@@ -3,7 +3,15 @@ uuid = "a389b534-8bca-4fe3-8ff2-14829cd8824f"
 authors = ["Jake W. Liu"]
 version = "1.0.0-DEV"
 
+[deps]
+BatchAssign = "e837618a-1c15-48db-beb0-68297dffdb28"
+PlotlyJS = "f0f68f2c-4968-5e81-91da-67840de0976a"
+Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
+
 [compat]
+BatchAssign = "1.0.0"
+PlotlyJS = "0.18.15"
+Reexport = "1.2.2"
 julia = "1.6.7"
 
 [extras]
