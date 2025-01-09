@@ -10,8 +10,9 @@ include("api.jl")
 rplot = plot_rect
 pplot = plot_polar
 hplot = plot_holo
+splot = plot_surf
 
-export plot_rect, plot_polar, plot_holo
-export rplot, pplot, hplot
+export plot_rect, plot_polar, plot_holo, plot_surf
+export rplot, pplot, hplot, splot
 
 end

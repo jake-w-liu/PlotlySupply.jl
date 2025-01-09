@@ -1,17 +1,16 @@
 """
-plot_rect(
-    x,
-    y;
-    xlabel = "",
-    ylabel = "",
-    xrange = [0, 0],
-    yrange = [0, 0],
-    width = 0,
-    height = 0,
-    mode = "lines",
-    color = "",
-    name = "",
-    show 
+function plot_rect(
+    x::Union{AbstractRange, Vector},
+    y::Union{AbstractRange, Vector};
+    xlabel::String= "",
+    ylabel::String = "",
+    xrange::Vector = [0, 0],
+    yrange::Vector = [0, 0],
+    width::Int = 0,
+    height::Int = 0,
+    mode::String = "lines",
+    color::String = "",
+    name::String = "",
 )
 Plots a rectangular (Cartesian) plot.
 
@@ -19,6 +18,9 @@ Plots a rectangular (Cartesian) plot.
 
 - `x`: x-coordinate data (can be vector of vectors)
 - `y`: y-coordinate data (can be vector of vectors)
+
+#### Keywords
+
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `xrange`: Range for the x-axis (default: `[0, 0]`)
@@ -41,7 +43,6 @@ function plot_rect(
     mode::String = "lines",
     color::String = "",
     name::String = "",
-    show::Bool = true,
 )
     if isa(y, Vector) && eltype(y) <: Vector
         trace = Vector{GenericTrace}(undef, length(y))
@@ -129,30 +130,31 @@ function plot_rect(
     if height > 0
         relayout!(fig, height = height)
     end
-    if show 
-        display(fig)
-    end
+
     return fig
 end
 
 """
-plot_rect(
-    y;
-    xlabel = "",
-    ylabel = "",
-    xrange = [0, 0],
-    yrange = [0, 0],
-    width = 0,
-    height = 0,
-    mode = "lines",
-    color = "",
-    name = "",
+function plot_rect(
+    y::Union{AbstractRange, Vector};
+    xlabel::String = "",
+    ylabel::String = "",
+    xrange::Vector = [0, 0],
+    yrange::Vector = [0, 0],
+    width::Int = 0,
+    height::Int = 0,
+    mode::String = "lines",
+    color::String = "",
+    name::String = "",
 )
 Plots a rectangular (Cartesian) plot (x-axis not specified).
 
 #### Arguments
 
 - `y`: y-coordinate data (can be vector of vectors)
+
+#### Keywords
+
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `xrange`: Range for the x-axis (default: `[0, 0]`)
@@ -174,7 +176,6 @@ function plot_rect(
     mode::String = "lines",
     color::String = "",
     name::String = "",
-    show::Bool = true,
 )
     if isa(y, Vector) && eltype(y) <: Vector
         x = Vector{Vector{Int}}(undef, length(y))
@@ -197,19 +198,20 @@ function plot_rect(
         mode = mode,
         color = color,
         name = name,
-        show = show,
     )
 end
 
 """
-plot_polar(
-    theta, r;
-    trange = [0, 0],
-    rrange = [0, 0],
-    width = 0,
-    height = 0,
-    mode = "lines",
-    color = "",
+function plot_polar(
+    theta::Union{AbstractRange, Vector},
+    r::Union{AbstractRange, Vector};
+    trange::Vector = [0, 0],
+    rrange::Vector = [0, 0],
+    width::Int = 0,
+    height::Int = 0,
+    mode::String = "lines",
+    color::String = "",
+    name::String = "",
 )
 
 Plots a polar plot.
@@ -218,6 +220,9 @@ Plots a polar plot.
 
 - `theta`: Angular coordinate data (can be vector of vectors)
 - `r`: Radial coordinate data (can be vector of vectors)
+
+#### Keywords
+
 - `trange`: Range for the angular axis (default: `[0, 0]`)
 - `rrange`: Range for the radial axis (default: `[0, 0]`)
 - `width`: Width of the plot (default: `0`)
@@ -236,7 +241,6 @@ function plot_polar(
     mode::String = "lines",
     color::String = "",
     name::String = "",
-    show::Bool = true,
 )
     if isa(r, Vector) && eltype(r) <: Vector
         trace = Vector{GenericTrace}(undef, length(r))
@@ -314,9 +318,7 @@ function plot_polar(
     if height > 0
         relayout!(fig, height = height)
     end
-    if show 
-        display(fig)
-    end
+
     return fig
 end
 
@@ -339,6 +341,9 @@ Plots holographic data.
 - 'x::AbstractRange': x-axis range
 - 'y::AbstractRange': x-axis range
 - `U`: 2D hologram data
+
+#### Keywords
+
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
@@ -354,7 +359,6 @@ function plot_holo(
     zrange::Vector = [0, 0],
     ref_size::Int = 500,
     colorscale::String = "Jet",
-    show::Bool = true,
 )
     #calculate figure size
     height = length(y)
@@ -414,9 +418,7 @@ function plot_holo(
         margin = attr(r = 0, b = 0),
     )
     fig = plot(trace, layout)
-    if show 
-        display(fig)
-    end
+
     return fig
 end
 
@@ -435,6 +437,9 @@ Plots holographic data.
 #### Arguments
 
 - `U`: 2D hologram data
+
+#### Keywords
+
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
@@ -448,9 +453,37 @@ function plot_holo(
     zrange::Vector = [0, 0],
     ref_size::Int = 500,
     colorscale::String = "Jet",
-    show::Bool = true,
 )
     x = collect(0:1:size(U, 1)-1)
     y = collect(0:1:size(U, 2)-1)
-    return plot_holo(x, y, U; xlabel=xlabel, ylabel=ylabel, zrange=zrange, ref_size=ref_size, colorscale=colorscale, show=show)
+    return plot_holo(x, y, U; xlabel=xlabel, ylabel=ylabel, zrange=zrange, ref_size=ref_size, colorscale=colorscale)
+end
+
+function plot_surf(
+    X::Array,
+    Y::Array,
+    Z::Array;
+    xlabel::String = "",
+    ylabel::String = "",
+    zlabel::String = "",
+    aspectmode::String = "",
+    colorscale::String = "Jet",
+)
+    # trace = surface(x = X, y = Y, z = Z, surfacecolor = S, colorscale = "Jet")
+    trace = surface(x = X, y = Y, z = Z, colorscale = "Jet")
+    layout = Layout(
+        scene = attr(
+            aspectmode = aspectmode,
+            xaxis = attr(title = xlabel),
+            yaxis = attr(title = ylabel),
+            zaxis = attr(title = zlabel),
+        ),
+
+        # coloraxis = attr(cmax = maximum(C), cmin = minimum(C)),
+        # template = :plotly_white,
+    )
+
+    # fig = plot(trace, layout)
+
+    return plot(trace, layout)
 end
