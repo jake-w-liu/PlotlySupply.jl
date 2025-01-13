@@ -10,7 +10,7 @@ function plot_rect(
     height::Int = 0,
     mode::String = "lines",
     color::String = "",
-    name::String = "",
+    legend::String = "",
 )
 Plots a rectangular (Cartesian) plot.
 
@@ -29,7 +29,8 @@ Plots a rectangular (Cartesian) plot.
 - `height`: Height of the plot (default: `0`)
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
-- `name`: Name of the plot lines (default: `""`, can be vector)
+- `legend`: Name of the plot lines (default: `""`, can be vector)
+
 """
 function plot_rect(
     x::Union{AbstractRange, Vector},
@@ -42,13 +43,14 @@ function plot_rect(
     height::Int = 0,
     mode::String = "lines",
     color::String = "",
-    name::String = "",
+    legend::String = "",
+    title::String = "",
 )
     if isa(y, Vector) && eltype(y) <: Vector
         trace = Vector{GenericTrace}(undef, length(y))
         modeV = fill("line", length(y))
         colorV = fill("", length(y))
-        nameV = fill("", length(y))
+        legendV = fill("", length(y))
         
         if !(mode isa Vector)
             fill!(modeV, mode)
@@ -64,11 +66,11 @@ function plot_rect(
                 colorV[n] = color[n]
             end
         end
-        if !(name isa Vector)
-            fill!(nameV, name)
+        if !(legend isa Vector)
+            fill!(legendV, legend)
         else
-            for n in eachindex(name)
-                nameV[n] = name[n]
+            for n in eachindex(legend)
+                legendV[n] = legend[n]
             end
         end
 
@@ -79,7 +81,7 @@ function plot_rect(
                     x = x[n],
                     mode = modeV[n],
                     line = attr(color = colorV[n]),
-                    name = nameV[n],
+                    legend = legendV[n],
                 )
             end
         else
@@ -89,15 +91,15 @@ function plot_rect(
                     x = x,
                     mode = modeV[n],
                     line = attr(color = colorV[n]),
-                    name = nameV[n],
+                    legend = legendV[n],
                 )
             end
         end
     else
-        trace = scatter(y = y, x = x, mode = mode, line = attr(color = color), name = name)
+        trace = scatter(y = y, x = x, mode = mode, line = attr(color = color), legend = legend)
     end
     layout = Layout(
-        template = :plotly_white,
+        title = title,
         yaxis = attr(
             title_text = ylabel,
             zeroline = false,
@@ -130,7 +132,7 @@ function plot_rect(
     if height > 0
         relayout!(fig, height = height)
     end
-
+    relayout!(fig, template = :plotly_white)
     return fig
 end
 
@@ -145,7 +147,7 @@ function plot_rect(
     height::Int = 0,
     mode::String = "lines",
     color::String = "",
-    name::String = "",
+    legend::String = "",
 )
 Plots a rectangular (Cartesian) plot (x-axis not specified).
 
@@ -163,7 +165,7 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 - `height`: Height of the plot (default: `0`)
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
-- `name`: Name of the plot lines (default: `""`, can be vector)
+- `legend`: legend of the plot lines (default: `""`, can be vector)
 """
 function plot_rect(
     y::Union{AbstractRange, Vector};
@@ -175,7 +177,8 @@ function plot_rect(
     height::Int = 0,
     mode::String = "lines",
     color::String = "",
-    name::String = "",
+    legend::String = "",
+    title::String = "",
 )
     if isa(y, Vector) && eltype(y) <: Vector
         x = Vector{Vector{Int}}(undef, length(y))
@@ -197,7 +200,8 @@ function plot_rect(
         height = height,
         mode = mode,
         color = color,
-        name = name,
+        legend = legend,
+        title = title,
     )
 end
 
@@ -211,7 +215,7 @@ function plot_polar(
     height::Int = 0,
     mode::String = "lines",
     color::String = "",
-    name::String = "",
+    legend::String = "",
 )
 
 Plots a polar plot.
@@ -229,7 +233,7 @@ Plots a polar plot.
 - `height`: Height of the plot (default: `0`)
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
-- `name`: Name of the plot lines (default: `""`, can be vector)
+- `legend`: legend of the plot lines (default: `""`, can be vector)
 """
 function plot_polar(
     theta::Union{AbstractRange, Vector},
@@ -240,13 +244,14 @@ function plot_polar(
     height::Int = 0,
     mode::String = "lines",
     color::String = "",
-    name::String = "",
+    legend::String = "",
+    title::String = "",
 )
     if isa(r, Vector) && eltype(r) <: Vector
         trace = Vector{GenericTrace}(undef, length(r))
         modeV = fill("line", length(r))
         colorV = fill("", length(r))
-        nameV = fill("", length(r))
+        legendV = fill("", length(r))
         
         if !(mode isa Vector)
             fill!(modeV, mode)
@@ -262,11 +267,11 @@ function plot_polar(
                 colorV[n] = color[n]
             end
         end
-        if !(name isa Vector)
-            fill!(nameV, name)
+        if !(legend isa Vector)
+            fill!(legendV, legend)
         else
-            for n in eachindex(name)
-                nameV[n] = name[n]
+            for n in eachindex(legend)
+                legendV[n] = legend[n]
             end
         end
 
@@ -277,7 +282,7 @@ function plot_polar(
                     theta = theta[n],
                     mode = modeV[n],
                     line = attr(color = colorV[n]),
-                    name = nameV[n],
+                    legend = legendV[n],
                 )
             end
         else
@@ -287,7 +292,7 @@ function plot_polar(
                     theta = theta,
                     mode = modeV[n],
                     line = attr(color = colorV[n]),
-                    name = nameV[n],
+                    legend = legendV[n],
                 )
             end
         end
@@ -297,12 +302,12 @@ function plot_polar(
             theta = theta,
             mode = mode,
             line = attr(color = color),
-            name = name,
+            legend = legend,
         )
     end
 
     layout = Layout(
-        template = :plotly_white,
+        title = title,
         polar = attr(sector = [minimum(theta), maximum(theta)]),
     )
     fig = plot(trace, layout)
@@ -318,7 +323,7 @@ function plot_polar(
     if height > 0
         relayout!(fig, height = height)
     end
-
+    relayout!(fig, template = :plotly_white)
     return fig
 end
 
@@ -359,6 +364,7 @@ function plot_holo(
     zrange::Vector = [0, 0],
     ref_size::Int = 500,
     colorscale::String = "Jet",
+    title::String = "",
 )
     #calculate figure size
     height = length(y)
@@ -378,7 +384,7 @@ function plot_holo(
     end
 
     FV = @view U[:, :]
-    FV = transpose(FV)
+    FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
     trace = heatmap(x = x, y = y, z = FV, colorscale = colorscale)
     if !all(zrange .== [0, 0])
         trace.zmin = zrange[1]
@@ -400,6 +406,7 @@ function plot_holo(
         dy = dx
     end
     layout = Layout(
+        title = title,
         height = height,
         width = width,
         plot_bgcolor = "white",
@@ -453,10 +460,11 @@ function plot_holo(
     zrange::Vector = [0, 0],
     ref_size::Int = 500,
     colorscale::String = "Jet",
+    title::String = "",
 )
     x = collect(0:1:size(U, 1)-1)
     y = collect(0:1:size(U, 2)-1)
-    return plot_holo(x, y, U; xlabel=xlabel, ylabel=ylabel, zrange=zrange, ref_size=ref_size, colorscale=colorscale)
+    return plot_holo(x, y, U; xlabel=xlabel, ylabel=ylabel, zrange=zrange, ref_size=ref_size, colorscale=colorscale, title=title)
 end
 
 function plot_surf(
@@ -468,10 +476,12 @@ function plot_surf(
     zlabel::String = "",
     aspectmode::String = "",
     colorscale::String = "Jet",
+    title::String = "",
 )
     # trace = surface(x = X, y = Y, z = Z, surfacecolor = S, colorscale = "Jet")
     trace = surface(x = X, y = Y, z = Z, colorscale = "Jet")
     layout = Layout(
+        title = title,
         scene = attr(
             aspectmode = aspectmode,
             xaxis = attr(title = xlabel),
@@ -483,7 +493,7 @@ function plot_surf(
         # template = :plotly_white,
     )
 
-    # fig = plot(trace, layout)
-
-    return plot(trace, layout)
+    fig = plot(trace, layout)
+    relayout!(fig, template = :plotly_white)
+    return fig
 end
