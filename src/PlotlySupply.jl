@@ -2,17 +2,14 @@ module PlotlySupply
 
 using BatchAssign
 using Reexport
+using Infiltrator
 @reexport using PlotlyJS
 
 include("api.jl")
 
 # acronyms
-rplot = plot_rect
-pplot = plot_polar
-hplot = plot_holo
-splot = plot_surf
 
-export plot_rect, plot_polar, plot_holo, plot_surf
-export rplot, pplot, hplot, splot
+
+export plot_scatter, plot_scatterpolar, plot_heatmap, plot_surface, plot_scatter3d
 
 end
