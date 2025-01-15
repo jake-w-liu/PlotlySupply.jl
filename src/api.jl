@@ -37,9 +37,7 @@ Plots a rectangular (Cartesian) plot.
 """
 function plot_scatter(
 	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector};
-
-	xlabel::String = "",
+	y::Union{AbstractRange, Vector}; xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -49,7 +47,7 @@ function plot_scatter(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
-    grid::Bool = true,
+	grid::Bool = true,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		trace = Vector{GenericTrace}(undef, length(y))
@@ -137,10 +135,10 @@ function plot_scatter(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-    if !grid
-        update_xaxes!(fig, showgrid = false)
-        update_yaxes!(fig, showgrid = false)
-    end
+	if !grid
+		update_xaxes!(fig, showgrid = false)
+		update_yaxes!(fig, showgrid = false)
+	end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
@@ -178,9 +176,7 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 - `legend`: legend of the plot lines (default: `""`, can be vector)
 """
 function plot_scatter(
-	y::Union{AbstractRange, Vector};
-
-	xlabel::String = "",
+	y::Union{AbstractRange, Vector}; xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -190,7 +186,7 @@ function plot_scatter(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
-    grid::Bool = true,
+	grid::Bool = true,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -214,7 +210,7 @@ function plot_scatter(
 		color = color,
 		legend = legend,
 		title = title,
-        grid = grid,
+		grid = grid,
 	)
 end
 
@@ -260,7 +256,7 @@ function plot_scatterpolar(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
-    grid::Bool = true,
+	grid::Bool = true,
 )
 	if isa(r, Vector) && eltype(r) <: Vector
 		trace = Vector{GenericTrace}(undef, length(r))
@@ -338,10 +334,10 @@ function plot_scatterpolar(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-    if !grid
-        update_xaxes!(fig, showgrid = false)
-        update_yaxes!(fig, showgrid = false)
-    end
+	if !grid
+		update_xaxes!(fig, showgrid = false)
+		update_yaxes!(fig, showgrid = false)
+	end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
@@ -382,9 +378,7 @@ Plots holographic data.
 function plot_heatmap(
 	x::Union{AbstractRange, Vector},
 	y::Union{AbstractRange, Vector},
-	U::Array;
-
-	xlabel::String = "",
+	U::Array; xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -394,7 +388,7 @@ function plot_heatmap(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
-    grid::Bool = true,
+	grid::Bool = true,
 )
 	#calculate figure size
 	height_ref = length(y)
@@ -439,10 +433,10 @@ function plot_heatmap(
 		title = title,
 		height = height_ref,
 		width = width_ref,
-		scene = attr(aspectmode = "data"), 
-        xaxis = attr(
+		scene = attr(aspectmode = "data"),
+		xaxis = attr(
 			title = xlabel,
-            constrain = "domain",
+			constrain = "domain",
 			automargin = true,
 			zeroline = false,
 			showline = true,
@@ -458,7 +452,7 @@ function plot_heatmap(
 			mirror = true,
 			ticks = "outside",
 		),
-        margin = attr(r = 0, b = 0, t = 0, l = 0),
+		margin = attr(r = 0, b = 0, t = 0, l = 0),
 	)
 	fig = plot(trace, layout)
 	if !all(xrange .== [0, 0])
@@ -478,10 +472,10 @@ function plot_heatmap(
 		scaleratio = 1,
 	)
 	relayout!(fig, template = :plotly_white)
-    if !grid
-        update_xaxes!(fig, showgrid = false)
-        update_yaxes!(fig, showgrid = false)
-    end
+	if !grid
+		update_xaxes!(fig, showgrid = false)
+		update_yaxes!(fig, showgrid = false)
+	end
 	return fig
 end
 
@@ -511,9 +505,7 @@ Plots holographic data.
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
 """
 function plot_heatmap(
-	U::Array;
-
-	xlabel::String = "",
+	U::Array; xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -537,17 +529,15 @@ function plot_heatmap(
 		title = title,
 		width = width,
 		height = heigh,
-        grid = grid, 
-        )
+		grid = grid,
+	)
 end
 
 function plot_quiver(
 	x::Vector,
 	y::Vector,
 	u::Vector,
-	v::Vector;
-
-	color::String = "RoyalBlue",
+	v::Vector; color::String = "RoyalBlue",
 	sizeref::Real = 1,
 	xlabel::String = "",
 	ylabel::String = "",
@@ -558,7 +548,7 @@ function plot_quiver(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
-    grid::Bool = true,
+	grid::Bool = true,
 )
 	p_max = maximum(sqrt.(u .^ 2 .+ v .^ 2))
 	u_ref = u ./ p_max .* sizeref
@@ -595,7 +585,7 @@ function plot_quiver(
 		scene = attr(aspectmode = "data"),
 		xaxis = attr(
 			title = xlabel,
-            constrain = "domain",
+			constrain = "domain",
 			automargin = true,
 			zeroline = false,
 			showline = true,
@@ -632,10 +622,10 @@ function plot_quiver(
 		scaleanchor = "y",
 		scaleratio = 1,
 	)
-    if !grid
-        update_xaxes!(fig, showgrid = false)
-        update_yaxes!(fig, showgrid = false)
-    end
+	if !grid
+		update_xaxes!(fig, showgrid = false)
+		update_yaxes!(fig, showgrid = false)
+	end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
@@ -647,9 +637,7 @@ end
 function plot_surface(
 	X::Array,
 	Y::Array,
-	Z::Array;
-
-	surfacecolor::Array = [],
+	Z::Array; surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -661,13 +649,13 @@ function plot_surface(
 	aspectmode::String = "auto",
 	colorscale::String = "Jet",
 	title::String = "",
-    grid::Bool = true,
-    showaxis::Bool = true,
+	grid::Bool = true,
+	showaxis::Bool = true,
 )
 	if isempty(surfacecolor)
-		trace = surface(x = X, y = Y, z = Z, colorscale = "Jet")
+		trace = surface(x = X, y = Y, z = Z, colorscale = colorscale)
 	else
-		trace = surface(x = X, y = Y, z = Z, surfacecolor = surfacecolor, colorscale = "Jet")
+		trace = surface(x = X, y = Y, z = Z, surfacecolor = surfacecolor, colorscale = colorscale)
 	end
 
 	if xlabel == ""
@@ -706,28 +694,26 @@ function plot_surface(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-    if !grid
-        relayout!(fig, scene = attr(
+	if !grid
+		relayout!(fig, scene = attr(
 			xaxis = attr(showgrid = false),
 			yaxis = attr(showgrid = false),
 			zaxis = attr(showgrid = false),
-		),)
-    end
-    if !showaxis
-        relayout!(fig, scene = attr(
+		))
+	end
+	if !showaxis
+		relayout!(fig, scene = attr(
 			xaxis = attr(visible = false),
 			yaxis = attr(visible = false),
 			zaxis = attr(visible = false),
-		),)
-    end
+		))
+	end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
 
 function plot_surface(
-	Z::Array;
-
-	surfacecolor::Array = [],
+	Z::Array; surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -739,8 +725,8 @@ function plot_surface(
 	aspectmode::String = "auto",
 	colorscale::String = "Jet",
 	title::String = "",
-    grid::Bool = true,
-    showaxis::Bool = true,
+	grid::Bool = true,
+	showaxis::Bool = true,
 )
 	return plot_surface(
 		collect(0:size(Z, 1)-1),
@@ -758,17 +744,15 @@ function plot_surface(
 		aspectmode = aspectmode,
 		colorscale = colorscale,
 		title = title,
-        grid = grid,
-        showaxis = showaxis,
+		grid = grid,
+		showaxis = showaxis,
 	)
 end
 
 function plot_scatter3d(
 	x::Vector,
 	y::Vector,
-	z::Vector;
-
-	xrange::Vector = [0, 0],
+	z::Vector; xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
 	width::Int = 0,
@@ -782,8 +766,8 @@ function plot_scatter3d(
 	aspectmode::String = "auto",
 	title::String = "",
 	perspective::Bool = true,
-    grid::Bool = true,
-    showaxis::Bool = true,
+	grid::Bool = true,
+	showaxis::Bool = true,
 )
 	if isa(z, Vector) && eltype(z) <: Vector
 		modeV = fill("line", length(z))
@@ -864,20 +848,120 @@ function plot_scatter3d(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-    if !grid
-        relayout!(fig, scene = attr(
+	if !grid
+		relayout!(fig, scene = attr(
 			xaxis = attr(showgrid = false),
 			yaxis = attr(showgrid = false),
 			zaxis = attr(showgrid = false),
-		),)
-    end
-    if !showaxis
-        relayout!(fig, scene = attr(
+		))
+	end
+	if !showaxis
+		relayout!(fig, scene = attr(
 			xaxis = attr(visible = false),
 			yaxis = attr(visible = false),
 			zaxis = attr(visible = false),
-		),)
+		))
+	end
+	relayout!(fig, template = :plotly_white)
+	return fig
+end
+
+function plot_quiver3d(
+	x::Vector,
+	y::Vector,
+	z::Vector,
+	u::Vector,
+	v::Vector,
+	w::Vector; 
+
+    sizeref::Real = 1,
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	color::Union{String, Vector{String}} = "",
+	colorscale::String = "Jet",
+
+	xlabel::String = "",
+	ylabel::String = "",
+	zlabel::String = "",
+	aspectmode::String = "auto",
+	title::String = "",
+	perspective::Bool = true,
+	grid::Bool = true,
+	showaxis::Bool = true,
+)
+
+	trace = cone(
+		x = x,
+		y = y,
+		z = z,
+		u = u,
+		v = v,
+		w = w,
+		sizemode = "absolute",
+		sizeref = sizeref,
+		anchor = "cm",
+        colorscale = colorscale,
+	)
+    if color != "" # use single color
+        trace.colorscale =  [[0, color], [1, color]]
+        trace.showscale = false
     end
+    if xlabel == ""
+		xlabel = "x"
+	end
+	if ylabel == ""
+		ylabel = "y"
+	end
+	if zlabel == ""
+		zlabel = "z"
+	end
+	layout = Layout(
+		title = title,
+		scene = attr(
+			aspectmode = aspectmode,
+			xaxis = attr(title = xlabel, zeroline = false),
+			yaxis = attr(title = ylabel, zeroline = false),
+			zaxis = attr(title = zlabel, zeroline = false),
+		),
+	)
+
+	fig = plot(trace, layout)
+	if !perspective
+		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
+	end
+
+	if !all(xrange .== [0, 0])
+		update_xaxes!(fig, range = xrange)
+	end
+	if !all(yrange .== [0, 0])
+		update_yaxes!(fig, range = yrange)
+	end
+	if !all(zrange .== [0, 0])
+		update_yaxes!(fig, range = zrange)
+	end
+	if width > 0
+		relayout!(fig, width = width)
+	end
+	if height > 0
+		relayout!(fig, height = height)
+	end
+	if !grid
+		relayout!(fig, scene = attr(
+			xaxis = attr(showgrid = false),
+			yaxis = attr(showgrid = false),
+			zaxis = attr(showgrid = false),
+		))
+	end
+	if !showaxis
+		relayout!(fig, scene = attr(
+			xaxis = attr(visible = false),
+			yaxis = attr(visible = false),
+			zaxis = attr(visible = false),
+		))
+	end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
