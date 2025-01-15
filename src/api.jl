@@ -417,22 +417,26 @@ function plot_heatmap(
 		title = title,
 		height = height_ref,
 		width = width_ref,
-		# plot_bgcolor = "white",
-		scene = attr(aspectmode = "data"),
-		xaxis = attr(
+		scene = attr(aspectmode = "data"), 
+        xaxis = attr(
 			title = xlabel,
-			range = [minimum(x) - dx / 2, maximum(x) + dx / 2],
+            constrain = "domain",
 			automargin = true,
-            zeroline = false,
-			scaleanchor = "y",
+			zeroline = false,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
 		),
 		yaxis = attr(
 			title = ylabel,
-			range = [minimum(y) - dy / 2, maximum(y) + dy / 2],
-            zeroline = false,
+			constrain = "domain",
+			zeroline = false,
 			automargin = true,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
 		),
-		margin = attr(r = 0, b = 0),
+        margin = attr(r = 0, b = 0, t = 0, l = 0),
 	)
 	fig = plot(trace, layout)
 	if !all(xrange .== [0, 0])
@@ -447,7 +451,11 @@ function plot_heatmap(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-    relayout!(fig, template = :plotly_white)
+	update_xaxes!(fig,
+		scaleanchor = "y",
+		scaleratio = 1,
+	)
+	relayout!(fig, template = :plotly_white)
 	return fig
 end
 
@@ -511,7 +519,7 @@ function plot_quiver(
 	v::Vector;
 	color::String = "RoyalBlue",
 	sizeref::Real = 1,
-    xlabel::String = "",
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -551,35 +559,32 @@ function plot_quiver(
 	arrow = scatter(x = arrow_x, y = arrow_y, mode = "lines", line_color = color,
 		fill = "toself", fillcolor = color, hoverinfo = "skip")
 
-        layout = Layout(
-            title = title,
-            # plot_bgcolor = "white",
-            # scene = attr(aspectmode = "data"),
-            xaxis = attr(
-                title = xlabel,
-                automargin = true,
-                zeroline = false,
-                # scaleanchor = "y",
-                constrain="domain",
-                showline = true,
-                mirror = true,
-                ticks = "outside",
-            ),
-            yaxis = attr(
-                title = ylabel,
-                # scaleanchor = "x",
-                constrain="domain",
-                zeroline = false,
-                automargin = true,
-                showline = true,
-                mirror = true,
-                ticks = "outside",
-            ),
-            margin = attr(r = 0, b = 0, t = 0, l = 0,),
-        )
+	layout = Layout(
+		title = title,
+		scene = attr(aspectmode = "data"),
+		xaxis = attr(
+			title = xlabel,
+            constrain = "domain",
+			automargin = true,
+			zeroline = false,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
+		),
+		yaxis = attr(
+			title = ylabel,
+			constrain = "domain",
+			zeroline = false,
+			automargin = true,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
+		),
+		margin = attr(r = 0, b = 0, t = 0, l = 0),
+	)
 
-    fig = plot(arrow, layout)
-    if !all(xrange .== [0, 0])
+	fig = plot(arrow, layout)
+	if !all(xrange .== [0, 0])
 		update_xaxes!(fig, range = xrange)
 	end
 	if !all(yrange .== [0, 0])
@@ -591,16 +596,12 @@ function plot_quiver(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-    # relayout!(fig, yaxis=attr(scaleratio=1, scaleanchor="x"),)
-#     update_yaxes!(fig,
-#     scaleanchor="x",
-#     scaleratio=1,
-#   )
-  update_xaxes!(fig,
-    scaleanchor="y",
-    scaleratio=1,
-  )
-    relayout!(fig, template = :plotly_white)
+
+	update_xaxes!(fig,
+		scaleanchor = "y",
+		scaleratio = 1,
+	)
+	relayout!(fig, template = :plotly_white)
 	return fig
 end
 

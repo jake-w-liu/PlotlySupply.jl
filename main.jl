@@ -13,4 +13,6 @@ using PlotlySupply
 
 # plot_quiver([0, 1], [0, 1], [0, 1], [1, -1]; xrange = [-1, 2])
 # plot_quiver([0, 1], [0, 1], [0, 1], [1, -1]; xrange = [0, 2], yrange = [0, 1], width = 800, height = 500)
-plot_quiver([0, 1], [0, 1], [0, 1], [1, -1]; xrange = [0, 2], yrange = [0, 4], width = 800, height = 500)
+# plot_quiver([0, 1], [0, 1], [0, 1], [1, -1]; xrange = [0, 2], yrange = [0, 4], width = 800, height = 500)
+
+plot_heatmap([0,1e-6], [0,1e-6,2e-6], [1 3 5; 2 4 6]);
