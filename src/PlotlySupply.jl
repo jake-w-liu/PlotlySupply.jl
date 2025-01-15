@@ -10,6 +10,6 @@ include("api.jl")
 # acronyms
 
 
-export plot_scatter, plot_scatterpolar, plot_heatmap, plot_surface, plot_scatter3d
+export plot_scatter, plot_scatterpolar, plot_heatmap, plot_quiver, plot_surface, plot_scatter3d
 
 end

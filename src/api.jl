@@ -191,7 +191,7 @@ function plot_scatter(
 		x = 0:length(y)-1
 	end
 
-	return plot_rect(
+	return plot_scatter(
 		x,
 		y;
 		xlabel = xlabel,
@@ -417,17 +417,19 @@ function plot_heatmap(
 		title = title,
 		height = height_ref,
 		width = width_ref,
-		plot_bgcolor = "white",
+		# plot_bgcolor = "white",
 		scene = attr(aspectmode = "data"),
 		xaxis = attr(
 			title = xlabel,
 			range = [minimum(x) - dx / 2, maximum(x) + dx / 2],
 			automargin = true,
+            zeroline = false,
 			scaleanchor = "y",
 		),
 		yaxis = attr(
 			title = ylabel,
 			range = [minimum(y) - dy / 2, maximum(y) + dy / 2],
+            zeroline = false,
 			automargin = true,
 		),
 		margin = attr(r = 0, b = 0),
@@ -445,7 +447,7 @@ function plot_heatmap(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-
+    relayout!(fig, template = :plotly_white)
 	return fig
 end
 
@@ -489,7 +491,117 @@ function plot_heatmap(
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
-	return plot_heatmap(x, y, U; xlabel = xlabel, ylabel = ylabel, xrange = xrange, yrange = yrange, zrange = zrange, ref_size = ref_size, colorscale = colorscale, title = title, width = width, height = height)
+	return plot_heatmap(x, y, U;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		zrange = zrange,
+		ref_size = ref_size,
+		colorscale = colorscale,
+		title = title,
+		width = width,
+		height = height)
+end
+
+function plot_quiver(
+	x::Vector,
+	y::Vector,
+	u::Vector,
+	v::Vector;
+	color::String = "RoyalBlue",
+	sizeref::Real = 1,
+    xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	ref_size::Int = 500,
+	colorscale::String = "Jet",
+	title::String = "",
+)
+	p_max = maximum(sqrt.(u .^ 2 .+ v .^ 2))
+	u_ref = u ./ p_max .* sizeref
+	v_ref = v ./ p_max .* sizeref
+	end_x = x .+ u_ref .* 2 / 3
+	end_y = y .+ v_ref .* 2 / 3
+
+	vect_nans = repeat([NaN], length(x))
+
+	arrow_length = sqrt.(u_ref .^ 2 .+ v_ref .^ 2)
+	barb_angle = atan.(v_ref, u_ref)
+
+	ang1 = barb_angle .+ atan(1 / 4)
+	ang2 = barb_angle .- atan(1 / 4)
+
+	seg1_x = arrow_length .* cos.(ang1) .* sqrt(1.0625)
+	seg1_y = arrow_length .* sin.(ang1) .* sqrt(1.0625)
+
+	seg2_x = arrow_length .* cos.(ang2) .* sqrt(1.0625)
+	seg2_y = arrow_length .* sin.(ang2) .* sqrt(1.0625)
+
+	arrowend1_x = end_x .- seg1_x
+	arrowend1_y = end_y .- seg1_y
+	arrowend2_x = end_x .- seg2_x
+	arrowend2_y = end_y .- seg2_y
+	arrow_x = tuple_interleave((arrowend1_x, end_x, arrowend2_x, vect_nans))
+	arrow_y = tuple_interleave((arrowend1_y, end_y, arrowend2_y, vect_nans))
+
+	arrow = scatter(x = arrow_x, y = arrow_y, mode = "lines", line_color = color,
+		fill = "toself", fillcolor = color, hoverinfo = "skip")
+
+        layout = Layout(
+            title = title,
+            # plot_bgcolor = "white",
+            # scene = attr(aspectmode = "data"),
+            xaxis = attr(
+                title = xlabel,
+                automargin = true,
+                zeroline = false,
+                # scaleanchor = "y",
+                constrain="domain",
+                showline = true,
+                mirror = true,
+                ticks = "outside",
+            ),
+            yaxis = attr(
+                title = ylabel,
+                # scaleanchor = "x",
+                constrain="domain",
+                zeroline = false,
+                automargin = true,
+                showline = true,
+                mirror = true,
+                ticks = "outside",
+            ),
+            margin = attr(r = 0, b = 0, t = 0, l = 0,),
+        )
+
+    fig = plot(arrow, layout)
+    if !all(xrange .== [0, 0])
+		update_xaxes!(fig, range = xrange)
+	end
+	if !all(yrange .== [0, 0])
+		update_yaxes!(fig, range = yrange)
+	end
+	if width > 0
+		relayout!(fig, width = width)
+	end
+	if height > 0
+		relayout!(fig, height = height)
+	end
+    # relayout!(fig, yaxis=attr(scaleratio=1, scaleanchor="x"),)
+#     update_yaxes!(fig,
+#     scaleanchor="x",
+#     scaleratio=1,
+#   )
+  update_xaxes!(fig,
+    scaleanchor="y",
+    scaleratio=1,
+  )
+    relayout!(fig, template = :plotly_white)
+	return fig
 end
 
 function plot_surface(
@@ -690,5 +802,12 @@ function plot_scatter3d(
 	end
 	relayout!(fig, template = :plotly_white)
 	return fig
+end
+
+function tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
+	#auxilliary function to interleave elements of a NTuple of vectors, N=3 or 4
+	zipped_data = collect(zip(tu...))
+	vv_zdata = [collect(elem) for elem in zipped_data]
+	return reduce(vcat, vv_zdata)
 end
 
