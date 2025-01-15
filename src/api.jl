@@ -36,6 +36,7 @@ Plots a rectangular (Cartesian) plot.
 function plot_scatter(
 	x::Union{AbstractRange, Vector},
 	y::Union{AbstractRange, Vector};
+
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -46,6 +47,7 @@ function plot_scatter(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+    grid::Bool = true,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		trace = Vector{GenericTrace}(undef, length(y))
@@ -133,6 +135,10 @@ function plot_scatter(
 	if height > 0
 		relayout!(fig, height = height)
 	end
+    if !grid
+        update_xaxes!(fig, showgrid = false)
+        update_yaxes!(fig, showgrid = false)
+    end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
@@ -171,6 +177,7 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 """
 function plot_scatter(
 	y::Union{AbstractRange, Vector};
+
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -181,6 +188,7 @@ function plot_scatter(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+    grid::Bool = true,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -204,6 +212,7 @@ function plot_scatter(
 		color = color,
 		legend = legend,
 		title = title,
+        grid = grid,
 	)
 end
 
@@ -249,6 +258,7 @@ function plot_scatterpolar(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+    grid::Bool = true,
 )
 	if isa(r, Vector) && eltype(r) <: Vector
 		trace = Vector{GenericTrace}(undef, length(r))
@@ -326,6 +336,10 @@ function plot_scatterpolar(
 	if height > 0
 		relayout!(fig, height = height)
 	end
+    if !grid
+        update_xaxes!(fig, showgrid = false)
+        update_yaxes!(fig, showgrid = false)
+    end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
@@ -363,6 +377,7 @@ function plot_heatmap(
 	x::Union{AbstractRange, Vector},
 	y::Union{AbstractRange, Vector},
 	U::Array;
+
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -373,6 +388,7 @@ function plot_heatmap(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
+    grid::Bool = true,
 )
 	#calculate figure size
 	height_ref = length(y)
@@ -456,6 +472,10 @@ function plot_heatmap(
 		scaleratio = 1,
 	)
 	relayout!(fig, template = :plotly_white)
+    if !grid
+        update_xaxes!(fig, showgrid = false)
+        update_yaxes!(fig, showgrid = false)
+    end
 	return fig
 end
 
@@ -486,6 +506,7 @@ Plots holographic data.
 """
 function plot_heatmap(
 	U::Array;
+
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -509,7 +530,9 @@ function plot_heatmap(
 		colorscale = colorscale,
 		title = title,
 		width = width,
-		height = height)
+		height = heigh,
+        grid = grid, 
+        )
 end
 
 function plot_quiver(
@@ -517,6 +540,7 @@ function plot_quiver(
 	y::Vector,
 	u::Vector,
 	v::Vector;
+
 	color::String = "RoyalBlue",
 	sizeref::Real = 1,
 	xlabel::String = "",
@@ -528,6 +552,7 @@ function plot_quiver(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
+    grid::Bool = true,
 )
 	p_max = maximum(sqrt.(u .^ 2 .+ v .^ 2))
 	u_ref = u ./ p_max .* sizeref
@@ -601,6 +626,10 @@ function plot_quiver(
 		scaleanchor = "y",
 		scaleratio = 1,
 	)
+    if !grid
+        update_xaxes!(fig, showgrid = false)
+        update_yaxes!(fig, showgrid = false)
+    end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
@@ -609,6 +638,7 @@ function plot_surface(
 	X::Array,
 	Y::Array,
 	Z::Array;
+
 	surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -671,6 +701,7 @@ end
 
 function plot_surface(
 	Z::Array;
+
 	surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -707,6 +738,7 @@ function plot_scatter3d(
 	x::Vector,
 	y::Vector,
 	z::Vector;
+
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -806,7 +838,7 @@ function plot_scatter3d(
 end
 
 function tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
-	#auxilliary function to interleave elements of a NTuple of vectors, N=3 or 4
+	#auxilliary function to interleave elements of a NTuple of vectors, N = 3 or 4
 	zipped_data = collect(zip(tu...))
 	vv_zdata = [collect(elem) for elem in zipped_data]
 	return reduce(vcat, vv_zdata)
