@@ -1,3 +1,5 @@
+#region 1D Plot
+
 """
 function plot_scatter(
 	x::Union{AbstractRange, Vector},
@@ -344,6 +346,10 @@ function plot_scatterpolar(
 	return fig
 end
 
+#endregion
+
+#region 2D Plot
+
 """
 function plot_heatmap(
 	x::Union{AbstractRange, Vector},
@@ -634,6 +640,10 @@ function plot_quiver(
 	return fig
 end
 
+#endregion
+
+#region 3D Plot
+
 function plot_surface(
 	X::Array,
 	Y::Array,
@@ -651,6 +661,8 @@ function plot_surface(
 	aspectmode::String = "auto",
 	colorscale::String = "Jet",
 	title::String = "",
+    grid::Bool = true,
+    showaxis::Bool = true,
 )
 	if isempty(surfacecolor)
 		trace = surface(x = X, y = Y, z = Z, colorscale = "Jet")
@@ -671,9 +683,9 @@ function plot_surface(
 		title = title,
 		scene = attr(
 			aspectmode = aspectmode,
-			xaxis = attr(title = xlabel),
-			yaxis = attr(title = ylabel),
-			zaxis = attr(title = zlabel),
+			xaxis = attr(title = xlabel, zeroline = false),
+			yaxis = attr(title = ylabel, zeroline = false),
+			zaxis = attr(title = zlabel, zeroline = false),
 		),
 		# coloraxis = attr(cmax = maximum(C), cmin = minimum(C)),
 	)
@@ -694,7 +706,20 @@ function plot_surface(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-
+    if !grid
+        relayout!(fig, scene = attr(
+			xaxis = attr(showgrid = false),
+			yaxis = attr(showgrid = false),
+			zaxis = attr(showgrid = false),
+		),)
+    end
+    if !showaxis
+        relayout!(fig, scene = attr(
+			xaxis = attr(visible = false),
+			yaxis = attr(visible = false),
+			zaxis = attr(visible = false),
+		),)
+    end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
@@ -714,6 +739,8 @@ function plot_surface(
 	aspectmode::String = "auto",
 	colorscale::String = "Jet",
 	title::String = "",
+    grid::Bool = true,
+    showaxis::Bool = true,
 )
 	return plot_surface(
 		collect(0:size(Z, 1)-1),
@@ -731,6 +758,8 @@ function plot_surface(
 		aspectmode = aspectmode,
 		colorscale = colorscale,
 		title = title,
+        grid = grid,
+        showaxis = showaxis,
 	)
 end
 
@@ -753,6 +782,8 @@ function plot_scatter3d(
 	aspectmode::String = "auto",
 	title::String = "",
 	perspective::Bool = true,
+    grid::Bool = true,
+    showaxis::Bool = true,
 )
 	if isa(z, Vector) && eltype(z) <: Vector
 		modeV = fill("line", length(z))
@@ -807,9 +838,9 @@ function plot_scatter3d(
 		title = title,
 		scene = attr(
 			aspectmode = aspectmode,
-			xaxis = attr(title = xlabel),
-			yaxis = attr(title = ylabel),
-			zaxis = attr(title = zlabel),
+			xaxis = attr(title = xlabel, zeroline = false),
+			yaxis = attr(title = ylabel, zeroline = false),
+			zaxis = attr(title = zlabel, zeroline = false),
 		),
 	)
 
@@ -833,9 +864,25 @@ function plot_scatter3d(
 	if height > 0
 		relayout!(fig, height = height)
 	end
+    if !grid
+        relayout!(fig, scene = attr(
+			xaxis = attr(showgrid = false),
+			yaxis = attr(showgrid = false),
+			zaxis = attr(showgrid = false),
+		),)
+    end
+    if !showaxis
+        relayout!(fig, scene = attr(
+			xaxis = attr(visible = false),
+			yaxis = attr(visible = false),
+			zaxis = attr(visible = false),
+		),)
+    end
 	relayout!(fig, template = :plotly_white)
 	return fig
 end
+
+#endregion
 
 function tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
 	#auxilliary function to interleave elements of a NTuple of vectors, N = 3 or 4
