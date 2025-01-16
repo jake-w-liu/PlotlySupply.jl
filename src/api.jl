@@ -14,6 +14,7 @@ function plot_scatter(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+	grid::Bool = true,
 )
 Plots a rectangular (Cartesian) plot.
 
@@ -33,11 +34,14 @@ Plots a rectangular (Cartesian) plot.
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
 - `legend`: Name of the plot lines (default: `""`, can be vector)
+- `title`: Title of thje figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: true)
 
 """
 function plot_scatter(
 	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector}; xlabel::String = "",
+	y::Union{AbstractRange, Vector};
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -145,8 +149,8 @@ end
 
 """
 function plot_scatter(
-	y::Union{AbstractRange, Vector};
-	xlabel::String = "",
+	y::Union{AbstractRange, Vector}; 
+    xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -156,6 +160,7 @@ function plot_scatter(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+	grid::Bool = true,
 )
 Plots a rectangular (Cartesian) plot (x-axis not specified).
 
@@ -174,9 +179,13 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
 - `legend`: legend of the plot lines (default: `""`, can be vector)
+- `title`: Title of thje figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: true)
+
 """
 function plot_scatter(
-	y::Union{AbstractRange, Vector}; xlabel::String = "",
+	y::Union{AbstractRange, Vector}; 
+    xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -226,8 +235,8 @@ function plot_scatterpolar(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+	grid::Bool = true,
 )
-
 Plots a polar plot.
 
 #### Arguments
@@ -244,6 +253,9 @@ Plots a polar plot.
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
 - `legend`: legend of the plot lines (default: `""`, can be vector)
+- `title`: Title of thje figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: true)
+
 """
 function plot_scatterpolar(
 	theta::Union{AbstractRange, Vector},
@@ -350,13 +362,18 @@ end
 function plot_heatmap(
 	x::Union{AbstractRange, Vector},
 	y::Union{AbstractRange, Vector},
-	U::Array;
-	xlabel::String = "",
+	U::Array; 
+    xlabel::String = "",
 	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
+	grid::Bool = true,
 )
 
 Plots holographic data.
@@ -374,11 +391,15 @@ Plots holographic data.
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
 - `ref_size`: ref size of the plot in pixels (default: `500`)
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
+- `title`: Title of thje figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: true)
+
 """
 function plot_heatmap(
 	x::Union{AbstractRange, Vector},
 	y::Union{AbstractRange, Vector},
-	U::Array; xlabel::String = "",
+	U::Array; 
+    xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -481,15 +502,18 @@ end
 
 """
 function plot_heatmap(
-	U::Array;
-	xlabel::String = "",
+	U::Array; 
+    xlabel::String = "",
 	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
 )
-
 Plots holographic data.
 
 #### Arguments
@@ -503,9 +527,13 @@ Plots holographic data.
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
 - `ref_size`: ref size of the plot in pixels (default: `500`)
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
+- `title`: Title of thje figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: true)
+
 """
 function plot_heatmap(
-	U::Array; xlabel::String = "",
+	U::Array; 
+    xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -515,6 +543,7 @@ function plot_heatmap(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
+    grid::Bool = true,
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -533,11 +562,32 @@ function plot_heatmap(
 	)
 end
 
+"""
 function plot_quiver(
 	x::Vector,
 	y::Vector,
 	u::Vector,
-	v::Vector; color::String = "RoyalBlue",
+	v::Vector; 
+    color::String = "RoyalBlue",
+	sizeref::Real = 1,
+	xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	ref_size::Int = 500,
+	colorscale::String = "Jet",
+	title::String = "",
+	grid::Bool = true,
+)
+"""
+function plot_quiver(
+	x::Vector,
+	y::Vector,
+	u::Vector,
+	v::Vector; 
+    color::String = "RoyalBlue",
 	sizeref::Real = 1,
 	xlabel::String = "",
 	ylabel::String = "",
@@ -633,11 +683,32 @@ end
 #endregion
 
 #region 3D Plot
-
+"""
 function plot_surface(
 	X::Array,
 	Y::Array,
-	Z::Array; surfacecolor::Array = [],
+	Z::Array; 
+    surfacecolor::Array = [],
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	xlabel::String = "",
+	ylabel::String = "",
+	zlabel::String = "",
+	aspectmode::String = "auto",
+	colorscale::String = "Jet",
+	title::String = "",
+	grid::Bool = true,
+	showaxis::Bool = true,
+)
+"""
+function plot_surface(
+	X::Array,
+	Y::Array,
+	Z::Array; 
+    surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -712,6 +783,24 @@ function plot_surface(
 	return fig
 end
 
+"""
+function plot_surface(
+	Z::Array; surfacecolor::Array = [],
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	xlabel::String = "",
+	ylabel::String = "",
+	zlabel::String = "",
+	aspectmode::String = "auto",
+	colorscale::String = "Jet",
+	title::String = "",
+	grid::Bool = true,
+	showaxis::Bool = true,
+)
+"""
 function plot_surface(
 	Z::Array; surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
@@ -749,6 +838,28 @@ function plot_surface(
 	)
 end
 
+"""
+function plot_scatter3d(
+	x::Vector,
+	y::Vector,
+	z::Vector; xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	mode::Union{String, Vector{String}} = "lines",
+	color::Union{String, Vector{String}} = "",
+	legend::Union{String, Vector{String}} = "",
+	xlabel::String = "",
+	ylabel::String = "",
+	zlabel::String = "",
+	aspectmode::String = "auto",
+	title::String = "",
+	perspective::Bool = true,
+	grid::Bool = true,
+	showaxis::Bool = true,
+)
+"""
 function plot_scatter3d(
 	x::Vector,
 	y::Vector,
@@ -866,24 +977,21 @@ function plot_scatter3d(
 	return fig
 end
 
+"""
 function plot_quiver3d(
 	x::Vector,
 	y::Vector,
 	z::Vector,
 	u::Vector,
 	v::Vector,
-	w::Vector; 
-
-    sizeref::Real = 1,
+	w::Vector; sizeref::Real = 1,
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
 	color::Union{String, Vector{String}} = "",
-	colorscale::String = "Jet",
-
-	xlabel::String = "",
+	colorscale::String = "Jet", xlabel::String = "",
 	ylabel::String = "",
 	zlabel::String = "",
 	aspectmode::String = "auto",
@@ -892,7 +1000,29 @@ function plot_quiver3d(
 	grid::Bool = true,
 	showaxis::Bool = true,
 )
-
+"""
+function plot_quiver3d(
+	x::Vector,
+	y::Vector,
+	z::Vector,
+	u::Vector,
+	v::Vector,
+	w::Vector; sizeref::Real = 1,
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	color::Union{String, Vector{String}} = "",
+	colorscale::String = "Jet", xlabel::String = "",
+	ylabel::String = "",
+	zlabel::String = "",
+	aspectmode::String = "auto",
+	title::String = "",
+	perspective::Bool = true,
+	grid::Bool = true,
+	showaxis::Bool = true,
+)
 	trace = cone(
 		x = x,
 		y = y,
@@ -903,13 +1033,13 @@ function plot_quiver3d(
 		sizemode = "absolute",
 		sizeref = sizeref,
 		anchor = "cm",
-        colorscale = colorscale,
+		colorscale = colorscale,
 	)
-    if color != "" # use single color
-        trace.colorscale =  [[0, color], [1, color]]
-        trace.showscale = false
-    end
-    if xlabel == ""
+	if color != "" # use single color
+		trace.colorscale = [[0, color], [1, color]]
+		trace.showscale = false
+	end
+	if xlabel == ""
 		xlabel = "x"
 	end
 	if ylabel == ""
