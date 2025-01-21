@@ -103,7 +103,7 @@ function plot_scatter(
 			end
 		end
 	else
-		trace = scatter(y = y, x = x, mode = mode, line = attr(color = color), legend = legend)
+		trace = scatter(y = y, x = x, mode = mode, line = attr(color = color), name = legend)
 	end
 	layout = Layout(
 		title = title,
@@ -216,6 +216,216 @@ function plot_scatter(
 		width = width,
 		height = height,
 		mode = mode,
+		color = color,
+		legend = legend,
+		title = title,
+		grid = grid,
+	)
+end
+
+"""
+function plot_scatter(
+	x::Union{AbstractRange, Vector},
+	y::Union{AbstractRange, Vector};
+	xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	mode::Union{String, Vector{String}} = "lines",
+	color::Union{String, Vector{String}} = "",
+	legend::Union{String, Vector{String}} = "",
+	title::String = "",
+	grid::Bool = true,
+)
+Plots a rectangular (Cartesian) plot.
+
+#### Arguments
+
+- `x`: x-coordinate data (can be vector of vectors)
+- `y`: y-coordinate data (can be vector of vectors)
+
+#### Keywords
+
+- `xlabel`: Label for the x-axis (default: `""`)
+- `ylabel`: Label for the y-axis (default: `""`)
+- `xrange`: Range for the x-axis (default: `[0, 0]`)
+- `yrange`: Range for the y-axis (default: `[0, 0]`)
+- `width`: Width of the plot (default: `0`)
+- `height`: Height of the plot (default: `0`)
+- `mode`: Plotting mode (default: `"lines"`, can be vector)
+- `color`: Color of the plot lines (default: `""`, can be vector)
+- `legend`: Name of the plot lines (default: `""`, can be vector)
+- `title`: Title of thje figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: true)
+
+"""
+function plot_stem(
+	x::Union{AbstractRange, Vector},
+	y::Union{AbstractRange, Vector};
+	xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	color::Union{String, Vector{String}} = "",
+	legend::Union{String, Vector{String}} = "",
+	title::String = "",
+	grid::Bool = true,
+)
+	if isa(y, Vector) && eltype(y) <: Vector
+		trace = Vector{GenericTrace}(undef, length(y))
+		colorV = fill("", length(y))
+		legendV = fill("", length(y))
+
+		if !(color isa Vector)
+			fill!(colorV, color)
+		else
+			for n in eachindex(color)
+				colorV[n] = color[n]
+			end
+		end
+		if !(legend isa Vector)
+			fill!(legendV, legend)
+		else
+			for n in eachindex(legend)
+				legendV[n] = legend[n]
+			end
+		end
+
+		if isa(x, Vector) && eltype(x) <: Vector
+			for n in eachindex(y)
+				trace[n] = stem(
+					y = y[n],
+					x = x[n],
+					line = attr(color = colorV[n]),
+					name = legendV[n],
+				)
+			end
+		else
+			for n in eachindex(y)
+				trace[n] = scatter(
+					y = y[n],
+					x = x,
+					line = attr(color = colorV[n]),
+					name = legendV[n],
+				)
+			end
+		end
+	else
+		trace = stem(y = y, x = x, line = attr(color = color), name = legend)
+	end
+	layout = Layout(
+		title = title,
+		yaxis = attr(
+			title_text = ylabel,
+			zeroline = false,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
+			tick0 = minimum(y),
+			automargin = true,
+		),
+		xaxis = attr(
+			title_text = xlabel,
+			zeroline = false,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
+			tick0 = minimum(x),
+			automargin = true,
+		),
+	)
+	fig = plot(trace, layout)
+	if !all(xrange .== [0, 0])
+		update_xaxes!(fig, range = xrange)
+	end
+	if !all(yrange .== [0, 0])
+		update_yaxes!(fig, range = yrange)
+	end
+	if width > 0
+		relayout!(fig, width = width)
+	end
+	if height > 0
+		relayout!(fig, height = height)
+	end
+	if !grid
+		update_xaxes!(fig, showgrid = false)
+		update_yaxes!(fig, showgrid = false)
+	end
+	relayout!(fig, template = :plotly_white)
+	return fig
+end
+
+"""
+function plot_scatter(
+	y::Union{AbstractRange, Vector}; 
+    xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	mode::Union{String, Vector{String}} = "lines",
+	color::Union{String, Vector{String}} = "",
+	legend::Union{String, Vector{String}} = "",
+	title::String = "",
+	grid::Bool = true,
+)
+Plots a rectangular (Cartesian) plot (x-axis not specified).
+
+#### Arguments
+
+- `y`: y-coordinate data (can be vector of vectors)
+
+#### Keywords
+
+- `xlabel`: Label for the x-axis (default: `""`)
+- `ylabel`: Label for the y-axis (default: `""`)
+- `xrange`: Range for the x-axis (default: `[0, 0]`)
+- `yrange`: Range for the y-axis (default: `[0, 0]`)
+- `width`: Width of the plot (default: `0`)
+- `height`: Height of the plot (default: `0`)
+- `mode`: Plotting mode (default: `"lines"`, can be vector)
+- `color`: Color of the plot lines (default: `""`, can be vector)
+- `legend`: legend of the plot lines (default: `""`, can be vector)
+- `title`: Title of thje figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: true)
+
+"""
+function plot_stem(
+	y::Union{AbstractRange, Vector}; 
+    xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	color::Union{String, Vector{String}} = "",
+	legend::Union{String, Vector{String}} = "",
+	title::String = "",
+	grid::Bool = true,
+)
+	if isa(y, Vector) && eltype(y) <: Vector
+		x = Vector{Vector{Int}}(undef, length(y))
+		for n in eachindex(y)
+			x[n] = 0:length(y[n])-1
+		end
+	else
+		x = 0:length(y)-1
+	end
+
+	return plot_stem(
+		x,
+		y;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		width = width,
+		height = height,
 		color = color,
 		legend = legend,
 		title = title,
@@ -1097,6 +1307,10 @@ function plot_quiver3d(
 end
 
 #endregion
+
+function set_template!(fig, template)
+    relayout!(fig, template = template)
+end
 
 function tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
 	#auxilliary function to interleave elements of a NTuple of vectors, N = 3 or 4
