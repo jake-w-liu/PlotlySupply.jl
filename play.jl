@@ -49,42 +49,43 @@ using FFTW
 #region section 2
 function fourier(sig, srate = 1)
     Sig = fft(sig)
-    n = length(Sig)
-    Sig ./= n
-    if isodd(n)
-        fac = (n - 1) / n
+    N = length(Sig)
+    Sig ./= N
+    if isodd(N)
+        f = LinRange(0, srate / 2 * (N - 1) / N, floor(Int64, N / 2 + 1))
     else
-        fac = 1
+        f = LinRange(0, srate / 2 * 1, floor(Int64, N / 2 + 1))
     end
-    f = LinRange(0, srate / 2 * fac, floor(Int64, n / 2 + 1))
-    fsig = Sig[1:length(f)]
-    fsig[2:end] .= 2 .* abs.(fsig[2:end])
 
-    return fsig, f
+    sSig = Sig[1:length(f)]
+    sSig[2:end] .= 2 .* abs.(sSig[2:end])
+
+    return sSig, f
 end
 
 # test several signals
 
 srate = 100
 time = collect(0 : 1/srate : 1 - 1/srate)
+# time = collect(0 : 1/srate : 1 + 1/srate)
 N = length(time)
 
 # boring sinusoids
-s1(t) = 2 + sin(2pi*5*t) + 1.5 * cos(2pi*30*t) 
+s1(t) = 2 + sin(2pi*5*t) + 3 * cos(2pi*30*t)  + 1.5 * sin(2pi*50*t + pi/5) 
 S1, freq = fourier(s1.(time), srate)
 fig_td = plot_scatter(time, s1.(time), xlabel = "time (sec.)", ylabel = "amplitude.") 
 fig_fd = plot_stem(freq, abs.(S1), xlabel = "frequency (Hz)", ylabel = "coef.") 
-fig = [fig_td fig_fd]
+fig = [fig_td; fig_fd]
 set_template!(fig, :plotly_white)
 display(fig)
 
 # white noise
-s2(t) = rand() 
-S2, f = fourier(s2.(time), srate)
-fig_td = plot_scatter(time, s2.(time), xlabel = "time (sec.)", ylabel = "amplitude.") 
-fig_fd = plot_stem(freq, abs.(S2), xlabel = "frequency (Hz)", ylabel = "coef.") 
-fig = [fig_td fig_fd]
-set_template!(fig, :plotly_white)
-display(fig)
+# s2(t) = rand() 
+# S2, f = fourier(s2.(time), srate)
+# fig_td = plot_scatter(time, s2.(time), xlabel = "time (sec.)", ylabel = "amplitude.") 
+# fig_fd = plot_stem(freq, abs.(S2), xlabel = "frequency (Hz)", ylabel = "coef.") 
+# fig = [fig_td; fig_fd]
+# set_template!(fig, :plotly_white)
+# display(fig)
 
 #endregion

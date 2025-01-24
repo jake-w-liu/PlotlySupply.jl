@@ -150,7 +150,7 @@ end
 """
 function plot_scatter(
 	y::Union{AbstractRange, Vector}; 
-    xlabel::String = "",
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -184,8 +184,8 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 
 """
 function plot_scatter(
-	y::Union{AbstractRange, Vector}; 
-    xlabel::String = "",
+	y::Union{AbstractRange, Vector};
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -297,25 +297,40 @@ function plot_stem(
 
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				trace[n] = stem(
+				# trace[n] = stem(
+				# 	y = y[n],
+				# 	x = x[n],
+				# 	line = attr(color = colorV[n]),
+				# 	name = legendV[n],
+				# )
+				trace[n] = scatter(
 					y = y[n],
 					x = x[n],
 					line = attr(color = colorV[n]),
 					name = legendV[n],
+					mode = "markers",
 				)
 			end
 		else
 			for n in eachindex(y)
+				# trace[n] = stem(
+				# 	y = y[n],
+				# 	x = x,
+				# 	line = attr(color = colorV[n]),
+				# 	name = legendV[n],
+				# )
 				trace[n] = scatter(
 					y = y[n],
 					x = x,
 					line = attr(color = colorV[n]),
 					name = legendV[n],
+					mode = "markers",
 				)
 			end
 		end
 	else
-		trace = stem(y = y, x = x, line = attr(color = color), name = legend)
+		# trace = stem(y = y, x = x, line = attr(color = color), name = legend)
+		trace = scatter(y = y, x = x, line = attr(color = color), name = legend, mode = "markers")
 	end
 	layout = Layout(
 		title = title,
@@ -339,6 +354,7 @@ function plot_stem(
 		),
 	)
 	fig = plot(trace, layout)
+
 	if !all(xrange .== [0, 0])
 		update_xaxes!(fig, range = xrange)
 	end
@@ -356,13 +372,76 @@ function plot_stem(
 		update_yaxes!(fig, showgrid = false)
 	end
 	relayout!(fig, template = :plotly_white)
+
+	#exp
+	if isa(y, Vector) && eltype(y) <: Vector
+		if isa(x, Vector) && eltype(x) <: Vector
+			for n in eachindex(y)
+				for m in eachindex(y[n])
+					# add_shape!(fig, line(
+					# 	x0 = x[n][m], y0 = 0,
+					# 	x1 = x[n][m], y1 = y[n][m],
+					# 	line = attr(color = "black", width = 0.5),
+					# )
+					# )
+					addtraces!(fig,
+						scatter(
+							x = [x[n][m], x[n][m]],
+							y = [0, y[n][m]],
+							mode = "lines",
+							line = attr(color = "black", width = 0.5),
+							showlegend = false,
+						),
+					)
+				end
+			end
+		else
+			for n in eachindex(y)
+				for m in eachindex(y[n])
+					# add_shape!(fig, line(
+					# 	x0 = x[m], y0 = 0,
+					# 	x1 = x[m], y1 = y[n][m],
+					# 	line = attr(color = "black", width = 0.5),
+					# )
+					# )
+					addtraces!(fig,
+						scatter(
+							x = [x[m], x[m]],
+							y = [0, y[n][m]],
+							mode = "lines",
+							line = attr(color = "black", width = 0.5),
+							showlegend = false,
+						),
+					)
+				end
+			end
+		end
+	else
+		for m in eachindex(y)
+			# add_shape!(fig, line(
+			# 	x0 = x[m], y0 = 0,
+			# 	x1 = x[m], y1 = y[m],
+			# 	line = attr(color = "black", width = 0.5),
+			# )
+			# )
+			addtraces!(fig,
+				scatter(
+					x = [x[m], x[m]],
+					y = [0, y[m]],
+					mode = "lines",
+					line = attr(color = "black", width = 0.5),
+					showlegend = false,
+				),
+			)
+		end
+	end
 	return fig
 end
 
 """
 function plot_scatter(
 	y::Union{AbstractRange, Vector}; 
-    xlabel::String = "",
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -396,8 +475,8 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 
 """
 function plot_stem(
-	y::Union{AbstractRange, Vector}; 
-    xlabel::String = "",
+	y::Union{AbstractRange, Vector};
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -573,7 +652,7 @@ function plot_heatmap(
 	x::Union{AbstractRange, Vector},
 	y::Union{AbstractRange, Vector},
 	U::Array; 
-    xlabel::String = "",
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -608,8 +687,8 @@ Plots holographic data.
 function plot_heatmap(
 	x::Union{AbstractRange, Vector},
 	y::Union{AbstractRange, Vector},
-	U::Array; 
-    xlabel::String = "",
+	U::Array;
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -713,7 +792,7 @@ end
 """
 function plot_heatmap(
 	U::Array; 
-    xlabel::String = "",
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -742,8 +821,8 @@ Plots holographic data.
 
 """
 function plot_heatmap(
-	U::Array; 
-    xlabel::String = "",
+	U::Array;
+	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -753,7 +832,7 @@ function plot_heatmap(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
-    grid::Bool = true,
+	grid::Bool = true,
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -778,7 +857,7 @@ function plot_quiver(
 	y::Vector,
 	u::Vector,
 	v::Vector; 
-    color::String = "RoyalBlue",
+	color::String = "RoyalBlue",
 	sizeref::Real = 1,
 	xlabel::String = "",
 	ylabel::String = "",
@@ -796,8 +875,8 @@ function plot_quiver(
 	x::Vector,
 	y::Vector,
 	u::Vector,
-	v::Vector; 
-    color::String = "RoyalBlue",
+	v::Vector;
+	color::String = "RoyalBlue",
 	sizeref::Real = 1,
 	xlabel::String = "",
 	ylabel::String = "",
@@ -898,7 +977,7 @@ function plot_surface(
 	X::Array,
 	Y::Array,
 	Z::Array; 
-    surfacecolor::Array = [],
+	surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -917,8 +996,8 @@ function plot_surface(
 function plot_surface(
 	X::Array,
 	Y::Array,
-	Z::Array; 
-    surfacecolor::Array = [],
+	Z::Array;
+	surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -1309,7 +1388,7 @@ end
 #endregion
 
 function set_template!(fig, template = :plotly_white)
-    relayout!(fig, template = template)
+	relayout!(fig, template = template)
 end
 
 function tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
