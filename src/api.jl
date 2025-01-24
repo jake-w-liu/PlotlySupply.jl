@@ -1308,7 +1308,7 @@ end
 
 #endregion
 
-function set_template!(fig, template)
+function set_template!(fig, template = :plotly_white)
     relayout!(fig, template = template)
 end
 
