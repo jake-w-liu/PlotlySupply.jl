@@ -48,6 +48,7 @@ function plot_scatter(
 	width::Int = 0,
 	height::Int = 0,
 	mode::Union{String, Vector{String}} = "lines",
+	dash::Union{String, Vector{String}} = "",
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
@@ -56,6 +57,7 @@ function plot_scatter(
 	if isa(y, Vector) && eltype(y) <: Vector
 		trace = Vector{GenericTrace}(undef, length(y))
 		modeV = fill("line", length(y))
+		dashV = fill("", length(y))
 		colorV = fill("", length(y))
 		legendV = fill("", length(y))
 
@@ -64,6 +66,13 @@ function plot_scatter(
 		else
 			for n in eachindex(mode)
 				modeV[n] = mode[n]
+			end
+		end
+		if !(dash isa Vector)
+			fill!(dashV, dash)
+		else
+			for n in eachindex(dash)
+				dashV[n] = dash[n]
 			end
 		end
 		if !(color isa Vector)
@@ -87,7 +96,7 @@ function plot_scatter(
 					y = y[n],
 					x = x[n],
 					mode = modeV[n],
-					line = attr(color = colorV[n]),
+					line = attr(color = colorV[n], dash = dashV[n]),
 					name = legendV[n],
 				)
 			end
@@ -97,13 +106,13 @@ function plot_scatter(
 					y = y[n],
 					x = x,
 					mode = modeV[n],
-					line = attr(color = colorV[n]),
+					line = attr(color = colorV[n], dash = dashV[n]),
 					name = legendV[n],
 				)
 			end
 		end
 	else
-		trace = scatter(y = y, x = x, mode = mode, line = attr(color = color), name = legend)
+		trace = scatter(y = y, x = x, mode = mode, line = attr(color = color, dash = dash), name = legend)
 	end
 	layout = Layout(
 		title = title,
@@ -192,6 +201,7 @@ function plot_scatter(
 	width::Int = 0,
 	height::Int = 0,
 	mode::Union{String, Vector{String}} = "lines",
+	dash::Union{String, Vector{String}} = "",
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
@@ -216,6 +226,7 @@ function plot_scatter(
 		width = width,
 		height = height,
 		mode = mode,
+		dash = dash,
 		color = color,
 		legend = legend,
 		title = title,
@@ -224,7 +235,7 @@ function plot_scatter(
 end
 
 """
-function plot_scatter(
+function plot_stem(
 	x::Union{AbstractRange, Vector},
 	y::Union{AbstractRange, Vector};
 	xlabel::String = "",
@@ -233,13 +244,11 @@ function plot_scatter(
 	yrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
 	grid::Bool = true,
 )
-Plots a rectangular (Cartesian) plot.
 
 #### Arguments
 
@@ -439,21 +448,19 @@ function plot_stem(
 end
 
 """
-function plot_scatter(
-	y::Union{AbstractRange, Vector}; 
+function plot_stem(
+	y::Union{AbstractRange, Vector};
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
 	grid::Bool = true,
 )
-Plots a rectangular (Cartesian) plot (x-axis not specified).
 
 #### Arguments
 
@@ -554,6 +561,7 @@ function plot_scatterpolar(
 	width::Int = 0,
 	height::Int = 0,
 	mode::Union{String, Vector{String}} = "lines",
+	dash::Union{String, Vector{String}} = "",
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
@@ -562,6 +570,7 @@ function plot_scatterpolar(
 	if isa(r, Vector) && eltype(r) <: Vector
 		trace = Vector{GenericTrace}(undef, length(r))
 		modeV = fill("line", length(r))
+		dashV = fill("", length(r))
 		colorV = fill("", length(r))
 		legendV = fill("", length(r))
 
@@ -570,6 +579,13 @@ function plot_scatterpolar(
 		else
 			for n in eachindex(mode)
 				modeV[n] = mode[n]
+			end
+		end
+		if !(dash isa Vector)
+			fill!(dashV, dash)
+		else
+			for n in eachindex(dash)
+				dashV[n] = dash[n]
 			end
 		end
 		if !(color isa Vector)
@@ -593,7 +609,7 @@ function plot_scatterpolar(
 					r = r[n],
 					theta = theta[n],
 					mode = modeV[n],
-					line = attr(color = colorV[n]),
+					line = attr(color = colorV[n], dash = dashV[n]),
 					name = legendV[n],
 				)
 			end
@@ -603,7 +619,7 @@ function plot_scatterpolar(
 					r = r[n],
 					theta = theta,
 					mode = modeV[n],
-					line = attr(color = colorV[n]),
+					line = attr(color = colorV[n], dash = dashV[n]),
 					name = legendV[n],
 				)
 			end
@@ -613,7 +629,7 @@ function plot_scatterpolar(
 			r = r,
 			theta = theta,
 			mode = mode,
-			line = attr(color = color),
+			line = attr(color = color, dash = dash),
 			name = legend,
 		)
 	end

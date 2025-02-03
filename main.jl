@@ -3,9 +3,9 @@ Pkg.activate(".")
 
 using PlotlySupply
 
-# plot_scatter(1:3, 4:6, title = "dd", height =400, width = 400)
+plot_scatter(1:3, [[4,5,6], [5,1,2]], title = "dd", height =400, width = 400, dash=["", "dash"])
 
-plot_surface([1 3 5; 2 4 6], showaxis = false)
+# plot_surface([1 3 5; 2 4 6], showaxis = false)
 
 # plot_scatter3d([[1,2,3], [1,2,3]], [[4,5,6], [8,10, 12]], [[7,8,9], [14,16,18]], legend = ["a", "b"], perspective = false)
 
@@ -17,4 +17,4 @@ plot_surface([1 3 5; 2 4 6], showaxis = false)
 
 # plot_heatmap([0,1e-6], [0,1e-6,2e-6], [1 3 5; 2 4 6]);
 
-plot_quiver3d([1, 2], [1, 2], [1, 2], [1, -2], [1, 2], [1, 2], color = "blue")
+# plot_quiver3d([1, 2], [1, 2], [1, 2], [1, -2], [1, 2], [1, 2], color = "blue")
