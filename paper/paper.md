@@ -48,7 +48,7 @@ plot_heatmap(x, y, U; xlabel="x", ylabel="y", title="Radial Sine")
 
 # Research applications
 
-The package has been employed in visualization tasks for optical field simulations and electromagnetic scattering problems [@liu2024near, @liu2024circularly]. It provides an efficient plotting interface for projects requiring dynamic inspection of scalar or vector fields over time and space.
+The package has been employed in visualization tasks for optical field simulations [@liu2024near] and electromagnetic scattering problems [@liu2024circularly]. It provides an efficient plotting interface for projects requiring dynamic inspection of scalar or vector fields over time and space.
 
 # Acknowledgements
 
