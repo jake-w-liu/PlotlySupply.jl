@@ -11,6 +11,7 @@ function plot_scatter(
 	width::Int = 0,
 	height::Int = 0,
 	mode::Union{String, Vector{String}} = "lines",
+	dash::Union{String, Vector{String}} = "",
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
@@ -32,6 +33,7 @@ Plots a rectangular (Cartesian) plot.
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
+- `dash`: line style ("dash, "dashdot", or "dot", default: `""`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
 - `legend`: Name of the plot lines (default: `""`, can be vector)
 - `title`: Title of thje figure (default: `""`)
@@ -166,6 +168,7 @@ function plot_scatter(
 	width::Int = 0,
 	height::Int = 0,
 	mode::Union{String, Vector{String}} = "lines",
+	dash::Union{String, Vector{String}} = "",
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
@@ -186,6 +189,7 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
+- `dash`: line style ("dash, "dashdot", or "dot", default: `""`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
 - `legend`: legend of the plot lines (default: `""`, can be vector)
 - `title`: Title of thje figure (default: `""`)
