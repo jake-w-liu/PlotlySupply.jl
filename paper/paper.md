@@ -19,7 +19,7 @@ bibliography: paper.bib
 
 # Summary
 
-`PlotlySupply.jl` is a high-level visualization toolkit for the Julia programming language, offering concise and consistent APIs for 1D, 2D, and 3D plotting. Built on top of `PlotlyJS.jl`, it is designed to streamline the generation of scientific figures while maintaining full access to Plotly’s interactivity and styling options.
+`PlotlySupply.jl` is a high-level visualization toolkit for the Julia programming language, offering concise and consistent APIs for 1D, 2D, and 3D plotting [@sievert2021package]. Built on top of `PlotlyJS.jl`, it is designed to streamline the generation of scientific figures while maintaining full access to Plotly’s interactivity and styling options.
 
 The API design of `PlotlySupply.jl` is intentionally similar to MATLAB-style plotting, making it intuitive for researchers transitioning to Julia or working in multi-language environments. It supports line plots, surface plots, vector field visualizations (quiver plots), heatmaps, and 3D scatter plots with minimal setup and boilerplate code. This makes it especially suitable for rapid prototyping, numerical simulations, and exploratory data visualization in scientific computing.
 
@@ -48,7 +48,7 @@ plot_heatmap(x, y, U; xlabel="x", ylabel="y", title="Radial Sine")
 
 # Research applications
 
-The package has been employed in visualization tasks for optical field simulations, electromagnetic scattering problems, and bio-optical modeling. It provides an efficient plotting interface for projects requiring dynamic inspection of scalar or vector fields over time and space.
+The package has been employed in visualization tasks for optical field simulations and electromagnetic scattering problems [@liu2024near, @liu2024circularly]. It provides an efficient plotting interface for projects requiring dynamic inspection of scalar or vector fields over time and space.
 
 # Acknowledgements
 
@@ -56,7 +56,3 @@ The author thanks the developers of `PlotlyJS.jl`, and the Julia open-source com
 
 # References
 
-- Spencer Lyon. *PlotlyJS.jl*. https://github.com/JuliaPlots/PlotlyJS.jl
-- Plotly Technologies Inc. *plotly.js: The open source JavaScript graphing library*. https://github.com/plotly/plotly.js
-- Simon Danisch, et al. *Makie.jl: Flexible high-performance visualizations for Julia*. https://github.com/MakieOrg/Makie.jl
-- Thomas Breloff. *Plots.jl: Unified interface to multiple Julia plotting backends*. https://github.com/JuliaPlots/Plots.jl
