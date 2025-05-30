@@ -1576,7 +1576,7 @@ function set_template!(fig, template = "plotly_white")
 	else # default
 		fig.plot.layout.template = PlotlyJS.templates.plotly_white	
 	end
-		# react!(fig, fig.plot.data, fig.plot.layout)
+	react!(fig, fig.plot.data, fig.plot.layout)
 	# display(fig)
 end
 

@@ -54,6 +54,8 @@ Pkg.add("PlotlyJS")
 
 ## Examples
 
+Please refer the [API documentation](./doc/api.md) for full functionality.
+
 ### 1D Line Plot
 
 ```julia

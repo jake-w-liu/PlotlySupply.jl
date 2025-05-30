@@ -17,7 +17,6 @@ A comprehensive plotting library built on PlotlyJS for creating interactive 1D, 
   - [plot_quiver3d](#plot_quiver3d)
 - [Utility Functions](#utility-functions)
   - [set_template!](#set_template)
-  - [tuple_interleave](#tuple_interleave)
 
 ---
 
@@ -429,22 +428,24 @@ Applies a visual template to a PlotlyJS figure.
 #### Signature
 
 ```julia
-set_template!(fig; template=:plotly_white)
+fig = plot_scatter(0:0.1:2π, sin.(0:0.1:2π); xlabel="x", ylabel="sin(x)", title="Sine Wave")
+set_template!(fig, "plotly_dark")
+# press enter if using REPL
 ```
 
 #### Arguments
 
 - **`fig`**: A PlotlyJS.Plot object
-- **`template`**: Symbol or string specifying the template (default: `:plotly_white`)
+- **`template`**: String specifying the template (default: `"plotly_white"`)
 
 #### Available Templates
 
-- `:plotly` - Default Plotly theme
-- `:plotly_white` - Clean white background
-- `:plotly_dark` - Dark theme
-- `:ggplot2` - ggplot2-style theme
-- `:seaborn` - Seaborn-style theme
-- `:simple_white` - Minimal white theme
+- `"plotly"` - Default Plotly theme
+- `"plotly_white"` - Clean white background
+- `"plotly_dark"` - Dark theme
+- `"ggplot2"` - ggplot2-style theme
+- `"seaborn"` - Seaborn-style theme
+- `"simple_white"` - Minimal white theme
 
 please refer to [this page](https://plotly.com/python/templates/) for more information.
 
@@ -454,30 +455,6 @@ please refer to [this page](https://plotly.com/python/templates/) for more infor
 fig = plot_scatter(1:10, (1:10).^2)
 set_template!(fig, :plotly_dark)
 ```
-
----
-
-### tuple_interleave
-
-Auxiliary function to interleave elements of a NTuple of vectors (N = 3 or 4).
-
-#### Signature
-
-```julia
-tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
-```
-
-#### Arguments
-
-- **`tu`**: A tuple containing 3 or 4 vectors
-
-#### Returns
-
-- A single vector with interleaved elements from the input tuple
-
-This function is primarily used internally for creating arrow visualizations in quiver plots.
-
----
 
 ## Common Patterns and Tips
 
