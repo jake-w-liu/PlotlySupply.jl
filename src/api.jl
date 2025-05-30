@@ -874,10 +874,10 @@ end
 
 """
 function plot_quiver(
-    x::Vector,
-    y::Vector,
-    u::Vector,
-    v::Vector;
+    x::Union{AbstractRange, Vector},
+    y::Union{AbstractRange, Vector},
+    u::Union{AbstractRange, Vector},
+    v::Union{AbstractRange, Vector};
     color::String = "RoyalBlue",
     sizeref::Real = 1,
     xlabel::String = "",
@@ -916,10 +916,10 @@ Plots a 2D quiver (vector field) diagram using arrow segments.
 - `grid`: Whether to show the grid or not (default: `true`)
 """
 function plot_quiver(
-	x::Vector,
-	y::Vector,
-	u::Vector,
-	v::Vector;
+	x::Union{AbstractRange, Vector},
+	y::Union{AbstractRange, Vector},
+	u::Union{AbstractRange, Vector},
+	v::Union{AbstractRange, Vector};
 	color::String = "RoyalBlue",
 	sizeref::Real = 1,
 	xlabel::String = "",
@@ -1225,9 +1225,9 @@ end
 
 """
 plot_scatter3d(
-    x::Vector,
-    y::Vector,
-    z::Vector;
+    x::Union{AbstractRange, Vector},
+    y::Union{AbstractRange, Vector},
+    z::Union{AbstractRange, Vector};
     xrange::Vector = [0, 0],
     yrange::Vector = [0, 0],
     zrange::Vector = [0, 0],
@@ -1271,9 +1271,10 @@ Plots a 3D scatter or line plot using `PlotlyJS`, with options for customizing a
 - This function supports plotting multiple lines by passing `Vector{Vector}` types to `x`, `y`, and `z`. In this case, corresponding vectors of `mode`, `color`, and `legend` will be used.
 """
 function plot_scatter3d(
-	x::Vector,
-	y::Vector,
-	z::Vector; xrange::Vector = [0, 0],
+	x::Union{AbstractRange, Vector},
+	y::Union{AbstractRange, Vector},
+	z::Union{AbstractRange, Vector}; 
+	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
 	width::Int = 0,
@@ -1291,7 +1292,7 @@ function plot_scatter3d(
 	showaxis::Bool = true,
 )
 	if isa(z, Vector) && eltype(z) <: Vector
-		modeV = fill("line", length(z))
+		modeV = fill("lines", length(z))
 		colorV = fill("", length(z))
 		legendV = fill("", length(z))
 		trace = Vector{GenericTrace}(undef, length(z))
@@ -1327,7 +1328,7 @@ function plot_scatter3d(
 			)
 		end
 	else
-		trace = scatter3d(x = x, y = y, z = z, mode = mode, line = line, name = legend)
+		trace = scatter3d(x = x, y = y, z = z, mode = mode, line = attr(color = color), name = legend)
 	end
 
 	if xlabel == ""
@@ -1389,12 +1390,12 @@ end
 
 """
 plot_quiver3d(
-    x::Vector,
-    y::Vector,
-    z::Vector,
-    u::Vector,
-    v::Vector,
-    w::Vector;
+    x::Union{AbstractRange, Vector},
+    y::Union{AbstractRange, Vector},
+    z::Union{AbstractRange, Vector},
+    u::Union{AbstractRange, Vector},
+    v::Union{AbstractRange, Vector},
+    w::Union{AbstractRange, Vector};
     sizeref::Real = 1,
     xrange::Vector = [0, 0],
     yrange::Vector = [0, 0],
@@ -1440,12 +1441,13 @@ Generates a 3D vector field (quiver plot) using cones via `PlotlyJS`.
 - If `color` is specified, all cones are displayed in a uniform color without a color bar.
 """
 function plot_quiver3d(
-	x::Vector,
-	y::Vector,
-	z::Vector,
-	u::Vector,
-	v::Vector,
-	w::Vector; sizeref::Real = 1,
+	x::Union{AbstractRange, Vector},
+	y::Union{AbstractRange, Vector},
+	z::Union{AbstractRange, Vector},
+	u::Union{AbstractRange, Vector},
+	v::Union{AbstractRange, Vector},
+	w::Union{AbstractRange, Vector}; 
+	sizeref::Real = 1,
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -1537,20 +1539,45 @@ end
 #endregion
 
 """
-set_template!(fig, template = :plotly_white)
+set_template!(fig, template = "plotly_white")
 
 Applies a visual template to a PlotlyJS figure.
 
 # Arguments
 - `fig`: A `PlotlyJS.Plot` object.
-- `template`: Symbol or string specifying the template to apply (default: `:plotly_white`).
+- `template`: String specifying the template to apply (default: `:plotly_white`).
 
 # Notes
 - This modifies the figure in-place using `relayout!`.
 - Available templates include `:plotly`, `:ggplot2`, `:seaborn`, `:simple_white`, `:plotly_dark`, etc.
 """
-function set_template!(fig, template = :plotly_white)
-	relayout!(fig, template = template)
+function set_template!(fig, template = "plotly_white")
+	# relayout!(fig, template = template)
+	if template == "plotly_white"
+		fig.plot.layout.template = PlotlyJS.templates.plotly_white
+	elseif template == "plotly_dark"
+		fig.plot.layout.template = PlotlyJS.templates.plotly_dark
+	elseif template == "plotly"
+		fig.plot.layout.template = PlotlyJS.templates.plotly
+	elseif template == "ggplot2"
+		fig.plot.layout.template = PlotlyJS.templates.ggplot2	
+	elseif template == "seaborn"
+		fig.plot.layout.template = PlotlyJS.templates.seaborn	
+	elseif template == "simple_white"
+		fig.plot.layout.template = PlotlyJS.templates.simple_white	
+	elseif template == "presentation"
+		fig.plot.layout.template = PlotlyJS.templates.presentation	
+	elseif template == "xgridoff"
+		fig.plot.layout.template = PlotlyJS.templates.xgridoff	
+	elseif template == "ygridoff"
+		fig.plot.layout.template = PlotlyJS.templates.ygridoff	
+	elseif template == "gridon"
+		fig.plot.layout.template = PlotlyJS.templates.gridon	
+	else # default
+		fig.plot.layout.template = PlotlyJS.templates.plotly_white	
+	end
+		# react!(fig, fig.plot.data, fig.plot.layout)
+	# display(fig)
 end
 
 function tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
