@@ -4,11 +4,11 @@ A comprehensive plotting library built on PlotlyJS for creating interactive 1D, 
 
 ## Table of Contents
 
-- [1D Plotting Functions](#1d-plotting-functions)
+- [2D Plotting Functions](#2d-plotting-functions)
   - [plot_scatter](#plot_scatter)
   - [plot_stem](#plot_stem)
   - [plot_scatterpolar](#plot_scatterpolar)
-- [2D Plotting Functions](#2d-plotting-functions)
+- [2D Heatmap and Vector Plotting Functions](#2d-heatmap-and-vector-plotting-functions)
   - [plot_heatmap](#plot_heatmap)
   - [plot_quiver](#plot_quiver)
 - [3D Plotting Functions](#3d-plotting-functions)
@@ -20,7 +20,7 @@ A comprehensive plotting library built on PlotlyJS for creating interactive 1D, 
 
 ---
 
-## 1D Plotting Functions
+## 2D Plotting Functions
 
 ### plot_scatter
 
@@ -160,7 +160,7 @@ fig = plot_scatterpolar(theta, r, title="Rose Pattern")
 
 ---
 
-## 2D Plotting Functions
+## 2D Heatmap and Vector Plotting Functions
 
 ### plot_heatmap
 
