@@ -12,22 +12,22 @@
 
 ## Overview of Functions
 
-### 1D Cartesian Plots
+### 2D Cartesian Plots
 
 - `plot_scatter(x, y; ...)`: Line or marker plot for 1D data.
 - `plot_scatter(y; ...)`: Uses index as x-axis.
 - `plot_stem(x, y; ...)`: Stem plot using markers and vertical lines.
 - `plot_stem(y; ...)`: Uses index as x-axis.
 
-### 2D Plots
+### 2D Polar Plots
+
+- `plot_scatterpolar(theta, r; ...)`: Polar plot in angular-radial coordinates.
+
+### 2D Heatmap and Vector Plots
 
 - `plot_heatmap(x, y, U; ...)`: Heatmap of matrix `U` over grid `x`, `y`.
 - `plot_heatmap(U; ...)`: Uses default x/y indices.
 - `plot_quiver(x, y, u, v; ...)`: 2D quiver plot with arrows from vectors `(u,v)` at locations `(x,y)`.
-
-### 2D Polar Plots
-
-- `plot_scatterpolar(theta, r; ...)`: Polar plot in angular-radial coordinates.
 
 ### 3D Plots
 
@@ -46,7 +46,7 @@
 
 Please refer the [API documentation](./doc/api.md) for full functionality.
 
-### 1D Line Plot
+### 2D Line Plot
 
 ```julia
 plot_scatter(0:0.1:2π, sin.(0:0.1:2π); xlabel="x", ylabel="sin(x)", title="Sine Wave")
@@ -93,7 +93,6 @@ Most functions accept the following options:
 ## Notes
 
 - All plots use the `:plotly_white` template by default.
-- Internal helper `tuple_interleave` is used for quiver arrow rendering.
 - Most functions support both scalar and vectorized input (e.g., multiple traces).
 
 ---
