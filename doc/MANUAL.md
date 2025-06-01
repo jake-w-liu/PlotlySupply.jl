@@ -476,6 +476,8 @@ fig = plot_scatter(x, [y1, y2, y3],
 ### Customizing Appearance
 
 ```julia
+x = 1:10
+y = sin.(x)
 fig = plot_scatter(x, y, 
                    xlabel="Time (s)", 
                    ylabel="Amplitude", 
@@ -483,7 +485,7 @@ fig = plot_scatter(x, y,
                    width=800, 
                    height=600,
                    grid=false)
-set_template!(fig, :plotly_dark)
+set_template!(fig, "plotly_dark")
 display(fig)
 ```
 
