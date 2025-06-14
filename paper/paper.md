@@ -13,7 +13,7 @@ authors:
 affiliations:
   - name: Department of Electronic Engineering, National Taipei University of Technology, Taiwan
     index: 1
-date: 2025-06-02
+date: 14 June 2025
 bibliography: paper.bib
 ---
 
