@@ -44,7 +44,7 @@
 
 ## Examples
 
-Please refer the [API documentation](./doc/MANUAL.md) for full functionality.
+Please refer the [API documentation](./docs/MANUAL.md) for full functionality.
 
 ### 2D Line Plot
 
