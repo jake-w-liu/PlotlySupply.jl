@@ -880,8 +880,6 @@ function plot_quiver(
     yrange::Vector = [0, 0],
     width::Int = 0,
     height::Int = 0,
-    ref_size::Int = 500,
-    colorscale::String = "Jet",
     title::String = "",
     grid::Bool = true,
 )
@@ -904,8 +902,6 @@ Plots a 2D quiver (vector field) diagram using arrow segments.
 - `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `width`: Width of the figure in pixels (default: `0`)
 - `height`: Height of the figure in pixels (default: `0`)
-- `ref_size`: Reference size of the plot in pixels (default: `500`)
-- `colorscale`: Not used in the current function but included for compatibility (default: `"Jet"`)
 - `title`: Title of the figure (default: `""`)
 - `grid`: Whether to show the grid or not (default: `true`)
 """
@@ -922,8 +918,6 @@ function plot_quiver(
 	yrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
-	ref_size::Int = 500,
-	colorscale::String = "Jet",
 	title::String = "",
 	grid::Bool = true,
 )

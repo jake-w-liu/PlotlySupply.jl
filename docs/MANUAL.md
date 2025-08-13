@@ -195,7 +195,6 @@ When only `U` is provided, coordinates are automatically generated as array indi
 | `ref_size` | `Int` | `500` | Reference size of the plot in pixels |
 | `colorscale` | `String` | `"Jet"` | Color scale for the heatmap |
 | `title` | `String` | `""` | Title of the figure |
-| `grid` | `Bool` | `true` | Whether to show the grid |
 
 #### Example
 
@@ -240,8 +239,6 @@ plot_quiver(x, y, u, v; kwargs...)
 | `yrange` | `Vector` | `[0, 0]` | Range for the y-axis |
 | `width` | `Int` | `0` | Width of the figure in pixels |
 | `height` | `Int` | `0` | Height of the figure in pixels |
-| `ref_size` | `Int` | `500` | Reference size of the plot in pixels |
-| `colorscale` | `String` | `"Jet"` | Not used but included for compatibility |
 | `title` | `String` | `""` | Title of the figure |
 | `grid` | `Bool` | `true` | Whether to show the grid |
 
