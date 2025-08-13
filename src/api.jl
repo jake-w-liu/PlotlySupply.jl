@@ -884,99 +884,104 @@ Plots a 2D quiver (vector field) diagram using arrow segments.
 - `grid`: Whether to show the grid or not (default: `true`)
 """
 function plot_quiver(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector},
-	u::Union{AbstractRange, Vector},
-	v::Union{AbstractRange, Vector};
-	color::String = "RoyalBlue",
-	sizeref::Real = 1,
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	title::String = "",
-	grid::Bool = true,
+    x::Union{AbstractRange, Vector},
+    y::Union{AbstractRange, Vector},
+    u::Union{AbstractRange, Vector},
+    v::Union{AbstractRange, Vector};
+    color::String = "RoyalBlue",
+    sizeref::Real = 1,
+    xlabel::String = "",
+    ylabel::String = "",
+    xrange::Vector = [0, 0],
+    yrange::Vector = [0, 0],
+    width::Int = 0,
+    height::Int = 0,
+    title::String = "",
+    grid::Bool = true,
 )
-	p_max = maximum(sqrt.(u .^ 2 .+ v .^ 2))
-	u_ref = u ./ p_max .* sizeref
-	v_ref = v ./ p_max .* sizeref
-	end_x = x .+ u_ref .* 2 / 3
-	end_y = y .+ v_ref .* 2 / 3
+    x_vec = isa(x, AbstractRange) ? collect(x) : x
+    y_vec = isa(y, AbstractRange) ? collect(y) : y
+    u_vec = isa(u, AbstractRange) ? collect(u) : u
+    v_vec = isa(v, AbstractRange) ? collect(v) : v
 
-	vect_nans = repeat([NaN], length(x))
+    p_max = maximum(sqrt.(u_vec .^ 2 .+ v_vec .^ 2))
+    u_ref = u_vec ./ p_max .* sizeref
+    v_ref = v_vec ./ p_max .* sizeref
+    end_x = x_vec .+ u_ref .* 2 / 3
+    end_y = y_vec .+ v_ref .* 2 / 3
 
-	arrow_length = sqrt.(u_ref .^ 2 .+ v_ref .^ 2)
-	barb_angle = atan.(v_ref, u_ref)
+    vect_nans = repeat([NaN], length(x_vec))
 
-	ang1 = barb_angle .+ atan(1 / 4)
-	ang2 = barb_angle .- atan(1 / 4)
+    arrow_length = sqrt.(u_ref .^ 2 .+ v_ref .^ 2)
+    barb_angle = atan.(v_ref, u_ref)
 
-	seg1_x = arrow_length .* cos.(ang1) .* sqrt(1.0625)
-	seg1_y = arrow_length .* sin.(ang1) .* sqrt(1.0625)
+    ang1 = barb_angle .+ atan(1 / 4)
+    ang2 = barb_angle .- atan(1 / 4)
 
-	seg2_x = arrow_length .* cos.(ang2) .* sqrt(1.0625)
-	seg2_y = arrow_length .* sin.(ang2) .* sqrt(1.0625)
+    seg1_x = arrow_length .* cos.(ang1) .* sqrt(1.0625)
+    seg1_y = arrow_length .* sin.(ang1) .* sqrt(1.0625)
 
-	arrowend1_x = end_x .- seg1_x
-	arrowend1_y = end_y .- seg1_y
-	arrowend2_x = end_x .- seg2_x
-	arrowend2_y = end_y .- seg2_y
-	arrow_x = _tuple_interleave((arrowend1_x, end_x, arrowend2_x, vect_nans))
-	arrow_y = _tuple_interleave((arrowend1_y, end_y, arrowend2_y, vect_nans))
+    seg2_x = arrow_length .* cos.(ang2) .* sqrt(1.0625)
+    seg2_y = arrow_length .* sin.(ang2) .* sqrt(1.0625)
 
-	arrow = scatter(x = arrow_x, y = arrow_y, mode = "lines", line_color = color,
-		fill = "toself", fillcolor = color, hoverinfo = "skip")
+    arrowend1_x = end_x .- seg1_x
+    arrowend1_y = end_y .- seg1_y
+    arrowend2_x = end_x .- seg2_x
+    arrowend2_y = end_y .- seg2_y
+    arrow_x = _tuple_interleave((collect(arrowend1_x), collect(end_x), collect(arrowend2_x), collect(vect_nans)))
+    arrow_y = _tuple_interleave((collect(arrowend1_y), collect(end_y), collect(arrowend2_y), collect(vect_nans)))
 
-	layout = Layout(
-		title = title,
-		scene = attr(aspectmode = "data"),
-		xaxis = attr(
-			title = xlabel,
-			constrain = "domain",
-			automargin = true,
-			zeroline = false,
-			showline = true,
-			mirror = true,
-			ticks = "outside",
-		),
-		yaxis = attr(
-			title = ylabel,
-			constrain = "domain",
-			zeroline = false,
-			automargin = true,
-			showline = true,
-			mirror = true,
-			ticks = "outside",
-		),
-		# margin = attr(r = 0, b = 0, t = 0, l = 0),
-	)
+    arrow = scatter(x = arrow_x, y = arrow_y, mode = "lines", line_color = color,
+        fill = "toself", fillcolor = color, hoverinfo = "skip")
 
-	fig = plot(arrow, layout)
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
+    layout = Layout(
+        title = title,
+        scene = attr(aspectmode = "data"),
+        xaxis = attr(
+            title = xlabel,
+            constrain = "domain",
+            automargin = true,
+            zeroline = false,
+            showline = true,
+            mirror = true,
+            ticks = "outside",
+        ),
+        yaxis = attr(
+            title = ylabel,
+            constrain = "domain",
+            zeroline = false,
+            automargin = true,
+            showline = true,
+            mirror = true,
+            ticks = "outside",
+        ),
+        # margin = attr(r = 0, b = 0, t = 0, l = 0),
+    )
 
-	update_xaxes!(fig,
-		scaleanchor = "y",
-		scaleratio = 1,
-	)
-	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
-	end
-	relayout!(fig, template = :plotly_white)
-	return fig
+    fig = plot(arrow, layout)
+    if !all(xrange .== [0, 0])
+        update_xaxes!(fig, range = xrange)
+    end
+    if !all(yrange .== [0, 0])
+        update_yaxes!(fig, range = yrange)
+    end
+    if width > 0
+        relayout!(fig, width = width)
+    end
+    if height > 0
+        relayout!(fig, height = height)
+    end
+
+    update_xaxes!(fig,
+        scaleanchor = "y",
+        scaleratio = 1,
+    )
+    if !grid
+        update_xaxes!(fig, showgrid = false)
+        update_yaxes!(fig, showgrid = false)
+    end
+    relayout!(fig, template = :plotly_white)
+    return fig
 end
 
 #endregion
@@ -1543,7 +1548,6 @@ function set_template!(fig, template = "plotly_white")
 		fig.plot.layout.template = PlotlyJS.templates.plotly_white	
 	end
 	react!(fig, fig.plot.data, fig.plot.layout)
-	# display(fig)
 end
 
 ## additional auxilliary functions

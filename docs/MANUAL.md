@@ -248,11 +248,10 @@ plot_quiver(x, y, u, v; kwargs...)
 # Vector field visualization
 x = -2:0.5:2
 y = -2:0.5:2
-X = repeat(x', length(y), 1)
-Y = repeat(y, 1, length(x))
+Y, X = meshgrid(y, x)  # uses Meshgrid.jl
 U = -Y[:]
 V = X[:]
-fig = plot_quiver(X[:], Y[:], U, V, title="Circulation Field")
+fig = plot_quiver(X[:], Y[:], U, V, sizeref = 0.5, title="Circulation Field")
 ```
 
 ---
@@ -303,8 +302,7 @@ When only `Z` is provided, coordinate grids are generated from array indices.
 # 3D mountain surface
 x = -3:0.1:3
 y = -3:0.1:3
-X = repeat(x', length(y), 1)
-Y = repeat(y, 1, length(x))
+Y, X = meshgrid(y, x)  # uses Meshgrid.jl
 Z = 3 * (1 .- X).^2 .* exp.(-(X.^2) - (Y .+ 1).^2)
 fig = plot_surface(X, Y, Z, title="3D Surface", colorscale="Plasma")
 ```
