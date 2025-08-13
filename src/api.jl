@@ -682,7 +682,6 @@ function plot_heatmap(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
-	grid::Bool = true,
 )
 
 Plots holographic data.
@@ -701,7 +700,6 @@ Plots holographic data.
 - `ref_size`: ref size of the plot in pixels (default: `500`)
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
 - `title`: Title of thje figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: true)
 
 """
 function plot_heatmap(
@@ -718,7 +716,6 @@ function plot_heatmap(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
-	grid::Bool = true,
 )
 	#calculate figure size
 	height_ref = length(y)
@@ -837,7 +834,6 @@ Plots holographic data.
 - `ref_size`: ref size of the plot in pixels (default: `500`)
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
 - `title`: Title of thje figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: true)
 
 """
 function plot_heatmap(
@@ -852,7 +848,6 @@ function plot_heatmap(
 	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
-	grid::Bool = true,
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -866,8 +861,7 @@ function plot_heatmap(
 		colorscale = colorscale,
 		title = title,
 		width = width,
-		height = heigh,
-		grid = grid,
+		height = height,
 	)
 end
 
