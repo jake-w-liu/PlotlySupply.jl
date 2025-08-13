@@ -679,9 +679,9 @@ function plot_heatmap(
 	zrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
-	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
+	equalar::Bool = false,
 )
 
 Plots holographic data.
@@ -697,7 +697,6 @@ Plots holographic data.
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
-- `ref_size`: ref size of the plot in pixels (default: `500`)
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
 - `title`: Title of thje figure (default: `""`)
 
@@ -713,27 +712,10 @@ function plot_heatmap(
 	zrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
-	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
+	equalar::Bool = false,
 )
-	#calculate figure size
-	height_ref = length(y)
-	width_ref = length(x)
-	ratio = height_ref / (width_ref)
-	if width_ref > height_ref
-		width_ref = ref_size
-		height_ref = round(Int64, width_ref * ratio)
-	else
-		height_ref = ref_size
-		width_ref = round(Int64, height_ref / ratio)
-	end
-	if height_ref >= width_ref
-		width_ref += round(Int, ratio) * 45
-	elseif height_ref < width_ref
-		height_ref += round(Int, 1 / ratio) * 20
-	end
-
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
 	trace = heatmap(x = x, y = y, z = FV, colorscale = colorscale)
@@ -758,8 +740,6 @@ function plot_heatmap(
 	end
 	layout = Layout(
 		title = title,
-		height = height_ref,
-		width = width_ref,
 		scene = attr(aspectmode = "data"),
 		xaxis = attr(
 			title = xlabel,
@@ -779,7 +759,7 @@ function plot_heatmap(
 			mirror = true,
 			ticks = "outside",
 		),
-		margin = attr(r = 0, b = 0, t = 0, l = 0),
+		# margin = attr(r = 0, b = 0, t = 0, l = 0),
 	)
 	fig = plot(trace, layout)
 	if !all(xrange .== [0, 0])
@@ -788,21 +768,20 @@ function plot_heatmap(
 	if !all(yrange .== [0, 0])
 		update_yaxes!(fig, range = yrange)
 	end
+	if equalar
+		update_xaxes!(fig,
+		scaleanchor = "y",
+		scaleratio = 1,
+	)
+	end
 	if width > 0
 		relayout!(fig, width = width)
 	end
 	if height > 0
 		relayout!(fig, height = height)
 	end
-	update_xaxes!(fig,
-		scaleanchor = "y",
-		scaleratio = 1,
-	)
+	
 	relayout!(fig, template = :plotly_white)
-	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
-	end
 	return fig
 end
 
@@ -816,9 +795,9 @@ function plot_heatmap(
 	zrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
-	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
+	equalar::Bool = false,
 )
 Plots holographic data.
 
@@ -831,7 +810,6 @@ Plots holographic data.
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
-- `ref_size`: ref size of the plot in pixels (default: `500`)
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
 - `title`: Title of thje figure (default: `""`)
 
@@ -845,9 +823,9 @@ function plot_heatmap(
 	zrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
-	ref_size::Int = 500,
 	colorscale::String = "Jet",
 	title::String = "",
+	equalar::Bool = false,
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -857,11 +835,11 @@ function plot_heatmap(
 		xrange = xrange,
 		yrange = yrange,
 		zrange = zrange,
-		ref_size = ref_size,
 		colorscale = colorscale,
 		title = title,
 		width = width,
 		height = height,
+		equalar = equalar,
 	)
 end
 
@@ -945,8 +923,8 @@ function plot_quiver(
 	arrowend1_y = end_y .- seg1_y
 	arrowend2_x = end_x .- seg2_x
 	arrowend2_y = end_y .- seg2_y
-	arrow_x = tuple_interleave((arrowend1_x, end_x, arrowend2_x, vect_nans))
-	arrow_y = tuple_interleave((arrowend1_y, end_y, arrowend2_y, vect_nans))
+	arrow_x = _tuple_interleave((arrowend1_x, end_x, arrowend2_x, vect_nans))
+	arrow_y = _tuple_interleave((arrowend1_y, end_y, arrowend2_y, vect_nans))
 
 	arrow = scatter(x = arrow_x, y = arrow_y, mode = "lines", line_color = color,
 		fill = "toself", fillcolor = color, hoverinfo = "skip")
@@ -972,7 +950,7 @@ function plot_quiver(
 			mirror = true,
 			ticks = "outside",
 		),
-		margin = attr(r = 0, b = 0, t = 0, l = 0),
+		# margin = attr(r = 0, b = 0, t = 0, l = 0),
 	)
 
 	fig = plot(arrow, layout)
@@ -1568,7 +1546,9 @@ function set_template!(fig, template = "plotly_white")
 	# display(fig)
 end
 
-function tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
+## additional auxilliary functions
+
+function _tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
 	#auxilliary function to interleave elements of a NTuple of vectors, N = 3 or 4
 	zipped_data = collect(zip(tu...))
 	vv_zdata = [collect(elem) for elem in zipped_data]

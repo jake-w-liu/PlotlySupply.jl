@@ -195,17 +195,17 @@ When only `U` is provided, coordinates are automatically generated as array indi
 | `ref_size` | `Int` | `500` | Reference size of the plot in pixels |
 | `colorscale` | `String` | `"Jet"` | Color scale for the heatmap |
 | `title` | `String` | `""` | Title of the figure |
+| `equalar` | `Bool` | `false` | Whether to set equal axis |
 
 #### Example
 
 ```julia
-# Temperature distribution heatmap
-x = -5:0.1:5
+# Gaussian distribution heatmap
+x = -8:0.1:8
 y = -5:0.1:5
-X = repeat(x', length(y), 1)
-Y = repeat(y, 1, length(x))
+Y, X = meshgrid(y, x)  # uses Meshgrid.jl
 Z = exp.(-(X.^2 + Y.^2))
-fig = plot_heatmap(x, y, Z, title="2D Gaussian", colorscale="Viridis")
+fig = plot_heatmap(x, y, Z, title="2D Gaussian", colorscale="Viridis", equalar=true)
 ```
 
 ---
