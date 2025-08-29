@@ -1,22 +1,23 @@
 #region 1D Plot
 
 """
-function plot_scatter(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	dash::Union{String, Vector{String}} = "",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	grid::Bool = true,
-)
+	function plot_scatter(
+		x::Union{AbstractRange, Vector},
+		y::Union{AbstractRange, Vector};
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		mode::Union{String, Vector{String}} = "lines",
+		dash::Union{String, Vector{String}} = "",
+		color::Union{String, Vector{String}} = "",
+		legend::Union{String, Vector{String}} = "",
+		title::String = "",
+		grid::Bool = true,
+	)
+		
 Plots a rectangular (Cartesian) plot.
 
 #### Arguments
