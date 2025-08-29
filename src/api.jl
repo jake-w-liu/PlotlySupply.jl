@@ -17,7 +17,7 @@
 		title::String = "",
 		grid::Bool = true,
 	)
-		
+
 Plots a rectangular (Cartesian) plot.
 
 #### Arguments
@@ -160,21 +160,22 @@ function plot_scatter(
 end
 
 """
-function plot_scatter(
-	y::Union{AbstractRange, Vector}; 
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	dash::Union{String, Vector{String}} = "",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	grid::Bool = true,
-)
+	function plot_scatter(
+		y::Union{AbstractRange, Vector}; 
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		mode::Union{String, Vector{String}} = "lines",
+		dash::Union{String, Vector{String}} = "",
+		color::Union{String, Vector{String}} = "",
+		legend::Union{String, Vector{String}} = "",
+		title::String = "",
+		grid::Bool = true,
+	)
+
 Plots a rectangular (Cartesian) plot (x-axis not specified).
 
 #### Arguments
@@ -240,20 +241,22 @@ function plot_scatter(
 end
 
 """
-function plot_stem(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	grid::Bool = true,
-)
+	function plot_stem(
+		x::Union{AbstractRange, Vector},
+		y::Union{AbstractRange, Vector};
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		color::Union{String, Vector{String}} = "",
+		legend::Union{String, Vector{String}} = "",
+		title::String = "",
+		grid::Bool = true,
+	)
+
+Plots a rectangular stem plot.
 
 #### Arguments
 
@@ -453,19 +456,21 @@ function plot_stem(
 end
 
 """
-function plot_stem(
-	y::Union{AbstractRange, Vector};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	grid::Bool = true,
-)
+	function plot_stem(
+		y::Union{AbstractRange, Vector};
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		color::Union{String, Vector{String}} = "",
+		legend::Union{String, Vector{String}} = "",
+		title::String = "",
+		grid::Bool = true,
+	)
+
+Plots a rectangular stem plot (x-axis not specified).
 
 #### Arguments
 
@@ -525,19 +530,20 @@ function plot_stem(
 end
 
 """
-function plot_scatterpolar(
-	theta::Union{AbstractRange, Vector},
-	r::Union{AbstractRange, Vector};
-	trange::Vector = [0, 0],
-	rrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	grid::Bool = true,
-)
+	function plot_scatterpolar(
+		theta::Union{AbstractRange, Vector},
+		r::Union{AbstractRange, Vector};
+		trange::Vector = [0, 0],
+		rrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		mode::Union{String, Vector{String}} = "lines",
+		color::Union{String, Vector{String}} = "",
+		legend::Union{String, Vector{String}} = "",
+		title::String = "",
+		grid::Bool = true,
+	)
+
 Plots a polar plot.
 
 #### Arguments
@@ -669,23 +675,23 @@ end
 #region 2D Plot
 
 """
-function plot_heatmap(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector},
-	U::Array; 
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "Jet",
-	title::String = "",
-	equalar::Bool = false,
-)
+	function plot_heatmap(
+		x::Union{AbstractRange, Vector},
+		y::Union{AbstractRange, Vector},
+		U::Array; 
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		zrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		colorscale::String = "Jet",
+		title::String = "",
+		equalar::Bool = false,
+	)
 
-Plots holographic data.
+Plots heatmap (holographic) data.
 
 #### Arguments
 
@@ -787,20 +793,21 @@ function plot_heatmap(
 end
 
 """
-function plot_heatmap(
-	U::Array; 
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "Jet",
-	title::String = "",
-	equalar::Bool = false,
-)
-Plots holographic data.
+	function plot_heatmap(
+		U::Array; 
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		zrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		colorscale::String = "Jet",
+		title::String = "",
+		equalar::Bool = false,
+	)
+
+Plots heatmap (holographic) data (axes not specified).
 
 #### Arguments
 
@@ -846,22 +853,23 @@ end
 
 
 """
-function plot_quiver(
-    x::Union{AbstractRange, Vector},
-    y::Union{AbstractRange, Vector},
-    u::Union{AbstractRange, Vector},
-    v::Union{AbstractRange, Vector};
-    color::String = "RoyalBlue",
-    sizeref::Real = 1,
-    xlabel::String = "",
-    ylabel::String = "",
-    xrange::Vector = [0, 0],
-    yrange::Vector = [0, 0],
-    width::Int = 0,
-    height::Int = 0,
-    title::String = "",
-    grid::Bool = true,
-)
+	function plot_quiver(
+		x::Union{AbstractRange, Vector},
+		y::Union{AbstractRange, Vector},
+		u::Union{AbstractRange, Vector},
+		v::Union{AbstractRange, Vector};
+		color::String = "RoyalBlue",
+		sizeref::Real = 1,
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		title::String = "",
+		grid::Bool = true,
+	)
+
 Plots a 2D quiver (vector field) diagram using arrow segments.
 
 #### Arguments
@@ -989,25 +997,26 @@ end
 
 #region 3D Plot
 """
-function plot_surface(
-    X::Array,
-    Y::Array,
-    Z::Array;
-    surfacecolor::Array = [],
-    xrange::Vector = [0, 0],
-    yrange::Vector = [0, 0],
-    zrange::Vector = [0, 0],
-    width::Int = 0,
-    height::Int = 0,
-    xlabel::String = "",
-    ylabel::String = "",
-    zlabel::String = "",
-    aspectmode::String = "auto",
-    colorscale::String = "Jet",
-    title::String = "",
-    grid::Bool = true,
-    showaxis::Bool = true,
-)
+	function plot_surface(
+		X::Array,
+		Y::Array,
+		Z::Array;
+		surfacecolor::Array = [],
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		zrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		xlabel::String = "",
+		ylabel::String = "",
+		zlabel::String = "",
+		aspectmode::String = "auto",
+		colorscale::String = "Jet",
+		title::String = "",
+		grid::Bool = true,
+		showaxis::Bool = true,
+	)
+
 Plots a 3D surface using x, y, z coordinate grids.
 
 #### Arguments
@@ -1113,23 +1122,23 @@ function plot_surface(
 end
 
 """
-plot_surface(
-    Z::Array;
-    surfacecolor::Array = [],
-    xrange::Vector = [0, 0],
-    yrange::Vector = [0, 0],
-    zrange::Vector = [0, 0],
-    width::Int = 0,
-    height::Int = 0,
-    xlabel::String = "",
-    ylabel::String = "",
-    zlabel::String = "",
-    aspectmode::String = "auto",
-    colorscale::String = "Jet",
-    title::String = "",
-    grid::Bool = true,
-    showaxis::Bool = true,
-)
+	plot_surface(
+		Z::Array;
+		surfacecolor::Array = [],
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		zrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		xlabel::String = "",
+		ylabel::String = "",
+		zlabel::String = "",
+		aspectmode::String = "auto",
+		colorscale::String = "Jet",
+		title::String = "",
+		grid::Bool = true,
+		showaxis::Bool = true,
+	)
 
 Plots a 3D surface given a matrix of height values `Z`, using the array indices as x and y coordinates.
 
@@ -1196,27 +1205,27 @@ function plot_surface(
 end
 
 """
-plot_scatter3d(
-    x::Union{AbstractRange, Vector},
-    y::Union{AbstractRange, Vector},
-    z::Union{AbstractRange, Vector};
-    xrange::Vector = [0, 0],
-    yrange::Vector = [0, 0],
-    zrange::Vector = [0, 0],
-    width::Int = 0,
-    height::Int = 0,
-    mode::Union{String, Vector{String}} = "lines",
-    color::Union{String, Vector{String}} = "",
-    legend::Union{String, Vector{String}} = "",
-    xlabel::String = "",
-    ylabel::String = "",
-    zlabel::String = "",
-    aspectmode::String = "auto",
-    title::String = "",
-    perspective::Bool = true,
-    grid::Bool = true,
-    showaxis::Bool = true,
-)
+	plot_scatter3d(
+		x::Union{AbstractRange, Vector},
+		y::Union{AbstractRange, Vector},
+		z::Union{AbstractRange, Vector};
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		zrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		mode::Union{String, Vector{String}} = "lines",
+		color::Union{String, Vector{String}} = "",
+		legend::Union{String, Vector{String}} = "",
+		xlabel::String = "",
+		ylabel::String = "",
+		zlabel::String = "",
+		aspectmode::String = "auto",
+		title::String = "",
+		perspective::Bool = true,
+		grid::Bool = true,
+		showaxis::Bool = true,
+	)
 
 Plots a 3D scatter or line plot using `PlotlyJS`, with options for customizing appearance and handling multiple curves.
 
@@ -1361,30 +1370,30 @@ function plot_scatter3d(
 end
 
 """
-plot_quiver3d(
-    x::Union{AbstractRange, Vector},
-    y::Union{AbstractRange, Vector},
-    z::Union{AbstractRange, Vector},
-    u::Union{AbstractRange, Vector},
-    v::Union{AbstractRange, Vector},
-    w::Union{AbstractRange, Vector};
-    sizeref::Real = 1,
-    xrange::Vector = [0, 0],
-    yrange::Vector = [0, 0],
-    zrange::Vector = [0, 0],
-    width::Int = 0,
-    height::Int = 0,
-    color::Union{String, Vector{String}} = "",
-    colorscale::String = "Jet",
-    xlabel::String = "",
-    ylabel::String = "",
-    zlabel::String = "",
-    aspectmode::String = "auto",
-    title::String = "",
-    perspective::Bool = true,
-    grid::Bool = true,
-    showaxis::Bool = true,
-)
+	plot_quiver3d(
+		x::Union{AbstractRange, Vector},
+		y::Union{AbstractRange, Vector},
+		z::Union{AbstractRange, Vector},
+		u::Union{AbstractRange, Vector},
+		v::Union{AbstractRange, Vector},
+		w::Union{AbstractRange, Vector};
+		sizeref::Real = 1,
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		zrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		color::Union{String, Vector{String}} = "",
+		colorscale::String = "Jet",
+		xlabel::String = "",
+		ylabel::String = "",
+		zlabel::String = "",
+		aspectmode::String = "auto",
+		title::String = "",
+		perspective::Bool = true,
+		grid::Bool = true,
+		showaxis::Bool = true,
+	)
 
 Generates a 3D vector field (quiver plot) using cones via `PlotlyJS`.
 
@@ -1511,7 +1520,7 @@ end
 #endregion
 
 """
-set_template!(fig, template = "plotly_white")
+	set_template!(fig, template = "plotly_white")
 
 Applies a visual template to a PlotlyJS figure.
 
