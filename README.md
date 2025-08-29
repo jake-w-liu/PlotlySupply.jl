@@ -45,7 +45,7 @@
 
 ## Examples
 
-Please refer the [API documentation](./docs/MANUAL.md) for full functionality.
+Please refer the [API documentation]([./docs/MANUAL.md](https://jake-w-liu.github.io/PlotlySupply.jl/dev/)) for full functionality.
 
 ### 2D Line Plot
 
