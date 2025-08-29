@@ -625,8 +625,8 @@ function plot_scatterpolar(
 				)
 			end
 		else
-			for n in scatterpolar(r)
-				trace[n] = scatter(
+			for n in eachindex(r)
+				trace[n] = scatterpolar(
 					r = r[n],
 					theta = theta,
 					mode = modeV[n],

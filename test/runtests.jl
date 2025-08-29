@@ -11,7 +11,7 @@ using PlotlySupply
         @test fig isa PlotlyJS.SyncPlot
 
         y2 = [rand(10), rand(10)]
-        fig2 = plot_scatter(x, y2)
+        fig2 = plot_scatter(x, y2, legend=["trace1", "trace2"], mode=["markers", "lines+markers"], color=["red", "blue"])
         @test fig2 isa PlotlyJS.SyncPlot
     end
 
@@ -22,7 +22,7 @@ using PlotlySupply
         @test fig isa PlotlyJS.SyncPlot
 
         y2 = [rand(10), rand(10)]
-        fig2 = plot_stem(x, y2)
+        fig2 = plot_stem(x, y2, legend=["trace1", "trace2"], color=["red", "blue"])
         @test fig2 isa PlotlyJS.SyncPlot
     end
 
@@ -33,8 +33,7 @@ using PlotlySupply
         @test fig isa PlotlyJS.SyncPlot
 
         r2 = [sin.(theta), cos.(theta)]
-        traces = [scatterpolar(theta=theta, r=r_i) for r_i in r2]
-        fig2 = plot(traces)
+        fig2 = plot_scatterpolar(theta, r2, legend=["trace1", "trace2"], color=["red", "blue"])
         @test fig2 isa PlotlyJS.SyncPlot
     end
 
@@ -81,7 +80,7 @@ using PlotlySupply
         z2 = [rand(10), rand(10)]
         x2 = [1:10, 1:10]
         y2 = [1:10, 1:10]
-        fig2 = plot_scatter3d(x2, y2, z2)
+        fig2 = plot_scatter3d(x2, y2, z2, color=["red", "blue"], legend=["trace1", "trace2"], mode=["markers", "lines+markers"])
         @test fig2 isa PlotlyJS.SyncPlot
     end
 
