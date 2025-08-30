@@ -153,8 +153,8 @@ plot_scatterpolar(theta, r; kwargs...)
 
 ```julia
 # Polar rose pattern
-theta = 0:0.1:4π
-r = sin.(4 * theta)
+theta = 0:1:360
+r = 3 .* sind.(4 * theta)
 fig = plot_scatterpolar(theta, r, title="Rose Pattern")
 ```
 

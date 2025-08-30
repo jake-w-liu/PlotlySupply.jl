@@ -8,7 +8,6 @@ x = 1:10
 y = x.^2
 fig = plot_scatter(x, y, xlabel="X", ylabel="Y²", title="Quadratic Function")
 
-<iframe src="figs/fig_scatter.html" width="700" height="500"></iframe>
 
 # Multiple lines with different styles
 y1 = sin.(x)
@@ -20,6 +19,9 @@ fig = plot_scatter(x, [y1, y2],
                    legend=["sin(x)", "cos(x)"])
 ```
 
+<iframe src="figs/fig_scatter.html" width="700" height="500"></iframe>
+<iframe src="figs/fig_scatter2.html" width="700" height="500"></iframe>
+
 ## `plot_stem`
 
 ```julia
@@ -29,14 +31,18 @@ signal = [1, 0, -1, 0, 1, 0, -1, 0, 1, 0, -1]
 fig = plot_stem(n, signal, xlabel="Sample", ylabel="Amplitude")
 ```
 
+<iframe src="figs/fig_stem.html" width="700" height="500"></iframe>
+
 ## `plot_scatterpolar`
 
 ```julia
 # Polar rose pattern
-theta = 0:0.1:4π
-r = sin.(4 * theta)
+theta = 0:1:360
+r = 3 .* sind.(4 * theta)
 fig = plot_scatterpolar(theta, r, title="Rose Pattern")
 ```
+
+<iframe src="figs/fig_scatterpolar.html" width="700" height="500"></iframe>
 
 ## `plot_heatmap`
 
@@ -48,6 +54,9 @@ Y, X = meshgrid(y, x)  # uses Meshgrid.jl
 Z = exp.(-(X.^2 + Y.^2))
 fig = plot_heatmap(x, y, Z, title="2D Gaussian", colorscale="Viridis", equalar=true)
 ```
+
+<iframe src="figs/fig_heatmap.html" width="700" height="500"></iframe>
+
 
 ## `plot_quiver`
 
@@ -61,6 +70,9 @@ V = X[:]
 fig = plot_quiver(X[:], Y[:], U, V, sizeref = 0.5, title="Circulation Field")
 ```
 
+<iframe src="figs/fig_quiver.html" width="700" height="500"></iframe>
+
+
 ## `plot_surface`
 
 ```julia
@@ -72,6 +84,9 @@ Z = 3 * (1 .- X).^2 .* exp.(-(X.^2) - (Y .+ 1).^2)
 fig = plot_surface(X, Y, Z, title="3D Surface", colorscale="Plasma")
 ```
 
+<iframe src="figs/fig_surface.html" width="700" height="500"></iframe>
+
+
 ## `plot_scatter3d`
 
 ```julia
@@ -82,6 +97,9 @@ y = sin.(t)
 z = t
 fig = plot_scatter3d(x, y, z, mode="lines", title="3D Helix")
 ```
+
+<iframe src="figs/fig_surface.html" width="700" height="500"></iframe>
+
 
 ## `plot_quiver3d`
 
@@ -96,6 +114,9 @@ w = [0, 0, 1]
 fig = plot_quiver3d(x, y, z, u, v, w, sizeref=0.5, title="3D Vector Field")
 ```
 
+<iframe src="figs/fig_quiver3d.html" width="700" height="500"></iframe>
+
+
 ## `set_template!`
 
 ```julia
@@ -103,39 +124,5 @@ fig = plot_scatter(1:10, (1:10).^2)
 set_template!(fig, :plotly_dark)
 ```
 
-## Common Patterns and Tips
+<iframe src="figs/fig_template.html" width="700" height="500"></iframe>
 
-### Multiple Data Series
-
-```julia
-# Multiple y-series with shared x
-x = 1:10
-y1 = sin.(x)
-y2 = cos.(x)
-y3 = tan.(x/10)
-fig = plot_scatter(x, [y1, y2, y3], 
-                   legend=["sin", "cos", "tan"],
-                   color=["red", "blue", "green"])
-```
-
-### Customizing Appearance
-
-```julia
-x = 1:10
-y = sin.(x)
-fig = plot_scatter(x, y, 
-                   xlabel="Time (s)", 
-                   ylabel="Amplitude", 
-                   title="Signal Analysis",
-                   width=800, 
-                   height=600,
-                   grid=false)
-set_template!(fig, "plotly_dark")
-display(fig)
-```
-
-### Axis Ranges
-
-```julia
-fig = plot_scatter(x, y, xrange=[0, 10], yrange=[-2, 2])
-```

@@ -1,5 +1,7 @@
 
 using Documenter
+# using Pkg
+# Pkg.activate("..")
 using PlotlySupply
 
 makedocs(
