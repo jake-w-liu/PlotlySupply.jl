@@ -19,8 +19,8 @@ fig = plot_scatter(x, [y1, y2],
                    legend=["sin(x)", "cos(x)"])
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html" width="700" height="500"></iframe>
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.html" width="700" height="500"></iframe>
 
 ## `plot_stem`
 
@@ -31,7 +31,7 @@ signal = [1, 0, -1, 0, 1, 0, -1, 0, 1, 0, -1]
 fig = plot_stem(n, signal, xlabel="Sample", ylabel="Amplitude")
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.html" width="700" height="500"></iframe>
 
 ## `plot_scatterpolar`
 
@@ -42,7 +42,7 @@ r = 3 .* sind.(4 * theta)
 fig = plot_scatterpolar(theta, r, title="Rose Pattern")
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.html" width="700" height="500"></iframe>
 
 ## `plot_heatmap`
 
@@ -55,7 +55,7 @@ Z = exp.(-(X.^2 + Y.^2))
 fig = plot_heatmap(x, y, Z, title="2D Gaussian", colorscale="Viridis", equalar=true)
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.html" width="700" height="500"></iframe>
 
 
 ## `plot_quiver`
@@ -70,7 +70,7 @@ V = X[:]
 fig = plot_quiver(X[:], Y[:], U, V, sizeref = 0.5, title="Circulation Field")
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.html" width="700" height="500"></iframe>
 
 
 ## `plot_surface`
@@ -84,7 +84,7 @@ Z = 3 * (1 .- X).^2 .* exp.(-(X.^2) - (Y .+ 1).^2)
 fig = plot_surface(X, Y, Z, title="3D Surface", colorscale="Plasma")
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html" width="700" height="500"></iframe>
 
 
 ## `plot_scatter3d`
@@ -98,7 +98,7 @@ z = t
 fig = plot_scatter3d(x, y, z, mode="lines", title="3D Helix")
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html" width="700" height="500"></iframe>
 
 
 ## `plot_quiver3d`
@@ -114,7 +114,7 @@ w = [0, 0, 1]
 fig = plot_quiver3d(x, y, z, u, v, w, sizeref=0.5, title="3D Vector Field")
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.html" width="700" height="500"></iframe>
 
 
 ## `set_template!`
@@ -124,5 +124,5 @@ fig = plot_scatter(1:10, (1:10).^2)
 set_template!(fig, :plotly_dark)
 ```
 
-<iframe src="http://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.html" width="700" height="500"></iframe>
 
