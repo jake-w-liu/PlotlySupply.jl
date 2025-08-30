@@ -8,6 +8,8 @@ x = 1:10
 y = x.^2
 fig = plot_scatter(x, y, xlabel="X", ylabel="Y²", title="Quadratic Function")
 
+<iframe src="figs/fig_scatter.html" width="700" height="500"></iframe>
+
 # Multiple lines with different styles
 y1 = sin.(x)
 y2 = cos.(x)
