@@ -1,4 +1,4 @@
-# PlotlySupply Documentation
+# API Documentation
 
 ```@autodocs
 Modules = [PlotlySupply]
