@@ -19,7 +19,9 @@ fig = plot_scatter(x, [y1, y2],
                    legend=["sin(x)", "cos(x)"])
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html" width="700" height="500"></iframe>
+<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html"></iframe>
+
+
 <iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.html" width="700" height="500"></iframe>
 
 ## `plot_stem`
