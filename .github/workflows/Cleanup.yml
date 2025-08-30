@@ -1,6 +1,7 @@
 name: Doc Preview Cleanup
 
 on:
+  workflow_dispatch:
   pull_request:
     types: [closed]
 
