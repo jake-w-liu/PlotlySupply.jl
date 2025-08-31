@@ -1,4 +1,4 @@
-# Plotting Examples with PlotlySupply.jl
+# Examples 
 
 This page provides a gallery of examples to showcase the plotting capabilities of `PlotlySupply.jl`. Each example includes the Julia code used to generate the plot and the resulting figure. These examples are designed to help you get started with the package and demonstrate how to create a variety of common plot types.
 
@@ -17,7 +17,7 @@ y = x.^2
 fig = plot_scatter(x, y, xlabel="X", ylabel="Y²", title="Quadratic Function")
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.png" alt="ScatterPlot" style="width:60%; display: block; margin: auto;"></a>
+[![ScatterPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html)
 
 ### Multiple Lines with Different Styles
 
@@ -35,7 +35,7 @@ fig = plot_scatter(x, [y1, y2],
                    legend=["sin(x)", "cos(x)"])
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.png" alt="ScatterPlot2" style="width:60%; display: block; margin: auto;"></a>
+[![ScatterPlot2](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.html)
 
 ## `plot_stem`
 
@@ -52,7 +52,7 @@ signal = [1, 0, -1, 0, 1, 0, -1, 0, 1, 0, -1]
 fig = plot_stem(n, signal, xlabel="Sample", ylabel="Amplitude")
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.png" alt="StemPlot" style="width:60%; display: block; margin: auto;"></a>
+[![StemPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.html)
 
 ## `plot_scatterpolar`
 
@@ -69,7 +69,7 @@ r = 3 .* sind.(4 * theta)
 fig = plot_scatterpolar(theta, r, title="Rose Pattern")
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.png" alt="ScatterpolarPlot" style="width:60%; display: block; margin: auto;"></a>
+[![ScatterpolarPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.html)
 
 ## `plot_heatmap`
 
@@ -88,7 +88,7 @@ Z = exp.(-(X.^2 + Y.^2))
 fig = plot_heatmap(x, y, Z, title="2D Gaussian", colorscale="Viridis", equalar=true)
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.png" alt="HeatmapPlot" style="width:60%; display: block; margin: auto;"></a>
+[![HeatmapPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.html)
 
 ## `plot_quiver`
 
@@ -108,7 +108,7 @@ V = X[:]
 fig = plot_quiver(X[:], Y[:], U, V, sizeref = 0.5, title="Circulation Field")
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.png" alt="QuiverPlot" style="width:60%; display: block; margin: auto;"></a>
+[![QuiverPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.html)
 
 
 ## `plot_surface`
@@ -128,7 +128,7 @@ Z = 3 * (1 .- X).^2 .* exp.(-(X.^2) - (Y .+ 1).^2)
 fig = plot_surface(X, Y, Z, title="3D Surface", colorscale="Plasma")
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.png" alt="SurfacePlot" style="width:60%; display: block; margin: auto;"></a>
+[![SurfacePlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html)
 
 
 ## `plot_scatter3d`
@@ -148,7 +148,7 @@ z = t
 fig = plot_scatter3d(x, y, z, mode="lines", title="3D Helix")
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter3d.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter3d.png" alt="Scatter3dPlot" style="width:60%; display: block; margin: auto;"></a>
+[![Scatter3dPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter3d.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter3d.html)
 
 
 ## `plot_quiver3d`
@@ -170,7 +170,7 @@ w = [0, 0, 1]
 fig = plot_quiver3d(x, y, z, u, v, w, sizeref=0.5, title="3D Vector Field")
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.png" alt="Quiver3dPlot" style="width:60%; display: block; margin: auto;"></a>
+[![Quiver3dPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.html)
 
 ## `set_template!`
 
@@ -185,4 +185,4 @@ fig = plot_scatter(1:10, (1:10).^2)
 set_template!(fig, "plotly_dark")
 ```
 
-<a href="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.html" target="_blank"><img src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.png" alt="TemplatePlot" style="width:60%; display: block; margin: auto;"></a>
+[![TemplatePlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.html)
