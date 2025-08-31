@@ -7,8 +7,11 @@
 x = 1:10
 y = x.^2
 fig = plot_scatter(x, y, xlabel="X", ylabel="Y²", title="Quadratic Function")
+```
 
+[![ScatterPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html)
 
+```julia
 # Multiple lines with different styles
 y1 = sin.(x)
 y2 = cos.(x)
@@ -19,11 +22,7 @@ fig = plot_scatter(x, [y1, y2],
                    legend=["sin(x)", "cos(x)"])
 ```
 
-[![ScatterPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html)
-<!-- <iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter.html"></iframe> -->
-
-
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.html" width="700" height="500"></iframe>
+[![ScatterPlot2](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter2.html)
 
 ## `plot_stem`
 
@@ -34,7 +33,7 @@ signal = [1, 0, -1, 0, 1, 0, -1, 0, 1, 0, -1]
 fig = plot_stem(n, signal, xlabel="Sample", ylabel="Amplitude")
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.html" width="700" height="500"></iframe>
+[![StemPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_stem.html)
 
 ## `plot_scatterpolar`
 
@@ -45,7 +44,7 @@ r = 3 .* sind.(4 * theta)
 fig = plot_scatterpolar(theta, r, title="Rose Pattern")
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.html" width="700" height="500"></iframe>
+[![ScatterpolarPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatterpolar.html)
 
 ## `plot_heatmap`
 
@@ -58,8 +57,7 @@ Z = exp.(-(X.^2 + Y.^2))
 fig = plot_heatmap(x, y, Z, title="2D Gaussian", colorscale="Viridis", equalar=true)
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.html" width="700" height="500"></iframe>
-
+[![HeatmapPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.html)
 
 ## `plot_quiver`
 
@@ -73,7 +71,7 @@ V = X[:]
 fig = plot_quiver(X[:], Y[:], U, V, sizeref = 0.5, title="Circulation Field")
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.html" width="700" height="500"></iframe>
+[![QuiverPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.html)
 
 
 ## `plot_surface`
@@ -87,7 +85,7 @@ Z = 3 * (1 .- X).^2 .* exp.(-(X.^2) - (Y .+ 1).^2)
 fig = plot_surface(X, Y, Z, title="3D Surface", colorscale="Plasma")
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html" width="700" height="500"></iframe>
+[![SurfacePlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html)
 
 
 ## `plot_scatter3d`
@@ -101,7 +99,7 @@ z = t
 fig = plot_scatter3d(x, y, z, mode="lines", title="3D Helix")
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html" width="700" height="500"></iframe>
+[![Scatter3dPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter3d.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_scatter3d.html)
 
 
 ## `plot_quiver3d`
@@ -117,15 +115,13 @@ w = [0, 0, 1]
 fig = plot_quiver3d(x, y, z, u, v, w, sizeref=0.5, title="3D Vector Field")
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.html" width="700" height="500"></iframe>
-
+[![Quiver3dPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver3d.html)
 
 ## `set_template!`
 
 ```julia
 fig = plot_scatter(1:10, (1:10).^2)
-set_template!(fig, :plotly_dark)
+set_template!(fig, "plotly_dark")
 ```
 
-<iframe src="https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.html" width="700" height="500"></iframe>
-
+[![TemplatePlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_template.html)
