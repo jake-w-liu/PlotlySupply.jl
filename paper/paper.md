@@ -13,7 +13,7 @@ authors:
 affiliations:
   - name: Department of Electronic Engineering, National Taipei University of Technology, Taiwan
     index: 1
-date: 14 June 2025
+date: 2 September 2025
 bibliography: paper.bib
 ---
 
@@ -27,7 +27,56 @@ The Plotly backend has a strong advantage in 3D rendering, and it is widely used
 
 Many research projects involve the frequent creation of diagnostic and publication-quality figures. While `PlotlyJS.jl` is highly customizable, it requires verbose code for routine tasks. One often needs to define the trace and layout separately before generating the plot. `PlotlySupply.jl` addresses this by wrapping low-level PlotlyJS calls with streamlined functions that follow predictable keyword conventions, automated axis labeling, and sensible visual defaults.
 
+The design philosophy of `PlotlySupply.jl` is to provide a user experience similar to MATLAB's plotting functions. In MATLAB, functions like `plot`, `surf`, and `quiver` accept data arrays as primary arguments and use key-value pairs for customization. This procedural approach is often more intuitive for quick data exploration than the object-oriented paradigm of constructing `Trace` and `Layout` objects, which is the standard practice in `PlotlyJS.jl`. `PlotlySupply.jl` adopts this procedural, single-function-call approach for common plot types, which can significantly reduce the cognitive load and lines of code for the user.
+
 Compared to other visualization ecosystems such as `Plots.jl` or `Makie.jl`, `PlotlySupply.jl` focuses specifically on interactive, web-ready figures with a MATLAB-like syntax. It provides convenience without sacrificing flexibility, making it ideal for researchers working in simulation-heavy domains such as physics, signal processing, and applied mathematics.
+
+# Comparison with PlotlyJS.jl
+
+To illustrate the convenience of `PlotlySupply.jl`, consider the task of creating a simple 2D line plot. With `PlotlyJS.jl`, one must define a `trace` for the data and a `layout` for the plot's appearance separately. To meet typical publication requirements for figures, additional effort is often needed to adjust the `Layout`, which can also be very cumbersome:
+
+```julia
+# Using PlotlyJS.jl
+using PlotlyJS
+x_data = 0:0.1:2π
+y_data = sin.(x_data)
+trace = scatter(x=x_data, y=y_data, mode="lines")
+layout = Layout(
+		title = "Sine Wave",
+		yaxis = attr(
+			title_text = "sin(x)",
+			zeroline = false,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
+			tick0 = minimum(y),
+			automargin = true,
+		),
+		xaxis = attr(
+			title_text = "x",
+			zeroline = false,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
+			tick0 = minimum(x),
+			automargin = true,
+		),
+	)
+plot(trace, layout)
+```
+
+`PlotlySupply.jl` simplifies this into a single function call, where layout properties are passed as keyword arguments:
+
+```julia
+# Using PlotlySupply.jl
+using PlotlySupply
+x_data = 0:0.1:2π
+y_data = sin.(x_data)
+plot_scatter(x_data, y_data; 
+  title="Sine Wave", xlabel="x", ylabel="sin(x)")
+```
+
+This abstraction becomes even more valuable for more complex plots, such as a 3D surface. The boilerplate code for setting up the 3D scene, aspect ratio, and color scales is handled automatically.
 
 # Example usage
 
@@ -58,7 +107,12 @@ plot_surface(X, Y, Z; title="3D Surface", colorscale="Viridis")
 
 # Research applications
 
-The package has been employed in visualization tasks for optical field simulations [@liu2024near] and electromagnetic scattering problems [@liu2024circularly]. It provides an efficient plotting interface for projects requiring dynamic inspection of scalar or vector fields over time and space.
+The package has been employed in visualization tasks for optical field simulations [@liu2024near] and electromagnetic scattering problems [@liu2024circularly]. Beyond these specific examples, `PlotlySupply.jl` is well-suited for a wide range of research domains:
+
+*   **Physics and Engineering:** Visualizing vector fields (e.g., electric or fluid flow fields with `plot_quiver` and `plot_quiver3d`), wave propagation, and visualizing 3D structures or topographies with `plot_surface`.
+*   **Signal Processing:** Plotting time-series data with `plot_scatter` and `plot_stem`, or visualizing 2D data like spectrograms or field distributions with `plot_heatmap`.
+
+The simplified API allows researchers to quickly generate these visualizations with minimal code, enabling them to focus on the interpretation of their data.
 
 # Acknowledgements
 
