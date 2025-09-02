@@ -1,7 +1,7 @@
 # PlotlySupply
 
 [![Build Status](https://github.com/jake-w-liu/PlotlySupply.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/jake-w-liu/PlotlySupply.jl/actions/workflows/CI.yml?query=branch%3Amain)
-<!-- [![Coverage](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl) -->
+[![Coverage](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl) 
 
 
 # PlotlySupply.jl
