@@ -2,3 +2,5 @@
 
 test.jl
 docs/build
+
+.DS_Store
