@@ -19,7 +19,7 @@ bibliography: paper.bib
 
 # Summary
 
-`PlotlySupply.jl` is a high-level visualization toolkit for the Julia programming language, offering concise and consistent APIs for 2D, and 3D plotting [@sievert2021package]. Built on top of `PlotlyJS.jl`, it is designed to streamline the generation of scientific figures while maintaining full access to Plotly’s interactivity and styling options.
+`PlotlySupply.jl` is a high-level visualization toolkit for the Julia programming language, offering concise and consistent APIs for 2D, and 3D plotting [@plotly]. Built on top of `PlotlyJS.jl`, it is designed to streamline the generation of scientific figures while maintaining full access to Plotly’s interactivity and styling options.
 
 The Plotly backend has a strong advantage in 3D rendering, and it is widely used among front-end engineers. However, its API is not so user-friendly for researchers. The API design of `PlotlySupply.jl` is intentionally similar to MATLAB-style plotting, making it intuitive for researchers transitioning to Julia or working in multi-language environments. It supports line plots, surface plots, vector field visualizations (quiver plots), heatmaps, and 3D scatter plots with minimal setup and boilerplate code. This makes it especially suitable for rapid prototyping, numerical simulations, and exploratory data visualization in scientific computing.
 
@@ -34,7 +34,8 @@ Compared to other visualization ecosystems such as `Plots.jl` or `Makie.jl`, `Pl
 ### 1D Line Plot
 
 ```julia
-plot_scatter(0:0.1:2π, sin.(0:0.1:2π); xlabel="x", ylabel="sin(x)", title="Sine Wave")
+plot_scatter(0:0.1:2π, sin.(0:0.1:2π);
+    xlabel="x", ylabel="sin(x)", title="Sine Wave")
 ```
 
 ### 2D Heatmap
