@@ -2,6 +2,7 @@
 
 [![Build Status](https://github.com/jake-w-liu/PlotlySupply.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/jake-w-liu/PlotlySupply.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
+[![Coverage](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl) 
 
 **PlotlySupply.jl** is a lightweight Julia module that wraps PlotlyJS to supply a set of high-level abstractions for 2D and 3D plot visualizations. It simplifies the creation of line plots, heatmaps, quiver plots, polar plots, and surface plots, with consistent options for customization and layout control. Notice that this module re-exprots [`PlotlyJS.jl`](https://github.com/JuliaPlots/PlotlyJS.jl).
 
