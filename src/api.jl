@@ -678,7 +678,7 @@ end
 	function plot_heatmap(
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray},
-		U::Union{Array, SubArray},
+		U::Union{Array, SubArray};
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -716,7 +716,7 @@ Plots heatmap (holographic) data.
 function plot_heatmap(
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray},
-	U::Union{Array, SubArray},
+	U::Union{Array, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -799,7 +799,7 @@ end
 
 """
 	function plot_heatmap(
-		U::Union{Array, SubArray},
+		U::Union{Array, SubArray};
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -833,7 +833,7 @@ Plots heatmap (holographic) data (axes not specified).
 
 """
 function plot_heatmap(
-	U::Union{Array, SubArray},
+	U::Union{Array, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
