@@ -678,7 +678,7 @@ end
 	function plot_heatmap(
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray},
-		U::Array; 
+		U::Union{Array, SubArray},
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -703,15 +703,20 @@ Plots heatmap (holographic) data.
 
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
+- `xrange`: Range for the x-axis (default: `[0, 0]`)
+- `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
 - `title`: Title of thje figure (default: `""`)
+- `width`: Width of the plot (default: `0`)
+- `height`: Height of the plot (default: `0`)
+- 'equalar': Whether to set equal aspect ratio (default: false)
 
 """
 function plot_heatmap(
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray},
-	U::Array;
+	U::Union{Array, SubArray},
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -794,7 +799,7 @@ end
 
 """
 	function plot_heatmap(
-		U::Array; 
+		U::Union{Array, SubArray},
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -817,13 +822,18 @@ Plots heatmap (holographic) data (axes not specified).
 
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
+- `xrange`: Range for the x-axis (default: `[0, 0]`)
+- `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
 - `colorscale`: Color scale for the heatmap (default: `"Jet"`)
 - `title`: Title of thje figure (default: `""`)
+- `width`: Width of the plot (default: `0`)
+- `height`: Height of the plot (default: `0`)
+- 'equalar': Whether to set equal aspect ratio (default: false)
 
 """
 function plot_heatmap(
-	U::Array;
+	U::Union{Array, SubArray},
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
