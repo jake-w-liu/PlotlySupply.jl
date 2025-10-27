@@ -2,8 +2,8 @@
 
 """
 	function plot_scatter(
-		x::Union{AbstractRange, Vector},
-		y::Union{AbstractRange, Vector};
+		x::Union{AbstractRange, Vector, SubArray},
+		y::Union{AbstractRange, Vector, SubArray};
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -42,8 +42,8 @@ Plots a rectangular (Cartesian) plot.
 
 """
 function plot_scatter(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector};
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -161,7 +161,7 @@ end
 
 """
 	function plot_scatter(
-		y::Union{AbstractRange, Vector}; 
+		y::Union{AbstractRange, Vector, SubArray}; 
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -199,7 +199,7 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 
 """
 function plot_scatter(
-	y::Union{AbstractRange, Vector};
+	y::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -242,8 +242,8 @@ end
 
 """
 	function plot_stem(
-		x::Union{AbstractRange, Vector},
-		y::Union{AbstractRange, Vector};
+		x::Union{AbstractRange, Vector, SubArray},
+		y::Union{AbstractRange, Vector, SubArray};
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -279,8 +279,8 @@ Plots a rectangular stem plot.
 
 """
 function plot_stem(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector};
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -457,7 +457,7 @@ end
 
 """
 	function plot_stem(
-		y::Union{AbstractRange, Vector};
+		y::Union{AbstractRange, Vector, SubArray};
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -492,7 +492,7 @@ Plots a rectangular stem plot (x-axis not specified).
 
 """
 function plot_stem(
-	y::Union{AbstractRange, Vector};
+	y::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -531,8 +531,8 @@ end
 
 """
 	function plot_scatterpolar(
-		theta::Union{AbstractRange, Vector},
-		r::Union{AbstractRange, Vector};
+		theta::Union{AbstractRange, Vector, SubArray},
+		r::Union{AbstractRange, Vector, SubArray};
 		trange::Vector = [0, 0],
 		rrange::Vector = [0, 0],
 		width::Int = 0,
@@ -565,8 +565,8 @@ Plots a polar plot.
 
 """
 function plot_scatterpolar(
-	theta::Union{AbstractRange, Vector},
-	r::Union{AbstractRange, Vector};
+	theta::Union{AbstractRange, Vector, SubArray},
+	r::Union{AbstractRange, Vector, SubArray};
 	trange::Vector = [0, 0],
 	rrange::Vector = [0, 0],
 	width::Int = 0,
@@ -676,8 +676,8 @@ end
 
 """
 	function plot_heatmap(
-		x::Union{AbstractRange, Vector},
-		y::Union{AbstractRange, Vector},
+		x::Union{AbstractRange, Vector, SubArray},
+		y::Union{AbstractRange, Vector, SubArray},
 		U::Array; 
 		xlabel::String = "",
 		ylabel::String = "",
@@ -709,8 +709,8 @@ Plots heatmap (holographic) data.
 
 """
 function plot_heatmap(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector},
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray},
 	U::Array;
 	xlabel::String = "",
 	ylabel::String = "",
@@ -854,10 +854,10 @@ end
 
 """
 	function plot_quiver(
-		x::Union{AbstractRange, Vector},
-		y::Union{AbstractRange, Vector},
-		u::Union{AbstractRange, Vector},
-		v::Union{AbstractRange, Vector};
+		x::Union{AbstractRange, Vector, SubArray},
+		y::Union{AbstractRange, Vector, SubArray},
+		u::Union{AbstractRange, Vector, SubArray},
+		v::Union{AbstractRange, Vector, SubArray};
 		color::String = "RoyalBlue",
 		sizeref::Real = 1,
 		xlabel::String = "",
@@ -893,10 +893,10 @@ Plots a 2D quiver (vector field) diagram using arrow segments.
 - `grid`: Whether to show the grid or not (default: `true`)
 """
 function plot_quiver(
-    x::Union{AbstractRange, Vector},
-    y::Union{AbstractRange, Vector},
-    u::Union{AbstractRange, Vector},
-    v::Union{AbstractRange, Vector};
+    x::Union{AbstractRange, Vector, SubArray},
+    y::Union{AbstractRange, Vector, SubArray},
+    u::Union{AbstractRange, Vector, SubArray},
+    v::Union{AbstractRange, Vector, SubArray};
     color::String = "RoyalBlue",
     sizeref::Real = 1,
     xlabel::String = "",
@@ -1206,9 +1206,9 @@ end
 
 """
 	plot_scatter3d(
-		x::Union{AbstractRange, Vector},
-		y::Union{AbstractRange, Vector},
-		z::Union{AbstractRange, Vector};
+		x::Union{AbstractRange, Vector, SubArray},
+		y::Union{AbstractRange, Vector, SubArray},
+		z::Union{AbstractRange, Vector, SubArray};
 		xrange::Vector = [0, 0],
 		yrange::Vector = [0, 0],
 		zrange::Vector = [0, 0],
@@ -1252,9 +1252,9 @@ Plots a 3D scatter or line plot using `PlotlyJS`, with options for customizing a
 - This function supports plotting multiple lines by passing `Vector{Vector}` types to `x`, `y`, and `z`. In this case, corresponding vectors of `mode`, `color`, and `legend` will be used.
 """
 function plot_scatter3d(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector},
-	z::Union{AbstractRange, Vector}; 
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray},
+	z::Union{AbstractRange, Vector, SubArray}; 
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -1371,12 +1371,12 @@ end
 
 """
 	plot_quiver3d(
-		x::Union{AbstractRange, Vector},
-		y::Union{AbstractRange, Vector},
-		z::Union{AbstractRange, Vector},
-		u::Union{AbstractRange, Vector},
-		v::Union{AbstractRange, Vector},
-		w::Union{AbstractRange, Vector};
+		x::Union{AbstractRange, Vector, SubArray},
+		y::Union{AbstractRange, Vector, SubArray},
+		z::Union{AbstractRange, Vector, SubArray},
+		u::Union{AbstractRange, Vector, SubArray},
+		v::Union{AbstractRange, Vector, SubArray},
+		w::Union{AbstractRange, Vector, SubArray};
 		sizeref::Real = 1,
 		xrange::Vector = [0, 0],
 		yrange::Vector = [0, 0],
@@ -1422,12 +1422,12 @@ Generates a 3D vector field (quiver plot) using cones via `PlotlyJS`.
 - If `color` is specified, all cones are displayed in a uniform color without a color bar.
 """
 function plot_quiver3d(
-	x::Union{AbstractRange, Vector},
-	y::Union{AbstractRange, Vector},
-	z::Union{AbstractRange, Vector},
-	u::Union{AbstractRange, Vector},
-	v::Union{AbstractRange, Vector},
-	w::Union{AbstractRange, Vector}; 
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray},
+	z::Union{AbstractRange, Vector, SubArray},
+	u::Union{AbstractRange, Vector, SubArray},
+	v::Union{AbstractRange, Vector, SubArray},
+	w::Union{AbstractRange, Vector, SubArray}; 
 	sizeref::Real = 1,
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
