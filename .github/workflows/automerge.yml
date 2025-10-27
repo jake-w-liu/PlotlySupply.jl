@@ -1,0 +1,35 @@
+name: Automerge
+on:
+  issue_comment:
+    types:
+      - created
+  workflow_dispatch:
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.10'
+          - '1.6'
+          - 'pre'
+        os:
+          - ubuntu-latest
+        arch:
+          - x64
+    steps:
+      - name: Fix registry dirty state
+        run: |
+          julia --project=@. -e '
+            using Pkg
+            try
+              Pkg.Registry.rm("General")
+            catch
+            end
+            Pkg.Registry.add("General")'
