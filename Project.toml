@@ -12,7 +12,7 @@ Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
 
 [compat]
 BatchAssign = "1.0.0"
-Infiltrator = "1.9.1"
+Infiltrator = "1.9.3"
 MeshGrid = "1.0.3"
 PlotlyJS = "0.18.17"
 Reexport = "1.2.2"
