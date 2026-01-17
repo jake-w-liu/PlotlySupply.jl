@@ -900,6 +900,204 @@ end
 
 
 """
+	function plot_contour(
+		x::Union{AbstractRange, Vector, SubArray},
+		y::Union{AbstractRange, Vector, SubArray},
+		U::Union{Array, SubArray};
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		zrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		colorscale::String = "Jet",
+		title::String = "",
+		fontsize::Int = 0,
+		equalar::Bool = false,
+	)
+
+Plots contour data.
+
+#### Arguments
+
+- 'x::AbstractRange': x-axis range
+- 'y::AbstractRange': x-axis range
+- `U`: 2D data for contours
+
+#### Keywords
+
+- `xlabel`: Label for the x-axis (default: `""`)
+- `ylabel`: Label for the y-axis (default: `""`)
+- `xrange`: Range for the x-axis (default: `[0, 0]`)
+- `yrange`: Range for the y-axis (default: `[0, 0]`)
+- `zrange`: Range for the z-axis (default: `[0, 0]`)
+- `colorscale`: Color scale for the contour plot (default: `"Jet"`)
+- `title`: Title of thje figure (default: `""`)
+- `width`: Width of the plot (default: `0`)
+- `height`: Height of the plot (default: `0`)
+- 'equalar': Whether to set equal aspect ratio (default: false)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+
+"""
+function plot_contour(
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray},
+	U::Union{Array, SubArray};
+	xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	colorscale::String = "Jet",
+	title::String = "",
+	fontsize::Int = 0,
+	equalar::Bool = false,
+)
+	FV = @view U[:, :]
+	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
+	trace = contour(x = x, y = y, z = FV, colorscale = colorscale)
+	if !all(zrange .== [0, 0])
+		trace.zmin = zrange[1]
+		trace.zmax = zrange[2]
+	end
+	if length(x) > 1
+		dx = x[2] - x[1]
+	else
+		dx = 0
+	end
+	if length(y) > 1
+		dy = y[2] - y[1]
+	else
+		dy = 0
+	end
+	if dx == 0 && dy != 0
+		dx = dy
+	elseif dy == 0 && dx != 0
+		dy = dx
+	end
+	layout = Layout(
+		title = title,
+		scene = attr(aspectmode = "data"),
+		xaxis = attr(
+			title = xlabel,
+			constrain = "domain",
+			automargin = true,
+			zeroline = false,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
+		),
+		yaxis = attr(
+			title = ylabel,
+			constrain = "domain",
+			zeroline = false,
+			automargin = true,
+			showline = true,
+			mirror = true,
+			ticks = "outside",
+		),
+		# margin = attr(r = 0, b = 0, t = 0, l = 0),
+	)
+	fig = plot(trace, layout)
+	if !all(xrange .== [0, 0])
+		update_xaxes!(fig, range = xrange)
+	end
+	if !all(yrange .== [0, 0])
+		update_yaxes!(fig, range = yrange)
+	end
+	if equalar
+		update_xaxes!(fig,
+		scaleanchor = "y",
+		scaleratio = 1,
+	)
+	end
+	if width > 0
+		relayout!(fig, width = width)
+	end
+	if height > 0
+		relayout!(fig, height = height)
+	end
+	
+	relayout!(fig, template = :plotly_white)
+	if fontsize > 0
+		relayout!(fig, font = attr(size = fontsize))
+	end
+	return fig
+end
+
+"""
+	function plot_contour(
+		U::Union{Array, SubArray};
+		xlabel::String = "",
+		ylabel::String = "",
+		xrange::Vector = [0, 0],
+		yrange::Vector = [0, 0],
+		zrange::Vector = [0, 0],
+		width::Int = 0,
+		height::Int = 0,
+		colorscale::String = "Jet",
+		title::String = "",
+		fontsize::Int = 0,
+		equalar::Bool = false,
+	)
+
+Plots contour data (axes not specified).
+
+#### Arguments
+
+- `U`: 2D data for contours
+
+#### Keywords
+
+- `xlabel`: Label for the x-axis (default: `""`)
+- `ylabel`: Label for the y-axis (default: `""`)
+- `xrange`: Range for the x-axis (default: `[0, 0]`)
+- `yrange`: Range for the y-axis (default: `[0, 0]`)
+- `zrange`: Range for the z-axis (default: `[0, 0]`)
+- `colorscale`: Color scale for the contour plot (default: `"Jet"`)
+- `title`: Title of thje figure (default: `""`)
+- `width`: Width of the plot (default: `0`)
+- `height`: Height of the plot (default: `0`)
+- 'equalar': Whether to set equal aspect ratio (default: false)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+
+"""
+function plot_contour(
+	U::Union{Array, SubArray};
+	xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	zrange::Vector = [0, 0],
+	width::Int = 0,
+	height::Int = 0,
+	colorscale::String = "Jet",
+	title::String = "",
+	fontsize::Int = 0,
+	equalar::Bool = false,
+)
+	x = collect(0:1:size(U, 1)-1)
+	y = collect(0:1:size(U, 2)-1)
+	return plot_contour(x, y, U;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		zrange = zrange,
+		colorscale = colorscale,
+		title = title,
+		fontsize = fontsize,
+		width = width,
+		height = height,
+		equalar = equalar,
+	)
+end
+
+
+"""
 	function plot_quiver(
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray},
