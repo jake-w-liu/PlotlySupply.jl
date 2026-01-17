@@ -26,6 +26,8 @@
 
 - `plot_heatmap(x, y, U; ...)`: Heatmap of matrix `U` over grid `x`, `y`.
 - `plot_heatmap(U; ...)`: Uses default x/y indices.
+- `plot_contour(x, y, U; ...)`: Contour plot of matrix `U` over grid `x`, `y`.
+- `plot_contour(U; ...)`: Uses default x/y indices.
 - `plot_quiver(x, y, u, v; ...)`: 2D quiver plot with arrows from vectors `(u,v)` at locations `(x,y)`.
 
 ### 3D Plots
@@ -60,6 +62,15 @@ U = [sin(sqrt(xi^2 + yj^2)) for yj in y, xi in x]
 plot_heatmap(x, y, U; xlabel="x", ylabel="y", title="Radial Sine")
 ```
 
+### 2D Contour
+
+```julia
+x = -5:0.1:5
+y = -5:0.1:5
+U = [sin(sqrt(xi^2 + yj^2)) for yj in y, xi in x]
+plot_contour(x, y, U; xlabel="x", ylabel="y", title="Radial Sine Contour")
+```
+
 ### 3D Surface
 
 ```julia
@@ -82,6 +93,7 @@ Most functions accept the following options:
 | `width`, `height` | Plot size in pixels                     | `0` (auto)       |
 | `color`, `colorscale` | Line or surface color settings    | `""` or `"Jet"`  |
 | `title`         | Plot title                                | `""`             |
+| `fontsize`      | Global font size                          | `0` (auto)       |
 | `grid`          | Show/hide grid lines                      | `true`           |
 | `showaxis`      | Show/hide axis lines and ticks            | `true`           |
 | `aspectmode`    | `"auto"`, `"cube"`, `"data"`              | `"auto"`         |

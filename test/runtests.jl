@@ -7,7 +7,7 @@ using PlotlySupply
     @testset "plot_scatter" begin
         x = 1:10
         y = rand(10)
-        fig = plot_scatter(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false)
+        fig = plot_scatter(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false, fontsize=12)
         @test fig isa PlotlyJS.SyncPlot
 
         y2 = [rand(10), rand(10)]
@@ -45,6 +45,17 @@ using PlotlySupply
         @test fig isa PlotlyJS.SyncPlot
 
         fig2 = plot_heatmap(U)
+        @test fig2 isa PlotlyJS.SyncPlot
+    end
+
+    @testset "plot_contour" begin
+        x = 1:10
+        y = 1:20
+        U = rand(10, 20)
+        fig = plot_contour(x, y, U, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 20], zrange=[0, 1], width=500, height=500, colorscale="Viridis", equalar=true, fontsize=11)
+        @test fig isa PlotlyJS.SyncPlot
+
+        fig2 = plot_contour(U)
         @test fig2 isa PlotlyJS.SyncPlot
     end
 

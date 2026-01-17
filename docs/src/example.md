@@ -90,6 +90,20 @@ fig = plot_heatmap(x, y, Z, title="2D Gaussian", colorscale="Viridis", equalar=t
 
 [![HeatmapPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_heatmap.html)
 
+## `plot_contour`
+
+Contour plots are useful for visualizing level sets of 2D data.
+
+### 2D Contour of Radial Sine
+
+```julia
+# Radial sine contour
+x = -5:0.1:5
+y = -5:0.1:5
+U = [sin(sqrt(xi^2 + yj^2)) for yj in y, xi in x]
+fig = plot_contour(x, y, U, title="Radial Sine Contour", colorscale="Viridis")
+```
+
 ## `plot_quiver`
 
 Quiver plots are used to visualize vector fields, showing both the direction and magnitude of vectors at different points in space.
