@@ -15,6 +15,7 @@
 		color::Union{String, Vector{String}} = "",
 		legend::Union{String, Vector{String}} = "",
 		title::String = "",
+		fontsize::Int = 0,
 		grid::Bool = true,
 	)
 
@@ -39,6 +40,7 @@ Plots a rectangular (Cartesian) plot.
 - `legend`: Name of the plot lines (default: `""`, can be vector)
 - `title`: Title of thje figure (default: `""`)
 - `grid`: Whether to show the grid or not (default: true)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 
 """
 function plot_scatter(
@@ -55,6 +57,7 @@ function plot_scatter(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+	fontsize::Int = 0,
 	grid::Bool = true,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -156,6 +159,9 @@ function plot_scatter(
 		update_yaxes!(fig, showgrid = false)
 	end
 	relayout!(fig, template = :plotly_white)
+	if fontsize > 0
+		relayout!(fig, font = attr(size = fontsize))
+	end
 	return fig
 end
 
@@ -173,6 +179,7 @@ end
 		color::Union{String, Vector{String}} = "",
 		legend::Union{String, Vector{String}} = "",
 		title::String = "",
+		fontsize::Int = 0,
 		grid::Bool = true,
 	)
 
@@ -196,6 +203,8 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 - `legend`: legend of the plot lines (default: `""`, can be vector)
 - `title`: Title of thje figure (default: `""`)
 - `grid`: Whether to show the grid or not (default: true)
+- `grid`: Whether to show the grid or not (default: true)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 
 """
 function plot_scatter(
@@ -211,6 +220,7 @@ function plot_scatter(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+	fontsize::Int = 0,
 	grid::Bool = true,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -236,6 +246,7 @@ function plot_scatter(
 		color = color,
 		legend = legend,
 		title = title,
+		fontsize = fontsize,
 		grid = grid,
 	)
 end
@@ -253,6 +264,7 @@ end
 		color::Union{String, Vector{String}} = "",
 		legend::Union{String, Vector{String}} = "",
 		title::String = "",
+		fontsize::Int = 0,
 		grid::Bool = true,
 	)
 
@@ -276,6 +288,7 @@ Plots a rectangular stem plot.
 - `legend`: Name of the plot lines (default: `""`, can be vector)
 - `title`: Title of thje figure (default: `""`)
 - `grid`: Whether to show the grid or not (default: true)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 
 """
 function plot_stem(
@@ -290,6 +303,7 @@ function plot_stem(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+	fontsize::Int = 0,
 	grid::Bool = true,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -389,6 +403,9 @@ function plot_stem(
 		update_yaxes!(fig, showgrid = false)
 	end
 	relayout!(fig, template = :plotly_white)
+	if fontsize > 0
+		relayout!(fig, font = attr(size = fontsize))
+	end
 
 	#exp
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -467,6 +484,7 @@ end
 		color::Union{String, Vector{String}} = "",
 		legend::Union{String, Vector{String}} = "",
 		title::String = "",
+		fontsize::Int = 0,
 		grid::Bool = true,
 	)
 
@@ -489,6 +507,7 @@ Plots a rectangular stem plot (x-axis not specified).
 - `legend`: legend of the plot lines (default: `""`, can be vector)
 - `title`: Title of thje figure (default: `""`)
 - `grid`: Whether to show the grid or not (default: true)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 
 """
 function plot_stem(
@@ -502,6 +521,7 @@ function plot_stem(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+	fontsize::Int = 0,
 	grid::Bool = true,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -525,6 +545,7 @@ function plot_stem(
 		color = color,
 		legend = legend,
 		title = title,
+		fontsize = fontsize,
 		grid = grid,
 	)
 end
@@ -541,6 +562,7 @@ end
 		color::Union{String, Vector{String}} = "",
 		legend::Union{String, Vector{String}} = "",
 		title::String = "",
+		fontsize::Int = 0,
 		grid::Bool = true,
 	)
 
@@ -562,6 +584,7 @@ Plots a polar plot.
 - `legend`: legend of the plot lines (default: `""`, can be vector)
 - `title`: Title of thje figure (default: `""`)
 - `grid`: Whether to show the grid or not (default: true)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 
 """
 function plot_scatterpolar(
@@ -576,6 +599,7 @@ function plot_scatterpolar(
 	color::Union{String, Vector{String}} = "",
 	legend::Union{String, Vector{String}} = "",
 	title::String = "",
+	fontsize::Int = 0,
 	grid::Bool = true,
 )
 	if isa(r, Vector) && eltype(r) <: Vector
@@ -667,6 +691,9 @@ function plot_scatterpolar(
 		update_yaxes!(fig, showgrid = false)
 	end
 	relayout!(fig, template = :plotly_white)
+	if fontsize > 0
+		relayout!(fig, font = attr(size = fontsize))
+	end
 	return fig
 end
 
@@ -688,6 +715,7 @@ end
 		height::Int = 0,
 		colorscale::String = "Jet",
 		title::String = "",
+		fontsize::Int = 0,
 		equalar::Bool = false,
 	)
 
@@ -711,6 +739,7 @@ Plots heatmap (holographic) data.
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
 - 'equalar': Whether to set equal aspect ratio (default: false)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 
 """
 function plot_heatmap(
@@ -726,6 +755,7 @@ function plot_heatmap(
 	height::Int = 0,
 	colorscale::String = "Jet",
 	title::String = "",
+	fontsize::Int = 0,
 	equalar::Bool = false,
 )
 	FV = @view U[:, :]
@@ -794,6 +824,9 @@ function plot_heatmap(
 	end
 	
 	relayout!(fig, template = :plotly_white)
+	if fontsize > 0
+		relayout!(fig, font = attr(size = fontsize))
+	end
 	return fig
 end
 
@@ -809,6 +842,7 @@ end
 		height::Int = 0,
 		colorscale::String = "Jet",
 		title::String = "",
+		fontsize::Int = 0,
 		equalar::Bool = false,
 	)
 
@@ -830,6 +864,7 @@ Plots heatmap (holographic) data (axes not specified).
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
 - 'equalar': Whether to set equal aspect ratio (default: false)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 
 """
 function plot_heatmap(
@@ -843,6 +878,7 @@ function plot_heatmap(
 	height::Int = 0,
 	colorscale::String = "Jet",
 	title::String = "",
+	fontsize::Int = 0,
 	equalar::Bool = false,
 )
 	x = collect(0:1:size(U, 1)-1)
@@ -855,6 +891,7 @@ function plot_heatmap(
 		zrange = zrange,
 		colorscale = colorscale,
 		title = title,
+		fontsize = fontsize,
 		width = width,
 		height = height,
 		equalar = equalar,
@@ -877,6 +914,7 @@ end
 		width::Int = 0,
 		height::Int = 0,
 		title::String = "",
+		fontsize::Int = 0,
 		grid::Bool = true,
 	)
 
@@ -901,6 +939,7 @@ Plots a 2D quiver (vector field) diagram using arrow segments.
 - `height`: Height of the figure in pixels (default: `0`)
 - `title`: Title of the figure (default: `""`)
 - `grid`: Whether to show the grid or not (default: `true`)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 """
 function plot_quiver(
     x::Union{AbstractRange, Vector, SubArray},
@@ -916,6 +955,7 @@ function plot_quiver(
     width::Int = 0,
     height::Int = 0,
     title::String = "",
+    fontsize::Int = 0,
     grid::Bool = true,
 )
     x_vec = isa(x, AbstractRange) ? collect(x) : x
@@ -1000,6 +1040,9 @@ function plot_quiver(
         update_yaxes!(fig, showgrid = false)
     end
     relayout!(fig, template = :plotly_white)
+    if fontsize > 0
+        relayout!(fig, font = attr(size = fontsize))
+    end
     return fig
 end
 
@@ -1023,6 +1066,7 @@ end
 		aspectmode::String = "auto",
 		colorscale::String = "Jet",
 		title::String = "",
+		fontsize::Int = 0,
 		grid::Bool = true,
 		showaxis::Bool = true,
 	)
@@ -1051,6 +1095,7 @@ Plots a 3D surface using x, y, z coordinate grids.
 - `title`: Title of the figure (default: `""`)
 - `grid`: Whether to display grid lines (default: `true`)
 - `showaxis`: Whether to show axis lines and labels (default: `true`)
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 """
 function plot_surface(
 	X::Array,
@@ -1068,6 +1113,7 @@ function plot_surface(
 	aspectmode::String = "auto",
 	colorscale::String = "Jet",
 	title::String = "",
+	fontsize::Int = 0,
 	grid::Bool = true,
 	showaxis::Bool = true,
 )
@@ -1128,6 +1174,9 @@ function plot_surface(
 		))
 	end
 	relayout!(fig, template = :plotly_white)
+	if fontsize > 0
+		relayout!(fig, font = attr(size = fontsize))
+	end
 	return fig
 end
 
@@ -1146,6 +1195,7 @@ end
 		aspectmode::String = "auto",
 		colorscale::String = "Jet",
 		title::String = "",
+		fontsize::Int = 0,
 		grid::Bool = true,
 		showaxis::Bool = true,
 	)
@@ -1170,6 +1220,7 @@ Plots a 3D surface given a matrix of height values `Z`, using the array indices 
 - `title::String`: Plot title.
 - `grid::Bool`: If `false`, disables grid lines.
 - `showaxis::Bool`: If `false`, hides all axes.
+- `fontsize::Int`: Font size for plot text (default: `0`, uses Plotly default).
 
 # Returns
 - A `Plot` object rendered using PlotlyJS.
@@ -1190,6 +1241,7 @@ function plot_surface(
 	aspectmode::String = "auto",
 	colorscale::String = "Jet",
 	title::String = "",
+	fontsize::Int = 0,
 	grid::Bool = true,
 	showaxis::Bool = true,
 )
@@ -1209,6 +1261,7 @@ function plot_surface(
 		aspectmode = aspectmode,
 		colorscale = colorscale,
 		title = title,
+		fontsize = fontsize,
 		grid = grid,
 		showaxis = showaxis,
 	)
@@ -1232,6 +1285,7 @@ end
 		zlabel::String = "",
 		aspectmode::String = "auto",
 		title::String = "",
+		fontsize::Int = 0,
 		perspective::Bool = true,
 		grid::Bool = true,
 		showaxis::Bool = true,
@@ -1254,6 +1308,7 @@ Plots a 3D scatter or line plot using `PlotlyJS`, with options for customizing a
 - `perspective`: If `false`, uses orthographic projection. Defaults to perspective projection.
 - `grid`: Whether to show grid lines.
 - `showaxis`: Whether to show axis lines and labels.
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default).
 
 # Returns
 - A `Plot` object containing the 3D scatter or line plot.
@@ -1278,6 +1333,7 @@ function plot_scatter3d(
 	zlabel::String = "",
 	aspectmode::String = "auto",
 	title::String = "",
+	fontsize::Int = 0,
 	perspective::Bool = true,
 	grid::Bool = true,
 	showaxis::Bool = true,
@@ -1376,6 +1432,9 @@ function plot_scatter3d(
 		))
 	end
 	relayout!(fig, template = :plotly_white)
+	if fontsize > 0
+		relayout!(fig, font = attr(size = fontsize))
+	end
 	return fig
 end
 
@@ -1400,6 +1459,7 @@ end
 		zlabel::String = "",
 		aspectmode::String = "auto",
 		title::String = "",
+		fontsize::Int = 0,
 		perspective::Bool = true,
 		grid::Bool = true,
 		showaxis::Bool = true,
@@ -1423,6 +1483,7 @@ Generates a 3D vector field (quiver plot) using cones via `PlotlyJS`.
 - `perspective`: If `false`, uses orthographic projection. Defaults to perspective view.
 - `grid`: Controls visibility of grid lines.
 - `showaxis`: Controls visibility of axis lines and labels.
+- `fontsize`: Font size for plot text (default: `0`, uses Plotly default).
 
 # Returns
 - A `Plot` object containing the 3D quiver plot.
@@ -1450,6 +1511,7 @@ function plot_quiver3d(
 	zlabel::String = "",
 	aspectmode::String = "auto",
 	title::String = "",
+	fontsize::Int = 0,
 	perspective::Bool = true,
 	grid::Bool = true,
 	showaxis::Bool = true,
@@ -1524,6 +1586,9 @@ function plot_quiver3d(
 		))
 	end
 	relayout!(fig, template = :plotly_white)
+	if fontsize > 0
+		relayout!(fig, font = attr(size = fontsize))
+	end
 	return fig
 end
 
@@ -1578,4 +1643,3 @@ function _tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
 	vv_zdata = [collect(elem) for elem in zipped_data]
 	return reduce(vcat, vv_zdata)
 end
-
