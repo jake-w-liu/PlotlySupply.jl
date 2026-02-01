@@ -104,6 +104,33 @@ U = [sin(sqrt(xi^2 + yj^2)) for yj in y, xi in x]
 fig = plot_contour(x, y, U, title="Radial Sine Contour", colorscale="Viridis")
 ```
 
+### Heatmap with Overlaid Shapes
+
+You can enhance heatmaps by overlaying other plots on top using mutating `!` functions. This example demonstrates combining a heatmap with a line and circle overlay.
+
+```julia
+# Create a heatmap with Gaussian distribution
+x = -5:0.2:5
+y = -5:0.2:5
+Y, X = meshgrid(y, x)  # uses Meshgrid.jl
+Z = exp.(-(X.^2 .+ Y.^2))
+fig = plot_heatmap(x, y, Z, title="Gaussian with Annotations", colorscale="Viridis", equalar=true)
+
+# Overlay a circle (scatter plot with markers)
+θ = 0:0.1:2π
+radius = 2
+circle_x = radius .* cos.(θ)
+circle_y = radius .* sin.(θ)
+plot_scatter!(fig, circle_x, circle_y, mode="lines", color="red", legend="Circle")
+
+# Overlay a line
+line_x = [-4, 4]
+line_y = [-2, 2]
+plot_scatter!(fig, line_x, line_y, mode="lines", dash="dash", color="yellow", legend="Line")
+```
+
+This creates a heatmap with a red circle overlay and a dashed yellow line, all combined efficiently using the mutating API.
+
 ## `plot_quiver`
 
 Quiver plots are used to visualize vector fields, showing both the direction and magnitude of vectors at different points in space.
@@ -125,6 +152,21 @@ fig = plot_quiver(X[:], Y[:], U, V, sizeref = 0.5, title="Circulation Field")
 [![QuiverPlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_quiver.html)
 
 
+### Appending traces to an existing figure
+
+You can append traces to an existing figure using the mutating `plot_*!` functions. These modify the provided `fig` in-place and call `react!(fig, fig.plot.data, fig.plot.layout)` before returning `nothing`.
+
+```julia
+# create initial figure
+x = 1:10
+y = rand(10)
+fig = plot_scatter(x, y, title="Base")
+
+# append another trace in-place
+plot_scatter!(fig, x, rand(10), color="red", legend="added")
+```
+
+
 ## `plot_surface`
 
 Surface plots are used to create 3D representations of surfaces, which is useful for visualizing functions of two variables.
@@ -143,6 +185,23 @@ fig = plot_surface(X, Y, Z, title="3D Surface", colorscale="Plasma")
 ```
 
 [![SurfacePlot](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.png)](https://jake-w-liu.github.io/assets/img/PlotlySupply/fig_surface.html)
+
+### Appending Surfaces to an Existing Figure
+
+You can append additional surfaces to an existing figure using the mutating `plot_surface!` function. This is useful for comparing multiple 3D surfaces or overlaying analysis results.
+
+```julia
+# Create initial surface
+x = -2:0.2:2
+y = -2:0.2:2
+Y, X = meshgrid(y, x)
+Z1 = sin.(sqrt.(X.^2 .+ Y.^2))
+fig = plot_surface(X, Y, Z1, xlabel="X", ylabel="Y", zlabel="Z", title="Multiple Surfaces")
+
+# Append another surface with different values
+Z2 = cos.(sqrt.(X.^2 .+ Y.^2)) .* 0.5
+plot_surface!(fig, X, Y, Z2; shared_coloraxis = true)
+```
 
 
 ## `plot_scatter3d`

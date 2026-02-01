@@ -43,6 +43,10 @@
 
 - `set_template!(fig, template)`: Apply Plotly template style to a figure.
 
+### Mutating APIs
+
+- `plot_*!(fig, ...)`: Mutating convenience functions (for example `plot_scatter!`, `plot_stem!`, `plot_heatmap!`, `plot_contour!`, `plot_surface!`, `plot_scatter3d!`, `plot_quiver!`, `plot_quiver3d!`) append traces to an existing `PlotlyJS.SyncPlot`. They update the figure in-place by calling `react!(fig, fig.plot.data, fig.plot.layout)` and return `nothing`. Use these when you want to append traces to an existing figure (MATLAB-style `hold on`).
+
 ---
 
 ## Examples

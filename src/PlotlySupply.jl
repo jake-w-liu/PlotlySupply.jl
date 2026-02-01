@@ -7,7 +7,7 @@ using Infiltrator
 
 include("api.jl")
 
-export plot_scatter, plot_stem, plot_scatterpolar, plot_heatmap, plot_contour, plot_quiver, plot_surface, plot_scatter3d, plot_quiver3d
+export plot_scatter, plot_scatter!, plot_stem, plot_stem!, plot_scatterpolar, plot_scatterpolar!, plot_heatmap, plot_heatmap!, plot_contour, plot_contour!, plot_quiver, plot_quiver!, plot_surface, plot_surface!, plot_scatter3d, plot_scatter3d!, plot_quiver3d, plot_quiver3d!
 export set_template!
 
 end

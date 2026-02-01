@@ -295,6 +295,7 @@ When only `Z` is provided, coordinate grids are generated from array indices.
 | `title` | `String` | `""` | Title of the figure |
 | `grid` | `Bool` | `true` | Whether to display grid lines |
 | `showaxis` | `Bool` | `true` | Whether to show axis lines and labels |
+| `shared_coloraxis` | `Bool` | `false` | Use a shared coloraxis (single colorbar) for multiple surfaces |
 
 #### Example
 
