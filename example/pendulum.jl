@@ -37,3 +37,4 @@ cont = contour(
 addtraces!(fig, cont)
 
 display(fig)
+savefig(fig, "pendulum.pdf")
