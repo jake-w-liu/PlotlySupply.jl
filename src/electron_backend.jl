@@ -20,6 +20,19 @@ end
 
 _json_js(x) = replace(PlotlyBase.JSON.json(x; allownan = true), "</script" => "<\\/script")
 
+_is_linux_github_actions_ci() =
+	Sys.islinux() && get(ENV, "GITHUB_ACTIONS", "") == "true"
+
+function _default_electron_app(ec)
+	# GitHub Linux runners usually lack SUID sandbox setup for Electron.
+	# Use ElectronCall's CI-friendly security config only in that environment.
+	if _is_linux_github_actions_ci() && isdefined(ec, :development_config)
+		security = Base.invokelatest(() -> ec.development_config())
+		return Base.invokelatest(() -> ec.default_application(security))
+	end
+	return Base.invokelatest(() -> ec.default_application())
+end
+
 function _next_syncplot_id()
 	_SYNC_ID_COUNTER[] += 1
 	return "plotsupply-" * string(_SYNC_ID_COUNTER[]) * "-" * string(time_ns())
@@ -76,7 +89,7 @@ function _create_syncplot_window(
 	show::Bool = true,
 )
 	ec = _electroncall()
-	electron_app = app === nothing ? Base.invokelatest(() -> ec.default_application()) : app
+	electron_app = app === nothing ? _default_electron_app(ec) : app
 	divid = _next_syncplot_id()
 	html = _syncplot_html(p, divid)
 	win = Base.invokelatest(() -> ec.Window(
