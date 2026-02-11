@@ -1,3 +1,32 @@
+_plot_obj(fig::Plot) = fig
+
+function _plot_obj(fig)
+	if hasproperty(fig, :plot)
+		p = getproperty(fig, :plot)
+		if p isa Plot
+			return p
+		end
+	end
+	throw(ArgumentError("Expected a PlotlyBase.Plot or a SyncPlot-like object with a `plot::Plot` field."))
+end
+
+_plot_data(fig) = _plot_obj(fig).data
+_plot_layout(fig) = _plot_obj(fig).layout
+
+function _refresh!(fig)
+	p = _plot_obj(fig)
+	react!(p, p.data, p.layout)
+	_plotlyjs_refresh!(fig, p.data, p.layout)
+	return nothing
+end
+
+function _finalize_plot(fig::Plot; width::Int = 0, height::Int = 0, title::String = "")
+	window_width = width > 0 ? width : 960
+	window_height = height > 0 ? height : 720
+	window_title = title == "" ? "PlotlySupply" : title
+	return to_syncplot(fig; width = window_width, height = window_height, title = window_title)
+end
+
 #region 1D Plot
 
 """
@@ -141,7 +170,7 @@ function plot_scatter(
 			automargin = true,
 		),
 	)
-	fig = plot(trace, layout)
+	fig = Plot(trace, layout)
 	if !all(xrange .== [0, 0])
 		update_xaxes!(fig, range = xrange)
 	end
@@ -162,7 +191,7 @@ function plot_scatter(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return fig
+	return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 """
@@ -384,7 +413,7 @@ function plot_stem(
 			automargin = true,
 		),
 	)
-	fig = plot(trace, layout)
+	fig = Plot(trace, layout)
 
 	if !all(xrange .== [0, 0])
 		update_xaxes!(fig, range = xrange)
@@ -469,7 +498,7 @@ function plot_stem(
 			)
 		end
 	end
-	return fig
+	return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 """
@@ -673,7 +702,7 @@ function plot_scatterpolar(
 		title = title,
 		polar = attr(sector = [minimum(theta), maximum(theta)]),
 	)
-	fig = plot(trace, layout)
+	fig = Plot(trace, layout)
 	if !all(rrange .== [0, 0])
 		update_polars!(fig, radialaxis = attr(range = rrange))
 	end
@@ -694,7 +723,7 @@ function plot_scatterpolar(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return fig
+	return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 #endregion
@@ -803,7 +832,7 @@ function plot_heatmap(
 		),
 		# margin = attr(r = 0, b = 0, t = 0, l = 0),
 	)
-	fig = plot(trace, layout)
+	fig = Plot(trace, layout)
 	if !all(xrange .== [0, 0])
 		update_xaxes!(fig, range = xrange)
 	end
@@ -827,7 +856,7 @@ function plot_heatmap(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return fig
+	return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 """
@@ -1001,7 +1030,7 @@ function plot_contour(
 		),
 		# margin = attr(r = 0, b = 0, t = 0, l = 0),
 	)
-	fig = plot(trace, layout)
+	fig = Plot(trace, layout)
 	if !all(xrange .== [0, 0])
 		update_xaxes!(fig, range = xrange)
 	end
@@ -1025,7 +1054,7 @@ function plot_contour(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return fig
+	return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 """
@@ -1215,7 +1244,7 @@ function plot_quiver(
         # margin = attr(r = 0, b = 0, t = 0, l = 0),
     )
 
-    fig = plot(arrow, layout)
+    fig = Plot(arrow, layout)
     if !all(xrange .== [0, 0])
         update_xaxes!(fig, range = xrange)
     end
@@ -1241,7 +1270,7 @@ function plot_quiver(
     if fontsize > 0
         relayout!(fig, font = attr(size = fontsize))
     end
-    return fig
+    return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 #endregion
@@ -1346,7 +1375,7 @@ function plot_surface(
 		# coloraxis = attr(cmax = maximum(C), cmin = minimum(C)),
 	)
 
-	fig = plot(trace, layout)
+	fig = Plot(trace, layout)
 	if shared_coloraxis
 		if colorscale == ""
 			relayout!(fig, coloraxis = attr())
@@ -1387,7 +1416,7 @@ function plot_surface(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return fig
+	return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 """
@@ -1434,7 +1463,7 @@ Plots a 3D surface given a matrix of height values `Z`, using the array indices 
 - `fontsize::Int`: Font size for plot text (default: `0`, uses Plotly default).
 
 # Returns
-- A `Plot` object rendered using PlotlyJS.
+- A `Plot` object.
 
 # Notes
 - This function is a convenience wrapper for `plot_surface(X, Y, Z; ...)`, where `X` and `Y` are index grids derived from the shape of `Z`.
@@ -1504,7 +1533,7 @@ end
 		showaxis::Bool = true,
 	)
 
-Plots a 3D scatter or line plot using `PlotlyJS`, with options for customizing appearance and handling multiple curves.
+Plots a 3D scatter or line plot using `PlotlyBase`, with options for customizing appearance and handling multiple curves.
 
 # Arguments
 - `x`, `y`, `z`: Coordinate vectors. If `z` is a `Vector{Vector}` (i.e., multiple datasets), `x` and `y` must also be `Vector{Vector}` of the same length.
@@ -1610,7 +1639,7 @@ function plot_scatter3d(
 		),
 	)
 
-	fig = plot(trace, layout)
+	fig = Plot(trace, layout)
 	if !perspective
 		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
 	end
@@ -1648,7 +1677,7 @@ function plot_scatter3d(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return fig
+	return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 """
@@ -1678,7 +1707,7 @@ end
 		showaxis::Bool = true,
 	)
 
-Generates a 3D vector field (quiver plot) using cones via `PlotlyJS`.
+Generates a 3D vector field (quiver plot) using cones via `PlotlyBase`.
 
 # Arguments
 - `x`, `y`, `z`: Coordinates of vector origins.
@@ -1764,7 +1793,7 @@ function plot_quiver3d(
 		),
 	)
 
-	fig = plot(trace, layout)
+	fig = Plot(trace, layout)
 	if !perspective
 		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
 	end
@@ -1802,7 +1831,7 @@ function plot_quiver3d(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return fig
+	return _finalize_plot(fig; width = width, height = height, title = title)
 end
 
 #endregion
@@ -1811,7 +1840,7 @@ end
 
 """
 	function plot_scatter!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray};
 		xlabel::String = "",
@@ -1833,7 +1862,7 @@ Adds new scatter traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `x`: x-coordinate data (can be vector of vectors)
 - `y`: y-coordinate data (can be vector of vectors)
 
@@ -1855,7 +1884,7 @@ Adds new scatter traces to an existing figure.
 
 """
 function plot_scatter!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
@@ -1916,7 +1945,7 @@ function plot_scatter!(
 					line = attr(color = colorV[n], dash = dashV[n]),
 					name = legendV[n],
 				)
-				push!(fig.plot.data, trace)
+				push!(_plot_data(fig), trace)
 			end
 		else
 			for n in eachindex(y)
@@ -1927,12 +1956,12 @@ function plot_scatter!(
 					line = attr(color = colorV[n], dash = dashV[n]),
 					name = legendV[n],
 				)
-				push!(fig.plot.data, trace)
+				push!(_plot_data(fig), trace)
 			end
 		end
 	else
 		trace = scatter(y = y, x = x, mode = mode, line = attr(color = color, dash = dash), name = legend)
-		push!(fig.plot.data, trace)
+		push!(_plot_data(fig), trace)
 	end
 	# apply optional layout updates
 	if title != ""
@@ -1964,13 +1993,13 @@ function plot_scatter!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
 """
 	function plot_scatter!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		y::Union{AbstractRange, Vector, SubArray}; 
 		xlabel::String = "",
 		ylabel::String = "",
@@ -1991,7 +2020,7 @@ Adds new scatter traces to an existing figure (x-axis not specified, uses indice
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `y`: y-coordinate data (can be vector of vectors)
 
 #### Keywords
@@ -2012,7 +2041,7 @@ Adds new scatter traces to an existing figure (x-axis not specified, uses indice
 
 """
 function plot_scatter!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	y::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
@@ -2059,7 +2088,7 @@ end
 
 """
 	function plot_stem!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray};
 		xlabel::String = "",
@@ -2079,7 +2108,7 @@ Adds new stem plot traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `x`: x-coordinate data (can be vector of vectors)
 - `y`: y-coordinate data (can be vector of vectors)
 
@@ -2099,7 +2128,7 @@ Adds new stem plot traces to an existing figure.
 
 """
 function plot_stem!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
@@ -2142,11 +2171,11 @@ function plot_stem!(
 					name = legendV[n],
 					mode = "markers",
 				)
-				push!(fig.plot.data, trace_stem)
+				push!(_plot_data(fig), trace_stem)
 			end
 			for n in eachindex(y)
 				for m in eachindex(y[n])
-					push!(fig.plot.data,
+					push!(_plot_data(fig),
 						scatter(
 							x = [x[n][m], x[n][m]],
 							y = [0, y[n][m]],
@@ -2166,11 +2195,11 @@ function plot_stem!(
 					name = legendV[n],
 					mode = "markers",
 				)
-				push!(fig.plot.data, trace_stem)
+				push!(_plot_data(fig), trace_stem)
 			end
 			for n in eachindex(y)
 				for m in eachindex(y[n])
-					push!(fig.plot.data,
+					push!(_plot_data(fig),
 						scatter(
 							x = [x[m], x[m]],
 							y = [0, y[n][m]],
@@ -2184,9 +2213,9 @@ function plot_stem!(
 		end
 	else
 		trace_stem = scatter(y = y, x = x, line = attr(color = color), name = legend, mode = "markers")
-		push!(fig.plot.data, trace_stem)
+		push!(_plot_data(fig), trace_stem)
 		for m in eachindex(y)
-			push!(fig.plot.data,
+			push!(_plot_data(fig),
 				scatter(
 					x = [x[m], x[m]],
 					y = [0, y[m]],
@@ -2227,13 +2256,13 @@ function plot_stem!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
 """
 	function plot_stem!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		y::Union{AbstractRange, Vector, SubArray};
 		xlabel::String = "",
 		ylabel::String = "",
@@ -2252,7 +2281,7 @@ Adds new stem plot traces to an existing figure (x-axis not specified, uses indi
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `y`: y-coordinate data (can be vector of vectors)
 
 #### Keywords
@@ -2271,7 +2300,7 @@ Adds new stem plot traces to an existing figure (x-axis not specified, uses indi
 
 """
 function plot_stem!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	y::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
@@ -2314,7 +2343,7 @@ end
 
 """
 	function plot_scatterpolar!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		theta::Union{AbstractRange, Vector, SubArray},
 		r::Union{AbstractRange, Vector, SubArray};
 		trange::Vector = [0, 0],
@@ -2334,7 +2363,7 @@ Adds new polar scatter traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `theta`: Angular coordinates
 - `r`: Radial coordinates
 
@@ -2354,7 +2383,7 @@ Adds new polar scatter traces to an existing figure.
 
 """
 function plot_scatterpolar!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	theta::Union{AbstractRange, Vector, SubArray},
 	r::Union{AbstractRange, Vector, SubArray};
 	trange::Vector = [0, 0],
@@ -2413,7 +2442,7 @@ function plot_scatterpolar!(
 					line = attr(color = colorV[n], dash = dashV[n]),
 					name = legendV[n],
 				)
-				push!(fig.plot.data, trace)
+				push!(_plot_data(fig), trace)
 			end
 		else
 			for n in eachindex(r)
@@ -2424,7 +2453,7 @@ function plot_scatterpolar!(
 					line = attr(color = colorV[n], dash = dashV[n]),
 					name = legendV[n],
 				)
-				push!(fig.plot.data, trace)
+				push!(_plot_data(fig), trace)
 			end
 		end
 	else
@@ -2435,7 +2464,7 @@ function plot_scatterpolar!(
 			line = attr(color = color, dash = dash),
 			name = legend,
 		)
-		push!(fig.plot.data, trace)
+		push!(_plot_data(fig), trace)
 	end
 	# apply optional layout updates
 	if title != ""
@@ -2468,13 +2497,13 @@ function plot_scatterpolar!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
 """
 	function plot_heatmap!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray},
 		U::Union{Array, SubArray};
@@ -2495,7 +2524,7 @@ Adds new heatmap traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `x`: x-coordinate values
 - `y`: y-coordinate values
 - `U`: Matrix of values
@@ -2516,7 +2545,7 @@ Adds new heatmap traces to an existing figure.
 
 """
 function plot_heatmap!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray},
 	U::Union{Array, SubArray};
@@ -2539,7 +2568,7 @@ function plot_heatmap!(
 		trace.zmin = zrange[1]
 		trace.zmax = zrange[2]
 	end
-	push!(fig.plot.data, trace)
+	push!(_plot_data(fig), trace)
 	# apply optional layout updates if labels or title provided
 	if title != ""
 		relayout!(fig, title = title)
@@ -2572,12 +2601,12 @@ function plot_heatmap!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
 function plot_heatmap!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	U::Union{Array, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
@@ -2610,7 +2639,7 @@ end
 
 """
 	function plot_contour!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray},
 		U::Union{Array, SubArray};
@@ -2631,7 +2660,7 @@ Adds new contour traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `x`: x-coordinate values
 - `y`: y-coordinate values
 - `U`: Matrix of values
@@ -2652,7 +2681,7 @@ Adds new contour traces to an existing figure.
 
 """
 function plot_contour!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray},
 	U::Union{Array, SubArray};
@@ -2675,7 +2704,7 @@ function plot_contour!(
 		trace.zmin = zrange[1]
 		trace.zmax = zrange[2]
 	end
-	push!(fig.plot.data, trace)
+	push!(_plot_data(fig), trace)
 	# apply optional layout updates if labels or title provided
 	if title != ""
 		relayout!(fig, title = title)
@@ -2708,12 +2737,12 @@ function plot_contour!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
 function plot_contour!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	U::Union{Array, SubArray};
 	xlabel::String = "",
 	ylabel::String = "",
@@ -2746,7 +2775,7 @@ end
 
 """
 	function plot_quiver!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray},
 		u::Union{AbstractRange, Vector, SubArray},
@@ -2768,7 +2797,7 @@ Adds new quiver plot traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `x`: x-coordinate values
 - `y`: y-coordinate values
 - `u`: x-component of vector field
@@ -2790,7 +2819,7 @@ Adds new quiver plot traces to an existing figure.
 
 """
 function plot_quiver!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray},
 	u::Union{AbstractRange, Vector, SubArray},
@@ -2841,7 +2870,7 @@ function plot_quiver!(
 
 	arrow = scatter(x = arrow_x, y = arrow_y, mode = "lines", line_color = color,
 		fill = "toself", fillcolor = color, hoverinfo = "skip")
-	push!(fig.plot.data, arrow)
+	push!(_plot_data(fig), arrow)
 	# apply optional layout updates
 	if title != ""
 		relayout!(fig, title = title)
@@ -2876,13 +2905,13 @@ function plot_quiver!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
 """
 	function plot_surface!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		X::Matrix,
 		Y::Matrix,
 		Z::Matrix;
@@ -2907,7 +2936,7 @@ Adds new surface traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `X`: X-coordinates
 - `Y`: Y-coordinates
 - `Z`: Z-coordinates
@@ -2933,7 +2962,7 @@ Adds new surface traces to an existing figure.
 
 """
 function plot_surface!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	X::Matrix,
 	Y::Matrix,
 	Z::Matrix;
@@ -2968,10 +2997,10 @@ function plot_surface!(
 	if shared_coloraxis
 		trace.coloraxis = "coloraxis"
 	end
-	push!(fig.plot.data, trace)
+	push!(_plot_data(fig), trace)
 
 	if shared_coloraxis
-		for tr in fig.plot.data
+		for tr in _plot_data(fig)
 			if get(tr, :type, "") == "surface"
 				tr.coloraxis = "coloraxis"
 			end
@@ -3035,12 +3064,12 @@ function plot_surface!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
 function plot_surface!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	Z::Array; surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -3086,7 +3115,7 @@ end
 
 """
 	function plot_scatter3d!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray},
 		z::Union{AbstractRange, Vector, SubArray};
@@ -3113,7 +3142,7 @@ Adds new 3D scatter traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `x`: x-coordinate data (can be vector of vectors)
 - `y`: y-coordinate data (can be vector of vectors)
 - `z`: z-coordinate data (can be vector of vectors)
@@ -3140,7 +3169,7 @@ Adds new 3D scatter traces to an existing figure.
 
 """
 function plot_scatter3d!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray},
 	z::Union{AbstractRange, Vector, SubArray};
@@ -3198,7 +3227,7 @@ function plot_scatter3d!(
 				line = attr(color = colorV[n]),
 				name = legendV[n],
 			)
-			push!(fig.plot.data, trace)
+			push!(_plot_data(fig), trace)
 		end
 	else
 		trace = scatter3d(
@@ -3209,7 +3238,7 @@ function plot_scatter3d!(
 			line = attr(color = color),
 			name = legend,
 		)
-		push!(fig.plot.data, trace)
+		push!(_plot_data(fig), trace)
 	end
 	if xlabel == ""
 		xlabel = "x"
@@ -3265,13 +3294,13 @@ function plot_scatter3d!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
 """
 	function plot_quiver3d!(
-		fig::PlotlyJS.SyncPlot,
+		fig,
 		x::Union{AbstractRange, Vector, SubArray},
 		y::Union{AbstractRange, Vector, SubArray},
 		z::Union{AbstractRange, Vector, SubArray},
@@ -3301,7 +3330,7 @@ Adds new 3D quiver plot traces to an existing figure.
 
 #### Arguments
 
-- `fig`: Existing `PlotlyJS.SyncPlot` to append to
+- `fig`: Existing `plot figure` to append to
 - `x`: x-coordinate values
 - `y`: y-coordinate values
 - `z`: z-coordinate values
@@ -3331,7 +3360,7 @@ Adds new 3D quiver plot traces to an existing figure.
 
 """
 function plot_quiver3d!(
-	fig::PlotlyJS.SyncPlot,
+	fig,
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray},
 	z::Union{AbstractRange, Vector, SubArray},
@@ -3373,7 +3402,7 @@ function plot_quiver3d!(
 		trace.colorscale = [[0, color], [1, color]]
 		trace.showscale = false
 	end
-	push!(fig.plot.data, trace)
+	push!(_plot_data(fig), trace)
 	if xlabel == ""
 		xlabel = "x"
 	end
@@ -3428,7 +3457,7 @@ function plot_quiver3d!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	_refresh!(fig)
 	return nothing
 end
 
@@ -3437,42 +3466,33 @@ end
 """
 	set_template!(fig, template = "plotly_white")
 
-Applies a visual template to a PlotlyJS figure.
+Applies a visual template to a figure.
 
 # Arguments
-- `fig`: A `PlotlyJS.Plot` object.
-- `template`: String specifying the template to apply (default: `:plotly_white`).
+- `fig`: A `PlotlyBase.Plot` or a `PlotlySupply.SyncPlot`.
+- `template`: Template name string or symbol.
 
 # Notes
 - This modifies the figure in-place using `relayout!`.
-- Available templates include `:plotly`, `:ggplot2`, `:seaborn`, `:simple_white`, `:plotly_dark`, etc.
+- Available templates include `plotly`, `ggplot2`, `seaborn`, `simple_white`, `plotly_dark`, etc.
 """
 function set_template!(fig, template = "plotly_white")
-	# relayout!(fig, template = template)
-	if template == "plotly_white"
-		fig.plot.layout.template = PlotlyJS.templates.plotly_white
-	elseif template == "plotly_dark"
-		fig.plot.layout.template = PlotlyJS.templates.plotly_dark
-	elseif template == "plotly"
-		fig.plot.layout.template = PlotlyJS.templates.plotly
-	elseif template == "ggplot2"
-		fig.plot.layout.template = PlotlyJS.templates.ggplot2	
-	elseif template == "seaborn"
-		fig.plot.layout.template = PlotlyJS.templates.seaborn	
-	elseif template == "simple_white"
-		fig.plot.layout.template = PlotlyJS.templates.simple_white	
-	elseif template == "presentation"
-		fig.plot.layout.template = PlotlyJS.templates.presentation	
-	elseif template == "xgridoff"
-		fig.plot.layout.template = PlotlyJS.templates.xgridoff	
-	elseif template == "ygridoff"
-		fig.plot.layout.template = PlotlyJS.templates.ygridoff	
-	elseif template == "gridon"
-		fig.plot.layout.template = PlotlyJS.templates.gridon	
-	else # default
-		fig.plot.layout.template = PlotlyJS.templates.plotly_white	
-	end
-	react!(fig, fig.plot.data, fig.plot.layout)
+	template_sym = Symbol(template)
+	valid = (
+		:plotly_white,
+		:plotly_dark,
+		:plotly,
+		:ggplot2,
+		:seaborn,
+		:simple_white,
+		:presentation,
+		:xgridoff,
+		:ygridoff,
+		:gridon,
+	)
+	chosen = template_sym in valid ? template_sym : :plotly_white
+	relayout!(fig, template = chosen)
+	_refresh!(fig)
 	return nothing
 end
 

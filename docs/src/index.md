@@ -4,7 +4,7 @@
 
 [![Coverage](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl) 
 
-**PlotlySupply.jl** is a lightweight Julia module that wraps PlotlyJS to supply a set of high-level abstractions for 2D and 3D plot visualizations. It simplifies the creation of line plots, heatmaps, quiver plots, polar plots, and surface plots, with consistent options for customization and layout control. Notice that this module re-exprots [`PlotlyJS.jl`](https://github.com/JuliaPlots/PlotlyJS.jl).
+**PlotlySupply.jl** is a lightweight Julia module that wraps `PlotlyBase.jl` to supply high-level abstractions for 2D and 3D plot visualizations. It simplifies the creation of line plots, heatmaps, quiver plots, polar plots, and surface plots, with consistent options for customization and layout control. High-level constructors open independent desktop windows through `ElectronCall.jl` via `PlotlySupply.SyncPlot`.
 
 ---
 
@@ -40,12 +40,24 @@
 ### Utilities
 
 - `set_template!(fig, template)`: Apply Plotly template style to a figure.
+- `to_syncplot(fig)`: Convert a `PlotlyBase.Plot` into a desktop `SyncPlot`.
+- `plot(...)`: PlotlyJS-style constructor that opens a desktop `SyncPlot` window.
+- `savefig(...)`: PlotlyJS-style export helper (requires `PlotlyKaleido.jl` to be installed).
+- `make_subplots(...)`, `mgrid(...)`: PlotlyJS-style helper utilities.
+
+`ElectronCall.jl` and `PlotlyKaleido.jl` are loaded internally by PlotlySupply when needed, so you do not need `using ElectronCall` or `using PlotlyKaleido`.
 
 ### Mutating APIs
 
-- `plot_*!(fig, ...)`: A set of mutating convenience functions (for example `plot_scatter!`, `plot_stem!`, `plot_heatmap!`, `plot_contour!`, `plot_surface!`, `plot_scatter3d!`, `plot_quiver!`, `plot_quiver3d!`) that append traces to an existing `PlotlyJS.SyncPlot` instance. These functions update the figure in-place by calling `react!(fig, fig.plot.data, fig.plot.layout)` and return `nothing`.
+- `plot_*!(fig, ...)`: A set of mutating convenience functions (for example `plot_scatter!`, `plot_stem!`, `plot_heatmap!`, `plot_contour!`, `plot_surface!`, `plot_scatter3d!`, `plot_quiver!`, `plot_quiver3d!`) that append traces to an existing figure. These work with both `PlotlyBase.Plot` and `PlotlySupply.SyncPlot`.
 
 Use the mutating APIs when you want MATLAB-style `hold on` behavior (append traces to an existing figure) instead of creating a new figure.
+
+### Return Type Behavior
+
+- All high-level constructor APIs (`plot_scatter`, `plot_stem`, `plot_heatmap`, `plot_surface`, etc.) return `PlotlySupply.SyncPlot` and open an Electron window by default.
+- `SyncPlot` forwards properties like `fig.data` and `fig.layout`.
+- The wrapped `PlotlyBase.Plot` is available at `fig.plot`.
 
 ---
 
@@ -57,6 +69,14 @@ Please refer the [API documentation](https://jake-w-liu.github.io/PlotlySupply.j
 
 ```julia
 plot_scatter(0:0.1:2π, sin.(0:0.1:2π); xlabel="x", ylabel="sin(x)", title="Sine Wave")
+```
+
+### PlotlyJS-Style API Compatibility
+
+```julia
+tr = scatter(x=1:10, y=rand(10), mode="lines+markers")
+lay = Layout(title="Compatibility Mode")
+fig = plot(tr, lay) # returns SyncPlot and opens Electron window
 ```
 
 ### 2D Heatmap

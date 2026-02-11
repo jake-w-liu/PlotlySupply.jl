@@ -154,7 +154,7 @@ fig = plot_quiver(X[:], Y[:], U, V, sizeref = 0.5, title="Circulation Field")
 
 ### Appending traces to an existing figure
 
-You can append traces to an existing figure using the mutating `plot_*!` functions. These modify the provided `fig` in-place and call `react!(fig, fig.plot.data, fig.plot.layout)` before returning `nothing`.
+You can append traces to an existing figure using the mutating `plot_*!` functions. These modify the provided `fig` in-place, update the underlying Plotly data/layout, and refresh the existing Electron window when `fig` is a `SyncPlot`.
 
 ```julia
 # create initial figure

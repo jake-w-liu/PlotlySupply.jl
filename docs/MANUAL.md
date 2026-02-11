@@ -1,6 +1,6 @@
 # Julia Plotting API Documentation
 
-A comprehensive plotting library built on PlotlyJS for creating interactive 1D, 2D, and 3D visualizations.
+A comprehensive plotting library built on PlotlyBase for creating interactive 1D, 2D, and 3D visualizations.
 
 ## Table of Contents
 
@@ -419,7 +419,7 @@ fig = plot_quiver3d(x, y, z, u, v, w, sizeref=0.5, title="3D Vector Field")
 
 ### set_template!
 
-Applies a visual template to a PlotlyJS figure.
+Applies a visual template to a Plotly figure.
 
 #### Signature
 
@@ -431,7 +431,7 @@ set_template!(fig, "plotly_dark")
 
 #### Arguments
 
-- **`fig`**: A PlotlyJS.Plot object
+- **`fig`**: A `PlotlySupply.SyncPlot` or `PlotlyBase.Plot` object
 - **`template`**: String specifying the template (default: `"plotly_white"`)
 
 #### Available Templates
