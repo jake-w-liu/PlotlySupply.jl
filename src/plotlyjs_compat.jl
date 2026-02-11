@@ -54,6 +54,45 @@ function _savefig_html(io::IO, p::Plot)
 	return nothing
 end
 
+const _KALEIDO_EXPORT_KW = Set((:height, :width, :scale))
+
+_is_nan_json_error(err) =
+	err isa ArgumentError &&
+	occursin("NaN not allowed to be written in JSON spec", sprint(showerror, err))
+
+function _savefig_kaleido(io::IO, p::Plot, fmt::String, pk::Module; kwargs...)
+	try
+		Base.invokelatest(() -> pk.savefig(io, p; format = fmt, kwargs...))
+		return nothing
+	catch err
+		_is_nan_json_error(err) || rethrow(err)
+
+		# Keep behavior strict: only Kaleido's documented export kwargs are supported.
+		for k in keys(kwargs)
+			k in _KALEIDO_EXPORT_KW || rethrow(err)
+		end
+
+		height = get(kwargs, :height, 500)
+		width = get(kwargs, :width, 700)
+		scale = get(kwargs, :scale, 1)
+		payload = PlotlyBase.JSON.json(
+			(; height = height, width = width, scale = scale, format = fmt, data = p);
+			allownan = true,
+			nan = "null",
+			inf = "null",
+			ninf = "null",
+		)
+
+		if isdefined(pk, :save_payload)
+			Base.invokelatest(() -> pk.save_payload(io, payload, fmt))
+		else
+			# Fallback for older/newer PlotlyKaleido APIs: pass serialized plot directly.
+			Base.invokelatest(() -> pk.savefig(io, payload; format = fmt, kwargs...))
+		end
+		return nothing
+	end
+end
+
 function savefig(io::IO, p::Plot; format::AbstractString = "png", kwargs...)
 	fmt = lowercase(String(format))
 	if fmt == "html"
@@ -61,7 +100,7 @@ function savefig(io::IO, p::Plot; format::AbstractString = "png", kwargs...)
 	end
 
 	pk = _ensure_plotlykaleido_running()
-	Base.invokelatest(() -> pk.savefig(io, p; format = fmt, kwargs...))
+	_savefig_kaleido(io, p, fmt, pk; kwargs...)
 	return nothing
 end
 

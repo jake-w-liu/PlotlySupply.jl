@@ -659,6 +659,15 @@ using PlotlySupply
             @test occursin("PlotlyKaleido", sprint(showerror, err))
         end
 
+        # Regression: NaN separators (used by quiver-like traces) should still export.
+        p_nan = Plot(scatter(x=[1.0, 2.0, NaN, 3.0], y=[1.0, 2.0, NaN, 3.0]), Layout(title="nan-export"))
+        try
+            svg_nan = savefig(p_nan; format="svg")
+            @test length(svg_nan) > 0
+        catch err
+            @test occursin("PlotlyKaleido", sprint(showerror, err))
+        end
+
         html_fn = tempname() * ".html"
         savefig(html_fn, plot_scatter(1:3, rand(3)); format="html")
         @test isfile(html_fn)
