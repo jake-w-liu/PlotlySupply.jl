@@ -17,6 +17,7 @@ A comprehensive plotting library built on PlotlyBase for creating interactive 1D
   - [plot_quiver3d](#plot_quiver3d)
 - [Utility Functions](#utility-functions)
   - [set_template!](#set_template)
+  - [set_legend!](#set_legend)
 
 ---
 
@@ -73,6 +74,7 @@ fig = plot_scatter(x, [y1, y2],
                    dash=["", "dash"],
                    color=["blue", "red"],
                    legend=["sin(x)", "cos(x)"])
+set_legend!(fig; position=:bottomright)
 ```
 
 ---
@@ -450,6 +452,33 @@ please refer to [this page](https://plotly.com/python/templates/) for more infor
 ```julia
 fig = plot_scatter(1:10, (1:10).^2)
 set_template!(fig, :plotly_dark)
+```
+
+### set_legend!
+
+Places legend boxes inside the plotting region and supports symbolic positions.
+
+#### Signature
+
+```julia
+set_legend!(fig; position=:topright, inset=(0.02, 0.03), bgcolor="rgba(255,255,255,0.72)")
+```
+
+#### Arguments
+
+- **`fig`**: A `PlotlySupply.SyncPlot`, `PlotlyBase.Plot`, or `SubplotFigure` object.
+- **`position`**: Symbolic position. Supported values:
+  `:topright`, `:top`, `:topleft`, `:right`, `:center`, `:left`, `:bottomright`, `:bottom`, `:bottomleft`,
+  `:outside_right`, `:outside_left`, `:outside_top`, `:outside_bottom`.
+- **`inset`**: Relative padding from subplot/figure edges.
+- **`bgcolor`** / **`bordercolor`** / **`borderwidth`**: Legend box style.
+
+#### Example
+
+```julia
+fig = plot_scatter(1:100, cumsum(randn(100)); legend="run A")
+plot_scatter!(fig, 1:100, cumsum(randn(100)); legend="run B")
+set_legend!(fig; position=:top, inset=(0.01, 0.02))
 ```
 
 ## Common Patterns and Tips

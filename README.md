@@ -19,6 +19,10 @@
 - `plot_scatter(y; ...)`: Uses index as x-axis.
 - `plot_stem(x, y; ...)`: Stem plot using markers and vertical lines.
 - `plot_stem(y; ...)`: Uses index as x-axis.
+- `plot_bar(x, y; ...)` / `plot_bar(y; ...)`: Bar plot.
+- `plot_histogram(x; ...)`: Histogram plot.
+- `plot_box(x, y; ...)` / `plot_box(y; ...)`: Box plot.
+- `plot_violin(x, y; ...)` / `plot_violin(y; ...)`: Violin plot.
 
 ### 2D Polar Plots
 
@@ -42,14 +46,21 @@
 ### Utilities
 
 - `set_template!(fig, template)`: Apply Plotly template style to a figure.
+- `set_default_template!(template)` / `get_default_template()`: Configure package-wide default template.
+- `set_legend!(fig; position=:topright, ...)`: Place legend with transparent box using symbolic positions (including `:outside_right`).
+- `set_default_legend_position!(...)` / `get_default_legend_position()`: Configure package-wide default legend position.
 - `to_syncplot(fig)`: Convert a `PlotlyBase.Plot` to a desktop `SyncPlot` window.
-- `plot(...)`: PlotlyJS-style constructor that opens a desktop `SyncPlot` window.
+- `plot(...; sync=false)`: PlotlyJS-style constructor that can return raw `Plot` (headless mode).
 - `savefig(...)`: PlotlyJS-style file export helper (requires `PlotlyKaleido.jl` to be installed).
 - `make_subplots(...)`, `mgrid(...)`: PlotlyJS-style helpers.
+- `subplots(rows, cols; sync=false, ...)`: Easy subplot canvas; can be headless.
+- `subplot!(sf, row, col)` / `subplot!(sf, index)`: Select the active subplot cell.
+- `subplot_legends!(fig; position=:topright, ...)`: Place legends per subplot instead of clustering them.
+- `xlabel!(sf, ...)`, `ylabel!(sf, ...)`, `xrange!(sf, ...)`, `yrange!(sf, ...)`: Per-subplot axis helpers.
 
 ### Mutating APIs
 
-- `plot_*!(fig, ...)`: Mutating convenience functions (for example `plot_scatter!`, `plot_stem!`, `plot_heatmap!`, `plot_contour!`, `plot_surface!`, `plot_scatter3d!`, `plot_quiver!`, `plot_quiver3d!`) append traces to an existing figure. The figure can be either a `PlotlyBase.Plot` or a `PlotlySupply.SyncPlot`.
+- `plot_*!(fig, ...)`: Mutating convenience functions (for example `plot_scatter!`, `plot_stem!`, `plot_bar!`, `plot_histogram!`, `plot_box!`, `plot_violin!`, `plot_heatmap!`, `plot_contour!`, `plot_surface!`, `plot_scatter3d!`, `plot_quiver!`, `plot_quiver3d!`) append traces to an existing figure. The figure can be either a `PlotlyBase.Plot` or a `PlotlySupply.SyncPlot`.
 
 ### Return Type Behavior
 
@@ -76,9 +87,32 @@ using PlotlySupply
 
 fig = plot_scatter(1:10, rand(10))
 plot_scatter!(fig, 1:10, rand(10); color="red")
+set_legend!(fig; position=:bottomright)
 ```
 
 `plot_scatter` already returns a `SyncPlot`, so this opens and updates a standalone Electron window directly.
+
+### MATLAB-Like Subplots With Per-Subplot Legends
+
+```julia
+using PlotlySupply
+
+sf = subplots(2, 2; show=true, legend_position=:topright)
+
+plot!(sf, 1:100, cumsum(randn(100)); legend="run A")
+subplot!(sf, 1, 2)
+plot_stem!(sf, 1:100, abs.(randn(100)); legend="run B")
+subplot!(sf, 3) # row=2, col=1
+plot_contour!(sf, rand(30, 30))
+subplot!(sf, 2, 2)
+plot_heatmap!(sf, rand(30, 30))
+xlabel!(sf, "time")
+ylabel!(sf, "value")
+xrange!(sf, [0, 100])
+display(sf)
+```
+
+Each subplot gets its own legend box, positioned inside that subplot by default.
 
 ### PlotlyJS-Style API Compatibility
 

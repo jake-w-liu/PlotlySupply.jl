@@ -24,7 +24,12 @@ function _ensure_plotlykaleido_running()
 end
 
 function make_subplots(; kwargs...)
-	return plot(Layout(Subplots(; kwargs...)))
+	fig = plot(Layout(Subplots(; kwargs...)))
+	p = _plot_obj(fig)
+	_apply_default_template!(p)
+	_apply_default_cartesian_axes!(p)
+	_refresh!(fig)
+	return fig
 end
 
 function mgrid(arrays...)

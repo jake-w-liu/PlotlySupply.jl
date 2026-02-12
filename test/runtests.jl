@@ -26,6 +26,49 @@ using PlotlySupply
         @test fig2 isa SyncPlot
     end
 
+    @testset "plot_bar" begin
+        x = 1:10
+        y = rand(10)
+        fig = plot_bar(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false)
+        @test fig isa SyncPlot
+
+        y2 = [rand(10), rand(10)]
+        fig2 = plot_bar(x, y2, legend=["trace1", "trace2"], color=["red", "blue"])
+        @test fig2 isa SyncPlot
+    end
+
+    @testset "plot_histogram" begin
+        x = randn(200)
+        fig = plot_histogram(x, title="Histogram", xlabel="x", ylabel="count", nbinsx=30, width=500, height=500)
+        @test fig isa SyncPlot
+
+        xmulti = [randn(100), randn(100) .+ 1.0]
+        fig2 = plot_histogram(xmulti, legend=["h1", "h2"], color=["red", "blue"], histnorm="probability")
+        @test fig2 isa SyncPlot
+    end
+
+    @testset "plot_box" begin
+        x = fill("group A", 20)
+        y = randn(20)
+        fig = plot_box(x, y, title="Box", xlabel="group", ylabel="value", width=500, height=500)
+        @test fig isa SyncPlot
+
+        y2 = [randn(20), randn(20) .+ 0.5]
+        fig2 = plot_box(y2, legend=["b1", "b2"], color=["red", "blue"])
+        @test fig2 isa SyncPlot
+    end
+
+    @testset "plot_violin" begin
+        x = fill("group A", 20)
+        y = randn(20)
+        fig = plot_violin(x, y, title="Violin", xlabel="group", ylabel="value", width=500, height=500)
+        @test fig isa SyncPlot
+
+        y2 = [randn(20), randn(20) .+ 0.5]
+        fig2 = plot_violin(y2, legend=["v1", "v2"], color=["red", "blue"], side="positive")
+        @test fig2 isa SyncPlot
+    end
+
     @testset "plot_scatterpolar" begin
         theta = 0:0.1:2*pi
         r = sin.(theta)
@@ -128,6 +171,45 @@ using PlotlySupply
         @test fig.layout.template == :gridon
         set_template!(fig, "none")
         @test fig.layout.template == :plotly_white
+
+        prev_default = get_default_template()
+        set_default_template!("plotly_dark")
+        @test get_default_template() == :plotly_dark
+        fig2 = plot_scatter(x, y)
+        @test fig2.layout.template == :plotly_dark
+        set_default_template!(prev_default)
+    end
+
+    @testset "Legend Defaults and Positioning" begin
+        x = 1:10
+        y = rand(10)
+        fig = plot_scatter(x, y; legend="trace")
+        @test fig.layout.fields[:legend][:xanchor] == "right"
+        @test fig.layout.fields[:legend][:yanchor] == "top"
+        @test fig.layout.fields[:legend][:bgcolor] == "rgba(255,255,255,0.72)"
+        @test fig.layout.fields[:legend][:x] ≈ 0.98
+        @test fig.layout.fields[:legend][:y] ≈ 0.97
+
+        set_legend!(fig; position=:top, inset=(0.01, 0.02))
+        @test fig.layout.fields[:legend][:xanchor] == "center"
+        @test fig.layout.fields[:legend][:yanchor] == "top"
+        @test fig.layout.fields[:legend][:x] ≈ 0.5
+        @test fig.layout.fields[:legend][:y] ≈ 0.98
+        set_legend!(fig; position=:outside_right, inset=(0.02, 0.03))
+        @test fig.layout.fields[:legend][:xanchor] == "left"
+        @test fig.layout.fields[:legend][:yanchor] == "top"
+        @test fig.layout.fields[:legend][:x] ≈ 1.02
+        plot_scatter!(fig, x, rand(10); legend="trace-next")
+        @test fig.layout.fields[:legend][:xanchor] == "left"
+        @test fig.layout.fields[:legend][:yanchor] == "top"
+
+        prev_legend_pos = get_default_legend_position()
+        set_default_legend_position!(:bottomleft)
+        @test get_default_legend_position() == :bottomleft
+        fig2 = plot_scatter(x, y; legend="trace2")
+        @test fig2.layout.fields[:legend][:xanchor] == "left"
+        @test fig2.layout.fields[:legend][:yanchor] == "bottom"
+        set_default_legend_position!(prev_legend_pos)
     end
 
     @testset "Mutating Functions - plot_scatter!" begin
@@ -185,6 +267,66 @@ using PlotlySupply
         initial_count = length(fig3.data)
         plot_stem!(fig3, x, y_multi, color=["blue", "red"], legend=["s1", "s2"])
         @test length(fig3.data) > initial_count
+    end
+
+    @testset "Mutating Functions - plot_bar!" begin
+        x = 1:10
+        y = rand(10)
+        y2 = rand(10)
+
+        fig = plot_bar(x, y, title="Bar Test")
+        initial_trace_count = length(fig.data)
+        plot_bar!(fig, x, y2, color="red", legend="added bar")
+        @test fig isa SyncPlot
+        @test length(fig.data) == initial_trace_count + 1
+
+        fig2 = plot_bar(y, title="Bar Test 2")
+        initial_count = length(fig2.data)
+        plot_bar!(fig2, y2, color="green", legend="appended")
+        @test length(fig2.data) == initial_count + 1
+    end
+
+    @testset "Mutating Functions - plot_histogram!" begin
+        x = randn(200)
+        fig = plot_histogram(x, title="Histogram Test")
+        initial_trace_count = length(fig.data)
+        plot_histogram!(fig, randn(200) .+ 1.0, color="red", legend="h2", nbinsx=20)
+        @test fig isa SyncPlot
+        @test length(fig.data) == initial_trace_count + 1
+    end
+
+    @testset "Mutating Functions - plot_box!" begin
+        x = fill("A", 20)
+        y = randn(20)
+        y2 = randn(20) .+ 0.5
+
+        fig = plot_box(x, y, title="Box Test")
+        initial_trace_count = length(fig.data)
+        plot_box!(fig, fill("B", 20), y2, color="red", legend="B")
+        @test fig isa SyncPlot
+        @test length(fig.data) == initial_trace_count + 1
+
+        fig2 = plot_box(y, title="Box Test 2")
+        initial_count = length(fig2.data)
+        plot_box!(fig2, y2, color="green", legend="appended")
+        @test length(fig2.data) == initial_count + 1
+    end
+
+    @testset "Mutating Functions - plot_violin!" begin
+        x = fill("A", 20)
+        y = randn(20)
+        y2 = randn(20) .+ 0.5
+
+        fig = plot_violin(x, y, title="Violin Test")
+        initial_trace_count = length(fig.data)
+        plot_violin!(fig, fill("B", 20), y2, color="red", legend="B", side="negative")
+        @test fig isa SyncPlot
+        @test length(fig.data) == initial_trace_count + 1
+
+        fig2 = plot_violin(y, title="Violin Test 2")
+        initial_count = length(fig2.data)
+        plot_violin!(fig2, y2, color="green", legend="appended")
+        @test length(fig2.data) == initial_count + 1
     end
 
     @testset "Mutating Functions - plot_scatterpolar!" begin
@@ -320,6 +462,91 @@ using PlotlySupply
         
         @test fig isa SyncPlot
         @test length(fig.data) >= 4
+    end
+
+    @testset "Subplots API" begin
+        sf = PlotlySupply.subplots(2, 2; show=false, title="subplot-api")
+        @test sf isa PlotlySupply.SubplotFigure
+        @test sf.rows == 2
+        @test sf.cols == 2
+        @test sf.legend_position == get_default_legend_position()
+        @test sf.plot.layout.template == get_default_template()
+
+        PlotlySupply.plot!(sf, 1:5, rand(5); legend="A")
+        PlotlySupply.subplot!(sf, 1, 2)
+        PlotlySupply.plot_stem!(sf, 1:5, rand(5); legend="B")
+        PlotlySupply.subplot!(sf, 3) # row 2, col 1
+        PlotlySupply.plot_contour!(sf, rand(5, 5); title="contour")
+        PlotlySupply.subplot!(sf, 2, 2)
+        PlotlySupply.plot_heatmap!(sf, rand(5, 5); title="heat")
+
+        xlabel!(sf, "x22")
+        ylabel!(sf, "y22")
+        xrange!(sf, [0, 6])
+        yrange!(sf, [0, 6])
+
+        @test length(sf.plot.data) >= 4
+        @test sf.plot.data[1].fields[:legend] == "legend"
+        @test sf.plot.data[2].fields[:legend] == "legend2"
+        @test sf.plot.data[end - 1].fields[:legend] == "legend3"
+        @test sf.plot.data[end].fields[:legend] == "legend4"
+        @test haskey(sf.plot.layout.fields, :legend)
+        @test haskey(sf.plot.layout.fields, :legend2)
+        @test haskey(sf.plot.layout.fields, :legend3)
+        @test haskey(sf.plot.layout.fields, :legend4)
+        @test sf.plot.data[1].fields[:showlegend] == true
+        @test sf.plot.data[2].fields[:showlegend] == true
+        @test sf.plot.layout.fields[:showlegend] == true
+
+        @test sf.plot.layout.fields[:legend2][:x] > sf.plot.layout.fields[:legend][:x]
+        @test sf.plot.layout.fields[:legend3][:y] < sf.plot.layout.fields[:legend][:y]
+        @test subplot_legends!(sf) === sf
+        @test set_legend!(sf; position=:bottomleft, inset=(0.01, 0.01)) === sf
+        @test sf.legend_position == :bottomleft
+        @test sf.plot.layout.fields[:legend][:xanchor] == "left"
+        @test sf.plot.layout.fields[:legend][:yanchor] == "bottom"
+        @test sf.plot.layout.fields[:xaxis4][:title_text] == "x22"
+        @test sf.plot.layout.fields[:yaxis4][:title_text] == "y22"
+        @test sf.plot.layout.fields[:xaxis4][:range] == [0, 6]
+        @test sf.plot.layout.fields[:yaxis4][:range] == [0, 6]
+
+        close(sf.fig)
+
+        sf_raw = PlotlySupply.subplots(1, 2; sync=false, title="raw-subplots")
+        @test sf_raw isa PlotlySupply.SubplotFigure
+        @test sf_raw.fig isa Plot
+        set_legend!(sf_raw; position=:top)
+        PlotlySupply.plot_scatter!(sf_raw, 1:5, rand(5); legend="raw")
+        PlotlySupply.subplot!(sf_raw, 2)
+        PlotlySupply.plot_scatter!(sf_raw, 1:5, rand(5); legend="raw2")
+        @test length(sf_raw.plot.data) == 2
+        @test sf_raw.plot.layout.template == get_default_template()
+        @test sf_raw.plot.layout.fields[:showlegend] == true
+    end
+
+    @testset "Subplots API - Statistical Traces" begin
+        sf = PlotlySupply.subplots(2, 2; sync=false, title="subplot-stats")
+        @test sf.fig isa Plot
+
+        subplot!(sf, 1, 1)
+        plot_bar!(sf, 1:5, rand(5); legend="bar")
+        subplot!(sf, 1, 2)
+        plot_histogram!(sf, randn(200); legend="hist")
+        subplot!(sf, 2, 1)
+        plot_box!(sf, randn(30); legend="box")
+        subplot!(sf, 2, 2)
+        plot_violin!(sf, randn(30); legend="violin")
+
+        @test length(sf.plot.data) == 4
+        @test sf.plot.data[1].fields[:type] == "bar"
+        @test sf.plot.data[2].fields[:type] == "histogram"
+        @test sf.plot.data[3].fields[:type] == "box"
+        @test sf.plot.data[4].fields[:type] == "violin"
+        @test sf.plot.layout.fields[:showlegend] == true
+        @test haskey(sf.plot.layout.fields, :legend)
+        @test haskey(sf.plot.layout.fields, :legend2)
+        @test haskey(sf.plot.layout.fields, :legend3)
+        @test haskey(sf.plot.layout.fields, :legend4)
     end
 
     @testset "Desktop SyncPlot Interop" begin
@@ -695,11 +922,13 @@ using PlotlySupply
             sp3 = plot(scatter(x=[1], y=[1]), scatter(x=[1], y=[2]); show=false, title="p3")
             sp4 = plot(; layout=Layout(title="empty"), show=false, title="p4")
             sp5 = plot(Plot(scatter(x=[1, 2], y=[2, 1]), Layout(title="fig")); show=false, title="p5")
+            raw = plot(scatter(x=[1, 2], y=[2, 1]); sync=false, title="raw")
             @test sp1 isa SyncPlot
             @test sp2 isa SyncPlot
             @test sp3 isa SyncPlot
             @test sp4 isa SyncPlot
             @test sp5 isa SyncPlot
+            @test raw isa Plot
 
             # Sync mutating wrappers
             react!(sp, [scatter(x=[1, 2], y=[2, 1])], Layout(title="react1"))

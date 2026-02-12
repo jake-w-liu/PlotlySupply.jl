@@ -130,38 +130,51 @@ end
 
 to_syncplot(sp::SyncPlot; kwargs...) = sp
 
+function _maybe_syncplot(fig::Plot; sync::Bool = true, kwargs...)
+	return sync ? to_syncplot(fig; kwargs...) : fig
+end
+
 function plot(
 	trace::AbstractTrace,
 	layout::AbstractLayout = Layout();
 	config::PlotConfig = PlotConfig(),
+	sync::Bool = true,
 	kwargs...,
 )
-	return to_syncplot(Plot([trace], layout; config = config); kwargs...)
+	return _maybe_syncplot(Plot([trace], layout; config = config); sync = sync, kwargs...)
 end
 
 function plot(
 	traces::AbstractVector{<:AbstractTrace},
 	layout::AbstractLayout = Layout();
 	config::PlotConfig = PlotConfig(),
+	sync::Bool = true,
 	kwargs...,
 )
-	return to_syncplot(Plot(traces, layout; config = config); kwargs...)
+	return _maybe_syncplot(Plot(traces, layout; config = config); sync = sync, kwargs...)
 end
 
 function plot(
 	traces::AbstractTrace...;
 	layout::AbstractLayout = Layout(),
 	config::PlotConfig = PlotConfig(),
+	sync::Bool = true,
 	kwargs...,
 )
-	return to_syncplot(Plot(collect(traces), layout; config = config); kwargs...)
+	return _maybe_syncplot(Plot(collect(traces), layout; config = config); sync = sync, kwargs...)
 end
 
-plot(fig::Plot; kwargs...) = to_syncplot(fig; kwargs...)
+plot(fig::Plot; sync::Bool = true, kwargs...) = _maybe_syncplot(fig; sync = sync, kwargs...)
 
-function plot(; layout::AbstractLayout = Layout(), config::PlotConfig = PlotConfig(), kwargs...)
+function plot(
+	;
+	layout::AbstractLayout = Layout(),
+	config::PlotConfig = PlotConfig(),
+	sync::Bool = true,
+	kwargs...,
+)
 	empty_traces = Vector{GenericTrace}(undef, 0)
-	return to_syncplot(Plot(empty_traces, layout; config = config); kwargs...)
+	return _maybe_syncplot(Plot(empty_traces, layout; config = config); sync = sync, kwargs...)
 end
 
 function _plotlyjs_refresh!(sp::SyncPlot, data, layout)
