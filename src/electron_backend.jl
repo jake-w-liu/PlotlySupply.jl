@@ -62,7 +62,7 @@ function _syncplot_html(p::Plot, divid::String)
 </head>
 <body>
   <div id="$divid"></div>
-  <script src="$_PLOTLY_CDN_URL" charset="utf-8"></script>
+  <script src="$_PLOTLY_CDN_URL" charset="utf-8" async></script>
   <script>
     (function() {
       function boot() {
@@ -92,9 +92,17 @@ function _create_syncplot_window(
 	electron_app = app === nothing ? _default_electron_app(ec) : app
 	divid = _next_syncplot_id()
 	html = _syncplot_html(p, divid)
+
+	# Write HTML to a temp file and load via file:// URI.
+	# ElectronCall converts HTML strings to data: URIs which have a ~2 MB
+	# size limit in Chromium, causing blank windows for large datasets.
+	tmpfile = tempname() * ".html"
+	write(tmpfile, html)
+	file_uri = "file://" * tmpfile
+
 	win = Base.invokelatest(() -> ec.Window(
 		electron_app,
-		html;
+		file_uri;
 		width = width,
 		height = height,
 		title = title,
@@ -104,6 +112,10 @@ function _create_syncplot_window(
 	finalizer(sp) do obj
 		try
 			close(obj)
+		catch
+		end
+		try
+			rm(tmpfile; force = true)
 		catch
 		end
 	end
