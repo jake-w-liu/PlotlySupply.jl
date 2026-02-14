@@ -20,13 +20,6 @@ function _refresh!(fig)
 	return nothing
 end
 
-function _finalize_plot(fig::Plot; width::Int = 0, height::Int = 0, title::String = "")
-	window_width = width > 0 ? width : 960
-	window_height = height > 0 ? height : 720
-	window_title = title == "" ? "PlotlySupply" : title
-	return to_syncplot(fig; width = window_width, height = window_height, title = window_title)
-end
-
 const _VALID_TEMPLATES = (
 	:plotly_white,
 	:plotly_dark,
@@ -1448,6 +1441,25 @@ function _auto_xvalues(y)
 	return 0:length(y)-1
 end
 
+function _apply_showlegend!(trace, showlegend)
+	showlegend === nothing && return
+	if isa(trace, Vector)
+		if showlegend isa Bool
+			for t in trace
+				t.showlegend = showlegend
+			end
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				trace[n].showlegend = showlegend[n]
+			end
+		end
+	else
+		if showlegend isa Bool
+			trace.showlegend = showlegend
+		end
+	end
+end
+
 function _apply_cartesian_plot_options!(
 	fig;
 	xlabel::String = "",
@@ -1459,6 +1471,8 @@ function _apply_cartesian_plot_options!(
 	grid::Bool = true,
 	fontsize::Int = 0,
 	title::String = "",
+	xscale::String = "",
+	yscale::String = "",
 	refresh::Bool = false,
 )
 	if title != ""
@@ -1489,6 +1503,12 @@ function _apply_cartesian_plot_options!(
 	_apply_default_template!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
+	end
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
 	end
 	refresh && _refresh!(fig)
 	return nothing
@@ -1580,6 +1600,11 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		xscale::String = "",
+		yscale::String = "",
+		marker_size::Union{Int, Vector{Int}} = 0,
+		marker_symbol::Union{String, Vector{String}} = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Plots a rectangular (Cartesian) plot.
@@ -1598,12 +1623,17 @@ Plots a rectangular (Cartesian) plot.
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
-- `dash`: line style ("dash, "dashdot", or "dot", default: `""`, can be vector)
+- `dash`: line style ("dash", "dashdot", or "dot", default: `""`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
 - `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of thje figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: true)
+- `title`: Title of the figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: `true`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+- `marker_size`: Marker size in pixels (default: `0`, can be vector)
+- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_scatter(
@@ -1622,6 +1652,11 @@ function plot_scatter(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		trace = Vector{GenericTrace}(undef, length(y))
@@ -1659,29 +1694,66 @@ function plot_scatter(
 			end
 		end
 
+		marker_sizeV = fill(0, length(y))
+		marker_symbolV = fill("", length(y))
+		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
+		if !(marker_size isa Vector)
+			fill!(marker_sizeV, marker_size)
+		else
+			for n in eachindex(marker_size)
+				marker_sizeV[n] = marker_size[n]
+			end
+		end
+		if !(marker_symbol isa Vector)
+			fill!(marker_symbolV, marker_symbol)
+		else
+			for n in eachindex(marker_symbol)
+				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if showlegend isa Bool
+			fill!(showlegendV, showlegend)
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				showlegendV[n] = showlegend[n]
+			end
+		end
+
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				trace[n] = scatter(
-					y = y[n],
-					x = x[n],
-					mode = modeV[n],
-					line = attr(color = colorV[n], dash = dashV[n]),
-					name = legendV[n],
-				)
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
+				mk = Dict{Symbol,Any}()
+				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				trace[n] = scatter(; trace_kw...)
 			end
 		else
 			for n in eachindex(y)
-				trace[n] = scatter(
-					y = y[n],
-					x = x,
-					mode = modeV[n],
-					line = attr(color = colorV[n], dash = dashV[n]),
-					name = legendV[n],
-				)
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
+				mk = Dict{Symbol,Any}()
+				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				trace[n] = scatter(; trace_kw...)
 			end
 		end
 	else
-		trace = scatter(y = y, x = x, mode = mode, line = attr(color = color, dash = dash), name = legend)
+		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :mode => mode, :line => attr(color = color, dash = dash), :name => legend)
+		mk = Dict{Symbol,Any}()
+		if marker_size isa Int && marker_size > 0
+			mk[:size] = marker_size
+		end
+		if marker_symbol isa String && marker_symbol != ""
+			mk[:symbol] = marker_symbol
+		end
+		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if showlegend isa Bool
+			trace_kw[:showlegend] = showlegend
+		end
+		trace = scatter(; trace_kw...)
 	end
 	layout = _default_cartesian_layout(
 		title = title,
@@ -1691,6 +1763,12 @@ function plot_scatter(
 		y_tick0 = minimum(y),
 	)
 	fig = Plot(trace, layout)
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
+	end
 	if !all(xrange .== [0, 0])
 		update_xaxes!(fig, range = xrange)
 	end
@@ -1711,12 +1789,12 @@ function plot_scatter(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 """
 	function plot_scatter(
-		y::Union{AbstractRange, Vector, SubArray}; 
+		y::Union{AbstractRange, Vector, SubArray};
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -1730,6 +1808,11 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		xscale::String = "",
+		yscale::String = "",
+		marker_size::Union{Int, Vector{Int}} = 0,
+		marker_symbol::Union{String, Vector{String}} = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Plots a rectangular (Cartesian) plot (x-axis not specified).
@@ -1747,13 +1830,17 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
-- `dash`: line style ("dash, "dashdot", or "dot", default: `""`, can be vector)
+- `dash`: line style ("dash", "dashdot", or "dot", default: `""`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: legend of the plot lines (default: `""`, can be vector)
-- `title`: Title of thje figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: true)
-- `grid`: Whether to show the grid or not (default: true)
+- `legend`: Name of the plot lines (default: `""`, can be vector)
+- `title`: Title of the figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: `true`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+- `marker_size`: Marker size in pixels (default: `0`, can be vector)
+- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_scatter(
@@ -1771,6 +1858,11 @@ function plot_scatter(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -1797,6 +1889,11 @@ function plot_scatter(
 		title = title,
 		fontsize = fontsize,
 		grid = grid,
+		xscale = xscale,
+		yscale = yscale,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		showlegend = showlegend,
 	)
 end
 
@@ -1815,6 +1912,9 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		xscale::String = "",
+		yscale::String = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Plots a rectangular stem plot.
@@ -1832,12 +1932,14 @@ Plots a rectangular stem plot.
 - `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
-- `mode`: Plotting mode (default: `"lines"`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
 - `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of thje figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: true)
+- `title`: Title of the figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: `true`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_stem(
@@ -1854,6 +1956,9 @@ function plot_stem(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		trace = Vector{GenericTrace}(undef, length(y))
@@ -1875,6 +1980,15 @@ function plot_stem(
 			end
 		end
 
+		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
+		if showlegend isa Bool
+			fill!(showlegendV, showlegend)
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				showlegendV[n] = showlegend[n]
+			end
+		end
+
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
 				# trace[n] = stem(
@@ -1883,34 +1997,23 @@ function plot_stem(
 				# 	line = attr(color = colorV[n]),
 				# 	name = legendV[n],
 				# )
-				trace[n] = scatter(
-					y = y[n],
-					x = x[n],
-					line = attr(color = colorV[n]),
-					name = legendV[n],
-					mode = "markers",
-				)
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				trace[n] = scatter(; trace_kw...)
 			end
 		else
 			for n in eachindex(y)
-				# trace[n] = stem(
-				# 	y = y[n],
-				# 	x = x,
-				# 	line = attr(color = colorV[n]),
-				# 	name = legendV[n],
-				# )
-				trace[n] = scatter(
-					y = y[n],
-					x = x,
-					line = attr(color = colorV[n]),
-					name = legendV[n],
-					mode = "markers",
-				)
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				trace[n] = scatter(; trace_kw...)
 			end
 		end
 	else
-		# trace = stem(y = y, x = x, line = attr(color = color), name = legend)
-		trace = scatter(y = y, x = x, line = attr(color = color), name = legend, mode = "markers")
+		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :line => attr(color = color), :name => legend, :mode => "markers")
+		if showlegend isa Bool
+			trace_kw[:showlegend] = showlegend
+		end
+		trace = scatter(; trace_kw...)
 	end
 	layout = _default_cartesian_layout(
 		title = title,
@@ -1940,6 +2043,12 @@ function plot_stem(
 	_apply_default_template!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
+	end
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
 	end
 
 	#exp
@@ -2004,7 +2113,7 @@ function plot_stem(
 			)
 		end
 	end
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 """
@@ -2021,6 +2130,9 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		xscale::String = "",
+		yscale::String = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Plots a rectangular stem plot (x-axis not specified).
@@ -2037,12 +2149,14 @@ Plots a rectangular stem plot (x-axis not specified).
 - `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
-- `mode`: Plotting mode (default: `"lines"`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: legend of the plot lines (default: `""`, can be vector)
-- `title`: Title of thje figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: true)
+- `legend`: Name of the plot lines (default: `""`, can be vector)
+- `title`: Title of the figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: `true`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_stem(
@@ -2058,6 +2172,9 @@ function plot_stem(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -2082,6 +2199,9 @@ function plot_stem(
 		title = title,
 		fontsize = fontsize,
 		grid = grid,
+		xscale = xscale,
+		yscale = yscale,
+		showlegend = showlegend,
 		)
 end
 
@@ -2099,6 +2219,9 @@ function plot_bar(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2123,6 +2246,8 @@ function plot_bar(
 		)
 	end
 
+	_apply_showlegend!(trace, showlegend)
+
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
 	_apply_cartesian_plot_options!(
 		fig;
@@ -2135,8 +2260,10 @@ function plot_bar(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 	)
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 function plot_bar(
@@ -2152,6 +2279,9 @@ function plot_bar(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	x = _auto_xvalues(y)
 	return plot_bar(
@@ -2168,6 +2298,9 @@ function plot_bar(
 		title = title,
 		fontsize = fontsize,
 		grid = grid,
+		xscale = xscale,
+		yscale = yscale,
+		showlegend = showlegend,
 	)
 end
 
@@ -2186,6 +2319,9 @@ function plot_histogram(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(x, Vector) && eltype(x) <: Vector
 		colorV = _string_kwarg_vector(color, length(x))
@@ -2210,6 +2346,8 @@ function plot_histogram(
 		)
 	end
 
+	_apply_showlegend!(trace, showlegend)
+
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
 	_apply_cartesian_plot_options!(
 		fig;
@@ -2222,8 +2360,10 @@ function plot_histogram(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 	)
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 function plot_box(
@@ -2241,6 +2381,9 @@ function plot_box(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2278,6 +2421,8 @@ function plot_box(
 		)
 	end
 
+	_apply_showlegend!(trace, showlegend)
+
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
 	_apply_cartesian_plot_options!(
 		fig;
@@ -2290,8 +2435,10 @@ function plot_box(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 	)
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 function plot_box(
@@ -2308,6 +2455,9 @@ function plot_box(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2330,6 +2480,8 @@ function plot_box(
 		)
 	end
 
+	_apply_showlegend!(trace, showlegend)
+
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
 	_apply_cartesian_plot_options!(
 		fig;
@@ -2342,8 +2494,10 @@ function plot_box(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 	)
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 function plot_violin(
@@ -2362,6 +2516,9 @@ function plot_violin(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2402,6 +2559,8 @@ function plot_violin(
 		)
 	end
 
+	_apply_showlegend!(trace, showlegend)
+
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
 	_apply_cartesian_plot_options!(
 		fig;
@@ -2414,8 +2573,10 @@ function plot_violin(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 	)
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 function plot_violin(
@@ -2433,6 +2594,9 @@ function plot_violin(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2457,6 +2621,8 @@ function plot_violin(
 		)
 	end
 
+	_apply_showlegend!(trace, showlegend)
+
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
 	_apply_cartesian_plot_options!(
 		fig;
@@ -2469,8 +2635,10 @@ function plot_violin(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 	)
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 """
@@ -2482,11 +2650,15 @@ end
 		width::Int = 0,
 		height::Int = 0,
 		mode::Union{String, Vector{String}} = "lines",
+		dash::Union{String, Vector{String}} = "",
 		color::Union{String, Vector{String}} = "",
 		legend::Union{String, Vector{String}} = "",
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		marker_size::Union{Int, Vector{Int}} = 0,
+		marker_symbol::Union{String, Vector{String}} = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Plots a polar plot.
@@ -2503,11 +2675,15 @@ Plots a polar plot.
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
 - `mode`: Plotting mode (default: `"lines"`, can be vector)
+- `dash`: line style ("dash", "dashdot", or "dot", default: `""`, can be vector)
 - `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: legend of the plot lines (default: `""`, can be vector)
-- `title`: Title of thje figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: true)
+- `legend`: Name of the plot lines (default: `""`, can be vector)
+- `title`: Title of the figure (default: `""`)
+- `grid`: Whether to show the grid or not (default: `true`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `marker_size`: Marker size in pixels (default: `0`, can be vector)
+- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_scatterpolar(
@@ -2524,6 +2700,9 @@ function plot_scatterpolar(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(r, Vector) && eltype(r) <: Vector
 		trace = Vector{GenericTrace}(undef, length(r))
@@ -2561,35 +2740,66 @@ function plot_scatterpolar(
 			end
 		end
 
+		marker_sizeV = fill(0, length(r))
+		marker_symbolV = fill("", length(r))
+		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(r))
+		if !(marker_size isa Vector)
+			fill!(marker_sizeV, marker_size)
+		else
+			for n in eachindex(marker_size)
+				marker_sizeV[n] = marker_size[n]
+			end
+		end
+		if !(marker_symbol isa Vector)
+			fill!(marker_symbolV, marker_symbol)
+		else
+			for n in eachindex(marker_symbol)
+				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if showlegend isa Bool
+			fill!(showlegendV, showlegend)
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				showlegendV[n] = showlegend[n]
+			end
+		end
+
 		if isa(theta, Vector) && eltype(theta) <: Vector
 			for n in eachindex(r)
-				trace[n] = scatterpolar(
-					r = r[n],
-					theta = theta[n],
-					mode = modeV[n],
-					line = attr(color = colorV[n], dash = dashV[n]),
-					name = legendV[n],
-				)
+				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
+				mk = Dict{Symbol,Any}()
+				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				trace[n] = scatterpolar(; trace_kw...)
 			end
 		else
 			for n in eachindex(r)
-				trace[n] = scatterpolar(
-					r = r[n],
-					theta = theta,
-					mode = modeV[n],
-					line = attr(color = colorV[n], dash = dashV[n]),
-					name = legendV[n],
-				)
+				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta, :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
+				mk = Dict{Symbol,Any}()
+				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				trace[n] = scatterpolar(; trace_kw...)
 			end
 		end
 	else
-		trace = scatterpolar(
-			r = r,
-			theta = theta,
-			mode = mode,
-			line = attr(color = color, dash = dash),
-			name = legend,
-		)
+		trace_kw = Dict{Symbol,Any}(:r => r, :theta => theta, :mode => mode, :line => attr(color = color, dash = dash), :name => legend)
+		mk = Dict{Symbol,Any}()
+		if marker_size isa Int && marker_size > 0
+			mk[:size] = marker_size
+		end
+		if marker_symbol isa String && marker_symbol != ""
+			mk[:symbol] = marker_symbol
+		end
+		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if showlegend isa Bool
+			trace_kw[:showlegend] = showlegend
+		end
+		trace = scatterpolar(; trace_kw...)
 	end
 
 	layout = Layout(
@@ -2617,7 +2827,7 @@ function plot_scatterpolar(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 #endregion
@@ -2640,14 +2850,16 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		equalar::Bool = false,
+		xscale::String = "",
+		yscale::String = "",
 	)
 
 Plots heatmap (holographic) data.
 
 #### Arguments
 
-- 'x::AbstractRange': x-axis range
-- 'y::AbstractRange': x-axis range
+- `x`: x-axis coordinate data
+- `y`: y-axis coordinate data
 - `U`: 2D hologram data
 
 #### Keywords
@@ -2658,11 +2870,13 @@ Plots heatmap (holographic) data.
 - `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
 - `colorscale`: Color scale for the heatmap (default: `""`)
-- `title`: Title of thje figure (default: `""`)
+- `title`: Title of the figure (default: `""`)
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
-- 'equalar': Whether to set equal aspect ratio (default: false)
+- `equalar`: Whether to set equal aspect ratio (default: `false`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 
 """
 function plot_heatmap(
@@ -2680,6 +2894,8 @@ function plot_heatmap(
 	title::String = "",
 	fontsize::Int = 0,
 	equalar::Bool = false,
+	xscale::String = "",
+	yscale::String = "",
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
@@ -2750,7 +2966,13 @@ function plot_heatmap(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
+	end
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 """
@@ -2767,6 +2989,8 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		equalar::Bool = false,
+		xscale::String = "",
+		yscale::String = "",
 	)
 
 Plots heatmap (holographic) data (axes not specified).
@@ -2783,11 +3007,13 @@ Plots heatmap (holographic) data (axes not specified).
 - `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
 - `colorscale`: Color scale for the heatmap (default: `""`)
-- `title`: Title of thje figure (default: `""`)
+- `title`: Title of the figure (default: `""`)
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
-- 'equalar': Whether to set equal aspect ratio (default: false)
+- `equalar`: Whether to set equal aspect ratio (default: `false`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 
 """
 function plot_heatmap(
@@ -2803,6 +3029,8 @@ function plot_heatmap(
 	title::String = "",
 	fontsize::Int = 0,
 	equalar::Bool = false,
+	xscale::String = "",
+	yscale::String = "",
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -2818,6 +3046,8 @@ function plot_heatmap(
 		width = width,
 		height = height,
 		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
 	)
 end
 
@@ -2838,14 +3068,16 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		equalar::Bool = false,
+		xscale::String = "",
+		yscale::String = "",
 	)
 
 Plots contour data.
 
 #### Arguments
 
-- 'x::AbstractRange': x-axis range
-- 'y::AbstractRange': x-axis range
+- `x`: x-axis coordinate data
+- `y`: y-axis coordinate data
 - `U`: 2D data for contours
 
 #### Keywords
@@ -2856,11 +3088,13 @@ Plots contour data.
 - `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
 - `colorscale`: Color scale for the contour plot (default: `""`)
-- `title`: Title of thje figure (default: `""`)
+- `title`: Title of the figure (default: `""`)
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
-- 'equalar': Whether to set equal aspect ratio (default: false)
+- `equalar`: Whether to set equal aspect ratio (default: `false`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 
 """
 function plot_contour(
@@ -2878,6 +3112,8 @@ function plot_contour(
 	title::String = "",
 	fontsize::Int = 0,
 	equalar::Bool = false,
+	xscale::String = "",
+	yscale::String = "",
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
@@ -2948,7 +3184,13 @@ function plot_contour(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
+	end
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 """
@@ -2965,6 +3207,8 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		equalar::Bool = false,
+		xscale::String = "",
+		yscale::String = "",
 	)
 
 Plots contour data (axes not specified).
@@ -2981,11 +3225,13 @@ Plots contour data (axes not specified).
 - `yrange`: Range for the y-axis (default: `[0, 0]`)
 - `zrange`: Range for the z-axis (default: `[0, 0]`)
 - `colorscale`: Color scale for the contour plot (default: `""`)
-- `title`: Title of thje figure (default: `""`)
+- `title`: Title of the figure (default: `""`)
 - `width`: Width of the plot (default: `0`)
 - `height`: Height of the plot (default: `0`)
-- 'equalar': Whether to set equal aspect ratio (default: false)
+- `equalar`: Whether to set equal aspect ratio (default: `false`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 
 """
 function plot_contour(
@@ -3001,6 +3247,8 @@ function plot_contour(
 	title::String = "",
 	fontsize::Int = 0,
 	equalar::Bool = false,
+	xscale::String = "",
+	yscale::String = "",
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -3016,6 +3264,8 @@ function plot_contour(
 		width = width,
 		height = height,
 		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
 	)
 end
 
@@ -3164,7 +3414,7 @@ function plot_quiver(
     if fontsize > 0
         relayout!(fig, font = attr(size = fontsize))
     end
-    return _finalize_plot(fig; width = width, height = height, title = title)
+    return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 #endregion
@@ -3310,7 +3560,7 @@ function plot_surface(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 """
@@ -3473,6 +3723,9 @@ function plot_scatter3d(
 	perspective::Bool = true,
 	grid::Bool = true,
 	showaxis::Bool = true,
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(z, Vector) && eltype(z) <: Vector
 		modeV = fill("lines", length(z))
@@ -3500,18 +3753,54 @@ function plot_scatter3d(
 				legendV[n] = legend[n]
 			end
 		end
+		marker_sizeV = fill(0, length(z))
+		marker_symbolV = fill("", length(z))
+		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(z))
+		if !(marker_size isa Vector)
+			fill!(marker_sizeV, marker_size)
+		else
+			for n in eachindex(marker_size)
+				marker_sizeV[n] = marker_size[n]
+			end
+		end
+		if !(marker_symbol isa Vector)
+			fill!(marker_symbolV, marker_symbol)
+		else
+			for n in eachindex(marker_symbol)
+				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if showlegend isa Bool
+			fill!(showlegendV, showlegend)
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				showlegendV[n] = showlegend[n]
+			end
+		end
+
 		for n in eachindex(y)
-			trace[n] = scatter3d(
-				y = y[n],
-				x = x[n],
-				z = z[n],
-				mode = modeV[n],
-				line = attr(color = colorV[n]),
-				name = legendV[n],
-			)
+			trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :z => z[n], :mode => modeV[n], :line => attr(color = colorV[n]), :name => legendV[n])
+			mk = Dict{Symbol,Any}()
+			marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+			marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+			!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+			showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+			trace[n] = scatter3d(; trace_kw...)
 		end
 	else
-		trace = scatter3d(x = x, y = y, z = z, mode = mode, line = attr(color = color), name = legend)
+		trace_kw = Dict{Symbol,Any}(:x => x, :y => y, :z => z, :mode => mode, :line => attr(color = color), :name => legend)
+		mk = Dict{Symbol,Any}()
+		if marker_size isa Int && marker_size > 0
+			mk[:size] = marker_size
+		end
+		if marker_symbol isa String && marker_symbol != ""
+			mk[:symbol] = marker_symbol
+		end
+		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if showlegend isa Bool
+			trace_kw[:showlegend] = showlegend
+		end
+		trace = scatter3d(; trace_kw...)
 	end
 
 	if xlabel == ""
@@ -3571,7 +3860,7 @@ function plot_scatter3d(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 """
@@ -3725,7 +4014,7 @@ function plot_quiver3d(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return _finalize_plot(fig; width = width, height = height, title = title)
+	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
 end
 
 #endregion
@@ -3750,6 +4039,11 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		xscale::String = "",
+		yscale::String = "",
+		marker_size::Union{Int, Vector{Int}} = 0,
+		marker_symbol::Union{String, Vector{String}} = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Adds new scatter traces to an existing figure.
@@ -3775,6 +4069,11 @@ Adds new scatter traces to an existing figure.
 - `title`: Title of the figure (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 - `grid`: Whether to show the grid or not (default: `true`)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+- `marker_size`: Marker size in pixels (default: `0`, can be vector)
+- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_scatter!(
@@ -3794,6 +4093,11 @@ function plot_scatter!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		modeV = fill("line", length(y))
@@ -3830,32 +4134,66 @@ function plot_scatter!(
 			end
 		end
 
+		marker_sizeV = fill(0, length(y))
+		marker_symbolV = fill("", length(y))
+		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
+		if !(marker_size isa Vector)
+			fill!(marker_sizeV, marker_size)
+		else
+			for n in eachindex(marker_size)
+				marker_sizeV[n] = marker_size[n]
+			end
+		end
+		if !(marker_symbol isa Vector)
+			fill!(marker_symbolV, marker_symbol)
+		else
+			for n in eachindex(marker_symbol)
+				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if showlegend isa Bool
+			fill!(showlegendV, showlegend)
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				showlegendV[n] = showlegend[n]
+			end
+		end
+
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				trace = scatter(
-					y = y[n],
-					x = x[n],
-					mode = modeV[n],
-					line = attr(color = colorV[n], dash = dashV[n]),
-					name = legendV[n],
-				)
-				push!(_plot_data(fig), trace)
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
+				mk = Dict{Symbol,Any}()
+				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				push!(_plot_data(fig), scatter(; trace_kw...))
 			end
 		else
 			for n in eachindex(y)
-				trace = scatter(
-					y = y[n],
-					x = x,
-					mode = modeV[n],
-					line = attr(color = colorV[n], dash = dashV[n]),
-					name = legendV[n],
-				)
-				push!(_plot_data(fig), trace)
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
+				mk = Dict{Symbol,Any}()
+				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				push!(_plot_data(fig), scatter(; trace_kw...))
 			end
 		end
 	else
-		trace = scatter(y = y, x = x, mode = mode, line = attr(color = color, dash = dash), name = legend)
-		push!(_plot_data(fig), trace)
+		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :mode => mode, :line => attr(color = color, dash = dash), :name => legend)
+		mk = Dict{Symbol,Any}()
+		if marker_size isa Int && marker_size > 0
+			mk[:size] = marker_size
+		end
+		if marker_symbol isa String && marker_symbol != ""
+			mk[:symbol] = marker_symbol
+		end
+		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if showlegend isa Bool
+			trace_kw[:showlegend] = showlegend
+		end
+		push!(_plot_data(fig), scatter(; trace_kw...))
 	end
 	# apply optional layout updates
 	if title != ""
@@ -3887,6 +4225,12 @@ function plot_scatter!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
+	end
 	_refresh!(fig)
 	return nothing
 end
@@ -3894,7 +4238,7 @@ end
 """
 	function plot_scatter!(
 		fig,
-		y::Union{AbstractRange, Vector, SubArray}; 
+		y::Union{AbstractRange, Vector, SubArray};
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -3908,6 +4252,11 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		xscale::String = "",
+		yscale::String = "",
+		marker_size::Union{Int, Vector{Int}} = 0,
+		marker_symbol::Union{String, Vector{String}} = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Adds new scatter traces to an existing figure (x-axis not specified, uses indices).
@@ -3932,6 +4281,11 @@ Adds new scatter traces to an existing figure (x-axis not specified, uses indice
 - `title`: Title of the figure (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 - `grid`: Whether to show the grid or not (default: `true`)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+- `marker_size`: Marker size in pixels (default: `0`, can be vector)
+- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_scatter!(
@@ -3950,6 +4304,11 @@ function plot_scatter!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -3977,6 +4336,11 @@ function plot_scatter!(
 		title = title,
 		fontsize = fontsize,
 		grid = grid,
+		xscale = xscale,
+		yscale = yscale,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		showlegend = showlegend,
 	)
 end
 
@@ -3996,6 +4360,9 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		xscale::String = "",
+		yscale::String = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Adds new stem plot traces to an existing figure.
@@ -4019,6 +4386,9 @@ Adds new stem plot traces to an existing figure.
 - `title`: Title of the figure (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 - `grid`: Whether to show the grid or not (default: `true`)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_stem!(
@@ -4036,6 +4406,9 @@ function plot_stem!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = fill("", length(y))
@@ -4056,16 +4429,20 @@ function plot_stem!(
 			end
 		end
 
+		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
+		if showlegend isa Bool
+			fill!(showlegendV, showlegend)
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				showlegendV[n] = showlegend[n]
+			end
+		end
+
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				trace_stem = scatter(
-					y = y[n],
-					x = x[n],
-					line = attr(color = colorV[n]),
-					name = legendV[n],
-					mode = "markers",
-				)
-				push!(_plot_data(fig), trace_stem)
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				push!(_plot_data(fig), scatter(; trace_kw...))
 			end
 			for n in eachindex(y)
 				for m in eachindex(y[n])
@@ -4082,14 +4459,9 @@ function plot_stem!(
 			end
 		else
 			for n in eachindex(y)
-				trace_stem = scatter(
-					y = y[n],
-					x = x,
-					line = attr(color = colorV[n]),
-					name = legendV[n],
-					mode = "markers",
-				)
-				push!(_plot_data(fig), trace_stem)
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				push!(_plot_data(fig), scatter(; trace_kw...))
 			end
 			for n in eachindex(y)
 				for m in eachindex(y[n])
@@ -4106,8 +4478,11 @@ function plot_stem!(
 			end
 		end
 	else
-		trace_stem = scatter(y = y, x = x, line = attr(color = color), name = legend, mode = "markers")
-		push!(_plot_data(fig), trace_stem)
+		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :line => attr(color = color), :name => legend, :mode => "markers")
+		if showlegend isa Bool
+			trace_kw[:showlegend] = showlegend
+		end
+		push!(_plot_data(fig), scatter(; trace_kw...))
 		for m in eachindex(y)
 			push!(_plot_data(fig),
 				scatter(
@@ -4150,6 +4525,12 @@ function plot_stem!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
+	end
 	_refresh!(fig)
 	return nothing
 end
@@ -4169,6 +4550,9 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		xscale::String = "",
+		yscale::String = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Adds new stem plot traces to an existing figure (x-axis not specified, uses indices).
@@ -4191,6 +4575,9 @@ Adds new stem plot traces to an existing figure (x-axis not specified, uses indi
 - `title`: Title of the figure (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 - `grid`: Whether to show the grid or not (default: `true`)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_stem!(
@@ -4207,6 +4594,9 @@ function plot_stem!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -4232,6 +4622,9 @@ function plot_stem!(
 		title = title,
 		fontsize = fontsize,
 		grid = grid,
+		xscale = xscale,
+		yscale = yscale,
+		showlegend = showlegend,
 		)
 end
 
@@ -4250,27 +4643,39 @@ function plot_bar!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 
+		showlegendV = _string_kwarg_vector("", length(y))
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				push!(_plot_data(fig), _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n]))
+				t = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n])
+				showlegend isa Bool && (t.showlegend = showlegend)
+				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+				push!(_plot_data(fig), t)
 			end
 		else
 			for n in eachindex(y)
-				push!(_plot_data(fig), _bar_trace(x = x, y = y[n], color = colorV[n], name = legendV[n]))
+				t = _bar_trace(x = x, y = y[n], color = colorV[n], name = legendV[n])
+				showlegend isa Bool && (t.showlegend = showlegend)
+				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+				push!(_plot_data(fig), t)
 			end
 		end
 	else
-		push!(_plot_data(fig), _bar_trace(
+		t = _bar_trace(
 			x = x,
 			y = y,
 			color = _first_or_empty(color),
 			name = _first_or_empty(legend),
-		))
+		)
+		showlegend isa Bool && (t.showlegend = showlegend)
+		push!(_plot_data(fig), t)
 	end
 
 	_apply_cartesian_plot_options!(
@@ -4284,6 +4689,8 @@ function plot_bar!(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 		refresh = true,
 	)
 	return nothing
@@ -4303,6 +4710,9 @@ function plot_bar!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	x = _auto_xvalues(y)
 	return plot_bar!(
@@ -4320,6 +4730,9 @@ function plot_bar!(
 		title = title,
 		fontsize = fontsize,
 		grid = grid,
+		xscale = xscale,
+		yscale = yscale,
+		showlegend = showlegend,
 	)
 end
 
@@ -4339,27 +4752,35 @@ function plot_histogram!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(x, Vector) && eltype(x) <: Vector
 		colorV = _string_kwarg_vector(color, length(x))
 		legendV = _string_kwarg_vector(legend, length(x))
 		for n in eachindex(x)
-			push!(_plot_data(fig), _histogram_trace(
+			t = _histogram_trace(
 				x = x[n],
 				nbinsx = nbinsx,
 				histnorm = histnorm,
 				color = colorV[n],
 				name = legendV[n],
-			))
+			)
+			showlegend isa Bool && (t.showlegend = showlegend)
+			showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+			push!(_plot_data(fig), t)
 		end
 	else
-		push!(_plot_data(fig), _histogram_trace(
+		t = _histogram_trace(
 			x = x,
 			nbinsx = nbinsx,
 			histnorm = histnorm,
 			color = _first_or_empty(color),
 			name = _first_or_empty(legend),
-		))
+		)
+		showlegend isa Bool && (t.showlegend = showlegend)
+		push!(_plot_data(fig), t)
 	end
 
 	_apply_cartesian_plot_options!(
@@ -4373,6 +4794,8 @@ function plot_histogram!(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 		refresh = true,
 	)
 	return nothing
@@ -4394,39 +4817,32 @@ function plot_box!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				push!(_plot_data(fig), _box_trace(
-					x = x[n],
-					y = y[n],
-					color = colorV[n],
-					name = legendV[n],
-					points = points,
-				))
+				t = _box_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], points = points)
+				showlegend isa Bool && (t.showlegend = showlegend)
+				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+				push!(_plot_data(fig), t)
 			end
 		else
 			for n in eachindex(y)
-				push!(_plot_data(fig), _box_trace(
-					x = x,
-					y = y[n],
-					color = colorV[n],
-					name = legendV[n],
-					points = points,
-				))
+				t = _box_trace(x = x, y = y[n], color = colorV[n], name = legendV[n], points = points)
+				showlegend isa Bool && (t.showlegend = showlegend)
+				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+				push!(_plot_data(fig), t)
 			end
 		end
 	else
-		push!(_plot_data(fig), _box_trace(
-			x = x,
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			points = points,
-		))
+		t = _box_trace(x = x, y = y, color = _first_or_empty(color), name = _first_or_empty(legend), points = points)
+		showlegend isa Bool && (t.showlegend = showlegend)
+		push!(_plot_data(fig), t)
 	end
 
 	_apply_cartesian_plot_options!(
@@ -4440,6 +4856,8 @@ function plot_box!(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 		refresh = true,
 	)
 	return nothing
@@ -4460,25 +4878,23 @@ function plot_box!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		for n in eachindex(y)
-			push!(_plot_data(fig), _box_trace(
-				y = y[n],
-				color = colorV[n],
-				name = legendV[n],
-				points = points,
-			))
+			t = _box_trace(y = y[n], color = colorV[n], name = legendV[n], points = points)
+			showlegend isa Bool && (t.showlegend = showlegend)
+			showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+			push!(_plot_data(fig), t)
 		end
 	else
-		push!(_plot_data(fig), _box_trace(
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			points = points,
-		))
+		t = _box_trace(y = y, color = _first_or_empty(color), name = _first_or_empty(legend), points = points)
+		showlegend isa Bool && (t.showlegend = showlegend)
+		push!(_plot_data(fig), t)
 	end
 
 	_apply_cartesian_plot_options!(
@@ -4492,6 +4908,8 @@ function plot_box!(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 		refresh = true,
 	)
 	return nothing
@@ -4514,42 +4932,32 @@ function plot_violin!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				push!(_plot_data(fig), _violin_trace(
-					x = x[n],
-					y = y[n],
-					color = colorV[n],
-					name = legendV[n],
-					points = points,
-					side = side,
-				))
+				t = _violin_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], points = points, side = side)
+				showlegend isa Bool && (t.showlegend = showlegend)
+				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+				push!(_plot_data(fig), t)
 			end
 		else
 			for n in eachindex(y)
-				push!(_plot_data(fig), _violin_trace(
-					x = x,
-					y = y[n],
-					color = colorV[n],
-					name = legendV[n],
-					points = points,
-					side = side,
-				))
+				t = _violin_trace(x = x, y = y[n], color = colorV[n], name = legendV[n], points = points, side = side)
+				showlegend isa Bool && (t.showlegend = showlegend)
+				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+				push!(_plot_data(fig), t)
 			end
 		end
 	else
-		push!(_plot_data(fig), _violin_trace(
-			x = x,
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			points = points,
-			side = side,
-		))
+		t = _violin_trace(x = x, y = y, color = _first_or_empty(color), name = _first_or_empty(legend), points = points, side = side)
+		showlegend isa Bool && (t.showlegend = showlegend)
+		push!(_plot_data(fig), t)
 	end
 
 	_apply_cartesian_plot_options!(
@@ -4563,6 +4971,8 @@ function plot_violin!(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 		refresh = true,
 	)
 	return nothing
@@ -4584,27 +4994,23 @@ function plot_violin!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	xscale::String = "",
+	yscale::String = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		for n in eachindex(y)
-			push!(_plot_data(fig), _violin_trace(
-				y = y[n],
-				color = colorV[n],
-				name = legendV[n],
-				points = points,
-				side = side,
-			))
+			t = _violin_trace(y = y[n], color = colorV[n], name = legendV[n], points = points, side = side)
+			showlegend isa Bool && (t.showlegend = showlegend)
+			showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
+			push!(_plot_data(fig), t)
 		end
 	else
-		push!(_plot_data(fig), _violin_trace(
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			points = points,
-			side = side,
-		))
+		t = _violin_trace(y = y, color = _first_or_empty(color), name = _first_or_empty(legend), points = points, side = side)
+		showlegend isa Bool && (t.showlegend = showlegend)
+		push!(_plot_data(fig), t)
 	end
 
 	_apply_cartesian_plot_options!(
@@ -4618,6 +5024,8 @@ function plot_violin!(
 		grid = grid,
 		fontsize = fontsize,
 		title = title,
+		xscale = xscale,
+		yscale = yscale,
 		refresh = true,
 	)
 	return nothing
@@ -4639,6 +5047,9 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		grid::Bool = true,
+		marker_size::Union{Int, Vector{Int}} = 0,
+		marker_symbol::Union{String, Vector{String}} = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Adds new polar scatter traces to an existing figure.
@@ -4662,6 +5073,9 @@ Adds new polar scatter traces to an existing figure.
 - `title`: Title of the figure (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 - `grid`: Whether to show the grid or not (default: `true`)
+- `marker_size`: Marker size in pixels (default: `0`, can be vector)
+- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_scatterpolar!(
@@ -4679,6 +5093,9 @@ function plot_scatterpolar!(
 	title::String = "",
 	fontsize::Int = 0,
 	grid::Bool = true,
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(r, Vector) && eltype(r) <: Vector
 		modeV = fill("line", length(r))
@@ -4715,38 +5132,66 @@ function plot_scatterpolar!(
 			end
 		end
 
+		marker_sizeV = fill(0, length(r))
+		marker_symbolV = fill("", length(r))
+		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(r))
+		if !(marker_size isa Vector)
+			fill!(marker_sizeV, marker_size)
+		else
+			for n in eachindex(marker_size)
+				marker_sizeV[n] = marker_size[n]
+			end
+		end
+		if !(marker_symbol isa Vector)
+			fill!(marker_symbolV, marker_symbol)
+		else
+			for n in eachindex(marker_symbol)
+				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if showlegend isa Bool
+			fill!(showlegendV, showlegend)
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				showlegendV[n] = showlegend[n]
+			end
+		end
+
 		if isa(theta, Vector) && eltype(theta) <: Vector
 			for n in eachindex(r)
-				trace = scatterpolar(
-					r = r[n],
-					theta = theta[n],
-					mode = modeV[n],
-					line = attr(color = colorV[n], dash = dashV[n]),
-					name = legendV[n],
-				)
-				push!(_plot_data(fig), trace)
+				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
+				mk = Dict{Symbol,Any}()
+				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				push!(_plot_data(fig), scatterpolar(; trace_kw...))
 			end
 		else
 			for n in eachindex(r)
-				trace = scatterpolar(
-					r = r[n],
-					theta = theta,
-					mode = modeV[n],
-					line = attr(color = colorV[n], dash = dashV[n]),
-					name = legendV[n],
-				)
-				push!(_plot_data(fig), trace)
+				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta, :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
+				mk = Dict{Symbol,Any}()
+				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+				push!(_plot_data(fig), scatterpolar(; trace_kw...))
 			end
 		end
 	else
-		trace = scatterpolar(
-			r = r,
-			theta = theta,
-			mode = mode,
-			line = attr(color = color, dash = dash),
-			name = legend,
-		)
-		push!(_plot_data(fig), trace)
+		trace_kw = Dict{Symbol,Any}(:r => r, :theta => theta, :mode => mode, :line => attr(color = color, dash = dash), :name => legend)
+		mk = Dict{Symbol,Any}()
+		if marker_size isa Int && marker_size > 0
+			mk[:size] = marker_size
+		end
+		if marker_symbol isa String && marker_symbol != ""
+			mk[:symbol] = marker_symbol
+		end
+		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if showlegend isa Bool
+			trace_kw[:showlegend] = showlegend
+		end
+		push!(_plot_data(fig), scatterpolar(; trace_kw...))
 	end
 	# apply optional layout updates
 	if title != ""
@@ -4800,6 +5245,8 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		equalar::Bool = false,
+		xscale::String = "",
+		yscale::String = "",
 	)
 
 Adds new heatmap traces to an existing figure.
@@ -4824,6 +5271,8 @@ Adds new heatmap traces to an existing figure.
 - `title`: Title for the heatmap (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 - `equalar`: Whether to set equal aspect ratio (default: `false`)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 
 """
 function plot_heatmap!(
@@ -4842,6 +5291,8 @@ function plot_heatmap!(
 	title::String = "",
 	fontsize::Int = 0,
 	equalar::Bool = false,
+	xscale::String = "",
+	yscale::String = "",
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
@@ -4883,6 +5334,12 @@ function plot_heatmap!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
+	end
 	_refresh!(fig)
 	return nothing
 end
@@ -4901,6 +5358,8 @@ function plot_heatmap!(
 	title::String = "",
 	fontsize::Int = 0,
 	equalar::Bool = false,
+	xscale::String = "",
+	yscale::String = "",
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -4916,6 +5375,8 @@ function plot_heatmap!(
 		width = width,
 		height = height,
 		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
 	)
 end
 
@@ -4936,6 +5397,8 @@ end
 		title::String = "",
 		fontsize::Int = 0,
 		equalar::Bool = false,
+		xscale::String = "",
+		yscale::String = "",
 	)
 
 Adds new contour traces to an existing figure.
@@ -4960,6 +5423,8 @@ Adds new contour traces to an existing figure.
 - `title`: Title for the contour (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 - `equalar`: Whether to set equal aspect ratio (default: `false`)
+- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
+- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 
 """
 function plot_contour!(
@@ -4978,6 +5443,8 @@ function plot_contour!(
 	title::String = "",
 	fontsize::Int = 0,
 	equalar::Bool = false,
+	xscale::String = "",
+	yscale::String = "",
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
@@ -5019,6 +5486,12 @@ function plot_contour!(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
+	if xscale != ""
+		update_xaxes!(fig, type = xscale)
+	end
+	if yscale != ""
+		update_yaxes!(fig, type = yscale)
+	end
 	_refresh!(fig)
 	return nothing
 end
@@ -5037,6 +5510,8 @@ function plot_contour!(
 	title::String = "",
 	fontsize::Int = 0,
 	equalar::Bool = false,
+	xscale::String = "",
+	yscale::String = "",
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -5052,6 +5527,8 @@ function plot_contour!(
 		width = width,
 		height = height,
 		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
 	)
 end
 
@@ -5194,9 +5671,9 @@ end
 """
 	function plot_surface!(
 		fig,
-		X::Matrix,
-		Y::Matrix,
-		Z::Matrix;
+		X::Union{AbstractRange, Array, SubArray},
+		Y::Union{AbstractRange, Array, SubArray},
+		Z::Union{SubArray, Array};
 		surfacecolor::Array = [],
 		xrange::Vector = [0, 0],
 		yrange::Vector = [0, 0],
@@ -5245,9 +5722,9 @@ Adds new surface traces to an existing figure.
 """
 function plot_surface!(
 	fig,
-	X::Matrix,
-	Y::Matrix,
-	Z::Matrix;
+	X::Union{AbstractRange, Array, SubArray},
+	Y::Union{AbstractRange, Array, SubArray},
+	Z::Union{SubArray, Array};
 	surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
@@ -5352,7 +5829,7 @@ end
 
 function plot_surface!(
 	fig,
-	Z::Array; surfacecolor::Array = [],
+	Z::Union{SubArray, Array}; surfacecolor::Array = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -5418,6 +5895,9 @@ end
 		perspective::Bool = true,
 		grid::Bool = true,
 		showaxis::Bool = true,
+		marker_size::Union{Int, Vector{Int}} = 0,
+		marker_symbol::Union{String, Vector{String}} = "",
+		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
 Adds new 3D scatter traces to an existing figure.
@@ -5448,6 +5928,9 @@ Adds new 3D scatter traces to an existing figure.
 - `perspective`: If `false`, uses orthographic projection (default: `true`)
 - `grid`: Whether to show grid lines (default: `true`)
 - `showaxis`: Whether to show axis lines and labels (default: `true`)
+- `marker_size`: Marker size in pixels (default: `0`, can be vector)
+- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
 function plot_scatter3d!(
@@ -5472,6 +5955,9 @@ function plot_scatter3d!(
 	perspective::Bool = true,
 	grid::Bool = true,
 	showaxis::Bool = true,
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(z, Vector) && eltype(z) <: Vector
 		modeV = fill("lines", length(z))
@@ -5500,27 +5986,54 @@ function plot_scatter3d!(
 			end
 		end
 
+		marker_sizeV = fill(0, length(z))
+		marker_symbolV = fill("", length(z))
+		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(z))
+		if !(marker_size isa Vector)
+			fill!(marker_sizeV, marker_size)
+		else
+			for n in eachindex(marker_size)
+				marker_sizeV[n] = marker_size[n]
+			end
+		end
+		if !(marker_symbol isa Vector)
+			fill!(marker_symbolV, marker_symbol)
+		else
+			for n in eachindex(marker_symbol)
+				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if showlegend isa Bool
+			fill!(showlegendV, showlegend)
+		elseif showlegend isa Vector
+			for n in eachindex(showlegend)
+				showlegendV[n] = showlegend[n]
+			end
+		end
+
 		for n in eachindex(z)
-			trace = scatter3d(
-				y = y[n],
-				x = x[n],
-				z = z[n],
-				mode = modeV[n],
-				line = attr(color = colorV[n]),
-				name = legendV[n],
-			)
-			push!(_plot_data(fig), trace)
+			trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :z => z[n], :mode => modeV[n], :line => attr(color = colorV[n]), :name => legendV[n])
+			mk = Dict{Symbol,Any}()
+			marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
+			marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
+			!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+			showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
+			push!(_plot_data(fig), scatter3d(; trace_kw...))
 		end
 	else
-		trace = scatter3d(
-			x = x,
-			y = y,
-			z = z,
-			mode = mode,
-			line = attr(color = color),
-			name = legend,
-		)
-		push!(_plot_data(fig), trace)
+		trace_kw = Dict{Symbol,Any}(:x => x, :y => y, :z => z, :mode => mode, :line => attr(color = color), :name => legend)
+		mk = Dict{Symbol,Any}()
+		if marker_size isa Int && marker_size > 0
+			mk[:size] = marker_size
+		end
+		if marker_symbol isa String && marker_symbol != ""
+			mk[:symbol] = marker_symbol
+		end
+		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if showlegend isa Bool
+			trace_kw[:showlegend] = showlegend
+		end
+		push!(_plot_data(fig), scatter3d(; trace_kw...))
 	end
 	if xlabel == ""
 		xlabel = "x"
