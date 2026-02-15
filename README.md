@@ -50,10 +50,10 @@
 - `set_legend!(fig; position=:topright, ...)`: Place legend with transparent box using symbolic positions (including `:outside_right`).
 - `set_default_legend_position!(...)` / `get_default_legend_position()`: Configure package-wide default legend position.
 - `to_syncplot(fig)`: Convert a `PlotlyBase.Plot` to a desktop `SyncPlot` window.
-- `plot(...; sync=false)`: PlotlyJS-style constructor that can return raw `Plot` (headless mode).
+- `plot(...)`: PlotlyJS-style constructor. Returns `Plot` by default; pass `sync=true` to get a `SyncPlot`.
 - `savefig(...)`: PlotlyJS-style file export helper (requires `PlotlyKaleido.jl` to be installed).
 - `make_subplots(...)`, `mgrid(...)`: PlotlyJS-style helpers.
-- `subplots(rows, cols; sync=false, ...)`: Easy subplot canvas; can be headless.
+- `subplots(rows, cols; ...)`: Easy subplot canvas; pass `sync=false` for headless mode.
 - `subplot!(sf, row, col)` / `subplot!(sf, index)`: Select the active subplot cell.
 - `subplot_legends!(fig; position=:topright, ...)`: Place legends per subplot instead of clustering them.
 - `xlabel!(sf, ...)`, `ylabel!(sf, ...)`, `xrange!(sf, ...)`, `yrange!(sf, ...)`: Per-subplot axis helpers.
@@ -62,9 +62,12 @@
 
 - `plot_*!(fig, ...)`: Mutating convenience functions (for example `plot_scatter!`, `plot_stem!`, `plot_bar!`, `plot_histogram!`, `plot_box!`, `plot_violin!`, `plot_heatmap!`, `plot_contour!`, `plot_surface!`, `plot_scatter3d!`, `plot_quiver!`, `plot_quiver3d!`) append traces to an existing figure. The figure can be either a `PlotlyBase.Plot` or a `PlotlySupply.SyncPlot`.
 
-### Return Type Behavior
+### Return Type and Display Behavior
 
-- All high-level constructor APIs (`plot_scatter`, `plot_stem`, `plot_heatmap`, `plot_surface`, etc.) return `PlotlySupply.SyncPlot` and open an Electron window by default.
+- All high-level constructor APIs (`plot_scatter`, `plot_stem`, `plot_heatmap`, `plot_surface`, etc.) return a `PlotlyBase.Plot` by default.
+- In the REPL, typing `plot_scatter(x, y)` without assignment triggers Julia's display system, which automatically opens an Electron window.
+- Assigning to a variable (`fig = plot_scatter(x, y)`) suppresses display — no window opens. Use `display(fig)` to open the window later.
+- Pass `show=true` to open a window immediately: `plot_scatter(x, y; show=true)` returns a `SyncPlot`.
 - `SyncPlot` forwards properties like `fig.data` and `fig.layout`, so most Plotly-style figure access works unchanged.
 - The wrapped `PlotlyBase.Plot` is available at `fig.plot`.
 
@@ -80,17 +83,18 @@ Please refer the [API documentation](https://jake-w-liu.github.io/PlotlySupply.j
 plot_scatter(0:0.1:2π, sin.(0:0.1:2π); xlabel="x", ylabel="sin(x)", title="Sine Wave")
 ```
 
-### Desktop Window + Mutating Append
+### Building a Figure + Display
 
 ```julia
 using PlotlySupply
 
-fig = plot_scatter(1:10, rand(10))
+fig = plot_scatter(1:10, rand(10))          # returns Plot, no window
 plot_scatter!(fig, 1:10, rand(10); color="red")
 set_legend!(fig; position=:bottomright)
+display(fig)                                 # opens Electron window
 ```
 
-`plot_scatter` already returns a `SyncPlot`, so this opens and updates a standalone Electron window directly.
+Use `display(fig)` when you're ready to view the figure. In the REPL, the last expression is displayed automatically.
 
 ### MATLAB-Like Subplots With Per-Subplot Legends
 
@@ -121,7 +125,7 @@ using PlotlySupply
 
 tr = scatter(x=1:10, y=rand(10), mode="lines+markers")
 lay = Layout(title="Compatibility Mode")
-fig = plot(tr, lay) # returns SyncPlot and opens Electron window
+fig = plot(tr, lay) # returns Plot; use display(fig) to open Electron window
 ```
 
 `ElectronCall.jl` and `PlotlyKaleido.jl` are loaded internally by PlotlySupply when needed; users do not need `using ElectronCall` or `using PlotlyKaleido`.
@@ -170,6 +174,7 @@ Most functions accept the following options:
 | `showaxis`      | Show/hide axis lines and ticks            | `true`           |
 | `aspectmode`    | `"auto"`, `"cube"`, `"data"`              | `"auto"`         |
 | `mode`          | `"lines"`, `"markers"`, `"lines+markers"` | `"lines"`        |
+| `show`          | Open Electron window immediately           | `false`          |
 
 ---
 

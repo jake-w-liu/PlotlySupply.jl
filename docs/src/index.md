@@ -48,10 +48,10 @@
 - `set_legend!(fig; position=:topright, ...)`: Place legend with transparent box and symbolic positions (including `:outside_right`).
 - `set_default_legend_position!(...)` / `get_default_legend_position()`: Configure package-wide default legend position.
 - `to_syncplot(fig)`: Convert a `PlotlyBase.Plot` into a desktop `SyncPlot`.
-- `plot(...; sync=false)`: PlotlyJS-style constructor with optional headless return (`Plot`).
+- `plot(...)`: PlotlyJS-style constructor. Returns `Plot` by default; pass `sync=true` to get a `SyncPlot`.
 - `savefig(...)`: PlotlyJS-style export helper (requires `PlotlyKaleido.jl` to be installed).
 - `make_subplots(...)`, `mgrid(...)`: PlotlyJS-style helper utilities.
-- `subplots(rows, cols; sync=false, ...)`: High-level subplot canvas with optional headless mode.
+- `subplots(rows, cols; ...)`: High-level subplot canvas; pass `sync=false` for headless mode.
 - `subplot!(sf, row, col)` / `subplot!(sf, index)`: Select active subplot cell.
 - `subplot_legends!(fig; position=:topright, ...)`: Split legends by subplot and place them in-panel.
 - `xlabel!(sf, ...)`, `ylabel!(sf, ...)`, `xrange!(sf, ...)`, `yrange!(sf, ...)`: Per-subplot axis helpers.
@@ -64,9 +64,12 @@
 
 Use the mutating APIs when you want MATLAB-style `hold on` behavior (append traces to an existing figure) instead of creating a new figure.
 
-### Return Type Behavior
+### Return Type and Display Behavior
 
-- All high-level constructor APIs (`plot_scatter`, `plot_stem`, `plot_heatmap`, `plot_surface`, etc.) return `PlotlySupply.SyncPlot` and open an Electron window by default.
+- All high-level constructor APIs (`plot_scatter`, `plot_stem`, `plot_heatmap`, `plot_surface`, etc.) return a `PlotlyBase.Plot` by default.
+- In the REPL, typing `plot_scatter(x, y)` without assignment triggers Julia's display system, which automatically opens an Electron window.
+- Assigning to a variable (`fig = plot_scatter(x, y)`) suppresses display — no window opens. Use `display(fig)` to open the window later.
+- Pass `show=true` to open a window immediately: `plot_scatter(x, y; show=true)` returns a `SyncPlot`.
 - `SyncPlot` forwards properties like `fig.data` and `fig.layout`.
 - The wrapped `PlotlyBase.Plot` is available at `fig.plot`.
 
@@ -87,7 +90,7 @@ plot_scatter(0:0.1:2π, sin.(0:0.1:2π); xlabel="x", ylabel="sin(x)", title="Sin
 ```julia
 tr = scatter(x=1:10, y=rand(10), mode="lines+markers")
 lay = Layout(title="Compatibility Mode")
-fig = plot(tr, lay) # returns SyncPlot and opens Electron window
+fig = plot(tr, lay) # returns Plot; use display(fig) to open Electron window
 ```
 
 ### MATLAB-Like Subplots
@@ -151,6 +154,7 @@ Most functions accept the following options:
 | `showaxis`      | Show/hide axis lines and ticks            | `true`           |
 | `aspectmode`    | `"auto"`, `"cube"`, `"data"`              | `"auto"`         |
 | `mode`          | `"lines"`, `"markers"`, `"lines+markers"` | `"lines"`        |
+| `show`          | Open Electron window immediately           | `false`          |
 
 ---
 

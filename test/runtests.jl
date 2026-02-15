@@ -8,76 +8,76 @@ using PlotlySupply
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false, fontsize=12)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_scatter(x, y2, legend=["trace1", "trace2"], mode=["markers", "lines+markers"], color=["red", "blue"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_stem" begin
         x = 1:10
         y = rand(10)
         fig = plot_stem(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_stem(x, y2, legend=["trace1", "trace2"], color=["red", "blue"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_bar" begin
         x = 1:10
         y = rand(10)
         fig = plot_bar(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_bar(x, y2, legend=["trace1", "trace2"], color=["red", "blue"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_histogram" begin
         x = randn(200)
         fig = plot_histogram(x, title="Histogram", xlabel="x", ylabel="count", nbinsx=30, width=500, height=500)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         xmulti = [randn(100), randn(100) .+ 1.0]
         fig2 = plot_histogram(xmulti, legend=["h1", "h2"], color=["red", "blue"], histnorm="probability")
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_box" begin
         x = fill("group A", 20)
         y = randn(20)
         fig = plot_box(x, y, title="Box", xlabel="group", ylabel="value", width=500, height=500)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [randn(20), randn(20) .+ 0.5]
         fig2 = plot_box(y2, legend=["b1", "b2"], color=["red", "blue"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_violin" begin
         x = fill("group A", 20)
         y = randn(20)
         fig = plot_violin(x, y, title="Violin", xlabel="group", ylabel="value", width=500, height=500)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [randn(20), randn(20) .+ 0.5]
         fig2 = plot_violin(y2, legend=["v1", "v2"], color=["red", "blue"], side="positive")
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_scatterpolar" begin
         theta = 0:0.1:2*pi
         r = sin.(theta)
         fig = plot_scatterpolar(theta, r, title="My Title", trange=[0, 360], rrange=[0, 1], width=500, height=500, grid=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         r2 = [sin.(theta), cos.(theta)]
         fig2 = plot_scatterpolar(theta, r2, legend=["trace1", "trace2"], color=["red", "blue"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_heatmap" begin
@@ -85,10 +85,10 @@ using PlotlySupply
         y = 1:20
         U = rand(10, 20)
         fig = plot_heatmap(x, y, U, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 20], zrange=[0, 1], width=500, height=500, colorscale="Viridis", equalar=true)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         fig2 = plot_heatmap(U)
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_contour" begin
@@ -96,10 +96,10 @@ using PlotlySupply
         y = 1:20
         U = rand(10, 20)
         fig = plot_contour(x, y, U, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 20], zrange=[0, 1], width=500, height=500, colorscale="Viridis", equalar=true, fontsize=11)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         fig2 = plot_contour(U)
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_quiver" begin
@@ -108,7 +108,7 @@ using PlotlySupply
         u = rand(10)
         v = rand(10)
         fig = plot_quiver(x, y, u, v, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 10], width=500, height=500, color="red", sizeref=0.5, grid=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
     end
 
     @testset "plot_surface" begin
@@ -118,10 +118,10 @@ using PlotlySupply
         Y = [j for i in x, j in y]
         Z = rand(10, 20)
         fig = plot_surface(X, Y, Z, title="My Title", xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10], yrange=[0, 20], zrange=[0, 1], width=500, height=500, colorscale="Viridis", aspectmode="cube", grid=false, showaxis=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         fig2 = plot_surface(Z, surfacecolor=rand(10, 20))
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_scatter3d" begin
@@ -129,13 +129,13 @@ using PlotlySupply
         y = 1:10
         z = rand(10)
         fig = plot_scatter3d(x, y, z, title="My Title", xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10], yrange=[0, 10], zrange=[0, 1], width=500, height=500, mode="markers", color="red", legend="trace1", aspectmode="cube", perspective=false, grid=false, showaxis=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         z2 = [rand(10), rand(10)]
         x2 = [1:10, 1:10]
         y2 = [1:10, 1:10]
         fig2 = plot_scatter3d(x2, y2, z2, color=["red", "blue"], legend=["trace1", "trace2"], mode=["markers", "lines+markers"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "plot_quiver3d" begin
@@ -146,7 +146,7 @@ using PlotlySupply
         v = rand(10)
         w = rand(10)
         fig = plot_quiver3d(x, y, z, u, v, w, title="My Title", xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10], yrange=[0, 10], zrange=[0, 10], width=500, height=500, color="red", colorscale="Viridis", sizeref=0.5, aspectmode="cube", perspective=false, grid=false, showaxis=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
     end
 
     @testset "set_template!" begin
@@ -222,7 +222,7 @@ using PlotlySupply
         fig = plot_scatter(x, y, title="Scatter Test")
         initial_trace_count = length(fig.data)
         plot_scatter!(fig, x, y2, color="red", legend="added trace")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
         
         # Test chaining multiple scatter! calls
@@ -252,7 +252,7 @@ using PlotlySupply
         fig = plot_stem(x, y, title="Stem Test")
         initial_trace_count = length(fig.data)
         plot_stem!(fig, x, y2, color="red", legend="added stem")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) > initial_trace_count  # stem creates 2 traces per call
         
         # Test stem! without x (uses indices)
@@ -277,7 +277,7 @@ using PlotlySupply
         fig = plot_bar(x, y, title="Bar Test")
         initial_trace_count = length(fig.data)
         plot_bar!(fig, x, y2, color="red", legend="added bar")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
 
         fig2 = plot_bar(y, title="Bar Test 2")
@@ -291,7 +291,7 @@ using PlotlySupply
         fig = plot_histogram(x, title="Histogram Test")
         initial_trace_count = length(fig.data)
         plot_histogram!(fig, randn(200) .+ 1.0, color="red", legend="h2", nbinsx=20)
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
     end
 
@@ -303,7 +303,7 @@ using PlotlySupply
         fig = plot_box(x, y, title="Box Test")
         initial_trace_count = length(fig.data)
         plot_box!(fig, fill("B", 20), y2, color="red", legend="B")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
 
         fig2 = plot_box(y, title="Box Test 2")
@@ -320,7 +320,7 @@ using PlotlySupply
         fig = plot_violin(x, y, title="Violin Test")
         initial_trace_count = length(fig.data)
         plot_violin!(fig, fill("B", 20), y2, color="red", legend="B", side="negative")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
 
         fig2 = plot_violin(y, title="Violin Test 2")
@@ -337,7 +337,7 @@ using PlotlySupply
         fig = plot_scatterpolar(theta, r, title="Polar Test")
         initial_trace_count = length(fig.data)
         plot_scatterpolar!(fig, theta, r2, color="red", legend="cos trace")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
     end
 
@@ -350,7 +350,7 @@ using PlotlySupply
         fig = plot_heatmap(x, y, U, title="Heatmap Test")
         initial_trace_count = length(fig.data)
         plot_heatmap!(fig, x, y, U2, title="Added Heatmap")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
     end
 
@@ -363,7 +363,7 @@ using PlotlySupply
         fig = plot_contour(x, y, U, title="Contour Test")
         initial_trace_count = length(fig.data)
         plot_contour!(fig, x, y, U2, title="Added Contour")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
     end
 
@@ -378,7 +378,7 @@ using PlotlySupply
         fig = plot_quiver(x, y, u, v, title="Quiver Test")
         initial_trace_count = length(fig.data)
         plot_quiver!(fig, x, y, u2, v2, color="red")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
     end
 
@@ -393,7 +393,7 @@ using PlotlySupply
         fig = plot_surface(X, Y, Z, title="Surface Test")
         initial_trace_count = length(fig.data)
         plot_surface!(fig, X, Y, Z2, zlabel="Added Surface")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
         
         # Test with color matrix
@@ -413,7 +413,7 @@ using PlotlySupply
         fig = plot_scatter3d(x, y, z, title="3D Scatter Test")
         initial_trace_count = length(fig.data)
         plot_scatter3d!(fig, x, y, z2, color="red", legend="added trace")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
         
         # Test with vector of vectors
@@ -440,7 +440,7 @@ using PlotlySupply
         fig = plot_quiver3d(x, y, z, u, v, w, title="3D Quiver Test")
         initial_trace_count = length(fig.data)
         plot_quiver3d!(fig, x, y, z, u2, v2, w2, color="red")
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == initial_trace_count + 1
     end
 
@@ -460,7 +460,7 @@ using PlotlySupply
         
         plot_scatter!(fig, x, y4, color="green", legend="trace 4")
         
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) >= 4
     end
 
@@ -576,19 +576,19 @@ using PlotlySupply
             color="purple",
             legend="bundle",
         )
-        @test fig_scatter_multi isa SyncPlot
+        @test fig_scatter_multi isa Plot
         @test length(fig_scatter_multi.data) == 2
 
         # y-only vector-of-vectors branch
         fig_scatter_yonly = plot_scatter(y_multi)
-        @test fig_scatter_yonly isa SyncPlot
+        @test fig_scatter_yonly isa Plot
 
         # plot_stem branches: x/y vectors and fontsize path
         fig_stem_multi = plot_stem(x_multi, y_multi; color="black", legend="stem", fontsize=10)
-        @test fig_stem_multi isa SyncPlot
+        @test fig_stem_multi isa Plot
         @test length(fig_stem_multi.data) > 2
         fig_stem_yonly = plot_stem(y_multi)
-        @test fig_stem_yonly isa SyncPlot
+        @test fig_stem_yonly isa Plot
 
         # plot_scatterpolar branches: theta vectors, mode/dash vector loops, color/legend fill!, fontsize
         theta_multi = [collect(0:30:90), collect(15:30:105)]
@@ -602,7 +602,7 @@ using PlotlySupply
             legend="polar",
             fontsize=11,
         )
-        @test fig_polar_multi isa SyncPlot
+        @test fig_polar_multi isa Plot
         @test length(fig_polar_multi.data) == 2
 
         # heatmap/contour edge branches for dx/dy fallback and fontsize
@@ -610,16 +610,16 @@ using PlotlySupply
         U31 = rand(3, 1)
         fig_heat_dx0 = plot_heatmap([0.0], [0.0, 1.0, 2.0], U13; equalar=true, fontsize=9)
         fig_heat_dy0 = plot_heatmap([0.0, 1.0, 2.0], [0.0], U31; equalar=true)
-        @test fig_heat_dx0 isa SyncPlot
-        @test fig_heat_dy0 isa SyncPlot
+        @test fig_heat_dx0 isa Plot
+        @test fig_heat_dy0 isa Plot
 
         fig_contour_dx0 = plot_contour([0.0], [0.0, 1.0, 2.0], U13; equalar=true, fontsize=9)
         fig_contour_dy0 = plot_contour([0.0, 1.0, 2.0], [0.0], U31; equalar=true)
-        @test fig_contour_dx0 isa SyncPlot
-        @test fig_contour_dy0 isa SyncPlot
+        @test fig_contour_dx0 isa Plot
+        @test fig_contour_dy0 isa Plot
 
         fig_quiver_font = plot_quiver(1:5, 1:5, rand(5), rand(5); fontsize=10)
-        @test fig_quiver_font isa SyncPlot
+        @test fig_quiver_font isa Plot
 
         # plot_surface shared coloraxis branches (with and without explicit colorscale)
         X = [i for i in 1:3, j in 1:3]
@@ -643,18 +643,18 @@ using PlotlySupply
             shared_coloraxis=true,
             colorscale="Viridis",
         )
-        @test fig_surface_shared_default isa SyncPlot
-        @test fig_surface_shared_scaled isa SyncPlot
+        @test fig_surface_shared_default isa Plot
+        @test fig_surface_shared_scaled isa Plot
 
         # plot_scatter3d multi branch with fill! paths for mode/color/legend
         x3 = [collect(1:4), collect(1:4)]
         y3 = [collect(1:4), collect(1:4)]
         z3 = [rand(4), rand(4)]
         fig_scatter3d_multi_fill = plot_scatter3d(x3, y3, z3; mode="lines+markers", color="orange", legend="traj", fontsize=10)
-        @test fig_scatter3d_multi_fill isa SyncPlot
+        @test fig_scatter3d_multi_fill isa Plot
 
         fig_quiver3d_font = plot_quiver3d(1:5, 1:5, 1:5, rand(5), rand(5), rand(5); fontsize=10)
-        @test fig_quiver3d_font isa SyncPlot
+        @test fig_quiver3d_font isa Plot
     end
 
     @testset "Coverage Branches - Mutating APIs" begin
@@ -681,7 +681,7 @@ using PlotlySupply
             fontsize=9,
         )
         plot_scatter!(fig_scatter, y_multi)
-        @test fig_scatter isa SyncPlot
+        @test fig_scatter isa Plot
 
         fig_stem = plot_stem(1:4, rand(4))
         plot_stem!(
@@ -701,7 +701,7 @@ using PlotlySupply
             fontsize=9,
         )
         plot_stem!(fig_stem, y_multi)
-        @test fig_stem isa SyncPlot
+        @test fig_stem isa Plot
 
         theta_multi = [collect(0:30:90), collect(15:30:105)]
         r_multi = [rand(4), rand(4)]
@@ -732,7 +732,7 @@ using PlotlySupply
             color=["teal", "brown"],
             legend=["r1", "r2"],
         )
-        @test fig_polar isa SyncPlot
+        @test fig_polar isa Plot
 
         U13 = rand(1, 3)
         U31 = rand(3, 1)
@@ -754,7 +754,7 @@ using PlotlySupply
             fontsize=9,
         )
         plot_heatmap!(fig_heat, U31; xlabel="x2")
-        @test fig_heat isa SyncPlot
+        @test fig_heat isa Plot
 
         fig_cont = plot_contour(rand(3, 3))
         plot_contour!(
@@ -774,7 +774,7 @@ using PlotlySupply
             fontsize=9,
         )
         plot_contour!(fig_cont, U31; xlabel="x2")
-        @test fig_cont isa SyncPlot
+        @test fig_cont isa Plot
 
         fig_quiver = plot_quiver(1:5, 1:5, rand(5), rand(5))
         plot_quiver!(
@@ -794,7 +794,7 @@ using PlotlySupply
             grid=false,
             fontsize=9,
         )
-        @test fig_quiver isa SyncPlot
+        @test fig_quiver isa Plot
 
         X = [i for i in 1:3, j in 1:3]
         Y = [j for i in 1:3, j in 1:3]
@@ -820,7 +820,7 @@ using PlotlySupply
             fontsize=9,
         )
         plot_surface!(fig_surface, X, Y, Z; color=C, shared_coloraxis=true, colorscale="Viridis")
-        @test fig_surface isa SyncPlot
+        @test fig_surface isa Plot
 
         x3 = [collect(1:4), collect(1:4)]
         y3 = [collect(1:4), collect(1:4)]
@@ -846,7 +846,7 @@ using PlotlySupply
             showaxis=false,
             fontsize=9,
         )
-        @test fig_s3 isa SyncPlot
+        @test fig_s3 isa Plot
 
         fig_q3 = plot_quiver3d(1:4, 1:4, 1:4, rand(4), rand(4), rand(4))
         plot_quiver3d!(
@@ -870,7 +870,7 @@ using PlotlySupply
             showaxis=false,
             fontsize=9,
         )
-        @test fig_q3 isa SyncPlot
+        @test fig_q3 isa Plot
     end
 
     @testset "Coverage Branches - Internal + SyncPlot" begin
@@ -917,11 +917,11 @@ using PlotlySupply
             @test msgchannel(sp) isa Channel
 
             # plot(...) compatibility entry points
-            sp1 = plot(scatter(x=[1, 2], y=[2, 1]); show=false, title="p1")
-            sp2 = plot([scatter(x=[1, 2], y=[1, 2])]; show=false, title="p2")
-            sp3 = plot(scatter(x=[1], y=[1]), scatter(x=[1], y=[2]); show=false, title="p3")
-            sp4 = plot(; layout=Layout(title="empty"), show=false, title="p4")
-            sp5 = plot(Plot(scatter(x=[1, 2], y=[2, 1]), Layout(title="fig")); show=false, title="p5")
+            sp1 = plot(scatter(x=[1, 2], y=[2, 1]); sync=true, show=false, title="p1")
+            sp2 = plot([scatter(x=[1, 2], y=[1, 2])]; sync=true, show=false, title="p2")
+            sp3 = plot(scatter(x=[1], y=[1]), scatter(x=[1], y=[2]); sync=true, show=false, title="p3")
+            sp4 = plot(; layout=Layout(title="empty"), sync=true, show=false, title="p4")
+            sp5 = plot(Plot(scatter(x=[1, 2], y=[2, 1]), Layout(title="fig")); sync=true, show=false, title="p5")
             raw = plot(scatter(x=[1, 2], y=[2, 1]); sync=false, title="raw")
             @test sp1 isa SyncPlot
             @test sp2 isa SyncPlot
@@ -988,177 +988,177 @@ using PlotlySupply
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, xscale="log", yscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_scatter(x, y2, xscale="log")
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         # y-only variant
         fig3 = plot_scatter(y, yscale="log")
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         fig3m = plot_scatter(y2, xscale="log", yscale="log")
-        @test fig3m isa SyncPlot
+        @test fig3m isa Plot
     end
 
     @testset "marker_size/marker_symbol - scatter" begin
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, mode="markers", marker_size=10, marker_symbol="circle-open")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_scatter(x, y2, mode="markers", marker_size=[8, 12], marker_symbol=["circle", "square"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         # scalar marker on multi-trace
         fig3 = plot_scatter(x, y2, mode="markers", marker_size=6, marker_symbol="diamond")
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         # y-only with markers
         fig4 = plot_scatter(y, mode="markers", marker_size=5)
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
     end
 
     @testset "showlegend - scatter" begin
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, showlegend=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_scatter(x, y2, showlegend=[true, false])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         fig3 = plot_scatter(x, y2, showlegend=true)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         # y-only
         fig4 = plot_scatter(y2, showlegend=[false, true])
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
     end
 
     @testset "xscale/yscale - stem" begin
         x = 1:10
         y = rand(10)
         fig = plot_stem(x, y, xscale="log", yscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_stem(x, y2, xscale="log")
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         fig3 = plot_stem(y, yscale="log")
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
     end
 
     @testset "showlegend - stem" begin
         x = 1:10
         y2 = [rand(10), rand(10)]
         fig = plot_stem(x, y2, showlegend=[true, false])
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         fig2 = plot_stem(x, y2, showlegend=true)
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         # single trace
         fig3 = plot_stem(x, rand(10), showlegend=false)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         # y-only
         fig4 = plot_stem(y2, showlegend=[false, true])
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
     end
 
     @testset "xscale/yscale/showlegend - bar" begin
         x = 1:5
         y = rand(5)
         fig = plot_bar(x, y, xscale="log", yscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(5), rand(5)]
         fig2 = plot_bar(x, y2, showlegend=[true, false], xscale="log")
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         fig3 = plot_bar(x, y2, showlegend=true)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         fig4 = plot_bar(x, y, showlegend=false)
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
 
         # y-only
         fig5 = plot_bar(y, xscale="log", yscale="log", showlegend=false)
-        @test fig5 isa SyncPlot
+        @test fig5 isa Plot
 
         fig6 = plot_bar(y2, showlegend=[true, false])
-        @test fig6 isa SyncPlot
+        @test fig6 isa Plot
     end
 
     @testset "xscale/yscale/showlegend - histogram" begin
         x = randn(200)
         fig = plot_histogram(x, xscale="log", yscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         xmulti = [randn(100), randn(100) .+ 1.0]
         fig2 = plot_histogram(xmulti, showlegend=[true, false])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         fig3 = plot_histogram(xmulti, showlegend=true)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         fig4 = plot_histogram(x, showlegend=false)
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
     end
 
     @testset "xscale/yscale/showlegend - box" begin
         x = fill("A", 20)
         y = randn(20)
         fig = plot_box(x, y, xscale="log", yscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [randn(20), randn(20)]
         x2 = [fill("A", 20), fill("B", 20)]
         fig2 = plot_box(x2, y2, showlegend=[true, false])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         fig3 = plot_box(x, y, showlegend=false)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         # y-only
         fig4 = plot_box(y2, xscale="log", showlegend=[true, false])
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
 
         fig5 = plot_box(y, showlegend=false)
-        @test fig5 isa SyncPlot
+        @test fig5 isa Plot
 
         fig6 = plot_box(y2, showlegend=true)
-        @test fig6 isa SyncPlot
+        @test fig6 isa Plot
     end
 
     @testset "xscale/yscale/showlegend - violin" begin
         x = fill("A", 20)
         y = randn(20)
         fig = plot_violin(x, y, xscale="log", yscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [randn(20), randn(20)]
         x2 = [fill("A", 20), fill("B", 20)]
         fig2 = plot_violin(x2, y2, showlegend=[true, false])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         fig3 = plot_violin(x, y, showlegend=false)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         # y-only
         fig4 = plot_violin(y2, yscale="log", showlegend=[false, true])
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
 
         fig5 = plot_violin(y, showlegend=false)
-        @test fig5 isa SyncPlot
+        @test fig5 isa Plot
 
         fig6 = plot_violin(y2, showlegend=true)
-        @test fig6 isa SyncPlot
+        @test fig6 isa Plot
     end
 
     @testset "xscale/yscale - heatmap" begin
@@ -1166,10 +1166,10 @@ using PlotlySupply
         y = 1:20
         U = rand(10, 20)
         fig = plot_heatmap(x, y, U, xscale="log", yscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         fig2 = plot_heatmap(U, xscale="log")
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "xscale/yscale - contour" begin
@@ -1177,27 +1177,27 @@ using PlotlySupply
         y = 1:20
         U = rand(10, 20)
         fig = plot_contour(x, y, U, xscale="log", yscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         fig2 = plot_contour(U, yscale="log")
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "marker_size/marker_symbol/showlegend - scatterpolar" begin
         theta = 0:10:350
         r = rand(36)
         fig = plot_scatterpolar(theta, r, mode="markers", marker_size=8, marker_symbol="circle-open")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         r2 = [rand(36), rand(36)]
         fig2 = plot_scatterpolar(theta, r2, marker_size=[6, 10], marker_symbol=["circle", "square"], showlegend=[true, false])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         fig3 = plot_scatterpolar(theta, r2, showlegend=true, marker_size=5)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         fig4 = plot_scatterpolar(theta, r, showlegend=false)
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
     end
 
     @testset "marker_size/marker_symbol/showlegend - scatter3d" begin
@@ -1205,147 +1205,147 @@ using PlotlySupply
         y = 1:10
         z = rand(10)
         fig = plot_scatter3d(x, y, z, mode="markers", marker_size=8, marker_symbol="circle-open")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         z2 = [rand(10), rand(10)]
         x2 = [1:10, 1:10]
         y2 = [1:10, 1:10]
         fig2 = plot_scatter3d(x2, y2, z2, marker_size=[6, 10], marker_symbol=["circle", "square"], showlegend=[true, false])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         fig3 = plot_scatter3d(x2, y2, z2, showlegend=true, marker_size=5)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         fig4 = plot_scatter3d(x, y, z, showlegend=false)
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
     end
 
     @testset "mutating variants - new features" begin
         # scatter!
         fig = plot_scatter(1:10, rand(10))
         plot_scatter!(fig, 1:10, rand(10), xscale="log", yscale="log", marker_size=5, marker_symbol="square", showlegend=false)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         y2 = [rand(10), rand(10)]
         plot_scatter!(fig, 1:10, y2, marker_size=[4, 8], marker_symbol=["circle", "diamond"], showlegend=[true, false])
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         plot_scatter!(fig, y2, xscale="log", marker_size=6, showlegend=true)
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         # stem!
         fig2 = plot_stem(1:5, rand(5))
         plot_stem!(fig2, 1:5, rand(5), xscale="log", yscale="log", showlegend=false)
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         plot_stem!(fig2, 1:5, [rand(5), rand(5)], showlegend=[true, false])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         plot_stem!(fig2, [rand(5), rand(5)], showlegend=true, xscale="log")
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
 
         # bar!
         fig3 = plot_bar(1:5, rand(5))
         plot_bar!(fig3, 1:5, rand(5), xscale="log", yscale="log", showlegend=false)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         plot_bar!(fig3, 1:5, [rand(5), rand(5)], showlegend=[true, false])
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         plot_bar!(fig3, [rand(5), rand(5)], xscale="log", showlegend=true)
-        @test fig3 isa SyncPlot
+        @test fig3 isa Plot
 
         # histogram!
         fig4 = plot_histogram(randn(100))
         plot_histogram!(fig4, randn(100), xscale="log", showlegend=false)
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
 
         plot_histogram!(fig4, [randn(100), randn(100)], showlegend=[true, false])
-        @test fig4 isa SyncPlot
+        @test fig4 isa Plot
 
         # box!
         fig5 = plot_box(fill("A", 20), randn(20))
         plot_box!(fig5, fill("A", 20), randn(20), xscale="log", showlegend=false)
-        @test fig5 isa SyncPlot
+        @test fig5 isa Plot
 
         plot_box!(fig5, [fill("A", 20), fill("B", 20)], [randn(20), randn(20)], showlegend=[true, false])
-        @test fig5 isa SyncPlot
+        @test fig5 isa Plot
 
         plot_box!(fig5, randn(20), showlegend=false)
-        @test fig5 isa SyncPlot
+        @test fig5 isa Plot
 
         plot_box!(fig5, [randn(20), randn(20)], showlegend=[true, false])
-        @test fig5 isa SyncPlot
+        @test fig5 isa Plot
 
         # violin!
         fig6 = plot_violin(fill("A", 20), randn(20))
         plot_violin!(fig6, fill("A", 20), randn(20), yscale="log", showlegend=false)
-        @test fig6 isa SyncPlot
+        @test fig6 isa Plot
 
         plot_violin!(fig6, [fill("A", 20), fill("B", 20)], [randn(20), randn(20)], showlegend=[true, false])
-        @test fig6 isa SyncPlot
+        @test fig6 isa Plot
 
         plot_violin!(fig6, randn(20), showlegend=false)
-        @test fig6 isa SyncPlot
+        @test fig6 isa Plot
 
         plot_violin!(fig6, [randn(20), randn(20)], showlegend=[true, false])
-        @test fig6 isa SyncPlot
+        @test fig6 isa Plot
 
         # heatmap!
         fig7 = plot_heatmap(1:10, 1:20, rand(10, 20))
         plot_heatmap!(fig7, 1:10, 1:20, rand(10, 20), xscale="log", yscale="log")
-        @test fig7 isa SyncPlot
+        @test fig7 isa Plot
 
         plot_heatmap!(fig7, rand(10, 20), xscale="log")
-        @test fig7 isa SyncPlot
+        @test fig7 isa Plot
 
         # contour!
         fig8 = plot_contour(1:10, 1:20, rand(10, 20))
         plot_contour!(fig8, 1:10, 1:20, rand(10, 20), xscale="log", yscale="log")
-        @test fig8 isa SyncPlot
+        @test fig8 isa Plot
 
         plot_contour!(fig8, rand(10, 20), yscale="log")
-        @test fig8 isa SyncPlot
+        @test fig8 isa Plot
 
         # scatterpolar!
         fig9 = plot_scatterpolar(0:10:350, rand(36))
         plot_scatterpolar!(fig9, 0:10:350, rand(36), marker_size=8, marker_symbol="square", showlegend=false)
-        @test fig9 isa SyncPlot
+        @test fig9 isa Plot
 
         plot_scatterpolar!(fig9, 0:10:350, [rand(36), rand(36)], marker_size=[4, 8], showlegend=[true, false])
-        @test fig9 isa SyncPlot
+        @test fig9 isa Plot
 
         # scatter3d!
         fig10 = plot_scatter3d(1:10, 1:10, rand(10))
         plot_scatter3d!(fig10, 1:10, 1:10, rand(10), marker_size=8, marker_symbol="square", showlegend=false)
-        @test fig10 isa SyncPlot
+        @test fig10 isa Plot
 
         plot_scatter3d!(fig10, [1:10, 1:10], [1:10, 1:10], [rand(10), rand(10)], marker_size=[4, 8], showlegend=[true, false])
-        @test fig10 isa SyncPlot
+        @test fig10 isa Plot
     end
 
     @testset "scatter x-vector-of-vectors" begin
         x2 = [collect(1:10), collect(1:10)]
         y2 = [rand(10), rand(10)]
         fig = plot_scatter(x2, y2, marker_size=[4, 8], marker_symbol=["circle", "square"], showlegend=[true, false], xscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
 
         fig2 = plot_scatter(x2, y2, dash=["solid", "dash"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
     end
 
     @testset "stem x-vector-of-vectors" begin
         x2 = [collect(1:5), collect(1:5)]
         y2 = [rand(5), rand(5)]
         fig = plot_stem(x2, y2, showlegend=[true, false], xscale="log")
-        @test fig isa SyncPlot
+        @test fig isa Plot
     end
 
     @testset "scatterpolar theta-vector-of-vectors" begin
         theta2 = [collect(0:10:350), collect(0:10:350)]
         r2 = [rand(36), rand(36)]
         fig = plot_scatterpolar(theta2, r2, marker_size=[4, 8], showlegend=[true, false])
-        @test fig isa SyncPlot
+        @test fig isa Plot
     end
 
     @testset "_apply_showlegend! helper" begin
@@ -1445,12 +1445,12 @@ using PlotlySupply
         x_shared = fill("A", 20)
         y_multi = [randn(20), randn(20) .+ 1.0]
         fig = plot_box(x_shared, y_multi, legend=["g1", "g2"], color=["red", "blue"])
-        @test fig isa SyncPlot
+        @test fig isa Plot
         @test length(fig.data) == 2
 
         # plot_violin with shared x and multi y
         fig2 = plot_violin(x_shared, y_multi, legend=["v1", "v2"], color=["red", "blue"])
-        @test fig2 isa SyncPlot
+        @test fig2 isa Plot
         @test length(fig2.data) == 2
     end
 
@@ -1521,7 +1521,7 @@ using PlotlySupply
     @testset "fontsize in helper-using functions" begin
         # Cover fontsize > 0 branch in _apply_cartesian_plot_options!
         fig = plot_bar(1:5, rand(5), fontsize=14)
-        @test fig isa SyncPlot
+        @test fig isa Plot
     end
 
     @testset "SubplotFigure property access" begin

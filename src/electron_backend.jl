@@ -142,7 +142,7 @@ end
 
 to_syncplot(sp::SyncPlot; kwargs...) = sp
 
-function _maybe_syncplot(fig::Plot; sync::Bool = true, kwargs...)
+function _maybe_syncplot(fig::Plot; sync::Bool = false, kwargs...)
 	return sync ? to_syncplot(fig; kwargs...) : fig
 end
 
@@ -150,7 +150,7 @@ function plot(
 	trace::AbstractTrace,
 	layout::AbstractLayout = Layout();
 	config::PlotConfig = PlotConfig(),
-	sync::Bool = true,
+	sync::Bool = false,
 	kwargs...,
 )
 	return _maybe_syncplot(Plot([trace], layout; config = config); sync = sync, kwargs...)
@@ -160,7 +160,7 @@ function plot(
 	traces::AbstractVector{<:AbstractTrace},
 	layout::AbstractLayout = Layout();
 	config::PlotConfig = PlotConfig(),
-	sync::Bool = true,
+	sync::Bool = false,
 	kwargs...,
 )
 	return _maybe_syncplot(Plot(traces, layout; config = config); sync = sync, kwargs...)
@@ -170,19 +170,19 @@ function plot(
 	traces::AbstractTrace...;
 	layout::AbstractLayout = Layout(),
 	config::PlotConfig = PlotConfig(),
-	sync::Bool = true,
+	sync::Bool = false,
 	kwargs...,
 )
 	return _maybe_syncplot(Plot(collect(traces), layout; config = config); sync = sync, kwargs...)
 end
 
-plot(fig::Plot; sync::Bool = true, kwargs...) = _maybe_syncplot(fig; sync = sync, kwargs...)
+plot(fig::Plot; sync::Bool = false, kwargs...) = _maybe_syncplot(fig; sync = sync, kwargs...)
 
 function plot(
 	;
 	layout::AbstractLayout = Layout(),
 	config::PlotConfig = PlotConfig(),
-	sync::Bool = true,
+	sync::Bool = false,
 	kwargs...,
 )
 	empty_traces = Vector{GenericTrace}(undef, 0)
@@ -305,6 +305,15 @@ function Base.close(sp::SyncPlot)
 		ec = _electroncall()
 		Base.invokelatest(() -> ec.close(sp.window))
 	end
+	return nothing
+end
+
+struct ElectronDisplay <: AbstractDisplay end
+const _DISPLAYED_PLOTS = SyncPlot[]
+
+function Base.display(d::ElectronDisplay, p::Plot)
+	sp = to_syncplot(p)
+	push!(_DISPLAYED_PLOTS, sp)
 	return nothing
 end
 

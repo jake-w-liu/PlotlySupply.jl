@@ -652,7 +652,7 @@ function subplots(
 
 	layout = Layout(Subplots(rows = rows_i, cols = cols_i; subplot_kwargs...))
 	fig = if sync
-		plot(; layout = layout, width = width, height = height, title = title, show = show, app = app)
+		plot(; layout = layout, sync = true, width = width, height = height, title = title, show = show, app = app)
 	else
 		p = Plot(Vector{GenericTrace}(undef, 0), layout)
 		width > 0 && relayout!(p, width = width)
@@ -1657,6 +1657,7 @@ function plot_scatter(
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		trace = Vector{GenericTrace}(undef, length(y))
@@ -1789,7 +1790,7 @@ function plot_scatter(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 """
@@ -1863,6 +1864,7 @@ function plot_scatter(
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -1894,6 +1896,7 @@ function plot_scatter(
 		marker_size = marker_size,
 		marker_symbol = marker_symbol,
 		showlegend = showlegend,
+		show = show,
 	)
 end
 
@@ -1959,6 +1962,7 @@ function plot_stem(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		trace = Vector{GenericTrace}(undef, length(y))
@@ -2113,7 +2117,7 @@ function plot_stem(
 			)
 		end
 	end
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 """
@@ -2175,6 +2179,7 @@ function plot_stem(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -2202,6 +2207,7 @@ function plot_stem(
 		xscale = xscale,
 		yscale = yscale,
 		showlegend = showlegend,
+		show = show,
 		)
 end
 
@@ -2222,6 +2228,7 @@ function plot_bar(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2263,7 +2270,7 @@ function plot_bar(
 		xscale = xscale,
 		yscale = yscale,
 	)
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 function plot_bar(
@@ -2282,6 +2289,7 @@ function plot_bar(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	x = _auto_xvalues(y)
 	return plot_bar(
@@ -2301,6 +2309,7 @@ function plot_bar(
 		xscale = xscale,
 		yscale = yscale,
 		showlegend = showlegend,
+		show = show,
 	)
 end
 
@@ -2322,6 +2331,7 @@ function plot_histogram(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(x, Vector) && eltype(x) <: Vector
 		colorV = _string_kwarg_vector(color, length(x))
@@ -2363,7 +2373,7 @@ function plot_histogram(
 		xscale = xscale,
 		yscale = yscale,
 	)
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 function plot_box(
@@ -2384,6 +2394,7 @@ function plot_box(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2438,7 +2449,7 @@ function plot_box(
 		xscale = xscale,
 		yscale = yscale,
 	)
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 function plot_box(
@@ -2458,6 +2469,7 @@ function plot_box(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2497,7 +2509,7 @@ function plot_box(
 		xscale = xscale,
 		yscale = yscale,
 	)
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 function plot_violin(
@@ -2519,6 +2531,7 @@ function plot_violin(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2576,7 +2589,7 @@ function plot_violin(
 		xscale = xscale,
 		yscale = yscale,
 	)
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 function plot_violin(
@@ -2597,6 +2610,7 @@ function plot_violin(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
@@ -2638,7 +2652,7 @@ function plot_violin(
 		xscale = xscale,
 		yscale = yscale,
 	)
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 """
@@ -2703,6 +2717,7 @@ function plot_scatterpolar(
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(r, Vector) && eltype(r) <: Vector
 		trace = Vector{GenericTrace}(undef, length(r))
@@ -2827,7 +2842,7 @@ function plot_scatterpolar(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 #endregion
@@ -2896,6 +2911,7 @@ function plot_heatmap(
 	equalar::Bool = false,
 	xscale::String = "",
 	yscale::String = "",
+	show::Bool = false,
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
@@ -2972,7 +2988,7 @@ function plot_heatmap(
 	if yscale != ""
 		update_yaxes!(fig, type = yscale)
 	end
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 """
@@ -3031,6 +3047,7 @@ function plot_heatmap(
 	equalar::Bool = false,
 	xscale::String = "",
 	yscale::String = "",
+	show::Bool = false,
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -3048,6 +3065,7 @@ function plot_heatmap(
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
+		show = show,
 	)
 end
 
@@ -3114,6 +3132,7 @@ function plot_contour(
 	equalar::Bool = false,
 	xscale::String = "",
 	yscale::String = "",
+	show::Bool = false,
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
@@ -3190,7 +3209,7 @@ function plot_contour(
 	if yscale != ""
 		update_yaxes!(fig, type = yscale)
 	end
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 """
@@ -3249,6 +3268,7 @@ function plot_contour(
 	equalar::Bool = false,
 	xscale::String = "",
 	yscale::String = "",
+	show::Bool = false,
 )
 	x = collect(0:1:size(U, 1)-1)
 	y = collect(0:1:size(U, 2)-1)
@@ -3266,6 +3286,7 @@ function plot_contour(
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
+		show = show,
 	)
 end
 
@@ -3328,6 +3349,7 @@ function plot_quiver(
     title::String = "",
     fontsize::Int = 0,
     grid::Bool = true,
+    show::Bool = false,
 )
     x_vec = isa(x, AbstractRange) ? collect(x) : x
     y_vec = isa(y, AbstractRange) ? collect(y) : y
@@ -3414,7 +3436,7 @@ function plot_quiver(
     if fontsize > 0
         relayout!(fig, font = attr(size = fontsize))
     end
-    return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+    return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 #endregion
@@ -3489,6 +3511,7 @@ function plot_surface(
 	grid::Bool = true,
 	showaxis::Bool = true,
 	shared_coloraxis::Bool = false,
+	show::Bool = false,
 )
 	if isempty(surfacecolor)
 		trace = surface(x = X, y = Y, z = Z, colorscale = colorscale)
@@ -3560,7 +3583,7 @@ function plot_surface(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 """
@@ -3629,6 +3652,7 @@ function plot_surface(
 	grid::Bool = true,
 	showaxis::Bool = true,
 	shared_coloraxis::Bool = false,
+	show::Bool = false,
 )
 	return plot_surface(
 		collect(0:size(Z, 1)-1),
@@ -3650,6 +3674,7 @@ function plot_surface(
 		grid = grid,
 		showaxis = showaxis,
 		shared_coloraxis = shared_coloraxis,
+		show = show,
 	)
 end
 
@@ -3726,6 +3751,7 @@ function plot_scatter3d(
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	show::Bool = false,
 )
 	if isa(z, Vector) && eltype(z) <: Vector
 		modeV = fill("lines", length(z))
@@ -3860,7 +3886,7 @@ function plot_scatter3d(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 """
@@ -3940,6 +3966,7 @@ function plot_quiver3d(
 	perspective::Bool = true,
 	grid::Bool = true,
 	showaxis::Bool = true,
+	show::Bool = false,
 )
 	trace = cone(
 		x = x,
@@ -4014,7 +4041,7 @@ function plot_quiver3d(
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
-	return to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title)
+	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
 #endregion

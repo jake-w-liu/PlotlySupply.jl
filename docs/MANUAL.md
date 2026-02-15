@@ -57,6 +57,7 @@ When only `y` is provided, x-coordinates are automatically generated as `0:lengt
 | `legend` | `Union{String, Vector{String}}` | `""` | Name of the plot lines |
 | `title` | `String` | `""` | Title of the figure |
 | `grid` | `Bool` | `true` | Whether to show the grid |
+| `show` | `Bool` | `false` | Open an Electron window immediately (returns `SyncPlot` instead of `Plot`) |
 
 #### Examples
 
@@ -109,6 +110,7 @@ plot_stem(y; kwargs...)
 | `legend` | `Union{String, Vector{String}}` | `""` | Name of the plot lines |
 | `title` | `String` | `""` | Title of the figure |
 | `grid` | `Bool` | `true` | Whether to show the grid |
+| `show` | `Bool` | `false` | Open an Electron window immediately (returns `SyncPlot` instead of `Plot`) |
 
 #### Example
 
@@ -150,6 +152,7 @@ plot_scatterpolar(theta, r; kwargs...)
 | `legend` | `Union{String, Vector{String}}` | `""` | Legend of the plot lines |
 | `title` | `String` | `""` | Title of the figure |
 | `grid` | `Bool` | `true` | Whether to show the grid |
+| `show` | `Bool` | `false` | Open an Electron window immediately (returns `SyncPlot` instead of `Plot`) |
 
 #### Example
 
@@ -198,6 +201,7 @@ When only `U` is provided, coordinates are automatically generated as array indi
 | `colorscale` | `String` | `"Jet"` | Color scale for the heatmap |
 | `title` | `String` | `""` | Title of the figure |
 | `equalar` | `Bool` | `false` | Whether to set equal axis |
+| `show` | `Bool` | `false` | Open an Electron window immediately (returns `SyncPlot` instead of `Plot`) |
 
 #### Example
 
@@ -243,6 +247,7 @@ plot_quiver(x, y, u, v; kwargs...)
 | `height` | `Int` | `0` | Height of the figure in pixels |
 | `title` | `String` | `""` | Title of the figure |
 | `grid` | `Bool` | `true` | Whether to show the grid |
+| `show` | `Bool` | `false` | Open an Electron window immediately (returns `SyncPlot` instead of `Plot`) |
 
 #### Example
 
@@ -298,6 +303,7 @@ When only `Z` is provided, coordinate grids are generated from array indices.
 | `grid` | `Bool` | `true` | Whether to display grid lines |
 | `showaxis` | `Bool` | `true` | Whether to show axis lines and labels |
 | `shared_coloraxis` | `Bool` | `false` | Use a shared coloraxis (single colorbar) for multiple surfaces |
+| `show` | `Bool` | `false` | Open an Electron window immediately (returns `SyncPlot` instead of `Plot`) |
 
 #### Example
 
@@ -348,6 +354,7 @@ plot_scatter3d(x, y, z; kwargs...)
 | `perspective` | `Bool` | `true` | If false, uses orthographic projection |
 | `grid` | `Bool` | `true` | Whether to show grid lines |
 | `showaxis` | `Bool` | `true` | Whether to show axis lines and labels |
+| `show` | `Bool` | `false` | Open an Electron window immediately (returns `SyncPlot` instead of `Plot`) |
 
 #### Example
 
@@ -401,6 +408,7 @@ plot_quiver3d(x, y, z, u, v, w; kwargs...)
 | `perspective` | `Bool` | `true` | If false, uses orthographic projection |
 | `grid` | `Bool` | `true` | Controls visibility of grid lines |
 | `showaxis` | `Bool` | `true` | Controls visibility of axis lines and labels |
+| `show` | `Bool` | `false` | Open an Electron window immediately (returns `SyncPlot` instead of `Plot`) |
 
 #### Example
 

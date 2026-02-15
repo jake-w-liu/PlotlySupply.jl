@@ -1,6 +1,6 @@
 name = "PlotlySupply"
 uuid = "a389b534-8bca-4fe3-8ff2-14829cd8824f"
-version = "1.5.0"
+version = "1.6.0"
 authors = ["Jake W. Liu"]
 
 [deps]
