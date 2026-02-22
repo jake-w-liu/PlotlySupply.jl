@@ -459,8 +459,9 @@ end
 # ── Plot method overrides (auto-refresh for displayed plots) ────────
 # When a Plot has been `display()`ed, these overrides push the mutation
 # to the associated Electron window automatically.
-# Installed at runtime via __init__() to avoid precompilation errors
-# from overwriting PlotlyBase methods.
+# Installed at runtime via __init__() behind a precompilation guard so
+# that downstream packages can precompile without triggering
+# eval-into-closed-module or method-overwriting errors (Julia ≥ 1.12).
 
 function _install_plot_method_overrides!()
 	@eval function PlotlyBase.react!(p::Plot, data::AbstractVector{<:AbstractTrace}, layout::Layout)
