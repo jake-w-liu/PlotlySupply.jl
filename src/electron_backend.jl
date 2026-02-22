@@ -215,83 +215,360 @@ function _plotlyjs_refresh!(sp::SyncPlot, data, layout)
 	return nothing
 end
 
+# ── Auto-refresh infrastructure ─────────────────────────────────────
+# Maps a displayed Plot to its SyncPlot so that mutating the Plot
+# (react!, addtraces!, …) automatically refreshes the Electron window.
+const _PLOT_SYNCPLOT_MAP = IdDict{Plot,SyncPlot}()
+
+function _maybe_sync_refresh!(p::Plot)
+	sp = get(_PLOT_SYNCPLOT_MAP, p, nothing)
+	if sp !== nothing && isopen(sp)
+		_plotlyjs_refresh!(sp, p.data, p.layout)
+	end
+	return nothing
+end
+
+# ── Internal mutation helpers (no display refresh) ──────────────────
+# These replicate PlotlyBase's Plot-level logic so that both SyncPlot
+# and Plot methods can share them without dispatch loops.
+
+function _do_react!(p::Plot, data::AbstractVector{<:AbstractTrace}, layout)
+	p.data = data
+	p.layout = layout
+	return p
+end
+
+function _do_addtraces!(p::Plot, traces::AbstractTrace...)
+	push!(p.data, traces...)
+	return p
+end
+
+function _do_addtraces!(p::Plot, i::Int, traces::AbstractTrace...)
+	p.data = vcat(p.data[1:i-1], traces..., p.data[i:end])
+	return p
+end
+
+function _do_deletetraces!(p::Plot, inds::Int...)
+	deleteat!(p.data, inds)
+	return p
+end
+
+function _do_relayout!(p::Plot, args...; kwargs...)
+	relayout!(p.layout, args...; kwargs...)
+	return p
+end
+
+function _do_restyle!(p::Plot, ind::Int, update::AbstractDict = Dict(); kwargs...)
+	restyle!(p.data[ind], 1, update; kwargs...)
+	return p
+end
+
+function _do_restyle!(p::Plot, inds::AbstractVector{Int}, update::AbstractDict = Dict(); kwargs...)
+	N = length(inds)
+	kw = Dict{Symbol,Any}(kwargs)
+	for d in (kw, update)
+		for (k, v) in d
+			d[k] = PlotlyBase._prep_restyle_vec_setindex(v, N)
+		end
+	end
+	map((ind, i) -> restyle!(p.data[ind], i, update; kw...), inds, 1:N)
+	return p
+end
+
+function _do_restyle!(p::Plot, update::AbstractDict = Dict(); kwargs...)
+	_do_restyle!(p, 1:length(p.data), update; kwargs...)
+	return p
+end
+
+function _do_movetraces!(p::Plot, to_end::Int...)
+	ii = collect(to_end)
+	x = p.data[ii]
+	append!(deleteat!(p.data, ii), x)
+	return p
+end
+
+function _do_movetraces!(p::Plot, src::AbstractVector{Int}, dest::AbstractVector{Int})
+	map((i, j) -> PlotlyBase._move_one!(p.data, i, j), src, dest)
+	return p
+end
+
+function _do_extendtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+	for (ix, p_ix) in enumerate(indices)
+		tr = p.data[p_ix]
+		for k in keys(update)
+			v = update[k][ix]
+			tr[k] = vcat(tr[k], v)
+		end
+	end
+	return p
+end
+
+function _do_prependtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+	for (ix, p_ix) in enumerate(indices)
+		tr = p.data[p_ix]
+		for k in keys(update)
+			v = update[k][ix]
+			tr[k] = vcat(v, tr[k])
+		end
+	end
+	return p
+end
+
+function _do_update!(p::Plot, ind::Union{AbstractVector{Int},Int}, update::AbstractDict = Dict(); layout::AbstractLayout = p.layout, kwargs...)
+	_do_relayout!(p; layout.fields...)
+	_do_restyle!(p, ind, update; kwargs...)
+	return p
+end
+
+function _do_update!(p::Plot, update = Dict(); layout::AbstractLayout = p.layout, kwargs...)
+	_do_update!(p, 1:length(p.data), update; layout = layout, kwargs...)
+	return p
+end
+
+function _do_update_xaxes!(p::Plot, args...; kwargs...)
+	update_xaxes!(p.layout, args...; kwargs...)
+	return p
+end
+
+function _do_update_yaxes!(p::Plot, args...; kwargs...)
+	update_yaxes!(p.layout, args...; kwargs...)
+	return p
+end
+
+function _do_update_polars!(p::Plot, args...; kwargs...)
+	update_polars!(p.layout, args...; kwargs...)
+	return p
+end
+
+# ── SyncPlot methods ────────────────────────────────────────────────
+# Each method mutates via _do_*, then pushes the update to Electron.
+
 function PlotlyBase.react!(sp::SyncPlot, data::AbstractVector{<:AbstractTrace}, layout::AbstractLayout)
-	sp.plot = Plot(data, layout; config = sp.plot.config)
+	_do_react!(sp.plot, data, layout)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
 function PlotlyBase.react!(sp::SyncPlot, p::Plot)
+	old = sp.plot
 	sp.plot = p
+	if haskey(_PLOT_SYNCPLOT_MAP, old)
+		delete!(_PLOT_SYNCPLOT_MAP, old)
+		_PLOT_SYNCPLOT_MAP[p] = sp
+	end
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
 function PlotlyBase.relayout!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.relayout!(sp.plot, args...; kwargs...)
+	_do_relayout!(sp.plot, args...; kwargs...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
-function PlotlyBase.restyle!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.restyle!(sp.plot, args...; kwargs...)
+function PlotlyBase.restyle!(sp::SyncPlot, ind::Int, update::AbstractDict = Dict(); kwargs...)
+	_do_restyle!(sp.plot, ind, update; kwargs...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
-function PlotlyBase.addtraces!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.addtraces!(sp.plot, args...; kwargs...)
+function PlotlyBase.restyle!(sp::SyncPlot, inds::AbstractVector{Int}, update::AbstractDict = Dict(); kwargs...)
+	_do_restyle!(sp.plot, inds, update; kwargs...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
-function PlotlyBase.deletetraces!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.deletetraces!(sp.plot, args...; kwargs...)
+function PlotlyBase.restyle!(sp::SyncPlot, update::AbstractDict = Dict(); kwargs...)
+	_do_restyle!(sp.plot, update; kwargs...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
-function PlotlyBase.movetraces!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.movetraces!(sp.plot, args...; kwargs...)
+function PlotlyBase.addtraces!(sp::SyncPlot, traces::AbstractTrace...)
+	_do_addtraces!(sp.plot, traces...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
-function PlotlyBase.extendtraces!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.extendtraces!(sp.plot, args...; kwargs...)
+function PlotlyBase.addtraces!(sp::SyncPlot, i::Int, traces::AbstractTrace...)
+	_do_addtraces!(sp.plot, i, traces...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
-function PlotlyBase.prependtraces!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.prependtraces!(sp.plot, args...; kwargs...)
+function PlotlyBase.deletetraces!(sp::SyncPlot, inds::Int...)
+	_do_deletetraces!(sp.plot, inds...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
-function PlotlyBase.update!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.update!(sp.plot, args...; kwargs...)
+function PlotlyBase.movetraces!(sp::SyncPlot, to_end::Int...)
+	_do_movetraces!(sp.plot, to_end...)
+	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	return sp
+end
+
+function PlotlyBase.movetraces!(sp::SyncPlot, src::AbstractVector{Int}, dest::AbstractVector{Int})
+	_do_movetraces!(sp.plot, src, dest)
+	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	return sp
+end
+
+function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+	_do_extendtraces!(sp.plot, update, indices, maxpoints)
+	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	return sp
+end
+
+function PlotlyBase.prependtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+	_do_prependtraces!(sp.plot, update, indices, maxpoints)
+	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	return sp
+end
+
+function PlotlyBase.update!(sp::SyncPlot, ind::Union{AbstractVector{Int},Int}, update::AbstractDict = Dict(); layout::AbstractLayout = sp.plot.layout, kwargs...)
+	_do_update!(sp.plot, ind, update; layout = layout, kwargs...)
+	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	return sp
+end
+
+function PlotlyBase.update!(sp::SyncPlot, update = Dict(); layout::AbstractLayout = sp.plot.layout, kwargs...)
+	_do_update!(sp.plot, update; layout = layout, kwargs...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
 function PlotlyBase.update_xaxes!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.update_xaxes!(sp.plot, args...; kwargs...)
+	_do_update_xaxes!(sp.plot, args...; kwargs...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
 function PlotlyBase.update_yaxes!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.update_yaxes!(sp.plot, args...; kwargs...)
+	_do_update_yaxes!(sp.plot, args...; kwargs...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
 
 function PlotlyBase.update_polars!(sp::SyncPlot, args...; kwargs...)
-	PlotlyBase.update_polars!(sp.plot, args...; kwargs...)
+	_do_update_polars!(sp.plot, args...; kwargs...)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
 end
+
+# ── Plot method overrides (auto-refresh for displayed plots) ────────
+# When a Plot has been `display()`ed, these overrides push the mutation
+# to the associated Electron window automatically.
+# Installed at runtime via __init__() to avoid precompilation errors
+# from overwriting PlotlyBase methods.
+
+function _install_plot_method_overrides!()
+	@eval function PlotlyBase.react!(p::Plot, data::AbstractVector{<:AbstractTrace}, layout::Layout)
+		_do_react!(p, data, layout)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.relayout!(p::Plot, args...; kwargs...)
+		_do_relayout!(p, args...; kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.restyle!(p::Plot, ind::Int, update::AbstractDict = Dict(); kwargs...)
+		_do_restyle!(p, ind, update; kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.restyle!(p::Plot, inds::AbstractVector{Int}, update::AbstractDict = Dict(); kwargs...)
+		_do_restyle!(p, inds, update; kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.restyle!(p::Plot, update::AbstractDict = Dict(); kwargs...)
+		_do_restyle!(p, update; kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.addtraces!(p::Plot, traces::AbstractTrace...)
+		_do_addtraces!(p, traces...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.addtraces!(p::Plot, i::Int, traces::AbstractTrace...)
+		_do_addtraces!(p, i, traces...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.deletetraces!(p::Plot, inds::Int...)
+		_do_deletetraces!(p, inds...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.movetraces!(p::Plot, to_end::Int...)
+		_do_movetraces!(p, to_end...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.movetraces!(p::Plot, src::AbstractVector{Int}, dest::AbstractVector{Int})
+		_do_movetraces!(p, src, dest)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.extendtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+		_do_extendtraces!(p, update, indices, maxpoints)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.prependtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+		_do_prependtraces!(p, update, indices, maxpoints)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.update!(p::Plot, ind::Union{AbstractVector{Int},Int}, update::AbstractDict = Dict(); layout::Layout = p.layout, kwargs...)
+		_do_update!(p, ind, update; layout = layout, kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.update!(p::Plot, update = Dict(); layout::Layout = p.layout, kwargs...)
+		_do_update!(p, update; layout = layout, kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.update_xaxes!(p::Plot, args...; kwargs...)
+		_do_update_xaxes!(p, args...; kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.update_yaxes!(p::Plot, args...; kwargs...)
+		_do_update_yaxes!(p, args...; kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	@eval function PlotlyBase.update_polars!(p::Plot, args...; kwargs...)
+		_do_update_polars!(p, args...; kwargs...)
+		_maybe_sync_refresh!(p)
+		return p
+	end
+
+	return nothing
+end
+
+# ── Window lifecycle ────────────────────────────────────────────────
 
 Base.isopen(sp::SyncPlot) = try
 	ec = _electroncall()
@@ -308,11 +585,14 @@ function Base.close(sp::SyncPlot)
 	return nothing
 end
 
+# ── Display ─────────────────────────────────────────────────────────
+
 struct ElectronDisplay <: AbstractDisplay end
 const _DISPLAYED_PLOTS = SyncPlot[]
 
 function Base.display(d::ElectronDisplay, p::Plot)
 	sp = to_syncplot(p)
+	_PLOT_SYNCPLOT_MAP[p] = sp
 	push!(_DISPLAYED_PLOTS, sp)
 	return nothing
 end

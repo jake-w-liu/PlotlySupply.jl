@@ -10,4 +10,3 @@ Xd = A_plt .* sind.(T) .* cosd.(P)
 Yd = A_plt .* sind.(T) .* sind.(P)
 fig = plot_surface(Xd, Yd, Zd)
 display(fig)
-
