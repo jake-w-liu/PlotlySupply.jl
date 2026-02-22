@@ -1656,6 +1656,7 @@ function plot_scatter(
 	yscale::String = "",
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
@@ -1697,6 +1698,7 @@ function plot_scatter(
 
 		marker_sizeV = fill(0, length(y))
 		marker_symbolV = fill("", length(y))
+		linewidthV = fill(0.0, length(y))
 		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
 		if !(marker_size isa Vector)
 			fill!(marker_sizeV, marker_size)
@@ -1710,6 +1712,13 @@ function plot_scatter(
 		else
 			for n in eachindex(marker_symbol)
 				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if !(linewidth isa Vector)
+			fill!(linewidthV, linewidth)
+		else
+			for n in eachindex(linewidth)
+				linewidthV[n] = linewidth[n]
 			end
 		end
 		if showlegend isa Bool
@@ -1727,6 +1736,7 @@ function plot_scatter(
 				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				trace[n] = scatter(; trace_kw...)
 			end
@@ -1737,6 +1747,7 @@ function plot_scatter(
 				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				trace[n] = scatter(; trace_kw...)
 			end
@@ -1751,6 +1762,9 @@ function plot_scatter(
 			mk[:symbol] = marker_symbol
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if linewidth isa Real && linewidth > 0
+			trace_kw[:line][:width] = linewidth
+		end
 		if showlegend isa Bool
 			trace_kw[:showlegend] = showlegend
 		end
@@ -1813,6 +1827,7 @@ end
 		yscale::String = "",
 		marker_size::Union{Int, Vector{Int}} = 0,
 		marker_symbol::Union{String, Vector{String}} = "",
+		linewidth::Union{Real, Vector{<:Real}} = 0,
 		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
@@ -1841,6 +1856,7 @@ Plots a rectangular (Cartesian) plot (x-axis not specified).
 - `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 - `marker_size`: Marker size in pixels (default: `0`, can be vector)
 - `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `linewidth`: Line width in pixels (default: `0`, can be vector)
 - `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
@@ -1863,6 +1879,7 @@ function plot_scatter(
 	yscale::String = "",
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
@@ -1895,6 +1912,7 @@ function plot_scatter(
 		yscale = yscale,
 		marker_size = marker_size,
 		marker_symbol = marker_symbol,
+		linewidth = linewidth,
 		showlegend = showlegend,
 		show = show,
 	)
@@ -2672,6 +2690,7 @@ end
 		grid::Bool = true,
 		marker_size::Union{Int, Vector{Int}} = 0,
 		marker_symbol::Union{String, Vector{String}} = "",
+		linewidth::Union{Real, Vector{<:Real}} = 0,
 		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
@@ -2697,6 +2716,7 @@ Plots a polar plot.
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 - `marker_size`: Marker size in pixels (default: `0`, can be vector)
 - `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `linewidth`: Line width in pixels (default: `0`, can be vector)
 - `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
@@ -2716,6 +2736,7 @@ function plot_scatterpolar(
 	grid::Bool = true,
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
@@ -2757,6 +2778,7 @@ function plot_scatterpolar(
 
 		marker_sizeV = fill(0, length(r))
 		marker_symbolV = fill("", length(r))
+		linewidthV = fill(0.0, length(r))
 		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(r))
 		if !(marker_size isa Vector)
 			fill!(marker_sizeV, marker_size)
@@ -2770,6 +2792,13 @@ function plot_scatterpolar(
 		else
 			for n in eachindex(marker_symbol)
 				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if !(linewidth isa Vector)
+			fill!(linewidthV, linewidth)
+		else
+			for n in eachindex(linewidth)
+				linewidthV[n] = linewidth[n]
 			end
 		end
 		if showlegend isa Bool
@@ -2787,6 +2816,7 @@ function plot_scatterpolar(
 				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				trace[n] = scatterpolar(; trace_kw...)
 			end
@@ -2797,6 +2827,7 @@ function plot_scatterpolar(
 				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				trace[n] = scatterpolar(; trace_kw...)
 			end
@@ -2811,6 +2842,9 @@ function plot_scatterpolar(
 			mk[:symbol] = marker_symbol
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if linewidth isa Real && linewidth > 0
+			trace_kw[:line][:width] = linewidth
+		end
 		if showlegend isa Bool
 			trace_kw[:showlegend] = showlegend
 		end
@@ -3700,6 +3734,7 @@ end
 		perspective::Bool = true,
 		grid::Bool = true,
 		showaxis::Bool = true,
+		linewidth::Union{Real, Vector{<:Real}} = 0,
 	)
 
 Plots a 3D scatter or line plot using `PlotlyBase`, with options for customizing appearance and handling multiple curves.
@@ -3720,6 +3755,7 @@ Plots a 3D scatter or line plot using `PlotlyBase`, with options for customizing
 - `grid`: Whether to show grid lines.
 - `showaxis`: Whether to show axis lines and labels.
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default).
+- `linewidth`: Line width in pixels (default: `0`, can be vector).
 
 # Returns
 - A `Plot` object containing the 3D scatter or line plot.
@@ -3750,6 +3786,7 @@ function plot_scatter3d(
 	showaxis::Bool = true,
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
@@ -3781,6 +3818,7 @@ function plot_scatter3d(
 		end
 		marker_sizeV = fill(0, length(z))
 		marker_symbolV = fill("", length(z))
+		linewidthV = fill(0.0, length(z))
 		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(z))
 		if !(marker_size isa Vector)
 			fill!(marker_sizeV, marker_size)
@@ -3794,6 +3832,13 @@ function plot_scatter3d(
 		else
 			for n in eachindex(marker_symbol)
 				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if !(linewidth isa Vector)
+			fill!(linewidthV, linewidth)
+		else
+			for n in eachindex(linewidth)
+				linewidthV[n] = linewidth[n]
 			end
 		end
 		if showlegend isa Bool
@@ -3810,6 +3855,7 @@ function plot_scatter3d(
 			marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 			marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 			!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+			linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 			showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 			trace[n] = scatter3d(; trace_kw...)
 		end
@@ -3823,6 +3869,9 @@ function plot_scatter3d(
 			mk[:symbol] = marker_symbol
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if linewidth isa Real && linewidth > 0
+			trace_kw[:line][:width] = linewidth
+		end
 		if showlegend isa Bool
 			trace_kw[:showlegend] = showlegend
 		end
@@ -4070,6 +4119,7 @@ end
 		yscale::String = "",
 		marker_size::Union{Int, Vector{Int}} = 0,
 		marker_symbol::Union{String, Vector{String}} = "",
+		linewidth::Union{Real, Vector{<:Real}} = 0,
 		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
@@ -4100,6 +4150,7 @@ Adds new scatter traces to an existing figure.
 - `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 - `marker_size`: Marker size in pixels (default: `0`, can be vector)
 - `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `linewidth`: Line width in pixels (default: `0`, can be vector)
 - `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
@@ -4124,6 +4175,7 @@ function plot_scatter!(
 	yscale::String = "",
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -4163,6 +4215,7 @@ function plot_scatter!(
 
 		marker_sizeV = fill(0, length(y))
 		marker_symbolV = fill("", length(y))
+		linewidthV = fill(0.0, length(y))
 		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
 		if !(marker_size isa Vector)
 			fill!(marker_sizeV, marker_size)
@@ -4176,6 +4229,13 @@ function plot_scatter!(
 		else
 			for n in eachindex(marker_symbol)
 				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if !(linewidth isa Vector)
+			fill!(linewidthV, linewidth)
+		else
+			for n in eachindex(linewidth)
+				linewidthV[n] = linewidth[n]
 			end
 		end
 		if showlegend isa Bool
@@ -4193,6 +4253,7 @@ function plot_scatter!(
 				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				push!(_plot_data(fig), scatter(; trace_kw...))
 			end
@@ -4203,6 +4264,7 @@ function plot_scatter!(
 				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				push!(_plot_data(fig), scatter(; trace_kw...))
 			end
@@ -4217,6 +4279,9 @@ function plot_scatter!(
 			mk[:symbol] = marker_symbol
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if linewidth isa Real && linewidth > 0
+			trace_kw[:line][:width] = linewidth
+		end
 		if showlegend isa Bool
 			trace_kw[:showlegend] = showlegend
 		end
@@ -4283,6 +4348,7 @@ end
 		yscale::String = "",
 		marker_size::Union{Int, Vector{Int}} = 0,
 		marker_symbol::Union{String, Vector{String}} = "",
+		linewidth::Union{Real, Vector{<:Real}} = 0,
 		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
@@ -4312,6 +4378,7 @@ Adds new scatter traces to an existing figure (x-axis not specified, uses indice
 - `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
 - `marker_size`: Marker size in pixels (default: `0`, can be vector)
 - `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `linewidth`: Line width in pixels (default: `0`, can be vector)
 - `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
@@ -4335,6 +4402,7 @@ function plot_scatter!(
 	yscale::String = "",
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -4367,6 +4435,7 @@ function plot_scatter!(
 		yscale = yscale,
 		marker_size = marker_size,
 		marker_symbol = marker_symbol,
+		linewidth = linewidth,
 		showlegend = showlegend,
 	)
 end
@@ -5076,6 +5145,7 @@ end
 		grid::Bool = true,
 		marker_size::Union{Int, Vector{Int}} = 0,
 		marker_symbol::Union{String, Vector{String}} = "",
+		linewidth::Union{Real, Vector{<:Real}} = 0,
 		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
@@ -5102,6 +5172,7 @@ Adds new polar scatter traces to an existing figure.
 - `grid`: Whether to show the grid or not (default: `true`)
 - `marker_size`: Marker size in pixels (default: `0`, can be vector)
 - `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `linewidth`: Line width in pixels (default: `0`, can be vector)
 - `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
@@ -5122,6 +5193,7 @@ function plot_scatterpolar!(
 	grid::Bool = true,
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(r, Vector) && eltype(r) <: Vector
@@ -5161,6 +5233,7 @@ function plot_scatterpolar!(
 
 		marker_sizeV = fill(0, length(r))
 		marker_symbolV = fill("", length(r))
+		linewidthV = fill(0.0, length(r))
 		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(r))
 		if !(marker_size isa Vector)
 			fill!(marker_sizeV, marker_size)
@@ -5174,6 +5247,13 @@ function plot_scatterpolar!(
 		else
 			for n in eachindex(marker_symbol)
 				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if !(linewidth isa Vector)
+			fill!(linewidthV, linewidth)
+		else
+			for n in eachindex(linewidth)
+				linewidthV[n] = linewidth[n]
 			end
 		end
 		if showlegend isa Bool
@@ -5191,6 +5271,7 @@ function plot_scatterpolar!(
 				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				push!(_plot_data(fig), scatterpolar(; trace_kw...))
 			end
@@ -5201,6 +5282,7 @@ function plot_scatterpolar!(
 				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				push!(_plot_data(fig), scatterpolar(; trace_kw...))
 			end
@@ -5215,6 +5297,9 @@ function plot_scatterpolar!(
 			mk[:symbol] = marker_symbol
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if linewidth isa Real && linewidth > 0
+			trace_kw[:line][:width] = linewidth
+		end
 		if showlegend isa Bool
 			trace_kw[:showlegend] = showlegend
 		end
@@ -5924,6 +6009,7 @@ end
 		showaxis::Bool = true,
 		marker_size::Union{Int, Vector{Int}} = 0,
 		marker_symbol::Union{String, Vector{String}} = "",
+		linewidth::Union{Real, Vector{<:Real}} = 0,
 		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	)
 
@@ -5957,6 +6043,7 @@ Adds new 3D scatter traces to an existing figure.
 - `showaxis`: Whether to show axis lines and labels (default: `true`)
 - `marker_size`: Marker size in pixels (default: `0`, can be vector)
 - `marker_symbol`: Marker symbol name (default: `""`, can be vector)
+- `linewidth`: Line width in pixels (default: `0`, can be vector)
 - `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
 
 """
@@ -5984,6 +6071,7 @@ function plot_scatter3d!(
 	showaxis::Bool = true,
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(z, Vector) && eltype(z) <: Vector
@@ -6015,6 +6103,7 @@ function plot_scatter3d!(
 
 		marker_sizeV = fill(0, length(z))
 		marker_symbolV = fill("", length(z))
+		linewidthV = fill(0.0, length(z))
 		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(z))
 		if !(marker_size isa Vector)
 			fill!(marker_sizeV, marker_size)
@@ -6028,6 +6117,13 @@ function plot_scatter3d!(
 		else
 			for n in eachindex(marker_symbol)
 				marker_symbolV[n] = marker_symbol[n]
+			end
+		end
+		if !(linewidth isa Vector)
+			fill!(linewidthV, linewidth)
+		else
+			for n in eachindex(linewidth)
+				linewidthV[n] = linewidth[n]
 			end
 		end
 		if showlegend isa Bool
@@ -6044,6 +6140,7 @@ function plot_scatter3d!(
 			marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 			marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
 			!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+			linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
 			showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 			push!(_plot_data(fig), scatter3d(; trace_kw...))
 		end
@@ -6057,6 +6154,9 @@ function plot_scatter3d!(
 			mk[:symbol] = marker_symbol
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
+		if linewidth isa Real && linewidth > 0
+			trace_kw[:line][:width] = linewidth
+		end
 		if showlegend isa Bool
 			trace_kw[:showlegend] = showlegend
 		end

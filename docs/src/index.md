@@ -154,6 +154,7 @@ Most functions accept the following options:
 | `showaxis`      | Show/hide axis lines and ticks            | `true`           |
 | `aspectmode`    | `"auto"`, `"cube"`, `"data"`              | `"auto"`         |
 | `mode`          | `"lines"`, `"markers"`, `"lines+markers"` | `"lines"`        |
+| `linewidth`     | Line width in pixels (scalar or vector)    | `0` (auto)       |
 | `show`          | Open Electron window immediately           | `false`          |
 
 ---
