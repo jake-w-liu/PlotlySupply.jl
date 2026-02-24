@@ -17,9 +17,19 @@ function _plotlykaleido()
 	end
 end
 
+const _KALEIDO_WARMED_UP = Ref(false)
+
 function _ensure_plotlykaleido_running()
 	pk = _plotlykaleido()
 	Base.invokelatest(() -> pk.is_running()) || Base.invokelatest(() -> pk.start())
+	if !_KALEIDO_WARMED_UP[]
+		# Dummy export so Kaleido's internal Chromium loads MathJax before any real
+		# figure is rendered.  Without this, the first PDF export in a fresh process
+		# can embed a "File failed to load: /extensions/MathMenu.js" text artifact.
+		_warmup_p = Plot(scatter(; x = [0], y = [0]))
+		Base.invokelatest(() -> pk.savefig(IOBuffer(), _warmup_p; format = "pdf"))
+		_KALEIDO_WARMED_UP[] = true
+	end
 	return pk
 end
 
