@@ -17,18 +17,64 @@ function _plotlykaleido()
 	end
 end
 
-const _KALEIDO_WARMED_UP = Ref(false)
+"""
+    _kaleido_mathjax_dir(pk) -> String
+
+Find the full MathJax installation inside Kaleido's artifact directory.
+The standalone mathjax artifact is a single combined file without fonts/jax,
+so we use Kaleido's bundled copy which has the complete directory structure.
+"""
+function _kaleido_mathjax_dir(pk)
+	# Kaleido_jll artifact dir contains etc/mathjax/ with the full installation
+	kaleido_jll_root = Base.invokelatest(() -> begin
+		Kaleido_jll = pk.eval(:Kaleido_jll)
+		Kaleido_jll.artifact_dir
+	end)
+	mj = joinpath(kaleido_jll_root, "etc", "mathjax")
+	isdir(mj) && return mj
+	error("Cannot find full MathJax installation in Kaleido artifact at $kaleido_jll_root")
+end
+
+"""
+    _patched_mathjax_url(pk) -> String
+
+Return `file://` URL to a self-contained, patched MathJax directory.  Copies the full
+MathJax installation (~8 MB) from Kaleido's artifact into a depot cache and patches
+`messageStyle:"none"` so MathJax never displays "Loading [MathJax]/..." status text
+that would otherwise be captured as visual artifacts in static PDF export.
+Rebuilds automatically when the source artifact changes (e.g. Kaleido_jll update).
+LaTeX rendering is fully preserved.
+"""
+function _patched_mathjax_url(pk)
+	mj_src = _kaleido_mathjax_dir(pk)
+	cache_dir = joinpath(first(DEPOT_PATH), "plotlysupply_cache", "mathjax")
+	patched = joinpath(cache_dir, "MathJax.js")
+	original = joinpath(mj_src, "MathJax.js")
+	# Track source artifact path — rebuild if Kaleido_jll updates (new artifact hash)
+	source_marker = joinpath(cache_dir, ".source_path")
+	source_changed = !isfile(source_marker) || strip(read(source_marker, String)) != mj_src
+
+	if source_changed || !isfile(patched) || mtime(original) > mtime(patched)
+		# Full rebuild: remove stale cache and copy entire MathJax directory
+		rm(cache_dir; force = true, recursive = true)
+		mkpath(dirname(cache_dir))
+		cp(mj_src, cache_dir)
+		# Patch: suppress all loading status messages (the root cause of visual artifacts)
+		chmod(patched, 0o644)
+		src = read(patched, String)
+		src = replace(src, r"messageStyle:\s*\"normal\"" => "messageStyle:\"none\"")
+		write(patched, src)
+		write(source_marker, mj_src)
+	end
+
+	return string("file://", patched)
+end
 
 function _ensure_plotlykaleido_running()
 	pk = _plotlykaleido()
-	Base.invokelatest(() -> pk.is_running()) || Base.invokelatest(() -> pk.start())
-	if !_KALEIDO_WARMED_UP[]
-		# Dummy export so Kaleido's internal Chromium loads MathJax before any real
-		# figure is rendered.  Without this, the first PDF export in a fresh process
-		# can embed a "File failed to load: /extensions/MathMenu.js" text artifact.
-		_warmup_p = Plot(scatter(; x = [0], y = [0]))
-		Base.invokelatest(() -> pk.savefig(IOBuffer(), _warmup_p; format = "pdf"))
-		_KALEIDO_WARMED_UP[] = true
+	if !Base.invokelatest(() -> pk.is_running())
+		mathjax_url = _patched_mathjax_url(pk)
+		Base.invokelatest(() -> pk.start(; mathjax = mathjax_url))
 	end
 	return pk
 end
