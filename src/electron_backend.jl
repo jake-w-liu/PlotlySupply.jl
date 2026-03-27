@@ -612,3 +612,79 @@ function toggle_devtools(sp::SyncPlot)
 	ec = _electroncall()
 	return Base.invokelatest(() -> ec.toggle_devtools(sp.window))
 end
+
+# ── Hidden export window (for savefig) ──────────────────────────────
+
+const _EXPORT_WINDOW = Ref{Any}(nothing)
+const _EXPORT_APP = Ref{Any}(nothing)
+const _EXPORT_DIVID = Ref{String}("plotlysupply-export")
+
+function _export_window_html(divid::String)
+	return """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body, #$divid { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
+  </style>
+</head>
+<body>
+  <div id="$divid"></div>
+  <script src="$_PLOTLY_CDN_URL" charset="utf-8"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/MathJax.js?config=TeX-AMS-MML_SVG"></script>
+</body>
+</html>
+"""
+end
+
+function _wait_for_plotly(ec, win; timeout_s::Float64 = 10.0)
+	t0 = time()
+	while time() - t0 < timeout_s
+		try
+			result = Base.invokelatest(() -> ec.run(win, "typeof Plotly !== 'undefined' ? 'ready' : 'waiting'"))
+			result == "ready" && return true
+		catch
+		end
+		sleep(0.05)
+	end
+	error("Plotly.js did not load in the export window within $(timeout_s)s")
+end
+
+function _ensure_export_window()
+	ec = _electroncall()
+	# Check if existing window is still alive
+	win_alive = false
+	if _EXPORT_WINDOW[] !== nothing
+		try
+			win_alive = Base.invokelatest(() -> ec.isopen(_EXPORT_WINDOW[]))
+		catch
+			win_alive = false
+		end
+	end
+
+	if !win_alive
+		app = _EXPORT_APP[]
+		if app === nothing
+			app = _default_electron_app(ec)
+			_EXPORT_APP[] = app
+		end
+		divid = _EXPORT_DIVID[]
+		html = _export_window_html(divid)
+		tmpfile = tempname() * ".html"
+		write(tmpfile, html)
+		file_uri = "file://" * tmpfile
+		win = Base.invokelatest(() -> ec.Window(
+			app,
+			file_uri;
+			width = 960,
+			height = 720,
+			title = "PlotlySupply Export",
+			show = false,
+		))
+		_EXPORT_WINDOW[] = win
+		_wait_for_plotly(ec, win)
+	end
+
+	return (ec, _EXPORT_APP[], _EXPORT_WINDOW[], _EXPORT_DIVID[])
+end

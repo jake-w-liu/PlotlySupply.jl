@@ -1,82 +1,147 @@
-const _PLOTLYKALEIDO_PKGID =
-	Base.PkgId(Base.UUID("f2990250-8cf9-495f-b13a-cce12b45703c"), "PlotlyKaleido")
+using Base64
+using Printf: @sprintf
 
-function _plotlykaleido()
-	try
-		return Base.root_module(_PLOTLYKALEIDO_PKGID)
-	catch
-		try
-			Base.require(_PLOTLYKALEIDO_PKGID)
-			return Base.root_module(_PLOTLYKALEIDO_PKGID)
-		catch
-			error(
-				"PlotlyKaleido.jl is required for image export. " *
-				"Run `import Pkg; Pkg.add(\"PlotlyKaleido\")` once in your environment.",
-			)
+_urldecode(s::AbstractString) =
+	replace(s, r"%([0-9A-Fa-f]{2})" => m -> Char(parse(UInt8, m[2:3]; base = 16)))
+
+# ── Minimal JPEG-in-PDF generator ───────────────────────────────────
+
+const _ICC_PROFILE_SIG = UInt8[0x49, 0x43, 0x43, 0x5F, 0x50, 0x52, 0x4F,
+	0x46, 0x49, 0x4C, 0x45, 0x00]  # "ICC_PROFILE\0"
+
+function _jpeg_dimensions(data::Vector{UInt8})
+	i = 1
+	while i < length(data) - 8
+		if data[i] != 0xFF
+			i += 1
+			continue
+		end
+		marker = data[i+1]
+		# SOF0 or SOF2 — contains image dimensions
+		if marker == 0xC0 || marker == 0xC2
+			h = Int(data[i+5]) << 8 | Int(data[i+6])
+			w = Int(data[i+7]) << 8 | Int(data[i+8])
+			return (w, h)
+		elseif marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0 <= marker <= 0xD7)
+			i += 2
+		else
+			seg_len = Int(data[i+2]) << 8 | Int(data[i+3])
+			i += 2 + seg_len
 		end
 	end
+	error("Could not parse JPEG dimensions from SOF marker")
 end
 
-"""
-    _kaleido_mathjax_dir(pk) -> String
-
-Find the full MathJax installation inside Kaleido's artifact directory.
-The standalone mathjax artifact is a single combined file without fonts/jax,
-so we use Kaleido's bundled copy which has the complete directory structure.
-"""
-function _kaleido_mathjax_dir(pk)
-	# Kaleido_jll artifact dir contains etc/mathjax/ with the full installation
-	kaleido_jll_root = Base.invokelatest(() -> begin
-		Kaleido_jll = pk.eval(:Kaleido_jll)
-		Kaleido_jll.artifact_dir
-	end)
-	mj = joinpath(kaleido_jll_root, "etc", "mathjax")
-	isdir(mj) && return mj
-	error("Cannot find full MathJax installation in Kaleido artifact at $kaleido_jll_root")
+function _extract_jpeg_icc(data::Vector{UInt8})
+	chunks = Dict{Int,Vector{UInt8}}()
+	n_chunks = 0
+	i = 1
+	while i < length(data) - 1
+		if data[i] != 0xFF
+			i += 1
+			continue
+		end
+		marker = data[i+1]
+		if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0 <= marker <= 0xD7)
+			i += 2
+		elseif marker == 0xDA  # SOS — start of scan, no more metadata
+			break
+		else
+			i + 3 > length(data) && break
+			seg_len = Int(data[i+2]) << 8 | Int(data[i+3])
+			# APP2 with ICC_PROFILE signature
+			if marker == 0xE2 && seg_len >= 16 &&
+					i + 17 <= length(data) &&
+					data[i+4:i+15] == _ICC_PROFILE_SIG
+				chunk_num = Int(data[i+16])
+				n_chunks = Int(data[i+17])
+				# ICC data starts after the 14-byte header (sig + seq + count)
+				chunks[chunk_num] = data[i+18:i+1+seg_len]
+			end
+			i += 2 + seg_len
+		end
+	end
+	isempty(chunks) && return nothing
+	icc = UInt8[]
+	for j in 1:n_chunks
+		haskey(chunks, j) || return nothing  # missing chunk
+		append!(icc, chunks[j])
+	end
+	return icc
 end
 
-"""
-    _patched_mathjax_url(pk) -> String
+function _write_jpeg_pdf(io::IO, jpeg::Vector{UInt8}, img_w::Int, img_h::Int,
+		page_w::Float64, page_h::Float64)
+	pw = @sprintf("%.4f", page_w)
+	ph = @sprintf("%.4f", page_h)
+	icc = _extract_jpeg_icc(jpeg)
 
-Return `file://` URL to a self-contained, patched MathJax directory.  Copies the full
-MathJax installation (~8 MB) from Kaleido's artifact into a depot cache and patches
-`messageStyle:"none"` so MathJax never displays "Loading [MathJax]/..." status text
-that would otherwise be captured as visual artifacts in static PDF export.
-Rebuilds automatically when the source artifact changes (e.g. Kaleido_jll update).
-LaTeX rendering is fully preserved.
-"""
-function _patched_mathjax_url(pk)
-	mj_src = _kaleido_mathjax_dir(pk)
-	cache_dir = joinpath(first(DEPOT_PATH), "plotlysupply_cache", "mathjax")
-	patched = joinpath(cache_dir, "MathJax.js")
-	original = joinpath(mj_src, "MathJax.js")
-	# Track source artifact path — rebuild if Kaleido_jll updates (new artifact hash)
-	source_marker = joinpath(cache_dir, ".source_path")
-	source_changed = !isfile(source_marker) || strip(read(source_marker, String)) != mj_src
+	content = "q $pw 0 0 $ph 0 0 cm /Img Do Q"
+	content_bytes = Vector{UInt8}(content)
 
-	if source_changed || !isfile(patched) || mtime(original) > mtime(patched)
-		# Full rebuild: remove stale cache and copy entire MathJax directory
-		rm(cache_dir; force = true, recursive = true)
-		mkpath(dirname(cache_dir))
-		cp(mj_src, cache_dir)
-		# Patch: suppress all loading status messages (the root cause of visual artifacts)
-		chmod(patched, 0o644)
-		src = read(patched, String)
-		src = replace(src, r"messageStyle:\s*\"normal\"" => "messageStyle:\"none\"")
-		write(patched, src)
-		write(source_marker, mj_src)
+	# Build objects, tracking byte offsets for xref
+	buf = IOBuffer()
+	write(buf, "%PDF-1.4\n")
+	write(buf, UInt8[0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A])
+
+	offsets = Int[]
+
+	# 1: Catalog
+	push!(offsets, position(buf))
+	write(buf, "1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n")
+
+	# 2: Pages
+	push!(offsets, position(buf))
+	write(buf, "2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n")
+
+	# 3: Page
+	push!(offsets, position(buf))
+	write(buf, "3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 $pw $ph]")
+	write(buf, "/Contents 4 0 R/Resources<</XObject<</Img 5 0 R>>>>>>\nendobj\n")
+
+	# 4: Content stream
+	push!(offsets, position(buf))
+	write(buf, "4 0 obj\n<</Length $(length(content_bytes))>>\nstream\n")
+	write(buf, content_bytes)
+	write(buf, "\nendstream\nendobj\n")
+
+	# 5: Image XObject — use ICCBased colorspace if ICC profile found
+	push!(offsets, position(buf))
+	write(buf, "5 0 obj\n<</Type/XObject/Subtype/Image")
+	write(buf, "/Width $img_w/Height $img_h")
+	if icc !== nothing
+		write(buf, "/ColorSpace[/ICCBased 6 0 R]")
+	else
+		write(buf, "/ColorSpace/DeviceRGB")
+	end
+	write(buf, "/BitsPerComponent 8")
+	write(buf, "/Filter/DCTDecode/Length $(length(jpeg))>>\nstream\n")
+	write(buf, jpeg)
+	write(buf, "\nendstream\nendobj\n")
+
+	if icc !== nothing
+		# 6: ICC profile stream
+		push!(offsets, position(buf))
+		write(buf, "6 0 obj\n<</Length $(length(icc))/N 3/Alternate/DeviceRGB>>\nstream\n")
+		write(buf, icc)
+		write(buf, "\nendstream\nendobj\n")
 	end
 
-	return string("file://", patched)
-end
-
-function _ensure_plotlykaleido_running()
-	pk = _plotlykaleido()
-	if !Base.invokelatest(() -> pk.is_running())
-		mathjax_url = _patched_mathjax_url(pk)
-		Base.invokelatest(() -> pk.start(; mathjax = mathjax_url))
+	# Cross-reference table
+	xref_pos = position(buf)
+	n_objs = length(offsets) + 1
+	write(buf, "xref\n0 $n_objs\n")
+	write(buf, "0000000000 65535 f\r\n")
+	for off in offsets
+		write(buf, @sprintf("%010d 00000 n\r\n", off))
 	end
-	return pk
+
+	# Trailer
+	write(buf, "trailer\n<</Size $n_objs/Root 1 0 R>>\n")
+	write(buf, "startxref\n$xref_pos\n%%EOF\n")
+
+	write(io, take!(buf))
+	return nothing
 end
 
 function make_subplots(; kwargs...)
@@ -115,53 +180,151 @@ function _savefig_html(io::IO, p::Plot)
 	return nothing
 end
 
-const _KALEIDO_EXPORT_KW = Set((:height, :width, :scale))
+const _EXPORT_KW = Set((:height, :width, :scale))
 
-_is_nan_json_error(err) =
-	err isa ArgumentError &&
-	occursin("NaN not allowed to be written in JSON spec", sprint(showerror, err))
-
-function _savefig_kaleido(io::IO, p::Plot, fmt::String, pk::Module; kwargs...)
-	try
-		Base.invokelatest(() -> pk.savefig(io, p; format = fmt, kwargs...))
-		return nothing
-	catch err
-		_is_nan_json_error(err) || rethrow(err)
-
-		# Keep behavior strict: only Kaleido's documented export kwargs are supported.
-		for k in keys(kwargs)
-			k in _KALEIDO_EXPORT_KW || rethrow(err)
-		end
-
-		height = get(kwargs, :height, 500)
-		width = get(kwargs, :width, 700)
-		scale = get(kwargs, :scale, 1)
-		payload = PlotlyBase.JSON.json(
-			(; height = height, width = width, scale = scale, format = fmt, data = p);
-			allownan = true,
-			nan = "null",
-			inf = "null",
-			ninf = "null",
-		)
-
-		if isdefined(pk, :save_payload)
-			Base.invokelatest(() -> pk.save_payload(io, payload, fmt))
-		else
-			# Fallback for older/newer PlotlyKaleido APIs: pass serialized plot directly.
-			Base.invokelatest(() -> pk.savefig(io, payload; format = fmt, kwargs...))
-		end
-		return nothing
+function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwargs...)
+	for k in keys(kwargs)
+		k in _EXPORT_KW || error("Unsupported keyword argument: $k. Supported: height, width, scale.")
 	end
+	height = get(kwargs, :height, 500)
+	width = get(kwargs, :width, 700)
+	scale = get(kwargs, :scale, 1)
+
+	data_js = _json_js(p.data)
+	layout_js = _json_js(p.layout)
+	config_js = _json_js(p.config)
+	divid_js = _json_js(divid)
+
+	js = """
+(async function() {
+  const div = document.getElementById($divid_js);
+  await Plotly.react(div, $data_js, $layout_js, $config_js);
+  const url = await Plotly.toImage(div, {format: "$fmt", width: $width, height: $height, scale: $scale});
+  return url;
+})();
+"""
+	data_url = Base.invokelatest(() -> ec.run(win, js))
+
+	if fmt == "svg"
+		# SVG returns data:image/svg+xml,<url-encoded-svg>
+		prefix = "data:image/svg+xml,"
+		if startswith(data_url, prefix)
+			svg_text = _urldecode(data_url[length(prefix)+1:end])
+			write(io, svg_text)
+		else
+			# Fallback: might be base64 encoded
+			prefix_b64 = "data:image/svg+xml;base64,"
+			if startswith(data_url, prefix_b64)
+				write(io, base64decode(data_url[length(prefix_b64)+1:end]))
+			else
+				write(io, data_url)
+			end
+		end
+	else
+		# PNG/JPEG/WebP return data:<mime>;base64,<data>
+		idx = findfirst(";base64,", data_url)
+		if idx !== nothing
+			b64_start = last(idx) + 1
+			write(io, base64decode(data_url[b64_start:end]))
+		else
+			error("Unexpected data URL format from Plotly.toImage for format '$fmt'")
+		end
+	end
+	return nothing
+end
+
+function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
+	for k in keys(kwargs)
+		k in _EXPORT_KW || error("Unsupported keyword argument: $k. Supported: height, width, scale.")
+	end
+	height = get(kwargs, :height, 500)
+	width = get(kwargs, :width, 700)
+	scale = get(kwargs, :scale, 1)
+
+	data_js = _json_js(p.data)
+	layout_js = _json_js(p.layout)
+	config_js = _json_js(p.config)
+	divid_js = _json_js(divid)
+
+	# Render the plot with explicit dimensions in the export window
+	js_render = """
+(async function() {
+  var div = document.getElementById($divid_js);
+  var layout = Object.assign({}, $layout_js, {width: $width, height: $height});
+  await Plotly.react(div, $data_js, layout, $config_js);
+  return 'ok';
+})();
+"""
+	Base.invokelatest(() -> ec.run(win, js_render))
+
+	# Use Electron's printToPDF for vector output with selectable text.
+	# printToPDF is an async main-process API, so we write to a temp file
+	# and poll for completion.
+	app = Base.invokelatest(() -> getfield(win, :app))
+	win_id = Base.invokelatest(() -> getfield(win, :id))
+	tmpfile = tempname() * ".pdf"
+	tmpfile_js = _json_js(tmpfile)
+
+	# Page size in inches (Electron printToPDF pageSize uses inches)
+	page_w_in = @sprintf("%.6f", width * scale / 96.0)
+	page_h_in = @sprintf("%.6f", height * scale / 96.0)
+
+	js_pdf = """
+	global.__ps_pdf_done = false;
+	global.__ps_pdf_err = null;
+	require('electron').BrowserWindow.fromId($win_id)
+		.webContents.printToPDF({
+			printBackground: true,
+			margins: { marginType: 'none' },
+			pageSize: { width: $page_w_in, height: $page_h_in }
+		})
+		.then(function(buf) {
+			require('fs').writeFileSync($tmpfile_js, buf);
+			global.__ps_pdf_done = true;
+		})
+		.catch(function(err) {
+			global.__ps_pdf_err = err.toString();
+			global.__ps_pdf_done = true;
+		});
+	'started'
+	"""
+	Base.invokelatest(() -> ec.run(app, js_pdf))
+
+	# Poll for completion (up to 15 seconds)
+	for _ in 1:300
+		done = Base.invokelatest(() -> ec.run(app, "global.__ps_pdf_done"))
+		done === true && break
+		sleep(0.05)
+	end
+
+	err = Base.invokelatest(() -> ec.run(app, "global.__ps_pdf_err"))
+	if err !== nothing && err !== false && err != ""
+		rm(tmpfile; force = true)
+		error("printToPDF failed: $err")
+	end
+
+	if !isfile(tmpfile)
+		error("printToPDF timed out or failed to write PDF")
+	end
+
+	pdf_data = read(tmpfile)
+	rm(tmpfile; force = true)
+	write(io, pdf_data)
+	return nothing
 end
 
 function savefig(io::IO, p::Plot; format::AbstractString = "png", kwargs...)
 	fmt = lowercase(String(format))
-	if fmt == "html"
-		return _savefig_html(io, p)
-	end
+	fmt == "html" && return _savefig_html(io, p)
+	fmt == "json" && return (PlotlyBase.JSON.print(io, p); nothing)
+	fmt == "eps" && error("EPS export is not supported. Use \"svg\" or \"pdf\" instead.")
 
-	pk = _ensure_plotlykaleido_running()
-	_savefig_kaleido(io, p, fmt, pk; kwargs...)
+	ec, app, win, divid = _ensure_export_window()
+	if fmt == "pdf"
+		_export_pdf(io, ec, win, divid, p; kwargs...)
+	else
+		_export_image(io, ec, win, divid, p, fmt; kwargs...)
+	end
 	return nothing
 end
 

@@ -879,12 +879,21 @@ using PlotlySupply
 
         html_bytes = savefig(plot_scatter(1:3, rand(3)); format="html")
         @test length(html_bytes) > 0
+
+        # Image export now uses Electron; skip if display backend unavailable.
         try
             svg_bytes = savefig(plot_scatter(1:3, rand(3)); format="svg")
             @test length(svg_bytes) > 0
         catch err
-            @test occursin("PlotlyKaleido", sprint(showerror, err))
+            @test occursin("ElectronCall", sprint(showerror, err)) || occursin("Plotly.js", sprint(showerror, err))
         end
+
+        # JSON export
+        json_bytes = savefig(plot_scatter(1:3, rand(3)); format="json")
+        @test length(json_bytes) > 0
+
+        # EPS should error with suggestion
+        @test_throws ErrorException savefig(plot_scatter(1:3, rand(3)); format="eps")
 
         # Regression: NaN separators (used by quiver-like traces) should still export.
         p_nan = Plot(scatter(x=[1.0, 2.0, NaN, 3.0], y=[1.0, 2.0, NaN, 3.0]), Layout(title="nan-export"))
@@ -892,7 +901,7 @@ using PlotlySupply
             svg_nan = savefig(p_nan; format="svg")
             @test length(svg_nan) > 0
         catch err
-            @test occursin("PlotlyKaleido", sprint(showerror, err))
+            @test occursin("ElectronCall", sprint(showerror, err)) || occursin("Plotly.js", sprint(showerror, err))
         end
 
         html_fn = tempname() * ".html"
