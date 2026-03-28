@@ -246,12 +246,18 @@ function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
 	config_js = _json_js(p.config)
 	divid_js = _json_js(divid)
 
-	# Render the plot with explicit dimensions in the export window
+	# Render the plot with explicit dimensions and inject @page CSS for print
 	js_render = """
 (async function() {
   var div = document.getElementById($divid_js);
   var layout = Object.assign({}, $layout_js, {width: $width, height: $height});
   await Plotly.react(div, $data_js, layout, $config_js);
+  if (!document.getElementById('__ps_print_css')) {
+    var style = document.createElement('style');
+    style.id = '__ps_print_css';
+    style.textContent = '@page { margin: 0 !important; } @media print { html, body { margin: 0 !important; padding: 0 !important; } }';
+    document.head.appendChild(style);
+  }
   return 'ok';
 })();
 """
@@ -275,7 +281,8 @@ function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
 	require('electron').BrowserWindow.fromId($win_id)
 		.webContents.printToPDF({
 			printBackground: true,
-			margins: { marginType: 'none' },
+			preferCSSPageSize: true,
+			margins: { marginType: 'custom', top: 0, bottom: 0, left: 0, right: 0 },
 			pageSize: { width: $page_w_in, height: $page_h_in }
 		})
 		.then(function(buf) {

@@ -626,6 +626,7 @@ function _export_window_html(divid::String)
 <head>
   <meta charset="utf-8" />
   <style>
+    @page { margin: 0; }
     html, body, #$divid { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
   </style>
 </head>
