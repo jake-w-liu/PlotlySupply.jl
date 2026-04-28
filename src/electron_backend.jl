@@ -20,13 +20,23 @@ end
 
 _json_js(x) = replace(PlotlyBase.JSON.json(x; allownan = true), "</script" => "<\\/script")
 
-_is_linux_github_actions_ci() =
-	Sys.islinux() && get(ENV, "GITHUB_ACTIONS", "") == "true"
+# Env vars that signal a CI / agent-sandbox environment where Electron's
+# chrome-sandbox SUID helper is unavailable or local socket bind is blocked.
+# `PLOTLYSUPPLY_DISABLE_ELECTRON_SANDBOX` is the explicit user escape hatch.
+const _SANDBOX_ENV_VARS = (
+	"GITHUB_ACTIONS", "CI",
+	"CODEX_SANDBOX", "CODEX_AUTOMATION",
+	"CLAUDE_CODE_SANDBOX", "AGENT_SANDBOX", "SANDBOX",
+	"PLOTLYSUPPLY_DISABLE_ELECTRON_SANDBOX",
+)
+
+_is_sandboxed_env() = any(
+	v -> lowercase(get(ENV, v, "")) in ("1", "true", "yes", "on"),
+	_SANDBOX_ENV_VARS,
+)
 
 function _default_electron_app(ec)
-	# GitHub Linux runners usually lack SUID sandbox setup for Electron.
-	# Use ElectronCall's CI-friendly security config only in that environment.
-	if _is_linux_github_actions_ci() && isdefined(ec, :development_config)
+	if _is_sandboxed_env() && isdefined(ec, :development_config)
 		security = Base.invokelatest(() -> ec.development_config())
 		return Base.invokelatest(() -> ec.default_application(security))
 	end
@@ -666,6 +676,12 @@ function _ensure_export_window()
 
 	if !win_alive
 		app = _EXPORT_APP[]
+		# Drop cached app if its underlying Electron process has died — otherwise
+		# the next Window() call fails on a dead handle.
+		if app !== nothing && hasproperty(app, :exists) && !app.exists
+			app = nothing
+			_EXPORT_APP[] = nothing
+		end
 		if app === nothing
 			app = _default_electron_app(ec)
 			_EXPORT_APP[] = app
