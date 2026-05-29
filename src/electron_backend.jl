@@ -199,6 +199,11 @@ function plot(
 	return _maybe_syncplot(Plot(empty_traces, layout; config = config); sync = sync, kwargs...)
 end
 
+# Positional-layout form. `make_subplots` and other PlotlyJS-compat helpers call
+# `plot(Layout(...))` with the layout passed positionally; without this method
+# such calls fall through to the variadic error stub in PlotlySupply.jl.
+plot(layout::AbstractLayout; kwargs...) = plot(; layout = layout, kwargs...)
+
 function _plotlyjs_refresh!(sp::SyncPlot, data, layout)
 	isopen(sp) || return nothing
 
