@@ -1,149 +1,34 @@
 using Base64
 using Printf: @sprintf
 
-_urldecode(s::AbstractString) =
-	replace(s, r"%([0-9A-Fa-f]{2})" => m -> Char(parse(UInt8, m[2:3]; base = 16)))
-
-# ── Minimal JPEG-in-PDF generator ───────────────────────────────────
-
-const _ICC_PROFILE_SIG = UInt8[0x49, 0x43, 0x43, 0x5F, 0x50, 0x52, 0x4F,
-	0x46, 0x49, 0x4C, 0x45, 0x00]  # "ICC_PROFILE\0"
-
-function _jpeg_dimensions(data::Vector{UInt8})
-	i = 1
-	while i < length(data) - 8
-		if data[i] != 0xFF
-			i += 1
-			continue
-		end
-		marker = data[i+1]
-		# SOF0 or SOF2 — contains image dimensions
-		if marker == 0xC0 || marker == 0xC2
-			h = Int(data[i+5]) << 8 | Int(data[i+6])
-			w = Int(data[i+7]) << 8 | Int(data[i+8])
-			return (w, h)
-		elseif marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0 <= marker <= 0xD7)
-			i += 2
+# Decode percent-escapes into raw bytes. Decoding into a String of per-byte
+# `Char`s (the old approach) corrupts multi-byte UTF-8 sequences in SVG text;
+# emitting the bytes preserves the original UTF-8 exactly.
+function _urldecode_bytes(s::AbstractString)
+	out = UInt8[]
+	i = firstindex(s)
+	stop = lastindex(s)
+	while i <= stop
+		c = s[i]
+		if c == '%' && i + 2 <= stop
+			push!(out, parse(UInt8, s[(i+1):(i+2)]; base = 16))
+			i += 3
 		else
-			seg_len = Int(data[i+2]) << 8 | Int(data[i+3])
-			i += 2 + seg_len
+			append!(out, codeunits(string(c)))
+			i = nextind(s, i)
 		end
 	end
-	error("Could not parse JPEG dimensions from SOF marker")
+	return out
 end
 
-function _extract_jpeg_icc(data::Vector{UInt8})
-	chunks = Dict{Int,Vector{UInt8}}()
-	n_chunks = 0
-	i = 1
-	while i < length(data) - 1
-		if data[i] != 0xFF
-			i += 1
-			continue
-		end
-		marker = data[i+1]
-		if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0 <= marker <= 0xD7)
-			i += 2
-		elseif marker == 0xDA  # SOS — start of scan, no more metadata
-			break
-		else
-			i + 3 > length(data) && break
-			seg_len = Int(data[i+2]) << 8 | Int(data[i+3])
-			# APP2 with ICC_PROFILE signature
-			if marker == 0xE2 && seg_len >= 16 &&
-					i + 17 <= length(data) &&
-					data[i+4:i+15] == _ICC_PROFILE_SIG
-				chunk_num = Int(data[i+16])
-				n_chunks = Int(data[i+17])
-				# ICC data starts after the 14-byte header (sig + seq + count)
-				chunks[chunk_num] = data[i+18:i+1+seg_len]
-			end
-			i += 2 + seg_len
-		end
-	end
-	isempty(chunks) && return nothing
-	icc = UInt8[]
-	for j in 1:n_chunks
-		haskey(chunks, j) || return nothing  # missing chunk
-		append!(icc, chunks[j])
-	end
-	return icc
-end
+"""
+	make_subplots(; kwargs...)
 
-function _write_jpeg_pdf(io::IO, jpeg::Vector{UInt8}, img_w::Int, img_h::Int,
-		page_w::Float64, page_h::Float64)
-	pw = @sprintf("%.4f", page_w)
-	ph = @sprintf("%.4f", page_h)
-	icc = _extract_jpeg_icc(jpeg)
-
-	content = "q $pw 0 0 $ph 0 0 cm /Img Do Q"
-	content_bytes = Vector{UInt8}(content)
-
-	# Build objects, tracking byte offsets for xref
-	buf = IOBuffer()
-	write(buf, "%PDF-1.4\n")
-	write(buf, UInt8[0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A])
-
-	offsets = Int[]
-
-	# 1: Catalog
-	push!(offsets, position(buf))
-	write(buf, "1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n")
-
-	# 2: Pages
-	push!(offsets, position(buf))
-	write(buf, "2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n")
-
-	# 3: Page
-	push!(offsets, position(buf))
-	write(buf, "3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 $pw $ph]")
-	write(buf, "/Contents 4 0 R/Resources<</XObject<</Img 5 0 R>>>>>>\nendobj\n")
-
-	# 4: Content stream
-	push!(offsets, position(buf))
-	write(buf, "4 0 obj\n<</Length $(length(content_bytes))>>\nstream\n")
-	write(buf, content_bytes)
-	write(buf, "\nendstream\nendobj\n")
-
-	# 5: Image XObject — use ICCBased colorspace if ICC profile found
-	push!(offsets, position(buf))
-	write(buf, "5 0 obj\n<</Type/XObject/Subtype/Image")
-	write(buf, "/Width $img_w/Height $img_h")
-	if icc !== nothing
-		write(buf, "/ColorSpace[/ICCBased 6 0 R]")
-	else
-		write(buf, "/ColorSpace/DeviceRGB")
-	end
-	write(buf, "/BitsPerComponent 8")
-	write(buf, "/Filter/DCTDecode/Length $(length(jpeg))>>\nstream\n")
-	write(buf, jpeg)
-	write(buf, "\nendstream\nendobj\n")
-
-	if icc !== nothing
-		# 6: ICC profile stream
-		push!(offsets, position(buf))
-		write(buf, "6 0 obj\n<</Length $(length(icc))/N 3/Alternate/DeviceRGB>>\nstream\n")
-		write(buf, icc)
-		write(buf, "\nendstream\nendobj\n")
-	end
-
-	# Cross-reference table
-	xref_pos = position(buf)
-	n_objs = length(offsets) + 1
-	write(buf, "xref\n0 $n_objs\n")
-	write(buf, "0000000000 65535 f\r\n")
-	for off in offsets
-		write(buf, @sprintf("%010d 00000 n\r\n", off))
-	end
-
-	# Trailer
-	write(buf, "trailer\n<</Size $n_objs/Root 1 0 R>>\n")
-	write(buf, "startxref\n$xref_pos\n%%EOF\n")
-
-	write(io, take!(buf))
-	return nothing
-end
-
+PlotlyJS-style subplot constructor. Forwards `kwargs` to `PlotlyBase.Subplots`
+(e.g. `rows`, `cols`, `shared_xaxes`, `specs`, `column_widths`) and returns a
+`Plot` with the package default template and Cartesian axis styling applied.
+For the MATLAB-like helper that returns a mutable canvas, see [`subplots`](@ref).
+"""
 function make_subplots(; kwargs...)
 	fig = plot(Layout(Subplots(; kwargs...)))
 	p = _plot_obj(fig)
@@ -153,19 +38,32 @@ function make_subplots(; kwargs...)
 	return fig
 end
 
+"""
+	mgrid(arrays...)
+
+Build broadcasted coordinate grids from 1-D `arrays`, NumPy `mgrid`-style. For
+inputs of lengths `(n₁, n₂, …)` returns a vector of arrays each of shape
+`(n₁, n₂, …)`, where the `i`-th output varies along its `i`-th dimension. The
+element type of each input is preserved.
+
+```julia
+X, Y = mgrid(1:3, 1:2)   # X[i,j] = i, Y[i,j] = j
+```
+"""
 function mgrid(arrays...)
 	lengths = collect(length.(arrays))
 	ones_vec = ones(Int, length(arrays))
-	out = []
-	for i in eachindex(arrays)
+	grids = map(eachindex(arrays)) do i
 		repeats = copy(lengths)
 		repeats[i] = 1
 
 		shape = copy(ones_vec)
 		shape[i] = lengths[i]
-		push!(out, reshape(arrays[i], shape...) .* ones(repeats...))
+		# `repeat(...; outer)` preserves the element type (the old `.* ones(...)`
+		# trick force-promoted integer inputs to Float64 and yielded Vector{Any}).
+		repeat(reshape(collect(arrays[i]), shape...); outer = repeats)
 	end
-	return out
+	return collect(grids)
 end
 
 function _savefig_html(io::IO, p::Plot)
@@ -209,8 +107,7 @@ function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwa
 		# SVG returns data:image/svg+xml,<url-encoded-svg>
 		prefix = "data:image/svg+xml,"
 		if startswith(data_url, prefix)
-			svg_text = _urldecode(data_url[length(prefix)+1:end])
-			write(io, svg_text)
+			write(io, _urldecode_bytes(data_url[length(prefix)+1:end]))
 		else
 			# Fallback: might be base64 encoded
 			prefix_b64 = "data:image/svg+xml;base64,"
@@ -246,11 +143,12 @@ function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
 	config_js = _json_js(p.config)
 	divid_js = _json_js(divid)
 
-	# Render the plot with explicit dimensions and inject @page CSS for print
+	# Render the plot at the scaled dimensions so it fills the (scaled) PDF page
+	# — otherwise `scale>1` enlarges the page but not the plot, leaving blank space.
 	js_render = """
 (async function() {
   var div = document.getElementById($divid_js);
-  var layout = Object.assign({}, $layout_js, {width: $width, height: $height});
+  var layout = Object.assign({}, $layout_js, {width: $(width * scale), height: $(height * scale)});
   await Plotly.react(div, $data_js, layout, $config_js);
   if (!document.getElementById('__ps_print_css')) {
     var style = document.createElement('style');
@@ -320,6 +218,26 @@ function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
 	return nothing
 end
 
+"""
+	savefig(filename, fig; format=nothing, kwargs...)
+	savefig(fig, filename; kwargs...)
+	savefig(io::IO, fig; format="png", kwargs...)
+	savefig(fig; format="png", kwargs...) -> Vector{UInt8}
+
+Export a `Plot`, `SyncPlot`, or `SubplotFigure` to a file, stream, or byte
+vector. When a `filename` is given and `format` is `nothing`, the format is
+inferred from the extension (defaulting to `png`).
+
+Supported formats: `"png"`, `"jpeg"`, `"svg"`, `"pdf"`, `"html"`, `"json"`.
+`html` and `json` are produced in-process and need no external dependency;
+`png`/`jpeg`/`svg`/`pdf` are rendered through PlotlySupply's internal Electron
+export window (so they require a working Electron, but no Kaleido/Python).
+
+# Keyword Arguments
+- `format`: Override the output format (otherwise inferred from the extension).
+- `width`, `height`: Image size in pixels (raster/SVG/PDF; default `700`×`500`).
+- `scale`: Resolution multiplier for raster output / page-size multiplier for PDF.
+"""
 function savefig(io::IO, p::Plot; format::AbstractString = "png", kwargs...)
 	fmt = lowercase(String(format))
 	fmt == "html" && return _savefig_html(io, p)

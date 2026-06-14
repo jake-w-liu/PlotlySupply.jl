@@ -1683,4 +1683,217 @@ using PlotlySupply
         @test PlotlySupply._first_or_empty(["hello", "world"]) == "hello"
         @test PlotlySupply._first_or_empty("test") == "test"
     end
+
+    # ─────────────────────────────────────────────────────────────────
+    # Regression tests for the CRC (correct/robust/complete) bug-fix pass
+    # ─────────────────────────────────────────────────────────────────
+
+    @testset "CRC: helpers _scalar_or_first / _safe_tick0" begin
+        @test PlotlySupply._scalar_or_first(5, 0) == 5
+        @test PlotlySupply._scalar_or_first([7, 8], 0) == 7
+        @test PlotlySupply._scalar_or_first(Int[], 0) == 0
+        @test PlotlySupply._safe_tick0([3, 1, 2]) == 1.0
+        @test PlotlySupply._safe_tick0([[3.0, 4.0], [1.0, 2.0]]) == 1.0   # nested
+        @test PlotlySupply._safe_tick0(Float64[]) === nothing            # empty
+        @test PlotlySupply._safe_tick0([NaN, Inf]) === nothing           # non-finite
+    end
+
+    @testset "CRC: scatter mode is valid 'lines' (never 'line')" begin
+        f = plot_scatter(1:10, [sin.(1:10), cos.(1:10)]; mode=["markers"])
+        @test f.data[1].fields[:mode] == "markers"
+        @test f.data[2].fields[:mode] == "lines"          # trailing default, not "line"
+        fp = plot_scatterpolar([[0,90,180],[0,90,180]], [[1,2,3],[3,2,1]]; mode=["markers"])
+        @test fp.data[2].fields[:mode] == "lines"
+    end
+
+    @testset "CRC: multi-series tick0 is scalar, not a Vector" begin
+        f = plot_scatter(1:10, [sin.(1:10), cos.(1:10)])
+        @test get(f.layout.yaxis, :tick0, 0.0) isa Real
+        @test get(f.layout.xaxis, :tick0, 0.0) isa Real
+    end
+
+    @testset "CRC: single-trace Vector kwargs are scalarized" begin
+        f = plot_scatter([1.0, 2, 3]; mode=["markers"], color=["red"], dash=["dot"], legend=["foo"])
+        tr = f.data[1].fields
+        @test tr[:mode] == "markers"
+        @test tr[:name] == "foo"
+        @test tr[:line][:color] == "red"
+        @test tr[:line][:dash] == "dot"
+    end
+
+    @testset "CRC: empty input does not crash" begin
+        @test plot_scatter(Float64[]) isa Plot
+        @test plot_stem(Float64[]) isa Plot
+    end
+
+    @testset "CRC: stem honors color (marker + stem lines)" begin
+        f = plot_stem([0, 1, 2], [3.0, 4.0, 5.0]; color="red")
+        @test f.data[1].fields[:marker][:color] == "red"        # head marker colored
+        @test !haskey(f.data[1].fields, :line)                  # no unused line on markers trace
+        @test f.data[2].fields[:line][:color] == "red"          # stem line colored
+        # default (no color) keeps black stems
+        g = plot_stem([0, 1], [1.0, 2.0])
+        @test g.data[2].fields[:line][:color] == "black"
+    end
+
+    @testset "CRC: scatterpolar has no default sector (full circle)" begin
+        f = plot_scatterpolar([0, 90, 180], [1, 2, 3])
+        @test !haskey(f.layout.fields, :polar)
+        f2 = plot_scatterpolar([0, 90, 180], [1, 2, 3]; trange=[0, 180])
+        @test haskey(f2.layout.fields, :polar)
+        # mutating variant: no data-extent sector, polar grid (not cartesian)
+        g = plot_scatterpolar([0, 90, 180], [1, 2, 3])
+        plot_scatterpolar!(g, [0, 90, 180], [3, 2, 1]; grid=false)
+        @test !haskey(g.layout.fields, :xaxis)   # grid=false must not touch cartesian axes
+        sect = haskey(g.layout.fields, :polar) ?
+            get(PlotlySupply._symbol_dict(g.layout.fields[:polar]), :sector, nothing) : nothing
+        @test sect === nothing                     # no auto-clip to data extent
+    end
+
+    @testset "CRC: box/violin points=true normalized; group mode" begin
+        b = plot_box([1, 2], [[1.0, 2, 3], [4.0, 5, 6]]; points=true)
+        @test b.data[1].fields[:boxpoints] == "all"
+        @test b.layout.fields[:boxmode] == "group"
+        v = plot_violin([1, 2], [[1.0, 2, 3], [4.0, 5, 6]]; points=true)
+        @test v.data[1].fields[:points] == "all"
+        @test v.layout.fields[:violinmode] == "group"
+    end
+
+    @testset "CRC: heatmap/contour omit empty colorscale, keep given one" begin
+        @test !haskey(plot_heatmap(rand(3, 3)).data[1].fields, :colorscale)
+        @test plot_heatmap(rand(3, 3); colorscale="Viridis").data[1].fields[:colorscale] == "Viridis"
+        @test !haskey(plot_contour(rand(3, 3)).data[1].fields, :colorscale)
+        # mutating variants too
+        h = plot_heatmap(rand(3, 3)); plot_heatmap!(h, rand(3, 3))
+        @test !haskey(h.data[2].fields, :colorscale)
+    end
+
+    @testset "CRC: dead dx/dy removed; no stray scene in 2-D layouts" begin
+        @test !haskey(plot_heatmap(rand(3, 3)).layout.fields, :scene)
+        @test !haskey(plot_contour(rand(3, 3)).layout.fields, :scene)
+    end
+
+    @testset "CRC: 3-D ranges target scene axes (not top-level)" begin
+        for f in (plot_surface(rand(4, 4); xrange=[0, 3], yrange=[1, 2], zrange=[-1, 1]),
+                  plot_scatter3d(1:3, 1:3, 1:3; zrange=[-1, 1]),
+                  plot_quiver3d([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]; zrange=[-1, 1]))
+            @test !haskey(f.layout.fields, :yaxis)   # no stray top-level cartesian axis
+            sc = PlotlySupply._symbol_dict(f.layout.fields[:scene])
+            zr = PlotlySupply._symbol_dict(sc[:zaxis])
+            @test get(zr, :range, nothing) == [-1, 1]
+        end
+        f = plot_surface(rand(4, 4); xrange=[0, 3], yrange=[1, 2])
+        sc = PlotlySupply._symbol_dict(f.layout.fields[:scene])
+        @test PlotlySupply._symbol_dict(sc[:xaxis])[:range] == [0, 3]
+        @test PlotlySupply._symbol_dict(sc[:yaxis])[:range] == [1, 2]
+    end
+
+    @testset "CRC: scatter3d broadcasts shared 1-D x/y over z-series" begin
+        f = plot_scatter3d(1:3, 1:3, [[1.0, 2, 3], [4.0, 5, 6]]; legend=["a", "b"])
+        @test length(f.data) == 2
+        @test collect(f.data[2].fields[:x]) == [1, 2, 3]
+        @test collect(f.data[2].fields[:z]) == [4.0, 5.0, 6.0]
+        # mutating variant
+        g = plot_scatter3d(1:3, 1:3, 1:3)
+        plot_scatter3d!(g, 1:3, 1:3, [[7.0, 8, 9]])
+        @test length(g.data) == 2
+    end
+
+    @testset "CRC: quiver3d accepts vector color uniformly" begin
+        q = plot_quiver3d([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]; color=["red"])
+        @test q.data[1].fields[:colorscale] == [[0, "red"], [1, "red"]]
+        @test q.data[1].fields[:showscale] == false
+        @test !haskey(plot_quiver3d([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]).data[1].fields, :colorscale)
+    end
+
+    @testset "CRC: quiver robustness (length guard + zero field)" begin
+        @test_throws ArgumentError plot_quiver([1.0], [1.0], [1.0, 2.0], [1.0])
+        @test_throws ArgumentError plot_quiver!(plot_scatter(1:2, 1:2), [1.0], [1.0], [1.0, 2.0], [1.0])
+        local q
+        @test (q = (@test_logs (:warn,) plot_quiver([0.0, 1], [0.0, 1], [0.0, 0], [0.0, 0]))) isa Plot
+    end
+
+    @testset "CRC: mutating constructors preserve a user template" begin
+        f = plot_scatter(1:5, rand(5)); set_template!(f, "plotly_dark")
+        plot_scatter!(f, 1:5, rand(5))
+        @test f.layout.fields[:template] == :plotly_dark
+        g = plot_bar(1:3, rand(3)); set_template!(g, "seaborn"); plot_bar!(g, 1:3, rand(3))
+        @test g.layout.fields[:template] == :seaborn
+        h = plot_heatmap(rand(3, 3)); set_template!(h, "plotly_dark"); plot_heatmap!(h, rand(3, 3))
+        @test h.layout.fields[:template] == :plotly_dark
+    end
+
+    @testset "CRC: _apply_showlegend! tolerates over-long vector" begin
+        @test plot_bar([1, 2, 3]; showlegend=[true, false, true, false]) isa Plot
+        b = plot_box([1.0, 2, 3]; showlegend=[true])   # vector for single trace
+        @test b.data[1].fields[:showlegend] == true
+    end
+
+    @testset "CRC: legend block gating + forced visibility" begin
+        f = plot_scatter(1:5, rand(5))                    # unnamed single trace
+        @test !haskey(f.layout.fields, :legend)
+        @test plot_scatter(1:5, rand(5); legend="a").layout.fields[:legend][:xanchor] == "right"
+        set_legend!(f; position=:topright, showlegend=true)
+        @test f.layout.fields[:showlegend] == true
+        @test haskey(f.layout.fields, :legend)
+    end
+
+    @testset "CRC: normalize warns on invalid template / legend position" begin
+        @test (@test_logs (:warn,) PlotlySupply._normalize_template("does_not_exist")) == :plotly_white
+        @test (@test_logs (:warn,) PlotlySupply._normalize_legend_position("nowhere")) == :topright
+    end
+
+    @testset "CRC: _json_js escapes all close-tag sequences" begin
+        @test !occursin("</", PlotlySupply._json_js("</SCRIPT>"))
+        @test occursin("<\\/", PlotlySupply._json_js("</SCRIPT>"))
+        @test !occursin("</", PlotlySupply._json_js(Dict(:k => "a</Style>b")))
+    end
+
+    @testset "CRC: _file_uri encodes spaces" begin
+        @test PlotlySupply._file_uri("/tmp/a b.html") == "file:///tmp/a%20b.html"
+    end
+
+    @testset "CRC: _urldecode_bytes preserves UTF-8" begin
+        @test String(PlotlySupply._urldecode_bytes("%E4%B8%AD%E6%96%87")) == "中文"
+        @test String(PlotlySupply._urldecode_bytes("a%2Fb")) == "a/b"
+    end
+
+    @testset "CRC: mgrid is type-stable and value-correct" begin
+        g = mgrid(1:3, 1:2)
+        @test eltype(g[1]) == Int && eltype(g[2]) == Int
+        @test g[1] == [1 1; 2 2; 3 3]
+        @test g[2] == [1 2; 1 2; 1 2]
+        @test eltype(mgrid(1.0:3.0, 1.0:2.0)[1]) == Float64
+    end
+
+    @testset "CRC: meshgrid is reexported" begin
+        Y, X = meshgrid(1:2, 1:3)
+        @test size(X) == (3, 2)
+    end
+
+    @testset "CRC: savefig json/html work headlessly" begin
+        f = plot_scatter(1:5, rand(5); title="α中文")
+        io = IOBuffer(); savefig(io, f; format="json"); js = String(take!(io))
+        @test occursin("scatter", js)
+        io2 = IOBuffer(); savefig(io2, f; format="html"); html = String(take!(io2))
+        @test occursin("Plotly", html)
+        bytes = savefig(f; format="json")
+        @test bytes isa Vector{UInt8} && !isempty(bytes)
+    end
+
+    @testset "CRC: SubplotFigure delegations + secondary-y" begin
+        sf = PlotlySupply.subplots(1, 1; sync=false, show=false)
+        @test relayout!(sf; title="t") === sf
+        @test sf.plot.layout.fields[:title] == "t"
+        @test update_xaxes!(sf; showgrid=false) === sf
+        io = IOBuffer(); savefig(io, sf; format="json")
+        @test !isempty(take!(io))
+        # secondary-y label targets yaxis2
+        sf2 = PlotlySupply.subplots(1, 1; sync=false, show=false,
+            specs=fill(PlotlySupply.Spec(secondary_y=true), 1, 1))
+        plot_scatter!(sf2, 1:3, [1.0, 2, 3])
+        plot_scatter!(sf2, 1:3, [10.0, 20, 30]; secondary_y=true)
+        ylabel!(sf2, "secondary"; secondary_y=true)
+        @test haskey(sf2.plot.layout.fields, :yaxis2)
+    end
 end

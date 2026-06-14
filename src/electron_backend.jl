@@ -18,7 +18,20 @@ function _electroncall()
 	end
 end
 
-_json_js(x) = replace(PlotlyBase.JSON.json(x; allownan = true), "</script" => "<\\/script")
+# Escape every "</" as "<\/" so no close-tag sequence (in any case, e.g.
+# "</script", "</SCRIPT", "</Style") can break out of the inline <script> block.
+# In a JS string literal "\/" decodes back to "/", so JSON semantics are intact.
+_json_js(x) = replace(PlotlyBase.JSON.json(x; allownan = true), "</" => "<\\/")
+
+# Build a well-formed file:// URI from an absolute local path. On Windows a
+# drive-letter path needs a leading '/' and backslashes become forward slashes;
+# spaces (common in temp paths) are percent-encoded so Chromium loads the file.
+function _file_uri(path::AbstractString)
+	p = replace(path, "\\" => "/")
+	Sys.iswindows() && !startswith(p, "/") && (p = "/" * p)
+	p = replace(p, " " => "%20")
+	return "file://" * p
+end
 
 # Env vars that signal a CI / agent-sandbox environment where Electron's
 # chrome-sandbox SUID helper is unavailable or local socket bind is blocked.
@@ -108,7 +121,7 @@ function _create_syncplot_window(
 	# size limit in Chromium, causing blank windows for large datasets.
 	tmpfile = tempname() * ".html"
 	write(tmpfile, html)
-	file_uri = "file://" * tmpfile
+	file_uri = _file_uri(tmpfile)
 
 	win = Base.invokelatest(() -> ec.Window(
 		electron_app,
@@ -598,6 +611,14 @@ function Base.close(sp::SyncPlot)
 		ec = _electroncall()
 		Base.invokelatest(() -> ec.close(sp.window))
 	end
+	# Deregister so the SyncPlot is no longer pinned by the auto-refresh
+	# registries; once unreferenced its finalizer can run and reclaim the temp
+	# HTML file. (We only prune on an explicit close — never on a possibly
+	# transient isopen()==false — so a live window is never dropped by mistake.)
+	filter!(x -> x !== sp, _DISPLAYED_PLOTS)
+	for k in collect(keys(_PLOT_SYNCPLOT_MAP))
+		_PLOT_SYNCPLOT_MAP[k] === sp && delete!(_PLOT_SYNCPLOT_MAP, k)
+	end
 	return nothing
 end
 
@@ -607,6 +628,10 @@ struct ElectronDisplay <: AbstractDisplay end
 const _DISPLAYED_PLOTS = SyncPlot[]
 
 function Base.display(d::ElectronDisplay, p::Plot)
+	# If this exact Plot was displayed before, close the stale window first so
+	# re-displaying does not leak the previous SyncPlot/window/temp file.
+	old = get(_PLOT_SYNCPLOT_MAP, p, nothing)
+	old === nothing || close(old)
 	sp = to_syncplot(p)
 	_PLOT_SYNCPLOT_MAP[p] = sp
 	push!(_DISPLAYED_PLOTS, sp)
@@ -633,6 +658,11 @@ end
 const _EXPORT_WINDOW = Ref{Any}(nothing)
 const _EXPORT_APP = Ref{Any}(nothing)
 const _EXPORT_DIVID = Ref{String}("plotlysupply-export")
+# Path of the export window's temp HTML file, so it can be reclaimed when the
+# window is recreated and at process exit (the persistent window holds it open
+# while alive, so we must not rm it immediately).
+const _EXPORT_TMPFILE = Ref{String}("")
+const _EXPORT_ATEXIT_REGISTERED = Ref{Bool}(false)
 
 function _export_window_html(divid::String)
 	return """
@@ -693,9 +723,19 @@ function _ensure_export_window()
 		end
 		divid = _EXPORT_DIVID[]
 		html = _export_window_html(divid)
+		# Reclaim the previous export HTML file (its window is gone) before
+		# orphaning it, and ensure a single atexit hook removes the last one.
+		isempty(_EXPORT_TMPFILE[]) || (try rm(_EXPORT_TMPFILE[]; force = true) catch end)
 		tmpfile = tempname() * ".html"
 		write(tmpfile, html)
-		file_uri = "file://" * tmpfile
+		_EXPORT_TMPFILE[] = tmpfile
+		if !_EXPORT_ATEXIT_REGISTERED[]
+			atexit() do
+				isempty(_EXPORT_TMPFILE[]) || (try rm(_EXPORT_TMPFILE[]; force = true) catch end)
+			end
+			_EXPORT_ATEXIT_REGISTERED[] = true
+		end
+		file_uri = _file_uri(tmpfile)
 		win = Base.invokelatest(() -> ec.Window(
 			app,
 			file_uri;

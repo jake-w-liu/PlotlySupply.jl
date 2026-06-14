@@ -57,7 +57,11 @@ const _DEFAULT_LEGEND_BORDERWIDTH = Ref{Float64}(1.0)
 
 _normalize_template(template) = begin
 	template_sym = Symbol(template)
-	return template_sym in _VALID_TEMPLATES ? template_sym : :plotly_white
+	if template_sym in _VALID_TEMPLATES
+		return template_sym
+	end
+	@warn "Unrecognized template $(repr(template)); falling back to :plotly_white." valid = _VALID_TEMPLATES
+	return :plotly_white
 end
 
 function _normalize_legend_position(position)
@@ -83,7 +87,11 @@ function _normalize_legend_position(position)
 	else
 		pos
 	end
-	return pos in _VALID_LEGEND_POSITIONS ? pos : :topright
+	if pos in _VALID_LEGEND_POSITIONS
+		return pos
+	end
+	@warn "Unrecognized legend position $(repr(position)); falling back to :topright." valid = _VALID_LEGEND_POSITIONS
+	return :topright
 end
 
 """
@@ -114,9 +122,12 @@ end
 """
 	set_default_legend_position!(position = :topright)
 
-Set the package-wide default legend position.
-Accepted symbols include `:topright`, `:top`, `:topleft`, `:right`,
-`:center`, `:left`, `:bottomright`, `:bottom`, and `:bottomleft`.
+Set the package-wide default legend position. Accepted symbols are
+`:topright`, `:top`, `:topleft`, `:right`, `:center`, `:left`, `:bottomright`,
+`:bottom`, `:bottomleft`, and the outside placements `:outside_right`,
+`:outside_left`, `:outside_top`, and `:outside_bottom`. Hyphen/space/alias
+forms (e.g. `"top-left"`, `"upper right"`, `:outside`) are normalized, and an
+unrecognized value warns and falls back to `:topright`.
 """
 function set_default_legend_position!(position = :topright)
 	_DEFAULT_LEGEND_POSITION[] = _normalize_legend_position(position)
@@ -178,6 +189,22 @@ function _apply_default_cartesian_axes!(fig)
 			ticks = "outside",
 			automargin = true,
 		)
+	end
+	return nothing
+end
+
+# Apply axis ranges to a 3D `scene` (not the top-level Cartesian axes, which a
+# 3D plot does not use). `relayout!` merges into the existing scene, so each
+# axis range is set without clobbering titles/aspectmode or the other axes.
+function _apply_scene_ranges!(fig; xrange, yrange, zrange)
+	if !all(xrange .== [0, 0])
+		relayout!(fig, scene = attr(xaxis = attr(range = xrange)))
+	end
+	if !all(yrange .== [0, 0])
+		relayout!(fig, scene = attr(yaxis = attr(range = yrange)))
+	end
+	if !all(zrange .== [0, 0])
+		relayout!(fig, scene = attr(zaxis = attr(range = zrange)))
 	end
 	return nothing
 end
@@ -328,10 +355,14 @@ function _legend_anchor(
 	ybottom = ydom[1] + (ydom[2] - ydom[1]) * ypad
 	ytop = ydom[2] - (ydom[2] - ydom[1]) * ypad
 	ycenter = 0.5 * (ydom[1] + ydom[2])
-	xoutside_right = xdom[2] + (xdom[2] - xdom[1]) * xpad
-	xoutside_left = xdom[1] - (xdom[2] - xdom[1]) * xpad
-	youtside_top = ydom[2] + (ydom[2] - ydom[1]) * ypad
-	youtside_bottom = ydom[1] - (ydom[2] - ydom[1]) * ypad
+	# Outside offsets are a *fixed* paper delta (the inset pad itself), not scaled
+	# by the subplot domain width — otherwise a small subplot pushes the legend
+	# only a hair outside its domain (into the neighbour). For a full-figure
+	# domain (0,1) this matches the previous behaviour exactly.
+	xoutside_right = xdom[2] + xpad
+	xoutside_left = xdom[1] - xpad
+	youtside_top = ydom[2] + ypad
+	youtside_bottom = ydom[1] - ypad
 
 	if legend_position == :top
 		return xcenter, ytop, "center", "top"
@@ -454,34 +485,55 @@ function _apply_default_legend!(
 	bordercolor::String = _DEFAULT_LEGEND_BORDERCOLOR[],
 	borderwidth::Real = _DEFAULT_LEGEND_BORDERWIDTH[],
 	overwrite::Bool = false,
+	showlegend::Union{Nothing, Bool} = nothing,
 )
 	p = _plot_obj(fig)
 	legend_position = _normalize_legend_position(position)
 	legend_inset = (Float64(inset[1]), Float64(inset[2]))
 	x, y, xanchor, yanchor = _legend_anchor((0.0, 1.0), (0.0, 1.0), legend_inset, legend_position)
 
-	p.layout.fields[:legend] = _legend_layout(
-		get(p.layout.fields, :legend, nothing),
-		x,
-		y;
-		xanchor = xanchor,
-		yanchor = yanchor,
-		legend_bgcolor = bgcolor,
-		legend_bordercolor = bordercolor,
-		legend_borderwidth = Float64(borderwidth),
-		overwrite = overwrite,
-	)
-	if !haskey(p.layout.fields, :showlegend) && any(_trace_will_showlegend(trace) for trace in p.data)
+	# Only write a styled legend block when a legend will actually show (a trace
+	# with a name/showlegend), one already exists, or the caller forces it
+	# (`overwrite=true`, i.e. an explicit `set_legend!`). This keeps empty
+	# canvases and unnamed single-trace figures free of stray legend layout.
+	if overwrite || haskey(p.layout.fields, :legend) || any(_trace_will_showlegend(trace) for trace in p.data)
+		p.layout.fields[:legend] = _legend_layout(
+			get(p.layout.fields, :legend, nothing),
+			x,
+			y;
+			xanchor = xanchor,
+			yanchor = yanchor,
+			legend_bgcolor = bgcolor,
+			legend_bordercolor = bordercolor,
+			legend_borderwidth = Float64(borderwidth),
+			overwrite = overwrite,
+		)
+	end
+	if showlegend isa Bool
+		# Explicit caller override (e.g. force a legend for a single unnamed trace).
+		p.layout.fields[:showlegend] = showlegend
+	elseif !haskey(p.layout.fields, :showlegend) && any(_trace_will_showlegend(trace) for trace in p.data)
 		p.layout.fields[:showlegend] = true
 	end
 	return p
 end
 
 """
-	set_legend!(fig; position=:topright, kwargs...)
+	set_legend!(fig; position=:topright, showlegend=nothing, kwargs...)
 
 Set legend placement and styling with simple position symbols such as
-`:top`, `:topright`, `:left`, `:bottomleft`, or `:outside_right`.
+`:top`, `:topright`, `:left`, `:bottomleft`, or `:outside_right`. Accepted
+positions also include `:bottom`, `:right`, `:center`, `:topleft`,
+`:bottomright`, `:outside_left`, `:outside_top`, and `:outside_bottom`.
+
+Pass `showlegend=true` to force the legend visible (useful for a single,
+unnamed trace), or `showlegend=false` to hide it.
+
+# Keyword Arguments
+- `position`: Symbolic legend placement (see above).
+- `inset`: Relative `(x, y)` padding from the plot edges.
+- `bgcolor` / `bordercolor` / `borderwidth`: Legend box styling.
+- `showlegend`: Force legend visibility (`true`/`false`), or leave `nothing` to auto-detect.
 """
 function set_legend!(
 	fig::Union{Plot, SyncPlot};
@@ -490,6 +542,7 @@ function set_legend!(
 	bgcolor::String = _DEFAULT_LEGEND_BGCOLOR[],
 	bordercolor::String = _DEFAULT_LEGEND_BORDERCOLOR[],
 	borderwidth::Real = _DEFAULT_LEGEND_BORDERWIDTH[],
+	showlegend::Union{Nothing, Bool} = nothing,
 )
 	_apply_default_legend!(
 		fig;
@@ -499,6 +552,7 @@ function set_legend!(
 		bordercolor = bordercolor,
 		borderwidth = borderwidth,
 		overwrite = true,
+		showlegend = showlegend,
 	)
 	_refresh!(fig)
 	return fig
@@ -700,6 +754,20 @@ function subplot!(sf::SubplotFigure, index::Integer)
 	return subplot!(sf, row, col)
 end
 
+# Delegate raw PlotlyBase verbs to the underlying figure so a SubplotFigure can
+# be driven like a Plot/SyncPlot. The fig-level methods already handle the
+# Electron refresh; we return `sf` so calls remain chainable on the subplot.
+for f in (:relayout!, :react!, :restyle!, :update_xaxes!, :update_yaxes!, :update_polars!)
+	@eval function PlotlyBase.$f(sf::SubplotFigure, args...; kwargs...)
+		PlotlyBase.$f(getfield(sf, :fig), args...; kwargs...)
+		return sf
+	end
+end
+
+savefig(sf::SubplotFigure, args...; kwargs...) = savefig(getfield(sf, :fig), args...; kwargs...)
+savefig(io::IO, sf::SubplotFigure; kwargs...) = savefig(io, getfield(sf, :fig); kwargs...)
+savefig(filename::AbstractString, sf::SubplotFigure; kwargs...) = savefig(filename, getfield(sf, :fig); kwargs...)
+
 function PlotlyBase.add_trace!(
 	sf::SubplotFigure,
 	trace::GenericTrace;
@@ -837,6 +905,16 @@ function _subplot_delegate_mutator!(
 	kwargs...,
 )
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	# `title`/`width`/`height` are figure-level, not per-cell: the delegate only
+	# transplants traces + per-axis layout, so these would be silently dropped.
+	# Warn instead of leaving the caller wondering why nothing changed.
+	let kw = values(kwargs)
+		dropped = Symbol[]
+		get(kw, :title, "") != "" && push!(dropped, :title)
+		get(kw, :width, 0) != 0 && push!(dropped, :width)
+		get(kw, :height, 0) != 0 && push!(dropped, :height)
+		isempty(dropped) || @warn "Per-subplot plot_*! ignores figure-level keyword(s) $(dropped); set them on the `subplots(...)` call or via `relayout!(sf; ...)`."
+	end
 	tmp = Plot(Vector{GenericTrace}(undef, 0), Layout())
 	mutator(tmp, args...; kwargs...)
 
@@ -864,7 +942,7 @@ function _subplot_delegate_mutator!(
 	return sf
 end
 
-function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int)
+function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_y::Bool = false)
 	p = _plot_obj(sf.fig)
 	probe = scatter(
 		x = [0.0],
@@ -875,9 +953,10 @@ function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int)
 		marker = attr(size = 0.1, opacity = 0.0),
 	)
 	try
-		PlotlyBase.add_trace!(p, probe; row = row, col = col)
+		PlotlyBase.add_trace!(p, probe; row = row, col = col, secondary_y = secondary_y)
 	catch err
-		throw(ArgumentError("Selected subplot cell ($(row), $(col)) does not accept Cartesian x/y axes."))
+		throw(ArgumentError("Selected subplot cell ($(row), $(col)) does not accept Cartesian x/y axes" *
+			(secondary_y ? " with a secondary y-axis (was the cell created with `secondary_y=true`?)." : ".")))
 	end
 	fields = p.data[end].fields
 	pop!(p.data)
@@ -890,6 +969,19 @@ function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int)
 	return xkey, ykey
 end
 
+"""
+	xlabel!(sf, label; row=nothing, col=nothing)
+	ylabel!(sf, label; row=nothing, col=nothing, secondary_y=false)
+	xrange!(sf, range; row=nothing, col=nothing)
+	yrange!(sf, range; row=nothing, col=nothing, secondary_y=false)
+
+Set the axis title (`xlabel!`/`ylabel!`) or axis range (`xrange!`/`yrange!`,
+a 2-element `[min, max]`) of one cell of a [`SubplotFigure`](@ref). When `row`
+and `col` are omitted the currently active cell (see [`subplot!`](@ref)) is used;
+otherwise both must be given. `ylabel!`/`yrange!` accept `secondary_y=true` to
+target a cell's secondary y-axis (the cell must have been created with a
+secondary-y spec). Returns the `SubplotFigure` for chaining.
+"""
 function xlabel!(
 	sf::SubplotFigure,
 	label::AbstractString;
@@ -910,9 +1002,10 @@ function ylabel!(
 	label::AbstractString;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
 )
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
-	_, ykey = _subplot_xy_axis_keys(sf, r, c)
+	_, ykey = _subplot_xy_axis_keys(sf, r, c; secondary_y = secondary_y)
 	_merge_layout_attr!(_plot_layout(sf.fig), ykey, attr(title_text = String(label)))
 	sf.current_row = r
 	sf.current_col = c
@@ -941,10 +1034,11 @@ function yrange!(
 	range::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
 )
 	length(range) == 2 || throw(ArgumentError("`range` must have length 2."))
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
-	_, ykey = _subplot_xy_axis_keys(sf, r, c)
+	_, ykey = _subplot_xy_axis_keys(sf, r, c; secondary_y = secondary_y)
 	_merge_layout_attr!(_plot_layout(sf.fig), ykey, attr(range = collect(range)))
 	sf.current_row = r
 	sf.current_col = c
@@ -1430,6 +1524,34 @@ function _first_or_empty(value::Union{String, Vector{String}})
 	return value
 end
 
+# Reduce a possibly-vector styling kwarg to a scalar for a single-trace plot.
+# Mirrors `_first_or_empty` but for numeric / Bool kwargs: an empty vector
+# falls back to `default`, otherwise the first element is used.
+_scalar_or_first(value, default) = value isa AbstractVector ? (isempty(value) ? default : value[1]) : value
+
+# Compute a finite scalar `tick0` from possibly nested / non-finite data.
+# Handles a vector-of-vectors (multi-series), ignores non-finite entries, and
+# returns `nothing` when no finite value exists — so the axis simply omits
+# `tick0` instead of receiving an invalid Vector or NaN. Iterates lazily (no
+# flattening allocation) so it is cheap even for large series.
+function _safe_tick0(v)
+	if v isa AbstractVector && eltype(v) <: Union{AbstractVector, AbstractRange}
+		best = nothing
+		for sub in v
+			t = _safe_tick0(sub)
+			t === nothing || (best = best === nothing ? t : min(best, t))
+		end
+		return best
+	end
+	best = nothing
+	for x in v
+		if x isa Real && isfinite(x)
+			best = best === nothing ? float(x) : min(best, float(x))
+		end
+	end
+	return best
+end
+
 function _auto_xvalues(y)
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -1449,13 +1571,17 @@ function _apply_showlegend!(trace, showlegend)
 				t.showlegend = showlegend
 			end
 		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
+			# Tolerate a vector longer than the trace count (ignore the surplus)
+			# to match the lenient handling of color/legend in the constructors.
+			for n in 1:min(length(trace), length(showlegend))
 				trace[n].showlegend = showlegend[n]
 			end
 		end
 	else
 		if showlegend isa Bool
 			trace.showlegend = showlegend
+		elseif showlegend isa Vector && !isempty(showlegend)
+			trace.showlegend = showlegend[1]
 		end
 	end
 end
@@ -1474,6 +1600,7 @@ function _apply_cartesian_plot_options!(
 	xscale::String = "",
 	yscale::String = "",
 	refresh::Bool = false,
+	apply_template::Bool = true,
 )
 	if title != ""
 		relayout!(fig, title = title)
@@ -1500,7 +1627,13 @@ function _apply_cartesian_plot_options!(
 		update_xaxes!(fig, showgrid = false)
 		update_yaxes!(fig, showgrid = false)
 	end
-	_apply_default_template!(fig)
+	# On first construction apply the default template; when appending to an
+	# existing figure only refresh the legend so a user-set template survives.
+	if apply_template
+		_apply_default_template!(fig)
+	else
+		_apply_default_legend!(fig)
+	end
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -1539,6 +1672,11 @@ function _histogram_trace(
 	return histogram(; kwargs...)
 end
 
+# Plotly's box/violin point options are a string enum
+# ("all"|"outliers"|"suspectedoutliers") or `false`. A bare `true` is invalid
+# and silently ignored by Plotly, so map it to the sensible "all".
+_normalize_points(points) = points isa Bool ? (points ? "all" : false) : points
+
 function _box_trace(
 	;
 	x = nothing,
@@ -1550,7 +1688,7 @@ function _box_trace(
 	kwargs = Dict{Symbol, Any}(
 		:y => y,
 		:name => name,
-		:boxpoints => points,
+		:boxpoints => _normalize_points(points),
 	)
 	x === nothing || (kwargs[:x] = x)
 	if color != ""
@@ -1572,7 +1710,7 @@ function _violin_trace(
 	kwargs = Dict{Symbol, Any}(
 		:y => y,
 		:name => name,
-		:points => points,
+		:points => _normalize_points(points),
 		:side => side,
 	)
 	x === nothing || (kwargs[:x] = x)
@@ -1662,7 +1800,7 @@ function plot_scatter(
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		trace = Vector{GenericTrace}(undef, length(y))
-		modeV = fill("line", length(y))
+		modeV = fill("lines", length(y))
 		dashV = fill("", length(y))
 		colorV = fill("", length(y))
 		legendV = fill("", length(y))
@@ -1753,20 +1891,26 @@ function plot_scatter(
 			end
 		end
 	else
-		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :mode => mode, :line => attr(color = color, dash = dash), :name => legend)
+		mode1 = _first_or_empty(mode)
+		mode1 == "" && (mode1 = "lines")
+		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :mode => mode1, :line => attr(color = _first_or_empty(color), dash = _first_or_empty(dash)), :name => _first_or_empty(legend))
 		mk = Dict{Symbol,Any}()
-		if marker_size isa Int && marker_size > 0
-			mk[:size] = marker_size
+		ms = _scalar_or_first(marker_size, 0)
+		if ms isa Real && ms > 0
+			mk[:size] = ms
 		end
-		if marker_symbol isa String && marker_symbol != ""
-			mk[:symbol] = marker_symbol
+		msym = _first_or_empty(marker_symbol)
+		if msym != ""
+			mk[:symbol] = msym
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		if linewidth isa Real && linewidth > 0
-			trace_kw[:line][:width] = linewidth
+		lw = _scalar_or_first(linewidth, 0)
+		if lw isa Real && lw > 0
+			trace_kw[:line][:width] = lw
 		end
-		if showlegend isa Bool
-			trace_kw[:showlegend] = showlegend
+		sl = _scalar_or_first(showlegend, nothing)
+		if sl isa Bool
+			trace_kw[:showlegend] = sl
 		end
 		trace = scatter(; trace_kw...)
 	end
@@ -1774,8 +1918,8 @@ function plot_scatter(
 		title = title,
 		xlabel = xlabel,
 		ylabel = ylabel,
-		x_tick0 = minimum(x),
-		y_tick0 = minimum(y),
+		x_tick0 = _safe_tick0(x),
+		y_tick0 = _safe_tick0(y),
 	)
 	fig = Plot(trace, layout)
 	if xscale != ""
@@ -2013,27 +2157,28 @@ function plot_stem(
 
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				# trace[n] = stem(
-				# 	y = y[n],
-				# 	x = x[n],
-				# 	line = attr(color = colorV[n]),
-				# 	name = legendV[n],
-				# )
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
+				# Stem heads are drawn as markers; color belongs on `marker`
+				# (a `line` color is ignored for a markers-only trace).
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :name => legendV[n], :mode => "markers")
+				colorV[n] != "" && (trace_kw[:marker] = attr(color = colorV[n]))
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				trace[n] = scatter(; trace_kw...)
 			end
 		else
 			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
+				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :name => legendV[n], :mode => "markers")
+				colorV[n] != "" && (trace_kw[:marker] = attr(color = colorV[n]))
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				trace[n] = scatter(; trace_kw...)
 			end
 		end
 	else
-		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :line => attr(color = color), :name => legend, :mode => "markers")
-		if showlegend isa Bool
-			trace_kw[:showlegend] = showlegend
+		color1 = _first_or_empty(color)
+		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :name => _first_or_empty(legend), :mode => "markers")
+		color1 != "" && (trace_kw[:marker] = attr(color = color1))
+		sl = _scalar_or_first(showlegend, nothing)
+		if sl isa Bool
+			trace_kw[:showlegend] = sl
 		end
 		trace = scatter(; trace_kw...)
 	end
@@ -2041,8 +2186,8 @@ function plot_stem(
 		title = title,
 		xlabel = xlabel,
 		ylabel = ylabel,
-		x_tick0 = minimum(x),
-		y_tick0 = minimum(y),
+		x_tick0 = _safe_tick0(x),
+		y_tick0 = _safe_tick0(y),
 	)
 	fig = Plot(trace, layout)
 
@@ -2073,23 +2218,19 @@ function plot_stem(
 		update_yaxes!(fig, type = yscale)
 	end
 
-	#exp
+	# Draw a vertical line from the baseline (y=0) to each stem head. Use the
+	# per-series color so the stems match their markers, defaulting to black.
 	if isa(y, Vector) && eltype(y) <: Vector
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
+				stem_color = colorV[n] == "" ? "black" : colorV[n]
 				for m in eachindex(y[n])
-					# add_shape!(fig, line(
-					# 	x0 = x[n][m], y0 = 0,
-					# 	x1 = x[n][m], y1 = y[n][m],
-					# 	line = attr(color = "black", width = 0.5),
-					# )
-					# )
 					addtraces!(fig,
 						scatter(
 							x = [x[n][m], x[n][m]],
 							y = [0, y[n][m]],
 							mode = "lines",
-							line = attr(color = "black", width = 0.5),
+							line = attr(color = stem_color, width = 0.5),
 							showlegend = false,
 						),
 					)
@@ -2097,19 +2238,14 @@ function plot_stem(
 			end
 		else
 			for n in eachindex(y)
+				stem_color = colorV[n] == "" ? "black" : colorV[n]
 				for m in eachindex(y[n])
-					# add_shape!(fig, line(
-					# 	x0 = x[m], y0 = 0,
-					# 	x1 = x[m], y1 = y[n][m],
-					# 	line = attr(color = "black", width = 0.5),
-					# )
-					# )
 					addtraces!(fig,
 						scatter(
 							x = [x[m], x[m]],
 							y = [0, y[n][m]],
 							mode = "lines",
-							line = attr(color = "black", width = 0.5),
+							line = attr(color = stem_color, width = 0.5),
 							showlegend = false,
 						),
 					)
@@ -2117,19 +2253,14 @@ function plot_stem(
 			end
 		end
 	else
+		stem_color = _first_or_empty(color) == "" ? "black" : _first_or_empty(color)
 		for m in eachindex(y)
-			# add_shape!(fig, line(
-			# 	x0 = x[m], y0 = 0,
-			# 	x1 = x[m], y1 = y[m],
-			# 	line = attr(color = "black", width = 0.5),
-			# )
-			# )
 			addtraces!(fig,
 				scatter(
 					x = [x[m], x[m]],
 					y = [0, y[m]],
 					mode = "lines",
-					line = attr(color = "black", width = 0.5),
+					line = attr(color = stem_color, width = 0.5),
 					showlegend = false,
 				),
 			)
@@ -2229,6 +2360,29 @@ function plot_stem(
 		)
 end
 
+"""
+	plot_bar(x, y; kwargs...)
+	plot_bar(y; kwargs...)
+
+Bar plot of `y` over categories/positions `x` (defaults to `0:length(y)-1`).
+Pass a `Vector` of `Vector`s for `y` (and optionally `x`) to draw multiple
+grouped bar series.
+
+# Keyword Arguments
+- `xlabel`, `ylabel`: Axis labels (default `""`).
+- `xrange`, `yrange`: Axis ranges as `[min, max]`; `[0, 0]` keeps auto-scaling.
+- `width`, `height`: Figure size in pixels (`0` uses the default).
+- `color`: Bar color(s) — a string, or a vector for multiple series.
+- `legend`: Trace name(s) for the legend.
+- `title`: Figure title.
+- `grid`: Show grid lines (default `true`).
+- `fontsize`: Base font size (`0` uses the Plotly default).
+- `xscale`, `yscale`: `"log"` for a logarithmic axis.
+- `showlegend`: Force legend entry visibility (`Bool` or vector).
+- `show`: Open an Electron window immediately (returns a `SyncPlot`).
+
+Returns a `PlotlyBase.Plot` (or a `SyncPlot` when `show=true`).
+"""
 function plot_bar(
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray};
@@ -2331,6 +2485,29 @@ function plot_bar(
 	)
 end
 
+"""
+	plot_histogram(x; kwargs...)
+
+Histogram of the samples in `x`. Pass a `Vector` of `Vector`s for `x` to overlay
+multiple histogram series.
+
+# Keyword Arguments
+- `nbinsx`: Target number of bins (`0` lets Plotly choose).
+- `histnorm`: Normalization — `""`, `"percent"`, `"probability"`, `"density"`, or `"probability density"`.
+- `xlabel`, `ylabel`: Axis labels.
+- `xrange`, `yrange`: Axis ranges as `[min, max]`; `[0, 0]` keeps auto-scaling.
+- `width`, `height`: Figure size in pixels.
+- `color`: Bar color(s).
+- `legend`: Trace name(s).
+- `title`: Figure title.
+- `grid`: Show grid lines (default `true`).
+- `fontsize`: Base font size.
+- `xscale`, `yscale`: `"log"` for a logarithmic axis.
+- `showlegend`: Force legend entry visibility.
+- `show`: Open an Electron window immediately (returns a `SyncPlot`).
+
+Returns a `PlotlyBase.Plot` (or a `SyncPlot` when `show=true`).
+"""
 function plot_histogram(
 	x::Union{AbstractRange, Vector, SubArray};
 	xlabel::String = "",
@@ -2394,6 +2571,29 @@ function plot_histogram(
 	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
+"""
+	plot_box(x, y; kwargs...)
+	plot_box(y; kwargs...)
+
+Box plot of the distribution(s) in `y`, optionally grouped by `x`. Pass a
+`Vector` of `Vector`s for `y` to draw several boxes side-by-side (`boxmode="group"`).
+
+# Keyword Arguments
+- `points`: Outlier/point display — `"all"`, `"outliers"`, `"suspectedoutliers"`, or `false` (`true` is treated as `"all"`).
+- `xlabel`, `ylabel`: Axis labels.
+- `xrange`, `yrange`: Axis ranges as `[min, max]`; `[0, 0]` keeps auto-scaling.
+- `width`, `height`: Figure size in pixels.
+- `color`: Box color(s).
+- `legend`: Trace name(s).
+- `title`: Figure title.
+- `grid`: Show grid lines (default `true`).
+- `fontsize`: Base font size.
+- `xscale`, `yscale`: `"log"` for a logarithmic axis.
+- `showlegend`: Force legend entry visibility.
+- `show`: Open an Electron window immediately (returns a `SyncPlot`).
+
+Returns a `PlotlyBase.Plot` (or a `SyncPlot` when `show=true`).
+"""
 function plot_box(
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray};
@@ -2453,6 +2653,10 @@ function plot_box(
 	_apply_showlegend!(trace, showlegend)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+	# Render multiple boxes side-by-side (Plotly defaults to "overlay").
+	if isa(y, Vector) && eltype(y) <: Vector && length(y) > 1
+		relayout!(fig, boxmode = "group")
+	end
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -2530,6 +2734,30 @@ function plot_box(
 	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
+"""
+	plot_violin(x, y; kwargs...)
+	plot_violin(y; kwargs...)
+
+Violin plot of the distribution(s) in `y`, optionally grouped by `x`. Pass a
+`Vector` of `Vector`s for `y` to draw several violins side-by-side (`violinmode="group"`).
+
+# Keyword Arguments
+- `points`: Point display — `"all"`, `"outliers"`, `"suspectedoutliers"`, or `false` (`true` is treated as `"all"`).
+- `side`: Violin side — `"both"`, `"positive"`, or `"negative"`.
+- `xlabel`, `ylabel`: Axis labels.
+- `xrange`, `yrange`: Axis ranges as `[min, max]`; `[0, 0]` keeps auto-scaling.
+- `width`, `height`: Figure size in pixels.
+- `color`: Violin color(s).
+- `legend`: Trace name(s).
+- `title`: Figure title.
+- `grid`: Show grid lines (default `true`).
+- `fontsize`: Base font size.
+- `xscale`, `yscale`: `"log"` for a logarithmic axis.
+- `showlegend`: Force legend entry visibility.
+- `show`: Open an Electron window immediately (returns a `SyncPlot`).
+
+Returns a `PlotlyBase.Plot` (or a `SyncPlot` when `show=true`).
+"""
 function plot_violin(
 	x::Union{AbstractRange, Vector, SubArray},
 	y::Union{AbstractRange, Vector, SubArray};
@@ -2593,6 +2821,10 @@ function plot_violin(
 	_apply_showlegend!(trace, showlegend)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+	# Render multiple violins side-by-side (Plotly defaults to "overlay").
+	if isa(y, Vector) && eltype(y) <: Vector && length(y) > 1
+		relayout!(fig, violinmode = "group")
+	end
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -2742,7 +2974,7 @@ function plot_scatterpolar(
 )
 	if isa(r, Vector) && eltype(r) <: Vector
 		trace = Vector{GenericTrace}(undef, length(r))
-		modeV = fill("line", length(r))
+		modeV = fill("lines", length(r))
 		dashV = fill("", length(r))
 		colorV = fill("", length(r))
 		legendV = fill("", length(r))
@@ -2833,28 +3065,33 @@ function plot_scatterpolar(
 			end
 		end
 	else
-		trace_kw = Dict{Symbol,Any}(:r => r, :theta => theta, :mode => mode, :line => attr(color = color, dash = dash), :name => legend)
+		mode1 = _first_or_empty(mode)
+		mode1 == "" && (mode1 = "lines")
+		trace_kw = Dict{Symbol,Any}(:r => r, :theta => theta, :mode => mode1, :line => attr(color = _first_or_empty(color), dash = _first_or_empty(dash)), :name => _first_or_empty(legend))
 		mk = Dict{Symbol,Any}()
-		if marker_size isa Int && marker_size > 0
-			mk[:size] = marker_size
+		ms = _scalar_or_first(marker_size, 0)
+		if ms isa Real && ms > 0
+			mk[:size] = ms
 		end
-		if marker_symbol isa String && marker_symbol != ""
-			mk[:symbol] = marker_symbol
+		msym = _first_or_empty(marker_symbol)
+		if msym != ""
+			mk[:symbol] = msym
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		if linewidth isa Real && linewidth > 0
-			trace_kw[:line][:width] = linewidth
+		lw = _scalar_or_first(linewidth, 0)
+		if lw isa Real && lw > 0
+			trace_kw[:line][:width] = lw
 		end
-		if showlegend isa Bool
-			trace_kw[:showlegend] = showlegend
+		sl = _scalar_or_first(showlegend, nothing)
+		if sl isa Bool
+			trace_kw[:showlegend] = sl
 		end
 		trace = scatterpolar(; trace_kw...)
 	end
 
-	layout = Layout(
-		title = title,
-		polar = attr(sector = [minimum(theta), maximum(theta)]),
-	)
+	# Leave `polar.sector` unset by default so the plot shows the full circle;
+	# only constrain the angular axis when the caller supplies `trange`.
+	layout = Layout(title = title)
 	fig = Plot(trace, layout)
 	if !all(rrange .== [0, 0])
 		update_polars!(fig, radialaxis = attr(range = rrange))
@@ -2869,8 +3106,7 @@ function plot_scatterpolar(
 		relayout!(fig, height = height)
 	end
 	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
+		update_polars!(fig, radialaxis = attr(showgrid = false), angularaxis = attr(showgrid = false))
 	end
 	_apply_default_template!(fig)
 	if fontsize > 0
@@ -2949,29 +3185,14 @@ function plot_heatmap(
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
-	trace = heatmap(x = x, y = y, z = FV, colorscale = colorscale)
+	trace = heatmap(x = x, y = y, z = FV)
+	colorscale != "" && (trace.colorscale = colorscale)
 	if !all(zrange .== [0, 0])
 		trace.zmin = zrange[1]
 		trace.zmax = zrange[2]
 	end
-	if length(x) > 1
-		dx = x[2] - x[1]
-	else
-		dx = 0
-	end
-	if length(y) > 1
-		dy = y[2] - y[1]
-	else
-		dy = 0
-	end
-	if dx == 0 && dy != 0
-		dx = dy
-	elseif dy == 0 && dx != 0
-		dy = dx
-	end
 	layout = Layout(
 		title = title,
-		scene = attr(aspectmode = "data"),
 		xaxis = attr(
 			title = xlabel,
 			constrain = "domain",
@@ -3170,29 +3391,14 @@ function plot_contour(
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
-	trace = contour(x = x, y = y, z = FV, colorscale = colorscale)
+	trace = contour(x = x, y = y, z = FV)
+	colorscale != "" && (trace.colorscale = colorscale)
 	if !all(zrange .== [0, 0])
 		trace.zmin = zrange[1]
 		trace.zmax = zrange[2]
 	end
-	if length(x) > 1
-		dx = x[2] - x[1]
-	else
-		dx = 0
-	end
-	if length(y) > 1
-		dy = y[2] - y[1]
-	else
-		dy = 0
-	end
-	if dx == 0 && dy != 0
-		dx = dy
-	elseif dy == 0 && dx != 0
-		dy = dx
-	end
 	layout = Layout(
 		title = title,
-		scene = attr(aspectmode = "data"),
 		xaxis = attr(
 			title = xlabel,
 			constrain = "domain",
@@ -3390,7 +3596,16 @@ function plot_quiver(
     u_vec = isa(u, AbstractRange) ? collect(u) : u
     v_vec = isa(v, AbstractRange) ? collect(v) : v
 
+    length(x_vec) == length(y_vec) == length(u_vec) == length(v_vec) ||
+        throw(ArgumentError("plot_quiver: x, y, u, v must all have the same length; got $(length(x_vec)), $(length(y_vec)), $(length(u_vec)), $(length(v_vec))"))
+
     p_max = maximum(sqrt.(u_vec .^ 2 .+ v_vec .^ 2))
+    # All-zero (or non-finite) field would divide by zero and produce an all-NaN
+    # invisible trace; fall back to unit scale so arrows degenerate to points.
+    if !isfinite(p_max) || p_max == 0
+        @warn "plot_quiver: all vectors have zero (or non-finite) magnitude; nothing to draw."
+        p_max = one(p_max)
+    end
     u_ref = u_vec ./ p_max .* sizeref
     v_ref = v_vec ./ p_max .* sizeref
     end_x = x_vec .+ u_ref .* 2 / 3
@@ -3422,7 +3637,6 @@ function plot_quiver(
 
     layout = Layout(
         title = title,
-        scene = attr(aspectmode = "data"),
         xaxis = attr(
             title = xlabel,
             constrain = "domain",
@@ -3548,10 +3762,11 @@ function plot_surface(
 	show::Bool = false,
 )
 	if isempty(surfacecolor)
-		trace = surface(x = X, y = Y, z = Z, colorscale = colorscale)
+		trace = surface(x = X, y = Y, z = Z)
 	else
-		trace = surface(x = X, y = Y, z = Z, surfacecolor = surfacecolor, colorscale = colorscale)
+		trace = surface(x = X, y = Y, z = Z, surfacecolor = surfacecolor)
 	end
+	colorscale != "" && (trace.colorscale = colorscale)
 	if shared_coloraxis
 		trace.coloraxis = "coloraxis"
 	end
@@ -3584,15 +3799,7 @@ function plot_surface(
 			relayout!(fig, coloraxis = attr(colorscale = colorscale))
 		end
 	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if !all(zrange .== [0, 0])
-		update_yaxes!(fig, range = zrange)
-	end
+	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
 	if width > 0
 		relayout!(fig, width = width)
 	end
@@ -3849,8 +4056,14 @@ function plot_scatter3d(
 			end
 		end
 
-		for n in eachindex(y)
-			trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :z => z[n], :mode => modeV[n], :line => attr(color = colorV[n]), :name => legendV[n])
+		# x/y may be shared 1D coordinates broadcast across all z-series, or
+		# per-series Vector-of-Vectors. Iterate over z (the multi-series arg).
+		x_nested = x isa Vector && eltype(x) <: Vector
+		y_nested = y isa Vector && eltype(y) <: Vector
+		for n in eachindex(z)
+			xn = x_nested ? x[n] : x
+			yn = y_nested ? y[n] : y
+			trace_kw = Dict{Symbol,Any}(:y => yn, :x => xn, :z => z[n], :mode => modeV[n], :line => attr(color = colorV[n]), :name => legendV[n])
 			mk = Dict{Symbol,Any}()
 			marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 			marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
@@ -3902,15 +4115,7 @@ function plot_scatter3d(
 		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
 	end
 
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if !all(zrange .== [0, 0])
-		update_yaxes!(fig, range = zrange)
-	end
+	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
 	if width > 0
 		relayout!(fig, width = width)
 	end
@@ -4027,10 +4232,12 @@ function plot_quiver3d(
 		sizemode = "absolute",
 		sizeref = sizeref,
 		anchor = "cm",
-		colorscale = colorscale,
 	)
-	if color != "" # use single color
-		trace.colorscale = [[0, color], [1, color]]
+	colorscale != "" && (trace.colorscale = colorscale)
+	# A cone shares one colorscale, so a uniform color is a flat two-stop scale.
+	col = _first_or_empty(color)
+	if col != "" # use single color
+		trace.colorscale = [[0, col], [1, col]]
 		trace.showscale = false
 	end
 	if xlabel == ""
@@ -4057,15 +4264,7 @@ function plot_quiver3d(
 		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
 	end
 
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if !all(zrange .== [0, 0])
-		update_yaxes!(fig, range = zrange)
-	end
+	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
 	if width > 0
 		relayout!(fig, width = width)
 	end
@@ -4179,7 +4378,7 @@ function plot_scatter!(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
-		modeV = fill("line", length(y))
+		modeV = fill("lines", length(y))
 		dashV = fill("", length(y))
 		colorV = fill("", length(y))
 		legendV = fill("", length(y))
@@ -4270,20 +4469,26 @@ function plot_scatter!(
 			end
 		end
 	else
-		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :mode => mode, :line => attr(color = color, dash = dash), :name => legend)
+		mode1 = _first_or_empty(mode)
+		mode1 == "" && (mode1 = "lines")
+		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :mode => mode1, :line => attr(color = _first_or_empty(color), dash = _first_or_empty(dash)), :name => _first_or_empty(legend))
 		mk = Dict{Symbol,Any}()
-		if marker_size isa Int && marker_size > 0
-			mk[:size] = marker_size
+		ms = _scalar_or_first(marker_size, 0)
+		if ms isa Real && ms > 0
+			mk[:size] = ms
 		end
-		if marker_symbol isa String && marker_symbol != ""
-			mk[:symbol] = marker_symbol
+		msym = _first_or_empty(marker_symbol)
+		if msym != ""
+			mk[:symbol] = msym
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		if linewidth isa Real && linewidth > 0
-			trace_kw[:line][:width] = linewidth
+		lw = _scalar_or_first(linewidth, 0)
+		if lw isa Real && lw > 0
+			trace_kw[:line][:width] = lw
 		end
-		if showlegend isa Bool
-			trace_kw[:showlegend] = showlegend
+		sl = _scalar_or_first(showlegend, nothing)
+		if sl isa Bool
+			trace_kw[:showlegend] = sl
 		end
 		push!(_plot_data(fig), scatter(; trace_kw...))
 	end
@@ -4313,7 +4518,7 @@ function plot_scatter!(
 		update_xaxes!(fig, showgrid = false)
 		update_yaxes!(fig, showgrid = false)
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -4617,7 +4822,7 @@ function plot_stem!(
 		update_xaxes!(fig, showgrid = false)
 		update_yaxes!(fig, showgrid = false)
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -4788,6 +4993,7 @@ function plot_bar!(
 		xscale = xscale,
 		yscale = yscale,
 		refresh = true,
+		apply_template = false,
 	)
 	return nothing
 end
@@ -4893,6 +5099,7 @@ function plot_histogram!(
 		xscale = xscale,
 		yscale = yscale,
 		refresh = true,
+		apply_template = false,
 	)
 	return nothing
 end
@@ -4955,6 +5162,7 @@ function plot_box!(
 		xscale = xscale,
 		yscale = yscale,
 		refresh = true,
+		apply_template = false,
 	)
 	return nothing
 end
@@ -5007,6 +5215,7 @@ function plot_box!(
 		xscale = xscale,
 		yscale = yscale,
 		refresh = true,
+		apply_template = false,
 	)
 	return nothing
 end
@@ -5070,6 +5279,7 @@ function plot_violin!(
 		xscale = xscale,
 		yscale = yscale,
 		refresh = true,
+		apply_template = false,
 	)
 	return nothing
 end
@@ -5123,6 +5333,7 @@ function plot_violin!(
 		xscale = xscale,
 		yscale = yscale,
 		refresh = true,
+		apply_template = false,
 	)
 	return nothing
 end
@@ -5197,7 +5408,7 @@ function plot_scatterpolar!(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
 	if isa(r, Vector) && eltype(r) <: Vector
-		modeV = fill("line", length(r))
+		modeV = fill("lines", length(r))
 		dashV = fill("", length(r))
 		colorV = fill("", length(r))
 		legendV = fill("", length(r))
@@ -5288,20 +5499,26 @@ function plot_scatterpolar!(
 			end
 		end
 	else
-		trace_kw = Dict{Symbol,Any}(:r => r, :theta => theta, :mode => mode, :line => attr(color = color, dash = dash), :name => legend)
+		mode1 = _first_or_empty(mode)
+		mode1 == "" && (mode1 = "lines")
+		trace_kw = Dict{Symbol,Any}(:r => r, :theta => theta, :mode => mode1, :line => attr(color = _first_or_empty(color), dash = _first_or_empty(dash)), :name => _first_or_empty(legend))
 		mk = Dict{Symbol,Any}()
-		if marker_size isa Int && marker_size > 0
-			mk[:size] = marker_size
+		ms = _scalar_or_first(marker_size, 0)
+		if ms isa Real && ms > 0
+			mk[:size] = ms
 		end
-		if marker_symbol isa String && marker_symbol != ""
-			mk[:symbol] = marker_symbol
+		msym = _first_or_empty(marker_symbol)
+		if msym != ""
+			mk[:symbol] = msym
 		end
 		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		if linewidth isa Real && linewidth > 0
-			trace_kw[:line][:width] = linewidth
+		lw = _scalar_or_first(linewidth, 0)
+		if lw isa Real && lw > 0
+			trace_kw[:line][:width] = lw
 		end
-		if showlegend isa Bool
-			trace_kw[:showlegend] = showlegend
+		sl = _scalar_or_first(showlegend, nothing)
+		if sl isa Bool
+			trace_kw[:showlegend] = sl
 		end
 		push!(_plot_data(fig), scatterpolar(; trace_kw...))
 	end
@@ -5309,13 +5526,8 @@ function plot_scatterpolar!(
 	if title != ""
 		relayout!(fig, title = title)
 	end
-	if isa(theta, Vector) && eltype(theta) <: Vector
-		min_theta = minimum(map(minimum, theta))
-		max_theta = maximum(map(maximum, theta))
-		relayout!(fig, polar = attr(sector = [min_theta, max_theta]))
-	else
-		relayout!(fig, polar = attr(sector = [minimum(theta), maximum(theta)]))
-	end
+	# Do not clip the angular axis to the data extent by default (full circle);
+	# only constrain it when the caller supplies `trange`.
 	if !all(rrange .== [0, 0])
 		update_polars!(fig, radialaxis = attr(range = rrange))
 	end
@@ -5329,10 +5541,9 @@ function plot_scatterpolar!(
 		relayout!(fig, height = height)
 	end
 	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
+		update_polars!(fig, radialaxis = attr(showgrid = false), angularaxis = attr(showgrid = false))
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -5408,7 +5619,8 @@ function plot_heatmap!(
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
-	trace = heatmap(x = x, y = y, z = FV, colorscale = colorscale)
+	trace = heatmap(x = x, y = y, z = FV)
+	colorscale != "" && (trace.colorscale = colorscale)
 	if !all(zrange .== [0, 0])
 		trace.zmin = zrange[1]
 		trace.zmax = zrange[2]
@@ -5442,7 +5654,7 @@ function plot_heatmap!(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -5560,7 +5772,8 @@ function plot_contour!(
 )
 	FV = @view U[:, :]
 	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
-	trace = contour(x = x, y = y, z = FV, colorscale = colorscale)
+	trace = contour(x = x, y = y, z = FV)
+	colorscale != "" && (trace.colorscale = colorscale)
 	if !all(zrange .== [0, 0])
 		trace.zmin = zrange[1]
 		trace.zmax = zrange[2]
@@ -5594,7 +5807,7 @@ function plot_contour!(
 	if height > 0
 		relayout!(fig, height = height)
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -5712,7 +5925,14 @@ function plot_quiver!(
 	u_vec = isa(u, AbstractRange) ? collect(u) : u
 	v_vec = isa(v, AbstractRange) ? collect(v) : v
 
+	length(x_vec) == length(y_vec) == length(u_vec) == length(v_vec) ||
+		throw(ArgumentError("plot_quiver!: x, y, u, v must all have the same length; got $(length(x_vec)), $(length(y_vec)), $(length(u_vec)), $(length(v_vec))"))
+
 	p_max = maximum(sqrt.(u_vec .^ 2 .+ v_vec .^ 2))
+	if !isfinite(p_max) || p_max == 0
+		@warn "plot_quiver!: all vectors have zero (or non-finite) magnitude; nothing to draw."
+		p_max = one(p_max)
+	end
 	u_ref = u_vec ./ p_max .* sizeref
 	v_ref = v_vec ./ p_max .* sizeref
 	end_x = x_vec .+ u_ref .* 2 / 3
@@ -5772,7 +5992,7 @@ function plot_quiver!(
 		update_xaxes!(fig, showgrid = false)
 		update_yaxes!(fig, showgrid = false)
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -5861,10 +6081,11 @@ function plot_surface!(
 	end
 	
 	if isempty(surfacecolor)
-		trace = surface(x = X, y = Y, z = Z, colorscale = colorscale)
+		trace = surface(x = X, y = Y, z = Z)
 	else
-		trace = surface(x = X, y = Y, z = Z, surfacecolor = surfacecolor, colorscale = colorscale)
+		trace = surface(x = X, y = Y, z = Z, surfacecolor = surfacecolor)
 	end
+	colorscale != "" && (trace.colorscale = colorscale)
 	if shared_coloraxis
 		trace.coloraxis = "coloraxis"
 	end
@@ -5916,22 +6137,14 @@ function plot_surface!(
 	if title != ""
 		relayout!(fig, title = title)
 	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if !all(zrange .== [0, 0])
-		update_yaxes!(fig, range = zrange)
-	end
+	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
 	if width > 0
 		relayout!(fig, width = width)
 	end
 	if height > 0
 		relayout!(fig, height = height)
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -6134,8 +6347,13 @@ function plot_scatter3d!(
 			end
 		end
 
+		# x/y may be shared 1D coordinates broadcast across all z-series.
+		x_nested = x isa Vector && eltype(x) <: Vector
+		y_nested = y isa Vector && eltype(y) <: Vector
 		for n in eachindex(z)
-			trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :z => z[n], :mode => modeV[n], :line => attr(color = colorV[n]), :name => legendV[n])
+			xn = x_nested ? x[n] : x
+			yn = y_nested ? y[n] : y
+			trace_kw = Dict{Symbol,Any}(:y => yn, :x => xn, :z => z[n], :mode => modeV[n], :line => attr(color = colorV[n]), :name => legendV[n])
 			mk = Dict{Symbol,Any}()
 			marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
 			marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
@@ -6197,22 +6415,14 @@ function plot_scatter3d!(
 	if !perspective
 		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
 	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if !all(zrange .== [0, 0])
-		update_yaxes!(fig, range = zrange)
-	end
+	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
 	if width > 0
 		relayout!(fig, width = width)
 	end
 	if height > 0
 		relayout!(fig, height = height)
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end
@@ -6295,7 +6505,7 @@ function plot_quiver3d!(
 	zrange::Vector = [0, 0],
 	width::Int = 0,
 	height::Int = 0,
-	color::String = "",
+	color::Union{String, Vector{String}} = "",
 	colorscale::String = "",
 	xlabel::String = "",
 	ylabel::String = "",
@@ -6317,11 +6527,12 @@ function plot_quiver3d!(
 		sizemode = "absolute",
 		sizeref = sizeref,
 		anchor = "cm",
-		colorscale = colorscale,
 	)
+	colorscale != "" && (trace.colorscale = colorscale)
 	# if a single color is requested, force a uniform colorscale and hide colorbar
-	if color != ""
-		trace.colorscale = [[0, color], [1, color]]
+	col = _first_or_empty(color)
+	if col != ""
+		trace.colorscale = [[0, col], [1, col]]
 		trace.showscale = false
 	end
 	push!(_plot_data(fig), trace)
@@ -6360,22 +6571,14 @@ function plot_quiver3d!(
 	if !perspective
 		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
 	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if !all(zrange .== [0, 0])
-		update_yaxes!(fig, range = zrange)
-	end
+	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
 	if width > 0
 		relayout!(fig, width = width)
 	end
 	if height > 0
 		relayout!(fig, height = height)
 	end
-	_apply_default_template!(fig)
+	_apply_default_legend!(fig)
 	if fontsize > 0
 		relayout!(fig, font = attr(size = fontsize))
 	end

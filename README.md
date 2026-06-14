@@ -51,7 +51,7 @@
 - `set_default_legend_position!(...)` / `get_default_legend_position()`: Configure package-wide default legend position.
 - `to_syncplot(fig)`: Convert a `PlotlyBase.Plot` to a desktop `SyncPlot` window.
 - `plot(...)`: PlotlyJS-style constructor. Returns `Plot` by default; pass `sync=true` to get a `SyncPlot`.
-- `savefig(...)`: PlotlyJS-style file export helper (requires `PlotlyKaleido.jl` to be installed).
+- `savefig(...)`: PlotlyJS-style file export helper. `json`/`html` export works headlessly; `png`/`jpeg`/`svg`/`pdf` render through PlotlySupply's internal Electron export window (no external Kaleido/Python dependency).
 - `make_subplots(...)`, `mgrid(...)`: PlotlyJS-style helpers.
 - `subplots(rows, cols; ...)`: Easy subplot canvas; pass `sync=false` for headless mode.
 - `subplot!(sf, row, col)` / `subplot!(sf, index)`: Select the active subplot cell.
@@ -128,7 +128,7 @@ lay = Layout(title="Compatibility Mode")
 fig = plot(tr, lay) # returns Plot; use display(fig) to open Electron window
 ```
 
-`ElectronCall.jl` and `PlotlyKaleido.jl` are loaded internally by PlotlySupply when needed; users do not need `using ElectronCall` or `using PlotlyKaleido`.
+`ElectronCall.jl` is loaded internally by PlotlySupply when needed (for `display`, `show=true`, `to_syncplot`, and image/PDF `savefig`); users do not need `using ElectronCall`.
 
 ### 2D Heatmap
 
@@ -161,21 +161,27 @@ plot_surface(X, Y, Z; title="3D Surface", colorscale="Viridis")
 
 ## Common Keyword Arguments
 
-Most functions accept the following options:
+These options are accepted by essentially every constructor:
 
 | Keyword        | Description                                | Default         |
 |----------------|--------------------------------------------|-----------------|
-| `xlabel`, `ylabel`, `zlabel` | Axis labels               | `""` or `"x/y/z"` |
-| `xrange`, `yrange`, `zrange` | Axis ranges as `[min, max]` | `[0, 0]`         |
+| `xlabel`, `ylabel` | Axis labels                            | `""`             |
+| `xrange`, `yrange` | Axis ranges as `[min, max]`            | `[0, 0]` (auto)  |
 | `width`, `height` | Plot size in pixels                     | `0` (auto)       |
-| `color`, `colorscale` | Line or surface color settings    | `""` or `"Jet"`  |
 | `title`         | Plot title                                | `""`             |
 | `grid`          | Show/hide grid lines                      | `true`           |
-| `showaxis`      | Show/hide axis lines and ticks            | `true`           |
-| `aspectmode`    | `"auto"`, `"cube"`, `"data"`              | `"auto"`         |
-| `mode`          | `"lines"`, `"markers"`, `"lines+markers"` | `"lines"`        |
-| `linewidth`     | Line width in pixels (scalar or vector)    | `0` (auto)       |
+| `color`         | Trace color (scalar or per-series vector) | `""`             |
 | `show`          | Open Electron window immediately           | `false`          |
+
+Family-specific options (passing one to a constructor that doesn't accept it raises a `MethodError`):
+
+| Keyword        | Description                                | Supported by    |
+|----------------|--------------------------------------------|-----------------|
+| `mode`, `dash`, `linewidth`, `marker_size`, `marker_symbol` | Line/marker styling | `plot_scatter`, `plot_scatter3d`, `plot_scatterpolar` |
+| `xscale`, `yscale` | `"log"` axis scale                     | 2-D Cartesian plots |
+| `colorscale`    | Color scale (`""` = Plotly default)       | `plot_heatmap`, `plot_contour`, `plot_surface`, `plot_quiver3d` |
+| `zlabel`, `zrange`, `aspectmode`, `showaxis`, `perspective` | 3-D scene options | `plot_surface`, `plot_scatter3d`, `plot_quiver3d` |
+| `points`        | Outlier display (`"all"`/`"outliers"`/…)  | `plot_box`, `plot_violin` |
 
 ---
 

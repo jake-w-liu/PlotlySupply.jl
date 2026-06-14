@@ -4,6 +4,9 @@ using BatchAssign
 using Infiltrator
 using Reexport
 @reexport using PlotlyBase
+# Re-export so the documented `meshgrid(y, x)` workflow works after `using
+# PlotlySupply` (the heatmap/surface/quiver examples rely on it).
+@reexport using MeshGrid
 
 mutable struct SyncPlot
 	plot::Plot
