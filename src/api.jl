@@ -209,6 +209,16 @@ function _apply_scene_ranges!(fig; xrange, yrange, zrange)
 	return nothing
 end
 
+"""
+	SubplotFigure
+
+A MATLAB-like subplot canvas returned by [`subplots`](@ref). It wraps the
+underlying `Plot`/`SyncPlot` together with the grid shape and the currently
+active cell. Select a cell with [`subplot!`](@ref), append to it with the
+`plot_*!` mutating constructors, and adjust per-cell axes with [`xlabel!`](@ref)
+/ `ylabel!` / `xrange!` / `yrange!`. Property access forwards to the wrapped
+figure (e.g. `sf.plot`, `sf.layout`, `sf.data`).
+"""
 mutable struct SubplotFigure
 	fig::Union{Plot, SyncPlot}
 	rows::Int
