@@ -40,6 +40,22 @@
 - `plot_surface(Z; ...)`: Uses index grids as X/Y.
 - `plot_scatter3d(x, y, z; ...)`: 3D scatter or line plot with multiple trace support.
 - `plot_quiver3d(x, y, z, u, v, w; ...)`: 3D vector field rendered with cones.
+- `plot_mesh3d`, `plot_isosurface`, `plot_volume`, `plot_streamtube`: meshes, volumetric fields, and streamtubes.
+
+### Statistical / Business Charts
+
+- `plot_pie`, `plot_sunburst`, `plot_treemap`, `plot_funnel`, `plot_funnelarea`, `plot_waterfall`, `plot_indicator`.
+- `plot_sankey`, `plot_parcoords`, `plot_histogram2d`, `plot_area`, `plot_candlestick`, `plot_ohlc`, `plot_ternary`, `plot_image`.
+
+### Geographic Maps
+
+- `plot_choropleth`, `plot_scattergeo`, `plot_scattermapbox`, `plot_densitymapbox` (tile maps default to the token-free `open-street-map` style).
+
+### Annotations & Error Bars
+
+- `annotate!(fig, x, y, text; ...)` adds text annotations; `plot_scatter`/`plot_bar` accept `error_x`/`error_y`, and `plot_bar` accepts `orientation` and `barmode`.
+
+All of these have mutating `plot_*!` variants.
 
 ### Utilities
 

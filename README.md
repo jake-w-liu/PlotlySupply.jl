@@ -42,6 +42,37 @@
 - `plot_surface(Z; ...)`: Uses index grids as X/Y.
 - `plot_scatter3d(x, y, z; ...)`: 3D scatter or line plot with multiple trace support.
 - `plot_quiver3d(x, y, z, u, v, w; ...)`: 3D vector field rendered with cones.
+- `plot_mesh3d(x, y, z; ...)`: 3D triangular mesh (auto or `i`/`j`/`k` triangulation).
+- `plot_isosurface(x, y, z, value; ...)` / `plot_volume(x, y, z, value; ...)`: volumetric scalar fields.
+- `plot_streamtube(x, y, z, u, v, w; ...)`: 3D streamtubes of a vector field.
+
+### Statistical / Business Charts
+
+- `plot_pie(values; labels, hole, ...)`: Pie / donut chart.
+- `plot_sunburst(labels, parents; values, ...)` / `plot_treemap(...)`: Hierarchical charts.
+- `plot_funnel(x, y; ...)` / `plot_funnelarea(values; ...)`: Funnel charts.
+- `plot_waterfall(x, y; measure, ...)`: Waterfall chart.
+- `plot_indicator(value; mode, reference, gauge_range, ...)`: KPI number / gauge / delta.
+- `plot_sankey(source, target, value; label, ...)`: Sankey flow diagram.
+- `plot_parcoords(dimensions; ...)`: Parallel-coordinates plot.
+- `plot_histogram2d(x, y; ...)`: 2D density histogram.
+- `plot_area(x, y; stack, ...)`: Filled-area line plot.
+- `plot_candlestick(x, open, high, low, close; ...)` / `plot_ohlc(...)`: Financial charts.
+- `plot_ternary(a, b, c; ...)`: Ternary scatter plot.
+- `plot_image(z; ...)`: Display image data.
+
+### Geographic Maps
+
+- `plot_choropleth(locations, z; locationmode, ...)`: Choropleth map.
+- `plot_scattergeo(lon, lat; ...)`: Scatter points on a geographic map.
+- `plot_scattermapbox(lon, lat; style, zoom, ...)` / `plot_densitymapbox(lon, lat, z; ...)`: Tile-map charts (default `open-street-map` style, no token needed).
+
+### Annotations & Error Bars
+
+- `annotate!(fig, x, y, text; ...)`: Add a text annotation at data coordinates.
+- `plot_scatter`/`plot_bar` accept `error_x` / `error_y` (a vector, or a vector-of-vectors per series); `plot_bar` also accepts `orientation` (`"h"`) and `barmode` (`"group"`/`"stack"`).
+
+All of the above also have mutating `plot_*!(fig, ...)` variants.
 
 ### Utilities
 

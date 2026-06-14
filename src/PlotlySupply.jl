@@ -57,6 +57,15 @@ function __init__()
 end
 
 export plot_scatter, plot_scatter!, plot_stem, plot_stem!, plot_bar, plot_bar!, plot_histogram, plot_histogram!, plot_box, plot_box!, plot_violin, plot_violin!, plot_scatterpolar, plot_scatterpolar!, plot_heatmap, plot_heatmap!, plot_contour, plot_contour!, plot_quiver, plot_quiver!, plot_surface, plot_surface!, plot_scatter3d, plot_scatter3d!, plot_quiver3d, plot_quiver3d!
+export plot_pie, plot_pie!, plot_sunburst, plot_sunburst!, plot_treemap, plot_treemap!
+export plot_funnel, plot_funnel!, plot_funnelarea, plot_funnelarea!, plot_waterfall, plot_waterfall!
+export plot_indicator, plot_indicator!
+export plot_area, plot_area!, plot_candlestick, plot_candlestick!, plot_ohlc, plot_ohlc!
+export plot_histogram2d, plot_histogram2d!, annotate!
+export plot_sankey, plot_sankey!, plot_parcoords, plot_parcoords!, plot_ternary, plot_ternary!, plot_image, plot_image!
+export plot_mesh3d, plot_mesh3d!, plot_isosurface, plot_isosurface!, plot_volume, plot_volume!, plot_streamtube, plot_streamtube!
+export plot_choropleth, plot_choropleth!, plot_scattergeo, plot_scattergeo!
+export plot_scattermapbox, plot_scattermapbox!, plot_densitymapbox, plot_densitymapbox!
 export set_template!, get_default_template, set_default_template!
 export set_legend!, get_default_legend_position, set_default_legend_position!
 export xlabel!, ylabel!, xrange!, yrange!

@@ -1552,6 +1552,25 @@ function _safe_tick0(v)
 	return best
 end
 
+# Attach symmetric data error bars to one or more traces. `error_x`/`error_y`
+# may be a flat vector (applied to every trace) or a vector-of-vectors (one per
+# trace); `nothing` leaves that axis untouched.
+function _set_error_bars!(trace, error_x, error_y)
+	(error_x === nothing && error_y === nothing) && return nothing
+	traces = trace isa AbstractVector ? trace : (trace,)
+	nx = error_x isa AbstractVector && !isempty(error_x) && eltype(error_x) <: Union{AbstractVector, AbstractRange}
+	ny = error_y isa AbstractVector && !isempty(error_y) && eltype(error_y) <: Union{AbstractVector, AbstractRange}
+	for (n, t) in enumerate(traces)
+		if error_x !== nothing && !(nx && n > length(error_x))
+			t.error_x = attr(type = "data", array = collect(nx ? error_x[n] : error_x), visible = true)
+		end
+		if error_y !== nothing && !(ny && n > length(error_y))
+			t.error_y = attr(type = "data", array = collect(ny ? error_y[n] : error_y), visible = true)
+		end
+	end
+	return nothing
+end
+
 function _auto_xvalues(y)
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -1647,11 +1666,11 @@ function _apply_cartesian_plot_options!(
 	return nothing
 end
 
-function _bar_trace(; x, y, color::String = "", name::String = "")
-	if color == ""
-		return bar(x = x, y = y, name = name)
-	end
-	return bar(x = x, y = y, name = name, marker = attr(color = color))
+function _bar_trace(; x, y, color::String = "", name::String = "", orientation::String = "")
+	kw = Dict{Symbol, Any}(:x => x, :y => y, :name => name)
+	color == "" || (kw[:marker] = attr(color = color))
+	orientation == "" || (kw[:orientation] = orientation)
+	return bar(; kw...)
 end
 
 function _histogram_trace(
@@ -1796,6 +1815,8 @@ function plot_scatter(
 	marker_symbol::Union{String, Vector{String}} = "",
 	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	error_x::Union{Nothing, AbstractVector} = nothing,
+	error_y::Union{Nothing, AbstractVector} = nothing,
 	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -1921,6 +1942,7 @@ function plot_scatter(
 		x_tick0 = _safe_tick0(x),
 		y_tick0 = _safe_tick0(y),
 	)
+	_set_error_bars!(trace, error_x, error_y)
 	fig = Plot(trace, layout)
 	if xscale != ""
 		update_xaxes!(fig, type = xscale)
@@ -2025,6 +2047,8 @@ function plot_scatter(
 	marker_symbol::Union{String, Vector{String}} = "",
 	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	error_x::Union{Nothing, AbstractVector} = nothing,
+	error_y::Union{Nothing, AbstractVector} = nothing,
 	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -2058,6 +2082,8 @@ function plot_scatter(
 		marker_symbol = marker_symbol,
 		linewidth = linewidth,
 		showlegend = showlegend,
+		error_x = error_x,
+		error_y = error_y,
 		show = show,
 	)
 end
@@ -2400,6 +2426,10 @@ function plot_bar(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	orientation::String = "",
+	barmode::String = "",
+	error_x::Union{Nothing, AbstractVector} = nothing,
+	error_y::Union{Nothing, AbstractVector} = nothing,
 	show::Bool = false,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
@@ -2409,11 +2439,11 @@ function plot_bar(
 
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				trace[n] = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n])
+				trace[n] = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
 			end
 		else
 			for n in eachindex(y)
-				trace[n] = _bar_trace(x = x, y = y[n], color = colorV[n], name = legendV[n])
+				trace[n] = _bar_trace(x = x, y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
 			end
 		end
 	else
@@ -2422,12 +2452,15 @@ function plot_bar(
 			y = y,
 			color = _first_or_empty(color),
 			name = _first_or_empty(legend),
+			orientation = orientation,
 		)
 	end
 
 	_apply_showlegend!(trace, showlegend)
+	_set_error_bars!(trace, error_x, error_y)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+	barmode == "" || relayout!(fig, barmode = barmode)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -2461,6 +2494,10 @@ function plot_bar(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	orientation::String = "",
+	barmode::String = "",
+	error_x::Union{Nothing, AbstractVector} = nothing,
+	error_y::Union{Nothing, AbstractVector} = nothing,
 	show::Bool = false,
 )
 	x = _auto_xvalues(y)
@@ -2481,6 +2518,10 @@ function plot_bar(
 		xscale = xscale,
 		yscale = yscale,
 		showlegend = showlegend,
+		orientation = orientation,
+		barmode = barmode,
+		error_x = error_x,
+		error_y = error_y,
 		show = show,
 	)
 end
@@ -4376,7 +4417,10 @@ function plot_scatter!(
 	marker_symbol::Union{String, Vector{String}} = "",
 	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	error_x::Union{Nothing, AbstractVector} = nothing,
+	error_y::Union{Nothing, AbstractVector} = nothing,
 )
+	_n0 = length(_plot_data(fig))
 	if isa(y, Vector) && eltype(y) <: Vector
 		modeV = fill("lines", length(y))
 		dashV = fill("", length(y))
@@ -4492,6 +4536,7 @@ function plot_scatter!(
 		end
 		push!(_plot_data(fig), scatter(; trace_kw...))
 	end
+	_set_error_bars!(view(_plot_data(fig), (_n0 + 1):length(_plot_data(fig))), error_x, error_y)
 	# apply optional layout updates
 	if title != ""
 		relayout!(fig, title = title)
@@ -4609,6 +4654,8 @@ function plot_scatter!(
 	marker_symbol::Union{String, Vector{String}} = "",
 	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	error_x::Union{Nothing, AbstractVector} = nothing,
+	error_y::Union{Nothing, AbstractVector} = nothing,
 )
 	if isa(y, Vector) && eltype(y) <: Vector
 		x = Vector{Vector{Int}}(undef, length(y))
@@ -4642,6 +4689,8 @@ function plot_scatter!(
 		marker_symbol = marker_symbol,
 		linewidth = linewidth,
 		showlegend = showlegend,
+		error_x = error_x,
+		error_y = error_y,
 	)
 end
 
@@ -4947,7 +4996,12 @@ function plot_bar!(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	orientation::String = "",
+	barmode::String = "",
+	error_x::Union{Nothing, AbstractVector} = nothing,
+	error_y::Union{Nothing, AbstractVector} = nothing,
 )
+	_n0 = length(_plot_data(fig))
 	if isa(y, Vector) && eltype(y) <: Vector
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
@@ -4955,14 +5009,14 @@ function plot_bar!(
 		showlegendV = _string_kwarg_vector("", length(y))
 		if isa(x, Vector) && eltype(x) <: Vector
 			for n in eachindex(y)
-				t = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n])
+				t = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
 				showlegend isa Bool && (t.showlegend = showlegend)
 				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
 				push!(_plot_data(fig), t)
 			end
 		else
 			for n in eachindex(y)
-				t = _bar_trace(x = x, y = y[n], color = colorV[n], name = legendV[n])
+				t = _bar_trace(x = x, y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
 				showlegend isa Bool && (t.showlegend = showlegend)
 				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
 				push!(_plot_data(fig), t)
@@ -4974,11 +5028,14 @@ function plot_bar!(
 			y = y,
 			color = _first_or_empty(color),
 			name = _first_or_empty(legend),
+			orientation = orientation,
 		)
 		showlegend isa Bool && (t.showlegend = showlegend)
 		push!(_plot_data(fig), t)
 	end
 
+	_set_error_bars!(view(_plot_data(fig), (_n0 + 1):length(_plot_data(fig))), error_x, error_y)
+	barmode == "" || relayout!(fig, barmode = barmode)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -5015,6 +5072,10 @@ function plot_bar!(
 	xscale::String = "",
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	orientation::String = "",
+	barmode::String = "",
+	error_x::Union{Nothing, AbstractVector} = nothing,
+	error_y::Union{Nothing, AbstractVector} = nothing,
 )
 	x = _auto_xvalues(y)
 	return plot_bar!(
@@ -5035,6 +5096,10 @@ function plot_bar!(
 		xscale = xscale,
 		yscale = yscale,
 		showlegend = showlegend,
+		orientation = orientation,
+		barmode = barmode,
+		error_x = error_x,
+		error_y = error_y,
 	)
 end
 
@@ -6616,3 +6681,1420 @@ function _tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
 	vv_zdata = [collect(elem) for elem in zipped_data]
 	return reduce(vcat, vv_zdata)
 end
+
+#region Extended chart types
+
+# Open a window for the freshly-built figure when `show=true`, otherwise return
+# the `Plot`. Mirrors the inline pattern used by the core constructors.
+_maybe_show(fig, show::Bool, width::Int, height::Int, title::String) =
+	show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720,
+		title = title == "" ? "PlotlySupply" : title) : fig
+
+# Lightweight layout options for non-Cartesian charts (pie, sankey, sunburst, …)
+# that have no x/y axes to style. On first construction the default template is
+# applied; on append (`apply_template=false`) only the legend is refreshed so a
+# user-set template survives.
+function _apply_basic_plot_options!(
+	fig;
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	apply_template::Bool = true,
+)
+	title != "" && relayout!(fig, title = title)
+	width > 0 && relayout!(fig, width = width)
+	height > 0 && relayout!(fig, height = height)
+	apply_template ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	fontsize > 0 && relayout!(fig, font = attr(size = fontsize))
+	return nothing
+end
+
+# Standard 3D scene layout shared by the 3D extended charts.
+function _scene_layout(; title::String, xlabel::String, ylabel::String, zlabel::String, aspectmode::String)
+	return Layout(
+		title = title,
+		scene = attr(
+			aspectmode = aspectmode,
+			xaxis = attr(title = xlabel == "" ? "x" : xlabel, zeroline = false),
+			yaxis = attr(title = ylabel == "" ? "y" : ylabel, zeroline = false),
+			zaxis = attr(title = zlabel == "" ? "z" : zlabel, zeroline = false),
+		),
+	)
+end
+
+# ── Pie ──────────────────────────────────────────────────────────────
+
+function _pie_trace(values; labels, hole::Real, colors::Vector{String}, name::String)
+	kw = Dict{Symbol, Any}(:values => collect(values))
+	labels === nothing || (kw[:labels] = collect(labels))
+	hole > 0 && (kw[:hole] = hole)
+	isempty(colors) || (kw[:marker] = attr(colors = colors))
+	name == "" || (kw[:name] = name)
+	return pie(; kw...)
+end
+
+"""
+	plot_pie(values; labels=nothing, hole=0, colors=String[], kwargs...)
+
+Pie (or donut, when `hole>0`) chart of `values`, with optional slice `labels`
+and per-slice `colors`.
+
+# Keyword Arguments
+- `labels`: Slice labels (defaults to indices).
+- `hole`: Donut hole fraction in `[0, 1)`.
+- `colors`: Per-slice colors.
+- `title`, `width`, `height`, `fontsize`, `show`: Common figure options.
+"""
+function plot_pie(
+	values::Union{AbstractVector, AbstractRange};
+	labels::Union{Nothing, AbstractVector} = nothing,
+	hole::Real = 0,
+	colors::Vector{String} = String[],
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	fig = Plot(_pie_trace(values; labels = labels, hole = hole, colors = colors, name = ""), Layout())
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_pie!(fig, values; labels=nothing, hole=0, colors=String[], kwargs...)
+
+Append a pie/donut trace to an existing figure.
+"""
+function plot_pie!(
+	fig,
+	values::Union{AbstractVector, AbstractRange};
+	labels::Union{Nothing, AbstractVector} = nothing,
+	hole::Real = 0,
+	colors::Vector{String} = String[],
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	push!(_plot_data(fig), _pie_trace(values; labels = labels, hole = hole, colors = colors, name = ""))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── Sunburst / Treemap (hierarchical) ────────────────────────────────
+
+function _hierarchy_trace(constructor, labels, parents; values, colorscale::String, name::String)
+	length(labels) == length(parents) ||
+		throw(ArgumentError("`labels` and `parents` must have the same length; got $(length(labels)) and $(length(parents))."))
+	kw = Dict{Symbol, Any}(:labels => collect(labels), :parents => collect(parents))
+	values === nothing || (kw[:values] = collect(values))
+	colorscale == "" || (kw[:marker] = attr(colorscale = colorscale))
+	name == "" || (kw[:name] = name)
+	return constructor(; kw...)
+end
+
+"""
+	plot_sunburst(labels, parents; values=nothing, colorscale="", kwargs...)
+
+Hierarchical sunburst chart. `parents[i]` is the label of `labels[i]`'s parent
+(use `""` for a root). Optional `values` size the slices.
+"""
+function plot_sunburst(
+	labels::AbstractVector,
+	parents::AbstractVector;
+	values::Union{Nothing, AbstractVector} = nothing,
+	colorscale::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	fig = Plot(_hierarchy_trace(sunburst, labels, parents; values = values, colorscale = colorscale, name = ""), Layout())
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_sunburst!(fig, labels, parents; values=nothing, colorscale="", kwargs...)
+
+Append a sunburst trace to an existing figure.
+"""
+function plot_sunburst!(
+	fig,
+	labels::AbstractVector,
+	parents::AbstractVector;
+	values::Union{Nothing, AbstractVector} = nothing,
+	colorscale::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	push!(_plot_data(fig), _hierarchy_trace(sunburst, labels, parents; values = values, colorscale = colorscale, name = ""))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+"""
+	plot_treemap(labels, parents; values=nothing, colorscale="", kwargs...)
+
+Hierarchical treemap chart. See [`plot_sunburst`](@ref) for the `labels`/`parents` convention.
+"""
+function plot_treemap(
+	labels::AbstractVector,
+	parents::AbstractVector;
+	values::Union{Nothing, AbstractVector} = nothing,
+	colorscale::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	fig = Plot(_hierarchy_trace(treemap, labels, parents; values = values, colorscale = colorscale, name = ""), Layout())
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_treemap!(fig, labels, parents; values=nothing, colorscale="", kwargs...)
+
+Append a treemap trace to an existing figure.
+"""
+function plot_treemap!(
+	fig,
+	labels::AbstractVector,
+	parents::AbstractVector;
+	values::Union{Nothing, AbstractVector} = nothing,
+	colorscale::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	push!(_plot_data(fig), _hierarchy_trace(treemap, labels, parents; values = values, colorscale = colorscale, name = ""))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── Funnel / Funnel-area ─────────────────────────────────────────────
+
+"""
+	plot_funnel(x, y; color="", legend="", kwargs...)
+
+Funnel chart of stage values `x` against stage labels `y`.
+"""
+function plot_funnel(
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
+	color::String = "",
+	legend::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	kw = Dict{Symbol, Any}(:x => x, :y => y)
+	color == "" || (kw[:marker] = attr(color = color))
+	legend == "" || (kw[:name] = legend)
+	fig = Plot(funnel(; kw...), Layout())
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_funnel!(fig, x, y; color="", legend="", kwargs...)
+
+Append a funnel trace to an existing figure.
+"""
+function plot_funnel!(
+	fig,
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
+	color::String = "",
+	legend::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	kw = Dict{Symbol, Any}(:x => x, :y => y)
+	color == "" || (kw[:marker] = attr(color = color))
+	legend == "" || (kw[:name] = legend)
+	push!(_plot_data(fig), funnel(; kw...))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+"""
+	plot_funnelarea(values; labels=nothing, colors=String[], kwargs...)
+
+Funnel-area chart of `values` with optional `labels`.
+"""
+function plot_funnelarea(
+	values::Union{AbstractVector, AbstractRange};
+	labels::Union{Nothing, AbstractVector} = nothing,
+	colors::Vector{String} = String[],
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	kw = Dict{Symbol, Any}(:values => collect(values))
+	labels === nothing || (kw[:labels] = collect(labels))
+	isempty(colors) || (kw[:marker] = attr(colors = colors))
+	fig = Plot(funnelarea(; kw...), Layout())
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_funnelarea!(fig, values; labels=nothing, colors=String[], kwargs...)
+
+Append a funnel-area trace to an existing figure.
+"""
+function plot_funnelarea!(
+	fig,
+	values::Union{AbstractVector, AbstractRange};
+	labels::Union{Nothing, AbstractVector} = nothing,
+	colors::Vector{String} = String[],
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	kw = Dict{Symbol, Any}(:values => collect(values))
+	labels === nothing || (kw[:labels] = collect(labels))
+	isempty(colors) || (kw[:marker] = attr(colors = colors))
+	push!(_plot_data(fig), funnelarea(; kw...))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── Waterfall ────────────────────────────────────────────────────────
+
+function _waterfall_trace(x, y; measure, legend::String)
+	kw = Dict{Symbol, Any}(:x => x, :y => y)
+	if measure !== nothing
+		length(measure) == length(y) ||
+			throw(ArgumentError("`measure` must match `y` in length; got $(length(measure)) and $(length(y))."))
+		kw[:measure] = collect(measure)
+	end
+	legend == "" || (kw[:name] = legend)
+	return waterfall(; kw...)
+end
+
+"""
+	plot_waterfall(x, y; measure=nothing, legend="", kwargs...)
+
+Waterfall chart. `measure[i]` is one of `"relative"`, `"total"`, or
+`"absolute"` (defaults to all-relative when omitted).
+"""
+function plot_waterfall(
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
+	measure::Union{Nothing, AbstractVector} = nothing,
+	legend::String = "",
+	xlabel::String = "",
+	ylabel::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	grid::Bool = true,
+	show::Bool = false,
+)
+	fig = Plot(_waterfall_trace(x, y; measure = measure, legend = legend),
+		_default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+	_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, width = width, height = height,
+		grid = grid, fontsize = fontsize, title = title)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_waterfall!(fig, x, y; measure=nothing, legend="", kwargs...)
+
+Append a waterfall trace to an existing figure.
+"""
+function plot_waterfall!(
+	fig,
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
+	measure::Union{Nothing, AbstractVector} = nothing,
+	legend::String = "",
+	xlabel::String = "",
+	ylabel::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	grid::Bool = true,
+)
+	push!(_plot_data(fig), _waterfall_trace(x, y; measure = measure, legend = legend))
+	_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, width = width, height = height,
+		grid = grid, fontsize = fontsize, title = title, refresh = true, apply_template = false)
+	return nothing
+end
+
+# ── Indicator (number / gauge / delta) ───────────────────────────────
+
+function _indicator_trace(value; mode::String, reference, gauge_range, gauge_shape::String, number_suffix::String)
+	kw = Dict{Symbol, Any}(:mode => mode, :value => value)
+	if reference !== nothing
+		kw[:delta] = attr(reference = reference)
+	end
+	if gauge_range !== nothing
+		kw[:gauge] = attr(shape = gauge_shape, axis = attr(range = collect(gauge_range)))
+	end
+	number_suffix == "" || (kw[:number] = attr(suffix = number_suffix))
+	return indicator(; kw...)
+end
+
+"""
+	plot_indicator(value; mode="number+delta", reference=nothing, gauge_range=nothing, gauge_shape="angular", number_suffix="", kwargs...)
+
+KPI indicator showing a big `value`. Add a delta with `reference`, and a gauge
+with `gauge_range=[lo,hi]` (`gauge_shape` is `"angular"` or `"bullet"`). `mode`
+combines `"number"`, `"delta"`, and `"gauge"` with `+`.
+"""
+function plot_indicator(
+	value::Real;
+	mode::String = "number+delta",
+	reference::Union{Nothing, Real} = nothing,
+	gauge_range::Union{Nothing, AbstractVector} = nothing,
+	gauge_shape::String = "angular",
+	number_suffix::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	m = gauge_range !== nothing && !occursin("gauge", mode) ? mode * "+gauge" : mode
+	fig = Plot(_indicator_trace(value; mode = m, reference = reference, gauge_range = gauge_range,
+		gauge_shape = gauge_shape, number_suffix = number_suffix), Layout())
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_indicator!(fig, value; kwargs...)
+
+Append an indicator trace to an existing figure (see [`plot_indicator`](@ref)).
+"""
+function plot_indicator!(
+	fig,
+	value::Real;
+	mode::String = "number+delta",
+	reference::Union{Nothing, Real} = nothing,
+	gauge_range::Union{Nothing, AbstractVector} = nothing,
+	gauge_shape::String = "angular",
+	number_suffix::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	m = gauge_range !== nothing && !occursin("gauge", mode) ? mode * "+gauge" : mode
+	push!(_plot_data(fig), _indicator_trace(value; mode = m, reference = reference, gauge_range = gauge_range,
+		gauge_shape = gauge_shape, number_suffix = number_suffix))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── Area (filled scatter) ────────────────────────────────────────────
+
+function _area_traces(x, y; color, legend, mode::String, stack::Bool)
+	if isa(y, Vector) && eltype(y) <: Vector
+		colorV = _string_kwarg_vector(color, length(y))
+		legendV = _string_kwarg_vector(legend, length(y))
+		x_nested = isa(x, Vector) && eltype(x) <: Vector
+		traces = Vector{GenericTrace}(undef, length(y))
+		for n in eachindex(y)
+			xn = x_nested ? x[n] : x
+			kw = Dict{Symbol, Any}(:x => xn, :y => y[n], :mode => mode, :name => legendV[n])
+			colorV[n] == "" || (kw[:line] = attr(color = colorV[n]))
+			stack ? (kw[:stackgroup] = "one") : (kw[:fill] = "tozeroy")
+			traces[n] = scatter(; kw...)
+		end
+		return traces
+	end
+	kw = Dict{Symbol, Any}(:x => x, :y => y, :mode => mode, :fill => "tozeroy", :name => _first_or_empty(legend))
+	c = _first_or_empty(color)
+	c == "" || (kw[:line] = attr(color = c))
+	return scatter(; kw...)
+end
+
+"""
+	plot_area(x, y; color="", legend="", mode="lines", stack=false, kwargs...)
+	plot_area(y; ...)
+
+Filled-area line plot. With a `Vector` of `Vector`s for `y`, pass `stack=true`
+to stack the series (Plotly `stackgroup`), otherwise each is filled to zero.
+"""
+function plot_area(
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
+	color::Union{String, Vector{String}} = "",
+	legend::Union{String, Vector{String}} = "",
+	mode::String = "lines",
+	stack::Bool = false,
+	xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	grid::Bool = true,
+	show::Bool = false,
+)
+	trace = _area_traces(x, y; color = color, legend = legend, mode = mode, stack = stack)
+	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel,
+		x_tick0 = _safe_tick0(x), y_tick0 = _safe_tick0(y)))
+	_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, xrange = xrange, yrange = yrange,
+		width = width, height = height, grid = grid, fontsize = fontsize, title = title)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+plot_area(y::Union{AbstractRange, Vector, SubArray}; kwargs...) = plot_area(_auto_xvalues(y), y; kwargs...)
+
+"""
+	plot_area!(fig, x, y; kwargs...)
+	plot_area!(fig, y; ...)
+
+Append filled-area trace(s) to an existing figure.
+"""
+function plot_area!(
+	fig,
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
+	color::Union{String, Vector{String}} = "",
+	legend::Union{String, Vector{String}} = "",
+	mode::String = "lines",
+	stack::Bool = false,
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	trace = _area_traces(x, y; color = color, legend = legend, mode = mode, stack = stack)
+	for t in (trace isa AbstractVector ? trace : [trace])
+		push!(_plot_data(fig), t)
+	end
+	_apply_cartesian_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize,
+		refresh = true, apply_template = false)
+	return nothing
+end
+
+plot_area!(fig, y::Union{AbstractRange, Vector, SubArray}; kwargs...) = plot_area!(fig, _auto_xvalues(y), y; kwargs...)
+
+# ── Candlestick / OHLC ───────────────────────────────────────────────
+
+function _ohlc_trace(constructor, x, o, h, l, c; increasing_color::String, decreasing_color::String, legend::String)
+	length(x) == length(o) == length(h) == length(l) == length(c) ||
+		throw(ArgumentError("candlestick/ohlc: x, open, high, low, close must share length; got $(length(x)), $(length(o)), $(length(h)), $(length(l)), $(length(c))."))
+	kw = Dict{Symbol, Any}(:x => x, :open => o, :high => h, :low => l, :close => c)
+	increasing_color == "" || (kw[:increasing] = attr(line = attr(color = increasing_color)))
+	decreasing_color == "" || (kw[:decreasing] = attr(line = attr(color = decreasing_color)))
+	legend == "" || (kw[:name] = legend)
+	return constructor(; kw...)
+end
+
+for (fn, fn!, ctor, label) in (
+	(:plot_candlestick, :plot_candlestick!, :candlestick, "candlestick"),
+	(:plot_ohlc, :plot_ohlc!, :ohlc, "OHLC"),
+)
+	@eval begin
+		"""
+			$($(string(fn)))(x, open, high, low, close; increasing_color="", decreasing_color="", legend="", kwargs...)
+
+		$($label) financial chart over positions/dates `x`.
+		"""
+		function $fn(
+			x::Union{AbstractRange, Vector, SubArray},
+			open::Union{AbstractRange, Vector, SubArray},
+			high::Union{AbstractRange, Vector, SubArray},
+			low::Union{AbstractRange, Vector, SubArray},
+			close::Union{AbstractRange, Vector, SubArray};
+			increasing_color::String = "",
+			decreasing_color::String = "",
+			legend::String = "",
+			xlabel::String = "",
+			ylabel::String = "",
+			title::String = "",
+			width::Int = 0,
+			height::Int = 0,
+			fontsize::Int = 0,
+			grid::Bool = true,
+			show::Bool = false,
+		)
+			trace = _ohlc_trace($ctor, x, open, high, low, close;
+				increasing_color = increasing_color, decreasing_color = decreasing_color, legend = legend)
+			fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+			_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, width = width, height = height,
+				grid = grid, fontsize = fontsize, title = title)
+			return _maybe_show(fig, show, width, height, title)
+		end
+
+		"""
+			$($(string(fn!)))(fig, x, open, high, low, close; kwargs...)
+
+		Append a $($label) trace to an existing figure.
+		"""
+		function $fn!(
+			fig,
+			x::Union{AbstractRange, Vector, SubArray},
+			open::Union{AbstractRange, Vector, SubArray},
+			high::Union{AbstractRange, Vector, SubArray},
+			low::Union{AbstractRange, Vector, SubArray},
+			close::Union{AbstractRange, Vector, SubArray};
+			increasing_color::String = "",
+			decreasing_color::String = "",
+			legend::String = "",
+			title::String = "",
+			width::Int = 0,
+			height::Int = 0,
+			fontsize::Int = 0,
+		)
+			push!(_plot_data(fig), _ohlc_trace($ctor, x, open, high, low, close;
+				increasing_color = increasing_color, decreasing_color = decreasing_color, legend = legend))
+			_apply_cartesian_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize,
+				refresh = true, apply_template = false)
+			return nothing
+		end
+	end
+end
+
+# ── 2D histogram (density) ───────────────────────────────────────────
+
+function _histogram2d_trace(x, y; nbinsx::Int, nbinsy::Int, colorscale::String, histnorm::String)
+	kw = Dict{Symbol, Any}(:x => x, :y => y)
+	nbinsx > 0 && (kw[:nbinsx] = nbinsx)
+	nbinsy > 0 && (kw[:nbinsy] = nbinsy)
+	colorscale == "" || (kw[:colorscale] = colorscale)
+	histnorm == "" || (kw[:histnorm] = histnorm)
+	return histogram2d(; kw...)
+end
+
+"""
+	plot_histogram2d(x, y; nbinsx=0, nbinsy=0, colorscale="", histnorm="", kwargs...)
+
+2-D histogram (density heatmap) of paired samples `x`, `y`.
+"""
+function plot_histogram2d(
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
+	nbinsx::Int = 0,
+	nbinsy::Int = 0,
+	colorscale::String = "",
+	histnorm::String = "",
+	xlabel::String = "",
+	ylabel::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	grid::Bool = true,
+	show::Bool = false,
+)
+	fig = Plot(_histogram2d_trace(x, y; nbinsx = nbinsx, nbinsy = nbinsy, colorscale = colorscale, histnorm = histnorm),
+		_default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+	_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, width = width, height = height,
+		grid = grid, fontsize = fontsize, title = title)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_histogram2d!(fig, x, y; kwargs...)
+
+Append a 2-D histogram trace to an existing figure.
+"""
+function plot_histogram2d!(
+	fig,
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray};
+	nbinsx::Int = 0,
+	nbinsy::Int = 0,
+	colorscale::String = "",
+	histnorm::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	push!(_plot_data(fig), _histogram2d_trace(x, y; nbinsx = nbinsx, nbinsy = nbinsy, colorscale = colorscale, histnorm = histnorm))
+	_apply_cartesian_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize,
+		refresh = true, apply_template = false)
+	return nothing
+end
+
+# ── Annotations ──────────────────────────────────────────────────────
+
+"""
+	annotate!(fig, x, y, text; showarrow=true, xref="x", yref="y", font_size=0, kwargs...)
+
+Append a text annotation at data coordinates `(x, y)`. Extra `kwargs` are passed
+through to the Plotly annotation (e.g. `arrowhead`, `ax`, `ay`, `bgcolor`).
+Returns the figure.
+"""
+function annotate!(
+	fig,
+	x,
+	y,
+	text::AbstractString;
+	showarrow::Bool = true,
+	xref::String = "x",
+	yref::String = "y",
+	font_size::Int = 0,
+	kwargs...,
+)
+	p = _plot_obj(fig)
+	d = Dict{Symbol, Any}(:x => x, :y => y, :text => String(text), :showarrow => showarrow, :xref => xref, :yref => yref)
+	font_size > 0 && (d[:font] = attr(size = font_size))
+	for (k, v) in kwargs
+		d[k] = v
+	end
+	existing = get(p.layout.fields, :annotations, nothing)
+	anns = existing === nothing ? Any[] : collect(existing)
+	push!(anns, attr(; d...))
+	relayout!(fig, annotations = anns)
+	_refresh!(fig)
+	return fig
+end
+
+# ── Sankey ───────────────────────────────────────────────────────────
+
+function _sankey_trace(source, target, value; label, node_color::Vector{String}, link_color::String)
+	length(source) == length(target) == length(value) ||
+		throw(ArgumentError("sankey: source, target, value must share length; got $(length(source)), $(length(target)), $(length(value))."))
+	node = Dict{Symbol, Any}()
+	label === nothing || (node[:label] = collect(label))
+	isempty(node_color) || (node[:color] = node_color)
+	link = Dict{Symbol, Any}(:source => collect(source), :target => collect(target), :value => collect(value))
+	link_color == "" || (link[:color] = link_color)
+	return sankey(node = attr(; node...), link = attr(; link...))
+end
+
+"""
+	plot_sankey(source, target, value; label=nothing, node_color=String[], link_color="", kwargs...)
+
+Sankey flow diagram. `source`/`target` are 0-based node indices and `value` the
+flow magnitude of each link; `label` names the nodes.
+"""
+function plot_sankey(
+	source::AbstractVector,
+	target::AbstractVector,
+	value::AbstractVector;
+	label::Union{Nothing, AbstractVector} = nothing,
+	node_color::Vector{String} = String[],
+	link_color::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	fig = Plot(_sankey_trace(source, target, value; label = label, node_color = node_color, link_color = link_color), Layout())
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_sankey!(fig, source, target, value; kwargs...)
+
+Append a Sankey trace to an existing figure.
+"""
+function plot_sankey!(
+	fig,
+	source::AbstractVector,
+	target::AbstractVector,
+	value::AbstractVector;
+	label::Union{Nothing, AbstractVector} = nothing,
+	node_color::Vector{String} = String[],
+	link_color::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	push!(_plot_data(fig), _sankey_trace(source, target, value; label = label, node_color = node_color, link_color = link_color))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── Parallel coordinates ─────────────────────────────────────────────
+
+function _parcoords_dim(d)
+	d isa Pair && return attr(label = String(first(d)), values = collect(last(d)))
+	d isa PlotlyBase.PlotlyAttribute && return d
+	throw(ArgumentError("each parcoords dimension must be a `\"label\" => values` Pair or an `attr(...)`."))
+end
+
+"""
+	plot_parcoords(dimensions; line_color=nothing, colorscale="", kwargs...)
+
+Parallel-coordinates plot. `dimensions` is a vector of `"label" => values`
+pairs (or `attr(...)` dimensions). `line_color` (a per-row numeric vector) plus
+`colorscale` color the lines.
+"""
+function plot_parcoords(
+	dimensions::AbstractVector;
+	line_color::Union{Nothing, AbstractVector} = nothing,
+	colorscale::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	kw = Dict{Symbol, Any}(:dimensions => [_parcoords_dim(d) for d in dimensions])
+	if line_color !== nothing
+		lc = Dict{Symbol, Any}(:color => collect(line_color))
+		colorscale == "" || (lc[:colorscale] = colorscale)
+		kw[:line] = attr(; lc...)
+	end
+	fig = Plot(parcoords(; kw...), Layout())
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_parcoords!(fig, dimensions; kwargs...)
+
+Append a parallel-coordinates trace to an existing figure.
+"""
+function plot_parcoords!(
+	fig,
+	dimensions::AbstractVector;
+	line_color::Union{Nothing, AbstractVector} = nothing,
+	colorscale::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	kw = Dict{Symbol, Any}(:dimensions => [_parcoords_dim(d) for d in dimensions])
+	if line_color !== nothing
+		lc = Dict{Symbol, Any}(:color => collect(line_color))
+		colorscale == "" || (lc[:colorscale] = colorscale)
+		kw[:line] = attr(; lc...)
+	end
+	push!(_plot_data(fig), parcoords(; kw...))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── Ternary scatter ──────────────────────────────────────────────────
+
+function _ternary_trace(a, b, c; mode::String, color::String, legend::String, marker_size::Int)
+	kw = Dict{Symbol, Any}(:a => a, :b => b, :c => c, :mode => mode)
+	mk = Dict{Symbol, Any}()
+	color == "" || (mk[:color] = color)
+	marker_size > 0 && (mk[:size] = marker_size)
+	isempty(mk) || (kw[:marker] = attr(; mk...))
+	legend == "" || (kw[:name] = legend)
+	return scatterternary(; kw...)
+end
+
+function _ternary_layout(title, alabel, blabel, clabel)
+	tern = Dict{Symbol, Any}()
+	alabel == "" || (tern[:aaxis] = attr(title = alabel))
+	blabel == "" || (tern[:baxis] = attr(title = blabel))
+	clabel == "" || (tern[:caxis] = attr(title = clabel))
+	return isempty(tern) ? Layout(title = title) : Layout(title = title, ternary = attr(; tern...))
+end
+
+"""
+	plot_ternary(a, b, c; mode="markers", color="", legend="", marker_size=0, alabel="", blabel="", clabel="", kwargs...)
+
+Ternary scatter plot of three-component compositions `(a, b, c)`.
+"""
+function plot_ternary(
+	a::Union{AbstractRange, Vector, SubArray},
+	b::Union{AbstractRange, Vector, SubArray},
+	c::Union{AbstractRange, Vector, SubArray};
+	mode::String = "markers",
+	color::String = "",
+	legend::String = "",
+	marker_size::Int = 0,
+	alabel::String = "",
+	blabel::String = "",
+	clabel::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	fig = Plot(_ternary_trace(a, b, c; mode = mode, color = color, legend = legend, marker_size = marker_size),
+		_ternary_layout(title, alabel, blabel, clabel))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_ternary!(fig, a, b, c; kwargs...)
+
+Append a ternary scatter trace to an existing figure.
+"""
+function plot_ternary!(
+	fig,
+	a::Union{AbstractRange, Vector, SubArray},
+	b::Union{AbstractRange, Vector, SubArray},
+	c::Union{AbstractRange, Vector, SubArray};
+	mode::String = "markers",
+	color::String = "",
+	legend::String = "",
+	marker_size::Int = 0,
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	push!(_plot_data(fig), _ternary_trace(a, b, c; mode = mode, color = color, legend = legend, marker_size = marker_size))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── Image ────────────────────────────────────────────────────────────
+
+# Convert an H×W×C numeric array to the nested [[[c…]…]…] form Plotly expects;
+# pass an already-nested z through unchanged.
+function _image_z(z)
+	ndims(z) == 3 || return z
+	return [[[z[i, j, ch] for ch in axes(z, 3)] for j in axes(z, 2)] for i in axes(z, 1)]
+end
+
+"""
+	plot_image(z; colormodel="", kwargs...)
+
+Display image data `z` — either an `H×W×C` numeric array (C = 3 RGB or 4 RGBA)
+or an already-nested `[[[channels…]…]…]`. `colormodel` overrides the channel
+interpretation (e.g. `"rgb"`, `"rgba"`, `"hsl"`).
+"""
+function plot_image(
+	z::AbstractArray;
+	colormodel::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	kw = Dict{Symbol, Any}(:z => _image_z(z))
+	colormodel == "" || (kw[:colormodel] = colormodel)
+	fig = Plot(image(; kw...),
+		Layout(yaxis = attr(scaleanchor = "x", constrain = "domain"), xaxis = attr(constrain = "domain")))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_image!(fig, z; colormodel="", kwargs...)
+
+Append an image trace to an existing figure.
+"""
+function plot_image!(
+	fig,
+	z::AbstractArray;
+	colormodel::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	kw = Dict{Symbol, Any}(:z => _image_z(z))
+	colormodel == "" || (kw[:colormodel] = colormodel)
+	push!(_plot_data(fig), image(; kw...))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── 3D volumetric / mesh charts ──────────────────────────────────────
+
+# Shared 3D scene post-processing (projection, ranges, grid/axis visibility,
+# template/legend, font), mirroring the core 3D constructors.
+function _apply_scene_options!(
+	fig;
+	xrange, yrange, zrange,
+	width::Int, height::Int, perspective::Bool, grid::Bool, showaxis::Bool,
+	fontsize::Int, apply_template::Bool,
+)
+	perspective || relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
+	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
+	width > 0 && relayout!(fig, width = width)
+	height > 0 && relayout!(fig, height = height)
+	grid || relayout!(fig, scene = attr(xaxis = attr(showgrid = false), yaxis = attr(showgrid = false), zaxis = attr(showgrid = false)))
+	showaxis || relayout!(fig, scene = attr(xaxis = attr(visible = false), yaxis = attr(visible = false), zaxis = attr(visible = false)))
+	apply_template ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	fontsize > 0 && relayout!(fig, font = attr(size = fontsize))
+	return nothing
+end
+
+function _mesh3d_trace(x, y, z; i, j, k, intensity, color::String, colorscale::String, opacity::Real)
+	kw = Dict{Symbol, Any}(:x => x, :y => y, :z => z)
+	if i !== nothing && j !== nothing && k !== nothing
+		kw[:i] = i
+		kw[:j] = j
+		kw[:k] = k
+	end
+	intensity === nothing || (kw[:intensity] = collect(intensity))
+	color == "" || (kw[:color] = color)
+	colorscale == "" || (kw[:colorscale] = colorscale)
+	opacity < 1 && (kw[:opacity] = opacity)
+	return mesh3d(; kw...)
+end
+
+"""
+	plot_mesh3d(x, y, z; i=nothing, j=nothing, k=nothing, intensity=nothing, color="", colorscale="", opacity=1, kwargs...)
+
+3D triangular mesh through points `(x, y, z)`. Supply explicit triangle vertex
+indices via `i`/`j`/`k` (0-based), or omit them for automatic triangulation.
+Color with a uniform `color`, or per-vertex `intensity` + `colorscale`.
+"""
+function plot_mesh3d(
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray},
+	z::Union{AbstractRange, Vector, SubArray};
+	i = nothing, j = nothing, k = nothing,
+	intensity::Union{Nothing, AbstractVector} = nothing,
+	color::String = "",
+	colorscale::String = "",
+	opacity::Real = 1,
+	xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+	xlabel::String = "", ylabel::String = "", zlabel::String = "",
+	aspectmode::String = "auto", title::String = "", width::Int = 0, height::Int = 0,
+	fontsize::Int = 0, perspective::Bool = true, grid::Bool = true, showaxis::Bool = true, show::Bool = false,
+)
+	fig = Plot(_mesh3d_trace(x, y, z; i = i, j = j, k = k, intensity = intensity, color = color, colorscale = colorscale, opacity = opacity),
+		_scene_layout(title = title, xlabel = xlabel, ylabel = ylabel, zlabel = zlabel, aspectmode = aspectmode))
+	_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
+		perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = true)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_mesh3d!(fig, x, y, z; kwargs...)
+
+Append a 3D mesh trace to an existing figure.
+"""
+function plot_mesh3d!(
+	fig,
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray},
+	z::Union{AbstractRange, Vector, SubArray};
+	i = nothing, j = nothing, k = nothing,
+	intensity::Union{Nothing, AbstractVector} = nothing,
+	color::String = "", colorscale::String = "", opacity::Real = 1,
+	xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+	width::Int = 0, height::Int = 0, fontsize::Int = 0,
+	perspective::Bool = true, grid::Bool = true, showaxis::Bool = true,
+)
+	push!(_plot_data(fig), _mesh3d_trace(x, y, z; i = i, j = j, k = k, intensity = intensity, color = color, colorscale = colorscale, opacity = opacity))
+	_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
+		perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+function _field3d_trace(constructor, x, y, z, value; isomin, isomax, surface_count::Int, colorscale::String, opacity::Real)
+	kw = Dict{Symbol, Any}(:x => x, :y => y, :z => z, :value => collect(value))
+	isomin === nothing || (kw[:isomin] = isomin)
+	isomax === nothing || (kw[:isomax] = isomax)
+	surface_count > 0 && (kw[:surface_count] = surface_count)
+	colorscale == "" || (kw[:colorscale] = colorscale)
+	opacity < 1 && (kw[:opacity] = opacity)
+	return constructor(; kw...)
+end
+
+for (fn, fn!, ctor, label, defop) in (
+	(:plot_isosurface, :plot_isosurface!, :isosurface, "isosurface", 1.0),
+	(:plot_volume, :plot_volume!, :volume, "volume", 0.1),
+)
+	@eval begin
+		"""
+			$($(string(fn)))(x, y, z, value; isomin=nothing, isomax=nothing, surface_count=0, colorscale="", opacity=$($defop), kwargs...)
+
+		3D $($label) of a scalar field `value` sampled at points `(x, y, z)`.
+		`isomin`/`isomax` bound the rendered iso-levels and `surface_count` sets
+		how many are drawn.
+		"""
+		function $fn(
+			x::Union{AbstractRange, Vector, SubArray},
+			y::Union{AbstractRange, Vector, SubArray},
+			z::Union{AbstractRange, Vector, SubArray},
+			value::Union{AbstractRange, Vector, SubArray};
+			isomin::Union{Nothing, Real} = nothing, isomax::Union{Nothing, Real} = nothing,
+			surface_count::Int = 0, colorscale::String = "", opacity::Real = $defop,
+			xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+			xlabel::String = "", ylabel::String = "", zlabel::String = "",
+			aspectmode::String = "auto", title::String = "", width::Int = 0, height::Int = 0,
+			fontsize::Int = 0, perspective::Bool = true, grid::Bool = true, showaxis::Bool = true, show::Bool = false,
+		)
+			fig = Plot(_field3d_trace($ctor, x, y, z, value; isomin = isomin, isomax = isomax,
+				surface_count = surface_count, colorscale = colorscale, opacity = opacity),
+				_scene_layout(title = title, xlabel = xlabel, ylabel = ylabel, zlabel = zlabel, aspectmode = aspectmode))
+			_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
+				perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = true)
+			return _maybe_show(fig, show, width, height, title)
+		end
+
+		"""
+			$($(string(fn!)))(fig, x, y, z, value; kwargs...)
+
+		Append a 3D $($label) trace to an existing figure.
+		"""
+		function $fn!(
+			fig,
+			x::Union{AbstractRange, Vector, SubArray},
+			y::Union{AbstractRange, Vector, SubArray},
+			z::Union{AbstractRange, Vector, SubArray},
+			value::Union{AbstractRange, Vector, SubArray};
+			isomin::Union{Nothing, Real} = nothing, isomax::Union{Nothing, Real} = nothing,
+			surface_count::Int = 0, colorscale::String = "", opacity::Real = $defop,
+			xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+			width::Int = 0, height::Int = 0, fontsize::Int = 0,
+			perspective::Bool = true, grid::Bool = true, showaxis::Bool = true,
+		)
+			push!(_plot_data(fig), _field3d_trace($ctor, x, y, z, value; isomin = isomin, isomax = isomax,
+				surface_count = surface_count, colorscale = colorscale, opacity = opacity))
+			_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
+				perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = false)
+			_refresh!(fig)
+			return nothing
+		end
+	end
+end
+
+function _streamtube_trace(x, y, z, u, v, w; sizeref::Real, colorscale::String)
+	kw = Dict{Symbol, Any}(:x => x, :y => y, :z => z, :u => u, :v => v, :w => w)
+	sizeref > 0 && (kw[:sizeref] = sizeref)
+	colorscale == "" || (kw[:colorscale] = colorscale)
+	return streamtube(; kw...)
+end
+
+"""
+	plot_streamtube(x, y, z, u, v, w; sizeref=0, colorscale="", kwargs...)
+
+3D streamtube visualization of a vector field `(u, v, w)` at points `(x, y, z)`.
+"""
+function plot_streamtube(
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray},
+	z::Union{AbstractRange, Vector, SubArray},
+	u::Union{AbstractRange, Vector, SubArray},
+	v::Union{AbstractRange, Vector, SubArray},
+	w::Union{AbstractRange, Vector, SubArray};
+	sizeref::Real = 0, colorscale::String = "",
+	xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+	xlabel::String = "", ylabel::String = "", zlabel::String = "",
+	aspectmode::String = "auto", title::String = "", width::Int = 0, height::Int = 0,
+	fontsize::Int = 0, perspective::Bool = true, grid::Bool = true, showaxis::Bool = true, show::Bool = false,
+)
+	fig = Plot(_streamtube_trace(x, y, z, u, v, w; sizeref = sizeref, colorscale = colorscale),
+		_scene_layout(title = title, xlabel = xlabel, ylabel = ylabel, zlabel = zlabel, aspectmode = aspectmode))
+	_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
+		perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = true)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_streamtube!(fig, x, y, z, u, v, w; kwargs...)
+
+Append a streamtube trace to an existing figure.
+"""
+function plot_streamtube!(
+	fig,
+	x::Union{AbstractRange, Vector, SubArray},
+	y::Union{AbstractRange, Vector, SubArray},
+	z::Union{AbstractRange, Vector, SubArray},
+	u::Union{AbstractRange, Vector, SubArray},
+	v::Union{AbstractRange, Vector, SubArray},
+	w::Union{AbstractRange, Vector, SubArray};
+	sizeref::Real = 0, colorscale::String = "",
+	xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+	width::Int = 0, height::Int = 0, fontsize::Int = 0,
+	perspective::Bool = true, grid::Bool = true, showaxis::Bool = true,
+)
+	push!(_plot_data(fig), _streamtube_trace(x, y, z, u, v, w; sizeref = sizeref, colorscale = colorscale))
+	_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
+		perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+# ── Geographic maps ──────────────────────────────────────────────────
+
+function _geo_layout(title::String, scope::String, projection::String)
+	g = Dict{Symbol, Any}()
+	scope == "" || (g[:scope] = scope)
+	projection == "" || (g[:projection] = attr(type = projection))
+	return isempty(g) ? Layout(title = title) : Layout(title = title, geo = attr(; g...))
+end
+
+function _mapbox_layout(title::String, style::String, zoom::Real, center_lon, center_lat)
+	m = Dict{Symbol, Any}(:style => style)
+	zoom > 0 && (m[:zoom] = zoom)
+	if center_lon !== nothing && center_lat !== nothing
+		m[:center] = attr(lon = center_lon, lat = center_lat)
+	end
+	return Layout(title = title, mapbox = attr(; m...))
+end
+
+"""
+	plot_choropleth(locations, z; locationmode="country names", colorscale="", scope="", projection="", kwargs...)
+
+Choropleth map shading regions `locations` by value `z`. `locationmode` selects
+how `locations` are matched (e.g. `"country names"`, `"ISO-3"`, `"USA-states"`).
+"""
+function plot_choropleth(
+	locations::AbstractVector,
+	z::AbstractVector;
+	locationmode::String = "country names",
+	colorscale::String = "",
+	scope::String = "",
+	projection::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	length(locations) == length(z) ||
+		throw(ArgumentError("choropleth: locations and z must share length; got $(length(locations)) and $(length(z))."))
+	kw = Dict{Symbol, Any}(:locations => collect(locations), :z => collect(z), :locationmode => locationmode)
+	colorscale == "" || (kw[:colorscale] = colorscale)
+	fig = Plot(choropleth(; kw...), _geo_layout(title, scope, projection))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_choropleth!(fig, locations, z; kwargs...)
+
+Append a choropleth trace to an existing figure.
+"""
+function plot_choropleth!(
+	fig,
+	locations::AbstractVector,
+	z::AbstractVector;
+	locationmode::String = "country names",
+	colorscale::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	kw = Dict{Symbol, Any}(:locations => collect(locations), :z => collect(z), :locationmode => locationmode)
+	colorscale == "" || (kw[:colorscale] = colorscale)
+	push!(_plot_data(fig), choropleth(; kw...))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+"""
+	plot_scattergeo(lon, lat; mode="markers", color="", marker_size=0, legend="", scope="", projection="", kwargs...)
+
+Scatter points on a geographic map at coordinates `(lon, lat)` (degrees).
+"""
+function plot_scattergeo(
+	lon::AbstractVector,
+	lat::AbstractVector;
+	mode::String = "markers",
+	color::String = "",
+	marker_size::Int = 0,
+	legend::String = "",
+	scope::String = "",
+	projection::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	length(lon) == length(lat) ||
+		throw(ArgumentError("scattergeo: lon and lat must share length; got $(length(lon)) and $(length(lat))."))
+	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :mode => mode)
+	mk = Dict{Symbol, Any}()
+	color == "" || (mk[:color] = color)
+	marker_size > 0 && (mk[:size] = marker_size)
+	isempty(mk) || (kw[:marker] = attr(; mk...))
+	legend == "" || (kw[:name] = legend)
+	fig = Plot(scattergeo(; kw...), _geo_layout(title, scope, projection))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_scattergeo!(fig, lon, lat; kwargs...)
+
+Append a scattergeo trace to an existing figure.
+"""
+function plot_scattergeo!(
+	fig,
+	lon::AbstractVector,
+	lat::AbstractVector;
+	mode::String = "markers",
+	color::String = "",
+	marker_size::Int = 0,
+	legend::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :mode => mode)
+	mk = Dict{Symbol, Any}()
+	color == "" || (mk[:color] = color)
+	marker_size > 0 && (mk[:size] = marker_size)
+	isempty(mk) || (kw[:marker] = attr(; mk...))
+	legend == "" || (kw[:name] = legend)
+	push!(_plot_data(fig), scattergeo(; kw...))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+"""
+	plot_scattermapbox(lon, lat; mode="markers", color="", marker_size=0, legend="", style="open-street-map", zoom=0, center_lon=nothing, center_lat=nothing, kwargs...)
+
+Scatter points on a tile map at `(lon, lat)`. The default `"open-street-map"`
+style needs no access token.
+"""
+function plot_scattermapbox(
+	lon::AbstractVector,
+	lat::AbstractVector;
+	mode::String = "markers",
+	color::String = "",
+	marker_size::Int = 0,
+	legend::String = "",
+	style::String = "open-street-map",
+	zoom::Real = 0,
+	center_lon::Union{Nothing, Real} = nothing,
+	center_lat::Union{Nothing, Real} = nothing,
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	length(lon) == length(lat) ||
+		throw(ArgumentError("scattermapbox: lon and lat must share length; got $(length(lon)) and $(length(lat))."))
+	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :mode => mode)
+	mk = Dict{Symbol, Any}()
+	color == "" || (mk[:color] = color)
+	marker_size > 0 && (mk[:size] = marker_size)
+	isempty(mk) || (kw[:marker] = attr(; mk...))
+	legend == "" || (kw[:name] = legend)
+	fig = Plot(scattermapbox(; kw...), _mapbox_layout(title, style, zoom, center_lon, center_lat))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_scattermapbox!(fig, lon, lat; kwargs...)
+
+Append a scattermapbox trace to an existing figure.
+"""
+function plot_scattermapbox!(
+	fig,
+	lon::AbstractVector,
+	lat::AbstractVector;
+	mode::String = "markers",
+	color::String = "",
+	marker_size::Int = 0,
+	legend::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :mode => mode)
+	mk = Dict{Symbol, Any}()
+	color == "" || (mk[:color] = color)
+	marker_size > 0 && (mk[:size] = marker_size)
+	isempty(mk) || (kw[:marker] = attr(; mk...))
+	legend == "" || (kw[:name] = legend)
+	push!(_plot_data(fig), scattermapbox(; kw...))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+"""
+	plot_densitymapbox(lon, lat, z; radius=0, colorscale="", style="open-street-map", zoom=0, center_lon=nothing, center_lat=nothing, kwargs...)
+
+Density heatmap on a tile map from weighted points `(lon, lat, z)`. `radius`
+sets the influence (in pixels) of each point.
+"""
+function plot_densitymapbox(
+	lon::AbstractVector,
+	lat::AbstractVector,
+	z::AbstractVector;
+	radius::Real = 0,
+	colorscale::String = "",
+	style::String = "open-street-map",
+	zoom::Real = 0,
+	center_lon::Union{Nothing, Real} = nothing,
+	center_lat::Union{Nothing, Real} = nothing,
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+)
+	length(lon) == length(lat) == length(z) ||
+		throw(ArgumentError("densitymapbox: lon, lat, z must share length; got $(length(lon)), $(length(lat)), $(length(z))."))
+	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :z => collect(z))
+	radius > 0 && (kw[:radius] = radius)
+	colorscale == "" || (kw[:colorscale] = colorscale)
+	fig = Plot(densitymapbox(; kw...), _mapbox_layout(title, style, zoom, center_lon, center_lat))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_densitymapbox!(fig, lon, lat, z; kwargs...)
+
+Append a densitymapbox trace to an existing figure.
+"""
+function plot_densitymapbox!(
+	fig,
+	lon::AbstractVector,
+	lat::AbstractVector,
+	z::AbstractVector;
+	radius::Real = 0,
+	colorscale::String = "",
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+)
+	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :z => collect(z))
+	radius > 0 && (kw[:radius] = radius)
+	colorscale == "" || (kw[:colorscale] = colorscale)
+	push!(_plot_data(fig), densitymapbox(; kw...))
+	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+#endregion

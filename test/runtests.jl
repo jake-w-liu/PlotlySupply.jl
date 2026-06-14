@@ -1896,4 +1896,152 @@ using PlotlySupply
         ylabel!(sf2, "secondary"; secondary_y=true)
         @test haskey(sf2.plot.layout.fields, :yaxis2)
     end
+
+    # ─────────────────────────────────────────────────────────────────
+    # Extended chart types (v1.8.0 additions)
+    # ─────────────────────────────────────────────────────────────────
+
+    ttype(f) = f.data[1].fields[:type]
+
+    @testset "Extended: pie / funnelarea" begin
+        f = plot_pie([3, 2, 1]; labels=["a", "b", "c"], hole=0.3, colors=["red", "green", "blue"])
+        @test ttype(f) == "pie"
+        @test f.data[1].fields[:hole] == 0.3
+        @test f.data[1].fields[:marker][:colors] == ["red", "green", "blue"]
+        @test plot_funnelarea([5, 3, 1]; labels=["x", "y", "z"]).data[1].fields[:type] == "funnelarea"
+        g = plot_pie([1, 2]); plot_pie!(g, [3, 4]); @test length(g.data) == 2
+    end
+
+    @testset "Extended: sunburst / treemap" begin
+        @test ttype(plot_sunburst(["a", "b", "c"], ["", "a", "a"]; values=[10, 3, 2])) == "sunburst"
+        @test ttype(plot_treemap(["a", "b"], ["", ""]; values=[1, 2])) == "treemap"
+        @test_throws ArgumentError plot_sunburst(["a", "b"], [""])   # length mismatch
+        g = plot_sunburst(["a"], [""]); plot_sunburst!(g, ["b"], [""]); @test length(g.data) == 2
+    end
+
+    @testset "Extended: funnel / waterfall" begin
+        @test ttype(plot_funnel([100, 60, 30], ["A", "B", "C"])) == "funnel"
+        w = plot_waterfall(["a", "b", "c"], [10, -3, 5]; measure=["absolute", "relative", "total"])
+        @test ttype(w) == "waterfall"
+        @test w.data[1].fields[:measure] == ["absolute", "relative", "total"]
+        @test_throws ArgumentError plot_waterfall(["a", "b"], [1, 2]; measure=["total"])
+    end
+
+    @testset "Extended: indicator" begin
+        f = plot_indicator(72; reference=50, gauge_range=[0, 100])
+        @test ttype(f) == "indicator"
+        @test occursin("gauge", f.data[1].fields[:mode])
+        @test f.data[1].fields[:delta][:reference] == 50
+        @test f.data[1].fields[:gauge][:axis][:range] == [0, 100]
+    end
+
+    @testset "Extended: area" begin
+        @test plot_area(1:5, rand(5)).data[1].fields[:fill] == "tozeroy"
+        s = plot_area(1:5, [rand(5), rand(5)]; stack=true)
+        @test length(s.data) == 2 && s.data[1].fields[:stackgroup] == "one"
+        @test plot_area(rand(5)) isa Plot   # y-only form
+    end
+
+    @testset "Extended: candlestick / ohlc" begin
+        @test ttype(plot_candlestick(1:3, [1, 2, 3], [2, 3, 4], [0, 1, 2], [1.5, 2.5, 3.5])) == "candlestick"
+        @test ttype(plot_ohlc(1:3, [1, 2, 3], [2, 3, 4], [0, 1, 2], [1.5, 2.5, 3.5])) == "ohlc"
+        @test_throws ArgumentError plot_candlestick(1:3, [1, 2], [2, 3, 4], [0, 1, 2], [1.5, 2.5, 3.5])
+    end
+
+    @testset "Extended: histogram2d" begin
+        f = plot_histogram2d(randn(50), randn(50); nbinsx=10, colorscale="Viridis")
+        @test ttype(f) == "histogram2d"
+        @test f.data[1].fields[:colorscale] == "Viridis"
+    end
+
+    @testset "Extended: error bars" begin
+        f = plot_scatter(1:5, rand(5); error_y=fill(0.1, 5))
+        @test f.data[1].fields[:error_y][:array] == fill(0.1, 5)
+        @test f.data[1].fields[:error_y][:visible] == true
+        # nested per-series
+        m = plot_scatter(1:3, [[1, 2, 3], [4, 5, 6]]; error_y=[[0.1, 0.1, 0.1], [0.2, 0.2, 0.2]])
+        @test m.data[2].fields[:error_y][:array] == [0.2, 0.2, 0.2]
+        # bar error_x + only-new-trace on mutate
+        b = plot_bar([3, 2, 4]; error_y=[0.2, 0.3, 0.1])
+        @test haskey(b.data[1].fields, :error_y)
+        g = plot_scatter(1:3, [1, 2, 3]); plot_scatter!(g, 1:3, [3, 2, 1]; error_y=[0.1, 0.1, 0.1])
+        @test haskey(g.data[2].fields, :error_y) && !haskey(g.data[1].fields, :error_y)
+    end
+
+    @testset "Extended: bar orientation / barmode" begin
+        h = plot_bar([3, 2, 4], ["a", "b", "c"]; orientation="h")
+        @test h.data[1].fields[:orientation] == "h"
+        @test plot_bar(["a", "b"], [[1, 2], [3, 4]]; barmode="stack").layout.fields[:barmode] == "stack"
+    end
+
+    @testset "Extended: annotate!" begin
+        a = plot_scatter(1:5, rand(5))
+        annotate!(a, 3, 0.5, "peak"; arrowhead=2)
+        annotate!(a, 1, 0.1, "start"; showarrow=false)
+        @test length(a.layout.fields[:annotations]) == 2
+        @test a.layout.fields[:annotations][1][:text] == "peak"
+        @test a.layout.fields[:annotations][2][:showarrow] == false
+    end
+
+    @testset "Extended: sankey" begin
+        f = plot_sankey([0, 1], [1, 2], [5, 3]; label=["a", "b", "c"])
+        @test ttype(f) == "sankey"
+        @test f.data[1].fields[:link][:value] == [5, 3]
+        @test_throws ArgumentError plot_sankey([0], [1, 2], [5])
+    end
+
+    @testset "Extended: parcoords / ternary" begin
+        p = plot_parcoords(["A" => [1, 2, 3], "B" => [3, 2, 1]]; line_color=[1, 2, 3], colorscale="Viridis")
+        @test ttype(p) == "parcoords"
+        @test p.data[1].fields[:dimensions][1][:label] == "A"
+        @test p.data[1].fields[:line][:colorscale] == "Viridis"
+        t = plot_ternary([1, 2], [2, 1], [1, 1]; alabel="A", marker_size=8)
+        @test ttype(t) == "scatterternary"
+        @test t.layout.fields[:ternary][:aaxis][:title] == "A"
+    end
+
+    @testset "Extended: image" begin
+        rgb = plot_image(reshape(collect(0:11), 2, 2, 3))
+        @test ttype(rgb) == "image"
+        @test rgb.data[1].fields[:z] isa AbstractVector   # nested rows
+        @test ttype(plot_image([[[255, 0, 0], [0, 255, 0]]])) == "image"
+    end
+
+    @testset "Extended: 3D mesh / field / streamtube" begin
+        @test ttype(plot_mesh3d([0, 1, 0], [0, 0, 1], [0, 0, 0]; i=[0], j=[1], k=[2], color="lightblue")) == "mesh3d"
+        iso = plot_isosurface([0, 1, 0, 1], [0, 0, 1, 1], [0, 0, 0, 0], [1.0, 2, 3, 4]; surface_count=3, zrange=[-1, 1])
+        @test ttype(iso) == "isosurface"
+        @test iso.data[1].fields[:surface][:count] == 3
+        sc = PlotlySupply._symbol_dict(iso.layout.fields[:scene])
+        @test PlotlySupply._symbol_dict(sc[:zaxis])[:range] == [-1, 1]   # range on scene, not 2D axis
+        @test !haskey(iso.layout.fields, :yaxis)
+        @test plot_volume([0, 1], [0, 1], [0, 1], [1.0, 2]).data[1].fields[:opacity] == 0.1
+        @test ttype(plot_streamtube([0, 1], [0, 0], [0, 0], [1, 1], [0, 0], [0, 0]; sizeref=0.5)) == "streamtube"
+    end
+
+    @testset "Extended: geo / mapbox" begin
+        c = plot_choropleth(["USA", "CAN"], [1.0, 2.0]; colorscale="Blues", scope="north america")
+        @test ttype(c) == "choropleth"
+        @test PlotlySupply._symbol_dict(c.layout.fields[:geo])[:scope] == "north america"
+        @test ttype(plot_scattergeo([-100.0, 0.0], [40.0, 0.0]; marker_size=8)) == "scattergeo"
+        m = plot_scattermapbox([-122.4, -73.9], [37.8, 40.7]; zoom=2, center_lon=-100, center_lat=40)
+        @test ttype(m) == "scattermapbox"
+        @test PlotlySupply._symbol_dict(m.layout.fields[:mapbox])[:style] == "open-street-map"
+        @test ttype(plot_densitymapbox([-122.4], [37.8], [1.0]; radius=20)) == "densitymapbox"
+        @test_throws ArgumentError plot_scattergeo([0.0], [1.0, 2.0])
+    end
+
+    @testset "Extended: mutating preserves template" begin
+        for (mk, add!) in (
+            (() -> plot_pie([1, 2]), (g) -> plot_pie!(g, [3, 4])),
+            (() -> plot_waterfall(["a"], [1]), (g) -> plot_waterfall!(g, ["b"], [2])),
+            (() -> plot_mesh3d([0, 1, 0], [0, 0, 1], [0, 0, 0]; i=[0], j=[1], k=[2]),
+                (g) -> plot_mesh3d!(g, [1, 2, 1], [1, 1, 2], [1, 1, 1]; i=[0], j=[1], k=[2])),
+            (() -> plot_choropleth(["USA"], [1.0]), (g) -> plot_choropleth!(g, ["CAN"], [2.0])),
+        )
+            g = mk(); set_template!(g, "plotly_dark"); add!(g)
+            @test g.layout.fields[:template] == :plotly_dark
+            @test length(g.data) == 2
+        end
+    end
 end
