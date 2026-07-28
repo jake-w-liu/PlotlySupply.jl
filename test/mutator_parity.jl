@@ -188,20 +188,26 @@ end
 end
 
 @testset "redraw/purge use their exact renderer operations" begin
-    for target_kind in (:syncplot, :registered_plot)
+    for target_kind in (:syncplot, :registered_syncplot, :registered_plot)
         p = _mutator_probe_plot()
         sp, scripts = _command_probe_syncplot(
             p;
-            register=target_kind === :registered_plot,
+            register=target_kind !== :syncplot,
         )
-        target = target_kind === :syncplot ? sp : p
+        target = target_kind === :registered_plot ? p : sp
         data_ref = p.data
         layout_ref = p.layout
+        frames_ref = p.frames
+        config_ref = p.config
+        divid = sp.divid
 
         try
             @test redraw!(target) === target
             @test p.data === data_ref
             @test p.layout === layout_ref
+            @test p.frames === frames_ref
+            @test p.config === config_ref
+            @test sp.divid == divid
             @test length(scripts) == 1
             @test occursin("await Plotly.redraw(div);", only(scripts))
             @test !occursin("Plotly.react", only(scripts))
@@ -212,9 +218,25 @@ end
             @test isempty(p.data)
             @test p.layout == Layout()
             @test p.layout !== layout_ref
+            @test p.frames === frames_ref
+            @test p.config === config_ref
+            @test sp.divid == divid
             @test length(scripts) == 1
             @test occursin("Plotly.purge(div);", only(scripts))
             @test !occursin("Plotly.react", only(scripts))
+
+            first_purged_layout = p.layout
+            empty!(scripts)
+            @test purge!(target) === target
+            @test p.data === data_ref
+            @test isempty(p.data)
+            @test p.layout == Layout()
+            @test p.layout !== first_purged_layout
+            @test p.frames === frames_ref
+            @test p.config === config_ref
+            @test sp.divid == divid
+            @test length(scripts) == 1
+            @test occursin("Plotly.purge(div);", only(scripts))
         finally
             close(sp)
         end
