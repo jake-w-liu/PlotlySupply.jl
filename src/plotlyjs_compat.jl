@@ -421,8 +421,12 @@ const _SYNCPLOT_DEFINED_LAYOUT_UPDATERS = Set((:update_xaxes!, :update_yaxes!, :
 
 for (f, _) in vcat(PlotlyBase._layout_obj_updaters, PlotlyBase._layout_vector_updaters)
 	f in _SYNCPLOT_DEFINED_LAYOUT_UPDATERS && continue
-	@eval function PlotlyBase.$f(sp::SyncPlot, args...; kwargs...)
-		PlotlyBase.$f(sp.plot, args...; kwargs...)
+	@eval function PlotlyBase.$f(
+		sp::SyncPlot,
+		with::PlotlyBase.PlotlyAttribute = attr();
+		kwargs...,
+	)
+		PlotlyBase.$f(sp.plot.layout, with; kwargs...)
 		_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 		return sp
 	end

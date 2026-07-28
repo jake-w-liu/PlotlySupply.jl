@@ -800,6 +800,17 @@ function _do_prependtraces!(p::Plot, update::AbstractDict, indices::AbstractVect
 	return p
 end
 
+_trace_splice_tovec(value) = _trace_splice_tovec([value])
+_trace_splice_tovec(value::Vector) =
+	eltype(value) <: Vector ? value : Vector[value]
+
+function _trace_splice_keyword_update(update)
+	return Dict(
+		key => _trace_splice_tovec(value)
+		for (key, value) in pairs(update)
+	)
+end
+
 function _do_update!(
 	p::Plot,
 	ind::Union{AbstractVector{Int},Int},
@@ -937,10 +948,66 @@ function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::A
 	return sp
 end
 
+function PlotlyBase.extendtraces!(
+	sp::SyncPlot,
+	indices::Vector{Int} = [1],
+	maxpoints = -1;
+	update...,
+)
+	converted = _trace_splice_keyword_update(update)
+	return PlotlyBase.extendtraces!(sp, converted, indices, maxpoints)
+end
+
+function PlotlyBase.extendtraces!(
+	sp::SyncPlot,
+	index::Int,
+	maxpoints = -1;
+	update...,
+)
+	return PlotlyBase.extendtraces!(sp, [index], maxpoints; update...)
+end
+
+function PlotlyBase.extendtraces!(
+	sp::SyncPlot,
+	update::AbstractDict,
+	index::Int,
+	maxpoints = -1,
+)
+	return PlotlyBase.extendtraces!(sp, update, [index], maxpoints)
+end
+
 function PlotlyBase.prependtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
 	_do_prependtraces!(sp.plot, update, indices, maxpoints)
 	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
 	return sp
+end
+
+function PlotlyBase.prependtraces!(
+	sp::SyncPlot,
+	indices::Vector{Int} = [1],
+	maxpoints = -1;
+	update...,
+)
+	converted = _trace_splice_keyword_update(update)
+	return PlotlyBase.prependtraces!(sp, converted, indices, maxpoints)
+end
+
+function PlotlyBase.prependtraces!(
+	sp::SyncPlot,
+	index::Int,
+	maxpoints = -1;
+	update...,
+)
+	return PlotlyBase.prependtraces!(sp, [index], maxpoints; update...)
+end
+
+function PlotlyBase.prependtraces!(
+	sp::SyncPlot,
+	update::AbstractDict,
+	index::Int,
+	maxpoints = -1,
+)
+	return PlotlyBase.prependtraces!(sp, update, [index], maxpoints)
 end
 
 function PlotlyBase.update!(sp::SyncPlot, ind::Union{AbstractVector{Int},Int}, update::AbstractDict = Dict(); layout::AbstractLayout = sp.plot.layout, kwargs...)
@@ -1080,6 +1147,34 @@ function PlotlyBase.extendtraces!(
 	return p
 end
 
+function PlotlyBase.extendtraces!(
+	p::_RefreshablePlot,
+	indices::Vector{Int} = [1],
+	maxpoints = -1;
+	update...,
+)
+	converted = _trace_splice_keyword_update(update)
+	return PlotlyBase.extendtraces!(p, converted, indices, maxpoints)
+end
+
+function PlotlyBase.extendtraces!(
+	p::_RefreshablePlot,
+	index::Int,
+	maxpoints = -1;
+	update...,
+)
+	return PlotlyBase.extendtraces!(p, [index], maxpoints; update...)
+end
+
+function PlotlyBase.extendtraces!(
+	p::_RefreshablePlot,
+	update::AbstractDict,
+	index::Int,
+	maxpoints = -1,
+)
+	return PlotlyBase.extendtraces!(p, update, [index], maxpoints)
+end
+
 function PlotlyBase.prependtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
@@ -1089,6 +1184,34 @@ function PlotlyBase.prependtraces!(
 	_do_prependtraces!(p, update, indices, maxpoints)
 	_maybe_sync_refresh!(p)
 	return p
+end
+
+function PlotlyBase.prependtraces!(
+	p::_RefreshablePlot,
+	indices::Vector{Int} = [1],
+	maxpoints = -1;
+	update...,
+)
+	converted = _trace_splice_keyword_update(update)
+	return PlotlyBase.prependtraces!(p, converted, indices, maxpoints)
+end
+
+function PlotlyBase.prependtraces!(
+	p::_RefreshablePlot,
+	index::Int,
+	maxpoints = -1;
+	update...,
+)
+	return PlotlyBase.prependtraces!(p, [index], maxpoints; update...)
+end
+
+function PlotlyBase.prependtraces!(
+	p::_RefreshablePlot,
+	update::AbstractDict,
+	index::Int,
+	maxpoints = -1,
+)
+	return PlotlyBase.prependtraces!(p, update, [index], maxpoints)
 end
 
 function PlotlyBase.update!(
@@ -1140,6 +1263,76 @@ function PlotlyBase.update_polars!(
 	kwargs...,
 )
 	_do_update_polars!(p, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
+
+function PlotlyBase.update_geos!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	PlotlyBase.update_geos!(p.layout, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
+
+function PlotlyBase.update_mapboxes!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	PlotlyBase.update_mapboxes!(p.layout, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
+
+function PlotlyBase.update_scenes!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	PlotlyBase.update_scenes!(p.layout, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
+
+function PlotlyBase.update_ternaries!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	PlotlyBase.update_ternaries!(p.layout, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
+
+function PlotlyBase.update_annotations!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	PlotlyBase.update_annotations!(p.layout, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
+
+function PlotlyBase.update_shapes!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	PlotlyBase.update_shapes!(p.layout, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
+
+function PlotlyBase.update_images!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	PlotlyBase.update_images!(p.layout, with; kwargs...)
 	_maybe_sync_refresh!(p)
 	return p
 end

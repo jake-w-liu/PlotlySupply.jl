@@ -3288,4 +3288,6 @@ end
             @test !isopen(fixture.window.msg_channel)
         end
     end
+
+    include("mutator_parity.jl")
 end
