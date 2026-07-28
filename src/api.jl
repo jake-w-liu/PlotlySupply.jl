@@ -3608,6 +3608,162 @@ function plot_contour(
 end
 
 
+# Preserve the existing maximum shaft length while matching Plotly's reference
+# quiver proportions for the arrowhead.
+const _QUIVER_SHAFT_SCALE = 2 / 3
+const _QUIVER_HEAD_SCALE = 0.3
+const _QUIVER_HEAD_ANGLE = pi / 9
+
+function _quiver_coordinates(
+	x,
+	y,
+	u,
+	v,
+	sizeref::Real;
+	caller::AbstractString,
+)
+	n = length(x)
+	n == length(y) == length(u) == length(v) || throw(ArgumentError(
+		"$caller: x, y, u, v must all have the same length; got " *
+		"$(length(x)), $(length(y)), $(length(u)), $(length(v))",
+	))
+	isfinite(sizeref) && sizeref >= 0 || throw(ArgumentError(
+		"$caller: sizeref must be finite and non-negative; got $sizeref",
+	))
+
+	TX = promote_type(Float64, eltype(x), eltype(u), eltype(v), typeof(sizeref))
+	TY = promote_type(Float64, eltype(y), eltype(u), eltype(v), typeof(sizeref))
+	empty_x, empty_y = Vector{TX}(), Vector{TY}()
+	n == 0 && return empty_x, empty_y
+
+	# Represent each magnitude as component * shape, where component is the
+	# largest absolute component and shape lies in [1, sqrt(2)]. Comparing
+	# bounded ratios avoids squaring overflow and underflow.
+	max_component = 0.0
+	max_shape = 0.0
+	drawable = 0
+	skipped = 0
+
+	@inbounds for i in eachindex(x, y, u, v)
+		xi, yi, ui, vi = x[i], y[i], u[i], v[i]
+		xi isa Real && yi isa Real && ui isa Real && vi isa Real ||
+			throw(ArgumentError(
+				"$caller: x, y, u, v values must be real numbers " *
+				"(invalid value at index $i)",
+			))
+
+		xf, yf, uf, vf = float(xi), float(yi), float(ui), float(vi)
+		if !(isfinite(xf) && isfinite(yf) && isfinite(uf) && isfinite(vf))
+			skipped += 1
+			continue
+		end
+
+		component = max(abs(uf), abs(vf))
+		iszero(component) && continue
+		shape = hypot(uf / component, vf / component)
+		drawable += 1
+
+		if iszero(max_component) ||
+		   (component > max_component ?
+			shape > (max_component / component) * max_shape :
+			(component / max_component) * shape > max_shape)
+			max_component, max_shape = component, shape
+		end
+	end
+
+	skipped > 0 && @warn(
+		"$caller: skipped $skipped vector(s) with non-finite origins or components.",
+	)
+	if drawable == 0
+		n > skipped && @warn(
+			"$caller: all finite vectors have zero magnitude; nothing to draw.",
+		)
+		return empty_x, empty_y
+	end
+
+	# An explicit zero scale is a valid request for no visible arrows.
+	iszero(sizeref) && return empty_x, empty_y
+
+	# Each arrow needs a shaft and a separate three-point arrowhead:
+	# origin, tip, NaN, head1, tip, head2, NaN.
+	output_length = Base.Checked.checked_mul(7, drawable)
+	arrow_x = Vector{TX}(undef, output_length)
+	arrow_y = Vector{TY}(undef, output_length)
+	cos_head, sin_head = cos(_QUIVER_HEAD_ANGLE), sin(_QUIVER_HEAD_ANGLE)
+	max_shaft = sizeref * _QUIVER_SHAFT_SCALE
+	j = 1
+
+	@inbounds for i in eachindex(x, y, u, v)
+		xf, yf = float(x[i]), float(y[i])
+		uf, vf = float(u[i]), float(v[i])
+		isfinite(xf) && isfinite(yf) && isfinite(uf) && isfinite(vf) ||
+			continue
+
+		component = max(abs(uf), abs(vf))
+		iszero(component) && continue
+		su, sv = uf / component, vf / component
+		shape = hypot(su, sv)
+		ux, uy = su / shape, sv / shape
+
+		shaft = (component / max_component) *
+			(shape / max_shape) *
+			max_shaft
+		tip_x, tip_y = xf + ux * shaft, yf + uy * shaft
+
+		arm = _QUIVER_HEAD_SCALE * shaft
+		head1_x = tip_x - arm * (ux * cos_head - uy * sin_head)
+		head1_y = tip_y - arm * (uy * cos_head + ux * sin_head)
+		head2_x = tip_x - arm * (ux * cos_head + uy * sin_head)
+		head2_y = tip_y - arm * (uy * cos_head - ux * sin_head)
+
+		isfinite(tip_x) && isfinite(tip_y) &&
+			isfinite(head1_x) && isfinite(head1_y) &&
+			isfinite(head2_x) && isfinite(head2_y) ||
+			throw(ArgumentError(
+				"$caller: scaled arrow coordinates are non-finite at index $i",
+			))
+
+		arrow_x[j] = xf
+		arrow_y[j] = yf
+		arrow_x[j + 1] = tip_x
+		arrow_y[j + 1] = tip_y
+		arrow_x[j + 2] = NaN
+		arrow_y[j + 2] = NaN
+		arrow_x[j + 3] = head1_x
+		arrow_y[j + 3] = head1_y
+		arrow_x[j + 4] = tip_x
+		arrow_y[j + 4] = tip_y
+		arrow_x[j + 5] = head2_x
+		arrow_y[j + 5] = head2_y
+		arrow_x[j + 6] = NaN
+		arrow_y[j + 6] = NaN
+		j += 7
+	end
+
+	return arrow_x, arrow_y
+end
+
+function _quiver_trace(
+	x,
+	y,
+	u,
+	v;
+	color::String = "RoyalBlue",
+	sizeref::Real = 1,
+	caller::AbstractString = "plot_quiver",
+)
+	arrow_x, arrow_y =
+		_quiver_coordinates(x, y, u, v, sizeref; caller = caller)
+	return scatter(
+		x = arrow_x,
+		y = arrow_y,
+		mode = "lines",
+		line_color = color,
+		hoverinfo = "skip",
+	)
+end
+
+
 """
 	function plot_quiver(
 		x::Union{AbstractRange, Vector, SubArray},
@@ -3668,49 +3824,15 @@ function plot_quiver(
     grid::Bool = true,
     show::Bool = false,
 )
-    x_vec = isa(x, AbstractRange) ? collect(x) : x
-    y_vec = isa(y, AbstractRange) ? collect(y) : y
-    u_vec = isa(u, AbstractRange) ? collect(u) : u
-    v_vec = isa(v, AbstractRange) ? collect(v) : v
-
-    length(x_vec) == length(y_vec) == length(u_vec) == length(v_vec) ||
-        throw(ArgumentError("plot_quiver: x, y, u, v must all have the same length; got $(length(x_vec)), $(length(y_vec)), $(length(u_vec)), $(length(v_vec))"))
-
-    p_max = maximum(sqrt.(u_vec .^ 2 .+ v_vec .^ 2))
-    # All-zero (or non-finite) field would divide by zero and produce an all-NaN
-    # invisible trace; fall back to unit scale so arrows degenerate to points.
-    if !isfinite(p_max) || p_max == 0
-        @warn "plot_quiver: all vectors have zero (or non-finite) magnitude; nothing to draw."
-        p_max = one(p_max)
-    end
-    u_ref = u_vec ./ p_max .* sizeref
-    v_ref = v_vec ./ p_max .* sizeref
-    end_x = x_vec .+ u_ref .* 2 / 3
-    end_y = y_vec .+ v_ref .* 2 / 3
-
-    vect_nans = repeat([NaN], length(x_vec))
-
-    arrow_length = sqrt.(u_ref .^ 2 .+ v_ref .^ 2)
-    barb_angle = atan.(v_ref, u_ref)
-
-    ang1 = barb_angle .+ atan(1 / 4)
-    ang2 = barb_angle .- atan(1 / 4)
-
-    seg1_x = arrow_length .* cos.(ang1) .* sqrt(1.0625)
-    seg1_y = arrow_length .* sin.(ang1) .* sqrt(1.0625)
-
-    seg2_x = arrow_length .* cos.(ang2) .* sqrt(1.0625)
-    seg2_y = arrow_length .* sin.(ang2) .* sqrt(1.0625)
-
-    arrowend1_x = end_x .- seg1_x
-    arrowend1_y = end_y .- seg1_y
-    arrowend2_x = end_x .- seg2_x
-    arrowend2_y = end_y .- seg2_y
-    arrow_x = _tuple_interleave((collect(arrowend1_x), collect(end_x), collect(arrowend2_x), collect(vect_nans)))
-    arrow_y = _tuple_interleave((collect(arrowend1_y), collect(end_y), collect(arrowend2_y), collect(vect_nans)))
-
-    arrow = scatter(x = arrow_x, y = arrow_y, mode = "lines", line_color = color,
-        fill = "toself", fillcolor = color, hoverinfo = "skip")
+    arrow = _quiver_trace(
+        x,
+        y,
+        u,
+        v;
+        color = color,
+        sizeref = sizeref,
+        caller = "plot_quiver",
+    )
 
     layout = Layout(
         title = title,
@@ -6021,47 +6143,15 @@ function plot_quiver!(
 	fontsize::Int = 0,
 	grid::Bool = true,
 )
-	x_vec = isa(x, AbstractRange) ? collect(x) : x
-	y_vec = isa(y, AbstractRange) ? collect(y) : y
-	u_vec = isa(u, AbstractRange) ? collect(u) : u
-	v_vec = isa(v, AbstractRange) ? collect(v) : v
-
-	length(x_vec) == length(y_vec) == length(u_vec) == length(v_vec) ||
-		throw(ArgumentError("plot_quiver!: x, y, u, v must all have the same length; got $(length(x_vec)), $(length(y_vec)), $(length(u_vec)), $(length(v_vec))"))
-
-	p_max = maximum(sqrt.(u_vec .^ 2 .+ v_vec .^ 2))
-	if !isfinite(p_max) || p_max == 0
-		@warn "plot_quiver!: all vectors have zero (or non-finite) magnitude; nothing to draw."
-		p_max = one(p_max)
-	end
-	u_ref = u_vec ./ p_max .* sizeref
-	v_ref = v_vec ./ p_max .* sizeref
-	end_x = x_vec .+ u_ref .* 2 / 3
-	end_y = y_vec .+ v_ref .* 2 / 3
-
-	vect_nans = repeat([NaN], length(x_vec))
-
-	arrow_length = sqrt.(u_ref .^ 2 .+ v_ref .^ 2)
-	barb_angle = atan.(v_ref, u_ref)
-
-	ang1 = barb_angle .+ atan(1 / 4)
-	ang2 = barb_angle .- atan(1 / 4)
-
-	seg1_x = arrow_length .* cos.(ang1) .* sqrt(1.0625)
-	seg1_y = arrow_length .* sin.(ang1) .* sqrt(1.0625)
-
-	seg2_x = arrow_length .* cos.(ang2) .* sqrt(1.0625)
-	seg2_y = arrow_length .* sin.(ang2) .* sqrt(1.0625)
-
-	arrowend1_x = end_x .- seg1_x
-	arrowend1_y = end_y .- seg1_y
-	arrowend2_x = end_x .- seg2_x
-	arrowend2_y = end_y .- seg2_y
-	arrow_x = _tuple_interleave((collect(arrowend1_x), collect(end_x), collect(arrowend2_x), collect(vect_nans)))
-	arrow_y = _tuple_interleave((collect(arrowend1_y), collect(end_y), collect(arrowend2_y), collect(vect_nans)))
-
-	arrow = scatter(x = arrow_x, y = arrow_y, mode = "lines", line_color = color,
-		fill = "toself", fillcolor = color, hoverinfo = "skip")
+	arrow = _quiver_trace(
+		x,
+		y,
+		u,
+		v;
+		color = color,
+		sizeref = sizeref,
+		caller = "plot_quiver!",
+	)
 	push!(_plot_data(fig), arrow)
 	# apply optional layout updates
 	if title != ""
@@ -6709,13 +6799,24 @@ function set_template!(fig, template = string(get_default_template()))
 	return nothing
 end
 
-## additional auxilliary functions
+## additional auxiliary functions
 
-function _tuple_interleave(tu::Union{NTuple{3, Vector}, NTuple{4, Vector}})
-	#auxilliary function to interleave elements of a NTuple of vectors, N = 3 or 4
-	zipped_data = collect(zip(tu...))
-	vv_zdata = [collect(elem) for elem in zipped_data]
-	return reduce(vcat, vv_zdata)
+function _tuple_interleave(tu::Tuple{Vararg{AbstractVector, N}}) where {N}
+	N > 0 || return Any[]
+	n = length(first(tu))
+	all(v -> length(v) == n, tu) || throw(ArgumentError(
+		"all vectors passed to `_tuple_interleave` must have the same length.",
+	))
+	T = mapreduce(eltype, promote_type, tu)
+	out = Vector{T}(undef, Base.Checked.checked_mul(N, n))
+	j = 1
+	for values in zip(tu...)
+		for value in values
+			@inbounds out[j] = value
+			j += 1
+		end
+	end
+	return out
 end
 
 #region Extended chart types

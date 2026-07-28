@@ -1901,11 +1901,106 @@ end
         @test !haskey(plot_quiver3d([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]).data[1].fields, :colorscale)
     end
 
-    @testset "CRC: quiver robustness (length guard + zero field)" begin
+    @testset "CRC: quiver geometry and robustness" begin
         @test_throws ArgumentError plot_quiver([1.0], [1.0], [1.0, 2.0], [1.0])
         @test_throws ArgumentError plot_quiver!(plot_scatter(1:2, 1:2), [1.0], [1.0], [1.0, 2.0], [1.0])
-        local q
-        @test (q = (@test_logs (:warn,) plot_quiver([0.0, 1], [0.0, 1], [0.0, 0], [0.0, 0]))) isa Plot
+
+        q = plot_quiver([10.0], [20.0], [3.0], [0.0])
+        xs = q.data[1].fields[:x]
+        ys = q.data[1].fields[:y]
+        @test length(xs) == length(ys) == 7
+        @test xs[1:2] ≈ [10.0, 10.0 + 2 / 3]
+        @test ys[1:2] ≈ [20.0, 20.0]
+        @test isnan(xs[3]) && isnan(ys[3])
+        @test xs[4] < xs[2] && xs[6] < xs[2]
+        @test ys[4] < ys[2] < ys[6]
+        @test q.data[1].fields[:mode] == "lines"
+        @test !haskey(q.data[1].fields, :fill)
+
+        empty_q = plot_quiver(Float64[], Float64[], Float64[], Float64[])
+        @test isempty(empty_q.data[1].fields[:x])
+        @test isempty(empty_q.data[1].fields[:y])
+
+        mixed = @test_logs (:warn, r"skipped 1") plot_quiver(
+            [0.0, 10.0],
+            [0.0, 10.0],
+            [2.0, NaN],
+            [0.0, 0.0],
+        )
+        @test length(mixed.data[1].fields[:x]) == 7
+        @test mixed.data[1].fields[:x][1:2] ≈ [0.0, 2 / 3]
+
+        zero_q = @test_logs (:warn, r"zero magnitude") plot_quiver(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+        )
+        @test isempty(zero_q.data[1].fields[:x])
+
+        mixed_zero = plot_quiver(
+            [0.0, 10.0],
+            [0.0, 20.0],
+            [0.0, 2.0],
+            [0.0, 0.0],
+        )
+        @test length(mixed_zero.data[1].fields[:x]) == 7
+        @test mixed_zero.data[1].fields[:x][1] == 10.0
+        @test mixed_zero.data[1].fields[:y][1] == 20.0
+
+        scaled = plot_quiver(
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [2.0, 1.0],
+            [0.0, 0.0],
+        )
+        @test scaled.data[1].fields[:x][2] ≈ 2 / 3
+        @test scaled.data[1].fields[:x][9] ≈ 1 / 3
+
+        for (u, v) in (
+            ([1e308], [1e308]),
+            ([floatmax(Float64)], [floatmax(Float64)]),
+            ([nextfloat(0.0)], [nextfloat(0.0)]),
+            ([typemin(Int)], [typemin(Int)]),
+        )
+            extreme = plot_quiver([0.0], [0.0], u, v)
+            xv = extreme.data[1].fields[:x]
+            yv = extreme.data[1].fields[:y]
+            @test all(z -> isnan(z) || isfinite(z), xv)
+            @test all(z -> isnan(z) || isfinite(z), yv)
+            @test hypot(xv[2] - xv[1], yv[2] - yv[1]) ≈ 2 / 3 rtol=2e-15
+        end
+
+        @test_throws ArgumentError plot_quiver(
+            [0.0], [0.0], [1.0], [0.0]; sizeref=-1,
+        )
+        @test_throws ArgumentError plot_quiver(
+            [0.0], [0.0], [1.0], [0.0]; sizeref=NaN,
+        )
+        @test_throws ArgumentError plot_quiver(
+            [0.0], [0.0], Any["bad"], [0.0],
+        )
+
+        base = plot_scatter(1:2, 1:2)
+        initial_count = length(base.data)
+        @test_throws ArgumentError plot_quiver!(
+            base,
+            [0.0],
+            [0.0],
+            [1.0],
+            [0.0];
+            sizeref=-1,
+        )
+        @test length(base.data) == initial_count
+        @test_throws ArgumentError plot_quiver!(
+            base,
+            [floatmax(Float64)],
+            [0.0],
+            [1.0],
+            [0.0];
+            sizeref=floatmax(Float64),
+        )
+        @test length(base.data) == initial_count
     end
 
     @testset "CRC: mutating constructors preserve a user template" begin
