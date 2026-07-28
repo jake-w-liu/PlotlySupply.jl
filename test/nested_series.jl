@@ -201,3 +201,129 @@ end
     @test length(sf.plot.data) == 2
     @test all(trace.fields[:xaxis] == "x" for trace in sf.plot.data)
 end
+
+@testset "CRC: nested distribution layout modes" begin
+    nested = UnitRange{Int}[1:3, 4:6]
+    nested_x = UnitRange{Int}[10:12, 20:22]
+    singleton = UnitRange{Int}[1:3]
+    empty_nested = UnitRange{Int}[]
+
+    constructor_cases = (
+        (() -> plot_histogram(nested), :barmode, "overlay"),
+        (() -> plot_box(nested_x, nested), :boxmode, "group"),
+        (() -> plot_box(nested), :boxmode, "group"),
+        (() -> plot_violin(nested_x, nested), :violinmode, "group"),
+        (() -> plot_violin(nested), :violinmode, "group"),
+    )
+    for (make_figure, key, expected) in constructor_cases
+        @test make_figure().layout.fields[key] == expected
+    end
+
+    for (make_figure, key) in (
+        (() -> plot_histogram(singleton), :barmode),
+        (() -> plot_histogram(empty_nested), :barmode),
+        (() -> plot_box(singleton), :boxmode),
+        (() -> plot_box(empty_nested), :boxmode),
+        (() -> plot_violin(singleton), :violinmode),
+        (() -> plot_violin(empty_nested), :violinmode),
+    )
+        @test !haskey(make_figure().layout.fields, key)
+    end
+
+    mutator_cases = (
+        (plot_histogram!, :barmode, "overlay", "group"),
+        (plot_box!, :boxmode, "group", "overlay"),
+        (plot_violin!, :violinmode, "group", "overlay"),
+    )
+    for (mutate!, key, automatic, existing) in mutator_cases
+        p = plot_scatter(1:3, 1:3)
+        @test mutate!(p, nested) === nothing
+        @test p.layout.fields[key] == automatic
+
+        p = plot_scatter(1:3, 1:3)
+        p.layout.fields[key] = existing
+        @test mutate!(p, nested) === nothing
+        @test p.layout.fields[key] == existing
+    end
+
+    p = plot_scatter(1:3, 1:3)
+    @test plot_box!(p, nested_x, nested) === nothing
+    @test p.layout.fields[:boxmode] == "group"
+    @test plot_violin!(p, nested_x, nested) === nothing
+    @test p.layout.fields[:violinmode] == "group"
+
+    p = plot_histogram(nested)
+    @test p.layout.fields[:barmode] == "overlay"
+    @test plot_bar!(p, nested) === nothing
+    @test p.layout.fields[:barmode] == "overlay"
+    @test plot_bar!(p, nested; barmode="stack") === nothing
+    @test p.layout.fields[:barmode] == "stack"
+    @test plot_histogram!(p, nested) === nothing
+    @test p.layout.fields[:barmode] == "stack"
+
+    before_count = length(p.data)
+    @test plot_bar!(p, empty_nested; barmode="group") === nothing
+    @test length(p.data) == before_count
+    @test p.layout.fields[:barmode] == "group"
+
+    sf = PlotlySupply.subplots(
+        1,
+        1;
+        sync=false,
+        per_subplot_legends=false,
+    )
+    @test plot_box!(sf, nested) === sf
+    @test plot_violin!(sf, nested) === sf
+    @test plot_histogram!(sf, nested) === sf
+    @test sf.plot.layout.fields[:boxmode] == "group"
+    @test sf.plot.layout.fields[:violinmode] == "group"
+    @test sf.plot.layout.fields[:barmode] == "overlay"
+    for axis_key in (:xaxis, :yaxis)
+        for mode_key in (:barmode, :boxmode, :violinmode)
+            @test !haskey(sf.plot.layout.fields[axis_key], mode_key)
+        end
+    end
+
+    sf.plot.layout.fields[:boxmode] = "overlay"
+    sf.plot.layout.fields[:violinmode] = "overlay"
+    sf.plot.layout.fields[:barmode] = "stack"
+    @test plot_box!(sf, nested) === sf
+    @test plot_violin!(sf, nested) === sf
+    @test plot_histogram!(sf, nested) === sf
+    @test sf.plot.layout.fields[:boxmode] == "overlay"
+    @test sf.plot.layout.fields[:violinmode] == "overlay"
+    @test sf.plot.layout.fields[:barmode] == "stack"
+    @test plot_bar!(sf, nested; barmode="group") === sf
+    @test sf.plot.layout.fields[:barmode] == "group"
+
+    subplot_count = length(sf.plot.data)
+    @test plot_bar!(sf, empty_nested; barmode="stack") === sf
+    @test length(sf.plot.data) == subplot_count
+    @test sf.plot.layout.fields[:barmode] == "stack"
+
+    invalid_sf = PlotlySupply.subplots(
+        1,
+        1;
+        sync=false,
+        per_subplot_legends=false,
+        specs=fill(PlotlySupply.Spec(kind="polar"), 1, 1),
+    )
+    invalid_layout_before = deepcopy(invalid_sf.plot.layout)
+    @test_throws ArgumentError plot_box!(invalid_sf, nested)
+    @test isempty(invalid_sf.plot.data)
+    @test invalid_sf.plot.layout == invalid_layout_before
+
+    counted_data = _CountingTraceVector(GenericTrace[scatter(x=1:3, y=1:3)])
+    counted_plot = Plot(counted_data, Layout())
+    counted_sync = SyncPlot(counted_plot, nothing, nothing, "mode-refresh-count")
+    for mutate! in (
+        fig -> plot_histogram!(fig, nested),
+        fig -> plot_box!(fig, nested),
+        fig -> plot_violin!(fig, nested),
+        fig -> plot_bar!(fig, nested; barmode="stack"),
+    )
+        _subplot_refresh_calls[] = 0
+        @test mutate!(counted_sync) === nothing
+        @test _subplot_refresh_calls[] == 1
+    end
+end

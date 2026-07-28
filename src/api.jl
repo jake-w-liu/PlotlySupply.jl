@@ -1023,6 +1023,24 @@ function _apply_source_layout_to_added_traces!(
 	return nothing
 end
 
+const _SUBPLOT_ROOT_LAYOUT_MODES = (:barmode, :boxmode, :violinmode)
+
+function _apply_source_root_layout_modes!(
+	target::Plot,
+	source::Plot;
+	overwrite_keys::Tuple{Vararg{Symbol}} = (),
+)
+	for key in _SUBPLOT_ROOT_LAYOUT_MODES
+		haskey(source.layout.fields, key) || continue
+		if key in overwrite_keys
+			target.layout.fields[key] = source.layout.fields[key]
+		else
+			get!(target.layout.fields, key, source.layout.fields[key])
+		end
+	end
+	return nothing
+end
+
 function _subplot_delegate_mutator!(
 	sf::SubplotFigure,
 	mutator::Function,
@@ -1057,6 +1075,14 @@ function _subplot_delegate_mutator!(
 	start_index = length(p.data) + 1
 	append!(p.data, staged.data)
 	_apply_source_layout_to_added_traces!(p, tmp, start_index)
+	explicit_modes = get(values(kwargs), :barmode, "") == "" ?
+		() :
+		(:barmode,)
+	_apply_source_root_layout_modes!(
+		p,
+		tmp;
+		overwrite_keys = explicit_modes,
+	)
 
 	if sf.per_subplot_legends
 		_apply_subplot_legends!(
@@ -1730,6 +1756,27 @@ _scalar_or_first(value, default) = value isa AbstractVector ? (isempty(value) ? 
 # correctly handles ranges, views, and abstractly typed collections.
 @inline _is_nested_series(::AbstractVector{<:AbstractVector}) = true
 @inline _is_nested_series(::Any) = false
+
+function _apply_nested_layout_mode!(
+	fig,
+	values,
+	key::Symbol,
+	mode::String,
+)
+	if _is_nested_series(values) && length(values) > 1
+		get!(_plot_layout(fig).fields, key, mode)
+	end
+	return nothing
+end
+
+function _apply_explicit_layout_mode!(
+	fig,
+	key::Symbol,
+	mode::String,
+)
+	isempty(mode) || (_plot_layout(fig).fields[key] = mode)
+	return nothing
+end
 
 function _nested_coordinate_mode(primary, secondary, primary_name::Symbol, secondary_name::Symbol)
 	primary_nested = _is_nested_series(primary)
@@ -2677,7 +2724,7 @@ function plot_bar(
 	_set_error_bars!(trace, error_x, error_y)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	barmode == "" || relayout!(fig, barmode = barmode)
+	_apply_explicit_layout_mode!(fig, :barmode, barmode)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -2812,6 +2859,7 @@ function plot_histogram(
 	_apply_showlegend!(trace, showlegend)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+	_apply_nested_layout_mode!(fig, x, :barmode, "overlay")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -2912,10 +2960,7 @@ function plot_box(
 	_apply_showlegend!(trace, showlegend)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	# Render multiple boxes side-by-side (Plotly defaults to "overlay").
-	if y_nested && length(y) > 1
-		relayout!(fig, boxmode = "group")
-	end
+	_apply_nested_layout_mode!(fig, y, :boxmode, "group")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -2976,6 +3021,7 @@ function plot_box(
 	_apply_showlegend!(trace, showlegend)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+	_apply_nested_layout_mode!(fig, y, :boxmode, "group")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -3081,10 +3127,7 @@ function plot_violin(
 	_apply_showlegend!(trace, showlegend)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	# Render multiple violins side-by-side (Plotly defaults to "overlay").
-	if y_nested && length(y) > 1
-		relayout!(fig, violinmode = "group")
-	end
+	_apply_nested_layout_mode!(fig, y, :violinmode, "group")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -3148,6 +3191,7 @@ function plot_violin(
 	_apply_showlegend!(trace, showlegend)
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
+	_apply_nested_layout_mode!(fig, y, :violinmode, "group")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -5364,7 +5408,7 @@ function plot_bar!(
 	end
 
 	_set_error_bars!(view(_plot_data(fig), (_n0 + 1):length(_plot_data(fig))), error_x, error_y)
-	barmode == "" || relayout!(fig, barmode = barmode)
+	_apply_explicit_layout_mode!(fig, :barmode, barmode)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -5479,6 +5523,7 @@ function plot_histogram!(
 		push!(_plot_data(fig), t)
 	end
 
+	_apply_nested_layout_mode!(fig, x, :barmode, "overlay")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -5543,6 +5588,7 @@ function plot_box!(
 		push!(_plot_data(fig), t)
 	end
 
+	_apply_nested_layout_mode!(fig, y, :boxmode, "group")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -5596,6 +5642,7 @@ function plot_box!(
 		push!(_plot_data(fig), t)
 	end
 
+	_apply_nested_layout_mode!(fig, y, :boxmode, "group")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -5661,6 +5708,7 @@ function plot_violin!(
 		push!(_plot_data(fig), t)
 	end
 
+	_apply_nested_layout_mode!(fig, y, :violinmode, "group")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
@@ -5715,6 +5763,7 @@ function plot_violin!(
 		push!(_plot_data(fig), t)
 	end
 
+	_apply_nested_layout_mode!(fig, y, :violinmode, "group")
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
