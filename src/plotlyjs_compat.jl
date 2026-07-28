@@ -790,14 +790,13 @@ function PlotlyBase.add_trace!(sp::SyncPlot, trace::GenericTrace; kw...)
 end
 
 function PlotlyBase.redraw!(sp::SyncPlot)
-	PlotlyBase.redraw!(sp.plot)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	_plotlyjs_command!(sp, :redraw)
 	return sp
 end
 
 function PlotlyBase.purge!(sp::SyncPlot)
-	PlotlyBase.purge!(sp.plot)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	_do_purge!(sp.plot)
+	_plotlyjs_command!(sp, :purge)
 	return sp
 end
 

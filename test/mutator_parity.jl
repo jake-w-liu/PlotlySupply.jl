@@ -54,6 +54,23 @@ function _attach_mutator_refresh_probe(p::Plot)
     return sp
 end
 
+function _command_probe_syncplot(p::Plot; register::Bool=false)
+    scripts = String[]
+    backend = (
+        isopen=window -> true,
+        close=window -> nothing,
+        run=(window, script) -> (push!(scripts, script); "ok"),
+    )
+    resources = PlotlySupply._SyncPlotResources(nothing, backend)
+    sp = SyncPlot(p, nothing, nothing, "command-probe", resources)
+    if register
+        old, registered = PlotlySupply._register_displayed_syncplot!(p, sp)
+        old === nothing || error("unexpected existing command probe")
+        registered || error("failed to register command probe")
+    end
+    return sp, scripts
+end
+
 function _layout_update_value(p::Plot, field::Symbol)
     value = p.layout.fields[field]
     return field in (:annotations, :shapes, :images) ? only(value) : value
@@ -168,6 +185,49 @@ end
             end
         end
     end
+end
+
+@testset "redraw/purge use their exact renderer operations" begin
+    for target_kind in (:syncplot, :registered_plot)
+        p = _mutator_probe_plot()
+        sp, scripts = _command_probe_syncplot(
+            p;
+            register=target_kind === :registered_plot,
+        )
+        target = target_kind === :syncplot ? sp : p
+        data_ref = p.data
+        layout_ref = p.layout
+
+        try
+            @test redraw!(target) === target
+            @test p.data === data_ref
+            @test p.layout === layout_ref
+            @test length(scripts) == 1
+            @test occursin("await Plotly.redraw(div);", only(scripts))
+            @test !occursin("Plotly.react", only(scripts))
+
+            empty!(scripts)
+            @test purge!(target) === target
+            @test p.data === data_ref
+            @test isempty(p.data)
+            @test p.layout == Layout()
+            @test p.layout !== layout_ref
+            @test length(scripts) == 1
+            @test occursin("Plotly.purge(div);", only(scripts))
+            @test !occursin("Plotly.react", only(scripts))
+        finally
+            close(sp)
+        end
+    end
+
+    p = _mutator_probe_plot()
+    data_ref = p.data
+    @test redraw!(p) === p
+    @test p.data === data_ref
+    @test purge!(p) === p
+    @test p.data === data_ref
+    @test isempty(p.data)
+    @test p.layout == Layout()
 end
 
 @testset "extend/prepend keyword conversion" begin

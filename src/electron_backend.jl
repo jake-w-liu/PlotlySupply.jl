@@ -414,6 +414,36 @@ function _plotlyjs_refresh!(
 	return nothing
 end
 
+function _plotlyjs_command!(sp::SyncPlot, command::Symbol)
+	command in (:redraw, :purge) ||
+		throw(ArgumentError("unsupported Plotly.js command: $command"))
+	isopen(sp) || return nothing
+
+	divid_js = _json_js(sp.divid)
+	call_js = command === :redraw ?
+		"await Plotly.redraw(div);" :
+		"Plotly.purge(div);"
+	js = """
+(async function() {
+  if (typeof Plotly === "undefined") return "plotly-not-loaded";
+  const div = document.getElementById($divid_js);
+  if (!div) return "plot-div-not-found";
+  $call_js
+  return "ok";
+})();
+"""
+	try
+		ec = _syncplot_backend(sp)
+		Base.invokelatest(() -> ec.run(sp.window, js))
+	catch err
+		@warn "Failed to run Plotly.$command for SyncPlot window." exception = (
+			err,
+			catch_backtrace(),
+		)
+	end
+	return nothing
+end
+
 # ── Auto-refresh infrastructure ─────────────────────────────────────
 # Maps a displayed Plot to its SyncPlot so that mutating the Plot
 # (react!, addtraces!, …) automatically refreshes the Electron window.
@@ -428,6 +458,14 @@ function _maybe_sync_refresh!(p::Plot)
 	if sp !== nothing && isopen(sp)
 		_plotlyjs_refresh!(sp, p.data, p.layout)
 	end
+	return nothing
+end
+
+function _maybe_sync_command!(p::Plot, command::Symbol)
+	sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
+		get(_PLOT_SYNCPLOT_MAP, p, nothing)
+	end
+	sp === nothing || _plotlyjs_command!(sp, command)
 	return nothing
 end
 
@@ -453,6 +491,12 @@ end
 
 function _do_deletetraces!(p::Plot, inds::Int...)
 	deleteat!(p.data, inds)
+	return p
+end
+
+function _do_purge!(p::Plot)
+	empty!(p.data)
+	p.layout = Layout()
 	return p
 end
 
@@ -1125,6 +1169,17 @@ const _RefreshablePlot = Plot{TT, TL, TF} where {
 	TL <: Layout,
 	TF <: Vector{<:PlotlyFrame},
 }
+
+function PlotlyBase.redraw!(p::_RefreshablePlot)
+	_maybe_sync_command!(p, :redraw)
+	return p
+end
+
+function PlotlyBase.purge!(p::_RefreshablePlot)
+	_do_purge!(p)
+	_maybe_sync_command!(p, :purge)
+	return p
+end
 
 function PlotlyBase.react!(
 	p::_RefreshablePlot,
