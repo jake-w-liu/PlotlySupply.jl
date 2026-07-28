@@ -1875,6 +1875,15 @@ using PlotlySupply
         @test size(X) == (3, 2)
     end
 
+    @testset "CRC: json is a working reexport" begin
+        @test isdefined(PlotlySupply, :json)
+        p = plot_scatter(1:2, [3.0, NaN])
+        @test json(p; allownan=true) == PlotlyBase.JSON.json(p; allownan=true)
+        io = IOBuffer()
+        @test json(io, Dict("answer" => 42)) === nothing
+        @test String(take!(io)) == "{\"answer\":42}"
+    end
+
     @testset "CRC: savefig json/html work headlessly" begin
         f = plot_scatter(1:5, rand(5); title="α中文")
         io = IOBuffer(); savefig(io, f; format="json"); js = String(take!(io))

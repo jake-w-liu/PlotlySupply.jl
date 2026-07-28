@@ -8,6 +8,13 @@ using Reexport
 # PlotlySupply` (the heatmap/surface/quiver examples rely on it).
 @reexport using MeshGrid
 
+# PlotlyBase exports `json`, but recent JSON.jl releases no longer export that
+# function for `using JSON` to import. Restore the documented binding while
+# retaining forward compatibility with a PlotlyBase release that defines it.
+if !isdefined(@__MODULE__, :json)
+	const json = PlotlyBase.JSON.json
+end
+
 mutable struct SyncPlot
 	plot::Plot
 	app::Any
