@@ -3492,8 +3492,7 @@ function plot_heatmap(
 	yscale::String = "",
 	show::Bool = false,
 )
-	FV = @view U[:, :]
-	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
+	FV = transpose(U) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
 	trace = heatmap(x = x, y = y, z = FV)
 	colorscale != "" && (trace.colorscale = colorscale)
 	if !all(zrange .== [0, 0])
@@ -3698,8 +3697,7 @@ function plot_contour(
 	yscale::String = "",
 	show::Bool = false,
 )
-	FV = @view U[:, :]
-	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
+	FV = transpose(U) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
 	trace = contour(x = x, y = y, z = FV)
 	colorscale != "" && (trace.colorscale = colorscale)
 	if !all(zrange .== [0, 0])
@@ -6067,8 +6065,7 @@ function plot_heatmap!(
 	xscale::String = "",
 	yscale::String = "",
 )
-	FV = @view U[:, :]
-	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
+	FV = transpose(U) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
 	trace = heatmap(x = x, y = y, z = FV)
 	colorscale != "" && (trace.colorscale = colorscale)
 	if !all(zrange .== [0, 0])
@@ -6220,8 +6217,7 @@ function plot_contour!(
 	xscale::String = "",
 	yscale::String = "",
 )
-	FV = @view U[:, :]
-	FV = transpose(FV) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
+	FV = transpose(U) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
 	trace = contour(x = x, y = y, z = FV)
 	colorscale != "" && (trace.colorscale = colorscale)
 	if !all(zrange .== [0, 0])

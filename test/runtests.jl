@@ -317,6 +317,61 @@ end
         @test fig2 isa Plot
     end
 
+    @testset "heatmap and contour preserve x-y matrix orientation without copies" begin
+        x = [10, 20]
+        y = [100, 200, 300]
+        U = [11 12 13; 21 22 23]
+        expected_rendered_z = [11 21; 12 22; 13 23]
+
+        for constructor in (plot_heatmap, plot_contour)
+            explicit = constructor(x, y, U)
+            trace = only(explicit.data)
+            @test trace.fields[:x] === x
+            @test trace.fields[:y] === y
+            @test trace.fields[:transpose] === true
+            @test Matrix(trace.fields[:z]) == expected_rendered_z
+            @test parent(trace.fields[:z]) === U
+            @test PlotlyBase.JSON.json(trace.fields[:z]) ==
+                  "[[11,12,13],[21,22,23]]"
+
+            implicit = constructor(U)
+            implicit_trace = only(implicit.data)
+            @test implicit_trace.fields[:x] == [0, 1]
+            @test implicit_trace.fields[:y] == [0, 1, 2]
+            @test Matrix(implicit_trace.fields[:z]) == expected_rendered_z
+            @test parent(implicit_trace.fields[:z]) === U
+
+            square = constructor([1, 2], [3, 4], [11 12; 21 22])
+            @test Matrix(only(square.data).fields[:z]) ==
+                  [11 21; 12 22]
+        end
+
+        for mutator in (plot_heatmap!, plot_contour!)
+            explicit = Plot()
+            @test mutator(explicit, x, y, U) === nothing
+            trace = only(explicit.data)
+            @test trace.fields[:transpose] === true
+            @test Matrix(trace.fields[:z]) == expected_rendered_z
+            @test parent(trace.fields[:z]) === U
+
+            implicit = Plot()
+            @test mutator(implicit, U) === nothing
+            implicit_trace = only(implicit.data)
+            @test implicit_trace.fields[:x] == [0, 1]
+            @test implicit_trace.fields[:y] == [0, 1, 2]
+            @test Matrix(implicit_trace.fields[:z]) == expected_rendered_z
+            @test parent(implicit_trace.fields[:z]) === U
+        end
+
+        storage = [0 0 0 0; 11 12 13 0; 21 22 23 0; 0 0 0 0]
+        U_view = @view storage[2:3, 1:3]
+        for constructor in (plot_heatmap, plot_contour)
+            trace = only(constructor(x, y, U_view).data)
+            @test Matrix(trace.fields[:z]) == expected_rendered_z
+            @test parent(trace.fields[:z]) === U_view
+        end
+    end
+
     @testset "plot_quiver" begin
         x = 1:10
         y = 1:10
