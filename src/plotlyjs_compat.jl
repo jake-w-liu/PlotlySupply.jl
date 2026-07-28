@@ -800,8 +800,63 @@ function PlotlyBase.purge!(sp::SyncPlot)
 	return sp
 end
 
-PlotlyBase.to_image(sp::SyncPlot; kwargs...) = PlotlyBase.to_image(sp.plot; kwargs...)
-PlotlyBase.download_image(sp::SyncPlot; kwargs...) = PlotlyBase.download_image(sp.plot; kwargs...)
+function _require_open_syncplot_image_window(sp::SyncPlot)
+	isopen(sp) || throw(InvalidStateException(
+		"SyncPlot window is not open",
+		:not_open,
+	))
+	return nothing
+end
+
+function _syncplot_to_image_script(sp::SyncPlot, kwargs)
+	divid_js = _json_js(getfield(sp, :divid))
+	options_js = _json_js(kwargs)
+	return """
+(async function() {
+  if (typeof Plotly === "undefined" || typeof Plotly.toImage !== "function") {
+    throw new Error("Plotly.toImage is unavailable in the SyncPlot window");
+  }
+  const div = document.getElementById($divid_js);
+  if (!div) throw new Error("SyncPlot plot div was not found");
+  return await Plotly.toImage(div, $options_js);
+})()
+"""
+end
+
+function _syncplot_download_image_script(sp::SyncPlot, kwargs)
+	divid_js = _json_js(getfield(sp, :divid))
+	options_js = _json_js(kwargs)
+	return """
+(async function() {
+  if (typeof Plotly === "undefined" || typeof Plotly.downloadImage !== "function") {
+    throw new Error("Plotly.downloadImage is unavailable in the SyncPlot window");
+  }
+  const div = document.getElementById($divid_js);
+  if (!div) throw new Error("SyncPlot plot div was not found");
+  await Plotly.downloadImage(div, $options_js);
+  return null;
+})()
+"""
+end
+
+function PlotlyBase.to_image(sp::SyncPlot; kwargs...)
+	_require_open_syncplot_image_window(sp)
+	js = _syncplot_to_image_script(sp, kwargs)
+	ec = _syncplot_backend(sp)
+	result = Base.invokelatest(() -> ec.run(getfield(sp, :window), js))
+	result isa AbstractString || error(
+		"Plotly.toImage returned a non-string result of type $(typeof(result))",
+	)
+	return String(result)
+end
+
+function PlotlyBase.download_image(sp::SyncPlot; kwargs...)
+	_require_open_syncplot_image_window(sp)
+	js = _syncplot_download_image_script(sp, kwargs)
+	ec = _syncplot_backend(sp)
+	Base.invokelatest(() -> ec.run(getfield(sp, :window), js))
+	return nothing
+end
 
 const _SYNCPLOT_MISSING_CREATION_SPEC_ERROR =
 	"Cannot clone this SyncPlot because its original window options are unavailable. " *

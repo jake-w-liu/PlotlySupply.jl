@@ -793,6 +793,10 @@ end
 savefig(sf::SubplotFigure, args...; kwargs...) = savefig(getfield(sf, :fig), args...; kwargs...)
 savefig(io::IO, sf::SubplotFigure; kwargs...) = savefig(io, getfield(sf, :fig); kwargs...)
 savefig(filename::AbstractString, sf::SubplotFigure; kwargs...) = savefig(filename, getfield(sf, :fig); kwargs...)
+PlotlyBase.to_image(sf::SubplotFigure; kwargs...) =
+	PlotlyBase.to_image(getfield(sf, :fig); kwargs...)
+PlotlyBase.download_image(sf::SubplotFigure; kwargs...) =
+	PlotlyBase.download_image(getfield(sf, :fig); kwargs...)
 
 function _subplot_target_ref(
 	p::Plot,

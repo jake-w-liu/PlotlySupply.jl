@@ -117,6 +117,30 @@ function Base.getproperty(ec::_LifecycleFakeElectron, name::Symbol)
     return getfield(ec, name)
 end
 
+mutable struct _ImageCommandState
+    open::Bool
+    calls::Vector{Tuple{Any,String}}
+    results::Vector{Any}
+    run_error::Union{Nothing,Exception}
+end
+
+_ImageCommandState() =
+    _ImageCommandState(true, Tuple{Any,String}[], Any[], nothing)
+
+function _image_command_backend(state::_ImageCommandState)
+    return (
+        isopen=window -> state.open,
+        close=window -> (state.open = false; nothing),
+        run=function (window, script)
+            push!(state.calls, (window, String(script)))
+            state.run_error === nothing || throw(state.run_error)
+            isempty(state.results) &&
+                error("image command fake has no queued result")
+            return popfirst!(state.results)
+        end,
+    )
+end
+
 function _wait_for_lifecycle(predicate; timeout::Float64=5.0, collect::Bool=false)
     deadline = time() + timeout
     while time() < deadline
@@ -1147,8 +1171,6 @@ end
 
             add_trace!(sp, scatter(x=[0], y=[0]))
             redraw!(sp)
-            to_image(sp)
-            download_image(sp)
 
             sp_relayout = relayout(sp, title="copy")
             @test sp_relayout isa SyncPlot
@@ -3063,6 +3085,240 @@ end
             @test close(sp) === nothing
             @test window.close_calls == 1
             @test !ispath(tempdir)
+        end
+
+        @testset "live image commands use the source renderer exactly once" begin
+            state = _ImageCommandState()
+            backend = _image_command_backend(state)
+            window = Ref(:image_command_window)
+            plot = Plot(
+                scatter(y=[1, 2, 3]),
+                Layout(title="image-command");
+                config=PlotConfig(staticPlot=true),
+            )
+            resources = PlotlySupply._SyncPlotResources(nothing, backend)
+            hostile_divid =
+                "plot\"\\\n</ScRiPt><script>window.injected=true</script>"
+            sp = SyncPlot(
+                plot,
+                :fake,
+                window,
+                hostile_divid,
+                resources,
+            )
+            model_json =
+                PlotlyBase.JSON.json(plot; allownan=true)
+            model_refs = (
+                plot,
+                plot.data,
+                plot.layout,
+                plot.frames,
+                plot.config,
+                window,
+                resources,
+            )
+
+            push!(state.results, "data:image/png;base64,QUFBQQ==")
+            call_count = length(state.calls)
+            image_url = to_image(sp)
+            @test image_url == "data:image/png;base64,QUFBQQ=="
+            @test image_url isa String
+            @test length(state.calls) == call_count + 1
+            image_window, image_script = last(state.calls)
+            @test image_window === window
+            @test occursin("(async function()", image_script)
+            @test occursin(
+                "return await Plotly.toImage(div, {});",
+                image_script,
+            )
+            @test occursin(
+                "typeof Plotly.toImage !== \"function\"",
+                image_script,
+            )
+            @test occursin(
+                "SyncPlot plot div was not found",
+                image_script,
+            )
+            @test occursin(
+                PlotlySupply._json_js(hostile_divid),
+                image_script,
+            )
+            @test !occursin("</script>", lowercase(image_script))
+            @test !occursin("Plotly.react", image_script)
+            @test !occursin("Plotly.newPlot", image_script)
+
+            raw_result = SubString("renderer-image-data", 1)
+            push!(state.results, raw_result)
+            image_url = to_image(
+                sp;
+                format="full-json",
+                width=641,
+                height=479,
+                scale=2.5,
+                imageDataOnly=true,
+                setBackground="rgba(0,0,0,0)",
+            )
+            @test image_url == raw_result
+            @test image_url isa String
+            option_script = last(state.calls)[2]
+            for token in (
+                "\"format\":\"full-json\"",
+                "\"width\":641",
+                "\"height\":479",
+                "\"scale\":2.5",
+                "\"imageDataOnly\":true",
+                "\"setBackground\":\"rgba(0,0,0,0)\"",
+            )
+                @test occursin(token, option_script)
+            end
+
+            for invalid_result in (nothing, 1, Dict(:image => "x"), true)
+                push!(state.results, invalid_result)
+                call_count = length(state.calls)
+                err = try
+                    to_image(sp)
+                    nothing
+                catch caught
+                    caught
+                end
+                @test err isa ErrorException
+                @test occursin(
+                    "non-string result",
+                    sprint(showerror, err),
+                )
+                @test length(state.calls) == call_count + 1
+            end
+
+            hostile_filename =
+                "plot\"\\\n</ScRiPt><script>window.injected=true</script>"
+            push!(state.results, "renderer-private-filename.jpeg")
+            call_count = length(state.calls)
+            @test download_image(
+                sp;
+                format="jpeg",
+                filename=hostile_filename,
+                width=642,
+                height=481,
+                scale=1.75,
+            ) === nothing
+            @test length(state.calls) == call_count + 1
+            download_window, download_script = last(state.calls)
+            @test download_window === window
+            @test occursin(
+                "await Plotly.downloadImage(div,",
+                download_script,
+            )
+            @test occursin("return null;", download_script)
+            @test occursin(
+                "typeof Plotly.downloadImage !== \"function\"",
+                download_script,
+            )
+            for token in (
+                "\"format\":\"jpeg\"",
+                "\"width\":642",
+                "\"height\":481",
+                "\"scale\":1.75",
+                PlotlySupply._json_js(hostile_filename),
+            )
+                @test occursin(token, download_script)
+            end
+            @test !occursin("</script>", lowercase(download_script))
+
+            injected_error =
+                ErrorException("injected renderer promise rejection")
+            for image_operation in (to_image, download_image)
+                state.run_error = injected_error
+                call_count = length(state.calls)
+                caught = try
+                    image_operation(sp)
+                    nothing
+                catch err
+                    err
+                end
+                @test caught === injected_error
+                @test length(state.calls) == call_count + 1
+                state.run_error = nothing
+            end
+
+            sf = SubplotFigure(
+                sp,
+                1,
+                1,
+                1,
+                1,
+                false,
+                :topright,
+                (0.02, 0.02),
+                "white",
+                "black",
+                1.0,
+            )
+            subplot_state = (
+                sf.rows,
+                sf.cols,
+                sf.current_row,
+                sf.current_col,
+            )
+            push!(state.results, "subplot-renderer-image")
+            @test to_image(sf; format="svg") ==
+                  "subplot-renderer-image"
+            push!(state.results, nothing)
+            @test download_image(sf; filename="subplot") === nothing
+            @test (
+                sf.rows,
+                sf.cols,
+                sf.current_row,
+                sf.current_col,
+            ) == subplot_state
+
+            raw_sf = SubplotFigure(
+                Plot(scatter(y=[1, 2, 3])),
+                1,
+                1,
+                1,
+                1,
+                false,
+                :topright,
+                (0.02, 0.02),
+                "white",
+                "black",
+                1.0,
+            )
+            call_count = length(state.calls)
+            @test to_image(raw_sf) === nothing
+            @test download_image(raw_sf) === nothing
+            @test length(state.calls) == call_count
+
+            state.open = false
+            for image_operation in (to_image, download_image)
+                call_count = length(state.calls)
+                err = try
+                    image_operation(sp)
+                    nothing
+                catch caught
+                    caught
+                end
+                @test err isa InvalidStateException
+                @test occursin(
+                    "window is not open",
+                    sprint(showerror, err),
+                )
+                @test length(state.calls) == call_count
+            end
+            state.open = true
+
+            @test PlotlyBase.JSON.json(plot; allownan=true) ==
+                  model_json
+            @test (
+                sp.plot,
+                sp.plot.data,
+                sp.plot.layout,
+                sp.plot.frames,
+                sp.plot.config,
+                sp.window,
+                getfield(sp, :_resources),
+            ) === model_refs
+            @test sp.divid == hostile_divid
         end
 
         @testset "SyncPlot clones own independent windows and resources" begin
