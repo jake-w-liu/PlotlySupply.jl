@@ -813,9 +813,35 @@ function PlotlyBase.addtraces!(
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 )
+	isempty(traces) && return sf
+
+	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	p = _plot_obj(sf.fig)
+
+	# PlotlyBase.add_trace! deep-copies each trace and merges the selected
+	# subplot references. Stage the whole batch so a bad later trace or subplot
+	# reference cannot leave a partially appended figure.
+	staged = Plot(p.layout)
+	sizehint!(staged.data, length(traces))
 	for trace in traces
-		PlotlyBase.add_trace!(sf, trace; row = row, col = col, secondary_y = secondary_y)
+		PlotlyBase.add_trace!(staged, trace; row = r, col = c, secondary_y = secondary_y)
 	end
+	append!(p.data, staged.data)
+
+	if sf.per_subplot_legends
+		_apply_subplot_legends!(
+			p;
+			legend_position = sf.legend_position,
+			legend_inset = sf.legend_inset,
+			legend_bgcolor = sf.legend_bgcolor,
+			legend_bordercolor = sf.legend_bordercolor,
+			legend_borderwidth = sf.legend_borderwidth,
+		)
+	end
+
+	sf.current_row = r
+	sf.current_col = c
+	_refresh!(sf.fig)
 	return sf
 end
 

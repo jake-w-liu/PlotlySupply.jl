@@ -1,6 +1,30 @@
 using Test
 using PlotlySupply
 
+struct _UnsupportedTrace <: AbstractTrace end
+
+mutable struct _CountingTraceVector <: AbstractVector{GenericTrace}
+    data::Vector{GenericTrace}
+end
+Base.IndexStyle(::Type{_CountingTraceVector}) = IndexLinear()
+Base.size(v::_CountingTraceVector) = size(v.data)
+Base.getindex(v::_CountingTraceVector, i::Int) = v.data[i]
+Base.setindex!(v::_CountingTraceVector, x, i::Int) = (v.data[i] = x)
+Base.push!(v::_CountingTraceVector, xs...) = (push!(v.data, xs...); v)
+Base.append!(v::_CountingTraceVector, xs) = (append!(v.data, xs); v)
+Base.sizehint!(v::_CountingTraceVector, n::Integer) = (sizehint!(v.data, n); v)
+
+const _subplot_refresh_calls = Ref(0)
+function PlotlySupply._plotlyjs_refresh!(
+    ::SyncPlot,
+    ::_CountingTraceVector,
+    ::Layout;
+    kwargs...,
+)
+    _subplot_refresh_calls[] += 1
+    return nothing
+end
+
 @testset "PlotlySupply.jl" begin
     # Write your tests here.
 
@@ -1579,6 +1603,77 @@ using PlotlySupply
         @test length(sf.plot.data) >= 3
         @test sf.current_row == 1
         @test sf.current_col == 2
+    end
+
+    @testset "SubplotFigure addtraces! batches atomically" begin
+        sf = PlotlySupply.subplots(1, 2; sync=false)
+        seed = scatter(x=[0], y=[0], name="seed", legendgroup="seed-group")
+        PlotlyBase.add_trace!(sf, seed; row=1, col=1)
+
+        t1 = scatter(
+            x=[1,2],
+            y=[3,4],
+            name="one",
+            legendgroup="group",
+            showlegend=false,
+        )
+        t2 = scatter(x=[5,6], y=[7,8], name="two", legendgroup="group")
+        @test PlotlyBase.addtraces!(sf, t1, t2; row=1, col=2) === sf
+        @test length(sf.plot.data) == 3
+        @test all(
+            t.fields[:xaxis] == "x2" && t.fields[:yaxis] == "y2"
+            for t in sf.plot.data[2:3]
+        )
+        @test all(t.fields[:legend] == "legend2" for t in sf.plot.data[2:3])
+        @test sf.plot.data[2].fields[:showlegend] == false
+        @test sf.plot.data[3].fields[:showlegend] == true
+        @test all(t.fields[:legendgroup] == "group" for t in sf.plot.data[2:3])
+        @test !haskey(t1.fields, :xaxis) && !haskey(t2.fields, :xaxis)
+        @test (sf.current_row, sf.current_col) == (1, 2)
+
+        atomic = PlotlySupply.subplots(1, 2; sync=false)
+        layout_before = deepcopy(atomic.plot.layout.fields)
+        cell_before = (atomic.current_row, atomic.current_col)
+        valid = scatter(x=[1], y=[1], name="valid")
+        @test_throws MethodError PlotlyBase.addtraces!(
+            atomic,
+            valid,
+            _UnsupportedTrace();
+            row=1,
+            col=2,
+        )
+        @test isempty(atomic.plot.data)
+        @test atomic.plot.layout.fields == layout_before
+        @test (atomic.current_row, atomic.current_col) == cell_before
+
+        @test_throws Exception PlotlyBase.addtraces!(atomic, valid; row=2, col=1)
+        @test isempty(atomic.plot.data)
+        @test_throws Exception PlotlyBase.addtraces!(
+            atomic,
+            valid;
+            row=1,
+            col=1,
+            secondary_y=true,
+        )
+        @test isempty(atomic.plot.data)
+
+        @test PlotlyBase.addtraces!(atomic; row=99, col=99) === atomic
+        @test isempty(atomic.plot.data)
+        @test (atomic.current_row, atomic.current_col) == cell_before
+    end
+
+    @testset "SubplotFigure addtraces! refreshes once" begin
+        sf = PlotlySupply.subplots(1, 1; sync=false)
+        p = Plot(_CountingTraceVector(copy(sf.plot.data)), sf.plot.layout)
+        sf.fig = SyncPlot(p, nothing, nothing, "counting")
+        traces = ntuple(
+            i -> scatter(x=[1,2], y=[i,i+1], name="trace-$i"),
+            4,
+        )
+        _subplot_refresh_calls[] = 0
+        PlotlyBase.addtraces!(sf, traces...)
+        @test _subplot_refresh_calls[] == 1
+        @test length(sf.plot.data) == 4
     end
 
     @testset "SubplotFigure y-only delegations" begin
