@@ -2005,10 +2005,24 @@ using PlotlySupply
     end
 
     @testset "Extended: image" begin
-        rgb = plot_image(reshape(collect(0:11), 2, 2, 3))
+        rgb_data = reshape(collect(0:11), 2, 2, 3)
+        rgb = plot_image(rgb_data)
         @test ttype(rgb) == "image"
-        @test rgb.data[1].fields[:z] isa AbstractVector   # nested rows
+        @test rgb.data[1].fields[:z] isa PermutedDimsArray
+        @test parent(rgb.data[1].fields[:z]) === rgb_data
+        expected = [[[rgb_data[i, j, ch] for ch in axes(rgb_data, 3)]
+            for j in axes(rgb_data, 2)] for i in axes(rgb_data, 1)]
+        @test PlotlyBase.JSON.json(rgb.data[1].fields[:z]) ==
+            PlotlyBase.JSON.json(expected)
+        rgba_data = reshape(UInt8.(0:23), 2, 3, 4)
+        rgba_expected = [[[rgba_data[i, j, ch] for ch in axes(rgba_data, 3)]
+            for j in axes(rgba_data, 2)] for i in axes(rgba_data, 1)]
+        @test PlotlyBase.JSON.json(PlotlySupply._image_z(rgba_data)) ==
+            PlotlyBase.JSON.json(rgba_expected)
         @test ttype(plot_image([[[255, 0, 0], [0, 255, 0]]])) == "image"
+        @test_throws ArgumentError plot_image(zeros(UInt8, 2, 2, 2))
+        @test_throws ArgumentError plot_image!(rgb, zeros(UInt8, 2, 2, 2))
+        @test length(rgb.data) == 1
     end
 
     @testset "Extended: 3D mesh / field / streamtube" begin

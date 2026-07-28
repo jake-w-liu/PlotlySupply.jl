@@ -7584,11 +7584,18 @@ end
 
 # ── Image ────────────────────────────────────────────────────────────
 
-# Convert an H×W×C numeric array to the nested [[[c…]…]…] form Plotly expects;
-# pass an already-nested z through unchanged.
+# Present an H×W×C numeric array in Plotly's row/pixel/channel JSON order
+# without materializing one heap object per pixel/channel. PlotlyBase's JSON
+# lowering reverses Julia array dimensions, so this lazy C×W×H permutation
+# serializes identically to a nested H×W×C vector. Pass already-nested data
+# through unchanged.
 function _image_z(z)
 	ndims(z) == 3 || return z
-	return [[[z[i, j, ch] for ch in axes(z, 3)] for j in axes(z, 2)] for i in axes(z, 1)]
+	channels = size(z, 3)
+	channels in (3, 4) || throw(ArgumentError(
+		"an H×W×C image must have 3 (RGB) or 4 (RGBA) channels; got C=$channels.",
+	))
+	return PermutedDimsArray(z, (3, 2, 1))
 end
 
 """
