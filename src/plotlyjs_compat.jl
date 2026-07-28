@@ -801,11 +801,7 @@ function PlotlyBase.purge!(sp::SyncPlot)
 end
 
 function _require_open_syncplot_image_window(sp::SyncPlot)
-	isopen(sp) || throw(InvalidStateException(
-		"SyncPlot window is not open",
-		:not_open,
-	))
-	return nothing
+	return _require_open_syncplot_window(sp)
 end
 
 function _syncplot_to_image_script(sp::SyncPlot, kwargs)

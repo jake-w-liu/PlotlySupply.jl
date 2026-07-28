@@ -402,6 +402,37 @@ plot(layout::AbstractLayout; kwargs...) = plot(; layout = layout, kwargs...)
 plot(layout::AbstractLayout, frames::AbstractVector{<:PlotlyFrame}; kwargs...) =
 	plot(; layout = layout, frames = frames, kwargs...)
 
+function _require_open_syncplot_window(sp::SyncPlot)
+	resources = getfield(sp, :_resources)
+	lock(resources.lock) do
+		resources.close_started && throw(InvalidStateException(
+			"SyncPlot window is not open",
+			:not_open,
+		))
+	end
+
+	ec = _syncplot_backend(sp)
+	window = getfield(sp, :window)
+	open_result = Base.invokelatest(() -> ec.isopen(window))
+	open_result === true && return nothing
+	open_result === false && throw(InvalidStateException(
+		"SyncPlot window is not open",
+		:not_open,
+	))
+	throw(ErrorException(
+		"SyncPlot backend returned a non-Boolean isopen result: " *
+		repr(open_result),
+	))
+end
+
+function _require_plotlyjs_success(result, operation::AbstractString)
+	result isa AbstractString && result == "ok" && return nothing
+	throw(ErrorException(
+		"Plotly.js $operation did not complete successfully; " *
+		"renderer returned $(repr(result)).",
+	))
+end
+
 function _plotlyjs_refresh!(
 	sp::SyncPlot,
 	data,
@@ -409,7 +440,7 @@ function _plotlyjs_refresh!(
 	rebuild::Bool = false,
 	autoplay::Bool = false,
 )
-	isopen(sp) || return nothing
+	_require_open_syncplot_window(sp)
 
 	js = if rebuild
 		_plotlyjs_newplot_script(sp.plot, sp.divid; autoplay = autoplay, purge = true)
@@ -419,28 +450,25 @@ function _plotlyjs_refresh!(
 		layout_js = _json_js(layout)
 		config_js = _json_js(sp.plot.config)
 		"""
-(function() {
+(async function() {
   if (typeof Plotly === "undefined") return "plotly-not-loaded";
   const div = document.getElementById($divid_js);
   if (!div) return "plot-div-not-found";
-  Plotly.react(div, $data_js, $layout_js, $config_js);
+  await Plotly.react(div, $data_js, $layout_js, $config_js);
   return "ok";
 })();
 """
 	end
-	try
-		ec = _syncplot_backend(sp)
-		Base.invokelatest(() -> ec.run(sp.window, js))
-	catch err
-		@warn "Failed to refresh SyncPlot window." exception = (err, catch_backtrace())
-	end
+	ec = _syncplot_backend(sp)
+	result = Base.invokelatest(() -> ec.run(sp.window, js))
+	_require_plotlyjs_success(result, rebuild ? "newPlot" : "react")
 	return nothing
 end
 
 function _plotlyjs_command!(sp::SyncPlot, command::Symbol)
 	command in (:redraw, :purge) ||
 		throw(ArgumentError("unsupported Plotly.js command: $command"))
-	isopen(sp) || return nothing
+	_require_open_syncplot_window(sp)
 
 	divid_js = _json_js(sp.divid)
 	call_js = command === :redraw ?
@@ -455,15 +483,9 @@ function _plotlyjs_command!(sp::SyncPlot, command::Symbol)
   return "ok";
 })();
 """
-	try
-		ec = _syncplot_backend(sp)
-		Base.invokelatest(() -> ec.run(sp.window, js))
-	catch err
-		@warn "Failed to run Plotly.$command for SyncPlot window." exception = (
-			err,
-			catch_backtrace(),
-		)
-	end
+	ec = _syncplot_backend(sp)
+	result = Base.invokelatest(() -> ec.run(sp.window, js))
+	_require_plotlyjs_success(result, string(command))
 	return nothing
 end
 
@@ -478,7 +500,7 @@ function _maybe_sync_refresh!(p::Plot)
 	sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
 		get(_PLOT_SYNCPLOT_MAP, p, nothing)
 	end
-	if sp !== nothing && isopen(sp)
+	if sp !== nothing
 		_plotlyjs_refresh!(sp, p.data, p.layout)
 	end
 	return nothing

@@ -10,6 +10,38 @@ Base.size(::_FailingSpliceVector) = (1,)
 Base.getindex(::_FailingSpliceVector, ::Int) =
     error("injected splice read failure")
 
+mutable struct _RendererProbeState
+    open::Any
+    scripts::Vector{String}
+    result::Any
+    run_error::Union{Nothing,Exception}
+    isopen_error::Union{Nothing,Exception}
+end
+
+_RendererProbeState() =
+    _RendererProbeState(true, String[], "ok", nothing, nothing)
+
+function _renderer_probe_syncplot()
+    state = _RendererProbeState()
+    backend = (
+        isopen=function (window)
+            state.isopen_error === nothing ||
+                throw(state.isopen_error)
+            return state.open
+        end,
+        close=window -> (state.open = false; nothing),
+        run=function (window, script)
+            push!(state.scripts, String(script))
+            state.run_error === nothing || throw(state.run_error)
+            return state.result
+        end,
+    )
+    resources = PlotlySupply._SyncPlotResources(nothing, backend)
+    plot = Plot(scatter(y=[1, 2, 3]), Layout(title="renderer-probe"))
+    sp = SyncPlot(plot, nothing, :renderer_probe_window, "renderer-probe", resources)
+    return sp, state
+end
+
 function PlotlySupply._plotlyjs_refresh!(
     ::SyncPlot,
     ::Vector{_MutatorProbeTrace},
@@ -250,6 +282,183 @@ end
     @test p.data === data_ref
     @test isempty(p.data)
     @test p.layout == Layout()
+end
+
+@testset "renderer promises and statuses are observable" begin
+    sp, state = _renderer_probe_syncplot()
+    p = sp.plot
+
+    try
+        @test PlotlySupply._plotlyjs_refresh!(
+            sp,
+            p.data,
+            p.layout,
+        ) === nothing
+        @test length(state.scripts) == 1
+        refresh_script = only(state.scripts)
+        @test occursin("(async function()", refresh_script)
+        @test occursin(
+            "await Plotly.react(div,",
+            refresh_script,
+        )
+
+        state.result = SubString("ok", 1, 2)
+        @test PlotlySupply._plotlyjs_refresh!(
+            sp,
+            p.data,
+            p.layout,
+        ) === nothing
+
+        for result in (
+            "plotly-not-loaded",
+            "plot-div-not-found",
+            "unexpected-renderer-result",
+            nothing,
+            missing,
+            false,
+            1,
+        )
+            state.result = result
+            call_count = length(state.scripts)
+            caught = try
+                PlotlySupply._plotlyjs_refresh!(
+                    sp,
+                    p.data,
+                    p.layout,
+                )
+                nothing
+            catch err
+                err
+            end
+            @test caught isa ErrorException
+            @test occursin(
+                "did not complete successfully",
+                sprint(showerror, caught),
+            )
+            @test occursin(
+                repr(result),
+                sprint(showerror, caught),
+            )
+            @test length(state.scripts) == call_count + 1
+        end
+
+        injected_error =
+            ErrorException("injected renderer transport failure")
+        state.result = "ok"
+        state.run_error = injected_error
+        call_count = length(state.scripts)
+        caught = try
+            PlotlySupply._plotlyjs_refresh!(
+                sp,
+                p.data,
+                p.layout,
+            )
+            nothing
+        catch err
+            err
+        end
+        @test caught === injected_error
+        @test length(state.scripts) == call_count + 1
+        state.run_error = nothing
+
+        empty!(state.scripts)
+        state.result = "ok"
+        @test PlotlySupply._plotlyjs_refresh!(
+            sp,
+            p.data,
+            p.layout;
+            rebuild=true,
+            autoplay=true,
+        ) === nothing
+        @test length(state.scripts) == 1
+        rebuild_script = only(state.scripts)
+        @test occursin("await Plotly.newPlot", rebuild_script)
+        @test occursin("await Plotly.animate", rebuild_script)
+
+        for command in (:redraw, :purge)
+            empty!(state.scripts)
+            state.result = "ok"
+            @test PlotlySupply._plotlyjs_command!(sp, command) ===
+                  nothing
+            @test length(state.scripts) == 1
+            @test occursin(
+                command === :redraw ?
+                "await Plotly.redraw(div);" :
+                "Plotly.purge(div);",
+                only(state.scripts),
+            )
+
+            state.result = "plot-div-not-found"
+            caught = try
+                PlotlySupply._plotlyjs_command!(sp, command)
+                nothing
+            catch err
+                err
+            end
+            @test caught isa ErrorException
+            @test occursin(
+                string(command),
+                sprint(showerror, caught),
+            )
+        end
+
+        call_count = length(state.scripts)
+        @test_throws ArgumentError PlotlySupply._plotlyjs_command!(
+            sp,
+            :unsupported,
+        )
+        @test length(state.scripts) == call_count
+
+        empty!(state.scripts)
+        state.open = false
+        state.result = "plot-div-not-found"
+        @test_throws InvalidStateException PlotlySupply._plotlyjs_refresh!(
+            sp,
+            p.data,
+            p.layout,
+        )
+        @test_throws InvalidStateException PlotlySupply._plotlyjs_command!(
+            sp,
+            :redraw,
+        )
+        @test isempty(state.scripts)
+
+        state.open = "not-a-boolean"
+        caught = try
+            PlotlySupply._plotlyjs_refresh!(
+                sp,
+                p.data,
+                p.layout,
+            )
+            nothing
+        catch err
+            err
+        end
+        @test caught isa ErrorException
+        @test occursin(
+            "non-Boolean isopen result",
+            sprint(showerror, caught),
+        )
+        @test isempty(state.scripts)
+
+        state.open = true
+        isopen_error =
+            ErrorException("injected renderer isopen failure")
+        state.isopen_error = isopen_error
+        caught = try
+            PlotlySupply._plotlyjs_command!(sp, :redraw)
+            nothing
+        catch err
+            err
+        end
+        @test caught === isopen_error
+        @test isempty(state.scripts)
+        state.isopen_error = nothing
+    finally
+        state.run_error = nothing
+        state.isopen_error = nothing
+        close(sp)
+    end
 end
 
 @testset "extend/prepend keyword conversion" begin
