@@ -38,6 +38,8 @@ mutable struct _LifecycleFakeElectron
     throw_on_close::Bool
     throw_on_isopen::Bool
     block_close::Bool
+    run_result::Any
+    run_error::Union{Nothing,Exception}
 end
 
 _LifecycleFakeElectron(;
@@ -45,6 +47,8 @@ _LifecycleFakeElectron(;
     throw_on_close::Bool=false,
     throw_on_isopen::Bool=false,
     block_close::Bool=false,
+    run_result="ok",
+    run_error::Union{Nothing,Exception}=nothing,
 ) = _LifecycleFakeElectron(
     _LifecycleFakeWindow[],
     String[],
@@ -52,6 +56,8 @@ _LifecycleFakeElectron(;
     throw_on_close,
     throw_on_isopen,
     block_close,
+    run_result,
+    run_error,
 )
 
 function _lifecycle_fake_window(
@@ -112,7 +118,11 @@ function Base.getproperty(ec::_LifecycleFakeElectron, name::Symbol)
     elseif name === :msgchannel
         return window -> window.msg_channel
     elseif name === :run
-        return (window, script) -> (push!(ec.scripts, String(script)); "ok")
+        return function (window, script)
+            push!(ec.scripts, String(script))
+            ec.run_error === nothing || throw(ec.run_error)
+            return ec.run_result
+        end
     end
     return getfield(ec, name)
 end
@@ -822,14 +832,50 @@ end
     @testset "Desktop SyncPlot Interop" begin
         fig = plot_scatter(1:5, rand(5))
 
+        sp = nothing
         try
             sp = to_syncplot(fig; show=false)
             @test sp isa SyncPlot
-            close(sp)
+            ec = PlotlySupply._syncplot_backend(sp)
+            divid_js = PlotlySupply._json_js(sp.divid)
+            function renderer_ready()
+                return Base.invokelatest(() -> ec.run(
+                    sp.window,
+                    """
+(() => {
+  const div = document.getElementById($divid_js);
+  return !!div &&
+    Array.isArray(div.calcdata) &&
+    !!div._fullLayout &&
+    window.__plotlysupply_model === null &&
+    window.__plotlysupply_plotly_loader === null &&
+    window.__plotlysupply_initial_render === null;
+})()
+""",
+                ))
+            end
+            @test renderer_ready() === true
+
+            resources = getfield(sp, :_resources)
+            index_uri = PlotlySupply._file_uri(
+                joinpath(resources.tempdir, "index.html"),
+            )
+            @test Base.invokelatest(
+                () -> ec.load(sp.window, index_uri),
+            ) === nothing
+            @test Base.invokelatest(
+                () -> ec.run(
+                    sp.window,
+                    PlotlySupply._syncplot_readiness_script(),
+                ),
+            ) == "ok"
+            @test renderer_ready() === true
         catch err
             # Accept environments where ElectronCall is not installed.
             @test err isa Exception
             @test occursin("ElectronCall", sprint(showerror, err))
+        finally
+            sp === nothing || close(sp)
         end
     end
 
@@ -3070,18 +3116,59 @@ end
         empty_plot = plot(; frames=[fr])
         @test empty_plot.frames == [fr]
 
-        html = PlotlySupply._syncplot_html(positional_plot, "frame-test")
-        @test occursin("frame-sentinel", html)
+        html = PlotlySupply._syncplot_html(
+            "frame-test";
+            autoplay=true,
+            timeout_s=2.5,
+        )
+        @test occursin("<script src=\"model.js\"", html)
+        @test occursin("__plotlysupply_plotly_loader", html)
+        @test !occursin("frame-sentinel", html)
         @test occursin("Plotly.addFrames", html)
+        @test occursin("Plotly.newPlot", html)
         @test occursin("Plotly.animate", html)
+        @test occursin("2500.0", html)
+
+        readiness = PlotlySupply._syncplot_readiness_script()
+        @test occursin("__plotlysupply_initial_render", readiness)
+        @test !occursin("Plotly.newPlot", readiness)
+        @test !occursin("frame-sentinel", readiness)
 
         no_autoplay = PlotlySupply._syncplot_html(
-            positional_plot,
             "frame-test";
             autoplay=false,
+            timeout_s=2.5,
         )
         @test occursin("Plotly.addFrames", no_autoplay)
         @test occursin("if (false)", no_autoplay)
+
+        hostile = "</ScRiPt><script>window.__plotlysupply_injected=true</script>"
+        streamed_plot = Plot(
+            scatter(
+                y=[NaN, Inf, -Inf],
+                text=[hostile, "safe", "safe"],
+            ),
+            Layout(),
+            [fr],
+        )
+        mktempdir() do tempdir
+            model_path = joinpath(tempdir, "model.js")
+            @test PlotlySupply._write_syncplot_model(
+                model_path,
+                streamed_plot,
+            ) === nothing
+            model_js = read(model_path, String)
+            @test startswith(
+                model_js,
+                "window.__plotlysupply_model = {",
+            )
+            @test endswith(model_js, ";\n")
+            @test occursin("frame-sentinel", model_js)
+            @test occursin(hostile, model_js)
+            @test occursin("NaN", model_js)
+            @test occursin("Infinity", model_js)
+            @test !occursin(hostile, html)
+        end
 
         rebuild = PlotlySupply._plotlyjs_newplot_script(
             positional_plot,
@@ -3110,6 +3197,126 @@ end
             end
         end
 
+        @testset "constructor awaits and validates the initial render" begin
+            plot = Plot(
+                scatter(y=[1, 2, 3]),
+                Layout(),
+                [frame(name="startup-frame", data=[scatter(y=[2, 3, 4])])],
+            )
+
+            ec = _LifecycleFakeElectron()
+            sp = PlotlySupply._create_syncplot_window(
+                ec,
+                plot;
+                app=:fake,
+                show=false,
+                autoplay=false,
+                timeout_s=3.25,
+            )
+            @test length(ec.scripts) == 1
+            startup_script = only(ec.scripts)
+            @test occursin(
+                "await readiness",
+                startup_script,
+            )
+            @test !occursin("Plotly.newPlot", startup_script)
+            @test !occursin("startup-frame", startup_script)
+            resources = getfield(sp, :_resources)
+            @test resources.creation_spec.timeout_s == 3.25
+            @test isfile(joinpath(resources.tempdir, "model.js"))
+            @test occursin(
+                "startup-frame",
+                read(joinpath(resources.tempdir, "model.js"), String),
+            )
+            index_html =
+                read(joinpath(resources.tempdir, "index.html"), String)
+            @test !occursin("startup-frame", index_html)
+            @test occursin("await Plotly.newPlot", index_html)
+            @test occursin("await Plotly.addFrames", index_html)
+            @test occursin("if (false)", index_html)
+            @test occursin("3250.0", index_html)
+            @test close(sp) === nothing
+
+            for (run_result, run_error) in (
+                ("plotly-not-loaded", nothing),
+                (nothing, nothing),
+                ("ok", ErrorException("injected startup transport failure")),
+            )
+                mktempdir() do temp_root
+                    failed_ec = _LifecycleFakeElectron(
+                        ;
+                        run_result=run_result,
+                        run_error=run_error,
+                    )
+                    caught = withenv("TMPDIR" => temp_root) do
+                        try
+                            PlotlySupply._create_syncplot_window(
+                                failed_ec,
+                                plot;
+                                app=:fake,
+                                show=false,
+                            )
+                            nothing
+                        catch err
+                            err
+                        end
+                    end
+                    if run_error === nothing
+                        @test caught isa ErrorException
+                        @test occursin(
+                            "initial render did not complete successfully",
+                            sprint(showerror, caught),
+                        )
+                    else
+                        @test caught === run_error
+                    end
+                    @test length(failed_ec.scripts) == 1
+                    @test length(failed_ec.windows) == 1
+                    failed_window = only(failed_ec.windows)
+                    @test failed_window.close_calls == 1
+                    @test !failed_window.exists
+                    @test isempty(readdir(temp_root))
+                end
+            end
+
+            for invalid_timeout in (
+                -1.0,
+                Inf,
+                NaN,
+                PlotlySupply._SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS + 1,
+            )
+                mktempdir() do temp_root
+                    invalid_ec = _LifecycleFakeElectron()
+                    caught = withenv("TMPDIR" => temp_root) do
+                        try
+                            PlotlySupply._create_syncplot_window(
+                                invalid_ec,
+                                plot;
+                                timeout_s=invalid_timeout,
+                            )
+                            nothing
+                        catch err
+                            err
+                        end
+                    end
+                    @test caught isa ArgumentError
+                    error_text = sprint(showerror, caught)
+                    @test occursin("timeout", error_text)
+                    @test occursin(
+                        isfinite(invalid_timeout) &&
+                        invalid_timeout >
+                        PlotlySupply._SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS ?
+                        "must not exceed" :
+                        "finite, non-negative",
+                        error_text,
+                    )
+                    @test isempty(invalid_ec.windows)
+                    @test isempty(invalid_ec.scripts)
+                    @test isempty(readdir(temp_root))
+                end
+            end
+        end
+
         @testset "explicit close is synchronous and idempotent" begin
             ec = _LifecycleFakeElectron()
             plot = Plot(scatter(y=[1, 2, 3]))
@@ -3127,6 +3334,7 @@ end
             @test old === nothing
             @test _lifecycle_is_registered(plot, sp)
             @test isfile(joinpath(tempdir, "index.html"))
+            @test isfile(joinpath(tempdir, "model.js"))
             @test isopen(sp)
             @test :_resources ∉ propertynames(sp)
             @test :_resources ∈ propertynames(sp, true)
@@ -3419,6 +3627,7 @@ end
                 title="clone-source",
                 show=false,
                 autoplay=false,
+                timeout_s=6.75,
             )
             source_window = source.window
             source_tempdir = getfield(source, :_resources).tempdir
@@ -3463,14 +3672,20 @@ end
                 @test spec.title == "clone-source"
                 @test !spec.show
                 @test !spec.autoplay
+                @test spec.timeout_s == 6.75
                 @test window.width == 777
                 @test window.height == 444
                 @test window.title == "clone-source"
                 @test !window.show
-                @test occursin(
-                    "if (false)",
-                    read(joinpath(resources.tempdir, "index.html"), String),
-                )
+                index_html =
+                    read(joinpath(resources.tempdir, "index.html"), String)
+                model_js =
+                    read(joinpath(resources.tempdir, "model.js"), String)
+                @test occursin("__plotlysupply_plotly_loader", index_html)
+                @test occursin("if (false)", index_html)
+                @test occursin("6750.0", index_html)
+                @test !occursin("source-frame", index_html)
+                @test occursin("source-frame", model_js)
                 @test !_lifecycle_is_registered(clone.plot, clone)
                 @test _lifecycle_is_registered(plot, source)
                 return resources.tempdir
@@ -3478,8 +3693,14 @@ end
 
             for clone_operation in (copy, PlotlyBase.fork, deepcopy)
                 window_count = length(ec.windows)
+                script_count = length(ec.scripts)
                 clone = clone_operation(source)
                 @test length(ec.windows) == window_count + 1
+                @test length(ec.scripts) == script_count + 1
+                @test occursin(
+                    "__plotlysupply_initial_render",
+                    last(ec.scripts),
+                )
                 clone_window = last(ec.windows)
                 clone_tempdir = check_clone(clone, clone_window)
 
@@ -3601,7 +3822,11 @@ end
 
             script_count = length(ec.scripts)
             relayout_clone = relayout(source; title="clone-relayout")
-            @test length(ec.scripts) == script_count + 1
+            @test length(ec.scripts) == script_count + 2
+            @test occursin(
+                "__plotlysupply_initial_render",
+                ec.scripts[script_count + 1],
+            )
             @test occursin("Plotly.react", last(ec.scripts))
             @test relayout_clone.layout.fields[:title] == "clone-relayout"
             @test source.layout.fields[:title] == "source"
@@ -3610,14 +3835,22 @@ end
 
             script_count = length(ec.scripts)
             redraw_clone = redraw(source)
-            @test length(ec.scripts) == script_count + 1
+            @test length(ec.scripts) == script_count + 2
+            @test occursin(
+                "__plotlysupply_initial_render",
+                ec.scripts[script_count + 1],
+            )
             @test occursin("Plotly.redraw", last(ec.scripts))
             check_clone(redraw_clone, last(ec.windows))
             close(redraw_clone)
 
             script_count = length(ec.scripts)
             purge_clone = PlotlyBase.purge(source)
-            @test length(ec.scripts) == script_count + 1
+            @test length(ec.scripts) == script_count + 2
+            @test occursin(
+                "__plotlysupply_initial_render",
+                ec.scripts[script_count + 1],
+            )
             @test occursin("Plotly.purge", last(ec.scripts))
             @test isempty(purge_clone.plot.data)
             @test purge_clone.plot.layout == Layout()

@@ -19,6 +19,7 @@ struct _SyncPlotCreationSpec
 	title::String
 	show::Bool
 	autoplay::Bool
+	timeout_s::Float64
 end
 
 mutable struct _SyncPlotResources

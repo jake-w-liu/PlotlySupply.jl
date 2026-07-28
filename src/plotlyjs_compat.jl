@@ -857,7 +857,7 @@ end
 const _SYNCPLOT_MISSING_CREATION_SPEC_ERROR =
 	"Cannot clone this SyncPlot because its original window options are unavailable. " *
 	"Copy `sp.plot`, then call `to_syncplot(plot; width=..., height=..., " *
-	"title=..., show=..., autoplay=...)` with explicit window options."
+	"title=..., show=..., autoplay=..., timeout_s=...)` with explicit window options."
 
 struct _SyncPlotModelDeepcopyContext end
 const _SYNCPLOT_MODEL_DEEPCOPY_CONTEXT = _SyncPlotModelDeepcopyContext()
@@ -889,6 +889,7 @@ function _create_syncplot_clone(
 		title = spec.title,
 		show = spec.show,
 		autoplay = spec.autoplay,
+		timeout_s = spec.timeout_s,
 	)
 end
 

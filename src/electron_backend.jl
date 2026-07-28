@@ -1,6 +1,13 @@
 const _PLOTLY_CDN_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 const _ELECTRONCALL_PKGID = Base.PkgId(Base.UUID("8ddd578f-0c94-4c64-8c65-f083f291b266"), "ElectronCall")
 const _SYNC_ID_COUNTER = Ref(0)
+const _SYNCPLOT_STARTUP_TIMEOUT_SECONDS = 15.0
+const _SYNCPLOT_MODEL_FILENAME = "model.js"
+# Browser timers store the millisecond delay in a signed 32-bit integer.
+const _SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS = typemax(Int32) / 1_000
+# Bound the JSON writer's scratch buffer independently of the model size. The
+# serializer flushes to disk whenever this threshold is reached.
+const _SYNCPLOT_MODEL_JSON_BUFFER_BYTES = 16 * 1024
 
 function _electroncall()
 	try
@@ -22,6 +29,26 @@ end
 # "</script", "</SCRIPT", "</Style") can break out of the inline <script> block.
 # In a JS string literal "\/" decodes back to "/", so JSON semantics are intact.
 _json_js(x) = replace(PlotlyBase.JSON.json(x; allownan = true), "</" => "<\\/")
+
+function _validated_timeout_seconds(timeout_s::Real, operation::AbstractString)
+	timeout = try
+		Float64(timeout_s)
+	catch
+		throw(ArgumentError("$operation timeout must be a finite, non-negative number"))
+	end
+	isfinite(timeout) && timeout >= 0 ||
+		throw(ArgumentError("$operation timeout must be a finite, non-negative number"))
+	return timeout
+end
+
+function _validated_syncplot_startup_timeout_seconds(timeout_s::Real)
+	timeout = _validated_timeout_seconds(timeout_s, "SyncPlot startup")
+	timeout <= _SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS || throw(ArgumentError(
+		"SyncPlot startup timeout must not exceed " *
+		"$(_SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS) seconds",
+	))
+	return timeout
+end
 
 # Build a well-formed file:// URI from an absolute local path. On Windows a
 # drive-letter path needs a leading '/' and backslashes become forward slashes;
@@ -92,8 +119,18 @@ function _plotlyjs_newplot_script(
 """
 end
 
-function _syncplot_html(p::Plot, divid::String; autoplay::Bool = true)
-	newplot_js = _plotlyjs_newplot_script(p, divid; autoplay = autoplay)
+function _syncplot_html(
+	divid::String;
+	autoplay::Bool,
+	timeout_s::Float64,
+)
+	divid_js = _json_js(divid)
+	autoplay_js = autoplay ? "true" : "false"
+	timeout_ms = timeout_s * 1_000
+	timeout_message_js = _json_js(
+		"SyncPlot initial render timed out after $(timeout_s) seconds",
+	)
+
 	return """
 <!doctype html>
 <html lang="en">
@@ -113,21 +150,136 @@ function _syncplot_html(p::Plot, divid::String; autoplay::Bool = true)
 </head>
 <body>
   <div id="$divid"></div>
-  <script src="$_PLOTLY_CDN_URL" charset="utf-8" async></script>
   <script>
     (function() {
-      function boot() {
-        if (typeof Plotly === "undefined") {
-          setTimeout(boot, 25);
-          return;
-        }
-        $newplot_js;
+      window.__plotlysupply_render_deadline =
+        performance.now() + $timeout_ms;
+      const loader = new Promise(function(resolve) {
+        const script = document.createElement("script");
+        script.src = "$_PLOTLY_CDN_URL";
+        script.charset = "utf-8";
+        script.onload = function() {
+          resolve(
+            typeof Plotly === "undefined" ?
+              "Plotly.js loaded without defining the Plotly global" :
+              null
+          );
+        };
+        script.onerror = function() {
+          resolve("Plotly.js failed to load from $_PLOTLY_CDN_URL");
+        };
+        document.head.appendChild(script);
+      });
+      loader.catch(function() {});
+      window.__plotlysupply_plotly_loader = loader;
+    })();
+  </script>
+  <script src="$_SYNCPLOT_MODEL_FILENAME" charset="utf-8"></script>
+  <script>
+    (function() {
+      const deadline = window.__plotlysupply_render_deadline;
+      if (!Number.isFinite(deadline)) {
+        const missingDeadline = Promise.reject(
+          new Error("SyncPlot render deadline was not initialized")
+        );
+        missingDeadline.catch(function() {});
+        window.__plotlysupply_initial_render = missingDeadline;
+        window.__plotlysupply_render_deadline = null;
+        window.__plotlysupply_plotly_loader = null;
+        window.__plotlysupply_model = null;
+        return;
       }
-      boot();
+
+      let timeoutId = null;
+      const timeoutMessage = $timeout_message_js;
+      const requireTimeRemaining = function() {
+        if (performance.now() >= deadline) {
+          throw new Error(timeoutMessage);
+        }
+      };
+      const timeout = new Promise(function(_, reject) {
+        timeoutId = setTimeout(
+          function() { reject(new Error(timeoutMessage)); },
+          Math.max(0, deadline - performance.now())
+        );
+      });
+      const render = (async function() {
+        requireTimeRemaining();
+        const loader = window.__plotlysupply_plotly_loader;
+        if (!loader || typeof loader.then !== "function") {
+          throw new Error("SyncPlot Plotly.js loader was not initialized");
+        }
+        const loadError = await loader;
+        requireTimeRemaining();
+        if (loadError !== null) throw new Error(String(loadError));
+        if (typeof Plotly === "undefined") {
+          throw new Error("Plotly.js is unavailable after its loader completed");
+        }
+        const div = document.getElementById($divid_js);
+        if (!div) throw new Error("SyncPlot plot div was not found");
+        const model = window.__plotlysupply_model;
+        window.__plotlysupply_model = null;
+        if (!model || typeof model !== "object") {
+          throw new Error("SyncPlot model was not loaded");
+        }
+        await Plotly.newPlot(div, model.data, model.layout, model.config);
+        requireTimeRemaining();
+        if (Array.isArray(model.frames) && model.frames.length > 0) {
+          await Plotly.addFrames(div, model.frames);
+          requireTimeRemaining();
+          if ($autoplay_js) {
+            await Plotly.animate(div, null);
+            requireTimeRemaining();
+          }
+        }
+        return "ok";
+      })();
+      const readiness = Promise.race([render, timeout]).finally(
+        function() {
+          if (timeoutId !== null) clearTimeout(timeoutId);
+          window.__plotlysupply_render_deadline = null;
+          window.__plotlysupply_plotly_loader = null;
+          window.__plotlysupply_model = null;
+        }
+      );
+      // A reload has no Julia waiter. Attach a rejection observer immediately
+      // while retaining the original promise for the constructor handshake.
+      readiness.catch(function() {});
+      window.__plotlysupply_initial_render = readiness;
     })();
   </script>
 </body>
 </html>
+"""
+end
+
+function _write_syncplot_model(path::AbstractString, p::Plot)
+	open(path, "w") do io
+		write(io, "window.__plotlysupply_model = ")
+		PlotlyBase.JSON.json(
+			io,
+			p;
+			allownan = true,
+			bufsize = _SYNCPLOT_MODEL_JSON_BUFFER_BYTES,
+		)
+		write(io, ";\n")
+	end
+	return nothing
+end
+
+function _syncplot_readiness_script()
+	return """
+(async function() {
+  const readiness = window.__plotlysupply_initial_render;
+  if (!readiness || typeof readiness.then !== "function") {
+    throw new Error("SyncPlot initial render was not initialized");
+  }
+  try {
+    return await readiness;
+  } finally {
+    window.__plotlysupply_initial_render = null;
+  }
+})()
 """
 end
 
@@ -211,20 +363,29 @@ function _create_syncplot_window(
 	title::String = "PlotlySupply",
 	show::Bool = true,
 	autoplay::Bool = true,
+	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
 )
+	startup_timeout = _validated_syncplot_startup_timeout_seconds(timeout_s)
 	electron_app = app === nothing ? _default_electron_app(ec) : app
 	divid = _next_syncplot_id()
-	html = _syncplot_html(p, divid; autoplay = autoplay)
+	html = _syncplot_html(
+		divid;
+		autoplay = autoplay,
+		timeout_s = startup_timeout,
+	)
+	readiness_js = _syncplot_readiness_script()
 
 	# Own a dedicated temp directory and load its index via file://. ElectronCall
 	# converts HTML strings to data: URIs which have a ~2 MB size limit in
 	# Chromium, causing blank windows for large datasets.
 	tempdir = mktempdir(; prefix = "plotlysupply-sync-")
 	tmpfile = joinpath(tempdir, "index.html")
+	model_file = joinpath(tempdir, _SYNCPLOT_MODEL_FILENAME)
 	window = nothing
 	sp = nothing
 	try
 		write(tmpfile, html)
+		_write_syncplot_model(model_file, p)
 		file_uri = _file_uri(tmpfile)
 
 		window = Base.invokelatest(() -> ec.Window(
@@ -235,12 +396,17 @@ function _create_syncplot_window(
 			title = title,
 			show = show,
 		))
+		render_result = Base.invokelatest(
+			() -> ec.run(window, readiness_js),
+		)
+		_require_plotlyjs_success(render_result, "initial render")
 		creation_spec = _SyncPlotCreationSpec(
 			width,
 			height,
 			title,
 			show,
 			autoplay,
+			startup_timeout,
 		)
 		resources = _SyncPlotResources(tempdir, ec, creation_spec)
 		sp = SyncPlot(p, electron_app, window, divid, resources)
@@ -292,6 +458,7 @@ function to_syncplot(
 	title::String = "PlotlySupply",
 	show::Bool = true,
 	autoplay::Bool = true,
+	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
 )
 	return _create_syncplot_window(
 		fig;
@@ -301,6 +468,7 @@ function to_syncplot(
 		title = title,
 		show = show,
 		autoplay = autoplay,
+		timeout_s = timeout_s,
 	)
 end
 
@@ -1817,14 +1985,7 @@ function _export_window_html(divid::String)
 end
 
 function _export_timeout_seconds(timeout_s::Real, operation::AbstractString)
-	timeout = try
-		Float64(timeout_s)
-	catch
-		throw(ArgumentError("$operation timeout must be a finite, non-negative number"))
-	end
-	isfinite(timeout) && timeout >= 0 ||
-		throw(ArgumentError("$operation timeout must be a finite, non-negative number"))
-	return timeout
+	return _validated_timeout_seconds(timeout_s, operation)
 end
 
 function _wait_for_plotly(ec, win; timeout_s::Real = 10.0)

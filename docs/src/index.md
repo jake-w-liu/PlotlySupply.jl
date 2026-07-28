@@ -63,7 +63,10 @@ All of these have mutating `plot_*!` variants.
 - `set_default_template!(template)` / `get_default_template()`: Configure package-wide default template.
 - `set_legend!(fig; position=:topright, ...)`: Place legend with transparent box and symbolic positions (including `:outside_right`).
 - `set_default_legend_position!(...)` / `get_default_legend_position()`: Configure package-wide default legend position.
-- `to_syncplot(fig)`: Convert a `PlotlyBase.Plot` into a desktop `SyncPlot`.
+- `to_syncplot(fig; timeout_s=15)`: Convert a `PlotlyBase.Plot` into a desktop
+  `SyncPlot`. It returns only after the initial Plotly render succeeds;
+  `timeout_s` bounds the renderer handshake after the window page loads,
+  including frame loading and autoplay.
 - `plot(...)`: PlotlyJS-style constructor. Returns `Plot` by default; pass `sync=true` to get a `SyncPlot`.
 - `savefig(...)`: PlotlyJS-style export helper. `json`/`html` export works headlessly; `png`/`jpeg`/`svg`/`pdf` render through PlotlySupply's internal Electron export window (no external Kaleido/Python dependency).
 - `make_subplots(...)`, `mgrid(...)`: PlotlyJS-style helper utilities.
