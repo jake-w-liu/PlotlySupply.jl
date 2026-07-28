@@ -235,7 +235,14 @@ function _create_syncplot_window(
 			title = title,
 			show = show,
 		))
-		resources = _SyncPlotResources(tempdir, ec)
+		creation_spec = _SyncPlotCreationSpec(
+			width,
+			height,
+			title,
+			show,
+			autoplay,
+		)
+		resources = _SyncPlotResources(tempdir, ec, creation_spec)
 		sp = SyncPlot(p, electron_app, window, divid, resources)
 		finalizer(_finalize_syncplot!, sp)
 		_watch_syncplot_window!(sp, ec)
@@ -406,7 +413,7 @@ function _plotlyjs_refresh!(
 """
 	end
 	try
-		ec = _electroncall()
+		ec = _syncplot_backend(sp)
 		Base.invokelatest(() -> ec.run(sp.window, js))
 	catch err
 		@warn "Failed to refresh SyncPlot window." exception = (err, catch_backtrace())
@@ -1170,7 +1177,7 @@ const _RefreshablePlot = Plot{TT, TL, TF} where {
 	TF <: Vector{<:PlotlyFrame},
 }
 
-function _clone_refreshable_plot(p::_RefreshablePlot)
+function _clone_plot_model(p::Plot)
 	data, layout, frames, config = deepcopy((
 		p.data,
 		p.layout,
@@ -1184,6 +1191,18 @@ function _clone_refreshable_plot(p::_RefreshablePlot)
 		config = config,
 	)
 end
+
+function _clone_plot_model(p::Plot, stackdict::IdDict)
+	cloned = if haskey(stackdict, p)
+		stackdict[p]::typeof(p)
+	else
+		Base.deepcopy_internal(p, stackdict)::typeof(p)
+	end
+	cloned.divid = PlotlyBase.uuid4()
+	return cloned
+end
+
+_clone_refreshable_plot(p::_RefreshablePlot) = _clone_plot_model(p)
 
 Base.copy(p::_RefreshablePlot) = _clone_refreshable_plot(p)
 PlotlyBase.fork(p::_RefreshablePlot) = _clone_refreshable_plot(p)

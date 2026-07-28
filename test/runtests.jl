@@ -19,6 +19,10 @@ mutable struct _LifecycleFakeWindow
     exists::Bool
     msg_channel::Channel{Any}
     uri::String
+    width::Int
+    height::Int
+    title::String
+    show::Bool
     close_calls::Int
     throw_on_close::Bool
     throw_on_isopen::Bool
@@ -29,6 +33,7 @@ end
 
 mutable struct _LifecycleFakeElectron
     windows::Vector{_LifecycleFakeWindow}
+    scripts::Vector{String}
     fail_window::Bool
     throw_on_close::Bool
     throw_on_isopen::Bool
@@ -42,6 +47,7 @@ _LifecycleFakeElectron(;
     block_close::Bool=false,
 ) = _LifecycleFakeElectron(
     _LifecycleFakeWindow[],
+    String[],
     fail_window,
     throw_on_close,
     throw_on_isopen,
@@ -62,6 +68,10 @@ function _lifecycle_fake_window(
         true,
         Channel{Any}(1),
         String(uri),
+        width,
+        height,
+        String(title),
+        show,
         0,
         ec.throw_on_close,
         ec.throw_on_isopen,
@@ -101,6 +111,8 @@ function Base.getproperty(ec::_LifecycleFakeElectron, name::Symbol)
         return _lifecycle_fake_close
     elseif name === :msgchannel
         return window -> window.msg_channel
+    elseif name === :run
+        return (window, script) -> (push!(ec.scripts, String(script)); "ok")
     end
     return getfield(ec, name)
 end
@@ -1140,6 +1152,7 @@ end
 
             sp_relayout = relayout(sp, title="copy")
             @test sp_relayout isa SyncPlot
+            close(sp_relayout)
 
             # fallback false branch in isopen catch
             bogus = SyncPlot(Plot(scatter(y=[1])), nothing, nothing, "bogus")
@@ -3050,6 +3063,305 @@ end
             @test close(sp) === nothing
             @test window.close_calls == 1
             @test !ispath(tempdir)
+        end
+
+        @testset "SyncPlot clones own independent windows and resources" begin
+            ec = _LifecycleFakeElectron()
+            shared_clone_payload = [10, 20, 30]
+            plot = Plot(
+                GenericTrace[
+                    scatter(
+                        y=[1, 2, 3],
+                        name="source",
+                        customdata=shared_clone_payload,
+                    ),
+                    scatter(
+                        y=[3, 2, 1],
+                        name="second",
+                        customdata=shared_clone_payload,
+                    ),
+                ],
+                Layout(title="source", meta=shared_clone_payload),
+                [
+                    frame(
+                        name="source-frame",
+                        data=[
+                            scatter(
+                                y=[2, 3, 4],
+                                customdata=shared_clone_payload,
+                            ),
+                        ],
+                    ),
+                ];
+                config=PlotConfig(
+                    staticPlot=true,
+                    locale="fr",
+                    toImageButtonOptions=Dict(:width => 640),
+                ),
+            )
+            source = PlotlySupply._create_syncplot_window(
+                ec,
+                plot;
+                app=:fake,
+                width=777,
+                height=444,
+                title="clone-source",
+                show=false,
+                autoplay=false,
+            )
+            source_window = source.window
+            source_tempdir = getfield(source, :_resources).tempdir
+            _, registered =
+                PlotlySupply._register_displayed_syncplot!(plot, source)
+            @test registered
+
+            function check_clone(clone, window)
+                resources = getfield(clone, :_resources)
+                spec = resources.creation_spec
+                @test clone !== source
+                @test clone.plot !== source.plot
+                @test clone.plot.data !== source.plot.data
+                @test clone.plot.frames == source.plot.frames
+                @test clone.plot.frames !== source.plot.frames
+                cloned_shared =
+                    clone.plot.data[1].fields[:customdata]
+                @test cloned_shared !== shared_clone_payload
+                @test cloned_shared ===
+                      clone.plot.data[2].fields[:customdata]
+                @test cloned_shared === clone.plot.layout.fields[:meta]
+                cloned_frame_trace =
+                    clone.plot.frames[1].fields[:data][1]
+                @test cloned_shared ===
+                      cloned_frame_trace.fields[:customdata]
+                @test clone.plot.config.staticPlot
+                @test clone.plot.config.locale == "fr"
+                @test clone.plot.config.toImageButtonOptions ==
+                      Dict(:width => 640)
+                @test clone.plot.divid != source.plot.divid
+                @test clone.divid != source.divid
+                @test clone.app === source.app
+                @test clone.window === window
+                @test clone.window !== source.window
+                @test resources !== getfield(source, :_resources)
+                @test resources.backend === ec
+                @test resources.tempdir != source_tempdir
+                @test ispath(resources.tempdir)
+                @test spec !== nothing
+                @test spec.width == 777
+                @test spec.height == 444
+                @test spec.title == "clone-source"
+                @test !spec.show
+                @test !spec.autoplay
+                @test window.width == 777
+                @test window.height == 444
+                @test window.title == "clone-source"
+                @test !window.show
+                @test occursin(
+                    "if (false)",
+                    read(joinpath(resources.tempdir, "index.html"), String),
+                )
+                @test !_lifecycle_is_registered(clone.plot, clone)
+                @test _lifecycle_is_registered(plot, source)
+                return resources.tempdir
+            end
+
+            for clone_operation in (copy, PlotlyBase.fork, deepcopy)
+                window_count = length(ec.windows)
+                clone = clone_operation(source)
+                @test length(ec.windows) == window_count + 1
+                clone_window = last(ec.windows)
+                clone_tempdir = check_clone(clone, clone_window)
+
+                @test close(clone) === nothing
+                @test clone_window.close_calls == 1
+                @test !ispath(clone_tempdir)
+                @test isopen(source)
+                @test source_window.close_calls == 0
+                @test ispath(source_tempdir)
+                @test _lifecycle_is_registered(plot, source)
+            end
+
+            for outer in (
+                Any[source],
+                Any[source, source],
+                Any[source.plot, source],
+                Any[source.plot.data, source],
+                Any[source.plot.data[1], source],
+            )
+                window_count = length(ec.windows)
+                nested_error = try
+                    deepcopy(outer)
+                    nothing
+                catch caught
+                    caught
+                end
+                @test nested_error isa ArgumentError
+                @test occursin(
+                    "Deepcopy the SyncPlot directly",
+                    sprint(showerror, nested_error),
+                )
+                @test length(ec.windows) == window_count
+                @test isopen(source)
+            end
+
+            function check_model_syncplot_rejection(embedded)
+                source.plot.layout.fields[:embedded_syncplot] = embedded
+                try
+                    for clone_operation in (
+                        copy,
+                        PlotlyBase.fork,
+                        deepcopy,
+                        sp -> relayout(sp; title="unreachable"),
+                    )
+                        window_count = length(ec.windows)
+                        clone_error = try
+                            result = clone_operation(source)
+                            result isa SyncPlot && close(result)
+                            nothing
+                        catch caught
+                            caught
+                        end
+                        @test clone_error isa ArgumentError
+                        @test occursin(
+                            "plot model contains a SyncPlot reference",
+                            sprint(showerror, clone_error),
+                        )
+                        @test length(ec.windows) == window_count
+                        @test isopen(source)
+                        @test isopen(embedded)
+                    end
+
+                    for outer in (
+                        Any[source.plot, source],
+                        Any[source.plot.layout, source],
+                        Any[source.plot.layout.fields, source],
+                    )
+                        window_count = length(ec.windows)
+                        model_first_error = try
+                            deepcopy(outer)
+                            nothing
+                        catch caught
+                            caught
+                        end
+                        @test model_first_error isa ArgumentError
+                        @test length(ec.windows) == window_count
+                        @test isopen(source)
+                        @test isopen(embedded)
+                    end
+                finally
+                    delete!(
+                        source.plot.layout.fields,
+                        :embedded_syncplot,
+                    )
+                end
+                return nothing
+            end
+
+            check_model_syncplot_rejection(source)
+            other = PlotlySupply._create_syncplot_window(
+                ec,
+                Plot(scatter(y=[4, 5, 6]));
+                app=:fake,
+                show=false,
+            )
+            other_tempdir = getfield(other, :_resources).tempdir
+            other_window = other.window
+            check_model_syncplot_rejection(other)
+
+            window_count = length(ec.windows)
+            collection_error = try
+                deepcopy(Any[source, other])
+                nothing
+            catch caught
+                caught
+            end
+            @test collection_error isa ArgumentError
+            @test occursin(
+                "native window creation cannot be rolled back",
+                sprint(showerror, collection_error),
+            )
+            @test length(ec.windows) == window_count
+            @test isopen(source)
+            @test isopen(other)
+
+            close(other)
+            @test other_window.close_calls == 1
+            @test !ispath(other_tempdir)
+
+            script_count = length(ec.scripts)
+            relayout_clone = relayout(source; title="clone-relayout")
+            @test length(ec.scripts) == script_count + 1
+            @test occursin("Plotly.react", last(ec.scripts))
+            @test relayout_clone.layout.fields[:title] == "clone-relayout"
+            @test source.layout.fields[:title] == "source"
+            check_clone(relayout_clone, last(ec.windows))
+            close(relayout_clone)
+
+            script_count = length(ec.scripts)
+            redraw_clone = redraw(source)
+            @test length(ec.scripts) == script_count + 1
+            @test occursin("Plotly.redraw", last(ec.scripts))
+            check_clone(redraw_clone, last(ec.windows))
+            close(redraw_clone)
+
+            script_count = length(ec.scripts)
+            purge_clone = PlotlyBase.purge(source)
+            @test length(ec.scripts) == script_count + 1
+            @test occursin("Plotly.purge", last(ec.scripts))
+            @test isempty(purge_clone.plot.data)
+            @test purge_clone.plot.layout == Layout()
+            @test length(source.plot.data) == 2
+            purge_window = last(ec.windows)
+            purge_tempdir = getfield(purge_clone, :_resources).tempdir
+            close(purge_clone)
+            @test purge_window.close_calls == 1
+            @test !ispath(purge_tempdir)
+
+            window_count = length(ec.windows)
+            @test_throws BoundsError restyle(
+                source,
+                [99],
+                Dict(:name => ["invalid"]),
+            )
+            @test length(ec.windows) == window_count + 1
+            failed_window = last(ec.windows)
+            @test failed_window.close_calls == 1
+            @test !failed_window.exists
+            @test isopen(source)
+            @test _lifecycle_is_registered(plot, source)
+
+            @test close(source) === nothing
+            @test source_window.close_calls == 1
+            @test !ispath(source_tempdir)
+            @test !_lifecycle_is_registered(plot, source)
+        end
+
+        @testset "manual SyncPlot clone requests fail before allocation" begin
+            ec = _LifecycleFakeElectron()
+            resources = PlotlySupply._SyncPlotResources(nothing, ec)
+            manual = SyncPlot(
+                Plot(scatter(y=[1, 2, 3])),
+                :fake,
+                nothing,
+                "manual",
+                resources,
+            )
+            window_count = length(ec.windows)
+
+            for clone_operation in (copy, PlotlyBase.fork, deepcopy)
+                err = try
+                    clone_operation(manual)
+                    nothing
+                catch caught
+                    caught
+                end
+                @test err isa ArgumentError
+                @test occursin("sp.plot", sprint(showerror, err))
+                @test occursin("to_syncplot", sprint(showerror, err))
+            end
+            @test_throws ArgumentError deepcopy(Any[manual])
+            @test length(ec.windows) == window_count
+            @test manual.plot.data[1].fields[:y] == [1, 2, 3]
         end
 
         @testset "unknown backend state still attempts explicit close" begin

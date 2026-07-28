@@ -13,6 +13,14 @@ if !isdefined(@__MODULE__, :json)
 	const json = PlotlyBase.JSON.json
 end
 
+struct _SyncPlotCreationSpec
+	width::Int
+	height::Int
+	title::String
+	show::Bool
+	autoplay::Bool
+end
+
 mutable struct _SyncPlotResources
 	lock::ReentrantLock
 	tempdir::Union{Nothing,String}
@@ -23,11 +31,13 @@ mutable struct _SyncPlotResources
 	cleanup_in_progress::Bool
 	cleanup_done::Base.Event
 	tempdir_remover::Any
+	creation_spec::Union{Nothing,_SyncPlotCreationSpec}
 end
 
 _SyncPlotResources(
 	tempdir::Union{Nothing,String} = nothing,
 	backend = nothing,
+	creation_spec::Union{Nothing,_SyncPlotCreationSpec} = nothing,
 ) = _SyncPlotResources(
 	ReentrantLock(),
 	tempdir,
@@ -38,6 +48,7 @@ _SyncPlotResources(
 	false,
 	Base.Event(),
 	nothing,
+	creation_spec,
 )
 
 mutable struct SyncPlot

@@ -803,8 +803,87 @@ end
 PlotlyBase.to_image(sp::SyncPlot; kwargs...) = PlotlyBase.to_image(sp.plot; kwargs...)
 PlotlyBase.download_image(sp::SyncPlot; kwargs...) = PlotlyBase.download_image(sp.plot; kwargs...)
 
+const _SYNCPLOT_MISSING_CREATION_SPEC_ERROR =
+	"Cannot clone this SyncPlot because its original window options are unavailable. " *
+	"Copy `sp.plot`, then call `to_syncplot(plot; width=..., height=..., " *
+	"title=..., show=..., autoplay=...)` with explicit window options."
+
+struct _SyncPlotModelDeepcopyContext end
+const _SYNCPLOT_MODEL_DEEPCOPY_CONTEXT = _SyncPlotModelDeepcopyContext()
+const _SYNCPLOT_MODEL_REFERENCE_ERROR =
+	"Cannot clone a SyncPlot whose plot model contains a SyncPlot reference."
+const _SYNCPLOT_NESTED_DEEPCOPY_ERROR =
+	"Cannot deepcopy a SyncPlot as part of another object because native " *
+	"window creation cannot be rolled back if a later deepcopy operation fails. " *
+	"Deepcopy the SyncPlot directly instead."
+
+function _syncplot_creation_spec(sp::SyncPlot)
+	spec = getfield(sp, :_resources).creation_spec
+	spec === nothing &&
+		throw(ArgumentError(_SYNCPLOT_MISSING_CREATION_SPEC_ERROR))
+	return spec
+end
+
+function _create_syncplot_clone(
+	sp::SyncPlot,
+	plot_clone::Plot,
+	spec::_SyncPlotCreationSpec,
+)
+	return _create_syncplot_window(
+		_syncplot_backend(sp),
+		plot_clone;
+		app = sp.app,
+		width = spec.width,
+		height = spec.height,
+		title = spec.title,
+		show = spec.show,
+		autoplay = spec.autoplay,
+	)
+end
+
 function _clone_syncplot(sp::SyncPlot)
-	return to_syncplot(deepcopy(sp.plot); app = sp.app)
+	spec = _syncplot_creation_spec(sp)
+	stackdict = IdDict()
+	stackdict[_SYNCPLOT_MODEL_DEEPCOPY_CONTEXT] = sp
+	plot_clone = try
+		_clone_plot_model(sp.plot, stackdict)
+	finally
+		delete!(stackdict, _SYNCPLOT_MODEL_DEEPCOPY_CONTEXT)
+	end
+	return _create_syncplot_clone(sp, plot_clone, spec)
+end
+
+Base.copy(sp::SyncPlot) = _clone_syncplot(sp)
+PlotlyBase.fork(sp::SyncPlot) = _clone_syncplot(sp)
+Base.deepcopy(sp::SyncPlot) = _clone_syncplot(sp)
+
+function Base.deepcopy_internal(sp::SyncPlot, stackdict::IdDict)
+	haskey(stackdict, _SYNCPLOT_MODEL_DEEPCOPY_CONTEXT) &&
+		throw(ArgumentError(_SYNCPLOT_MODEL_REFERENCE_ERROR))
+	throw(ArgumentError(_SYNCPLOT_NESTED_DEEPCOPY_ERROR))
+end
+
+function _mutate_syncplot_clone!(
+	mutator::Function,
+	sp::SyncPlot,
+	args...;
+	kwargs...,
+)
+	out = _clone_syncplot(sp)
+	try
+		mutator(out, args...; kwargs...)
+		return out
+	catch
+		try
+			close(out)
+		catch cleanup_error
+			@warn "Failed to close a SyncPlot clone after mutation failed." exception = (
+				cleanup_error,
+				catch_backtrace(),
+			)
+		end
+		rethrow()
+	end
 end
 
 for f in (
@@ -816,13 +895,18 @@ for f in (
 	:movetraces,
 	:extendtraces,
 	:prependtraces,
+	:redraw,
+	:purge,
 	:react,
 )
 	f_bang = Symbol(f, "!")
 	@eval function PlotlyBase.$f(sp::SyncPlot, args...; kwargs...)
-		out = _clone_syncplot(sp)
-		PlotlyBase.$f_bang(out, args...; kwargs...)
-		return out
+		return _mutate_syncplot_clone!(
+			PlotlyBase.$f_bang,
+			sp,
+			args...;
+			kwargs...,
+		)
 	end
 end
 
