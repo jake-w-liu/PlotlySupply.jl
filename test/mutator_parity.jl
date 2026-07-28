@@ -528,6 +528,112 @@ end
           PlotlyBase
 end
 
+@testset "public plot materializes abstract containers for safe dispatch" begin
+    traces = _MutatorProbeTrace[
+        GenericTrace(IdDict{Symbol,Any}(
+            :type => "scatter",
+            :y => [1, 2, 3],
+        )),
+        GenericTrace(IdDict{Symbol,Any}(
+            :type => "scatter",
+            :y => [3, 2, 1],
+        )),
+    ]
+    frames = PlotlyFrame[
+        frame(
+            name="view-frame",
+            data=[scatter(y=[3, 2, 1])],
+        ),
+    ]
+    trace_view = view(traces, :)
+    frame_view = view(frames, :)
+    config = PlotConfig(staticPlot=true, locale="fr")
+
+    builders = (
+        (() -> plot(traces[1], Layout(); config=config, frames=frame_view), 1),
+        (() -> plot(traces[1], Layout(), frame_view; config=config), 1),
+        (() -> plot(trace_view, Layout(); config=config, frames=frame_view), 2),
+        (() -> plot(trace_view, Layout(), frame_view; config=config), 2),
+        (() -> plot(traces...; layout=Layout(), config=config, frames=frame_view), 2),
+        (() -> plot(; layout=Layout(), config=config, frames=frame_view), 0),
+        (() -> plot(Layout(), frame_view; config=config), 0),
+    )
+
+    for (build, expected_trace_count) in builders
+        public_plot = build()
+        @test public_plot isa PlotlySupply._RefreshablePlot
+        @test public_plot.data isa Vector
+        @test public_plot.frames isa Vector
+        @test public_plot.frames !== frame_view
+        @test only(public_plot.frames) === only(frames)
+        @test length(public_plot.data) == expected_trace_count
+        @test public_plot.config === config
+        @test which(copy, (typeof(public_plot),)).module === PlotlySupply
+        @test which(PlotlyBase.fork, (typeof(public_plot),)).module ===
+              PlotlySupply
+    end
+
+    public_plot = plot(
+        trace_view,
+        Layout(title="source");
+        config=config,
+        frames=frame_view,
+    )
+    original_trace = public_plot.data[1]
+    original_frame = public_plot.frames[1]
+    traces[1] = GenericTrace(IdDict{Symbol,Any}(
+        :type => "scatter",
+        :y => [9, 9, 9],
+    ))
+    frames[1] = frame(name="replacement", data=[scatter(y=[9])])
+    @test public_plot.data[1] === original_trace
+    @test public_plot.frames[1] === original_frame
+
+    for clone in (copy(public_plot), PlotlyBase.fork(public_plot))
+        @test clone isa PlotlySupply._RefreshablePlot
+        @test clone !== public_plot
+        @test clone.divid != public_plot.divid
+        @test clone.data !== public_plot.data
+        @test clone.data[1] !== public_plot.data[1]
+        @test clone.frames !== public_plot.frames
+        @test clone.frames[1] !== public_plot.frames[1]
+        @test clone.config !== public_plot.config
+        @test clone.config.staticPlot === true
+        @test clone.config.locale == "fr"
+    end
+
+    relayout_clone = relayout(public_plot; title="clone")
+    @test length(relayout_clone.frames) == 1
+    @test relayout_clone.config.staticPlot === true
+    @test relayout_clone.config.locale == "fr"
+    @test public_plot.layout.fields[:title] == "source"
+    @test relayout_clone.layout.fields[:title] == "clone"
+
+    refresh_plot = plot(
+        view(traces, :),
+        Layout();
+        frames=frame_view,
+    )
+    sp = _attach_mutator_refresh_probe(refresh_plot)
+    _MUTATOR_REFRESH_CALLS[] = 0
+    try
+        @test relayout!(refresh_plot; title="refreshed") === refresh_plot
+        @test _MUTATOR_REFRESH_CALLS[] == 1
+    finally
+        close(sp)
+    end
+
+    owned_traces = copy(traces)
+    owned_frames = copy(frames)
+    owned_plot = plot(
+        owned_traces,
+        Layout();
+        frames=owned_frames,
+    )
+    @test owned_plot.data === owned_traces
+    @test owned_plot.frames === owned_frames
+end
+
 @testset "non-mutating verbs preserve frames and config" begin
     source = _animated_config_plot()
     operations = (

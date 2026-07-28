@@ -310,6 +310,14 @@ function _maybe_syncplot(fig::Plot; sync::Bool = false, kwargs...)
 	return sync ? to_syncplot(fig; kwargs...) : fig
 end
 
+# PlotlySupply's Plot mutators resize and reorder trace containers, and its
+# metadata-preserving clone methods deliberately target vector-backed models.
+# Preserve already-owned Vectors without copying, but materialize views and
+# other AbstractVectors at the public `plot` boundary so every model produced
+# here has the same safe dispatch and ownership semantics.
+_owned_plot_vector(items::Vector) = items
+_owned_plot_vector(items::AbstractVector{T}) where {T} = Vector{T}(items)
+
 function plot(
 	trace::AbstractTrace,
 	layout::AbstractLayout = Layout();
@@ -318,7 +326,8 @@ function plot(
 	sync::Bool = false,
 	kwargs...,
 )
-	return _maybe_syncplot(Plot([trace], layout, frames; config = config); sync = sync, kwargs...)
+	owned_frames = _owned_plot_vector(frames)
+	return _maybe_syncplot(Plot([trace], layout, owned_frames; config = config); sync = sync, kwargs...)
 end
 
 function plot(
@@ -329,7 +338,8 @@ function plot(
 	sync::Bool = false,
 	kwargs...,
 )
-	return _maybe_syncplot(Plot([trace], layout, frames; config = config); sync = sync, kwargs...)
+	owned_frames = _owned_plot_vector(frames)
+	return _maybe_syncplot(Plot([trace], layout, owned_frames; config = config); sync = sync, kwargs...)
 end
 
 function plot(
@@ -340,7 +350,9 @@ function plot(
 	sync::Bool = false,
 	kwargs...,
 )
-	return _maybe_syncplot(Plot(traces, layout, frames; config = config); sync = sync, kwargs...)
+	owned_traces = _owned_plot_vector(traces)
+	owned_frames = _owned_plot_vector(frames)
+	return _maybe_syncplot(Plot(owned_traces, layout, owned_frames; config = config); sync = sync, kwargs...)
 end
 
 function plot(
@@ -351,7 +363,9 @@ function plot(
 	sync::Bool = false,
 	kwargs...,
 )
-	return _maybe_syncplot(Plot(traces, layout, frames; config = config); sync = sync, kwargs...)
+	owned_traces = _owned_plot_vector(traces)
+	owned_frames = _owned_plot_vector(frames)
+	return _maybe_syncplot(Plot(owned_traces, layout, owned_frames; config = config); sync = sync, kwargs...)
 end
 
 function plot(
@@ -362,7 +376,8 @@ function plot(
 	sync::Bool = false,
 	kwargs...,
 )
-	return _maybe_syncplot(Plot(collect(traces), layout, frames; config = config); sync = sync, kwargs...)
+	owned_frames = _owned_plot_vector(frames)
+	return _maybe_syncplot(Plot(collect(traces), layout, owned_frames; config = config); sync = sync, kwargs...)
 end
 
 plot(fig::Plot; sync::Bool = false, kwargs...) = _maybe_syncplot(fig; sync = sync, kwargs...)
@@ -376,7 +391,8 @@ function plot(
 	kwargs...,
 )
 	empty_traces = Vector{GenericTrace}(undef, 0)
-	return _maybe_syncplot(Plot(empty_traces, layout, frames; config = config); sync = sync, kwargs...)
+	owned_frames = _owned_plot_vector(frames)
+	return _maybe_syncplot(Plot(empty_traces, layout, owned_frames; config = config); sync = sync, kwargs...)
 end
 
 # Positional-layout form. `make_subplots` and other PlotlyJS-compat helpers call
