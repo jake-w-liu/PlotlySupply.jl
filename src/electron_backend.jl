@@ -320,23 +320,131 @@ function _do_movetraces!(p::Plot, src::AbstractVector{Int}, dest::AbstractVector
 	return p
 end
 
+function _validate_trace_splice_args(
+	p::Plot,
+	update::AbstractDict,
+	indices::AbstractVector{Int},
+	maxpoints,
+)
+	allunique(indices) || throw(ArgumentError("`indices` must not contain duplicates."))
+	for p_ix in indices
+		checkbounds(Bool, p.data, p_ix) || throw(BoundsError(p.data, p_ix))
+	end
+
+	maxpoints_is_dict = maxpoints isa AbstractDict
+	for (key, inserts) in update
+		inserts isa AbstractVector ||
+			throw(ArgumentError("update attribute $(repr(key)) must be a vector of per-trace vectors."))
+		length(inserts) == length(indices) || throw(ArgumentError(
+			"update attribute $(repr(key)) must contain one vector per trace index; " *
+			"got $(length(inserts)) updates for $(length(indices)) indices.",
+		))
+
+		if maxpoints_is_dict
+			haskey(maxpoints, key) || throw(ArgumentError(
+				"`maxpoints` must contain an entry for update attribute $(repr(key)).",
+			))
+			limits = maxpoints[key]
+			limits isa AbstractVector || throw(ArgumentError(
+				"`maxpoints[$(repr(key))]` must be a vector with one limit per trace index.",
+			))
+			length(limits) == length(indices) || throw(ArgumentError(
+				"`maxpoints[$(repr(key))]` must contain one limit per trace index; " *
+				"got $(length(limits)) limits for $(length(indices)) indices.",
+			))
+		end
+
+		for (ix, p_ix) in enumerate(indices)
+			inserts[ix] isa AbstractVector || throw(ArgumentError(
+				"update attribute $(repr(key)) at position $ix must be an `AbstractVector`.",
+			))
+			p.data[p_ix][key] isa AbstractVector || throw(ArgumentError(
+				"cannot extend or prepend missing/non-vector trace attribute $(repr(key)) " *
+				"on trace index $p_ix.",
+			))
+		end
+	end
+	return nothing
+end
+
+function _trace_window_limit(maxpoints, key, ix::Int)
+	raw = maxpoints isa AbstractDict ? maxpoints[key][ix] : maxpoints
+	(raw isa Real && isfinite(raw) && raw >= 0) || return nothing
+	raw >= typemax(Int) && return typemax(Int)
+	return floor(Int, raw)
+end
+
+function _copy_vector_segment!(
+	dest::Vector,
+	dest_start::Int,
+	src::AbstractVector,
+	src_start::Int,
+	count::Int,
+)
+	@inbounds for offset in 0:(count - 1)
+		dest[dest_start + offset] = src[src_start + offset]
+	end
+	return dest
+end
+
+function _windowed_concat(
+	target::AbstractVector,
+	insert::AbstractVector,
+	limit::Union{Nothing, Int};
+	prepend::Bool,
+)
+	limit === nothing && return prepend ? vcat(insert, target) : vcat(target, insert)
+
+	total = Base.Checked.checked_add(length(target), length(insert))
+	keep = min(limit, total)
+	T = promote_type(eltype(target), eltype(insert))
+	out = Vector{T}(undef, keep)
+	keep == 0 && return out
+
+	target_first = firstindex(target)
+	insert_first = firstindex(insert)
+	if prepend
+		insert_count = min(keep, length(insert))
+		_copy_vector_segment!(out, 1, insert, insert_first, insert_count)
+		target_count = keep - insert_count
+		target_count > 0 &&
+			_copy_vector_segment!(out, insert_count + 1, target, target_first, target_count)
+	else
+		insert_count = min(keep, length(insert))
+		target_count = keep - insert_count
+		if target_count > 0
+			target_start = target_first + length(target) - target_count
+			_copy_vector_segment!(out, 1, target, target_start, target_count)
+		end
+		if insert_count > 0
+			insert_start = insert_first + length(insert) - insert_count
+			_copy_vector_segment!(out, target_count + 1, insert, insert_start, insert_count)
+		end
+	end
+	return out
+end
+
 function _do_extendtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+	_validate_trace_splice_args(p, update, indices, maxpoints)
 	for (ix, p_ix) in enumerate(indices)
 		tr = p.data[p_ix]
 		for k in keys(update)
 			v = update[k][ix]
-			tr[k] = vcat(tr[k], v)
+			limit = _trace_window_limit(maxpoints, k, ix)
+			tr[k] = _windowed_concat(tr[k], v, limit; prepend = false)
 		end
 	end
 	return p
 end
 
 function _do_prependtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+	_validate_trace_splice_args(p, update, indices, maxpoints)
 	for (ix, p_ix) in enumerate(indices)
 		tr = p.data[p_ix]
 		for k in keys(update)
 			v = update[k][ix]
-			tr[k] = vcat(v, tr[k])
+			limit = _trace_window_limit(maxpoints, k, ix)
+			tr[k] = _windowed_concat(tr[k], v, limit; prepend = true)
 		end
 	end
 	return p

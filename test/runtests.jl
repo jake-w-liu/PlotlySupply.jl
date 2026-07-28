@@ -2044,4 +2044,50 @@ using PlotlySupply
             @test length(g.data) == 2
         end
     end
+
+    @testset "CRC: bounded extend/prepend traces" begin
+        p = Plot(scatter(x=[1, 2, 3], y=[10, 20, 30]))
+        extendtraces!(p, Dict(:x => [[4, 5]], :y => [[40, 50]]), [1], 3)
+        @test p.data[1][:x] == [3, 4, 5]
+        @test p.data[1][:y] == [30, 40, 50]
+
+        prependtraces!(p, Dict(:x => [[-1, 0]], :y => [[-10, 0]]), [1], 4)
+        @test p.data[1][:x] == [-1, 0, 3, 4]
+        @test p.data[1][:y] == [-10, 0, 30, 40]
+
+        extendtraces!(p, Dict(:x => [[6]], :y => [[60]]), [1], 0)
+        @test isempty(p.data[1][:x])
+        @test isempty(p.data[1][:y])
+
+        multi = Plot([
+            scatter(x=[1, 2], y=[10, 20]),
+            scatter(x=[3, 4], y=[30, 40]),
+        ])
+        limits = Dict(:x => [2, 3], :y => [1, 4])
+        extendtraces!(
+            multi,
+            Dict(:x => [[5, 6], [7, 8]], :y => [[50, 60], [70, 80]]),
+            [1, 2],
+            limits,
+        )
+        @test multi.data[1][:x] == [5, 6]
+        @test multi.data[1][:y] == [60]
+        @test multi.data[2][:x] == [4, 7, 8]
+        @test multi.data[2][:y] == [30, 40, 70, 80]
+
+        unchanged = copy(multi.data[1][:x])
+        @test_throws ArgumentError extendtraces!(
+            multi,
+            Dict(:x => [[9], [10]], :y => [[90]]),
+            [1, 2],
+            3,
+        )
+        @test multi.data[1][:x] == unchanged
+        @test_throws ArgumentError prependtraces!(
+            multi,
+            Dict(:x => [[9], [10]]),
+            [1, 2],
+            Dict(:y => [2, 2]),
+        )
+    end
 end
