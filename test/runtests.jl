@@ -1,5 +1,6 @@
 using Test
 using PlotlySupply
+using Base64
 
 struct _UnsupportedTrace <: AbstractTrace end
 
@@ -2050,6 +2051,102 @@ end
         @test String(PlotlySupply._urldecode_bytes("100%")) == "100%"
         @test String(PlotlySupply._urldecode_bytes("%A")) == "%A"
         @test_throws ArgumentError PlotlySupply._urldecode_bytes("%GG")
+    end
+
+    @testset "CRC: image export validates and streams data URLs" begin
+        p = plot_scatter(1:2, 1:2)
+
+        function export_data_url(data_url, format)
+            io = IOBuffer()
+            ec = (run = (win, js) -> data_url,)
+            PlotlySupply._export_image(io, ec, nothing, "test-export", p, format)
+            return take!(io)
+        end
+
+        raster_bytes = UInt8[0x00, 0x01, 0x7f, 0x80, 0xff]
+        raster_payload = base64encode(raster_bytes)
+        @test export_data_url("data:image/png;base64,$raster_payload", "png") == raster_bytes
+        @test export_data_url("data:image/jpeg;base64,$raster_payload", "jpeg") == raster_bytes
+
+        svg = "<svg><text>α中文</text></svg>"
+        svg_url = "data:image/svg+xml,%3Csvg%3E%3Ctext%3E%CE%B1%E4%B8%AD%E6%96%87%3C%2Ftext%3E%3C%2Fsvg%3E"
+        @test String(export_data_url(svg_url, "svg")) == svg
+        @test export_data_url(
+            "data:image/svg+xml;base64,$(base64encode(codeunits(svg)))",
+            "svg",
+        ) == collect(codeunits(svg))
+
+        for n in (0, 1, 2, 3, 65_535, 65_536, 65_537)
+            bytes = [UInt8(i % 251) for i in 0:(n - 1)]
+            io = IOBuffer()
+            PlotlySupply._write_base64_payload!(io, base64encode(bytes))
+            @test take!(io) == bytes
+        end
+
+        malformed = (
+            "A",
+            "AA=A",
+            "A===",
+            "AA!A",
+            "AAAA\n",
+        )
+        for payload in malformed
+            io = IOBuffer()
+            @test_throws ArgumentError PlotlySupply._write_base64_payload!(io, payload)
+            @test isempty(take!(io))
+        end
+
+        late_invalid = collect(codeunits(base64encode(fill(UInt8(0x5a), 2 * 65_536))))
+        late_invalid[end - 4] = UInt8('!')
+        io = IOBuffer()
+        @test_throws ArgumentError PlotlySupply._write_base64_payload!(
+            io,
+            String(late_invalid),
+        )
+        @test isempty(take!(io))
+
+        for (url, format) in (
+            ("not-a-data-url", "svg"),
+            ("data:image/png;base64,$raster_payload", "svg"),
+            ("data:image/jpeg;base64,$raster_payload", "png"),
+            ("data:text/plain;base64,$raster_payload", "png"),
+        )
+            io = IOBuffer()
+            ec = (run = (win, js) -> url,)
+            @test_throws ErrorException PlotlySupply._export_image(
+                io,
+                ec,
+                nothing,
+                "test-export",
+                p,
+                format,
+            )
+            @test isempty(take!(io))
+        end
+
+        io = IOBuffer()
+        ec = (run = (win, js) -> 42,)
+        err = try
+            PlotlySupply._export_image(io, ec, nothing, "test-export", p, "png")
+            nothing
+        catch caught
+            caught
+        end
+        @test err isa ErrorException
+        @test occursin("non-string", sprint(showerror, err))
+        @test isempty(take!(io))
+    end
+
+    @testset "CRC: savefig validates before opening destinations" begin
+        p = plot_scatter(1:2, 1:2)
+        @test_throws ErrorException savefig(IOBuffer(), p; format="unsupported")
+
+        mktempdir() do dir
+            filename = joinpath(dir, "existing.unsupported")
+            write(filename, "sentinel")
+            @test_throws ErrorException savefig(filename, p; format="unsupported")
+            @test read(filename, String) == "sentinel"
+        end
     end
 
     @testset "CRC: mgrid is type-stable and value-correct" begin

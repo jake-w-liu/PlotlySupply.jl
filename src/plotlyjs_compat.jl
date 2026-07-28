@@ -46,6 +46,59 @@ function _urldecode_bytes(s::AbstractString)
 	return out
 end
 
+const _BASE64_DECODE_CHUNK_BYTES = 64 * 1024
+
+@inline function _is_base64_byte(byte::UInt8)
+	return 0x41 <= byte <= 0x5a ||
+		   0x61 <= byte <= 0x7a ||
+		   0x30 <= byte <= 0x39 ||
+		   byte == 0x2b ||
+		   byte == 0x2f
+end
+
+# Validate the complete payload before writing any decoded bytes. Besides
+# producing clearer errors than Base64DecodePipe, this keeps the destination
+# unchanged when a malformed character occurs late in a large payload.
+function _validate_base64_payload(payload::Union{String, SubString{String}})
+	bytes = codeunits(payload)
+	n = length(bytes)
+	n == 0 && return nothing
+	n % 4 == 0 || throw(ArgumentError("malformed base64 payload"))
+
+	padding = bytes[n] == 0x3d ? 1 : 0 # '='
+	if padding == 1 && bytes[n - 1] == 0x3d
+		padding = 2
+	end
+
+	@inbounds for i in 1:(n - padding)
+		_is_base64_byte(bytes[i]) ||
+			throw(ArgumentError("malformed base64 payload"))
+	end
+	return nothing
+end
+
+function _write_base64_payload!(
+	io::IO,
+	payload::Union{String, SubString{String}},
+)
+	_validate_base64_payload(payload)
+	isempty(payload) && return nothing
+
+	decoded = Base64DecodePipe(IOBuffer(payload))
+	# Bound temporary memory independently of image size while retaining enough
+	# data per write to avoid excessive small-I/O overhead.
+	buffer = Vector{UInt8}(
+		undef,
+		min(_BASE64_DECODE_CHUNK_BYTES, ncodeunits(payload)),
+	)
+	while !eof(decoded)
+		n = readbytes!(decoded, buffer, length(buffer))
+		n == 0 && break
+		write(io, buffer)
+	end
+	return nothing
+end
+
 """
 	make_subplots(; kwargs...)
 
@@ -104,6 +157,14 @@ function _savefig_html(io::IO, p::Plot)
 end
 
 const _EXPORT_KW = Set((:height, :width, :scale))
+const _SAVEFIG_FORMATS = ("png", "jpeg", "svg", "pdf", "html", "json")
+
+function _validate_export_format(fmt::String)
+	fmt == "eps" && error("EPS export is not supported. Use \"svg\" or \"pdf\" instead.")
+	fmt in _SAVEFIG_FORMATS ||
+		error("Unsupported export format '$fmt'. Supported: $(join(_SAVEFIG_FORMATS, ", ")).")
+	return fmt
+end
 
 function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwargs...)
 	for k in keys(kwargs)
@@ -127,30 +188,32 @@ function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwa
 })();
 """
 	data_url = Base.invokelatest(() -> ec.run(win, js))
+	data_url isa AbstractString ||
+		error("Plotly.toImage returned a non-string value for format '$fmt'")
+	# ElectronCall normally returns String. This conversion is zero-copy for
+	# String and preserves compatibility with other AbstractString adapters.
+	data_url = String(data_url)
 
 	if fmt == "svg"
-		# SVG returns data:image/svg+xml,<url-encoded-svg>
 		prefix = "data:image/svg+xml,"
 		if startswith(data_url, prefix)
-			write(io, _urldecode_bytes(data_url[length(prefix)+1:end]))
+			payload = SubString(data_url, ncodeunits(prefix) + 1)
+			write(io, _urldecode_bytes(payload))
 		else
-			# Fallback: might be base64 encoded
 			prefix_b64 = "data:image/svg+xml;base64,"
 			if startswith(data_url, prefix_b64)
-				write(io, base64decode(data_url[length(prefix_b64)+1:end]))
+				payload = SubString(data_url, ncodeunits(prefix_b64) + 1)
+				_write_base64_payload!(io, payload)
 			else
-				write(io, data_url)
+				error("Unexpected data URL format from Plotly.toImage for format 'svg'")
 			end
 		end
 	else
-		# PNG/JPEG/WebP return data:<mime>;base64,<data>
-		idx = findfirst(";base64,", data_url)
-		if idx !== nothing
-			b64_start = last(idx) + 1
-			write(io, base64decode(data_url[b64_start:end]))
-		else
+		prefix = "data:image/$fmt;base64,"
+		startswith(data_url, prefix) ||
 			error("Unexpected data URL format from Plotly.toImage for format '$fmt'")
-		end
+		payload = SubString(data_url, ncodeunits(prefix) + 1)
+		_write_base64_payload!(io, payload)
 	end
 	return nothing
 end
@@ -264,10 +327,9 @@ export window (so they require a working Electron, but no Kaleido/Python).
 - `scale`: Resolution multiplier for raster output / page-size multiplier for PDF.
 """
 function savefig(io::IO, p::Plot; format::AbstractString = "png", kwargs...)
-	fmt = lowercase(String(format))
+	fmt = _validate_export_format(lowercase(String(format)))
 	fmt == "html" && return _savefig_html(io, p)
 	fmt == "json" && return (PlotlyBase.JSON.print(io, p); nothing)
-	fmt == "eps" && error("EPS export is not supported. Use \"svg\" or \"pdf\" instead.")
 
 	ec, app, win, divid = _ensure_export_window()
 	if fmt == "pdf"
@@ -294,6 +356,7 @@ function savefig(
 )
 	ext = lowercase(splitext(filename)[2])
 	fmt = isnothing(format) ? (isempty(ext) ? "png" : lstrip(ext, '.')) : lowercase(String(format))
+	_validate_export_format(fmt)
 
 	open(filename, "w") do io
 		savefig(io, p; format = fmt, kwargs...)
