@@ -56,11 +56,6 @@ include("plotlyjs_compat.jl")
 
 function __init__()
 	pushdisplay(ElectronDisplay())
-	# Skip method overrides when running inside another package's precompilation
-	# to avoid eval-into-closed-module errors on Julia ≥ 1.12.
-	if ccall(:jl_generating_output, Cint, ()) == 0
-		_install_plot_method_overrides!()
-	end
 end
 
 export plot_scatter, plot_scatter!, plot_stem, plot_stem!, plot_bar, plot_bar!, plot_histogram, plot_histogram!, plot_box, plot_box!, plot_violin, plot_violin!, plot_scatterpolar, plot_scatterpolar!, plot_heatmap, plot_heatmap!, plot_contour, plot_contour!, plot_quiver, plot_quiver!, plot_surface, plot_surface!, plot_scatter3d, plot_scatter3d!, plot_quiver3d, plot_quiver3d!

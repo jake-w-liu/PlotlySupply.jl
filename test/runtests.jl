@@ -2171,6 +2171,43 @@ end
         @test String(take!(io)) == "{\"answer\":42}"
     end
 
+    @testset "CRC: Plot methods are additive and dispatchable" begin
+        p = plot_scatter(1:3, 1:3)
+        @test p isa PlotlySupply._RefreshablePlot
+        @test which(restyle!, (typeof(p), Dict{Symbol, Any})).module === PlotlySupply
+        @test which(update_xaxes!, (typeof(p),)).module === PlotlySupply
+        @test which(
+            update_xaxes!,
+            (typeof(p), typeof(attr())),
+        ).module === PlotlySupply
+
+        @test update_xaxes!(p; showgrid=false) === p
+        @test p.layout.fields[:xaxis][:showgrid] == false
+        @test update_xaxes!(p, attr(zeroline=false)) === p
+        @test p.layout.fields[:xaxis][:zeroline] == false
+
+        ambiguities = Test.detect_ambiguities(
+            PlotlyBase,
+            PlotlySupply;
+            recursive=false,
+        )
+        relevant = filter(ambiguities) do pair
+            any(method -> method.module === PlotlySupply, pair)
+        end
+        @test isempty(relevant)
+
+        project_file = something(
+            Base.active_project(),
+            normpath(joinpath(@__DIR__, "..", "Project.toml")),
+        )
+        output = IOBuffer()
+        command = `$(Base.julia_cmd()) --startup-file=no --compiled-modules=no --warn-overwrite=yes --project=$(dirname(project_file)) -e $("using PlotlySupply")`
+        process = run(pipeline(ignorestatus(command), stdout=output, stderr=output))
+        diagnostics = String(take!(output))
+        @test success(process)
+        @test !occursin("overwritten in module PlotlySupply", diagnostics)
+    end
+
     @testset "CRC: savefig json/html work headlessly" begin
         f = plot_scatter(1:5, rand(5); title="α中文")
         io = IOBuffer(); savefig(io, f; format="json"); js = String(take!(io))

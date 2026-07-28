@@ -864,117 +864,175 @@ function PlotlyBase.update_polars!(sp::SyncPlot, args...; kwargs...)
 	return sp
 end
 
-# ── Plot method overrides (auto-refresh for displayed plots) ────────
-# When a Plot has been `display()`ed, these overrides push the mutation
-# to the associated Electron window automatically.
-# Installed at runtime via __init__() behind a precompilation guard so
-# that downstream packages can precompile without triggering
-# eval-into-closed-module or method-overwriting errors (Julia ≥ 1.12).
+# ── Plot auto-refresh methods ───────────────────────────────────────
+# Restrict these additions to the concrete vector-backed Plot shape emitted by
+# PlotlySupply. They remain more specific than PlotlyBase's Plot methods, so
+# loading this package adds dispatch without replacing methods owned upstream.
+const _RefreshablePlot = Plot{TT, TL, TF} where {
+	TT <: Vector{<:AbstractTrace},
+	TL <: Layout,
+	TF <: Vector{<:PlotlyFrame},
+}
 
-function _install_plot_method_overrides!()
-	@eval function PlotlyBase.react!(p::Plot, data::AbstractVector{<:AbstractTrace}, layout::Layout)
-		_do_react!(p, data, layout)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.react!(
+	p::_RefreshablePlot,
+	data::AbstractVector{<:AbstractTrace},
+	layout::Layout,
+)
+	_do_react!(p, data, layout)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.relayout!(p::Plot, args...; kwargs...)
-		_do_relayout!(p, args...; kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.relayout!(p::_RefreshablePlot, args...; kwargs...)
+	_do_relayout!(p, args...; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.restyle!(p::Plot, ind::Int, update::AbstractDict = Dict(); kwargs...)
-		_do_restyle!(p, ind, update; kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.restyle!(
+	p::_RefreshablePlot,
+	ind::Int,
+	update::AbstractDict = Dict();
+	kwargs...,
+)
+	_do_restyle!(p, ind, update; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.restyle!(p::Plot, inds::AbstractVector{Int}, update::AbstractDict = Dict(); kwargs...)
-		_do_restyle!(p, inds, update; kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.restyle!(
+	p::_RefreshablePlot,
+	inds::AbstractVector{Int},
+	update::AbstractDict = Dict();
+	kwargs...,
+)
+	_do_restyle!(p, inds, update; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.restyle!(p::Plot, update::AbstractDict = Dict(); kwargs...)
-		_do_restyle!(p, update; kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.restyle!(
+	p::_RefreshablePlot,
+	update::AbstractDict = Dict();
+	kwargs...,
+)
+	_do_restyle!(p, update; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.addtraces!(p::Plot, traces::AbstractTrace...)
-		_do_addtraces!(p, traces...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.addtraces!(p::_RefreshablePlot, traces::AbstractTrace...)
+	_do_addtraces!(p, traces...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.addtraces!(p::Plot, i::Int, traces::AbstractTrace...)
-		_do_addtraces!(p, i, traces...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.addtraces!(
+	p::_RefreshablePlot,
+	i::Int,
+	traces::AbstractTrace...,
+)
+	_do_addtraces!(p, i, traces...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.deletetraces!(p::Plot, inds::Int...)
-		_do_deletetraces!(p, inds...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.deletetraces!(p::_RefreshablePlot, inds::Int...)
+	_do_deletetraces!(p, inds...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.movetraces!(p::Plot, to_end::Int...)
-		_do_movetraces!(p, to_end...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.movetraces!(p::_RefreshablePlot, to_end::Int...)
+	_do_movetraces!(p, to_end...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.movetraces!(p::Plot, src::AbstractVector{Int}, dest::AbstractVector{Int})
-		_do_movetraces!(p, src, dest)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.movetraces!(
+	p::_RefreshablePlot,
+	src::AbstractVector{Int},
+	dest::AbstractVector{Int},
+)
+	_do_movetraces!(p, src, dest)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.extendtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
-		_do_extendtraces!(p, update, indices, maxpoints)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.extendtraces!(
+	p::_RefreshablePlot,
+	update::AbstractDict,
+	indices::AbstractVector{Int} = [1],
+	maxpoints = -1,
+)
+	_do_extendtraces!(p, update, indices, maxpoints)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.prependtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
-		_do_prependtraces!(p, update, indices, maxpoints)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.prependtraces!(
+	p::_RefreshablePlot,
+	update::AbstractDict,
+	indices::AbstractVector{Int} = [1],
+	maxpoints = -1,
+)
+	_do_prependtraces!(p, update, indices, maxpoints)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.update!(p::Plot, ind::Union{AbstractVector{Int},Int}, update::AbstractDict = Dict(); layout::Layout = p.layout, kwargs...)
-		_do_update!(p, ind, update; layout = layout, kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.update!(
+	p::_RefreshablePlot,
+	ind::Union{AbstractVector{Int}, Int},
+	update::AbstractDict = Dict();
+	layout::Layout = p.layout,
+	kwargs...,
+)
+	_do_update!(p, ind, update; layout = layout, kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.update!(p::Plot, update = Dict(); layout::Layout = p.layout, kwargs...)
-		_do_update!(p, update; layout = layout, kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.update!(
+	p::_RefreshablePlot,
+	update = Dict();
+	layout::Layout = p.layout,
+	kwargs...,
+)
+	_do_update!(p, update; layout = layout, kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.update_xaxes!(p::Plot, args...; kwargs...)
-		_do_update_xaxes!(p, args...; kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.update_xaxes!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	_do_update_xaxes!(p, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.update_yaxes!(p::Plot, args...; kwargs...)
-		_do_update_yaxes!(p, args...; kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
+function PlotlyBase.update_yaxes!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	_do_update_yaxes!(p, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
+end
 
-	@eval function PlotlyBase.update_polars!(p::Plot, args...; kwargs...)
-		_do_update_polars!(p, args...; kwargs...)
-		_maybe_sync_refresh!(p)
-		return p
-	end
-
-	return nothing
+function PlotlyBase.update_polars!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	_do_update_polars!(p, with; kwargs...)
+	_maybe_sync_refresh!(p)
+	return p
 end
 
 # ── Window lifecycle ────────────────────────────────────────────────
