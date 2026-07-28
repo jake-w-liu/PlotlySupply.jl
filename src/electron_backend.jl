@@ -354,37 +354,212 @@ function _do_relayout!(p::Plot, args...; kwargs...)
 	return p
 end
 
-function _do_restyle!(p::Plot, ind::Int, update::AbstractDict = Dict(); kwargs...)
-	restyle!(p.data[ind], 1, update; kwargs...)
+# Copy only containers that PlotlyBase's setters can mutate. Large array
+# payloads remain shared because restyle/relayout replace them rather than
+# mutating their elements.
+_copy_mutation_container(value) =
+	_copy_mutation_container(value, IdDict{Any,Any}())
+_copy_mutation_container(value, ::IdDict{Any,Any}) = value
+
+function _copy_mutation_container(
+	value::AbstractDict,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	staged = copy(value)
+	memo[value] = staged
+	for (key, child) in value
+		staged[key] = _copy_mutation_container(child, memo)
+	end
+	return staged
+end
+
+function _copy_mutation_container(
+	value::PlotlyBase.AbstractPlotlyAttribute,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	staged = typeof(value)(_copy_mutation_container(value.fields, memo))
+	memo[value] = staged
+	return staged
+end
+
+_clone_trace_for_mutation(trace::GenericTrace) =
+	GenericTrace(_copy_mutation_container(trace.fields))
+_clone_trace_for_mutation(trace::AbstractTrace) = deepcopy(trace)
+
+function _clone_layout_for_mutation(layout::Layout)
+	fields = _copy_mutation_container(layout.fields)
+	staged = Layout(fields)
+	# Layout's public constructor merges defaults. Restore the exact cloned
+	# dictionary so staging cannot reintroduce a field the caller removed.
+	setfield!(staged, :fields, fields)
+	return staged
+end
+_clone_layout_for_mutation(layout::AbstractLayout) = deepcopy(layout)
+
+function _prepare_restyle_inputs(
+	update::AbstractDict,
+	kwargs,
+	trace_count::Int;
+	vectorized::Bool,
+)
+	# Widen the copied dictionary so vector preparation can replace narrowly
+	# typed values without changing the caller's object.
+	prepared_update = Dict{Any,Any}(pairs(update))
+	prepared_kwargs = Dict{Symbol,Any}(kwargs)
+	if vectorized
+		for values in (prepared_update, prepared_kwargs)
+			for (key, value) in values
+				values[key] =
+					PlotlyBase._prep_restyle_vec_setindex(value, trace_count)
+			end
+		end
+	end
+	return prepared_update, prepared_kwargs
+end
+
+function _stage_restyle(
+	p::Plot,
+	inds,
+	update::AbstractDict,
+	kwargs;
+	vectorized::Bool,
+)
+	for ind in inds
+		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
+	end
+
+	prepared_update, prepared_kwargs = _prepare_restyle_inputs(
+		update,
+		kwargs,
+		length(inds);
+		vectorized = vectorized,
+	)
+
+	# Stage a shared trace only once so aliased entries retain their sequential
+	# restyle behavior.
+	staged = IdDict{AbstractTrace,AbstractTrace}()
+	for (position, ind) in enumerate(inds)
+		original = p.data[ind]
+		trace = get!(
+			() -> _clone_trace_for_mutation(original),
+			staged,
+			original,
+		)
+		restyle!(trace, position, prepared_update; prepared_kwargs...)
+	end
+	return staged
+end
+
+function _commit_restyle!(
+	p::Plot,
+	staged::IdDict{AbstractTrace,AbstractTrace},
+)
+	# Standard traces keep their identity by swapping the successfully staged
+	# field dictionary. Third-party trace implementations are replaced only
+	# after every staged update succeeds.
+	replacement_data = nothing
+	for (original, _) in staged
+		if !(original isa GenericTrace)
+			replacement_data = copy(p.data)
+			break
+		end
+	end
+	if replacement_data !== nothing
+		for ind in eachindex(replacement_data)
+			original = p.data[ind]
+			if !(original isa GenericTrace) && haskey(staged, original)
+				replacement_data[ind] = staged[original]
+			end
+		end
+		copyto!(p.data, replacement_data)
+	end
+	for (original, trace) in staged
+		if original isa GenericTrace
+			setfield!(original, :fields, getfield(trace, :fields))
+		end
+	end
 	return p
 end
 
-function _do_restyle!(p::Plot, inds::AbstractVector{Int}, update::AbstractDict = Dict(); kwargs...)
-	N = length(inds)
-	kw = Dict{Symbol,Any}(kwargs)
-	for d in (kw, update)
-		for (k, v) in d
-			d[k] = PlotlyBase._prep_restyle_vec_setindex(v, N)
-		end
+function _commit_layout!(p::Plot, staged::AbstractLayout)
+	if p.layout isa Layout && staged isa Layout
+		# Preserve Layout identity and its Subplots routing metadata.
+		setfield!(p.layout, :fields, staged.fields)
+	else
+		setfield!(p, :layout, staged)
 	end
-	map((ind, i) -> restyle!(p.data[ind], i, update; kw...), inds, 1:N)
+	return p
+end
+
+function _do_restyle!(
+	p::Plot,
+	ind::Int,
+	update::AbstractDict = Dict();
+	kwargs...,
+)
+	staged = _stage_restyle(
+		p,
+		(ind,),
+		update,
+		kwargs;
+		vectorized = false,
+	)
+	_commit_restyle!(p, staged)
+	return p
+end
+
+function _do_restyle!(
+	p::Plot,
+	inds::AbstractVector{Int},
+	update::AbstractDict = Dict();
+	kwargs...,
+)
+	staged = _stage_restyle(
+		p,
+		inds,
+		update,
+		kwargs;
+		vectorized = true,
+	)
+	_commit_restyle!(p, staged)
 	return p
 end
 
 function _do_restyle!(p::Plot, update::AbstractDict = Dict(); kwargs...)
-	_do_restyle!(p, 1:length(p.data), update; kwargs...)
-	return p
+	return _do_restyle!(p, 1:length(p.data), update; kwargs...)
 end
 
 function _do_movetraces!(p::Plot, to_end::Int...)
-	ii = collect(to_end)
-	x = p.data[ii]
-	append!(deleteat!(p.data, ii), x)
+	staged = copy(p.data)
+	inds = collect(to_end)
+	moved = staged[inds]
+	append!(deleteat!(staged, inds), moved)
+	copyto!(p.data, staged)
 	return p
 end
 
-function _do_movetraces!(p::Plot, src::AbstractVector{Int}, dest::AbstractVector{Int})
-	map((i, j) -> PlotlyBase._move_one!(p.data, i, j), src, dest)
+function _do_movetraces!(
+	p::Plot,
+	src::AbstractVector{Int},
+	dest::AbstractVector{Int},
+)
+	length(src) == length(dest) || throw(DimensionMismatch(
+		"`src` and `dest` must contain the same number of indices.",
+	))
+	for ind in src
+		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
+	end
+	for ind in dest
+		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
+	end
+
+	staged = copy(p.data)
+	for (from, to) in zip(src, dest)
+		PlotlyBase._move_one!(staged, from, to)
+	end
+	copyto!(p.data, staged)
 	return p
 end
 
@@ -518,15 +693,38 @@ function _do_prependtraces!(p::Plot, update::AbstractDict, indices::AbstractVect
 	return p
 end
 
-function _do_update!(p::Plot, ind::Union{AbstractVector{Int},Int}, update::AbstractDict = Dict(); layout::AbstractLayout = p.layout, kwargs...)
-	_do_relayout!(p; layout.fields...)
-	_do_restyle!(p, ind, update; kwargs...)
+function _do_update!(
+	p::Plot,
+	ind::Union{AbstractVector{Int},Int},
+	update::AbstractDict = Dict();
+	layout::AbstractLayout = p.layout,
+	kwargs...,
+)
+	# Commit neither side until layout and trace staging both succeed.
+	staged_layout = _clone_layout_for_mutation(p.layout)
+	relayout!(staged_layout; layout.fields...)
+	inds = ind isa Int ? (ind,) : ind
+	staged_traces = _stage_restyle(
+		p,
+		inds,
+		update,
+		kwargs;
+		vectorized = !(ind isa Int),
+	)
+
+	_commit_restyle!(p, staged_traces)
+	_commit_layout!(p, staged_layout)
 	return p
 end
 
 function _do_update!(p::Plot, update = Dict(); layout::AbstractLayout = p.layout, kwargs...)
-	_do_update!(p, 1:length(p.data), update; layout = layout, kwargs...)
-	return p
+	return _do_update!(
+		p,
+		1:length(p.data),
+		update;
+		layout = layout,
+		kwargs...,
+	)
 end
 
 function _do_update_xaxes!(p::Plot, args...; kwargs...)

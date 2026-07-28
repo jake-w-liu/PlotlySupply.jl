@@ -2262,6 +2262,150 @@ end
         end
     end
 
+    @testset "CRC: atomic restyle/update/movetraces" begin
+        snapshot_atomic = p -> PlotlyBase.JSON.json(
+            Dict(:data => p.data, :layout => p.layout);
+            allownan=true,
+        )
+        make_atomic_plot = () -> Plot(
+            [
+                scatter(
+                    x=[1, 2],
+                    y=[1, 2],
+                    name="one",
+                    marker=attr(size=2),
+                ),
+                scatter(x=[3, 4], y=[3, 4], name="two"),
+                scatter(x=[5, 6], y=[5, 6], name="three"),
+            ],
+            Layout(title="old"),
+        )
+
+        p = make_atomic_plot()
+        update_dict = Dict{Symbol,Any}(:name => ["a", "b"])
+        update_before = deepcopy(update_dict)
+        data_ref = p.data
+        trace_ref = p.data[1]
+        x_ref = p.data[1][:x]
+        restyle!(p, [1, 2, 3], update_dict)
+        @test update_dict == update_before
+        @test [trace[:name] for trace in p.data] == ["a", "b", "a"]
+        @test p.data === data_ref
+        @test p.data[1] === trace_ref
+        @test p.data[1][:x] === x_ref
+
+        p = make_atomic_plot()
+        before = snapshot_atomic(p)
+        update_dict = Dict{Symbol,Any}(:name => ["changed"])
+        update_before = deepcopy(update_dict)
+        @test_throws BoundsError restyle!(p, [1, 4], update_dict)
+        @test snapshot_atomic(p) == before
+        @test update_dict == update_before
+
+        p = make_atomic_plot()
+        p.data[2][:marker] = 7
+        before = snapshot_atomic(p)
+        @test_throws MethodError restyle!(p, [1, 2]; marker_color="red")
+        @test snapshot_atomic(p) == before
+
+        p = make_atomic_plot()
+        before = snapshot_atomic(p)
+        layout_ref = p.layout
+        update_dict = Dict{Symbol,Any}(:name => ["changed"])
+        update_before = deepcopy(update_dict)
+        @test_throws BoundsError update!(
+            p,
+            [1, 4],
+            update_dict;
+            layout=Layout(title="new"),
+        )
+        @test snapshot_atomic(p) == before
+        @test p.layout === layout_ref
+        @test update_dict == update_before
+
+        p = make_atomic_plot()
+        data_ref = p.data
+        layout_ref = p.layout
+        trace_ref = p.data[1]
+        x_ref = p.data[1][:x]
+        update!(
+            p,
+            [1, 2],
+            Dict(:opacity => [0.2, 0.4]);
+            layout=Layout(title="new"),
+            marker_symbol=["circle", "square"],
+        )
+        @test p.data === data_ref
+        @test p.layout === layout_ref
+        @test p.data[1] === trace_ref
+        @test p.data[1][:x] === x_ref
+        @test p.layout[:title] == "new"
+        @test [trace[:opacity] for trace in p.data[1:2]] == [0.2, 0.4]
+
+        shared = scatter(name="old")
+        p = Plot([shared, shared])
+        restyle!(p, [1, 2], Dict(:name => ["first", "second"]))
+        @test p.data[1] === shared
+        @test p.data[2] === shared
+        @test shared[:name] == "second"
+
+        shared_nested = Dict{Symbol,Any}(:color => "red")
+        trace = scatter()
+        trace.fields[:marker] = shared_nested
+        trace.fields[:line] = shared_nested
+        p = Plot([trace])
+        restyle!(p, 1; marker_size=5)
+        @test p.data[1].fields[:marker] === p.data[1].fields[:line]
+        @test p.data[1].fields[:line][:size] == 5
+
+        p = make_atomic_plot()
+        before = snapshot_atomic(p)
+        data_ref = p.data
+        @test_throws BoundsError movetraces!(p, [1, 9], [3, 1])
+        @test snapshot_atomic(p) == before
+        @test p.data === data_ref
+        @test_throws DimensionMismatch movetraces!(p, [1, 2], [3])
+        @test snapshot_atomic(p) == before
+        movetraces!(p, [1, 3], [2, 1])
+        @test [trace[:name] for trace in p.data] == ["three", "two", "one"]
+        @test p.data === data_ref
+
+        p = make_atomic_plot()
+        data_ref = p.data
+        movetraces!(p, 2)
+        @test [trace[:name] for trace in p.data] == ["one", "three", "two"]
+        @test p.data === data_ref
+        before = snapshot_atomic(p)
+        @test_throws BoundsError movetraces!(p, 9)
+        @test snapshot_atomic(p) == before
+
+        p = make_atomic_plot()
+        restyle!(p, 1; x=[10, 20])
+        @test p.data[1][:x] == 10
+        p = make_atomic_plot()
+        restyle!(p, [1]; x=[10, 20])
+        @test p.data[1][:x] == 10
+
+        p = make_atomic_plot()
+        sp = SyncPlot(p, nothing, nothing, "atomic-test")
+        before = snapshot_atomic(p)
+        @test_throws BoundsError restyle!(
+            sp,
+            [1, 4],
+            Dict(:name => ["x", "y"]),
+        )
+        @test snapshot_atomic(p) == before
+        @test_throws BoundsError update!(
+            sp,
+            [1, 4],
+            Dict(:name => ["x", "y"]);
+            layout=Layout(title="new"),
+        )
+        @test snapshot_atomic(p) == before
+        @test_throws BoundsError movetraces!(sp, [1, 9], [3, 1])
+        @test snapshot_atomic(p) == before
+    end
+
     @testset "CRC: bounded extend/prepend traces" begin
         p = Plot(scatter(x=[1, 2, 3], y=[10, 20, 30]))
         extendtraces!(p, Dict(:x => [[4, 5]], :y => [[40, 50]]), [1], 3)
