@@ -1856,6 +1856,10 @@ using PlotlySupply
     @testset "CRC: _urldecode_bytes preserves UTF-8" begin
         @test String(PlotlySupply._urldecode_bytes("%E4%B8%AD%E6%96%87")) == "中文"
         @test String(PlotlySupply._urldecode_bytes("a%2Fb")) == "a/b"
+        @test String(PlotlySupply._urldecode_bytes("a%20b%2Fc")) == "a b/c"
+        @test String(PlotlySupply._urldecode_bytes("100%")) == "100%"
+        @test String(PlotlySupply._urldecode_bytes("%A")) == "%A"
+        @test_throws ArgumentError PlotlySupply._urldecode_bytes("%GG")
     end
 
     @testset "CRC: mgrid is type-stable and value-correct" begin

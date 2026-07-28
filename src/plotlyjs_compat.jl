@@ -1,22 +1,47 @@
 using Base64
 using Printf: @sprintf
 
-# Decode percent-escapes into raw bytes. Decoding into a String of per-byte
-# `Char`s (the old approach) corrupts multi-byte UTF-8 sequences in SVG text;
-# emitting the bytes preserves the original UTF-8 exactly.
+@inline function _hex_nibble(byte::UInt8)
+	0x30 <= byte <= 0x39 && return byte - 0x30
+	0x41 <= byte <= 0x46 && return byte - 0x41 + 0x0a
+	0x61 <= byte <= 0x66 && return byte - 0x61 + 0x0a
+	throw(ArgumentError("invalid hexadecimal digit in percent escape: $(Char(byte))"))
+end
+
+# Decode percent-escapes into raw bytes. Work directly on UTF-8 code units so
+# non-ASCII SVG text is preserved without allocating one temporary String per
+# character. The first pass validates escapes and computes the exact output
+# length; the second fills one right-sized result buffer.
 function _urldecode_bytes(s::AbstractString)
-	out = UInt8[]
-	i = firstindex(s)
-	stop = lastindex(s)
-	while i <= stop
-		c = s[i]
-		if c == '%' && i + 2 <= stop
-			push!(out, parse(UInt8, s[(i+1):(i+2)]; base = 16))
+	bytes = codeunits(s)
+	n = length(bytes)
+	output_length = 0
+	i = 1
+	while i <= n
+		if bytes[i] == 0x25 && i + 2 <= n # '%'
+			_hex_nibble(bytes[i + 1])
+			_hex_nibble(bytes[i + 2])
 			i += 3
 		else
-			append!(out, codeunits(string(c)))
-			i = nextind(s, i)
+			i += 1
 		end
+		output_length += 1
+	end
+
+	out = Vector{UInt8}(undef, output_length)
+	i = 1
+	j = 1
+	while i <= n
+		if bytes[i] == 0x25 && i + 2 <= n # '%'
+			hi = _hex_nibble(bytes[i + 1])
+			lo = _hex_nibble(bytes[i + 2])
+			@inbounds out[j] = (hi << 4) | lo
+			i += 3
+		else
+			@inbounds out[j] = bytes[i]
+			i += 1
+		end
+		j += 1
 	end
 	return out
 end
