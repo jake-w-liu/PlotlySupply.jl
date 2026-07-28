@@ -161,7 +161,7 @@ export plot_histogram2d, plot_histogram2d!, annotate!
 export plot_sankey, plot_sankey!, plot_parcoords, plot_parcoords!, plot_ternary, plot_ternary!, plot_image, plot_image!
 export plot_mesh3d, plot_mesh3d!, plot_isosurface, plot_isosurface!, plot_volume, plot_volume!, plot_streamtube, plot_streamtube!
 export plot_choropleth, plot_choropleth!, plot_scattergeo, plot_scattergeo!
-export plot_scattermapbox, plot_scattermapbox!, plot_densitymapbox, plot_densitymapbox!
+export plot_scattermapbox, plot_scattermapbox!, plot_choroplethmapbox, plot_choroplethmapbox!, plot_densitymapbox, plot_densitymapbox!
 export set_template!, get_default_template, set_default_template!
 export set_legend!, get_default_legend_position, set_default_legend_position!
 export xlabel!, ylabel!, xrange!, yrange!

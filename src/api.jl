@@ -1300,6 +1300,7 @@ function _merge_layout_attr!(
 	key::Symbol,
 	source;
 	drop_keys::Tuple{Vararg{Symbol}} = (),
+	deep_merge_keys::Tuple{Vararg{Symbol}} = (),
 )
 	source_dict = _symbol_dict(source)
 	isempty(source_dict) && return
@@ -1307,8 +1308,14 @@ function _merge_layout_attr!(
 		pop!(source_dict, k, nothing)
 	end
 	target_dict = _symbol_dict(get(layout.fields, key, nothing))
+	for nested_key in deep_merge_keys
+		haskey(source_dict, nested_key) || continue
+		nested = _symbol_dict(get(target_dict, nested_key, nothing))
+		merge!(nested, _symbol_dict(source_dict[nested_key]))
+		source_dict[nested_key] = attr(nested)
+	end
 	merge!(target_dict, source_dict)
-	layout.fields[key] = attr(; target_dict...)
+	layout.fields[key] = attr(target_dict)
 	return nothing
 end
 
@@ -1370,6 +1377,7 @@ function _apply_source_layout_to_added_traces!(
 					geo_key,
 					get(source.layout.fields, :geo, nothing);
 					drop_keys = (:domain,),
+					deep_merge_keys = (:projection,),
 				)
 				push!(processed, geo_key)
 			end
@@ -1380,11 +1388,16 @@ function _apply_source_layout_to_added_traces!(
 			source_kind, _ = _trace_subplot_kind(target.data[idx])
 			source_key = Symbol(source_kind)
 			if !(subplot_key in processed)
+				nested_keys =
+					source_kind in ("mapbox", "map") ?
+					(:center,) :
+					()
 				_merge_layout_attr!(
 					target.layout,
 					subplot_key,
 					get(source.layout.fields, source_key, nothing);
 					drop_keys = (:domain,),
+					deep_merge_keys = nested_keys,
 				)
 				push!(processed, subplot_key)
 			end
@@ -1438,15 +1451,27 @@ function _subplot_delegate_mutator_impl!(
 	mutator(tmp, args...; kwargs...)
 
 	p = _plot_obj(sf.fig)
-	_validate_subplot_traces!(p, tmp.data, r, c; secondary_y = secondary_y)
-	staged = Plot(p.layout)
-	sizehint!(staged.data, length(tmp.data))
+	target_ref = _validate_subplot_traces!(
+		p,
+		tmp.data,
+		r,
+		c;
+		secondary_y = secondary_y,
+	)
+	routed = Vector{GenericTrace}()
+	sizehint!(routed, length(tmp.data))
 	for trace in tmp.data
-		PlotlyBase.add_trace!(staged, trace; row = r, col = c, secondary_y = secondary_y)
+		# The delegate owns `trace`, so only its fields dictionary needs a new
+		# container before subplot references are merged. PlotlyBase.add_trace!
+		# deep-copies every payload, which turns range/view-backed high-level
+		# inputs into O(n) allocations without providing additional isolation.
+		routed_trace = GenericTrace(copy(trace.fields))
+		merge!(routed_trace, target_ref.trace_kwargs)
+		push!(routed, routed_trace)
 	end
 
 	start_index = length(p.data) + 1
-	append!(p.data, staged.data)
+	append!(p.data, routed)
 	_apply_source_layout_to_added_traces!(p, tmp, start_index)
 	explicit_modes = get(values(kwargs), :barmode, "") == "" ?
 		() :
@@ -1515,6 +1540,122 @@ function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_
 	xkey = _axis_layout_key(String(fields[:xaxis]), :x)
 	ykey = _axis_layout_key(String(fields[:yaxis]), :y)
 	return xkey, ykey
+end
+
+function _subplot_geographic_layout_key(
+	sf::SubplotFigure,
+	row::Int,
+	col::Int,
+	kind::Symbol,
+)
+	p = _plot_obj(sf.fig)
+	expected_kind = if kind === :geo
+		"geo"
+	elseif kind === :mapbox
+		"mapbox"
+	else
+		throw(ArgumentError(
+			"Unsupported geographic subplot kind `$kind`.",
+		))
+	end
+
+	target_ref = _subplot_target_ref(p, row, col)
+	actual_kind = String(target_ref.subplot_kind)
+	actual_kind == expected_kind || throw(ArgumentError(
+		"Selected subplot cell ($(row), $(col)) is '$actual_kind', " *
+		"not '$expected_kind'.",
+	))
+	return only(target_ref.layout_keys)
+end
+
+function _subplot_geographic_update_impl!(
+	sf::SubplotFigure,
+	updater::Function,
+	kind::Symbol,
+	with::PlotlyBase.PlotlyAttribute;
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	kwargs...,
+)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	key = _subplot_geographic_layout_key(sf, r, c, kind)
+	layout = _plot_layout(sf.fig)
+	root_key = kind === :geo ? :geo : :mapbox
+	temporary = Layout()
+	temporary.fields[root_key] =
+		deepcopy(get(layout.fields, key, attr()))
+	updater(temporary, with; kwargs...)
+	if kind === :mapbox
+		_require_valid_mapbox_layouts(temporary)
+	end
+	_merge_layout_attr!(
+		layout,
+		key,
+		get(temporary.fields, root_key, nothing);
+		drop_keys = (:domain,),
+		deep_merge_keys =
+			kind === :geo ?
+			(:projection,) :
+			(:center,),
+	)
+	sf.current_row = r
+	sf.current_col = c
+	_refresh!(sf.fig)
+	return sf
+end
+
+function _subplot_geographic_update!(
+	sf::SubplotFigure,
+	updater::Function,
+	kind::Symbol,
+	with::PlotlyBase.PlotlyAttribute;
+	kwargs...,
+)
+	return _transactional_subplot_mutation!(
+		_subplot_geographic_update_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		updater,
+		kind,
+		with;
+		kwargs...,
+	)
+end
+
+function PlotlyBase.update_geos!(
+	sf::SubplotFigure,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_geographic_update!(
+		sf,
+		PlotlyBase.update_geos!,
+		:geo,
+		with;
+		row = row,
+		col = col,
+		kwargs...,
+	)
+end
+
+function PlotlyBase.update_mapboxes!(
+	sf::SubplotFigure,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_geographic_update!(
+		sf,
+		PlotlyBase.update_mapboxes!,
+		:mapbox,
+		with;
+		row = row,
+		col = col,
+		kwargs...,
+	)
 end
 
 """
@@ -2131,6 +2272,29 @@ for (fn, nargs) in (
 	)
 		return _subplot_delegate_mutator!(sf, $fn, args...; kwargs...)
 	end
+end
+
+function plot_choroplethmapbox!(
+	sf::SubplotFigure,
+	geojson,
+	locations::AbstractVector,
+	z::AbstractVector;
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(
+		sf,
+		plot_choroplethmapbox!,
+		geojson,
+		locations,
+		z;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
 end
 
 function plot_indicator!(
@@ -8666,20 +8830,210 @@ end
 
 # ── Geographic maps ──────────────────────────────────────────────────
 
-function _geo_layout(title::String, scope::String, projection::String)
+function _require_equal_geo_lengths(
+	kind::AbstractString,
+	values::Pair{Symbol}...,
+)
+	lengths = map(value -> length(last(value)), values)
+	all(==(first(lengths)), lengths) && return nothing
+	names = join((String(first(value)) for value in values), ", ")
+	throw(ArgumentError(
+		"$kind: $names must share length; got $(join(lengths, ", ")).",
+	))
+end
+
+function _trace_keyword_dict(kwargs)
+	result = Dict{Symbol,Any}()
+	for (key, value) in pairs(kwargs)
+		result[Symbol(key)] = value
+	end
+	return result
+end
+
+function _set_optional_colorscale!(
+	kwargs::Dict{Symbol,Any},
+	colorscale,
+)
+	if colorscale isa AbstractString
+		isempty(colorscale) || (kwargs[:colorscale] = String(colorscale))
+	elseif colorscale !== nothing
+		kwargs[:colorscale] = colorscale
+	end
+	return kwargs
+end
+
+function _require_bounded_numeric_option(
+	kind::AbstractString,
+	name::AbstractString,
+	value;
+	minimum::Real,
+	maximum::Union{Nothing,Real} = nothing,
+)
+	values = value isa AbstractVector ? value : (value,)
+	valid = all(values) do entry
+		(entry isa Real && !(entry isa Bool)) || return false
+		isfinite(entry) || return false
+		entry >= minimum || return false
+		maximum === nothing || entry <= maximum
+	end
+	valid && return nothing
+
+	bounds = maximum === nothing ?
+		"at least $minimum" :
+		"between $minimum and $maximum"
+	throw(ArgumentError(
+		"$kind: $name must contain only finite numeric values $bounds.",
+	))
+end
+
+function _set_geo_marker!(
+	kwargs::Dict{Symbol,Any},
+	color,
+	marker_size,
+)
+	marker = _symbol_dict(get(kwargs, :marker, nothing))
+	changed = false
+	if color isa AbstractString
+		if !isempty(color)
+			marker[:color] = String(color)
+			changed = true
+		end
+	elseif color !== nothing
+		marker[:color] = color
+		changed = true
+	end
+	if marker_size isa Real
+		_require_bounded_numeric_option(
+			"geographic scatter",
+			"marker_size",
+			marker_size;
+			minimum = 0,
+		)
+		marker[:size] = marker_size
+		changed = true
+	elseif marker_size !== nothing
+		_require_bounded_numeric_option(
+			"geographic scatter",
+			"marker_size",
+			marker_size;
+			minimum = 0,
+		)
+		marker[:size] = marker_size
+		changed = true
+	end
+	changed && (kwargs[:marker] = attr(; marker...))
+	return kwargs
+end
+
+function _geo_layout(
+	title::String,
+	scope::AbstractString,
+	projection::AbstractString,
+)
 	g = Dict{Symbol, Any}()
-	scope == "" || (g[:scope] = scope)
-	projection == "" || (g[:projection] = attr(type = projection))
+	isempty(scope) || (g[:scope] = String(scope))
+	isempty(projection) ||
+		(g[:projection] = attr(type = String(projection)))
 	return isempty(g) ? Layout(title = title) : Layout(title = title, geo = attr(; g...))
 end
 
-function _mapbox_layout(title::String, style::String, zoom::Real, center_lon, center_lat)
-	m = Dict{Symbol, Any}(:style => style)
-	zoom > 0 && (m[:zoom] = zoom)
-	if center_lon !== nothing && center_lat !== nothing
-		m[:center] = attr(lon = center_lon, lat = center_lat)
+function _require_valid_mapbox_view(
+	zoom,
+	center_lon,
+	center_lat,
+)
+	for (name, value) in (
+		(:zoom, zoom),
+		(:center_lon, center_lon),
+		(:center_lat, center_lat),
+	)
+		value === nothing && continue
+		valid =
+			value isa Real &&
+			!(value isa Bool) &&
+			isfinite(value)
+		valid || throw(ArgumentError(
+			"mapbox: $name must be a finite real number, not $(repr(value)).",
+		))
 	end
-	return Layout(title = title, mapbox = attr(; m...))
+	return nothing
+end
+
+function _require_valid_mapbox_layouts(layout::Layout)
+	for (key, value) in layout.fields
+		startswith(String(key), "mapbox") || continue
+		mapbox = _symbol_dict(value)
+		center = _symbol_dict(get(mapbox, :center, nothing))
+		_require_valid_mapbox_view(
+			get(mapbox, :zoom, nothing),
+			get(center, :lon, nothing),
+			get(center, :lat, nothing),
+		)
+	end
+	return nothing
+end
+
+function _mapbox_layout(
+	title::String,
+	style,
+	zoom,
+	center_lon,
+	center_lat,
+)
+	_require_valid_mapbox_view(zoom, center_lon, center_lat)
+	m = Dict{Symbol, Any}()
+	style === nothing ||
+		(m[:style] = style isa AbstractString ? String(style) : style)
+	zoom === nothing || (m[:zoom] = zoom)
+	center = Dict{Symbol,Any}()
+	center_lon === nothing || (center[:lon] = center_lon)
+	center_lat === nothing || (center[:lat] = center_lat)
+	if !isempty(center)
+		m[:center] = attr(center)
+	end
+	layout = Layout(title = title)
+	isempty(m) || (layout.fields[:mapbox] = attr(m))
+	return layout
+end
+
+function _apply_geo_layout_options!(
+	fig;
+	scope::AbstractString,
+	projection::AbstractString,
+)
+	source = _geo_layout("", scope, projection)
+	haskey(source.fields, :geo) || return nothing
+	_merge_layout_attr!(
+		_plot_layout(fig),
+		:geo,
+		source.fields[:geo];
+		deep_merge_keys = (:projection,),
+	)
+	return nothing
+end
+
+function _apply_mapbox_layout_options!(
+	fig;
+	style,
+	zoom,
+	center_lon,
+	center_lat,
+)
+	source = _mapbox_layout(
+		"",
+		style,
+		zoom,
+		center_lon,
+		center_lat,
+	)
+	haskey(source.fields, :mapbox) || return nothing
+	_merge_layout_attr!(
+		_plot_layout(fig),
+		:mapbox,
+		source.fields[:mapbox];
+		deep_merge_keys = (:center,),
+	)
+	return nothing
 end
 
 """
@@ -8691,20 +9045,27 @@ how `locations` are matched (e.g. `"country names"`, `"ISO-3"`, `"USA-states"`).
 function plot_choropleth(
 	locations::AbstractVector,
 	z::AbstractVector;
-	locationmode::String = "country names",
-	colorscale::String = "",
-	scope::String = "",
-	projection::String = "",
+	locationmode::AbstractString = "country names",
+	colorscale::Union{AbstractString,AbstractVector} = "",
+	scope::AbstractString = "",
+	projection::AbstractString = "",
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
 	show::Bool = false,
+	kwargs...,
 )
-	length(locations) == length(z) ||
-		throw(ArgumentError("choropleth: locations and z must share length; got $(length(locations)) and $(length(z))."))
-	kw = Dict{Symbol, Any}(:locations => collect(locations), :z => collect(z), :locationmode => locationmode)
-	colorscale == "" || (kw[:colorscale] = colorscale)
+	_require_equal_geo_lengths(
+		"choropleth",
+		:locations => locations,
+		:z => z,
+	)
+	kw = _trace_keyword_dict(kwargs)
+	kw[:locations] = locations
+	kw[:z] = z
+	kw[:locationmode] = String(locationmode)
+	_set_optional_colorscale!(kw, colorscale)
 	fig = Plot(choropleth(; kw...), _geo_layout(title, scope, projection))
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
 	return _maybe_show(fig, show, width, height, title)
@@ -8719,49 +9080,69 @@ function plot_choropleth!(
 	fig,
 	locations::AbstractVector,
 	z::AbstractVector;
-	locationmode::String = "country names",
-	colorscale::String = "",
+	locationmode::AbstractString = "country names",
+	colorscale::Union{AbstractString,AbstractVector} = "",
+	scope::AbstractString = "",
+	projection::AbstractString = "",
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
+	kwargs...,
 )
-	kw = Dict{Symbol, Any}(:locations => collect(locations), :z => collect(z), :locationmode => locationmode)
-	colorscale == "" || (kw[:colorscale] = colorscale)
+	_require_equal_geo_lengths(
+		"choropleth",
+		:locations => locations,
+		:z => z,
+	)
+	kw = _trace_keyword_dict(kwargs)
+	kw[:locations] = locations
+	kw[:z] = z
+	kw[:locationmode] = String(locationmode)
+	_set_optional_colorscale!(kw, colorscale)
 	push!(_plot_data(fig), choropleth(; kw...))
+	_apply_geo_layout_options!(
+		fig;
+		scope = scope,
+		projection = projection,
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
 	_refresh!(fig)
 	return nothing
 end
 
 """
-	plot_scattergeo(lon, lat; mode="markers", color="", marker_size=0, legend="", scope="", projection="", kwargs...)
+	plot_scattergeo(lon, lat; mode="markers", color="", marker_size=nothing, legend="", scope="", projection="", kwargs...)
 
 Scatter points on a geographic map at coordinates `(lon, lat)` (degrees).
 """
 function plot_scattergeo(
 	lon::AbstractVector,
 	lat::AbstractVector;
-	mode::String = "markers",
-	color::String = "",
-	marker_size::Int = 0,
-	legend::String = "",
-	scope::String = "",
-	projection::String = "",
+	mode::AbstractString = "markers",
+	color::Union{Nothing,AbstractString,AbstractVector} = "",
+	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
+	legend::AbstractString = "",
+	scope::AbstractString = "",
+	projection::AbstractString = "",
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
 	show::Bool = false,
+	kwargs...,
 )
-	length(lon) == length(lat) ||
-		throw(ArgumentError("scattergeo: lon and lat must share length; got $(length(lon)) and $(length(lat))."))
-	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :mode => mode)
-	mk = Dict{Symbol, Any}()
-	color == "" || (mk[:color] = color)
-	marker_size > 0 && (mk[:size] = marker_size)
-	isempty(mk) || (kw[:marker] = attr(; mk...))
-	legend == "" || (kw[:name] = legend)
+	_require_equal_geo_lengths(
+		"scattergeo",
+		:lon => lon,
+		:lat => lat,
+	)
+	kw = _trace_keyword_dict(kwargs)
+	kw[:lon] = lon
+	kw[:lat] = lat
+	kw[:mode] = String(mode)
+	_set_geo_marker!(kw, color, marker_size)
+	isempty(legend) || (kw[:name] = String(legend))
 	fig = Plot(scattergeo(; kw...), _geo_layout(title, scope, projection))
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
 	return _maybe_show(fig, show, width, height, title)
@@ -8776,29 +9157,42 @@ function plot_scattergeo!(
 	fig,
 	lon::AbstractVector,
 	lat::AbstractVector;
-	mode::String = "markers",
-	color::String = "",
-	marker_size::Int = 0,
-	legend::String = "",
+	mode::AbstractString = "markers",
+	color::Union{Nothing,AbstractString,AbstractVector} = "",
+	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
+	legend::AbstractString = "",
+	scope::AbstractString = "",
+	projection::AbstractString = "",
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
+	kwargs...,
 )
-	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :mode => mode)
-	mk = Dict{Symbol, Any}()
-	color == "" || (mk[:color] = color)
-	marker_size > 0 && (mk[:size] = marker_size)
-	isempty(mk) || (kw[:marker] = attr(; mk...))
-	legend == "" || (kw[:name] = legend)
+	_require_equal_geo_lengths(
+		"scattergeo",
+		:lon => lon,
+		:lat => lat,
+	)
+	kw = _trace_keyword_dict(kwargs)
+	kw[:lon] = lon
+	kw[:lat] = lat
+	kw[:mode] = String(mode)
+	_set_geo_marker!(kw, color, marker_size)
+	isempty(legend) || (kw[:name] = String(legend))
 	push!(_plot_data(fig), scattergeo(; kw...))
+	_apply_geo_layout_options!(
+		fig;
+		scope = scope,
+		projection = projection,
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
 	_refresh!(fig)
 	return nothing
 end
 
 """
-	plot_scattermapbox(lon, lat; mode="markers", color="", marker_size=0, legend="", style="open-street-map", zoom=0, center_lon=nothing, center_lat=nothing, kwargs...)
+	plot_scattermapbox(lon, lat; mode="markers", color="", marker_size=nothing, legend="", style="open-street-map", zoom=0, center_lon=nothing, center_lat=nothing, kwargs...)
 
 Scatter points on a tile map at `(lon, lat)`. The default `"open-street-map"`
 style needs no access token.
@@ -8806,28 +9200,32 @@ style needs no access token.
 function plot_scattermapbox(
 	lon::AbstractVector,
 	lat::AbstractVector;
-	mode::String = "markers",
-	color::String = "",
-	marker_size::Int = 0,
-	legend::String = "",
-	style::String = "open-street-map",
-	zoom::Real = 0,
-	center_lon::Union{Nothing, Real} = nothing,
-	center_lat::Union{Nothing, Real} = nothing,
+	mode::AbstractString = "markers",
+	color::Union{Nothing,AbstractString,AbstractVector} = "",
+	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
+	legend::AbstractString = "",
+	style = "open-street-map",
+	zoom = 0,
+	center_lon = nothing,
+	center_lat = nothing,
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
 	show::Bool = false,
+	kwargs...,
 )
-	length(lon) == length(lat) ||
-		throw(ArgumentError("scattermapbox: lon and lat must share length; got $(length(lon)) and $(length(lat))."))
-	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :mode => mode)
-	mk = Dict{Symbol, Any}()
-	color == "" || (mk[:color] = color)
-	marker_size > 0 && (mk[:size] = marker_size)
-	isempty(mk) || (kw[:marker] = attr(; mk...))
-	legend == "" || (kw[:name] = legend)
+	_require_equal_geo_lengths(
+		"scattermapbox",
+		:lon => lon,
+		:lat => lat,
+	)
+	kw = _trace_keyword_dict(kwargs)
+	kw[:lon] = lon
+	kw[:lat] = lat
+	kw[:mode] = String(mode)
+	_set_geo_marker!(kw, color, marker_size)
+	isempty(legend) || (kw[:name] = String(legend))
 	fig = Plot(scattermapbox(; kw...), _mapbox_layout(title, style, zoom, center_lon, center_lat))
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
 	return _maybe_show(fig, show, width, height, title)
@@ -8842,23 +9240,224 @@ function plot_scattermapbox!(
 	fig,
 	lon::AbstractVector,
 	lat::AbstractVector;
-	mode::String = "markers",
-	color::String = "",
-	marker_size::Int = 0,
-	legend::String = "",
+	mode::AbstractString = "markers",
+	color::Union{Nothing,AbstractString,AbstractVector} = "",
+	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
+	legend::AbstractString = "",
+	style = nothing,
+	zoom = nothing,
+	center_lon = nothing,
+	center_lat = nothing,
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
+	kwargs...,
 )
-	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :mode => mode)
-	mk = Dict{Symbol, Any}()
-	color == "" || (mk[:color] = color)
-	marker_size > 0 && (mk[:size] = marker_size)
-	isempty(mk) || (kw[:marker] = attr(; mk...))
-	legend == "" || (kw[:name] = legend)
+	_require_valid_mapbox_view(zoom, center_lon, center_lat)
+	_require_equal_geo_lengths(
+		"scattermapbox",
+		:lon => lon,
+		:lat => lat,
+	)
+	kw = _trace_keyword_dict(kwargs)
+	kw[:lon] = lon
+	kw[:lat] = lat
+	kw[:mode] = String(mode)
+	_set_geo_marker!(kw, color, marker_size)
+	isempty(legend) || (kw[:name] = String(legend))
 	push!(_plot_data(fig), scattermapbox(; kw...))
+	_apply_mapbox_layout_options!(
+		fig;
+		style = style,
+		zoom = zoom,
+		center_lon = center_lon,
+		center_lat = center_lat,
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_refresh!(fig)
+	return nothing
+end
+
+function _choroplethmapbox_trace(
+	geojson,
+	locations::AbstractVector,
+	z::AbstractVector;
+	featureidkey::AbstractString,
+	colorscale,
+	marker_line_color,
+	marker_line_width,
+	marker_opacity,
+	legend::AbstractString,
+	trace_kwargs,
+)
+	_require_equal_geo_lengths(
+		"choroplethmapbox",
+		:locations => locations,
+		:z => z,
+	)
+	marker_line_width === nothing || _require_bounded_numeric_option(
+		"choroplethmapbox",
+		"marker_line_width",
+		marker_line_width;
+		minimum = 0,
+	)
+	marker_opacity === nothing || _require_bounded_numeric_option(
+		"choroplethmapbox",
+		"marker_opacity",
+		marker_opacity;
+		minimum = 0,
+		maximum = 1,
+	)
+	kw = _trace_keyword_dict(trace_kwargs)
+	kw[:geojson] = geojson
+	kw[:locations] = locations
+	kw[:z] = z
+	isempty(featureidkey) ||
+		(kw[:featureidkey] = String(featureidkey))
+	_set_optional_colorscale!(kw, colorscale)
+	isempty(legend) || (kw[:name] = String(legend))
+
+	marker = _symbol_dict(get(kw, :marker, nothing))
+	marker_changed = false
+	line = _symbol_dict(get(marker, :line, nothing))
+	if marker_line_color isa AbstractString
+		if !isempty(marker_line_color)
+			line[:color] = String(marker_line_color)
+			marker_changed = true
+		end
+	elseif marker_line_color !== nothing
+		line[:color] = marker_line_color
+		marker_changed = true
+	end
+	if marker_line_width !== nothing
+		line[:width] = marker_line_width
+		marker_changed = true
+	end
+	isempty(line) || (marker[:line] = attr(; line...))
+	if marker_opacity !== nothing
+		marker[:opacity] = marker_opacity
+		marker_changed = true
+	end
+	marker_changed && (kw[:marker] = attr(; marker...))
+	return choroplethmapbox(; kw...)
+end
+
+"""
+	plot_choroplethmapbox(geojson, locations, z; featureidkey="", colorscale="", style="open-street-map", zoom=0, kwargs...)
+
+Shade GeoJSON features on a Mapbox tile map. `locations` and `z` must have the
+same length; `featureidkey` selects the GeoJSON property matched by each
+location. Extra keywords are passed to the Plotly trace.
+"""
+function plot_choroplethmapbox(
+	geojson,
+	locations::AbstractVector,
+	z::AbstractVector;
+	featureidkey::AbstractString = "",
+	colorscale::Union{AbstractString,AbstractVector} = "",
+	marker_line_color::Union{Nothing,AbstractString,AbstractVector} = nothing,
+	marker_line_width::Union{Nothing,Real,AbstractVector} = nothing,
+	marker_opacity::Union{Nothing,Real,AbstractVector} = nothing,
+	legend::AbstractString = "",
+	style = "open-street-map",
+	zoom = 0,
+	center_lon = nothing,
+	center_lat = nothing,
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	show::Bool = false,
+	kwargs...,
+)
+	trace = _choroplethmapbox_trace(
+		geojson,
+		locations,
+		z;
+		featureidkey = featureidkey,
+		colorscale = colorscale,
+		marker_line_color = marker_line_color,
+		marker_line_width = marker_line_width,
+		marker_opacity = marker_opacity,
+		legend = legend,
+		trace_kwargs = kwargs,
+	)
+	fig = Plot(
+		trace,
+		_mapbox_layout(
+			title,
+			style,
+			zoom,
+			center_lon,
+			center_lat,
+		),
+	)
+	_apply_basic_plot_options!(
+		fig;
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+	)
+	return _maybe_show(fig, show, width, height, title)
+end
+
+"""
+	plot_choroplethmapbox!(fig, geojson, locations, z; kwargs...)
+
+Append a GeoJSON choropleth trace to an existing figure.
+"""
+function plot_choroplethmapbox!(
+	fig,
+	geojson,
+	locations::AbstractVector,
+	z::AbstractVector;
+	featureidkey::AbstractString = "",
+	colorscale::Union{AbstractString,AbstractVector} = "",
+	marker_line_color::Union{Nothing,AbstractString,AbstractVector} = nothing,
+	marker_line_width::Union{Nothing,Real,AbstractVector} = nothing,
+	marker_opacity::Union{Nothing,Real,AbstractVector} = nothing,
+	legend::AbstractString = "",
+	style = nothing,
+	zoom = nothing,
+	center_lon = nothing,
+	center_lat = nothing,
+	title::String = "",
+	width::Int = 0,
+	height::Int = 0,
+	fontsize::Int = 0,
+	kwargs...,
+)
+	_require_valid_mapbox_view(zoom, center_lon, center_lat)
+	trace = _choroplethmapbox_trace(
+		geojson,
+		locations,
+		z;
+		featureidkey = featureidkey,
+		colorscale = colorscale,
+		marker_line_color = marker_line_color,
+		marker_line_width = marker_line_width,
+		marker_opacity = marker_opacity,
+		legend = legend,
+		trace_kwargs = kwargs,
+	)
+	push!(_plot_data(fig), trace)
+	_apply_mapbox_layout_options!(
+		fig;
+		style = style,
+		zoom = zoom,
+		center_lon = center_lon,
+		center_lat = center_lat,
+	)
+	_apply_basic_plot_options!(
+		fig;
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = false,
+	)
 	_refresh!(fig)
 	return nothing
 end
@@ -8873,23 +9472,43 @@ function plot_densitymapbox(
 	lon::AbstractVector,
 	lat::AbstractVector,
 	z::AbstractVector;
-	radius::Real = 0,
-	colorscale::String = "",
-	style::String = "open-street-map",
-	zoom::Real = 0,
-	center_lon::Union{Nothing, Real} = nothing,
-	center_lat::Union{Nothing, Real} = nothing,
+	radius::Union{Real,AbstractVector} = 0,
+	colorscale::Union{AbstractString,AbstractVector} = "",
+	style = "open-street-map",
+	zoom = 0,
+	center_lon = nothing,
+	center_lat = nothing,
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
 	show::Bool = false,
+	kwargs...,
 )
-	length(lon) == length(lat) == length(z) ||
-		throw(ArgumentError("densitymapbox: lon, lat, z must share length; got $(length(lon)), $(length(lat)), $(length(z))."))
-	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :z => collect(z))
-	radius > 0 && (kw[:radius] = radius)
-	colorscale == "" || (kw[:colorscale] = colorscale)
+	_require_equal_geo_lengths(
+		"densitymapbox",
+		:lon => lon,
+		:lat => lat,
+		:z => z,
+	)
+	# Scalar zero is this wrapper's backward-compatible sentinel for Plotly's
+	# schema default radius; every emitted radius must satisfy the schema min.
+	radius_is_default =
+		radius isa Real &&
+		!(radius isa Bool) &&
+		radius == 0
+	radius_is_default || _require_bounded_numeric_option(
+		"densitymapbox",
+		"radius",
+		radius;
+		minimum = 1,
+	)
+	kw = _trace_keyword_dict(kwargs)
+	kw[:lon] = lon
+	kw[:lat] = lat
+	kw[:z] = z
+	radius_is_default || (kw[:radius] = radius)
+	_set_optional_colorscale!(kw, colorscale)
 	fig = Plot(densitymapbox(; kw...), _mapbox_layout(title, style, zoom, center_lon, center_lat))
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
 	return _maybe_show(fig, show, width, height, title)
@@ -8905,17 +9524,49 @@ function plot_densitymapbox!(
 	lon::AbstractVector,
 	lat::AbstractVector,
 	z::AbstractVector;
-	radius::Real = 0,
-	colorscale::String = "",
+	radius::Union{Real,AbstractVector} = 0,
+	colorscale::Union{AbstractString,AbstractVector} = "",
+	style = nothing,
+	zoom = nothing,
+	center_lon = nothing,
+	center_lat = nothing,
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
+	kwargs...,
 )
-	kw = Dict{Symbol, Any}(:lon => collect(lon), :lat => collect(lat), :z => collect(z))
-	radius > 0 && (kw[:radius] = radius)
-	colorscale == "" || (kw[:colorscale] = colorscale)
+	_require_valid_mapbox_view(zoom, center_lon, center_lat)
+	_require_equal_geo_lengths(
+		"densitymapbox",
+		:lon => lon,
+		:lat => lat,
+		:z => z,
+	)
+	radius_is_default =
+		radius isa Real &&
+		!(radius isa Bool) &&
+		radius == 0
+	radius_is_default || _require_bounded_numeric_option(
+		"densitymapbox",
+		"radius",
+		radius;
+		minimum = 1,
+	)
+	kw = _trace_keyword_dict(kwargs)
+	kw[:lon] = lon
+	kw[:lat] = lat
+	kw[:z] = z
+	radius_is_default || (kw[:radius] = radius)
+	_set_optional_colorscale!(kw, colorscale)
 	push!(_plot_data(fig), densitymapbox(; kw...))
+	_apply_mapbox_layout_options!(
+		fig;
+		style = style,
+		zoom = zoom,
+		center_lon = center_lon,
+		center_lat = center_lat,
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
 	_refresh!(fig)
 	return nothing
@@ -8966,6 +9617,7 @@ const _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS = (
 	:plot_choropleth!,
 	:plot_scattergeo!,
 	:plot_scattermapbox!,
+	:plot_choroplethmapbox!,
 	:plot_densitymapbox!,
 	:set_template!,
 )

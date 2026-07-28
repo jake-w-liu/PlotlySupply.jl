@@ -6765,6 +6765,24 @@ function PlotlyBase.update_polars!(sp::SyncPlot, args...; kwargs...)
 	end
 end
 
+function PlotlyBase.update_mapboxes!(
+	sp::SyncPlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	return _mutate_and_refresh_syncplot!(
+		sp;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		PlotlyBase.update_mapboxes!(
+			current.layout,
+			with;
+			kwargs...,
+		)
+		_require_valid_mapbox_layouts(current.layout)
+	end
+end
+
 # ── Plot auto-refresh methods ───────────────────────────────────────
 # Restrict these additions to the concrete vector-backed Plot shape emitted by
 # PlotlySupply. They remain more specific than PlotlyBase's Plot methods, so
@@ -7192,6 +7210,7 @@ function PlotlyBase.update_mapboxes!(
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
 	) do current
 		PlotlyBase.update_mapboxes!(current.layout, with; kwargs...)
+		_require_valid_mapbox_layouts(current.layout)
 	end
 end
 

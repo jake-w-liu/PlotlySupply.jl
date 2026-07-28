@@ -49,7 +49,7 @@
 
 ### Geographic Maps
 
-- `plot_choropleth`, `plot_scattergeo`, `plot_scattermapbox`, `plot_densitymapbox` (tile maps default to the token-free `open-street-map` style).
+- `plot_choropleth`, `plot_scattergeo`, `plot_scattermapbox`, `plot_choroplethmapbox`, `plot_densitymapbox` (tile maps default to the token-free `open-street-map` style).
 
 ### Annotations & Error Bars
 

@@ -2622,6 +2622,17 @@ end
                 col=2,
             ),
             () -> plot_scattermapbox!(sf, [0.0, 1.0], [2.0, 3.0]; row=2, col=3),
+            () -> plot_choroplethmapbox!(
+                sf,
+                Dict(
+                    "type" => "FeatureCollection",
+                    "features" => Any[],
+                ),
+                ["a", "b"],
+                [1.0, 2.0];
+                row=2,
+                col=3,
+            ),
             () -> plot_densitymapbox!(
                 sf,
                 [0.0, 1.0],
@@ -2637,7 +2648,7 @@ end
             @test call() === sf
             @test length(sf.data) == old_length + 1
         end
-        @test length(sf.data) == 24
+        @test length(sf.data) == 25
         @test (sf.current_row, sf.current_col) == (2, 3)
 
         for trace in sf.data
@@ -2886,15 +2897,795 @@ end
     end
 
     @testset "Extended: geo / mapbox" begin
-        c = plot_choropleth(["USA", "CAN"], [1.0, 2.0]; colorscale="Blues", scope="north america")
+        locations_parent = ["unused", "USA", "CAN", "unused"]
+        locations = view(locations_parent, 2:3)
+        values = 1.0:2.0
+        customdata = 11:12
+        c = plot_choropleth(
+            locations,
+            values;
+            colorscale="Blues",
+            scope="north america",
+            hovertext=customdata,
+        )
         @test ttype(c) == "choropleth"
+        @test c.data[1].fields[:locations] === locations
+        @test c.data[1].fields[:z] === values
+        @test c.data[1].fields[:hovertext] === customdata
         @test PlotlySupply._symbol_dict(c.layout.fields[:geo])[:scope] == "north america"
-        @test ttype(plot_scattergeo([-100.0, 0.0], [40.0, 0.0]; marker_size=8)) == "scattergeo"
-        m = plot_scattermapbox([-122.4, -73.9], [37.8, 40.7]; zoom=2, center_lon=-100, center_lat=40)
+
+        lon_parent = [-999.0, -122.4, -73.9, 999.0]
+        lon = view(lon_parent, 2:3)
+        lat = 37.8:2.9:40.7
+        marker_color = 1:2
+        marker_size = 8:9
+        geo = plot_scattergeo(
+            lon,
+            lat;
+            color=marker_color,
+            marker_size=marker_size,
+            scope="world",
+            projection="mercator",
+            customdata=customdata,
+        )
+        @test ttype(geo) == "scattergeo"
+        @test geo.data[1].fields[:lon] === lon
+        @test geo.data[1].fields[:lat] === lat
+        @test geo.data[1].fields[:marker][:color] === marker_color
+        @test geo.data[1].fields[:marker][:size] === marker_size
+        @test geo.data[1].fields[:customdata] === customdata
+        zero_marker = plot_scattergeo(
+            lon,
+            lat;
+            marker_size=0,
+        )
+        @test zero_marker.data[1].fields[:marker][:size] == 0
+        @test !haskey(
+            plot_scattergeo(lon, lat).data[1].fields,
+            :marker,
+        )
+
+        m = plot_scattermapbox(
+            lon,
+            lat;
+            zoom=0,
+            center_lon=-100,
+            hovertext=customdata,
+        )
         @test ttype(m) == "scattermapbox"
-        @test PlotlySupply._symbol_dict(m.layout.fields[:mapbox])[:style] == "open-street-map"
-        @test ttype(plot_densitymapbox([-122.4], [37.8], [1.0]; radius=20)) == "densitymapbox"
+        @test m.data[1].fields[:lon] === lon
+        @test m.data[1].fields[:lat] === lat
+        @test m.data[1].fields[:hovertext] === customdata
+        mapbox = PlotlySupply._symbol_dict(m.layout.fields[:mapbox])
+        @test mapbox[:style] == "open-street-map"
+        @test mapbox[:zoom] == 0
+        center = PlotlySupply._symbol_dict(mapbox[:center])
+        @test center[:lon] == -100
+        @test !haskey(center, :lat)
+
+        lat_center = plot_scattermapbox(
+            lon,
+            lat;
+            center_lat=20,
+        )
+        lat_only_center = PlotlySupply._symbol_dict(
+            PlotlySupply._symbol_dict(
+                lat_center.layout.fields[:mapbox],
+            )[:center],
+        )
+        @test lat_only_center[:lat] == 20
+        @test !haskey(lat_only_center, :lon)
+
+        density = plot_densitymapbox(
+            lon,
+            lat,
+            values;
+            radius=20,
+            zoom=0,
+            center_lat=10,
+            hovertext=customdata,
+        )
+        @test ttype(density) == "densitymapbox"
+        @test density.data[1].fields[:lon] === lon
+        @test density.data[1].fields[:lat] === lat
+        @test density.data[1].fields[:z] === values
+        @test density.data[1].fields[:hovertext] === customdata
+        density_mapbox = PlotlySupply._symbol_dict(
+            density.layout.fields[:mapbox],
+        )
+        @test density_mapbox[:zoom] == 0
+        radius_values = 20:21
+        density_radius = plot_densitymapbox(
+            lon,
+            lat,
+            values;
+            radius=radius_values,
+        )
+        @test density_radius.data[1].fields[:radius] ===
+              radius_values
+
+        style_object = Dict(
+            "version" => 8,
+            "sources" => Dict{String,Any}(),
+            "layers" => Any[],
+        )
+        object_styled = plot_scattermapbox(
+            lon,
+            lat;
+            style=style_object,
+        )
+        @test PlotlySupply._symbol_dict(
+            object_styled.layout.fields[:mapbox],
+        )[:style] === style_object
+        object_style_target = Plot()
+        plot_scattermapbox!(
+            object_style_target,
+            lon,
+            lat;
+            style=style_object,
+        )
+        object_style_layout = PlotlySupply._symbol_dict(
+            object_style_target.layout.fields[:mapbox],
+        )
+        @test object_style_layout[:style] == style_object
+        plot_densitymapbox!(
+            object_style_target,
+            lon,
+            lat,
+            values;
+            center_lon=15,
+        )
+        object_style_after_merge = PlotlySupply._symbol_dict(
+            object_style_target.layout.fields[:mapbox],
+        )
+        @test object_style_after_merge[:style] == style_object
+        @test PlotlySupply._symbol_dict(
+            object_style_after_merge[:center],
+        )[:lon] == 15
+
+        geojson = Dict(
+            "type" => "FeatureCollection",
+            "features" => Any[],
+        )
+        tiled = plot_choroplethmapbox(
+            geojson,
+            locations,
+            values;
+            featureidkey="properties.id",
+            marker_line_color="white",
+            marker_line_width=2,
+            marker_opacity=0.75,
+            zoom=0,
+            center_lon=-90,
+            customdata=customdata,
+        )
+        @test ttype(tiled) == "choroplethmapbox"
+        @test tiled.data[1].fields[:geojson] === geojson
+        @test tiled.data[1].fields[:locations] === locations
+        @test tiled.data[1].fields[:z] === values
+        @test tiled.data[1].fields[:customdata] === customdata
+        @test tiled.data[1].fields[:featureidkey] == "properties.id"
+        @test tiled.data[1].fields[:marker][:opacity] == 0.75
+        zero_boundary = plot_choroplethmapbox(
+            geojson,
+            locations,
+            values;
+            marker_line_width=0,
+        )
+        @test zero_boundary.data[1].fields[:marker][:line][:width] ==
+              0
+        line_colors = ["red", "blue"]
+        line_widths = 0:1
+        opacities = 0.5:0.25:0.75
+        array_markers = plot_choroplethmapbox(
+            geojson,
+            locations,
+            values;
+            marker_line_color=line_colors,
+            marker_line_width=line_widths,
+            marker_opacity=opacities,
+        )
+        array_marker = array_markers.data[1].fields[:marker]
+        @test array_marker[:line][:color] === line_colors
+        @test array_marker[:line][:width] === line_widths
+        @test array_marker[:opacity] === opacities
+
         @test_throws ArgumentError plot_scattergeo([0.0], [1.0, 2.0])
+        @test_throws ArgumentError plot_choropleth(["USA"], [1.0, 2.0])
+        @test_throws ArgumentError plot_scattermapbox([0.0], [1.0, 2.0])
+        @test_throws ArgumentError plot_densitymapbox(
+            [0.0],
+            [1.0, 2.0],
+            [3.0],
+        )
+        @test_throws ArgumentError plot_choroplethmapbox(
+            geojson,
+            ["USA"],
+            [1.0, 2.0],
+        )
+        @test_throws ArgumentError plot_scattergeo(
+            lon,
+            lat;
+            marker_size=-1,
+        )
+        @test_throws ArgumentError plot_scattermapbox(
+            lon,
+            lat;
+            marker_size=[1, -1],
+        )
+        @test_throws ArgumentError plot_densitymapbox(
+            lon,
+            lat,
+            values;
+            radius=-1,
+        )
+        @test_throws ArgumentError plot_densitymapbox(
+            lon,
+            lat,
+            values;
+            radius=[20, 0],
+        )
+        @test_throws ArgumentError plot_choroplethmapbox(
+            geojson,
+            locations,
+            values;
+            marker_line_width=[0, -1],
+        )
+        @test_throws ArgumentError plot_choroplethmapbox(
+            geojson,
+            locations,
+            values;
+            marker_opacity=[0.5, 2],
+        )
+        invalid_view_values = (
+            true,
+            NaN,
+            Inf,
+            -Inf,
+            "not-a-number",
+        )
+        mapbox_constructors = (
+            options -> plot_scattermapbox(
+                lon,
+                lat;
+                options...,
+            ),
+            options -> plot_densitymapbox(
+                lon,
+                lat,
+                values;
+                options...,
+            ),
+            options -> plot_choroplethmapbox(
+                geojson,
+                locations,
+                values;
+                options...,
+            ),
+        )
+        mapbox_mutators = (
+            (fig, options) -> plot_scattermapbox!(
+                fig,
+                lon,
+                lat;
+                options...,
+            ),
+            (fig, options) -> plot_densitymapbox!(
+                fig,
+                lon,
+                lat,
+                values;
+                options...,
+            ),
+            (fig, options) -> plot_choroplethmapbox!(
+                fig,
+                geojson,
+                locations,
+                values;
+                options...,
+            ),
+        )
+        for option in (:zoom, :center_lon, :center_lat)
+            for invalid in invalid_view_values
+                options = NamedTuple{(option,)}((invalid,))
+                for make_plot in mapbox_constructors
+                    @test_throws ArgumentError make_plot(options)
+                end
+                for mutate! in mapbox_mutators
+                    target = Plot()
+                    layout_before = deepcopy(target.layout)
+                    staged = PlotlySupply._StagedPlotMutation(
+                        target,
+                    )
+                    @test_throws ArgumentError mutate!(
+                        staged,
+                        options,
+                    )
+                    @test isempty(target.data)
+                    @test target.layout == layout_before
+                end
+            end
+        end
+
+        for invalid! in (
+            p -> plot_choropleth!(p, ["USA"], [1.0, 2.0]),
+            p -> plot_scattergeo!(p, [0.0], [1.0, 2.0]),
+            p -> plot_scattermapbox!(p, [0.0], [1.0, 2.0]),
+            p -> plot_densitymapbox!(
+                p,
+                [0.0],
+                [1.0, 2.0],
+                [3.0],
+            ),
+            p -> plot_choroplethmapbox!(
+                p,
+                geojson,
+                ["USA"],
+                [1.0, 2.0],
+            ),
+        )
+            target = Plot()
+            layout_before = deepcopy(target.layout)
+            @test_throws ArgumentError invalid!(target)
+            @test isempty(target.data)
+            @test target.layout == layout_before
+        end
+
+        geographic_target = Plot(
+            GenericTrace[],
+            Layout(
+                geo=attr(
+                    projection=attr(
+                        rotation=attr(lon=15),
+                    ),
+                ),
+            ),
+        )
+        plot_choropleth!(
+            geographic_target,
+            locations,
+            values;
+            scope="north america",
+            projection="mercator",
+        )
+        plot_scattergeo!(
+            geographic_target,
+            lon,
+            lat;
+            scope="world",
+            projection="orthographic",
+        )
+        geo_layout = PlotlySupply._symbol_dict(
+            geographic_target.layout.fields[:geo],
+        )
+        geo_projection = PlotlySupply._symbol_dict(
+            geo_layout[:projection],
+        )
+        @test geo_layout[:scope] == "world"
+        @test geo_projection[:type] == "orthographic"
+        @test PlotlySupply._symbol_dict(
+            geo_projection[:rotation],
+        )[:lon] == 15
+
+        mapbox_target = Plot(
+            GenericTrace[],
+            Layout(
+                mapbox=attr(
+                    center=attr(lat=25),
+                ),
+            ),
+        )
+        plot_scattermapbox!(
+            mapbox_target,
+            lon,
+            lat;
+            style="carto-positron",
+            zoom=0,
+            center_lon=-80,
+        )
+        plot_densitymapbox!(
+            mapbox_target,
+            lon,
+            lat,
+            values;
+            style="open-street-map",
+            zoom=0,
+            center_lon=-70,
+        )
+        plot_choroplethmapbox!(
+            mapbox_target,
+            geojson,
+            locations,
+            values;
+            zoom=0,
+            center_lon=-60,
+        )
+        mutated_mapbox = PlotlySupply._symbol_dict(
+            mapbox_target.layout.fields[:mapbox],
+        )
+        mutated_center = PlotlySupply._symbol_dict(
+            mutated_mapbox[:center],
+        )
+        @test mutated_mapbox[:zoom] == 0
+        @test mutated_mapbox[:style] == "open-street-map"
+        @test mutated_center[:lon] == -60
+        @test mutated_center[:lat] == 25
+        @test length(mapbox_target.data) == 3
+
+        preserved_target = Plot(
+            GenericTrace[],
+            Layout(
+                mapbox=attr(
+                    style="carto-darkmatter",
+                    zoom=7,
+                    center=attr(lon=30, lat=20),
+                ),
+            ),
+        )
+        plot_scattermapbox!(preserved_target, lon, lat)
+        plot_densitymapbox!(
+            preserved_target,
+            lon,
+            lat,
+            values,
+        )
+        plot_choroplethmapbox!(
+            preserved_target,
+            geojson,
+            locations,
+            values,
+        )
+        preserved_mapbox = PlotlySupply._symbol_dict(
+            preserved_target.layout.fields[:mapbox],
+        )
+        @test preserved_mapbox[:style] == "carto-darkmatter"
+        @test preserved_mapbox[:zoom] == 7
+        @test PlotlySupply._symbol_dict(
+            preserved_mapbox[:center],
+        ) == Dict{Symbol,Any}(
+            :lon => 30,
+            :lat => 20,
+        )
+    end
+
+    @testset "CRC: geo/mapbox inputs stay lazy and allocation bounded" begin
+        payload = 1:1_000_000
+        geojson = Dict(
+            "type" => "FeatureCollection",
+            "features" => Any[],
+        )
+        constructors = (
+            () -> plot_choropleth(payload, payload),
+            () -> plot_scattergeo(payload, payload),
+            () -> plot_scattermapbox(payload, payload),
+            () -> plot_densitymapbox(
+                payload,
+                payload,
+                payload,
+            ),
+            () -> plot_choroplethmapbox(
+                geojson,
+                payload,
+                payload,
+            ),
+        )
+        for make_plot in constructors
+            make_plot()
+            GC.gc()
+            allocated = @allocated make_plot()
+            @test allocated < 2_000_000
+        end
+
+        mutators = (
+            p -> plot_choropleth!(p, payload, payload),
+            p -> plot_scattergeo!(p, payload, payload),
+            p -> plot_scattermapbox!(p, payload, payload),
+            p -> plot_densitymapbox!(
+                p,
+                payload,
+                payload,
+                payload,
+            ),
+            p -> plot_choroplethmapbox!(
+                p,
+                geojson,
+                payload,
+                payload,
+            ),
+        )
+        for mutate! in mutators
+            mutate!(Plot())
+            target = Plot()
+            GC.gc()
+            allocated = @allocated mutate!(target)
+            @test allocated < 2_000_000
+        end
+
+        geo_subplot = () -> PlotlySupply.subplots(
+            1,
+            1;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+            specs=fill(PlotlySupply.Spec(kind="geo"), 1, 1),
+        )
+        mapbox_subplot = () -> PlotlySupply.subplots(
+            1,
+            1;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+            specs=fill(PlotlySupply.Spec(kind="mapbox"), 1, 1),
+        )
+        subplot_cases = (
+            (
+                geo_subplot,
+                sf -> plot_choropleth!(
+                    sf,
+                    payload,
+                    payload;
+                    customdata=payload,
+                ),
+                (:locations, :z, :customdata),
+            ),
+            (
+                geo_subplot,
+                sf -> plot_scattergeo!(
+                    sf,
+                    payload,
+                    payload;
+                    color=payload,
+                    marker_size=payload,
+                    customdata=payload,
+                ),
+                (:lon, :lat, :customdata),
+            ),
+            (
+                mapbox_subplot,
+                sf -> plot_scattermapbox!(
+                    sf,
+                    payload,
+                    payload;
+                    color=payload,
+                    marker_size=payload,
+                    customdata=payload,
+                ),
+                (:lon, :lat, :customdata),
+            ),
+            (
+                mapbox_subplot,
+                sf -> plot_densitymapbox!(
+                    sf,
+                    payload,
+                    payload,
+                    payload,
+                    customdata=payload,
+                ),
+                (:lon, :lat, :z, :customdata),
+            ),
+            (
+                mapbox_subplot,
+                sf -> plot_choroplethmapbox!(
+                    sf,
+                    geojson,
+                    payload,
+                    payload,
+                    customdata=payload,
+                ),
+                (:locations, :z, :customdata),
+            ),
+        )
+        for (make_subplot, mutate!, payload_fields) in subplot_cases
+            mutate!(make_subplot())
+            target = make_subplot()
+            GC.gc()
+            allocated = @allocated mutate!(target)
+            @test allocated < 2_000_000
+            for field in payload_fields
+                @test only(target.data).fields[field] === payload
+            end
+            trace = only(target.data)
+            if haskey(trace.fields, :marker)
+                marker = trace.fields[:marker]
+                if haskey(marker, :color)
+                    @test marker[:color] === payload
+                end
+                if haskey(marker, :size)
+                    @test marker[:size] === payload
+                end
+            end
+            if get(trace.fields, :type, "") == "choroplethmapbox"
+                @test trace.fields[:geojson] === geojson
+            end
+        end
+    end
+
+    @testset "CRC: cell-specific geo/mapbox updates" begin
+        specs = [
+            PlotlySupply.Spec(kind="geo") PlotlySupply.Spec(kind="geo")
+            PlotlySupply.Spec(kind="mapbox") PlotlySupply.Spec(kind="mapbox")
+        ]
+        sf = PlotlySupply.subplots(
+            2,
+            2;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+            specs=specs,
+        )
+        geo_domain = deepcopy(sf.layout.fields[:geo2][:domain])
+        mapbox_domain = deepcopy(sf.layout.fields[:mapbox2][:domain])
+
+        @test update_geos!(
+            sf;
+            row=1,
+            col=2,
+            bgcolor="red",
+            projection_type="mercator",
+        ) === sf
+        @test !haskey(
+            PlotlySupply._symbol_dict(sf.layout.fields[:geo]),
+            :bgcolor,
+        )
+        updated_geo = PlotlySupply._symbol_dict(
+            sf.layout.fields[:geo2],
+        )
+        @test updated_geo[:bgcolor] == "red"
+        @test PlotlySupply._symbol_dict(
+            updated_geo[:projection],
+        )[:type] == "mercator"
+        @test updated_geo[:domain] == geo_domain
+
+        @test update_mapboxes!(
+            sf;
+            row=2,
+            col=2,
+            zoom=0,
+            center_lon=12,
+        ) === sf
+        @test !haskey(
+            PlotlySupply._symbol_dict(
+                sf.layout.fields[:mapbox],
+            ),
+            :zoom,
+        )
+        updated_mapbox = PlotlySupply._symbol_dict(
+            sf.layout.fields[:mapbox2],
+        )
+        @test updated_mapbox[:zoom] == 0
+        @test PlotlySupply._symbol_dict(
+            updated_mapbox[:center],
+        )[:lon] == 12
+        @test updated_mapbox[:domain] == mapbox_domain
+        style_object = Dict(
+            "version" => 8,
+            "sources" => Dict{String,Any}(),
+            "layers" => Any[],
+        )
+        @test plot_scattermapbox!(
+            sf,
+            [0.0],
+            [0.0];
+            row=2,
+            col=2,
+            style=style_object,
+        ) === sf
+        @test PlotlySupply._symbol_dict(
+            sf.layout.fields[:mapbox2],
+        )[:style] == style_object
+        @test plot_densitymapbox!(
+            sf,
+            [0.0],
+            [0.0],
+            [1.0];
+            row=2,
+            col=2,
+            center_lat=8,
+        ) === sf
+        mapbox_after_center = PlotlySupply._symbol_dict(
+            sf.layout.fields[:mapbox2],
+        )
+        @test mapbox_after_center[:style] == style_object
+        @test PlotlySupply._symbol_dict(
+            mapbox_after_center[:center],
+        )[:lat] == 8
+
+        selection_before = (
+            sf.current_row,
+            sf.current_col,
+        )
+        layout_before = deepcopy(sf.layout)
+        @test_throws ArgumentError update_geos!(
+            sf;
+            row=2,
+            col=1,
+            bgcolor="invalid-cell",
+        )
+        @test sf.layout == layout_before
+        @test (
+            sf.current_row,
+            sf.current_col,
+        ) == selection_before
+        @test_throws ArgumentError update_mapboxes!(
+            sf;
+            row=1,
+            col=1,
+            zoom=0,
+        )
+        @test sf.layout == layout_before
+        @test (
+            sf.current_row,
+            sf.current_col,
+        ) == selection_before
+        for option in (:zoom, :center_lon, :center_lat)
+            for invalid in (true, NaN, Inf, -Inf)
+                options = NamedTuple{(option,)}((invalid,))
+                @test_throws ArgumentError update_mapboxes!(
+                    sf;
+                    row=2,
+                    col=1,
+                    options...,
+                )
+                @test sf.layout == layout_before
+                @test (
+                    sf.current_row,
+                    sf.current_col,
+                ) == selection_before
+            end
+        end
+
+        @test update_mapboxes!(
+            sf;
+            row=2,
+            col=1,
+            center_lat=5,
+        ) === sf
+        geojson = Dict(
+            "type" => "FeatureCollection",
+            "features" => Any[],
+        )
+        @test plot_choroplethmapbox!(
+            sf,
+            geojson,
+            ["region"],
+            [1.0];
+            row=2,
+            col=1,
+            zoom=0,
+            center_lon=-90,
+        ) === sf
+        @test sf.data[end].fields[:type] ==
+              "choroplethmapbox"
+        @test sf.data[end].fields[:subplot] == "mapbox"
+        first_mapbox = PlotlySupply._symbol_dict(
+            sf.layout.fields[:mapbox],
+        )
+        first_center = PlotlySupply._symbol_dict(
+            first_mapbox[:center],
+        )
+        @test first_mapbox[:zoom] == 0
+        @test first_center[:lon] == -90
+        @test first_center[:lat] == 5
+        @test update_mapboxes!(
+            sf;
+            row=2,
+            col=1,
+            style="carto-darkmatter",
+            zoom=6,
+        ) === sf
+        @test plot_choroplethmapbox!(
+            sf,
+            geojson,
+            ["region"],
+            [2.0];
+            row=2,
+            col=1,
+        ) === sf
+        preserved_submap = PlotlySupply._symbol_dict(
+            sf.layout.fields[:mapbox],
+        )
+        @test preserved_submap[:style] == "carto-darkmatter"
+        @test preserved_submap[:zoom] == 6
     end
 
     @testset "Extended: mutating preserves template" begin

@@ -223,6 +223,53 @@ end
     end
 end
 
+@testset "mapbox updaters reject invalid view values atomically" begin
+    invalid_values = (true, NaN, Inf, -Inf, "not-a-number")
+    for target_kind in (:plot, :syncplot)
+        for option in (:zoom, :center_lon, :center_lat)
+            for invalid in invalid_values
+                for via_with in (false, true)
+                    p = _mutator_probe_plot()
+                    sp = _attach_mutator_refresh_probe(p)
+                    target = target_kind === :plot ? p : sp
+                    layout_ref = p.layout
+                    layout_before = deepcopy(p.layout)
+                    data_ref = p.data
+                    _MUTATOR_REFRESH_CALLS[] = 0
+
+                    try
+                        if via_with
+                            with = if option === :zoom
+                                attr(zoom=invalid)
+                            elseif option === :center_lon
+                                attr(center=attr(lon=invalid))
+                            else
+                                attr(center=attr(lat=invalid))
+                            end
+                            @test_throws ArgumentError update_mapboxes!(
+                                target,
+                                with,
+                            )
+                        else
+                            options = NamedTuple{(option,)}((invalid,))
+                            @test_throws ArgumentError update_mapboxes!(
+                                target;
+                                options...,
+                            )
+                        end
+                        @test p.layout === layout_ref
+                        @test p.layout == layout_before
+                        @test p.data === data_ref
+                        @test _MUTATOR_REFRESH_CALLS[] == 0
+                    finally
+                        close(sp)
+                    end
+                end
+            end
+        end
+    end
+end
+
 @testset "redraw/purge use their exact renderer operations" begin
     for target_kind in (:syncplot, :registered_syncplot, :registered_plot)
         p = _mutator_probe_plot()

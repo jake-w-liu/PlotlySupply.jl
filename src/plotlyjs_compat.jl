@@ -1001,7 +1001,12 @@ for f in (
 	end
 end
 
-const _SYNCPLOT_DEFINED_LAYOUT_UPDATERS = Set((:update_xaxes!, :update_yaxes!, :update_polars!))
+const _SYNCPLOT_DEFINED_LAYOUT_UPDATERS = Set((
+	:update_xaxes!,
+	:update_yaxes!,
+	:update_polars!,
+	:update_mapboxes!,
+))
 
 for (f, _) in vcat(PlotlyBase._layout_obj_updaters, PlotlyBase._layout_vector_updaters)
 	f in _SYNCPLOT_DEFINED_LAYOUT_UPDATERS && continue

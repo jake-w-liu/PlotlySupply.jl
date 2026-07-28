@@ -65,7 +65,7 @@
 
 - `plot_choropleth(locations, z; locationmode, ...)`: Choropleth map.
 - `plot_scattergeo(lon, lat; ...)`: Scatter points on a geographic map.
-- `plot_scattermapbox(lon, lat; style, zoom, ...)` / `plot_densitymapbox(lon, lat, z; ...)`: Tile-map charts (default `open-street-map` style, no token needed).
+- `plot_scattermapbox(lon, lat; style, zoom, ...)`, `plot_choroplethmapbox(geojson, locations, z; ...)`, and `plot_densitymapbox(lon, lat, z; ...)`: Tile-map charts (default `open-street-map` style, no token needed).
 
 ### Annotations & Error Bars
 
