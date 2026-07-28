@@ -1725,13 +1725,34 @@ end
 # falls back to `default`, otherwise the first element is used.
 _scalar_or_first(value, default) = value isa AbstractVector ? (isempty(value) ? default : value[1]) : value
 
+# A multi-series input is any abstract vector whose elements are themselves
+# abstract vectors.  Keeping this type-driven avoids scanning the data and
+# correctly handles ranges, views, and abstractly typed collections.
+@inline _is_nested_series(::AbstractVector{<:AbstractVector}) = true
+@inline _is_nested_series(::Any) = false
+
+function _nested_coordinate_mode(primary, secondary, primary_name::Symbol, secondary_name::Symbol)
+	primary_nested = _is_nested_series(primary)
+	secondary_nested = _is_nested_series(secondary)
+	if secondary_nested
+		primary_nested || throw(ArgumentError(
+			"`$secondary_name` contains multiple series but `$primary_name` contains one series.",
+		))
+		length(secondary) == length(primary) || throw(ArgumentError(
+			"`$secondary_name` and `$primary_name` must contain the same number of series; " *
+			"got $(length(secondary)) and $(length(primary)).",
+		))
+	end
+	return primary_nested, secondary_nested
+end
+
 # Compute a finite scalar `tick0` from possibly nested / non-finite data.
 # Handles a vector-of-vectors (multi-series), ignores non-finite entries, and
 # returns `nothing` when no finite value exists — so the axis simply omits
 # `tick0` instead of receiving an invalid Vector or NaN. Iterates lazily (no
 # flattening allocation) so it is cheap even for large series.
 function _safe_tick0(v)
-	if v isa AbstractVector && eltype(v) <: Union{AbstractVector, AbstractRange}
+	if _is_nested_series(v)
 		best = nothing
 		for sub in v
 			t = _safe_tick0(sub)
@@ -1754,8 +1775,8 @@ end
 function _set_error_bars!(trace, error_x, error_y)
 	(error_x === nothing && error_y === nothing) && return nothing
 	traces = trace isa AbstractVector ? trace : (trace,)
-	nx = error_x isa AbstractVector && !isempty(error_x) && eltype(error_x) <: Union{AbstractVector, AbstractRange}
-	ny = error_y isa AbstractVector && !isempty(error_y) && eltype(error_y) <: Union{AbstractVector, AbstractRange}
+	nx = _is_nested_series(error_x)
+	ny = _is_nested_series(error_y)
 	for (n, t) in enumerate(traces)
 		if error_x !== nothing && !(nx && n > length(error_x))
 			t.error_x = attr(type = "data", array = collect(nx ? error_x[n] : error_x), visible = true)
@@ -1768,14 +1789,27 @@ function _set_error_bars!(trace, error_x, error_y)
 end
 
 function _auto_xvalues(y)
-	if isa(y, Vector) && eltype(y) <: Vector
-		x = Vector{Vector{Int}}(undef, length(y))
-		for n in eachindex(y)
-			x[n] = 0:length(y[n])-1
+	if _is_nested_series(y)
+		x = Vector{UnitRange{Int}}(undef, length(y))
+		if y isa LinRange{<:Vector}
+			# A built-in LinRange of ordinary vectors preserves the endpoint
+			# length. Inspecting only its stored first endpoint avoids
+			# materializing every interpolated vector just to obtain lengths.
+			isempty(y) || fill!(x, 0:(length(first(y)) - 1))
+		elseif y isa StepRangeLen{<:Vector}
+			# A built-in vector StepRangeLen likewise preserves the vector
+			# step's length, and `step` returns that stored vector directly.
+			isempty(y) || fill!(x, 0:(length(step(y)) - 1))
+		else
+			# Keep the general path for views, heterogeneous collections, and
+			# custom ranges whose inner series may have different lengths.
+			for (n, series) in enumerate(y)
+				x[n] = 0:(length(series) - 1)
+			end
 		end
 		return x
 	end
-	return 0:length(y)-1
+	return 0:(length(y) - 1)
 end
 
 function _apply_showlegend!(trace, showlegend)
@@ -2015,7 +2049,8 @@ function plot_scatter(
 	error_y::Union{Nothing, AbstractVector} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		trace = Vector{GenericTrace}(undef, length(y))
 		modeV = fill("lines", length(y))
 		dashV = fill("", length(y))
@@ -2084,7 +2119,7 @@ function plot_scatter(
 			end
 		end
 
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
 				mk = Dict{Symbol,Any}()
@@ -2247,15 +2282,7 @@ function plot_scatter(
 	error_y::Union{Nothing, AbstractVector} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
-		x = Vector{Vector{Int}}(undef, length(y))
-		for n in eachindex(y)
-			x[n] = 0:length(y[n])-1
-		end
-	else
-		x = 0:length(y)-1
-	end
-
+	x = _auto_xvalues(y)
 	return plot_scatter(
 		x,
 		y;
@@ -2348,7 +2375,8 @@ function plot_stem(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		trace = Vector{GenericTrace}(undef, length(y))
 		colorV = fill("", length(y))
 		legendV = fill("", length(y))
@@ -2377,7 +2405,7 @@ function plot_stem(
 			end
 		end
 
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				# Stem heads are drawn as markers; color belongs on `marker`
 				# (a `line` color is ignored for a markers-only trace).
@@ -2442,8 +2470,8 @@ function plot_stem(
 
 	# Draw a vertical line from the baseline (y=0) to each stem head. Use the
 	# per-series color so the stems match their markers, defaulting to black.
-	if isa(y, Vector) && eltype(y) <: Vector
-		if isa(x, Vector) && eltype(x) <: Vector
+	if y_nested
+		if x_nested
 			for n in eachindex(y)
 				stem_color = colorV[n] == "" ? "black" : colorV[n]
 				for m in eachindex(y[n])
@@ -2552,15 +2580,7 @@ function plot_stem(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
-		x = Vector{Vector{Int}}(undef, length(y))
-		for n in eachindex(y)
-			x[n] = 0:length(y[n])-1
-		end
-	else
-		x = 0:length(y)-1
-	end
-
+	x = _auto_xvalues(y)
 	return plot_stem(
 		x,
 		y;
@@ -2628,12 +2648,13 @@ function plot_bar(
 	error_y::Union{Nothing, AbstractVector} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		trace = Vector{GenericTrace}(undef, length(y))
 
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				trace[n] = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
 			end
@@ -2765,7 +2786,7 @@ function plot_histogram(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(x, Vector) && eltype(x) <: Vector
+	if _is_nested_series(x)
 		colorV = _string_kwarg_vector(color, length(x))
 		legendV = _string_kwarg_vector(legend, length(x))
 		trace = Vector{GenericTrace}(undef, length(x))
@@ -2851,12 +2872,13 @@ function plot_box(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		trace = Vector{GenericTrace}(undef, length(y))
 
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				trace[n] = _box_trace(
 					x = x[n],
@@ -2891,7 +2913,7 @@ function plot_box(
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
 	# Render multiple boxes side-by-side (Plotly defaults to "overlay").
-	if isa(y, Vector) && eltype(y) <: Vector && length(y) > 1
+	if y_nested && length(y) > 1
 		relayout!(fig, boxmode = "group")
 	end
 	_apply_cartesian_plot_options!(
@@ -2930,7 +2952,7 @@ function plot_box(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	if _is_nested_series(y)
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		trace = Vector{GenericTrace}(undef, length(y))
@@ -3016,12 +3038,13 @@ function plot_violin(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		trace = Vector{GenericTrace}(undef, length(y))
 
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				trace[n] = _violin_trace(
 					x = x[n],
@@ -3059,7 +3082,7 @@ function plot_violin(
 
 	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
 	# Render multiple violins side-by-side (Plotly defaults to "overlay").
-	if isa(y, Vector) && eltype(y) <: Vector && length(y) > 1
+	if y_nested && length(y) > 1
 		relayout!(fig, violinmode = "group")
 	end
 	_apply_cartesian_plot_options!(
@@ -3099,7 +3122,7 @@ function plot_violin(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	if _is_nested_series(y)
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		trace = Vector{GenericTrace}(undef, length(y))
@@ -3209,7 +3232,8 @@ function plot_scatterpolar(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(r, Vector) && eltype(r) <: Vector
+	r_nested, theta_nested = _nested_coordinate_mode(r, theta, :r, :theta)
+	if r_nested
 		trace = Vector{GenericTrace}(undef, length(r))
 		modeV = fill("lines", length(r))
 		dashV = fill("", length(r))
@@ -3278,7 +3302,7 @@ function plot_scatterpolar(
 			end
 		end
 
-		if isa(theta, Vector) && eltype(theta) <: Vector
+		if theta_nested
 			for n in eachindex(r)
 				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
 				mk = Dict{Symbol,Any}()
@@ -4356,7 +4380,9 @@ function plot_scatter3d(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	if isa(z, Vector) && eltype(z) <: Vector
+	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x)
+	_, y_nested = _nested_coordinate_mode(z, y, :z, :y)
+	if z_nested
 		modeV = fill("lines", length(z))
 		colorV = fill("", length(z))
 		legendV = fill("", length(z))
@@ -4417,8 +4443,6 @@ function plot_scatter3d(
 
 		# x/y may be shared 1D coordinates broadcast across all z-series, or
 		# per-series Vector-of-Vectors. Iterate over z (the multi-series arg).
-		x_nested = x isa Vector && eltype(x) <: Vector
-		y_nested = y isa Vector && eltype(y) <: Vector
 		for n in eachindex(z)
 			xn = x_nested ? x[n] : x
 			yn = y_nested ? y[n] : y
@@ -4738,8 +4762,9 @@ function plot_scatter!(
 	error_x::Union{Nothing, AbstractVector} = nothing,
 	error_y::Union{Nothing, AbstractVector} = nothing,
 )
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
 	_n0 = length(_plot_data(fig))
-	if isa(y, Vector) && eltype(y) <: Vector
+	if y_nested
 		modeV = fill("lines", length(y))
 		dashV = fill("", length(y))
 		colorV = fill("", length(y))
@@ -4807,7 +4832,7 @@ function plot_scatter!(
 			end
 		end
 
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
 				mk = Dict{Symbol,Any}()
@@ -4975,15 +5000,7 @@ function plot_scatter!(
 	error_x::Union{Nothing, AbstractVector} = nothing,
 	error_y::Union{Nothing, AbstractVector} = nothing,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
-		x = Vector{Vector{Int}}(undef, length(y))
-		for n in eachindex(y)
-			x[n] = 0:length(y[n])-1
-		end
-	else
-		x = 0:length(y)-1
-	end
-
+	x = _auto_xvalues(y)
 	return plot_scatter!(
 		fig,
 		x,
@@ -5078,7 +5095,8 @@ function plot_stem!(
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		colorV = fill("", length(y))
 		legendV = fill("", length(y))
 
@@ -5106,7 +5124,7 @@ function plot_stem!(
 			end
 		end
 
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
@@ -5266,15 +5284,7 @@ function plot_stem!(
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
-		x = Vector{Vector{Int}}(undef, length(y))
-		for n in eachindex(y)
-			x[n] = 0:length(y[n])-1
-		end
-	else
-		x = 0:length(y)-1
-	end
-
+	x = _auto_xvalues(y)
 	return plot_stem!(
 		fig,
 		x,
@@ -5319,13 +5329,14 @@ function plot_bar!(
 	error_x::Union{Nothing, AbstractVector} = nothing,
 	error_y::Union{Nothing, AbstractVector} = nothing,
 )
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
 	_n0 = length(_plot_data(fig))
-	if isa(y, Vector) && eltype(y) <: Vector
+	if y_nested
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 
 		showlegendV = _string_kwarg_vector("", length(y))
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				t = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
 				showlegend isa Bool && (t.showlegend = showlegend)
@@ -5441,7 +5452,7 @@ function plot_histogram!(
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(x, Vector) && eltype(x) <: Vector
+	if _is_nested_series(x)
 		colorV = _string_kwarg_vector(color, length(x))
 		legendV = _string_kwarg_vector(legend, length(x))
 		for n in eachindex(x)
@@ -5507,10 +5518,11 @@ function plot_box!(
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				t = _box_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], points = points)
 				showlegend isa Bool && (t.showlegend = showlegend)
@@ -5569,7 +5581,7 @@ function plot_box!(
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	if _is_nested_series(y)
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		for n in eachindex(y)
@@ -5624,10 +5636,11 @@ function plot_violin!(
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
-		if isa(x, Vector) && eltype(x) <: Vector
+		if x_nested
 			for n in eachindex(y)
 				t = _violin_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], points = points, side = side)
 				showlegend isa Bool && (t.showlegend = showlegend)
@@ -5687,7 +5700,7 @@ function plot_violin!(
 	yscale::String = "",
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(y, Vector) && eltype(y) <: Vector
+	if _is_nested_series(y)
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
 		for n in eachindex(y)
@@ -5790,7 +5803,8 @@ function plot_scatterpolar!(
 	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(r, Vector) && eltype(r) <: Vector
+	r_nested, theta_nested = _nested_coordinate_mode(r, theta, :r, :theta)
+	if r_nested
 		modeV = fill("lines", length(r))
 		dashV = fill("", length(r))
 		colorV = fill("", length(r))
@@ -5858,7 +5872,7 @@ function plot_scatterpolar!(
 			end
 		end
 
-		if isa(theta, Vector) && eltype(theta) <: Vector
+		if theta_nested
 			for n in eachindex(r)
 				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
 				mk = Dict{Symbol,Any}()
@@ -6638,7 +6652,9 @@ function plot_scatter3d!(
 	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	if isa(z, Vector) && eltype(z) <: Vector
+	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x)
+	_, y_nested = _nested_coordinate_mode(z, y, :z, :y)
+	if z_nested
 		modeV = fill("lines", length(z))
 		colorV = fill("", length(z))
 		legendV = fill("", length(z))
@@ -6699,8 +6715,6 @@ function plot_scatter3d!(
 		end
 
 		# x/y may be shared 1D coordinates broadcast across all z-series.
-		x_nested = x isa Vector && eltype(x) <: Vector
-		y_nested = y isa Vector && eltype(y) <: Vector
 		for n in eachindex(z)
 			xn = x_nested ? x[n] : x
 			yn = y_nested ? y[n] : y
@@ -7413,10 +7427,10 @@ end
 # ── Area (filled scatter) ────────────────────────────────────────────
 
 function _area_traces(x, y; color, legend, mode::String, stack::Bool)
-	if isa(y, Vector) && eltype(y) <: Vector
+	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
+	if y_nested
 		colorV = _string_kwarg_vector(color, length(y))
 		legendV = _string_kwarg_vector(legend, length(y))
-		x_nested = isa(x, Vector) && eltype(x) <: Vector
 		traces = Vector{GenericTrace}(undef, length(y))
 		for n in eachindex(y)
 			xn = x_nested ? x[n] : x

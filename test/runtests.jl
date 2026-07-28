@@ -3289,6 +3289,7 @@ end
         end
     end
 
+    include("nested_series.jl")
     include("export_transactions.jl")
     include("mutator_parity.jl")
 end
