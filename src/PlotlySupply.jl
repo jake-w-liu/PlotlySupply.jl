@@ -1,7 +1,5 @@
 module PlotlySupply
 
-using BatchAssign
-using Infiltrator
 using Reexport
 @reexport using PlotlyBase
 # Re-export so the documented `meshgrid(y, x)` workflow works after `using
