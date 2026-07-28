@@ -800,9 +800,9 @@ function _do_prependtraces!(p::Plot, update::AbstractDict, indices::AbstractVect
 	return p
 end
 
-_trace_splice_tovec(value) = _trace_splice_tovec([value])
-_trace_splice_tovec(value::Vector) =
-	eltype(value) <: Vector ? value : Vector[value]
+_trace_splice_tovec(value) = [[value]]
+_trace_splice_tovec(value::AbstractVector) = [value]
+_trace_splice_tovec(value::AbstractVector{<:AbstractVector}) = value
 
 function _trace_splice_keyword_update(update)
 	return Dict(
@@ -960,6 +960,16 @@ end
 
 function PlotlyBase.extendtraces!(
 	sp::SyncPlot,
+	indices::AbstractVector{Int},
+	maxpoints = -1;
+	update...,
+)
+	converted = _trace_splice_keyword_update(update)
+	return PlotlyBase.extendtraces!(sp, converted, indices, maxpoints)
+end
+
+function PlotlyBase.extendtraces!(
+	sp::SyncPlot,
 	index::Int,
 	maxpoints = -1;
 	update...,
@@ -985,6 +995,16 @@ end
 function PlotlyBase.prependtraces!(
 	sp::SyncPlot,
 	indices::Vector{Int} = [1],
+	maxpoints = -1;
+	update...,
+)
+	converted = _trace_splice_keyword_update(update)
+	return PlotlyBase.prependtraces!(sp, converted, indices, maxpoints)
+end
+
+function PlotlyBase.prependtraces!(
+	sp::SyncPlot,
+	indices::AbstractVector{Int},
 	maxpoints = -1;
 	update...,
 )
@@ -1159,6 +1179,16 @@ end
 
 function PlotlyBase.extendtraces!(
 	p::_RefreshablePlot,
+	indices::AbstractVector{Int},
+	maxpoints = -1;
+	update...,
+)
+	converted = _trace_splice_keyword_update(update)
+	return PlotlyBase.extendtraces!(p, converted, indices, maxpoints)
+end
+
+function PlotlyBase.extendtraces!(
+	p::_RefreshablePlot,
 	index::Int,
 	maxpoints = -1;
 	update...,
@@ -1189,6 +1219,16 @@ end
 function PlotlyBase.prependtraces!(
 	p::_RefreshablePlot,
 	indices::Vector{Int} = [1],
+	maxpoints = -1;
+	update...,
+)
+	converted = _trace_splice_keyword_update(update)
+	return PlotlyBase.prependtraces!(p, converted, indices, maxpoints)
+end
+
+function PlotlyBase.prependtraces!(
+	p::_RefreshablePlot,
+	indices::AbstractVector{Int},
 	maxpoints = -1;
 	update...,
 )
