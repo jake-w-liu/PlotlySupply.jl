@@ -313,9 +313,12 @@ end
     @test isempty(invalid_sf.plot.data)
     @test invalid_sf.plot.layout == invalid_layout_before
 
-    counted_data = _CountingTraceVector(GenericTrace[scatter(x=1:3, y=1:3)])
+    counted_data = GenericTrace[scatter(x=1:3, y=1:3)]
     counted_plot = Plot(counted_data, Layout())
-    counted_sync = SyncPlot(counted_plot, nothing, nothing, "mode-refresh-count")
+    counted_sync = _subplot_counting_syncplot(
+        counted_plot,
+        "mode-refresh-count",
+    )
     for mutate! in (
         fig -> plot_histogram!(fig, nested),
         fig -> plot_box!(fig, nested),

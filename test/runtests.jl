@@ -4,17 +4,6 @@ using Base64
 
 struct _UnsupportedTrace <: AbstractTrace end
 
-mutable struct _CountingTraceVector <: AbstractVector{GenericTrace}
-    data::Vector{GenericTrace}
-end
-Base.IndexStyle(::Type{_CountingTraceVector}) = IndexLinear()
-Base.size(v::_CountingTraceVector) = size(v.data)
-Base.getindex(v::_CountingTraceVector, i::Int) = v.data[i]
-Base.setindex!(v::_CountingTraceVector, x, i::Int) = (v.data[i] = x)
-Base.push!(v::_CountingTraceVector, xs...) = (push!(v.data, xs...); v)
-Base.append!(v::_CountingTraceVector, xs) = (append!(v.data, xs); v)
-Base.sizehint!(v::_CountingTraceVector, n::Integer) = (sizehint!(v.data, n); v)
-
 mutable struct _LifecycleFakeWindow
     exists::Bool
     msg_channel::Channel{Any}
@@ -216,14 +205,25 @@ function _open_watcher_lifecycle_fixture(ec::_LifecycleFakeElectron)
 end
 
 const _subplot_refresh_calls = Ref(0)
-function PlotlySupply._plotlyjs_refresh!(
-    ::SyncPlot,
-    ::_CountingTraceVector,
-    ::Layout;
-    kwargs...,
-)
-    _subplot_refresh_calls[] += 1
-    return nothing
+
+function _subplot_counting_backend()
+    open = Ref(true)
+    return (
+        isopen=window -> open[],
+        close=window -> (open[] = false; nothing),
+        run=(window, script) -> begin
+            _subplot_refresh_calls[] += 1
+            return "ok"
+        end,
+    )
+end
+
+function _subplot_counting_syncplot(p::Plot, divid::String)
+    resources = PlotlySupply._SyncPlotResources(
+        nothing,
+        _subplot_counting_backend(),
+    )
+    return SyncPlot(p, nothing, nothing, divid, resources)
 end
 
 @testset "PlotlySupply.jl" begin
@@ -1955,8 +1955,8 @@ end
 
     @testset "SubplotFigure addtraces! refreshes once" begin
         sf = PlotlySupply.subplots(1, 1; sync=false)
-        p = Plot(_CountingTraceVector(copy(sf.plot.data)), sf.plot.layout)
-        sf.fig = SyncPlot(p, nothing, nothing, "counting")
+        p = Plot(copy(sf.plot.data), sf.plot.layout)
+        sf.fig = _subplot_counting_syncplot(p, "counting")
         traces = ntuple(
             i -> scatter(x=[1,2], y=[i,i+1], name="trace-$i"),
             4,
@@ -3827,7 +3827,7 @@ end
                 "__plotlysupply_initial_render",
                 ec.scripts[script_count + 1],
             )
-            @test occursin("Plotly.react", last(ec.scripts))
+            @test occursin("Plotly.relayout", last(ec.scripts))
             @test relayout_clone.layout.fields[:title] == "clone-relayout"
             @test source.layout.fields[:title] == "source"
             check_clone(relayout_clone, last(ec.windows))
@@ -4148,4 +4148,5 @@ end
     include("nested_series.jl")
     include("export_transactions.jl")
     include("mutator_parity.jl")
+    include("renderer_transactions.jl")
 end

@@ -365,6 +365,7 @@ function _create_syncplot_window(
 	autoplay::Bool = true,
 	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
 )
+	_require_syncplot_model(p)
 	startup_timeout = _validated_syncplot_startup_timeout_seconds(timeout_s)
 	electron_app = app === nothing ? _default_electron_app(ec) : app
 	divid = _next_syncplot_id()
@@ -601,22 +602,21 @@ function _require_plotlyjs_success(result, operation::AbstractString)
 	))
 end
 
-function _plotlyjs_refresh!(
+function _plotlyjs_refresh_script(
 	sp::SyncPlot,
 	data,
 	layout;
+	model::Plot = sp.plot,
 	rebuild::Bool = false,
 	autoplay::Bool = false,
 )
-	_require_open_syncplot_window(sp)
-
-	js = if rebuild
-		_plotlyjs_newplot_script(sp.plot, sp.divid; autoplay = autoplay, purge = true)
+	return if rebuild
+		_plotlyjs_newplot_script(model, sp.divid; autoplay = autoplay, purge = true)
 	else
 		divid_js = _json_js(sp.divid)
 		data_js = _json_js(data)
 		layout_js = _json_js(layout)
-		config_js = _json_js(sp.plot.config)
+		config_js = _json_js(model.config)
 		"""
 (async function() {
   if (typeof Plotly === "undefined") return "plotly-not-loaded";
@@ -627,16 +627,89 @@ function _plotlyjs_refresh!(
 })();
 """
 	end
+end
+
+function _plotlyjs_refresh_payload_script(
+	sp::SyncPlot,
+	payload;
+	rebuild::Bool = false,
+	autoplay::Bool = false,
+)
+	divid_js = _json_js(sp.divid)
+	if rebuild
+		payload.frames === nothing && throw(ArgumentError(
+			"A rebuilding renderer payload must include frames.",
+		))
+		autoplay_js = autoplay ? "true" : "false"
+		return """
+(async function() {
+  if (typeof Plotly === "undefined") return "plotly-not-loaded";
+  const div = document.getElementById($divid_js);
+  if (!div) return "plot-div-not-found";
+  const frames = $(payload.frames);
+  Plotly.purge(div);
+  await Plotly.newPlot(div, $(payload.data), $(payload.layout), $(payload.config));
+  if (frames.length > 0) {
+    await Plotly.addFrames(div, frames);
+    if ($autoplay_js) await Plotly.animate(div, null);
+  }
+  return "ok";
+})()
+"""
+	end
+	return """
+(async function() {
+  if (typeof Plotly === "undefined") return "plotly-not-loaded";
+  const div = document.getElementById($divid_js);
+  if (!div) return "plot-div-not-found";
+  await Plotly.react(div, $(payload.data), $(payload.layout), $(payload.config));
+  return "ok";
+})();
+"""
+end
+
+function _run_plotlyjs_script!(
+	sp::SyncPlot,
+	js::AbstractString,
+	operation::AbstractString,
+)
 	ec = _syncplot_backend(sp)
 	result = Base.invokelatest(() -> ec.run(sp.window, js))
-	_require_plotlyjs_success(result, rebuild ? "newPlot" : "react")
+	_require_plotlyjs_success(result, operation)
 	return nothing
 end
 
-function _plotlyjs_command!(sp::SyncPlot, command::Symbol)
+function _plotlyjs_refresh!(
+	sp::SyncPlot,
+	data,
+	layout;
+	model::Plot = sp.plot,
+	rebuild::Bool = false,
+	autoplay::Bool = false,
+)
+	_require_open_syncplot_window(sp)
+	js = _plotlyjs_refresh_script(
+		sp,
+		data,
+		layout;
+		model = model,
+		rebuild = rebuild,
+		autoplay = autoplay,
+	)
+	# Serialization can be material for large models. Recheck after it finishes
+	# so a concurrently closed window never receives a stale renderer command.
+	_require_open_syncplot_window(sp)
+	_run_plotlyjs_script!(
+		sp,
+		js,
+		rebuild ? "newPlot" : "react",
+	)
+	return nothing
+end
+
+function _plotlyjs_command_script(sp::SyncPlot, command::Symbol)
 	command in (:redraw, :purge) ||
 		throw(ArgumentError("unsupported Plotly.js command: $command"))
-	_require_open_syncplot_window(sp)
 
 	divid_js = _json_js(sp.divid)
 	call_js = command === :redraw ?
@@ -651,6 +724,12 @@ function _plotlyjs_command!(sp::SyncPlot, command::Symbol)
   return "ok";
 })();
 """
+	return js
+end
+
+function _plotlyjs_command!(sp::SyncPlot, command::Symbol)
+	_require_open_syncplot_window(sp)
+	js = _plotlyjs_command_script(sp, command)
 	ec = _syncplot_backend(sp)
 	result = Base.invokelatest(() -> ec.run(sp.window, js))
 	_require_plotlyjs_success(result, string(command))
@@ -662,24 +741,150 @@ end
 # (react!, addtraces!, …) automatically refreshes the Electron window.
 const _SYNCPLOT_REGISTRY_LOCK = ReentrantLock()
 const _PLOT_SYNCPLOT_MAP = IdDict{Plot,SyncPlot}()
+struct _SyncPlotReservation
+	syncplot::Union{Nothing,SyncPlot}
+	kind::Symbol
+	owner::Task
+	done::Union{Nothing,Base.Event}
+end
+const _PLOT_SYNCPLOT_RESERVATIONS =
+	IdDict{Plot,_SyncPlotReservation}()
+mutable struct _PlotSyncPlotGeneration end
+const _PLOT_SYNCPLOT_VERSIONS =
+	WeakKeyDict{Plot,_PlotSyncPlotGeneration}()
 const _DISPLAYED_PLOTS = SyncPlot[]
 
+function _plot_syncplot_version(p::Plot)
+	return get(_PLOT_SYNCPLOT_VERSIONS, p, nothing)
+end
+
+function _bump_plot_syncplot_version!(p::Plot)
+	version = _PlotSyncPlotGeneration()
+	_PLOT_SYNCPLOT_VERSIONS[p] = version
+	return version
+end
+
+function _reserve_plot_for_syncplot!(
+	p::Plot,
+	sp::SyncPlot,
+	kind::Symbol,
+)
+	kind in (:current, :candidate) || throw(ArgumentError(
+		"unsupported SyncPlot reservation kind: $kind",
+	))
+	existing = get(_PLOT_SYNCPLOT_RESERVATIONS, p, nothing)
+	if existing !== nothing
+		existing.syncplot === sp && existing.kind === kind &&
+			return existing, false
+		throw(InvalidStateException(
+			"Plot is already participating in another SyncPlot transaction",
+			:busy,
+		))
+	end
+	reservation = _SyncPlotReservation(
+		sp,
+		kind,
+		current_task(),
+		nothing,
+	)
+	_PLOT_SYNCPLOT_RESERVATIONS[p] = reservation
+	_bump_plot_syncplot_version!(p)
+	return reservation, true
+end
+
+function _release_plot_syncplot_reservation!(
+	p::Plot,
+	reservation::_SyncPlotReservation,
+)
+	get(_PLOT_SYNCPLOT_RESERVATIONS, p, nothing) === reservation ||
+		return false
+	delete!(_PLOT_SYNCPLOT_RESERVATIONS, p)
+	_bump_plot_syncplot_version!(p)
+	return true
+end
+
 function _maybe_sync_refresh!(p::Plot)
-	sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
-		get(_PLOT_SYNCPLOT_MAP, p, nothing)
+	while true
+		sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
+			get(_PLOT_SYNCPLOT_MAP, p, nothing)
+		end
+		sp === nothing && return nothing
+
+		prepare = function (target, current)
+			script = _plotlyjs_refresh_script(
+				target,
+				current.data,
+				current.layout;
+				model = current,
+			)
+			commit = () -> current
+			return (
+				script = script,
+				operation = "react",
+				commit = commit,
+			)
+		end
+		status = _syncplot_transaction_status!(
+			sp,
+			prepare;
+			required_plot = p,
+		)
+		status === :committed && return nothing
+		yield()
 	end
-	if sp !== nothing
-		_plotlyjs_refresh!(sp, p.data, p.layout)
+end
+
+function _try_local_plot_mutation!(mutation, p::Plot)
+	reservation = lock(_SYNCPLOT_REGISTRY_LOCK) do
+		(haskey(_PLOT_SYNCPLOT_MAP, p) ||
+		 haskey(_PLOT_SYNCPLOT_RESERVATIONS, p)) &&
+			return nothing
+		claimed = _SyncPlotReservation(
+			nothing,
+			:local,
+			current_task(),
+			Base.Event(),
+		)
+		_PLOT_SYNCPLOT_RESERVATIONS[p] = claimed
+		_bump_plot_syncplot_version!(p)
+		return claimed
 	end
-	return nothing
+	reservation === nothing && return :retry
+
+	try
+		mutation()
+		return :committed
+	finally
+		try
+			lock(_SYNCPLOT_REGISTRY_LOCK) do
+				_release_plot_syncplot_reservation!(p, reservation)
+			end
+		finally
+			notify(reservation.done::Base.Event)
+		end
+	end
 end
 
 function _maybe_sync_command!(p::Plot, command::Symbol)
-	sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
-		get(_PLOT_SYNCPLOT_MAP, p, nothing)
+	while true
+		sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
+			get(_PLOT_SYNCPLOT_MAP, p, nothing)
+		end
+		sp === nothing && return nothing
+
+		resources = getfield(sp, :_resources)
+		lock(resources.render_lock)
+		try
+			still_mapped = lock(_SYNCPLOT_REGISTRY_LOCK) do
+				get(_PLOT_SYNCPLOT_MAP, p, nothing) === sp
+			end
+			still_mapped || continue
+			_plotlyjs_command!(sp, command)
+			return nothing
+		finally
+			unlock(resources.render_lock)
+		end
 	end
-	sp === nothing || _plotlyjs_command!(sp, command)
-	return nothing
 end
 
 # ── Internal mutation helpers (no display refresh) ──────────────────
@@ -714,32 +919,153 @@ function _do_purge!(p::Plot)
 end
 
 function _do_relayout!(p::Plot, args...; kwargs...)
-	relayout!(p.layout, args...; kwargs...)
+	memo = IdDict{Any,Any}()
+	setter_origins = IdDict{Any,Nothing}()
+	staged_layout = _clone_layout_for_mutation(p.layout, memo)
+	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
+	prepared_args, prepared_kwargs =
+		_prepare_relayout_inputs(
+			args,
+			kwargs,
+			memo,
+			setter_origins,
+			;
+			strict = !(p.layout isa Layout),
+		)
+	relayout!(staged_layout, prepared_args...; prepared_kwargs...)
+	_rebase_staged_layout!(p.layout, staged_layout, memo)
+	expanded = _expand_staged_alias_roots!(
+		p,
+		staged_traces,
+		staged_layout,
+		memo;
+		setter_origins = setter_origins,
+	)
+	staged_layout = expanded.layout
+	_prepare_incremental_outer_root_commit!(p, expanded)
+	replacement_data =
+		expanded.data === nothing ?
+		_prepare_restyle_replacement_data(p, staged_traces) :
+		nothing
+	_commit_restyle!(p, staged_traces, replacement_data)
+	_commit_layout!(p, staged_layout)
+	_commit_incremental_outer_roots!(p, expanded)
 	return p
 end
 
-# Copy only containers that PlotlyBase's setters can mutate. Large array
-# payloads remain shared because restyle/relayout replace them rather than
-# mutating their elements.
+# Copy only containers that PlotlyBase's setters can mutate. Dense numeric
+# payloads remain shared. Arrays are copied only when they contain dictionaries
+# or Plotly attributes, because a nested setter can otherwise mutate one of
+# those elements through a caller-owned wrapper.
 _copy_mutation_container(value) =
 	_copy_mutation_container(value, IdDict{Any,Any}())
-_copy_mutation_container(value, ::IdDict{Any,Any}) = value
+const _BuiltinMutationDict = Union{Dict,IdDict}
+const _BuiltinPlotlyAttribute = Union{
+	PlotlyBase.PlotlyAttribute,
+	PlotlyBase.PlotlyFrame,
+}
 
 function _copy_mutation_container(
-	value::AbstractDict,
+	value,
+	memo::IdDict{Any,Any},
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String
+		return value
+	end
+	haskey(memo, value) && return memo[value]
+	if _graph_reaches_staged_node(value, memo)
+		staged = Base.deepcopy_internal(value, memo)
+		# deepcopy does not memo immutable wrapper roots. Recording the rebuilt
+		# counterpart explicitly lets commit-time rebasing translate preserved
+		# trace/layout roots nested inside arbitrary wrappers.
+		memo[value] = staged
+		return staged
+	end
+	return value
+end
+
+function _array_elements_may_be_mutation_containers(
+	::Type{T},
+) where {T}
+	# Skip only element types that provably cannot carry mutable identity.
+	# Concrete wrapper structs can contain dictionaries or attributes even
+	# when they are not themselves plotting containers.
+	return !(
+		isbitstype(T) ||
+		Base.isbitsunion(T) ||
+		T <: String ||
+		T <: Symbol ||
+		T <: Type ||
+		T <: Module
+	)
+end
+
+function _setter_input_requires_copy(
+	value,
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa Function ||
+			value isa BigInt ||
+			value isa BigFloat
+		return false
+	end
+	value isa AbstractDict && return true
+	value isa PlotlyBase.AbstractPlotlyAttribute && return true
+	value isa AbstractArray &&
+		return _array_contains_mutation_container(value, seen)
+	ismutable(value) && return true
+	haskey(seen, value) && return false
+	seen[value] = nothing
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_setter_input_requires_copy(
+			getfield(value, ind),
+			seen,
+		) && return true
+	end
+	return false
+end
+
+function _array_contains_mutation_container(
+	value::AbstractArray,
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	_array_elements_may_be_mutation_containers(eltype(value)) ||
+		return false
+	haskey(seen, value) && return false
+	seen[value] = nothing
+	for ind in eachindex(value)
+		isassigned(value, ind) || continue
+		_setter_input_requires_copy(value[ind], seen) &&
+			return true
+	end
+	return false
+end
+
+function _copy_mutation_container(
+	value::_BuiltinMutationDict,
 	memo::IdDict{Any,Any},
 )
 	haskey(memo, value) && return memo[value]
-	staged = copy(value)
+	staged = empty(value)
 	memo[value] = staged
 	for (key, child) in value
-		staged[key] = _copy_mutation_container(child, memo)
+		staged[
+			_copy_mutation_container(key, memo)
+		] = _copy_mutation_container(child, memo)
 	end
 	return staged
 end
 
 function _copy_mutation_container(
-	value::PlotlyBase.AbstractPlotlyAttribute,
+	value::_BuiltinPlotlyAttribute,
 	memo::IdDict{Any,Any},
 )
 	haskey(memo, value) && return memo[value]
@@ -748,35 +1074,1827 @@ function _copy_mutation_container(
 	return staged
 end
 
-_clone_trace_for_mutation(trace::GenericTrace) =
-	GenericTrace(_copy_mutation_container(trace.fields))
-_clone_trace_for_mutation(trace::AbstractTrace) = deepcopy(trace)
-
-function _clone_layout_for_mutation(layout::Layout)
-	fields = _copy_mutation_container(layout.fields)
-	staged = Layout(fields)
-	# Layout's public constructor merges defaults. Restore the exact cloned
-	# dictionary so staging cannot reintroduce a field the caller removed.
-	setfield!(staged, :fields, fields)
+function _copy_setter_input(
+	value,
+	memo::IdDict{Any,Any},
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String
+		return value
+	end
+	# Arbitrary setter payloads can contain live callbacks, locks, or model
+	# handles. Stage every mutable payload graph before invoking third-party
+	# setters; if a value cannot be copied independently, reject it before any
+	# model or renderer side effect instead of exposing caller-owned state.
+	haskey(memo, value) && return memo[value]
+	_setter_input_requires_copy(value) || return value
+	staged = Base.deepcopy_internal(value, memo)
+	(
+		typeof(staged) === typeof(value) &&
+		(!ismutable(value) || staged !== value)
+	) || throw(ArgumentError(
+		"Setter value cannot be staged independently.",
+	))
+	memo[value] = staged
 	return staged
 end
-_clone_layout_for_mutation(layout::AbstractLayout) = deepcopy(layout)
+
+function _copy_setter_input(
+	value::_BuiltinMutationDict,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	staged = empty(value)
+	memo[value] = staged
+	for (key, child) in value
+		staged[
+			_copy_setter_input(key, memo)
+		] = _copy_setter_input(child, memo)
+	end
+	return staged
+end
+
+function _copy_setter_input(
+	value::AbstractDict,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	staged = Base.deepcopy_internal(value, memo)
+	(staged === value || typeof(staged) !== typeof(value)) &&
+		throw(ArgumentError(
+			"Setter dictionary cannot be staged independently.",
+		))
+	return staged
+end
+
+function _copy_setter_input(
+	value::_BuiltinPlotlyAttribute,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	staged = typeof(value)(_copy_setter_input(value.fields, memo))
+	memo[value] = staged
+	return staged
+end
+
+function _copy_setter_input(
+	value::PlotlyBase.AbstractPlotlyAttribute,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	staged = Base.deepcopy_internal(value, memo)
+	(staged === value || typeof(staged) !== typeof(value)) &&
+		throw(ArgumentError(
+			"Setter Plotly attribute cannot be staged independently.",
+		))
+	return staged
+end
+
+function _copy_setter_input(
+	value::AbstractArray,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	_array_contains_mutation_container(value) || return value
+	staged = copy(value)
+	if staged === value ||
+			typeof(staged) !== typeof(value) ||
+			axes(staged) != axes(value)
+		staged = Base.deepcopy_internal(value, memo)
+		(staged === value ||
+		 typeof(staged) !== typeof(value) ||
+		 axes(staged) != axes(value)) &&
+			throw(ArgumentError(
+				"Setter array cannot be staged independently.",
+			))
+		return staged
+	end
+	memo[value] = staged
+	for ind in eachindex(value)
+		isassigned(value, ind) || continue
+		staged[ind] = _copy_setter_input(value[ind], memo)
+	end
+	return staged
+end
+
+function _strict_setter_input_requires_copy(
+	value,
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa Function ||
+			value isa BigInt ||
+			value isa BigFloat
+		return false
+	end
+	ismutable(value) && return true
+	haskey(seen, value) && return false
+	seen[value] = nothing
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_strict_setter_input_requires_copy(
+			getfield(value, ind),
+			seen,
+		) && return true
+	end
+	return false
+end
+
+function _copy_setter_input_strict(
+	value,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	_strict_setter_input_requires_copy(value) || return value
+	staged = Base.deepcopy_internal(value, memo)
+	(
+		typeof(staged) === typeof(value) &&
+		(!ismutable(value) || staged !== value)
+	) || throw(ArgumentError(
+		"Third-party setter value cannot be staged independently.",
+	))
+	memo[value] = staged
+	return staged
+end
+
+_prepare_setter_input(value, memo, strict::Bool) =
+	strict ?
+	_copy_setter_input_strict(value, memo) :
+	_copy_setter_input(value, memo)
+
+function _clone_trace_for_mutation(
+	trace::GenericTrace,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, trace) &&
+		return memo[trace]::GenericTrace
+
+	original_fields = getfield(trace, :fields)
+	original_fields isa _BuiltinMutationDict ||
+		return Base.deepcopy_internal(trace, memo)
+	if haskey(memo, original_fields)
+		staged_fields = memo[original_fields]
+		staged = typeof(trace)(staged_fields)
+		memo[trace] = staged
+		return staged
+	end
+
+	# Construct the cycle-breaking shell with the trace's exact dictionary
+	# type. GenericTrace is parametric in that type, so a canonical Dict shell
+	# cannot later accept (for example) cloned IdDict fields.
+	staged_fields = copy(original_fields)
+	if staged_fields === original_fields ||
+			typeof(staged_fields) !== typeof(original_fields)
+		return Base.deepcopy_internal(trace, memo)
+	end
+	staged = typeof(trace)(staged_fields)
+	memo[trace] = staged
+	memo[original_fields] = staged_fields
+	for (key, child) in original_fields
+		staged_fields[key] = _copy_mutation_container(child, memo)
+	end
+	return staged
+end
+_clone_trace_for_mutation(
+	trace::AbstractTrace,
+	memo::IdDict{Any,Any},
+) = Base.deepcopy_internal(trace, memo)
+_clone_trace_for_mutation(trace::AbstractTrace) =
+	_clone_trace_for_mutation(trace, IdDict{Any,Any}())
+
+function _clone_layout_for_mutation(
+	layout::Layout,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, layout) &&
+		return memo[layout]::Layout
+
+	original_fields = getfield(layout, :fields)
+	original_fields isa _BuiltinMutationDict ||
+		return Base.deepcopy_internal(layout, memo)
+	if haskey(memo, original_fields)
+		staged_fields = memo[original_fields]
+		staged = typeof(layout)(staged_fields)
+		memo[layout] = staged
+	else
+		# Preserve Layout's exact parametric dictionary type while installing
+		# the root in the memo before recursively copying its values. This also
+		# keeps cycles through the Layout root intact.
+		staged_fields = copy(original_fields)
+		if staged_fields === original_fields ||
+				typeof(staged_fields) !== typeof(original_fields)
+			staged = Base.deepcopy_internal(layout, memo)
+			setfield!(
+				staged,
+				:subplots,
+				_copy_mutation_container(
+					getfield(layout, :subplots),
+					memo,
+				),
+			)
+			return staged
+		end
+		staged = typeof(layout)(staged_fields)
+		memo[layout] = staged
+		memo[original_fields] = staged_fields
+		for (key, child) in original_fields
+			staged_fields[key] =
+				_copy_mutation_container(child, memo)
+		end
+	end
+	# Layout's public constructor merges defaults. Restore the exact cloned
+	# dictionary so staging cannot reintroduce a field the caller removed.
+	setfield!(staged, :fields, staged_fields)
+	# Subplot routing metadata is read-only during model staging, so it can
+	# normally remain shared. If a custom root already caused deepcopy to
+	# clone it, however, reuse that clone to preserve cross-root aliases.
+	original_subplots = getfield(layout, :subplots)
+	setfield!(
+		staged,
+		:subplots,
+		_copy_mutation_container(original_subplots, memo),
+	)
+	return staged
+end
+_clone_layout_for_mutation(
+	layout::AbstractLayout,
+	memo::IdDict{Any,Any},
+) = Base.deepcopy_internal(layout, memo)
+_clone_layout_for_mutation(layout::AbstractLayout) =
+	_clone_layout_for_mutation(layout, IdDict{Any,Any}())
+
+function _prepare_relayout_inputs(
+	args,
+	kwargs,
+	memo::IdDict{Any,Any},
+	setter_origins::Union{Nothing,IdDict{Any,Nothing}} = nothing,
+	;
+	strict::Bool = false,
+)
+	prepared_args = map(
+		arg -> _prepare_setter_input(arg, memo, strict),
+		args,
+	)
+	prepared_kwargs = Dict{Symbol,Any}(
+		key => _prepare_setter_input(value, memo, strict)
+		for (key, value) in pairs(kwargs)
+	)
+	if setter_origins !== nothing
+		seen = IdDict{Any,Nothing}()
+		for (value, prepared) in zip(args, prepared_args)
+			_collect_setter_memoized_identities!(
+				setter_origins,
+				value,
+				memo,
+				seen,
+			)
+			prepared === value &&
+				_collect_passthrough_setter_roots!(
+					setter_origins,
+					prepared,
+				)
+		end
+		for (key, value) in pairs(kwargs)
+			_collect_setter_memoized_identities!(
+				setter_origins,
+				value,
+				memo,
+				seen,
+			)
+			prepared = prepared_kwargs[key]
+			prepared === value &&
+				_collect_passthrough_setter_roots!(
+					setter_origins,
+					prepared,
+				)
+		end
+	end
+	return prepared_args, prepared_kwargs
+end
+
+function _rebase_unchanged_mutation_container!(
+	original,
+	staged,
+	memo::IdDict{Any,Any},
+	preserved_roots::Union{Nothing,IdDict} = nothing,
+	seen::IdDict{Any,Any} = IdDict{Any,Any}(),
+)
+	if preserved_roots !== nothing &&
+			haskey(preserved_roots, staged)
+		rebased = preserved_roots[staged]
+		return rebased, original === rebased
+	end
+	preserved_roots === nothing &&
+		return staged, original === staged
+	typeof(original) === typeof(staged) ||
+		return staged, false
+	if original isa BigInt || original isa BigFloat
+		unchanged = isequal(original, staged)
+		rebased = unchanged ? original : staged
+		ismutable(staged) &&
+			(preserved_roots[staged] = rebased)
+		return rebased, unchanged
+	end
+	if original isa Type ||
+			original isa Module ||
+			isbits(original) ||
+			original isa Symbol ||
+			original isa String
+		return staged, original === staged
+	end
+	memoized_counterpart =
+		haskey(memo, original) &&
+		memo[original] === staged
+	if !memoized_counterpart && ismutable(original)
+		return staged, original === staged
+	end
+	if haskey(seen, original)
+		seen[original] === staged ||
+			return staged, false
+		unchanged =
+			_staged_graph_unchanged(
+				original,
+				staged,
+				memo,
+				IdDict{Any,Any}(),
+				preserved_roots,
+			)
+		rebased = unchanged ? original : staged
+		# A changed generic wrapper or non-Array element store is rebuilt
+		# after its children have accumulated their final projections. Do not
+		# memoize staged → staged at this unresolved backedge: doing so would
+		# make deepcopy_internal return early and skip those child mappings.
+		unchanged &&
+			ismutable(staged) &&
+			(preserved_roots[staged] = rebased)
+		return rebased, unchanged
+	end
+	seen[original] = staged
+
+	if _is_builtin_element_storage(original)
+		unchanged = axes(original) == axes(staged)
+		writable_storage =
+			unchanged && _is_generic_memory(staged)
+		common_length = min(length(original), length(staged))
+		for ind in 1:common_length
+			original_assigned = isassigned(original, ind)
+			staged_assigned = isassigned(staged, ind)
+			if original_assigned != staged_assigned
+				unchanged = false
+				writable_storage = false
+				continue
+			end
+			original_assigned || continue
+			original_child = original[ind]
+			staged_child = staged[ind]
+			if (
+				haskey(memo, original_child) &&
+				memo[original_child] === staged_child
+			) || haskey(preserved_roots, staged_child) || (
+				!ismutable(original_child) &&
+				typeof(original_child) === typeof(staged_child)
+			)
+				rebased_child, child_unchanged =
+					_rebase_unchanged_mutation_container!(
+						original_child,
+						staged_child,
+						memo,
+						preserved_roots,
+						seen,
+					)
+				if writable_storage
+					staged[ind] = rebased_child
+				elseif child_unchanged ||
+						rebased_child !== staged_child
+					ismutable(staged_child) &&
+						(preserved_roots[staged_child] =
+							rebased_child)
+				end
+				unchanged &= child_unchanged
+			else
+				child_unchanged =
+					original_child === staged_child
+				child_unchanged &&
+					ismutable(staged_child) &&
+					(preserved_roots[staged_child] =
+						staged_child)
+				unchanged &= child_unchanged
+			end
+		end
+		if haskey(preserved_roots, staged) &&
+				preserved_roots[staged] !== staged
+			projected = preserved_roots[staged]
+			return projected, projected === original
+		end
+		if unchanged
+			preserved_roots[staged] = original
+			return original, true
+		end
+		if writable_storage
+			preserved_roots[staged] = staged
+			return staged, false
+		end
+		# Core.SimpleVector and GenericMemory are element stores without
+		# reflected fields. GenericMemory with unchanged axes/assignment state
+		# was projected in place above; rebuild immutable SimpleVector (or a
+		# store whose defined-slot shape changed) through the accumulated root
+		# translations.
+		return _rebuild_projected_component!(
+			staged,
+			preserved_roots,
+		), false
+	end
+
+	unchanged = true
+	writable_wrapper = ismutable(staged)
+	for ind in 1:fieldcount(typeof(original))
+		original_defined = isdefined(original, ind)
+		staged_defined = isdefined(staged, ind)
+		if original_defined != staged_defined
+			unchanged = false
+			writable_wrapper = false
+			continue
+		end
+		original_defined || continue
+		original_child = getfield(original, ind)
+		staged_child = getfield(staged, ind)
+		if (
+				haskey(memo, original_child) &&
+				memo[original_child] === staged_child
+			) ||
+				haskey(preserved_roots, staged_child) ||
+				(
+					!ismutable(original_child) &&
+					typeof(original_child) ===
+						typeof(staged_child)
+				)
+			rebased_child, child_unchanged =
+				_rebase_unchanged_mutation_container!(
+					original_child,
+					staged_child,
+					memo,
+					preserved_roots,
+					seen,
+				)
+			if writable_wrapper &&
+					!Base.isconst(typeof(staged), ind) &&
+					!Base.isfieldatomic(
+						typeof(staged),
+						ind,
+					)
+				setfield!(staged, ind, rebased_child)
+			elseif rebased_child !== staged_child
+				writable_wrapper = false
+				ismutable(staged_child) &&
+					(preserved_roots[staged_child] =
+						rebased_child)
+			elseif child_unchanged
+				ismutable(staged_child) &&
+					(preserved_roots[staged_child] =
+						rebased_child)
+			end
+			unchanged &= child_unchanged
+		else
+			child_unchanged =
+				original_child === staged_child
+			child_unchanged &&
+				ismutable(staged_child) &&
+				(preserved_roots[staged_child] =
+					staged_child)
+			unchanged &= child_unchanged
+		end
+	end
+	if haskey(preserved_roots, staged) &&
+			preserved_roots[staged] !== staged
+		projected = preserved_roots[staged]
+		return projected, projected === original
+	end
+	if unchanged
+		ismutable(staged) &&
+			(preserved_roots[staged] = original)
+		return original, true
+	end
+
+	if writable_wrapper
+		preserved_roots[staged] = staged
+		return staged, false
+	end
+
+	# Reconstruct changed arbitrary wrappers through the staged-to-committed
+	# memo accumulated above. This translates preserved roots without mutating
+	# third-party structs or cloning already-rebased mutable children.
+	return _rebuild_projected_component!(
+		staged,
+		preserved_roots,
+	), false
+end
+
+function _rebase_unchanged_mutation_container!(
+	original::_BuiltinMutationDict,
+	staged::_BuiltinMutationDict,
+	memo::IdDict{Any,Any},
+	preserved_roots::Union{Nothing,IdDict} = nothing,
+	seen::IdDict{Any,Any} = IdDict{Any,Any}(),
+)
+	if preserved_roots !== nothing &&
+			haskey(preserved_roots, staged)
+		rebased = preserved_roots[staged]
+		return rebased, original === rebased
+	end
+	if !haskey(memo, original) || memo[original] !== staged
+		return staged, original === staged
+	end
+	if haskey(seen, original)
+		seen[original] === staged ||
+			return staged, false
+		unchanged =
+			_staged_graph_unchanged(
+				original,
+				staged,
+				memo,
+				IdDict{Any,Any}(),
+				preserved_roots,
+			)
+		rebased = unchanged ? original : staged
+		preserved_roots === nothing ||
+			(preserved_roots[staged] = rebased)
+		return rebased, unchanged
+	end
+	seen[original] = staged
+
+	unchanged = length(original) == length(staged)
+	missing_key = Ref(nothing)
+	processed_staged_keys = IdDict{Any,Nothing}()
+	for (original_key, original_child) in original
+		exact_original_key_present = if staged isa Dict
+			getkey(staged, original_key, missing_key) ===
+				original_key
+		elseif staged isa IdDict
+			haskey(staged, original_key)
+		else
+			haskey(staged, original_key)
+		end
+		staged_key = if exact_original_key_present
+			original_key
+		elseif staged isa Dict || staged isa IdDict
+			Base.deepcopy_internal(original_key, memo)
+		else
+			original_key
+		end
+		key_present = if staged isa Dict
+			getkey(staged, staged_key, missing_key) === staged_key
+		else
+			haskey(staged, staged_key)
+		end
+		if !key_present
+			unchanged = false
+			continue
+		end
+		processed_staged_keys[staged_key] = nothing
+		staged_child = staged[staged_key]
+		rebased_key = staged_key
+
+		if (
+			haskey(memo, original_key) &&
+			memo[original_key] === staged_key
+		) || (
+			preserved_roots !== nothing &&
+			haskey(preserved_roots, staged_key)
+		) || (
+			!ismutable(original_key) &&
+			typeof(original_key) === typeof(staged_key)
+		)
+			rebased_key, key_unchanged =
+				_rebase_unchanged_mutation_container!(
+					original_key,
+					staged_key,
+					memo,
+					preserved_roots,
+					seen,
+				)
+			unchanged &= key_unchanged
+		else
+			unchanged &= original_key === staged_key
+		end
+
+		if rebased_key !== staged_key
+			preserved_roots === nothing ||
+				(preserved_roots[staged_key] = rebased_key)
+			existing_key = if staged isa Dict
+				getkey(staged, rebased_key, missing_key)
+			else
+				haskey(staged, rebased_key) ?
+					rebased_key :
+					missing_key
+			end
+			(
+				existing_key === missing_key ||
+				existing_key === staged_key
+			) || throw(ArgumentError(
+				"Projected dictionary keys collide during transaction commit.",
+			))
+			delete!(staged, staged_key)
+			staged[rebased_key] = staged_child
+			delete!(processed_staged_keys, staged_key)
+			processed_staged_keys[rebased_key] = nothing
+			staged_key = rebased_key
+		end
+
+		if (
+			haskey(memo, original_child) &&
+			memo[original_child] === staged_child
+		) || (
+			!ismutable(original_child) &&
+			typeof(original_child) === typeof(staged_child)
+		)
+			rebased_child, child_unchanged =
+				_rebase_unchanged_mutation_container!(
+					original_child,
+					staged_child,
+					memo,
+					preserved_roots,
+					seen,
+				)
+			staged[staged_key] = rebased_child
+			unchanged &= child_unchanged
+		elseif preserved_roots !== nothing &&
+				haskey(preserved_roots, staged_child)
+			rebased_child =
+				preserved_roots[staged_child]
+			staged[staged_key] = rebased_child
+			unchanged &= original_child === rebased_child
+		else
+			unchanged &= original_child === staged_child
+		end
+	end
+	if preserved_roots !== nothing
+		for (staged_key, staged_child) in collect(staged)
+			haskey(processed_staged_keys, staged_key) &&
+				continue
+			projected_key =
+				Base.deepcopy_internal(staged_key, preserved_roots)
+			projected_child =
+				Base.deepcopy_internal(staged_child, preserved_roots)
+			if projected_key !== staged_key
+				delete!(staged, staged_key)
+			end
+			staged[projected_key] = projected_child
+		end
+	end
+	if preserved_roots !== nothing &&
+			haskey(preserved_roots, staged) &&
+			preserved_roots[staged] !== staged
+		projected = preserved_roots[staged]
+		return projected, projected === original
+	end
+	rebased = unchanged ? original : staged
+	preserved_roots === nothing ||
+		(preserved_roots[staged] = rebased)
+	return rebased, unchanged
+end
+
+function _rebase_unchanged_mutation_container!(
+	original::_BuiltinPlotlyAttribute,
+	staged::_BuiltinPlotlyAttribute,
+	memo::IdDict{Any,Any},
+	preserved_roots::Union{Nothing,IdDict} = nothing,
+	seen::IdDict{Any,Any} = IdDict{Any,Any}(),
+)
+	if preserved_roots !== nothing &&
+			haskey(preserved_roots, staged)
+		rebased = preserved_roots[staged]
+		return rebased, original === rebased
+	end
+	if !haskey(memo, original) || memo[original] !== staged
+		return staged, original === staged
+	end
+	if haskey(seen, original)
+		seen[original] === staged ||
+			return staged, false
+		unchanged =
+			_staged_graph_unchanged(
+				original,
+				staged,
+				memo,
+				IdDict{Any,Any}(),
+				preserved_roots,
+			)
+		rebased = unchanged ? original : staged
+		preserved_roots === nothing ||
+			(preserved_roots[staged] = rebased)
+		return rebased, unchanged
+	end
+	seen[original] = staged
+
+	rebased_fields, unchanged =
+		_rebase_unchanged_mutation_container!(
+			original.fields,
+			staged.fields,
+			memo,
+			preserved_roots,
+			seen,
+		)
+	rebased_fields === staged.fields ||
+		setfield!(staged, :fields, rebased_fields)
+	if preserved_roots !== nothing &&
+			haskey(preserved_roots, staged) &&
+			preserved_roots[staged] !== staged
+		projected = preserved_roots[staged]
+		return projected, projected === original
+	end
+	rebased = unchanged ? original : staged
+	preserved_roots === nothing ||
+		(preserved_roots[staged] = rebased)
+	return rebased, unchanged
+end
+
+function _rebase_unchanged_mutation_container!(
+	original::Array,
+	staged::Array,
+	memo::IdDict{Any,Any},
+	preserved_roots::Union{Nothing,IdDict} = nothing,
+	seen::IdDict{Any,Any} = IdDict{Any,Any}(),
+)
+	if preserved_roots !== nothing &&
+			haskey(preserved_roots, staged)
+		rebased = preserved_roots[staged]
+		return rebased, original === rebased
+	end
+	if !haskey(memo, original) || memo[original] !== staged
+		return staged, original === staged
+	end
+	if haskey(seen, original)
+		seen[original] === staged ||
+			return staged, false
+		unchanged =
+			_staged_graph_unchanged(
+				original,
+				staged,
+				memo,
+				IdDict{Any,Any}(),
+				preserved_roots,
+			)
+		rebased = unchanged ? original : staged
+		preserved_roots === nothing ||
+			(preserved_roots[staged] = rebased)
+		return rebased, unchanged
+	end
+	seen[original] = staged
+
+	unchanged = axes(original) == axes(staged)
+	common_length = min(length(original), length(staged))
+	for ind in 1:common_length
+		original_assigned = isassigned(original, ind)
+		staged_assigned = isassigned(staged, ind)
+		if original_assigned != staged_assigned
+			unchanged = false
+			if staged_assigned &&
+				preserved_roots !== nothing
+				staged[ind] = Base.deepcopy_internal(
+					staged[ind],
+					preserved_roots,
+				)
+			end
+			continue
+		end
+		original_assigned || continue
+		original_child = original[ind]
+		staged_child = staged[ind]
+		if (
+			haskey(memo, original_child) &&
+			memo[original_child] === staged_child
+		) || (
+			preserved_roots !== nothing &&
+			haskey(preserved_roots, staged_child)
+		) || (
+			!ismutable(original_child) &&
+			typeof(original_child) === typeof(staged_child)
+		)
+			rebased_child, child_unchanged =
+				_rebase_unchanged_mutation_container!(
+					original_child,
+					staged_child,
+					memo,
+					preserved_roots,
+					seen,
+				)
+			staged[ind] = rebased_child
+			unchanged &= child_unchanged
+		else
+			unchanged &= original_child === staged_child
+		end
+	end
+	if length(staged) > common_length &&
+			preserved_roots !== nothing
+		for ind in (common_length + 1):length(staged)
+			isassigned(staged, ind) || continue
+			staged[ind] = Base.deepcopy_internal(
+				staged[ind],
+				preserved_roots,
+			)
+		end
+	end
+	if preserved_roots !== nothing &&
+			haskey(preserved_roots, staged) &&
+			preserved_roots[staged] !== staged
+		projected = preserved_roots[staged]
+		return projected, projected === original
+	end
+	rebased = unchanged ? original : staged
+	preserved_roots === nothing ||
+		(preserved_roots[staged] = rebased)
+	return rebased, unchanged
+end
+
+function _rebase_staged_trace!(
+	original::GenericTrace,
+	trace::GenericTrace,
+	memo::IdDict{Any,Any},
+	preserved_roots::Union{Nothing,IdDict} = nothing,
+)
+	fields, _ = _rebase_unchanged_mutation_container!(
+		original.fields,
+		trace.fields,
+		memo,
+		preserved_roots,
+	)
+	fields === trace.fields || setfield!(trace, :fields, fields)
+	return trace
+end
+
+function _rebase_staged_traces!(
+	staged::IdDict{AbstractTrace,AbstractTrace},
+	memo::IdDict{Any,Any},
+)
+	for (original, trace) in staged
+		if original isa GenericTrace && trace isa GenericTrace
+			_rebase_staged_trace!(original, trace, memo)
+		end
+	end
+	return staged
+end
+
+function _rebase_staged_layout!(
+	original::AbstractLayout,
+	staged::AbstractLayout,
+	memo::IdDict{Any,Any},
+	preserved_roots::Union{Nothing,IdDict} = nothing,
+)
+	if original isa Layout && staged isa Layout
+		fields, _ = _rebase_unchanged_mutation_container!(
+			original.fields,
+			staged.fields,
+			memo,
+			preserved_roots,
+		)
+		fields === staged.fields || setfield!(staged, :fields, fields)
+	end
+	return staged
+end
+
+# `deepcopy` is the only safe general staging strategy for third-party trace
+# implementations, but an unrelated structural/layout mutation must not
+# replace an otherwise untouched public trace object. Compare the original and
+# staged graphs through deepcopy's identity memo, using their field structure
+# instead of user equality for structured values. `seen` handles cycles and
+# verifies that aliases still point to the same staged counterpart.
+function _is_generic_memory(value)
+	isdefined(Core, :GenericMemory) || return false
+	return isa(value, getfield(Core, :GenericMemory))
+end
+
+function _is_builtin_element_storage(value)
+	(value isa Array || value isa Core.SimpleVector) &&
+		return true
+	return _is_generic_memory(value)
+end
+
+function _projection_graph_terminal(value)
+	return isbits(value) ||
+		value isa Symbol ||
+		value isa String ||
+		value isa Type ||
+		value isa Module ||
+		(
+			value isa Function &&
+			fieldcount(typeof(value)) == 0
+		) ||
+		value isa BigInt ||
+		value isa BigFloat
+end
+
+# Rebuild a non-writable staged root without splitting cycles. Earlier rebase
+# steps may have memoized mutable members of the root's strongly connected
+# component to themselves. Those entries are valid only after the whole
+# component is resolved; leaving them in deepcopy's memo would retain stale
+# backedges. Remove exactly that SCC while retaining every external public-root
+# and completed-child translation, then let deepcopy rebuild the component as
+# one alias-preserving graph.
+function _rebuild_projected_component!(
+	staged,
+	preserved_roots::IdDict,
+)
+	nodes = Any[staged]
+	node_indices = IdDict{Any,Int}(staged => 1)
+	reverse_edges = Vector{Vector{Int}}([Int[]])
+
+	function register_child!(child, parent_ind)
+		_projection_graph_terminal(child) && return
+		if haskey(preserved_roots, child) &&
+				preserved_roots[child] !== child
+			# This edge is already projected outside the staged component.
+			return
+		end
+		child_ind = get(node_indices, child, 0)
+		if child_ind == 0
+			push!(nodes, child)
+			child_ind = length(nodes)
+			node_indices[child] = child_ind
+			push!(reverse_edges, Int[])
+		end
+		push!(reverse_edges[child_ind], parent_ind)
+		return
+	end
+
+	next_ind = 1
+	while next_ind <= length(nodes)
+		value = nodes[next_ind]
+		if value isa Dict || value isa IdDict
+			for (key, child) in value
+				register_child!(key, next_ind)
+				register_child!(child, next_ind)
+			end
+		elseif _is_builtin_element_storage(value)
+			for ind in eachindex(value)
+				isassigned(value, ind) || continue
+				register_child!(value[ind], next_ind)
+			end
+		else
+			for ind in 1:fieldcount(typeof(value))
+				isdefined(value, ind) || continue
+				register_child!(
+					getfield(value, ind),
+					next_ind,
+				)
+			end
+		end
+		next_ind += 1
+	end
+
+	in_component = falses(length(nodes))
+	component_stack = Int[1]
+	in_component[1] = true
+	while !isempty(component_stack)
+		child_ind = pop!(component_stack)
+		for parent_ind in reverse_edges[child_ind]
+			in_component[parent_ind] && continue
+			in_component[parent_ind] = true
+			push!(component_stack, parent_ind)
+		end
+	end
+
+	component = IdDict{Any,Nothing}()
+	for ind in eachindex(nodes)
+		in_component[ind] || continue
+		component[nodes[ind]] = nothing
+	end
+
+	projection_memo = copy(preserved_roots)
+	for value in keys(component)
+		delete!(projection_memo, value)
+	end
+	rebased = Base.deepcopy_internal(staged, projection_memo)
+	projection_memo[staged] = rebased
+
+	# If an existing alias translation targeted an old component member,
+	# redirect it to that member's rebuilt counterpart before publishing the
+	# completed memo.
+	for (key, value) in collect(projection_memo)
+		haskey(component, value) || continue
+		haskey(projection_memo, value) || continue
+		projection_memo[key] = projection_memo[value]
+	end
+	merge!(preserved_roots, projection_memo)
+	return rebased
+end
+
+function _staged_graph_unchanged(
+	original,
+	staged,
+	memo::IdDict{Any,Any},
+	seen::IdDict{Any,Any} = IdDict{Any,Any}(),
+	projected_roots::Union{Nothing,IdDict} = nothing,
+)
+	if isbits(original) || original isa Symbol
+		return typeof(original) === typeof(staged) &&
+			original === staged
+	end
+	if original isa String
+		return staged isa String && isequal(original, staged)
+	end
+	if haskey(memo, original)
+		memoized = memo[original]
+		# A surrounding container observes only the identity of a child that
+		# has its own in-place commit. Treat that edge as unchanged when the
+		# commit projection proves the staged child resolves to this exact
+		# original object. Accept both the not-yet-projected and already
+		# projected slot so cyclic rebasing is independent of child order.
+		identity_projected =
+			projected_roots !== nothing &&
+			haskey(projected_roots, memoized) &&
+			projected_roots[memoized] === original &&
+			(staged === memoized || staged === original)
+		identity_projected && return true
+		memoized === staged || return false
+	end
+	typeof(original) === typeof(staged) || return false
+	if original isa BigInt ||
+			original isa BigFloat
+		return isequal(original, staged)
+	end
+	if original isa Type || original isa Module
+		return original === staged
+	end
+	if haskey(seen, original)
+		return seen[original] === staged
+	end
+	if original === staged
+		ismutable(original) && (seen[original] = staged)
+		return true
+	end
+	seen[original] = staged
+
+	# Entry-wise comparison is valid only for built-in storage maps and element
+	# stores, whose plotting state is their contents. Array/dictionary
+	# wrappers and third-party container subtypes may carry parent links, tags,
+	# or other metadata, so they fall through to structural field comparison.
+	if original isa Dict || original isa IdDict
+		length(original) == length(staged) || return false
+		missing_key = Ref(nothing)
+		for (original_key, original_value) in original
+			# Immutable composite keys (for example, a tuple containing a
+			# BigInt) are rebuilt by deepcopy without receiving their own memo
+			# entry. Reconstruct the expected key through the populated memo so
+			# its cloned children point at the exact staged counterparts.
+			memoized_key =
+				Base.deepcopy_internal(original_key, memo)
+			projected_key =
+				projected_roots !== nothing &&
+				haskey(projected_roots, memoized_key) ?
+				projected_roots[memoized_key] :
+				memoized_key
+			projected_key_present = if staged isa Dict
+				getkey(
+					staged,
+					projected_key,
+					missing_key,
+				) === projected_key
+			else
+				haskey(staged, projected_key)
+			end
+			memoized_key_present = if staged isa Dict
+				getkey(
+					staged,
+					memoized_key,
+					missing_key,
+				) === memoized_key
+			else
+				haskey(staged, memoized_key)
+			end
+			staged_key =
+				projected_key_present ?
+				projected_key :
+				memoized_key
+			key_present = if staged isa Dict
+				getkey(staged, staged_key, missing_key) === staged_key
+			else
+				haskey(staged, staged_key)
+			end
+			(
+				projected_key_present ||
+				memoized_key_present
+			) || return false
+			key_present || return false
+			_staged_graph_unchanged(
+				original_key,
+				staged_key,
+				memo,
+				seen,
+				projected_roots,
+			) || return false
+			_staged_graph_unchanged(
+				original_value,
+				staged[staged_key],
+				memo,
+				seen,
+				projected_roots,
+			) || return false
+		end
+		return true
+	elseif _is_builtin_element_storage(original)
+		axes(original) == axes(staged) || return false
+		for ind in eachindex(original)
+			original_assigned = isassigned(original, ind)
+			staged_assigned = isassigned(staged, ind)
+			original_assigned == staged_assigned || return false
+			original_assigned || continue
+			_staged_graph_unchanged(
+				original[ind],
+				staged[ind],
+				memo,
+				seen,
+				projected_roots,
+			) || return false
+		end
+		return true
+	end
+
+	field_count = fieldcount(typeof(original))
+	if field_count == 0
+		return ismutable(original) ?
+			haskey(memo, original) && memo[original] === staged :
+			isequal(original, staged)
+	end
+	for ind in 1:field_count
+		original_defined = isdefined(original, ind)
+		staged_defined = isdefined(staged, ind)
+		original_defined == staged_defined || return false
+		original_defined || continue
+		_staged_graph_unchanged(
+			getfield(original, ind),
+			getfield(staged, ind),
+			memo,
+			seen,
+			projected_roots,
+		) || return false
+	end
+	return true
+end
+
+function _component_find!(parents::Vector{Int}, ind::Int)
+	root = ind
+	while parents[root] != root
+		root = parents[root]
+	end
+	while parents[ind] != ind
+		next = parents[ind]
+		parents[ind] = root
+		ind = next
+	end
+	return root
+end
+
+function _component_union!(
+	parents::Vector{Int},
+	left::Int,
+	right::Int,
+)
+	left_root = _component_find!(parents, left)
+	right_root = _component_find!(parents, right)
+	left_root == right_root ||
+		(parents[right_root] = left_root)
+	return nothing
+end
+
+function _candidate_array_elements_may_carry_identity(
+	::Type{T},
+) where {T}
+	# Skip only element types whose values provably cannot carry mutable
+	# identity. Concrete user structs, heap-backed numbers, and closures may
+	# all contain mutable children even when they are not plotting containers.
+	return !(
+		isbitstype(T) ||
+		Base.isbitsunion(T) ||
+		T <: String ||
+		T <: Symbol ||
+		T <: Type ||
+		T <: Module
+	)
+end
+
+function _connect_candidate_graph_nodes!(
+	root_index::Int,
+	value,
+	owners::IdDict{Any,Int},
+	parents::Vector{Int},
+	seen::IdDict{Any,Nothing},
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module
+		return nothing
+	end
+	haskey(seen, value) && return nothing
+	seen[value] = nothing
+
+	if ismutable(value)
+		owner = get(owners, value, 0)
+		if owner == 0
+			owners[value] = root_index
+		else
+			_component_union!(parents, root_index, owner)
+			# The prior root already visited this mutable subgraph, so its
+			# descendants cannot introduce a component the union missed.
+			return nothing
+		end
+	end
+
+	if value isa BigInt
+		return nothing
+	elseif value isa Dict || value isa IdDict
+		for (key, child) in value
+			_connect_candidate_graph_nodes!(
+				root_index,
+				key,
+				owners,
+				parents,
+				seen,
+			)
+			_connect_candidate_graph_nodes!(
+				root_index,
+				child,
+				owners,
+				parents,
+				seen,
+			)
+		end
+		return nothing
+	elseif _is_builtin_element_storage(value)
+		_candidate_array_elements_may_carry_identity(eltype(value)) ||
+			return nothing
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_connect_candidate_graph_nodes!(
+				root_index,
+				value[ind],
+				owners,
+				parents,
+				seen,
+			)
+		end
+		return nothing
+	end
+
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_connect_candidate_graph_nodes!(
+			root_index,
+			getfield(value, ind),
+			owners,
+			parents,
+			seen,
+		)
+	end
+	return nothing
+end
+
+function _graph_reaches_staged_node(
+	value,
+	memo::IdDict{Any,Any},
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module
+		return false
+	end
+	haskey(memo, value) && return true
+	value isa BigInt && return false
+	haskey(seen, value) && return false
+	seen[value] = nothing
+
+	if value isa AbstractDict ||
+			value isa PlotlyBase.AbstractPlotlyAttribute
+		# Optimized staging always clones these mutable plotting containers.
+		return true
+	elseif value isa AbstractArray
+		_array_contains_mutation_container(value) && return true
+	end
+
+	if value isa Dict || value isa IdDict
+		for (key, child) in value
+			_graph_reaches_staged_node(key, memo, seen) &&
+				return true
+			_graph_reaches_staged_node(child, memo, seen) &&
+				return true
+		end
+		return false
+	elseif _is_builtin_element_storage(value)
+		_candidate_array_elements_may_carry_identity(eltype(value)) ||
+			return false
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_graph_reaches_staged_node(value[ind], memo, seen) &&
+				return true
+		end
+		return false
+	end
+
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_graph_reaches_staged_node(
+			getfield(value, ind),
+			memo,
+			seen,
+		) && return true
+	end
+	return false
+end
+
+function _graph_contains_memoized_identity(
+	value,
+	memo::IdDict{Any,Any},
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa BigInt ||
+			value isa BigFloat
+		return false
+	end
+	haskey(memo, value) && return true
+	haskey(seen, value) && return false
+	seen[value] = nothing
+
+	if value isa Dict || value isa IdDict
+		for (key, child) in value
+			_graph_contains_memoized_identity(
+				key,
+				memo,
+				seen,
+			) && return true
+			_graph_contains_memoized_identity(
+				child,
+				memo,
+				seen,
+			) && return true
+		end
+		return false
+	elseif _is_builtin_element_storage(value)
+		_candidate_array_elements_may_carry_identity(eltype(value)) ||
+			return false
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_graph_contains_memoized_identity(
+				value[ind],
+				memo,
+				seen,
+			) && return true
+		end
+		return false
+	end
+
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_graph_contains_memoized_identity(
+			getfield(value, ind),
+			memo,
+			seen,
+		) && return true
+	end
+	return false
+end
+
+function _collect_graph_mutable_identities!(
+	identities::IdDict{Any,Nothing},
+	value,
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa BigInt ||
+			value isa BigFloat
+		return identities
+	end
+	haskey(seen, value) && return identities
+	seen[value] = nothing
+	ismutable(value) && (identities[value] = nothing)
+
+	if value isa Dict || value isa IdDict
+		for (key, child) in value
+			_collect_graph_mutable_identities!(
+				identities,
+				key,
+				seen,
+			)
+			_collect_graph_mutable_identities!(
+				identities,
+				child,
+				seen,
+			)
+		end
+		return identities
+	elseif _is_builtin_element_storage(value)
+		_candidate_array_elements_may_carry_identity(eltype(value)) ||
+			return identities
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_collect_graph_mutable_identities!(
+				identities,
+				value[ind],
+				seen,
+			)
+		end
+		return identities
+	end
+
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_collect_graph_mutable_identities!(
+			identities,
+			getfield(value, ind),
+			seen,
+		)
+	end
+	return identities
+end
+
+function _collect_model_memoized_identities!(
+	identities::IdDict{Any,Nothing},
+	value,
+	memo::IdDict{Any,Any},
+	targets::IdDict{Any,Nothing},
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa BigInt ||
+			value isa BigFloat
+		return identities
+	end
+	haskey(seen, value) && return identities
+	seen[value] = nothing
+	haskey(targets, value) &&
+		haskey(memo, value) &&
+		(identities[value] = nothing)
+
+	if value isa Dict || value isa IdDict
+		for (key, child) in value
+			_collect_model_memoized_identities!(
+				identities,
+				key,
+				memo,
+				targets,
+				seen,
+			)
+			_collect_model_memoized_identities!(
+				identities,
+				child,
+				memo,
+				targets,
+				seen,
+			)
+		end
+		return identities
+	elseif _is_builtin_element_storage(value)
+		_candidate_array_elements_may_carry_identity(eltype(value)) ||
+			return identities
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_collect_model_memoized_identities!(
+				identities,
+				value[ind],
+				memo,
+				targets,
+				seen,
+			)
+		end
+		return identities
+	end
+
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_collect_model_memoized_identities!(
+			identities,
+			getfield(value, ind),
+			memo,
+			targets,
+			seen,
+		)
+	end
+	return identities
+end
+
+function _collect_setter_memoized_identities!(
+	identities::IdDict{Any,Nothing},
+	value,
+	memo::IdDict{Any,Any},
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa Function ||
+			value isa BigInt ||
+			value isa BigFloat
+		return identities
+	end
+	haskey(seen, value) && return identities
+	seen[value] = nothing
+	haskey(memo, value) && (identities[value] = nothing)
+
+	if value isa Dict || value isa IdDict
+		for (key, child) in value
+			_collect_setter_memoized_identities!(
+				identities,
+				key,
+				memo,
+				seen,
+			)
+			_collect_setter_memoized_identities!(
+				identities,
+				child,
+				memo,
+				seen,
+			)
+		end
+		return identities
+	elseif _is_builtin_element_storage(value)
+		_candidate_array_elements_may_carry_identity(eltype(value)) ||
+			return identities
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_collect_setter_memoized_identities!(
+				identities,
+				value[ind],
+				memo,
+				seen,
+			)
+		end
+		return identities
+	end
+
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_collect_setter_memoized_identities!(
+			identities,
+			getfield(value, ind),
+			memo,
+			seen,
+		)
+	end
+	return identities
+end
+
+function _collect_passthrough_setter_roots!(
+	identities::IdDict{Any,Nothing},
+	value,
+	seen::IdDict{Any,Nothing} = IdDict{Any,Nothing}(),
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module
+		return identities
+	end
+	haskey(seen, value) && return identities
+	seen[value] = nothing
+	# `deepcopy` reconstructs immutable wrappers and closures even when their
+	# wrapper roots are pre-populated in its memo. Preserving the first mutable
+	# identity on every path retains the exact pass-through value graph while
+	# avoiding a traversal of large arrays, dictionaries, or captured models.
+	if ismutable(value)
+		identities[value] = nothing
+		return identities
+	end
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_collect_passthrough_setter_roots!(
+			identities,
+			getfield(value, ind),
+			seen,
+		)
+	end
+	return identities
+end
+
+function _stage_cross_aliased_model_root(
+	value,
+	memo::IdDict{Any,Any},
+)
+	haskey(memo, value) && return memo[value]
+	_graph_contains_memoized_identity(value, memo) ||
+		return value
+	return Base.deepcopy_internal(value, memo)
+end
+
+function _full_model_replacement_roots(
+	p::Plot,
+	candidate::Plot,
+	staged_traces::IdDict{AbstractTrace,AbstractTrace},
+	memo::IdDict{Any,Any},
+	affected_roots::Union{Nothing,IdDict} = nothing,
+)
+	(
+		any(
+			original -> !(original isa GenericTrace),
+			keys(staged_traces),
+		) ||
+		!(p.layout isa Layout)
+	) ||
+		return nothing
+
+	original_roots = Any[]
+	staged_roots = Any[]
+	third_party = Bool[]
+	root_indices = IdDict{Any,Int}()
+
+	push!(original_roots, p.data)
+	push!(staged_roots, candidate.data)
+	push!(third_party, false)
+	root_indices[p.data] = length(original_roots)
+	data_root_index = length(original_roots)
+
+	for original in p.data
+		haskey(root_indices, original) && continue
+		push!(original_roots, original)
+		push!(staged_roots, staged_traces[original])
+		push!(third_party, !(original isa GenericTrace))
+		root_indices[original] = length(original_roots)
+	end
+	push!(original_roots, p.layout)
+	push!(staged_roots, candidate.layout)
+	push!(third_party, !(p.layout isa Layout))
+	root_indices[p.layout] = length(original_roots)
+	push!(original_roots, p.frames)
+	push!(staged_roots, candidate.frames)
+	push!(third_party, false)
+	root_indices[p.frames] = length(original_roots)
+	push!(original_roots, p.config)
+	push!(staged_roots, candidate.config)
+	push!(third_party, false)
+	root_indices[p.config] = length(original_roots)
+
+	parents = collect(eachindex(original_roots))
+	# The data vector is itself an aliasable model root, but its trace elements
+	# must not make every trace one replacement component. Register the vector
+	# as an opaque owner and traverse each trace root independently.
+	owners = IdDict{Any,Int}(
+		candidate.data => data_root_index,
+	)
+	for ind in eachindex(original_roots)
+		ind == data_root_index && continue
+		# Component membership follows the post-mutation candidate graph.
+		# A setter may deliberately detach one root from a formerly shared
+		# object; retaining the original edge would replace an untouched root.
+		_connect_candidate_graph_nodes!(
+			ind,
+			staged_roots[ind],
+			owners,
+			parents,
+			IdDict{Any,Nothing}(),
+		)
+	end
+
+	affected_original_parents = nothing
+	affected_original_components = nothing
+	if affected_roots !== nothing
+		affected_original_parents =
+			collect(eachindex(original_roots))
+		affected_owners = IdDict{Any,Int}(
+			p.data => data_root_index,
+		)
+		for ind in eachindex(original_roots)
+			ind == data_root_index && continue
+			_connect_candidate_graph_nodes!(
+				ind,
+				original_roots[ind],
+				affected_owners,
+				affected_original_parents,
+				IdDict{Any,Nothing}(),
+			)
+		end
+		affected_original_components =
+			falses(length(original_roots))
+		for ind in eachindex(original_roots)
+			haskey(affected_roots, original_roots[ind]) ||
+				continue
+			affected_original_components[
+				_component_find!(
+					affected_original_parents,
+					ind,
+				)
+			] = true
+		end
+	end
+
+	dirty_custom_components = falses(length(original_roots))
+	for ind in eachindex(original_roots)
+		third_party[ind] || continue
+		if affected_original_components !== nothing
+			affected_original_components[
+				_component_find!(
+					affected_original_parents,
+					ind,
+				)
+			] || continue
+		end
+		_staged_graph_unchanged(
+			original_roots[ind],
+			staged_roots[ind],
+			memo,
+		) && continue
+		dirty_custom_components[
+			_component_find!(parents, ind)
+		] = true
+	end
+
+	replace = IdDict{Any,Bool}()
+	for ind in eachindex(original_roots)
+		replace[original_roots[ind]] =
+			dirty_custom_components[
+				_component_find!(parents, ind)
+			]
+	end
+	return replace
+end
+
+function _full_model_mutation_affected_roots(
+	p::Plot,
+	mutation_scope,
+)
+	mutation_scope === nothing && return nothing
+	affected = IdDict{Any,Nothing}()
+	for ind in mutation_scope.trace_indices
+		checkbounds(Bool, p.data, ind) ||
+			throw(BoundsError(p.data, ind))
+		affected[p.data[ind]] = nothing
+	end
+	mutation_scope.layout &&
+		(affected[p.layout] = nothing)
+	return affected
+end
 
 function _prepare_restyle_inputs(
 	update::AbstractDict,
 	kwargs,
 	trace_count::Int;
 	vectorized::Bool,
+	memo::IdDict{Any,Any},
+	setter_origins::Union{Nothing,IdDict{Any,Nothing}} = nothing,
+	strict::Bool = false,
 )
 	# Widen the copied dictionary so vector preparation can replace narrowly
 	# typed values without changing the caller's object.
 	prepared_update = Dict{Any,Any}(pairs(update))
 	prepared_kwargs = Dict{Symbol,Any}(kwargs)
-	if vectorized
-		for values in (prepared_update, prepared_kwargs)
-			for (key, value) in values
-				values[key] =
-					PlotlyBase._prep_restyle_vec_setindex(value, trace_count)
+	for values in (prepared_update, prepared_kwargs)
+		for (key, value) in values
+			prepared = vectorized ?
+				PlotlyBase._prep_restyle_vec_setindex(
+					value,
+					trace_count,
+				) :
+				value
+			staged_value =
+				_prepare_setter_input(prepared, memo, strict)
+			values[key] = staged_value
+			setter_origins === nothing ||
+				_collect_setter_memoized_identities!(
+					setter_origins,
+					prepared,
+					memo,
+				)
+			if setter_origins !== nothing &&
+					staged_value === prepared
+				_collect_passthrough_setter_roots!(
+					setter_origins,
+					staged_value,
+				)
+				if vectorized &&
+						(
+							staged_value isa AbstractArray ||
+							staged_value isa Tuple
+						)
+					for position in 1:trace_count
+						child = staged_value[position]
+						_collect_passthrough_setter_roots!(
+							setter_origins,
+							child,
+						)
+					end
+				end
 			end
 		end
 	end
@@ -789,54 +2907,1459 @@ function _stage_restyle(
 	update::AbstractDict,
 	kwargs;
 	vectorized::Bool,
+	memo::IdDict{Any,Any} = IdDict{Any,Any}(),
+	setter_origins::Union{Nothing,IdDict{Any,Nothing}} = nothing,
 )
 	for ind in inds
 		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
 	end
 
+	# A repeated trace object is staged only once, retaining PlotlyBase's
+	# sequential behavior when the same object appears at multiple indices.
+	staged = IdDict{AbstractTrace,AbstractTrace}()
+	for ind in inds
+		original = p.data[ind]
+		get!(
+			() -> _clone_trace_for_mutation(original, memo),
+			staged,
+			original,
+		)
+	end
+
+	# Clone setter inputs only after the selected model graph has populated the
+	# memo. If a caller passes a dictionary already shared by the model, both
+	# references then resolve to the same staged clone.
 	prepared_update, prepared_kwargs = _prepare_restyle_inputs(
 		update,
 		kwargs,
 		length(inds);
 		vectorized = vectorized,
+		memo = memo,
+		setter_origins = setter_origins,
+		strict = any(
+			original -> !(original isa GenericTrace),
+			keys(staged),
+		),
 	)
 
-	# Stage a shared trace only once so aliased entries retain their sequential
-	# restyle behavior.
-	staged = IdDict{AbstractTrace,AbstractTrace}()
 	for (position, ind) in enumerate(inds)
-		original = p.data[ind]
-		trace = get!(
-			() -> _clone_trace_for_mutation(original),
-			staged,
-			original,
-		)
+		trace = staged[p.data[ind]]
 		restyle!(trace, position, prepared_update; prepared_kwargs...)
 	end
 	return staged
 end
 
-function _commit_restyle!(
+function _collect_changed_mutation_containers!(
+	changed::IdDict{Any,Nothing},
+	original,
+	staged,
+	memo::IdDict{Any,Any},
+)
+	original === staged && return false
+	container_changed =
+		!_staged_graph_unchanged(original, staged, memo)
+	if container_changed &&
+			!(
+				isbits(original) ||
+				original isa Symbol ||
+				original isa String ||
+				original isa Type ||
+				original isa Module ||
+				original isa BigInt ||
+				original isa BigFloat
+			)
+		changed[original] = nothing
+	end
+	return container_changed
+end
+
+function _collect_changed_mutation_containers!(
+	changed::IdDict{Any,Nothing},
+	original::AbstractDict,
+	staged::AbstractDict,
+	memo::IdDict{Any,Any},
+)
+	original === staged && return false
+	if !haskey(memo, original) || memo[original] !== staged
+		return true
+	end
+
+	container_changed = length(original) != length(staged)
+	for (key, original_child) in original
+		if !haskey(staged, key)
+			container_changed = true
+			continue
+		end
+		staged_child = staged[key]
+		if haskey(memo, original_child) &&
+				memo[original_child] === staged_child
+			container_changed |=
+				_collect_changed_mutation_containers!(
+					changed,
+					original_child,
+					staged_child,
+					memo,
+				)
+		else
+			container_changed |= original_child !== staged_child
+		end
+	end
+	container_changed && (changed[original] = nothing)
+	return container_changed
+end
+
+function _collect_changed_mutation_containers!(
+	changed::IdDict{Any,Nothing},
+	original::PlotlyBase.AbstractPlotlyAttribute,
+	staged::PlotlyBase.AbstractPlotlyAttribute,
+	memo::IdDict{Any,Any},
+)
+	original === staged && return false
+	if !haskey(memo, original) || memo[original] !== staged
+		return true
+	end
+	container_changed = _collect_changed_mutation_containers!(
+		changed,
+		original.fields,
+		staged.fields,
+		memo,
+	)
+	container_changed && (changed[original] = nothing)
+	return container_changed
+end
+
+function _collect_changed_graph_nodes!(
+	changed::IdDict{Any,Nothing},
+	original,
+	staged,
+	memo::IdDict{Any,Any},
+	seen::IdDict{Any,Any},
+)
+	if isbits(original) || original isa Symbol
+		return !(
+			typeof(original) === typeof(staged) &&
+			original === staged
+		)
+	elseif original isa String
+		return !(staged isa String && isequal(original, staged))
+	elseif original isa BigInt || original isa BigFloat
+		return !(
+			typeof(original) === typeof(staged) &&
+			isequal(original, staged)
+		)
+	elseif original isa Type || original isa Module
+		return original !== staged
+	end
+	typeof(original) === typeof(staged) || return true
+	original === staged && return false
+	memoized_counterpart =
+		haskey(memo, original) &&
+		memo[original] === staged
+	ismutable(original) &&
+		!memoized_counterpart &&
+		return true
+	if haskey(seen, original)
+		return seen[original] !== staged
+	end
+	seen[original] = staged
+
+	node_changed = false
+	if original isa Dict || original isa IdDict
+		node_changed = length(original) != length(staged)
+		missing_key = Ref(nothing)
+		for (original_key, original_child) in original
+			staged_key =
+				Base.deepcopy_internal(original_key, memo)
+			key_present = if staged isa Dict
+				getkey(staged, staged_key, missing_key) ===
+					staged_key
+			else
+				haskey(staged, staged_key)
+			end
+			if !key_present
+				node_changed = true
+				continue
+			end
+			node_changed |= _collect_changed_graph_nodes!(
+				changed,
+				original_key,
+				staged_key,
+				memo,
+				seen,
+			)
+			node_changed |= _collect_changed_graph_nodes!(
+				changed,
+				original_child,
+				staged[staged_key],
+				memo,
+				seen,
+			)
+		end
+	elseif _is_builtin_element_storage(original)
+		node_changed = axes(original) != axes(staged)
+		common_length = min(length(original), length(staged))
+		for ind in 1:common_length
+			original_assigned = isassigned(original, ind)
+			staged_assigned = isassigned(staged, ind)
+			if original_assigned != staged_assigned
+				node_changed = true
+				continue
+			end
+			original_assigned || continue
+			node_changed |= _collect_changed_graph_nodes!(
+				changed,
+				original[ind],
+				staged[ind],
+				memo,
+				seen,
+			)
+		end
+	else
+		field_count = fieldcount(typeof(original))
+		if field_count == 0
+			node_changed = ismutable(original) ?
+				!memoized_counterpart :
+				!isequal(original, staged)
+		else
+			for ind in 1:field_count
+				original_defined = isdefined(original, ind)
+				staged_defined = isdefined(staged, ind)
+				if original_defined != staged_defined
+					node_changed = true
+					continue
+				end
+				original_defined || continue
+				node_changed |= _collect_changed_graph_nodes!(
+					changed,
+					getfield(original, ind),
+					getfield(staged, ind),
+					memo,
+					seen,
+				)
+			end
+		end
+	end
+	node_changed &&
+		ismutable(original) &&
+		memoized_counterpart &&
+		(changed[original] = nothing)
+	return node_changed
+end
+
+function _contains_changed_mutation_container(
+	value,
+	changed::IdDict{Any,Nothing},
+)
+	return _contains_changed_mutation_container(
+		value,
+		changed,
+		IdDict{Any,Any}(),
+	)
+end
+
+mutable struct _ContainsVisitMarker end
+const _CONTAINS_VISIT_ACTIVE = _ContainsVisitMarker()
+const _CONTAINS_VISIT_FALSE = _ContainsVisitMarker()
+const _CONTAINS_BACKEDGE_COUNT = _ContainsVisitMarker()
+
+function _contains_visit_enter!(visiting::IdDict{Any,Any}, value)
+	state = get(visiting, value, nothing)
+	state === _CONTAINS_VISIT_FALSE && return :cached_false
+	if state === _CONTAINS_VISIT_ACTIVE
+		visiting[_CONTAINS_BACKEDGE_COUNT] =
+			get(visiting, _CONTAINS_BACKEDGE_COUNT, 0) + 1
+		return :backedge
+	end
+	visiting[value] = _CONTAINS_VISIT_ACTIVE
+	return :entered
+end
+
+function _contains_changed_mutation_container(
+	value,
+	changed::IdDict{Any,Nothing},
+	visiting::IdDict{Any,Any},
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa BigInt ||
+			value isa BigFloat
+		return false
+	end
+	haskey(changed, value) && return true
+	_contains_visit_enter!(visiting, value) === :entered ||
+		return false
+	if _is_builtin_element_storage(value)
+		backedges_before =
+			get(visiting, _CONTAINS_BACKEDGE_COUNT, 0)
+		if _array_elements_may_be_mutation_containers(
+			eltype(value),
+		)
+			for ind in eachindex(value)
+				isassigned(value, ind) || continue
+				if _contains_changed_mutation_container(
+					value[ind],
+					changed,
+					visiting,
+				)
+					delete!(visiting, value)
+					return true
+				end
+			end
+		end
+		if get(visiting, _CONTAINS_BACKEDGE_COUNT, 0) ==
+				backedges_before
+			visiting[value] = _CONTAINS_VISIT_FALSE
+		else
+			delete!(visiting, value)
+		end
+		return false
+	end
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		if _contains_changed_mutation_container(
+			getfield(value, ind),
+			changed,
+			visiting,
+		)
+			delete!(visiting, value)
+			return true
+		end
+	end
+	delete!(visiting, value)
+	return false
+end
+
+function _contains_changed_mutation_container(
+	value::AbstractDict,
+	changed::IdDict{Any,Nothing},
+	visiting::IdDict{Any,Any},
+)
+	haskey(changed, value) && return true
+	_contains_visit_enter!(visiting, value) === :entered ||
+		return false
+	for (key, child) in value
+		if _contains_changed_mutation_container(
+			key,
+			changed,
+			visiting,
+		) || _contains_changed_mutation_container(
+			child,
+			changed,
+			visiting,
+		)
+			delete!(visiting, value)
+			return true
+		end
+	end
+	if !(value isa _BuiltinMutationDict)
+		for ind in 1:fieldcount(typeof(value))
+			isdefined(value, ind) || continue
+			if _contains_changed_mutation_container(
+				getfield(value, ind),
+				changed,
+				visiting,
+			)
+				delete!(visiting, value)
+				return true
+			end
+		end
+	end
+	delete!(visiting, value)
+	return false
+end
+
+function _contains_changed_mutation_container(
+	value::PlotlyBase.AbstractPlotlyAttribute,
+	changed::IdDict{Any,Nothing},
+	visiting::IdDict{Any,Any},
+)
+	haskey(changed, value) && return true
+	_contains_visit_enter!(visiting, value) === :entered ||
+		return false
+	result = false
+	if value isa _BuiltinPlotlyAttribute
+		result = _contains_changed_mutation_container(
+			value.fields,
+			changed,
+			visiting,
+		)
+	else
+		for ind in 1:fieldcount(typeof(value))
+			isdefined(value, ind) || continue
+			result = _contains_changed_mutation_container(
+				getfield(value, ind),
+				changed,
+				visiting,
+			)
+			result && break
+		end
+	end
+	delete!(visiting, value)
+	return result
+end
+
+function _contains_changed_mutation_container(
+	value::AbstractArray,
+	changed::IdDict{Any,Nothing},
+	visiting::IdDict{Any,Any},
+)
+	haskey(changed, value) && return true
+	scan_elements =
+		_array_elements_may_be_mutation_containers(eltype(value))
+	builtin_storage = _is_builtin_element_storage(value)
+	builtin_storage && !scan_elements &&
+		return false
+	_contains_visit_enter!(visiting, value) === :entered ||
+		return false
+	backedges_before =
+		get(visiting, _CONTAINS_BACKEDGE_COUNT, 0)
+	found = false
+	if scan_elements
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			child = value[ind]
+			found = _contains_changed_mutation_container(
+				child,
+				changed,
+				visiting,
+			)
+			found && break
+		end
+	end
+	if !found && !builtin_storage
+		for ind in 1:fieldcount(typeof(value))
+			isdefined(value, ind) || continue
+			found = _contains_changed_mutation_container(
+				getfield(value, ind),
+				changed,
+				visiting,
+			)
+			found && break
+		end
+	end
+	# Cache a completed false result only when this traversal encountered no
+	# backedge. Acyclic shared arrays are then scanned once, while unresolved
+	# false cycles are deliberately retraversed rather than cached unsafely.
+	if !found &&
+			get(visiting, _CONTAINS_BACKEDGE_COUNT, 0) ==
+				backedges_before
+		visiting[value] = _CONTAINS_VISIT_FALSE
+	else
+		delete!(visiting, value)
+	end
+	return found
+end
+
+_copy_alias_mutation_container(
+	value,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+) = _copy_alias_mutation_container(
+	value,
+	memo,
+	changed,
+	IdDict{Any,Nothing}(),
+)
+
+_copy_alias_mutation_container(
+	value,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+	::IdDict{Any,Nothing},
+) = begin
+	_contains_changed_mutation_container(value, changed) ||
+		return value
+	if haskey(memo, value)
+		staged = memo[value]
+		ismutable(value) && staged === value &&
+			throw(ArgumentError(
+				"Aliased value cannot be staged independently.",
+			))
+		return staged
+	end
+	staged = Base.deepcopy_internal(value, memo)
+	ismutable(value) && staged === value &&
+		throw(ArgumentError(
+			"Aliased value cannot be staged independently.",
+		))
+	return staged
+end
+
+function _dictionary_key_contains_changed(
+	value::AbstractDict,
+	changed::IdDict{Any,Nothing},
+)
+	for key in keys(value)
+		_contains_changed_mutation_container(key, changed) &&
+			return true
+	end
+	return false
+end
+
+function _copy_alias_mutation_container(
+	value::_BuiltinMutationDict,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+	visiting::IdDict{Any,Nothing},
+)
+	if haskey(visiting, value)
+		haskey(memo, value) || throw(AssertionError(
+			"Active alias dictionary has no staged counterpart.",
+		))
+		return memo[value]
+	end
+	keys_changed =
+		_dictionary_key_contains_changed(value, changed)
+	if haskey(memo, value)
+		staged = memo[value]
+		(haskey(changed, value) ||
+			_contains_changed_mutation_container(value, changed)) ||
+			return value
+		if keys_changed
+			staged === value && throw(ArgumentError(
+				"Aliased dictionary cannot be staged independently.",
+			))
+			visiting[value] = nothing
+			try
+				empty!(staged)
+				for (key, child) in value
+					staged[
+						_copy_alias_mutation_container(
+							key,
+							memo,
+							changed,
+							visiting,
+						)
+					] = _copy_alias_mutation_container(
+						child,
+						memo,
+						changed,
+						visiting,
+					)
+				end
+			finally
+				delete!(visiting, value)
+			end
+			return staged
+		end
+		visiting[value] = nothing
+		try
+			for (key, child) in value
+				haskey(staged, key) || continue
+				staged_child = staged[key]
+				if staged_child === child ||
+						(haskey(memo, child) &&
+						 memo[child] === staged_child)
+					staged[key] = _copy_alias_mutation_container(
+						child,
+						memo,
+						changed,
+						visiting,
+					)
+				end
+			end
+		finally
+			delete!(visiting, value)
+		end
+		return staged
+	end
+	_contains_changed_mutation_container(value, changed) ||
+		return value
+	staged = keys_changed ? empty(value) : copy(value)
+	memo[value] = staged
+	visiting[value] = nothing
+	try
+		for (key, child) in value
+			staged[
+				keys_changed ?
+				_copy_alias_mutation_container(
+					key,
+					memo,
+					changed,
+					visiting,
+				) :
+				key
+			] = _copy_alias_mutation_container(
+				child,
+				memo,
+				changed,
+				visiting,
+			)
+		end
+	finally
+		delete!(visiting, value)
+	end
+	return staged
+end
+
+function _copy_alias_mutation_container(
+	value::AbstractDict,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+	::IdDict{Any,Nothing},
+)
+	_contains_changed_mutation_container(value, changed) ||
+		return value
+	if haskey(memo, value)
+		staged = memo[value]
+		staged === value && throw(ArgumentError(
+			"Aliased dictionary cannot be staged independently.",
+		))
+		return staged
+	end
+	staged = Base.deepcopy_internal(value, memo)
+	staged === value && throw(ArgumentError(
+		"Aliased dictionary cannot be staged independently.",
+	))
+	return staged
+end
+
+function _copy_alias_mutation_container(
+	value::_BuiltinPlotlyAttribute,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+	visiting::IdDict{Any,Nothing},
+)
+	if haskey(visiting, value)
+		haskey(memo, value) || throw(AssertionError(
+			"Active Plotly attribute has no staged counterpart.",
+		))
+		return memo[value]
+	end
+	if haskey(memo, value)
+		staged = memo[value]
+		(haskey(changed, value) ||
+			_contains_changed_mutation_container(value, changed)) ||
+			return value
+		visiting[value] = nothing
+		fields = try
+			_copy_alias_mutation_container(
+				value.fields,
+				memo,
+				changed,
+				visiting,
+			)
+		finally
+			delete!(visiting, value)
+		end
+		fields === staged.fields ||
+			setfield!(staged, :fields, fields)
+		return staged
+	end
+	_contains_changed_mutation_container(value, changed) ||
+		return value
+	# A shallow field copy provides a cycle-safe shell without triggering
+	# PlotlyFrame's missing-name warning; recursive alias projection replaces
+	# the shell fields before it can escape.
+	staged = typeof(value)(copy(value.fields))
+	memo[value] = staged
+	visiting[value] = nothing
+	fields = try
+		_copy_alias_mutation_container(
+			value.fields,
+			memo,
+			changed,
+			visiting,
+		)
+	finally
+		delete!(visiting, value)
+	end
+	setfield!(staged, :fields, fields)
+	return staged
+end
+
+function _copy_alias_mutation_container(
+	value::PlotlyBase.AbstractPlotlyAttribute,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+	::IdDict{Any,Nothing},
+)
+	_contains_changed_mutation_container(value, changed) ||
+		return value
+	if haskey(memo, value)
+		staged = memo[value]
+		staged === value && throw(ArgumentError(
+			"Aliased Plotly attribute cannot be staged independently.",
+		))
+		return staged
+	end
+	staged = Base.deepcopy_internal(value, memo)
+	staged === value && throw(ArgumentError(
+		"Aliased Plotly attribute cannot be staged independently.",
+	))
+	return staged
+end
+
+function _copy_alias_mutation_container(
+	value::AbstractArray,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+	visiting::IdDict{Any,Nothing},
+)
+	if haskey(visiting, value)
+		haskey(memo, value) || throw(AssertionError(
+			"Active alias array has no staged counterpart.",
+		))
+		return memo[value]
+	end
+	if haskey(memo, value)
+		staged = memo[value]
+		(haskey(changed, value) ||
+			_contains_changed_mutation_container(value, changed)) ||
+			return value
+		axes(value) == axes(staged) || return staged
+		visiting[value] = nothing
+		try
+			for ind in eachindex(value, staged)
+				isassigned(value, ind) || continue
+				isassigned(staged, ind) || continue
+				child = value[ind]
+				staged_child = staged[ind]
+				if staged_child === child ||
+						(haskey(memo, child) &&
+						 memo[child] === staged_child)
+					staged[ind] = _copy_alias_mutation_container(
+						child,
+						memo,
+						changed,
+						visiting,
+					)
+				end
+			end
+		finally
+			delete!(visiting, value)
+		end
+		return staged
+	end
+	_contains_changed_mutation_container(value, changed) ||
+		return value
+	staged = copy(value)
+	if staged === value ||
+			typeof(staged) !== typeof(value) ||
+			axes(staged) != axes(value)
+		staged = Base.deepcopy_internal(value, memo)
+		(staged === value ||
+		 typeof(staged) !== typeof(value) ||
+		 axes(staged) != axes(value)) &&
+			throw(ArgumentError(
+				"Aliased array cannot be staged independently.",
+			))
+		return staged
+	end
+	memo[value] = staged
+	visiting[value] = nothing
+	try
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			staged[ind] = _copy_alias_mutation_container(
+				value[ind],
+				memo,
+				changed,
+				visiting,
+			)
+		end
+	finally
+		delete!(visiting, value)
+	end
+	return staged
+end
+
+function _clone_trace_for_alias_expansion(
+	trace::GenericTrace,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+)
+	if haskey(memo, trace)
+		staged = memo[trace]
+		(staged isa GenericTrace && staged !== trace) ||
+			throw(ArgumentError(
+				"Aliased trace cannot be staged independently.",
+			))
+		fields = _copy_alias_mutation_container(
+			trace.fields,
+			memo,
+			changed,
+		)
+		fields === staged.fields ||
+			setfield!(staged, :fields, fields)
+		return staged
+	end
+
+	original_fields = getfield(trace, :fields)
+	original_fields isa _BuiltinMutationDict || begin
+		staged = Base.deepcopy_internal(trace, memo)
+		staged !== trace || throw(ArgumentError(
+			"Aliased trace cannot be staged independently.",
+		))
+		return staged::GenericTrace
+	end
+
+	if haskey(memo, original_fields)
+		staged_fields = _copy_alias_mutation_container(
+			original_fields,
+			memo,
+			changed,
+		)
+		staged = typeof(trace)(staged_fields)
+		memo[trace] = staged
+		return staged
+	end
+
+	# Install both shells before descending so a cycle through the trace root
+	# reuses this exact staged trace instead of creating a second clone.
+	staged_fields = copy(original_fields)
+	(
+		staged_fields !== original_fields &&
+		typeof(staged_fields) === typeof(original_fields)
+	) || begin
+		staged = Base.deepcopy_internal(trace, memo)
+		staged !== trace || throw(ArgumentError(
+			"Aliased trace cannot be staged independently.",
+		))
+		return staged::GenericTrace
+	end
+	staged = typeof(trace)(staged_fields)
+	memo[trace] = staged
+	memo[original_fields] = staged_fields
+	fields = _copy_alias_mutation_container(
+		original_fields,
+		memo,
+		changed,
+	)
+	fields === staged_fields ||
+		setfield!(staged, :fields, fields)
+	return staged
+end
+
+function _clone_trace_for_alias_expansion(
+	trace::AbstractTrace,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+)
+	_contains_changed_mutation_container(trace, changed) ||
+		return trace
+	if haskey(memo, trace)
+		staged = memo[trace]
+		staged === trace && throw(ArgumentError(
+			"Aliased trace cannot be staged independently.",
+		))
+		return staged::AbstractTrace
+	end
+	staged = Base.deepcopy_internal(trace, memo)
+	staged === trace && throw(ArgumentError(
+		"Aliased trace cannot be staged independently.",
+	))
+	return staged::AbstractTrace
+end
+
+function _clone_layout_for_alias_expansion(
+	layout::Layout,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+)
+	if haskey(memo, layout)
+		staged = memo[layout]
+		(staged isa Layout && staged !== layout) ||
+			throw(ArgumentError(
+				"Aliased layout cannot be staged independently.",
+			))
+	else
+		original_fields = getfield(layout, :fields)
+		original_fields isa _BuiltinMutationDict || begin
+			staged = Base.deepcopy_internal(layout, memo)
+			staged !== layout || throw(ArgumentError(
+				"Aliased layout cannot be staged independently.",
+			))
+			return staged::Layout
+		end
+		if haskey(memo, original_fields)
+			staged_fields = _copy_alias_mutation_container(
+				original_fields,
+				memo,
+				changed,
+			)
+			staged = typeof(layout)(staged_fields)
+			memo[layout] = staged
+		else
+			# As for traces, publish the layout and field shells before
+			# recursively projecting aliases that may point back to the root.
+			staged_fields = copy(original_fields)
+			(
+				staged_fields !== original_fields &&
+				typeof(staged_fields) ===
+					typeof(original_fields)
+			) || begin
+				staged = Base.deepcopy_internal(layout, memo)
+				staged !== layout || throw(ArgumentError(
+					"Aliased layout cannot be staged independently.",
+				))
+				return staged::Layout
+			end
+			staged = typeof(layout)(staged_fields)
+			memo[layout] = staged
+			memo[original_fields] = staged_fields
+		end
+	end
+
+	fields = _copy_alias_mutation_container(
+		layout.fields,
+		memo,
+		changed,
+	)
+	# Layout's constructor merges defaults; restore the exact staged fields.
+	fields === staged.fields ||
+		setfield!(staged, :fields, fields)
+	subplots = _copy_alias_mutation_container(
+		getfield(layout, :subplots),
+		memo,
+		changed,
+	)
+	setfield!(staged, :subplots, subplots)
+	return staged
+end
+
+function _clone_layout_for_alias_expansion(
+	layout::AbstractLayout,
+	memo::IdDict{Any,Any},
+	changed::IdDict{Any,Nothing},
+)
+	_contains_changed_mutation_container(layout, changed) ||
+		return layout
+	if haskey(memo, layout)
+		staged = memo[layout]
+		staged === layout && throw(ArgumentError(
+			"Aliased layout cannot be staged independently.",
+		))
+		return staged::AbstractLayout
+	end
+	staged = Base.deepcopy_internal(layout, memo)
+	staged === layout && throw(ArgumentError(
+		"Aliased layout cannot be staged independently.",
+	))
+	return staged::AbstractLayout
+end
+
+function _data_membership_changed(
+	original::AbstractVector,
+	staged::AbstractVector,
+	memo::IdDict{Any,Any},
+)
+	axes(original) == axes(staged) || return true
+	for ind in eachindex(original, staged)
+		original_assigned = isassigned(original, ind)
+		staged_assigned = isassigned(staged, ind)
+		original_assigned == staged_assigned || return true
+		original_assigned || continue
+		original_trace = original[ind]
+		staged_trace = staged[ind]
+		(
+			staged_trace === original_trace ||
+			(
+				haskey(memo, original_trace) &&
+				memo[original_trace] === staged_trace
+			)
+		) || return true
+	end
+	return false
+end
+
+function _expand_staged_alias_roots!(
+	p::Plot,
+	staged_traces::IdDict{AbstractTrace,AbstractTrace},
+	staged_layout::Union{Nothing,AbstractLayout},
+	memo::IdDict{Any,Any},
+	;
+	for_renderer::Bool = false,
+	setter_origins::Union{Nothing,IdDict{Any,Nothing}} = nothing,
+)
+	pruned_roots = IdDict{Any,Any}()
+	for (original, staged) in collect(staged_traces)
+		original isa GenericTrace && continue
+		if _staged_graph_unchanged(original, staged, memo)
+			pruned_roots[staged] = original
+			delete!(staged_traces, original)
+		end
+	end
+	changed = IdDict{Any,Nothing}()
+	contains_visiting = IdDict{Any,Any}()
+	# Setter inputs can be caller-owned containers that also appear elsewhere
+	# in the model. They are not necessarily reachable from the original side
+	# of a newly inserted field, so inspect both staged model roots and every
+	# copy-on-write memo pair. Structural graph diffing records the deepest
+	# changed mutable nodes, including nodes behind arbitrary wrappers.
+	diff_seen = IdDict{Any,Any}()
+	for (original, staged) in staged_traces
+		_collect_changed_graph_nodes!(
+			changed,
+			original,
+			staged,
+			memo,
+			diff_seen,
+		)
+	end
+	if staged_layout !== nothing
+		_collect_changed_graph_nodes!(
+			changed,
+			p.layout,
+			staged_layout,
+			memo,
+			diff_seen,
+		)
+	end
+	for (original, staged) in collect(memo)
+		_collect_changed_graph_nodes!(
+			changed,
+			original,
+			staged,
+			memo,
+			diff_seen,
+		)
+	end
+	isempty(changed) && return (
+		data = nothing,
+		layout = staged_layout,
+		frames = nothing,
+		config = nothing,
+		render_payload = nothing,
+	)
+
+	if _contains_changed_mutation_container(
+				p.layout,
+				changed,
+				contains_visiting,
+			)
+		if staged_layout === nothing
+			staged_layout = _clone_layout_for_alias_expansion(
+				p.layout,
+				memo,
+				changed,
+			)
+		elseif p.layout isa Layout &&
+				staged_layout isa Layout
+			fields = _copy_alias_mutation_container(
+				p.layout.fields,
+				memo,
+				changed,
+			)
+			fields === staged_layout.fields ||
+				setfield!(staged_layout, :fields, fields)
+		end
+	end
+
+	for original in p.data
+		_contains_changed_mutation_container(
+			original,
+			changed,
+			contains_visiting,
+		) || continue
+		if haskey(staged_traces, original)
+			trace = staged_traces[original]
+			if original isa GenericTrace &&
+					trace isa GenericTrace
+				fields = _copy_alias_mutation_container(
+					original.fields,
+					memo,
+					changed,
+				)
+				fields === trace.fields ||
+					setfield!(trace, :fields, fields)
+			end
+		else
+			staged_traces[original] = _clone_trace_for_alias_expansion(
+				original,
+				memo,
+				changed,
+			)
+		end
+	end
+
+	staged_frames =
+		_contains_changed_mutation_container(
+			p.frames,
+			changed,
+			contains_visiting,
+		) ?
+		_copy_alias_mutation_container(
+			p.frames,
+			memo,
+			changed,
+		) :
+		nothing
+	staged_config =
+		_contains_changed_mutation_container(
+			p.config,
+			changed,
+			contains_visiting,
+		) ?
+		_copy_alias_mutation_container(
+			p.config,
+			memo,
+			changed,
+		) :
+		nothing
+
+	data_candidate = get(memo, p.data, nothing)
+	data_changed =
+		data_candidate !== nothing &&
+		(
+			_data_membership_changed(p.data, data_candidate, memo) ||
+			(
+				!(p.data isa Vector && data_candidate isa Vector) &&
+				!_staged_graph_unchanged(
+					p.data,
+					data_candidate,
+					memo,
+				)
+			)
+		)
+	needs_full_renderer_refresh =
+		data_changed ||
+		staged_frames !== nothing ||
+		staged_config !== nothing ||
+		any(
+			original -> !(original isa GenericTrace),
+			keys(staged_traces),
+		) ||
+		(
+			staged_layout !== nothing &&
+			!(p.layout isa Layout && staged_layout isa Layout)
+		)
+	render_payload =
+		for_renderer && needs_full_renderer_refresh ?
+		(
+			data = _json_js(
+				data_candidate === nothing ?
+				_staged_candidate_data(p, staged_traces) :
+				data_candidate,
+			),
+			layout = _json_js(
+				staged_layout === nothing ?
+					p.layout :
+					staged_layout,
+			),
+			config = _json_js(
+				staged_config === nothing ?
+					p.config :
+					staged_config,
+			),
+			frames = staged_frames === nothing ?
+				nothing :
+				_json_js(staged_frames),
+		) :
+		nothing
+
+	preserved_roots = copy(pruned_roots)
+	preserve_data_root =
+		data_candidate !== nothing &&
+		(
+			!data_changed ||
+			(p.data isa Vector && data_candidate isa Vector)
+		)
+	preserve_data_root &&
+		(preserved_roots[data_candidate] = p.data)
+	data_candidate !== nothing &&
+		data_changed &&
+		!preserve_data_root &&
+		(preserved_roots[data_candidate] = data_candidate)
+	# Any public trace cloned incidentally through an arbitrary wrapper must
+	# project back to that trace when it is otherwise unchanged. This is
+	# independent of whether the data vector itself was staged.
+	for original in p.data
+		haskey(memo, original) || continue
+		staged = memo[original]
+		_staged_graph_unchanged(original, staged, memo) &&
+			(preserved_roots[staged] = original)
+	end
+	for (original, staged) in staged_traces
+		original isa GenericTrace &&
+			staged isa GenericTrace &&
+			(preserved_roots[staged] = original)
+	end
+	if staged_layout !== nothing &&
+			p.layout isa Layout &&
+			staged_layout isa Layout
+		preserved_roots[staged_layout] = p.layout
+	end
+	memoized_layout = get(memo, p.layout, nothing)
+	if memoized_layout !== nothing &&
+			(
+				staged_layout === nothing ||
+				(p.layout isa Layout && staged_layout isa Layout)
+			)
+		preserved_roots[memoized_layout] = p.layout
+	end
+	frame_candidate =
+		staged_frames === nothing ?
+		get(memo, p.frames, nothing) :
+		staged_frames
+	preserve_frames_root =
+		frame_candidate !== nothing &&
+		(
+			staged_frames === nothing ||
+			(p.frames isa Vector && frame_candidate isa Vector)
+		)
+	preserve_frames_root &&
+		(preserved_roots[frame_candidate] = p.frames)
+	config_candidate =
+		staged_config === nothing ?
+		get(memo, p.config, nothing) :
+		staged_config
+	config_candidate === nothing ||
+		(preserved_roots[config_candidate] = p.config)
+
+	model_memoized = IdDict{Any,Nothing}()
+	if setter_origins !== nothing && !isempty(setter_origins)
+		model_seen = IdDict{Any,Nothing}()
+		for root in (p.data, p.layout, p.frames, p.config)
+			_collect_model_memoized_identities!(
+				model_memoized,
+				root,
+				memo,
+				setter_origins,
+				model_seen,
+			)
+		end
+	end
+	for original in keys(model_memoized)
+		staged = memo[original]
+		_staged_graph_unchanged(original, staged, memo) &&
+			(preserved_roots[staged] = original)
+	end
+
+	root_translation = copy(preserved_roots)
+	root_translation[p.data] = p.data
+	root_translation[p.layout] = p.layout
+	root_translation[p.frames] = p.frames
+	root_translation[p.config] = p.config
+	if setter_origins !== nothing
+		# Values that the optimized setter staging deliberately passed through
+		# must retain their identity when a newly inserted plotting dictionary
+		# is projected onto committed model roots. Memoized model identities
+		# are excluded here because their staged counterparts require the
+		# translations assembled below.
+		for root in keys(setter_origins)
+			haskey(memo, root) && continue
+			haskey(root_translation, root) ||
+				(root_translation[root] = root)
+		end
+	end
+	if staged_layout !== nothing &&
+			!(
+				p.layout isa Layout &&
+				staged_layout isa Layout
+			)
+		original_staged_layout = staged_layout
+		staged_layout =
+			Base.deepcopy_internal(
+				original_staged_layout,
+				root_translation,
+			)
+		root_translation[original_staged_layout] =
+			staged_layout
+	end
+	if staged_frames !== nothing
+		original_staged_frames = staged_frames
+		delete!(root_translation, staged_frames)
+		staged_frames, _ =
+			_rebase_unchanged_mutation_container!(
+				p.frames,
+				staged_frames,
+				memo,
+				root_translation,
+			)
+		root_translation[original_staged_frames] =
+			preserve_frames_root ? p.frames : staged_frames
+	end
+	if staged_config !== nothing
+		original_staged_config = staged_config
+		delete!(root_translation, staged_config)
+		staged_config, _ =
+			_rebase_unchanged_mutation_container!(
+				p.config,
+				staged_config,
+				memo,
+				root_translation,
+			)
+		root_translation[original_staged_config] = p.config
+	end
+	for (original, staged) in collect(staged_traces)
+		original isa GenericTrace && continue
+		rebased =
+			Base.deepcopy_internal(
+				staged,
+				root_translation,
+			)
+		root_translation[staged] = rebased
+		staged_traces[original] = rebased
+	end
+	for (original, staged) in staged_traces
+		original isa GenericTrace &&
+			staged isa GenericTrace &&
+			_rebase_staged_trace!(
+				original,
+				staged,
+				memo,
+				root_translation,
+			)
+	end
+	staged_layout === nothing ||
+		_rebase_staged_layout!(
+			p.layout,
+			staged_layout,
+			memo,
+			root_translation,
+		)
+
+	if staged_frames !== nothing && preserve_frames_root
+		root_translation[staged_frames] = p.frames
+		projected_frames = copy(staged_frames)
+		for ind in eachindex(staged_frames)
+			isassigned(staged_frames, ind) || continue
+			projected_frames[ind] =
+				Base.deepcopy_internal(
+					staged_frames[ind],
+					root_translation,
+				)
+		end
+		staged_frames = projected_frames
+	end
+	if staged_config !== nothing
+		root_translation[staged_config] = p.config
+		projected_config = typeof(p.config)()
+		for ind in 1:fieldcount(typeof(staged_config))
+			isdefined(staged_config, ind) || continue
+			setfield!(
+				projected_config,
+				ind,
+				Base.deepcopy_internal(
+					getfield(staged_config, ind),
+					root_translation,
+				),
+			)
+		end
+		staged_config = projected_config
+	end
+	staged_data = nothing
+	if data_changed
+		projected_data =
+			preserve_data_root ? copy(data_candidate) : data_candidate
+		for ind in eachindex(data_candidate)
+			isassigned(data_candidate, ind) || continue
+			projected_data[ind] = Base.deepcopy_internal(
+				data_candidate[ind],
+				root_translation,
+			)
+		end
+		staged_data = projected_data
+	end
+	return (
+		data = staged_data,
+		layout = staged_layout,
+		frames = staged_frames,
+		config = staged_config,
+		render_payload = render_payload,
+	)
+end
+
+function _prepare_incremental_outer_root_commit!(
+	p::Plot,
+	expanded,
+)
+	if expanded.data !== nothing &&
+			p.data isa Vector &&
+			expanded.data isa Vector
+		sizehint!(p.data, length(expanded.data))
+	end
+	if expanded.frames !== nothing &&
+			p.frames isa Vector &&
+			expanded.frames isa Vector
+		sizehint!(p.frames, length(expanded.frames))
+	end
+	return expanded
+end
+
+function _commit_incremental_outer_roots!(
+	p::Plot,
+	expanded,
+)
+	if expanded.data !== nothing
+		if p.data isa Vector &&
+				expanded.data isa Vector
+			resize!(p.data, length(expanded.data))
+			copyto!(p.data, expanded.data)
+		else
+			setfield!(p, :data, expanded.data)
+		end
+	end
+	if expanded.frames !== nothing
+		if p.frames isa Vector &&
+				expanded.frames isa Vector
+			resize!(p.frames, length(expanded.frames))
+			copyto!(p.frames, expanded.frames)
+		else
+			setfield!(p, :frames, expanded.frames)
+		end
+	end
+	if expanded.config !== nothing
+		for ind in 1:fieldcount(typeof(p.config))
+			setfield!(
+				p.config,
+				ind,
+				getfield(expanded.config, ind),
+			)
+		end
+	end
+	return p
+end
+
+function _incremental_candidate_model(
+	p::Plot,
+	data,
+	layout,
+	expanded,
+)
+	return Plot(
+		data,
+		layout,
+		expanded.frames === nothing ?
+			p.frames :
+			expanded.frames,
+		p.divid,
+		expanded.config === nothing ?
+			p.config :
+			expanded.config,
+	)
+end
+
+function _prepare_restyle_replacement_data(
 	p::Plot,
 	staged::IdDict{AbstractTrace,AbstractTrace},
 )
-	# Standard traces keep their identity by swapping the successfully staged
-	# field dictionary. Third-party trace implementations are replaced only
-	# after every staged update succeeds.
-	replacement_data = nothing
-	for (original, _) in staged
-		if !(original isa GenericTrace)
-			replacement_data = copy(p.data)
-			break
+	any(original -> !(original isa GenericTrace), keys(staged)) ||
+		return nothing
+	replacement_data = copy(p.data)
+	for ind in eachindex(replacement_data)
+		original = p.data[ind]
+		if !(original isa GenericTrace) && haskey(staged, original)
+			replacement_data[ind] = staged[original]
 		end
 	end
+	return replacement_data
+end
+
+function _commit_restyle!(
+	p::Plot,
+	staged::IdDict{AbstractTrace,AbstractTrace},
+	replacement_data,
+)
+	# Standard traces keep their identity by swapping the successfully staged
+	# field dictionary. Third-party trace implementations are replaced only
+	# after every staged update succeeds. For renderer transactions the
+	# replacement vector is prepared before the renderer call.
 	if replacement_data !== nothing
-		for ind in eachindex(replacement_data)
-			original = p.data[ind]
-			if !(original isa GenericTrace) && haskey(staged, original)
-				replacement_data[ind] = staged[original]
-			end
-		end
 		copyto!(p.data, replacement_data)
 	end
 	for (original, trace) in staged
@@ -845,6 +4368,14 @@ function _commit_restyle!(
 		end
 	end
 	return p
+end
+
+function _commit_restyle!(
+	p::Plot,
+	staged::IdDict{AbstractTrace,AbstractTrace},
+)
+	replacement_data = _prepare_restyle_replacement_data(p, staged)
+	return _commit_restyle!(p, staged, replacement_data)
 end
 
 function _commit_layout!(p::Plot, staged::AbstractLayout)
@@ -863,14 +4394,36 @@ function _do_restyle!(
 	update::AbstractDict = Dict();
 	kwargs...,
 )
+	memo = IdDict{Any,Any}()
+	setter_origins = IdDict{Any,Nothing}()
 	staged = _stage_restyle(
 		p,
 		(ind,),
 		update,
 		kwargs;
 		vectorized = false,
+		memo = memo,
+		setter_origins = setter_origins,
 	)
-	_commit_restyle!(p, staged)
+	_rebase_staged_traces!(staged, memo)
+	expanded =
+		_expand_staged_alias_roots!(
+			p,
+			staged,
+			nothing,
+			memo;
+			setter_origins = setter_origins,
+		)
+	staged_layout = expanded.layout
+	_prepare_incremental_outer_root_commit!(p, expanded)
+	replacement_data =
+		expanded.data === nothing ?
+		_prepare_restyle_replacement_data(p, staged) :
+		nothing
+	_commit_restyle!(p, staged, replacement_data)
+	staged_layout === nothing ||
+		_commit_layout!(p, staged_layout)
+	_commit_incremental_outer_roots!(p, expanded)
 	return p
 end
 
@@ -880,14 +4433,36 @@ function _do_restyle!(
 	update::AbstractDict = Dict();
 	kwargs...,
 )
+	memo = IdDict{Any,Any}()
+	setter_origins = IdDict{Any,Nothing}()
 	staged = _stage_restyle(
 		p,
 		inds,
 		update,
 		kwargs;
 		vectorized = true,
+		memo = memo,
+		setter_origins = setter_origins,
 	)
-	_commit_restyle!(p, staged)
+	_rebase_staged_traces!(staged, memo)
+	expanded =
+		_expand_staged_alias_roots!(
+			p,
+			staged,
+			nothing,
+			memo;
+			setter_origins = setter_origins,
+		)
+	staged_layout = expanded.layout
+	_prepare_incremental_outer_root_commit!(p, expanded)
+	replacement_data =
+		expanded.data === nothing ?
+		_prepare_restyle_replacement_data(p, staged) :
+		nothing
+	_commit_restyle!(p, staged, replacement_data)
+	staged_layout === nothing ||
+		_commit_layout!(p, staged_layout)
+	_commit_incremental_outer_roots!(p, expanded)
 	return p
 end
 
@@ -1132,8 +4707,18 @@ function _do_update!(
 	kwargs...,
 )
 	# Commit neither side until layout and trace staging both succeed.
-	staged_layout = _clone_layout_for_mutation(p.layout)
-	relayout!(staged_layout; layout.fields...)
+	memo = IdDict{Any,Any}()
+	setter_origins = IdDict{Any,Nothing}()
+	staged_layout = _clone_layout_for_mutation(p.layout, memo)
+	_, prepared_layout = _prepare_relayout_inputs(
+		(),
+		layout.fields,
+		memo,
+		setter_origins,
+		;
+		strict = !(p.layout isa Layout),
+	)
+	relayout!(staged_layout; prepared_layout...)
 	inds = ind isa Int ? (ind,) : ind
 	staged_traces = _stage_restyle(
 		p,
@@ -1141,10 +4726,28 @@ function _do_update!(
 		update,
 		kwargs;
 		vectorized = !(ind isa Int),
+		memo = memo,
+		setter_origins = setter_origins,
 	)
+	_rebase_staged_layout!(p.layout, staged_layout, memo)
+	_rebase_staged_traces!(staged_traces, memo)
+	expanded = _expand_staged_alias_roots!(
+		p,
+		staged_traces,
+		staged_layout,
+		memo;
+		setter_origins = setter_origins,
+	)
+	staged_layout = expanded.layout
+	_prepare_incremental_outer_root_commit!(p, expanded)
 
-	_commit_restyle!(p, staged_traces)
+	replacement_data =
+		expanded.data === nothing ?
+		_prepare_restyle_replacement_data(p, staged_traces) :
+		nothing
+	_commit_restyle!(p, staged_traces, replacement_data)
 	_commit_layout!(p, staged_layout)
+	_commit_incremental_outer_roots!(p, expanded)
 	return p
 end
 
@@ -1173,92 +4776,1833 @@ function _do_update_polars!(p::Plot, args...; kwargs...)
 	return p
 end
 
+# ── Transactional renderer mutation helpers ────────────────────────
+
+struct _CurrentPlotLayout end
+const _CURRENT_PLOT_LAYOUT = _CurrentPlotLayout()
+
+function _resolve_update_layout(p::Plot, requested)
+	requested === _CURRENT_PLOT_LAYOUT && return p.layout
+	requested isa AbstractLayout || throw(TypeError(
+		:update!,
+		"keyword argument `layout`",
+		AbstractLayout,
+		requested,
+	))
+	return requested
+end
+
+_plotly_delta_path(prefix::AbstractString, key) =
+	isempty(prefix) ? string(key) : string(prefix, '.', key)
+
+function _is_atomic_plotly_delta_attribute(key, original, staged)
+	(original isa AbstractDict || staged isa AbstractDict) || return false
+	(key isa Symbol || key isa AbstractString) || return false
+	# `meta` is an arbitrary JSON value, not a schema-addressable object.
+	# Emit it whole so literal dots in user keys never become Plotly.js paths.
+	return Symbol(key) in (:geojson, :labelalias, :meta)
+end
+
+_is_plotly_delta_container(value) =
+	value isa AbstractDict ||
+	value isa PlotlyBase.AbstractPlotlyAttribute
+
+function _is_staged_mutation_clone(original, staged, memo)
+	memo === nothing && return false
+	return haskey(memo, original) && memo[original] === staged
+end
+
+function _plotly_leaf_deltas!(
+	deltas::Dict{String,Any},
+	original,
+	staged,
+	path::String,
+	memo,
+)
+	original === staged && return deltas
+	isempty(path) || (deltas[path] = staged)
+	return deltas
+end
+
+function _plotly_leaf_deltas!(
+	deltas::Dict{String,Any},
+	original::AbstractDict,
+	staged::AbstractDict,
+	path::String,
+	memo,
+)
+	original === staged && return deltas
+	for (key, original_value) in original
+		child_path = _plotly_delta_path(path, key)
+		if haskey(staged, key)
+			staged_value = staged[key]
+			if _is_atomic_plotly_delta_attribute(
+				key,
+				original_value,
+				staged_value,
+			)
+				original_value === staged_value ||
+					(deltas[child_path] = staged_value)
+			elseif (_is_plotly_delta_container(original_value) ||
+					_is_plotly_delta_container(staged_value)) &&
+					!_is_staged_mutation_clone(
+						original_value,
+						staged_value,
+						memo,
+					)
+				# A dictionary/attribute assigned wholesale is an atomic Plotly
+				# value. Flatten only structural clones created by our nested
+				# setter staging; otherwise dotted user keys (for example in
+				# `meta`) would be misinterpreted as property paths.
+				original_value === staged_value ||
+					(deltas[child_path] = staged_value)
+			else
+				_plotly_leaf_deltas!(
+					deltas,
+					original_value,
+					staged_value,
+					child_path,
+					memo,
+				)
+			end
+		else
+			# Plotly.js uses null to clear/reset a property.
+			deltas[child_path] = nothing
+		end
+	end
+	for (key, staged_value) in staged
+		haskey(original, key) && continue
+		deltas[_plotly_delta_path(path, key)] = staged_value
+	end
+	return deltas
+end
+
+function _plotly_leaf_deltas!(
+	deltas::Dict{String,Any},
+	original::PlotlyBase.AbstractPlotlyAttribute,
+	staged::PlotlyBase.AbstractPlotlyAttribute,
+	path::String,
+	memo,
+)
+	original === staged && return deltas
+	return _plotly_leaf_deltas!(
+		deltas,
+		original.fields,
+		staged.fields,
+		path,
+		memo,
+	)
+end
+
+function _plotly_leaf_deltas(
+	original,
+	staged,
+	memo = nothing,
+)
+	deltas = Dict{String,Any}()
+	_plotly_leaf_deltas!(deltas, original, staged, "", memo)
+	return deltas
+end
+
+function _trace_delta_operations(
+	p::Plot,
+	staged::IdDict{AbstractTrace,AbstractTrace},
+	memo::IdDict{Any,Any},
+)
+	deltas_by_trace = IdDict{AbstractTrace,Dict{String,Any}}()
+	for (original, trace) in staged
+		if original isa GenericTrace && trace isa GenericTrace
+			deltas_by_trace[original] =
+				_plotly_leaf_deltas(
+					original.fields,
+					trace.fields,
+					memo,
+				)
+		end
+	end
+
+	grouped =
+		Dict{String,Tuple{Vector{Int},Vector{Any}}}()
+	for ind in eachindex(p.data)
+		original = p.data[ind]
+		haskey(deltas_by_trace, original) || continue
+		for (path, value) in deltas_by_trace[original]
+			indices, values = get!(
+				() -> (Int[], Any[]),
+				grouped,
+				path,
+			)
+			push!(indices, Int(ind) - 1)
+			push!(values, value)
+		end
+	end
+
+	paths = sort!(collect(keys(grouped)))
+	return [
+		(
+			path = path,
+			indices = grouped[path][1],
+			values = grouped[path][2],
+		)
+		for path in paths
+	]
+end
+
+function _plotlyjs_delta_script(
+	sp::SyncPlot,
+	calls::Vector{String},
+)
+	isempty(calls) && return nothing
+	divid_js = _json_js(sp.divid)
+	body = join(calls, '\n')
+	return """
+(async function() {
+  if (typeof Plotly === "undefined") return "plotly-not-loaded";
+  const div = document.getElementById($divid_js);
+  if (!div) return "plot-div-not-found";
+$body
+  return "ok";
+})();
+"""
+end
+
+function _plotlyjs_relayout_script(
+	sp::SyncPlot,
+	layout_delta::AbstractDict,
+)
+	isempty(layout_delta) && return nothing
+	call = "  await Plotly.relayout(div, $(_json_js(layout_delta)));"
+	return _plotlyjs_delta_script(sp, [call])
+end
+
+function _plotlyjs_restyle_script(sp::SyncPlot, operations)
+	calls = String[]
+	sizehint!(calls, length(operations))
+	for operation in operations
+		update = Dict{String,Any}(
+			operation.path => operation.values,
+		)
+		push!(
+			calls,
+			"  await Plotly.restyle(div, $(_json_js(update)), " *
+			"$(_json_js(operation.indices)));",
+		)
+	end
+	return _plotlyjs_delta_script(sp, calls)
+end
+
+function _plotlyjs_update_script(
+	sp::SyncPlot,
+	trace_operations,
+	layout_delta::AbstractDict,
+)
+	if isempty(trace_operations)
+		return _plotlyjs_relayout_script(sp, layout_delta)
+	end
+
+	calls = String[]
+	sizehint!(calls, length(trace_operations))
+	first_operation = first(trace_operations)
+	first_update = Dict{String,Any}(
+		first_operation.path => first_operation.values,
+	)
+	push!(
+		calls,
+		"  await Plotly.update(div, $(_json_js(first_update)), " *
+		"$(_json_js(layout_delta)), " *
+		"$(_json_js(first_operation.indices)));",
+	)
+	for operation in Iterators.drop(trace_operations, 1)
+		update = Dict{String,Any}(
+			operation.path => operation.values,
+		)
+		push!(
+			calls,
+			"  await Plotly.restyle(div, $(_json_js(update)), " *
+			"$(_json_js(operation.indices)));",
+		)
+	end
+	return _plotlyjs_delta_script(sp, calls)
+end
+
+function _staged_candidate_data(
+	p::Plot,
+	staged::IdDict{AbstractTrace,AbstractTrace},
+)
+	data = copy(p.data)
+	for ind in eachindex(data)
+		original = p.data[ind]
+		haskey(staged, original) && (data[ind] = staged[original])
+	end
+	return data
+end
+
+_has_third_party_staged_trace(
+	staged::IdDict{AbstractTrace,AbstractTrace},
+) = any(original -> !(original isa GenericTrace), keys(staged))
+
+function _prepare_react_values(p::Plot, data, layout)
+	data_type = fieldtype(typeof(p), :data)
+	layout_type = fieldtype(typeof(p), :layout)
+	# Mutable struct assignment converts to the declared field type. Perform
+	# both conversions before rendering so commit cannot fail halfway through.
+	return convert(data_type, data), convert(layout_type, layout)
+end
+
+function _syncplot_recovery_autoplay(sp::SyncPlot)
+	spec = getfield(sp, :_resources).creation_spec
+	return spec === nothing ? false : spec.autoplay
+end
+
+function _set_renderer_desynchronized!(
+	sp::SyncPlot,
+	value::Bool,
+)
+	getfield(sp, :_resources).renderer_desynchronized = value
+	return nothing
+end
+
+function _rebuild_committed_renderer!(
+	sp::SyncPlot,
+	committed_model::Plot,
+	operation_error = nothing,
+)
+	try
+		_require_open_syncplot_window(sp)
+		script = _plotlyjs_refresh_script(
+			sp,
+			committed_model.data,
+			committed_model.layout;
+			model = committed_model,
+			rebuild = true,
+			autoplay = _syncplot_recovery_autoplay(sp),
+		)
+		_require_open_syncplot_window(sp)
+		_run_plotlyjs_script!(sp, script, "renderer recovery")
+	catch recovery_error
+		_set_renderer_desynchronized!(sp, true)
+		throw(_SyncPlotDesynchronizationError(
+			operation_error,
+			recovery_error,
+		))
+	end
+	_set_renderer_desynchronized!(sp, false)
+	return nothing
+end
+
+function _ensure_renderer_synchronized!(
+	sp::SyncPlot,
+	committed_model::Plot,
+)
+	getfield(sp, :_resources).renderer_desynchronized || return nothing
+	_rebuild_committed_renderer!(sp, committed_model)
+	return nothing
+end
+
+function _run_transaction_renderer_script!(
+	sp::SyncPlot,
+	script::String,
+	operation::String,
+	committed_model::Plot,
+)
+	# Staging, diffing, JSON encoding, and both open checks have completed
+	# before this try block. Therefore every caught error follows an actual
+	# renderer attempt and requires recovery of the committed model.
+	try
+		_run_plotlyjs_script!(sp, script, operation)
+	catch operation_error
+		if operation_error isa InterruptException
+			_set_renderer_desynchronized!(sp, true)
+			throw(operation_error)
+		end
+		_rebuild_committed_renderer!(
+			sp,
+			committed_model,
+			operation_error,
+		)
+		throw(operation_error)
+	end
+	return nothing
+end
+
+function _syncplot_registration_matches_locked(
+	sp::SyncPlot,
+	p::Plot,
+	expectation::Symbol,
+	expected_version::Union{Nothing,_PlotSyncPlotGeneration},
+)
+	getfield(sp, :plot) === p || return false
+	_plot_syncplot_version(p) === expected_version || return false
+	mapped = get(_PLOT_SYNCPLOT_MAP, p, nothing)
+	if expectation === :mapped
+		return mapped === sp
+	elseif expectation === :unregistered
+		return mapped === nothing
+	end
+	throw(ArgumentError(
+		"unsupported SyncPlot registration expectation: $expectation",
+	))
+end
+
+function _syncplot_registration_matches(
+	sp::SyncPlot,
+	p::Plot,
+	expectation::Symbol,
+	expected_version::Union{Nothing,_PlotSyncPlotGeneration},
+)
+	return lock(_SYNCPLOT_REGISTRY_LOCK) do
+		_syncplot_registration_matches_locked(
+			sp,
+			p,
+			expectation,
+			expected_version,
+		)
+	end
+end
+
+function _execute_syncplot_transaction_locked!(
+	sp::SyncPlot,
+	prepare;
+	expected_plot::Union{Nothing,Plot} = nothing,
+	registration_expectation::Symbol = :mapped,
+	expected_version::Union{Nothing,_PlotSyncPlotGeneration} = nothing,
+)
+	if expected_plot !== nothing &&
+			!_syncplot_registration_matches(
+				sp,
+				expected_plot,
+				registration_expectation,
+				expected_version,
+			)
+		return :stale
+	end
+
+	committed_model = getfield(sp, :plot)
+	expected_plot === nothing || committed_model === expected_plot ||
+		return :stale
+	prepared = prepare(sp, committed_model)
+	rendered = prepared.script !== nothing
+
+	# Preparation performs bounds/type validation and JSON serialization. Check
+	# the registration generation again before the first renderer effect so an
+	# invalid call or concurrent remap remains side-effect free.
+	if expected_plot !== nothing &&
+			!_syncplot_registration_matches(
+				sp,
+				expected_plot,
+				registration_expectation,
+				expected_version,
+			)
+		return :stale
+	end
+
+	_require_open_syncplot_window(sp)
+	_ensure_renderer_synchronized!(sp, committed_model)
+	if expected_plot !== nothing &&
+			!_syncplot_registration_matches(
+				sp,
+				expected_plot,
+				registration_expectation,
+				expected_version,
+			)
+		return :stale
+	end
+	if rendered
+		_require_open_syncplot_window(sp)
+		_run_transaction_renderer_script!(
+			sp,
+			prepared.script,
+			prepared.operation,
+			committed_model,
+		)
+	end
+
+	resources = getfield(sp, :_resources)
+	status = try
+		lock(resources.lock) do
+			resources.close_started && throw(InvalidStateException(
+				"SyncPlot window is not open",
+				:not_open,
+			))
+			lock(_SYNCPLOT_REGISTRY_LOCK) do
+				if expected_plot !== nothing
+					if !_syncplot_registration_matches_locked(
+							sp,
+							expected_plot,
+							registration_expectation,
+							expected_version,
+						)
+						return :stale
+					end
+				end
+				prepared.commit()
+				return :committed
+			end
+		end
+	catch post_render_error
+		# The renderer has accepted the candidate, but Julia commit did not
+		# return normally. Its exact linearization point is unknowable under an
+		# asynchronous exception, so force a committed-model rebuild before the
+		# next mutation instead of claiming synchronization.
+		rendered && _set_renderer_desynchronized!(sp, true)
+		throw(post_render_error)
+	end
+
+	if status === :stale && rendered
+		_rebuild_committed_renderer!(
+			sp,
+			committed_model,
+			ErrorException(
+				"SyncPlot registration changed before transaction commit.",
+			),
+		)
+	end
+	return status
+end
+
+function _syncplot_transaction_status!(
+	sp::SyncPlot,
+	prepare;
+	required_plot::Union{Nothing,Plot} = nothing,
+	reserved_plot::Union{Nothing,Plot} = nothing,
+)
+	resources = getfield(sp, :_resources)
+	lock(resources.render_lock)
+	reservations = Tuple{Plot,_SyncPlotReservation}[]
+	owner_claimed = false
+	try
+		resources.transaction_owner === nothing ||
+			throw(InvalidStateException(
+				"Reentrant SyncPlot mutation is not supported",
+				:reentrant,
+			))
+		resources.transaction_owner = current_task()
+		owner_claimed = true
+
+		current = getfield(sp, :plot)
+		_require_syncplot_model(current)
+		reserved_plot === nothing ||
+			_require_syncplot_model(reserved_plot)
+		required_plot === nothing || current === required_plot ||
+			return :stale
+
+		expectation, version = lock(_SYNCPLOT_REGISTRY_LOCK) do
+			mapped = get(_PLOT_SYNCPLOT_MAP, current, nothing)
+			if mapped !== nothing && mapped !== sp
+				required_plot === nothing ||
+					return (:stale, nothing)
+				throw(InvalidStateException(
+					"SyncPlot model is displayed by a different SyncPlot",
+					:remapped,
+				))
+			end
+
+			current_reservation, current_added =
+				_reserve_plot_for_syncplot!(
+					current,
+					sp,
+					:current,
+				)
+			current_added &&
+				push!(reservations, (current, current_reservation))
+
+			if reserved_plot !== nothing && reserved_plot !== current
+				candidate_mapping =
+					get(_PLOT_SYNCPLOT_MAP, reserved_plot, nothing)
+				candidate_mapping === nothing ||
+					throw(InvalidStateException(
+						"Replacement Plot is already displayed by a SyncPlot",
+						:remapped,
+					))
+				candidate_reservation, candidate_added =
+					_reserve_plot_for_syncplot!(
+						reserved_plot,
+						sp,
+						:candidate,
+					)
+				candidate_added &&
+					push!(
+						reservations,
+						(reserved_plot, candidate_reservation),
+					)
+			end
+
+			registration_expectation =
+				mapped === sp ? :mapped : :unregistered
+			return (
+				registration_expectation,
+				_plot_syncplot_version(current),
+			)
+		end
+
+		expectation === :stale && return :stale
+		status = _execute_syncplot_transaction_locked!(
+			sp,
+			prepare;
+			expected_plot = current,
+			registration_expectation = expectation,
+			expected_version = version,
+		)
+		return status
+	finally
+		try
+			lock(_SYNCPLOT_REGISTRY_LOCK) do
+				for (plot, reservation) in Iterators.reverse(reservations)
+					_release_plot_syncplot_reservation!(
+						plot,
+						reservation,
+					)
+				end
+			end
+		finally
+			try
+				owner_claimed &&
+					(resources.transaction_owner = nothing)
+			finally
+				unlock(resources.render_lock)
+			end
+		end
+	end
+end
+
+function _syncplot_transaction!(
+	sp::SyncPlot,
+	prepare;
+	reserved_plot::Union{Nothing,Plot} = nothing,
+)
+	status = _syncplot_transaction_status!(
+		sp,
+		prepare;
+		reserved_plot = reserved_plot,
+	)
+	status === :committed || throw(InvalidStateException(
+		"SyncPlot registration changed before transaction commit",
+		:remapped,
+	))
+	return sp
+end
+
+function _transactional_plot_mutation!(
+	p::Plot,
+	prepare,
+	local_mutation,
+)
+	while true
+		route = lock(_SYNCPLOT_REGISTRY_LOCK) do
+			reservation =
+				get(_PLOT_SYNCPLOT_RESERVATIONS, p, nothing)
+			if reservation === nothing
+				return (
+					:syncplot,
+					get(_PLOT_SYNCPLOT_MAP, p, nothing),
+					nothing,
+				)
+			elseif reservation.kind === :local
+				return (
+					:wait,
+					nothing,
+					reservation,
+				)
+			end
+			return (:syncplot, reservation.syncplot, nothing)
+		end
+		action, sp, reservation = route
+		if action === :wait
+			if reservation.owner === current_task()
+				throw(InvalidStateException(
+					"Reentrant Plot mutation is not supported",
+					:reentrant,
+				))
+			end
+			wait(reservation.done::Base.Event)
+			continue
+		end
+
+		if sp === nothing
+			outcome =
+				_try_local_plot_mutation!(local_mutation, p)
+			outcome === :committed && return p
+			continue
+		end
+
+		status = _syncplot_transaction_status!(
+			sp,
+			prepare;
+			required_plot = p,
+		)
+		status === :committed && return p
+		yield()
+	end
+end
+
+function _prepare_relayout_transaction(
+	sp::SyncPlot,
+	p::Plot,
+	args,
+	kwargs,
+)
+	memo = IdDict{Any,Any}()
+	setter_origins = IdDict{Any,Nothing}()
+	staged_layout = _clone_layout_for_mutation(p.layout, memo)
+	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
+	prepared_args, prepared_kwargs =
+		_prepare_relayout_inputs(
+			args,
+			kwargs,
+			memo,
+			setter_origins,
+			;
+			strict = !(p.layout isa Layout),
+		)
+	relayout!(staged_layout, prepared_args...; prepared_kwargs...)
+	_rebase_staged_layout!(p.layout, staged_layout, memo)
+	expanded = _expand_staged_alias_roots!(
+		p,
+		staged_traces,
+		staged_layout,
+		memo,
+		;
+		for_renderer = true,
+		setter_origins = setter_origins,
+	)
+	staged_layout = expanded.layout
+	_prepare_incremental_outer_root_commit!(p, expanded)
+	replacement_data =
+		expanded.data === nothing ?
+		_prepare_restyle_replacement_data(p, staged_traces) :
+		nothing
+
+	outer_root_changed =
+		expanded.data !== nothing ||
+		expanded.frames !== nothing ||
+		expanded.config !== nothing
+	full_refresh =
+		outer_root_changed ||
+		_has_third_party_staged_trace(staged_traces) ||
+		!(p.layout isa Layout && staged_layout isa Layout)
+	script = if !full_refresh &&
+			p.layout isa Layout &&
+			staged_layout isa Layout
+		trace_operations =
+			_trace_delta_operations(p, staged_traces, memo)
+		layout_delta =
+			_plotly_leaf_deltas(
+				p.layout.fields,
+				staged_layout.fields,
+				memo,
+			)
+		isempty(trace_operations) ?
+		_plotlyjs_relayout_script(sp, layout_delta) :
+		_plotlyjs_update_script(
+			sp,
+			trace_operations,
+			layout_delta,
+		)
+	else
+		expanded.render_payload === nothing && throw(AssertionError(
+			"Missing coherent renderer payload for relayout refresh.",
+		))
+		_plotlyjs_refresh_payload_script(
+			sp,
+			expanded.render_payload;
+			rebuild = expanded.frames !== nothing,
+		)
+	end
+	commit = () -> begin
+		_commit_restyle!(p, staged_traces, replacement_data)
+		_commit_layout!(p, staged_layout)
+		_commit_incremental_outer_roots!(p, expanded)
+		return p
+	end
+	operation = expanded.frames !== nothing ?
+		"newPlot" :
+		(full_refresh ? "react" : "relayout")
+	return (script = script, operation = operation, commit = commit)
+end
+
+function _prepare_restyle_transaction(
+	sp::SyncPlot,
+	p::Plot,
+	inds,
+	update,
+	kwargs;
+	vectorized::Bool,
+)
+	memo = IdDict{Any,Any}()
+	setter_origins = IdDict{Any,Nothing}()
+	staged = _stage_restyle(
+		p,
+		inds,
+		update,
+		kwargs;
+		vectorized = vectorized,
+		memo = memo,
+		setter_origins = setter_origins,
+	)
+	_rebase_staged_traces!(staged, memo)
+	expanded =
+		_expand_staged_alias_roots!(
+			p,
+			staged,
+			nothing,
+			memo;
+			for_renderer = true,
+			setter_origins = setter_origins,
+		)
+	staged_layout = expanded.layout
+	_prepare_incremental_outer_root_commit!(p, expanded)
+	replacement_data =
+		expanded.data === nothing ?
+		_prepare_restyle_replacement_data(p, staged) :
+		nothing
+
+	outer_root_changed =
+		expanded.data !== nothing ||
+		expanded.frames !== nothing ||
+		expanded.config !== nothing
+	full_refresh =
+		outer_root_changed ||
+			_has_third_party_staged_trace(staged) ||
+			(staged_layout !== nothing &&
+			 !(p.layout isa Layout && staged_layout isa Layout))
+	script = if full_refresh
+		expanded.render_payload === nothing && throw(AssertionError(
+			"Missing coherent renderer payload for restyle refresh.",
+		))
+		_plotlyjs_refresh_payload_script(
+			sp,
+			expanded.render_payload;
+			rebuild = expanded.frames !== nothing,
+		)
+	else
+		trace_operations = _trace_delta_operations(p, staged, memo)
+		layout_delta = staged_layout === nothing ?
+			Dict{String,Any}() :
+			_plotly_leaf_deltas(
+				p.layout.fields,
+				staged_layout.fields,
+				memo,
+			)
+		isempty(layout_delta) ?
+		_plotlyjs_restyle_script(sp, trace_operations) :
+		_plotlyjs_update_script(sp, trace_operations, layout_delta)
+	end
+	commit = () -> begin
+		_commit_restyle!(p, staged, replacement_data)
+		staged_layout === nothing ||
+			_commit_layout!(p, staged_layout)
+		_commit_incremental_outer_roots!(p, expanded)
+		return p
+	end
+	operation = expanded.frames !== nothing ?
+		"newPlot" :
+		(full_refresh ? "react" : "restyle")
+	return (script = script, operation = operation, commit = commit)
+end
+
+function _prepare_update_transaction(
+	sp::SyncPlot,
+	p::Plot,
+	ind,
+	update,
+	layout,
+	kwargs,
+)
+	memo = IdDict{Any,Any}()
+	setter_origins = IdDict{Any,Nothing}()
+	staged_layout = _clone_layout_for_mutation(p.layout, memo)
+	_, prepared_layout = _prepare_relayout_inputs(
+		(),
+		layout.fields,
+		memo,
+		setter_origins,
+		;
+		strict = !(p.layout isa Layout),
+	)
+	relayout!(staged_layout; prepared_layout...)
+	inds = ind isa Int ? (ind,) : ind
+	staged = _stage_restyle(
+		p,
+		inds,
+		update,
+		kwargs;
+		vectorized = !(ind isa Int),
+		memo = memo,
+		setter_origins = setter_origins,
+	)
+	_rebase_staged_layout!(p.layout, staged_layout, memo)
+	_rebase_staged_traces!(staged, memo)
+	expanded = _expand_staged_alias_roots!(
+		p,
+		staged,
+		staged_layout,
+		memo,
+		;
+		for_renderer = true,
+		setter_origins = setter_origins,
+	)
+	staged_layout = expanded.layout
+	_prepare_incremental_outer_root_commit!(p, expanded)
+	replacement_data =
+		expanded.data === nothing ?
+		_prepare_restyle_replacement_data(p, staged) :
+		nothing
+
+	outer_root_changed =
+		expanded.data !== nothing ||
+		expanded.frames !== nothing ||
+		expanded.config !== nothing
+	full_refresh =
+		outer_root_changed ||
+			!(p.layout isa Layout && staged_layout isa Layout) ||
+			_has_third_party_staged_trace(staged)
+	script = if full_refresh
+		expanded.render_payload === nothing && throw(AssertionError(
+			"Missing coherent renderer payload for update refresh.",
+		))
+		_plotlyjs_refresh_payload_script(
+			sp,
+			expanded.render_payload;
+			rebuild = expanded.frames !== nothing,
+		)
+	else
+		_plotlyjs_update_script(
+			sp,
+			_trace_delta_operations(p, staged, memo),
+			_plotly_leaf_deltas(
+				p.layout.fields,
+				staged_layout.fields,
+				memo,
+			),
+		)
+	end
+	commit = () -> begin
+		_commit_restyle!(p, staged, replacement_data)
+		_commit_layout!(p, staged_layout)
+		_commit_incremental_outer_roots!(p, expanded)
+		return p
+	end
+	operation = expanded.frames !== nothing ?
+		"newPlot" :
+		(full_refresh ? "react" : "update")
+	return (script = script, operation = operation, commit = commit)
+end
+
+function _prepare_purge_transaction(sp::SyncPlot, p::Plot)
+	# Validate every field update before the renderer effect. Standard
+	# vector-backed models preserve their public data-container identity.
+	# Other Plot parameterizations must admit an empty field-compatible
+	# replacement; otherwise fail without purging the renderer.
+	layout_type = fieldtype(typeof(p), :layout)
+	staged_layout = convert(layout_type, Layout())
+	replacement_data = if p.data isa Vector
+		nothing
+	else
+		data_type = fieldtype(typeof(p), :data)
+		convert(
+			data_type,
+			Vector{eltype(p.data)}(undef, 0),
+		)
+	end
+	script = _plotlyjs_command_script(sp, :purge)
+	commit = () -> begin
+		if replacement_data === nothing
+			empty!(p.data)
+		else
+			setfield!(p, :data, replacement_data)
+		end
+		setfield!(p, :layout, staged_layout)
+		return p
+	end
+	return (script = script, operation = "purge", commit = commit)
+end
+
 # ── SyncPlot methods ────────────────────────────────────────────────
-# Each method mutates via _do_*, then pushes the update to Electron.
+# Renderer-backed model mutations stage and encode their complete candidate,
+# render it, and only then publish non-allocating pointer swaps to Julia.
 
 function PlotlyBase.react!(sp::SyncPlot, data::AbstractVector{<:AbstractTrace}, layout::AbstractLayout)
-	_do_react!(sp.plot, data, layout)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	prepare = function (target, current)
+		staged_data, staged_layout =
+			_prepare_react_values(current, data, layout)
+		script = _plotlyjs_refresh_script(
+			target,
+			staged_data,
+			staged_layout;
+			model = current,
+		)
+		commit = () -> begin
+			setfield!(current, :data, staged_data)
+			setfield!(current, :layout, staged_layout)
+			return current
+		end
+		return (script = script, operation = "react", commit = commit)
+	end
+	return _syncplot_transaction!(sp, prepare)
 end
 
 function PlotlyBase.react!(sp::SyncPlot, p::Plot)
-	old = sp.plot
-	sp.plot = p
-	lock(_SYNCPLOT_REGISTRY_LOCK) do
-		if get(_PLOT_SYNCPLOT_MAP, old, nothing) === sp
-			delete!(_PLOT_SYNCPLOT_MAP, old)
-			_PLOT_SYNCPLOT_MAP[p] = sp
+	prepare = function (target, current)
+		script = _plotlyjs_refresh_script(
+			target,
+			p.data,
+			p.layout;
+			model = p,
+			rebuild = true,
+			autoplay = true,
+		)
+		commit = () -> begin
+			if p !== current
+				reservation =
+					get(_PLOT_SYNCPLOT_RESERVATIONS, p, nothing)
+				(reservation !== nothing &&
+				 reservation.syncplot === target &&
+				 reservation.kind === :candidate) ||
+					throw(InvalidStateException(
+						"Replacement Plot reservation was lost",
+						:remapped,
+					))
+
+				current_mapping =
+					get(_PLOT_SYNCPLOT_MAP, current, nothing)
+				candidate_mapping =
+					get(_PLOT_SYNCPLOT_MAP, p, nothing)
+				candidate_mapping === nothing ||
+					throw(InvalidStateException(
+						"Replacement Plot became displayed before commit",
+						:remapped,
+					))
+				if current_mapping === target
+					# Publish the replacement mapping before removing the old
+					# key so insertion cannot orphan the committed model.
+					_PLOT_SYNCPLOT_MAP[p] = target
+					_bump_plot_syncplot_version!(p)
+					delete!(_PLOT_SYNCPLOT_MAP, current)
+					_bump_plot_syncplot_version!(current)
+				elseif current_mapping !== nothing
+					throw(InvalidStateException(
+						"SyncPlot model was remapped before replacement commit",
+						:remapped,
+					))
+				end
+			end
+			setfield!(target, :plot, p)
+			return target
 		end
+		return (script = script, operation = "newPlot", commit = commit)
 	end
-	_plotlyjs_refresh!(
+	return _syncplot_transaction!(
 		sp,
-		sp.plot.data,
-		sp.plot.layout;
-		rebuild = true,
-		autoplay = true,
+		prepare;
+		reserved_plot = p,
 	)
-	return sp
 end
 
 function PlotlyBase.relayout!(sp::SyncPlot, args...; kwargs...)
-	_do_relayout!(sp.plot, args...; kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	prepare = (target, current) ->
+		_prepare_relayout_transaction(
+			target,
+			current,
+			args,
+			kwargs,
+		)
+	return _syncplot_transaction!(sp, prepare)
 end
 
 function PlotlyBase.restyle!(sp::SyncPlot, ind::Int, update::AbstractDict = Dict(); kwargs...)
-	_do_restyle!(sp.plot, ind, update; kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	prepare = (target, current) ->
+		_prepare_restyle_transaction(
+			target,
+			current,
+			(ind,),
+			update,
+			kwargs;
+			vectorized = false,
+		)
+	return _syncplot_transaction!(sp, prepare)
 end
 
 function PlotlyBase.restyle!(sp::SyncPlot, inds::AbstractVector{Int}, update::AbstractDict = Dict(); kwargs...)
-	_do_restyle!(sp.plot, inds, update; kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	prepare = (target, current) ->
+		_prepare_restyle_transaction(
+			target,
+			current,
+			inds,
+			update,
+			kwargs;
+			vectorized = true,
+		)
+	return _syncplot_transaction!(sp, prepare)
 end
 
 function PlotlyBase.restyle!(sp::SyncPlot, update::AbstractDict = Dict(); kwargs...)
-	_do_restyle!(sp.plot, update; kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	prepare = (target, current) ->
+		_prepare_restyle_transaction(
+			target,
+			current,
+			1:length(current.data),
+			update,
+			kwargs;
+			vectorized = true,
+		)
+	return _syncplot_transaction!(sp, prepare)
+end
+
+_noop_plot_commit(::Plot) = nothing
+
+function _prepare_full_model_mutation_transaction(
+	sp::Union{Nothing,SyncPlot},
+	p::Plot,
+	mutation,
+	commit_callback = _noop_plot_commit,
+	mutation_scope = nothing,
+	preserve_layout_vector::Union{Nothing,Symbol} = nothing,
+)
+	# Full-refresh compatibility mutators can change the data vector, trace
+	# attributes, and layout in one call. Stage the complete mutable model graph
+	# while retaining immutable and bulk numeric payloads. A shared memo keeps
+	# aliases between traces and layout intact without deep-copying plot data.
+	memo = IdDict{Any,Any}()
+	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
+	staged_data = copy(p.data)
+	memo[p.data] = staged_data
+	# Clone custom roots first. Their general deepcopy discovers every shared
+	# object; optimized GenericTrace/Layout cloning can then reuse those memoized
+	# counterparts without deep-copying ordinary numeric payloads globally.
+	for original in p.data
+		original isa GenericTrace && continue
+		get!(
+			() -> _clone_trace_for_mutation(original, memo),
+			staged_traces,
+			original,
+		)
+	end
+	for ind in eachindex(staged_data)
+		original = p.data[ind]
+		staged_data[ind] = get!(
+			() -> _clone_trace_for_mutation(original, memo),
+			staged_traces,
+			original,
+		)
+	end
+	staged_layout = _clone_layout_for_mutation(p.layout, memo)
+	if p.layout isa Layout && staged_layout isa Layout
+		# PlotlyBase.add_trace! and the shape helpers route through the subplot
+		# grid metadata. They only read it, so sharing it during staging avoids
+		# a large deepcopy unless a custom root already cloned that metadata to
+		# preserve a cross-root alias.
+		original_subplots = getfield(p.layout, :subplots)
+		setfield!(
+			staged_layout,
+			:subplots,
+			_copy_mutation_container(
+				original_subplots,
+				memo,
+			),
+		)
+	end
+	if mutation_scope === nothing
+		# An unscoped internal mutation may address any Plot field directly.
+		# Isolate both outer roots before invoking an unknown callback.
+		staged_frames = Base.deepcopy_internal(p.frames, memo)
+		staged_config = Base.deepcopy_internal(p.config, memo)
+	else
+		# Scoped public mutators address traces/layout directly. Stage
+		# frames/config only when those roots reach them (or descendants)
+		# through identity aliases. Revisit both roots once so an alias first
+		# discovered while cloning config also pulls in frames, and vice versa.
+		staged_frames =
+			_stage_cross_aliased_model_root(p.frames, memo)
+		staged_config =
+			_stage_cross_aliased_model_root(p.config, memo)
+		staged_frames =
+			_stage_cross_aliased_model_root(p.frames, memo)
+		staged_config =
+			_stage_cross_aliased_model_root(p.config, memo)
+	end
+
+	candidate = Plot(
+		staged_data,
+		staged_layout,
+		staged_frames,
+		p.divid,
+		staged_config,
+	)
+	mutation(candidate)
+	affected_roots =
+		_full_model_mutation_affected_roots(
+			p,
+			mutation_scope,
+		)
+
+	# A changed third-party root cannot be committed in place. Replace only its
+	# alias-connected component, including GenericTrace or Layout roots when a
+	# custom object points at them. Unrelated components retain public roots.
+	replace_roots = _full_model_replacement_roots(
+		p,
+		candidate,
+		staged_traces,
+		memo,
+		affected_roots,
+	)
+	replace_layout_root =
+		replace_roots !== nothing && replace_roots[p.layout]
+	replace_data_root =
+		replace_roots !== nothing && replace_roots[p.data]
+	replace_frames_root =
+		replace_roots !== nothing && replace_roots[p.frames]
+	replace_config_root =
+		replace_roots !== nothing && replace_roots[p.config]
+	frames_changed =
+		candidate.frames !== p.frames &&
+		!_staged_graph_unchanged(
+			p.frames,
+			candidate.frames,
+			memo,
+		)
+	config_changed =
+		candidate.config !== p.config &&
+		!_staged_graph_unchanged(
+			p.config,
+			candidate.config,
+			memo,
+		)
+	# Concrete vectors can publish changed frame membership without replacing
+	# their public root. Other AbstractVector implementations have no
+	# non-allocating, method-independent commit contract, so retain the exact
+	# staged root and let alias rebasing target it.
+	replace_frames_root |=
+		frames_changed &&
+		!(p.frames isa Vector && candidate.frames isa Vector)
+
+	preserved_layout_attributes = IdDict{Any,Any}()
+	if preserve_layout_vector !== nothing &&
+			!replace_layout_root &&
+			p.layout isa Layout &&
+			candidate.layout isa Layout
+		original_values =
+			get(p.layout.fields, preserve_layout_vector, nothing)
+		staged_values =
+			get(candidate.layout.fields, preserve_layout_vector, nothing)
+		if original_values isa AbstractVector &&
+				staged_values isa AbstractVector &&
+				axes(original_values) == axes(staged_values)
+			for ind in eachindex(original_values)
+				isassigned(original_values, ind) || continue
+				isassigned(staged_values, ind) || continue
+				original = original_values[ind]
+				staged = staged_values[ind]
+				if original isa _BuiltinPlotlyAttribute &&
+						staged isa _BuiltinPlotlyAttribute &&
+						haskey(memo, original) &&
+						memo[original] === staged
+					preserved_layout_attributes[original] = staged
+				end
+			end
+		end
+	end
+
+	# Vector layout updaters mutate their existing PlotlyAttribute elements in
+	# PlotlyBase. Serialize the coherent staged graph before commit projection
+	# maps those staged elements back onto their public identities.
+	early_script =
+		sp !== nothing && !isempty(preserved_layout_attributes) ?
+		_plotlyjs_refresh_script(
+			sp,
+			candidate.data,
+			candidate.layout;
+			model = candidate,
+			rebuild = frames_changed,
+		) :
+		nothing
+
+	preserved_staged_roots = IdDict{Any,Any}()
+	for (original, staged) in staged_traces
+		(
+			replace_roots === nothing ||
+			!replace_roots[original]
+		) &&
+			(preserved_staged_roots[staged] = original)
+	end
+	if !replace_layout_root &&
+			haskey(memo, p.layout)
+		preserved_staged_roots[memo[p.layout]] = p.layout
+	end
+	if !replace_data_root &&
+			haskey(memo, p.data)
+		preserved_staged_roots[memo[p.data]] = p.data
+	end
+	if !replace_frames_root &&
+			haskey(memo, p.frames)
+		preserved_staged_roots[memo[p.frames]] = p.frames
+	end
+	if !replace_config_root &&
+			haskey(memo, p.config)
+		preserved_staged_roots[memo[p.config]] = p.config
+	end
+	for (original, staged) in preserved_layout_attributes
+		preserved_staged_roots[staged] = original
+	end
+
+	committed_layout_attribute_fields = IdDict{Any,Any}()
+	for (original, staged) in preserved_layout_attributes
+		fields, _ = _rebase_unchanged_mutation_container!(
+			original.fields,
+			staged.fields,
+			memo,
+			preserved_staged_roots,
+		)
+		committed_layout_attribute_fields[original] = fields
+	end
+	for (original, staged) in staged_traces
+		if original isa GenericTrace &&
+				staged isa GenericTrace &&
+				(
+					replace_roots === nothing ||
+					!replace_roots[original]
+				)
+			_rebase_staged_trace!(
+				original,
+				staged,
+				memo,
+				preserved_staged_roots,
+			)
+		end
+	end
+	if !replace_layout_root
+		_rebase_staged_layout!(
+			p.layout,
+			candidate.layout,
+			memo,
+			preserved_staged_roots,
+		)
+	end
+
+	committed_frames = candidate.frames
+	committed_config = candidate.config
+	if (frames_changed && !replace_frames_root) ||
+			(config_changed && !replace_config_root)
+		# First traverse unchanged roots to record staged-descendant → original
+		# mappings. Then clone changed roots through that same memo. This keeps
+		# cross-root aliases exact even when a changed vector reordered or
+		# deleted elements, where positional rebasing is not meaningful.
+		translated_roots = copy(preserved_staged_roots)
+		# An unscoped callback may deliberately insert an original public root
+		# into a changed outer root. Treat those captured originals as terminal
+		# identities instead of deepcopying them during commit preparation.
+		translated_roots[p.data] = p.data
+		translated_roots[p.layout] = p.layout
+		translated_roots[p.frames] = p.frames
+		translated_roots[p.config] = p.config
+		for original in p.data
+			translated_roots[original] = original
+		end
+		!replace_frames_root &&
+			candidate.frames !== p.frames &&
+			delete!(translated_roots, candidate.frames)
+		!replace_config_root &&
+			candidate.config !== p.config &&
+			delete!(translated_roots, candidate.config)
+		reachable_staged_nodes = IdDict{Any,Nothing}()
+		!replace_frames_root &&
+			_collect_graph_mutable_identities!(
+				reachable_staged_nodes,
+				candidate.frames,
+			)
+		!replace_config_root &&
+			_collect_graph_mutable_identities!(
+				reachable_staged_nodes,
+				candidate.config,
+			)
+		for (original, staged) in collect(memo)
+			haskey(reachable_staged_nodes, staged) || continue
+			haskey(translated_roots, staged) && continue
+			_staged_graph_unchanged(
+				original,
+				staged,
+				memo,
+			) || continue
+			translated_roots[staged] = original
+		end
+		!replace_frames_root &&
+			candidate.frames !== p.frames &&
+			delete!(translated_roots, candidate.frames)
+		!replace_config_root &&
+			candidate.config !== p.config &&
+			delete!(translated_roots, candidate.config)
+		if !replace_frames_root &&
+				!frames_changed &&
+				candidate.frames !== p.frames
+			_, unchanged =
+				_rebase_unchanged_mutation_container!(
+					p.frames,
+					candidate.frames,
+					memo,
+					translated_roots,
+				)
+			unchanged || throw(ArgumentError(
+				"Frame change detection disagreed with root rebasing.",
+			))
+		end
+		if !replace_config_root &&
+				!config_changed &&
+				candidate.config !== p.config
+			_, unchanged =
+				_rebase_unchanged_mutation_container!(
+					p.config,
+					candidate.config,
+					memo,
+					translated_roots,
+				)
+			unchanged || throw(ArgumentError(
+				"Config change detection disagreed with root rebasing.",
+			))
+		end
+		!replace_frames_root &&
+			(translated_roots[candidate.frames] = p.frames)
+		!replace_config_root &&
+			(translated_roots[candidate.config] = p.config)
+		if frames_changed && !replace_frames_root
+			committed_frames = copy(candidate.frames)
+			for ind in eachindex(candidate.frames)
+				isassigned(candidate.frames, ind) || continue
+				committed_frames[ind] =
+					Base.deepcopy_internal(
+						candidate.frames[ind],
+						translated_roots,
+					)
+			end
+		end
+		if config_changed && !replace_config_root
+			committed_config = typeof(p.config)()
+			for ind in 1:fieldcount(typeof(candidate.config))
+				isdefined(candidate.config, ind) || continue
+				setfield!(
+					committed_config,
+					ind,
+					Base.deepcopy_internal(
+						getfield(candidate.config, ind),
+						translated_roots,
+					),
+				)
+			end
+		end
+	end
+	if frames_changed && !replace_frames_root
+		committed_frames isa Vector ||
+			throw(ArgumentError(
+				"Changed frames cannot preserve their public root.",
+			))
+		sizehint!(p.frames, length(committed_frames))
+	end
+	if config_changed && !replace_config_root
+		typeof(committed_config) === typeof(p.config) ||
+			throw(ArgumentError(
+				"Changed config cannot preserve its public root.",
+			))
+	end
+
+	# Restore roots outside dirty custom components. Roots inside such a
+	# component remain the exact staged objects, preserving root and nested
+	# alias topology without rewriting arbitrary third-party structs.
+	committed_data =
+		replace_data_root ?
+		candidate.data :
+		copy(candidate.data)
+	for ind in eachindex(committed_data)
+		committed_data[ind] = get(
+			preserved_staged_roots,
+			candidate.data[ind],
+			candidate.data[ind],
+		)
+	end
+
+	data_unchanged =
+		!replace_data_root &&
+		_data_roots_unchanged(committed_data, p.data)
+
+	# Mutators that operate on a concrete Vector in place preserve its public
+	# identity. Reserve required capacity before the renderer effect so the
+	# commit consists only of non-allocating resize/copy operations. If neither
+	# an in-place commit nor a field-compatible replacement is possible, the
+	# conversion fails here before Plotly.js observes the candidate.
+	preserve_data_identity =
+		!data_unchanged &&
+		!replace_data_root &&
+		candidate.data === staged_data &&
+		p.data isa Vector
+	if data_unchanged
+		nothing
+	elseif preserve_data_identity
+		sizehint!(p.data, length(committed_data))
+	else
+		data_type = fieldtype(typeof(p), :data)
+		if replace_data_root
+			committed_data isa data_type ||
+				throw(ArgumentError(
+					"Aliased staged data cannot be committed " *
+					"without changing its identity.",
+				))
+		else
+			committed_data =
+				convert(data_type, committed_data)
+		end
+	end
+
+	script = if sp === nothing
+		nothing
+	elseif early_script !== nothing
+		early_script
+	else
+		_plotlyjs_refresh_script(
+			sp,
+			candidate.data,
+			candidate.layout;
+			model = candidate,
+			rebuild = frames_changed,
+		)
+	end
+	commit = () -> begin
+		for (original, fields) in committed_layout_attribute_fields
+			setfield!(original, :fields, fields)
+		end
+		for (original, staged) in staged_traces
+			if original isa GenericTrace &&
+					staged isa GenericTrace &&
+					(
+						replace_roots === nothing ||
+						!replace_roots[original]
+					)
+				setfield!(
+					original,
+					:fields,
+					getfield(staged, :fields),
+				)
+			end
+		end
+		if replace_layout_root
+			setfield!(p, :layout, candidate.layout)
+		elseif p.layout isa Layout &&
+				candidate.layout isa Layout
+				_commit_layout!(p, candidate.layout)
+		end
+		if replace_frames_root
+			setfield!(p, :frames, candidate.frames)
+		elseif frames_changed
+			resize!(p.frames, length(committed_frames))
+			copyto!(p.frames, committed_frames)
+		end
+		if replace_config_root
+			setfield!(p, :config, candidate.config)
+		elseif config_changed
+			for ind in 1:fieldcount(typeof(p.config))
+				setfield!(
+					p.config,
+					ind,
+					getfield(committed_config, ind),
+				)
+			end
+		end
+		if data_unchanged
+			nothing
+		elseif preserve_data_identity
+			resize!(p.data, length(committed_data))
+			copyto!(p.data, committed_data)
+		else
+			setfield!(p, :data, committed_data)
+		end
+		commit_callback(p)
+		return p
+	end
+	return (
+		script = script,
+		operation = frames_changed ? "newPlot" : "react",
+		commit = commit,
+	)
+end
+
+function _data_roots_unchanged(
+	candidate::AbstractVector{<:AbstractTrace},
+	original::AbstractVector{<:AbstractTrace},
+)
+	length(candidate) == length(original) || return false
+	for (candidate_trace, original_trace) in zip(candidate, original)
+		candidate_trace === original_trace || return false
+	end
+	return true
+end
+
+function _prepare_structural_data_mutation_transaction(
+	sp::Union{Nothing,SyncPlot},
+	p::Plot,
+	mutation,
+)
+	# Membership and ordering operations do not mutate trace/layout graphs.
+	# Stage only the data container so existing and newly supplied trace roots
+	# retain their exact public identities.
+	staged_data = copy(p.data)
+	candidate = Plot(
+		staged_data,
+		p.layout,
+		p.frames,
+		p.divid,
+		p.config,
+	)
+	mutation(candidate)
+
+	committed_data = candidate.data
+	data_unchanged =
+		_data_roots_unchanged(committed_data, p.data)
+	preserve_data_identity =
+		!data_unchanged &&
+		candidate.data === staged_data &&
+		p.data isa Vector
+	if data_unchanged
+		nothing
+	elseif preserve_data_identity
+		# Reserve growth before the renderer effect. The post-render commit can
+		# then resize/copy without failing from an allocation.
+		sizehint!(p.data, length(committed_data))
+	else
+		data_type = fieldtype(typeof(p), :data)
+		committed_data = convert(data_type, committed_data)
+	end
+
+	script = sp === nothing ?
+		nothing :
+		_plotlyjs_refresh_script(
+			sp,
+			candidate.data,
+			candidate.layout;
+			model = candidate,
+		)
+	commit = () -> begin
+		if data_unchanged
+			nothing
+		elseif preserve_data_identity
+			resize!(p.data, length(committed_data))
+			copyto!(p.data, committed_data)
+		else
+			setfield!(p, :data, committed_data)
+		end
+		return p
+	end
+	return (
+		script = script,
+		operation = "react",
+		commit = commit,
+	)
+end
+
+function _mutate_and_refresh_syncplot!(
+	mutation,
+	sp::SyncPlot;
+	commit_callback = _noop_plot_commit,
+	mutation_scope = nothing,
+	preserve_layout_vector::Union{Nothing,Symbol} = nothing,
+)
+	prepare = (target, current) ->
+		_prepare_full_model_mutation_transaction(
+			target,
+			current,
+			mutation,
+			commit_callback,
+			mutation_scope,
+			preserve_layout_vector,
+		)
+	_syncplot_transaction!(sp, prepare)
 	return sp
 end
 
-function PlotlyBase.addtraces!(sp::SyncPlot, traces::AbstractTrace...)
-	_do_addtraces!(sp.plot, traces...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+function _mutate_structural_data_and_refresh_syncplot!(
+	mutation,
+	sp::SyncPlot,
+)
+	prepare = (target, current) ->
+		_prepare_structural_data_mutation_transaction(
+			target,
+			current,
+			mutation,
+		)
+	_syncplot_transaction!(sp, prepare)
 	return sp
+end
+
+function _transactional_model_plot_mutation!(
+	p::Plot;
+	prepare,
+	local_mutation,
+)
+	while true
+		route = lock(_SYNCPLOT_REGISTRY_LOCK) do
+			reservation =
+				get(_PLOT_SYNCPLOT_RESERVATIONS, p, nothing)
+			if reservation === nothing
+				return (
+					:syncplot,
+					get(_PLOT_SYNCPLOT_MAP, p, nothing),
+					nothing,
+				)
+			elseif reservation.kind === :local
+				return (
+					:wait,
+					nothing,
+					reservation,
+				)
+			elseif reservation.kind === :candidate
+				state = reservation.owner === current_task() ?
+					:reentrant :
+					:busy
+				throw(InvalidStateException(
+					"Plot is participating in a model replacement",
+					state,
+				))
+			end
+			return (:syncplot, reservation.syncplot, nothing)
+		end
+		action, sp, reservation = route
+		if action === :wait
+			if reservation.owner === current_task()
+				throw(InvalidStateException(
+					"Reentrant Plot mutation is not supported",
+					:reentrant,
+				))
+			end
+			wait(reservation.done::Base.Event)
+			continue
+		end
+
+		if sp === nothing
+			outcome =
+				_try_local_plot_mutation!(local_mutation, p)
+			outcome === :committed && return p
+			continue
+		end
+
+		status = _syncplot_transaction_status!(
+			sp,
+			prepare;
+			required_plot = p,
+		)
+		status === :committed && return p
+		yield()
+	end
+end
+
+function _transactional_full_plot_mutation!(
+	mutation,
+	p::Plot;
+	commit_callback = _noop_plot_commit,
+	mutation_scope = nothing,
+	preserve_layout_vector::Union{Nothing,Symbol} = nothing,
+)
+	prepare = (target, current) ->
+		_prepare_full_model_mutation_transaction(
+			target,
+			current,
+			mutation,
+			commit_callback,
+			mutation_scope,
+			preserve_layout_vector,
+		)
+	local_mutation = () -> begin
+		prepared = _prepare_full_model_mutation_transaction(
+			nothing,
+			p,
+			mutation,
+			commit_callback,
+			mutation_scope,
+			preserve_layout_vector,
+		)
+		prepared.commit()
+		return p
+	end
+	return _transactional_model_plot_mutation!(
+		p;
+		prepare = prepare,
+		local_mutation = local_mutation,
+	)
+end
+
+function _transactional_structural_plot_mutation!(
+	mutation,
+	p::Plot,
+)
+	prepare = (target, current) ->
+		_prepare_structural_data_mutation_transaction(
+			target,
+			current,
+			mutation,
+		)
+	local_mutation = () -> begin
+		prepared = _prepare_structural_data_mutation_transaction(
+			nothing,
+			p,
+			mutation,
+		)
+		prepared.commit()
+		return p
+	end
+	return _transactional_model_plot_mutation!(
+		p;
+		prepare = prepare,
+		local_mutation = local_mutation,
+	)
+end
+
+_trace_mutation_scope(indices) = (
+	trace_indices = collect(indices),
+	layout = false,
+)
+const _LAYOUT_ONLY_MUTATION_SCOPE = (
+	trace_indices = (),
+	layout = true,
+)
+
+function PlotlyBase.addtraces!(sp::SyncPlot, traces::AbstractTrace...)
+	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
+		_do_addtraces!(current, traces...)
+	end
 end
 
 function PlotlyBase.addtraces!(sp::SyncPlot, i::Int, traces::AbstractTrace...)
-	_do_addtraces!(sp.plot, i, traces...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
+		_do_addtraces!(current, i, traces...)
+	end
 end
 
 function PlotlyBase.deletetraces!(sp::SyncPlot, inds::Int...)
-	_do_deletetraces!(sp.plot, inds...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
+		_do_deletetraces!(current, inds...)
+	end
 end
 
 function PlotlyBase.movetraces!(sp::SyncPlot, to_end::Int...)
-	_do_movetraces!(sp.plot, to_end...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
+		_do_movetraces!(current, to_end...)
+	end
 end
 
 function PlotlyBase.movetraces!(sp::SyncPlot, src::AbstractVector{Int}, dest::AbstractVector{Int})
-	_do_movetraces!(sp.plot, src, dest)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
+		_do_movetraces!(current, src, dest)
+	end
 end
 
 function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
-	_do_extendtraces!(sp.plot, update, indices, maxpoints)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	stable_indices = collect(indices)
+	return _mutate_and_refresh_syncplot!(
+		sp;
+		mutation_scope =
+			_trace_mutation_scope(stable_indices),
+	) do current
+		_do_extendtraces!(
+			current,
+			update,
+			stable_indices,
+			maxpoints,
+		)
+	end
 end
 
 function PlotlyBase.extendtraces!(
@@ -1300,9 +6644,19 @@ function PlotlyBase.extendtraces!(
 end
 
 function PlotlyBase.prependtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
-	_do_prependtraces!(sp.plot, update, indices, maxpoints)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	stable_indices = collect(indices)
+	return _mutate_and_refresh_syncplot!(
+		sp;
+		mutation_scope =
+			_trace_mutation_scope(stable_indices),
+	) do current
+		_do_prependtraces!(
+			current,
+			update,
+			stable_indices,
+			maxpoints,
+		)
+	end
 end
 
 function PlotlyBase.prependtraces!(
@@ -1343,34 +6697,72 @@ function PlotlyBase.prependtraces!(
 	return PlotlyBase.prependtraces!(sp, update, [index], maxpoints)
 end
 
-function PlotlyBase.update!(sp::SyncPlot, ind::Union{AbstractVector{Int},Int}, update::AbstractDict = Dict(); layout::AbstractLayout = sp.plot.layout, kwargs...)
-	_do_update!(sp.plot, ind, update; layout = layout, kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+function PlotlyBase.update!(
+	sp::SyncPlot,
+	ind::Union{AbstractVector{Int},Int},
+	update::AbstractDict = Dict();
+	layout = _CURRENT_PLOT_LAYOUT,
+	kwargs...,
+)
+	prepare = function (target, current)
+		resolved_layout = _resolve_update_layout(current, layout)
+		return _prepare_update_transaction(
+			target,
+			current,
+			ind,
+			update,
+			resolved_layout,
+			kwargs,
+		)
+	end
+	return _syncplot_transaction!(sp, prepare)
 end
 
-function PlotlyBase.update!(sp::SyncPlot, update = Dict(); layout::AbstractLayout = sp.plot.layout, kwargs...)
-	_do_update!(sp.plot, update; layout = layout, kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+function PlotlyBase.update!(
+	sp::SyncPlot,
+	update = Dict();
+	layout = _CURRENT_PLOT_LAYOUT,
+	kwargs...,
+)
+	prepare = function (target, current)
+		resolved_layout = _resolve_update_layout(current, layout)
+		return _prepare_update_transaction(
+			target,
+			current,
+			1:length(current.data),
+			update,
+			resolved_layout,
+			kwargs,
+		)
+	end
+	return _syncplot_transaction!(sp, prepare)
 end
 
 function PlotlyBase.update_xaxes!(sp::SyncPlot, args...; kwargs...)
-	_do_update_xaxes!(sp.plot, args...; kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	return _mutate_and_refresh_syncplot!(
+		sp;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		_do_update_xaxes!(current, args...; kwargs...)
+	end
 end
 
 function PlotlyBase.update_yaxes!(sp::SyncPlot, args...; kwargs...)
-	_do_update_yaxes!(sp.plot, args...; kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	return _mutate_and_refresh_syncplot!(
+		sp;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		_do_update_yaxes!(current, args...; kwargs...)
+	end
 end
 
 function PlotlyBase.update_polars!(sp::SyncPlot, args...; kwargs...)
-	_do_update_polars!(sp.plot, args...; kwargs...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	return _mutate_and_refresh_syncplot!(
+		sp;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		_do_update_polars!(current, args...; kwargs...)
+	end
 end
 
 # ── Plot auto-refresh methods ───────────────────────────────────────
@@ -1380,7 +6772,7 @@ end
 const _RefreshablePlot = Plot{TT, TL, TF} where {
 	TT <: Vector{<:AbstractTrace},
 	TL <: Layout,
-	TF <: Vector{<:PlotlyFrame},
+	TF <: AbstractVector{<:PlotlyFrame},
 }
 
 function _clone_plot_model(p::Plot)
@@ -1419,9 +6811,14 @@ function PlotlyBase.redraw!(p::_RefreshablePlot)
 end
 
 function PlotlyBase.purge!(p::_RefreshablePlot)
-	_do_purge!(p)
-	_maybe_sync_command!(p, :purge)
-	return p
+	prepare = (target, current) ->
+		_prepare_purge_transaction(target, current)
+	local_mutation = () -> _do_purge!(p)
+	return _transactional_plot_mutation!(
+		p,
+		prepare,
+		local_mutation,
+	)
 end
 
 function PlotlyBase.react!(
@@ -1429,15 +6826,36 @@ function PlotlyBase.react!(
 	data::AbstractVector{<:AbstractTrace},
 	layout::Layout,
 )
-	_do_react!(p, data, layout)
-	_maybe_sync_refresh!(p)
-	return p
+	prepare = function (target, current)
+		staged_data, staged_layout =
+			_prepare_react_values(current, data, layout)
+		script = _plotlyjs_refresh_script(
+			target,
+			staged_data,
+			staged_layout;
+			model = current,
+		)
+		commit = () -> begin
+			setfield!(current, :data, staged_data)
+			setfield!(current, :layout, staged_layout)
+			return current
+		end
+		return (script = script, operation = "react", commit = commit)
+	end
+	local_mutation = () -> _do_react!(p, data, layout)
+	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
 function PlotlyBase.relayout!(p::_RefreshablePlot, args...; kwargs...)
-	_do_relayout!(p, args...; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	prepare = (target, current) ->
+		_prepare_relayout_transaction(
+			target,
+			current,
+			args,
+			kwargs,
+		)
+	local_mutation = () -> _do_relayout!(p, args...; kwargs...)
+	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
 function PlotlyBase.restyle!(
@@ -1446,9 +6864,17 @@ function PlotlyBase.restyle!(
 	update::AbstractDict = Dict();
 	kwargs...,
 )
-	_do_restyle!(p, ind, update; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	prepare = (target, current) ->
+		_prepare_restyle_transaction(
+			target,
+			current,
+			(ind,),
+			update,
+			kwargs;
+			vectorized = false,
+		)
+	local_mutation = () -> _do_restyle!(p, ind, update; kwargs...)
+	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
 function PlotlyBase.restyle!(
@@ -1457,9 +6883,17 @@ function PlotlyBase.restyle!(
 	update::AbstractDict = Dict();
 	kwargs...,
 )
-	_do_restyle!(p, inds, update; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	prepare = (target, current) ->
+		_prepare_restyle_transaction(
+			target,
+			current,
+			inds,
+			update,
+			kwargs;
+			vectorized = true,
+		)
+	local_mutation = () -> _do_restyle!(p, inds, update; kwargs...)
+	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
 function PlotlyBase.restyle!(
@@ -1467,15 +6901,23 @@ function PlotlyBase.restyle!(
 	update::AbstractDict = Dict();
 	kwargs...,
 )
-	_do_restyle!(p, update; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	prepare = (target, current) ->
+		_prepare_restyle_transaction(
+			target,
+			current,
+			1:length(current.data),
+			update,
+			kwargs;
+			vectorized = true,
+		)
+	local_mutation = () -> _do_restyle!(p, update; kwargs...)
+	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
 function PlotlyBase.addtraces!(p::_RefreshablePlot, traces::AbstractTrace...)
-	_do_addtraces!(p, traces...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_structural_plot_mutation!(p) do current
+		_do_addtraces!(current, traces...)
+	end
 end
 
 function PlotlyBase.addtraces!(
@@ -1483,21 +6925,21 @@ function PlotlyBase.addtraces!(
 	i::Int,
 	traces::AbstractTrace...,
 )
-	_do_addtraces!(p, i, traces...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_structural_plot_mutation!(p) do current
+		_do_addtraces!(current, i, traces...)
+	end
 end
 
 function PlotlyBase.deletetraces!(p::_RefreshablePlot, inds::Int...)
-	_do_deletetraces!(p, inds...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_structural_plot_mutation!(p) do current
+		_do_deletetraces!(current, inds...)
+	end
 end
 
 function PlotlyBase.movetraces!(p::_RefreshablePlot, to_end::Int...)
-	_do_movetraces!(p, to_end...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_structural_plot_mutation!(p) do current
+		_do_movetraces!(current, to_end...)
+	end
 end
 
 function PlotlyBase.movetraces!(
@@ -1505,9 +6947,9 @@ function PlotlyBase.movetraces!(
 	src::AbstractVector{Int},
 	dest::AbstractVector{Int},
 )
-	_do_movetraces!(p, src, dest)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_structural_plot_mutation!(p) do current
+		_do_movetraces!(current, src, dest)
+	end
 end
 
 function PlotlyBase.extendtraces!(
@@ -1516,9 +6958,19 @@ function PlotlyBase.extendtraces!(
 	indices::AbstractVector{Int} = [1],
 	maxpoints = -1,
 )
-	_do_extendtraces!(p, update, indices, maxpoints)
-	_maybe_sync_refresh!(p)
-	return p
+	stable_indices = collect(indices)
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope =
+			_trace_mutation_scope(stable_indices),
+	) do current
+		_do_extendtraces!(
+			current,
+			update,
+			stable_indices,
+			maxpoints,
+		)
+	end
 end
 
 function PlotlyBase.extendtraces!(
@@ -1565,9 +7017,19 @@ function PlotlyBase.prependtraces!(
 	indices::AbstractVector{Int} = [1],
 	maxpoints = -1,
 )
-	_do_prependtraces!(p, update, indices, maxpoints)
-	_maybe_sync_refresh!(p)
-	return p
+	stable_indices = collect(indices)
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope =
+			_trace_mutation_scope(stable_indices),
+	) do current
+		_do_prependtraces!(
+			current,
+			update,
+			stable_indices,
+			maxpoints,
+		)
+	end
 end
 
 function PlotlyBase.prependtraces!(
@@ -1612,23 +7074,60 @@ function PlotlyBase.update!(
 	p::_RefreshablePlot,
 	ind::Union{AbstractVector{Int}, Int},
 	update::AbstractDict = Dict();
-	layout::Layout = p.layout,
+	layout = _CURRENT_PLOT_LAYOUT,
 	kwargs...,
 )
-	_do_update!(p, ind, update; layout = layout, kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	prepare = function (target, current)
+		resolved_layout = _resolve_update_layout(current, layout)
+		return _prepare_update_transaction(
+			target,
+			current,
+			ind,
+			update,
+			resolved_layout,
+			kwargs,
+		)
+	end
+	local_mutation = function ()
+		resolved_layout = _resolve_update_layout(p, layout)
+		return _do_update!(
+			p,
+			ind,
+			update;
+			layout = resolved_layout,
+			kwargs...,
+		)
+	end
+	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
 function PlotlyBase.update!(
 	p::_RefreshablePlot,
 	update = Dict();
-	layout::Layout = p.layout,
+	layout = _CURRENT_PLOT_LAYOUT,
 	kwargs...,
 )
-	_do_update!(p, update; layout = layout, kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	prepare = function (target, current)
+		resolved_layout = _resolve_update_layout(current, layout)
+		return _prepare_update_transaction(
+			target,
+			current,
+			1:length(current.data),
+			update,
+			resolved_layout,
+			kwargs,
+		)
+	end
+	local_mutation = function ()
+		resolved_layout = _resolve_update_layout(p, layout)
+		return _do_update!(
+			p,
+			update;
+			layout = resolved_layout,
+			kwargs...,
+		)
+	end
+	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
 function PlotlyBase.update_xaxes!(
@@ -1636,9 +7135,12 @@ function PlotlyBase.update_xaxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	_do_update_xaxes!(p, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		_do_update_xaxes!(current, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_yaxes!(
@@ -1646,9 +7148,12 @@ function PlotlyBase.update_yaxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	_do_update_yaxes!(p, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		_do_update_yaxes!(current, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_polars!(
@@ -1656,9 +7161,12 @@ function PlotlyBase.update_polars!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	_do_update_polars!(p, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		_do_update_polars!(current, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_geos!(
@@ -1666,9 +7174,12 @@ function PlotlyBase.update_geos!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	PlotlyBase.update_geos!(p.layout, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		PlotlyBase.update_geos!(current.layout, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_mapboxes!(
@@ -1676,9 +7187,12 @@ function PlotlyBase.update_mapboxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	PlotlyBase.update_mapboxes!(p.layout, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		PlotlyBase.update_mapboxes!(current.layout, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_scenes!(
@@ -1686,9 +7200,12 @@ function PlotlyBase.update_scenes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	PlotlyBase.update_scenes!(p.layout, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		PlotlyBase.update_scenes!(current.layout, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_ternaries!(
@@ -1696,9 +7213,12 @@ function PlotlyBase.update_ternaries!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	PlotlyBase.update_ternaries!(p.layout, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		PlotlyBase.update_ternaries!(current.layout, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_annotations!(
@@ -1706,9 +7226,13 @@ function PlotlyBase.update_annotations!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	PlotlyBase.update_annotations!(p.layout, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+		preserve_layout_vector = :annotations,
+	) do current
+		PlotlyBase.update_annotations!(current.layout, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_shapes!(
@@ -1716,9 +7240,13 @@ function PlotlyBase.update_shapes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	PlotlyBase.update_shapes!(p.layout, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+		preserve_layout_vector = :shapes,
+	) do current
+		PlotlyBase.update_shapes!(current.layout, with; kwargs...)
+	end
 end
 
 function PlotlyBase.update_images!(
@@ -1726,9 +7254,13 @@ function PlotlyBase.update_images!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
-	PlotlyBase.update_images!(p.layout, with; kwargs...)
-	_maybe_sync_refresh!(p)
-	return p
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+		preserve_layout_vector = :images,
+	) do current
+		PlotlyBase.update_images!(current.layout, with; kwargs...)
+	end
 end
 
 # ── Window lifecycle ────────────────────────────────────────────────
@@ -1764,7 +7296,10 @@ function _deregister_syncplot!(sp::SyncPlot)
 	lock(_SYNCPLOT_REGISTRY_LOCK) do
 		filter!(x -> x !== sp, _DISPLAYED_PLOTS)
 		for plot in collect(keys(_PLOT_SYNCPLOT_MAP))
-			_PLOT_SYNCPLOT_MAP[plot] === sp && delete!(_PLOT_SYNCPLOT_MAP, plot)
+			if _PLOT_SYNCPLOT_MAP[plot] === sp
+				delete!(_PLOT_SYNCPLOT_MAP, plot)
+				_bump_plot_syncplot_version!(plot)
+			end
 		end
 	end
 	return nothing
@@ -1823,16 +7358,33 @@ end
 function Base.close(sp::SyncPlot)
 	resources = getfield(sp, :_resources)
 	caller = current_task()
-	close_state, close_done = lock(resources.lock) do
-		if resources.close_started
-			state = resources.close_owner === caller ? :reentrant : :wait
-			return (state, resources.close_done)
+	# Claim closure only after every earlier renderer transaction has finished.
+	# Later transactions observe close_started and fail before touching either
+	# renderer or model. Native close itself runs without render_lock because a
+	# backend callback may re-enter close from another task.
+	lock(resources.render_lock)
+	render_lock_held = true
+	close_state, close_done = try
+		lock(resources.lock) do
+			if resources.close_started
+				state =
+					resources.close_owner === caller ? :reentrant : :wait
+				return (state, resources.close_done)
+			end
+			resources.close_started = true
+			resources.close_owner = caller
+			return (:owner, resources.close_done)
 		end
-		resources.close_started = true
-		resources.close_owner = caller
-		return (:owner, resources.close_done)
+	catch
+		unlock(resources.render_lock)
+		render_lock_held = false
+		rethrow()
 	end
 
+	if close_state !== :owner
+		unlock(resources.render_lock)
+		render_lock_held = false
+	end
 	close_state === :reentrant && return nothing
 	if close_state === :wait
 		wait(close_done)
@@ -1846,12 +7398,18 @@ function Base.close(sp::SyncPlot)
 	try
 		try
 			_deregister_syncplot!(sp)
+			unlock(resources.render_lock)
+			render_lock_held = false
 			if _syncplot_raw_window_state(sp) !== :closed
 				ec = _syncplot_backend(sp)
 				window = getfield(sp, :window)
 				Base.invokelatest(() -> ec.close(window))
 			end
 		catch
+			if render_lock_held
+				unlock(resources.render_lock)
+				render_lock_held = false
+			end
 			# Preserve the backend exception while still making the package-owned
 			# HTML cleanup deterministic.
 			try
@@ -1869,6 +7427,10 @@ function Base.close(sp::SyncPlot)
 		return nothing
 	finally
 		try
+			if render_lock_held
+				unlock(resources.render_lock)
+				render_lock_held = false
+			end
 			lock(resources.lock) do
 				resources.close_owner = nothing
 			end
@@ -1883,25 +7445,57 @@ end
 struct ElectronDisplay <: AbstractDisplay end
 
 function _register_displayed_syncplot!(p::Plot, sp::SyncPlot)
+	_require_syncplot_model(p)
+	_require_syncplot_model(getfield(sp, :plot))
 	resources = getfield(sp, :_resources)
-	lock(resources.lock)
+	lock(resources.render_lock)
 	try
-		resources.close_started && return (nothing, false)
-		return lock(_SYNCPLOT_REGISTRY_LOCK) do
-			old = get(_PLOT_SYNCPLOT_MAP, p, nothing)
-			_PLOT_SYNCPLOT_MAP[p] = sp
-			push!(_DISPLAYED_PLOTS, sp)
-			(old, true)
+		lock(resources.lock)
+		try
+			resources.close_started && return (nothing, false)
+			return lock(_SYNCPLOT_REGISTRY_LOCK) do
+				reservation =
+					get(_PLOT_SYNCPLOT_RESERVATIONS, p, nothing)
+				if reservation !== nothing &&
+						reservation.kind in (:candidate, :local)
+					throw(InvalidStateException(
+						"Plot is reserved by an active mutation",
+						:busy,
+					))
+				end
+				old = get(_PLOT_SYNCPLOT_MAP, p, nothing)
+				_PLOT_SYNCPLOT_MAP[p] = sp
+				old === sp || _bump_plot_syncplot_version!(p)
+				push!(_DISPLAYED_PLOTS, sp)
+				(old, true)
+			end
+		finally
+			unlock(resources.lock)
 		end
 	finally
-		unlock(resources.lock)
+		unlock(resources.render_lock)
 	end
 end
 
 function Base.display(d::ElectronDisplay, p::Plot)
 	sp = to_syncplot(p)
-	old, registered = _register_displayed_syncplot!(p, sp)
-	registered || return nothing
+	old, registered = try
+		_register_displayed_syncplot!(p, sp)
+	catch
+		try
+			close(sp)
+		catch cleanup_error
+			@warn "Failed to close an unregistered SyncPlot." exception = (
+				cleanup_error,
+				catch_backtrace(),
+			)
+		end
+		rethrow()
+	end
+	if !registered
+		close(sp)
+		return nothing
+	end
 
 	# Close the stale window only after its replacement is registered. If new
 	# window construction fails, the existing display remains usable.

@@ -77,6 +77,10 @@ function _attach_mutator_refresh_probe(p::Plot)
     backend = (
         isopen=window -> true,
         close=window -> nothing,
+        run=(window, script) -> begin
+            _MUTATOR_REFRESH_CALLS[] += 1
+            return "ok"
+        end,
     )
     resources = PlotlySupply._SyncPlotResources(nothing, backend)
     sp = SyncPlot(p, nothing, nothing, "mutator-refresh-probe", resources)

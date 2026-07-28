@@ -783,20 +783,59 @@ PlotlyBase._is3d(sp::SyncPlot) = PlotlyBase._is3d(sp.plot)
 
 Base.size(sp::SyncPlot) = size(sp.plot)
 
+function _invoke_plot_add_trace!(
+	p::Plot,
+	trace::GenericTrace;
+	kw...,
+)
+	return invoke(
+		PlotlyBase.add_trace!,
+		Tuple{Plot,GenericTrace},
+		p,
+		trace;
+		kw...,
+	)
+end
+
+function PlotlyBase.add_trace!(
+	p::_RefreshablePlot,
+	trace::GenericTrace;
+	kw...,
+)
+	return _transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		_invoke_plot_add_trace!(current, trace; kw...)
+	end
+end
+
 function PlotlyBase.add_trace!(sp::SyncPlot, trace::GenericTrace; kw...)
-	PlotlyBase.add_trace!(sp.plot, trace; kw...)
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-	return sp
+	return _mutate_and_refresh_syncplot!(
+		sp;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		_invoke_plot_add_trace!(current, trace; kw...)
+	end
 end
 
 function PlotlyBase.redraw!(sp::SyncPlot)
-	_plotlyjs_command!(sp, :redraw)
+	prepare = function (target, current)
+		commit = () -> current
+		return (
+			script = _plotlyjs_command_script(target, :redraw),
+			operation = "redraw",
+			commit = commit,
+		)
+	end
+	_syncplot_transaction!(sp, prepare)
 	return sp
 end
 
 function PlotlyBase.purge!(sp::SyncPlot)
-	_do_purge!(sp.plot)
-	_plotlyjs_command!(sp, :purge)
+	prepare = (target, current) ->
+		_prepare_purge_transaction(target, current)
+	_syncplot_transaction!(sp, prepare)
 	return sp
 end
 
@@ -966,29 +1005,126 @@ const _SYNCPLOT_DEFINED_LAYOUT_UPDATERS = Set((:update_xaxes!, :update_yaxes!, :
 
 for (f, _) in vcat(PlotlyBase._layout_obj_updaters, PlotlyBase._layout_vector_updaters)
 	f in _SYNCPLOT_DEFINED_LAYOUT_UPDATERS && continue
+	preserve_layout_vector =
+		f === :update_annotations! ? :annotations :
+		f === :update_shapes! ? :shapes :
+		f === :update_images! ? :images :
+		nothing
 	@eval function PlotlyBase.$f(
 		sp::SyncPlot,
 		with::PlotlyBase.PlotlyAttribute = attr();
 		kwargs...,
 	)
-		PlotlyBase.$f(sp.plot.layout, with; kwargs...)
-		_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-		return sp
+		return _mutate_and_refresh_syncplot!(
+			sp;
+			mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+			preserve_layout_vector = $(
+				QuoteNode(preserve_layout_vector)
+			),
+		) do current
+			PlotlyBase.$f(current.layout, with; kwargs...)
+		end
+	end
+end
+
+const _REFRESHABLE_DEFINED_LAYOUT_UPDATERS = Set((
+	:update_xaxes!,
+	:update_yaxes!,
+	:update_polars!,
+	:update_geos!,
+	:update_mapboxes!,
+	:update_scenes!,
+	:update_ternaries!,
+	:update_annotations!,
+	:update_shapes!,
+	:update_images!,
+))
+
+for (f, _) in vcat(
+	PlotlyBase._layout_obj_updaters,
+	PlotlyBase._layout_vector_updaters,
+)
+	f in _REFRESHABLE_DEFINED_LAYOUT_UPDATERS && continue
+	@eval function PlotlyBase.$f(
+		p::_RefreshablePlot,
+		with::PlotlyBase.PlotlyAttribute = attr();
+		kwargs...,
+	)
+		return _transactional_full_plot_mutation!(
+			p;
+			mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+		) do current
+			PlotlyBase.$f(current.layout, with; kwargs...)
+		end
 	end
 end
 
 for f in (:add_hrect!, :add_hline!, :add_vrect!, :add_vline!, :add_shape!, :add_layout_image!)
 	@eval function PlotlyBase.$f(sp::SyncPlot, args...; kwargs...)
-		PlotlyBase.$f(sp.plot, args...; kwargs...)
-		_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
-		return sp
+		return _mutate_and_refresh_syncplot!(
+			sp;
+			mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+		) do current
+			PlotlyBase.$f(current.layout, args...; kwargs...)
+		end
+	end
+
+	@eval function PlotlyBase.$f(
+		p::_RefreshablePlot,
+		args...;
+		kwargs...,
+	)
+		return _transactional_full_plot_mutation!(
+			p;
+			mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+		) do current
+			PlotlyBase.$f(current.layout, args...; kwargs...)
+		end
 	end
 end
 
 function PlotlyBase.add_recession_bands!(sp::SyncPlot; kwargs...)
-	new_shapes = PlotlyBase.add_recession_bands!(sp.plot; kwargs...)
-	PlotlyBase.relayout!(sp, shapes = new_shapes)
-	return new_shapes
+	new_shapes = Ref{Any}(nothing)
+	_mutate_and_refresh_syncplot!(
+		sp;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		bands = PlotlyBase._recession_band_shapes(
+			current;
+			kwargs...,
+		)
+		bands === nothing && return nothing
+		old_shapes = current.layout[:shapes]
+		new_shapes[] =
+			isempty(old_shapes) ? bands : vcat(old_shapes, bands)
+		PlotlyBase.relayout!(
+			current.layout;
+			shapes = new_shapes[],
+		)
+	end
+	return new_shapes[]
+end
+
+function PlotlyBase.add_recession_bands!(
+	p::_RefreshablePlot;
+	kwargs...,
+)
+	new_shapes = Ref{Any}(nothing)
+	_transactional_full_plot_mutation!(
+		p;
+		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+	) do current
+		bands = PlotlyBase._recession_band_shapes(current; kwargs...)
+		bands === nothing && return nothing
+		old_shapes = current.layout[:shapes]
+		new_shapes[] =
+			isempty(old_shapes) ? bands : vcat(old_shapes, bands)
+		PlotlyBase.relayout!(
+			current.layout;
+			shapes = new_shapes[],
+		)
+	end
+	return new_shapes[]
 end
 
 function _syncplot_app(sps::Tuple{Vararg{SyncPlot}})

@@ -24,8 +24,11 @@ end
 
 mutable struct _SyncPlotResources
 	lock::ReentrantLock
+	render_lock::ReentrantLock
+	transaction_owner::Union{Nothing,Task}
 	tempdir::Union{Nothing,String}
 	backend::Any
+	renderer_desynchronized::Bool
 	close_started::Bool
 	close_owner::Union{Nothing,Task}
 	close_done::Base.Event
@@ -41,8 +44,11 @@ _SyncPlotResources(
 	creation_spec::Union{Nothing,_SyncPlotCreationSpec} = nothing,
 ) = _SyncPlotResources(
 	ReentrantLock(),
+	ReentrantLock(),
+	nothing,
 	tempdir,
 	backend,
+	false,
 	false,
 	nothing,
 	Base.Event(),
@@ -52,6 +58,32 @@ _SyncPlotResources(
 	creation_spec,
 )
 
+struct _SyncPlotDesynchronizationError <: Exception
+	operation_error::Any
+	recovery_error::Any
+end
+
+function Base.showerror(io::IO, err::_SyncPlotDesynchronizationError)
+	if err.operation_error === nothing
+		print(
+			io,
+			"SyncPlot renderer recovery failed; the Julia model remains " *
+			"unchanged, but the renderer state is unknown. Recovery error: ",
+		)
+	else
+		print(
+			io,
+			"SyncPlot renderer operation failed and recovery also failed; " *
+			"the Julia model was not committed, but the renderer state is " *
+			"unknown. Operation error: ",
+		)
+		showerror(io, err.operation_error)
+		print(io, ". Recovery error: ")
+	end
+	showerror(io, err.recovery_error)
+	return nothing
+end
+
 mutable struct SyncPlot
 	plot::Plot
 	app::Any
@@ -60,10 +92,28 @@ mutable struct SyncPlot
 	_resources::_SyncPlotResources
 end
 
+function _require_syncplot_model(plot::Plot)
+	plot.data isa Vector || throw(ArgumentError(
+		"SyncPlot requires `plot.data` to be a concrete Vector so renderer " *
+		"transactions can commit trace insertion, deletion, and reordering " *
+		"atomically. Rebuild the model with `PlotlySupply.plot(plot.data, " *
+		"plot.layout; frames=plot.frames, config=plot.config)`.",
+	))
+	return plot
+end
+
 # Preserve the original public constructor even though lifecycle state is kept
 # privately on each SyncPlot.
-SyncPlot(plot::Plot, app, window, divid::String) =
-	SyncPlot(plot, app, window, divid, _SyncPlotResources())
+function SyncPlot(plot::Plot, app, window, divid::String)
+	_require_syncplot_model(plot)
+	return SyncPlot(
+		plot,
+		app,
+		window,
+		divid,
+		_SyncPlotResources(),
+	)
+end
 
 function Base.getproperty(sp::SyncPlot, name::Symbol)
 	if name in fieldnames(SyncPlot)

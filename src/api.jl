@@ -13,11 +13,104 @@ end
 _plot_data(fig) = _plot_obj(fig).data
 _plot_layout(fig) = _plot_obj(fig).layout
 
+struct _StagedPlotMutation
+	plot::Plot
+end
+
 function _refresh!(fig)
 	p = _plot_obj(fig)
-	react!(p, p.data, p.layout)
-	_plotlyjs_refresh!(fig, p.data, p.layout)
+	# Route through the public target exactly once. A SyncPlot owns its renderer
+	# transaction directly; a registered Plot discovers that SyncPlot through
+	# react!. Rendering both paths allowed an older, unlocked full refresh to
+	# race and overwrite a newer incremental mutation.
+	react!(fig, p.data, p.layout)
 	return nothing
+end
+
+_refresh!(::_StagedPlotMutation) = nothing
+
+function PlotlyBase.relayout!(
+	staged::_StagedPlotMutation,
+	args...;
+	kwargs...,
+)
+	_do_relayout!(staged.plot, args...; kwargs...)
+	return staged
+end
+
+function PlotlyBase.react!(
+	staged::_StagedPlotMutation,
+	data::AbstractVector{<:AbstractTrace},
+	layout::AbstractLayout,
+)
+	_do_react!(staged.plot, data, layout)
+	return staged
+end
+
+function PlotlyBase.addtraces!(
+	staged::_StagedPlotMutation,
+	traces::AbstractTrace...,
+)
+	_do_addtraces!(staged.plot, traces...)
+	return staged
+end
+
+function PlotlyBase.addtraces!(
+	staged::_StagedPlotMutation,
+	index::Int,
+	traces::AbstractTrace...,
+)
+	_do_addtraces!(staged.plot, index, traces...)
+	return staged
+end
+
+for updater in (
+	:update_xaxes!,
+	:update_yaxes!,
+	:update_geos!,
+	:update_mapboxes!,
+	:update_polars!,
+	:update_scenes!,
+	:update_ternaries!,
+	:update_annotations!,
+	:update_shapes!,
+	:update_images!,
+)
+	@eval function PlotlyBase.$updater(
+		staged::_StagedPlotMutation,
+		with::PlotlyBase.PlotlyAttribute = attr();
+		kwargs...,
+	)
+		PlotlyBase.$updater(
+			staged.plot.layout,
+			with;
+			kwargs...,
+		)
+		return staged
+	end
+end
+
+function _transactional_high_level_plot_mutation!(
+	mutator::Function,
+	fig::Union{Plot,SyncPlot},
+	args...;
+	kwargs...,
+)
+	result = Ref{Any}(nothing)
+	staged_target = Ref{Any}(nothing)
+	mutation = function (candidate)
+		staged = _StagedPlotMutation(candidate)
+		staged_target[] = staged
+		result[] = mutator(staged, args...; kwargs...)
+		return nothing
+	end
+
+	if fig isa SyncPlot
+		_mutate_and_refresh_syncplot!(mutation, fig)
+	else
+		_transactional_full_plot_mutation!(mutation, fig)
+	end
+	return result[] === staged_target[] ? fig : result[]
 end
 
 const _VALID_TEMPLATES = (
@@ -231,6 +324,36 @@ mutable struct SubplotFigure
 	legend_bgcolor::String
 	legend_bordercolor::String
 	legend_borderwidth::Float64
+	_lock::ReentrantLock
+end
+
+function SubplotFigure(
+	fig::Union{Plot,SyncPlot},
+	rows::Int,
+	cols::Int,
+	current_row::Int,
+	current_col::Int,
+	per_subplot_legends::Bool,
+	legend_position::Symbol,
+	legend_inset::Tuple{Float64,Float64},
+	legend_bgcolor::String,
+	legend_bordercolor::String,
+	legend_borderwidth::Float64,
+)
+	return SubplotFigure(
+		fig,
+		rows,
+		cols,
+		current_row,
+		current_col,
+		per_subplot_legends,
+		legend_position,
+		legend_inset,
+		legend_bgcolor,
+		legend_bordercolor,
+		legend_borderwidth,
+		ReentrantLock(),
+	)
 end
 
 function Base.getproperty(sf::SubplotFigure, name::Symbol)
@@ -244,7 +367,8 @@ function Base.getproperty(sf::SubplotFigure, name::Symbol)
 		name === :legend_inset ||
 		name === :legend_bgcolor ||
 		name === :legend_bordercolor ||
-		name === :legend_borderwidth
+		name === :legend_borderwidth ||
+		name === :_lock
 		return getfield(sf, name)
 	end
 
@@ -259,7 +383,98 @@ function Base.getproperty(sf::SubplotFigure, name::Symbol)
 end
 
 function Base.propertynames(sf::SubplotFigure, private::Bool = false)
-	return (fieldnames(SubplotFigure)..., propertynames(getfield(sf, :fig), private)...)
+	own = private ?
+		fieldnames(SubplotFigure) :
+		fieldnames(SubplotFigure)[1:(end - 1)]
+	return (own..., propertynames(getfield(sf, :fig), private)...)
+end
+
+function _staged_subplot_figure(
+	sf::SubplotFigure,
+	candidate::Plot,
+)
+	return SubplotFigure(
+		candidate,
+		sf.rows,
+		sf.cols,
+		sf.current_row,
+		sf.current_col,
+		sf.per_subplot_legends,
+		sf.legend_position,
+		sf.legend_inset,
+		sf.legend_bgcolor,
+		sf.legend_bordercolor,
+		sf.legend_borderwidth,
+	)
+end
+
+const _SUBPLOT_SELECTION_METADATA_FIELDS = (
+	:current_row,
+	:current_col,
+)
+const _SUBPLOT_LEGEND_METADATA_FIELDS = (
+	:legend_position,
+	:legend_inset,
+	:legend_bgcolor,
+	:legend_bordercolor,
+	:legend_borderwidth,
+)
+
+function _commit_subplot_metadata!(
+	sf::SubplotFigure,
+	staged::SubplotFigure,
+	fields::Tuple{Vararg{Symbol}},
+)
+	for field in fields
+		setfield!(sf, field, getfield(staged, field))
+	end
+	return sf
+end
+
+function _transactional_subplot_mutation!(
+	mutator::Function,
+	sf::SubplotFigure,
+	metadata_fields::Tuple{Vararg{Symbol}},
+	args...;
+	kwargs...,
+)
+	metadata_lock = getfield(sf, :_lock)
+	lock(metadata_lock)
+	try
+		staged_ref =
+			Ref{Union{Nothing,SubplotFigure}}(nothing)
+		result = Ref{Any}(nothing)
+		mutation = function (candidate)
+			staged = _staged_subplot_figure(sf, candidate)
+			staged_ref[] = staged
+			result[] =
+				mutator(staged, args...; kwargs...)
+			return nothing
+		end
+		commit_callback = _ -> _commit_subplot_metadata!(
+			sf,
+			something(staged_ref[]),
+			metadata_fields,
+		)
+
+		fig = getfield(sf, :fig)
+		if fig isa SyncPlot
+			_mutate_and_refresh_syncplot!(
+				mutation,
+				fig;
+				commit_callback = commit_callback,
+			)
+		else
+			_transactional_full_plot_mutation!(
+				mutation,
+				fig;
+				commit_callback = commit_callback,
+			)
+		end
+		return result[] === staged_ref[] ? sf : result[]
+	finally
+		unlock(metadata_lock)
+	end
 end
 
 function _symbol_dict(x)
@@ -561,8 +776,8 @@ unnamed trace), or `showlegend=false` to hide it.
 - `bgcolor` / `bordercolor` / `borderwidth`: Legend box styling.
 - `showlegend`: Force legend visibility (`true`/`false`), or leave `nothing` to auto-detect.
 """
-function set_legend!(
-	fig::Union{Plot, SyncPlot};
+function _set_legend_impl!(
+	fig;
 	position::Union{Symbol, AbstractString} = get_default_legend_position(),
 	inset::Tuple{<:Real, <:Real} = _DEFAULT_LEGEND_INSET[],
 	bgcolor::String = _DEFAULT_LEGEND_BGCOLOR[],
@@ -585,33 +800,93 @@ function set_legend!(
 end
 
 function set_legend!(
-	sf::SubplotFigure;
-	position::Union{Symbol, AbstractString} = sf.legend_position,
-	inset::Tuple{<:Real, <:Real} = sf.legend_inset,
-	bgcolor::String = sf.legend_bgcolor,
-	bordercolor::String = sf.legend_bordercolor,
-	borderwidth::Real = sf.legend_borderwidth,
+	fig::Union{Plot, SyncPlot};
+	position::Union{Symbol, AbstractString} = get_default_legend_position(),
+	inset::Tuple{<:Real, <:Real} = _DEFAULT_LEGEND_INSET[],
+	bgcolor::String = _DEFAULT_LEGEND_BGCOLOR[],
+	bordercolor::String = _DEFAULT_LEGEND_BORDERCOLOR[],
+	borderwidth::Real = _DEFAULT_LEGEND_BORDERWIDTH[],
+	showlegend::Union{Nothing, Bool} = nothing,
 )
+	return _transactional_high_level_plot_mutation!(
+		_set_legend_impl!,
+		fig;
+		position = position,
+		inset = inset,
+		bgcolor = bgcolor,
+		bordercolor = bordercolor,
+		borderwidth = borderwidth,
+		showlegend = showlegend,
+	)
+end
+
+function _set_subplot_legend_impl!(
+	sf::SubplotFigure;
+	position::Union{Nothing, Symbol, AbstractString} = nothing,
+	inset::Union{Nothing, Tuple{<:Real, <:Real}} = nothing,
+	bgcolor::Union{Nothing, String} = nothing,
+	bordercolor::Union{Nothing, String} = nothing,
+	borderwidth::Union{Nothing, Real} = nothing,
+)
+	resolved_position =
+		position === nothing ? sf.legend_position : position
+	resolved_inset = inset === nothing ? sf.legend_inset : inset
+	resolved_bgcolor =
+		bgcolor === nothing ? sf.legend_bgcolor : bgcolor
+	resolved_bordercolor =
+		bordercolor === nothing ? sf.legend_bordercolor : bordercolor
+	resolved_borderwidth =
+		borderwidth === nothing ? sf.legend_borderwidth : borderwidth
+
+	sf.legend_position = _normalize_legend_position(resolved_position)
+	sf.legend_inset = (
+		Float64(resolved_inset[1]),
+		Float64(resolved_inset[2]),
+	)
+	sf.legend_bgcolor = resolved_bgcolor
+	sf.legend_bordercolor = resolved_bordercolor
+	sf.legend_borderwidth = Float64(resolved_borderwidth)
+
 	if sf.per_subplot_legends
 		subplot_legends!(
 			sf;
-			position = position,
-			legend_inset = inset,
-			legend_bgcolor = bgcolor,
-			legend_bordercolor = bordercolor,
-			legend_borderwidth = borderwidth,
+			position = sf.legend_position,
+			legend_inset = sf.legend_inset,
+			legend_bgcolor = sf.legend_bgcolor,
+			legend_bordercolor = sf.legend_bordercolor,
+			legend_borderwidth = sf.legend_borderwidth,
 		)
 	else
 		set_legend!(
 			sf.fig;
-			position = position,
-			inset = inset,
-			bgcolor = bgcolor,
-			bordercolor = bordercolor,
-			borderwidth = borderwidth,
+			position = sf.legend_position,
+			inset = sf.legend_inset,
+			bgcolor = sf.legend_bgcolor,
+			bordercolor = sf.legend_bordercolor,
+			borderwidth = sf.legend_borderwidth,
 		)
 	end
 	return sf
+end
+
+function set_legend!(
+	sf::SubplotFigure;
+	position::Union{Nothing, Symbol, AbstractString} = nothing,
+	inset::Union{Nothing, Tuple{<:Real, <:Real}} = nothing,
+	bgcolor::Union{Nothing, String} = nothing,
+	bordercolor::Union{Nothing, String} = nothing,
+	borderwidth::Union{Nothing, Real} = nothing,
+)
+	return _transactional_subplot_mutation!(
+		_set_subplot_legend_impl!,
+		sf,
+		_SUBPLOT_LEGEND_METADATA_FIELDS;
+		position = position,
+		inset = inset,
+		bgcolor = bgcolor,
+		bordercolor = bordercolor,
+		borderwidth = borderwidth,
+	)
 end
 
 """
@@ -620,8 +895,8 @@ end
 Attach each subplot to its own legend box and place that legend inside the subplot domain.
 This avoids Plotly's default behavior where all legends are clustered in one place.
 """
-function subplot_legends!(
-	fig::Union{Plot, SyncPlot};
+function _subplot_legends_impl!(
+	fig;
 	position::Union{Symbol, AbstractString} = get_default_legend_position(),
 	legend_inset::Tuple{<:Real, <:Real} = _DEFAULT_LEGEND_INSET[],
 	legend_bgcolor::String = _DEFAULT_LEGEND_BGCOLOR[],
@@ -642,18 +917,53 @@ function subplot_legends!(
 end
 
 function subplot_legends!(
-	sf::SubplotFigure;
-	position::Union{Symbol, AbstractString} = sf.legend_position,
-	legend_inset::Tuple{<:Real, <:Real} = sf.legend_inset,
-	legend_bgcolor::String = sf.legend_bgcolor,
-	legend_bordercolor::String = sf.legend_bordercolor,
-	legend_borderwidth::Real = sf.legend_borderwidth,
+	fig::Union{Plot, SyncPlot};
+	position::Union{Symbol, AbstractString} = get_default_legend_position(),
+	legend_inset::Tuple{<:Real, <:Real} = _DEFAULT_LEGEND_INSET[],
+	legend_bgcolor::String = _DEFAULT_LEGEND_BGCOLOR[],
+	legend_bordercolor::String = _DEFAULT_LEGEND_BORDERCOLOR[],
+	legend_borderwidth::Real = _DEFAULT_LEGEND_BORDERWIDTH[],
 )
-	sf.legend_position = _normalize_legend_position(position)
-	sf.legend_inset = (Float64(legend_inset[1]), Float64(legend_inset[2]))
-	sf.legend_bgcolor = legend_bgcolor
-	sf.legend_bordercolor = legend_bordercolor
-	sf.legend_borderwidth = Float64(legend_borderwidth)
+	return _transactional_high_level_plot_mutation!(
+		_subplot_legends_impl!,
+		fig;
+		position = position,
+		legend_inset = legend_inset,
+		legend_bgcolor = legend_bgcolor,
+		legend_bordercolor = legend_bordercolor,
+		legend_borderwidth = legend_borderwidth,
+	)
+end
+
+function _subplot_figure_legends_impl!(
+	sf::SubplotFigure;
+	position::Union{Nothing, Symbol, AbstractString} = nothing,
+	legend_inset::Union{Nothing, Tuple{<:Real, <:Real}} = nothing,
+	legend_bgcolor::Union{Nothing, String} = nothing,
+	legend_bordercolor::Union{Nothing, String} = nothing,
+	legend_borderwidth::Union{Nothing, Real} = nothing,
+)
+	resolved_position =
+		position === nothing ? sf.legend_position : position
+	resolved_inset =
+		legend_inset === nothing ? sf.legend_inset : legend_inset
+	resolved_bgcolor =
+		legend_bgcolor === nothing ? sf.legend_bgcolor : legend_bgcolor
+	resolved_bordercolor = legend_bordercolor === nothing ?
+		sf.legend_bordercolor :
+		legend_bordercolor
+	resolved_borderwidth = legend_borderwidth === nothing ?
+		sf.legend_borderwidth :
+		legend_borderwidth
+
+	sf.legend_position = _normalize_legend_position(resolved_position)
+	sf.legend_inset = (
+		Float64(resolved_inset[1]),
+		Float64(resolved_inset[2]),
+	)
+	sf.legend_bgcolor = resolved_bgcolor
+	sf.legend_bordercolor = resolved_bordercolor
+	sf.legend_borderwidth = Float64(resolved_borderwidth)
 
 	subplot_legends!(
 		sf.fig;
@@ -664,6 +974,26 @@ function subplot_legends!(
 		legend_borderwidth = sf.legend_borderwidth,
 	)
 	return sf
+end
+
+function subplot_legends!(
+	sf::SubplotFigure;
+	position::Union{Nothing, Symbol, AbstractString} = nothing,
+	legend_inset::Union{Nothing, Tuple{<:Real, <:Real}} = nothing,
+	legend_bgcolor::Union{Nothing, String} = nothing,
+	legend_bordercolor::Union{Nothing, String} = nothing,
+	legend_borderwidth::Union{Nothing, Real} = nothing,
+)
+	return _transactional_subplot_mutation!(
+		_subplot_figure_legends_impl!,
+		sf,
+		_SUBPLOT_LEGEND_METADATA_FIELDS;
+		position = position,
+		legend_inset = legend_inset,
+		legend_bgcolor = legend_bgcolor,
+		legend_bordercolor = legend_bordercolor,
+		legend_borderwidth = legend_borderwidth,
+	)
 end
 
 function _check_subplot_dims(rows::Int, cols::Int)
@@ -769,9 +1099,11 @@ Set the active subplot cell in a `SubplotFigure`.
 function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
 	r = Int(row)
 	c = Int(col)
-	_check_subplot_cell(sf, r, c)
-	sf.current_row = r
-	sf.current_col = c
+	lock(getfield(sf, :_lock)) do
+		_check_subplot_cell(sf, r, c)
+		sf.current_row = r
+		sf.current_col = c
+	end
 	return sf
 end
 
@@ -857,7 +1189,7 @@ function _validate_subplot_traces!(
 	return target_ref
 end
 
-function PlotlyBase.add_trace!(
+function _subplot_add_trace_impl!(
 	sf::SubplotFigure,
 	trace::GenericTrace;
 	row::Union{Nothing, Integer} = nothing,
@@ -886,7 +1218,25 @@ function PlotlyBase.add_trace!(
 	return sf
 end
 
-function PlotlyBase.addtraces!(
+function PlotlyBase.add_trace!(
+	sf::SubplotFigure,
+	trace::GenericTrace;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+)
+	return _transactional_subplot_mutation!(
+		_subplot_add_trace_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		trace;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+	)
+end
+
+function _subplot_addtraces_impl!(
 	sf::SubplotFigure,
 	traces::AbstractTrace...;
 	row::Union{Nothing, Integer} = nothing,
@@ -924,6 +1274,25 @@ function PlotlyBase.addtraces!(
 	sf.current_col = c
 	_refresh!(sf.fig)
 	return sf
+end
+
+function PlotlyBase.addtraces!(
+	sf::SubplotFigure,
+	traces::AbstractTrace...;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+)
+	isempty(traces) && return sf
+	return _transactional_subplot_mutation!(
+		_subplot_addtraces_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		traces...;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+	)
 end
 
 function _merge_layout_attr!(
@@ -1045,7 +1414,7 @@ function _apply_source_root_layout_modes!(
 	return nothing
 end
 
-function _subplot_delegate_mutator!(
+function _subplot_delegate_mutator_impl!(
 	sf::SubplotFigure,
 	mutator::Function,
 	args...;
@@ -1105,6 +1474,22 @@ function _subplot_delegate_mutator!(
 	return sf
 end
 
+function _subplot_delegate_mutator!(
+	sf::SubplotFigure,
+	mutator::Function,
+	args...;
+	kwargs...,
+)
+	return _transactional_subplot_mutation!(
+		_subplot_delegate_mutator_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		mutator,
+		args...;
+		kwargs...,
+	)
+end
+
 function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_y::Bool = false)
 	p = _plot_obj(sf.fig)
 	probe = scatter(
@@ -1145,7 +1530,7 @@ otherwise both must be given. `ylabel!`/`yrange!` accept `secondary_y=true` to
 target a cell's secondary y-axis (the cell must have been created with a
 secondary-y spec). Returns the `SubplotFigure` for chaining.
 """
-function xlabel!(
+function _subplot_xlabel_impl!(
 	sf::SubplotFigure,
 	label::AbstractString;
 	row::Union{Nothing, Integer} = nothing,
@@ -1160,7 +1545,23 @@ function xlabel!(
 	return sf
 end
 
-function ylabel!(
+function xlabel!(
+	sf::SubplotFigure,
+	label::AbstractString;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+)
+	return _transactional_subplot_mutation!(
+		_subplot_xlabel_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		label;
+		row = row,
+		col = col,
+	)
+end
+
+function _subplot_ylabel_impl!(
 	sf::SubplotFigure,
 	label::AbstractString;
 	row::Union{Nothing, Integer} = nothing,
@@ -1176,7 +1577,25 @@ function ylabel!(
 	return sf
 end
 
-function xrange!(
+function ylabel!(
+	sf::SubplotFigure,
+	label::AbstractString;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+)
+	return _transactional_subplot_mutation!(
+		_subplot_ylabel_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		label;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+	)
+end
+
+function _subplot_xrange_impl!(
 	sf::SubplotFigure,
 	range::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
@@ -1192,7 +1611,25 @@ function xrange!(
 	return sf
 end
 
-function yrange!(
+function xrange!(
+	sf::SubplotFigure,
+	range::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+)
+	length(range) == 2 ||
+		throw(ArgumentError("`range` must have length 2."))
+	return _transactional_subplot_mutation!(
+		_subplot_xrange_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		range;
+		row = row,
+		col = col,
+	)
+end
+
+function _subplot_yrange_impl!(
 	sf::SubplotFigure,
 	range::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
@@ -1207,6 +1644,26 @@ function yrange!(
 	sf.current_col = c
 	_refresh!(sf.fig)
 	return sf
+end
+
+function yrange!(
+	sf::SubplotFigure,
+	range::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+)
+	length(range) == 2 ||
+		throw(ArgumentError("`range` must have length 2."))
+	return _transactional_subplot_mutation!(
+		_subplot_yrange_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		range;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+	)
 end
 
 function plot_scatter!(
@@ -8465,3 +8922,91 @@ function plot_densitymapbox!(
 end
 
 #endregion
+
+# The public high-level mutators above intentionally accept several figure-like
+# targets through an untyped first argument. Install strictly-more-specific
+# Plot/SyncPlot methods with the same remaining positional signatures. Each
+# wrapper runs the original implementation against `_StagedPlotMutation`, so
+# direct vector pushes and all nested layout helpers are published by one
+# renderer transaction.
+const _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS = (
+	:plot_scatter!,
+	:plot_stem!,
+	:plot_bar!,
+	:plot_histogram!,
+	:plot_box!,
+	:plot_violin!,
+	:plot_scatterpolar!,
+	:plot_heatmap!,
+	:plot_contour!,
+	:plot_quiver!,
+	:plot_surface!,
+	:plot_scatter3d!,
+	:plot_quiver3d!,
+	:plot_pie!,
+	:plot_sunburst!,
+	:plot_treemap!,
+	:plot_funnel!,
+	:plot_funnelarea!,
+	:plot_waterfall!,
+	:plot_indicator!,
+	:plot_area!,
+	:plot_candlestick!,
+	:plot_ohlc!,
+	:plot_histogram2d!,
+	:annotate!,
+	:plot_sankey!,
+	:plot_parcoords!,
+	:plot_ternary!,
+	:plot_image!,
+	:plot_mesh3d!,
+	:plot_isosurface!,
+	:plot_volume!,
+	:plot_streamtube!,
+	:plot_choropleth!,
+	:plot_scattergeo!,
+	:plot_scattermapbox!,
+	:plot_densitymapbox!,
+	:set_template!,
+)
+
+function _install_transactional_high_level_plot_wrappers!()
+	for function_name in _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS
+		mutator = getfield(@__MODULE__, function_name)
+		for method in collect(methods(mutator))
+			method.module === (@__MODULE__) || continue
+			signature = Base.unwrap_unionall(method.sig)
+			positional_types = signature.parameters[2:end]
+			isempty(positional_types) && continue
+			first(positional_types) === Any || continue
+
+			argument_types = positional_types[2:end]
+			argument_names = [
+				gensym(:argument)
+				for _ in argument_types
+			]
+			typed_arguments = [
+				:($(argument_names[ind])::$(argument_types[ind]))
+				for ind in eachindex(argument_types)
+			]
+			definition = quote
+				function $(function_name)(
+					fig::Union{Plot,SyncPlot},
+					$(typed_arguments...);
+					kwargs...,
+				)
+					return _transactional_high_level_plot_mutation!(
+						$(function_name),
+						fig,
+						$(argument_names...);
+						kwargs...,
+					)
+				end
+			end
+			Core.eval(@__MODULE__, definition)
+		end
+	end
+	return nothing
+end
+
+_install_transactional_high_level_plot_wrappers!()
