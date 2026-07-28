@@ -1636,7 +1636,7 @@ end
         layout_before = deepcopy(atomic.plot.layout.fields)
         cell_before = (atomic.current_row, atomic.current_col)
         valid = scatter(x=[1], y=[1], name="valid")
-        @test_throws MethodError PlotlyBase.addtraces!(
+        @test_throws ArgumentError PlotlyBase.addtraces!(
             atomic,
             valid,
             _UnsupportedTrace();
@@ -2195,6 +2195,231 @@ end
         plot_scatter!(sf2, 1:3, [10.0, 20, 30]; secondary_y=true)
         ylabel!(sf2, "secondary"; secondary_y=true)
         @test haskey(sf2.plot.layout.fields, :yaxis2)
+    end
+
+    @testset "CRC: extended mutators route to heterogeneous subplots" begin
+        specs = [
+            PlotlySupply.Spec(kind="domain") PlotlySupply.Spec(kind="xy") PlotlySupply.Spec(kind="scene")
+            PlotlySupply.Spec(kind="geo") PlotlySupply.Spec(kind="ternary") PlotlySupply.Spec(kind="mapbox")
+        ]
+        sf = PlotlySupply.subplots(
+            2,
+            3;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+            specs=specs,
+        )
+        scene_domain = deepcopy(sf.layout.fields[:scene][:domain])
+
+        calls = (
+            () -> plot_pie!(sf, [3, 2]; row=1, col=1),
+            () -> plot_sunburst!(sf, ["root", "leaf"], ["", "root"]; row=1, col=1),
+            () -> plot_treemap!(sf, ["root", "leaf"], ["", "root"]; row=1, col=1),
+            () -> plot_funnelarea!(sf, [3, 2]; row=1, col=1),
+            () -> plot_indicator!(sf, 42; row=1, col=1),
+            () -> plot_sankey!(sf, [0], [1], [2.0]; row=1, col=1),
+            () -> plot_parcoords!(sf, ["a" => [1, 2], "b" => [3, 4]]; row=1, col=1),
+            () -> plot_funnel!(sf, [3, 2], ["a", "b"]; row=1, col=2),
+            () -> plot_waterfall!(sf, ["a", "b"], [1.0, -0.5]; row=1, col=2),
+            () -> plot_area!(sf, [1.0, 2.0]; row=1, col=2),
+            () -> plot_area!(sf, 1:2, [2.0, 3.0]; row=1, col=2),
+            () -> plot_candlestick!(
+                sf,
+                1:2,
+                [1.0, 2.0],
+                [2.0, 3.0],
+                [0.5, 1.5],
+                [1.5, 2.5];
+                row=1,
+                col=2,
+            ),
+            () -> plot_ohlc!(
+                sf,
+                1:2,
+                [1.0, 2.0],
+                [2.0, 3.0],
+                [0.5, 1.5],
+                [1.5, 2.5];
+                row=1,
+                col=2,
+            ),
+            () -> plot_histogram2d!(sf, [1.0, 2.0], [2.0, 3.0]; row=1, col=2),
+            () -> plot_image!(sf, reshape(UInt8.(0:11), 2, 2, 3); row=1, col=2),
+            () -> plot_mesh3d!(
+                sf,
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0];
+                row=1,
+                col=3,
+                perspective=false,
+            ),
+            () -> plot_isosurface!(
+                sf,
+                [0.0, 1.0],
+                [0.0, 1.0],
+                [0.0, 1.0],
+                [1.0, 2.0];
+                row=1,
+                col=3,
+            ),
+            () -> plot_volume!(
+                sf,
+                [0.0, 1.0],
+                [0.0, 1.0],
+                [0.0, 1.0],
+                [1.0, 2.0];
+                row=1,
+                col=3,
+            ),
+            () -> plot_streamtube!(
+                sf,
+                [0.0, 1.0],
+                [0.0, 1.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [0.0, 0.0];
+                row=1,
+                col=3,
+            ),
+            () -> plot_choropleth!(sf, ["CAN", "USA"], [1.0, 2.0]; row=2, col=1),
+            () -> plot_scattergeo!(sf, [0.0, 1.0], [2.0, 3.0]; row=2, col=1),
+            () -> plot_ternary!(
+                sf,
+                [0.2, 0.3],
+                [0.3, 0.3],
+                [0.5, 0.4];
+                row=2,
+                col=2,
+            ),
+            () -> plot_scattermapbox!(sf, [0.0, 1.0], [2.0, 3.0]; row=2, col=3),
+            () -> plot_densitymapbox!(
+                sf,
+                [0.0, 1.0],
+                [2.0, 3.0],
+                [1.0, 2.0];
+                row=2,
+                col=3,
+            ),
+        )
+
+        for call in calls
+            old_length = length(sf.data)
+            @test call() === sf
+            @test length(sf.data) == old_length + 1
+        end
+        @test length(sf.data) == 24
+        @test (sf.current_row, sf.current_col) == (2, 3)
+
+        for trace in sf.data
+            kind = PlotlyBase.get_subplotkind_from_trace_type(Symbol(trace.fields[:type]))
+            if kind == "domain"
+                @test haskey(trace.fields, :domain)
+            elseif kind == "xy"
+                @test haskey(trace.fields, :xaxis)
+                @test haskey(trace.fields, :yaxis)
+            elseif kind == "scene"
+                @test trace.fields[:scene] == "scene"
+            elseif kind == "geo"
+                @test trace.fields[:geo] == "geo"
+            else
+                @test trace.fields[:subplot] == kind
+            end
+        end
+        @test sf.layout.fields[:scene][:camera][:projection][:type] == "orthographic"
+        @test sf.layout.fields[:scene][:domain] == scene_domain
+    end
+
+    @testset "CRC: subplot routing rejects incompatible traces atomically" begin
+        sf = PlotlySupply.subplots(
+            1,
+            2;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+            specs=[
+                PlotlySupply.Spec(kind="domain") PlotlySupply.Spec(kind="xy")
+            ],
+        )
+        before = json(sf.plot)
+
+        @test_throws ArgumentError plot_scatter!(sf, 1:2, [1.0, 2.0]; row=1, col=1)
+        @test json(sf.plot) == before
+        @test_throws ArgumentError plot_pie!(sf, [1.0, 2.0]; row=1, col=2)
+        @test json(sf.plot) == before
+        @test_throws ArgumentError plot_pie!(
+            sf,
+            [1.0, 2.0];
+            row=1,
+            col=1,
+            secondary_y=true,
+        )
+        @test json(sf.plot) == before
+
+        @test_throws ArgumentError PlotlyBase.add_trace!(
+            sf,
+            pie(values=[1.0, 2.0]);
+            row=1,
+            col=2,
+        )
+        @test json(sf.plot) == before
+        @test_throws ArgumentError PlotlyBase.addtraces!(
+            sf,
+            scatter(x=1:2, y=[1.0, 2.0]),
+            pie(values=[1.0, 2.0]);
+            row=1,
+            col=2,
+        )
+        @test json(sf.plot) == before
+
+        sf_empty = PlotlySupply.subplots(
+            1,
+            2;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+            specs=[missing PlotlySupply.Spec()],
+        )
+        @test_throws ArgumentError plot_scatter!(
+            sf_empty,
+            1:2,
+            [1.0, 2.0];
+            row=1,
+            col=1,
+        )
+        @test isempty(sf_empty.data)
+    end
+
+    @testset "CRC: domain and geo traces receive per-subplot legends" begin
+        sf = PlotlySupply.subplots(
+            1,
+            2;
+            sync=false,
+            show=false,
+            specs=[
+                PlotlySupply.Spec(kind="domain") PlotlySupply.Spec(kind="geo")
+            ],
+        )
+        PlotlyBase.add_trace!(
+            sf,
+            pie(values=[2.0, 1.0], name="domain");
+            row=1,
+            col=1,
+        )
+        PlotlyBase.add_trace!(
+            sf,
+            scattergeo(lon=[0.0], lat=[0.0], name="geo");
+            row=1,
+            col=2,
+        )
+        @test sf.data[1].fields[:legend] == "legend"
+        @test sf.data[2].fields[:legend] == "legend2"
+        @test sf.data[1].fields[:showlegend] == true
+        @test sf.data[2].fields[:showlegend] == true
+        @test haskey(sf.layout.fields, :legend)
+        @test haskey(sf.layout.fields, :legend2)
     end
 
     # ─────────────────────────────────────────────────────────────────

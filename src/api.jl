@@ -323,11 +323,27 @@ function _trace_subplot_key_domain(p::Plot, trace::GenericTrace)
 		return ("scene:" * scene_ref, domain)
 	end
 
+	if haskey(fields, :geo)
+		geo_ref = String(get(fields, :geo, "geo"))
+		domain = _layout_subplot_domain(p.layout, Symbol(geo_ref))
+		domain === nothing && return nothing
+		return ("geo:" * geo_ref, domain)
+	end
+
 	if haskey(fields, :subplot)
 		subplot_ref = String(get(fields, :subplot, "polar"))
 		domain = _layout_subplot_domain(p.layout, Symbol(subplot_ref))
 		domain === nothing && return nothing
 		return ("subplot:" * subplot_ref, domain)
+	end
+
+	if haskey(fields, :domain)
+		domain_fields = _symbol_dict(fields[:domain])
+		xdom = _domain_tuple(get(domain_fields, :x, nothing))
+		ydom = _domain_tuple(get(domain_fields, :y, nothing))
+		(xdom === nothing || ydom === nothing) && return nothing
+		key = "domain:$(xdom[1]),$(xdom[2])|$(ydom[1]),$(ydom[2])"
+		return (key, (xdom, ydom))
 	end
 
 	return nothing
@@ -778,6 +794,65 @@ savefig(sf::SubplotFigure, args...; kwargs...) = savefig(getfield(sf, :fig), arg
 savefig(io::IO, sf::SubplotFigure; kwargs...) = savefig(io, getfield(sf, :fig); kwargs...)
 savefig(filename::AbstractString, sf::SubplotFigure; kwargs...) = savefig(filename, getfield(sf, :fig); kwargs...)
 
+function _subplot_target_ref(
+	p::Plot,
+	row::Int,
+	col::Int;
+	secondary_y::Bool = false,
+)
+	grid_ref = p.layout.subplots.grid_ref
+	if !isassigned(grid_ref, row, col) || isempty(grid_ref[row, col])
+		throw(ArgumentError("subplot cell ($(row), $(col)) is empty"))
+	end
+
+	refs = grid_ref[row, col]
+	if secondary_y && (refs[1].subplot_kind != "xy" || length(refs) < 2)
+		throw(ArgumentError(
+			"subplot cell ($(row), $(col)) has no secondary y-axis; " *
+			"create it with `secondary_y=true`",
+		))
+	end
+	return refs[secondary_y ? 2 : 1]
+end
+
+function _trace_subplot_kind(trace::GenericTrace)
+	trace_type_value = get(trace.fields, :type, "scatter")
+	trace_type = try
+		trace_type_value isa Symbol ? trace_type_value : Symbol(trace_type_value)
+	catch
+		throw(ArgumentError("invalid Plotly trace type $(repr(trace_type_value))"))
+	end
+	kind = try
+		PlotlyBase.get_subplotkind_from_trace_type(trace_type)
+	catch
+		throw(ArgumentError("unknown Plotly trace type $(repr(trace_type_value))"))
+	end
+	kind isa AbstractString ||
+		throw(ArgumentError("Plotly trace type $(repr(trace_type_value)) has no subplot kind"))
+	return String(kind), trace_type
+end
+
+function _validate_subplot_traces!(
+	p::Plot,
+	traces,
+	row::Int,
+	col::Int;
+	secondary_y::Bool = false,
+)
+	target_ref = _subplot_target_ref(p, row, col; secondary_y = secondary_y)
+	target_kind = target_ref.subplot_kind
+	for trace in traces
+		trace isa GenericTrace ||
+			throw(ArgumentError("only PlotlyBase.GenericTrace values can be added to a subplot"))
+		required_kind, trace_type = _trace_subplot_kind(trace)
+		required_kind == target_kind || throw(ArgumentError(
+			"trace type '$trace_type' requires a '$required_kind' subplot, " *
+			"but cell ($(row), $(col)) is '$target_kind'",
+		))
+	end
+	return target_ref
+end
+
 function PlotlyBase.add_trace!(
 	sf::SubplotFigure,
 	trace::GenericTrace;
@@ -787,6 +862,7 @@ function PlotlyBase.add_trace!(
 )
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	p = _plot_obj(sf.fig)
+	_validate_subplot_traces!(p, (trace,), r, c; secondary_y = secondary_y)
 	PlotlyBase.add_trace!(p, trace; row = r, col = c, secondary_y = secondary_y)
 
 	if sf.per_subplot_legends
@@ -817,6 +893,7 @@ function PlotlyBase.addtraces!(
 
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	p = _plot_obj(sf.fig)
+	_validate_subplot_traces!(p, traces, r, c; secondary_y = secondary_y)
 
 	# PlotlyBase.add_trace! deep-copies each trace and merges the selected
 	# subplot references. Stage the whole batch so a bad later trace or subplot
@@ -912,16 +989,31 @@ function _apply_source_layout_to_added_traces!(
 			end
 		end
 
-		if haskey(fields, :subplot)
-			polar_key = Symbol(String(get(fields, :subplot, "polar")))
-			if !(polar_key in processed)
+		if haskey(fields, :geo)
+			geo_key = Symbol(String(get(fields, :geo, "geo")))
+			if !(geo_key in processed)
 				_merge_layout_attr!(
 					target.layout,
-					polar_key,
-					get(source.layout.fields, :polar, nothing);
+					geo_key,
+					get(source.layout.fields, :geo, nothing);
 					drop_keys = (:domain,),
 				)
-				push!(processed, polar_key)
+				push!(processed, geo_key)
+			end
+		end
+
+		if haskey(fields, :subplot)
+			subplot_key = Symbol(String(fields[:subplot]))
+			source_kind, _ = _trace_subplot_kind(target.data[idx])
+			source_key = Symbol(source_kind)
+			if !(subplot_key in processed)
+				_merge_layout_attr!(
+					target.layout,
+					subplot_key,
+					get(source.layout.fields, source_key, nothing);
+					drop_keys = (:domain,),
+				)
+				push!(processed, subplot_key)
 			end
 		end
 	end
@@ -955,10 +1047,15 @@ function _subplot_delegate_mutator!(
 	mutator(tmp, args...; kwargs...)
 
 	p = _plot_obj(sf.fig)
-	start_index = length(p.data) + 1
+	_validate_subplot_traces!(p, tmp.data, r, c; secondary_y = secondary_y)
+	staged = Plot(p.layout)
+	sizehint!(staged.data, length(tmp.data))
 	for trace in tmp.data
-		PlotlyBase.add_trace!(p, deepcopy(trace); row = r, col = c, secondary_y = secondary_y)
+		PlotlyBase.add_trace!(staged, trace; row = r, col = c, secondary_y = secondary_y)
 	end
+
+	start_index = length(p.data) + 1
+	append!(p.data, staged.data)
 	_apply_source_layout_to_added_traces!(p, tmp, start_index)
 
 	if sf.per_subplot_legends
@@ -1523,6 +1620,69 @@ function plot_quiver3d!(
 		secondary_y = secondary_y,
 		kwargs...,
 	)
+end
+
+# Extended chart mutators need the same explicit positional signatures as their
+# Plot/SyncPlot counterparts. A catch-all SubplotFigure method would hide
+# misspelled or otherwise unsupported call shapes.
+for (fn, nargs) in (
+	(:plot_pie!, 1),
+	(:plot_funnelarea!, 1),
+	(:plot_parcoords!, 1),
+	(:plot_sunburst!, 2),
+	(:plot_treemap!, 2),
+	(:plot_choropleth!, 2),
+	(:plot_scattergeo!, 2),
+	(:plot_scattermapbox!, 2),
+	(:plot_sankey!, 3),
+	(:plot_densitymapbox!, 3),
+)
+	@eval function $fn(
+		sf::SubplotFigure,
+		args::Vararg{AbstractVector, $nargs};
+		kwargs...,
+	)
+		return _subplot_delegate_mutator!(sf, $fn, args...; kwargs...)
+	end
+end
+
+function plot_indicator!(
+	sf::SubplotFigure,
+	value::Real;
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_indicator!, value; kwargs...)
+end
+
+for (fn, nargs) in (
+	(:plot_funnel!, 2),
+	(:plot_waterfall!, 2),
+	(:plot_area!, 1),
+	(:plot_area!, 2),
+	(:plot_candlestick!, 5),
+	(:plot_ohlc!, 5),
+	(:plot_histogram2d!, 2),
+	(:plot_ternary!, 3),
+	(:plot_mesh3d!, 3),
+	(:plot_isosurface!, 4),
+	(:plot_volume!, 4),
+	(:plot_streamtube!, 6),
+)
+	@eval function $fn(
+		sf::SubplotFigure,
+		args::Vararg{Union{AbstractRange, Vector, SubArray}, $nargs};
+		kwargs...,
+	)
+		return _subplot_delegate_mutator!(sf, $fn, args...; kwargs...)
+	end
+end
+
+function plot_image!(
+	sf::SubplotFigure,
+	z::AbstractArray;
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_image!, z; kwargs...)
 end
 
 """
