@@ -2090,4 +2090,41 @@ using PlotlySupply
             Dict(:y => [2, 2]),
         )
     end
+
+    @testset "CRC: plot frames reach desktop renderer" begin
+        fr = frame(name="frame-sentinel", data=[scatter(y=[2, 3])])
+
+        keyword_plot = plot(scatter(y=[1, 2]); frames=[fr])
+        @test keyword_plot.frames == [fr]
+
+        positional_plot = plot(scatter(y=[1, 2]), Layout(), [fr])
+        @test positional_plot.frames == [fr]
+
+        vector_plot = plot([scatter(y=[1, 2])], Layout(), [fr])
+        @test vector_plot.frames == [fr]
+
+        empty_plot = plot(; frames=[fr])
+        @test empty_plot.frames == [fr]
+
+        html = PlotlySupply._syncplot_html(positional_plot, "frame-test")
+        @test occursin("frame-sentinel", html)
+        @test occursin("Plotly.addFrames", html)
+        @test occursin("Plotly.animate", html)
+
+        no_autoplay = PlotlySupply._syncplot_html(
+            positional_plot,
+            "frame-test";
+            autoplay=false,
+        )
+        @test occursin("Plotly.addFrames", no_autoplay)
+        @test occursin("if (false)", no_autoplay)
+
+        rebuild = PlotlySupply._plotlyjs_newplot_script(
+            positional_plot,
+            "frame-test";
+            purge=true,
+        )
+        @test occursin("Plotly.purge", rebuild)
+        @test occursin("frame-sentinel", rebuild)
+    end
 end

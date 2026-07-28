@@ -61,11 +61,39 @@ function _next_syncplot_id()
 	return "plotsupply-" * string(_SYNC_ID_COUNTER[]) * "-" * string(time_ns())
 end
 
-function _syncplot_html(p::Plot, divid::String)
+function _plotlyjs_newplot_script(
+	p::Plot,
+	divid::String;
+	autoplay::Bool = true,
+	purge::Bool = false,
+)
 	data_js = _json_js(p.data)
 	layout_js = _json_js(p.layout)
 	config_js = _json_js(p.config)
+	frames_js = _json_js(p.frames)
+	divid_js = _json_js(divid)
+	purge_js = purge ? "Plotly.purge(div);" : ""
+	autoplay_js = autoplay ? "true" : "false"
 
+	return """
+(async function() {
+  if (typeof Plotly === "undefined") return "plotly-not-loaded";
+  const div = document.getElementById($divid_js);
+  if (!div) return "plot-div-not-found";
+  const frames = $frames_js;
+  $purge_js
+  await Plotly.newPlot(div, $data_js, $layout_js, $config_js);
+  if (frames.length > 0) {
+    await Plotly.addFrames(div, frames);
+    if ($autoplay_js) await Plotly.animate(div, null);
+  }
+  return "ok";
+})()
+"""
+end
+
+function _syncplot_html(p::Plot, divid::String; autoplay::Bool = true)
+	newplot_js = _plotlyjs_newplot_script(p, divid; autoplay = autoplay)
 	return """
 <!doctype html>
 <html lang="en">
@@ -93,7 +121,7 @@ function _syncplot_html(p::Plot, divid::String)
           setTimeout(boot, 25);
           return;
         }
-        Plotly.newPlot("$divid", $data_js, $layout_js, $config_js);
+        $newplot_js;
       }
       boot();
     })();
@@ -110,11 +138,12 @@ function _create_syncplot_window(
 	height::Int = 720,
 	title::String = "PlotlySupply",
 	show::Bool = true,
+	autoplay::Bool = true,
 )
 	ec = _electroncall()
 	electron_app = app === nothing ? _default_electron_app(ec) : app
 	divid = _next_syncplot_id()
-	html = _syncplot_html(p, divid)
+	html = _syncplot_html(p, divid; autoplay = autoplay)
 
 	# Write HTML to a temp file and load via file:// URI.
 	# ElectronCall converts HTML strings to data: URIs which have a ~2 MB
@@ -152,6 +181,7 @@ function to_syncplot(
 	height::Int = 720,
 	title::String = "PlotlySupply",
 	show::Bool = true,
+	autoplay::Bool = true,
 )
 	return _create_syncplot_window(
 		fig;
@@ -160,6 +190,7 @@ function to_syncplot(
 		height = height,
 		title = title,
 		show = show,
+		autoplay = autoplay,
 	)
 end
 
@@ -173,30 +204,55 @@ function plot(
 	trace::AbstractTrace,
 	layout::AbstractLayout = Layout();
 	config::PlotConfig = PlotConfig(),
+	frames::AbstractVector{<:PlotlyFrame} = PlotlyFrame[],
 	sync::Bool = false,
 	kwargs...,
 )
-	return _maybe_syncplot(Plot([trace], layout; config = config); sync = sync, kwargs...)
+	return _maybe_syncplot(Plot([trace], layout, frames; config = config); sync = sync, kwargs...)
+end
+
+function plot(
+	trace::AbstractTrace,
+	layout::AbstractLayout,
+	frames::AbstractVector{<:PlotlyFrame};
+	config::PlotConfig = PlotConfig(),
+	sync::Bool = false,
+	kwargs...,
+)
+	return _maybe_syncplot(Plot([trace], layout, frames; config = config); sync = sync, kwargs...)
 end
 
 function plot(
 	traces::AbstractVector{<:AbstractTrace},
 	layout::AbstractLayout = Layout();
 	config::PlotConfig = PlotConfig(),
+	frames::AbstractVector{<:PlotlyFrame} = PlotlyFrame[],
 	sync::Bool = false,
 	kwargs...,
 )
-	return _maybe_syncplot(Plot(traces, layout; config = config); sync = sync, kwargs...)
+	return _maybe_syncplot(Plot(traces, layout, frames; config = config); sync = sync, kwargs...)
+end
+
+function plot(
+	traces::AbstractVector{<:AbstractTrace},
+	layout::AbstractLayout,
+	frames::AbstractVector{<:PlotlyFrame};
+	config::PlotConfig = PlotConfig(),
+	sync::Bool = false,
+	kwargs...,
+)
+	return _maybe_syncplot(Plot(traces, layout, frames; config = config); sync = sync, kwargs...)
 end
 
 function plot(
 	traces::AbstractTrace...;
 	layout::AbstractLayout = Layout(),
 	config::PlotConfig = PlotConfig(),
+	frames::AbstractVector{<:PlotlyFrame} = PlotlyFrame[],
 	sync::Bool = false,
 	kwargs...,
 )
-	return _maybe_syncplot(Plot(collect(traces), layout; config = config); sync = sync, kwargs...)
+	return _maybe_syncplot(Plot(collect(traces), layout, frames; config = config); sync = sync, kwargs...)
 end
 
 plot(fig::Plot; sync::Bool = false, kwargs...) = _maybe_syncplot(fig; sync = sync, kwargs...)
@@ -205,27 +261,38 @@ function plot(
 	;
 	layout::AbstractLayout = Layout(),
 	config::PlotConfig = PlotConfig(),
+	frames::AbstractVector{<:PlotlyFrame} = PlotlyFrame[],
 	sync::Bool = false,
 	kwargs...,
 )
 	empty_traces = Vector{GenericTrace}(undef, 0)
-	return _maybe_syncplot(Plot(empty_traces, layout; config = config); sync = sync, kwargs...)
+	return _maybe_syncplot(Plot(empty_traces, layout, frames; config = config); sync = sync, kwargs...)
 end
 
 # Positional-layout form. `make_subplots` and other PlotlyJS-compat helpers call
 # `plot(Layout(...))` with the layout passed positionally; without this method
 # such calls fall through to the variadic error stub in PlotlySupply.jl.
 plot(layout::AbstractLayout; kwargs...) = plot(; layout = layout, kwargs...)
+plot(layout::AbstractLayout, frames::AbstractVector{<:PlotlyFrame}; kwargs...) =
+	plot(; layout = layout, frames = frames, kwargs...)
 
-function _plotlyjs_refresh!(sp::SyncPlot, data, layout)
+function _plotlyjs_refresh!(
+	sp::SyncPlot,
+	data,
+	layout;
+	rebuild::Bool = false,
+	autoplay::Bool = false,
+)
 	isopen(sp) || return nothing
 
-	divid_js = _json_js(sp.divid)
-	data_js = _json_js(data)
-	layout_js = _json_js(layout)
-	config_js = _json_js(sp.plot.config)
-
-	js = """
+	js = if rebuild
+		_plotlyjs_newplot_script(sp.plot, sp.divid; autoplay = autoplay, purge = true)
+	else
+		divid_js = _json_js(sp.divid)
+		data_js = _json_js(data)
+		layout_js = _json_js(layout)
+		config_js = _json_js(sp.plot.config)
+		"""
 (function() {
   if (typeof Plotly === "undefined") return "plotly-not-loaded";
   const div = document.getElementById($divid_js);
@@ -234,6 +301,7 @@ function _plotlyjs_refresh!(sp::SyncPlot, data, layout)
   return "ok";
 })();
 """
+	end
 	try
 		ec = _electroncall()
 		Base.invokelatest(() -> ec.run(sp.window, js))
@@ -492,7 +560,13 @@ function PlotlyBase.react!(sp::SyncPlot, p::Plot)
 		delete!(_PLOT_SYNCPLOT_MAP, old)
 		_PLOT_SYNCPLOT_MAP[p] = sp
 	end
-	_plotlyjs_refresh!(sp, sp.plot.data, sp.plot.layout)
+	_plotlyjs_refresh!(
+		sp,
+		sp.plot.data,
+		sp.plot.layout;
+		rebuild = true,
+		autoplay = true,
+	)
 	return sp
 end
 
