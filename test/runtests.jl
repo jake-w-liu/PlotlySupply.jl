@@ -15,6 +15,160 @@ Base.push!(v::_CountingTraceVector, xs...) = (push!(v.data, xs...); v)
 Base.append!(v::_CountingTraceVector, xs) = (append!(v.data, xs); v)
 Base.sizehint!(v::_CountingTraceVector, n::Integer) = (sizehint!(v.data, n); v)
 
+mutable struct _LifecycleFakeWindow
+    exists::Bool
+    msg_channel::Channel{Any}
+    uri::String
+    close_calls::Int
+    throw_on_close::Bool
+    throw_on_isopen::Bool
+    on_close::Any
+    close_entered::Union{Nothing,Channel{Nothing}}
+    close_release::Union{Nothing,Channel{Nothing}}
+end
+
+mutable struct _LifecycleFakeElectron
+    windows::Vector{_LifecycleFakeWindow}
+    fail_window::Bool
+    throw_on_close::Bool
+    throw_on_isopen::Bool
+    block_close::Bool
+end
+
+_LifecycleFakeElectron(;
+    fail_window::Bool=false,
+    throw_on_close::Bool=false,
+    throw_on_isopen::Bool=false,
+    block_close::Bool=false,
+) = _LifecycleFakeElectron(
+    _LifecycleFakeWindow[],
+    fail_window,
+    throw_on_close,
+    throw_on_isopen,
+    block_close,
+)
+
+function _lifecycle_fake_window(
+    ec::_LifecycleFakeElectron,
+    app,
+    uri;
+    width,
+    height,
+    title,
+    show,
+)
+    ec.fail_window && error("injected Window construction failure")
+    window = _LifecycleFakeWindow(
+        true,
+        Channel{Any}(1),
+        String(uri),
+        0,
+        ec.throw_on_close,
+        ec.throw_on_isopen,
+        nothing,
+        ec.block_close ? Channel{Nothing}(1) : nothing,
+        ec.block_close ? Channel{Nothing}(1) : nothing,
+    )
+    push!(ec.windows, window)
+    return window
+end
+
+function _lifecycle_fake_isopen(window::_LifecycleFakeWindow)
+    window.throw_on_isopen && error("injected window isopen failure")
+    return window.exists
+end
+
+function _lifecycle_fake_close(window::_LifecycleFakeWindow)
+    window.close_calls += 1
+    if window.close_entered !== nothing
+        put!(window.close_entered, nothing)
+        take!(window.close_release)
+    end
+    window.on_close === nothing || window.on_close()
+    window.throw_on_close && error("injected window close failure")
+    window.exists = false
+    isopen(window.msg_channel) && close(window.msg_channel)
+    return nothing
+end
+
+function Base.getproperty(ec::_LifecycleFakeElectron, name::Symbol)
+    if name === :Window
+        return (args...; kwargs...) ->
+            _lifecycle_fake_window(ec, args...; kwargs...)
+    elseif name === :isopen
+        return _lifecycle_fake_isopen
+    elseif name === :close
+        return _lifecycle_fake_close
+    elseif name === :msgchannel
+        return window -> window.msg_channel
+    end
+    return getfield(ec, name)
+end
+
+function _wait_for_lifecycle(predicate; timeout::Float64=5.0, collect::Bool=false)
+    deadline = time() + timeout
+    while time() < deadline
+        predicate() && return true
+        collect && GC.gc(true)
+        sleep(0.01)
+    end
+    collect && GC.gc(true)
+    return predicate()
+end
+
+function _lifecycle_registry_counts()
+    return lock(PlotlySupply._SYNCPLOT_REGISTRY_LOCK) do
+        (
+            length(PlotlySupply._PLOT_SYNCPLOT_MAP),
+            length(PlotlySupply._DISPLAYED_PLOTS),
+        )
+    end
+end
+
+function _lifecycle_is_registered(plot, sp)
+    return lock(PlotlySupply._SYNCPLOT_REGISTRY_LOCK) do
+        get(PlotlySupply._PLOT_SYNCPLOT_MAP, plot, nothing) === sp &&
+            any(candidate -> candidate === sp, PlotlySupply._DISPLAYED_PLOTS)
+    end
+end
+
+function _native_close_lifecycle_fixture(ec::_LifecycleFakeElectron)
+    payload = ones(Float64, 250_000)
+    plot = Plot(scatter(y=payload))
+    sp = PlotlySupply._create_syncplot_window(ec, plot; app=:fake, show=false)
+    old, registered = PlotlySupply._register_displayed_syncplot!(plot, sp)
+    tempdir = getfield(sp, :_resources).tempdir
+    window = sp.window
+    retained_size = Base.summarysize(sp)
+    refs = (WeakRef(payload), WeakRef(plot), WeakRef(sp))
+
+    # This is the notification ElectronCall applies on a native/UI close:
+    # exists becomes false and the per-window message channel closes.
+    window.exists = false
+    close(window.msg_channel)
+    return (; refs, tempdir, window, retained_size, old, registered)
+end
+
+function _open_watcher_lifecycle_fixture(ec::_LifecycleFakeElectron)
+    payload = ones(Float64, 250_000)
+    plot = Plot(scatter(y=payload))
+    sp = PlotlySupply._create_syncplot_window(ec, plot; app=:fake, show=false)
+    tempdir = getfield(sp, :_resources).tempdir
+    window = sp.window
+    retained_size = Base.summarysize(sp)
+    refs = (WeakRef(payload), WeakRef(plot), WeakRef(sp))
+    initially_open = isopen(sp)
+    initial_close_calls = window.close_calls
+    return (;
+        refs,
+        tempdir,
+        window,
+        retained_size,
+        initially_open,
+        initial_close_calls,
+    )
+end
+
 const _subplot_refresh_calls = Ref(0)
 function PlotlySupply._plotlyjs_refresh!(
     ::SyncPlot,
@@ -2846,5 +3000,292 @@ end
         )
         @test occursin("Plotly.purge", rebuild)
         @test occursin("frame-sentinel", rebuild)
+    end
+
+    @testset "SyncPlot lifecycle ownership" begin
+        @testset "constructor failure rolls back its temp directory" begin
+            mktempdir() do temp_root
+                ec = _LifecycleFakeElectron(; fail_window=true)
+                plot = Plot(scatter(y=[1, 2, 3]))
+                withenv("TMPDIR" => temp_root) do
+                    @test_throws ErrorException PlotlySupply._create_syncplot_window(
+                        ec,
+                        plot;
+                        app=:fake,
+                        show=false,
+                    )
+                end
+                @test isempty(readdir(temp_root))
+                @test isempty(ec.windows)
+            end
+        end
+
+        @testset "explicit close is synchronous and idempotent" begin
+            ec = _LifecycleFakeElectron()
+            plot = Plot(scatter(y=[1, 2, 3]))
+            sp = PlotlySupply._create_syncplot_window(
+                ec,
+                plot;
+                app=:fake,
+                show=false,
+            )
+            tempdir = getfield(sp, :_resources).tempdir
+            window = only(ec.windows)
+            old, registered = PlotlySupply._register_displayed_syncplot!(plot, sp)
+
+            @test registered
+            @test old === nothing
+            @test _lifecycle_is_registered(plot, sp)
+            @test isfile(joinpath(tempdir, "index.html"))
+            @test isopen(sp)
+            @test :_resources ∉ propertynames(sp)
+            @test :_resources ∈ propertynames(sp, true)
+
+            @test close(sp) === nothing
+            @test window.close_calls == 1
+            @test !ispath(tempdir)
+            @test !_lifecycle_is_registered(plot, sp)
+            @test !isopen(sp)
+
+            @test close(sp) === nothing
+            @test window.close_calls == 1
+            @test !ispath(tempdir)
+        end
+
+        @testset "unknown backend state still attempts explicit close" begin
+            ec = _LifecycleFakeElectron(; throw_on_isopen=true)
+            plot = Plot(scatter(y=[1, 2, 3]))
+            sp = PlotlySupply._create_syncplot_window(
+                ec,
+                plot;
+                app=:fake,
+                show=false,
+            )
+            tempdir = getfield(sp, :_resources).tempdir
+            window = only(ec.windows)
+            _, registered = PlotlySupply._register_displayed_syncplot!(plot, sp)
+            @test registered
+
+            # Public status remains conservative when the backend query fails,
+            # but explicit close must not interpret "unknown" as "closed".
+            @test !isopen(sp)
+            @test window.exists
+            @test close(sp) === nothing
+            @test window.close_calls == 1
+            @test !window.exists
+            @test !ispath(tempdir)
+            @test !_lifecycle_is_registered(plot, sp)
+        end
+
+        @testset "backend close may re-enter close on the owner task" begin
+            ec = _LifecycleFakeElectron()
+            plot = Plot(scatter(y=[1, 2, 3]))
+            sp = PlotlySupply._create_syncplot_window(
+                ec,
+                plot;
+                app=:fake,
+                show=false,
+            )
+            tempdir = getfield(sp, :_resources).tempdir
+            window = only(ec.windows)
+            window.on_close = () -> close(sp)
+
+            task = @async close(sp)
+            status = timedwait(() -> istaskdone(task), 2.0; pollint=0.01)
+            if status === :timed_out
+                # Keep a regression failure from leaving its test task blocked.
+                notify(getfield(sp, :_resources).close_done)
+                timedwait(() -> istaskdone(task), 2.0; pollint=0.01)
+            end
+
+            @test status === :ok
+            @test fetch(task) === nothing
+            @test window.close_calls == 1
+            @test !ispath(tempdir)
+            window.on_close = nothing
+        end
+
+        @testset "concurrent close waits without holding resource lock" begin
+            ec = _LifecycleFakeElectron(; block_close=true)
+            plot = Plot(scatter(y=[1, 2, 3]))
+            sp = PlotlySupply._create_syncplot_window(
+                ec,
+                plot;
+                app=:fake,
+                show=false,
+            )
+            tempdir = getfield(sp, :_resources).tempdir
+            window = only(ec.windows)
+            _, registered = PlotlySupply._register_displayed_syncplot!(plot, sp)
+            @test registered
+
+            first_close = Threads.@spawn close(sp)
+            take!(window.close_entered)
+
+            resource_lock = getfield(sp, :_resources).lock
+            lock_available = trylock(resource_lock)
+            @test lock_available
+            lock_available && unlock(resource_lock)
+
+            second_close = Threads.@spawn close(sp)
+            sleep(0.05)
+            @test !istaskdone(second_close)
+            @test ispath(tempdir)
+
+            put!(window.close_release, nothing)
+            @test fetch(first_close) === nothing
+            @test fetch(second_close) === nothing
+            @test window.close_calls == 1
+            @test !ispath(tempdir)
+            @test !_lifecycle_is_registered(plot, sp)
+        end
+
+        @testset "same-task close retries failed temp cleanup" begin
+            owned_tempdir = mktempdir(; prefix="plotlysupply-cleanup-retry-")
+            try
+                write(joinpath(owned_tempdir, "index.html"), "owned")
+                ec = _LifecycleFakeElectron()
+                window = _lifecycle_fake_window(
+                    ec,
+                    :fake,
+                    "file://cleanup-retry";
+                    width=1,
+                    height=1,
+                    title="cleanup-retry",
+                    show=false,
+                )
+                resources = PlotlySupply._SyncPlotResources(owned_tempdir, ec)
+                attempts = Ref(0)
+                resources.tempdir_remover = path -> begin
+                    attempts[] += 1
+                    attempts[] == 1 && error("injected temp cleanup failure")
+                    rm(path; recursive=true, force=true)
+                end
+                sp = SyncPlot(
+                    Plot(scatter(y=[1])),
+                    :fake,
+                    window,
+                    "cleanup-retry",
+                    resources,
+                )
+
+                @test_throws ErrorException close(sp)
+                @test attempts[] == 1
+                @test resources.close_owner === nothing
+                @test ispath(owned_tempdir)
+                @test window.close_calls == 1
+
+                @test close(sp) === nothing
+                @test attempts[] == 2
+                @test !ispath(owned_tempdir)
+                @test window.close_calls == 1
+            finally
+                ispath(owned_tempdir) &&
+                    rm(owned_tempdir; recursive=true, force=true)
+            end
+        end
+
+        @testset "throwing backend close still releases owned resources" begin
+            ec = _LifecycleFakeElectron(; throw_on_close=true)
+            plot = Plot(scatter(y=[1, 2, 3]))
+            sp = PlotlySupply._create_syncplot_window(
+                ec,
+                plot;
+                app=:fake,
+                show=false,
+            )
+            tempdir = getfield(sp, :_resources).tempdir
+            window = only(ec.windows)
+            _, registered = PlotlySupply._register_displayed_syncplot!(plot, sp)
+            @test registered
+
+            @test_throws ErrorException close(sp)
+            @test window.close_calls == 1
+            @test !ispath(tempdir)
+            @test !_lifecycle_is_registered(plot, sp)
+            @test !isopen(sp)
+
+            # Closing the same SyncPlot again neither retries the native close
+            # nor rethrows after its package-owned resources were released.
+            @test close(sp) === nothing
+            @test window.close_calls == 1
+
+            # End the fake native lifecycle so its weak watcher can exit.
+            window.exists = false
+            isopen(window.msg_channel) && close(window.msg_channel)
+        end
+
+        @testset "registry mutation is thread-safe" begin
+            baseline = _lifecycle_registry_counts()
+            ec = _LifecycleFakeElectron()
+            plots = [Plot(scatter(y=[i, i + 1])) for i in 1:24]
+            syncplots = [
+                PlotlySupply._create_syncplot_window(
+                    ec,
+                    plot;
+                    app=:fake,
+                    show=false,
+                )
+                for plot in plots
+            ]
+            tempdirs = [getfield(sp, :_resources).tempdir for sp in syncplots]
+
+            tasks = map(eachindex(plots)) do index
+                Threads.@spawn begin
+                    _, registered = PlotlySupply._register_displayed_syncplot!(
+                        plots[index],
+                        syncplots[index],
+                    )
+                    registered || error("SyncPlot closed before registration")
+                    yield()
+                    close(syncplots[index])
+                end
+            end
+            foreach(fetch, tasks)
+
+            @test _lifecycle_registry_counts() == baseline
+            @test all(!ispath(tempdir) for tempdir in tempdirs)
+            @test all(window.close_calls == 1 for window in ec.windows)
+        end
+
+        @testset "native close releases registries and large payload" begin
+            ec = _LifecycleFakeElectron()
+            baseline = _lifecycle_registry_counts()
+            fixture = _native_close_lifecycle_fixture(ec)
+
+            @test fixture.registered
+            @test fixture.old === nothing
+            @test fixture.retained_size > 1_500_000
+            @test all(ref -> ref.value !== nothing, fixture.refs)
+            @test _lifecycle_registry_counts() == (baseline[1] + 1, baseline[2] + 1)
+
+            @test _wait_for_lifecycle() do
+                !ispath(fixture.tempdir) &&
+                    _lifecycle_registry_counts() == baseline
+            end
+            @test fixture.window.close_calls == 0
+
+            @test _wait_for_lifecycle(; collect=true) do
+                all(ref -> isnothing(ref.value), fixture.refs)
+            end
+        end
+
+        @testset "open-window watcher remains weak" begin
+            ec = _LifecycleFakeElectron()
+            fixture = _open_watcher_lifecycle_fixture(ec)
+
+            @test fixture.initially_open
+            @test fixture.initial_close_calls == 0
+            @test fixture.retained_size > 1_500_000
+            @test fixture.window === only(ec.windows)
+
+            @test _wait_for_lifecycle(; collect=true) do
+                !ispath(fixture.tempdir) &&
+                    fixture.window.close_calls == 1 &&
+                    !fixture.window.exists &&
+                    all(ref -> isnothing(ref.value), fixture.refs)
+            end
+            @test !isopen(fixture.window.msg_channel)
+        end
     end
 end

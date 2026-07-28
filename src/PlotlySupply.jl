@@ -15,15 +15,48 @@ if !isdefined(@__MODULE__, :json)
 	const json = PlotlyBase.JSON.json
 end
 
+mutable struct _SyncPlotResources
+	lock::ReentrantLock
+	tempdir::Union{Nothing,String}
+	backend::Any
+	close_started::Bool
+	close_owner::Union{Nothing,Task}
+	close_done::Base.Event
+	cleanup_in_progress::Bool
+	cleanup_done::Base.Event
+	tempdir_remover::Any
+end
+
+_SyncPlotResources(
+	tempdir::Union{Nothing,String} = nothing,
+	backend = nothing,
+) = _SyncPlotResources(
+	ReentrantLock(),
+	tempdir,
+	backend,
+	false,
+	nothing,
+	Base.Event(),
+	false,
+	Base.Event(),
+	nothing,
+)
+
 mutable struct SyncPlot
 	plot::Plot
 	app::Any
 	window::Any
 	divid::String
+	_resources::_SyncPlotResources
 end
 
+# Preserve the original public constructor even though lifecycle state is kept
+# privately on each SyncPlot.
+SyncPlot(plot::Plot, app, window, divid::String) =
+	SyncPlot(plot, app, window, divid, _SyncPlotResources())
+
 function Base.getproperty(sp::SyncPlot, name::Symbol)
-	if name === :plot || name === :app || name === :window || name === :divid
+	if name in fieldnames(SyncPlot)
 		return getfield(sp, name)
 	end
 
@@ -35,7 +68,8 @@ function Base.getproperty(sp::SyncPlot, name::Symbol)
 end
 
 function Base.propertynames(sp::SyncPlot, private::Bool = false)
-	return (fieldnames(SyncPlot)..., propertynames(getfield(sp, :plot), private)...)
+	fields = private ? fieldnames(SyncPlot) : (:plot, :app, :window, :divid)
+	return (fields..., propertynames(getfield(sp, :plot), private)...)
 end
 
 _plotlyjs_refresh!(fig, data, layout) = nothing

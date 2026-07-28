@@ -131,7 +131,79 @@ function _syncplot_html(p::Plot, divid::String; autoplay::Bool = true)
 """
 end
 
+const _SYNC_WINDOW_WATCH_INTERVAL_SECONDS = 0.05
+
+function _syncplot_native_window_closed(window, message_channel)
+	try
+		if hasproperty(window, :exists)
+			return getproperty(window, :exists) === false
+		end
+	catch
+	end
+
+	if message_channel !== nothing
+		try
+			return !isopen(message_channel)
+		catch
+		end
+	end
+	return false
+end
+
+function _watch_syncplot_window!(sp::SyncPlot, ec)
+	weak_sp = WeakRef(sp)
+	window = getfield(sp, :window)
+	message_channel = try
+		Base.invokelatest(() -> ec.msgchannel(window))
+	catch
+		nothing
+	end
+
+	task = @async begin
+		while !_syncplot_native_window_closed(window, message_channel)
+			# Inspect the weak reference only before yielding and never retain its
+			# value in a local across sleep. This lets an otherwise-unreferenced
+			# SyncPlot reach its finalizer while the watcher is active.
+			isnothing(weak_sp.value) && return nothing
+			sleep(_SYNC_WINDOW_WATCH_INTERVAL_SECONDS)
+		end
+
+		obj = weak_sp.value
+		if obj !== nothing
+			try
+				close(obj)
+			catch err
+				@warn "Failed to release a natively closed SyncPlot." exception = (
+					err,
+					catch_backtrace(),
+				)
+			finally
+				obj = nothing
+			end
+		end
+		return nothing
+	end
+	errormonitor(task)
+	return nothing
+end
+
+function _finalize_syncplot!(sp::SyncPlot)
+	try
+		close(sp)
+	catch
+	end
+	return nothing
+end
+
 function _create_syncplot_window(
+	p::Plot;
+	kwargs...,
+)
+	return _create_syncplot_window(_electroncall(), p; kwargs...)
+end
+
+function _create_syncplot_window(
+	ec,
 	p::Plot;
 	app = nothing,
 	width::Int = 960,
@@ -140,38 +212,69 @@ function _create_syncplot_window(
 	show::Bool = true,
 	autoplay::Bool = true,
 )
-	ec = _electroncall()
 	electron_app = app === nothing ? _default_electron_app(ec) : app
 	divid = _next_syncplot_id()
 	html = _syncplot_html(p, divid; autoplay = autoplay)
 
-	# Write HTML to a temp file and load via file:// URI.
-	# ElectronCall converts HTML strings to data: URIs which have a ~2 MB
-	# size limit in Chromium, causing blank windows for large datasets.
-	tmpfile = tempname() * ".html"
-	write(tmpfile, html)
-	file_uri = _file_uri(tmpfile)
+	# Own a dedicated temp directory and load its index via file://. ElectronCall
+	# converts HTML strings to data: URIs which have a ~2 MB size limit in
+	# Chromium, causing blank windows for large datasets.
+	tempdir = mktempdir(; prefix = "plotlysupply-sync-")
+	tmpfile = joinpath(tempdir, "index.html")
+	window = nothing
+	sp = nothing
+	try
+		write(tmpfile, html)
+		file_uri = _file_uri(tmpfile)
 
-	win = Base.invokelatest(() -> ec.Window(
-		electron_app,
-		file_uri;
-		width = width,
-		height = height,
-		title = title,
-		show = show,
-	))
-	sp = SyncPlot(p, electron_app, win, divid)
-	finalizer(sp) do obj
-		try
-			close(obj)
-		catch
+		window = Base.invokelatest(() -> ec.Window(
+			electron_app,
+			file_uri;
+			width = width,
+			height = height,
+			title = title,
+			show = show,
+		))
+		resources = _SyncPlotResources(tempdir, ec)
+		sp = SyncPlot(p, electron_app, window, divid, resources)
+		finalizer(_finalize_syncplot!, sp)
+		_watch_syncplot_window!(sp, ec)
+		return sp
+	catch
+		if sp !== nothing
+			try
+				close(sp)
+			catch cleanup_error
+				@warn "Failed to close a partially constructed SyncPlot." exception = (
+					cleanup_error,
+					catch_backtrace(),
+				)
+			end
+		elseif window !== nothing
+			# This exact window was created in the transaction above, so it is
+			# safe to close here even if setup failed before SyncPlot existed.
+			try
+				Base.invokelatest(() -> ec.close(window))
+			catch cleanup_error
+				@warn "Failed to close a partially constructed Electron window." exception = (
+					cleanup_error,
+					catch_backtrace(),
+				)
+			end
 		end
-		try
-			rm(tmpfile; force = true)
-		catch
+
+		if ispath(tempdir)
+			try
+				rm(tempdir; recursive = true, force = true)
+			catch cleanup_error
+				@warn "Failed to remove a partially constructed SyncPlot temp directory." exception = (
+					cleanup_error,
+					catch_backtrace(),
+				)
+			end
 		end
+		rethrow()
 	end
-	return sp
 end
 
 function to_syncplot(
@@ -314,10 +417,14 @@ end
 # ── Auto-refresh infrastructure ─────────────────────────────────────
 # Maps a displayed Plot to its SyncPlot so that mutating the Plot
 # (react!, addtraces!, …) automatically refreshes the Electron window.
+const _SYNCPLOT_REGISTRY_LOCK = ReentrantLock()
 const _PLOT_SYNCPLOT_MAP = IdDict{Plot,SyncPlot}()
+const _DISPLAYED_PLOTS = SyncPlot[]
 
 function _maybe_sync_refresh!(p::Plot)
-	sp = get(_PLOT_SYNCPLOT_MAP, p, nothing)
+	sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
+		get(_PLOT_SYNCPLOT_MAP, p, nothing)
+	end
 	if sp !== nothing && isopen(sp)
 		_plotlyjs_refresh!(sp, p.data, p.layout)
 	end
@@ -754,9 +861,11 @@ end
 function PlotlyBase.react!(sp::SyncPlot, p::Plot)
 	old = sp.plot
 	sp.plot = p
-	if haskey(_PLOT_SYNCPLOT_MAP, old)
-		delete!(_PLOT_SYNCPLOT_MAP, old)
-		_PLOT_SYNCPLOT_MAP[p] = sp
+	lock(_SYNCPLOT_REGISTRY_LOCK) do
+		if get(_PLOT_SYNCPLOT_MAP, old, nothing) === sp
+			delete!(_PLOT_SYNCPLOT_MAP, old)
+			_PLOT_SYNCPLOT_MAP[p] = sp
+		end
 	end
 	_plotlyjs_refresh!(
 		sp,
@@ -1037,42 +1146,179 @@ end
 
 # ── Window lifecycle ────────────────────────────────────────────────
 
-Base.isopen(sp::SyncPlot) = try
-	ec = _electroncall()
-	Base.invokelatest(() -> ec.isopen(sp.window))
-catch
-	false
+function _syncplot_backend(sp::SyncPlot)
+	resources = getfield(sp, :_resources)
+	return resources.backend === nothing ? _electroncall() : resources.backend
+end
+
+function _syncplot_raw_window_state(sp::SyncPlot)
+	try
+		ec = _syncplot_backend(sp)
+		window = getfield(sp, :window)
+		is_open = Base.invokelatest(() -> ec.isopen(window))
+		return is_open ? :open : :closed
+	catch
+		return :unknown
+	end
+end
+
+function Base.isopen(sp::SyncPlot)
+	resources = getfield(sp, :_resources)
+	lock(resources.lock)
+	try
+		resources.close_started && return false
+	finally
+		unlock(resources.lock)
+	end
+	return _syncplot_raw_window_state(sp) === :open
+end
+
+function _deregister_syncplot!(sp::SyncPlot)
+	lock(_SYNCPLOT_REGISTRY_LOCK) do
+		filter!(x -> x !== sp, _DISPLAYED_PLOTS)
+		for plot in collect(keys(_PLOT_SYNCPLOT_MAP))
+			_PLOT_SYNCPLOT_MAP[plot] === sp && delete!(_PLOT_SYNCPLOT_MAP, plot)
+		end
+	end
+	return nothing
+end
+
+function _cleanup_syncplot_tempdir!(resources::_SyncPlotResources)
+	while true
+		claim = lock(resources.lock) do
+			if resources.tempdir === nothing
+				return (:done, nothing, nothing, nothing)
+			elseif resources.cleanup_in_progress
+				return (:wait, nothing, resources.cleanup_done, nothing)
+			end
+
+			resources.cleanup_in_progress = true
+			resources.cleanup_done = Base.Event()
+			return (
+				:clean,
+				resources.tempdir,
+				resources.cleanup_done,
+				resources.tempdir_remover,
+			)
+		end
+
+		action, tempdir, cleanup_done, tempdir_remover = claim
+		action === :done && return nothing
+		if action === :wait
+			wait(cleanup_done)
+			continue
+		end
+
+		succeeded = false
+		try
+			if tempdir_remover === nothing
+				rm(tempdir; recursive = true, force = true)
+			else
+				tempdir_remover(tempdir)
+			end
+			succeeded = true
+		finally
+			try
+				lock(resources.lock) do
+					if succeeded && resources.tempdir == tempdir
+						resources.tempdir = nothing
+					end
+					resources.cleanup_in_progress = false
+				end
+			finally
+				notify(cleanup_done)
+			end
+		end
+		return nothing
+	end
 end
 
 function Base.close(sp::SyncPlot)
-	if isopen(sp)
-		ec = _electroncall()
-		Base.invokelatest(() -> ec.close(sp.window))
+	resources = getfield(sp, :_resources)
+	caller = current_task()
+	close_state, close_done = lock(resources.lock) do
+		if resources.close_started
+			state = resources.close_owner === caller ? :reentrant : :wait
+			return (state, resources.close_done)
+		end
+		resources.close_started = true
+		resources.close_owner = caller
+		return (:owner, resources.close_done)
 	end
-	# Deregister so the SyncPlot is no longer pinned by the auto-refresh
-	# registries; once unreferenced its finalizer can run and reclaim the temp
-	# HTML file. (We only prune on an explicit close — never on a possibly
-	# transient isopen()==false — so a live window is never dropped by mistake.)
-	filter!(x -> x !== sp, _DISPLAYED_PLOTS)
-	for k in collect(keys(_PLOT_SYNCPLOT_MAP))
-		_PLOT_SYNCPLOT_MAP[k] === sp && delete!(_PLOT_SYNCPLOT_MAP, k)
+
+	close_state === :reentrant && return nothing
+	if close_state === :wait
+		wait(close_done)
+		# A prior cleanup failure leaves tempdir populated so an idempotent
+		# follow-up close can retry it without touching the native window.
+		_deregister_syncplot!(sp)
+		_cleanup_syncplot_tempdir!(resources)
+		return nothing
 	end
-	return nothing
+
+	try
+		try
+			_deregister_syncplot!(sp)
+			if _syncplot_raw_window_state(sp) !== :closed
+				ec = _syncplot_backend(sp)
+				window = getfield(sp, :window)
+				Base.invokelatest(() -> ec.close(window))
+			end
+		catch
+			# Preserve the backend exception while still making the package-owned
+			# HTML cleanup deterministic.
+			try
+				_cleanup_syncplot_tempdir!(resources)
+			catch cleanup_error
+				@warn "Failed to remove a SyncPlot temp directory after window close failed." exception = (
+					cleanup_error,
+					catch_backtrace(),
+				)
+			end
+			rethrow()
+		end
+
+		_cleanup_syncplot_tempdir!(resources)
+		return nothing
+	finally
+		try
+			lock(resources.lock) do
+				resources.close_owner = nothing
+			end
+		finally
+			notify(close_done)
+		end
+	end
 end
 
 # ── Display ─────────────────────────────────────────────────────────
 
 struct ElectronDisplay <: AbstractDisplay end
-const _DISPLAYED_PLOTS = SyncPlot[]
+
+function _register_displayed_syncplot!(p::Plot, sp::SyncPlot)
+	resources = getfield(sp, :_resources)
+	lock(resources.lock)
+	try
+		resources.close_started && return (nothing, false)
+		return lock(_SYNCPLOT_REGISTRY_LOCK) do
+			old = get(_PLOT_SYNCPLOT_MAP, p, nothing)
+			_PLOT_SYNCPLOT_MAP[p] = sp
+			push!(_DISPLAYED_PLOTS, sp)
+			(old, true)
+		end
+	finally
+		unlock(resources.lock)
+	end
+end
 
 function Base.display(d::ElectronDisplay, p::Plot)
-	# If this exact Plot was displayed before, close the stale window first so
-	# re-displaying does not leak the previous SyncPlot/window/temp file.
-	old = get(_PLOT_SYNCPLOT_MAP, p, nothing)
-	old === nothing || close(old)
 	sp = to_syncplot(p)
-	_PLOT_SYNCPLOT_MAP[p] = sp
-	push!(_DISPLAYED_PLOTS, sp)
+	old, registered = _register_displayed_syncplot!(p, sp)
+	registered || return nothing
+
+	# Close the stale window only after its replacement is registered. If new
+	# window construction fails, the existing display remains usable.
+	old === nothing || close(old)
 	return nothing
 end
 
