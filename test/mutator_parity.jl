@@ -405,6 +405,159 @@ end
     end
 end
 
+function _animated_config_plot()
+    plot_frames = [
+        frame(
+            name="frame-1",
+            data=[scatter(y=[3, 2, 1])],
+            layout=attr(title=attr(text="frame title")),
+        ),
+    ]
+    config = PlotConfig(
+        staticPlot=true,
+        locale="fr",
+        toImageButtonOptions=Dict(:format => "svg", :width => 640),
+        modeBarButtonsToAdd=[Dict(:name => "probe")],
+    )
+    return Plot(
+        GenericTrace[
+            scatter(y=[1, 2, 3], name="first"),
+            scatter(y=[3, 2, 1], name="second"),
+        ],
+        Layout(
+            title=attr(text="source"),
+            annotations=[attr(text="annotation")],
+        ),
+        plot_frames;
+        config=config,
+    )
+end
+
+function _test_plot_metadata_clone(
+    source::Plot,
+    clone::Plot;
+    content_equal::Bool=true,
+)
+    @test clone !== source
+    @test clone isa PlotlySupply._RefreshablePlot
+    @test clone.divid != source.divid
+    @test clone.data !== source.data
+    @test clone.layout !== source.layout
+    if content_equal
+        @test clone.data == source.data
+        @test clone.data[1] !== source.data[1]
+        @test clone.layout == source.layout
+    end
+    @test clone.frames == source.frames
+    @test clone.frames !== source.frames
+    @test clone.frames[1] !== source.frames[1]
+    @test clone.config !== source.config
+    @test PlotlyBase.JSON.lower(clone.config) ==
+          PlotlyBase.JSON.lower(source.config)
+    @test clone.config.toImageButtonOptions !==
+          source.config.toImageButtonOptions
+    @test clone.config.modeBarButtonsToAdd !==
+          source.config.modeBarButtonsToAdd
+    return nothing
+end
+
+@testset "copy/fork preserve animated plot metadata" begin
+    source = _animated_config_plot()
+    @test source isa PlotlySupply._RefreshablePlot
+    @test which(copy, (typeof(source),)).module === PlotlySupply
+    @test which(PlotlyBase.fork, (typeof(source),)).module === PlotlySupply
+
+    for clone in (copy(source), PlotlyBase.fork(source))
+        _test_plot_metadata_clone(source, clone)
+
+        clone.data[1].fields[:y][1] = 99
+        clone.layout.fields[:annotations][1].fields[:text] = "changed"
+        clone.frames[1].fields[:data][1].fields[:y][1] = 77
+        clone.config.toImageButtonOptions[:width] = 320
+        clone.config.modeBarButtonsToAdd[1][:name] = "changed"
+
+        @test source.data[1].fields[:y] == [1, 2, 3]
+        @test source.layout.fields[:annotations][1].fields[:text] ==
+              "annotation"
+        @test source.frames[1].fields[:data][1].fields[:y] == [3, 2, 1]
+        @test source.config.toImageButtonOptions[:width] == 640
+        @test source.config.modeBarButtonsToAdd[1][:name] == "probe"
+    end
+
+    shared_payload = [1.0, 2.0, 3.0]
+    shared_layout = Layout()
+    shared_layout.fields[:meta] = Dict(:payload => shared_payload)
+    shared_config = PlotConfig(
+        toImageButtonOptions=Dict(:payload => shared_payload),
+    )
+    shared_source = Plot(
+        GenericTrace[scatter(y=shared_payload)],
+        shared_layout,
+        [
+            frame(
+                name="shared-frame",
+                data=[scatter(y=shared_payload)],
+            ),
+        ];
+        config=shared_config,
+    )
+    for clone in (copy(shared_source), PlotlyBase.fork(shared_source))
+        cloned_payload = clone.data[1].fields[:y]
+        @test cloned_payload !== shared_payload
+        @test clone.frames[1].fields[:data][1].fields[:y] ===
+              cloned_payload
+        @test clone.layout.fields[:meta][:payload] === cloned_payload
+        @test clone.config.toImageButtonOptions[:payload] ===
+              cloned_payload
+    end
+
+    empty_source = Plot()
+    for clone in (copy(empty_source), PlotlyBase.fork(empty_source))
+        @test isempty(clone.data)
+        @test isempty(clone.frames)
+        @test clone.divid != empty_source.divid
+    end
+
+    view_backed = Plot(
+        view(GenericTrace[scatter(y=[1, 2, 3])], :),
+        Layout(),
+    )
+    @test !(view_backed isa PlotlySupply._RefreshablePlot)
+    @test which(copy, (typeof(view_backed),)).module === PlotlyBase
+    @test which(PlotlyBase.fork, (typeof(view_backed),)).module ===
+          PlotlyBase
+end
+
+@testset "non-mutating verbs preserve frames and config" begin
+    source = _animated_config_plot()
+    operations = (
+        p -> restyle(p, Dict(:name => "restyled")),
+        p -> relayout(p; title="relayout"),
+        p -> update(
+            p,
+            Dict(:name => "updated");
+            layout=Layout(title="update"),
+        ),
+        p -> addtraces(p, scatter(y=[4, 5, 6])),
+        p -> deletetraces(p, 2),
+        p -> movetraces(p, 1),
+        p -> redraw(p),
+        p -> extendtraces(p, Dict(:y => [[4]]), [1], -1),
+        p -> prependtraces(p, Dict(:y => [[0]]), [1], -1),
+        p -> PlotlyBase.purge(p),
+        p -> react(p, [scatter(y=[9, 8, 7])], Layout(title="react")),
+    )
+
+    for operation in operations
+        clone = operation(source)
+        _test_plot_metadata_clone(source, clone; content_equal=false)
+    end
+
+    @test length(source.data) == 2
+    @test source.data[1].fields[:y] == [1, 2, 3]
+    @test source.layout.fields[:title][:text] == "source"
+end
+
 @testset "mutator parity has no method ambiguity" begin
     ambiguities = Test.detect_ambiguities(
         PlotlyBase,

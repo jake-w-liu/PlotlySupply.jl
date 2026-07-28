@@ -1170,6 +1170,24 @@ const _RefreshablePlot = Plot{TT, TL, TF} where {
 	TF <: Vector{<:PlotlyFrame},
 }
 
+function _clone_refreshable_plot(p::_RefreshablePlot)
+	data, layout, frames, config = deepcopy((
+		p.data,
+		p.layout,
+		p.frames,
+		p.config,
+	))
+	return Plot(
+		data,
+		layout,
+		frames;
+		config = config,
+	)
+end
+
+Base.copy(p::_RefreshablePlot) = _clone_refreshable_plot(p)
+PlotlyBase.fork(p::_RefreshablePlot) = _clone_refreshable_plot(p)
+
 function PlotlyBase.redraw!(p::_RefreshablePlot)
 	_maybe_sync_command!(p, :redraw)
 	return p
