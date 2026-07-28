@@ -4,6 +4,12 @@ using PlotlySupply
 const _MUTATOR_REFRESH_CALLS = Ref(0)
 const _MutatorProbeTrace = GenericTrace{IdDict{Symbol,Any}}
 
+struct _FailingSpliceVector <: AbstractVector{Int} end
+Base.IndexStyle(::Type{_FailingSpliceVector}) = IndexLinear()
+Base.size(::_FailingSpliceVector) = (1,)
+Base.getindex(::_FailingSpliceVector, ::Int) =
+    error("injected splice read failure")
+
 function PlotlySupply._plotlyjs_refresh!(
     ::SyncPlot,
     ::Vector{_MutatorProbeTrace},
@@ -283,6 +289,37 @@ end
         end
     finally
         close(sp)
+    end
+end
+
+@testset "extend/prepend staging is atomic" begin
+    updates = AbstractVector[[4], _FailingSpliceVector()]
+    for splice! in (extendtraces!, prependtraces!)
+        for target_kind in (:plot, :syncplot)
+            p = _mutator_probe_plot()
+            sp = _attach_mutator_refresh_probe(p)
+            target = target_kind === :plot ? p : sp
+            data_ref = p.data
+            trace_refs = copy(p.data)
+            y_refs = [trace[:y] for trace in p.data]
+            before = [copy(values) for values in y_refs]
+            _MUTATOR_REFRESH_CALLS[] = 0
+
+            try
+                @test_throws ErrorException splice!(
+                    target,
+                    Dict(:y => updates),
+                    [1, 2],
+                )
+                @test p.data === data_ref
+                @test all(p.data[index] === trace_refs[index] for index in 1:2)
+                @test all(p.data[index][:y] === y_refs[index] for index in 1:2)
+                @test [trace[:y] for trace in p.data] == before
+                @test _MUTATOR_REFRESH_CALLS[] == 0
+            finally
+                close(sp)
+            end
+        end
     end
 end
 

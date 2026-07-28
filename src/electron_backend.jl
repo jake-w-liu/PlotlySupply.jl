@@ -774,30 +774,86 @@ function _windowed_concat(
 	return out
 end
 
-function _do_extendtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+function _do_trace_splice!(
+	p::Plot,
+	update::AbstractDict,
+	indices::AbstractVector{Int},
+	maxpoints;
+	prepend::Bool,
+)
 	_validate_trace_splice_args(p, update, indices, maxpoints)
+	(isempty(indices) || isempty(update)) && return p
+
+	# The overwhelmingly common one-trace/one-attribute case is already
+	# transactional when its one result is computed before assignment. Avoid
+	# allocating the general staging table for that path.
+	if length(indices) == 1 && length(update) == 1
+		p_ix = only(indices)
+		k = only(keys(update))
+		v = update[k][1]
+		limit = _trace_window_limit(maxpoints, k, 1)
+		staged = _windowed_concat(
+			p.data[p_ix][k],
+			v,
+			limit;
+			prepend = prepend,
+		)
+		p.data[p_ix][k] = staged
+		return p
+	end
+
+	update_keys = collect(keys(update))
+	staged = Matrix{Any}(undef, length(update_keys), length(indices))
 	for (ix, p_ix) in enumerate(indices)
 		tr = p.data[p_ix]
-		for k in keys(update)
+		for (key_ix, k) in enumerate(update_keys)
 			v = update[k][ix]
 			limit = _trace_window_limit(maxpoints, k, ix)
-			tr[k] = _windowed_concat(tr[k], v, limit; prepend = false)
+			staged[key_ix, ix] =
+				_windowed_concat(tr[k], v, limit; prepend = prepend)
+		end
+	end
+
+	# Do not publish any attribute until every input has been materialized
+	# successfully. GenericTrace assignment is non-validating, so this commit
+	# loop cannot expose a partially staged input failure.
+	for (ix, p_ix) in enumerate(indices)
+		tr = p.data[p_ix]
+		for (key_ix, k) in enumerate(update_keys)
+			tr[k] = staged[key_ix, ix]
 		end
 	end
 	return p
 end
 
-function _do_prependtraces!(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
-	_validate_trace_splice_args(p, update, indices, maxpoints)
-	for (ix, p_ix) in enumerate(indices)
-		tr = p.data[p_ix]
-		for k in keys(update)
-			v = update[k][ix]
-			limit = _trace_window_limit(maxpoints, k, ix)
-			tr[k] = _windowed_concat(tr[k], v, limit; prepend = true)
-		end
-	end
-	return p
+function _do_extendtraces!(
+	p::Plot,
+	update::AbstractDict,
+	indices::AbstractVector{Int} = [1],
+	maxpoints = -1,
+)
+	return _do_trace_splice!(
+		p,
+		update,
+		indices,
+		maxpoints;
+		prepend = false,
+	)
+end
+
+function _do_prependtraces!(
+	p::Plot,
+	update::AbstractDict,
+	indices::AbstractVector{Int} = [1],
+	maxpoints = -1,
+)
+	return _do_trace_splice!(
+		p,
+		update,
+		indices,
+		maxpoints;
+		prepend = true,
+	)
 end
 
 _trace_splice_tovec(value) = [[value]]
