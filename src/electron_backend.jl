@@ -1532,14 +1532,43 @@ end
 
 # ── Hidden export window (for savefig) ──────────────────────────────
 
-const _EXPORT_WINDOW = Ref{Any}(nothing)
-const _EXPORT_APP = Ref{Any}(nothing)
-const _EXPORT_DIVID = Ref{String}("plotlysupply-export")
-# Path of the export window's temp HTML file, so it can be reclaimed when the
-# window is recreated and at process exit (the persistent window holds it open
-# while alive, so we must not rm it immediately).
-const _EXPORT_TMPFILE = Ref{String}("")
-const _EXPORT_ATEXIT_REGISTERED = Ref{Bool}(false)
+mutable struct _ExportState
+	lock::ReentrantLock
+	backend::Any
+	app_backend::Any
+	app::Any
+	window::Any
+	divid::String
+	tempdir::Union{Nothing,String}
+	ready::Bool
+	pdf_job_counter::UInt64
+	atexit_registered::Bool
+	tempdir_remover::Any
+	pending_windows::Vector{Tuple{Any,Any}}
+	owned_tempdirs::Set{String}
+	owned_pdf_tempdirs::Set{String}
+end
+
+function _ExportState(; divid::String = "plotlysupply-export")
+	return _ExportState(
+		ReentrantLock(),
+		nothing,
+		nothing,
+		nothing,
+		nothing,
+		divid,
+		nothing,
+		false,
+		zero(UInt64),
+		false,
+		nothing,
+		Tuple{Any,Any}[],
+		Set{String}(),
+		Set{String}(),
+	)
+end
+
+const _EXPORT_STATE = _ExportState()
 
 function _export_window_html(divid::String)
 	return """
@@ -1561,57 +1590,235 @@ function _export_window_html(divid::String)
 """
 end
 
-function _wait_for_plotly(ec, win; timeout_s::Float64 = 10.0)
-	t0 = time()
-	while time() - t0 < timeout_s
+function _export_timeout_seconds(timeout_s::Real, operation::AbstractString)
+	timeout = try
+		Float64(timeout_s)
+	catch
+		throw(ArgumentError("$operation timeout must be a finite, non-negative number"))
+	end
+	isfinite(timeout) && timeout >= 0 ||
+		throw(ArgumentError("$operation timeout must be a finite, non-negative number"))
+	return timeout
+end
+
+function _wait_for_plotly(ec, win; timeout_s::Real = 10.0)
+	timeout = _export_timeout_seconds(timeout_s, "Plotly.js load")
+	start_ns = time_ns()
+	while (time_ns() - start_ns) / 1.0e9 < timeout
 		try
 			result = Base.invokelatest(() -> ec.run(win, "typeof Plotly !== 'undefined' ? 'ready' : 'waiting'"))
 			result == "ready" && return true
-		catch
+		catch err
+			err isa InterruptException && rethrow()
 		end
-		sleep(0.05)
+		elapsed = (time_ns() - start_ns) / 1.0e9
+		remaining = timeout - elapsed
+		remaining > 0 && sleep(min(0.05, remaining))
 	end
-	error("Plotly.js did not load in the export window within $(timeout_s)s")
+	error("Plotly.js did not load in the export window within $(timeout)s")
 end
 
-function _ensure_export_window()
-	ec = _electroncall()
-	# Check if existing window is still alive
-	win_alive = false
-	if _EXPORT_WINDOW[] !== nothing
-		try
-			win_alive = Base.invokelatest(() -> ec.isopen(_EXPORT_WINDOW[]))
-		catch
-			win_alive = false
+function _remove_export_tempdir_locked!(
+	state::_ExportState,
+	tempdir::String;
+	throw_errors::Bool,
+)
+	try
+		remover = state.tempdir_remover
+		if remover === nothing
+			rm(tempdir; recursive = true, force = true)
+		else
+			Base.invokelatest(remover, tempdir)
 		end
+	catch err
+		if throw_errors
+			rethrow()
+		end
+		@warn "Failed to remove an export temp directory." tempdir exception = (
+			err,
+			catch_backtrace(),
+		)
+		return false
 	end
 
-	if !win_alive
-		app = _EXPORT_APP[]
-		# Drop cached app if its underlying Electron process has died — otherwise
-		# the next Window() call fails on a dead handle.
-		if app !== nothing && hasproperty(app, :exists) && !app.exists
-			app = nothing
-			_EXPORT_APP[] = nothing
-		end
-		if app === nothing
-			app = _default_electron_app(ec)
-			_EXPORT_APP[] = app
-		end
-		divid = _EXPORT_DIVID[]
-		html = _export_window_html(divid)
-		# Reclaim the previous export HTML file (its window is gone) before
-		# orphaning it, and ensure a single atexit hook removes the last one.
-		isempty(_EXPORT_TMPFILE[]) || (try rm(_EXPORT_TMPFILE[]; force = true) catch end)
-		tmpfile = tempname() * ".html"
-		write(tmpfile, html)
-		_EXPORT_TMPFILE[] = tmpfile
-		if !_EXPORT_ATEXIT_REGISTERED[]
-			atexit() do
-				isempty(_EXPORT_TMPFILE[]) || (try rm(_EXPORT_TMPFILE[]; force = true) catch end)
+	delete!(state.owned_tempdirs, tempdir)
+	state.tempdir == tempdir && (state.tempdir = nothing)
+	return true
+end
+
+function _close_export_window(ec, win)
+	should_close = true
+	try
+		should_close = Base.invokelatest(() -> ec.isopen(win))
+	catch
+		# Unknown backend state is not proof that the window is closed. Attempt
+		# the close using the exact backend that created this exact window.
+	end
+	should_close && Base.invokelatest(() -> ec.close(win))
+	return nothing
+end
+
+function _remove_pending_export_window_locked!(
+	state::_ExportState,
+	ec,
+	win,
+)
+	index = findfirst(entry -> entry[1] === ec && entry[2] === win, state.pending_windows)
+	index === nothing || deleteat!(state.pending_windows, index)
+	return nothing
+end
+
+function _retry_pending_export_windows_locked!(
+	state::_ExportState;
+	throw_errors::Bool,
+)
+	for (ec, win) in copy(state.pending_windows)
+		try
+			_close_export_window(ec, win)
+			_remove_pending_export_window_locked!(state, ec, win)
+		catch err
+			if throw_errors
+				rethrow()
 			end
-			_EXPORT_ATEXIT_REGISTERED[] = true
+			@warn "Failed to close a partially constructed export window." exception = (
+				err,
+				catch_backtrace(),
+			)
 		end
+	end
+	return nothing
+end
+
+function _cleanup_owned_export_tempdirs_locked!(
+	state::_ExportState;
+	throw_errors::Bool,
+)
+	for tempdir in copy(state.owned_tempdirs)
+		tempdir == state.tempdir && state.window !== nothing && continue
+		_remove_export_tempdir_locked!(state, tempdir; throw_errors = throw_errors)
+	end
+	return nothing
+end
+
+function _retire_export_window_locked!(
+	state::_ExportState;
+	throw_errors::Bool,
+)
+	win = state.window
+	win === nothing && return nothing
+	ec = state.backend
+	tempdir = state.tempdir
+
+	try
+		_close_export_window(ec, win)
+	catch err
+		state.ready = false
+		if throw_errors
+			rethrow()
+		end
+		@warn "Failed to close the hidden export window." exception = (
+			err,
+			catch_backtrace(),
+		)
+		return nothing
+	end
+
+	state.backend = nothing
+	state.window = nothing
+	state.tempdir = nothing
+	state.ready = false
+	if tempdir !== nothing
+		_remove_export_tempdir_locked!(
+			state,
+			tempdir;
+			throw_errors = throw_errors,
+		)
+	end
+	return nothing
+end
+
+function _cleanup_export_state_at_exit!(state::_ExportState)
+	lock(state.lock)
+	try
+		_retire_export_window_locked!(state; throw_errors = false)
+		_retry_pending_export_windows_locked!(state; throw_errors = false)
+		_cleanup_owned_export_tempdirs_locked!(state; throw_errors = false)
+		for tempdir in copy(state.owned_pdf_tempdirs)
+			try
+				rm(tempdir; recursive = true, force = true)
+				delete!(state.owned_pdf_tempdirs, tempdir)
+			catch err
+				@warn "Failed to remove a captured PDF temp directory at exit." tempdir exception = (
+					err,
+					catch_backtrace(),
+				)
+			end
+		end
+	finally
+		unlock(state.lock)
+	end
+	return nothing
+end
+
+function _register_export_atexit_locked!(state::_ExportState)
+	if state === _EXPORT_STATE && !state.atexit_registered
+		atexit(() -> _cleanup_export_state_at_exit!(state))
+		state.atexit_registered = true
+	end
+	return nothing
+end
+
+function _export_window_is_alive_locked(state::_ExportState)
+	state.window === nothing && return false
+	state.ready || return false
+	try
+		return Base.invokelatest(() -> state.backend.isopen(state.window))
+	catch
+		return false
+	end
+end
+
+function _export_app_is_alive(app)
+	app === nothing && return false
+	if hasproperty(app, :exists)
+		try
+			return getproperty(app, :exists) !== false
+		catch
+			return false
+		end
+	end
+	return true
+end
+
+function _ensure_export_window_locked!(
+	state::_ExportState,
+	ec;
+	timeout_s::Real,
+)
+	_register_export_atexit_locked!(state)
+
+	if _export_window_is_alive_locked(state)
+		return (state.backend, state.app, state.window, state.divid)
+	end
+	state.window === nothing ||
+		_retire_export_window_locked!(state; throw_errors = true)
+	_retry_pending_export_windows_locked!(state; throw_errors = true)
+	_cleanup_owned_export_tempdirs_locked!(state; throw_errors = true)
+
+	app = state.app
+	if state.app_backend !== ec || !_export_app_is_alive(app)
+		app = _default_electron_app(ec)
+		state.app_backend = ec
+		state.app = app
+	end
+
+	divid = state.divid
+	tempdir = mktempdir(; prefix = "plotlysupply-export-")
+	push!(state.owned_tempdirs, tempdir)
+	tmpfile = joinpath(tempdir, "index.html")
+	win = nothing
+	try
+		write(tmpfile, _export_window_html(divid))
 		file_uri = _file_uri(tmpfile)
 		win = Base.invokelatest(() -> ec.Window(
 			app,
@@ -1621,9 +1828,92 @@ function _ensure_export_window()
 			title = "PlotlySupply Export",
 			show = false,
 		))
-		_EXPORT_WINDOW[] = win
-		_wait_for_plotly(ec, win)
-	end
+		push!(state.pending_windows, (ec, win))
+		_wait_for_plotly(ec, win; timeout_s = timeout_s)
 
-	return (ec, _EXPORT_APP[], _EXPORT_WINDOW[], _EXPORT_DIVID[])
+		# Publish only after readiness succeeds. Until this assignment the local
+		# transaction is not available to another export as a usable cache entry.
+		_remove_pending_export_window_locked!(state, ec, win)
+		state.backend = ec
+		state.window = win
+		state.tempdir = tempdir
+		state.ready = true
+		return (ec, app, win, divid)
+	catch
+		if win !== nothing
+			try
+				_close_export_window(ec, win)
+				_remove_pending_export_window_locked!(state, ec, win)
+			catch cleanup_error
+				@warn "Failed to close a partially constructed export window." exception = (
+					cleanup_error,
+					catch_backtrace(),
+				)
+			end
+		end
+		try
+			_remove_export_tempdir_locked!(
+				state,
+				tempdir;
+				throw_errors = true,
+			)
+		catch cleanup_error
+			@warn "Failed to remove a partially constructed export temp directory." tempdir exception = (
+				cleanup_error,
+				catch_backtrace(),
+			)
+		end
+		rethrow()
+	end
+end
+
+function _ensure_export_window(
+	state::_ExportState = _EXPORT_STATE;
+	ec = nothing,
+	timeout_s::Real = 10.0,
+)
+	backend = ec === nothing ? _electroncall() : ec
+	lock(state.lock)
+	try
+		return _ensure_export_window_locked!(
+			state,
+			backend;
+			timeout_s = timeout_s,
+		)
+	finally
+		unlock(state.lock)
+	end
+end
+
+function _with_export_window(
+	f,
+	state::_ExportState = _EXPORT_STATE;
+	ec = nothing,
+	timeout_s::Real = 10.0,
+)
+	backend = ec === nothing ? _electroncall() : ec
+	lock(state.lock)
+	try
+		args = _ensure_export_window_locked!(
+			state,
+			backend;
+			timeout_s = timeout_s,
+		)
+		return f(args...)
+	finally
+		unlock(state.lock)
+	end
+end
+
+function _next_pdf_job_id_locked!(state::_ExportState)
+	state.pdf_job_counter = Base.Checked.checked_add(
+		state.pdf_job_counter,
+		one(UInt64),
+	)
+	return "plotlysupply-pdf-" *
+		   string(objectid(state)) *
+		   "-" *
+		   string(state.pdf_job_counter) *
+		   "-" *
+		   string(time_ns())
 end

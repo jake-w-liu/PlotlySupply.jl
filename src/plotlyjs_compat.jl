@@ -1,5 +1,4 @@
 using Base64
-using Printf: @sprintf
 
 @inline function _hex_nibble(byte::UInt8)
 	0x30 <= byte <= 0x39 && return byte - 0x30
@@ -158,6 +157,36 @@ end
 
 const _EXPORT_KW = Set((:height, :width, :scale))
 const _SAVEFIG_FORMATS = ("png", "jpeg", "svg", "pdf", "html", "json")
+const _PDF_COPY_CHUNK_BYTES = 64 * 1024
+
+struct _ExportOptions
+	width::Float64
+	height::Float64
+	scale::Float64
+	scaled_width::Float64
+	scaled_height::Float64
+	width_js::String
+	height_js::String
+	scale_js::String
+	scaled_width_js::String
+	scaled_height_js::String
+end
+
+struct _PreparedRendererExport
+	data_js::String
+	layout_js::String
+	config_js::String
+	options::_ExportOptions
+end
+
+struct _CapturedPDF
+	tempdir::String
+	path::String
+	owner_state::Union{Nothing,_ExportState}
+end
+
+_CapturedPDF(tempdir::String, path::String) =
+	_CapturedPDF(tempdir, path, nothing)
 
 function _validate_export_format(fmt::String)
 	fmt == "eps" && error("EPS export is not supported. Use \"svg\" or \"pdf\" instead.")
@@ -166,24 +195,82 @@ function _validate_export_format(fmt::String)
 	return fmt
 end
 
-function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwargs...)
-	for k in keys(kwargs)
-		k in _EXPORT_KW || error("Unsupported keyword argument: $k. Supported: height, width, scale.")
+function _normalize_export_number(name::Symbol, value)
+	value isa Real && !(value isa Bool) ||
+		throw(ArgumentError("$name must be a positive, finite, non-Bool real number"))
+	number = try
+		Float64(value)
+	catch
+		throw(ArgumentError("$name must be representable as a finite number"))
 	end
-	height = get(kwargs, :height, 500)
-	width = get(kwargs, :width, 700)
-	scale = get(kwargs, :scale, 1)
+	isfinite(number) && number > 0 ||
+		throw(ArgumentError("$name must be a positive, finite, non-Bool real number"))
+	return number
+end
 
-	data_js = _json_js(p.data)
-	layout_js = _json_js(p.layout)
-	config_js = _json_js(p.config)
+function _normalize_export_options(kwargs)
+	for k in keys(kwargs)
+		k in _EXPORT_KW ||
+			throw(ArgumentError("Unsupported keyword argument: $k. Supported: height, width, scale."))
+	end
+	width = _normalize_export_number(:width, get(kwargs, :width, 700))
+	height = _normalize_export_number(:height, get(kwargs, :height, 500))
+	scale = _normalize_export_number(:scale, get(kwargs, :scale, 1))
+	scaled_width = width * scale
+	scaled_height = height * scale
+	isfinite(scaled_width) && scaled_width > 0 ||
+		throw(ArgumentError("width * scale must be finite and positive"))
+	isfinite(scaled_height) && scaled_height > 0 ||
+		throw(ArgumentError("height * scale must be finite and positive"))
+
+	# JSON is the only interpolation path for caller-controlled numeric values.
+	# Construct these strings during preflight, before opening a destination or
+	# creating/accessing an Electron export window.
+	return _ExportOptions(
+		width,
+		height,
+		scale,
+		scaled_width,
+		scaled_height,
+		_json_js(width),
+		_json_js(height),
+		_json_js(scale),
+		_json_js(scaled_width),
+		_json_js(scaled_height),
+	)
+end
+
+function _prepare_renderer_export(p::Plot, kwargs)
+	options = _normalize_export_options(kwargs)
+	return _PreparedRendererExport(
+		_json_js(p.data),
+		_json_js(p.layout),
+		_json_js(p.config),
+		options,
+	)
+end
+
+function _capture_image_data_url(
+	ec,
+	win,
+	divid::String,
+	prepared::_PreparedRendererExport,
+	fmt::String,
+)
+	options = prepared.options
+	format_js = _json_js(fmt)
 	divid_js = _json_js(divid)
 
 	js = """
 (async function() {
   const div = document.getElementById($divid_js);
-  await Plotly.react(div, $data_js, $layout_js, $config_js);
-  const url = await Plotly.toImage(div, {format: "$fmt", width: $width, height: $height, scale: $scale});
+  await Plotly.react(div, $(prepared.data_js), $(prepared.layout_js), $(prepared.config_js));
+  const url = await Plotly.toImage(div, {
+    format: $format_js,
+    width: $(options.width_js),
+    height: $(options.height_js),
+    scale: $(options.scale_js)
+  });
   return url;
 })();
 """
@@ -192,8 +279,10 @@ function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwa
 		error("Plotly.toImage returned a non-string value for format '$fmt'")
 	# ElectronCall normally returns String. This conversion is zero-copy for
 	# String and preserves compatibility with other AbstractString adapters.
-	data_url = String(data_url)
+	return String(data_url)
+end
 
+function _write_image_data_url!(io::IO, data_url::String, fmt::String)
 	if fmt == "svg"
 		prefix = "data:image/svg+xml,"
 		if startswith(data_url, prefix)
@@ -218,17 +307,77 @@ function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwa
 	return nothing
 end
 
-function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
-	for k in keys(kwargs)
-		k in _EXPORT_KW || error("Unsupported keyword argument: $k. Supported: height, width, scale.")
+function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwargs...)
+	prepared = _prepare_renderer_export(p, kwargs)
+	data_url = lock(_EXPORT_STATE.lock) do
+		_capture_image_data_url(ec, win, divid, prepared, fmt)
 	end
-	height = get(kwargs, :height, 500)
-	width = get(kwargs, :width, 700)
-	scale = get(kwargs, :scale, 1)
+	_write_image_data_url!(io, data_url, fmt)
+	return nothing
+end
 
-	data_js = _json_js(p.data)
-	layout_js = _json_js(p.layout)
-	config_js = _json_js(p.config)
+function _pdf_status_field(status, name::Symbol)
+	if status isa AbstractDict
+		haskey(status, String(name)) && return status[String(name)]
+		haskey(status, name) && return status[name]
+	elseif status isa NamedTuple && hasproperty(status, name)
+		return getproperty(status, name)
+	end
+	return nothing
+end
+
+function _wait_for_pdf_job(ec, app, job_id::String; timeout_s::Real)
+	timeout = _export_timeout_seconds(timeout_s, "printToPDF")
+	job_id_js = _json_js(job_id)
+	status_js = """
+(function() {
+  const jobs = global.__plotlysupply_pdf_jobs;
+  const job = jobs && jobs.get($job_id_js);
+  return job === undefined ? null : {done: job.done, error: job.error};
+})()
+"""
+	start_ns = time_ns()
+	while (time_ns() - start_ns) / 1.0e9 < timeout
+		status = Base.invokelatest(() -> ec.run(app, status_js))
+		status === nothing &&
+			error("printToPDF job '$job_id' disappeared before completion")
+		if _pdf_status_field(status, :done) === true
+			err = _pdf_status_field(status, :error)
+			if err !== nothing && err !== false && err != ""
+				error("printToPDF failed: $err")
+			end
+			return nothing
+		end
+		elapsed = (time_ns() - start_ns) / 1.0e9
+		remaining = timeout - elapsed
+		remaining > 0 && sleep(min(0.05, remaining))
+	end
+	error("printToPDF timed out after $(timeout)s")
+end
+
+function _delete_pdf_job(ec, app, job_id::String)
+	job_id_js = _json_js(job_id)
+	js = """
+(function() {
+  const jobs = global.__plotlysupply_pdf_jobs;
+  return jobs ? jobs.delete($job_id_js) : false;
+})()
+"""
+	Base.invokelatest(() -> ec.run(app, js))
+	return nothing
+end
+
+function _capture_pdf_file(
+	ec,
+	app,
+	win,
+	divid::String,
+	prepared::_PreparedRendererExport,
+	job_id::String;
+	timeout_s::Real = 15.0,
+	owner_state::Union{Nothing,_ExportState} = nothing,
+)
+	options = prepared.options
 	divid_js = _json_js(divid)
 
 	# Render the plot at the scaled dimensions so it fills the (scaled) PDF page
@@ -236,8 +385,11 @@ function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
 	js_render = """
 (async function() {
   var div = document.getElementById($divid_js);
-  var layout = Object.assign({}, $layout_js, {width: $(width * scale), height: $(height * scale)});
-  await Plotly.react(div, $data_js, layout, $config_js);
+  var layout = Object.assign({}, $(prepared.layout_js), {
+    width: $(options.scaled_width_js),
+    height: $(options.scaled_height_js)
+  });
+  await Plotly.react(div, $(prepared.data_js), layout, $(prepared.config_js));
   if (!document.getElementById('__ps_print_css')) {
     var style = document.createElement('style');
     style.id = '__ps_print_css';
@@ -249,61 +401,303 @@ function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
 """
 	Base.invokelatest(() -> ec.run(win, js_render))
 
-	# Use Electron's printToPDF for vector output with selectable text.
-	# printToPDF is an async main-process API, so we write to a temp file
-	# and poll for completion.
-	app = Base.invokelatest(() -> getfield(win, :app))
 	win_id = Base.invokelatest(() -> getfield(win, :id))
-	tmpfile = tempname() * ".pdf"
+	tempdir = mktempdir(; prefix = "plotlysupply-pdf-")
+	if owner_state !== nothing
+		lock(owner_state.lock) do
+			push!(owner_state.owned_pdf_tempdirs, tempdir)
+		end
+	end
+	tmpfile = joinpath(tempdir, "output.pdf")
 	tmpfile_js = _json_js(tmpfile)
+	job_id_js = _json_js(job_id)
 
 	# Page size in inches (Electron printToPDF pageSize uses inches)
-	page_w_in = @sprintf("%.6f", width * scale / 96.0)
-	page_h_in = @sprintf("%.6f", height * scale / 96.0)
+	page_w_in = _json_js(options.scaled_width / 96.0)
+	page_h_in = _json_js(options.scaled_height / 96.0)
 
 	js_pdf = """
-	global.__ps_pdf_done = false;
-	global.__ps_pdf_err = null;
-	require('electron').BrowserWindow.fromId($win_id)
-		.webContents.printToPDF({
-			printBackground: true,
-			preferCSSPageSize: true,
-			margins: { marginType: 'custom', top: 0, bottom: 0, left: 0, right: 0 },
-			pageSize: { width: $page_w_in, height: $page_h_in }
-		})
-		.then(function(buf) {
-			require('fs').writeFileSync($tmpfile_js, buf);
-			global.__ps_pdf_done = true;
-		})
-		.catch(function(err) {
-			global.__ps_pdf_err = err.toString();
-			global.__ps_pdf_done = true;
-		});
-	'started'
-	"""
-	Base.invokelatest(() -> ec.run(app, js_pdf))
+(function() {
+  if (!global.__plotlysupply_pdf_jobs) {
+    global.__plotlysupply_pdf_jobs = new Map();
+  }
+  const jobs = global.__plotlysupply_pdf_jobs;
+  const key = $job_id_js;
+  if (jobs.has(key)) return 'duplicate';
+  const job = {done: false, error: null};
+  jobs.set(key, job);
+  function fail(err) {
+    const current = jobs.get(key);
+    if (current === job) {
+      current.error = String(err);
+      current.done = true;
+    }
+  }
+  try {
+    const browserWindow = require('electron').BrowserWindow.fromId($win_id);
+    if (!browserWindow) throw new Error('export BrowserWindow no longer exists');
+    browserWindow.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      margins: { marginType: 'custom', top: 0, bottom: 0, left: 0, right: 0 },
+      pageSize: { width: $page_w_in, height: $page_h_in }
+    }).then(function(buf) {
+      const current = jobs.get(key);
+      if (current !== job) return;
+      try {
+        require('fs').writeFileSync($tmpfile_js, buf);
+        current.done = true;
+      } catch (err) {
+        fail(err);
+      }
+    }).catch(fail);
+  } catch (err) {
+    fail(err);
+  }
+  return 'started';
+})()
+"""
 
-	# Poll for completion (up to 15 seconds)
-	for _ in 1:300
-		done = Base.invokelatest(() -> ec.run(app, "global.__ps_pdf_done"))
-		done === true && break
-		sleep(0.05)
+	job_start_attempted = false
+	try
+		job_start_attempted = true
+		result = Base.invokelatest(() -> ec.run(app, js_pdf))
+		result == "started" ||
+			error("printToPDF job '$job_id' failed to start (result: $result)")
+		_wait_for_pdf_job(ec, app, job_id; timeout_s = timeout_s)
+		isfile(tmpfile) ||
+			error("printToPDF completed without writing its private output file")
+	catch
+		if job_start_attempted
+			try
+				_delete_pdf_job(ec, app, job_id)
+			catch cleanup_error
+				@warn "Failed to remove a failed printToPDF job state." job_id exception = (
+					cleanup_error,
+					catch_backtrace(),
+				)
+			end
+		end
+		try
+			rm(tempdir; recursive = true, force = true)
+			if owner_state !== nothing
+				lock(owner_state.lock) do
+					delete!(owner_state.owned_pdf_tempdirs, tempdir)
+				end
+			end
+		catch cleanup_error
+			@warn "Failed to remove a failed printToPDF temp directory." tempdir exception = (
+				cleanup_error,
+				catch_backtrace(),
+			)
+		end
+		rethrow()
 	end
 
-	err = Base.invokelatest(() -> ec.run(app, "global.__ps_pdf_err"))
-	if err !== nothing && err !== false && err != ""
-		rm(tmpfile; force = true)
-		error("printToPDF failed: $err")
+	try
+		_delete_pdf_job(ec, app, job_id)
+	catch
+		try
+			rm(tempdir; recursive = true, force = true)
+			if owner_state !== nothing
+				lock(owner_state.lock) do
+					delete!(owner_state.owned_pdf_tempdirs, tempdir)
+				end
+			end
+		catch cleanup_error
+			@warn "Failed to remove a printToPDF temp directory after job-state cleanup failed." tempdir exception = (
+				cleanup_error,
+				catch_backtrace(),
+			)
+		end
+		rethrow()
 	end
+	return _CapturedPDF(tempdir, tmpfile, owner_state)
+end
 
-	if !isfile(tmpfile)
-		error("printToPDF timed out or failed to write PDF")
+function _copy_pdf_file_chunked!(io::IO, path::String)
+	open(path, "r") do input
+		buffer = Vector{UInt8}(undef, _PDF_COPY_CHUNK_BYTES)
+		while !eof(input)
+			n = readbytes!(input, buffer, _PDF_COPY_CHUNK_BYTES)
+			n == 0 && break
+			write(io, @view buffer[1:n])
+		end
 	end
-
-	pdf_data = read(tmpfile)
-	rm(tmpfile; force = true)
-	write(io, pdf_data)
 	return nothing
+end
+
+function _remove_captured_pdf_tempdir!(
+	captured::_CapturedPDF,
+	tempdir_remover,
+)
+	if tempdir_remover === nothing
+		rm(captured.tempdir; recursive = true, force = true)
+	else
+		Base.invokelatest(tempdir_remover, captured.tempdir)
+	end
+	if captured.owner_state !== nothing
+		lock(captured.owner_state.lock) do
+			delete!(
+				captured.owner_state.owned_pdf_tempdirs,
+				captured.tempdir,
+			)
+		end
+	end
+	return nothing
+end
+
+function _write_captured_pdf!(
+	io::IO,
+	captured::_CapturedPDF;
+	tempdir_remover = nothing,
+)
+	try
+		_copy_pdf_file_chunked!(io, captured.path)
+	catch
+		try
+			_remove_captured_pdf_tempdir!(captured, tempdir_remover)
+		catch cleanup_error
+			@warn "Failed to remove a captured PDF after its destination write failed." tempdir = captured.tempdir exception = (
+				cleanup_error,
+				catch_backtrace(),
+			)
+		end
+		rethrow()
+	end
+	_remove_captured_pdf_tempdir!(captured, tempdir_remover)
+	return nothing
+end
+
+function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
+	prepared = _prepare_renderer_export(p, kwargs)
+	app = Base.invokelatest(() -> getfield(win, :app))
+	state = _EXPORT_STATE
+	captured = lock(state.lock) do
+		job_id = _next_pdf_job_id_locked!(state)
+		_capture_pdf_file(
+			ec,
+			app,
+			win,
+			divid,
+			prepared,
+			job_id;
+			owner_state = state,
+		)
+	end
+	_write_captured_pdf!(io, captured)
+	return nothing
+end
+
+function _prepare_savefig(p::Plot, fmt::String, kwargs)
+	fmt in ("html", "json") && return nothing
+	return _prepare_renderer_export(p, kwargs)
+end
+
+function _savefig_prepared(
+	io::IO,
+	p::Plot,
+	fmt::String,
+	prepared;
+	state::_ExportState = _EXPORT_STATE,
+	ec = nothing,
+	window_timeout_s::Real = 10.0,
+	pdf_timeout_s::Real = 15.0,
+)
+	fmt == "html" && return _savefig_html(io, p)
+	fmt == "json" && return (PlotlyBase.JSON.print(io, p); nothing)
+	prepared isa _PreparedRendererExport ||
+		throw(ArgumentError("renderer export was not prepared"))
+
+	if fmt == "pdf"
+		captured = _with_export_window(
+			state;
+			ec = ec,
+			timeout_s = window_timeout_s,
+		) do backend, app, win, divid
+			job_id = _next_pdf_job_id_locked!(state)
+			_capture_pdf_file(
+				backend,
+				app,
+				win,
+				divid,
+				prepared,
+				job_id;
+				timeout_s = pdf_timeout_s,
+				owner_state = state,
+			)
+		end
+		# This user-controlled I/O is deliberately outside the renderer lock.
+		_write_captured_pdf!(io, captured)
+	else
+		data_url = _with_export_window(
+			state;
+			ec = ec,
+			timeout_s = window_timeout_s,
+		) do backend, app, win, divid
+			_capture_image_data_url(backend, win, divid, prepared, fmt)
+		end
+		# Decoding and user-controlled I/O are deliberately outside the lock.
+		_write_image_data_url!(io, data_url, fmt)
+	end
+	return nothing
+end
+
+function _savefig_atomic(
+	filename::AbstractString,
+	p::Plot,
+	fmt::String,
+	prepared;
+	state::_ExportState = _EXPORT_STATE,
+	ec = nothing,
+	window_timeout_s::Real = 10.0,
+	pdf_timeout_s::Real = 15.0,
+	renamer = Base.Filesystem.rename,
+)
+	target = abspath(filename)
+	isdir(target) &&
+		throw(ArgumentError("savefig destination is a directory: $filename"))
+	parent = dirname(target)
+	temp_path, temp_io = mktemp(parent; cleanup = false)
+	try
+		_savefig_prepared(
+			temp_io,
+			p,
+			fmt,
+			prepared;
+			state = state,
+			ec = ec,
+			window_timeout_s = window_timeout_s,
+			pdf_timeout_s = pdf_timeout_s,
+		)
+		flush(temp_io)
+		close(temp_io)
+		# The temp file is in the destination directory, so one filesystem
+		# rename is the commit. Avoid `mv(...; force=true)`: its fallback can
+		# remove the old target before a later copy/rename error.
+		Base.invokelatest(renamer, temp_path, target)
+	catch
+		if isopen(temp_io)
+			try
+				close(temp_io)
+			catch cleanup_error
+				@warn "Failed to close an unpublished savefig temp file." temp_path exception = (
+					cleanup_error,
+					catch_backtrace(),
+				)
+			end
+		end
+		try
+			rm(temp_path; force = true)
+		catch cleanup_error
+			@warn "Failed to remove an unpublished savefig temp file." temp_path exception = (
+				cleanup_error,
+				catch_backtrace(),
+			)
+		end
+		rethrow()
+	end
+	return filename
 end
 
 """
@@ -328,16 +722,8 @@ export window (so they require a working Electron, but no Kaleido/Python).
 """
 function savefig(io::IO, p::Plot; format::AbstractString = "png", kwargs...)
 	fmt = _validate_export_format(lowercase(String(format)))
-	fmt == "html" && return _savefig_html(io, p)
-	fmt == "json" && return (PlotlyBase.JSON.print(io, p); nothing)
-
-	ec, app, win, divid = _ensure_export_window()
-	if fmt == "pdf"
-		_export_pdf(io, ec, win, divid, p; kwargs...)
-	else
-		_export_image(io, ec, win, divid, p, fmt; kwargs...)
-	end
-	return nothing
+	prepared = _prepare_savefig(p, fmt, kwargs)
+	return _savefig_prepared(io, p, fmt, prepared)
 end
 
 savefig(io::IO, sp::SyncPlot; kwargs...) = savefig(io, sp.plot; kwargs...)
@@ -348,20 +734,44 @@ function savefig(p::Union{Plot, SyncPlot}; kwargs...)
 	return take!(io)
 end
 
+function _filename_export_format(
+	filename::AbstractString,
+	format::Union{Nothing,AbstractString},
+)
+	ext = lowercase(splitext(filename)[2])
+	inferred = isempty(ext) ? "png" : String(lstrip(ext, '.'))
+	fmt = isnothing(format) ? inferred : lowercase(String(format))
+	return _validate_export_format(fmt)
+end
+
+function _savefig_filename(
+	filename::AbstractString,
+	p::Union{Plot,SyncPlot},
+	format::Union{Nothing,AbstractString},
+	kwargs;
+	state::_ExportState = _EXPORT_STATE,
+	ec = nothing,
+)
+	fmt = _filename_export_format(filename, format)
+	plot = p isa SyncPlot ? p.plot : p
+	prepared = _prepare_savefig(plot, fmt, kwargs)
+	return _savefig_atomic(
+		filename,
+		plot,
+		fmt,
+		prepared;
+		state = state,
+		ec = ec,
+	)
+end
+
 function savefig(
 	filename::AbstractString,
 	p::Union{Plot, SyncPlot};
 	format::Union{Nothing, AbstractString} = nothing,
 	kwargs...,
 )
-	ext = lowercase(splitext(filename)[2])
-	fmt = isnothing(format) ? (isempty(ext) ? "png" : lstrip(ext, '.')) : lowercase(String(format))
-	_validate_export_format(fmt)
-
-	open(filename, "w") do io
-		savefig(io, p; format = fmt, kwargs...)
-	end
-	return filename
+	return _savefig_filename(filename, p, format, kwargs)
 end
 
 savefig(p::Union{Plot, SyncPlot}, filename::AbstractString; kwargs...) =
