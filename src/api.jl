@@ -487,6 +487,10 @@ function _symbol_dict(x)
 		for (k, v) in x
 			d[Symbol(k)] = v
 		end
+	elseif x isa NamedTuple
+		for (k, v) in pairs(x)
+			d[Symbol(k)] = v
+		end
 	end
 	return d
 end
@@ -1060,7 +1064,9 @@ function subplots(
 	cols_i = Int(cols)
 	_check_subplot_dims(rows_i, cols_i)
 
-	layout = Layout(Subplots(rows = rows_i, cols = cols_i; subplot_kwargs...))
+	layout = _plotlysupply_subplot_layout(
+		Subplots(rows = rows_i, cols = cols_i; subplot_kwargs...),
+	)
 	fig = if sync
 		plot(; layout = layout, sync = true, width = width, height = height, title = title, show = show, app = app)
 	else
@@ -1159,7 +1165,7 @@ function _trace_subplot_kind(trace::GenericTrace)
 		throw(ArgumentError("invalid Plotly trace type $(repr(trace_type_value))"))
 	end
 	kind = try
-		PlotlyBase.get_subplotkind_from_trace_type(trace_type)
+		_plotlysupply_subplot_kind_from_trace_type(trace_type)
 	catch
 		throw(ArgumentError("unknown Plotly trace type $(repr(trace_type_value))"))
 	end
@@ -1301,20 +1307,73 @@ function _merge_layout_attr!(
 	source;
 	drop_keys::Tuple{Vararg{Symbol}} = (),
 	deep_merge_keys::Tuple{Vararg{Symbol}} = (),
+	mutate_builtin_target::Bool = false,
 )
 	source_dict = _symbol_dict(source)
 	isempty(source_dict) && return
 	for k in drop_keys
 		pop!(source_dict, k, nothing)
 	end
-	target_dict = _symbol_dict(get(layout.fields, key, nothing))
+	existing = get(layout.fields, key, nothing)
+	target_dict = _symbol_dict(existing)
 	for nested_key in deep_merge_keys
 		haskey(source_dict, nested_key) || continue
+		source_nested = source_dict[nested_key]
+		(
+			source_nested isa PlotlyBase.PlotlyAttribute ||
+			source_nested isa AbstractDict ||
+			source_nested isa NamedTuple
+		) || continue
 		nested = _symbol_dict(get(target_dict, nested_key, nothing))
-		merge!(nested, _symbol_dict(source_dict[nested_key]))
+		merge!(nested, _symbol_dict(source_nested))
 		source_dict[nested_key] = attr(nested)
 	end
 	merge!(target_dict, source_dict)
+
+	# Full-model transactions memo-clone built-in attribute containers. Keep
+	# that staged root (and its fields dictionary) in place when requested so
+	# commit-time rebasing can descend through it and restore unchanged opaque
+	# children such as a large MapLibre style object. Build the replacement
+	# contents first, then mutate only dictionary types that accept the
+	# canonical Symbol/Any representation without conversion.
+	if mutate_builtin_target
+		fields = if existing isa PlotlyBase.PlotlyAttribute
+			existing.fields
+		elseif existing isa Dict || existing isa IdDict
+			existing
+		else
+			nothing
+		end
+		if fields isa Dict || fields isa IdDict
+			candidate = try
+				prepared = empty(fields)
+				for (candidate_key, candidate_value) in target_dict
+					stored_key =
+						Symbol <: keytype(fields) ||
+						keytype(fields) === Any ?
+						candidate_key :
+						keytype(fields) <: AbstractString ?
+							string(candidate_key) :
+							candidate_key
+					prepared[stored_key] = candidate_value
+				end
+				prepared
+			catch err
+				if err isa MethodError ||
+					err isa TypeError ||
+					err isa InexactError
+					nothing
+				else
+					rethrow()
+				end
+			end
+			if candidate !== nothing
+				empty!(fields)
+				merge!(fields, candidate)
+				return nothing
+			end
+		end
+	end
 	layout.fields[key] = attr(target_dict)
 	return nothing
 end
@@ -1553,6 +1612,8 @@ function _subplot_geographic_layout_key(
 		"geo"
 	elseif kind === :mapbox
 		"mapbox"
+	elseif kind === :map
+		"map"
 	else
 		throw(ArgumentError(
 			"Unsupported geographic subplot kind `$kind`.",
@@ -1580,13 +1641,18 @@ function _subplot_geographic_update_impl!(
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	key = _subplot_geographic_layout_key(sf, r, c, kind)
 	layout = _plot_layout(sf.fig)
-	root_key = kind === :geo ? :geo : :mapbox
+	root_key = kind
 	temporary = Layout()
+	existing = get(layout.fields, key, attr())
 	temporary.fields[root_key] =
-		deepcopy(get(layout.fields, key, attr()))
+		kind === :map ?
+		attr(_symbol_dict(existing)) :
+		deepcopy(existing)
 	updater(temporary, with; kwargs...)
 	if kind === :mapbox
 		_require_valid_mapbox_layouts(temporary)
+	elseif kind === :map
+		_require_valid_map_layouts(temporary)
 	end
 	_merge_layout_attr!(
 		layout,
@@ -1597,6 +1663,7 @@ function _subplot_geographic_update_impl!(
 			kind === :geo ?
 			(:projection,) :
 			(:center,),
+		mutate_builtin_target = kind === :map,
 	)
 	sf.current_row = r
 	sf.current_col = c
@@ -1651,6 +1718,22 @@ function PlotlyBase.update_mapboxes!(
 		sf,
 		PlotlyBase.update_mapboxes!,
 		:mapbox,
+		with;
+		row = row,
+		col = col,
+		kwargs...,
+	)
+end
+
+function update_maps!(
+	sf::SubplotFigure,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	kwargs...,
+)
+	return _transactional_modern_map_subplot_update!(
+		sf,
 		with;
 		row = row,
 		col = col,
@@ -2261,8 +2344,11 @@ for (fn, nargs) in (
 	(:plot_treemap!, 2),
 	(:plot_choropleth!, 2),
 	(:plot_scattergeo!, 2),
+	(:plot_scattermap!, 2),
 	(:plot_scattermapbox!, 2),
 	(:plot_sankey!, 3),
+	(:plot_densitymap!, 2),
+	(:plot_densitymap!, 3),
 	(:plot_densitymapbox!, 3),
 )
 	@eval function $fn(
@@ -2287,6 +2373,29 @@ function plot_choroplethmapbox!(
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_choroplethmapbox!,
+		geojson,
+		locations,
+		z;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
+end
+
+function plot_choroplethmap!(
+	sf::SubplotFigure,
+	geojson,
+	locations::AbstractVector,
+	z::AbstractVector;
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(
+		sf,
+		plot_choroplethmap!,
 		geojson,
 		locations,
 		z;
@@ -8862,6 +8971,27 @@ function _set_optional_colorscale!(
 	return kwargs
 end
 
+function _is_finite_plotly_number(value)
+	(value isa Real && !(value isa Bool)) || return false
+	# JSON can encode arbitrary-precision Julia numbers that JavaScript then
+	# parses as ±Infinity. Plotly.js number fields require a finite IEEE-754
+	# Number, so validate representability without coercing the caller's value.
+	converted = try
+		Float64(value)
+	catch err
+		(
+			err isa MethodError ||
+			err isa InexactError ||
+			err isa OverflowError ||
+			err isa DomainError ||
+			err isa ArgumentError ||
+			err isa TypeError
+		) || rethrow()
+		return false
+	end
+	return isfinite(converted)
+end
+
 function _require_bounded_numeric_option(
 	kind::AbstractString,
 	name::AbstractString,
@@ -8871,8 +9001,7 @@ function _require_bounded_numeric_option(
 )
 	values = value isa AbstractVector ? value : (value,)
 	valid = all(values) do entry
-		(entry isa Real && !(entry isa Bool)) || return false
-		isfinite(entry) || return false
+		_is_finite_plotly_number(entry) || return false
 		entry >= minimum || return false
 		maximum === nothing || entry <= maximum
 	end
@@ -9035,6 +9164,9 @@ function _apply_mapbox_layout_options!(
 	)
 	return nothing
 end
+
+include("modern_map_api.jl")
+include("modern_map_updates.jl")
 
 """
 	plot_choropleth(locations, z; locationmode="country names", colorscale="", scope="", projection="", kwargs...)
@@ -9616,6 +9748,9 @@ const _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS = (
 	:plot_streamtube!,
 	:plot_choropleth!,
 	:plot_scattergeo!,
+	:plot_scattermap!,
+	:plot_choroplethmap!,
+	:plot_densitymap!,
 	:plot_scattermapbox!,
 	:plot_choroplethmapbox!,
 	:plot_densitymapbox!,

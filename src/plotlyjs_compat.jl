@@ -107,7 +107,7 @@ PlotlyJS-style subplot constructor. Forwards `kwargs` to `PlotlyBase.Subplots`
 For the MATLAB-like helper that returns a mutable canvas, see [`subplots`](@ref).
 """
 function make_subplots(; kwargs...)
-	fig = plot(Layout(Subplots(; kwargs...)))
+	fig = plot(_plotlysupply_subplot_layout(Subplots(; kwargs...)))
 	p = _plot_obj(fig)
 	_apply_default_template!(p)
 	_apply_default_cartesian_axes!(p)

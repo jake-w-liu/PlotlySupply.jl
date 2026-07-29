@@ -1,4 +1,8 @@
-const _PLOTLY_CDN_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"
+const _PLOTLYJS_VERSION = "2.35.2"
+const _PLOTLY_CDN_URL =
+	"https://cdn.plot.ly/plotly-$(_PLOTLYJS_VERSION).min.js"
+const _PLOTLYJS_ARTIFACT_RELATIVE_PATH =
+	joinpath("package", "plotly.min.js")
 const _ELECTRONCALL_PKGID = Base.PkgId(Base.UUID("8ddd578f-0c94-4c64-8c65-f083f291b266"), "ElectronCall")
 const _SYNC_ID_COUNTER = Ref(0)
 const _SYNCPLOT_STARTUP_TIMEOUT_SECONDS = 15.0
@@ -30,6 +34,16 @@ end
 # In a JS string literal "\/" decodes back to "/", so JSON semantics are intact.
 _json_js(x) = replace(PlotlyBase.JSON.json(x; allownan = true), "</" => "<\\/")
 
+function _plotlyjs_asset_path()
+	path = joinpath(artifact"plotlyjs", _PLOTLYJS_ARTIFACT_RELATIVE_PATH)
+	isfile(path) || error(
+		"Plotly.js artifact is incomplete: expected file $(repr(path))",
+	)
+	return path
+end
+
+_plotlyjs_asset_uri() = _file_uri(_plotlyjs_asset_path())
+
 function _validated_timeout_seconds(timeout_s::Real, operation::AbstractString)
 	timeout = try
 		Float64(timeout_s)
@@ -50,14 +64,76 @@ function _validated_syncplot_startup_timeout_seconds(timeout_s::Real)
 	return timeout
 end
 
-# Build a well-formed file:// URI from an absolute local path. On Windows a
-# drive-letter path needs a leading '/' and backslashes become forward slashes;
-# spaces (common in temp paths) are percent-encoded so Chromium loads the file.
+@inline _is_uri_unreserved(byte::UInt8) =
+	0x41 <= byte <= 0x5a || # A-Z
+	0x61 <= byte <= 0x7a || # a-z
+	0x30 <= byte <= 0x39 || # 0-9
+	byte in (0x2d, 0x2e, 0x5f, 0x7e) # - . _ ~
+
+@inline function _file_uri_byte_is_safe(
+	bytes,
+	index::Int,
+	windows_drive::Bool,
+)
+	byte = bytes[index]
+	return _is_uri_unreserved(byte) ||
+		byte == 0x2f || # '/'
+		(windows_drive && index == 3 && byte == 0x3a) # '/C:'
+end
+
+# Build a well-formed file URI from an absolute local path without relying on
+# Base.Filesystem.uripath (which is unavailable on supported Julia 1.10).
+# Encode UTF-8 bytes outside RFC 3986's unreserved set so a valid depot/temp
+# path containing '#', '?', '%', quotes, or non-ASCII text cannot be parsed as
+# a fragment/query or break the surrounding JavaScript/HTML literal.
 function _file_uri(path::AbstractString)
 	p = replace(path, "\\" => "/")
 	Sys.iswindows() && !startswith(p, "/") && (p = "/" * p)
-	p = replace(p, " " => "%20")
-	return "file://" * p
+	bytes = codeunits(p)
+	windows_drive =
+		Sys.iswindows() &&
+		length(bytes) >= 3 &&
+		bytes[1] == 0x2f &&
+		(
+			0x41 <= bytes[2] <= 0x5a ||
+			0x61 <= bytes[2] <= 0x7a
+		) &&
+		bytes[3] == 0x3a
+
+	encoded_length = length(bytes)
+	for index in eachindex(bytes)
+		_file_uri_byte_is_safe(bytes, index, windows_drive) ||
+			(encoded_length += 2)
+	end
+
+	hex = codeunits("0123456789ABCDEF")
+	encoded = Vector{UInt8}(undef, encoded_length)
+	output_index = 1
+	for index in eachindex(bytes)
+		byte = bytes[index]
+		if _file_uri_byte_is_safe(bytes, index, windows_drive)
+			@inbounds encoded[output_index] = byte
+			output_index += 1
+		else
+			@inbounds begin
+				encoded[output_index] = 0x25 # '%'
+				encoded[output_index + 1] =
+					hex[Int(byte >> 4) + 1]
+				encoded[output_index + 2] =
+					hex[Int(byte & 0x0f) + 1]
+			end
+			output_index += 3
+		end
+	end
+
+	# A Windows UNC path already begins with "//server"; `file:` produces the
+	# required `file://server/...`. All other absolute paths use `file://` plus
+	# their leading slash, yielding `file:///...`.
+	prefix =
+		Sys.iswindows() && startswith(p, "//") ?
+		"file:" :
+		"file://"
+	return prefix * String(encoded)
 end
 
 # Env vars that signal a CI / agent-sandbox environment where Electron's
@@ -124,6 +200,7 @@ function _syncplot_html(
 	autoplay::Bool,
 	timeout_s::Float64,
 )
+	plotlyjs_uri = _plotlyjs_asset_uri()
 	divid_js = _json_js(divid)
 	autoplay_js = autoplay ? "true" : "false"
 	timeout_ms = timeout_s * 1_000
@@ -156,7 +233,7 @@ function _syncplot_html(
         performance.now() + $timeout_ms;
       const loader = new Promise(function(resolve) {
         const script = document.createElement("script");
-        script.src = "$_PLOTLY_CDN_URL";
+        script.src = "$plotlyjs_uri";
         script.charset = "utf-8";
         script.onload = function() {
           resolve(
@@ -166,7 +243,7 @@ function _syncplot_html(
           );
         };
         script.onerror = function() {
-          resolve("Plotly.js failed to load from $_PLOTLY_CDN_URL");
+          resolve("Plotly.js failed to load from $plotlyjs_uri");
         };
         document.head.appendChild(script);
       });
@@ -6783,6 +6860,514 @@ function PlotlyBase.update_mapboxes!(
 	end
 end
 
+function _shallow_clone_modern_map_container(value)
+	if value isa _BuiltinPlotlyAttribute &&
+		(value.fields isa Dict || value.fields isa IdDict)
+		return typeof(value)(copy(value.fields))
+	elseif value isa Dict || value isa IdDict
+		return copy(value)
+	end
+	return value
+end
+
+function _modern_map_update_keys(
+	layout::Layout,
+	target_key::Union{Nothing,Symbol},
+)
+	target_key === nothing || return Symbol[target_key]
+	targets = Symbol[
+		key for key in keys(layout.fields)
+		if _is_modern_map_layout_key(key)
+	]
+	:map in targets || pushfirst!(targets, :map)
+	return targets
+end
+
+function _copy_map_update_without_domain(
+	update::PlotlyBase.PlotlyAttribute,
+)
+	filtered = attr()
+	for (key, value) in update.fields
+		Symbol(key) === :domain && continue
+		filtered.fields[Symbol(key)] = value
+	end
+	return filtered
+end
+
+function _stage_modern_map_layout_update(
+	layout::Layout,
+	with::PlotlyBase.PlotlyAttribute,
+	kwargs;
+	target_key::Union{Nothing,Symbol} = nothing,
+	protect_domain::Bool = false,
+)
+	update = _combined_map_update(with, kwargs)
+	if target_key === nothing
+		_require_valid_map_update(layout, update)
+	else
+		current = get(layout.fields, target_key, attr())
+		probe = Layout()
+		probe.fields[:map] = current
+		_require_valid_map_update(probe, update)
+	end
+
+	staged_fields = copy(layout.fields)
+	staged_layout = typeof(layout)(staged_fields)
+	# Layout's public constructor may merge defaults. Publish the exact shallow
+	# shell and retain read-only subplot routing metadata for the candidate.
+	setfield!(staged_layout, :fields, staged_fields)
+	setfield!(
+		staged_layout,
+		:subplots,
+		getfield(layout, :subplots),
+	)
+
+	memo = IdDict{Any,Any}(
+		layout => staged_layout,
+		layout.fields => staged_fields,
+	)
+	staged_roots = IdDict{Any,Any}()
+	targets = _modern_map_update_keys(layout, target_key)
+	for key in targets
+		haskey(layout.fields, key) || continue
+		original = layout.fields[key]
+		staged = get(
+			staged_roots,
+			original,
+			nothing,
+		)
+		if staged === nothing
+			staged = _shallow_clone_modern_map_container(
+				original,
+			)
+			staged !== original &&
+				(staged_roots[original] = staged)
+		end
+		staged_fields[key] = staged
+		if staged !== original && ismutable(original)
+			memo[original] = staged
+			if original isa _BuiltinPlotlyAttribute &&
+				staged isa _BuiltinPlotlyAttribute &&
+				original.fields !== staged.fields
+				memo[original.fields] = staged.fields
+			end
+		end
+	end
+
+	if target_key === nothing
+		_update_all_maps!(staged_layout, update)
+	else
+		effective_update =
+			protect_domain ?
+			_copy_map_update_without_domain(update) :
+			update
+		_merge_layout_attr!(
+			staged_layout,
+			target_key,
+			effective_update;
+			deep_merge_keys = (:center, :bounds),
+			mutate_builtin_target = true,
+		)
+	end
+	_require_valid_map_layouts(staged_layout)
+	return staged_layout, memo, staged_roots
+end
+
+function _commit_modern_map_layout!(
+	p::Plot,
+	staged_layout::Layout,
+	::IdDict{Any,Any},
+)
+	# Changed, unaliased map containers are copy-on-write roots. Sharing one
+	# root among multiple target map keys is retained by staging it once.
+	# Alias-connected roots take the general graph-preserving transaction path
+	# before this commit is constructed.
+	_commit_layout!(p, staged_layout)
+	return p
+end
+
+function _modern_map_graph_contains_identity(
+	value,
+	identities::IdDict{Any,Nothing},
+	path::Vector{Any},
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa BigInt ||
+			value isa BigFloat
+		return false
+	end
+	haskey(identities, value) && return true
+	for ancestor in path
+		ancestor === value && return false
+	end
+	push!(path, value)
+	try
+		if value isa AbstractDict
+			for (key, child) in value
+				_modern_map_graph_contains_identity(
+					key,
+					identities,
+					path,
+				) && return true
+				_modern_map_graph_contains_identity(
+					child,
+					identities,
+					path,
+				) && return true
+			end
+			# Third-party dictionaries can keep public alias-bearing metadata
+			# outside their key/value iteration.
+			if value isa Dict || value isa IdDict
+				return false
+			end
+		elseif value isa AbstractArray
+			if _array_elements_may_be_mutation_containers(
+				eltype(value),
+			)
+				for index in eachindex(value)
+					isassigned(value, index) || continue
+					_modern_map_graph_contains_identity(
+						value[index],
+						identities,
+						path,
+					) && return true
+				end
+			end
+			# Built-in storage has no public graph beyond its elements.
+			_is_builtin_element_storage(value) && return false
+		end
+
+		for index in 1:fieldcount(typeof(value))
+			isdefined(value, index) || continue
+			_modern_map_graph_contains_identity(
+				getfield(value, index),
+				identities,
+				path,
+			) && return true
+		end
+		return false
+	finally
+		pop!(path)
+	end
+end
+
+function _modern_map_root_contents_have_alias(
+	root,
+	identities::IdDict{Any,Nothing},
+	path::Vector{Any},
+)
+	storage =
+		root isa _BuiltinPlotlyAttribute ?
+		root.fields :
+		root
+	storage isa AbstractDict || return false
+	for (key, value) in storage
+		_modern_map_graph_contains_identity(
+			key,
+			identities,
+			path,
+		) && return true
+		_modern_map_graph_contains_identity(
+			value,
+			identities,
+			path,
+		) && return true
+	end
+	return false
+end
+
+function _modern_map_roots_have_external_alias(
+	p::Plot,
+	target_key::Union{Nothing,Symbol},
+	staged_roots::IdDict{Any,Any},
+)
+	isempty(staged_roots) && return false
+	target_keys = _modern_map_update_keys(
+		p.layout,
+		target_key,
+	)
+	identities = IdDict{Any,Nothing}()
+	for root in keys(staged_roots)
+		identities[root] = nothing
+		if root isa _BuiltinPlotlyAttribute
+			identities[root.fields] = nothing
+		end
+	end
+	path = Any[]
+
+	# A shallow clone also needs a full graph transaction when one target root
+	# contains another target root (or a back-reference to its own storage).
+	for root in keys(staged_roots)
+		_modern_map_root_contents_have_alias(
+			root,
+			identities,
+			path,
+		) && return true
+	end
+	for (key, value) in p.layout.fields
+		key in target_keys && continue
+		_modern_map_graph_contains_identity(
+			value,
+			identities,
+			path,
+		) && return true
+	end
+	for root in (p.data, p.frames, p.config, p.layout.subplots)
+		_modern_map_graph_contains_identity(
+			root,
+			identities,
+			path,
+		) && return true
+	end
+	return false
+end
+
+function _apply_modern_map_update_for_transaction!(
+	layout::Layout,
+	with::PlotlyBase.PlotlyAttribute,
+	kwargs;
+	target_key::Union{Nothing,Symbol},
+	protect_domain::Bool,
+)
+	if target_key === nothing
+		update_maps!(layout, with; kwargs...)
+		return layout
+	end
+
+	update = _combined_map_update(with, kwargs)
+	current = get(layout.fields, target_key, attr())
+	probe = Layout()
+	probe.fields[:map] = current
+	_require_valid_map_update(probe, update)
+	effective_update =
+		protect_domain ?
+		_copy_map_update_without_domain(update) :
+		update
+	_merge_layout_attr!(
+		layout,
+		target_key,
+		effective_update;
+		deep_merge_keys = (:center, :bounds),
+		mutate_builtin_target = true,
+	)
+	_require_valid_map_layouts(layout)
+	return layout
+end
+
+function _prepare_modern_map_layout_transaction(
+	sp::Union{Nothing,SyncPlot},
+	p::Plot,
+	with::PlotlyBase.PlotlyAttribute,
+	kwargs;
+	target_key::Union{Nothing,Symbol} = nothing,
+	protect_domain::Bool = false,
+	commit_callback::Function = _noop_plot_commit,
+)
+	staged_layout, memo, staged_roots =
+		_stage_modern_map_layout_update(
+		p.layout,
+		with,
+		kwargs;
+		target_key = target_key,
+		protect_domain = protect_domain,
+	)
+	layout_delta =
+		_plotly_leaf_deltas(
+			p.layout.fields,
+			staged_layout.fields,
+			memo,
+		)
+	if isempty(layout_delta)
+		commit = () -> begin
+			commit_callback(p)
+			return p
+		end
+		return (
+			script = nothing,
+			operation = "relayout",
+			commit = commit,
+		)
+	end
+	# A layout-only relayout cannot update another renderer field that aliases
+	# the same Julia map object. Detect arbitrary wrappers and custom trace
+	# roots with a path-only walk: numeric arrays are skipped by element type,
+	# and traversal allocates in proportion to graph depth rather than payload
+	# size. Alias-connected models use the general topology-preserving react
+	# transaction.
+	if _modern_map_roots_have_external_alias(
+		p,
+		target_key,
+		staged_roots,
+	)
+		mutation = current ->
+			_apply_modern_map_update_for_transaction!(
+				current.layout,
+				with,
+				kwargs;
+				target_key = target_key,
+				protect_domain = protect_domain,
+			)
+		return _prepare_full_model_mutation_transaction(
+			sp,
+			p,
+			mutation,
+			commit_callback,
+			_LAYOUT_ONLY_MUTATION_SCOPE,
+		)
+	end
+	script =
+		sp === nothing ?
+		nothing :
+		_plotlyjs_relayout_script(sp, layout_delta)
+	commit = () -> begin
+		_commit_modern_map_layout!(
+			p,
+			staged_layout,
+			staged_roots,
+		)
+		commit_callback(p)
+		return p
+	end
+	return (
+		script = script,
+		operation = "relayout",
+		commit = commit,
+	)
+end
+
+function _transactional_modern_map_plot_update!(
+	p::Plot,
+	with::PlotlyBase.PlotlyAttribute,
+	kwargs,
+)
+	prepare = (target, current) ->
+		_prepare_modern_map_layout_transaction(
+			target,
+			current,
+			with,
+			kwargs,
+		)
+	local_mutation = () -> begin
+		prepared = _prepare_modern_map_layout_transaction(
+			nothing,
+			p,
+			with,
+			kwargs,
+		)
+		prepared.commit()
+		return p
+	end
+	return _transactional_plot_mutation!(
+		p,
+		prepare,
+		local_mutation,
+	)
+end
+
+function _modern_map_subplot_layout_key(
+	p::Plot,
+	row::Int,
+	col::Int,
+)
+	target_ref = _subplot_target_ref(p, row, col)
+	actual_kind = String(target_ref.subplot_kind)
+	actual_kind == "map" || throw(ArgumentError(
+		"Selected subplot cell ($(row), $(col)) is '$actual_kind', not 'map'.",
+	))
+	length(target_ref.layout_keys) == 1 || throw(ArgumentError(
+		"Selected map subplot cell ($(row), $(col)) has invalid routing metadata.",
+	))
+	return only(target_ref.layout_keys)
+end
+
+function _transactional_modern_map_subplot_update!(
+	sf::SubplotFigure,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	kwargs...,
+)
+	metadata_lock = getfield(sf, :_lock)
+	lock(metadata_lock)
+	try
+		r, c = _resolve_subplot_cell(sf; row = row, col = col)
+		commit_selection = _ -> begin
+			sf.current_row = r
+			sf.current_col = c
+			return nothing
+		end
+		prepare = function (target, current)
+			key = _modern_map_subplot_layout_key(
+				current,
+				r,
+				c,
+			)
+			return _prepare_modern_map_layout_transaction(
+				target,
+				current,
+				with,
+				kwargs;
+				target_key = key,
+				protect_domain = true,
+				commit_callback = commit_selection,
+			)
+		end
+
+		fig = getfield(sf, :fig)
+		if fig isa SyncPlot
+			_syncplot_transaction!(fig, prepare)
+		else
+			local_mutation = () -> begin
+				key = _modern_map_subplot_layout_key(
+					fig,
+					r,
+					c,
+				)
+				prepared =
+					_prepare_modern_map_layout_transaction(
+						nothing,
+						fig,
+						with,
+						kwargs;
+						target_key = key,
+						protect_domain = true,
+						commit_callback =
+							commit_selection,
+					)
+				prepared.commit()
+				return fig
+			end
+			_transactional_plot_mutation!(
+				fig,
+				prepare,
+				local_mutation,
+			)
+		end
+		return sf
+	finally
+		unlock(metadata_lock)
+	end
+end
+
+function update_maps!(
+	sp::SyncPlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	prepare = (target, current) ->
+		_prepare_modern_map_layout_transaction(
+			target,
+			current,
+			with,
+			kwargs,
+		)
+	return _syncplot_transaction!(sp, prepare)
+end
+
 # ── Plot auto-refresh methods ───────────────────────────────────────
 # Restrict these additions to the concrete vector-backed Plot shape emitted by
 # PlotlySupply. They remain more specific than PlotlyBase's Plot methods, so
@@ -7214,6 +7799,18 @@ function PlotlyBase.update_mapboxes!(
 	end
 end
 
+function update_maps!(
+	p::_RefreshablePlot,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	return _transactional_modern_map_plot_update!(
+		p,
+		with,
+		kwargs,
+	)
+end
+
 function PlotlyBase.update_scenes!(
 	p::_RefreshablePlot,
 	with::PlotlyBase.PlotlyAttribute = attr();
@@ -7578,6 +8175,7 @@ end
 const _EXPORT_STATE = _ExportState()
 
 function _export_window_html(divid::String)
+	plotlyjs_uri = _plotlyjs_asset_uri()
 	return """
 <!doctype html>
 <html lang="en">
@@ -7590,7 +8188,7 @@ function _export_window_html(divid::String)
 </head>
 <body>
   <div id="$divid"></div>
-  <script src="$_PLOTLY_CDN_URL" charset="utf-8"></script>
+  <script src="$plotlyjs_uri" charset="utf-8"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/MathJax.js?config=TeX-AMS-MML_SVG"></script>
 </body>
 </html>

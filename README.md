@@ -65,7 +65,10 @@
 
 - `plot_choropleth(locations, z; locationmode, ...)`: Choropleth map.
 - `plot_scattergeo(lon, lat; ...)`: Scatter points on a geographic map.
-- `plot_scattermapbox(lon, lat; style, zoom, ...)`, `plot_choroplethmapbox(geojson, locations, z; ...)`, and `plot_densitymapbox(lon, lat, z; ...)`: Tile-map charts (default `open-street-map` style, no token needed).
+- `plot_scattermap(lon, lat; style, zoom, ...)`, `plot_choroplethmap(geojson, locations, z; ...)`, and `plot_densitymap(lon, lat, z=nothing; ...)`: MapLibre-backed tile maps (default `open-street-map` style, no token needed).
+- `update_maps!(fig; zoom, center, bounds, style, ...)`: Update every MapLibre map in a figure, including `map2`, `map3`, and later subplot maps.
+- `make_subplots(...; specs=fill(Spec(kind="map"), rows, cols))`: Create independently routed MapLibre map subplots.
+- The older `plot_scattermapbox`, `plot_choroplethmapbox`, and `plot_densitymapbox` APIs remain available for compatibility with Mapbox-based figures.
 
 ### Annotations & Error Bars
 

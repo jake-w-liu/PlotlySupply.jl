@@ -49,7 +49,10 @@
 
 ### Geographic Maps
 
-- `plot_choropleth`, `plot_scattergeo`, `plot_scattermapbox`, `plot_choroplethmapbox`, `plot_densitymapbox` (tile maps default to the token-free `open-street-map` style).
+- `plot_choropleth` and `plot_scattergeo` provide geographic projection traces.
+- `plot_scattermap`, `plot_choroplethmap`, and `plot_densitymap` provide MapLibre-backed tile maps, defaulting to the token-free `open-street-map` style.
+- `update_maps!` updates all `map`, `map2`, ... layout objects; `Spec(kind="map")` creates independently routed MapLibre subplot cells.
+- The older `plot_scattermapbox`, `plot_choroplethmapbox`, and `plot_densitymapbox` APIs remain available for Mapbox compatibility.
 
 ### Annotations & Error Bars
 

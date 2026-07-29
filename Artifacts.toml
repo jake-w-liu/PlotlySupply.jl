@@ -1,0 +1,7 @@
+[plotlyjs]
+git-tree-sha1 = "b75a0d9be9ad9eeaaf32597e7d15bb44b9a669b7"
+lazy = true
+
+    [[plotlyjs.download]]
+    url = "https://registry.npmjs.org/plotly.js-dist-min/-/plotly.js-dist-min-2.35.2.tgz"
+    sha256 = "519b4874ce25867da4e8f59e6356a8ac0d36990f0901a54c2189d75e793dcb8b"

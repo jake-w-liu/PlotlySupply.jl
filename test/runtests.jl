@@ -2330,8 +2330,18 @@ end
         @test !occursin("</", PlotlySupply._json_js(Dict(:k => "a</Style>b")))
     end
 
-    @testset "CRC: _file_uri encodes spaces" begin
+    @testset "CRC: _file_uri percent-encodes unsafe path bytes" begin
         @test PlotlySupply._file_uri("/tmp/a b.html") == "file:///tmp/a%20b.html"
+        @test PlotlySupply._file_uri("/tmp/a#b?.html") ==
+              "file:///tmp/a%23b%3F.html"
+        @test PlotlySupply._file_uri("/tmp/100%.html") ==
+              "file:///tmp/100%25.html"
+        @test PlotlySupply._file_uri("/tmp/a\"b.html") ==
+              "file:///tmp/a%22b.html"
+        @test PlotlySupply._file_uri("/tmp/中文.html") ==
+              "file:///tmp/%E4%B8%AD%E6%96%87.html"
+        @test PlotlySupply._file_uri("/tmp/a:b.html") ==
+              "file:///tmp/a%3Ab.html"
     end
 
     @testset "CRC: _urldecode_bytes preserves UTF-8" begin
@@ -4940,4 +4950,5 @@ end
     include("export_transactions.jl")
     include("mutator_parity.jl")
     include("renderer_transactions.jl")
+    include("modern_maps.jl")
 end
