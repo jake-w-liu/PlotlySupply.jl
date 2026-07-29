@@ -2686,9 +2686,9 @@ end
 
 function plot_heatmap!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	U::Union{Array, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray},
+	U::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -2709,7 +2709,7 @@ end
 
 function plot_heatmap!(
 	sf::SubplotFigure,
-	U::Union{Array, SubArray};
+	U::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -2728,9 +2728,9 @@ end
 
 function plot_contour!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	U::Union{Array, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray},
+	U::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -2751,7 +2751,7 @@ end
 
 function plot_contour!(
 	sf::SubplotFigure,
-	U::Union{Array, SubArray};
+	U::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -2795,9 +2795,9 @@ end
 
 function plot_surface!(
 	sf::SubplotFigure,
-	X::Union{AbstractRange, Array, SubArray},
-	Y::Union{AbstractRange, Array, SubArray},
-	Z::Union{Array, SubArray};
+	X::AbstractArray,
+	Y::AbstractArray,
+	Z::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -2818,7 +2818,7 @@ end
 
 function plot_surface!(
 	sf::SubplotFigure,
-	Z::Union{Array, SubArray};
+	Z::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -2970,21 +2970,32 @@ end
 
 for (fn, nargs) in (
 	(:plot_funnel!, 2),
-	(:plot_waterfall!, 2),
 	(:plot_area!, 1),
 	(:plot_area!, 2),
 	(:plot_candlestick!, 5),
 	(:plot_ohlc!, 5),
 	(:plot_histogram2d!, 2),
 	(:plot_ternary!, 3),
-	(:plot_mesh3d!, 3),
-	(:plot_isosurface!, 4),
-	(:plot_volume!, 4),
 	(:plot_streamtube!, 6),
 )
 	@eval function $fn(
 		sf::SubplotFigure,
 		args::Vararg{Union{AbstractRange, Vector, SubArray}, $nargs};
+		kwargs...,
+	)
+		return _subplot_delegate_mutator!(sf, $fn, args...; kwargs...)
+	end
+end
+
+for (fn, nargs) in (
+	(:plot_waterfall!, 2),
+	(:plot_mesh3d!, 3),
+	(:plot_isosurface!, 4),
+	(:plot_volume!, 4),
+)
+	@eval function $fn(
+		sf::SubplotFigure,
+		args::Vararg{Union{AbstractVector, SubArray}, $nargs};
 		kwargs...,
 	)
 		return _subplot_delegate_mutator!(sf, $fn, args...; kwargs...)
@@ -3235,10 +3246,20 @@ function _set_error_bars!(trace, error_x, error_y)
 	ny = _is_nested_series(error_y)
 	for (n, t) in enumerate(traces)
 		if error_x !== nothing && !(nx && n > length(error_x))
-			t.error_x = attr(type = "data", array = collect(nx ? error_x[n] : error_x), visible = true)
+			payload = nx ? error_x[n] : error_x
+			t.error_x = attr(
+				type = "data",
+				array = payload,
+				visible = true,
+			)
 		end
 		if error_y !== nothing && !(ny && n > length(error_y))
-			t.error_y = attr(type = "data", array = collect(ny ? error_y[n] : error_y), visible = true)
+			payload = ny ? error_y[n] : error_y
+			t.error_y = attr(
+				type = "data",
+				array = payload,
+				visible = true,
+			)
 		end
 	end
 	return nothing
@@ -4804,9 +4825,9 @@ end
 
 """
 	function plot_heatmap(
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray},
-		U::Union{Array, SubArray};
+		x::Union{AbstractVector, SubArray},
+		y::Union{AbstractVector, SubArray},
+		U::AbstractArray;
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -4848,9 +4869,9 @@ Plots heatmap (holographic) data.
 
 """
 function plot_heatmap(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	U::Union{Array, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray},
+	U::AbstractArray;
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -4930,7 +4951,7 @@ end
 
 """
 	function plot_heatmap(
-		U::Union{Array, SubArray};
+		U::AbstractArray;
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -4970,7 +4991,7 @@ Plots heatmap (holographic) data (axes not specified).
 
 """
 function plot_heatmap(
-	U::Union{Array, SubArray};
+	U::AbstractArray;
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -4986,8 +5007,8 @@ function plot_heatmap(
 	yscale::String = "",
 	show::Bool = false,
 )
-	x = collect(0:1:size(U, 1)-1)
-	y = collect(0:1:size(U, 2)-1)
+	x = 0:(size(U, 1) - 1)
+	y = 0:(size(U, 2) - 1)
 	return plot_heatmap(x, y, U;
 		xlabel = xlabel,
 		ylabel = ylabel,
@@ -5009,9 +5030,9 @@ end
 
 """
 	function plot_contour(
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray},
-		U::Union{Array, SubArray};
+		x::Union{AbstractVector, SubArray},
+		y::Union{AbstractVector, SubArray},
+		U::AbstractArray;
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -5053,9 +5074,9 @@ Plots contour data.
 
 """
 function plot_contour(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	U::Union{Array, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray},
+	U::AbstractArray;
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -5135,7 +5156,7 @@ end
 
 """
 	function plot_contour(
-		U::Union{Array, SubArray};
+		U::AbstractArray;
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -5175,7 +5196,7 @@ Plots contour data (axes not specified).
 
 """
 function plot_contour(
-	U::Union{Array, SubArray};
+	U::AbstractArray;
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -5191,8 +5212,8 @@ function plot_contour(
 	yscale::String = "",
 	show::Bool = false,
 )
-	x = collect(0:1:size(U, 1)-1)
-	y = collect(0:1:size(U, 2)-1)
+	x = 0:(size(U, 1) - 1)
+	y = 0:(size(U, 2) - 1)
 	return plot_contour(x, y, U;
 		xlabel = xlabel,
 		ylabel = ylabel,
@@ -5495,10 +5516,10 @@ end
 #region 3D Plot
 """
 	function plot_surface(
-		X::Array,
-		Y::Array,
-		Z::Array;
-		surfacecolor::Array = [],
+		X::AbstractArray,
+		Y::AbstractArray,
+		Z::AbstractArray;
+		surfacecolor::AbstractArray = [],
 		xrange::Vector = [0, 0],
 		yrange::Vector = [0, 0],
 		zrange::Vector = [0, 0],
@@ -5543,10 +5564,10 @@ Plots a 3D surface using x, y, z coordinate grids.
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 """
 function plot_surface(
-	X::Array,
-	Y::Array,
-	Z::Array;
-	surfacecolor::Array = [],
+	X::AbstractArray,
+	Y::AbstractArray,
+	Z::AbstractArray;
+	surfacecolor::AbstractArray = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -5632,8 +5653,8 @@ end
 
 """
 	plot_surface(
-		Z::Array;
-		surfacecolor::Array = [],
+		Z::AbstractArray;
+		surfacecolor::AbstractArray = [],
 		xrange::Vector = [0, 0],
 		yrange::Vector = [0, 0],
 		zrange::Vector = [0, 0],
@@ -5653,10 +5674,10 @@ end
 Plots a 3D surface given a matrix of height values `Z`, using the array indices as x and y coordinates.
 
 # Arguments
-- `Z::Array`: 2D array representing surface height. The dimensions of `Z` define the surface grid, with x and y coordinates automatically generated as `0:size(Z, 1)-1` and `0:size(Z, 2)-1`.
+- `Z::AbstractArray`: 2D array representing surface height. The dimensions of `Z` define the surface grid, with x and y coordinates automatically generated as `0:size(Z, 1)-1` and `0:size(Z, 2)-1`.
 
 # Keyword Arguments
-- `surfacecolor::Array`: Optional array for surface coloring. If empty, `Z` is used for coloring.
+- `surfacecolor::AbstractArray`: Optional array for surface coloring. If empty, `Z` is used for coloring.
 - `xrange::Vector`: `[xmin, xmax]` range for the x-axis. `[0, 0]` disables manual range.
 - `yrange::Vector`: `[ymin, ymax]` range for the y-axis.
 - `zrange::Vector`: `[zmin, zmax]` range for the z-axis.
@@ -5680,7 +5701,7 @@ Plots a 3D surface given a matrix of height values `Z`, using the array indices 
 - This function is a convenience wrapper for `plot_surface(X, Y, Z; ...)`, where `X` and `Y` are index grids derived from the shape of `Z`.
 """
 function plot_surface(
-	Z::Array; surfacecolor::Array = [],
+	Z::AbstractArray; surfacecolor::AbstractArray = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -5699,8 +5720,8 @@ function plot_surface(
 	show::Bool = false,
 )
 	return plot_surface(
-		collect(0:size(Z, 1)-1),
-		collect(0:size(Z, 2)-1),
+		0:(size(Z, 1) - 1),
+		0:(size(Z, 2) - 1),
 		Z;
 		xrange = xrange,
 		yrange = yrange,
@@ -7293,9 +7314,9 @@ end
 """
 	function plot_heatmap!(
 		fig,
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray},
-		U::Union{Array, SubArray};
+		x::Union{AbstractVector, SubArray},
+		y::Union{AbstractVector, SubArray},
+		U::AbstractArray;
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -7339,9 +7360,9 @@ Adds new heatmap traces to an existing figure.
 """
 function plot_heatmap!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	U::Union{Array, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray},
+	U::AbstractArray;
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -7408,7 +7429,7 @@ end
 
 function plot_heatmap!(
 	fig,
-	U::Union{Array, SubArray};
+	U::AbstractArray;
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -7423,8 +7444,8 @@ function plot_heatmap!(
 	xscale::String = "",
 	yscale::String = "",
 )
-	x = collect(0:1:size(U, 1)-1)
-	y = collect(0:1:size(U, 2)-1)
+	x = 0:(size(U, 1) - 1)
+	y = 0:(size(U, 2) - 1)
 	return plot_heatmap!(fig, x, y, U;
 		xlabel = xlabel,
 		ylabel = ylabel,
@@ -7445,9 +7466,9 @@ end
 """
 	function plot_contour!(
 		fig,
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray},
-		U::Union{Array, SubArray};
+		x::Union{AbstractVector, SubArray},
+		y::Union{AbstractVector, SubArray},
+		U::AbstractArray;
 		xlabel::String = "",
 		ylabel::String = "",
 		xrange::Vector = [0, 0],
@@ -7491,9 +7512,9 @@ Adds new contour traces to an existing figure.
 """
 function plot_contour!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	U::Union{Array, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray},
+	U::AbstractArray;
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -7560,7 +7581,7 @@ end
 
 function plot_contour!(
 	fig,
-	U::Union{Array, SubArray};
+	U::AbstractArray;
 	xlabel::String = "",
 	ylabel::String = "",
 	xrange::Vector = [0, 0],
@@ -7575,8 +7596,8 @@ function plot_contour!(
 	xscale::String = "",
 	yscale::String = "",
 )
-	x = collect(0:1:size(U, 1)-1)
-	y = collect(0:1:size(U, 2)-1)
+	x = 0:(size(U, 1) - 1)
+	y = 0:(size(U, 2) - 1)
 	return plot_contour!(fig, x, y, U;
 		xlabel = xlabel,
 		ylabel = ylabel,
@@ -7708,10 +7729,10 @@ end
 """
 	function plot_surface!(
 		fig,
-		X::Union{AbstractRange, Array, SubArray},
-		Y::Union{AbstractRange, Array, SubArray},
-		Z::Union{SubArray, Array};
-		surfacecolor::Array = [],
+		X::AbstractArray,
+		Y::AbstractArray,
+		Z::AbstractArray;
+		surfacecolor::AbstractArray = [],
 		xrange::Vector = [0, 0],
 		yrange::Vector = [0, 0],
 		zrange::Vector = [0, 0],
@@ -7759,10 +7780,10 @@ Adds new surface traces to an existing figure.
 """
 function plot_surface!(
 	fig,
-	X::Union{AbstractRange, Array, SubArray},
-	Y::Union{AbstractRange, Array, SubArray},
-	Z::Union{SubArray, Array};
-	surfacecolor::Array = [],
+	X::AbstractArray,
+	Y::AbstractArray,
+	Z::AbstractArray;
+	surfacecolor::AbstractArray = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -7778,7 +7799,7 @@ function plot_surface!(
 	grid::Union{Nothing, Bool} = nothing,
 	showaxis::Union{Nothing, Bool} = nothing,
 	shared_coloraxis::Bool = false,
-	color::Array = [],  # Alias for surfacecolor for backward compatibility
+	color::AbstractArray = [],  # Alias for surfacecolor for backward compatibility
 )
 	# Handle color parameter as alias for surfacecolor
 	if !isempty(color)
@@ -7839,7 +7860,7 @@ end
 
 function plot_surface!(
 	fig,
-	Z::Union{SubArray, Array}; surfacecolor::Array = [],
+	Z::AbstractArray; surfacecolor::AbstractArray = [],
 	xrange::Vector = [0, 0],
 	yrange::Vector = [0, 0],
 	zrange::Vector = [0, 0],
@@ -7855,12 +7876,12 @@ function plot_surface!(
 	grid::Union{Nothing, Bool} = nothing,
 	showaxis::Union{Nothing, Bool} = nothing,
 	shared_coloraxis::Bool = false,
-	color::Array = [],  # Alias for surfacecolor for backward compatibility
+	color::AbstractArray = [],  # Alias for surfacecolor for backward compatibility
 )
 	return plot_surface!(
 		fig,
-		collect(0:size(Z, 1)-1),
-		collect(0:size(Z, 2)-1),
+		0:(size(Z, 1) - 1),
+		0:(size(Z, 2) - 1),
 		Z;
 		xrange = xrange,
 		yrange = yrange,
@@ -8241,8 +8262,8 @@ end
 # ── Pie ──────────────────────────────────────────────────────────────
 
 function _pie_trace(values; labels, hole::Real, colors::Vector{String}, name::String)
-	kw = Dict{Symbol, Any}(:values => collect(values))
-	labels === nothing || (kw[:labels] = collect(labels))
+	kw = Dict{Symbol, Any}(:values => values)
+	labels === nothing || (kw[:labels] = labels)
 	hole > 0 && (kw[:hole] = hole)
 	isempty(colors) || (kw[:marker] = attr(colors = colors))
 	name == "" || (kw[:name] = name)
@@ -8312,14 +8333,17 @@ function _hierarchy_trace(
 )
 	length(labels) == length(parents) ||
 		throw(ArgumentError("`labels` and `parents` must have the same length; got $(length(labels)) and $(length(parents))."))
-	kw = Dict{Symbol, Any}(:labels => collect(labels), :parents => collect(parents))
+	kw = Dict{Symbol, Any}(
+		:labels => labels,
+		:parents => parents,
+	)
 	if values !== nothing
 		length(values) == length(labels) ||
 			throw(ArgumentError(
 				"`values` must match `labels` in length; got " *
 				"$(length(values)) and $(length(labels)).",
 			))
-		kw[:values] = collect(values)
+		kw[:values] = values
 	end
 
 	marker = Dict{Symbol,Any}()
@@ -8329,7 +8353,7 @@ function _hierarchy_trace(
 				"`colors` must match `labels` in length; got " *
 				"$(length(colors)) and $(length(labels)).",
 			))
-		marker[:colors] = collect(colors)
+		marker[:colors] = colors
 	end
 	if !isempty(colorscale)
 		if colors === nothing && values !== nothing
@@ -8549,8 +8573,8 @@ function plot_funnelarea(
 	fontsize::Int = 0,
 	show::Bool = false,
 )
-	kw = Dict{Symbol, Any}(:values => collect(values))
-	labels === nothing || (kw[:labels] = collect(labels))
+	kw = Dict{Symbol, Any}(:values => values)
+	labels === nothing || (kw[:labels] = labels)
 	isempty(colors) || (kw[:marker] = attr(colors = colors))
 	fig = Plot(funnelarea(; kw...), Layout())
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
@@ -8572,8 +8596,8 @@ function plot_funnelarea!(
 	height::Int = 0,
 	fontsize::Int = 0,
 )
-	kw = Dict{Symbol, Any}(:values => collect(values))
-	labels === nothing || (kw[:labels] = collect(labels))
+	kw = Dict{Symbol, Any}(:values => values)
+	labels === nothing || (kw[:labels] = labels)
 	isempty(colors) || (kw[:marker] = attr(colors = colors))
 	push!(_plot_data(fig), funnelarea(; kw...))
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
@@ -8588,7 +8612,7 @@ function _waterfall_trace(x, y; measure, legend::String)
 	if measure !== nothing
 		length(measure) == length(y) ||
 			throw(ArgumentError("`measure` must match `y` in length; got $(length(measure)) and $(length(y))."))
-		kw[:measure] = collect(measure)
+		kw[:measure] = measure
 	end
 	legend == "" || (kw[:name] = legend)
 	return waterfall(; kw...)
@@ -8601,8 +8625,8 @@ Waterfall chart. `measure[i]` is one of `"relative"`, `"total"`, or
 `"absolute"` (defaults to all-relative when omitted).
 """
 function plot_waterfall(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray};
 	measure::Union{Nothing, AbstractVector} = nothing,
 	legend::String = "",
 	xlabel::String = "",
@@ -8628,8 +8652,8 @@ Append a waterfall trace to an existing figure.
 """
 function plot_waterfall!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray};
 	measure::Union{Nothing, AbstractVector} = nothing,
 	legend::String = "",
 	xlabel::String = "",
@@ -9024,9 +9048,13 @@ function _sankey_trace(source, target, value; label, node_color::Vector{String},
 	length(source) == length(target) == length(value) ||
 		throw(ArgumentError("sankey: source, target, value must share length; got $(length(source)), $(length(target)), $(length(value))."))
 	node = Dict{Symbol, Any}()
-	label === nothing || (node[:label] = collect(label))
+	label === nothing || (node[:label] = label)
 	isempty(node_color) || (node[:color] = node_color)
-	link = Dict{Symbol, Any}(:source => collect(source), :target => collect(target), :value => collect(value))
+	link = Dict{Symbol, Any}(
+		:source => source,
+		:target => target,
+		:value => value,
+	)
 	link_color == "" || (link[:color] = link_color)
 	return sankey(node = attr(; node...), link = attr(; link...))
 end
@@ -9082,7 +9110,15 @@ end
 # ── Parallel coordinates ─────────────────────────────────────────────
 
 function _parcoords_dim(d)
-	d isa Pair && return attr(label = String(first(d)), values = collect(last(d)))
+	if d isa Pair
+		values = last(d)
+		return attr(
+			label = String(first(d)),
+			values = values isa AbstractVector ?
+				values :
+				collect(values),
+		)
+	end
 	d isa PlotlyBase.PlotlyAttribute && return d
 	throw(ArgumentError("each parcoords dimension must be a `\"label\" => values` Pair or an `attr(...)`."))
 end
@@ -9106,7 +9142,7 @@ function plot_parcoords(
 )
 	kw = Dict{Symbol, Any}(:dimensions => [_parcoords_dim(d) for d in dimensions])
 	if line_color !== nothing
-		lc = Dict{Symbol, Any}(:color => collect(line_color))
+		lc = Dict{Symbol, Any}(:color => line_color)
 		colorscale == "" || (lc[:colorscale] = colorscale)
 		kw[:line] = attr(; lc...)
 	end
@@ -9132,7 +9168,7 @@ function plot_parcoords!(
 )
 	kw = Dict{Symbol, Any}(:dimensions => [_parcoords_dim(d) for d in dimensions])
 	if line_color !== nothing
-		lc = Dict{Symbol, Any}(:color => collect(line_color))
+		lc = Dict{Symbol, Any}(:color => line_color)
 		colorscale == "" || (lc[:colorscale] = colorscale)
 		kw[:line] = attr(; lc...)
 	end
@@ -9447,7 +9483,7 @@ function _mesh3d_trace(x, y, z; i, j, k, intensity, color::String, colorscale::S
 				"mesh3d: `intensity` must match x/y/z in length; got " *
 				"$(length(intensity)) and $vertex_count.",
 			))
-		kw[:intensity] = collect(intensity)
+		kw[:intensity] = intensity
 	end
 	color == "" || (kw[:color] = color)
 	colorscale == "" || (kw[:colorscale] = colorscale)
@@ -9463,9 +9499,9 @@ indices via `i`/`j`/`k` (0-based), or omit them for automatic triangulation.
 Color with a uniform `color`, or per-vertex `intensity` + `colorscale`.
 """
 function plot_mesh3d(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	z::Union{AbstractRange, Vector, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray},
+	z::Union{AbstractVector, SubArray};
 	i = nothing, j = nothing, k = nothing,
 	intensity::Union{Nothing, AbstractVector} = nothing,
 	color::String = "",
@@ -9490,9 +9526,9 @@ Append a 3D mesh trace to an existing figure.
 """
 function plot_mesh3d!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	z::Union{AbstractRange, Vector, SubArray};
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray},
+	z::Union{AbstractVector, SubArray};
 	i = nothing, j = nothing, k = nothing,
 	intensity::Union{Nothing, AbstractVector} = nothing,
 	color::String = "", colorscale::String = "", opacity::Real = 1,
@@ -9527,7 +9563,12 @@ function plot_mesh3d!(
 end
 
 function _field3d_trace(constructor, x, y, z, value; isomin, isomax, surface_count::Int, colorscale::String, opacity::Real)
-	kw = Dict{Symbol, Any}(:x => x, :y => y, :z => z, :value => collect(value))
+	kw = Dict{Symbol, Any}(
+		:x => x,
+		:y => y,
+		:z => z,
+		:value => value,
+	)
 	isomin === nothing || (kw[:isomin] = isomin)
 	isomax === nothing || (kw[:isomax] = isomax)
 	surface_count > 0 && (kw[:surface_count] = surface_count)
@@ -9549,10 +9590,10 @@ for (fn, fn!, ctor, label, defop) in (
 		how many are drawn.
 		"""
 		function $fn(
-			x::Union{AbstractRange, Vector, SubArray},
-			y::Union{AbstractRange, Vector, SubArray},
-			z::Union{AbstractRange, Vector, SubArray},
-			value::Union{AbstractRange, Vector, SubArray};
+			x::Union{AbstractVector, SubArray},
+			y::Union{AbstractVector, SubArray},
+			z::Union{AbstractVector, SubArray},
+			value::Union{AbstractVector, SubArray};
 			isomin::Union{Nothing, Real} = nothing, isomax::Union{Nothing, Real} = nothing,
 			surface_count::Int = 0, colorscale::String = "", opacity::Real = $defop,
 			xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
@@ -9575,10 +9616,10 @@ for (fn, fn!, ctor, label, defop) in (
 		"""
 		function $fn!(
 			fig,
-			x::Union{AbstractRange, Vector, SubArray},
-			y::Union{AbstractRange, Vector, SubArray},
-			z::Union{AbstractRange, Vector, SubArray},
-			value::Union{AbstractRange, Vector, SubArray};
+			x::Union{AbstractVector, SubArray},
+			y::Union{AbstractVector, SubArray},
+			z::Union{AbstractVector, SubArray},
+			value::Union{AbstractVector, SubArray};
 			isomin::Union{Nothing, Real} = nothing, isomax::Union{Nothing, Real} = nothing,
 			surface_count::Int = 0, colorscale::String = "", opacity::Real = $defop,
 			xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
