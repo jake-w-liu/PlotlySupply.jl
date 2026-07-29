@@ -1529,6 +1529,40 @@ function _merge_scene_layout_attr!(
 	return nothing
 end
 
+# Ternary labels are partial axis updates, just like 3D scene labels. Preserve
+# axis ranges/ticks and nested title styling while routing the source
+# `ternary` layout into the selected target subplot (`ternary2`, etc.).
+function _merge_ternary_layout_attr!(
+	layout::Layout,
+	key::Symbol,
+	source,
+)
+	source_ternary = _symbol_dict(source)
+	isempty(source_ternary) && return nothing
+	pop!(source_ternary, :domain, nothing)
+	target_ternary = _symbol_dict(get(layout.fields, key, nothing))
+
+	for axis_key in (:aaxis, :baxis, :caxis)
+		haskey(source_ternary, axis_key) || continue
+		source_axis_value = source_ternary[axis_key]
+		_is_layout_mapping(source_axis_value) || continue
+		target_axis =
+			_symbol_dict(get(target_ternary, axis_key, nothing))
+		source_axis = _symbol_dict(source_axis_value)
+		_merge_known_nested_layout_field!(
+			target_axis,
+			source_axis,
+			:title,
+		)
+		merge!(target_axis, source_axis)
+		source_ternary[axis_key] = attr(target_axis)
+	end
+
+	merge!(target_ternary, source_ternary)
+	layout.fields[key] = attr(target_ternary)
+	return nothing
+end
+
 function _merge_layout_attr!(
 	layout::Layout,
 	key::Symbol,
@@ -1674,17 +1708,25 @@ function _apply_source_layout_to_added_traces!(
 			source_kind, _ = _trace_subplot_kind(target.data[idx])
 			source_key = Symbol(source_kind)
 			if !(subplot_key in processed)
-				nested_keys =
-					source_kind in ("mapbox", "map") ?
-					(:center,) :
-					()
-				_merge_layout_attr!(
-					target.layout,
-					subplot_key,
-					get(source.layout.fields, source_key, nothing);
-					drop_keys = (:domain,),
-					deep_merge_keys = nested_keys,
-				)
+				if source_kind == "ternary"
+					_merge_ternary_layout_attr!(
+						target.layout,
+						subplot_key,
+						get(source.layout.fields, source_key, nothing),
+					)
+				else
+					nested_keys =
+						source_kind in ("mapbox", "map") ?
+						(:center,) :
+						()
+					_merge_layout_attr!(
+						target.layout,
+						subplot_key,
+						get(source.layout.fields, source_key, nothing);
+						drop_keys = (:domain,),
+						deep_merge_keys = nested_keys,
+					)
+				end
 				push!(processed, subplot_key)
 			end
 		end
@@ -3036,6 +3078,16 @@ function _apply_cartesian_plot_options!(
 		update_yaxes!(fig, type = yscale)
 	end
 	refresh && _refresh!(fig)
+	return nothing
+end
+
+function _apply_cartesian_grid_override!(
+	fig,
+	grid::Union{Nothing, Bool},
+)
+	grid === nothing && return nothing
+	update_xaxes!(fig, showgrid = grid)
+	update_yaxes!(fig, showgrid = grid)
 	return nothing
 end
 
@@ -8462,17 +8514,34 @@ function plot_area!(
 	legend::Union{String, Vector{String}} = "",
 	mode::String = "lines",
 	stack::Bool = false,
+	xlabel::String = "",
+	ylabel::String = "",
+	xrange::Vector = [0, 0],
+	yrange::Vector = [0, 0],
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
+	grid::Union{Nothing, Bool} = nothing,
 )
 	trace = _area_traces(x, y; color = color, legend = legend, mode = mode, stack = stack)
 	for t in (trace isa AbstractVector ? trace : [trace])
 		push!(_plot_data(fig), t)
 	end
-	_apply_cartesian_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize,
-		refresh = true, apply_template = false)
+	_apply_cartesian_grid_override!(fig, grid)
+	_apply_cartesian_plot_options!(
+		fig;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		refresh = true,
+		apply_template = false,
+	)
 	return nothing
 end
 
@@ -8541,15 +8610,28 @@ for (fn, fn!, ctor, label) in (
 			increasing_color::String = "",
 			decreasing_color::String = "",
 			legend::String = "",
+			xlabel::String = "",
+			ylabel::String = "",
 			title::String = "",
 			width::Int = 0,
 			height::Int = 0,
 			fontsize::Int = 0,
+			grid::Union{Nothing, Bool} = nothing,
 		)
 			push!(_plot_data(fig), _ohlc_trace($ctor, x, open, high, low, close;
 				increasing_color = increasing_color, decreasing_color = decreasing_color, legend = legend))
-			_apply_cartesian_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize,
-				refresh = true, apply_template = false)
+			_apply_cartesian_grid_override!(fig, grid)
+			_apply_cartesian_plot_options!(
+				fig;
+				xlabel = xlabel,
+				ylabel = ylabel,
+				title = title,
+				width = width,
+				height = height,
+				fontsize = fontsize,
+				refresh = true,
+				apply_template = false,
+			)
 			return nothing
 		end
 	end
@@ -8607,14 +8689,27 @@ function plot_histogram2d!(
 	nbinsy::Int = 0,
 	colorscale::String = "",
 	histnorm::String = "",
+	xlabel::String = "",
+	ylabel::String = "",
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
+	grid::Union{Nothing, Bool} = nothing,
 )
 	push!(_plot_data(fig), _histogram2d_trace(x, y; nbinsx = nbinsx, nbinsy = nbinsy, colorscale = colorscale, histnorm = histnorm))
-	_apply_cartesian_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize,
-		refresh = true, apply_template = false)
+	_apply_cartesian_grid_override!(fig, grid)
+	_apply_cartesian_plot_options!(
+		fig;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		refresh = true,
+		apply_template = false,
+	)
 	return nothing
 end
 
@@ -8796,6 +8891,28 @@ function _ternary_layout(title, alabel, blabel, clabel)
 	return isempty(tern) ? Layout(title = title) : Layout(title = title, ternary = attr(; tern...))
 end
 
+function _apply_ternary_labels!(
+	fig;
+	alabel::String = "",
+	blabel::String = "",
+	clabel::String = "",
+)
+	ternary = Dict{Symbol, Any}()
+	alabel == "" ||
+		(ternary[:aaxis] = attr(title_text = alabel))
+	blabel == "" ||
+		(ternary[:baxis] = attr(title_text = blabel))
+	clabel == "" ||
+		(ternary[:caxis] = attr(title_text = clabel))
+	isempty(ternary) && return nothing
+	_merge_ternary_layout_attr!(
+		_plot_layout(fig),
+		:ternary,
+		attr(; ternary...),
+	)
+	return nothing
+end
+
 """
 	plot_ternary(a, b, c; mode="markers", color="", legend="", marker_size=0, alabel="", blabel="", clabel="", kwargs...)
 
@@ -8838,12 +8955,21 @@ function plot_ternary!(
 	color::String = "",
 	legend::String = "",
 	marker_size::Int = 0,
+	alabel::String = "",
+	blabel::String = "",
+	clabel::String = "",
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
 )
 	push!(_plot_data(fig), _ternary_trace(a, b, c; mode = mode, color = color, legend = legend, marker_size = marker_size))
+	_apply_ternary_labels!(
+		fig;
+		alabel = alabel,
+		blabel = blabel,
+		clabel = clabel,
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
 	_refresh!(fig)
 	return nothing
@@ -8932,14 +9058,126 @@ function _apply_scene_options!(
 	return nothing
 end
 
+function _apply_scene_mutator_options!(
+	fig;
+	xrange,
+	yrange,
+	zrange,
+	xlabel::String,
+	ylabel::String,
+	zlabel::String,
+	aspectmode::Union{Nothing, String},
+	title::String,
+	width::Int,
+	height::Int,
+	perspective::Union{Nothing, Bool},
+	grid::Union{Nothing, Bool},
+	showaxis::Union{Nothing, Bool},
+	fontsize::Int,
+)
+	_apply_scene_style_options!(
+		fig;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		zlabel = zlabel,
+		aspectmode = aspectmode,
+		perspective = perspective,
+		grid = grid,
+		showaxis = showaxis,
+	)
+	isempty(title) || relayout!(fig, title = title)
+	_apply_scene_ranges!(
+		fig;
+		xrange = xrange,
+		yrange = yrange,
+		zrange = zrange,
+	)
+	width > 0 && relayout!(fig, width = width)
+	height > 0 && relayout!(fig, height = height)
+	_apply_default_legend!(fig)
+	fontsize > 0 && relayout!(fig, font = attr(size = fontsize))
+	return nothing
+end
+
+function _require_mesh_indices(indices, name::Symbol, vertex_count::Int)
+	(
+		indices isa AbstractVector ||
+		indices isa Tuple
+	) || throw(ArgumentError(
+		"mesh3d: `$name` must be a one-dimensional index collection.",
+	))
+	index_count = try
+		length(indices)
+	catch err
+		(
+			err isa MethodError ||
+			err isa ArgumentError ||
+			err isa TypeError
+		) || rethrow()
+		throw(ArgumentError(
+			"mesh3d: `$name` must be a finite index collection.",
+		))
+	end
+	for (position, index) in enumerate(indices)
+		(
+			index isa Integer &&
+			!(index isa Bool) &&
+			0 <= index < vertex_count
+		) || throw(ArgumentError(
+			"mesh3d: `$name[$position]` must be a zero-based integer " *
+			"between 0 and $(vertex_count - 1); got $(repr(index)).",
+		))
+	end
+	return index_count
+end
+
 function _mesh3d_trace(x, y, z; i, j, k, intensity, color::String, colorscale::String, opacity::Real)
+	vertex_count = length(x)
+	(length(y) == vertex_count && length(z) == vertex_count) ||
+		throw(ArgumentError(
+			"mesh3d: x, y, z must share length; got " *
+			"$(length(x)), $(length(y)), $(length(z)).",
+		))
+	(
+		opacity isa Bool ||
+		!isfinite(opacity) ||
+		opacity < 0 ||
+		opacity > 1
+	) && throw(ArgumentError(
+		"mesh3d: `opacity` must be a finite number between 0 and 1.",
+	))
+
 	kw = Dict{Symbol, Any}(:x => x, :y => y, :z => z)
-	if i !== nothing && j !== nothing && k !== nothing
+	index_values = (i, j, k)
+	index_presence = map(value -> value !== nothing, index_values)
+	if any(index_presence) && !all(index_presence)
+		throw(ArgumentError(
+			"mesh3d: triangle indices `i`, `j`, and `k` must be " *
+			"supplied together or all omitted.",
+		))
+	elseif all(index_presence)
+		index_lengths = (
+			_require_mesh_indices(i, :i, vertex_count),
+			_require_mesh_indices(j, :j, vertex_count),
+			_require_mesh_indices(k, :k, vertex_count),
+		)
+		(index_lengths[1] == index_lengths[2] == index_lengths[3]) ||
+			throw(ArgumentError(
+				"mesh3d: i, j, k must share length; got " *
+				"$(join(index_lengths, ", ")).",
+			))
 		kw[:i] = i
 		kw[:j] = j
 		kw[:k] = k
 	end
-	intensity === nothing || (kw[:intensity] = collect(intensity))
+	if intensity !== nothing
+		length(intensity) == vertex_count ||
+			throw(ArgumentError(
+				"mesh3d: `intensity` must match x/y/z in length; got " *
+				"$(length(intensity)) and $vertex_count.",
+			))
+		kw[:intensity] = collect(intensity)
+	end
 	color == "" || (kw[:color] = color)
 	colorscale == "" || (kw[:colorscale] = colorscale)
 	opacity < 1 && (kw[:opacity] = opacity)
@@ -8988,12 +9226,31 @@ function plot_mesh3d!(
 	intensity::Union{Nothing, AbstractVector} = nothing,
 	color::String = "", colorscale::String = "", opacity::Real = 1,
 	xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+	xlabel::String = "", ylabel::String = "", zlabel::String = "",
+	aspectmode::Union{Nothing, String} = nothing, title::String = "",
 	width::Int = 0, height::Int = 0, fontsize::Int = 0,
-	perspective::Bool = true, grid::Bool = true, showaxis::Bool = true,
+	perspective::Union{Nothing, Bool} = nothing,
+	grid::Union{Nothing, Bool} = nothing,
+	showaxis::Union{Nothing, Bool} = nothing,
 )
 	push!(_plot_data(fig), _mesh3d_trace(x, y, z; i = i, j = j, k = k, intensity = intensity, color = color, colorscale = colorscale, opacity = opacity))
-	_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
-		perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = false)
+	_apply_scene_mutator_options!(
+		fig;
+		xrange = xrange,
+		yrange = yrange,
+		zrange = zrange,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		zlabel = zlabel,
+		aspectmode = aspectmode,
+		title = title,
+		width = width,
+		height = height,
+		perspective = perspective,
+		grid = grid,
+		showaxis = showaxis,
+		fontsize = fontsize,
+	)
 	_refresh!(fig)
 	return nothing
 end
@@ -9054,13 +9311,32 @@ for (fn, fn!, ctor, label, defop) in (
 			isomin::Union{Nothing, Real} = nothing, isomax::Union{Nothing, Real} = nothing,
 			surface_count::Int = 0, colorscale::String = "", opacity::Real = $defop,
 			xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+			xlabel::String = "", ylabel::String = "", zlabel::String = "",
+			aspectmode::Union{Nothing, String} = nothing, title::String = "",
 			width::Int = 0, height::Int = 0, fontsize::Int = 0,
-			perspective::Bool = true, grid::Bool = true, showaxis::Bool = true,
+			perspective::Union{Nothing, Bool} = nothing,
+			grid::Union{Nothing, Bool} = nothing,
+			showaxis::Union{Nothing, Bool} = nothing,
 		)
 			push!(_plot_data(fig), _field3d_trace($ctor, x, y, z, value; isomin = isomin, isomax = isomax,
 				surface_count = surface_count, colorscale = colorscale, opacity = opacity))
-			_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
-				perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = false)
+			_apply_scene_mutator_options!(
+				fig;
+				xrange = xrange,
+				yrange = yrange,
+				zrange = zrange,
+				xlabel = xlabel,
+				ylabel = ylabel,
+				zlabel = zlabel,
+				aspectmode = aspectmode,
+				title = title,
+				width = width,
+				height = height,
+				perspective = perspective,
+				grid = grid,
+				showaxis = showaxis,
+				fontsize = fontsize,
+			)
 			_refresh!(fig)
 			return nothing
 		end
@@ -9114,12 +9390,31 @@ function plot_streamtube!(
 	w::Union{AbstractRange, Vector, SubArray};
 	sizeref::Real = 0, colorscale::String = "",
 	xrange::Vector = [0, 0], yrange::Vector = [0, 0], zrange::Vector = [0, 0],
+	xlabel::String = "", ylabel::String = "", zlabel::String = "",
+	aspectmode::Union{Nothing, String} = nothing, title::String = "",
 	width::Int = 0, height::Int = 0, fontsize::Int = 0,
-	perspective::Bool = true, grid::Bool = true, showaxis::Bool = true,
+	perspective::Union{Nothing, Bool} = nothing,
+	grid::Union{Nothing, Bool} = nothing,
+	showaxis::Union{Nothing, Bool} = nothing,
 )
 	push!(_plot_data(fig), _streamtube_trace(x, y, z, u, v, w; sizeref = sizeref, colorscale = colorscale))
-	_apply_scene_options!(fig; xrange = xrange, yrange = yrange, zrange = zrange, width = width, height = height,
-		perspective = perspective, grid = grid, showaxis = showaxis, fontsize = fontsize, apply_template = false)
+	_apply_scene_mutator_options!(
+		fig;
+		xrange = xrange,
+		yrange = yrange,
+		zrange = zrange,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		zlabel = zlabel,
+		aspectmode = aspectmode,
+		title = title,
+		width = width,
+		height = height,
+		perspective = perspective,
+		grid = grid,
+		showaxis = showaxis,
+		fontsize = fontsize,
+	)
 	_refresh!(fig)
 	return nothing
 end

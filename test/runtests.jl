@@ -5070,6 +5070,7 @@ end
 
     include("nested_series.jl")
     include("three_d_styling.jl")
+    include("extended_mutator_parity.jl")
     include("export_transactions.jl")
     include("mutator_parity.jl")
     include("renderer_transactions.jl")
