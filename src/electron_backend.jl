@@ -7293,12 +7293,11 @@ function PlotlyBase.update_mapboxes!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
 	) do current
-		PlotlyBase.update_mapboxes!(
+		_update_mapboxes_preserving_aliases!(
 			current.layout,
 			with;
 			kwargs...,
 		)
-		_require_valid_mapbox_layouts(current.layout)
 	end
 end
 
@@ -7310,6 +7309,65 @@ function _shallow_clone_modern_map_container(value)
 		return copy(value)
 	end
 	return value
+end
+
+function _memoize_modern_map_clone!(
+	memo::IdDict{Any,Any},
+	original,
+	staged,
+)
+	staged === original && return nothing
+	ismutable(original) || return nothing
+	memo[original] = staged
+	if original isa _BuiltinPlotlyAttribute &&
+		staged isa _BuiltinPlotlyAttribute &&
+		original.fields !== staged.fields
+		memo[original.fields] = staged.fields
+	end
+	return nothing
+end
+
+function _modern_map_builtin_storage(value)
+	if value isa _BuiltinPlotlyAttribute &&
+		(value.fields isa Dict || value.fields isa IdDict)
+		return value.fields
+	elseif value isa Dict || value isa IdDict
+		return value
+	end
+	return nothing
+end
+
+function _stage_modern_map_nested_containers!(
+	original,
+	staged,
+	memo::IdDict{Any,Any},
+	staged_nested::IdDict{Any,Any},
+)
+	original_storage = _modern_map_builtin_storage(original)
+	staged_storage = _modern_map_builtin_storage(staged)
+	(
+		original_storage === nothing ||
+		staged_storage === nothing
+	) && return nothing
+
+	for (stored_key, original_nested) in original_storage
+		Symbol(stored_key) in (:center, :bounds) || continue
+		staged_value = get(staged_nested, original_nested, nothing)
+		if staged_value === nothing
+			staged_value =
+				_shallow_clone_modern_map_container(original_nested)
+			if staged_value !== original_nested
+				staged_nested[original_nested] = staged_value
+				_memoize_modern_map_clone!(
+					memo,
+					original_nested,
+					staged_value,
+				)
+			end
+		end
+		staged_storage[stored_key] = staged_value
+	end
+	return nothing
 end
 
 function _modern_map_update_keys(
@@ -7369,6 +7427,7 @@ function _stage_modern_map_layout_update(
 		layout.fields => staged_fields,
 	)
 	staged_roots = IdDict{Any,Any}()
+	staged_nested = IdDict{Any,Any}()
 	targets = _modern_map_update_keys(layout, target_key)
 	for key in targets
 		haskey(layout.fields, key) || continue
@@ -7386,13 +7445,14 @@ function _stage_modern_map_layout_update(
 				(staged_roots[original] = staged)
 		end
 		staged_fields[key] = staged
-		if staged !== original && ismutable(original)
-			memo[original] = staged
-			if original isa _BuiltinPlotlyAttribute &&
-				staged isa _BuiltinPlotlyAttribute &&
-				original.fields !== staged.fields
-				memo[original.fields] = staged.fields
-			end
+		if staged !== original
+			_memoize_modern_map_clone!(memo, original, staged)
+			_stage_modern_map_nested_containers!(
+				original,
+				staged,
+				memo,
+				staged_nested,
+			)
 		end
 	end
 
@@ -7412,7 +7472,7 @@ function _stage_modern_map_layout_update(
 		)
 	end
 	_require_valid_map_layouts(staged_layout)
-	return staged_layout, memo, staged_roots
+	return staged_layout, memo, staged_roots, staged_nested
 end
 
 function _commit_modern_map_layout!(
@@ -7526,8 +7586,12 @@ function _modern_map_roots_have_external_alias(
 	p::Plot,
 	target_key::Union{Nothing,Symbol},
 	staged_roots::IdDict{Any,Any},
+	staged_nested::IdDict{Any,Any},
 )
-	isempty(staged_roots) && return false
+	(
+		isempty(staged_roots) &&
+		isempty(staged_nested)
+	) && return false
 	target_keys = _modern_map_update_keys(
 		p.layout,
 		target_key,
@@ -7564,6 +7628,62 @@ function _modern_map_roots_have_external_alias(
 			identities,
 			path,
 		) && return true
+	end
+
+	nested_identities = IdDict{Any,Nothing}()
+	for nested in keys(staged_nested)
+		nested_identities[nested] = nothing
+		if nested isa _BuiltinPlotlyAttribute
+			nested_identities[nested.fields] = nothing
+		end
+	end
+	if !isempty(nested_identities)
+		for key in target_keys
+			root = get(p.layout.fields, key, nothing)
+			storage = _modern_map_builtin_storage(root)
+			storage === nothing && continue
+			for (stored_key, value) in storage
+				_modern_map_graph_contains_identity(
+					stored_key,
+					nested_identities,
+					path,
+				) && return true
+				if Symbol(stored_key) in (:center, :bounds) &&
+					haskey(nested_identities, value)
+					_modern_map_root_contents_have_alias(
+						value,
+						nested_identities,
+						path,
+					) && return true
+					continue
+				end
+				_modern_map_graph_contains_identity(
+					value,
+					nested_identities,
+					path,
+				) && return true
+			end
+		end
+		for (key, value) in p.layout.fields
+			key in target_keys && continue
+			_modern_map_graph_contains_identity(
+				value,
+				nested_identities,
+				path,
+			) && return true
+		end
+		for root in (
+			p.data,
+			p.frames,
+			p.config,
+			p.layout.subplots,
+		)
+			_modern_map_graph_contains_identity(
+				root,
+				nested_identities,
+				path,
+			) && return true
+		end
 	end
 	return false
 end
@@ -7609,7 +7729,7 @@ function _prepare_modern_map_layout_transaction(
 	protect_domain::Bool = false,
 	commit_callback::Function = _noop_plot_commit,
 )
-	staged_layout, memo, staged_roots =
+	staged_layout, memo, staged_roots, staged_nested =
 		_stage_modern_map_layout_update(
 		p.layout,
 		with,
@@ -7644,6 +7764,7 @@ function _prepare_modern_map_layout_transaction(
 		p,
 		target_key,
 		staged_roots,
+		staged_nested,
 	)
 		mutation = current ->
 			_apply_modern_map_update_for_transaction!(
@@ -8236,8 +8357,11 @@ function PlotlyBase.update_mapboxes!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
 	) do current
-		PlotlyBase.update_mapboxes!(current.layout, with; kwargs...)
-		_require_valid_mapbox_layouts(current.layout)
+		_update_mapboxes_preserving_aliases!(
+			current.layout,
+			with;
+			kwargs...,
+		)
 	end
 end
 

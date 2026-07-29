@@ -97,6 +97,28 @@ function _require_valid_map_update(
 	return nothing
 end
 
+function _require_valid_finalized_map_layouts(
+	mutations,
+	layout::Layout,
+	targets,
+)
+	for key in targets
+		projected = _finalized_layout_attr(
+			mutations,
+			_finalized_layout_value(
+				mutations,
+				layout,
+				key,
+			),
+			(:center, :bounds),
+		)
+		probe = Layout()
+		probe.fields[:map] = projected
+		_require_valid_map_layouts(probe)
+	end
+	return nothing
+end
+
 function _update_all_maps!(
 	layout::Layout,
 	update::PlotlyBase.PlotlyAttribute,
@@ -106,8 +128,10 @@ function _update_all_maps!(
 		if _is_modern_map_layout_key(key)
 	]
 	:map in targets || pushfirst!(targets, :map)
+	context = _new_layout_merge_context()
 	for key in targets
-		_merge_layout_attr!(
+		_prepare_layout_attr_merge!(
+			context,
 			layout,
 			key,
 			update;
@@ -115,6 +139,13 @@ function _update_all_maps!(
 			mutate_builtin_target = true,
 		)
 	end
+	mutations = _finalize_layout_merge_context(context)
+	_require_valid_finalized_map_layouts(
+		mutations,
+		layout,
+		targets,
+	)
+	_commit_layout_merge_context!(context, mutations)
 	return layout
 end
 

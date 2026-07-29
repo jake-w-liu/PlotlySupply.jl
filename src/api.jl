@@ -1563,7 +1563,191 @@ function _merge_ternary_layout_attr!(
 	return nothing
 end
 
-function _merge_layout_attr!(
+function _builtin_layout_mapping_fields(existing)
+	fields = if existing isa PlotlyBase.PlotlyAttribute
+		existing.fields
+	elseif existing isa Dict || existing isa IdDict
+		existing
+	else
+		nothing
+	end
+	return fields isa Dict || fields isa IdDict ?
+		fields :
+		nothing
+end
+
+function _layout_mapping_storage(existing)
+	if existing isa PlotlyBase.PlotlyAttribute
+		return existing.fields
+	elseif existing isa AbstractDict
+		return existing
+	end
+	return nothing
+end
+
+function _require_unambiguous_layout_mapping(
+	existing,
+	path::String,
+)
+	fields = _layout_mapping_storage(existing)
+	fields === nothing && return nothing
+
+	seen = Set{Symbol}()
+	for stored_key in keys(fields)
+		(
+			stored_key isa Symbol ||
+			stored_key isa String
+		) || throw(ArgumentError(
+			"$path uses key $(repr(stored_key)) of type " *
+			"$(typeof(stored_key)); atomic layout merges support only " *
+			"concrete Symbol or String keys.",
+		))
+		canonical_key = Symbol(stored_key)
+		canonical_key in seen && throw(ArgumentError(
+			"$path contains both Symbol/String spellings of " *
+			"$(repr(canonical_key)); merging them would silently discard " *
+			"one value.",
+		))
+		push!(seen, canonical_key)
+	end
+	return nothing
+end
+
+function _require_safe_builtin_layout_mapping(
+	fields,
+	path::String,
+)
+	_require_unambiguous_layout_mapping(fields, path)
+	key_type = keytype(fields)
+	(
+		Symbol <: key_type ||
+		String <: key_type
+	) || throw(ArgumentError(
+		"$path uses key type $key_type, which cannot be committed " *
+		"atomically with concrete Symbol or String keys.",
+	))
+	return nothing
+end
+
+function _new_layout_merge_context()
+	return (
+		contents = IdDict{Any, Dict{Symbol, Any}}(),
+		paths = IdDict{Any, String}(),
+	)
+end
+
+function _prepared_builtin_layout_contents!(
+	context,
+	existing,
+	path::String,
+)
+	fields = _builtin_layout_mapping_fields(existing)
+	fields === nothing && return nothing
+	if !haskey(context.contents, fields)
+		_require_safe_builtin_layout_mapping(fields, path)
+		context.contents[fields] = _symbol_dict(existing)
+		context.paths[fields] = path
+	end
+	return context.contents[fields]
+end
+
+function _try_prepare_builtin_layout_mapping(
+	fields,
+	contents::Dict{Symbol, Any},
+)
+	candidate = try
+		existing_keys = Dict{Symbol, Any}()
+		has_symbol_key = false
+		has_string_key = false
+		for stored_key in keys(fields)
+			symbol_key = Symbol(stored_key)
+			existing_keys[symbol_key] = stored_key
+			has_symbol_key |= stored_key isa Symbol
+			has_string_key |= stored_key isa AbstractString
+		end
+		prefer_string_key = has_string_key && !has_symbol_key
+
+		prepared = empty(fields)
+		for (candidate_key, candidate_value) in contents
+			stored_key = if haskey(existing_keys, candidate_key)
+				# Retain existing key objects, which matters for IdDict and
+				# also avoids changing String-keyed mappings to Symbol keys.
+				existing_keys[candidate_key]
+			elseif prefer_string_key &&
+				String <: keytype(fields)
+				string(candidate_key)
+			elseif Symbol <: keytype(fields)
+				candidate_key
+			elseif String <: keytype(fields)
+				string(candidate_key)
+			else
+				candidate_key
+			end
+			prepared[stored_key] = candidate_value
+		end
+		prepared
+	catch err
+		if err isa MethodError ||
+			err isa TypeError ||
+			err isa InexactError ||
+			err isa ArgumentError ||
+			err isa OverflowError
+			nothing
+		else
+			rethrow()
+		end
+	end
+	return candidate
+end
+
+function _throw_unrepresentable_layout_mapping(
+	path::String,
+	fields,
+)
+	throw(ArgumentError(
+		"$path uses $(typeof(fields)), which cannot represent the " *
+		"merged layout values without replacing the container and " *
+		"breaking object identity. Use an Any-valued mapping such as " *
+		"`Dict{Symbol,Any}` for heterogeneous layout attributes.",
+	))
+end
+
+function _finalize_layout_merge_context(context)
+	mutations = IdDict{Any, Any}()
+	for (fields, contents) in context.contents
+		candidate =
+			_try_prepare_builtin_layout_mapping(fields, contents)
+		candidate === nothing &&
+			_throw_unrepresentable_layout_mapping(
+				context.paths[fields],
+				fields,
+			)
+		_require_safe_builtin_layout_mapping(
+			candidate,
+			context.paths[fields],
+		)
+		mutations[fields] = candidate
+	end
+	return mutations
+end
+
+function _commit_layout_merge_context!(
+	context,
+	mutations = _finalize_layout_merge_context(context),
+)
+	# Every candidate has the same concrete dictionary type as its target and
+	# contains only concrete Symbol/String keys. Candidate construction,
+	# conversion, semantic validation, and ambiguity checks all happen before
+	# this commit loop touches live state.
+	for (fields, candidate) in mutations
+		empty!(fields)
+		merge!(fields, candidate)
+	end
+	return nothing
+end
+
+function _prepare_layout_attr_merge!(
+	context,
 	layout::Layout,
 	key::Symbol,
 	source;
@@ -1571,13 +1755,37 @@ function _merge_layout_attr!(
 	deep_merge_keys::Tuple{Vararg{Symbol}} = (),
 	mutate_builtin_target::Bool = false,
 )
+	_require_unambiguous_layout_mapping(
+		source,
+		"layout.$key update",
+	)
 	source_dict = _symbol_dict(source)
-	isempty(source_dict) && return
+	isempty(source_dict) && return false
 	for k in drop_keys
 		pop!(source_dict, k, nothing)
 	end
+	isempty(source_dict) && return false
 	existing = get(layout.fields, key, nothing)
-	target_dict = _symbol_dict(existing)
+	_require_unambiguous_layout_mapping(
+		existing,
+		"layout.$key",
+	)
+	existing_fields = _builtin_layout_mapping_fields(existing)
+	target_dict = if mutate_builtin_target
+		_prepared_builtin_layout_contents!(
+			context,
+			existing,
+			"layout.$key",
+		)
+	else
+		nothing
+	end
+	if target_dict === nothing
+		target_dict = _symbol_dict(existing)
+	end
+	mutate_nested_target =
+		mutate_builtin_target &&
+		existing_fields !== nothing
 	for nested_key in deep_merge_keys
 		haskey(source_dict, nested_key) || continue
 		source_nested = source_dict[nested_key]
@@ -1586,57 +1794,104 @@ function _merge_layout_attr!(
 			source_nested isa AbstractDict ||
 			source_nested isa NamedTuple
 		) || continue
-		nested = _symbol_dict(get(target_dict, nested_key, nothing))
-		merge!(nested, _symbol_dict(source_nested))
-		source_dict[nested_key] = attr(nested)
-	end
-	merge!(target_dict, source_dict)
-
-	# Full-model transactions memo-clone built-in attribute containers. Keep
-	# that staged root (and its fields dictionary) in place when requested so
-	# commit-time rebasing can descend through it and restore unchanged opaque
-	# children such as a large MapLibre style object. Build the replacement
-	# contents first, then mutate only dictionary types that accept the
-	# canonical Symbol/Any representation without conversion.
-	if mutate_builtin_target
-		fields = if existing isa PlotlyBase.PlotlyAttribute
-			existing.fields
-		elseif existing isa Dict || existing isa IdDict
-			existing
+		_require_unambiguous_layout_mapping(
+			source_nested,
+			"layout.$key.$nested_key update",
+		)
+		existing_nested = get(target_dict, nested_key, nothing)
+		_require_unambiguous_layout_mapping(
+			existing_nested,
+			"layout.$key.$nested_key",
+		)
+		existing_nested_fields =
+			_builtin_layout_mapping_fields(existing_nested)
+		nested = if mutate_nested_target
+			_prepared_builtin_layout_contents!(
+				context,
+				existing_nested,
+				"layout.$key.$nested_key",
+			)
 		else
 			nothing
 		end
-		if fields isa Dict || fields isa IdDict
-			candidate = try
-				prepared = empty(fields)
-				for (candidate_key, candidate_value) in target_dict
-					stored_key =
-						Symbol <: keytype(fields) ||
-						keytype(fields) === Any ?
-						candidate_key :
-						keytype(fields) <: AbstractString ?
-							string(candidate_key) :
-							candidate_key
-					prepared[stored_key] = candidate_value
-				end
-				prepared
-			catch err
-				if err isa MethodError ||
-					err isa TypeError ||
-					err isa InexactError
-					nothing
-				else
-					rethrow()
-				end
-			end
-			if candidate !== nothing
-				empty!(fields)
-				merge!(fields, candidate)
-				return nothing
-			end
+		if nested === nothing
+			nested = _symbol_dict(existing_nested)
 		end
+		merge!(nested, _symbol_dict(source_nested))
+		source_dict[nested_key] =
+			mutate_nested_target &&
+			existing_nested_fields !== nothing ?
+			existing_nested :
+			attr(nested)
 	end
-	layout.fields[key] = attr(target_dict)
+	merge!(target_dict, source_dict)
+
+	if mutate_builtin_target &&
+		existing_fields !== nothing
+		return true
+	end
+	layout_contents = _prepared_builtin_layout_contents!(
+		context,
+		layout.fields,
+		"layout",
+	)
+	layout_contents === nothing && throw(ArgumentError(
+		"layout.fields uses $(typeof(layout.fields)); replacing " *
+		"layout.$key atomically requires Dict or IdDict storage.",
+	))
+	layout_contents[key] = attr(target_dict)
+	return true
+end
+
+function _merge_layout_attr!(
+	layout::Layout,
+	key::Symbol,
+	source;
+	drop_keys::Tuple{Vararg{Symbol}} = (),
+	deep_merge_keys::Tuple{Vararg{Symbol}} = (),
+	mutate_builtin_target::Bool = false,
+)
+	context = _new_layout_merge_context()
+	changed = _prepare_layout_attr_merge!(
+		context,
+		layout,
+		key,
+		source;
+		drop_keys = drop_keys,
+		deep_merge_keys = deep_merge_keys,
+		mutate_builtin_target = mutate_builtin_target,
+	)
+	changed || return nothing
+	mutations = _finalize_layout_merge_context(context)
+	if mutate_builtin_target
+		_require_valid_finalized_layout_merge(
+			mutations,
+			layout,
+			key,
+		)
+	end
+	_commit_layout_merge_context!(context, mutations)
+	return nothing
+end
+
+function _require_valid_finalized_layout_merge(
+	mutations,
+	layout::Layout,
+	key::Symbol,
+)
+	if _is_modern_map_layout_key(key)
+		_require_valid_finalized_map_layouts(
+			mutations,
+			layout,
+			(key,),
+		)
+	elseif startswith(String(key), "mapbox")
+		_require_valid_finalized_mapbox_layouts(
+			mutations,
+			layout,
+			(key,),
+		)
+	end
 	return nothing
 end
 
@@ -1663,6 +1918,7 @@ function _apply_source_layout_to_added_traces!(
 					xkey,
 					get(source.layout.fields, :xaxis, nothing);
 					drop_keys = (:domain, :anchor),
+					deep_merge_keys = (:title,),
 				)
 				push!(processed, xkey)
 			end
@@ -1672,6 +1928,7 @@ function _apply_source_layout_to_added_traces!(
 					ykey,
 					get(source.layout.fields, :yaxis, nothing);
 					drop_keys = (:domain, :anchor),
+					deep_merge_keys = (:title,),
 				)
 				push!(processed, ykey)
 			end
@@ -1716,15 +1973,19 @@ function _apply_source_layout_to_added_traces!(
 					)
 				else
 					nested_keys =
+						source_kind == "polar" ?
+						(:radialaxis, :angularaxis) :
 						source_kind in ("mapbox", "map") ?
-						(:center,) :
-						()
+							(:center,) :
+							()
 					_merge_layout_attr!(
 						target.layout,
 						subplot_key,
 						get(source.layout.fields, source_key, nothing);
 						drop_keys = (:domain,),
 						deep_merge_keys = nested_keys,
+						mutate_builtin_target =
+							source_kind in ("mapbox", "map"),
 					)
 				end
 				push!(processed, subplot_key)
@@ -1932,7 +2193,7 @@ function _subplot_geographic_update_impl!(
 			kind === :geo ?
 			(:projection,) :
 			(:center,),
-		mutate_builtin_target = kind === :map,
+		mutate_builtin_target = kind in (:map, :mapbox),
 	)
 	sf.current_row = r
 	sf.current_col = c
@@ -2018,7 +2279,12 @@ function _subplot_xlabel_impl!(
 )
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	xkey, _ = _subplot_xy_axis_keys(sf, r, c)
-	_merge_layout_attr!(_plot_layout(sf.fig), xkey, attr(title_text = String(label)))
+	_merge_layout_attr!(
+		_plot_layout(sf.fig),
+		xkey,
+		attr(title_text = String(label));
+		deep_merge_keys = (:title,),
+	)
 	sf.current_row = r
 	sf.current_col = c
 	_refresh!(sf.fig)
@@ -2057,7 +2323,12 @@ function _subplot_ylabel_impl!(
 )
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	_, ykey = _subplot_xy_axis_keys(sf, r, c; secondary_y = secondary_y)
-	_merge_layout_attr!(_plot_layout(sf.fig), ykey, attr(title_text = String(label)))
+	_merge_layout_attr!(
+		_plot_layout(sf.fig),
+		ykey,
+		attr(title_text = String(label));
+		deep_merge_keys = (:title,),
+	)
 	sf.current_row = r
 	sf.current_col = c
 	_refresh!(sf.fig)
@@ -9584,6 +9855,114 @@ function _require_valid_mapbox_layouts(layout::Layout)
 	return nothing
 end
 
+function _finalized_layout_value(
+	mutations,
+	layout::Layout,
+	key::Symbol,
+)
+	fields = _builtin_layout_mapping_fields(layout.fields)
+	if fields !== nothing && haskey(mutations, fields)
+		return get(
+			_symbol_dict(mutations[fields]),
+			key,
+			nothing,
+		)
+	end
+	return get(layout.fields, key, nothing)
+end
+
+function _finalized_layout_mapping_dict(mutations, value)
+	fields = _builtin_layout_mapping_fields(value)
+	if fields !== nothing && haskey(mutations, fields)
+		return _symbol_dict(mutations[fields])
+	end
+	return _symbol_dict(value)
+end
+
+function _finalized_layout_attr(
+	mutations,
+	value,
+	deep_keys::Tuple{Vararg{Symbol}},
+)
+	contents =
+		_finalized_layout_mapping_dict(mutations, value)
+	for key in deep_keys
+		haskey(contents, key) || continue
+		nested = contents[key]
+		_is_layout_mapping(nested) || continue
+		contents[key] = attr(
+			_finalized_layout_mapping_dict(
+				mutations,
+				nested,
+			),
+		)
+	end
+	return attr(contents)
+end
+
+function _require_valid_finalized_mapbox_layouts(
+	mutations,
+	layout::Layout,
+	targets,
+)
+	for key in targets
+		mapbox = _finalized_layout_mapping_dict(
+			mutations,
+			_finalized_layout_value(
+				mutations,
+				layout,
+				key,
+			),
+		)
+		center = _finalized_layout_mapping_dict(
+			mutations,
+			get(mapbox, :center, nothing),
+		)
+		_require_valid_mapbox_view(
+			get(mapbox, :zoom, nothing),
+			get(center, :lon, nothing),
+			get(center, :lat, nothing),
+		)
+	end
+	return nothing
+end
+
+function _update_mapboxes_preserving_aliases!(
+	layout::Layout,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	kwargs...,
+)
+	temporary = Layout()
+	PlotlyBase.update_mapboxes!(temporary, with; kwargs...)
+	update = get(temporary.fields, :mapbox, nothing)
+	update === nothing && return layout
+
+	targets = Symbol[
+		key for key in keys(layout.fields)
+		if startswith(String(key), "mapbox")
+	]
+	:mapbox in targets || pushfirst!(targets, :mapbox)
+	context = _new_layout_merge_context()
+	for key in targets
+		_prepare_layout_attr_merge!(
+			context,
+			layout,
+			key,
+			update;
+			deep_merge_keys = (:center,),
+			mutate_builtin_target = true,
+		)
+	end
+	mutations = _finalize_layout_merge_context(context)
+	_require_valid_finalized_mapbox_layouts(
+		mutations,
+		layout,
+		targets,
+	)
+	_commit_layout_merge_context!(context, mutations)
+	return layout
+end
+
 function _mapbox_layout(
 	title::String,
 	style,
@@ -9643,6 +10022,7 @@ function _apply_mapbox_layout_options!(
 		:mapbox,
 		source.fields[:mapbox];
 		deep_merge_keys = (:center,),
+		mutate_builtin_target = true,
 	)
 	return nothing
 end
