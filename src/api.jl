@@ -1741,19 +1741,6 @@ function update_maps!(
 	)
 end
 
-"""
-	xlabel!(sf, label; row=nothing, col=nothing)
-	ylabel!(sf, label; row=nothing, col=nothing, secondary_y=false)
-	xrange!(sf, range; row=nothing, col=nothing)
-	yrange!(sf, range; row=nothing, col=nothing, secondary_y=false)
-
-Set the axis title (`xlabel!`/`ylabel!`) or axis range (`xrange!`/`yrange!`,
-a 2-element `[min, max]`) of one cell of a [`SubplotFigure`](@ref). When `row`
-and `col` are omitted the currently active cell (see [`subplot!`](@ref)) is used;
-otherwise both must be given. `ylabel!`/`yrange!` accept `secondary_y=true` to
-target a cell's secondary y-axis (the cell must have been created with a
-secondary-y spec). Returns the `SubplotFigure` for chaining.
-"""
 function _subplot_xlabel_impl!(
 	sf::SubplotFigure,
 	label::AbstractString;
@@ -1769,6 +1756,13 @@ function _subplot_xlabel_impl!(
 	return sf
 end
 
+"""
+	xlabel!(sf, label; row=nothing, col=nothing)
+
+Set the x-axis title of one [`SubplotFigure`](@ref) cell. When `row` and `col`
+are omitted, update the currently active cell selected by [`subplot!`](@ref);
+otherwise both must be given. Returns `sf` for chaining.
+"""
 function xlabel!(
 	sf::SubplotFigure,
 	label::AbstractString;
@@ -1801,6 +1795,13 @@ function _subplot_ylabel_impl!(
 	return sf
 end
 
+"""
+	ylabel!(sf, label; row=nothing, col=nothing, secondary_y=false)
+
+Set the y-axis title of one [`SubplotFigure`](@ref) cell. When `row` and `col`
+are omitted, update the active cell. Pass `secondary_y=true` to target a
+secondary-y cell created by an appropriate subplot spec. Returns `sf`.
+"""
 function ylabel!(
 	sf::SubplotFigure,
 	label::AbstractString;
@@ -1835,6 +1836,12 @@ function _subplot_xrange_impl!(
 	return sf
 end
 
+"""
+	xrange!(sf, range; row=nothing, col=nothing)
+
+Set the two-element x-axis `range` of one [`SubplotFigure`](@ref) cell. When
+`row` and `col` are omitted, update the active cell. Returns `sf`.
+"""
 function xrange!(
 	sf::SubplotFigure,
 	range::AbstractVector;
@@ -1870,6 +1877,13 @@ function _subplot_yrange_impl!(
 	return sf
 end
 
+"""
+	yrange!(sf, range; row=nothing, col=nothing, secondary_y=false)
+
+Set the two-element y-axis `range` of one [`SubplotFigure`](@ref) cell. When
+`row` and `col` are omitted, update the active cell. Pass `secondary_y=true`
+to target a secondary-y subplot axis. Returns `sf`.
+"""
 function yrange!(
 	sf::SubplotFigure,
 	range::AbstractVector;
