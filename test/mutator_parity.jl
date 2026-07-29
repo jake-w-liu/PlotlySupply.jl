@@ -112,6 +112,34 @@ function _layout_update_value(p::Plot, field::Symbol)
     return field in (:annotations, :shapes, :images) ? only(value) : value
 end
 
+function _stem_color_signature(traces)
+    return map(traces) do trace
+        marker = get(trace.fields, :marker, nothing)
+        line = get(trace.fields, :line, nothing)
+        (
+            marker=marker === nothing ? nothing :
+                   get(marker, :color, nothing),
+            line=line === nothing ? nothing :
+                 get(line, :color, nothing),
+        )
+    end
+end
+
+function _series_style_signature(trace)
+    line = get(trace.fields, :line, attr())
+    marker = get(trace.fields, :marker, attr())
+    return (
+        mode=get(trace.fields, :mode, nothing),
+        dash=get(line, :dash, nothing),
+        color=get(line, :color, nothing),
+        legend=get(trace.fields, :name, nothing),
+        marker_size=get(marker, :size, nothing),
+        marker_symbol=get(marker, :symbol, nothing),
+        linewidth=get(line, :width, nothing),
+        showlegend=get(trace.fields, :showlegend, nothing),
+    )
+end
+
 function _exercise_splice_overload!(
     splice!,
     target_kind::Symbol,
@@ -221,6 +249,265 @@ end
             end
         end
     end
+end
+
+@testset "plot_stem! matches constructor colors" begin
+    cases = (
+        (
+            x=[1, 2, 3],
+            y=[2.0, 4.0, 3.0],
+            color="crimson",
+        ),
+        (
+            x=[1, 2, 3],
+            y=[[2.0, 4.0, 3.0], [1.0, 3.0, 5.0]],
+            color=["crimson", "navy"],
+        ),
+        (
+            x=[[1, 2, 3], [4, 5, 6]],
+            y=[[2.0, 4.0, 3.0], [1.0, 3.0, 5.0]],
+            color=["crimson", "navy"],
+        ),
+    )
+
+    for case in cases
+        expected = plot_stem(
+            case.x,
+            case.y;
+            color=case.color,
+        )
+        target = Plot(scatter(x=[0], y=[0]), Layout())
+        initial_count = length(target.data)
+
+        @test plot_stem!(
+            target,
+            case.x,
+            case.y;
+            color=case.color,
+        ) === nothing
+        appended = target.data[(initial_count + 1):end]
+        @test _stem_color_signature(appended) ==
+              _stem_color_signature(expected.data)
+    end
+
+    expected_first_color = plot_stem(
+        [1, 2],
+        [3.0, 4.0];
+        color=["purple", "ignored"],
+        legend=["first", "ignored"],
+        showlegend=[false, true],
+    )
+    target = Plot(scatter(x=[0], y=[0]), Layout())
+    initial_count = length(target.data)
+    plot_stem!(
+        target,
+        [1, 2],
+        [3.0, 4.0];
+        color=["purple", "ignored"],
+        legend=["first", "ignored"],
+        showlegend=[false, true],
+    )
+    appended = target.data[(initial_count + 1):end]
+    @test _stem_color_signature(appended) ==
+          _stem_color_signature(expected_first_color.data)
+    @test appended[1].fields[:name] ==
+          expected_first_color.data[1].fields[:name]
+    @test appended[1].fields[:name] == "first"
+    @test appended[1].fields[:showlegend] ===
+          expected_first_color.data[1].fields[:showlegend]
+    @test appended[1].fields[:showlegend] === false
+end
+
+@testset "per-series styling ignores surplus vector entries" begin
+    coordinates = UnitRange{Int}[1:3, 4:6]
+    style = (
+        mode=["markers", "lines", "lines+markers"],
+        dash=["dot", "dash", "dashdot"],
+        color=["crimson", "navy", "green"],
+        legend=["first", "second", "surplus"],
+        marker_size=[5, 7, 9],
+        marker_symbol=["circle", "diamond", "square"],
+        linewidth=[1, 2, 3],
+        showlegend=[true, false, true],
+    )
+
+    constructor_cases = (
+        (
+            make=() -> plot_scatter(
+                coordinates,
+                coordinates;
+                style...,
+            ),
+            append=(figure) -> plot_scatter!(
+                figure,
+                coordinates,
+                coordinates;
+                style...,
+            ),
+        ),
+        (
+            make=() -> plot_scatterpolar(
+                coordinates,
+                coordinates;
+                style...,
+            ),
+            append=(figure) -> plot_scatterpolar!(
+                figure,
+                coordinates,
+                coordinates;
+                style...,
+            ),
+        ),
+    )
+
+    for case in constructor_cases
+        expected = case.make()
+        @test length(expected.data) == 2
+        @test getfield.(
+            _series_style_signature.(expected.data),
+            :legend,
+        ) == ["first", "second"]
+
+        target = Plot(scatter(x=[0], y=[0]), Layout())
+        initial_count = length(target.data)
+        @test case.append(target) === nothing
+        appended = target.data[(initial_count + 1):end]
+        @test _series_style_signature.(appended) ==
+              _series_style_signature.(expected.data)
+    end
+
+    expected_stem = plot_stem(
+        coordinates,
+        coordinates;
+        color=["crimson", "navy", "surplus"],
+        legend=["first", "second", "surplus"],
+        showlegend=[true, false, true],
+    )
+    target = Plot(scatter(x=[0], y=[0]), Layout())
+    initial_count = length(target.data)
+    @test plot_stem!(
+        target,
+        coordinates,
+        coordinates;
+        color=["crimson", "navy", "surplus"],
+        legend=["first", "second", "surplus"],
+        showlegend=[true, false, true],
+    ) === nothing
+    appended_stem = target.data[(initial_count + 1):end]
+    @test _stem_color_signature(appended_stem) ==
+          _stem_color_signature(expected_stem.data)
+    @test getfield.(
+        _series_style_signature.(appended_stem[1:2]),
+        :legend,
+    ) == ["first", "second"]
+end
+
+@testset "pie-like traces receive default legend styling" begin
+    constructors = (
+        () -> plot_pie(
+            [3, 2, 1];
+            labels=["alpha", "beta", "gamma"],
+        ),
+        () -> plot_pie([3, 2, 1]),
+        () -> plot_funnelarea(
+            [3, 2, 1];
+            labels=["alpha", "beta", "gamma"],
+        ),
+        () -> plot_funnelarea([3, 2, 1]),
+    )
+
+    for constructor in constructors
+        figure = constructor()
+        trace = only(figure.data)
+        @test PlotlySupply._trace_will_showlegend(trace)
+        @test figure.layout.fields[:showlegend] === true
+        legend = figure.layout.fields[:legend]
+        for key in (
+            :x,
+            :y,
+            :xanchor,
+            :yanchor,
+            :bgcolor,
+            :bordercolor,
+            :borderwidth,
+        )
+            @test haskey(legend, key)
+        end
+    end
+
+    appenders = (
+        figure -> plot_pie!(
+            figure,
+            [3, 2, 1];
+            labels=["alpha", "beta", "gamma"],
+        ),
+        figure -> plot_funnelarea!(
+            figure,
+            [3, 2, 1];
+            labels=["alpha", "beta", "gamma"],
+        ),
+    )
+    for append! in appenders
+        figure = Plot(scatter(y=[1, 2, 3]), Layout())
+        @test append!(figure) === nothing
+        @test figure.layout.fields[:showlegend] === true
+        @test haskey(figure.layout.fields, :legend)
+    end
+
+    symbolic = GenericTrace(Dict{Symbol,Any}(
+        :type => :pie,
+        :values => [3, 2, 1],
+    ))
+    @test PlotlySupply._trace_will_showlegend(symbolic)
+
+    subplot_appenders = (
+        figure -> plot_pie!(
+            figure,
+            [3, 2, 1];
+            labels=["alpha", "beta", "gamma"],
+            row=1,
+            col=1,
+        ),
+        figure -> plot_funnelarea!(
+            figure,
+            [3, 2, 1];
+            labels=["alpha", "beta", "gamma"],
+            row=1,
+            col=1,
+        ),
+    )
+    for append! in subplot_appenders
+        figure = PlotlySupply.subplots(
+            1,
+            1;
+            sync=false,
+            per_subplot_legends=true,
+            specs=fill(
+                PlotlySupply.Spec(kind="domain"),
+                1,
+                1,
+            ),
+        )
+        @test append!(figure) === figure
+        trace = only(figure.data)
+        @test trace.fields[:showlegend] === true
+        @test trace.fields[:legend] == "legend"
+        @test figure.layout.fields[:showlegend] === true
+        @test haskey(figure.layout.fields, :legend)
+    end
+
+    hidden = Plot(
+        pie(
+            values=[3, 2, 1],
+            labels=["alpha", "beta", "gamma"],
+            showlegend=false,
+        ),
+        Layout(),
+    )
+    PlotlySupply._apply_default_legend!(hidden)
+    @test !PlotlySupply._trace_will_showlegend(only(hidden.data))
+    @test !haskey(hidden.layout.fields, :legend)
+    @test !haskey(hidden.layout.fields, :showlegend)
 end
 
 @testset "mapbox updaters reject invalid view values atomically" begin

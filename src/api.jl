@@ -210,19 +210,6 @@ function _transactional_high_level_plot_mutation!(
 	return result[] === staged_target[] ? fig : result[]
 end
 
-const _VALID_TEMPLATES = (
-	:plotly_white,
-	:plotly_dark,
-	:plotly,
-	:ggplot2,
-	:seaborn,
-	:simple_white,
-	:presentation,
-	:xgridoff,
-	:ygridoff,
-	:gridon,
-)
-
 const _DEFAULT_TEMPLATE = Ref{Symbol}(:plotly_white)
 const _VALID_LEGEND_POSITIONS = (
 	:topright,
@@ -245,13 +232,32 @@ const _DEFAULT_LEGEND_BGCOLOR = Ref("rgba(255,255,255,0.72)")
 const _DEFAULT_LEGEND_BORDERCOLOR = Ref("rgba(0,0,0,0.15)")
 const _DEFAULT_LEGEND_BORDERWIDTH = Ref{Float64}(1.0)
 
-_normalize_template(template) = begin
+function _normalize_template(template)
+	(template isa Symbol || template isa AbstractString) ||
+		throw(ArgumentError(
+			"template names must be strings or symbols; got $(typeof(template))",
+		))
 	template_sym = Symbol(template)
-	if template_sym in _VALID_TEMPLATES
+	if template_sym in keys(PlotlyBase.templates)
 		return template_sym
 	end
-	@warn "Unrecognized template $(repr(template)); falling back to :plotly_white." valid = _VALID_TEMPLATES
+	parts = strip.(split(String(template), '+'))
+	if length(parts) > 1 &&
+			all(!isempty(part) && Symbol(part) in keys(PlotlyBase.templates)
+				for part in parts)
+		return Symbol(join(parts, '+'))
+	end
+	valid_templates = sort!(collect(keys(PlotlyBase.templates)))
+	@warn "Unrecognized template $(repr(template)); falling back to :plotly_white." valid = valid_templates
 	return :plotly_white
+end
+
+_resolve_template(template::PlotlyBase.Template) = template
+function _resolve_template(template)
+	name = _normalize_template(template)
+	name in keys(PlotlyBase.templates) &&
+		return PlotlyBase.templates[name]
+	return PlotlyBase.templates[String(name)]
 end
 
 function _normalize_legend_position(position)
@@ -301,8 +307,11 @@ get_default_legend_position() = _DEFAULT_LEGEND_POSITION[]
 """
 	set_default_template!(template = "plotly_white")
 
-Set the package-wide default Plotly template used by high-level constructors.
-Invalid values fall back to `:plotly_white`.
+Set the package-wide default Plotly template name used by high-level
+constructors. The name may refer to a built-in template or a custom
+`PlotlyBase.Template` registered in `PlotlyBase.templates`; registered names
+may be combined with `+` using PlotlyBase's compound-template syntax. Invalid
+names fall back to `:plotly_white`.
 """
 function set_default_template!(template = "plotly_white")
 	_DEFAULT_TEMPLATE[] = _normalize_template(template)
@@ -325,7 +334,7 @@ function set_default_legend_position!(position = :topright)
 end
 
 function _apply_default_template!(fig)
-	relayout!(fig, template = _DEFAULT_TEMPLATE[])
+	relayout!(fig, template = _resolve_template(_DEFAULT_TEMPLATE[]))
 	_apply_default_legend!(fig)
 	return nothing
 end
@@ -396,6 +405,51 @@ function _apply_scene_ranges!(fig; xrange, yrange, zrange)
 	if !all(zrange .== [0, 0])
 		relayout!(fig, scene = attr(zaxis = attr(range = zrange)))
 	end
+	return nothing
+end
+
+# Mutating 3D constructors must not replace scene styling merely because a
+# caller appended a trace. Only explicitly requested labels/aspect settings
+# and the opt-out grid/visibility flags are merged into the existing scene.
+function _apply_scene_style_options!(
+	fig;
+	xlabel::String = "",
+	ylabel::String = "",
+	zlabel::String = "",
+	aspectmode::Union{Nothing, String} = nothing,
+	perspective::Union{Nothing, Bool} = nothing,
+	grid::Union{Nothing, Bool} = nothing,
+	showaxis::Union{Nothing, Bool} = nothing,
+)
+	scene_options = Dict{Symbol, Any}()
+	aspectmode === nothing || (scene_options[:aspectmode] = aspectmode)
+	perspective === nothing ||
+		(scene_options[:camera] = attr(
+			projection = attr(
+				type = perspective ? "perspective" : "orthographic",
+			),
+		))
+
+	for (key, label) in (
+		(:xaxis, xlabel),
+		(:yaxis, ylabel),
+		(:zaxis, zlabel),
+	)
+		axis_options = Dict{Symbol, Any}()
+		isempty(label) ||
+			(axis_options[:title] = attr(text = label))
+		grid === nothing || (axis_options[:showgrid] = grid)
+		showaxis === nothing || (axis_options[:visible] = showaxis)
+		isempty(axis_options) ||
+			(scene_options[key] = attr(; axis_options...))
+	end
+
+	isempty(scene_options) ||
+		_merge_scene_layout_attr!(
+			_plot_layout(fig),
+			:scene,
+			attr(; scene_options...),
+		)
 	return nothing
 end
 
@@ -680,8 +734,17 @@ function _trace_has_legend_label(trace::GenericTrace)
 end
 
 _trace_showlegend(trace::GenericTrace) = get(trace.fields, :showlegend, false) == true
-_trace_will_showlegend(trace::GenericTrace) =
-	haskey(trace.fields, :showlegend) ? _trace_showlegend(trace) : _trace_has_legend_label(trace)
+function _trace_has_slice_legend(trace::GenericTrace)
+	trace_type = get(trace.fields, :type, nothing)
+	return trace_type in ("pie", :pie, "funnelarea", :funnelarea)
+end
+
+function _trace_will_showlegend(trace::GenericTrace)
+	haskey(trace.fields, :showlegend) &&
+		return _trace_showlegend(trace)
+	return _trace_has_legend_label(trace) ||
+		_trace_has_slice_legend(trace)
+end
 
 function _legend_anchor(
 	xdom::Tuple{Float64, Float64},
@@ -792,7 +855,8 @@ function _apply_subplot_legends!(
 
 		trace.fields[:legend] = _legend_id(legend_ids[key])
 		if !haskey(trace.fields, :showlegend)
-			trace.fields[:showlegend] = _trace_has_legend_label(trace)
+			trace.fields[:showlegend] =
+				_trace_will_showlegend(trace)
 		end
 	end
 
@@ -1398,6 +1462,73 @@ function PlotlyBase.addtraces!(
 	)
 end
 
+_is_layout_mapping(value) =
+	value isa PlotlyBase.PlotlyAttribute ||
+	value isa AbstractDict ||
+	value isa NamedTuple
+
+function _merge_known_nested_layout_field!(
+	target::Dict{Symbol, Any},
+	source::Dict{Symbol, Any},
+	key::Symbol,
+)
+	haskey(source, key) || return nothing
+	source_value = source[key]
+	_is_layout_mapping(source_value) || return nothing
+	merged = _symbol_dict(get(target, key, nothing))
+	merge!(merged, _symbol_dict(source_value))
+	source[key] = attr(merged)
+	return nothing
+end
+
+# Scene updates produced by PlotlySupply are deliberately partial. Merge only
+# Plotly's known nested scene containers so an axis-label/range or camera
+# projection update cannot replace sibling styling. This bounded schema merge
+# avoids recursively traversing opaque or cyclic user-supplied layout values.
+function _merge_scene_layout_attr!(
+	layout::Layout,
+	key::Symbol,
+	source,
+)
+	source_scene = _symbol_dict(source)
+	isempty(source_scene) && return nothing
+	pop!(source_scene, :domain, nothing)
+	target_scene = _symbol_dict(get(layout.fields, key, nothing))
+
+	for axis_key in (:xaxis, :yaxis, :zaxis)
+		haskey(source_scene, axis_key) || continue
+		source_axis_value = source_scene[axis_key]
+		_is_layout_mapping(source_axis_value) || continue
+		target_axis = _symbol_dict(get(target_scene, axis_key, nothing))
+		source_axis = _symbol_dict(source_axis_value)
+		_merge_known_nested_layout_field!(
+			target_axis,
+			source_axis,
+			:title,
+		)
+		merge!(target_axis, source_axis)
+		source_scene[axis_key] = attr(target_axis)
+	end
+
+	if haskey(source_scene, :camera) &&
+		_is_layout_mapping(source_scene[:camera])
+		target_camera =
+			_symbol_dict(get(target_scene, :camera, nothing))
+		source_camera = _symbol_dict(source_scene[:camera])
+		_merge_known_nested_layout_field!(
+			target_camera,
+			source_camera,
+			:projection,
+		)
+		merge!(target_camera, source_camera)
+		source_scene[:camera] = attr(target_camera)
+	end
+
+	merge!(target_scene, source_scene)
+	layout.fields[key] = attr(target_scene)
+	return nothing
+end
+
 function _merge_layout_attr!(
 	layout::Layout,
 	key::Symbol,
@@ -1515,11 +1646,10 @@ function _apply_source_layout_to_added_traces!(
 		if haskey(fields, :scene)
 			scene_key = Symbol(String(get(fields, :scene, "scene")))
 			if !(scene_key in processed)
-				_merge_layout_attr!(
+				_merge_scene_layout_attr!(
 					target.layout,
 					scene_key,
-					get(source.layout.fields, :scene, nothing);
-					drop_keys = (:domain,),
+					get(source.layout.fields, :scene, nothing),
 				)
 				push!(processed, scene_key)
 			end
@@ -2571,17 +2701,33 @@ end
 
 #region 1D Plot
 
-function _string_kwarg_vector(value::Union{String, Vector{String}}, n::Int)
-	out = fill("", n)
-	if value isa Vector
-		for i in eachindex(value)
-			i > n && break
-			out[i] = value[i]
+# Normalize a scalar-or-vector per-series keyword to exactly `n` values.
+# Scalars broadcast, short vectors retain `default` for missing series, and
+# overlong vectors are intentionally truncated instead of indexing past the
+# destination. The explicit element type keeps optional values such as
+# `Union{Nothing,Bool}` type-stable.
+function _series_kwarg_vector(
+	value,
+	n::Int,
+	default,
+	::Type{T},
+) where {T}
+	n >= 0 || throw(ArgumentError("series count must be nonnegative, got $n"))
+	out = Vector{T}(undef, n)
+	fill!(out, default)
+	if value isa AbstractVector
+		for (destination, source) in
+			zip(eachindex(out), eachindex(value))
+			out[destination] = value[source]
 		end
 	else
 		fill!(out, value)
 	end
 	return out
+end
+
+function _string_kwarg_vector(value::Union{String, Vector{String}}, n::Int)
+	return _series_kwarg_vector(value, n, "", String)
 end
 
 function _first_or_empty(value::Union{String, Vector{String}})
@@ -2636,6 +2782,111 @@ function _nested_coordinate_mode(primary, secondary, primary_name::Symbol, secon
 		))
 	end
 	return primary_nested, secondary_nested
+end
+
+function _scatter3d_trace(
+	x,
+	y,
+	z;
+	mode::String,
+	color::String,
+	legend::String,
+	marker_size::Int,
+	marker_symbol::String,
+	linewidth::Real,
+	showlegend::Union{Nothing, Bool},
+)
+	trace_kw = Dict{Symbol, Any}(
+		:x => x,
+		:y => y,
+		:z => z,
+		:mode => mode,
+		:line => attr(color = color),
+		:name => legend,
+	)
+	marker_options = Dict{Symbol, Any}()
+	marker_size > 0 && (marker_options[:size] = marker_size)
+	isempty(marker_symbol) ||
+		(marker_options[:symbol] = marker_symbol)
+	isempty(marker_options) ||
+		(trace_kw[:marker] = attr(; marker_options...))
+	linewidth > 0 &&
+		(trace_kw[:line][:width] = linewidth)
+	showlegend === nothing ||
+		(trace_kw[:showlegend] = showlegend)
+	return scatter3d(; trace_kw...)
+end
+
+function _scatter3d_traces(
+	x,
+	y,
+	z;
+	mode::Union{String, Vector{String}} = "lines",
+	color::Union{String, Vector{String}} = "",
+	legend::Union{String, Vector{String}} = "",
+	marker_size::Union{Int, Vector{Int}} = 0,
+	marker_symbol::Union{String, Vector{String}} = "",
+	linewidth::Union{Real, Vector{<:Real}} = 0,
+	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+)
+	z_nested, x_nested =
+		_nested_coordinate_mode(z, x, :z, :x)
+	_, y_nested =
+		_nested_coordinate_mode(z, y, :z, :y)
+
+	if !z_nested
+		mode_value = _first_or_empty(mode)
+		isempty(mode_value) && (mode_value = "lines")
+		return _scatter3d_trace(
+			x,
+			y,
+			z;
+			mode = mode_value,
+			color = _first_or_empty(color),
+			legend = _first_or_empty(legend),
+			marker_size = _scalar_or_first(marker_size, 0),
+			marker_symbol = _first_or_empty(marker_symbol),
+			linewidth = _scalar_or_first(linewidth, 0),
+			showlegend = _scalar_or_first(showlegend, nothing),
+		)
+	end
+
+	series_count = length(z)
+	mode_values =
+		_series_kwarg_vector(mode, series_count, "lines", String)
+	color_values =
+		_series_kwarg_vector(color, series_count, "", String)
+	legend_values =
+		_series_kwarg_vector(legend, series_count, "", String)
+	marker_size_values =
+		_series_kwarg_vector(marker_size, series_count, 0, Int)
+	marker_symbol_values =
+		_series_kwarg_vector(marker_symbol, series_count, "", String)
+	linewidth_values =
+		_series_kwarg_vector(linewidth, series_count, 0.0, Float64)
+	showlegend_values = _series_kwarg_vector(
+		showlegend,
+		series_count,
+		nothing,
+		Union{Nothing, Bool},
+	)
+
+	traces = Vector{GenericTrace}(undef, series_count)
+	for index in eachindex(z)
+		traces[index] = _scatter3d_trace(
+			x_nested ? x[index] : x,
+			y_nested ? y[index] : y,
+			z[index];
+			mode = mode_values[index],
+			color = color_values[index],
+			legend = legend_values[index],
+			marker_size = marker_size_values[index],
+			marker_symbol = marker_symbol_values[index],
+			linewidth = linewidth_values[index],
+			showlegend = showlegend_values[index],
+		)
+	end
+	return traces
 end
 
 # Compute a finite scalar `tick0` from possibly nested / non-finite data.
@@ -2944,72 +3195,55 @@ function plot_scatter(
 	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
 	if y_nested
 		trace = Vector{GenericTrace}(undef, length(y))
-		modeV = fill("lines", length(y))
-		dashV = fill("", length(y))
-		colorV = fill("", length(y))
-		legendV = fill("", length(y))
-
-		if !(mode isa Vector)
-			fill!(modeV, mode)
-		else
-			for n in eachindex(mode)
-				modeV[n] = mode[n]
-			end
-		end
-		if !(dash isa Vector)
-			fill!(dashV, dash)
-		else
-			for n in eachindex(dash)
-				dashV[n] = dash[n]
-			end
-		end
-		if !(color isa Vector)
-			fill!(colorV, color)
-		else
-			for n in eachindex(color)
-				colorV[n] = color[n]
-			end
-		end
-		if !(legend isa Vector)
-			fill!(legendV, legend)
-		else
-			for n in eachindex(legend)
-				legendV[n] = legend[n]
-			end
-		end
-
-		marker_sizeV = fill(0, length(y))
-		marker_symbolV = fill("", length(y))
-		linewidthV = fill(0.0, length(y))
-		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
-		if !(marker_size isa Vector)
-			fill!(marker_sizeV, marker_size)
-		else
-			for n in eachindex(marker_size)
-				marker_sizeV[n] = marker_size[n]
-			end
-		end
-		if !(marker_symbol isa Vector)
-			fill!(marker_symbolV, marker_symbol)
-		else
-			for n in eachindex(marker_symbol)
-				marker_symbolV[n] = marker_symbol[n]
-			end
-		end
-		if !(linewidth isa Vector)
-			fill!(linewidthV, linewidth)
-		else
-			for n in eachindex(linewidth)
-				linewidthV[n] = linewidth[n]
-			end
-		end
-		if showlegend isa Bool
-			fill!(showlegendV, showlegend)
-		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
-				showlegendV[n] = showlegend[n]
-			end
-		end
+		series_count = length(y)
+		modeV = _series_kwarg_vector(
+			mode,
+			series_count,
+			"lines",
+			String,
+		)
+		dashV = _series_kwarg_vector(
+			dash,
+			series_count,
+			"",
+			String,
+		)
+		colorV = _series_kwarg_vector(
+			color,
+			series_count,
+			"",
+			String,
+		)
+		legendV = _series_kwarg_vector(
+			legend,
+			series_count,
+			"",
+			String,
+		)
+		marker_sizeV = _series_kwarg_vector(
+			marker_size,
+			series_count,
+			0,
+			Int,
+		)
+		marker_symbolV = _series_kwarg_vector(
+			marker_symbol,
+			series_count,
+			"",
+			String,
+		)
+		linewidthV = _series_kwarg_vector(
+			linewidth,
+			series_count,
+			0.0,
+			Float64,
+		)
+		showlegendV = _series_kwarg_vector(
+			showlegend,
+			series_count,
+			nothing,
+			Union{Nothing,Bool},
+		)
 
 		if x_nested
 			for n in eachindex(y)
@@ -3270,32 +3504,25 @@ function plot_stem(
 	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
 	if y_nested
 		trace = Vector{GenericTrace}(undef, length(y))
-		colorV = fill("", length(y))
-		legendV = fill("", length(y))
-
-		if !(color isa Vector)
-			fill!(colorV, color)
-		else
-			for n in eachindex(color)
-				colorV[n] = color[n]
-			end
-		end
-		if !(legend isa Vector)
-			fill!(legendV, legend)
-		else
-			for n in eachindex(legend)
-				legendV[n] = legend[n]
-			end
-		end
-
-		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
-		if showlegend isa Bool
-			fill!(showlegendV, showlegend)
-		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
-				showlegendV[n] = showlegend[n]
-			end
-		end
+		series_count = length(y)
+		colorV = _series_kwarg_vector(
+			color,
+			series_count,
+			"",
+			String,
+		)
+		legendV = _series_kwarg_vector(
+			legend,
+			series_count,
+			"",
+			String,
+		)
+		showlegendV = _series_kwarg_vector(
+			showlegend,
+			series_count,
+			nothing,
+			Union{Nothing,Bool},
+		)
 
 		if x_nested
 			for n in eachindex(y)
@@ -4124,72 +4351,55 @@ function plot_scatterpolar(
 	r_nested, theta_nested = _nested_coordinate_mode(r, theta, :r, :theta)
 	if r_nested
 		trace = Vector{GenericTrace}(undef, length(r))
-		modeV = fill("lines", length(r))
-		dashV = fill("", length(r))
-		colorV = fill("", length(r))
-		legendV = fill("", length(r))
-
-		if !(mode isa Vector)
-			fill!(modeV, mode)
-		else
-			for n in eachindex(mode)
-				modeV[n] = mode[n]
-			end
-		end
-		if !(dash isa Vector)
-			fill!(dashV, dash)
-		else
-			for n in eachindex(dash)
-				dashV[n] = dash[n]
-			end
-		end
-		if !(color isa Vector)
-			fill!(colorV, color)
-		else
-			for n in eachindex(color)
-				colorV[n] = color[n]
-			end
-		end
-		if !(legend isa Vector)
-			fill!(legendV, legend)
-		else
-			for n in eachindex(legend)
-				legendV[n] = legend[n]
-			end
-		end
-
-		marker_sizeV = fill(0, length(r))
-		marker_symbolV = fill("", length(r))
-		linewidthV = fill(0.0, length(r))
-		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(r))
-		if !(marker_size isa Vector)
-			fill!(marker_sizeV, marker_size)
-		else
-			for n in eachindex(marker_size)
-				marker_sizeV[n] = marker_size[n]
-			end
-		end
-		if !(marker_symbol isa Vector)
-			fill!(marker_symbolV, marker_symbol)
-		else
-			for n in eachindex(marker_symbol)
-				marker_symbolV[n] = marker_symbol[n]
-			end
-		end
-		if !(linewidth isa Vector)
-			fill!(linewidthV, linewidth)
-		else
-			for n in eachindex(linewidth)
-				linewidthV[n] = linewidth[n]
-			end
-		end
-		if showlegend isa Bool
-			fill!(showlegendV, showlegend)
-		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
-				showlegendV[n] = showlegend[n]
-			end
-		end
+		series_count = length(r)
+		modeV = _series_kwarg_vector(
+			mode,
+			series_count,
+			"lines",
+			String,
+		)
+		dashV = _series_kwarg_vector(
+			dash,
+			series_count,
+			"",
+			String,
+		)
+		colorV = _series_kwarg_vector(
+			color,
+			series_count,
+			"",
+			String,
+		)
+		legendV = _series_kwarg_vector(
+			legend,
+			series_count,
+			"",
+			String,
+		)
+		marker_sizeV = _series_kwarg_vector(
+			marker_size,
+			series_count,
+			0,
+			Int,
+		)
+		marker_symbolV = _series_kwarg_vector(
+			marker_symbol,
+			series_count,
+			"",
+			String,
+		)
+		linewidthV = _series_kwarg_vector(
+			linewidth,
+			series_count,
+			0.0,
+			Float64,
+		)
+		showlegendV = _series_kwarg_vector(
+			showlegend,
+			series_count,
+			nothing,
+			Union{Nothing,Bool},
+		)
 
 		if theta_nested
 			for n in eachindex(r)
@@ -5267,99 +5477,18 @@ function plot_scatter3d(
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 	show::Bool = false,
 )
-	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x)
-	_, y_nested = _nested_coordinate_mode(z, y, :z, :y)
-	if z_nested
-		modeV = fill("lines", length(z))
-		colorV = fill("", length(z))
-		legendV = fill("", length(z))
-		trace = Vector{GenericTrace}(undef, length(z))
-		if !(mode isa Vector)
-			fill!(modeV, mode)
-		else
-			for n in eachindex(mode)
-				modeV[n] = mode[n]
-			end
-		end
-		if !(color isa Vector)
-			fill!(colorV, color)
-		else
-			for n in eachindex(color)
-				colorV[n] = color[n]
-			end
-		end
-		if !(legend isa Vector)
-			fill!(legendV, legend)
-		else
-			for n in eachindex(legend)
-				legendV[n] = legend[n]
-			end
-		end
-		marker_sizeV = fill(0, length(z))
-		marker_symbolV = fill("", length(z))
-		linewidthV = fill(0.0, length(z))
-		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(z))
-		if !(marker_size isa Vector)
-			fill!(marker_sizeV, marker_size)
-		else
-			for n in eachindex(marker_size)
-				marker_sizeV[n] = marker_size[n]
-			end
-		end
-		if !(marker_symbol isa Vector)
-			fill!(marker_symbolV, marker_symbol)
-		else
-			for n in eachindex(marker_symbol)
-				marker_symbolV[n] = marker_symbol[n]
-			end
-		end
-		if !(linewidth isa Vector)
-			fill!(linewidthV, linewidth)
-		else
-			for n in eachindex(linewidth)
-				linewidthV[n] = linewidth[n]
-			end
-		end
-		if showlegend isa Bool
-			fill!(showlegendV, showlegend)
-		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
-				showlegendV[n] = showlegend[n]
-			end
-		end
-
-		# x/y may be shared 1D coordinates broadcast across all z-series, or
-		# per-series Vector-of-Vectors. Iterate over z (the multi-series arg).
-		for n in eachindex(z)
-			xn = x_nested ? x[n] : x
-			yn = y_nested ? y[n] : y
-			trace_kw = Dict{Symbol,Any}(:y => yn, :x => xn, :z => z[n], :mode => modeV[n], :line => attr(color = colorV[n]), :name => legendV[n])
-			mk = Dict{Symbol,Any}()
-			marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-			marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-			!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-			linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-			showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-			trace[n] = scatter3d(; trace_kw...)
-		end
-	else
-		trace_kw = Dict{Symbol,Any}(:x => x, :y => y, :z => z, :mode => mode, :line => attr(color = color), :name => legend)
-		mk = Dict{Symbol,Any}()
-		if marker_size isa Int && marker_size > 0
-			mk[:size] = marker_size
-		end
-		if marker_symbol isa String && marker_symbol != ""
-			mk[:symbol] = marker_symbol
-		end
-		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		if linewidth isa Real && linewidth > 0
-			trace_kw[:line][:width] = linewidth
-		end
-		if showlegend isa Bool
-			trace_kw[:showlegend] = showlegend
-		end
-		trace = scatter3d(; trace_kw...)
-	end
+	trace = _scatter3d_traces(
+		x,
+		y,
+		z;
+		mode = mode,
+		color = color,
+		legend = legend,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		linewidth = linewidth,
+		showlegend = showlegend,
+	)
 
 	if xlabel == ""
 		xlabel = "x"
@@ -5652,72 +5781,55 @@ function plot_scatter!(
 	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
 	_n0 = length(_plot_data(fig))
 	if y_nested
-		modeV = fill("lines", length(y))
-		dashV = fill("", length(y))
-		colorV = fill("", length(y))
-		legendV = fill("", length(y))
-
-		if !(mode isa Vector)
-			fill!(modeV, mode)
-		else
-			for n in eachindex(mode)
-				modeV[n] = mode[n]
-			end
-		end
-		if !(dash isa Vector)
-			fill!(dashV, dash)
-		else
-			for n in eachindex(dash)
-				dashV[n] = dash[n]
-			end
-		end
-		if !(color isa Vector)
-			fill!(colorV, color)
-		else
-			for n in eachindex(color)
-				colorV[n] = color[n]
-			end
-		end
-		if !(legend isa Vector)
-			fill!(legendV, legend)
-		else
-			for n in eachindex(legend)
-				legendV[n] = legend[n]
-			end
-		end
-
-		marker_sizeV = fill(0, length(y))
-		marker_symbolV = fill("", length(y))
-		linewidthV = fill(0.0, length(y))
-		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
-		if !(marker_size isa Vector)
-			fill!(marker_sizeV, marker_size)
-		else
-			for n in eachindex(marker_size)
-				marker_sizeV[n] = marker_size[n]
-			end
-		end
-		if !(marker_symbol isa Vector)
-			fill!(marker_symbolV, marker_symbol)
-		else
-			for n in eachindex(marker_symbol)
-				marker_symbolV[n] = marker_symbol[n]
-			end
-		end
-		if !(linewidth isa Vector)
-			fill!(linewidthV, linewidth)
-		else
-			for n in eachindex(linewidth)
-				linewidthV[n] = linewidth[n]
-			end
-		end
-		if showlegend isa Bool
-			fill!(showlegendV, showlegend)
-		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
-				showlegendV[n] = showlegend[n]
-			end
-		end
+		series_count = length(y)
+		modeV = _series_kwarg_vector(
+			mode,
+			series_count,
+			"lines",
+			String,
+		)
+		dashV = _series_kwarg_vector(
+			dash,
+			series_count,
+			"",
+			String,
+		)
+		colorV = _series_kwarg_vector(
+			color,
+			series_count,
+			"",
+			String,
+		)
+		legendV = _series_kwarg_vector(
+			legend,
+			series_count,
+			"",
+			String,
+		)
+		marker_sizeV = _series_kwarg_vector(
+			marker_size,
+			series_count,
+			0,
+			Int,
+		)
+		marker_symbolV = _series_kwarg_vector(
+			marker_symbol,
+			series_count,
+			"",
+			String,
+		)
+		linewidthV = _series_kwarg_vector(
+			linewidth,
+			series_count,
+			0.0,
+			Float64,
+		)
+		showlegendV = _series_kwarg_vector(
+			showlegend,
+			series_count,
+			nothing,
+			Union{Nothing,Bool},
+		)
 
 		if x_nested
 			for n in eachindex(y)
@@ -5984,47 +6096,53 @@ function plot_stem!(
 )
 	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
 	if y_nested
-		colorV = fill("", length(y))
-		legendV = fill("", length(y))
-
-		if !(color isa Vector)
-			fill!(colorV, color)
-		else
-			for n in eachindex(color)
-				colorV[n] = color[n]
-			end
-		end
-		if !(legend isa Vector)
-			fill!(legendV, legend)
-		else
-			for n in eachindex(legend)
-				legendV[n] = legend[n]
-			end
-		end
-
-		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(y))
-		if showlegend isa Bool
-			fill!(showlegendV, showlegend)
-		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
-				showlegendV[n] = showlegend[n]
-			end
-		end
+		series_count = length(y)
+		colorV = _series_kwarg_vector(
+			color,
+			series_count,
+			"",
+			String,
+		)
+		legendV = _series_kwarg_vector(
+			legend,
+			series_count,
+			"",
+			String,
+		)
+		showlegendV = _series_kwarg_vector(
+			showlegend,
+			series_count,
+			nothing,
+			Union{Nothing,Bool},
+		)
 
 		if x_nested
 			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
+				trace_kw = Dict{Symbol,Any}(
+					:y => y[n],
+					:x => x[n],
+					:name => legendV[n],
+					:mode => "markers",
+				)
+				colorV[n] != "" &&
+					(trace_kw[:marker] =
+						attr(color = colorV[n]))
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				push!(_plot_data(fig), scatter(; trace_kw...))
 			end
 			for n in eachindex(y)
+				stem_color =
+					colorV[n] == "" ? "black" : colorV[n]
 				for m in eachindex(y[n])
 					push!(_plot_data(fig),
 						scatter(
 							x = [x[n][m], x[n][m]],
 							y = [0, y[n][m]],
 							mode = "lines",
-							line = attr(color = "black", width = 0.5),
+							line = attr(
+								color = stem_color,
+								width = 0.5,
+							),
 							showlegend = false,
 						),
 					)
@@ -6032,18 +6150,31 @@ function plot_stem!(
 			end
 		else
 			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :line => attr(color = colorV[n]), :name => legendV[n], :mode => "markers")
+				trace_kw = Dict{Symbol,Any}(
+					:y => y[n],
+					:x => x,
+					:name => legendV[n],
+					:mode => "markers",
+				)
+				colorV[n] != "" &&
+					(trace_kw[:marker] =
+						attr(color = colorV[n]))
 				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
 				push!(_plot_data(fig), scatter(; trace_kw...))
 			end
 			for n in eachindex(y)
+				stem_color =
+					colorV[n] == "" ? "black" : colorV[n]
 				for m in eachindex(y[n])
 					push!(_plot_data(fig),
 						scatter(
 							x = [x[m], x[m]],
 							y = [0, y[n][m]],
 							mode = "lines",
-							line = attr(color = "black", width = 0.5),
+							line = attr(
+								color = stem_color,
+								width = 0.5,
+							),
 							showlegend = false,
 						),
 					)
@@ -6051,18 +6182,31 @@ function plot_stem!(
 			end
 		end
 	else
-		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :line => attr(color = color), :name => legend, :mode => "markers")
-		if showlegend isa Bool
-			trace_kw[:showlegend] = showlegend
+		color1 = _first_or_empty(color)
+		trace_kw = Dict{Symbol,Any}(
+			:y => y,
+			:x => x,
+			:name => _first_or_empty(legend),
+			:mode => "markers",
+		)
+		color1 != "" &&
+			(trace_kw[:marker] = attr(color = color1))
+		sl = _scalar_or_first(showlegend, nothing)
+		if sl isa Bool
+			trace_kw[:showlegend] = sl
 		end
 		push!(_plot_data(fig), scatter(; trace_kw...))
+		stem_color = color1 == "" ? "black" : color1
 		for m in eachindex(y)
 			push!(_plot_data(fig),
 				scatter(
 					x = [x[m], x[m]],
 					y = [0, y[m]],
 					mode = "lines",
-					line = attr(color = "black", width = 0.5),
+					line = attr(
+						color = stem_color,
+						width = 0.5,
+					),
 					showlegend = false,
 				),
 			)
@@ -6697,72 +6841,55 @@ function plot_scatterpolar!(
 )
 	r_nested, theta_nested = _nested_coordinate_mode(r, theta, :r, :theta)
 	if r_nested
-		modeV = fill("lines", length(r))
-		dashV = fill("", length(r))
-		colorV = fill("", length(r))
-		legendV = fill("", length(r))
-
-		if !(mode isa Vector)
-			fill!(modeV, mode)
-		else
-			for n in eachindex(mode)
-				modeV[n] = mode[n]
-			end
-		end
-		if !(dash isa Vector)
-			fill!(dashV, dash)
-		else
-			for n in eachindex(dash)
-				dashV[n] = dash[n]
-			end
-		end
-		if !(color isa Vector)
-			fill!(colorV, color)
-		else
-			for n in eachindex(color)
-				colorV[n] = color[n]
-			end
-		end
-		if !(legend isa Vector)
-			fill!(legendV, legend)
-		else
-			for n in eachindex(legend)
-				legendV[n] = legend[n]
-			end
-		end
-
-		marker_sizeV = fill(0, length(r))
-		marker_symbolV = fill("", length(r))
-		linewidthV = fill(0.0, length(r))
-		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(r))
-		if !(marker_size isa Vector)
-			fill!(marker_sizeV, marker_size)
-		else
-			for n in eachindex(marker_size)
-				marker_sizeV[n] = marker_size[n]
-			end
-		end
-		if !(marker_symbol isa Vector)
-			fill!(marker_symbolV, marker_symbol)
-		else
-			for n in eachindex(marker_symbol)
-				marker_symbolV[n] = marker_symbol[n]
-			end
-		end
-		if !(linewidth isa Vector)
-			fill!(linewidthV, linewidth)
-		else
-			for n in eachindex(linewidth)
-				linewidthV[n] = linewidth[n]
-			end
-		end
-		if showlegend isa Bool
-			fill!(showlegendV, showlegend)
-		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
-				showlegendV[n] = showlegend[n]
-			end
-		end
+		series_count = length(r)
+		modeV = _series_kwarg_vector(
+			mode,
+			series_count,
+			"lines",
+			String,
+		)
+		dashV = _series_kwarg_vector(
+			dash,
+			series_count,
+			"",
+			String,
+		)
+		colorV = _series_kwarg_vector(
+			color,
+			series_count,
+			"",
+			String,
+		)
+		legendV = _series_kwarg_vector(
+			legend,
+			series_count,
+			"",
+			String,
+		)
+		marker_sizeV = _series_kwarg_vector(
+			marker_size,
+			series_count,
+			0,
+			Int,
+		)
+		marker_symbolV = _series_kwarg_vector(
+			marker_symbol,
+			series_count,
+			"",
+			String,
+		)
+		linewidthV = _series_kwarg_vector(
+			linewidth,
+			series_count,
+			0.0,
+			Float64,
+		)
+		showlegendV = _series_kwarg_vector(
+			showlegend,
+			series_count,
+			nothing,
+			Union{Nothing,Bool},
+		)
 
 		if theta_nested
 			for n in eachindex(r)
@@ -7270,12 +7397,12 @@ end
 		xlabel::String = "",
 		ylabel::String = "",
 		zlabel::String = "",
-		aspectmode::String = "auto",
+		aspectmode::Union{Nothing, String} = nothing,
 		colorscale::String = "",
 		title::String = "",
 		fontsize::Int = 0,
-		grid::Bool = true,
-		showaxis::Bool = true,
+		grid::Union{Nothing, Bool} = nothing,
+		showaxis::Union{Nothing, Bool} = nothing,
 	)
 
 Adds new surface traces to an existing figure.
@@ -7298,11 +7425,11 @@ Adds new surface traces to an existing figure.
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `zlabel`: Label for the z-axis (default: `""`)
-- `aspectmode`: Aspect mode setting (default: `"auto"`)
+- `aspectmode`: Aspect mode setting; `nothing` preserves the existing scene (default: `nothing`)
 - `colorscale`: Color scale for the surface (default: `""`)
 - `title`: Title of the figure (default: `""`)
-- `grid`: Whether to display grid lines (default: `true`)
-- `showaxis`: Whether to show axis lines and labels (default: `true`)
+- `grid`: Whether to display grid lines; `nothing` preserves the existing scene (default: `nothing`)
+- `showaxis`: Whether to show axes; `nothing` preserves the existing scene (default: `nothing`)
 - `shared_coloraxis`: If `true`, uses a shared coloraxis (single colorbar) for multiple surfaces (default: `false`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
 
@@ -7321,12 +7448,12 @@ function plot_surface!(
 	xlabel::String = "",
 	ylabel::String = "",
 	zlabel::String = "",
-	aspectmode::String = "auto",
+	aspectmode::Union{Nothing, String} = nothing,
 	colorscale::String = "",
 	title::String = "",
 	fontsize::Int = 0,
-	grid::Bool = true,
-	showaxis::Bool = true,
+	grid::Union{Nothing, Bool} = nothing,
+	showaxis::Union{Nothing, Bool} = nothing,
 	shared_coloraxis::Bool = false,
 	color::Array = [],  # Alias for surfacecolor for backward compatibility
 )
@@ -7359,35 +7486,15 @@ function plot_surface!(
 		end
 	end
 
-	if xlabel == ""
-		xlabel = "x"
-	end
-	if ylabel == ""
-		ylabel = "y"
-	end
-	if zlabel == ""
-		zlabel = "z"
-	end
-	xaxis_attr = attr(title = xlabel, zeroline = false)
-	yaxis_attr = attr(title = ylabel, zeroline = false)
-	zaxis_attr = attr(title = zlabel, zeroline = false)
-	if !grid
-		xaxis_attr = merge(xaxis_attr, attr(showgrid = false))
-		yaxis_attr = merge(yaxis_attr, attr(showgrid = false))
-		zaxis_attr = merge(zaxis_attr, attr(showgrid = false))
-	end
-	if !showaxis
-		xaxis_attr = merge(xaxis_attr, attr(visible = false))
-		yaxis_attr = merge(yaxis_attr, attr(visible = false))
-		zaxis_attr = merge(zaxis_attr, attr(visible = false))
-	end
-	scene_attr = attr(
+	_apply_scene_style_options!(
+		fig;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		zlabel = zlabel,
 		aspectmode = aspectmode,
-		xaxis = xaxis_attr,
-		yaxis = yaxis_attr,
-		zaxis = zaxis_attr,
+		grid = grid,
+		showaxis = showaxis,
 	)
-	relayout!(fig, scene = scene_attr)
 	# apply optional layout updates
 	if title != ""
 		relayout!(fig, title = title)
@@ -7418,12 +7525,12 @@ function plot_surface!(
 	xlabel::String = "",
 	ylabel::String = "",
 	zlabel::String = "",
-	aspectmode::String = "auto",
+	aspectmode::Union{Nothing, String} = nothing,
 	colorscale::String = "",
 	title::String = "",
 	fontsize::Int = 0,
-	grid::Bool = true,
-	showaxis::Bool = true,
+	grid::Union{Nothing, Bool} = nothing,
+	showaxis::Union{Nothing, Bool} = nothing,
 	shared_coloraxis::Bool = false,
 	color::Array = [],  # Alias for surfacecolor for backward compatibility
 )
@@ -7469,12 +7576,12 @@ end
 		xlabel::String = "",
 		ylabel::String = "",
 		zlabel::String = "",
-		aspectmode::String = "auto",
+		aspectmode::Union{Nothing, String} = nothing,
 		title::String = "",
 		fontsize::Int = 0,
-		perspective::Bool = true,
-		grid::Bool = true,
-		showaxis::Bool = true,
+		perspective::Union{Nothing, Bool} = nothing,
+		grid::Union{Nothing, Bool} = nothing,
+		showaxis::Union{Nothing, Bool} = nothing,
 		marker_size::Union{Int, Vector{Int}} = 0,
 		marker_symbol::Union{String, Vector{String}} = "",
 		linewidth::Union{Real, Vector{<:Real}} = 0,
@@ -7503,12 +7610,12 @@ Adds new 3D scatter traces to an existing figure.
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `zlabel`: Label for the z-axis (default: `""`)
-- `aspectmode`: Aspect mode for 3D view (default: `"auto"`)
+- `aspectmode`: Aspect mode for 3D view; `nothing` preserves the existing scene (default: `nothing`)
 - `title`: Title of the plot (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `perspective`: If `false`, uses orthographic projection (default: `true`)
-- `grid`: Whether to show grid lines (default: `true`)
-- `showaxis`: Whether to show axis lines and labels (default: `true`)
+- `perspective`: Projection mode; `nothing` preserves the existing scene (default: `nothing`)
+- `grid`: Whether to show grid lines; `nothing` preserves the existing scene (default: `nothing`)
+- `showaxis`: Whether to show axes; `nothing` preserves the existing scene (default: `nothing`)
 - `marker_size`: Marker size in pixels (default: `0`, can be vector)
 - `marker_symbol`: Marker symbol name (default: `""`, can be vector)
 - `linewidth`: Line width in pixels (default: `0`, can be vector)
@@ -7531,144 +7638,47 @@ function plot_scatter3d!(
 	xlabel::String = "",
 	ylabel::String = "",
 	zlabel::String = "",
-	aspectmode::String = "auto",
+	aspectmode::Union{Nothing, String} = nothing,
 	title::String = "",
 	fontsize::Int = 0,
-	perspective::Bool = true,
-	grid::Bool = true,
-	showaxis::Bool = true,
+	perspective::Union{Nothing, Bool} = nothing,
+	grid::Union{Nothing, Bool} = nothing,
+	showaxis::Union{Nothing, Bool} = nothing,
 	marker_size::Union{Int, Vector{Int}} = 0,
 	marker_symbol::Union{String, Vector{String}} = "",
 	linewidth::Union{Real, Vector{<:Real}} = 0,
 	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
 )
-	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x)
-	_, y_nested = _nested_coordinate_mode(z, y, :z, :y)
-	if z_nested
-		modeV = fill("lines", length(z))
-		colorV = fill("", length(z))
-		legendV = fill("", length(z))
-
-		if !(mode isa Vector)
-			fill!(modeV, mode)
-		else
-			for n in eachindex(mode)
-				modeV[n] = mode[n]
-			end
-		end
-		if !(color isa Vector)
-			fill!(colorV, color)
-		else
-			for n in eachindex(color)
-				colorV[n] = color[n]
-			end
-		end
-		if !(legend isa Vector)
-			fill!(legendV, legend)
-		else
-			for n in eachindex(legend)
-				legendV[n] = legend[n]
-			end
-		end
-
-		marker_sizeV = fill(0, length(z))
-		marker_symbolV = fill("", length(z))
-		linewidthV = fill(0.0, length(z))
-		showlegendV = Vector{Union{Nothing, Bool}}(nothing, length(z))
-		if !(marker_size isa Vector)
-			fill!(marker_sizeV, marker_size)
-		else
-			for n in eachindex(marker_size)
-				marker_sizeV[n] = marker_size[n]
-			end
-		end
-		if !(marker_symbol isa Vector)
-			fill!(marker_symbolV, marker_symbol)
-		else
-			for n in eachindex(marker_symbol)
-				marker_symbolV[n] = marker_symbol[n]
-			end
-		end
-		if !(linewidth isa Vector)
-			fill!(linewidthV, linewidth)
-		else
-			for n in eachindex(linewidth)
-				linewidthV[n] = linewidth[n]
-			end
-		end
-		if showlegend isa Bool
-			fill!(showlegendV, showlegend)
-		elseif showlegend isa Vector
-			for n in eachindex(showlegend)
-				showlegendV[n] = showlegend[n]
-			end
-		end
-
-		# x/y may be shared 1D coordinates broadcast across all z-series.
-		for n in eachindex(z)
-			xn = x_nested ? x[n] : x
-			yn = y_nested ? y[n] : y
-			trace_kw = Dict{Symbol,Any}(:y => yn, :x => xn, :z => z[n], :mode => modeV[n], :line => attr(color = colorV[n]), :name => legendV[n])
-			mk = Dict{Symbol,Any}()
-			marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-			marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-			!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-			linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-			showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-			push!(_plot_data(fig), scatter3d(; trace_kw...))
-		end
+	traces = _scatter3d_traces(
+		x,
+		y,
+		z;
+		mode = mode,
+		color = color,
+		legend = legend,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		linewidth = linewidth,
+		showlegend = showlegend,
+	)
+	if traces isa GenericTrace
+		push!(_plot_data(fig), traces)
 	else
-		trace_kw = Dict{Symbol,Any}(:x => x, :y => y, :z => z, :mode => mode, :line => attr(color = color), :name => legend)
-		mk = Dict{Symbol,Any}()
-		if marker_size isa Int && marker_size > 0
-			mk[:size] = marker_size
-		end
-		if marker_symbol isa String && marker_symbol != ""
-			mk[:symbol] = marker_symbol
-		end
-		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		if linewidth isa Real && linewidth > 0
-			trace_kw[:line][:width] = linewidth
-		end
-		if showlegend isa Bool
-			trace_kw[:showlegend] = showlegend
-		end
-		push!(_plot_data(fig), scatter3d(; trace_kw...))
+		append!(_plot_data(fig), traces)
 	end
-	if xlabel == ""
-		xlabel = "x"
-	end
-	if ylabel == ""
-		ylabel = "y"
-	end
-	if zlabel == ""
-		zlabel = "z"
-	end
-	xaxis_attr = attr(title = xlabel, zeroline = false)
-	yaxis_attr = attr(title = ylabel, zeroline = false)
-	zaxis_attr = attr(title = zlabel, zeroline = false)
-	if !grid
-		xaxis_attr = merge(xaxis_attr, attr(showgrid = false))
-		yaxis_attr = merge(yaxis_attr, attr(showgrid = false))
-		zaxis_attr = merge(zaxis_attr, attr(showgrid = false))
-	end
-	if !showaxis
-		xaxis_attr = merge(xaxis_attr, attr(visible = false))
-		yaxis_attr = merge(yaxis_attr, attr(visible = false))
-		zaxis_attr = merge(zaxis_attr, attr(visible = false))
-	end
-	relayout!(fig, scene = attr(
+	_apply_scene_style_options!(
+		fig;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		zlabel = zlabel,
 		aspectmode = aspectmode,
-		xaxis = xaxis_attr,
-		yaxis = yaxis_attr,
-		zaxis = zaxis_attr,
-	))
+		perspective = perspective,
+		grid = grid,
+		showaxis = showaxis,
+	)
 	# apply optional layout updates
 	if title != ""
 		relayout!(fig, title = title)
-	end
-	if !perspective
-		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
 	end
 	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
 	if width > 0
@@ -7705,12 +7715,12 @@ end
 		xlabel::String = "",
 		ylabel::String = "",
 		zlabel::String = "",
-		aspectmode::String = "auto",
+		aspectmode::Union{Nothing, String} = nothing,
 		title::String = "",
 		fontsize::Int = 0,
-		perspective::Bool = true,
-		grid::Bool = true,
-		showaxis::Bool = true,
+		perspective::Union{Nothing, Bool} = nothing,
+		grid::Union{Nothing, Bool} = nothing,
+		showaxis::Union{Nothing, Bool} = nothing,
 	)
 
 Adds new 3D quiver plot traces to an existing figure.
@@ -7738,12 +7748,12 @@ Adds new 3D quiver plot traces to an existing figure.
 - `xlabel`: Label for the x-axis (default: `""`)
 - `ylabel`: Label for the y-axis (default: `""`)
 - `zlabel`: Label for the z-axis (default: `""`)
-- `aspectmode`: Aspect mode for 3D view (default: `"auto"`)
+- `aspectmode`: Aspect mode for 3D view; `nothing` preserves the existing scene (default: `nothing`)
 - `title`: Title of the plot (default: `""`)
 - `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `perspective`: If `false`, uses orthographic projection (default: `true`)
-- `grid`: Whether to show grid lines (default: `true`)
-- `showaxis`: Whether to show axis lines and labels (default: `true`)
+- `perspective`: Projection mode; `nothing` preserves the existing scene (default: `nothing`)
+- `grid`: Whether to show grid lines; `nothing` preserves the existing scene (default: `nothing`)
+- `showaxis`: Whether to show axes; `nothing` preserves the existing scene (default: `nothing`)
 
 """
 function plot_quiver3d!(
@@ -7765,12 +7775,12 @@ function plot_quiver3d!(
 	xlabel::String = "",
 	ylabel::String = "",
 	zlabel::String = "",
-	aspectmode::String = "auto",
+	aspectmode::Union{Nothing, String} = nothing,
 	title::String = "",
 	fontsize::Int = 0,
-	perspective::Bool = true,
-	grid::Bool = true,
-	showaxis::Bool = true,
+	perspective::Union{Nothing, Bool} = nothing,
+	grid::Union{Nothing, Bool} = nothing,
+	showaxis::Union{Nothing, Bool} = nothing,
 )
 	trace = cone(
 		x = x,
@@ -7791,40 +7801,19 @@ function plot_quiver3d!(
 		trace.showscale = false
 	end
 	push!(_plot_data(fig), trace)
-	if xlabel == ""
-		xlabel = "x"
-	end
-	if ylabel == ""
-		ylabel = "y"
-	end
-	if zlabel == ""
-		zlabel = "z"
-	end
-	xaxis_attr = attr(title = xlabel, zeroline = false)
-	yaxis_attr = attr(title = ylabel, zeroline = false)
-	zaxis_attr = attr(title = zlabel, zeroline = false)
-	if !grid
-		xaxis_attr = merge(xaxis_attr, attr(showgrid = false))
-		yaxis_attr = merge(yaxis_attr, attr(showgrid = false))
-		zaxis_attr = merge(zaxis_attr, attr(showgrid = false))
-	end
-	if !showaxis
-		xaxis_attr = merge(xaxis_attr, attr(visible = false))
-		yaxis_attr = merge(yaxis_attr, attr(visible = false))
-		zaxis_attr = merge(zaxis_attr, attr(visible = false))
-	end
-	relayout!(fig, scene = attr(
+	_apply_scene_style_options!(
+		fig;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		zlabel = zlabel,
 		aspectmode = aspectmode,
-		xaxis = xaxis_attr,
-		yaxis = yaxis_attr,
-		zaxis = zaxis_attr,
-	))
+		perspective = perspective,
+		grid = grid,
+		showaxis = showaxis,
+	)
 	# apply optional layout updates
 	if title != ""
 		relayout!(fig, title = title)
-	end
-	if !perspective
-		relayout!(fig, scene = attr(camera = attr(projection = attr(type = "orthographic"))))
 	end
 	_apply_scene_ranges!(fig; xrange = xrange, yrange = yrange, zrange = zrange)
 	if width > 0
@@ -7850,14 +7839,16 @@ Applies a visual template to a figure.
 
 # Arguments
 - `fig`: A `PlotlyBase.Plot` or a `PlotlySupply.SyncPlot`.
-- `template`: Template name string or symbol.
+- `template`: Registered template name (string or symbol), or a
+  `PlotlyBase.Template`.
 
 # Notes
 - This modifies the figure in-place using `relayout!`.
 - Available templates include `plotly`, `ggplot2`, `seaborn`, `simple_white`, `plotly_dark`, etc.
+- Registered template names may be combined with `+`.
 """
 function set_template!(fig, template = string(get_default_template()))
-	chosen = _normalize_template(template)
+	chosen = _resolve_template(template)
 	relayout!(fig, template = chosen)
 	_refresh!(fig)
 	return nothing
@@ -7987,26 +7978,61 @@ end
 
 # ── Sunburst / Treemap (hierarchical) ────────────────────────────────
 
-function _hierarchy_trace(constructor, labels, parents; values, colorscale::String, name::String)
+function _hierarchy_trace(
+	constructor,
+	labels,
+	parents;
+	values,
+	colors,
+	colorscale::String,
+	name::String,
+)
 	length(labels) == length(parents) ||
 		throw(ArgumentError("`labels` and `parents` must have the same length; got $(length(labels)) and $(length(parents))."))
 	kw = Dict{Symbol, Any}(:labels => collect(labels), :parents => collect(parents))
-	values === nothing || (kw[:values] = collect(values))
-	colorscale == "" || (kw[:marker] = attr(colorscale = colorscale))
+	if values !== nothing
+		length(values) == length(labels) ||
+			throw(ArgumentError(
+				"`values` must match `labels` in length; got " *
+				"$(length(values)) and $(length(labels)).",
+			))
+		kw[:values] = collect(values)
+	end
+
+	marker = Dict{Symbol,Any}()
+	if colors !== nothing
+		length(colors) == length(labels) ||
+			throw(ArgumentError(
+				"`colors` must match `labels` in length; got " *
+				"$(length(colors)) and $(length(labels)).",
+			))
+		marker[:colors] = collect(colors)
+	end
+	if !isempty(colorscale)
+		if colors === nothing && values !== nothing
+			marker[:colors] = kw[:values]
+		end
+		marker[:colorscale] = colorscale
+	end
+	isempty(marker) || (kw[:marker] = attr(; marker...))
 	name == "" || (kw[:name] = name)
 	return constructor(; kw...)
 end
 
 """
-	plot_sunburst(labels, parents; values=nothing, colorscale="", kwargs...)
+	plot_sunburst(labels, parents; values=nothing, colors=nothing,
+		colorscale="", kwargs...)
 
 Hierarchical sunburst chart. `parents[i]` is the label of `labels[i]`'s parent
-(use `""` for a root). Optional `values` size the slices.
+(use `""` for a root). Optional `values` size the slices. When `colorscale`
+is set, `values` color the slices unless `colors` are supplied explicitly.
+Without either array, Plotly derives colors from the hierarchy.
 """
 function plot_sunburst(
 	labels::AbstractVector,
 	parents::AbstractVector;
 	values::Union{Nothing, AbstractVector} = nothing,
+	colors::Union{Nothing, AbstractVector} = nothing,
 	colorscale::String = "",
 	title::String = "",
 	width::Int = 0,
@@ -8014,13 +8040,25 @@ function plot_sunburst(
 	fontsize::Int = 0,
 	show::Bool = false,
 )
-	fig = Plot(_hierarchy_trace(sunburst, labels, parents; values = values, colorscale = colorscale, name = ""), Layout())
+	fig = Plot(
+		_hierarchy_trace(
+			sunburst,
+			labels,
+			parents;
+			values = values,
+			colors = colors,
+			colorscale = colorscale,
+			name = "",
+		),
+		Layout(),
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
 	return _maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_sunburst!(fig, labels, parents; values=nothing, colorscale="", kwargs...)
+	plot_sunburst!(fig, labels, parents; values=nothing, colors=nothing,
+		colorscale="", kwargs...)
 
 Append a sunburst trace to an existing figure.
 """
@@ -8029,20 +8067,33 @@ function plot_sunburst!(
 	labels::AbstractVector,
 	parents::AbstractVector;
 	values::Union{Nothing, AbstractVector} = nothing,
+	colors::Union{Nothing, AbstractVector} = nothing,
 	colorscale::String = "",
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
 )
-	push!(_plot_data(fig), _hierarchy_trace(sunburst, labels, parents; values = values, colorscale = colorscale, name = ""))
+	push!(
+		_plot_data(fig),
+		_hierarchy_trace(
+			sunburst,
+			labels,
+			parents;
+			values = values,
+			colors = colors,
+			colorscale = colorscale,
+			name = "",
+		),
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
 	_refresh!(fig)
 	return nothing
 end
 
 """
-	plot_treemap(labels, parents; values=nothing, colorscale="", kwargs...)
+	plot_treemap(labels, parents; values=nothing, colors=nothing,
+		colorscale="", kwargs...)
 
 Hierarchical treemap chart. See [`plot_sunburst`](@ref) for the `labels`/`parents` convention.
 """
@@ -8050,6 +8101,7 @@ function plot_treemap(
 	labels::AbstractVector,
 	parents::AbstractVector;
 	values::Union{Nothing, AbstractVector} = nothing,
+	colors::Union{Nothing, AbstractVector} = nothing,
 	colorscale::String = "",
 	title::String = "",
 	width::Int = 0,
@@ -8057,13 +8109,25 @@ function plot_treemap(
 	fontsize::Int = 0,
 	show::Bool = false,
 )
-	fig = Plot(_hierarchy_trace(treemap, labels, parents; values = values, colorscale = colorscale, name = ""), Layout())
+	fig = Plot(
+		_hierarchy_trace(
+			treemap,
+			labels,
+			parents;
+			values = values,
+			colors = colors,
+			colorscale = colorscale,
+			name = "",
+		),
+		Layout(),
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
 	return _maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_treemap!(fig, labels, parents; values=nothing, colorscale="", kwargs...)
+	plot_treemap!(fig, labels, parents; values=nothing, colors=nothing,
+		colorscale="", kwargs...)
 
 Append a treemap trace to an existing figure.
 """
@@ -8072,13 +8136,25 @@ function plot_treemap!(
 	labels::AbstractVector,
 	parents::AbstractVector;
 	values::Union{Nothing, AbstractVector} = nothing,
+	colors::Union{Nothing, AbstractVector} = nothing,
 	colorscale::String = "",
 	title::String = "",
 	width::Int = 0,
 	height::Int = 0,
 	fontsize::Int = 0,
 )
-	push!(_plot_data(fig), _hierarchy_trace(treemap, labels, parents; values = values, colorscale = colorscale, name = ""))
+	push!(
+		_plot_data(fig),
+		_hierarchy_trace(
+			treemap,
+			labels,
+			parents;
+			values = values,
+			colors = colors,
+			colorscale = colorscale,
+			name = "",
+		),
+	)
 	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
 	_refresh!(fig)
 	return nothing

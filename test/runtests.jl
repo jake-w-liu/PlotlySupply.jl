@@ -433,31 +433,76 @@ end
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y)
-        set_template!(fig, "plotly_dark")
-        @test fig.layout.template == :plotly_dark
-        set_template!(fig, "ggplot2")
-        @test fig.layout.template == :ggplot2
-        set_template!(fig, "seaborn")
-        @test fig.layout.template == :seaborn
-        set_template!(fig, "simple_white")
-        @test fig.layout.template == :simple_white
-        set_template!(fig, "presentation")
-        @test fig.layout.template == :presentation
-        set_template!(fig, "xgridoff")
-        @test fig.layout.template == :xgridoff
-        set_template!(fig, "ygridoff")
-        @test fig.layout.template == :ygridoff
-        set_template!(fig, "gridon")
-        @test fig.layout.template == :gridon
-        set_template!(fig, "none")
-        @test fig.layout.template == :plotly_white
+        serialized = value -> PlotlyBase.JSON.parse(
+            PlotlyBase.JSON.json(value; allownan=true),
+        )
+        for name in (
+            :plotly_dark,
+            :ggplot2,
+            :seaborn,
+            :simple_white,
+            :presentation,
+            :xgridoff,
+            :ygridoff,
+            :gridon,
+        )
+            set_template!(fig, string(name))
+            expected = PlotlyBase.templates[name]
+            @test fig.layout.fields[:template] isa PlotlyBase.Template
+            @test fig.layout.fields[:template] === expected
+            @test serialized(fig.layout)["template"] == serialized(expected)
+        end
+        @test_logs (:warn,) set_template!(fig, "none")
+        @test fig.layout.fields[:template] ===
+            PlotlyBase.templates[:plotly_white]
 
-        prev_default = get_default_template()
-        set_default_template!("plotly_dark")
-        @test get_default_template() == :plotly_dark
-        fig2 = plot_scatter(x, y)
-        @test fig2.layout.template == :plotly_dark
-        set_default_template!(prev_default)
+        custom_name = :plotlysupply_test_custom
+        custom = PlotlyBase.Template(
+            layout=attr(paper_bgcolor="rgb(12, 34, 56)"),
+        )
+        previous_default = get_default_template()
+        registered_templates = PlotlyBase.templates.templates
+        had_previous_custom = haskey(registered_templates, custom_name)
+        previous_custom = get(registered_templates, custom_name, missing)
+        PlotlyBase.templates[custom_name] = custom
+        try
+            compound_name = Symbol("plotly_white+xgridoff")
+            compound = PlotlyBase.templates[String(compound_name)]
+            set_template!(fig, " plotly_white + xgridoff ")
+            @test fig.layout.fields[:template] isa PlotlyBase.Template
+            @test fig.layout.fields[:template] == compound
+            @test serialized(fig.layout)["template"] ==
+                serialized(compound)
+            @test set_default_template!("plotly_white + xgridoff") ===
+                compound_name
+            compound_default = plot_scatter(x, y)
+            @test compound_default.layout.fields[:template] == compound
+            @test serialized(compound_default.layout)["template"] ==
+                serialized(compound)
+
+            set_template!(fig, custom)
+            @test fig.layout.fields[:template] === custom
+            @test serialized(fig.layout)["template"] == serialized(custom)
+
+            set_template!(fig, custom_name)
+            @test fig.layout.fields[:template] === custom
+            @test set_default_template!(custom_name) === custom_name
+            @test get_default_template() === custom_name
+            fig2 = plot_scatter(x, y)
+            @test fig2.layout.fields[:template] isa PlotlyBase.Template
+            @test fig2.layout.fields[:template] == custom
+            @test serialized(fig2.layout)["template"] == serialized(custom)
+
+            @test_throws ArgumentError set_default_template!(custom)
+            @test get_default_template() === custom_name
+        finally
+            set_default_template!(previous_default)
+            if had_previous_custom
+                registered_templates[custom_name] = previous_custom
+            else
+                delete!(registered_templates, custom_name)
+            end
+        end
     end
 
     @testset "Legend Defaults and Positioning" begin
@@ -750,7 +795,9 @@ end
         @test sf.rows == 2
         @test sf.cols == 2
         @test sf.legend_position == get_default_legend_position()
-        @test sf.plot.layout.template == get_default_template()
+        @test sf.plot.layout.fields[:template] isa PlotlyBase.Template
+        @test sf.plot.layout.fields[:template] ==
+            PlotlyBase.templates[get_default_template()]
 
         PlotlySupply.plot!(sf, 1:5, rand(5); legend="A")
         PlotlySupply.subplot!(sf, 1, 2)
@@ -800,7 +847,9 @@ end
         PlotlySupply.subplot!(sf_raw, 2)
         PlotlySupply.plot_scatter!(sf_raw, 1:5, rand(5); legend="raw2")
         @test length(sf_raw.plot.data) == 2
-        @test sf_raw.plot.layout.template == get_default_template()
+        @test sf_raw.plot.layout.fields[:template] isa PlotlyBase.Template
+        @test sf_raw.plot.layout.fields[:template] ==
+            PlotlyBase.templates[get_default_template()]
         @test sf_raw.plot.layout.fields[:showlegend] == true
     end
 
@@ -2296,12 +2345,15 @@ end
 
     @testset "CRC: mutating constructors preserve a user template" begin
         f = plot_scatter(1:5, rand(5)); set_template!(f, "plotly_dark")
+        f_template = f.layout.fields[:template]
         plot_scatter!(f, 1:5, rand(5))
-        @test f.layout.fields[:template] == :plotly_dark
+        @test f_template === PlotlyBase.templates[:plotly_dark]
+        @test f.layout.fields[:template] === f_template
         g = plot_bar(1:3, rand(3)); set_template!(g, "seaborn"); plot_bar!(g, 1:3, rand(3))
-        @test g.layout.fields[:template] == :seaborn
+        @test g.layout.fields[:template] === PlotlyBase.templates[:seaborn]
         h = plot_heatmap(rand(3, 3)); set_template!(h, "plotly_dark"); plot_heatmap!(h, rand(3, 3))
-        @test h.layout.fields[:template] == :plotly_dark
+        @test h.layout.fields[:template] ===
+            PlotlyBase.templates[:plotly_dark]
     end
 
     @testset "CRC: _apply_showlegend! tolerates over-long vector" begin
@@ -2789,7 +2841,76 @@ end
         @test ttype(plot_sunburst(["a", "b", "c"], ["", "a", "a"]; values=[10, 3, 2])) == "sunburst"
         @test ttype(plot_treemap(["a", "b"], ["", ""]; values=[1, 2])) == "treemap"
         @test_throws ArgumentError plot_sunburst(["a", "b"], [""])   # length mismatch
+        @test_throws ArgumentError plot_sunburst(
+            ["a", "b"],
+            ["", "a"];
+            values=[1],
+        )
+        derived = plot_sunburst(
+            ["a", "b"],
+            ["", "a"];
+            colorscale="Viridis",
+        )
+        @test derived.data[1].fields[:marker][:colorscale] ==
+              "Viridis"
+        @test !haskey(derived.data[1].fields[:marker], :colors)
+
+        explicit_colors = plot_sunburst(
+            ["a", "b"],
+            ["", "a"];
+            values=[2, 1],
+            colors=["red", "blue"],
+            colorscale="Viridis",
+        )
+        @test explicit_colors.data[1].fields[:marker][:colors] ==
+              ["red", "blue"]
+        @test explicit_colors.data[1].fields[:marker][:colorscale] ==
+              "Viridis"
+
+        numeric_strings = plot_sunburst(
+            ["a", "b"],
+            ["", "a"];
+            values=["2", "1"],
+            colorscale="Viridis",
+        )
+        @test numeric_strings.data[1].fields[:marker][:colors] ==
+              ["2", "1"]
+        scaled = plot_sunburst(
+            ["a", "b", "c"],
+            ["", "a", "a"];
+            values=[10, 3, 2],
+            colorscale="Viridis",
+        )
+        scaled_marker = scaled.data[1].fields[:marker]
+        @test scaled_marker[:colors] ===
+              scaled.data[1].fields[:values]
+        @test scaled_marker[:colors] == [10, 3, 2]
+        @test scaled_marker[:colorscale] == "Viridis"
+
+        colored = plot_treemap(
+            ["a", "b"],
+            ["", "a"];
+            values=[2, 1],
+            colors=[0.25, 0.75],
+            colorscale="Cividis",
+        )
+        @test colored.data[1].fields[:marker][:colors] ==
+              [0.25, 0.75]
+        @test colored.data[1].fields[:marker][:colorscale] ==
+              "Cividis"
+
         g = plot_sunburst(["a"], [""]); plot_sunburst!(g, ["b"], [""]); @test length(g.data) == 2
+        plot_treemap!(
+            g,
+            ["root", "leaf"],
+            ["", "root"];
+            values=[2, 1],
+            colorscale="Blues",
+        )
+        @test last(g.data).fields[:marker][:colors] ===
+              last(g.data).fields[:values]
+        @test last(g.data).fields[:marker][:colorscale] ==
+              "Blues"
     end
 
     @testset "Extended: funnel / waterfall" begin
@@ -3707,7 +3828,8 @@ end
             (() -> plot_choropleth(["USA"], [1.0]), (g) -> plot_choropleth!(g, ["CAN"], [2.0])),
         )
             g = mk(); set_template!(g, "plotly_dark"); add!(g)
-            @test g.layout.fields[:template] == :plotly_dark
+            @test g.layout.fields[:template] ===
+                PlotlyBase.templates[:plotly_dark]
             @test length(g.data) == 2
         end
     end
@@ -4947,6 +5069,7 @@ end
     end
 
     include("nested_series.jl")
+    include("three_d_styling.jl")
     include("export_transactions.jl")
     include("mutator_parity.jl")
     include("renderer_transactions.jl")
