@@ -884,7 +884,14 @@ end
             @test caught === primary
             _test_transaction_snapshot(p, snapshot)
             @test length(state.scripts) == 2
-            @test occursin("Plotly.react", state.scripts[1])
+            expected_operation =
+                operation === :plot_pie ? "Plotly.addTraces" :
+                operation === :set_legend ? "Plotly.relayout" :
+                "Plotly.react"
+            @test occursin(
+                expected_operation,
+                state.scripts[1],
+            )
             @test occursin("Plotly.newPlot", state.scripts[2])
             @test occursin(
                 "old-transaction-title",
@@ -894,6 +901,336 @@ end
         finally
             close(sp)
         end
+    end
+end
+
+function _large_high_level_map_fixture(
+    count::Int;
+    outcomes=Any[],
+    register::Bool=false,
+)
+    features = [
+        Dict{String,Any}(
+            "type" => "Feature",
+            "id" => index,
+            "properties" => Dict{String,Any}(
+                "value" => index,
+            ),
+        )
+        for index in 1:count
+    ]
+    geojson = Dict{String,Any}(
+        "type" => "FeatureCollection",
+        "features" => features,
+    )
+    layers = [
+        Dict{String,Any}(
+            "id" => "existing-layer-$index",
+            "type" => "fill",
+        )
+        for index in 1:count
+    ]
+    sources = Dict(
+        "existing-source-$index" => Dict{String,Any}(
+            "type" => "geojson",
+            "data" => Dict{String,Any}(
+                "type" => "FeatureCollection",
+                "features" => Any[],
+            ),
+        )
+        for index in 1:count
+    )
+    style = Dict{String,Any}(
+        "version" => 8,
+        "sources" => sources,
+        "layers" => layers,
+    )
+    p = plot_choroplethmap(
+        geojson,
+        1:count,
+        1:count;
+        style=style,
+    )
+    state = _TransactionRendererState(outcomes)
+    sp = SyncPlot(
+        p,
+        nothing,
+        :high_level_map_window,
+        "high-level-map-div",
+        PlotlySupply._SyncPlotResources(
+            nothing,
+            _transaction_backend(state),
+        ),
+    )
+    if register
+        old, registered =
+            PlotlySupply._register_displayed_syncplot!(p, sp)
+        old === nothing ||
+            error("unexpected high-level map registration")
+        registered ||
+            error("failed to register high-level map fixture")
+    end
+    return (; p, sp, state, geojson, features, style, layers, sources)
+end
+
+@testset "high-level append transactions stay incremental and bounded" begin
+    for function_name in
+        PlotlySupply._TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS
+        @test PlotlySupply._is_transactional_high_level_plot_mutator(
+            getfield(PlotlySupply, function_name),
+        )
+    end
+    @test !PlotlySupply._is_transactional_high_level_plot_mutator(
+        PlotlyBase.relayout!,
+    )
+
+    for registered in (false, true)
+        fixture = _large_high_level_map_fixture(
+            1_000;
+            register=registered,
+        )
+        p = fixture.p
+        target = registered ? p : fixture.sp
+        data = p.data
+        layout = p.layout
+        original_trace = only(p.data)
+        try
+            @test plot_scattermap!(
+                target,
+                [121.5],
+                [25.0];
+                legend="incremental-map",
+            ) === nothing
+            @test length(fixture.state.scripts) == 1
+            script = only(fixture.state.scripts)
+            @test occursin("Plotly.addTraces", script)
+            @test occursin("Plotly.relayout", script)
+            @test !occursin("Plotly.react", script)
+            @test !occursin("FeatureCollection", script)
+            @test !occursin("\"features\"", script)
+            @test !occursin("\"layers\"", script)
+            @test !occursin("\"sources\"", script)
+            @test ncodeunits(script) < 10_000
+
+            @test p.data === data
+            @test p.layout === layout
+            @test p.data[1] === original_trace
+            @test original_trace.fields[:geojson] ===
+                  fixture.geojson
+            @test fixture.geojson["features"] ===
+                  fixture.features
+            @test p.layout.fields[:map][:style] ===
+                  fixture.style
+            @test fixture.style["layers"] === fixture.layers
+            @test fixture.style["sources"] === fixture.sources
+            @test p.data[2].fields[:name] == "incremental-map"
+        finally
+            close(fixture.sp)
+        end
+    end
+end
+
+@testset "high-level append renderer failure restores old payload" begin
+    for registered in (false, true)
+        primary = ErrorException(
+            "injected-$registered-high-level-map-failure",
+        )
+        fixture = _large_high_level_map_fixture(
+            250;
+            outcomes=Any[primary, "ok"],
+            register=registered,
+        )
+        p = fixture.p
+        target = registered ? p : fixture.sp
+        snapshot = (
+            json=PlotlyBase.JSON.json(p; allownan=true),
+            data=p.data,
+            layout=p.layout,
+            frames=p.frames,
+            config=p.config,
+            trace=p.data[1],
+            trace_fields=p.data[1].fields,
+            layout_fields=p.layout.fields,
+        )
+        try
+            caught = try
+                plot_scattermap!(
+                    target,
+                    [121.5],
+                    [25.0];
+                    legend="must-roll-back",
+                )
+                nothing
+            catch err
+                err
+            end
+            @test caught === primary
+            @test PlotlyBase.JSON.json(p; allownan=true) ==
+                  snapshot.json
+            @test p.data === snapshot.data
+            @test p.layout === snapshot.layout
+            @test p.frames === snapshot.frames
+            @test p.config === snapshot.config
+            @test p.data[1] === snapshot.trace
+            @test p.data[1].fields === snapshot.trace_fields
+            @test p.layout.fields === snapshot.layout_fields
+            @test length(fixture.state.scripts) == 2
+            @test occursin(
+                "Plotly.addTraces",
+                fixture.state.scripts[1],
+            )
+            @test !occursin(
+                "FeatureCollection",
+                fixture.state.scripts[1],
+            )
+            @test occursin(
+                "Plotly.newPlot",
+                fixture.state.scripts[2],
+            )
+            @test occursin(
+                "FeatureCollection",
+                fixture.state.scripts[2],
+            )
+            @test p.data[1].fields[:geojson] ===
+                  fixture.geojson
+            @test p.layout.fields[:map][:style] ===
+                  fixture.style
+        finally
+            close(fixture.sp)
+        end
+    end
+end
+
+@testset "high-level fast path falls back for mutable aliases" begin
+    shared = Dict{Symbol,Any}(:size => 10)
+    trace = scatter(x=[1], y=[1])
+    trace.fields[:marker] = shared
+    layout = Layout()
+    layout.fields[:font] = shared
+    p = Plot([trace], layout)
+    state = _TransactionRendererState()
+    sp = SyncPlot(
+        p,
+        nothing,
+        :high_level_alias_window,
+        "high-level-alias-div",
+        PlotlySupply._SyncPlotResources(
+            nothing,
+            _transaction_backend(state),
+        ),
+    )
+    try
+        @test plot_scatter!(
+            sp,
+            [2],
+            [2];
+            fontsize=20,
+        ) === nothing
+        @test p.data[1].fields[:marker] ===
+              p.layout.fields[:font]
+        @test p.layout.fields[:font][:size] == 20
+        @test occursin("Plotly.react", only(state.scripts))
+        @test !occursin(
+            "Plotly.addTraces",
+            only(state.scripts),
+        )
+    finally
+        close(sp)
+    end
+
+    shared_font = Dict{Symbol,Any}(:size => 10)
+    style = Dict{String,Any}(
+        "version" => 8,
+        "sources" => Dict{String,Any}(),
+        "layers" => Any[],
+        "font-alias" => shared_font,
+    )
+    layout = Layout()
+    layout.fields[:font] = shared_font
+    map_attribute = attr()
+    map_attribute.fields[:style] = style
+    layout.fields[:map] = map_attribute
+    p = Plot(scattermap(lon=[0.0], lat=[0.0]), layout)
+    state = _TransactionRendererState()
+    sp = SyncPlot(
+        p,
+        nothing,
+        :high_level_style_alias_window,
+        "high-level-style-alias-div",
+        PlotlySupply._SyncPlotResources(
+            nothing,
+            _transaction_backend(state),
+        ),
+    )
+    try
+        @test plot_scattermap!(
+            sp,
+            [1.0],
+            [1.0];
+            fontsize=20,
+        ) === nothing
+        committed_style = p.layout.fields[:map][:style]
+        @test committed_style["font-alias"] ===
+              p.layout.fields[:font]
+        @test p.layout.fields[:font][:size] == 20
+        @test style["font-alias"] === shared_font
+        @test shared_font[:size] == 10
+        @test occursin("Plotly.react", only(state.scripts))
+    finally
+        close(sp)
+    end
+
+    captured_font = Dict{Symbol,Any}(:size => 10)
+    callback = ((value) -> () -> value)(captured_font)
+    layout = Layout()
+    layout.fields[:font] = captured_font
+    layout.fields[:callback] = callback
+    p = Plot(scatter(x=[1], y=[1]), layout)
+    @test PlotlySupply._prepare_high_level_plot_fast_context(
+        p,
+    ) === nothing
+    @test plot_scatter!(
+        p,
+        [2],
+        [2];
+        fontsize=20,
+    ) === nothing
+    committed_callback = p.layout.fields[:callback]
+    @test committed_callback() === p.layout.fields[:font]
+    @test p.layout.fields[:font][:size] == 20
+    @test captured_font[:size] == 10
+end
+
+@testset "existing-trace high-level mutations retain full staging" begin
+    old_surface = surface(z=[1.0 2.0; 3.0 4.0])
+    p = Plot(old_surface)
+    state = _TransactionRendererState()
+    sp = SyncPlot(
+        p,
+        nothing,
+        :shared_coloraxis_window,
+        "shared-coloraxis-div",
+        PlotlySupply._SyncPlotResources(
+            nothing,
+            _transaction_backend(state),
+        ),
+    )
+    try
+        @test plot_surface!(
+            sp,
+            [5.0 6.0; 7.0 8.0];
+            shared_coloraxis=true,
+        ) === nothing
+        @test p.data[1] === old_surface
+        @test p.data[1].fields[:coloraxis] == "coloraxis"
+        @test p.data[2].fields[:coloraxis] == "coloraxis"
+        @test occursin("Plotly.react", only(state.scripts))
+        @test !occursin(
+            "Plotly.addTraces",
+            only(state.scripts),
+        )
+    finally
+        close(sp)
     end
 end
 
@@ -1830,6 +2167,66 @@ end
         @test cyclic_layout_plot.layout === cyclic_layout
         @test cyclic_layout.fields[:self] === cyclic_layout
     end
+
+    self_attribute = attr()
+    self_attribute.fields[:self] = self_attribute
+    self_clone = PlotlySupply._copy_mutation_container(
+        self_attribute,
+    )
+    @test self_clone !== self_attribute
+    @test self_clone.fields[:self] === self_clone
+    setter_clone = PlotlySupply._copy_setter_input(
+        self_attribute,
+        IdDict{Any,Any}(),
+    )
+    @test setter_clone !== self_attribute
+    @test setter_clone.fields[:self] === setter_clone
+
+    valid_frame = frame(name="cycle-clone-frame")
+    frame_clone = @test_logs(
+        PlotlySupply._copy_mutation_container(valid_frame)
+    )
+    frame_setter_clone = @test_logs(
+        PlotlySupply._copy_setter_input(
+            valid_frame,
+            IdDict{Any,Any}(),
+        )
+    )
+    @test frame_clone.fields[:name] == "cycle-clone-frame"
+    @test frame_setter_clone.fields[:name] ==
+          "cycle-clone-frame"
+
+    left_attribute = attr()
+    right_attribute = attr()
+    left_attribute.fields[:right] = right_attribute
+    right_attribute.fields[:left] = left_attribute
+    left_clone = PlotlySupply._copy_mutation_container(
+        left_attribute,
+    )
+    @test left_clone !== left_attribute
+    @test left_clone.fields[:right] !== right_attribute
+    @test left_clone.fields[:right].fields[:left] ===
+          left_clone
+
+    map_root = attr()
+    cyclic_style = Dict{Symbol,Any}(:owner => map_root)
+    map_root.fields[:style] = cyclic_style
+    cyclic_map_layout = Layout()
+    cyclic_map_layout.fields[:map] = map_root
+    cyclic_map_plot = Plot(
+        scattermap(lon=[0.0], lat=[0.0]),
+        cyclic_map_layout,
+    )
+    @test plot_scattermap!(
+        cyclic_map_plot,
+        [1.0],
+        [1.0];
+        zoom=2,
+    ) === nothing
+    committed_map = cyclic_map_plot.layout.fields[:map]
+    @test committed_map.fields[:style][:owner] ===
+          committed_map
+    @test committed_map.fields[:zoom] == 2
 
     first = scatter(y=[1, 2])
     second = scatter(y=[4, 5])
@@ -5079,20 +5476,28 @@ end
 
         put!(state.release, nothing)
         high_level_script = take!(state.entered)
-        @test occursin("Plotly.react", high_level_script)
-        @test occursin(
-            "serialized-first",
-            high_level_script,
-        )
         if operation === :plot_pie
+            @test occursin(
+                "Plotly.addTraces",
+                high_level_script,
+            )
             @test occursin("13", high_level_script)
             @test occursin("21", high_level_script)
         else
+            @test occursin(
+                "Plotly.relayout",
+                high_level_script,
+            )
             @test occursin(
                 "\"showlegend\":true",
                 high_level_script,
             )
         end
+        @test !occursin("Plotly.react", high_level_script)
+        @test !occursin(
+            "serialized-first",
+            high_level_script,
+        )
         put!(state.release, nothing)
         @test fetch(first_task) === sp
         expected = operation === :plot_pie ? nothing : sp

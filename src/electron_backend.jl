@@ -1146,8 +1146,28 @@ function _copy_mutation_container(
 	memo::IdDict{Any,Any},
 )
 	haskey(memo, value) && return memo[value]
-	staged = typeof(value)(_copy_mutation_container(value.fields, memo))
+	original_fields = value.fields
+	original_fields isa _BuiltinMutationDict ||
+		return Base.deepcopy_internal(value, memo)
+	if haskey(memo, original_fields)
+		staged_fields = memo[original_fields]
+		staged = typeof(value)(copy(original_fields))
+		setfield!(staged, :fields, staged_fields)
+		memo[value] = staged
+		return staged
+	end
+	staged_fields = copy(original_fields)
+	if staged_fields === original_fields ||
+			typeof(staged_fields) !== typeof(original_fields)
+		return Base.deepcopy_internal(value, memo)
+	end
+	staged = typeof(value)(staged_fields)
 	memo[value] = staged
+	memo[original_fields] = staged_fields
+	for (key, child) in original_fields
+		staged_fields[key] =
+			_copy_mutation_container(child, memo)
+	end
 	return staged
 end
 
@@ -1210,8 +1230,28 @@ function _copy_setter_input(
 	memo::IdDict{Any,Any},
 )
 	haskey(memo, value) && return memo[value]
-	staged = typeof(value)(_copy_setter_input(value.fields, memo))
+	original_fields = value.fields
+	original_fields isa _BuiltinMutationDict ||
+		return _copy_setter_input_strict(value, memo)
+	if haskey(memo, original_fields)
+		staged_fields = memo[original_fields]
+		staged = typeof(value)(copy(original_fields))
+		setfield!(staged, :fields, staged_fields)
+		memo[value] = staged
+		return staged
+	end
+	staged_fields = copy(original_fields)
+	if staged_fields === original_fields ||
+			typeof(staged_fields) !== typeof(original_fields)
+		return _copy_setter_input_strict(value, memo)
+	end
+	staged = typeof(value)(staged_fields)
 	memo[value] = staged
+	memo[original_fields] = staged_fields
+	for (key, child) in original_fields
+		staged_fields[key] =
+			_copy_setter_input(child, memo)
+	end
 	return staged
 end
 
@@ -6409,6 +6449,378 @@ function _data_roots_unchanged(
 	return true
 end
 
+function _copy_high_level_layout_container(
+	value,
+	memo::IdDict{Any,Any},
+	shared_roots::Vector{Any},
+	supported::Base.RefValue{Bool},
+)
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			(
+				value isa Function &&
+				fieldcount(typeof(value)) == 0
+			) ||
+			value isa BigInt ||
+			value isa BigFloat
+		return value
+	end
+	haskey(memo, value) && return memo[value]
+	if value isa AbstractArray
+		# High-level plotting helpers replace layout arrays; they never mutate
+		# an existing array or one of its elements. Keep large annotations,
+		# layers, and template payloads shared, then reject the fast path below
+		# if one reaches a layout container that the helper can mutate.
+		push!(shared_roots, value)
+		return value
+	end
+	if value isa AbstractDict ||
+			value isa PlotlyBase.AbstractPlotlyAttribute ||
+			ismutable(value)
+		supported[] = false
+		return value
+	end
+
+	# Immutable wrappers cannot themselves be changed. Their mutable members
+	# remain read-only on this path and are included in the alias check.
+	push!(shared_roots, value)
+	return value
+end
+
+function _is_high_level_readonly_layout_payload(key, value)
+	(key isa Symbol || key isa AbstractString) || return false
+	Symbol(key) in (
+		:geojson,
+		:labelalias,
+		:meta,
+		:style,
+		:template,
+	) || return false
+	return value isa AbstractDict ||
+		value isa AbstractArray ||
+		value isa PlotlyBase.AbstractPlotlyAttribute
+end
+
+function _copy_high_level_layout_container(
+	value::_BuiltinMutationDict,
+	memo::IdDict{Any,Any},
+	shared_roots::Vector{Any},
+	supported::Base.RefValue{Bool},
+)
+	haskey(memo, value) && return memo[value]
+	staged = empty(value)
+	memo[value] = staged
+	for (key, child) in value
+		staged[
+			_copy_high_level_layout_container(
+				key,
+				memo,
+				shared_roots,
+				supported,
+			)
+		] = if _is_high_level_readonly_layout_payload(
+			key,
+			child,
+		)
+			push!(shared_roots, child)
+			child
+		else
+			_copy_high_level_layout_container(
+				child,
+				memo,
+				shared_roots,
+				supported,
+			)
+		end
+	end
+	return staged
+end
+
+function _copy_high_level_layout_container(
+	value::_BuiltinPlotlyAttribute,
+	memo::IdDict{Any,Any},
+	shared_roots::Vector{Any},
+	supported::Base.RefValue{Bool},
+)
+	haskey(memo, value) && return memo[value]
+	original_fields = value.fields
+	original_fields isa _BuiltinMutationDict || begin
+		supported[] = false
+		return value
+	end
+	if haskey(memo, original_fields)
+		staged_fields = memo[original_fields]
+		staged = typeof(value)(copy(original_fields))
+		setfield!(staged, :fields, staged_fields)
+		memo[value] = staged
+		return staged
+	end
+	staged_fields = copy(original_fields)
+	if staged_fields === original_fields ||
+			typeof(staged_fields) !== typeof(original_fields)
+		supported[] = false
+		return value
+	end
+	staged = typeof(value)(staged_fields)
+	memo[value] = staged
+	memo[original_fields] = staged_fields
+	for (key, child) in original_fields
+		staged_fields[key] = if _is_high_level_readonly_layout_payload(
+			key,
+			child,
+		)
+			push!(shared_roots, child)
+			child
+		else
+			_copy_high_level_layout_container(
+				child,
+				memo,
+				shared_roots,
+				supported,
+			)
+		end
+	end
+	return staged
+end
+
+function _clone_high_level_layout_for_mutation(layout::Layout)
+	original_fields = getfield(layout, :fields)
+	original_fields isa _BuiltinMutationDict || return nothing
+	staged_fields = copy(original_fields)
+	(
+		staged_fields !== original_fields &&
+		typeof(staged_fields) === typeof(original_fields)
+	) || return nothing
+
+	staged_layout = typeof(layout)(staged_fields)
+	setfield!(staged_layout, :fields, staged_fields)
+	setfield!(
+		staged_layout,
+		:subplots,
+		getfield(layout, :subplots),
+	)
+	memo = IdDict{Any,Any}(
+		layout => staged_layout,
+		original_fields => staged_fields,
+	)
+	shared_roots = Any[]
+	supported = Ref(true)
+	for (key, child) in original_fields
+		staged_fields[key] = if _is_high_level_readonly_layout_payload(
+			key,
+			child,
+		)
+			push!(shared_roots, child)
+			child
+		else
+			_copy_high_level_layout_container(
+				child,
+				memo,
+				shared_roots,
+				supported,
+			)
+		end
+	end
+	supported[] || return nothing
+	return (
+		layout = staged_layout,
+		memo = memo,
+		shared_roots = shared_roots,
+	)
+end
+
+function _high_level_layout_has_external_alias(
+	p::Plot,
+	memo::IdDict{Any,Any},
+	shared_roots::Vector{Any},
+)
+	identities = IdDict{Any,Nothing}()
+	for (original, staged) in memo
+		original === staged && continue
+		ismutable(original) || continue
+		identities[original] = nothing
+	end
+	isempty(identities) && return false
+
+	path = Any[]
+	for root in shared_roots
+		_modern_map_graph_contains_identity(
+			root,
+			identities,
+			path,
+		) && return true
+	end
+	for root in (
+		p.data,
+		p.frames,
+		p.config,
+		getfield(p.layout, :subplots),
+	)
+		_modern_map_graph_contains_identity(
+			root,
+			identities,
+			path,
+		) && return true
+	end
+	return false
+end
+
+function _prepare_high_level_plot_fast_context(p::Plot)
+	p.data isa Vector || return nothing
+	p.layout isa Layout || return nothing
+	cloned = _clone_high_level_layout_for_mutation(p.layout)
+	cloned === nothing && return nothing
+	_high_level_layout_has_external_alias(
+		p,
+		cloned.memo,
+		cloned.shared_roots,
+	) && return nothing
+
+	staged_data = copy(p.data)
+	(
+		staged_data !== p.data &&
+		typeof(staged_data) === typeof(p.data)
+	) || return nothing
+	candidate = Plot(
+		staged_data,
+		cloned.layout,
+		p.frames,
+		p.divid,
+		p.config,
+	)
+	(
+		candidate.data === staged_data &&
+		candidate.layout === cloned.layout &&
+		candidate.frames === p.frames &&
+		candidate.config === p.config
+	) || return nothing
+	return (
+		candidate = candidate,
+		staged_data = staged_data,
+		staged_layout = cloned.layout,
+		memo = cloned.memo,
+	)
+end
+
+function _plotlyjs_high_level_append_script(
+	sp::SyncPlot,
+	new_traces::AbstractVector{<:AbstractTrace},
+	layout_delta::AbstractDict,
+)
+	calls = String[]
+	if !isempty(new_traces)
+		push!(
+			calls,
+			"  await Plotly.addTraces(div, $(_json_js(new_traces)));",
+		)
+	end
+	if !isempty(layout_delta)
+		push!(
+			calls,
+			"  await Plotly.relayout(div, $(_json_js(layout_delta)));",
+		)
+	end
+	return _plotlyjs_delta_script(sp, calls)
+end
+
+function _finish_high_level_plot_fast_transaction(
+	sp::Union{Nothing,SyncPlot},
+	p::Plot,
+	context,
+	mutation,
+)
+	candidate = context.candidate
+	mutation(candidate)
+	(
+		candidate.data === context.staged_data &&
+		candidate.layout === context.staged_layout &&
+		candidate.frames === p.frames &&
+		candidate.config === p.config
+	) || throw(ArgumentError(
+		"High-level plot mutators may only append traces and update layout.",
+	))
+
+	original_length = length(p.data)
+	length(candidate.data) >= original_length ||
+		throw(ArgumentError(
+			"High-level plot mutators may not remove traces.",
+		))
+	for index in eachindex(p.data)
+		candidate.data[index] === p.data[index] ||
+			throw(ArgumentError(
+				"High-level plot mutators may not replace existing traces.",
+			))
+	end
+
+	_rebase_staged_layout!(
+		p.layout,
+		context.staged_layout,
+		context.memo,
+	)
+	new_trace_count = length(candidate.data) - original_length
+	new_traces = candidate.data[(original_length + 1):end]
+	sizehint!(p.data, length(candidate.data))
+
+	layout_delta = sp === nothing ?
+		Dict{String,Any}() :
+		_plotly_leaf_deltas(
+			p.layout.fields,
+			context.staged_layout.fields,
+			context.memo,
+		)
+	script = sp === nothing ?
+		nothing :
+		_plotlyjs_high_level_append_script(
+			sp,
+			new_traces,
+			layout_delta,
+		)
+	commit = () -> begin
+		if new_trace_count > 0
+			resize!(p.data, length(candidate.data))
+			copyto!(
+				p.data,
+				original_length + 1,
+				candidate.data,
+				original_length + 1,
+				new_trace_count,
+			)
+		end
+		_commit_layout!(p, context.staged_layout)
+		return p
+	end
+	operation = if new_trace_count > 0
+		isempty(layout_delta) ? "addTraces" : "addTraces/relayout"
+	else
+		"relayout"
+	end
+	return (script = script, operation = operation, commit = commit)
+end
+
+function _prepare_high_level_plot_mutation_transaction(
+	sp::Union{Nothing,SyncPlot},
+	p::Plot,
+	fast_mutation,
+	full_mutation,
+)
+	context = _prepare_high_level_plot_fast_context(p)
+	context === nothing &&
+		return _prepare_full_model_mutation_transaction(
+			sp,
+			p,
+			full_mutation,
+		)
+	return _finish_high_level_plot_fast_transaction(
+		sp,
+		p,
+		context,
+		fast_mutation,
+	)
+end
+
 function _prepare_structural_data_mutation_transaction(
 	sp::Union{Nothing,SyncPlot},
 	p::Plot,
@@ -6591,6 +7003,36 @@ function _transactional_full_plot_mutation!(
 			mutation_scope,
 			preserve_layout_vector,
 		)
+		prepared.commit()
+		return p
+	end
+	return _transactional_model_plot_mutation!(
+		p;
+		prepare = prepare,
+		local_mutation = local_mutation,
+	)
+end
+
+function _transactional_high_level_model_mutation!(
+	fast_mutation,
+	full_mutation,
+	p::Plot,
+)
+	prepare = (target, current) ->
+		_prepare_high_level_plot_mutation_transaction(
+			target,
+			current,
+			fast_mutation,
+			full_mutation,
+		)
+	local_mutation = () -> begin
+		prepared =
+			_prepare_high_level_plot_mutation_transaction(
+				nothing,
+				p,
+				fast_mutation,
+				full_mutation,
+			)
 		prepared.commit()
 		return p
 	end

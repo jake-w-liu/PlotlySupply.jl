@@ -972,6 +972,9 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
         # A small camera update must neither traverse/copy a large opaque
         # MapLibre style payload nor replace its public identity.
         realistic_size = 10_000
+        # A thousand nested source dictionaries exceeds the allocation gate
+        # if the opaque style is accidentally traversed or copied.
+        source_size = 1_000
         style_payload = [
             Dict{String,Any}(
                 "id" => "layer-$index",
@@ -979,9 +982,19 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
             )
             for index in 1:realistic_size
         ]
+        source_payload = Dict(
+            "source-$index" => Dict{String,Any}(
+                "type" => "geojson",
+                "data" => Dict{String,Any}(
+                    "type" => "FeatureCollection",
+                    "features" => Any[],
+                ),
+            )
+            for index in 1:source_size
+        )
         large_style = Dict{String,Any}(
             "version" => 8,
-            "sources" => Dict{String,Any}(),
+            "sources" => source_payload,
             "layers" => style_payload,
         )
         feature_payload = [
@@ -1015,10 +1028,41 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
               large_style
         @test map_figure.layout.fields[:map][:style]["layers"] ===
               style_payload
+        @test map_figure.layout.fields[:map][:style]["sources"] ===
+              source_payload
         @test only(map_figure.data).fields[:geojson] ===
               large_geojson
         @test only(map_figure.data).fields[:geojson]["features"] ===
               feature_payload
+
+        # Appending one trace must not clone either existing opaque payload or
+        # make allocation scale with its feature/layer/source count.
+        map_data = map_figure.data
+        map_layout = map_figure.layout
+        original_map_trace = only(map_figure.data)
+        append_map_trace! = p -> plot_scattermap!(
+            p,
+            [121.5],
+            [25.0];
+            legend="allocation-probe",
+        )
+        # Exercise both legend-creation and existing-legend branches before
+        # measuring steady-state transaction allocation.
+        append_map_trace!(map_figure)
+        append_map_trace!(map_figure)
+        GC.gc()
+        @test @allocated(append_map_trace!(map_figure)) <
+              500_000
+        @test map_figure.data === map_data
+        @test map_figure.layout === map_layout
+        @test map_figure.data[1] === original_map_trace
+        @test original_map_trace.fields[:geojson] === large_geojson
+        @test map_figure.layout.fields[:map][:style] ===
+              large_style
+        @test map_figure.layout.fields[:map][:style]["layers"] ===
+              style_payload
+        @test map_figure.layout.fields[:map][:style]["sources"] ===
+              source_payload
 
         delta_probe = SyncPlot(
             map_figure,
@@ -1038,6 +1082,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
         @test occursin("Plotly.relayout", delta_script)
         @test !occursin("Plotly.react", delta_script)
         @test !occursin("\"layers\"", delta_script)
+        @test !occursin("\"sources\"", delta_script)
         @test !occursin("\"features\"", delta_script)
         @test ncodeunits(delta_script) < 1_000
 

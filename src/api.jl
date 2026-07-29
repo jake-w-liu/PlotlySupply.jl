@@ -17,6 +17,10 @@ struct _StagedPlotMutation
 	plot::Plot
 end
 
+struct _HighLevelStagedPlotMutation
+	plot::Plot
+end
+
 function _refresh!(fig)
 	p = _plot_obj(fig)
 	# Route through the public target exactly once. A SyncPlot owns its renderer
@@ -28,6 +32,7 @@ function _refresh!(fig)
 end
 
 _refresh!(::_StagedPlotMutation) = nothing
+_refresh!(::_HighLevelStagedPlotMutation) = nothing
 
 function PlotlyBase.relayout!(
 	staged::_StagedPlotMutation,
@@ -38,8 +43,29 @@ function PlotlyBase.relayout!(
 	return staged
 end
 
+function PlotlyBase.relayout!(
+	staged::_HighLevelStagedPlotMutation,
+	args...;
+	kwargs...,
+)
+	# The high-level fast path has already isolated every layout container that
+	# PlotlyBase's setters can mutate. Applying the setter directly avoids
+	# cloning that candidate again for every option helper.
+	PlotlyBase.relayout!(staged.plot.layout, args...; kwargs...)
+	return staged
+end
+
 function PlotlyBase.react!(
 	staged::_StagedPlotMutation,
+	data::AbstractVector{<:AbstractTrace},
+	layout::AbstractLayout,
+)
+	_do_react!(staged.plot, data, layout)
+	return staged
+end
+
+function PlotlyBase.react!(
+	staged::_HighLevelStagedPlotMutation,
 	data::AbstractVector{<:AbstractTrace},
 	layout::AbstractLayout,
 )
@@ -56,7 +82,24 @@ function PlotlyBase.addtraces!(
 end
 
 function PlotlyBase.addtraces!(
+	staged::_HighLevelStagedPlotMutation,
+	traces::AbstractTrace...,
+)
+	_do_addtraces!(staged.plot, traces...)
+	return staged
+end
+
+function PlotlyBase.addtraces!(
 	staged::_StagedPlotMutation,
+	index::Int,
+	traces::AbstractTrace...,
+)
+	_do_addtraces!(staged.plot, index, traces...)
+	return staged
+end
+
+function PlotlyBase.addtraces!(
+	staged::_HighLevelStagedPlotMutation,
 	index::Int,
 	traces::AbstractTrace...,
 )
@@ -72,6 +115,25 @@ for updater in (
 	:update_polars!,
 	:update_scenes!,
 	:update_ternaries!,
+)
+	@eval function PlotlyBase.$updater(
+		staged::Union{
+			_StagedPlotMutation,
+			_HighLevelStagedPlotMutation,
+		},
+		with::PlotlyBase.PlotlyAttribute = attr();
+		kwargs...,
+	)
+		PlotlyBase.$updater(
+			staged.plot.layout,
+			with;
+			kwargs...,
+		)
+		return staged
+	end
+end
+
+for updater in (
 	:update_annotations!,
 	:update_shapes!,
 	:update_images!,
@@ -98,17 +160,52 @@ function _transactional_high_level_plot_mutation!(
 )
 	result = Ref{Any}(nothing)
 	staged_target = Ref{Any}(nothing)
-	mutation = function (candidate)
+	full_mutation = function (candidate)
 		staged = _StagedPlotMutation(candidate)
 		staged_target[] = staged
 		result[] = mutator(staged, args...; kwargs...)
 		return nothing
 	end
+	fast_mutation = function (candidate)
+		staged = _HighLevelStagedPlotMutation(candidate)
+		staged_target[] = staged
+		result[] = mutator(staged, args...; kwargs...)
+		return nothing
+	end
+	fast_path_allowed =
+		(
+			mutator === _set_legend_impl! ||
+			_is_transactional_high_level_plot_mutator(mutator)
+		) &&
+		!(
+			mutator === plot_surface! &&
+			get(kwargs, :shared_coloraxis, false) === true
+		)
 
-	if fig isa SyncPlot
-		_mutate_and_refresh_syncplot!(mutation, fig)
+	if !fast_path_allowed
+		if fig isa SyncPlot
+			_mutate_and_refresh_syncplot!(full_mutation, fig)
+		else
+			_transactional_full_plot_mutation!(
+				full_mutation,
+				fig,
+			)
+		end
+	elseif fig isa SyncPlot
+		prepare = (target, current) ->
+			_prepare_high_level_plot_mutation_transaction(
+				target,
+				current,
+				fast_mutation,
+				full_mutation,
+			)
+		_syncplot_transaction!(fig, prepare)
 	else
-		_transactional_full_plot_mutation!(mutation, fig)
+		_transactional_high_level_model_mutation!(
+			fast_mutation,
+			full_mutation,
+			fig,
+		)
 	end
 	return result[] === staged_target[] ? fig : result[]
 end
@@ -9770,6 +9867,14 @@ const _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS = (
 	:plot_densitymapbox!,
 	:set_template!,
 )
+
+function _is_transactional_high_level_plot_mutator(mutator::Function)
+	for function_name in _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS
+		mutator === getfield(@__MODULE__, function_name) &&
+			return true
+	end
+	return false
+end
 
 function _install_transactional_high_level_plot_wrappers!()
 	for function_name in _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS
