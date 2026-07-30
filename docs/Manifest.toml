@@ -478,7 +478,7 @@ version = "0.8.23"
 deps = ["Base64", "ElectronCall", "LazyArtifacts", "MeshGrid", "PlotlyBase", "Reexport"]
 path = ".."
 uuid = "a389b534-8bca-4fe3-8ff2-14829cd8824f"
-version = "1.8.0"
+version = "1.8.1"
 
 [[deps.PrecompileTools]]
 deps = ["Preferences"]
