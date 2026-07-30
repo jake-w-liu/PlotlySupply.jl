@@ -103,13 +103,31 @@ function _require_valid_finalized_map_layouts(
 	targets,
 )
 	for key in targets
+		value = _finalized_layout_value(
+			mutations,
+			layout,
+			key,
+		)
+		_require_unambiguous_layout_mapping(
+			value,
+			"layout.$key",
+		)
+		contents = _finalized_layout_mapping_dict(
+			mutations,
+			value,
+		)
+		for nested_key in (:center, :bounds)
+			haskey(contents, nested_key) || continue
+			nested = contents[nested_key]
+			_is_layout_mapping(nested) || continue
+			_require_unambiguous_layout_mapping(
+				nested,
+				"layout.$key.$nested_key",
+			)
+		end
 		projected = _finalized_layout_attr(
 			mutations,
-			_finalized_layout_value(
-				mutations,
-				layout,
-				key,
-			),
+			value,
 			(:center, :bounds),
 		)
 		probe = Layout()
@@ -140,11 +158,13 @@ function _update_all_maps!(
 		)
 	end
 	mutations = _finalize_layout_merge_context(context)
-	_require_valid_finalized_map_layouts(
-		mutations,
-		layout,
-		targets,
-	)
+	for key in targets
+		_require_valid_finalized_layout_merge(
+			mutations,
+			layout,
+			key,
+		)
+	end
 	_commit_layout_merge_context!(context, mutations)
 	return layout
 end

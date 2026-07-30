@@ -1494,6 +1494,19 @@ function _prepare_relayout_inputs(
 	return prepared_args, prepared_kwargs
 end
 
+function _seal_unchanged_projection_target!(
+	projection::Union{Nothing,IdDict},
+	target,
+)
+	projection === nothing ||
+		_seal_projection_target!(
+			projection,
+			target,
+			IdDict{Any,Nothing}(),
+		)
+	return target
+end
+
 function _rebase_unchanged_mutation_container!(
 	original,
 	staged,
@@ -1504,6 +1517,11 @@ function _rebase_unchanged_mutation_container!(
 	if preserved_roots !== nothing &&
 			haskey(preserved_roots, staged)
 		rebased = preserved_roots[staged]
+		original === rebased &&
+			_seal_unchanged_projection_target!(
+				preserved_roots,
+				original,
+			)
 		return rebased, original === rebased
 	end
 	preserved_roots === nothing &&
@@ -1528,6 +1546,11 @@ function _rebase_unchanged_mutation_container!(
 		haskey(memo, original) &&
 		memo[original] === staged
 	if !memoized_counterpart && ismutable(original)
+		original === staged &&
+			_seal_unchanged_projection_target!(
+				preserved_roots,
+				original,
+			)
 		return staged, original === staged
 	end
 	if haskey(seen, original)
@@ -1549,6 +1572,11 @@ function _rebase_unchanged_mutation_container!(
 		unchanged &&
 			ismutable(staged) &&
 			(preserved_roots[staged] = rebased)
+		unchanged &&
+			_seal_unchanged_projection_target!(
+				preserved_roots,
+				original,
+			)
 		return rebased, unchanged
 	end
 	seen[original] = staged
@@ -1610,6 +1638,10 @@ function _rebase_unchanged_mutation_container!(
 		end
 		if unchanged
 			preserved_roots[staged] = original
+			_seal_unchanged_projection_target!(
+				preserved_roots,
+				original,
+			)
 			return original, true
 		end
 		if writable_storage
@@ -1694,6 +1726,10 @@ function _rebase_unchanged_mutation_container!(
 	if unchanged
 		ismutable(staged) &&
 			(preserved_roots[staged] = original)
+		_seal_unchanged_projection_target!(
+			preserved_roots,
+			original,
+		)
 		return original, true
 	end
 
@@ -2056,6 +2092,53 @@ function _rebase_staged_traces!(
 	return staged
 end
 
+function _seal_projection_target!(
+	projection::IdDict,
+	target,
+	seen::IdDict{Any,Nothing},
+)
+	_projection_graph_terminal(target) && return projection
+	haskey(seen, target) && return projection
+	seen[target] = nothing
+	if ismutable(target)
+		haskey(projection, target) ||
+			(projection[target] = target)
+		return projection
+	end
+	if _is_builtin_element_storage(target)
+		for index in eachindex(target)
+			isassigned(target, index) || continue
+			_seal_projection_target!(
+				projection,
+				target[index],
+				seen,
+			)
+		end
+		return projection
+	end
+	for index in 1:fieldcount(typeof(target))
+		isdefined(target, index) || continue
+		_seal_projection_target!(
+			projection,
+			getfield(target, index),
+			seen,
+		)
+	end
+	return projection
+end
+
+function _seal_projection_targets!(projection::IdDict)
+	seen = IdDict{Any,Nothing}()
+	for target in collect(values(projection))
+		_seal_projection_target!(
+			projection,
+			target,
+			seen,
+		)
+	end
+	return projection
+end
+
 function _rebase_staged_layout!(
 	original::AbstractLayout,
 	staged::AbstractLayout,
@@ -2063,6 +2146,34 @@ function _rebase_staged_layout!(
 	preserved_roots::Union{Nothing,IdDict} = nothing,
 )
 	if original isa Layout && staged isa Layout
+		if preserved_roots === nothing &&
+				_staged_graph_unchanged(
+					original,
+					staged,
+					memo,
+				)
+			setfield!(staged, :fields, original.fields)
+			setfield!(
+				staged,
+				:subplots,
+				original.subplots,
+			)
+			return staged
+		end
+		if preserved_roots !== nothing
+			haskey(preserved_roots, staged) ||
+				(preserved_roots[staged] = original)
+		end
+		original_subplots = getfield(original, :subplots)
+		staged_subplots = getfield(staged, :subplots)
+		unchanged_subplots =
+			preserved_roots === nothing &&
+			original_subplots !== staged_subplots &&
+			_staged_graph_unchanged(
+				original_subplots,
+				staged_subplots,
+				memo,
+			)
 		fields, _ = _rebase_unchanged_mutation_container!(
 			original.fields,
 			staged.fields,
@@ -2070,6 +2181,29 @@ function _rebase_staged_layout!(
 			preserved_roots,
 		)
 		fields === staged.fields || setfield!(staged, :fields, fields)
+		if original_subplots !== staged_subplots
+			if preserved_roots === nothing
+				unchanged_subplots && setfield!(
+					staged,
+					:subplots,
+					original_subplots,
+				)
+			else
+				subplots, _ =
+					_rebase_unchanged_mutation_container!(
+						original_subplots,
+						staged_subplots,
+						memo,
+						preserved_roots,
+					)
+				subplots === staged_subplots ||
+					setfield!(
+						staged,
+						:subplots,
+						subplots,
+					)
+			end
+		end
 	end
 	return staged
 end
@@ -2182,6 +2316,11 @@ function _rebuild_projected_component!(
 	end
 
 	projection_memo = copy(preserved_roots)
+	# Earlier child rebases can publish new staged-to-public targets after the
+	# transaction's initial projection seal. Seal those targets now so
+	# rebuilding this component cannot clone a public mutable root (including
+	# one nested inside an immutable wrapper).
+	_seal_projection_targets!(projection_memo)
 	for value in keys(component)
 		delete!(projection_memo, value)
 	end
@@ -4251,6 +4390,9 @@ function _expand_staged_alias_roots!(
 	root_translation[p.layout] = p.layout
 	root_translation[p.frames] = p.frames
 	root_translation[p.config] = p.config
+	_seal_projection_targets!(
+		root_translation,
+	)
 	if setter_origins !== nothing
 		# Values that the optimized setter staging deliberately passed through
 		# must retain their identity when a newly inserted plotting dictionary
@@ -4497,8 +4639,11 @@ end
 
 function _commit_layout!(p::Plot, staged::AbstractLayout)
 	if p.layout isa Layout && staged isa Layout
-		# Preserve Layout identity and its Subplots routing metadata.
+		# Preserve Layout identity. Subplot routing metadata normally rebases
+		# to the original value, but a projected replacement is required when
+		# it carries an alias to a changed layout or trace container.
 		setfield!(p.layout, :fields, staged.fields)
+		setfield!(p.layout, :subplots, staged.subplots)
 	else
 		setfield!(p, :layout, staged)
 	end
@@ -6160,6 +6305,9 @@ function _prepare_full_model_mutation_transaction(
 	for (original, staged) in preserved_layout_attributes
 		preserved_staged_roots[staged] = original
 	end
+	_seal_projection_targets!(
+		preserved_staged_roots,
+	)
 
 	committed_layout_attribute_fields = IdDict{Any,Any}()
 	for (original, staged) in preserved_layout_attributes

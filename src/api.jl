@@ -1467,18 +1467,44 @@ _is_layout_mapping(value) =
 	value isa AbstractDict ||
 	value isa NamedTuple
 
-function _merge_known_nested_layout_field!(
-	target::Dict{Symbol, Any},
-	source::Dict{Symbol, Any},
-	key::Symbol,
+const _AXIS_LAYOUT_MERGE_PATHS = ((:title,),)
+const _GEO_LAYOUT_MERGE_PATHS = ((:projection,),)
+const _POLAR_LAYOUT_MERGE_PATHS = (
+	(:radialaxis, :title),
+	(:angularaxis, :title),
 )
-	haskey(source, key) || return nothing
-	source_value = source[key]
-	_is_layout_mapping(source_value) || return nothing
-	merged = _symbol_dict(get(target, key, nothing))
-	merge!(merged, _symbol_dict(source_value))
-	source[key] = attr(merged)
-	return nothing
+const _SCENE_LAYOUT_MERGE_PATHS = (
+	(:xaxis, :title),
+	(:yaxis, :title),
+	(:zaxis, :title),
+	(:camera, :projection),
+)
+const _TERNARY_LAYOUT_MERGE_PATHS = (
+	(:aaxis, :title),
+	(:baxis, :title),
+	(:caxis, :title),
+)
+const _MAPBOX_LAYOUT_MERGE_PATHS = ((:center,),)
+const _MAP_LAYOUT_MERGE_PATHS = (
+	(:center,),
+	(:bounds,),
+)
+
+function _prepare_scene_layout_attr_merge!(
+	context,
+	layout::Layout,
+	key::Symbol,
+	source,
+)
+	return _prepare_layout_attr_merge!(
+		context,
+		layout,
+		key,
+		source;
+		drop_keys = (:domain,),
+		deep_merge_paths = _SCENE_LAYOUT_MERGE_PATHS,
+		mutate_builtin_target = true,
+	)
 end
 
 # Scene updates produced by PlotlySupply are deliberately partial. Merge only
@@ -1490,43 +1516,34 @@ function _merge_scene_layout_attr!(
 	key::Symbol,
 	source,
 )
-	source_scene = _symbol_dict(source)
-	isempty(source_scene) && return nothing
-	pop!(source_scene, :domain, nothing)
-	target_scene = _symbol_dict(get(layout.fields, key, nothing))
-
-	for axis_key in (:xaxis, :yaxis, :zaxis)
-		haskey(source_scene, axis_key) || continue
-		source_axis_value = source_scene[axis_key]
-		_is_layout_mapping(source_axis_value) || continue
-		target_axis = _symbol_dict(get(target_scene, axis_key, nothing))
-		source_axis = _symbol_dict(source_axis_value)
-		_merge_known_nested_layout_field!(
-			target_axis,
-			source_axis,
-			:title,
-		)
-		merge!(target_axis, source_axis)
-		source_scene[axis_key] = attr(target_axis)
-	end
-
-	if haskey(source_scene, :camera) &&
-		_is_layout_mapping(source_scene[:camera])
-		target_camera =
-			_symbol_dict(get(target_scene, :camera, nothing))
-		source_camera = _symbol_dict(source_scene[:camera])
-		_merge_known_nested_layout_field!(
-			target_camera,
-			source_camera,
-			:projection,
-		)
-		merge!(target_camera, source_camera)
-		source_scene[:camera] = attr(target_camera)
-	end
-
-	merge!(target_scene, source_scene)
-	layout.fields[key] = attr(target_scene)
+	context = _new_layout_merge_context()
+	changed = _prepare_scene_layout_attr_merge!(
+		context,
+		layout,
+		key,
+		source,
+	)
+	changed || return nothing
+	mutations = _finalize_layout_merge_context(context)
+	_commit_layout_merge_context!(context, mutations)
 	return nothing
+end
+
+function _prepare_ternary_layout_attr_merge!(
+	context,
+	layout::Layout,
+	key::Symbol,
+	source,
+)
+	return _prepare_layout_attr_merge!(
+		context,
+		layout,
+		key,
+		source;
+		drop_keys = (:domain,),
+		deep_merge_paths = _TERNARY_LAYOUT_MERGE_PATHS,
+		mutate_builtin_target = true,
+	)
 end
 
 # Ternary labels are partial axis updates, just like 3D scene labels. Preserve
@@ -1537,29 +1554,16 @@ function _merge_ternary_layout_attr!(
 	key::Symbol,
 	source,
 )
-	source_ternary = _symbol_dict(source)
-	isempty(source_ternary) && return nothing
-	pop!(source_ternary, :domain, nothing)
-	target_ternary = _symbol_dict(get(layout.fields, key, nothing))
-
-	for axis_key in (:aaxis, :baxis, :caxis)
-		haskey(source_ternary, axis_key) || continue
-		source_axis_value = source_ternary[axis_key]
-		_is_layout_mapping(source_axis_value) || continue
-		target_axis =
-			_symbol_dict(get(target_ternary, axis_key, nothing))
-		source_axis = _symbol_dict(source_axis_value)
-		_merge_known_nested_layout_field!(
-			target_axis,
-			source_axis,
-			:title,
-		)
-		merge!(target_axis, source_axis)
-		source_ternary[axis_key] = attr(target_axis)
-	end
-
-	merge!(target_ternary, source_ternary)
-	layout.fields[key] = attr(target_ternary)
+	context = _new_layout_merge_context()
+	changed = _prepare_ternary_layout_attr_merge!(
+		context,
+		layout,
+		key,
+		source,
+	)
+	changed || return nothing
+	mutations = _finalize_layout_merge_context(context)
+	_commit_layout_merge_context!(context, mutations)
 	return nothing
 end
 
@@ -1574,6 +1578,26 @@ function _builtin_layout_mapping_fields(existing)
 	return fields isa Dict || fields isa IdDict ?
 		fields :
 		nothing
+end
+
+function _is_persistent_immutable_layout_mapping(existing)
+	return existing isa Base.ImmutableDict ||
+		(
+			isdefined(Base, :PersistentDict) &&
+			existing isa getfield(Base, :PersistentDict)
+		)
+end
+
+function _requires_supported_layout_mapping_storage(existing)
+	(
+		existing isa PlotlyBase.PlotlyAttribute ||
+		existing isa AbstractDict
+	) || return false
+	_builtin_layout_mapping_fields(existing) === nothing ||
+		return false
+	# Persistent mappings have no in-place write API, so replacing them is the
+	# only possible update and does not abandon a mutable mapping identity.
+	return !_is_persistent_immutable_layout_mapping(existing)
 end
 
 function _layout_mapping_storage(existing)
@@ -1633,6 +1657,7 @@ function _new_layout_merge_context()
 	return (
 		contents = IdDict{Any, Dict{Symbol, Any}}(),
 		paths = IdDict{Any, String}(),
+		roots = IdDict{Any, Nothing}(),
 	)
 end
 
@@ -1731,10 +1756,445 @@ function _finalize_layout_merge_context(context)
 	return mutations
 end
 
+function _layout_merge_graph_terminal(value)
+	return (
+		isbits(value) ||
+		value isa Symbol ||
+		value isa String ||
+		value isa Type ||
+		value isa Module ||
+		value isa Function ||
+		value isa BigInt ||
+		value isa BigFloat
+	)
+end
+
+function _collect_layout_mapping_implementation_identities!(
+	identities::IdDict{Any,Nothing},
+	value,
+	seen::IdDict{Any,Nothing},
+)
+	_layout_merge_graph_terminal(value) &&
+		return identities
+	haskey(seen, value) && return identities
+	seen[value] = nothing
+	ismutable(value) &&
+		(identities[value] = nothing)
+	(
+		value isa Dict ||
+		value isa IdDict ||
+		value isa AbstractArray
+	) && return identities
+	for index in 1:fieldcount(typeof(value))
+		isdefined(value, index) || continue
+		_collect_layout_mapping_implementation_identities!(
+			identities,
+			getfield(value, index),
+			seen,
+		)
+	end
+	return identities
+end
+
+function _add_layout_mapping_implementation_identities!(
+	identities::IdDict{Any,Nothing},
+	value,
+)
+	storage = _layout_mapping_storage(value)
+	(
+		storage === nothing ||
+		storage isa Dict ||
+		storage isa IdDict
+	) && return identities
+	seen = IdDict{Any,Nothing}(storage => nothing)
+	for index in 1:fieldcount(typeof(storage))
+		isdefined(storage, index) || continue
+		_collect_layout_mapping_implementation_identities!(
+			identities,
+			getfield(storage, index),
+			seen,
+		)
+	end
+	return identities
+end
+
+function _layout_mapping_has_model_alias(
+	plot::Plot,
+	key::Symbol,
+)
+	layout = plot.layout
+	layout isa Layout || return false
+	root = get(layout.fields, key, nothing)
+	_is_layout_mapping(root) || return false
+
+	identities = IdDict{Any,Nothing}(root => nothing)
+	storage = _layout_mapping_storage(root)
+	storage === nothing ||
+		(identities[storage] = nothing)
+	_add_layout_mapping_implementation_identities!(
+		identities,
+		root,
+	)
+	path = Any[]
+
+	if storage !== nothing
+		for (stored_key, child) in pairs(storage)
+			_modern_map_graph_contains_identity(
+				stored_key,
+				identities,
+				path,
+			) && return true
+			_modern_map_graph_contains_identity(
+				child,
+				identities,
+				path,
+			) && return true
+		end
+	end
+	for (stored_key, child) in pairs(layout.fields)
+		candidate_key =
+			stored_key isa Symbol ||
+			stored_key isa String ?
+			Symbol(stored_key) :
+			nothing
+		candidate_key === key && child === root &&
+			continue
+		_modern_map_graph_contains_identity(
+			stored_key,
+			identities,
+			path,
+		) && return true
+		_modern_map_graph_contains_identity(
+			child,
+			identities,
+			path,
+		) && return true
+	end
+	for graph_root in (
+		plot.data,
+		plot.frames,
+		plot.config,
+		getfield(layout, :subplots),
+	)
+		_modern_map_graph_contains_identity(
+			graph_root,
+			identities,
+			path,
+		) && return true
+	end
+	return false
+end
+
+function _nested_layout_mapping_model_alias(
+	plot::Plot,
+	key::Symbol,
+	nested_key::Symbol,
+)
+	layout = plot.layout
+	layout isa Layout || return (false, nothing)
+	root = get(layout.fields, key, nothing)
+	_is_layout_mapping(root) ||
+		return (false, nothing)
+
+	nested = nothing
+	found = false
+	for (stored_key, child) in pairs(root)
+		(
+			stored_key isa Symbol ||
+			stored_key isa String
+		) || continue
+		Symbol(stored_key) === nested_key || continue
+		nested = child
+		found = true
+		break
+	end
+	(
+		found &&
+		_is_layout_mapping(nested)
+	) || return (false, nested)
+
+	identities = IdDict{Any,Nothing}(nested => nothing)
+	nested_storage =
+		_layout_mapping_storage(nested)
+	nested_storage === nothing ||
+		(identities[nested_storage] = nothing)
+	_add_layout_mapping_implementation_identities!(
+		identities,
+		nested,
+	)
+	path = Any[]
+
+	for (stored_key, child) in pairs(nested)
+		_modern_map_graph_contains_identity(
+			stored_key,
+			identities,
+			path,
+		) && return (true, nested)
+		_modern_map_graph_contains_identity(
+			child,
+			identities,
+			path,
+		) && return (true, nested)
+	end
+	for (stored_key, child) in pairs(root)
+		_modern_map_graph_contains_identity(
+			stored_key,
+			identities,
+			path,
+		) && return (true, nested)
+		candidate_key =
+			stored_key isa Symbol ||
+			stored_key isa String ?
+			Symbol(stored_key) :
+			nothing
+		candidate_key === nested_key &&
+			child === nested &&
+			continue
+		_modern_map_graph_contains_identity(
+			child,
+			identities,
+			path,
+		) && return (true, nested)
+	end
+	for (stored_key, child) in pairs(layout.fields)
+		_modern_map_graph_contains_identity(
+			stored_key,
+			identities,
+			path,
+		) && return (true, nested)
+		candidate_key =
+			stored_key isa Symbol ||
+			stored_key isa String ?
+			Symbol(stored_key) :
+			nothing
+		candidate_key === key && child === root &&
+			continue
+		_modern_map_graph_contains_identity(
+			child,
+			identities,
+			path,
+		) && return (true, nested)
+	end
+	for graph_root in (
+		plot.data,
+		plot.frames,
+		plot.config,
+		getfield(layout, :subplots),
+	)
+		_modern_map_graph_contains_identity(
+			graph_root,
+			identities,
+			path,
+		) && return (true, nested)
+	end
+	return (false, nested)
+end
+
+function _preserve_layout_mapping_root(
+	plot::Plot,
+	key::Symbol,
+	nested_keys::Tuple{Vararg{Symbol}} =
+		(:title,),
+)
+	existing = get(plot.layout.fields, key, nothing)
+	preserve_builtin_root =
+		existing isa PlotlyBase.PlotlyAttribute &&
+		_builtin_layout_mapping_fields(existing) !== nothing
+	root_has_alias =
+		_layout_mapping_has_model_alias(plot, key)
+	if root_has_alias &&
+		_requires_supported_layout_mapping_storage(
+			existing,
+		)
+		throw(ArgumentError(
+			"layout.$key uses aliased $(typeof(existing)) storage, which " *
+			"cannot be updated without splitting the alias. Use a " *
+			"PlotlyAttribute, Dict, or IdDict.",
+		))
+	end
+	nested_has_alias = false
+	for nested_key in nested_keys
+		has_alias, nested =
+			_nested_layout_mapping_model_alias(
+				plot,
+				key,
+				nested_key,
+			)
+		if has_alias &&
+			_requires_supported_layout_mapping_storage(
+				nested,
+			)
+			throw(ArgumentError(
+				"layout.$key.$nested_key uses aliased " *
+				"$(typeof(nested)) storage, which cannot be updated " *
+				"without splitting the alias. Use a PlotlyAttribute, " *
+				"Dict, or IdDict.",
+			))
+		end
+		nested_has_alias |= has_alias
+	end
+	return preserve_builtin_root ||
+		root_has_alias ||
+		nested_has_alias
+end
+
+function _preserve_subplot_axis_root(
+	sf::SubplotFigure,
+	key::Symbol,
+	nested_keys::Tuple{Vararg{Symbol}} =
+		(:title,),
+)
+	return _preserve_layout_mapping_root(
+		_plot_obj(sf.fig),
+		key,
+		nested_keys,
+	)
+end
+
+function _layout_merge_key_reaches_mutation(
+	value,
+	mutated::IdDict{Any,Nothing},
+	seen::IdDict{Any,Nothing},
+)
+	_layout_merge_graph_terminal(value) && return false
+	haskey(mutated, value) && return true
+	haskey(seen, value) && return false
+	seen[value] = nothing
+
+	if value isa AbstractDict
+		for (key, child) in pairs(value)
+			_layout_merge_key_reaches_mutation(
+				key,
+				mutated,
+				seen,
+			) && return true
+			_layout_merge_key_reaches_mutation(
+				child,
+				mutated,
+				seen,
+			) && return true
+		end
+		(value isa Dict || value isa IdDict) &&
+			return false
+	elseif value isa AbstractArray
+		_array_elements_may_be_mutation_containers(
+			eltype(value),
+		) || return false
+		for index in eachindex(value)
+			isassigned(value, index) || continue
+			_layout_merge_key_reaches_mutation(
+				value[index],
+				mutated,
+				seen,
+			) && return true
+		end
+		value isa Array && return false
+	end
+
+	for index in 1:fieldcount(typeof(value))
+		isdefined(value, index) || continue
+		_layout_merge_key_reaches_mutation(
+			getfield(value, index),
+			mutated,
+			seen,
+		) && return true
+	end
+	return false
+end
+
+function _layout_merge_graph_has_hash_sensitive_key(
+	value,
+	mutated::IdDict{Any,Nothing},
+	seen::IdDict{Any,Nothing},
+)
+	_layout_merge_graph_terminal(value) && return false
+	haskey(seen, value) && return false
+	seen[value] = nothing
+
+	if value isa AbstractDict
+		for (key, child) in pairs(value)
+			if !(value isa IdDict) &&
+				!_layout_merge_graph_terminal(key) &&
+				_layout_merge_key_reaches_mutation(
+					key,
+					mutated,
+					IdDict{Any,Nothing}(),
+				)
+				return true
+			end
+			_layout_merge_graph_has_hash_sensitive_key(
+				key,
+				mutated,
+				seen,
+			) && return true
+			_layout_merge_graph_has_hash_sensitive_key(
+				child,
+				mutated,
+				seen,
+			) && return true
+		end
+		(value isa Dict || value isa IdDict) &&
+			return false
+	elseif value isa AbstractArray
+		_array_elements_may_be_mutation_containers(
+			eltype(value),
+		) || return false
+		for index in eachindex(value)
+			isassigned(value, index) || continue
+			_layout_merge_graph_has_hash_sensitive_key(
+				value[index],
+				mutated,
+				seen,
+			) && return true
+		end
+		value isa Array && return false
+	end
+
+	for index in 1:fieldcount(typeof(value))
+		isdefined(value, index) || continue
+		_layout_merge_graph_has_hash_sensitive_key(
+			getfield(value, index),
+			mutated,
+			seen,
+		) && return true
+	end
+	return false
+end
+
+function _require_hash_stable_layout_merge_keys!(
+	context,
+	mutations,
+)
+	isempty(mutations) && return nothing
+	isempty(context.roots) && return nothing
+	mutated = IdDict{Any,Nothing}(
+		storage => nothing for storage in keys(mutations)
+	)
+	seen = IdDict{Any,Nothing}()
+	for root in keys(context.roots)
+		_layout_merge_graph_has_hash_sensitive_key(
+			root,
+			mutated,
+			seen,
+		) || continue
+		paths = sort!(unique!(collect(values(context.paths))))
+		throw(ArgumentError(
+			"Updating $(join(paths, ", ")) would mutate a mapping used " *
+			"as a reachable key in a hash-based dictionary. Store mutable " *
+			"identity keys in IdDict instead.",
+		))
+	end
+	return nothing
+end
+
 function _commit_layout_merge_context!(
 	context,
 	mutations = _finalize_layout_merge_context(context),
 )
+	_require_hash_stable_layout_merge_keys!(
+		context,
+		mutations,
+	)
 	# Every candidate has the same concrete dictionary type as its target and
 	# contains only concrete Symbol/String keys. Candidate construction,
 	# conversion, semantic validation, and ambiguity checks all happen before
@@ -1746,6 +2206,155 @@ function _commit_layout_merge_context!(
 	return nothing
 end
 
+function _layout_merge_paths(
+	deep_merge_keys::Tuple{Vararg{Symbol}},
+	deep_merge_paths::Tuple,
+)
+	paths = (
+		map(key -> (key,), deep_merge_keys)...,
+		deep_merge_paths...,
+	)
+	for path in paths
+		(
+			path isa Tuple &&
+			!isempty(path) &&
+			all(key -> key isa Symbol, path)
+		) || throw(ArgumentError(
+			"layout deep-merge paths must be nonempty tuples of Symbols.",
+		))
+	end
+	return paths
+end
+
+function _layout_merge_child_paths(paths::Tuple, key::Symbol)
+	return Tuple(
+		path[2:end] for path in paths
+		if !isempty(path) && first(path) === key
+	)
+end
+
+function _normalize_nested_layout_source(
+	key::Symbol,
+	value,
+)
+	if key === :title && value isa AbstractString
+		return attr(text = String(value))
+	end
+	return value
+end
+
+function _normalize_nested_layout_existing(
+	key::Symbol,
+	value,
+)
+	if key === :title && value isa AbstractString
+		return attr(text = String(value))
+	end
+	return value
+end
+
+function _require_identity_preserving_layout_mapping(
+	existing,
+	path::String,
+)
+	if _requires_supported_layout_mapping_storage(existing)
+		throw(ArgumentError(
+			"$path uses $(typeof(existing)), whose storage cannot " *
+			"be committed atomically without replacing the container and " *
+			"breaking object identity. Use a PlotlyAttribute, Dict, " *
+			"IdDict, or immutable NamedTuple.",
+		))
+	end
+	return nothing
+end
+
+function _prepare_layout_mapping_merge!(
+	context,
+	existing,
+	source,
+	path::String,
+	merge_paths::Tuple;
+	mutate_builtin_target::Bool,
+	allow_unsupported_replacement::Bool = false,
+)
+	_require_unambiguous_layout_mapping(
+		source,
+		"$path update",
+	)
+	_require_unambiguous_layout_mapping(
+		existing,
+		path,
+	)
+	if mutate_builtin_target &&
+		!allow_unsupported_replacement
+		_require_identity_preserving_layout_mapping(
+			existing,
+			path,
+		)
+	end
+
+	source_dict = _symbol_dict(source)
+	existing_fields = _builtin_layout_mapping_fields(existing)
+	target_dict = if mutate_builtin_target
+		_prepared_builtin_layout_contents!(
+			context,
+			existing,
+			path,
+		)
+	else
+		nothing
+	end
+	target_dict === nothing &&
+		(target_dict = _symbol_dict(existing))
+
+	processed = Set{Symbol}()
+	for merge_path in merge_paths
+		isempty(merge_path) && continue
+		nested_key = first(merge_path)
+		nested_key in processed && continue
+		push!(processed, nested_key)
+		haskey(source_dict, nested_key) || continue
+
+		source_nested = _normalize_nested_layout_source(
+			nested_key,
+			source_dict[nested_key],
+		)
+		source_dict[nested_key] = source_nested
+		_is_layout_mapping(source_nested) || continue
+
+		existing_nested = _normalize_nested_layout_existing(
+			nested_key,
+			get(target_dict, nested_key, nothing),
+		)
+		child_paths = _layout_merge_child_paths(
+			merge_paths,
+			nested_key,
+		)
+		merged_nested, _ = _prepare_layout_mapping_merge!(
+			context,
+			existing_nested,
+			source_nested,
+			"$path.$nested_key",
+			child_paths;
+			mutate_builtin_target = mutate_builtin_target,
+			allow_unsupported_replacement =
+				allow_unsupported_replacement,
+		)
+		source_dict[nested_key] = merged_nested
+	end
+
+	merge!(target_dict, source_dict)
+	preserve_existing =
+		mutate_builtin_target &&
+		existing_fields !== nothing
+	return (
+		preserve_existing ?
+			existing :
+			attr(target_dict),
+		preserve_existing,
+	)
+end
+
 function _prepare_layout_attr_merge!(
 	context,
 	layout::Layout,
@@ -1753,8 +2362,11 @@ function _prepare_layout_attr_merge!(
 	source;
 	drop_keys::Tuple{Vararg{Symbol}} = (),
 	deep_merge_keys::Tuple{Vararg{Symbol}} = (),
+	deep_merge_paths::Tuple = (),
 	mutate_builtin_target::Bool = false,
+	allow_unsupported_replacement::Bool = false,
 )
+	context.roots[layout] = nothing
 	_require_unambiguous_layout_mapping(
 		source,
 		"layout.$key update",
@@ -1766,68 +2378,22 @@ function _prepare_layout_attr_merge!(
 	end
 	isempty(source_dict) && return false
 	existing = get(layout.fields, key, nothing)
-	_require_unambiguous_layout_mapping(
-		existing,
-		"layout.$key",
+	merge_paths = _layout_merge_paths(
+		deep_merge_keys,
+		deep_merge_paths,
 	)
-	existing_fields = _builtin_layout_mapping_fields(existing)
-	target_dict = if mutate_builtin_target
-		_prepared_builtin_layout_contents!(
+	merged, preserve_existing =
+		_prepare_layout_mapping_merge!(
 			context,
 			existing,
+			source_dict,
 			"layout.$key",
+			merge_paths;
+			mutate_builtin_target = mutate_builtin_target,
+			allow_unsupported_replacement =
+				allow_unsupported_replacement,
 		)
-	else
-		nothing
-	end
-	if target_dict === nothing
-		target_dict = _symbol_dict(existing)
-	end
-	mutate_nested_target =
-		mutate_builtin_target &&
-		existing_fields !== nothing
-	for nested_key in deep_merge_keys
-		haskey(source_dict, nested_key) || continue
-		source_nested = source_dict[nested_key]
-		(
-			source_nested isa PlotlyBase.PlotlyAttribute ||
-			source_nested isa AbstractDict ||
-			source_nested isa NamedTuple
-		) || continue
-		_require_unambiguous_layout_mapping(
-			source_nested,
-			"layout.$key.$nested_key update",
-		)
-		existing_nested = get(target_dict, nested_key, nothing)
-		_require_unambiguous_layout_mapping(
-			existing_nested,
-			"layout.$key.$nested_key",
-		)
-		existing_nested_fields =
-			_builtin_layout_mapping_fields(existing_nested)
-		nested = if mutate_nested_target
-			_prepared_builtin_layout_contents!(
-				context,
-				existing_nested,
-				"layout.$key.$nested_key",
-			)
-		else
-			nothing
-		end
-		if nested === nothing
-			nested = _symbol_dict(existing_nested)
-		end
-		merge!(nested, _symbol_dict(source_nested))
-		source_dict[nested_key] =
-			mutate_nested_target &&
-			existing_nested_fields !== nothing ?
-			existing_nested :
-			attr(nested)
-	end
-	merge!(target_dict, source_dict)
-
-	if mutate_builtin_target &&
-		existing_fields !== nothing
+	if preserve_existing
 		return true
 	end
 	layout_contents = _prepared_builtin_layout_contents!(
@@ -1839,7 +2405,7 @@ function _prepare_layout_attr_merge!(
 		"layout.fields uses $(typeof(layout.fields)); replacing " *
 		"layout.$key atomically requires Dict or IdDict storage.",
 	))
-	layout_contents[key] = attr(target_dict)
+	layout_contents[key] = merged
 	return true
 end
 
@@ -1849,7 +2415,9 @@ function _merge_layout_attr!(
 	source;
 	drop_keys::Tuple{Vararg{Symbol}} = (),
 	deep_merge_keys::Tuple{Vararg{Symbol}} = (),
+	deep_merge_paths::Tuple = (),
 	mutate_builtin_target::Bool = false,
+	allow_unsupported_replacement::Bool = false,
 )
 	context = _new_layout_merge_context()
 	changed = _prepare_layout_attr_merge!(
@@ -1859,7 +2427,10 @@ function _merge_layout_attr!(
 		source;
 		drop_keys = drop_keys,
 		deep_merge_keys = deep_merge_keys,
+		deep_merge_paths = deep_merge_paths,
 		mutate_builtin_target = mutate_builtin_target,
+		allow_unsupported_replacement =
+			allow_unsupported_replacement,
 	)
 	changed || return nothing
 	mutations = _finalize_layout_merge_context(context)
@@ -1879,17 +2450,88 @@ function _require_valid_finalized_layout_merge(
 	layout::Layout,
 	key::Symbol,
 )
+	mapping_storage_mutated = function (value)
+		fields = _builtin_layout_mapping_fields(value)
+		return fields !== nothing &&
+			haskey(mutations, fields)
+	end
+	map_root_mutated = function (
+		value,
+		nested_keys,
+		path,
+	)
+		mapping_storage_mutated(value) && return true
+		_is_layout_mapping(value) || return false
+		for (stored_key, nested) in pairs(value)
+			if mapping_storage_mutated(stored_key)
+				_require_unambiguous_layout_mapping(
+					value,
+					path,
+				)
+			end
+			mapping_storage_mutated(nested) ||
+				continue
+			if !(
+				stored_key isa Symbol ||
+				stored_key isa String
+			)
+				_require_unambiguous_layout_mapping(
+					value,
+					path,
+				)
+			end
+			Symbol(stored_key) in nested_keys ||
+				continue
+			return true
+		end
+		return false
+	end
+
+	map_targets = Symbol[]
+	mapbox_targets = Symbol[]
+	for (stored_key, value) in layout.fields
+		(
+			stored_key isa Symbol ||
+			stored_key isa String
+		) || continue
+		candidate_key = Symbol(stored_key)
+		if _is_modern_map_layout_key(candidate_key)
+			map_root_mutated(
+				value,
+				(:center, :bounds),
+				"layout.$candidate_key",
+			) || continue
+			candidate_key in map_targets ||
+				push!(map_targets, candidate_key)
+		elseif startswith(String(candidate_key), "mapbox")
+			map_root_mutated(
+				value,
+				(:center,),
+				"layout.$candidate_key",
+			) || continue
+			candidate_key in mapbox_targets ||
+				push!(mapbox_targets, candidate_key)
+		end
+	end
 	if _is_modern_map_layout_key(key)
+		key in map_targets || push!(map_targets, key)
+	elseif startswith(String(key), "mapbox")
+		key in mapbox_targets ||
+			push!(mapbox_targets, key)
+	end
+
+	if !isempty(map_targets)
 		_require_valid_finalized_map_layouts(
 			mutations,
 			layout,
-			(key,),
+			map_targets,
 		)
-	elseif startswith(String(key), "mapbox")
+	end
+	if !isempty(mapbox_targets)
 		_require_valid_finalized_mapbox_layouts(
 			mutations,
 			layout,
-			(key,),
+			mapbox_targets,
 		)
 	end
 	return nothing
@@ -1902,6 +2544,16 @@ function _apply_source_layout_to_added_traces!(
 )
 	start_index > length(target.data) && return nothing
 	processed = Set{Symbol}()
+	context = _new_layout_merge_context()
+	context.roots[target] = nothing
+	context.roots[source] = nothing
+	changed_keys = Symbol[]
+
+	function record_change!(key::Symbol, changed::Bool)
+		changed || return nothing
+		key in changed_keys || push!(changed_keys, key)
+		return nothing
+	end
 
 	for idx in start_index:length(target.data)
 		fields = target.data[idx].fields
@@ -1913,22 +2565,84 @@ function _apply_source_layout_to_added_traces!(
 			ykey = _axis_layout_key(yref, :y)
 
 			if !(xkey in processed)
-				_merge_layout_attr!(
-					target.layout,
+				source_axis =
+					get(
+						source.layout.fields,
+						:xaxis,
+						nothing,
+					)
+				filtered_source =
+					_symbol_dict(source_axis)
+				pop!(filtered_source, :domain, nothing)
+				pop!(filtered_source, :anchor, nothing)
+				preserve_root =
+					!isempty(filtered_source) &&
+					_preserve_layout_mapping_root(
+						target,
+						xkey,
+						haskey(
+							filtered_source,
+							:title,
+						) ?
+							(:title,) :
+							(),
+					)
+				record_change!(
 					xkey,
-					get(source.layout.fields, :xaxis, nothing);
-					drop_keys = (:domain, :anchor),
-					deep_merge_keys = (:title,),
+					_prepare_layout_attr_merge!(
+						context,
+						target.layout,
+						xkey,
+						source_axis;
+						drop_keys = (:domain, :anchor),
+						deep_merge_paths =
+							_AXIS_LAYOUT_MERGE_PATHS,
+						mutate_builtin_target =
+							preserve_root,
+						allow_unsupported_replacement =
+							true,
+					),
 				)
 				push!(processed, xkey)
 			end
 			if !(ykey in processed)
-				_merge_layout_attr!(
-					target.layout,
+				source_axis =
+					get(
+						source.layout.fields,
+						:yaxis,
+						nothing,
+					)
+				filtered_source =
+					_symbol_dict(source_axis)
+				pop!(filtered_source, :domain, nothing)
+				pop!(filtered_source, :anchor, nothing)
+				preserve_root =
+					!isempty(filtered_source) &&
+					_preserve_layout_mapping_root(
+						target,
+						ykey,
+						haskey(
+							filtered_source,
+							:title,
+						) ?
+							(:title,) :
+							(),
+					)
+				record_change!(
 					ykey,
-					get(source.layout.fields, :yaxis, nothing);
-					drop_keys = (:domain, :anchor),
-					deep_merge_keys = (:title,),
+					_prepare_layout_attr_merge!(
+						context,
+						target.layout,
+						ykey,
+						source_axis;
+						drop_keys = (:domain, :anchor),
+						deep_merge_paths =
+							_AXIS_LAYOUT_MERGE_PATHS,
+						mutate_builtin_target =
+							preserve_root,
+						allow_unsupported_replacement =
+							true,
+					),
 				)
 				push!(processed, ykey)
 			end
@@ -1937,10 +2651,14 @@ function _apply_source_layout_to_added_traces!(
 		if haskey(fields, :scene)
 			scene_key = Symbol(String(get(fields, :scene, "scene")))
 			if !(scene_key in processed)
-				_merge_scene_layout_attr!(
-					target.layout,
+				record_change!(
 					scene_key,
-					get(source.layout.fields, :scene, nothing),
+					_prepare_scene_layout_attr_merge!(
+						context,
+						target.layout,
+						scene_key,
+						get(source.layout.fields, :scene, nothing),
+					),
 				)
 				push!(processed, scene_key)
 			end
@@ -1949,12 +2667,18 @@ function _apply_source_layout_to_added_traces!(
 		if haskey(fields, :geo)
 			geo_key = Symbol(String(get(fields, :geo, "geo")))
 			if !(geo_key in processed)
-				_merge_layout_attr!(
-					target.layout,
+				record_change!(
 					geo_key,
-					get(source.layout.fields, :geo, nothing);
-					drop_keys = (:domain,),
-					deep_merge_keys = (:projection,),
+					_prepare_layout_attr_merge!(
+						context,
+						target.layout,
+						geo_key,
+						get(source.layout.fields, :geo, nothing);
+						drop_keys = (:domain,),
+						deep_merge_paths =
+							_GEO_LAYOUT_MERGE_PATHS,
+						mutate_builtin_target = true,
+					),
 				)
 				push!(processed, geo_key)
 			end
@@ -1965,36 +2689,69 @@ function _apply_source_layout_to_added_traces!(
 			source_kind, _ = _trace_subplot_kind(target.data[idx])
 			source_key = Symbol(source_kind)
 			if !(subplot_key in processed)
-				if source_kind == "ternary"
-					_merge_ternary_layout_attr!(
+				changed = if source_kind == "ternary"
+					_prepare_ternary_layout_attr_merge!(
+						context,
 						target.layout,
 						subplot_key,
-						get(source.layout.fields, source_key, nothing),
+						get(
+							source.layout.fields,
+							source_key,
+							nothing,
+						),
 					)
 				else
-					nested_keys =
+					merge_paths =
 						source_kind == "polar" ?
-						(:radialaxis, :angularaxis) :
-						source_kind in ("mapbox", "map") ?
-							(:center,) :
-							()
-					_merge_layout_attr!(
+						_POLAR_LAYOUT_MERGE_PATHS :
+						source_kind == "mapbox" ?
+							_MAPBOX_LAYOUT_MERGE_PATHS :
+							source_kind == "map" ?
+								_MAP_LAYOUT_MERGE_PATHS :
+								()
+					_prepare_layout_attr_merge!(
+						context,
 						target.layout,
 						subplot_key,
-						get(source.layout.fields, source_key, nothing);
+						get(
+							source.layout.fields,
+							source_key,
+							nothing,
+						);
 						drop_keys = (:domain,),
-						deep_merge_keys = nested_keys,
-						mutate_builtin_target =
-							source_kind in ("mapbox", "map"),
+						deep_merge_paths = merge_paths,
+						mutate_builtin_target = true,
 					)
 				end
+				record_change!(subplot_key, changed)
 				push!(processed, subplot_key)
 			end
 		end
 	end
 
-	_merge_layout_attr!(target.layout, :font, get(source.layout.fields, :font, nothing))
-	_merge_layout_attr!(target.layout, :coloraxis, get(source.layout.fields, :coloraxis, nothing))
+	for key in (:font, :coloraxis)
+		record_change!(
+			key,
+			_prepare_layout_attr_merge!(
+				context,
+				target.layout,
+				key,
+				get(source.layout.fields, key, nothing);
+				mutate_builtin_target = true,
+			),
+		)
+	end
+
+	isempty(changed_keys) && return nothing
+	mutations = _finalize_layout_merge_context(context)
+	for key in changed_keys
+		_require_valid_finalized_layout_merge(
+			mutations,
+			target.layout,
+			key,
+		)
+	end
+	_commit_layout_merge_context!(context, mutations)
 	return nothing
 end
 
@@ -2189,11 +2946,13 @@ function _subplot_geographic_update_impl!(
 		key,
 		get(temporary.fields, root_key, nothing);
 		drop_keys = (:domain,),
-		deep_merge_keys =
+		deep_merge_paths =
 			kind === :geo ?
-			(:projection,) :
-			(:center,),
-		mutate_builtin_target = kind in (:map, :mapbox),
+			_GEO_LAYOUT_MERGE_PATHS :
+			kind === :map ?
+				_MAP_LAYOUT_MERGE_PATHS :
+				_MAPBOX_LAYOUT_MERGE_PATHS,
+		mutate_builtin_target = true,
 	)
 	sf.current_row = r
 	sf.current_col = c
@@ -2279,11 +3038,15 @@ function _subplot_xlabel_impl!(
 )
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	xkey, _ = _subplot_xy_axis_keys(sf, r, c)
+	preserve_root =
+		_preserve_subplot_axis_root(sf, xkey)
 	_merge_layout_attr!(
 		_plot_layout(sf.fig),
 		xkey,
 		attr(title_text = String(label));
-		deep_merge_keys = (:title,),
+		deep_merge_paths = _AXIS_LAYOUT_MERGE_PATHS,
+		mutate_builtin_target = preserve_root,
+		allow_unsupported_replacement = true,
 	)
 	sf.current_row = r
 	sf.current_col = c
@@ -2323,11 +3086,15 @@ function _subplot_ylabel_impl!(
 )
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	_, ykey = _subplot_xy_axis_keys(sf, r, c; secondary_y = secondary_y)
+	preserve_root =
+		_preserve_subplot_axis_root(sf, ykey)
 	_merge_layout_attr!(
 		_plot_layout(sf.fig),
 		ykey,
 		attr(title_text = String(label));
-		deep_merge_keys = (:title,),
+		deep_merge_paths = _AXIS_LAYOUT_MERGE_PATHS,
+		mutate_builtin_target = preserve_root,
+		allow_unsupported_replacement = true,
 	)
 	sf.current_row = r
 	sf.current_col = c
@@ -2369,7 +3136,18 @@ function _subplot_xrange_impl!(
 	length(range) == 2 || throw(ArgumentError("`range` must have length 2."))
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	xkey, _ = _subplot_xy_axis_keys(sf, r, c)
-	_merge_layout_attr!(_plot_layout(sf.fig), xkey, attr(range = collect(range)))
+	preserve_root =
+		_preserve_subplot_axis_root(
+			sf,
+			xkey,
+			(),
+		)
+	_merge_layout_attr!(
+		_plot_layout(sf.fig),
+		xkey,
+		attr(range = collect(range));
+		mutate_builtin_target = preserve_root,
+	)
 	sf.current_row = r
 	sf.current_col = c
 	_refresh!(sf.fig)
@@ -2410,7 +3188,18 @@ function _subplot_yrange_impl!(
 	length(range) == 2 || throw(ArgumentError("`range` must have length 2."))
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	_, ykey = _subplot_xy_axis_keys(sf, r, c; secondary_y = secondary_y)
-	_merge_layout_attr!(_plot_layout(sf.fig), ykey, attr(range = collect(range)))
+	preserve_root =
+		_preserve_subplot_axis_root(
+			sf,
+			ykey,
+			(),
+		)
+	_merge_layout_attr!(
+		_plot_layout(sf.fig),
+		ykey,
+		attr(range = collect(range));
+		mutate_builtin_target = preserve_root,
+	)
 	sf.current_row = r
 	sf.current_col = c
 	_refresh!(sf.fig)
@@ -9864,33 +10653,85 @@ function _require_valid_mapbox_view(
 	zoom,
 	center_lon,
 	center_lat,
+	bearing = nothing,
+	pitch = nothing,
 )
 	for (name, value) in (
 		(:zoom, zoom),
 		(:center_lon, center_lon),
 		(:center_lat, center_lat),
+		(:bearing, bearing),
+		(:pitch, pitch),
 	)
 		value === nothing && continue
-		valid =
-			value isa Real &&
-			!(value isa Bool) &&
-			isfinite(value)
+		valid = _is_finite_plotly_number(value)
 		valid || throw(ArgumentError(
-			"mapbox: $name must be a finite real number, not $(repr(value)).",
+			"mapbox: $name must be a finite JavaScript-representable " *
+			"real number, not $(repr(value)).",
 		))
 	end
+	return nothing
+end
+
+function _require_mapbox_mapping(
+	value,
+	path::AbstractString,
+)
+	(
+		value isa PlotlyBase.PlotlyAttribute ||
+		value isa AbstractDict ||
+		value isa NamedTuple
+	) || throw(ArgumentError(
+		"mapbox: $path must be an attribute object.",
+	))
+	return nothing
+end
+
+function _require_valid_mapbox_options(
+	mapbox,
+	key,
+	finalized_mapping,
+)
+	center = Dict{Symbol,Any}()
+	if haskey(mapbox, :center) &&
+		mapbox[:center] !== nothing
+		center_value = mapbox[:center]
+		_require_mapbox_mapping(
+			center_value,
+			"layout.$key.center",
+		)
+		_require_unambiguous_layout_mapping(
+			center_value,
+			"layout.$key.center",
+		)
+		center = finalized_mapping(center_value)
+	end
+	_require_valid_mapbox_view(
+		get(mapbox, :zoom, nothing),
+		get(center, :lon, nothing),
+		get(center, :lat, nothing),
+		get(mapbox, :bearing, nothing),
+		get(mapbox, :pitch, nothing),
+	)
 	return nothing
 end
 
 function _require_valid_mapbox_layouts(layout::Layout)
 	for (key, value) in layout.fields
 		startswith(String(key), "mapbox") || continue
+		_require_mapbox_mapping(
+			value,
+			"layout.$key",
+		)
+		_require_unambiguous_layout_mapping(
+			value,
+			"layout.$key",
+		)
 		mapbox = _symbol_dict(value)
-		center = _symbol_dict(get(mapbox, :center, nothing))
-		_require_valid_mapbox_view(
-			get(mapbox, :zoom, nothing),
-			get(center, :lon, nothing),
-			get(center, :lat, nothing),
+		_require_valid_mapbox_options(
+			mapbox,
+			key,
+			_symbol_dict,
 		)
 	end
 	return nothing
@@ -9947,22 +10788,30 @@ function _require_valid_finalized_mapbox_layouts(
 	targets,
 )
 	for key in targets
+		value = _finalized_layout_value(
+			mutations,
+			layout,
+			key,
+		)
+		_require_mapbox_mapping(
+			value,
+			"layout.$key",
+		)
+		_require_unambiguous_layout_mapping(
+			value,
+			"layout.$key",
+		)
 		mapbox = _finalized_layout_mapping_dict(
 			mutations,
-			_finalized_layout_value(
+			value,
+		)
+		_require_valid_mapbox_options(
+			mapbox,
+			key,
+			value -> _finalized_layout_mapping_dict(
 				mutations,
-				layout,
-				key,
+				value,
 			),
-		)
-		center = _finalized_layout_mapping_dict(
-			mutations,
-			get(mapbox, :center, nothing),
-		)
-		_require_valid_mapbox_view(
-			get(mapbox, :zoom, nothing),
-			get(center, :lon, nothing),
-			get(center, :lat, nothing),
 		)
 	end
 	return nothing
@@ -9990,16 +10839,19 @@ function _update_mapboxes_preserving_aliases!(
 			layout,
 			key,
 			update;
-			deep_merge_keys = (:center,),
+			deep_merge_paths =
+				_MAPBOX_LAYOUT_MERGE_PATHS,
 			mutate_builtin_target = true,
 		)
 	end
 	mutations = _finalize_layout_merge_context(context)
-	_require_valid_finalized_mapbox_layouts(
-		mutations,
-		layout,
-		targets,
-	)
+	for key in targets
+		_require_valid_finalized_layout_merge(
+			mutations,
+			layout,
+			key,
+		)
+	end
 	_commit_layout_merge_context!(context, mutations)
 	return layout
 end
@@ -10038,7 +10890,8 @@ function _apply_geo_layout_options!(
 		_plot_layout(fig),
 		:geo,
 		source.fields[:geo];
-		deep_merge_keys = (:projection,),
+		deep_merge_paths = _GEO_LAYOUT_MERGE_PATHS,
+		mutate_builtin_target = true,
 	)
 	return nothing
 end
@@ -10062,7 +10915,8 @@ function _apply_mapbox_layout_options!(
 		_plot_layout(fig),
 		:mapbox,
 		source.fields[:mapbox];
-		deep_merge_keys = (:center,),
+		deep_merge_paths =
+			_MAPBOX_LAYOUT_MERGE_PATHS,
 		mutate_builtin_target = true,
 	)
 	return nothing

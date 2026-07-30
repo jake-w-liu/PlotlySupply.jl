@@ -65,6 +65,42 @@ Base.convert(
     value::Dict{Symbol,Any},
 ) = _LayoutMergeRejectingDict(value, false)
 
+struct _LayoutMergeImmutableWrapperDict <:
+       AbstractDict{Symbol,Any}
+    data::Dict{Symbol,Any}
+end
+
+struct _LayoutMergeProjectionToken
+    data::Dict{Symbol,Any}
+end
+
+Base.length(value::_LayoutMergeImmutableWrapperDict) =
+    length(value.data)
+Base.iterate(
+    value::_LayoutMergeImmutableWrapperDict,
+    state...,
+) = iterate(value.data, state...)
+Base.getindex(
+    value::_LayoutMergeImmutableWrapperDict,
+    key::Symbol,
+) = value.data[key]
+Base.get(
+    value::_LayoutMergeImmutableWrapperDict,
+    key::Symbol,
+    default,
+) = get(value.data, key, default)
+Base.setindex!(
+    value::_LayoutMergeImmutableWrapperDict,
+    item,
+    key::Symbol,
+) = setindex!(value.data, item, key)
+Base.delete!(
+    value::_LayoutMergeImmutableWrapperDict,
+    key::Symbol,
+) = delete!(value.data, key)
+Base.empty!(value::_LayoutMergeImmutableWrapperDict) =
+    (empty!(value.data); value)
+
 function _layout_merge_seed_cartesian_axis!(
     target,
     key::Symbol,
@@ -984,6 +1020,296 @@ end
     @test root[:zoom] == 1.0f0
 end
 
+@testset "CRC: mapbox view validation is JSON-safe and atomic" begin
+    huge = big(10)^1000
+    for kwargs in (
+        (; bearing=Inf),
+        (; pitch=NaN),
+        (; zoom=huge),
+        (; center_lon=huge),
+        (; center_lat=huge),
+    )
+        layout = Layout()
+        root = attr(zoom=1.0)
+        layout.fields[:mapbox] = root
+        before = deepcopy(root.fields)
+
+        @test_throws ArgumentError PlotlySupply._update_mapboxes_preserving_aliases!(
+            layout;
+            kwargs...,
+        )
+        @test layout.fields[:mapbox] === root
+        @test root.fields == before
+    end
+
+    for malformed_center in (1, "invalid", [1, 2])
+        layout = Layout()
+        root = attr(
+            center=malformed_center,
+            zoom=1.0,
+        )
+        layout.fields[:mapbox] = root
+        before = deepcopy(root.fields)
+
+        @test_throws ArgumentError PlotlySupply._update_mapboxes_preserving_aliases!(
+            layout;
+            zoom=2.0,
+        )
+        @test layout.fields[:mapbox] === root
+        @test root.fields == before
+    end
+
+    layout = Layout()
+    root = Dict{Symbol,Float32}(:bearing => 0.0f0)
+    layout.fields[:mapbox] = root
+    @test_throws ArgumentError PlotlySupply._update_mapboxes_preserving_aliases!(
+        layout;
+        bearing=1e100,
+    )
+    @test layout.fields[:mapbox] === root
+    @test root == Dict{Symbol,Float32}(
+        :bearing => 0.0f0,
+    )
+end
+
+@testset "CRC: cross-schema map aliases validate before commit" begin
+    target = _layout_merge_raw_map(:mapbox)
+    shared_root = target.layout.fields[:mapbox]
+    target.layout.fields[:map] = shared_root
+    before_root = deepcopy(
+        _layout_merge_fields(shared_root),
+    )
+    before_data_length = length(target.data)
+
+    @test_throws ArgumentError plot_scattermapbox!(
+        target,
+        [1.0],
+        [2.0];
+        style="",
+    )
+    @test length(target.data) == before_data_length
+    @test target.layout.fields[:map] === shared_root
+    @test target.layout.fields[:mapbox] === shared_root
+    @test _layout_merge_fields(shared_root) ==
+          before_root
+
+    modern_root =
+        Dict{Symbol,Any}(:style => "white-bg")
+    legacy_root =
+        Dict{Symbol,Any}(:center => modern_root)
+    layout = Layout()
+    layout.fields[:map] = modern_root
+    layout.fields[:mapbox] = legacy_root
+    modern_before = deepcopy(modern_root)
+
+    @test_throws ArgumentError PlotlySupply._update_mapboxes_preserving_aliases!(
+        layout,
+        attr(center=attr(style="")),
+    )
+    @test layout.fields[:map] === modern_root
+    @test layout.fields[:mapbox] === legacy_root
+    @test legacy_root[:center] === modern_root
+    @test modern_root == modern_before
+
+    legacy_root = Dict{Symbol,Any}(
+        :style => "white-bg",
+        :bearing => 0.0,
+    )
+    modern_root = Dict{Symbol,Any}(
+        :style => "white-bg",
+        :center => legacy_root,
+    )
+    layout = Layout()
+    layout.fields[:map] = modern_root
+    layout.fields[:mapbox] = legacy_root
+    legacy_before = deepcopy(legacy_root)
+
+    @test_throws ArgumentError update_maps!(
+        layout;
+        center_bearing=Inf,
+    )
+    @test layout.fields[:map] === modern_root
+    @test layout.fields[:mapbox] === legacy_root
+    @test modern_root[:center] === legacy_root
+    @test legacy_root == legacy_before
+
+    for make_root in (
+        (good, bad) -> Dict{Any,Any}(
+            :style => "white-bg",
+            :bounds => good,
+            "bounds" => bad,
+        ),
+        (good, bad) -> IdDict{Any,Any}(
+            :style => "white-bg",
+            :bounds => good,
+            "bounds" => bad,
+        ),
+    )
+        bad = Dict{Symbol,Any}(:west => 0.0)
+        good = Dict{Symbol,Any}(:west => 1.0)
+        modern_root = make_root(good, bad)
+        legacy_root =
+            Dict{Symbol,Any}(:center => bad)
+        layout = Layout()
+        layout.fields[:map] = modern_root
+        layout.fields[:mapbox] = legacy_root
+        bad_before = deepcopy(bad)
+
+        @test_throws ArgumentError PlotlySupply._update_mapboxes_preserving_aliases!(
+            layout,
+            attr(center=attr(west=NaN)),
+        )
+        @test layout.fields[:map] === modern_root
+        @test layout.fields[:mapbox] === legacy_root
+        @test legacy_root[:center] === bad
+        @test bad == bad_before
+    end
+
+    for make_root in (
+        bad -> Dict{Any,Any}(
+            :style => "white-bg",
+            _LayoutMergeUnsafeKey(:bounds) => bad,
+        ),
+        bad -> IdDict{Any,Any}(
+            :style => "white-bg",
+            _LayoutMergeUnsafeKey(:bounds) => bad,
+        ),
+    )
+        bad = Dict{Symbol,Any}(:west => 0.0)
+        modern_root = make_root(bad)
+        legacy_root =
+            Dict{Symbol,Any}(:center => bad)
+        layout = Layout()
+        layout.fields[:map] = modern_root
+        layout.fields[:mapbox] = legacy_root
+        bad_before = deepcopy(bad)
+
+        @test_throws ArgumentError PlotlySupply._update_mapboxes_preserving_aliases!(
+            layout,
+            attr(center=attr(west=NaN)),
+        )
+        @test layout.fields[:map] === modern_root
+        @test layout.fields[:mapbox] === legacy_root
+        @test legacy_root[:center] === bad
+        @test bad == bad_before
+    end
+
+    for make_root in (
+        bad -> Dict{Any,Any}(
+            :style => "white-bg",
+            bad => :opaque,
+        ),
+        bad -> IdDict{Any,Any}(
+            :style => "white-bg",
+            bad => :opaque,
+        ),
+    )
+        bad = Dict{Symbol,Any}(:west => 0.0)
+        modern_root = make_root(bad)
+        legacy_root =
+            Dict{Symbol,Any}(:center => bad)
+        layout = Layout()
+        layout.fields[:map] = modern_root
+        layout.fields[:mapbox] = legacy_root
+        bad_before = deepcopy(bad)
+
+        @test_throws ArgumentError PlotlySupply._update_mapboxes_preserving_aliases!(
+            layout,
+            attr(center=attr(west=NaN)),
+        )
+        @test layout.fields[:map] === modern_root
+        @test layout.fields[:mapbox] === legacy_root
+        @test legacy_root[:center] === bad
+        @test bad == bad_before
+    end
+end
+
+@testset "CRC: immutable map roots remain updateable" begin
+    for make_original in (
+        () -> Base.ImmutableDict(:zoom => 1.0),
+        () -> Base.PersistentDict(:zoom => 1.0),
+    )
+        for kind in (:map, :mapbox)
+            original = make_original()
+            layout = Layout()
+            layout.fields[kind] = original
+
+            if kind === :map
+                @test update_maps!(
+                    layout;
+                    bearing=2.0,
+                ) === layout
+            else
+                @test PlotlySupply._update_mapboxes_preserving_aliases!(
+                    layout;
+                    bearing=2.0,
+                ) === layout
+            end
+
+            committed =
+                _layout_merge_fields(layout.fields[kind])
+            @test layout.fields[kind] !== original
+            @test Dict(original) == Dict(:zoom => 1.0)
+            @test committed[:zoom] == 1.0
+            @test committed[:bearing] == 2.0
+        end
+    end
+end
+
+@testset "CRC: hash-indexed mapping keys cannot be corrupted" begin
+    for kind in (:map, :mapbox)
+        root = Dict{Symbol,Any}(:zoom => 1.0)
+        holder = Dict{Any,Any}(root => :held)
+        layout = Layout()
+        layout.fields[kind] = root
+        layout.fields[:meta] = holder
+
+        if kind === :map
+            @test_throws ArgumentError update_maps!(
+                layout;
+                zoom=2.0,
+            )
+        else
+            @test_throws ArgumentError PlotlySupply._update_mapboxes_preserving_aliases!(
+                layout;
+                zoom=2.0,
+            )
+        end
+        @test layout.fields[kind] === root
+        @test layout.fields[:meta] === holder
+        @test root == Dict{Symbol,Any}(
+            :zoom => 1.0,
+        )
+        @test haskey(holder, root)
+        @test holder[root] === :held
+
+        identity_root =
+            Dict{Symbol,Any}(:zoom => 1.0)
+        identity_holder =
+            IdDict{Any,Any}(identity_root => :held)
+        layout = Layout()
+        layout.fields[kind] = identity_root
+        layout.fields[:meta] = identity_holder
+
+        if kind === :map
+            @test update_maps!(
+                layout;
+                zoom=2.0,
+            ) === layout
+        else
+            @test PlotlySupply._update_mapboxes_preserving_aliases!(
+                layout;
+                zoom=2.0,
+            ) === layout
+        end
+        @test layout.fields[kind] === identity_root
+        @test layout.fields[:meta] === identity_holder
+        @test identity_root[:zoom] == 2.0
+        @test haskey(identity_holder, identity_root)
+        @test identity_holder[identity_root] === :held
+    end
+end
+
 @testset "CRC: unsafe or ambiguous map keys are rejected atomically" begin
     for kind in (:map, :mapbox)
         for duplicate in (
@@ -1063,4 +1389,1272 @@ end
     @test root == Dict{Symbol,Any}(:zoom => 1.0)
     @test layout.fields.data[:map2] ==
           (zoom=2.0,)
+end
+
+function _layout_merge_subplot(kind::Union{Nothing,Symbol}=nothing)
+    if kind === nothing
+        return subplots(
+            1,
+            1;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+        )
+    end
+    return subplots(
+        1,
+        1;
+        sync=false,
+        show=false,
+        per_subplot_legends=false,
+        specs=fill(Spec(kind=String(kind)), 1, 1),
+    )
+end
+
+function _layout_merge_attach!(parent, key::Symbol, child)
+    _layout_merge_fields(parent)[key] = child
+    return child
+end
+
+function _layout_merge_assert_holder_path(
+    holder,
+    holder_key::Symbol,
+    parent,
+    parent_key::Symbol,
+)
+    child = _layout_merge_fields(parent)[parent_key]
+    @test child === holder[holder_key]
+    return child
+end
+
+@testset "CRC: public Cartesian merges retain external and internal aliases" begin
+    external = _layout_merge_subplot()
+    @test plot_scatter!(
+        external,
+        [0.0],
+        [0.0],
+    ) === external
+    shared = external.layout.fields[:xaxis]
+    external.data[1].fields[:meta] = shared
+
+    @test plot_scatter!(
+        external,
+        [1.0],
+        [2.0];
+        xlabel="external-x",
+    ) === external
+    committed = external.layout.fields[:xaxis]
+    @test external.data[1].fields[:meta] === committed
+    committed_title =
+        _layout_merge_fields(committed)[:title]
+    @test _layout_merge_fields(
+        committed_title,
+    )[:text] == "external-x"
+
+    for operation in (:xlabel, :scatter, :xrange)
+        routed = _layout_merge_subplot()
+        routed_axis = routed.layout.fields[:xaxis]
+        routed_ref =
+            routed.layout.subplots.grid_ref[1, 1][1]
+        routed_ref.trace_kwargs.fields[:meta] =
+            routed_axis
+
+        if operation === :xlabel
+            @test xlabel!(
+                routed,
+                "routed-direct",
+            ) === routed
+        elseif operation === :scatter
+            @test plot_scatter!(
+                routed,
+                [1.0],
+                [2.0];
+                xlabel="routed-delegated",
+            ) === routed
+        else
+            @test xrange!(
+                routed,
+                [1.0, 4.0],
+            ) === routed
+        end
+
+        committed_ref =
+            routed.layout.subplots.grid_ref[1, 1][1]
+        committed_axis =
+            routed.layout.fields[:xaxis]
+        @test committed_ref.trace_kwargs.fields[
+            :meta
+        ] === committed_axis
+        if operation === :xrange
+            @test committed_axis[:range] ==
+                  [1.0, 4.0]
+        else
+            expected = operation === :xlabel ?
+                       "routed-direct" :
+                       "routed-delegated"
+            @test _layout_merge_fields(
+                _layout_merge_fields(
+                    committed_axis,
+                )[:title],
+            )[:text] == expected
+        end
+    end
+
+    routed_noop = _layout_merge_subplot()
+    @test plot_scatter!(
+        routed_noop,
+        [0.0],
+        [0.0],
+    ) === routed_noop
+    noop_axis =
+        Dict{Symbol,Any}(:showgrid => false)
+    routed_noop.layout.fields[:xaxis] = noop_axis
+    noop_ref =
+        routed_noop.layout.subplots.grid_ref[1, 1][1]
+    noop_ref.trace_kwargs.fields[:meta] =
+        noop_axis
+    noop_subplots = routed_noop.layout.subplots
+    noop_ref.trace_kwargs.fields[:trace] =
+        routed_noop.data[1]
+    noop_ref.trace_kwargs.fields[:layout] =
+        routed_noop.layout
+    noop_axis[:back] = noop_subplots
+    routed_noop.data[1].fields[:axis] =
+        noop_axis
+    noop_fields = routed_noop.layout.fields
+    @test relayout!(
+        routed_noop;
+        xaxis_showgrid=false,
+    ) === routed_noop
+    @test routed_noop.layout.fields[:xaxis] ===
+          noop_axis
+    @test routed_noop.layout.subplots ===
+          noop_subplots
+    @test routed_noop.layout.fields ===
+          noop_fields
+    @test routed_noop.layout.subplots.grid_ref[1, 1][
+        1
+    ].trace_kwargs.fields[:meta] === noop_axis
+    @test routed_noop.layout.subplots.grid_ref[1, 1][
+        1
+    ].trace_kwargs.fields[:trace] ===
+          routed_noop.data[1]
+    @test routed_noop.layout.subplots.grid_ref[1, 1][
+        1
+    ].trace_kwargs.fields[:layout] ===
+          routed_noop.layout
+    @test routed_noop.data[1].fields[:axis] ===
+          noop_axis
+    @test noop_axis[:back] === noop_subplots
+
+    for operation in (:direct, :delegated)
+        cyclic = _layout_merge_subplot()
+        @test plot_scatter!(
+            cyclic,
+            [0.0],
+            [0.0],
+        ) === cyclic
+        cyclic_layout = cyclic.layout
+        cyclic_axis =
+            cyclic_layout.fields[:xaxis]
+        cyclic_subplots = cyclic_layout.subplots
+        cyclic_ref =
+            cyclic_subplots.grid_ref[1, 1][1]
+        cyclic_ref.trace_kwargs.fields[:axis] =
+            cyclic_axis
+        cyclic_ref.trace_kwargs.fields[:layout] =
+            cyclic_layout
+        cyclic_axis[:back] = cyclic_subplots
+        cyclic.data[1].fields[:axis] =
+            cyclic_axis
+        old_length = length(cyclic.data)
+
+        if operation === :direct
+            @test xlabel!(
+                cyclic,
+                "cyclic-direct",
+            ) === cyclic
+        else
+            @test plot_scatter!(
+                cyclic,
+                [1.0],
+                [2.0];
+                xlabel="cyclic-delegated",
+            ) === cyclic
+        end
+
+        committed_axis =
+            cyclic.layout.fields[:xaxis]
+        committed_subplots =
+            cyclic.layout.subplots
+        committed_ref =
+            committed_subplots.grid_ref[1, 1][1]
+        @test cyclic.layout === cyclic_layout
+        @test length(cyclic.data) ==
+              old_length +
+              (operation === :delegated)
+        @test committed_ref.trace_kwargs.fields[
+            :axis
+        ] === committed_axis
+        @test committed_ref.trace_kwargs.fields[
+            :layout
+        ] === cyclic.layout
+        @test committed_axis[:back] ===
+              committed_subplots
+        @test cyclic.data[1].fields[:axis] ===
+              committed_axis
+        expected = operation === :direct ?
+                   "cyclic-direct" :
+                   "cyclic-delegated"
+        @test _layout_merge_fields(
+            _layout_merge_fields(
+                committed_axis,
+            )[:title],
+        )[:text] == expected
+    end
+
+    incremental = _layout_merge_subplot()
+    @test plot_scatter!(
+        incremental,
+        [0.0],
+        [0.0],
+    ) === incremental
+    incremental_axis =
+        incremental.layout.fields[:xaxis]
+    incremental_axis[:showgrid] = false
+    incremental_subplots =
+        incremental.layout.subplots
+    incremental_ref =
+        incremental_subplots.grid_ref[1, 1][1]
+    incremental_ref.trace_kwargs.fields[
+        :axis
+    ] = incremental_axis
+    incremental_ref.trace_kwargs.fields[
+        :trace
+    ] = incremental.data[1]
+    incremental_axis[:back] =
+        incremental_subplots
+    incremental.data[1].fields[:axis] =
+        incremental_axis
+    token_storage =
+        Dict{Symbol,Any}(:value => 1)
+    token =
+        _LayoutMergeProjectionToken(
+            token_storage,
+        )
+    incremental_ref.trace_kwargs.fields[
+        :token
+    ] = token
+    incremental.data[1].fields[:token] =
+        token
+    @test relayout!(
+        incremental;
+        xaxis_showgrid=true,
+    ) === incremental
+    committed_incremental_axis =
+        incremental.layout.fields[:xaxis]
+    committed_incremental_subplots =
+        incremental.layout.subplots
+    committed_incremental_ref =
+        committed_incremental_subplots.grid_ref[
+            1,
+            1,
+        ][1]
+    @test committed_incremental_ref.trace_kwargs.fields[
+        :axis
+    ] === committed_incremental_axis
+    @test committed_incremental_ref.trace_kwargs.fields[
+        :trace
+    ] === incremental.data[1]
+    @test incremental.data[1].fields[:axis] ===
+          committed_incremental_axis
+    @test committed_incremental_axis[:back] ===
+          committed_incremental_subplots
+    @test incremental.data[1].fields[:token] ===
+          token
+    @test committed_incremental_ref.trace_kwargs.fields[
+        :token
+    ] === token
+    @test committed_incremental_ref.trace_kwargs.fields[
+        :token
+    ].data === token_storage
+
+    for make_immutable in (
+        () -> Base.ImmutableDict(
+            :showgrid => false,
+        ),
+        () -> Base.PersistentDict(
+            :showgrid => false,
+        ),
+    )
+        immutable_alias = _layout_merge_subplot()
+        immutable_axis = make_immutable()
+        immutable_alias.layout.fields[:xaxis] =
+            immutable_axis
+        immutable_alias.layout.fields[:meta] =
+            Dict{Symbol,Any}(
+                :axis => immutable_axis,
+            )
+        @test xlabel!(
+            immutable_alias,
+            "immutable-replacement",
+        ) === immutable_alias
+        @test immutable_alias.layout.fields[
+            :xaxis
+        ] !== immutable_axis
+        @test Dict(
+            immutable_alias.layout.fields[
+                :meta
+            ][:axis],
+        ) == Dict(immutable_axis)
+        @test Dict(immutable_axis) ==
+              Dict(:showgrid => false)
+        @test immutable_alias.layout.fields[
+            :xaxis
+        ][:title_text] ==
+              "immutable-replacement"
+    end
+
+    delegated = _layout_merge_subplot()
+    old_xaxis = delegated.layout.fields[:xaxis]
+    old_yaxis = delegated.layout.fields[:yaxis]
+    @test plot_scatter!(
+        delegated,
+        [0.0],
+        [1.0];
+        xlabel="delegated-x",
+        ylabel="delegated-y",
+    ) === delegated
+    @test delegated.layout.fields[:xaxis] !==
+          old_xaxis
+    @test delegated.layout.fields[:yaxis] !==
+          old_yaxis
+    @test delegated.layout.fields[:xaxis][
+        :title_text
+    ] == "delegated-x"
+    @test delegated.layout.fields[:yaxis][
+        :title_text
+    ] == "delegated-y"
+
+    nested_direct = _layout_merge_subplot()
+    nested_direct_root =
+        nested_direct.layout.fields[:xaxis]
+    nested_direct_title = attr(
+        text="old-direct",
+        font=attr(color="red"),
+    )
+    _layout_merge_fields(nested_direct_root)[
+        :title
+    ] = nested_direct_title
+    nested_direct.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :title => nested_direct_title,
+        )
+    @test xlabel!(
+        nested_direct,
+        "nested-direct",
+    ) === nested_direct
+    committed_nested_direct =
+        nested_direct.layout.fields[:xaxis]
+    committed_nested_direct_title =
+        _layout_merge_fields(
+            committed_nested_direct,
+        )[:title]
+    @test committed_nested_direct_title ===
+          nested_direct.layout.fields[:meta][:title]
+    @test _layout_merge_fields(
+        committed_nested_direct_title,
+    )[:text] == "nested-direct"
+    @test _layout_merge_fields(
+        committed_nested_direct_title,
+    )[:font][:color] == "red"
+
+    nested_delegated = _layout_merge_subplot()
+    nested_delegated_root =
+        nested_delegated.layout.fields[:xaxis]
+    nested_delegated_title = attr(
+        text="old-delegated",
+        font=attr(color="blue"),
+    )
+    _layout_merge_fields(nested_delegated_root)[
+        :title
+    ] = nested_delegated_title
+    nested_delegated.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :title => nested_delegated_title,
+        )
+    @test plot_scatter!(
+        nested_delegated,
+        [0.0],
+        [1.0];
+        xlabel="nested-delegated",
+    ) === nested_delegated
+    committed_nested_delegated =
+        nested_delegated.layout.fields[:xaxis]
+    committed_nested_delegated_title =
+        _layout_merge_fields(
+            committed_nested_delegated,
+        )[:title]
+    @test committed_nested_delegated_title ===
+          nested_delegated.layout.fields[
+              :meta
+          ][:title]
+    @test _layout_merge_fields(
+        committed_nested_delegated_title,
+    )[:text] == "nested-delegated"
+    @test _layout_merge_fields(
+        committed_nested_delegated_title,
+    )[:font][:color] == "blue"
+
+    direct = _layout_merge_subplot()
+    direct_root = direct.layout.fields[:xaxis]
+    direct.layout.fields[:meta] =
+        Dict{Symbol,Any}(:axis => direct_root)
+    @test xlabel!(direct, "direct-alias-x") === direct
+    @test direct.layout.fields[:xaxis] ===
+          direct.layout.fields[:meta][:axis]
+    direct_title = _layout_merge_fields(
+        direct.layout.fields[:xaxis],
+    )[:title]
+    @test _layout_merge_fields(
+        direct_title,
+    )[:text] == "direct-alias-x"
+
+    compatibility = _layout_merge_subplot()
+    @test xlabel!(
+        compatibility,
+        "flattened-x",
+    ) === compatibility
+    @test compatibility.layout.fields[:xaxis][
+        :title_text
+    ] == "flattened-x"
+
+    plain_ranges = _layout_merge_subplot()
+    plain_xaxis = plain_ranges.layout.fields[:xaxis]
+    plain_yaxis = plain_ranges.layout.fields[:yaxis]
+    @test xrange!(
+        plain_ranges,
+        [0.0, 2.0],
+    ) === plain_ranges
+    @test yrange!(
+        plain_ranges,
+        [-1.0, 3.0],
+    ) === plain_ranges
+    @test plain_ranges.layout.fields[:xaxis] !==
+          plain_xaxis
+    @test plain_ranges.layout.fields[:yaxis] !==
+          plain_yaxis
+    @test plain_ranges.layout.fields[:xaxis][
+        :range
+    ] == [0.0, 2.0]
+    @test plain_ranges.layout.fields[:yaxis][
+        :range
+    ] == [-1.0, 3.0]
+
+    aliased_range = _layout_merge_subplot()
+    aliased_range_root =
+        aliased_range.layout.fields[:xaxis]
+    aliased_range.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :axis => aliased_range_root,
+        )
+    @test xrange!(
+        aliased_range,
+        [1.0, 4.0],
+    ) === aliased_range
+    committed_aliased_range =
+        aliased_range.layout.fields[:xaxis]
+    @test committed_aliased_range ===
+          aliased_range.layout.fields[:meta][:axis]
+    @test committed_aliased_range[:range] ==
+          [1.0, 4.0]
+
+    custom_range = _layout_merge_subplot()
+    custom_range_root = _LayoutMergeRejectingDict(
+        Dict{Symbol,Any}(:showgrid => false),
+        false,
+    )
+    custom_range.layout.fields[:xaxis] =
+        custom_range_root
+    @test xrange!(
+        custom_range,
+        [2.0, 5.0],
+    ) === custom_range
+    @test custom_range.layout.fields[:xaxis] !==
+          custom_range_root
+    @test custom_range.layout.fields[:xaxis][
+        :range
+    ] == [2.0, 5.0]
+    @test custom_range_root.data ==
+          Dict{Symbol,Any}(:showgrid => false)
+
+    custom_alias = _layout_merge_subplot()
+    custom_root = _LayoutMergeRejectingDict(
+        Dict{Symbol,Any}(:showgrid => false),
+        false,
+    )
+    custom_alias.layout.fields[:xaxis] = custom_root
+    custom_alias.layout.fields[:meta] =
+        Dict{Symbol,Any}(:axis => custom_root)
+    @test_throws ArgumentError xlabel!(
+        custom_alias,
+        "must-not-split",
+    )
+    @test custom_alias.layout.fields[:xaxis] ===
+          custom_root
+    @test custom_alias.layout.fields[:meta][:axis] ===
+          custom_root
+    @test custom_root.data ==
+          Dict{Symbol,Any}(:showgrid => false)
+
+    custom_backing_alias = _layout_merge_subplot()
+    backing_root = _LayoutMergeRejectingDict(
+        Dict{Symbol,Any}(:showgrid => false),
+        false,
+    )
+    custom_backing_alias.layout.fields[:xaxis] =
+        backing_root
+    custom_backing_alias.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :backing => backing_root.data,
+        )
+    @test_throws ArgumentError xlabel!(
+        custom_backing_alias,
+        "must-not-split-backing",
+    )
+    @test custom_backing_alias.layout.fields[
+        :xaxis
+    ] === backing_root
+    @test custom_backing_alias.layout.fields[
+        :meta
+    ][:backing] === backing_root.data
+    @test backing_root.data ==
+          Dict{Symbol,Any}(:showgrid => false)
+
+    for operation in (:xlabel, :scatter, :xrange)
+        immutable_wrapper = _layout_merge_subplot()
+        wrapper_root =
+            _LayoutMergeImmutableWrapperDict(
+                Dict{Symbol,Any}(
+                    :showgrid => false,
+                ),
+            )
+        immutable_wrapper.layout.fields[:xaxis] =
+            wrapper_root
+        immutable_wrapper.layout.fields[:meta] =
+            Dict{Symbol,Any}(
+                :axis => wrapper_root,
+                :backing => wrapper_root.data,
+            )
+        data_length = length(immutable_wrapper.data)
+
+        if operation === :xlabel
+            @test_throws ArgumentError xlabel!(
+                immutable_wrapper,
+                "immutable-wrapper",
+            )
+        elseif operation === :scatter
+            @test_throws ArgumentError plot_scatter!(
+                immutable_wrapper,
+                [1.0],
+                [2.0];
+                xlabel="immutable-wrapper",
+            )
+        else
+            @test_throws ArgumentError xrange!(
+                immutable_wrapper,
+                [1.0, 2.0],
+            )
+        end
+
+        @test length(immutable_wrapper.data) ==
+              data_length
+        @test immutable_wrapper.layout.fields[
+            :xaxis
+        ] === wrapper_root
+        @test immutable_wrapper.layout.fields[
+            :meta
+        ][:axis] === wrapper_root
+        @test immutable_wrapper.layout.fields[
+            :meta
+        ][:backing] === wrapper_root.data
+        @test wrapper_root.data ==
+              Dict{Symbol,Any}(
+                  :showgrid => false,
+              )
+    end
+
+    immutable_nested = _layout_merge_subplot()
+    immutable_nested_root = attr(showgrid=false)
+    immutable_nested_title =
+        _LayoutMergeImmutableWrapperDict(
+            Dict{Symbol,Any}(
+                :text => "old-immutable-title",
+            ),
+        )
+    immutable_nested_root.fields[:title] =
+        immutable_nested_title
+    immutable_nested.layout.fields[:xaxis] =
+        immutable_nested_root
+    immutable_nested.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :title => immutable_nested_title,
+            :backing => immutable_nested_title.data,
+        )
+    @test_throws ArgumentError xlabel!(
+        immutable_nested,
+        "must-not-split-immutable-title",
+    )
+    @test immutable_nested.layout.fields[
+        :xaxis
+    ] === immutable_nested_root
+    @test immutable_nested_root.fields[:title] ===
+          immutable_nested_title
+    @test immutable_nested.layout.fields[
+        :meta
+    ][:title] === immutable_nested_title
+    @test immutable_nested.layout.fields[
+        :meta
+    ][:backing] === immutable_nested_title.data
+    @test immutable_nested_title.data[:text] ==
+          "old-immutable-title"
+
+    custom_unaliased = _layout_merge_subplot()
+    unaliased_root = _LayoutMergeRejectingDict(
+        Dict{Symbol,Any}(:showgrid => false),
+        false,
+    )
+    custom_unaliased.layout.fields[:xaxis] =
+        unaliased_root
+    @test xlabel!(
+        custom_unaliased,
+        "custom-replacement",
+    ) === custom_unaliased
+    @test custom_unaliased.layout.fields[:xaxis] !==
+          unaliased_root
+    @test custom_unaliased.layout.fields[:xaxis][
+        :title_text
+    ] == "custom-replacement"
+    @test unaliased_root.data ==
+          Dict{Symbol,Any}(:showgrid => false)
+
+    custom_attribute_alias = _layout_merge_subplot()
+    custom_attribute = PlotlyBase.PlotlyAttribute(
+        _LayoutMergeRejectingDict(
+            Dict{Symbol,Any}(:showgrid => false),
+            false,
+        ),
+    )
+    custom_attribute_alias.layout.fields[:xaxis] =
+        custom_attribute
+    custom_attribute_alias.layout.fields[:meta] =
+        Dict{Symbol,Any}(:axis => custom_attribute)
+    @test_throws ArgumentError xlabel!(
+        custom_attribute_alias,
+        "must-not-split-attribute",
+    )
+    @test custom_attribute_alias.layout.fields[
+        :xaxis
+    ] === custom_attribute
+    @test custom_attribute_alias.layout.fields[
+        :meta
+    ][:axis] === custom_attribute
+
+    custom_attribute_unaliased =
+        _layout_merge_subplot()
+    replacement_attribute =
+        PlotlyBase.PlotlyAttribute(
+            _LayoutMergeRejectingDict(
+                Dict{Symbol,Any}(
+                    :showgrid => false,
+                ),
+                false,
+            ),
+        )
+    custom_attribute_unaliased.layout.fields[
+        :xaxis
+    ] = replacement_attribute
+    @test xlabel!(
+        custom_attribute_unaliased,
+        "attribute-replacement",
+    ) === custom_attribute_unaliased
+    @test custom_attribute_unaliased.layout.fields[
+        :xaxis
+    ] !== replacement_attribute
+    @test custom_attribute_unaliased.layout.fields[
+        :xaxis
+    ][:title_text] == "attribute-replacement"
+
+    custom_title_unaliased = _layout_merge_subplot()
+    custom_title_root = attr(showgrid=false)
+    custom_title = _LayoutMergeRejectingDict(
+        Dict{Symbol,Any}(
+            :text => "old-custom-title",
+        ),
+        false,
+    )
+    custom_title_root.fields[:title] =
+        custom_title
+    custom_title_unaliased.layout.fields[:xaxis] =
+        custom_title_root
+    @test xlabel!(
+        custom_title_unaliased,
+        "new-custom-title",
+    ) === custom_title_unaliased
+    committed_custom_title_root =
+        custom_title_unaliased.layout.fields[
+            :xaxis
+        ]
+    @test committed_custom_title_root.fields[
+        :title
+    ] !==
+          custom_title
+    @test committed_custom_title_root[
+        :title_text
+    ] ==
+          "new-custom-title"
+    @test custom_title.data[:text] ==
+          "old-custom-title"
+
+    custom_title_alias = _layout_merge_subplot()
+    aliased_title_root = attr(showgrid=false)
+    aliased_custom_title =
+        _LayoutMergeRejectingDict(
+            Dict{Symbol,Any}(
+                :text => "old-aliased-title",
+            ),
+            false,
+        )
+    aliased_title_root.fields[:title] =
+        aliased_custom_title
+    custom_title_alias.layout.fields[:xaxis] =
+        aliased_title_root
+    custom_title_alias.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :title => aliased_custom_title,
+        )
+    @test_throws ArgumentError xlabel!(
+        custom_title_alias,
+        "must-not-split-custom-title",
+    )
+    @test custom_title_alias.layout.fields[
+        :xaxis
+    ] === aliased_title_root
+    @test aliased_title_root.fields[:title] ===
+          aliased_custom_title
+    @test custom_title_alias.layout.fields[
+        :meta
+    ][:title] === aliased_custom_title
+    @test aliased_custom_title.data[:text] ==
+          "old-aliased-title"
+
+    custom_title_backing_alias =
+        _layout_merge_subplot()
+    backing_title_root = attr(showgrid=false)
+    backing_custom_title =
+        _LayoutMergeRejectingDict(
+            Dict{Symbol,Any}(
+                :text => "old-backing-title",
+            ),
+            false,
+        )
+    backing_title_root.fields[:title] =
+        backing_custom_title
+    custom_title_backing_alias.layout.fields[
+        :xaxis
+    ] = backing_title_root
+    custom_title_backing_alias.layout.fields[
+        :meta
+    ] = Dict{Symbol,Any}(
+        :backing => backing_custom_title.data,
+    )
+    @test_throws ArgumentError xlabel!(
+        custom_title_backing_alias,
+        "must-not-split-title-backing",
+    )
+    @test custom_title_backing_alias.layout.fields[
+        :xaxis
+    ] === backing_title_root
+    @test backing_title_root.fields[:title] ===
+          backing_custom_title
+    @test custom_title_backing_alias.layout.fields[
+        :meta
+    ][:backing] === backing_custom_title.data
+    @test backing_custom_title.data[:text] ==
+          "old-backing-title"
+
+    named_title_alias = _layout_merge_subplot()
+    named_title = Dict{Symbol,Any}(
+        :text => "old-named-title",
+        :font => attr(color="purple"),
+    )
+    named_root = (
+        title=named_title,
+        showgrid=false,
+    )
+    named_title_alias.layout.fields[:xaxis] =
+        named_root
+    named_title_alias.layout.fields[:meta] =
+        Dict{Symbol,Any}(:title => named_title)
+    @test xlabel!(
+        named_title_alias,
+        "new-named-title",
+    ) === named_title_alias
+    @test named_title_alias.layout.fields[:xaxis] !==
+          named_root
+    committed_named_title =
+        _layout_merge_fields(
+            named_title_alias.layout.fields[
+                :xaxis
+            ],
+        )[:title]
+    @test committed_named_title ===
+          named_title_alias.layout.fields[:meta][
+              :title
+          ]
+    @test _layout_merge_fields(
+        committed_named_title,
+    )[:text] == "new-named-title"
+    @test named_title[:text] == "old-named-title"
+
+    named_root_alias = _layout_merge_subplot()
+    immutable_root = (
+        showgrid=false,
+        label="nonbits",
+    )
+    named_root_alias.layout.fields[:xaxis] =
+        immutable_root
+    named_root_alias.layout.fields[:meta] =
+        Dict{Symbol,Any}(:axis => immutable_root)
+    @test xlabel!(
+        named_root_alias,
+        "named-root-replacement",
+    ) === named_root_alias
+    @test named_root_alias.layout.fields[:xaxis] !==
+          immutable_root
+    @test named_root_alias.layout.fields[:xaxis][
+        :title_text
+    ] == "named-root-replacement"
+    @test named_root_alias.layout.fields[:meta][
+        :axis
+    ] === immutable_root
+
+    no_label_custom = _layout_merge_subplot()
+    no_label_x = _LayoutMergeRejectingDict(
+        Dict{Symbol,Any}(:showgrid => false),
+        false,
+    )
+    no_label_y = _LayoutMergeRejectingDict(
+        Dict{Symbol,Any}(:showgrid => false),
+        false,
+    )
+    no_label_custom.layout.fields[:xaxis] =
+        no_label_x
+    no_label_custom.layout.fields[:yaxis] =
+        no_label_y
+    no_label_custom.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :xaxis => no_label_x,
+            :yaxis => no_label_y,
+        )
+    @test plot_scatter!(
+        no_label_custom,
+        [0.0],
+        [1.0],
+    ) === no_label_custom
+    @test length(no_label_custom.data) == 1
+    @test no_label_custom.layout.fields[:xaxis] ===
+          no_label_x
+    @test no_label_custom.layout.fields[:yaxis] ===
+          no_label_y
+    @test no_label_custom.layout.fields[:meta][
+        :xaxis
+    ] === no_label_x
+    @test no_label_custom.layout.fields[:meta][
+        :yaxis
+    ] === no_label_y
+
+    internal = _layout_merge_subplot()
+    internal.layout.fields[:yaxis] =
+        internal.layout.fields[:xaxis]
+    @test plot_scatter!(
+        internal,
+        [1.0],
+        [2.0];
+        xlabel="X",
+        ylabel="Y",
+    ) === internal
+    @test internal.layout.fields[:xaxis] ===
+          internal.layout.fields[:yaxis]
+    shared_title = _layout_merge_fields(
+        internal.layout.fields[:xaxis],
+    )[:title]
+    # Both layout keys intentionally name one storage node. Updates therefore
+    # coalesce in Cartesian traversal order, with the later y update winning.
+    @test _layout_merge_fields(shared_title)[:text] ==
+          "Y"
+end
+
+@testset "CRC: recursive geographic and polar aliases stay connected" begin
+    geographic = _layout_merge_subplot(:geo)
+    geo = geographic.layout.fields[:geo]
+    projection = attr()
+    rotation = attr(lon=10.0)
+    projection.fields[:type] = "equirectangular"
+    projection.fields[:rotation] = rotation
+    _layout_merge_attach!(geo, :projection, projection)
+    geographic.layout.fields[:meta] = Dict{Symbol,Any}(
+        :root => geo,
+        :projection => projection,
+        :rotation => rotation,
+    )
+
+    @test plot_scattergeo!(
+        geographic,
+        [0.0],
+        [1.0];
+        scope="world",
+        projection="mercator",
+    ) === geographic
+    geo_holder = geographic.layout.fields[:meta]
+    committed_geo = geographic.layout.fields[:geo]
+    @test committed_geo === geo_holder[:root]
+    committed_projection =
+        _layout_merge_assert_holder_path(
+            geo_holder,
+            :projection,
+            committed_geo,
+            :projection,
+        )
+    @test _layout_merge_fields(
+        committed_projection,
+    )[:type] == "mercator"
+    @test _layout_merge_fields(
+        committed_projection,
+    )[:rotation] === geo_holder[:rotation]
+    @test _layout_merge_fields(committed_geo)[:scope] ==
+          "world"
+
+    polar = _layout_merge_subplot(:polar)
+    polar_root = polar.layout.fields[:polar]
+    shared_axis = attr()
+    axis_title = attr(
+        text="radius",
+        font=attr(color="red"),
+    )
+    shared_axis.fields[:title] = axis_title
+    shared_axis.fields[:linecolor] = "purple"
+    _layout_merge_attach!(
+        polar_root,
+        :radialaxis,
+        shared_axis,
+    )
+    _layout_merge_attach!(
+        polar_root,
+        :angularaxis,
+        shared_axis,
+    )
+    polar.layout.fields[:meta] = Dict{Symbol,Any}(
+        :root => polar_root,
+        :axis => shared_axis,
+        :title => axis_title,
+    )
+
+    @test plot_scatterpolar!(
+        polar,
+        [0.0, 90.0],
+        [1.0, 2.0];
+        rrange=[0.0, 5.0],
+        grid=false,
+    ) === polar
+    polar_holder = polar.layout.fields[:meta]
+    committed_polar = polar.layout.fields[:polar]
+    @test committed_polar === polar_holder[:root]
+    radial = _layout_merge_assert_holder_path(
+        polar_holder,
+        :axis,
+        committed_polar,
+        :radialaxis,
+    )
+    angular = _layout_merge_assert_holder_path(
+        polar_holder,
+        :axis,
+        committed_polar,
+        :angularaxis,
+    )
+    @test radial === angular
+    @test _layout_merge_fields(radial)[:title] ===
+          polar_holder[:title]
+    @test _layout_merge_fields(radial)[:range] ==
+          [0.0, 5.0]
+    @test _layout_merge_fields(radial)[:showgrid] ===
+          false
+    @test _layout_merge_fields(radial)[:linecolor] ==
+          "purple"
+end
+
+@testset "CRC: scene, font, and coloraxis aliases merge recursively" begin
+    scene_figure = _layout_merge_subplot(:scene)
+    scene = scene_figure.layout.fields[:scene]
+    xaxis = attr()
+    axis_title = attr()
+    title_font = attr(color="red")
+    axis_title.fields[:text] = "old-x"
+    axis_title.fields[:font] = title_font
+    xaxis.fields[:title] = axis_title
+    xaxis.fields[:showgrid] = true
+    _layout_merge_attach!(scene, :xaxis, xaxis)
+
+    camera = attr()
+    projection = attr(type="perspective")
+    camera.fields[:projection] = projection
+    _layout_merge_attach!(scene, :camera, camera)
+
+    font = Dict{Symbol,Any}(
+        :family => "monospace",
+        :size => 10,
+    )
+    coloraxis = Dict{Symbol,Any}(:cmin => 0.0)
+    scene_figure.layout.fields[:font] = font
+    scene_figure.layout.fields[:coloraxis] = coloraxis
+    scene_figure.layout.fields[:meta] = Dict{Symbol,Any}(
+        :scene => scene,
+        :xaxis => xaxis,
+        :title => axis_title,
+        :title_font => title_font,
+        :camera => camera,
+        :projection => projection,
+        :font => font,
+        :coloraxis => coloraxis,
+    )
+
+    z = [1.0 2.0; 3.0 4.0]
+    @test plot_surface!(
+        scene_figure,
+        z;
+        xlabel="surface-x",
+        fontsize=21,
+        shared_coloraxis=true,
+        colorscale="Viridis",
+    ) === scene_figure
+    holder = scene_figure.layout.fields[:meta]
+    committed_scene = scene_figure.layout.fields[:scene]
+    @test committed_scene === holder[:scene]
+    committed_xaxis = _layout_merge_assert_holder_path(
+        holder,
+        :xaxis,
+        committed_scene,
+        :xaxis,
+    )
+    committed_title = _layout_merge_assert_holder_path(
+        holder,
+        :title,
+        committed_xaxis,
+        :title,
+    )
+    @test _layout_merge_fields(committed_title)[:text] ==
+          "surface-x"
+    @test _layout_merge_fields(committed_title)[:font] ===
+          holder[:title_font]
+    @test scene_figure.layout.fields[:font] ===
+          holder[:font]
+    @test holder[:font][:family] == "monospace"
+    @test holder[:font][:size] == 21
+    @test scene_figure.layout.fields[:coloraxis] ===
+          holder[:coloraxis]
+    @test holder[:coloraxis][:cmin] == 0.0
+    @test holder[:coloraxis][:colorscale] == "Viridis"
+
+    @test plot_scatter3d!(
+        scene_figure,
+        [0.0, 1.0],
+        [0.0, 1.0],
+        [0.0, 1.0];
+        perspective=false,
+    ) === scene_figure
+    holder = scene_figure.layout.fields[:meta]
+    committed_scene = scene_figure.layout.fields[:scene]
+    @test committed_scene === holder[:scene]
+    committed_camera = _layout_merge_assert_holder_path(
+        holder,
+        :camera,
+        committed_scene,
+        :camera,
+    )
+    committed_projection =
+        _layout_merge_assert_holder_path(
+            holder,
+            :projection,
+            committed_camera,
+            :projection,
+        )
+    @test _layout_merge_fields(
+        committed_projection,
+    )[:type] == "orthographic"
+end
+
+@testset "CRC: ternary title aliases merge recursively" begin
+    ternary_figure = _layout_merge_subplot(:ternary)
+    ternary = ternary_figure.layout.fields[:ternary]
+    shared_axis = attr()
+    title = attr()
+    title_font = attr(color="green")
+    title.fields[:text] = "old"
+    title.fields[:font] = title_font
+    shared_axis.fields[:title] = title
+    shared_axis.fields[:tickfont] = attr(color="blue")
+    _layout_merge_attach!(
+        ternary,
+        :aaxis,
+        shared_axis,
+    )
+    _layout_merge_attach!(
+        ternary,
+        :baxis,
+        shared_axis,
+    )
+    ternary_figure.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :root => ternary,
+            :axis => shared_axis,
+            :title => title,
+            :font => title_font,
+        )
+
+    @test plot_ternary!(
+        ternary_figure,
+        [0.2, 0.3],
+        [0.3, 0.3],
+        [0.5, 0.4];
+        alabel="shared",
+        blabel="shared",
+    ) === ternary_figure
+    holder = ternary_figure.layout.fields[:meta]
+    committed = ternary_figure.layout.fields[:ternary]
+    @test committed === holder[:root]
+    aaxis = _layout_merge_assert_holder_path(
+        holder,
+        :axis,
+        committed,
+        :aaxis,
+    )
+    baxis = _layout_merge_assert_holder_path(
+        holder,
+        :axis,
+        committed,
+        :baxis,
+    )
+    @test aaxis === baxis
+    committed_title = _layout_merge_assert_holder_path(
+        holder,
+        :title,
+        aaxis,
+        :title,
+    )
+    @test _layout_merge_fields(committed_title)[:text] ==
+          "shared"
+    @test _layout_merge_fields(committed_title)[:font] ===
+          holder[:font]
+end
+
+@testset "CRC: scalar title shorthand preserves nested styling" begin
+    heatmap_figure = _layout_merge_subplot()
+    xaxis = heatmap_figure.layout.fields[:xaxis]
+    title = attr()
+    title_font = attr(color="red", size=17)
+    title.fields[:text] = "old"
+    title.fields[:font] = title_font
+    _layout_merge_attach!(xaxis, :title, title)
+    heatmap_figure.layout.fields[:meta] =
+        Dict{Symbol,Any}(
+            :xaxis => xaxis,
+            :title => title,
+            :font => title_font,
+        )
+
+    @test plot_heatmap!(
+        heatmap_figure,
+        [0.0, 1.0],
+        [0.0, 1.0],
+        [1.0 2.0; 3.0 4.0];
+        xlabel="heat-x",
+    ) === heatmap_figure
+    holder = heatmap_figure.layout.fields[:meta]
+    committed_xaxis = heatmap_figure.layout.fields[:xaxis]
+    @test committed_xaxis === holder[:xaxis]
+    committed_title = _layout_merge_assert_holder_path(
+        holder,
+        :title,
+        committed_xaxis,
+        :title,
+    )
+    @test _layout_merge_fields(committed_title)[:text] ==
+          "heat-x"
+    @test _layout_merge_fields(committed_title)[:font] ===
+          holder[:font]
+    @test _layout_merge_fields(holder[:font])[:color] ==
+          "red"
+end
+
+@testset "CRC: non-map preparation rejects atomically" begin
+    trace = scatter(x=[0.0], y=[0.0])
+    trace.fields[:xaxis] = "x"
+    trace.fields[:yaxis] = "y"
+
+    target_layout = Layout()
+    xaxis = Dict{Symbol,Any}(:showgrid => false)
+    yaxis = Dict{Symbol,Float64}(:tick0 => 0.0)
+    target_layout.fields[:xaxis] = xaxis
+    target_layout.fields[:yaxis] = yaxis
+    holder = Dict{Symbol,Any}(
+        :xaxis => xaxis,
+        :yaxis => yaxis,
+    )
+    target_layout.fields[:meta] = holder
+    target = Plot([trace], target_layout)
+
+    source_layout = Layout()
+    source_layout.fields[:xaxis] =
+        attr(title_text="prepared-x")
+    source_layout.fields[:yaxis] =
+        attr(title_text="unrepresentable-y")
+    source = Plot(
+        Vector{GenericTrace}(undef, 0),
+        source_layout,
+    )
+    xaxis_before = deepcopy(xaxis)
+    yaxis_before = copy(yaxis)
+
+    @test_throws ArgumentError PlotlySupply._apply_source_layout_to_added_traces!(
+        target,
+        source,
+        1,
+    )
+    @test target.layout.fields[:xaxis] === xaxis
+    @test target.layout.fields[:yaxis] === yaxis
+    @test target.layout.fields[:meta] === holder
+    @test holder[:xaxis] === xaxis
+    @test holder[:yaxis] === yaxis
+    @test xaxis == xaxis_before
+    @test yaxis == yaxis_before
+
+    ambiguous = Dict{Any,Any}(
+        :showgrid => true,
+        "showgrid" => false,
+    )
+    target.layout.fields[:xaxis] = ambiguous
+    target.layout.fields[:yaxis] =
+        Dict{Symbol,Any}(:tick0 => 0.0)
+    holder[:xaxis] = ambiguous
+    holder[:yaxis] =
+        target.layout.fields[:yaxis]
+    ambiguous_before = copy(ambiguous)
+
+    @test_throws ArgumentError PlotlySupply._apply_source_layout_to_added_traces!(
+        target,
+        source,
+        1,
+    )
+    @test target.layout.fields[:xaxis] === ambiguous
+    @test ambiguous == ambiguous_before
 end

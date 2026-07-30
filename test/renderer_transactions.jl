@@ -2652,6 +2652,240 @@ function _subplot_metadata_snapshot(sf::SubplotFigure)
     )
 end
 
+@testset "subplot layout aliases select safe renderer transactions" begin
+    p, sp, sf, state = _subplot_transaction_fixture()
+    external_axis = p.layout.fields[:xaxis]
+    p.data[1].fields[:meta] = external_axis
+    routing_ref =
+        p.layout.subplots.grid_ref[1, 1][1]
+    routing_ref.trace_kwargs.fields[:meta] =
+        external_axis
+    routing_ref.trace_kwargs.fields[:layout] =
+        p.layout
+    data_root = p.data
+    layout_root = p.layout
+    old_trace = p.data[1]
+    try
+        @test PlotlySupply._prepare_high_level_plot_fast_context(
+            p,
+        ) === nothing
+        @test plot_scatter!(
+            sf,
+            [5, 6],
+            [7, 8];
+            xlabel="external-alias-x",
+        ) === sf
+        @test p.data === data_root
+        @test p.layout === layout_root
+        @test p.data[1] === old_trace
+        @test p.data[1].fields[:meta] ===
+              p.layout.fields[:xaxis]
+        committed_ref =
+            p.layout.subplots.grid_ref[1, 1][1]
+        @test committed_ref.trace_kwargs.fields[
+            :meta
+        ] === p.layout.fields[:xaxis]
+        @test committed_ref.trace_kwargs.fields[
+            :layout
+        ] === p.layout
+        @test p.layout.fields[:xaxis][:title][:text] ==
+              "external-alias-x"
+        @test occursin("Plotly.react", only(state.scripts))
+        @test !occursin(
+            "Plotly.addTraces",
+            only(state.scripts),
+        )
+    finally
+        close(sp)
+    end
+
+    p, sp, _, state = _subplot_transaction_fixture()
+    incremental_axis =
+        Dict{Symbol,Any}(:showgrid => false)
+    p.layout.fields[:xaxis] = incremental_axis
+    p.data[1].fields[:axis] = incremental_axis
+    incremental_ref =
+        p.layout.subplots.grid_ref[1, 1][1]
+    incremental_ref.trace_kwargs.fields[:axis] =
+        incremental_axis
+    incremental_ref.trace_kwargs.fields[:trace] =
+        p.data[1]
+    try
+        @test relayout!(
+            sp;
+            xaxis_showgrid=true,
+        ) === sp
+        committed_axis =
+            p.layout.fields[:xaxis]
+        committed_ref =
+            p.layout.subplots.grid_ref[1, 1][1]
+        @test committed_axis[:showgrid] === true
+        @test p.data[1].fields[:axis] ===
+              committed_axis
+        @test committed_ref.trace_kwargs.fields[
+            :axis
+        ] === committed_axis
+        @test committed_ref.trace_kwargs.fields[
+            :trace
+        ] === p.data[1]
+        @test length(state.scripts) == 1
+        @test occursin(
+            "Plotly.update",
+            only(state.scripts),
+        )
+    finally
+        close(sp)
+    end
+
+    p, sp, _, state = _subplot_transaction_fixture()
+    noop_axis =
+        Dict{Symbol,Any}(:showgrid => false)
+    p.layout.fields[:xaxis] = noop_axis
+    noop_subplots = p.layout.subplots
+    noop_ref =
+        noop_subplots.grid_ref[1, 1][1]
+    noop_ref.trace_kwargs.fields[:meta] =
+        noop_axis
+    try
+        @test relayout!(
+            sp;
+            xaxis_showgrid=false,
+        ) === sp
+        @test p.layout.fields[:xaxis] ===
+              noop_axis
+        @test p.layout.subplots === noop_subplots
+        @test p.layout.subplots.grid_ref[1, 1][
+            1
+        ].trace_kwargs.fields[:meta] ===
+              noop_axis
+        @test isempty(state.scripts)
+    finally
+        close(sp)
+    end
+
+    p, sp, _, state = _subplot_transaction_fixture()
+    shared_axis = attr(
+        title=attr(text="shared-old"),
+        showgrid=false,
+    )
+    p.layout.fields[:xaxis] = shared_axis
+    p.layout.fields[:yaxis] = shared_axis
+    old_trace = p.data[1]
+    append_with_axis_merge! = function (candidate)
+        source = Plot(
+            scatter(
+                x=[2],
+                y=[2],
+                xaxis="x",
+                yaxis="y",
+            ),
+            Layout(
+                xaxis=attr(
+                    title=attr(text="shared-new"),
+                ),
+            ),
+        )
+        start_index = length(candidate.data) + 1
+        append!(candidate.data, source.data)
+        PlotlySupply._apply_source_layout_to_added_traces!(
+            candidate,
+            source,
+            start_index,
+        )
+        return nothing
+    end
+    prepare = (target, current) ->
+        PlotlySupply._prepare_high_level_plot_mutation_transaction(
+            target,
+            current,
+            append_with_axis_merge!,
+            append_with_axis_merge!,
+        )
+    data_root = p.data
+    layout_root = p.layout
+    try
+        @test PlotlySupply._prepare_high_level_plot_fast_context(
+            p,
+        ) !== nothing
+        @test PlotlySupply._syncplot_transaction!(
+            sp,
+            prepare,
+        ) === sp
+        @test p.data === data_root
+        @test p.layout === layout_root
+        @test p.data[1] === old_trace
+        @test p.layout.fields[:xaxis] ===
+              p.layout.fields[:yaxis]
+        @test p.layout.fields[:xaxis][:title][:text] ==
+              "shared-new"
+        @test p.layout.fields[:xaxis][:showgrid] === false
+        @test occursin(
+            "Plotly.addTraces",
+            only(state.scripts),
+        )
+        @test occursin(
+            "Plotly.relayout",
+            only(state.scripts),
+        )
+        @test !occursin(
+            "Plotly.react",
+            only(state.scripts),
+        )
+    finally
+        close(sp)
+    end
+
+    primary = ErrorException(
+        "injected-subplot-alias-renderer-failure",
+    )
+    p, sp, sf, state = _subplot_transaction_fixture(
+        outcomes=Any[primary, "ok"],
+    )
+    external_axis = p.layout.fields[:xaxis]
+    p.data[1].fields[:meta] = external_axis
+    original_subplots = p.layout.subplots
+    routing_ref =
+        original_subplots.grid_ref[1, 1][1]
+    routing_ref.trace_kwargs.fields[:meta] =
+        external_axis
+    routing_ref.trace_kwargs.fields[:layout] =
+        p.layout
+    snapshot = _transaction_snapshot(p)
+    metadata = _subplot_metadata_snapshot(sf)
+    try
+        caught = try
+            plot_scatter!(
+                sf,
+                [5, 6],
+                [7, 8];
+                xlabel="must-roll-back-alias",
+            )
+            nothing
+        catch err
+            err
+        end
+        @test caught === primary
+        _test_transaction_snapshot(p, snapshot)
+        @test _subplot_metadata_snapshot(sf) == metadata
+        @test p.data[1].fields[:meta] === external_axis
+        @test p.layout.fields[:xaxis] === external_axis
+        @test p.layout.subplots === original_subplots
+        @test p.layout.subplots.grid_ref[1, 1][
+            1
+        ].trace_kwargs.fields[:meta] ===
+              external_axis
+        @test p.layout.subplots.grid_ref[1, 1][
+            1
+        ].trace_kwargs.fields[:layout] ===
+              p.layout
+        @test length(state.scripts) == 2
+        @test occursin("Plotly.react", state.scripts[1])
+        @test occursin("Plotly.newPlot", state.scripts[2])
+    finally
+        close(sp)
+    end
+end
+
 function _apply_subplot_transaction_operation!(
     sf::SubplotFigure,
     operation::Symbol,

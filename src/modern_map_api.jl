@@ -116,6 +116,10 @@ function _require_valid_map_layouts(layout::Layout)
 		 value isa NamedTuple) || throw(ArgumentError(
 			"map: layout.$key must be a map attribute object.",
 		))
+		_require_unambiguous_layout_mapping(
+			value,
+			"layout.$key",
+		)
 		map_options = _map_object_dict(value)
 
 		if haskey(map_options, :style)
@@ -133,6 +137,10 @@ function _require_valid_map_layouts(layout::Layout)
 			 center_value isa NamedTuple) || throw(ArgumentError(
 				"map: layout.$key.center must be an attribute object or nothing.",
 			))
+			_require_unambiguous_layout_mapping(
+				center_value,
+				"layout.$key.center",
+			)
 			center = _map_object_dict(center_value)
 			for name in (:lon, :lat)
 				haskey(center, name) || continue
@@ -150,6 +158,10 @@ function _require_valid_map_layouts(layout::Layout)
 			 bounds_value isa NamedTuple) || throw(ArgumentError(
 				"map: layout.$key.bounds must be an attribute object or nothing.",
 			))
+			_require_unambiguous_layout_mapping(
+				bounds_value,
+				"layout.$key.bounds",
+			)
 			bounds = _map_object_dict(bounds_value)
 			for name in (:west, :east, :south, :north)
 				haskey(bounds, name) || continue
