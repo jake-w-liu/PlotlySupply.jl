@@ -2794,7 +2794,7 @@ function _subplot_delegate_mutator_impl!(
 		isempty(dropped) || @warn "Per-subplot plot_*! ignores figure-level keyword(s) $(dropped); set them on the `subplots(...)` call or via `relayout!(sf; ...)`."
 	end
 	tmp = Plot(Vector{GenericTrace}(undef, 0), Layout())
-	mutator(tmp, args...; kwargs...)
+	mutator(_StagedPlotMutation(tmp), args...; kwargs...)
 
 	p = _plot_obj(sf.fig)
 	target_ref = _validate_subplot_traces!(
@@ -2851,14 +2851,67 @@ function _subplot_delegate_mutator!(
 	args...;
 	kwargs...,
 )
-	return _transactional_subplot_mutation!(
-		_subplot_delegate_mutator_impl!,
-		sf,
-		_SUBPLOT_SELECTION_METADATA_FIELDS,
-		mutator,
-		args...;
-		kwargs...,
-	)
+	metadata_lock = getfield(sf, :_lock)
+	lock(metadata_lock)
+	try
+		staged_ref =
+			Ref{Union{Nothing,SubplotFigure}}(nothing)
+		result = Ref{Any}(nothing)
+		mutation = function (candidate)
+			staged = _staged_subplot_figure(sf, candidate)
+			staged_ref[] = staged
+			result[] = _subplot_delegate_mutator_impl!(
+				staged,
+				mutator,
+				args...;
+				kwargs...,
+			)
+			return nothing
+		end
+		commit_callback = _ -> _commit_subplot_metadata!(
+			sf,
+			something(staged_ref[]),
+			_SUBPLOT_SELECTION_METADATA_FIELDS,
+		)
+
+		fig = getfield(sf, :fig)
+		# Per-subplot legends rewrite existing traces. The append-only fast path
+		# intentionally shares those trace roots, so retain full staging whenever
+		# legend assignment is enabled.
+		if sf.per_subplot_legends && fig isa SyncPlot
+			_mutate_and_refresh_syncplot!(
+				mutation,
+				fig;
+				commit_callback = commit_callback,
+			)
+		elseif sf.per_subplot_legends
+			_transactional_full_plot_mutation!(
+				mutation,
+				fig;
+				commit_callback = commit_callback,
+			)
+		elseif fig isa SyncPlot
+			prepare = (target, current) ->
+				_prepare_high_level_plot_mutation_transaction(
+					target,
+					current,
+					mutation,
+					mutation,
+					commit_callback,
+				)
+			_syncplot_transaction!(fig, prepare)
+		else
+			_transactional_high_level_model_mutation!(
+				mutation,
+				mutation,
+				fig,
+				commit_callback,
+			)
+		end
+		return result[] === staged_ref[] ? sf : result[]
+	finally
+		unlock(metadata_lock)
+	end
 end
 
 function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_y::Bool = false)

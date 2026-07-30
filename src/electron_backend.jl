@@ -6879,6 +6879,7 @@ function _finish_high_level_plot_fast_transaction(
 	p::Plot,
 	context,
 	mutation,
+	commit_callback = _noop_plot_commit,
 )
 	candidate = context.candidate
 	mutation(candidate)
@@ -6938,6 +6939,7 @@ function _finish_high_level_plot_fast_transaction(
 			)
 		end
 		_commit_layout!(p, context.staged_layout)
+		commit_callback(p)
 		return p
 	end
 	operation = if new_trace_count > 0
@@ -6953,6 +6955,7 @@ function _prepare_high_level_plot_mutation_transaction(
 	p::Plot,
 	fast_mutation,
 	full_mutation,
+	commit_callback = _noop_plot_commit,
 )
 	context = _prepare_high_level_plot_fast_context(p)
 	context === nothing &&
@@ -6960,12 +6963,14 @@ function _prepare_high_level_plot_mutation_transaction(
 			sp,
 			p,
 			full_mutation,
+			commit_callback,
 		)
 	return _finish_high_level_plot_fast_transaction(
 		sp,
 		p,
 		context,
 		fast_mutation,
+		commit_callback,
 	)
 end
 
@@ -7165,6 +7170,7 @@ function _transactional_high_level_model_mutation!(
 	fast_mutation,
 	full_mutation,
 	p::Plot,
+	commit_callback = _noop_plot_commit,
 )
 	prepare = (target, current) ->
 		_prepare_high_level_plot_mutation_transaction(
@@ -7172,6 +7178,7 @@ function _transactional_high_level_model_mutation!(
 			current,
 			fast_mutation,
 			full_mutation,
+			commit_callback,
 		)
 	local_mutation = () -> begin
 		prepared =
@@ -7180,6 +7187,7 @@ function _transactional_high_level_model_mutation!(
 				p,
 				fast_mutation,
 				full_mutation,
+				commit_callback,
 			)
 		prepared.commit()
 		return p

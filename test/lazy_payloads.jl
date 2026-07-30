@@ -11,6 +11,13 @@ function _test_lazy_payload_reference(stored, original)
     return nothing
 end
 
+function _append_large_lazy_subplot!(
+    sf::SubplotFigure,
+    payload::AbstractRange,
+)
+    return plot_scatter!(sf, payload, payload)
+end
+
 @testset "CRC: large payloads stay lazy" begin
     lazy_x = reinterpret(
         Float64,
@@ -762,5 +769,33 @@ end
             GC.gc()
             @test @allocated(construct()) < 2_000_000
         end
+
+        warm_subplot = subplots(
+            1,
+            1;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+        )
+        _append_large_lazy_subplot!(warm_subplot, payload)
+
+        target_subplot = subplots(
+            1,
+            1;
+            sync=false,
+            show=false,
+            per_subplot_legends=false,
+        )
+        GC.gc()
+        append_allocations = @allocated(
+            _append_large_lazy_subplot!(
+                target_subplot,
+                payload,
+            )
+        )
+        @test append_allocations < 128 * 1024
+        appended_trace = only(target_subplot.data)
+        @test appended_trace.fields[:x] === payload
+        @test appended_trace.fields[:y] === payload
     end
 end

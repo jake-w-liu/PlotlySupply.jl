@@ -2599,8 +2599,10 @@ end
 function _subplot_transaction_fixture(;
     registered::Bool=false,
     outcomes=Any[],
+    cols::Int=1,
+    per_subplot_legends::Bool=true,
 )
-    layout = Layout(Subplots(rows=1, cols=1))
+    layout = Layout(Subplots(rows=1, cols=cols))
     p = Plot(GenericTrace[], layout)
     add_trace!(
         p,
@@ -2626,10 +2628,10 @@ function _subplot_transaction_fixture(;
     sf = SubplotFigure(
         fig,
         1,
+        cols,
         1,
         1,
-        1,
-        true,
+        per_subplot_legends,
         :topright,
         (0.02, 0.03),
         "white",
@@ -2652,8 +2654,112 @@ function _subplot_metadata_snapshot(sf::SubplotFigure)
     )
 end
 
+@testset "subplot high-level appends use incremental transactions" begin
+    for registered in (false, true)
+        p, sp, sf, state = _subplot_transaction_fixture(
+            ;
+            registered=registered,
+            cols=2,
+            per_subplot_legends=false,
+        )
+        data_root = p.data
+        layout_root = p.layout
+        old_trace = only(p.data)
+        payload = 5:6
+        try
+            @test plot_scatter!(
+                sf,
+                payload,
+                payload;
+                row=1,
+                col=2,
+                xlabel="incremental-subplot-x",
+            ) === sf
+            @test p.data === data_root
+            @test p.layout === layout_root
+            @test p.data[1] === old_trace
+            @test p.data[2].fields[:x] === payload
+            @test p.data[2].fields[:y] === payload
+            @test sf.current_row == 1
+            @test sf.current_col == 2
+            @test p.layout.fields[:xaxis2][
+                :title
+            ][:text] == "incremental-subplot-x"
+            @test length(state.scripts) == 1
+            @test occursin(
+                "Plotly.addTraces",
+                only(state.scripts),
+            )
+            @test occursin(
+                "Plotly.relayout",
+                only(state.scripts),
+            )
+            @test !occursin(
+                "Plotly.react",
+                only(state.scripts),
+            )
+        finally
+            close(sp)
+        end
+    end
+
+    for registered in (false, true)
+        primary = ErrorException(
+            "injected-$registered-incremental-subplot-failure",
+        )
+        p, sp, sf, state = _subplot_transaction_fixture(
+            ;
+            registered=registered,
+            outcomes=Any[primary, "ok"],
+            cols=2,
+            per_subplot_legends=false,
+        )
+        snapshot = _transaction_snapshot(p)
+        metadata = _subplot_metadata_snapshot(sf)
+        try
+            caught = try
+                plot_scatter!(
+                    sf,
+                    5:6,
+                    7:8;
+                    row=1,
+                    col=2,
+                    xlabel="must-roll-back-incremental",
+                )
+                nothing
+            catch err
+                err
+            end
+            @test caught === primary
+            _test_transaction_snapshot(p, snapshot)
+            @test _subplot_metadata_snapshot(sf) == metadata
+            @test length(state.scripts) == 2
+            @test occursin(
+                "Plotly.addTraces",
+                state.scripts[1],
+            )
+            @test occursin(
+                "Plotly.relayout",
+                state.scripts[1],
+            )
+            @test !occursin(
+                "Plotly.react",
+                state.scripts[1],
+            )
+            @test occursin(
+                "Plotly.newPlot",
+                state.scripts[2],
+            )
+        finally
+            close(sp)
+        end
+    end
+end
+
 @testset "subplot layout aliases select safe renderer transactions" begin
-    p, sp, sf, state = _subplot_transaction_fixture()
+    p, sp, sf, state = _subplot_transaction_fixture(
+        per_subplot_legends=false,
+    )
     external_axis = p.layout.fields[:xaxis]
     p.data[1].fields[:meta] = external_axis
     routing_ref =
@@ -2839,7 +2945,9 @@ end
         "injected-subplot-alias-renderer-failure",
     )
     p, sp, sf, state = _subplot_transaction_fixture(
+        ;
         outcomes=Any[primary, "ok"],
+        per_subplot_legends=false,
     )
     external_axis = p.layout.fields[:xaxis]
     p.data[1].fields[:meta] = external_axis
