@@ -240,6 +240,29 @@ end
         @test fig2 isa Plot
     end
 
+    @testset "default cartesian spines stay black after template" begin
+        function spine_fields(axis)
+            return axis isa AbstractDict ? axis : axis.fields
+        end
+        fig = plot_scatter(1:4, 1:4; show=false)
+        for axis in (fig.layout[:xaxis], fig.layout[:yaxis])
+            fields = spine_fields(axis)
+            @test fields[:showline] == true
+            @test fields[:mirror] == true
+            @test fields[:linecolor] == "#000000"
+            @test fields[:linewidth] == 1 || fields[:linewidth] == 1.0
+            @test fields[:tickcolor] == "#000000"
+            @test fields[:linecolor] != "#EBF0F8"
+        end
+        # Template application must not restore the wash-out gray.
+        PlotlySupply._apply_default_template!(fig)
+        for axis in (fig.layout[:xaxis], fig.layout[:yaxis])
+            fields = spine_fields(axis)
+            @test fields[:linecolor] == "#000000"
+            @test fields[:linewidth] == 1 || fields[:linewidth] == 1.0
+        end
+    end
+
     @testset "plot_stem" begin
         x = 1:10
         y = rand(10)

@@ -231,6 +231,11 @@ const _DEFAULT_LEGEND_INSET = Ref{Tuple{Float64, Float64}}((0.02, 0.03))
 const _DEFAULT_LEGEND_BGCOLOR = Ref("rgba(255,255,255,0.72)")
 const _DEFAULT_LEGEND_BORDERCOLOR = Ref("rgba(0,0,0,0.15)")
 const _DEFAULT_LEGEND_BORDERWIDTH = Ref{Float64}(1.0)
+# plotly_white paints axis.linecolor as #EBF0F8 (same as the grid). After
+# f22f860 the Template object is applied in full, so that wash-out becomes the
+# exported spine. Publication default is a closed black box.
+const _DEFAULT_AXIS_LINECOLOR = "#000000"
+const _DEFAULT_AXIS_LINEWIDTH = 1.0
 
 function _normalize_template(template)
 	(template isa Symbol || template isa AbstractString) ||
@@ -335,6 +340,8 @@ end
 
 function _apply_default_template!(fig)
 	relayout!(fig, template = _resolve_template(_DEFAULT_TEMPLATE[]))
+	# Re-apply spines after the template so plotly_white cannot wash them out.
+	_apply_default_cartesian_axes!(fig)
 	_apply_default_legend!(fig)
 	return nothing
 end
@@ -347,6 +354,9 @@ function _cartesian_axis_style(; title_text::String = "", tick0 = nothing)
 		:mirror => true,
 		:ticks => "outside",
 		:automargin => true,
+		:linecolor => _DEFAULT_AXIS_LINECOLOR,
+		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
+		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
 	)
 	tick0 === nothing || (d[:tick0] = tick0)
 	return attr(; d...)
@@ -377,6 +387,9 @@ function _apply_default_cartesian_axes!(fig)
 			mirror = true,
 			ticks = "outside",
 			automargin = true,
+			linecolor = _DEFAULT_AXIS_LINECOLOR,
+			linewidth = _DEFAULT_AXIS_LINEWIDTH,
+			tickcolor = _DEFAULT_AXIS_LINECOLOR,
 		)
 	end
 	if any(startswith(String(k), "yaxis") for k in layout_keys)
@@ -387,6 +400,9 @@ function _apply_default_cartesian_axes!(fig)
 			mirror = true,
 			ticks = "outside",
 			automargin = true,
+			linecolor = _DEFAULT_AXIS_LINECOLOR,
+			linewidth = _DEFAULT_AXIS_LINEWIDTH,
+			tickcolor = _DEFAULT_AXIS_LINECOLOR,
 		)
 	end
 	return nothing
