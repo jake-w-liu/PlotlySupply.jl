@@ -8846,11 +8846,22 @@ function Base.show(io::IO, sp::SyncPlot)
 	print(io, "SyncPlot($state, div=\"$(sp.divid)\")")
 end
 
+"""
+	msgchannel(sp::SyncPlot)
+
+Return the `ElectronCall` message channel attached to `sp`'s window, for
+sending custom messages between Julia and the Electron renderer.
+"""
 function msgchannel(sp::SyncPlot)
 	ec = _electroncall()
 	return Base.invokelatest(() -> ec.msgchannel(sp.window))
 end
 
+"""
+	toggle_devtools(sp::SyncPlot)
+
+Toggle the Chromium developer-tools panel of `sp`'s Electron window.
+"""
 function toggle_devtools(sp::SyncPlot)
 	ec = _electroncall()
 	return Base.invokelatest(() -> ec.toggle_devtools(sp.window))

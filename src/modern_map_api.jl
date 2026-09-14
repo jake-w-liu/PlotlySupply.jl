@@ -2,14 +2,39 @@
 # GenericTrace is intentionally used here so support does not depend on the
 # older PlotlyBase schema artifact.  The outer field dictionary is new, while
 # coordinate arrays and other payloads remain shared with the caller.
+"""
+	scattermap(; kwargs...)
+	scattermap(fields::AbstractDict; kwargs...)
+
+Construct a `scattermap` trace: points, lines, or text rendered on a
+MapLibre-backed tile map. Keyword arguments or `fields` become trace
+attributes; see the [plotly.js figure
+reference](https://plotly.com/julia/reference/).
+"""
 scattermap(; kwargs...) = GenericTrace("scattermap"; kwargs...)
 scattermap(fields::AbstractDict; kwargs...) =
 	GenericTrace("scattermap", _symbol_dict(fields); kwargs...)
 
+"""
+	choroplethmap(; kwargs...)
+	choroplethmap(fields::AbstractDict; kwargs...)
+
+Construct a `choroplethmap` trace: filled regions rendered on a MapLibre-backed
+tile map. Keyword arguments or `fields` become trace attributes; see the
+[plotly.js figure reference](https://plotly.com/julia/reference/).
+"""
 choroplethmap(; kwargs...) = GenericTrace("choroplethmap"; kwargs...)
 choroplethmap(fields::AbstractDict; kwargs...) =
 	GenericTrace("choroplethmap", _symbol_dict(fields); kwargs...)
 
+"""
+	densitymap(; kwargs...)
+	densitymap(fields::AbstractDict; kwargs...)
+
+Construct a `densitymap` trace: a density heatmap rendered on a MapLibre-backed
+tile map. Keyword arguments or `fields` become trace attributes; see the
+[plotly.js figure reference](https://plotly.com/julia/reference/).
+"""
 densitymap(; kwargs...) = GenericTrace("densitymap"; kwargs...)
 densitymap(fields::AbstractDict; kwargs...) =
 	GenericTrace("densitymap", _symbol_dict(fields); kwargs...)

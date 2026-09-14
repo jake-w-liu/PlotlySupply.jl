@@ -1153,3 +1153,459 @@ function Base.hvcat(rows::Tuple{Vararg{Int}}, sps::SyncPlot...)
 	plots = Plot[sp.plot for sp in sps]
 	return to_syncplot(hvcat(rows, plots...); app = _syncplot_app(sps))
 end
+
+#region Re-exported PlotlyBase API docstrings
+# Attach docstrings to names re-exported from PlotlyBase (and MeshGrid) for
+# PlotlyJS compatibility, so `?name` and the generated API reference cover the
+# full exported surface.
+
+for (fn, desc) in (
+	(:bar, "bar chart"),
+	(:barpolar, "polar bar (wind-rose)"),
+	(:box, "box-and-whisker"),
+	(:candlestick, "candlestick financial"),
+	(:carpet, "carpet coordinate-system"),
+	(:choropleth, "geographic choropleth"),
+	(:choroplethmapbox, "Mapbox-tiled choropleth"),
+	(:cone, "3D cone vector-field"),
+	(:contour, "2D contour"),
+	(:contourcarpet, "contour over a `carpet` coordinate system"),
+	(:densitymapbox, "density heatmap on Mapbox tiles"),
+	(:funnel, "funnel"),
+	(:funnelarea, "funnel-area"),
+	(:heatmap, "heatmap"),
+	(:heatmapgl, "WebGL heatmap"),
+	(:histogram, "histogram"),
+	(:histogram2d, "2D histogram"),
+	(:histogram2dcontour, "2D histogram contour"),
+	(:icicle, "icicle (hierarchical partition)"),
+	(:image, "image"),
+	(:indicator, "indicator/gauge card"),
+	(:isosurface, "3D isosurface"),
+	(:mesh3d, "3D mesh"),
+	(:ohlc, "OHLC financial"),
+	(:parcats, "parallel-categories"),
+	(:parcoords, "parallel-coordinates"),
+	(:pie, "pie"),
+	(:pointcloud, "WebGL point-cloud"),
+	(:sankey, "Sankey diagram"),
+	(:scatter, "scatter/line"),
+	(:scatter3d, "3D scatter/line"),
+	(:scattercarpet, "scatter over a `carpet` coordinate system"),
+	(:scattergeo, "geographic scatter"),
+	(:scattergl, "WebGL scatter"),
+	(:scattermapbox, "scatter on Mapbox tiles"),
+	(:scatterpolar, "polar scatter"),
+	(:scatterpolargl, "WebGL polar scatter"),
+	(:scatterternary, "ternary scatter"),
+	(:splom, "scatter-plot matrix"),
+	(:streamtube, "3D streamtube"),
+	(:sunburst, "sunburst (hierarchical partition)"),
+	(:surface, "3D surface"),
+	(:table, "table"),
+	(:treemap, "treemap (hierarchical partition)"),
+	(:violin, "violin"),
+	(:volume, "3D volume"),
+	(:waterfall, "waterfall"),
+)
+	doc = """
+		$(fn)(; kwargs...)
+		$(fn)(fields::AbstractDict; kwargs...)
+
+	Construct a $(desc) trace — equivalent to `GenericTrace("$(fn)"; kwargs...)`.
+	Keyword arguments or `fields` become trace attributes; see the
+	[plotly.js `$(fn)` reference](https://plotly.com/julia/reference/$(fn)/).
+	"""
+	@eval @doc $doc $fn
+end
+
+# ── Attribute containers and core types ─────────────────────────────
+
+"""
+	attr(; kwargs...)
+	attr(fields::AbstractDict; kwargs...)
+	attr(nt::NamedTuple)
+
+Build a nested `PlotlyAttribute` object — e.g.
+`Layout(xaxis = attr(title = "x", range = [0, 1]))`. Fields are accessible
+dynamically (`a.title`).
+"""
+attr
+
+"""
+	GenericTrace(kind::AbstractString; kwargs...)
+	GenericTrace(kind::AbstractString, fields::AbstractDict; kwargs...)
+
+Generic trace of arbitrary plotly.js `kind`. The trace constructors
+(`scatter`, `bar`, `heatmap`, …) build these; fields are accessible
+dynamically (`tr.x` reads/writes the `x` attribute).
+"""
+GenericTrace
+
+"""
+	Layout(; kwargs...)
+	Layout(fields::AbstractDict; kwargs...)
+
+Figure layout object (axes, title, margins, legend, shapes, …). Nested
+attributes are built with [`attr`](@ref), e.g.
+`Layout(title = "Hi", xaxis = attr(range = [0, 1]))`.
+"""
+Layout
+
+"""
+	AbstractTrace
+
+Abstract supertype of all trace objects; concrete traces are
+[`GenericTrace`](@ref) instances.
+"""
+AbstractTrace
+
+"""
+	AbstractLayout
+
+Abstract supertype of layout-level objects such as [`Layout`](@ref) and
+[`Shape`](@ref).
+"""
+AbstractLayout
+
+"""
+	PlotlyFrame
+
+Animation frame: a `Dict`-backed container of frame attributes (`data`,
+`layout`, `name`, …) passed to `plot(...; frames = [...])`. Build frames with
+[`frame`](@ref).
+"""
+PlotlyFrame
+
+"""
+	Shape(kind::AbstractString; kwargs...)
+	Shape(kind::AbstractString, fields::AbstractDict; kwargs...)
+
+Layout shape of `kind` — `"line"`, `"rect"`, `"circle"`, or `"path"`. Add one
+with [`add_shape!`](@ref) or the [`add_hline!`](@ref), [`add_vline!`](@ref),
+[`add_hrect!`](@ref), and [`add_vrect!`](@ref) helpers.
+"""
+Shape
+
+"""
+	Template(; data = Dict(), layout = attr())
+	Template(data, layout::Layout)
+
+Plotly template holding default `data` attributes per trace type and a default
+`layout`. Built-ins are accessible through [`templates`](@ref), e.g.
+`templates[:plotly_dark]`; apply one with `set_template!`.
+"""
+Template
+
+"""
+	Cycler(values::AbstractVector)
+	Cycler(x)
+
+Container that cycles through `values` on indexing (`c[i]` wraps around) —
+used internally for per-trace attribute cycling.
+"""
+Cycler
+
+# ── Figure update verbs (PlotlyJS API) ──────────────────────────────
+
+"""
+	fork(p::Plot)
+
+Return a copy of `p` (deep-copied `data`, copied `layout`). The non-mutating
+update verbs (`restyle`, `relayout`, `update`, `addtraces`, `deletetraces`,
+`movetraces`, `extendtraces`, `prependtraces`, `redraw`, `react`) are `fork`
+plus their `!` counterpart applied to the copy.
+"""
+fork
+
+"""
+	frame(fields = Dict{Symbol,Any}(); kwargs...)
+
+Build a [`PlotlyFrame`](@ref) animation frame from `fields` and keyword
+attributes.
+"""
+frame
+
+"""
+	restyle(p::Plot, args...; kwargs...)
+
+Non-mutating [`restyle!`](@ref): apply the trace update to a [`fork`](@ref)ed
+copy of `p` and return it.
+"""
+restyle
+
+"""
+	relayout(p::Plot, args...; kwargs...)
+
+Non-mutating [`relayout!`](@ref): apply the layout update to a [`fork`](@ref)ed
+copy of `p` and return it.
+"""
+relayout
+
+"""
+	update(p::Plot, update = Dict(); layout::Layout = p.layout, kwargs...)
+	update(p::Plot, ind, update = Dict(); layout::Layout = p.layout, kwargs...)
+
+Non-mutating [`update!`](@ref): apply `restyle!` and `relayout!` to a
+[`fork`](@ref)ed copy of `p` and return it.
+"""
+update
+
+"""
+	addtraces(p::Plot, traces::AbstractTrace...)
+
+Non-mutating [`addtraces!`](@ref): append `traces` to a [`fork`](@ref)ed copy
+of `p` and return it.
+"""
+addtraces
+
+"""
+	deletetraces(p::Plot, inds::Int...)
+
+Non-mutating [`deletetraces!`](@ref): delete the traces at `inds` from a
+[`fork`](@ref)ed copy of `p` and return it.
+"""
+deletetraces
+
+"""
+	movetraces(p::Plot, to_end::Int...)
+	movetraces(p::Plot, src::AbstractVector{Int}, dest::AbstractVector{Int})
+
+Non-mutating [`movetraces!`](@ref): reorder the traces of a [`fork`](@ref)ed
+copy of `p` and return it.
+"""
+movetraces
+
+"""
+	extendtraces(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+
+Non-mutating [`extendtraces!`](@ref): extend existing trace attributes on a
+[`fork`](@ref)ed copy of `p` and return it.
+"""
+extendtraces
+
+"""
+	prependtraces(p::Plot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+
+Non-mutating [`prependtraces!`](@ref): prepend data to existing trace
+attributes on a [`fork`](@ref)ed copy of `p` and return it.
+"""
+prependtraces
+
+"""
+	redraw(p::Plot)
+
+Non-mutating [`redraw!`](@ref): returns a [`fork`](@ref)ed copy of `p`.
+"""
+redraw
+
+"""
+	react(p::Plot, data::AbstractVector{<:AbstractTrace}, layout::Layout)
+
+Non-mutating [`react!`](@ref): replace `data` and `layout` on a [`fork`](@ref)ed
+copy of `p` and return it.
+"""
+react
+
+"""
+	purge!(p)
+
+Empty `p`: remove all traces and reset the layout to a blank `Layout`. On a
+[`SyncPlot`](@ref) the open window is cleared as well.
+"""
+purge!
+
+"""
+	react!(p, data::AbstractVector{<:AbstractTrace}, layout::Layout)
+	react!(p::SyncPlot, p2::Plot)
+
+Replace the `data` and `layout` of `p` in place (plotly.js `Plotly.react`
+semantics). On a [`SyncPlot`](@ref) the open window is updated.
+"""
+react!
+
+"""
+	redraw!(p)
+
+Redraw `p` in place. On a `Plot` this is a no-op; on a [`SyncPlot`](@ref) it
+refreshes the open Electron window from the Julia-side model.
+"""
+redraw!
+
+"""
+	savejson(p::Plot, filename::AbstractString)
+
+Write `p`'s JSON figure specification to `filename`.
+"""
+savejson
+
+"""
+	to_image(sp::SyncPlot; kwargs...)
+
+Render `sp` in its Electron window via `Plotly.toImage` and return the image
+as a data-URL `String`. Keyword arguments map to `Plotly.toImage` options
+(`format`, `width`, `height`, `scale`).
+"""
+to_image
+
+"""
+	download_image(sp::SyncPlot; kwargs...)
+
+Trigger a browser-style download of `sp`'s rendered image via
+`Plotly.downloadImage` in its Electron window. Keyword arguments map to
+`Plotly.downloadImage` options (`format`, `width`, `height`, `scale`,
+`filename`).
+"""
+download_image
+
+# ── Trace and subplot helpers ───────────────────────────────────────
+
+"""
+	add_trace!(p, trace::GenericTrace; row = 1, col = 1, secondary_y = false)
+
+Add `trace` to `p`, routed to the subplot cell at `row`/`col` (with
+`secondary_y = true` for a secondary-y axis). Works on `Plot` and
+[`SyncPlot`](@ref); returns `p`.
+"""
+add_trace!
+
+"""
+	add_shape!(p, shape; row = "all", col = "all")
+
+Add a layout [`Shape`](@ref) to `p`. `row`/`col` restrict the shape to a
+subplot cell; `"all"` applies it to every cell. Returns `p`.
+"""
+add_shape!
+
+"""
+	add_hline!(p, y; row = "all", col = "all", kwargs...)
+
+Add a horizontal line [`Shape`](@ref) at `y` to `p`. `row`/`col` restrict it
+to a subplot cell. Returns `p`.
+"""
+add_hline!
+
+"""
+	add_vline!(p, x; row = "all", col = "all", kwargs...)
+
+Add a vertical line [`Shape`](@ref) at `x` to `p`. `row`/`col` restrict it to
+a subplot cell. Returns `p`.
+"""
+add_vline!
+
+"""
+	add_hrect!(p, y0, y1; row = "all", col = "all", kwargs...)
+
+Add a horizontal rectangle [`Shape`](@ref) spanning `y0`–`y1` (full x-range)
+to `p`. `row`/`col` restrict it to a subplot cell. Returns `p`.
+"""
+add_hrect!
+
+"""
+	add_vrect!(p, x0, x1; row = "all", col = "all", kwargs...)
+
+Add a vertical rectangle [`Shape`](@ref) spanning `x0`–`x1` (full y-range) to
+`p`. `row`/`col` restrict it to a subplot cell. Returns `p`.
+"""
+add_vrect!
+
+"""
+	add_layout_image!(p, image; row = "all", col = "all")
+
+Add a layout image (e.g. `attr(source = "...", x = ..., y = ...)`) to `p`.
+`row`/`col` restrict it to a subplot cell. Returns `p`.
+"""
+add_layout_image!
+
+"""
+	add_recession_bands!(p; kwargs...)
+
+Shade recession bands (vertical spans) on a time-series `Plot` or
+[`SyncPlot`](@ref); `kwargs` are forwarded to the generated band shapes.
+Returns the added shapes.
+"""
+add_recession_bands!
+
+# ── Layout object updaters ──────────────────────────────────────────
+
+for (fn, objs, desc) in (
+	(:update_xaxes!, "`xaxis`", "x-axis"),
+	(:update_yaxes!, "`yaxis`", "y-axis"),
+	(:update_polars!, "`polar`", "polar"),
+	(:update_scenes!, "`scene`", "3D scene"),
+	(:update_ternaries!, "`ternary`", "ternary"),
+	(:update_geos!, "`geo`", "geographic"),
+	(:update_mapboxes!, "`mapbox`", "mapbox"),
+)
+	doc = """
+		$(fn)(p, with::PlotlyAttribute = attr(); kwargs...)
+
+	Apply the attribute update `with`/`kwargs` to every $(objs)-family layout
+	object ($(objs), $(objs)2, …) of the $(desc) subplots in `p`, which may be a
+	`Plot` or `Layout`; `SyncPlot` is supported for `update_xaxes!`,
+	`update_yaxes!`, and `update_polars!`.
+	"""
+	@eval @doc $doc $fn
+end
+
+for (fn, objs) in (
+	(:update_annotations!, "`annotations`"),
+	(:update_images!, "`images`"),
+	(:update_shapes!, "`shapes`"),
+)
+	doc = """
+		$(fn)(p, with::PlotlyAttribute = attr(); kwargs...)
+
+	Apply the attribute update `with`/`kwargs` to every entry of the
+	$(objs) layout array of `p` (`Plot` or `Layout`).
+	"""
+	@eval @doc $doc $fn
+end
+
+# ── Colors, templates, grids ────────────────────────────────────────
+
+"""
+	colors
+
+Registry of built-in color scales. Access a scale by name — `colors.inferno`
+or `colors[:inferno]` — or list families via `colors.sequential`,
+`colors.diverging`, `colors.cyclical`, `colors.discrete`, and `colors.all`.
+"""
+colors
+
+"""
+	templates
+
+Registry of built-in `Template`s. `templates.available` lists template names,
+`templates[:plotly_dark]` returns the `Template`, and `templates.default`
+gets/sets the default template name.
+"""
+templates
+
+"""
+	meshgrid(x, y)
+	meshgrid(x, y, z)
+
+Build 2D or 3D coordinate grids from coordinate vectors `x`, `y` (and `z`),
+re-exported from MeshGrid.jl.
+"""
+meshgrid
+
+"""
+	json(args...; kwargs...)
+
+Serialize to JSON — re-exported from `JSON.jl` via PlotlyBase; e.g.
+`json(p, 2)` pretty-prints a figure's JSON specification.
+"""
+json
+
+"""
+	L"..."
+
+LaTeX string literal macro (re-exported from LaTeXStrings.jl) —
+`L"\\sin(x)"` produces a string rendered as math in labels, titles, and
+annotations.
+"""
+var"@L_str"
+
+#endregion

@@ -86,6 +86,20 @@ function Base.showerror(io::IO, err::_SyncPlotDesynchronizationError)
 	return nothing
 end
 
+"""
+	SyncPlot
+
+A `PlotlyBase.Plot` displayed in a live Electron desktop window. Construct one
+via [`to_syncplot`](@ref), `plot(...; sync = true)`, or any high-level `plot_*`
+or `subplots` constructor with `show = true`.
+
+Mutating calls (`plot_*!`, `relayout!`, `restyle!`, `add_trace!`, …) committed
+on a `SyncPlot` refresh the open window transactionally. `sp.plot` is the
+wrapped `Plot`; `sp.app`, `sp.window`, and `sp.divid` expose the underlying
+Electron objects, and any other property access forwards to `sp.plot` (e.g.
+`sp.data`, `sp.layout`). See also [`msgchannel`](@ref),
+[`toggle_devtools`](@ref), and [`savefig`](@ref).
+"""
 mutable struct SyncPlot
 	plot::Plot
 	app::Any
@@ -136,11 +150,41 @@ end
 
 _plotlyjs_refresh!(fig, data, layout) = nothing
 
+"""
+	to_syncplot(fig::Plot; app = nothing, width = 960, height = 720,
+		title = "PlotlySupply", show = true, autoplay = true, timeout_s = 15)
+	to_syncplot(sp::SyncPlot; kwargs...)
+
+Convert a `Plot` into a [`SyncPlot`](@ref) displayed in a desktop Electron
+window. Returns only after the initial Plotly render succeeds; `timeout_s`
+bounds the renderer handshake after the window page loads, including frame
+loading and autoplay. Calling `to_syncplot` on an existing `SyncPlot` returns
+it unchanged.
+
+Requires `ElectronCall.jl` (`import Pkg; Pkg.add("ElectronCall")`); PlotlySupply
+loads it automatically when needed.
+"""
 to_syncplot(fig; kwargs...) = error(
 	"`to_syncplot` requires ElectronCall.jl. " *
 	"Install it once in your environment: `import Pkg; Pkg.add(\"ElectronCall\")`.",
 )
 
+"""
+	plot(traces, layout = Layout(); config = PlotConfig(), frames = PlotlyFrame[], sync = false, kwargs...)
+	plot(trace::AbstractTrace, layout::AbstractLayout = Layout(); kwargs...)
+	plot(traces::AbstractTrace...; layout = Layout(), kwargs...)
+	plot(fig::Plot; sync = false, kwargs...)
+	plot(layout::AbstractLayout; kwargs...)
+
+PlotlyJS-style figure constructor. `traces` is a single trace or vector of
+traces (e.g. built with [`scatter`](@ref) or `attr`). Returns a
+`PlotlyBase.Plot` by default; pass `sync = true` to open an Electron window and
+return a [`SyncPlot`](@ref), forwarding extra keyword arguments such as
+`width`, `height`, and `title` to [`to_syncplot`](@ref).
+
+Desktop display requires `ElectronCall.jl`; headless `Plot` construction works
+without it.
+"""
 plot(args...; kwargs...) = error(
 	"`plot` compatibility API requires ElectronCall.jl. " *
 	"Install it once in your environment: `import Pkg; Pkg.add(\"ElectronCall\")`.",

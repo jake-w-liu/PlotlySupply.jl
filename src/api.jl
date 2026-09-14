@@ -940,23 +940,6 @@ function _apply_default_legend!(
 	return p
 end
 
-"""
-	set_legend!(fig; position=:topright, showlegend=nothing, kwargs...)
-
-Set legend placement and styling with simple position symbols such as
-`:top`, `:topright`, `:left`, `:bottomleft`, or `:outside_right`. Accepted
-positions also include `:bottom`, `:right`, `:center`, `:topleft`,
-`:bottomright`, `:outside_left`, `:outside_top`, and `:outside_bottom`.
-
-Pass `showlegend=true` to force the legend visible (useful for a single,
-unnamed trace), or `showlegend=false` to hide it.
-
-# Keyword Arguments
-- `position`: Symbolic legend placement (see above).
-- `inset`: Relative `(x, y)` padding from the plot edges.
-- `bgcolor` / `bordercolor` / `borderwidth`: Legend box styling.
-- `showlegend`: Force legend visibility (`true`/`false`), or leave `nothing` to auto-detect.
-"""
 function _set_legend_impl!(
 	fig;
 	position::Union{Symbol, AbstractString} = get_default_legend_position(),
@@ -980,6 +963,27 @@ function _set_legend_impl!(
 	return fig
 end
 
+"""
+	set_legend!(fig; position=:topright, showlegend=nothing, kwargs...)
+
+Set legend placement and styling with simple position symbols such as
+`:top`, `:topright`, `:left`, `:bottomleft`, or `:outside_right`. Accepted
+positions also include `:bottom`, `:right`, `:center`, `:topleft`,
+`:bottomright`, `:outside_left`, `:outside_top`, and `:outside_bottom`.
+
+Pass `showlegend=true` to force the legend visible (useful for a single,
+unnamed trace), or `showlegend=false` to hide it.
+
+`fig` may be a `Plot`, [`SyncPlot`](@ref), or [`SubplotFigure`](@ref); on a
+`SubplotFigure` the choice is stored and applied to the active subplot
+arrangement (see [`subplot_legends!`](@ref)).
+
+# Keyword Arguments
+- `position`: Symbolic legend placement (see above).
+- `inset`: Relative `(x, y)` padding from the plot edges.
+- `bgcolor` / `bordercolor` / `borderwidth`: Legend box styling.
+- `showlegend`: Force legend visibility (`true`/`false`), or leave `nothing` to auto-detect.
+"""
 function set_legend!(
 	fig::Union{Plot, SyncPlot};
 	position::Union{Symbol, AbstractString} = get_default_legend_position(),
@@ -1070,12 +1074,6 @@ function set_legend!(
 	)
 end
 
-"""
-	subplot_legends!(fig; kwargs...)
-
-Attach each subplot to its own legend box and place that legend inside the subplot domain.
-This avoids Plotly's default behavior where all legends are clustered in one place.
-"""
 function _subplot_legends_impl!(
 	fig;
 	position::Union{Symbol, AbstractString} = get_default_legend_position(),
@@ -1097,6 +1095,22 @@ function _subplot_legends_impl!(
 	return fig
 end
 
+"""
+	subplot_legends!(fig; kwargs...)
+
+Attach each subplot to its own legend box and place that legend inside the
+subplot domain. This avoids Plotly's default behavior where all legends are
+clustered in one place.
+
+`fig` may be a `Plot`, [`SyncPlot`](@ref), or [`SubplotFigure`](@ref); returns
+the figure.
+
+# Keyword Arguments
+- `position`: Symbolic legend placement, same set as [`set_legend!`](@ref)
+  (default `get_default_legend_position()`).
+- `legend_inset`: Relative `(x, y)` padding inside each subplot domain.
+- `legend_bgcolor` / `legend_bordercolor` / `legend_borderwidth`: Legend box styling.
+"""
 function subplot_legends!(
 	fig::Union{Plot, SyncPlot};
 	position::Union{Symbol, AbstractString} = get_default_legend_position(),
@@ -7539,6 +7553,24 @@ function plot_stem!(
 		)
 end
 
+"""
+	plot_bar!(fig, x, y; kwargs...)
+	plot_bar!(fig, y; kwargs...)
+
+Append bar trace(s) to an existing figure (`Plot`, [`SyncPlot`](@ref), or
+[`SubplotFigure`](@ref)). When `x` is omitted it defaults to `0:length(y)-1`.
+Pass a `Vector` of `Vector`s for `y` (and optionally `x`) to append multiple
+bar series at once.
+
+# Keyword Arguments
+- `color`: Bar color(s) — a string, or a vector for multiple series.
+- `legend`: Trace name(s) for the legend.
+- `orientation`: `"v"` (default) or `"h"` for horizontal bars.
+- `barmode`: Layout bar mode such as `"group"` or `"stack"`.
+- `error_x`, `error_y`: Error-bar magnitudes applied to the appended trace(s).
+- `xlabel`, `ylabel`, `xrange`, `yrange`, `width`, `height`, `title`,
+  `fontsize`, `grid`, `xscale`, `yscale`, `showlegend`: same as [`plot_bar`](@ref).
+"""
 function plot_bar!(
 	fig,
 	x::Union{AbstractRange, Vector, SubArray},
@@ -7665,6 +7697,21 @@ function plot_bar!(
 	)
 end
 
+"""
+	plot_histogram!(fig, x; kwargs...)
+
+Append histogram trace(s) of the samples in `x` to an existing figure (`Plot`,
+[`SyncPlot`](@ref), or [`SubplotFigure`](@ref)). Pass a `Vector` of `Vector`s
+for `x` to overlay multiple series (`barmode` is set to `"overlay"` for nested
+input).
+
+# Keyword Arguments
+- `nbinsx`: Target number of bins (`0` lets Plotly choose).
+- `histnorm`: Normalization — `""`, `"percent"`, `"probability"`, `"density"`, or `"probability density"`.
+- `color`, `legend`, `title`, `xlabel`, `ylabel`, `xrange`, `yrange`, `width`,
+  `height`, `grid`, `fontsize`, `xscale`, `yscale`, `showlegend`: same as
+  [`plot_histogram`](@ref).
+"""
 function plot_histogram!(
 	fig,
 	x::Union{AbstractRange, Vector, SubArray};
@@ -7732,6 +7779,21 @@ function plot_histogram!(
 	return nothing
 end
 
+"""
+	plot_box!(fig, x, y; kwargs...)
+	plot_box!(fig, y; kwargs...)
+
+Append box trace(s) of the distribution(s) in `y`, optionally grouped by `x`,
+to an existing figure (`Plot`, [`SyncPlot`](@ref), or [`SubplotFigure`](@ref)).
+Pass a `Vector` of `Vector`s for `y` to append several boxes at once
+(`boxmode="group"`).
+
+# Keyword Arguments
+- `points`: Outlier/point display — `"all"`, `"outliers"`, `"suspectedoutliers"`, or `false`.
+- `color`, `legend`, `title`, `xlabel`, `ylabel`, `xrange`, `yrange`, `width`,
+  `height`, `grid`, `fontsize`, `xscale`, `yscale`, `showlegend`: same as
+  [`plot_box`](@ref).
+"""
 function plot_box!(
 	fig,
 	x::Union{AbstractRange, Vector, SubArray},
@@ -7851,6 +7913,22 @@ function plot_box!(
 	return nothing
 end
 
+"""
+	plot_violin!(fig, x, y; kwargs...)
+	plot_violin!(fig, y; kwargs...)
+
+Append violin trace(s) of the distribution(s) in `y`, optionally grouped by
+`x`, to an existing figure (`Plot`, [`SyncPlot`](@ref), or
+[`SubplotFigure`](@ref)). Pass a `Vector` of `Vector`s for `y` to append
+several violins at once (`violinmode="group"`).
+
+# Keyword Arguments
+- `points`: Point display — `"all"`, `"outliers"`, `"suspectedoutliers"`, or `false`.
+- `side`: Violin side — `"both"`, `"positive"`, or `"negative"`.
+- `color`, `legend`, `title`, `xlabel`, `ylabel`, `xrange`, `yrange`, `width`,
+  `height`, `grid`, `fontsize`, `xscale`, `yscale`, `showlegend`: same as
+  [`plot_violin`](@ref).
+"""
 function plot_violin!(
 	fig,
 	x::Union{AbstractRange, Vector, SubArray},
