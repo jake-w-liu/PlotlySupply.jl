@@ -3,6 +3,18 @@ module PlotlySupply
 using LazyArtifacts
 using Reexport
 @reexport using PlotlyBase
+
+# PlotlyBase 0.9+ stores attributes in `JSON.Object`, an insertion-ordered
+# mutable mapping that supports the same in-place operations as `Dict`.
+# Older PlotlyBase releases use JSON.jl versions without that type.
+const _JSONObject =
+	isdefined(PlotlyBase.JSON, :Object) ? PlotlyBase.JSON.Object : Union{}
+
+# Mutable mappings whose storage PlotlySupply can update in place without
+# replacing the container (and so without breaking caller-held identities).
+const _BuiltinMutationDict = Union{Dict,IdDict,_JSONObject}
+_is_builtin_mutable_mapping(value) = value isa _BuiltinMutationDict
+
 include("modern_map_subplots.jl")
 # Re-export so the documented `meshgrid(y, x)` workflow works after `using
 # PlotlySupply` (the heatmap/surface/quiver examples rely on it).

@@ -1036,7 +1036,6 @@ end
 # those elements through a caller-owned wrapper.
 _copy_mutation_container(value) =
 	_copy_mutation_container(value, IdDict{Any,Any}())
-const _BuiltinMutationDict = Union{Dict,IdDict}
 const _BuiltinPlotlyAttribute = Union{
 	PlotlyBase.PlotlyAttribute,
 	PlotlyBase.PlotlyFrame,
@@ -1794,7 +1793,7 @@ function _rebase_unchanged_mutation_container!(
 		end
 		staged_key = if exact_original_key_present
 			original_key
-		elseif staged isa Dict || staged isa IdDict
+		elseif _is_builtin_mutable_mapping(staged)
 			Base.deepcopy_internal(original_key, memo)
 		else
 			original_key
@@ -2275,7 +2274,7 @@ function _rebuild_projected_component!(
 	next_ind = 1
 	while next_ind <= length(nodes)
 		value = nodes[next_ind]
-		if value isa Dict || value isa IdDict
+		if _is_builtin_mutable_mapping(value)
 			for (key, child) in value
 				register_child!(key, next_ind)
 				register_child!(child, next_ind)
@@ -2389,7 +2388,7 @@ function _staged_graph_unchanged(
 	# stores, whose plotting state is their contents. Array/dictionary
 	# wrappers and third-party container subtypes may carry parent links, tags,
 	# or other metadata, so they fall through to structural field comparison.
-	if original isa Dict || original isa IdDict
+	if _is_builtin_mutable_mapping(original)
 		length(original) == length(staged) || return false
 		missing_key = Ref(nothing)
 		for (original_key, original_value) in original
@@ -2564,7 +2563,7 @@ function _connect_candidate_graph_nodes!(
 
 	if value isa BigInt
 		return nothing
-	elseif value isa Dict || value isa IdDict
+	elseif _is_builtin_mutable_mapping(value)
 		for (key, child) in value
 			_connect_candidate_graph_nodes!(
 				root_index,
@@ -2636,7 +2635,7 @@ function _graph_reaches_staged_node(
 		_array_contains_mutation_container(value) && return true
 	end
 
-	if value isa Dict || value isa IdDict
+	if _is_builtin_mutable_mapping(value)
 		for (key, child) in value
 			_graph_reaches_staged_node(key, memo, seen) &&
 				return true
@@ -2684,7 +2683,7 @@ function _graph_contains_memoized_identity(
 	haskey(seen, value) && return false
 	seen[value] = nothing
 
-	if value isa Dict || value isa IdDict
+	if _is_builtin_mutable_mapping(value)
 		for (key, child) in value
 			_graph_contains_memoized_identity(
 				key,
@@ -2741,7 +2740,7 @@ function _collect_graph_mutable_identities!(
 	seen[value] = nothing
 	ismutable(value) && (identities[value] = nothing)
 
-	if value isa Dict || value isa IdDict
+	if _is_builtin_mutable_mapping(value)
 		for (key, child) in value
 			_collect_graph_mutable_identities!(
 				identities,
@@ -2802,7 +2801,7 @@ function _collect_model_memoized_identities!(
 		haskey(memo, value) &&
 		(identities[value] = nothing)
 
-	if value isa Dict || value isa IdDict
+	if _is_builtin_mutable_mapping(value)
 		for (key, child) in value
 			_collect_model_memoized_identities!(
 				identities,
@@ -2869,7 +2868,7 @@ function _collect_setter_memoized_identities!(
 	seen[value] = nothing
 	haskey(memo, value) && (identities[value] = nothing)
 
-	if value isa Dict || value isa IdDict
+	if _is_builtin_mutable_mapping(value)
 		for (key, child) in value
 			_collect_setter_memoized_identities!(
 				identities,
@@ -3320,7 +3319,7 @@ function _collect_changed_graph_nodes!(
 	seen[original] = staged
 
 	node_changed = false
-	if original isa Dict || original isa IdDict
+	if _is_builtin_mutable_mapping(original)
 		node_changed = length(original) != length(staged)
 		missing_key = Ref(nothing)
 		for (original_key, original_child) in original
@@ -7459,9 +7458,9 @@ end
 
 function _shallow_clone_modern_map_container(value)
 	if value isa _BuiltinPlotlyAttribute &&
-		(value.fields isa Dict || value.fields isa IdDict)
+		(_is_builtin_mutable_mapping(value.fields))
 		return typeof(value)(copy(value.fields))
-	elseif value isa Dict || value isa IdDict
+	elseif _is_builtin_mutable_mapping(value)
 		return copy(value)
 	end
 	return value
@@ -7485,9 +7484,9 @@ end
 
 function _modern_map_builtin_storage(value)
 	if value isa _BuiltinPlotlyAttribute &&
-		(value.fields isa Dict || value.fields isa IdDict)
+		(_is_builtin_mutable_mapping(value.fields))
 		return value.fields
-	elseif value isa Dict || value isa IdDict
+	elseif _is_builtin_mutable_mapping(value)
 		return value
 	end
 	return nothing
@@ -7679,7 +7678,7 @@ function _modern_map_graph_contains_identity(
 			end
 			# Third-party dictionaries can keep public alias-bearing metadata
 			# outside their key/value iteration.
-			if value isa Dict || value isa IdDict
+			if _is_builtin_mutable_mapping(value)
 				return false
 			end
 		elseif value isa AbstractArray

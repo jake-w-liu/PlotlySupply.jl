@@ -1600,12 +1600,12 @@ end
 function _builtin_layout_mapping_fields(existing)
 	fields = if existing isa PlotlyBase.PlotlyAttribute
 		existing.fields
-	elseif existing isa Dict || existing isa IdDict
+	elseif _is_builtin_mutable_mapping(existing)
 		existing
 	else
 		nothing
 	end
-	return fields isa Dict || fields isa IdDict ?
+	return _is_builtin_mutable_mapping(fields) ?
 		fields :
 		nothing
 end
@@ -1811,8 +1811,7 @@ function _collect_layout_mapping_implementation_identities!(
 	ismutable(value) &&
 		(identities[value] = nothing)
 	(
-		value isa Dict ||
-		value isa IdDict ||
+		_is_builtin_mutable_mapping(value) ||
 		value isa AbstractArray
 	) && return identities
 	for index in 1:fieldcount(typeof(value))
@@ -1833,8 +1832,7 @@ function _add_layout_mapping_implementation_identities!(
 	storage = _layout_mapping_storage(value)
 	(
 		storage === nothing ||
-		storage isa Dict ||
-		storage isa IdDict
+		_is_builtin_mutable_mapping(storage)
 	) && return identities
 	seen = IdDict{Any,Nothing}(storage => nothing)
 	for index in 1:fieldcount(typeof(storage))
@@ -2104,7 +2102,7 @@ function _layout_merge_key_reaches_mutation(
 				seen,
 			) && return true
 		end
-		(value isa Dict || value isa IdDict) &&
+		(_is_builtin_mutable_mapping(value)) &&
 			return false
 	elseif value isa AbstractArray
 		_array_elements_may_be_mutation_containers(
@@ -2163,7 +2161,7 @@ function _layout_merge_graph_has_hash_sensitive_key(
 				seen,
 			) && return true
 		end
-		(value isa Dict || value isa IdDict) &&
+		(_is_builtin_mutable_mapping(value)) &&
 			return false
 	elseif value isa AbstractArray
 		_array_elements_may_be_mutation_containers(
