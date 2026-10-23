@@ -144,14 +144,16 @@ function mgrid(arrays...)
 end
 
 function _savefig_html(io::IO, p::Plot)
+	buf = IOBuffer()
 	show(
-		io,
+		buf,
 		MIME("text/html"),
 		p;
 		include_mathjax = "cdn",
 		include_plotlyjs = "cdn",
 		full_html = true,
 	)
+	write(io, _inject_mathjax_svg_font(String(take!(buf))))
 	return nothing
 end
 

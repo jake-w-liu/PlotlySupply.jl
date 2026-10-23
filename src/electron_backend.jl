@@ -8907,8 +8907,43 @@ end
 
 const _EXPORT_STATE = _ExportState()
 
+const _MATHJAX_CDN_URL =
+	"https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/MathJax.js?config=TeX-AMS-MML_SVG"
+const _MATHJAX_SVG_FONT_ENV_VAR = "PLOTLYSUPPLY_MATHJAX_SVG_FONT"
+const _MATHJAX_SVG_FONT_DEFAULT = "Latin-Modern"
+
+function _mathjax_svg_font()
+	font = strip(get(ENV, _MATHJAX_SVG_FONT_ENV_VAR, _MATHJAX_SVG_FONT_DEFAULT))
+	isempty(font) && return _MATHJAX_SVG_FONT_DEFAULT
+	match(r"^[A-Za-z0-9._-]+$", font) === nothing && error(
+		"Invalid $(_MATHJAX_SVG_FONT_ENV_VAR) value $(repr(font)): expected a " *
+		"MathJax SVG font name containing only letters, digits, '.', '_', '-'.",
+	)
+	return font
+end
+
+function _mathjax_config_script()
+	return "  <script type=\"text/x-mathjax-config\">\n" *
+		"    MathJax.Hub.Config({SVG: {font: \"$(_mathjax_svg_font())\"}});\n" *
+		"  </script>"
+end
+
+function _inject_mathjax_svg_font(html::AbstractString)
+	tag = match(r"<script\b[^>]*MathJax\.js[^>]*>", html)
+	tag === nothing && error(
+		"savefig(html): the MathJax <script> tag was not found in the " *
+		"generated HTML; the configured SVG font could not be applied.",
+	)
+	return replace(
+		html,
+		tag.match => _mathjax_config_script() * "\n    " * tag.match;
+		count = 1,
+	)
+end
+
 function _export_window_html(divid::String)
 	plotlyjs_uri = _plotlyjs_asset_uri()
+	mathjax_config = _mathjax_config_script()
 	return """
 <!doctype html>
 <html lang="en">
@@ -8922,7 +8957,8 @@ function _export_window_html(divid::String)
 <body>
   <div id="$divid"></div>
   <script src="$plotlyjs_uri" charset="utf-8"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/MathJax.js?config=TeX-AMS-MML_SVG"></script>
+$mathjax_config
+  <script src="$_MATHJAX_CDN_URL"></script>
 </body>
 </html>
 """
