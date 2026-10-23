@@ -392,6 +392,95 @@ function _capture_pdf_file(
     height: $(options.scaled_height_js)
   });
   await Plotly.react(div, $(prepared.data_js), layout, $(prepared.config_js));
+  (function flattenColorbarGradients() {
+    // Chromium printToPDF encodes SVG linearGradient fills as PDF shading
+    // patterns, which some viewers render as a flat end color. Expand every
+    // colorbar gradient fill into discrete flat rects instead.
+    var NS = 'http://www.w3.org/2000/svg';
+    function parseCol(c) {
+      c = (c || '').trim();
+      if (c.charAt(0) === '#') {
+        var h = c.slice(1);
+        if (h.length === 3) h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+        var v = parseInt(h.slice(0, 6), 16);
+        return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+      }
+      var i0 = c.indexOf('('), i1 = c.indexOf(')');
+      if (i0 > -1 && i1 > i0) {
+        var p = c.slice(i0 + 1, i1).split(',');
+        return [+p[0], +p[1], +p[2]];
+      }
+      return [0, 0, 0];
+    }
+    function sample(stops, t) {
+      if (t <= stops[0][0]) return stops[0];
+      if (t >= stops[stops.length - 1][0]) return stops[stops.length - 1];
+      for (var i = 0; i < stops.length - 1; i++) {
+        var a = stops[i], b = stops[i + 1];
+        if (t >= a[0] && t <= b[0]) {
+          var u = b[0] > a[0] ? (t - a[0]) / (b[0] - a[0]) : 0;
+          var A = parseCol(a[1]), B = parseCol(b[1]);
+          return [t, 'rgb(' + Math.round(A[0] + u * (B[0] - A[0])) + ',' +
+                 Math.round(A[1] + u * (B[1] - A[1])) + ',' +
+                 Math.round(A[2] + u * (B[2] - A[2])) + ')',
+                 a[2] + u * (b[2] - a[2])];
+        }
+      }
+      return stops[stops.length - 1];
+    }
+    div.querySelectorAll('.cbfills *').forEach(function(el) {
+      var fv = (el.style && el.style.fill) || el.getAttribute('fill') || '';
+      var ui = fv.indexOf('url('), hi = fv.indexOf('#', ui), ei = fv.indexOf(')', hi);
+      if (ui === -1 || hi === -1 || ei === -1) return;
+      var id = fv.slice(hi + 1, ei).split('"').join('').split("'").join('');
+      var lg = document.getElementById(id);
+      if (!lg || lg.tagName.toLowerCase() !== 'lineargradient') return;
+      var stops = [];
+      lg.querySelectorAll('stop').forEach(function(s) {
+        var off = s.getAttribute('offset') || '0';
+        off = off.indexOf('%') > -1 ? parseFloat(off) / 100 : parseFloat(off);
+        var col = s.getAttribute('stop-color') || s.style.stopColor ||
+                  (getComputedStyle(s).stopColor);
+        var op = s.getAttribute('stop-opacity');
+        if (op === null && s.style && s.style.stopOpacity) op = s.style.stopOpacity;
+        stops.push([off, col, op === null ? 1 : parseFloat(op)]);
+      });
+      if (stops.length < 2) return;
+      stops.sort(function(a, b) { return a[0] - b[0]; });
+      var bb = el.getBBox();
+      var units = lg.getAttribute('gradientUnits') || 'objectBoundingBox';
+      var x1 = parseFloat(lg.getAttribute('x1') || '0'),
+          y1 = parseFloat(lg.getAttribute('y1') || '0'),
+          x2 = parseFloat(lg.getAttribute('x2') || '0'),
+          y2 = parseFloat(lg.getAttribute('y2') || '0');
+      if (units !== 'userSpaceOnUse') {
+        x1 = bb.x + x1 * bb.width; x2 = bb.x + x2 * bb.width;
+        y1 = bb.y + y1 * bb.height; y2 = bb.y + y2 * bb.height;
+      }
+      var vert = Math.abs(y2 - y1) >= Math.abs(x2 - x1);
+      var N = 128, g = document.createElementNS(NS, 'g');
+      for (var i = 0; i < N; i++) {
+        var sc = sample(stops, (i + 0.5) / N);
+        var r = document.createElementNS(NS, 'rect');
+        if (vert) {
+          var ya = y1 + (i / N) * (y2 - y1), yb = y1 + ((i + 1) / N) * (y2 - y1);
+          r.setAttribute('x', bb.x); r.setAttribute('width', bb.width);
+          r.setAttribute('y', Math.min(ya, yb));
+          r.setAttribute('height', Math.abs(yb - ya) + 0.3);
+        } else {
+          var xa = x1 + (i / N) * (x2 - x1), xb = x1 + ((i + 1) / N) * (x2 - x1);
+          r.setAttribute('y', bb.y); r.setAttribute('height', bb.height);
+          r.setAttribute('x', Math.min(xa, xb));
+          r.setAttribute('width', Math.abs(xb - xa) + 0.3);
+        }
+        r.setAttribute('fill', sc[1]);
+        if (sc[2] < 1) r.setAttribute('fill-opacity', sc[2]);
+        g.appendChild(r);
+      }
+      el.parentNode.insertBefore(g, el);
+      el.remove();
+    });
+  })();
   if (!document.getElementById('__ps_print_css')) {
     var style = document.createElement('style');
     style.id = '__ps_print_css';
