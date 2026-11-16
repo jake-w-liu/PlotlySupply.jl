@@ -110,8 +110,10 @@ _rv_calls(script::AbstractString) =
 	@test p.layout[:xaxis][:title][:text] == "X"
 	@test p.layout[:xaxis][:title][:font][:size] == 9
 
-	# A displayed figure applies the same model change and renders it.
-	fig = plot_scatter(1:3, [4, 5, 6]; title = "T")
+	# A displayed figure applies the same model change and renders it. The
+	# figure holds a bare String title (2.0 plot_scatter stores `title.text`,
+	# which relayout updates in place as `title.x`).
+	fig = Plot(scatter(x = 1:3, y = [4, 5, 6]), Layout(title = "T"))
 	sp, renderer = _rv_syncplot(fig)
 	try
 		@test relayout!(sp; title_x = 0.5) === sp
