@@ -90,15 +90,27 @@ end
 	SyncPlot
 
 A `PlotlyBase.Plot` displayed in a live Electron desktop window. Construct one
-via [`to_syncplot`](@ref), `plot(...; sync = true)`, or any high-level `plot_*`
-or `subplots` constructor with `show = true`.
+with [`to_syncplot`](@ref), `plot(...; sync = true)`, any high-level `plot_*`
+constructor with `show = true`, or [`subplots`](@ref) with `sync = true` (its
+default; the window is hidden when `show = false`).
 
 Mutating calls (`plot_*!`, `relayout!`, `restyle!`, `add_trace!`, …) committed
 on a `SyncPlot` refresh the open window transactionally. `sp.plot` is the
 wrapped `Plot`; `sp.app`, `sp.window`, and `sp.divid` expose the underlying
 Electron objects, and any other property access forwards to `sp.plot` (e.g.
-`sp.data`, `sp.layout`). See also [`msgchannel`](@ref),
-[`toggle_devtools`](@ref), and [`savefig`](@ref).
+`sp.data`, `sp.layout`).
+
+Lifecycle: `close(sp)` closes the window and deletes its temporary files, and
+`isopen(sp)` reports whether the window is still open. A visible window stays
+open until the user closes it or `close(sp)` is called, even when no variable
+refers to its `SyncPlot` any more. A hidden window (`show = false`) is closed
+automatically once its `SyncPlot` has become unreachable and been
+garbage-collected.
+
+LaTeX labels such as `"\$x^2\$"` are typeset with MathJax in the window, as
+in [`savefig`](@ref); MathJax is loaded from a CDN, so without network access
+such labels are shown as plain text. See also [`msgchannel`](@ref) and
+[`toggle_devtools`](@ref).
 """
 mutable struct SyncPlot
 	plot::Plot
@@ -145,50 +157,103 @@ end
 
 function Base.propertynames(sp::SyncPlot, private::Bool = false)
 	fields = private ? fieldnames(SyncPlot) : (:plot, :app, :window, :divid)
-	return (fields..., propertynames(getfield(sp, :plot), private)...)
+	# `Plot` has its own `divid`, shadowed by the SyncPlot field of that name;
+	# list every name once.
+	forwarded = filter(
+		name -> !(name in fields),
+		propertynames(getfield(sp, :plot), private),
+	)
+	return (fields..., forwarded...)
 end
-
-_plotlyjs_refresh!(fig, data, layout) = nothing
 
 """
 	to_syncplot(fig::Plot; app = nothing, width = 960, height = 720,
 		title = "PlotlySupply", show = true, autoplay = true, timeout_s = 15)
-	to_syncplot(sp::SyncPlot; kwargs...)
+	to_syncplot(sp::SyncPlot; window options...)
 
-Convert a `Plot` into a [`SyncPlot`](@ref) displayed in a desktop Electron
-window. Returns only after the initial Plotly render succeeds; `timeout_s`
-bounds the renderer handshake after the window page loads, including frame
-loading and autoplay. Calling `to_syncplot` on an existing `SyncPlot` returns
-it unchanged.
+Open `fig` in a desktop Electron window and return the live
+[`SyncPlot`](@ref) that drives it. The call returns once the initial Plotly
+render has succeeded.
 
-Requires `ElectronCall.jl` (`import Pkg; Pkg.add("ElectronCall")`); PlotlySupply
-loads it automatically when needed.
+# Keywords
+- `app = nothing`: the ElectronCall `Application` that hosts the window;
+  `nothing` uses PlotlySupply's shared default application.
+- `width::Real = 960`, `height::Real = 720`: window size in pixels, rounded to
+  whole pixels. `0` selects the default; negative, non-finite or sub-pixel
+  sizes throw an `ArgumentError`.
+- `title::AbstractString = "PlotlySupply"`: window title (`""` selects the
+  default).
+- `show::Bool = true`: show the window. `false` creates a hidden window, e.g.
+  for scripted image capture with `to_image(sp)`.
+- `autoplay::Bool = true`: start playing the figure's animation frames once the
+  window is ready. Playback runs in the background and does not delay the
+  return.
+- `timeout_s::Real = 15`: bound in seconds on the renderer handshake after the
+  window page has loaded (loading plotly.js, `Plotly.newPlot` and frame
+  registration; not playback). Must be finite and non-negative.
+
+Calling `to_syncplot` on an existing `SyncPlot` validates the keywords and
+returns it unchanged, since its window already exists. Any other argument
+throws an `ArgumentError`; for a [`SubplotFigure`](@ref) use
+`subplots(...; sync = true)` or `display(sf)`.
+
+The window lives until it is closed by the user or with `close(sp)`; see
+[`SyncPlot`](@ref) for the lifecycle of unreferenced windows.
+
+# Example
+```julia
+sp = to_syncplot(plot_scatter(1:3, [1, 4, 9]); title = "Squares")
+relayout!(sp; title = "Squares, updated")
+close(sp)
+```
 """
-to_syncplot(fig; kwargs...) = error(
-	"`to_syncplot` requires ElectronCall.jl. " *
-	"Install it once in your environment: `import Pkg; Pkg.add(\"ElectronCall\")`.",
-)
+function to_syncplot end
 
 """
-	plot(traces, layout = Layout(); config = PlotConfig(), frames = PlotlyFrame[], sync = false, kwargs...)
-	plot(trace::AbstractTrace, layout::AbstractLayout = Layout(); kwargs...)
+	plot(trace::AbstractTrace, layout::AbstractLayout[, frames]; kwargs...)
 	plot(traces::AbstractTrace...; layout = Layout(), kwargs...)
-	plot(fig::Plot; sync = false, kwargs...)
-	plot(layout::AbstractLayout; kwargs...)
+	plot(traces::AbstractVector[, layout::AbstractLayout[, frames]]; kwargs...)
+	plot(layout::AbstractLayout[, frames]; kwargs...)
+	plot(; layout = Layout(), kwargs...)
+	plot(fig::Plot; sync = false, window options...)
 
-PlotlyJS-style figure constructor. `traces` is a single trace or vector of
-traces (e.g. built with [`scatter`](@ref) or `attr`). Returns a
-`PlotlyBase.Plot` by default; pass `sync = true` to open an Electron window and
-return a [`SyncPlot`](@ref), forwarding extra keyword arguments such as
-`width`, `height`, and `title` to [`to_syncplot`](@ref).
+PlotlyJS-style figure constructor. Builds a `PlotlyBase.Plot` from traces
+(e.g. [`scatter`](@ref)), a layout and animation frames (built with `frame`).
+With `sync = true` it opens the figure in an Electron window and returns a
+[`SyncPlot`](@ref) instead.
 
-Desktop display requires `ElectronCall.jl`; headless `Plot` construction works
-without it.
+`traces` may be any vector whose elements are all traces, including an untyped
+`Vector{Any}` filled with `push!`; a `Vector{<:AbstractTrace}` is used without
+copying. `frames` likewise accepts any vector of frames. `plot(fig::Plot)`
+returns `fig` itself, or its window with `sync = true`.
+
+# Keywords
+- `layout::AbstractLayout = Layout()`: figure layout, when not given
+  positionally.
+- `frames::AbstractVector = PlotlyFrame[]`: animation frames, when not given
+  positionally.
+- `config::PlotConfig = PlotConfig()`: Plotly configuration.
+- `sync::Bool = false`: open the figure in a window (see
+  [`to_syncplot`](@ref)).
+- `app`, `width`, `height`, `title`, `show`, `autoplay`, `timeout_s`: the
+  window options of [`to_syncplot`](@ref). They are validated on every call
+  and applied only with `sync = true`.
+
+Passing `layout`, `frames` or `config` as a keyword when the same argument was
+given positionally, or together with a prebuilt `Plot`, throws an
+`ArgumentError`, as does any other keyword or an unsupported positional
+argument. To plot data vectors directly use [`plot_scatter`](@ref) or another
+`plot_*` function. `plot` applies no PlotlySupply template: the figure uses
+PlotlyBase's defaults.
+
+# Example
+```julia
+fig = plot([scatter(y = [1, 3, 2]), bar(y = [2, 1, 3])]; layout = Layout(title = "Mixed"))
+sp = plot(scatter(y = [1, 2]); sync = true, title = "Window")
+close(sp)
+```
 """
-plot(args...; kwargs...) = error(
-	"`plot` compatibility API requires ElectronCall.jl. " *
-	"Install it once in your environment: `import Pkg; Pkg.add(\"ElectronCall\")`.",
-)
+function plot end
 
 include("api.jl")
 include("electron_backend.jl")
