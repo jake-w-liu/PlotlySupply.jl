@@ -147,7 +147,33 @@ end
 			close(sp)
 		end
 
-		@testset "#41 #53 #116 #130 #268 set_template! on a SubplotFigure" begin
+		@testset "#5 #53 #116 #284 (+ set_template! part of #41 #130 #268) set_template! on a SubplotFigure" begin
+			# The findings' own regression tests (sync = false, Plot-backed).
+			# Before: set_template! changed the template and then threw.
+			s5 = subplots(1, 1; sync = false)
+			plot!(s5, 1:3, [1, 2, 3])
+			@test set_template!(s5, "ggplot2") === s5
+			@test s5.plot.layout.fields[:template] == _RS_PB.templates[:ggplot2]
+			@test annotate!(s5, 2, 2, "hi") === s5
+			@test length(s5.plot.layout.fields[:annotations]) == 1
+			s53 = subplots(1, 2; sync = false)
+			@test annotate!(s53, 1, 1, "hi"; xref = "x2", yref = "y2") === s53
+			s53b = subplots(1, 2; sync = false)
+			set_template!(s53b, "plotly_dark")
+			@test s53b.plot.layout.fields[:template].layout.fields[:paper_bgcolor] == "rgb(17,17,17)"
+			s53c = subplots(1, 1; sync = false, specs = fill(Spec(kind = "map"), 1, 1))
+			plot_densitymap!(s53c, [0.0, 1.0], [0.0, 1.0], nothing)
+			@test length(s53c.plot.data) == 1 && s53c.plot.data[1].fields[:subplot] == "map"
+			s116 = subplots(2, 1; sync = false, show = false)
+			plot_scatter!(s116, [1.0, 2.0], [3.0, 4.0])
+			@test set_template!(s116, "plotly_dark") === s116
+			@test s116.layout.fields[:template] == _RS_PB.templates[:plotly_dark]
+			s284 = subplots(1, 2; sync = false)
+			plot!(s284, 1:3, [1, 2, 3])
+			@test hasproperty(s284, :plot)
+			set_template!(s284, "plotly_dark")
+			@test s284.plot.layout.fields[:template] == _RS._resolve_template("plotly_dark")
+
 			sf = subplots(1, 2; sync = false)
 			plot_scatter!(sf, 1:5, [1.0, 2, 3, 2, 1]; row = 1, col = 2, legend = "a")
 			@test set_template!(sf, "plotly_dark") === sf
@@ -529,6 +555,120 @@ end
 			shown = plot_scatter(1:3, 1:3)
 			@test _RS._maybe_show(shown, false, 0, 0, "") === shown
 			@test _RS._maybe_show(shown, false, 640.0, 480, SubString("window")) === shown
+		end
+
+		@testset "template errors and warnings name the function" begin
+			fig = plot_scatter(1:3, 1:3)
+			before = _rs_json(fig)
+			for (call, who) in (
+				(() -> set_template!(fig, 3), "set_template!:"),
+				(() -> set_template!(fig, nothing), "set_template!:"),
+				(() -> set_default_template!(3.5), "set_default_template!:"),
+			)
+				err = try
+					call()
+					nothing
+				catch e
+					e
+				end
+				@test err isa ArgumentError
+				@test startswith(sprint(showerror, err), "ArgumentError: $(who)")
+			end
+			@test _rs_json(fig) == before
+			@test get_default_template() === :plotly_white
+			@test_logs (:warn, r"^set_template!: unrecognized template \"nope\"") set_template!(fig, "nope")
+			@test fig.layout.fields[:template] == _RS_PB.templates[:plotly_white]
+			_rs_with_defaults() do
+				@test (@test_logs (:warn, r"^set_default_template!: unrecognized") set_default_template!(:nope)) === :plotly_white
+			end
+		end
+
+		@testset "an explicit grid keyword wins over the style grid" begin
+			# The constructor pipeline: layout, then the options (grid first), then
+			# the template.
+			function built(grid)
+				fig = Plot(GenericTrace[scatter(x = [1, 2], y = [1, 2])], _RS._default_cartesian_layout())
+				_RS._apply_cartesian_plot_options!(fig; grid = grid, who = "probe")
+				return fig
+			end
+			with_style(; grid = false) do
+				hidden = plot_scatter(1:3, 1:3)
+				@test _rs_get(hidden, :xaxis)[:showgrid] === false
+				@test _rs_get(hidden, :yaxis)[:showgrid] === false
+				@test _rs_get(built(true), :xaxis)[:showgrid] === false
+				x_only = built(:x)
+				@test _rs_get(x_only, :xaxis)[:showgrid] === true
+				@test _rs_get(x_only, :yaxis)[:showgrid] === false
+				both = built(:both)
+				@test _rs_get(both, :xaxis)[:showgrid] === true
+				@test _rs_get(both, :yaxis)[:showgrid] === true
+				# Axes without a grid setting of their own get the style's.
+				sf = subplots(1, 2; sync = false)
+				for key in (:xaxis, :xaxis2, :yaxis, :yaxis2)
+					@test _rs_get(sf, key)[:showgrid] === false
+				end
+			end
+			# (An empty `attr()` is dropped by `Layout`, so each axis gets a key.)
+			bare = Plot(GenericTrace[], Layout(xaxis = attr(showgrid = true), xaxis2 = attr(side = "top"), yaxis = attr(title_text = "y")))
+			_RS._apply_default_cartesian_axes!(bare; style = PlotStyle(; grid = false))
+			@test _rs_get(bare, :xaxis)[:showgrid] === true
+			@test _rs_get(bare, :xaxis2)[:showgrid] === false
+			@test _rs_get(bare, :yaxis)[:showgrid] === false
+			# Under the default style no grid key is written at all.
+			plain = plot_scatter(1:3, 1:3)
+			@test !haskey(_rs_get(plain, :xaxis), :showgrid)
+		end
+
+		@testset "figure-derived legend and axis defaults" begin
+			dark = plot_scatter(1:3, 1:3)
+			set_template!(dark, :plotly_dark)
+			@test _RS._figure_legend_defaults(dark) ==
+				  (bgcolor = _RS_DARK_LEGEND.bgcolor, bordercolor = _RS_DARK_LEGEND.bordercolor, borderwidth = 1.0)
+			@test _RS._figure_legend_defaults(dark; style = PlotStyle(; legend_frame = false)).borderwidth == 0.0
+			@test _RS._figure_axis_defaults(dark; axis = :y)[:linecolor] == _RS_DARK_INK
+			light = plot_scatter(1:3, 1:3)
+			@test _RS._figure_legend_defaults(light) ==
+				  (bgcolor = _RS_LIGHT_LEGEND.bgcolor, bordercolor = _RS_LIGHT_LEGEND.bordercolor, borderwidth = 1.0)
+			@test _RS._figure_axis_defaults(light)[:tickcolor] == "#000000"
+			# A template stored by name is resolved; a layout without one falls
+			# back to the style's template.
+			named = Plot(GenericTrace[], Layout())
+			named.layout.fields[:template] = " plotly_dark "
+			@test _RS._figure_style_template(named) === _RS_PB.templates[:plotly_dark]
+			delete!(named.layout.fields, :template)
+			@test _RS._figure_template(named) === nothing
+			@test _RS._figure_style_template(named) === _RS_PB.templates[:plotly_white]
+			with_style(; template = :ggplot2) do
+				@test _RS._figure_style_template(named) === _RS_PB.templates[:ggplot2]
+			end
+		end
+
+		@testset "style cycle: offset scope and mode flags" begin
+			style = PlotStyle(; cycle = :dash_marker)
+			outer = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]])
+			tmp = plot_scatter(1:3, [[1, 1, 1], [2, 2, 2]])
+			_RS._with_style_trace_offset(outer) do
+				_RS._apply_style_trace_defaults!(tmp, 1:2; style = style)
+			end
+			@test [_rs_sd(t.fields[:line])[:dash] for t in tmp.data] == ["dot", "dashdot"]
+			@test [_rs_sd(t.fields[:marker])[:symbol] for t in tmp.data] == ["diamond", "triangle-up"]
+			# The offset is scoped: outside the block positions restart at 1.
+			@test _RS._STYLE_TRACE_OFFSET[] == 0
+			again = plot_scatter(1:3, [1, 1, 1])
+			_RS._apply_style_trace_defaults!(again, 1; style = style)
+			@test _rs_sd(again.data[1].fields[:line])[:dash] == "solid"
+			# The value of `f` is returned, and the offset is reset on an exception.
+			@test _RS._with_style_trace_offset(() -> 42, outer) == 42
+			@test_throws ErrorException _RS._with_style_trace_offset(() -> error("boom"), outer)
+			@test _RS._STYLE_TRACE_OFFSET[] == 0
+
+			modes = Plot([scatter(x = [1, 2], y = [1, 2], mode = m) for m in ("lines+text", "markers", "lines+markers", "text")], Layout())
+			unset = Plot([scatter(x = [1, 2], y = [1, 2])], Layout())
+			_RS._apply_style_trace_defaults!(modes, 1:4; style = PlotStyle(; cycle = :marker))
+			_RS._apply_style_trace_defaults!(unset, 1; style = PlotStyle(; cycle = :marker))
+			@test [t.fields[:mode] for t in modes.data] == ["lines+markers+text", "markers", "lines+markers", "text"]
+			@test !haskey(unset.data[1].fields, :mode)
+			@test _rs_sd(unset.data[1].fields[:marker])[:symbol] == "circle"
 		end
 	finally
 		_RS._DEFAULT_TEMPLATE[] = original_template

@@ -22,15 +22,33 @@
 # Already wired in api.jl (style-template owner): `_apply_default_template!`
 # (template → `_apply_default_cartesian_axes!` → `_apply_default_legend!` with
 # `_style_legend_defaults` → `_apply_style_layout!`), `_cartesian_axis_style` /
-# `_default_cartesian_layout` (axis defaults at construction) and
-# `set_template!` (re-derives template-derived colours). Constructors get the
-# whole default look by calling `_apply_default_template!` (directly or through
-# `_apply_cartesian_plot_options!` / `_apply_basic_plot_options!` /
-# `_apply_scene_options!` with `apply_template = true`) AFTER their title,
-# labels and annotations exist and BEFORE an explicit `fontsize`
-# (`_apply_figure_fontsize!`), so the caller's size wins over the style's.
-# Trace builders call `_apply_style_trace_defaults!` (below) on the traces they
-# add.
+# `_default_cartesian_layout` (axis defaults at construction),
+# `_apply_basic_plot_options!` and `set_template!` (re-derives
+# template-derived colours).
+#
+# Rules for constructors and mutators (other owners):
+# - A constructor gets the whole default look by calling
+#   `_apply_default_template!` once (directly or through
+#   `_apply_cartesian_plot_options!` / `_apply_basic_plot_options!` /
+#   `_apply_scene_options!` with `apply_template = true`). Call it AFTER the
+#   title, axis titles and paper-referenced annotations exist (the style sizes
+#   their fonts and fits the margins around them) and BEFORE an explicit
+#   `fontsize` (`_apply_figure_fontsize!`, which merges `font.size` and keeps the
+#   style's family/colour), so the caller's base size wins over the style's.
+#   Per-role sizes written by the style (title, axis titles, ticks, legend)
+#   stay; `set_fonts!` changes those.
+# - The template re-writes the 1.x frame keys of every x/y axis (zeroline,
+#   showline, mirror, ticks, automargin, linecolor, linewidth, tickcolor); an
+#   option that must override one of them (e.g. tick direction) is applied
+#   after `_apply_default_template!`. `showgrid` set before it is kept.
+# - A mutator never calls `_apply_default_template!` (it would reset a
+#   user-set template). A legend it creates should use
+#   `_apply_default_legend!(fig; _figure_legend_defaults(fig)...)`, and an
+#   axis it adds (twin/secondary) `_figure_axis_defaults(fig; axis = :y)`, so
+#   both match the figure's template (dark on plotly_dark).
+# - Trace builders call `_apply_style_trace_defaults!` (below) on the traces
+#   they add; code that builds traces on a temporary figure and appends them
+#   elsewhere wraps that in `_with_style_trace_offset`.
 #
 #   _active_style()::PlotStyle
 #       The style constructors must consult. Internal callers must not mutate it.
@@ -45,6 +63,14 @@
 #       registered name), `nothing` when it has none. Pass it as `template` to
 #       the helpers below when styling something added to an existing figure
 #       (e.g. a legend created by a mutator) so the colours match that figure.
+#
+#   _figure_style_template(fig; style)::PlotlyBase.Template
+#       `_figure_template(fig)`, else the style's template.
+#
+#   _figure_legend_defaults(fig; style)::NamedTuple   (bgcolor, bordercolor, borderwidth)
+#   _figure_axis_defaults(fig; axis = :x, style)::Dict{Symbol,Any}
+#       `_style_legend_defaults` / `_style_axis_defaults` in the colours of the
+#       figure's template, for legends and axes created on an existing figure.
 #
 #   _style_axis_defaults(style = _active_style(); template = _style_template(style),
 #                        axis::Symbol = :x)::Dict{Symbol,Any}
@@ -106,11 +132,16 @@
 #       data, normally the traces the calling constructor or mutator just
 #       added) wherever the trace leaves them unset. See its docstring.
 #
+#   _with_style_trace_offset(f, fig)
+#       Run `f()` so that `_apply_style_trace_defaults!` inside it continues
+#       the cycle of `fig` (for builders that work on a temporary figure).
+#
 #   _style_mathsize(style = _active_style())::String
 #       "" or a LaTeX size command for the mathtext pipeline (`:publication` gives
 #       "\\large"). The math size is applied where labels are converted, so
-#       `_label` (src/sci/mathtext.jl) must fall back to it when the
-#       `set_default_mathtext!` size is "" (requested from the mathtext owner).
+#       `_label` (src/sci/mathtext.jl, not owned here) must fall back to it when
+#       the `set_default_mathtext!` size is "" (cross-request to the mathtext
+#       owner; until that lands a style's `mathsize` has no effect).
 #
 #   _template_is_dark(t), _template_ink(t), _template_legend_colors(t)
 #       Template-derived colours; `set_template!` re-derives every layout value
@@ -313,19 +344,10 @@ end
 const _STYLE_TICKS = ("outside", "inside", "")
 const _STYLE_SPINES = (:box, :open, :none)
 const _STYLE_CYCLES = (:none, :bw, :dash, :marker, :dash_marker)
-const _STYLE_MATHSIZES = (
-	"",
-	"\\tiny",
-	"\\scriptsize",
-	"\\footnotesize",
-	"\\small",
-	"\\normalsize",
-	"\\large",
-	"\\Large",
-	"\\LARGE",
-	"\\huge",
-	"\\Huge",
-)
+# `mathsize` accepts exactly the MathJax 2 size switches the mathtext pipeline
+# accepts (`_MATHTEXT_SIZES`, src/sci/mathtext.jl): `\footnotesize` does not
+# exist in MathJax 2 and would render as a red undefined macro.
+const _STYLE_MATHSIZES = ("", ("\\" * name for name in _MATHTEXT_SIZES)...)
 const _STYLE_MARGIN_KEYS = (:l, :r, :t, :b, :pad)
 const _STYLE_DASH_CYCLE = ("solid", "dash", "dot", "dashdot")
 const _STYLE_MARKER_CYCLE = (
@@ -384,8 +406,11 @@ Every field is validated by the constructor and on assignment
 - `margin=nothing`: plot margins in px: a number (all four sides), or a
   `NamedTuple`/`Dict` with any of `l`, `r`, `t`, `b`, `pad`. When set, the
   figure title is given `automargin=true` so it never overlaps the plot.
-- `mathsize=""`: LaTeX size command (`"\\\\small"`, `"\\\\large"`, …) applied to
-  math labels by the mathtext pipeline.
+- `mathsize=""`: MathJax size switch applied to math labels by the mathtext
+  pipeline when `set_default_mathtext!` sets no size: `""` or one of
+  `"\\\\tiny"`, `"\\\\Tiny"`, `"\\\\scriptsize"`, `"\\\\small"`,
+  `"\\\\normalsize"`, `"\\\\large"`, `"\\\\Large"`, `"\\\\LARGE"`, `"\\\\huge"`,
+  `"\\\\Huge"` (MathJax 2 has no `\\footnotesize`).
 - `cycle=:none`: per-trace line-style cycle used where the caller does not pass
   `dash`/`marker_symbol`: `:dash` (solid, dash, dot, dashdot), `:marker`
   (circle, square, diamond, triangle-up, x, triangle-down, cross, star; a
@@ -400,6 +425,17 @@ Numeric fields use `0` as "unset"; negative and non-finite values throw an
 
 `template` defaults to `nothing` rather than `"plotly_white"` so that the
 `:default` style keeps honouring `set_default_template!` exactly as 1.x did.
+
+# How a style meets the constructor keywords
+The active style is applied when a figure is created; existing figures are not
+restyled. A constructor's explicit keywords then win: `fontsize` sets the base
+size (`layout.font.size`, keeping the style's family and colour) while the
+style's per-role sizes stay (change those with [`set_fonts!`](@ref)); a
+`grid` keyword other than the constructor default `true` (`false`, `:x`,
+`:y`, `:both`, `:none`) wins over the style's `grid`; `title`/`xlabel`/`ylabel`
+get the style's role sizes. Spine,
+tick and legend colours follow the template (light ink on dark templates) and
+are re-derived by `set_template!`.
 
 # Example
 ```julia
@@ -899,6 +935,22 @@ function _figure_template(fig)
 	return nothing
 end
 
+# The template the colours of something added to an EXISTING figure must match:
+# the figure's own template, else (none usable) the active style's.
+_figure_style_template(fig; style::PlotStyle = _active_style()) =
+	something(_figure_template(fig), _style_template(style))
+
+# Legend box for a legend that a mutator creates on an existing figure: the
+# style's frame choice in the colours of the figure's template (a dark box on
+# a plotly_dark figure). Splat into `_apply_default_legend!(fig; ...)`.
+_figure_legend_defaults(fig; style::PlotStyle = _active_style()) =
+	_style_legend_defaults(style; template = _figure_style_template(fig; style = style))
+
+# Frame of a Cartesian axis that is added to an existing figure (a twin or
+# secondary axis): `_style_axis_defaults` in the ink of the figure's template.
+_figure_axis_defaults(fig; axis::Symbol = :x, style::PlotStyle = _active_style()) =
+	_style_axis_defaults(style; template = _figure_style_template(fig; style = style), axis = axis)
+
 # Whether a template specification (as stored in `PlotStyle.template` or
 # `_DEFAULT_TEMPLATE`) is one of plotly's built-in templates or a `+`
 # compound of them. `nothing` means the package default template.
@@ -1047,6 +1099,35 @@ const _STYLE_MARKER_CYCLE_3D = (
 # The keyword names `explicit` may list in `_apply_style_trace_defaults!`.
 const _STYLE_TRACE_DEFAULT_KEYWORDS = (:linewidth, :marker_size, :dash, :marker_symbol, :mode)
 
+# Number of line-style traces that precede the figure `_apply_style_trace_defaults!`
+# is called on. Non-zero only inside `_with_style_trace_offset`, i.e. while a
+# trace builder runs on a temporary figure whose traces are appended to a
+# larger one afterwards (the SubplotFigure delegate). A ScopedValue, so
+# concurrent tasks never see each other's offset.
+const _STYLE_TRACE_OFFSET = Base.ScopedValues.ScopedValue(0)
+
+"""
+	_with_style_trace_offset(f, fig)
+
+Run `f()` with the style cycle offset by the number of line-style traces
+already in `fig` (a `Plot`, `SyncPlot`, `SubplotFigure` or staged target), and
+return its value. Internal; for code that builds traces on a temporary figure
+and then appends them to `fig` (the `plot_*!(sf::SubplotFigure, …)` delegate
+builds into an empty `Plot`): calls to [`_apply_style_trace_defaults!`](@ref)
+inside `f` then continue the dash/marker cycle of `fig` instead of restarting
+it at 1.
+
+```julia
+_with_style_trace_offset(target_plot) do
+	mutator(_StagedPlotMutation(tmp), args...; kwargs...)
+end
+```
+"""
+function _with_style_trace_offset(f, fig)
+	offset = count(_style_is_line_trace, _plot_obj(fig).data)
+	return Base.ScopedValues.with(f, _STYLE_TRACE_OFFSET => offset)
+end
+
 function _style_trace_type(trace::PlotlyBase.AbstractTrace)
 	value = get(trace.fields, :type, "scatter")
 	return value isa Union{AbstractString, Symbol} ? String(value) : ""
@@ -1088,16 +1169,30 @@ sentinels). Filled:
 - `line.width` ← `style.linewidth`, `marker.size` ← `style.marker_size` (when > 0);
 - `line.dash` ← the dash cycle (`cycle` `:bw`, `:dash`, `:dash_marker`);
 - `marker.symbol` ← the marker cycle (`:marker`, `:dash_marker`; scatter3d
-  uses its own eight-symbol cycle), and `mode = "lines"` becomes
-  `"lines+markers"` so the markers show.
+  uses its own eight-symbol cycle), and a `mode` that draws lines but no
+  markers gets the `markers` flag (`"lines"` → `"lines+markers"`,
+  `"lines+text"` → `"lines+markers+text"`) so the markers show. An absent
+  `mode` is left to plotly's own default.
 
 The cycle position of a trace is its rank among the figure's line-style traces
 (1 for the first), so the cycle continues across `plot_*!` appends and
-skips non-line traces. Colour is not set here: the `:bw` cycle's single ink
-colour is the figure colorway (written by `_apply_default_template!`).
-Nested `line`/`marker` containers are replaced, never mutated in place. Under
-a style with no trace defaults (`:default`) nothing is touched. Returns
-`nothing`.
+skips non-line traces; inside [`_with_style_trace_offset`](@ref) the line-style
+traces of the outer figure are counted too. Colour is not set here: the `:bw`
+cycle's single ink colour is the figure colorway (written by
+`_apply_default_template!`). Nested `line`/`marker` containers are replaced,
+never mutated in place. Under a style with no trace defaults (`:default`)
+nothing is touched. Returns `nothing`.
+
+Call it after the traces are in the figure and before the figure is returned
+(constructor) or refreshed (mutator), e.g.
+
+```julia
+first_new = length(_plot_data(fig)) + 1
+push!(_plot_data(fig), traces...)
+# `mode` defaults to "lines" in the signature, so say when the caller chose it.
+_apply_style_trace_defaults!(fig, first_new:length(_plot_data(fig));
+	explicit = haskey(kwargs, :mode) ? (:mode,) : ())
+```
 """
 function _apply_style_trace_defaults!(
 	fig,
@@ -1125,10 +1220,11 @@ function _apply_style_trace_defaults!(
 
 	# All updates are computed first, then committed.
 	pending = Tuple{Int, Dict{Symbol, Any}}[]
+	offset = _STYLE_TRACE_OFFSET[]
 	for index in unique(indices)
 		trace = data[index]
 		_style_is_line_trace(trace) || continue
-		position = count(_style_is_line_trace, view(data, 1:index))
+		position = offset + count(_style_is_line_trace, view(data, 1:index))
 		updates = _style_trace_default_updates(
 			trace,
 			_style_trace_defaults(style, position),
@@ -1170,9 +1266,12 @@ function _style_trace_default_updates(trace, defaults, position::Integer, explic
 		(updates[:line] = _style_update_path(get(fields, :line, nothing), (), line_updates, "line", who))
 	isempty(marker_updates) ||
 		(updates[:marker] = _style_update_path(get(fields, :marker, nothing), (), marker_updates, "marker", who))
-	if get(defaults, :markers, false) === true && !(:mode in explicit) &&
-	   isequal(get(fields, :mode, nothing), "lines")
-		updates[:mode] = "lines+markers"
+	mode = get(fields, :mode, nothing)
+	if get(defaults, :markers, false) === true && !(:mode in explicit) && mode isa AbstractString
+		flags = split(String(mode), '+')
+		if "lines" in flags && !("markers" in flags)
+			updates[:mode] = join((flag == "lines" ? "lines+markers" : flag for flag in flags), '+')
+		end
 	end
 	return updates
 end

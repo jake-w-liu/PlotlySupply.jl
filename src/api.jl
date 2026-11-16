@@ -264,21 +264,28 @@ function _template_name_or_nothing(template::Union{AbstractString, Symbol})
 	return nothing
 end
 
-function _normalize_template(template)
+# Normalized registered template name for a `String`/`Symbol` template
+# specification. An unrecognised name warns and falls back to `:plotly_white`
+# (the 1.x behaviour); any other type throws an `ArgumentError` naming `who`,
+# the public function the template was passed to.
+function _normalize_template(template; who::AbstractString = "template")
 	(template isa Symbol || template isa AbstractString) ||
 		throw(ArgumentError(
-			"template names must be strings or symbols; got $(typeof(template))",
+			"$(who): a template must be a registered template name (String or " *
+			"Symbol) or a PlotlyBase.Template; got a $(typeof(template)).",
 		))
 	name = _template_name_or_nothing(template)
 	name === nothing || return name
 	valid_templates = sort!(collect(keys(PlotlyBase.templates)))
-	@warn "Unrecognized template $(repr(template)); falling back to :plotly_white." valid = valid_templates
+	@warn "$(who): unrecognized template $(repr(template)); falling back to :plotly_white." valid = valid_templates
 	return :plotly_white
 end
 
-_resolve_template(template::PlotlyBase.Template) = template
-function _resolve_template(template)
-	name = _normalize_template(template)
+# The `PlotlyBase.Template` object for a template specification: a Template is
+# returned as is, a name goes through `_normalize_template` (same `who`).
+_resolve_template(template::PlotlyBase.Template; who::AbstractString = "template") = template
+function _resolve_template(template; who::AbstractString = "template")
+	name = _normalize_template(template; who = who)
 	name in keys(PlotlyBase.templates) &&
 		return PlotlyBase.templates[name]
 	return PlotlyBase.templates[String(name)]
@@ -370,7 +377,7 @@ set_default_template!()                    # back to "plotly_white"
 function set_default_template!(template = "plotly_white")
 	_DEFAULT_TEMPLATE[] = template isa PlotlyBase.Template ?
 		template :
-		_normalize_template(template)
+		_normalize_template(template; who = "set_default_template!")
 	return _DEFAULT_TEMPLATE[]
 end
 
@@ -448,19 +455,37 @@ end
 # (defined in src/sci/style.jl, included further down, hence no annotation);
 # `template` must be the template the figure uses (normally the style's own,
 # just applied by `_apply_default_template!`): it chooses the spine/tick ink.
+#
+# The 1.x frame keys (zeroline, showline, mirror, ticks, automargin, linecolor,
+# linewidth, tickcolor) are written to every axis, as in 1.x. `showgrid`
+# (written only by a style with `grid = false`) is filled in only where an axis
+# has none yet, so an explicit `grid = :x`/`:y`/`false` applied by a
+# constructor before the template is kept.
 function _apply_default_cartesian_axes!(
 	fig;
 	style = _active_style(),
 	template::PlotlyBase.Template = _style_template(style),
 )
-	layout_keys = keys(_plot_layout(fig).fields)
+	fields = _plot_layout(fig).fields
+	layout_keys = collect(keys(fields))
 	has_x = any(startswith(String(k), "xaxis") for k in layout_keys)
 	has_y = any(startswith(String(k), "yaxis") for k in layout_keys)
-	# Compute both before the first write.
+	# Compute everything before the first write.
 	x_defaults = has_x ? _style_axis_defaults(style; template = template, axis = :x) : nothing
 	y_defaults = has_y ? _style_axis_defaults(style; template = template, axis = :y) : nothing
+	grid_updates = Pair{Symbol, Any}[]
+	for (defaults, letter) in ((x_defaults, "x"), (y_defaults, "y"))
+		defaults === nothing && continue
+		showgrid = pop!(defaults, :showgrid, nothing)
+		showgrid === nothing && continue
+		for key in sort!(filter(k -> occursin(Regex("^$(letter)axis\\d*\$"), String(k)), layout_keys); by = String)
+			haskey(_symbol_dict(fields[key]), :showgrid) && continue
+			push!(grid_updates, Symbol(key, "_showgrid") => showgrid)
+		end
+	end
 	x_defaults === nothing || update_xaxes!(fig; x_defaults...)
 	y_defaults === nothing || update_yaxes!(fig; y_defaults...)
+	isempty(grid_updates) || relayout!(fig; grid_updates...)
 	return nothing
 end
 
@@ -9438,7 +9463,7 @@ set_template!(sf, :ggplot2)         # returns sf
 """
 function set_template!(fig, template = get_default_template(); kwargs...)
 	_require_no_set_template_keywords(kwargs)
-	chosen = _resolve_template(template)
+	chosen = _resolve_template(template; who = "set_template!")
 	_apply_template_change!(fig, chosen)
 	_refresh!(fig)
 	return nothing
@@ -9454,17 +9479,21 @@ function _require_no_set_template_keywords(kwargs)
 	))
 end
 
+# Spine/tick ink and legend box colours derived from a figure's current
+# template; a figure without a (usable) template counts as the 1.x light look.
+_set_template_old_ink(old) = old === nothing ? _DEFAULT_AXIS_LINECOLOR : _template_ink(old)
+_set_template_old_legend(old) = old === nothing ?
+	(bgcolor = _DEFAULT_LEGEND_BGCOLOR[], bordercolor = _DEFAULT_LEGEND_BORDERCOLOR[]) :
+	_template_legend_colors(old)
+
 # Every layout value derived from the figure's current template that must be
 # re-derived for `chosen`, as `relayout!` keyword pairs. Only values that still
 # equal the derived colour of the current template are listed, so colours set
-# by the caller survive. A figure without a template counts as the 1.x light
-# look (black ink, light legend box).
+# by the caller survive.
 function _template_change_updates(layout::PlotlyBase.Layout, chosen::PlotlyBase.Template)
 	old = _figure_template(layout)
-	old_ink = old === nothing ? _DEFAULT_AXIS_LINECOLOR : _template_ink(old)
-	old_legend = old === nothing ?
-		(bgcolor = _DEFAULT_LEGEND_BGCOLOR[], bordercolor = _DEFAULT_LEGEND_BORDERCOLOR[]) :
-		_template_legend_colors(old)
+	old_ink = _set_template_old_ink(old)
+	old_legend = _set_template_old_legend(old)
 	new_ink = _template_ink(chosen)
 	new_legend = _template_legend_colors(chosen)
 	updates = Pair{Symbol, Any}[]
@@ -9502,11 +9531,7 @@ function _apply_template_change!(fig, chosen::PlotlyBase.Template)
 end
 
 function _set_template_subplot_impl!(sf::SubplotFigure, chosen::PlotlyBase.Template)
-	p = _plot_obj(sf.fig)
-	old = _figure_template(p.layout)
-	old_legend = old === nothing ?
-		(bgcolor = _DEFAULT_LEGEND_BGCOLOR[], bordercolor = _DEFAULT_LEGEND_BORDERCOLOR[]) :
-		_template_legend_colors(old)
+	old_legend = _set_template_old_legend(_figure_template(_plot_layout(sf.fig)))
 	new_legend = _template_legend_colors(chosen)
 	# The stored legend colours style every per-cell legend added later.
 	isequal(sf.legend_bgcolor, old_legend.bgcolor) &&
@@ -9521,7 +9546,7 @@ end
 function set_template!(sf::SubplotFigure, template = get_default_template(); kwargs...)
 	_require_no_set_template_keywords(kwargs)
 	# Resolve (and so validate) before the transaction starts.
-	chosen = _resolve_template(template)
+	chosen = _resolve_template(template; who = "set_template!")
 	return _transactional_subplot_mutation!(
 		_set_template_subplot_impl!,
 		sf,
@@ -9588,9 +9613,7 @@ function _apply_basic_plot_options!(
 	else
 		# A legend first created by an append gets the box that matches the
 		# figure's own template (dark on plotly_dark), not the light default.
-		style = _active_style()
-		template = something(_figure_template(fig), _style_template(style))
-		_apply_default_legend!(fig; _style_legend_defaults(style; template = template)...)
+		_apply_default_legend!(fig; _figure_legend_defaults(fig)...)
 	end
 	_apply_figure_fontsize!(fig, who, fontsize)
 	return nothing

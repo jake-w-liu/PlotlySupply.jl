@@ -63,6 +63,13 @@ using PlotlySupply
 			@test_throws ArgumentError PlotStyle(; spines = :left)
 			@test_throws ArgumentError PlotStyle(; cycle = :rainbow)
 			@test_throws ArgumentError PlotStyle(; mathsize = "\\big")
+			# Exactly the MathJax 2 switches the mathtext pipeline accepts.
+			@test_throws ArgumentError PlotStyle(; mathsize = "\\footnotesize")
+			@test PlotStyle(; mathsize = "\\Tiny").mathsize == "\\Tiny"
+			for size in ("\\tiny", "\\scriptsize", "\\small", "\\normalsize", "\\large", "\\Large", "\\LARGE", "\\huge", "\\Huge")
+				@test PlotStyle(; mathsize = size).mathsize == size
+				@test mathtext("\$x\$"; size = size) isa String
+			end
 			@test_throws ArgumentError PlotStyle(; template = :no_such_template)
 			@test_throws ArgumentError PlotStyle(; template = "plotly_white+no_such_template")
 			@test_throws ArgumentError PlotStyle(; template = "plotly_white+")
