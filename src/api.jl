@@ -6859,8 +6859,9 @@ Axes and figure:
 - `xrange = [0, 0]`, `yrange = [0, 0]`: axis ranges in data units (also on log
   axes); `[0, 0]`/`nothing` is automatic.
 - `xscale = ""`, `yscale = ""`: axis type, e.g. `"log"`.
-- `xticks = nothing`, `xticklabels = nothing`, `xtickformat = ""` (and the
-  `y` versions): explicit tick values, their labels, and a d3 tick format.
+- `xticks = nothing`, `xticklabels = nothing`, `xtickformat = ""`, `yticks`,
+  `yticklabels`, `ytickformat`: explicit tick values (data units), their
+  labels (same length), and a d3 tick format.
 - `grid::Union{Nothing,Bool,Symbol} = true`: `true` keeps the template grid,
   `false`/`:none` hides it, `:x`/`:y`/`:both` choose the axes.
 - `equalar::Bool = false`: equal data aspect (one x unit = one y unit).

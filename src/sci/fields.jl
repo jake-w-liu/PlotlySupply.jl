@@ -77,13 +77,14 @@ function _matrix_add!(
 		labels !== nothing || n <= _MATRIX_MAX_INDEX_TICKS ? (1:n) : nothing
 	# Column j is x = j, row i is y = i with the y axis pointing down, so A is
 	# drawn as printed (A[1, 1] top left). The heatmap convention U[ix, iy]
-	# is the lazy transpose of A.
+	# is A with its dimensions swapped: a lazy, non-recursive PermutedDimsArray
+	# (`transpose` would recurse into the entries and fails on strings).
 	_heatmap_add!(
 		fig,
 		who,
 		1:ncols,
 		1:nrows,
-		transpose(A);
+		PermutedDimsArray(A, (2, 1));
 		constructor = constructor,
 		xlabel = xlabel,
 		ylabel = ylabel,
@@ -101,7 +102,7 @@ function _matrix_add!(
 		colorbar_ticks = nothing,
 		colorbar_ticklabels = nothing,
 		coloraxis = nothing,
-		text = text === nothing ? nothing : transpose(text),
+		text = text === nothing ? nothing : PermutedDimsArray(text, (2, 1)),
 		texttemplate = template,
 		textsize = textsize,
 		origin = "upper",
@@ -130,7 +131,7 @@ end
 Draw a matrix as printed: `A[i, j]` is the cell in row `i` (counted from the
 top) and column `j` (from the left), each cell annotated with its value. Rows
 are y = 1, 2, ... downwards and columns x = 1, 2, ...; this is a heatmap of
-`transpose(A)` with a reversed y axis (note the difference from
+`permutedims(A)` with a reversed y axis (note the difference from
 [`plot_heatmap`](@ref), whose `U[ix, iy]` puts the first index on x). Real
 entries; NaN/`missing` cells are empty, Bool is drawn as 0/1, complex throws.
 

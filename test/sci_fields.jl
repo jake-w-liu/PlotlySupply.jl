@@ -7,7 +7,8 @@ using PlotlySupply: PlotlyBase
 
 const _SF_JSON = PlotlyBase.JSON
 
-_sf_roundtrip(x) = _SF_JSON.parse(_SF_JSON.json(x))
+# Serialise as the export and window paths do: non-finite numbers become null.
+_sf_roundtrip(x) = _SF_JSON.parse(_SF_JSON.json(x; PlotlySupply._JSON_NONFINITE_AS_NULL...))
 
 function _sf_thrown(f)
 	try
@@ -206,7 +207,7 @@ end
 			width = 600, height = 400, fontsize = 14, equalar = true)
 		l = _sf_roundtrip(fig.layout)
 		@test l["title"]["text"] == "T"
-		@test l["xaxis"]["title"]["text"] == "\$x\$ (m)"
+		@test l["xaxis"]["title"]["text"] == PlotlySupply._label("\$x\$ (m)")
 		@test l["xaxis"]["range"] == [0, 6] && l["yaxis"]["range"] == [10, 40]
 		@test l["xaxis"]["tickvals"] == [0, 3, 6] && l["xaxis"]["ticktext"] == ["a", "b", "c"]
 		@test l["yaxis"]["tickformat"] == ".1f"
