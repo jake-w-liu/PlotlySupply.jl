@@ -5413,40 +5413,83 @@ end
 function _subplot_xlabel_impl!(
 	sf::SubplotFigure,
 	label::AbstractString;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
+	row = nothing,
+	col = nothing,
+	inset = nothing,
 )
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
-	xkey, _ = _subplot_xy_axis_keys(sf, r, c)
-	preserve_root =
-		_preserve_subplot_axis_root(sf, xkey)
-	_merge_layout_attr!(
-		_plot_layout(sf.fig),
-		xkey,
-		attr(title_text = String(label));
-		deep_merge_paths = _AXIS_LAYOUT_MERGE_PATHS,
-		mutate_builtin_target = preserve_root,
-		allow_unsupported_replacement = true,
+	_axes_label!(
+		sf,
+		'x',
+		label;
+		row = row,
+		col = col,
+		inset = inset,
+		who = "xlabel!",
 	)
-	sf.current_row = r
-	sf.current_col = c
-	_refresh!(sf.fig)
 	return sf
 end
 
 """
-	xlabel!(sf, label; row=nothing, col=nothing)
+	xlabel!(fig, label; row=nothing, col=nothing, inset=nothing)
+	xlabel!(sf::SubplotFigure, label; row=nothing, col=nothing, inset=nothing)
 
-Set the x-axis title of one [`SubplotFigure`](@ref) cell. When `row` and `col`
-are omitted, update the currently active cell selected by [`subplot!`](@ref);
-otherwise both must be given. Returns `sf` for chaining.
+Set the x-axis title of a `Plot`/`SyncPlot`, of one
+[`SubplotFigure`](@ref) cell, or of an inset.
+
+# Arguments
+- `fig`: a `Plot`, `SyncPlot` or `SubplotFigure`.
+- `label::AbstractString`: the title; mixed text and `\$...\$` math goes
+  through the mathtext layer. `""` clears the title. On a 3-D scene cell the
+  title is written to `scene.xaxis.title.text` (scene titles cannot typeset
+  MathJax, so TeX is converted to HTML/Unicode).
+
+# Keywords
+- `row`, `col`: SubplotFigure cell (both or neither). Omitted, the active
+  cell selected by [`subplot!`](@ref) is used; the targeted cell becomes the
+  active cell. An `ArgumentError` on a plain figure.
+- `inset = nothing`: inset id `k` from [`inset!`](@ref) (SubplotFigure only).
+
+Throws `ArgumentError` (figure unchanged) for cells without x/y or scene
+axes. Returns `nothing` (`sf` for a SubplotFigure, for chaining).
+
+# Example
+```julia
+fig = plot_scatter(1:10, rand(10))
+xlabel!(fig, "time (s)")
+sf = subplots(1, 2; sync = false)
+xlabel!(sf, "x (m)"; row = 1, col = 2)
+```
 """
+function xlabel!(
+	fig,
+	label::AbstractString;
+	row = nothing,
+	col = nothing,
+	inset = nothing,
+	show = nothing,
+)
+	_axes_reject_show(show, "xlabel!")
+	_axes_label!(
+		fig,
+		'x',
+		label;
+		row = row,
+		col = col,
+		inset = inset,
+		who = "xlabel!",
+	)
+	return nothing
+end
+
 function xlabel!(
 	sf::SubplotFigure,
 	label::AbstractString;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
+	row = nothing,
+	col = nothing,
+	inset = nothing,
+	show = nothing,
 )
+	_axes_reject_show(show, "xlabel!")
 	return _transactional_subplot_mutation!(
 		_subplot_xlabel_impl!,
 		sf,
@@ -5454,48 +5497,90 @@ function xlabel!(
 		label;
 		row = row,
 		col = col,
+		inset = inset,
 	)
 end
 
 function _subplot_ylabel_impl!(
 	sf::SubplotFigure,
 	label::AbstractString;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
+	row = nothing,
+	col = nothing,
+	inset = nothing,
 	secondary_y::Bool = false,
 )
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
-	_, ykey = _subplot_xy_axis_keys(sf, r, c; secondary_y = secondary_y)
-	preserve_root =
-		_preserve_subplot_axis_root(sf, ykey)
-	_merge_layout_attr!(
-		_plot_layout(sf.fig),
-		ykey,
-		attr(title_text = String(label));
-		deep_merge_paths = _AXIS_LAYOUT_MERGE_PATHS,
-		mutate_builtin_target = preserve_root,
-		allow_unsupported_replacement = true,
+	_axes_label!(
+		sf,
+		'y',
+		label;
+		row = row,
+		col = col,
+		inset = inset,
+		secondary_y = secondary_y,
+		who = "ylabel!",
 	)
-	sf.current_row = r
-	sf.current_col = c
-	_refresh!(sf.fig)
 	return sf
 end
 
 """
-	ylabel!(sf, label; row=nothing, col=nothing, secondary_y=false)
+	ylabel!(fig, label; row=nothing, col=nothing, inset=nothing, secondary_y=false)
+	ylabel!(sf::SubplotFigure, label; row=nothing, col=nothing, inset=nothing, secondary_y=false)
 
-Set the y-axis title of one [`SubplotFigure`](@ref) cell. When `row` and `col`
-are omitted, update the active cell. Pass `secondary_y=true` to target a
-secondary-y cell created by an appropriate subplot spec. Returns `sf`.
+Set the y-axis title of a `Plot`/`SyncPlot`, of one
+[`SubplotFigure`](@ref) cell, or of an inset; identical to
+[`xlabel!`](@ref) for the y axis.
+
+# Keywords
+- `row`, `col`, `inset`: as for [`xlabel!`](@ref).
+- `secondary_y::Bool = false`: target the secondary y axis: the twin of a
+  plain figure (created by a `secondary_y=true` plot call) or the secondary
+  axis of a `Spec(secondary_y=true)` subplot cell. Without one it is an
+  `ArgumentError`.
+
+Returns `nothing` (`sf` for a SubplotFigure).
+
+# Example
+```julia
+sf = subplots(1, 1; sync = false, specs = fill(Spec(secondary_y = true), 1, 1))
+plot_scatter!(sf, 1:3, [1.0, 2, 3])
+plot_scatter!(sf, 1:3, [10.0, 20, 30]; secondary_y = true)
+ylabel!(sf, "left")
+ylabel!(sf, "right"; secondary_y = true)
+```
 """
+function ylabel!(
+	fig,
+	label::AbstractString;
+	row = nothing,
+	col = nothing,
+	inset = nothing,
+	secondary_y::Bool = false,
+	show = nothing,
+)
+	_axes_reject_show(show, "ylabel!")
+	_axes_label!(
+		fig,
+		'y',
+		label;
+		row = row,
+		col = col,
+		inset = inset,
+		secondary_y = secondary_y,
+		who = "ylabel!",
+	)
+	return nothing
+end
+
 function ylabel!(
 	sf::SubplotFigure,
 	label::AbstractString;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
+	row = nothing,
+	col = nothing,
+	inset = nothing,
 	secondary_y::Bool = false,
+	show = nothing,
 )
+	_axes_reject_show(show, "ylabel!")
 	return _transactional_subplot_mutation!(
 		_subplot_ylabel_impl!,
 		sf,
@@ -5503,51 +5588,99 @@ function ylabel!(
 		label;
 		row = row,
 		col = col,
+		inset = inset,
 		secondary_y = secondary_y,
 	)
 end
 
 function _subplot_xrange_impl!(
 	sf::SubplotFigure,
-	range::AbstractVector;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
+	range;
+	row = nothing,
+	col = nothing,
+	inset = nothing,
 )
-	length(range) == 2 || throw(ArgumentError("`range` must have length 2."))
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
-	xkey, _ = _subplot_xy_axis_keys(sf, r, c)
-	preserve_root =
-		_preserve_subplot_axis_root(
-			sf,
-			xkey,
-			(),
-		)
-	_merge_layout_attr!(
-		_plot_layout(sf.fig),
-		xkey,
-		attr(range = collect(range));
-		mutate_builtin_target = preserve_root,
+	_axes_range!(
+		sf,
+		'x',
+		range;
+		row = row,
+		col = col,
+		inset = inset,
+		who = "xrange!",
 	)
-	sf.current_row = r
-	sf.current_col = c
-	_refresh!(sf.fig)
 	return sf
 end
 
 """
-	xrange!(sf, range; row=nothing, col=nothing)
+	xrange!(fig, range; row=nothing, col=nothing, inset=nothing)
+	xrange!(sf::SubplotFigure, range; row=nothing, col=nothing, inset=nothing)
 
-Set the two-element x-axis `range` of one [`SubplotFigure`](@ref) cell. When
-`row` and `col` are omitted, update the active cell. Returns `sf`.
+Set the x-axis range of a `Plot`/`SyncPlot`, of one [`SubplotFigure`](@ref)
+cell, or of an inset.
+
+# Arguments
+- `range`: `(lo, hi)` or `[lo, hi]` in DATA units on every axis type: on a
+  logarithmic axis pass data values (`(1e-3, 1e2)`), never exponents; they
+  are converted to the log10 values Plotly stores, and non-positive bounds
+  are an `ArgumentError` (breaking in 2.0: 1.x passed log10 exponents
+  through). A reversed range (`hi < lo`) flips the axis. Bounds are numbers
+  on linear, log and category axes (category positions are 0-based
+  indices); a date axis also takes date strings or `Date`/`DateTime`.
+  `[0, 0]`, `(0, 0)` and `nothing` restore automatic ranging (1.x wrote a
+  literal `[0, 0]` range). Partial ranges and equal bounds are an
+  `ArgumentError`.
+
+# Keywords
+- `row`, `col`: SubplotFigure cell (both or neither). Omitted, the active
+  cell is used; the targeted cell becomes the active cell. An
+  `ArgumentError` on a plain figure.
+- `inset = nothing`: inset id `k` from [`inset!`](@ref) (SubplotFigure only).
+
+The range is written with `autorange = false`, so it applies even where an
+explicit `autorange` was set. When the axis is shared with other cells
+(`shared_xaxes`, i.e. it `matches` another axis), the range is written on
+the axis that owns the shared range, so every cell of the group shows it.
+A 3-D scene cell sets `scene.xaxis.range` (log scene axes alike). Returns
+`nothing` (`sf` for a SubplotFigure).
+
+# Example
+```julia
+fig = plot_scatter([1e-3, 1.0, 1e3], [1.0, 2.0, 3.0]; xscale = "log")
+xrange!(fig, (1e-4, 1e4))       # data units on the log axis
+xrange!(fig, nothing)            # automatic again
+```
 """
 function xrange!(
-	sf::SubplotFigure,
-	range::AbstractVector;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
+	fig,
+	range;
+	row = nothing,
+	col = nothing,
+	inset = nothing,
+	show = nothing,
 )
-	length(range) == 2 ||
-		throw(ArgumentError("`range` must have length 2."))
+	_axes_reject_show(show, "xrange!")
+	_axes_range!(
+		fig,
+		'x',
+		range;
+		row = row,
+		col = col,
+		inset = inset,
+		who = "xrange!",
+	)
+	return nothing
+end
+
+function xrange!(
+	sf::SubplotFigure,
+	range;
+	row = nothing,
+	col = nothing,
+	inset = nothing,
+	show = nothing,
+)
+	_axes_reject_show(show, "xrange!")
 	return _transactional_subplot_mutation!(
 		_subplot_xrange_impl!,
 		sf,
@@ -5555,53 +5688,86 @@ function xrange!(
 		range;
 		row = row,
 		col = col,
+		inset = inset,
 	)
 end
 
 function _subplot_yrange_impl!(
 	sf::SubplotFigure,
-	range::AbstractVector;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
+	range;
+	row = nothing,
+	col = nothing,
+	inset = nothing,
 	secondary_y::Bool = false,
 )
-	length(range) == 2 || throw(ArgumentError("`range` must have length 2."))
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
-	_, ykey = _subplot_xy_axis_keys(sf, r, c; secondary_y = secondary_y)
-	preserve_root =
-		_preserve_subplot_axis_root(
-			sf,
-			ykey,
-			(),
-		)
-	_merge_layout_attr!(
-		_plot_layout(sf.fig),
-		ykey,
-		attr(range = collect(range));
-		mutate_builtin_target = preserve_root,
+	_axes_range!(
+		sf,
+		'y',
+		range;
+		row = row,
+		col = col,
+		inset = inset,
+		secondary_y = secondary_y,
+		who = "yrange!",
 	)
-	sf.current_row = r
-	sf.current_col = c
-	_refresh!(sf.fig)
 	return sf
 end
 
 """
-	yrange!(sf, range; row=nothing, col=nothing, secondary_y=false)
+	yrange!(fig, range; row=nothing, col=nothing, inset=nothing, secondary_y=false)
+	yrange!(sf::SubplotFigure, range; row=nothing, col=nothing, inset=nothing, secondary_y=false)
 
-Set the two-element y-axis `range` of one [`SubplotFigure`](@ref) cell. When
-`row` and `col` are omitted, update the active cell. Pass `secondary_y=true`
-to target a secondary-y subplot axis. Returns `sf`.
+Set the y-axis range of a `Plot`/`SyncPlot`, of one [`SubplotFigure`](@ref)
+cell, or of an inset; identical to [`xrange!`](@ref) for the y axis: DATA
+units on logarithmic axes (`yrange!(fig, (1, 1e5))`, not exponents),
+`autorange = false`, shared axes, scene cells.
+
+# Keywords
+- `row`, `col`, `inset`: as for [`xrange!`](@ref).
+- `secondary_y::Bool = false`: target the secondary y axis (the twin of a
+  plain figure or of a `Spec(secondary_y=true)` subplot cell).
+
+Returns `nothing` (`sf` for a SubplotFigure).
+
+# Example
+```julia
+fig = plot_scatter(1:10, exp.(1:10); yscale = "log")
+yrange!(fig, (1, 1e5))
+```
 """
 function yrange!(
-	sf::SubplotFigure,
-	range::AbstractVector;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
+	fig,
+	range;
+	row = nothing,
+	col = nothing,
+	inset = nothing,
 	secondary_y::Bool = false,
+	show = nothing,
 )
-	length(range) == 2 ||
-		throw(ArgumentError("`range` must have length 2."))
+	_axes_reject_show(show, "yrange!")
+	_axes_range!(
+		fig,
+		'y',
+		range;
+		row = row,
+		col = col,
+		inset = inset,
+		secondary_y = secondary_y,
+		who = "yrange!",
+	)
+	return nothing
+end
+
+function yrange!(
+	sf::SubplotFigure,
+	range;
+	row = nothing,
+	col = nothing,
+	inset = nothing,
+	secondary_y::Bool = false,
+	show = nothing,
+)
+	_axes_reject_show(show, "yrange!")
 	return _transactional_subplot_mutation!(
 		_subplot_yrange_impl!,
 		sf,
@@ -5609,6 +5775,7 @@ function yrange!(
 		range;
 		row = row,
 		col = col,
+		inset = inset,
 		secondary_y = secondary_y,
 	)
 end

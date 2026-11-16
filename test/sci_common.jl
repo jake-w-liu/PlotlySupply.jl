@@ -376,7 +376,10 @@ end
         ax = _cmn_axis(fig, :xaxis)
         @test ax[:tickmode] == "array"
         @test ax[:tickvals] == [1e-3, 1e-2, 1e-1, 1.0]
-        @test ax[:tickformat] == "~g"
+        # ADDENDUM B1: no "~g" on a log axis (it prints 1e+06); the power
+        # exponent format of the log axis stays in effect.
+        @test _cmn_get(ax, :tickformat) === nothing
+        @test ax[:exponentformat] == "power"
         # JSON tick values are data values even on a log axis.
         @test occursin("\"tickvals\":[0.001,0.01,0.1,1.0]", _cmn_json(fig.layout))
         @test _cmn_get(ax, :type) == "log" && _cmn_get(ax, :showline) == true
@@ -456,7 +459,8 @@ end
         l2 = plot_scatter([4, 8, 16, 24, 32], [1.0, 2, 3, 4, 5]; xscale = "log")
         _CMN._apply_ticks!(l2, :xaxis; values = 2 .^ (2:5))
         @test _cmn_axis(l2, :xaxis)[:tickvals] == [4.0, 8.0, 16.0, 32.0]
-        @test _cmn_axis(l2, :xaxis)[:tickformat] == "~g"
+        @test _cmn_get(_cmn_axis(l2, :xaxis), :tickformat) === nothing
+        @test _cmn_axis(l2, :xaxis)[:exponentformat] == "power"
 
         # Only the target cell's axis changes on a SubplotFigure.
         sf = subplots(1, 2; sync = false)
