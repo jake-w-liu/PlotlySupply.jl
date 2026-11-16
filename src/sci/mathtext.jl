@@ -38,8 +38,9 @@ const _MATHTEXT_SETTINGS = Ref(_MathtextSettings(true, "", "", false))
 
 # The fonts of MathJax 2.7's SVG output (jax/output/SVG/fonts/<name>). Each was
 # verified to load from the pinned MathJax 2.7.9 CDN by exporting a math label
-# and checking the glyph ids of the SVG; any other name makes MathJax request a
-# font directory that does not exist, and math labels never finish typesetting.
+# and checking the glyph ids of the SVG (e.g. GYRETERMESMAIN-…). MathJax
+# silently typesets any other name in its TeX font (verified with "bogus":
+# MJMAIN-/MJMATHI- glyphs), so other names are rejected instead of ignored.
 const _MATHJAX_SVG_FONTS = (
 	"TeX", "STIX-Web", "Asana-Math", "Neo-Euler",
 	"Gyre-Pagella", "Gyre-Termes", "Latin-Modern",
@@ -231,8 +232,10 @@ Configure how PlotlySupply writes and typesets every user-visible label
 `font` and `inherit_text_font` take effect at render time: every following
 `savefig` (all formats, including HTML) uses them, and an open `SyncPlot`
 window reloads its page with the new configuration before its next update
-(`relayout!`, `react!`, `plot_*!`, …). Math labels are typeset by MathJax 2.7.9,
-which is loaded from a CDN, so they need network access.
+(`relayout!`, `react!`, `plot_*!`, …); until then it keeps its current
+typesetting (the reload also resets any interactive zoom or pan in it). Math
+labels are typeset by MathJax 2.7.9, which is loaded from a CDN, so they need
+network access.
 
 All four settings are replaced on every call (an omitted keyword resets it to
 its default). Validation happens before anything changes. Returns the new

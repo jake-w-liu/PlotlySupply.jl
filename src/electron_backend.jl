@@ -9823,6 +9823,9 @@ function PlotlyBase.extendtraces!(
 	)
 end
 
+# `indices::Vector{Int}` (not AbstractVector) is deliberate: this method must
+# outrank PlotlyBase's `extendtraces!(p::Plot, inds::Vector{Int} = [1],
+# maxpoints = -1; update...)`, or keyword calls on a Plot are ambiguous (#173).
 function PlotlyBase.extendtraces!(
 	p::_RefreshablePlot,
 	indices::Vector{Int} = [1],
@@ -9876,6 +9879,7 @@ function PlotlyBase.prependtraces!(
 	)
 end
 
+# `Vector{Int}` for the same reason as the `extendtraces!` method above.
 function PlotlyBase.prependtraces!(
 	p::_RefreshablePlot,
 	indices::Vector{Int} = [1],
