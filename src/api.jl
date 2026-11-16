@@ -1622,7 +1622,7 @@ without `row`/`col` target the active cell. Selecting a cell changes no
 figure data and never refreshes the window.
 
 Out-of-range or `Bool` indices throw an `ArgumentError` and leave the active
-cell unchanged. Empty cells (`specs` entries of `nothing`) may be selected,
+cell unchanged. Empty cells (`specs` entries of `missing`) may be selected,
 but plotting into them throws.
 """
 function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
@@ -1679,12 +1679,7 @@ function _subplot_layout_object_key(
 	who::AbstractString;
 	secondary_y::Bool = false,
 )
-	ref = try
-		_subplot_target_ref(p, row, col; secondary_y = secondary_y)
-	catch err
-		err isa ArgumentError || rethrow()
-		throw(ArgumentError("$(who): $(err.msg)"))
-	end
+	ref = _subplot_target_ref(p, row, col; secondary_y = secondary_y, who = who)
 	kind = String(ref.subplot_kind)
 	expected = family in (:xaxis, :yaxis) ? "xy" : String(family)
 	kind == expected || throw(ArgumentError(
@@ -1720,7 +1715,7 @@ function _subplot_layout_object_update_impl!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = who)
 	p = _plot_obj(sf.fig)
 	key = _subplot_layout_object_key(
 		p,
@@ -1913,7 +1908,7 @@ function _subplot_layout_vector_update_impl!(
 	col::Integer,
 	kwargs...,
 )
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = who)
 	p = _plot_obj(sf.fig)
 	refs = p.layout.subplots.grid_ref
 	(isassigned(refs, r, c) && !isempty(refs[r, c])) || throw(ArgumentError(
@@ -2108,22 +2103,31 @@ function PlotlyBase.download_image(sf::SubplotFigure; kwargs...)
 	return nothing
 end
 
+# The routing reference (axis/scene ids and subplot kind) of grid cell
+# (row, col); `secondary_y` selects the cell's secondary y axis. Errors are
+# prefixed with `who`.
 function _subplot_target_ref(
 	p::Plot,
 	row::Int,
 	col::Int;
 	secondary_y::Bool = false,
+	who::AbstractString = "SubplotFigure",
 )
 	grid_ref = p.layout.subplots.grid_ref
-	if !isassigned(grid_ref, row, col) || isempty(grid_ref[row, col])
-		throw(ArgumentError("subplot cell ($(row), $(col)) is empty"))
+	if !checkbounds(Bool, grid_ref, row, col) || !isassigned(grid_ref, row, col) ||
+			isempty(grid_ref[row, col])
+		throw(ArgumentError(
+			"$(who): subplot cell ($(row), $(col)) is empty (its `specs` entry " *
+			"is `missing`, or a spanning cell covers it).",
+		))
 	end
 
 	refs = grid_ref[row, col]
 	if secondary_y && (refs[1].subplot_kind != "xy" || length(refs) < 2)
 		throw(ArgumentError(
-			"subplot cell ($(row), $(col)) has no secondary y-axis; " *
-			"create it with `secondary_y=true`",
+			"$(who): subplot cell ($(row), $(col)) has no secondary y-axis; " *
+			"create the grid with `specs` containing `Spec(secondary_y=true)` " *
+			"for that cell.",
 		))
 	end
 	return refs[secondary_y ? 2 : 1]
@@ -2146,22 +2150,28 @@ function _trace_subplot_kind(trace::GenericTrace)
 	return String(kind), trace_type
 end
 
+# Check that every trace can be drawn in cell (row, col) (its subplot kind
+# matches the cell's) and return the cell's routing reference. Nothing is
+# modified; errors are prefixed with `who`.
 function _validate_subplot_traces!(
 	p::Plot,
 	traces,
 	row::Int,
 	col::Int;
 	secondary_y::Bool = false,
+	who::AbstractString = "SubplotFigure",
 )
-	target_ref = _subplot_target_ref(p, row, col; secondary_y = secondary_y)
+	target_ref = _subplot_target_ref(p, row, col; secondary_y = secondary_y, who = who)
 	target_kind = target_ref.subplot_kind
 	for trace in traces
-		trace isa GenericTrace ||
-			throw(ArgumentError("only PlotlyBase.GenericTrace values can be added to a subplot"))
+		trace isa GenericTrace || throw(ArgumentError(
+			"$(who): only PlotlyBase.GenericTrace values can be added to a " *
+			"subplot; got $(typeof(trace)).",
+		))
 		required_kind, trace_type = _trace_subplot_kind(trace)
 		required_kind == target_kind || throw(ArgumentError(
-			"trace type '$trace_type' requires a '$required_kind' subplot, " *
-			"but cell ($(row), $(col)) is '$target_kind'",
+			"$(who): trace type '$trace_type' requires a '$required_kind' subplot, " *
+			"but cell ($(row), $(col)) is '$target_kind'.",
 		))
 	end
 	return target_ref
@@ -2174,9 +2184,9 @@ function _subplot_add_trace_impl!(
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 )
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = "add_trace!")
 	p = _plot_obj(sf.fig)
-	_validate_subplot_traces!(p, (trace,), r, c; secondary_y = secondary_y)
+	_validate_subplot_traces!(p, (trace,), r, c; secondary_y = secondary_y, who = "add_trace!")
 	PlotlyBase.add_trace!(p, trace; row = r, col = c, secondary_y = secondary_y)
 	_subplot_apply_legends!(sf, p)
 
@@ -2242,7 +2252,7 @@ function _subplot_addtraces_impl!(
 )
 	isempty(traces) && return sf
 
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = "addtraces!")
 	p = _plot_obj(sf.fig)
 	if index !== nothing
 		1 <= index <= length(p.data) + 1 || throw(ArgumentError(
@@ -2250,7 +2260,7 @@ function _subplot_addtraces_impl!(
 			"got $(index).",
 		))
 	end
-	_validate_subplot_traces!(p, traces, r, c; secondary_y = secondary_y)
+	_validate_subplot_traces!(p, traces, r, c; secondary_y = secondary_y, who = "addtraces!")
 
 	# PlotlyBase.add_trace! deep-copies each trace and merges the selected
 	# subplot references. Stage the whole batch so a bad later trace or subplot
@@ -3788,7 +3798,7 @@ function _subplot_delegate_mutator_impl!(
 		who = who,
 	)
 	r, c = inset_target === nothing ?
-		_resolve_subplot_cell(sf; row = row, col = col) :
+		_resolve_subplot_cell(sf; row = row, col = col, who = who) :
 		(inset_target.row, inset_target.col)
 	# `title`/`width`/`height` are figure-level, not per-cell: the delegate only
 	# transplants traces + per-axis layout, so these would be silently dropped.
@@ -3816,6 +3826,7 @@ function _subplot_delegate_mutator_impl!(
 			r,
 			c;
 			secondary_y = secondary_y,
+			who = who,
 		).trace_kwargs
 	else
 		for trace in tmp.data
@@ -3953,7 +3964,7 @@ function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_
 		isassigned(grid_ref, row, col) &&
 		!isempty(grid_ref[row, col])) || throw(ArgumentError(
 		"Selected subplot cell ($(row), $(col)) is empty (its `specs` entry is " *
-		"`nothing`) and has no axes.",
+		"`missing`, or a spanning cell covers it) and has no axes.",
 	))
 	refs = grid_ref[row, col]
 	kind = String(first(refs).subplot_kind)

@@ -401,8 +401,70 @@ end
 		@test sf.plot isa Plot
 
 		live = subplots(1, 1; sync=false)
-		_rsp_live!(live)
+		renderer = _rsp_live!(live)
 		@test isopen(live) == true
+		# A window figure forwards to the SyncPlot and returns its result.
+		@test to_image(live; format="png") == "ok"
+		@test occursin("Plotly.toImage", last(renderer.scripts))
+		@test download_image(live) === nothing
+		@test occursin("Plotly.downloadImage", last(renderer.scripts))
+	end
+
+	@testset "update_scenes!/update_ternaries!/update_images! with row/col" begin
+		scenes = subplots(1, 2; sync=false, specs=[Spec(kind="scene") Spec(kind="scene")])
+		domain = _rsp_fields(_rsp_axis(scenes, :scene2)[:domain])
+		@test update_scenes!(scenes; row=1, col=2, aspectmode="cube") === scenes
+		@test _rsp_axis(scenes, :scene2)[:aspectmode] == "cube"
+		@test _rsp_fields(_rsp_axis(scenes, :scene2)[:domain]) == domain
+		@test !haskey(_rsp_axis(scenes, :scene), :aspectmode)
+		@test (scenes.current_row, scenes.current_col) == (1, 2)
+		update_scenes!(scenes; dragmode="orbit")
+		@test _rsp_axis(scenes, :scene)[:dragmode] == "orbit"
+		@test _rsp_axis(scenes, :scene2)[:dragmode] == "orbit"
+		@test_throws ArgumentError update_xaxes!(scenes; row=1, col=1, showgrid=false)
+
+		ternary = subplots(1, 2; sync=false, specs=[Spec(kind="ternary") Spec(kind="xy")])
+		@test update_ternaries!(ternary; row=1, col=1, sum=100) === ternary
+		@test _rsp_axis(ternary, :ternary)[:sum] == 100
+		@test_throws ArgumentError update_ternaries!(ternary; row=1, col=2, sum=1)
+		@test_throws ArgumentError update_scenes!(ternary; row=1, col=1, aspectmode="cube")
+
+		images = subplots(1, 2; sync=false)
+		relayout!(
+			images;
+			images=[
+				attr(source="a.png", xref="x", yref="y", x=0, y=0, sizex=1, sizey=1),
+				attr(source="b.png", xref="x2 domain", yref="y2 domain", x=0, y=0, sizex=1, sizey=1),
+			],
+		)
+		@test update_images!(images; row=1, col=2, opacity=0.4) === images
+		opacities = [get(_rsp_fields(i), :opacity, nothing) for i in _rsp_layout(images)[:images]]
+		@test opacities == [nothing, 0.4]
+	end
+
+	@testset "cell errors name the calling function" begin
+		sf = subplots(1, 2; sync=false, specs=[Spec(kind="polar") Spec(kind="xy")])
+		for (call, who) in (
+			(() -> add_trace!(sf, scatter(x=[1], y=[1]); row=1, col=1), "add_trace!"),
+			(() -> addtraces!(sf, scatter(x=[1], y=[1]); row=1, col=1), "addtraces!"),
+			(() -> plot_scatter!(sf, [1.0], [1.0]; row=1, col=1), "plot_scatter!"),
+			(() -> plot_scatter!(sf, [1.0], [1.0]; row=3, col=1), "plot_scatter!"),
+			(() -> plot_scatter!(sf, [1.0], [1.0]; row=true, col=1), "plot_scatter!"),
+			(() -> subplot!(sf, 5), "subplot!"),
+			(() -> subplot!(sf, 1, 3), "subplot!"),
+			(() -> update_yaxes!(sf; row=1, col=2, secondary_y=true, type="log"), "update_yaxes!"),
+		)
+			err = try
+				call()
+				nothing
+			catch caught
+				caught
+			end
+			@test err isa ArgumentError
+			@test startswith(err.msg, who * ":")
+		end
+		@test isempty(sf.plot.data)
+		@test (sf.current_row, sf.current_col) == (1, 1)
 	end
 
 	@testset "mutators reject `show`" begin

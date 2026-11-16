@@ -1181,7 +1181,10 @@ Edit the colorbars that already exist in a figure.
 - `side::Symbol=:right`: `:right` gives a vertical bar left-anchored at
   `xdomain[2] + 0.01` and as tall as the cell; `:bottom` a horizontal bar
   centred `0.12` (paper fraction) below the cell and as wide as it. The
-  geometry is written on every call.
+  geometry is written on every call. A right-side bar and its tick labels
+  sit in the gap to the next cell; with three or more columns at small
+  figure widths, pass a wider `horizontal_spacing` (e.g. `0.15`) to
+  [`subplots`](@ref) so they do not reach that cell's tick labels.
 - `len::Real=0`: bar length as a paper fraction (`0`: the cell's extent).
 - `thickness::Real=0`: bar thickness in px (`0`: unchanged).
 - `x`, `y`: explicit bar position (paper fractions) overriding `side`'s.
