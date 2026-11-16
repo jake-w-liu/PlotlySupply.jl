@@ -163,7 +163,46 @@ end
 		# Explicit positions keep the group default.
 		grouped = constructor(["x", "x"], [[1.0, 2.0], [3.0, 4.0]]; legend = ["A", "B"])
 		@test _st_layout(grouped)[key] == "group"
+
+		# SubplotFigure: the delegate builds the traces on an empty staged
+		# Plot, so the collision with a box already in the TARGET cell must be
+		# seen through the cell context; boxes in other cells do not collide.
+		sf = subplots(1, 2; sync = false)
+		mutator(sf, randn(10); legend = "A", row = 1, col = 1)
+		mutator(sf, [randn(10), randn(10)]; legend = ["A", "B"], row = 1, col = 1)
+		@test _st_layout(sf.plot)[key] == "group"
+		other = subplots(1, 2; sync = false)
+		mutator(other, randn(10); legend = "A", row = 1, col = 1)
+		mutator(other, [randn(10), randn(10)]; legend = ["A", "B"], row = 1, col = 2)
+		@test !haskey(_st_layout(other.plot), key)
 	end
+end
+
+@testset "stats: a per-cell barmode that changes other cells warns (C29)" begin
+	sf = subplots(1, 2; sync = false)
+	plot_bar!(sf, ["a", "b"], [[1, 2], [3, 4]]; row = 1, col = 1)
+	@test_logs (:warn, r"figure-wide bar mode \"group\"") plot_bar!(
+		sf, ["a", "b"], [[1, 2], [3, 4]]; barmode = "stack", row = 1, col = 2,
+	)
+	@test _st_layout(sf.plot)[:barmode] == "stack"
+	# Same mode again: nothing changes, no warning.
+	@test_logs plot_bar!(sf, ["c"], [[1], [2]]; barmode = "stack", row = 1, col = 2)
+	@test_logs (:warn, r"figure-wide bar mode \"stack\"") plot_histogram!(
+		sf, [randn(10), randn(10)]; barmode = "overlay", row = 1, col = 2,
+	)
+
+	# No bars elsewhere: an explicit mode is not a conflict.
+	alone = subplots(1, 2; sync = false)
+	plot_scatter!(alone, 1:3, 1:3; row = 1, col = 1)
+	@test_logs plot_bar!(alone, ["a"], [[1], [2]]; barmode = "stack", row = 1, col = 2)
+	# A rejected call does not warn and changes nothing.
+	failing = subplots(1, 2; sync = false)
+	plot_bar!(failing, ["a"], [1]; row = 1, col = 1)
+	@test_logs (@test_throws ArgumentError plot_bar!(
+		failing, ["a"], [1]; barmode = "stack", text = ["x", "y"], row = 1, col = 2,
+	))
+	@test !haskey(_st_layout(failing.plot), :barmode)
+	@test length(failing.plot.data) == 1
 end
 
 @testset "stats: mutators honour a showlegend vector (#226 #102 #110)" begin
@@ -315,7 +354,27 @@ end
 	@test sum(sum(row) for row in gappy[:customdata]) == 5
 	@test_throws ArgumentError plot_histogram2d(["a", "b"], [1, 2]; colornorm = :log)
 	@test_throws ArgumentError plot_histogram2d([NaN, NaN], [1, 2]; colornorm = :log)
+	# Finite x and finite y never in the same pair: nothing to count.
+	@test_throws ArgumentError plot_histogram2d([1.0, NaN], [NaN, 2.0]; colornorm = :log)
 	@test_throws ArgumentError plot_histogram2d(data, data; colornorm = :sqrt)
+
+	# Empty bins stay blank also under an explicit crange (matplotlib's LogNorm
+	# masks them) instead of taking the bottom colour.
+	ranged = _st_trace(plot_histogram2d(data, data; colornorm = :log, crange = (1, 10)))
+	@test ranged[:z] == [Any[log10(3), nothing], Any[nothing, log10(2)]]
+	@test ranged[:zmin] == 0.0 && ranged[:zmax] == 1.0
+	@test ranged[:customdata] == [Any[3.0, 0.0], Any[0.0, 2.0]]
+
+	# plotly counts missing/non-finite entries in the n of its 2σ/n^(1/4) bin
+	# estimate (checked against the bins plotly.js computes: width 0.5 here,
+	# 1.0 if only the finite samples were counted).
+	finite = collect(range(-1.7, 1.7; length = 100))
+	@test PlotlySupply._stats_autobins(finite, 0; total = 1000) == (-2.0, 2.0, 0.5)
+	@test PlotlySupply._stats_autobins(finite, 0) == (-2.0, 2.0, 1.0)
+	padded = _st_trace(plot_histogram2d(vcat(finite, fill(NaN, 900)), vcat(finite, finite, fill(0.5, 800)); colornorm = :log))
+	@test padded[:x][2] - padded[:x][1] == 0.5
+	@test first(padded[:x]) == -2.0 && last(padded[:x]) == 2.0
+	@test_throws ArgumentError PlotlySupply._stats_autobins(Float64[], 0)
 
 	sf = subplots(1, 2; sync = false)
 	@test plot_histogram2d!(sf, data, data; colornorm = :log, row = 1, col = 2, xrange = (0, 4)) === sf
@@ -405,7 +464,10 @@ end
 	@test_throws ArgumentError plot_bar([1, 2]; opacity = 1.5)
 	@test_throws ArgumentError plot_bar([1, 2]; hatch = "o")
 	@test_throws ArgumentError plot_bar([1, 2]; error_y = [0.1])
-	@test_throws ArgumentError plot_bar([[1, 2], [3, 4]]; error_y = [[0.1, 0.1]])
+	@test_throws ArgumentError plot_bar([[1, 2], [3, 4]]; error_y = [[0.1, 0.1], [0.2]])
+	@test_throws ArgumentError plot_bar([1, 2]; error_y = [0.1, -0.2])
+	@test_throws ArgumentError plot_bar([1, 2]; error_y = ["a", "b"])
+	@test_throws ArgumentError plot_bar([[1, 2], [3, 4]]; error_y = ([[0.1, 0.1], [0.1, 0.1]], [[0.1, 0.1]]))
 	@test_throws ArgumentError plot_bar([1, 2]; error_y = ([0.1, 0.1],))
 	@test_throws ArgumentError plot_bar([1, 2]; error_y = 0.1)
 	@test_throws ArgumentError plot_bar([1, 2]; barmode = "stacked")
@@ -414,6 +476,26 @@ end
 
 	stack = plot_bar(["a", "b"], [[1, 2], [3, 4]]; barmode = "stack")
 	@test _st_layout(stack)[:barmode] == "stack"
+
+	# Per-point keywords given per series follow the per-series rule: series
+	# without an entry get none (as error bars did in 1.x), surplus is ignored.
+	partial = plot_bar(
+		[[1, 2], [3, 4], [5, 6]];
+		error_y = [[0.1, 0.1]],
+		text = [["a", "b"], ["c", "d"]],
+		base = [[1, 1]],
+	)
+	@test _st_fields(_st_trace(partial, 1)[:error_y])[:array] == [0.1, 0.1]
+	@test !haskey(_st_trace(partial, 2), :error_y)
+	@test _st_trace(partial, 2)[:text] == ["c", "d"]
+	@test !haskey(_st_trace(partial, 3), :text)
+	@test !haskey(_st_trace(partial, 2), :base)
+	@test !haskey(_st_trace(plot_bar([[1, 2], [3, 4]]; error_y = Vector{Float64}[]), 1), :error_y)
+	# NaN / missing magnitudes leave single bars without an error bar.
+	@test isequal(_st_fields(_st_trace(plot_bar([1, 2]; error_y = [NaN, 0.2]))[:error_y])[:array], [NaN, 0.2])
+	# Horizontal bars carry the value errors on x.
+	horizontal = _st_trace(plot_bar([3.0, 5.0], ["a", "b"]; orientation = "h", error_x = [0.5, 0.25]))
+	@test _st_fields(horizontal[:error_x])[:array] == [0.5, 0.25]
 end
 
 @testset "stats: histogram hatch, cumulative, orientation and bins (C29)" begin
@@ -603,4 +685,44 @@ end
 	@test routed[1][:yaxis] == "y"
 	@test routed[2][:yaxis] != "y" && routed[2][:xaxis] == "x"
 	@test routed[3][:xaxis] != "x"
+end
+
+# A SyncPlot whose renderer is a recording stub: mutators must update the model
+# and send the change in one transaction, or leave both untouched.
+function _st_probe_syncplot(plot)
+	scripts = String[]
+	backend = (
+		isopen = window -> true,
+		close = window -> nothing,
+		run = (window, script) -> (push!(scripts, String(script)); "ok"),
+	)
+	resources = PlotlySupply._SyncPlotResources(nothing, backend)
+	return SyncPlot(plot, nothing, :stats_probe_window, "stats-probe", resources), scripts
+end
+
+@testset "stats: SyncPlot mutators commit atomically" begin
+	for mutate! in (
+		sp -> plot_bar!(sp, [1, 2]; legend = "bars", yrange = (0, 3)),
+		sp -> plot_bar!(sp, [1.0, 2.0], ["a", "b"]; orientation = "h"),
+		sp -> plot_histogram!(sp, [randn(20), randn(20)]; bins = (-3, 3, 0.5)),
+		sp -> plot_box!(sp, randn(10); boxmean = true, grid = :y),
+		sp -> plot_box!(sp, fill("g", 10), randn(10)),
+		sp -> plot_violin!(sp, randn(10); box = true),
+		sp -> plot_violin!(sp, fill("g", 10), randn(10)),
+		sp -> plot_histogram2d!(sp, randn(30), randn(30); colornorm = :log),
+	)
+		sp, scripts = _st_probe_syncplot(plot_scatter(1:3, 1:3))
+		@test mutate!(sp) === nothing
+		@test length(sp.plot.data) >= 2
+		@test !isempty(scripts)
+	end
+
+	sp, scripts = _st_probe_syncplot(plot_scatter(1:3, 1:3; title = "keep"))
+	before = _st_snapshot(sp.plot)
+	@test_throws ArgumentError plot_bar!(sp, [1, 2]; error_y = [0.1])
+	@test_throws ArgumentError plot_histogram!(sp, randn(5); bins = (0, 1, -1))
+	@test_throws ArgumentError plot_box!(sp, randn(5); show = true)
+	@test_throws ArgumentError plot_histogram2d!(sp, randn(5), randn(4))
+	@test _st_snapshot(sp.plot) == before
+	@test isempty(scripts)
 end

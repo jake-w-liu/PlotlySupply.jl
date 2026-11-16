@@ -3528,7 +3528,7 @@ function plot_bar!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_bar!,
 		x,
@@ -3536,6 +3536,7 @@ function plot_bar!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_bar!",
 		kwargs...,
 	)
 end
@@ -3548,13 +3549,14 @@ function plot_bar!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_bar!,
 		y;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_bar!",
 		kwargs...,
 	)
 end
@@ -3567,20 +3569,16 @@ function plot_histogram!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	# The overlay rule of nested histograms depends on the figure-wide bar mode,
-	# which the staged cell Plot of the delegate does not carry.
-	root_barmode = get(_plot_layout(sf.fig).fields, :barmode, nothing)
-	return Base.ScopedValues.with(_STATS_CELL_BARMODE => root_barmode) do
-		_subplot_delegate_mutator!(
-			sf,
-			plot_histogram!,
-			x;
-			row = row,
-			col = col,
-			secondary_y = secondary_y,
-			kwargs...,
-		)
-	end
+	return _stats_subplot_delegate!(
+		sf,
+		plot_histogram!,
+		x;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		who = "plot_histogram!",
+		kwargs...,
+	)
 end
 
 function plot_box!(
@@ -3592,7 +3590,7 @@ function plot_box!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_box!,
 		x,
@@ -3600,6 +3598,7 @@ function plot_box!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_box!",
 		kwargs...,
 	)
 end
@@ -3612,13 +3611,14 @@ function plot_box!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_box!,
 		y;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_box!",
 		kwargs...,
 	)
 end
@@ -3632,7 +3632,7 @@ function plot_violin!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_violin!,
 		x,
@@ -3640,6 +3640,7 @@ function plot_violin!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_violin!",
 		kwargs...,
 	)
 end
@@ -3652,13 +3653,14 @@ function plot_violin!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_violin!,
 		y;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_violin!",
 		kwargs...,
 	)
 end
@@ -3672,7 +3674,7 @@ function plot_histogram2d!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_histogram2d!,
 		x,
@@ -3680,6 +3682,7 @@ function plot_histogram2d!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_histogram2d!",
 		kwargs...,
 	)
 end
@@ -4518,10 +4521,22 @@ const _STATS_VIOLIN_SIDES = ("both", "positive", "negative")
 # visible where they overlap while the colours remain identifiable (checked on
 # rendered overlays of two overlapping normal samples).
 const _STATS_OVERLAY_OPACITY = 0.6
-# Figure-wide bar mode of the SubplotFigure whose cell is being filled. The
-# subplot delegate runs the mutator on an empty staged Plot, so the histogram
-# overlay rule reads the root figure's mode from here (`nothing` elsewhere).
-const _STATS_CELL_BARMODE = Base.ScopedValues.ScopedValue{Any}(nothing)
+# Trace types whose layout is governed by the figure-wide `layout.barmode`.
+const _STATS_BARMODE_TRACE_TYPES = ("bar", "histogram")
+
+# What the stats rules need to know about the SubplotFigure cell being filled.
+# The subplot delegate runs the mutator on an empty staged Plot, so the
+# histogram overlay rule (figure-wide bar mode) and the box/violin collision
+# rule (boxes already in the cell) read the real figure from here.
+struct _StatsCellContext
+	# Root `layout.barmode` of the SubplotFigure (`nothing` when unset).
+	barmode::Any
+	# Field dictionaries of the traces already drawn on the target cell's axes.
+	traces::Vector{Any}
+end
+
+# `nothing` outside a SubplotFigure call; set by `_stats_subplot_delegate!`.
+const _STATS_SUBPLOT_CELL = Base.ScopedValues.ScopedValue{Union{Nothing, _StatsCellContext}}(nothing)
 
 function _stats_choice(
 	value::AbstractString,
@@ -4651,21 +4666,21 @@ function _stats_patterns(hatch, count::Int, who::AbstractString)
 end
 
 # The part of a per-point keyword that belongs to series `index`: a flat vector
-# (shared by every series) or a vector of vectors (one per series). Its length
-# must match the series' point count.
+# (shared by every series) or a vector of vectors (one per series). Like the
+# other per-series keywords, a vector of vectors with fewer entries than there
+# are series leaves the remaining series without it (`nothing` is returned)
+# and surplus entries are ignored. The part's length must match the series'
+# point count.
 function _stats_point_part(
 	value,
 	index::Int,
-	series_count::Int,
 	point_count::Int,
 	who::AbstractString,
 	name::AbstractString,
 )
 	part = value
 	if _is_nested_series(value)
-		length(value) == series_count || throw(ArgumentError(
-			"$(who): `$(name)` holds $(length(value)) series for $(series_count) data series.",
-		))
+		index <= length(value) || return nothing
 		part = value[index]
 	end
 	length(part) == point_count || throw(ArgumentError(
@@ -4676,11 +4691,11 @@ end
 
 # Error-bar attribute for one series: a vector of magnitudes (symmetric), a
 # vector of such vectors (one per series), or a `(minus, plus)` tuple of either
-# form (asymmetric). An empty vector of vectors means no error bars.
+# form (asymmetric). Series without an entry (including an empty vector of
+# vectors) get no error bars.
 function _stats_error_bars(
 	errors,
 	index::Int,
-	series_count::Int,
 	point_count::Int,
 	who::AbstractString,
 	name::AbstractString,
@@ -4693,8 +4708,14 @@ function _stats_error_bars(
 		parts = map(enumerate(("minus", "plus"))) do (position, side)
 			part = errors[position]
 			part isa AbstractVector || throw(ArgumentError("$(form_message); the $(side) part is $(typeof(part))."))
-			_stats_point_part(part, index, series_count, point_count, who, "$(name) ($(side))")
+			_stats_check_error_values(part, who, "$(name) ($(side))")
+			_stats_point_part(part, index, point_count, who, "$(name) ($(side))")
 		end
+		all(isnothing, parts) && return nothing
+		any(isnothing, parts) && throw(ArgumentError(
+			"$(who): the minus and plus parts of `$(name)` must cover the same series; " *
+			"series $(index) has only one of them.",
+		))
 		return attr(
 			type = "data",
 			symmetric = false,
@@ -4704,9 +4725,24 @@ function _stats_error_bars(
 		)
 	end
 	errors isa AbstractVector || throw(ArgumentError("$(form_message); got $(typeof(errors))."))
-	(_is_nested_series(errors) && isempty(errors)) && return nothing
-	part = _stats_point_part(errors, index, series_count, point_count, who, name)
+	_stats_check_error_values(errors, who, name)
+	part = _stats_point_part(errors, index, point_count, who, name)
+	part === nothing && return nothing
 	return attr(type = "data", array = part, visible = true)
+end
+
+# Error magnitudes must be non-negative numbers, as in matplotlib (`NaN`,
+# `missing` or `nothing` leave a point without an error bar); plotly silently
+# draws nothing for other values and flips negative ones.
+function _stats_check_error_values(errors, who::AbstractString, name::AbstractString)
+	series_list = _is_nested_series(errors) ? errors : (errors,)
+	for series in series_list, value in series
+		(value === nothing || value === missing ||
+			(value isa Real && !(value isa Bool) && !(value < 0))) || throw(ArgumentError(
+			"$(who): `$(name)` entries must be non-negative numbers; got $(repr(value)).",
+		))
+	end
+	return nothing
 end
 
 # Bar labels are plain SVG text (plotly never typesets them), so strings go
@@ -4722,7 +4758,6 @@ end
 function _stats_bar_text(
 	text,
 	index::Int,
-	series_count::Int,
 	point_count::Int,
 	who::AbstractString,
 )
@@ -4732,7 +4767,8 @@ function _stats_bar_text(
 		"$(who): `text` must be a string, a vector with one label per bar, or a vector " *
 		"of such vectors (one per series); got $(typeof(text)).",
 	))
-	part = _stats_point_part(text, index, series_count, point_count, who, "text")
+	part = _stats_point_part(text, index, point_count, who, "text")
+	part === nothing && return nothing
 	return Any[_stats_bar_text_entry(entry, who) for entry in part]
 end
 
@@ -4747,13 +4783,13 @@ end
 function _stats_bar_base(
 	base,
 	index::Int,
-	series_count::Int,
 	point_count::Int,
 	who::AbstractString,
 )
 	base === nothing && return nothing
 	base isa AbstractVector || return _stats_bar_base_entry(base, who)
-	part = _stats_point_part(base, index, series_count, point_count, who, "base")
+	part = _stats_point_part(base, index, point_count, who, "base")
+	part === nothing && return nothing
 	return Any[_stats_bar_base_entry(entry, who) for entry in part]
 end
 
@@ -4819,7 +4855,8 @@ end
 # a name: plotly then draws them on one category, and only group mode places
 # them side by side. Distinctly named series each own a category, where group
 # mode would narrow and offset them. Existing position-less traces of the same
-# type and orientation in the target figure count as well.
+# type and orientation in the target figure (for a SubplotFigure: on the
+# target cell's axes) count as well.
 function _stats_positions_collide(
 	fig,
 	names::Vector{String},
@@ -4830,8 +4867,10 @@ function _stats_positions_collide(
 	allunique(names) || return true
 	position_key = horizontal ? :y : :x
 	value_key = horizontal ? :x : :y
-	for trace in _plot_data(fig)
-		fields = trace.fields
+	cell = _STATS_SUBPLOT_CELL[]
+	existing_traces = cell === nothing ?
+		Any[trace.fields for trace in _plot_data(fig)] : cell.traces
+	for fields in existing_traces
 		get(fields, :type, nothing) == trace_type || continue
 		haskey(fields, position_key) && continue
 		haskey(fields, value_key) || continue
@@ -4957,6 +4996,64 @@ function _stats_maybe_show(fig, show::Bool, width::Real, height::Real, title::Ab
 		height isa Integer ? Int(height) : round(Int, height),
 		String(title),
 	)
+end
+
+# ── SubplotFigure delegation ────────────────────────────────────────────────
+
+_stats_trace_on(fields, xref::AbstractString, yref::AbstractString) =
+	get(fields, :xaxis, "x") == xref && get(fields, :yaxis, "y") == yref
+
+# Run a stats mutator on a SubplotFigure cell with `_STATS_SUBPLOT_CELL` set to
+# the cell's context. The (reentrant) metadata lock is held from the lookup to
+# the commit so another task cannot change the cell in between. An explicit
+# `barmode` that changes the layout of bars on other axes (plotly's bar mode is
+# one figure-wide setting) is reported with a warning after the call succeeds.
+function _stats_subplot_delegate!(
+	sf::SubplotFigure,
+	mutator,
+	args...;
+	row,
+	col,
+	secondary_y::Bool,
+	who::AbstractString,
+	kwargs...,
+)
+	return lock(getfield(sf, :_lock)) do
+		root = _plot_obj(getfield(sf, :fig))
+		target = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, who = who)
+		cell_traces = Any[]
+		others_barlike = false
+		for trace in root.data
+			fields = trace.fields
+			if target.kind === :xy && _stats_trace_on(fields, target.xref, target.yref)
+				push!(cell_traces, fields)
+			else
+				others_barlike |= get(fields, :type, nothing) in _STATS_BARMODE_TRACE_TYPES
+			end
+		end
+		root_barmode = get(root.layout.fields, :barmode, nothing)
+		context = _StatsCellContext(root_barmode, cell_traces)
+		result = Base.ScopedValues.with(_STATS_SUBPLOT_CELL => context) do
+			_subplot_delegate_mutator!(
+				sf,
+				mutator,
+				args...;
+				row = row,
+				col = col,
+				secondary_y = secondary_y,
+				kwargs...,
+			)
+		end
+		requested = get(values(kwargs), :barmode, "")
+		current = root_barmode === nothing ? "group" : root_barmode
+		if others_barlike && requested isa AbstractString && !isempty(requested) &&
+			requested != current
+			@warn "$(who): `barmode = $(repr(requested))` replaces the figure-wide " *
+				"bar mode $(repr(current)); plotly has one `layout.barmode` for every " *
+				"subplot, so the existing bars and histograms on the other axes change too."
+		end
+		return result
+	end
 end
 
 # ── Trace builders ──────────────────────────────────────────────────────────
@@ -5160,14 +5257,14 @@ function _stats_bar!(fig, x, y, who::AbstractString, options, bar_options; mutat
 			name = names[index],
 			orientation = orientation,
 			showlegend = showlegends[index],
-			text = _stats_bar_text(o.text, index, count, points, who),
+			text = _stats_bar_text(o.text, index, points, who),
 			textposition = textposition,
 			texttemplate = o.texttemplate,
-			base = _stats_bar_base(o.base, index, count, points, who),
+			base = _stats_bar_base(o.base, index, points, who),
 			opacity = opacity,
 			pattern = patterns[index],
-			error_x = _stats_error_bars(o.error_x, index, count, points, who, "error_x"),
-			error_y = _stats_error_bars(o.error_y, index, count, points, who, "error_y"),
+			error_x = _stats_error_bars(o.error_x, index, points, who, "error_x"),
+			error_y = _stats_error_bars(o.error_y, index, points, who, "error_y"),
 		)
 	end
 	_stats_validate_options(fig, who, options)
@@ -5202,7 +5299,8 @@ function _stats_histogram!(fig, x, who::AbstractString, options, histogram_optio
 	# which case plotly groups or stacks them on the shared bins.
 	shared = nested && count > 1
 	existing_mode = get(_plot_layout(fig).fields, :barmode, nothing)
-	existing_mode === nothing && (existing_mode = _STATS_CELL_BARMODE[])
+	cell = _STATS_SUBPLOT_CELL[]
+	(existing_mode === nothing && cell !== nothing) && (existing_mode = cell.barmode)
 	mode = isempty(barmode) ? existing_mode : barmode
 	overlay = shared && (mode === nothing || mode == "overlay")
 	group_id = shared ?
@@ -5973,19 +6071,26 @@ Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
 - `orientation::AbstractString = ""`: `"v"`/`""` vertical, `"h"` horizontal.
 - `barmode::AbstractString = ""`: layout bar mode `"group"`, `"stack"`,
   `"overlay"` or `"relative"`; `""` leaves it unchanged (plotly: `"group"`).
-- `error_x`, `error_y = nothing`: error bars, a vector of magnitudes (one per
-  bar, shared by every series), a vector of such vectors (one per series) or a
-  `(minus, plus)` tuple of either form for asymmetric bars.
+- `error_x`, `error_y = nothing`: error bars, a vector of non-negative
+  magnitudes (one per bar, shared by every series), a vector of such vectors
+  (one per series) or a `(minus, plus)` tuple of either form for asymmetric
+  bars. For horizontal bars the value errors are `error_x`. `NaN`/`missing`
+  leaves a bar without an error bar.
 - `text = nothing`: bar labels, a string for every bar, a vector with one
   label (string or number) per bar, or a vector of such vectors (one per
-  series). Strings are drawn as plain text (`_label_plain`: `\$…\$` becomes
-  Unicode, no MathJax).
+  series). Strings are drawn as plain text (plotly never typesets bar text:
+  `\$…\$` math becomes Unicode/HTML, no MathJax); `nothing`/`missing` entries
+  leave a bar unlabelled.
 - `textposition::AbstractString = ""`: `"inside"`, `"outside"`, `"auto"` or
   `"none"` (`""` is plotly's `"auto"`).
 - `texttemplate::AbstractString = ""`: plotly text template, e.g.
   `"%{y:.1f}"`, passed through verbatim.
 - `base = nothing`: where bars start on the value axis, a number or one number
   per bar (per series as a vector of vectors).
+- Per-point keywords given as a vector of vectors (`error_x`, `error_y`,
+  `text`, `base`) follow the per-series rule of the other keywords: series
+  without an entry get none, surplus entries are ignored; each entry must have
+  one value per bar of its series.
 - `opacity::Union{Nothing,Real} = nothing`: trace opacity in [0, 1].
 - `hatch::Union{AbstractString,AbstractVector{<:AbstractString}} = ""`:
   matplotlib hatch (`"/"`, `"\\\\"`, `"x"`, `"-"`, `"|"`, `"+"`, `"."`,
@@ -10841,9 +10946,15 @@ _stats_js_floor_log10(value::Float64) = floor(log(value) / log(10.0))
 # `Axes.autoBin` for numeric data on a linear (or log, which plotly bins
 # linearly) axis in the 2-D histogram variant, so a histogram2d binned in
 # Julia (colornorm = :log) gets the bins plotly would pick for the same data.
-# `nbins > 0` is a maximum bin count.
-function _stats_autobins(samples::Vector{Float64}, nbins::Int)
+# `samples` are the finite values; `total` is the length of the original data
+# including missing/non-finite entries, which plotly keeps in the sample count
+# of its 2σ/n^(1/4) estimate. `nbins > 0` is a maximum bin count. Verified
+# against the bins plotly.js computes (gd._fullData xbins/ybins) for normal,
+# uniform, integer, constant, single-sample, scaled and clustered data.
+function _stats_autobins(samples::Vector{Float64}, nbins::Int; total::Int = length(samples))
 	count = length(samples)
+	count > 0 || throw(ArgumentError("_stats_autobins: needs at least one finite sample."))
+	total >= count || throw(ArgumentError("_stats_autobins: `total` must be at least the sample count."))
 	lower, upper = extrema(samples)
 	size_estimate = if nbins > 0
 		(upper - lower) / nbins
@@ -10867,7 +10978,7 @@ function _stats_autobins(samples::Vector{Float64}, nbins::Int)
 		rounded = decade * (ratio >= 9.9 ? 9.9 : ratio >= 4.9 ? 4.9 : ratio >= 1.9 ? 1.9 : 0.9)
 		mean_value = sum(samples) / count
 		deviation = sqrt(sum(value -> (value - mean_value)^2, samples) / count)
-		max(rounded, 2 * deviation / count^0.25)
+		max(rounded, 2 * deviation / total^0.25)
 	end
 	(isfinite(size_estimate) && size_estimate > 0) || (size_estimate = 1.0)
 	# Axes.autoTicks on a linear axis: the next "nice" width 2, 5 or 10 times
@@ -10936,8 +11047,8 @@ function _stats_histogram2d_counts(
 	(isempty(x_samples) || isempty(y_samples)) && throw(ArgumentError(
 		"$(who): colornorm=:log needs at least one finite (x, y) sample.",
 	))
-	x_start, x_stop, x_width = _stats_autobins(x_samples, nbinsx)
-	y_start, y_stop, y_width = _stats_autobins(y_samples, nbinsy)
+	x_start, x_stop, x_width = _stats_autobins(x_samples, nbinsx; total = length(x))
+	y_start, y_stop, y_width = _stats_autobins(y_samples, nbinsy; total = length(y))
 	nx = round(Int, (x_stop - x_start) / x_width)
 	ny = round(Int, (y_stop - y_start) / y_width)
 	counts = zeros(Float64, ny, nx)
@@ -10951,6 +11062,9 @@ function _stats_histogram2d_counts(
 		counts[iy, ix] += 1
 		total += 1
 	end
+	total > 0 || throw(ArgumentError(
+		"$(who): colornorm=:log needs at least one (x, y) pair whose x and y are both finite.",
+	))
 	area = x_width * y_width
 	if histnorm == "percent"
 		counts .*= 100 / total
@@ -10992,8 +11106,10 @@ function _stats_histogram2d!(fig, x, y, who::AbstractString, options, color_opti
 
 	if norm === :log
 		x_edges, y_edges, counts = _stats_histogram2d_counts(x, y, nbinsx, nbinsy, histnorm, who)
+		# Empty bins hold no data: they stay blank (matplotlib's LogNorm masks
+		# them too) instead of being floored to the bottom of an explicit crange.
 		mapped = _apply_color_norm(
-			counts;
+			map(count -> count > 0 ? count : NaN, counts);
 			crange = o.crange,
 			cmid = o.cmid,
 			colornorm = :log,
