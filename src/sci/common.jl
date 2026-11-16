@@ -940,6 +940,12 @@ const _CMN_TICK_DIRECTIONS = ("inside", "outside", "")
 # Minor tick length in px chosen by the 2.0 spec (F8): short enough to read
 # as minor next to Plotly's 5 px major ticks.
 const _CMN_MINOR_TICKLEN = 3
+# plotly.js 2.35 defaults `minor.ticklen` to 0.6 * (major `ticklen` || 5)
+# (verified in the bundled plotly.min.js tick-defaults code); an explicit minor
+# length keeps that ratio when the major length is set (`ticklen` keyword).
+const _CMN_MINOR_TICKLEN_RATIO = 0.6
+# The d3 format written by default for numeric array ticks on linear axes.
+const _CMN_AUTO_TICKFORMAT = "~g"
 
 function _cmn_tick_values(values, log_axis::Bool, who::AbstractString)
 	(values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
@@ -1006,27 +1012,93 @@ function _cmn_log_minor_values(lower::Float64, upper::Float64, majors, who::Abst
 	]
 end
 
+# The explicit array major ticks of an axis layout entry, or `nothing`.
+function _cmn_array_tickvals(axis_entry)
+	_cmn_mapping_get(axis_entry, :tickmode) == "array" || return nothing
+	existing = _cmn_mapping_get(axis_entry, :tickvals)
+	return existing isa AbstractVector ? existing : nothing
+end
+
+# Explicit minor tick values for log axis `key` whose major ticks are the array
+# `majors`: mantissas 1..9 per decade over the explicit range, otherwise over
+# the span of the majors and the data extent. `nothing` when the axis is not
+# logarithmic or `majors` holds no positive number (Plotly's automatic minor
+# ticks are then correct).
+function _cmn_log_minor_tickvals(fig, key::Symbol, majors, who::AbstractString)
+	layout = _cmn_layout(fig)
+	_cmn_is_log_axis(layout, key) || return nothing
+	numeric_majors = majors === nothing ? Float64[] :
+		Float64[
+			v for v in majors
+			if v isa Real && !(v isa Bool) && isfinite(v) && v > 0
+		]
+	isempty(numeric_majors) && return nothing
+	limits = _from_axis_range(layout, key)
+	if limits === nothing
+		lower, upper = extrema(numeric_majors)
+		extent = _axis_data_extent(fig, key)
+		if extent !== nothing
+			lower = min(lower, extent[1])
+			upper = max(upper, extent[2])
+		end
+		limits = (lower, upper)
+	end
+	return _cmn_log_minor_values(
+		minimum(limits),
+		maximum(limits),
+		numeric_majors,
+		who,
+	)
+end
+
+# Explicit minor tick length: `_CMN_MINOR_TICKLEN_RATIO` times the major
+# length (`ticklen` when positive, else the axis's own `ticklen`, else Plotly's
+# 5 px default, giving `_CMN_MINOR_TICKLEN`).
+function _cmn_minor_ticklen(axis_entry, ticklen::Real)
+	major = ticklen > 0 ? ticklen : _cmn_mapping_get(axis_entry, :ticklen)
+	(major isa Real && !(major isa Bool) && isfinite(major) && major > 0) ||
+		return _CMN_MINOR_TICKLEN
+	return _CMN_MINOR_TICKLEN_RATIO * Float64(major)
+end
+
+function _cmn_check_tick_size(value, name::AbstractString, who::AbstractString)
+	(value isa Real && !(value isa Bool) && isfinite(value) && value >= 0) ||
+		throw(ArgumentError(
+			"$(who): `$(name)` must be a finite number >= 0 (0 leaves it " *
+			"unchanged); got $(repr(value)).",
+		))
+	return nothing
+end
+
 """
-	_apply_ticks!(fig, key::Symbol; values=nothing, labels=nothing, format="", exponentformat="", minor=nothing, subs=nothing, angle=nothing, direction="", who)
+	_apply_ticks!(fig, key::Symbol; values=nothing, labels=nothing, format="", exponentformat="", minor=nothing, subs=nothing, angle=nothing, direction="", tickwidth=0, ticklen=0, who)
 
 Set the ticks of Cartesian axis `key` (spec F8). Only that axis is touched.
 
 - `values`: tick positions in data units (also on log axes); sets
   `tickmode="array"`. Numbers, or strings on category/date axes.
 - `labels`: one label per value, each passed through `_label`. Without labels,
-  numeric array ticks default to `tickformat="~g"` unless `format`,
-  `exponentformat` or an existing `tickformat` says otherwise, and stale
-  `ticktext` from an earlier call is removed.
+  numeric array ticks on a linear axis default to `tickformat="~g"` unless
+  `format`, `exponentformat` or an existing `tickformat` says otherwise. On a
+  log axis "~g" is never written (it prints 1e+06, ADDENDUM B1): the axis
+  keeps its exponent format, and gets `exponentformat="power"` when it has
+  none (C17), and an earlier automatic "~g" is removed. Stale `ticktext` from
+  an earlier call is removed.
 - `subs`: log axes only; ticks are `log_ticks` over the explicit range, else
   over the data extent (`ArgumentError` if neither exists, or if no tick falls
   inside). Mutually exclusive with `values`.
 - `format`: d3 `tickformat`; `exponentformat` in
-  ("none", "e", "E", "power", "SI", "B").
-- `minor=true`: minor ticks (`ticks` = `direction` or "outside", length 3);
-  on a log axis with array major ticks also explicit minor tick values
-  (mantissas 1..9 per decade). `minor=false` removes minor ticks.
+  ("none", "e", "E", "power", "SI", "B"). A d3 `tickformat` takes precedence
+  over `exponentformat` in plotly.js, so an `exponentformat` given without
+  `format` removes an automatic "~g".
+- `minor=true`: minor ticks (`ticks` = `direction` or "outside", length 0.6
+  times the major length, 3 px by default); on a log axis with array major
+  ticks also explicit minor tick values (mantissas 1..9 per decade).
+  `minor=false` removes minor ticks.
 - `angle`: `tickangle`; `direction` in ("inside", "outside", "") sets `ticks`
   ("" leaves it unchanged).
+- `tickwidth`, `ticklen`: major tick width/length in px (ADDENDUM A6); 0
+  leaves them unchanged. A new `ticklen` also rescales explicit minor ticks.
 """
 function _apply_ticks!(
 	fig,
@@ -1039,6 +1111,8 @@ function _apply_ticks!(
 	subs = nothing,
 	angle::Union{Nothing, Real} = nothing,
 	direction::AbstractString = "",
+	tickwidth::Real = 0,
+	ticklen::Real = 0,
 	who::AbstractString = "_apply_ticks!",
 )
 	_cmn_check_axis_key(key, who)
@@ -1059,6 +1133,8 @@ function _apply_ticks!(
 	(angle === nothing || isfinite(angle)) || throw(ArgumentError(
 		"$(who): `angle` must be finite; got $(angle).",
 	))
+	_cmn_check_tick_size(tickwidth, "tickwidth", who)
+	_cmn_check_tick_size(ticklen, "ticklen", who)
 	(subs !== nothing && values !== nothing) && throw(ArgumentError(
 		"$(who): pass either tick `values` or `subs`, not both.",
 	))
@@ -1099,72 +1175,77 @@ function _apply_ticks!(
 	end
 
 	minor_fields = nothing
-	minor_is_array = false
+	clear_minor_array = false
 	if minor === true
 		minor_fields = Dict{Symbol, Any}(
 			:ticks => direction == "" ? "outside" : direction,
-			:ticklen => _CMN_MINOR_TICKLEN,
+			:ticklen => _cmn_minor_ticklen(axis_entry, ticklen),
 		)
-		majors = tickvals
-		if majors === nothing &&
-			_cmn_mapping_get(axis_entry, :tickmode) == "array"
-			existing = _cmn_mapping_get(axis_entry, :tickvals)
-			existing isa AbstractVector && (majors = existing)
-		end
-		numeric_majors = majors === nothing ? Float64[] :
-			Float64[v for v in majors if v isa Real && isfinite(v) && v > 0]
-		if log_axis && !isempty(numeric_majors)
-			limits = _from_axis_range(layout, key)
-			if limits === nothing
-				lower, upper = extrema(numeric_majors)
-				extent = _axis_data_extent(fig, key)
-				if extent !== nothing
-					lower = min(lower, extent[1])
-					upper = max(upper, extent[2])
-				end
-				limits = (lower, upper)
-			end
+		majors = tickvals === nothing ? _cmn_array_tickvals(axis_entry) : tickvals
+		minor_values = _cmn_log_minor_tickvals(fig, key, majors, who)
+		if minor_values === nothing
+			clear_minor_array = true
+		else
 			minor_fields[:tickmode] = "array"
-			minor_fields[:tickvals] = _cmn_log_minor_values(
-				minimum(limits),
-				maximum(limits),
-				numeric_majors,
-				who,
-			)
-			minor_is_array = true
+			minor_fields[:tickvals] = minor_values
 		end
 	elseif minor === false
 		minor_fields = Dict{Symbol, Any}(:ticks => "")
+		clear_minor_array = true
+	elseif ticklen > 0 &&
+		_cmn_mapping_get(_cmn_mapping_get(axis_entry, :minor), :ticklen) !== nothing
+		# Keep explicit minor ticks proportional to the new major length.
+		minor_fields = Dict{Symbol, Any}(
+			:ticklen => _cmn_minor_ticklen(axis_entry, ticklen),
+		)
 	end
 
 	# --- write ---
+	existing_format = _cmn_mapping_get(axis_entry, :tickformat)
+	numeric_array = tickvals !== nothing && eltype(tickvals) === Float64
+	# An automatic "~g" left by an earlier call goes when it would hide the
+	# requested exponent format, or when the axis is (now) logarithmic.
+	drop_auto_format =
+		format == "" &&
+		existing_format == _CMN_AUTO_TICKFORMAT &&
+		(exponentformat != "" || (log_axis && numeric_array && ticktext === nothing))
 	fields = Dict{Symbol, Any}()
 	if tickvals !== nothing
 		fields[:tickmode] = "array"
 		fields[:tickvals] = tickvals
 		ticktext === nothing || (fields[:ticktext] = ticktext)
-		existing_format = _cmn_mapping_get(axis_entry, :tickformat)
 		has_format =
-			existing_format isa AbstractString && !isempty(existing_format)
+			!drop_auto_format &&
+			existing_format isa AbstractString &&
+			!isempty(existing_format)
 		if ticktext === nothing &&
-			eltype(tickvals) === Float64 &&
+			numeric_array &&
 			format == "" &&
 			exponentformat == "" &&
 			!has_format
-			fields[:tickformat] = "~g"
+			if log_axis
+				existing_exponent = _cmn_mapping_get(axis_entry, :exponentformat)
+				(existing_exponent isa AbstractString && !isempty(existing_exponent)) ||
+					(fields[:exponentformat] = "power")
+			else
+				fields[:tickformat] = _CMN_AUTO_TICKFORMAT
+			end
 		end
 	end
 	format == "" || (fields[:tickformat] = String(format))
 	exponentformat == "" || (fields[:exponentformat] = String(exponentformat))
 	angle === nothing || (fields[:tickangle] = angle)
 	direction == "" || (fields[:ticks] = String(direction))
+	tickwidth > 0 && (fields[:tickwidth] = tickwidth)
+	ticklen > 0 && (fields[:ticklen] = ticklen)
 	minor_fields === nothing || (fields[:minor] = attr(minor_fields))
 
 	_cmn_merge_layout_key!(fig, key, fields; nested = (:minor,))
+	drop_auto_format && _cmn_delete_layout_fields!(fig, key, (:tickformat,))
 	if tickvals !== nothing && ticktext === nothing
 		_cmn_delete_layout_fields!(fig, key, (:ticktext,))
 	end
-	if minor_fields !== nothing && !minor_is_array
+	if clear_minor_array
 		_cmn_delete_layout_fields!(
 			fig,
 			key,
@@ -1246,7 +1327,8 @@ end
 Layout key of the y axis that overlays `"y"` on a plain `Plot`/`SyncPlot`
 (or staged target), creating it when missing: the next free `yaxisN` with
 `overlaying="y"`, `side="right"`, `anchor="x"`, no grid, and the package's
-black outside-tick spine style without `mirror`. Idempotent. A SubplotFigure
+black outside-tick spine style without `mirror`; the primary y axis's
+`title.font` and `tickfont`, when set, are copied. Idempotent. A SubplotFigure
 cell gets its secondary y axis from `subplots(...; specs=...)` instead, so it
 is an `ArgumentError` here, as is a figure without Cartesian axes.
 """
@@ -1279,23 +1361,29 @@ function _ensure_twin_y!(fig; who::AbstractString = "_ensure_twin_y!")
 		index === nothing || (highest = max(highest, index))
 	end
 	key = Symbol("yaxis", highest + 1)
-	_cmn_merge_layout_key!(
-		fig,
-		key,
-		Dict{Symbol, Any}(
-			:overlaying => "y",
-			:side => "right",
-			:anchor => "x",
-			:showgrid => false,
-			:zeroline => false,
-			:showline => true,
-			:ticks => "outside",
-			:automargin => true,
-			:linecolor => _DEFAULT_AXIS_LINECOLOR,
-			:linewidth => _DEFAULT_AXIS_LINEWIDTH,
-			:tickcolor => _DEFAULT_AXIS_LINECOLOR,
-		),
+	fields = Dict{Symbol, Any}(
+		:overlaying => "y",
+		:side => "right",
+		:anchor => "x",
+		:showgrid => false,
+		:zeroline => false,
+		:showline => true,
+		:ticks => "outside",
+		:automargin => true,
+		:linecolor => _DEFAULT_AXIS_LINECOLOR,
+		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
+		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
 	)
+	# Fonts set on the primary y axis before the twin exists (set_fonts!,
+	# styles) carry over, so both y axes read alike. Copied, never aliased.
+	primary = get(p.layout.fields, :yaxis, nothing)
+	title_font = _cmn_mapping_get(_cmn_mapping_get(primary, :title), :font)
+	_is_layout_mapping(title_font) &&
+		(fields[:title] = attr(font = attr(; _symbol_dict(title_font)...)))
+	tickfont = _cmn_mapping_get(primary, :tickfont)
+	_is_layout_mapping(tickfont) &&
+		(fields[:tickfont] = attr(; _symbol_dict(tickfont)...))
+	_cmn_merge_layout_key!(fig, key, fields; nested = (:title,))
 	return key
 end
 
