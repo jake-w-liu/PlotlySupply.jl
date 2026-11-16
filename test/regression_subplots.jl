@@ -71,8 +71,66 @@ end
 		@test_throws ArgumentError subplots(true, 1; sync=false)
 		@test_throws ArgumentError subplots(1, 1; sync=false, legend_inset=(NaN, 0.1))
 		@test_throws ArgumentError subplots(1, 1; sync=false, legend_borderwidth=-1)
+		@test_throws ArgumentError subplots(1, 1; sync=false, legend_inset=[0.1])
+		@test_throws ArgumentError subplots(1, 1; sync=false, legend_bgcolor="notacolour")
+		@test_throws ArgumentError subplots(1, 1; sync=false, rows=2)
+		# PlotlyBase accepts negative spacing and raises a plain error above 1;
+		# both, and spacings that leave no room for the cells, are rejected.
+		for (key, value) in (
+			(:horizontal_spacing, 1.5),
+			(:horizontal_spacing, -0.1),
+			(:horizontal_spacing, NaN),
+			(:horizontal_spacing, true),
+			(:horizontal_spacing, 0.5),  # 1 × 3 grid: 2 gaps of 0.5 fill the row
+			(:vertical_spacing, 0.6),
+		)
+			err = try
+				subplots(key === :vertical_spacing ? 3 : 1, 3; sync=false, Dict(key => value)...)
+				nothing
+			catch caught
+				caught
+			end
+			@test err isa ArgumentError
+			@test occursin(String(key), err.msg)
+		end
+		spaced = subplots(1, 3; sync=false, horizontal_spacing=0.1)
+		@test _rsp_axis(spaced, :xaxis2)[:domain][1] - _rsp_axis(spaced, :xaxis)[:domain][2] ≈ 0.1
 		# PlotlyBase grid assertions surface as ArgumentError.
-		@test_throws ArgumentError subplots(1, 2; sync=false, horizontal_spacing=1.5)
+		@test_throws ArgumentError subplots(1, 2; sync=false, column_titles=["a", "b", "c"])
+		@test_throws ArgumentError subplots(1, 2; sync=false, shared_xaxes="bogus")
+		# plotly.py's flat subplot_titles list is accepted (row-major).
+		flat = subplots(2, 2; sync=false, subplot_titles=["A", "B", "C", "D"])
+		texts = [_rsp_fields(a)[:text] for a in _rsp_layout(flat)[:annotations]]
+		@test texts == ["A", "B", "C", "D"]
+		@test_throws ArgumentError subplots(1, 2; sync=false, subplot_titles=[1, 2])
+		@test_throws ArgumentError subplots(1, 2; sync=false, subplot_titles="AB")
+
+		# Legend style defaults follow the active style; explicit colours are
+		# normalised.
+		styled = subplots(1, 1; sync=false, legend_bgcolor="white", legend_bordercolor="0.5")
+		@test styled.legend_bgcolor == "#FFFFFF"
+		@test styled.legend_bordercolor == "#808080"
+		@test styled.legend_borderwidth == 1.0
+		default_style = subplots(1, 1; sync=false)
+		@test default_style.legend_bgcolor == "rgba(255,255,255,0.72)"
+		@test default_style.legend_bordercolor == "rgba(0,0,0,0.15)"
+		@test default_style.legend_borderwidth == 1.0
+	end
+
+	@testset "subplots: sync=true writes the figure title, not the window title (C10)" begin
+		sf = subplots(1, 1; show=false)
+		try
+			@test sf.fig isa SyncPlot
+			@test !haskey(_rsp_layout(sf), :title)
+		finally
+			close(sf)
+		end
+		titled = subplots(1, 1; show=false, title="Figure T", window_title="Window W")
+		try
+			@test _rsp_fields(_rsp_layout(titled)[:title])[:text] == "Figure T"
+		finally
+			close(titled)
+		end
 	end
 
 	@testset "subplots: height_ratios / width_ratios" begin
@@ -275,8 +333,10 @@ end
 		@test sf.plot.data[1][:y][end] == 9.0
 		@test prependtraces!(sf, Dict(:y => Vector[[0.0]]), [2], -1) === sf
 		@test sf.plot.data[2][:y][1] == 0.0
-		@test update!(sf, Dict(:opacity => 0.3), [1]) === sf
+		@test update!(sf, [1], Dict(:opacity => 0.3)) === sf
 		@test sf.plot.data[1][:opacity] == 0.3
+		@test update!(sf, 2; opacity=0.4) === sf
+		@test sf.plot.data[2][:opacity] == 0.4
 		@test redraw!(sf) === sf
 		@test restyle!(sf, 2; opacity=0.6) === sf
 		@test sf.plot.data[2][:opacity] == 0.6
@@ -379,21 +439,30 @@ end
 			plot_surface!(plain, rand(3, 3); row=1, col=2)
 			@test all(!haskey(t.fields, :coloraxis) for t in plain.plot.data)
 
-			# Renderer failure: the live model is unchanged and one transaction
-			# was attempted.
+			# Live figure: the rebinding of an existing surface is sent as one
+			# full Plotly.react (the append-only fast path would leave the
+			# renderer's first surface unbound).
 			live = subplots(1, 2; sync=false, per_subplot_legends=psl, specs=[Spec(kind="scene") Spec(kind="scene")])
 			plot_surface!(live, rand(3, 3); row=1, col=1)
 			renderer = _rsp_live!(live)
-			first_surface = live.plot.data[1]
-			renderer.fail = true
-			@test_throws Exception plot_surface!(live, rand(3, 3); row=1, col=2, shared_coloraxis=true)
-			@test length(live.plot.data) == 1
-			@test !haskey(live.plot.data[1].fields, :coloraxis)
-			renderer.fail = false
 			plot_surface!(live, rand(3, 3); row=1, col=2, shared_coloraxis=true)
-			@test live.plot.data[1] === first_surface || live.plot.data[1][:type] == "surface"
 			@test all(get(t.fields, :coloraxis, nothing) == "coloraxis" for t in live.plot.data)
 			@test length(renderer.scripts) == 1
+			@test occursin("Plotly.react", only(renderer.scripts))
+			@test !occursin("Plotly.addTraces", only(renderer.scripts))
+
+			# Renderer failure: the live model is unchanged (rollback).
+			failing = subplots(1, 2; sync=false, per_subplot_legends=psl, specs=[Spec(kind="scene") Spec(kind="scene")])
+			plot_surface!(failing, rand(3, 3); row=1, col=1)
+			failing_renderer = _rsp_live!(failing)
+			first_surface = failing.plot.data[1]
+			layout_before = deepcopy(failing.plot.layout)
+			failing_renderer.fail = true
+			@test_throws Exception plot_surface!(failing, rand(3, 3); row=1, col=2, shared_coloraxis=true)
+			@test length(failing.plot.data) == 1
+			@test failing.plot.data[1] === first_surface
+			@test !haskey(failing.plot.data[1].fields, :coloraxis)
+			@test failing.plot.layout == layout_before
 		end
 	end
 

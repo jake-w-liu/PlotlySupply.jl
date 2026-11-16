@@ -1262,21 +1262,30 @@ function _subplot_cell(sf::SubplotFigure, index::Int)
 	return row, col
 end
 
+# The (row, col) a SubplotFigure call targets: the active cell when both are
+# `nothing`, otherwise the validated pair. Errors are prefixed with `who`.
 function _resolve_subplot_cell(
 	sf::SubplotFigure;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	who::AbstractString = "SubplotFigure",
 )
 	if isnothing(row) && isnothing(col)
 		return sf.current_row, sf.current_col
 	end
 	if isnothing(row) || isnothing(col)
-		throw(ArgumentError("`row` and `col` must be provided together."))
+		throw(ArgumentError("$(who): `row` and `col` must be provided together."))
 	end
-	r = Int(row)
-	c = Int(col)
-	_check_subplot_cell(sf, r, c)
-	return r, c
+	(row isa Bool || col isa Bool) && throw(ArgumentError(
+		"$(who): `row` and `col` must be integers, not Bool.",
+	))
+	(1 <= row <= sf.rows) || throw(ArgumentError(
+		"$(who): `row` must be in 1:$(sf.rows); got $(row).",
+	))
+	(1 <= col <= sf.cols) || throw(ArgumentError(
+		"$(who): `col` must be in 1:$(sf.cols); got $(col).",
+	))
+	return Int(row), Int(col)
 end
 
 const _SUBPLOTS_START_CELLS = ("top-left", "bottom-left")
@@ -1328,6 +1337,36 @@ function _subplots_grid_kwargs(
 			"got $(repr(start_cell)).",
 		))
 	grid[:start_cell] = String(start_cell)
+	# PlotlyBase checks the spacing with `spacing < 0 || spacing > 1 && error(...)`,
+	# which accepts negative values and raises a plain ErrorException otherwise.
+	for (name, count) in ((:horizontal_spacing, cols), (:vertical_spacing, rows))
+		haskey(grid, name) || continue
+		spacing = grid[name]
+		(spacing isa Real && !(spacing isa Bool) && isfinite(spacing) &&
+			0 <= spacing <= 1 && spacing * (count - 1) < 1) || throw(ArgumentError(
+			"subplots: `$(name)` must be a finite number in [0, 1] whose " *
+			"$(count - 1) gap(s) leave room for the cells (spacing × $(count - 1) < 1); " *
+			"got $(repr(spacing)).",
+		))
+		grid[name] = Float64(spacing)
+	end
+	# PlotlyBase types `subplot_titles` as a Matrix of String/missing; accept
+	# plotly.py's flat list (a Vector, read in row-major order) and
+	# loosely-typed containers, and reject anything else with an ArgumentError
+	# rather than a conversion MethodError.
+	if haskey(grid, :subplot_titles)
+		titles = grid[:subplot_titles]
+		(titles isa AbstractVecOrMat &&
+			all(t -> t isa AbstractString || t === missing, titles)) ||
+			throw(ArgumentError(
+				"subplots: `subplot_titles` must be a vector or matrix of strings " *
+				"(`missing` skips a cell); got $(repr(titles)).",
+			))
+		as_matrix = titles isa AbstractVector ? reshape(collect(titles), 1, :) : collect(titles)
+		grid[:subplot_titles] = any(ismissing, as_matrix) ?
+			Matrix{Union{Missing, String}}(map(t -> t === missing ? missing : String(t), as_matrix)) :
+			Matrix{String}(map(String, as_matrix))
+	end
 	if height_ratios !== nothing
 		haskey(grid, :row_heights) && throw(ArgumentError(
 			"subplots: pass either `height_ratios` (top-to-bottom) or " *
@@ -1356,54 +1395,76 @@ function _subplots_grid_kwargs(
 	return grid
 end
 
+# A legend colour keyword of `subplots`: `nothing` takes the style default; a
+# String/Symbol must parse as a colour (CSS name, hex, rgb/rgba/hsl, or a
+# matplotlib grey level such as "0.35") and is stored in the normalised
+# "#RRGGBB" / "rgba(...)" form plotly understands.
+function _subplots_legend_colour(value, default::AbstractString, name::AbstractString)
+	value === nothing && return String(default)
+	return _color_hex(value; who = "subplots: `$(name)`")
+end
+
 """
-	subplots(rows, cols; sync=true, title="", window_title="", width=0, height=0,
-		show=true, app=nothing, height_ratios=nothing, width_ratios=nothing,
-		per_subplot_legends=true, legend_position=get_default_legend_position(),
-		legend_inset=(0.02, 0.03), legend_bgcolor="rgba(255,255,255,0.72)",
-		legend_bordercolor="rgba(0,0,0,0.15)", legend_borderwidth=1,
-		subplot_kwargs...) -> SubplotFigure
+	subplots(rows::Integer, cols::Integer; sync=true, title="", window_title="",
+		width=0, height=0, show=true, app=nothing, height_ratios=nothing,
+		width_ratios=nothing, per_subplot_legends=true,
+		legend_position=get_default_legend_position(), legend_inset=(0.02, 0.03),
+		legend_bgcolor=nothing, legend_bordercolor=nothing,
+		legend_borderwidth=nothing, subplot_kwargs...) -> SubplotFigure
 
 Create a MATLAB-like grid of `rows` × `cols` subplot cells and return a
-[`SubplotFigure`](@ref). Cell `(1, 1)` is active; select another with
-[`subplot!`](@ref) and append to the active cell (or to `row`/`col`) with the
-`plot_*!` mutators, `add_trace!` and `addtraces!`.
+[`SubplotFigure`](@ref). Cell `(1, 1)` (top left) is active; select another
+with [`subplot!`](@ref) and append to the active cell (or to `row`/`col`) with
+the `plot_*!` mutators, `add_trace!` and `addtraces!`. Coloured traces added
+with `plot_*!` get a colorbar next to their own cell (see
+[`colorbar!`](@ref) and [`shared_colorbar!`](@ref)).
 
 # Keywords
 - `sync::Bool=true`: `true` shows the figure in a live Electron window (the
   figure is a `SyncPlot`); `false` builds a plain `Plot` without a window.
 - `title::AbstractString=""`: figure title, stored as `layout.title.text`
-  (LaTeX/mathtext is rendered, see [`mathtext`](@ref)); `""` writes no title.
+  in both modes (LaTeX/mathtext is rendered, see [`mathtext`](@ref)); `""`
+  writes no title. (1.x wrote `"PlotlySupply"` here for `sync=false`.)
 - `window_title::AbstractString=""`: title of the Electron window
   (`sync=true` only). `""` uses `title` when it is non-empty, otherwise
   `"PlotlySupply"`.
 - `width::Real=0`, `height::Real=0`: figure size in CSS pixels, written to
   `layout.width`/`layout.height` in both modes and, with `sync=true`, used as
   the window size. `0` leaves the layout size automatic (the figure fills the
-  window, which defaults to 960 × 720; `savefig` uses its own default size).
-  Negative or non-finite values throw an `ArgumentError`.
+  window, which defaults to 960 × 720; `savefig` then uses its own default
+  size). Negative or non-finite values throw an `ArgumentError`.
 - `show::Bool=true`, `app=nothing`: window visibility and ElectronCall
   application (`sync=true` only; validated in both modes).
-- `height_ratios=nothing`: relative row heights listed top-to-bottom as drawn
-  (`[3, 1]` makes row 1 three times as tall as row 2); one positive finite
-  number per row. Cannot be combined with `row_heights`; with
-  `start_cell="bottom-left"` only equal ratios are accepted.
-- `width_ratios=nothing`: relative column widths, left-to-right; one positive
+- `height_ratios=nothing`: relative row heights listed TOP-TO-BOTTOM as drawn
+  (`[3, 1]` makes row 1 three times as tall as row 2); a vector or tuple with
+  one positive finite number per row. Cannot be combined with `row_heights`;
+  with `start_cell="bottom-left"` only equal ratios are accepted (PlotlyBase
+  overlaps unequal rows there).
+- `width_ratios=nothing`: relative column widths, LEFT-TO-RIGHT; one positive
   finite number per column. Cannot be combined with `column_widths`.
 - `per_subplot_legends::Bool=true`: every cell gets its own legend inside the
   cell. `false` keeps one figure legend, placed and styled with the
   `legend_*` keywords below as soon as a named trace is added.
-- `legend_position`, `legend_inset::Tuple{Real,Real}`,
-  `legend_bgcolor::AbstractString`, `legend_bordercolor::AbstractString`,
-  `legend_borderwidth::Real`: legend placement and style (see
-  [`set_legend!`](@ref)).
+- `legend_position::Union{Symbol,AbstractString}`: legend placement inside
+  each cell (or the figure), one of the [`set_legend!`](@ref) positions.
+- `legend_inset=(0.02, 0.03)`: legend offset from the cell edges as fractions
+  of the cell (2-tuple or 2-vector of finite numbers).
+- `legend_bgcolor`, `legend_bordercolor` (String or Symbol colour, also a
+  matplotlib grey level such as `"0.9"`), `legend_borderwidth::Real` (px):
+  legend box style. `nothing` takes the active style's defaults, which for
+  the default style are the 1.x `"rgba(255,255,255,0.72)"`,
+  `"rgba(0,0,0,0.15)"` and `1` (darker on dark templates, transparent and 0
+  for frameless styles).
 - `subplot_kwargs...`: forwarded to `PlotlyBase.Subplots`: `specs`,
   `shared_xaxes`, `shared_yaxes`, `start_cell` (`"top-left"` or
-  `"bottom-left"`), `subplot_titles`, `column_titles`, `row_titles`,
-  `x_title`, `y_title`, `insets`, `horizontal_spacing`, `vertical_spacing`,
+  `"bottom-left"`), `subplot_titles` (a matrix, or a vector read in
+  row-major order as in plotly.py), `column_titles`, `row_titles`,
+  `x_title`, `y_title`, `insets`, `horizontal_spacing`, `vertical_spacing`
+  (numbers in `[0, 1]` that must leave room for the cells),
   `column_widths` and `row_heights`. `row_heights` keeps PlotlyBase's order:
   for the default `start_cell="top-left"` its FIRST entry sizes the BOTTOM
-  row; prefer `height_ratios`.
+  row; prefer `height_ratios`. Cell colorbars sit in the gap right of their
+  cell, so widen `horizontal_spacing` when neighbouring cells crowd them.
 
 Every option is validated before the figure (or window) is created; invalid
 values throw an `ArgumentError`. Figure-level settings are not changed by the
@@ -1431,16 +1492,22 @@ function subplots(
 	width_ratios = nothing,
 	per_subplot_legends::Bool = true,
 	legend_position::Union{Symbol, AbstractString} = get_default_legend_position(),
-	legend_inset::Tuple{<:Real, <:Real} = _DEFAULT_LEGEND_INSET[],
-	legend_bgcolor::AbstractString = _DEFAULT_LEGEND_BGCOLOR[],
-	legend_bordercolor::AbstractString = _DEFAULT_LEGEND_BORDERCOLOR[],
-	legend_borderwidth::Real = _DEFAULT_LEGEND_BORDERWIDTH[],
+	legend_inset::Union{Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = _DEFAULT_LEGEND_INSET[],
+	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
+	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
+	legend_borderwidth::Union{Nothing, Real} = nothing,
 	subplot_kwargs...,
 )
 	# Validate every option before a figure or window exists.
 	(rows isa Bool || cols isa Bool) && throw(ArgumentError(
 		"subplots: `rows` and `cols` must be integers, not Bool.",
 	))
+	for key in (:rows, :cols, :grid_ref)
+		haskey(subplot_kwargs, key) && throw(ArgumentError(
+			"subplots: `$(key)` is not a keyword; pass the grid shape " *
+			"positionally as `subplots(rows, cols)`.",
+		))
+	end
 	rows_i = Int(rows)
 	cols_i = Int(cols)
 	_check_subplot_dims(rows_i, cols_i)
@@ -1458,15 +1525,30 @@ function subplots(
 		show = show,
 	)
 	normalized_legend_position = _normalize_legend_position(legend_position)
+	(length(legend_inset) == 2 && all(v -> !(v isa Bool) && isfinite(v), legend_inset)) ||
+		throw(ArgumentError(
+			"subplots: `legend_inset` must be two finite numbers (x, y); got " *
+			"$(repr(legend_inset)).",
+		))
 	inset = (Float64(legend_inset[1]), Float64(legend_inset[2]))
-	all(isfinite, inset) || throw(ArgumentError(
-		"subplots: `legend_inset` must contain finite numbers; got $(legend_inset).",
-	))
-	(!(legend_borderwidth isa Bool) && isfinite(legend_borderwidth) &&
-		legend_borderwidth >= 0) || throw(ArgumentError(
-		"subplots: `legend_borderwidth` must be a finite number ≥ 0; got " *
-		"$(repr(legend_borderwidth)).",
-	))
+	# Unset legend colours follow the active style and template (the 1.x
+	# translucent white box under the default style; a dark box on dark
+	# templates; transparent for frameless styles).
+	legend_style = _style_legend_defaults()
+	bgcolor = _subplots_legend_colour(legend_bgcolor, legend_style.bgcolor, "legend_bgcolor")
+	bordercolor = _subplots_legend_colour(
+		legend_bordercolor,
+		legend_style.bordercolor,
+		"legend_bordercolor",
+	)
+	borderwidth = legend_borderwidth === nothing ?
+		Float64(legend_style.borderwidth) :
+		legend_borderwidth
+	(!(borderwidth isa Bool) && isfinite(borderwidth) && borderwidth >= 0) ||
+		throw(ArgumentError(
+			"subplots: `legend_borderwidth` must be a finite number ≥ 0; got " *
+			"$(repr(legend_borderwidth)).",
+		))
 	grid_kwargs = _subplots_grid_kwargs(
 		rows_i,
 		cols_i,
@@ -1477,10 +1559,20 @@ function subplots(
 	grid = try
 		Subplots(; rows = rows_i, cols = cols_i, grid_kwargs...)
 	catch err
-		# PlotlyBase checks spacing, titles and shared-axis modes with
-		# @assert; report them as argument errors.
+		# PlotlyBase checks start_cell, shared-axis modes and title counts
+		# with @assert; report them as argument errors.
 		err isa AssertionError || rethrow()
 		throw(ArgumentError("subplots: invalid grid option: $(err.msg)"))
+	end
+	# The cell sizes PlotlyBase derived from the spacing (the horizontal room
+	# also shrinks for secondary y axes and row titles) must stay positive.
+	for (name, sizes) in (
+		("horizontal_spacing", getfield(grid, :_widths)),
+		("vertical_spacing", getfield(grid, :_heights)),
+	)
+		all(size -> size > 0, sizes) || throw(ArgumentError(
+			"subplots: `$(name)` leaves no room for the cells; use a smaller value.",
+		))
 	end
 	layout = _plotlysupply_subplot_layout(grid)
 
@@ -1510,9 +1602,9 @@ function subplots(
 		per_subplot_legends,
 		normalized_legend_position,
 		inset,
-		String(legend_bgcolor),
-		String(legend_bordercolor),
-		Float64(legend_borderwidth),
+		bgcolor,
+		bordercolor,
+		Float64(borderwidth),
 	)
 end
 
@@ -1520,13 +1612,22 @@ end
 	subplot!(sf, row, col)
 	subplot!(sf, index)
 
-Set the active subplot cell in a `SubplotFigure`.
+Set the active subplot cell in a `SubplotFigure` and return `sf`.
+
+`subplot!(sf, row, col)` selects cell `(row, col)` (row 1 is the top row for
+the default `start_cell="top-left"`). `subplot!(sf, index)` uses MATLAB's
+row-major numbering: `index = (row - 1) * cols + col`, so in a 2 × 3 grid
+index 4 is cell `(2, 1)`. Later `plot_*!`, `add_trace!`, `xlabel!`, ... calls
+without `row`/`col` target the active cell. Selecting a cell changes no
+figure data and never refreshes the window.
+
+Out-of-range or `Bool` indices throw an `ArgumentError` and leave the active
+cell unchanged. Empty cells (`specs` entries of `nothing`) may be selected,
+but plotting into them throws.
 """
 function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
-	r = Int(row)
-	c = Int(col)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = "subplot!")
 	lock(getfield(sf, :_lock)) do
-		_check_subplot_cell(sf, r, c)
 		sf.current_row = r
 		sf.current_col = c
 	end
@@ -1534,6 +1635,13 @@ function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
 end
 
 function subplot!(sf::SubplotFigure, index::Integer)
+	index isa Bool && throw(ArgumentError(
+		"subplot!: `index` must be an integer, not Bool.",
+	))
+	count = sf.rows * sf.cols
+	(1 <= index <= count) || throw(ArgumentError(
+		"subplot!: `index` must be in 1:$(count); got $(index).",
+	))
 	row, col = _subplot_cell(sf, Int(index))
 	return subplot!(sf, row, col)
 end
@@ -3823,17 +3931,20 @@ function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_
 	(checkbounds(Bool, grid_ref, row, col) &&
 		isassigned(grid_ref, row, col) &&
 		!isempty(grid_ref[row, col])) || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) is empty.",
+		"Selected subplot cell ($(row), $(col)) is empty (its `specs` entry is " *
+		"`nothing`) and has no axes.",
 	))
 	refs = grid_ref[row, col]
-	String(first(refs).subplot_kind) == "xy" || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) does not accept Cartesian x/y axes.",
+	kind = String(first(refs).subplot_kind)
+	kind == "xy" || throw(ArgumentError(
+		"Selected subplot cell ($(row), $(col)) is a '$(kind)' cell and does " *
+		"not accept Cartesian x/y axes.",
 	))
 	if secondary_y && length(refs) < 2
 		throw(ArgumentError(
-			"Selected subplot cell ($(row), $(col)) does not accept Cartesian " *
-			"x/y axes with a secondary y-axis (was the cell created with " *
-			"`secondary_y=true`?).",
+			"Selected subplot cell ($(row), $(col)) has no secondary y-axis; " *
+			"create the grid with `specs` containing `Spec(secondary_y=true)` " *
+			"for that cell.",
 		))
 	end
 	trace_refs = refs[secondary_y ? 2 : 1].trace_kwargs.fields
