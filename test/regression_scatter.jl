@@ -387,7 +387,7 @@ end
 	@test _rsc_get(plot_scatter(1:3, 1:3; dash = "5px,10px").data[1].fields[:line], :dash) == "5px,10px"
 end
 
-@testset "scatter family: per-series keyword vectors and showlegend (7, 102, 110)" begin
+@testset "scatter family: per-series keyword vectors and showlegend vectors" begin
 	nested = [[1.0, 2, 3], [3.0, 2, 1]]
 	# The package-wide per-series convention: one value for every series, or
 	# one entry per series; missing entries take the default and surplus
