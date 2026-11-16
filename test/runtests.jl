@@ -2232,7 +2232,8 @@ end
 
     @testset "CRC: heatmap/contour omit empty colorscale, keep given one" begin
         @test !haskey(plot_heatmap(rand(3, 3)).data[1].fields, :colorscale)
-        @test plot_heatmap(rand(3, 3); colorscale="Viridis").data[1].fields[:colorscale] == "Viridis"
+        @test plot_heatmap(rand(3, 3); colorscale="Viridis").data[1].fields[:colorscale] ==
+              PlotlySupply._resolve_colorscale("Viridis"; who="plot_heatmap").scale
         @test !haskey(plot_contour(rand(3, 3)).data[1].fields, :colorscale)
         # mutating variants too
         h = plot_heatmap(rand(3, 3)); plot_heatmap!(h, rand(3, 3))
@@ -2287,7 +2288,7 @@ end
         @test length(xs) == length(ys) == 7
         @test xs[1:2] ≈ [10.0, 10.0 + 2 / 3]
         @test ys[1:2] ≈ [20.0, 20.0]
-        @test isnan(xs[3]) && isnan(ys[3])
+        @test xs[3] === nothing && ys[3] === nothing
         @test xs[4] < xs[2] && xs[6] < xs[2]
         @test ys[4] < ys[2] < ys[6]
         @test q.data[1].fields[:mode] == "lines"
@@ -2342,8 +2343,8 @@ end
             extreme = plot_quiver([0.0], [0.0], u, v)
             xv = extreme.data[1].fields[:x]
             yv = extreme.data[1].fields[:y]
-            @test all(z -> isnan(z) || isfinite(z), xv)
-            @test all(z -> isnan(z) || isfinite(z), yv)
+            @test all(z -> z === nothing || isfinite(z), xv)
+            @test all(z -> z === nothing || isfinite(z), yv)
             @test hypot(xv[2] - xv[1], yv[2] - yv[1]) ≈ 2 / 3 rtol=2e-15
         end
 
