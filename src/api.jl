@@ -3679,25 +3679,148 @@ function plot_scatterpolar!(
 	)
 end
 
+# SubplotFigure path of the 2-D field mutators (heatmap, contour, quiver,
+# image, and plot_matrix/plot_streamlines in src/sci/fields.jl). The delegate
+# builds the traces on an empty scratch figure and transplants them into the
+# target cell. Equal aspect is applied afterwards to the cell's own axes (the
+# scratch figure only knows "x"/"y"), inside the same transaction.
+function _field2d_subplot!(
+	sf::SubplotFigure,
+	mutator::Function,
+	args::Tuple;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	equalar::Bool = false,
+	kwargs...,
+)
+	equalar || return _subplot_delegate_mutator!(
+		sf,
+		mutator,
+		args...;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		equalar = false,
+		kwargs...,
+	)
+	who = String(get(kwargs, :who, string(nameof(mutator))))
+	return _transactional_subplot_mutation!(
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+	) do staged
+		_subplot_delegate_mutator_impl!(
+			staged,
+			mutator,
+			args...;
+			row = row,
+			col = col,
+			secondary_y = secondary_y,
+			equalar = false,
+			kwargs...,
+		)
+		_apply_equal_aspect!(
+			staged,
+			_cell_target(staged; secondary_y = secondary_y, who = who);
+			who = who,
+		)
+		return staged
+	end
+end
+
+# Whether the target cell's x / y axes are logarithmic after a call passing
+# `xscale` / `yscale` ("" keeps the cell's current type).
+function _field2d_subplot_log_axes(
+	sf::SubplotFigure,
+	who::AbstractString;
+	row = nothing,
+	col = nothing,
+	secondary_y::Bool = false,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+)
+	_require_axis_scale(xscale, who, "xscale")
+	_require_axis_scale(yscale, who, "yscale")
+	target = _cell_target(
+		sf;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		who = who,
+	)
+	layout = _plot_layout(getfield(sf, :fig))
+	cell_log(key) = target.kind === :xy && _axis_type(layout, key) == "log"
+	xlog = isempty(xscale) ? cell_log(target.xkey) : xscale == "log"
+	ylog = isempty(yscale) ? cell_log(target.ykey) : yscale == "log"
+	return xlog, ylog
+end
+
+# Coordinates on a logarithmic cell axis must be positive; the scratch figure
+# of the delegate cannot know the cell's axis type, so check it here.
+function _field2d_subplot_check_coordinates(
+	sf::SubplotFigure,
+	who::AbstractString,
+	x,
+	y;
+	kwargs...,
+)
+	xlog, ylog = _field2d_subplot_log_axes(sf, who; kwargs...)
+	xlog && _field2d_check_coordinates(x, who, "x"; log_axis = true)
+	ylog && _field2d_check_coordinates(y, who, "y"; log_axis = true)
+	return nothing
+end
+
+# Implicit coordinates of `U` in a SubplotFigure cell: 0-based, or 1-based on
+# a logarithmic cell axis.
+function _field2d_subplot_implicit_axes(
+	sf::SubplotFigure,
+	who::AbstractString,
+	U;
+	kwargs...,
+)
+	ndims(U) == 2 || throw(ArgumentError(
+		"$(who): `U` must be a matrix indexed U[ix, iy]; got a " *
+		"$(ndims(U))-D array of size $(size(U)).",
+	))
+	xlog, ylog = _field2d_subplot_log_axes(sf, who; kwargs...)
+	return _field2d_implicit_axis(size(U, 1), xlog),
+		_field2d_implicit_axis(size(U, 2), ylog)
+end
+
 function plot_heatmap!(
 	sf::SubplotFigure,
-	x::Union{AbstractVector, SubArray},
-	y::Union{AbstractVector, SubArray},
+	x::AbstractArray,
+	y::AbstractArray,
 	U::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	equalar::Bool = false,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	_field2d_subplot_check_coordinates(
 		sf,
-		plot_heatmap!,
+		"plot_heatmap!",
 		x,
-		y,
-		U;
+		y;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		xscale = xscale,
+		yscale = yscale,
+	)
+	return _field2d_subplot!(
+		sf,
+		plot_heatmap!,
+		(x, y, U);
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
 		kwargs...,
 	)
 end
@@ -3708,38 +3831,69 @@ function plot_heatmap!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	equalar::Bool = false,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	x, y = _field2d_subplot_implicit_axes(
 		sf,
-		plot_heatmap!,
+		"plot_heatmap!",
 		U;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		xscale = xscale,
+		yscale = yscale,
+	)
+	return _field2d_subplot!(
+		sf,
+		plot_heatmap!,
+		(x, y, U);
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
 		kwargs...,
 	)
 end
 
 function plot_contour!(
 	sf::SubplotFigure,
-	x::Union{AbstractVector, SubArray},
-	y::Union{AbstractVector, SubArray},
+	x::AbstractArray,
+	y::AbstractArray,
 	U::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	equalar::Bool = false,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	_field2d_subplot_check_coordinates(
 		sf,
-		plot_contour!,
+		"plot_contour!",
 		x,
-		y,
-		U;
+		y;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		xscale = xscale,
+		yscale = yscale,
+	)
+	return _field2d_subplot!(
+		sf,
+		plot_contour!,
+		(x, y, U);
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
 		kwargs...,
 	)
 end
@@ -3750,40 +3904,160 @@ function plot_contour!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	equalar::Bool = false,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	x, y = _field2d_subplot_implicit_axes(
 		sf,
-		plot_contour!,
+		"plot_contour!",
 		U;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		xscale = xscale,
+		yscale = yscale,
+	)
+	return _field2d_subplot!(
+		sf,
+		plot_contour!,
+		(x, y, U);
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
 		kwargs...,
 	)
+end
+
+# Delegated SubplotFigure mutator for traces built against the target cell
+# (quiver and streamline geometry depends on the cell's axis types, which
+# the delegate's scratch figure does not know): append them and apply the
+# common Cartesian options.
+function _field2d_push_traces!(
+	fig,
+	traces::AbstractVector;
+	who::AbstractString,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	equalar::Bool = false,
+	kwargs...,
+)
+	_field2d_reject_keywords(who, kwargs)
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	append!(_plot_data(fig), traces)
+	_field2d_apply_options!(
+		fig,
+		who;
+		constructor = false,
+		title = title,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xscale = xscale,
+		yscale = yscale,
+		xrange = xrange,
+		yrange = yrange,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		origin = "",
+		equalar = equalar,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	_refresh!(fig)
+	return nothing
 end
 
 function plot_quiver!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	u::Union{AbstractRange, Vector, SubArray},
-	v::Union{AbstractRange, Vector, SubArray};
+	x::AbstractArray,
+	y::AbstractArray,
+	u::AbstractArray,
+	v::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	color = "RoyalBlue",
+	sizeref::Real = 1,
+	legend::AbstractString = "",
+	linewidth::Real = 0,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	equalar::Bool = true,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	who = "plot_quiver!"
+	haskey(kwargs, :show) && _field2d_reject_keywords(who, kwargs)
+	xlog, ylog = _field2d_subplot_log_axes(
 		sf,
-		plot_quiver!,
+		who;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		xscale = xscale,
+		yscale = yscale,
+	)
+	colour = _field2d_color_string(color, who, "color")
+	_field2d_nonnegative(linewidth, who, "linewidth")
+	trace = _quiver_trace(
 		x,
 		y,
 		u,
 		v;
+		color = colour,
+		sizeref = sizeref,
+		legend = legend,
+		linewidth = linewidth,
+		caller = who,
+		xlog = xlog,
+		ylog = ylog,
+	)
+	return _field2d_subplot!(
+		sf,
+		_field2d_push_traces!,
+		(GenericTrace[trace],);
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		equalar = equalar,
+		who = who,
+		xscale = xscale,
+		yscale = yscale,
 		kwargs...,
 	)
 end
@@ -4080,9 +4354,22 @@ end
 function plot_image!(
 	sf::SubplotFigure,
 	z::AbstractArray;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	equalar::Bool = true,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(sf, plot_image!, z; kwargs...)
+	return _field2d_subplot!(
+		sf,
+		plot_image!,
+		(z,);
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		equalar = equalar,
+		kwargs...,
+	)
 end
 
 """
@@ -5918,422 +6205,1361 @@ end
 
 #region 2D Plot
 
-"""
-	function plot_heatmap(
-		x::Union{AbstractVector, SubArray},
-		y::Union{AbstractVector, SubArray},
-		U::AbstractArray;
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		zrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		colorscale::String = "",
-		title::String = "",
-		fontsize::Int = 0,
-		equalar::Bool = false,
-		xscale::String = "",
-		yscale::String = "",
-	)
+# ── 2-D field helpers (plot_heatmap / plot_contour / plot_quiver / plot_image,
+# and plot_matrix / plot_streamlines in src/sci/fields.jl) ───────────────────
+#
+# Matrix convention of every 2-D field function: `U[ix, iy]` is the value at
+# (x[ix], y[iy]), so `size(U) == (length(x), length(y))`. The matrix is handed
+# to plotly lazily as `transpose(U)`; PlotlyBase then sets `transpose = true`,
+# so no copy is made. Per-cell `text` and the raw values in `customdata` are
+# NOT transposed by plotly.js, so they are passed in the `U[ix, iy]` layout
+# itself (PlotlyBase serialises a Julia matrix column by column, which is the
+# `[iy][ix]` order plotly reads them in).
 
-Plots heatmap (holographic) data.
+# Whether the primary `letter` axis is logarithmic once a call that passes
+# `scale` ("" keeps the current type) has been applied. `fig === nothing`
+# stands for a figure that does not exist yet.
+function _field2d_log_axis(fig, letter::Symbol, scale::AbstractString)
+	isempty(scale) || return scale == "log"
+	fig === nothing && return false
+	return _axis_type(_plot_layout(fig), _axis_layout_key(letter)) == "log"
+end
 
-#### Arguments
+# Implicit coordinates of a matrix dimension of length `n`: the 0-based
+# indices, or 1-based on a logarithmic axis, where 0 cannot be drawn.
+_field2d_implicit_axis(n::Integer, log_axis::Bool) =
+	log_axis ? (1:n) : (0:(n - 1))
 
-- `x`: x-axis coordinate data
-- `y`: y-axis coordinate data
-- `U`: 2D hologram data
+_field2d_bad_coordinate(value) =
+	value isa Bool || value === missing || value === nothing ||
+	(value isa Number && !(value isa Real)) || value isa AbstractArray
 
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `zrange`: Range for the z-axis (default: `[0, 0]`)
-- `colorscale`: Color scale for the heatmap (default: `""`)
-- `title`: Title of the figure (default: `""`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `equalar`: Whether to set equal aspect ratio (default: `false`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-
-"""
-function plot_heatmap(
-	x::Union{AbstractVector, SubArray},
-	y::Union{AbstractVector, SubArray},
-	U::AbstractArray;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "",
-	title::String = "",
-	fontsize::Int = 0,
-	equalar::Bool = false,
-	xscale::String = "",
-	yscale::String = "",
-	show::Bool = false,
+# Validate a coordinate vector: finite reals (positive on a log axis), or
+# strings/dates for category/date axes. The vector itself is not copied.
+function _field2d_check_coordinates(
+	v,
+	who::AbstractString,
+	name::AbstractString;
+	log_axis::Bool = false,
 )
-	FV = transpose(U) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
-	trace = heatmap(x = x, y = y, z = FV)
-	colorscale != "" && (trace.colorscale = colorscale)
-	if !all(zrange .== [0, 0])
-		trace.zmin = zrange[1]
-		trace.zmax = zrange[2]
+	if ndims(v) != 1
+		hint = ndims(v) == 2 ?
+			" For grid matrices `Y, X = meshgrid(y, x)` pass the coordinate " *
+			"vectors `x = X[:, 1]` and `y = Y[1, :]`." :
+			""
+		throw(ArgumentError(
+			"$(who): `$(name)` must be a vector of coordinates; got a " *
+			"$(ndims(v))-D array of size $(size(v)).$(hint)",
+		))
 	end
-	layout = Layout(
+	numeric = eltype(v) <: Real && !(eltype(v) <: Bool)
+	for (i, value) in enumerate(v)
+		if numeric || (value isa Real && !(value isa Bool))
+			isfinite(value) || throw(ArgumentError(
+				"$(who): `$(name)` coordinates must be finite; entry $(i) is $(value).",
+			))
+			log_axis && value <= 0 && throw(ArgumentError(
+				"$(who): `$(name)` is on a logarithmic axis, so its coordinates " *
+				"must be positive; entry $(i) is $(value).",
+			))
+		elseif _field2d_bad_coordinate(value)
+			throw(ArgumentError(
+				"$(who): `$(name)` coordinates must be finite real numbers, " *
+				"strings (categories) or dates; entry $(i) is $(repr(value)).",
+			))
+		elseif log_axis
+			throw(ArgumentError(
+				"$(who): `$(name)` is on a logarithmic axis, so its coordinates " *
+				"must be positive numbers; entry $(i) is $(repr(value)).",
+			))
+		end
+	end
+	return nothing
+end
+
+_field2d_complex_error(who::AbstractString, name::AbstractString) =
+	ArgumentError(
+		"$(who): `$(name)` is complex-valued; plot a real quantity such as " *
+		"abs.($(name)) (magnitude), real.($(name)), imag.($(name)) or " *
+		"angle.($(name)) (phase).",
+	)
+
+# The matrix that is plotted for `U`: real matrices are returned unchanged (no
+# copy); Bool entries become 0/1 (plotly cannot colour JSON true/false);
+# complex or non-numeric entries are an error. NaN and `missing` mark gaps.
+function _field2d_matrix(U, who::AbstractString, name::AbstractString = "U")
+	ndims(U) == 2 || throw(ArgumentError(
+		"$(who): `$(name)` must be a matrix indexed $(name)[ix, iy]; got a " *
+		"$(ndims(U))-D array of size $(size(U)).",
+	))
+	T = eltype(U)
+	T <: Bool && return UInt8.(U)
+	T <: Complex && throw(_field2d_complex_error(who, name))
+	T <: Real && isconcretetype(T) && return U
+	has_bool = false
+	for value in U
+		if value isa Bool
+			has_bool = true
+		elseif !(value === missing || value isa Real)
+			value isa Complex && throw(_field2d_complex_error(who, name))
+			throw(ArgumentError(
+				"$(who): `$(name)` entries must be real numbers (NaN or missing " *
+				"mark gaps); got $(repr(value)).",
+			))
+		end
+	end
+	has_bool || return U
+	return map(value -> value isa Bool ? UInt8(value) : value, U)
+end
+
+# `U[ix, iy]` must match the coordinate lengths; heatmaps also accept cell
+# edges (one more coordinate than cells).
+function _field2d_check_shape(
+	x,
+	y,
+	U,
+	who::AbstractString;
+	allow_edges::Bool,
+)
+	nx, ny = size(U)
+	lx, ly = length(x), length(y)
+	fits(l, n) = l == n || (allow_edges && n > 0 && l == n + 1)
+	fits(lx, nx) && fits(ly, ny) && return nothing
+	edges = allow_edges ?
+		" (or one less in each dimension when x and y list the cell edges)" :
+		""
+	hint = fits(lx, ny) && fits(ly, nx) ?
+		" The matrix looks transposed: if it is indexed U[iy, ix] (rows " *
+		"follow y, e.g. built from `meshgrid(x, y)`), pass permutedims(U)." :
+		""
+	throw(ArgumentError(
+		"$(who): the matrix is indexed U[ix, iy], so size(U) must be " *
+		"(length(x), length(y)) = ($(lx), $(ly))$(edges); got size(U) = " *
+		"$(size(U)).$(hint)",
+	))
+end
+
+function _field2d_labels(labels, who::AbstractString, name::AbstractString)
+	(labels isa AbstractVector || labels isa Tuple) || throw(ArgumentError(
+		"$(who): `$(name)` must be a vector of labels; got $(typeof(labels)).",
+	))
+	return String[
+		_label(label isa AbstractString ? label : string(label))
+		for label in labels
+	]
+end
+
+# A colour keyword (`linecolor`, `color`): "" / nothing is unset; strings and
+# Symbols are validated and passed through, Colorants become hex strings.
+function _field2d_color_string(color, who::AbstractString, name::AbstractString)
+	color === nothing && return ""
+	if color isa AbstractString || color isa Symbol
+		text = strip(String(color))
+		isempty(text) && return ""
+		_parse_color(text, who)
+		return String(text)
+	elseif color isa Colors.Colorant
+		return _color_hex(color; who = who)
+	end
+	throw(ArgumentError(
+		"$(who): `$(name)` must be a colour name, hex string, Symbol or " *
+		"Colors.jl Colorant; got $(repr(color)).",
+	))
+end
+
+function _field2d_nonnegative(value, who::AbstractString, name::AbstractString)
+	(value isa Real && !(value isa Bool) && isfinite(value) && value >= 0) ||
+		throw(ArgumentError(
+			"$(who): `$(name)` must be a finite number ≥ 0 (0 = unset); got " *
+			"$(repr(value)).",
+		))
+	return value
+end
+
+# Colour keywords of plot_heatmap(!) / plot_contour(!) (spec C21) resolved
+# through `_apply_color_norm`. Returns the matrix to plot (log10 values for
+# colornorm = :log), the raw values for the hover text (`nothing` when the
+# norm is linear), the colour fields and the normalised coloraxis id. Without
+# a coloraxis the fields are trace fields (`colorscale`, `zmin`, `zmax`,
+# `zmid`, `showscale`, `colorbar`); with one they are the `layout.<coloraxis>`
+# fields (`cmin`/`cmax`/`cmid`) and the trace only references the axis.
+function _field2d_color(
+	Z,
+	who::AbstractString;
+	zrange,
+	crange,
+	cmid,
+	colornorm,
+	levels,
+	colorscale,
+	showscale::Union{Nothing, Bool},
+	colorbar_title::AbstractString,
+	colorbar_ticks,
+	colorbar_ticklabels,
+	coloraxis,
+)
+	zlimits = _checked_range(zrange, who, "zrange")
+	if zlimits !== nothing
+		_checked_range(crange, who, "crange") === nothing || throw(ArgumentError(
+			"$(who): `zrange` is an alias of `crange`; pass only one of them.",
+		))
+		(all(b -> b isa Real && !(b isa Bool), zlimits) && zlimits[1] < zlimits[2]) ||
+			throw(ArgumentError(
+				"$(who): `zrange` must be numeric colour limits (lower, upper) " *
+				"with lower < upper; got $(repr(zrange)).",
+			))
+	end
+	ticklabels = colorbar_ticklabels === nothing ? nothing :
+		_field2d_labels(colorbar_ticklabels, who, "colorbar_ticklabels")
+	norm = _apply_color_norm(
+		Z;
+		crange = zlimits === nothing ? crange : zrange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		stops = colorscale,
+		ticks = colorbar_ticks,
+		ticklabels = ticklabels,
+		who = who,
+	)
+	colorbar = _colorbar_attr(;
+		title = isempty(colorbar_title) ? "" : _label(colorbar_title),
+		ticks = norm.tickvals,
+		ticklabels = norm.ticktext,
+		who = who,
+	)
+	axis_id = coloraxis === nothing ? nothing :
+		_normalize_coloraxis(coloraxis, who)
+	prefix = axis_id === nothing ? "z" : "c"
+	fields = Dict{Symbol, Any}()
+	stops = norm.stops
+	(stops isa AbstractString && isempty(stops)) || (fields[:colorscale] = stops)
+	norm.cmin === nothing || (fields[Symbol(prefix, "min")] = norm.cmin)
+	norm.cmax === nothing || (fields[Symbol(prefix, "max")] = norm.cmax)
+	norm.cmid === nothing || (fields[Symbol(prefix, "mid")] = norm.cmid)
+	showscale === nothing || (fields[:showscale] = showscale)
+	colorbar === nothing || (fields[:colorbar] = colorbar)
+	return (
+		values = norm.values,
+		customdata = norm.customdata,
+		fields = fields,
+		coloraxis = axis_id,
+	)
+end
+
+# Hover text of a log-normalised field: plotly holds log10 values, so the raw
+# values travel in `customdata`.
+const _FIELD2D_LOG_HOVERTEMPLATE =
+	"x: %{x}<br>y: %{y}<br>z: %{customdata:.3g}<extra></extra>"
+
+function _field2d_color_trace_fields!(fields::AbstractDict, color)
+	if color.coloraxis === nothing
+		merge!(fields, color.fields)
+	else
+		fields[:coloraxis] = color.coloraxis
+	end
+	if color.customdata !== nothing
+		fields[:customdata] = color.customdata
+		fields[:hovertemplate] = _FIELD2D_LOG_HOVERTEMPLATE
+	end
+	return fields
+end
+
+# Write the colour fields of a shared coloraxis into `layout.<coloraxis>`.
+function _field2d_apply_coloraxis!(fig, color)
+	color.coloraxis === nothing && return nothing
+	_cmn_merge_layout_key!(
+		fig,
+		Symbol(color.coloraxis),
+		color.fields;
+		nested = (:colorbar,),
+	)
+	return nothing
+end
+
+function _field2d_origin(origin, who::AbstractString; allow_unset::Bool)
+	(origin isa Symbol || origin isa AbstractString) || throw(ArgumentError(
+		"$(who): `origin` must be :lower or :upper; got $(repr(origin)).",
+	))
+	value = lowercase(strip(String(origin)))
+	allow_unset && isempty(value) && return ""
+	value in ("lower", "upper") || throw(ArgumentError(
+		"$(who): `origin` must be :lower or :upper" *
+		(allow_unset ? " (or \"\" to keep the y-axis direction)" : "") *
+		"; got $(repr(origin)).",
+	))
+	return value
+end
+
+# Make the primary `letter` axis decrease (`reversed = true`) or increase
+# along the screen direction. An explicit range is reordered; otherwise the
+# autorange direction is written. An increasing direction is only written
+# when the axis is currently reversed, unless `force` (plotly reverses the y
+# axis of image traces by default).
+function _field2d_axis_direction!(fig, letter::Symbol, reversed::Bool; force::Bool = false)
+	key = _axis_layout_key(letter)
+	axis = get(_plot_layout(fig).fields, key, nothing)
+	current = _cmn_mapping_get(axis, :range)
+	autorange = _cmn_mapping_get(axis, :autorange)
+	if (autorange === nothing || autorange === false) &&
+			current isa AbstractVector && length(current) == 2
+		first_bound, last_bound = current[1], current[2]
+		comparable =
+			(first_bound isa Real && last_bound isa Real) ||
+			(first_bound isa AbstractString && last_bound isa AbstractString)
+		if comparable && (reversed ? first_bound < last_bound : first_bound > last_bound)
+			relayout!(fig; Symbol(key, :_range) => Any[last_bound, first_bound])
+		end
+		return nothing
+	end
+	if reversed
+		relayout!(fig; Symbol(key, :_autorange) => "reversed")
+	elseif force || autorange == "reversed"
+		relayout!(fig; Symbol(key, :_autorange) => true)
+	end
+	return nothing
+end
+
+# `origin = "upper"` points the y axis down (first row / y value at the top),
+# "lower" up; "" leaves the axis alone.
+_field2d_apply_origin!(fig, origin::AbstractString) =
+	isempty(origin) ? nothing :
+	_field2d_axis_direction!(fig, :y, origin == "upper")
+
+function _field2d_apply_ticks!(
+	fig,
+	who::AbstractString;
+	xticks,
+	xticklabels,
+	xtickformat::AbstractString,
+	yticks,
+	yticklabels,
+	ytickformat::AbstractString,
+)
+	if xticks !== nothing || xticklabels !== nothing || !isempty(xtickformat)
+		_apply_ticks!(
+			fig,
+			:xaxis;
+			values = xticks,
+			labels = xticklabels,
+			format = xtickformat,
+			who = who,
+		)
+	end
+	if yticks !== nothing || yticklabels !== nothing || !isempty(ytickformat)
+		_apply_ticks!(
+			fig,
+			:yaxis;
+			values = yticks,
+			labels = yticklabels,
+			format = ytickformat,
+			who = who,
+		)
+	end
+	return nothing
+end
+
+# Common Cartesian options of the 2-D field functions, applied through the
+# figure-option primitives (primary axes only). Constructors (`constructor =
+# true`) keep the template grid for `grid = true` and apply the default
+# template; mutators apply any explicit `grid` and only refresh the legend so
+# a user template survives. Call `_validate_cartesian_options` first.
+function _field2d_apply_options!(
+	fig,
+	who::AbstractString;
+	constructor::Bool,
+	title::AbstractString,
+	xlabel::AbstractString,
+	ylabel::AbstractString,
+	xscale::AbstractString,
+	yscale::AbstractString,
+	xrange,
+	yrange,
+	xticks,
+	xticklabels,
+	xtickformat::AbstractString,
+	yticks,
+	yticklabels,
+	ytickformat::AbstractString,
+	origin::AbstractString,
+	equalar::Bool,
+	width,
+	height,
+	fontsize,
+	grid,
+)
+	_apply_figure_title!(fig, title)
+	_apply_axis_title!(fig, :x, xlabel)
+	_apply_axis_title!(fig, :y, ylabel)
+	# Scale before range and ticks: a log axis stores exponents.
+	_apply_axis_scale!(fig, :x, xscale, who)
+	_apply_axis_scale!(fig, :y, yscale, who)
+	_apply_axis_range!(fig, :x, xrange, who)
+	_apply_axis_range!(fig, :y, yrange, who)
+	_field2d_apply_ticks!(
+		fig,
+		who;
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+	)
+	_field2d_apply_origin!(fig, origin)
+	equalar && _apply_equal_aspect!(fig, _cell_target(fig; who = who); who = who)
+	_apply_figure_size!(fig, who; width = width, height = height)
+	(constructor && grid === true) || _apply_axis_grid!(fig, grid, who)
+	constructor ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	_apply_figure_fontsize!(fig, who, fontsize)
+	return nothing
+end
+
+# A fresh Cartesian figure for a 2-D field constructor.
+_field2d_new_figure() = Plot(GenericTrace[], _default_cartesian_layout())
+
+_field2d_show(fig, show::Bool, width, height, title::AbstractString) =
+	show ? to_syncplot(
+		fig;
+		width = width > 0 ? width : 960,
+		height = height > 0 ? height : 720,
+		title = isempty(title) ? "PlotlySupply" : title,
+	) : fig
+
+# Mutators do not open windows: a `show` keyword (or any other unknown
+# keyword) is an ArgumentError naming the function.
+function _field2d_reject_keywords(who::AbstractString, extra)
+	isempty(extra) && return nothing
+	names = collect(keys(extra))
+	:show in names && throw(ArgumentError(
+		"$(who): mutators do not take `show`; the traces are added to the " *
+		"figure you pass (display it, or call `to_syncplot(fig)` for a window).",
+	))
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) " *
+		"$(join(("`$(name)`" for name in names), ", ")).",
+	))
+end
+
+# ── Heatmap ──────────────────────────────────────────────────────────
+
+# Per-cell text of a heatmap (spec F27). `text` uses the `U[ix, iy]` layout of
+# the data; plain text (`_label_plain`: plotly never typesets cell text).
+function _heatmap_text_fields(
+	text,
+	texttemplate::AbstractString,
+	textsize,
+	data_size::Tuple{Int, Int},
+	who::AbstractString,
+)
+	fields = Dict{Symbol, Any}()
+	_field2d_nonnegative(textsize, who, "textsize")
+	if text !== nothing
+		(text isa AbstractArray && ndims(text) == 2) || throw(ArgumentError(
+			"$(who): `text` must be a matrix of cell labels indexed " *
+			"text[ix, iy] like U; got $(typeof(text)).",
+		))
+		size(text) == data_size || throw(ArgumentError(
+			"$(who): `text` must have the size of U, $(data_size) (indexed " *
+			"text[ix, iy]); got $(size(text)).",
+		))
+		fields[:text] = map(
+			label -> _label_plain(label isa AbstractString ? label : string(label)),
+			text,
+		)
+		isempty(texttemplate) && (fields[:texttemplate] = "%{text}")
+	end
+	isempty(texttemplate) || (fields[:texttemplate] = String(texttemplate))
+	textsize > 0 && (fields[:textfont] = attr(size = textsize))
+	return fields
+end
+
+function _heatmap_add!(
+	fig,
+	who::AbstractString,
+	x,
+	y,
+	U;
+	constructor::Bool,
+	xlabel::AbstractString,
+	ylabel::AbstractString,
+	title::AbstractString,
+	xrange,
+	yrange,
+	zrange,
+	crange,
+	cmid,
+	colornorm,
+	levels,
+	colorscale,
+	showscale::Union{Nothing, Bool},
+	colorbar_title::AbstractString,
+	colorbar_ticks,
+	colorbar_ticklabels,
+	coloraxis,
+	text,
+	texttemplate::AbstractString,
+	textsize,
+	origin,
+	xgap,
+	ygap,
+	xticks,
+	xticklabels,
+	xtickformat::AbstractString,
+	yticks,
+	yticklabels,
+	ytickformat::AbstractString,
+	width,
+	height,
+	fontsize,
+	grid,
+	equalar::Bool,
+	xscale::AbstractString,
+	yscale::AbstractString,
+)
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	origin_value = _field2d_origin(origin, who; allow_unset = !constructor)
+	_field2d_nonnegative(xgap, who, "xgap")
+	_field2d_nonnegative(ygap, who, "ygap")
+	Z = _field2d_matrix(U, who)
+	_field2d_check_coordinates(
+		x,
+		who,
+		"x";
+		log_axis = _field2d_log_axis(fig, :x, xscale),
+	)
+	_field2d_check_coordinates(
+		y,
+		who,
+		"y";
+		log_axis = _field2d_log_axis(fig, :y, yscale),
+	)
+	_field2d_check_shape(x, y, Z, who; allow_edges = true)
+	color = _field2d_color(
+		Z,
+		who;
+		zrange = zrange,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		colorscale = colorscale,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
+	)
+	fields = Dict{Symbol, Any}(
+		:x => x,
+		:y => y,
+		:z => transpose(color.values),
+	)
+	_field2d_color_trace_fields!(fields, color)
+	merge!(
+		fields,
+		_heatmap_text_fields(text, texttemplate, textsize, size(Z), who),
+	)
+	xgap > 0 && (fields[:xgap] = xgap)
+	ygap > 0 && (fields[:ygap] = ygap)
+
+	push!(_plot_data(fig), heatmap(; fields...))
+	_field2d_apply_coloraxis!(fig, color)
+	_field2d_apply_options!(
+		fig,
+		who;
+		constructor = constructor,
 		title = title,
-		xaxis = attr(
-			title = xlabel,
-			constrain = "domain",
-			automargin = true,
-			zeroline = false,
-			showline = true,
-			mirror = true,
-			ticks = "outside",
-		),
-		yaxis = attr(
-			title = ylabel,
-			constrain = "domain",
-			zeroline = false,
-			automargin = true,
-			showline = true,
-			mirror = true,
-			ticks = "outside",
-		),
-		# margin = attr(r = 0, b = 0, t = 0, l = 0),
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xscale = xscale,
+		yscale = yscale,
+		xrange = xrange,
+		yrange = yrange,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		origin = origin_value,
+		equalar = equalar,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
 	)
-	fig = Plot(trace, layout)
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if equalar
-		update_xaxes!(fig,
-		scaleanchor = "y",
-		scaleratio = 1,
-	)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	
-	_apply_default_template!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	return nothing
 end
 
 """
-	function plot_heatmap(
-		U::AbstractArray;
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		zrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		colorscale::String = "",
-		title::String = "",
-		fontsize::Int = 0,
-		equalar::Bool = false,
-		xscale::String = "",
-		yscale::String = "",
-	)
+	plot_heatmap(x, y, U; kwargs...)
+	plot_heatmap(U; kwargs...)
 
-Plots heatmap (holographic) data (axes not specified).
+Draw the matrix `U` as a heatmap. `U[ix, iy]` is the value at
+`(x[ix], y[iy])`, so `size(U) == (length(x), length(y))`; `x`/`y` may instead
+list the `n + 1` cell edges. This is the layout of `f.(X, Y)` for
+`Y, X = meshgrid(y, x)`. A wrongly shaped `U` throws an `ArgumentError` (a
+matrix indexed `U[iy, ix]` is reported as transposed: pass `permutedims(U)`).
+Without `x`/`y` the cells sit at the 0-based indices `0:size(U, 1)-1` and
+`0:size(U, 2)-1` (1-based on an axis made logarithmic with `xscale`/`yscale`).
 
-#### Arguments
-
-- `U`: 2D hologram data
+`x`/`y` are vectors of finite reals (positive on a log axis), strings
+(categories) or dates. `U` holds real numbers; NaN and `missing` leave gaps,
+Bool matrices are drawn as 0/1, complex matrices throw (plot `abs.(U)`,
+`real.(U)`, `angle.(U)`, ...). `U` is not copied.
 
 #### Keywords
 
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `zrange`: Range for the z-axis (default: `[0, 0]`)
-- `colorscale`: Color scale for the heatmap (default: `""`)
-- `title`: Title of the figure (default: `""`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `equalar`: Whether to set equal aspect ratio (default: `false`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
+Colour (spec C21):
+- `colorscale = ""`: a colormap name (`"viridis"`, `"RdBu_r"`, any `COLORMAPS`,
+  plotly.js or ColorSchemes.jl name, `_r` reverses), a vector of colours or of
+  `(t, colour)` stops, or a `ColorScheme`; `""` uses the template's. Unknown
+  names throw with suggestions.
+- `crange = [0, 0]`: colour limits `(lower, upper)`; `[0, 0]`/`nothing` is
+  automatic. `zrange` is an alias (passing both throws).
+- `cmid::Union{Nothing,Real} = nothing`: colour midpoint. With an automatic
+  `crange` it is plotly's `zmid`; inside an explicit `crange` the colorscale
+  is remapped so its centre sits at `cmid` (two-slope norm).
+- `colornorm = :linear`: `:log` colours `log10(U)` (non-positive values are
+  gaps, or `crange[1]` with an explicit positive `crange`); the colorbar shows
+  decades `10ᵏ` and the hover shows the raw values.
+- `levels = nothing`: `k + 1` increasing boundaries give `k` discrete colour
+  bands (BoundaryNorm); excludes `crange`/`cmid`.
+- `showscale::Union{Nothing,Bool} = nothing`: show/hide the colorbar
+  (`nothing` = plotly default, shown).
+- `colorbar_title = ""`, `colorbar_ticks = nothing` (tick values in data
+  units), `colorbar_ticklabels = nothing` (same length as `colorbar_ticks`).
+- `coloraxis = nothing`: `:shared` (or `"coloraxis2"`, ...) binds the trace to
+  a shared `layout.coloraxis`, which then receives the colour settings.
 
+Cells and text (spec F27):
+- `text = nothing`: matrix of per-cell labels, same size and `[ix, iy]`
+  indexing as `U` (plain text; `<br>` breaks lines). Implies
+  `texttemplate = "%{text}"` unless one is given.
+- `texttemplate = ""`: e.g. `"%{z:.2f}"` (with `colornorm = :log`, `z` is
+  `log10` of the value).
+- `textsize::Real = 0`: cell-text font size (0 = automatic).
+- `origin = :lower`: `:upper` reverses the y axis so `y[1]` is at the top.
+- `xgap::Real = 0`, `ygap::Real = 0`: gaps between cells in pixels.
+
+Axes and figure:
+- `xlabel = ""`, `ylabel = ""`, `title = ""`: text (LaTeX in `\$...\$` allowed).
+- `xrange = [0, 0]`, `yrange = [0, 0]`: axis ranges in data units (also on log
+  axes); `[0, 0]`/`nothing` is automatic.
+- `xscale = ""`, `yscale = ""`: axis type, e.g. `"log"`.
+- `xticks = nothing`, `xticklabels = nothing`, `xtickformat = ""` (and the
+  `y` versions): explicit tick values, their labels, and a d3 tick format.
+- `grid::Union{Nothing,Bool,Symbol} = true`: `true` keeps the template grid,
+  `false`/`:none` hides it, `:x`/`:y`/`:both` choose the axes.
+- `equalar::Bool = false`: equal data aspect (one x unit = one y unit).
+- `width = 0`, `height = 0` (pixels, 0 = automatic), `fontsize = 0`.
+- `show::Bool = false`: open the figure in a window and return a `SyncPlot`.
+
+Returns a `Plot` (a `SyncPlot` when `show = true`). Invalid input throws an
+`ArgumentError`.
+
+# Example
+```julia
+x = range(0, 2; length = 40)
+y = range(-1, 1; length = 30)
+U = [sin(pi * xi) * yi for xi in x, yi in y]     # U[ix, iy]
+fig = plot_heatmap(x, y, U; colorscale = "RdBu_r", cmid = 0,
+	xlabel = "x", ylabel = "y", colorbar_title = "u")
+```
 """
 function plot_heatmap(
+	x::AbstractArray,
+	y::AbstractArray,
 	U::AbstractArray;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "",
-	title::String = "",
-	fontsize::Int = 0,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	zrange = [0, 0],
+	crange = [0, 0],
+	cmid::Union{Nothing, Real} = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	levels = nothing,
+	colorscale = "",
+	showscale::Union{Nothing, Bool} = nothing,
+	colorbar_title::AbstractString = "",
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
+	text = nothing,
+	texttemplate::AbstractString = "",
+	textsize::Real = 0,
+	origin::Union{Symbol, AbstractString} = :lower,
+	xgap::Real = 0,
+	ygap::Real = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
 	equalar::Bool = false,
-	xscale::String = "",
-	yscale::String = "",
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
 	show::Bool = false,
 )
-	x = 0:(size(U, 1) - 1)
-	y = 0:(size(U, 2) - 1)
-	return plot_heatmap(x, y, U;
+	fig = _field2d_new_figure()
+	_heatmap_add!(
+		fig,
+		"plot_heatmap",
+		x,
+		y,
+		U;
+		constructor = true,
 		xlabel = xlabel,
 		ylabel = ylabel,
+		title = title,
 		xrange = xrange,
 		yrange = yrange,
 		zrange = zrange,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
 		colorscale = colorscale,
-		title = title,
-		fontsize = fontsize,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
+		text = text,
+		texttemplate = texttemplate,
+		textsize = textsize,
+		origin = origin,
+		xgap = xgap,
+		ygap = ygap,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
 		width = width,
 		height = height,
+		fontsize = fontsize,
+		grid = grid,
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
-		show = show,
+	)
+	return _field2d_show(fig, show, width, height, title)
+end
+
+function plot_heatmap(
+	U::AbstractArray;
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	kwargs...,
+)
+	x = _field2d_implicit_axis(size(U, 1), xscale == "log")
+	y = _field2d_implicit_axis(size(U, 2), yscale == "log")
+	return plot_heatmap(x, y, U; xscale = xscale, yscale = yscale, kwargs...)
+end
+
+# ── Contour ──────────────────────────────────────────────────────────
+
+const _CONTOUR_COLORINGS = ("fill", "lines", "heatmap", "none")
+
+function _contour_uniform_levels(values::Vector{Float64})
+	step = values[2] - values[1]
+	return all(
+		i -> isapprox(values[i + 1] - values[i], step; rtol = 1e-6),
+		1:(length(values) - 1),
 	)
 end
 
-
-"""
-	function plot_contour(
-		x::Union{AbstractVector, SubArray},
-		y::Union{AbstractVector, SubArray},
-		U::AbstractArray;
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		zrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		colorscale::String = "",
-		title::String = "",
-		fontsize::Int = 0,
-		equalar::Bool = false,
-		xscale::String = "",
-		yscale::String = "",
-	)
-
-Plots contour data.
-
-#### Arguments
-
-- `x`: x-axis coordinate data
-- `y`: y-axis coordinate data
-- `U`: 2D data for contours
-
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `zrange`: Range for the z-axis (default: `[0, 0]`)
-- `colorscale`: Color scale for the contour plot (default: `""`)
-- `title`: Title of the figure (default: `""`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `equalar`: Whether to set equal aspect ratio (default: `false`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-
-"""
-function plot_contour(
-	x::Union{AbstractVector, SubArray},
-	y::Union{AbstractVector, SubArray},
-	U::AbstractArray;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "",
-	title::String = "",
-	fontsize::Int = 0,
-	equalar::Bool = false,
-	xscale::String = "",
-	yscale::String = "",
-	show::Bool = false,
+# Contour-level specification of plot_contour(!) (spec F26). `kind` is
+# `:auto` (plotly chooses), `:count` (`ncontours`), `:uniform`
+# (start/end/size), `:per_level` (one trace per level: a single level, or
+# non-uniform line contours) or `:bands` (non-uniform filled contours: one
+# constraint trace per band). `values` are in plotted units (log10 under
+# colornorm = :log), `boundaries` in data units.
+function _contour_specs(
+	levels,
+	who::AbstractString;
+	ncontours = 0,
+	coloring = "",
+	linecolor_set::Bool = false,
+	log_levels::Bool = false,
 )
-	FV = transpose(U) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
-	trace = contour(x = x, y = y, z = FV)
-	colorscale != "" && (trace.colorscale = colorscale)
-	if !all(zrange .== [0, 0])
-		trace.zmin = zrange[1]
-		trace.zmax = zrange[2]
+	(ncontours isa Integer && !(ncontours isa Bool) && ncontours >= 0) ||
+		throw(ArgumentError(
+			"$(who): `ncontours` must be an integer ≥ 0 (0 = automatic); got " *
+			"$(repr(ncontours)).",
+		))
+	(coloring isa Symbol || coloring isa AbstractString) || throw(ArgumentError(
+		"$(who): `coloring` must be a string or symbol; got $(repr(coloring)).",
+	))
+	mode = lowercase(strip(String(coloring)))
+	(isempty(mode) || mode in _CONTOUR_COLORINGS) || throw(ArgumentError(
+		"$(who): `coloring` must be \"fill\", \"lines\", \"heatmap\", \"none\" " *
+		"or \"\" (plotly default, filled); got $(repr(coloring)).",
+	))
+	if linecolor_set
+		mode == "lines" && throw(ArgumentError(
+			"$(who): `linecolor` conflicts with coloring = \"lines\" (lines " *
+			"coloured by the colorscale); use coloring = \"none\" or \"fill\".",
+		))
+		isempty(mode) && (mode = "none")
 	end
-	layout = Layout(
+	kind = :auto
+	count = 0
+	values = Float64[]
+	boundaries = Float64[]
+	if levels === nothing
+		ncontours > 0 && (kind = :count; count = Int(ncontours))
+	elseif levels isa Integer && !(levels isa Bool)
+		ncontours > 0 && throw(ArgumentError(
+			"$(who): pass either `levels` or `ncontours`, not both.",
+		))
+		levels >= 1 || throw(ArgumentError(
+			"$(who): an integer `levels` is the number of contour levels and " *
+			"must be ≥ 1; got $(levels).",
+		))
+		kind = :count
+		count = Int(levels)
+	else
+		ncontours > 0 && throw(ArgumentError(
+			"$(who): pass either `levels` or `ncontours`, not both.",
+		))
+		(levels isa AbstractVector || levels isa Tuple) || throw(ArgumentError(
+			"$(who): `levels` must be an integer (number of levels) or a " *
+			"vector of level values; got $(repr(levels)).",
+		))
+		boundaries = _checked_real_vector(levels, who, "levels")
+		isempty(boundaries) && throw(ArgumentError(
+			"$(who): `levels` must contain at least one level.",
+		))
+		all(i -> boundaries[i] < boundaries[i + 1], 1:(length(boundaries) - 1)) ||
+			throw(ArgumentError(
+				"$(who): `levels` must be strictly increasing; got $(repr(levels)).",
+			))
+		if log_levels
+			all(>(0), boundaries) || throw(ArgumentError(
+				"$(who): `levels` must be positive for colornorm = :log; got " *
+				"$(repr(levels)).",
+			))
+			values = log10.(boundaries)
+		else
+			values = copy(boundaries)
+		end
+		if length(values) >= 2 && _contour_uniform_levels(values)
+			kind = :uniform
+		elseif length(values) >= 2
+			isempty(mode) && (mode = "fill")
+			mode == "heatmap" && throw(ArgumentError(
+				"$(who): coloring = \"heatmap\" needs uniformly spaced `levels`; " *
+				"got $(repr(levels)).",
+			))
+			kind = mode == "fill" ? :bands : :per_level
+		else
+			isempty(mode) && (mode = "lines")
+			mode in ("fill", "heatmap") && throw(ArgumentError(
+				"$(who): coloring = \"$(mode)\" needs at least two `levels` (a " *
+				"filled band lies between two levels); got $(repr(levels)).",
+			))
+			kind = :per_level
+		end
+	end
+	return (
+		kind = kind,
+		count = count,
+		values = values,
+		boundaries = boundaries,
+		coloring = mode,
+	)
+end
+
+const _CONTOUR_DASHES =
+	("solid", "dot", "dash", "longdash", "dashdot", "longdashdot")
+const _CONTOUR_DASH_LIST =
+	r"^\s*\d+(\.\d+)?(px|%)?(\s*,\s*\d+(\.\d+)?(px|%)?)*\s*$"
+
+function _field2d_dash(dash, who::AbstractString)
+	(dash isa Symbol || dash isa AbstractString) || throw(ArgumentError(
+		"$(who): `dash` must be a string or symbol; got $(repr(dash)).",
+	))
+	value = strip(String(dash))
+	(isempty(value) || value in _CONTOUR_DASHES ||
+		occursin(_CONTOUR_DASH_LIST, value)) || throw(ArgumentError(
+		"$(who): `dash` must be one of $(join(repr.(_CONTOUR_DASHES), ", ")), a " *
+		"dash-length list such as \"5px,3px\", or \"\"; got $(repr(dash)).",
+	))
+	return String(value)
+end
+
+function _contour_add!(
+	fig,
+	who::AbstractString,
+	x,
+	y,
+	U;
+	constructor::Bool,
+	levels,
+	ncontours,
+	coloring,
+	linecolor,
+	linewidth,
+	dash,
+	showlabels::Bool,
+	labelformat::AbstractString,
+	xlabel::AbstractString,
+	ylabel::AbstractString,
+	title::AbstractString,
+	xrange,
+	yrange,
+	zrange,
+	crange,
+	cmid,
+	colornorm,
+	colorscale,
+	showscale::Union{Nothing, Bool},
+	colorbar_title::AbstractString,
+	colorbar_ticks,
+	colorbar_ticklabels,
+	coloraxis,
+	xticks,
+	xticklabels,
+	xtickformat::AbstractString,
+	yticks,
+	yticklabels,
+	ytickformat::AbstractString,
+	width,
+	height,
+	fontsize,
+	grid,
+	equalar::Bool,
+	xscale::AbstractString,
+	yscale::AbstractString,
+)
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	line_color = _field2d_color_string(linecolor, who, "linecolor")
+	_field2d_nonnegative(linewidth, who, "linewidth")
+	dash_value = _field2d_dash(dash, who)
+	log_norm = _normalize_colornorm(colornorm, who) === :log
+	spec = _contour_specs(
+		levels,
+		who;
+		ncontours = ncontours,
+		coloring = coloring,
+		linecolor_set = !isempty(line_color),
+		log_levels = log_norm,
+	)
+	single_colour = spec.coloring == "none"
+	single_colour && showscale === true && throw(ArgumentError(
+		"$(who): `showscale = true` needs colour-mapped contours; coloring = " *
+		"\"none\" (or a `linecolor`) draws single-colour lines.",
+	))
+	Z = _field2d_matrix(U, who)
+	_field2d_check_coordinates(
+		x,
+		who,
+		"x";
+		log_axis = _field2d_log_axis(fig, :x, xscale),
+	)
+	_field2d_check_coordinates(
+		y,
+		who,
+		"y";
+		log_axis = _field2d_log_axis(fig, :y, yscale),
+	)
+	_field2d_check_shape(x, y, Z, who; allow_edges = false)
+	bands = spec.kind === :bands
+	color = _field2d_color(
+		Z,
+		who;
+		zrange = zrange,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = nothing,
+		colorscale = colorscale,
+		showscale = single_colour ? false : showscale,
+		colorbar_title = bands ? "" : colorbar_title,
+		colorbar_ticks = bands ? nothing : colorbar_ticks,
+		colorbar_ticklabels = bands ? nothing : colorbar_ticklabels,
+		coloraxis = bands ? nothing : coloraxis,
+	)
+	band_norm = nothing
+	if bands
+		# Filled bands between non-uniform levels: the band colours and the
+		# stepped colorbar come from the BoundaryNorm of the levels.
+		band_norm = _apply_color_norm(
+			nothing;
+			crange = _checked_range(zrange, who, "zrange") === nothing ? crange : zrange,
+			cmid = cmid,
+			colornorm = colornorm,
+			levels = spec.boundaries,
+			stops = colorscale,
+			ticks = colorbar_ticks,
+			ticklabels = colorbar_ticklabels === nothing ? nothing :
+				_field2d_labels(colorbar_ticklabels, who, "colorbar_ticklabels"),
+			who = who,
+		)
+	end
+
+	base = Dict{Symbol, Any}(:x => x, :y => y, :z => transpose(color.values))
+	_field2d_color_trace_fields!(base, color)
+	line = Dict{Symbol, Any}()
+	isempty(line_color) || (line[:color] = line_color)
+	linewidth > 0 && (line[:width] = linewidth)
+	isempty(dash_value) || (line[:dash] = dash_value)
+	contours = Dict{Symbol, Any}()
+	(isempty(spec.coloring) || bands) || (contours[:coloring] = spec.coloring)
+	showlabels && (contours[:showlabels] = true)
+	isempty(labelformat) || (contours[:labelformat] = String(labelformat))
+	single_colour && (base[:showlegend] = false)
+
+	traces = GenericTrace[]
+	if spec.kind === :count
+		base[:ncontours] = spec.count
+	elseif spec.kind === :uniform
+		base[:autocontour] = false
+		contours[:start] = spec.values[1]
+		contours[:end] = spec.values[end]
+		contours[:size] = spec.values[2] - spec.values[1]
+	end
+	if spec.kind in (:auto, :count, :uniform)
+		isempty(line) || (base[:line] = attr(; line...))
+		isempty(contours) || (base[:contours] = attr(; contours...))
+		push!(traces, contour(; base...))
+	elseif spec.kind === :per_level
+		for (index, level) in enumerate(spec.values)
+			fields = copy(base)
+			fields[:autocontour] = false
+			level_contours = copy(contours)
+			level_contours[:start] = level
+			level_contours[:end] = level
+			# plotly needs a positive size; start == end gives one level.
+			level_contours[:size] = 1
+			fields[:contours] = attr(; level_contours...)
+			isempty(line) || (fields[:line] = attr(; line...))
+			if index > 1
+				# One colorbar and one hover label for the whole level set.
+				color.coloraxis === nothing && (fields[:showscale] = false)
+				fields[:hoverinfo] = "skip"
+			end
+			push!(traces, contour(; fields...))
+		end
+	else
+		k = length(spec.values) - 1
+		for band in 1:k
+			fill_colour = band_norm.stops[2 * band - 1][2]
+			# plotly shades the region a constraint EXCLUDES, so "][" (keep
+			# values outside the band) fills the band itself.
+			band_contours = Dict{Symbol, Any}(
+				:type => "constraint",
+				:operation => "][",
+				:value => Any[spec.values[band], spec.values[band + 1]],
+			)
+			showlabels && (band_contours[:showlabels] = true)
+			isempty(labelformat) ||
+				(band_contours[:labelformat] = String(labelformat))
+			band_line = Dict{Symbol, Any}(
+				:color => isempty(line_color) ? fill_colour : line_color,
+				# No outline between bands unless a line width is requested.
+				:width => linewidth > 0 ? linewidth : 0,
+			)
+			isempty(dash_value) || (band_line[:dash] = dash_value)
+			fields = Dict{Symbol, Any}(
+				:x => x,
+				:y => y,
+				:z => base[:z],
+				:autocontour => false,
+				:contours => attr(; band_contours...),
+				:fillcolor => fill_colour,
+				:line => attr(; band_line...),
+				:showscale => false,
+				:showlegend => false,
+			)
+			if band == 1
+				color.customdata === nothing ||
+					(fields[:customdata] = color.customdata)
+				color.customdata === nothing ||
+					(fields[:hovertemplate] = _FIELD2D_LOG_HOVERTEMPLATE)
+			else
+				fields[:hoverinfo] = "skip"
+			end
+			push!(traces, contour(; fields...))
+		end
+		colorbar = _colorbar_attr(;
+			title = isempty(colorbar_title) ? "" : _label(colorbar_title),
+			ticks = band_norm.tickvals,
+			ticklabels = band_norm.ticktext,
+			who = who,
+		)
+		if coloraxis === nothing
+			push!(
+				traces,
+				_colorbar_carrier_trace(;
+					stops = band_norm.stops,
+					cmin = band_norm.cmin,
+					cmax = band_norm.cmax,
+					showscale = showscale !== false,
+					colorbar = colorbar,
+					who = who,
+				),
+			)
+		else
+			axis_id = _normalize_coloraxis(coloraxis, who)
+			push!(
+				traces,
+				_colorbar_carrier_trace(;
+					cmin = band_norm.cmin,
+					cmax = band_norm.cmax,
+					coloraxis = axis_id,
+					who = who,
+				),
+			)
+			axis_fields = Dict{Symbol, Any}(
+				:colorscale => band_norm.stops,
+				:cmin => band_norm.cmin,
+				:cmax => band_norm.cmax,
+			)
+			showscale === nothing || (axis_fields[:showscale] = showscale)
+			colorbar === nothing || (axis_fields[:colorbar] = colorbar)
+			_cmn_merge_layout_key!(
+				fig,
+				Symbol(axis_id),
+				axis_fields;
+				nested = (:colorbar,),
+			)
+		end
+	end
+
+	append!(_plot_data(fig), traces)
+	_field2d_apply_coloraxis!(fig, color)
+	_field2d_apply_options!(
+		fig,
+		who;
+		constructor = constructor,
 		title = title,
-		xaxis = attr(
-			title = xlabel,
-			constrain = "domain",
-			automargin = true,
-			zeroline = false,
-			showline = true,
-			mirror = true,
-			ticks = "outside",
-		),
-		yaxis = attr(
-			title = ylabel,
-			constrain = "domain",
-			zeroline = false,
-			automargin = true,
-			showline = true,
-			mirror = true,
-			ticks = "outside",
-		),
-		# margin = attr(r = 0, b = 0, t = 0, l = 0),
-	)
-	fig = Plot(trace, layout)
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if equalar
-		update_xaxes!(fig,
-		scaleanchor = "y",
-		scaleratio = 1,
-	)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	
-	_apply_default_template!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
-end
-
-"""
-	function plot_contour(
-		U::AbstractArray;
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		zrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		colorscale::String = "",
-		title::String = "",
-		fontsize::Int = 0,
-		equalar::Bool = false,
-		xscale::String = "",
-		yscale::String = "",
-	)
-
-Plots contour data (axes not specified).
-
-#### Arguments
-
-- `U`: 2D data for contours
-
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `zrange`: Range for the z-axis (default: `[0, 0]`)
-- `colorscale`: Color scale for the contour plot (default: `""`)
-- `title`: Title of the figure (default: `""`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `equalar`: Whether to set equal aspect ratio (default: `false`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-
-"""
-function plot_contour(
-	U::AbstractArray;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "",
-	title::String = "",
-	fontsize::Int = 0,
-	equalar::Bool = false,
-	xscale::String = "",
-	yscale::String = "",
-	show::Bool = false,
-)
-	x = 0:(size(U, 1) - 1)
-	y = 0:(size(U, 2) - 1)
-	return plot_contour(x, y, U;
 		xlabel = xlabel,
 		ylabel = ylabel,
+		xscale = xscale,
+		yscale = yscale,
+		xrange = xrange,
+		yrange = yrange,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		origin = "",
+		equalar = equalar,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	return nothing
+end
+
+"""
+	plot_contour(x, y, U; kwargs...)
+	plot_contour(U; kwargs...)
+
+Draw contours of the matrix `U`. `U[ix, iy]` is the value at `(x[ix], y[iy])`,
+so `size(U) == (length(x), length(y))` (exactly; the layout of `f.(X, Y)` for
+`Y, X = meshgrid(y, x)`). A wrongly shaped `U` throws an `ArgumentError` that
+suggests `permutedims(U)` when the matrix is transposed. Without `x`/`y` the
+grid is `0:size(U, 1)-1` by `0:size(U, 2)-1` (1-based on a log axis). `x`/`y`
+and `U` follow the rules of [`plot_heatmap`](@ref) (finite coordinates; real
+values with NaN/`missing` gaps; Bool drawn as 0/1; complex throws).
+
+#### Keywords
+
+Levels and lines (spec F26):
+- `levels = nothing`: an `Integer` is the number of levels (plotly picks
+  them); a uniformly spaced vector gives exactly those levels
+  (`contours.start/end/size`); a single level or non-uniform levels draw one
+  line trace per level; non-uniform levels with filled colouring draw one
+  filled band per interval (values outside `[levels[1], levels[end]]` stay
+  empty) and a stepped colorbar. Levels are data values, also with
+  `colornorm = :log`.
+- `ncontours::Integer = 0`: number of automatic levels (not with `levels`).
+- `coloring = ""`: `"fill"` (plotly default), `"lines"` (lines coloured by the
+  colorscale), `"heatmap"`, or `"none"` (single-colour lines without colorbar
+  or legend entry). A single level defaults to `"lines"`.
+- `linecolor = ""`: one colour for every contour line (string, Symbol or
+  Colorant); implies `coloring = "none"` unless `"fill"`/`"heatmap"` is given
+  and conflicts with `"lines"`.
+- `linewidth::Real = 0` (0 = plotly default), `dash = ""` (`"dash"`, `"dot"`,
+  `"dashdot"`, ... or `"5px,3px"`).
+- `showlabels::Bool = false`, `labelformat = ""` (d3 format, e.g. `".2f"`).
+
+Colour: `colorscale`, `crange` (alias `zrange`), `cmid`, `colornorm`,
+`showscale`, `colorbar_title`, `colorbar_ticks`, `colorbar_ticklabels`,
+`coloraxis` as for [`plot_heatmap`](@ref) (`showscale = true` with
+single-colour lines throws).
+
+Axes and figure: `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`,
+`yscale`, `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
+`ytickformat`, `grid = true`, `equalar = false`, `width`, `height`,
+`fontsize`, `show = false`, as for [`plot_heatmap`](@ref).
+
+Returns a `Plot` (a `SyncPlot` when `show = true`). Invalid input throws an
+`ArgumentError`.
+
+# Example
+```julia
+x = range(-2, 2; length = 60)
+y = range(-1, 1; length = 40)
+U = [exp(-xi^2 - 4yi^2) for xi in x, yi in y]    # U[ix, iy]
+fig = plot_heatmap(x, y, U)
+plot_contour!(fig, x, y, U; levels = [0.5], linecolor = "white",
+	showlabels = true)                         # overlay one labelled level
+```
+"""
+function plot_contour(
+	x::AbstractArray,
+	y::AbstractArray,
+	U::AbstractArray;
+	levels = nothing,
+	ncontours::Integer = 0,
+	coloring::Union{Symbol, AbstractString} = "",
+	linecolor = "",
+	linewidth::Real = 0,
+	dash::Union{Symbol, AbstractString} = "",
+	showlabels::Bool = false,
+	labelformat::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	zrange = [0, 0],
+	crange = [0, 0],
+	cmid::Union{Nothing, Real} = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	colorscale = "",
+	showscale::Union{Nothing, Bool} = nothing,
+	colorbar_title::AbstractString = "",
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	equalar::Bool = false,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	show::Bool = false,
+)
+	fig = _field2d_new_figure()
+	_contour_add!(
+		fig,
+		"plot_contour",
+		x,
+		y,
+		U;
+		constructor = true,
+		levels = levels,
+		ncontours = ncontours,
+		coloring = coloring,
+		linecolor = linecolor,
+		linewidth = linewidth,
+		dash = dash,
+		showlabels = showlabels,
+		labelformat = labelformat,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		title = title,
 		xrange = xrange,
 		yrange = yrange,
 		zrange = zrange,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
 		colorscale = colorscale,
-		title = title,
-		fontsize = fontsize,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
 		width = width,
 		height = height,
+		fontsize = fontsize,
+		grid = grid,
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
-		show = show,
 	)
+	return _field2d_show(fig, show, width, height, title)
 end
 
+function plot_contour(
+	U::AbstractArray;
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	kwargs...,
+)
+	x = _field2d_implicit_axis(size(U, 1), xscale == "log")
+	y = _field2d_implicit_axis(size(U, 2), yscale == "log")
+	return plot_contour(x, y, U; xscale = xscale, yscale = yscale, kwargs...)
+end
 
-# Preserve the existing maximum shaft length while matching Plotly's reference
-# quiver proportions for the arrowhead.
+# ── Quiver ───────────────────────────────────────────────────────────
+
+# Arrow geometry: the longest arrow is `sizeref * _QUIVER_SHAFT_SCALE` axis
+# units long and every arrowhead arm is `_QUIVER_HEAD_SCALE` of its shaft at
+# `_QUIVER_HEAD_ANGLE` from it (plotly.py's create_quiver proportions).
 const _QUIVER_SHAFT_SCALE = 2 / 3
 const _QUIVER_HEAD_SCALE = 0.3
 const _QUIVER_HEAD_ANGLE = pi / 9
 
+# Arrow polyline of every finite, non-zero vector: origin, tip, gap, head
+# arm, tip, head arm, gap (`_GAP`, serialised as JSON null). On a logarithmic
+# axis the arrow is laid out in axis units (decades) and mapped back, so the
+# arrow direction on screen is atan(v, u) with equal aspect (matplotlib's
+# default `angles = "uv"`); origins there must be positive.
 function _quiver_coordinates(
 	x,
 	y,
@@ -6341,19 +7567,21 @@ function _quiver_coordinates(
 	v,
 	sizeref::Real;
 	caller::AbstractString,
+	xlog::Bool = false,
+	ylog::Bool = false,
 )
 	n = length(x)
 	n == length(y) == length(u) == length(v) || throw(ArgumentError(
 		"$caller: x, y, u, v must all have the same length; got " *
 		"$(length(x)), $(length(y)), $(length(u)), $(length(v))",
 	))
-	isfinite(sizeref) && sizeref >= 0 || throw(ArgumentError(
-		"$caller: sizeref must be finite and non-negative; got $sizeref",
-	))
+	(sizeref isa Real && !(sizeref isa Bool) && isfinite(sizeref) && sizeref >= 0) ||
+		throw(ArgumentError(
+			"$caller: sizeref must be finite and non-negative; got $sizeref",
+		))
 
-	TX = promote_type(Float64, eltype(x), eltype(u), eltype(v), typeof(sizeref))
-	TY = promote_type(Float64, eltype(y), eltype(u), eltype(v), typeof(sizeref))
-	empty_x, empty_y = Vector{TX}(), Vector{TY}()
+	empty_x = Union{Nothing, Float64}[]
+	empty_y = Union{Nothing, Float64}[]
 	n == 0 && return empty_x, empty_y
 
 	# Represent each magnitude as component * shape, where component is the
@@ -6364,19 +7592,28 @@ function _quiver_coordinates(
 	drawable = 0
 	skipped = 0
 
-	@inbounds for i in eachindex(x, y, u, v)
-		xi, yi, ui, vi = x[i], y[i], u[i], v[i]
-		xi isa Real && yi isa Real && ui isa Real && vi isa Real ||
-			throw(ArgumentError(
+	@inbounds for (xi, yi, ui, vi, i) in zip(x, y, u, v, 1:n)
+		for (value, name) in ((xi, "x"), (yi, "y"), (ui, "u"), (vi, "v"))
+			value isa Complex && throw(_field2d_complex_error(caller, name))
+			(value isa Real && !(value isa Bool)) || throw(ArgumentError(
 				"$caller: x, y, u, v values must be real numbers " *
 				"(invalid value at index $i)",
 			))
+		end
 
-		xf, yf, uf, vf = float(xi), float(yi), float(ui), float(vi)
+		xf, yf, uf, vf = Float64(xi), Float64(yi), Float64(ui), Float64(vi)
 		if !(isfinite(xf) && isfinite(yf) && isfinite(uf) && isfinite(vf))
 			skipped += 1
 			continue
 		end
+		xlog && xf <= 0 && throw(ArgumentError(
+			"$caller: x is on a logarithmic axis, so arrow origins must be " *
+			"positive; x[$i] = $xf",
+		))
+		ylog && yf <= 0 && throw(ArgumentError(
+			"$caller: y is on a logarithmic axis, so arrow origins must be " *
+			"positive; y[$i] = $yf",
+		))
 
 		component = max(abs(uf), abs(vf))
 		iszero(component) && continue
@@ -6404,18 +7641,20 @@ function _quiver_coordinates(
 	# An explicit zero scale is a valid request for no visible arrows.
 	iszero(sizeref) && return empty_x, empty_y
 
-	# Each arrow needs a shaft and a separate three-point arrowhead:
-	# origin, tip, NaN, head1, tip, head2, NaN.
 	output_length = Base.Checked.checked_mul(7, drawable)
-	arrow_x = Vector{TX}(undef, output_length)
-	arrow_y = Vector{TY}(undef, output_length)
+	arrow_x = Vector{Union{Nothing, Float64}}(undef, output_length)
+	arrow_y = Vector{Union{Nothing, Float64}}(undef, output_length)
 	cos_head, sin_head = cos(_QUIVER_HEAD_ANGLE), sin(_QUIVER_HEAD_ANGLE)
-	max_shaft = sizeref * _QUIVER_SHAFT_SCALE
+	max_shaft = Float64(sizeref) * _QUIVER_SHAFT_SCALE
+	to_axis_x(value) = xlog ? log10(value) : value
+	to_axis_y(value) = ylog ? log10(value) : value
+	from_axis_x(value) = xlog ? exp10(value) : value
+	from_axis_y(value) = ylog ? exp10(value) : value
 	j = 1
 
-	@inbounds for i in eachindex(x, y, u, v)
-		xf, yf = float(x[i]), float(y[i])
-		uf, vf = float(u[i]), float(v[i])
+	@inbounds for (xi, yi, ui, vi, i) in zip(x, y, u, v, 1:n)
+		xf, yf = Float64(xi), Float64(yi)
+		uf, vf = Float64(ui), Float64(vi)
 		isfinite(xf) && isfinite(yf) && isfinite(uf) && isfinite(vf) ||
 			continue
 
@@ -6428,7 +7667,8 @@ function _quiver_coordinates(
 		shaft = (component / max_component) *
 			(shape / max_shape) *
 			max_shaft
-		tip_x, tip_y = xf + ux * shaft, yf + uy * shaft
+		ax, ay = to_axis_x(xf), to_axis_y(yf)
+		tip_x, tip_y = ax + ux * shaft, ay + uy * shaft
 
 		arm = _QUIVER_HEAD_SCALE * shaft
 		head1_x = tip_x - arm * (ux * cos_head - uy * sin_head)
@@ -6436,31 +7676,73 @@ function _quiver_coordinates(
 		head2_x = tip_x - arm * (ux * cos_head + uy * sin_head)
 		head2_y = tip_y - arm * (uy * cos_head - ux * sin_head)
 
-		isfinite(tip_x) && isfinite(tip_y) &&
-			isfinite(head1_x) && isfinite(head1_y) &&
-			isfinite(head2_x) && isfinite(head2_y) ||
+		points_x = (from_axis_x(tip_x), from_axis_x(head1_x), from_axis_x(head2_x))
+		points_y = (from_axis_y(tip_y), from_axis_y(head1_y), from_axis_y(head2_y))
+		all(isfinite, points_x) && all(isfinite, points_y) ||
 			throw(ArgumentError(
 				"$caller: scaled arrow coordinates are non-finite at index $i",
 			))
 
 		arrow_x[j] = xf
 		arrow_y[j] = yf
-		arrow_x[j + 1] = tip_x
-		arrow_y[j + 1] = tip_y
-		arrow_x[j + 2] = NaN
-		arrow_y[j + 2] = NaN
-		arrow_x[j + 3] = head1_x
-		arrow_y[j + 3] = head1_y
-		arrow_x[j + 4] = tip_x
-		arrow_y[j + 4] = tip_y
-		arrow_x[j + 5] = head2_x
-		arrow_y[j + 5] = head2_y
-		arrow_x[j + 6] = NaN
-		arrow_y[j + 6] = NaN
+		arrow_x[j + 1] = points_x[1]
+		arrow_y[j + 1] = points_y[1]
+		arrow_x[j + 2] = _GAP
+		arrow_y[j + 2] = _GAP
+		arrow_x[j + 3] = points_x[2]
+		arrow_y[j + 3] = points_y[2]
+		arrow_x[j + 4] = points_x[1]
+		arrow_y[j + 4] = points_y[1]
+		arrow_x[j + 5] = points_x[3]
+		arrow_y[j + 5] = points_y[3]
+		arrow_x[j + 6] = _GAP
+		arrow_y[j + 6] = _GAP
 		j += 7
 	end
 
 	return arrow_x, arrow_y
+end
+
+# Flatten the accepted quiver input forms into four equal-length vectors:
+# four vectors (one arrow per entry), four same-size matrices (meshgrid
+# style), or coordinate vectors with `u[ix, iy]`/`v[ix, iy]` matrices of size
+# (length(x), length(y)).
+function _quiver_points(x, y, u, v, who::AbstractString)
+	for (value, name) in ((x, "x"), (y, "y"), (u, "u"), (v, "v"))
+		ndims(value) <= 2 || throw(ArgumentError(
+			"$(who): `$(name)` must be a vector or a matrix; got a " *
+			"$(ndims(value))-D array of size $(size(value)).",
+		))
+	end
+	dims = (ndims(x), ndims(y), ndims(u), ndims(v))
+	all(==(1), dims) && return x, y, u, v
+	if all(==(2), dims)
+		size(x) == size(y) == size(u) == size(v) || throw(ArgumentError(
+			"$(who): matrices x, y, u, v must have the same size; got " *
+			"$(size(x)), $(size(y)), $(size(u)), $(size(v)).",
+		))
+		return vec(x), vec(y), vec(u), vec(v)
+	end
+	if dims == (1, 1, 2, 2)
+		expected = (length(x), length(y))
+		size(u) == expected && size(v) == expected || throw(ArgumentError(
+			"$(who): with coordinate vectors x, y the components are indexed " *
+			"u[ix, iy], so u and v must have size (length(x), length(y)) = " *
+			"$(expected); got $(size(u)) and $(size(v)).",
+		))
+		nx, ny = expected
+		return (
+			[x[ix] for ix in eachindex(x), _ in 1:ny][:],
+			[y[iy] for _ in 1:nx, iy in eachindex(y)][:],
+			vec(u),
+			vec(v),
+		)
+	end
+	throw(ArgumentError(
+		"$(who): x, y, u, v must be four vectors, four matrices of one size, " *
+		"or coordinate vectors x, y with u, v matrices of size " *
+		"(length(x), length(y)); got dimensions $(dims).",
+	))
 end
 
 function _quiver_trace(
@@ -6468,142 +7750,235 @@ function _quiver_trace(
 	y,
 	u,
 	v;
-	color::String = "RoyalBlue",
+	color::AbstractString = "RoyalBlue",
 	sizeref::Real = 1,
+	legend::AbstractString = "",
+	linewidth::Real = 0,
 	caller::AbstractString = "plot_quiver",
+	xlog::Bool = false,
+	ylog::Bool = false,
 )
-	arrow_x, arrow_y =
-		_quiver_coordinates(x, y, u, v, sizeref; caller = caller)
-	return scatter(
-		x = arrow_x,
-		y = arrow_y,
-		mode = "lines",
-		line_color = color,
-		hoverinfo = "skip",
+	xp, yp, up, vp = _quiver_points(x, y, u, v, caller)
+	arrow_x, arrow_y = _quiver_coordinates(
+		xp,
+		yp,
+		up,
+		vp,
+		sizeref;
+		caller = caller,
+		xlog = xlog,
+		ylog = ylog,
 	)
+	line = isempty(color) ? Dict{Symbol, Any}() : Dict{Symbol, Any}(:color => color)
+	linewidth > 0 && (line[:width] = linewidth)
+	fields = Dict{Symbol, Any}(
+		:x => arrow_x,
+		:y => arrow_y,
+		:mode => "lines",
+		:hoverinfo => "skip",
+		:name => isempty(legend) ? "" : _label(legend),
+		# An unnamed quiver gets no "trace N" legend entry.
+		:showlegend => !isempty(legend),
+	)
+	isempty(line) || (fields[:line] = attr(; line...))
+	return scatter(; fields...)
 end
 
+function _quiver_add!(
+	fig,
+	who::AbstractString,
+	x,
+	y,
+	u,
+	v;
+	constructor::Bool,
+	color,
+	sizeref,
+	legend::AbstractString,
+	linewidth,
+	xlabel::AbstractString,
+	ylabel::AbstractString,
+	title::AbstractString,
+	xrange,
+	yrange,
+	xscale::AbstractString,
+	yscale::AbstractString,
+	xticks,
+	xticklabels,
+	xtickformat::AbstractString,
+	yticks,
+	yticklabels,
+	ytickformat::AbstractString,
+	width,
+	height,
+	fontsize,
+	grid,
+	equalar::Bool,
+)
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	colour = _field2d_color_string(color, who, "color")
+	_field2d_nonnegative(linewidth, who, "linewidth")
+	trace = _quiver_trace(
+		x,
+		y,
+		u,
+		v;
+		color = colour,
+		sizeref = sizeref,
+		legend = legend,
+		linewidth = linewidth,
+		caller = who,
+		xlog = _field2d_log_axis(fig, :x, xscale),
+		ylog = _field2d_log_axis(fig, :y, yscale),
+	)
+	push!(_plot_data(fig), trace)
+	_field2d_apply_options!(
+		fig,
+		who;
+		constructor = constructor,
+		title = title,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xscale = xscale,
+		yscale = yscale,
+		xrange = xrange,
+		yrange = yrange,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		origin = "",
+		equalar = equalar,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	return nothing
+end
 
 """
-	function plot_quiver(
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray},
-		u::Union{AbstractRange, Vector, SubArray},
-		v::Union{AbstractRange, Vector, SubArray};
-		color::String = "RoyalBlue",
-		sizeref::Real = 1,
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-	)
+	plot_quiver(x, y, u, v; kwargs...)
 
-Plots a 2D quiver (vector field) diagram using arrow segments.
+Draw a 2-D vector field as arrows: the vector `(u, v)` starts at `(x, y)`.
+Accepted forms:
+- four vectors of equal length (one arrow per entry);
+- four matrices of the same size (e.g. from `Y, X = meshgrid(y, x)`);
+- coordinate vectors `x`, `y` with component matrices `u[ix, iy]`,
+  `v[ix, iy]` of size `(length(x), length(y))`.
+Mismatched sizes throw an `ArgumentError`.
 
-#### Arguments
-
-- `x`: x-coordinates of vector origins
-- `y`: y-coordinates of vector origins
-- `u`: x-components of vector directions
-- `v`: y-components of vector directions
+Arrow length is proportional to the magnitude `hypot(u, v)`: the longest
+arrow is `2/3 * sizeref` axis units long (on a log axis, decades) and the
+others are scaled by their magnitude relative to it, so `sizeref` is the
+length budget of the strongest vector and does not depend on the data units
+of `u`, `v`. The arrowhead is 0.3 of each shaft at ±20°. Vectors with a
+non-finite origin or component are skipped with a warning; zero vectors draw
+nothing (a warning when every vector is zero). On a logarithmic axis
+(`xscale`/`yscale = "log"`) the arrows are laid out in axis units (decades),
+pointing at angle `atan(v, u)` with equal aspect (matplotlib's default
+`angles = "uv"`), and origins must be positive.
 
 #### Keywords
+- `color = "RoyalBlue"`: arrow colour (string, Symbol or Colorant).
+- `sizeref::Real = 1`: length budget of the longest arrow (see above); 0
+  draws nothing; must be finite and ≥ 0.
+- `legend = ""`: legend name; an unnamed quiver has no legend entry.
+- `linewidth::Real = 0`: arrow line width in pixels (0 = plotly default).
+- `equalar::Bool = true`: equal data aspect, so arrow angles are true.
+- `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
+  `yrange = [0, 0]` (data units), `xscale = ""`, `yscale = ""`,
+  `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
+  `ytickformat`, `grid::Union{Nothing,Bool,Symbol} = true`, `width = 0`,
+  `height = 0`, `fontsize = 0`: as for [`plot_heatmap`](@ref).
+- `show::Bool = false`: open a window and return a `SyncPlot`.
 
-- `color`: Arrow color (default: `"RoyalBlue"`)
-- `sizeref`: Reference scaling for arrow length (default: `1`)
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the figure in pixels (default: `0`)
-- `height`: Height of the figure in pixels (default: `0`)
-- `title`: Title of the figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
+Returns a `Plot` (a `SyncPlot` when `show = true`).
+
+# Example
+```julia
+x = range(-1, 1; length = 9)
+y = range(-1, 1; length = 7)
+u = [-yi for xi in x, yi in y]                  # u[ix, iy]
+v = [xi for xi in x, yi in y]
+fig = plot_quiver(x, y, u, v; sizeref = 0.3, legend = "rotation")
+```
 """
 function plot_quiver(
-    x::Union{AbstractRange, Vector, SubArray},
-    y::Union{AbstractRange, Vector, SubArray},
-    u::Union{AbstractRange, Vector, SubArray},
-    v::Union{AbstractRange, Vector, SubArray};
-    color::String = "RoyalBlue",
-    sizeref::Real = 1,
-    xlabel::String = "",
-    ylabel::String = "",
-    xrange::Vector = [0, 0],
-    yrange::Vector = [0, 0],
-    width::Int = 0,
-    height::Int = 0,
-    title::String = "",
-    fontsize::Int = 0,
-    grid::Bool = true,
-    show::Bool = false,
+	x::AbstractArray,
+	y::AbstractArray,
+	u::AbstractArray,
+	v::AbstractArray;
+	color = "RoyalBlue",
+	sizeref::Real = 1,
+	legend::AbstractString = "",
+	linewidth::Real = 0,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	equalar::Bool = true,
+	show::Bool = false,
 )
-    arrow = _quiver_trace(
-        x,
-        y,
-        u,
-        v;
-        color = color,
-        sizeref = sizeref,
-        caller = "plot_quiver",
-    )
-
-    layout = Layout(
-        title = title,
-        xaxis = attr(
-            title = xlabel,
-            constrain = "domain",
-            automargin = true,
-            zeroline = false,
-            showline = true,
-            mirror = true,
-            ticks = "outside",
-        ),
-        yaxis = attr(
-            title = ylabel,
-            constrain = "domain",
-            zeroline = false,
-            automargin = true,
-            showline = true,
-            mirror = true,
-            ticks = "outside",
-        ),
-        # margin = attr(r = 0, b = 0, t = 0, l = 0),
-    )
-
-    fig = Plot(arrow, layout)
-    if !all(xrange .== [0, 0])
-        update_xaxes!(fig, range = xrange)
-    end
-    if !all(yrange .== [0, 0])
-        update_yaxes!(fig, range = yrange)
-    end
-    if width > 0
-        relayout!(fig, width = width)
-    end
-    if height > 0
-        relayout!(fig, height = height)
-    end
-
-    update_xaxes!(fig,
-        scaleanchor = "y",
-        scaleratio = 1,
-    )
-    if !grid
-        update_xaxes!(fig, showgrid = false)
-        update_yaxes!(fig, showgrid = false)
-    end
-    _apply_default_template!(fig)
-    if fontsize > 0
-        relayout!(fig, font = attr(size = fontsize))
-    end
-    return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	fig = _field2d_new_figure()
+	_quiver_add!(
+		fig,
+		"plot_quiver",
+		x,
+		y,
+		u,
+		v;
+		constructor = true,
+		color = color,
+		sizeref = sizeref,
+		legend = legend,
+		linewidth = linewidth,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		title = title,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		equalar = equalar,
+	)
+	return _field2d_show(fig, show, width, height, title)
 end
 
 #endregion
@@ -8471,117 +9846,121 @@ function plot_scatterpolar!(
 end
 
 """
-	function plot_heatmap!(
-		fig,
-		x::Union{AbstractVector, SubArray},
-		y::Union{AbstractVector, SubArray},
-		U::AbstractArray;
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		zrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		colorscale::String = "",
-		title::String = "",
-		fontsize::Int = 0,
-		equalar::Bool = false,
-		xscale::String = "",
-		yscale::String = "",
-	)
+	plot_heatmap!(fig, x, y, U; kwargs...)
+	plot_heatmap!(fig, U; kwargs...)
+	plot_heatmap!(sf::SubplotFigure, x, y, U; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_heatmap!(sf::SubplotFigure, U; row = nothing, col = nothing, secondary_y = false, kwargs...)
 
-Adds new heatmap traces to an existing figure.
+Append a heatmap of `U` (indexed `U[ix, iy]`, `size(U) == (length(x),
+length(y))` or cell edges) to `fig`, a `Plot` or `SyncPlot`, or to a cell of
+a `SubplotFigure` (`row`/`col` together, default: the active cell;
+`secondary_y` targets the cell's secondary y axis). Implicit coordinates are
+0-based, or 1-based when the target x/y axis is (or is made) logarithmic.
 
-#### Arguments
+Takes the keywords of [`plot_heatmap`](@ref) except `show` (passing `show`
+throws an `ArgumentError`), with mutator defaults that leave the figure as it
+is: `origin = ""` keeps the y-axis direction (`:upper`/`:lower` set it),
+`grid = nothing` keeps the grid (`true` re-enables it), empty labels/titles,
+automatic ranges and empty scales change nothing. The layout keywords act on
+the primary axes of a `Plot`/`SyncPlot` and on the target cell's axes of a
+`SubplotFigure`, where `title`, `width` and `height` are ignored with a
+warning. A user template is kept.
 
-- `fig`: Existing `plot figure` to append to
-- `x`: x-coordinate values
-- `y`: y-coordinate values
-- `U`: Matrix of values
+Invalid input throws an `ArgumentError` and leaves the figure unchanged.
+Returns `nothing` (`sf` for a `SubplotFigure`).
 
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `zrange`: Range for the z-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `colorscale`: Color scale for the heatmap (default: `""`)
-- `title`: Title for the heatmap (default: `""`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `equalar`: Whether to set equal aspect ratio (default: `false`)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-
+# Example
+```julia
+fig = plot_heatmap(rand(4, 3))
+plot_heatmap!(fig, 5:8, 0:2, rand(4, 3); colorscale = "viridis")
+```
 """
 function plot_heatmap!(
 	fig,
-	x::Union{AbstractVector, SubArray},
-	y::Union{AbstractVector, SubArray},
+	x::AbstractArray,
+	y::AbstractArray,
 	U::AbstractArray;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "",
-	title::String = "",
-	fontsize::Int = 0,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	zrange = [0, 0],
+	crange = [0, 0],
+	cmid::Union{Nothing, Real} = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	levels = nothing,
+	colorscale = "",
+	showscale::Union{Nothing, Bool} = nothing,
+	colorbar_title::AbstractString = "",
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
+	text = nothing,
+	texttemplate::AbstractString = "",
+	textsize::Real = 0,
+	origin::Union{Symbol, AbstractString} = "",
+	xgap::Real = 0,
+	ygap::Real = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
 	equalar::Bool = false,
-	xscale::String = "",
-	yscale::String = "",
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	kwargs...,
 )
-	FV = transpose(U) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
-	trace = heatmap(x = x, y = y, z = FV)
-	colorscale != "" && (trace.colorscale = colorscale)
-	if !all(zrange .== [0, 0])
-		trace.zmin = zrange[1]
-		trace.zmax = zrange[2]
-	end
-	push!(_plot_data(fig), trace)
-	# apply optional layout updates if labels or title provided
-	if title != ""
-		relayout!(fig, title = title)
-	end
-	if xlabel != ""
-		relayout!(fig, xaxis = attr(title = xlabel))
-	end
-	if ylabel != ""
-		relayout!(fig, yaxis = attr(title = ylabel))
-	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if equalar
-		update_xaxes!(fig,
-			scaleanchor = "y",
-			scaleratio = 1,
-		)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	_apply_default_legend!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
+	_field2d_reject_keywords("plot_heatmap!", kwargs)
+	_heatmap_add!(
+		fig,
+		"plot_heatmap!",
+		x,
+		y,
+		U;
+		constructor = false,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		title = title,
+		xrange = xrange,
+		yrange = yrange,
+		zrange = zrange,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		colorscale = colorscale,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
+		text = text,
+		texttemplate = texttemplate,
+		textsize = textsize,
+		origin = origin,
+		xgap = xgap,
+		ygap = ygap,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		equalar = equalar,
+		xscale = xscale,
+		yscale = yscale,
+	)
 	_refresh!(fig)
 	return nothing
 end
@@ -8589,151 +9968,134 @@ end
 function plot_heatmap!(
 	fig,
 	U::AbstractArray;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "",
-	title::String = "",
-	fontsize::Int = 0,
-	equalar::Bool = false,
-	xscale::String = "",
-	yscale::String = "",
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	kwargs...,
 )
-	x = 0:(size(U, 1) - 1)
-	y = 0:(size(U, 2) - 1)
-	return plot_heatmap!(fig, x, y, U;
+	x = _field2d_implicit_axis(size(U, 1), _field2d_log_axis(fig, :x, xscale))
+	y = _field2d_implicit_axis(size(U, 2), _field2d_log_axis(fig, :y, yscale))
+	return plot_heatmap!(fig, x, y, U; xscale = xscale, yscale = yscale, kwargs...)
+end
+
+"""
+	plot_contour!(fig, x, y, U; kwargs...)
+	plot_contour!(fig, U; kwargs...)
+	plot_contour!(sf::SubplotFigure, x, y, U; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_contour!(sf::SubplotFigure, U; row = nothing, col = nothing, secondary_y = false, kwargs...)
+
+Append contours of `U` (indexed `U[ix, iy]`, `size(U) == (length(x),
+length(y))`) to `fig`, a `Plot` or `SyncPlot`, or to a cell of a
+`SubplotFigure` (`row`/`col` together, default: the active cell). Implicit
+coordinates are 0-based, or 1-based when the target axis is logarithmic.
+
+Takes the keywords of [`plot_contour`](@ref) except `show` (passing `show`
+throws an `ArgumentError`); `grid = nothing` keeps the grid, and the other
+layout keywords change nothing at their defaults. The overlay idiom draws
+one labelled white level without a colorbar or legend entry:
+`plot_contour!(fig, x, y, U; levels = [0.0], linecolor = "white",
+showlabels = true)`. On a `SubplotFigure` the layout keywords act on the
+target cell; `title`, `width` and `height` are ignored with a warning.
+
+Invalid input throws an `ArgumentError` and leaves the figure unchanged.
+Returns `nothing` (`sf` for a `SubplotFigure`).
+
+# Example
+```julia
+x = range(-1, 1; length = 30)
+U = [xi^2 + yi^2 for xi in x, yi in x]
+fig = plot_heatmap(x, x, U)
+plot_contour!(fig, x, x, U; levels = [0.25, 0.5], coloring = "none",
+	linecolor = "black", showlabels = true)
+```
+"""
+function plot_contour!(
+	fig,
+	x::AbstractArray,
+	y::AbstractArray,
+	U::AbstractArray;
+	levels = nothing,
+	ncontours::Integer = 0,
+	coloring::Union{Symbol, AbstractString} = "",
+	linecolor = "",
+	linewidth::Real = 0,
+	dash::Union{Symbol, AbstractString} = "",
+	showlabels::Bool = false,
+	labelformat::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	zrange = [0, 0],
+	crange = [0, 0],
+	cmid::Union{Nothing, Real} = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	colorscale = "",
+	showscale::Union{Nothing, Bool} = nothing,
+	colorbar_title::AbstractString = "",
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	equalar::Bool = false,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	kwargs...,
+)
+	_field2d_reject_keywords("plot_contour!", kwargs)
+	_contour_add!(
+		fig,
+		"plot_contour!",
+		x,
+		y,
+		U;
+		constructor = false,
+		levels = levels,
+		ncontours = ncontours,
+		coloring = coloring,
+		linecolor = linecolor,
+		linewidth = linewidth,
+		dash = dash,
+		showlabels = showlabels,
+		labelformat = labelformat,
 		xlabel = xlabel,
 		ylabel = ylabel,
+		title = title,
 		xrange = xrange,
 		yrange = yrange,
 		zrange = zrange,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
 		colorscale = colorscale,
-		title = title,
-		fontsize = fontsize,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
 		width = width,
 		height = height,
+		fontsize = fontsize,
+		grid = grid,
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
 	)
-end
-
-"""
-	function plot_contour!(
-		fig,
-		x::Union{AbstractVector, SubArray},
-		y::Union{AbstractVector, SubArray},
-		U::AbstractArray;
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		zrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		colorscale::String = "",
-		title::String = "",
-		fontsize::Int = 0,
-		equalar::Bool = false,
-		xscale::String = "",
-		yscale::String = "",
-	)
-
-Adds new contour traces to an existing figure.
-
-#### Arguments
-
-- `fig`: Existing `plot figure` to append to
-- `x`: x-coordinate values
-- `y`: y-coordinate values
-- `U`: Matrix of values
-
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `zrange`: Range for the z-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `colorscale`: Color scale for the contour plot (default: `""`)
-- `title`: Title for the contour (default: `""`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `equalar`: Whether to set equal aspect ratio (default: `false`)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-
-"""
-function plot_contour!(
-	fig,
-	x::Union{AbstractVector, SubArray},
-	y::Union{AbstractVector, SubArray},
-	U::AbstractArray;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "",
-	title::String = "",
-	fontsize::Int = 0,
-	equalar::Bool = false,
-	xscale::String = "",
-	yscale::String = "",
-)
-	FV = transpose(U) # IMPORTANT! THIS FOLLOWS THE CONVENTION OF meshgrid(y,x)
-	trace = contour(x = x, y = y, z = FV)
-	colorscale != "" && (trace.colorscale = colorscale)
-	if !all(zrange .== [0, 0])
-		trace.zmin = zrange[1]
-		trace.zmax = zrange[2]
-	end
-	push!(_plot_data(fig), trace)
-	# apply optional layout updates if labels or title provided
-	if title != ""
-		relayout!(fig, title = title)
-	end
-	if xlabel != ""
-		relayout!(fig, xaxis = attr(title = xlabel))
-	end
-	if ylabel != ""
-		relayout!(fig, yaxis = attr(title = ylabel))
-	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if equalar
-		update_xaxes!(fig,
-			scaleanchor = "y",
-			scaleratio = 1,
-		)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	_apply_default_legend!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
 	_refresh!(fig)
 	return nothing
 end
@@ -8741,146 +10103,102 @@ end
 function plot_contour!(
 	fig,
 	U::AbstractArray;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	zrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	colorscale::String = "",
-	title::String = "",
-	fontsize::Int = 0,
-	equalar::Bool = false,
-	xscale::String = "",
-	yscale::String = "",
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	kwargs...,
 )
-	x = 0:(size(U, 1) - 1)
-	y = 0:(size(U, 2) - 1)
-	return plot_contour!(fig, x, y, U;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		zrange = zrange,
-		colorscale = colorscale,
-		title = title,
-		fontsize = fontsize,
-		width = width,
-		height = height,
-		equalar = equalar,
-		xscale = xscale,
-		yscale = yscale,
-	)
+	x = _field2d_implicit_axis(size(U, 1), _field2d_log_axis(fig, :x, xscale))
+	y = _field2d_implicit_axis(size(U, 2), _field2d_log_axis(fig, :y, yscale))
+	return plot_contour!(fig, x, y, U; xscale = xscale, yscale = yscale, kwargs...)
 end
 
 """
-	function plot_quiver!(
-		fig,
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray},
-		u::Union{AbstractRange, Vector, SubArray},
-		v::Union{AbstractRange, Vector, SubArray};
-		color::String = "RoyalBlue",
-		sizeref::Real = 1,
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-	)
+	plot_quiver!(fig, x, y, u, v; kwargs...)
+	plot_quiver!(sf::SubplotFigure, x, y, u, v; row = nothing, col = nothing, secondary_y = false, kwargs...)
 
-Adds new quiver plot traces to an existing figure.
+Append a vector field (same input forms, arrow scaling and keywords as
+[`plot_quiver`](@ref), except `show`, which throws an `ArgumentError`) to
+`fig`, a `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
+together, default: the active cell). `equalar = true` (default) locks the
+data aspect of the target axes; `grid = nothing` keeps the grid (`true`
+re-enables it, `false` hides it). Each call scales its own arrows: the longest
+arrow of this call is `2/3 * sizeref` axis units long. Arrows on an axis that
+is already logarithmic are laid out in decades. On a `SubplotFigure`,
+`title`, `width` and `height` are ignored with a warning.
 
-#### Arguments
+Invalid input throws an `ArgumentError` and leaves the figure unchanged.
+Returns `nothing` (`sf` for a `SubplotFigure`).
 
-- `fig`: Existing `plot figure` to append to
-- `x`: x-coordinate values
-- `y`: y-coordinate values
-- `u`: x-component of vector field
-- `v`: y-component of vector field
-
-#### Keywords
-
-- `color`: Color of the arrows (default: `"RoyalBlue"`)
-- `sizeref`: Reference scaling for arrow length (default: `1`)
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the figure in pixels (default: `0`)
-- `height`: Height of the figure in pixels (default: `0`)
-- `title`: Title of the figure (default: `""`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `grid`: Whether to show the grid or not (default: `true`)
-
+# Example
+```julia
+x = range(0, 1; length = 6)
+fig = plot_heatmap(x, x, [xi * yi for xi in x, yi in x])
+plot_quiver!(fig, x, x, [yi for xi in x, yi in x], [-xi for xi in x, yi in x];
+	color = "white", sizeref = 0.2, legend = "flow")
+```
 """
 function plot_quiver!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray},
-	u::Union{AbstractRange, Vector, SubArray},
-	v::Union{AbstractRange, Vector, SubArray};
-	color::String = "RoyalBlue",
+	x::AbstractArray,
+	y::AbstractArray,
+	u::AbstractArray,
+	v::AbstractArray;
+	color = "RoyalBlue",
 	sizeref::Real = 1,
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
+	legend::AbstractString = "",
+	linewidth::Real = 0,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	equalar::Bool = true,
+	kwargs...,
 )
-	arrow = _quiver_trace(
+	_field2d_reject_keywords("plot_quiver!", kwargs)
+	_quiver_add!(
+		fig,
+		"plot_quiver!",
 		x,
 		y,
 		u,
 		v;
+		constructor = false,
 		color = color,
 		sizeref = sizeref,
-		caller = "plot_quiver!",
+		legend = legend,
+		linewidth = linewidth,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		title = title,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		equalar = equalar,
 	)
-	push!(_plot_data(fig), arrow)
-	# apply optional layout updates
-	if title != ""
-		relayout!(fig, title = title)
-	end
-	if xlabel != ""
-		relayout!(fig, xaxis = attr(title = xlabel))
-	end
-	if ylabel != ""
-		relayout!(fig, yaxis = attr(title = ylabel))
-	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	update_xaxes!(fig,
-		scaleanchor = "y",
-		scaleratio = 1,
-	)
-	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
-	end
-	_apply_default_legend!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
 	_refresh!(fig)
 	return nothing
 end
@@ -10443,62 +11761,506 @@ end
 
 # ── Image ────────────────────────────────────────────────────────────
 
+const _IMAGE_COLORMODELS = ("rgb", "rgba", "rgba256", "hsl", "hsla")
+
+_image_colormodel_channels(model::AbstractString) =
+	model in ("rgb", "hsl") ? 3 : 4
+
+_image_sequence(value) = value isa AbstractVector || value isa Tuple
+
 # Present an H×W×C numeric array in Plotly's row/pixel/channel JSON order
 # without materializing one heap object per pixel/channel. PlotlyBase's JSON
 # lowering reverses Julia array dimensions, so this lazy C×W×H permutation
-# serializes identically to a nested H×W×C vector. Pass already-nested data
-# through unchanged.
-function _image_z(z)
-	ndims(z) == 3 || return z
-	channels = size(z, 3)
-	channels in (3, 4) || throw(ArgumentError(
-		"an H×W×C image must have 3 (RGB) or 4 (RGBA) channels; got C=$channels.",
+# serializes identically to a nested H×W×C vector. Already-nested rows of
+# pixels are validated and passed through unchanged.
+function _image_z(z; who::AbstractString = "plot_image")
+	if ndims(z) == 3
+		channels = size(z, 3)
+		channels in (3, 4) || throw(ArgumentError(
+			"$(who): an H×W×C image must have 3 (RGB) or 4 (RGBA) channels; " *
+			"got C=$channels.",
+		))
+		return PermutedDimsArray(z, (3, 2, 1))
+	end
+	return _image_nested(z, who).data
+end
+
+const _IMAGE_FORMS =
+	"an H×W×3 (RGB) or H×W×4 (RGBA) array of channel values, a matrix of " *
+	"Colors.jl colours, a matrix of pixel vectors, or nested rows of pixel vectors"
+
+# Validate nested rows of pixels (`z[row][column][channel]`).
+function _image_nested(rows, who::AbstractString)
+	(rows isa AbstractVector && !isempty(rows)) || throw(ArgumentError(
+		"$(who): image data must be $(_IMAGE_FORMS); got $(summary(rows)).",
 	))
-	return PermutedDimsArray(z, (3, 2, 1))
+	first(rows) isa Real && throw(ArgumentError(
+		"$(who): a vector of numbers is not an image; expected $(_IMAGE_FORMS).",
+	))
+	width = -1
+	channels = -1
+	bytes = true
+	for (i, row) in enumerate(rows)
+		_image_sequence(row) || throw(ArgumentError(
+			"$(who): nested image rows must be vectors of pixels; row $(i) is " *
+			"$(repr(row)).",
+		))
+		if width < 0
+			width = length(row)
+			width > 0 || throw(ArgumentError("$(who): image row 1 has no pixels."))
+		elseif length(row) != width
+			throw(ArgumentError(
+				"$(who): every image row must have the same number of pixels; " *
+				"row 1 has $(width), row $(i) has $(length(row)).",
+			))
+		end
+		for (j, pixel) in enumerate(row)
+			_image_sequence(pixel) || throw(ArgumentError(
+				"$(who): pixel ($(i), $(j)) must be a vector of 3 or 4 channel " *
+				"values; got $(repr(pixel)).",
+			))
+			n = length(pixel)
+			n in (3, 4) || throw(ArgumentError(
+				"$(who): pixel ($(i), $(j)) has $(n) channels; expected 3 (RGB) " *
+				"or 4 (RGBA).",
+			))
+			if channels < 0
+				channels = n
+			elseif n != channels
+				throw(ArgumentError(
+					"$(who): every pixel needs the same number of channels; " *
+					"pixel (1, 1) has $(channels), pixel ($(i), $(j)) has $(n).",
+				))
+			end
+			for value in pixel
+				(value isa Real && !(value isa Bool)) || throw(ArgumentError(
+					"$(who): pixel channels must be real numbers; pixel " *
+					"($(i), $(j)) has $(repr(value)).",
+				))
+				value isa UInt8 || (bytes = false)
+			end
+		end
+	end
+	return (
+		kind = :nested,
+		data = rows,
+		channels = channels,
+		bytes = bytes,
+		height = length(rows),
+		width = width,
+	)
+end
+
+# H×W×C bytes of a matrix of Colors.jl colours (`img[row, column]`, row 1 at
+# the top). Colours with alpha keep it (C = 4).
+function _image_from_colorants(z, who::AbstractString)
+	isempty(z) && throw(ArgumentError("$(who): the image is empty."))
+	alpha = eltype(z) <: Colors.TransparentColor
+	for pixel in z
+		pixel isa Colors.Colorant || throw(ArgumentError(
+			"$(who): a colour image must contain only Colors.jl colours; got " *
+			"$(repr(pixel)).",
+		))
+		alpha |= pixel isa Colors.TransparentColor
+	end
+	channels = alpha ? 4 : 3
+	data = Array{UInt8}(undef, size(z, 1), size(z, 2), channels)
+	for (j, column) in enumerate(axes(z, 2)), (i, row) in enumerate(axes(z, 1))
+		c = convert(Colors.RGBA{Float64}, z[row, column])
+		data[i, j, 1] = _channel_byte(Float64(Colors.red(c)))
+		data[i, j, 2] = _channel_byte(Float64(Colors.green(c)))
+		data[i, j, 3] = _channel_byte(Float64(Colors.blue(c)))
+		alpha && (data[i, j, 4] = _channel_byte(Float64(Colors.alpha(c))))
+	end
+	return (
+		kind = :array3,
+		data = data,
+		channels = channels,
+		bytes = true,
+		height = size(z, 1),
+		width = size(z, 2),
+	)
+end
+
+# Validate plot_image input and describe it (see `_IMAGE_FORMS`).
+function _image_source(z, who::AbstractString)
+	if ndims(z) == 3
+		size(z, 3) in (3, 4) || throw(ArgumentError(
+			"$(who): an H×W×C image must have 3 (RGB) or 4 (RGBA) channels; " *
+			"got C=$(size(z, 3)).",
+		))
+		(size(z, 1) > 0 && size(z, 2) > 0) ||
+			throw(ArgumentError("$(who): the image is empty; got size $(size(z))."))
+		T = eltype(z)
+		T <: Complex && throw(_field2d_complex_error(who, "z"))
+		if !(T <: Real && !(T <: Bool) && isconcretetype(T))
+			for value in z
+				value isa Complex && throw(_field2d_complex_error(who, "z"))
+				(value isa Real && !(value isa Bool)) || throw(ArgumentError(
+					"$(who): channel values must be real numbers; got $(repr(value)).",
+				))
+			end
+		end
+		return (
+			kind = :array3,
+			data = z,
+			channels = size(z, 3),
+			bytes = T === UInt8,
+			height = size(z, 1),
+			width = size(z, 2),
+		)
+	elseif ndims(z) == 2
+		(!isempty(z) && all(pixel -> pixel isa Colors.Colorant, z)) &&
+			return _image_from_colorants(z, who)
+		if !isempty(z) && all(_image_sequence, z)
+			rows = [
+				[collect(z[row, column]) for column in axes(z, 2)]
+				for row in axes(z, 1)
+			]
+			return _image_nested(rows, who)
+		end
+		throw(ArgumentError(
+			"$(who): a 2-D matrix of numbers is not an image; plot scalar data " *
+			"with plot_heatmap(z), or pass $(_IMAGE_FORMS).",
+		))
+	elseif ndims(z) == 1
+		return _image_nested(z, who)
+	end
+	throw(ArgumentError(
+		"$(who): image data must be $(_IMAGE_FORMS); got a $(ndims(z))-D " *
+		"array of size $(size(z)).",
+	))
+end
+
+# `colormodel = ""` picks rgb for three channels and, for four channels,
+# "rgba256" (alpha 0-255) for 8-bit data or "rgba" (alpha 0-1) otherwise, so
+# the alpha channel is never dropped.
+function _image_colormodel(colormodel, source, who::AbstractString)
+	(colormodel isa Symbol || colormodel isa AbstractString) || throw(ArgumentError(
+		"$(who): `colormodel` must be a string; got $(repr(colormodel)).",
+	))
+	model = lowercase(strip(String(colormodel)))
+	if isempty(model)
+		source.channels == 4 || return ""
+		return source.bytes ? "rgba256" : "rgba"
+	end
+	model in _IMAGE_COLORMODELS || throw(ArgumentError(
+		"$(who): `colormodel` must be one of $(join(repr.(_IMAGE_COLORMODELS), ", ")) " *
+		"or \"\" (automatic); got $(repr(colormodel)).",
+	))
+	expected = _image_colormodel_channels(model)
+	expected == source.channels || throw(ArgumentError(
+		"$(who): colormodel $(repr(model)) needs $(expected) channels per pixel; " *
+		"the image has $(source.channels).",
+	))
+	return model
+end
+
+# Pixel placement for `extent = (left, right, bottom, top)` (matplotlib's
+# imshow convention): pixel edges span the extent, column 1 starts at `left`,
+# row 1 lies at `top` (origin "upper") or `bottom` (origin "lower"). plotly
+# places pixel (r, c) at (x0 + c dx, y0 + r dy) with positive steps, so a
+# decreasing direction is expressed by reversing the rows/columns.
+function _image_placement(extent, origin::AbstractString, height::Int, width::Int, who::AbstractString)
+	((extent isa Tuple || extent isa AbstractVector) && length(extent) == 4) ||
+		throw(ArgumentError(
+			"$(who): `extent` must be (left, right, bottom, top); got $(repr(extent)).",
+		))
+	left, right, bottom, top = _checked_real_vector(extent, who, "extent")
+	left == right && throw(ArgumentError(
+		"$(who): `extent` needs left != right; got $(repr(extent)).",
+	))
+	bottom == top && throw(ArgumentError(
+		"$(who): `extent` needs bottom != top; got $(repr(extent)).",
+	))
+	sx = (right - left) / width
+	start_y = origin == "upper" ? top : bottom
+	sy = (origin == "upper" ? bottom - top : top - bottom) / height
+	return (
+		x0 = sx > 0 ? left + sx / 2 : right + abs(sx) / 2,
+		dx = abs(sx),
+		flip_columns = sx < 0,
+		y0 = sy > 0 ? start_y + sy / 2 : start_y + height * sy + abs(sy) / 2,
+		dy = abs(sy),
+		flip_rows = sy < 0,
+		x_reversed = right < left,
+		y_reversed = top < bottom,
+	)
+end
+
+function _image_flip(source, flip_rows::Bool, flip_columns::Bool)
+	if source.kind === :array3
+		rows = flip_rows ? reverse(axes(source.data, 1)) : axes(source.data, 1)
+		columns = flip_columns ? reverse(axes(source.data, 2)) : axes(source.data, 2)
+		return (flip_rows || flip_columns) ?
+			view(source.data, rows, columns, :) :
+			source.data
+	end
+	rows = flip_rows ? reverse(source.data) : source.data
+	return flip_columns ? [reverse(row) for row in rows] : rows
+end
+
+function _image_add!(
+	fig,
+	who::AbstractString,
+	z;
+	constructor::Bool,
+	colormodel,
+	extent,
+	origin,
+	xlabel::AbstractString,
+	ylabel::AbstractString,
+	title::AbstractString,
+	xrange,
+	yrange,
+	xticks,
+	xticklabels,
+	xtickformat::AbstractString,
+	yticks,
+	yticklabels,
+	ytickformat::AbstractString,
+	width,
+	height,
+	fontsize,
+	grid,
+	equalar::Bool,
+)
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = xrange,
+		yrange = yrange,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	origin_value = _field2d_origin(origin, who; allow_unset = !constructor)
+	source = _image_source(z, who)
+	model = _image_colormodel(colormodel, source, who)
+	placement = extent === nothing ? nothing : _image_placement(
+		extent,
+		isempty(origin_value) ? "upper" : origin_value,
+		source.height,
+		source.width,
+		who,
+	)
+	data = placement === nothing ? source.data :
+		_image_flip(source, placement.flip_rows, placement.flip_columns)
+	fields = Dict{Symbol, Any}(
+		:z => source.kind === :array3 ? _image_z(data; who = who) : data,
+	)
+	isempty(model) || (fields[:colormodel] = model)
+	if placement !== nothing
+		fields[:x0] = placement.x0
+		fields[:dx] = placement.dx
+		fields[:y0] = placement.y0
+		fields[:dy] = placement.dy
+	end
+
+	push!(_plot_data(fig), image(; fields...))
+	_field2d_apply_options!(
+		fig,
+		who;
+		constructor = constructor,
+		title = title,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xscale = "",
+		yscale = "",
+		xrange = xrange,
+		yrange = yrange,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		origin = "",
+		equalar = equalar,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	# plotly reverses the y axis of an image by default; write the direction
+	# explicitly so the extent / origin hold.
+	if placement !== nothing
+		_field2d_axis_direction!(fig, :x, placement.x_reversed; force = true)
+		_field2d_axis_direction!(fig, :y, placement.y_reversed; force = true)
+	elseif !isempty(origin_value)
+		_field2d_axis_direction!(fig, :y, origin_value == "upper"; force = true)
+	end
+	return nothing
 end
 
 """
-	plot_image(z; colormodel="", kwargs...)
+	plot_image(z; kwargs...)
 
-Display image data `z` — either an `H×W×C` numeric array (C = 3 RGB or 4 RGBA)
-or an already-nested `[[[channels…]…]…]`. `colormodel` overrides the channel
-interpretation (e.g. `"rgb"`, `"rgba"`, `"hsl"`).
+Display an image. `z` is one of
+- an `H×W×3` (RGB) or `H×W×4` (RGBA) array of channel values, `z[row,
+  column, channel]` (row 1 is the top row with the default `origin`);
+- a matrix of Colors.jl colours (`img[row, column]`, e.g. from Images.jl),
+  converted to 8-bit RGB, or RGBA when the colours carry alpha;
+- a matrix of pixel vectors, or nested rows of pixels `z[row][column]` with 3
+  or 4 channels each.
+Channel values follow plotly's convention: 0-255 for RGB (scale `[0, 1]` float
+data by 255). A 4-channel image uses `colormodel = "rgba256"` (alpha also
+0-255) when the data are `UInt8` and `"rgba"` (alpha in 0-1) otherwise, so the
+alpha channel is kept. A 2-D matrix of numbers is not an image (use
+[`plot_heatmap`](@ref)); 1-D, 4-D, 2-channel, complex or empty data throw an
+`ArgumentError`.
+
+#### Keywords
+- `colormodel = ""`: `"rgb"`, `"rgba"`, `"rgba256"`, `"hsl"` or `"hsla"`;
+  must match the channel count; `""` chooses as above.
+- `extent = nothing`: `(left, right, bottom, top)` in data units: the image
+  spans these pixel edges (matplotlib's `imshow(extent=...)`); a reversed pair
+  (`right < left`, `top < bottom`) reverses that axis. Without `extent` pixel
+  `(row, column)` is centred at x = column - 1, y = row - 1.
+- `origin = :upper`: row 1 at the top (`:lower`: at the bottom, y axis
+  pointing up).
+- `equalar::Bool = true`: square pixels (equal data aspect).
+- `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
+  `yrange = [0, 0]`, `xticks`, `xticklabels`, `xtickformat`, `yticks`,
+  `yticklabels`, `ytickformat`, `grid::Union{Nothing,Bool,Symbol} = true`,
+  `width = 0`, `height = 0`, `fontsize = 0`: as for [`plot_heatmap`](@ref).
+- `show::Bool = false`: open a window and return a `SyncPlot`.
+
+Returns a `Plot` (a `SyncPlot` when `show = true`).
+
+# Example
+```julia
+img = zeros(UInt8, 20, 30, 4)              # H×W×RGBA
+img[:, :, 1] .= 255                        # red
+img[:, :, 4] .= repeat(UInt8.(round.(range(0, 255; length = 30)))', 20)
+fig = plot_image(img; extent = (0, 3, 0, 2), xlabel = "x (mm)", ylabel = "y (mm)")
+```
 """
 function plot_image(
 	z::AbstractArray;
-	colormodel::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	colormodel::Union{Symbol, AbstractString} = "",
+	extent = nothing,
+	origin::Union{Symbol, AbstractString} = :upper,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	equalar::Bool = true,
 	show::Bool = false,
 )
-	kw = Dict{Symbol, Any}(:z => _image_z(z))
-	colormodel == "" || (kw[:colormodel] = colormodel)
-	fig = Plot(image(; kw...),
-		Layout(yaxis = attr(scaleanchor = "x", constrain = "domain"), xaxis = attr(constrain = "domain")))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	fig = _field2d_new_figure()
+	_image_add!(
+		fig,
+		"plot_image",
+		z;
+		constructor = true,
+		colormodel = colormodel,
+		extent = extent,
+		origin = origin,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		title = title,
+		xrange = xrange,
+		yrange = yrange,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		equalar = equalar,
+	)
+	return _field2d_show(fig, show, width, height, title)
 end
 
 """
-	plot_image!(fig, z; colormodel="", kwargs...)
+	plot_image!(fig, z; kwargs...)
+	plot_image!(sf::SubplotFigure, z; row = nothing, col = nothing, secondary_y = false, kwargs...)
 
-Append an image trace to an existing figure.
+Append an image (same data forms and keywords as [`plot_image`](@ref), except
+`show`, which throws an `ArgumentError`) to `fig`, a `Plot` or `SyncPlot`, or
+to a cell of a `SubplotFigure` (`row`/`col` together, default: the active
+cell). `origin = ""` (default) keeps the y-axis direction (plotly shows an
+image's first row at the top unless the axis direction was set); `:upper` /
+`:lower` set it, and an `extent` sets both axis directions. `grid = nothing`
+keeps the grid. On a `SubplotFigure`, `title`, `width` and `height` are
+ignored with a warning.
+
+Invalid input throws an `ArgumentError` and leaves the figure unchanged.
+Returns `nothing` (`sf` for a `SubplotFigure`).
+
+# Example
+```julia
+fig = plot_heatmap(0:9, 0:9, rand(10, 10))
+plot_image!(fig, fill(UInt8(200), 2, 2, 3); extent = (2, 4, 2, 4))
+```
 """
 function plot_image!(
 	fig,
 	z::AbstractArray;
-	colormodel::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	colormodel::Union{Symbol, AbstractString} = "",
+	extent = nothing,
+	origin::Union{Symbol, AbstractString} = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	equalar::Bool = true,
+	kwargs...,
 )
-	kw = Dict{Symbol, Any}(:z => _image_z(z))
-	colormodel == "" || (kw[:colormodel] = colormodel)
-	push!(_plot_data(fig), image(; kw...))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_field2d_reject_keywords("plot_image!", kwargs)
+	_image_add!(
+		fig,
+		"plot_image!",
+		z;
+		constructor = false,
+		colormodel = colormodel,
+		extent = extent,
+		origin = origin,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		title = title,
+		xrange = xrange,
+		yrange = yrange,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		equalar = equalar,
+	)
 	_refresh!(fig)
 	return nothing
 end
