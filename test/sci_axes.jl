@@ -744,6 +744,46 @@ end
         @test twin[:overlaying] == "y" && twin[:side] == "right"
     end
 
+    @testset "labels keep title fonts; insets survive later cell plotting" begin
+        f = plot_scatter([1.0, 2.0], [1.0, 2.0])
+        relayout!(f; xaxis_title_font = attr(size = 21, family = "Arial"))
+        xlabel!(f, "new")
+        @test _ax_get(_ax_get(_ax_get(f.layout.fields[:xaxis], :title), :font), :size) == 21
+        @test _ax_get(_ax_get(f.layout.fields[:xaxis], :title), :text) == "new"
+        f3 = plot_scatter3d([1.0, 2.0], [1.0, 2.0], [1.0, 2.0])
+        relayout!(f3; scene_zaxis_title_font = attr(size = 19))
+        zlabel!(f3, "Z")
+        ztitle = _ax_get(_ax_get(f3.layout.fields[:scene], :zaxis), :title)
+        @test _ax_get(ztitle, :text) == "Z"
+        @test _ax_get(_ax_get(ztitle, :font), :size) == 19
+
+        sf = subplots(1, 2; sync = false)
+        xs = collect(0:0.5:10)
+        plot_scatter!(sf, xs, sin.(xs); row = 1, col = 1, legend = "sin")
+        k = inset!(sf, (0.5, 0.55, 0.45, 0.4); row = 1, col = 1)
+        rec = sf.insets[k]
+        addtraces!(sf.plot, scatter(x = xs[1:5], y = xs[1:5], xaxis = rec.xref, yaxis = rec.yref))
+        xrange!(sf, (0, 2); inset = k)
+        secondary_xaxis!(sf, x -> 2x, v -> v / 2; row = 1, col = 1)
+        plot_scatter!(sf, xs, cos.(xs); row = 1, col = 2, legend = "cos")
+        plot_scatter!(sf, xs, xs; row = 1, col = 1, legend = "line")
+        @test length(sf.insets) == 1
+        @test _ax_field(sf, rec.xkey, :range) == [0, 2]
+        @test _ax_field(sf, rec.xkey, :anchor) == rec.yref
+        cell12 = _AX._cell_target(sf; row = 1, col = 2)
+        cos_trace = only(filter(tr -> get(tr.fields, :name, nothing) == "cos", sf.plot.data))
+        @test (cos_trace.fields[:xaxis], cos_trace.fields[:yaxis]) == (cell12.xref, cell12.yref)
+        line_trace = only(filter(tr -> get(tr.fields, :name, nothing) == "line", sf.plot.data))
+        @test (line_trace.fields[:xaxis], line_trace.fields[:yaxis]) == ("x", "y")
+        dummy = only(filter(tr -> startswith(string(get(tr.fields, :name, "")), "plotlysupply:secondary_xaxis"), sf.plot.data))
+        @test dummy.fields[:visible] === false && dummy.fields[:showlegend] === false
+        # The next new axis index skips the inset's and the secondary axis's.
+        k2 = inset!(sf, (0.1, 0.1, 0.3, 0.3); row = 1, col = 2)
+        used = Set([rec.xkey, _AX._axis_layout_key(String(dummy.fields[:xaxis]), :x)])
+        @test length(used) == 2
+        @test !(sf.insets[k2].xkey in used)
+    end
+
     @testset "SyncPlot-backed SubplotFigure: inset!, helpers, rollback" begin
         base = subplots(1, 2; sync = false)
         plot_scatter!(base, [1.0, 2.0, 3.0], [1.0, 4.0, 9.0]; row = 1, col = 1)
