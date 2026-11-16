@@ -42,16 +42,6 @@ function _renderer_probe_syncplot()
     return sp, state
 end
 
-function PlotlySupply._plotlyjs_refresh!(
-    ::SyncPlot,
-    ::Vector{_MutatorProbeTrace},
-    ::Layout;
-    kwargs...,
-)
-    _MUTATOR_REFRESH_CALLS[] += 1
-    return nothing
-end
-
 function _mutator_probe_plot(; trace_count::Int=2)
     traces = [
         GenericTrace(IdDict{Symbol,Any}(
@@ -627,13 +617,18 @@ end
     p = sp.plot
 
     try
-        @test PlotlySupply._plotlyjs_refresh!(
+        refresh_script = PlotlySupply._plotlyjs_refresh_script(
             sp,
             p.data,
             p.layout,
+        )
+        @test PlotlySupply._run_plotlyjs_script!(
+            sp,
+            refresh_script,
+            "react",
         ) === nothing
         @test length(state.scripts) == 1
-        refresh_script = only(state.scripts)
+        @test only(state.scripts) == refresh_script
         @test occursin("(async function()", refresh_script)
         @test occursin(
             "await Plotly.react(div,",
@@ -641,10 +636,10 @@ end
         )
 
         state.result = SubString("ok", 1, 2)
-        @test PlotlySupply._plotlyjs_refresh!(
+        @test PlotlySupply._run_plotlyjs_script!(
             sp,
-            p.data,
-            p.layout,
+            refresh_script,
+            "react",
         ) === nothing
 
         for result in (
@@ -659,10 +654,10 @@ end
             state.result = result
             call_count = length(state.scripts)
             caught = try
-                PlotlySupply._plotlyjs_refresh!(
+                PlotlySupply._run_plotlyjs_script!(
                     sp,
-                    p.data,
-                    p.layout,
+                    refresh_script,
+                    "react",
                 )
                 nothing
             catch err
@@ -686,10 +681,10 @@ end
         state.run_error = injected_error
         call_count = length(state.scripts)
         caught = try
-            PlotlySupply._plotlyjs_refresh!(
+            PlotlySupply._run_plotlyjs_script!(
                 sp,
-                p.data,
-                p.layout,
+                refresh_script,
+                "react",
             )
             nothing
         catch err
@@ -701,17 +696,22 @@ end
 
         empty!(state.scripts)
         state.result = "ok"
-        @test PlotlySupply._plotlyjs_refresh!(
+        rebuild_script = PlotlySupply._plotlyjs_refresh_script(
             sp,
             p.data,
             p.layout;
             rebuild=true,
             autoplay=true,
+        )
+        @test PlotlySupply._run_plotlyjs_script!(
+            sp,
+            rebuild_script,
+            "newPlot",
         ) === nothing
-        @test length(state.scripts) == 1
-        rebuild_script = only(state.scripts)
+        @test only(state.scripts) == rebuild_script
         @test occursin("await Plotly.newPlot", rebuild_script)
-        @test occursin("await Plotly.animate", rebuild_script)
+        @test occursin("Plotly.animate(div, null)", rebuild_script)
+        @test !occursin("await Plotly.animate", rebuild_script)
 
         for command in (:redraw, :purge)
             empty!(state.scripts)
@@ -750,10 +750,8 @@ end
         empty!(state.scripts)
         state.open = false
         state.result = "plot-div-not-found"
-        @test_throws InvalidStateException PlotlySupply._plotlyjs_refresh!(
+        @test_throws InvalidStateException PlotlySupply._require_open_syncplot_window(
             sp,
-            p.data,
-            p.layout,
         )
         @test_throws InvalidStateException PlotlySupply._plotlyjs_command!(
             sp,
@@ -763,11 +761,7 @@ end
 
         state.open = "not-a-boolean"
         caught = try
-            PlotlySupply._plotlyjs_refresh!(
-                sp,
-                p.data,
-                p.layout,
-            )
+            PlotlySupply._require_open_syncplot_window(sp)
             nothing
         catch err
             err

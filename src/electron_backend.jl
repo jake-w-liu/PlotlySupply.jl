@@ -4,8 +4,16 @@ const _PLOTLY_CDN_URL =
 const _PLOTLYJS_ARTIFACT_RELATIVE_PATH =
 	joinpath("package", "plotly.min.js")
 const _ELECTRONCALL_PKGID = Base.PkgId(Base.UUID("8ddd578f-0c94-4c64-8c65-f083f291b266"), "ElectronCall")
-const _SYNC_ID_COUNTER = Ref(0)
+# Windows may be created from several threads; the counter must not race.
+const _SYNC_ID_COUNTER = Threads.Atomic{Int}(0)
 const _SYNCPLOT_STARTUP_TIMEOUT_SECONDS = 15.0
+# Default window geometry and title. `0` (sizes) and `""` (title) select these,
+# matching the sentinel convention of every high-level constructor.
+const _SYNCPLOT_DEFAULT_WIDTH = 960
+const _SYNCPLOT_DEFAULT_HEIGHT = 720
+const _SYNCPLOT_DEFAULT_TITLE = "PlotlySupply"
+# Electron's BrowserWindow sizes are 32-bit integers.
+const _SYNCPLOT_MAX_WINDOW_PIXELS = Int(typemax(Int32))
 const _SYNCPLOT_MODEL_FILENAME = "model.js"
 # Browser timers store the millisecond delay in a signed 32-bit integer.
 const _SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS = typemax(Int32) / 1_000
@@ -13,20 +21,16 @@ const _SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS = typemax(Int32) / 1_000
 # serializer flushes to disk whenever this threshold is reached.
 const _SYNCPLOT_MODEL_JSON_BUFFER_BYTES = 16 * 1024
 
+# ElectronCall is a hard dependency. It is loaded on first desktop or export use
+# so that `using PlotlySupply` stays fast; a genuine load failure (for example an
+# environment that was never instantiated) propagates with its own message.
 function _electroncall()
 	try
 		return Base.root_module(_ELECTRONCALL_PKGID)
-	catch
-		try
-			Base.require(_ELECTRONCALL_PKGID)
-			return Base.root_module(_ELECTRONCALL_PKGID)
-		catch
-			error(
-				"ElectronCall.jl is required for desktop SyncPlot windows. " *
-				"Run `import Pkg; Pkg.add(\"ElectronCall\")` once in your environment.",
-			)
-		end
+	catch err
+		err isa KeyError || rethrow()
 	end
+	return Base.require(_ELECTRONCALL_PKGID)
 end
 
 # Escape every "</" as "<\/" so no close-tag sequence (in any case, e.g.
@@ -81,11 +85,12 @@ end
 		(windows_drive && index == 3 && byte == 0x3a) # '/C:'
 end
 
-# Build a well-formed file URI from an absolute local path without relying on
-# Base.Filesystem.uripath (which is unavailable on supported Julia 1.10).
-# Encode UTF-8 bytes outside RFC 3986's unreserved set so a valid depot/temp
-# path containing '#', '?', '%', quotes, or non-ASCII text cannot be parsed as
-# a fragment/query or break the surrounding JavaScript/HTML literal.
+# Build a well-formed, host-less `file:///...` URI from an absolute local path.
+# Base.Filesystem.uripath is not used because it embeds the local hostname
+# (`file://<host>/...`). Encode UTF-8 bytes outside RFC 3986's unreserved set
+# so a valid depot/temp path containing '#', '?', '%', quotes, or non-ASCII text
+# cannot be parsed as a fragment/query or break the surrounding JavaScript/HTML
+# literal.
 function _file_uri(path::AbstractString)
 	p = replace(path, "\\" => "/")
 	Sys.iswindows() && !startswith(p, "/") && (p = "/" * p)
@@ -160,9 +165,19 @@ function _default_electron_app(ec)
 end
 
 function _next_syncplot_id()
-	_SYNC_ID_COUNTER[] += 1
-	return "plotsupply-" * string(_SYNC_ID_COUNTER[]) * "-" * string(time_ns())
+	id = Threads.atomic_add!(_SYNC_ID_COUNTER, 1) + 1
+	return "plotsupply-" * string(id) * "-" * string(time_ns())
 end
+
+# Escape text for an HTML text node or attribute value.
+_html_escape(text::AbstractString) = replace(
+	text,
+	"&" => "&amp;",
+	"<" => "&lt;",
+	">" => "&gt;",
+	"\"" => "&quot;",
+	"'" => "&#39;",
+)
 
 function _plotlyjs_newplot_script(
 	p::Plot,
@@ -188,7 +203,9 @@ function _plotlyjs_newplot_script(
   await Plotly.newPlot(div, $data_js, $layout_js, $config_js);
   if (frames.length > 0) {
     await Plotly.addFrames(div, frames);
-    if ($autoplay_js) await Plotly.animate(div, null);
+    // Start playback without awaiting it: the backend serializes every
+    // renderer command, so awaiting would block all windows until it ends.
+    if ($autoplay_js) Plotly.animate(div, null).catch(function() {});
   }
   return "ok";
 })()
@@ -199,6 +216,7 @@ function _syncplot_html(
 	divid::String;
 	autoplay::Bool,
 	timeout_s::Float64,
+	title::AbstractString = _SYNCPLOT_DEFAULT_TITLE,
 )
 	plotlyjs_uri = _plotlyjs_asset_uri()
 	divid_js = _json_js(divid)
@@ -207,6 +225,13 @@ function _syncplot_html(
 	timeout_message_js = _json_js(
 		"SyncPlot initial render timed out after $(timeout_s) seconds",
 	)
+	# Electron replaces the BrowserWindow title with the page <title>, so the
+	# page carries the requested window title.
+	title_html = _html_escape(title)
+	# MathJax typesets "$...$" labels exactly as in the export window
+	# (`_export_window_html`). It must be defined before Plotly draws, so it is
+	# loaded parser-blocking in <head>, ahead of the render script below.
+	mathjax_config = _mathjax_config_script()
 
 	return """
 <!doctype html>
@@ -214,7 +239,9 @@ function _syncplot_html(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PlotlySupply</title>
+  <title>$title_html</title>
+$mathjax_config
+  <script src="$_MATHJAX_CDN_URL"></script>
   <style>
     html, body, #$divid {
       margin: 0;
@@ -304,10 +331,9 @@ function _syncplot_html(
         if (Array.isArray(model.frames) && model.frames.length > 0) {
           await Plotly.addFrames(div, model.frames);
           requireTimeRemaining();
-          if ($autoplay_js) {
-            await Plotly.animate(div, null);
-            requireTimeRemaining();
-          }
+          // Playback is not part of readiness: an animation may legitimately
+          // run longer than the startup deadline.
+          if ($autoplay_js) Plotly.animate(div, null).catch(function() {});
         }
         return "ok";
       })();
@@ -379,8 +405,21 @@ function _syncplot_native_window_closed(window, message_channel)
 	return false
 end
 
-function _watch_syncplot_window!(sp::SyncPlot, ec)
+_syncplot_close_started(resources::_SyncPlotResources) =
+	lock(() -> resources.close_started, resources.lock)
+
+# Watch the native window and release the SyncPlot when the user closes it.
+#
+# With `retain = false` (hidden windows) the watcher holds the SyncPlot only
+# weakly: nobody can see or reach a hidden window whose SyncPlot is unreachable,
+# so it is closed by `_finalize_syncplot!`. With `retain = true` (visible
+# windows) the watcher holds the SyncPlot until its window closes, so a window
+# the user can see never disappears at an arbitrary GC, e.g. after
+# `plot_scatter(...; show = true)` used as a statement.
+function _watch_syncplot_window!(sp::SyncPlot, ec; retain::Bool = false)
 	weak_sp = WeakRef(sp)
+	retained = Ref{Union{Nothing,SyncPlot}}(retain ? sp : nothing)
+	resources = getfield(sp, :_resources)
 	window = getfield(sp, :window)
 	message_channel = try
 		Base.invokelatest(() -> ec.msgchannel(window))
@@ -388,16 +427,20 @@ function _watch_syncplot_window!(sp::SyncPlot, ec)
 		nothing
 	end
 
-	task = @async begin
+	task = @async try
 		while !_syncplot_native_window_closed(window, message_channel)
+			# An explicit close() owns the cleanup from here on.
+			_syncplot_close_started(resources) && return nothing
 			# Inspect the weak reference only before yielding and never retain its
 			# value in a local across sleep. This lets an otherwise-unreferenced
-			# SyncPlot reach its finalizer while the watcher is active.
-			isnothing(weak_sp.value) && return nothing
+			# hidden SyncPlot reach its finalizer while the watcher is active.
+			retained[] === nothing && isnothing(weak_sp.value) &&
+				return nothing
 			sleep(_SYNC_WINDOW_WATCH_INTERVAL_SECONDS)
 		end
 
-		obj = weak_sp.value
+		obj = retained[]
+		obj === nothing && (obj = weak_sp.value)
 		if obj !== nothing
 			try
 				close(obj)
@@ -411,18 +454,98 @@ function _watch_syncplot_window!(sp::SyncPlot, ec)
 			end
 		end
 		return nothing
+	finally
+		# Drop the strong reference even if this finished Task stays reachable.
+		retained[] = nothing
 	end
 	errormonitor(task)
 	return nothing
 end
 
+# GC finalizer of every SyncPlot that owns a window. Finalizers must not
+# task-switch, but close() takes locks and performs ElectronCall pipe I/O; doing
+# that inline aborted the write mid-command, left the window open and corrupted
+# the next command on the shared pipe. As the `finalizer` docstring advises,
+# defer the work to a task that runs outside the finalizer; the task keeps `sp`
+# alive until it has run.
 function _finalize_syncplot!(sp::SyncPlot)
+	Threads.@spawn _close_unreachable_syncplot(sp)
+	return nothing
+end
+
+function _close_unreachable_syncplot(sp::SyncPlot)
 	try
 		close(sp)
-	catch
+	catch err
+		@warn "Failed to close the window of an unreachable SyncPlot." exception = (
+			err,
+			catch_backtrace(),
+		)
 	end
 	return nothing
 end
+
+function _syncplot_window_dimension(
+	who::AbstractString,
+	name::AbstractString,
+	value::Real,
+	default::Int,
+)
+	value isa Bool && throw(ArgumentError(
+		"$who: $name must be a number of pixels, got the Bool $value",
+	))
+	isfinite(value) && value >= 0 || throw(ArgumentError(
+		"$who: $name must be a finite, non-negative number of pixels " *
+		"(0 selects the default $default), got $value",
+	))
+	iszero(value) && return default
+	value <= _SYNCPLOT_MAX_WINDOW_PIXELS || throw(ArgumentError(
+		"$who: $name of $value pixels exceeds the largest window size " *
+		"($(_SYNCPLOT_MAX_WINDOW_PIXELS))",
+	))
+	pixels = round(Int, value)
+	pixels >= 1 || throw(ArgumentError(
+		"$who: $name must be at least 1 pixel, got $value",
+	))
+	return pixels
+end
+
+# Validate and normalize the window options shared by `to_syncplot` and
+# `plot(...; sync = true)`. It has no side effects, so `plot(...; sync = false)`
+# can validate the same options it does not apply.
+function _syncplot_window_options(
+	who::AbstractString;
+	app = nothing,
+	width::Real = _SYNCPLOT_DEFAULT_WIDTH,
+	height::Real = _SYNCPLOT_DEFAULT_HEIGHT,
+	title::AbstractString = _SYNCPLOT_DEFAULT_TITLE,
+	show::Bool = true,
+	autoplay::Bool = true,
+	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
+)
+	return (
+		app = app,
+		width = _syncplot_window_dimension(
+			who,
+			"width",
+			width,
+			_SYNCPLOT_DEFAULT_WIDTH,
+		),
+		height = _syncplot_window_dimension(
+			who,
+			"height",
+			height,
+			_SYNCPLOT_DEFAULT_HEIGHT,
+		),
+		title = isempty(title) ? _SYNCPLOT_DEFAULT_TITLE : String(title),
+		show = show,
+		autoplay = autoplay,
+		timeout_s = _validated_syncplot_startup_timeout_seconds(timeout_s),
+	)
+end
+
+const _SYNCPLOT_WINDOW_OPTION_NAMES =
+	(:app, :width, :height, :title, :show, :autoplay, :timeout_s)
 
 function _create_syncplot_window(
 	p::Plot;
@@ -435,21 +558,32 @@ function _create_syncplot_window(
 	ec,
 	p::Plot;
 	app = nothing,
-	width::Int = 960,
-	height::Int = 720,
-	title::String = "PlotlySupply",
+	width::Real = _SYNCPLOT_DEFAULT_WIDTH,
+	height::Real = _SYNCPLOT_DEFAULT_HEIGHT,
+	title::AbstractString = _SYNCPLOT_DEFAULT_TITLE,
 	show::Bool = true,
 	autoplay::Bool = true,
 	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
 )
 	_require_syncplot_model(p)
-	startup_timeout = _validated_syncplot_startup_timeout_seconds(timeout_s)
+	# Validate everything before the backend, the temp directory or a window
+	# exists, so invalid options leave nothing behind.
+	options = _syncplot_window_options(
+		"to_syncplot";
+		width = width,
+		height = height,
+		title = title,
+		show = show,
+		autoplay = autoplay,
+		timeout_s = timeout_s,
+	)
 	electron_app = app === nothing ? _default_electron_app(ec) : app
 	divid = _next_syncplot_id()
 	html = _syncplot_html(
 		divid;
-		autoplay = autoplay,
-		timeout_s = startup_timeout,
+		autoplay = options.autoplay,
+		timeout_s = options.timeout_s,
+		title = options.title,
 	)
 	readiness_js = _syncplot_readiness_script()
 
@@ -469,27 +603,27 @@ function _create_syncplot_window(
 		window = Base.invokelatest(() -> ec.Window(
 			electron_app,
 			file_uri;
-			width = width,
-			height = height,
-			title = title,
-			show = show,
+			width = options.width,
+			height = options.height,
+			title = options.title,
+			show = options.show,
 		))
 		render_result = Base.invokelatest(
 			() -> ec.run(window, readiness_js),
 		)
 		_require_plotlyjs_success(render_result, "initial render")
 		creation_spec = _SyncPlotCreationSpec(
-			width,
-			height,
-			title,
-			show,
-			autoplay,
-			startup_timeout,
+			options.width,
+			options.height,
+			options.title,
+			options.show,
+			options.autoplay,
+			options.timeout_s,
 		)
 		resources = _SyncPlotResources(tempdir, ec, creation_spec)
 		sp = SyncPlot(p, electron_app, window, divid, resources)
 		finalizer(_finalize_syncplot!, sp)
-		_watch_syncplot_window!(sp, ec)
+		_watch_syncplot_window!(sp, ec; retain = options.show)
 		return sp
 	catch
 		if sp !== nothing
@@ -531,9 +665,9 @@ end
 function to_syncplot(
 	fig::Plot;
 	app = nothing,
-	width::Int = 960,
-	height::Int = 720,
-	title::String = "PlotlySupply",
+	width::Real = _SYNCPLOT_DEFAULT_WIDTH,
+	height::Real = _SYNCPLOT_DEFAULT_HEIGHT,
+	title::AbstractString = _SYNCPLOT_DEFAULT_TITLE,
 	show::Bool = true,
 	autoplay::Bool = true,
 	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
@@ -550,10 +684,48 @@ function to_syncplot(
 	)
 end
 
-to_syncplot(sp::SyncPlot; kwargs...) = sp
+# The window already exists: validate the options (so a typo still raises) and
+# return the SyncPlot unchanged.
+function to_syncplot(
+	sp::SyncPlot;
+	app = nothing,
+	width::Real = _SYNCPLOT_DEFAULT_WIDTH,
+	height::Real = _SYNCPLOT_DEFAULT_HEIGHT,
+	title::AbstractString = _SYNCPLOT_DEFAULT_TITLE,
+	show::Bool = true,
+	autoplay::Bool = true,
+	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
+)
+	_syncplot_window_options(
+		"to_syncplot";
+		app = app,
+		width = width,
+		height = height,
+		title = title,
+		show = show,
+		autoplay = autoplay,
+		timeout_s = timeout_s,
+	)
+	return sp
+end
 
-function _maybe_syncplot(fig::Plot; sync::Bool = false, kwargs...)
-	return sync ? to_syncplot(fig; kwargs...) : fig
+function _figure_argument_hint(value)
+	value isa SubplotFigure && return " A SubplotFigure keeps its own " *
+		"figure: create it with `subplots(...; sync = true)` for a live " *
+		"window, call `display(sf)` to open its Plot in a window, or use " *
+		"`sf.plot` for the underlying Plot."
+	value isa SyncPlot && return " A SyncPlot is already shown in a " *
+		"window; its figure is `sp.plot`."
+	return ""
+end
+
+function to_syncplot(fig; kwargs...)
+	throw(ArgumentError(
+		"to_syncplot: expected a Plot or a SyncPlot, got a value of type " *
+		"$(typeof(fig)). Accepted forms: to_syncplot(fig::Plot; app, width, " *
+		"height, title, show, autoplay, timeout_s) and " *
+		"to_syncplot(sp::SyncPlot)." * _figure_argument_hint(fig),
+	))
 end
 
 # PlotlySupply's Plot mutators resize and reorder trace containers, and its
@@ -564,89 +736,258 @@ end
 _owned_plot_vector(items::Vector) = items
 _owned_plot_vector(items::AbstractVector{T}) where {T} = Vector{T}(items)
 
+# Accept an untyped vector (e.g. `Any[]` filled with push!) whose elements are
+# all of `element_type`, narrowing it to the elements' common type.
+function _plot_typed_vector(
+	items::AbstractVector,
+	element_type::Type,
+	what::AbstractString,
+	hint::AbstractString,
+	empty_vector::AbstractVector,
+)
+	items isa AbstractVector{<:element_type} && return _owned_plot_vector(items)
+	for (position, item) in enumerate(items)
+		item isa element_type || throw(ArgumentError(
+			"plot: element $position of the $what vector is a " *
+			"$(typeof(item)), not a $what; $hint",
+		))
+	end
+	isempty(items) && return empty_vector
+	return collect(mapreduce(typeof, typejoin, items), items)
+end
+
+_plot_trace_vector(traces::AbstractVector) = _plot_typed_vector(
+	traces,
+	AbstractTrace,
+	"trace",
+	"build traces with e.g. `scatter(x = x, y = y)`, or plot data vectors " *
+	"with `plot_scatter(x, y)`.",
+	Vector{GenericTrace}(undef, 0),
+)
+
+_plot_frame_vector(frames::AbstractVector) = _plot_typed_vector(
+	frames,
+	PlotlyFrame,
+	"frame",
+	"build frames with `frame(name = ..., data = [...])`.",
+	PlotlyFrame[],
+)
+
+# Keywords that describe the figure itself. They are rejected where they would
+# be ignored: when the same argument was given positionally, or for a prebuilt
+# Plot.
+const _PLOT_MODEL_KEYWORDS = (:layout, :config, :frames)
+
+function _plot_window_options(kwargs)
+	for key in keys(kwargs)
+		key in _PLOT_MODEL_KEYWORDS && throw(ArgumentError(
+			"plot: `$key` cannot be passed as a keyword in this call: it was " *
+			"already given positionally, or the figure is a prebuilt `Plot` " *
+			"(change a Plot with `relayout!`/`update!`, or build a new one).",
+		))
+	end
+	unknown = [key for key in keys(kwargs) if !(key in _SYNCPLOT_WINDOW_OPTION_NAMES)]
+	isempty(unknown) || throw(ArgumentError(
+		"plot: unsupported keyword argument" *
+		(length(unknown) == 1 ? " " : "s ") *
+		join(("`$key`" for key in unknown), ", ") *
+		". Accepted keywords: layout, frames, config, sync, and the window " *
+		"options " * join(_SYNCPLOT_WINDOW_OPTION_NAMES, ", ") *
+		" (validated on every call, applied with sync = true).",
+	))
+	return _syncplot_window_options("plot"; kwargs...)
+end
+
+function _plot_figure(
+	traces::AbstractVector,
+	layout::AbstractLayout,
+	frames::AbstractVector,
+	config::PlotConfig,
+	sync::Bool,
+	window::NamedTuple,
+)
+	fig = Plot(traces, layout, frames; config = config)
+	sync || return fig
+	return _create_syncplot_window(fig; window...)
+end
+
 function plot(
 	trace::AbstractTrace,
-	layout::AbstractLayout = Layout();
+	layout::AbstractLayout;
 	config::PlotConfig = PlotConfig(),
-	frames::AbstractVector{<:PlotlyFrame} = PlotlyFrame[],
+	frames::AbstractVector = PlotlyFrame[],
 	sync::Bool = false,
 	kwargs...,
 )
-	owned_frames = _owned_plot_vector(frames)
-	return _maybe_syncplot(Plot([trace], layout, owned_frames; config = config); sync = sync, kwargs...)
+	window = _plot_window_options(kwargs)
+	return _plot_figure([trace], layout, _plot_frame_vector(frames), config, sync, window)
 end
 
 function plot(
 	trace::AbstractTrace,
 	layout::AbstractLayout,
-	frames::AbstractVector{<:PlotlyFrame};
+	frames::AbstractVector;
 	config::PlotConfig = PlotConfig(),
 	sync::Bool = false,
 	kwargs...,
 )
-	owned_frames = _owned_plot_vector(frames)
-	return _maybe_syncplot(Plot([trace], layout, owned_frames; config = config); sync = sync, kwargs...)
+	window = _plot_window_options(kwargs)
+	return _plot_figure([trace], layout, _plot_frame_vector(frames), config, sync, window)
 end
 
-function plot(
-	traces::AbstractVector{<:AbstractTrace},
-	layout::AbstractLayout = Layout();
-	config::PlotConfig = PlotConfig(),
-	frames::AbstractVector{<:PlotlyFrame} = PlotlyFrame[],
-	sync::Bool = false,
-	kwargs...,
-)
-	owned_traces = _owned_plot_vector(traces)
-	owned_frames = _owned_plot_vector(frames)
-	return _maybe_syncplot(Plot(owned_traces, layout, owned_frames; config = config); sync = sync, kwargs...)
-end
-
-function plot(
-	traces::AbstractVector{<:AbstractTrace},
-	layout::AbstractLayout,
-	frames::AbstractVector{<:PlotlyFrame};
-	config::PlotConfig = PlotConfig(),
-	sync::Bool = false,
-	kwargs...,
-)
-	owned_traces = _owned_plot_vector(traces)
-	owned_frames = _owned_plot_vector(frames)
-	return _maybe_syncplot(Plot(owned_traces, layout, owned_frames; config = config); sync = sync, kwargs...)
-end
-
+# One or more traces; also the single-trace form with a `layout` keyword.
 function plot(
 	traces::AbstractTrace...;
 	layout::AbstractLayout = Layout(),
 	config::PlotConfig = PlotConfig(),
-	frames::AbstractVector{<:PlotlyFrame} = PlotlyFrame[],
+	frames::AbstractVector = PlotlyFrame[],
 	sync::Bool = false,
 	kwargs...,
 )
-	owned_frames = _owned_plot_vector(frames)
-	return _maybe_syncplot(Plot(collect(traces), layout, owned_frames; config = config); sync = sync, kwargs...)
+	window = _plot_window_options(kwargs)
+	return _plot_figure(collect(traces), layout, _plot_frame_vector(frames), config, sync, window)
 end
 
-plot(fig::Plot; sync::Bool = false, kwargs...) = _maybe_syncplot(fig; sync = sync, kwargs...)
+function plot(
+	traces::AbstractVector;
+	layout::AbstractLayout = Layout(),
+	config::PlotConfig = PlotConfig(),
+	frames::AbstractVector = PlotlyFrame[],
+	sync::Bool = false,
+	kwargs...,
+)
+	window = _plot_window_options(kwargs)
+	return _plot_figure(
+		_plot_trace_vector(traces),
+		layout,
+		_plot_frame_vector(frames),
+		config,
+		sync,
+		window,
+	)
+end
+
+function plot(
+	traces::AbstractVector,
+	layout::AbstractLayout;
+	config::PlotConfig = PlotConfig(),
+	frames::AbstractVector = PlotlyFrame[],
+	sync::Bool = false,
+	kwargs...,
+)
+	window = _plot_window_options(kwargs)
+	return _plot_figure(
+		_plot_trace_vector(traces),
+		layout,
+		_plot_frame_vector(frames),
+		config,
+		sync,
+		window,
+	)
+end
+
+function plot(
+	traces::AbstractVector,
+	layout::AbstractLayout,
+	frames::AbstractVector;
+	config::PlotConfig = PlotConfig(),
+	sync::Bool = false,
+	kwargs...,
+)
+	window = _plot_window_options(kwargs)
+	return _plot_figure(
+		_plot_trace_vector(traces),
+		layout,
+		_plot_frame_vector(frames),
+		config,
+		sync,
+		window,
+	)
+end
+
+function plot(fig::Plot; sync::Bool = false, kwargs...)
+	window = _plot_window_options(kwargs)
+	sync || return fig
+	return _create_syncplot_window(fig; window...)
+end
 
 function plot(
 	;
 	layout::AbstractLayout = Layout(),
 	config::PlotConfig = PlotConfig(),
-	frames::AbstractVector{<:PlotlyFrame} = PlotlyFrame[],
+	frames::AbstractVector = PlotlyFrame[],
 	sync::Bool = false,
 	kwargs...,
 )
-	empty_traces = Vector{GenericTrace}(undef, 0)
-	owned_frames = _owned_plot_vector(frames)
-	return _maybe_syncplot(Plot(empty_traces, layout, owned_frames; config = config); sync = sync, kwargs...)
+	window = _plot_window_options(kwargs)
+	return _plot_figure(
+		Vector{GenericTrace}(undef, 0),
+		layout,
+		_plot_frame_vector(frames),
+		config,
+		sync,
+		window,
+	)
 end
 
-# Positional-layout form. `make_subplots` and other PlotlyJS-compat helpers call
-# `plot(Layout(...))` with the layout passed positionally; without this method
-# such calls fall through to the variadic error stub in PlotlySupply.jl.
-plot(layout::AbstractLayout; kwargs...) = plot(; layout = layout, kwargs...)
-plot(layout::AbstractLayout, frames::AbstractVector{<:PlotlyFrame}; kwargs...) =
-	plot(; layout = layout, frames = frames, kwargs...)
+# Positional-layout forms (`make_subplots` and other PlotlyJS-compat helpers
+# call `plot(Layout(...))`).
+function plot(
+	layout::AbstractLayout;
+	config::PlotConfig = PlotConfig(),
+	frames::AbstractVector = PlotlyFrame[],
+	sync::Bool = false,
+	kwargs...,
+)
+	window = _plot_window_options(kwargs)
+	return _plot_figure(
+		Vector{GenericTrace}(undef, 0),
+		layout,
+		_plot_frame_vector(frames),
+		config,
+		sync,
+		window,
+	)
+end
+
+function plot(
+	layout::AbstractLayout,
+	frames::AbstractVector;
+	config::PlotConfig = PlotConfig(),
+	sync::Bool = false,
+	kwargs...,
+)
+	window = _plot_window_options(kwargs)
+	return _plot_figure(
+		Vector{GenericTrace}(undef, 0),
+		layout,
+		_plot_frame_vector(frames),
+		config,
+		sync,
+		window,
+	)
+end
+
+const _PLOT_ACCEPTED_FORMS =
+	"Accepted forms: plot(trace, layout[, frames]), " *
+	"plot(traces::AbstractTrace...; layout), " *
+	"plot(traces::AbstractVector[, layout[, frames]]), " *
+	"plot(layout[, frames]), plot(; layout) and plot(fig::Plot). " *
+	"To plot data vectors use `plot_scatter(x, y)` (or another plot_* " *
+	"function), or build traces with e.g. `scatter(x = x, y = y)`."
+
+function plot(args...; kwargs...)
+	types = join((string(typeof(arg)) for arg in args), ", ")
+	hint = ""
+	for arg in args
+		hint = _figure_argument_hint(arg)
+		isempty(hint) || break
+	end
+	throw(ArgumentError(
+		"plot: no method accepts positional arguments of type ($types). " *
+		_PLOT_ACCEPTED_FORMS * hint,
+	))
+end
 
 function _require_open_syncplot_window(sp::SyncPlot)
 	resources = getfield(sp, :_resources)
@@ -728,7 +1069,8 @@ function _plotlyjs_refresh_payload_script(
   await Plotly.newPlot(div, $(payload.data), $(payload.layout), $(payload.config));
   if (frames.length > 0) {
     await Plotly.addFrames(div, frames);
-    if ($autoplay_js) await Plotly.animate(div, null);
+    // Start playback without awaiting it (see _plotlyjs_newplot_script).
+    if ($autoplay_js) Plotly.animate(div, null).catch(function() {});
   }
   return "ok";
 })()
@@ -753,34 +1095,6 @@ function _run_plotlyjs_script!(
 	ec = _syncplot_backend(sp)
 	result = Base.invokelatest(() -> ec.run(sp.window, js))
 	_require_plotlyjs_success(result, operation)
-	return nothing
-end
-
-function _plotlyjs_refresh!(
-	sp::SyncPlot,
-	data,
-	layout;
-	model::Plot = sp.plot,
-	rebuild::Bool = false,
-	autoplay::Bool = false,
-)
-	_require_open_syncplot_window(sp)
-	js = _plotlyjs_refresh_script(
-		sp,
-		data,
-		layout;
-		model = model,
-		rebuild = rebuild,
-		autoplay = autoplay,
-	)
-	# Serialization can be material for large models. Recheck after it finishes
-	# so a concurrently closed window never receives a stale renderer command.
-	_require_open_syncplot_window(sp)
-	_run_plotlyjs_script!(
-		sp,
-		js,
-		rebuild ? "newPlot" : "react",
-	)
 	return nothing
 end
 
@@ -8841,30 +9155,69 @@ function Base.display(d::ElectronDisplay, p::Plot)
 	return nothing
 end
 
+# A Plot-backed SubplotFigure opens like its Plot. A SyncPlot-backed one already
+# owns its window; like a bare SyncPlot (no ElectronDisplay method), it falls
+# through to the next display on the stack, which prints the compact form.
+function Base.display(d::ElectronDisplay, sf::SubplotFigure)
+	fig = getfield(sf, :fig)
+	fig isa Plot || throw(MethodError(display, (d, sf)))
+	return display(d, fig)
+end
+
 function Base.show(io::IO, sp::SyncPlot)
 	state = isopen(sp) ? "open" : "closed"
 	print(io, "SyncPlot($state, div=\"$(sp.divid)\")")
 end
 
-"""
-	msgchannel(sp::SyncPlot)
-
-Return the `ElectronCall` message channel attached to `sp`'s window, for
-sending custom messages between Julia and the Electron renderer.
-"""
-function msgchannel(sp::SyncPlot)
-	ec = _electroncall()
-	return Base.invokelatest(() -> ec.msgchannel(sp.window))
+function Base.show(io::IO, sf::SubplotFigure)
+	fig = getfield(sf, :fig)
+	print(
+		io,
+		"SubplotFigure(",
+		getfield(sf, :rows),
+		"x",
+		getfield(sf, :cols),
+		" grid, active cell (",
+		getfield(sf, :current_row),
+		", ",
+		getfield(sf, :current_col),
+		"), ",
+	)
+	if fig isa SyncPlot
+		show(io, fig)
+	else
+		trace_count = length(fig.data)
+		print(io, "Plot with ", trace_count, trace_count == 1 ? " trace" : " traces")
+	end
+	print(io, ")")
+	return nothing
 end
 
 """
-	toggle_devtools(sp::SyncPlot)
+	msgchannel(sp::SyncPlot) -> Channel
 
-Toggle the Chromium developer-tools panel of `sp`'s Electron window.
+Return the `ElectronCall` message channel attached to `sp`'s window, for
+sending custom messages between Julia and the Electron renderer. The channel
+is closed when the window closes.
+"""
+function msgchannel(sp::SyncPlot)
+	ec = _syncplot_backend(sp)
+	window = getfield(sp, :window)
+	return Base.invokelatest(() -> ec.msgchannel(window))
+end
+
+"""
+	toggle_devtools(sp::SyncPlot) -> nothing
+
+Toggle the Chromium developer-tools panel of `sp`'s Electron window. Throws an
+`InvalidStateException` when the window is not open.
 """
 function toggle_devtools(sp::SyncPlot)
-	ec = _electroncall()
-	return Base.invokelatest(() -> ec.toggle_devtools(sp.window))
+	_require_open_syncplot_window(sp)
+	ec = _syncplot_backend(sp)
+	window = getfield(sp, :window)
+	Base.invokelatest(() -> ec.toggle_devtools(window))
+	return nothing
 end
 
 # ── Hidden export window (for savefig) ──────────────────────────────
