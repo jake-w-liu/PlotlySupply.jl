@@ -9401,7 +9401,7 @@ function _extended_secondary_y_guard(who::AbstractString, secondary_y::Bool)
 end
 
 # A user label through the mathtext pipeline (text plotly typesets: titles,
-# axis titles, legend names, parcoords/ternary axis titles, annotations).
+# axis titles, legend names, ternary axis titles, annotations).
 function _extended_label(
 	text::AbstractString,
 	who::AbstractString,
@@ -9417,7 +9417,8 @@ function _extended_label(
 end
 
 # The same for text plotly draws without MathJax (`data-notex`: slice labels
-# of pie/funnelarea/sunburst/treemap, sankey node labels).
+# of pie/funnelarea/sunburst/treemap, sankey node labels) and for parcoords
+# dimension labels (see `_parcoords_dim`).
 function _extended_plain_label(
 	text::AbstractString,
 	who::AbstractString,
