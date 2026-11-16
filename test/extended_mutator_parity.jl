@@ -95,6 +95,11 @@ function _extended_constructor_keywords(function_object)
     return result
 end
 
+# Keywords a mutator takes beyond its constructor: the SubplotFigure cell
+# selectors (rejected with a clear error on a single figure) and `show`
+# (accepted only to reject it with a clear error).
+const _EXTENDED_MUTATOR_GUARD_KEYWORDS = (:row, :col, :secondary_y, :show)
+
 function _extended_mutator_keywords(function_object)
     result = Set{Symbol}()
     for method in methods(function_object)
@@ -110,11 +115,21 @@ function _extended_mutator_keywords(function_object)
             ),
         )
     end
+    foreach(keyword -> delete!(result, keyword), _EXTENDED_MUTATOR_GUARD_KEYWORDS)
     return result
 end
 
 @testset "CRC: extended constructors and mutators expose the same options" begin
     for (constructor, mutator) in (
+        (plot_pie, plot_pie!),
+        (plot_funnelarea, plot_funnelarea!),
+        (plot_sunburst, plot_sunburst!),
+        (plot_treemap, plot_treemap!),
+        (plot_funnel, plot_funnel!),
+        (plot_waterfall, plot_waterfall!),
+        (plot_indicator, plot_indicator!),
+        (plot_sankey, plot_sankey!),
+        (plot_parcoords, plot_parcoords!),
         (plot_area, plot_area!),
         (plot_candlestick, plot_candlestick!),
         (plot_ohlc, plot_ohlc!),
@@ -225,6 +240,26 @@ end
         )[:showgrid] === true
     end
 
+    # Finding 249: `plot_waterfall!` used to default to `grid=true` and
+    # re-apply the template grid on every call; `plot_funnel!` ignored grid.
+    for (mutator, args) in (
+        (plot_waterfall!, (["a", "b"], [1.0, -0.5])),
+        (plot_funnel!, ([3.0, 2.0], ["a", "b"])),
+    )
+        figure = plot_scatter(1:3, 1:3)
+        @test mutator(figure, args...; grid=false) === nothing
+        layout = _extended_fields(figure.layout)
+        @test _extended_fields(layout[:xaxis])[:showgrid] === false
+        @test _extended_fields(layout[:yaxis])[:showgrid] === false
+        @test mutator(figure, args...) === nothing
+        layout = _extended_fields(figure.layout)
+        @test _extended_fields(layout[:xaxis])[:showgrid] === false
+        @test mutator(figure, args...; grid=true) === nothing
+        layout = _extended_fields(figure.layout)
+        @test _extended_fields(layout[:xaxis])[:showgrid] === true
+        @test _extended_fields(layout[:yaxis])[:showgrid] === true
+    end
+
     histogram_figure = plot_scatter(1:3, 1:3)
     @test plot_histogram2d!(
         histogram_figure,
@@ -312,9 +347,9 @@ end
     ternary = _extended_fields(
         _extended_fields(figure.layout)[:ternary],
     )
-    @test _extended_fields(
-        ternary[:aaxis],
-    )[:title] == "old-a"
+    @test _extended_title_text(
+        _extended_fields(ternary[:aaxis])[:title],
+    ) == "old-a"
     for axis in (:aaxis, :baxis, :caxis)
         fields = _extended_fields(ternary[axis])
         fields[:title] = attr(
