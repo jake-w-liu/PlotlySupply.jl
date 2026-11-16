@@ -88,6 +88,44 @@ const _CBAR_DEFER_MATH_TITLES = Base.ScopedValues.ScopedValue(false)
 
 _cbar_attr(fields::Dict{Symbol,Any}) = PlotlyBase.PlotlyAttribute(fields)
 
+# Make the mapping stored under `key` in `container` (layout or coloraxis
+# fields) equal `fields`. An existing Dict/IdDict/PlotlyAttribute there that
+# can hold them (Symbol keys only, values of any type) is updated in place,
+# like the layout mutators do: the transactions run on a staged clone of the
+# layout, so another reference to that object inside the layout (e.g. under
+# `meta`) keeps pointing at the committed value. Anything else is replaced by
+# a new attribute wrapping `fields`.
+function _cbar_store_mapping!(
+	container::AbstractDict,
+	key::Symbol,
+	fields::Dict{Symbol,Any},
+)
+	target = _builtin_layout_mapping_fields(get(container, key, nothing))
+	if target !== nothing && target !== fields && Symbol <: keytype(target) &&
+			valtype(target) === Any && all(name -> name isa Symbol, keys(target))
+		for name in collect(keys(target))
+			haskey(fields, name) || delete!(target, name)
+		end
+		merge!(target, fields)
+		return nothing
+	end
+	container[key] = _cbar_attr(fields)
+	return nothing
+end
+
+# Write colorbar `bar` into coloraxis `id` (whose current fields, shallow
+# copied, are `axis`), both in place where possible (`_cbar_store_mapping!`).
+function _cbar_store_coloraxis!(
+	p::Plot,
+	id::AbstractString,
+	axis::Dict{Symbol,Any},
+	bar::Dict{Symbol,Any},
+)
+	_cbar_store_mapping!(axis, :colorbar, bar)
+	_cbar_store_mapping!(p.layout.fields, Symbol(id), axis)
+	return nothing
+end
+
 function _cbar_string(fields::AbstractDict, key::Symbol, default::String)
 	value = get(fields, key, nothing)
 	(value isa AbstractString || value isa Symbol) || return default
@@ -522,9 +560,7 @@ function _cbar_auto_place_coloraxis!(p::Plot, id::String, start_index::Int)
 	end
 	merge!(bar, _cbar_region_placement(side, all_regions))
 	haskey(bar, :thickness) || (bar[:thickness] = _CBAR_CELL_THICKNESS)
-	axis_fields = _symbol_dict(axis)
-	axis_fields[:colorbar] = _cbar_attr(bar)
-	p.layout.fields[key] = _cbar_attr(axis_fields)
+	_cbar_store_coloraxis!(p, id, _symbol_dict(axis), bar)
 	return nothing
 end
 
@@ -775,9 +811,7 @@ function _cbar_convert_math_titles!(p::Plot, indices, coloraxes)
 		geometry === nothing && continue
 		side = _cbar_title_side(bar)
 		delete!(bar, :title)
-		axis_fields = _symbol_dict(axis)
-		axis_fields[:colorbar] = _cbar_attr(bar)
-		p.layout.fields[key] = _cbar_attr(axis_fields)
+		_cbar_store_coloraxis!(p, id, _symbol_dict(axis), bar)
 		_cbar_upsert_title_annotation!(p, id, text, side, geometry)
 	end
 	return nothing
@@ -1038,8 +1072,7 @@ function _colorbar_edit_coloraxis!(
 		get(axis, :showscale, true) !== false,
 		_cbar_coloraxis_range(p, id),
 	)
-	axis[:colorbar] = _cbar_attr(bar)
-	p.layout.fields[key] = _cbar_attr(axis)
+	_cbar_store_coloraxis!(p, id, axis, bar)
 	return nothing
 end
 
@@ -1647,8 +1680,7 @@ function _shared_colorbar_apply!(
 	bar = _symbol_dict(get(axis, :colorbar, nothing))
 	range = limits !== nothing ? limits : _cbar_coloraxis_range(p, id)
 	_shared_colorbar_fill_bar!(p, bar, placement, carried, opts, id, range)
-	axis[:colorbar] = _cbar_attr(bar)
-	p.layout.fields[key] = _cbar_attr(axis)
+	_cbar_store_coloraxis!(p, id, axis, bar)
 	return nothing
 end
 

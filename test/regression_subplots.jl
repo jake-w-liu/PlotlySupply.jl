@@ -539,6 +539,14 @@ end
 			@test failing.plot.data[1] === first_surface
 			@test !haskey(failing.plot.data[1].fields, :coloraxis)
 			@test failing.plot.layout == layout_before
+
+			# A later shared surface without `colorscale` keeps the axis
+			# colorscale an earlier one set (#243).
+			scaled = subplots(1, 2; sync=false, per_subplot_legends=psl, specs=[Spec(kind="scene") Spec(kind="scene")])
+			plot_surface!(scaled, rand(3, 3); row=1, col=1, colorscale="Viridis", shared_coloraxis=true)
+			plot_surface!(scaled, rand(3, 3); row=1, col=2, shared_coloraxis=true)
+			@test _rsp_fields(_rsp_layout(scaled)[:coloraxis])[:colorscale] == "Viridis"
+			@test all(get(t.fields, :coloraxis, nothing) == "coloraxis" for t in scaled.plot.data)
 		end
 	end
 

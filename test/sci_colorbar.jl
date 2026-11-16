@@ -199,6 +199,29 @@ end
 		_scb_layout(hidden)[:coloraxis] = attr(showscale=false)
 		_SCB._place_cell_colorbars!(hidden, 1)
 		@test !haskey(_scb_axis(hidden, :coloraxis), :colorbar)
+
+		# The coloraxis and colorbar objects are updated in place, so a layout
+		# alias of them (here under `meta`) sees the placed bar.
+		aliased = Plot([heatmap(z=rand(3, 3), coloraxis="coloraxis")], deepcopy(layout))
+		cbar_obj = Dict{Symbol,Any}(:thickness => 20)
+		axis_obj = Dict{Symbol,Any}(:cmin => 0.0, :colorbar => cbar_obj)
+		_scb_layout(aliased)[:coloraxis] = axis_obj
+		_scb_layout(aliased)[:meta] = Dict{Symbol,Any}(:coloraxis => axis_obj)
+		_SCB._place_cell_colorbars!(aliased, 1)
+		@test _scb_layout(aliased)[:coloraxis] === axis_obj
+		@test axis_obj[:colorbar] === cbar_obj
+		@test cbar_obj[:x] ≈ 0.45 + _SCB._CBAR_CELL_PAD
+		@test cbar_obj[:thickness] == 20
+		@test axis_obj[:cmin] == 0.0
+		# A mapping that cannot hold Symbol keys/any values is replaced.
+		typed = Plot([heatmap(z=rand(3, 3), coloraxis="coloraxis")], deepcopy(layout))
+		typed_axis = Dict{String,Float64}("cmin" => 0.0)
+		_scb_layout(typed)[:coloraxis] = typed_axis
+		_SCB._place_cell_colorbars!(typed, 1)
+		@test _scb_layout(typed)[:coloraxis] !== typed_axis
+		@test _scb_axis(typed, :coloraxis)[:cmin] == 0.0
+		@test _scb_axis_bar(typed)[:x] ≈ 0.45 + _SCB._CBAR_CELL_PAD
+		@test typed_axis == Dict("cmin" => 0.0)
 	end
 
 	@testset "math colorbar titles become annotations" begin
