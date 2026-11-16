@@ -5132,7 +5132,7 @@ end
 # bins and drawn as `bar` traces whose bars span their bins exactly (`offset`
 # 0 and `width` = bin width, in data units). Automatic bins have equal width
 # in decades (plotly's automatic bins over log10 of the pooled samples,
-# `nbins` a maximum); explicit `bins` are linear in data units and must start
+# `nbins` approximate); explicit `bins` are linear in data units and must start
 # above 0. Non-positive samples cannot be shown on a log axis and are not
 # counted. `histnorm` and `cumulative` follow plotly's histogram: densities
 # divide by each bin's width in data units, the cumulative sum is taken after
@@ -5397,7 +5397,7 @@ function _stats_histogram!(fig, x, who::AbstractString, options, histogram_optio
 	nbins = _stats_count(o.nbinsx, who, "nbinsx")
 	bins = _stats_bins(o.bins, who)
 	(bins !== nothing && nbins > 0) && throw(ArgumentError(
-		"$(who): pass either `nbinsx` (a maximum bin count) or `bins` (explicit " *
+		"$(who): pass either `nbinsx` (an approximate bin count) or `bins` (explicit " *
 		"(start, stop, width) bins), not both.",
 	))
 	opacity = _stats_number(o.opacity, who, "opacity", 0, 1)
@@ -6385,9 +6385,12 @@ Histogram of the samples `x`. Returns a `PlotlyBase.Plot`, or a
   side.
 
 #### Keyword Arguments
-- `nbinsx::Integer = 0`: MAXIMUM number of bins; plotly picks a "nice" bin
-  width with at most this many bins (`0` = automatic). With
-  `orientation = "h"` it limits the bins along y.
+- `nbinsx::Integer = 0`: approximate number of bins (`0` = automatic). It is
+  neither exact nor a strict maximum: plotly rounds the bin width (data range
+  / `nbinsx`) to a "nice" value and aligns the edges to round numbers, so the
+  drawn count differs (measured with plotly.js 2.35: 31 bins for
+  `nbinsx = 30` on `randn(500)`, 20 on `rand(500)`). Use `bins` for exact
+  bins. With `orientation = "h"` it applies to the bins along y.
 - `bins = nothing`: explicit bins `(start, stop, width)` in data units, e.g.
   `(0, 10, 0.5)`; mutually exclusive with `nbinsx`.
 - `histnorm::AbstractString = ""`: `""` (counts), `"percent"`,
@@ -8932,8 +8935,8 @@ end
 
 Append histogram trace(s) of the samples `x` to `fig`: a `Plot`, a
 [`SyncPlot`](@ref) or a [`SubplotFigure`](@ref) cell. Data conventions and
-keywords are those of [`plot_histogram`](@ref) (`nbinsx` is a maximum bin
-count; `bins`, `histnorm`, `cumulative`, `orientation`, `barmode`, `opacity`,
+keywords are those of [`plot_histogram`](@ref) (`nbinsx` is an approximate
+bin count; `bins`, `histnorm`, `cumulative`, `orientation`, `barmode`, `opacity`,
 `hatch`, tick keywords). The series of ONE call share bins and overlay as
 described there; separate calls are binned separately, and appending single
 series one call at a time gives plotly's layout for the figure's `barmode`
@@ -11120,7 +11123,8 @@ _stats_js_floor_log10(value::Float64) = floor(log(value) / log(10.0))
 # Julia (colornorm = :log) gets the bins plotly would pick for the same data.
 # `samples` are the finite values; `total` is the length of the original data
 # including missing/non-finite entries, which plotly keeps in the sample count
-# of its 2σ/n^(1/4) estimate. `nbins > 0` is a maximum bin count. Verified
+# of its 2σ/n^(1/4) estimate. `nbins > 0` is the requested (approximate) bin
+# count, as plotly's `nbinsx`. Verified
 # against the bins plotly.js computes (gd._fullData xbins/ybins) for normal,
 # uniform, integer, constant, single-sample, scaled and clustered data.
 function _stats_autobins(samples::Vector{Float64}, nbins::Int; total::Int = length(samples))
@@ -11407,9 +11411,10 @@ numeric data only, missing and non-finite samples are skipped:
   divide by each bin's area in data units.
 
 #### Keyword Arguments
-- `nbinsx`, `nbinsy::Integer = 0`: MAXIMUM number of bins along x / y; plotly
-  picks a "nice" bin width with at most this many bins (`0` = automatic).
-  On a log axis the width is in decades.
+- `nbinsx`, `nbinsy::Integer = 0`: approximate number of bins along x / y
+  (`0` = automatic); plotly rounds the bin width to a "nice" value and aligns
+  the edges to round numbers, so the drawn count can be somewhat higher or
+  lower (see [`plot_histogram`](@ref)). On a log axis the width is in decades.
 - `histnorm::AbstractString = ""`: `""` (counts), `"percent"`,
   `"probability"`, `"density"` or `"probability density"`.
 - `colorscale = ""`: colormap name (`"viridis"`, `"RdBu_r"`, `:magma`, a

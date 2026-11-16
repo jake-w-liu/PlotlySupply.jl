@@ -292,7 +292,10 @@ end
 	plot_histogram2d!(target, x, y; yscale = "log", yrange = (0.01, 1), nbinsx = 5)
 	@test _st_axis(target, :yaxis)[:range] ≈ [-2.0, 0.0]
 	@test _st_trace(target, 2)[:type] == "heatmap"
-	@test length(_st_trace(target, 2)[:x]) - 1 <= 5   # nbinsx stays a maximum
+	# nbinsx is passed to the Julia binning as plotly's automatic bins would use it.
+	x_start, x_stop, x_width = PlotlySupply._stats_autobins(Float64.(x), 5; total = length(x))
+	@test _st_trace(target, 2)[:x] ≈
+		[x_start + k * x_width for k in 0:round(Int, (x_stop - x_start) / x_width)]
 	# A target whose axis is already logarithmic is binned in Julia too;
 	# switching the axis back to linear uses plotly's histogram2d.
 	log_target = plot_scatter([1, 10], [1, 2]; xscale = "log")
@@ -337,10 +340,13 @@ end
 	@test_throws ArgumentError plot_histogram2d(x, y[1:10])
 	@test_throws ArgumentError plot_histogram2d([x, x], [y, y])
 
-	# The docstrings state that nbinsx is a maximum (#227 #66 #77) and list the
-	# bar keywords (#302).
-	@test occursin("MAXIMUM", string(@doc plot_histogram2d))
-	@test occursin("MAXIMUM", string(@doc plot_histogram))
+	# The docstrings no longer call nbinsx a target (#227 #66): it is
+	# approximate (plotly.js 2.35 draws 31 bins for nbinsx = 30 on randn(500)
+	# and 20 on rand(500)), and they list the bar keywords.
+	for text in (string(@doc plot_histogram2d), string(@doc plot_histogram))
+		@test occursin("approximate number of bins", text)
+		@test !occursin("Target number of bins", text)
+	end
 	for keyword in ("orientation", "barmode", "error_x", "error_y")
 		@test occursin("`$(keyword)", string(@doc plot_bar))
 	end
@@ -768,7 +774,10 @@ end
 	@test first(left) <= minimum(data) && last(right) >= maximum(data)
 	@test trace[:customdata][1] ≈ [left[1], right[1]]
 	@test _st_axis(fig, :xaxis)[:type] == "log"
-	@test length(_st_trace(plot_histogram(data; xscale = "log", nbinsx = 5))[:x]) <= 5
+	# nbinsx works as for plotly's automatic bins, over log10 of the data.
+	l_start, l_stop, l_width = PlotlySupply._stats_autobins(log10.(data), 5; total = length(data))
+	@test log10.(_st_trace(plot_histogram(data; xscale = "log", nbinsx = 5))[:x]) ≈
+		[l_start + k * l_width for k in 0:(round(Int, (l_stop - l_start) / l_width) - 1)]
 
 	# Non-positive samples cannot be shown on a log axis and are not counted.
 	@test sum(_st_trace(plot_histogram([-1.0, 0.0, 1.0, 2.0, 30.0]; xscale = "log"))[:y]) == 3
