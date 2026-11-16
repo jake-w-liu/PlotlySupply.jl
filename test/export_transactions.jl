@@ -273,9 +273,11 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
             ],
         )
         try
+            # 2.0: sizes below plotly.js's 10 px layout minimum are rejected,
+            # so the rational height is 21//2 rather than 7//2.
             prepared = PlotlySupply._prepare_renderer_export(
                 p,
-                (width=12.5, height=7//2, scale=2),
+                (width=12.5, height=21//2, scale=2),
             )
             io = IOBuffer()
             PlotlySupply._savefig_prepared(
@@ -289,7 +291,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
             @test take!(io) == payload
             script = only(ec.image_scripts)
             @test occursin("width: 12.5", script)
-            @test occursin("height: 3.5", script)
+            @test occursin("height: 10.5", script)
             @test occursin("scale: 2.0", script)
         finally
             _cleanup_export_test_state(state)
@@ -586,28 +588,25 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
         end
     end
 
-    @testset "PDF copy is exact and bounded" begin
+    # 2.0: the captured PDF is read whole for post-processing (page box and
+    # dates), so the chunked stream copy was replaced by `_consume_captured_pdf`.
+    @testset "captured PDF is consumed and its directory reclaimed" begin
         mktempdir() do dir
-            small_path = joinpath(dir, "small.pdf")
-            small = [UInt8(index % 251) for index in 0:65_536]
-            write(small_path, small)
-            io = IOBuffer()
-            PlotlySupply._copy_pdf_file_chunked!(io, small_path)
-            @test take!(io) == small
-
-            large_path = joinpath(dir, "large.pdf")
-            block = fill(UInt8(0x5a), 64 * 1024)
-            open(large_path, "w") do output
-                for _ in 1:128
-                    write(output, block)
-                end
-            end
-            PlotlySupply._copy_pdf_file_chunked!(devnull, large_path)
-            allocated = @allocated PlotlySupply._copy_pdf_file_chunked!(
-                devnull,
-                large_path,
+            consumed_dir = mktempdir(dir)
+            consumed_path = joinpath(consumed_dir, "output.pdf")
+            payload = [UInt8(index % 251) for index in 0:65_536]
+            write(consumed_path, payload)
+            consumed_state = PlotlySupply._ExportState()
+            push!(consumed_state.owned_pdf_tempdirs, consumed_dir)
+            consumed = PlotlySupply._CapturedPDF(
+                consumed_dir,
+                consumed_path,
+                consumed_state,
             )
-            @test allocated < 512 * 1024
+            @test PlotlySupply._consume_captured_pdf(pdf -> read(pdf.path), consumed) ==
+                  payload
+            @test !ispath(consumed_dir)
+            @test isempty(consumed_state.owned_pdf_tempdirs)
 
             captured_dir = mktempdir(dir)
             captured_path = joinpath(captured_dir, "output.pdf")
@@ -623,8 +622,8 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
                 error("injected captured-PDF cleanup failure")
             err = @test_logs (:warn, r"Failed to remove a captured PDF") begin
                 try
-                    PlotlySupply._write_captured_pdf!(
-                        _ExportFailingIO(),
+                    PlotlySupply._consume_captured_pdf(
+                        pdf -> write(_ExportFailingIO(), read(pdf.path)),
                         captured;
                         tempdir_remover=failing_remover,
                     )

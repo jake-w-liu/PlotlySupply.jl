@@ -109,8 +109,8 @@ For the MATLAB-like helper that returns a mutable canvas, see [`subplots`](@ref)
 function make_subplots(; kwargs...)
 	fig = plot(_plotlysupply_subplot_layout(Subplots(; kwargs...)))
 	p = _plot_obj(fig)
+	# Also applies the default Cartesian axis styling (see api.jl).
 	_apply_default_template!(p)
-	_apply_default_cartesian_axes!(p)
 	_refresh!(fig)
 	return fig
 end
@@ -143,41 +143,61 @@ function mgrid(arrays...)
 	return collect(grids)
 end
 
-function _savefig_html(io::IO, p::Plot)
-	buf = IOBuffer()
-	show(
-		buf,
-		MIME("text/html"),
-		p;
-		include_mathjax = "cdn",
-		include_plotlyjs = "cdn",
-		full_html = true,
-	)
-	write(io, _inject_mathjax_svg_font(String(take!(buf))))
-	return nothing
-end
+# ── savefig: formats, options and validation ────────────────────────
 
-const _EXPORT_KW = Set((:height, :width, :scale))
-const _SAVEFIG_FORMATS = ("png", "jpeg", "svg", "pdf", "html", "json")
-const _PDF_COPY_CHUNK_BYTES = 64 * 1024
+const _SAVEFIG_FORMATS = ("png", "jpeg", "svg", "pdf", "eps", "html", "json")
+# Formats drawn by plotly.js in the hidden Electron export window.
+const _RENDERER_FORMATS = ("png", "jpeg", "svg", "pdf", "eps")
+# Formats produced by `Plotly.toImage`.
+const _IMAGE_FORMATS = ("png", "jpeg", "svg")
+const _EXPORT_KW = (
+	:width,
+	:height,
+	:scale,
+	:units,
+	:dpi,
+	:deterministic,
+	:background,
+	:tight,
+	:timeout,
+)
+# plotly.js declares layout.width/height with `min: 10` and silently replaces
+# smaller values by its 700 x 450 default, so smaller export sizes are rejected.
+const _PLOTLY_MIN_LAYOUT_PX = 10.0
+# Export size used when neither the keywords nor layout.width/height give one
+# (the 1.x default).
+const _DEFAULT_EXPORT_WIDTH_PX = 700.0
+const _DEFAULT_EXPORT_HEIGHT_PX = 500.0
+# Bound on each renderer step (drawing, printToPDF, Ghostscript). It is large
+# enough for multi-million-point figures and exists so a figure that can never
+# finish drawing (e.g. a map style that never loads) cannot hold the export
+# window, and its lock, forever.
+const _DEFAULT_EXPORT_TIMEOUT_S = 300.0
+const _TRANSPARENT_BACKGROUND = "rgba(0,0,0,0)"
+# JSON has no NaN/Infinity. plotly.js treats `null` in data arrays as a gap,
+# exactly like a non-finite number, so non-finite values are written as null.
+const _JSON_NONFINITE_AS_NULL = (allownan = true, nan = "null", inf = "null", ninf = "null")
 
 struct _ExportOptions
-	width::Float64
-	height::Float64
-	scale::Float64
-	scaled_width::Float64
-	scaled_height::Float64
-	width_js::String
-	height_js::String
-	scale_js::String
-	scaled_width_js::String
-	scaled_height_js::String
+	width::Float64          # layout width in CSS px
+	height::Float64         # layout height in CSS px
+	scale::Float64          # user magnification (1 when absent)
+	dpi::Union{Nothing,Float64}
+	deterministic::Bool
+	background::Union{Nothing,String}
+	tight::Bool
+	timeout::Float64        # seconds per renderer step
 end
 
 struct _PreparedRendererExport
 	data_js::String
 	layout_js::String
 	config_js::String
+	options::_ExportOptions
+end
+
+struct _PreparedDocumentExport
+	plot::Plot
 	options::_ExportOptions
 end
 
@@ -190,66 +210,524 @@ end
 _CapturedPDF(tempdir::String, path::String) =
 	_CapturedPDF(tempdir, path, nothing)
 
-function _validate_export_format(fmt::String)
-	fmt == "eps" && error("EPS export is not supported. Use \"svg\" or \"pdf\" instead.")
-	fmt in _SAVEFIG_FORMATS ||
-		error("Unsupported export format '$fmt'. Supported: $(join(_SAVEFIG_FORMATS, ", ")).")
-	return fmt
+# Raised when a renderer step exceeds `timeout`; the export window is retired
+# because the page may still be busy with the abandoned figure.
+struct _ExportTimeoutError <: Exception
+	message::String
+end
+
+Base.showerror(io::IO, err::_ExportTimeoutError) = print(io, err.message)
+
+# Unsupported formats keep raising `ErrorException`, as in 1.x.
+function _validate_export_format(fmt::AbstractString)
+	name = lowercase(String(fmt))
+	name == "jpg" && return "jpeg"
+	name in _SAVEFIG_FORMATS || error(
+		"savefig: unsupported export format $(repr(name)). Supported: " *
+		"png, jpeg (or jpg), svg, pdf, eps, html, json.",
+	)
+	return name
+end
+
+function _filename_export_format(
+	filename::AbstractString,
+	format::Union{Nothing,AbstractString},
+)
+	ext = lowercase(splitext(filename)[2])
+	inferred = isempty(ext) ? "png" : String(lstrip(ext, '.'))
+	fmt = isnothing(format) ? inferred : String(format)
+	return _validate_export_format(fmt)
 end
 
 function _normalize_export_number(name::Symbol, value)
 	value isa Real && !(value isa Bool) ||
-		throw(ArgumentError("$name must be a positive, finite, non-Bool real number"))
+		throw(ArgumentError("savefig: `$name` must be a positive, finite, non-Bool real number; got $(repr(value))."))
 	number = try
 		Float64(value)
 	catch
-		throw(ArgumentError("$name must be representable as a finite number"))
+		throw(ArgumentError("savefig: `$name` must be representable as a finite number."))
 	end
 	isfinite(number) && number > 0 ||
-		throw(ArgumentError("$name must be a positive, finite, non-Bool real number"))
+		throw(ArgumentError("savefig: `$name` must be a positive, finite, non-Bool real number; got $(repr(value))."))
 	return number
 end
 
-function _normalize_export_options(kwargs)
-	for k in keys(kwargs)
-		k in _EXPORT_KW ||
-			throw(ArgumentError("Unsupported keyword argument: $k. Supported: height, width, scale."))
-	end
-	width = _normalize_export_number(:width, get(kwargs, :width, 700))
-	height = _normalize_export_number(:height, get(kwargs, :height, 500))
-	scale = _normalize_export_number(:scale, get(kwargs, :scale, 1))
-	scaled_width = width * scale
-	scaled_height = height * scale
-	isfinite(scaled_width) && scaled_width > 0 ||
-		throw(ArgumentError("width * scale must be finite and positive"))
-	isfinite(scaled_height) && scaled_height > 0 ||
-		throw(ArgumentError("height * scale must be finite and positive"))
+function _export_flag(kwargs, name::Symbol, default::Bool)
+	value = get(kwargs, name, default)
+	value isa Bool ||
+		throw(ArgumentError("savefig: `$name` must be true or false; got $(repr(value))."))
+	return value
+end
 
-	# JSON is the only interpolation path for caller-controlled numeric values.
-	# Construct these strings during preflight, before opening a destination or
-	# creating/accessing an Electron export window.
+function _normalize_export_timeout(value)
+	value === nothing && return _DEFAULT_EXPORT_TIMEOUT_S
+	(value isa Real && !(value isa Bool)) ||
+		throw(ArgumentError("savefig: `timeout` must be a positive number of seconds; got $(repr(value))."))
+	seconds = Float64(value)
+	# The renderer enforces the bound with a browser timer, whose delay is a
+	# signed 32-bit millisecond count.
+	isfinite(seconds) && 0 < seconds <= _SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS ||
+		throw(ArgumentError(
+			"savefig: `timeout` must be positive, finite and at most " *
+			"$(_SYNCPLOT_MAX_STARTUP_TIMEOUT_SECONDS) s; got $(value).",
+		))
+	return seconds
+end
+
+const _CSS_HEX_COLOUR = r"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"
+const _CSS_FUNCTIONAL_COLOUR =
+	r"^(?:rgba?|hsla?|hsva?)\(\s*[-+0-9.e%]+\s*(?:,\s*[-+0-9.e%]+\s*){2,3}\)$"
+
+function _is_export_colour(colour::String)
+	occursin(_CSS_HEX_COLOUR, colour) && return true
+	occursin(_CSS_FUNCTIONAL_COLOUR, lowercase(colour)) && return true
+	return occursin(r"^[A-Za-z]+$", colour) &&
+		   haskey(PlotlyBase.Colors.color_names, lowercase(colour))
+end
+
+function _normalize_export_background(background)
+	background === nothing && return nothing
+	text = if background isa Symbol
+		String(background)
+	elseif background isa AbstractString
+		String(strip(background))
+	else
+		throw(ArgumentError(
+			"savefig: `background` must be a colour string, a Symbol such as " *
+			":white or :transparent, or nothing; got $(typeof(background)).",
+		))
+	end
+	lowercase(text) in ("transparent", "none") && return _TRANSPARENT_BACKGROUND
+	_is_export_colour(text) || throw(ArgumentError(
+		"savefig: `background` $(repr(background)) is not a colour; use a CSS " *
+		"name (\"white\"), \"#rrggbb\", \"rgb(r,g,b)\"/\"rgba(r,g,b,a)\" or :transparent.",
+	))
+	return text
+end
+
+# layout.width/height when they hold a size plotly.js would honour, else `default`.
+function _layout_export_px(p::Plot, key::Symbol, default::Float64)
+	value = get(p.layout.fields, key, nothing)
+	value isa Real && !(value isa Bool) || return default
+	number = Float64(value)
+	isfinite(number) && number >= _PLOTLY_MIN_LAYOUT_PX || return default
+	return number
+end
+
+function _export_length(p::Plot, kwargs, key::Symbol, units::Symbol, default::Float64)
+	value = get(kwargs, key, nothing)
+	value === nothing && return _layout_export_px(p, key, default)
+	number = _normalize_export_number(key, value)
+	px = _physical_to_px(number, units)
+	isfinite(px) || throw(ArgumentError("savefig: `$key` is too large."))
+	px >= _PLOTLY_MIN_LAYOUT_PX || throw(ArgumentError(
+		"savefig: `$key` = $(value) $(units) is $(px) px, below plotly.js's " *
+		"$(Int(_PLOTLY_MIN_LAYOUT_PX)) px layout minimum.",
+	))
+	return px
+end
+
+function _normalize_export_options(p::Plot, kwargs)
+	for key in keys(kwargs)
+		key in _EXPORT_KW || throw(ArgumentError(
+			"savefig: unsupported keyword argument `$key`. Supported: format, " *
+			"$(join(_EXPORT_KW, ", ")).",
+		))
+	end
+	units = get(kwargs, :units, :px)
+	units isa Symbol || throw(ArgumentError(
+		"savefig: `units` must be :px, :in, :cm, :mm or :pt; got $(repr(units)).",
+	))
+	_export_units_per_inch(units, "savefig")
+	width = _export_length(p, kwargs, :width, units, _DEFAULT_EXPORT_WIDTH_PX)
+	height = _export_length(p, kwargs, :height, units, _DEFAULT_EXPORT_HEIGHT_PX)
+
+	scale_value = get(kwargs, :scale, nothing)
+	scale = scale_value === nothing ? 1.0 : _normalize_export_number(:scale, scale_value)
+	dpi_value = get(kwargs, :dpi, nothing)
+	dpi = dpi_value === nothing ? nothing : _validated_export_dpi(dpi_value, "savefig")
+	dpi !== nothing && scale_value !== nothing && throw(ArgumentError(
+		"savefig: pass either `dpi` or `scale`, not both (`dpi` sets the raster " *
+		"scale to dpi / 96).",
+	))
+	# Every magnification a format of this call can use: `scale` for all
+	# formats, or dpi / 96 for raster and 1 for vector output.
+	scales = dpi === nothing ? (scale,) : (dpi / _CSS_PX_PER_INCH, 1.0)
+	for factor in scales, (name, size) in (("width", width), ("height", height))
+		scaled = size * factor
+		isfinite(scaled) || throw(ArgumentError(
+			"savefig: $(name) * scale must be finite; got $(size) * $(factor).",
+		))
+		scaled >= 1 || throw(ArgumentError(
+			"savefig: $(name) * scale must be at least 1 px; got $(scaled).",
+		))
+	end
+
+	tight = _export_flag(kwargs, :tight, false)
+	# `tight_layout!` comes from the sci style extension (sci/style.jl); a build
+	# without it must fail here, before any file is touched.
+	tight && !isdefined(@__MODULE__, :tight_layout!) && throw(ArgumentError(
+		"savefig: `tight = true` requires `tight_layout!`, which this build does not define.",
+	))
+
 	return _ExportOptions(
 		width,
 		height,
 		scale,
-		scaled_width,
-		scaled_height,
-		_json_js(width),
-		_json_js(height),
-		_json_js(scale),
-		_json_js(scaled_width),
-		_json_js(scaled_height),
+		dpi,
+		_export_flag(kwargs, :deterministic, true),
+		_normalize_export_background(get(kwargs, :background, nothing)),
+		tight,
+		_normalize_export_timeout(get(kwargs, :timeout, nothing)),
 	)
 end
 
-function _prepare_renderer_export(p::Plot, kwargs)
-	options = _normalize_export_options(kwargs)
+# Magnification used for `fmt`: `dpi` sets the raster resolution (scale =
+# dpi / 96) and leaves vector output at its physical size.
+function _format_scale(options::_ExportOptions, fmt::AbstractString)
+	options.dpi === nothing && return options.scale
+	return fmt in ("png", "jpeg") ? options.dpi / _CSS_PX_PER_INCH : 1.0
+end
+
+# ── savefig: the export copy ─────────────────────────────────────────
+# The caller's figure is never mutated: `tight` runs on a deep copy, and
+# backgrounds and deterministic trace uids are written into the freshly
+# lowered JSON objects that are serialized for the renderer.
+
+function _export_source(p::Plot, options::_ExportOptions)
+	options.tight || return p
+	export_copy = _clone_plot_model(p)
+	tight_layout!(export_copy)
+	return export_copy
+end
+
+function _lowered_get(object::AbstractDict, key::Symbol, default = nothing)
+	haskey(object, key) && return object[key]
+	haskey(object, String(key)) && return object[String(key)]
+	return default
+end
+
+# Set `key`, removing a String spelling of the same key so the JSON output
+# never carries it twice.
+function _lowered_set!(object::AbstractDict, key::Symbol, value)
+	haskey(object, String(key)) && delete!(object, String(key))
+	object[key] = value
+	return object
+end
+
+# Replace the nested object at `key` by a shallow copy (so objects the caller
+# still owns are never written) and return the copy.
+function _lowered_child!(object::AbstractDict, key::Symbol)
+	child = _lowered_get(object, key)
+	copied = child isa AbstractDict ? Dict{Any,Any}(child) : Dict{Any,Any}()
+	_lowered_set!(object, key, copied)
+	return copied
+end
+
+const _BACKGROUND_SUBPLOT_KEY = r"^(?:scene|polar|ternary|geo|smith)[0-9]*$"
+# Trace type => (attribute naming its subplot, default subplot).
+const _BACKGROUND_SUBPLOT_TRACES = Dict{String,Tuple{Symbol,String}}(
+	"scatter3d" => (:scene, "scene"),
+	"surface" => (:scene, "scene"),
+	"mesh3d" => (:scene, "scene"),
+	"cone" => (:scene, "scene"),
+	"streamtube" => (:scene, "scene"),
+	"volume" => (:scene, "scene"),
+	"isosurface" => (:scene, "scene"),
+	"scatterpolar" => (:subplot, "polar"),
+	"scatterpolargl" => (:subplot, "polar"),
+	"barpolar" => (:subplot, "polar"),
+	"scatterternary" => (:subplot, "ternary"),
+	"scattergeo" => (:geo, "geo"),
+	"choropleth" => (:geo, "geo"),
+	"scattersmith" => (:subplot, "smith"),
+)
+
+# `background` paints the figure (paper) background. `:transparent` also
+# clears the plot area and every 3-D scene, polar, ternary, geo and smith
+# background, so nothing opaque remains behind the data.
+function _apply_export_background!(layout::AbstractDict, data::AbstractVector, background::String)
+	_lowered_set!(layout, :paper_bgcolor, background)
+	background == _TRANSPARENT_BACKGROUND || return layout
+	_lowered_set!(layout, :plot_bgcolor, background)
+	subplots = Set{String}()
+	for key in keys(layout)
+		name = string(key)
+		occursin(_BACKGROUND_SUBPLOT_KEY, name) && push!(subplots, name)
+	end
+	for trace in data
+		trace isa AbstractDict || continue
+		spec = get(_BACKGROUND_SUBPLOT_TRACES, string(_lowered_get(trace, :type, "scatter")), nothing)
+		spec === nothing && continue
+		reference = _lowered_get(trace, spec[1], spec[2])
+		reference isa AbstractString && occursin(_BACKGROUND_SUBPLOT_KEY, reference) &&
+			push!(subplots, String(reference))
+	end
+	for name in subplots
+		_lowered_set!(_lowered_child!(layout, Symbol(name)), :bgcolor, background)
+	end
+	return layout
+end
+
+# plotly.js derives SVG ids and colorbar classes from each trace's random
+# `uid`. Fixed uids ("t0", "t1", …, skipping any uid the user set) make
+# repeated exports byte-identical.
+function _assign_export_uids!(data::AbstractVector)
+	used = Set{String}()
+	for trace in data
+		trace isa AbstractDict || continue
+		uid = _lowered_get(trace, :uid)
+		uid === nothing || push!(used, string(uid))
+	end
+	counter = 0
+	for trace in data
+		trace isa AbstractDict || continue
+		_lowered_get(trace, :uid) === nothing || continue
+		candidate = "t$(counter)"
+		while candidate in used
+			counter += 1
+			candidate = "t$(counter)"
+		end
+		counter += 1
+		push!(used, candidate)
+		_lowered_set!(trace, :uid, candidate)
+	end
+	return data
+end
+
+function _prepare_renderer_export(
+	p::Plot,
+	kwargs;
+	options::Union{Nothing,_ExportOptions} = nothing,
+	source::Union{Nothing,Plot} = nothing,
+)
+	resolved = options === nothing ? _normalize_export_options(p, kwargs) : options
+	figure = source === nothing ? _export_source(p, resolved) : source
+	data = Any[PlotlyBase.JSON.lower(trace) for trace in figure.data]
+	layout = PlotlyBase.JSON.lower(figure.layout)
+	resolved.background === nothing ||
+		_apply_export_background!(layout, data, resolved.background)
+	resolved.deterministic && _assign_export_uids!(data)
 	return _PreparedRendererExport(
-		_json_js(p.data),
-		_json_js(p.layout),
-		_json_js(p.config),
-		options,
+		_json_js(data),
+		_json_js(layout),
+		_json_js(figure.config),
+		resolved,
 	)
+end
+
+function _prepare_document_export(
+	p::Plot,
+	kwargs;
+	options::Union{Nothing,_ExportOptions} = nothing,
+	source::Union{Nothing,Plot} = nothing,
+)
+	resolved = options === nothing ? _normalize_export_options(p, kwargs) : options
+	figure = source === nothing ? _export_source(p, resolved) : source
+	return _PreparedDocumentExport(figure, resolved)
+end
+
+# Validate everything for `formats` (keywords, Ghostscript for EPS) and build
+# the export copy once. Nothing is drawn and no destination is touched.
+function _prepare_export(p::Plot, formats, kwargs)
+	options = _normalize_export_options(p, kwargs)
+	"eps" in formats && _ghostscript_command()
+	source = _export_source(p, options)
+	renderer = any(in(_RENDERER_FORMATS), formats) ?
+		_prepare_renderer_export(p, kwargs; options = options, source = source) : nothing
+	document = any(in(("html", "json")), formats) ?
+		_prepare_document_export(p, kwargs; options = options, source = source) : nothing
+	return (renderer = renderer, document = document)
+end
+
+function _prepare_savefig(p::Plot, fmt::String, kwargs)
+	prepared = _prepare_export(p, (fmt,), kwargs)
+	return fmt in _RENDERER_FORMATS ? prepared.renderer : prepared.document
+end
+
+# ── savefig: HTML and JSON ──────────────────────────────────────────
+
+# JSON for inline <script> blocks of a standalone HTML page. Besides writing
+# non-finite numbers as null, every "<", ">" and "&" becomes a \u escape:
+# those characters can only occur inside JSON strings, where the escape
+# decodes to the same character, and without them no user text can form
+# "</script>", "<!--" or "<script" and change how the HTML parser ends the
+# block. U+2028/U+2029 are escaped for pre-ES2019 JavaScript parsers.
+function _json_html(x)
+	json = PlotlyBase.JSON.json(x; _JSON_NONFINITE_AS_NULL...)
+	return replace(
+		json,
+		"<" => "\\u003c",
+		">" => "\\u003e",
+		"&" => "\\u0026",
+		" " => "\\u2028",
+		" " => "\\u2029",
+	)
+end
+
+function _html_attribute(text::AbstractString)
+	return replace(
+		String(text),
+		"&" => "&amp;",
+		"<" => "&lt;",
+		">" => "&gt;",
+		"\"" => "&quot;",
+		"'" => "&#39;",
+	)
+end
+
+# CSS size of the figure div: layout.width/height in px when they are valid
+# plotly sizes, else `default` (the figure then fills the page).
+function _html_css_length(value, default::String)
+	value isa Real && !(value isa Bool) || return default
+	number = Float64(value)
+	isfinite(number) && number >= _PLOTLY_MIN_LAYOUT_PX || return default
+	return string(number, "px")
+end
+
+"""
+	_savefig_html(io::IO, p::Plot; background = nothing)
+
+Write `p` as a standalone HTML page that loads plotly.js $(_PLOTLYJS_VERSION) and
+MathJax 2.7.9 from their CDNs. Non-finite numbers become `null` and every
+embedded JSON blob is escaped so user text cannot end the inline script.
+"""
+function _savefig_html(io::IO, p::Plot; background::Union{Nothing,String} = nothing)
+	lowered = PlotlyBase.JSON.lower(p)
+	data = lowered[:data]
+	layout = lowered[:layout]
+	frames = lowered[:frames]
+	config = lowered[:config]
+	background === nothing || _apply_export_background!(layout, data, background)
+	get!(config, :responsive, true)
+
+	base_url_line = ""
+	if p.config.showLink === true || p.config.showEditInChartStudio === true
+		url = something(p.config.plotlyServerURL, "https://plot.ly")
+		base_url_line = "window.PLOTLYENV.BASE_URL = $(_json_html(url));\n"
+	else
+		for key in (:plotlyServerURL, :linkText, :showLink)
+			haskey(config, key) && delete!(config, key)
+		end
+	end
+
+	then_frames = isempty(frames) ? "" :
+		".then(function () { return Plotly.addFrames(gd, $(_json_html(frames))); })" *
+		".then(function () { return Plotly.animate(gd, null); })"
+	div_width = _html_css_length(_lowered_get(layout, :width), "100%")
+	div_height = _html_css_length(_lowered_get(layout, :height), "100%")
+	divid = string(p.divid)
+
+	print(
+		io,
+		"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>html, body { margin: 0; padding: 0; height: 100%; }</style>
+  <script type="text/javascript">window.PlotlyConfig = {MathJaxConfig: 'local'};</script>
+$(_mathjax_head_html())
+  <script src="$(_PLOTLY_CDN_URL)" charset="utf-8"></script>
+</head>
+<body>
+  <div id="$(_html_attribute(divid))" class="plotly-graph-div" style="height:$(div_height); width:$(div_width);"></div>
+  <script type="text/javascript">
+window.PLOTLYENV = window.PLOTLYENV || {};
+$(base_url_line)(function () {
+  var gd = document.getElementById($(_json_html(divid)));
+  if (!gd) { return; }
+  Plotly.newPlot(gd, $(_json_html(data)), $(_json_html(layout)), $(_json_html(config)))$(then_frames);
+})();
+  </script>
+</body>
+</html>
+""",
+	)
+	return nothing
+end
+
+function _savefig_json(io::IO, p::Plot; background::Union{Nothing,String} = nothing)
+	if background === nothing
+		PlotlyBase.JSON.json(io, p; _JSON_NONFINITE_AS_NULL...)
+	else
+		lowered = PlotlyBase.JSON.lower(p)
+		_apply_export_background!(lowered[:layout], lowered[:data], background)
+		PlotlyBase.JSON.json(io, lowered; _JSON_NONFINITE_AS_NULL...)
+	end
+	return nothing
+end
+
+function _document_bytes(fmt::String, prepared::_PreparedDocumentExport)
+	buffer = IOBuffer()
+	background = prepared.options.background
+	if fmt == "html"
+		_savefig_html(buffer, prepared.plot; background = background)
+	else
+		_savefig_json(buffer, prepared.plot; background = background)
+	end
+	return take!(buffer)
+end
+
+# ── savefig: renderer scripts ───────────────────────────────────────
+
+# Wrap the async renderer `body` (which may use `div`) so it always settles:
+# with its result, with `{error: message}` when it throws, or with
+# `{error, timeout: true}` once `timeout_s` elapses. A settled promise
+# releases the Electron request (and with it the export lock) even when
+# plotly.js never finishes drawing.
+function _guarded_export_script(divid::String, timeout_s::Float64, body::String)
+	timeout_ms = _json_js(round(Int64, timeout_s * 1000))
+	timeout_text = _json_js("drawing the figure did not finish within $(timeout_s) s")
+	return """
+(async function() {
+  const div = document.getElementById($(_json_js(divid)));
+  if (!div) { return {error: 'the export plot div was not found'}; }
+  let timer = null;
+  const deadline = new Promise(function(resolve) {
+    timer = setTimeout(function() { resolve({__plotlysupply_timeout: true}); }, $timeout_ms);
+  });
+  const work = (async function() {
+$body
+  })();
+  work.catch(function() {});
+  try {
+    const result = await Promise.race([work, deadline]);
+    if (result && result.__plotlysupply_timeout === true) {
+      return {error: $timeout_text, timeout: true};
+    }
+    return result;
+  } catch (err) {
+    return {error: String((err && err.message) || err)};
+  } finally {
+    clearTimeout(timer);
+  }
+})();
+"""
+end
+
+# Each export starts from a purged div and `Plotly.newPlot`, so no state
+# (axis constraints, colorbar groups, transforms, animations) of an earlier,
+# unrelated export can leak into this one.
+const _EXPORT_RESET_DIV_JS = """
+    div.style.transform = '';
+    div.style.transformOrigin = '';
+    div.style.width = '';
+    div.style.height = '';
+    Plotly.purge(div);
+"""
+
+function _check_renderer_result(result, what::AbstractString)
+	result isa AbstractDict || return result
+	haskey(result, "error") || return result
+	message = string(result["error"])
+	if get(result, "timeout", false) === true
+		throw(_ExportTimeoutError(
+			"savefig: $(message) while $(what); pass a larger `timeout` " *
+			"(seconds) to savefig if the figure is just slow to draw.",
+		))
+	end
+	error("savefig: plotly.js failed while $(what): $(message)")
 end
 
 function _capture_image_data_url(
@@ -260,25 +738,33 @@ function _capture_image_data_url(
 	fmt::String,
 )
 	options = prepared.options
-	format_js = _json_js(fmt)
-	divid_js = _json_js(divid)
-
-	js = """
-(async function() {
-  const div = document.getElementById($divid_js);
-  await Plotly.react(div, $(prepared.data_js), $(prepared.layout_js), $(prepared.config_js));
-  const url = await Plotly.toImage(div, {
-    format: $format_js,
-    width: $(options.width_js),
-    height: $(options.height_js),
-    scale: $(options.scale_js)
-  });
-  return url;
-})();
+	scale = _format_scale(options, fmt)
+	width_js = _json_js(options.width)
+	height_js = _json_js(options.height)
+	body = """
+$(_EXPORT_RESET_DIV_JS)
+    const layout = Object.assign({}, $(prepared.layout_js), {width: $width_js, height: $height_js});
+    await Plotly.newPlot(div, $(prepared.data_js), layout, $(prepared.config_js));
+    return await Plotly.toImage(div, {
+      format: $(_json_js(fmt)),
+      width: $width_js,
+      height: $height_js,
+      scale: $(_json_js(scale))
+    });
 """
-	data_url = Base.invokelatest(() -> ec.run(win, js))
+	js = _guarded_export_script(divid, options.timeout, body)
+	result = Base.invokelatest(() -> ec.run(win, js))
+	data_url = _check_renderer_result(result, "rendering the $(fmt) image")
 	data_url isa AbstractString ||
 		error("Plotly.toImage returned a non-string value for format '$fmt'")
+	if data_url == "data:,"
+		error(
+			"savefig: Plotly.toImage returned an empty $(fmt) image (\"data:,\"). " *
+			"The requested canvas is $(options.width * scale) x " *
+			"$(options.height * scale) px (width*scale x height*scale), which " *
+			"exceeds the renderer's canvas limit; reduce width, height, scale or dpi.",
+		)
+	end
 	# ElectronCall normally returns String. This conversion is zero-copy for
 	# String and preserves compatibility with other AbstractString adapters.
 	return String(data_url)
@@ -309,13 +795,20 @@ function _write_image_data_url!(io::IO, data_url::String, fmt::String)
 	return nothing
 end
 
-function _export_image(io::IO, ec, win, divid::String, p::Plot, fmt::String; kwargs...)
-	prepared = _prepare_renderer_export(p, kwargs)
-	data_url = lock(_EXPORT_STATE.lock) do
-		_capture_image_data_url(ec, win, divid, prepared, fmt)
+# Decode a captured data URL and apply the per-format post-processing:
+# PNG pHYs / JPEG JFIF density for `dpi`, stable SVG ids for `deterministic`.
+function _finalize_image(data_url::String, fmt::String, options::_ExportOptions)
+	buffer = IOBuffer()
+	_write_image_data_url!(buffer, data_url, fmt)
+	bytes = take!(buffer)
+	if fmt == "png"
+		options.dpi === nothing || (bytes = _png_set_phys(bytes, options.dpi))
+	elseif fmt == "jpeg"
+		options.dpi === nothing || (bytes = _jpeg_set_density(bytes, options.dpi))
+	elseif fmt == "svg"
+		options.deterministic && (bytes = collect(codeunits(_svg_stable_ids(String(bytes)))))
 	end
-	_write_image_data_url!(io, data_url, fmt)
-	return nothing
+	return bytes
 end
 
 function _pdf_status_field(status, name::Symbol)
@@ -354,7 +847,10 @@ function _wait_for_pdf_job(ec, app, job_id::String; timeout_s::Real)
 		remaining = timeout - elapsed
 		remaining > 0 && sleep(min(0.05, remaining))
 	end
-	error("printToPDF timed out after $(timeout)s")
+	error(
+		"printToPDF timed out after $(timeout)s; pass a larger `timeout` " *
+		"(seconds) to savefig.",
+	)
 end
 
 function _delete_pdf_job(ec, app, job_id::String)
@@ -369,6 +865,158 @@ function _delete_pdf_job(ec, app, job_id::String)
 	return nothing
 end
 
+# Chromium printToPDF encodes SVG linearGradient fills as PDF shading
+# patterns, which some viewers render as a flat end color. Expand every
+# colorbar gradient fill into discrete flat rects instead. It runs right after
+# `Plotly.newPlot` on a purged div, so only the current figure's colorbars
+# exist and nothing from an earlier export is left in the printed DOM.
+const _FLATTEN_COLORBAR_GRADIENTS_JS = """
+    (function flattenColorbarGradients() {
+      var NS = 'http://www.w3.org/2000/svg';
+      function parseCol(c) {
+        c = (c || '').trim();
+        if (c.charAt(0) === '#') {
+          var h = c.slice(1);
+          if (h.length === 3) h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+          var v = parseInt(h.slice(0, 6), 16);
+          return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+        }
+        var i0 = c.indexOf('('), i1 = c.indexOf(')');
+        if (i0 > -1 && i1 > i0) {
+          var p = c.slice(i0 + 1, i1).split(',');
+          return [+p[0], +p[1], +p[2]];
+        }
+        return [0, 0, 0];
+      }
+      function sample(stops, t) {
+        if (t <= stops[0][0]) return stops[0];
+        if (t >= stops[stops.length - 1][0]) return stops[stops.length - 1];
+        for (var i = 0; i < stops.length - 1; i++) {
+          var a = stops[i], b = stops[i + 1];
+          if (t >= a[0] && t <= b[0]) {
+            var u = b[0] > a[0] ? (t - a[0]) / (b[0] - a[0]) : 0;
+            var A = parseCol(a[1]), B = parseCol(b[1]);
+            return [t, 'rgb(' + Math.round(A[0] + u * (B[0] - A[0])) + ',' +
+                   Math.round(A[1] + u * (B[1] - A[1])) + ',' +
+                   Math.round(A[2] + u * (B[2] - A[2])) + ')',
+                   a[2] + u * (b[2] - a[2])];
+          }
+        }
+        return stops[stops.length - 1];
+      }
+      div.querySelectorAll('.cbfills *').forEach(function(el) {
+        var fv = (el.style && el.style.fill) || el.getAttribute('fill') || '';
+        var ui = fv.indexOf('url('), hi = fv.indexOf('#', ui), ei = fv.indexOf(')', hi);
+        if (ui === -1 || hi === -1 || ei === -1) return;
+        var id = fv.slice(hi + 1, ei).split('"').join('').split("'").join('');
+        var lg = document.getElementById(id);
+        if (!lg || lg.tagName.toLowerCase() !== 'lineargradient') return;
+        var stops = [];
+        lg.querySelectorAll('stop').forEach(function(s) {
+          var off = s.getAttribute('offset') || '0';
+          off = off.indexOf('%') > -1 ? parseFloat(off) / 100 : parseFloat(off);
+          var col = s.getAttribute('stop-color') || s.style.stopColor ||
+                    (getComputedStyle(s).stopColor);
+          var op = s.getAttribute('stop-opacity');
+          if (op === null && s.style && s.style.stopOpacity) op = s.style.stopOpacity;
+          stops.push([off, col, op === null ? 1 : parseFloat(op)]);
+        });
+        if (stops.length < 2) return;
+        stops.sort(function(a, b) { return a[0] - b[0]; });
+        var bb = el.getBBox();
+        var units = lg.getAttribute('gradientUnits') || 'objectBoundingBox';
+        var x1 = parseFloat(lg.getAttribute('x1') || '0'),
+            y1 = parseFloat(lg.getAttribute('y1') || '0'),
+            x2 = parseFloat(lg.getAttribute('x2') || '0'),
+            y2 = parseFloat(lg.getAttribute('y2') || '0');
+        if (units !== 'userSpaceOnUse') {
+          x1 = bb.x + x1 * bb.width; x2 = bb.x + x2 * bb.width;
+          y1 = bb.y + y1 * bb.height; y2 = bb.y + y2 * bb.height;
+        }
+        var vert = Math.abs(y2 - y1) >= Math.abs(x2 - x1);
+        var N = 128, g = document.createElementNS(NS, 'g');
+        for (var i = 0; i < N; i++) {
+          var sc = sample(stops, (i + 0.5) / N);
+          var r = document.createElementNS(NS, 'rect');
+          if (vert) {
+            var ya = y1 + (i / N) * (y2 - y1), yb = y1 + ((i + 1) / N) * (y2 - y1);
+            r.setAttribute('x', bb.x); r.setAttribute('width', bb.width);
+            r.setAttribute('y', Math.min(ya, yb));
+            r.setAttribute('height', Math.abs(yb - ya) + 0.3);
+          } else {
+            var xa = x1 + (i / N) * (x2 - x1), xb = x1 + ((i + 1) / N) * (x2 - x1);
+            r.setAttribute('y', bb.y); r.setAttribute('height', bb.height);
+            r.setAttribute('x', Math.min(xa, xb));
+            r.setAttribute('width', Math.abs(xb - xa) + 0.3);
+          }
+          r.setAttribute('fill', sc[1]);
+          if (sc[2] < 1) r.setAttribute('fill-opacity', sc[2]);
+          g.appendChild(r);
+        }
+        el.parentNode.insertBefore(g, el);
+        el.remove();
+      });
+    })();
+"""
+
+# Draw the figure for printing: laid out at width x height and magnified by
+# `scale` with a CSS transform, so a PDF `scale` enlarges the page and its
+# content uniformly, exactly like the png/jpeg/svg `scale`.
+function _pdf_render_script(divid::String, prepared::_PreparedRendererExport)
+	options = prepared.options
+	scale_js = _json_js(_format_scale(options, "pdf"))
+	body = """
+$(_EXPORT_RESET_DIV_JS)
+    const scale = $scale_js;
+    const width = $(_json_js(options.width));
+    const height = $(_json_js(options.height));
+    // The div is exactly the figure size: it clips its overflow, and the
+    // print viewport (the page, width*scale x height*scale) would otherwise
+    // size it, cutting off the figure whenever scale < 1.
+    div.style.width = width + 'px';
+    div.style.height = height + 'px';
+    const layout = Object.assign({}, $(prepared.layout_js), {width: width, height: height});
+    const config = Object.assign({}, $(prepared.config_js));
+    // WebGL canvases (3-D scenes, maps) are bitmaps that the transform below
+    // enlarges, so draw them with proportionally more pixels; plotly.js
+    // accepts plotGlPixelRatio in [1, 4] and defaults to 2.
+    if (scale > 1 && config.plotGlPixelRatio == null) {
+      config.plotGlPixelRatio = Math.min(4, 2 * scale);
+    }
+    await Plotly.newPlot(div, $(prepared.data_js), layout, config);
+$(_FLATTEN_COLORBAR_GRADIENTS_JS)
+    if (scale !== 1) {
+      div.style.transformOrigin = '0 0';
+      div.style.transform = 'scale(' + scale + ')';
+    }
+    if (!document.getElementById('__ps_print_css')) {
+      var style = document.createElement('style');
+      style.id = '__ps_print_css';
+      style.textContent = '@page { margin: 0 !important; } @media print { html, body { margin: 0 !important; padding: 0 !important; } }';
+      document.head.appendChild(style);
+    }
+    return 'ok';
+"""
+	return _guarded_export_script(divid, options.timeout, body)
+end
+
+function _remove_failed_pdf_tempdir(tempdir::String, owner_state)
+	try
+		rm(tempdir; recursive = true, force = true)
+		if owner_state !== nothing
+			lock(owner_state.lock) do
+				delete!(owner_state.owned_pdf_tempdirs, tempdir)
+			end
+		end
+	catch cleanup_error
+		@warn "Failed to remove a printToPDF temp directory." tempdir exception = (
+			cleanup_error,
+			catch_backtrace(),
+		)
+	end
+	return nothing
+end
+
 function _capture_pdf_file(
 	ec,
 	app,
@@ -376,121 +1024,14 @@ function _capture_pdf_file(
 	divid::String,
 	prepared::_PreparedRendererExport,
 	job_id::String;
-	timeout_s::Real = 15.0,
+	timeout_s::Real = prepared.options.timeout,
 	owner_state::Union{Nothing,_ExportState} = nothing,
 )
 	options = prepared.options
-	divid_js = _json_js(divid)
-
-	# Render the plot at the scaled dimensions so it fills the (scaled) PDF page
-	# — otherwise `scale>1` enlarges the page but not the plot, leaving blank space.
-	js_render = """
-(async function() {
-  var div = document.getElementById($divid_js);
-  var layout = Object.assign({}, $(prepared.layout_js), {
-    width: $(options.scaled_width_js),
-    height: $(options.scaled_height_js)
-  });
-  await Plotly.react(div, $(prepared.data_js), layout, $(prepared.config_js));
-  (function flattenColorbarGradients() {
-    // Chromium printToPDF encodes SVG linearGradient fills as PDF shading
-    // patterns, which some viewers render as a flat end color. Expand every
-    // colorbar gradient fill into discrete flat rects instead.
-    var NS = 'http://www.w3.org/2000/svg';
-    function parseCol(c) {
-      c = (c || '').trim();
-      if (c.charAt(0) === '#') {
-        var h = c.slice(1);
-        if (h.length === 3) h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
-        var v = parseInt(h.slice(0, 6), 16);
-        return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-      }
-      var i0 = c.indexOf('('), i1 = c.indexOf(')');
-      if (i0 > -1 && i1 > i0) {
-        var p = c.slice(i0 + 1, i1).split(',');
-        return [+p[0], +p[1], +p[2]];
-      }
-      return [0, 0, 0];
-    }
-    function sample(stops, t) {
-      if (t <= stops[0][0]) return stops[0];
-      if (t >= stops[stops.length - 1][0]) return stops[stops.length - 1];
-      for (var i = 0; i < stops.length - 1; i++) {
-        var a = stops[i], b = stops[i + 1];
-        if (t >= a[0] && t <= b[0]) {
-          var u = b[0] > a[0] ? (t - a[0]) / (b[0] - a[0]) : 0;
-          var A = parseCol(a[1]), B = parseCol(b[1]);
-          return [t, 'rgb(' + Math.round(A[0] + u * (B[0] - A[0])) + ',' +
-                 Math.round(A[1] + u * (B[1] - A[1])) + ',' +
-                 Math.round(A[2] + u * (B[2] - A[2])) + ')',
-                 a[2] + u * (b[2] - a[2])];
-        }
-      }
-      return stops[stops.length - 1];
-    }
-    div.querySelectorAll('.cbfills *').forEach(function(el) {
-      var fv = (el.style && el.style.fill) || el.getAttribute('fill') || '';
-      var ui = fv.indexOf('url('), hi = fv.indexOf('#', ui), ei = fv.indexOf(')', hi);
-      if (ui === -1 || hi === -1 || ei === -1) return;
-      var id = fv.slice(hi + 1, ei).split('"').join('').split("'").join('');
-      var lg = document.getElementById(id);
-      if (!lg || lg.tagName.toLowerCase() !== 'lineargradient') return;
-      var stops = [];
-      lg.querySelectorAll('stop').forEach(function(s) {
-        var off = s.getAttribute('offset') || '0';
-        off = off.indexOf('%') > -1 ? parseFloat(off) / 100 : parseFloat(off);
-        var col = s.getAttribute('stop-color') || s.style.stopColor ||
-                  (getComputedStyle(s).stopColor);
-        var op = s.getAttribute('stop-opacity');
-        if (op === null && s.style && s.style.stopOpacity) op = s.style.stopOpacity;
-        stops.push([off, col, op === null ? 1 : parseFloat(op)]);
-      });
-      if (stops.length < 2) return;
-      stops.sort(function(a, b) { return a[0] - b[0]; });
-      var bb = el.getBBox();
-      var units = lg.getAttribute('gradientUnits') || 'objectBoundingBox';
-      var x1 = parseFloat(lg.getAttribute('x1') || '0'),
-          y1 = parseFloat(lg.getAttribute('y1') || '0'),
-          x2 = parseFloat(lg.getAttribute('x2') || '0'),
-          y2 = parseFloat(lg.getAttribute('y2') || '0');
-      if (units !== 'userSpaceOnUse') {
-        x1 = bb.x + x1 * bb.width; x2 = bb.x + x2 * bb.width;
-        y1 = bb.y + y1 * bb.height; y2 = bb.y + y2 * bb.height;
-      }
-      var vert = Math.abs(y2 - y1) >= Math.abs(x2 - x1);
-      var N = 128, g = document.createElementNS(NS, 'g');
-      for (var i = 0; i < N; i++) {
-        var sc = sample(stops, (i + 0.5) / N);
-        var r = document.createElementNS(NS, 'rect');
-        if (vert) {
-          var ya = y1 + (i / N) * (y2 - y1), yb = y1 + ((i + 1) / N) * (y2 - y1);
-          r.setAttribute('x', bb.x); r.setAttribute('width', bb.width);
-          r.setAttribute('y', Math.min(ya, yb));
-          r.setAttribute('height', Math.abs(yb - ya) + 0.3);
-        } else {
-          var xa = x1 + (i / N) * (x2 - x1), xb = x1 + ((i + 1) / N) * (x2 - x1);
-          r.setAttribute('y', bb.y); r.setAttribute('height', bb.height);
-          r.setAttribute('x', Math.min(xa, xb));
-          r.setAttribute('width', Math.abs(xb - xa) + 0.3);
-        }
-        r.setAttribute('fill', sc[1]);
-        if (sc[2] < 1) r.setAttribute('fill-opacity', sc[2]);
-        g.appendChild(r);
-      }
-      el.parentNode.insertBefore(g, el);
-      el.remove();
-    });
-  })();
-  if (!document.getElementById('__ps_print_css')) {
-    var style = document.createElement('style');
-    style.id = '__ps_print_css';
-    style.textContent = '@page { margin: 0 !important; } @media print { html, body { margin: 0 !important; padding: 0 !important; } }';
-    document.head.appendChild(style);
-  }
-  return 'ok';
-})();
-"""
-	Base.invokelatest(() -> ec.run(win, js_render))
+	result = Base.invokelatest(() -> ec.run(win, _pdf_render_script(divid, prepared)))
+	result = _check_renderer_result(result, "drawing the PDF page")
+	result == "ok" ||
+		error("savefig: unexpected result from the PDF render step: $(repr(result))")
 
 	win_id = Base.invokelatest(() -> getfield(win, :id))
 	tempdir = mktempdir(; prefix = "plotlysupply-pdf-")
@@ -503,9 +1044,11 @@ function _capture_pdf_file(
 	tmpfile_js = _json_js(tmpfile)
 	job_id_js = _json_js(job_id)
 
-	# Page size in inches (Electron printToPDF pageSize uses inches)
-	page_w_in = _json_js(options.scaled_width / 96.0)
-	page_h_in = _json_js(options.scaled_height / 96.0)
+	# Electron's printToPDF pageSize is in inches; Chromium prints 96 CSS px
+	# to the inch. The page is the magnified figure.
+	scale = _format_scale(options, "pdf")
+	page_w_in = _json_js(options.width * scale / _CSS_PX_PER_INCH)
+	page_h_in = _json_js(options.height * scale / _CSS_PX_PER_INCH)
 
 	js_pdf = """
 (function() {
@@ -549,9 +1092,7 @@ function _capture_pdf_file(
 })()
 """
 
-	job_start_attempted = false
 	try
-		job_start_attempted = true
 		result = Base.invokelatest(() -> ec.run(app, js_pdf))
 		result == "started" ||
 			error("printToPDF job '$job_id' failed to start (result: $result)")
@@ -559,63 +1100,25 @@ function _capture_pdf_file(
 		isfile(tmpfile) ||
 			error("printToPDF completed without writing its private output file")
 	catch
-		if job_start_attempted
-			try
-				_delete_pdf_job(ec, app, job_id)
-			catch cleanup_error
-				@warn "Failed to remove a failed printToPDF job state." job_id exception = (
-					cleanup_error,
-					catch_backtrace(),
-				)
-			end
-		end
 		try
-			rm(tempdir; recursive = true, force = true)
-			if owner_state !== nothing
-				lock(owner_state.lock) do
-					delete!(owner_state.owned_pdf_tempdirs, tempdir)
-				end
-			end
+			_delete_pdf_job(ec, app, job_id)
 		catch cleanup_error
-			@warn "Failed to remove a failed printToPDF temp directory." tempdir exception = (
+			@warn "Failed to remove a failed printToPDF job state." job_id exception = (
 				cleanup_error,
 				catch_backtrace(),
 			)
 		end
+		_remove_failed_pdf_tempdir(tempdir, owner_state)
 		rethrow()
 	end
 
 	try
 		_delete_pdf_job(ec, app, job_id)
 	catch
-		try
-			rm(tempdir; recursive = true, force = true)
-			if owner_state !== nothing
-				lock(owner_state.lock) do
-					delete!(owner_state.owned_pdf_tempdirs, tempdir)
-				end
-			end
-		catch cleanup_error
-			@warn "Failed to remove a printToPDF temp directory after job-state cleanup failed." tempdir exception = (
-				cleanup_error,
-				catch_backtrace(),
-			)
-		end
+		_remove_failed_pdf_tempdir(tempdir, owner_state)
 		rethrow()
 	end
 	return _CapturedPDF(tempdir, tmpfile, owner_state)
-end
-
-function _copy_pdf_file_chunked!(io::IO, path::String)
-	open(path, "r") do input
-		buffer = Vector{UInt8}(undef, _PDF_COPY_CHUNK_BYTES)
-		while !eof(input)
-			n = readbytes!(input, buffer, _PDF_COPY_CHUNK_BYTES)
-			n == 0 && break
-			write(io, @view buffer[1:n])
-		end
-	end
-	return nothing
 end
 
 function _remove_captured_pdf_tempdir!(
@@ -638,18 +1141,18 @@ function _remove_captured_pdf_tempdir!(
 	return nothing
 end
 
-function _write_captured_pdf!(
-	io::IO,
-	captured::_CapturedPDF;
-	tempdir_remover = nothing,
-)
-	try
-		_copy_pdf_file_chunked!(io, captured.path)
+# Run `f(captured)` and then remove the captured PDF's private directory. If
+# `f` fails, removal is still attempted (a removal failure is only logged so
+# the original error surfaces); an unremoved directory stays registered with
+# its export state and is reclaimed at exit.
+function _consume_captured_pdf(f, captured::_CapturedPDF; tempdir_remover = nothing)
+	result = try
+		f(captured)
 	catch
 		try
 			_remove_captured_pdf_tempdir!(captured, tempdir_remover)
 		catch cleanup_error
-			@warn "Failed to remove a captured PDF after its destination write failed." tempdir = captured.tempdir exception = (
+			@warn "Failed to remove a captured PDF after its post-processing failed." tempdir = captured.tempdir exception = (
 				cleanup_error,
 				catch_backtrace(),
 			)
@@ -657,32 +1160,134 @@ function _write_captured_pdf!(
 		rethrow()
 	end
 	_remove_captured_pdf_tempdir!(captured, tempdir_remover)
-	return nothing
+	return result
 end
 
-function _export_pdf(io::IO, ec, win, divid::String, p::Plot; kwargs...)
-	prepared = _prepare_renderer_export(p, kwargs)
-	app = Base.invokelatest(() -> getfield(win, :app))
-	state = _EXPORT_STATE
-	captured = lock(state.lock) do
+# Final PDF bytes: the exact requested page box and, when deterministic,
+# blanked creation/modification dates.
+function _finalize_pdf(bytes::Vector{UInt8}, options::_ExportOptions)
+	# 1 CSS px = 72/96 pt.
+	points_per_px = 72 / _CSS_PX_PER_INCH
+	scale = _format_scale(options, "pdf")
+	bytes = _pdf_set_page_box(
+		bytes,
+		options.width * scale * points_per_px,
+		options.height * scale * points_per_px,
+	)
+	options.deterministic && (bytes = _pdf_blank_dates(bytes))
+	return bytes
+end
+
+# EPS is converted from the finalized PDF: Ghostscript derives the EPS
+# BoundingBox from the drawn page, so it must see the exact page box.
+function _finalize_eps(captured::_CapturedPDF, pdf_bytes::Vector{UInt8}, options::_ExportOptions)
+	pdf_path = joinpath(captured.tempdir, "page.pdf")
+	write(pdf_path, pdf_bytes)
+	eps_path = joinpath(captured.tempdir, "output.eps")
+	_pdf_to_eps(pdf_path, eps_path; timeout_s = options.timeout)
+	bytes = read(eps_path)
+	options.deterministic && (bytes = _eps_blank_dates(bytes))
+	return bytes
+end
+
+# ── savefig: rendering ──────────────────────────────────────────────
+
+# Draw every renderer format of one call in the export window while holding
+# its lock. Images are captured first so a failure leaves no PDF behind.
+function _capture_renderer_outputs(
+	state::_ExportState,
+	ec,
+	app,
+	win,
+	divid::String,
+	prepared::_PreparedRendererExport,
+	image_formats::Vector{String},
+	needs_pdf::Bool,
+	pdf_timeout_s::Real,
+)
+	urls = Dict{String,String}()
+	for fmt in image_formats
+		urls[fmt] = _capture_image_data_url(ec, win, divid, prepared, fmt)
+	end
+	captured = nothing
+	if needs_pdf
 		job_id = _next_pdf_job_id_locked!(state)
-		_capture_pdf_file(
+		captured = _capture_pdf_file(
 			ec,
 			app,
 			win,
 			divid,
 			prepared,
 			job_id;
+			timeout_s = pdf_timeout_s,
 			owner_state = state,
 		)
 	end
-	_write_captured_pdf!(io, captured)
-	return nothing
+	return (urls, captured)
 end
 
-function _prepare_savefig(p::Plot, fmt::String, kwargs)
-	fmt in ("html", "json") && return nothing
-	return _prepare_renderer_export(p, kwargs)
+# Produce the bytes of every format in `formats` (each drawn once). Decoding,
+# post-processing and Ghostscript run after the export lock is released.
+function _export_outputs(
+	formats,
+	renderer::Union{Nothing,_PreparedRendererExport},
+	document::Union{Nothing,_PreparedDocumentExport};
+	state::_ExportState = _EXPORT_STATE,
+	ec = nothing,
+	window_timeout_s::Real = 10.0,
+	pdf_timeout_s::Union{Nothing,Real} = nothing,
+)
+	outputs = Dict{String,Vector{UInt8}}()
+	for fmt in formats
+		fmt in ("html", "json") || continue
+		document isa _PreparedDocumentExport ||
+			throw(ArgumentError("document export was not prepared"))
+		outputs[fmt] = _document_bytes(fmt, document)
+	end
+	image_formats = String[fmt for fmt in _IMAGE_FORMATS if fmt in formats]
+	needs_pdf = "pdf" in formats || "eps" in formats
+	isempty(image_formats) && !needs_pdf && return outputs
+	renderer isa _PreparedRendererExport ||
+		throw(ArgumentError("renderer export was not prepared"))
+	options = renderer.options
+	pdf_timeout = pdf_timeout_s === nothing ? options.timeout : pdf_timeout_s
+
+	urls, captured = _with_export_window(
+		state;
+		ec = ec,
+		timeout_s = window_timeout_s,
+	) do backend, app, win, divid
+		try
+			_capture_renderer_outputs(
+				state,
+				backend,
+				app,
+				win,
+				divid,
+				renderer,
+				image_formats,
+				needs_pdf,
+				pdf_timeout,
+			)
+		catch err
+			# The page may still be drawing the abandoned figure.
+			err isa _ExportTimeoutError &&
+				_retire_export_window_locked!(state; throw_errors = false)
+			rethrow()
+		end
+	end
+
+	if captured !== nothing
+		_consume_captured_pdf(captured) do pdf
+			pdf_bytes = _finalize_pdf(read(pdf.path), options)
+			"pdf" in formats && (outputs["pdf"] = pdf_bytes)
+			"eps" in formats && (outputs["eps"] = _finalize_eps(pdf, pdf_bytes, options))
+		end
+	end
+	for fmt in image_formats
+		outputs[fmt] = _finalize_image(urls[fmt], fmt, options)
+	end
+	return outputs
 end
 
 function _savefig_prepared(
@@ -693,43 +1298,106 @@ function _savefig_prepared(
 	state::_ExportState = _EXPORT_STATE,
 	ec = nothing,
 	window_timeout_s::Real = 10.0,
-	pdf_timeout_s::Real = 15.0,
+	pdf_timeout_s::Union{Nothing,Real} = nothing,
 )
-	fmt == "html" && return _savefig_html(io, p)
-	fmt == "json" && return (PlotlyBase.JSON.print(io, p); nothing)
-	prepared isa _PreparedRendererExport ||
-		throw(ArgumentError("renderer export was not prepared"))
+	renderer = prepared isa _PreparedRendererExport ? prepared : nothing
+	document = if prepared isa _PreparedDocumentExport
+		prepared
+	elseif prepared === nothing && fmt in ("html", "json")
+		_prepare_document_export(p, NamedTuple())
+	else
+		nothing
+	end
+	outputs = _export_outputs(
+		(fmt,),
+		renderer,
+		document;
+		state = state,
+		ec = ec,
+		window_timeout_s = window_timeout_s,
+		pdf_timeout_s = pdf_timeout_s,
+	)
+	# User-controlled I/O happens after the renderer lock is released.
+	write(io, outputs[fmt])
+	return nothing
+end
 
-	if fmt == "pdf"
-		captured = _with_export_window(
-			state;
-			ec = ec,
-			timeout_s = window_timeout_s,
-		) do backend, app, win, divid
-			job_id = _next_pdf_job_id_locked!(state)
-			_capture_pdf_file(
-				backend,
-				app,
-				win,
-				divid,
-				prepared,
-				job_id;
-				timeout_s = pdf_timeout_s,
-				owner_state = state,
+# ── savefig: files ──────────────────────────────────────────────────
+
+# Resolve the file a savefig destination really names: symbolic links are
+# followed (so the link survives and its target is written), and the
+# destination must be a regular file or not exist, inside an existing directory.
+function _resolve_savefig_target(filename::AbstractString)
+	target = abspath(filename)
+	hops = 0
+	while islink(target)
+		# Same bound as the kernel's MAXSYMLINKS on Linux.
+		hops += 1
+		hops > 40 && throw(ArgumentError(
+			"savefig: too many levels of symbolic links: $(repr(filename))",
+		))
+		link = readlink(target)
+		target = isabspath(link) ? link : normpath(joinpath(dirname(target), link))
+	end
+	isdir(target) &&
+		throw(ArgumentError("savefig destination is a directory: $filename"))
+	ispath(target) && !isfile(target) && throw(ArgumentError(
+		"savefig: destination exists and is not a regular file: $(repr(filename))",
+	))
+	parent = dirname(target)
+	isdir(parent) || throw(ArgumentError(
+		"savefig: destination directory does not exist: $(repr(parent))",
+	))
+	return target
+end
+
+# Create a new, uniquely named file in `parent` with O_EXCL and mode 0o666, so
+# the operating system applies the umask exactly as for an ordinary new file.
+function _create_exclusive_temp(parent::AbstractString)
+	flags = Base.Filesystem.JL_O_WRONLY | Base.Filesystem.JL_O_CREAT | Base.Filesystem.JL_O_EXCL
+	for _ in 1:100
+		path = tempname(parent; cleanup = false)
+		file = try
+			Base.Filesystem.open(path, flags, 0o666)
+		catch err
+			err isa Base.IOError && err.code == Base.UV_EEXIST && continue
+			rethrow()
+		end
+		return (path, file)
+	end
+	error("savefig: could not create a unique temporary file in $(repr(parent))")
+end
+
+# Publish `bytes` at `target` with one rename from a temp file in the same
+# directory. An existing file keeps its permission bits; a new file gets the
+# umask-derived mode of an ordinary new file.
+function _publish_atomically(
+	target::String,
+	bytes::AbstractVector{UInt8};
+	renamer = Base.Filesystem.rename,
+)
+	existing_mode = isfile(target) ? (filemode(target) & 0o7777) : nothing
+	temp_path, file = _create_exclusive_temp(dirname(target))
+	try
+		try
+			write(file, bytes)
+		finally
+			close(file)
+		end
+		existing_mode === nothing || chmod(temp_path, existing_mode)
+		# Avoid `mv(...; force=true)`: its fallback can remove the old target
+		# before a later copy/rename error.
+		Base.invokelatest(renamer, temp_path, target)
+	catch
+		try
+			rm(temp_path; force = true)
+		catch cleanup_error
+			@warn "Failed to remove an unpublished savefig temp file." temp_path exception = (
+				cleanup_error,
+				catch_backtrace(),
 			)
 		end
-		# This user-controlled I/O is deliberately outside the renderer lock.
-		_write_captured_pdf!(io, captured)
-	else
-		data_url = _with_export_window(
-			state;
-			ec = ec,
-			timeout_s = window_timeout_s,
-		) do backend, app, win, divid
-			_capture_image_data_url(backend, win, divid, prepared, fmt)
-		end
-		# Decoding and user-controlled I/O are deliberately outside the lock.
-		_write_image_data_url!(io, data_url, fmt)
+		rethrow()
 	end
 	return nothing
 end
@@ -742,98 +1410,27 @@ function _savefig_atomic(
 	state::_ExportState = _EXPORT_STATE,
 	ec = nothing,
 	window_timeout_s::Real = 10.0,
-	pdf_timeout_s::Real = 15.0,
+	pdf_timeout_s::Union{Nothing,Real} = nothing,
 	renamer = Base.Filesystem.rename,
 )
-	target = abspath(filename)
-	isdir(target) &&
-		throw(ArgumentError("savefig destination is a directory: $filename"))
-	parent = dirname(target)
-	temp_path, temp_io = mktemp(parent; cleanup = false)
-	try
-		_savefig_prepared(
-			temp_io,
-			p,
-			fmt,
-			prepared;
-			state = state,
-			ec = ec,
-			window_timeout_s = window_timeout_s,
-			pdf_timeout_s = pdf_timeout_s,
-		)
-		flush(temp_io)
-		close(temp_io)
-		# The temp file is in the destination directory, so one filesystem
-		# rename is the commit. Avoid `mv(...; force=true)`: its fallback can
-		# remove the old target before a later copy/rename error.
-		Base.invokelatest(renamer, temp_path, target)
-	catch
-		if isopen(temp_io)
-			try
-				close(temp_io)
-			catch cleanup_error
-				@warn "Failed to close an unpublished savefig temp file." temp_path exception = (
-					cleanup_error,
-					catch_backtrace(),
-				)
-			end
-		end
-		try
-			rm(temp_path; force = true)
-		catch cleanup_error
-			@warn "Failed to remove an unpublished savefig temp file." temp_path exception = (
-				cleanup_error,
-				catch_backtrace(),
-			)
-		end
-		rethrow()
-	end
+	target = _resolve_savefig_target(filename)
+	buffer = IOBuffer()
+	_savefig_prepared(
+		buffer,
+		p,
+		fmt,
+		prepared;
+		state = state,
+		ec = ec,
+		window_timeout_s = window_timeout_s,
+		pdf_timeout_s = pdf_timeout_s,
+	)
+	_publish_atomically(target, take!(buffer); renamer = renamer)
 	return filename
 end
 
-"""
-	savefig(filename, fig; format=nothing, kwargs...)
-	savefig(fig, filename; kwargs...)
-	savefig(io::IO, fig; format="png", kwargs...)
-	savefig(fig; format="png", kwargs...) -> Vector{UInt8}
-
-Export a `Plot`, `SyncPlot`, or `SubplotFigure` to a file, stream, or byte
-vector. When a `filename` is given and `format` is `nothing`, the format is
-inferred from the extension (defaulting to `png`).
-
-Supported formats: `"png"`, `"jpeg"`, `"svg"`, `"pdf"`, `"html"`, `"json"`.
-`html` and `json` are produced in-process and need no external dependency;
-`png`/`jpeg`/`svg`/`pdf` are rendered through PlotlySupply's internal Electron
-export window (so they require a working Electron, but no Kaleido/Python).
-
-# Keyword Arguments
-- `format`: Override the output format (otherwise inferred from the extension).
-- `width`, `height`: Image size in pixels (raster/SVG/PDF; default `700`×`500`).
-- `scale`: Resolution multiplier for raster output / page-size multiplier for PDF.
-"""
-function savefig(io::IO, p::Plot; format::AbstractString = "png", kwargs...)
-	fmt = _validate_export_format(lowercase(String(format)))
-	prepared = _prepare_savefig(p, fmt, kwargs)
-	return _savefig_prepared(io, p, fmt, prepared)
-end
-
-savefig(io::IO, sp::SyncPlot; kwargs...) = savefig(io, sp.plot; kwargs...)
-
-function savefig(p::Union{Plot, SyncPlot}; kwargs...)
-	io = IOBuffer()
-	savefig(io, p; kwargs...)
-	return take!(io)
-end
-
-function _filename_export_format(
-	filename::AbstractString,
-	format::Union{Nothing,AbstractString},
-)
-	ext = lowercase(splitext(filename)[2])
-	inferred = isempty(ext) ? "png" : String(lstrip(ext, '.'))
-	fmt = isnothing(format) ? inferred : lowercase(String(format))
-	return _validate_export_format(fmt)
-end
+_export_plot(p::Plot) = p
+_export_plot(sp::SyncPlot) = sp.plot
 
 function _savefig_filename(
 	filename::AbstractString,
@@ -844,7 +1441,8 @@ function _savefig_filename(
 	ec = nothing,
 )
 	fmt = _filename_export_format(filename, format)
-	plot = p isa SyncPlot ? p.plot : p
+	plot = _export_plot(p)
+	_resolve_savefig_target(filename)
 	prepared = _prepare_savefig(plot, fmt, kwargs)
 	return _savefig_atomic(
 		filename,
@@ -856,19 +1454,170 @@ function _savefig_filename(
 	)
 end
 
+function _savefig_many(
+	filenames::AbstractVector,
+	p::Union{Plot,SyncPlot},
+	kwargs;
+	state::_ExportState = _EXPORT_STATE,
+	ec = nothing,
+)
+	haskey(kwargs, :format) && throw(ArgumentError(
+		"savefig: `format` cannot be combined with a vector of file names; " *
+		"each format is taken from its file extension.",
+	))
+	isempty(filenames) && throw(ArgumentError("savefig: no file names given."))
+	for filename in filenames
+		filename isa AbstractString || throw(ArgumentError(
+			"savefig: file names must be strings; got $(typeof(filename)).",
+		))
+	end
+	names = String[String(filename) for filename in filenames]
+	formats = String[_filename_export_format(name, nothing) for name in names]
+	targets = String[_resolve_savefig_target(name) for name in names]
+	allunique(targets) || throw(ArgumentError(
+		"savefig: the same destination appears more than once in $(repr(names)).",
+	))
+	plot = _export_plot(p)
+	distinct = unique(formats)
+	prepared = _prepare_export(plot, distinct, kwargs)
+	outputs = _export_outputs(
+		distinct,
+		prepared.renderer,
+		prepared.document;
+		state = state,
+		ec = ec,
+	)
+	for (target, fmt) in zip(targets, formats)
+		_publish_atomically(target, outputs[fmt])
+	end
+	return names
+end
+
+"""
+	savefig(fig, filename::AbstractString; kwargs...) -> filename
+	savefig(filename::AbstractString, fig; format = nothing, kwargs...) -> filename
+	savefig(fig, filenames::AbstractVector{<:AbstractString}; kwargs...) -> Vector{String}
+	savefig(io::IO, fig; format = nothing, kwargs...)
+	savefig(fig; format = "png", kwargs...) -> Vector{UInt8}
+
+Export a `Plot`, `SyncPlot` or `SubplotFigure` to a file, several files, a
+stream, or a byte vector. The caller's figure is never modified.
+
+# Formats
+`"png"`, `"jpeg"` (`".jpg"` is accepted), `"svg"`, `"pdf"`, `"eps"`, `"html"`,
+`"json"`. With a file name the format comes from the extension (no extension
+means png) unless `format` is given; for a stream or bytes it defaults to
+`"png"`. `png`/`jpeg`/`svg`/`pdf` are drawn by plotly.js in a hidden Electron
+window (no Kaleido or Python needed). `eps` is converted from that PDF by
+Ghostscript (`gs` must be on `PATH`; translucent fills are flattened to
+opaque). `html` and `json` are written in-process. JSON and HTML write
+non-finite numbers (`NaN`, `±Inf`) as `null`, which plotly.js draws as a gap.
+
+# Keyword arguments
+- `format::Union{Nothing,AbstractString} = nothing`: output format, overriding
+  the extension. Not allowed with a vector of file names.
+- `width`, `height::Real`: figure size in `units`. Default: the figure's
+  `layout.width`/`layout.height` when set, else 700 x 500 px. The size must be
+  at least 10 px (plotly.js's layout minimum).
+- `units::Symbol = :px`: unit of `width`/`height`: `:px` (CSS pixel, 1/96 in),
+  `:in`, `:cm`, `:mm` or `:pt` (1/72 in).
+- `scale::Real = 1`: uniform magnification. png/jpeg get `scale` times more
+  pixels; svg/pdf/eps get a `scale` times larger page with the same layout
+  (text, markers and lines grow with it).
+- `dpi::Real`: raster resolution in dots per inch, an alternative to `scale`
+  (passing both is an error). png/jpeg are drawn at `scale = dpi/96` and record
+  the resolution (PNG `pHYs` chunk, JPEG JFIF density), so `width = 3.5,
+  units = :in, dpi = 300` gives a 1050-px-wide PNG that prints 3.5 in wide.
+  Vector formats keep their physical size and ignore `dpi`.
+- `deterministic::Bool = true`: make repeated exports of the same figure
+  byte-identical: blank the PDF creation/modification dates and the EPS
+  creation date, and give SVG/PDF elements fixed ids (`uid`s are set on the
+  export copy only). PNG and JPEG output is deterministic by nature.
+- `background = nothing`: figure background. `nothing` keeps the figure's own
+  colours; a colour (`"white"`, `:black`, `"#ffeedd"`, `"rgba(0,0,0,0.5)"`)
+  sets the paper background; `:transparent` clears the paper, plot-area and
+  3-D scene/polar/ternary/geo backgrounds (useful for png and svg).
+- `tight::Bool = false`: apply [`tight_layout!`](@ref) to the export copy, which
+  trims the margins to the labels.
+- `timeout::Real = $(Int(_DEFAULT_EXPORT_TIMEOUT_S))`: seconds allowed for each
+  renderer step (drawing the figure, printing the PDF, running Ghostscript)
+  before the export fails with a timeout error.
+
+`html` and `json` validate every keyword but ignore the size, resolution and
+renderer options; `background` and `tight` apply to all formats.
+
+A file is written atomically: the output goes to a temporary file in the same
+directory, which then replaces the destination in one rename. A symbolic link
+is followed and its target replaced, an existing file keeps its permission
+bits, and a new file gets the usual mode for new files (umask applied).
+With several file names every distinct format is rendered once, everything is
+validated before anything is drawn, and the files are published one by one.
+
+The MathJax font used for LaTeX labels is `Latin-Modern`; set the environment
+variable `PLOTLYSUPPLY_MATHJAX_SVG_FONT` (letters, digits, `.`, `_`, `-`;
+e.g. `"TeX"` or `"STIX-Web"`) to change it for html and image export.
+
+# Errors
+`ArgumentError` for unknown keywords, invalid values, a missing destination
+directory, or EPS without Ghostscript, before any file is touched;
+`ErrorException` for an unsupported format or a renderer failure.
+
+```julia
+fig = plot_scatter(1:10, rand(10); xlabel = "x", ylabel = "y")
+savefig(fig, "figure.pdf"; width = 3.5, height = 2.5, units = :in)
+savefig(fig, "figure.png"; width = 3.5, height = 2.5, units = :in, dpi = 300)
+savefig(fig, ["figure.svg", "figure.eps"]; background = :transparent)
+bytes = savefig(fig; format = "svg")
+```
+"""
+function savefig(
+	io::IO,
+	p::Plot;
+	format::Union{Nothing,AbstractString} = nothing,
+	kwargs...,
+)
+	fmt = _validate_export_format(format === nothing ? "png" : format)
+	prepared = _prepare_savefig(p, fmt, kwargs)
+	return _savefig_prepared(io, p, fmt, prepared)
+end
+
+savefig(io::IO, sp::SyncPlot; kwargs...) = savefig(io, sp.plot; kwargs...)
+
+function savefig(p::Union{Plot,SyncPlot}; kwargs...)
+	io = IOBuffer()
+	savefig(io, p; kwargs...)
+	return take!(io)
+end
+
 function savefig(
 	filename::AbstractString,
-	p::Union{Plot, SyncPlot};
-	format::Union{Nothing, AbstractString} = nothing,
+	p::Union{Plot,SyncPlot};
+	format::Union{Nothing,AbstractString} = nothing,
 	kwargs...,
 )
 	return _savefig_filename(filename, p, format, kwargs)
 end
 
-savefig(p::Union{Plot, SyncPlot}, filename::AbstractString; kwargs...) =
+savefig(p::Union{Plot,SyncPlot}, filename::AbstractString; kwargs...) =
 	savefig(filename, p; kwargs...)
 
-PlotlyBase.savejson(sp::SyncPlot, fn::String) = PlotlyBase.savejson(sp.plot, fn)
+savefig(p::Union{Plot,SyncPlot}, filenames::AbstractVector; kwargs...) =
+	_savefig_many(filenames, p, kwargs)
+
+"""
+	savejson(sp::SyncPlot, filename::AbstractString)
+
+Write the JSON figure specification of `sp`'s plot to `filename` (which must
+end in `.json`), atomically and with non-finite numbers written as `null`.
+Returns `sp.plot`.
+"""
+function PlotlyBase.savejson(sp::SyncPlot, filename::AbstractString)
+	lowercase(splitext(filename)[2]) == ".json" || throw(ArgumentError(
+		"savejson: the file name must end in .json; use savefig for other formats.",
+	))
+	savefig(filename, sp.plot; format = "json")
+	return sp.plot
+end
 PlotlyBase.trace_map(sp::SyncPlot, axis) = PlotlyBase.trace_map(sp.plot, axis)
 PlotlyBase._is3d(sp::SyncPlot) = PlotlyBase._is3d(sp.plot)
 
@@ -930,10 +1679,6 @@ function PlotlyBase.purge!(sp::SyncPlot)
 	return sp
 end
 
-function _require_open_syncplot_image_window(sp::SyncPlot)
-	return _require_open_syncplot_window(sp)
-end
-
 function _syncplot_to_image_script(sp::SyncPlot, kwargs)
 	divid_js = _json_js(getfield(sp, :divid))
 	options_js = _json_js(kwargs)
@@ -966,7 +1711,7 @@ function _syncplot_download_image_script(sp::SyncPlot, kwargs)
 end
 
 function PlotlyBase.to_image(sp::SyncPlot; kwargs...)
-	_require_open_syncplot_image_window(sp)
+	_require_open_syncplot_window(sp)
 	js = _syncplot_to_image_script(sp, kwargs)
 	ec = _syncplot_backend(sp)
 	result = Base.invokelatest(() -> ec.run(getfield(sp, :window), js))
@@ -977,7 +1722,7 @@ function PlotlyBase.to_image(sp::SyncPlot; kwargs...)
 end
 
 function PlotlyBase.download_image(sp::SyncPlot; kwargs...)
-	_require_open_syncplot_image_window(sp)
+	_require_open_syncplot_window(sp)
 	js = _syncplot_download_image_script(sp, kwargs)
 	ec = _syncplot_backend(sp)
 	Base.invokelatest(() -> ec.run(getfield(sp, :window), js))
@@ -1123,38 +1868,6 @@ for (f, _) in vcat(PlotlyBase._layout_obj_updaters, PlotlyBase._layout_vector_up
 	end
 end
 
-const _REFRESHABLE_DEFINED_LAYOUT_UPDATERS = Set((
-	:update_xaxes!,
-	:update_yaxes!,
-	:update_polars!,
-	:update_geos!,
-	:update_mapboxes!,
-	:update_scenes!,
-	:update_ternaries!,
-	:update_annotations!,
-	:update_shapes!,
-	:update_images!,
-))
-
-for (f, _) in vcat(
-	PlotlyBase._layout_obj_updaters,
-	PlotlyBase._layout_vector_updaters,
-)
-	f in _REFRESHABLE_DEFINED_LAYOUT_UPDATERS && continue
-	@eval function PlotlyBase.$f(
-		p::_RefreshablePlot,
-		with::PlotlyBase.PlotlyAttribute = attr();
-		kwargs...,
-	)
-		return _transactional_full_plot_mutation!(
-			p;
-			mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
-		) do current
-			PlotlyBase.$f(current.layout, with; kwargs...)
-		end
-	end
-end
-
 for f in (:add_hrect!, :add_hline!, :add_vrect!, :add_vline!, :add_shape!, :add_layout_image!)
 	@eval function PlotlyBase.$f(sp::SyncPlot, args...; kwargs...)
 		return _mutate_and_refresh_syncplot!(
@@ -1230,19 +1943,49 @@ function _syncplot_app(sps::Tuple{Vararg{SyncPlot}})
 	return nothing
 end
 
+# Window options for a SyncPlot built from `sps`: it is shown (and autoplays)
+# when any input with known options was, and waits for startup as long as the
+# most patient input. Inputs without recorded options (e.g. a SyncPlot wrapped
+# by hand) do not constrain it; with none known, `to_syncplot`'s defaults apply.
+function _syncplot_concat_window_options(sps::Tuple{Vararg{SyncPlot}})
+	specs = _SyncPlotCreationSpec[]
+	for sp in sps
+		spec = getfield(sp, :_resources).creation_spec
+		spec === nothing || push!(specs, spec)
+	end
+	isempty(specs) && return NamedTuple()
+	return (
+		show = any(spec -> spec.show, specs),
+		autoplay = any(spec -> spec.autoplay, specs),
+		timeout_s = maximum(spec -> spec.timeout_s, specs),
+	)
+end
+
 function Base.hcat(sps::SyncPlot...)
 	plots = Plot[sp.plot for sp in sps]
-	return to_syncplot(hcat(plots...); app = _syncplot_app(sps))
+	return to_syncplot(
+		hcat(plots...);
+		app = _syncplot_app(sps),
+		_syncplot_concat_window_options(sps)...,
+	)
 end
 
 function Base.vcat(sps::SyncPlot...)
 	plots = Plot[sp.plot for sp in sps]
-	return to_syncplot(vcat(plots...); app = _syncplot_app(sps))
+	return to_syncplot(
+		vcat(plots...);
+		app = _syncplot_app(sps),
+		_syncplot_concat_window_options(sps)...,
+	)
 end
 
 function Base.hvcat(rows::Tuple{Vararg{Int}}, sps::SyncPlot...)
 	plots = Plot[sp.plot for sp in sps]
-	return to_syncplot(hvcat(rows, plots...); app = _syncplot_app(sps))
+	return to_syncplot(
+		hvcat(rows, plots...);
+		app = _syncplot_app(sps),
+		_syncplot_concat_window_options(sps)...,
+	)
 end
 
 #region Re-exported PlotlyBase API docstrings
@@ -1552,11 +2295,18 @@ download_image
 # ── Trace and subplot helpers ───────────────────────────────────────
 
 """
-	add_trace!(p, trace::GenericTrace; row = 1, col = 1, secondary_y = false)
+	add_trace!(p::Union{Plot,SyncPlot}, trace::GenericTrace; row = 1, col = 1, secondary_y = false)
+	add_trace!(sf::SubplotFigure, trace::GenericTrace; row = nothing, col = nothing, secondary_y = false)
 
-Add `trace` to `p`, routed to the subplot cell at `row`/`col` (with
-`secondary_y = true` for a secondary-y axis). Works on `Plot` and
-[`SyncPlot`](@ref); returns `p`.
+Add `trace` to `p`, routed to the subplot cell at `row`/`col`; with
+`secondary_y = true` it goes to that cell's secondary y-axis (the subplot grid
+must have been created with a secondary-y spec). Returns `p`.
+
+On a `Plot` or [`SyncPlot`](@ref), `row`/`col` default to the first cell. On a
+[`SubplotFigure`](@ref) they default to the active cell (see
+[`subplot!`](@ref)), must be given together, and the trace type must match the
+cell kind (e.g. a `scatter3d` needs a 3-D scene cell); the cell then becomes the
+active cell. A `SubplotFigure` call returns `sf`.
 """
 add_trace!
 
@@ -1611,9 +2361,12 @@ add_layout_image!
 """
 	add_recession_bands!(p; kwargs...)
 
-Shade recession bands (vertical spans) on a time-series `Plot` or
+Shade US recession bands (vertical spans) on a time-series `Plot` or
 [`SyncPlot`](@ref); `kwargs` are forwarded to the generated band shapes.
-Returns the added shapes.
+
+Returns the layout's complete shape vector after the update (existing shapes
+followed by the new bands), or `nothing`, leaving the figure unchanged, when no
+trace has date `x` values.
 """
 add_recession_bands!
 
@@ -1628,13 +2381,23 @@ for (fn, objs, desc) in (
 	(:update_geos!, "`geo`", "geographic"),
 	(:update_mapboxes!, "`mapbox`", "mapbox"),
 )
+	subplot_note = if fn in (:update_xaxes!, :update_yaxes!, :update_polars!)
+		"On a [`SubplotFigure`](@ref) the update is applied to the whole " *
+		"figure (every $(desc) object, not just the active cell) and `sf` is returned."
+	elseif fn in (:update_geos!, :update_mapboxes!)
+		"On a [`SubplotFigure`](@ref) it also accepts `row`/`col` (given " *
+		"together) to update only that cell's $(objs) object, and returns `sf`."
+	else
+		"It has no `SubplotFigure` method; update `sf.fig` instead."
+	end
 	doc = """
 		$(fn)(p, with::PlotlyAttribute = attr(); kwargs...)
 
-	Apply the attribute update `with`/`kwargs` to every $(objs)-family layout
-	object ($(objs), $(objs)2, …) of the $(desc) subplots in `p`, which may be a
-	`Plot` or `Layout`; `SyncPlot` is supported for `update_xaxes!`,
-	`update_yaxes!`, and `update_polars!`.
+	Merge the attribute update `with` and `kwargs` into every $(objs)-family
+	layout object ($(objs), $(objs)2, …) of the $(desc) subplots in `p`, which
+	may be a `Plot`, `Layout` or [`SyncPlot`](@ref) (a `SyncPlot` is redrawn in
+	one renderer transaction). Returns the updated `p`.
+	$(subplot_note)
 	"""
 	@eval @doc $doc $fn
 end
@@ -1645,10 +2408,14 @@ for (fn, objs) in (
 	(:update_shapes!, "`shapes`"),
 )
 	doc = """
-		$(fn)(p, with::PlotlyAttribute = attr(); kwargs...)
+		$(fn)(p::Union{Plot,SyncPlot}, with::PlotlyAttribute = attr(); kwargs...)
+		$(fn)(layout::Layout, with::PlotlyAttribute; kwargs...)
 
-	Apply the attribute update `with`/`kwargs` to every entry of the
-	$(objs) layout array of `p` (`Plot` or `Layout`).
+	Merge the attribute update `with` and `kwargs` into every entry of the
+	$(objs) layout array of `p` (a [`SyncPlot`](@ref) is redrawn in one renderer
+	transaction) and return `p`. On a bare `Layout` the `with` argument is
+	required and the call returns `nothing`. It has no `SubplotFigure` method;
+	update `sf.fig` instead.
 	"""
 	@eval @doc $doc $fn
 end
