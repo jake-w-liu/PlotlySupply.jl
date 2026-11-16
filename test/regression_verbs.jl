@@ -565,6 +565,10 @@ end
 	)
 	@test !isdefined(PlotlySupply, Symbol("_maybe_sync_refresh!"))
 	@test !isdefined(PlotlySupply, Symbol("_maybe_sync_command!"))
+	# The displayed-plot list duplicated _PLOT_SYNCPLOT_MAP (written in the same
+	# critical sections, never read by the package).
+	@test !isdefined(PlotlySupply, :_DISPLAYED_PLOTS)
+	@test !isdefined(PlotlySupply, Symbol("_plotlyjs_refresh!"))
 
 	# redraw! on a displayed Plot runs inside the renderer transaction.
 	p = Plot([scatter(y = [1, 2])])

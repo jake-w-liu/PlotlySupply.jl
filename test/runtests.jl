@@ -153,17 +153,13 @@ end
 
 function _lifecycle_registry_counts()
     return lock(PlotlySupply._SYNCPLOT_REGISTRY_LOCK) do
-        (
-            length(PlotlySupply._PLOT_SYNCPLOT_MAP),
-            length(PlotlySupply._DISPLAYED_PLOTS),
-        )
+        length(PlotlySupply._PLOT_SYNCPLOT_MAP)
     end
 end
 
 function _lifecycle_is_registered(plot, sp)
     return lock(PlotlySupply._SYNCPLOT_REGISTRY_LOCK) do
-        get(PlotlySupply._PLOT_SYNCPLOT_MAP, plot, nothing) === sp &&
-            any(candidate -> candidate === sp, PlotlySupply._DISPLAYED_PLOTS)
+        get(PlotlySupply._PLOT_SYNCPLOT_MAP, plot, nothing) === sp
     end
 end
 
@@ -942,11 +938,9 @@ end
                 ),
             ) == "ok"
             @test renderer_ready() === true
-        catch err
-            # Accept environments where ElectronCall is not installed.
-            @test err isa Exception
-            @test occursin("ElectronCall", sprint(showerror, err))
         finally
+            # ElectronCall is a hard dependency: a failure above is a test error,
+            # and the window is closed either way.
             sp === nothing || close(sp)
         end
     end
@@ -1268,13 +1262,31 @@ end
         html_bytes = savefig(plot_scatter(1:3, rand(3)); format="html")
         @test length(html_bytes) > 0
 
-        # Image export now uses Electron; skip if display backend unavailable.
-        try
-            svg_bytes = savefig(plot_scatter(1:3, rand(3)); format="svg")
-            @test length(svg_bytes) > 0
-        catch err
-            @test occursin("ElectronCall", sprint(showerror, err)) || occursin("Plotly.js", sprint(showerror, err))
-        end
+        # Image export renders in the hidden Electron export window (ElectronCall
+        # is a hard dependency, so a renderer failure is a test error). Check each
+        # format's signature and the requested pixel size, not just "non-empty".
+        export_fig = plot_scatter(1:3, [1.0, 3.0, 2.0])
+        svg_text = String(savefig(export_fig; format="svg", width=400, height=300))
+        @test startswith(svg_text, "<svg")
+        @test occursin(r"<svg[^>]*\bwidth=\"400\"", svg_text)
+        @test occursin(r"<svg[^>]*\bheight=\"300\"", svg_text)
+        @test occursin("class=\"scatterlayer", svg_text)
+        png_bytes = savefig(export_fig; format="png", width=400, height=300)
+        @test png_bytes[1:8] == UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+        @test String(png_bytes[13:16]) == "IHDR"
+        @test ntoh(reinterpret(UInt32, png_bytes[17:20])[1]) == 400
+        @test ntoh(reinterpret(UInt32, png_bytes[21:24])[1]) == 300
+        jpeg_bytes = savefig(export_fig; format="jpeg", width=400, height=300)
+        @test jpeg_bytes[1:3] == UInt8[0xff, 0xd8, 0xff]
+        @test jpeg_bytes[end-1:end] == UInt8[0xff, 0xd9]
+        pdf_bytes = savefig(
+            plot_heatmap(1:3, 1:2, [1.0 2.0; 3.0 4.0; 5.0 6.0]);
+            format="pdf",
+            width=400,
+            height=300,
+        )
+        @test String(pdf_bytes[1:5]) == "%PDF-"
+        @test occursin("%%EOF", String(pdf_bytes[max(1, end - 1023):end]))
 
         # JSON export
         json_bytes = savefig(plot_scatter(1:3, rand(3)); format="json")
@@ -1298,12 +1310,13 @@ end
 
         # Regression: NaN separators (used by quiver-like traces) should still export.
         p_nan = Plot(scatter(x=[1.0, 2.0, NaN, 3.0], y=[1.0, 2.0, NaN, 3.0]), Layout(title="nan-export"))
-        try
-            svg_nan = savefig(p_nan; format="svg")
-            @test length(svg_nan) > 0
-        catch err
-            @test occursin("ElectronCall", sprint(showerror, err)) || occursin("Plotly.js", sprint(showerror, err))
-        end
+        svg_nan = String(savefig(p_nan; format="svg"))
+        @test startswith(svg_nan, "<svg")
+        @test occursin("nan-export", svg_nan)
+        # The NaN splits the line into two drawn segments (two "M" moves).
+        line_paths = [m.captures[1] for m in eachmatch(r"<path class=\"js-line\" d=\"([^\"]*)\"", svg_nan)]
+        @test !isempty(line_paths)
+        @test sum(d -> count(==('M'), d), line_paths) == 2
 
         html_fn = tempname() * ".html"
         savefig(html_fn, plot_scatter(1:3, rand(3)); format="html")
@@ -1315,78 +1328,115 @@ end
         @test size(mg[1]) == (2, 3)
         @test size(mg[2]) == (2, 3)
 
-        # Exercise syncplot API paths; skip only if backend fails at runtime.
+        # SyncPlot entry points and mutators on real hidden windows. ElectronCall
+        # is a hard dependency, so any exception is a test error; every window
+        # opened here is closed in the `finally`, also when an assertion fails.
+        opened = SyncPlot[]
+        keep!(sp) = (push!(opened, sp); sp)
+        function live(sp, expression)
+            divid_js = PlotlySupply._json_js(sp.divid)
+            backend = PlotlySupply._syncplot_backend(sp)
+            return Base.invokelatest(() -> backend.run(
+                sp.window,
+                "(() => { const d = document.getElementById($divid_js); " *
+                "return JSON.stringify($expression); })()",
+            ))
+        end
+        live_title(sp) = live(sp, "d._fullLayout.title.text")
+        live_y(sp) = live(sp, "d.data.map(t => Array.from(t.y))")
         try
-            fig = plot_scatter(1:4, rand(4))
-            sp = to_syncplot(fig; show=false, title="coverage-sync")
+            sp = keep!(to_syncplot(plot_scatter(1:4, [4.0, 3.0, 2.0, 1.0]); show=false, title="coverage-sync"))
             @test sp isa SyncPlot
             @test to_syncplot(sp) === sp
-            @test PlotlySupply._plot_obj(sp) isa Plot
-            @test isopen(sp) isa Bool
-            @test occursin("SyncPlot", sprint(show, sp))
+            @test PlotlySupply._plot_obj(sp) === sp.plot
+            @test isopen(sp) === true
+            @test startswith(sprint(show, sp), "SyncPlot(open")
             @test msgchannel(sp) isa Channel
 
             # plot(...) compatibility entry points
-            sp1 = plot(scatter(x=[1, 2], y=[2, 1]); sync=true, show=false, title="p1")
-            sp2 = plot([scatter(x=[1, 2], y=[1, 2])]; sync=true, show=false, title="p2")
-            sp3 = plot(scatter(x=[1], y=[1]), scatter(x=[1], y=[2]); sync=true, show=false, title="p3")
-            sp4 = plot(; layout=Layout(title="empty"), sync=true, show=false, title="p4")
-            sp5 = plot(Plot(scatter(x=[1, 2], y=[2, 1]), Layout(title="fig")); sync=true, show=false, title="p5")
+            sp1 = keep!(plot(scatter(x=[1, 2], y=[2, 1]); sync=true, show=false, title="p1"))
+            sp2 = keep!(plot([scatter(x=[1, 2], y=[1, 2])]; sync=true, show=false, title="p2"))
+            sp3 = keep!(plot(scatter(x=[1], y=[1]), scatter(x=[1], y=[2]); sync=true, show=false, title="p3"))
+            sp4 = keep!(plot(; layout=Layout(title="empty"), sync=true, show=false, title="p4"))
+            sp5 = keep!(plot(Plot(scatter(x=[1, 2], y=[2, 1]), Layout(title="fig")); sync=true, show=false, title="p5"))
             raw = plot(scatter(x=[1, 2], y=[2, 1]); sync=false, title="raw")
-            @test sp1 isa SyncPlot
-            @test sp2 isa SyncPlot
-            @test sp3 isa SyncPlot
-            @test sp4 isa SyncPlot
-            @test sp5 isa SyncPlot
+            @test all(s -> s isa SyncPlot && isopen(s), (sp1, sp2, sp3, sp4, sp5))
             @test raw isa Plot
+            @test sp1.plot.data[1][:y] == [2, 1]
+            @test live_y(sp1) == "[[2,1]]"
+            @test length(sp3.plot.data) == 2
+            @test live(sp3, "d.data.length") == "2"
+            @test isempty(sp4.plot.data)
+            @test live_title(sp4) == "\"empty\""
+            @test live_title(sp5) == "\"fig\""
 
-            # Sync mutating wrappers
-            react!(sp, [scatter(x=[1, 2], y=[2, 1])], Layout(title="react1"))
-            react!(sp, Plot(scatter(x=[1, 2], y=[1, 2]), Layout(title="react2")))
-            relayout!(sp, title="layout")
-            restyle!(sp, marker=attr(size=8))
-            addtraces!(sp, scatter(x=[1, 2], y=[3, 4]))
-            movetraces!(sp, 1)
-            extendtraces!(sp, Dict(:y => [[5, 6]]), [1], -1)
-            prependtraces!(sp, Dict(:y => [[0]]), [1], -1)
-            update!(sp, Dict(:name => "updated"), layout=Layout(title="updated"))
-            update_xaxes!(sp, range=[0, 3])
-            update_yaxes!(sp, range=[0, 6])
-            update_polars!(sp, radialaxis=attr(range=[0, 2]))
-            deletetraces!(sp, length(sp.plot.data))
+            # Sync mutating wrappers: each commits to the model and the window.
+            @test react!(sp, [scatter(x=[1, 2], y=[2, 1])], Layout(title="react1")) === sp
+            @test sp.plot.data[1][:y] == [2, 1]
+            @test live_title(sp) == "\"react1\""
+            replacement = Plot(scatter(x=[1, 2], y=[1, 2]), Layout(title="react2"))
+            @test react!(sp, replacement) === sp
+            @test sp.plot === replacement
+            @test live_title(sp) == "\"react2\""
+            @test relayout!(sp, title="layout") === sp
+            @test live_title(sp) == "\"layout\""
+            @test restyle!(sp, marker=attr(size=8)) === sp
+            @test sp.plot.data[1][:marker][:size] == 8
+            @test live(sp, "d._fullData[0].marker.size") == "8"
+            @test addtraces!(sp, scatter(x=[1, 2], y=[3, 4])) === sp
+            @test length(sp.plot.data) == 2
+            @test movetraces!(sp, 1) === sp
+            @test [t[:y] for t in sp.plot.data] == [[3, 4], [1, 2]]
+            @test live_y(sp) == "[[3,4],[1,2]]"
+            @test extendtraces!(sp, Dict(:y => [[5, 6]]), [1], -1) === sp
+            @test prependtraces!(sp, Dict(:y => [[0]]), [1], -1) === sp
+            @test sp.plot.data[1][:y] == [0, 3, 4, 5, 6]
+            @test live_y(sp) == "[[0,3,4,5,6],[1,2]]"
+            @test update!(sp, Dict(:name => "updated"), layout=Layout(title="updated")) === sp
+            @test all(t -> t[:name] == "updated", sp.plot.data)
+            @test live_title(sp) == "\"updated\""
+            @test live(sp, "d.data.map(t => t.name)") == "[\"updated\",\"updated\"]"
+            @test update_xaxes!(sp, range=[0, 3]) === sp
+            @test update_yaxes!(sp, range=[0, 6]) === sp
+            @test sp.plot.layout[:xaxis][:range] == [0, 3]
+            @test sp.plot.layout[:yaxis][:range] == [0, 6]
+            @test live(sp, "[d._fullLayout.xaxis.range, d._fullLayout.yaxis.range]") == "[[0,3],[0,6]]"
+            @test update_polars!(sp, radialaxis=attr(range=[0, 2])) === sp
+            @test deletetraces!(sp, length(sp.plot.data)) === sp
+            @test length(sp.plot.data) == 1
+            @test add_trace!(sp, scatter(x=[0], y=[0])) === sp
+            @test live_y(sp) == "[[0,3,4,5,6],[0]]"
+            @test redraw!(sp) === sp
+            @test live(sp, "d.data.length") == "2"
+            @test !getfield(sp, :_resources).renderer_desynchronized
 
-            add_trace!(sp, scatter(x=[0], y=[0]))
-            redraw!(sp)
-
-            sp_relayout = relayout(sp, title="copy")
-            @test sp_relayout isa SyncPlot
-            close(sp_relayout)
+            sp_relayout = keep!(relayout(sp, title="copy"))
+            @test sp_relayout isa SyncPlot && sp_relayout !== sp
+            @test live_title(sp_relayout) == "\"copy\""
+            @test live_title(sp) == "\"updated\""
 
             # fallback false branch in isopen catch
             bogus = SyncPlot(Plot(scatter(y=[1])), nothing, nothing, "bogus")
             @test !isopen(bogus)
             @test PlotlySupply._syncplot_app((bogus,)) === nothing
 
-            # concat overloads
-            hsp = hcat(sp1, sp2)
-            vsp = vcat(sp1, sp2)
-            hvsp = hvcat((1, 1), sp1, sp2)
-            @test hsp isa SyncPlot
-            @test vsp isa SyncPlot
-            @test hvsp isa SyncPlot
-
-            close(sp)
-            close(sp1)
-            close(sp2)
-            close(sp3)
-            close(sp4)
-            close(sp5)
-            close(hsp)
-            close(vsp)
-            close(hvsp)
-        catch err
-            @test err isa Exception
+            # concat overloads place both sources side by side / stacked.
+            hsp = keep!(hcat(sp1, sp2))
+            vsp = keep!(vcat(sp1, sp2))
+            hvsp = keep!(hvcat((1, 1), sp1, sp2))
+            for joined in (hsp, vsp, hvsp)
+                @test joined isa SyncPlot && isopen(joined)
+                @test [t[:y] for t in joined.plot.data] == [[2, 1], [1, 2]]
+                @test live(joined, "d.data.length") == "2"
+            end
+            @test live(hsp, "d._fullLayout.xaxis2.domain[0] > d._fullLayout.xaxis.domain[1]") == "true"
+            @test live(vsp, "d._fullLayout.yaxis.domain[0] > d._fullLayout.yaxis2.domain[1]") == "true"
+        finally
+            for opened_sp in opened
+                close(opened_sp)
+            end
         end
+        @test all(s -> !isopen(s), opened)
     end
 
     # ============================================================
@@ -5073,7 +5123,7 @@ end
             @test fixture.old === nothing
             @test fixture.retained_size > 1_500_000
             @test all(ref -> ref.value !== nothing, fixture.refs)
-            @test _lifecycle_registry_counts() == (baseline[1] + 1, baseline[2] + 1)
+            @test _lifecycle_registry_counts() == baseline + 1
 
             @test _wait_for_lifecycle() do
                 !ispath(fixture.tempdir) &&

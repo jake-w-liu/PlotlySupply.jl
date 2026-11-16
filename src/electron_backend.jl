@@ -1143,7 +1143,6 @@ const _PLOT_SYNCPLOT_RESERVATIONS =
 mutable struct _PlotSyncPlotGeneration end
 const _PLOT_SYNCPLOT_VERSIONS =
 	WeakKeyDict{Plot,_PlotSyncPlotGeneration}()
-const _DISPLAYED_PLOTS = SyncPlot[]
 
 function _plot_syncplot_version(p::Plot)
 	return get(_PLOT_SYNCPLOT_VERSIONS, p, nothing)
@@ -10063,7 +10062,6 @@ end
 
 function _deregister_syncplot!(sp::SyncPlot)
 	lock(_SYNCPLOT_REGISTRY_LOCK) do
-		filter!(x -> x !== sp, _DISPLAYED_PLOTS)
 		for plot in collect(keys(_PLOT_SYNCPLOT_MAP))
 			if _PLOT_SYNCPLOT_MAP[plot] === sp
 				delete!(_PLOT_SYNCPLOT_MAP, plot)
@@ -10235,7 +10233,6 @@ function _register_displayed_syncplot!(p::Plot, sp::SyncPlot)
 				old = get(_PLOT_SYNCPLOT_MAP, p, nothing)
 				_PLOT_SYNCPLOT_MAP[p] = sp
 				old === sp || _bump_plot_syncplot_version!(p)
-				push!(_DISPLAYED_PLOTS, sp)
 				(old, true)
 			end
 		finally
