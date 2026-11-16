@@ -641,6 +641,12 @@ end
 			with_style(; template = :ggplot2) do
 				@test _RS._figure_style_template(named) === _RS_PB.templates[:ggplot2]
 			end
+			# Legend font for legends created after construction.
+			@test _RS._style_legend_font() == Dict{Symbol, Any}()
+			@test _RS._style_legend_font(PlotStyle(; legend_fontsize = 9)) == Dict{Symbol, Any}(:size => 9.0)
+			with_style(:publication) do
+				@test _RS._style_legend_font() == Dict{Symbol, Any}(:size => 12.0)
+			end
 		end
 
 		@testset "style cycle: offset scope and mode flags" begin

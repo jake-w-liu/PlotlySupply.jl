@@ -43,7 +43,8 @@
 #   after `_apply_default_template!`. `showgrid` set before it is kept.
 # - A mutator never calls `_apply_default_template!` (it would reset a
 #   user-set template). A legend it creates should use
-#   `_apply_default_legend!(fig; _figure_legend_defaults(fig)...)`, and an
+#   `_apply_default_legend!(fig; _figure_legend_defaults(fig)...)` (and
+#   `_style_legend_font()` for its font size), and an
 #   axis it adds (twin/secondary) `_figure_axis_defaults(fig; axis = :y)`, so
 #   both match the figure's template (dark on plotly_dark).
 # - Trace builders call `_apply_style_trace_defaults!` (below) on the traces
@@ -71,6 +72,11 @@
 #   _figure_axis_defaults(fig; axis = :x, style)::Dict{Symbol,Any}
 #       `_style_legend_defaults` / `_style_axis_defaults` in the colours of the
 #       figure's template, for legends and axes created on an existing figure.
+#
+#   _style_legend_font(style = _active_style())::Dict{Symbol,Any}
+#       `Dict(:size => style.legend_fontsize)` (empty for `:default`): merge
+#       into the `font` of a legend created after construction (SubplotFigure
+#       per-cell legends), so it matches the legends the style sized.
 #
 #   _style_axis_defaults(style = _active_style(); template = _style_template(style),
 #                        axis::Symbol = :x)::Dict{Symbol,Any}
@@ -945,6 +951,14 @@ _figure_style_template(fig; style::PlotStyle = _active_style()) =
 # a plotly_dark figure). Splat into `_apply_default_legend!(fig; ...)`.
 _figure_legend_defaults(fig; style::PlotStyle = _active_style()) =
 	_style_legend_defaults(style; template = _figure_style_template(fig; style = style))
+
+# Font of a legend created after the figure was built (e.g. a SubplotFigure's
+# per-cell `legend2`…): the style's legend size, which `_apply_style_layout!`
+# wrote only onto the legends that existed at construction. Empty when the
+# style leaves the legend size unset (`:default`), so 1.x output is unchanged.
+# Merge it into the new legend's `font`.
+_style_legend_font(style::PlotStyle = _active_style()) =
+	style.legend_fontsize > 0 ? Dict{Symbol, Any}(:size => style.legend_fontsize) : Dict{Symbol, Any}()
 
 # Frame of a Cartesian axis that is added to an existing figure (a twin or
 # secondary axis): `_style_axis_defaults` in the ink of the figure's template.
