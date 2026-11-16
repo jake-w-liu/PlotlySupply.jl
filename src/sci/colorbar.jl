@@ -69,6 +69,15 @@ const _CBAR_ROOT_TRACE_TYPES = (
 	"densitymapbox",
 	"densitymap",
 )
+const _CBAR_CONTOUR_TYPES = ("contour", "contourcarpet", "histogram2dcontour")
+
+# Colorbar keys that position a bar. `shared_colorbar!` carries the other
+# settings (ticks, number format, thickness, …) of the bars it removes over
+# to the shared bar, never these.
+const _CBAR_GEOMETRY_KEYS = (
+	:x, :y, :xanchor, :yanchor, :xref, :yref, :xpad, :ypad,
+	:len, :lenmode, :orientation,
+)
 
 # Set while the SubplotFigure delegate runs a mutator on its scratch figure.
 # Math colorbar titles are then left on the traces and converted by
@@ -159,6 +168,13 @@ function _cbar_slot(trace, index::Int)
 	if type_name in _CBAR_ROOT_TRACE_TYPES
 		# A mesh3d without `intensity` is drawn in one flat colour.
 		type_name == "mesh3d" && !haskey(fields, :intensity) && return nothing
+		# Contours with `coloring = "none"` are drawn in `line.color`; plotly
+		# gives them no colour scale and no colorbar.
+		if type_name in _CBAR_CONTOUR_TYPES
+			coloring = _cmn_mapping_get(get(fields, :contours, nothing), :coloring)
+			(coloring isa AbstractString || coloring isa Symbol) &&
+				String(coloring) == "none" && return nothing
+		end
 		axis = _cbar_coloraxis_ref(get(fields, :coloraxis, nothing))
 		shows = axis === nothing && get(fields, :showscale, true) !== false
 		return _CbarSlot(index, :root, axis, shows)
@@ -331,6 +347,30 @@ function _cbar_ref_default(key::Symbol, kind::String)
 	key === :geo && return "geo"
 	key === :subplot && return kind
 	return nothing
+end
+
+# Indices of the traces drawn in the SubplotFigure cells `cells` ((row, col)
+# pairs): traces routed to a cell's primary or secondary axes or scene/polar/…
+# reference, and traces in the insets registered for the cell.
+function _cbar_cell_trace_indices(sf::SubplotFigure, p::Plot, cells, who::AbstractString)
+	cell_refs = Any[_cbar_cell_refs(p, r, c, who) for (r, c) in cells]
+	insets = [
+		inset for inset in getfield(sf, :insets)
+		if any(cell -> cell == (inset.row, inset.col), cells)
+	]
+	indices = Int[]
+	for index in eachindex(p.data)
+		trace = p.data[index]
+		trace isa GenericTrace || continue
+		inside = any(refs -> _cbar_trace_in_refs(trace, refs), cell_refs)
+		if !inside && !isempty(insets) && _cbar_trace_kind(trace) == "xy"
+			xref = string(get(trace.fields, :xaxis, "x"))
+			yref = string(get(trace.fields, :yaxis, "y"))
+			inside = any(inset -> inset.xref == xref && inset.yref == yref, insets)
+		end
+		inside && push!(indices, index)
+	end
+	return indices
 end
 
 # Whether `trace` is routed to one of the subplot references `refs`.
@@ -973,12 +1013,12 @@ function _colorbar_edit_coloraxis!(
 	region,
 	who::AbstractString,
 )
+	regions, _ = _cbar_coloraxis_regions(p, id, length(p.data) + 1)
+	isempty(regions) && throw(ArgumentError(
+		"$(who): no trace uses coloraxis $(repr(id)); bind traces to it " *
+		"first (e.g. `coloraxis=:shared` or `shared_colorbar!`).",
+	))
 	if region === nothing
-		regions, _ = _cbar_coloraxis_regions(p, id, length(p.data) + 1)
-		isempty(regions) && throw(ArgumentError(
-			"$(who): no trace uses coloraxis $(repr(id)); bind traces to it " *
-			"first (e.g. `coloraxis=:shared` or `shared_colorbar!`).",
-		))
 		xdomain, ydomain = _cbar_union(regions)
 		pad = length(regions) == 1 ? _CBAR_CELL_PAD : _CBAR_SHARED_PAD
 	else
@@ -1083,15 +1123,9 @@ function _colorbar_subplot_impl!(
 	r, c = target.row, target.col
 	p = _plot_obj(sf.fig)
 	if coloraxis === nothing
-		refs = _cbar_cell_refs(p, r, c, who)
-		indices = [
-			index for index in eachindex(p.data)
-			if p.data[index] isa GenericTrace &&
-				_cbar_trace_in_refs(p.data[index], refs)
-		]
 		slots = _colorbar_slots(
 			p,
-			indices,
+			_cbar_cell_trace_indices(sf, p, ((r, c),), who),
 			who,
 			"subplot cell ($(r), $(c)) has no coloured trace $(_CBAR_NO_COLOUR_HINT).",
 		)
@@ -1308,18 +1342,209 @@ function _shared_colorbar_first_scale(p::Plot, slots::Vector{_CbarSlot})
 	return nothing
 end
 
+# Fully expanded `[t, "#RRGGBB"]` stops of a stored colour scale, or `nothing`
+# when it is unset or not a scale this package can interpret (then it is
+# treated as "unknown" and never compared).
+function _cbar_scale_stops(scale, reversescale::Bool)
+	_is_unset_colorscale(scale) && return nothing
+	stops = try
+		_colorscale_stops(scale; who = "shared_colorbar!")
+	catch err
+		err isa ArgumentError || rethrow()
+		return nothing
+	end
+	return reversescale ? _reverse_stops(stops) : stops
+end
+
+function _cbar_same_stops(a, b)
+	length(a) == length(b) || return false
+	for (sa, sb) in zip(a, b)
+		isapprox(Float64(sa[1]), Float64(sb[1]); atol = 1e-9) || return false
+		_color_hex(sa[2]) == _color_hex(sb[2]) || return false
+	end
+	return true
+end
+
+function _cbar_slot_source(trace::GenericTrace, slot::_CbarSlot)
+	slot.container === :root && return trace.fields
+	return _symbol_dict(get(trace.fields, slot.container, nothing))
+end
+
+# A trace that is not bound to a coloraxis and whose own colour scale has one
+# colour everywhere (e.g. `plot_quiver3d(...; color=...)` cones) shows a flat
+# colour, not a colour mapping; `shared_colorbar!` leaves it alone.
+function _cbar_slot_is_flat(trace::GenericTrace, slot::_CbarSlot)
+	slot.coloraxis === nothing || return false
+	source = _cbar_slot_source(trace, slot)
+	stops = _cbar_scale_stops(
+		get(source, :colorscale, nothing),
+		get(source, :reversescale, false) === true,
+	)
+	(stops === nothing || isempty(stops)) && return false
+	first_colour = _color_hex(stops[1][2])
+	return all(stop -> _color_hex(stop[2]) == first_colour, stops)
+end
+
+# An invisible colorbar carrier made by `_colorbar_carrier_trace`: its colour
+# limits are `marker.color = [cmin, cmax]` and the colours it labels were
+# sampled in Julia, so they cannot follow a new range or scale.
+function _cbar_is_carrier(trace::GenericTrace)
+	fields = trace.fields
+	_cbar_trace_type(trace) == "scatter" || return false
+	get(fields, :hoverinfo, nothing) == "skip" || return false
+	for key in (:x, :y)
+		values = get(fields, key, nothing)
+		(values isa AbstractVector && length(values) == 1 && only(values) === _GAP) ||
+			return false
+	end
+	colours = _cmn_mapping_get(get(fields, :marker, nothing), :color)
+	return colours isa AbstractVector && length(colours) == 2 &&
+		all(v -> v isa Real && !(v isa Bool) && isfinite(v), colours)
+end
+
+# (limits, scale) the carriers among `slots` were drawn with: limits from
+# `marker.color`; scale `(scale, reversescale, stops)` from the marker or the
+# coloraxis they are bound to (`nothing` when unset). Carriers that disagree
+# cannot share one bar.
+function _shared_colorbar_carrier_spec(p::Plot, slots::Vector{_CbarSlot}, who::AbstractString)
+	limits = nothing
+	scale = nothing
+	for slot in slots
+		trace = p.data[slot.index]
+		_cbar_is_carrier(trace) || continue
+		colours = _cmn_mapping_get(get(trace.fields, :marker, nothing), :color)
+		carrier_limits = (Float64(colours[1]), Float64(colours[2]))
+		if limits === nothing
+			limits = carrier_limits
+		elseif !(isapprox(limits[1], carrier_limits[1]; rtol = 1e-9, atol = 1e-12) &&
+				isapprox(limits[2], carrier_limits[2]; rtol = 1e-9, atol = 1e-12))
+			throw(ArgumentError(
+				"$(who): the colorbar carrier traces were drawn for different colour " *
+				"limits ($(limits[1])..$(limits[2]) and $(carrier_limits[1])..$(carrier_limits[2])). " *
+				"Their colours are fixed when the figure is built, so they cannot share " *
+				"one bar; rebuild those plots with a common colour range (e.g. `crange`).",
+			))
+		end
+		source = slot.coloraxis === nothing ?
+			_cbar_slot_source(trace, slot) :
+			_symbol_dict(get(p.layout.fields, Symbol(slot.coloraxis), nothing))
+		raw = get(source, :colorscale, nothing)
+		reversed = get(source, :reversescale, false) === true
+		stops = _cbar_scale_stops(raw, reversed)
+		stops === nothing && continue
+		if scale === nothing
+			scale = (scale = raw, reversescale = reversed, stops = stops)
+		elseif !_cbar_same_stops(scale.stops, stops)
+			throw(ArgumentError(
+				"$(who): the colorbar carrier traces were drawn with different colour " *
+				"scales. Their colours are fixed when the figure is built, so they " *
+				"cannot share one bar; rebuild those plots with a common `colorscale`.",
+			))
+		end
+	end
+	return (limits = limits, scale = scale)
+end
+
+# Non-geometry settings of the bars that `shared_colorbar!` removes, for the
+# shared bar: the first bar's settings (number format, thickness, …), its
+# title (`nothing` when none), and the union of the explicit ticks of all
+# bars (`tickvals` sorted, the first label of a value winning; labelled
+# bars take precedence over unlabelled ones). Log-scaled panels thus keep
+# their decade labels on the shared bar.
+function _shared_colorbar_carried(p::Plot, slots::Vector{_CbarSlot})
+	settings = Dict{Symbol,Any}()
+	title = nothing
+	labelled = Dict{Float64,Any}()
+	unlabelled = Float64[]
+	first_bar = true
+	for slot in slots
+		slot.coloraxis === nothing || continue
+		trace = p.data[slot.index]
+		bar = _symbol_dict(_cbar_slot_bar(trace, slot))
+		if title === nothing
+			text = _cbar_title_text(bar)
+			if text !== nothing && !isempty(text)
+				title = (text = text, side = _cbar_title_side(bar))
+			elseif slot.shows
+				found = _cbar_find_title_annotation(p, _cbar_trace_region(p, trace).key)
+				found === nothing || (title = found)
+			end
+		end
+		tickvals = get(bar, :tickvals, nothing)
+		if tickvals isa AbstractVector && !isempty(tickvals) &&
+				all(v -> v isa Real && !(v isa Bool) && isfinite(v), tickvals)
+			ticktext = get(bar, :ticktext, nothing)
+			if ticktext isa AbstractVector && length(ticktext) == length(tickvals)
+				for (value, label) in zip(tickvals, ticktext)
+					get!(labelled, Float64(value), label)
+				end
+			else
+				append!(unlabelled, Float64.(tickvals))
+			end
+		end
+		if first_bar && !isempty(bar)
+			for (key, value) in bar
+				key in _CBAR_GEOMETRY_KEYS && continue
+				key in (:title, :tickvals, :ticktext, :tickmode) && continue
+				settings[key] = value
+			end
+			first_bar = false
+		end
+	end
+	if !isempty(labelled)
+		values = sort!(collect(keys(labelled)))
+		settings[:tickmode] = "array"
+		settings[:tickvals] = values
+		settings[:ticktext] = Any[labelled[v] for v in values]
+	elseif !isempty(unlabelled)
+		settings[:tickmode] = "array"
+		settings[:tickvals] = sort!(unique(unlabelled))
+	end
+	return (settings = settings, title = title)
+end
+
 function _shared_colorbar_apply!(
 	p::Plot,
 	slots::Vector{_CbarSlot},
 	regions,
 	opts,
+	who::AbstractString,
 )
 	id = opts.coloraxis
-	# Colour limits: explicit, centred automatic (cmid), or the global finite
-	# extrema of the colour data. When any trace's colour data is computed by
-	# plotly (histogram2d counts, …) the limits stay automatic: plotly ranges
-	# a coloraxis over every trace bound to it.
+	carriers = _shared_colorbar_carrier_spec(p, slots, who)
+	carried = _shared_colorbar_carried(p, slots)
+	# Colour limits: explicit, centred automatic (cmid), the limits colorbar
+	# carriers were drawn with, or the global finite extrema of the colour
+	# data. When any trace's colour data is computed by plotly (histogram2d
+	# counts, …) the limits stay automatic: plotly ranges a coloraxis over
+	# every trace bound to it.
 	limits = opts.limits
+	if carriers.limits !== nothing
+		opts.cmid === nothing || throw(ArgumentError(
+			"$(who): `cmid` would rescale the colorbar carrier traces, whose " *
+			"colours are fixed at $(carriers.limits[1])..$(carriers.limits[2]); omit it.",
+		))
+		if limits !== nothing &&
+				!(isapprox(limits[1], carriers.limits[1]; rtol = 1e-9, atol = 1e-12) &&
+				isapprox(limits[2], carriers.limits[2]; rtol = 1e-9, atol = 1e-12))
+			throw(ArgumentError(
+				"$(who): `crange` $(collect(limits)) differs from the colour limits " *
+				"$(collect(carriers.limits)) the colorbar carrier traces were drawn " *
+				"with; their colours cannot be rescaled. Omit `crange` or rebuild " *
+				"those plots with it.",
+			))
+		end
+		limits = carriers.limits
+	end
+	if carriers.scale !== nothing && opts.scale !== nothing
+		requested = _cbar_scale_stops(opts.scale.scale, opts.scale.reversescale)
+		(requested === nothing || _cbar_same_stops(requested, carriers.scale.stops)) ||
+			throw(ArgumentError(
+				"$(who): `colorscale` differs from the scale the colorbar carrier " *
+				"traces were drawn with; their colours cannot be recoloured. Omit " *
+				"`colorscale` or rebuild those plots with it.",
+			))
+	end
 	if limits === nothing && opts.cmid === nothing
 		lo = Inf
 		hi = -Inf
@@ -1337,9 +1562,13 @@ function _shared_colorbar_apply!(
 		end
 		(known && isfinite(lo) && lo < hi) && (limits = (lo, hi))
 	end
-	scale = opts.scale === nothing ?
-		_shared_colorbar_first_scale(p, slots) :
+	scale = if opts.scale !== nothing
 		(scale = opts.scale.scale, reversescale = opts.scale.reversescale)
+	elseif carriers.scale !== nothing
+		(scale = carriers.scale.scale, reversescale = carriers.scale.reversescale)
+	else
+		_shared_colorbar_first_scale(p, slots)
+	end
 
 	# Rebind every coloured trace; its own bar disappears with it.
 	removed_areas = String[]
@@ -1388,13 +1617,38 @@ function _shared_colorbar_apply!(
 	extent = opts.side === :right ? ydomain[2] - ydomain[1] : xdomain[2] - xdomain[1]
 	placement[:len] = opts.len * extent
 	bar = _symbol_dict(get(axis, :colorbar, nothing))
+	# Settings already on the shared bar win over those carried from the
+	# removed per-trace bars.
+	for (name, value) in carried.settings
+		haskey(bar, name) || (bar[name] = value)
+	end
 	merge!(bar, placement)
 	haskey(bar, :thickness) || (bar[:thickness] = _CBAR_CELL_THICKNESS)
 	range = limits !== nothing ? limits : _cbar_coloraxis_range(p, id)
-	_cbar_apply_title!(p, bar, id, opts.title, opts.title_side, true, range)
+	title, title_side = opts.title, opts.title_side
+	if title === nothing && carried.title !== nothing &&
+			_cbar_title_text(bar) === nothing &&
+			_cbar_find_title_annotation(p, id) === nothing
+		title, title_side = carried.title.text, carried.title.side
+	end
+	_cbar_apply_title!(p, bar, id, title, title_side, true, range)
 	axis[:colorbar] = _cbar_attr(bar)
 	p.layout.fields[key] = _cbar_attr(axis)
 	return nothing
+end
+
+# The coloured traces `shared_colorbar!` binds among `indices`: flat-coloured
+# traces (see `_cbar_slot_is_flat`) are left alone.
+function _shared_colorbar_slots(p::Plot, indices, who::AbstractString, empty_message::AbstractString)
+	slots = _CbarSlot[]
+	for index in indices
+		slot = _cbar_slot(p.data[index], index)
+		slot === nothing && continue
+		_cbar_slot_is_flat(p.data[index], slot) && continue
+		push!(slots, slot)
+	end
+	isempty(slots) && throw(ArgumentError("$(who): $(empty_message)"))
+	return slots
 end
 
 function _shared_colorbar_impl!(
@@ -1409,7 +1663,7 @@ function _shared_colorbar_impl!(
 	))
 	opts = _shared_colorbar_options(who; options...)
 	p = _plot_obj(fig)
-	slots = _colorbar_slots(
+	slots = _shared_colorbar_slots(
 		p,
 		eachindex(p.data),
 		who,
@@ -1419,7 +1673,7 @@ function _shared_colorbar_impl!(
 	for slot in slots
 		_cbar_push_region!(regions, _cbar_trace_region(p, p.data[slot.index]))
 	end
-	_shared_colorbar_apply!(p, slots, regions, opts)
+	_shared_colorbar_apply!(p, slots, regions, opts, who)
 	_refresh!(fig)
 	return nothing
 end
@@ -1458,7 +1712,7 @@ function _shared_colorbar_subplot_impl!(
 	p = _plot_obj(sf.fig)
 	regions = Any[]
 	if selected === :all
-		slots = _colorbar_slots(
+		slots = _shared_colorbar_slots(
 			p,
 			eachindex(p.data),
 			who,
@@ -1468,10 +1722,7 @@ function _shared_colorbar_subplot_impl!(
 			_cbar_push_region!(regions, _cbar_trace_region(p, p.data[slot.index]))
 		end
 	else
-		cell_refs = Any[]
 		for (r, c) in selected
-			refs = _cbar_cell_refs(p, r, c, who)
-			push!(cell_refs, refs)
 			target = _cell_target(sf; row = r, col = c, who = who)
 			push!(regions, (
 				key = "cell:$(r):$(c)",
@@ -1479,19 +1730,14 @@ function _shared_colorbar_subplot_impl!(
 				ydomain = target.ydomain,
 			))
 		end
-		indices = [
-			index for index in eachindex(p.data)
-			if p.data[index] isa GenericTrace &&
-				any(refs -> _cbar_trace_in_refs(p.data[index], refs), cell_refs)
-		]
-		slots = _colorbar_slots(
+		slots = _shared_colorbar_slots(
 			p,
-			indices,
+			_cbar_cell_trace_indices(sf, p, selected, who),
 			who,
 			"the selected cells have no coloured trace $(_CBAR_NO_COLOUR_HINT).",
 		)
 	end
-	_shared_colorbar_apply!(p, slots, regions, opts)
+	_shared_colorbar_apply!(p, slots, regions, opts, who)
 	_refresh!(sf.fig)
 	return sf
 end
@@ -1501,24 +1747,38 @@ end
 		title_side=:top, len=0.75, side=:right, coloraxis="coloraxis")
 	shared_colorbar!(sf::SubplotFigure; cells=:all, ...)
 
-Give several panels one colour scale and one colorbar. Every coloured trace —
-heatmap, contour, surface, mesh3d with `intensity`, histogram2d, volume,
-cone, choropleth, …, traces with a numeric `marker.color`/`line.color`, and
-invisible colorbar carrier traces — of the selected cells is bound to the
-shared `coloraxis`, and its own `showscale`/colorbar are removed.
+Give several panels one colour scale and one colorbar. Every colour-mapped
+trace — heatmap, contour, surface, mesh3d with `intensity`, histogram2d,
+volume, cone, choropleth, …, traces with a numeric `marker.color`/
+`line.color`, and invisible colorbar carrier traces — of the selected cells
+(including their insets) is bound to the shared `coloraxis`, and its own
+`showscale`/colorbar are removed. Flat-coloured traces (a colour scale with
+one colour, e.g. `plot_quiver3d(...; color="red")` cones) and contours with
+`contours.coloring = "none"` are left as they are.
+
+The removed bars' settings carry over to the shared bar unless it already
+has them: the first bar's number format, thickness, … and title (unless
+`title` is given), and the union of all bars' explicit ticks (so log-scaled
+panels keep their decade labels).
+
+Colorbar carrier traces (polygon fills, binned streamlines, … whose colours
+were sampled in Julia) cannot be recoloured: with an automatic `crange` and
+`colorscale` the shared bar uses the limits and scale they were drawn with,
+and a different explicit `crange`/`colorscale`, a `cmid`, or carriers drawn
+with different limits or scales throw an `ArgumentError`.
 
 # Keywords
 - `cells=:all` (SubplotFigure only): `:all`, or a vector of `(row, col)`
   tuples.
 - `colorscale=""`: any colour scale `colormap` accepts; `""` keeps the scale
-  of the first trace that sets one (plotly's default sequential scale if
-  none does).
+  of the carriers, else of the first trace that sets one (plotly's default
+  sequential scale if none does).
 - `crange=[0, 0]`: colour limits `[cmin, cmax]` (increasing). `[0, 0]` uses
-  the global finite min/max of the traces' colour data (z, surfacecolor,
-  intensity, value, cone norms, marker colours, carrier limits); when a
-  trace's colour data is computed by plotly (histogram2d counts, streamtube
-  magnitudes) the limits are left to plotly, which ranges a coloraxis over
-  every bound trace.
+  the carriers' limits, else the global finite min/max of the traces' colour
+  data (z, surfacecolor, intensity, value, cone norms, marker colours); when
+  a trace's colour data is computed by plotly (histogram2d counts,
+  streamtube magnitudes) the limits are left to plotly, which ranges a
+  coloraxis over every bound trace.
 - `cmid=nothing`: centre of an automatic colour range (plotly `cmid`);
   combining it with an explicit `crange` is an `ArgumentError` (plotly would
   ignore it).
