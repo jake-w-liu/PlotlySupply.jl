@@ -825,6 +825,11 @@ end
 # written. Returns `(cell, xtype, ytype)` where the axis types are the ones the
 # call ends with (the requested scale, else the current axis type).
 function _mesh2d_prepare_figure(fig, who::AbstractString, fo)
+	for (name, value) in (("xscale", fo.xscale), ("yscale", fo.yscale))
+		value isa AbstractString || throw(ArgumentError(
+			"$(who): `$(name)` must be a string such as \"log\" (\"\" leaves the axis type unchanged); got $(repr(value)).",
+		))
+	end
 	_validate_cartesian_options(
 		fig,
 		who;
@@ -889,19 +894,23 @@ end
 
 # A fresh constructor figure: Cartesian axes plus the package template, so
 # default colours and colorscales come from the template the figure gets.
-function _mesh2d_new_figure()
+# `show` is checked first so a bad value fails before any work.
+function _mesh2d_new_figure(show, who::AbstractString)
+	_mesh2d_bool(show, who, "show")
 	fig = Plot(GenericTrace[], _default_cartesian_layout())
 	_apply_default_template!(fig)
 	return fig
 end
 
+# The constructor result: the Plot, or a window showing it (the figure size
+# and title, which the mesh call has validated, size and name the window).
 function _mesh2d_show(fig, show::Bool, fo)
 	show || return fig
 	return to_syncplot(
 		fig;
-		width = fo.width > 0 ? fo.width : 960,
-		height = fo.height > 0 ? fo.height : 720,
-		title = isempty(fo.title) ? "PlotlySupply" : fo.title,
+		width = fo.width > 0 ? fo.width : _SYNCPLOT_DEFAULT_WIDTH,
+		height = fo.height > 0 ? fo.height : _SYNCPLOT_DEFAULT_HEIGHT,
+		title = isempty(fo.title) ? _SYNCPLOT_DEFAULT_TITLE : fo.title,
 	)
 end
 
@@ -953,9 +962,10 @@ function _mesh2d_subplot!(
 	args...;
 	row = nothing,
 	col = nothing,
-	secondary_y::Bool = false,
+	secondary_y = false,
 	kwargs...,
 )
+	_mesh2d_bool(secondary_y, who, "secondary_y")
 	metadata_lock = getfield(sf, :_lock)
 	lock(metadata_lock)
 	try
@@ -1417,8 +1427,8 @@ fig = plot_polygons(x, y, quads, [0.2, 0.9]; colorbar_title = "T",
 plot_polygons([[3.0, 4.0, 3.5]], [[0.0, 0.0, 1.0]])   # one triangle, one colour
 ```
 """
-function plot_polygons(a::AbstractVector, b::AbstractVector, c = nothing, d = nothing; show::Bool = false, kwargs...)
-	fig = _mesh2d_new_figure()
+function plot_polygons(a::AbstractVector, b::AbstractVector, c = nothing, d = nothing; show = false, kwargs...)
+	fig = _mesh2d_new_figure(show, "plot_polygons")
 	_mesh2d_polygons_impl!(fig, _Mesh2dTarget(), a, b, c, d; constructor = true, kwargs...)
 	return _mesh2d_show(fig, show, _mesh2d_show_options(; kwargs...))
 end
@@ -1463,9 +1473,9 @@ function plot_polygons!(
 	b::AbstractVector,
 	c = nothing,
 	d = nothing;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
-	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	secondary_y = false,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
@@ -1704,8 +1714,8 @@ fig = plot_pcolormesh(X, Y, C; colorscale = "RdBu_r", cmid = 0, colorbar_title =
 plot_pcolormesh!(fig, -X, Y, C; colorscale = "RdBu_r", cmid = 0, showscale = false)
 ```
 """
-function plot_pcolormesh(X::AbstractArray, Y::AbstractArray, C::AbstractMatrix; show::Bool = false, kwargs...)
-	fig = _mesh2d_new_figure()
+function plot_pcolormesh(X::AbstractArray, Y::AbstractArray, C::AbstractMatrix; show = false, kwargs...)
+	fig = _mesh2d_new_figure(show, "plot_pcolormesh")
 	_mesh2d_pcolormesh_impl!(fig, _Mesh2dTarget(), X, Y, C; constructor = true, kwargs...)
 	return _mesh2d_show(fig, show, _mesh2d_show_options(; kwargs...))
 end
@@ -1740,9 +1750,9 @@ function plot_pcolormesh!(
 	X::AbstractArray,
 	Y::AbstractArray,
 	C::AbstractMatrix;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
-	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	secondary_y = false,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
@@ -1829,23 +1839,39 @@ function _mesh2d_gouraud_raster(t::_Mesh2dTri, v::Vector{Float64}, resolution::I
 	end
 	isfinite(xmin) || return Float64[], Float64[], Matrix{Float64}(undef, 0, 0)
 	dx, dy = xmax - xmin, ymax - ymin
-	(dx > 0 && dy > 0) || throw(ArgumentError(
-		"$(who): the drawn triangles have no area (all nodes on one line); shading = :gouraud cannot rasterise them.",
+	has_area = false
+	for tri in 1:t.ntri
+		_mesh2d_tri_drawn(t, tri) || continue
+		a, b, c = t.indices[3tri - 2], t.indices[3tri - 1], t.indices[3tri]
+		if (t.x[b] - t.x[a]) * (t.y[c] - t.y[a]) != (t.x[c] - t.x[a]) * (t.y[b] - t.y[a])
+			has_area = true
+			break
+		end
+	end
+	(has_area && dx > 0 && dy > 0) || throw(ArgumentError(
+		"$(who): the drawn triangles have no area (every triangle is degenerate); shading = :gouraud cannot rasterise them.",
 	))
 	h = max(dx, dy) / resolution
 	nx = max(1, round(Int, dx / h))
 	ny = max(1, round(Int, dy / h))
 	hx, hy = dx / nx, dy / ny
-	xc = [xmin + (i - 0.5) * hx for i in 1:nx]
-	yc = [ymin + (j - 0.5) * hy for j in 1:ny]
+	# Plain loops, not comprehensions: a closure capturing the reassigned
+	# `xmin`/`ymin` would box them and make this whole function type-unstable.
+	xc = Vector{Float64}(undef, nx)
+	yc = Vector{Float64}(undef, ny)
+	for i in 1:nx
+		xc[i] = xmin + (i - 0.5) * hx
+	end
+	for j in 1:ny
+		yc[j] = ymin + (j - 0.5) * hy
+	end
 	Z = fill(NaN, nx, ny)
 	for tri in 1:t.ntri
 		_mesh2d_tri_drawn(t, tri) || continue
 		a, b, c = t.indices[3tri - 2], t.indices[3tri - 1], t.indices[3tri]
 		xa, ya, xb, yb, xc_, yc_ = t.x[a], t.y[a], t.x[b], t.y[b], t.x[c], t.y[c]
 		den = (yb - yc_) * (xa - xc_) + (xc_ - xb) * (ya - yc_)
-		den == 0 && continue
-		scale = abs(den)
+		den == 0 && continue   # degenerate triangle: covers no pixel centre
 		i0 = max(1, ceil(Int, (min(xa, xb, xc_) - xmin) / hx + 0.5))
 		i1 = min(nx, floor(Int, (max(xa, xb, xc_) - xmin) / hx + 0.5))
 		j0 = max(1, ceil(Int, (min(ya, yb, yc_) - ymin) / hy + 0.5))
@@ -1861,7 +1887,6 @@ function _mesh2d_gouraud_raster(t::_Mesh2dTri, v::Vector{Float64}, resolution::I
 			(l1 >= tol && l2 >= tol && l3 >= tol) || continue
 			Z[i, j] = l1 * va + l2 * vb + l3 * vc
 		end
-		scale > 0 || continue
 	end
 	return xc, yc, Z
 end
@@ -2060,8 +2085,8 @@ fig = plot_tripcolor(x, y, tri, x .+ y; shading = :gouraud, edges = true,
 plot_tripcolor(x, y, tri, [1.0, 2.0, 3.0, 4.0]; colorbar_title = "per triangle")
 ```
 """
-function plot_tripcolor(x::AbstractVector, y::AbstractVector, triangles, values::AbstractVector; show::Bool = false, kwargs...)
-	fig = _mesh2d_new_figure()
+function plot_tripcolor(x::AbstractVector, y::AbstractVector, triangles, values::AbstractVector; show = false, kwargs...)
+	fig = _mesh2d_new_figure(show, "plot_tripcolor")
 	_mesh2d_tripcolor_impl!(fig, _Mesh2dTarget(), x, y, triangles, values; constructor = true, kwargs...)
 	return _mesh2d_show(fig, show, _mesh2d_show_options(; kwargs...))
 end
@@ -2096,9 +2121,9 @@ function plot_tripcolor!(
 	y::AbstractVector,
 	triangles,
 	values::AbstractVector;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
-	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	secondary_y = false,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
@@ -2186,8 +2211,8 @@ x = [0.0, 1.0, 0.0, 1.0]; y = [0.0, 0.0, 1.0, 1.0]
 fig = plot_triplot(x, y, [1 2 3; 2 4 3]; color = "gray", legend = "mesh")
 ```
 """
-function plot_triplot(x::AbstractVector, y::AbstractVector, triangles; show::Bool = false, kwargs...)
-	fig = _mesh2d_new_figure()
+function plot_triplot(x::AbstractVector, y::AbstractVector, triangles; show = false, kwargs...)
+	fig = _mesh2d_new_figure(show, "plot_triplot")
 	_mesh2d_triplot_impl!(fig, _Mesh2dTarget(), x, y, triangles; constructor = true, kwargs...)
 	return _mesh2d_show(fig, show, _mesh2d_show_options(; kwargs...))
 end
@@ -2219,9 +2244,9 @@ function plot_triplot!(
 	x::AbstractVector,
 	y::AbstractVector,
 	triangles;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
-	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	secondary_y = false,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
@@ -2234,7 +2259,43 @@ end
 # plot_tricontour
 # ---------------------------------------------------------------------------
 
-# Contour levels: an integer n gives n levels evenly spaced strictly inside
+# "Nice" contour levels strictly inside (lo, hi), at most `n` of them: the
+# multiples of the smallest step m * 10^e (m in 1, 2, 2.5, 5, 10 - matplotlib's
+# MaxNLocator steps) that leaves at most `n` multiples inside the range.
+# Starting one decade below range/n guarantees the first step has more than
+# `n` multiples or at least one; consecutive steps grow by at most 2.5x, and a
+# range holding two multiples of one step holds at least one of the next, so
+# the chosen step always yields between 1 and `n` levels.
+function _mesh2d_nice_levels(lo::Float64, hi::Float64, n::Int)
+	e0 = floor(Int, log10((hi - lo) / n)) - 1
+	for e in e0:(e0 + 2), m in (1.0, 2.0, 2.5, 5.0)
+		# k * m / 10^-e keeps decimal steps exact (0.1 * 3 would not be).
+		level(k) = e < 0 ? k * m / exp10(-e) : k * m * exp10(e)
+		step = level(1)
+		# Multiples beyond 2^53 steps from zero are not representable apart;
+		# such a range is far below the resolution of its own offset.
+		max(abs(lo), abs(hi)) / step < 2.0^53 || break
+		kmin = floor(Int, lo / step) + 1
+		kmax = ceil(Int, hi / step) - 1
+		# Candidates are kmin:kmax minus at most one rounding casualty per
+		# end; skip a step with far too many without materialising them.
+		kmax - kmin + 1 > n + 2 && continue
+		out = Float64[level(k) for k in kmin:kmax if lo < level(k) < hi]
+		length(out) <= n && !isempty(out) && return out
+	end
+	# Only reached when the offset swamps the range: n even levels inside it.
+	return unique!(Float64[lo + (hi - lo) * k / (n + 1) for k in 1:n])
+end
+
+# Label text of a contour level: up to 6 significant digits, no trailing ".0".
+function _mesh2d_level_text(v::Float64)
+	r = round(v; sigdigits = 6)
+	r == 0 && return "0"
+	isinteger(r) && abs(r) < 1e15 && return string(Int(r))
+	return string(r)
+end
+
+# Contour levels: an integer n gives at most n "nice" levels strictly inside
 # the finite data range (none for a constant field); a vector is used as given
 # (finite, strictly increasing).
 function _mesh2d_contour_levels(levels, v::Vector{Float64}, who::AbstractString)
@@ -2244,7 +2305,7 @@ function _mesh2d_contour_levels(levels, v::Vector{Float64}, who::AbstractString)
 		extent === nothing && return Float64[]
 		lo, hi = extent
 		lo == hi && return Float64[]
-		return [lo + (hi - lo) * k / (levels + 1) for k in 1:levels]
+		return _mesh2d_nice_levels(lo, hi, Int(levels))
 	end
 	out = _checked_real_vector(levels, who, "levels")
 	isempty(out) && throw(ArgumentError("$(who): `levels` must not be empty."))
@@ -2457,7 +2518,7 @@ function _mesh2d_tricontour_impl!(
 				end
 			end
 		end
-		text = _format_colorbar_number(level)
+		text = _mesh2d_level_text(level)
 		line = Dict{Symbol, Any}(:color => level_colours[k], :width => line_width)
 		isempty(line_dash) || (line[:dash] = line_dash)
 		fields = Dict{Symbol, Any}(
@@ -2517,8 +2578,11 @@ mesh edges.
   `missing`/`NaN`/`±Inf` value are skipped.
 
 #### Keywords
-- `levels = 10`: an integer `n` (n levels evenly spaced strictly inside the
-  range of the drawn nodes' values) or a strictly increasing vector of levels.
+- `levels = 10`: an integer `n` (at most `n` round levels, the multiples of
+  the smallest step `{1, 2, 2.5, 5} x 10^k` that leaves at most `n` of them
+  strictly inside the range of the drawn nodes' values, like matplotlib's
+  `MaxNLocator`; none for a constant field) or a strictly increasing vector of
+  levels.
 - `color = ""`: one colour for every level; `""` colours each level from
   `colorscale = "Viridis"` (`""`: the template's scale) by its position in
   `crange` (default: from the lowest to the highest level).
@@ -2554,8 +2618,8 @@ plot_tricontour!(fig, vec(xs), vec(ys), tri, f; levels = -0.75:0.25:0.75,
                  color = "black", showlabels = true)
 ```
 """
-function plot_tricontour(x::AbstractVector, y::AbstractVector, triangles, values::AbstractVector; show::Bool = false, kwargs...)
-	fig = _mesh2d_new_figure()
+function plot_tricontour(x::AbstractVector, y::AbstractVector, triangles, values::AbstractVector; show = false, kwargs...)
+	fig = _mesh2d_new_figure(show, "plot_tricontour")
 	_mesh2d_tricontour_impl!(fig, _Mesh2dTarget(), x, y, triangles, values; constructor = true, kwargs...)
 	return _mesh2d_show(fig, show, _mesh2d_show_options(; kwargs...))
 end
@@ -2589,9 +2653,9 @@ function plot_tricontour!(
 	y::AbstractVector,
 	triangles,
 	values::AbstractVector;
-	row::Union{Nothing, Integer} = nothing,
-	col::Union{Nothing, Integer} = nothing,
-	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	secondary_y = false,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
