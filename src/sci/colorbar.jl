@@ -1545,23 +1545,28 @@ function _shared_colorbar_apply!(
 				"`colorscale` or rebuild those plots with it.",
 			))
 	end
-	if limits === nothing && opts.cmid === nothing
-		lo = Inf
-		hi = -Inf
-		known = true
-		for slot in slots
-			values = _cbar_slot_values(p.data[slot.index], slot)
-			if values === nothing
-				known = false
-				break
+	# Filled/line contours are given the shared scale and limits instead of
+	# the coloraxis (see `_cbar_is_banded_contour`).
+	banded = [slot for slot in slots if _cbar_is_banded_contour(p.data[slot.index], slot)]
+	bound = [slot for slot in slots if !(slot in banded)]
+	if limits === nothing && (opts.cmid === nothing || !isempty(banded))
+		data_range = _shared_colorbar_data_range(p, slots)
+		if data_range !== nothing
+			if opts.cmid === nothing
+				limits = data_range
+			else
+				# plotly's cmid: the smallest range centred on cmid that holds
+				# the data, written out so the contours get the same one.
+				radius = max(data_range[2] - opts.cmid, opts.cmid - data_range[1])
+				radius > 0 && (limits = (opts.cmid - radius, opts.cmid + radius))
 			end
-			extrema = _cbar_extrema(values)
-			extrema === nothing && continue
-			lo = min(lo, extrema[1])
-			hi = max(hi, extrema[2])
 		end
-		(known && isfinite(lo) && lo < hi) && (limits = (lo, hi))
 	end
+	isempty(banded) || limits !== nothing || throw(ArgumentError(
+		"$(who): filled contours need explicit colour limits to share a colour " *
+		"scale, but here plotly would compute them (histogram counts or " *
+		"constant data). Pass `crange=[cmin, cmax]`.",
+	))
 	scale = if opts.scale !== nothing
 		(scale = opts.scale.scale, reversescale = opts.scale.reversescale)
 	elseif carriers.scale !== nothing
@@ -1569,13 +1574,22 @@ function _shared_colorbar_apply!(
 	else
 		_shared_colorbar_first_scale(p, slots)
 	end
+	if scale === nothing && !isempty(banded)
+		# Contours and the coloraxis must name the same scale explicitly.
+		scale = (
+			scale = _cbar_default_scale(p, _cbar_trace_type(p.data[first(banded).index])),
+			reversescale = false,
+		)
+	end
 
 	# Rebind every coloured trace; its own bar disappears with it.
 	removed_areas = String[]
 	for slot in slots
 		trace = p.data[slot.index]
 		slot.shows && push!(removed_areas, _cbar_trace_region(p, trace).key)
-		if slot.container === :root
+		if slot in banded
+			_cbar_set_banded_scale!(trace, scale, limits)
+		elseif slot.container === :root
 			trace.fields[:coloraxis] = id
 			delete!(trace.fields, :showscale)
 			delete!(trace.fields, :colorbar)
@@ -1591,7 +1605,23 @@ function _shared_colorbar_apply!(
 		_cbar_remove_title_annotation!(p, area)
 	end
 
+	xdomain, ydomain = _cbar_union(regions)
+	placement = _cbar_placement(opts.side, xdomain, ydomain, _CBAR_SHARED_PAD)
+	extent = opts.side === :right ? ydomain[2] - ydomain[1] : xdomain[2] - xdomain[1]
+	placement[:len] = opts.len * extent
+
 	key = Symbol(id)
+	if isempty(bound)
+		# Only contours: the first one draws the shared bar (its scale and
+		# limits are those of every other contour).
+		holder = first(banded)
+		trace = p.data[holder.index]
+		bar = _symbol_dict(get(trace.fields, :colorbar, nothing))
+		_shared_colorbar_fill_bar!(p, bar, placement, carried, opts, _cbar_trace_region(p, trace).key, limits)
+		trace.fields[:showscale] = true
+		trace.fields[:colorbar] = _cbar_attr(bar)
+		return nothing
+	end
 	axis = _symbol_dict(get(p.layout.fields, key, nothing))
 	if scale !== nothing && !(scale.scale isa AbstractString && isempty(scale.scale))
 		axis[:colorscale] = scale.scale
@@ -1611,12 +1641,17 @@ function _shared_colorbar_apply!(
 		axis[:cmid] = opts.cmid
 	end
 	axis[:showscale] = true
-
-	xdomain, ydomain = _cbar_union(regions)
-	placement = _cbar_placement(opts.side, xdomain, ydomain, _CBAR_SHARED_PAD)
-	extent = opts.side === :right ? ydomain[2] - ydomain[1] : xdomain[2] - xdomain[1]
-	placement[:len] = opts.len * extent
 	bar = _symbol_dict(get(axis, :colorbar, nothing))
+	range = limits !== nothing ? limits : _cbar_coloraxis_range(p, id)
+	_shared_colorbar_fill_bar!(p, bar, placement, carried, opts, id, range)
+	axis[:colorbar] = _cbar_attr(bar)
+	p.layout.fields[key] = _cbar_attr(axis)
+	return nothing
+end
+
+# Geometry, carried settings and title of the shared bar `bar`, whose title
+# annotation (for a math title) is named after `key`.
+function _shared_colorbar_fill_bar!(p::Plot, bar::Dict{Symbol,Any}, placement, carried, opts, key, range)
 	# Settings already on the shared bar win over those carried from the
 	# removed per-trace bars.
 	for (name, value) in carried.settings
@@ -1624,17 +1659,85 @@ function _shared_colorbar_apply!(
 	end
 	merge!(bar, placement)
 	haskey(bar, :thickness) || (bar[:thickness] = _CBAR_CELL_THICKNESS)
-	range = limits !== nothing ? limits : _cbar_coloraxis_range(p, id)
 	title, title_side = opts.title, opts.title_side
 	if title === nothing && carried.title !== nothing &&
 			_cbar_title_text(bar) === nothing &&
-			_cbar_find_title_annotation(p, id) === nothing
+			_cbar_find_title_annotation(p, key) === nothing
 		title, title_side = carried.title.text, carried.title.side
 	end
-	_cbar_apply_title!(p, bar, id, title, title_side, true, range)
-	axis[:colorbar] = _cbar_attr(bar)
-	p.layout.fields[key] = _cbar_attr(axis)
+	_cbar_apply_title!(p, bar, key, title, title_side, true, range)
+	return bar
+end
+
+# Finite (min, max) over the colour data of all `slots`, or `nothing` when
+# plotly computes some of it (histogram counts, …) or it is constant/empty.
+function _shared_colorbar_data_range(p::Plot, slots::Vector{_CbarSlot})
+	lo = Inf
+	hi = -Inf
+	for slot in slots
+		values = _cbar_slot_values(p.data[slot.index], slot)
+		values === nothing && return nothing
+		extrema = _cbar_extrema(values)
+		extrema === nothing && continue
+		lo = min(lo, extrema[1])
+		hi = max(hi, extrema[2])
+	end
+	return (isfinite(lo) && lo < hi) ? (lo, hi) : nothing
+end
+
+# Contours coloured by band or line (`contours.coloring` "fill", the
+# default, or "lines"). plotly.js 2.35.2 derives a contour's colour limits
+# from its own levels and writes them back to a coloraxis it is bound to, so
+# such contours on a shared coloraxis are drawn with wrong colours (and a
+# heatmap on the same axis loses the axis' scale). They keep their own
+# colour settings instead: the shared scale, `zmin`/`zmax` = the shared
+# limits, no bar of their own.
+function _cbar_is_banded_contour(trace::GenericTrace, slot::_CbarSlot)
+	slot.container === :root || return false
+	_cbar_trace_type(trace) in _CBAR_CONTOUR_TYPES || return false
+	coloring = _cmn_mapping_get(get(trace.fields, :contours, nothing), :coloring)
+	(coloring isa AbstractString || coloring isa Symbol) || return true
+	return String(coloring) in ("fill", "lines")
+end
+
+function _cbar_set_banded_scale!(trace::GenericTrace, scale, limits)
+	fields = trace.fields
+	delete!(fields, :coloraxis)
+	delete!(fields, :colorbar)
+	fields[:showscale] = false
+	fields[:colorscale] = scale.scale
+	if scale.reversescale
+		fields[:reversescale] = true
+	else
+		delete!(fields, :reversescale)
+	end
+	delete!(fields, :zmid)
+	fields[:zauto] = false
+	fields[:zmin] = limits[1]
+	fields[:zmax] = limits[2]
 	return nothing
+end
+
+# The colour scale plotly gives a trace of type `type_name` that sets none:
+# the template's default for that trace type, else the template's
+# `layout.colorscale.sequential`. Without a template plotly's own default is
+# not known here, so Viridis is used; any explicit scale keeps the contours
+# and the coloraxis in agreement, which is what matters.
+function _cbar_default_scale(p::Plot, type_name::String)
+	template = get(p.layout.fields, :template, nothing)
+	if template isa PlotlyBase.Template
+		defaults = get(template.data, Symbol(type_name), nothing)
+		if defaults isa AbstractVector && !isempty(defaults)
+			scale = _cmn_mapping_get(first(defaults), :colorscale)
+			_is_unset_colorscale(scale) || return scale
+		end
+		sequential = _cmn_mapping_get(
+			get(_template_layout_fields(template), :colorscale, nothing),
+			:sequential,
+		)
+		_is_unset_colorscale(sequential) || return sequential
+	end
+	return _resolve_colorscale("viridis"; who = "shared_colorbar!").scale
 end
 
 # The coloured traces `shared_colorbar!` binds among `indices`: flat-coloured
@@ -1761,6 +1864,15 @@ has them: the first bar's number format, thickness, … and title (unless
 `title` is given), and the union of all bars' explicit ticks (so log-scaled
 panels keep their decade labels).
 
+Filled and line contours (`contours.coloring` `"fill"`, the default, or
+`"lines"`) are not bound to the coloraxis: plotly.js 2.35 recomputes a bound
+contour's colour limits from its levels, which miscolours the contours and
+every heatmap on the same axis. They get the shared scale, `zmin`/`zmax` =
+the shared limits and no bar of their own instead, so they match the shared
+bar; contours of plotly-computed data (`histogram2dcontour`) therefore need
+an explicit `crange`. When only such contours are selected, the first one
+draws the shared bar and `layout.<coloraxis>` is not used.
+
 Colorbar carrier traces (polygon fills, binned streamlines, … whose colours
 were sampled in Julia) cannot be recoloured: with an automatic `crange` and
 `colorscale` the shared bar uses the limits and scale they were drawn with,
@@ -1781,7 +1893,8 @@ with different limits or scales throw an `ArgumentError`.
   coloraxis over every bound trace.
 - `cmid=nothing`: centre of an automatic colour range (plotly `cmid`);
   combining it with an explicit `crange` is an `ArgumentError` (plotly would
-  ignore it).
+  ignore it). With filled contours selected the centred range (`cmid` ± the
+  largest distance to the data) is written out as `cmin`/`cmax`.
 - `title=""`, `title_side=:top`: bar title (mathtext) and its side, as in
   [`colorbar!`](@ref) (math titles become an annotation).
 - `len::Real=0.75`: bar length as a fraction of the selected cells' extent.

@@ -3690,7 +3690,10 @@ end
 # - An automatic box/violin mode only fills an unset root value (it offsets
 #   boxes but hides no data).
 # - An automatic barmode is never copied: a nested histogram's "overlay" would
-#   hide grouped bars in every other cell.
+#   hide grouped bars in every other cell. The new bars/histograms of the call
+#   are overlaid inside their own cell instead, by sharing one `offsetgroup`
+#   (under plotly's default "group" mode, traces of one offset group are drawn
+#   at the same positions).
 function _apply_source_root_layout_modes!(
 	target::Plot,
 	source::Plot;
@@ -3713,7 +3716,25 @@ function _apply_source_root_layout_modes!(
 			target.layout.fields[key] = value
 		elseif key !== :barmode
 			get!(target.layout.fields, key, value)
+		elseif value == "overlay" && get(target.layout.fields, :barmode, "group") == "group"
+			_subplot_overlay_new_bars!(target, start_index)
 		end
+	end
+	return nothing
+end
+
+# Give the bar/histogram traces `target.data[start_index:end]` (when there are
+# two or more and none has an offset group yet) one offset group of their own.
+function _subplot_overlay_new_bars!(target::Plot, start_index::Int)
+	added = [
+		trace for trace in target.data[start_index:end]
+		if string(get(trace.fields, :type, "scatter")) in _subplot_mode_trace_types(:barmode)
+	]
+	length(added) >= 2 || return nothing
+	any(trace -> haskey(trace.fields, :offsetgroup), added) && return nothing
+	group = "plotlysupply:overlay:$(start_index)"
+	for trace in added
+		trace.fields[:offsetgroup] = group
 	end
 	return nothing
 end

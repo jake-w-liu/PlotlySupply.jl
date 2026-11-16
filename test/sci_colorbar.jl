@@ -451,6 +451,66 @@ end
 		@test all(t.fields[:coloraxis] == "coloraxis" for t in p.data)
 	end
 
+	@testset "shared_colorbar! with filled contours (plotly.js coloraxis limitation)" begin
+		# Filled contours keep their own scale settings, equal to the shared ones.
+		sf = subplots(1, 3; sync=false)
+		plot_heatmap!(sf, rand(4, 4); row=1, col=1)
+		plot_contour!(sf, 2 .+ rand(4, 4); row=1, col=2)
+		plot_contour!(sf, rand(4, 4); row=1, col=3)
+		_scb_fields(sf.plot.data[3].fields)[:contours] = attr(coloring="heatmap")
+		shared_colorbar!(sf; colorscale="viridis")
+		heat, filled, smooth = sf.plot.data
+		axis = _scb_axis(sf, :coloraxis)
+		@test heat.fields[:coloraxis] == "coloraxis"
+		@test smooth.fields[:coloraxis] == "coloraxis"  # coloring = "heatmap" binds fine
+		@test !haskey(filled.fields, :coloraxis)
+		@test filled.fields[:showscale] == false
+		@test !haskey(filled.fields, :colorbar)
+		@test filled.fields[:zauto] == false
+		@test (filled.fields[:zmin], filled.fields[:zmax]) == (axis[:cmin], axis[:cmax])
+		@test filled.fields[:colorscale] == axis[:colorscale]
+		@test axis[:cmax] ≈ maximum(filled.fields[:z])
+
+		# Only contours: the first draws the shared bar, no coloraxis is written.
+		contours = subplots(1, 2; sync=false)
+		plot_contour!(contours, rand(4, 4); row=1, col=1)
+		plot_contour!(contours, 5 .+ rand(4, 4); row=1, col=2)
+		shared_colorbar!(contours; title="C")
+		first_contour, second_contour = contours.plot.data
+		@test !haskey(_scb_layout(contours), :coloraxis)
+		@test first_contour.fields[:showscale] == true
+		@test second_contour.fields[:showscale] == false
+		bar = _scb_bar(first_contour)
+		@test bar[:x] ≈ 1.0 + _SCB._CBAR_SHARED_PAD
+		@test bar[:len] ≈ 0.75
+		@test _scb_title(bar)[:text] == "C"
+		@test first_contour.fields[:zmin] == second_contour.fields[:zmin]
+		@test first_contour.fields[:zmax] == second_contour.fields[:zmax]
+		# No scale given: both name the template's contour scale explicitly.
+		template = _scb_layout(contours)[:template]
+		@test first_contour.fields[:colorscale] ==
+			_scb_fields(first(template.data[:contour]))[:colorscale]
+		@test second_contour.fields[:colorscale] == first_contour.fields[:colorscale]
+
+		# cmid: the centred range is written out for the contours.
+		centred = subplots(1, 2; sync=false)
+		plot_heatmap!(centred, [-1.0 0.5; 0.0 0.2]; row=1, col=1)
+		plot_contour!(centred, [-0.2 3.0; 0.0 0.1]; row=1, col=2)
+		shared_colorbar!(centred; cmid=0)
+		axis = _scb_axis(centred, :coloraxis)
+		@test (axis[:cmin], axis[:cmax]) == (-3.0, 3.0)
+		@test (centred.plot.data[2].fields[:zmin], centred.plot.data[2].fields[:zmax]) == (-3.0, 3.0)
+
+		# Plotly-computed contour data needs an explicit crange.
+		hist = Plot([histogram2dcontour(x=randn(30), y=randn(30)), heatmap(z=rand(3, 3))], Layout())
+		before = deepcopy(hist.data)
+		@test _scb_throws(() -> shared_colorbar!(hist), "crange")
+		@test hist.data == before
+		shared_colorbar!(hist; crange=[0, 10])
+		@test (hist.data[1].fields[:zmin], hist.data[1].fields[:zmax]) == (0.0, 10.0)
+		@test hist.data[2].fields[:coloraxis] == "coloraxis"
+	end
+
 	@testset "shared_colorbar! carries bar settings over" begin
 		p = Plot(
 			[

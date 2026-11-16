@@ -277,7 +277,16 @@ end
     @test plot_histogram!(sf, nested) === sf
     @test sf.plot.layout.fields[:boxmode] == "group"
     @test sf.plot.layout.fields[:violinmode] == "group"
-    @test sf.plot.layout.fields[:barmode] == "overlay"
+    # v2: the automatic "overlay" barmode is figure-wide in plotly, so a
+    # SubplotFigure overlays the nested histograms in their own cell through a
+    # shared offsetgroup instead of writing the root barmode (#221).
+    @test !haskey(sf.plot.layout.fields, :barmode)
+    histogram_groups = [
+        trace.fields[:offsetgroup] for trace in sf.plot.data
+        if trace.fields[:type] == "histogram"
+    ]
+    @test length(histogram_groups) == 2
+    @test allequal(histogram_groups)
     for axis_key in (:xaxis, :yaxis)
         for mode_key in (:barmode, :boxmode, :violinmode)
             @test !haskey(sf.plot.layout.fields[axis_key], mode_key)

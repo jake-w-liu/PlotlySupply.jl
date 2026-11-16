@@ -211,6 +211,20 @@ end
 		plot_bar!(sf, ["Q1", "Q2"], [[1.0, 2.0], [3.0, 4.0]]; row=1, col=1)
 		plot_histogram!(sf, [randn(50), randn(50)]; row=1, col=2)
 		@test get(_rsp_layout(sf), :barmode, "group") != "overlay"
+		# The histograms overlay inside their own cell (one offset group); the
+		# bars keep plotly's per-trace groups.
+		@test sf.plot.data[3][:offsetgroup] == sf.plot.data[4][:offsetgroup]
+		@test !haskey(sf.plot.data[1].fields, :offsetgroup)
+		@test !haskey(sf.plot.data[2].fields, :offsetgroup)
+		# A single histogram is not grouped.
+		single = subplots(1, 1; sync=false)
+		plot_histogram!(single, randn(20))
+		@test !haskey(single.plot.data[1].fields, :offsetgroup)
+		# Under an explicit root overlay no offset group is needed.
+		overlaid = subplots(1, 1; sync=false)
+		relayout!(overlaid; barmode="overlay")
+		plot_histogram!(overlaid, [randn(20), randn(20)])
+		@test all(!haskey(t.fields, :offsetgroup) for t in overlaid.plot.data)
 
 		reverse_order = subplots(1, 2; sync=false)
 		plot_histogram!(reverse_order, [randn(50), randn(50)]; row=1, col=1)
