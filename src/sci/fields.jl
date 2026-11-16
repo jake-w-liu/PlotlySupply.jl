@@ -219,7 +219,8 @@ end
 Append a matrix plot (see [`plot_matrix`](@ref) for the layout and the
 keywords; `show` is not accepted and throws an `ArgumentError`) to `fig`, a
 `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
-together, default: the active cell). The target y axis is reversed so row 1
+together, default: the active cell; `secondary_y` targets the cell's
+secondary y axis). The target y axis is reversed so row 1
 is at the top; `grid = nothing` keeps the grid. On a `SubplotFigure`,
 `title`, `width` and `height` are ignored with a warning.
 
@@ -1060,7 +1061,8 @@ end
 Append streamlines (see [`plot_streamlines`](@ref) for the arguments and
 keywords; `show` is not accepted and throws an `ArgumentError`) to `fig`, a
 `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
-together, default: the active cell). `grid = nothing` keeps the grid. On a
+together, default: the active cell; `secondary_y` targets the cell's
+secondary y axis). `grid = nothing` keeps the grid. On a
 `SubplotFigure`, `title`, `width` and `height` are ignored with a warning.
 
 Returns `nothing` (`sf` for a `SubplotFigure`).

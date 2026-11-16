@@ -269,6 +269,14 @@ end
 		@test all(b["contours"]["operation"] == "][" for b in bands)
 		@test length(unique(b["fillcolor"] for b in bands)) == 3
 		@test all(b["showscale"] == false && b["showlegend"] == false for b in bands)
+		# Band lines/labels use plotly's level-contour colour, not the fill colour.
+		@test all(b["line"]["color"] == "#000" && b["line"]["width"] == 0 for b in bands)
+		labelled = plot_contour(x, y, U; levels = [100, 150, 300, 500], showlabels = true)
+		@test all(_sf_roundtrip(t)["contours"]["labelfont"]["color"] == "#000" for t in labelled.data[1:3])
+		white = plot_contour(x, y, U; levels = [100, 150, 300, 500], showlabels = true,
+			linecolor = "white", coloring = :fill, linewidth = 1)
+		wt = _sf_roundtrip(white.data[1])
+		@test wt["line"]["color"] == "white" && wt["contours"]["labelfont"]["color"] == "white"
 		carrier = _sf_roundtrip(fig.data[4])
 		@test carrier["marker"]["cmin"] == 100 && carrier["marker"]["cmax"] == 500
 		@test carrier["marker"]["colorbar"]["title"]["text"] == "b"
@@ -607,6 +615,13 @@ end
 			row = 1, col = 2)
 		@test sf.plot.data[end].fields[:xaxis] == "x2"
 		@test length(sf.plot.data) == ns + 1
+		# secondary_y: the trace and the equal aspect use the cell's secondary y axis.
+		sy = subplots(1, 2; sync = false, specs = [Spec() Spec(secondary_y = true)])
+		plot_quiver!(sy, [0.0, 1.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]; row = 1, col = 2, secondary_y = true)
+		@test sy.plot.data[end].fields[:xaxis] == "x2" && sy.plot.data[end].fields[:yaxis] == "y3"
+		ly = _sf_roundtrip(sy.plot.layout)
+		@test ly["yaxis3"]["scaleanchor"] == "x2"
+		@test !haskey(ly["yaxis"], "scaleanchor") && !haskey(ly["yaxis2"], "scaleanchor")
 		# Log cell axes are honoured for coordinate checks of the delegated methods.
 		sl = subplots(1, 2; sync = false)
 		plot_heatmap!(sl, [1.0, 2.0, 4.0, 8.0], y, U; row = 1, col = 2, xscale = "log")

@@ -6983,6 +6983,11 @@ end
 
 const _CONTOUR_COLORINGS = ("fill", "lines", "heatmap", "none")
 
+# plotly.js's default line and label colour of an ordinary (level) contour
+# trace (contour style defaults: `line.color` "#000"); used for the
+# constraint traces of filled bands, whose own default is the fill colour.
+const _CONTOUR_DEFAULT_LINE_COLOR = "#000"
+
 function _contour_uniform_levels(values::Vector{Float64})
 	step = values[2] - values[1]
 	return all(
@@ -7286,11 +7291,18 @@ function _contour_add!(
 				:operation => "][",
 				:value => Any[spec.values[band], spec.values[band + 1]],
 			)
-			showlabels && (band_contours[:showlabels] = true)
+			# Constraint contours draw their lines and labels in the fill colour
+			# by default (labels invisible on their own band); use the colour of
+			# an ordinary contour trace instead.
+			band_line_colour = isempty(line_color) ? _CONTOUR_DEFAULT_LINE_COLOR : line_color
+			if showlabels
+				band_contours[:showlabels] = true
+				band_contours[:labelfont] = attr(color = band_line_colour)
+			end
 			isempty(labelformat) ||
 				(band_contours[:labelformat] = String(labelformat))
 			band_line = Dict{Symbol, Any}(
-				:color => isempty(line_color) ? fill_colour : line_color,
+				:color => band_line_colour,
 				# No outline between bands unless a line width is requested.
 				:width => linewidth > 0 ? linewidth : 0,
 			)
@@ -7883,10 +7895,11 @@ Accepted forms:
 Mismatched sizes throw an `ArgumentError`.
 
 Arrow length is proportional to the magnitude `hypot(u, v)`: the longest
-arrow is `2/3 * sizeref` axis units long (on a log axis, decades) and the
-others are scaled by their magnitude relative to it, so `sizeref` is the
-length budget of the strongest vector and does not depend on the data units
-of `u`, `v`. The arrowhead is 0.3 of each shaft at ±20°. Vectors with a
+arrow is `2/3 * sizeref` long in x/y data units (on a log axis, in decades)
+and the others are scaled by their magnitude relative to it, so `sizeref` is
+the length budget of the strongest vector and does not depend on the units
+of `u`, `v`. Set `sizeref` to about the grid spacing so neighbouring arrows do
+not overlap. The arrowhead is 0.3 of each shaft at ±20°. Vectors with a
 non-finite origin or component are skipped with a warning; zero vectors draw
 nothing (a warning when every vector is zero). On a logarithmic axis
 (`xscale`/`yscale = "log"`) the arrows are laid out in axis units (decades),
@@ -9986,8 +9999,9 @@ end
 
 Append contours of `U` (indexed `U[ix, iy]`, `size(U) == (length(x),
 length(y))`) to `fig`, a `Plot` or `SyncPlot`, or to a cell of a
-`SubplotFigure` (`row`/`col` together, default: the active cell). Implicit
-coordinates are 0-based, or 1-based when the target axis is logarithmic.
+`SubplotFigure` (`row`/`col` together, default: the active cell;
+`secondary_y` targets the cell's secondary y axis). Implicit coordinates are
+0-based, or 1-based when the target axis is logarithmic.
 
 Takes the keywords of [`plot_contour`](@ref) except `show` (passing `show`
 throws an `ArgumentError`); `grid = nothing` keeps the grid, and the other
@@ -10120,10 +10134,11 @@ end
 Append a vector field (same input forms, arrow scaling and keywords as
 [`plot_quiver`](@ref), except `show`, which throws an `ArgumentError`) to
 `fig`, a `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
-together, default: the active cell). `equalar = true` (default) locks the
+together, default: the active cell; `secondary_y` targets the cell's
+secondary y axis). `equalar = true` (default) locks the
 data aspect of the target axes; `grid = nothing` keeps the grid (`true`
 re-enables it, `false` hides it). Each call scales its own arrows: the longest
-arrow of this call is `2/3 * sizeref` axis units long. Arrows on an axis that
+arrow of this call is `2/3 * sizeref` long in x/y data units. Arrows on an axis that
 is already logarithmic are laid out in decades. On a `SubplotFigure`,
 `title`, `width` and `height` are ignored with a warning.
 
@@ -12197,7 +12212,8 @@ end
 Append an image (same data forms and keywords as [`plot_image`](@ref), except
 `show`, which throws an `ArgumentError`) to `fig`, a `Plot` or `SyncPlot`, or
 to a cell of a `SubplotFigure` (`row`/`col` together, default: the active
-cell). `origin = ""` (default) keeps the y-axis direction (plotly shows an
+cell; `secondary_y` targets the cell's secondary y axis). `origin = ""`
+(default) keeps the y-axis direction (plotly shows an
 image's first row at the top unless the axis direction was set); `:upper` /
 `:lower` set it, and an `extent` sets both axis directions. `grid = nothing`
 keeps the grid. On a `SubplotFigure`, `title`, `width` and `height` are
