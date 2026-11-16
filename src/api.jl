@@ -470,6 +470,27 @@ function _apply_scene_style_options!(
 end
 
 """
+	_SubplotInset
+
+Immutable record of one inset axes pair registered on a [`SubplotFigure`](@ref)
+(see `inset!`). `row`/`col` name the host grid cell; `xkey`/`ykey` are the
+layout keys (`:xaxis5`, `:yaxis5`) and `xref`/`yref` the matching trace
+references (`"x5"`, `"y5"`); `xdomain`/`ydomain` are the paper-fraction
+domains the inset was created with. Inset ids are 1-based positions in
+`sf.insets`.
+"""
+struct _SubplotInset
+	row::Int
+	col::Int
+	xkey::Symbol
+	ykey::Symbol
+	xref::String
+	yref::String
+	xdomain::NTuple{2, Float64}
+	ydomain::NTuple{2, Float64}
+end
+
+"""
 	SubplotFigure
 
 A MATLAB-like subplot canvas returned by [`subplots`](@ref). It wraps the
@@ -491,6 +512,10 @@ mutable struct SubplotFigure
 	legend_bgcolor::String
 	legend_bordercolor::String
 	legend_borderwidth::Float64
+	# Inset axes registered by `inset!`, in creation order (id k == index k).
+	# Staged copies get their own vector, so a failed transactional mutation
+	# never leaks a half-registered inset into the live figure.
+	insets::Vector{_SubplotInset}
 	_lock::ReentrantLock
 end
 
@@ -506,6 +531,7 @@ function SubplotFigure(
 	legend_bgcolor::String,
 	legend_bordercolor::String,
 	legend_borderwidth::Float64,
+	insets::AbstractVector{_SubplotInset} = _SubplotInset[],
 )
 	return SubplotFigure(
 		fig,
@@ -519,6 +545,9 @@ function SubplotFigure(
 		legend_bgcolor,
 		legend_bordercolor,
 		legend_borderwidth,
+		# Always own a fresh vector: a caller's vector (or a live figure's
+		# metadata, when staging) must never be shared with this figure.
+		collect(_SubplotInset, insets),
 		ReentrantLock(),
 	)
 end
@@ -535,6 +564,7 @@ function Base.getproperty(sf::SubplotFigure, name::Symbol)
 		name === :legend_bgcolor ||
 		name === :legend_bordercolor ||
 		name === :legend_borderwidth ||
+		name === :insets ||
 		name === :_lock
 		return getfield(sf, name)
 	end
@@ -552,14 +582,25 @@ end
 function Base.propertynames(sf::SubplotFigure, private::Bool = false)
 	own = private ?
 		fieldnames(SubplotFigure) :
-		fieldnames(SubplotFigure)[1:(end - 1)]
-	return (own..., propertynames(getfield(sf, :fig), private)...)
+		filter(!=(:_lock), fieldnames(SubplotFigure))
+	fig = getfield(sf, :fig)
+	# `getproperty(sf, :plot)` serves the wrapped Plot for both backings, so
+	# `:plot` must be listed for both: `hasproperty(sf, :plot)` is how the
+	# untyped helpers (`_plot_obj`, `set_template!`, `annotate!`) find the
+	# model. A SyncPlot already lists `:plot`; `unique` keeps each name once.
+	forwarded = fig isa Plot ?
+		(:plot, propertynames(fig, private)...) :
+		propertynames(fig, private)
+	return Tuple(unique((own..., forwarded...)))
 end
 
 function _staged_subplot_figure(
 	sf::SubplotFigure,
 	candidate::Plot,
 )
+	# The positional constructor copies `insets`, so the staged figure can
+	# push/replace inset records without touching the live metadata until
+	# `_commit_subplot_metadata!` publishes the fields the mutation owns.
 	return SubplotFigure(
 		candidate,
 		sf.rows,
@@ -572,6 +613,7 @@ function _staged_subplot_figure(
 		sf.legend_bgcolor,
 		sf.legend_bordercolor,
 		sf.legend_borderwidth,
+		getfield(sf, :insets),
 	)
 end
 
@@ -585,6 +627,12 @@ const _SUBPLOT_LEGEND_METADATA_FIELDS = (
 	:legend_bgcolor,
 	:legend_bordercolor,
 	:legend_borderwidth,
+)
+# Mutations that register inset axes (`inset!`) commit the new inset list
+# together with the active-cell selection.
+const _SUBPLOT_INSET_METADATA_FIELDS = (
+	_SUBPLOT_SELECTION_METADATA_FIELDS...,
+	:insets,
 )
 
 function _commit_subplot_metadata!(
