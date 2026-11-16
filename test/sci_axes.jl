@@ -78,6 +78,16 @@ end
         @test fig.layout[:xaxis_title_text] == PlotlySupply._label("Time \$t\$ (s)")
         xlabel!(fig, "")
         @test fig.layout[:xaxis_title_text] == ""
+        # #19/#56 (mutator part): LaTeXString and SubString labels are accepted.
+        xlabel!(fig, L"\alpha^2")
+        @test fig.layout[:xaxis_title_text] == PlotlySupply._label("\$\\alpha^2\$")
+        ylabel!(fig, split("signal level")[1])
+        @test fig.layout[:yaxis_title_text] == "signal"
+        f3l = plot_scatter3d([1.0, 2.0], [1.0, 2.0], [1.0, 2.0])
+        zlabel!(f3l, L"z")
+        @test _ax_get(_ax_get(_ax_get(f3l.layout.fields[:scene], :zaxis), :title), :text) ==
+            _AX._axes_label3d("\$z\$")
+        ylabel!(fig, "signal")
         @test xrange!(fig, (0, 5)) === nothing
         @test _ax_field(fig, :xaxis, :range) == [0, 5]
         @test _ax_field(fig, :xaxis, :autorange) === false
