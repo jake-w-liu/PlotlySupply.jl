@@ -2228,10 +2228,10 @@ end
     end
 
     @testset "CRC: box/violin points=true normalized; group mode" begin
-        b = plot_box([1, 2], [[1.0, 2, 3], [4.0, 5, 6]]; points=true)
+        b = plot_box([1, 2, 3], [[1.0, 2, 3], [4.0, 5, 6]]; points=true)
         @test b.data[1].fields[:boxpoints] == "all"
         @test b.layout.fields[:boxmode] == "group"
-        v = plot_violin([1, 2], [[1.0, 2, 3], [4.0, 5, 6]]; points=true)
+        v = plot_violin([1, 2, 3], [[1.0, 2, 3], [4.0, 5, 6]]; points=true)
         @test v.data[1].fields[:points] == "all"
         @test v.layout.fields[:violinmode] == "group"
     end
@@ -2988,7 +2988,8 @@ end
     @testset "Extended: histogram2d" begin
         f = plot_histogram2d(randn(50), randn(50); nbinsx=10, colorscale="Viridis")
         @test ttype(f) == "histogram2d"
-        @test f.data[1].fields[:colorscale] == "Viridis"
+        @test f.data[1].fields[:colorscale] ==
+            PlotlySupply._resolve_colorscale("Viridis"; who="test").scale
     end
 
     @testset "Extended: error bars" begin

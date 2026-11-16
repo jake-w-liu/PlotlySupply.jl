@@ -5865,14 +5865,14 @@ end
 
 function plot_bar!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
+	x::AbstractVector,
+	y::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_bar!,
 		x,
@@ -5880,58 +5880,61 @@ function plot_bar!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_bar!",
 		kwargs...,
 	)
 end
 
 function plot_bar!(
 	sf::SubplotFigure,
-	y::Union{AbstractRange, Vector, SubArray};
+	y::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_bar!,
 		y;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_bar!",
 		kwargs...,
 	)
 end
 
 function plot_histogram!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray};
+	x::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_histogram!,
 		x;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_histogram!",
 		kwargs...,
 	)
 end
 
 function plot_box!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
+	x::AbstractVector,
+	y::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_box!,
 		x,
@@ -5939,39 +5942,41 @@ function plot_box!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_box!",
 		kwargs...,
 	)
 end
 
 function plot_box!(
 	sf::SubplotFigure,
-	y::Union{AbstractRange, Vector, SubArray};
+	y::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_box!,
 		y;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_box!",
 		kwargs...,
 	)
 end
 
 function plot_violin!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
+	x::AbstractVector,
+	y::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_violin!,
 		x,
@@ -5979,25 +5984,27 @@ function plot_violin!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_violin!",
 		kwargs...,
 	)
 end
 
 function plot_violin!(
 	sf::SubplotFigure,
-	y::Union{AbstractRange, Vector, SubArray};
+	y::AbstractVector;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _stats_subplot_delegate!(
 		sf,
 		plot_violin!,
 		y;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		who = "plot_violin!",
 		kwargs...,
 	)
 end
@@ -6391,7 +6398,6 @@ for (fn, nargs) in (
 	(:plot_funnel!, 2),
 	(:plot_candlestick!, 5),
 	(:plot_ohlc!, 5),
-	(:plot_histogram2d!, 2),
 	(:plot_ternary!, 3),
 	(:plot_streamtube!, 6),
 )
@@ -6976,6 +6982,558 @@ function _apply_cartesian_grid_override!(
 	_apply_axis_grid!(fig, grid, who)
 	return nothing
 end
+
+# ── Statistical traces: bar, histogram, box, violin, histogram2d ─────────────
+# The constructors and `!` mutators of this family share the builders below, so
+# both validate and build identically. Every `_stats_*` builder is pure: it
+# validates its inputs and returns new traces without touching a figure; the
+# callers then validate the figure options and only afterwards write.
+
+const _STATS_HISTNORMS = ("", "percent", "probability", "density", "probability density")
+const _STATS_BARMODES = ("", "group", "overlay", "stack", "relative")
+const _STATS_TEXTPOSITIONS = ("", "inside", "outside", "auto", "none")
+const _STATS_POINT_MODES = ("all", "outliers", "suspectedoutliers")
+const _STATS_VIOLIN_SIDES = ("both", "positive", "negative")
+# Trace opacity of automatically overlaid histograms: every series stays
+# visible where they overlap while the colours remain identifiable (checked on
+# rendered overlays of two overlapping normal samples).
+const _STATS_OVERLAY_OPACITY = 0.6
+# Trace types whose layout is governed by the figure-wide `layout.barmode`.
+const _STATS_BARMODE_TRACE_TYPES = ("bar", "histogram")
+
+# What the stats rules need to know about the SubplotFigure cell being filled.
+# The subplot delegate runs the mutator on an empty staged Plot, so the
+# histogram overlay rule (figure-wide bar mode) and the box/violin collision
+# rule (boxes already in the cell) read the real figure from here.
+struct _StatsCellContext
+	# Root `layout.barmode` of the SubplotFigure (`nothing` when unset).
+	barmode::Any
+	# Field dictionaries of the traces already drawn on the target cell's axes.
+	traces::Vector{Any}
+end
+
+# `nothing` outside a SubplotFigure call; set by `_stats_subplot_delegate!`.
+const _STATS_SUBPLOT_CELL = Base.ScopedValues.ScopedValue{Union{Nothing, _StatsCellContext}}(nothing)
+
+function _stats_choice(
+	value::AbstractString,
+	choices,
+	who::AbstractString,
+	name::AbstractString,
+)
+	value in choices || throw(ArgumentError(
+		"$(who): `$(name)` must be one of $(join(repr.(choices), ", ")); got $(repr(value)).",
+	))
+	return String(value)
+end
+
+function _stats_orientation(orientation::AbstractString, who::AbstractString)
+	orientation in ("", "v", "h") || throw(ArgumentError(
+		"$(who): `orientation` must be \"v\" (vertical), \"h\" (horizontal) or \"\" " *
+		"(vertical); got $(repr(orientation)).",
+	))
+	return String(orientation)
+end
+
+# Optional number restricted to [lo, hi]; `nothing` means unset.
+function _stats_number(value, who::AbstractString, name::AbstractString, lo::Real, hi::Real)
+	value === nothing && return nothing
+	(value isa Real && !(value isa Bool) && isfinite(value) && lo <= value <= hi) ||
+		throw(ArgumentError(
+			"$(who): `$(name)` must be a number in [$(lo), $(hi)] or nothing; got $(repr(value)).",
+		))
+	return value
+end
+
+function _stats_count(value::Integer, who::AbstractString, name::AbstractString)
+	(!(value isa Bool) && value >= 0) || throw(ArgumentError(
+		"$(who): `$(name)` must be a non-negative integer (0 = automatic); got $(repr(value)).",
+	))
+	return Int(value)
+end
+
+_stats_label(text::AbstractString) = isempty(text) ? "" : _label(text)
+
+# A plotted series must be data Plotly can draw: complex numbers serialize as
+# {re, im} objects that plotly.js silently does not plot. Abstractly typed
+# containers are scanned because their element type says nothing.
+function _stats_check_series(series, who::AbstractString, name::AbstractString)
+	element_type = eltype(series)
+	complex_values = element_type !== Union{} && (
+		element_type <: Complex ||
+		(!isconcretetype(element_type) && any(value -> value isa Complex, series))
+	)
+	complex_values && throw(ArgumentError(
+		"$(who): `$(name)` has complex values, which Plotly cannot draw; pass " *
+		"real.(v), imag.(v), abs.(v) or angle.(v).",
+	))
+	return series
+end
+
+# Split `values` (the series to draw) and their optional `positions`
+# (categories or coordinates, either shared or one per series) into per-series
+# lists, checking series counts.
+function _stats_series_lists(
+	values,
+	positions,
+	who::AbstractString,
+	value_name::AbstractString,
+	position_name::AbstractString,
+)
+	values_nested = _is_nested_series(values)
+	positions_nested = positions !== nothing && _is_nested_series(positions)
+	if positions_nested
+		values_nested || throw(ArgumentError(
+			"$(who): `$(position_name)` holds $(length(positions)) series but " *
+			"`$(value_name)` holds a single series.",
+		))
+		length(positions) == length(values) || throw(ArgumentError(
+			"$(who): `$(value_name)` and `$(position_name)` must hold the same number " *
+			"of series; got $(length(values)) and $(length(positions)).",
+		))
+	end
+	value_list = values_nested ? Any[series for series in values] : Any[values]
+	position_list = positions_nested ? Any[series for series in positions] :
+		Any[positions for _ in value_list]
+	for (index, series) in enumerate(value_list)
+		_stats_check_series(series, who, value_name)
+		position_series = position_list[index]
+		position_series === nothing && continue
+		_stats_check_series(position_series, who, position_name)
+		length(position_series) == length(series) || throw(ArgumentError(
+			values_nested ?
+			"$(who): series $(index) of `$(value_name)` has $(length(series)) values " *
+			"but `$(position_name)` has $(length(position_series)) for it." :
+			"$(who): `$(value_name)` has $(length(series)) values but " *
+			"`$(position_name)` has $(length(position_series)).",
+		))
+	end
+	return value_list, position_list, values_nested
+end
+
+# Per-series colours: one string or symbol for every series, or a vector with
+# one entry per series (short vectors leave the remaining series on the colour
+# cycle, long vectors are truncated, like the other per-series keywords).
+function _stats_colors(color, count::Int, who::AbstractString)
+	if color isa AbstractVector
+		entries = String[]
+		for entry in color
+			(entry isa AbstractString || entry isa Symbol) || throw(ArgumentError(
+				"$(who): `color` entries must be strings or symbols; got $(repr(entry)).",
+			))
+			push!(entries, String(entry))
+		end
+		return _series_kwarg_vector(entries, count, "", String)
+	end
+	(color isa AbstractString || color isa Symbol) || throw(ArgumentError(
+		"$(who): `color` must be a string, a symbol or a vector of them; got $(repr(color)).",
+	))
+	return fill(String(color), count)
+end
+
+_stats_names(legend, count::Int) =
+	String[_stats_label(name) for name in _series_kwarg_vector(legend, count, "", String)]
+
+_stats_showlegends(showlegend, count::Int) =
+	_series_kwarg_vector(showlegend, count, nothing, Union{Nothing, Bool})
+
+function _stats_patterns(hatch, count::Int, who::AbstractString)
+	hatches = _series_kwarg_vector(hatch, count, "", String)
+	return Any[_hatch_pattern(entry; who = who) for entry in hatches]
+end
+
+# The part of a per-point keyword that belongs to series `index`: a flat vector
+# (shared by every series) or a vector of vectors (one per series). Like the
+# other per-series keywords, a vector of vectors with fewer entries than there
+# are series leaves the remaining series without it (`nothing` is returned)
+# and surplus entries are ignored. The part's length must match the series'
+# point count.
+function _stats_point_part(
+	value,
+	index::Int,
+	point_count::Int,
+	who::AbstractString,
+	name::AbstractString,
+)
+	part = value
+	if _is_nested_series(value)
+		index <= length(value) || return nothing
+		part = value[index]
+	end
+	length(part) == point_count || throw(ArgumentError(
+		"$(who): `$(name)` has $(length(part)) entries for a series of $(point_count) values.",
+	))
+	return part
+end
+
+# Error-bar attribute for one series: a vector of magnitudes (symmetric), a
+# vector of such vectors (one per series), or a `(minus, plus)` tuple of either
+# form (asymmetric). Series without an entry (including an empty vector of
+# vectors) get no error bars.
+function _stats_error_bars(
+	errors,
+	index::Int,
+	point_count::Int,
+	who::AbstractString,
+	name::AbstractString,
+)
+	errors === nothing && return nothing
+	form_message = "$(who): `$(name)` must be a vector of error magnitudes, a vector " *
+		"of such vectors (one per series) or a (minus, plus) tuple of them"
+	if errors isa Tuple
+		length(errors) == 2 || throw(ArgumentError("$(form_message); got a $(length(errors))-tuple."))
+		parts = map(enumerate(("minus", "plus"))) do (position, side)
+			part = errors[position]
+			part isa AbstractVector || throw(ArgumentError("$(form_message); the $(side) part is $(typeof(part))."))
+			_stats_check_error_values(part, who, "$(name) ($(side))")
+			_stats_point_part(part, index, point_count, who, "$(name) ($(side))")
+		end
+		all(isnothing, parts) && return nothing
+		any(isnothing, parts) && throw(ArgumentError(
+			"$(who): the minus and plus parts of `$(name)` must cover the same series; " *
+			"series $(index) has only one of them.",
+		))
+		return attr(
+			type = "data",
+			symmetric = false,
+			array = parts[2],
+			arrayminus = parts[1],
+			visible = true,
+		)
+	end
+	errors isa AbstractVector || throw(ArgumentError("$(form_message); got $(typeof(errors))."))
+	_stats_check_error_values(errors, who, name)
+	part = _stats_point_part(errors, index, point_count, who, name)
+	part === nothing && return nothing
+	return attr(type = "data", array = part, visible = true)
+end
+
+# Error magnitudes must be non-negative numbers, as in matplotlib (`NaN`,
+# `missing` or `nothing` leave a point without an error bar); plotly silently
+# draws nothing for other values and flips negative ones.
+function _stats_check_error_values(errors, who::AbstractString, name::AbstractString)
+	series_list = _is_nested_series(errors) ? errors : (errors,)
+	for series in series_list, value in series
+		(value === nothing || value === missing ||
+			(value isa Real && !(value isa Bool) && !(value < 0))) || throw(ArgumentError(
+			"$(who): `$(name)` entries must be non-negative numbers; got $(repr(value)).",
+		))
+	end
+	return nothing
+end
+
+# Bar labels are plain SVG text (plotly never typesets them), so strings go
+# through `_label_plain`; numbers are kept and formatted by plotly; `nothing`
+# and `missing` leave a bar unlabelled.
+function _stats_bar_text_entry(entry, who::AbstractString)
+	entry isa AbstractString && return _label_plain(entry)
+	(entry === nothing || entry === missing) && return ""
+	(entry isa Real && !(entry isa Bool)) && return entry
+	throw(ArgumentError("$(who): `text` entries must be strings or numbers; got $(repr(entry))."))
+end
+
+function _stats_bar_text(
+	text,
+	index::Int,
+	point_count::Int,
+	who::AbstractString,
+)
+	text === nothing && return nothing
+	text isa AbstractString && return _label_plain(text)
+	text isa AbstractVector || throw(ArgumentError(
+		"$(who): `text` must be a string, a vector with one label per bar, or a vector " *
+		"of such vectors (one per series); got $(typeof(text)).",
+	))
+	part = _stats_point_part(text, index, point_count, who, "text")
+	part === nothing && return nothing
+	return Any[_stats_bar_text_entry(entry, who) for entry in part]
+end
+
+function _stats_bar_base_entry(entry, who::AbstractString)
+	entry isa AbstractString && return String(entry)
+	(entry isa Real && !(entry isa Bool) && isfinite(entry)) && return entry
+	throw(ArgumentError(
+		"$(who): `base` entries must be finite numbers (or date strings); got $(repr(entry)).",
+	))
+end
+
+function _stats_bar_base(
+	base,
+	index::Int,
+	point_count::Int,
+	who::AbstractString,
+)
+	base === nothing && return nothing
+	base isa AbstractVector || return _stats_bar_base_entry(base, who)
+	part = _stats_point_part(base, index, point_count, who, "base")
+	part === nothing && return nothing
+	return Any[_stats_bar_base_entry(entry, who) for entry in part]
+end
+
+# Explicit histogram bins `(start, stop, width)` in data units.
+function _stats_bins(bins, who::AbstractString)
+	bins === nothing && return nothing
+	((bins isa Tuple || bins isa AbstractVector) && length(bins) == 3) ||
+		throw(ArgumentError(
+			"$(who): `bins` must be a (start, stop, width) tuple; got $(repr(bins)).",
+		))
+	values = Float64[]
+	for (entry, name) in zip(bins, ("start", "stop", "width"))
+		(entry isa Real && !(entry isa Bool) && isfinite(entry)) || throw(ArgumentError(
+			"$(who): `bins` $(name) must be a finite number; got $(repr(entry)).",
+		))
+		push!(values, Float64(entry))
+	end
+	values[1] < values[2] || throw(ArgumentError(
+		"$(who): `bins` start must be less than stop; got $(repr(bins)).",
+	))
+	values[3] > 0 || throw(ArgumentError(
+		"$(who): `bins` width must be positive; got $(repr(bins)).",
+	))
+	return (values[1], values[2], values[3])
+end
+
+function _stats_bins_attr(bins)
+	return attr(Dict{Symbol, Any}(
+		:start => bins[1],
+		Symbol("end") => bins[2],
+		:size => bins[3],
+	))
+end
+
+# Deterministic id shared by the traces of one multi-series histogram call: it
+# becomes their `bingroup` (common bins) and, for overlays, their `offsetgroup`
+# (same bar slot, so they overlay inside their own subplot even under the
+# figure-wide default barmode "group"). It hashes every sample and the bin
+# options, so separate calls (and other subplot cells) get separate groups
+# while the same call always produces the same JSON.
+function _stats_histogram_group_id(series_list, options)
+	digest = hash(options, hash("PlotlySupply.plot_histogram"))
+	for series in series_list
+		digest = hash(length(series), digest)
+		for value in series
+			digest = hash(value, digest)
+		end
+	end
+	return "plotlysupply-histogram-" * string(digest; base = 16)
+end
+
+# Validate the points / jitter / pointpos keywords shared by box and violin.
+function _stats_points(points, who::AbstractString)
+	points isa Bool && return points
+	(points isa AbstractString && points in _STATS_POINT_MODES) || throw(ArgumentError(
+		"$(who): `points` must be true, false, $(join(repr.(_STATS_POINT_MODES), ", ")); " *
+		"got $(repr(points)).",
+	))
+	return String(points)
+end
+
+# Box / violin positions collide when traces without explicit positions share
+# a name: plotly then draws them on one category, and only group mode places
+# them side by side. Distinctly named series each own a category, where group
+# mode would narrow and offset them. Existing position-less traces of the same
+# type and orientation in the target figure (for a SubplotFigure: on the
+# target cell's axes) count as well.
+function _stats_positions_collide(
+	fig,
+	names::Vector{String},
+	trace_type::String,
+	horizontal::Bool,
+)
+	any(name -> isempty(strip(name)), names) && return true
+	allunique(names) || return true
+	position_key = horizontal ? :y : :x
+	value_key = horizontal ? :x : :y
+	cell = _STATS_SUBPLOT_CELL[]
+	existing_traces = cell === nothing ?
+		Any[trace.fields for trace in _plot_data(fig)] : cell.traces
+	for fields in existing_traces
+		get(fields, :type, nothing) == trace_type || continue
+		haskey(fields, position_key) && continue
+		haskey(fields, value_key) || continue
+		existing = get(fields, :name, "")
+		existing isa AbstractString && existing in names && return true
+	end
+	return false
+end
+
+# ── Figure options shared by the family ──────────────────────────────────────
+
+# Validate every common Cartesian keyword before the first write, including
+# tick values against the axis type the call ends with and titles/labels
+# (mathtext rejects malformed `$…$`), so a rejected keyword leaves the figure
+# untouched.
+function _stats_validate_options(fig, who::AbstractString, options)
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = options.xrange,
+		yrange = options.yrange,
+		xscale = options.xscale,
+		yscale = options.yscale,
+		width = options.width,
+		height = options.height,
+		fontsize = options.fontsize,
+		grid = options.grid,
+	)
+	_stats_validate_ticks(fig, :x, options.xticks, options.xticklabels, options.xscale, who)
+	_stats_validate_ticks(fig, :y, options.yticks, options.yticklabels, options.yscale, who)
+	_stats_label(options.title)
+	_stats_label(options.xlabel)
+	_stats_label(options.ylabel)
+	return nothing
+end
+
+function _stats_validate_ticks(
+	fig,
+	letter::Symbol,
+	values,
+	labels,
+	scale::AbstractString,
+	who::AbstractString,
+)
+	name = String(letter)
+	if values === nothing
+		labels === nothing || throw(ArgumentError(
+			"$(who): `$(name)ticklabels` need `$(name)ticks` (one label per tick value).",
+		))
+		return nothing
+	end
+	key = letter === :x ? :xaxis : :yaxis
+	final_type = isempty(scale) ? _axis_type(_plot_layout(fig), key) : String(scale)
+	tick_values = _cmn_tick_values(values, final_type == "log", who)
+	labels === nothing || _cmn_tick_labels(labels, length(tick_values), who)
+	return nothing
+end
+
+function _stats_apply_ticks!(
+	fig,
+	key::Symbol,
+	values,
+	labels,
+	format::AbstractString,
+	who::AbstractString,
+)
+	(values === nothing && labels === nothing && isempty(format)) && return nothing
+	_apply_ticks!(fig, key; values = values, labels = labels, format = format, who = who)
+	return nothing
+end
+
+# Apply the validated common keywords through the D7 primitives. Constructors
+# keep the template grid for their default `grid = true`; mutators default to
+# `nothing` (unchanged) and apply every explicit value, so `grid = true`
+# re-enables a grid that was switched off earlier.
+function _stats_apply_options!(fig, who::AbstractString, options; mutator::Bool)
+	_apply_figure_title!(fig, options.title)
+	_apply_axis_title!(fig, :x, options.xlabel)
+	_apply_axis_title!(fig, :y, options.ylabel)
+	# Scale before range and ticks: a logarithmic axis stores its range as
+	# exponents and takes tick values in data units.
+	_apply_axis_scale!(fig, :x, options.xscale, who)
+	_apply_axis_scale!(fig, :y, options.yscale, who)
+	_apply_axis_range!(fig, :x, options.xrange, who)
+	_apply_axis_range!(fig, :y, options.yrange, who)
+	_stats_apply_ticks!(fig, :xaxis, options.xticks, options.xticklabels, options.xtickformat, who)
+	_stats_apply_ticks!(fig, :yaxis, options.yticks, options.yticklabels, options.ytickformat, who)
+	_apply_figure_size!(fig, who; width = options.width, height = options.height)
+	(mutator || options.grid !== true) && _apply_axis_grid!(fig, options.grid, who)
+	# A new figure gets the default template; an append only refreshes the
+	# legend so a user-set template survives.
+	if mutator
+		_apply_default_legend!(fig)
+	else
+		_apply_default_template!(fig)
+	end
+	_apply_figure_fontsize!(fig, who, options.fontsize)
+	mutator && _refresh!(fig)
+	return nothing
+end
+
+# Mutators take the constructor keywords minus `show`; `kwargs...` only exists
+# to turn `show` (and any other unknown keyword) into a clear error.
+function _stats_reject_keywords(who::AbstractString, kwargs)
+	isempty(kwargs) && return nothing
+	names = collect(keys(kwargs))
+	:show in names && throw(ArgumentError(
+		"$(who): mutators do not take `show`; display the figure with `display(fig)` " *
+		"or pass `show = true` to the constructor.",
+	))
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) $(join(repr.(names), ", ")); see " *
+		"the docstring for the accepted keywords.",
+	))
+end
+
+function _stats_maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString)
+	show || return fig
+	return _maybe_show(
+		fig,
+		true,
+		width isa Integer ? Int(width) : round(Int, width),
+		height isa Integer ? Int(height) : round(Int, height),
+		String(title),
+	)
+end
+
+# ── SubplotFigure delegation ────────────────────────────────────────────────
+
+_stats_trace_on(fields, xref::AbstractString, yref::AbstractString) =
+	get(fields, :xaxis, "x") == xref && get(fields, :yaxis, "y") == yref
+
+# Run a stats mutator on a SubplotFigure cell with `_STATS_SUBPLOT_CELL` set to
+# the cell's context. The (reentrant) metadata lock is held from the lookup to
+# the commit so another task cannot change the cell in between. An explicit
+# `barmode` that changes the layout of bars on other axes (plotly's bar mode is
+# one figure-wide setting) is reported with a warning after the call succeeds.
+function _stats_subplot_delegate!(
+	sf::SubplotFigure,
+	mutator,
+	args...;
+	row,
+	col,
+	secondary_y::Bool,
+	who::AbstractString,
+	kwargs...,
+)
+	return lock(getfield(sf, :_lock)) do
+		root = _plot_obj(getfield(sf, :fig))
+		target = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, who = who)
+		cell_traces = Any[]
+		others_barlike = false
+		for trace in root.data
+			fields = trace.fields
+			if target.kind === :xy && _stats_trace_on(fields, target.xref, target.yref)
+				push!(cell_traces, fields)
+			else
+				others_barlike |= get(fields, :type, nothing) in _STATS_BARMODE_TRACE_TYPES
+			end
+		end
+		root_barmode = get(root.layout.fields, :barmode, nothing)
+		context = _StatsCellContext(root_barmode, cell_traces)
+		result = Base.ScopedValues.with(_STATS_SUBPLOT_CELL => context) do
+			_subplot_delegate_mutator!(
+				sf,
+				mutator,
+				args...;
+				row = row,
+				col = col,
+				secondary_y = secondary_y,
+				kwargs...,
+			)
+		end
+		requested = get(values(kwargs), :barmode, "")
+		current = root_barmode === nothing ? "group" : root_barmode
+		if others_barlike && requested isa AbstractString && !isempty(requested) &&
+			requested != current
+			@warn "$(who): `barmode = $(repr(requested))` replaces the figure-wide " *
+				"bar mode $(repr(current)); plotly has one `layout.barmode` for every " *
+				"subplot, so the existing bars and histograms on the other axes change too."
+		end
+		return result
+	end
+end
+
+# ── Trace builders ──────────────────────────────────────────────────────────
 
 # ── Scatter family: shared validation and trace building ─────────────
 # Used by plot_scatter, plot_stem, plot_area and plot_scatterpolar (with their
@@ -7862,29 +8420,187 @@ function _scatter_impl!(
 	return nothing
 end
 
-function _bar_trace(; x, y, color::String = "", name::String = "", orientation::String = "")
-	kw = Dict{Symbol, Any}(:x => x, :y => y, :name => name)
-	color == "" || (kw[:marker] = attr(color = color))
-	orientation == "" || (kw[:orientation] = orientation)
+function _bar_trace(;
+	x,
+	y,
+	color::AbstractString = "",
+	name::AbstractString = "",
+	orientation::AbstractString = "",
+	showlegend::Union{Nothing, Bool} = nothing,
+	text = nothing,
+	textposition::AbstractString = "",
+	texttemplate::AbstractString = "",
+	base = nothing,
+	opacity::Union{Nothing, Real} = nothing,
+	pattern = nothing,
+	error_x = nothing,
+	error_y = nothing,
+)
+	kw = Dict{Symbol, Any}(:x => x, :y => y, :name => String(name))
+	marker = Dict{Symbol, Any}()
+	isempty(color) || (marker[:color] = String(color))
+	pattern === nothing || (marker[:pattern] = pattern)
+	isempty(marker) || (kw[:marker] = attr(; marker...))
+	isempty(orientation) || (kw[:orientation] = String(orientation))
+	showlegend === nothing || (kw[:showlegend] = showlegend)
+	text === nothing || (kw[:text] = text)
+	isempty(textposition) || (kw[:textposition] = String(textposition))
+	isempty(texttemplate) || (kw[:texttemplate] = String(texttemplate))
+	base === nothing || (kw[:base] = base)
+	opacity === nothing || (kw[:opacity] = opacity)
+	error_x === nothing || (kw[:error_x] = error_x)
+	error_y === nothing || (kw[:error_y] = error_y)
 	return bar(; kw...)
 end
 
-function _histogram_trace(
-	;
-	x,
-	nbinsx::Int = 0,
-	histnorm::String = "",
-	color::String = "",
-	name::String = "",
+# One histogram trace. `orientation = "h"` bins `samples` along y (the bars
+# grow along x); otherwise along x.
+function _histogram_trace(;
+	samples,
+	orientation::AbstractString = "",
+	nbins::Int = 0,
+	bins = nothing,
+	histnorm::AbstractString = "",
+	cumulative::Bool = false,
+	color::AbstractString = "",
+	name::AbstractString = "",
+	showlegend::Union{Nothing, Bool} = nothing,
+	opacity::Union{Nothing, Real} = nothing,
+	pattern = nothing,
+	bingroup::AbstractString = "",
+	offsetgroup::AbstractString = "",
 )
-	kwargs = Dict{Symbol, Any}(
-		:x => x,
-		:name => name,
-	)
-	nbinsx > 0 && (kwargs[:nbinsx] = nbinsx)
-	histnorm != "" && (kwargs[:histnorm] = histnorm)
-	color != "" && (kwargs[:marker] = attr(color = color))
-	return histogram(; kwargs...)
+	horizontal = orientation == "h"
+	kw = Dict{Symbol, Any}(:name => String(name))
+	kw[horizontal ? :y : :x] = samples
+	isempty(orientation) || (kw[:orientation] = String(orientation))
+	nbins > 0 && (kw[horizontal ? :nbinsy : :nbinsx] = nbins)
+	bins === nothing || (kw[horizontal ? :ybins : :xbins] = _stats_bins_attr(bins))
+	isempty(histnorm) || (kw[:histnorm] = String(histnorm))
+	cumulative && (kw[:cumulative] = attr(enabled = true))
+	marker = Dict{Symbol, Any}()
+	isempty(color) || (marker[:color] = String(color))
+	pattern === nothing || (marker[:pattern] = pattern)
+	isempty(marker) || (kw[:marker] = attr(; marker...))
+	showlegend === nothing || (kw[:showlegend] = showlegend)
+	opacity === nothing || (kw[:opacity] = opacity)
+	isempty(bingroup) || (kw[:bingroup] = String(bingroup))
+	isempty(offsetgroup) || (kw[:offsetgroup] = String(offsetgroup))
+	return histogram(; kw...)
+end
+
+# Histogram on a logarithmic binning axis, which plotly.js cannot bin (see
+# `_stats_log_axis`): the series of one call are counted in Julia on shared
+# bins and drawn as `bar` traces whose bars span their bins exactly (`offset`
+# 0 and `width` = bin width, in data units). Automatic bins have equal width
+# in decades (plotly's automatic bins over log10 of the pooled samples,
+# `nbins` approximate); explicit `bins` are linear in data units and must start
+# above 0. Non-positive samples cannot be shown on a log axis and are not
+# counted. `histnorm` and `cumulative` follow plotly's histogram: densities
+# divide by each bin's width in data units, the cumulative sum is taken after
+# normalization, and under `cumulative` the density norms act as their
+# non-density equivalents. With `grouped`, the series sit side by side inside
+# each bin, each taking an equal share of the bin's width in decades.
+function _stats_log_histogram_traces(
+	sample_list,
+	who::AbstractString;
+	orientation::AbstractString,
+	nbins::Int,
+	bins,
+	histnorm::AbstractString,
+	cumulative::Bool,
+	grouped::Bool,
+	colors,
+	names,
+	showlegends,
+	opacity,
+	patterns,
+)
+	series_count = length(sample_list)
+	positions = Vector{Vector{Float64}}(undef, series_count)
+	total_length = 0
+	for (index, samples) in enumerate(sample_list)
+		numeric = _stats_numeric_samples(samples, who, "x")
+		total_length += length(samples)
+		positions[index] = bins === nothing ? Float64[log10(value) for value in numeric if value > 0] : numeric
+	end
+	if bins === nothing
+		pooled = reduce(vcat, positions; init = Float64[])
+		isempty(pooled) && throw(ArgumentError(
+			"$(who): a histogram on a log axis needs at least one positive finite sample.",
+		))
+		start, stop, width = _stats_autobins(pooled, nbins; total = total_length)
+		bin_count = round(Int, (stop - start) / width)
+		edges = exp10.([start + k * width for k in 0:bin_count])
+	else
+		start, stop, width = bins
+		start > 0 || throw(ArgumentError(
+			"$(who): on a log axis `bins` (data units) must start above 0; got start = $(start).",
+		))
+		# plotly keeps every bin whose left edge lies below `stop`.
+		bin_count = max(1, ceil(Int, (stop - start) / width - 1e-9))
+		edges = [start + k * width for k in 0:bin_count]
+	end
+	bin_widths = diff(edges)
+	norm = histnorm
+	if cumulative
+		norm == "density" && (norm = "")
+		norm == "probability density" && (norm = "probability")
+	end
+	horizontal = orientation == "h"
+	value_letter = horizontal ? "x" : "y"
+	hovertemplate = "[%{customdata[0]:.4g}, %{customdata[1]:.4g}): " *
+		"$(cumulative ? "cumulative " : "")$(_STATS_HISTNORM_LABELS[histnorm]) %{$(value_letter)}"
+	customdata = [Any[edges[k], edges[k + 1]] for k in 1:bin_count]
+	traces = Vector{GenericTrace}(undef, series_count)
+	for index in 1:series_count
+		counts = zeros(Float64, bin_count)
+		binned = 0
+		for position in positions[index]
+			bin = _stats_bin_index(position, start, width, bin_count)
+			bin == 0 && continue
+			counts[bin] += 1
+			binned += 1
+		end
+		if norm == "percent"
+			binned > 0 && (counts .*= 100 / binned)
+		elseif norm == "probability"
+			binned > 0 && (counts ./= binned)
+		elseif norm == "density"
+			counts ./= bin_widths
+		elseif norm == "probability density"
+			counts ./= bin_widths
+			binned > 0 && (counts ./= binned)
+		end
+		cumulative && cumsum!(counts, counts)
+		if grouped
+			low = log10.(edges[1:(end - 1)])
+			share = (log10.(edges[2:end]) .- low) ./ series_count
+			left = exp10.(low .+ (index - 1) .* share)
+			right = exp10.(low .+ index .* share)
+		else
+			left = edges[1:(end - 1)]
+			right = edges[2:end]
+		end
+		kw = Dict{Symbol, Any}(
+			:name => String(names[index]),
+			:offset => 0,
+			:width => right .- left,
+			:customdata => customdata,
+			:hovertemplate => hovertemplate,
+		)
+		kw[horizontal ? :y : :x] = left
+		kw[horizontal ? :x : :y] = counts
+		horizontal && (kw[:orientation] = "h")
+		marker = Dict{Symbol, Any}()
+		isempty(colors[index]) || (marker[:color] = String(colors[index]))
+		patterns[index] === nothing || (marker[:pattern] = patterns[index])
+		isempty(marker) || (kw[:marker] = attr(; marker...))
+		showlegends[index] === nothing || (kw[:showlegend] = showlegends[index])
+		opacity === nothing || (kw[:opacity] = opacity)
+		traces[index] = bar(; kw...)
+	end
+	return traces
 end
 
 # Plotly's box/violin point options are a string enum
@@ -7892,48 +8608,326 @@ end
 # and silently ignored by Plotly, so map it to the sensible "all".
 _normalize_points(points) = points isa Bool ? (points ? "all" : false) : points
 
-function _box_trace(
-	;
-	x = nothing,
+# Shared box/violin fields: data, name, colour, orientation and point options.
+function _stats_distribution_fields(;
+	x,
 	y,
-	color::String = "",
-	name::String = "",
-	points::Union{Bool, String} = "outliers",
+	color::AbstractString,
+	name::AbstractString,
+	orientation::AbstractString,
+	showlegend::Union{Nothing, Bool},
+	jitter::Union{Nothing, Real},
+	pointpos::Union{Nothing, Real},
 )
-	kwargs = Dict{Symbol, Any}(
-		:y => y,
-		:name => name,
-		:boxpoints => _normalize_points(points),
-	)
-	x === nothing || (kwargs[:x] = x)
-	if color != ""
-		kwargs[:marker] = attr(color = color)
-		kwargs[:line] = attr(color = color)
+	kw = Dict{Symbol, Any}(:name => String(name))
+	x === nothing || (kw[:x] = x)
+	y === nothing || (kw[:y] = y)
+	if !isempty(color)
+		kw[:marker] = attr(color = String(color))
+		kw[:line] = attr(color = String(color))
 	end
-	return PlotlyBase.box(; kwargs...)
+	isempty(orientation) || (kw[:orientation] = String(orientation))
+	showlegend === nothing || (kw[:showlegend] = showlegend)
+	jitter === nothing || (kw[:jitter] = jitter)
+	pointpos === nothing || (kw[:pointpos] = pointpos)
+	return kw
 end
 
-function _violin_trace(
-	;
+function _box_trace(;
 	x = nothing,
-	y,
-	color::String = "",
-	name::String = "",
-	points::Union{Bool, String} = "outliers",
-	side::String = "both",
+	y = nothing,
+	color::AbstractString = "",
+	name::AbstractString = "",
+	points::Union{Bool, AbstractString} = "outliers",
+	orientation::AbstractString = "",
+	showlegend::Union{Nothing, Bool} = nothing,
+	boxmean::Union{Bool, AbstractString} = false,
+	notched::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
 )
-	kwargs = Dict{Symbol, Any}(
-		:y => y,
-		:name => name,
-		:points => _normalize_points(points),
-		:side => side,
+	kw = _stats_distribution_fields(;
+		x = x,
+		y = y,
+		color = color,
+		name = name,
+		orientation = orientation,
+		showlegend = showlegend,
+		jitter = jitter,
+		pointpos = pointpos,
 	)
-	x === nothing || (kwargs[:x] = x)
-	if color != ""
-		kwargs[:marker] = attr(color = color)
-		kwargs[:line] = attr(color = color)
+	kw[:boxpoints] = _normalize_points(points)
+	boxmean === false || (kw[:boxmean] = boxmean isa Bool ? true : String(boxmean))
+	notched && (kw[:notched] = true)
+	return PlotlyBase.box(; kw...)
+end
+
+function _violin_trace(;
+	x = nothing,
+	y = nothing,
+	color::AbstractString = "",
+	name::AbstractString = "",
+	points::Union{Bool, AbstractString} = "outliers",
+	side::AbstractString = "both",
+	orientation::AbstractString = "",
+	showlegend::Union{Nothing, Bool} = nothing,
+	box::Bool = false,
+	meanline::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
+)
+	kw = _stats_distribution_fields(;
+		x = x,
+		y = y,
+		color = color,
+		name = name,
+		orientation = orientation,
+		showlegend = showlegend,
+		jitter = jitter,
+		pointpos = pointpos,
+	)
+	kw[:points] = _normalize_points(points)
+	kw[:side] = String(side)
+	box && (kw[:box] = attr(visible = true))
+	meanline && (kw[:meanline] = attr(visible = true))
+	return violin(; kw...)
+end
+
+# ── Family implementations (shared by constructor and mutator) ───────────────
+
+function _stats_bar!(fig, x, y, who::AbstractString, options, bar_options; mutator::Bool)
+	o = bar_options
+	orientation = _stats_orientation(o.orientation, who)
+	horizontal = orientation == "h"
+	barmode = _stats_choice(o.barmode, _STATS_BARMODES, who, "barmode")
+	textposition = _stats_choice(o.textposition, _STATS_TEXTPOSITIONS, who, "textposition")
+	opacity = _stats_number(o.opacity, who, "opacity", 0, 1)
+	if x === nothing
+		# y-only form: generated positions 0:n-1 go on the category axis, the
+		# values on the value axis (x for horizontal bars).
+		value_name, position_name = "y", "x"
+		values, positions = y, _auto_xvalues(y)
+	else
+		# Two-argument form: plotly's convention, `x` and `y` are passed
+		# through as given; for horizontal bars `x` holds the values.
+		value_name, position_name = horizontal ? ("x", "y") : ("y", "x")
+		values, positions = horizontal ? (x, y) : (y, x)
 	end
-	return violin(; kwargs...)
+	value_list, position_list, _ =
+		_stats_series_lists(values, positions, who, value_name, position_name)
+	count = length(value_list)
+	colors = _stats_colors(o.color, count, who)
+	names = _stats_names(o.legend, count)
+	showlegends = _stats_showlegends(o.showlegend, count)
+	patterns = _stats_patterns(o.hatch, count, who)
+	traces = Vector{GenericTrace}(undef, count)
+	for index in 1:count
+		series = value_list[index]
+		series_positions = position_list[index]
+		points = length(series)
+		trace_x, trace_y = horizontal ? (series, series_positions) : (series_positions, series)
+		traces[index] = _bar_trace(;
+			x = trace_x,
+			y = trace_y,
+			color = colors[index],
+			name = names[index],
+			orientation = orientation,
+			showlegend = showlegends[index],
+			text = _stats_bar_text(o.text, index, points, who),
+			textposition = textposition,
+			texttemplate = o.texttemplate,
+			base = _stats_bar_base(o.base, index, points, who),
+			opacity = opacity,
+			pattern = patterns[index],
+			error_x = _stats_error_bars(o.error_x, index, points, who, "error_x"),
+			error_y = _stats_error_bars(o.error_y, index, points, who, "error_y"),
+		)
+	end
+	_stats_validate_options(fig, who, options)
+
+	append!(_plot_data(fig), traces)
+	_apply_explicit_layout_mode!(fig, :barmode, barmode)
+	_stats_apply_options!(fig, who, options; mutator = mutator)
+	return nothing
+end
+
+function _stats_histogram!(fig, x, who::AbstractString, options, histogram_options; mutator::Bool)
+	o = histogram_options
+	orientation = _stats_orientation(o.orientation, who)
+	histnorm = _stats_choice(o.histnorm, _STATS_HISTNORMS, who, "histnorm")
+	barmode = _stats_choice(o.barmode, _STATS_BARMODES, who, "barmode")
+	nbins = _stats_count(o.nbinsx, who, "nbinsx")
+	bins = _stats_bins(o.bins, who)
+	(bins !== nothing && nbins > 0) && throw(ArgumentError(
+		"$(who): pass either `nbinsx` (an approximate bin count) or `bins` (explicit " *
+		"(start, stop, width) bins), not both.",
+	))
+	opacity = _stats_number(o.opacity, who, "opacity", 0, 1)
+	sample_list, _, nested = _stats_series_lists(x, nothing, who, "x", "")
+	count = length(sample_list)
+	colors = _stats_colors(o.color, count, who)
+	names = _stats_names(o.legend, count)
+	showlegends = _stats_showlegends(o.showlegend, count)
+	patterns = _stats_patterns(o.hatch, count, who)
+
+	# Several series from one call share their bins. They overlay unless a bar
+	# mode other than "overlay" is requested or already set on the target, in
+	# which case plotly groups or stacks them on the shared bins.
+	shared = nested && count > 1
+	existing_mode = get(_plot_layout(fig).fields, :barmode, nothing)
+	cell = _STATS_SUBPLOT_CELL[]
+	(existing_mode === nothing && cell !== nothing) && (existing_mode = cell.barmode)
+	mode = isempty(barmode) ? existing_mode : barmode
+	overlay = shared && (mode === nothing || mode == "overlay")
+	group_id = shared ?
+		_stats_histogram_group_id(
+			sample_list,
+			(orientation, nbins, bins, histnorm, o.cumulative),
+		) : ""
+	trace_opacity = opacity !== nothing ? opacity :
+		overlay ? _STATS_OVERLAY_OPACITY : nothing
+	horizontal = orientation == "h"
+	log_axis = _stats_log_axis(
+		fig,
+		horizontal ? options.yscale : options.xscale,
+		horizontal ? :yaxis : :xaxis,
+	)
+	if log_axis
+		traces = _stats_log_histogram_traces(
+			sample_list,
+			who;
+			orientation = orientation,
+			nbins = nbins,
+			bins = bins,
+			histnorm = histnorm,
+			cumulative = o.cumulative,
+			grouped = shared && mode == "group",
+			colors = colors,
+			names = names,
+			showlegends = showlegends,
+			opacity = trace_opacity,
+			patterns = patterns,
+		)
+	else
+		traces = Vector{GenericTrace}(undef, count)
+		for index in 1:count
+			traces[index] = _histogram_trace(;
+				samples = sample_list[index],
+				orientation = orientation,
+				nbins = nbins,
+				bins = bins,
+				histnorm = histnorm,
+				cumulative = o.cumulative,
+				color = colors[index],
+				name = names[index],
+				showlegend = showlegends[index],
+				opacity = trace_opacity,
+				pattern = patterns[index],
+				bingroup = group_id,
+				offsetgroup = overlay ? group_id : "",
+			)
+		end
+	end
+	_stats_validate_options(fig, who, options)
+
+	append!(_plot_data(fig), traces)
+	if !isempty(barmode)
+		_apply_explicit_layout_mode!(fig, :barmode, barmode)
+	elseif overlay
+		_apply_nested_layout_mode!(fig, x, :barmode, "overlay")
+	end
+	_stats_apply_options!(fig, who, options; mutator = mutator)
+	return nothing
+end
+
+function _stats_distribution!(
+	fig,
+	x,
+	y,
+	who::AbstractString,
+	options,
+	distribution_options;
+	kind::Symbol,
+	mutator::Bool,
+)
+	o = distribution_options
+	orientation = _stats_orientation(o.orientation, who)
+	horizontal = orientation == "h"
+	points = _stats_points(o.points, who)
+	jitter = _stats_number(o.jitter, who, "jitter", 0, 1)
+	pointpos = _stats_number(o.pointpos, who, "pointpos", -2, 2)
+	if kind === :box
+		boxmean = o.boxmean
+		(boxmean isa Bool || boxmean == "sd") || throw(ArgumentError(
+			"$(who): `boxmean` must be true, false or \"sd\"; got $(repr(boxmean)).",
+		))
+	else
+		_stats_choice(o.side, _STATS_VIOLIN_SIDES, who, "side")
+	end
+	if x === nothing
+		# y-only form: one distribution per series, positioned by its name;
+		# horizontal distributions put the samples on x.
+		value_name, position_name = "y", ""
+		values, positions = y, nothing
+	else
+		value_name, position_name = horizontal ? ("x", "y") : ("y", "x")
+		values, positions = horizontal ? (x, y) : (y, x)
+	end
+	value_list, position_list, nested =
+		_stats_series_lists(values, positions, who, value_name, position_name)
+	count = length(value_list)
+	colors = _stats_colors(o.color, count, who)
+	names = _stats_names(o.legend, count)
+	showlegends = _stats_showlegends(o.showlegend, count)
+	traces = Vector{GenericTrace}(undef, count)
+	for index in 1:count
+		series = value_list[index]
+		series_positions = position_list[index]
+		trace_x, trace_y = horizontal ? (series, series_positions) : (series_positions, series)
+		traces[index] = if kind === :box
+			_box_trace(;
+				x = trace_x,
+				y = trace_y,
+				color = colors[index],
+				name = names[index],
+				points = points,
+				orientation = orientation,
+				showlegend = showlegends[index],
+				boxmean = o.boxmean,
+				notched = o.notched,
+				jitter = jitter,
+				pointpos = pointpos,
+			)
+		else
+			_violin_trace(;
+				x = trace_x,
+				y = trace_y,
+				color = colors[index],
+				name = names[index],
+				points = points,
+				side = o.side,
+				orientation = orientation,
+				showlegend = showlegends[index],
+				box = o.box,
+				meanline = o.meanline,
+				jitter = jitter,
+				pointpos = pointpos,
+			)
+		end
+	end
+	# Several series side by side need group mode when they share positions:
+	# always with explicit positions, and in the y-only form when names collide.
+	mode_key = kind === :box ? :boxmode : :violinmode
+	group = nested && count > 1 && (
+		positions !== nothing ||
+		_stats_positions_collide(fig, names, String(kind), horizontal)
+	)
+	_stats_validate_options(fig, who, options)
+
+	append!(_plot_data(fig), traces)
+	group && _apply_nested_layout_mode!(fig, values, mode_key, "group")
+	_stats_apply_options!(fig, who, options; mutator = mutator)
+	return nothing
 end
 
 """
@@ -8473,560 +9467,568 @@ plot_stem(y::AbstractArray; kwargs...) =
 	plot_bar(x, y; kwargs...)
 	plot_bar(y; kwargs...)
 
-Bar plot of `y` over categories/positions `x` (defaults to `0:length(y)-1`).
-Pass a `Vector` of `Vector`s for `y` (and optionally `x`) to draw multiple
-grouped bar series.
+Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
+`show = true`.
 
-# Keyword Arguments
-- `xlabel`, `ylabel`: Axis labels (default `""`).
-- `xrange`, `yrange`: Axis ranges as `[min, max]`; `[0, 0]` keeps auto-scaling.
-- `width`, `height`: Figure size in pixels (`0` uses the default).
-- `color`: Bar color(s) — a string, or a vector for multiple series.
-- `legend`: Trace name(s) for the legend.
-- `title`: Figure title.
-- `grid`: Show grid lines (default `true`).
-- `fontsize`: Base font size (`0` uses the Plotly default).
-- `xscale`, `yscale`: `"log"` for a logarithmic axis.
-- `showlegend`: Force legend entry visibility (`Bool` or vector).
-- `show`: Open an Electron window immediately (returns a `SyncPlot`).
+#### Data
+- `plot_bar(x, y)`: plotly's convention, passed through as given. For vertical
+  bars (default) `x` holds the categories or positions and `y` the bar values.
+  For `orientation = "h"` the roles swap: `x` holds the values (bar lengths)
+  and `y` the categories, e.g. `plot_bar([3, 5, 2], ["a", "b", "c"];
+  orientation = "h")`.
+- `plot_bar(y)`: the values `y` at generated positions `0:length(y)-1`, which
+  go on the category axis (the y axis for `orientation = "h"`).
+- Multiple series: pass a vector of vectors for the values (and optionally one
+  position vector per series); a vector whose elements are all vectors (also
+  `Vector{Any}`) is multi-series. Every series must have as many values as
+  its positions. Bars of several series are grouped (plotly's default
+  `barmode`).
+- `AbstractVector` data: vectors, ranges, views. Complex values are an
+  `ArgumentError`.
 
-Returns a `PlotlyBase.Plot` (or a `SyncPlot` when `show=true`).
+#### Keyword Arguments
+- `color::Union{AbstractString,Symbol,AbstractVector} = ""`: bar colour, or one
+  colour per series (`""` uses the colour cycle).
+- `legend::Union{AbstractString,AbstractVector{<:AbstractString}} = ""`: trace
+  name(s) shown in the legend (mathtext labels allowed).
+- `showlegend::Union{Nothing,Bool,AbstractVector{Bool}} = nothing`: force the
+  legend entry on/off, per series when a vector.
+- `orientation::AbstractString = ""`: `"v"`/`""` vertical, `"h"` horizontal.
+- `barmode::AbstractString = ""`: layout bar mode `"group"`, `"stack"`,
+  `"overlay"` or `"relative"`; `""` leaves it unchanged (plotly: `"group"`).
+- `error_x`, `error_y = nothing`: error bars, a vector of non-negative
+  magnitudes (one per bar, shared by every series), a vector of such vectors
+  (one per series) or a `(minus, plus)` tuple of either form for asymmetric
+  bars. For horizontal bars the value errors are `error_x`. `NaN`/`missing`
+  leaves a bar without an error bar.
+- `text = nothing`: bar labels, a string for every bar, a vector with one
+  label (string or number) per bar, or a vector of such vectors (one per
+  series). Strings are drawn as plain text (plotly never typesets bar text:
+  `\$…\$` math becomes Unicode/HTML, no MathJax); `nothing`/`missing` entries
+  leave a bar unlabelled.
+- `textposition::AbstractString = ""`: `"inside"`, `"outside"`, `"auto"` or
+  `"none"` (`""` is plotly's `"auto"`).
+- `texttemplate::AbstractString = ""`: plotly text template, e.g.
+  `"%{y:.1f}"`, passed through verbatim.
+- `base = nothing`: where bars start on the value axis, a number or one number
+  per bar (per series as a vector of vectors).
+- Per-point keywords given as a vector of vectors (`error_x`, `error_y`,
+  `text`, `base`) follow the per-series rule of the other keywords: series
+  without an entry get none, surplus entries are ignored; each entry must have
+  one value per bar of its series.
+- `opacity::Union{Nothing,Real} = nothing`: trace opacity in [0, 1].
+- `hatch::Union{AbstractString,AbstractVector{<:AbstractString}} = ""`:
+  matplotlib hatch (`"/"`, `"\\\\"`, `"x"`, `"-"`, `"|"`, `"+"`, `"."`,
+  repeated for density, e.g. `"//"`), per series when a vector.
+- `xlabel`, `ylabel`, `title::AbstractString = ""`: axis titles and figure
+  title (mathtext labels allowed).
+- `xrange`, `yrange = [0, 0]`: axis range `[min, max]` or `(min, max)` in data
+  units (also on log axes); `[0, 0]` or `nothing` autoscales.
+- `xscale`, `yscale::AbstractString = ""`: axis type, e.g. `"log"` (log axes
+  get power-of-ten tick labels).
+- `xticks`, `yticks = nothing`: tick positions (data units); `xticklabels`,
+  `yticklabels = nothing`: one label per tick; `xtickformat`,
+  `ytickformat::AbstractString = ""`: d3 tick format, e.g. `".2f"`.
+- `width`, `height::Real = 0`: figure size in pixels (`0` = automatic).
+- `fontsize::Real = 0`: base font size in pixels (`0` = template default).
+- `grid::Union{Nothing,Bool,Symbol} = true`: `true` keeps the template grid;
+  `false`, `:none`, `:x`, `:y`, `:both` select the grid lines.
+- `show::Bool = false`: open the figure in an Electron window.
+
+#### Example
+```julia
+fig = plot_bar(["Q1", "Q2", "Q3"], [[10, 12, 9], [11, 14, 11]];
+	legend = ["2023", "2024"], error_y = [[1, 1, 2], [2, 1, 1]], text = [[10, 12, 9], [11, 14, 11]])
+plot_bar([3, 5, 2], ["a", "b", "c"]; orientation = "h", hatch = "//")
+```
 """
 function plot_bar(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	orientation::String = "",
-	barmode::String = "",
-	error_x::Union{Nothing, AbstractVector} = nothing,
-	error_y::Union{Nothing, AbstractVector} = nothing,
+	x::AbstractVector,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	orientation::AbstractString = "",
+	barmode::AbstractString = "",
+	error_x = nothing,
+	error_y = nothing,
+	text = nothing,
+	textposition::AbstractString = "",
+	texttemplate::AbstractString = "",
+	base = nothing,
+	opacity::Union{Nothing, Real} = nothing,
+	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	show::Bool = false,
 )
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		trace = Vector{GenericTrace}(undef, length(y))
-
-		if x_nested
-			for n in eachindex(y)
-				trace[n] = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
-			end
-		else
-			for n in eachindex(y)
-				trace[n] = _bar_trace(x = x, y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
-			end
-		end
-	else
-		trace = _bar_trace(
-			x = x,
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			orientation = orientation,
-		)
-	end
-
-	_apply_showlegend!(trace, showlegend)
-	_set_error_bars!(trace, error_x, error_y)
-
-	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	_apply_explicit_layout_mode!(fig, :barmode, barmode)
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stats_bar!(
+		fig,
+		x,
+		y,
+		"plot_bar",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, orientation, barmode, error_x, error_y, text,
+			textposition, texttemplate, base, opacity, hatch);
+		mutator = false,
 	)
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	return _stats_maybe_show(fig, show, width, height, title)
 end
 
 function plot_bar(
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	orientation::String = "",
-	barmode::String = "",
-	error_x::Union{Nothing, AbstractVector} = nothing,
-	error_y::Union{Nothing, AbstractVector} = nothing,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	orientation::AbstractString = "",
+	barmode::AbstractString = "",
+	error_x = nothing,
+	error_y = nothing,
+	text = nothing,
+	textposition::AbstractString = "",
+	texttemplate::AbstractString = "",
+	base = nothing,
+	opacity::Union{Nothing, Real} = nothing,
+	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	show::Bool = false,
 )
-	x = _auto_xvalues(y)
-	return plot_bar(
-		x,
-		y;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		color = color,
-		legend = legend,
-		title = title,
-		fontsize = fontsize,
-		grid = grid,
-		xscale = xscale,
-		yscale = yscale,
-		showlegend = showlegend,
-		orientation = orientation,
-		barmode = barmode,
-		error_x = error_x,
-		error_y = error_y,
-		show = show,
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stats_bar!(
+		fig,
+		nothing,
+		y,
+		"plot_bar",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, orientation, barmode, error_x, error_y, text,
+			textposition, texttemplate, base, opacity, hatch);
+		mutator = false,
 	)
+	return _stats_maybe_show(fig, show, width, height, title)
 end
 
 """
 	plot_histogram(x; kwargs...)
 
-Histogram of the samples in `x`. Pass a `Vector` of `Vector`s for `x` to overlay
-multiple histogram series.
+Histogram of the samples `x`. Returns a `PlotlyBase.Plot`, or a
+[`SyncPlot`](@ref) window when `show = true`.
 
-# Keyword Arguments
-- `nbinsx`: Target number of bins (`0` lets Plotly choose).
-- `histnorm`: Normalization — `""`, `"percent"`, `"probability"`, `"density"`, or `"probability density"`.
-- `xlabel`, `ylabel`: Axis labels.
-- `xrange`, `yrange`: Axis ranges as `[min, max]`; `[0, 0]` keeps auto-scaling.
-- `width`, `height`: Figure size in pixels.
-- `color`: Bar color(s).
-- `legend`: Trace name(s).
-- `title`: Figure title.
-- `grid`: Show grid lines (default `true`).
-- `fontsize`: Base font size.
-- `xscale`, `yscale`: `"log"` for a logarithmic axis.
-- `showlegend`: Force legend entry visibility.
-- `show`: Open an Electron window immediately (returns a `SyncPlot`).
+#### Data
+- `x::AbstractVector`: the samples (vector, range or view; complex values are
+  an `ArgumentError`). With `orientation = "h"` the samples are binned along
+  the y axis and the bars grow along x.
+- Multiple series: a vector of vectors (also `Vector{Any}`). The series of one
+  call share their bins (`bingroup`). They are overlaid: each trace gets
+  opacity 0.6 (unless `opacity` is given) and one shared `offsetgroup`, and the
+  layout `barmode` becomes `"overlay"` unless the figure already has a bar
+  mode. With `barmode = "stack"`/`"group"`/`"relative"` (passed or already set
+  on the figure) they are stacked or grouped on the shared bins instead.
+- Log binning axis (`xscale = "log"`, `yscale = "log"` with
+  `orientation = "h"`, or a mutator target whose binning axis is already
+  logarithmic): plotly.js cannot bin there (it draws nothing), so the samples
+  are counted in Julia (numeric data only) and drawn as `bar` traces spanning
+  the bins. Automatic bins have equal width in decades (chosen like plotly's
+  automatic bins, over log10 of the data, shared by the series of one call);
+  explicit `bins` are in data units and must start above 0. Non-positive
+  samples, which a log axis cannot show, are dropped. `histnorm` and
+  `cumulative` behave as in plotly (densities divide by each bin's width in
+  data units); in group mode the series of one call share each bin side by
+  side.
 
-Returns a `PlotlyBase.Plot` (or a `SyncPlot` when `show=true`).
+#### Keyword Arguments
+- `nbinsx::Integer = 0`: approximate number of bins (`0` = automatic). It is
+  neither exact nor a strict maximum: plotly rounds the bin width (data range
+  / `nbinsx`) to a "nice" value and aligns the edges to round numbers, so the
+  drawn count differs (measured with plotly.js 2.35: 31 bins for
+  `nbinsx = 30` on `randn(500)`, 20 on `rand(500)`). Use `bins` for exact
+  bins. With `orientation = "h"` it applies to the bins along y.
+- `bins = nothing`: explicit bins `(start, stop, width)` in data units, e.g.
+  `(0, 10, 0.5)`; mutually exclusive with `nbinsx`.
+- `histnorm::AbstractString = ""`: `""` (counts), `"percent"`,
+  `"probability"`, `"density"` or `"probability density"`.
+- `cumulative::Bool = false`: cumulative histogram.
+- `orientation::AbstractString = ""`: `"v"`/`""` vertical, `"h"` horizontal.
+- `barmode::AbstractString = ""`: layout bar mode (see above); `""` keeps the
+  automatic choice.
+- `opacity::Union{Nothing,Real} = nothing`: trace opacity in [0, 1].
+- `hatch::Union{AbstractString,AbstractVector{<:AbstractString}} = ""`:
+  matplotlib hatch per series (see [`plot_bar`](@ref)).
+- `color::Union{AbstractString,Symbol,AbstractVector} = ""`, `legend = ""`,
+  `showlegend = nothing`: per-series colour, name and legend visibility as in
+  [`plot_bar`](@ref).
+- `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
+  `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
+  `ytickformat`, `width`, `height`, `fontsize`, `grid = true`, `show = false`:
+  as in [`plot_bar`](@ref).
+
+#### Example
+```julia
+a, b = randn(500), randn(500) .+ 1
+fig = plot_histogram([a, b]; bins = (-4, 5, 0.25), legend = ["a", "b"])
+plot_histogram([a, b]; barmode = "stack", nbinsx = 30, hatch = ["", "//"])
+plot_histogram(a; cumulative = true, histnorm = "probability")
+```
 """
 function plot_histogram(
-	x::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	nbinsx::Int = 0,
-	histnorm::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	x::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	nbinsx::Integer = 0,
+	bins = nothing,
+	histnorm::AbstractString = "",
+	cumulative::Bool = false,
+	orientation::AbstractString = "",
+	barmode::AbstractString = "",
+	opacity::Union{Nothing, Real} = nothing,
+	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	show::Bool = false,
 )
-	if _is_nested_series(x)
-		colorV = _string_kwarg_vector(color, length(x))
-		legendV = _string_kwarg_vector(legend, length(x))
-		trace = Vector{GenericTrace}(undef, length(x))
-		for n in eachindex(x)
-			trace[n] = _histogram_trace(
-				x = x[n],
-				nbinsx = nbinsx,
-				histnorm = histnorm,
-				color = colorV[n],
-				name = legendV[n],
-			)
-		end
-	else
-		trace = _histogram_trace(
-			x = x,
-			nbinsx = nbinsx,
-			histnorm = histnorm,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-		)
-	end
-
-	_apply_showlegend!(trace, showlegend)
-
-	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	_apply_nested_layout_mode!(fig, x, :barmode, "overlay")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stats_histogram!(
+		fig,
+		x,
+		"plot_histogram",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, nbinsx, bins, histnorm, cumulative,
+			orientation, barmode, opacity, hatch);
+		mutator = false,
 	)
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	return _stats_maybe_show(fig, show, width, height, title)
 end
 
 """
 	plot_box(x, y; kwargs...)
 	plot_box(y; kwargs...)
 
-Box plot of the distribution(s) in `y`, optionally grouped by `x`. Pass a
-`Vector` of `Vector`s for `y` to draw several boxes side-by-side (`boxmode="group"`).
+Box plot. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
+`show = true`.
 
-# Keyword Arguments
-- `points`: Outlier/point display — `"all"`, `"outliers"`, `"suspectedoutliers"`, or `false` (`true` is treated as `"all"`).
-- `xlabel`, `ylabel`: Axis labels.
-- `xrange`, `yrange`: Axis ranges as `[min, max]`; `[0, 0]` keeps auto-scaling.
-- `width`, `height`: Figure size in pixels.
-- `color`: Box color(s).
-- `legend`: Trace name(s).
-- `title`: Figure title.
-- `grid`: Show grid lines (default `true`).
-- `fontsize`: Base font size.
-- `xscale`, `yscale`: `"log"` for a logarithmic axis.
-- `showlegend`: Force legend entry visibility.
-- `show`: Open an Electron window immediately (returns a `SyncPlot`).
+#### Data
+- `plot_box(y)`: one box of the samples `y`, placed at its `legend` name. A
+  vector of vectors (also `Vector{Any}`) draws one box per series; distinctly
+  named series each sit centred on their own name, while unnamed or
+  duplicate-named series are placed side by side (`boxmode = "group"`).
+- `plot_box(x, y)`: plotly's convention, passed through. For vertical boxes
+  `x` gives the group (category) of every sample in `y` (same length), so
+  `plot_box(["a", "a", "b", "b"], [1.0, 2.0, 3.0, 4.0])` draws boxes "a" and
+  "b". Several `y` series (vector of vectors, sharing `x` or with one `x` per
+  series) are grouped side by side (`boxmode = "group"`). For
+  `orientation = "h"` the roles swap: `x` holds the samples and `y` the groups.
+- An existing `boxmode` on the figure is never overwritten.
 
-Returns a `PlotlyBase.Plot` (or a `SyncPlot` when `show=true`).
+#### Keyword Arguments
+- `points::Union{Bool,AbstractString} = "outliers"`: sample points drawn next
+  to the box: `"all"` (or `true`), `"outliers"`, `"suspectedoutliers"`, or
+  `false`.
+- `orientation::AbstractString = ""`: `"v"`/`""` vertical, `"h"` horizontal
+  (the y-only form then puts the samples on x).
+- `boxmean::Union{Bool,AbstractString} = false`: `true` draws the mean as a
+  dashed line, `"sd"` also the standard deviation.
+- `notched::Bool = false`: notched boxes (median confidence interval).
+- `jitter::Union{Nothing,Real} = nothing`: horizontal spread of the drawn
+  points in [0, 1].
+- `pointpos::Union{Nothing,Real} = nothing`: offset of the points relative to
+  the box in [-2, 2] (0 = centred on the box).
+- `color::Union{AbstractString,Symbol,AbstractVector} = ""`, `legend = ""`,
+  `showlegend = nothing`: per-series colour, name and legend visibility as in
+  [`plot_bar`](@ref).
+- `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
+  `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
+  `ytickformat`, `width`, `height`, `fontsize`, `grid = true`, `show = false`:
+  as in [`plot_bar`](@ref).
+
+#### Example
+```julia
+fig = plot_box([randn(100), randn(100) .+ 1]; legend = ["control", "drug"], boxmean = true)
+plot_box(repeat(["a", "b"], 50), randn(100); points = "all", jitter = 0.3, pointpos = -1.8)
+```
 """
 function plot_box(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	points::Union{Bool, String} = "outliers",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	x::AbstractVector,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	points::Union{Bool, AbstractString} = "outliers",
+	orientation::AbstractString = "",
+	boxmean::Union{Bool, AbstractString} = false,
+	notched::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
 	show::Bool = false,
 )
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		trace = Vector{GenericTrace}(undef, length(y))
-
-		if x_nested
-			for n in eachindex(y)
-				trace[n] = _box_trace(
-					x = x[n],
-					y = y[n],
-					color = colorV[n],
-					name = legendV[n],
-					points = points,
-				)
-			end
-		else
-			for n in eachindex(y)
-				trace[n] = _box_trace(
-					x = x,
-					y = y[n],
-					color = colorV[n],
-					name = legendV[n],
-					points = points,
-				)
-			end
-		end
-	else
-		trace = _box_trace(
-			x = x,
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			points = points,
-		)
-	end
-
-	_apply_showlegend!(trace, showlegend)
-
-	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	_apply_nested_layout_mode!(fig, y, :boxmode, "group")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stats_distribution!(
+		fig,
+		x,
+		y,
+		"plot_box",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, points, orientation, boxmean, notched, jitter,
+			pointpos);
+		kind = :box,
+		mutator = false,
 	)
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	return _stats_maybe_show(fig, show, width, height, title)
 end
 
 function plot_box(
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	points::Union{Bool, String} = "outliers",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	points::Union{Bool, AbstractString} = "outliers",
+	orientation::AbstractString = "",
+	boxmean::Union{Bool, AbstractString} = false,
+	notched::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
 	show::Bool = false,
 )
-	if _is_nested_series(y)
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		trace = Vector{GenericTrace}(undef, length(y))
-		for n in eachindex(y)
-			trace[n] = _box_trace(
-				y = y[n],
-				color = colorV[n],
-				name = legendV[n],
-				points = points,
-			)
-		end
-	else
-		trace = _box_trace(
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			points = points,
-		)
-	end
-
-	_apply_showlegend!(trace, showlegend)
-
-	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	_apply_nested_layout_mode!(fig, y, :boxmode, "group")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stats_distribution!(
+		fig,
+		nothing,
+		y,
+		"plot_box",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, points, orientation, boxmean, notched, jitter,
+			pointpos);
+		kind = :box,
+		mutator = false,
 	)
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	return _stats_maybe_show(fig, show, width, height, title)
 end
 
 """
 	plot_violin(x, y; kwargs...)
 	plot_violin(y; kwargs...)
 
-Violin plot of the distribution(s) in `y`, optionally grouped by `x`. Pass a
-`Vector` of `Vector`s for `y` to draw several violins side-by-side (`violinmode="group"`).
+Violin plot (kernel density of the samples). Returns a `PlotlyBase.Plot`, or a
+[`SyncPlot`](@ref) window when `show = true`.
 
-# Keyword Arguments
-- `points`: Point display — `"all"`, `"outliers"`, `"suspectedoutliers"`, or `false` (`true` is treated as `"all"`).
-- `side`: Violin side — `"both"`, `"positive"`, or `"negative"`.
-- `xlabel`, `ylabel`: Axis labels.
-- `xrange`, `yrange`: Axis ranges as `[min, max]`; `[0, 0]` keeps auto-scaling.
-- `width`, `height`: Figure size in pixels.
-- `color`: Violin color(s).
-- `legend`: Trace name(s).
-- `title`: Figure title.
-- `grid`: Show grid lines (default `true`).
-- `fontsize`: Base font size.
-- `xscale`, `yscale`: `"log"` for a logarithmic axis.
-- `showlegend`: Force legend entry visibility.
-- `show`: Open an Electron window immediately (returns a `SyncPlot`).
+#### Data
+Same conventions as [`plot_box`](@ref): `plot_violin(y)` places each series at
+its `legend` name (unnamed or duplicate-named series side by side with
+`violinmode = "group"`); `plot_violin(x, y)` passes `x` (the group of every
+sample) and `y` (the samples) through, swapped for `orientation = "h"`, and
+groups several series side by side. An existing `violinmode` is never
+overwritten.
 
-Returns a `PlotlyBase.Plot` (or a `SyncPlot` when `show=true`).
+#### Keyword Arguments
+- `points::Union{Bool,AbstractString} = "outliers"`: `"all"` (or `true`),
+  `"outliers"`, `"suspectedoutliers"` or `false`.
+- `side::AbstractString = "both"`: `"both"`, `"positive"` or `"negative"`
+  (half violins).
+- `orientation::AbstractString = ""`: `"v"`/`""` vertical, `"h"` horizontal.
+- `box::Bool = false`: draw a mini box plot inside the violin.
+- `meanline::Bool = false`: draw the sample mean as a line.
+- `jitter::Union{Nothing,Real} = nothing` in [0, 1] and
+  `pointpos::Union{Nothing,Real} = nothing` in [-2, 2]: spread and offset of
+  the drawn points.
+- `color::Union{AbstractString,Symbol,AbstractVector} = ""`, `legend = ""`,
+  `showlegend = nothing`: per-series colour, name and legend visibility as in
+  [`plot_bar`](@ref).
+- `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
+  `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
+  `ytickformat`, `width`, `height`, `fontsize`, `grid = true`, `show = false`:
+  as in [`plot_bar`](@ref).
+
+#### Example
+```julia
+fig = plot_violin([randn(200), randn(200) .+ 1]; legend = ["a", "b"], box = true, meanline = true)
+plot_violin(randn(200); orientation = "h", side = "positive", points = false)
+```
 """
 function plot_violin(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	points::Union{Bool, String} = "outliers",
-	side::String = "both",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	x::AbstractVector,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	points::Union{Bool, AbstractString} = "outliers",
+	side::AbstractString = "both",
+	orientation::AbstractString = "",
+	box::Bool = false,
+	meanline::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
 	show::Bool = false,
 )
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		trace = Vector{GenericTrace}(undef, length(y))
-
-		if x_nested
-			for n in eachindex(y)
-				trace[n] = _violin_trace(
-					x = x[n],
-					y = y[n],
-					color = colorV[n],
-					name = legendV[n],
-					points = points,
-					side = side,
-				)
-			end
-		else
-			for n in eachindex(y)
-				trace[n] = _violin_trace(
-					x = x,
-					y = y[n],
-					color = colorV[n],
-					name = legendV[n],
-					points = points,
-					side = side,
-				)
-			end
-		end
-	else
-		trace = _violin_trace(
-			x = x,
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			points = points,
-			side = side,
-		)
-	end
-
-	_apply_showlegend!(trace, showlegend)
-
-	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	_apply_nested_layout_mode!(fig, y, :violinmode, "group")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stats_distribution!(
+		fig,
+		x,
+		y,
+		"plot_violin",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, points, side, orientation, box, meanline,
+			jitter, pointpos);
+		kind = :violin,
+		mutator = false,
 	)
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	return _stats_maybe_show(fig, show, width, height, title)
 end
 
 function plot_violin(
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	points::Union{Bool, String} = "outliers",
-	side::String = "both",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	points::Union{Bool, AbstractString} = "outliers",
+	side::AbstractString = "both",
+	orientation::AbstractString = "",
+	box::Bool = false,
+	meanline::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
 	show::Bool = false,
 )
-	if _is_nested_series(y)
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		trace = Vector{GenericTrace}(undef, length(y))
-		for n in eachindex(y)
-			trace[n] = _violin_trace(
-				y = y[n],
-				color = colorV[n],
-				name = legendV[n],
-				points = points,
-				side = side,
-			)
-		end
-	else
-		trace = _violin_trace(
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			points = points,
-			side = side,
-		)
-	end
-
-	_apply_showlegend!(trace, showlegend)
-
-	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	_apply_nested_layout_mode!(fig, y, :violinmode, "group")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stats_distribution!(
+		fig,
+		nothing,
+		y,
+		"plot_violin",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, points, side, orientation, box, meanline,
+			jitter, pointpos);
+		kind = :violin,
+		mutator = false,
 	)
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	return _stats_maybe_show(fig, show, width, height, title)
 end
 
 const _POLAR_DIRECTIONS = ("counterclockwise", "clockwise")
@@ -10725,224 +11727,203 @@ plot_stem!(fig, y::AbstractArray; kwargs...) =
 	plot_bar!(fig, x, y; kwargs...)
 	plot_bar!(fig, y; kwargs...)
 
-Append bar trace(s) to an existing figure (`Plot`, [`SyncPlot`](@ref), or
-[`SubplotFigure`](@ref)). When `x` is omitted it defaults to `0:length(y)-1`.
-Pass a `Vector` of `Vector`s for `y` (and optionally `x`) to append multiple
-bar series at once.
+Append bar trace(s) to `fig`: a `Plot`, a [`SyncPlot`](@ref) or a
+[`SubplotFigure`](@ref) cell. Data conventions and keywords are those of
+[`plot_bar`](@ref) (including `orientation`, `barmode`, `error_x`/`error_y`,
+`text`, `textposition`, `texttemplate`, `base`, `opacity`, `hatch` and the
+tick keywords), with these differences:
+- `grid::Union{Nothing,Bool,Symbol} = nothing` leaves the grid unchanged; any
+  other value (also `true`) is applied.
+- `show` is not accepted (`ArgumentError`); display the figure instead.
+- On a `SubplotFigure`, `row`/`col` select the cell (default: the current
+  cell) and `secondary_y = true` targets the cell's secondary y axis; the
+  axis keywords apply to that cell's axes. `title`, `width` and `height` are
+  figure-wide and are ignored there with a warning, and `barmode` (a single
+  figure-wide plotly setting) applies to every cell.
 
-# Keyword Arguments
-- `color`: Bar color(s) — a string, or a vector for multiple series.
-- `legend`: Trace name(s) for the legend.
-- `orientation`: `"v"` (default) or `"h"` for horizontal bars.
-- `barmode`: Layout bar mode such as `"group"` or `"stack"`.
-- `error_x`, `error_y`: Error-bar magnitudes applied to the appended trace(s).
-- `xlabel`, `ylabel`, `xrange`, `yrange`, `width`, `height`, `title`,
-  `fontsize`, `grid`, `xscale`, `yscale`, `showlegend`: same as [`plot_bar`](@ref).
+Every keyword is validated before the figure changes. Returns `nothing` for a
+`Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
+
+#### Example
+```julia
+fig = plot_bar(["a", "b"], [1, 2]; legend = "2023")
+plot_bar!(fig, ["a", "b"], [2, 3]; legend = "2024", text = [2, 3])
+```
 """
 function plot_bar!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	orientation::String = "",
-	barmode::String = "",
-	error_x::Union{Nothing, AbstractVector} = nothing,
-	error_y::Union{Nothing, AbstractVector} = nothing,
+	x::AbstractVector,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	orientation::AbstractString = "",
+	barmode::AbstractString = "",
+	error_x = nothing,
+	error_y = nothing,
+	text = nothing,
+	textposition::AbstractString = "",
+	texttemplate::AbstractString = "",
+	base = nothing,
+	opacity::Union{Nothing, Real} = nothing,
+	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	kwargs...,
 )
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	_n0 = length(_plot_data(fig))
-	if y_nested
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-
-		showlegendV = _string_kwarg_vector("", length(y))
-		if x_nested
-			for n in eachindex(y)
-				t = _bar_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
-				showlegend isa Bool && (t.showlegend = showlegend)
-				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-				push!(_plot_data(fig), t)
-			end
-		else
-			for n in eachindex(y)
-				t = _bar_trace(x = x, y = y[n], color = colorV[n], name = legendV[n], orientation = orientation)
-				showlegend isa Bool && (t.showlegend = showlegend)
-				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-				push!(_plot_data(fig), t)
-			end
-		end
-	else
-		t = _bar_trace(
-			x = x,
-			y = y,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-			orientation = orientation,
-		)
-		showlegend isa Bool && (t.showlegend = showlegend)
-		push!(_plot_data(fig), t)
-	end
-
-	_set_error_bars!(view(_plot_data(fig), (_n0 + 1):length(_plot_data(fig))), error_x, error_y)
-	_apply_explicit_layout_mode!(fig, :barmode, barmode)
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
-		refresh = true,
-		apply_template = false,
+	_stats_reject_keywords("plot_bar!", kwargs)
+	_stats_bar!(
+		fig,
+		x,
+		y,
+		"plot_bar!",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, orientation, barmode, error_x, error_y, text,
+			textposition, texttemplate, base, opacity, hatch);
+		mutator = true,
 	)
 	return nothing
 end
 
 function plot_bar!(
 	fig,
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	orientation::String = "",
-	barmode::String = "",
-	error_x::Union{Nothing, AbstractVector} = nothing,
-	error_y::Union{Nothing, AbstractVector} = nothing,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	orientation::AbstractString = "",
+	barmode::AbstractString = "",
+	error_x = nothing,
+	error_y = nothing,
+	text = nothing,
+	textposition::AbstractString = "",
+	texttemplate::AbstractString = "",
+	base = nothing,
+	opacity::Union{Nothing, Real} = nothing,
+	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	kwargs...,
 )
-	x = _auto_xvalues(y)
-	return plot_bar!(
+	_stats_reject_keywords("plot_bar!", kwargs)
+	_stats_bar!(
 		fig,
-		x,
-		y;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		color = color,
-		legend = legend,
-		title = title,
-		fontsize = fontsize,
-		grid = grid,
-		xscale = xscale,
-		yscale = yscale,
-		showlegend = showlegend,
-		orientation = orientation,
-		barmode = barmode,
-		error_x = error_x,
-		error_y = error_y,
+		nothing,
+		y,
+		"plot_bar!",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, orientation, barmode, error_x, error_y, text,
+			textposition, texttemplate, base, opacity, hatch);
+		mutator = true,
 	)
+	return nothing
 end
 
 """
 	plot_histogram!(fig, x; kwargs...)
 
-Append histogram trace(s) of the samples in `x` to an existing figure (`Plot`,
-[`SyncPlot`](@ref), or [`SubplotFigure`](@ref)). Pass a `Vector` of `Vector`s
-for `x` to overlay multiple series (`barmode` is set to `"overlay"` for nested
-input).
+Append histogram trace(s) of the samples `x` to `fig`: a `Plot`, a
+[`SyncPlot`](@ref) or a [`SubplotFigure`](@ref) cell. Data conventions and
+keywords are those of [`plot_histogram`](@ref) (`nbinsx` is an approximate
+bin count; `bins`, `histnorm`, `cumulative`, `orientation`, `barmode`, `opacity`,
+`hatch`, tick keywords). The series of ONE call share bins and overlay as
+described there; separate calls are binned separately, and appending single
+series one call at a time gives plotly's layout for the figure's `barmode`
+(grouped by default). Differences from the constructor:
+- `grid::Union{Nothing,Bool,Symbol} = nothing` leaves the grid unchanged; any
+  other value (also `true`) is applied.
+- `show` is not accepted (`ArgumentError`).
+- On a `SubplotFigure`, `row`/`col` select the cell (default: the current
+  cell) and `secondary_y = true` targets its secondary y axis; `title`,
+  `width` and `height` are figure-wide and ignored there with a warning.
 
-# Keyword Arguments
-- `nbinsx`: Target number of bins (`0` lets Plotly choose).
-- `histnorm`: Normalization — `""`, `"percent"`, `"probability"`, `"density"`, or `"probability density"`.
-- `color`, `legend`, `title`, `xlabel`, `ylabel`, `xrange`, `yrange`, `width`,
-  `height`, `grid`, `fontsize`, `xscale`, `yscale`, `showlegend`: same as
-  [`plot_histogram`](@ref).
+Every keyword is validated before the figure changes. Returns `nothing` for a
+`Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
+
+#### Example
+```julia
+fig = plot_histogram(randn(500); legend = "reference")
+plot_histogram!(fig, [randn(500) .+ 1, randn(500) .- 1]; bins = (-5, 5, 0.25))
+```
 """
 function plot_histogram!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	nbinsx::Int = 0,
-	histnorm::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	x::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	nbinsx::Integer = 0,
+	bins = nothing,
+	histnorm::AbstractString = "",
+	cumulative::Bool = false,
+	orientation::AbstractString = "",
+	barmode::AbstractString = "",
+	opacity::Union{Nothing, Real} = nothing,
+	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	kwargs...,
 )
-	if _is_nested_series(x)
-		colorV = _string_kwarg_vector(color, length(x))
-		legendV = _string_kwarg_vector(legend, length(x))
-		for n in eachindex(x)
-			t = _histogram_trace(
-				x = x[n],
-				nbinsx = nbinsx,
-				histnorm = histnorm,
-				color = colorV[n],
-				name = legendV[n],
-			)
-			showlegend isa Bool && (t.showlegend = showlegend)
-			showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-			push!(_plot_data(fig), t)
-		end
-	else
-		t = _histogram_trace(
-			x = x,
-			nbinsx = nbinsx,
-			histnorm = histnorm,
-			color = _first_or_empty(color),
-			name = _first_or_empty(legend),
-		)
-		showlegend isa Bool && (t.showlegend = showlegend)
-		push!(_plot_data(fig), t)
-	end
-
-	_apply_nested_layout_mode!(fig, x, :barmode, "overlay")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
-		refresh = true,
-		apply_template = false,
+	_stats_reject_keywords("plot_histogram!", kwargs)
+	_stats_histogram!(
+		fig,
+		x,
+		"plot_histogram!",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, nbinsx, bins, histnorm, cumulative,
+			orientation, barmode, opacity, hatch);
+		mutator = true,
 	)
 	return nothing
 end
@@ -10951,132 +11932,122 @@ end
 	plot_box!(fig, x, y; kwargs...)
 	plot_box!(fig, y; kwargs...)
 
-Append box trace(s) of the distribution(s) in `y`, optionally grouped by `x`,
-to an existing figure (`Plot`, [`SyncPlot`](@ref), or [`SubplotFigure`](@ref)).
-Pass a `Vector` of `Vector`s for `y` to append several boxes at once
-(`boxmode="group"`).
+Append box trace(s) to `fig`: a `Plot`, a [`SyncPlot`](@ref) or a
+[`SubplotFigure`](@ref) cell. Data conventions and keywords are those of
+[`plot_box`](@ref) (`points`, `orientation`, `boxmean`, `notched`, `jitter`,
+`pointpos`, tick keywords). In the y-only form, group mode is chosen when the
+new series' names are blank or repeated, or repeat the name of a box already
+in the figure that has no explicit positions. Differences from the
+constructor:
+- `grid::Union{Nothing,Bool,Symbol} = nothing` leaves the grid unchanged; any
+  other value (also `true`) is applied.
+- `show` is not accepted (`ArgumentError`).
+- On a `SubplotFigure`, `row`/`col` select the cell (default: the current
+  cell) and `secondary_y = true` targets its secondary y axis; `title`,
+  `width` and `height` are figure-wide and ignored there with a warning.
 
-# Keyword Arguments
-- `points`: Outlier/point display — `"all"`, `"outliers"`, `"suspectedoutliers"`, or `false`.
-- `color`, `legend`, `title`, `xlabel`, `ylabel`, `xrange`, `yrange`, `width`,
-  `height`, `grid`, `fontsize`, `xscale`, `yscale`, `showlegend`: same as
-  [`plot_box`](@ref).
+Every keyword is validated before the figure changes. Returns `nothing` for a
+`Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
+
+#### Example
+```julia
+fig = plot_box(randn(100); legend = "control")
+plot_box!(fig, randn(100) .+ 1; legend = "drug", boxmean = "sd")
+```
 """
 function plot_box!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	points::Union{Bool, String} = "outliers",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	x::AbstractVector,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	points::Union{Bool, AbstractString} = "outliers",
+	orientation::AbstractString = "",
+	boxmean::Union{Bool, AbstractString} = false,
+	notched::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
+	kwargs...,
 )
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		if x_nested
-			for n in eachindex(y)
-				t = _box_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], points = points)
-				showlegend isa Bool && (t.showlegend = showlegend)
-				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-				push!(_plot_data(fig), t)
-			end
-		else
-			for n in eachindex(y)
-				t = _box_trace(x = x, y = y[n], color = colorV[n], name = legendV[n], points = points)
-				showlegend isa Bool && (t.showlegend = showlegend)
-				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-				push!(_plot_data(fig), t)
-			end
-		end
-	else
-		t = _box_trace(x = x, y = y, color = _first_or_empty(color), name = _first_or_empty(legend), points = points)
-		showlegend isa Bool && (t.showlegend = showlegend)
-		push!(_plot_data(fig), t)
-	end
-
-	_apply_nested_layout_mode!(fig, y, :boxmode, "group")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
-		refresh = true,
-		apply_template = false,
+	_stats_reject_keywords("plot_box!", kwargs)
+	_stats_distribution!(
+		fig,
+		x,
+		y,
+		"plot_box!",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, points, orientation, boxmean, notched, jitter,
+			pointpos);
+		kind = :box,
+		mutator = true,
 	)
 	return nothing
 end
 
 function plot_box!(
 	fig,
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	points::Union{Bool, String} = "outliers",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	points::Union{Bool, AbstractString} = "outliers",
+	orientation::AbstractString = "",
+	boxmean::Union{Bool, AbstractString} = false,
+	notched::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
+	kwargs...,
 )
-	if _is_nested_series(y)
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		for n in eachindex(y)
-			t = _box_trace(y = y[n], color = colorV[n], name = legendV[n], points = points)
-			showlegend isa Bool && (t.showlegend = showlegend)
-			showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-			push!(_plot_data(fig), t)
-		end
-	else
-		t = _box_trace(y = y, color = _first_or_empty(color), name = _first_or_empty(legend), points = points)
-		showlegend isa Bool && (t.showlegend = showlegend)
-		push!(_plot_data(fig), t)
-	end
-
-	_apply_nested_layout_mode!(fig, y, :boxmode, "group")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
-		refresh = true,
-		apply_template = false,
+	_stats_reject_keywords("plot_box!", kwargs)
+	_stats_distribution!(
+		fig,
+		nothing,
+		y,
+		"plot_box!",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, points, orientation, boxmean, notched, jitter,
+			pointpos);
+		kind = :box,
+		mutator = true,
 	)
 	return nothing
 end
@@ -11085,135 +12056,122 @@ end
 	plot_violin!(fig, x, y; kwargs...)
 	plot_violin!(fig, y; kwargs...)
 
-Append violin trace(s) of the distribution(s) in `y`, optionally grouped by
-`x`, to an existing figure (`Plot`, [`SyncPlot`](@ref), or
-[`SubplotFigure`](@ref)). Pass a `Vector` of `Vector`s for `y` to append
-several violins at once (`violinmode="group"`).
+Append violin trace(s) to `fig`: a `Plot`, a [`SyncPlot`](@ref) or a
+[`SubplotFigure`](@ref) cell. Data conventions and keywords are those of
+[`plot_violin`](@ref) (`points`, `side`, `orientation`, `box`, `meanline`,
+`jitter`, `pointpos`, tick keywords); group mode is chosen as for
+[`plot_box!`](@ref). Differences from the constructor:
+- `grid::Union{Nothing,Bool,Symbol} = nothing` leaves the grid unchanged; any
+  other value (also `true`) is applied.
+- `show` is not accepted (`ArgumentError`).
+- On a `SubplotFigure`, `row`/`col` select the cell (default: the current
+  cell) and `secondary_y = true` targets its secondary y axis; `title`,
+  `width` and `height` are figure-wide and ignored there with a warning.
 
-# Keyword Arguments
-- `points`: Point display — `"all"`, `"outliers"`, `"suspectedoutliers"`, or `false`.
-- `side`: Violin side — `"both"`, `"positive"`, or `"negative"`.
-- `color`, `legend`, `title`, `xlabel`, `ylabel`, `xrange`, `yrange`, `width`,
-  `height`, `grid`, `fontsize`, `xscale`, `yscale`, `showlegend`: same as
-  [`plot_violin`](@ref).
+Every keyword is validated before the figure changes. Returns `nothing` for a
+`Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
+
+#### Example
+```julia
+fig = plot_violin(randn(200); legend = "a")
+plot_violin!(fig, randn(200) .+ 1; legend = "b", box = true, meanline = true)
+```
 """
 function plot_violin!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	points::Union{Bool, String} = "outliers",
-	side::String = "both",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	x::AbstractVector,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	points::Union{Bool, AbstractString} = "outliers",
+	side::AbstractString = "both",
+	orientation::AbstractString = "",
+	box::Bool = false,
+	meanline::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
+	kwargs...,
 )
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		if x_nested
-			for n in eachindex(y)
-				t = _violin_trace(x = x[n], y = y[n], color = colorV[n], name = legendV[n], points = points, side = side)
-				showlegend isa Bool && (t.showlegend = showlegend)
-				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-				push!(_plot_data(fig), t)
-			end
-		else
-			for n in eachindex(y)
-				t = _violin_trace(x = x, y = y[n], color = colorV[n], name = legendV[n], points = points, side = side)
-				showlegend isa Bool && (t.showlegend = showlegend)
-				showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-				push!(_plot_data(fig), t)
-			end
-		end
-	else
-		t = _violin_trace(x = x, y = y, color = _first_or_empty(color), name = _first_or_empty(legend), points = points, side = side)
-		showlegend isa Bool && (t.showlegend = showlegend)
-		push!(_plot_data(fig), t)
-	end
-
-	_apply_nested_layout_mode!(fig, y, :violinmode, "group")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
-		refresh = true,
-		apply_template = false,
+	_stats_reject_keywords("plot_violin!", kwargs)
+	_stats_distribution!(
+		fig,
+		x,
+		y,
+		"plot_violin!",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, points, side, orientation, box, meanline,
+			jitter, pointpos);
+		kind = :violin,
+		mutator = true,
 	)
 	return nothing
 end
 
 function plot_violin!(
 	fig,
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	points::Union{Bool, String} = "outliers",
-	side::String = "both",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
+	points::Union{Bool, AbstractString} = "outliers",
+	side::AbstractString = "both",
+	orientation::AbstractString = "",
+	box::Bool = false,
+	meanline::Bool = false,
+	jitter::Union{Nothing, Real} = nothing,
+	pointpos::Union{Nothing, Real} = nothing,
+	kwargs...,
 )
-	if _is_nested_series(y)
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		for n in eachindex(y)
-			t = _violin_trace(y = y[n], color = colorV[n], name = legendV[n], points = points, side = side)
-			showlegend isa Bool && (t.showlegend = showlegend)
-			showlegend isa Vector && n <= length(showlegend) && (t.showlegend = showlegend[n])
-			push!(_plot_data(fig), t)
-		end
-	else
-		t = _violin_trace(y = y, color = _first_or_empty(color), name = _first_or_empty(legend), points = points, side = side)
-		showlegend isa Bool && (t.showlegend = showlegend)
-		push!(_plot_data(fig), t)
-	end
-
-	_apply_nested_layout_mode!(fig, y, :violinmode, "group")
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xrange = xrange,
-		yrange = yrange,
-		width = width,
-		height = height,
-		grid = grid,
-		fontsize = fontsize,
-		title = title,
-		xscale = xscale,
-		yscale = yscale,
-		refresh = true,
-		apply_template = false,
+	_stats_reject_keywords("plot_violin!", kwargs)
+	_stats_distribution!(
+		fig,
+		nothing,
+		y,
+		"plot_violin!",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; color, legend, showlegend, points, side, orientation, box, meanline,
+			jitter, pointpos);
+		kind = :violin,
+		mutator = true,
 	)
 	return nothing
 end
@@ -13278,78 +14236,523 @@ end
 
 # ── 2D histogram (density) ───────────────────────────────────────────
 
-function _histogram2d_trace(x, y; nbinsx::Int, nbinsy::Int, colorscale::String, histnorm::String)
-	kw = Dict{Symbol, Any}(:x => x, :y => y)
-	nbinsx > 0 && (kw[:nbinsx] = nbinsx)
-	nbinsy > 0 && (kw[:nbinsy] = nbinsy)
-	colorscale == "" || (kw[:colorscale] = colorscale)
-	histnorm == "" || (kw[:histnorm] = histnorm)
-	return histogram2d(; kw...)
+# Finite numeric samples of one histogram axis (the Julia-binned path needs
+# numbers; missing and non-finite samples are skipped).
+function _stats_numeric_samples(values, who::AbstractString, name::AbstractString)
+	samples = Float64[]
+	sizehint!(samples, length(values))
+	for value in values
+		value === missing && continue
+		(value isa Real && !(value isa Bool)) || throw(ArgumentError(
+			"$(who): a log binning axis (and colornorm=:log) bins the samples in Julia, " *
+			"which needs numeric `$(name)`; got $(repr(value)).",
+		))
+		isfinite(value) && push!(samples, Float64(value))
+	end
+	return samples
+end
+
+# Where a sample falls on its axis for binning: the value on a linear axis,
+# log10 of it on a log axis (where non-positive values cannot be shown).
+# `nothing` for samples that are not binned (missing, non-finite, ≤ 0 on log).
+function _stats_bin_position(value, log_axis::Bool)
+	(value isa Real && !(value isa Bool) && isfinite(value)) || return nothing
+	log_axis || return Float64(value)
+	value > 0 || return nothing
+	return log10(Float64(value))
+end
+
+# Whether a histogram's binning axis is logarithmic after this call: the
+# requested scale, else the figure's current axis type. plotly.js 2.35 cannot
+# bin a histogram or histogram2d on a log axis: automatic bins mix a log-unit
+# bin end with a data-unit size and come out empty (gd.calcdata holds no
+# counts for x = exp.(randn(5000)) on a log x axis), and explicit bins are
+# misread (1-D: 115 bins spanning 2..31 for start=-2, end=2, size=0.25; 2-D:
+# a renderer "Invalid array length" error for start=0, end=30, size=1). Such
+# histograms are binned in Julia instead.
+function _stats_log_axis(fig, scale::AbstractString, key::Symbol)
+	isempty(scale) || return scale == "log"
+	return _axis_type(_plot_layout(fig), key) == "log"
+end
+
+# plotly.js computes `Math.log(v) / Math.LN10`, which differs from `log10` at
+# exact powers of ten (log(1000)/ln(10) = 2.9999999999999996); the automatic
+# bins below must round the same way to reproduce plotly's bin width.
+_stats_js_floor_log10(value::Float64) = floor(log(value) / log(10.0))
+
+# Automatic bins `(start, stop, width)` of one axis, reproducing plotly.js 2.35
+# `Axes.autoBin` for numeric data on a linear (or log, which plotly bins
+# linearly) axis in the 2-D histogram variant, so a histogram2d binned in
+# Julia (colornorm = :log) gets the bins plotly would pick for the same data.
+# `samples` are the finite values; `total` is the length of the original data
+# including missing/non-finite entries, which plotly keeps in the sample count
+# of its 2σ/n^(1/4) estimate. `nbins > 0` is the requested (approximate) bin
+# count, as plotly's `nbinsx`. Verified
+# against the bins plotly.js computes (gd._fullData xbins/ybins) for normal,
+# uniform, integer, constant, single-sample, scaled and clustered data.
+function _stats_autobins(samples::Vector{Float64}, nbins::Int; total::Int = length(samples))
+	count = length(samples)
+	count > 0 || throw(ArgumentError("_stats_autobins: needs at least one finite sample."))
+	total >= count || throw(ArgumentError("_stats_autobins: `total` must be at least the sample count."))
+	lower, upper = extrema(samples)
+	size_estimate = if nbins > 0
+		(upper - lower) / nbins
+	else
+		# Smallest gap between distinct values, rounded down to 0.9, 1.9, 4.9
+		# or 9.9 times its decade, against 2σ/n^(1/4) (2-D variant).
+		sorted = sort(samples)
+		min_gap = upper - lower
+		min_gap == 0 && (min_gap = 1.0)
+		threshold = min_gap / max(count - 1, 1) / 1e4
+		previous = sorted[1]
+		for value in @view sorted[2:end]
+			gap = value - previous
+			if gap > threshold
+				min_gap = min(min_gap, gap)
+				previous = value
+			end
+		end
+		decade = 10.0^_stats_js_floor_log10(min_gap)
+		ratio = min_gap / decade
+		rounded = decade * (ratio >= 9.9 ? 9.9 : ratio >= 4.9 ? 4.9 : ratio >= 1.9 ? 1.9 : 0.9)
+		mean_value = sum(samples) / count
+		deviation = sqrt(sum(value -> (value - mean_value)^2, samples) / count)
+		max(rounded, 2 * deviation / total^0.25)
+	end
+	(isfinite(size_estimate) && size_estimate > 0) || (size_estimate = 1.0)
+	# Axes.autoTicks on a linear axis: the next "nice" width 2, 5 or 10 times
+	# the estimate's decade that is strictly larger than the estimate.
+	decade = 10.0^_stats_js_floor_log10(size_estimate)
+	ratio = size_estimate / decade
+	width = decade * (ratio < 2 ? 2.0 : ratio < 5 ? 5.0 : 10.0)
+	start = ceil(lower / width) * width - width
+	# Move the edges off the data: integer data gets half-integer edges, and
+	# data clustered on the edges is shifted by half a bin.
+	near_edge(value) = rem(1 + 100 * (value - start) / width, 100) < 2
+	integers = 0
+	on_edges = 0
+	on_centres = 0
+	for value in samples
+		isinteger(value) && (integers += 1)
+		near_edge(value) && (on_edges += 1)
+		near_edge(value + width / 2) && (on_centres += 1)
+	end
+	shifted = start
+	if integers == count
+		if width < 1
+			shifted = lower - 0.5 * width
+		else
+			shifted -= 0.5
+			shifted + width < lower && (shifted += width)
+		end
+	elseif on_centres < 0.1 * count &&
+		(on_edges > 0.3 * count || near_edge(lower) || near_edge(upper))
+		half = width / 2
+		shifted += shifted + half < lower ? half : -half
+	end
+	stop = shifted + (1 + floor((upper - shifted) / width)) * width
+	return shifted, stop, width
+end
+
+# Bin index (1-based) of `value` for bins starting at `start` of `width`, or 0
+# outside; plotly's `Lib.findBin` uses the same 1e-9 tolerance.
+function _stats_bin_index(value::Float64, start::Float64, width::Float64, nbins::Int)
+	index = floor(Int, (value - start) / width + 1e-9) + 1
+	return 1 <= index <= nbins ? index : 0
+end
+
+const _STATS_HISTNORM_LABELS = Dict(
+	"" => "count",
+	"percent" => "percent",
+	"probability" => "probability",
+	"density" => "density",
+	"probability density" => "probability density",
+)
+
+# Julia-side 2-D histogram, used where plotly's own histogram2d cannot serve:
+# colornorm = :log (plotly counts in the browser, where the counts cannot be
+# log-normed) and log axes (where plotly bins nothing). The bins are plotly's
+# automatic bins over the bin positions (`_stats_bin_position`): linear in the
+# data on a linear axis, of equal width in decades on a log axis. Returns the
+# bin edges in data units and the normalized counts as `z[iy, ix]`.
+function _stats_histogram2d_counts(
+	x,
+	y,
+	nbinsx::Int,
+	nbinsy::Int,
+	histnorm::String,
+	who::AbstractString;
+	xlog::Bool,
+	ylog::Bool,
+)
+	x_numeric = _stats_numeric_samples(x, who, "x")
+	y_numeric = _stats_numeric_samples(y, who, "y")
+	x_samples = xlog ? Float64[log10(value) for value in x_numeric if value > 0] : x_numeric
+	y_samples = ylog ? Float64[log10(value) for value in y_numeric if value > 0] : y_numeric
+	requirement = (xlog || ylog) ? "finite (and on a log axis positive)" : "finite"
+	(isempty(x_samples) || isempty(y_samples)) && throw(ArgumentError(
+		"$(who): binning in Julia needs at least one $(requirement) x and y sample.",
+	))
+	x_start, x_stop, x_width = _stats_autobins(x_samples, nbinsx; total = length(x))
+	y_start, y_stop, y_width = _stats_autobins(y_samples, nbinsy; total = length(y))
+	nx = round(Int, (x_stop - x_start) / x_width)
+	ny = round(Int, (y_stop - y_start) / y_width)
+	counts = zeros(Float64, ny, nx)
+	total = 0
+	for (x_value, y_value) in zip(x, y)
+		x_position = _stats_bin_position(x_value, xlog)
+		y_position = _stats_bin_position(y_value, ylog)
+		(x_position === nothing || y_position === nothing) && continue
+		ix = _stats_bin_index(x_position, x_start, x_width, nx)
+		iy = _stats_bin_index(y_position, y_start, y_width, ny)
+		(ix == 0 || iy == 0) && continue
+		counts[iy, ix] += 1
+		total += 1
+	end
+	total > 0 || throw(ArgumentError(
+		"$(who): binning in Julia needs at least one (x, y) pair whose x and y are both " *
+		"$(requirement).",
+	))
+	x_edges = [x_start + k * x_width for k in 0:nx]
+	y_edges = [y_start + k * y_width for k in 0:ny]
+	xlog && (x_edges = exp10.(x_edges))
+	ylog && (y_edges = exp10.(y_edges))
+	if histnorm == "percent"
+		counts .*= 100 / total
+	elseif histnorm == "probability"
+		counts ./= total
+	elseif histnorm in ("density", "probability density")
+		# Bin areas in data units: equal on linear axes, growing with the
+		# decade on a log axis.
+		counts ./= diff(y_edges) .* permutedims(diff(x_edges))
+		histnorm == "probability density" && (counts ./= total)
+	end
+	return x_edges, y_edges, counts
+end
+
+_stats_matrix_rows(matrix::AbstractMatrix) =
+	[Any[_stats_json_value(matrix[row, column]) for column in axes(matrix, 2)] for row in axes(matrix, 1)]
+
+# Non-finite colour values are gaps; JSON `null` is plotly's gap marker.
+_stats_json_value(value) = value isa Real && !isfinite(value) ? _GAP : value
+
+function _stats_histogram2d!(fig, x, y, who::AbstractString, options, color_options; mutator::Bool)
+	o = color_options
+	(_is_nested_series(x) || _is_nested_series(y)) && throw(ArgumentError(
+		"$(who): takes one set of paired samples `x`, `y`; got a vector of series.",
+	))
+	_stats_check_series(x, who, "x")
+	_stats_check_series(y, who, "y")
+	length(x) == length(y) || throw(ArgumentError(
+		"$(who): `x` and `y` must have the same length (one (x, y) sample per entry); " *
+		"got $(length(x)) and $(length(y)).",
+	))
+	nbinsx = _stats_count(o.nbinsx, who, "nbinsx")
+	nbinsy = _stats_count(o.nbinsy, who, "nbinsy")
+	histnorm = _stats_choice(o.histnorm, _STATS_HISTNORMS, who, "histnorm")
+	norm = _normalize_colornorm(o.colornorm, who)
+	coloraxis = o.coloraxis === nothing ? nothing : _normalize_coloraxis(o.coloraxis, who)
+	colorbar_title = _stats_label(o.colorbar_title)
+
+	xlog = _stats_log_axis(fig, options.xscale, :xaxis)
+	ylog = _stats_log_axis(fig, options.yscale, :yaxis)
+	if norm === :log || xlog || ylog
+		x_edges, y_edges, counts = _stats_histogram2d_counts(
+			x, y, nbinsx, nbinsy, histnorm, who; xlog = xlog, ylog = ylog,
+		)
+		# Under the log norm empty bins hold no data: they stay blank
+		# (matplotlib's LogNorm masks them too) instead of being floored to the
+		# bottom of an explicit crange. The linear norm colours them as 0, as
+		# plotly's own histogram2d does.
+		mapped = _apply_color_norm(
+			norm === :log ? map(count -> count > 0 ? count : NaN, counts) : counts;
+			crange = o.crange,
+			cmid = o.cmid,
+			colornorm = norm,
+			levels = o.levels,
+			stops = o.colorscale,
+			ticks = o.colorbar_ticks,
+			ticklabels = o.colorbar_ticklabels,
+			who = who,
+		)
+		value_format = histnorm == "" ? "%{customdata}" : "%{customdata:.3g}"
+		trace = heatmap(
+			x = x_edges,
+			y = y_edges,
+			z = _stats_matrix_rows(mapped.values),
+			customdata = _stats_matrix_rows(counts),
+			transpose = false,
+			hovertemplate = "x: %{x}<br>y: %{y}<br>$(_STATS_HISTNORM_LABELS[histnorm]): " *
+				"$(value_format)<extra></extra>",
+		)
+	else
+		mapped = _apply_color_norm(
+			nothing;
+			crange = o.crange,
+			cmid = o.cmid,
+			colornorm = :linear,
+			levels = o.levels,
+			stops = o.colorscale,
+			ticks = o.colorbar_ticks,
+			ticklabels = o.colorbar_ticklabels,
+			who = who,
+		)
+		fields = Dict{Symbol, Any}(:x => x, :y => y)
+		nbinsx > 0 && (fields[:nbinsx] = nbinsx)
+		nbinsy > 0 && (fields[:nbinsy] = nbinsy)
+		isempty(histnorm) || (fields[:histnorm] = histnorm)
+		trace = histogram2d(; fields...)
+	end
+	# User colorbar tick labels are text for MathJax; the automatic decade
+	# labels of the log norm are plotly HTML and stay verbatim.
+	ticktext = mapped.ticktext
+	if o.colorbar_ticklabels !== nothing && ticktext !== nothing
+		ticktext = String[_stats_label(label) for label in ticktext]
+	end
+	colorbar = _colorbar_attr(;
+		title = colorbar_title,
+		ticks = mapped.tickvals,
+		ticklabels = ticktext,
+		who = who,
+	)
+	scale = mapped.stops
+	has_scale = !(scale isa AbstractString && isempty(scale))
+	layout_fields = Pair{Symbol, Any}[]
+	if coloraxis === nothing
+		has_scale && (trace.colorscale = scale)
+		mapped.cmin === nothing || (trace.zmin = mapped.cmin)
+		mapped.cmax === nothing || (trace.zmax = mapped.cmax)
+		mapped.cmid === nothing || (trace.zmid = mapped.cmid)
+		colorbar === nothing || (trace.colorbar = colorbar)
+		o.showscale === nothing || (trace.showscale = o.showscale)
+	else
+		# A shared colour axis carries the scale, limits and colorbar of every
+		# trace bound to it; existing colorbar styling is merged, not replaced.
+		trace.coloraxis = coloraxis
+		has_scale && push!(layout_fields, Symbol(coloraxis, "_colorscale") => scale)
+		mapped.cmin === nothing || push!(layout_fields, Symbol(coloraxis, "_cmin") => mapped.cmin)
+		mapped.cmax === nothing || push!(layout_fields, Symbol(coloraxis, "_cmax") => mapped.cmax)
+		mapped.cmid === nothing || push!(layout_fields, Symbol(coloraxis, "_cmid") => mapped.cmid)
+		o.showscale === nothing || push!(layout_fields, Symbol(coloraxis, "_showscale") => o.showscale)
+		if colorbar !== nothing
+			for (key, value) in colorbar.fields
+				if key === :title
+					push!(layout_fields, Symbol(coloraxis, "_colorbar_title_text") => colorbar_title)
+				else
+					push!(layout_fields, Symbol(coloraxis, "_colorbar_", key) => value)
+				end
+			end
+		end
+	end
+	_stats_validate_options(fig, who, options)
+
+	push!(_plot_data(fig), trace)
+	isempty(layout_fields) || relayout!(fig; layout_fields...)
+	_stats_apply_options!(fig, who, options; mutator = mutator)
+	return nothing
 end
 
 """
-	plot_histogram2d(x, y; nbinsx=0, nbinsy=0, colorscale="", histnorm="", kwargs...)
+	plot_histogram2d(x, y; kwargs...)
 
-2-D histogram (density heatmap) of paired samples `x`, `y`.
+2-D histogram (density heatmap) of the paired samples `x[i]`, `y[i]`. Returns
+a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when `show = true`.
+
+#### Data
+`x`, `y::AbstractVector` of equal length (vectors, ranges or views; complex
+values are an `ArgumentError`). By default plotly bins and counts the samples
+(a `histogram2d` trace). Two cases are binned in Julia instead and drawn as a
+`heatmap` over the bin edges, whose hover shows the (normalized) count;
+numeric data only, missing and non-finite samples are skipped:
+- `colornorm = :log`: the bins are those plotly would choose; `z` is log10 of
+  the count and empty bins are left blank.
+- a log x or y axis (`xscale`/`yscale = "log"`, or a mutator target whose axis
+  is already logarithmic), where plotly.js cannot bin a `histogram2d` and
+  would draw nothing: along a log axis the bins have equal width in decades
+  (chosen like plotly's automatic bins, over log10 of the data), and
+  non-positive samples, which a log axis cannot show, are dropped. Densities
+  divide by each bin's area in data units.
+
+#### Keyword Arguments
+- `nbinsx`, `nbinsy::Integer = 0`: approximate number of bins along x / y
+  (`0` = automatic); plotly rounds the bin width to a "nice" value and aligns
+  the edges to round numbers, so the drawn count can be somewhat higher or
+  lower (see [`plot_histogram`](@ref)). On a log axis the width is in decades.
+- `histnorm::AbstractString = ""`: `""` (counts), `"percent"`,
+  `"probability"`, `"density"` or `"probability density"`.
+- `colorscale = ""`: colormap name (`"viridis"`, `"RdBu_r"`, `:magma`, a
+  plotly name), a vector of colours or `(t, colour)` stops, or a
+  `ColorScheme`; `""` uses the template's colorscale.
+- `crange = [0, 0]`: colour limits `[min, max]` (data units, counts);
+  `[0, 0]`/`nothing` is automatic.
+- `cmid::Union{Nothing,Real} = nothing`: colour midpoint (linear norm).
+- `colornorm::Union{Symbol,AbstractString} = :linear`: `:linear` or `:log`
+  (decade colorbar ticks labelled 10ᵏ).
+- `levels = nothing`: k+1 increasing boundaries giving k discrete colours.
+- `showscale::Union{Nothing,Bool} = nothing`: show/hide the colorbar.
+- `colorbar_title::AbstractString = ""`, `colorbar_ticks = nothing`,
+  `colorbar_ticklabels = nothing`: colorbar title and ticks (tick positions
+  in data units, labels need ticks of the same length).
+- `coloraxis = nothing`: `:shared` (or `"coloraxis"`, `"coloraxis2"`, …)
+  binds the trace to a shared colour axis; the colour keywords are then
+  written to that layout colour axis.
+- `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
+  `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
+  `ytickformat`, `width`, `height`, `fontsize`, `grid = true`, `show = false`:
+  as in [`plot_bar`](@ref).
+
+#### Example
+```julia
+x, y = randn(5000), randn(5000)
+fig = plot_histogram2d(x, y; nbinsx = 40, nbinsy = 40, colorscale = "viridis")
+plot_histogram2d(x, y; colornorm = :log, colorbar_title = "count")
+```
 """
 function plot_histogram2d(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	nbinsx::Int = 0,
-	nbinsy::Int = 0,
-	colorscale::String = "",
-	histnorm::String = "",
-	xlabel::String = "",
-	ylabel::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-	grid::Bool = true,
+	x::AbstractVector,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	nbinsx::Integer = 0,
+	nbinsy::Integer = 0,
+	histnorm::AbstractString = "",
+	colorscale = "",
+	crange = [0, 0],
+	cmid::Union{Nothing, Real} = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	levels = nothing,
+	showscale::Union{Nothing, Bool} = nothing,
+	colorbar_title::AbstractString = "",
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
 	show::Bool = false,
 )
-	fig = Plot(_histogram2d_trace(x, y; nbinsx = nbinsx, nbinsy = nbinsy, colorscale = colorscale, histnorm = histnorm),
-		_default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, width = width, height = height,
-		grid = grid, fontsize = fontsize, title = title)
-	return _maybe_show(fig, show, width, height, title)
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stats_histogram2d!(
+		fig,
+		x,
+		y,
+		"plot_histogram2d",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; nbinsx, nbinsy, histnorm, colorscale, crange, cmid, colornorm, levels,
+			showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis);
+		mutator = false,
+	)
+	return _stats_maybe_show(fig, show, width, height, title)
 end
 
 """
 	plot_histogram2d!(fig, x, y; kwargs...)
 
-Append a 2-D histogram trace to an existing figure.
+Append a 2-D histogram of the paired samples `x`, `y` to `fig`: a `Plot`, a
+[`SyncPlot`](@ref) or a [`SubplotFigure`](@ref) cell. Data conventions and
+keywords are those of [`plot_histogram2d`](@ref), with these differences:
+- `grid::Union{Nothing,Bool,Symbol} = nothing` leaves the grid unchanged; any
+  other value (also `true`) is applied.
+- `show` is not accepted (`ArgumentError`).
+- On a `SubplotFigure`, `row`/`col` select the cell (default: the current
+  cell) and `secondary_y = true` targets its secondary y axis; `title`,
+  `width` and `height` are figure-wide and ignored there with a warning.
+
+Every keyword is validated before the figure changes. Returns `nothing` for a
+`Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
+
+#### Example
+```julia
+fig = plot_scatter(randn(100), randn(100); mode = "markers")
+plot_histogram2d!(fig, randn(5000), randn(5000); colornorm = :log)
+```
 """
 function plot_histogram2d!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	nbinsx::Int = 0,
-	nbinsy::Int = 0,
-	colorscale::String = "",
-	histnorm::String = "",
-	xlabel::String = "",
-	ylabel::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-	grid::Union{Nothing, Bool} = nothing,
+	x::AbstractVector,
+	y::AbstractVector;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	title::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
+	nbinsx::Integer = 0,
+	nbinsy::Integer = 0,
+	histnorm::AbstractString = "",
+	colorscale = "",
+	crange = [0, 0],
+	cmid::Union{Nothing, Real} = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	levels = nothing,
+	showscale::Union{Nothing, Bool} = nothing,
+	colorbar_title::AbstractString = "",
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
+	kwargs...,
 )
-	push!(_plot_data(fig), _histogram2d_trace(x, y; nbinsx = nbinsx, nbinsy = nbinsy, colorscale = colorscale, histnorm = histnorm))
-	_apply_cartesian_grid_override!(fig, grid)
-	_apply_cartesian_plot_options!(
-		fig;
-		xlabel = xlabel,
-		ylabel = ylabel,
-		title = title,
-		width = width,
-		height = height,
-		fontsize = fontsize,
-		refresh = true,
-		apply_template = false,
+	_stats_reject_keywords("plot_histogram2d!", kwargs)
+	_stats_histogram2d!(
+		fig,
+		x,
+		y,
+		"plot_histogram2d!",
+		(; xlabel, ylabel, title, xrange, yrange, xscale, yscale, width, height,
+			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
+			ytickformat),
+		(; nbinsx, nbinsy, histnorm, colorscale, crange, cmid, colornorm, levels,
+			showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis);
+		mutator = true,
 	)
 	return nothing
+end
+
+function plot_histogram2d!(
+	sf::SubplotFigure,
+	x::AbstractVector,
+	y::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _stats_subplot_delegate!(
+		sf,
+		plot_histogram2d!,
+		x,
+		y;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		who = "plot_histogram2d!",
+		kwargs...,
+	)
 end
 
 # ── Annotations ──────────────────────────────────────────────────────
