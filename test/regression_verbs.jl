@@ -772,15 +772,9 @@ end
 
 # ── Real renderer checks (hidden Electron windows) ─────────────────────
 
-function _rv_open_window(p::Plot)
-	try
-		return to_syncplot(p; show = false)
-	catch err
-		# Accept environments where ElectronCall is not installed.
-		occursin("ElectronCall", sprint(showerror, err)) || rethrow()
-		return nothing
-	end
-end
+# ElectronCall is a hard dependency, so a window that fails to open is a test
+# failure, not a skip.
+_rv_open_window(p::Plot) = to_syncplot(p; show = false)
 
 function _rv_js(sp::SyncPlot, script::AbstractString)
 	backend = PlotlySupply._syncplot_backend(sp)
@@ -799,73 +793,62 @@ end
 
 @testset "verbs: live renderer matches the committed model" begin
 	sp = _rv_open_window(Plot([scatter(y = [1, 2, 3])], Layout(title = "t")))
-	if sp === nothing
-		@test_skip "Electron is not available"
-	else
-		try
-			divid = sp.divid
-			@test purge!(sp) === sp
-			@test relayout!(sp; title = "x") === sp
-			@test _rv_div_json(sp, divid, "d._fullLayout.title.text") ==
-				"\"x\""
-			@test redraw!(sp) === sp
-			@test update!(sp; layout = Layout(title = "y")) === sp
-			@test addtraces!(sp, scatter(y = [2, 1])) === sp
-			@test _rv_div_json(sp, divid, "d.data.length") == "1"
-			@test _rv_div_json(sp, divid, "d._fullLayout.title.text") ==
-				"\"y\""
-			@test !sp._resources.renderer_desynchronized
-		finally
-			close(sp)
-		end
+	try
+		divid = sp.divid
+		@test purge!(sp) === sp
+		@test relayout!(sp; title = "x") === sp
+		@test _rv_div_json(sp, divid, "d._fullLayout.title.text") ==
+			"\"x\""
+		@test redraw!(sp) === sp
+		@test update!(sp; layout = Layout(title = "y")) === sp
+		@test addtraces!(sp, scatter(y = [2, 1])) === sp
+		@test _rv_div_json(sp, divid, "d.data.length") == "1"
+		@test _rv_div_json(sp, divid, "d._fullLayout.title.text") ==
+			"\"y\""
+		@test !sp._resources.renderer_desynchronized
+	finally
+		close(sp)
 	end
 
 	sp = _rv_open_window(Plot(scatter(x = [1, 2, 3, 4], y = [1, 2, 3, 4])))
-	if sp === nothing
-		@test_skip "Electron is not available"
-	else
-		try
-			divid = sp.divid
-			model_x() = _RV_PB.JSON.json(sp.plot.data[1][:x])
-			live_x() = _rv_div_json(sp, divid, "d.data[0].x")
-			extendtraces!(sp, Dict(:x => [[5, 6, 7]], :y => [[5, 6, 7]]), [1], 3)
-			@test sp.plot.data[1][:x] == [5, 6, 7]
-			@test live_x() == model_x()
-			prependtraces!(sp, Dict(:x => [[0, -1]], :y => [[0, -1]]), [1], 4)
-			@test sp.plot.data[1][:x] == [0, -1, 5, 6]
-			@test live_x() == model_x()
-			extendtraces!(sp, Dict(:y => [[9]]), [1], 0)
-			@test isempty(sp.plot.data[1][:y])
-			@test _rv_div_json(sp, divid, "d.data[0].y") == "[]"
+	try
+		divid = sp.divid
+		model_x() = _RV_PB.JSON.json(sp.plot.data[1][:x])
+		live_x() = _rv_div_json(sp, divid, "d.data[0].x")
+		extendtraces!(sp, Dict(:x => [[5, 6, 7]], :y => [[5, 6, 7]]), [1], 3)
+		@test sp.plot.data[1][:x] == [5, 6, 7]
+		@test live_x() == model_x()
+		prependtraces!(sp, Dict(:x => [[0, -1]], :y => [[0, -1]]), [1], 4)
+		@test sp.plot.data[1][:x] == [0, -1, 5, 6]
+		@test live_x() == model_x()
+		extendtraces!(sp, Dict(:y => [[9]]), [1], 0)
+		@test isempty(sp.plot.data[1][:y])
+		@test _rv_div_json(sp, divid, "d.data[0].y") == "[]"
 
-			# A user zoom survives a streamed append.
-			restyle!(sp, 1; y = ([1, 2, 3, 4],))
-			_rv_js(
-				sp,
-				"(async function(){ await Plotly.relayout(document." *
-				"getElementById(" * PlotlySupply._json_js(divid) *
-				"), {'xaxis.range': [0.5, 1.5]}); return 'ok'; })()",
-			)
-			extendtraces!(sp, 1; x = [8], y = [5])
-			@test _rv_div_json(sp, divid, "d._fullLayout.xaxis.range") ==
-				"[0.5,1.5]"
-			@test live_x() == model_x()
-		finally
-			close(sp)
-		end
+		# A user zoom survives a streamed append.
+		restyle!(sp, 1; y = ([1, 2, 3, 4],))
+		_rv_js(
+			sp,
+			"(async function(){ await Plotly.relayout(document." *
+			"getElementById(" * PlotlySupply._json_js(divid) *
+			"), {'xaxis.range': [0.5, 1.5]}); return 'ok'; })()",
+		)
+		extendtraces!(sp, 1; x = [8], y = [5])
+		@test _rv_div_json(sp, divid, "d._fullLayout.xaxis.range") ==
+			"[0.5,1.5]"
+		@test live_x() == model_x()
+	finally
+		close(sp)
 	end
 
 	# Differential checks: mutate a plot rendered in one div through a
 	# SyncPlot bound to it, then render the committed model into a second div
 	# and compare what plotly.js shows.
 	host = _rv_open_window(Plot(scatter(y = [1])))
-	if host === nothing
-		@test_skip "Electron is not available"
-	else
-		try
-			_rv_js(
-				host,
-				"""
+	try
+		_rv_js(
+			host,
+			"""
 (function(){
   for (const id of ["rv-live", "rv-model"]) {
     const d = document.createElement("div");
@@ -876,114 +859,113 @@ end
   }
   return "ok";
 })()""",
+		)
+		function render!(divid, p)
+			result = _rv_js(
+				host,
+				"(async function(){ const d = document.getElementById(" *
+				PlotlySupply._json_js(divid) * "); Plotly.purge(d); " *
+				"await Plotly.newPlot(d, $(PlotlySupply._json_js(p.data)), " *
+				"$(PlotlySupply._json_js(p.layout)), " *
+				"$(PlotlySupply._json_js(p.config))); return 'ok'; })()",
 			)
-			function render!(divid, p)
-				result = _rv_js(
-					host,
-					"(async function(){ const d = document.getElementById(" *
-					PlotlySupply._json_js(divid) * "); Plotly.purge(d); " *
-					"await Plotly.newPlot(d, $(PlotlySupply._json_js(p.data)), " *
-					"$(PlotlySupply._json_js(p.layout)), " *
-					"$(PlotlySupply._json_js(p.config))); return 'ok'; })()",
-				)
-				result == "ok" || error("newPlot failed: $result")
-			end
-			function differential(make, mutate!, expressions)
-				p = make()
-				render!("rv-live", p)
-				backend = (
-					isopen = window -> true,
-					close = window -> nothing,
-					run = (window, script) -> _rv_js(host, script),
-				)
-				probe = SyncPlot(
-					p,
-					nothing,
-					:rv_probe,
-					"rv-live",
-					PlotlySupply._SyncPlotResources(nothing, backend),
-				)
-				try
-					mutate!(probe)
-				finally
-					close(probe)
-				end
-				render!("rv-model", p)
-				return [
-					_rv_div_json(host, "rv-live", expression) ==
-					_rv_div_json(host, "rv-model", expression)
-					for expression in expressions
-				]
-			end
-			ranged() = Plot(
-				scatter(x = collect(1:100), y = collect(1:100) .^ 2),
-				Layout(xaxis = attr(range = [1, 100])),
-			)
-			axis = ["d._fullLayout.xaxis.range", "d._fullLayout.xaxis.type"]
-			@test all(differential(
-				ranged,
-				sp -> relayout!(sp; xaxis_type = "log"),
-				axis,
-			))
-			@test all(differential(
-				ranged,
-				sp -> restyle!(sp, 1; type = "bar"),
-				[axis; "d._fullData[0].type"],
-			))
-			@test all(differential(
-				() -> Plot(
-					scatter(y = [1, 2]),
-					Layout(xaxis = attr(autorange = true)),
-				),
-				sp -> relayout!(sp; xaxis_range = [0, 1]),
-				[axis; "d._fullLayout.xaxis.autorange"],
-			))
-			@test all(differential(
-				() -> Plot(
-					scatter3d(x = [1, 2], y = [1, 2], z = [1, 2]),
-					Layout(scene = attr(aspectmode = "auto")),
-				),
-				sp -> relayout!(sp; scene_aspectratio = attr(x = 1, y = 1, z = 0.3)),
-				["d._fullLayout.scene.aspectmode", "d._fullLayout.scene.aspectratio"],
-			))
-			@test all(differential(
-				() -> Plot(heatmap(z = [1 2; 3 4])),
-				sp -> restyle!(sp, 1; zmin = 0),
-				["d._fullData[0].zauto", "d._fullData[0].zmin", "d._fullData[0].zmax"],
-			))
-			@test all(differential(
-				() -> Plot(
-					[scatter(y = [1, 2])],
-					Layout(title = attr(text = "old", font = attr(size = 30))),
-				),
-				sp -> relayout!(sp; title = "New"),
-				["d._fullLayout.title.text", "d._fullLayout.title.font.size"],
-			))
-			@test all(differential(
-				() -> Plot([scatter(y = [1, 2, 3], mode = "markers")]),
-				sp -> restyle!(
-					sp,
-					1;
-					marker = attr(
-						color = [1, 2, 3],
-						showscale = true,
-						colorbar = attr(title = "cb"),
-					),
-				),
-				["d._fullData[0].marker.colorbar.title.text"],
-			))
-			@test all(differential(
-				() -> Plot([scatter(y = [1, 2], line = attr(color = "red"))]),
-				sp -> restyle!(sp, 1; line = nothing),
-				["d._fullData[0].line.color"],
-			))
-			@test all(differential(
-				() -> Plot([scatter(y = [1, 2], marker = attr(size = 4))]),
-				sp -> restyle!(sp, 1, Dict(Symbol("marker.size") => 9)),
-				["d._fullData[0].marker.size"],
-			))
-		finally
-			close(host)
+			result == "ok" || error("newPlot failed: $result")
 		end
+		function differential(make, mutate!, expressions)
+			p = make()
+			render!("rv-live", p)
+			backend = (
+				isopen = window -> true,
+				close = window -> nothing,
+				run = (window, script) -> _rv_js(host, script),
+			)
+			probe = SyncPlot(
+				p,
+				nothing,
+				:rv_probe,
+				"rv-live",
+				PlotlySupply._SyncPlotResources(nothing, backend),
+			)
+			try
+				mutate!(probe)
+			finally
+				close(probe)
+			end
+			render!("rv-model", p)
+			return [
+				_rv_div_json(host, "rv-live", expression) ==
+				_rv_div_json(host, "rv-model", expression)
+				for expression in expressions
+			]
+		end
+		ranged() = Plot(
+			scatter(x = collect(1:100), y = collect(1:100) .^ 2),
+			Layout(xaxis = attr(range = [1, 100])),
+		)
+		axis = ["d._fullLayout.xaxis.range", "d._fullLayout.xaxis.type"]
+		@test all(differential(
+			ranged,
+			sp -> relayout!(sp; xaxis_type = "log"),
+			axis,
+		))
+		@test all(differential(
+			ranged,
+			sp -> restyle!(sp, 1; type = "bar"),
+			[axis; "d._fullData[0].type"],
+		))
+		@test all(differential(
+			() -> Plot(
+				scatter(y = [1, 2]),
+				Layout(xaxis = attr(autorange = true)),
+			),
+			sp -> relayout!(sp; xaxis_range = [0, 1]),
+			[axis; "d._fullLayout.xaxis.autorange"],
+		))
+		@test all(differential(
+			() -> Plot(
+				scatter3d(x = [1, 2], y = [1, 2], z = [1, 2]),
+				Layout(scene = attr(aspectmode = "auto")),
+			),
+			sp -> relayout!(sp; scene_aspectratio = attr(x = 1, y = 1, z = 0.3)),
+			["d._fullLayout.scene.aspectmode", "d._fullLayout.scene.aspectratio"],
+		))
+		@test all(differential(
+			() -> Plot(heatmap(z = [1 2; 3 4])),
+			sp -> restyle!(sp, 1; zmin = 0),
+			["d._fullData[0].zauto", "d._fullData[0].zmin", "d._fullData[0].zmax"],
+		))
+		@test all(differential(
+			() -> Plot(
+				[scatter(y = [1, 2])],
+				Layout(title = attr(text = "old", font = attr(size = 30))),
+			),
+			sp -> relayout!(sp; title = "New"),
+			["d._fullLayout.title.text", "d._fullLayout.title.font.size"],
+		))
+		@test all(differential(
+			() -> Plot([scatter(y = [1, 2, 3], mode = "markers")]),
+			sp -> restyle!(
+				sp,
+				1;
+				marker = attr(
+					color = [1, 2, 3],
+					showscale = true,
+					colorbar = attr(title = "cb"),
+				),
+			),
+			["d._fullData[0].marker.colorbar.title.text"],
+		))
+		@test all(differential(
+			() -> Plot([scatter(y = [1, 2], line = attr(color = "red"))]),
+			sp -> restyle!(sp, 1; line = nothing),
+			["d._fullData[0].line.color"],
+		))
+		@test all(differential(
+			() -> Plot([scatter(y = [1, 2], marker = attr(size = 4))]),
+			sp -> restyle!(sp, 1, Dict(Symbol("marker.size") => 9)),
+			["d._fullData[0].marker.size"],
+		))
+	finally
+		close(host)
 	end
 end

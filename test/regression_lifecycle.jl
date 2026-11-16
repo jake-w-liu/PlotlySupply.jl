@@ -1,5 +1,6 @@
 using Test, PlotlySupply
 using Base64
+using Dates
 
 # Regression tests for the Electron window lifecycle and the PlotlyJS-style
 # `plot`/`to_syncplot` entry points. The fake backend below mirrors the
@@ -23,9 +24,12 @@ end
 mutable struct _RLFakeElectron
 	windows::Vector{_RLFakeWindow}
 	scripts::Vector{String}
+	# Page loads (`ec.load(window, uri)`) and an optional error to raise from one.
+	loads::Vector{String}
+	load_error::Union{Nothing,Exception}
 end
 
-_RLFakeElectron() = _RLFakeElectron(_RLFakeWindow[], String[])
+_RLFakeElectron() = _RLFakeElectron(_RLFakeWindow[], String[], String[], nothing)
 
 function _rl_fake_close(window::_RLFakeWindow)
 	window.close_calls += 1
@@ -67,6 +71,14 @@ function Base.getproperty(ec::_RLFakeElectron, name::Symbol)
 		return function (window, script)
 			push!(getfield(ec, :scripts), String(script))
 			return "ok"
+		end
+	elseif name === :load
+		return function (window, uri)
+			failure = getfield(ec, :load_error)
+			failure === nothing || throw(failure)
+			push!(getfield(ec, :loads), String(uri))
+			window.uri = String(uri)
+			return nothing
 		end
 	end
 	return getfield(ec, name)
@@ -173,6 +185,57 @@ const _RL_FIGURES = get(
 	"PLOTLYSUPPLY_LIFECYCLE_FIGURES",
 	"",
 )
+
+# Run `f` with `set_default_mathtext!(enabled; kwargs...)` in effect, restoring
+# the previous settings afterwards (also on failure).
+function _rl_with_mathtext(f, enabled::Bool = true; kwargs...)
+	previous = get_default_mathtext()
+	set_default_mathtext!(enabled; kwargs...)
+	try
+		return f()
+	finally
+		set_default_mathtext!(
+			previous.enabled;
+			size = previous.size,
+			font = previous.font,
+			inherit_text_font = previous.inherit_text_font,
+		)
+	end
+end
+
+# Glyph-set prefixes of the MathJax <use> references in `svg` (e.g.
+# "LATINMODERNMAIN" for `href="#LATINMODERNMAIN-3B1"`): they name the font.
+function _rl_glyph_sets(svg::AbstractString)
+	sets = Set{String}()
+	for m in eachmatch(r"href=\"#([A-Z]+)-[0-9A-F]+\"", svg)
+		push!(sets, m.captures[1])
+	end
+	return sort!(collect(sets))
+end
+
+# Live-window counterpart: glyph sets and inherited <text> font families of the
+# typeset label `g.<name>-math-group`, plus that label's source text.
+function _rl_live_math(sp::SyncPlot, name::AbstractString)
+	result = _rl_js(sp, """
+(() => {
+  const g = document.querySelector('g.' + $(PlotlySupply._json_js(name)) + '-math-group');
+  if (!g) return JSON.stringify(null);
+  const source = g.parentNode.querySelector('text.' + $(PlotlySupply._json_js(name)));
+  const sets = new Set();
+  g.querySelectorAll('use').forEach(u => {
+    const ref = u.getAttribute('href') || u.getAttribute('xlink:href') || '';
+    const m = ref.match(/^#([A-Z]+)-/);
+    if (m) sets.add(m[1]);
+  });
+  return JSON.stringify({
+    source: source ? source.getAttribute('data-unformatted') : null,
+    glyphs: Array.from(sets).sort(),
+    families: Array.from(g.querySelectorAll('text')).map(t => t.getAttribute('font-family')),
+  });
+})()
+""")
+	return PlotlySupply.PlotlyBase.JSON.parse(result)
+end
 
 @testset "regression: Electron lifecycle and plot entry points" begin
 	@testset "GC finalizer defers the native close to a task" begin
@@ -564,6 +627,240 @@ const _RL_FIGURES = get(
 		end
 	end
 
+	@testset "set_default_mathtext!: font, inherit_text_font, style size" begin
+		_rl_with_mathtext() do
+			@test get_default_mathtext() ==
+				(enabled = true, size = "", font = "", inherit_text_font = false)
+			# Font names are matched case-insensitively and stored canonically.
+			@test set_default_mathtext!(; font = " stix-web ", inherit_text_font = true) ==
+				(enabled = true, size = "", font = "STIX-Web", inherit_text_font = true)
+			@test PlotlySupply._mathjax_page_config() ==
+				(font = "STIX-Web", inherit_text_font = true)
+			for bad in ("bogus", "Latin Modern", "TeX\"); alert(1); (\"")
+				err = _rl_error(() -> set_default_mathtext!(; font = bad))
+				@test err isa ArgumentError
+				@test occursin("set_default_mathtext!", sprint(showerror, err))
+				@test occursin("Latin-Modern", sprint(showerror, err))
+			end
+			# Validation happens before anything changes.
+			@test_throws ArgumentError set_default_mathtext!(; size = "\\footnotesize", font = "TeX")
+			@test get_default_mathtext().font == "STIX-Web"
+			# Every keyword is replaced on each call.
+			@test set_default_mathtext!(false) ==
+				(enabled = false, size = "", font = "", inherit_text_font = false)
+			set_default_mathtext!()
+
+			# font = "" falls back to the environment variable, then Latin-Modern.
+			withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => nothing) do
+				@test PlotlySupply._mathjax_svg_font() == "Latin-Modern"
+			end
+			withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => "gyre-pagella") do
+				@test PlotlySupply._mathjax_svg_font() == "Gyre-Pagella"
+				@test occursin("SVG: {font: \"Gyre-Pagella\"}", PlotlySupply._mathjax_head_html())
+				# An explicit setting wins over the environment.
+				set_default_mathtext!(; font = "neo-euler")
+				@test PlotlySupply._mathjax_svg_font() == "Neo-Euler"
+				set_default_mathtext!()
+			end
+			withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => "bogus") do
+				err = _rl_error(PlotlySupply._mathjax_svg_font)
+				@test err isa ErrorException
+				@test occursin("PLOTLYSUPPLY_MATHJAX_SVG_FONT", err.msg)
+				@test occursin("Gyre-Termes", err.msg)
+				set_default_mathtext!(; font = "TeX")
+				@test PlotlySupply._mathjax_svg_font() == "TeX"
+				set_default_mathtext!()
+			end
+
+			# The page script carries the font and the inherit switch.
+			plain = PlotlySupply._mathjax_config_script("TeX"; inherit_text_font = false)
+			@test occursin("SVG: {font: \"TeX\"}", plain)
+			@test occursin("var INHERIT = false;", plain)
+			@test occursin("\"SVG Jax Ready\"", plain)
+			@test !occursin("__INHERIT__", plain)
+			inherit = PlotlySupply._mathjax_config_script("Asana-Math"; inherit_text_font = true)
+			@test occursin("SVG: {font: \"Asana-Math\"}", inherit)
+			@test occursin("var INHERIT = true;", inherit)
+			@test occursin("mtextFontInherit: true", inherit)
+			# The defaults follow the settings, for every page kind.
+			set_default_mathtext!(; font = "gyre-termes", inherit_text_font = true)
+			for page in (
+				PlotlySupply._mathjax_head_html(),
+				PlotlySupply._export_window_html("rl-export"),
+				PlotlySupply._syncplot_html("rl-div"; autoplay = false, timeout_s = 1.0),
+				String(savefig(Plot(scatter(y = [1, 2])); format = "html")),
+			)
+				@test occursin("SVG: {font: \"Gyre-Termes\"}", page)
+				@test occursin("var INHERIT = true;", page)
+			end
+			set_default_mathtext!()
+			@test occursin(
+				"var INHERIT = false;",
+				PlotlySupply._syncplot_html("rl-div"; autoplay = false, timeout_s = 1.0),
+			)
+		end
+
+		# The size default consults the active PlotStyle when its own is "".
+		_rl_with_mathtext() do
+			@test PlotlySupply._label("Time \$t\$") == "\$\\text{Time }t\$"
+			with_style(:publication) do
+				@test PlotlySupply._label("Time \$t\$") == "\$\\large{\\text{Time }t}\$"
+				@test mathtext("\$x\$") == "\$\\large{x}\$"
+				@test mathtext("\$x\$"; size = "") == "\$x\$"
+				@test mathtext("\$x\$"; size = "small") == "\$\\small{x}\$"
+				@test PlotlySupply._label("plain") == "plain"
+				# The package setting overrides the style.
+				set_default_mathtext!(; size = "\\normalsize")
+				@test PlotlySupply._label("\$x\$") == "\$\\normalsize{x}\$"
+				set_default_mathtext!()
+			end
+			# A style size MathJax 2 does not have fails only for math labels,
+			# and an explicit size still works.
+			with_style(:default; mathsize = "\\footnotesize") do
+				err = _rl_error(() -> PlotlySupply._label("\$x\$"))
+				@test err isa ArgumentError
+				@test occursin("footnotesize", sprint(showerror, err))
+				@test_throws ArgumentError mathtext("\$x\$")
+				@test PlotlySupply._label("plain") == "plain"
+				@test mathtext("\$x\$"; size = "Large") == "\$\\Large{x}\$"
+				set_default_mathtext!(; size = "small")
+				@test PlotlySupply._label("\$x\$") == "\$\\small{x}\$"
+				set_default_mathtext!()
+			end
+		end
+	end
+
+	@testset "live pages reload when the MathJax configuration changes" begin
+		_rl_with_mathtext() do
+			ec = _RLFakeElectron()
+			sp = PlotlySupply._create_syncplot_window(
+				ec,
+				Plot(scatter(y = [1, 2]));
+				app = :fake,
+				show = false,
+				title = "Reload",
+				autoplay = true,
+			)
+			try
+				resources = getfield(sp, :_resources)
+				index = joinpath(resources.tempdir, "index.html")
+				model_file = joinpath(resources.tempdir, PlotlySupply._SYNCPLOT_MODEL_FILENAME)
+				live_title() = sp.plot.layout[:title]
+				@test PlotlySupply._syncplot_page_mathjax(sp) ==
+					(font = "Latin-Modern", inherit_text_font = false)
+				@test occursin("SVG: {font: \"Latin-Modern\"}", read(index, String))
+
+				# An unchanged configuration never reloads.
+				relayout!(sp; title = "a")
+				@test isempty(ec.loads)
+
+				set_default_mathtext!(; font = "TeX", inherit_text_font = true)
+				before = length(ec.scripts)
+				relayout!(sp; title = "b")
+				@test ec.loads == [PlotlySupply._file_uri(index)]
+				page = read(index, String)
+				@test occursin("SVG: {font: \"TeX\"}", page)
+				@test occursin("var INHERIT = true;", page)
+				@test occursin("<title>Reload</title>", page)
+				# A reload never restarts an animation.
+				@test occursin("if (false) Plotly.animate", page)
+				# The page is rebuilt from the committed model ("a"); the update then
+				# runs as usual: readiness handshake, then the relayout script.
+				@test occursin("\"title\":\"a\"", read(model_file, String))
+				@test ec.scripts[before + 1] == PlotlySupply._syncplot_readiness_script()
+				@test length(ec.scripts) == before + 2
+				@test live_title() == "b"
+				@test PlotlySupply._syncplot_page_mathjax(sp) ==
+					(font = "TeX", inherit_text_font = true)
+				@test !resources.renderer_desynchronized
+				relayout!(sp; title = "b2")
+				@test length(ec.loads) == 1
+
+				# A failed reload leaves the model unchanged and marks the renderer
+				# desynchronized; the next update reloads again.
+				set_default_mathtext!(; font = "STIX-Web")
+				ec.load_error = ErrorException("rl load failure")
+				err = _rl_error(() -> relayout!(sp; title = "c"))
+				@test err isa PlotlySupply._SyncPlotDesynchronizationError
+				@test err.recovery_error == ErrorException("rl load failure")
+				@test occursin("rl load failure", sprint(showerror, err))
+				@test live_title() == "b2"
+				@test resources.renderer_desynchronized
+				@test PlotlySupply._syncplot_page_mathjax(sp).font == "TeX"
+				ec.load_error = nothing
+				relayout!(sp; title = "d")
+				@test length(ec.loads) == 2
+				@test live_title() == "d"
+				@test !resources.renderer_desynchronized
+				@test PlotlySupply._syncplot_page_mathjax(sp) ==
+					(font = "STIX-Web", inherit_text_font = false)
+
+				# An interrupt propagates as itself.
+				set_default_mathtext!(; font = "Neo-Euler")
+				ec.load_error = InterruptException()
+				@test_throws InterruptException relayout!(sp; title = "e")
+				@test live_title() == "d"
+				@test resources.renderer_desynchronized
+				ec.load_error = nothing
+
+				# `_syncplot_refresh_page!` applies the configuration without
+				# changing the model.
+				model = sp.plot
+				@test PlotlySupply._syncplot_refresh_page!(sp) === nothing
+				@test length(ec.loads) == 3
+				@test sp.plot === model
+				@test live_title() == "d"
+				@test PlotlySupply._syncplot_page_mathjax(sp).font == "Neo-Euler"
+				@test !resources.renderer_desynchronized
+
+				# An invalid environment font fails the update before any renderer
+				# effect.
+				set_default_mathtext!()
+				withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => "bogus") do
+					scripts = length(ec.scripts)
+					@test_throws ErrorException relayout!(sp; title = "f")
+					@test length(ec.scripts) == scripts
+					@test live_title() == "d"
+				end
+			finally
+				close(sp)
+			end
+			@test !isopen(sp)
+		end
+		# A window cannot be built with an invalid environment font.
+		withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => "bogus") do
+			ec = _RLFakeElectron()
+			@test_throws ErrorException PlotlySupply._create_syncplot_window(
+				ec,
+				Plot(scatter(y = [1]));
+				app = :fake,
+				show = false,
+			)
+			@test isempty(ec.windows)
+		end
+	end
+
+	@testset "react!(sp, ::Plot) follows the window's autoplay setting" begin
+		frames = [frame(name = "rl-ap$(i)", data = [attr(y = [i, i])]) for i in 1:2]
+		for autoplay in (true, false)
+			ec = _RLFakeElectron()
+			sp = PlotlySupply._create_syncplot_window(
+				ec,
+				Plot(scatter(y = [0, 0]));
+				app = :fake,
+				show = false,
+				autoplay = autoplay,
+			)
+			try
+				react!(sp, Plot([scatter(y = [0, 0])], Layout(), frames))
+				@test occursin("if ($(autoplay)) Plotly.animate(div, null)", ec.scripts[end])
+				@test !occursin("await Plotly.animate", ec.scripts[end])
+			finally
+				close(sp)
+			end
+		end
+	end
+
 	@testset "real Electron windows" begin
 		@testset "GC of an unreferenced window leaves the backend usable" begin
 			handle = _rl_unreferenced_real_syncplot()
@@ -663,6 +960,272 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 			finally
 				sp === nothing || close(sp)
 			end
+		end
+
+		@testset "react! starts autoplay without blocking other windows" begin
+			# 40 frames at plotly's default 500 ms per frame play for ~20 s, far
+			# longer than every step below, so "still playing" is deterministic.
+			frames = [frame(name = "rl-np$(i)", data = [attr(y = [i, i])]) for i in 1:40]
+			playback(sp) = PlotlySupply.PlotlyBase.JSON.parse(_rl_js(sp, """
+(() => {
+  const d = document.getElementById($(PlotlySupply._json_js(sp.divid)));
+  const t = d._transitionData || {};
+  return JSON.stringify({y: Array.from(d.data[0].y), queued: (t._frameQueue || []).length,
+    running: !!t._animationRaf});
+})()
+"""))
+			opened = SyncPlot[]
+			try
+				player = push!(opened, to_syncplot(Plot(scatter(y = [0, 0])); show = false))[end]
+				other = push!(opened, to_syncplot(Plot(scatter(y = [5, 5])); show = false))[end]
+				still = push!(opened, to_syncplot(Plot(scatter(y = [0, 0])); show = false, autoplay = false))[end]
+				@test react!(player, Plot([scatter(y = [0, 0])], Layout(), frames)) === player
+				# react! returned while the animation is still playing ...
+				state = playback(player)
+				@test state["running"]
+				@test state["queued"] > 0
+				# ... and another window's update does not wait for it.
+				relayout!(other; title = "not blocked")
+				@test playback(player)["running"]
+				@test _rl_js(other, "document.getElementById($(PlotlySupply._json_js(other.divid)))._fullLayout.title.text") ==
+					"not blocked"
+				# A window created with autoplay = false installs frames without playing.
+				react!(still, Plot([scatter(y = [0, 0])], Layout(), frames))
+				sleep(1.0)
+				quiet = playback(still)
+				@test quiet["y"] == [0, 0]
+				@test !quiet["running"]
+				@test quiet["queued"] == 0
+				@test _rl_js(still, "document.getElementById($(PlotlySupply._json_js(still.divid)))._transitionData._frames.length") == 40
+			finally
+				foreach(close, opened)
+			end
+			@test all(sp -> !isopen(sp), opened)
+		end
+
+		@testset "MathJax labels are typeset after react! and relayout!" begin
+			fig = Plot(
+				scatter(x = [1, 2, 3], y = [1.0, 4.0, 9.0]),
+				Layout(
+					title = attr(text = mathtext(raw"Start $\alpha^2$")),
+					xaxis = attr(title = attr(text = mathtext(raw"$x_i$ (m)"))),
+				),
+			)
+			sp = to_syncplot(fig; show = false)
+			try
+				typeset(name, label) = _rl_wait(; timeout = 30.0) do
+					state = _rl_live_math(sp, name)
+					state !== nothing && state["source"] == label && !isempty(state["glyphs"])
+				end
+				@test typeset("gtitle", mathtext(raw"Start $\alpha^2$"))
+				@test typeset("xtitle", mathtext(raw"$x_i$ (m)"))
+
+				after_relayout = mathtext(raw"After relayout $\beta_0$")
+				relayout!(sp; title = attr(text = after_relayout))
+				@test typeset("gtitle", after_relayout)
+				@test typeset("xtitle", mathtext(raw"$x_i$ (m)"))
+
+				ylabel = mathtext(raw"Energy $E^2$ (J)")
+				react!(sp, Plot(
+					scatter(x = [1, 2, 3], y = [9.0, 4.0, 1.0]),
+					Layout(yaxis = attr(title = attr(text = ylabel))),
+				))
+				@test typeset("ytitle", ylabel)
+				# The previous labels are gone with the old layout.
+				@test _rl_live_math(sp, "gtitle") === nothing
+				@test _rl_live_math(sp, "xtitle") === nothing
+				@test !getfield(sp, :_resources).renderer_desynchronized
+				if !isempty(_RL_FIGURES)
+					relayout!(sp; title = attr(text = after_relayout))
+					@test typeset("gtitle", after_relayout)
+					url = to_image(sp; format = "png", width = 700, height = 500)
+					write(
+						joinpath(_RL_FIGURES, "live_mathjax_after_updates.png"),
+						base64decode(split(url, ","; limit = 2)[2]),
+					)
+				end
+			finally
+				close(sp)
+			end
+			@test !isopen(sp)
+		end
+
+		@testset "set_default_mathtext! reaches open windows and every export" begin
+			label = mathtext(raw"Contrast $\lambda$ and $\textbf{bold}\ x$")
+			fig() = Plot(
+				scatter(x = [1, 2, 3], y = [1.0, 4.0, 9.0]),
+				Layout(
+					font = attr(family = "Courier New, monospace", size = 16),
+					title = attr(text = label),
+				),
+			)
+			_rl_with_mathtext() do
+				# Live window: built with Latin-Modern, then the settings change.
+				sp = to_syncplot(fig(); show = false)
+				try
+					@test _rl_wait(; timeout = 30.0) do
+						state = _rl_live_math(sp, "gtitle")
+						state !== nothing && !isempty(state["glyphs"])
+					end
+					state = _rl_live_math(sp, "gtitle")
+					@test all(startswith("LATINMODERN"), state["glyphs"])
+					@test all(isnothing, state["families"])
+
+					set_default_mathtext!(; font = "TeX", inherit_text_font = true)
+					relabel = mathtext(raw"Reloaded $\lambda$ and $\textbf{bold}\ x$")
+					relayout!(sp; title = attr(text = relabel))
+					@test PlotlySupply._syncplot_page_mathjax(sp) ==
+						(font = "TeX", inherit_text_font = true)
+					@test _rl_wait(; timeout = 30.0) do
+						state = _rl_live_math(sp, "gtitle")
+						state !== nothing && state["source"] == relabel && !isempty(state["glyphs"])
+					end
+					state = _rl_live_math(sp, "gtitle")
+					@test all(startswith("MJ"), state["glyphs"])
+					# Every text run of the label is drawn in the figure font.
+					@test !isempty(state["families"])
+					@test all(f -> f !== nothing && occursin("Courier New", f), state["families"])
+					@test sp.plot.layout[:title][:text] == relabel
+					@test !getfield(sp, :_resources).renderer_desynchronized
+					if !isempty(_RL_FIGURES)
+						url = to_image(sp; format = "png", width = 700, height = 500)
+						write(
+							joinpath(_RL_FIGURES, "live_reloaded_tex_inherit.png"),
+							base64decode(split(url, ","; limit = 2)[2]),
+						)
+					end
+				finally
+					close(sp)
+				end
+				@test !isopen(sp)
+
+				# Export window: reused while the configuration is unchanged,
+				# rebuilt as soon as it changes.
+				set_default_mathtext!()
+				svg() = String(savefig(fig(); format = "svg", width = 600, height = 400))
+				inherited(svg) = occursin(r"<text[^>]*font-family=\"[^\"]*Courier New", svg)
+				first_svg = svg()
+				@test "LATINMODERNMAIN" in _rl_glyph_sets(first_svg)
+				@test all(startswith("LATINMODERN"), _rl_glyph_sets(first_svg))
+				@test !inherited(first_svg)
+				window = PlotlySupply._EXPORT_STATE.window
+				svg()
+				@test PlotlySupply._EXPORT_STATE.window === window
+
+				set_default_mathtext!(; font = "gyre-termes")
+				termes = svg()
+				@test !isempty(_rl_glyph_sets(termes))
+				@test all(startswith("GYRETERMES"), _rl_glyph_sets(termes))
+				@test !inherited(termes)
+				@test PlotlySupply._EXPORT_STATE.window !== window
+				@test PlotlySupply._EXPORT_STATE.mathjax_font == "Gyre-Termes"
+				@test !PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font
+				window = PlotlySupply._EXPORT_STATE.window
+
+				set_default_mathtext!(; font = "Gyre-Termes", inherit_text_font = true)
+				inherit_svg = svg()
+				@test all(startswith("GYRETERMES"), _rl_glyph_sets(inherit_svg))
+				@test inherited(inherit_svg)
+				@test PlotlySupply._EXPORT_STATE.window !== window
+				@test PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font
+				# PDF export of an inherited label works (a `"` in a font list
+				# used to break plotly's SVG serialization).
+				pdf = savefig(fig(); format = "pdf", width = 600, height = 400)
+				@test String(pdf[1:5]) == "%PDF-"
+				if !isempty(_RL_FIGURES)
+					savefig(fig(), joinpath(_RL_FIGURES, "export_termes_inherit.png"); width = 700, height = 500)
+					set_default_mathtext!()
+					savefig(fig(), joinpath(_RL_FIGURES, "export_default.png"); width = 700, height = 500)
+				end
+			end
+			# Back to the defaults: the next export rebuilds the window again.
+			restored = _rl_glyph_sets(String(savefig(fig(); format = "svg")))
+			@test "LATINMODERNMAIN" in restored
+			@test all(startswith("LATINMODERN"), restored)
+			@test PlotlySupply._EXPORT_STATE.mathjax_font == "Latin-Modern"
+			@test !PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font
+		end
+
+		@testset "shape, image, JSON and devtools entry points" begin
+			months = collect(Date(2007, 1, 1):Month(1):Date(2010, 12, 1))
+			sp = to_syncplot(
+				Plot(scatter(x = months, y = collect(1.0:length(months)))),
+				show = false,
+			)
+			try
+				live(expr) = _rl_js(sp, """
+(() => {
+  const d = document.getElementById($(PlotlySupply._json_js(sp.divid)));
+  return JSON.stringify($expr);
+})()
+""")
+				live_shapes() = PlotlySupply.PlotlyBase.JSON.parse(live(
+					"d._fullLayout.shapes.map(s => [s.type, s.xref, s.yref, s.x0, s.x1, s.y0, s.y1])",
+				))
+				model_shapes() = sp.plot.layout[:shapes]
+
+				@test add_vline!(sp, "2008-06-01"; line_color = "red") === sp
+				@test length(model_shapes()) == 1
+				@test live_shapes() == [["line", "x", "y domain", "2008-06-01", "2008-06-01", 0, 1]]
+
+				@test add_hrect!(sp, 2.0, 5.0; fillcolor = "blue", opacity = 0.2) === sp
+				@test live_shapes()[2] == ["rect", "x domain", "y", 0, 1, 2, 5]
+
+				@test add_vrect!(sp, "2009-01-01", "2009-06-01") === sp
+				@test live_shapes()[3] == ["rect", "x", "y domain", "2009-01-01", "2009-06-01", 0, 1]
+
+				@test add_shape!(sp, attr(type = "circle", x0 = "2010-01-01", x1 = "2010-03-01", y0 = 30, y1 = 40)) === sp
+				@test live_shapes()[4] == ["circle", "x", "y", "2010-01-01", "2010-03-01", 30, 40]
+				@test length(model_shapes()) == 4
+
+				# A 1x1 transparent PNG.
+				pixel = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+				@test add_layout_image!(sp, attr(source = pixel, x = 0.1, y = 0.9, sizex = 0.2, sizey = 0.2)) === sp
+				@test length(sp.plot.layout[:images]) == 1
+				@test PlotlySupply.PlotlyBase.JSON.parse(live(
+					"d._fullLayout.images.map(i => [i.source.length, i.xref, i.yref, i.x, i.y])",
+				)) == [[length(pixel), "x domain", "y domain", 0.1, 0.9]]
+
+				# The 2007-2009 recession overlaps the data: one band, appended
+				# after the existing shapes and returned.
+				existing = live_shapes()
+				bands = add_recession_bands!(sp)
+				@test length(bands) == 5
+				@test length(model_shapes()) == 5
+				shapes = live_shapes()
+				@test length(shapes) == 5
+				@test shapes[1:4] == existing
+				# PlotlyBase's recession_dates.tsv row "2008-01-01  2009-07-01".
+				@test shapes[5] == ["rect", "x", "paper", "2008-01-01", "2009-07-01", 0, 1]
+				@test !getfield(sp, :_resources).renderer_desynchronized
+
+				mktempdir() do dir
+					path = joinpath(dir, "fig.json")
+					@test savejson(sp, path) === sp.plot
+					saved = PlotlySupply.PlotlyBase.JSON.parsefile(path)
+					@test length(saved["layout"]["shapes"]) == 5
+					@test length(saved["layout"]["images"]) == 1
+					@test length(saved["data"][1]["x"]) == length(months)
+					@test_throws ArgumentError savejson(sp, joinpath(dir, "fig.png"))
+					@test !isfile(joinpath(dir, "fig.png"))
+				end
+
+				ec = PlotlySupply._syncplot_backend(sp)
+				devtools_open() = Base.invokelatest(() -> ec.run(
+					sp.window.app,
+					"require('electron').BrowserWindow.fromId($(sp.window.id)).webContents.isDevToolsOpened()",
+				))
+				@test !devtools_open()
+				@test toggle_devtools(sp) === nothing
+				@test _rl_wait(devtools_open; timeout = 10.0)
+				@test toggle_devtools(sp) === nothing
+				@test _rl_wait(() -> !devtools_open(); timeout = 10.0)
+				@test isopen(sp)
+			finally
+				close(sp)
+			end
+			@test !isopen(sp)
+			@test_throws InvalidStateException toggle_devtools(sp)
 		end
 	end
 end

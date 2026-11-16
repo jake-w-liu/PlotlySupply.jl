@@ -466,7 +466,7 @@ function _syncplot_refresh_page!(sp::SyncPlot)
 	prepare = (target, current) -> (
 		script = nothing,
 		operation = "page refresh",
-		commit = () -> current,
+		commit = () -> nothing,
 	)
 	_syncplot_transaction!(sp, prepare)
 	return nothing

@@ -293,22 +293,22 @@ end
 	end
 
 	@testset "default settings" begin
-		@test get_default_mathtext() == (enabled = true, size = "")
+		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = false)
 		_with_mathtext_settings(true; size = "large") do
-			@test get_default_mathtext() == (enabled = true, size = "\\large")
+			@test get_default_mathtext() == (enabled = true, size = "\\large", font = "", inherit_text_font = false)
 			@test PlotlySupply._label("Time \$t\$") == "\$\\large{\\text{Time }t}\$"
 			@test mathtext("\$x\$") == "\$\\large{x}\$"
 			@test mathtext("\$x\$"; size = "") == "\$x\$"
 			@test PlotlySupply._label("plain") == "plain"
 		end
-		@test get_default_mathtext() == (enabled = true, size = "")
+		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = false)
 		# Validation happens before the settings change.
 		@test_throws ArgumentError set_default_mathtext!(true; size = "\\footnotesize")
-		@test get_default_mathtext() == (enabled = true, size = "")
+		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = false)
 		# Return value and replacement semantics.
 		try
-			@test set_default_mathtext!(false; size = "\\small") == (enabled = false, size = "\\small")
-			@test set_default_mathtext!() == (enabled = true, size = "")
+			@test set_default_mathtext!(false; size = "\\small") == (enabled = false, size = "\\small", font = "", inherit_text_font = false)
+			@test set_default_mathtext!() == (enabled = true, size = "", font = "", inherit_text_font = false)
 		finally
 			set_default_mathtext!()
 		end

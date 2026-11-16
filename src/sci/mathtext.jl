@@ -280,7 +280,7 @@ function _label(s::AbstractString; align::Symbol = :c)::String
 	settings = _MATHTEXT_SETTINGS[]
 	column = _mathtext_align_column(align, "mathtext")
 	settings.enabled || return _mathtext_newlines_to_br(String(s))
-	return _mathtext(String(s), column, _mathtext_default_size())
+	return _mathtext(String(s), column, nothing)
 end
 
 """
@@ -351,7 +351,7 @@ function mathtext(
 	size::Union{Nothing,AbstractString} = nothing,
 )::String
 	column = _mathtext_align_column(align, "mathtext")
-	normalized_size = size === nothing ? _mathtext_default_size() :
+	normalized_size = size === nothing ? nothing :
 		_normalize_mathtext_size(size, "mathtext")
 	return _mathtext(String(s), column, normalized_size)
 end
@@ -363,14 +363,18 @@ function _mathtext_newlines_to_br(s::String)
 	return replace(s, r"\r\n|\r|\n" => "<br>")
 end
 
-function _mathtext(s::String, column::Char, size::String)::String
+# `size === nothing` means the default size (`_mathtext_default_size`). It is
+# resolved only for labels that contain math, so plain labels never depend on
+# (or fail because of) the active style's `mathsize`.
+function _mathtext(s::String, column::Char, size::Union{Nothing,String})::String
 	isvalid(s) || throw(ArgumentError("mathtext: label is not valid UTF-8: $(repr(s))."))
 	chars = collect(s)
 	segments = _mathtext_segments(chars, s)
 	if all(segment -> segment[1] === :text, segments)
 		return _mathtext_plain(chars)
 	end
-	return _mathtext_compose(segments, s, column, size)
+	resolved = size === nothing ? _mathtext_default_size() : size
+	return _mathtext_compose(segments, s, column, resolved)
 end
 
 # Number of consecutive backslashes immediately before position `k`.
