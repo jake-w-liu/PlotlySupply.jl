@@ -1837,7 +1837,9 @@ end
         @test fig.layout.fields[:legend][:yanchor] == "bottom"
 
         set_legend!(fig; position=:outside_left)
-        @test fig.layout.fields[:legend][:xanchor] == "right"
+        # 2.0 (C11): anchored to the left edge of the figure container
+        @test fig.layout.fields[:legend][:xanchor] == "left"
+        @test fig.layout.fields[:legend][:xref] == "container"
         @test fig.layout.fields[:legend][:yanchor] == "top"
 
         set_legend!(fig; position=:outside_top)
@@ -1846,7 +1848,9 @@ end
 
         set_legend!(fig; position=:outside_bottom)
         @test fig.layout.fields[:legend][:xanchor] == "center"
-        @test fig.layout.fields[:legend][:yanchor] == "top"
+        # 2.0 (C11): anchored to the bottom edge of the figure container
+        @test fig.layout.fields[:legend][:yanchor] == "bottom"
+        @test fig.layout.fields[:legend][:yref] == "container"
     end
 
     @testset "box/violin shared-x multi-trace (non-!)" begin
