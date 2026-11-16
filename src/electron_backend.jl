@@ -1194,37 +1194,6 @@ function _release_plot_syncplot_reservation!(
 	return true
 end
 
-function _maybe_sync_refresh!(p::Plot)
-	while true
-		sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
-			get(_PLOT_SYNCPLOT_MAP, p, nothing)
-		end
-		sp === nothing && return nothing
-
-		prepare = function (target, current)
-			script = _plotlyjs_refresh_script(
-				target,
-				current.data,
-				current.layout;
-				model = current,
-			)
-			commit = () -> current
-			return (
-				script = script,
-				operation = "react",
-				commit = commit,
-			)
-		end
-		status = _syncplot_transaction_status!(
-			sp,
-			prepare;
-			required_plot = p,
-		)
-		status === :committed && return nothing
-		yield()
-	end
-end
-
 function _try_local_plot_mutation!(mutation, p::Plot)
 	reservation = lock(_SYNCPLOT_REGISTRY_LOCK) do
 		(haskey(_PLOT_SYNCPLOT_MAP, p) ||
@@ -1252,28 +1221,6 @@ function _try_local_plot_mutation!(mutation, p::Plot)
 			end
 		finally
 			notify(reservation.done::Base.Event)
-		end
-	end
-end
-
-function _maybe_sync_command!(p::Plot, command::Symbol)
-	while true
-		sp = lock(_SYNCPLOT_REGISTRY_LOCK) do
-			get(_PLOT_SYNCPLOT_MAP, p, nothing)
-		end
-		sp === nothing && return nothing
-
-		resources = getfield(sp, :_resources)
-		lock(resources.render_lock)
-		try
-			still_mapped = lock(_SYNCPLOT_REGISTRY_LOCK) do
-				get(_PLOT_SYNCPLOT_MAP, p, nothing) === sp
-			end
-			still_mapped || continue
-			_plotlyjs_command!(sp, command)
-			return nothing
-		finally
-			unlock(resources.render_lock)
 		end
 	end
 end
@@ -1323,7 +1270,12 @@ function _do_relayout!(p::Plot, args...; kwargs...)
 			;
 			strict = !(p.layout isa Layout),
 		)
-	relayout!(staged_layout, prepared_args...; prepared_kwargs...)
+	_apply_relayout_setters!(
+		staged_layout,
+		prepared_args,
+		prepared_kwargs,
+		:relayout!,
+	)
 	_rebase_staged_layout!(p.layout, staged_layout, memo)
 	expanded = _expand_staged_alias_roots!(
 		p,
@@ -1759,6 +1711,315 @@ _clone_layout_for_mutation(
 _clone_layout_for_mutation(layout::AbstractLayout) =
 	_clone_layout_for_mutation(layout, IdDict{Any,Any}())
 
+# ── Setter application on staged clones ─────────────────────────────
+# relayout!/restyle!/update! apply PlotlyBase's own setters to a staged clone of
+# a standard Layout or GenericTrace. Three mismatches between PlotlyBase and
+# plotly.js are reconciled on that clone (so a failed call never changes the
+# model), keeping the committed model equal to what the renderer shows:
+#   1. A scalar `title` (plotly.js's legacy string form, written by many
+#      builders and by `Layout(title = "...")`) cannot receive PlotlyBase's
+#      nested writes (`title_x`, `title_font_size`, `title = attr(...)`). It is
+#      promoted to `Dict(:text => title)` first. plotly.js normalizes a string
+#      title to exactly that object, so rendering is unchanged.
+#   2. A Symbol key containing '.' (for example `Symbol("marker.color")`) is a
+#      plotly.js property path. The renderer applies it as a nested path, so the
+#      model stores it nested too (split on '.' only, so `error_y` survives).
+#   3. A `nothing` written by the call is plotly.js's `null`, which removes the
+#      attribute. The key is deleted instead of committing a null container
+#      that plotly.js newPlot/react (and therefore savefig) cannot render.
+
+# Attributes whose values are arbitrary JSON, where a nested null is data.
+const _PLOTLY_ARBITRARY_JSON_ATTRIBUTES = (:meta, :geojson, :labelalias)
+
+_is_scalar_plotly_title(value) =
+	value isa AbstractString ||
+	value isa Symbol ||
+	value isa AbstractChar ||
+	(value isa Real && !(value isa Bool))
+
+_setter_container_fields(container::AbstractDict) = container
+_setter_container_fields(
+	container::PlotlyBase.AbstractPlotlyAttribute,
+) = container.fields
+_setter_container_fields(container) = nothing
+
+_setter_path_symbol(key::Symbol) = key
+_setter_path_symbol(key::AbstractString) = Symbol(key)
+_setter_path_symbol(key) = nothing
+
+function _nested_setter_write_paths!(
+	paths::Vector{Vector{Symbol}},
+	keys::Vector{Symbol},
+	value,
+)
+	if value isa PlotlyBase._LikeAssociative &&
+			!PlotlyBase._is_assoc_attr_value(last(keys), value)
+		for (child_key, child) in value
+			child_symbol = _setter_path_symbol(child_key)
+			child_symbol === nothing && continue
+			_nested_setter_write_paths!(
+				paths,
+				Symbol[keys..., child_symbol],
+				child,
+			)
+		end
+	else
+		push!(paths, keys)
+	end
+	return paths
+end
+
+# The nested key paths written by PlotlyBase's `setindex!(hf, value, key)`
+# (PlotlyBase traces_layouts.jl): an underscore key splits on '.' and '_'
+# unless it is one of `_UNDERSCORE_ATTRS`; the four `*title` keys receiving a
+# String/Symbol write `*_text`; an associative value expands into one write per
+# leaf unless the key is an associative attribute (geojson, labelalias).
+function _setter_write_paths(key::Symbol, value)
+	paths = Vector{Symbol}[]
+	text = string(key)
+	if occursin('_', text)
+		if key in (:xaxis_title, :yaxis_title, :zaxis_title, :title) &&
+				(value isa String || value isa Symbol)
+			key = Symbol(key, :_text)
+			text = string(key)
+		end
+		if !(key in PlotlyBase._UNDERSCORE_ATTRS)
+			if PlotlyBase._is_assoc_attr_value(text, value)
+				push!(paths, Symbol[key])
+			else
+				parts = Symbol[
+					Symbol(part) for part in split(text, ('.', '_'))
+				]
+				_nested_setter_write_paths!(paths, parts, value)
+			end
+			return paths
+		end
+	end
+	if value isa PlotlyBase._LikeAssociative &&
+			!PlotlyBase._is_assoc_attr_value(key, value)
+		for (child_key, child) in value
+			child_symbol = _setter_path_symbol(child_key)
+			child_symbol === nothing && continue
+			_nested_setter_write_paths!(
+				paths,
+				Symbol[key, child_symbol],
+				child,
+			)
+		end
+	else
+		push!(paths, Symbol[key])
+	end
+	return paths
+end
+
+function _promote_scalar_titles_on_path!(
+	fields::AbstractDict,
+	path::Vector{Symbol},
+)
+	container = fields
+	for depth in 1:(length(path) - 1)
+		key = path[depth]
+		haskey(container, key) || return nothing
+		child = container[key]
+		if key === :title &&
+				_is_scalar_plotly_title(child) &&
+				Dict{Any,Any} <: valtype(container)
+			child = Dict{Any,Any}(:text => child)
+			container[key] = child
+		end
+		next = _setter_container_fields(child)
+		next === nothing && return nothing
+		container = next
+	end
+	return nothing
+end
+
+function _drop_written_nothing!(
+	fields::AbstractDict,
+	path::Vector{Symbol},
+)
+	isempty(path) && return nothing
+	container = fields
+	for depth in 1:(length(path) - 1)
+		key = path[depth]
+		key in _PLOTLY_ARBITRARY_JSON_ATTRIBUTES && return nothing
+		haskey(container, key) || return nothing
+		next = _setter_container_fields(container[key])
+		next === nothing && return nothing
+		container = next
+	end
+	leaf = last(path)
+	haskey(container, leaf) &&
+		container[leaf] === nothing &&
+		delete!(container, leaf)
+	return nothing
+end
+
+# A Symbol key that plotly.js would interpret as a property path. Returns its
+# segments, or `nothing` for an ordinary key.
+function _plotly_property_path(key, verb::Symbol)
+	key isa Symbol || return nothing
+	text = String(key)
+	has_index = occursin('[', text) || occursin(']', text)
+	(has_index || occursin('.', text)) || return nothing
+	has_index && throw(ArgumentError(
+		"$verb: key `$text` addresses an array element; array-index " *
+		"property paths are not supported. Assign the whole array instead.",
+	))
+	parts = split(text, '.')
+	any(isempty, parts) && throw(ArgumentError(
+		"$verb: key `$text` is not a valid property path " *
+		"(it has an empty segment).",
+	))
+	return Symbol[Symbol(part) for part in parts]
+end
+
+# plotly.js's nestedProperty set: walk the path, creating (or replacing
+# non-object) intermediate containers, then assign the leaf wholesale. A scalar
+# title met on the way is promoted like PlotlyBase writes are.
+function _set_plotly_property_path!(
+	fields::AbstractDict,
+	path::Vector{Symbol},
+	value,
+)
+	container = fields
+	for depth in 1:(length(path) - 1)
+		key = path[depth]
+		child = get(container, key, nothing)
+		if key === :title && _is_scalar_plotly_title(child)
+			child = Dict{Any,Any}(:text => child)
+			container[key] = child
+		end
+		next = _setter_container_fields(child)
+		if next === nothing
+			next = Dict{Any,Any}()
+			container[key] = next
+		end
+		container = next
+	end
+	container[last(path)] = value
+	_drop_written_nothing!(fields, path)
+	return nothing
+end
+
+function _apply_plotlybase_setter!(
+	target::PlotlyBase.HasFields,
+	key::Symbol,
+	value,
+	verb::Symbol,
+)
+	fields = target.fields
+	path = _plotly_property_path(key, verb)
+	if path !== nothing
+		_set_plotly_property_path!(fields, path, value)
+		return target
+	end
+	paths = _setter_write_paths(key, value)
+	for written in paths
+		_promote_scalar_titles_on_path!(fields, written)
+	end
+	setindex!(target, value, key)
+	for written in paths
+		_drop_written_nothing!(fields, written)
+	end
+	return target
+end
+
+# Raw dictionary merge (PlotlyBase's `merge!(fields, update)` for relayout and
+# `_apply_restyle_setindex!(fields, ...)` for restyle). Property-path keys are
+# applied after the plain keys, so a nested path refines a container replaced
+# by the same call instead of being overwritten by it.
+function _merge_raw_setter_dict!(
+	fields::AbstractDict,
+	update::AbstractDict,
+	verb::Symbol,
+	value_for = identity,
+)
+	property_paths = Pair{Vector{Symbol},Any}[]
+	for (key, value) in update
+		path = _plotly_property_path(key, verb)
+		if path === nothing
+			fields[key] = value_for(value)
+			key isa Symbol && _drop_written_nothing!(fields, Symbol[key])
+		else
+			push!(property_paths, path => value_for(value))
+		end
+	end
+	for (path, value) in property_paths
+		_set_plotly_property_path!(fields, path, value)
+	end
+	return fields
+end
+
+function _apply_relayout_setters!(
+	layout::AbstractLayout,
+	args,
+	kwargs,
+	verb::Symbol,
+)
+	standard =
+		layout isa Layout &&
+		length(args) <= 1 &&
+		all(arg -> arg isa AbstractDict || arg isa Layout, args)
+	if !standard
+		# Third-party layouts and unsupported argument shapes keep PlotlyBase's
+		# own dispatch (including its errors).
+		relayout!(layout, args...; kwargs...)
+		return layout
+	end
+	for arg in args
+		if arg isa Layout
+			# relayout!(::Layout, ::Layout) merges through setindex!.
+			for (key, value) in arg.fields
+				_apply_plotlybase_setter!(layout, key, value, verb)
+			end
+		else
+			_merge_raw_setter_dict!(layout.fields, arg, verb)
+		end
+	end
+	for (key, value) in kwargs
+		_apply_plotlybase_setter!(layout, key, value, verb)
+	end
+	return layout
+end
+
+# PlotlyBase `_apply_restyle_setindex!`: an array or tuple value supplies the
+# entry for the trace's position in the call; any other value applies as is.
+_restyle_position_value(value, position::Int) =
+	(value isa AbstractArray || value isa Tuple) ?
+	value[position] :
+	value
+
+function _apply_restyle_setters!(
+	trace::AbstractTrace,
+	position::Int,
+	update::AbstractDict,
+	kwargs,
+	verb::Symbol,
+)
+	if !(trace isa GenericTrace) || !all(key -> key isa Symbol, keys(update))
+		# Third-party traces and non-Symbol update keys keep PlotlyBase's own
+		# dispatch (including its errors).
+		restyle!(trace, position, update; kwargs...)
+		return trace
+	end
+	_merge_raw_setter_dict!(
+		trace.fields,
+		update,
+		verb,
+		value -> _restyle_position_value(value, position),
+	)
+	for (key, value) in kwargs
+		_apply_plotlybase_setter!(
+			trace,
+			key,
+			_restyle_position_value(value, position),
+			verb,
+		)
+	end
+	return trace
+end
+
 function _prepare_relayout_inputs(
 	args,
 	kwargs,
@@ -1771,10 +2032,13 @@ function _prepare_relayout_inputs(
 		arg -> _prepare_setter_input(arg, memo, strict),
 		args,
 	)
-	prepared_kwargs = Dict{Symbol,Any}(
+	# PlotlyBase's relayout!(::Layout; kwargs...) applies keywords in call
+	# order, so later keywords win over earlier overlapping ones. Keep that
+	# order instead of re-keying through a hash-ordered Dict.
+	prepared_kwargs = Pair{Symbol,Any}[
 		key => _prepare_setter_input(value, memo, strict)
 		for (key, value) in pairs(kwargs)
-	)
+	]
 	if setter_origins !== nothing
 		seen = IdDict{Any,Nothing}()
 		for (value, prepared) in zip(args, prepared_args)
@@ -1790,14 +2054,14 @@ function _prepare_relayout_inputs(
 					prepared,
 				)
 		end
-		for (key, value) in pairs(kwargs)
+		for ((_, value), (_, prepared)) in
+				zip(pairs(kwargs), prepared_kwargs)
 			_collect_setter_memoized_identities!(
 				setter_origins,
 				value,
 				memo,
 				seen,
 			)
-			prepared = prepared_kwargs[key]
 			prepared === value &&
 				_collect_passthrough_setter_roots!(
 					setter_origins,
@@ -2939,6 +3203,14 @@ function _graph_reaches_staged_node(
 	end
 	haskey(memo, value) && return true
 	value isa BigInt && return false
+	# Built-in storage whose element type cannot carry identity (for example
+	# each Vector{Float64} inside customdata::Vector{Vector{Float64}}) never
+	# reaches a staged node unless it is itself memoized, which was checked
+	# above. Returning before `seen` bookkeeping avoids two IdDict operations
+	# per numeric leaf array; the traversal below would return false anyway.
+	_is_builtin_element_storage(value) &&
+		!_candidate_array_elements_may_carry_identity(eltype(value)) &&
+		return false
 	haskey(seen, value) && return false
 	seen[value] = nothing
 
@@ -3424,49 +3696,78 @@ function _prepare_restyle_inputs(
 	memo::IdDict{Any,Any},
 	setter_origins::Union{Nothing,IdDict{Any,Nothing}} = nothing,
 	strict::Bool = false,
+	verb::Symbol = :restyle!,
 )
 	# Widen the copied dictionary so vector preparation can replace narrowly
 	# typed values without changing the caller's object.
 	prepared_update = Dict{Any,Any}(pairs(update))
-	prepared_kwargs = Dict{Symbol,Any}(kwargs)
-	for values in (prepared_update, prepared_kwargs)
-		for (key, value) in values
-			prepared = vectorized ?
-				PlotlyBase._prep_restyle_vec_setindex(
-					value,
-					trace_count,
-				) :
-				value
-			staged_value =
-				_prepare_setter_input(prepared, memo, strict)
-			values[key] = staged_value
-			setter_origins === nothing ||
-				_collect_setter_memoized_identities!(
-					setter_origins,
-					prepared,
-					memo,
-				)
-			if setter_origins !== nothing &&
-					staged_value === prepared
-				_collect_passthrough_setter_roots!(
-					setter_origins,
-					staged_value,
-				)
-				if vectorized &&
-						(
-							staged_value isa AbstractArray ||
-							staged_value isa Tuple
-						)
-					for position in 1:trace_count
-						child = staged_value[position]
-						_collect_passthrough_setter_roots!(
-							setter_origins,
-							child,
-						)
-					end
+	# PlotlyBase applies scalar restyle keywords in call order
+	# (`_update_fields`), and vectorized ones in the order of the
+	# `Dict{Symbol,Any}(kwargs)` it builds. Mirror both exactly.
+	prepared_kwargs = vectorized ?
+		collect(Pair{Symbol,Any}, Dict{Symbol,Any}(kwargs)) :
+		collect(Pair{Symbol,Any}, pairs(kwargs))
+	stage_value = function (key, value)
+		if (value isa AbstractArray || value isa Tuple) &&
+				isempty(value) &&
+				trace_count > 0
+			kind = value isa Tuple ? "tuple" : "array"
+			throw(ArgumentError(
+				vectorized ?
+				"$verb: the value for attribute `$key` is an empty $kind; " *
+				"vectorized values are applied per target trace (cycled), " *
+				"so supply at least one entry, or wrap an array in a " *
+				"1-tuple (for example `y = (Float64[],)`) to assign the " *
+				"same array to every trace." :
+				"$verb: the value for attribute `$key` is an empty $kind; " *
+				"an array or tuple value supplies the trace's value as its " *
+				"first entry, so wrap an array in a 1-tuple (for example " *
+				"`y = (Float64[],)`) to assign the array itself.",
+			))
+		end
+		# With no target trace the value is never indexed or applied.
+		prepared = vectorized && trace_count > 0 ?
+			PlotlyBase._prep_restyle_vec_setindex(
+				value,
+				trace_count,
+			) :
+			value
+		staged_value =
+			_prepare_setter_input(prepared, memo, strict)
+		setter_origins === nothing ||
+			_collect_setter_memoized_identities!(
+				setter_origins,
+				prepared,
+				memo,
+			)
+		if setter_origins !== nothing &&
+				staged_value === prepared
+			_collect_passthrough_setter_roots!(
+				setter_origins,
+				staged_value,
+			)
+			if vectorized &&
+					(
+						staged_value isa AbstractArray ||
+						staged_value isa Tuple
+					)
+				for position in 1:trace_count
+					child = staged_value[position]
+					_collect_passthrough_setter_roots!(
+						setter_origins,
+						child,
+					)
 				end
 			end
 		end
+		return staged_value
+	end
+	for (key, value) in prepared_update
+		prepared_update[key] = stage_value(key, value)
+	end
+	for ind in eachindex(prepared_kwargs)
+		key, value = prepared_kwargs[ind]
+		prepared_kwargs[ind] = key => stage_value(key, value)
 	end
 	return prepared_update, prepared_kwargs
 end
@@ -3479,6 +3780,7 @@ function _stage_restyle(
 	vectorized::Bool,
 	memo::IdDict{Any,Any} = IdDict{Any,Any}(),
 	setter_origins::Union{Nothing,IdDict{Any,Nothing}} = nothing,
+	verb::Symbol = :restyle!,
 )
 	for ind in inds
 		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
@@ -3510,92 +3812,20 @@ function _stage_restyle(
 			original -> !(original isa GenericTrace),
 			keys(staged),
 		),
+		verb = verb,
 	)
 
 	for (position, ind) in enumerate(inds)
 		trace = staged[p.data[ind]]
-		restyle!(trace, position, prepared_update; prepared_kwargs...)
+		_apply_restyle_setters!(
+			trace,
+			position,
+			prepared_update,
+			prepared_kwargs,
+			verb,
+		)
 	end
 	return staged
-end
-
-function _collect_changed_mutation_containers!(
-	changed::IdDict{Any,Nothing},
-	original,
-	staged,
-	memo::IdDict{Any,Any},
-)
-	original === staged && return false
-	container_changed =
-		!_staged_graph_unchanged(original, staged, memo)
-	if container_changed &&
-			!(
-				isbits(original) ||
-				original isa Symbol ||
-				original isa String ||
-				original isa Type ||
-				original isa Module ||
-				original isa BigInt ||
-				original isa BigFloat
-			)
-		changed[original] = nothing
-	end
-	return container_changed
-end
-
-function _collect_changed_mutation_containers!(
-	changed::IdDict{Any,Nothing},
-	original::AbstractDict,
-	staged::AbstractDict,
-	memo::IdDict{Any,Any},
-)
-	original === staged && return false
-	if !haskey(memo, original) || memo[original] !== staged
-		return true
-	end
-
-	container_changed = length(original) != length(staged)
-	for (key, original_child) in original
-		if !haskey(staged, key)
-			container_changed = true
-			continue
-		end
-		staged_child = staged[key]
-		if haskey(memo, original_child) &&
-				memo[original_child] === staged_child
-			container_changed |=
-				_collect_changed_mutation_containers!(
-					changed,
-					original_child,
-					staged_child,
-					memo,
-				)
-		else
-			container_changed |= original_child !== staged_child
-		end
-	end
-	container_changed && (changed[original] = nothing)
-	return container_changed
-end
-
-function _collect_changed_mutation_containers!(
-	changed::IdDict{Any,Nothing},
-	original::PlotlyBase.AbstractPlotlyAttribute,
-	staged::PlotlyBase.AbstractPlotlyAttribute,
-	memo::IdDict{Any,Any},
-)
-	original === staged && return false
-	if !haskey(memo, original) || memo[original] !== staged
-		return true
-	end
-	container_changed = _collect_changed_mutation_containers!(
-		changed,
-		original.fields,
-		staged.fields,
-		memo,
-	)
-	container_changed && (changed[original] = nothing)
-	return container_changed
 end
 
 function _collect_changed_graph_nodes!(
@@ -4888,25 +5118,6 @@ function _commit_incremental_outer_roots!(
 	return p
 end
 
-function _incremental_candidate_model(
-	p::Plot,
-	data,
-	layout,
-	expanded,
-)
-	return Plot(
-		data,
-		layout,
-		expanded.frames === nothing ?
-			p.frames :
-			expanded.frames,
-		p.divid,
-		expanded.config === nothing ?
-			p.config :
-			expanded.config,
-	)
-end
-
 function _prepare_restyle_replacement_data(
 	p::Plot,
 	staged::IdDict{AbstractTrace,AbstractTrace},
@@ -5234,36 +5445,6 @@ function _do_trace_splice!(
 	return p
 end
 
-function _do_extendtraces!(
-	p::Plot,
-	update::AbstractDict,
-	indices::AbstractVector{Int} = [1],
-	maxpoints = -1,
-)
-	return _do_trace_splice!(
-		p,
-		update,
-		indices,
-		maxpoints;
-		prepend = false,
-	)
-end
-
-function _do_prependtraces!(
-	p::Plot,
-	update::AbstractDict,
-	indices::AbstractVector{Int} = [1],
-	maxpoints = -1,
-)
-	return _do_trace_splice!(
-		p,
-		update,
-		indices,
-		maxpoints;
-		prepend = true,
-	)
-end
-
 _trace_splice_tovec(value) = [[value]]
 _trace_splice_tovec(value::AbstractVector) = [value]
 _trace_splice_tovec(value::AbstractVector{<:AbstractVector}) = value
@@ -5294,7 +5475,12 @@ function _do_update!(
 		;
 		strict = !(p.layout isa Layout),
 	)
-	relayout!(staged_layout; prepared_layout...)
+	_apply_relayout_setters!(
+		staged_layout,
+		(),
+		prepared_layout,
+		:update!,
+	)
 	inds = ind isa Int ? (ind,) : ind
 	staged_traces = _stage_restyle(
 		p,
@@ -5304,6 +5490,7 @@ function _do_update!(
 		vectorized = !(ind isa Int),
 		memo = memo,
 		setter_origins = setter_origins,
+		verb = :update!,
 	)
 	_rebase_staged_layout!(p.layout, staged_layout, memo)
 	_rebase_staged_traces!(staged_traces, memo)
@@ -5371,6 +5558,69 @@ end
 _plotly_delta_path(prefix::AbstractString, key) =
 	isempty(prefix) ? string(key) : string(prefix, '.', key)
 
+# plotly.js 2.35.2 `_relayout`/`_restyle` rewrite a string or number assigned
+# at `title`, `<...>axis<N>.title` or `<...>colorbar.title` to `<path>.text`
+# (the legacy-title shim; the regexes below are copied from plotly.min.js),
+# which MERGES the text into the existing title container. PlotlyBase replaces
+# the container, so send the scalar as `{text: value}`: plotly.js then replaces
+# the container too, and the window matches a fresh render of the model.
+# (Restyle values are per-trace arrays, which the shim skips; without the wrap
+# plotly.js would store a bare string as the title container.)
+# A whole container sent by Plotly.restyle (for example a new `marker` holding
+# `colorbar.title = "..."`) is not cleaned by plotly.js either, while a fresh
+# render cleans it, so scalar titles nested in container values are wrapped
+# too (in a copy; the committed model keeps its own values).
+const _PLOTLY_LEGACY_AXIS_TITLE_PATH = r"axis([2-9]|[1-9][0-9]+)?.title$"
+const _PLOTLY_LEGACY_COLORBAR_TITLE_PATH = r"colorbar\.title$"
+
+_is_plotly_legacy_title_path(path::AbstractString) =
+	path == "title" ||
+	occursin(_PLOTLY_LEGACY_AXIS_TITLE_PATH, path) ||
+	occursin(_PLOTLY_LEGACY_COLORBAR_TITLE_PATH, path)
+
+# `container` with every scalar title at a legacy title path wrapped as
+# `{text: title}`; the same object when there is nothing to wrap.
+function _wrap_nested_plotly_titles(path::AbstractString, container)
+	fields = _setter_container_fields(container)
+	fields === nothing && return container
+	wrapped = nothing
+	for (key, child) in fields
+		(key isa Symbol || key isa AbstractString) || continue
+		Symbol(key) in _PLOTLY_ARBITRARY_JSON_ATTRIBUTES && continue
+		child_path = _plotly_delta_path(path, key)
+		replacement = if _is_plotly_delta_container(child)
+			_wrap_nested_plotly_titles(child_path, child)
+		elseif _is_scalar_plotly_title(child) &&
+				_is_plotly_legacy_title_path(child_path)
+			Dict{String,Any}("text" => child)
+		else
+			child
+		end
+		replacement === child && continue
+		if wrapped === nothing
+			wrapped = Dict{Any,Any}()
+			for (copy_key, copy_value) in fields
+				wrapped[copy_key] = copy_value
+			end
+		end
+		wrapped[key] = replacement
+	end
+	return wrapped === nothing ? container : wrapped
+end
+
+function _plotly_delta_value(path::AbstractString, value)
+	# Values inside arbitrary-JSON attributes are data, never titles.
+	any(
+		segment -> Symbol(segment) in _PLOTLY_ARBITRARY_JSON_ATTRIBUTES,
+		eachsplit(path, '.'),
+	) && return value
+	_is_plotly_delta_container(value) &&
+		return _wrap_nested_plotly_titles(path, value)
+	_is_scalar_plotly_title(value) || return value
+	_is_plotly_legacy_title_path(path) || return value
+	return Dict{String,Any}("text" => value)
+end
+
 function _is_atomic_plotly_delta_attribute(key, original, staged)
 	(original isa AbstractDict || staged isa AbstractDict) || return false
 	(key isa Symbol || key isa AbstractString) || return false
@@ -5396,7 +5646,7 @@ function _plotly_leaf_deltas!(
 	memo,
 )
 	original === staged && return deltas
-	isempty(path) || (deltas[path] = staged)
+	isempty(path) || (deltas[path] = _plotly_delta_value(path, staged))
 	return deltas
 end
 
@@ -5418,7 +5668,8 @@ function _plotly_leaf_deltas!(
 				staged_value,
 			)
 				original_value === staged_value ||
-					(deltas[child_path] = staged_value)
+					(deltas[child_path] =
+						_plotly_delta_value(child_path, staged_value))
 			elseif (_is_plotly_delta_container(original_value) ||
 					_is_plotly_delta_container(staged_value)) &&
 					!_is_staged_mutation_clone(
@@ -5431,7 +5682,8 @@ function _plotly_leaf_deltas!(
 				# setter staging; otherwise dotted user keys (for example in
 				# `meta`) would be misinterpreted as property paths.
 				original_value === staged_value ||
-					(deltas[child_path] = staged_value)
+					(deltas[child_path] =
+						_plotly_delta_value(child_path, staged_value))
 			else
 				_plotly_leaf_deltas!(
 					deltas,
@@ -5448,7 +5700,8 @@ function _plotly_leaf_deltas!(
 	end
 	for (key, staged_value) in staged
 		haskey(original, key) && continue
-		deltas[_plotly_delta_path(path, key)] = staged_value
+		child_path = _plotly_delta_path(path, key)
+		deltas[child_path] = _plotly_delta_value(child_path, staged_value)
 	end
 	return deltas
 end
@@ -5480,8 +5733,7 @@ function _plotly_leaf_deltas(
 	return deltas
 end
 
-function _trace_delta_operations(
-	p::Plot,
+function _staged_trace_deltas(
 	staged::IdDict{AbstractTrace,AbstractTrace},
 	memo::IdDict{Any,Any},
 )
@@ -5496,7 +5748,13 @@ function _trace_delta_operations(
 				)
 		end
 	end
+	return deltas_by_trace
+end
 
+function _trace_delta_operations(
+	p::Plot,
+	deltas_by_trace::IdDict{AbstractTrace,Dict{String,Any}},
+)
 	grouped =
 		Dict{String,Tuple{Vector{Int},Vector{Any}}}()
 	for ind in eachindex(p.data)
@@ -5522,6 +5780,529 @@ function _trace_delta_operations(
 		)
 		for path in paths
 	]
+end
+
+_trace_delta_operations(
+	p::Plot,
+	staged::IdDict{AbstractTrace,AbstractTrace},
+	memo::IdDict{Any,Any},
+) = _trace_delta_operations(p, _staged_trace_deltas(staged, memo))
+
+_plotly_paths_overlap(a::AbstractString, b::AbstractString) =
+	a == b ||
+	startswith(a, string(b, '.')) ||
+	startswith(b, string(a, '.'))
+
+# Fold per-path operations into as few Plotly calls as possible: one call per
+# distinct trace-index vector. plotly.js rejects a path together with its
+# ancestor in one call ("cannot set ... and a parent attribute
+# simultaneously"), so such a path opens a further call for the same indices.
+# Each call runs one plotly.js recalc/redraw instead of one per attribute.
+function _group_trace_operations(operations)
+	groups = Tuple{Vector{Int},Dict{String,Any}}[]
+	for operation in operations
+		placed = false
+		for (indices, update) in groups
+			indices == operation.indices || continue
+			any(
+				path -> _plotly_paths_overlap(path, operation.path),
+				keys(update),
+			) && continue
+			update[operation.path] = operation.values
+			placed = true
+			break
+		end
+		placed || push!(
+			groups,
+			(
+				collect(Int, operation.indices),
+				Dict{String,Any}(operation.path => operation.values),
+			),
+		)
+	end
+	return groups
+end
+
+# ── plotly.js side effects of incremental renderer calls ───────────
+# Plotly.relayout/restyle/update edit gd.layout/gd.data beyond the keys they
+# are given (plotly.js 2.35.2 `_relayout`/`_restyle` in plotly.min.js, and the
+# `impliedEdits` declared by its PlotSchema). The committed model only receives
+# the requested keys, so whenever such an edit could make the window differ from
+# a fresh render of the model, the transaction sends the whole staged model
+# with Plotly.react instead. The window then shows exactly the model's
+# (PlotlyBase) semantics, as an undisplayed Plot or savefig would.
+
+struct _PlotlyAbsentValue end
+const _PLOTLY_ABSENT = _PlotlyAbsentValue()
+
+function _plotly_path_leaf(path::AbstractString)
+	ind = findlast('.', path)
+	return ind === nothing ? String(path) : String(path[nextind(path, ind):end])
+end
+
+function _plotly_path_parent(path::AbstractString)
+	ind = findlast('.', path)
+	return ind === nothing ? "" : String(path[1:prevind(path, ind)])
+end
+
+_plotly_path_join(parent::AbstractString, leaf::AbstractString) =
+	isempty(parent) ? String(leaf) : string(parent, '.', leaf)
+
+# The value at a plotly.js property path of a model container, or
+# `_PLOTLY_ABSENT` when it is missing or `nothing` (plotly.js `coerce` treats
+# null like a missing value and applies the attribute default).
+function _plotly_value_at(root, path::AbstractString)
+	current = root
+	current === nothing && return _PLOTLY_ABSENT
+	isempty(path) && return current
+	for part in split(path, '.')
+		container = _setter_container_fields(current)
+		container === nothing && return _PLOTLY_ABSENT
+		key = Symbol(part)
+		current = if haskey(container, key)
+			container[key]
+		elseif haskey(container, String(part))
+			container[String(part)]
+		else
+			return _PLOTLY_ABSENT
+		end
+		current === nothing && return _PLOTLY_ABSENT
+	end
+	return current
+end
+
+_plotly_json_number(value) =
+	value isa Real && !(value isa Bool) && isfinite(value)
+
+# plotly.js truthiness for a coerced number/string (`dtick`, aspect ratios).
+_plotly_truthy(value) =
+	!(value === _PLOTLY_ABSENT) &&
+	!(value === false) &&
+	!(value isa Real && !(value isa Bool) && iszero(value)) &&
+	!(value isa AbstractString && isempty(value))
+
+function _plotly_json_equal(current, expected)
+	expected isa Bool && return current isa Bool && current == expected
+	expected isa AbstractString &&
+		return (current isa AbstractString || current isa Symbol) &&
+			String(current) == expected
+	return isequal(current, expected)
+end
+
+# Conservative `isValidRange`: a two-entry array of finite numbers. Other
+# ranges (dates, categories, partial `null` ends) take the full refresh.
+function _is_valid_plotly_range(value)
+	(value isa AbstractVector || value isa Tuple) || return false
+	length(value) == 2 || return false
+	return all(_plotly_json_number, value)
+end
+
+function _plotly_valid_bounds(fields, parent::AbstractString, low, high)
+	lo = _plotly_value_at(fields, _plotly_path_join(parent, low))
+	hi = _plotly_value_at(fields, _plotly_path_join(parent, high))
+	return _plotly_json_number(lo) && _plotly_json_number(hi) && lo < hi
+end
+
+# plotly.js tick defaults: tickmode = tickvals array ? "array" :
+# dtick ? "linear" : "auto".
+function _plotly_linear_tick_default(fields, parent::AbstractString)
+	tickvals = _plotly_value_at(fields, _plotly_path_join(parent, "tickvals"))
+	tickvals === _PLOTLY_ABSENT || return false
+	return _plotly_truthy(
+		_plotly_value_at(fields, _plotly_path_join(parent, "dtick")),
+	)
+end
+
+function _plotly_graph_mentions_key(
+	value,
+	key::Symbol,
+	seen::IdDict{Any,Nothing},
+	budget::Base.RefValue{Int},
+)
+	budget[] -= 1
+	# An unexpectedly large template is treated as mentioning the key, which
+	# only selects the always-correct full refresh.
+	budget[] < 0 && return true
+	if value === nothing ||
+			value isa AbstractString ||
+			value isa Symbol ||
+			value isa Number ||
+			value isa AbstractChar
+		return false
+	elseif value isa AbstractDict
+		haskey(seen, value) && return false
+		seen[value] = nothing
+		for (child_key, child) in value
+			(
+				child_key === key ||
+				(child_key isa AbstractString && child_key == String(key))
+			) && return true
+			_plotly_graph_mentions_key(child, key, seen, budget) &&
+				return true
+		end
+		return false
+	elseif value isa PlotlyBase.HasFields
+		return _plotly_graph_mentions_key(value.fields, key, seen, budget)
+	elseif value isa PlotlyBase.Template
+		return _plotly_graph_mentions_key(value.data, key, seen, budget) ||
+			_plotly_graph_mentions_key(value.layout, key, seen, budget)
+	elseif value isa AbstractArray
+		_candidate_array_elements_may_carry_identity(eltype(value)) ||
+			return false
+		haskey(seen, value) && return false
+		seen[value] = nothing
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_plotly_graph_mentions_key(value[ind], key, seen, budget) &&
+				return true
+		end
+		return false
+	end
+	# Unknown template representation: assume it may set the attribute.
+	return true
+end
+
+# A template default replaces plotly.js's attribute default, so an absent model
+# value is only predictable when the layout template does not mention the key.
+function _plotly_template_mentions(layout_fields, key::Symbol)
+	layout_fields === nothing && return true
+	template = get(layout_fields, :template, nothing)
+	template === nothing && return false
+	return _plotly_graph_mentions_key(
+		template,
+		key,
+		IdDict{Any,Nothing}(),
+		Ref(100_000),
+	)
+end
+
+# True when plotly.js's implied edit `target = expected` leaves the window equal
+# to a fresh render of the staged model. `absent_matches` states whether
+# plotly.js's default for a missing target equals `expected`.
+function _implied_edit_consistent(
+	fields,
+	target::AbstractString,
+	expected,
+	absent_matches::Bool,
+	layout_fields,
+)
+	current = _plotly_value_at(fields, target)
+	if current === _PLOTLY_ABSENT
+		absent_matches || return false
+		return !_plotly_template_mentions(
+			layout_fields,
+			Symbol(_plotly_path_leaf(target)),
+		)
+	end
+	return _plotly_json_equal(current, expected)
+end
+
+function _layout_has_annotations_or_images(fields)
+	for key in (:annotations, :images)
+		value = get(fields, key, nothing)
+		value === nothing && continue
+		value isa AbstractVector && isempty(value) && continue
+		return true
+	end
+	return false
+end
+
+const _PLOTLY_CARTESIAN_AXIS_KEY = r"^[xy]axis\d*$"
+const _PLOTLY_SCENE_KEY = r"^scene\d*$"
+
+function _plotly_explicit_non_log_type(axis)
+	axis_type = _plotly_value_at(axis, "type")
+	axis_type === _PLOTLY_ABSENT && return false
+	return !_plotly_json_equal(axis_type, "log")
+end
+
+# plotly.js `clearAxisTypes` deletes every explicit non-log `type` of the
+# cartesian and 3D axes used by restyled traces when one of their data or axis
+# references changes.
+function _layout_has_explicit_axis_type(layout_fields)
+	layout_fields === nothing && return true
+	for (key, value) in layout_fields
+		name = string(key)
+		if occursin(_PLOTLY_CARTESIAN_AXIS_KEY, name)
+			_plotly_explicit_non_log_type(value) && return true
+		elseif occursin(_PLOTLY_SCENE_KEY, name)
+			for axis in ("xaxis", "yaxis", "zaxis")
+				_plotly_explicit_non_log_type(
+					_plotly_value_at(value, axis),
+				) && return true
+			end
+		end
+	end
+	return false
+end
+
+const _PLOTLY_AXIS_NAME_LEAF = r"^[xyz]axis[0-9]*$"
+const _PLOTLY_AXIS_RANGE_PATH =
+	r"^(?:[xy]axis\d*|scene\d*\.[xyz]axis|polar\d*\.radialaxis)\.range$|^[xy]axis\d*\.rangeslider\.range$"
+const _PLOTLY_LAYOUT_TICK_PATH =
+	r"^(?:[xy]axis\d*(?:\.minor)?|scene\d*\.[xyz]axis|polar\d*\.(?:radialaxis|angularaxis)|ternary\d*\.[abc]axis|coloraxis\d*\.colorbar)\.(?:dtick|tick0)$"
+const _PLOTLY_COLORAXIS_BOUND_PATH = r"^coloraxis\d*\.(?:cmin|cmax)$"
+const _PLOTLY_COLORAXIS_SCALE_PATH = r"^coloraxis\d*\.colorscale$"
+const _PLOTLY_ASPECTRATIO_PATH = r"^(scene\d*)\.aspectratio(?:\.[xyz])?$"
+
+function _layout_delta_has_renderer_side_effects(
+	layout::AbstractLayout,
+	layout_delta::AbstractDict,
+)
+	isempty(layout_delta) && return false
+	layout isa Layout || return true
+	fields = layout.fields
+	for (path, value) in layout_delta
+		leaf = _plotly_path_leaf(path)
+		# Axis `type` (any value, including removal) converts or autoranges the
+		# axis range; `reverse` flips it; width/height/autosize write each
+		# other; `allaxes` fans out to every axis.
+		(leaf == "type" || leaf == "reverse") && return true
+		path in ("width", "height", "autosize") && return true
+		startswith(path, "allaxes") && return true
+		# Replacing a whole axis container converts annotation/image
+		# coordinates when its type changes.
+		occursin(_PLOTLY_AXIS_NAME_LEAF, leaf) &&
+			_layout_has_annotations_or_images(fields) &&
+			return true
+		# impliedEdits apply only for a non-null value.
+		value === nothing && continue
+		parent = _plotly_path_parent(path)
+		aspect = match(_PLOTLY_ASPECTRATIO_PATH, path)
+		consistent = if occursin(_PLOTLY_AXIS_RANGE_PATH, path)
+			_implied_edit_consistent(
+				fields,
+				_plotly_path_join(parent, "autorange"),
+				false,
+				_is_valid_plotly_range(value),
+				fields,
+			)
+		elseif occursin(_PLOTLY_LAYOUT_TICK_PATH, path)
+			_implied_edit_consistent(
+				fields,
+				_plotly_path_join(parent, "tickmode"),
+				"linear",
+				_plotly_linear_tick_default(fields, parent),
+				fields,
+			)
+		elseif occursin(_PLOTLY_COLORAXIS_BOUND_PATH, path)
+			_implied_edit_consistent(
+				fields,
+				_plotly_path_join(parent, "cauto"),
+				false,
+				_plotly_valid_bounds(fields, parent, "cmin", "cmax"),
+				fields,
+			)
+		elseif occursin(_PLOTLY_COLORAXIS_SCALE_PATH, path)
+			_implied_edit_consistent(
+				fields,
+				_plotly_path_join(parent, "autocolorscale"),
+				false,
+				true,
+				fields,
+			)
+		elseif aspect !== nothing
+			# plotly.js gl3d defaults: aspectmode defaults to "manual" exactly
+			# when aspectratio.x, .y and .z are all truthy.
+			scene = String(aspect.captures[1])
+			_implied_edit_consistent(
+				fields,
+				_plotly_path_join(scene, "aspectmode"),
+				"manual",
+				all(
+					axis -> _plotly_truthy(
+						_plotly_value_at(
+							fields,
+							string(scene, ".aspectratio.", axis),
+						),
+					),
+					("x", "y", "z"),
+				),
+				fields,
+			)
+		else
+			true
+		end
+		consistent || return true
+	end
+	return false
+end
+
+# Restyle keys plotly.js handles with custom code that edits other attributes
+# (axis autorange/range, swapped x/y data, pie<->cartesian attribute swaps,
+# computed bins).
+const _PLOTLY_TRACE_REFRESH_PATHS = (
+	"type",
+	"orientation",
+	"swapxy",
+	"swapxyaxes",
+	"orientationaxes",
+	"autobinx",
+	"autobiny",
+)
+# Trace attributes whose editType includes `clearAxisTypes` in plotly.js
+# 2.35.2 (PlotSchema, any trace type).
+const _PLOTLY_CLEAR_AXIS_TYPE_ROOTS = (
+	"a", "a0", "atype", "b", "b0", "btype", "dimensions", "imag", "median",
+	"name", "orientation", "q1", "q3", "r", "r0", "real", "scene", "theta",
+	"theta0", "thetaunit", "value", "x", "x0", "xaxis", "xtype", "y", "y0",
+	"yaxis", "ytype", "z",
+)
+const _PLOTLY_TRACE_BOUND_PATH =
+	r"^(?:(?:marker|line|marker\.line)\.)?(?:cmin|cmax)$"
+const _PLOTLY_TRACE_SCALE_PATH =
+	r"^(?:(?:marker|line|marker\.line)\.)?colorscale$"
+const _PLOTLY_TRACE_TICK_PATH =
+	r"^(?:(?:(?:marker|line)\.)?colorbar|gauge\.axis)\.(?:dtick|tick0)$"
+const _PLOTLY_CONTOUR_PATHS =
+	("contours", "contours.start", "contours.end", "contours.size")
+const _PLOTLY_X_ARRAY_PATHS = ("x", "a")
+const _PLOTLY_Y_ARRAY_PATHS = ("y", "b")
+const _PLOTLY_X_SCALED_PATHS =
+	("x0", "dx", "a0", "da", "xperiod", "xperiod0", "xperiodalignment")
+const _PLOTLY_Y_SCALED_PATHS =
+	("y0", "dy", "b0", "db", "yperiod", "yperiod0", "yperiodalignment")
+
+_plotly_has_value(fields, path::AbstractString) =
+	_plotly_value_at(fields, path) !== _PLOTLY_ABSENT
+
+function _trace_delta_has_renderer_side_effects(
+	fields::AbstractDict,
+	deltas::AbstractDict,
+	layout_fields,
+)
+	for (path, value) in deltas
+		path in _PLOTLY_TRACE_REFRESH_PATHS && return true
+		# Restyle keys prefixed with LAYOUT write the layout.
+		startswith(path, "LAYOUT") && return true
+		leaf = _plotly_path_leaf(path)
+		# colorbar thicknessmode/lenmode switches convert thickness/len.
+		(leaf == "thicknessmode" || leaf == "lenmode") &&
+			(value isa AbstractString || value isa Symbol) &&
+			String(value) in ("fraction", "pixels") &&
+			return true
+		root = first(split(path, '.'))
+		root in _PLOTLY_CLEAR_AXIS_TYPE_ROOTS &&
+			_layout_has_explicit_axis_type(layout_fields) &&
+			return true
+		# impliedEdits apply only for a non-null value.
+		value === nothing && continue
+		parent = _plotly_path_parent(path)
+		consistent = if occursin(_PLOTLY_TRACE_BOUND_PATH, path)
+			_implied_edit_consistent(
+				fields,
+				_plotly_path_join(parent, "cauto"),
+				false,
+				_plotly_valid_bounds(fields, parent, "cmin", "cmax"),
+				layout_fields,
+			)
+		elseif occursin(_PLOTLY_TRACE_SCALE_PATH, path)
+			_implied_edit_consistent(
+				fields,
+				_plotly_path_join(parent, "autocolorscale"),
+				false,
+				true,
+				layout_fields,
+			)
+		elseif path == "zmin" || path == "zmax"
+			_implied_edit_consistent(
+				fields,
+				"zauto",
+				false,
+				_plotly_valid_bounds(fields, "", "zmin", "zmax"),
+				layout_fields,
+			)
+		elseif path in _PLOTLY_CONTOUR_PATHS
+			# plotly.js forces autocontour=true when contours.start or
+			# contours.end is missing, whatever the input says; otherwise the
+			# default is false.
+			if _plotly_has_value(fields, "contours.start") &&
+					_plotly_has_value(fields, "contours.end")
+				_implied_edit_consistent(
+					fields,
+					"autocontour",
+					false,
+					true,
+					layout_fields,
+				)
+			else
+				true
+			end
+		elseif occursin(_PLOTLY_TRACE_TICK_PATH, path)
+			_implied_edit_consistent(
+				fields,
+				_plotly_path_join(parent, "tickmode"),
+				"linear",
+				_plotly_linear_tick_default(fields, parent),
+				layout_fields,
+			)
+		elseif path in _PLOTLY_X_ARRAY_PATHS
+			_implied_edit_consistent(
+				fields,
+				"xtype",
+				"array",
+				true,
+				layout_fields,
+			)
+		elseif path in _PLOTLY_Y_ARRAY_PATHS
+			_implied_edit_consistent(
+				fields,
+				"ytype",
+				"array",
+				true,
+				layout_fields,
+			)
+		elseif path in _PLOTLY_X_SCALED_PATHS
+			_implied_edit_consistent(
+				fields,
+				"xtype",
+				"scaled",
+				!(_plotly_has_value(fields, "x") ||
+				  _plotly_has_value(fields, "a")),
+				layout_fields,
+			)
+		elseif path in _PLOTLY_Y_SCALED_PATHS
+			_implied_edit_consistent(
+				fields,
+				"ytype",
+				"scaled",
+				!(_plotly_has_value(fields, "y") ||
+				  _plotly_has_value(fields, "b")),
+				layout_fields,
+			)
+		elseif path == "node.groups"
+			# Sankey node.groups implies node.x = node.y = [].
+			all(("node.x", "node.y")) do node_path
+				node_value = _plotly_value_at(fields, node_path)
+				node_value === _PLOTLY_ABSENT ||
+					(node_value isa AbstractVector && isempty(node_value))
+			end
+		else
+			true
+		end
+		consistent || return true
+	end
+	return false
+end
+
+function _incremental_renderer_side_effects(
+	staged_traces::IdDict{AbstractTrace,AbstractTrace},
+	deltas_by_trace::IdDict{AbstractTrace,Dict{String,Any}},
+	layout::AbstractLayout,
+	layout_delta::AbstractDict,
+)
+	_layout_delta_has_renderer_side_effects(layout, layout_delta) &&
+		return true
+	layout_fields = layout isa Layout ? layout.fields : nothing
+	for (original, deltas) in deltas_by_trace
+		isempty(deltas) && continue
+		_trace_delta_has_renderer_side_effects(
+			staged_traces[original].fields,
+			deltas,
+			layout_fields,
+		) && return true
+	end
+	return false
 end
 
 function _plotlyjs_delta_script(
@@ -5552,16 +6333,14 @@ function _plotlyjs_relayout_script(
 end
 
 function _plotlyjs_restyle_script(sp::SyncPlot, operations)
+	groups = _group_trace_operations(operations)
 	calls = String[]
-	sizehint!(calls, length(operations))
-	for operation in operations
-		update = Dict{String,Any}(
-			operation.path => operation.values,
-		)
+	sizehint!(calls, length(groups))
+	for (indices, update) in groups
 		push!(
 			calls,
 			"  await Plotly.restyle(div, $(_json_js(update)), " *
-			"$(_json_js(operation.indices)));",
+			"$(_json_js(indices)));",
 		)
 	end
 	return _plotlyjs_delta_script(sp, calls)
@@ -5576,26 +6355,21 @@ function _plotlyjs_update_script(
 		return _plotlyjs_relayout_script(sp, layout_delta)
 	end
 
+	groups = _group_trace_operations(trace_operations)
 	calls = String[]
-	sizehint!(calls, length(trace_operations))
-	first_operation = first(trace_operations)
-	first_update = Dict{String,Any}(
-		first_operation.path => first_operation.values,
-	)
+	sizehint!(calls, length(groups))
+	first_indices, first_update = first(groups)
 	push!(
 		calls,
 		"  await Plotly.update(div, $(_json_js(first_update)), " *
 		"$(_json_js(layout_delta)), " *
-		"$(_json_js(first_operation.indices)));",
+		"$(_json_js(first_indices)));",
 	)
-	for operation in Iterators.drop(trace_operations, 1)
-		update = Dict{String,Any}(
-			operation.path => operation.values,
-		)
+	for (indices, update) in Iterators.drop(groups, 1)
 		push!(
 			calls,
 			"  await Plotly.restyle(div, $(_json_js(update)), " *
-			"$(_json_js(operation.indices)));",
+			"$(_json_js(indices)));",
 		)
 	end
 	return _plotlyjs_delta_script(sp, calls)
@@ -5628,6 +6402,15 @@ end
 function _syncplot_recovery_autoplay(sp::SyncPlot)
 	spec = getfield(sp, :_resources).creation_spec
 	return spec === nothing ? false : spec.autoplay
+end
+
+# `react!(sp, ::Plot)` installs a new model, so its frames autoplay exactly as
+# they would when the window is created: the window's `autoplay` setting
+# decides. A SyncPlot built with the public 4-argument constructor has no
+# creation spec; it keeps the historical default of autoplaying.
+function _syncplot_replacement_autoplay(sp::SyncPlot)
+	spec = getfield(sp, :_resources).creation_spec
+	return spec === nothing ? true : spec.autoplay
 end
 
 function _set_renderer_desynchronized!(
@@ -6030,7 +6813,12 @@ function _prepare_relayout_transaction(
 			;
 			strict = !(p.layout isa Layout),
 		)
-	relayout!(staged_layout, prepared_args...; prepared_kwargs...)
+	_apply_relayout_setters!(
+		staged_layout,
+		prepared_args,
+		prepared_kwargs,
+		:relayout!,
+	)
 	_rebase_staged_layout!(p.layout, staged_layout, memo)
 	expanded = _expand_staged_alias_roots!(
 		p,
@@ -6056,24 +6844,41 @@ function _prepare_relayout_transaction(
 		outer_root_changed ||
 		_has_third_party_staged_trace(staged_traces) ||
 		!(p.layout isa Layout && staged_layout isa Layout)
+	side_effect_refresh = false
 	script = if !full_refresh &&
 			p.layout isa Layout &&
 			staged_layout isa Layout
-		trace_operations =
-			_trace_delta_operations(p, staged_traces, memo)
+		deltas_by_trace = _staged_trace_deltas(staged_traces, memo)
 		layout_delta =
 			_plotly_leaf_deltas(
 				p.layout.fields,
 				staged_layout.fields,
 				memo,
 			)
-		isempty(trace_operations) ?
-		_plotlyjs_relayout_script(sp, layout_delta) :
-		_plotlyjs_update_script(
-			sp,
-			trace_operations,
+		side_effect_refresh = _incremental_renderer_side_effects(
+			staged_traces,
+			deltas_by_trace,
+			staged_layout,
 			layout_delta,
 		)
+		if side_effect_refresh
+			_plotlyjs_refresh_script(
+				sp,
+				_staged_candidate_data(p, staged_traces),
+				staged_layout;
+				model = p,
+			)
+		else
+			trace_operations =
+				_trace_delta_operations(p, deltas_by_trace)
+			isempty(trace_operations) ?
+			_plotlyjs_relayout_script(sp, layout_delta) :
+			_plotlyjs_update_script(
+				sp,
+				trace_operations,
+				layout_delta,
+			)
+		end
 	else
 		expanded.render_payload === nothing && throw(AssertionError(
 			"Missing coherent renderer payload for relayout refresh.",
@@ -6092,7 +6897,7 @@ function _prepare_relayout_transaction(
 	end
 	operation = expanded.frames !== nothing ?
 		"newPlot" :
-		(full_refresh ? "react" : "relayout")
+		(full_refresh || side_effect_refresh ? "react" : "relayout")
 	return (script = script, operation = operation, commit = commit)
 end
 
@@ -6141,6 +6946,7 @@ function _prepare_restyle_transaction(
 			_has_third_party_staged_trace(staged) ||
 			(staged_layout !== nothing &&
 			 !(p.layout isa Layout && staged_layout isa Layout))
+	side_effect_refresh = false
 	script = if full_refresh
 		expanded.render_payload === nothing && throw(AssertionError(
 			"Missing coherent renderer payload for restyle refresh.",
@@ -6151,7 +6957,7 @@ function _prepare_restyle_transaction(
 			rebuild = expanded.frames !== nothing,
 		)
 	else
-		trace_operations = _trace_delta_operations(p, staged, memo)
+		deltas_by_trace = _staged_trace_deltas(staged, memo)
 		layout_delta = staged_layout === nothing ?
 			Dict{String,Any}() :
 			_plotly_leaf_deltas(
@@ -6159,9 +6965,27 @@ function _prepare_restyle_transaction(
 				staged_layout.fields,
 				memo,
 			)
-		isempty(layout_delta) ?
-		_plotlyjs_restyle_script(sp, trace_operations) :
-		_plotlyjs_update_script(sp, trace_operations, layout_delta)
+		candidate_layout =
+			staged_layout === nothing ? p.layout : staged_layout
+		side_effect_refresh = _incremental_renderer_side_effects(
+			staged,
+			deltas_by_trace,
+			candidate_layout,
+			layout_delta,
+		)
+		if side_effect_refresh
+			_plotlyjs_refresh_script(
+				sp,
+				_staged_candidate_data(p, staged),
+				candidate_layout;
+				model = p,
+			)
+		else
+			trace_operations = _trace_delta_operations(p, deltas_by_trace)
+			isempty(layout_delta) ?
+			_plotlyjs_restyle_script(sp, trace_operations) :
+			_plotlyjs_update_script(sp, trace_operations, layout_delta)
+		end
 	end
 	commit = () -> begin
 		_commit_restyle!(p, staged, replacement_data)
@@ -6172,7 +6996,7 @@ function _prepare_restyle_transaction(
 	end
 	operation = expanded.frames !== nothing ?
 		"newPlot" :
-		(full_refresh ? "react" : "restyle")
+		(full_refresh || side_effect_refresh ? "react" : "restyle")
 	return (script = script, operation = operation, commit = commit)
 end
 
@@ -6195,7 +7019,12 @@ function _prepare_update_transaction(
 		;
 		strict = !(p.layout isa Layout),
 	)
-	relayout!(staged_layout; prepared_layout...)
+	_apply_relayout_setters!(
+		staged_layout,
+		(),
+		prepared_layout,
+		:update!,
+	)
 	inds = ind isa Int ? (ind,) : ind
 	staged = _stage_restyle(
 		p,
@@ -6205,6 +7034,7 @@ function _prepare_update_transaction(
 		vectorized = !(ind isa Int),
 		memo = memo,
 		setter_origins = setter_origins,
+		verb = :update!,
 	)
 	_rebase_staged_layout!(p.layout, staged_layout, memo)
 	_rebase_staged_traces!(staged, memo)
@@ -6232,6 +7062,7 @@ function _prepare_update_transaction(
 		outer_root_changed ||
 			!(p.layout isa Layout && staged_layout isa Layout) ||
 			_has_third_party_staged_trace(staged)
+	side_effect_refresh = false
 	script = if full_refresh
 		expanded.render_payload === nothing && throw(AssertionError(
 			"Missing coherent renderer payload for update refresh.",
@@ -6242,14 +7073,29 @@ function _prepare_update_transaction(
 			rebuild = expanded.frames !== nothing,
 		)
 	else
+		deltas_by_trace = _staged_trace_deltas(staged, memo)
+		layout_delta = _plotly_leaf_deltas(
+			p.layout.fields,
+			staged_layout.fields,
+			memo,
+		)
+		side_effect_refresh = _incremental_renderer_side_effects(
+			staged,
+			deltas_by_trace,
+			staged_layout,
+			layout_delta,
+		)
+		side_effect_refresh ?
+		_plotlyjs_refresh_script(
+			sp,
+			_staged_candidate_data(p, staged),
+			staged_layout;
+			model = p,
+		) :
 		_plotlyjs_update_script(
 			sp,
-			_trace_delta_operations(p, staged, memo),
-			_plotly_leaf_deltas(
-				p.layout.fields,
-				staged_layout.fields,
-				memo,
-			),
+			_trace_delta_operations(p, deltas_by_trace),
+			layout_delta,
 		)
 	end
 	commit = () -> begin
@@ -6260,7 +7106,7 @@ function _prepare_update_transaction(
 	end
 	operation = expanded.frames !== nothing ?
 		"newPlot" :
-		(full_refresh ? "react" : "update")
+		(full_refresh || side_effect_refresh ? "react" : "update")
 	return (script = script, operation = operation, commit = commit)
 end
 
@@ -6280,7 +7126,24 @@ function _prepare_purge_transaction(sp::SyncPlot, p::Plot)
 			Vector{eltype(p.data)}(undef, 0),
 		)
 	end
-	script = _plotlyjs_command_script(sp, :purge)
+	# Plotly.purge alone leaves a div that is no longer a plot: plotly.js then
+	# rejects relayout/update/redraw/addTraces on it. Re-create the committed
+	# empty model (no traces, default layout, retained frames and config) so
+	# the window stays a valid plot whose state equals the Julia model. Frames
+	# are re-added without autoplay; purging never starts an animation.
+	purged_model = Plot(
+		GenericTrace{Dict{Symbol,Any}}[],
+		staged_layout,
+		p.frames,
+		p.divid,
+		p.config,
+	)
+	script = _plotlyjs_newplot_script(
+		purged_model,
+		sp.divid;
+		autoplay = false,
+		purge = true,
+	)
 	commit = () -> begin
 		if replacement_data === nothing
 			empty!(p.data)
@@ -6325,7 +7188,7 @@ function PlotlyBase.react!(sp::SyncPlot, p::Plot)
 			p.layout;
 			model = p,
 			rebuild = true,
-			autoplay = true,
+			autoplay = _syncplot_replacement_autoplay(target),
 		)
 		commit = () -> begin
 			if p !== current
@@ -7234,13 +8097,30 @@ function _finish_high_level_plot_fast_transaction(
 			context.staged_layout.fields,
 			context.memo,
 		)
-	script = sp === nothing ?
-		nothing :
+	# Plotly.addTraces has no side effects on other attributes; the layout
+	# part goes through Plotly.relayout and gets the same check as relayout!.
+	side_effect_refresh =
+		sp !== nothing &&
+		_layout_delta_has_renderer_side_effects(
+			context.staged_layout,
+			layout_delta,
+		)
+	script = if sp === nothing
+		nothing
+	elseif side_effect_refresh
+		_plotlyjs_refresh_script(
+			sp,
+			candidate.data,
+			context.staged_layout;
+			model = p,
+		)
+	else
 		_plotlyjs_high_level_append_script(
 			sp,
 			new_traces,
 			layout_delta,
 		)
+	end
 	commit = () -> begin
 		if new_trace_count > 0
 			resize!(p.data, length(candidate.data))
@@ -7256,7 +8136,9 @@ function _finish_high_level_plot_fast_transaction(
 		commit_callback(p)
 		return p
 	end
-	operation = if new_trace_count > 0
+	operation = if side_effect_refresh
+		"react"
+	elseif new_trace_count > 0
 		isempty(layout_delta) ? "addTraces" : "addTraces/relayout"
 	else
 		"relayout"
@@ -7578,20 +8460,262 @@ function PlotlyBase.movetraces!(sp::SyncPlot, src::AbstractVector{Int}, dest::Ab
 	end
 end
 
-function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
-	stable_indices = collect(indices)
-	return _mutate_and_refresh_syncplot!(
-		sp;
-		mutation_scope =
-			_trace_mutation_scope(stable_indices),
-	) do current
-		_do_extendtraces!(
-			current,
-			update,
-			stable_indices,
-			maxpoints,
+# ── extendtraces!/prependtraces! through Plotly.extendTraces ────────
+# The general model transaction re-sends every trace with Plotly.react, which
+# costs O(total points) per streamed append. When the window provably ends up
+# equal to a fresh render of the committed model, send only the inserted points
+# with Plotly.extendTraces/prependTraces instead. Their windowing (keep the last
+# / first `maxPoints` of the concatenation) is the same as `_windowed_concat`.
+# Every other call keeps the general transaction.
+
+# Trace types whose calc/plot step writes nothing back into gd.data or
+# gd.layout for appended data. (Other types, e.g. histograms, compute bins or
+# positions from all data and keep the general path.)
+const _PLOTLY_SPLICE_TRACE_TYPES = ("scatter", "scattergl")
+
+_is_plain_real_eltype(::Type{T}) where {T} = T <: Real && !(T <: Bool)
+
+# The trace field a splice key names, when it is a plain top-level attribute
+# that PlotlyBase's getindex/setindex! resolve to `fields[Symbol(key)]`.
+function _trace_splice_field_key(key)
+	(key isa Symbol || key isa AbstractString) || return nothing
+	text = String(key)
+	isempty(text) && return nothing
+	any(c -> c in ('_', '.', '[', ']'), text) && return nothing
+	return Symbol(text)
+end
+
+function _prepare_trace_splice_fast_transaction(
+	sp::Union{Nothing,SyncPlot},
+	p::Plot,
+	update::AbstractDict,
+	indices::Vector{Int},
+	maxpoints;
+	prepend::Bool,
+)
+	(isempty(indices) || isempty(update)) && return nothing
+	update_keys = collect(keys(update))
+	field_keys = Symbol[]
+	sizehint!(field_keys, length(update_keys))
+	for key in update_keys
+		field = _trace_splice_field_key(key)
+		field === nothing && return nothing
+		push!(field_keys, field)
+	end
+	# `:x` and `"x"` in one update both name the same field.
+	allunique(field_keys) || return nothing
+	for ind in indices
+		# The general path reports invalid indices.
+		checkbounds(Bool, p.data, ind) || return nothing
+		trace = p.data[ind]
+		trace isa GenericTrace || return nothing
+		fields = getfield(trace, :fields)
+		fields isa _BuiltinMutationDict || return nothing
+		all(key -> key isa Symbol, keys(fields)) || return nothing
+		trace_type = get(fields, :type, "scatter")
+		(trace_type isa AbstractString || trace_type isa Symbol) ||
+			return nothing
+		String(trace_type) in _PLOTLY_SPLICE_TRACE_TYPES || return nothing
+	end
+	_validate_trace_splice_args(p, update, indices, maxpoints)
+
+	# Plotly.extendTraces changes only gd.data[i], so a trace object listed at
+	# two positions (which the model extends at both) needs the general path.
+	occurrences = IdDict{Any,Int}()
+	for trace in p.data
+		occurrences[trace] = get(occurrences, trace, 0) + 1
+	end
+	any(ind -> occurrences[p.data[ind]] != 1, indices) && return nothing
+
+	spliced = Matrix{Any}(undef, length(update_keys), length(indices))
+	inserts = Dict{String,Any}()
+	limits = Dict{String,Any}()
+	for (key_ix, key) in enumerate(update_keys)
+		field = field_keys[key_ix]
+		axis_data = field === :x || field === :y
+		key_inserts = Vector{Any}(undef, length(indices))
+		key_limits = Vector{Int}(undef, length(indices))
+		for (ix, ind) in enumerate(indices)
+			target = getfield(p.data[ind], :fields)[field]
+			insert = update[key][ix]
+			T = eltype(target)
+			if axis_data
+				# The window keeps the axis type plotly.js auto-detected (and
+				# copied into gd.layout) at the first render; a fresh render of
+				# the model re-detects it. Numbers extending a non-empty numeric
+				# axis array stay "linear" in both.
+				(
+					_is_plain_real_eltype(T) &&
+					_is_plain_real_eltype(eltype(insert)) &&
+					!isempty(target)
+				) || return nothing
+			else
+				(
+					!_candidate_array_elements_may_carry_identity(T) &&
+					!_candidate_array_elements_may_carry_identity(
+						eltype(insert),
+					)
+				) || return nothing
+			end
+			value = _windowed_concat(
+				target,
+				insert,
+				_trace_window_limit(maxpoints, key, ix);
+				prepend = prepend,
+			)
+			# The window already holds `target` as serialized from its element
+			# type; a promoted element type would serialize differently.
+			(value isa Vector && eltype(value) === T) || return nothing
+			axis_data && isempty(value) && return nothing
+			# Send the inserted points exactly as the model stores them, and
+			# only the ones the window keeps, so that plotly.js's concatenation
+			# and window reproduce `value`.
+			kept = min(length(value), length(insert))
+			key_inserts[ix] = prepend ?
+				value[1:kept] :
+				value[(length(value) - kept + 1):end]
+			key_limits[ix] =
+				length(value) < length(target) + kept ? length(value) : -1
+			spliced[key_ix, ix] = value
+		end
+		path = String(field)
+		inserts[path] = key_inserts
+		limits[path] = key_limits
+	end
+
+	memo = IdDict{Any,Any}()
+	staged = IdDict{AbstractTrace,AbstractTrace}()
+	for (ix, ind) in enumerate(indices)
+		original = p.data[ind]
+		trace = _clone_trace_for_mutation(original, memo)
+		staged[original] = trace
+		fields = getfield(trace, :fields)
+		for key_ix in eachindex(field_keys)
+			fields[field_keys[key_ix]] = spliced[key_ix, ix]
+		end
+	end
+	_rebase_staged_traces!(staged, memo)
+	expanded = _expand_staged_alias_roots!(p, staged, nothing, memo)
+	# A target field dictionary shared with another model root needs that root
+	# re-rendered too.
+	(
+		expanded.data === nothing &&
+		expanded.frames === nothing &&
+		expanded.config === nothing &&
+		expanded.layout === nothing &&
+		length(staged) == length(indices)
+	) || return nothing
+	expected_paths = Set(keys(inserts))
+	for deltas in values(_staged_trace_deltas(staged, memo))
+		Set(keys(deltas)) == expected_paths || return nothing
+	end
+
+	script = if sp === nothing
+		nothing
+	else
+		method = prepend ? "prependTraces" : "extendTraces"
+		_plotlyjs_delta_script(
+			sp,
+			[
+				"  await Plotly.$method(div, $(_json_js(inserts)), " *
+				"$(_json_js(indices .- 1)), $(_json_js(limits)));",
+			],
 		)
 	end
+	commit = () -> begin
+		_commit_restyle!(p, staged, nothing)
+		return p
+	end
+	return (
+		script = script,
+		operation = prepend ? "prependTraces" : "extendTraces",
+		commit = commit,
+	)
+end
+
+function _trace_splice_transaction_preparer(
+	update::AbstractDict,
+	indices::Vector{Int},
+	maxpoints;
+	prepend::Bool,
+)
+	mutation = current -> _do_trace_splice!(
+		current,
+		update,
+		indices,
+		maxpoints;
+		prepend = prepend,
+	)
+	mutation_scope = _trace_mutation_scope(indices)
+	return (target, current) -> begin
+		fast = _prepare_trace_splice_fast_transaction(
+			target,
+			current,
+			update,
+			indices,
+			maxpoints;
+			prepend = prepend,
+		)
+		fast === nothing || return fast
+		return _prepare_full_model_mutation_transaction(
+			target,
+			current,
+			mutation,
+			_noop_plot_commit,
+			mutation_scope,
+		)
+	end
+end
+
+function _syncplot_trace_splice!(
+	sp::SyncPlot,
+	update::AbstractDict,
+	indices::AbstractVector{Int},
+	maxpoints;
+	prepend::Bool,
+)
+	prepare = _trace_splice_transaction_preparer(
+		update,
+		collect(Int, indices),
+		maxpoints;
+		prepend = prepend,
+	)
+	_syncplot_transaction!(sp, prepare)
+	return sp
+end
+
+function _plot_trace_splice!(
+	p::Plot,
+	update::AbstractDict,
+	indices::AbstractVector{Int},
+	maxpoints;
+	prepend::Bool,
+)
+	prepare = _trace_splice_transaction_preparer(
+		update,
+		collect(Int, indices),
+		maxpoints;
+		prepend = prepend,
+	)
+	local_mutation = () -> begin
+		prepare(nothing, p).commit()
+		return p
+	end
+	return _transactional_model_plot_mutation!(
+		p;
+		prepare = prepare,
+		local_mutation = local_mutation,
+	)
+end
+
+function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+	return _syncplot_trace_splice!(
+		sp,
+		update,
+		indices,
+		maxpoints;
+		prepend = false,
+	)
 end
 
 function PlotlyBase.extendtraces!(
@@ -7633,19 +8757,13 @@ function PlotlyBase.extendtraces!(
 end
 
 function PlotlyBase.prependtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
-	stable_indices = collect(indices)
-	return _mutate_and_refresh_syncplot!(
-		sp;
-		mutation_scope =
-			_trace_mutation_scope(stable_indices),
-	) do current
-		_do_prependtraces!(
-			current,
-			update,
-			stable_indices,
-			maxpoints,
-		)
-	end
+	return _syncplot_trace_splice!(
+		sp,
+		update,
+		indices,
+		maxpoints;
+		prepend = true,
+	)
 end
 
 function PlotlyBase.prependtraces!(
@@ -7948,7 +9066,6 @@ end
 function _commit_modern_map_layout!(
 	p::Plot,
 	staged_layout::Layout,
-	::IdDict{Any,Any},
 )
 	# Changed, unaliased map containers are copy-on-write roots. Sharing one
 	# root among multiple target map keys is retained by staging it once.
@@ -8252,22 +9369,24 @@ function _prepare_modern_map_layout_transaction(
 			_LAYOUT_ONLY_MUTATION_SCOPE,
 		)
 	end
-	script =
-		sp === nothing ?
-		nothing :
+	side_effect_refresh =
+		sp !== nothing &&
+		_layout_delta_has_renderer_side_effects(staged_layout, layout_delta)
+	script = if sp === nothing
+		nothing
+	elseif side_effect_refresh
+		_plotlyjs_refresh_script(sp, p.data, staged_layout; model = p)
+	else
 		_plotlyjs_relayout_script(sp, layout_delta)
+	end
 	commit = () -> begin
-		_commit_modern_map_layout!(
-			p,
-			staged_layout,
-			staged_roots,
-		)
+		_commit_modern_map_layout!(p, staged_layout)
 		commit_callback(p)
 		return p
 	end
 	return (
 		script = script,
-		operation = "relayout",
+		operation = side_effect_refresh ? "react" : "relayout",
 		commit = commit,
 	)
 end
@@ -8442,8 +9561,18 @@ Base.copy(p::_RefreshablePlot) = _clone_refreshable_plot(p)
 PlotlyBase.fork(p::_RefreshablePlot) = _clone_refreshable_plot(p)
 
 function PlotlyBase.redraw!(p::_RefreshablePlot)
-	_maybe_sync_command!(p, :redraw)
-	return p
+	# A displayed Plot redraws through the same renderer transaction as
+	# redraw!(::SyncPlot), so a renderer marked desynchronized is rebuilt from
+	# the committed model before Plotly.redraw runs. An undisplayed Plot has no
+	# renderer, so the local path is a no-op (PlotlyBase's redraw! semantics).
+	prepare = function (target, current)
+		return (
+			script = _plotlyjs_command_script(target, :redraw),
+			operation = "redraw",
+			commit = () -> current,
+		)
+	end
+	return _transactional_plot_mutation!(p, prepare, () -> p)
 end
 
 function PlotlyBase.purge!(p::_RefreshablePlot)
@@ -8594,19 +9723,13 @@ function PlotlyBase.extendtraces!(
 	indices::AbstractVector{Int} = [1],
 	maxpoints = -1,
 )
-	stable_indices = collect(indices)
-	return _transactional_full_plot_mutation!(
-		p;
-		mutation_scope =
-			_trace_mutation_scope(stable_indices),
-	) do current
-		_do_extendtraces!(
-			current,
-			update,
-			stable_indices,
-			maxpoints,
-		)
-	end
+	return _plot_trace_splice!(
+		p,
+		update,
+		indices,
+		maxpoints;
+		prepend = false,
+	)
 end
 
 function PlotlyBase.extendtraces!(
@@ -8653,19 +9776,13 @@ function PlotlyBase.prependtraces!(
 	indices::AbstractVector{Int} = [1],
 	maxpoints = -1,
 )
-	stable_indices = collect(indices)
-	return _transactional_full_plot_mutation!(
-		p;
-		mutation_scope =
-			_trace_mutation_scope(stable_indices),
-	) do current
-		_do_prependtraces!(
-			current,
-			update,
-			stable_indices,
-			maxpoints,
-		)
-	end
+	return _plot_trace_splice!(
+		p,
+		update,
+		indices,
+		maxpoints;
+		prepend = true,
+	)
 end
 
 function PlotlyBase.prependtraces!(
