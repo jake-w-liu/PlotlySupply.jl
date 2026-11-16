@@ -3882,26 +3882,6 @@ function plot_quiver3d!(
 	)
 end
 
-# Extended chart mutators need the same explicit positional signatures as their
-# Plot/SyncPlot counterparts. A catch-all SubplotFigure method would hide
-# misspelled or otherwise unsupported call shapes.
-for (fn, nargs) in (
-	(:plot_pie!, 1),
-	(:plot_funnelarea!, 1),
-	(:plot_parcoords!, 1),
-	(:plot_sunburst!, 2),
-	(:plot_treemap!, 2),
-	(:plot_sankey!, 3),
-)
-	@eval function $fn(
-		sf::SubplotFigure,
-		args::Vararg{AbstractVector, $nargs};
-		kwargs...,
-	)
-		return _subplot_delegate_mutator!(sf, $fn, args...; kwargs...)
-	end
-end
-
 # Geographic (geo, mapbox, MapLibre map) mutators on a SubplotFigure: append
 # to the cell given by `row`/`col` (both or neither; default: the active
 # cell), which must be of the trace's subplot kind. Every positional shape
@@ -4035,22 +4015,10 @@ function plot_choroplethmapbox!(
 	)
 end
 
-function plot_indicator!(
-	sf::SubplotFigure,
-	value::Real;
-	kwargs...,
-)
-	return _subplot_delegate_mutator!(sf, plot_indicator!, value; kwargs...)
-end
-
 for (fn, nargs) in (
-	(:plot_funnel!, 2),
 	(:plot_area!, 1),
 	(:plot_area!, 2),
-	(:plot_candlestick!, 5),
-	(:plot_ohlc!, 5),
 	(:plot_histogram2d!, 2),
-	(:plot_ternary!, 3),
 	(:plot_streamtube!, 6),
 )
 	@eval function $fn(
@@ -4063,7 +4031,6 @@ for (fn, nargs) in (
 end
 
 for (fn, nargs) in (
-	(:plot_waterfall!, 2),
 	(:plot_mesh3d!, 3),
 	(:plot_isosurface!, 4),
 	(:plot_volume!, 4),
@@ -9357,26 +9324,6 @@ function set_template!(fig, template = string(get_default_template()))
 	return nothing
 end
 
-## additional auxiliary functions
-
-function _tuple_interleave(tu::Tuple{Vararg{AbstractVector, N}}) where {N}
-	N > 0 || return Any[]
-	n = length(first(tu))
-	all(v -> length(v) == n, tu) || throw(ArgumentError(
-		"all vectors passed to `_tuple_interleave` must have the same length.",
-	))
-	T = mapreduce(eltype, promote_type, tu)
-	out = Vector{T}(undef, Base.Checked.checked_mul(N, n))
-	j = 1
-	for values in zip(tu...)
-		for value in values
-			@inbounds out[j] = value
-			j += 1
-		end
-	end
-	return out
-end
-
 #region Extended chart types
 
 # Open a window for the freshly-built figure when `show=true`, otherwise return
@@ -9418,155 +9365,980 @@ function _scene_layout(; title::String, xlabel::String, ylabel::String, zlabel::
 	)
 end
 
-# ── Pie ──────────────────────────────────────────────────────────────
+# ── Extended chart helpers ───────────────────────────────────────────
+#
+# Shared by the extended charts below (pie, funnelarea, sunburst, treemap,
+# funnel, waterfall, indicator, candlestick, ohlc, sankey, parcoords,
+# ternary) and by `annotate!`. The checks only read their inputs, so a
+# builder can validate everything before the first write. Errors are
+# `ArgumentError("<who>: …")`, where `who` is the public function name.
 
-function _pie_trace(values; labels, hole::Real, colors::Vector{String}, name::String)
-	kw = Dict{Symbol, Any}(:values => values)
-	labels === nothing || (kw[:labels] = labels)
-	hole > 0 && (kw[:hole] = hole)
-	isempty(colors) || (kw[:marker] = attr(colors = colors))
-	name == "" || (kw[:name] = name)
-	return pie(; kw...)
+# Mutators never open a window, and `row`/`col` address a SubplotFigure cell:
+# the SubplotFigure methods take them out before calling the mutator, so on a
+# single figure they are an error.
+function _extended_mutator_guard(who::AbstractString, show, row, col)
+	show === nothing || throw(ArgumentError(
+		"$(who): mutators do not take `show` (they never open a window); " *
+		"display the figure with `to_syncplot(fig)`, or pass `show = true` " *
+		"to the constructor.",
+	))
+	(row === nothing && col === nothing) || throw(ArgumentError(
+		"$(who): `row`/`col` select a SubplotFigure cell; a single figure " *
+		"has one cell, so omit them.",
+	))
+	return nothing
 end
 
-"""
-	plot_pie(values; labels=nothing, hole=0, colors=String[], kwargs...)
+# The Cartesian mutators take `secondary_y` for SubplotFigure cells (the
+# SubplotFigure method routes it to the cell's secondary y axis).
+function _extended_secondary_y_guard(who::AbstractString, secondary_y::Bool)
+	secondary_y && throw(ArgumentError(
+		"$(who): `secondary_y = true` addresses the secondary y axis of a " *
+		"SubplotFigure cell created with `specs = Spec(secondary_y = true)`; " *
+		"it is not available on a single figure.",
+	))
+	return nothing
+end
 
-Pie (or donut, when `hole>0`) chart of `values`, with optional slice `labels`
-and per-slice `colors`.
-
-# Keyword Arguments
-- `labels`: Slice labels (defaults to indices).
-- `hole`: Donut hole fraction in `[0, 1)`.
-- `colors`: Per-slice colors.
-- `title`, `width`, `height`, `fontsize`, `show`: Common figure options.
-"""
-function plot_pie(
-	values::Union{AbstractVector, AbstractRange};
-	labels::Union{Nothing, AbstractVector} = nothing,
-	hole::Real = 0,
-	colors::Vector{String} = String[],
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-	show::Bool = false,
+# A user label through the mathtext pipeline (text plotly typesets: titles,
+# axis titles, legend names, parcoords/ternary axis titles, annotations).
+function _extended_label(
+	text::AbstractString,
+	who::AbstractString,
+	name::AbstractString;
+	align::Symbol = :c,
 )
-	fig = Plot(_pie_trace(values; labels = labels, hole = hole, colors = colors, name = ""), Layout())
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	try
+		return _label(text; align = align)
+	catch err
+		err isa ArgumentError || rethrow()
+		throw(ArgumentError("$(who): `$(name)`: $(err.msg)"))
+	end
 end
 
-"""
-	plot_pie!(fig, values; labels=nothing, hole=0, colors=String[], kwargs...)
+# The same for text plotly draws without MathJax (`data-notex`: slice labels
+# of pie/funnelarea/sunburst/treemap, sankey node labels).
+function _extended_plain_label(
+	text::AbstractString,
+	who::AbstractString,
+	name::AbstractString,
+)
+	try
+		return _label_plain(text)
+	catch err
+		err isa ArgumentError || rethrow()
+		throw(ArgumentError("$(who): `$(name)`: $(err.msg)"))
+	end
+end
 
-Append a pie/donut trace to an existing figure.
-"""
-function plot_pie!(
+# `_label_plain` changes only strings that contain a `$` or a line break;
+# every other character passes through verbatim.
+_extended_needs_plain(value) =
+	value isa AbstractString &&
+	(occursin('$', value) || occursin('\n', value) || occursin('\r', value))
+
+# Data labels drawn without MathJax. Labels with math or line breaks are
+# converted with `_label_plain`; otherwise the caller's array is returned
+# unchanged (not copied), so large payloads stay shared.
+function _extended_plain_labels(
+	labels::AbstractVector,
+	who::AbstractString,
+	name::AbstractString,
+)
+	any(_extended_needs_plain, labels) || return labels
+	converted = Vector{Any}(undef, length(labels))
+	for (position, value) in enumerate(labels)
+		converted[position] = _extended_needs_plain(value) ?
+			_extended_plain_label(value, who, "$(name)[$(position)]") :
+			value
+	end
+	return converted
+end
+
+_extended_is_real(value) = value isa Real && !(value isa Bool)
+
+_extended_is_gap(value) =
+	value === missing ||
+	value === nothing ||
+	(value isa AbstractFloat && isnan(value))
+
+# Element checks for numeric data arrays. Every element must be a finite real
+# number (Bool is rejected). `gaps = true` also admits `missing`, `nothing`
+# and NaN (drawn as gaps); `numeric_strings = true` admits strings that parse
+# as numbers (plotly coerces them); `nonnegative`, `positive` (log axes) and
+# `integer` (node indices) add the obvious constraints.
+function _extended_check_numbers(
+	who::AbstractString,
+	name::AbstractString,
+	values;
+	nonnegative::Bool = false,
+	positive::Bool = false,
+	integer::Bool = false,
+	gaps::Bool = false,
+	numeric_strings::Bool = false,
+)
+	for (position, raw) in enumerate(values)
+		gaps && _extended_is_gap(raw) && continue
+		value = raw
+		if numeric_strings && raw isa AbstractString
+			parsed = tryparse(Float64, raw)
+			parsed === nothing && throw(ArgumentError(
+				"$(who): `$(name)[$(position)]` must be a number; got $(repr(raw)).",
+			))
+			value = parsed
+		end
+		_extended_is_real(value) || throw(ArgumentError(
+			"$(who): `$(name)[$(position)]` must be a real number; got " *
+			"$(repr(raw))" *
+			(gaps ? " (mark missing values with `missing`, `nothing` or NaN)." : "."),
+		))
+		isfinite(value) || throw(ArgumentError(
+			"$(who): `$(name)[$(position)]` must be finite; got $(repr(raw)).",
+		))
+		nonnegative && value < 0 && throw(ArgumentError(
+			"$(who): `$(name)[$(position)]` must be non-negative; got $(repr(raw)).",
+		))
+		positive && value <= 0 && throw(ArgumentError(
+			"$(who): `$(name)[$(position)]` is on a logarithmic axis and must be " *
+			"positive; got $(repr(raw)).",
+		))
+		integer && !isinteger(value) && throw(ArgumentError(
+			"$(who): `$(name)[$(position)]` must be an integer index; got $(repr(raw)).",
+		))
+	end
+	return nothing
+end
+
+function _extended_check_number(who::AbstractString, name::AbstractString, value)
+	(_extended_is_real(value) && isfinite(value)) || throw(ArgumentError(
+		"$(who): `$(name)` must be a finite real number; got $(repr(value)).",
+	))
+	return value
+end
+
+# Data arguments also admit array views for dispatch compatibility with the
+# 1.x signatures; anything but a vector is an error.
+function _extended_require_vector(who::AbstractString, name::AbstractString, values)
+	ndims(values) == 1 || throw(ArgumentError(
+		"$(who): `$(name)` must be a vector; got a $(ndims(values))-dimensional " *
+		"$(typeof(values)) (use `vec(...)` to flatten it).",
+	))
+	return nothing
+end
+
+function _extended_check_length(
+	who::AbstractString,
+	name::AbstractString,
+	values,
+	reference_name::AbstractString,
+	n::Integer,
+)
+	length(values) == n || throw(ArgumentError(
+		"$(who): `$(name)` must have one entry per element of " *
+		"`$(reference_name)` ($(n)); got $(length(values)).",
+	))
+	return nothing
+end
+
+_extended_is_colour(value) = value isa AbstractString || value isa Symbol
+
+# One colour keyword: a String or Symbol (`""` = unset), passed through to
+# plotly as a String.
+function _extended_colour(who::AbstractString, name::AbstractString, value)
+	_extended_is_colour(value) || throw(ArgumentError(
+		"$(who): `$(name)` must be a colour string or Symbol; got $(repr(value)).",
+	))
+	return String(value)
+end
+
+# A per-element colour array of length `n`: colour strings/Symbols, and real
+# numbers when `numbers = true` (plotly maps those through a colorscale).
+# Returned unchanged unless Symbols have to become Strings.
+function _extended_colour_vector(
+	who::AbstractString,
+	name::AbstractString,
+	colors::AbstractVector,
+	n::Integer,
+	reference_name::AbstractString;
+	numbers::Bool = false,
+)
+	_extended_check_length(who, name, colors, reference_name, n)
+	for (position, value) in enumerate(colors)
+		(_extended_is_colour(value) ||
+		 (numbers && _extended_is_real(value) && isfinite(value))) ||
+			throw(ArgumentError(
+				"$(who): `$(name)[$(position)]` must be a colour string or Symbol" *
+				(numbers ? " or a finite number" : "") * "; got $(repr(value)).",
+			))
+	end
+	any(value -> value isa Symbol, colors) || return colors
+	return Any[value isa Symbol ? String(value) : value for value in colors]
+end
+
+# `width`, `height` and `fontsize` of the charts without Cartesian axes.
+function _extended_validate_sizes(who::AbstractString; width, height, fontsize)
+	_require_size_option(width, who, "width")
+	_require_size_option(height, who, "height")
+	_require_size_option(fontsize, who, "fontsize")
+	return nothing
+end
+
+# Common options of the charts without Cartesian axes. `title` is already a
+# `_label` result. A constructor applies the default template; a mutator only
+# refreshes the legend, so a user template survives.
+function _extended_apply_figure_options!(
 	fig,
-	values::Union{AbstractVector, AbstractRange};
-	labels::Union{Nothing, AbstractVector} = nothing,
-	hole::Real = 0,
-	colors::Vector{String} = String[],
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	who::AbstractString;
+	title::AbstractString,
+	width,
+	height,
+	fontsize,
+	apply_template::Bool,
 )
-	push!(_plot_data(fig), _pie_trace(values; labels = labels, hole = hole, colors = colors, name = ""))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_apply_figure_title!(fig, title)
+	_apply_figure_size!(fig, who; width = width, height = height)
+	apply_template ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	_apply_figure_fontsize!(fig, who, fontsize)
+	return nothing
+end
+
+# Open a window for a freshly built figure when `show = true` (960×720 and
+# the title "PlotlySupply" when width/height/title are unset).
+_extended_maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString) =
+	show ?
+	to_syncplot(
+		fig;
+		width = width > 0 ? width : 960,
+		height = height > 0 ? height : 720,
+		title = isempty(title) ? "PlotlySupply" : title,
+	) :
+	fig
+
+# Spine-styled Cartesian layout without a stored title (titles are written by
+# `_apply_figure_title!` as `title.text`).
+function _extended_cartesian_layout()
+	layout = _default_cartesian_layout()
+	get(layout.fields, :title, nothing) == "" && delete!(layout.fields, :title)
+	return layout
+end
+
+# Validated (`_label`led) title and axis labels of a Cartesian chart.
+_extended_cartesian_labels(who::AbstractString; title, xlabel, ylabel) = (
+	title = _extended_label(title, who, "title"),
+	xlabel = _extended_label(xlabel, who, "xlabel"),
+	ylabel = _extended_label(ylabel, who, "ylabel"),
+)
+
+# Constructor of a Cartesian chart: one trace, spine-styled axes, then the
+# common options through the D7 primitives (validated before any write).
+function _extended_cartesian_plot(
+	who::AbstractString,
+	trace;
+	labels,
+	raw_title::AbstractString,
+	xrange,
+	yrange,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width,
+	height,
+	fontsize,
+	grid,
+	show::Bool,
+)
+	fig = Plot(trace, _extended_cartesian_layout())
+	_apply_cartesian_plot_options!(
+		fig;
+		xlabel = labels.xlabel,
+		ylabel = labels.ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		grid = grid,
+		fontsize = fontsize,
+		title = labels.title,
+		who = who,
+	)
+	return _extended_maybe_show(fig, show, width, height, raw_title)
+end
+
+# Mutator of a Cartesian chart: every option is validated before the trace
+# is appended; `grid = nothing` leaves the grid as it is, any other value is
+# applied (so `grid = true` re-enables a hidden grid).
+function _extended_cartesian_append!(
+	fig,
+	who::AbstractString,
+	trace;
+	labels,
+	xrange,
+	yrange,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width,
+	height,
+	fontsize,
+	grid,
+)
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	push!(_plot_data(fig), trace)
+	_apply_axis_grid!(fig, grid, who)
+	_apply_cartesian_plot_options!(
+		fig;
+		xlabel = labels.xlabel,
+		ylabel = labels.ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		grid = nothing,
+		fontsize = fontsize,
+		title = labels.title,
+		refresh = true,
+		apply_template = false,
+		who = who,
+	)
+	return nothing
+end
+
+# Axis type a Cartesian mutator will draw on: the requested scale, otherwise
+# the figure's current primary-axis type.
+_extended_final_axis_type(fig, key::Symbol, scale::AbstractString) =
+	isempty(scale) ? _axis_type(fig, key) : String(scale)
+
+# ── Pie / funnel-area ────────────────────────────────────────────────
+
+# Trace of the slice charts (`pie`, `funnelarea`). Validates everything, then
+# stores the caller's arrays without copying them.
+function _pie_trace(
+	constructor,
+	who::AbstractString,
+	values::AbstractVector;
+	labels,
+	colors,
+	hole = 0,
+)
+	_extended_check_numbers(who, "values", values; nonnegative = true, numeric_strings = true)
+	(_extended_is_real(hole) && isfinite(hole) && 0 <= hole < 1) || throw(ArgumentError(
+		"$(who): `hole` must be a number in [0, 1) (the hole radius as a " *
+		"fraction of the pie radius); got $(repr(hole)).",
+	))
+	n = length(values)
+	kw = Dict{Symbol, Any}(:values => values)
+	if labels !== nothing
+		_extended_check_length(who, "labels", labels, "values", n)
+		kw[:labels] = _extended_plain_labels(labels, who, "labels")
+	end
+	if colors !== nothing && !isempty(colors)
+		kw[:marker] = attr(colors = _extended_colour_vector(who, "colors", colors, n, "values"))
+	end
+	hole > 0 && (kw[:hole] = hole)
+	return constructor(; kw...)
+end
+
+function _extended_slice_plot(
+	constructor,
+	who::AbstractString,
+	values::AbstractVector;
+	labels,
+	colors,
+	hole = 0,
+	title::AbstractString,
+	width,
+	height,
+	fontsize,
+	show::Bool,
+)
+	trace = _pie_trace(constructor, who, values; labels = labels, colors = colors, hole = hole)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	fig = Plot(trace, Layout())
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = true,
+	)
+	return _extended_maybe_show(fig, show, width, height, title)
+end
+
+function _extended_slice_append!(
+	fig,
+	constructor,
+	who::AbstractString,
+	values::AbstractVector;
+	labels,
+	colors,
+	hole = 0,
+	title::AbstractString,
+	width,
+	height,
+	fontsize,
+)
+	trace = _pie_trace(constructor, who, values; labels = labels, colors = colors, hole = hole)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	push!(_plot_data(fig), trace)
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = false,
+	)
 	_refresh!(fig)
 	return nothing
 end
 
-# ── Sunburst / Treemap (hierarchical) ────────────────────────────────
+"""
+	plot_pie(values; labels=nothing, hole=0, colors=nothing, title="", width=0,
+		height=0, fontsize=0, show=false)
 
-function _hierarchy_trace(
-	constructor,
-	labels,
-	parents;
-	values,
-	colors,
-	colorscale::String,
-	name::String,
+Pie chart of `values`, or a donut chart when `hole > 0`. Each value is one
+slice whose angle is proportional to it.
+
+# Arguments
+- `values::AbstractVector`: non-negative finite numbers (numeric strings are
+  accepted, as plotly coerces them). The array is stored without copying.
+
+# Keywords
+- `labels::Union{Nothing,AbstractVector} = nothing`: one label per slice
+  (default: the indices `0, 1, …`). Plotly sums slices that share a label.
+  Slice text is drawn without MathJax, so a label containing `\$…\$` math is
+  converted to Unicode with sub/superscripts (`"\$\\alpha\$"` → `"α"`); an odd
+  number of unescaped `\$` is an `ArgumentError` (write `\\\$` for a dollar sign).
+- `hole::Real = 0`: radius of the donut hole as a fraction of the pie radius,
+  in `[0, 1)`.
+- `colors::Union{Nothing,AbstractVector} = nothing`: one colour (String or
+  Symbol) per slice; `nothing` or an empty vector uses the template colorway.
+- `title::AbstractString = ""`: figure title (mathtext, see `mathtext`).
+- `width::Real = 0`, `height::Real = 0`: figure size in px (`0` = automatic).
+- `fontsize::Real = 0`: global font size in px (`0` = template default).
+- `show::Bool = false`: open an Electron window and return a `SyncPlot`.
+
+Lengths that differ from `length(values)`, negative or non-finite values and
+a `hole` outside `[0, 1)` throw an `ArgumentError`.
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_pie([45, 30, 25]; labels = ["Solar", "Wind", "Hydro"], hole = 0.4,
+	title = "Energy mix")
+```
+"""
+function plot_pie(
+	values::AbstractVector;
+	labels::Union{Nothing, AbstractVector} = nothing,
+	hole::Real = 0,
+	colors::Union{Nothing, AbstractVector} = nothing,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	show::Bool = false,
 )
-	length(labels) == length(parents) ||
-		throw(ArgumentError("`labels` and `parents` must have the same length; got $(length(labels)) and $(length(parents))."))
-	kw = Dict{Symbol, Any}(
-		:labels => labels,
-		:parents => parents,
+	return _extended_slice_plot(
+		pie,
+		"plot_pie",
+		values;
+		labels = labels,
+		colors = colors,
+		hole = hole,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		show = show,
 	)
-	if values !== nothing
-		length(values) == length(labels) ||
-			throw(ArgumentError(
-				"`values` must match `labels` in length; got " *
-				"$(length(values)) and $(length(labels)).",
-			))
-		kw[:values] = values
-	end
-
-	marker = Dict{Symbol,Any}()
-	if colors !== nothing
-		length(colors) == length(labels) ||
-			throw(ArgumentError(
-				"`colors` must match `labels` in length; got " *
-				"$(length(colors)) and $(length(labels)).",
-			))
-		marker[:colors] = colors
-	end
-	if !isempty(colorscale)
-		if colors === nothing && values !== nothing
-			marker[:colors] = kw[:values]
-		end
-		marker[:colorscale] = colorscale
-	end
-	isempty(marker) || (kw[:marker] = attr(; marker...))
-	name == "" || (kw[:name] = name)
-	return constructor(; kw...)
 end
 
 """
-	plot_sunburst(labels, parents; values=nothing, colors=nothing,
-		colorscale="", kwargs...)
+	plot_pie!(fig, values; labels=nothing, hole=0, colors=nothing, title="",
+		width=0, height=0, fontsize=0)
+	plot_pie!(sf::SubplotFigure, values; row=nothing, col=nothing, kwargs...)
 
-Hierarchical sunburst chart. `parents[i]` is the label of `labels[i]`'s parent
-(use `""` for a root). Optional `values` size the slices. When `colorscale`
-is set, `values` color the slices unless `colors` are supplied explicitly.
-Without either array, Plotly derives colors from the hierarchy.
+Append a pie/donut trace to `fig` (a `Plot` or `SyncPlot`). The keywords are
+those of [`plot_pie`](@ref) without `show` (passing `show` throws an
+`ArgumentError`); a non-empty `title` and non-zero `width`/`height`/`fontsize`
+update the figure, and the template is left as it is. Several pies in one
+figure overlap unless their `domain` is set; use a SubplotFigure instead.
+
+On a `SubplotFigure` the trace goes to the `domain` cell `row`, `col` (both or
+neither; default: the active cell), which becomes the active cell; `title`,
+`width` and `height` are figure-level there and are ignored with a warning.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+sf = subplots(1, 2; sync = false, specs = [Spec(kind = "domain") Spec(kind = "domain")])
+plot_pie!(sf, [3, 2, 1]; labels = ["a", "b", "c"], row = 1, col = 1)
+plot_pie!(sf, [1, 1]; labels = ["x", "y"], hole = 0.5, row = 1, col = 2)
+```
+"""
+function plot_pie!(
+	fig,
+	values::AbstractVector;
+	labels::Union{Nothing, AbstractVector} = nothing,
+	hole::Real = 0,
+	colors::Union{Nothing, AbstractVector} = nothing,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	row = nothing,
+	col = nothing,
+	show = nothing,
+)
+	who = "plot_pie!"
+	_extended_mutator_guard(who, show, row, col)
+	return _extended_slice_append!(
+		fig,
+		pie,
+		who,
+		values;
+		labels = labels,
+		colors = colors,
+		hole = hole,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+	)
+end
+
+function plot_pie!(
+	sf::SubplotFigure,
+	values::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_pie!, values; row = row, col = col, kwargs...)
+end
+
+"""
+	plot_funnelarea(values; labels=nothing, colors=nothing, title="", width=0,
+		height=0, fontsize=0, show=false)
+
+Funnel-area chart: stacked trapezoids whose areas are proportional to
+`values`, top to bottom in the given order.
+
+# Arguments
+- `values::AbstractVector`: non-negative finite numbers (numeric strings are
+  accepted). Stored without copying.
+
+# Keywords
+- `labels::Union{Nothing,AbstractVector} = nothing`: one label per stage
+  (default: indices). Drawn without MathJax: `\$…\$` math becomes Unicode, as
+  for [`plot_pie`](@ref).
+- `colors::Union{Nothing,AbstractVector} = nothing`: one colour (String or
+  Symbol) per stage; `nothing`/empty uses the colorway.
+- `title::AbstractString = ""`, `width::Real = 0`, `height::Real = 0`,
+  `fontsize::Real = 0`, `show::Bool = false`: as for [`plot_pie`](@ref).
+
+Mismatched lengths and negative or non-finite values throw an `ArgumentError`.
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_funnelarea([120, 60, 25, 8]; labels = ["Visits", "Sign-ups", "Trials", "Sales"])
+```
+"""
+function plot_funnelarea(
+	values::AbstractVector;
+	labels::Union{Nothing, AbstractVector} = nothing,
+	colors::Union{Nothing, AbstractVector} = nothing,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	show::Bool = false,
+)
+	return _extended_slice_plot(
+		funnelarea,
+		"plot_funnelarea",
+		values;
+		labels = labels,
+		colors = colors,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		show = show,
+	)
+end
+
+"""
+	plot_funnelarea!(fig, values; labels=nothing, colors=nothing, title="",
+		width=0, height=0, fontsize=0)
+	plot_funnelarea!(sf::SubplotFigure, values; row=nothing, col=nothing, kwargs...)
+
+Append a funnel-area trace to `fig` (`Plot`/`SyncPlot`), or to the `domain`
+cell `row`, `col` of a `SubplotFigure` (default: the active cell). Keywords as
+for [`plot_funnelarea`](@ref) without `show` (an `ArgumentError`); see
+[`plot_pie!`](@ref) for the figure-level options.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = Plot()
+plot_funnelarea!(fig, [5, 3, 1]; labels = ["x", "y", "z"])
+```
+"""
+function plot_funnelarea!(
+	fig,
+	values::AbstractVector;
+	labels::Union{Nothing, AbstractVector} = nothing,
+	colors::Union{Nothing, AbstractVector} = nothing,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	row = nothing,
+	col = nothing,
+	show = nothing,
+)
+	who = "plot_funnelarea!"
+	_extended_mutator_guard(who, show, row, col)
+	return _extended_slice_append!(
+		fig,
+		funnelarea,
+		who,
+		values;
+		labels = labels,
+		colors = colors,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+	)
+end
+
+function plot_funnelarea!(
+	sf::SubplotFigure,
+	values::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_funnelarea!, values; row = row, col = col, kwargs...)
+end
+
+# ── Sunburst / Treemap (hierarchical) ────────────────────────────────
+
+const _EXTENDED_BRANCHVALUES = ("remainder", "total")
+
+function _extended_first_duplicate(values)
+	seen = Set{Any}()
+	for value in values
+		value in seen && return value
+		push!(seen, value)
+	end
+	return nothing
+end
+
+# Trace of the hierarchical charts. Without `ids`, plotly identifies a sector
+# by its label, so labels must be unique (a repeated label would silently
+# merge two branches). When labels contain math they are converted for
+# display and the original labels become the `ids`, so `parents` still
+# refers to them.
+function _hierarchy_trace(
+	constructor,
+	who::AbstractString,
+	labels::AbstractVector,
+	parents::AbstractVector;
+	values,
+	colors,
+	colorscale,
+	ids,
+	branchvalues,
+)
+	n = length(labels)
+	_extended_check_length(who, "parents", parents, "labels", n)
+	if ids === nothing
+		if !allunique(labels)
+			duplicate = _extended_first_duplicate(labels)
+			throw(ArgumentError(
+				"$(who): `labels` contains $(repr(duplicate)) more than once; plotly " *
+				"identifies sectors by label, so the repeated sectors would be merged " *
+				"and one branch dropped. Pass unique `ids` (with `parents` referring " *
+				"to ids) to repeat a label.",
+			))
+		end
+	else
+		ids isa AbstractVector || throw(ArgumentError(
+			"$(who): `ids` must be a vector with one unique id per label; got $(typeof(ids)).",
+		))
+		_extended_check_length(who, "ids", ids, "labels", n)
+		for (position, id) in enumerate(ids)
+			valid = (id isa AbstractString && !isempty(id)) ||
+				id isa Symbol ||
+				(_extended_is_real(id) && isfinite(id))
+			valid || throw(ArgumentError(
+				"$(who): `ids[$(position)]` must be a non-empty string, a Symbol or a " *
+				"finite number (\"\" marks a root in `parents`); got $(repr(id)).",
+			))
+		end
+		if !allunique(ids)
+			duplicate = _extended_first_duplicate(ids)
+			throw(ArgumentError("$(who): `ids` must be unique; $(repr(duplicate)) appears more than once."))
+		end
+	end
+	if values !== nothing
+		_extended_check_length(who, "values", values, "labels", n)
+		_extended_check_numbers(who, "values", values; nonnegative = true, numeric_strings = true)
+	end
+	checked_colors = colors === nothing ? nothing :
+		_extended_colour_vector(who, "colors", colors, n, "labels"; numbers = true)
+	branch = String(branchvalues)
+	(isempty(branch) || branch in _EXTENDED_BRANCHVALUES) || throw(ArgumentError(
+		"$(who): `branchvalues` must be \"remainder\", \"total\" or \"\" (plotly " *
+		"default, \"remainder\"); got $(repr(branchvalues)).",
+	))
+	scale = _resolve_colorscale(colorscale; who = who).scale
+	display_labels = _extended_plain_labels(labels, who, "labels")
+
+	kw = Dict{Symbol, Any}(:labels => display_labels, :parents => parents)
+	if ids !== nothing
+		kw[:ids] = ids
+	elseif display_labels !== labels
+		kw[:ids] = labels
+	end
+	values === nothing || (kw[:values] = values)
+	isempty(branch) || (kw[:branchvalues] = branch)
+	marker = Dict{Symbol, Any}()
+	checked_colors === nothing || (marker[:colors] = checked_colors)
+	if !(scale isa AbstractString && isempty(scale))
+		# A colorscale colours the sectors by `values` unless explicit
+		# `colors` are given (without either array plotly ignores it).
+		checked_colors === nothing && values !== nothing && (marker[:colors] = values)
+		marker[:colorscale] = scale
+	end
+	isempty(marker) || (kw[:marker] = attr(; marker...))
+	return constructor(; kw...)
+end
+
+function _extended_hierarchy_plot(
+	constructor,
+	who::AbstractString,
+	labels::AbstractVector,
+	parents::AbstractVector;
+	values,
+	colors,
+	colorscale,
+	ids,
+	branchvalues,
+	title::AbstractString,
+	width,
+	height,
+	fontsize,
+	show::Bool,
+)
+	trace = _hierarchy_trace(
+		constructor,
+		who,
+		labels,
+		parents;
+		values = values,
+		colors = colors,
+		colorscale = colorscale,
+		ids = ids,
+		branchvalues = branchvalues,
+	)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	fig = Plot(trace, Layout())
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = true,
+	)
+	return _extended_maybe_show(fig, show, width, height, title)
+end
+
+function _extended_hierarchy_append!(
+	fig,
+	constructor,
+	who::AbstractString,
+	labels::AbstractVector,
+	parents::AbstractVector;
+	values,
+	colors,
+	colorscale,
+	ids,
+	branchvalues,
+	title::AbstractString,
+	width,
+	height,
+	fontsize,
+)
+	trace = _hierarchy_trace(
+		constructor,
+		who,
+		labels,
+		parents;
+		values = values,
+		colors = colors,
+		colorscale = colorscale,
+		ids = ids,
+		branchvalues = branchvalues,
+	)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	push!(_plot_data(fig), trace)
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = false,
+	)
+	_refresh!(fig)
+	return nothing
+end
+
+"""
+	plot_sunburst(labels, parents; values=nothing, colors=nothing, colorscale="",
+		ids=nothing, branchvalues="", title="", width=0, height=0, fontsize=0,
+		show=false)
+
+Hierarchical sunburst chart: rings of sectors, the root in the centre.
+
+# Arguments
+- `labels::AbstractVector`: the text of each sector. Without `ids` the labels
+  identify the sectors, so they must be unique (a repeated label throws an
+  `ArgumentError`; plotly would merge the two sectors and drop a branch).
+  Drawn without MathJax: `\$…\$` math is converted to Unicode (the original
+  labels then serve as ids).
+- `parents::AbstractVector`: for each sector, the label (or id, when `ids` is
+  given) of its parent; `""` marks a root.
+
+# Keywords
+- `values::Union{Nothing,AbstractVector} = nothing`: non-negative sector
+  sizes (numeric strings accepted). With the plotly default
+  `branchvalues = "remainder"` a parent's value is added to the sum of its
+  children; with `"total"` it is the total of its subtree (and must be at
+  least the sum of its children). Without values every leaf counts once.
+- `colors::Union{Nothing,AbstractVector} = nothing`: one colour (String or
+  Symbol) or number (mapped through `colorscale`) per sector.
+- `colorscale = ""`: a colormap name (matplotlib/plotly.py orientation,
+  case-insensitive, `_r` reverses; unknown names throw), a vector of colours or
+  `(t, colour)` stops, or a `ColorScheme`. With `values` and no `colors` the
+  sectors are coloured by `values`; `""` keeps the colorway.
+- `ids::Union{Nothing,AbstractVector} = nothing`: unique sector ids (non-empty
+  strings, Symbols or numbers). Use them to repeat a label in different
+  branches, e.g. `labels = ["2023", "2024", "Q1", "Q1"]`,
+  `ids = ["2023", "2024", "2023/Q1", "2024/Q1"]`,
+  `parents = ["", "", "2023", "2024"]`.
+- `branchvalues::Union{AbstractString,Symbol} = ""`: `"remainder"`, `"total"`
+  or `""` (plotly default, `"remainder"`).
+- `title::AbstractString = ""`, `width::Real = 0`, `height::Real = 0`,
+  `fontsize::Real = 0`, `show::Bool = false`: as for [`plot_pie`](@ref).
+
+All arrays must have `length(labels)` entries. The caller's arrays are stored
+without copying (unless labels with math have to be converted).
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+The label "Other" appears in two branches, so the sectors get `ids` and
+`parents` refers to those ids:
+```julia
+fig = plot_sunburst(
+	["Physics", "Chemistry", "Optics", "Other", "Other"],
+	["", "", "P", "P", "C"];
+	ids = ["P", "C", "P/optics", "P/other", "C/other"],
+	values = [0, 0, 4, 2, 3],
+	colorscale = "viridis",
+)
+```
 """
 function plot_sunburst(
 	labels::AbstractVector,
 	parents::AbstractVector;
 	values::Union{Nothing, AbstractVector} = nothing,
 	colors::Union{Nothing, AbstractVector} = nothing,
-	colorscale::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	colorscale = "",
+	ids::Union{Nothing, AbstractVector} = nothing,
+	branchvalues::Union{AbstractString, Symbol} = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 )
-	fig = Plot(
-		_hierarchy_trace(
-			sunburst,
-			labels,
-			parents;
-			values = values,
-			colors = colors,
-			colorscale = colorscale,
-			name = "",
-		),
-		Layout(),
+	return _extended_hierarchy_plot(
+		sunburst,
+		"plot_sunburst",
+		labels,
+		parents;
+		values = values,
+		colors = colors,
+		colorscale = colorscale,
+		ids = ids,
+		branchvalues = branchvalues,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		show = show,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
 end
 
 """
 	plot_sunburst!(fig, labels, parents; values=nothing, colors=nothing,
-		colorscale="", kwargs...)
+		colorscale="", ids=nothing, branchvalues="", title="", width=0,
+		height=0, fontsize=0)
+	plot_sunburst!(sf::SubplotFigure, labels, parents; row=nothing, col=nothing, kwargs...)
 
-Append a sunburst trace to an existing figure.
+Append a sunburst trace to `fig` (`Plot`/`SyncPlot`), or to the `domain` cell
+`row`, `col` of a `SubplotFigure` (default: the active cell). Arguments and
+keywords as for [`plot_sunburst`](@ref) without `show` (an `ArgumentError`);
+see [`plot_pie!`](@ref) for the figure-level options.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = Plot()
+plot_sunburst!(fig, ["root", "a", "b"], ["", "root", "root"]; values = [0, 2, 1])
+```
 """
 function plot_sunburst!(
 	fig,
@@ -9574,68 +10346,123 @@ function plot_sunburst!(
 	parents::AbstractVector;
 	values::Union{Nothing, AbstractVector} = nothing,
 	colors::Union{Nothing, AbstractVector} = nothing,
-	colorscale::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	colorscale = "",
+	ids::Union{Nothing, AbstractVector} = nothing,
+	branchvalues::Union{AbstractString, Symbol} = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	row = nothing,
+	col = nothing,
+	show = nothing,
 )
-	push!(
-		_plot_data(fig),
-		_hierarchy_trace(
-			sunburst,
-			labels,
-			parents;
-			values = values,
-			colors = colors,
-			colorscale = colorscale,
-			name = "",
-		),
+	who = "plot_sunburst!"
+	_extended_mutator_guard(who, show, row, col)
+	return _extended_hierarchy_append!(
+		fig,
+		sunburst,
+		who,
+		labels,
+		parents;
+		values = values,
+		colors = colors,
+		colorscale = colorscale,
+		ids = ids,
+		branchvalues = branchvalues,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
-	_refresh!(fig)
-	return nothing
+end
+
+function plot_sunburst!(
+	sf::SubplotFigure,
+	labels::AbstractVector,
+	parents::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_sunburst!, labels, parents; row = row, col = col, kwargs...)
 end
 
 """
-	plot_treemap(labels, parents; values=nothing, colors=nothing,
-		colorscale="", kwargs...)
+	plot_treemap(labels, parents; values=nothing, colors=nothing, colorscale="",
+		ids=nothing, branchvalues="", title="", width=0, height=0, fontsize=0,
+		show=false)
 
-Hierarchical treemap chart. See [`plot_sunburst`](@ref) for the `labels`/`parents` convention.
+Hierarchical treemap: nested rectangles whose areas follow `values`. The
+arguments, the `labels`/`parents`/`ids` convention and every keyword are those
+of [`plot_sunburst`](@ref).
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+Each year has quarters "Q1" and "Q2", so the sectors get `ids`; `parents`
+refers to ids:
+```julia
+fig = plot_treemap(
+	["2023", "2024", "Q1", "Q2", "Q1", "Q2"],
+	["", "", "2023", "2023", "2024", "2024"];
+	ids = ["2023", "2024", "2023/Q1", "2023/Q2", "2024/Q1", "2024/Q2"],
+	values = [0, 0, 1, 2, 3, 4],
+)
+```
 """
 function plot_treemap(
 	labels::AbstractVector,
 	parents::AbstractVector;
 	values::Union{Nothing, AbstractVector} = nothing,
 	colors::Union{Nothing, AbstractVector} = nothing,
-	colorscale::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	colorscale = "",
+	ids::Union{Nothing, AbstractVector} = nothing,
+	branchvalues::Union{AbstractString, Symbol} = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 )
-	fig = Plot(
-		_hierarchy_trace(
-			treemap,
-			labels,
-			parents;
-			values = values,
-			colors = colors,
-			colorscale = colorscale,
-			name = "",
-		),
-		Layout(),
+	return _extended_hierarchy_plot(
+		treemap,
+		"plot_treemap",
+		labels,
+		parents;
+		values = values,
+		colors = colors,
+		colorscale = colorscale,
+		ids = ids,
+		branchvalues = branchvalues,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		show = show,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
 end
 
 """
 	plot_treemap!(fig, labels, parents; values=nothing, colors=nothing,
-		colorscale="", kwargs...)
+		colorscale="", ids=nothing, branchvalues="", title="", width=0,
+		height=0, fontsize=0)
+	plot_treemap!(sf::SubplotFigure, labels, parents; row=nothing, col=nothing, kwargs...)
 
-Append a treemap trace to an existing figure.
+Append a treemap trace to `fig` (`Plot`/`SyncPlot`), or to the `domain` cell
+`row`, `col` of a `SubplotFigure` (default: the active cell). Arguments and
+keywords as for [`plot_sunburst`](@ref) without `show` (an `ArgumentError`);
+see [`plot_pie!`](@ref) for the figure-level options.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = Plot()
+plot_treemap!(fig, ["root", "a", "b"], ["", "root", "root"]; values = [0, 2, 1])
+```
 """
 function plot_treemap!(
 	fig,
@@ -9643,257 +10470,677 @@ function plot_treemap!(
 	parents::AbstractVector;
 	values::Union{Nothing, AbstractVector} = nothing,
 	colors::Union{Nothing, AbstractVector} = nothing,
-	colorscale::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	colorscale = "",
+	ids::Union{Nothing, AbstractVector} = nothing,
+	branchvalues::Union{AbstractString, Symbol} = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	row = nothing,
+	col = nothing,
+	show = nothing,
 )
-	push!(
-		_plot_data(fig),
-		_hierarchy_trace(
-			treemap,
-			labels,
-			parents;
-			values = values,
-			colors = colors,
-			colorscale = colorscale,
-			name = "",
-		),
+	who = "plot_treemap!"
+	_extended_mutator_guard(who, show, row, col)
+	return _extended_hierarchy_append!(
+		fig,
+		treemap,
+		who,
+		labels,
+		parents;
+		values = values,
+		colors = colors,
+		colorscale = colorscale,
+		ids = ids,
+		branchvalues = branchvalues,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
-	_refresh!(fig)
+end
+
+function plot_treemap!(
+	sf::SubplotFigure,
+	labels::AbstractVector,
+	parents::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_treemap!, labels, parents; row = row, col = col, kwargs...)
+end
+
+# ── Funnel ───────────────────────────────────────────────────────────
+
+# Funnel bars are centred on zero, so the value axis (x) cannot be
+# logarithmic; stage labels go on the y axis.
+function _extended_funnel_trace(who::AbstractString, x, y; color, legend::AbstractString)
+	_extended_require_vector(who, "x", x)
+	_extended_require_vector(who, "y", y)
+	n = length(x)
+	_extended_check_length(who, "y", y, "x", n)
+	_extended_check_numbers(who, "x", x)
+	kw = Dict{Symbol, Any}(:x => x, :y => y)
+	if color isa AbstractVector
+		isempty(color) ||
+			(kw[:marker] = attr(color = _extended_colour_vector(who, "color", color, n, "x")))
+	else
+		colour = _extended_colour(who, "color", color)
+		isempty(colour) || (kw[:marker] = attr(color = colour))
+	end
+	name = _extended_label(legend, who, "legend")
+	isempty(name) || (kw[:name] = name)
+	return funnel(; kw...)
+end
+
+function _extended_require_linear_value_axis(fig, who::AbstractString, key::Symbol, what::AbstractString)
+	_axis_type(fig, key) == "log" && throw(ArgumentError(
+		"$(who): the $(what) axis of this figure is logarithmic, but $(what) " *
+		"bars start at zero; use a linear axis.",
+	))
 	return nothing
 end
 
-# ── Funnel / Funnel-area ─────────────────────────────────────────────
-
 """
-	plot_funnel(x, y; color="", legend="", kwargs...)
+	plot_funnel(x, y; color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
+		yrange=[0, 0], title="", width=0, height=0, fontsize=0, grid=true,
+		show=false)
 
-Funnel chart of stage values `x` against stage labels `y`.
+Funnel chart: one horizontal bar per stage, centred on zero, with width
+`x[i]`, labelled by `y[i]` on the y axis (top to bottom in the given order).
+
+# Arguments
+- `x::AbstractVector`: stage values (finite real numbers).
+- `y::AbstractVector`: stage labels (categories), same length as `x`.
+
+# Keywords
+- `color::Union{AbstractString,Symbol,AbstractVector} = ""`: bar colour, or
+  one colour per stage (`""` = colorway).
+- `legend::AbstractString = ""`: legend name of the trace (mathtext).
+- `xlabel`, `ylabel::AbstractString = ""`: axis titles (mathtext).
+- `xrange`, `yrange = [0, 0]`: axis ranges as a 2-element vector or tuple in
+  data units; `[0, 0]` (or `nothing`) means automatic.
+- `title::AbstractString = ""`: figure title (mathtext).
+- `width::Real = 0`, `height::Real = 0`: figure size in px (`0` = automatic).
+- `fontsize::Real = 0`: global font size in px (`0` = template default).
+- `grid::Union{Bool,Symbol} = true`: `true` keeps the template grid; `false`
+  or `:none` hides it, `:x`/`:y`/`:both` choose the axes with grid lines.
+- `show::Bool = false`: open an Electron window and return a `SyncPlot`.
+
+The value axis cannot be logarithmic (the bars are centred on zero).
+Mismatched lengths and non-numeric or non-finite values throw an `ArgumentError`.
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_funnel([1200, 640, 210, 48], ["Visits", "Sign-ups", "Trials", "Sales"];
+	xlabel = "Users", title = "Conversion")
+```
 """
 function plot_funnel(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	color::String = "",
-	legend::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray};
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Bool, Symbol} = true,
 	show::Bool = false,
 )
-	kw = Dict{Symbol, Any}(:x => x, :y => y)
-	color == "" || (kw[:marker] = attr(color = color))
-	legend == "" || (kw[:name] = legend)
-	fig = Plot(funnel(; kw...), Layout())
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	who = "plot_funnel"
+	trace = _extended_funnel_trace(who, x, y; color = color, legend = legend)
+	labels = _extended_cartesian_labels(who; title = title, xlabel = xlabel, ylabel = ylabel)
+	return _extended_cartesian_plot(
+		who,
+		trace;
+		labels = labels,
+		raw_title = title,
+		xrange = xrange,
+		yrange = yrange,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		show = show,
+	)
 end
 
 """
-	plot_funnel!(fig, x, y; color="", legend="", kwargs...)
+	plot_funnel!(fig, x, y; color="", legend="", xlabel="", ylabel="",
+		xrange=[0, 0], yrange=[0, 0], title="", width=0, height=0, fontsize=0,
+		grid=nothing)
+	plot_funnel!(sf::SubplotFigure, x, y; row=nothing, col=nothing, secondary_y=false, kwargs...)
 
-Append a funnel trace to an existing figure.
+Append a funnel trace to `fig` (`Plot`/`SyncPlot`). Arguments and keywords as
+for [`plot_funnel`](@ref) without `show` (an `ArgumentError`); only non-default
+options change the figure, `grid = nothing` keeps the current grid and any other
+value is applied, and the template is left as it is. The figure's x axis must
+not be logarithmic.
+
+On a `SubplotFigure` the trace goes to the `xy` cell `row`, `col` (both or
+neither; default: the active cell; `secondary_y = true` draws against the
+cell's secondary y axis), which becomes the active cell; axis options apply to
+that cell, `title`/`width`/`height` are ignored with a warning. `secondary_y`
+on a single figure is an `ArgumentError`.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = plot_funnel([100, 60, 30], ["A", "B", "C"]; legend = "2023")
+plot_funnel!(fig, [90, 70, 40], ["A", "B", "C"]; legend = "2024")
+```
 """
 function plot_funnel!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	color::String = "",
-	legend::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray};
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	show = nothing,
 )
-	kw = Dict{Symbol, Any}(:x => x, :y => y)
-	color == "" || (kw[:marker] = attr(color = color))
-	legend == "" || (kw[:name] = legend)
-	push!(_plot_data(fig), funnel(; kw...))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
-	_refresh!(fig)
-	return nothing
+	who = "plot_funnel!"
+	_extended_mutator_guard(who, show, row, col)
+	_extended_secondary_y_guard(who, secondary_y)
+	trace = _extended_funnel_trace(who, x, y; color = color, legend = legend)
+	labels = _extended_cartesian_labels(who; title = title, xlabel = xlabel, ylabel = ylabel)
+	_extended_require_linear_value_axis(fig, who, :xaxis, "funnel (x)")
+	return _extended_cartesian_append!(
+		fig,
+		who,
+		trace;
+		labels = labels,
+		xrange = xrange,
+		yrange = yrange,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
 end
 
-"""
-	plot_funnelarea(values; labels=nothing, colors=String[], kwargs...)
-
-Funnel-area chart of `values` with optional `labels`.
-"""
-function plot_funnelarea(
-	values::Union{AbstractVector, AbstractRange};
-	labels::Union{Nothing, AbstractVector} = nothing,
-	colors::Vector{String} = String[],
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-	show::Bool = false,
+function plot_funnel!(
+	sf::SubplotFigure,
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray};
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
 )
-	kw = Dict{Symbol, Any}(:values => values)
-	labels === nothing || (kw[:labels] = labels)
-	isempty(colors) || (kw[:marker] = attr(colors = colors))
-	fig = Plot(funnelarea(; kw...), Layout())
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
-end
-
-"""
-	plot_funnelarea!(fig, values; labels=nothing, colors=String[], kwargs...)
-
-Append a funnel-area trace to an existing figure.
-"""
-function plot_funnelarea!(
-	fig,
-	values::Union{AbstractVector, AbstractRange};
-	labels::Union{Nothing, AbstractVector} = nothing,
-	colors::Vector{String} = String[],
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-)
-	kw = Dict{Symbol, Any}(:values => values)
-	labels === nothing || (kw[:labels] = labels)
-	isempty(colors) || (kw[:marker] = attr(colors = colors))
-	push!(_plot_data(fig), funnelarea(; kw...))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
-	_refresh!(fig)
-	return nothing
+	return _subplot_delegate_mutator!(
+		sf,
+		plot_funnel!,
+		x,
+		y;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
 end
 
 # ── Waterfall ────────────────────────────────────────────────────────
 
-function _waterfall_trace(x, y; measure, legend::String)
+const _EXTENDED_WATERFALL_MEASURES = ("relative", "total", "absolute")
+
+_extended_measure_name(measure) =
+	measure isa Symbol ? String(measure) :
+	measure isa AbstractString ? measure :
+	nothing
+
+function _waterfall_trace(
+	who::AbstractString,
+	x,
+	y;
+	measure,
+	legend::AbstractString,
+)
+	_extended_require_vector(who, "x", x)
+	_extended_require_vector(who, "y", y)
+	n = length(x)
+	_extended_check_length(who, "y", y, "x", n)
+	if measure === nothing
+		_extended_check_numbers(who, "y", y)
+	else
+		_extended_check_length(who, "measure", measure, "y", n)
+		for (position, (value, step)) in enumerate(zip(y, measure))
+			name = _extended_measure_name(step)
+			(name !== nothing && name in _EXTENDED_WATERFALL_MEASURES) || throw(ArgumentError(
+				"$(who): `measure[$(position)]` must be \"relative\", \"total\" or " *
+				"\"absolute\"; got $(repr(step)).",
+			))
+			# plotly computes a "total" bar from the running sum and ignores
+			# its y value, so a placeholder (`missing`, NaN, 0) is fine there.
+			if name == "total"
+				(_extended_is_gap(value) || _extended_is_real(value)) || throw(ArgumentError(
+					"$(who): `y[$(position)]` (a \"total\") must be a number or a " *
+					"placeholder (`missing`, `nothing`, NaN); got $(repr(value)).",
+				))
+			else
+				(_extended_is_real(value) && isfinite(value)) || throw(ArgumentError(
+					"$(who): `y[$(position)]` must be a finite real number; got $(repr(value)).",
+				))
+			end
+		end
+	end
 	kw = Dict{Symbol, Any}(:x => x, :y => y)
 	if measure !== nothing
-		length(measure) == length(y) ||
-			throw(ArgumentError("`measure` must match `y` in length; got $(length(measure)) and $(length(y))."))
-		kw[:measure] = measure
+		kw[:measure] = any(step -> step isa Symbol, measure) ?
+			String[_extended_measure_name(step) for step in measure] :
+			measure
 	end
-	legend == "" || (kw[:name] = legend)
+	name = _extended_label(legend, who, "legend")
+	isempty(name) || (kw[:name] = name)
 	return waterfall(; kw...)
 end
 
 """
-	plot_waterfall(x, y; measure=nothing, legend="", kwargs...)
+	plot_waterfall(x, y; measure=nothing, legend="", xlabel="", ylabel="",
+		xrange=[0, 0], yrange=[0, 0], title="", width=0, height=0, fontsize=0,
+		grid=true, show=false)
 
-Waterfall chart. `measure[i]` is one of `"relative"`, `"total"`, or
-`"absolute"` (defaults to all-relative when omitted).
+Waterfall chart: a running total built from the increments `y`, one bar per
+category `x`.
+
+# Arguments
+- `x::AbstractVector`: bar positions or categories.
+- `y::AbstractVector`: increments (finite real numbers), same length as `x`.
+
+# Keywords
+- `measure::Union{Nothing,AbstractVector} = nothing`: one of `"relative"`
+  (add `y[i]`), `"absolute"` (reset the total to `y[i]`) or `"total"` (draw the
+  running total; its `y` value is ignored and may be `missing`/NaN) per bar,
+  as Strings or Symbols; `nothing` means all relative.
+- `legend::AbstractString = ""`: legend name of the trace (mathtext).
+- `xlabel`, `ylabel`, `xrange`, `yrange`, `title`, `width`, `height`,
+  `fontsize`, `grid`, `show`: as for [`plot_funnel`](@ref).
+
+The y axis cannot be logarithmic (the bars start at zero). Mismatched lengths,
+unknown measures and non-finite increments throw an `ArgumentError`.
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_waterfall(["Revenue", "Costs", "Tax", "Profit"], [120, -70, -15, 0];
+	measure = ["absolute", "relative", "relative", "total"], ylabel = "k€")
+```
 """
 function plot_waterfall(
 	x::Union{AbstractVector, SubArray},
 	y::Union{AbstractVector, SubArray};
 	measure::Union{Nothing, AbstractVector} = nothing,
-	legend::String = "",
-	xlabel::String = "",
-	ylabel::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-	grid::Bool = true,
+	legend::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Bool, Symbol} = true,
 	show::Bool = false,
 )
-	fig = Plot(_waterfall_trace(x, y; measure = measure, legend = legend),
-		_default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-	_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, width = width, height = height,
-		grid = grid, fontsize = fontsize, title = title)
-	return _maybe_show(fig, show, width, height, title)
+	who = "plot_waterfall"
+	trace = _waterfall_trace(who, x, y; measure = measure, legend = legend)
+	labels = _extended_cartesian_labels(who; title = title, xlabel = xlabel, ylabel = ylabel)
+	return _extended_cartesian_plot(
+		who,
+		trace;
+		labels = labels,
+		raw_title = title,
+		xrange = xrange,
+		yrange = yrange,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		show = show,
+	)
 end
 
 """
-	plot_waterfall!(fig, x, y; measure=nothing, legend="", kwargs...)
+	plot_waterfall!(fig, x, y; measure=nothing, legend="", xlabel="", ylabel="",
+		xrange=[0, 0], yrange=[0, 0], title="", width=0, height=0, fontsize=0,
+		grid=nothing)
+	plot_waterfall!(sf::SubplotFigure, x, y; row=nothing, col=nothing, secondary_y=false, kwargs...)
 
-Append a waterfall trace to an existing figure.
+Append a waterfall trace to `fig` (`Plot`/`SyncPlot`), or to the `xy` cell
+`row`, `col` of a `SubplotFigure`. Arguments and keywords as for
+[`plot_waterfall`](@ref) without `show` (an `ArgumentError`); `grid = nothing`
+keeps the current grid and `grid = true` re-enables a hidden one. See
+[`plot_funnel!`](@ref) for the SubplotFigure and `secondary_y` rules. The
+figure's y axis must not be logarithmic.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = plot_waterfall(["a", "b"], [1, 2]; grid = false)
+plot_waterfall!(fig, ["a", "b"], [2, -1]; grid = true)
+```
 """
 function plot_waterfall!(
 	fig,
 	x::Union{AbstractVector, SubArray},
 	y::Union{AbstractVector, SubArray};
 	measure::Union{Nothing, AbstractVector} = nothing,
-	legend::String = "",
-	xlabel::String = "",
-	ylabel::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-	grid::Bool = true,
+	legend::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	show = nothing,
 )
-	push!(_plot_data(fig), _waterfall_trace(x, y; measure = measure, legend = legend))
-	_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, width = width, height = height,
-		grid = grid, fontsize = fontsize, title = title, refresh = true, apply_template = false)
-	return nothing
+	who = "plot_waterfall!"
+	_extended_mutator_guard(who, show, row, col)
+	_extended_secondary_y_guard(who, secondary_y)
+	trace = _waterfall_trace(who, x, y; measure = measure, legend = legend)
+	labels = _extended_cartesian_labels(who; title = title, xlabel = xlabel, ylabel = ylabel)
+	_extended_require_linear_value_axis(fig, who, :yaxis, "waterfall (y)")
+	return _extended_cartesian_append!(
+		fig,
+		who,
+		trace;
+		labels = labels,
+		xrange = xrange,
+		yrange = yrange,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+end
+
+function plot_waterfall!(
+	sf::SubplotFigure,
+	x::Union{AbstractVector, SubArray},
+	y::Union{AbstractVector, SubArray};
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(
+		sf,
+		plot_waterfall!,
+		x,
+		y;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
 end
 
 # ── Indicator (number / gauge / delta) ───────────────────────────────
 
-function _indicator_trace(value; mode::String, reference, gauge_range, gauge_shape::String, number_suffix::String)
-	kw = Dict{Symbol, Any}(:mode => mode, :value => value)
-	if reference !== nothing
-		kw[:delta] = attr(reference = reference)
+const _EXTENDED_INDICATOR_FLAGS = ("number", "delta", "gauge")
+const _EXTENDED_GAUGE_SHAPES = ("angular", "bullet")
+
+# The plotly `mode` flag list. A `reference` adds "delta" and a gauge request
+# (`gauge_range` or `gauge_shape`) adds "gauge", so neither is silently
+# ignored; "delta" without a reference (plotly would draw a meaningless zero
+# change) is an error.
+function _extended_indicator_mode(
+	who::AbstractString,
+	mode::AbstractString,
+	reference,
+	gauge_requested::Bool,
+)
+	flags = String[]
+	for part in split(mode, '+')
+		flag = String(strip(part))
+		flag in _EXTENDED_INDICATOR_FLAGS || throw(ArgumentError(
+			"$(who): `mode` must combine \"number\", \"delta\" and \"gauge\" with " *
+			"\"+\" (e.g. \"number+gauge\"); got $(repr(mode)).",
+		))
+		flag in flags && throw(ArgumentError(
+			"$(who): `mode` lists $(repr(flag)) twice; got $(repr(mode)).",
+		))
+		push!(flags, flag)
 	end
+	reference === nothing || "delta" in flags || push!(flags, "delta")
+	gauge_requested && !("gauge" in flags) && push!(flags, "gauge")
+	reference === nothing && "delta" in flags && throw(ArgumentError(
+		"$(who): `mode` includes \"delta\" but no `reference` was given; the " *
+		"delta is `value - reference`.",
+	))
+	return join(flags, "+")
+end
+
+function _indicator_trace(
+	who::AbstractString,
+	value;
+	mode::AbstractString,
+	reference,
+	gauge_range,
+	gauge_shape::AbstractString,
+	number_suffix::AbstractString,
+)
+	_extended_check_number(who, "value", value)
+	reference === nothing || _extended_check_number(who, "reference", reference)
+	axis_range = nothing
 	if gauge_range !== nothing
-		kw[:gauge] = attr(shape = gauge_shape, axis = attr(range = collect(gauge_range)))
+		(gauge_range isa AbstractVector || gauge_range isa Tuple) || throw(ArgumentError(
+			"$(who): `gauge_range` must be a 2-element vector or tuple (lo, hi); " *
+			"got $(typeof(gauge_range)).",
+		))
+		length(gauge_range) == 2 || throw(ArgumentError(
+			"$(who): `gauge_range` must have exactly 2 elements (lo, hi), e.g. " *
+			"[0, 100] — not a range such as 0:100; got $(length(gauge_range)) elements.",
+		))
+		lower, upper = first(gauge_range), last(gauge_range)
+		(_extended_is_real(lower) && _extended_is_real(upper) &&
+		 isfinite(lower) && isfinite(upper) && lower < upper) || throw(ArgumentError(
+			"$(who): `gauge_range` must be two finite numbers lo < hi; got $(repr(gauge_range)).",
+		))
+		axis_range = Any[lower, upper]
 	end
-	number_suffix == "" || (kw[:number] = attr(suffix = number_suffix))
+	shape = String(gauge_shape)
+	(isempty(shape) || shape in _EXTENDED_GAUGE_SHAPES) || throw(ArgumentError(
+		"$(who): `gauge_shape` must be \"angular\", \"bullet\" or \"\"; got $(repr(gauge_shape)).",
+	))
+	resolved_mode = _extended_indicator_mode(
+		who,
+		mode,
+		reference,
+		gauge_range !== nothing || !isempty(shape),
+	)
+	kw = Dict{Symbol, Any}(:mode => resolved_mode, :value => value)
+	reference === nothing || (kw[:delta] = attr(reference = reference))
+	if occursin("gauge", resolved_mode)
+		gauge = Dict{Symbol, Any}(:shape => isempty(shape) ? "angular" : shape)
+		axis_range === nothing || (gauge[:axis] = attr(range = axis_range))
+		kw[:gauge] = attr(; gauge...)
+	end
+	isempty(number_suffix) || (kw[:number] = attr(suffix = String(number_suffix)))
 	return indicator(; kw...)
 end
 
 """
-	plot_indicator(value; mode="number+delta", reference=nothing, gauge_range=nothing, gauge_shape="angular", number_suffix="", kwargs...)
+	plot_indicator(value; mode="number", reference=nothing, gauge_range=nothing,
+		gauge_shape="", number_suffix="", title="", width=0, height=0,
+		fontsize=0, show=false)
 
-KPI indicator showing a big `value`. Add a delta with `reference`, and a gauge
-with `gauge_range=[lo,hi]` (`gauge_shape` is `"angular"` or `"bullet"`). `mode`
-combines `"number"`, `"delta"`, and `"gauge"` with `+`.
+KPI indicator showing `value` as a big number, optionally with the change
+relative to a `reference` (delta) and a gauge.
+
+# Arguments
+- `value::Real`: the finite number to display.
+
+# Keywords
+- `mode::AbstractString = "number"`: `"number"`, `"delta"` and `"gauge"`
+  combined with `+`. A `reference` adds `"delta"` and `gauge_range`/
+  `gauge_shape` add `"gauge"` automatically; `"delta"` without a `reference`
+  is an `ArgumentError`.
+- `reference::Union{Nothing,Real} = nothing`: reference value; the delta shows
+  `value - reference`.
+- `gauge_range = nothing`: gauge axis range as a 2-element vector or tuple
+  `(lo, hi)` with `lo < hi` (a range such as `0:100` is rejected); `nothing`
+  lets plotly choose.
+- `gauge_shape::AbstractString = ""`: `"angular"` (default when a gauge is
+  drawn) or `"bullet"` (a horizontal bar).
+- `number_suffix::AbstractString = ""`: text appended to the number (e.g.
+  `"%"`), drawn verbatim.
+- `title::AbstractString = ""`: figure title (mathtext).
+- `width::Real = 0`, `height::Real = 0`, `fontsize::Real = 0`,
+  `show::Bool = false`: as for [`plot_pie`](@ref).
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_indicator(72; reference = 65, gauge_range = (0, 100), number_suffix = "%",
+	title = "Availability")
+```
 """
 function plot_indicator(
 	value::Real;
-	mode::String = "number+delta",
+	mode::AbstractString = "number",
 	reference::Union{Nothing, Real} = nothing,
-	gauge_range::Union{Nothing, AbstractVector} = nothing,
-	gauge_shape::String = "angular",
-	number_suffix::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	gauge_range = nothing,
+	gauge_shape::AbstractString = "",
+	number_suffix::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 )
-	m = gauge_range !== nothing && !occursin("gauge", mode) ? mode * "+gauge" : mode
-	fig = Plot(_indicator_trace(value; mode = m, reference = reference, gauge_range = gauge_range,
-		gauge_shape = gauge_shape, number_suffix = number_suffix), Layout())
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	who = "plot_indicator"
+	trace = _indicator_trace(
+		who,
+		value;
+		mode = mode,
+		reference = reference,
+		gauge_range = gauge_range,
+		gauge_shape = gauge_shape,
+		number_suffix = number_suffix,
+	)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	fig = Plot(trace, Layout())
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = true,
+	)
+	return _extended_maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_indicator!(fig, value; kwargs...)
+	plot_indicator!(fig, value; mode="number", reference=nothing,
+		gauge_range=nothing, gauge_shape="", number_suffix="", title="",
+		width=0, height=0, fontsize=0)
+	plot_indicator!(sf::SubplotFigure, value; row=nothing, col=nothing, kwargs...)
 
-Append an indicator trace to an existing figure (see [`plot_indicator`](@ref)).
+Append an indicator trace to `fig` (`Plot`/`SyncPlot`), or to the `domain`
+cell `row`, `col` of a `SubplotFigure` (default: the active cell). Keywords as
+for [`plot_indicator`](@ref) without `show` (an `ArgumentError`); see
+[`plot_pie!`](@ref) for the figure-level options.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+sf = subplots(1, 2; sync = false, specs = [Spec(kind = "domain") Spec(kind = "domain")])
+plot_indicator!(sf, 42; row = 1, col = 1)
+plot_indicator!(sf, 0.8; gauge_range = (0, 1), row = 1, col = 2)
+```
 """
 function plot_indicator!(
 	fig,
 	value::Real;
-	mode::String = "number+delta",
+	mode::AbstractString = "number",
 	reference::Union{Nothing, Real} = nothing,
-	gauge_range::Union{Nothing, AbstractVector} = nothing,
-	gauge_shape::String = "angular",
-	number_suffix::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	gauge_range = nothing,
+	gauge_shape::AbstractString = "",
+	number_suffix::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	row = nothing,
+	col = nothing,
+	show = nothing,
 )
-	m = gauge_range !== nothing && !occursin("gauge", mode) ? mode * "+gauge" : mode
-	push!(_plot_data(fig), _indicator_trace(value; mode = m, reference = reference, gauge_range = gauge_range,
-		gauge_shape = gauge_shape, number_suffix = number_suffix))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	who = "plot_indicator!"
+	_extended_mutator_guard(who, show, row, col)
+	trace = _indicator_trace(
+		who,
+		value;
+		mode = mode,
+		reference = reference,
+		gauge_range = gauge_range,
+		gauge_shape = gauge_shape,
+		number_suffix = number_suffix,
+	)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	push!(_plot_data(fig), trace)
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = false,
+	)
 	_refresh!(fig)
 	return nothing
+end
+
+function plot_indicator!(
+	sf::SubplotFigure,
+	value::Real;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_indicator!, value; row = row, col = col, kwargs...)
 end
 
 # ── Area (filled scatter) ────────────────────────────────────────────
@@ -10003,92 +11250,537 @@ plot_area!(fig, y::Union{AbstractRange, Vector, SubArray}; kwargs...) = plot_are
 
 # ── Candlestick / OHLC ───────────────────────────────────────────────
 
-function _ohlc_trace(constructor, x, o, h, l, c; increasing_color::String, decreasing_color::String, legend::String)
-	length(x) == length(o) == length(h) == length(l) == length(c) ||
-		throw(ArgumentError("candlestick/ohlc: x, open, high, low, close must share length; got $(length(x)), $(length(o)), $(length(h)), $(length(l)), $(length(c))."))
-	kw = Dict{Symbol, Any}(:x => x, :open => o, :high => h, :low => l, :close => c)
-	increasing_color == "" || (kw[:increasing] = attr(line = attr(color = increasing_color)))
-	decreasing_color == "" || (kw[:decreasing] = attr(line = attr(color = decreasing_color)))
-	legend == "" || (kw[:name] = legend)
+# Price columns of a candlestick/OHLC trace. Gaps (`missing`, `nothing`,
+# NaN) are allowed, so non-trading days can be skipped; on a logarithmic
+# price axis the prices must be positive.
+function _ohlc_trace(
+	constructor,
+	who::AbstractString,
+	x,
+	open,
+	high,
+	low,
+	close;
+	increasing_color,
+	decreasing_color,
+	legend::AbstractString,
+	log_x::Bool,
+	log_y::Bool,
+)
+	_extended_require_vector(who, "x", x)
+	n = length(x)
+	for (name, values) in (("open", open), ("high", high), ("low", low), ("close", close))
+		_extended_require_vector(who, name, values)
+		_extended_check_length(who, name, values, "x", n)
+		_extended_check_numbers(who, name, values; gaps = true, positive = log_y)
+	end
+	log_x && _extended_check_numbers(who, "x", x; positive = true)
+	increasing = _extended_colour(who, "increasing_color", increasing_color)
+	decreasing = _extended_colour(who, "decreasing_color", decreasing_color)
+	name = _extended_label(legend, who, "legend")
+	kw = Dict{Symbol, Any}(:x => x, :open => open, :high => high, :low => low, :close => close)
+	isempty(increasing) || (kw[:increasing] = attr(line = attr(color = increasing)))
+	isempty(decreasing) || (kw[:decreasing] = attr(line = attr(color = decreasing)))
+	isempty(name) || (kw[:name] = name)
 	return constructor(; kw...)
 end
 
-for (fn, fn!, ctor, label) in (
-	(:plot_candlestick, :plot_candlestick!, :candlestick, "candlestick"),
-	(:plot_ohlc, :plot_ohlc!, :ohlc, "OHLC"),
+function _extended_ohlc_plot(
+	constructor,
+	who::AbstractString,
+	x,
+	open,
+	high,
+	low,
+	close;
+	increasing_color,
+	decreasing_color,
+	legend::AbstractString,
+	xlabel::AbstractString,
+	ylabel::AbstractString,
+	xrange,
+	yrange,
+	xscale::AbstractString,
+	yscale::AbstractString,
+	title::AbstractString,
+	width,
+	height,
+	fontsize,
+	grid,
+	show::Bool,
 )
-	@eval begin
-		"""
-			$($(string(fn)))(x, open, high, low, close; increasing_color="", decreasing_color="", legend="", kwargs...)
+	trace = _ohlc_trace(
+		constructor,
+		who,
+		x,
+		open,
+		high,
+		low,
+		close;
+		increasing_color = increasing_color,
+		decreasing_color = decreasing_color,
+		legend = legend,
+		log_x = xscale == "log",
+		log_y = yscale == "log",
+	)
+	labels = _extended_cartesian_labels(who; title = title, xlabel = xlabel, ylabel = ylabel)
+	return _extended_cartesian_plot(
+		who,
+		trace;
+		labels = labels,
+		raw_title = title,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		show = show,
+	)
+end
 
-		$($label) financial chart over positions/dates `x`.
-		"""
-		function $fn(
-			x::Union{AbstractRange, Vector, SubArray},
-			open::Union{AbstractRange, Vector, SubArray},
-			high::Union{AbstractRange, Vector, SubArray},
-			low::Union{AbstractRange, Vector, SubArray},
-			close::Union{AbstractRange, Vector, SubArray};
-			increasing_color::String = "",
-			decreasing_color::String = "",
-			legend::String = "",
-			xlabel::String = "",
-			ylabel::String = "",
-			title::String = "",
-			width::Int = 0,
-			height::Int = 0,
-			fontsize::Int = 0,
-			grid::Bool = true,
-			show::Bool = false,
-		)
-			trace = _ohlc_trace($ctor, x, open, high, low, close;
-				increasing_color = increasing_color, decreasing_color = decreasing_color, legend = legend)
-			fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel))
-			_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, width = width, height = height,
-				grid = grid, fontsize = fontsize, title = title)
-			return _maybe_show(fig, show, width, height, title)
-		end
+function _extended_ohlc_append!(
+	fig,
+	constructor,
+	who::AbstractString,
+	x,
+	open,
+	high,
+	low,
+	close;
+	increasing_color,
+	decreasing_color,
+	legend::AbstractString,
+	xlabel::AbstractString,
+	ylabel::AbstractString,
+	xrange,
+	yrange,
+	xscale::AbstractString,
+	yscale::AbstractString,
+	title::AbstractString,
+	width,
+	height,
+	fontsize,
+	grid,
+	secondary_y::Bool,
+	row,
+	col,
+	show,
+)
+	_extended_mutator_guard(who, show, row, col)
+	_extended_secondary_y_guard(who, secondary_y)
+	trace = _ohlc_trace(
+		constructor,
+		who,
+		x,
+		open,
+		high,
+		low,
+		close;
+		increasing_color = increasing_color,
+		decreasing_color = decreasing_color,
+		legend = legend,
+		log_x = _extended_final_axis_type(fig, :xaxis, xscale) == "log",
+		log_y = _extended_final_axis_type(fig, :yaxis, yscale) == "log",
+	)
+	labels = _extended_cartesian_labels(who; title = title, xlabel = xlabel, ylabel = ylabel)
+	_extended_cartesian_append!(
+		fig,
+		who,
+		trace;
+		labels = labels,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	return nothing
+end
 
-		"""
-			$($(string(fn!)))(fig, x, open, high, low, close; kwargs...)
+"""
+	plot_candlestick(x, open, high, low, close; increasing_color="",
+		decreasing_color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
+		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
+		fontsize=0, grid=true, show=false)
 
-		Append a $($label) trace to an existing figure.
-		"""
-		function $fn!(
-			fig,
-			x::Union{AbstractRange, Vector, SubArray},
-			open::Union{AbstractRange, Vector, SubArray},
-			high::Union{AbstractRange, Vector, SubArray},
-			low::Union{AbstractRange, Vector, SubArray},
-			close::Union{AbstractRange, Vector, SubArray};
-			increasing_color::String = "",
-			decreasing_color::String = "",
-			legend::String = "",
-			xlabel::String = "",
-			ylabel::String = "",
-			title::String = "",
-			width::Int = 0,
-			height::Int = 0,
-			fontsize::Int = 0,
-			grid::Union{Nothing, Bool} = nothing,
-		)
-			push!(_plot_data(fig), _ohlc_trace($ctor, x, open, high, low, close;
-				increasing_color = increasing_color, decreasing_color = decreasing_color, legend = legend))
-			_apply_cartesian_grid_override!(fig, grid)
-			_apply_cartesian_plot_options!(
-				fig;
-				xlabel = xlabel,
-				ylabel = ylabel,
-				title = title,
-				width = width,
-				height = height,
-				fontsize = fontsize,
-				refresh = true,
-				apply_template = false,
-			)
-			return nothing
-		end
-	end
+Candlestick chart: for each period `x[i]` a box from `open[i]` to `close[i]`
+with whiskers to `high[i]` and `low[i]`, coloured by direction. Plotly adds a
+range slider under the x axis.
+
+# Arguments
+- `x::AbstractVector`: period positions (numbers, dates or date strings).
+- `open`, `high`, `low`, `close::AbstractVector`: prices, one per period
+  (finite real numbers; `missing`, `nothing` or NaN leave a gap). Stored
+  without copying. The OHLC ordering (`low ≤ open, close ≤ high`) is not
+  checked.
+
+# Keywords
+- `increasing_color::Union{AbstractString,Symbol} = ""`: colour of rising
+  periods (`""` = plotly green).
+- `decreasing_color::Union{AbstractString,Symbol} = ""`: colour of falling
+  periods (`""` = plotly red).
+- `legend::AbstractString = ""`: legend name of the trace (mathtext).
+- `xlabel`, `ylabel::AbstractString = ""`: axis titles (mathtext).
+- `xrange`, `yrange = [0, 0]`: axis ranges as a 2-element vector or tuple in
+  data units; `[0, 0]` (or `nothing`) means automatic.
+- `xscale`, `yscale::AbstractString = ""`: `"linear"`, `"log"` or `""`
+  (automatic). On a `"log"` axis the values must be positive.
+- `title::AbstractString = ""`: figure title (mathtext).
+- `width::Real = 0`, `height::Real = 0`: figure size in px (`0` = automatic).
+- `fontsize::Real = 0`: global font size in px (`0` = template default).
+- `grid::Union{Bool,Symbol} = true`: `true` keeps the template grid; `false`
+  or `:none` hides it, `:x`/`:y`/`:both` choose the axes with grid lines.
+- `show::Bool = false`: open an Electron window and return a `SyncPlot`.
+
+Arrays whose length differs from `length(x)` and non-finite or non-numeric
+prices throw an `ArgumentError`.
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_candlestick(1:4, [10, 11, 10.5, 12], [11.5, 12, 11, 13],
+	[9.5, 10.2, 9.8, 11.4], [11, 10.4, 10.9, 12.8]; ylabel = "Price", title = "ACME")
+```
+"""
+function plot_candlestick(
+	x::Union{AbstractVector, SubArray},
+	open::Union{AbstractVector, SubArray},
+	high::Union{AbstractVector, SubArray},
+	low::Union{AbstractVector, SubArray},
+	close::Union{AbstractVector, SubArray};
+	increasing_color::Union{AbstractString, Symbol} = "",
+	decreasing_color::Union{AbstractString, Symbol} = "",
+	legend::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Bool, Symbol} = true,
+	show::Bool = false,
+)
+	return _extended_ohlc_plot(
+		candlestick,
+		"plot_candlestick",
+		x,
+		open,
+		high,
+		low,
+		close;
+		increasing_color = increasing_color,
+		decreasing_color = decreasing_color,
+		legend = legend,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		show = show,
+	)
+end
+
+"""
+	plot_candlestick!(fig, x, open, high, low, close; increasing_color="",
+		decreasing_color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
+		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
+		fontsize=0, grid=nothing)
+	plot_candlestick!(sf::SubplotFigure, x, open, high, low, close;
+		row=nothing, col=nothing, secondary_y=false, kwargs...)
+
+Append a candlestick trace to `fig` (`Plot`/`SyncPlot`). Arguments and
+keywords as for [`plot_candlestick`](@ref) without `show` (an
+`ArgumentError`); only non-default options change the figure, `grid = nothing`
+keeps the current grid and any other value is applied, and the template is
+left as it is.
+
+On a `SubplotFigure` the trace goes to the `xy` cell `row`, `col` (both or
+neither; default: the active cell; `secondary_y = true` draws against the
+cell's secondary y axis), which becomes the active cell; axis options apply to
+that cell, `title`/`width`/`height` are ignored with a warning. `secondary_y`
+on a single figure is an `ArgumentError`.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = plot_candlestick(1:2, [1, 2], [2, 3], [0.5, 1.5], [1.8, 2.2]; legend = "A")
+plot_candlestick!(fig, 1:2, [2, 3], [3, 4], [1.5, 2.5], [2.8, 2.6]; legend = "B")
+```
+"""
+function plot_candlestick!(
+	fig,
+	x::Union{AbstractVector, SubArray},
+	open::Union{AbstractVector, SubArray},
+	high::Union{AbstractVector, SubArray},
+	low::Union{AbstractVector, SubArray},
+	close::Union{AbstractVector, SubArray};
+	increasing_color::Union{AbstractString, Symbol} = "",
+	decreasing_color::Union{AbstractString, Symbol} = "",
+	legend::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	show = nothing,
+)
+	return _extended_ohlc_append!(
+		fig,
+		candlestick,
+		"plot_candlestick!",
+		x,
+		open,
+		high,
+		low,
+		close;
+		increasing_color = increasing_color,
+		decreasing_color = decreasing_color,
+		legend = legend,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		secondary_y = secondary_y,
+		row = row,
+		col = col,
+		show = show,
+	)
+end
+
+function plot_candlestick!(
+	sf::SubplotFigure,
+	x::Union{AbstractVector, SubArray},
+	open::Union{AbstractVector, SubArray},
+	high::Union{AbstractVector, SubArray},
+	low::Union{AbstractVector, SubArray},
+	close::Union{AbstractVector, SubArray};
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(
+		sf,
+		plot_candlestick!,
+		x,
+		open,
+		high,
+		low,
+		close;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
+end
+
+"""
+	plot_ohlc(x, open, high, low, close; increasing_color="",
+		decreasing_color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
+		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
+		fontsize=0, grid=true, show=false)
+
+OHLC bar chart: for each period `x[i]` a vertical bar from `low[i]` to
+`high[i]` with ticks at `open[i]` (left) and `close[i]` (right), coloured by
+direction. Arguments and keywords are those of [`plot_candlestick`](@ref).
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_ohlc(1:4, [10, 11, 10.5, 12], [11.5, 12, 11, 13],
+	[9.5, 10.2, 9.8, 11.4], [11, 10.4, 10.9, 12.8]; increasing_color = "teal")
+```
+"""
+function plot_ohlc(
+	x::Union{AbstractVector, SubArray},
+	open::Union{AbstractVector, SubArray},
+	high::Union{AbstractVector, SubArray},
+	low::Union{AbstractVector, SubArray},
+	close::Union{AbstractVector, SubArray};
+	increasing_color::Union{AbstractString, Symbol} = "",
+	decreasing_color::Union{AbstractString, Symbol} = "",
+	legend::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Bool, Symbol} = true,
+	show::Bool = false,
+)
+	return _extended_ohlc_plot(
+		ohlc,
+		"plot_ohlc",
+		x,
+		open,
+		high,
+		low,
+		close;
+		increasing_color = increasing_color,
+		decreasing_color = decreasing_color,
+		legend = legend,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		show = show,
+	)
+end
+
+"""
+	plot_ohlc!(fig, x, open, high, low, close; increasing_color="",
+		decreasing_color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
+		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
+		fontsize=0, grid=nothing)
+	plot_ohlc!(sf::SubplotFigure, x, open, high, low, close;
+		row=nothing, col=nothing, secondary_y=false, kwargs...)
+
+Append an OHLC trace to `fig` (`Plot`/`SyncPlot`), or to the `xy` cell
+`row`, `col` of a `SubplotFigure`. Arguments and keywords as for
+[`plot_ohlc`](@ref) without `show` (an `ArgumentError`); see
+[`plot_candlestick!`](@ref) for the option, SubplotFigure and `secondary_y`
+rules.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = Plot()
+plot_ohlc!(fig, 1:2, [1, 2], [2, 3], [0.5, 1.5], [1.8, 2.2]; yscale = "log")
+```
+"""
+function plot_ohlc!(
+	fig,
+	x::Union{AbstractVector, SubArray},
+	open::Union{AbstractVector, SubArray},
+	high::Union{AbstractVector, SubArray},
+	low::Union{AbstractVector, SubArray},
+	close::Union{AbstractVector, SubArray};
+	increasing_color::Union{AbstractString, Symbol} = "",
+	decreasing_color::Union{AbstractString, Symbol} = "",
+	legend::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	secondary_y::Bool = false,
+	row = nothing,
+	col = nothing,
+	show = nothing,
+)
+	return _extended_ohlc_append!(
+		fig,
+		ohlc,
+		"plot_ohlc!",
+		x,
+		open,
+		high,
+		low,
+		close;
+		increasing_color = increasing_color,
+		decreasing_color = decreasing_color,
+		legend = legend,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		secondary_y = secondary_y,
+		row = row,
+		col = col,
+		show = show,
+	)
+end
+
+function plot_ohlc!(
+	sf::SubplotFigure,
+	x::Union{AbstractVector, SubArray},
+	open::Union{AbstractVector, SubArray},
+	high::Union{AbstractVector, SubArray},
+	low::Union{AbstractVector, SubArray},
+	close::Union{AbstractVector, SubArray};
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(
+		sf,
+		plot_ohlc!,
+		x,
+		open,
+		high,
+		low,
+		close;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
 end
 
 # ── 2D histogram (density) ───────────────────────────────────────────
@@ -10169,83 +11861,548 @@ end
 
 # ── Annotations ──────────────────────────────────────────────────────
 
-"""
-	annotate!(fig, x, y, text; showarrow=true, xref="x", yref="y", font_size=0, kwargs...)
+# Attribute names of a plotly.js 2.35.2 `layout.annotations` item (the version
+# PlotlyBase's schema describes). Keyword arguments of `annotate!` are
+# accepted when their first `_`-separated segment is one of these, so
+# `arrowhead = 2` and `hoverlabel_bgcolor = "white"` pass through while a
+# typo such as `arowhead` is an error instead of being silently ignored.
+const _ANNOTATION_ATTRIBUTE_NAMES = (
+	:align, :arrowcolor, :arrowhead, :arrowside, :arrowsize, :arrowwidth,
+	:ax, :axref, :ay, :ayref, :bgcolor, :bordercolor, :borderpad,
+	:borderwidth, :captureevents, :clicktoshow, :font, :height, :hoverlabel,
+	:hovertext, :name, :opacity, :showarrow, :standoff, :startarrowhead,
+	:startarrowsize, :startstandoff, :templateitemname, :text, :textangle,
+	:valign, :visible, :width, :x, :xanchor, :xclick, :xref, :xshift, :y,
+	:yanchor, :yclick, :yref, :yshift,
+)
 
-Append a text annotation at data coordinates `(x, y)`. Extra `kwargs` are passed
-through to the Plotly annotation (e.g. `arrowhead`, `ax`, `ay`, `bgcolor`).
-Returns the figure.
+const _ANNOTATION_COORDS = (:data, :axes, :figure)
+
+# Plotly reference strings: "paper", or an axis ("x", "x2", …) optionally
+# followed by " domain" (fractions of that axis' domain). Arrow tails also
+# take "pixel".
+const _ANNOTATION_X_REF = r"^(paper|x([2-9]|[1-9][0-9]+)?( domain)?)$"
+const _ANNOTATION_Y_REF = r"^(paper|y([2-9]|[1-9][0-9]+)?( domain)?)$"
+const _ANNOTATION_AX_REF = r"^(pixel|x([2-9]|[1-9][0-9]+)?( domain)?)$"
+const _ANNOTATION_AY_REF = r"^(pixel|y([2-9]|[1-9][0-9]+)?( domain)?)$"
+
+function _annotation_fraction(value, who::AbstractString, name::AbstractString, what::AbstractString)
+	(_extended_is_real(value) && isfinite(value)) || throw(ArgumentError(
+		"$(who): `$(name)` must be a finite number ($(what)); got $(repr(value)).",
+	))
+	return value
+end
+
+# A data coordinate on Cartesian axis `key`: on a logarithmic axis plotly
+# positions annotations by log10(value), so the data value is converted
+# (and must be positive); elsewhere numbers must be finite and categories or
+# dates pass through unchanged.
+function _annotation_data_position(layout::Layout, key::Symbol, value, who::AbstractString, name::AbstractString)
+	(value === nothing || value === missing) && throw(ArgumentError(
+		"$(who): `$(name)` must be a coordinate; got $(repr(value)).",
+	))
+	if _axis_type(layout, key) == "log"
+		_extended_is_real(value) || throw(ArgumentError(
+			"$(who): `$(name)` is on logarithmic axis $(repr(key)) and must be a " *
+			"positive number; got $(repr(value)).",
+		))
+		return _to_axis_coord(layout, key, value; who = who)
+	end
+	value isa Bool && throw(ArgumentError("$(who): `$(name)` must be a coordinate; got $(repr(value))."))
+	value isa Real && !isfinite(value) && throw(ArgumentError(
+		"$(who): `$(name)` must be finite; got $(repr(value)).",
+	))
+	return value
+end
+
+function _annotation_axis_exists(layout::Layout, key::Symbol)
+	key in (:xaxis, :yaxis) && return true
+	return haskey(layout.fields, key)
+end
+
+# Reference and position of one annotation coordinate. An explicit `xref` /
+# `yref` wins over `coords`.
+function _annotation_coordinate(
+	layout::Layout,
+	target,
+	letter::Symbol,
+	value,
+	coords::Symbol,
+	ref_override,
+	who::AbstractString,
+)
+	name = String(letter)
+	ref_name = name * "ref"
+	if ref_override !== nothing
+		ref_override isa AbstractString || throw(ArgumentError(
+			"$(who): `$(ref_name)` must be a string; got $(repr(ref_override)).",
+		))
+		ref = String(ref_override)
+		pattern = letter === :x ? _ANNOTATION_X_REF : _ANNOTATION_Y_REF
+		occursin(pattern, ref) || throw(ArgumentError(
+			"$(who): `$(ref_name)` must be \"paper\", \"$(name)\", \"$(name)2\", … or " *
+			"\"$(name) domain\", \"$(name)2 domain\", …; got $(repr(ref)).",
+		))
+		ref == "paper" && return ref, _annotation_fraction(value, who, name, "a figure fraction")
+		axis_ref = replace(ref, " domain" => "")
+		key = _axis_layout_key(axis_ref, letter)
+		_annotation_axis_exists(layout, key) || throw(ArgumentError(
+			"$(who): `$(ref_name)` refers to axis $(repr(axis_ref)), which this " *
+			"figure does not have.",
+		))
+		endswith(ref, " domain") &&
+			return ref, _annotation_fraction(value, who, name, "a fraction of the axis domain")
+		return ref, _annotation_data_position(layout, key, value, who, name)
+	end
+	if coords === :figure
+		return "paper", _annotation_fraction(value, who, name, "a figure fraction")
+	elseif coords === :axes
+		fraction = _annotation_fraction(value, who, name, "a fraction of the axes")
+		if target.kind === :xy
+			return (letter === :x ? target.xref : target.yref) * " domain", fraction
+		end
+		# Subplots without Cartesian axes (pie, polar, ternary, 3-D, maps):
+		# map the fraction into the cell's domain in figure coordinates.
+		lower, upper = letter === :x ? target.xdomain : target.ydomain
+		return "paper", lower + fraction * (upper - lower)
+	end
+	target.kind === :xy || throw(ArgumentError(
+		"$(who): `coords = :data` needs Cartesian x/y axes, but the target is a " *
+		":$(target.kind) $(target.row == 0 ? "figure" : "cell"); use `coords = :axes` " *
+		"or `coords = :figure`.",
+	))
+	key = letter === :x ? target.xkey : target.ykey
+	return letter === :x ? target.xref : target.yref,
+		_annotation_data_position(layout, key, value, who, name)
+end
+
+# Arrow tail (`ax`/`ay`) given in data units through an axis `axref`/`ayref`:
+# convert it on a logarithmic axis like the head.
+function _annotation_tail!(entry::Dict{Symbol, Any}, layout::Layout, letter::Symbol, who::AbstractString)
+	value_key = letter === :x ? :ax : :ay
+	ref_key = letter === :x ? :axref : :ayref
+	haskey(entry, ref_key) || return nothing
+	ref_value = entry[ref_key]
+	ref_value isa AbstractString || throw(ArgumentError(
+		"$(who): `$(ref_key)` must be a string; got $(repr(ref_value)).",
+	))
+	ref = String(ref_value)
+	pattern = letter === :x ? _ANNOTATION_AX_REF : _ANNOTATION_AY_REF
+	occursin(pattern, ref) || throw(ArgumentError(
+		"$(who): `$(ref_key)` must be \"pixel\", an axis such as \"$(letter)2\", or " *
+		"\"<axis> domain\"; got $(repr(ref)).",
+	))
+	(ref == "pixel" || endswith(ref, " domain")) && return nothing
+	key = _axis_layout_key(ref, letter)
+	_annotation_axis_exists(layout, key) || throw(ArgumentError(
+		"$(who): `$(ref_key)` refers to axis $(repr(ref)), which this figure does not have.",
+	))
+	haskey(entry, value_key) &&
+		(entry[value_key] = _annotation_data_position(layout, key, entry[value_key], who, String(value_key)))
+	return nothing
+end
+
+const _ANNOTATION_ALIGN = Dict("left" => :l, "center" => :c, "right" => :r)
+
+# Build the annotation for `target` (a `_CellTarget`) and append it to the
+# figure's annotations. Everything is validated before the layout is written.
+function _extended_annotate!(
+	fig,
+	target,
+	x,
+	y,
+	text::AbstractString;
+	coords::Union{Symbol, AbstractString} = :data,
+	offset = (0, 0),
+	fontsize::Real = 0,
+	font_size = nothing,
+	color::Union{AbstractString, Symbol} = "",
+	showarrow::Bool = true,
+	xref = nothing,
+	yref = nothing,
+	kwargs...,
+)
+	who = "annotate!"
+	layout = _plot_layout(fig)
+	coordinate_system = Symbol(coords)
+	coordinate_system in _ANNOTATION_COORDS || throw(ArgumentError(
+		"$(who): `coords` must be :data, :axes or :figure; got $(repr(coords)).",
+	))
+	_require_size_option(fontsize, who, "fontsize")
+	font_px = fontsize
+	if font_size !== nothing
+		Base.depwarn(
+			"`annotate!(...; font_size = n)` is deprecated; use `fontsize = n`.",
+			:annotate!,
+		)
+		_require_size_option(font_size, who, "font_size")
+		(fontsize > 0 && font_size != fontsize) && throw(ArgumentError(
+			"$(who): `font_size` (deprecated) and `fontsize` disagree " *
+			"($(repr(font_size)) vs $(repr(fontsize))); pass only `fontsize`.",
+		))
+		font_px = font_size
+	end
+	text_color = _extended_colour(who, "color", color)
+	(offset isa Tuple || offset isa AbstractVector) && length(offset) == 2 || throw(ArgumentError(
+		"$(who): `offset` must be a 2-element tuple or vector (dx, dy) in px; got $(repr(offset)).",
+	))
+	dx = _annotation_fraction(offset[begin], who, "offset", "px")
+	dy = _annotation_fraction(offset[end], who, "offset", "px")
+
+	entry = Dict{Symbol, Any}()
+	font = Dict{Symbol, Any}()
+	for (key, value) in kwargs
+		head = Symbol(first(split(String(key), '_')))
+		head in _ANNOTATION_ATTRIBUTE_NAMES || throw(ArgumentError(
+			"$(who): unknown keyword `$(key)`; plotly annotations have no " *
+			"attribute $(repr(String(head))).",
+		))
+		key in (:x, :y, :text) && throw(ArgumentError(
+			"$(who): `$(key)` is a positional argument; do not pass it as a keyword.",
+		))
+		if key === :font
+			value isa Union{PlotlyBase.PlotlyAttribute, AbstractDict, NamedTuple} || throw(ArgumentError(
+				"$(who): `font` must be an `attr(...)`, a Dict or a NamedTuple; got $(typeof(value)).",
+			))
+			merge!(font, _symbol_dict(value))
+		elseif head === :font
+			attribute = String(key)[(ncodeunits("font_") + 1):end]
+			isempty(attribute) && throw(ArgumentError("$(who): unknown keyword `$(key)`."))
+			font[Symbol(attribute)] = value
+		else
+			entry[key] = value
+		end
+	end
+	align = get(entry, :align, "center")
+	(align isa AbstractString && haskey(_ANNOTATION_ALIGN, align)) || throw(ArgumentError(
+		"$(who): `align` must be \"left\", \"center\" or \"right\"; got $(repr(align)).",
+	))
+	label = _extended_label(text, who, "text"; align = _ANNOTATION_ALIGN[align])
+
+	x_ref, x_position = _annotation_coordinate(layout, target, :x, x, coordinate_system, xref, who)
+	y_ref, y_position = _annotation_coordinate(layout, target, :y, y, coordinate_system, yref, who)
+	_annotation_tail!(entry, layout, :x, who)
+	_annotation_tail!(entry, layout, :y, who)
+	if dx != 0 || dy != 0
+		shift_keys = showarrow ? (:ax, :ay, :axref, :ayref) : (:xshift, :yshift)
+		for key in shift_keys
+			haskey(entry, key) && throw(ArgumentError(
+				"$(who): `offset` and `$(key)` both move the " *
+				(showarrow ? "text away from the arrow head" : "annotation") *
+				"; pass only one of them.",
+			))
+		end
+		if showarrow
+			# The arrow head stays at (x, y); the text moves by the offset
+			# (plotly's `ay` grows downwards, `offset` upwards).
+			entry[:ax] = dx
+			entry[:ay] = -dy
+		else
+			entry[:xshift] = dx
+			entry[:yshift] = dy
+		end
+	end
+	font_px > 0 && (font[:size] = font_px)
+	if !isempty(text_color)
+		font[:color] = text_color
+		showarrow && !haskey(entry, :arrowcolor) && (entry[:arrowcolor] = text_color)
+	end
+	isempty(font) || (entry[:font] = attr(; font...))
+	entry[:x] = x_position
+	entry[:y] = y_position
+	entry[:xref] = x_ref
+	entry[:yref] = y_ref
+	entry[:text] = label
+	entry[:showarrow] = showarrow
+
+	existing = get(layout.fields, :annotations, nothing)
+	annotations = existing === nothing ? Any[] : collect(Any, existing)
+	push!(annotations, attr(; entry...))
+	relayout!(fig, annotations = annotations)
+	return nothing
+end
+
+"""
+	annotate!(fig, x, y, text; coords=:data, offset=(0, 0), fontsize=0,
+		color="", showarrow=true, xref=nothing, yref=nothing, kwargs...)
+	annotate!(sf::SubplotFigure, x, y, text; row=nothing, col=nothing,
+		secondary_y=false, inset=nothing, kwargs...)
+
+Add the text annotation `text` at `(x, y)`, by default with an arrow pointing
+at that position.
+
+# Arguments
+- `fig`: a `Plot` or `SyncPlot` (or a `SubplotFigure`, see below).
+- `x`, `y`: the position, in the coordinate system chosen by `coords`.
+- `text::AbstractString`: the annotation text (mathtext: `\$…\$` math is
+  typeset, `\\n` breaks lines; `LaTeXString`s are accepted).
+
+# Keywords
+- `coords::Symbol = :data`:
+  - `:data`: data coordinates of the figure's (or cell's) x/y axes. On a
+    logarithmic axis give the data value (`x = 1000`), not its exponent.
+  - `:axes`: fractions of the axes area, `(0, 0)` bottom left, `(1, 1)` top
+    right (of the cell's domain for pie, polar, ternary, 3-D and map cells).
+  - `:figure`: fractions of the whole figure (plotly "paper" coordinates).
+- `offset = (0, 0)`: `(dx, dy)` in px, `dy` upwards. With an arrow the text
+  moves by the offset and the arrow head stays at `(x, y)`; without an arrow the
+  whole annotation is shifted.
+- `fontsize::Real = 0`: text size in px (`0` = figure font).
+- `font_size`: deprecated alias of `fontsize`.
+- `color::Union{AbstractString,Symbol} = ""`: text colour, also used for the
+  arrow unless `arrowcolor` is given (`""` = plotly default).
+- `showarrow::Bool = true`: draw an arrow from the text to `(x, y)`.
+- `xref`, `yref::Union{Nothing,AbstractString} = nothing`: explicit plotly
+  references (`"paper"`, `"x2"`, `"y3 domain"`, …) that override `coords` for
+  that coordinate; an axis reference takes data units (log-converted like
+  `:data`).
+- `kwargs...`: further plotly annotation attributes, e.g. `arrowhead = 2`,
+  `bgcolor = "white"`, `font = attr(family = "Courier")`, `align = "left"`,
+  `ax`/`ay` (with `axref`/`ayref` set to an axis, in data units). Unknown names
+  throw an `ArgumentError`.
+
+On a `SubplotFigure` the annotation is placed in cell `row`, `col` (both or
+neither; default: the active cell), against the cell's secondary y axis with
+`secondary_y = true`, or in inset `inset` (an id returned by `inset!`); that
+cell becomes the active cell. On a single figure, `row`/`col`/`inset` throw an
+`ArgumentError` and `secondary_y = true` needs a secondary y axis.
+
+# Returns
+`fig` (`sf` for a `SubplotFigure`).
+
+# Example
+```julia
+fig = plot_scatter(1:100, (1:100) .^ 2; yscale = "log")
+annotate!(fig, 50, 2500, "knee"; offset = (30, 30), color = "firebrick")
+annotate!(fig, 0.02, 0.95, "(a)"; coords = :axes, showarrow = false, fontsize = 16)
+```
 """
 function annotate!(
 	fig,
 	x,
 	y,
 	text::AbstractString;
+	coords::Union{Symbol, AbstractString} = :data,
+	offset = (0, 0),
+	fontsize::Real = 0,
+	font_size = nothing,
+	color::Union{AbstractString, Symbol} = "",
 	showarrow::Bool = true,
-	xref::String = "x",
-	yref::String = "y",
-	font_size::Int = 0,
+	xref = nothing,
+	yref = nothing,
+	row = nothing,
+	col = nothing,
+	secondary_y::Bool = false,
+	inset = nothing,
 	kwargs...,
 )
-	p = _plot_obj(fig)
-	d = Dict{Symbol, Any}(:x => x, :y => y, :text => String(text), :showarrow => showarrow, :xref => xref, :yref => yref)
-	font_size > 0 && (d[:font] = attr(size = font_size))
-	for (k, v) in kwargs
-		d[k] = v
-	end
-	existing = get(p.layout.fields, :annotations, nothing)
-	anns = existing === nothing ? Any[] : collect(existing)
-	push!(anns, attr(; d...))
-	relayout!(fig, annotations = anns)
+	target = _cell_target(fig; row = row, col = col, secondary_y = secondary_y, inset = inset, who = "annotate!")
+	_extended_annotate!(
+		fig,
+		target,
+		x,
+		y,
+		text;
+		coords = coords,
+		offset = offset,
+		fontsize = fontsize,
+		font_size = font_size,
+		color = color,
+		showarrow = showarrow,
+		xref = xref,
+		yref = yref,
+		kwargs...,
+	)
 	_refresh!(fig)
 	return fig
 end
 
+function _annotate_subplot_impl!(
+	sf::SubplotFigure,
+	x,
+	y,
+	text::AbstractString;
+	row = nothing,
+	col = nothing,
+	secondary_y::Bool = false,
+	inset = nothing,
+	kwargs...,
+)
+	target = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, inset = inset, who = "annotate!")
+	_extended_annotate!(sf.fig, target, x, y, text; kwargs...)
+	sf.current_row = target.row
+	sf.current_col = target.col
+	_refresh!(sf.fig)
+	return sf
+end
+
+function annotate!(
+	sf::SubplotFigure,
+	x,
+	y,
+	text::AbstractString;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	inset = nothing,
+	kwargs...,
+)
+	_transactional_subplot_mutation!(
+		_annotate_subplot_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		x,
+		y,
+		text;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		inset = inset,
+		kwargs...,
+	)
+	return sf
+end
+
 # ── Sankey ───────────────────────────────────────────────────────────
 
-function _sankey_trace(source, target, value; label, node_color::Vector{String}, link_color::String)
-	length(source) == length(target) == length(value) ||
-		throw(ArgumentError("sankey: source, target, value must share length; got $(length(source)), $(length(target)), $(length(value))."))
+# Number of nodes plotly draws: one per label, plus any node an index refers
+# to beyond the labels. Indices are validated integer-valued reals; they are
+# compared without conversion so a huge Float64 index cannot overflow `Int`.
+function _sankey_node_count(label, source, target)
+	largest = -1
+	for index in Iterators.flatten((source, target))
+		index > largest && (largest = index)
+	end
+	labelled = label === nothing ? 0 : length(label)
+	return largest + 1 > labelled ? largest + 1 : labelled
+end
+
+function _sankey_trace(
+	who::AbstractString,
+	source::AbstractVector,
+	target::AbstractVector,
+	value::AbstractVector;
+	label,
+	node_color,
+	link_color,
+)
+	n = length(source)
+	_extended_check_length(who, "target", target, "source", n)
+	_extended_check_length(who, "value", value, "source", n)
+	_extended_check_numbers(who, "source", source; nonnegative = true, integer = true)
+	_extended_check_numbers(who, "target", target; nonnegative = true, integer = true)
+	_extended_check_numbers(who, "value", value; nonnegative = true)
 	node = Dict{Symbol, Any}()
-	label === nothing || (node[:label] = label)
-	isempty(node_color) || (node[:color] = node_color)
-	link = Dict{Symbol, Any}(
-		:source => source,
-		:target => target,
-		:value => value,
-	)
-	link_color == "" || (link[:color] = link_color)
+	label === nothing || (node[:label] = _extended_plain_labels(label, who, "label"))
+	if node_color isa AbstractVector
+		if !isempty(node_color)
+			nodes = _sankey_node_count(label, source, target)
+			length(node_color) == nodes || throw(ArgumentError(
+				"$(who): `node_color` must have one colour per node ($(nodes) nodes: " *
+				"the labels and every index in `source`/`target`); got $(length(node_color)).",
+			))
+			node[:color] = _extended_colour_vector(who, "node_color", node_color, length(node_color), "nodes")
+		end
+	else
+		colour = _extended_colour(who, "node_color", node_color)
+		isempty(colour) || (node[:color] = colour)
+	end
+	link = Dict{Symbol, Any}(:source => source, :target => target, :value => value)
+	if link_color isa AbstractVector
+		isempty(link_color) ||
+			(link[:color] = _extended_colour_vector(who, "link_color", link_color, n, "source"))
+	else
+		colour = _extended_colour(who, "link_color", link_color)
+		isempty(colour) || (link[:color] = colour)
+	end
 	return sankey(node = attr(; node...), link = attr(; link...))
 end
 
 """
-	plot_sankey(source, target, value; label=nothing, node_color=String[], link_color="", kwargs...)
+	plot_sankey(source, target, value; label=nothing, node_color="",
+		link_color="", title="", width=0, height=0, fontsize=0, show=false)
 
-Sankey flow diagram. `source`/`target` are 0-based node indices and `value` the
-flow magnitude of each link; `label` names the nodes.
+Sankey flow diagram: link `i` carries `value[i]` from node `source[i]` to node
+`target[i]`.
+
+# Arguments
+- `source`, `target::AbstractVector`: 0-based node indices (non-negative
+  integers), one per link.
+- `value::AbstractVector`: flow of each link (non-negative finite numbers).
+  The three arrays are stored without copying.
+
+# Keywords
+- `label::Union{Nothing,AbstractVector} = nothing`: node names, by index.
+  Drawn without MathJax: `\$…\$` math becomes Unicode with sub/superscripts.
+- `node_color::Union{AbstractString,Symbol,AbstractVector} = ""`: one colour
+  for every node, or one per node (the node count is the larger of
+  `length(label)` and the largest index + 1). `""` or an empty vector uses the
+  colorway.
+- `link_color::Union{AbstractString,Symbol,AbstractVector} = ""`: one colour
+  for every link, or one per link (`""` = translucent grey).
+- `title::AbstractString = ""`, `width::Real = 0`, `height::Real = 0`,
+  `fontsize::Real = 0`, `show::Bool = false`: as for [`plot_pie`](@ref).
+
+Mismatched lengths, negative or fractional indices and negative or
+non-finite values throw an `ArgumentError`.
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_sankey([0, 0, 1, 2], [1, 2, 3, 3], [8, 4, 6, 3];
+	label = ["Source", "A", "B", "Sink"], link_color = "rgba(0,0,96,0.2)")
+```
 """
 function plot_sankey(
 	source::AbstractVector,
 	target::AbstractVector,
 	value::AbstractVector;
 	label::Union{Nothing, AbstractVector} = nothing,
-	node_color::Vector{String} = String[],
-	link_color::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	node_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	link_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 )
-	fig = Plot(_sankey_trace(source, target, value; label = label, node_color = node_color, link_color = link_color), Layout())
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	who = "plot_sankey"
+	trace = _sankey_trace(who, source, target, value; label = label, node_color = node_color, link_color = link_color)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	fig = Plot(trace, Layout())
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = true,
+	)
+	return _extended_maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_sankey!(fig, source, target, value; kwargs...)
+	plot_sankey!(fig, source, target, value; label=nothing, node_color="",
+		link_color="", title="", width=0, height=0, fontsize=0)
+	plot_sankey!(sf::SubplotFigure, source, target, value; row=nothing, col=nothing, kwargs...)
 
-Append a Sankey trace to an existing figure.
+Append a Sankey trace to `fig` (`Plot`/`SyncPlot`), or to the `domain` cell
+`row`, `col` of a `SubplotFigure` (default: the active cell). Arguments and
+keywords as for [`plot_sankey`](@ref) without `show` (an `ArgumentError`); see
+[`plot_pie!`](@ref) for the figure-level options.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = Plot()
+plot_sankey!(fig, [0, 1], [1, 2], [5, 3]; label = ["a", "b", "c"])
+```
 """
 function plot_sankey!(
 	fig,
@@ -10253,115 +12410,344 @@ function plot_sankey!(
 	target::AbstractVector,
 	value::AbstractVector;
 	label::Union{Nothing, AbstractVector} = nothing,
-	node_color::Vector{String} = String[],
-	link_color::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	node_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	link_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	row = nothing,
+	col = nothing,
+	show = nothing,
 )
-	push!(_plot_data(fig), _sankey_trace(source, target, value; label = label, node_color = node_color, link_color = link_color))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	who = "plot_sankey!"
+	_extended_mutator_guard(who, show, row, col)
+	trace = _sankey_trace(who, source, target, value; label = label, node_color = node_color, link_color = link_color)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	push!(_plot_data(fig), trace)
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = false,
+	)
 	_refresh!(fig)
 	return nothing
+end
+
+function plot_sankey!(
+	sf::SubplotFigure,
+	source::AbstractVector,
+	target::AbstractVector,
+	value::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_sankey!, source, target, value; row = row, col = col, kwargs...)
 end
 
 # ── Parallel coordinates ─────────────────────────────────────────────
 
-function _parcoords_dim(d)
-	if d isa Pair
-		values = last(d)
+# One dimension: a `label => values` Pair (the label goes through mathtext;
+# a non-vector iterable is collected), or a raw plotly `attr(...)` passed
+# through unchanged.
+function _parcoords_dim(who::AbstractString, dimension, position::Integer)
+	if dimension isa Pair
+		label = first(dimension)
+		(label isa AbstractString || label isa Symbol) || throw(ArgumentError(
+			"$(who): the label of `dimensions[$(position)]` must be a string or " *
+			"Symbol; got $(repr(label)).",
+		))
+		values = last(dimension)
+		values isa AbstractVector || (values = collect(values))
+		values isa AbstractVector || throw(ArgumentError(
+			"$(who): the values of `dimensions[$(position)]` must be a vector; " *
+			"got $(typeof(last(dimension))).",
+		))
+		_extended_check_numbers(who, "dimensions[$(position)] values", values; gaps = true)
 		return attr(
-			label = String(first(d)),
-			values = values isa AbstractVector ?
-				values :
-				collect(values),
+			label = _extended_label(String(label), who, "dimensions[$(position)] label"),
+			values = values,
 		)
 	end
-	d isa PlotlyBase.PlotlyAttribute && return d
-	throw(ArgumentError("each parcoords dimension must be a `\"label\" => values` Pair or an `attr(...)`."))
+	dimension isa PlotlyBase.PlotlyAttribute && return dimension
+	throw(ArgumentError(
+		"$(who): each dimension must be a `\"label\" => values` Pair or an " *
+		"`attr(...)`; `dimensions[$(position)]` is a $(typeof(dimension)).",
+	))
+end
+
+_parcoords_dim_values(dimension) =
+	get(dimension.fields, :values, nothing)
+
+function _parcoords_trace(who::AbstractString, dimensions::AbstractVector; line_color, colorscale)
+	isempty(dimensions) && throw(ArgumentError("$(who): `dimensions` must not be empty."))
+	dims = Any[_parcoords_dim(who, dimension, position) for (position, dimension) in enumerate(dimensions)]
+	rows = nothing
+	for (position, dimension) in enumerate(dims)
+		values = _parcoords_dim_values(dimension)
+		values === nothing && continue
+		count = length(values)
+		if rows === nothing
+			rows = count
+		elseif count != rows
+			throw(ArgumentError(
+				"$(who): every dimension must have the same number of values; " *
+				"`dimensions[$(position)]` has $(count), the first has $(rows).",
+			))
+		end
+	end
+	scale = _resolve_colorscale(colorscale; who = who).scale
+	has_scale = !(scale isa AbstractString && isempty(scale))
+	line = Dict{Symbol, Any}()
+	if line_color === nothing || (line_color isa AbstractString && isempty(line_color))
+		has_scale && throw(ArgumentError(
+			"$(who): `colorscale` colours the lines by a numeric `line_color` " *
+			"vector (one value per row); pass `line_color` too.",
+		))
+	elseif line_color isa AbstractVector
+		rows === nothing || _extended_check_length(who, "line_color", line_color, "rows", rows)
+		_extended_check_numbers(who, "line_color", line_color)
+		line[:color] = line_color
+	else
+		has_scale && throw(ArgumentError(
+			"$(who): `colorscale` needs a numeric `line_color` vector (one value " *
+			"per row), not the single colour $(repr(line_color)).",
+		))
+		line[:color] = _extended_colour(who, "line_color", line_color)
+	end
+	has_scale && (line[:colorscale] = scale)
+	kw = Dict{Symbol, Any}(:dimensions => dims)
+	isempty(line) || (kw[:line] = attr(; line...))
+	return parcoords(; kw...)
+end
+
+# Parcoords draws its dimension labels above the plot area, in the band the
+# figure title uses. With a title, the top margin is raised to hold both: the
+# label line and the title line (font size `f`, default 12 px; the title is
+# drawn 1.4× larger by plotly's default template) plus padding. The values
+# were tuned on renders at 700×500 px with fontsize 12 and 20.
+function _parcoords_title_margin!(fig, fontsize::Real)
+	font = fontsize > 0 ? Float64(fontsize) : 12.0
+	needed = ceil(Int, 56 + 2 * font + 1.4 * font + 8)
+	layout = _plot_layout(fig)
+	margin = _symbol_dict(get(layout.fields, :margin, nothing))
+	current = get(margin, :t, nothing)
+	current isa Real && current >= needed && return nothing
+	margin[:t] = needed
+	relayout!(fig, margin = attr(; margin...))
+	return nothing
 end
 
 """
-	plot_parcoords(dimensions; line_color=nothing, colorscale="", kwargs...)
+	plot_parcoords(dimensions; line_color=nothing, colorscale="", title="",
+		width=0, height=0, fontsize=0, show=false)
 
-Parallel-coordinates plot. `dimensions` is a vector of `"label" => values`
-pairs (or `attr(...)` dimensions). `line_color` (a per-row numeric vector) plus
-`colorscale` color the lines.
+Parallel-coordinates plot: one vertical axis per dimension and one line per
+row through the row's values.
+
+# Arguments
+- `dimensions::AbstractVector`: `"label" => values` Pairs (the label is
+  mathtext; `values` is a vector, stored without copying, or any iterable,
+  which is collected), or raw plotly `attr(label = …, values = …, range = …)`
+  dimensions (passed through unchanged). All dimensions need the same number
+  of values (rows).
+
+# Keywords
+- `line_color = nothing`: a numeric vector with one value per row (mapped
+  through `colorscale`), or a single colour (String or Symbol) for every line.
+- `colorscale = ""`: a colormap name (matplotlib/plotly.py orientation,
+  case-insensitive, `_r` reverses; unknown names throw), a vector of colours or
+  `(t, colour)` stops, or a `ColorScheme`; needs a numeric `line_color`.
+- `title::AbstractString = ""`: figure title (mathtext). The top margin is
+  raised so the title clears the dimension labels.
+- `width::Real = 0`, `height::Real = 0`, `fontsize::Real = 0`,
+  `show::Bool = false`: as for [`plot_pie`](@ref).
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_parcoords(["mass (kg)" => [1.2, 3.4, 2.2], "speed" => [10, 4, 7]];
+	line_color = [1.2, 3.4, 2.2], colorscale = "viridis", title = "Trade-offs")
+```
 """
 function plot_parcoords(
 	dimensions::AbstractVector;
-	line_color::Union{Nothing, AbstractVector} = nothing,
-	colorscale::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	line_color = nothing,
+	colorscale = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 )
-	kw = Dict{Symbol, Any}(:dimensions => [_parcoords_dim(d) for d in dimensions])
-	if line_color !== nothing
-		lc = Dict{Symbol, Any}(:color => line_color)
-		colorscale == "" || (lc[:colorscale] = colorscale)
-		kw[:line] = attr(; lc...)
-	end
-	fig = Plot(parcoords(; kw...), Layout())
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	who = "plot_parcoords"
+	trace = _parcoords_trace(who, dimensions; line_color = line_color, colorscale = colorscale)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	fig = Plot(trace, Layout())
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = true,
+	)
+	isempty(title_text) || _parcoords_title_margin!(fig, fontsize)
+	return _extended_maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_parcoords!(fig, dimensions; kwargs...)
+	plot_parcoords!(fig, dimensions; line_color=nothing, colorscale="",
+		title="", width=0, height=0, fontsize=0)
+	plot_parcoords!(sf::SubplotFigure, dimensions; row=nothing, col=nothing, kwargs...)
 
-Append a parallel-coordinates trace to an existing figure.
+Append a parallel-coordinates trace to `fig` (`Plot`/`SyncPlot`), or to the
+`domain` cell `row`, `col` of a `SubplotFigure` (default: the active cell).
+Arguments and keywords as for [`plot_parcoords`](@ref) without `show` (an
+`ArgumentError`); see [`plot_pie!`](@ref) for the figure-level options.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = Plot()
+plot_parcoords!(fig, ["a" => [1, 2, 3], "b" => [3, 1, 2]]; line_color = "teal")
+```
 """
 function plot_parcoords!(
 	fig,
 	dimensions::AbstractVector;
-	line_color::Union{Nothing, AbstractVector} = nothing,
-	colorscale::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	line_color = nothing,
+	colorscale = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	row = nothing,
+	col = nothing,
+	show = nothing,
 )
-	kw = Dict{Symbol, Any}(:dimensions => [_parcoords_dim(d) for d in dimensions])
-	if line_color !== nothing
-		lc = Dict{Symbol, Any}(:color => line_color)
-		colorscale == "" || (lc[:colorscale] = colorscale)
-		kw[:line] = attr(; lc...)
-	end
-	push!(_plot_data(fig), parcoords(; kw...))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	who = "plot_parcoords!"
+	_extended_mutator_guard(who, show, row, col)
+	trace = _parcoords_trace(who, dimensions; line_color = line_color, colorscale = colorscale)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	push!(_plot_data(fig), trace)
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = false,
+	)
+	isempty(title_text) || _parcoords_title_margin!(fig, fontsize)
 	_refresh!(fig)
 	return nothing
 end
 
+function plot_parcoords!(
+	sf::SubplotFigure,
+	dimensions::AbstractVector;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_parcoords!, dimensions; row = row, col = col, kwargs...)
+end
+
 # ── Ternary scatter ──────────────────────────────────────────────────
 
-function _ternary_trace(a, b, c; mode::String, color::String, legend::String, marker_size::Int)
-	kw = Dict{Symbol, Any}(:a => a, :b => b, :c => c, :mode => mode)
-	mk = Dict{Symbol, Any}()
-	color == "" || (mk[:color] = color)
-	marker_size > 0 && (mk[:size] = marker_size)
-	isempty(mk) || (kw[:marker] = attr(; mk...))
-	legend == "" || (kw[:name] = legend)
+const _EXTENDED_TERNARY_MODE_FLAGS = ("lines", "markers", "text")
+
+function _extended_scatter_mode(who::AbstractString, mode::AbstractString)
+	mode == "none" && return String(mode)
+	flags = split(mode, '+')
+	for flag in flags
+		flag in _EXTENDED_TERNARY_MODE_FLAGS || throw(ArgumentError(
+			"$(who): `mode` must combine \"lines\", \"markers\" and \"text\" with " *
+			"\"+\", or be \"none\"; got $(repr(mode)).",
+		))
+	end
+	allunique(flags) || throw(ArgumentError("$(who): `mode` repeats a flag; got $(repr(mode))."))
+	return String(mode)
+end
+
+function _ternary_trace(
+	who::AbstractString,
+	a,
+	b,
+	c;
+	mode::AbstractString,
+	color,
+	legend::AbstractString,
+	marker_size,
+)
+	_extended_require_vector(who, "a", a)
+	_extended_require_vector(who, "b", b)
+	_extended_require_vector(who, "c", c)
+	n = length(a)
+	_extended_check_length(who, "b", b, "a", n)
+	_extended_check_length(who, "c", c, "a", n)
+	for (name, values) in (("a", a), ("b", b), ("c", c))
+		_extended_check_numbers(who, name, values; nonnegative = true, gaps = true)
+	end
+	for (position, (va, vb, vc)) in enumerate(zip(a, b, c))
+		(_extended_is_gap(va) || _extended_is_gap(vb) || _extended_is_gap(vc)) && continue
+		va + vb + vc > 0 || throw(ArgumentError(
+			"$(who): point $(position) is (0, 0, 0); a composition needs a positive sum.",
+		))
+	end
+	checked_mode = _extended_scatter_mode(who, mode)
+	kw = Dict{Symbol, Any}(:a => a, :b => b, :c => c, :mode => checked_mode)
+	marker = Dict{Symbol, Any}()
+	if color isa AbstractVector
+		isempty(color) ||
+			(marker[:color] = _extended_colour_vector(who, "color", color, n, "a"; numbers = true))
+	else
+		colour = _extended_colour(who, "color", color)
+		if !isempty(colour)
+			marker[:color] = colour
+			occursin("lines", checked_mode) && (kw[:line] = attr(color = colour))
+		end
+	end
+	if marker_size isa AbstractVector
+		_extended_check_length(who, "marker_size", marker_size, "a", n)
+		_extended_check_numbers(who, "marker_size", marker_size; nonnegative = true)
+		marker[:size] = marker_size
+	else
+		(_extended_is_real(marker_size) && isfinite(marker_size) && marker_size >= 0) || throw(ArgumentError(
+			"$(who): `marker_size` must be a non-negative number (0 = plotly default) " *
+			"or a vector of them; got $(repr(marker_size)).",
+		))
+		marker_size > 0 && (marker[:size] = marker_size)
+	end
+	isempty(marker) || (kw[:marker] = attr(; marker...))
+	name = _extended_label(legend, who, "legend")
+	isempty(name) || (kw[:name] = name)
 	return scatterternary(; kw...)
 end
 
-function _ternary_layout(title, alabel, blabel, clabel)
-	tern = Dict{Symbol, Any}()
-	alabel == "" || (tern[:aaxis] = attr(title = alabel))
-	blabel == "" || (tern[:baxis] = attr(title = blabel))
-	clabel == "" || (tern[:caxis] = attr(title = clabel))
-	return isempty(tern) ? Layout(title = title) : Layout(title = title, ternary = attr(; tern...))
-end
-
+# Corner titles of the ternary subplot, merged into `layout.ternary` so
+# existing axis styling (title font, ticks) is kept. `labels` are `_label`
+# results; empty ones are skipped.
 function _apply_ternary_labels!(
 	fig;
-	alabel::String = "",
-	blabel::String = "",
-	clabel::String = "",
+	alabel::AbstractString = "",
+	blabel::AbstractString = "",
+	clabel::AbstractString = "",
 )
 	ternary = Dict{Symbol, Any}()
 	alabel == "" ||
@@ -10379,66 +12765,155 @@ function _apply_ternary_labels!(
 	return nothing
 end
 
-"""
-	plot_ternary(a, b, c; mode="markers", color="", legend="", marker_size=0, alabel="", blabel="", clabel="", kwargs...)
+_ternary_axis_labels(who::AbstractString; alabel, blabel, clabel) = (
+	alabel = _extended_label(alabel, who, "alabel"),
+	blabel = _extended_label(blabel, who, "blabel"),
+	clabel = _extended_label(clabel, who, "clabel"),
+)
 
-Ternary scatter plot of three-component compositions `(a, b, c)`.
+"""
+	plot_ternary(a, b, c; mode="markers", color="", legend="", marker_size=0,
+		alabel="", blabel="", clabel="", title="", width=0, height=0,
+		fontsize=0, show=false)
+
+Ternary scatter plot of three-part compositions `(a[i], b[i], c[i])`. Plotly
+normalises each point to `a + b + c = 1`.
+
+# Arguments
+- `a`, `b`, `c::AbstractVector`: the components (non-negative finite numbers,
+  same length, each point with a positive sum; `missing`, `nothing` or NaN
+  leave a gap). Stored without copying.
+
+# Keywords
+- `mode::AbstractString = "markers"`: `"markers"`, `"lines"`, `"text"`
+  combined with `+`, or `"none"`.
+- `color::Union{AbstractString,Symbol,AbstractVector} = ""`: colour of the
+  markers (and lines), or one colour or number per point (`""` = colorway).
+- `legend::AbstractString = ""`: legend name of the trace (mathtext).
+- `marker_size::Union{Real,AbstractVector} = 0`: marker size in px, or one per
+  point (`0` = plotly default).
+- `alabel`, `blabel`, `clabel::AbstractString = ""`: titles of the a, b and c
+  corners (mathtext).
+- `title::AbstractString = ""`, `width::Real = 0`, `height::Real = 0`,
+  `fontsize::Real = 0`, `show::Bool = false`: as for [`plot_pie`](@ref).
+
+# Returns
+A `Plot`, or a `SyncPlot` when `show = true`.
+
+# Example
+```julia
+fig = plot_ternary([0.6, 0.2, 0.1], [0.3, 0.5, 0.2], [0.1, 0.3, 0.7];
+	alabel = "Sand", blabel = "Silt", clabel = "Clay", marker_size = 10)
+```
 """
 function plot_ternary(
-	a::Union{AbstractRange, Vector, SubArray},
-	b::Union{AbstractRange, Vector, SubArray},
-	c::Union{AbstractRange, Vector, SubArray};
-	mode::String = "markers",
-	color::String = "",
-	legend::String = "",
-	marker_size::Int = 0,
-	alabel::String = "",
-	blabel::String = "",
-	clabel::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	a::Union{AbstractVector, SubArray},
+	b::Union{AbstractVector, SubArray},
+	c::Union{AbstractVector, SubArray};
+	mode::AbstractString = "markers",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::AbstractString = "",
+	marker_size::Union{Real, AbstractVector} = 0,
+	alabel::AbstractString = "",
+	blabel::AbstractString = "",
+	clabel::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 )
-	fig = Plot(_ternary_trace(a, b, c; mode = mode, color = color, legend = legend, marker_size = marker_size),
-		_ternary_layout(title, alabel, blabel, clabel))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	who = "plot_ternary"
+	trace = _ternary_trace(who, a, b, c; mode = mode, color = color, legend = legend, marker_size = marker_size)
+	corner = _ternary_axis_labels(who; alabel = alabel, blabel = blabel, clabel = clabel)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	fig = Plot(trace, Layout())
+	_apply_ternary_labels!(fig; corner...)
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = true,
+	)
+	return _extended_maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_ternary!(fig, a, b, c; kwargs...)
+	plot_ternary!(fig, a, b, c; mode="markers", color="", legend="",
+		marker_size=0, alabel="", blabel="", clabel="", title="", width=0,
+		height=0, fontsize=0)
+	plot_ternary!(sf::SubplotFigure, a, b, c; row=nothing, col=nothing, kwargs...)
 
-Append a ternary scatter trace to an existing figure.
+Append a ternary scatter trace to `fig` (`Plot`/`SyncPlot`), or to the
+`ternary` cell `row`, `col` of a `SubplotFigure` (default: the active cell).
+Arguments and keywords as for [`plot_ternary`](@ref) without `show` (an
+`ArgumentError`); non-empty corner titles replace the current ones and keep
+their styling. See [`plot_pie!`](@ref) for the figure-level options.
+
+# Returns
+`nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
+
+# Example
+```julia
+fig = plot_ternary([0.2, 0.3], [0.3, 0.4], [0.5, 0.3]; legend = "batch 1")
+plot_ternary!(fig, [0.4, 0.1], [0.2, 0.6], [0.4, 0.3]; legend = "batch 2")
+```
 """
 function plot_ternary!(
 	fig,
-	a::Union{AbstractRange, Vector, SubArray},
-	b::Union{AbstractRange, Vector, SubArray},
-	c::Union{AbstractRange, Vector, SubArray};
-	mode::String = "markers",
-	color::String = "",
-	legend::String = "",
-	marker_size::Int = 0,
-	alabel::String = "",
-	blabel::String = "",
-	clabel::String = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	a::Union{AbstractVector, SubArray},
+	b::Union{AbstractVector, SubArray},
+	c::Union{AbstractVector, SubArray};
+	mode::AbstractString = "markers",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::AbstractString = "",
+	marker_size::Union{Real, AbstractVector} = 0,
+	alabel::AbstractString = "",
+	blabel::AbstractString = "",
+	clabel::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	row = nothing,
+	col = nothing,
+	show = nothing,
 )
-	push!(_plot_data(fig), _ternary_trace(a, b, c; mode = mode, color = color, legend = legend, marker_size = marker_size))
-	_apply_ternary_labels!(
-		fig;
-		alabel = alabel,
-		blabel = blabel,
-		clabel = clabel,
+	who = "plot_ternary!"
+	_extended_mutator_guard(who, show, row, col)
+	trace = _ternary_trace(who, a, b, c; mode = mode, color = color, legend = legend, marker_size = marker_size)
+	corner = _ternary_axis_labels(who; alabel = alabel, blabel = blabel, clabel = clabel)
+	title_text = _extended_label(title, who, "title")
+	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
+	push!(_plot_data(fig), trace)
+	_apply_ternary_labels!(fig; corner...)
+	_extended_apply_figure_options!(
+		fig,
+		who;
+		title = title_text,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		apply_template = false,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
 	_refresh!(fig)
 	return nothing
+end
+
+function plot_ternary!(
+	sf::SubplotFigure,
+	a::Union{AbstractVector, SubArray},
+	b::Union{AbstractVector, SubArray},
+	c::Union{AbstractVector, SubArray};
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_delegate_mutator!(sf, plot_ternary!, a, b, c; row = row, col = col, kwargs...)
 end
 
 # ── Image ────────────────────────────────────────────────────────────
