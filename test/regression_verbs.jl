@@ -77,15 +77,17 @@ _rv_calls(script::AbstractString) =
 	)
 	for build in builders
 		fig = build()
-		# 2.0 builders store `title.text`; a user-built `Layout(title = "T")`
-		# still holds a bare String. Nested title setters must work on both.
-		stored_title = fig.layout.fields[:title]
+		# 2.0 builders store `title.text` and store nothing for an empty title
+		# (D7 `_title_attr`); a user-built `Layout(title = "T")` still holds a
+		# bare String. Nested title setters must work on all three.
+		had_title = haskey(fig.layout.fields, :title)
+		stored_title = get(fig.layout.fields, :title, "")
 		original_text = stored_title isa AbstractString ?
 			stored_title : stored_title[:text]
 		@test original_text isa AbstractString
 		@test relayout!(fig; title_x = 0.5, title_font_size = 20) === fig
 		title = fig.layout.fields[:title]
-		@test title[:text] == original_text
+		@test (had_title ? title[:text] : get(title, :text, "")) == original_text
 		@test title[:x] == 0.5
 		@test title[:font][:size] == 20
 		@test relayout!(fig; title_text = "New") === fig
@@ -110,8 +112,10 @@ _rv_calls(script::AbstractString) =
 	@test p.layout[:xaxis][:title][:text] == "X"
 	@test p.layout[:xaxis][:title][:font][:size] == 9
 
-	# A displayed figure applies the same model change and renders it.
-	fig = plot_scatter(1:3, [4, 5, 6]; title = "T")
+	# A displayed figure applies the same model change and renders it. The
+	# scalar (bare String) title is the one a user-built `Layout` holds; 2.0
+	# builders store `title.text` (D7), for which the nested delta is sent.
+	fig = Plot(scatter(x = 1:3, y = [4, 5, 6]), Layout(title = "T"))
 	sp, renderer = _rv_syncplot(fig)
 	try
 		@test relayout!(sp; title_x = 0.5) === sp
@@ -122,6 +126,18 @@ _rv_calls(script::AbstractString) =
 		@test occursin("\"title\":{", script)
 		@test occursin("\"x\":0.5", script)
 		@test occursin("\"text\":\"T\"", script)
+	finally
+		close(sp)
+	end
+	built = plot_scatter(1:3, [4, 5, 6]; title = "T")
+	sp, renderer = _rv_syncplot(built)
+	try
+		@test relayout!(sp; title_x = 0.5) === sp
+		@test built.layout.fields[:title][:text] == "T"
+		@test built.layout.fields[:title][:x] == 0.5
+		script = only(renderer.scripts)
+		@test _rv_calls(script) == ["await Plotly.relayout"]
+		@test occursin("\"title.x\":0.5", script)
 	finally
 		close(sp)
 	end
