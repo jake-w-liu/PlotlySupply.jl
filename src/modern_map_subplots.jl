@@ -439,15 +439,22 @@ function _apply_subplot_shared_axis!(
 			)
 		end
 	elseif shared == "all"
+		# plotly.py `_configure_shared_axes`: rows are the outer loop (bottom
+		# row first, `rows_iter` above), columns the inner loop, so the shared
+		# reference is the left-most xy cell of the bottom-most row.
 		cells = (
 			(row, col, position)
-			for col in 1:sp.cols
 			for (position, row) in enumerate(rows_iter)
+			for col in 1:sp.cols
 		)
+		# plotly.py writes these predicates with 0-based indices
+		# (`c > 0`, `ri > 0`); `col` and `position` are 1-based here. Only the
+		# first column keeps y tick labels and only the bottom row keeps x
+		# tick labels.
 		hide_tick_labels = if axis === :y
-			(_, col, _) -> col > 0
+			(_, col, _) -> col > 1
 		elseif sp.start_cell == "bottom-left"
-			(_, _, position) -> position > 0
+			(_, _, position) -> position > 1
 		else
 			(row, _, _) -> row < sp.rows
 		end
@@ -589,22 +596,49 @@ function _apply_subplot_title_annotations!(
 	annotations = Any[]
 
 	if !ismissing(sp.subplot_titles)
-		size(sp.subplot_titles) == (sp.rows, sp.cols) ||
-			throw(ArgumentError(
-				"`subplot_titles` must have size " *
-				"($(sp.rows), $(sp.cols)); got " *
-				"$(size(sp.subplot_titles)).",
+		titles = sp.subplot_titles
+		if size(titles) == (sp.rows, sp.cols)
+			# Grid form: titles[row, col] labels cell (row, col); titles of
+			# blank (missing-spec) cells are ignored.
+			for row in 1:sp.rows, col in 1:sp.cols
+				_append_subplot_title_annotation!(
+					annotations,
+					titles[row, col],
+					_subplot_grid_cell_domain(
+						layout,
+						row,
+						col,
+					),
+				)
+			end
+		elseif size(titles, 1) == 1
+			# PlotlyBase/plotly.py list form (`["a" "b" "c"]`, a 1×N row):
+			# titles are assigned in row-major order to the occupied cells
+			# only, skipping blank cells and the cells a row/col span covers.
+			domains = Any[]
+			for row in 1:sp.rows, col in 1:sp.cols
+				ismissing(sp.specs[row, col]) && continue
+				push!(domains, _subplot_grid_cell_domain(layout, row, col))
+			end
+			length(titles) <= length(domains) || throw(ArgumentError(
+				"Subplots: `subplot_titles` has $(length(titles)) entries but " *
+				"the grid has only $(length(domains)) occupied cell(s); " *
+				"titles for insets are not supported.",
 			))
-		for row in 1:sp.rows, col in 1:sp.cols
-			_append_subplot_title_annotation!(
-				annotations,
-				sp.subplot_titles[row, col],
-				_subplot_grid_cell_domain(
-					layout,
-					row,
-					col,
-				),
-			)
+			for (title, domain) in zip(titles, domains)
+				_append_subplot_title_annotation!(
+					annotations,
+					title,
+					domain,
+				)
+			end
+		else
+			throw(ArgumentError(
+				"Subplots: `subplot_titles` must be a ($(sp.rows), $(sp.cols)) " *
+				"matrix (one title per cell) or a 1×N row listing the " *
+				"occupied cells in row-major order; got size " *
+				"$(size(titles)).",
+			))
 		end
 	end
 
@@ -745,6 +779,13 @@ links and annotations are derived from the final routing table without
 changing PlotlyBase global state.
 """
 function _plotlysupply_subplot_layout(sp::Subplots)
+	# Every helper below indexes `sp.specs[row, col]` over the declared grid.
+	# PlotlyBase does not check the shape, so a smaller matrix would raise a
+	# raw BoundsError and a larger one would silently drop the extra cells.
+	size(sp.specs) == (sp.rows, sp.cols) || throw(ArgumentError(
+		"Subplots: `specs` must have size (rows, cols) = " *
+		"($(sp.rows), $(sp.cols)); got $(size(sp.specs)).",
+	))
 	has_modern_map = _contains_modern_map(sp)
 	needs_local_postprocessing =
 		has_modern_map ||

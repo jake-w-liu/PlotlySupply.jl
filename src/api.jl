@@ -3019,26 +3019,20 @@ function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_
 	return xkey, ykey
 end
 
+# `kind` is the subplot kind of the cell (:geo or :mapbox). MapLibre `map`
+# cells are updated by `_transactional_modern_map_subplot_update!`
+# (electron_backend.jl), which owns the alias-preserving map transaction.
 function _subplot_geographic_layout_key(
 	sf::SubplotFigure,
 	row::Int,
 	col::Int,
 	kind::Symbol,
 )
-	p = _plot_obj(sf.fig)
-	expected_kind = if kind === :geo
-		"geo"
-	elseif kind === :mapbox
-		"mapbox"
-	elseif kind === :map
-		"map"
-	else
-		throw(ArgumentError(
-			"Unsupported geographic subplot kind `$kind`.",
-		))
-	end
-
-	target_ref = _subplot_target_ref(p, row, col)
+	kind in (:geo, :mapbox) || throw(ArgumentError(
+		"Unsupported geographic subplot kind `$kind`.",
+	))
+	expected_kind = String(kind)
+	target_ref = _subplot_target_ref(_plot_obj(sf.fig), row, col)
 	actual_kind = String(target_ref.subplot_kind)
 	actual_kind == expected_kind || throw(ArgumentError(
 		"Selected subplot cell ($(row), $(col)) is '$actual_kind', " *
@@ -3059,36 +3053,48 @@ function _subplot_geographic_update_impl!(
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	key = _subplot_geographic_layout_key(sf, r, c, kind)
 	layout = _plot_layout(sf.fig)
-	root_key = kind
 	temporary = Layout()
-	existing = get(layout.fields, key, attr())
-	temporary.fields[root_key] =
-		kind === :map ?
-		attr(_symbol_dict(existing)) :
-		deepcopy(existing)
+	existing = get(layout.fields, key, nothing)
+	# A `nothing` cell root (e.g. after `relayout!(sf; geo2 = nothing)`) is
+	# Plotly's "all defaults"; update it like an empty object.
+	temporary.fields[kind] =
+		existing === nothing ? attr() : deepcopy(existing)
 	updater(temporary, with; kwargs...)
-	if kind === :mapbox
-		_require_valid_mapbox_layouts(temporary)
-	elseif kind === :map
-		_require_valid_map_layouts(temporary)
-	end
+	kind === :mapbox && _require_valid_mapbox_layouts(temporary)
 	_merge_layout_attr!(
 		layout,
 		key,
-		get(temporary.fields, root_key, nothing);
+		get(temporary.fields, kind, nothing);
 		drop_keys = (:domain,),
 		deep_merge_paths =
 			kind === :geo ?
 			_GEO_LAYOUT_MERGE_PATHS :
-			kind === :map ?
-				_MAP_LAYOUT_MERGE_PATHS :
-				_MAPBOX_LAYOUT_MERGE_PATHS,
+			_MAPBOX_LAYOUT_MERGE_PATHS,
 		mutate_builtin_target = true,
 	)
 	sf.current_row = r
 	sf.current_col = c
 	_refresh!(sf.fig)
 	return sf
+end
+
+# The grid owns every cell's `domain`; a per-cell update drops it. Say so
+# instead of silently ignoring the caller's value. Called before the
+# transaction starts so staging cannot emit the warning twice.
+function _warn_ignored_subplot_domain(
+	fn::AbstractString,
+	with::PlotlyBase.PlotlyAttribute,
+	kwargs,
+)
+	requested = haskey(_symbol_dict(with), :domain) ||
+		any(pairs(kwargs)) do (key, _)
+			name = String(key)
+			name == "domain" || startswith(name, "domain_")
+		end
+	requested && @warn "$fn on a SubplotFigure cell ignores `domain`: " *
+		"subplot domains are managed by the `subplots(...)` grid. Use " *
+		"`relayout!(sf; <key>_domain = ...)` to move a cell explicitly."
+	return nothing
 end
 
 function _subplot_geographic_update!(
@@ -3109,6 +3115,27 @@ function _subplot_geographic_update!(
 	)
 end
 
+"""
+	update_geos!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+
+Update the `geo` layout object of ONE `SubplotFigure` cell: the cell given by
+`row`/`col` (pass both), or the active cell (see [`subplot!`](@ref)) when they
+are omitted. The updated cell becomes the active cell. Keywords are Plotly
+`layout.geo` attributes (`showland=true`, `projection_type="mercator"`, …);
+nested `projection` settings merge with the existing ones.
+
+The grid manages cell domains, so a `domain` value is ignored with a warning.
+Throws `ArgumentError` (leaving the figure unchanged) when the cell is not a
+`geo` cell. To update every geo object of the grid at once, call
+`update_geos!(sf.fig; ...)` on the underlying `Plot`/`SyncPlot`.
+Returns `sf`.
+
+# Example
+```julia
+sf = subplots(1, 2; sync=false, specs=[Spec(kind="geo") Spec(kind="geo")])
+update_geos!(sf; row=1, col=2, showland=true, landcolor="lightgray")
+```
+"""
 function PlotlyBase.update_geos!(
 	sf::SubplotFigure,
 	with::PlotlyBase.PlotlyAttribute = attr();
@@ -3116,6 +3143,7 @@ function PlotlyBase.update_geos!(
 	col::Union{Nothing,Integer} = nothing,
 	kwargs...,
 )
+	_warn_ignored_subplot_domain("update_geos!", with, kwargs)
 	return _subplot_geographic_update!(
 		sf,
 		PlotlyBase.update_geos!,
@@ -3127,6 +3155,27 @@ function PlotlyBase.update_geos!(
 	)
 end
 
+"""
+	update_mapboxes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+
+Update the legacy `mapbox` layout object of ONE `SubplotFigure` cell: the
+cell given by `row`/`col` (pass both), or the active cell when they are
+omitted. The updated cell becomes the active cell. Keywords are Plotly
+`layout.mapbox` attributes (`style`, `zoom`, `center_lon`, `bearing`, …);
+a partial `center` update keeps the unspecified coordinate.
+
+`style` must be a nonempty style name/URL or a nonempty style object, and
+the view values must be finite numbers; invalid values throw `ArgumentError`
+before anything changes. The grid manages cell domains, so a `domain` value
+is ignored with a warning. To update every mapbox object of the grid at
+once, call `update_mapboxes!(sf.fig; ...)`. Returns `sf`.
+
+# Example
+```julia
+sf = subplots(1, 2; sync=false, specs=[Spec(kind="mapbox") Spec(kind="mapbox")])
+update_mapboxes!(sf; row=1, col=2, style="carto-positron", zoom=3)
+```
+"""
 function PlotlyBase.update_mapboxes!(
 	sf::SubplotFigure,
 	with::PlotlyBase.PlotlyAttribute = attr();
@@ -3134,6 +3183,7 @@ function PlotlyBase.update_mapboxes!(
 	col::Union{Nothing,Integer} = nothing,
 	kwargs...,
 )
+	_warn_ignored_subplot_domain("update_mapboxes!", with, kwargs)
 	return _subplot_geographic_update!(
 		sf,
 		PlotlyBase.update_mapboxes!,
@@ -3145,6 +3195,27 @@ function PlotlyBase.update_mapboxes!(
 	)
 end
 
+"""
+	update_maps!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+
+Update the MapLibre `map` layout object of ONE `SubplotFigure` cell: the cell
+given by `row`/`col` (pass both), or the active cell when they are omitted.
+The updated cell becomes the active cell. Keywords are the same as for
+`update_maps!(fig; ...)`: nested `center`/`bounds` merge, invalid view or
+style values throw `ArgumentError` before anything changes, and an error is
+also raised when the cell is not a `map` cell.
+
+The grid manages cell domains, so a `domain` value is ignored with a warning.
+To update every map cell of the grid at once, call `update_maps!(sf.fig; ...)`.
+Returns `sf`.
+
+# Example
+```julia
+sf = subplots(1, 2; sync=false, specs=[Spec(kind="map") Spec(kind="map")])
+update_maps!(sf; row=1, col=1, zoom=2, center_lon=10)
+update_maps!(sf.fig; style="carto-positron")   # every map cell
+```
+"""
 function update_maps!(
 	sf::SubplotFigure,
 	with::PlotlyBase.PlotlyAttribute = attr();
@@ -3152,6 +3223,7 @@ function update_maps!(
 	col::Union{Nothing,Integer} = nothing,
 	kwargs...,
 )
+	_warn_ignored_subplot_domain("update_maps!", with, kwargs)
 	return _transactional_modern_map_subplot_update!(
 		sf,
 		with;
@@ -3816,14 +3888,7 @@ for (fn, nargs) in (
 	(:plot_parcoords!, 1),
 	(:plot_sunburst!, 2),
 	(:plot_treemap!, 2),
-	(:plot_choropleth!, 2),
-	(:plot_scattergeo!, 2),
-	(:plot_scattermap!, 2),
-	(:plot_scattermapbox!, 2),
 	(:plot_sankey!, 3),
-	(:plot_densitymap!, 2),
-	(:plot_densitymap!, 3),
-	(:plot_densitymapbox!, 3),
 )
 	@eval function $fn(
 		sf::SubplotFigure,
@@ -3834,25 +3899,50 @@ for (fn, nargs) in (
 	end
 end
 
-function plot_choroplethmapbox!(
+# Geographic (geo, mapbox, MapLibre map) mutators on a SubplotFigure: append
+# to the cell given by `row`/`col` (both or neither; default: the active
+# cell), which must be of the trace's subplot kind. Every positional shape
+# of the Plot-level method has an explicit method here.
+for fn in (:plot_choropleth!, :plot_scattergeo!, :plot_scattermap!)
+	@eval function $fn(
+		sf::SubplotFigure,
+		first_values::AbstractVector,
+		second_values::AbstractVector;
+		row::Union{Nothing,Integer} = nothing,
+		col::Union{Nothing,Integer} = nothing,
+		kwargs...,
+	)
+		return _subplot_delegate_mutator!(
+			sf,
+			$fn,
+			first_values,
+			second_values;
+			row = row,
+			col = col,
+			kwargs...,
+		)
+	end
+end
+
+# `z = nothing` (equal weights) is part of the documented signature, so the
+# explicit `nothing` must route to the cell like an omitted `z`.
+function plot_densitymap!(
 	sf::SubplotFigure,
-	geojson,
-	locations::AbstractVector,
-	z::AbstractVector;
+	lon::AbstractVector,
+	lat::AbstractVector,
+	z::Union{Nothing,AbstractVector} = nothing;
 	row::Union{Nothing,Integer} = nothing,
 	col::Union{Nothing,Integer} = nothing,
-	secondary_y::Bool = false,
 	kwargs...,
 )
 	return _subplot_delegate_mutator!(
 		sf,
-		plot_choroplethmapbox!,
-		geojson,
-		locations,
+		plot_densitymap!,
+		lon,
+		lat,
 		z;
 		row = row,
 		col = col,
-		secondary_y = secondary_y,
 		kwargs...,
 	)
 end
@@ -3864,7 +3954,6 @@ function plot_choroplethmap!(
 	z::AbstractVector;
 	row::Union{Nothing,Integer} = nothing,
 	col::Union{Nothing,Integer} = nothing,
-	secondary_y::Bool = false,
 	kwargs...,
 )
 	return _subplot_delegate_mutator!(
@@ -3875,7 +3964,70 @@ function plot_choroplethmap!(
 		z;
 		row = row,
 		col = col,
-		secondary_y = secondary_y,
+		kwargs...,
+	)
+end
+
+# Legacy mapbox cells additionally receive the token-free default style when
+# neither the call nor the cell sets one (see `_subplot_mapbox_cell_style`).
+function plot_scattermapbox!(
+	sf::SubplotFigure,
+	lon::AbstractVector,
+	lat::AbstractVector;
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	style = nothing,
+	kwargs...,
+)
+	return _subplot_mapbox_delegate!(
+		sf,
+		plot_scattermapbox!,
+		(lon, lat);
+		row = row,
+		col = col,
+		style = style,
+		kwargs...,
+	)
+end
+
+function plot_densitymapbox!(
+	sf::SubplotFigure,
+	lon::AbstractVector,
+	lat::AbstractVector,
+	z::AbstractVector;
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	style = nothing,
+	kwargs...,
+)
+	return _subplot_mapbox_delegate!(
+		sf,
+		plot_densitymapbox!,
+		(lon, lat, z);
+		row = row,
+		col = col,
+		style = style,
+		kwargs...,
+	)
+end
+
+function plot_choroplethmapbox!(
+	sf::SubplotFigure,
+	geojson,
+	locations::AbstractVector,
+	z::AbstractVector;
+	row::Union{Nothing,Integer} = nothing,
+	col::Union{Nothing,Integer} = nothing,
+	style = nothing,
+	kwargs...,
+)
+	return _subplot_mapbox_delegate!(
+		sf,
+		plot_choroplethmapbox!,
+		(geojson, locations, z);
+		row = row,
+		col = col,
+		style = style,
 		kwargs...,
 	)
 end
@@ -10793,34 +10945,30 @@ function _require_bounded_numeric_option(
 	))
 end
 
+# `color`: "" / nothing = Plotly default; a String or Symbol is one colour; a
+# vector is per point (colour names or numbers mapped through the colorscale).
+# `marker_size`: nothing = default; a Real or a per-point vector, >= 0.
 function _set_geo_marker!(
 	kwargs::Dict{Symbol,Any},
+	kind::AbstractString,
 	color,
 	marker_size,
 )
 	marker = _symbol_dict(get(kwargs, :marker, nothing))
 	changed = false
-	if color isa AbstractString
-		if !isempty(color)
-			marker[:color] = String(color)
+	if color isa Union{AbstractString,Symbol}
+		text = String(color)
+		if !isempty(text)
+			marker[:color] = text
 			changed = true
 		end
 	elseif color !== nothing
 		marker[:color] = color
 		changed = true
 	end
-	if marker_size isa Real
+	if marker_size !== nothing
 		_require_bounded_numeric_option(
-			"geographic scatter",
-			"marker_size",
-			marker_size;
-			minimum = 0,
-		)
-		marker[:size] = marker_size
-		changed = true
-	elseif marker_size !== nothing
-		_require_bounded_numeric_option(
-			"geographic scatter",
+			kind,
 			"marker_size",
 			marker_size;
 			minimum = 0,
@@ -10833,7 +10981,6 @@ function _set_geo_marker!(
 end
 
 function _geo_layout(
-	title::String,
 	scope::AbstractString,
 	projection::AbstractString,
 )
@@ -10841,7 +10988,158 @@ function _geo_layout(
 	isempty(scope) || (g[:scope] = String(scope))
 	isempty(projection) ||
 		(g[:projection] = attr(type = String(projection)))
-	return isempty(g) ? Layout(title = title) : Layout(title = title, geo = attr(; g...))
+	return isempty(g) ? Layout() : Layout(geo = attr(; g...))
+end
+
+# Figure-level keywords shared by every geographic constructor and mutator
+# (geo, mapbox and MapLibre families). `0` means automatic. The minimums are
+# the plotly.js schema minimums (`layout.width`/`height` >= 10 px,
+# `font.size` >= 1); pixel sizes are rounded to whole pixels because the
+# Electron window and raster exports are integer-sized. Validates only, so
+# callers can run it before mutating anything.
+function _geo_figure_options(
+	who::AbstractString;
+	title::AbstractString,
+	width::Real,
+	height::Real,
+	fontsize::Real,
+)
+	for (name, value, minimum) in (
+		("width", width, 10),
+		("height", height, 10),
+		("fontsize", fontsize, 1),
+	)
+		valid =
+			_is_finite_plotly_number(value) &&
+			abs(Float64(value)) <= maxintfloat(Float64) &&
+			(iszero(value) || value >= minimum)
+		valid || throw(ArgumentError(
+			"$who: `$name` must be 0 (automatic) or a finite number of at " *
+			"least $minimum; got $(repr(value)).",
+		))
+	end
+	return (
+		title = String(title),
+		width = round(Int, Float64(width)),
+		height = round(Int, Float64(height)),
+		fontsize = fontsize,
+	)
+end
+
+# Apply validated `_geo_figure_options` to a constructed (`apply_template =
+# true`) or appended-to (`false`: only the legend is refreshed so a user
+# template survives) figure. A new title is stored as `attr(text = ...)` and
+# keeps the existing title's other attributes (position, font).
+function _apply_geo_figure_options!(
+	fig,
+	options;
+	apply_template::Bool,
+)
+	_apply_basic_plot_options!(fig; apply_template = apply_template)
+	title = _title_attr(options.title)
+	if title !== nothing
+		existing = get(_plot_layout(fig).fields, :title, nothing)
+		if _is_layout_mapping(existing)
+			merged = _symbol_dict(existing)
+			merged[:text] = options.title
+			title = attr(; merged...)
+		end
+		relayout!(fig, title = title)
+	end
+	options.width > 0 && relayout!(fig, width = options.width)
+	options.height > 0 && relayout!(fig, height = options.height)
+	options.fontsize > 0 &&
+		relayout!(fig, font = attr(size = options.fontsize))
+	return nothing
+end
+
+# Shared trace builder of scattergeo / scattermapbox / scattermap. Per-point
+# `color` and `marker_size` vectors must match the coordinates: plotly.js
+# silently drops the points past a shorter marker array.
+function _geo_scatter_trace(
+	kind::AbstractString,
+	constructor,
+	lon::AbstractVector,
+	lat::AbstractVector;
+	mode::AbstractString,
+	color,
+	marker_size,
+	legend::AbstractString,
+	trace_kwargs,
+)
+	_require_equal_geo_lengths(
+		kind,
+		:lon => lon,
+		:lat => lat,
+	)
+	_require_map_vector_length(kind, "color", color, length(lon))
+	_require_map_vector_length(
+		kind,
+		"marker_size",
+		marker_size,
+		length(lon),
+	)
+	kw = _trace_keyword_dict(trace_kwargs)
+	kw[:lon] = lon
+	kw[:lat] = lat
+	kw[:mode] = String(mode)
+	_set_geo_marker!(kw, kind, color, marker_size)
+	isempty(legend) || (kw[:name] = String(legend))
+	return constructor(; kw...)
+end
+
+const _CHOROPLETH_LOCATIONMODES =
+	("ISO-3", "USA-states", "country names", "geojson-id")
+
+# plotly.js uses a choropleth's `geojson` only when it is a nonempty URL
+# string or an object (choropleth supplyDefaults); anything else is ignored.
+_is_plotly_geojson(value) =
+	value isa AbstractString ? !isempty(value) : _is_layout_mapping(value)
+
+function _choropleth_trace(
+	locations::AbstractVector,
+	z::AbstractVector;
+	locationmode::Union{Nothing,AbstractString},
+	geojson,
+	featureidkey::AbstractString,
+	colorscale,
+	trace_kwargs,
+)
+	_require_equal_geo_lengths(
+		"choropleth",
+		:locations => locations,
+		:z => z,
+	)
+	has_geojson = _is_plotly_geojson(geojson)
+	geojson === nothing || has_geojson || throw(ArgumentError(
+		"choropleth: `geojson` must be a GeoJSON object (Dict, attr or " *
+		"NamedTuple) or a nonempty URL string; got $(typeof(geojson)).",
+	))
+	# An explicit mode always wins. Otherwise match GeoJSON features when a
+	# GeoJSON is given (plotly.js' own default) and country names if not.
+	mode =
+		locationmode !== nothing ? String(locationmode) :
+		has_geojson ? "geojson-id" : "country names"
+	mode in _CHOROPLETH_LOCATIONMODES || throw(ArgumentError(
+		"choropleth: `locationmode` must be one of " *
+		"$(join(repr.(_CHOROPLETH_LOCATIONMODES), ", ")); got $(repr(mode)).",
+	))
+	mode == "geojson-id" && !has_geojson && throw(ArgumentError(
+		"choropleth: locationmode=\"geojson-id\" requires `geojson`.",
+	))
+	isempty(featureidkey) || mode == "geojson-id" || throw(ArgumentError(
+		"choropleth: `featureidkey` only applies to GeoJSON locations " *
+		"(locationmode=\"geojson-id\"); got locationmode=$(repr(mode)).",
+	))
+	kw = _trace_keyword_dict(trace_kwargs)
+	kw[:locations] = locations
+	kw[:z] = z
+	kw[:locationmode] = mode
+	has_geojson && (kw[:geojson] = geojson)
+	isempty(featureidkey) ||
+		(kw[:featureidkey] = String(featureidkey))
+	_set_optional_colorscale!(kw, colorscale)
+	return choropleth(; kw...)
 end
 
 function _require_valid_mapbox_view(
@@ -10887,6 +11185,10 @@ function _require_valid_mapbox_options(
 	key,
 	finalized_mapping,
 )
+	# An empty style string never finishes loading in plotly.js (an export
+	# then blocks), so stored styles are validated like the keyword.
+	haskey(mapbox, :style) &&
+		_require_valid_map_style(mapbox[:style]; family = "mapbox")
 	center = Dict{Symbol,Any}()
 	if haskey(mapbox, :center) &&
 		mapbox[:center] !== nothing
@@ -11052,13 +11354,13 @@ function _update_mapboxes_preserving_aliases!(
 end
 
 function _mapbox_layout(
-	title::String,
 	style,
 	zoom,
 	center_lon,
 	center_lat,
 )
 	_require_valid_mapbox_view(zoom, center_lon, center_lat)
+	_require_valid_map_style(style; family = "mapbox")
 	m = Dict{Symbol, Any}()
 	style === nothing ||
 		(m[:style] = style isa AbstractString ? String(style) : style)
@@ -11069,9 +11371,72 @@ function _mapbox_layout(
 	if !isempty(center)
 		m[:center] = attr(center)
 	end
-	layout = Layout(title = title)
+	layout = Layout()
 	isempty(m) || (layout.fields[:mapbox] = attr(m))
 	return layout
+end
+
+# plotly.js renders a mapbox subplot without `style` only with a Mapbox
+# access token (its default "basic" style is token-gated) and otherwise
+# refuses to draw or export. The mapbox constructors therefore default to
+# this token-free style, and the mutators apply it to a target that has none.
+const _DEFAULT_MAPBOX_STYLE = "open-street-map"
+
+# The style stored in a mapbox layout root, or `nothing` when the root, or
+# its style, is absent or `nothing`.
+function _mapbox_root_style(root)
+	_is_layout_mapping(root) || return nothing
+	return get(_symbol_dict(root), :style, nothing)
+end
+
+# The `style` to forward when a mapbox mutator runs for a SubplotFigure cell.
+# The delegate runs the Plot-level mutator against an empty staging Plot, so
+# the mutator cannot see the target cell: forward the caller's style, else
+# the cell's current one (an unchanged merge), else the token-free default.
+# `nothing` (non-mapbox or empty cell) leaves the error to the delegate.
+function _subplot_mapbox_cell_style(
+	sf::SubplotFigure,
+	row,
+	col,
+	style,
+)
+	style === nothing || return style
+	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	p = _plot_obj(getfield(sf, :fig))
+	grid_ref = p.layout.subplots.grid_ref
+	(isassigned(grid_ref, r, c) && !isempty(grid_ref[r, c])) ||
+		return nothing
+	ref = first(grid_ref[r, c])
+	(ref.subplot_kind == "mapbox" && length(ref.layout_keys) == 1) ||
+		return nothing
+	existing = _mapbox_root_style(
+		get(p.layout.fields, only(ref.layout_keys), nothing),
+	)
+	return existing === nothing ? _DEFAULT_MAPBOX_STYLE : existing
+end
+
+function _subplot_mapbox_delegate!(
+	sf::SubplotFigure,
+	mutator::Function,
+	args::Tuple;
+	row::Union{Nothing,Integer},
+	col::Union{Nothing,Integer},
+	style,
+	kwargs...,
+)
+	# Hold the (reentrant) metadata lock across the cell lookup and the
+	# delegated transaction so another task cannot restyle the cell between.
+	return lock(getfield(sf, :_lock)) do
+		_subplot_delegate_mutator!(
+			sf,
+			mutator,
+			args...;
+			row = row,
+			col = col,
+			style = _subplot_mapbox_cell_style(sf, row, col, style),
+			kwargs...,
+		)
+	end
 end
 
 function _apply_geo_layout_options!(
@@ -11079,7 +11444,7 @@ function _apply_geo_layout_options!(
 	scope::AbstractString,
 	projection::AbstractString,
 )
-	source = _geo_layout("", scope, projection)
+	source = _geo_layout(scope, projection)
 	haskey(source.fields, :geo) || return nothing
 	_merge_layout_attr!(
 		_plot_layout(fig),
@@ -11098,8 +11463,12 @@ function _apply_mapbox_layout_options!(
 	center_lon,
 	center_lat,
 )
+	if style === nothing && _mapbox_root_style(
+		get(_plot_layout(fig).fields, :mapbox, nothing),
+	) === nothing
+		style = _DEFAULT_MAPBOX_STYLE
+	end
 	source = _mapbox_layout(
-		"",
 		style,
 		zoom,
 		center_lon,
@@ -11138,236 +11507,462 @@ include("sci/fields.jl")
 include("sci/scene3d.jl")
 
 """
-	plot_choropleth(locations, z; locationmode="country names", colorscale="", scope="", projection="", kwargs...)
+	plot_choropleth(locations, z; locationmode=nothing, geojson=nothing,
+		featureidkey="", colorscale="", scope="", projection="", title="",
+		width=0, height=0, fontsize=0, show=false, kwargs...)
 
-Choropleth map shading regions `locations` by value `z`. `locationmode` selects
-how `locations` are matched (e.g. `"country names"`, `"ISO-3"`, `"USA-states"`).
+Choropleth on a `geo` (outline) map: shade the regions named by `locations`
+by the values `z`.
+
+# Arguments
+- `locations::AbstractVector`: region identifiers, matched as `locationmode` says.
+- `z::AbstractVector`: one value per location (same length as `locations`),
+  coloured through `colorscale`.
+
+# Keywords
+- `locationmode::Union{Nothing,AbstractString} = nothing`: how `locations` are
+  matched: `"country names"`, `"ISO-3"`, `"USA-states"` or `"geojson-id"`.
+  `nothing` selects `"geojson-id"` when `geojson` is given and
+  `"country names"` otherwise.
+- `geojson = nothing`: a GeoJSON `FeatureCollection` (`Dict`, `attr` or
+  `NamedTuple`) or a URL string; its features are matched by `locations`.
+- `featureidkey::AbstractString = ""`: the GeoJSON feature property matched by
+  `locations` (plotly.js default `"id"`), e.g. `"properties.name"`. Only valid
+  with `"geojson-id"` matching.
+- `colorscale::Union{AbstractString,AbstractVector} = ""`: Plotly colorscale
+  name or `[[t, color], ...]` stops; `""` keeps the default.
+- `scope::AbstractString = ""`: geo scope (`"world"`, `"europe"`, `"usa"`, ...).
+- `projection::AbstractString = ""`: geo projection type (`"mercator"`, ...).
+- `title::AbstractString = ""`: figure title.
+- `width::Real = 0`, `height::Real = 0`: figure size in pixels (0 = automatic,
+  otherwise at least 10; rounded to whole pixels).
+- `fontsize::Real = 0`: global font size (0 = template default, otherwise ≥ 1).
+- `show::Bool = false`: open the figure in a window and return a `SyncPlot`.
+- `kwargs...`: further Plotly `choropleth` trace attributes (`zmin`, `zmax`,
+  `hovertext`, `marker_line_color`, ...).
+
+Throws `ArgumentError` for mismatched lengths, an unknown `locationmode`,
+`"geojson-id"` matching without `geojson`, `featureidkey` without GeoJSON
+matching, or an invalid size.
+
+Returns a `Plot`, or a `SyncPlot` when `show=true`.
+
+# Example
+```julia
+fig = plot_choropleth(["France", "Germany", "Spain"], [1.0, 2.0, 3.0];
+	scope="europe", title="Values")
+```
 """
 function plot_choropleth(
 	locations::AbstractVector,
 	z::AbstractVector;
-	locationmode::AbstractString = "country names",
+	locationmode::Union{Nothing,AbstractString} = nothing,
+	geojson = nothing,
+	featureidkey::AbstractString = "",
 	colorscale::Union{AbstractString,AbstractVector} = "",
 	scope::AbstractString = "",
 	projection::AbstractString = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 	kwargs...,
 )
-	_require_equal_geo_lengths(
-		"choropleth",
-		:locations => locations,
-		:z => z,
+	options = _geo_figure_options(
+		"plot_choropleth";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	kw = _trace_keyword_dict(kwargs)
-	kw[:locations] = locations
-	kw[:z] = z
-	kw[:locationmode] = String(locationmode)
-	_set_optional_colorscale!(kw, colorscale)
-	fig = Plot(choropleth(; kw...), _geo_layout(title, scope, projection))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	trace = _choropleth_trace(
+		locations,
+		z;
+		locationmode = locationmode,
+		geojson = geojson,
+		featureidkey = featureidkey,
+		colorscale = colorscale,
+		trace_kwargs = kwargs,
+	)
+	fig = Plot(trace, _geo_layout(scope, projection))
+	_apply_geo_figure_options!(fig, options; apply_template = true)
+	return _maybe_show(
+		fig,
+		show,
+		options.width,
+		options.height,
+		options.title,
+	)
 end
 
 """
-	plot_choropleth!(fig, locations, z; kwargs...)
+	plot_choropleth!(fig, locations, z; locationmode=nothing, geojson=nothing,
+		featureidkey="", colorscale="", scope="", projection="", title="",
+		width=0, height=0, fontsize=0, kwargs...)
+	plot_choropleth!(sf::SubplotFigure, locations, z; row=nothing, col=nothing, kwargs...)
 
-Append a choropleth trace to an existing figure.
+Append a choropleth trace (see [`plot_choropleth`](@ref) for the arguments and
+keywords; `show` is not accepted). `fig` is a `Plot`, a `SyncPlot` or a
+`SubplotFigure`; on a `SubplotFigure` the trace goes to the `geo` cell given
+by `row`/`col` (pass both; default: the active cell) and `title`/`width`/
+`height` are ignored with a warning (they are figure-wide).
+
+Layout keywords change the figure only when set: `scope`/`projection` merge
+into the existing `geo` object, and a `title` keeps the existing title's
+position and font. A user template is preserved.
+
+Throws `ArgumentError` (leaving `fig` unchanged) for invalid input.
+Returns `nothing` (`sf` for a `SubplotFigure`).
+
+# Example
+```julia
+fig = plot_choropleth(["France"], [1.0]; scope="europe")
+plot_choropleth!(fig, ["Italy"], [2.0])
+```
 """
 function plot_choropleth!(
 	fig,
 	locations::AbstractVector,
 	z::AbstractVector;
-	locationmode::AbstractString = "country names",
+	locationmode::Union{Nothing,AbstractString} = nothing,
+	geojson = nothing,
+	featureidkey::AbstractString = "",
 	colorscale::Union{AbstractString,AbstractVector} = "",
 	scope::AbstractString = "",
 	projection::AbstractString = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	kwargs...,
 )
-	_require_equal_geo_lengths(
-		"choropleth",
-		:locations => locations,
-		:z => z,
+	options = _geo_figure_options(
+		"plot_choropleth!";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	kw = _trace_keyword_dict(kwargs)
-	kw[:locations] = locations
-	kw[:z] = z
-	kw[:locationmode] = String(locationmode)
-	_set_optional_colorscale!(kw, colorscale)
-	push!(_plot_data(fig), choropleth(; kw...))
+	trace = _choropleth_trace(
+		locations,
+		z;
+		locationmode = locationmode,
+		geojson = geojson,
+		featureidkey = featureidkey,
+		colorscale = colorscale,
+		trace_kwargs = kwargs,
+	)
+	push!(_plot_data(fig), trace)
 	_apply_geo_layout_options!(
 		fig;
 		scope = scope,
 		projection = projection,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_apply_geo_figure_options!(fig, options; apply_template = false)
 	_refresh!(fig)
 	return nothing
 end
 
 """
-	plot_scattergeo(lon, lat; mode="markers", color="", marker_size=nothing, legend="", scope="", projection="", kwargs...)
+	plot_scattergeo(lon, lat; mode="markers", color="", marker_size=nothing,
+		legend="", scope="", projection="", title="", width=0, height=0,
+		fontsize=0, show=false, kwargs...)
 
-Scatter points on a geographic map at coordinates `(lon, lat)` (degrees).
+Scatter points (or lines) on a `geo` (outline) map at longitudes `lon` and
+latitudes `lat` in degrees.
+
+# Arguments
+- `lon::AbstractVector`, `lat::AbstractVector`: coordinates (equal lengths).
+
+# Keywords
+- `mode::AbstractString = "markers"`: Plotly scatter mode (`"markers"`,
+  `"lines"`, `"lines+markers"`, `"text"`, ...).
+- `color::Union{Nothing,AbstractString,Symbol,AbstractVector} = ""`: marker
+  colour; one colour, or one value per point (colour names, or numbers
+  coloured through `marker_colorscale`). `""`/`nothing` keeps the default.
+- `marker_size::Union{Nothing,Real,AbstractVector} = nothing`: marker size in
+  pixels (≥ 0), scalar or one per point.
+- `legend::AbstractString = ""`: legend name of the trace.
+- `scope::AbstractString = ""`, `projection::AbstractString = ""`: geo scope
+  and projection type (see [`plot_choropleth`](@ref)).
+- `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_choropleth`](@ref).
+- `kwargs...`: further Plotly `scattergeo` trace attributes.
+
+Per-point vectors must have the coordinate length; mismatches, negative or
+non-finite sizes, and invalid figure sizes throw `ArgumentError`.
+
+Returns a `Plot`, or a `SyncPlot` when `show=true`.
+
+# Example
+```julia
+fig = plot_scattergeo([2.35, 13.40], [48.86, 52.52]; color="red",
+	marker_size=10, legend="cities", scope="europe")
+```
 """
 function plot_scattergeo(
 	lon::AbstractVector,
 	lat::AbstractVector;
 	mode::AbstractString = "markers",
-	color::Union{Nothing,AbstractString,AbstractVector} = "",
+	color::Union{Nothing,AbstractString,Symbol,AbstractVector} = "",
 	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
 	legend::AbstractString = "",
 	scope::AbstractString = "",
 	projection::AbstractString = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 	kwargs...,
 )
-	_require_equal_geo_lengths(
-		"scattergeo",
-		:lon => lon,
-		:lat => lat,
+	options = _geo_figure_options(
+		"plot_scattergeo";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	kw = _trace_keyword_dict(kwargs)
-	kw[:lon] = lon
-	kw[:lat] = lat
-	kw[:mode] = String(mode)
-	_set_geo_marker!(kw, color, marker_size)
-	isempty(legend) || (kw[:name] = String(legend))
-	fig = Plot(scattergeo(; kw...), _geo_layout(title, scope, projection))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	trace = _geo_scatter_trace(
+		"scattergeo",
+		scattergeo,
+		lon,
+		lat;
+		mode = mode,
+		color = color,
+		marker_size = marker_size,
+		legend = legend,
+		trace_kwargs = kwargs,
+	)
+	fig = Plot(trace, _geo_layout(scope, projection))
+	_apply_geo_figure_options!(fig, options; apply_template = true)
+	return _maybe_show(
+		fig,
+		show,
+		options.width,
+		options.height,
+		options.title,
+	)
 end
 
 """
-	plot_scattergeo!(fig, lon, lat; kwargs...)
+	plot_scattergeo!(fig, lon, lat; mode="markers", color="",
+		marker_size=nothing, legend="", scope="", projection="", title="",
+		width=0, height=0, fontsize=0, kwargs...)
+	plot_scattergeo!(sf::SubplotFigure, lon, lat; row=nothing, col=nothing, kwargs...)
 
-Append a scattergeo trace to an existing figure.
+Append a scattergeo trace (see [`plot_scattergeo`](@ref) for the arguments and
+keywords; `show` is not accepted). `fig` is a `Plot`, a `SyncPlot` or a
+`SubplotFigure`; on a `SubplotFigure` the trace goes to the `geo` cell given
+by `row`/`col` (pass both; default: the active cell) and `title`/`width`/
+`height` are ignored with a warning.
+
+Layout keywords change the figure only when set; `scope`/`projection` merge
+into the existing `geo` object and a user template is preserved.
+
+Throws `ArgumentError` (leaving `fig` unchanged) for invalid input.
+Returns `nothing` (`sf` for a `SubplotFigure`).
+
+# Example
+```julia
+fig = plot_scattergeo([2.35], [48.86]; legend="Paris")
+plot_scattergeo!(fig, [13.40], [52.52]; legend="Berlin", color=:blue)
+```
 """
 function plot_scattergeo!(
 	fig,
 	lon::AbstractVector,
 	lat::AbstractVector;
 	mode::AbstractString = "markers",
-	color::Union{Nothing,AbstractString,AbstractVector} = "",
+	color::Union{Nothing,AbstractString,Symbol,AbstractVector} = "",
 	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
 	legend::AbstractString = "",
 	scope::AbstractString = "",
 	projection::AbstractString = "",
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	kwargs...,
 )
-	_require_equal_geo_lengths(
-		"scattergeo",
-		:lon => lon,
-		:lat => lat,
+	options = _geo_figure_options(
+		"plot_scattergeo!";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	kw = _trace_keyword_dict(kwargs)
-	kw[:lon] = lon
-	kw[:lat] = lat
-	kw[:mode] = String(mode)
-	_set_geo_marker!(kw, color, marker_size)
-	isempty(legend) || (kw[:name] = String(legend))
-	push!(_plot_data(fig), scattergeo(; kw...))
+	trace = _geo_scatter_trace(
+		"scattergeo",
+		scattergeo,
+		lon,
+		lat;
+		mode = mode,
+		color = color,
+		marker_size = marker_size,
+		legend = legend,
+		trace_kwargs = kwargs,
+	)
+	push!(_plot_data(fig), trace)
 	_apply_geo_layout_options!(
 		fig;
 		scope = scope,
 		projection = projection,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_apply_geo_figure_options!(fig, options; apply_template = false)
 	_refresh!(fig)
 	return nothing
 end
 
 """
-	plot_scattermapbox(lon, lat; mode="markers", color="", marker_size=nothing, legend="", style="open-street-map", zoom=0, center_lon=nothing, center_lat=nothing, kwargs...)
+	plot_scattermapbox(lon, lat; mode="markers", color="", marker_size=nothing,
+		legend="", style="open-street-map", zoom=0, center_lon=nothing,
+		center_lat=nothing, title="", width=0, height=0, fontsize=0,
+		show=false, kwargs...)
 
-Scatter points on a tile map at `(lon, lat)`. The default `"open-street-map"`
-style needs no access token.
+Scatter points (or lines) on a legacy Mapbox tile map at `(lon, lat)`
+(degrees). The MapLibre-based [`plot_scattermap`](@ref) is the modern
+equivalent.
+
+# Arguments
+- `lon::AbstractVector`, `lat::AbstractVector`: coordinates (equal lengths).
+
+# Keywords
+- `mode`, `color`, `marker_size`, `legend`: as for [`plot_scattergeo`](@ref).
+- `style = "open-street-map"`: tile style: a nonempty style name/URL or a
+  nonempty Mapbox style object. The default needs no access token; Mapbox
+  styles (`"basic"`, `"streets"`, `mapbox://...`) need `layout.mapbox.accesstoken`.
+- `zoom = 0`: initial zoom level (finite number).
+- `center_lon = nothing`, `center_lat = nothing`: initial map centre in
+  degrees (`nothing` keeps plotly.js' automatic centre).
+- `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_choropleth`](@ref).
+- `kwargs...`: further Plotly `scattermapbox` trace attributes.
+
+Throws `ArgumentError` for mismatched lengths, an empty or non-string,
+non-object `style`, non-finite view values or invalid sizes.
+
+Returns a `Plot`, or a `SyncPlot` when `show=true`.
+
+# Example
+```julia
+fig = plot_scattermapbox([2.35, 13.40], [48.86, 52.52]; zoom=3,
+	center_lon=8, center_lat=50)
+```
 """
 function plot_scattermapbox(
 	lon::AbstractVector,
 	lat::AbstractVector;
 	mode::AbstractString = "markers",
-	color::Union{Nothing,AbstractString,AbstractVector} = "",
+	color::Union{Nothing,AbstractString,Symbol,AbstractVector} = "",
 	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
 	legend::AbstractString = "",
-	style = "open-street-map",
+	style = _DEFAULT_MAPBOX_STYLE,
 	zoom = 0,
 	center_lon = nothing,
 	center_lat = nothing,
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 	kwargs...,
 )
-	_require_equal_geo_lengths(
-		"scattermapbox",
-		:lon => lon,
-		:lat => lat,
+	options = _geo_figure_options(
+		"plot_scattermapbox";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	kw = _trace_keyword_dict(kwargs)
-	kw[:lon] = lon
-	kw[:lat] = lat
-	kw[:mode] = String(mode)
-	_set_geo_marker!(kw, color, marker_size)
-	isempty(legend) || (kw[:name] = String(legend))
-	fig = Plot(scattermapbox(; kw...), _mapbox_layout(title, style, zoom, center_lon, center_lat))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	layout = _mapbox_layout(style, zoom, center_lon, center_lat)
+	trace = _geo_scatter_trace(
+		"scattermapbox",
+		scattermapbox,
+		lon,
+		lat;
+		mode = mode,
+		color = color,
+		marker_size = marker_size,
+		legend = legend,
+		trace_kwargs = kwargs,
+	)
+	fig = Plot(trace, layout)
+	_apply_geo_figure_options!(fig, options; apply_template = true)
+	return _maybe_show(
+		fig,
+		show,
+		options.width,
+		options.height,
+		options.title,
+	)
 end
 
 """
-	plot_scattermapbox!(fig, lon, lat; kwargs...)
+	plot_scattermapbox!(fig, lon, lat; mode="markers", color="",
+		marker_size=nothing, legend="", style=nothing, zoom=nothing,
+		center_lon=nothing, center_lat=nothing, title="", width=0, height=0,
+		fontsize=0, kwargs...)
+	plot_scattermapbox!(sf::SubplotFigure, lon, lat; row=nothing, col=nothing, kwargs...)
 
-Append a scattermapbox trace to an existing figure.
+Append a scattermapbox trace (see [`plot_scattermapbox`](@ref) for the
+arguments and keywords; `show` is not accepted). `fig` is a `Plot`, a
+`SyncPlot` or a `SubplotFigure`; on a `SubplotFigure` the trace goes to the
+`mapbox` cell given by `row`/`col` (pass both; default: the active cell) and
+`title`/`width`/`height` are ignored with a warning.
+
+The map-view keywords default to `nothing`, which keeps the target's current
+value. A target without a style (a bare `Plot()`, a new `subplots` mapbox
+cell) gets the token-free `"open-street-map"` style, because plotly.js cannot
+draw or export a mapbox subplot without a style or an access token.
+
+Throws `ArgumentError` (leaving `fig` unchanged) for invalid input.
+Returns `nothing` (`sf` for a `SubplotFigure`).
+
+# Example
+```julia
+fig = Plot()
+plot_scattermapbox!(fig, [2.35], [48.86]; zoom=4, center_lon=2, center_lat=48)
+```
 """
 function plot_scattermapbox!(
 	fig,
 	lon::AbstractVector,
 	lat::AbstractVector;
 	mode::AbstractString = "markers",
-	color::Union{Nothing,AbstractString,AbstractVector} = "",
+	color::Union{Nothing,AbstractString,Symbol,AbstractVector} = "",
 	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
 	legend::AbstractString = "",
 	style = nothing,
 	zoom = nothing,
 	center_lon = nothing,
 	center_lat = nothing,
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	kwargs...,
 )
-	_require_valid_mapbox_view(zoom, center_lon, center_lat)
-	_require_equal_geo_lengths(
-		"scattermapbox",
-		:lon => lon,
-		:lat => lat,
+	options = _geo_figure_options(
+		"plot_scattermapbox!";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	kw = _trace_keyword_dict(kwargs)
-	kw[:lon] = lon
-	kw[:lat] = lat
-	kw[:mode] = String(mode)
-	_set_geo_marker!(kw, color, marker_size)
-	isempty(legend) || (kw[:name] = String(legend))
-	push!(_plot_data(fig), scattermapbox(; kw...))
+	_require_valid_mapbox_view(zoom, center_lon, center_lat)
+	_require_valid_map_style(style; family = "mapbox")
+	trace = _geo_scatter_trace(
+		"scattermapbox",
+		scattermapbox,
+		lon,
+		lat;
+		mode = mode,
+		color = color,
+		marker_size = marker_size,
+		legend = legend,
+		trace_kwargs = kwargs,
+	)
+	push!(_plot_data(fig), trace)
 	_apply_mapbox_layout_options!(
 		fig;
 		style = style,
@@ -11375,81 +11970,55 @@ function plot_scattermapbox!(
 		center_lon = center_lon,
 		center_lat = center_lat,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_apply_geo_figure_options!(fig, options; apply_template = false)
 	_refresh!(fig)
 	return nothing
 end
 
-function _choroplethmapbox_trace(
-	geojson,
-	locations::AbstractVector,
-	z::AbstractVector;
-	featureidkey::AbstractString,
-	colorscale,
-	marker_line_color,
-	marker_line_width,
-	marker_opacity,
-	legend::AbstractString,
-	trace_kwargs,
-)
-	_require_equal_geo_lengths(
-		"choroplethmapbox",
-		:locations => locations,
-		:z => z,
-	)
-	marker_line_width === nothing || _require_bounded_numeric_option(
-		"choroplethmapbox",
-		"marker_line_width",
-		marker_line_width;
-		minimum = 0,
-	)
-	marker_opacity === nothing || _require_bounded_numeric_option(
-		"choroplethmapbox",
-		"marker_opacity",
-		marker_opacity;
-		minimum = 0,
-		maximum = 1,
-	)
-	kw = _trace_keyword_dict(trace_kwargs)
-	kw[:geojson] = geojson
-	kw[:locations] = locations
-	kw[:z] = z
-	isempty(featureidkey) ||
-		(kw[:featureidkey] = String(featureidkey))
-	_set_optional_colorscale!(kw, colorscale)
-	isempty(legend) || (kw[:name] = String(legend))
-
-	marker = _symbol_dict(get(kw, :marker, nothing))
-	marker_changed = false
-	line = _symbol_dict(get(marker, :line, nothing))
-	if marker_line_color isa AbstractString
-		if !isempty(marker_line_color)
-			line[:color] = String(marker_line_color)
-			marker_changed = true
-		end
-	elseif marker_line_color !== nothing
-		line[:color] = marker_line_color
-		marker_changed = true
-	end
-	if marker_line_width !== nothing
-		line[:width] = marker_line_width
-		marker_changed = true
-	end
-	isempty(line) || (marker[:line] = attr(; line...))
-	if marker_opacity !== nothing
-		marker[:opacity] = marker_opacity
-		marker_changed = true
-	end
-	marker_changed && (kw[:marker] = attr(; marker...))
-	return choroplethmapbox(; kw...)
-end
-
 """
-	plot_choroplethmapbox(geojson, locations, z; featureidkey="", colorscale="", style="open-street-map", zoom=0, kwargs...)
+	plot_choroplethmapbox(geojson, locations, z; featureidkey="",
+		colorscale="", marker_line_color=nothing, marker_line_width=nothing,
+		marker_opacity=nothing, legend="", style="open-street-map", zoom=0,
+		center_lon=nothing, center_lat=nothing, title="", width=0, height=0,
+		fontsize=0, show=false, kwargs...)
 
-Shade GeoJSON features on a Mapbox tile map. `locations` and `z` must have the
-same length; `featureidkey` selects the GeoJSON property matched by each
-location. Extra keywords are passed to the Plotly trace.
+Shade GeoJSON features on a legacy Mapbox tile map. The MapLibre-based
+[`plot_choroplethmap`](@ref) is the modern equivalent.
+
+# Arguments
+- `geojson`: a GeoJSON `FeatureCollection` (`Dict`, `attr`, `NamedTuple`) or URL.
+- `locations::AbstractVector`: feature ids matched against `featureidkey`.
+- `z::AbstractVector`: one value per location (same length as `locations`).
+
+# Keywords
+- `featureidkey::AbstractString = ""`: feature property matched by
+  `locations` (`""` = plotly.js default `"id"`).
+- `colorscale::Union{AbstractString,AbstractVector} = ""`: colorscale name or stops.
+- `marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing`:
+  boundary colour, scalar or one per location.
+- `marker_line_width::Union{Nothing,Real,AbstractVector} = nothing`: boundary
+  width in pixels (≥ 0), scalar or one per location.
+- `marker_opacity::Union{Nothing,Real,AbstractVector} = nothing`: fill opacity
+  in [0, 1], scalar or one per location.
+- `legend::AbstractString = ""`: legend name of the trace.
+- `style`, `zoom`, `center_lon`, `center_lat`: map view, as for
+  [`plot_scattermapbox`](@ref).
+- `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_choropleth`](@ref).
+- `kwargs...`: further Plotly `choroplethmapbox` trace attributes.
+
+Per-location vectors must have the `locations` length; mismatches and
+out-of-range values throw `ArgumentError`.
+
+Returns a `Plot`, or a `SyncPlot` when `show=true`.
+
+# Example
+```julia
+square = Dict("type" => "FeatureCollection", "features" => [Dict(
+	"type" => "Feature", "id" => "A", "properties" => Dict(),
+	"geometry" => Dict("type" => "Polygon",
+		"coordinates" => [[[0, 0], [0, 5], [5, 5], [5, 0], [0, 0]]]))])
+fig = plot_choroplethmapbox(square, ["A"], [1.0]; zoom=3, center_lon=2.5, center_lat=2.5)
+```
 """
 function plot_choroplethmapbox(
 	geojson,
@@ -11457,25 +12026,35 @@ function plot_choroplethmapbox(
 	z::AbstractVector;
 	featureidkey::AbstractString = "",
 	colorscale::Union{AbstractString,AbstractVector} = "",
-	marker_line_color::Union{Nothing,AbstractString,AbstractVector} = nothing,
+	marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing,
 	marker_line_width::Union{Nothing,Real,AbstractVector} = nothing,
 	marker_opacity::Union{Nothing,Real,AbstractVector} = nothing,
 	legend::AbstractString = "",
-	style = "open-street-map",
+	style = _DEFAULT_MAPBOX_STYLE,
 	zoom = 0,
 	center_lon = nothing,
 	center_lat = nothing,
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 	kwargs...,
 )
-	trace = _choroplethmapbox_trace(
+	options = _geo_figure_options(
+		"plot_choroplethmapbox";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+	)
+	layout = _mapbox_layout(style, zoom, center_lon, center_lat)
+	trace = _choroplethmap_trace(
 		geojson,
 		locations,
 		z;
+		kind = "choroplethmapbox",
+		constructor = choroplethmapbox,
 		featureidkey = featureidkey,
 		colorscale = colorscale,
 		marker_line_color = marker_line_color,
@@ -11484,30 +12063,44 @@ function plot_choroplethmapbox(
 		legend = legend,
 		trace_kwargs = kwargs,
 	)
-	fig = Plot(
-		trace,
-		_mapbox_layout(
-			title,
-			style,
-			zoom,
-			center_lon,
-			center_lat,
-		),
+	fig = Plot(trace, layout)
+	_apply_geo_figure_options!(fig, options; apply_template = true)
+	return _maybe_show(
+		fig,
+		show,
+		options.width,
+		options.height,
+		options.title,
 	)
-	_apply_basic_plot_options!(
-		fig;
-		title = title,
-		width = width,
-		height = height,
-		fontsize = fontsize,
-	)
-	return _maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_choroplethmapbox!(fig, geojson, locations, z; kwargs...)
+	plot_choroplethmapbox!(fig, geojson, locations, z; featureidkey="",
+		colorscale="", marker_line_color=nothing, marker_line_width=nothing,
+		marker_opacity=nothing, legend="", style=nothing, zoom=nothing,
+		center_lon=nothing, center_lat=nothing, title="", width=0, height=0,
+		fontsize=0, kwargs...)
+	plot_choroplethmapbox!(sf::SubplotFigure, geojson, locations, z; row=nothing, col=nothing, kwargs...)
 
-Append a GeoJSON choropleth trace to an existing figure.
+Append a GeoJSON choroplethmapbox trace (see
+[`plot_choroplethmapbox`](@ref) for the arguments and keywords; `show` is not
+accepted). `fig` is a `Plot`, a `SyncPlot` or a `SubplotFigure`; on a
+`SubplotFigure` the trace goes to the `mapbox` cell given by `row`/`col`
+(pass both; default: the active cell) and `title`/`width`/`height` are
+ignored with a warning.
+
+The map-view keywords default to `nothing`, which keeps the target's current
+value; a target without a style gets the token-free `"open-street-map"`
+style (see [`plot_scattermapbox!`](@ref)).
+
+Throws `ArgumentError` (leaving `fig` unchanged) for invalid input.
+Returns `nothing` (`sf` for a `SubplotFigure`).
+
+# Example
+```julia
+fig = plot_scattermapbox([2.5], [2.5]; zoom=3)
+plot_choroplethmapbox!(fig, square, ["A"], [1.0]; marker_opacity=0.5)
+```
 """
 function plot_choroplethmapbox!(
 	fig,
@@ -11516,7 +12109,7 @@ function plot_choroplethmapbox!(
 	z::AbstractVector;
 	featureidkey::AbstractString = "",
 	colorscale::Union{AbstractString,AbstractVector} = "",
-	marker_line_color::Union{Nothing,AbstractString,AbstractVector} = nothing,
+	marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing,
 	marker_line_width::Union{Nothing,Real,AbstractVector} = nothing,
 	marker_opacity::Union{Nothing,Real,AbstractVector} = nothing,
 	legend::AbstractString = "",
@@ -11524,17 +12117,27 @@ function plot_choroplethmapbox!(
 	zoom = nothing,
 	center_lon = nothing,
 	center_lat = nothing,
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	kwargs...,
 )
+	options = _geo_figure_options(
+		"plot_choroplethmapbox!";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+	)
 	_require_valid_mapbox_view(zoom, center_lon, center_lat)
-	trace = _choroplethmapbox_trace(
+	_require_valid_map_style(style; family = "mapbox")
+	trace = _choroplethmap_trace(
 		geojson,
 		locations,
 		z;
+		kind = "choroplethmapbox",
+		constructor = choroplethmapbox,
 		featureidkey = featureidkey,
 		colorscale = colorscale,
 		marker_line_color = marker_line_color,
@@ -11551,23 +12154,41 @@ function plot_choroplethmapbox!(
 		center_lon = center_lon,
 		center_lat = center_lat,
 	)
-	_apply_basic_plot_options!(
-		fig;
-		title = title,
-		width = width,
-		height = height,
-		fontsize = fontsize,
-		apply_template = false,
-	)
+	_apply_geo_figure_options!(fig, options; apply_template = false)
 	_refresh!(fig)
 	return nothing
 end
 
 """
-	plot_densitymapbox(lon, lat, z; radius=0, colorscale="", style="open-street-map", zoom=0, center_lon=nothing, center_lat=nothing, kwargs...)
+	plot_densitymapbox(lon, lat, z; radius=0, colorscale="",
+		style="open-street-map", zoom=0, center_lon=nothing, center_lat=nothing,
+		title="", width=0, height=0, fontsize=0, show=false, kwargs...)
 
-Density heatmap on a tile map from weighted points `(lon, lat, z)`. `radius`
-sets the influence (in pixels) of each point.
+Density heatmap of weighted points `(lon, lat, z)` on a legacy Mapbox tile
+map. The MapLibre-based [`plot_densitymap`](@ref) is the modern equivalent.
+
+# Arguments
+- `lon::AbstractVector`, `lat::AbstractVector`: point coordinates in degrees.
+- `z::AbstractVector`: point weights (same length as `lon`/`lat`).
+
+# Keywords
+- `radius::Union{Real,AbstractVector} = 0`: influence radius of each point in
+  pixels, scalar or one per point, each ≥ 1. `0` keeps plotly.js' default.
+- `colorscale::Union{AbstractString,AbstractVector} = ""`: colorscale name or stops.
+- `style`, `zoom`, `center_lon`, `center_lat`: map view, as for
+  [`plot_scattermapbox`](@ref).
+- `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_choropleth`](@ref).
+- `kwargs...`: further Plotly `densitymapbox` trace attributes.
+
+Throws `ArgumentError` for mismatched lengths (including a per-point
+`radius`), radii below 1 and invalid map-view or size values.
+
+Returns a `Plot`, or a `SyncPlot` when `show=true`.
+
+# Example
+```julia
+fig = plot_densitymapbox(randn(200), randn(200), rand(200); radius=15, zoom=4)
+```
 """
 function plot_densitymapbox(
 	lon::AbstractVector,
@@ -11575,50 +12196,70 @@ function plot_densitymapbox(
 	z::AbstractVector;
 	radius::Union{Real,AbstractVector} = 0,
 	colorscale::Union{AbstractString,AbstractVector} = "",
-	style = "open-street-map",
+	style = _DEFAULT_MAPBOX_STYLE,
 	zoom = 0,
 	center_lon = nothing,
 	center_lat = nothing,
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	show::Bool = false,
 	kwargs...,
 )
-	_require_equal_geo_lengths(
-		"densitymapbox",
-		:lon => lon,
-		:lat => lat,
-		:z => z,
+	options = _geo_figure_options(
+		"plot_densitymapbox";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
 	)
-	# Scalar zero is this wrapper's backward-compatible sentinel for Plotly's
-	# schema default radius; every emitted radius must satisfy the schema min.
-	radius_is_default =
-		radius isa Real &&
-		!(radius isa Bool) &&
-		radius == 0
-	radius_is_default || _require_bounded_numeric_option(
-		"densitymapbox",
-		"radius",
-		radius;
-		minimum = 1,
+	layout = _mapbox_layout(style, zoom, center_lon, center_lat)
+	trace = _densitymap_trace(
+		lon,
+		lat,
+		z;
+		kind = "densitymapbox",
+		constructor = densitymapbox,
+		radius = radius,
+		colorscale = colorscale,
+		trace_kwargs = kwargs,
 	)
-	kw = _trace_keyword_dict(kwargs)
-	kw[:lon] = lon
-	kw[:lat] = lat
-	kw[:z] = z
-	radius_is_default || (kw[:radius] = radius)
-	_set_optional_colorscale!(kw, colorscale)
-	fig = Plot(densitymapbox(; kw...), _mapbox_layout(title, style, zoom, center_lon, center_lat))
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize)
-	return _maybe_show(fig, show, width, height, title)
+	fig = Plot(trace, layout)
+	_apply_geo_figure_options!(fig, options; apply_template = true)
+	return _maybe_show(
+		fig,
+		show,
+		options.width,
+		options.height,
+		options.title,
+	)
 end
 
 """
-	plot_densitymapbox!(fig, lon, lat, z; kwargs...)
+	plot_densitymapbox!(fig, lon, lat, z; radius=0, colorscale="",
+		style=nothing, zoom=nothing, center_lon=nothing, center_lat=nothing,
+		title="", width=0, height=0, fontsize=0, kwargs...)
+	plot_densitymapbox!(sf::SubplotFigure, lon, lat, z; row=nothing, col=nothing, kwargs...)
 
-Append a densitymapbox trace to an existing figure.
+Append a densitymapbox trace (see [`plot_densitymapbox`](@ref) for the
+arguments and keywords; `show` is not accepted). `fig` is a `Plot`, a
+`SyncPlot` or a `SubplotFigure`; on a `SubplotFigure` the trace goes to the
+`mapbox` cell given by `row`/`col` (pass both; default: the active cell) and
+`title`/`width`/`height` are ignored with a warning.
+
+The map-view keywords default to `nothing`, which keeps the target's current
+value; a target without a style gets the token-free `"open-street-map"`
+style (see [`plot_scattermapbox!`](@ref)).
+
+Throws `ArgumentError` (leaving `fig` unchanged) for invalid input.
+Returns `nothing` (`sf` for a `SubplotFigure`).
+
+# Example
+```julia
+fig = plot_scattermapbox([0.0], [0.0])
+plot_densitymapbox!(fig, randn(50), randn(50), rand(50); radius=20)
+```
 """
 function plot_densitymapbox!(
 	fig,
@@ -11631,36 +12272,32 @@ function plot_densitymapbox!(
 	zoom = nothing,
 	center_lon = nothing,
 	center_lat = nothing,
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	kwargs...,
 )
+	options = _geo_figure_options(
+		"plot_densitymapbox!";
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+	)
 	_require_valid_mapbox_view(zoom, center_lon, center_lat)
-	_require_equal_geo_lengths(
-		"densitymapbox",
-		:lon => lon,
-		:lat => lat,
-		:z => z,
+	_require_valid_map_style(style; family = "mapbox")
+	trace = _densitymap_trace(
+		lon,
+		lat,
+		z;
+		kind = "densitymapbox",
+		constructor = densitymapbox,
+		radius = radius,
+		colorscale = colorscale,
+		trace_kwargs = kwargs,
 	)
-	radius_is_default =
-		radius isa Real &&
-		!(radius isa Bool) &&
-		radius == 0
-	radius_is_default || _require_bounded_numeric_option(
-		"densitymapbox",
-		"radius",
-		radius;
-		minimum = 1,
-	)
-	kw = _trace_keyword_dict(kwargs)
-	kw[:lon] = lon
-	kw[:lat] = lat
-	kw[:z] = z
-	radius_is_default || (kw[:radius] = radius)
-	_set_optional_colorscale!(kw, colorscale)
-	push!(_plot_data(fig), densitymapbox(; kw...))
+	push!(_plot_data(fig), trace)
 	_apply_mapbox_layout_options!(
 		fig;
 		style = style,
@@ -11668,7 +12305,7 @@ function plot_densitymapbox!(
 		center_lon = center_lon,
 		center_lat = center_lat,
 	)
-	_apply_basic_plot_options!(fig; title = title, width = width, height = height, fontsize = fontsize, apply_template = false)
+	_apply_geo_figure_options!(fig, options; apply_template = false)
 	_refresh!(fig)
 	return nothing
 end
