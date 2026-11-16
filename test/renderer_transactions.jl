@@ -887,6 +887,8 @@ end
             expected_operation =
                 operation === :plot_pie ? "Plotly.addTraces" :
                 operation === :set_legend ? "Plotly.relayout" :
+                operation === :extendtraces ? "Plotly.extendTraces" :
+                operation === :prependtraces ? "Plotly.prependTraces" :
                 "Plotly.react"
             @test occursin(
                 expected_operation,
