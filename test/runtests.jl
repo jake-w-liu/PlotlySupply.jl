@@ -4508,8 +4508,10 @@ end
                 1.0,
             )
             call_count = length(state.calls)
-            @test to_image(raw_sf) === nothing
-            @test download_image(raw_sf) === nothing
+            # A windowless SubplotFigure has nothing to render in: it throws
+            # (pointing to savefig) instead of returning `nothing`.
+            @test_throws ArgumentError to_image(raw_sf)
+            @test_throws ArgumentError download_image(raw_sf)
             @test length(state.calls) == call_count
 
             state.open = false
