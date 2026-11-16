@@ -262,7 +262,14 @@ end
 		yticks = [0, 0.5, 1],
 		ytickformat = ".1f",
 	)
-	@test _st_trace(fig)[:type] == "histogram2d"
+	# plotly.js cannot bin a histogram2d on a log axis (it draws nothing), so
+	# the counts are binned in Julia: equal-width bins in decades along x.
+	trace = _st_trace(fig)
+	@test trace[:type] == "heatmap"
+	edges = log10.(trace[:x])
+	@test all(isapprox.(diff(edges), edges[2] - edges[1]; atol = 1e-9))
+	@test first(trace[:x]) <= minimum(x) && last(trace[:x]) >= maximum(x)
+	@test sum(sum(row) for row in trace[:customdata]) == 100
 	@test _st_axis(fig, :xaxis)[:type] == "log"
 	@test _st_axis(fig, :xaxis)[:range] ≈ [0.0, 2.0]   # data units -> log10
 	@test _st_axis(fig, :yaxis)[:range] == [0, 1.5]
@@ -270,11 +277,29 @@ end
 	@test _st_axis(fig, :yaxis)[:tickformat] == ".1f"
 	@test _st_title(_st_axis(fig, :xaxis)[:title]) == "x"
 	@test_throws ArgumentError plot_histogram2d(x, y; xscale = "log", xrange = (0, 10))
+	# Linear colour norm: empty bins are 0 (as in plotly's histogram2d), not gaps.
+	@test all(value -> value isa Real, reduce(vcat, trace[:z]))
+	# Non-positive samples cannot be shown on a log axis and are not counted.
+	signed = _st_trace(plot_histogram2d([-1.0, 0.0, 1.0, 10.0], [1.0, 2.0, 3.0, 4.0]; xscale = "log"))
+	@test sum(sum(row) for row in signed[:customdata]) == 2
+	@test_throws ArgumentError plot_histogram2d([-1.0, 0.0], [1.0, 2.0]; xscale = "log")
+	# Densities divide by each bin's own area in data units.
+	density = _st_trace(plot_histogram2d(x, y; xscale = "log", histnorm = "probability density"))
+	areas = diff(density[:y]) .* permutedims(diff(density[:x]))
+	@test sum(reduce(vcat, permutedims.(density[:customdata])) .* areas) ≈ 1
 
 	target = plot_scatter(1:3, 1:3)
 	plot_histogram2d!(target, x, y; yscale = "log", yrange = (0.01, 1), nbinsx = 5)
 	@test _st_axis(target, :yaxis)[:range] ≈ [-2.0, 0.0]
-	@test _st_trace(target, 2)[:nbinsx] == 5
+	@test _st_trace(target, 2)[:type] == "heatmap"
+	@test length(_st_trace(target, 2)[:x]) - 1 <= 5   # nbinsx stays a maximum
+	# A target whose axis is already logarithmic is binned in Julia too;
+	# switching the axis back to linear uses plotly's histogram2d.
+	log_target = plot_scatter([1, 10], [1, 2]; xscale = "log")
+	plot_histogram2d!(log_target, x, y)
+	@test _st_trace(log_target, 2)[:type] == "heatmap"
+	plot_histogram2d!(log_target, x, y; xscale = "linear")
+	@test _st_trace(log_target, 3)[:type] == "histogram2d"
 
 	# Colour keywords (C20/C21).
 	colored = plot_histogram2d(
@@ -725,4 +750,75 @@ end
 	@test_throws ArgumentError plot_histogram2d!(sp, randn(5), randn(4))
 	@test _st_snapshot(sp.plot) == before
 	@test isempty(scripts)
+end
+
+@testset "stats: histograms on a log binning axis are binned in Julia" begin
+	# plotly.js 2.35 draws nothing for a histogram binned along a log axis, so
+	# the counts are made in Julia and drawn as bars spanning the bins.
+	data = exp.(randn(2000))
+	fig = plot_histogram(data; xscale = "log")
+	trace = _st_trace(fig)
+	@test trace[:type] == "bar"
+	@test trace[:offset] == 0
+	left, right = trace[:x], trace[:x] .+ trace[:width]
+	@test right[1:(end - 1)] ≈ left[2:end]                     # contiguous bins
+	steps = log10.(right) .- log10.(left)
+	@test all(isapprox.(steps, steps[1]; atol = 1e-9))          # equal width in decades
+	@test sum(trace[:y]) == 2000
+	@test first(left) <= minimum(data) && last(right) >= maximum(data)
+	@test trace[:customdata][1] ≈ [left[1], right[1]]
+	@test _st_axis(fig, :xaxis)[:type] == "log"
+	@test length(_st_trace(plot_histogram(data; xscale = "log", nbinsx = 5))[:x]) <= 5
+
+	# Non-positive samples cannot be shown on a log axis and are not counted.
+	@test sum(_st_trace(plot_histogram([-1.0, 0.0, 1.0, 2.0, 30.0]; xscale = "log"))[:y]) == 3
+	@test_throws ArgumentError plot_histogram([-1.0, 0.0]; xscale = "log")
+	@test_throws ArgumentError plot_histogram(["a", "b"]; xscale = "log")
+
+	# Normalizations follow plotly's histnorm / cumulative semantics.
+	density = _st_trace(plot_histogram(data; xscale = "log", histnorm = "probability density"))
+	@test sum(density[:y] .* density[:width]) ≈ 1
+	@test sum(_st_trace(plot_histogram(data; xscale = "log", histnorm = "percent"))[:y]) ≈ 100
+	cumulative = _st_trace(plot_histogram(data; xscale = "log", histnorm = "probability", cumulative = true))
+	@test issorted(cumulative[:y]) && last(cumulative[:y]) ≈ 1
+	@test last(_st_trace(plot_histogram(data; xscale = "log", histnorm = "density", cumulative = true))[:y]) == 2000
+
+	# Explicit bins are linear in data units and must start above 0.
+	explicit = _st_trace(plot_histogram(data; xscale = "log", bins = (0.5, 10, 0.5)))
+	@test explicit[:x] ≈ collect(0.5:0.5:9.5)
+	@test all(explicit[:width] .≈ 0.5)
+	@test sum(explicit[:y]) == count(value -> 0.5 <= value < 10, data)
+	@test_throws ArgumentError plot_histogram(data; xscale = "log", bins = (0, 10, 1))
+
+	# The series of one call share their bins; overlay is translucent and
+	# group mode splits each bin into equal shares in decades.
+	a, b = data, 3 .* exp.(randn(500))
+	overlay = plot_histogram([a, b]; xscale = "log", legend = ["a", "b"])
+	@test _st_trace(overlay, 1)[:x] == _st_trace(overlay, 2)[:x]
+	@test _st_trace(overlay, 1)[:opacity] == 0.6
+	@test _st_layout(overlay)[:barmode] == "overlay"
+	grouped = plot_histogram([a, b]; xscale = "log", barmode = "group")
+	first_series, second_series = _st_trace(grouped, 1), _st_trace(grouped, 2)
+	@test first_series[:x] .+ first_series[:width] ≈ second_series[:x]
+	@test log10.(first_series[:x] .+ first_series[:width]) .- log10.(first_series[:x]) ≈
+		log10.(second_series[:x] .+ second_series[:width]) .- log10.(second_series[:x])
+	@test first_series[:customdata] == second_series[:customdata]   # hover shows the whole bin
+
+	# Horizontal histograms bin along a log y axis; a log COUNT axis keeps
+	# plotly's own histogram.
+	horizontal = _st_trace(plot_histogram(data; yscale = "log", orientation = "h"))
+	@test horizontal[:type] == "bar" && horizontal[:orientation] == "h"
+	@test sum(horizontal[:x]) == 2000
+	@test _st_trace(plot_histogram(data; yscale = "log"))[:type] == "histogram"
+
+	# A mutator target whose binning axis is already logarithmic.
+	target = plot_scatter([1, 10], [1, 2]; xscale = "log")
+	plot_histogram!(target, data)
+	@test _st_trace(target, 2)[:type] == "bar"
+
+	# Styling keywords carry over to the bars.
+	styled = _st_trace(plot_histogram(data; xscale = "log", color = "red", hatch = "/", legend = "s", showlegend = true))
+	@test _st_fields(styled[:marker])[:color] == "red"
+	@test haskey(_st_fields(styled[:marker]), :pattern)
+	@test styled[:name] == "s" && styled[:showlegend] === true
 end

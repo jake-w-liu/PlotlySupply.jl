@@ -5127,6 +5127,120 @@ function _histogram_trace(;
 	return histogram(; kw...)
 end
 
+# Histogram on a logarithmic binning axis, which plotly.js cannot bin (see
+# `_stats_log_axis`): the series of one call are counted in Julia on shared
+# bins and drawn as `bar` traces whose bars span their bins exactly (`offset`
+# 0 and `width` = bin width, in data units). Automatic bins have equal width
+# in decades (plotly's automatic bins over log10 of the pooled samples,
+# `nbins` a maximum); explicit `bins` are linear in data units and must start
+# above 0. Non-positive samples cannot be shown on a log axis and are not
+# counted. `histnorm` and `cumulative` follow plotly's histogram: densities
+# divide by each bin's width in data units, the cumulative sum is taken after
+# normalization, and under `cumulative` the density norms act as their
+# non-density equivalents. With `grouped`, the series sit side by side inside
+# each bin, each taking an equal share of the bin's width in decades.
+function _stats_log_histogram_traces(
+	sample_list,
+	who::AbstractString;
+	orientation::AbstractString,
+	nbins::Int,
+	bins,
+	histnorm::AbstractString,
+	cumulative::Bool,
+	grouped::Bool,
+	colors,
+	names,
+	showlegends,
+	opacity,
+	patterns,
+)
+	series_count = length(sample_list)
+	positions = Vector{Vector{Float64}}(undef, series_count)
+	total_length = 0
+	for (index, samples) in enumerate(sample_list)
+		numeric = _stats_numeric_samples(samples, who, "x")
+		total_length += length(samples)
+		positions[index] = bins === nothing ? Float64[log10(value) for value in numeric if value > 0] : numeric
+	end
+	if bins === nothing
+		pooled = reduce(vcat, positions; init = Float64[])
+		isempty(pooled) && throw(ArgumentError(
+			"$(who): a histogram on a log axis needs at least one positive finite sample.",
+		))
+		start, stop, width = _stats_autobins(pooled, nbins; total = total_length)
+		bin_count = round(Int, (stop - start) / width)
+		edges = exp10.([start + k * width for k in 0:bin_count])
+	else
+		start, stop, width = bins
+		start > 0 || throw(ArgumentError(
+			"$(who): on a log axis `bins` (data units) must start above 0; got start = $(start).",
+		))
+		# plotly keeps every bin whose left edge lies below `stop`.
+		bin_count = max(1, ceil(Int, (stop - start) / width - 1e-9))
+		edges = [start + k * width for k in 0:bin_count]
+	end
+	bin_widths = diff(edges)
+	norm = histnorm
+	if cumulative
+		norm == "density" && (norm = "")
+		norm == "probability density" && (norm = "probability")
+	end
+	horizontal = orientation == "h"
+	value_letter = horizontal ? "x" : "y"
+	hovertemplate = "[%{customdata[0]:.4g}, %{customdata[1]:.4g}): " *
+		"$(cumulative ? "cumulative " : "")$(_STATS_HISTNORM_LABELS[histnorm]) %{$(value_letter)}"
+	customdata = [Any[edges[k], edges[k + 1]] for k in 1:bin_count]
+	traces = Vector{GenericTrace}(undef, series_count)
+	for index in 1:series_count
+		counts = zeros(Float64, bin_count)
+		binned = 0
+		for position in positions[index]
+			bin = _stats_bin_index(position, start, width, bin_count)
+			bin == 0 && continue
+			counts[bin] += 1
+			binned += 1
+		end
+		if norm == "percent"
+			binned > 0 && (counts .*= 100 / binned)
+		elseif norm == "probability"
+			binned > 0 && (counts ./= binned)
+		elseif norm == "density"
+			counts ./= bin_widths
+		elseif norm == "probability density"
+			counts ./= bin_widths
+			binned > 0 && (counts ./= binned)
+		end
+		cumulative && cumsum!(counts, counts)
+		if grouped
+			low = log10.(edges[1:(end - 1)])
+			share = (log10.(edges[2:end]) .- low) ./ series_count
+			left = exp10.(low .+ (index - 1) .* share)
+			right = exp10.(low .+ index .* share)
+		else
+			left = edges[1:(end - 1)]
+			right = edges[2:end]
+		end
+		kw = Dict{Symbol, Any}(
+			:name => String(names[index]),
+			:offset => 0,
+			:width => right .- left,
+			:customdata => customdata,
+			:hovertemplate => hovertemplate,
+		)
+		kw[horizontal ? :y : :x] = left
+		kw[horizontal ? :x : :y] = counts
+		horizontal && (kw[:orientation] = "h")
+		marker = Dict{Symbol, Any}()
+		isempty(colors[index]) || (marker[:color] = String(colors[index]))
+		patterns[index] === nothing || (marker[:pattern] = patterns[index])
+		isempty(marker) || (kw[:marker] = attr(; marker...))
+		showlegends[index] === nothing || (kw[:showlegend] = showlegends[index])
+		opacity === nothing || (kw[:opacity] = opacity)
+		traces[index] = bar(; kw...)
+	end
+	return traces
+end
+
 # Plotly's box/violin point options are a string enum
 # ("all"|"outliers"|"suspectedoutliers") or `false`. A bare `true` is invalid
 # and silently ignored by Plotly, so map it to the sensible "all".
@@ -5310,23 +5424,47 @@ function _stats_histogram!(fig, x, who::AbstractString, options, histogram_optio
 		) : ""
 	trace_opacity = opacity !== nothing ? opacity :
 		overlay ? _STATS_OVERLAY_OPACITY : nothing
-	traces = Vector{GenericTrace}(undef, count)
-	for index in 1:count
-		traces[index] = _histogram_trace(;
-			samples = sample_list[index],
+	horizontal = orientation == "h"
+	log_axis = _stats_log_axis(
+		fig,
+		horizontal ? options.yscale : options.xscale,
+		horizontal ? :yaxis : :xaxis,
+	)
+	if log_axis
+		traces = _stats_log_histogram_traces(
+			sample_list,
+			who;
 			orientation = orientation,
 			nbins = nbins,
 			bins = bins,
 			histnorm = histnorm,
 			cumulative = o.cumulative,
-			color = colors[index],
-			name = names[index],
-			showlegend = showlegends[index],
+			grouped = shared && mode == "group",
+			colors = colors,
+			names = names,
+			showlegends = showlegends,
 			opacity = trace_opacity,
-			pattern = patterns[index],
-			bingroup = group_id,
-			offsetgroup = overlay ? group_id : "",
+			patterns = patterns,
 		)
+	else
+		traces = Vector{GenericTrace}(undef, count)
+		for index in 1:count
+			traces[index] = _histogram_trace(;
+				samples = sample_list[index],
+				orientation = orientation,
+				nbins = nbins,
+				bins = bins,
+				histnorm = histnorm,
+				cumulative = o.cumulative,
+				color = colors[index],
+				name = names[index],
+				showlegend = showlegends[index],
+				opacity = trace_opacity,
+				pattern = patterns[index],
+				bingroup = group_id,
+				offsetgroup = overlay ? group_id : "",
+			)
+		end
 	end
 	_stats_validate_options(fig, who, options)
 
@@ -6234,6 +6372,17 @@ Histogram of the samples `x`. Returns a `PlotlyBase.Plot`, or a
   layout `barmode` becomes `"overlay"` unless the figure already has a bar
   mode. With `barmode = "stack"`/`"group"`/`"relative"` (passed or already set
   on the figure) they are stacked or grouped on the shared bins instead.
+- Log binning axis (`xscale = "log"`, `yscale = "log"` with
+  `orientation = "h"`, or a mutator target whose binning axis is already
+  logarithmic): plotly.js cannot bin there (it draws nothing), so the samples
+  are counted in Julia (numeric data only) and drawn as `bar` traces spanning
+  the bins. Automatic bins have equal width in decades (chosen like plotly's
+  automatic bins, over log10 of the data, shared by the series of one call);
+  explicit `bins` are in data units and must start above 0. Non-positive
+  samples, which a log axis cannot show, are dropped. `histnorm` and
+  `cumulative` behave as in plotly (densities divide by each bin's width in
+  data units); in group mode the series of one call share each bin side by
+  side.
 
 #### Keyword Arguments
 - `nbinsx::Integer = 0`: MAXIMUM number of bins; plotly picks a "nice" bin
@@ -6256,7 +6405,7 @@ Histogram of the samples `x`. Returns a `PlotlyBase.Plot`, or a
 - `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
   `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
   `ytickformat`, `width`, `height`, `fontsize`, `grid = true`, `show = false`:
-  as in [`plot_bar`](@ref). Bins are linear in data units also on a log axis.
+  as in [`plot_bar`](@ref).
 
 #### Example
 ```julia
@@ -10921,20 +11070,43 @@ end
 
 # ── 2D histogram (density) ───────────────────────────────────────────
 
-# Finite numeric samples of one histogram2d axis (the log-norm path bins in
-# Julia, which needs numbers; missing and non-finite samples are skipped).
+# Finite numeric samples of one histogram axis (the Julia-binned path needs
+# numbers; missing and non-finite samples are skipped).
 function _stats_numeric_samples(values, who::AbstractString, name::AbstractString)
 	samples = Float64[]
 	sizehint!(samples, length(values))
 	for value in values
 		value === missing && continue
 		(value isa Real && !(value isa Bool)) || throw(ArgumentError(
-			"$(who): colornorm=:log bins the samples in Julia and needs numeric `$(name)`; " *
-			"got $(repr(value)).",
+			"$(who): a log binning axis (and colornorm=:log) bins the samples in Julia, " *
+			"which needs numeric `$(name)`; got $(repr(value)).",
 		))
 		isfinite(value) && push!(samples, Float64(value))
 	end
 	return samples
+end
+
+# Where a sample falls on its axis for binning: the value on a linear axis,
+# log10 of it on a log axis (where non-positive values cannot be shown).
+# `nothing` for samples that are not binned (missing, non-finite, ≤ 0 on log).
+function _stats_bin_position(value, log_axis::Bool)
+	(value isa Real && !(value isa Bool) && isfinite(value)) || return nothing
+	log_axis || return Float64(value)
+	value > 0 || return nothing
+	return log10(Float64(value))
+end
+
+# Whether a histogram's binning axis is logarithmic after this call: the
+# requested scale, else the figure's current axis type. plotly.js 2.35 cannot
+# bin a histogram or histogram2d on a log axis: automatic bins mix a log-unit
+# bin end with a data-unit size and come out empty (gd.calcdata holds no
+# counts for x = exp.(randn(5000)) on a log x axis), and explicit bins are
+# misread (1-D: 115 bins spanning 2..31 for start=-2, end=2, size=0.25; 2-D:
+# a renderer "Invalid array length" error for start=0, end=30, size=1). Such
+# histograms are binned in Julia instead.
+function _stats_log_axis(fig, scale::AbstractString, key::Symbol)
+	isempty(scale) || return scale == "log"
+	return _axis_type(_plot_layout(fig), key) == "log"
 end
 
 # plotly.js computes `Math.log(v) / Math.LN10`, which differs from `log10` at
@@ -11030,22 +11202,29 @@ const _STATS_HISTNORM_LABELS = Dict(
 	"probability density" => "probability density",
 )
 
-# Julia-side 2-D histogram for colornorm = :log: plotly's histogram2d computes
-# its counts in the browser, where they cannot be log-normed, so the counts
-# are binned here (with plotly's automatic bins) and drawn as a heatmap over
-# the bin edges. Returns the edges and the normalized counts as `z[iy, ix]`.
+# Julia-side 2-D histogram, used where plotly's own histogram2d cannot serve:
+# colornorm = :log (plotly counts in the browser, where the counts cannot be
+# log-normed) and log axes (where plotly bins nothing). The bins are plotly's
+# automatic bins over the bin positions (`_stats_bin_position`): linear in the
+# data on a linear axis, of equal width in decades on a log axis. Returns the
+# bin edges in data units and the normalized counts as `z[iy, ix]`.
 function _stats_histogram2d_counts(
 	x,
 	y,
 	nbinsx::Int,
 	nbinsy::Int,
 	histnorm::String,
-	who::AbstractString,
+	who::AbstractString;
+	xlog::Bool,
+	ylog::Bool,
 )
-	x_samples = _stats_numeric_samples(x, who, "x")
-	y_samples = _stats_numeric_samples(y, who, "y")
+	x_numeric = _stats_numeric_samples(x, who, "x")
+	y_numeric = _stats_numeric_samples(y, who, "y")
+	x_samples = xlog ? Float64[log10(value) for value in x_numeric if value > 0] : x_numeric
+	y_samples = ylog ? Float64[log10(value) for value in y_numeric if value > 0] : y_numeric
+	requirement = (xlog || ylog) ? "finite (and on a log axis positive)" : "finite"
 	(isempty(x_samples) || isempty(y_samples)) && throw(ArgumentError(
-		"$(who): colornorm=:log needs at least one finite (x, y) sample.",
+		"$(who): binning in Julia needs at least one $(requirement) x and y sample.",
 	))
 	x_start, x_stop, x_width = _stats_autobins(x_samples, nbinsx; total = length(x))
 	y_start, y_stop, y_width = _stats_autobins(y_samples, nbinsy; total = length(y))
@@ -11054,29 +11233,33 @@ function _stats_histogram2d_counts(
 	counts = zeros(Float64, ny, nx)
 	total = 0
 	for (x_value, y_value) in zip(x, y)
-		(x_value isa Real && y_value isa Real) || continue
-		(isfinite(x_value) && isfinite(y_value)) || continue
-		ix = _stats_bin_index(Float64(x_value), x_start, x_width, nx)
-		iy = _stats_bin_index(Float64(y_value), y_start, y_width, ny)
+		x_position = _stats_bin_position(x_value, xlog)
+		y_position = _stats_bin_position(y_value, ylog)
+		(x_position === nothing || y_position === nothing) && continue
+		ix = _stats_bin_index(x_position, x_start, x_width, nx)
+		iy = _stats_bin_index(y_position, y_start, y_width, ny)
 		(ix == 0 || iy == 0) && continue
 		counts[iy, ix] += 1
 		total += 1
 	end
 	total > 0 || throw(ArgumentError(
-		"$(who): colornorm=:log needs at least one (x, y) pair whose x and y are both finite.",
+		"$(who): binning in Julia needs at least one (x, y) pair whose x and y are both " *
+		"$(requirement).",
 	))
-	area = x_width * y_width
+	x_edges = [x_start + k * x_width for k in 0:nx]
+	y_edges = [y_start + k * y_width for k in 0:ny]
+	xlog && (x_edges = exp10.(x_edges))
+	ylog && (y_edges = exp10.(y_edges))
 	if histnorm == "percent"
 		counts .*= 100 / total
 	elseif histnorm == "probability"
 		counts ./= total
-	elseif histnorm == "density"
-		counts ./= area
-	elseif histnorm == "probability density"
-		counts ./= total * area
+	elseif histnorm in ("density", "probability density")
+		# Bin areas in data units: equal on linear axes, growing with the
+		# decade on a log axis.
+		counts ./= diff(y_edges) .* permutedims(diff(x_edges))
+		histnorm == "probability density" && (counts ./= total)
 	end
-	x_edges = [x_start + k * x_width for k in 0:nx]
-	y_edges = [y_start + k * y_width for k in 0:ny]
 	return x_edges, y_edges, counts
 end
 
@@ -11104,15 +11287,21 @@ function _stats_histogram2d!(fig, x, y, who::AbstractString, options, color_opti
 	coloraxis = o.coloraxis === nothing ? nothing : _normalize_coloraxis(o.coloraxis, who)
 	colorbar_title = _stats_label(o.colorbar_title)
 
-	if norm === :log
-		x_edges, y_edges, counts = _stats_histogram2d_counts(x, y, nbinsx, nbinsy, histnorm, who)
-		# Empty bins hold no data: they stay blank (matplotlib's LogNorm masks
-		# them too) instead of being floored to the bottom of an explicit crange.
+	xlog = _stats_log_axis(fig, options.xscale, :xaxis)
+	ylog = _stats_log_axis(fig, options.yscale, :yaxis)
+	if norm === :log || xlog || ylog
+		x_edges, y_edges, counts = _stats_histogram2d_counts(
+			x, y, nbinsx, nbinsy, histnorm, who; xlog = xlog, ylog = ylog,
+		)
+		# Under the log norm empty bins hold no data: they stay blank
+		# (matplotlib's LogNorm masks them too) instead of being floored to the
+		# bottom of an explicit crange. The linear norm colours them as 0, as
+		# plotly's own histogram2d does.
 		mapped = _apply_color_norm(
-			map(count -> count > 0 ? count : NaN, counts);
+			norm === :log ? map(count -> count > 0 ? count : NaN, counts) : counts;
 			crange = o.crange,
 			cmid = o.cmid,
-			colornorm = :log,
+			colornorm = norm,
 			levels = o.levels,
 			stops = o.colorscale,
 			ticks = o.colorbar_ticks,
@@ -11205,15 +11394,22 @@ a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when `show = true`.
 #### Data
 `x`, `y::AbstractVector` of equal length (vectors, ranges or views; complex
 values are an `ArgumentError`). By default plotly bins and counts the samples
-(a `histogram2d` trace). With `colornorm = :log` the counts are computed in
-Julia with the bins plotly would choose (numeric data only; missing and
-non-finite samples are skipped) and drawn as a `heatmap` over the bin edges:
-`z` is log10 of the (normalized) count, empty bins are left blank, and the
-hover shows the count.
+(a `histogram2d` trace). Two cases are binned in Julia instead and drawn as a
+`heatmap` over the bin edges, whose hover shows the (normalized) count;
+numeric data only, missing and non-finite samples are skipped:
+- `colornorm = :log`: the bins are those plotly would choose; `z` is log10 of
+  the count and empty bins are left blank.
+- a log x or y axis (`xscale`/`yscale = "log"`, or a mutator target whose axis
+  is already logarithmic), where plotly.js cannot bin a `histogram2d` and
+  would draw nothing: along a log axis the bins have equal width in decades
+  (chosen like plotly's automatic bins, over log10 of the data), and
+  non-positive samples, which a log axis cannot show, are dropped. Densities
+  divide by each bin's area in data units.
 
 #### Keyword Arguments
 - `nbinsx`, `nbinsy::Integer = 0`: MAXIMUM number of bins along x / y; plotly
   picks a "nice" bin width with at most this many bins (`0` = automatic).
+  On a log axis the width is in decades.
 - `histnorm::AbstractString = ""`: `""` (counts), `"percent"`,
   `"probability"`, `"density"` or `"probability density"`.
 - `colorscale = ""`: colormap name (`"viridis"`, `"RdBu_r"`, `:magma`, a
@@ -11235,7 +11431,7 @@ hover shows the count.
 - `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
   `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
   `ytickformat`, `width`, `height`, `fontsize`, `grid = true`, `show = false`:
-  as in [`plot_bar`](@ref). Bins are linear in data units also on a log axis.
+  as in [`plot_bar`](@ref).
 
 #### Example
 ```julia
