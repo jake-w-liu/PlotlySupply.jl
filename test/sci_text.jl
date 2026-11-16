@@ -450,6 +450,21 @@ using Test, PlotlySupply
 		@test length(unique(t.fields[:legend] for t in pl(sm).data)) == 3
 	end
 
+	@testset "D5: no ambiguities, unknown keywords still raise" begin
+		mine = (:title!, :panel_labels!, :legend_entry!, :set_legend!, :subplot_legends!)
+		amb = Test.detect_ambiguities(PlotlySupply; recursive = false)
+		@test isempty(filter(a -> a[1].name in mine || a[2].name in mine, amb))
+		fig = plot_scatter(x, x; legend = "a")
+		sf = grid(1, 2)
+		for target in (fig, sf)
+			@test_throws MethodError title!(target, "t"; not_a_keyword = 1)
+			@test_throws MethodError panel_labels!(target; not_a_keyword = 1)
+			@test_throws MethodError legend_entry!(target, "t"; not_a_keyword = 1)
+			@test_throws MethodError set_legend!(target; not_a_keyword = 1)
+			@test_throws MethodError subplot_legends!(target; not_a_keyword = 1)
+		end
+	end
+
 	@testset "set_default_legend_position!" begin
 		original = get_default_legend_position()
 		try

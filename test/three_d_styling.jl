@@ -408,6 +408,7 @@ end
         marker_size=nothing,
         marker_symbol=nothing,
         linewidth=nothing,
-        showlegend=nothing,
+        # 2.0 (C12): a series without a legend name is hidden from the legend
+        showlegend=false,
     )
 end
