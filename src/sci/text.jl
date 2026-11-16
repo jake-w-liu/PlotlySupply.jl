@@ -56,6 +56,17 @@ end
 # Plotly emits integral sizes as integers in JSON (`12`, not `12.0`).
 _text_number(x::Real) = (isinteger(x) && abs(x) < 2.0^53) ? Int(x) : Float64(x)
 
+# `_label(s)` with its mathtext errors (unbalanced `$`, HTML tags around
+# math, …) reported under the public function's name.
+function _text_checked_label(s::AbstractString, who::AbstractString; align::Symbol = :c)
+	try
+		return _label(s; align = align)
+	catch err
+		err isa ArgumentError || rethrow()
+		throw(ArgumentError("$(who): invalid label $(repr(String(s))): $(err.msg)"))
+	end
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # F15: set_legend! extensions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,7 +181,7 @@ function _legend_options(
 	(legend_target === nothing || legend_target in (:cell, :figure)) || throw(ArgumentError(
 		"$(who): `legend_target` must be :cell, :figure or nothing; got $(repr(legend_target)).",
 	))
-	title_label = isempty(title) ? "" : _label(title)
+	title_label = isempty(title) ? "" : _text_checked_label(title, who)
 	return (
 		position = pos,
 		inset = inset_value,
@@ -194,16 +205,24 @@ function _legend_options(
 end
 
 """
-	_legend_layout_ext(opts)::Dict{Symbol,Any}
+	_legend_layout_ext(opts; span = 1.0)::Dict{Symbol,Any}
 
 Legend fields of the F15/A3 keywords (validated by `_legend_options`):
 `orientation` (explicit, or "h" when `ncols > 0`), `entrywidth` +
-`entrywidthmode` (`1/ncols` "fraction", or px "pixels"), `itemwidth`,
+`entrywidthmode` (`span/ncols` "fraction", or px "pixels"), `itemwidth`,
 `title.text` and `font.size`. Keywords left at their sentinel produce no
 field, so the current value is kept. Nested values are Dicts that
 `_legend_apply_ext!` merges into the existing `title`/`font`.
+
+plotly.js 2.35.2 measures a "fraction" entry width against the width of the
+whole plot area (`_maxWidth = _size.w` for a legend anchored inside the paper),
+so a legend that belongs to one subplot cell passes that cell's width as a
+paper fraction in `span` to get `ncols` columns across the cell.
 """
-function _legend_layout_ext(opts)
+function _legend_layout_ext(opts; span::Real = 1.0)
+	# A degenerate domain (zero width after a manual relayout) falls back to
+	# the whole plot area rather than writing a zero entry width.
+	width = (isfinite(span) && span > 0) ? min(Float64(span), 1.0) : 1.0
 	ext = Dict{Symbol, Any}()
 	if opts.orientation !== nothing
 		ext[:orientation] = opts.orientation
@@ -211,7 +230,7 @@ function _legend_layout_ext(opts)
 		ext[:orientation] = "h"
 	end
 	if opts.ncols > 0
-		ext[:entrywidth] = 1 / opts.ncols
+		ext[:entrywidth] = width / opts.ncols
 		ext[:entrywidthmode] = "fraction"
 	elseif opts.entrywidth > 0
 		ext[:entrywidth] = _text_number(opts.entrywidth)
@@ -260,9 +279,28 @@ function _text_bold(label::String)
 	return replace(label, r"(?<!\\)((?:\\\\)*)\\text\{" => s"\1\\textbf{")
 end
 
-function _text_label(text::AbstractString, align::Symbol, bold::Bool)
-	label = _label(text; align = _text_mathtext_align(align))
+function _text_label(text::AbstractString, align::Symbol, bold::Bool, who::AbstractString)
+	label = _text_checked_label(text, who; align = _text_mathtext_align(align))
 	return bold ? _text_bold(label) : label
+end
+
+# Figure-title offset checks (`offset = (dx, dy)` in px). A centred title has
+# no horizontal padding in plotly.js (pad.l/pad.r apply only to a left/right
+# `xanchor`), and the title cannot move above the top edge of the figure.
+function _text_check_figure_offset(text::AbstractString, align::Symbol, offset)
+	isempty(text) && return nothing
+	dx, dy = offset
+	align === :center && dx != 0 && throw(ArgumentError(
+		"title!: a centred figure title cannot be shifted horizontally (Plotly " *
+		"ignores the padding of centred titles); use `align=:left` or `:right` " *
+		"with `offset`.",
+	))
+	dy > _TEXT_TITLE_TOP_PAD && throw(ArgumentError(
+		"title!: `offset[2] = $(_text_number(dy))` would move the figure title above the " *
+		"top edge of the figure (it sits $(_TEXT_TITLE_TOP_PAD) px below it); use at most " *
+		"$(_TEXT_TITLE_TOP_PAD).",
+	))
+	return nothing
 end
 
 function _text_figure_title!(fig, text, align::Symbol, fontsize::Float64, bold::Bool, offset)
@@ -271,7 +309,7 @@ function _text_figure_title!(fig, text, align::Symbol, fontsize::Float64, bold::
 	if isempty(text)
 		updates[:title_text] = ""
 	else
-		updates[:title_text] = _text_label(text, align, bold)
+		updates[:title_text] = _text_label(text, align, bold, "title!")
 		x, xanchor = align === :left ? (0, "left") : align === :right ? (1, "right") : (0.5, "center")
 		updates[:title_x] = x
 		updates[:title_xanchor] = xanchor
@@ -288,6 +326,8 @@ function _text_figure_title!(fig, text, align::Symbol, fontsize::Float64, bold::
 		fontsize > 0 && (updates[:title_font_size] = _text_number(fontsize))
 	end
 	relayout!(fig; updates...)
+	# A legend already drawn above the axes stays clear of the new title.
+	isempty(text) || _legend_title_clearance!(_cmn_plot(fig))
 	return nothing
 end
 
@@ -327,7 +367,7 @@ function _text_panel_title!(fig, target, text, align::Symbol, fontsize::Float64,
 	x = align === :left ? xdom[1] : align === :right ? xdom[2] : (xdom[1] + xdom[2]) / 2
 	annotation = Dict{Symbol, Any}(
 		:name => name,
-		:text => _text_label(text, align, bold),
+		:text => _text_label(text, align, bold, "title!"),
 		:xref => "paper",
 		:yref => "paper",
 		:x => x,
@@ -414,11 +454,7 @@ function title!(
 	_text_reject_show(show, "title!")
 	a, fs, off = _text_title_args(align, fontsize, offset)
 	(row === nothing && col === nothing) || _cell_target(fig; row = row, col = col, who = "title!")
-	a === :center && off[1] != 0 && !isempty(text) && throw(ArgumentError(
-		"title!: a centred figure title cannot be shifted horizontally (Plotly " *
-		"ignores the padding of centred titles); use `align=:left` or `:right` " *
-		"with `offset`.",
-	))
+	_text_check_figure_offset(text, a, off)
 	_text_figure_title!(fig, text, a, fs, bold, off)
 	_refresh!(fig)
 	return nothing
@@ -436,11 +472,7 @@ function _text_title_sf_impl!(
 )
 	if row === nothing && col === nothing
 		a, fs, off = _text_title_args(align, fontsize, offset)
-		a === :center && off[1] != 0 && !isempty(text) && throw(ArgumentError(
-			"title!: a centred figure title cannot be shifted horizontally (Plotly " *
-			"ignores the padding of centred titles); use `align=:left` or `:right` " *
-			"with `offset`.",
-		))
+		_text_check_figure_offset(text, a, off)
 		_text_figure_title!(_cmn_relayout_target(sf), text, a, fs, bold, off)
 	else
 		(row === nothing) == (col === nothing) || throw(ArgumentError(
@@ -574,7 +606,7 @@ function _text_panel_label_annotation(target, text, position::Symbol, outside::B
 	ydom = target.ydomain
 	annotation = Dict{Symbol, Any}(
 		:name => "plotlysupply:panel_label:$(row):$(col)",
-		:text => _text_label(text, left ? :left : :right, bold),
+		:text => _text_label(text, left ? :left : :right, bold, "panel_labels!"),
 		:xref => "paper",
 		:yref => "paper",
 		:x => left ? xdom[1] : xdom[2],
@@ -765,6 +797,13 @@ function _text_legend_target(legend_target, who::AbstractString)
 end
 
 function _text_proxy(label, who; mode, color, dash, linewidth, marker_symbol, marker_size, marker_color, marker_line_color, marker_line_width, patch, legendgroup, opacity)
+	isempty(label) && throw(ArgumentError(
+		"$(who): `label` is empty, which would be an entry without text; use " *
+		"\" \" for a blank spacer entry.",
+	))
+	# Report mathtext errors under this function's name (`_proxy_trace` labels
+	# the name again; `_label` is idempotent).
+	_text_checked_label(label, who)
 	return _proxy_trace(
 		label;
 		mode = mode,

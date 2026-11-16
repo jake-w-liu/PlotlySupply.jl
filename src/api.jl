@@ -269,7 +269,10 @@ function _resolve_template(template)
 end
 
 function _normalize_legend_position(position)
-	pos_raw = lowercase(String(position))
+	(position isa Symbol || position isa AbstractString) || throw(ArgumentError(
+		"legend position must be a Symbol or a string such as :topright; got $(repr(position)).",
+	))
+	pos_raw = lowercase(strip(String(position)))
 	pos_raw = replace(pos_raw, "-" => "_", " " => "_")
 	pos = Symbol(pos_raw)
 	pos = if pos in (:top_right, :upperright, :upper_right)
@@ -306,9 +309,13 @@ Return the package-wide default Plotly template symbol used by high-level constr
 get_default_template() = _DEFAULT_TEMPLATE[]
 
 """
-	get_default_legend_position()
+	get_default_legend_position() -> Symbol
 
-Return the package-wide default legend position used by high-level constructors.
+Return the package-wide default legend position (a `Symbol` such as
+`:topright`): where constructors and `plot_*!` mutators place a new legend box,
+where [`set_legend!`](@ref) puts a legend that has none yet, and the default of
+`subplots(...; legend_position)`. Change it with
+[`set_default_legend_position!`](@ref).
 """
 get_default_legend_position() = _DEFAULT_LEGEND_POSITION[]
 
@@ -327,14 +334,25 @@ function set_default_template!(template = "plotly_white")
 end
 
 """
-	set_default_legend_position!(position = :topright)
+	set_default_legend_position!(position::Union{Symbol,AbstractString} = :topright) -> Symbol
 
-Set the package-wide default legend position. Accepted symbols are
-`:topright`, `:top`, `:topleft`, `:right`, `:center`, `:left`, `:bottomright`,
-`:bottom`, `:bottomleft`, and the outside placements `:outside_right`,
-`:outside_left`, `:outside_top`, and `:outside_bottom`. Hyphen/space/alias
-forms (e.g. `"top-left"`, `"upper right"`, `:outside`) are normalized, and an
-unrecognized value warns and falls back to `:topright`.
+Set the package-wide default legend position (see
+[`get_default_legend_position`](@ref)). Accepted symbols are `:topright`,
+`:top`, `:topleft`, `:right`, `:center`, `:left`, `:bottomright`, `:bottom`,
+`:bottomleft` (inside the axes) and the outside placements `:outside_right`,
+`:outside_left`, `:outside_top` and `:outside_bottom` (placed as described in
+[`set_legend!`](@ref)). Case, hyphen/space and alias forms (`"top-left"`,
+`"upper right"`, `:outside`, `:left_outside`, …) are normalized; an
+unrecognized name warns and falls back to `:topright`; a value that is neither
+a `Symbol` nor a string throws an `ArgumentError`. Figures that already exist
+are not changed. Returns the normalized position.
+
+# Example
+```julia
+set_default_legend_position!(:outside_bottom)
+fig = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]]; legend = ["a", "b"])  # legend below the axes
+set_default_legend_position!()                                         # back to :topright
+```
 """
 function set_default_legend_position!(position = :topright)
 	_DEFAULT_LEGEND_POSITION[] = _normalize_legend_position(position)
@@ -1046,17 +1064,27 @@ function _legend_write_block!(
 	return nothing
 end
 
+# The figure's own template (`layout.template`): a `Template`, a registered
+# name, or a "+"-compound of registered names (as `relayout!(fig; template =
+# "plotly_dark+xgridoff")` stores it); `nothing` when it has none or the name
+# is unknown.
+function _legend_layout_template(p::Plot)
+	t = get(p.layout.fields, :template, nothing)
+	t isa PlotlyBase.Template && return t
+	if t isa AbstractString || t isa Symbol
+		parts = strip.(split(String(t), '+'))
+		if !isempty(parts) && all(part -> !isempty(part) && Symbol(part) in keys(PlotlyBase.templates), parts)
+			return _resolve_template(join(parts, '+'))
+		end
+	end
+	return nothing
+end
+
 # Template used for derived legend colours: the figure's own template when it
 # has one (so `set_template!(fig, :plotly_dark)` + `set_legend!` gives a dark
 # box), else the active style's template.
-function _legend_figure_template(p::Plot, style)
-	t = get(p.layout.fields, :template, nothing)
-	t isa PlotlyBase.Template && return t
-	if (t isa AbstractString || t isa Symbol) && Symbol(t) in keys(PlotlyBase.templates)
-		return PlotlyBase.templates[Symbol(t)]
-	end
-	return _style_template(style)
-end
+_legend_figure_template(p::Plot, style) =
+	something(_legend_layout_template(p), _style_template(style))
 
 # Default box colours (audit #216/#266): the active PlotStyle's legend frame in
 # the figure's template — the 1.x translucent white box on light templates, a
@@ -1122,6 +1150,129 @@ function _legend_set_showlegend!(p::Plot, showlegend, replace::Bool)
 	elseif any(trace -> trace isa GenericTrace && _trace_will_showlegend(trace), p.data)
 		replace ? (p.layout.fields[:showlegend] = true) : get!(p.layout.fields, :showlegend, true)
 	end
+	return nothing
+end
+
+# ── Figure title above a top legend ──────────────────────────────────────────
+
+# Smallest gap (px) between a figure title and a legend placed above the axes.
+const _LEGEND_TITLE_GAP = 10
+# plotly.js `layout.margin.t` default (px), used when neither the layout nor
+# its template sets one.
+const _PLOTLY_DEFAULT_MARGIN_T = 100
+# plotly.js default size of the root font (px) and the title-font factor
+# (`title.font.size` defaults to `round(1.4 × font.size)`).
+const _PLOTLY_DEFAULT_FONT_SIZE = 12
+const _PLOTLY_TITLE_FONT_FACTOR = 1.4
+
+# A legend box drawn above the plot area: paper-referenced, `y ≥ 1` and
+# anchored at its bottom edge (plotly pushes the top margin for it).
+function _legend_box_above_plot(block)
+	block === nothing && return false
+	d = _symbol_dict(block)
+	get(d, :visible, true) === false && return false
+	get(d, :yref, "paper") == "paper" || return false
+	y = get(d, :y, nothing)
+	(y isa Real && y >= 1) || return false
+	return get(d, :yanchor, nothing) == "bottom"
+end
+
+function _legend_has_box_above_plot(p::Plot)
+	get(p.layout.fields, :showlegend, nothing) === false && return false
+	ids = Set{String}()
+	for trace in p.data
+		trace isa GenericTrace && _trace_will_showlegend(trace) || continue
+		push!(ids, _legend_trace_legend_id(trace))
+	end
+	return any(id -> _legend_box_above_plot(get(p.layout.fields, Symbol(id), nothing)), ids)
+end
+
+_legend_real(x) = (x isa Real && !(x isa Bool) && isfinite(x)) ? Float64(x) : nothing
+
+function _legend_template_layout_value(p::Plot, path::Tuple)
+	t = _legend_layout_template(p)
+	t === nothing && return nothing
+	value = _template_layout_fields(t)
+	for key in path
+		d = _symbol_dict(value)
+		haskey(d, key) || return nothing
+		value = d[key]
+	end
+	return value
+end
+
+# The top margin (px) and the title font size (px) plotly.js will use.
+function _legend_top_margin(p::Plot)
+	m = _legend_real(get(_symbol_dict(get(p.layout.fields, :margin, nothing)), :t, nothing))
+	m === nothing && (m = _legend_real(_legend_template_layout_value(p, (:margin, :t))))
+	return something(m, Float64(_PLOTLY_DEFAULT_MARGIN_T))
+end
+
+function _legend_title_font_size(p::Plot, title::AbstractDict)
+	s = _legend_real(get(_symbol_dict(get(title, :font, nothing)), :size, nothing))
+	s === nothing || return s
+	s = _legend_real(_legend_template_layout_value(p, (:title, :font, :size)))
+	s === nothing || return s
+	root = _legend_real(get(_symbol_dict(get(p.layout.fields, :font, nothing)), :size, nothing))
+	root === nothing && (root = _legend_real(_legend_template_layout_value(p, (:font, :size))))
+	return round(_PLOTLY_TITLE_FONT_FACTOR * something(root, Float64(_PLOTLY_DEFAULT_FONT_SIZE)))
+end
+
+"""
+	_legend_title_clearance(p, title) -> Union{Nothing, Dict{Symbol,Any}}
+
+The fields of `title` (a `layout.title` value) that keep a figure title clear
+of a legend drawn above the plot area, or `nothing` when nothing changes.
+
+plotly.js 2.35.2 (`plots.doAutoMargin`) grows the top margin to the *largest*
+of its pushers, so a title and a legend that both push it overlap. A
+container-referenced title with `automargin=true` whose band (`pad.t` + text
+height + `pad.b`) exceeds `margin.t` instead *reserves* that band, and the
+pushers are laid out below it. The title is therefore given `automargin=true`,
+`pad.t` = 10 px when it has none, and a `pad.b` (the gap between the title and
+the legend) large enough for its band to exceed `margin.t` — measured with the
+font size as a lower bound of the text height (half of it for MathJax titles).
+Paper-referenced titles and titles with an explicit bottom/middle anchor or a
+`y` in the lower half are left as they are. `pad.b` is never reduced.
+"""
+function _legend_title_clearance(p::Plot, title)
+	d = title isa AbstractString ? Dict{Symbol, Any}(:text => String(title)) : _symbol_dict(title)
+	text = get(d, :text, nothing)
+	(text isa AbstractString && !isempty(strip(text))) || return nothing
+	get(d, :yref, "container") == "container" || return nothing
+	y = get(d, :y, "auto")
+	(y == "auto" || (_legend_real(y) !== nothing && y > 0.5)) || return nothing
+	get(d, :yanchor, "auto") in ("auto", "top") || return nothing
+
+	pad = _symbol_dict(get(d, :pad, nothing))
+	pad_t = _legend_real(get(pad, :t, nothing))
+	if pad_t === nothing
+		pad_t = Float64(_TEXT_TITLE_TOP_PAD)
+		pad[:t] = _TEXT_TITLE_TOP_PAD
+	end
+	font_size = _legend_title_font_size(p, d)
+	# Lower bound of the drawn text height: one line of text is at least as
+	# tall as its font size; a MathJax expression can be shorter (e.g. `$x$`).
+	text_floor = occursin('$', text) ? font_size / 2 : font_size
+	needed = max(Float64(_LEGEND_TITLE_GAP), ceil(_legend_top_margin(p) - pad_t - text_floor + 1))
+	pad_b = _legend_real(get(pad, :b, nothing))
+	changed = get(d, :automargin, nothing) !== true || !haskey(d, :pad) ||
+		pad_b === nothing || pad_b < needed || !(title isa AbstractDict || title isa PlotlyBase.PlotlyAttribute)
+	(pad_b === nothing || pad_b < needed) && (pad[:b] = _text_number(needed))
+	changed || return nothing
+	d[:automargin] = true
+	d[:pad] = attr(; pad...)
+	return d
+end
+
+# Apply `_legend_title_clearance` to the figure title of `p` when a legend is
+# drawn above the plot area (audit: an `:outside_top` legend overlapped the title).
+function _legend_title_clearance!(p::Plot)
+	_legend_has_box_above_plot(p) || return nothing
+	title = get(p.layout.fields, :title, nothing)
+	title === nothing && return nothing
+	d = _legend_title_clearance(p, title)
+	d === nothing || (p.layout.fields[:title] = attr(; d...))
 	return nothing
 end
 
@@ -1292,15 +1443,19 @@ function _legend_subplot_assignment(p::Plot)
 end
 
 """
-	_apply_subplot_legends!(p; legend_position, legend_inset, legend_bgcolor, legend_bordercolor, legend_borderwidth, overwrite=false, replace_placement=overwrite, replace_colors=overwrite, fresh=false, xanchor="", yanchor="", ext=nothing)
+	_apply_subplot_legends!(p; legend_position, legend_inset, legend_bgcolor, legend_bordercolor, legend_borderwidth, overwrite=false, replace_placement=overwrite, replace_colors=overwrite, fresh=false, xanchor="", yanchor="", ext_opts=nothing)
 
 Give every subplot of `p` its own legend box (`legend`, `legend2`, … in order
 of first appearance) inside its domain. Secondary/overlaying axes share their
 base cell's legend; figure-legend proxies go to the reserved figure legend.
 Traces without `showlegend` get it from `_trace_will_showlegend`. Existing
 boxes keep their placement and colours unless `replace_placement` /
-`replace_colors` (so `relayout!` customisations survive later appends);
-`fresh` rebuilds them from scratch.
+`replace_colors` (so `relayout!` customisations survive later appends); a box
+is also rebuilt when its id now belongs to traces that had another id (the
+ids were renumbered, e.g. after `deletetraces!`) or to traces that had none
+(a new cell). `fresh` rebuilds every box from scratch. `ext_opts` are
+validated `_legend_options` whose F15 fields (`_legend_layout_ext`) are
+written into every box, with `ncols` scaled to the width of each cell.
 """
 function _apply_subplot_legends!(
 	p::Plot;
@@ -1315,10 +1470,15 @@ function _apply_subplot_legends!(
 	fresh::Bool = false,
 	xanchor::AbstractString = "",
 	yanchor::AbstractString = "",
-	ext = nothing,
+	ext_opts = nothing,
 )
 	order, ids, domains, trace_keys = _legend_subplot_assignment(p)
 
+	# Legend ids whose traces already carried exactly that id (`kept`) or a
+	# different one (`moved`), to tell a box that still belongs to its cell
+	# from one whose id was handed to another cell.
+	kept = Set{String}()
+	moved = Set{String}()
 	has_figure_entries = false
 	for (index, trace) in enumerate(p.data)
 		trace isa GenericTrace || continue
@@ -1328,7 +1488,12 @@ function _apply_subplot_legends!(
 		else
 			key = trace_keys[index]
 			key === nothing && continue
-			trace.fields[:legend] = _legend_id(ids[key])
+			new_id = _legend_id(ids[key])
+			old_id = get(trace.fields, :legend, nothing)
+			if old_id !== nothing
+				string(old_id) == new_id ? push!(kept, new_id) : push!(moved, new_id)
+			end
+			trace.fields[:legend] = new_id
 		end
 		if !haskey(trace.fields, :showlegend)
 			trace.fields[:showlegend] =
@@ -1339,6 +1504,8 @@ function _apply_subplot_legends!(
 	colors = _legend_resolve_colors(p, legend_bgcolor, legend_bordercolor, legend_borderwidth)
 	for key in order
 		xdom, ydom = domains[key]
+		legend_id = _legend_id(ids[key])
+		reassigned = legend_id in moved || !(legend_id in kept)
 		placement = _legend_placement(
 			legend_position,
 			xdom,
@@ -1353,9 +1520,10 @@ function _apply_subplot_legends!(
 			_legend_symbol(ids[key]);
 			placement = placement,
 			colors = colors,
-			ext = ext,
-			replace_placement = replace_placement,
-			replace_colors = replace_colors,
+			ext = ext_opts === nothing ? nothing :
+				_legend_layout_ext(ext_opts; span = xdom[2] - xdom[1]),
+			replace_placement = replace_placement || reassigned,
+			replace_colors = replace_colors || reassigned,
 			fresh = fresh,
 		)
 	end
@@ -1370,6 +1538,7 @@ function _apply_subplot_legends!(
 		)
 	end
 	_legend_set_showlegend!(p, nothing, overwrite)
+	_legend_title_clearance!(p)
 
 	return p
 end
@@ -1432,6 +1601,7 @@ function _apply_figure_legend!(
 		)
 	end
 	_legend_set_showlegend!(p, nothing, explicit)
+	_legend_title_clearance!(p)
 	return p
 end
 
@@ -1527,6 +1697,7 @@ function _apply_default_legend!(
 		any(trace -> trace isa GenericTrace && _trace_will_showlegend(trace), p.data)
 		p.layout.fields[:showlegend] = true
 	end
+	_legend_title_clearance!(p)
 	return p
 end
 
@@ -1542,9 +1713,10 @@ function _legend_apply_plot!(fig, opts; traces::Bool)
 	exists = haskey(p.layout.fields, :legend)
 	existing = _symbol_dict(get(p.layout.fields, :legend, nothing))
 	placed = haskey(existing, :x) || haskey(existing, :y)
-	position = opts.position === nothing ?
-		(placed ? nothing : _DEFAULT_LEGEND_POSITION[]) :
-		opts.position
+	# No `position`: keep the current placement, unless there is none yet or an
+	# `inset` asks for a re-placement (then the package default position, as in 1.x).
+	position = opts.position !== nothing ? opts.position :
+		(!placed || opts.inset_given) ? _DEFAULT_LEGEND_POSITION[] : nothing
 	placement, replace = if position !== nothing
 		(_legend_placement(
 			position,
@@ -1577,6 +1749,7 @@ function _legend_apply_plot!(fig, opts; traces::Bool)
 	)
 	traces && opts.dedupe && _legend_dedupe!(p)
 	_legend_set_showlegend!(p, opts.showlegend, false)
+	_legend_title_clearance!(p)
 	_refresh!(fig)
 	return fig
 end
@@ -1770,7 +1943,7 @@ function _legend_set_cell_mode!(sf::SubplotFigure, p::Plot, opts)
 		fresh = !was_per,
 		xanchor = opts.xanchor,
 		yanchor = opts.yanchor,
-		ext = _legend_layout_ext(opts),
+		ext_opts = opts,
 	)
 	opts.dedupe && _legend_dedupe!(p)
 	opts.showlegend === nothing || (p.layout.fields[:showlegend] = opts.showlegend)
@@ -1816,9 +1989,10 @@ end
 function _legend_set_figure_entry_legend!(sf::SubplotFigure, p::Plot, opts)
 	key = Symbol(_FIGURE_LEGEND_ID)
 	exists = haskey(p.layout.fields, key)
-	position = opts.position === nothing ?
-		(exists ? nothing : :outside_bottom) :
-		opts.position
+	# A new box, or an `inset` without a `position`, uses this legend's
+	# default place below the plot area.
+	position = opts.position !== nothing ? opts.position :
+		(!exists || opts.inset_given) ? :outside_bottom : nothing
 	if position === nothing && _legend_anchors_given(opts)
 		d = _symbol_dict(get(p.layout.fields, key, nothing))
 		merge!(d, _legend_anchor_fields(opts))
@@ -1887,7 +2061,10 @@ function _legend_set_cell!(sf::SubplotFigure, p::Plot, opts, row, col)
 	# Assign ids / defaults first, so the cell box exists with the stored style.
 	_refresh_subplot_legends!(sf, p)
 	key = Symbol(legend_id)
-	if opts.position === nothing && _legend_anchors_given(opts)
+	# An `inset` without a `position` re-places the box at the stored position.
+	position = opts.position !== nothing ? opts.position :
+		opts.inset_given ? sf.legend_position : nothing
+	if position === nothing && _legend_anchors_given(opts)
 		d = _symbol_dict(get(p.layout.fields, key, nothing))
 		merge!(d, _legend_anchor_fields(opts))
 		p.layout.fields[key] = attr(; d...)
@@ -1896,8 +2073,8 @@ function _legend_set_cell!(sf::SubplotFigure, p::Plot, opts, row, col)
 	_legend_write_block!(
 		p,
 		key;
-		placement = opts.position === nothing ? nothing : _legend_placement(
-			opts.position,
+		placement = position === nothing ? nothing : _legend_placement(
+			position,
 			target.xdomain,
 			target.ydomain,
 			opts.inset;
@@ -1906,7 +2083,7 @@ function _legend_set_cell!(sf::SubplotFigure, p::Plot, opts, row, col)
 			yanchor = opts.yanchor,
 		),
 		colors = _legend_call_colors(opts, defaults, true),
-		ext = _legend_layout_ext(opts),
+		ext = _legend_layout_ext(opts; span = target.xdomain[2] - target.xdomain[1]),
 		replace_placement = true,
 		replace_colors = true,
 	)
@@ -1941,6 +2118,7 @@ function _set_subplot_legend_impl!(
 			_legend_set_figure_mode!(sf, p, opts)
 		end
 	end
+	_legend_title_clearance!(p)
 	_refresh!(sf.fig)
 	return sf
 end
@@ -2036,7 +2214,7 @@ function _subplot_legends_impl!(fig; options)
 		overwrite = true,
 		xanchor = opts.xanchor,
 		yanchor = opts.yanchor,
-		ext = _legend_layout_ext(opts),
+		ext_opts = opts,
 	)
 	opts.dedupe && _legend_dedupe!(p)
 	opts.showlegend === nothing || (p.layout.fields[:showlegend] = opts.showlegend)
