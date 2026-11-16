@@ -1244,8 +1244,8 @@ vectors of finite reals of equal length (at least 3 vertices when `closed`,
 2 for an open polyline with `closed = false`). A `fillcolor` fills the shape
 even when it is open, as SVG and matplotlib do.
 
-On a log axis the vertices are data values (positive) placed exactly; the
-edges are straight on screen, as matplotlib draws a polygon on log axes.
+On a log axis the vertices are data values (positive) placed exactly, and
+the edges are straight lines on screen between them.
 
 The other keywords, the return value and additivity are as for
 [`circle!`](@ref).
