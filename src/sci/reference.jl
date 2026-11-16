@@ -1802,7 +1802,7 @@ autoranging.
 - `through`: required point `(X, Y)` on the guide, `X != 0` (both positive on
   log axes).
 - `label::AbstractString = ""`: text placed next to the guide (MathJax
-  `\$...\$` works, e.g. `"\$O(h^2)\$"`).
+  `\$...\$` works, e.g. `"\\\$O(h^2)\\\$"`).
 - `labelpos::Union{Symbol,AbstractString} = :mid`: `:mid` puts the label at
   the visual middle of the interval (the geometric mean of `x` on a log x
   axis) above the guide, on the side where it cannot touch the line;
@@ -1827,7 +1827,7 @@ and `sf` for a `SubplotFigure`.
 h = [0.1, 0.05, 0.025, 0.0125]
 err = 3 .* h .^ 2 .* (1 .+ 0.1 .* h)
 fig = plot_scatter(h, err; mode = "markers", xscale = "log", yscale = "log")
-slope_guide!(fig, 2; x = (0.0125, 0.1), through = (0.1, 0.02), label = "\$O(h^2)\$")
+slope_guide!(fig, 2; x = (0.0125, 0.1), through = (0.1, 0.02), label = "\\\$O(h^2)\\\$")
 ```
 """
 slope_guide!(fig, order::Real; kwargs...) = _ref_slope_guide!(fig, order; kwargs...)
