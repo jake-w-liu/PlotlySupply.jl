@@ -519,7 +519,9 @@ end
             # 2.0 (spec C38): a Template object is accepted as the default.
             @test set_default_template!(custom) === custom
             @test get_default_template() === custom
-            @test plot_scatter(x, y).layout.fields[:template] === custom
+            fig3 = plot_scatter(x, y)
+            @test fig3.layout.fields[:template] == custom
+            @test serialized(fig3.layout)["template"] == serialized(custom)
         finally
             set_default_template!(previous_default)
             if had_previous_custom
