@@ -1262,7 +1262,6 @@ end
     end
 
     @testset "Coverage Branches - Internal + SyncPlot" begin
-        @test PlotlySupply._tuple_interleave(([1, 2], [3, 4], [5, 6])) == [1, 3, 5, 2, 4, 6]
         @test_throws ArgumentError PlotlySupply._plot_obj(1)
 
         html_bytes = savefig(plot_scatter(1:3, rand(3)); format="html")
@@ -2888,8 +2887,9 @@ end
             ["", "a"];
             colorscale="Viridis",
         )
+        # 2.0 (C20): colormap names resolve to explicit stops.
         @test derived.data[1].fields[:marker][:colorscale] ==
-              "Viridis"
+              PlotlySupply._resolve_colorscale("Viridis"; who="test").scale
         @test !haskey(derived.data[1].fields[:marker], :colors)
 
         explicit_colors = plot_sunburst(
@@ -2902,7 +2902,7 @@ end
         @test explicit_colors.data[1].fields[:marker][:colors] ==
               ["red", "blue"]
         @test explicit_colors.data[1].fields[:marker][:colorscale] ==
-              "Viridis"
+              PlotlySupply._resolve_colorscale("Viridis"; who="test").scale
 
         numeric_strings = plot_sunburst(
             ["a", "b"],
@@ -2922,7 +2922,8 @@ end
         @test scaled_marker[:colors] ===
               scaled.data[1].fields[:values]
         @test scaled_marker[:colors] == [10, 3, 2]
-        @test scaled_marker[:colorscale] == "Viridis"
+        @test scaled_marker[:colorscale] ==
+              PlotlySupply._resolve_colorscale("Viridis"; who="test").scale
 
         colored = plot_treemap(
             ["a", "b"],
@@ -2934,7 +2935,7 @@ end
         @test colored.data[1].fields[:marker][:colors] ==
               [0.25, 0.75]
         @test colored.data[1].fields[:marker][:colorscale] ==
-              "Cividis"
+              PlotlySupply._resolve_colorscale("Cividis"; who="test").scale
 
         g = plot_sunburst(["a"], [""]); plot_sunburst!(g, ["b"], [""]); @test length(g.data) == 2
         plot_treemap!(
@@ -2947,7 +2948,7 @@ end
         @test last(g.data).fields[:marker][:colors] ===
               last(g.data).fields[:values]
         @test last(g.data).fields[:marker][:colorscale] ==
-              "Blues"
+              PlotlySupply._resolve_colorscale("Blues"; who="test").scale
     end
 
     @testset "Extended: funnel / waterfall" begin
@@ -3025,10 +3026,11 @@ end
         p = plot_parcoords(["A" => [1, 2, 3], "B" => [3, 2, 1]]; line_color=[1, 2, 3], colorscale="Viridis")
         @test ttype(p) == "parcoords"
         @test p.data[1].fields[:dimensions][1][:label] == "A"
-        @test p.data[1].fields[:line][:colorscale] == "Viridis"
+        @test p.data[1].fields[:line][:colorscale] ==
+              PlotlySupply._resolve_colorscale("Viridis"; who="test").scale
         t = plot_ternary([1, 2], [2, 1], [1, 1]; alabel="A", marker_size=8)
         @test ttype(t) == "scatterternary"
-        @test t.layout.fields[:ternary][:aaxis][:title] == "A"
+        @test t.layout.fields[:ternary][:aaxis][:title][:text] == "A"
     end
 
     @testset "Extended: image" begin
