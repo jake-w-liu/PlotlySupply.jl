@@ -1280,8 +1280,21 @@ end
         json_bytes = savefig(plot_scatter(1:3, rand(3)); format="json")
         @test length(json_bytes) > 0
 
-        # EPS should error with suggestion
-        @test_throws ErrorException savefig(plot_scatter(1:3, rand(3)); format="eps")
+        # EPS (2.0) is converted from the PDF export by Ghostscript; without
+        # Ghostscript it is rejected with install guidance before rendering.
+        has_ghostscript = try
+            PlotlySupply._ghostscript_command()
+            true
+        catch err
+            err isa ArgumentError || rethrow()
+            false
+        end
+        if has_ghostscript
+            eps_bytes = savefig(plot_scatter(1:3, rand(3)); format="eps")
+            @test startswith(String(eps_bytes), "%!PS-Adobe")
+        else
+            @test_throws ArgumentError savefig(plot_scatter(1:3, rand(3)); format="eps")
+        end
 
         # Regression: NaN separators (used by quiver-like traces) should still export.
         p_nan = Plot(scatter(x=[1.0, 2.0, NaN, 3.0], y=[1.0, 2.0, NaN, 3.0]), Layout(title="nan-export"))
@@ -2430,11 +2443,19 @@ end
 
     @testset "CRC: image export validates and streams data URLs" begin
         p = plot_scatter(1:2, 1:2)
+        prepared = PlotlySupply._prepare_renderer_export(p, NamedTuple())
+
+        # Capture a data URL from a fake renderer and decode it, as savefig does.
+        function export_through(io, ec, format)
+            url = PlotlySupply._capture_image_data_url(ec, nothing, "test-export", prepared, format)
+            PlotlySupply._write_image_data_url!(io, url, format)
+            return nothing
+        end
 
         function export_data_url(data_url, format)
             io = IOBuffer()
             ec = (run = (win, js) -> data_url,)
-            PlotlySupply._export_image(io, ec, nothing, "test-export", p, format)
+            export_through(io, ec, format)
             return take!(io)
         end
 
@@ -2488,21 +2509,14 @@ end
         )
             io = IOBuffer()
             ec = (run = (win, js) -> url,)
-            @test_throws ErrorException PlotlySupply._export_image(
-                io,
-                ec,
-                nothing,
-                "test-export",
-                p,
-                format,
-            )
+            @test_throws ErrorException export_through(io, ec, format)
             @test isempty(take!(io))
         end
 
         io = IOBuffer()
         ec = (run = (win, js) -> 42,)
         err = try
-            PlotlySupply._export_image(io, ec, nothing, "test-export", p, "png")
+            export_through(io, ec, "png")
             nothing
         catch caught
             caught

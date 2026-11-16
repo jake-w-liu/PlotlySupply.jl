@@ -8884,6 +8884,9 @@ mutable struct _ExportState
 	pending_windows::Vector{Tuple{Any,Any}}
 	owned_tempdirs::Set{String}
 	owned_pdf_tempdirs::Set{String}
+	# MathJax SVG font baked into the live export window. A window is reused
+	# only while `_mathjax_svg_font()` still returns this value.
+	mathjax_font::Union{Nothing,String}
 end
 
 function _ExportState(; divid::String = "plotlysupply-export")
@@ -8902,6 +8905,7 @@ function _ExportState(; divid::String = "plotlysupply-export")
 		Tuple{Any,Any}[],
 		Set{String}(),
 		Set{String}(),
+		nothing,
 	)
 end
 
@@ -8919,31 +8923,37 @@ function _mathjax_svg_font()
 		"Invalid $(_MATHJAX_SVG_FONT_ENV_VAR) value $(repr(font)): expected a " *
 		"MathJax SVG font name containing only letters, digits, '.', '_', '-'.",
 	)
-	return font
+	return String(font)
 end
 
-function _mathjax_config_script()
+function _validated_mathjax_font(font::AbstractString)
+	match(r"^[A-Za-z0-9._-]+$", font) === nothing && throw(ArgumentError(
+		"invalid MathJax SVG font name $(repr(font)): expected only letters, " *
+		"digits, '.', '_', '-'.",
+	))
+	return String(font)
+end
+
+function _mathjax_config_script(font::AbstractString = _mathjax_svg_font())
+	name = _validated_mathjax_font(font)
 	return "  <script type=\"text/x-mathjax-config\">\n" *
-		"    MathJax.Hub.Config({SVG: {font: \"$(_mathjax_svg_font())\"}});\n" *
+		"    MathJax.Hub.Config({SVG: {font: \"$(name)\"}});\n" *
 		"  </script>"
 end
 
-function _inject_mathjax_svg_font(html::AbstractString)
-	tag = match(r"<script\b[^>]*MathJax\.js[^>]*>", html)
-	tag === nothing && error(
-		"savefig(html): the MathJax <script> tag was not found in the " *
-		"generated HTML; the configured SVG font could not be applied.",
-	)
-	return replace(
-		html,
-		tag.match => _mathjax_config_script() * "\n    " * tag.match;
-		count = 1,
-	)
+# MathJax configuration plus the pinned MathJax 2.7.9 loader, as synchronous
+# tags: plotly.js checks `window.MathJax` when it draws text, so MathJax must
+# be parsed before the first render. Shared by the hidden export window and
+# the standalone HTML export (and usable by any other page that renders LaTeX).
+function _mathjax_head_html(font::AbstractString = _mathjax_svg_font())
+	return _mathjax_config_script(font) * "\n  <script src=\"$(_MATHJAX_CDN_URL)\"></script>"
 end
 
-function _export_window_html(divid::String)
+function _export_window_html(divid::String; font::AbstractString = _mathjax_svg_font())
 	plotlyjs_uri = _plotlyjs_asset_uri()
-	mathjax_config = _mathjax_config_script()
+	match(r"^[A-Za-z0-9_-]+$", divid) === nothing && throw(ArgumentError(
+		"export window div id must contain only letters, digits, '_' and '-'; got $(repr(divid))",
+	))
 	return """
 <!doctype html>
 <html lang="en">
@@ -8957,8 +8967,7 @@ function _export_window_html(divid::String)
 <body>
   <div id="$divid"></div>
   <script src="$plotlyjs_uri" charset="utf-8"></script>
-$mathjax_config
-  <script src="$_MATHJAX_CDN_URL"></script>
+$(_mathjax_head_html(font))
 </body>
 </html>
 """
@@ -9094,6 +9103,7 @@ function _retire_export_window_locked!(
 	state.window = nothing
 	state.tempdir = nothing
 	state.ready = false
+	state.mathjax_font = nothing
 	if tempdir !== nothing
 		_remove_export_tempdir_locked!(
 			state,
@@ -9164,7 +9174,10 @@ function _ensure_export_window_locked!(
 )
 	_register_export_atexit_locked!(state)
 
-	if _export_window_is_alive_locked(state)
+	# The MathJax font is baked into the window page, so a changed
+	# PLOTLYSUPPLY_MATHJAX_SVG_FONT requires a fresh window.
+	font = _mathjax_svg_font()
+	if _export_window_is_alive_locked(state) && state.mathjax_font == font
 		return (state.backend, state.app, state.window, state.divid)
 	end
 	state.window === nothing ||
@@ -9185,7 +9198,7 @@ function _ensure_export_window_locked!(
 	tmpfile = joinpath(tempdir, "index.html")
 	win = nothing
 	try
-		write(tmpfile, _export_window_html(divid))
+		write(tmpfile, _export_window_html(divid; font = font))
 		file_uri = _file_uri(tmpfile)
 		win = Base.invokelatest(() -> ec.Window(
 			app,
@@ -9205,6 +9218,7 @@ function _ensure_export_window_locked!(
 		state.window = win
 		state.tempdir = tempdir
 		state.ready = true
+		state.mathjax_font = font
 		return (ec, app, win, divid)
 	catch
 		if win !== nothing
