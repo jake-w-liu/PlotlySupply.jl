@@ -2451,12 +2451,19 @@ function _s3_quiver3d_traces(
 	))
 	uniform = _s3_uniform_color(color, who)
 	name = String(legend)
+	if !isempty(uniform) && !_is_unset_colorscale(colorscale)
+		# 1.x accepted `color` together with `colorscale` and drew the uniform
+		# colour, so that combination keeps working; the name is still checked.
+		_resolve_colorscale(colorscale; who)
+		@warn "$(who): `colorscale` is ignored because `color` sets one uniform colour."
+		colorscale = ""
+	end
 	colormap = _s3_colormap_requested(; colorscale, crange, cmid, colornorm, levels, colorbar_title,
 		colorbar_ticks, colorbar_ticklabels, coloraxis)
 	if !isempty(uniform) && colormap
 		throw(ArgumentError(
 			"$(who): a uniform `color` cannot be combined with colour-scale keywords " *
-			"(colorscale, crange, cmid, colornorm, levels, colorbar_*, coloraxis).",
+			"(crange, cmid, colornorm, levels, colorbar_*, coloraxis).",
 		))
 	end
 	if style === :cone
@@ -2687,7 +2694,9 @@ const _S3_QUIVER3D_KEYWORDS_DOC = raw"""
   vector of colours is accepted for compatibility and its first entry is
   used. With `""` cones are coloured by their vector norm through the colour
   keywords and arrows take the next colorway colour. Arrows have one colour,
-  so the colour keywords apply to cones only.
+  so the colour keywords apply to cones only. A `color` combined with
+  `colorscale` wins, as in 1.x, with a warning that `colorscale` is ignored;
+  combined with the other colour keywords it throws.
 - `legend::AbstractString = ""`: legend name.
 """
 

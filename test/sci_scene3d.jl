@@ -84,7 +84,8 @@ _t3_syncplot(p, scripts) =
 		# figure with zero margins is framed at distance 1.726.
 		cell = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; width = 900, height = 350)
 		relayout!(cell; margin = attr(l = 0, r = 0, t = 0, b = 0))
-		PlotlySupply._merge_scene_layout_attr!(cell.layout, :scene, attr(domain = attr(x = [0, 0.32], y = [0, 1])))
+		_t3_scene(cell)[:domain] = Dict{Symbol, Any}(:x => [0, 0.32], :y => [0, 1])
+		@test PlotlySupply._s3_viewport(cell, PlotlySupply._s3_scene_target(cell, "test")) == (288.0, 350.0)
 		scene!(cell; aspectratio = (1, 0.25, 0.25))
 		view!(cell; elev = 20, azim = -65)
 		eye = collect(_t3_xyz(_t3_camera(cell)[:eye]))
@@ -417,6 +418,22 @@ _t3_syncplot(p, scripts) =
 		g = plot_scatter3d([0.0], [0.0], [0.0])
 		plot_quiver3d!(g, [0.0], [0.0], [0.0], [0.0], [1.0], [0.0]; style = "arrow")
 		@test length(g.data) == 3
+	end
+
+	@testset "plot_quiver3d color with colorscale keeps 1.x behaviour" begin
+		args = ([0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [1.0, 2.0], [0.0, 0.0], [0.0, 0.0])
+		q = @test_logs (:warn, r"`colorscale` is ignored") plot_quiver3d(args...; color = "red", colorscale = "Viridis")
+		@test q.data[1].fields[:colorscale] == [[0, "red"], [1, "red"]]
+		@test q.data[1].fields[:showscale] === false
+		g = plot_scatter3d([0.0], [0.0], [0.0])
+		@test_logs (:warn, r"`colorscale` is ignored") plot_quiver3d!(g, args...; color = :blue, colorscale = "viridis")
+		@test g.data[end].fields[:colorscale] == [[0, "blue"], [1, "blue"]]
+		a = @test_logs (:warn, r"`colorscale` is ignored") plot_quiver3d(args...; style = :arrow, color = "red",
+			colorscale = "viridis")
+		@test _t3_fields(a.data[1].fields[:line])[:color] == "red"
+		@test_throws ArgumentError plot_quiver3d(args...; color = "red", colorscale = "NoSuchMap")
+		@test_throws ArgumentError plot_quiver3d(args...; color = "red", crange = [0, 1])
+		@test_throws ArgumentError plot_quiver3d(args...; color = "red", coloraxis = :shared)
 	end
 
 	@testset "plot_surface colour, opacity, lighting and edges (C24, C28)" begin
