@@ -432,6 +432,19 @@ end
 # object (lazy payloads keep their identity).
 _s3_plottable(values) = (values isa AbstractArray && eltype(values) <: Bool) ? UInt8.(values) : values
 
+# Every element must be a real number (non-finite values are allowed and
+# become gaps or holes); arrays typed with a real element type need no scan.
+function _s3_real_elements(values, who::AbstractString, name::AbstractString)
+	T = eltype(values)
+	(T <: Real && !(T <: Bool) && T !== Union{}) && return nothing
+	for (index, value) in pairs(values)
+		(value isa Real) || throw(ArgumentError(
+			"$(who): `$(name)[$(index)]` must be a real number; got $(repr(value)).",
+		))
+	end
+	return nothing
+end
+
 function _s3_all_finite(values, who::AbstractString, name::AbstractString)
 	for (index, value) in pairs(values)
 		(_s3_is_real(value) && isfinite(value)) || throw(ArgumentError(
@@ -613,6 +626,133 @@ end
 
 #endregion
 
+#region Docstring building blocks
+
+# Every 3-D docstring lists each keyword with its type, default and meaning.
+# The keyword groups shared by several functions are generated here; the
+# function-specific parts are raw strings, so `$…$` and TeX macros in them
+# need no escaping.
+
+const _S3_TEXT3D_DOC = raw"""Scene axis titles and tick labels are drawn by WebGL, which cannot typeset TeX: `$…$` is converted to Unicode and `<b>`/`<i>`/`<sub>`/`<sup>` (`$x_1$` gives x with a subscript 1, `$\mathbf{b}$` a bold b, `$\lambda^2$` λ with a superscript 2, `$\alpha$` α); an unsupported macro is shown as written and warns once."""
+
+const _S3_OPACITY_LINE_DOC = raw"""translucent scatter3d lines were observed to make other 3-D traces in the same scene vanish, so a line with `opacity < 1` is drawn in the opaque colour it would have over the scene background (`paper_bgcolor` and `scene.bgcolor`, from the layout or the template). Over coloured faces this is an approximation."""
+
+function _s3_scene_doc(constructor::Bool, aspectmode::AbstractString)
+	if constructor
+		return """
+		# Scene keywords
+
+		- `xlabel::AbstractString = ""`, `ylabel::AbstractString = ""`,
+		  `zlabel::AbstractString = ""`: axis titles (`""` gives "x", "y" and "z").
+		  $(_S3_TEXT3D_DOC)
+		- `xrange = [0, 0]`, `yrange = [0, 0]`, `zrange = [0, 0]`: axis ranges
+		  `[lo, hi]` (vector or tuple) in data units; `[0, 0]` is automatic.
+		- `aspectmode = $(aspectmode)`: "auto", "cube", "data" or "manual" (set the
+		  ratios with [`scene!`](@ref)).
+		- `perspective::Bool = true`: `false` selects an orthographic projection.
+		- `grid::Bool = true`: `false` hides the grid lines.
+		- `showaxis::Bool = true`: `false` hides the axes.
+		- `view = nothing`: `(elev, azim)` camera angles in degrees, as
+		  [`view!`](@ref).
+		- `title::AbstractString = ""`: figure title (TeX is typeset by MathJax).
+		- `width::Real = 0`, `height::Real = 0`: figure size in px (0: automatic).
+		- `fontsize::Real = 0`: base font size (0: the template's).
+		- `show::Bool = false`: open the figure in an Electron window and return the
+		  `SyncPlot` instead of the `Plot`.
+		"""
+	end
+	return """
+	# Scene keywords
+
+	Keywords left at their defaults keep the existing scene.
+
+	- `xlabel::AbstractString = ""`, `ylabel::AbstractString = ""`,
+	  `zlabel::AbstractString = ""`: new axis titles. $(_S3_TEXT3D_DOC)
+	- `xrange = [0, 0]`, `yrange = [0, 0]`, `zrange = [0, 0]`: axis ranges
+	  `[lo, hi]` in data units, also on a logarithmic scene axis.
+	- `aspectmode = nothing`: "auto", "cube", "data" or "manual".
+	- `perspective::Union{Nothing, Bool} = nothing`: `true`/`false` selects a
+	  perspective/orthographic projection.
+	- `grid::Union{Nothing, Bool} = nothing`: show or hide the grid lines.
+	- `showaxis::Union{Nothing, Bool} = nothing`: show or hide the axes.
+	- `view = nothing`: `(elev, azim)` camera angles in degrees, as
+	  [`view!`](@ref).
+	- `title::AbstractString = ""`, `width::Real = 0`, `height::Real = 0`,
+	  `fontsize::Real = 0`: figure title, size in px and base font size. On a
+	  `SubplotFigure` cell `title`, `width` and `height` belong to the whole
+	  figure and are ignored with a warning.
+	- `row::Integer`, `col::Integer` (`SubplotFigure` only; default: the active
+	  cell): the target cell, which must be a 3-D scene
+	  (`Spec(kind = "scene")`); it becomes the active cell.
+	- `secondary_y::Bool = false` (`SubplotFigure` only): accepted for
+	  uniformity with the 2-D mutators; a scene has no secondary y axis, so
+	  `true` throws.
+
+	`show` is a constructor keyword: passing it to a mutator throws an
+	`ArgumentError`, as does any unknown keyword.
+	"""
+end
+
+function _s3_color_doc(colorscale_default::AbstractString, note::AbstractString)
+	text = """
+	# Colour keywords
+
+	- `colorscale = $(colorscale_default)`: the colormap: a name (plotly's
+	  "Viridis", matplotlib's "viridis", "plasma", "coolwarm", …; a "_r" suffix
+	  reverses it), a vector of colours, `(t, colour)` stops or a `ColorScheme`.
+	  Unknown names throw.
+	- `crange = [0, 0]`: colour limits `[lo, hi]`; `[0, 0]` is automatic.
+	- `cmid = nothing`: the value at the middle of the colormap (diverging data).
+	- `colornorm = :linear`: `:linear` or `:log` (log10 colour mapping with
+	  decade ticks).
+	- `levels = nothing`: k+1 increasing boundaries for k discrete colour bands.
+	- `showscale::Union{Nothing, Bool} = nothing`: show or hide the colorbar
+	  (`nothing`: plotly's default).
+	- `colorbar_title::AbstractString = ""`: colorbar title (TeX is typeset by
+	  MathJax).
+	- `colorbar_ticks = nothing`, `colorbar_ticklabels = nothing`: colorbar tick
+	  positions (data values) and their labels.
+	- `coloraxis = nothing`: `:shared` (= "coloraxis") or "coloraxis2", …:
+	  traces on the same colour axis share one colour scale and colorbar, and the
+	  scale keywords are written to `layout.<coloraxis>`.
+	"""
+	return isempty(note) ? text : text * "\n" * note * "\n"
+end
+
+const _S3_CONSTRUCTOR_RETURNS_DOC = "# Returns\n\nThe new `Plot`, or its `SyncPlot` window with `show = true`."
+const _S3_MUTATOR_RETURNS_DOC = "# Returns\n\n`nothing` when `fig` is a `Plot` or `SyncPlot` (updated in place); `sf` when it is a `SubplotFigure`."
+
+# Assemble a docstring: `head` (signatures and description), the function's
+# own `keywords`, the colour keywords (when `colour`), the scene keywords,
+# the return value and a runnable `example`.
+function _s3_doc(
+	head::AbstractString,
+	keywords::AbstractString;
+	constructor::Bool,
+	example::AbstractString,
+	colour::Bool = false,
+	colorscale_default::AbstractString = "\"\"",
+	colour_note::AbstractString = "",
+	aspectmode::AbstractString = "\"auto\"",
+)
+	parts = String[rstrip(head)]
+	isempty(strip(keywords)) || push!(parts, "# Keywords\n\n" * rstrip(keywords))
+	colour && push!(parts, rstrip(_s3_color_doc(colorscale_default, colour_note)))
+	push!(parts, rstrip(_s3_scene_doc(constructor, aspectmode)))
+	push!(parts, constructor ? _S3_CONSTRUCTOR_RETURNS_DOC : _S3_MUTATOR_RETURNS_DOC)
+	push!(parts, "# Examples\n\n```julia\nusing PlotlySupply\n" * rstrip(example) * "\n```")
+	return join(parts, "\n\n") * "\n"
+end
+
+# The common introduction of a mutator docstring.
+_s3_mutator_head(signatures::AbstractString, what::AbstractString, constructor::AbstractString) =
+	rstrip(signatures) * "\n\n" *
+	"Add $(what) to `fig`: a `Plot`, a `SyncPlot` (its window is updated) or a " *
+	"`SubplotFigure`, whose 3-D scene cell is chosen with `row`/`col`. Takes the " *
+	"keywords of [`$(constructor)`](@ref) except `show`, and the same data layout."
+
+#endregion
+
 #region Colour keywords (C20/C21)
 
 struct _S3ColorSpec
@@ -707,9 +847,24 @@ end
 
 #region Default colours and the scene background
 
+# A SubplotFigure cell mutation runs the mutator on an empty staging figure
+# (`_subplot_delegate_mutator_impl!`). This context, set by `_s3_subplot!` for
+# the duration of that call, lets the mutator see the real figure: default
+# trace colours count the traces already in it, and translucent lines are
+# blended over the target cell's scene background.
+struct _S3CellContext
+	plot::Plot
+	scenekey::Symbol
+	offset::Int
+end
+
+const _S3_CELL_CONTEXT = Base.ScopedValues.ScopedValue{Union{Nothing, _S3CellContext}}(nothing)
+
 # Default colour of the `index`-th trace: from `fig`'s colorway/template, or
 # from the package default template when `fig` is `nothing` (constructors).
 function _s3_default_color(fig, index::Integer)
+	context = _S3_CELL_CONTEXT[]
+	context === nothing || return _default_trace_color(context.plot, context.offset + index)
 	source = fig === nothing ? Layout(template = _resolve_template(_DEFAULT_TEMPLATE[])) : fig
 	return _default_trace_color(source, index)
 end
@@ -718,7 +873,15 @@ end
 # then template) composited over `paper_bgcolor` (layout, then template, then
 # white). Used to pre-blend translucent 3-D lines (ADDENDUM B2).
 function _s3_scene_background(fig, scenekey::Symbol)
-	layout = fig === nothing ? Layout(template = _resolve_template(_DEFAULT_TEMPLATE[])) : _plot_layout(fig)
+	context = _S3_CELL_CONTEXT[]
+	if context !== nothing
+		layout = context.plot.layout
+		scenekey = context.scenekey
+	elseif fig === nothing
+		layout = Layout(template = _resolve_template(_DEFAULT_TEMPLATE[]))
+	else
+		layout = _plot_layout(fig)
+	end
 	template = _template_object(get(layout.fields, :template, nothing))
 	template_layout = template === nothing ? nothing : template.layout
 	paper = get(layout.fields, :paper_bgcolor, nothing)
@@ -971,31 +1134,57 @@ function _s3_scene_target(fig, who::AbstractString; row = nothing, col = nothing
 	return target
 end
 
-"""
+@doc raw"""
 	view!(fig; elev = 30, azim = -60, distance = :auto, up = :z, projection = nothing,
 	      zoom = 1, row = nothing, col = nothing) -> fig
 
-Point the camera of a 3-D scene like matplotlib's `view_init`: `elev` is the
-elevation above the horizontal plane and `azim` the azimuth from the +x axis
-towards +y, both in degrees. The eye sits at
-`distance · (cosd(elev)cosd(azim), cosd(elev)sind(azim), sind(elev))` from the
-camera centre with the camera's up vector along +z; near-vertical views
-(`|elev| ≥ 89.9`) use the horizontal up vector `∓(cosd(azim), sind(azim), 0)`.
+Point the camera of a 3-D scene like matplotlib's `view_init(elev, azim)`. The
+eye sits at `distance * (cosd(elev)cosd(azim), cosd(elev)sind(azim), sind(elev))`
+from the camera centre, looking at it, with the vertical axis pointing up;
+near-vertical views (`|elev| ≥ 89.9`) use the horizontal up vector
+`∓(cosd(azim), sind(azim), 0)`. `fig` is a `Plot` or `SyncPlot` with a 3-D
+scene, or a `SubplotFigure`. Every 3-D constructor and mutator also accepts
+`view = (elev, azim)`.
 
-- `distance = :auto` frames the scene box tightly in a perspective view, using
-  the scene's size in the figure (`layout.width`/`height`, else 700×500;
-  `layout.margin`; the cell domain). For "auto"/"data" aspect modes the data
-  proportions are pinned with `aspectmode = "manual"` so the framing stays
-  correct. A number sets the distance in plotly's normalised scene units.
-- `zoom > 0` divides the distance (perspective); in an orthographic scene, whose
-  image does not depend on the distance, it scales the scene box instead.
-- `up = :x`/`:y` makes that axis vertical (matplotlib `vertical_axis`).
-- `projection = "perspective"`/`"orthographic"` switches the projection;
-  `nothing` keeps the current one.
-- `row`/`col` select the scene of a `SubplotFigure` cell (default: the active
-  cell). Only that scene's camera changes.
+# Keywords
 
-Returns the figure (`sf` for a `SubplotFigure`).
+- `elev::Real = 30`: elevation above the horizontal plane, in degrees.
+- `azim::Real = -60`: azimuth from the +x axis towards +y, in degrees.
+- `distance = :auto`: `:auto` frames the scene box tightly in a perspective
+  view, using the scene's size in the figure (`layout.width`/`height`, else
+  700×500 px, `layout.margin` and the cell domain); for the "auto" and "data"
+  aspect modes the data proportions are then pinned with
+  `aspectmode = "manual"` so the framing stays right. A positive number is the
+  distance in plotly's normalised scene units.
+- `up = :z`: the vertical axis, `:x`, `:y` or `:z` (matplotlib
+  `vertical_axis`).
+- `projection = nothing`: "perspective" or "orthographic"; `nothing` keeps the
+  scene's projection.
+- `zoom::Real = 1`: positive; divides the distance of a perspective view. An
+  orthographic image does not depend on the distance, so there `zoom` scales
+  the scene box (the aspect ratios) instead.
+- `row::Integer`, `col::Integer` (`SubplotFigure` only; default: the active
+  cell): the scene to point. Only that scene's camera changes.
+
+Unknown keywords throw an `ArgumentError`.
+
+# Returns
+
+`fig` (`sf` for a `SubplotFigure`).
+
+# Examples
+
+```julia
+using PlotlySupply
+fig = plot_surface(rand(10, 20))
+view!(fig; elev = 20, azim = 30)
+view!(fig; elev = 90, azim = -90, projection = "orthographic")   # top view, +y up
+
+sf = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene")])
+plot_surface!(sf, rand(5, 5); row = 1, col = 1)
+plot_surface!(sf, rand(5, 5); row = 1, col = 2)
+view!(sf; row = 1, col = 2, elev = 10, azim = 0, zoom = 1.2)
+```
 """
 function view!(
 	fig;
@@ -1082,32 +1271,59 @@ function _s3_aspectratio(ratio, who::AbstractString)
 	return attr(x = a[1], y = a[2], z = a[3])
 end
 
-"""
-	scene!(fig; aspectratio = nothing, aspectmode = nothing, nticks = 0,
-	       showbackground = nothing, backgroundcolor = "", showgrid = nothing,
-	       showticklabels = nothing, showaxis = nothing,
-	       xlabel = "", ylabel = "", zlabel = "",
-	       xrange = [0, 0], yrange = [0, 0], zrange = [0, 0],
-	       xticks = nothing, yticks = nothing, zticks = nothing,
-	       xticklabels = nothing, yticklabels = nothing, zticklabels = nothing,
-	       row = nothing, col = nothing) -> fig
+@doc raw"""
+	scene!(fig; kwargs...) -> fig
 
-Style one 3-D scene (matplotlib `set_box_aspect`, `set_axis_off`, pane and tick
-settings). Only the target scene changes (`row`/`col` select a `SubplotFigure`
-cell, default the active cell); unset keywords leave the scene as it is.
+Style one 3-D scene: its aspect ratio (matplotlib `set_box_aspect`), axes,
+grid, panes and ticks (`set_axis_off`, `set_xticks`, …). Only the target scene
+changes, and keywords left at their defaults leave it as it is. `fig` is a
+`Plot` or `SyncPlot` with a 3-D scene, or a `SubplotFigure`.
 
-- `aspectratio = (x, y, z)` (positive) sets `aspectmode = "manual"`;
-  `aspectmode` is "auto", "cube", "data" or "manual".
-- `nticks > 0`, `showgrid`, `showticklabels`, `showaxis` (axis visibility),
-  `showbackground` and `backgroundcolor` (the panes; a colour also turns the
-  panes on unless `showbackground = false`) apply to all three axes.
-- `xlabel`…, `xticklabels`…: 3-D text is drawn by WebGL, which cannot typeset
-  TeX; `\$…\$` is converted to Unicode/HTML (see `_label3d`).
-- `xrange`… (`[0, 0]` = automatic) are data values, also on log axes.
-- `xticks`… place ticks at the given data values; `xticklabels` (same length)
-  name them.
+# Keywords
 
-Returns the figure (`sf` for a `SubplotFigure`).
+- `aspectratio = nothing`: `(x, y, z)` or `(x = …, y = …, z = …)`, positive;
+  sets `aspectmode = "manual"`.
+- `aspectmode = nothing`: "auto", "cube", "data" or "manual".
+- `nticks::Integer = 0`: about how many ticks each axis gets (0: automatic).
+- `showbackground::Union{Nothing, Bool} = nothing`: show or hide the axis
+  panes.
+- `backgroundcolor = ""`: colour of the panes; it also turns them on unless
+  `showbackground = false`.
+- `showgrid::Union{Nothing, Bool} = nothing`: show or hide the grid lines.
+- `showticklabels::Union{Nothing, Bool} = nothing`: show or hide the tick
+  labels.
+- `showaxis::Union{Nothing, Bool} = nothing`: show or hide the axes.
+- `xlabel::AbstractString = ""`, `ylabel::AbstractString = ""`,
+  `zlabel::AbstractString = ""`: axis titles. Scene axis titles and tick
+  labels are drawn by WebGL, which cannot typeset TeX: `$…$` is converted to
+  Unicode and `<b>`/`<i>`/`<sub>`/`<sup>` (`$x_1$` gives x with a subscript
+  1, `$\mathbf{b}$` a bold b, `$\lambda^2$` λ with a superscript 2); an
+  unsupported macro is shown as written and warns once.
+- `xrange = [0, 0]`, `yrange = [0, 0]`, `zrange = [0, 0]`: axis ranges
+  `[lo, hi]` in data units, also on a logarithmic axis (`[0, 0]`: unchanged).
+- `xticks = nothing`, `yticks = nothing`, `zticks = nothing`: tick positions
+  (data values).
+- `xticklabels = nothing`, `yticklabels = nothing`, `zticklabels = nothing`:
+  labels for those ticks (strings, one per tick; TeX is converted as for the
+  titles).
+- `row::Integer`, `col::Integer` (`SubplotFigure` only; default: the active
+  cell): the scene to style.
+
+Unknown keywords throw an `ArgumentError`.
+
+# Returns
+
+`fig` (`sf` for a `SubplotFigure`).
+
+# Examples
+
+```julia
+using PlotlySupply
+fig = plot_surface(rand(20, 10))
+scene!(fig; aspectratio = (2, 1, 0.5), showbackground = false,
+       xticks = [0, 10, 19], xticklabels = ["\$0\$", "\$\\pi\$", "\$2\\pi\$"],
+       zlabel = "\$\\lambda^2\$")
+```
 """
 function scene!(
 	fig;
@@ -1205,20 +1421,46 @@ const _S3_ANNOTATION_PASSTHROUGH = (
 	:startstandoff, :textangle, :valign, :visible, :width, :xshift, :yshift,
 )
 
-"""
-	annotate!(fig, x::Real, y::Real, z::Real, text::AbstractString; row = nothing, col = nothing,
-	          fontsize = 0, color = "", xanchor = "center", yanchor = "middle",
-	          showarrow = false, kwargs...) -> fig
+@doc raw"""
+	annotate!(fig, x::Real, y::Real, z::Real, text::AbstractString; kwargs...) -> fig
 
-Label the point `(x, y, z)` (data coordinates) of a 3-D scene. The label is a
-scene annotation, so it stays attached to the point when the scene rotates, and
-TeX in `\$…\$` is typeset by MathJax. Calling again with the same point and
-text replaces that label instead of adding a copy. `row`/`col` select a
-`SubplotFigure` cell (default: the active cell). `fontsize`/`color` style the
-text; extra keywords are passed to plotly (`ax`, `ay`, `arrowcolor`,
-`arrowhead`, `bgcolor`, `textangle`, `xshift`, `yshift`, …).
+Label the point `(x, y, z)` of a 3-D scene with `text`. The coordinates are
+data values, also on logarithmic scene axes. The label is a scene annotation:
+it stays attached to the point while the scene rotates, and TeX in `$…$` is
+typeset by MathJax (unlike the WebGL-drawn axis titles). Annotating the same
+point with the same text again replaces that label instead of adding a copy.
+`fig` is a `Plot` or `SyncPlot` with a 3-D scene, or a `SubplotFigure`.
 
-Returns the figure (`sf` for a `SubplotFigure`).
+# Keywords
+
+- `row::Integer`, `col::Integer` (`SubplotFigure` only; default: the active
+  cell): the scene to annotate.
+- `fontsize::Real = 0`: font size in px (0: the figure's).
+- `color = ""`: text colour.
+- `xanchor = "center"`: "auto", "left", "center" or "right".
+- `yanchor = "middle"`: "auto", "top", "middle" or "bottom".
+- `showarrow::Bool = false`: draw an arrow from the label to the point (the
+  label is then offset by `ax`, `ay` px).
+- Other plotly scene-annotation attributes are passed through: `align`,
+  `arrowcolor`, `arrowhead`, `arrowside`, `arrowsize`, `arrowwidth`, `ax`,
+  `ay`, `bgcolor`, `bordercolor`, `borderpad`, `borderwidth`,
+  `captureevents`, `height`, `hovertext`, `opacity`, `standoff`,
+  `startarrowhead`, `startarrowsize`, `startstandoff`, `textangle`, `valign`,
+  `visible`, `width`, `xshift`, `yshift`. Any other keyword throws an
+  `ArgumentError`.
+
+# Returns
+
+`fig` (`sf` for a `SubplotFigure`).
+
+# Examples
+
+```julia
+using PlotlySupply
+fig = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; mode = "markers")
+annotate!(fig, 1.0, 1.0, 1.0, "\$\\mathbf{p}_1\$"; fontsize = 16, color = "red")
+annotate!(fig, 0.0, 0.0, 0.0, "origin"; showarrow = true, ax = 30, ay = -30)
+```
 """
 function annotate!(
 	fig,
@@ -1244,10 +1486,21 @@ function annotate!(
 	)
 	_require_size_option(fontsize, who, "fontsize")
 	text_color = _s3_color(color, who, "color")
+	layout = _cmn_layout(fig)
+	# plotly.js places scene annotations in axis range units, which are log10
+	# exponents on a logarithmic axis; the point is given in data units.
+	position = ntuple(3) do d
+		axis = (:xaxis, :yaxis, :zaxis)[d]
+		_s3_scene_axis_type(layout, target.scenekey, axis) == "log" || return point[d]
+		point[d] > 0 || throw(ArgumentError(
+			"$(who): `$("xyz"[d])` = $(point[d]) must be positive on the logarithmic scene $(axis).",
+		))
+		return log10(point[d])
+	end
 	entry = Dict{Symbol, Any}(
-		:x => x,
-		:y => y,
-		:z => z,
+		:x => position[1],
+		:y => position[2],
+		:z => position[3],
 		:text => _label(String(text)),
 		:showarrow => showarrow,
 		:xanchor => _s3_choice(xanchor, _S3_ANNOTATION_XANCHORS, who, "xanchor"),
@@ -1265,7 +1518,6 @@ function annotate!(
 		))
 		entry[key] = value
 	end
-	layout = _cmn_layout(fig)
 	scene = get(layout.fields, target.scenekey, nothing)
 	existing = _cmn_mapping_get(scene, :annotations)
 	(existing === nothing || existing isa AbstractVector) || throw(ArgumentError(
@@ -1577,68 +1829,6 @@ function _s3_link_shared_surfaces!(p::Plot, colorscale_given::Bool)
 	return nothing
 end
 
-const _S3_SCENE_KEYWORDS_DOC = """
-Scene keywords (shared by every 3-D constructor and mutator):
-
-- `xlabel`, `ylabel`, `zlabel`: axis titles (constructors default to "x", "y",
-  "z"). 3-D axis titles are drawn by WebGL, which cannot typeset TeX: `\$…\$`
-  is converted to Unicode and `<b>`/`<i>`/`<sub>`/`<sup>` (`\\mathbf`,
-  subscripts, superscripts, Greek letters, …).
-- `xrange`, `yrange`, `zrange`: axis ranges in data units (`[0, 0]` =
-  automatic); on a logarithmic scene axis the bounds are data values too.
-- `aspectmode`: "auto", "cube", "data" or "manual" (constructors: "auto";
-  mutators: `nothing` keeps the scene's).
-- `perspective`: `false` selects an orthographic projection (mutators:
-  `nothing` keeps the current projection).
-- `grid`, `showaxis`: `false` hides the grid lines / the axes (mutators:
-  `nothing` keeps them).
-- `view = (elev, azim)`: camera angles in degrees, see [`view!`](@ref).
-- `title`, `width`, `height`, `fontsize` (0 = automatic). On a `SubplotFigure`
-  cell `title`/`width`/`height` belong to the whole figure and are ignored with
-  a warning.
-- Constructors also take `show = true` to open the figure in a window.
-"""
-
-const _S3_COLOR_KEYWORDS_DOC = """
-Colour keywords: `colorscale` (a name such as "Viridis", "viridis_r", a vector
-of colours or `(t, colour)` stops), `crange = [lo, hi]` (`[0, 0]` =
-automatic), `cmid`, `colornorm` (`:linear` or `:log`), `levels` (k+1
-boundaries for k discrete colours), `showscale`, `colorbar_title`,
-`colorbar_ticks`, `colorbar_ticklabels`, and `coloraxis` (`:shared` or
-"coloraxis2", … to share one colour scale and colorbar between traces; the
-scale keywords then go to `layout.<coloraxis>`).
-"""
-
-"""
-	plot_surface(X, Y, Z; kwargs...) -> Plot
-	plot_surface(Z; kwargs...) -> Plot
-
-Surface `Z[i, j]` drawn at `(X[i], Y[j])`. `X`/`Y` are vectors (lengths
-`size(Z, 1)`/`size(Z, 2)`) or matrices of the same size as `Z` (`ndgrid`
-layout, e.g. `X = [x for x in xs, y in ys]`); the `Z`-only form uses
-`0:size(Z, 1)-1` and `0:size(Z, 2)-1`. `zrange` is the z-axis range; the colour
-limits are `crange`. Boolean arrays are drawn as 0/1.
-
-Keywords:
-
-- `surfacecolor`: colour values (same size as `Z`) instead of `Z`.
-- `color`: one colour for the whole surface (no colorbar); for compatibility a
-  colour array is accepted as an alias of `surfacecolor`.
-- `opacity` in [0, 1].
-- `lighting`: `:default`, `:flat` (unshaded, like matplotlib) or a NamedTuple of
-  plotly lighting fields (`ambient`, `diffuse`, `specular`, `roughness`,
-  `fresnel`).
-- `edges = true` draws the grid lines (`edgecolor`, `edgewidth` in 1–16 px) on
-  the surface; the grid must be rectilinear and uniformly spaced (use
-  `plot_wireframe!` otherwise).
-- `shared_coloraxis = true` puts the surface on the shared colour axis
-  "coloraxis" (one colorbar for several surfaces). On `plot_surface!` the
-  figure's other surfaces join that axis too, and without a `colorscale` the
-  shared axis keeps the colorscale the first of them had.
-
-$(_S3_COLOR_KEYWORDS_DOC)
-$(_S3_SCENE_KEYWORDS_DOC)
-"""
 function plot_surface(
 	X::AbstractArray,
 	Y::AbstractArray,
@@ -1696,15 +1886,6 @@ function plot_surface(Z::AbstractArray; kwargs...)
 	return plot_surface(0:(size(Z, 1) - 1), 0:(size(Z, 2) - 1), Z; kwargs...)
 end
 
-"""
-	plot_surface!(fig, X, Y, Z; kwargs...) -> nothing
-	plot_surface!(fig, Z; kwargs...) -> nothing
-
-Add a surface to an existing figure (`Plot`, `SyncPlot` or `SubplotFigure`
-cell via `row`/`col`; a `SubplotFigure` returns `sf`). Takes the keywords of
-[`plot_surface`](@ref) except `show`; scene keywords left at their defaults
-keep the existing scene.
-"""
 function plot_surface!(
 	fig,
 	X::AbstractArray,
@@ -1767,6 +1948,73 @@ function plot_surface!(fig, Z::AbstractArray; kwargs...)
 	return plot_surface!(fig, 0:(size(Z, 1) - 1), 0:(size(Z, 2) - 1), Z; kwargs...)
 end
 
+const _S3_SURFACE_KEYWORDS_DOC = raw"""
+- `surfacecolor = nothing`: array of the size of `Z` with the values that
+  colour the surface (default: the heights `Z`).
+- `color = ""`: one colour (String or Symbol) for the whole surface, drawn
+  without a colorbar; it cannot be combined with `surfacecolor` or the colour
+  keywords. A numeric array is accepted as an alias of `surfacecolor`.
+- `opacity::Real = 1`: surface opacity in [0, 1].
+- `lighting = :default`: `:default` (plotly's shading), `:flat` (unshaded,
+  like matplotlib) or a NamedTuple of plotly lighting fields (`ambient`,
+  `diffuse`, `specular`, `roughness`, `fresnel`; each ≥ 0).
+- `edges::Bool = false`: draw the grid lines on the surface. They are plotly
+  surface contours, so the grid must be rectilinear and uniformly spaced; use
+  [`plot_wireframe!`](@ref) for other grids.
+- `edgecolor = "black"`: colour of the edges.
+- `edgewidth::Real = 1`: width of the edges in px, 1–16.
+- `shared_coloraxis::Bool = false`: put the surface on the shared colour axis
+  "coloraxis" (it cannot be combined with another `coloraxis`), so several
+  surfaces share one colour range and colorbar. [`plot_surface!`](@ref) also
+  moves the figure's other surfaces onto that axis; without a `colorscale`
+  the axis keeps the colormap the first of them had.
+"""
+
+@doc _s3_doc(
+	raw"""
+		plot_surface(X, Y, Z; kwargs...) -> Plot
+		plot_surface(Z; kwargs...) -> Plot
+
+	Surface of the matrix `Z`: `Z[i, j]` is the height at `(X[i], Y[j])`. `X`
+	and `Y` are vectors of lengths `size(Z, 1)` and `size(Z, 2)`, or matrices of
+	the size of `Z` (ndgrid layout, `X = [x for x in xs, y in ys]`, so
+	curvilinear grids work); `plot_surface(Z)` uses `0:size(Z, 1)-1` and
+	`0:size(Z, 2)-1`. Non-finite heights leave holes and Boolean arrays are
+	drawn as 0/1. `zrange` sets the z axis; the colour limits are `crange`.
+	""",
+	_S3_SURFACE_KEYWORDS_DOC;
+	constructor = true,
+	colour = true,
+	example = raw"""
+	xs = range(-2, 2; length = 41)
+	ys = range(-1, 1; length = 21)
+	Z = [exp(-x^2 - 4y^2) for x in xs, y in ys]   # Z[i, j] at (xs[i], ys[j])
+	fig = plot_surface(xs, ys, Z; colorscale = "viridis", edges = true,
+	                   xlabel = "\$x_1\$", ylabel = "\$x_2\$", view = (25, -50))
+	""",
+) plot_surface
+
+@doc _s3_doc(
+	_s3_mutator_head(
+		raw"""
+			plot_surface!(fig, X, Y, Z; kwargs...)
+			plot_surface!(fig, Z; kwargs...)
+		""",
+		"a surface",
+		"plot_surface",
+	),
+	_S3_SURFACE_KEYWORDS_DOC;
+	constructor = false,
+	colour = true,
+	example = raw"""
+	fig = plot_surface(rand(10, 10); colorscale = "Hot")
+	plot_surface!(fig, rand(10, 10) .+ 2; shared_coloraxis = true)   # one colorbar for both
+
+	sf = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene")])
+	plot_surface!(sf, rand(10, 10); row = 1, col = 2, view = (60, 30))
+	""",
+) plot_surface!
+
 #endregion
 
 #region scatter3d
@@ -1782,6 +2030,11 @@ function _s3_point_labels(text, count::Int, who::AbstractString)
 	))
 	return String[_label3d(label isa AbstractString ? label : string(label)) for label in text]
 end
+
+# Colour keywords given as Symbols (`:red`) are handled as strings.
+_s3_color_text(value::Symbol) = String(value)
+_s3_color_text(value::AbstractString) = value
+_s3_color_text(value::AbstractVector) = String[String(c) for c in value]
 
 function _s3_check_lengths(who::AbstractString, pairs::Pair...)
 	count = length(last(first(pairs)))
@@ -1895,6 +2148,8 @@ function _s3_scatter3d_traces(
 	for (name, values) in (("x", x), ("y", y), ("z", z))
 		eltype(values) <: Complex && _s3_check_numeric_array(values, who, name)
 	end
+	color = _s3_color_text(color)
+	marker_color = _s3_color_text(marker_color)
 	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x)
 	_, y_nested = _nested_coordinate_mode(z, y, :z, :y)
 	start = _s3_next_index(fig)
@@ -1973,47 +2228,16 @@ function _s3_scatter3d_traces(
 	return traces
 end
 
-const _S3_SCATTER3D_DOC = """
-- `mode`: "lines" (default), "markers", "lines+markers", "text", … ("" means
-  "lines").
-- `color`: line colour (markers inherit it unless `marker_color` is set).
-- `legend`: legend name; `showlegend` shows/hides the entry.
-- `linewidth`, `dash` ("solid", "dot", "dash", "longdash", "dashdot",
-  "longdashdot").
-- `marker_size`, `marker_symbol` ("circle", "circle-open", "cross", "diamond",
-  "diamond-open", "square", "square-open", "x"), `marker_color`.
-- `opacity` in [0, 1]: translucent lines are drawn as the opaque colour they
-  would have over the scene background (plotly mis-renders other 3-D traces
-  behind translucent scatter3d lines); over a coloured surface the blend is an
-  approximation.
-- `text`: one label per point (or one string for all); adds "text" to `mode`.
-  Labels are drawn by WebGL (TeX is converted as for axis titles).
-  `textposition` ("top center", "middle right", …) and `textsize` (px).
-
-Per-series keywords accept a vector with one entry per series; missing entries
-take the default and extra entries are ignored.
-"""
-
-"""
-	plot_scatter3d(x, y, z; kwargs...) -> Plot
-
-3-D line/marker plot through the points `(x[k], y[k], z[k])`. Several series:
-`z` a vector of vectors, with `x`/`y` either shared vectors or vectors of
-vectors with one entry per series.
-
-$(_S3_SCATTER3D_DOC)
-$(_S3_SCENE_KEYWORDS_DOC)
-"""
 function plot_scatter3d(
 	x::AbstractVector,
 	y::AbstractVector,
 	z::AbstractVector;
 	mode::Union{AbstractString, AbstractVector{<:AbstractString}} = "lines",
-	color::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	color::Union{AbstractString, Symbol, AbstractVector{<:Union{AbstractString, Symbol}}} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	marker_size::Union{Real, AbstractVector{<:Real}} = 0,
 	marker_symbol::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
-	marker_color::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	marker_color::Union{AbstractString, Symbol, AbstractVector{<:Union{AbstractString, Symbol}}} = "",
 	linewidth::Union{Real, AbstractVector{<:Real}} = 0,
 	dash::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	opacity::Union{Real, AbstractVector{<:Real}} = 1,
@@ -2048,25 +2272,17 @@ function plot_scatter3d(
 	return _s3_construct(traces, (), opts, who, show)
 end
 
-"""
-	plot_scatter3d!(fig, x, y, z; kwargs...) -> nothing
-
-Add 3-D lines/markers to an existing figure (`Plot`, `SyncPlot`, or a
-`SubplotFigure` cell via `row`/`col`, which returns `sf`). Takes the keywords
-of [`plot_scatter3d`](@ref) except `show`; scene keywords left at their
-defaults keep the existing scene.
-"""
 function plot_scatter3d!(
 	fig,
 	x::AbstractVector,
 	y::AbstractVector,
 	z::AbstractVector;
 	mode::Union{AbstractString, AbstractVector{<:AbstractString}} = "lines",
-	color::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	color::Union{AbstractString, Symbol, AbstractVector{<:Union{AbstractString, Symbol}}} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	marker_size::Union{Real, AbstractVector{<:Real}} = 0,
 	marker_symbol::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
-	marker_color::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	marker_color::Union{AbstractString, Symbol, AbstractVector{<:Union{AbstractString, Symbol}}} = "",
 	linewidth::Union{Real, AbstractVector{<:Real}} = 0,
 	dash::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	opacity::Union{Real, AbstractVector{<:Real}} = 1,
@@ -2100,6 +2316,74 @@ function plot_scatter3d!(
 	return _s3_append!(fig, traces, (), opts, who)
 end
 
+const _S3_SCATTER3D_KEYWORDS_DOC = raw"""
+- `mode = "lines"`: "lines", "markers", "lines+markers", "text", "none" or
+  another "+"-joined combination (`""` means "lines").
+- `color = ""`: line colour (String or Symbol; the markers use it too unless
+  `marker_color` is set); `""` takes the next colorway colour.
+- `legend = ""`: legend name.
+- `showlegend = nothing`: `true`/`false` shows or hides the legend entry.
+- `linewidth = 0`: line width in px (0: plotly's default).
+- `dash = ""`: "solid", "dot", "dash", "longdash", "dashdot" or
+  "longdashdot" (`""`: solid).
+- `marker_size = 0`: marker size in px (0: plotly's default).
+- `marker_symbol = ""`: "circle", "circle-open", "cross", "diamond",
+  "diamond-open", "square", "square-open" or "x".
+- `marker_color = ""`: marker colour (String or Symbol).
+- `opacity = 1`: in [0, 1]; """ * _S3_OPACITY_LINE_DOC * raw""" Markers are blended the same way.
+- `text = nothing`: point labels, one string per point or one string for all
+  points; adds "text" to `mode`. They are drawn by WebGL like the axis
+  titles, so TeX is converted as described below.
+- `textposition = ""`: "top left", "top center", "top right", "middle left",
+  "middle center", "middle right", "bottom left", "bottom center" or
+  "bottom right" (`""`: plotly's default).
+- `textsize = 0`: label font size in px (0: the figure's).
+
+`mode`, `color`, `legend`, `showlegend`, `linewidth`, `dash`, `marker_size`,
+`marker_symbol`, `marker_color`, `opacity`, `textposition` and `textsize` also
+take a vector with one entry per series (missing entries take the default,
+extra entries are ignored); with several series `text` is a vector of
+per-series label vectors.
+"""
+
+@doc _s3_doc(
+	raw"""
+		plot_scatter3d(x, y, z; kwargs...) -> Plot
+
+	3-D lines and/or markers through the points `(x[k], y[k], z[k])` (vectors of
+	equal length). Several series: `z` is a vector of vectors (an untyped `Any[]`
+	whose elements are all vectors counts too), and `x` and `y` are each either
+	one vector shared by every series or a vector of vectors with one entry per
+	series.
+	""",
+	_S3_SCATTER3D_KEYWORDS_DOC;
+	constructor = true,
+	example = raw"""
+	t = range(0, 4π; length = 200)
+	fig = plot_scatter3d(cos.(t), sin.(t), t; color = "royalblue", linewidth = 4,
+	                     dash = "dash", legend = "helix", zlabel = "\$\\theta\$")
+	plot_scatter3d!(fig, [1.0, 1.0], [0.0, 0.0], [0.0, 4π]; mode = "markers",
+	                text = ["start", "end"], marker_size = 6, color = :red)
+	""",
+) plot_scatter3d
+
+@doc _s3_doc(
+	_s3_mutator_head(
+		raw"""
+			plot_scatter3d!(fig, x, y, z; kwargs...)
+		""",
+		"3-D lines and/or markers",
+		"plot_scatter3d",
+	),
+	_S3_SCATTER3D_KEYWORDS_DOC;
+	constructor = false,
+	example = raw"""
+	fig = plot_surface(rand(10, 10))
+	plot_scatter3d!(fig, 0:9, 0:9, ones(10); mode = "lines+markers", color = "black",
+	                opacity = 0.5, legend = "diagonal")
+	""",
+) plot_scatter3d!
+
 #endregion
 
 #region quiver3d (cones and arrows)
@@ -2107,6 +2391,11 @@ end
 const _S3_CONE_SIZEMODES = ("scaled", "absolute", "raw")
 const _S3_CONE_ANCHORS = ("tip", "tail", "cm", "center")
 
+# Origins and components of a vector field, flattened to vectors. Every
+# element must be a real number; a vector with a non-finite origin or
+# component cannot be drawn and is skipped with one warning (as `plot_quiver`
+# does), so a single bad sample does not blank the whole trace. When nothing
+# is skipped the (flattened) inputs are returned as given.
 function _s3_vector_field(who::AbstractString, arrays::Pair...)
 	for (name, values) in arrays
 		_s3_array(values, who, name)
@@ -2114,9 +2403,17 @@ function _s3_vector_field(who::AbstractString, arrays::Pair...)
 	_s3_check_lengths(who, arrays...)
 	flat = map(((name, values),) -> _s3_flat(values), arrays)
 	for ((name, _), values) in zip(arrays, flat)
-		_s3_all_finite(values, who, name)
+		for (index, value) in pairs(values)
+			_s3_is_real(value) || throw(ArgumentError(
+				"$(who): `$(name)[$(index)]` must be a real number; got $(repr(value)).",
+			))
+		end
 	end
-	return flat
+	count = length(first(flat))
+	keep = [k for k in 1:count if all(values -> isfinite(values[firstindex(values) + k - 1]), flat)]
+	length(keep) == count && return flat
+	@warn "$(who): skipped $(count - length(keep)) vector(s) with non-finite origins or components."
+	return map(values -> values[firstindex(values) .+ keep .- 1], flat)
 end
 
 function _s3_quiver3d_traces(
@@ -2167,10 +2464,12 @@ function _s3_quiver3d_traces(
 			"$(who): `headsize` and `linewidth` apply to style=:arrow; cones are sized " *
 			"with `sizemode`/`sizeref`.",
 		))
-		mode =sizemode === nothing ? "scaled" : _s3_choice(sizemode, _S3_CONE_SIZEMODES, who, "sizemode")
-		# plotly.js: "scaled" defaults to 0.5; "raw" has no default (a missing
-		# sizeref breaks the cones) and "absolute" divides by the largest norm.
-		ref = sizeref === nothing ? (mode == "scaled" ? 0.5 : 1.0) : _s3_positive(sizeref, who, "sizeref")
+		mode = sizemode === nothing ? "scaled" : _s3_choice(sizemode, _S3_CONE_SIZEMODES, who, "sizemode")
+		# sizeref is always written: plotly.js has no usable default for "raw"
+		# (cones break without it), and 1 keeps 1.x's cone size for unit fields
+		# ("scaled" with sizeref s draws what "absolute" with s drew when the
+		# largest norm is 1). 0 is not "hide" for cones, so it is rejected.
+		ref = sizeref === nothing ? 1 : _s3_positive(sizeref, who, "sizeref")
 		fields = Dict{Symbol, Any}(
 			:x => px, :y => py, :z => pz, :u => vx, :v => vy, :w => vz,
 			:sizemode => mode,
@@ -2262,36 +2561,6 @@ function _arrow3d_traces(x, y, z, u, v, w; color::AbstractString, linewidth::Rea
 	return GenericTrace[shaft, heads]
 end
 
-const _S3_QUIVER3D_DOC = """
-The vectors `(u, v, w)` are drawn at the points `(x, y, z)` (vectors or
-equal-size arrays, all finite).
-
-- `style = :cone` (default) draws plotly cones. `anchor` says which part of the
-  cone sits at the point: "cm" (default, the centre of mass), "tail" (the
-  base — the point is the vector's origin), "tip" or "center". `sizemode`:
-  "scaled" (default; `sizeref`, default 0.5, scales the cones relative to the
-  point spacing, whatever the field magnitude), "absolute" (`sizeref`, default
-  1, in units of the largest vector's norm relative to the point spacing) or
-  "raw" (`sizeref`, default 1, times the vector length in data units).
-- `style = :arrow` draws arrows from each point to point + vector in data
-  units: a line shaft (`linewidth` in px, default plotly's 2) and a cone head
-  whose length is `headsize` (default 0.25) of the arrow. Arrows have one
-  colour. `headsize`/`linewidth` are only accepted with `:arrow`.
-- `color`: one colour for every cone/arrow (a vector uses its first entry);
-  otherwise the cones are coloured by the vector norm with the colour keywords
-  (`colornorm = :log` is not available).
-- `legend`: legend name.
-"""
-
-"""
-	plot_quiver3d(x, y, z, u, v, w; kwargs...) -> Plot
-
-3-D vector field.
-
-$(_S3_QUIVER3D_DOC)
-$(_S3_COLOR_KEYWORDS_DOC)
-$(_S3_SCENE_KEYWORDS_DOC)
-"""
 function plot_quiver3d(
 	x::AbstractArray,
 	y::AbstractArray,
@@ -2345,13 +2614,6 @@ function plot_quiver3d(
 	return _s3_construct(traces, specs, opts, who, show)
 end
 
-"""
-	plot_quiver3d!(fig, x, y, z, u, v, w; kwargs...) -> nothing
-
-Add a 3-D vector field to an existing figure (`Plot`, `SyncPlot`, or a
-`SubplotFigure` cell via `row`/`col`, which returns `sf`). Takes the keywords
-of [`plot_quiver3d`](@ref) except `show`.
-"""
 function plot_quiver3d!(
 	fig,
 	x::AbstractArray,
@@ -2404,6 +2666,75 @@ function plot_quiver3d!(
 		colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 	return _s3_append!(fig, traces, specs, opts, who)
 end
+
+const _S3_QUIVER3D_KEYWORDS_DOC = raw"""
+- `style = :cone`: `:cone` draws plotly cones; `:arrow` draws arrows (a line
+  shaft and a cone head) from each point to point + vector, in data units.
+- `sizemode = "scaled"` (cones): how `sizeref` sizes the cones. "scaled":
+  relative to the spacing of the points, independent of the magnitude of the
+  field; "absolute": `sizeref` is in units of the largest vector norm; "raw":
+  each cone is `sizeref` times its vector's length in data units.
+- `sizeref = 1` (cones): positive size factor (see `sizemode`).
+- `anchor = "cm"` (cones): the part of each cone placed at its point: "cm"
+  (the centre of mass, plotly's default: cones are centred on the points
+  rather than starting there), "center", "tail" (the vector starts at the
+  point, like a matplotlib quiver) or "tip".
+- `headsize = 0.25` (arrows): length of the head as a fraction of the arrow,
+  in (0, 1).
+- `linewidth = nothing` (arrows): shaft width in px (`nothing`: plotly's
+  default).
+- `color = ""`: one colour (String or Symbol) for every cone or arrow; a
+  vector of colours is accepted for compatibility and its first entry is
+  used. With `""` cones are coloured by their vector norm through the colour
+  keywords and arrows take the next colorway colour. Arrows have one colour,
+  so the colour keywords apply to cones only.
+- `legend::AbstractString = ""`: legend name.
+"""
+
+const _S3_QUIVER3D_HEAD_DOC = raw"""
+The vector `(u[k], v[k], w[k])` is drawn at the point `(x[k], y[k], z[k])`
+(vectors or arrays of equal length, flattened in memory order). A vector whose
+position or components are not finite cannot be drawn and is skipped with a
+warning. By default each cone is centred on its point (`anchor = "cm"`);
+`anchor = "tail"` starts the vectors at the points.
+"""
+
+@doc _s3_doc(
+	raw"""
+		plot_quiver3d(x, y, z, u, v, w; kwargs...) -> Plot
+
+	3-D vector field as cones or arrows.
+	""" * "\n" * _S3_QUIVER3D_HEAD_DOC,
+	_S3_QUIVER3D_KEYWORDS_DOC;
+	constructor = true,
+	colour = true,
+	colour_note = "`colornorm = :log` is not available: plotly computes the cone colours from the vector norms.",
+	example = raw"""
+	g = [-1.0, 0.0, 1.0]
+	x = [a for a in g, b in g, c in g]; y = [b for a in g, b in g, c in g]; z = [c for a in g, b in g, c in g]
+	fig = plot_quiver3d(x, y, z, -y, x, fill(0.3, size(x)); colorscale = "viridis", anchor = "tail")
+	plot_quiver3d!(fig, [0.0], [0.0], [1.5], [0.0], [0.0], [-1.0]; style = :arrow, color = "red")
+	""",
+) plot_quiver3d
+
+@doc _s3_doc(
+	_s3_mutator_head(
+		raw"""
+			plot_quiver3d!(fig, x, y, z, u, v, w; kwargs...)
+		""",
+		"a 3-D vector field",
+		"plot_quiver3d",
+	) * "\n\n" * _S3_QUIVER3D_HEAD_DOC,
+	_S3_QUIVER3D_KEYWORDS_DOC;
+	constructor = false,
+	colour = true,
+	colour_note = "`colornorm = :log` is not available: plotly computes the cone colours from the vector norms.",
+	example = raw"""
+	fig = plot_scatter3d([0.0, 1.0], [0.0, 0.0], [0.0, 0.0]; color = "black")
+	plot_quiver3d!(fig, [0.0, 1.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [1.0, 2.0];
+	               style = :arrow, headsize = 0.2, linewidth = 4, legend = "force")
+	""",
+) plot_quiver3d!
 
 #endregion
 
@@ -2487,13 +2818,13 @@ end
 
 #region mesh3d
 
-function _require_mesh_indices(indices, name::Symbol, vertex_count::Int)
+function _require_mesh_indices(indices, name::Symbol, vertex_count::Int, who::AbstractString)
 	(indices isa AbstractVector || indices isa Tuple) || throw(ArgumentError(
-		"mesh3d: `$name` must be a one-dimensional index collection.",
+		"$(who): `$name` must be a one-dimensional index collection.",
 	))
 	for (position, index) in enumerate(indices)
 		(index isa Integer && !(index isa Bool) && 0 <= index < vertex_count) || throw(ArgumentError(
-			"mesh3d: `$name[$position]` must be a zero-based integer " *
+			"$(who): `$name[$position]` must be a zero-based integer " *
 			"between 0 and $(vertex_count - 1); got $(repr(index)).",
 		))
 	end
@@ -2537,25 +2868,24 @@ function _s3_mesh3d_traces(
 	px, py, pz = _s3_flat(x), _s3_flat(y), _s3_flat(z)
 	vertex_count = length(px)
 	(length(py) == vertex_count && length(pz) == vertex_count) || throw(ArgumentError(
-		"mesh3d: x, y, z must share length; got $(length(px)), $(length(py)), $(length(pz)).",
+		"$(who): x, y, z must share length; got $(length(px)), $(length(py)), $(length(pz)).",
 	))
-	(opacity isa Bool || !(opacity isa Real) || !isfinite(opacity) || opacity < 0 || opacity > 1) &&
-		throw(ArgumentError("mesh3d: `opacity` must be a finite number between 0 and 1."))
+	alpha = _s3_unit_interval(opacity, who, "opacity")
 	fields = Dict{Symbol, Any}(:x => px, :y => py, :z => pz)
 	present = (i !== nothing, j !== nothing, k !== nothing)
 	face_count = nothing
 	if any(present) && !all(present)
 		throw(ArgumentError(
-			"mesh3d: triangle indices `i`, `j`, and `k` must be supplied together or all omitted.",
+			"$(who): triangle indices `i`, `j`, and `k` must be supplied together or all omitted.",
 		))
 	elseif all(present)
 		lengths = (
-			_require_mesh_indices(i, :i, vertex_count),
-			_require_mesh_indices(j, :j, vertex_count),
-			_require_mesh_indices(k, :k, vertex_count),
+			_require_mesh_indices(i, :i, vertex_count, who),
+			_require_mesh_indices(j, :j, vertex_count, who),
+			_require_mesh_indices(k, :k, vertex_count, who),
 		)
 		lengths[1] == lengths[2] == lengths[3] || throw(ArgumentError(
-			"mesh3d: i, j, k must share length; got $(join(lengths, ", ")).",
+			"$(who): i, j, k must share length; got $(join(lengths, ", ")).",
 		))
 		face_count = lengths[1]
 		fields[:i] = i
@@ -2579,12 +2909,12 @@ function _s3_mesh3d_traces(
 				"$(who): per-face `intensity` needs explicit triangles (`i`, `j`, `k`).",
 			))
 			count == face_count || throw(ArgumentError(
-				"mesh3d: `intensity` has $(count) values for $(face_count) faces.",
+				"$(who): `intensity` has $(count) values for $(face_count) faces.",
 			))
 			"cell"
 		else
 			count == vertex_count || throw(ArgumentError(
-				"mesh3d: `intensity` must match x/y/z in length (per vertex)" *
+				"$(who): `intensity` must match x/y/z in length (per vertex)" *
 				(face_count === nothing ? "" : " or the number of faces ($(face_count))") *
 				"; got $(count) and $(vertex_count).",
 			))
@@ -2620,7 +2950,7 @@ function _s3_mesh3d_traces(
 	))
 	shading = flatshading === nothing ? (flat ? true : nothing) : flatshading
 	shading === nothing || (fields[:flatshading] = shading)
-	opacity < 1 && (fields[:opacity] = opacity)
+	alpha < 1 && (fields[:opacity] = alpha)
 	name = String(legend)
 	isempty(name) || (fields[:name] = name; fields[:showlegend] = true)
 	traces = GenericTrace[GenericTrace("mesh3d"; fields...)]
@@ -2636,31 +2966,6 @@ function _s3_mesh3d_traces(
 	return traces, (spec,)
 end
 
-const _S3_MESH3D_DOC = """
-- `i`, `j`, `k`: 0-based vertex indices of the triangles (all three or none;
-  without them plotly triangulates the points itself).
-- `intensity`: colour values per vertex, or per face (one per triangle, which
-  sets `intensitymode = "cell"`; pass `intensitymode` to decide when the vertex
-  and face counts are equal).
-- `facecolor`: one colour per triangle; `color`: one colour for the mesh.
-- `opacity` in [0, 1]; `flatshading`; `lighting` (`:default`, `:flat` —
-  unshaded, also turns on flat shading — or a NamedTuple of plotly lighting
-  fields).
-- `edges = true` draws the triangle edges once each (`edgecolor`, default
-  black; `edgewidth` in px) as a second trace.
-- `legend`: legend name.
-"""
-
-"""
-	plot_mesh3d(x, y, z; kwargs...) -> Plot
-
-Triangle mesh with vertices `(x, y, z)` (vectors, or arrays flattened in
-memory order).
-
-$(_S3_MESH3D_DOC)
-$(_S3_COLOR_KEYWORDS_DOC)
-$(_S3_SCENE_KEYWORDS_DOC)
-"""
 function plot_mesh3d(
 	x::AbstractArray,
 	y::AbstractArray,
@@ -2718,13 +3023,6 @@ function plot_mesh3d(
 	return _s3_construct(traces, specs, opts, who, show)
 end
 
-"""
-	plot_mesh3d!(fig, x, y, z; kwargs...) -> nothing
-
-Add a triangle mesh to an existing figure (`Plot`, `SyncPlot`, or a
-`SubplotFigure` cell via `row`/`col`, which returns `sf`). Takes the keywords
-of [`plot_mesh3d`](@ref) except `show`.
-"""
 function plot_mesh3d!(
 	fig,
 	x::AbstractArray,
@@ -2781,6 +3079,73 @@ function plot_mesh3d!(
 		coloraxis, who)
 	return _s3_append!(fig, traces, specs, opts, who)
 end
+
+const _S3_MESH3D_KEYWORDS_DOC = raw"""
+- `i = nothing`, `j = nothing`, `k = nothing`: 0-based vertex indices of the
+  triangles (plotly's convention; give all three or none: without them plotly
+  triangulates the points itself).
+- `intensity = nothing`: colour values, one per vertex or one per triangle
+  (then `intensitymode = "cell"` is chosen automatically).
+- `intensitymode = nothing`: "vertex" or "cell", to decide when the vertex and
+  triangle counts are equal.
+- `facecolor = nothing`: a vector with one colour per triangle.
+- `color = ""`: one colour (String or Symbol) for the whole mesh.
+- `opacity::Real = 1`: in [0, 1].
+- `flatshading = nothing`: `true` shades every triangle flat (`nothing`:
+  plotly's default, or `true` with `lighting = :flat`).
+- `lighting = :default`: `:default` (plotly's shading), `:flat` (unshaded,
+  like matplotlib) or a NamedTuple of plotly lighting fields (`ambient`,
+  `diffuse`, `specular`, `roughness`, `fresnel`, `vertexnormalsepsilon`,
+  `facenormalsepsilon`; each ≥ 0).
+- `edges::Bool = false`: also draw every triangle edge once, as a second,
+  opaque line trace (needs `i`, `j`, `k`).
+- `edgecolor = "black"`: colour of the edges.
+- `edgewidth::Real = 1`: width of the edges in px (0: plotly's default).
+- `legend::AbstractString = ""`: legend name.
+"""
+
+const _S3_MESH3D_HEAD_DOC = raw"""
+The vertices are `(x[n], y[n], z[n])` (vectors, or arrays flattened in memory
+order). Colours come from `intensity` (through the colour keywords),
+`facecolor` or `color`, at most one of them. For polygons with 1-based
+connectivity and per-face values see [`plot_polygons3d`](@ref).
+"""
+
+@doc _s3_doc(
+	raw"""
+		plot_mesh3d(x, y, z; kwargs...) -> Plot
+
+	Triangle mesh.
+	""" * "\n" * _S3_MESH3D_HEAD_DOC,
+	_S3_MESH3D_KEYWORDS_DOC;
+	constructor = true,
+	colour = true,
+	colour_note = "The colour keywords need `intensity`.",
+	example = raw"""
+	x = [0.0, 1, 0, 0]; y = [0.0, 0, 1, 0]; z = [0.0, 0, 0, 1]
+	fig = plot_mesh3d(x, y, z; i = [0, 0, 0, 1], j = [1, 1, 2, 2], k = [2, 3, 3, 3],
+	                  facecolor = ["red", "green", "blue", "gold"], edges = true)
+	""",
+) plot_mesh3d
+
+@doc _s3_doc(
+	_s3_mutator_head(
+		raw"""
+			plot_mesh3d!(fig, x, y, z; kwargs...)
+		""",
+		"a triangle mesh",
+		"plot_mesh3d",
+	) * "\n\n" * _S3_MESH3D_HEAD_DOC,
+	_S3_MESH3D_KEYWORDS_DOC;
+	constructor = false,
+	colour = true,
+	colour_note = "The colour keywords need `intensity`.",
+	example = raw"""
+	fig = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0])
+	plot_mesh3d!(fig, [0.0, 1, 0], [0.0, 0, 1], [0.0, 0, 0]; i = [0], j = [1], k = [2],
+	             intensity = [1.0], colorscale = "plasma", opacity = 0.8)
+	""",
+) plot_mesh3d!
 
 #endregion
 
@@ -2893,35 +3258,8 @@ for (fn, fn!, kind, default_opacity) in (
 	(:plot_isosurface, :plot_isosurface!, "isosurface", 1.0),
 	(:plot_volume, :plot_volume!, "volume", 0.1),
 )
-	ctor_doc = """
-		$(fn)(x, y, z, value; kwargs...) -> Plot
-
-	3-D $(kind) of the scalar field `value`. Either every argument has one
-	entry per point (vectors, or same-size arrays), or `x`, `y`, `z` are axis
-	vectors and `value` is a `length(x)×length(y)×length(z)` array with
-	`value[i, j, k]` at `(x[i], y[j], z[k])`. Plotly needs the points to form a
-	grid.
-
-	- `isomin`/`isomax`: the range of iso-levels drawn; `surface_count` (0 =
-	  plotly's default) how many.
-	- `opacity` (default $(default_opacity)); `caps = false` hides the caps
-	  where the field meets the grid boundary.
-
-	$(_S3_COLOR_KEYWORDS_DOC)
-	`colornorm = :log` is not available (plotly computes the levels from the
-	raw values; pass `log10.(value)`).
-
-	$(_S3_SCENE_KEYWORDS_DOC)
-	"""
-	mutator_doc = """
-		$(fn!)(fig, x, y, z, value; kwargs...) -> nothing
-
-	Add a $(kind) to an existing figure (`Plot`, `SyncPlot`, or a
-	`SubplotFigure` cell via `row`/`col`, which returns `sf`). Takes the keywords
-	of [`$(fn)`](@ref) except `show`.
-	"""
 	@eval begin
-		@doc $ctor_doc function $fn(
+		function $fn(
 			x::AbstractArray,
 			y::AbstractArray,
 			z::AbstractArray,
@@ -2969,7 +3307,7 @@ for (fn, fn!, kind, default_opacity) in (
 			return _s3_construct(GenericTrace[trace], (spec,), opts, who, show)
 		end
 
-		@doc $mutator_doc function $fn!(
+		function $fn!(
 			fig,
 			x::AbstractArray,
 			y::AbstractArray,
@@ -3050,19 +3388,6 @@ function _s3_streamtube_trace(
 	return GenericTrace("streamtube"; fields...), spec
 end
 
-"""
-	plot_streamtube(x, y, z, u, v, w; kwargs...) -> Plot
-
-Streamtubes of the vector field `(u, v, w)`: one value per grid point (vectors
-or same-size arrays), or axis vectors `x`, `y`, `z` with
-`length(x)×length(y)×length(z)` component arrays. `sizeref` scales the tube
-diameter (0 = plotly's default). Tubes are coloured by the vector norm.
-
-$(_S3_COLOR_KEYWORDS_DOC)
-`colornorm = :log` is not available.
-
-$(_S3_SCENE_KEYWORDS_DOC)
-"""
 function plot_streamtube(
 	x::AbstractArray,
 	y::AbstractArray,
@@ -3108,13 +3433,6 @@ function plot_streamtube(
 	return _s3_construct(GenericTrace[trace], (spec,), opts, who, show)
 end
 
-"""
-	plot_streamtube!(fig, x, y, z, u, v, w; kwargs...) -> nothing
-
-Add streamtubes to an existing figure (`Plot`, `SyncPlot`, or a
-`SubplotFigure` cell via `row`/`col`, which returns `sf`). Takes the keywords
-of [`plot_streamtube`](@ref) except `show`.
-"""
 function plot_streamtube!(
 	fig,
 	x::AbstractArray,
@@ -3159,6 +3477,102 @@ function plot_streamtube!(
 		levels, showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 	return _s3_append!(fig, GenericTrace[trace], (spec,), opts, who)
 end
+
+const _S3_FIELD_LAYOUT_DOC = raw"""
+The field is sampled on a grid, given in one of two forms: every argument has
+one entry per point (vectors, or arrays of one shape such as `ndgrid` 3-D
+arrays, flattened in memory order), or `x`, `y`, `z` are axis vectors and the
+field arrays have size `length(x)×length(y)×length(z)`, with `A[i, j, k]` at
+`(x[i], y[j], z[k])`. Other shapes throw an `ArgumentError`.
+"""
+
+for (fn, fn!, kind, default_opacity, what, example) in (
+	(
+		:plot_isosurface, :plot_isosurface!, "isosurface", 1.0, "an isosurface",
+		raw"""
+		g = range(-1, 1; length = 20)
+		V = [x^2 + y^2 + z^2 for x in g, y in g, z in g]   # V[i, j, k] at (g[i], g[j], g[k])
+		fig = plot_isosurface(g, g, g, V; isomin = 0.3, isomax = 0.8, surface_count = 3,
+		                      colorscale = "plasma", caps = false)
+		""",
+	),
+	(
+		:plot_volume, :plot_volume!, "volume", 0.1, "a volume rendering",
+		raw"""
+		g = range(-1, 1; length = 20)
+		V = [exp(-4(x^2 + y^2 + z^2)) for x in g, y in g, z in g]
+		fig = plot_volume(g, g, g, V; isomin = 0.1, surface_count = 15, opacity = 0.2,
+		                  colorscale = "viridis")
+		""",
+	),
+)
+	keywords = """
+	- `isomin = nothing`, `isomax = nothing`: the range of values drawn
+	  (`nothing`: the data range); `isomin < isomax`.
+	- `surface_count::Integer = 0`: number of iso-surfaces (0: plotly's default).
+	- `opacity::Real = $(default_opacity)`: in [0, 1].
+	- `caps = nothing`: `false` hides the caps where the field meets the grid
+	  boundary (`nothing`: plotly's default).
+	"""
+	note = "`colornorm = :log` is not available: plotly computes the levels from the raw values (pass `log10.(value)`)."
+	head = "\t$(fn)(x, y, z, value; kwargs...) -> Plot\n\n" *
+		"3-D $(kind) of the scalar field `value`.\n\n" * _S3_FIELD_LAYOUT_DOC
+	ctor_doc = _s3_doc(head, keywords; constructor = true, colour = true, colour_note = note, example)
+	mutator_head = _s3_mutator_head("\t$(fn!)(fig, x, y, z, value; kwargs...)", what, String(fn)) *
+		"\n\n" * _S3_FIELD_LAYOUT_DOC
+	mutator_example = "fig = plot_scatter3d([-1.0, 1.0], [-1.0, 1.0], [-1.0, 1.0]; mode = \"markers\")\n" *
+		replace(example, "fig = $(fn)(" => "$(fn!)(fig, ")
+	mutator_doc = _s3_doc(mutator_head, keywords; constructor = false, colour = true, colour_note = note,
+		example = mutator_example)
+	@eval @doc $ctor_doc $fn
+	@eval @doc $mutator_doc $fn!
+end
+
+const _S3_STREAMTUBE_KEYWORDS_DOC = raw"""
+- `sizeref::Real = 0`: scale of the tube diameter (0: plotly's default).
+"""
+
+const _S3_STREAMTUBE_HEAD_DOC = raw"""
+The tubes start at plotly's default seed points and are coloured by the
+vector norm.
+""" * "\n" * _S3_FIELD_LAYOUT_DOC
+
+@doc _s3_doc(
+	raw"""
+		plot_streamtube(x, y, z, u, v, w; kwargs...) -> Plot
+
+	Streamtubes of the vector field `(u, v, w)`.
+	""" * "\n" * _S3_STREAMTUBE_HEAD_DOC,
+	_S3_STREAMTUBE_KEYWORDS_DOC;
+	constructor = true,
+	colour = true,
+	colour_note = "`colornorm = :log` is not available: plotly computes the colours from the vector norms.",
+	example = raw"""
+	g = range(-1, 1; length = 8)
+	U = [-y for x in g, y in g, z in g]; V = [x for x in g, y in g, z in g]; W = fill(0.2, 8, 8, 8)
+	fig = plot_streamtube(g, g, g, U, V, W; sizeref = 0.5, colorscale = "viridis")
+	""",
+) plot_streamtube
+
+@doc _s3_doc(
+	_s3_mutator_head(
+		raw"""
+			plot_streamtube!(fig, x, y, z, u, v, w; kwargs...)
+		""",
+		"streamtubes",
+		"plot_streamtube",
+	) * "\n\n" * _S3_STREAMTUBE_HEAD_DOC,
+	_S3_STREAMTUBE_KEYWORDS_DOC;
+	constructor = false,
+	colour = true,
+	colour_note = "`colornorm = :log` is not available: plotly computes the colours from the vector norms.",
+	example = raw"""
+	g = range(-1, 1; length = 8)
+	U = [-y for x in g, y in g, z in g]; V = [x for x in g, y in g, z in g]; W = fill(0.2, 8, 8, 8)
+	fig = plot_scatter3d([0.0], [0.0], [-1.0]; mode = "markers")
+	plot_streamtube!(fig, g, g, g, U, V, W; colorscale = "plasma", showscale = false)
+	""",
+) plot_streamtube!
 
 #endregion
 
@@ -3338,47 +3752,8 @@ function _s3_polygons3d_traces(
 	return traces, (spec,)
 end
 
-const _S3_POLYGONS3D_DOC = """
-Faces are given either as a vector of k×3 coordinate matrices (one row per
-vertex, k ≥ 3; vertices at identical coordinates are merged) or as vertex
-vectors `x`, `y`, `z` plus `faces`, an nf×k matrix or a vector of 1-based
-index vectors. Polygons are fan-triangulated from their first vertex, so they
-should be planar and roughly convex.
-
-- `values`: one colour value per face (colorscale default "Viridis"); faces
-  whose value is NaN (or ≤ 0 with `colornorm = :log` and an automatic
-  `crange`) are left unfilled. Without `values` every face has the uniform
-  `color` (default: the next colorway colour).
-- `edgecolor` (default "black"; "" for none), `edgewidth` (px, default 1;
-  0 for none): the polygon boundaries — not the triangulation diagonals —
-  drawn once each as an opaque line trace.
-- `opacity` in [0, 1]; `lighting` (`:flat`, the default, is unshaded like
-  matplotlib; `:default` or a NamedTuple of plotly lighting fields).
-- `legend`: legend name.
-- Constructors default to `aspectmode = "data"`.
-"""
-
-"""
-	plot_polygons3d(faces, values = nothing; kwargs...) -> Plot
-	plot_polygons3d(x, y, z, faces, values = nothing; kwargs...) -> Plot
-
-Filled 3-D polygons (matplotlib `Poly3DCollection`), e.g. finite-element
-faces coloured per face.
-
-$(_S3_POLYGONS3D_DOC)
-$(_S3_COLOR_KEYWORDS_DOC)
-$(_S3_SCENE_KEYWORDS_DOC)
-"""
 function plot_polygons3d end
 
-"""
-	plot_polygons3d!(fig, faces, values = nothing; kwargs...) -> nothing
-	plot_polygons3d!(fig, x, y, z, faces, values = nothing; kwargs...) -> nothing
-
-Add 3-D polygons to an existing figure (`Plot`, `SyncPlot`, or a
-`SubplotFigure` cell via `row`/`col`, which returns `sf`). Takes the keywords
-of [`plot_polygons3d`](@ref) except `show`.
-"""
 function plot_polygons3d! end
 
 for (positional, prepare) in (
@@ -3486,6 +3861,78 @@ for (positional, prepare) in (
 	end
 end
 
+const _S3_POLYGONS3D_KEYWORDS_DOC = raw"""
+- `color = ""`: one colour (String or Symbol) for every face when no `values`
+  are given (`""`: the next colorway colour).
+- `opacity::Real = 1`: in [0, 1].
+- `lighting = :flat`: `:flat` (unshaded, like matplotlib), `:default`
+  (plotly's shading) or a NamedTuple of plotly lighting fields.
+- `edgecolor = "black"`: colour of the polygon boundaries (`""`: none). Only
+  the polygon edges are drawn, not the triangulation diagonals, each edge once
+  as an opaque line trace.
+- `edgewidth::Real = 1`: width of the edges in px (0: none).
+- `legend::AbstractString = ""`: legend name.
+"""
+
+const _S3_POLYGONS3D_HEAD_DOC = raw"""
+`faces` is either a vector of k×3 coordinate matrices (one row per vertex,
+k ≥ 3; vertices with identical coordinates are merged, so neighbouring faces
+share their edges), or, with vertex vectors `x`, `y`, `z`, an nf×k matrix or a
+vector of vectors of 1-based vertex indices. Polygons are fan-triangulated
+from their first vertex, so they should be planar and convex. `values` (one
+number per face) colours the faces through the colour keywords; a face whose
+value is NaN (or ≤ 0 with `colornorm = :log` and an automatic `crange`) is
+left unfilled, while its edges are still drawn.
+"""
+
+const _S3_POLYGONS3D_COLOUR_NOTE = "The colour keywords need `values`; `colorscale = nothing` uses \"Viridis\"."
+
+const _S3_CUBE_EXAMPLE = raw"""
+x = [0.0, 1, 1, 0, 0, 1, 1, 0]; y = [0.0, 0, 1, 1, 0, 0, 1, 1]; z = [0.0, 0, 0, 0, 1, 1, 1, 1]
+faces = [1 2 3 4; 5 6 7 8; 1 2 6 5; 2 3 7 6; 3 4 8 7; 4 1 5 8]   # the unit cube, 1-based
+"""
+
+@doc _s3_doc(
+	raw"""
+		plot_polygons3d(faces, values = nothing; kwargs...) -> Plot
+		plot_polygons3d(x, y, z, faces, values = nothing; kwargs...) -> Plot
+
+	Filled 3-D polygons (matplotlib `Poly3DCollection`), such as the faces of a
+	finite-element mesh coloured per face.
+	""" * "\n" * _S3_POLYGONS3D_HEAD_DOC,
+	_S3_POLYGONS3D_KEYWORDS_DOC;
+	constructor = true,
+	colour = true,
+	colorscale_default = "nothing",
+	colour_note = _S3_POLYGONS3D_COLOUR_NOTE,
+	aspectmode = "\"data\"",
+	example = _S3_CUBE_EXAMPLE * raw"""
+	fig = plot_polygons3d(x, y, z, faces, 1.0:6.0; colorscale = "viridis", colorbar_title = "face")
+	square = [0.0 0 2; 1 0 2; 1 1 2; 0 1 2]                          # one k×3 coordinate matrix
+	plot_polygons3d!(fig, [square]; color = "orange", opacity = 0.5)
+	""",
+) plot_polygons3d
+
+@doc _s3_doc(
+	_s3_mutator_head(
+		raw"""
+			plot_polygons3d!(fig, faces, values = nothing; kwargs...)
+			plot_polygons3d!(fig, x, y, z, faces, values = nothing; kwargs...)
+		""",
+		"filled 3-D polygons",
+		"plot_polygons3d",
+	) * "\n\n" * _S3_POLYGONS3D_HEAD_DOC,
+	_S3_POLYGONS3D_KEYWORDS_DOC;
+	constructor = false,
+	colour = true,
+	colorscale_default = "nothing",
+	colour_note = _S3_POLYGONS3D_COLOUR_NOTE,
+	example = _S3_CUBE_EXAMPLE * raw"""
+	fig = plot_polygons3d(x, y, z, faces; color = "lightgray")
+	plot_polygons3d!(fig, x, y, z .+ 1.5, faces, [1.0, 2, NaN, 4, 5, 6]; colorscale = "plasma")
+	""",
+) plot_polygons3d!
+
 #endregion
 
 #region Wireframes and 3-D segments
@@ -3511,7 +3958,10 @@ function _s3_wire_point!(sx, sy, sz, t::Int, X, Y, Z, i::Int, j::Int)
 end
 
 function _s3_wireframe_trace(fig, X, Y, Z; rstride, cstride, color, linewidth, dash, opacity, legend, who::AbstractString)
-	_s3_surface_grid(X, Y, Z, who)
+	X, Y, Z = _s3_surface_grid(X, Y, Z, who)
+	for (name, values) in (("X", X), ("Y", Y), ("Z", Z))
+		_s3_real_elements(values, who, name)
+	end
 	for (name, stride) in (("rstride", rstride), ("cstride", cstride))
 		(stride isa Integer && !(stride isa Bool) && stride >= 0) || throw(ArgumentError(
 			"$(who): `$(name)` must be an integer >= 0; got $(repr(stride)).",
@@ -3556,28 +4006,6 @@ function _s3_wireframe_trace(fig, X, Y, Z; rstride, cstride, color, linewidth, d
 	)
 end
 
-const _S3_LINE_DOC = """
-- `color`, `linewidth` (px; 0 = plotly's default), `dash` ("solid", "dot",
-  "dash", "longdash", "dashdot", "longdashdot"), `legend`.
-- `opacity < 1` draws the opaque colour the line would have over the scene
-  background (`_blend_over`), because translucent scatter3d lines make other
-  3-D traces in the scene disappear. Over coloured faces the result is an
-  approximation (it is blended with the background, not with the faces).
-"""
-
-"""
-	plot_wireframe(X, Y, Z; rstride = 1, cstride = 1, color = "black", linewidth = 1,
-	               dash = "", opacity = 1, legend = "", kwargs...) -> Plot
-
-Grid lines of the surface `Z[i, j]` at `(X[i], Y[j])` (vectors, or matrices of
-the size of `Z`), as one line trace (matplotlib `plot_wireframe`). Draws every
-`rstride`-th line of constant `i` and every `cstride`-th line of constant `j`,
-always including the last; a stride of 0 skips that direction. Works for
-curvilinear grids.
-
-$(_S3_LINE_DOC)
-$(_S3_SCENE_KEYWORDS_DOC)
-"""
 function plot_wireframe(
 	X::AbstractArray,
 	Y::AbstractArray,
@@ -3615,14 +4043,6 @@ function plot_wireframe(
 	return _s3_construct(GenericTrace[trace], (), opts, who, show)
 end
 
-"""
-	plot_wireframe!(fig, X, Y, Z; kwargs...) -> nothing
-
-Add a wireframe to an existing figure (`Plot`, `SyncPlot`, or a
-`SubplotFigure` cell via `row`/`col`, which returns `sf`), e.g. a ghost of an
-undeformed mesh with `opacity = 0.35`. Takes the keywords of
-[`plot_wireframe`](@ref) except `show`.
-"""
 function plot_wireframe!(
 	fig,
 	X::AbstractArray,
@@ -3663,6 +4083,7 @@ end
 function _s3_pair_segments(x0, y0, z0, x1, y1, z1, who::AbstractString)
 	for (name, values) in (("x0", x0), ("y0", y0), ("z0", z0), ("x1", x1), ("y1", y1), ("z1", z1))
 		_s3_array(values, who, name)
+		_s3_real_elements(values, who, name)
 	end
 	n = _s3_check_lengths(who, "x0" => x0, "y0" => y0, "z0" => z0, "x1" => x1, "y1" => y1, "z1" => z1)
 	return vcat(vec(x0), vec(x1)), vcat(vec(y0), vec(y1)), vcat(vec(z0), vec(z1)), [(m, n + m) for m in 1:n]
@@ -3671,6 +4092,7 @@ end
 function _s3_indexed_segments(x, y, z, edges, who::AbstractString)
 	for (name, values) in (("x", x), ("y", y), ("z", z))
 		_s3_array(values, who, name)
+		_s3_real_elements(values, who, name)
 	end
 	n = _s3_check_lengths(who, "x" => x, "y" => y, "z" => z)
 	size(edges, 2) == 2 || throw(ArgumentError(
@@ -3689,35 +4111,8 @@ function _s3_indexed_segments(x, y, z, edges, who::AbstractString)
 	return _s3_flat(x), _s3_flat(y), _s3_flat(z), pairs
 end
 
-const _S3_SEGMENTS_DOC = """
-Two forms: segment end points `(x0[k], y0[k], z0[k])`–`(x1[k], y1[k], z1[k])`,
-or vertices `x`, `y`, `z` with `edges`, an ne×2 matrix of 1-based vertex
-indices. All segments form one line trace (gaps between segments).
-
-$(_S3_LINE_DOC)
-"""
-
-"""
-	plot_segments3d(x0, y0, z0, x1, y1, z1; color = "#999999", linewidth = 1, dash = "",
-	                opacity = 1, legend = "", kwargs...) -> Plot
-	plot_segments3d(x, y, z, edges; kwargs...) -> Plot
-
-Unconnected 3-D line segments (matplotlib `Line3DCollection`), e.g. mesh edges
-or a dashed reference box.
-
-$(_S3_SEGMENTS_DOC)
-$(_S3_SCENE_KEYWORDS_DOC)
-"""
 function plot_segments3d end
 
-"""
-	plot_segments3d!(fig, x0, y0, z0, x1, y1, z1; kwargs...) -> nothing
-	plot_segments3d!(fig, x, y, z, edges; kwargs...) -> nothing
-
-Add 3-D line segments to an existing figure (`Plot`, `SyncPlot`, or a
-`SubplotFigure` cell via `row`/`col`, which returns `sf`). Takes the keywords
-of [`plot_segments3d`](@ref) except `show`.
-"""
 function plot_segments3d! end
 
 for (typed, prepare) in (
@@ -3804,6 +4199,106 @@ for (typed, prepare) in (
 	end
 end
 
+const _S3_LINE_KEYWORDS_DOC = raw"""
+- `linewidth::Real = 1`: line width in px (0: plotly's default).
+- `dash = ""`: "solid", "dot", "dash", "longdash", "dashdot" or
+  "longdashdot" (`""`: solid).
+- `opacity::Real = 1`: in [0, 1]; """ * _S3_OPACITY_LINE_DOC * "\n" * raw"""
+- `legend::AbstractString = ""`: legend name.
+"""
+
+const _S3_WIREFRAME_KEYWORDS_DOC = raw"""
+- `rstride::Integer = 1`, `cstride::Integer = 1`: draw every `rstride`-th
+  line of constant `i` and every `cstride`-th line of constant `j` (the last
+  line is always drawn); 0 skips that direction.
+- `color = "black"`: line colour (String or Symbol).
+""" * _S3_LINE_KEYWORDS_DOC
+
+const _S3_WIREFRAME_HEAD_DOC = raw"""
+`X` and `Y` are vectors or matrices of the size of `Z`, as in
+[`plot_surface`](@ref) (curvilinear grids work). All lines form one trace;
+non-finite values leave gaps.
+"""
+
+@doc _s3_doc(
+	raw"""
+		plot_wireframe(X, Y, Z; kwargs...) -> Plot
+
+	Grid lines of the surface `Z[i, j]` at `(X[i], Y[j])` (matplotlib
+	`plot_wireframe`).
+	""" * "\n" * _S3_WIREFRAME_HEAD_DOC,
+	_S3_WIREFRAME_KEYWORDS_DOC;
+	constructor = true,
+	example = raw"""
+	xs = range(-1, 1; length = 21)
+	Z = [x^2 - y^2 for x in xs, y in xs]
+	fig = plot_wireframe(xs, xs, Z; rstride = 2, cstride = 2, color = "steelblue")
+	""",
+) plot_wireframe
+
+@doc _s3_doc(
+	_s3_mutator_head(
+		raw"""
+			plot_wireframe!(fig, X, Y, Z; kwargs...)
+		""",
+		"a wireframe (for example the ghost of an undeformed mesh, with `opacity = 0.35`)",
+		"plot_wireframe",
+	) * "\n\n" * _S3_WIREFRAME_HEAD_DOC,
+	_S3_WIREFRAME_KEYWORDS_DOC;
+	constructor = false,
+	example = raw"""
+	xs = range(-1, 1; length = 11)
+	Z = [x^2 - y^2 for x in xs, y in xs]
+	fig = plot_surface(xs, xs, Z .+ 0.3; colorscale = "viridis")
+	plot_wireframe!(fig, xs, xs, Z; opacity = 0.35, legend = "undeformed")
+	""",
+) plot_wireframe!
+
+const _S3_SEGMENTS_KEYWORDS_DOC = raw"""
+- `color = "#999999"`: line colour (String or Symbol).
+""" * _S3_LINE_KEYWORDS_DOC
+
+const _S3_SEGMENTS_HEAD_DOC = raw"""
+The segments run from `(x0[k], y0[k], z0[k])` to `(x1[k], y1[k], z1[k])`, or
+between the vertices `edges[m, 1]` and `edges[m, 2]` (1-based) of `x`, `y`,
+`z`. All segments form one line trace; a non-finite end point leaves its
+segment out.
+"""
+
+@doc _s3_doc(
+	raw"""
+		plot_segments3d(x0, y0, z0, x1, y1, z1; kwargs...) -> Plot
+		plot_segments3d(x, y, z, edges; kwargs...) -> Plot
+
+	Unconnected 3-D line segments (matplotlib `Line3DCollection`), such as mesh
+	edges or a reference box.
+	""" * "\n" * _S3_SEGMENTS_HEAD_DOC,
+	_S3_SEGMENTS_KEYWORDS_DOC;
+	constructor = true,
+	example = raw"""
+	x = [0.0, 1, 1, 0]; y = [0.0, 0, 1, 1]; z = zeros(4)
+	fig = plot_segments3d(x, y, z, [1 2; 2 3; 3 4; 4 1]; color = "gray", dash = "dash")
+	""",
+) plot_segments3d
+
+@doc _s3_doc(
+	_s3_mutator_head(
+		raw"""
+			plot_segments3d!(fig, x0, y0, z0, x1, y1, z1; kwargs...)
+			plot_segments3d!(fig, x, y, z, edges; kwargs...)
+		""",
+		"unconnected 3-D line segments",
+		"plot_segments3d",
+	) * "\n\n" * _S3_SEGMENTS_HEAD_DOC,
+	_S3_SEGMENTS_KEYWORDS_DOC;
+	constructor = false,
+	example = raw"""
+	fig = plot_surface(rand(5, 5))
+	plot_segments3d!(fig, [0.0, 4.0], [0.0, 0.0], [0.0, 0.0], [0.0, 4.0], [4.0, 4.0], [1.0, 1.0];
+	                 color = :black, linewidth = 3)
+	""",
+) plot_segments3d!
+
 #endregion
 
 #region SubplotFigure methods
@@ -3833,19 +4328,20 @@ function _s3_subplot!(
 	axis_value = get(options, :coloraxis, nothing)
 	extra_axis = axis_value === nothing ? nothing : _normalize_coloraxis(axis_value, who)
 	extra_axis == "coloraxis" && (extra_axis = nothing)
-	range_keys = ((:xrange, :xaxis), (:yrange, :yaxis), (:zrange, :zaxis))
-	if any(((key, _),) -> haskey(options, key), range_keys)
-		target = _s3_scene_target(sf, who; row, col)
-		layout = _cmn_layout(sf)
-		for (key, axis) in range_keys
-			haskey(options, key) || continue
-			checked = _s3_range(options[key], who, String(key))
-			checked === nothing && continue
-			options[key] = _s3_stored_range(layout, target.scenekey, axis, checked, who, String(key))
-		end
+	target = _s3_scene_target(sf, who; row, col)
+	current = _cmn_plot(sf)
+	layout = current.layout
+	for (key, axis) in ((:xrange, :xaxis), (:yrange, :yaxis), (:zrange, :zaxis))
+		haskey(options, key) || continue
+		checked = _s3_range(options[key], who, String(key))
+		checked === nothing && continue
+		options[key] = _s3_stored_range(layout, target.scenekey, axis, checked, who, String(key))
 	end
+	context = _S3CellContext(current, target.scenekey, length(current.data))
 	if view_angles === nothing && !shared && extra_axis === nothing
-		return _subplot_delegate_mutator!(sf, mutator, args...; row, col, secondary_y, options...)
+		return Base.ScopedValues.with(_S3_CELL_CONTEXT => context) do
+			_subplot_delegate_mutator!(sf, mutator, args...; row, col, secondary_y, options...)
+		end
 	end
 	colorscale_given = !_is_unset_colorscale(get(options, :colorscale, ""))
 	impl = staged -> begin
@@ -3869,7 +4365,9 @@ function _s3_subplot!(
 		_refresh!(getfield(staged, :fig))
 		return staged
 	end
-	return _transactional_subplot_mutation!(impl, sf, _SUBPLOT_SELECTION_METADATA_FIELDS)
+	return Base.ScopedValues.with(_S3_CELL_CONTEXT => context) do
+		_transactional_subplot_mutation!(impl, sf, _SUBPLOT_SELECTION_METADATA_FIELDS)
+	end
 end
 
 plot_surface!(sf::SubplotFigure, X::AbstractArray, Y::AbstractArray, Z::AbstractArray; kwargs...) =

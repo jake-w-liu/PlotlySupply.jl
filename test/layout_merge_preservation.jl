@@ -2463,7 +2463,9 @@ end
     @test scene_figure.layout.fields[:coloraxis] ===
           holder[:coloraxis]
     @test holder[:coloraxis][:cmin] == 0.0
-    @test holder[:coloraxis][:colorscale] == "Viridis"
+    # 2.0 (C20): colormap names are resolved to explicit stops.
+    @test holder[:coloraxis][:colorscale] ==
+          PlotlySupply._resolve_colorscale("Viridis"; who="test").scale
 
     @test plot_scatter3d!(
         scene_figure,
