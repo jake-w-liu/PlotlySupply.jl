@@ -3533,8 +3533,9 @@ const _S3_STREAMTUBE_KEYWORDS_DOC = raw"""
 """
 
 const _S3_STREAMTUBE_HEAD_DOC = raw"""
-The tubes start at plotly's default seed points and are coloured by the
-vector norm.
+The tubes start at plotly's default seed points, the interior grid points of
+the plane `y = minimum(y)`, so only flow that leaves that plane is drawn; they
+are coloured by the vector norm.
 """ * "\n" * _S3_FIELD_LAYOUT_DOC
 
 @doc _s3_doc(
@@ -4328,6 +4329,9 @@ function _s3_subplot!(
 	axis_value = get(options, :coloraxis, nothing)
 	extra_axis = axis_value === nothing ? nothing : _normalize_coloraxis(axis_value, who)
 	extra_axis == "coloraxis" && (extra_axis = nothing)
+	secondary_y && throw(ArgumentError(
+		"$(who): a 3-D scene has no secondary y axis; drop `secondary_y = true`.",
+	))
 	target = _s3_scene_target(sf, who; row, col)
 	current = _cmn_plot(sf)
 	layout = current.layout

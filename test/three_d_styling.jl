@@ -277,7 +277,8 @@ end
 end
 
 @testset "CRC: 3D appenders can select orthographic projection" begin
-    for kind in (:scatter3d, :quiver3d)
+    # 2.0 (#240/#94): plot_surface! takes `perspective` like the others.
+    for kind in (:surface_xyz, :surface_z, :scatter3d, :quiver3d)
         figure = _seed_rich_three_d_scene!(
             plot_scatter3d(1:3, 1:3, 1:3),
         )
