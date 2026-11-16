@@ -5100,4 +5100,14 @@ end
     include("mutator_parity.jl")
     include("renderer_transactions.jl")
     include("modern_maps.jl")
+
+    # 2.0 scientific-plotting extensions and regression suites: every
+    # `test/sci_*.jl` and `test/regression_*.jl` file is picked up automatically.
+    for test_file in sort!(filter(
+        name -> endswith(name, ".jl") &&
+            (startswith(name, "sci_") || startswith(name, "regression_")),
+        readdir(@__DIR__),
+    ))
+        include(test_file)
+    end
 end

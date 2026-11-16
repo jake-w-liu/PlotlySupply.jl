@@ -11072,6 +11072,23 @@ end
 include("modern_map_api.jl")
 include("modern_map_updates.jl")
 
+# 2.0 scientific-plotting extensions. Order matters: later files may use helpers
+# from earlier ones.
+include("sci/base.jl")
+include("sci/common.jl")
+include("sci/color.jl")
+include("sci/mathtext.jl")
+include("sci/style.jl")
+include("sci/export.jl")
+include("sci/colorbar.jl")
+include("sci/axes.jl")
+include("sci/text.jl")
+include("sci/reference.jl")
+include("sci/lines.jl")
+include("sci/mesh2d.jl")
+include("sci/fields.jl")
+include("sci/scene3d.jl")
+
 """
 	plot_choropleth(locations, z; locationmode="country names", colorscale="", scope="", projection="", kwargs...)
 
@@ -11659,6 +11676,19 @@ const _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS = (
 	:plot_choroplethmapbox!,
 	:plot_densitymapbox!,
 	:set_template!,
+	_SCI_COMMON_MUTATORS...,
+	_SCI_COLOR_MUTATORS...,
+	_SCI_MATHTEXT_MUTATORS...,
+	_SCI_STYLE_MUTATORS...,
+	_SCI_EXPORT_MUTATORS...,
+	_SCI_COLORBAR_MUTATORS...,
+	_SCI_AXES_MUTATORS...,
+	_SCI_TEXT_MUTATORS...,
+	_SCI_REFERENCE_MUTATORS...,
+	_SCI_LINES_MUTATORS...,
+	_SCI_MESH2D_MUTATORS...,
+	_SCI_FIELDS_MUTATORS...,
+	_SCI_SCENE3D_MUTATORS...,
 )
 
 function _is_transactional_high_level_plot_mutator(mutator::Function)
