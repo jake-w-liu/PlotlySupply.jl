@@ -172,6 +172,9 @@ end
 		@test _rx_get(trace, :marker, :color) == ["red", "green", "blue"]
 		@test trace.fields[:name] == "2024"
 		@test _rx_get(funnel_fig.layout, :xaxis, :title, :text) == "Users"
+		# Plotly hides a funnel's value axis; an x-axis title shows it.
+		@test _rx_get(funnel_fig.layout, :xaxis, :visible) === true
+		@test !_rx_has(_rx_get(plot_funnel([1, 2], ["a", "b"]).layout, :xaxis), :visible)
 		@test _rx_get(funnel_fig.layout, :title, :text) == "Conversion"
 		@test _rx_get(funnel_fig.layout, :xaxis, :showgrid) === false
 		@test _rx_throws(() -> plot_funnel([1, 2], ["a"]), "`y` must have one entry")
@@ -230,7 +233,26 @@ end
 			twin = subplots(1, 1; sync = false, specs = Union{Missing, Spec}[Spec(secondary_y = true);;])
 			@test mutator(twin, data...; secondary_y = true) === twin
 			@test only(twin.data).fields[:yaxis] == "y2"
+
+			# The target cell's log axis is checked although the trace is
+			# staged on an empty figure.
+			log_cell = subplots(1, 2; sync = false)
+			plot_scatter!(log_cell, 1:3, [1, 10, 100]; row = 1, col = 2, yscale = "log")
+			bad = (1:2, [1, 2], [2, 3], [0, 1], [1, 2])
+			@test _rx_atomic(log_cell.fig, () -> mutator(log_cell, bad...; row = 1, col = 2), "`low[1]` is on a logarithmic axis")
+			@test mutator(log_cell, bad...; row = 1, col = 2, yscale = "linear") === log_cell
+			@test mutator(log_cell, bad...; row = 1, col = 1) === log_cell
 		end
+	end
+
+	@testset "SubplotFigure funnel/waterfall reject a log value axis in the cell" begin
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, [1, 10], [1, 10]; row = 1, col = 1, xscale = "log", yscale = "log")
+		@test _rx_atomic(sf.fig, () -> plot_waterfall!(sf, ["a"], [1]; row = 1, col = 1), "logarithmic")
+		@test _rx_atomic(sf.fig, () -> plot_funnel!(sf, [1, 2], ["a", "b"]; row = 1, col = 1), "logarithmic")
+		@test plot_waterfall!(sf, ["a"], [1]; row = 1, col = 2) === sf
+		@test plot_funnel!(sf, [1, 2], ["a", "b"]; row = 1, col = 2, xlabel = "n") === sf
+		@test _rx_get(sf.fig.layout, :xaxis2, :visible) === true
 	end
 
 	@testset "sankey validation and colours" begin
@@ -275,7 +297,9 @@ end
 		@test _rx_get(roomy.layout, :margin, :l) == 80
 
 		trace = _rx_trace(plot_parcoords(dims; line_color = [1, 2, 3], colorscale = "magma"))
-		@test _rx_get(trace, :dimensions)[1][:label] == PlotlySupply._label("mass \$m\$")
+		# Parcoords titles are drawn as plain Unicode (MathJax output is misplaced).
+		@test _rx_get(trace, :dimensions)[1][:label] == PlotlySupply._label_plain("mass \$m\$")
+		@test !occursin('\$', _rx_get(trace, :dimensions)[1][:label])
 		@test _rx_get(trace, :line, :colorscale) == _rx_scale("magma")
 		@test _rx_get(_rx_trace(plot_parcoords(dims; line_color = :teal)), :line, :color) == "teal"
 		@test _rx_throws(() -> plot_parcoords(Pair{String, Vector{Int}}[]), "must not be empty")

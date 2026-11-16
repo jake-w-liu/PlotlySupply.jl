@@ -9631,6 +9631,8 @@ _extended_cartesian_labels(who::AbstractString; title, xlabel, ylabel) = (
 
 # Constructor of a Cartesian chart: one trace, spine-styled axes, then the
 # common options through the D7 primitives (validated before any write).
+# `reveal_x_axis` shows an x axis plotly hides by default (the value axis of
+# a horizontal funnel) when the caller gave it a title.
 function _extended_cartesian_plot(
 	who::AbstractString,
 	trace;
@@ -9645,6 +9647,7 @@ function _extended_cartesian_plot(
 	fontsize,
 	grid,
 	show::Bool,
+	reveal_x_axis::Bool = false,
 )
 	fig = Plot(trace, _extended_cartesian_layout())
 	_apply_cartesian_plot_options!(
@@ -9662,6 +9665,7 @@ function _extended_cartesian_plot(
 		title = labels.title,
 		who = who,
 	)
+	reveal_x_axis && relayout!(fig, xaxis_visible = true)
 	return _extended_maybe_show(fig, show, width, height, raw_title)
 end
 
@@ -9681,6 +9685,7 @@ function _extended_cartesian_append!(
 	height,
 	fontsize,
 	grid,
+	reveal_x_axis::Bool = false,
 )
 	_validate_cartesian_options(
 		fig,
@@ -9696,6 +9701,7 @@ function _extended_cartesian_append!(
 	)
 	push!(_plot_data(fig), trace)
 	_apply_axis_grid!(fig, grid, who)
+	reveal_x_axis && relayout!(fig, xaxis_visible = true)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = labels.xlabel,
@@ -9720,6 +9726,23 @@ end
 # the figure's current primary-axis type.
 _extended_final_axis_type(fig, key::Symbol, scale::AbstractString) =
 	isempty(scale) ? _axis_type(fig, key) : String(scale)
+
+# A SubplotFigure mutator runs the Plot mutator on an empty staging figure,
+# which cannot see the target cell's axes. These are the (x, y) axis types of
+# that cell ("-" for both when it is not a Cartesian cell; the delegate then
+# rejects the trace), so the cell's log axes can be checked up front.
+function _extended_subplot_axis_types(sf::SubplotFigure, who::AbstractString; row, col, secondary_y::Bool)
+	target = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, who = who)
+	target.kind === :xy || return ("-", "-")
+	return (_axis_type(sf, target.xkey), _axis_type(sf, target.ykey))
+end
+
+# Final type of a SubplotFigure cell axis: an explicit `xscale`/`yscale`
+# keyword wins over the cell's current type.
+function _extended_subplot_final_type(kwargs, name::Symbol, cell_type::AbstractString)
+	scale = get(kwargs, name, "")
+	return scale isa AbstractString && !isempty(scale) ? String(scale) : cell_type
+end
 
 # ── Pie / funnel-area ────────────────────────────────────────────────
 
@@ -10559,7 +10582,8 @@ Funnel chart: one horizontal bar per stage, centred on zero, with width
 - `color::Union{AbstractString,Symbol,AbstractVector} = ""`: bar colour, or
   one colour per stage (`""` = colorway).
 - `legend::AbstractString = ""`: legend name of the trace (mathtext).
-- `xlabel`, `ylabel::AbstractString = ""`: axis titles (mathtext).
+- `xlabel`, `ylabel::AbstractString = ""`: axis titles (mathtext). Plotly
+  hides the value (x) axis of a funnel; a non-empty `xlabel` shows it.
 - `xrange`, `yrange = [0, 0]`: axis ranges as a 2-element vector or tuple in
   data units; `[0, 0]` (or `nothing`) means automatic.
 - `title::AbstractString = ""`: figure title (mathtext).
@@ -10612,6 +10636,7 @@ function plot_funnel(
 		fontsize = fontsize,
 		grid = grid,
 		show = show,
+		reveal_x_axis = !isempty(labels.xlabel),
 	)
 end
 
@@ -10679,6 +10704,7 @@ function plot_funnel!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		reveal_x_axis = !isempty(labels.xlabel),
 	)
 end
 
@@ -10691,6 +10717,11 @@ function plot_funnel!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
+	x_type, _ = _extended_subplot_axis_types(sf, "plot_funnel!"; row = row, col = col, secondary_y = secondary_y)
+	x_type == "log" && throw(ArgumentError(
+		"plot_funnel!: the x axis of this cell is logarithmic, but funnel (x) bars " *
+		"start at zero; use a linear axis.",
+	))
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_funnel!,
@@ -10896,6 +10927,11 @@ function plot_waterfall!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
+	_, y_type = _extended_subplot_axis_types(sf, "plot_waterfall!"; row = row, col = col, secondary_y = secondary_y)
+	y_type == "log" && throw(ArgumentError(
+		"plot_waterfall!: the y axis of this cell is logarithmic, but waterfall (y) " *
+		"bars start at zero; use a linear axis.",
+	))
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_waterfall!,
@@ -11595,6 +11631,14 @@ function plot_candlestick!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
+	x_type, y_type = _extended_subplot_axis_types(sf, "plot_candlestick!"; row = row, col = col, secondary_y = secondary_y)
+	if _extended_subplot_final_type(kwargs, :yscale, y_type) == "log"
+		for (name, values) in (("open", open), ("high", high), ("low", low), ("close", close))
+			_extended_check_numbers("plot_candlestick!", name, values; gaps = true, positive = true)
+		end
+	end
+	_extended_subplot_final_type(kwargs, :xscale, x_type) == "log" &&
+		_extended_check_numbers("plot_candlestick!", "x", x; positive = true)
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_candlestick!,
@@ -11768,6 +11812,14 @@ function plot_ohlc!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
+	x_type, y_type = _extended_subplot_axis_types(sf, "plot_ohlc!"; row = row, col = col, secondary_y = secondary_y)
+	if _extended_subplot_final_type(kwargs, :yscale, y_type) == "log"
+		for (name, values) in (("open", open), ("high", high), ("low", low), ("close", close))
+			_extended_check_numbers("plot_ohlc!", name, values; gaps = true, positive = true)
+		end
+	end
+	_extended_subplot_final_type(kwargs, :xscale, x_type) == "log" &&
+		_extended_check_numbers("plot_ohlc!", "x", x; positive = true)
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_ohlc!,
@@ -12453,9 +12505,11 @@ end
 
 # ── Parallel coordinates ─────────────────────────────────────────────
 
-# One dimension: a `label => values` Pair (the label goes through mathtext;
-# a non-vector iterable is collected), or a raw plotly `attr(...)` passed
-# through unchanged.
+# One dimension: a `label => values` Pair (a non-vector iterable is
+# collected), or a raw plotly `attr(...)` passed through unchanged. Plotly
+# hands parcoords axis titles to MathJax, but places the typeset result at the
+# top tick label instead of above the axis (seen on 700x500 renders with
+# plotly.js 2.35.2), so labels take the Unicode `_label_plain` path.
 function _parcoords_dim(who::AbstractString, dimension, position::Integer)
 	if dimension isa Pair
 		label = first(dimension)
@@ -12471,7 +12525,7 @@ function _parcoords_dim(who::AbstractString, dimension, position::Integer)
 		))
 		_extended_check_numbers(who, "dimensions[$(position)] values", values; gaps = true)
 		return attr(
-			label = _extended_label(String(label), who, "dimensions[$(position)] label"),
+			label = _extended_plain_label(String(label), who, "dimensions[$(position)] label"),
 			values = values,
 		)
 	end
@@ -12552,9 +12606,10 @@ Parallel-coordinates plot: one vertical axis per dimension and one line per
 row through the row's values.
 
 # Arguments
-- `dimensions::AbstractVector`: `"label" => values` Pairs (the label is
-  mathtext; `values` is a vector, stored without copying, or any iterable,
-  which is collected), or raw plotly `attr(label = …, values = …, range = …)`
+- `dimensions::AbstractVector`: `"label" => values` Pairs (`\$…\$` math in
+  the label is drawn as Unicode with sub/superscripts; `values` is a vector,
+  stored without copying, or any iterable, which is collected), or raw plotly
+  `attr(label = …, values = …, range = …)`
   dimensions (passed through unchanged). All dimensions need the same number
   of values (rows).
 
