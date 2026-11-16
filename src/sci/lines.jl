@@ -48,6 +48,10 @@ function _lines_validate_figure(fig, who::AbstractString, secondary_y::Bool, fig
 		height = figure.height,
 		fontsize = figure.fontsize,
 		grid = figure.grid,
+		xticks = figure.xticks,
+		xticklabels = figure.xticklabels,
+		yticks = figure.yticks,
+		yticklabels = figure.yticklabels,
 	)
 	return nothing
 end
@@ -183,7 +187,7 @@ end
 # vector of vectors) call.
 function _lines_samples(x, who::AbstractString)
 	_scat_require_vector(x, who, :x)
-	if _is_nested_series(x)
+	if _is_nested_series(x; who = who)
 		n = length(x)
 		return [_lines_sample(series, who, :x, index, n) for (index, series) in enumerate(x)]
 	end
@@ -205,7 +209,7 @@ function _band_series(x, lower, upper, where, who::AbstractString)
 		"(one per band); got $(typeof(where)).",
 	))
 	inputs = ((x, :x), (lower, :lower), (upper, :upper), (where, :where))
-	nested = map(input -> _is_nested_series(input[1]), inputs)
+	nested = map(input -> _is_nested_series(input[1]; who = who), inputs)
 	counts = [length(input[1]) for (input, flag) in zip(inputs, nested) if flag]
 	n = isempty(counts) ? 1 : first(counts)
 	all(==(n), counts) || throw(ArgumentError(
@@ -320,7 +324,7 @@ function _band_impl!(
 	edge_width = _scat_nonnegative(linewidth, who, "linewidth")
 	_lines_validate_figure(fig, who, secondary_y, figure)
 	xtype, ytype = _lines_axis_types(fig, secondary_y, figure)
-	n_existing = length(_plot_data(fig))
+	n_existing = _scat_existing_count(fig)
 	styles = _scat_series_styles(
 		n,
 		n_existing,
@@ -564,7 +568,7 @@ function _segments_impl!(
 	]
 	style = only(_scat_series_styles(
 		1,
-		length(_plot_data(fig)),
+		_scat_existing_count(fig),
 		who;
 		mode = "lines",
 		dash = dash,
@@ -970,7 +974,7 @@ function _ecdf_impl!(
 	n = length(samples)
 	styles = _scat_series_styles(
 		n,
-		length(_plot_data(fig)),
+		_scat_existing_count(fig),
 		who;
 		mode = "lines",
 		dash = dash,
@@ -1242,7 +1246,7 @@ function _kde_impl!(
 	]
 	styles = _scat_series_styles(
 		n,
-		length(_plot_data(fig)),
+		_scat_existing_count(fig),
 		who;
 		mode = "lines",
 		dash = dash,
@@ -1253,6 +1257,20 @@ function _kde_impl!(
 		fill = fill ? "tozeroy" : "",
 	)
 	_lines_validate_figure(fig, who, secondary_y, figure)
+	xtype, _ = _lines_axis_types(fig, secondary_y, figure)
+	if xtype == "log"
+		# A logarithmic x axis cannot show the curve below 0: the evaluation
+		# grid must stay positive.
+		for (series, (sample, h)) in enumerate(zip(samples, bandwidths))
+			lower = first(sample) - cut * h
+			lower > 0 || throw(ArgumentError(
+				"$(who): on a logarithmic x axis the curve of `x`" *
+				"$(n > 1 ? " (series $(series))" : "") would start at $(lower) <= 0 " *
+				"(minimum $(first(sample)) minus `cut` = $(cut) bandwidths of $(h)); " *
+				"pass a smaller `cut` or use a linear axis.",
+			))
+		end
+	end
 
 	curves = map(zip(samples, bandwidths)) do (sample, h)
 		grid = collect(range(first(sample) - cut * h, last(sample) + cut * h; length = Int(npoints)))
@@ -1284,7 +1302,8 @@ const _KDE_DOC_KEYWORDS = """
   non-zero spread.
 - `npoints = 512`: number of evaluation points (>= 2), evenly spaced from
   `minimum(x) - cut * bandwidth` to `maximum(x) + cut * bandwidth`;
-  `cut = 3` (>= 0).
+  `cut = 3` (>= 0). On a logarithmic x axis the grid must stay positive
+  (otherwise an `ArgumentError` asks for a smaller `cut`).
 - `fill = false`: fill the area under the curve (`fill = "tozeroy"`).
 - `color = ""`, `dash = ""`, `linewidth = 0`, `legend = ""`,
   `showlegend = nothing`: line style, each a scalar or one entry per series
@@ -1453,7 +1472,7 @@ end
 # series).
 function _complex_parts(z, who::AbstractString)
 	_scat_require_vector(z, who, :z)
-	_is_nested_series(z) || return _complex_parts_flat(z, who)
+	_is_nested_series(z; who = who) || return _complex_parts_flat(z, who)
 	xs = Vector{Any}(undef, length(z))
 	ys = Vector{Any}(undef, length(z))
 	for (index, series) in enumerate(z)

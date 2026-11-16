@@ -4048,8 +4048,6 @@ end
 
 for (fn, nargs) in (
 	(:plot_funnel!, 2),
-	(:plot_area!, 1),
-	(:plot_area!, 2),
 	(:plot_candlestick!, 5),
 	(:plot_ohlc!, 5),
 	(:plot_histogram2d!, 2),
@@ -4088,9 +4086,9 @@ function plot_image!(
 	return _subplot_delegate_mutator!(sf, plot_image!, z; kwargs...)
 end
 
-# SubplotFigure methods of plot_area! for every vector type (the table above
-# keeps its narrower 1.x methods, which behave the same). The Plot/SyncPlot
-# methods are generated from the untyped ones (see
+# SubplotFigure methods of plot_area! for every array type, through the
+# scatter-family delegate (real-figure colours and style cycle). The
+# Plot/SyncPlot methods are generated from the untyped ones (see
 # `_install_transactional_high_level_plot_wrappers!`).
 function plot_area!(
 	sf::SubplotFigure,
@@ -4101,7 +4099,7 @@ function plot_area!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _scat_subplot_delegate!(
 		sf,
 		plot_area!,
 		x,
@@ -4121,7 +4119,7 @@ function plot_area!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _scat_subplot_delegate!(
 		sf,
 		plot_area!,
 		y;
@@ -4208,20 +4206,22 @@ _scalar_or_first(value, default) = value isa AbstractVector ? (isempty(value) ? 
 # A multi-series input is any abstract vector whose elements are themselves
 # abstract vectors.  Keeping this type-driven avoids scanning the data and
 # correctly handles ranges, views, and abstractly typed collections.
-@inline _is_nested_series(::AbstractVector{<:AbstractVector}) = true
-@inline _is_nested_series(::Any) = false
+@inline _is_nested_series(::AbstractVector{<:AbstractVector}; who::AbstractString = "") = true
+@inline _is_nested_series(::Any; who::AbstractString = "") = false
 
 # Abstractly typed containers (`ys = []; push!(ys, v)`, JSON-parsed data) carry
 # no element type to dispatch on, so their elements are inspected. A container
 # mixing series vectors with scalar values is ambiguous and is rejected rather
-# than plotted as one garbage series.
-function _is_nested_series(values::AbstractVector)
+# than plotted as one garbage series. `who` (the public function name), when
+# given, prefixes the error message.
+function _is_nested_series(values::AbstractVector; who::AbstractString = "")
 	isconcretetype(eltype(values)) && return false
 	isempty(values) && return false
 	nested_count = count(value -> value isa AbstractVector, values)
 	nested_count == 0 && return false
 	nested_count == length(values) ||
 		throw(ArgumentError(
+			(isempty(who) ? "" : "$(who): ") *
 			"multi-series input mixes $(nested_count) series vector(s) with " *
 			"$(length(values) - nested_count) scalar value(s); pass either one " *
 			"flat series or a vector whose elements are all series vectors.",
@@ -4261,8 +4261,8 @@ function _nested_coordinate_mode(
 	who::AbstractString = "",
 )
 	prefix = isempty(who) ? "" : "$(who): "
-	primary_nested = _is_nested_series(primary)
-	secondary_nested = _is_nested_series(secondary)
+	primary_nested = _is_nested_series(primary; who = who)
+	secondary_nested = _is_nested_series(secondary; who = who)
 	if secondary_nested
 		primary_nested || throw(ArgumentError(
 			"$(prefix)`$secondary_name` contains multiple series but `$primary_name` contains one series.",
@@ -4408,7 +4408,8 @@ end
 #   `(minus, plus)` tuples: one asymmetric pair per trace.
 # A per-trace list shorter than the trace count leaves the remaining traces
 # without error bars and surplus entries are ignored (the 1.x leniency of the
-# per-series keywords).
+# per-series keywords). The `minus` and `plus` lists of a per-trace asymmetric
+# pair must hold the same number of series.
 function _error_bar_entries(
 	err,
 	n::Int,
@@ -4430,12 +4431,16 @@ function _error_bar_entries(
 			"$(prefix)`$(name) = (minus, plus)` needs two vectors; got " *
 			"($(typeof(minus)), $(typeof(plus))).",
 		))
-		minus_nested = _is_nested_series(minus)
-		minus_nested == _is_nested_series(plus) || throw(ArgumentError(
+		minus_nested = _is_nested_series(minus; who = who)
+		minus_nested == _is_nested_series(plus; who = who) || throw(ArgumentError(
 			"$(prefix)`$(name) = (minus, plus)`: both must be flat vectors or " *
 			"both vectors of vectors (one per series).",
 		))
 		if minus_nested
+			length(minus) == length(plus) || throw(ArgumentError(
+				"$(prefix)`$(name) = (minus, plus)`: `minus` has $(length(minus)) " *
+				"series but `plus` has $(length(plus)).",
+			))
 			for (index, minus_i, plus_i) in zip(1:n, minus, plus)
 				entries[index] = (minus_i, plus_i)
 			end
@@ -4447,7 +4452,7 @@ function _error_bar_entries(
 			for (index, pair) in zip(1:n, err)
 				entries[index] = asymmetric_pair(pair)
 			end
-		elseif _is_nested_series(err)
+		elseif _is_nested_series(err; who = who)
 			for (index, series_errors) in zip(1:n, err)
 				entries[index] = series_errors
 			end
@@ -4480,8 +4485,10 @@ function _set_error_bars!(trace, error_x, error_y)
 	return nothing
 end
 
-function _auto_xvalues(y)
-	if _is_nested_series(y)
+# Default x coordinates `0:length(y)-1` of a y-only call (one range per
+# series for multi-series `y`). `who` prefixes the error for ambiguous input.
+function _auto_xvalues(y; who::AbstractString = "")
+	if _is_nested_series(y; who = who)
 		x = Vector{UnitRange{Int}}(undef, length(y))
 		if y isa LinRange{<:Vector}
 			# A built-in LinRange of ordinary vectors preserves the endpoint
@@ -4659,6 +4666,9 @@ const _SCAT_TEXT_POSITIONS = (
 # an active PlotStyle says otherwise.
 const _STEM_DEFAULT_COLOR = "black"
 const _STEM_DEFAULT_LINEWIDTH = 0.5
+# plotly.js `zorder` of stems traces: below the default layer 0 of every other
+# trace on the same axes.
+const _STEM_ZORDER = -1
 
 # Range check of any Cartesian axis `key` (`nothing`: an axis that does not
 # exist yet and starts linear) against the axis type the call ends up with.
@@ -4700,6 +4710,10 @@ function _scat_validate_cartesian_options(
 	height = 0,
 	fontsize = 0,
 	grid = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
 )
 	primary_y = ykey === :yaxis
 	_validate_cartesian_options(
@@ -4717,6 +4731,33 @@ function _scat_validate_cartesian_options(
 	if !primary_y
 		_require_axis_scale(yscale, who, "yscale")
 		_scat_require_axis_range(fig, ykey, yrange, yscale, who, "yrange")
+	end
+	_scat_validate_ticks(fig, :xaxis, xticks, xticklabels, xscale, who, "x")
+	_scat_validate_ticks(fig, ykey, yticks, yticklabels, yscale, who, "y")
+	return nothing
+end
+
+# Tick values and labels of axis `key` (`nothing`: a twin y axis not created
+# yet), checked as `_apply_ticks!` will check them once the call's `scale` is
+# applied, so a bad tick keyword throws before the figure changes.
+function _scat_validate_ticks(
+	fig,
+	key::Union{Nothing, Symbol},
+	values,
+	labels,
+	scale::AbstractString,
+	who::AbstractString,
+	letter::AbstractString,
+)
+	(values === nothing && labels === nothing) && return nothing
+	log_axis = !isempty(scale) ? scale == "log" :
+		key !== nothing && _cmn_is_log_axis(_plot_layout(fig), key)
+	tickvals = values === nothing ? nothing : _cmn_tick_values(values, log_axis, who)
+	if labels !== nothing
+		tickvals === nothing && throw(ArgumentError(
+			"$(who): `$(letter)ticklabels` needs `$(letter)ticks` (one tick value per label).",
+		))
+		_cmn_tick_labels(labels, length(tickvals), who)
 	end
 	return nothing
 end
@@ -4894,8 +4935,10 @@ function _scat_series(
 end
 
 # One validated value per series: a scalar applies to every series; a vector
-# gives one entry per series (missing entries take `default`, surplus entries
-# are ignored, as in 1.x). `check` validates and normalises one entry.
+# gives one entry per series. Missing entries take `default` and surplus
+# entries are ignored, the per-series convention of every plot family
+# (`_series_kwarg_vector`). `check` validates and normalises each entry that
+# is used (its messages name the keyword).
 _scat_per_series(value, n::Int, default, check) =
 	Any[check(entry) for entry in _series_kwarg_vector(value, n, default, Any)]
 
@@ -5009,8 +5052,18 @@ function _scat_series_styles(
 )
 	modes = _scat_per_series(mode, n, "lines", value -> _scat_mode(value, who))
 	dashes = _scat_per_series(dash, n, "", value -> _scat_dash(value, who))
-	colors = _scat_per_series(color, n, "", value -> _cmn_check_color(value, "color", who))
-	names = _scat_per_series(legend, n, "", value -> _scat_string(value, who, "legend"))
+	colors = _scat_per_series(
+		color,
+		n,
+		"",
+		value -> _cmn_check_color(value, "color", who),
+	)
+	names = _scat_per_series(
+		legend,
+		n,
+		"",
+		value -> _scat_string(value, who, "legend"),
+	)
 	sizes = _scat_per_series(
 		marker_size,
 		n,
@@ -5135,7 +5188,7 @@ function _scat_series_text(text, nested::Bool, lengths::Vector{Int}, who::Abstra
 		"$(who): `text` must be nothing, a string, a vector of labels or a vector " *
 		"of label vectors (one per series); got $(typeof(text)).",
 	))
-	if nested && _is_nested_series(text)
+	if nested && _is_nested_series(text; who = who)
 		for (index, labels) in zip(1:n, text)
 			out[index] = _scat_text_labels(labels, lengths[index], who, index)
 		end
@@ -5291,12 +5344,22 @@ function _scat_subplot_delegate!(sf::SubplotFigure, mutator, args...; kwargs...)
 	return _subplot_delegate_mutator!(sf, in_context, args...; kwargs...)
 end
 
-# Default colour of the trace at 1-based position `index` of `fig.data`, or of
-# the real figure when a SubplotFigure call is building its traces.
+# Number of traces that precede the next trace appended to `fig`: its own
+# traces plus, while a SubplotFigure call builds its traces in a scratch
+# figure, the real figure's. Trace positions derived from it (default colours,
+# style cycles) match the ones plotly.js assigns in the final figure.
+function _scat_existing_count(fig)
+	context = _SCAT_SUBPLOT_CONTEXT[]
+	count = length(_plot_data(fig))
+	return context === nothing ? count : context.offset + count
+end
+
+# Default colour plotly.js gives the trace at 1-based position `index` of the
+# final figure (`index` counts from `_scat_existing_count`): read from `fig`,
+# or from the real figure while a SubplotFigure call is building its traces.
 function _scat_default_color(fig, index::Integer)
 	context = _SCAT_SUBPLOT_CONTEXT[]
-	context === nothing && return _default_trace_color(fig, index)
-	return _default_trace_color(context.figure, context.offset + index)
+	return _default_trace_color(context === nothing ? fig : context.figure, index)
 end
 
 # Shared body of plot_scatter / plot_scatter! (and plot_complex(!)): validate
@@ -5353,7 +5416,7 @@ function _scatter_impl!(
 	xs, ys, nested = _scat_series(x, y, who)
 	n = length(ys)
 	lengths = Int[length(series) for series in ys]
-	n_existing = length(_plot_data(fig))
+	n_existing = _scat_existing_count(fig)
 	styles = _scat_series_styles(
 		n,
 		n_existing,
@@ -5392,6 +5455,10 @@ function _scatter_impl!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
 	)
 
 	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
@@ -5726,7 +5793,7 @@ function plot_scatter(
 end
 
 plot_scatter(y::AbstractArray; kwargs...) =
-	plot_scatter(_auto_xvalues(y), y; kwargs...)
+	plot_scatter(_auto_xvalues(y; who = "plot_scatter"), y; kwargs...)
 
 # Legend groups that tie each stem series' head and stem traces together. They
 # are unique within the target figure: groups already used by its traces (or,
@@ -5813,7 +5880,7 @@ function _stem_impl!(
 		"$(who): `baseline` must be a finite number; got $(repr(baseline)).",
 	))
 	n = length(ys)
-	n_existing = length(_plot_data(fig))
+	n_existing = _scat_existing_count(fig)
 	styles = _scat_series_styles(
 		n,
 		n_existing,
@@ -5839,6 +5906,10 @@ function _stem_impl!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
 	)
 
 	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
@@ -5872,12 +5943,20 @@ function _stem_impl!(
 			:legendgroup => groups[index],
 		)
 		isempty(marker.fields) || (head[:marker] = marker)
-		style.showlegend === nothing || (head[:showlegend] = style.showlegend)
+		# An unnamed series has no legend entry (its stems trace would otherwise
+		# make plotly.js draw a legend with one blank entry); `showlegend`
+		# overrides this.
+		head_legend = style.showlegend === nothing ?
+			(isempty(name) ? false : nothing) : style.showlegend
+		head_legend === nothing || (head[:showlegend] = head_legend)
 		isempty(yref) || (head[:yaxis] = yref)
 		heads[index] = GenericTrace("scatter", head)
 
 		stem_x, stem_y = _stem_segments(xs[index], ys[index], baseline)
-		stem_color = isempty(series_color) ? _STEM_DEFAULT_COLOR : String(series_color)
+		# Stems take the series colour only when one is given (`color`, or the
+		# active style's cycle); the colorway colour resolved above for
+		# white-faced or line-symbol heads stays on the heads.
+		stem_color = isempty(style.color) ? _STEM_DEFAULT_COLOR : String(style.color)
 		stem_width = style.linewidth > 0 ? style.linewidth : _STEM_DEFAULT_LINEWIDTH
 		stem = Dict{Symbol, Any}(
 			:x => stem_x,
@@ -5888,6 +5967,9 @@ function _stem_impl!(
 			:legendgroup => groups[index],
 			:showlegend => false,
 			:hoverinfo => "skip",
+			# Drawn below the heads (and the other traces of the axes), as in
+			# matplotlib, so a stem never crosses a hollow or white-faced head.
+			:zorder => _STEM_ZORDER,
 		)
 		isempty(yref) || (stem[:yaxis] = yref)
 		stems[index] = GenericTrace("scatter", stem)
@@ -5935,8 +6017,9 @@ vertical line (matplotlib `stem`). The one-argument form uses
 Each series is drawn by two traces: a marker ("head") trace carrying the legend
 entry, and one stems trace whose segments are separated by gaps. The two share
 a legend group, so clicking the legend entry toggles the whole series. All head
-traces of a call come first, then all stems traces. Stems never show hover
-labels or legend entries.
+traces of a call come first, then all stems traces; the stems are drawn below
+every other trace of the axes (plotly.js `zorder = -1`), so they never cross a
+head. Stems never show hover labels or legend entries.
 
 #### Data
 
@@ -5950,8 +6033,8 @@ Per series (a value for every series, or a vector with one entry per series):
 
 - `color = ""`: head and stem colour (`""`: heads use the colorway, stems are
   black).
-- `legend = ""`: legend name; `showlegend = nothing`: force the legend entry
-  on (`true`) or off (`false`).
+- `legend = ""`: legend name (an unnamed series has no legend entry);
+  `showlegend = nothing`: force the legend entry on (`true`) or off (`false`).
 - `marker_size = 0` (px), `marker_symbol = ""` (Plotly name or matplotlib code
   such as `"o"`, `"s"`, `"D"`), `marker_color = ""` (head face colour;
   `"none"` gives hollow heads).
@@ -6042,7 +6125,8 @@ function plot_stem(
 	return _scat_maybe_show(fig, show, width, height, title)
 end
 
-plot_stem(y::AbstractArray; kwargs...) = plot_stem(_auto_xvalues(y), y; kwargs...)
+plot_stem(y::AbstractArray; kwargs...) =
+	plot_stem(_auto_xvalues(y; who = "plot_stem"), y; kwargs...)
 
 """
 	plot_bar(x, y; kwargs...)
@@ -6646,7 +6730,7 @@ function _scatterpolar_impl!(
 	thetas, rs, nested = _scat_series(theta, r, who; xname = :theta, yname = :r)
 	n = length(rs)
 	lengths = Int[length(series) for series in rs]
-	n_existing = length(_plot_data(fig))
+	n_existing = _scat_existing_count(fig)
 	styles = _scat_series_styles(
 		n,
 		n_existing,
@@ -6676,7 +6760,8 @@ function _scatterpolar_impl!(
 	_require_size_option(height, who, "height")
 	_require_size_option(fontsize, who, "fontsize")
 	(grid === nothing || grid isa Bool) || throw(ArgumentError(
-		"$(who): `grid` must be true, false or nothing; got $(repr(grid)).",
+		"$(who): `grid` must be true, false or nothing (a polar plot has no x/y " *
+		"axes to select); got $(repr(grid)).",
 	))
 	angular_direction = _scat_choice(direction, _POLAR_DIRECTIONS, who, "direction")
 	(rotation === nothing || (!(rotation isa Bool) && isfinite(rotation))) ||
@@ -6792,7 +6877,7 @@ function plot_scatterpolar(
 	legend::Union{AbstractString, AbstractVector} = "",
 	title::AbstractString = "",
 	fontsize::Real = 0,
-	grid::Union{Nothing, Bool} = true,
+	grid::Union{Nothing, Bool, Symbol} = true,
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
 	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
@@ -8199,7 +8284,7 @@ function plot_scatter!(
 end
 
 plot_scatter!(fig, y::AbstractArray; kwargs...) =
-	plot_scatter!(fig, _auto_xvalues(y), y; kwargs...)
+	plot_scatter!(fig, _auto_xvalues(y; who = "plot_scatter!"), y; kwargs...)
 
 """
 	plot_stem!(fig, x, y; kwargs...) -> nothing (SubplotFigure: the figure)
@@ -8293,7 +8378,7 @@ function plot_stem!(
 end
 
 plot_stem!(fig, y::AbstractArray; kwargs...) =
-	plot_stem!(fig, _auto_xvalues(y), y; kwargs...)
+	plot_stem!(fig, _auto_xvalues(y; who = "plot_stem!"), y; kwargs...)
 
 """
 	plot_bar!(fig, x, y; kwargs...)
@@ -8824,7 +8909,7 @@ function plot_scatterpolar!(
 	legend::Union{AbstractString, AbstractVector} = "",
 	title::AbstractString = "",
 	fontsize::Real = 0,
-	grid::Union{Nothing, Bool} = nothing,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
 	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
@@ -10349,7 +10434,7 @@ function _area_impl!(
 )
 	xs, ys, _ = _scat_series(x, y, who)
 	n = length(ys)
-	n_existing = length(_plot_data(fig))
+	n_existing = _scat_existing_count(fig)
 	trace_mode = _scat_mode(mode, who)
 	styles = _scat_series_styles(
 		n,
@@ -10373,6 +10458,10 @@ function _area_impl!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
 	)
 
 	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
@@ -10534,7 +10623,8 @@ function plot_area(
 	return _scat_maybe_show(fig, show, width, height, title)
 end
 
-plot_area(y::AbstractArray; kwargs...) = plot_area(_auto_xvalues(y), y; kwargs...)
+plot_area(y::AbstractArray; kwargs...) =
+	plot_area(_auto_xvalues(y; who = "plot_area"), y; kwargs...)
 
 """
 	plot_area!(fig, x, y; kwargs...) -> nothing (SubplotFigure: the figure)
@@ -10616,7 +10706,8 @@ function plot_area!(
 	return nothing
 end
 
-plot_area!(fig, y::AbstractArray; kwargs...) = plot_area!(fig, _auto_xvalues(y), y; kwargs...)
+plot_area!(fig, y::AbstractArray; kwargs...) =
+	plot_area!(fig, _auto_xvalues(y; who = "plot_area!"), y; kwargs...)
 
 # ── Candlestick / OHLC ───────────────────────────────────────────────
 

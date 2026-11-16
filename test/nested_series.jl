@@ -63,7 +63,7 @@ end
 
     constructors = (
         ("scatter", () -> plot_scatter(coordinate_ranges, series_ranges), 2),
-        ("stem", () -> plot_stem(coordinate_ranges, series_ranges), 8),
+        ("stem", () -> plot_stem(coordinate_ranges, series_ranges), 4),
         ("bar", () -> plot_bar(coordinate_ranges, series_ranges), 2),
         ("histogram", () -> plot_histogram(series_ranges), 2),
         ("box", () -> plot_box(coordinate_ranges, series_ranges), 2),
@@ -89,7 +89,7 @@ end
 
     y_only_constructors = (
         ("scatter", () -> plot_scatter(series_ranges), 2),
-        ("stem", () -> plot_stem(series_ranges), 8),
+        ("stem", () -> plot_stem(series_ranges), 4),
         ("bar", () -> plot_bar(series_ranges), 2),
         ("box", () -> plot_box(series_ranges), 2),
         ("violin", () -> plot_violin(series_ranges), 2),
@@ -105,7 +105,7 @@ end
 
     explicit_mutators = (
         ("scatter!", fig -> plot_scatter!(fig, coordinate_ranges, series_ranges), 2),
-        ("stem!", fig -> plot_stem!(fig, coordinate_ranges, series_ranges), 8),
+        ("stem!", fig -> plot_stem!(fig, coordinate_ranges, series_ranges), 4),
         ("bar!", fig -> plot_bar!(fig, coordinate_ranges, series_ranges), 2),
         ("histogram!", fig -> plot_histogram!(fig, series_ranges), 2),
         ("box!", fig -> plot_box!(fig, coordinate_ranges, series_ranges), 2),
@@ -138,7 +138,7 @@ end
 
     y_only_mutators = (
         ("scatter!", fig -> plot_scatter!(fig, series_ranges), 2, true),
-        ("stem!", fig -> plot_stem!(fig, series_ranges), 8, true),
+        ("stem!", fig -> plot_stem!(fig, series_ranges), 4, true),
         ("bar!", fig -> plot_bar!(fig, series_ranges), 2, true),
         ("box!", fig -> plot_box!(fig, series_ranges), 2, false),
         ("violin!", fig -> plot_violin!(fig, series_ranges), 2, false),
