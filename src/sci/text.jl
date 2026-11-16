@@ -405,7 +405,10 @@ title of one panel.
   `loc="left"`; `:right` → right edge), `xref="paper"`, and is pinned
   `_TEXT_TITLE_TOP_PAD` (10) px below the top of the figure with
   `automargin=true`, so the plot area moves down instead of overlapping it.
-  Existing title styling (font family/colour) is kept.
+  When a legend sits above the plot area (`set_legend!(…; position =
+  :outside_top)`), `title.pad.b` is also set so the legend is laid out below
+  the title (see [`set_legend!`](@ref)). Existing title styling (font
+  family/colour) is kept.
 - Panel title: an annotation named `"plotlysupply:title:<row>:<col>"` placed
   just above the cell's axes (`x` = left edge / centre / right edge of the cell
   per `align`, `yanchor="bottom"`, 4 px gap). Calling it again replaces it; it
@@ -422,9 +425,11 @@ text); `""` removes the title.
 - `bold::Bool = false`: plain text is wrapped in `<b>…</b>`; for labels with
   math, the text runs become `\\textbf{…}` (HTML tags cannot wrap math) and the
   math itself is unchanged.
-- `offset::Tuple{Real,Real} = (0, 0)`: `(dx, dy)` shift in px, right and up.
-  A centred figure title cannot be shifted horizontally (Plotly ignores the
-  padding of centred titles): use `align=:left`/`:right` for a `dx`.
+- `offset::Tuple{Real,Real} = (0, 0)` (or a 2-vector): `(dx, dy)` shift in
+  px, right and up. A centred figure title cannot be shifted horizontally
+  (Plotly ignores the padding of centred titles): use `align=:left`/`:right`
+  for a `dx`. A figure title can move up by at most 10 px (`dy <= 10`), to
+  the top edge of the figure.
 
 Returns `nothing` for a `Plot`/`SyncPlot`, the `SubplotFigure` otherwise.
 Invalid keywords throw an `ArgumentError` before anything changes; `show` is
@@ -448,7 +453,7 @@ function title!(
 	align::Union{Symbol, AbstractString} = :center,
 	fontsize::Real = 0,
 	bold::Bool = false,
-	offset::Union{Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = (0, 0),
+	offset::Union{Tuple, AbstractVector} = (0, 0),
 	show = nothing,
 )
 	_text_reject_show(show, "title!")
@@ -494,7 +499,7 @@ function title!(
 	align::Union{Symbol, AbstractString} = :center,
 	fontsize::Real = 0,
 	bold::Bool = false,
-	offset::Union{Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = (0, 0),
+	offset::Union{Tuple, AbstractVector} = (0, 0),
 	show = nothing,
 )
 	_text_reject_show(show, "title!")
@@ -796,19 +801,34 @@ function _text_legend_target(legend_target, who::AbstractString)
 	return legend_target
 end
 
+# plotly.js line dash values: the named styles, or a dash-length list such as
+# "5px,10px,2px,2px" (px or % lengths).
+const _TEXT_DASH_NAMES = ("solid", "dot", "dash", "longdash", "dashdot", "longdashdot")
+const _TEXT_DASH_LIST = r"^\s*\d+(\.\d+)?(px|%)?(\s*,\s*\d+(\.\d+)?(px|%)?)*\s*$"
+
 function _text_proxy(label, who; mode, color, dash, linewidth, marker_symbol, marker_size, marker_color, marker_line_color, marker_line_width, patch, legendgroup, opacity)
 	isempty(label) && throw(ArgumentError(
 		"$(who): `label` is empty, which would be an entry without text; use " *
 		"\" \" for a blank spacer entry.",
 	))
+	dash_s = String(dash)
+	(isempty(dash_s) || dash_s in _TEXT_DASH_NAMES || occursin(_TEXT_DASH_LIST, dash_s)) ||
+		throw(ArgumentError(
+			"$(who): `dash` must be one of $(join(repr.(_TEXT_DASH_NAMES), ", ")) or a " *
+			"dash-length list such as \"5px,10px\"; got $(repr(dash_s)).",
+		))
 	# Report mathtext errors under this function's name (`_proxy_trace` labels
 	# the name again; `_label` is idempotent).
 	_text_checked_label(label, who)
+	# A blank spacer entry without colours draws no symbol (Plotly would give it
+	# the next colorway colour).
+	spacer = isempty(strip(label)) && isempty(String(color)) &&
+		isempty(String(marker_color)) && isempty(String(marker_line_color))
 	return _proxy_trace(
 		label;
-		mode = mode,
-		color = color,
-		dash = dash,
+		mode = String(mode),
+		color = spacer ? "rgba(0,0,0,0)" : color,
+		dash = String(dash),
 		linewidth = linewidth,
 		marker_symbol = marker_symbol,
 		marker_size = marker_size,
@@ -831,10 +851,12 @@ a trace with null coordinates (`x = y = [null]`, `hoverinfo="skip"`,
 `showlegend=true`), so it draws nothing in the plot area.
 
 # Keywords
-- `mode::AbstractString = "lines"`: `"lines"`, `"markers"` or `"lines+markers"`.
+- `mode = "lines"` (string or Symbol): `"lines"`, `"markers"` or `"lines+markers"`.
 - `color` (string or Symbol): line colour; also the marker colour when
   `marker_color` is not given.
-- `dash::AbstractString`, `linewidth::Real`: line style (`""`/0 = Plotly default).
+- `dash` (string or Symbol, `""` = solid) and `linewidth::Real` (0 = Plotly
+  default): line style; `dash` is a Plotly dash name (`"dash"`, `"dot"`,
+  `"dashdot"`, …).
 - `marker_symbol`: Plotly name or matplotlib code (`"o"`, `"s"`, `"^"`, `"x"`, …).
 - `marker_size::Real`, `marker_line_width::Real`: px (0 = default).
 - `marker_color`: face colour; `"none"` draws a hollow marker.
@@ -852,7 +874,8 @@ a trace with null coordinates (`x = y = [null]`, `hoverinfo="skip"`,
   `set_legend!(sf; legend_target=:figure, ...)` moves it). On a `Plot`/`SyncPlot`
   both targets mean its one legend.
 
-`label` goes through mathtext; `" "` gives a blank spacer entry.
+`label` goes through mathtext and must not be empty; `" "` gives a blank
+spacer entry (it draws no symbol unless a colour is given).
 
 Returns `nothing` for a `Plot`/`SyncPlot`, the `SubplotFigure` otherwise.
 
@@ -867,9 +890,9 @@ legend_entry!(fig, "tolerance band"; patch = true, color = "rgba(0,0,255,0.3)")
 function legend_entry!(
 	fig,
 	label::AbstractString;
-	mode::AbstractString = "lines",
+	mode::Union{AbstractString, Symbol} = "lines",
 	color::Union{AbstractString, Symbol} = "",
-	dash::AbstractString = "",
+	dash::Union{AbstractString, Symbol} = "",
 	linewidth::Real = 0,
 	marker_symbol::Union{AbstractString, Symbol} = "",
 	marker_size::Real = 0,
@@ -927,9 +950,9 @@ end
 function legend_entry!(
 	sf::SubplotFigure,
 	label::AbstractString;
-	mode::AbstractString = "lines",
+	mode::Union{AbstractString, Symbol} = "lines",
 	color::Union{AbstractString, Symbol} = "",
-	dash::AbstractString = "",
+	dash::Union{AbstractString, Symbol} = "",
 	linewidth::Real = 0,
 	marker_symbol::Union{AbstractString, Symbol} = "",
 	marker_size::Real = 0,

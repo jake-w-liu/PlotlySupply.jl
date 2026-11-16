@@ -1780,14 +1780,26 @@ current position.
   legend box gets `get_default_legend_position()`).
   - `:outside_bottom` is anchored to the bottom of the figure container and
     `:outside_left` to its left edge (Plotly reserves a margin, so the legend
-    never covers tick labels or axis titles); `:outside_top` sits above the
-    plot area and `:outside_right` right of it. Outside top/bottom legends are
-    horizontal unless `orientation` says otherwise.
+    never covers tick labels or axis titles); `:outside_top` sits just above
+    the plot area and `:outside_right` right of it, where Plotly grows the
+    margin to fit them. Outside top/bottom legends are horizontal unless
+    `orientation` says otherwise.
+  - With a legend above the plot area, a figure title (from the constructor's
+    `title` or [`title!`](@ref)) is pinned to the top edge with
+    `title.automargin=true` and given a `title.pad.b`, so that the legend is
+    laid out *below* the title instead of over it. This holds while
+    `layout.margin.t` keeps the value it had then; titles referenced to the
+    paper (`title.yref="paper"`) or anchored at their bottom are left alone.
+  - A new `position` replaces the whole placement, including the
+    orientation: an outside top/bottom legend moved to an inside position is
+    vertical again unless `orientation` or `ncols` is given.
   - Tuple positions anchor the legend box on the axes side of the point:
     `fx > 1` → `xanchor="left"`, `fx < 0` → `"right"`, inside the nearest third.
 - `inset::Tuple{Real,Real}` (or 2-vector): `(x, y)` padding from the axes
   edges as fractions of the axes (default `(0.02, 0.03)`; values above 0.49
-  are clamped). Outside positions use it as a fixed paper offset.
+  are clamped). Outside positions use it as a fixed paper offset. An `inset`
+  without a `position` re-places the legend at the default position (the
+  stored `sf.legend_position` for a SubplotFigure).
 - `xanchor`, `yanchor` (`""` = computed): `"left"|"center"|"right"|"auto"` and
   `"top"|"middle"|"bottom"|"auto"`; given without `position` they replace only
   the anchors.
@@ -1832,7 +1844,8 @@ current position.
   and used for cells that get traces later.
 
 Returns `fig` (the `SubplotFigure` for one). Invalid values throw an
-`ArgumentError` before anything is changed.
+`ArgumentError` before anything is changed; `show` is not accepted (this
+modifies an existing figure).
 
 # Example
 ```julia
@@ -1867,7 +1880,9 @@ function set_legend!(
 	legend_target::Union{Nothing, Symbol} = nothing,
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	show = nothing,
 )
+	_text_reject_show(show, "set_legend!")
 	(row === nothing && col === nothing) || throw(ArgumentError(
 		"set_legend!: `row`/`col` select a SubplotFigure cell; a Plot/SyncPlot " *
 		"has a single legend, so omit them.",
@@ -2144,7 +2159,9 @@ function set_legend!(
 	legend_target::Union{Nothing, Symbol} = nothing,
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	show = nothing,
 )
+	_text_reject_show(show, "set_legend!")
 	options = _legend_options(
 		"set_legend!";
 		position, inset, bgcolor, bordercolor, borderwidth, showlegend,
@@ -2239,7 +2256,9 @@ in [`set_legend!`](@ref); the 1.x names `legend_inset`, `legend_bgcolor`,
 - On a `Plot`/[`SyncPlot`](@ref) built with subplots it assigns the legends
   once (`position = nothing` means `get_default_legend_position()`).
 
-Returns `fig`.
+`ncols` gives each cell's legend that many columns across its cell. Returns
+`fig`. Invalid values throw an `ArgumentError` before anything is changed;
+`show` is not accepted.
 
 # Example
 ```julia
@@ -2271,7 +2290,9 @@ function subplot_legends!(
 	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_borderwidth::Union{Nothing, Real} = nothing,
+	show = nothing,
 )
+	_text_reject_show(show, "subplot_legends!")
 	aliases = _legend_subplot_aliases(
 		"subplot_legends!";
 		inset, bgcolor, bordercolor, borderwidth,
@@ -2324,7 +2345,9 @@ function subplot_legends!(
 	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_borderwidth::Union{Nothing, Real} = nothing,
+	show = nothing,
 )
+	_text_reject_show(show, "subplot_legends!")
 	aliases = _legend_subplot_aliases(
 		"subplot_legends!";
 		inset, bgcolor, bordercolor, borderwidth,
