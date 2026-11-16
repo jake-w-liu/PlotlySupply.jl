@@ -7718,8 +7718,9 @@ end
 
 # Flatten the accepted quiver input forms into four equal-length vectors:
 # four vectors (one arrow per entry), four same-size matrices (meshgrid
-# style), or coordinate vectors with `u[ix, iy]`/`v[ix, iy]` matrices of size
-# (length(x), length(y)).
+# style), coordinate vectors with `u[ix, iy]`/`v[ix, iy]` matrices of size
+# (length(x), length(y)), or (as before 2.0) any mix of vectors and matrices
+# with one element count, paired element by element in column-major order.
 function _quiver_points(x, y, u, v, who::AbstractString)
 	for (value, name) in ((x, "x"), (y, "y"), (u, "u"), (v, "v"))
 		ndims(value) <= 2 || throw(ArgumentError(
@@ -7728,7 +7729,6 @@ function _quiver_points(x, y, u, v, who::AbstractString)
 		))
 	end
 	dims = (ndims(x), ndims(y), ndims(u), ndims(v))
-	all(==(1), dims) && return x, y, u, v
 	if all(==(2), dims)
 		size(x) == size(y) == size(u) == size(v) || throw(ArgumentError(
 			"$(who): matrices x, y, u, v must have the same size; got " *
@@ -7736,14 +7736,9 @@ function _quiver_points(x, y, u, v, who::AbstractString)
 		))
 		return vec(x), vec(y), vec(u), vec(v)
 	end
-	if dims == (1, 1, 2, 2)
-		expected = (length(x), length(y))
-		size(u) == expected && size(v) == expected || throw(ArgumentError(
-			"$(who): with coordinate vectors x, y the components are indexed " *
-			"u[ix, iy], so u and v must have size (length(x), length(y)) = " *
-			"$(expected); got $(size(u)) and $(size(v)).",
-		))
-		nx, ny = expected
+	grid = (length(x), length(y))
+	if dims == (1, 1, 2, 2) && size(u) == grid && size(v) == grid
+		nx, ny = grid
 		return (
 			[x[ix] for ix in eachindex(x), _ in 1:ny][:],
 			[y[iy] for _ in 1:nx, iy in eachindex(y)][:],
@@ -7751,10 +7746,19 @@ function _quiver_points(x, y, u, v, who::AbstractString)
 			vec(v),
 		)
 	end
+	length(x) == length(y) == length(u) == length(v) &&
+		return vec(x), vec(y), vec(u), vec(v)
+	hint = dims == (1, 1, 2, 2) ?
+		" With coordinate vectors x, y the components are indexed u[ix, iy], " *
+		"so u and v must have size (length(x), length(y)) = $(grid); got " *
+		"$(size(u)) and $(size(v))." *
+		(size(u) == reverse(grid) ? " They look transposed: pass permutedims(u), permutedims(v)." : "") :
+		""
 	throw(ArgumentError(
-		"$(who): x, y, u, v must be four vectors, four matrices of one size, " *
-		"or coordinate vectors x, y with u, v matrices of size " *
-		"(length(x), length(y)); got dimensions $(dims).",
+		"$(who): x, y, u, v must be four vectors of one length, four matrices " *
+		"of one size, or coordinate vectors x, y with u, v matrices of size " *
+		"(length(x), length(y)); got sizes $(size(x)), $(size(y)), $(size(u)), " *
+		"$(size(v)).$(hint)",
 	))
 end
 
@@ -7891,8 +7895,10 @@ Accepted forms:
 - four vectors of equal length (one arrow per entry);
 - four matrices of the same size (e.g. from `Y, X = meshgrid(y, x)`);
 - coordinate vectors `x`, `y` with component matrices `u[ix, iy]`,
-  `v[ix, iy]` of size `(length(x), length(y))`.
-Mismatched sizes throw an `ArgumentError`.
+  `v[ix, iy]` of size `(length(x), length(y))`;
+- otherwise vectors and matrices with one element count, paired element by
+  element in column-major order (e.g. `X`, `Y` from `meshgrid` with `u = -Y[:]`).
+Other sizes throw an `ArgumentError` (a transposed `u`, `v` is reported).
 
 Arrow length is proportional to the magnitude `hypot(u, v)`: the longest
 arrow is `2/3 * sizeref` long in x/y data units (on a log axis, in decades)

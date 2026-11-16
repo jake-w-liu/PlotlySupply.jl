@@ -363,7 +363,17 @@ end
 		end
 		@test _sf_axis(fig, :yaxis)["scaleanchor"] == "x"
 		@test !haskey(_sf_axis(plot_quiver(qx, qy, qu, qv; equalar = false), :yaxis), "scaleanchor")
-		@test _sf_thrown(() -> plot_quiver(qx, qy, permutedims(qu), permutedims(qv))) isa ArgumentError
+		msg = _sf_message(() -> plot_quiver(qx, qy, permutedims(qu), permutedims(qv)))
+		@test occursin("(length(x), length(y)) = (3, 2)", msg) && occursin("permutedims(u)", msg)
+		# Equal element counts pair element by element (column-major), as before 2.0:
+		# meshgrid matrices with flattened components, or flattened coordinates.
+		QX = [xi for xi in qx, yi in qy]
+		QY = [yi for xi in qx, yi in qy]
+		mixed = plot_quiver(QX, QY, vec(qu), vec(qv)).data[1].fields
+		@test mixed[:x] == fig.data[1].fields[:x] && mixed[:y] == fig.data[1].fields[:y]
+		flat = plot_quiver(vec(QX), vec(QY), qu, qv).data[1].fields
+		@test flat[:x] == fig.data[1].fields[:x] && flat[:y] == fig.data[1].fields[:y]
+		@test _sf_thrown(() -> plot_quiver(QX, QY, permutedims(qu), permutedims(qv))) isa ArgumentError
 		# Logarithmic axes: arrows keep their screen proportions, origins must be positive.
 		lg = plot_quiver([1.0, 10.0], [1.0, 1.0], [1.0, 1.0], [0.0, 0.0]; xscale = "log")
 		lx = lg.data[1].fields[:x]
