@@ -187,9 +187,19 @@ using PlotlySupply
 		@testset ":default style reproduces 1.x" begin
 			default = PlotStyle()
 			axis = PS._style_axis_defaults(default)
-			legacy = sd(PS._cartesian_axis_style())
-			delete!(legacy, :title)
+			# The 1.x `_cartesian_axis_style` constants.
+			legacy = Dict{Symbol, Any}(
+				:zeroline => false,
+				:showline => true,
+				:mirror => true,
+				:ticks => "outside",
+				:automargin => true,
+				:linecolor => "#000000",
+				:linewidth => 1.0,
+				:tickcolor => "#000000",
+			)
 			@test axis == legacy
+			@test sd(PS._cartesian_axis_style()) == legacy
 			@test PS._style_axis_defaults(default; axis = :y) == legacy
 			@test PS._style_legend_defaults(default) == (
 				bgcolor = PS._DEFAULT_LEGEND_BGCOLOR[],
@@ -207,18 +217,8 @@ using PlotlySupply
 			@test PS._style_axis_defaults(default)[:linecolor] == "#f2f5fa"
 			set_default_template!(original_template)
 
-			# The C37 wiring of `_apply_default_template!` through the style API.
-			function wire!(fig, style)
-				template = PS._style_template(style)
-				relayout!(fig, template = template)
-				if any(startswith(String(k), "xaxis") for k in keys(fig.layout.fields))
-					update_xaxes!(fig; PS._style_axis_defaults(style; template = template, axis = :x)...)
-					update_yaxes!(fig; PS._style_axis_defaults(style; template = template, axis = :y)...)
-				end
-				PS._apply_default_legend!(fig; PS._style_legend_defaults(style; template = template)...)
-				PS._apply_style_layout!(fig, style)
-				return fig
-			end
+			# `_apply_default_template!` is wired through the style API (C37);
+			# under :default re-applying it changes nothing.
 			figures = [
 				plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]]; legend = ["a", "b"], title = "T", xlabel = "x", ylabel = "y"),
 				plot_heatmap(collect(1:3), collect(1:2), [1 2; 3 4; 5 6]; title = "H"),
@@ -228,7 +228,7 @@ using PlotlySupply
 				before = json(fig)
 				PS._apply_style_layout!(fig, default)
 				@test json(fig) == before
-				wire!(fig, default)
+				PS._apply_default_template!(fig)
 				@test json(fig) == before
 			end
 		end
@@ -293,11 +293,14 @@ using PlotlySupply
 		@testset "trace cycles" begin
 			bw = PlotStyle(; cycle = :bw, linewidth = 2, marker_size = 6.5)
 			@test PS._style_trace_defaults(bw, 1) ==
-				  Dict(:color => "#000000", :dash => "solid", :linewidth => 2, :marker_size => 6.5)
+				  Dict(:dash => "solid", :linewidth => 2, :marker_size => 6.5)
 			@test PS._style_trace_defaults(bw, 2)[:dash] == "dash"
 			@test PS._style_trace_defaults(bw, 4)[:dash] == "dashdot"
 			@test PS._style_trace_defaults(bw, 5)[:dash] == "solid"
-			@test PS._style_trace_defaults(bw, 1; template = PB.templates[:plotly_dark])[:color] == "#f2f5fa"
+			# The :bw ink is the figure colorway, derived from the template.
+			@test PS._style_layout_defaults(bw)[:colorway] == ["#000000"]
+			@test PS._style_layout_defaults(bw; template = PB.templates[:plotly_dark])[:colorway] == ["#f2f5fa"]
+			@test PS._style_layout_defaults(PlotStyle(; cycle = :bw, colorway = :okabe_ito))[:colorway] == ["#000000"]
 			dash = PS._style_trace_defaults(PlotStyle(; cycle = :dash), 3)
 			@test dash == Dict(:dash => "dot")
 			marker = PS._style_trace_defaults(PlotStyle(; cycle = :marker), 9)

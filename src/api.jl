@@ -213,7 +213,9 @@ function _transactional_high_level_plot_mutation!(
 	return result[] === staged_target[] ? fig : result[]
 end
 
-const _DEFAULT_TEMPLATE = Ref{Symbol}(:plotly_white)
+# Package-wide default template: a registered template name (`+` compounds
+# allowed) or a `PlotlyBase.Template` object (spec C38).
+const _DEFAULT_TEMPLATE = Ref{Union{Symbol, PlotlyBase.Template}}(:plotly_white)
 const _VALID_LEGEND_POSITIONS = (
 	:topright,
 	:top,
@@ -236,25 +238,39 @@ const _DEFAULT_LEGEND_BORDERCOLOR = Ref("rgba(0,0,0,0.15)")
 const _DEFAULT_LEGEND_BORDERWIDTH = Ref{Float64}(1.0)
 # plotly_white paints axis.linecolor as #EBF0F8 (same as the grid). After
 # f22f860 the Template object is applied in full, so that wash-out becomes the
-# exported spine. Publication default is a closed black box.
+# exported spine. Publication default is a closed black box. This is the spine
+# and tick colour on LIGHT templates; dark templates get a light colour from
+# `_template_ink` (src/sci/style.jl), so the frame stays visible.
 const _DEFAULT_AXIS_LINECOLOR = "#000000"
 const _DEFAULT_AXIS_LINEWIDTH = 1.0
+
+# Registered template name for `template` (a String or Symbol), or `nothing`
+# when it names no registered template. Surrounding whitespace is ignored, and
+# `+` compounds are accepted when every part is registered (PlotlyBase strips
+# every part the same way). Never warns.
+function _template_name_or_nothing(template::Union{AbstractString, Symbol})
+	known = keys(PlotlyBase.templates)
+	exact = Symbol(template)
+	exact in known && return exact
+	name = strip(String(template))
+	isempty(name) && return nothing
+	stripped = Symbol(name)
+	stripped in known && return stripped
+	parts = strip.(split(name, '+'))
+	if length(parts) > 1 &&
+			all(!isempty(part) && Symbol(part) in known for part in parts)
+		return Symbol(join(parts, '+'))
+	end
+	return nothing
+end
 
 function _normalize_template(template)
 	(template isa Symbol || template isa AbstractString) ||
 		throw(ArgumentError(
 			"template names must be strings or symbols; got $(typeof(template))",
 		))
-	template_sym = Symbol(template)
-	if template_sym in keys(PlotlyBase.templates)
-		return template_sym
-	end
-	parts = strip.(split(String(template), '+'))
-	if length(parts) > 1 &&
-			all(!isempty(part) && Symbol(part) in keys(PlotlyBase.templates)
-				for part in parts)
-		return Symbol(join(parts, '+'))
-	end
+	name = _template_name_or_nothing(template)
+	name === nothing || return name
 	valid_templates = sort!(collect(keys(PlotlyBase.templates)))
 	@warn "Unrecognized template $(repr(template)); falling back to :plotly_white." valid = valid_templates
 	return :plotly_white
@@ -301,7 +317,13 @@ end
 """
 	get_default_template()
 
-Return the package-wide default Plotly template symbol used by high-level constructors.
+Return the package-wide default Plotly template used by high-level
+constructors: a template name `Symbol` (initially `:plotly_white`; compound
+names such as `Symbol("plotly_white+xgridoff")` are possible) or the
+`PlotlyBase.Template` object passed to [`set_default_template!`](@ref).
+
+The active [`PlotStyle`](@ref) follows this default unless the style names a
+template of its own (the built-in `:default` style does not).
 """
 get_default_template() = _DEFAULT_TEMPLATE[]
 
@@ -315,14 +337,40 @@ get_default_legend_position() = _DEFAULT_LEGEND_POSITION[]
 """
 	set_default_template!(template = "plotly_white")
 
-Set the package-wide default Plotly template name used by high-level
-constructors. The name may refer to a built-in template or a custom
-`PlotlyBase.Template` registered in `PlotlyBase.templates`; registered names
-may be combined with `+` using PlotlyBase's compound-template syntax. Invalid
-names fall back to `:plotly_white`.
+Set the package-wide default Plotly template used by high-level constructors
+(figures created afterwards; existing figures are unchanged, use
+[`set_template!`](@ref) for those).
+
+# Arguments
+- `template`: one of
+  - a registered template name, as a `String` or `Symbol` (`"plotly_white"`,
+    `:plotly_dark`, `"ggplot2"`, `"simple_white"`, … or a custom
+    `PlotlyBase.Template` registered in `PlotlyBase.templates`). Surrounding
+    whitespace is ignored, and registered names may be combined with `+`
+    using PlotlyBase's compound-template syntax (`"plotly_white+xgridoff"`).
+    An unrecognised name warns and falls back to `:plotly_white`.
+  - a `PlotlyBase.Template` object, used as is.
+  Any other type throws an `ArgumentError`.
+
+Axis spines and tick marks follow the template: black on light templates and
+the template's light text colour on dark ones such as `plotly_dark`; the
+default legend box is likewise derived from the template.
+
+Returns the new default: the normalized name `Symbol`, or the `Template`
+object.
+
+# Example
+```julia
+set_default_template!(:plotly_dark)
+fig = plot_scatter(1:10, (1:10) .^ 2)      # dark figure with a light frame
+set_default_template!(PlotlyBase.Template(layout = attr(font = attr(family = "Arial"))))
+set_default_template!()                    # back to "plotly_white"
+```
 """
 function set_default_template!(template = "plotly_white")
-	_DEFAULT_TEMPLATE[] = _normalize_template(template)
+	_DEFAULT_TEMPLATE[] = template isa PlotlyBase.Template ?
+		template :
+		_normalize_template(template)
 	return _DEFAULT_TEMPLATE[]
 end
 
@@ -341,73 +389,78 @@ function set_default_legend_position!(position = :topright)
 	return _DEFAULT_LEGEND_POSITION[]
 end
 
+# The default look of a figure under construction (spec C37): the active
+# `PlotStyle`'s template, then its Cartesian axis defaults (re-applied after
+# the template so plotly_white cannot wash the spines out), the default legend
+# box derived from the template and style, and finally the style's fonts,
+# colorway and margins. Under the built-in `:default` style this produces
+# exactly the 1.x layout. Call it on a figure under construction only (the
+# constructors' `apply_template = true` path, `subplots`, `make_subplots`):
+# `_apply_style_layout!` writes colorbar fonts onto existing traces, which a
+# registered fast-path mutation cannot stage.
 function _apply_default_template!(fig)
-	relayout!(fig, template = _resolve_template(_DEFAULT_TEMPLATE[]))
-	# Re-apply spines after the template so plotly_white cannot wash them out.
-	_apply_default_cartesian_axes!(fig)
-	_apply_default_legend!(fig)
+	style = _active_style()
+	template = _style_template(style)
+	relayout!(fig, template = template)
+	_apply_default_cartesian_axes!(fig; style = style, template = template)
+	_apply_default_legend!(fig; _style_legend_defaults(style; template = template)...)
+	_apply_style_layout!(fig, style; template = template)
 	return nothing
 end
 
-function _cartesian_axis_style(; title_text::String = "", tick0 = nothing)
-	d = Dict{Symbol, Any}(
-		:title_text => title_text,
-		:zeroline => false,
-		:showline => true,
-		:mirror => true,
-		:ticks => "outside",
-		:automargin => true,
-		:linecolor => _DEFAULT_AXIS_LINECOLOR,
-		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
-		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
-	)
+# Attributes of one Cartesian axis of a new figure: the active style's axis
+# defaults (spines, ticks, ink colour, grid; see `_style_axis_defaults`), the
+# axis title (written as `title.text` through `_label`; an empty title writes
+# nothing) and an optional `tick0`. `axis` (`:x` or `:y`) selects which
+# template axis may override `ticks`/`mirror` for custom templates.
+function _cartesian_axis_style(
+	;
+	title_text::AbstractString = "",
+	tick0 = nothing,
+	axis::Symbol = :x,
+)
+	d = _style_axis_defaults(_active_style(); axis = axis)
+	title = isempty(title_text) ? nothing : _title_attr(_label(title_text))
+	title === nothing || (d[:title] = title)
 	tick0 === nothing || (d[:tick0] = tick0)
 	return attr(; d...)
 end
 
+# Layout of a new Cartesian figure: the figure title (as `title.text` through
+# `_label`, omitted when empty) and the styled primary x and y axes.
 function _default_cartesian_layout(
 	;
-	title::String = "",
-	xlabel::String = "",
-	ylabel::String = "",
+	title::AbstractString = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
 	x_tick0 = nothing,
 	y_tick0 = nothing,
 )
-	return Layout(
-		title = title,
-		yaxis = _cartesian_axis_style(title_text = ylabel, tick0 = y_tick0),
-		xaxis = _cartesian_axis_style(title_text = xlabel, tick0 = x_tick0),
-	)
+	yaxis = _cartesian_axis_style(title_text = ylabel, tick0 = y_tick0, axis = :y)
+	xaxis = _cartesian_axis_style(title_text = xlabel, tick0 = x_tick0, axis = :x)
+	figure_title = isempty(title) ? nothing : _title_attr(_label(title))
+	figure_title === nothing && return Layout(yaxis = yaxis, xaxis = xaxis)
+	return Layout(title = figure_title, yaxis = yaxis, xaxis = xaxis)
 end
 
-function _apply_default_cartesian_axes!(fig)
+# Re-apply the style's Cartesian axis defaults to every x/y axis of the figure
+# (only when the layout has x/y axes at all). `style` is a `PlotStyle`
+# (defined in src/sci/style.jl, included further down, hence no annotation);
+# `template` must be the template the figure uses (normally the style's own,
+# just applied by `_apply_default_template!`): it chooses the spine/tick ink.
+function _apply_default_cartesian_axes!(
+	fig;
+	style = _active_style(),
+	template::PlotlyBase.Template = _style_template(style),
+)
 	layout_keys = keys(_plot_layout(fig).fields)
-	if any(startswith(String(k), "xaxis") for k in layout_keys)
-		update_xaxes!(
-			fig,
-			zeroline = false,
-			showline = true,
-			mirror = true,
-			ticks = "outside",
-			automargin = true,
-			linecolor = _DEFAULT_AXIS_LINECOLOR,
-			linewidth = _DEFAULT_AXIS_LINEWIDTH,
-			tickcolor = _DEFAULT_AXIS_LINECOLOR,
-		)
-	end
-	if any(startswith(String(k), "yaxis") for k in layout_keys)
-		update_yaxes!(
-			fig,
-			zeroline = false,
-			showline = true,
-			mirror = true,
-			ticks = "outside",
-			automargin = true,
-			linecolor = _DEFAULT_AXIS_LINECOLOR,
-			linewidth = _DEFAULT_AXIS_LINEWIDTH,
-			tickcolor = _DEFAULT_AXIS_LINECOLOR,
-		)
-	end
+	has_x = any(startswith(String(k), "xaxis") for k in layout_keys)
+	has_y = any(startswith(String(k), "yaxis") for k in layout_keys)
+	# Compute both before the first write.
+	x_defaults = has_x ? _style_axis_defaults(style; template = template, axis = :x) : nothing
+	y_defaults = has_y ? _style_axis_defaults(style; template = template, axis = :y) : nothing
+	x_defaults === nothing || update_xaxes!(fig; x_defaults...)
+	y_defaults === nothing || update_yaxes!(fig; y_defaults...)
 	return nothing
 end
 
@@ -9336,25 +9389,145 @@ end
 #endregion
 
 """
-	set_template!(fig, template = "plotly_white")
+	set_template!(fig, template = get_default_template())
+	set_template!(sf::SubplotFigure, template = get_default_template())
 
-Applies a visual template to a figure.
+Apply a Plotly template to an existing figure, in place.
 
 # Arguments
-- `fig`: A `PlotlyBase.Plot` or a `PlotlySupply.SyncPlot`.
-- `template`: Registered template name (string or symbol), or a
-  `PlotlyBase.Template`.
+- `fig`: a `PlotlyBase.Plot`, a [`SyncPlot`](@ref) or a
+  [`SubplotFigure`](@ref) (the template is figure-wide, so a SubplotFigure
+  takes no `row`/`col`).
+- `template`: a registered template name (`String` or `Symbol`, e.g.
+  `"plotly_white"`, `:plotly_dark`, `"ggplot2"`, `"seaborn"`,
+  `"simple_white"`, `"presentation"`; surrounding whitespace is ignored and
+  names may be combined with `+`, e.g. `"plotly_dark+xgridoff"`), or a
+  `PlotlyBase.Template` object. Defaults to the package-wide default template
+  ([`get_default_template`](@ref), initially `:plotly_white`; see
+  [`set_default_template!`](@ref)). An unrecognised name warns and falls back
+  to `:plotly_white`; any other type throws an `ArgumentError`.
 
-# Notes
-- This modifies the figure in-place using `relayout!`.
-- Available templates include `plotly`, `ggplot2`, `seaborn`, `simple_white`, `plotly_dark`, etc.
-- Registered template names may be combined with `+`.
+# Template-derived colours
+PlotlySupply draws axis spines, tick marks and the default legend box in
+colours derived from the template: black spines and a translucent white
+legend on light templates, the template's light text colour and a
+translucent dark legend on dark templates such as `plotly_dark`. When the
+template changes, every value that still equals the colour derived from the
+previous template is re-derived for the new one: `linecolor`/`tickcolor` of
+every `xaxis*`/`yaxis*`, `bgcolor`/`bordercolor` of every `legend*` (and, on a
+`SubplotFigure`, the stored legend colours used for legends added later),
+`layout.font.color` and a single-colour `layout.colorway` (the `:bw` style
+cycle). Colours you set yourself (e.g. `linecolor = "red"`) are kept, and
+nothing else (spines, ticks, fonts, sizes) is changed.
+
+The call takes no keyword arguments (an `ArgumentError` names any that are
+passed, `show` included). It validates the template before changing anything
+and is atomic. Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a
+`SubplotFigure`.
+
+# Example
+```julia
+fig = plot_scatter(1:10, (1:10) .^ 2; legend = "n²")
+set_template!(fig, "plotly_dark")   # dark background, light frame and legend
+set_template!(fig)                  # back to the default template
+
+sf = subplots(1, 2; sync = false)
+plot_scatter!(sf, 1:3, [1, 2, 3])
+set_template!(sf, :ggplot2)         # returns sf
+```
 """
-function set_template!(fig, template = string(get_default_template()))
+function set_template!(fig, template = get_default_template(); kwargs...)
+	_require_no_set_template_keywords(kwargs)
 	chosen = _resolve_template(template)
-	relayout!(fig, template = chosen)
+	_apply_template_change!(fig, chosen)
 	_refresh!(fig)
 	return nothing
+end
+
+function _require_no_set_template_keywords(kwargs)
+	isempty(kwargs) && return nothing
+	names = join(("`$(k)`" for k in keys(kwargs)), ", ")
+	hint = haskey(kwargs, :show) ? " (mutators do not take `show`)" : ""
+	throw(ArgumentError(
+		"set_template!: unsupported keyword argument(s) $(names)$(hint); " *
+		"set_template! takes only the figure and the template.",
+	))
+end
+
+# Every layout value derived from the figure's current template that must be
+# re-derived for `chosen`, as `relayout!` keyword pairs. Only values that still
+# equal the derived colour of the current template are listed, so colours set
+# by the caller survive. A figure without a template counts as the 1.x light
+# look (black ink, light legend box).
+function _template_change_updates(layout::PlotlyBase.Layout, chosen::PlotlyBase.Template)
+	old = _figure_template(layout)
+	old_ink = old === nothing ? _DEFAULT_AXIS_LINECOLOR : _template_ink(old)
+	old_legend = old === nothing ?
+		(bgcolor = _DEFAULT_LEGEND_BGCOLOR[], bordercolor = _DEFAULT_LEGEND_BORDERCOLOR[]) :
+		_template_legend_colors(old)
+	new_ink = _template_ink(chosen)
+	new_legend = _template_legend_colors(chosen)
+	updates = Pair{Symbol, Any}[]
+	function rederive!(key, field, old_value, new_value, container)
+		isequal(old_value, new_value) && return nothing
+		isequal(get(container, field, nothing), old_value) || return nothing
+		push!(updates, Symbol(key, "_", field) => new_value)
+		return nothing
+	end
+	for key in sort!(collect(keys(layout.fields)); by = String)
+		name = String(key)
+		if occursin(r"^[xy]axis\d*$", name)
+			axis = _symbol_dict(layout.fields[key])
+			rederive!(name, :linecolor, old_ink, new_ink, axis)
+			rederive!(name, :tickcolor, old_ink, new_ink, axis)
+		elseif occursin(r"^legend\d*$", name)
+			legend = _symbol_dict(layout.fields[key])
+			rederive!(name, :bgcolor, old_legend.bgcolor, new_legend.bgcolor, legend)
+			rederive!(name, :bordercolor, old_legend.bordercolor, new_legend.bordercolor, legend)
+		end
+	end
+	rederive!("font", :color, old_ink, new_ink, _symbol_dict(get(layout.fields, :font, nothing)))
+	colorway = get(layout.fields, :colorway, nothing)
+	if colorway isa AbstractVector && length(colorway) == 1 &&
+	   isequal(colorway[1], old_ink) && !isequal(old_ink, new_ink)
+		push!(updates, :colorway => [new_ink])
+	end
+	return updates
+end
+
+function _apply_template_change!(fig, chosen::PlotlyBase.Template)
+	updates = _template_change_updates(_plot_layout(fig), chosen)
+	relayout!(fig; template = chosen, updates...)
+	return nothing
+end
+
+function _set_template_subplot_impl!(sf::SubplotFigure, chosen::PlotlyBase.Template)
+	p = _plot_obj(sf.fig)
+	old = _figure_template(p.layout)
+	old_legend = old === nothing ?
+		(bgcolor = _DEFAULT_LEGEND_BGCOLOR[], bordercolor = _DEFAULT_LEGEND_BORDERCOLOR[]) :
+		_template_legend_colors(old)
+	new_legend = _template_legend_colors(chosen)
+	# The stored legend colours style every per-cell legend added later.
+	isequal(sf.legend_bgcolor, old_legend.bgcolor) &&
+		(sf.legend_bgcolor = new_legend.bgcolor)
+	isequal(sf.legend_bordercolor, old_legend.bordercolor) &&
+		(sf.legend_bordercolor = new_legend.bordercolor)
+	_apply_template_change!(sf.fig, chosen)
+	_refresh!(sf.fig)
+	return sf
+end
+
+function set_template!(sf::SubplotFigure, template = get_default_template(); kwargs...)
+	_require_no_set_template_keywords(kwargs)
+	# Resolve (and so validate) before the transaction starts.
+	chosen = _resolve_template(template)
+	return _transactional_subplot_mutation!(
+		_set_template_subplot_impl!,
+		sf,
+		_SUBPLOT_LEGEND_METADATA_FIELDS,
+		chosen,
+	)
 end
 
 ## additional auxiliary functions
@@ -9380,28 +9553,46 @@ end
 #region Extended chart types
 
 # Open a window for the freshly-built figure when `show=true`, otherwise return
-# the `Plot`. Mirrors the inline pattern used by the core constructors.
-_maybe_show(fig, show::Bool, width::Int, height::Int, title::String) =
-	show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720,
-		title = title == "" ? "PlotlySupply" : title) : fig
+# the `Plot`. `to_syncplot` validates the window options and maps the
+# constructor sentinels `0` (width/height) and `""` (title) to its defaults
+# (960 × 720 px, "PlotlySupply"). The window title is the plain `title` text.
+_maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString) =
+	show ? to_syncplot(fig; width = width, height = height, title = title) : fig
 
 # Lightweight layout options for non-Cartesian charts (pie, sankey, sunburst, …)
-# that have no x/y axes to style. On first construction the default template is
-# applied; on append (`apply_template=false`) only the legend is refreshed so a
-# user-set template survives.
+# that have no x/y axes to style, written through the D7 figure-option
+# primitives: every option is validated before the first write (errors name
+# `who`), the title is stored as `title.text` through `_label`, and an
+# explicit `fontsize` is applied after the template so it wins over the
+# style's base size. On first construction the default template (and active
+# style) is applied; on append (`apply_template=false`) only the legend is
+# refreshed so a user-set template survives.
 function _apply_basic_plot_options!(
 	fig;
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
 	apply_template::Bool = true,
+	who::AbstractString = "plot",
 )
-	title != "" && relayout!(fig, title = title)
-	width > 0 && relayout!(fig, width = width)
-	height > 0 && relayout!(fig, height = height)
-	apply_template ? _apply_default_template!(fig) : _apply_default_legend!(fig)
-	fontsize > 0 && relayout!(fig, font = attr(size = fontsize))
+	_require_size_option(width, who, "width")
+	_require_size_option(height, who, "height")
+	_require_size_option(fontsize, who, "fontsize")
+	# The title is the first write, so a label `_label` rejects throws before
+	# anything has changed.
+	_apply_figure_title!(fig, title)
+	_apply_figure_size!(fig, who; width = width, height = height)
+	if apply_template
+		_apply_default_template!(fig)
+	else
+		# A legend first created by an append gets the box that matches the
+		# figure's own template (dark on plotly_dark), not the light default.
+		style = _active_style()
+		template = something(_figure_template(fig), _style_template(style))
+		_apply_default_legend!(fig; _style_legend_defaults(style; template = template)...)
+	end
+	_apply_figure_fontsize!(fig, who, fontsize)
 	return nothing
 end
 
