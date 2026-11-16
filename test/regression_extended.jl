@@ -5,8 +5,6 @@ using Test, PlotlySupply
 # parcoords, ternary) and the 2-D `annotate!`. Finding numbers refer to the
 # 2.0 audit.
 
-const _RX_PB = PlotlySupply.PlotlyBase
-
 _rx_fields(value) = value isa AbstractDict ? value : value.fields
 _rx_get(value, keys::Symbol...) =
 	foldl((current, key) -> _rx_fields(current)[key], keys; init = value)
@@ -115,7 +113,7 @@ end
 			@test _rx_throws(() -> constructor(["a", "b"], ["", "a"]; values = [1, NaN]), "finite")
 			@test _rx_throws(() -> constructor(["a", "b"], ["", "a"]; values = ["1", "x"]), "must be a number")
 			@test _rx_throws(() -> constructor(["a", "b"], ["", "a"]; colors = ["red"]), "`colors`")
-			@test _rx_throws(() -> constructor(["a", "b"], ["", "a"]; colorscale = "no_such_map"), "")
+			@test _rx_throws(() -> constructor(["a", "b"], ["", "a"]; colorscale = "no_such_map"), "unknown colorscale \"no_such_map\"")
 
 			# C20 colour scales.
 			scaled = _rx_trace(constructor(["a", "b"], ["", "a"]; values = [2, 1], colorscale = "viridis"))
