@@ -35,8 +35,8 @@ const _RGB_FUNCTION_REGEX =
 function _invalid_colour_error(c, who::AbstractString)
 	return ArgumentError(
 		"$(who): invalid colour $(repr(c)); use a CSS colour name, \"#RRGGBB\", " *
-		"\"#RRGGBBAA\", \"rgb(r,g,b)\", \"rgba(r,g,b,a)\", \"hsl(...)\", a Symbol, " *
-		"or a Colors.jl Colorant.",
+		"\"#RRGGBBAA\", \"rgb(r,g,b)\", \"rgba(r,g,b,a)\", \"hsl(...)\", a grey " *
+		"level such as \"0.35\" (in [0, 1]), a Symbol, or a Colors.jl Colorant.",
 	)
 end
 
@@ -85,6 +85,17 @@ end
 function _parse_colour_string(text::AbstractString, original, who::AbstractString)::_RGBA4
 	s = strip(text)
 	isempty(s) && throw(_invalid_colour_error(original, who))
+	# matplotlib grey levels: a numeric string in [0, 1] is an opaque grey
+	# ("0" black, "1" white, "0.35" == "#595959"). No CSS colour is a bare
+	# number, so any other numeric string is an error rather than a fallback.
+	level = tryparse(Float64, s)
+	if level !== nothing
+		(isfinite(level) && 0 <= level <= 1) || throw(ArgumentError(
+			"$(who): a numeric colour string is a matplotlib grey level and " *
+			"must lie in [0, 1]; got $(repr(original)).",
+		))
+		return (level, level, level, 1.0)
+	end
 	if startswith(s, '#')
 		parsed = _parse_hex_colour(s[2:end])
 		parsed === nothing && throw(_invalid_colour_error(original, who))
@@ -115,7 +126,8 @@ function _parse_colour_string(text::AbstractString, original, who::AbstractStrin
 	return _colorant_rgba(colorant, original, who)
 end
 
-# Parse any supported colour value into straight-alpha RGBA channels.
+# Parse any supported colour value into straight-alpha RGBA channels. Strings
+# and Symbols are CSS colours or matplotlib grey levels ("0.35").
 function _parse_color(c, who::AbstractString = "_parse_color")::_RGBA4
 	c isa Colors.Colorant && return _colorant_rgba(c, c, who)
 	c isa Symbol && return _parse_colour_string(String(c), c, who)
@@ -687,6 +699,7 @@ over a white background.
 
 # Arguments
 - `color`: a CSS colour string (`"red"`, `"#1f77b4"`, `"rgb(…)"`, `"rgba(…)"`, …),
+  a matplotlib grey level (a numeric string in `[0, 1]`: `"0.35"` is `"#595959"`),
   a `Symbol`, or a Colors.jl `Colorant`.
 - `frac::Real`: mixing fraction in `[0, 1]`; anything else throws an `ArgumentError`.
 

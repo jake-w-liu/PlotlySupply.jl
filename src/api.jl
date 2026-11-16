@@ -1279,49 +1279,227 @@ function _resolve_subplot_cell(
 	return r, c
 end
 
-"""
-	subplots(rows, cols; kwargs...)
+const _SUBPLOTS_START_CELLS = ("top-left", "bottom-left")
 
-Create a MATLAB-like subplot canvas and return a `SubplotFigure`.
-Use `subplot!(sf, row, col)` to change the active cell and `plot!(sf, x, y)` to append traces.
+# Validated relative sizes for `height_ratios` / `width_ratios`: `count`
+# positive finite reals, returned as Float64 in the caller's order.
+function _subplots_checked_ratios(ratios, count::Int, name::AbstractString)
+	(ratios isa AbstractVector || ratios isa Tuple) || throw(ArgumentError(
+		"subplots: `$(name)` must be a vector of positive numbers; got " *
+		"$(typeof(ratios)).",
+	))
+	length(ratios) == count || throw(ArgumentError(
+		"subplots: `$(name)` needs one entry per " *
+		(name == "height_ratios" ? "row" : "column") *
+		" ($(count)); got $(length(ratios)).",
+	))
+	out = Vector{Float64}(undef, count)
+	for (k, value) in enumerate(ratios)
+		(value isa Real && !(value isa Bool) && isfinite(value) && value > 0) ||
+			throw(ArgumentError(
+				"subplots: `$(name)` entries must be positive finite numbers; " *
+				"entry $(k) is $(repr(value)).",
+			))
+		out[k] = Float64(value)
+	end
+	return out
+end
+
+# Translate `height_ratios` (top-to-bottom as drawn) and `width_ratios`
+# (left-to-right) into PlotlyBase's `row_heights` / `column_widths`.
+# PlotlyBase spreads `row_heights` bottom-up for start_cell = "top-left"
+# (row_heights[1] sizes the BOTTOM row), so the list is reversed. For
+# start_cell = "bottom-left" PlotlyBase 0.8 sizes row r with the
+# (rows - r + 1)-th entry but stacks rows with the cumulative bottom-up sum,
+# which overlaps or overflows the cells for any non-symmetric list; only
+# uniform ratios give a valid grid there.
+function _subplots_grid_kwargs(
+	rows::Int,
+	cols::Int,
+	height_ratios,
+	width_ratios,
+	subplot_kwargs,
+)
+	grid = Dict{Symbol,Any}(pairs(subplot_kwargs))
+	start_cell = get(grid, :start_cell, "top-left")
+	(start_cell isa AbstractString && start_cell in _SUBPLOTS_START_CELLS) ||
+		throw(ArgumentError(
+			"subplots: `start_cell` must be \"top-left\" or \"bottom-left\"; " *
+			"got $(repr(start_cell)).",
+		))
+	grid[:start_cell] = String(start_cell)
+	if height_ratios !== nothing
+		haskey(grid, :row_heights) && throw(ArgumentError(
+			"subplots: pass either `height_ratios` (top-to-bottom) or " *
+			"`row_heights` (PlotlyBase order), not both.",
+		))
+		ratios = _subplots_checked_ratios(height_ratios, rows, "height_ratios")
+		if start_cell == "top-left"
+			grid[:row_heights] = reverse(ratios)
+		else
+			all(==(first(ratios)), ratios) || throw(ArgumentError(
+				"subplots: unequal `height_ratios` are not supported with " *
+				"start_cell = \"bottom-left\": PlotlyBase computes " *
+				"overlapping row domains for that combination. Use the " *
+				"default start_cell = \"top-left\" (row 1 at the top).",
+			))
+			grid[:row_heights] = ratios
+		end
+	end
+	if width_ratios !== nothing
+		haskey(grid, :column_widths) && throw(ArgumentError(
+			"subplots: pass either `width_ratios` or `column_widths`, not both.",
+		))
+		grid[:column_widths] =
+			_subplots_checked_ratios(width_ratios, cols, "width_ratios")
+	end
+	return grid
+end
+
+"""
+	subplots(rows, cols; sync=true, title="", window_title="", width=0, height=0,
+		show=true, app=nothing, height_ratios=nothing, width_ratios=nothing,
+		per_subplot_legends=true, legend_position=get_default_legend_position(),
+		legend_inset=(0.02, 0.03), legend_bgcolor="rgba(255,255,255,0.72)",
+		legend_bordercolor="rgba(0,0,0,0.15)", legend_borderwidth=1,
+		subplot_kwargs...) -> SubplotFigure
+
+Create a MATLAB-like grid of `rows` × `cols` subplot cells and return a
+[`SubplotFigure`](@ref). Cell `(1, 1)` is active; select another with
+[`subplot!`](@ref) and append to the active cell (or to `row`/`col`) with the
+`plot_*!` mutators, `add_trace!` and `addtraces!`.
+
+# Keywords
+- `sync::Bool=true`: `true` shows the figure in a live Electron window (the
+  figure is a `SyncPlot`); `false` builds a plain `Plot` without a window.
+- `title::AbstractString=""`: figure title, stored as `layout.title.text`
+  (LaTeX/mathtext is rendered, see [`mathtext`](@ref)); `""` writes no title.
+- `window_title::AbstractString=""`: title of the Electron window
+  (`sync=true` only). `""` uses `title` when it is non-empty, otherwise
+  `"PlotlySupply"`.
+- `width::Real=0`, `height::Real=0`: figure size in CSS pixels, written to
+  `layout.width`/`layout.height` in both modes and, with `sync=true`, used as
+  the window size. `0` leaves the layout size automatic (the figure fills the
+  window, which defaults to 960 × 720; `savefig` uses its own default size).
+  Negative or non-finite values throw an `ArgumentError`.
+- `show::Bool=true`, `app=nothing`: window visibility and ElectronCall
+  application (`sync=true` only; validated in both modes).
+- `height_ratios=nothing`: relative row heights listed top-to-bottom as drawn
+  (`[3, 1]` makes row 1 three times as tall as row 2); one positive finite
+  number per row. Cannot be combined with `row_heights`; with
+  `start_cell="bottom-left"` only equal ratios are accepted.
+- `width_ratios=nothing`: relative column widths, left-to-right; one positive
+  finite number per column. Cannot be combined with `column_widths`.
+- `per_subplot_legends::Bool=true`: every cell gets its own legend inside the
+  cell. `false` keeps one figure legend, placed and styled with the
+  `legend_*` keywords below as soon as a named trace is added.
+- `legend_position`, `legend_inset::Tuple{Real,Real}`,
+  `legend_bgcolor::AbstractString`, `legend_bordercolor::AbstractString`,
+  `legend_borderwidth::Real`: legend placement and style (see
+  [`set_legend!`](@ref)).
+- `subplot_kwargs...`: forwarded to `PlotlyBase.Subplots`: `specs`,
+  `shared_xaxes`, `shared_yaxes`, `start_cell` (`"top-left"` or
+  `"bottom-left"`), `subplot_titles`, `column_titles`, `row_titles`,
+  `x_title`, `y_title`, `insets`, `horizontal_spacing`, `vertical_spacing`,
+  `column_widths` and `row_heights`. `row_heights` keeps PlotlyBase's order:
+  for the default `start_cell="top-left"` its FIRST entry sizes the BOTTOM
+  row; prefer `height_ratios`.
+
+Every option is validated before the figure (or window) is created; invalid
+values throw an `ArgumentError`. Figure-level settings are not changed by the
+per-cell `plot_*!` mutators: set them here or with `relayout!(sf; ...)`.
+
+# Example
+```julia
+sf = subplots(2, 1; sync=false, title="Response", height_ratios=[3, 1],
+	width=700, height=500)
+plot_scatter!(sf, 0:0.1:10, sin.(0:0.1:10); row=1, col=1)
+plot_scatter!(sf, 0:0.1:10, cos.(0:0.1:10); row=2, col=1)
+```
 """
 function subplots(
 	rows::Integer,
 	cols::Integer;
 	sync::Bool = true,
-	width::Int = 960,
-	height::Int = 720,
-	title::String = "PlotlySupply",
+	width::Real = 0,
+	height::Real = 0,
+	title::AbstractString = "",
+	window_title::AbstractString = "",
 	show::Bool = true,
 	app = nothing,
+	height_ratios = nothing,
+	width_ratios = nothing,
 	per_subplot_legends::Bool = true,
 	legend_position::Union{Symbol, AbstractString} = get_default_legend_position(),
 	legend_inset::Tuple{<:Real, <:Real} = _DEFAULT_LEGEND_INSET[],
-	legend_bgcolor::String = _DEFAULT_LEGEND_BGCOLOR[],
-	legend_bordercolor::String = _DEFAULT_LEGEND_BORDERCOLOR[],
+	legend_bgcolor::AbstractString = _DEFAULT_LEGEND_BGCOLOR[],
+	legend_bordercolor::AbstractString = _DEFAULT_LEGEND_BORDERCOLOR[],
 	legend_borderwidth::Real = _DEFAULT_LEGEND_BORDERWIDTH[],
 	subplot_kwargs...,
 )
+	# Validate every option before a figure or window exists.
+	(rows isa Bool || cols isa Bool) && throw(ArgumentError(
+		"subplots: `rows` and `cols` must be integers, not Bool.",
+	))
 	rows_i = Int(rows)
 	cols_i = Int(cols)
 	_check_subplot_dims(rows_i, cols_i)
-
-	layout = _plotlysupply_subplot_layout(
-		Subplots(rows = rows_i, cols = cols_i; subplot_kwargs...),
+	_require_size_option(width, "subplots", "width")
+	_require_size_option(height, "subplots", "height")
+	resolved_window_title = isempty(window_title) ? title : window_title
+	# Pure validation of the window options (size limits, app/show types),
+	# applied below only with sync = true.
+	_syncplot_window_options(
+		"subplots";
+		app = app,
+		width = width,
+		height = height,
+		title = resolved_window_title,
+		show = show,
 	)
-	fig = if sync
-		plot(; layout = layout, sync = true, width = width, height = height, title = title, show = show, app = app)
-	else
-		p = Plot(Vector{GenericTrace}(undef, 0), layout)
-		width > 0 && relayout!(p, width = width)
-		height > 0 && relayout!(p, height = height)
-		title != "" && relayout!(p, title = title)
-		p
+	normalized_legend_position = _normalize_legend_position(legend_position)
+	inset = (Float64(legend_inset[1]), Float64(legend_inset[2]))
+	all(isfinite, inset) || throw(ArgumentError(
+		"subplots: `legend_inset` must contain finite numbers; got $(legend_inset).",
+	))
+	(!(legend_borderwidth isa Bool) && isfinite(legend_borderwidth) &&
+		legend_borderwidth >= 0) || throw(ArgumentError(
+		"subplots: `legend_borderwidth` must be a finite number ≥ 0; got " *
+		"$(repr(legend_borderwidth)).",
+	))
+	grid_kwargs = _subplots_grid_kwargs(
+		rows_i,
+		cols_i,
+		height_ratios,
+		width_ratios,
+		subplot_kwargs,
+	)
+	grid = try
+		Subplots(; rows = rows_i, cols = cols_i, grid_kwargs...)
+	catch err
+		# PlotlyBase checks spacing, titles and shared-axis modes with
+		# @assert; report them as argument errors.
+		err isa AssertionError || rethrow()
+		throw(ArgumentError("subplots: invalid grid option: $(err.msg)"))
 	end
-	p = _plot_obj(fig)
+	layout = _plotlysupply_subplot_layout(grid)
+
+	# Build the complete model first, so a live window renders it once.
+	p = Plot(Vector{GenericTrace}(undef, 0), layout)
 	_apply_default_template!(p)
-	_apply_default_cartesian_axes!(p)
-	_refresh!(fig)
+	_apply_figure_title!(p, title)
+	_apply_figure_size!(p, "subplots"; width = width, height = height)
+	fig = sync ?
+		plot(
+			p;
+			sync = true,
+			app = app,
+			width = width,
+			height = height,
+			title = resolved_window_title,
+			show = show,
+		) :
+		p
 
 	return SubplotFigure(
 		fig,
@@ -1330,10 +1508,10 @@ function subplots(
 		1,
 		1,
 		per_subplot_legends,
-		_normalize_legend_position(legend_position),
-		(Float64(legend_inset[1]), Float64(legend_inset[2])),
-		legend_bgcolor,
-		legend_bordercolor,
+		normalized_legend_position,
+		inset,
+		String(legend_bgcolor),
+		String(legend_bordercolor),
 		Float64(legend_borderwidth),
 	)
 end
@@ -1362,21 +1540,465 @@ end
 
 # Delegate raw PlotlyBase verbs to the underlying figure so a SubplotFigure can
 # be driven like a Plot/SyncPlot. The fig-level methods already handle the
-# Electron refresh; we return `sf` so calls remain chainable on the subplot.
-for f in (:relayout!, :react!, :restyle!, :update_xaxes!, :update_yaxes!, :update_polars!)
+# Electron refresh and their own transactions; `sf` is returned so calls remain
+# chainable on the subplot. These verbs address traces by index or the whole
+# layout, so they take no `row`/`col`.
+for f in (
+	:relayout!,
+	:react!,
+	:restyle!,
+	:update!,
+	:redraw!,
+	:deletetraces!,
+	:movetraces!,
+	:extendtraces!,
+	:prependtraces!,
+)
 	@eval function PlotlyBase.$f(sf::SubplotFigure, args...; kwargs...)
 		PlotlyBase.$f(getfield(sf, :fig), args...; kwargs...)
 		return sf
 	end
 end
 
+# Layout key of the `family` object (`:xaxis`, `:yaxis`, `:polar`, `:scene`,
+# `:ternary`) of one grid cell; `secondary_y` selects the cell's secondary y
+# axis. Throws when the cell has no such object.
+function _subplot_layout_object_key(
+	p::Plot,
+	row::Int,
+	col::Int,
+	family::Symbol,
+	who::AbstractString;
+	secondary_y::Bool = false,
+)
+	ref = try
+		_subplot_target_ref(p, row, col; secondary_y = secondary_y)
+	catch err
+		err isa ArgumentError || rethrow()
+		throw(ArgumentError("$(who): $(err.msg)"))
+	end
+	kind = String(ref.subplot_kind)
+	expected = family in (:xaxis, :yaxis) ? "xy" : String(family)
+	kind == expected || throw(ArgumentError(
+		"$(who): subplot cell ($(row), $(col)) is a '$(kind)' cell and has no " *
+		"$(family) object.",
+	))
+	if family === :xaxis
+		return ref.layout_keys[1]
+	elseif family === :yaxis
+		return ref.layout_keys[2]
+	end
+	return only(ref.layout_keys)
+end
+
+# Nested paths merged (not replaced) per layout object family. A function, not
+# a constant: the path constants are defined further down in this file.
+function _subplot_layout_object_merge_paths(family::Symbol)
+	family in (:xaxis, :yaxis) && return _AXIS_LAYOUT_MERGE_PATHS
+	family === :polar && return _POLAR_LAYOUT_MERGE_PATHS
+	family === :scene && return _SCENE_LAYOUT_MERGE_PATHS
+	family === :ternary && return _TERNARY_LAYOUT_MERGE_PATHS
+	throw(ArgumentError("unsupported subplot layout object family `$(family)`."))
+end
+
+function _subplot_layout_object_update_impl!(
+	sf::SubplotFigure,
+	updater::Function,
+	family::Symbol,
+	who::AbstractString,
+	with::PlotlyBase.PlotlyAttribute;
+	row::Integer,
+	col::Integer,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	p = _plot_obj(sf.fig)
+	key = _subplot_layout_object_key(
+		p,
+		r,
+		c,
+		family,
+		who;
+		secondary_y = secondary_y,
+	)
+	layout = p.layout
+	# Run PlotlyBase's own updater on a scratch layout holding only this cell's
+	# object, so `with`, `kwargs` and underscore paths (`title_text=...`) mean
+	# exactly what they mean for the figure-wide update.
+	temporary = Layout()
+	existing = get(layout.fields, key, nothing)
+	temporary.fields[family] = existing === nothing ? attr() : deepcopy(existing)
+	updater(temporary, with; kwargs...)
+	_merge_layout_attr!(
+		layout,
+		key,
+		get(temporary.fields, family, nothing);
+		drop_keys = (:domain,),
+		deep_merge_paths = _subplot_layout_object_merge_paths(family),
+		mutate_builtin_target = true,
+	)
+	sf.current_row = r
+	sf.current_col = c
+	_refresh!(sf.fig)
+	return sf
+end
+
+function _subplot_layout_object_update!(
+	sf::SubplotFigure,
+	updater::Function,
+	family::Symbol,
+	who::AbstractString,
+	with::PlotlyBase.PlotlyAttribute,
+	row,
+	col,
+	kwargs;
+	secondary_y::Bool = false,
+)
+	if row === nothing && col === nothing
+		secondary_y && throw(ArgumentError(
+			"$(who): `secondary_y=true` selects one cell's secondary y axis; " *
+			"pass `row` and `col`.",
+		))
+		updater(getfield(sf, :fig), with; kwargs...)
+		return sf
+	end
+	(row === nothing || col === nothing) && throw(ArgumentError(
+		"$(who): `row` and `col` must be provided together.",
+	))
+	_warn_ignored_subplot_domain(who, with, kwargs)
+	return _transactional_subplot_mutation!(
+		_subplot_layout_object_update_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		updater,
+		family,
+		who,
+		with;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
+end
+
+"""
+	update_xaxes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+	update_yaxes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, secondary_y=false, kwargs...)
+	update_polars!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+	update_scenes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+	update_ternaries!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+
+Update layout objects of a [`SubplotFigure`](@ref). Keywords are Plotly
+attributes of that object family (`showgrid=false`, `title_text="t"`, …).
+
+- Without `row`/`col`: every object of the family in the whole figure is
+  updated (as for a `Plot`); the active cell is unchanged.
+- With `row` and `col` (pass both): only that cell's object is updated —
+  its x axis, y axis (`secondary_y=true`: its secondary y axis), polar,
+  scene or ternary — and the cell becomes the active cell. The cell must be
+  of the matching kind, otherwise an `ArgumentError` is thrown and nothing
+  changes. The grid owns cell domains, so a `domain` value is ignored with a
+  warning. `row`/`col` are never written as attributes.
+
+Returns `sf`.
+
+# Example
+```julia
+sf = subplots(1, 2; sync=false)
+update_xaxes!(sf; showgrid=false)                 # every x axis
+update_yaxes!(sf; row=1, col=2, type="log")       # only cell (1, 2)
+```
+"""
+function PlotlyBase.update_xaxes!(
+	sf::SubplotFigure,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
+)
+	return _subplot_layout_object_update!(
+		sf,
+		PlotlyBase.update_xaxes!,
+		:xaxis,
+		"update_xaxes!",
+		with,
+		row,
+		col,
+		kwargs,
+	)
+end
+
+function PlotlyBase.update_yaxes!(
+	sf::SubplotFigure,
+	with::PlotlyBase.PlotlyAttribute = attr();
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _subplot_layout_object_update!(
+		sf,
+		PlotlyBase.update_yaxes!,
+		:yaxis,
+		"update_yaxes!",
+		with,
+		row,
+		col,
+		kwargs;
+		secondary_y = secondary_y,
+	)
+end
+
+for (updater, family) in (
+	(:update_polars!, :polar),
+	(:update_scenes!, :scene),
+	(:update_ternaries!, :ternary),
+)
+	who = String(updater)
+	doc = """
+		$(who)(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+
+	Without `row`/`col`, update every `$(family)` object of the figure; with
+	both, update only that cell's `$(family)` object (an `ArgumentError` if the
+	cell is of another kind) and make it the active cell. `domain` is ignored
+	with a warning on a cell update. Returns `sf`. See
+	[`update_xaxes!`](@ref) for the full SubplotFigure semantics.
+	"""
+	@eval begin
+		@doc $doc function PlotlyBase.$updater(
+			sf::SubplotFigure,
+			with::PlotlyBase.PlotlyAttribute = attr();
+			row::Union{Nothing, Integer} = nothing,
+			col::Union{Nothing, Integer} = nothing,
+			kwargs...,
+		)
+			return _subplot_layout_object_update!(
+				sf,
+				PlotlyBase.$updater,
+				$(QuoteNode(family)),
+				$who,
+				with,
+				row,
+				col,
+				kwargs,
+			)
+		end
+	end
+end
+
+# `xref`/`yref` values of an annotation/shape/image that place it on one of
+# `axis_refs` ("x3" or "x3 domain").
+function _subplot_item_ref_matches(value, axis_refs)
+	value isa AbstractString || return false
+	base = endswith(value, " domain") ? value[1:(end - length(" domain"))] : value
+	return base in axis_refs
+end
+
+function _subplot_layout_vector_update_impl!(
+	sf::SubplotFigure,
+	updater::Function,
+	vector_key::Symbol,
+	who::AbstractString,
+	with::PlotlyBase.PlotlyAttribute;
+	row::Integer,
+	col::Integer,
+	kwargs...,
+)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	p = _plot_obj(sf.fig)
+	refs = p.layout.subplots.grid_ref
+	(isassigned(refs, r, c) && !isempty(refs[r, c])) || throw(ArgumentError(
+		"$(who): subplot cell ($(r), $(c)) is empty.",
+	))
+	cell_refs = refs[r, c]
+	kind = String(first(cell_refs).subplot_kind)
+	kind == "xy" || throw(ArgumentError(
+		"$(who): subplot cell ($(r), $(c)) is a '$(kind)' cell; only " *
+		"Cartesian cells own layout.$(vector_key) entries.",
+	))
+	xrefs = Set{String}()
+	yrefs = Set{String}()
+	for ref in cell_refs
+		trace_refs = ref.trace_kwargs.fields
+		push!(xrefs, String(trace_refs[:xaxis]))
+		push!(yrefs, String(trace_refs[:yaxis]))
+	end
+	items = get(p.layout.fields, vector_key, nothing)
+	if items isa AbstractVector
+		selected = [
+			index for index in eachindex(items)
+			if _subplot_item_ref_matches(_cmn_mapping_get(items[index], :xref), xrefs) &&
+				_subplot_item_ref_matches(_cmn_mapping_get(items[index], :yref), yrefs)
+		]
+		if !isempty(selected)
+			# Apply PlotlyBase's own merge to copies of the selected entries,
+			# then publish them in their original positions.
+			temporary = Layout()
+			temporary.fields[vector_key] =
+				Any[deepcopy(items[index]) for index in selected]
+			updater(temporary, with; kwargs...)
+			updated = temporary.fields[vector_key]
+			for (position, index) in enumerate(selected)
+				items[index] = updated[position]
+			end
+		end
+	end
+	sf.current_row = r
+	sf.current_col = c
+	_refresh!(sf.fig)
+	return sf
+end
+
+for (updater, vector_key) in (
+	(:update_annotations!, :annotations),
+	(:update_shapes!, :shapes),
+	(:update_images!, :images),
+)
+	who = String(updater)
+	doc = """
+		$(who)(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
+
+	Merge `with` and the attribute keywords into entries of
+	`layout.$(vector_key)` of a [`SubplotFigure`](@ref).
+
+	- Without `row`/`col`: every entry is updated (as for a `Plot`).
+	- With `row` and `col` (pass both): only entries placed on that Cartesian
+	  cell — `xref` and `yref` both name one of the cell's axes, with or
+	  without the `" domain"` suffix (secondary y included) — are updated, and
+	  the cell becomes the active cell. Paper-referenced entries and entries
+	  without explicit `xref`/`yref` belong to no cell. A non-Cartesian cell
+	  throws an `ArgumentError`.
+
+	Returns `sf`.
+	"""
+	@eval begin
+		@doc $doc function PlotlyBase.$updater(
+			sf::SubplotFigure,
+			with::PlotlyBase.PlotlyAttribute = attr();
+			row::Union{Nothing, Integer} = nothing,
+			col::Union{Nothing, Integer} = nothing,
+			kwargs...,
+		)
+			if row === nothing && col === nothing
+				PlotlyBase.$updater(getfield(sf, :fig), with; kwargs...)
+				return sf
+			end
+			(row === nothing || col === nothing) && throw(ArgumentError(
+				$(who * ": `row` and `col` must be provided together."),
+			))
+			return _transactional_subplot_mutation!(
+				_subplot_layout_vector_update_impl!,
+				sf,
+				_SUBPLOT_SELECTION_METADATA_FIELDS,
+				PlotlyBase.$updater,
+				$(QuoteNode(vector_key)),
+				$who,
+				with;
+				row = row,
+				col = col,
+				kwargs...,
+			)
+		end
+	end
+end
+
+function _subplot_purge_impl!(sf::SubplotFigure)
+	p = _plot_obj(sf.fig)
+	# Rebuild the same grid (specs, spacing, ratios, titles) from the stored
+	# PlotlyBase.Subplots with a fresh routing table, then restyle it like a
+	# new `subplots(...)` figure.
+	fresh = _plotlysupply_subplot_layout(
+		_rebuild_subplots(p.layout.subplots),
+	)
+	empty!(p.data)
+	empty!(p.layout.fields)
+	merge!(p.layout.fields, fresh.fields)
+	p.layout.subplots = fresh.subplots
+	_apply_default_template!(p)
+	empty!(sf.insets)
+	sf.current_row = 1
+	sf.current_col = 1
+	_refresh!(sf.fig)
+	return sf
+end
+
+"""
+	purge!(sf::SubplotFigure)
+
+Remove every trace and every layout setting of `sf` but keep its grid: the
+figure is reset to the empty grid `subplots(...)` created (same specs,
+spacing, ratios and subplot titles, default template), registered insets are
+dropped and cell `(1, 1)` becomes active. A figure title or size set by
+`subplots(...; title, width, height)` is removed too. A live window is
+redrawn in one transaction. Returns `sf`.
+"""
+function PlotlyBase.purge!(sf::SubplotFigure)
+	return _transactional_subplot_mutation!(
+		_subplot_purge_impl!,
+		sf,
+		_SUBPLOT_INSET_METADATA_FIELDS,
+	)
+end
+
+"""
+	isopen(sf::SubplotFigure) -> Bool
+
+`true` while the Electron window of a `subplots(...; sync=true)` figure is
+open; always `false` for a figure built with `sync=false` (it has no window).
+"""
+function Base.isopen(sf::SubplotFigure)
+	fig = getfield(sf, :fig)
+	return fig isa SyncPlot ? isopen(fig) : false
+end
+
+"""
+	close(sf::SubplotFigure) -> nothing
+
+Close the Electron window of a `subplots(...; sync=true)` figure. A figure
+built with `sync=false` has no window, so this is a no-op for it. The figure
+model (`sf.plot`) stays usable after the window is closed.
+"""
+function Base.close(sf::SubplotFigure)
+	fig = getfield(sf, :fig)
+	fig isa SyncPlot && close(fig)
+	return nothing
+end
+
 savefig(sf::SubplotFigure, args...; kwargs...) = savefig(getfield(sf, :fig), args...; kwargs...)
 savefig(io::IO, sf::SubplotFigure; kwargs...) = savefig(io, getfield(sf, :fig); kwargs...)
 savefig(filename::AbstractString, sf::SubplotFigure; kwargs...) = savefig(filename, getfield(sf, :fig); kwargs...)
-PlotlyBase.to_image(sf::SubplotFigure; kwargs...) =
-	PlotlyBase.to_image(getfield(sf, :fig); kwargs...)
-PlotlyBase.download_image(sf::SubplotFigure; kwargs...) =
-	PlotlyBase.download_image(getfield(sf, :fig); kwargs...)
+
+function _subplot_window_figure(sf::SubplotFigure, who::AbstractString)
+	fig = getfield(sf, :fig)
+	fig isa SyncPlot || throw(ArgumentError(
+		"$(who): this SubplotFigure was created with `sync=false` and has no " *
+		"window to render in. Use `savefig(sf, \"figure.png\")` (or " *
+		"`savefig(io, sf; format=\"png\")`) to render it.",
+	))
+	return fig
+end
+
+"""
+	to_image(sf::SubplotFigure; kwargs...) -> String
+	download_image(sf::SubplotFigure; kwargs...) -> nothing
+
+Render a `subplots(...; sync=true)` figure in its window (see
+`to_image(::SyncPlot)` / `download_image(::SyncPlot)`). A figure created with
+`sync=false` has no window: both throw an `ArgumentError` pointing to
+`savefig` instead of returning `nothing`.
+"""
+function PlotlyBase.to_image(sf::SubplotFigure; kwargs...)
+	return PlotlyBase.to_image(_subplot_window_figure(sf, "to_image"); kwargs...)
+end
+
+function PlotlyBase.download_image(sf::SubplotFigure; kwargs...)
+	PlotlyBase.download_image(
+		_subplot_window_figure(sf, "download_image");
+		kwargs...,
+	)
+	return nothing
+end
 
 function _subplot_target_ref(
 	p::Plot,
@@ -1448,7 +2070,20 @@ function _subplot_add_trace_impl!(
 	p = _plot_obj(sf.fig)
 	_validate_subplot_traces!(p, (trace,), r, c; secondary_y = secondary_y)
 	PlotlyBase.add_trace!(p, trace; row = r, col = c, secondary_y = secondary_y)
+	_subplot_apply_legends!(sf, p)
 
+	sf.current_row = r
+	sf.current_col = c
+	_refresh!(sf.fig)
+	return sf
+end
+
+# Legend layout after traces were added to a SubplotFigure: per-cell legends,
+# or (per_subplot_legends = false) the figure legend styled with the
+# SubplotFigure's legend options. The figure-legend branch only writes layout
+# (`overwrite=false` keeps a legend set by `set_legend!`/`relayout!`), so it is
+# safe on the append-only fast path that shares existing trace roots.
+function _subplot_apply_legends!(sf::SubplotFigure, p::Plot)
 	if sf.per_subplot_legends
 		_apply_subplot_legends!(
 			p;
@@ -1458,12 +2093,17 @@ function _subplot_add_trace_impl!(
 			legend_bordercolor = sf.legend_bordercolor,
 			legend_borderwidth = sf.legend_borderwidth,
 		)
+	else
+		_apply_default_legend!(
+			p;
+			position = sf.legend_position,
+			inset = sf.legend_inset,
+			bgcolor = sf.legend_bgcolor,
+			bordercolor = sf.legend_bordercolor,
+			borderwidth = sf.legend_borderwidth,
+		)
 	end
-
-	sf.current_row = r
-	sf.current_col = c
-	_refresh!(sf.fig)
-	return sf
+	return nothing
 end
 
 function PlotlyBase.add_trace!(
@@ -1490,11 +2130,18 @@ function _subplot_addtraces_impl!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	index::Union{Nothing, Int} = nothing,
 )
 	isempty(traces) && return sf
 
 	r, c = _resolve_subplot_cell(sf; row = row, col = col)
 	p = _plot_obj(sf.fig)
+	if index !== nothing
+		1 <= index <= length(p.data) + 1 || throw(ArgumentError(
+			"addtraces!: insertion index must be in 1:$(length(p.data) + 1); " *
+			"got $(index).",
+		))
+	end
 	_validate_subplot_traces!(p, traces, r, c; secondary_y = secondary_y)
 
 	# PlotlyBase.add_trace! deep-copies each trace and merges the selected
@@ -1505,18 +2152,14 @@ function _subplot_addtraces_impl!(
 	for trace in traces
 		PlotlyBase.add_trace!(staged, trace; row = r, col = c, secondary_y = secondary_y)
 	end
-	append!(p.data, staged.data)
-
-	if sf.per_subplot_legends
-		_apply_subplot_legends!(
-			p;
-			legend_position = sf.legend_position,
-			legend_inset = sf.legend_inset,
-			legend_bgcolor = sf.legend_bgcolor,
-			legend_bordercolor = sf.legend_bordercolor,
-			legend_borderwidth = sf.legend_borderwidth,
-		)
+	if index === nothing
+		append!(p.data, staged.data)
+	else
+		# Same order as PlotlyBase's addtraces!(p, i, traces...): the first
+		# new trace lands at position `index`.
+		splice!(p.data, index:(index - 1), staged.data)
 	end
+	_subplot_apply_legends!(sf, p)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -1524,6 +2167,17 @@ function _subplot_addtraces_impl!(
 	return sf
 end
 
+"""
+	addtraces!(sf::SubplotFigure, traces...; row=nothing, col=nothing, secondary_y=false)
+	addtraces!(sf::SubplotFigure, i::Int, traces...; row=nothing, col=nothing, secondary_y=false)
+
+Add `traces` to one cell of `sf` — the cell given by `row`/`col` (pass both)
+or the active cell — routed to that cell's axes (`secondary_y=true`: its
+secondary y axis). The second form inserts them at trace position `i`
+(`1 ≤ i ≤ length(sf.data) + 1`) instead of appending. Every trace is checked
+against the cell kind before anything changes; the cell becomes the active
+cell. Returns `sf`.
+"""
 function PlotlyBase.addtraces!(
 	sf::SubplotFigure,
 	traces::AbstractTrace...;
@@ -1540,6 +2194,27 @@ function PlotlyBase.addtraces!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+	)
+end
+
+function PlotlyBase.addtraces!(
+	sf::SubplotFigure,
+	i::Int,
+	traces::AbstractTrace...;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+)
+	isempty(traces) && return sf
+	return _transactional_subplot_mutation!(
+		_subplot_addtraces_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS,
+		traces...;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		index = i,
 	)
 end
 
@@ -2618,6 +3293,45 @@ function _require_valid_finalized_layout_merge(
 	return nothing
 end
 
+# Axis-reference attributes a transplanted primary axis can carry
+# (`_apply_equal_aspect!` writes `scaleanchor`, shared axes write `matches`,
+# twins write `overlaying`). They name the scratch figure's axes; every routed
+# trace uses the target cell's axes, so an "x…" reference becomes the cell's
+# x axis and a "y…" reference its y axis. A reference to the axis itself is
+# dropped (plotly rejects a self-anchored axis); `anchor` never reaches this
+# point because the grid owns it.
+const _SUBPLOT_AXIS_REF_KEYS = (:scaleanchor, :matches, :overlaying)
+const _SUBPLOT_X_REF_PATTERN = r"^x([2-9]|[1-9][0-9]+)?$"
+const _SUBPLOT_Y_REF_PATTERN = r"^y([2-9]|[1-9][0-9]+)?$"
+
+function _subplot_remap_axis_refs(
+	source_axis,
+	xref::AbstractString,
+	yref::AbstractString,
+	self_ref::AbstractString,
+)
+	source_axis === nothing && return nothing
+	_is_layout_mapping(source_axis) || return source_axis
+	fields = _symbol_dict(source_axis)
+	any(key -> haskey(fields, key), _SUBPLOT_AXIS_REF_KEYS) ||
+		return source_axis
+	for key in _SUBPLOT_AXIS_REF_KEYS
+		haskey(fields, key) || continue
+		value = fields[key]
+		value isa AbstractString || continue
+		mapped = occursin(_SUBPLOT_X_REF_PATTERN, value) ? String(xref) :
+			occursin(_SUBPLOT_Y_REF_PATTERN, value) ? String(yref) :
+			String(value)
+		if mapped == self_ref
+			delete!(fields, key)
+		else
+			fields[key] = mapped
+		end
+	end
+	# A new container: the scratch figure's axis object is never mutated.
+	return PlotlyBase.PlotlyAttribute(fields)
+end
+
 function _apply_source_layout_to_added_traces!(
 	target::Plot,
 	source::Plot,
@@ -2646,12 +3360,16 @@ function _apply_source_layout_to_added_traces!(
 			ykey = _axis_layout_key(yref, :y)
 
 			if !(xkey in processed)
-				source_axis =
+				source_axis = _subplot_remap_axis_refs(
 					get(
 						source.layout.fields,
 						:xaxis,
 						nothing,
-					)
+					),
+					xref,
+					yref,
+					xref,
+				)
 				filtered_source =
 					_symbol_dict(source_axis)
 				pop!(filtered_source, :domain, nothing)
@@ -2687,12 +3405,16 @@ function _apply_source_layout_to_added_traces!(
 				push!(processed, xkey)
 			end
 			if !(ykey in processed)
-				source_axis =
+				source_axis = _subplot_remap_axis_refs(
 					get(
 						source.layout.fields,
 						:yaxis,
 						nothing,
-					)
+					),
+					xref,
+					yref,
+					yref,
+				)
 				filtered_source =
 					_symbol_dict(source_axis)
 				pop!(filtered_source, :domain, nothing)
@@ -2838,21 +3560,84 @@ end
 
 const _SUBPLOT_ROOT_LAYOUT_MODES = (:barmode, :boxmode, :violinmode)
 
+# Trace types each figure-wide mode arranges.
+function _subplot_mode_trace_types(key::Symbol)
+	key === :barmode && return ("bar", "histogram")
+	key === :boxmode && return ("box",)
+	return ("violin",)
+end
+
+# Root modes the caller passed explicitly (a non-empty string keyword).
+function _subplot_explicit_root_modes(kwargs)
+	return Tuple(
+		key for key in _SUBPLOT_ROOT_LAYOUT_MODES
+		if (value = get(kwargs, key, "")) isa AbstractString && !isempty(value)
+	)
+end
+
+# barmode/boxmode/violinmode are single figure-wide plotly attributes, so a
+# per-cell mutator must not let its automatic choice leak into other cells.
+# - An explicit mode (`barmode="stack"`) is written, with a warning when it
+#   replaces a different mode that already arranges traces in other cells.
+# - An automatic box/violin mode only fills an unset root value (it offsets
+#   boxes but hides no data).
+# - An automatic barmode is never copied: a nested histogram's "overlay" would
+#   hide grouped bars in every other cell.
 function _apply_source_root_layout_modes!(
 	target::Plot,
 	source::Plot;
-	overwrite_keys::Tuple{Vararg{Symbol}} = (),
+	explicit_keys::Tuple{Vararg{Symbol}} = (),
+	start_index::Int = length(target.data) + 1,
+	who::AbstractString = "plot",
 )
 	for key in _SUBPLOT_ROOT_LAYOUT_MODES
 		haskey(source.layout.fields, key) || continue
-		if key in overwrite_keys
-			target.layout.fields[key] = source.layout.fields[key]
-		else
-			get!(target.layout.fields, key, source.layout.fields[key])
+		value = source.layout.fields[key]
+		if key in explicit_keys
+			existing = get(target.layout.fields, key, nothing)
+			if existing !== nothing && existing != value &&
+					_subplot_mode_used_elsewhere(target, key, start_index)
+				@warn "$(who): `$(key)=$(repr(value))` replaces " *
+					"`$(key)=$(repr(existing))` for the WHOLE figure: plotly " *
+					"has one $(key), so traces already in other cells are " *
+					"re-arranged too."
+			end
+			target.layout.fields[key] = value
+		elseif key !== :barmode
+			get!(target.layout.fields, key, value)
 		end
 	end
 	return nothing
 end
+
+# Whether traces that existed before `start_index` and sit on other axes than
+# the new traces are arranged by the root mode `key`.
+function _subplot_mode_used_elsewhere(target::Plot, key::Symbol, start_index::Int)
+	types = _subplot_mode_trace_types(key)
+	new_refs = Set{Tuple{String,String}}()
+	for index in start_index:length(target.data)
+		fields = target.data[index].fields
+		push!(new_refs, (
+			string(get(fields, :xaxis, "x")),
+			string(get(fields, :yaxis, "y")),
+		))
+	end
+	for index in 1:min(start_index - 1, length(target.data))
+		fields = target.data[index].fields
+		string(get(fields, :type, "scatter")) in types || continue
+		refs = (
+			string(get(fields, :xaxis, "x")),
+			string(get(fields, :yaxis, "y")),
+		)
+		refs in new_refs || return true
+	end
+	return false
+end
+
+# plot_surface!(...; shared_coloraxis=true) also binds the surfaces already in
+# the figure to the shared coloraxis, which rewrites existing trace roots.
+_subplot_shared_surface_coloraxis(mutator, kwargs) =
+	mutator === plot_surface! && get(kwargs, :shared_coloraxis, false) === true
 
 function _subplot_delegate_mutator_impl!(
 	sf::SubplotFigure,
@@ -2861,9 +3646,21 @@ function _subplot_delegate_mutator_impl!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	who = String(nameof(mutator))
+	inset_target = inset === nothing ? nothing : _cell_target(
+		sf;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		inset = inset,
+		who = who,
+	)
+	r, c = inset_target === nothing ?
+		_resolve_subplot_cell(sf; row = row, col = col) :
+		(inset_target.row, inset_target.col)
 	# `title`/`width`/`height` are figure-level, not per-cell: the delegate only
 	# transplants traces + per-axis layout, so these would be silently dropped.
 	# Warn instead of leaving the caller wondering why nothing changed.
@@ -2875,16 +3672,32 @@ function _subplot_delegate_mutator_impl!(
 		isempty(dropped) || @warn "Per-subplot plot_*! ignores figure-level keyword(s) $(dropped); set them on the `subplots(...)` call or via `relayout!(sf; ...)`."
 	end
 	tmp = Plot(Vector{GenericTrace}(undef, 0), Layout())
-	mutator(_StagedPlotMutation(tmp), args...; kwargs...)
+	# Colorbar titles that plotly cannot typeset are converted after the
+	# traces reach their cell and the colorbars are placed (see
+	# `_place_cell_colorbars!`), not on the scratch figure.
+	Base.ScopedValues.with(_CBAR_DEFER_MATH_TITLES => true) do
+		mutator(_StagedPlotMutation(tmp), args...; kwargs...)
+	end
 
 	p = _plot_obj(sf.fig)
-	target_ref = _validate_subplot_traces!(
-		p,
-		tmp.data,
-		r,
-		c;
-		secondary_y = secondary_y,
-	)
+	trace_refs = if inset_target === nothing
+		_validate_subplot_traces!(
+			p,
+			tmp.data,
+			r,
+			c;
+			secondary_y = secondary_y,
+		).trace_kwargs
+	else
+		for trace in tmp.data
+			kind, trace_type = _trace_subplot_kind(trace)
+			kind == "xy" || throw(ArgumentError(
+				"$(who): trace type '$(trace_type)' needs a '$(kind)' subplot; " *
+				"inset $(inset) has Cartesian x/y axes.",
+			))
+		end
+		attr(xaxis = inset_target.xref, yaxis = inset_target.yref)
+	end
 	routed = Vector{GenericTrace}()
 	sizehint!(routed, length(tmp.data))
 	for trace in tmp.data
@@ -2893,32 +3706,32 @@ function _subplot_delegate_mutator_impl!(
 		# deep-copies every payload, which turns range/view-backed high-level
 		# inputs into O(n) allocations without providing additional isolation.
 		routed_trace = GenericTrace(copy(trace.fields))
-		merge!(routed_trace, target_ref.trace_kwargs)
+		merge!(routed_trace, trace_refs)
 		push!(routed, routed_trace)
 	end
 
 	start_index = length(p.data) + 1
 	append!(p.data, routed)
 	_apply_source_layout_to_added_traces!(p, tmp, start_index)
-	explicit_modes = get(values(kwargs), :barmode, "") == "" ?
-		() :
-		(:barmode,)
 	_apply_source_root_layout_modes!(
 		p,
 		tmp;
-		overwrite_keys = explicit_modes,
+		explicit_keys = _subplot_explicit_root_modes(kwargs),
+		start_index = start_index,
+		who = who,
 	)
-
-	if sf.per_subplot_legends
-		_apply_subplot_legends!(
-			p;
-			legend_position = sf.legend_position,
-			legend_inset = sf.legend_inset,
-			legend_bgcolor = sf.legend_bgcolor,
-			legend_bordercolor = sf.legend_bordercolor,
-			legend_borderwidth = sf.legend_borderwidth,
-		)
+	if _subplot_shared_surface_coloraxis(mutator, kwargs)
+		# Mirror the Plot-level mutator: every surface of the figure shares
+		# the coloraxis. `_subplot_delegate_mutator!` stages this case fully.
+		for index in 1:(start_index - 1)
+			trace = p.data[index]
+			trace isa GenericTrace || continue
+			string(get(trace.fields, :type, "")) == "surface" || continue
+			trace.fields[:coloraxis] = "coloraxis"
+		end
 	end
+	_place_cell_colorbars!(p, start_index)
+	_subplot_apply_legends!(sf, p)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -2932,6 +3745,10 @@ function _subplot_delegate_mutator!(
 	args...;
 	kwargs...,
 )
+	haskey(kwargs, :show) && throw(ArgumentError(
+		"$(nameof(mutator)): mutators do not take `show`; the SubplotFigure " *
+		"is shown by `subplots(...; sync=true)` (or `display(sf)`).",
+	))
 	metadata_lock = getfield(sf, :_lock)
 	lock(metadata_lock)
 	try
@@ -2956,16 +3773,19 @@ function _subplot_delegate_mutator!(
 		)
 
 		fig = getfield(sf, :fig)
-		# Per-subplot legends rewrite existing traces. The append-only fast path
-		# intentionally shares those trace roots, so retain full staging whenever
-		# legend assignment is enabled.
-		if sf.per_subplot_legends && fig isa SyncPlot
+		# Per-subplot legends and plot_surface!(...; shared_coloraxis=true)
+		# rewrite existing traces. The append-only fast path intentionally
+		# shares those trace roots, so retain full staging for both.
+		full_staging =
+			sf.per_subplot_legends ||
+			_subplot_shared_surface_coloraxis(mutator, kwargs)
+		if full_staging && fig isa SyncPlot
 			_mutate_and_refresh_syncplot!(
 				mutation,
 				fig;
 				commit_callback = commit_callback,
 			)
-		elseif sf.per_subplot_legends
+		elseif full_staging
 			_transactional_full_plot_mutation!(
 				mutation,
 				fig;
@@ -2995,30 +3815,33 @@ function _subplot_delegate_mutator!(
 	end
 end
 
+# Layout keys of a cell's x and y axes, read from the grid routing table (no
+# probe trace is added to the figure).
 function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_y::Bool = false)
 	p = _plot_obj(sf.fig)
-	probe = scatter(
-		x = [0.0],
-		y = [0.0],
-		mode = "markers",
-		showlegend = false,
-		hoverinfo = "skip",
-		marker = attr(size = 0.1, opacity = 0.0),
-	)
-	try
-		PlotlyBase.add_trace!(p, probe; row = row, col = col, secondary_y = secondary_y)
-	catch err
-		throw(ArgumentError("Selected subplot cell ($(row), $(col)) does not accept Cartesian x/y axes" *
-			(secondary_y ? " with a secondary y-axis (was the cell created with `secondary_y=true`?)." : ".")))
+	grid_ref = p.layout.subplots.grid_ref
+	(checkbounds(Bool, grid_ref, row, col) &&
+		isassigned(grid_ref, row, col) &&
+		!isempty(grid_ref[row, col])) || throw(ArgumentError(
+		"Selected subplot cell ($(row), $(col)) is empty.",
+	))
+	refs = grid_ref[row, col]
+	String(first(refs).subplot_kind) == "xy" || throw(ArgumentError(
+		"Selected subplot cell ($(row), $(col)) does not accept Cartesian x/y axes.",
+	))
+	if secondary_y && length(refs) < 2
+		throw(ArgumentError(
+			"Selected subplot cell ($(row), $(col)) does not accept Cartesian " *
+			"x/y axes with a secondary y-axis (was the cell created with " *
+			"`secondary_y=true`?).",
+		))
 	end
-	fields = p.data[end].fields
-	pop!(p.data)
-
-	haskey(fields, :xaxis) || throw(ArgumentError("Selected subplot cell ($(row), $(col)) has no x-axis."))
-	haskey(fields, :yaxis) || throw(ArgumentError("Selected subplot cell ($(row), $(col)) has no y-axis."))
-
-	xkey = _axis_layout_key(String(fields[:xaxis]), :x)
-	ykey = _axis_layout_key(String(fields[:yaxis]), :y)
+	trace_refs = refs[secondary_y ? 2 : 1].trace_kwargs.fields
+	(haskey(trace_refs, :xaxis) && haskey(trace_refs, :yaxis)) || throw(ArgumentError(
+		"Selected subplot cell ($(row), $(col)) has no x/y axis pair.",
+	))
+	xkey = _axis_layout_key(String(trace_refs[:xaxis]), :x)
+	ykey = _axis_layout_key(String(trace_refs[:yaxis]), :y)
 	return xkey, ykey
 end
 
