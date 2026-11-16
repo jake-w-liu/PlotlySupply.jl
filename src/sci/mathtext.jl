@@ -25,10 +25,36 @@ const _SCI_MATHTEXT_MUTATORS = ()
 
 struct _MathtextSettings
 	enabled::Bool
+	# MathJax size switch ("" defers to the active PlotStyle's `mathsize`).
 	size::String
+	# MathJax SVG font ("" defers to PLOTLYSUPPLY_MATHJAX_SVG_FONT, then
+	# "Latin-Modern"); read by the export window and live SyncPlot pages.
+	font::String
+	# Typeset `\text{…}` in the label's own font instead of the MathJax font.
+	inherit_text_font::Bool
 end
 
-const _MATHTEXT_SETTINGS = Ref(_MathtextSettings(true, ""))
+const _MATHTEXT_SETTINGS = Ref(_MathtextSettings(true, "", "", false))
+
+# The fonts of MathJax 2.7's SVG output (jax/output/SVG/fonts/<name>). Each was
+# verified to load from the pinned MathJax 2.7.9 CDN by exporting a math label
+# and checking the glyph ids of the SVG (e.g. GYRETERMESMAIN-…). MathJax
+# silently typesets any other name in its TeX font (verified with "bogus":
+# MJMAIN-/MJMATHI- glyphs), so other names are rejected instead of ignored.
+const _MATHJAX_SVG_FONTS = (
+	"TeX", "STIX-Web", "Asana-Math", "Neo-Euler",
+	"Gyre-Pagella", "Gyre-Termes", "Latin-Modern",
+)
+
+# The canonical spelling of a MathJax SVG font name (case-insensitive match),
+# or `nothing` when the name is not one of `_MATHJAX_SVG_FONTS`.
+function _mathjax_font_name(name::AbstractString)
+	wanted = lowercase(strip(String(name)))
+	for font in _MATHJAX_SVG_FONTS
+		lowercase(font) == wanted && return font
+	end
+	return nothing
+end
 
 # MathJax 2.7 size switches. `\footnotesize` is NOT defined in MathJax 2 (it
 # renders as a red undefined macro), so it is not accepted.
@@ -108,6 +134,24 @@ function _normalize_mathtext_size(size::AbstractString, who::AbstractString)
 	))
 end
 
+# The size switch applied when a label writer or `mathtext` is not given one:
+# the `set_default_mathtext!` size, or else the active PlotStyle's `mathsize`
+# (`_style_mathsize`, src/sci/style.jl; `\large` under `:publication`).
+function _mathtext_default_size()
+	size = _MATHTEXT_SETTINGS[].size
+	isempty(size) || return size
+	style_size = _style_mathsize()
+	isempty(style_size) && return ""
+	name = startswith(style_size, '\\') ? style_size[2:end] : style_size
+	name in _MATHTEXT_SIZES && return "\\" * name
+	throw(ArgumentError(
+		"mathtext: the active PlotStyle's mathsize $(repr(style_size)) is not a " *
+		"MathJax 2 size switch (MathJax 2 has no \\footnotesize); set the style's " *
+		"mathsize to one of $(join(("\\" * s for s in _MATHTEXT_SIZES), ", ")), " *
+		"or override it with set_default_mathtext!(; size = ...).",
+	))
+end
+
 function _mathtext_align_column(align::Symbol, who::AbstractString)
 	align in (:c, :center) && return 'c'
 	align in (:l, :left) && return 'l'
@@ -120,22 +164,39 @@ end
 """
 	get_default_mathtext()
 
-Return the package-wide label settings as a `NamedTuple` `(enabled, size)`:
-`enabled::Bool` says whether every PlotlySupply label writer converts mixed
-text + `\$…\$` labels with [`mathtext`](@ref), and `size::String` is the MathJax
-size switch (e.g. `"\\\\large"`, or `""` for none) prefixed to math labels.
-The package default is `(enabled = true, size = "")`.
+Return the package-wide label settings as a `NamedTuple`
+`(enabled, size, font, inherit_text_font)`, as set by
+[`set_default_mathtext!`](@ref):
+
+- `enabled::Bool`: every PlotlySupply label writer converts mixed text +
+  `\$…\$` labels with [`mathtext`](@ref).
+- `size::String`: the MathJax size switch (e.g. `"\\\\large"`) prefixed to math
+  labels, or `""`, which defers to the active [`PlotStyle`](@ref)'s `mathsize`.
+- `font::String`: the MathJax SVG font, or `""`, which defers to the
+  `PLOTLYSUPPLY_MATHJAX_SVG_FONT` environment variable and then to
+  `"Latin-Modern"`.
+- `inherit_text_font::Bool`: the text parts of math labels are drawn in the
+  label's own font.
+
+The package default is
+`(enabled = true, size = "", font = "", inherit_text_font = false)`.
 """
 function get_default_mathtext()
 	settings = _MATHTEXT_SETTINGS[]
-	return (enabled = settings.enabled, size = settings.size)
+	return (
+		enabled = settings.enabled,
+		size = settings.size,
+		font = settings.font,
+		inherit_text_font = settings.inherit_text_font,
+	)
 end
 
 """
-	set_default_mathtext!(enabled::Bool = true; size::AbstractString = "")
+	set_default_mathtext!(enabled::Bool = true; size::AbstractString = "",
+	                      font::AbstractString = "", inherit_text_font::Bool = false)
 
-Configure how PlotlySupply writes every user-visible label (titles, axis
-titles, legend names, colorbar titles, tick labels, annotations).
+Configure how PlotlySupply writes and typesets every user-visible label
+(titles, axis titles, legend names, colorbar titles, tick labels, annotations).
 
 #### Arguments
 - `enabled::Bool = true`: when `true`, labels go through [`mathtext`](@ref), so
@@ -146,27 +207,67 @@ titles, legend names, colorbar titles, tick labels, annotations).
 
 #### Keywords
 - `size::AbstractString = ""`: MathJax size switch prefixed to every label that
-  contains math: `""` (none) or one of `\\tiny`, `\\Tiny`, `\\scriptsize`,
-  `\\small`, `\\normalsize`, `\\large`, `\\Large`, `\\LARGE`, `\\huge`,
-  `\\Huge` (the leading backslash is optional). MathJax math renders at roughly
-  0.8× the height of plain text of the same font size, so `"\\\\large"` (1.2×)
-  matches them closely. Plain labels are not affected. Other values throw an
-  `ArgumentError` (`\\footnotesize` does not exist in MathJax 2).
+  contains math: one of `\\tiny`, `\\Tiny`, `\\scriptsize`, `\\small`,
+  `\\normalsize`, `\\large`, `\\Large`, `\\LARGE`, `\\huge`, `\\Huge` (the
+  leading backslash is optional). `""` uses the active [`PlotStyle`](@ref)'s
+  `mathsize` (`"\\\\large"` under `:publication`, none under `:default`); pass
+  `"\\\\normalsize"` to switch sizing off under such a style. MathJax math
+  renders at roughly 0.8× the height of plain text of the same font size, so
+  `"\\\\large"` (1.2×) matches them closely. Plain labels are not affected. Other
+  values throw an `ArgumentError` (`\\footnotesize` does not exist in MathJax 2).
+  The size is written into the label strings when a figure is built, so it
+  applies to figures created afterwards.
+- `font::AbstractString = ""`: the MathJax SVG font used to typeset math, one of
+  `"TeX"`, `"STIX-Web"`, `"Asana-Math"`, `"Neo-Euler"`, `"Gyre-Pagella"`,
+  `"Gyre-Termes"`, `"Latin-Modern"` (case-insensitive). `""` falls back to the
+  `PLOTLYSUPPLY_MATHJAX_SVG_FONT` environment variable (same names) and then to
+  `"Latin-Modern"`. Other names throw an `ArgumentError`.
+- `inherit_text_font::Bool = false`: when `true`, the text parts of a math label
+  (the `\\text{…}` segments [`mathtext`](@ref) produces, `\\textbf{…}`, `\\mbox{…}`)
+  are drawn in the font family, weight and style of the label itself (e.g. the
+  figure's sans-serif font) instead of the MathJax font; math symbols keep the
+  MathJax font, and MathJax scales them to the x-height of the label's font.
+  When `false`, the whole label is typeset in the MathJax font.
 
-Both settings are replaced on every call (an omitted `size` resets it to `""`).
-Returns the new settings as `(enabled = …, size = …)`, like
-[`get_default_mathtext`](@ref).
+`font` and `inherit_text_font` take effect at render time: every following
+`savefig` (all formats, including HTML) uses them, and an open `SyncPlot`
+window reloads its page with the new configuration before its next update
+(`relayout!`, `react!`, `plot_*!`, …); until then it keeps its current
+typesetting (the reload also resets any interactive zoom or pan in it). Math
+labels are typeset by MathJax 2.7.9, which is loaded from a CDN, so they need
+network access.
+
+All four settings are replaced on every call (an omitted keyword resets it to
+its default). Validation happens before anything changes. Returns the new
+settings, like [`get_default_mathtext`](@ref).
 
 #### Example
 ```julia
-set_default_mathtext!(true; size = "\\\\large")   # bigger math in every label
-fig = plot_scatter(1:3, [1, 4, 9]; xlabel = "Time \\\$t\\\$ (s)")
-set_default_mathtext!()                          # back to the defaults
+set_default_mathtext!(true; size = "\\\\large", font = "TeX", inherit_text_font = true)
+fig = plot_scatter(1:3, [1, 4, 9]; xlabel = "Contrast \\\$\\\\lambda\\\$")
+savefig(fig, "contrast.pdf")   # "Contrast" in the figure font, λ in MathJax TeX
+set_default_mathtext!()          # back to the defaults
 ```
 """
-function set_default_mathtext!(enabled::Bool = true; size::AbstractString = "")
+function set_default_mathtext!(
+	enabled::Bool = true;
+	size::AbstractString = "",
+	font::AbstractString = "",
+	inherit_text_font::Bool = false,
+)
 	normalized = _normalize_mathtext_size(size, "set_default_mathtext!")
-	_MATHTEXT_SETTINGS[] = _MathtextSettings(enabled, normalized)
+	font_name = if isempty(strip(font))
+		""
+	else
+		canonical = _mathjax_font_name(font)
+		canonical === nothing && throw(ArgumentError(
+			"set_default_mathtext!: `font` must be \"\" or one of the MathJax SVG " *
+			"fonts $(join(_MATHJAX_SVG_FONTS, ", ")); got $(repr(font)).",
+		))
+		canonical
+	end
+	_MATHTEXT_SETTINGS[] =
+		_MathtextSettings(enabled, normalized, font_name, inherit_text_font)
 	return get_default_mathtext()
 end
 
@@ -182,11 +283,11 @@ function _label(s::AbstractString; align::Symbol = :c)::String
 	settings = _MATHTEXT_SETTINGS[]
 	column = _mathtext_align_column(align, "mathtext")
 	settings.enabled || return _mathtext_newlines_to_br(String(s))
-	return _mathtext(String(s), column, settings.size)
+	return _mathtext(String(s), column, nothing)
 end
 
 """
-	mathtext(s::AbstractString; align::Symbol = :c, size::AbstractString = get_default_mathtext().size)
+	mathtext(s::AbstractString; align::Symbol = :c, size::Union{Nothing,AbstractString} = nothing)
 
 Convert a matplotlib-style label, where math is written between `\$` signs and
 everything else is text, into the single MathJax expression plotly can
@@ -203,9 +304,10 @@ directly when you write raw Plotly attributes.
 - `align::Symbol = :c`: horizontal alignment of the lines of a multi-line label
   that contains math: `:c`, `:l` or `:r` (`:center`, `:left`, `:right` are
   synonyms). Plain multi-line labels are aligned by the plotly element itself.
-- `size::AbstractString`: MathJax size switch for labels that contain math
-  (default: the package setting, see [`set_default_mathtext!`](@ref)). `""` or
-  one of `\\tiny … \\Huge`.
+- `size::Union{Nothing,AbstractString} = nothing`: MathJax size switch for
+  labels that contain math, one of `\\tiny … \\Huge`, or `""` for none.
+  `nothing` uses the package setting ([`set_default_mathtext!`](@ref)) and,
+  when that is `""`, the active [`PlotStyle`](@ref)'s `mathsize`.
 
 #### Rules
 - A `\$` preceded by an odd number of backslashes is escaped (`\\\$` is a
@@ -249,10 +351,11 @@ mathtext("Error 5% \\\$\\\\epsilon\\\$\\nsecond"; align = :l)
 function mathtext(
 	s::AbstractString;
 	align::Symbol = :c,
-	size::AbstractString = _MATHTEXT_SETTINGS[].size,
+	size::Union{Nothing,AbstractString} = nothing,
 )::String
 	column = _mathtext_align_column(align, "mathtext")
-	normalized_size = _normalize_mathtext_size(size, "mathtext")
+	normalized_size = size === nothing ? nothing :
+		_normalize_mathtext_size(size, "mathtext")
 	return _mathtext(String(s), column, normalized_size)
 end
 
@@ -263,14 +366,18 @@ function _mathtext_newlines_to_br(s::String)
 	return replace(s, r"\r\n|\r|\n" => "<br>")
 end
 
-function _mathtext(s::String, column::Char, size::String)::String
+# `size === nothing` means the default size (`_mathtext_default_size`). It is
+# resolved only for labels that contain math, so plain labels never depend on
+# (or fail because of) the active style's `mathsize`.
+function _mathtext(s::String, column::Char, size::Union{Nothing,String})::String
 	isvalid(s) || throw(ArgumentError("mathtext: label is not valid UTF-8: $(repr(s))."))
 	chars = collect(s)
 	segments = _mathtext_segments(chars, s)
 	if all(segment -> segment[1] === :text, segments)
 		return _mathtext_plain(chars)
 	end
-	return _mathtext_compose(segments, s, column, size)
+	resolved = size === nothing ? _mathtext_default_size() : size
+	return _mathtext_compose(segments, s, column, resolved)
 end
 
 # Number of consecutive backslashes immediately before position `k`.

@@ -217,6 +217,7 @@ function _syncplot_html(
 	autoplay::Bool,
 	timeout_s::Float64,
 	title::AbstractString = _SYNCPLOT_DEFAULT_TITLE,
+	mathjax::NamedTuple{(:font, :inherit_text_font)} = _mathjax_page_config(),
 )
 	plotlyjs_uri = _plotlyjs_asset_uri()
 	divid_js = _json_js(divid)
@@ -231,7 +232,10 @@ function _syncplot_html(
 	# MathJax typesets "$...$" labels exactly as in the export window
 	# (`_export_window_html`). It must be defined before Plotly draws, so it is
 	# loaded parser-blocking in <head>, ahead of the render script below.
-	mathjax_config = _mathjax_config_script()
+	mathjax_head = _mathjax_head_html(
+		mathjax.font;
+		inherit_text_font = mathjax.inherit_text_font,
+	)
 
 	return """
 <!doctype html>
@@ -240,8 +244,7 @@ function _syncplot_html(
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>$title_html</title>
-$mathjax_config
-  <script src="$_MATHJAX_CDN_URL"></script>
+$mathjax_head
   <style>
     html, body, #$divid {
       margin: 0;
@@ -384,6 +387,89 @@ function _syncplot_readiness_script()
   }
 })()
 """
+end
+
+# MathJax configuration each live page was built with, keyed by its SyncPlot's
+# resources (weakly, so a collected SyncPlot drops its entry). MathJax 2 fixes
+# its SVG font when it starts, so a page whose configuration differs from
+# `_mathjax_page_config()` is reloaded before its next renderer update
+# (`_ensure_renderer_mathjax_current!`). SyncPlots that were not built by
+# `_create_syncplot_window` have no entry and are never reloaded.
+const _MathJaxPageConfig = NamedTuple{(:font, :inherit_text_font),Tuple{String,Bool}}
+const _SYNCPLOT_MATHJAX_PAGES = WeakKeyDict{_SyncPlotResources,_MathJaxPageConfig}()
+
+function _record_syncplot_mathjax!(resources::_SyncPlotResources, config)
+	_SYNCPLOT_MATHJAX_PAGES[resources] = _MathJaxPageConfig((config.font, config.inherit_text_font))
+	return nothing
+end
+
+_syncplot_page_mathjax(sp::SyncPlot) =
+	get(_SYNCPLOT_MATHJAX_PAGES, getfield(sp, :_resources), nothing)
+
+# Reload a live page whose MathJax configuration is stale, rendering the
+# committed model (as a renderer recovery does). Runs under the SyncPlot's
+# render lock, before the transaction's own renderer effect, so the model is
+# untouched whatever happens. On failure the page state is unknown: it is
+# marked desynchronized (the next update rebuilds or reloads it again) and a
+# `_SyncPlotDesynchronizationError` names the cause.
+function _ensure_renderer_mathjax_current!(sp::SyncPlot, committed_model::Plot)
+	baked = _syncplot_page_mathjax(sp)
+	baked === nothing && return nothing
+	current = _mathjax_page_config()
+	baked.font == current.font &&
+		baked.inherit_text_font == current.inherit_text_font &&
+		return nothing
+
+	resources = getfield(sp, :_resources)
+	spec = resources.creation_spec
+	tempdir = resources.tempdir
+	(spec === nothing || tempdir === nothing) && throw(InvalidStateException(
+		"SyncPlot window is not open",
+		:not_open,
+	))
+	ec = _syncplot_backend(sp)
+	window = getfield(sp, :window)
+	index_file = joinpath(tempdir, "index.html")
+	try
+		# Frames are re-added without autoplay: a font change never restarts an
+		# animation (as in renderer recovery).
+		write(index_file, _syncplot_html(
+			getfield(sp, :divid);
+			autoplay = false,
+			timeout_s = spec.timeout_s,
+			title = spec.title,
+			mathjax = current,
+		))
+		_write_syncplot_model(
+			joinpath(tempdir, _SYNCPLOT_MODEL_FILENAME),
+			committed_model,
+		)
+		Base.invokelatest(() -> ec.load(window, _file_uri(index_file)))
+		result = Base.invokelatest(
+			() -> ec.run(window, _syncplot_readiness_script()),
+		)
+		_require_plotlyjs_success(result, "MathJax page reload")
+	catch reload_error
+		_set_renderer_desynchronized!(sp, true)
+		reload_error isa InterruptException && rethrow()
+		throw(_SyncPlotDesynchronizationError(nothing, reload_error))
+	end
+	_record_syncplot_mathjax!(resources, current)
+	_set_renderer_desynchronized!(sp, false)
+	return nothing
+end
+
+# Bring a live page up to date with the current MathJax configuration (and
+# rebuild it if it is desynchronized) without changing the model. For callers
+# that read the renderer directly, such as `to_image(sp)`.
+function _syncplot_refresh_page!(sp::SyncPlot)
+	prepare = (target, current) -> (
+		script = nothing,
+		operation = "page refresh",
+		commit = () -> nothing,
+	)
+	_syncplot_transaction!(sp, prepare)
+	return nothing
 end
 
 const _SYNC_WINDOW_WATCH_INTERVAL_SECONDS = 0.05
@@ -577,6 +663,9 @@ function _create_syncplot_window(
 		autoplay = autoplay,
 		timeout_s = timeout_s,
 	)
+	# Read (and validate) the MathJax configuration once: the page is built with
+	# it and the SyncPlot records it, so a later change reloads the page.
+	mathjax = _mathjax_page_config()
 	electron_app = app === nothing ? _default_electron_app(ec) : app
 	divid = _next_syncplot_id()
 	html = _syncplot_html(
@@ -584,6 +673,7 @@ function _create_syncplot_window(
 		autoplay = options.autoplay,
 		timeout_s = options.timeout_s,
 		title = options.title,
+		mathjax = mathjax,
 	)
 	readiness_js = _syncplot_readiness_script()
 
@@ -621,6 +711,7 @@ function _create_syncplot_window(
 			options.timeout_s,
 		)
 		resources = _SyncPlotResources(tempdir, ec, creation_spec)
+		_record_syncplot_mathjax!(resources, mathjax)
 		sp = SyncPlot(p, electron_app, window, divid, resources)
 		finalizer(_finalize_syncplot!, sp)
 		_watch_syncplot_window!(sp, ec; retain = options.show)
@@ -1143,7 +1234,6 @@ const _PLOT_SYNCPLOT_RESERVATIONS =
 mutable struct _PlotSyncPlotGeneration end
 const _PLOT_SYNCPLOT_VERSIONS =
 	WeakKeyDict{Plot,_PlotSyncPlotGeneration}()
-const _DISPLAYED_PLOTS = SyncPlot[]
 
 function _plot_syncplot_version(p::Plot)
 	return get(_PLOT_SYNCPLOT_VERSIONS, p, nothing)
@@ -6556,6 +6646,7 @@ function _execute_syncplot_transaction_locked!(
 	end
 
 	_require_open_syncplot_window(sp)
+	_ensure_renderer_mathjax_current!(sp, committed_model)
 	_ensure_renderer_synchronized!(sp, committed_model)
 	if expected_plot !== nothing &&
 			!_syncplot_registration_matches(
@@ -9732,6 +9823,9 @@ function PlotlyBase.extendtraces!(
 	)
 end
 
+# `indices::Vector{Int}` (not AbstractVector) is deliberate: this method must
+# outrank PlotlyBase's `extendtraces!(p::Plot, inds::Vector{Int} = [1],
+# maxpoints = -1; update...)`, or keyword calls on a Plot are ambiguous (#173).
 function PlotlyBase.extendtraces!(
 	p::_RefreshablePlot,
 	indices::Vector{Int} = [1],
@@ -9785,6 +9879,7 @@ function PlotlyBase.prependtraces!(
 	)
 end
 
+# `Vector{Int}` for the same reason as the `extendtraces!` method above.
 function PlotlyBase.prependtraces!(
 	p::_RefreshablePlot,
 	indices::Vector{Int} = [1],
@@ -10063,7 +10158,6 @@ end
 
 function _deregister_syncplot!(sp::SyncPlot)
 	lock(_SYNCPLOT_REGISTRY_LOCK) do
-		filter!(x -> x !== sp, _DISPLAYED_PLOTS)
 		for plot in collect(keys(_PLOT_SYNCPLOT_MAP))
 			if _PLOT_SYNCPLOT_MAP[plot] === sp
 				delete!(_PLOT_SYNCPLOT_MAP, plot)
@@ -10235,7 +10329,6 @@ function _register_displayed_syncplot!(p::Plot, sp::SyncPlot)
 				old = get(_PLOT_SYNCPLOT_MAP, p, nothing)
 				_PLOT_SYNCPLOT_MAP[p] = sp
 				old === sp || _bump_plot_syncplot_version!(p)
-				push!(_DISPLAYED_PLOTS, sp)
 				(old, true)
 			end
 		finally
@@ -10354,9 +10447,10 @@ mutable struct _ExportState
 	pending_windows::Vector{Tuple{Any,Any}}
 	owned_tempdirs::Set{String}
 	owned_pdf_tempdirs::Set{String}
-	# MathJax SVG font baked into the live export window. A window is reused
-	# only while `_mathjax_svg_font()` still returns this value.
+	# MathJax configuration baked into the live export window. A window is
+	# reused only while `_mathjax_page_config()` still returns these values.
 	mathjax_font::Union{Nothing,String}
+	mathjax_inherit_text_font::Bool
 end
 
 function _ExportState(; divid::String = "plotlysupply-export")
@@ -10376,6 +10470,7 @@ function _ExportState(; divid::String = "plotlysupply-export")
 		Set{String}(),
 		Set{String}(),
 		nothing,
+		false,
 	)
 end
 
@@ -10386,40 +10481,150 @@ const _MATHJAX_CDN_URL =
 const _MATHJAX_SVG_FONT_ENV_VAR = "PLOTLYSUPPLY_MATHJAX_SVG_FONT"
 const _MATHJAX_SVG_FONT_DEFAULT = "Latin-Modern"
 
+# The MathJax SVG font in effect now: `set_default_mathtext!(; font)`, else the
+# PLOTLYSUPPLY_MATHJAX_SVG_FONT environment variable, else Latin-Modern. It is
+# read on every export and live-window update, never cached, so a change takes
+# effect immediately (`_ensure_export_window_locked!`,
+# `_ensure_renderer_mathjax_current!`).
 function _mathjax_svg_font()
-	font = strip(get(ENV, _MATHJAX_SVG_FONT_ENV_VAR, _MATHJAX_SVG_FONT_DEFAULT))
+	configured = _MATHTEXT_SETTINGS[].font
+	isempty(configured) || return configured
+	font = strip(get(ENV, _MATHJAX_SVG_FONT_ENV_VAR, ""))
 	isempty(font) && return _MATHJAX_SVG_FONT_DEFAULT
-	match(r"^[A-Za-z0-9._-]+$", font) === nothing && error(
-		"Invalid $(_MATHJAX_SVG_FONT_ENV_VAR) value $(repr(font)): expected a " *
-		"MathJax SVG font name containing only letters, digits, '.', '_', '-'.",
+	canonical = _mathjax_font_name(font)
+	canonical === nothing && error(
+		"Invalid $(_MATHJAX_SVG_FONT_ENV_VAR) value $(repr(String(font))): expected " *
+		"one of the MathJax SVG fonts $(join(_MATHJAX_SVG_FONTS, ", ")).",
 	)
-	return String(font)
+	return canonical
 end
+
+# The MathJax configuration a page is built with. Pages that typeset labels
+# (export window, live SyncPlot window, HTML export) are rebuilt when it changes.
+_mathjax_page_config() = (
+	font = _mathjax_svg_font(),
+	inherit_text_font = _MATHTEXT_SETTINGS[].inherit_text_font,
+)
 
 function _validated_mathjax_font(font::AbstractString)
-	match(r"^[A-Za-z0-9._-]+$", font) === nothing && throw(ArgumentError(
-		"invalid MathJax SVG font name $(repr(font)): expected only letters, " *
-		"digits, '.', '_', '-'.",
+	canonical = _mathjax_font_name(font)
+	canonical === nothing && throw(ArgumentError(
+		"invalid MathJax SVG font name $(repr(font)): expected one of " *
+		"$(join(_MATHJAX_SVG_FONTS, ", ")).",
 	))
-	return String(font)
+	return canonical
 end
 
-function _mathjax_config_script(font::AbstractString = _mathjax_svg_font())
+# Page-level MathJax 2.7 extensions, installed by every page PlotlySupply builds
+# (`__INHERIT__` is replaced by `true`/`false`).
+#
+# 1. Explicit text metrics. MathJax draws characters it has no glyph for (CJK,
+#    and with `mtextFontInherit` every `\text{…}` run) as SVG <text> that
+#    inherits its font from where MathJax measured it. plotly.js typesets in a
+#    temporary <div> sized to the label, then moves the SVG into the figure
+#    (and toImage serializes it), where that inheritance is lost: the text came
+#    out at the page default size, overlapping or tiny (verified by export).
+#    Each <text> therefore carries the measured `font-size` (and, when
+#    inheriting, family/weight/style) as attributes. Double quotes in font
+#    lists become single quotes: plotly's SVG serializer decodes entities and
+#    would otherwise break the attribute (export failed with "[object Event]").
+# 2. Label font (inherit only). plotly.js gives its temporary <div> only the
+#    label's font size, so the label's family/weight/style are looked up from
+#    the hidden source <text> plotly is typesetting (same TeX after plotly's own
+#    `<`/`>` rewrite; a label without a math group yet is preferred) and set on
+#    the <div> before MathJax measures it.
+const _MATHJAX_PAGE_EXTENSIONS_JS = raw"""
+(function () {
+  var INHERIT = __INHERIT__;
+  if (INHERIT) {
+    MathJax.Hub.Config({SVG: {mtextFontInherit: true}});
+    var MATH = /([^$]*)([$]+[^$]*[$]+)([^$]*)/;
+    var LT = /(<|&lt;|&#60;)/g, GT = /(>|&gt;|&#62;)/g;
+    var sourceLabel = function (div) {
+      var tex = div.textContent, fallback = null;
+      var nodes = document.querySelectorAll('text[data-math="N"]');
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        if (node.style.display !== "none") continue;
+        var m = (node.getAttribute("data-unformatted") || "").match(MATH);
+        if (!m || m[2].replace(LT, "\\lt ").replace(GT, "\\gt ") !== tex) continue;
+        var group = (node.getAttribute("class") || "text").split(" ")[0] + "-math-group";
+        var typeset = false;
+        for (var c = node.parentNode ? node.parentNode.firstChild : null; c; c = c.nextSibling) {
+          if (c.classList && c.classList.contains(group)) { typeset = true; break; }
+        }
+        if (!typeset) return node;
+        if (fallback === null) fallback = node;
+      }
+      return fallback;
+    };
+    var typesetLabel = MathJax.Hub.Typeset;
+    MathJax.Hub.Typeset = function (element) {
+      if (element && element.nodeType === 1 && /^math-output-/.test(element.id || "")) {
+        var label = sourceLabel(element);
+        if (label !== null) {
+          element.style.fontFamily = label.style.fontFamily;
+          element.style.fontWeight = label.style.fontWeight;
+          element.style.fontStyle = label.style.fontStyle;
+        }
+      }
+      return typesetLabel.apply(this, arguments);
+    };
+  }
+  MathJax.Hub.Register.StartupHook("SVG Jax Ready", function () {
+    var SVG = MathJax.OutputJax.SVG, TEXT = SVG.BBOX.TEXT, init = TEXT.prototype.Init;
+    TEXT.Augment({
+      Init: function (scale, text, def) {
+        def = def || {};
+        var host = SVG.textSVG;
+        if (host && host.isConnected) {
+          var cs = window.getComputedStyle(host);
+          if (!def["font-size"] && cs.fontSize) def["font-size"] = cs.fontSize;
+          if (INHERIT) {
+            if (!def["font-family"] && cs.fontFamily) def["font-family"] = cs.fontFamily.replace(/"/g, "'");
+            if (!def["font-weight"] && cs.fontWeight) def["font-weight"] = cs.fontWeight;
+            if (!def["font-style"] && cs.fontStyle) def["font-style"] = cs.fontStyle;
+          }
+        }
+        return init.call(this, scale, text, def);
+      }
+    });
+  });
+})();
+"""
+
+function _mathjax_config_script(
+	font::AbstractString = _mathjax_svg_font();
+	inherit_text_font::Bool = _MATHTEXT_SETTINGS[].inherit_text_font,
+)
 	name = _validated_mathjax_font(font)
+	extensions = replace(
+		_MATHJAX_PAGE_EXTENSIONS_JS,
+		"__INHERIT__" => inherit_text_font ? "true" : "false",
+	)
 	return "  <script type=\"text/x-mathjax-config\">\n" *
 		"    MathJax.Hub.Config({SVG: {font: \"$(name)\"}});\n" *
+		extensions *
 		"  </script>"
 end
 
 # MathJax configuration plus the pinned MathJax 2.7.9 loader, as synchronous
 # tags: plotly.js checks `window.MathJax` when it draws text, so MathJax must
-# be parsed before the first render. Shared by the hidden export window and
-# the standalone HTML export (and usable by any other page that renders LaTeX).
-function _mathjax_head_html(font::AbstractString = _mathjax_svg_font())
-	return _mathjax_config_script(font) * "\n  <script src=\"$(_MATHJAX_CDN_URL)\"></script>"
+# be parsed before the first render. Shared by the hidden export window, the
+# live SyncPlot page and the standalone HTML export.
+function _mathjax_head_html(
+	font::AbstractString = _mathjax_svg_font();
+	inherit_text_font::Bool = _MATHTEXT_SETTINGS[].inherit_text_font,
+)
+	return _mathjax_config_script(font; inherit_text_font = inherit_text_font) *
+		"\n  <script src=\"$(_MATHJAX_CDN_URL)\"></script>"
 end
 
-function _export_window_html(divid::String; font::AbstractString = _mathjax_svg_font())
+function _export_window_html(
+	divid::String;
+	font::AbstractString = _mathjax_svg_font(),
+	inherit_text_font::Bool = _MATHTEXT_SETTINGS[].inherit_text_font,
+)
 	plotlyjs_uri = _plotlyjs_asset_uri()
 	match(r"^[A-Za-z0-9_-]+$", divid) === nothing && throw(ArgumentError(
 		"export window div id must contain only letters, digits, '_' and '-'; got $(repr(divid))",
@@ -10437,7 +10642,7 @@ function _export_window_html(divid::String; font::AbstractString = _mathjax_svg_
 <body>
   <div id="$divid"></div>
   <script src="$plotlyjs_uri" charset="utf-8"></script>
-$(_mathjax_head_html(font))
+$(_mathjax_head_html(font; inherit_text_font = inherit_text_font))
 </body>
 </html>
 """
@@ -10574,6 +10779,7 @@ function _retire_export_window_locked!(
 	state.tempdir = nothing
 	state.ready = false
 	state.mathjax_font = nothing
+	state.mathjax_inherit_text_font = false
 	if tempdir !== nothing
 		_remove_export_tempdir_locked!(
 			state,
@@ -10644,10 +10850,14 @@ function _ensure_export_window_locked!(
 )
 	_register_export_atexit_locked!(state)
 
-	# The MathJax font is baked into the window page, so a changed
+	# The MathJax configuration is baked into the window page, so a changed
+	# `set_default_mathtext!(; font, inherit_text_font)` or
 	# PLOTLYSUPPLY_MATHJAX_SVG_FONT requires a fresh window.
-	font = _mathjax_svg_font()
-	if _export_window_is_alive_locked(state) && state.mathjax_font == font
+	mathjax = _mathjax_page_config()
+	font = mathjax.font
+	if _export_window_is_alive_locked(state) &&
+			state.mathjax_font == font &&
+			state.mathjax_inherit_text_font == mathjax.inherit_text_font
 		return (state.backend, state.app, state.window, state.divid)
 	end
 	state.window === nothing ||
@@ -10668,7 +10878,11 @@ function _ensure_export_window_locked!(
 	tmpfile = joinpath(tempdir, "index.html")
 	win = nothing
 	try
-		write(tmpfile, _export_window_html(divid; font = font))
+		write(tmpfile, _export_window_html(
+			divid;
+			font = font,
+			inherit_text_font = mathjax.inherit_text_font,
+		))
 		file_uri = _file_uri(tmpfile)
 		win = Base.invokelatest(() -> ec.Window(
 			app,
@@ -10689,6 +10903,7 @@ function _ensure_export_window_locked!(
 		state.tempdir = tempdir
 		state.ready = true
 		state.mathjax_font = font
+		state.mathjax_inherit_text_font = mathjax.inherit_text_font
 		return (ec, app, win, divid)
 	catch
 		if win !== nothing
