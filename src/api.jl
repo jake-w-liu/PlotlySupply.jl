@@ -50,8 +50,11 @@ function PlotlyBase.relayout!(
 )
 	# The high-level fast path has already isolated every layout container that
 	# PlotlyBase's setters can mutate. Applying the setter directly avoids
-	# cloning that candidate again for every option helper.
-	PlotlyBase.relayout!(staged.plot.layout, args...; kwargs...)
+	# cloning that candidate again for every option helper. The setters are the
+	# same ones the full staging path uses, so a scalar `title` is promoted
+	# before nested `title_*` edits, dotted keys address nested paths, and a
+	# `nothing` value removes the key.
+	_apply_relayout_setters!(staged.plot.layout, args, kwargs, :relayout!)
 	return staged
 end
 
@@ -4122,15 +4125,20 @@ function _series_kwarg_vector(
 	return out
 end
 
-function _string_kwarg_vector(value::Union{String, Vector{String}}, n::Int)
+function _string_kwarg_vector(
+	value::Union{AbstractString, AbstractVector{<:AbstractString}},
+	n::Int,
+)
 	return _series_kwarg_vector(value, n, "", String)
 end
 
-function _first_or_empty(value::Union{String, Vector{String}})
-	if value isa Vector
-		return isempty(value) ? "" : value[1]
+function _first_or_empty(
+	value::Union{AbstractString, AbstractVector{<:AbstractString}},
+)
+	if value isa AbstractVector
+		return isempty(value) ? "" : String(first(value))
 	end
-	return value
+	return String(value)
 end
 
 # Reduce a possibly-vector styling kwarg to a scalar for a single-trace plot.
@@ -4143,6 +4151,24 @@ _scalar_or_first(value, default) = value isa AbstractVector ? (isempty(value) ? 
 # correctly handles ranges, views, and abstractly typed collections.
 @inline _is_nested_series(::AbstractVector{<:AbstractVector}) = true
 @inline _is_nested_series(::Any) = false
+
+# Abstractly typed containers (`ys = []; push!(ys, v)`, JSON-parsed data) carry
+# no element type to dispatch on, so their elements are inspected. A container
+# mixing series vectors with scalar values is ambiguous and is rejected rather
+# than plotted as one garbage series.
+function _is_nested_series(values::AbstractVector)
+	isconcretetype(eltype(values)) && return false
+	isempty(values) && return false
+	nested_count = count(value -> value isa AbstractVector, values)
+	nested_count == 0 && return false
+	nested_count == length(values) ||
+		throw(ArgumentError(
+			"multi-series input mixes $(nested_count) series vector(s) with " *
+			"$(length(values) - nested_count) scalar value(s); pass either one " *
+			"flat series or a vector whose elements are all series vectors.",
+		))
+	return true
+end
 
 function _apply_nested_layout_mode!(
 	fig,
@@ -4386,45 +4412,48 @@ end
 
 function _apply_cartesian_plot_options!(
 	fig;
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	grid::Bool = true,
-	fontsize::Int = 0,
-	title::String = "",
-	xscale::String = "",
-	yscale::String = "",
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	fontsize::Real = 0,
+	title::AbstractString = "",
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
 	refresh::Bool = false,
 	apply_template::Bool = true,
+	who::AbstractString = "plot",
 )
-	if title != ""
-		relayout!(fig, title = title)
-	end
-	if xlabel != ""
-		relayout!(fig, xaxis = attr(title_text = xlabel))
-	end
-	if ylabel != ""
-		relayout!(fig, yaxis = attr(title_text = ylabel))
-	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
-	end
+	# Validate every option before the first write so a rejected keyword
+	# leaves the figure untouched.
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+
+	_apply_figure_title!(fig, title)
+	_apply_axis_title!(fig, :x, xlabel)
+	_apply_axis_title!(fig, :y, ylabel)
+	# Scale before range: a logarithmic axis stores its range as exponents.
+	_apply_axis_scale!(fig, :x, xscale, who)
+	_apply_axis_scale!(fig, :y, yscale, who)
+	_apply_axis_range!(fig, :x, xrange, who)
+	_apply_axis_range!(fig, :y, yrange, who)
+	_apply_figure_size!(fig, who; width = width, height = height)
+	# `grid = true` keeps the template's grid (the constructor default);
+	# `false` or an axis selector overrides it.
+	grid === true || _apply_axis_grid!(fig, grid, who)
 	# On first construction apply the default template; when appending to an
 	# existing figure only refresh the legend so a user-set template survives.
 	if apply_template
@@ -4432,26 +4461,20 @@ function _apply_cartesian_plot_options!(
 	else
 		_apply_default_legend!(fig)
 	end
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
+	_apply_figure_fontsize!(fig, who, fontsize)
 	refresh && _refresh!(fig)
 	return nothing
 end
 
+# Mutator-side grid override: `nothing` (the mutator default) keeps the
+# existing grid, anything else is applied explicitly, so `grid = true` can
+# re-enable a grid that was switched off earlier.
 function _apply_cartesian_grid_override!(
 	fig,
-	grid::Union{Nothing, Bool},
+	grid::Union{Nothing, Bool, Symbol},
+	who::AbstractString = "plot",
 )
-	grid === nothing && return nothing
-	update_xaxes!(fig, showgrid = grid)
-	update_yaxes!(fig, showgrid = grid)
+	_apply_axis_grid!(fig, grid, who)
 	return nothing
 end
 

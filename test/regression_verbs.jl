@@ -77,7 +77,11 @@ _rv_calls(script::AbstractString) =
 	)
 	for build in builders
 		fig = build()
-		original_text = fig.layout.fields[:title]
+		# 2.0 builders store `title.text`; a user-built `Layout(title = "T")`
+		# still holds a bare String. Nested title setters must work on both.
+		stored_title = fig.layout.fields[:title]
+		original_text = stored_title isa AbstractString ?
+			stored_title : stored_title[:text]
 		@test original_text isa AbstractString
 		@test relayout!(fig; title_x = 0.5, title_font_size = 20) === fig
 		title = fig.layout.fields[:title]
@@ -329,9 +333,11 @@ end
 
 @testset "verbs: react! with a model honours the window autoplay" begin
 	cases = (
-		(false, "if (false) await Plotly.animate"),
-		(true, "if (true) await Plotly.animate"),
-		(nothing, "if (true) await Plotly.animate"),
+		# Playback is started without awaiting it (the render lock must not be
+		# held for the length of an animation), so only the flag is asserted.
+		(false, "if (false) Plotly.animate"),
+		(true, "if (true) Plotly.animate"),
+		(nothing, "if (true) Plotly.animate"),
 	)
 	for (autoplay, expected) in cases
 		spec = autoplay === nothing ? nothing :
