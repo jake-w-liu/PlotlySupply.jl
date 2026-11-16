@@ -39,15 +39,26 @@ _cmn_layout(fig) = _cmn_plot(fig).layout
 _cmn_relayout_target(fig::SubplotFigure) = getfield(fig, :fig)
 _cmn_relayout_target(fig) = fig
 
+# Whether an AbstractDict can hold keys of type `T`. Layout containers may be
+# user-supplied AbstractDicts that only define `get`/`haskey` for their own key
+# type (e.g. Symbol), so a lookup with a String key must not be attempted on
+# them: `haskey(d, "x")` would fall back to a `get(d, ::String, ...)` method
+# that does not exist.
+_cmn_accepts_key(mapping::AbstractDict, ::Type{T}) where {T} =
+	T <: keytype(mapping)
+
 # Look up `key` in a layout mapping (PlotlyAttribute, Dict with Symbol or String
 # keys, or NamedTuple) without copying it.
 function _cmn_mapping_get(mapping, key::Symbol, default = nothing)
 	if mapping isa PlotlyBase.PlotlyAttribute
 		return _cmn_mapping_get(mapping.fields, key, default)
 	elseif mapping isa AbstractDict
-		haskey(mapping, key) && return mapping[key]
-		skey = String(key)
-		haskey(mapping, skey) && return mapping[skey]
+		_cmn_accepts_key(mapping, Symbol) && haskey(mapping, key) &&
+			return mapping[key]
+		if _cmn_accepts_key(mapping, String)
+			skey = String(key)
+			haskey(mapping, skey) && return mapping[skey]
+		end
 		return default
 	elseif mapping isa NamedTuple
 		return get(mapping, key, default)
@@ -62,9 +73,12 @@ function _cmn_mapping_delete!(mapping, names)
 		return _cmn_mapping_delete!(mapping.fields, names)
 	elseif mapping isa AbstractDict
 		for name in names
-			haskey(mapping, name) && delete!(mapping, name)
-			skey = String(name)
-			haskey(mapping, skey) && delete!(mapping, skey)
+			_cmn_accepts_key(mapping, Symbol) && haskey(mapping, name) &&
+				delete!(mapping, name)
+			if _cmn_accepts_key(mapping, String)
+				skey = String(name)
+				haskey(mapping, skey) && delete!(mapping, skey)
+			end
 		end
 	end
 	return nothing
@@ -1321,6 +1335,34 @@ end
 # F11: twin y axis on a plain figure
 # ---------------------------------------------------------------------------
 
+# Spine and tick styling that a new overlaying axis (twin y, secondary x)
+# copies from the axis it overlays, so both read alike under styles, dark
+# templates and `spines!` colours.
+const _CMN_COPIED_AXIS_LINE_FIELDS = (:linecolor, :linewidth, :tickcolor, :ticklen, :tickwidth)
+
+# Add to `fields` (the new axis's attributes) copies of the primary axis's
+# line styling (`_CMN_COPIED_AXIS_LINE_FIELDS`), `tickfont` and `title.font`
+# where the primary sets them, so fonts set before the new axis exists
+# (set_fonts!, styles) carry over. Mappings are copied, never aliased; a
+# `:title` already in `fields` keeps its other entries.
+function _cmn_copy_axis_style!(fields::AbstractDict{Symbol}, primary)
+	for name in _CMN_COPIED_AXIS_LINE_FIELDS
+		value = _cmn_mapping_get(primary, name)
+		value === nothing || (fields[name] = value)
+	end
+	tickfont = _cmn_mapping_get(primary, :tickfont)
+	_is_layout_mapping(tickfont) &&
+		(fields[:tickfont] = attr(; _symbol_dict(tickfont)...))
+	title_font = _cmn_mapping_get(_cmn_mapping_get(primary, :title), :font)
+	if _is_layout_mapping(title_font)
+		title = get(fields, :title, nothing)
+		title_fields = title === nothing ? Dict{Symbol, Any}() : _symbol_dict(title)
+		title_fields[:font] = attr(; _symbol_dict(title_font)...)
+		fields[:title] = attr(; title_fields...)
+	end
+	return fields
+end
+
 """
 	_ensure_twin_y!(fig; who)::Symbol
 
@@ -1328,7 +1370,8 @@ Layout key of the y axis that overlays `"y"` on a plain `Plot`/`SyncPlot`
 (or staged target), creating it when missing: the next free `yaxisN` with
 `overlaying="y"`, `side="right"`, `anchor="x"`, no grid, and the package's
 black outside-tick spine style without `mirror`; the primary y axis's
-`title.font` and `tickfont`, when set, are copied. Idempotent. A SubplotFigure
+`title.font`, `tickfont`, `linecolor`, `linewidth`, `tickcolor`, `ticklen`
+and `tickwidth`, when set, are copied. Idempotent. A SubplotFigure
 cell gets its secondary y axis from `subplots(...; specs=...)` instead, so it
 is an `ArgumentError` here, as is a figure without Cartesian axes.
 """
@@ -1374,15 +1417,10 @@ function _ensure_twin_y!(fig; who::AbstractString = "_ensure_twin_y!")
 		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
 		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
 	)
-	# Fonts set on the primary y axis before the twin exists (set_fonts!,
-	# styles) carry over, so both y axes read alike. Copied, never aliased.
-	primary = get(p.layout.fields, :yaxis, nothing)
-	title_font = _cmn_mapping_get(_cmn_mapping_get(primary, :title), :font)
-	_is_layout_mapping(title_font) &&
-		(fields[:title] = attr(font = attr(; _symbol_dict(title_font)...)))
-	tickfont = _cmn_mapping_get(primary, :tickfont)
-	_is_layout_mapping(tickfont) &&
-		(fields[:tickfont] = attr(; _symbol_dict(tickfont)...))
+	# Fonts and spine styling set on the primary y axis before the twin exists
+	# (set_fonts!, styles, dark templates) carry over, so both y axes read
+	# alike. Copied, never aliased.
+	_cmn_copy_axis_style!(fields, get(p.layout.fields, :yaxis, nothing))
 	_cmn_merge_layout_key!(fig, key, fields; nested = (:title,))
 	return key
 end

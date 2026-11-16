@@ -183,7 +183,7 @@ end
         plot_scatter!(sf, 0:20, collect(0.0:20.0); row = 1, col = 1)
         plot_scatter!(sf, 0:20, collect(20.0:-1:0.0); row = 2, col = 1)
         follower = _AX._cell_target(sf; row = 1, col = 1).xkey
-        root = _AX._axes_match_root(sf.plot.layout, follower, "test")
+        root = _AX._axes_match_root(sf, follower, "test")
         @test root != follower
         xrange!(sf, [0, 5]; row = 1, col = 1)
         @test _ax_field(sf, root, :range) == [0, 5]
@@ -630,5 +630,142 @@ end
         @test _ax_throws(() -> inset!(plot_scatter([1.0], [1.0]), (0.1, 0.1, 0.2, 0.2)), "inset! needs a SubplotFigure; use subplots(1,1; sync=false)")
         # Ids follow creation order.
         @test inset!(sf, (0.05, 0.05, 0.3, 0.3); row = 1, col = 2) == 2
+    end
+
+    @testset "range bounds by axis type; matches to unknown axes" begin
+        cat = plot_scatter([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
+        relayout!(cat; xaxis_type = "category", yaxis_type = "linear")
+        before = _ax_json(cat.layout)
+        @test _ax_throws(() -> xrange!(cat, ("a", "c")), "xrange!: a category axis needs numeric range bounds")
+        @test _ax_throws(() -> yrange!(cat, ("a", "c")), "yrange!: a linear axis needs numeric range bounds")
+        @test _ax_json(cat.layout) == before
+        xrange!(cat, (-0.5, 2.5))
+        @test _ax_field(cat, :xaxis, :range) == [-0.5, 2.5]
+        dt = plot_scatter(["2020-01-01", "2020-03-01"], [1.0, 2.0])
+        relayout!(dt; xaxis_type = "date")
+        xrange!(dt, ("2020-01-15", "2020-02-15"))
+        @test _ax_field(dt, :xaxis, :range) == ["2020-01-15", "2020-02-15"]
+        @test _ax_throws(() -> xrange!(dt, ("2020-01-15", "2020-01-15")), "the range bounds must differ")
+        # A `matches` reference to an axis plotly.js does not know is ignored
+        # by plotly.js, so the range stays on the axis itself.
+        m = plot_scatter([1.0, 2.0], [1.0, 2.0])
+        relayout!(m; xaxis_matches = "x7")
+        xrange!(m, (0, 1))
+        @test _ax_field(m, :xaxis, :range) == [0, 1]
+        @test !haskey(m.layout.fields, :xaxis7)
+        # An axis that only a trace references exists for plotly.js.
+        m2 = plot_scatter([1.0, 2.0], [1.0, 2.0])
+        push!(m2.data, scatter(x = [0.0, 5.0], y = [1.0, 2.0], xaxis = "x3"))
+        relayout!(m2; xaxis_matches = "x3")
+        xrange!(m2, (0, 4))
+        @test _ax_field(m2, :xaxis3, :range) == [0, 4]
+        @test _ax_field(m2, :xaxis, :range) === nothing
+        # Scene axes: numeric bounds on a category scene axis.
+        f3 = plot_scatter3d([1.0, 2.0], [1.0, 2.0], [1.0, 2.0])
+        relayout!(f3; scene_yaxis_type = "category")
+        @test _ax_throws(() -> yrange!(f3, ("a", "b")), "a category axis needs numeric range bounds")
+    end
+
+    @testset "secondary_xaxis!: figure title clearance, copied axis style" begin
+        c = 299792.458
+        λ = collect(400.0:5:700.0)
+        y = exp.(-((λ .- 550) ./ 60) .^ 2)
+        fig = plot_scatter(λ, y; title = "spectrum")
+        relayout!(fig; xaxis_tickfont = attr(size = 16), xaxis_title_font = attr(size = 18, family = "Arial"),
+            xaxis_linecolor = "#123456", xaxis_linewidth = 2)
+        secondary_xaxis!(fig, l -> c / l, ν -> c / ν; title = "frequency (THz)")
+        title = fig.layout.fields[:title]
+        @test _ax_get(title, :text) == "spectrum"
+        @test (_ax_get(title, :yref), _ax_get(title, :y), _ax_get(title, :yanchor)) == ("paper", 1, "bottom")
+        @test _ax_get(title, :automargin) === true
+        pad = _ax_get(_ax_get(title, :pad), :b)
+        # tick labels 16 px, title 18 px, standoff 15, ticks 5, linewidth 2, gap 6.
+        @test pad == ceil(5 + 1.3 * 16 + 1 + 15 + 1.3 * 18 + 6)
+        ax2 = _ax_axis(fig, :xaxis2)
+        @test _ax_get(_ax_get(ax2, :tickfont), :size) == 16
+        @test _ax_get(_ax_get(_ax_get(ax2, :title), :font), :family) == "Arial"
+        @test _ax_get(_ax_get(ax2, :title), :text) == "frequency (THz)"
+        @test (ax2[:linecolor], ax2[:linewidth]) == ("#123456", 2)
+        @test _ax_get(ax2, :tickfont) !== _ax_get(fig.layout.fields[:xaxis], :tickfont)
+        @test ax2[:automargin] === true
+        # Re-calling keeps the larger clearance (idempotent placement).
+        secondary_xaxis!(fig, l -> c / l, ν -> c / ν)
+        @test _ax_get(_ax_get(fig.layout.fields[:title], :pad), :b) == pad
+        # Larger fonts need more room.
+        big = plot_scatter(λ, y; fontsize = 20)
+        secondary_xaxis!(big, l -> c / l, ν -> c / ν; title = "THz")
+        small = plot_scatter(λ, y)
+        secondary_xaxis!(small, l -> c / l, ν -> c / ν; title = "THz")
+        pad_of(f) = _ax_get(_ax_get(f.layout.fields[:title], :pad), :b)
+        @test pad_of(big) > pad_of(small)
+        # Without an axis title only the tick labels need room.
+        notitle = plot_scatter(λ, y)
+        secondary_xaxis!(notitle, l -> c / l, ν -> c / ν)
+        @test pad_of(notitle) < pad_of(small)
+        # A title the user placed is left alone; side = :bottom never moves it.
+        placed = plot_scatter(λ, y; title = "placed")
+        relayout!(placed; title_y = 0.95)
+        secondary_xaxis!(placed, l -> c / l, ν -> c / ν)
+        @test _ax_get(placed.layout.fields[:title], :yref) === nothing
+        @test _ax_get(placed.layout.fields[:title], :y) == 0.95
+        bottom = plot_scatter(λ, y; title = "b")
+        relayout!(bottom; xaxis_side = "top")
+        secondary_xaxis!(bottom, l -> c / l, ν -> c / ν; side = :bottom)
+        @test _ax_get(bottom.layout.fields[:title], :yref) === nothing
+        # A bare-string title keeps its text.
+        bare = plot_scatter(λ, y)
+        bare.layout.fields[:title] = "bare"
+        secondary_xaxis!(bare, l -> c / l, ν -> c / ν)
+        @test _ax_get(bare.layout.fields[:title], :text) == "bare"
+        @test _ax_get(bare.layout.fields[:title], :yref) == "paper"
+
+        # Subplots: only a top-row cell moves the figure title; an inset never.
+        sf = _ax_grid(2, 1)
+        secondary_xaxis!(sf, x -> 2x, v -> v / 2; row = 2, col = 1)
+        @test _ax_get(get(sf.plot.layout.fields, :title, nothing), :yref) === nothing
+        secondary_xaxis!(sf, x -> 2x, v -> v / 2; row = 1, col = 1)
+        @test _ax_get(sf.plot.layout.fields[:title], :yref) == "paper"
+        si = _ax_grid(1, 1)
+        k = inset!(si, (0.5, 0.5, 0.4, 0.4))
+        addtraces!(si.plot, scatter(x = [1.0, 2.0], y = [1.0, 2.0], xaxis = si.insets[k].xref, yaxis = si.insets[k].yref))
+        secondary_xaxis!(si, x -> 2x, v -> v / 2; inset = k)
+        sec = Symbol("xaxis", _AX._axes_highest_axis_index(si.plot, 'x'))
+        @test _ax_axis(si, sec)[:automargin] === false
+        @test _ax_axis(si, sec)[:overlaying] == si.insets[k].xref
+        @test _ax_get(get(si.plot.layout.fields, :title, nothing), :yref) === nothing
+    end
+
+    @testset "_ensure_twin_y! copies the primary y line styling" begin
+        fig = plot_scatter([1.0, 2.0], [3.0, 4.0])
+        relayout!(fig; yaxis_linecolor = "#abcdef", yaxis_linewidth = 3, yaxis_ticklen = 7)
+        key = _AX._ensure_twin_y!(fig)
+        twin = fig.layout.fields[key]
+        @test (twin[:linecolor], twin[:linewidth], twin[:ticklen]) == ("#abcdef", 3, 7)
+        @test twin[:overlaying] == "y" && twin[:side] == "right"
+    end
+
+    @testset "SyncPlot-backed SubplotFigure: inset!, helpers, rollback" begin
+        base = subplots(1, 2; sync = false)
+        plot_scatter!(base, [1.0, 2.0, 3.0], [1.0, 4.0, 9.0]; row = 1, col = 1)
+        plot_scatter!(base, [1.0, 2.0, 3.0], [1.0, 4.0, 9.0]; row = 1, col = 2)
+        sp, state = _ax_syncplot(base.plot)
+        sf = SubplotFigure(sp, 1, 2, 1, 1, false, :topright, (0.02, 0.03), "", "", 1.0)
+        n = length(state.scripts)
+        k = inset!(sf, (0.55, 0.55, 0.4, 0.4); row = 1, col = 2)
+        @test k == 1 && length(sf.insets) == 1 && sf.insets[1].row == 1 && sf.insets[1].col == 2
+        @test length(state.scripts) > n
+        @test haskey(sp.plot.layout.fields, sf.insets[1].xkey)
+        xlabel!(sf, "zoom"; inset = k)
+        xrange!(sf, (1.5, 2.5); inset = k)
+        grid!(sf; axis = :none, inset = k)
+        @test sp.plot.layout[Symbol(sf.insets[1].xkey, :_title_text)] == "zoom"
+        @test _ax_field(sp.plot, sf.insets[1].xkey, :range) == [1.5, 2.5]
+        @test (sf.current_row, sf.current_col) == (1, 2)
+        before = _ax_json(sp.plot.layout)
+        n = length(state.scripts)
+        @test _ax_throws(() -> inset!(sf, (0.9, 0.9, 0.2, 0.2)), "exceeds 1")
+        @test _ax_throws(() -> xrange!(sf, (1, 1); inset = k), "the range bounds must differ")
+        @test _ax_json(sp.plot.layout) == before
+        @test length(state.scripts) == n && length(sf.insets) == 1
     end
 end

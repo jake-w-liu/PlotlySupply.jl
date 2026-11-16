@@ -76,10 +76,30 @@ function _axes_label3d(s::AbstractString)
 	return _label_plain(s)
 end
 
+# Whether plotly.js knows axis `key`: it has a layout entry or a trace uses it
+# (plotly.js creates implicit axes for trace references).
+function _axes_axis_exists(p::Plot, key::Symbol)
+	haskey(p.layout.fields, key) && return true
+	letter = String(key)[1]
+	index = _cmn_axis_index(key, letter)
+	index === nothing && return false
+	field = letter == 'x' ? :xaxis : :yaxis
+	for trace in p.data
+		trace isa GenericTrace || continue
+		ref = get(trace.fields, field, letter == 'x' ? "x" : "y")
+		ref isa Symbol && (ref = String(ref))
+		_cmn_axis_ref_index(ref, letter) == index && return true
+	end
+	return false
+end
+
 # Follow `matches` from axis `key` to the axis that owns the shared range.
 # plotly.js takes the range of a matched group from that root axis, so a range
-# written on a follower is ignored (finding #265).
-function _axes_match_root(layout::Layout, key::Symbol, who::AbstractString)
+# written on a follower is ignored (finding #265). A `matches` reference to an
+# axis that does not exist is dropped by plotly.js, so the chain stops there.
+function _axes_match_root(fig, key::Symbol, who::AbstractString)
+	p = _cmn_plot(fig)
+	layout = p.layout
 	letter = String(key)[1]
 	chain = Symbol[key]
 	current = key
@@ -89,6 +109,7 @@ function _axes_match_root(layout::Layout, key::Symbol, who::AbstractString)
 		(ref isa AbstractString && _cmn_axis_ref_index(ref, letter) !== nothing) ||
 			return current
 		next = _axis_layout_key(ref, Symbol(letter))
+		_axes_axis_exists(p, next) || return current
 		next in chain && throw(ArgumentError(
 			"$(who): the `matches` references of $(repr(key)) form a cycle " *
 			"($(join(string.(vcat(chain, next)), " -> "))).",
@@ -287,10 +308,27 @@ function _axes_checked_range(range, who::AbstractString)
 		))
 	end
 	lower, upper = checked
-	(lower isa Real && upper isa Real && lower == upper) && throw(ArgumentError(
+	isequal(lower, upper) && throw(ArgumentError(
 		"$(who): the range bounds must differ; got $(repr(range)) (use " *
 		"[0, 0] or `nothing` for an automatic range).",
 	))
+	return checked
+end
+
+# The checked range in the units Plotly stores for an axis of type
+# `axis_type`: `to_log(checked)` (log10 of the bounds) on a log axis; numeric
+# bounds are required on linear and category axes (a category range is in
+# 0-based category positions). Date axes and autotyped ("-") axes take the
+# bounds as given.
+function _axes_axis_range_value(checked, axis_type, who::AbstractString, to_log)
+	checked === nothing && return nothing
+	axis_type == "log" && return to_log(checked)
+	if axis_type in ("linear", "category")
+		all(b -> b isa Real, checked) || throw(ArgumentError(
+			"$(who): a $(axis_type) axis needs numeric range bounds; got " *
+			"$(repr(Tuple(checked))).",
+		))
+	end
 	return checked
 end
 
@@ -355,25 +393,28 @@ function _axes_range!(
 			"$(who): a Cartesian (xy) cell has no z axis; `zrange!` needs a " *
 			"3-D scene cell.",
 		))
-		key = _axes_match_root(layout, letter == 'x' ? t.xkey : t.ykey, who)
-		value = checked
-		if checked !== nothing && _axis_type(layout, key) == "log"
-			value = _to_axis_range(layout, key, checked; who = who)
-		end
+		key = _axes_match_root(fig, letter == 'x' ? t.xkey : t.ykey, who)
+		value = _axes_axis_range_value(
+			checked,
+			_axis_type(layout, key),
+			who,
+			r -> _to_axis_range(layout, key, r; who = who),
+		)
 		_axes_write_xy_range!(fig, key, value)
 	elseif t.kind === :scene
-		value = checked
-		if checked !== nothing
-			axis_type = _cmn_mapping_get(
-				_axes_scene_axis_entry(layout, t.scenekey, letter),
-				:type,
-			)
-			if axis_type == "log"
-				# Scene log axes store log10 ranges too (verified render,
-				# probe2_scene_log.png).
-				value = Float64[_axes_log10_bound(b, who) for b in checked]
-			end
-		end
+		# Scene log axes store log10 ranges too (verified render,
+		# probe2_scene_log.png).
+		axis_type = _cmn_mapping_get(
+			_axes_scene_axis_entry(layout, t.scenekey, letter),
+			:type,
+		)
+		axis_type isa Symbol && (axis_type = String(axis_type))
+		value = _axes_axis_range_value(
+			checked,
+			axis_type,
+			who,
+			r -> Float64[_axes_log10_bound(b, who) for b in r],
+		)
 		fields = value === nothing ?
 			Dict{Symbol, Any}(:autorange => true) :
 			Dict{Symbol, Any}(:range => value, :autorange => false)
@@ -1125,7 +1166,7 @@ function _axes_group_extent(fig, root::Symbol, who::AbstractString)
 		k = Symbol(key)
 		_cmn_axis_index(k, 'x') === nothing && continue
 		k === root && continue
-		_axes_match_root(layout, k, who) === root && push!(keys_in_group, k)
+		_axes_match_root(fig, k, who) === root && push!(keys_in_group, k)
 	end
 	lower, upper = Inf, -Inf
 	for key in keys_in_group
@@ -1205,6 +1246,115 @@ function _axes_format_number(v::Float64)
 	return "$(text)e$(e)"
 end
 
+# Text metrics used to estimate how far a top x axis (tick labels plus title)
+# reaches above the plot area. Measured on plotly.js 2.35.2 SVG exports (tick
+# label baselines and title boxes at layout font sizes 8, 12 and 20): a text
+# box is 1.3 em per line (svg_text_utils LINE_SPACING); the axis title sits
+# `title.standoff` px (plotly_white sets 15) above the tick labels; an axis
+# title defaults to round(1.2 x) the layout font size, plotly's 5 px ticks.
+const _AXES_LINE_HEIGHT_EM = 1.3
+const _AXES_TITLE_FONT_FACTOR = 1.2
+const _AXES_TITLE_STANDOFF = 15.0
+const _AXES_PLOTLY_TICKLEN = 5.0
+# Gap between the top axis title and the figure title placed above it.
+const _AXES_FIGURE_TITLE_GAP = 6.0
+
+_axes_size(value, default::Float64) =
+	(value isa Real && !(value isa Bool) && isfinite(value) && value > 0) ?
+	Float64(value) : default
+
+# Template layout entry `key` (e.g. :xaxis), or `nothing`.
+function _axes_template_entry(layout::Layout, key::Symbol)
+	template = get(layout.fields, :template, nothing)
+	template isa PlotlyBase.Template || return nothing
+	return get(_template_layout_fields(template), key, nothing)
+end
+
+# Estimated height in px of a top x axis's tick labels and title above the
+# plot area. `axis` holds the axis fields about to be written.
+function _axes_top_axis_depth(layout::Layout, axis::AbstractDict{Symbol})
+	root = _tight_root_font_size(key -> get(layout.fields, key, nothing))
+	template_axis = _axes_template_entry(layout, :xaxis)
+	tick_size = _axes_size(
+		_cmn_mapping_get(get(axis, :tickfont, nothing), :size),
+		_axes_size(_cmn_mapping_get(_cmn_mapping_get(template_axis, :tickfont), :size), root),
+	)
+	ticklen = get(axis, :ticks, "outside") == "outside" ?
+		_axes_size(get(axis, :ticklen, nothing), _AXES_PLOTLY_TICKLEN) : 0.0
+	linewidth = _axes_size(get(axis, :linewidth, nothing), 1.0)
+	depth = ticklen + _AXES_LINE_HEIGHT_EM * tick_size + (linewidth - 1)
+	title = get(axis, :title, nothing)
+	text = _tight_title_text(title)
+	if !isempty(text)
+		template_title = _cmn_mapping_get(template_axis, :title)
+		title_size = _axes_size(
+			_cmn_mapping_get(_cmn_mapping_get(title, :font), :size),
+			_axes_size(
+				_cmn_mapping_get(_cmn_mapping_get(template_title, :font), :size),
+				Float64(round(_AXES_TITLE_FONT_FACTOR * root)),
+			),
+		)
+		standoff = _axes_size(
+			_cmn_mapping_get(title, :standoff),
+			_axes_size(_cmn_mapping_get(template_title, :standoff), _AXES_TITLE_STANDOFF),
+		)
+		depth += standoff + length(_tight_lines(text)) * _AXES_LINE_HEIGHT_EM * title_size
+	end
+	return depth
+end
+
+# Whether cell `t` reaches the top of the figure's plot region (no other cell
+# above it), so a top axis there sits under the figure title.
+function _axes_is_top_cell(fig, t::_CellTarget)
+	fig isa SubplotFigure || return true
+	top = t.ydomain[2]
+	grid_ref = _cmn_layout(fig).subplots.grid_ref
+	for r in 1:getfield(fig, :rows), c in 1:getfield(fig, :cols)
+		(
+			checkbounds(Bool, grid_ref, r, c) &&
+			isassigned(grid_ref, r, c) &&
+			!isempty(grid_ref[r, c])
+		) || continue
+		other = _cell_target(fig; row = r, col = c, who = "secondary_xaxis!")
+		other.ydomain[2] > top + 1e-9 && return false
+	end
+	return true
+end
+
+# Title placement that keeps the figure title clear of a top axis of depth
+# `depth` px: the title sits on the plot area (`yref="paper"`, `y=1`,
+# `yanchor="bottom"`) lifted by `pad.b`, and `automargin` grows the top margin
+# to fit it. plotly.js grows a margin to the larger of its pushers rather than
+# their sum, so with the default container placement the title and the top
+# axis overlap. `nothing` when the user placed the title (any of `y`, `yref`,
+# `yanchor` set to something other than this placement). A larger `pad.b` from
+# an earlier call (another top axis) is kept.
+function _axes_title_clearance(layout::Layout, depth::Float64)
+	title = get(layout.fields, :title, nothing)
+	fields = Dict{Symbol, Any}()
+	if title isa AbstractString
+		fields[:text] = String(title)
+		title = nothing
+	end
+	yref = _cmn_mapping_get(title, :yref)
+	y = _cmn_mapping_get(title, :y)
+	yanchor = _cmn_mapping_get(title, :yanchor)
+	ours = yref == "paper" && y isa Real && y == 1 && yanchor == "bottom"
+	untouched = yref === nothing && y === nothing && yanchor === nothing
+	(ours || untouched) || return nothing
+	pad_b = ceil(depth + _AXES_FIGURE_TITLE_GAP)
+	if ours
+		existing = _cmn_mapping_get(_cmn_mapping_get(title, :pad), :b)
+		existing isa Real && !(existing isa Bool) && (pad_b = max(pad_b, Float64(existing)))
+	end
+	fields[:yref] = "paper"
+	fields[:y] = 1
+	fields[:yanchor] = "bottom"
+	fields[:automargin] = true
+	fields[:pad] = attr(b = pad_b)
+	return fields
+end
+
 function _axes_secondary_xaxis!(
 	fig,
 	f,
@@ -1225,7 +1375,7 @@ function _axes_secondary_xaxis!(
 	t = _cell_target(fig; row = row, col = col, inset = inset, who = who)
 	_axes_require_xy(t, who, "a secondary x axis")
 	layout = _cmn_layout(fig)
-	root = _axes_match_root(layout, t.xkey, who)
+	root = _axes_match_root(fig, t.xkey, who)
 	axis_type = _axis_type(layout, root)
 	axis_type in ("-", "linear", "log") || throw(ArgumentError(
 		"$(who): needs a numeric (linear or log) x axis; $(repr(root)) has " *
@@ -1317,16 +1467,11 @@ function _axes_secondary_xaxis!(
 		Symbol("xaxis", _axes_highest_axis_index(_cmn_plot(fig), 'x') + 1) :
 		_axis_layout_key(existing_ref, :x)
 	ref = _cmn_axis_ref(key; who = who)
+	# An inset's axes stay inside the host cell and must not push the figure
+	# margins (as the inset's own axes).
+	in_inset = fig isa SubplotFigure &&
+		any(record -> record.xkey === t.xkey, getfield(fig, :insets))
 
-	# --- write ---
-	if explicit === nothing
-		_axes_write_xy_range!(
-			fig,
-			root,
-			log_axis ? Float64[log10(limits[1]), log10(limits[2])] :
-			Float64[limits[1], limits[2]],
-		)
-	end
 	fields = Dict{Symbol, Any}(
 		:overlaying => t.xref,
 		:matches => _cmn_axis_ref(root; who = who),
@@ -1340,14 +1485,30 @@ function _axes_secondary_xaxis!(
 		:showline => true,
 		:mirror => false,
 		:ticks => "outside",
-		:automargin => true,
+		:automargin => !in_inset,
 		:linecolor => _DEFAULT_AXIS_LINECOLOR,
 		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
 		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
 		:title => attr(text = title_text),
 	)
 	axis_type == "-" || (fields[:type] = axis_type)
+	_cmn_copy_axis_style!(fields, get(layout.fields, t.xkey, nothing))
+	title_clearance = (side_name == "top" && !in_inset && _axes_is_top_cell(fig, t)) ?
+		_axes_title_clearance(layout, _axes_top_axis_depth(layout, fields)) :
+		nothing
+
+	# --- write ---
+	if explicit === nothing
+		_axes_write_xy_range!(
+			fig,
+			root,
+			log_axis ? Float64[log10(limits[1]), log10(limits[2])] :
+			Float64[limits[1], limits[2]],
+		)
+	end
 	_cmn_merge_layout_key!(fig, key, fields; nested = (:title,))
+	title_clearance === nothing ||
+		_cmn_merge_layout_key!(fig, :title, title_clearance; nested = (:pad,))
 	if existing_ref === nothing
 		# plotly.js draws an axis only when a trace uses it (verified render,
 		# probe3_secondary_noaxis_trace.png); `visible = false` keeps it out of
@@ -1401,11 +1562,26 @@ Set the final range with [`xrange!`](@ref) before calling this.
 - `row`, `col`: SubplotFigure cell (both or neither; default the active cell,
   which the call makes active); `inset = k` targets inset `k`.
 
-Calling it again for the same axis replaces the secondary axis (idempotent).
-The axis needs a hidden dummy trace (named
+The new axis copies the primary x axis's `title.font`, `tickfont`,
+`linecolor`, `linewidth`, `tickcolor`, `ticklen` and `tickwidth` where the
+primary sets them (later changes to the primary are not followed), has no
+grid lines, and (except in an inset) pushes the
+figure margin to fit its labels. Calling it again for the same axis replaces
+the secondary axis (idempotent). The axis needs a hidden dummy trace (named
 `"plotlysupply:secondary_xaxis:<x ref>"`, `visible = false`), because
-plotly.js only draws axes that a trace uses. Returns `nothing` (`sf` for a
-SubplotFigure).
+plotly.js only draws axes that a trace uses.
+
+Figure title: plotly.js sizes the top margin for the larger of the figure
+title and the top axis, not their sum, so a default-placed title would
+overlap a top secondary axis in the top row. The title is therefore placed
+on the plot area (`title.yref = "paper"`, `y = 1`, `yanchor = "bottom"`,
+`automargin = true`) and lifted by `title.pad.b`, the axis's estimated
+height (from the font sizes at call time) plus 6 px. This also holds for a
+title set later. A title the user placed (`y`, `yref` or `yanchor` set) is
+left alone. Subplot titles of the same cell, and cells above an interior
+cell, are not moved: leave room with `vertical_spacing`.
+
+Returns `nothing` (`sf` for a SubplotFigure).
 
 # Example
 ```julia
@@ -1517,7 +1693,7 @@ function _axes_inset!(
 	yfields = merge(frame, Dict{Symbol, Any}(:domain => collect(ydomain), :anchor => xref))
 	for (share, host_key, fields) in ((sharex, host.xkey, xfields), (sharey, host.ykey, yfields))
 		share || continue
-		root = _axes_match_root(layout, host_key, who)
+		root = _axes_match_root(sf, host_key, who)
 		fields[:matches] = _cmn_axis_ref(root; who = who)
 		# Matched axes must have the same type.
 		axis_type = _axis_type(layout, root)

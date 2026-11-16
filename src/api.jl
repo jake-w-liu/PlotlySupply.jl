@@ -3449,9 +3449,13 @@ cell, or of an inset.
 - `range`: `(lo, hi)` or `[lo, hi]` in DATA units on every axis type: on a
   logarithmic axis pass data values (`(1e-3, 1e2)`), never exponents; they
   are converted to the log10 values Plotly stores, and non-positive bounds
-  are an `ArgumentError`. A reversed range (`hi < lo`) flips the axis.
-  `[0, 0]`, `(0, 0)` and `nothing` restore automatic ranging. Partial
-  ranges and equal bounds are an `ArgumentError`.
+  are an `ArgumentError` (breaking in 2.0: 1.x passed log10 exponents
+  through). A reversed range (`hi < lo`) flips the axis. Bounds are numbers
+  on linear, log and category axes (category positions are 0-based
+  indices); a date axis also takes date strings or `Date`/`DateTime`.
+  `[0, 0]`, `(0, 0)` and `nothing` restore automatic ranging (1.x wrote a
+  literal `[0, 0]` range). Partial ranges and equal bounds are an
+  `ArgumentError`.
 
 # Keywords
 - `row`, `col`: SubplotFigure cell (both or neither). Omitted, the active
