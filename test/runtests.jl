@@ -2171,10 +2171,8 @@ end
         @test PlotlySupply._scalar_or_first(5, 0) == 5
         @test PlotlySupply._scalar_or_first([7, 8], 0) == 7
         @test PlotlySupply._scalar_or_first(Int[], 0) == 0
-        @test PlotlySupply._safe_tick0([3, 1, 2]) == 1.0
-        @test PlotlySupply._safe_tick0([[3.0, 4.0], [1.0, 2.0]]) == 1.0   # nested
-        @test PlotlySupply._safe_tick0(Float64[]) === nothing            # empty
-        @test PlotlySupply._safe_tick0([NaN, Inf]) === nothing           # non-finite
+        # 2.0 (C14): the hidden tick0 = min(data) is gone, and so is its helper.
+        @test !isdefined(PlotlySupply, :_safe_tick0)
     end
 
     @testset "CRC: scatter mode is valid 'lines' (never 'line')" begin

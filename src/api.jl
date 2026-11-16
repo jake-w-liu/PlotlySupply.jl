@@ -5780,16 +5780,19 @@ function yrange!(
 	)
 end
 
+# Scatter-family SubplotFigure methods go through `_scat_subplot_delegate!`,
+# which gives the scratch figure the real figure's default colours and legend
+# groups.
 function plot_scatter!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
+	x::AbstractArray,
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _scat_subplot_delegate!(
 		sf,
 		plot_scatter!,
 		x,
@@ -5803,13 +5806,13 @@ end
 
 function plot_scatter!(
 	sf::SubplotFigure,
-	y::Union{AbstractRange, Vector, SubArray};
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _scat_subplot_delegate!(
 		sf,
 		plot_scatter!,
 		y;
@@ -5822,14 +5825,14 @@ end
 
 function plot_stem!(
 	sf::SubplotFigure,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
+	x::AbstractArray,
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _scat_subplot_delegate!(
 		sf,
 		plot_stem!,
 		x,
@@ -5843,13 +5846,13 @@ end
 
 function plot_stem!(
 	sf::SubplotFigure,
-	y::Union{AbstractRange, Vector, SubArray};
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _scat_subplot_delegate!(
 		sf,
 		plot_stem!,
 		y;
@@ -6001,14 +6004,14 @@ end
 
 function plot_scatterpolar!(
 	sf::SubplotFigure,
-	theta::Union{AbstractRange, Vector, SubArray},
-	r::Union{AbstractRange, Vector, SubArray};
+	theta::AbstractArray,
+	r::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	kwargs...,
 )
-	return _subplot_delegate_mutator!(
+	return _scat_subplot_delegate!(
 		sf,
 		plot_scatterpolar!,
 		theta,
@@ -6386,8 +6389,6 @@ end
 
 for (fn, nargs) in (
 	(:plot_funnel!, 2),
-	(:plot_area!, 1),
-	(:plot_area!, 2),
 	(:plot_candlestick!, 5),
 	(:plot_ohlc!, 5),
 	(:plot_histogram2d!, 2),
@@ -6426,10 +6427,58 @@ function plot_image!(
 	return _subplot_delegate_mutator!(sf, plot_image!, z; kwargs...)
 end
 
-"""
-	plot!(sf::SubplotFigure, x, y; kwargs...)
+# SubplotFigure methods of plot_area! for every array type, through the
+# scatter-family delegate (real-figure colours and style cycle). The
+# Plot/SyncPlot methods are generated from the untyped ones (see
+# `_install_transactional_high_level_plot_wrappers!`).
+function plot_area!(
+	sf::SubplotFigure,
+	x::AbstractArray,
+	y::AbstractArray;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _scat_subplot_delegate!(
+		sf,
+		plot_area!,
+		x,
+		y;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
+end
 
-MATLAB-like alias for `plot_scatter!` when working with `SubplotFigure`.
+function plot_area!(
+	sf::SubplotFigure,
+	y::AbstractArray;
+	row::Union{Nothing, Integer} = nothing,
+	col::Union{Nothing, Integer} = nothing,
+	secondary_y::Bool = false,
+	kwargs...,
+)
+	return _scat_subplot_delegate!(
+		sf,
+		plot_area!,
+		y;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		kwargs...,
+	)
+end
+
+"""
+	plot!(fig, x, y; kwargs...)
+	plot!(fig, y; kwargs...)
+
+MATLAB-like alias for [`plot_scatter!`](@ref): appends line/marker traces to
+a `Plot`, a [`SyncPlot`](@ref) or a `SubplotFigure` (active cell, or
+`row`/`col`) and accepts the same keywords. Returns `nothing` for a
+`Plot`/`SyncPlot` and the figure for a `SubplotFigure`.
 """
 function plot!(
 	sf::SubplotFigure,
@@ -6437,6 +6486,14 @@ function plot!(
 	kwargs...,
 )
 	return plot_scatter!(sf, args...; kwargs...)
+end
+
+function plot!(
+	fig::Union{Plot, SyncPlot},
+	args...;
+	kwargs...,
+)
+	return plot_scatter!(fig, args...; kwargs...)
 end
 
 #region 1D Plot
@@ -6490,20 +6547,22 @@ _scalar_or_first(value, default) = value isa AbstractVector ? (isempty(value) ? 
 # A multi-series input is any abstract vector whose elements are themselves
 # abstract vectors.  Keeping this type-driven avoids scanning the data and
 # correctly handles ranges, views, and abstractly typed collections.
-@inline _is_nested_series(::AbstractVector{<:AbstractVector}) = true
-@inline _is_nested_series(::Any) = false
+@inline _is_nested_series(::AbstractVector{<:AbstractVector}; who::AbstractString = "") = true
+@inline _is_nested_series(::Any; who::AbstractString = "") = false
 
 # Abstractly typed containers (`ys = []; push!(ys, v)`, JSON-parsed data) carry
 # no element type to dispatch on, so their elements are inspected. A container
 # mixing series vectors with scalar values is ambiguous and is rejected rather
-# than plotted as one garbage series.
-function _is_nested_series(values::AbstractVector)
+# than plotted as one garbage series. `who` (the public function name), when
+# given, prefixes the error message.
+function _is_nested_series(values::AbstractVector; who::AbstractString = "")
 	isconcretetype(eltype(values)) && return false
 	isempty(values) && return false
 	nested_count = count(value -> value isa AbstractVector, values)
 	nested_count == 0 && return false
 	nested_count == length(values) ||
 		throw(ArgumentError(
+			(isempty(who) ? "" : "$(who): ") *
 			"multi-series input mixes $(nested_count) series vector(s) with " *
 			"$(length(values) - nested_count) scalar value(s); pass either one " *
 			"flat series or a vector whose elements are all series vectors.",
@@ -6532,15 +6591,25 @@ function _apply_explicit_layout_mode!(
 	return nothing
 end
 
-function _nested_coordinate_mode(primary, secondary, primary_name::Symbol, secondary_name::Symbol)
-	primary_nested = _is_nested_series(primary)
-	secondary_nested = _is_nested_series(secondary)
+# Classify a (primary, secondary) coordinate pair as flat or multi-series and
+# check that their series counts agree. `who` (the public function name), when
+# given, prefixes the error message as "<function>: <message>".
+function _nested_coordinate_mode(
+	primary,
+	secondary,
+	primary_name::Symbol,
+	secondary_name::Symbol;
+	who::AbstractString = "",
+)
+	prefix = isempty(who) ? "" : "$(who): "
+	primary_nested = _is_nested_series(primary; who = who)
+	secondary_nested = _is_nested_series(secondary; who = who)
 	if secondary_nested
 		primary_nested || throw(ArgumentError(
-			"`$secondary_name` contains multiple series but `$primary_name` contains one series.",
+			"$(prefix)`$secondary_name` contains multiple series but `$primary_name` contains one series.",
 		))
 		length(secondary) == length(primary) || throw(ArgumentError(
-			"`$secondary_name` and `$primary_name` must contain the same number of series; " *
+			"$(prefix)`$secondary_name` and `$primary_name` must contain the same number of series; " *
 			"got $(length(secondary)) and $(length(primary)).",
 		))
 	end
@@ -6652,60 +6721,115 @@ function _scatter3d_traces(
 	return traces
 end
 
-# Compute a finite scalar `tick0` from possibly nested / non-finite data.
-# Handles a vector-of-vectors (multi-series), ignores non-finite entries, and
-# returns `nothing` when no finite value exists — so the axis simply omits
-# `tick0` instead of receiving an invalid Vector or NaN. Iterates lazily (no
-# flattening allocation) so it is cheap even for large series.
-function _safe_tick0(v)
-	if _is_nested_series(v)
-		best = nothing
-		for sub in v
-			t = _safe_tick0(sub)
-			t === nothing || (best = best === nothing ? t : min(best, t))
-		end
-		return best
+# Plotly `error_x` / `error_y` attribute of one trace. A vector gives symmetric
+# data errors; a `(minus, plus)` tuple gives asymmetric ones (`symmetric =
+# false`, `array` = plus, `arrayminus` = minus). Arrays are stored by reference.
+function _error_bar_attr(entry)
+	if entry isa Tuple
+		minus, plus = entry
+		return attr(
+			type = "data",
+			symmetric = false,
+			array = plus,
+			arrayminus = minus,
+			visible = true,
+		)
 	end
-	best = nothing
-	for x in v
-		if x isa Real && isfinite(x)
-			best = best === nothing ? float(x) : min(best, float(x))
-		end
-	end
-	return best
+	return attr(type = "data", array = entry, visible = true)
 end
 
-# Attach symmetric data error bars to one or more traces. `error_x`/`error_y`
-# may be a flat vector (applied to every trace) or a vector-of-vectors (one per
-# trace); `nothing` leaves that axis untouched.
+# Split an `error_x` / `error_y` keyword into one entry per trace (`nothing`
+# means no error bars on that trace):
+# - `nothing`: no error bars;
+# - a flat vector: the same symmetric errors on every trace;
+# - a vector of vectors: one symmetric error vector per trace;
+# - a `(minus, plus)` tuple of flat vectors: the same asymmetric errors on
+#   every trace;
+# - a `(minus, plus)` tuple of vectors of vectors, or a vector of
+#   `(minus, plus)` tuples: one asymmetric pair per trace.
+# A per-trace list shorter than the trace count leaves the remaining traces
+# without error bars and surplus entries are ignored (the 1.x leniency of the
+# per-series keywords). The `minus` and `plus` lists of a per-trace asymmetric
+# pair must hold the same number of series.
+function _error_bar_entries(
+	err,
+	n::Int,
+	name::AbstractString = "error",
+	who::AbstractString = "",
+)
+	prefix = isempty(who) ? "" : "$(who): "
+	entries = Vector{Any}(nothing, n)
+	err === nothing && return entries
+	asymmetric_pair = function (pair)
+		(pair isa Tuple && length(pair) == 2) || throw(ArgumentError(
+			"$(prefix)an asymmetric `$(name)` is a `(minus, plus)` tuple; got $(repr(pair)).",
+		))
+		return (pair[1], pair[2])
+	end
+	if err isa Tuple
+		minus, plus = asymmetric_pair(err)
+		(minus isa AbstractVector && plus isa AbstractVector) || throw(ArgumentError(
+			"$(prefix)`$(name) = (minus, plus)` needs two vectors; got " *
+			"($(typeof(minus)), $(typeof(plus))).",
+		))
+		minus_nested = _is_nested_series(minus; who = who)
+		minus_nested == _is_nested_series(plus; who = who) || throw(ArgumentError(
+			"$(prefix)`$(name) = (minus, plus)`: both must be flat vectors or " *
+			"both vectors of vectors (one per series).",
+		))
+		if minus_nested
+			length(minus) == length(plus) || throw(ArgumentError(
+				"$(prefix)`$(name) = (minus, plus)`: `minus` has $(length(minus)) " *
+				"series but `plus` has $(length(plus)).",
+			))
+			for (index, minus_i, plus_i) in zip(1:n, minus, plus)
+				entries[index] = (minus_i, plus_i)
+			end
+		else
+			fill!(entries, (minus, plus))
+		end
+	elseif err isa AbstractVector
+		if !isempty(err) && first(err) isa Tuple
+			for (index, pair) in zip(1:n, err)
+				entries[index] = asymmetric_pair(pair)
+			end
+		elseif _is_nested_series(err; who = who)
+			for (index, series_errors) in zip(1:n, err)
+				entries[index] = series_errors
+			end
+		else
+			fill!(entries, err)
+		end
+	else
+		throw(ArgumentError(
+			"$(prefix)`$(name)` must be nothing, a vector, a vector of vectors " *
+			"(one per series) or a `(minus, plus)` tuple; got $(typeof(err)).",
+		))
+	end
+	return entries
+end
+
+# Attach data error bars to one or more traces. `error_x`/`error_y` take the
+# forms listed at `_error_bar_entries`; `nothing` leaves that axis untouched.
 function _set_error_bars!(trace, error_x, error_y)
 	(error_x === nothing && error_y === nothing) && return nothing
 	traces = trace isa AbstractVector ? trace : (trace,)
-	nx = _is_nested_series(error_x)
-	ny = _is_nested_series(error_y)
-	for (n, t) in enumerate(traces)
-		if error_x !== nothing && !(nx && n > length(error_x))
-			payload = nx ? error_x[n] : error_x
-			t.error_x = attr(
-				type = "data",
-				array = payload,
-				visible = true,
-			)
-		end
-		if error_y !== nothing && !(ny && n > length(error_y))
-			payload = ny ? error_y[n] : error_y
-			t.error_y = attr(
-				type = "data",
-				array = payload,
-				visible = true,
-			)
-		end
+	n = length(traces)
+	x_entries = _error_bar_entries(error_x, n, "error_x")
+	y_entries = _error_bar_entries(error_y, n, "error_y")
+	for (index, t) in enumerate(traces)
+		x_entries[index] === nothing ||
+			(t.error_x = _error_bar_attr(x_entries[index]))
+		y_entries[index] === nothing ||
+			(t.error_y = _error_bar_attr(y_entries[index]))
 	end
 	return nothing
 end
 
-function _auto_xvalues(y)
-	if _is_nested_series(y)
+# Default x coordinates `0:length(y)-1` of a y-only call (one range per
+# series for multi-series `y`). `who` prefixes the error for ambiguous input.
+function _auto_xvalues(y; who::AbstractString = "")
+	if _is_nested_series(y; who = who)
 		x = Vector{UnitRange{Int}}(undef, length(y))
 		if y isa LinRange{<:Vector}
 			# A built-in LinRange of ordinary vectors preserves the endpoint
@@ -6728,27 +6852,30 @@ function _auto_xvalues(y)
 	return 0:(length(y) - 1)
 end
 
+# Apply a `showlegend` keyword (`nothing`, a Bool, or one entry per trace) to
+# one trace or a vector of traces. `nothing` entries leave a trace unchanged;
+# surplus vector entries are ignored, as for the other per-series keywords.
 function _apply_showlegend!(trace, showlegend)
 	showlegend === nothing && return
-	if isa(trace, Vector)
+	if trace isa AbstractVector
 		if showlegend isa Bool
 			for t in trace
 				t.showlegend = showlegend
 			end
-		elseif showlegend isa Vector
-			# Tolerate a vector longer than the trace count (ignore the surplus)
-			# to match the lenient handling of color/legend in the constructors.
-			for n in 1:min(length(trace), length(showlegend))
-				trace[n].showlegend = showlegend[n]
+		elseif showlegend isa AbstractVector
+			for (t, value) in zip(trace, showlegend)
+				value === nothing || (t.showlegend = value)
 			end
 		end
 	else
 		if showlegend isa Bool
 			trace.showlegend = showlegend
-		elseif showlegend isa Vector && !isempty(showlegend)
-			trace.showlegend = showlegend[1]
+		elseif showlegend isa AbstractVector && !isempty(showlegend)
+			value = first(showlegend)
+			value === nothing || (trace.showlegend = value)
 		end
 	end
+	return nothing
 end
 
 function _apply_cartesian_plot_options!(
@@ -6764,37 +6891,68 @@ function _apply_cartesian_plot_options!(
 	title::AbstractString = "",
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
+	ykey::Symbol = :yaxis,
 	refresh::Bool = false,
 	apply_template::Bool = true,
 	who::AbstractString = "plot",
 )
 	# Validate every option before the first write so a rejected keyword
-	# leaves the figure untouched.
+	# leaves the figure untouched. A twin y axis (`ykey` other than :yaxis,
+	# see `_ensure_twin_y!`) takes `ylabel`/`yscale`/`yrange`/`yticks`; the
+	# D7 primitives address the primary axes only, so it is handled here.
+	primary_y = ykey === :yaxis
 	_validate_cartesian_options(
 		fig,
 		who;
 		xrange = xrange,
-		yrange = yrange,
+		yrange = primary_y ? yrange : nothing,
 		xscale = xscale,
-		yscale = yscale,
+		yscale = primary_y ? yscale : "",
 		width = width,
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
 	)
+	if !primary_y
+		_require_axis_scale(yscale, who, "yscale")
+		_scat_require_axis_range(fig, ykey, yrange, yscale, who, "yrange")
+	end
 
 	_apply_figure_title!(fig, title)
 	_apply_axis_title!(fig, :x, xlabel)
-	_apply_axis_title!(fig, :y, ylabel)
 	# Scale before range: a logarithmic axis stores its range as exponents.
 	_apply_axis_scale!(fig, :x, xscale, who)
-	_apply_axis_scale!(fig, :y, yscale, who)
 	_apply_axis_range!(fig, :x, xrange, who)
-	_apply_axis_range!(fig, :y, yrange, who)
+	if primary_y
+		_apply_axis_title!(fig, :y, ylabel)
+		_apply_axis_scale!(fig, :y, yscale, who)
+		_apply_axis_range!(fig, :y, yrange, who)
+	else
+		_scat_apply_axis_options!(
+			fig,
+			ykey;
+			label = ylabel,
+			scale = yscale,
+			range = yrange,
+			range_name = "yrange",
+			who = who,
+		)
+	end
 	_apply_figure_size!(fig, who; width = width, height = height)
 	# `grid = true` keeps the template's grid (the constructor default);
 	# `false` or an axis selector overrides it.
 	grid === true || _apply_axis_grid!(fig, grid, who)
+	# Ticks after scale and range: log axes and explicit ranges are known.
+	_scat_apply_ticks!(fig, :xaxis, xticks, xticklabels, xtickformat, who)
+	_scat_apply_ticks!(fig, ykey, yticks, yticklabels, ytickformat, who)
+	equalar && _apply_equal_aspect!(fig, _cell_target(fig; who = who); who = who)
 	# On first construction apply the default template; when appending to an
 	# existing figure only refresh the legend so a user-set template survives.
 	if apply_template
@@ -6816,6 +6974,891 @@ function _apply_cartesian_grid_override!(
 	who::AbstractString = "plot",
 )
 	_apply_axis_grid!(fig, grid, who)
+	return nothing
+end
+
+# ── Scatter family: shared validation and trace building ─────────────
+# Used by plot_scatter, plot_stem, plot_area and plot_scatterpolar (with their
+# mutators) and by the plots in src/sci/lines.jl. Validators never write;
+# messages start with `who`, the public function name.
+
+const _SCAT_MODE_FLAGS = ("lines", "markers", "text")
+const _SCAT_DASH_NAMES = ("solid", "dot", "dash", "longdash", "dashdot", "longdashdot")
+# plotly.js also accepts an explicit dash-length list ("5px,10px,2px", "5%,2%").
+const _SCAT_DASH_LENGTHS = r"^\s*\d+(\.\d+)?(px|%)?\s*(,\s*\d+(\.\d+)?(px|%)?\s*)*$"
+# `line.shape` values of plotly.js `scatter` and of `scatterpolar`.
+const _SCAT_LINE_SHAPES = ("linear", "spline", "hv", "vh", "hvh", "vhv")
+const _SCAT_POLAR_LINE_SHAPES = ("linear", "spline")
+# `fill` values of plotly.js `scatter` and of `scatterpolar`.
+const _SCAT_FILLS = ("none", "tozeroy", "tozerox", "tonexty", "tonextx", "toself", "tonext")
+const _SCAT_POLAR_FILLS = ("none", "toself", "tonext")
+const _SCAT_TEXT_POSITIONS = (
+	"top left",
+	"top center",
+	"top right",
+	"middle left",
+	"middle center",
+	"middle right",
+	"bottom left",
+	"bottom center",
+	"bottom right",
+)
+# Stem lines keep the 1.x look (thin black) unless a colour, a line width or
+# an active PlotStyle says otherwise.
+const _STEM_DEFAULT_COLOR = "black"
+const _STEM_DEFAULT_LINEWIDTH = 0.5
+# plotly.js `zorder` of stems traces: below the default layer 0 of every other
+# trace on the same axes.
+const _STEM_ZORDER = -1
+
+# Range check of any Cartesian axis `key` (`nothing`: an axis that does not
+# exist yet and starts linear) against the axis type the call ends up with.
+function _scat_require_axis_range(
+	fig,
+	key::Union{Nothing, Symbol},
+	range,
+	scale::AbstractString,
+	who::AbstractString,
+	name::AbstractString,
+)
+	checked = _checked_range(range, who, name)
+	checked === nothing && return nothing
+	final_type = !isempty(scale) ? String(scale) :
+		key === nothing ? "-" : _axis_type(_plot_layout(fig), key)
+	if final_type == "log"
+		for bound in checked
+			(bound isa Real && bound > 0) || throw(ArgumentError(
+				"$(who): `$(name)` bounds on a logarithmic axis are data values " *
+				"and must be positive; got $(repr(range)).",
+			))
+		end
+	end
+	return checked
+end
+
+# Validate the common Cartesian keywords of a scatter-family call before its
+# first write. `ykey` is the y axis the call draws on: `:yaxis`, an existing
+# twin axis, or `nothing` for a twin that `_ensure_twin_y!` will create.
+function _scat_validate_cartesian_options(
+	fig,
+	who::AbstractString;
+	ykey::Union{Nothing, Symbol} = :yaxis,
+	xrange = nothing,
+	yrange = nothing,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width = 0,
+	height = 0,
+	fontsize = 0,
+	grid = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+)
+	primary_y = ykey === :yaxis
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = xrange,
+		yrange = primary_y ? yrange : nothing,
+		xscale = xscale,
+		yscale = primary_y ? yscale : "",
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	if !primary_y
+		_require_axis_scale(yscale, who, "yscale")
+		_scat_require_axis_range(fig, ykey, yrange, yscale, who, "yrange")
+	end
+	_scat_validate_ticks(fig, :xaxis, xticks, xticklabels, xscale, who, "x")
+	_scat_validate_ticks(fig, ykey, yticks, yticklabels, yscale, who, "y")
+	return nothing
+end
+
+# Tick values and labels of axis `key` (`nothing`: a twin y axis not created
+# yet), checked as `_apply_ticks!` will check them once the call's `scale` is
+# applied, so a bad tick keyword throws before the figure changes.
+function _scat_validate_ticks(
+	fig,
+	key::Union{Nothing, Symbol},
+	values,
+	labels,
+	scale::AbstractString,
+	who::AbstractString,
+	letter::AbstractString,
+)
+	(values === nothing && labels === nothing) && return nothing
+	log_axis = !isempty(scale) ? scale == "log" :
+		key !== nothing && _cmn_is_log_axis(_plot_layout(fig), key)
+	tickvals = values === nothing ? nothing : _cmn_tick_values(values, log_axis, who)
+	if labels !== nothing
+		tickvals === nothing && throw(ArgumentError(
+			"$(who): `$(letter)ticklabels` needs `$(letter)ticks` (one tick value per label).",
+		))
+		_cmn_tick_labels(labels, length(tickvals), who)
+	end
+	return nothing
+end
+
+# Title, scale and range of a non-primary Cartesian axis (the twin y axis of
+# `secondary_y = true`) with the semantics of the D7 primitives: the label
+# goes through `_label`, a log axis gets power exponents unless an exponent
+# format is already set, and the range is given in data units.
+function _scat_apply_axis_options!(
+	fig,
+	key::Symbol;
+	label::AbstractString = "",
+	scale::AbstractString = "",
+	range = nothing,
+	range_name::AbstractString = "range",
+	who::AbstractString,
+)
+	isempty(label) || relayout!(fig; Symbol(key, :_title_text) => _label(label))
+	if !isempty(scale)
+		relayout!(fig; Symbol(key, :_type) => String(scale))
+		if scale == "log"
+			axis = get(_plot_layout(fig).fields, key, nothing)
+			_cmn_mapping_get(axis, :exponentformat) === nothing &&
+				relayout!(fig; Symbol(key, :_exponentformat) => "power")
+		end
+	end
+	checked = _checked_range(range, who, range_name)
+	if checked !== nothing
+		layout = _plot_layout(fig)
+		value = _axis_type(layout, key) == "log" ?
+			_to_axis_range(layout, key, checked; who = "$(who) (`$(range_name)`)") :
+			checked
+		relayout!(
+			fig;
+			Symbol(key, :_range) => value,
+			Symbol(key, :_autorange) => false,
+		)
+	end
+	return nothing
+end
+
+# `xticks`/`xticklabels`/`xtickformat` (and the y counterparts) of a
+# constructor or mutator: forwarded to `_apply_ticks!` when any is given.
+function _scat_apply_ticks!(
+	fig,
+	key::Symbol,
+	values,
+	labels,
+	format::AbstractString,
+	who::AbstractString,
+)
+	(values === nothing && labels === nothing && isempty(format)) && return nothing
+	_apply_ticks!(fig, key; values = values, labels = labels, format = format, who = who)
+	return nothing
+end
+
+# Keywords a Plot/SyncPlot mutator of this family accepts beyond its documented
+# list; they arrive through its `kwargs...`. `secondary_y::Bool` draws on a twin
+# y axis (created on first use by `_ensure_twin_y!`); `row`/`col` may only be
+# `nothing` (they select SubplotFigure cells). `show` and every other keyword
+# are an ArgumentError. `kwargs` iterates `key => value` pairs (a mutator's
+# `kwargs...`). Returns `secondary_y`.
+function _scat_mutator_options(who::AbstractString, kwargs)
+	secondary_y = false
+	for (key, value) in kwargs
+		if key === :secondary_y
+			value isa Bool || throw(ArgumentError(
+				"$(who): `secondary_y` must be true or false; got $(repr(value)).",
+			))
+			secondary_y = value
+		elseif key === :show
+			throw(ArgumentError(
+				"$(who): `show` is a constructor keyword; a mutator draws into the " *
+				"figure it is given. Display that figure with `display(fig)` or open " *
+				"a window with `to_syncplot(fig)`.",
+			))
+		elseif key === :row || key === :col
+			value === nothing || throw(ArgumentError(
+				"$(who): `row`/`col` select a SubplotFigure cell; a single figure " *
+				"has one cell, so omit them.",
+			))
+		else
+			throw(ArgumentError("$(who): unsupported keyword argument `$(key)`."))
+		end
+	end
+	return secondary_y
+end
+
+# Window size/title for a constructor's `show = true`.
+_scat_maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString) =
+	_maybe_show(fig, show, round(Int, width), round(Int, height), String(title))
+
+function _scat_require_vector(v, who::AbstractString, name::Symbol)
+	v isa AbstractVector && return nothing
+	shape = v isa AbstractArray ? "a $(ndims(v))-dimensional " : "a "
+	throw(ArgumentError(
+		"$(who): `$(name)` must be a vector (one series) or a vector of vectors " *
+		"(several series); got $(shape)$(typeof(v)). Pass the columns of a " *
+		"matrix `A` as `collect(eachcol(A))`.",
+	))
+end
+
+function _scat_complex_error(who::AbstractString, name::Symbol)
+	throw(ArgumentError(
+		"$(who): `$(name)` holds complex values; plot_complex(z) draws them in " *
+		"the complex plane (real part on x, imaginary part on y). To plot one " *
+		"component pass real.(v), imag.(v) or abs.(v).",
+	))
+end
+
+# Element check of one coordinate vector: complex numbers and arrays cannot be
+# drawn as coordinates. A concrete element type is checked in O(1); abstractly
+# typed vectors are scanned without allocating.
+function _scat_check_values(v::AbstractVector, who::AbstractString, name::Symbol)
+	T = eltype(v)
+	if isconcretetype(T)
+		T <: Complex && _scat_complex_error(who, name)
+		T <: AbstractArray && throw(ArgumentError(
+			"$(who): `$(name)` holds $(T) elements; pass a vector of values, or " *
+			"a vector of vectors for several series.",
+		))
+		return nothing
+	end
+	for value in v
+		value isa Complex && _scat_complex_error(who, name)
+		value isa AbstractArray && throw(ArgumentError(
+			"$(who): `$(name)` holds a $(typeof(value)) element; pass a vector of " *
+			"values, or a vector of vectors for several series.",
+		))
+	end
+	return nothing
+end
+
+# Validate the coordinates of a scatter-family call and split them into
+# per-series vectors (stored by reference, never copied). `y` (the primary
+# coordinate) decides between one series and several; `x` is shared by every
+# series or nested like `y`. Every series needs as many `x` as `y` values.
+# Returns `(xs, ys, nested)`.
+function _scat_series(
+	x,
+	y,
+	who::AbstractString;
+	xname::Symbol = :x,
+	yname::Symbol = :y,
+)
+	_scat_require_vector(x, who, xname)
+	_scat_require_vector(y, who, yname)
+	y_nested, x_nested =
+		_nested_coordinate_mode(y, x, yname, xname; who = who)
+	if !y_nested
+		_scat_check_values(x, who, xname)
+		_scat_check_values(y, who, yname)
+		length(x) == length(y) || throw(ArgumentError(
+			"$(who): `$(xname)` has $(length(x)) values but `$(yname)` has " *
+			"$(length(y)); they must have the same length.",
+		))
+		return Any[x], Any[y], false
+	end
+	n = length(y)
+	xs = Vector{Any}(undef, n)
+	ys = Vector{Any}(undef, n)
+	x_nested || _scat_check_values(x, who, xname)
+	x_series = x_nested ? x : Iterators.repeated(x, n)
+	for (index, (xi, yi)) in enumerate(zip(x_series, y))
+		x_nested && _scat_check_values(xi, who, xname)
+		_scat_check_values(yi, who, yname)
+		length(xi) == length(yi) || throw(ArgumentError(
+			"$(who): series $(index) has $(length(xi)) `$(xname)` values but " *
+			"$(length(yi)) `$(yname)` values; they must have the same length.",
+		))
+		xs[index] = xi
+		ys[index] = yi
+	end
+	return xs, ys, true
+end
+
+# One validated value per series: a scalar applies to every series; a vector
+# gives one entry per series. Missing entries take `default` and surplus
+# entries are ignored, the per-series convention of every plot family
+# (`_series_kwarg_vector`). `check` validates and normalises each entry that
+# is used (its messages name the keyword).
+_scat_per_series(value, n::Int, default, check) =
+	Any[check(entry) for entry in _series_kwarg_vector(value, n, default, Any)]
+
+function _scat_mode(mode, who::AbstractString)
+	(mode isa AbstractString) || throw(ArgumentError(
+		"$(who): `mode` entries must be strings; got $(repr(mode)).",
+	))
+	isempty(mode) && return "lines"
+	value = String(mode)
+	value == "none" && return value
+	parts = split(value, '+')
+	(all(part -> part in _SCAT_MODE_FLAGS, parts) && allunique(parts)) ||
+		throw(ArgumentError(
+			"$(who): `mode` must combine \"lines\", \"markers\" and \"text\" with " *
+			"'+' (e.g. \"lines+markers\"), or be \"none\" or \"\" (lines); got " *
+			"$(repr(value)).",
+		))
+	return value
+end
+
+function _scat_add_mode_flag(mode::AbstractString, flag::AbstractString)
+	mode == "none" && return String(flag)
+	flag in split(mode, '+') && return String(mode)
+	return string(mode, "+", flag)
+end
+
+function _scat_string(value, who::AbstractString, name::AbstractString)
+	(value isa AbstractString || value isa Symbol) || throw(ArgumentError(
+		"$(who): `$(name)` must be a string; got $(repr(value)).",
+	))
+	return String(value)
+end
+
+function _scat_choice(value, choices, who::AbstractString, name::AbstractString)
+	text = _scat_string(value, who, name)
+	(isempty(text) || text in choices) || throw(ArgumentError(
+		"$(who): `$(name)` must be one of $(join(repr.(choices), ", ")) or \"\" " *
+		"(unset); got $(repr(text)).",
+	))
+	return text
+end
+
+function _scat_dash(value, who::AbstractString)
+	text = _scat_string(value, who, "dash")
+	(isempty(text) || text in _SCAT_DASH_NAMES || occursin(_SCAT_DASH_LENGTHS, text)) ||
+		throw(ArgumentError(
+			"$(who): `dash` must be one of $(join(repr.(_SCAT_DASH_NAMES), ", ")), " *
+			"a dash-length list such as \"5px,10px\", or \"\" (solid); got " *
+			"$(repr(text)).",
+		))
+	return text
+end
+
+function _scat_nonnegative(value, who::AbstractString, name::AbstractString)
+	(value isa Real && !(value isa Bool) && isfinite(value) && value >= 0) ||
+		throw(ArgumentError(
+			"$(who): `$(name)` must be a finite number >= 0 (0 = default); got " *
+			"$(repr(value)).",
+		))
+	return value
+end
+
+function _scat_unit_interval(value, who::AbstractString, name::AbstractString)
+	(value isa Real && !(value isa Bool) && isfinite(value) && 0 <= value <= 1) ||
+		throw(ArgumentError(
+			"$(who): `$(name)` must be a number in [0, 1]; got $(repr(value)).",
+		))
+	return value
+end
+
+function _scat_optional_bool(value, who::AbstractString, name::AbstractString)
+	(value === nothing || value isa Bool) || throw(ArgumentError(
+		"$(who): `$(name)` entries must be true, false or nothing; got $(repr(value)).",
+	))
+	return value
+end
+
+# Marker symbols are validated here (Plotly names or matplotlib codes) but kept
+# as given: `_marker_attr` maps them and gives "." its small default size.
+function _scat_marker_symbol(value, who::AbstractString)
+	text = _scat_string(value, who, "marker_symbol")
+	_plotly_marker_symbol(text; who = who)
+	return text
+end
+
+# Resolved per-series style of a scatter-family call: one NamedTuple per
+# series. The active PlotStyle's trace defaults (`_style_trace_defaults`, for
+# trace `n_existing + i`) fill keywords that are still at their sentinels;
+# under the :default style they are empty and nothing changes.
+function _scat_series_styles(
+	n::Int,
+	n_existing::Int,
+	who::AbstractString;
+	mode = "lines",
+	dash = "",
+	color = "",
+	legend = "",
+	marker_size = 0,
+	marker_symbol = "",
+	marker_color = "",
+	marker_line_color = "",
+	marker_line_width = 0,
+	linewidth = 0,
+	opacity = 1,
+	showlegend = nothing,
+	line_shape = "",
+	line_shapes = _SCAT_LINE_SHAPES,
+	fill = "",
+	fills = _SCAT_FILLS,
+	fillcolor = "",
+)
+	modes = _scat_per_series(mode, n, "lines", value -> _scat_mode(value, who))
+	dashes = _scat_per_series(dash, n, "", value -> _scat_dash(value, who))
+	colors = _scat_per_series(
+		color,
+		n,
+		"",
+		value -> _cmn_check_color(value, "color", who),
+	)
+	names = _scat_per_series(
+		legend,
+		n,
+		"",
+		value -> _scat_string(value, who, "legend"),
+	)
+	sizes = _scat_per_series(
+		marker_size,
+		n,
+		0,
+		value -> _scat_nonnegative(value, who, "marker_size"),
+	)
+	symbols = _scat_per_series(
+		marker_symbol,
+		n,
+		"",
+		value -> _scat_marker_symbol(value, who),
+	)
+	faces = _scat_per_series(
+		marker_color,
+		n,
+		"",
+		value -> _cmn_check_color(value, "marker_color", who),
+	)
+	edges = _scat_per_series(
+		marker_line_color,
+		n,
+		"",
+		value -> _cmn_check_color(value, "marker_line_color", who),
+	)
+	edge_widths = _scat_per_series(
+		marker_line_width,
+		n,
+		0,
+		value -> _scat_nonnegative(value, who, "marker_line_width"),
+	)
+	widths = _scat_per_series(
+		linewidth,
+		n,
+		0,
+		value -> _scat_nonnegative(value, who, "linewidth"),
+	)
+	opacities = _scat_per_series(
+		opacity,
+		n,
+		1,
+		value -> _scat_unit_interval(value, who, "opacity"),
+	)
+	legends_shown = _scat_per_series(
+		showlegend,
+		n,
+		nothing,
+		value -> _scat_optional_bool(value, who, "showlegend"),
+	)
+	shapes = _scat_per_series(
+		line_shape,
+		n,
+		"",
+		value -> _scat_choice(value, line_shapes, who, "line_shape"),
+	)
+	fill_modes = _scat_per_series(
+		fill,
+		n,
+		"",
+		value -> _scat_choice(value, fills, who, "fill"),
+	)
+	fill_colors = _scat_per_series(
+		fillcolor,
+		n,
+		"",
+		value -> _cmn_check_color(value, "fillcolor", who),
+	)
+
+	styles = Vector{Any}(undef, n)
+	n == 0 && return styles
+	style = _active_style()
+	template = _style_template(style)
+	for index in 1:n
+		defaults = _style_trace_defaults(style, n_existing + index; template = template)
+		trace_mode = modes[index]
+		get(defaults, :markers, false) === true && trace_mode == "lines" &&
+			(trace_mode = "lines+markers")
+		styles[index] = (
+			mode = trace_mode,
+			name = names[index],
+			color = isempty(colors[index]) ? String(get(defaults, :color, "")) : colors[index],
+			dash = isempty(dashes[index]) ? String(get(defaults, :dash, "")) : dashes[index],
+			linewidth = widths[index] == 0 ? get(defaults, :linewidth, 0) : widths[index],
+			marker_size = sizes[index] == 0 ? get(defaults, :marker_size, 0) : sizes[index],
+			marker_symbol = isempty(symbols[index]) ?
+				String(get(defaults, :marker_symbol, "")) : symbols[index],
+			marker_color = faces[index],
+			marker_line_color = edges[index],
+			marker_line_width = edge_widths[index],
+			opacity = opacities[index],
+			showlegend = legends_shown[index],
+			line_shape = shapes[index],
+			fill = fill_modes[index],
+			fillcolor = fill_colors[index],
+		)
+	end
+	return styles
+end
+
+# A marker face colour or a stroke-only symbol ("x-thin", ...) needs an
+# explicit series colour for its edge; otherwise Plotly's colorway applies.
+function _scat_needs_series_color(style)
+	face = style.marker_color
+	(!isempty(face) && face != "none") && return true
+	isempty(style.marker_symbol) && return false
+	return _cmn_is_line_symbol(_plotly_marker_symbol(style.marker_symbol))
+end
+
+# Per-point text labels of each series (`nothing`: no labels). `text` is a
+# string (one label for every point), a vector (the labels of a one-series
+# call, or the same labels for every series) or a vector of vectors (one label
+# vector per series). Labels are plain text (`_label_plain`; Plotly does not
+# typeset trace text); numbers are printed, `nothing`/`missing` are blank.
+function _scat_series_text(text, nested::Bool, lengths::Vector{Int}, who::AbstractString)
+	n = length(lengths)
+	out = Vector{Any}(nothing, n)
+	text === nothing && return out
+	if text isa AbstractString
+		fill!(out, _label_plain(text))
+		return out
+	end
+	text isa AbstractVector || throw(ArgumentError(
+		"$(who): `text` must be nothing, a string, a vector of labels or a vector " *
+		"of label vectors (one per series); got $(typeof(text)).",
+	))
+	if nested && _is_nested_series(text; who = who)
+		for (index, labels) in zip(1:n, text)
+			out[index] = _scat_text_labels(labels, lengths[index], who, index)
+		end
+	else
+		for index in 1:n
+			out[index] = _scat_text_labels(text, lengths[index], who, index)
+		end
+	end
+	return out
+end
+
+function _scat_text_labels(labels::AbstractVector, n::Int, who::AbstractString, series::Int)
+	length(labels) == n || throw(ArgumentError(
+		"$(who): `text` for series $(series) has $(length(labels)) labels but the " *
+		"series has $(n) points.",
+	))
+	out = Vector{String}(undef, n)
+	for (index, label) in zip(1:n, labels)
+		out[index] = if label isa AbstractString
+			_label_plain(label)
+		elseif label === nothing || label === missing
+			""
+		elseif label isa Real
+			string(label)
+		else
+			throw(ArgumentError(
+				"$(who): `text` labels must be strings or numbers; got $(repr(label)).",
+			))
+		end
+	end
+	return out
+end
+
+# `markevery` of each series as `_markevery_fields` dictionaries. For several
+# series, a vector gives one entry per series (each `nothing`, a step or an
+# index vector) and a scalar applies to every series.
+function _scat_series_markevery(markevery, nested::Bool, lengths::Vector{Int}, who::AbstractString)
+	n = length(lengths)
+	out = Vector{Dict{Symbol, Any}}(undef, n)
+	entries = nested && markevery isa AbstractVector ?
+		_series_kwarg_vector(markevery, n, nothing, Any) :
+		fill(markevery, n)
+	for index in 1:n
+		out[index] = _markevery_fields(entries[index], lengths[index]; who = who)
+	end
+	return out
+end
+
+# Error bars of each series (see `_error_bar_entries`); every given array must
+# have one value per point of its series.
+function _scat_series_errors(err, lengths::Vector{Int}, who::AbstractString, name::AbstractString)
+	entries = _error_bar_entries(err, length(lengths), name, who)
+	for (index, entry) in enumerate(entries)
+		entry === nothing && continue
+		for values in (entry isa Tuple ? entry : (entry,))
+			values isa AbstractVector || throw(ArgumentError(
+				"$(who): `$(name)` for series $(index) must be a vector; got " *
+				"$(typeof(values)).",
+			))
+			length(values) == lengths[index] || throw(ArgumentError(
+				"$(who): `$(name)` for series $(index) has $(length(values)) values " *
+				"but the series has $(lengths[index]) points.",
+			))
+		end
+	end
+	return entries
+end
+
+# Build one scatter-family trace. `fields` already holds the coordinates
+# (stored by reference); `style` is one entry of `_scat_series_styles` and
+# `series_color` its resolved colour. Only non-sentinel attributes are written.
+function _scat_trace(
+	fields::Dict{Symbol, Any},
+	trace_type::AbstractString,
+	style,
+	who::AbstractString;
+	series_color::AbstractString = style.color,
+	markevery::AbstractDict = Dict{Symbol, Any}(),
+	text = nothing,
+	textposition::AbstractString = "",
+	textsize::Real = 0,
+	error_x = nothing,
+	error_y = nothing,
+	cliponaxis::Union{Nothing, Bool} = nothing,
+	yref::AbstractString = "",
+)
+	mode = style.mode
+	isempty(markevery) || (mode = _scat_add_mode_flag(mode, "markers"))
+	text === nothing || (mode = _scat_add_mode_flag(mode, "text"))
+	fields[:mode] = mode
+	fields[:name] = isempty(style.name) ? "" : _label(style.name)
+	line = Dict{Symbol, Any}()
+	isempty(series_color) || (line[:color] = String(series_color))
+	isempty(style.dash) || (line[:dash] = style.dash)
+	style.linewidth > 0 && (line[:width] = style.linewidth)
+	isempty(style.line_shape) || (line[:shape] = style.line_shape)
+	isempty(line) || (fields[:line] = attr(line))
+	marker = _marker_attr(;
+		color_series = series_color,
+		marker_color = style.marker_color,
+		marker_line_color = style.marker_line_color,
+		marker_line_width = style.marker_line_width,
+		marker_size = style.marker_size,
+		marker_symbol = style.marker_symbol,
+		who = who,
+	)
+	isempty(marker.fields) || (fields[:marker] = marker)
+	style.opacity == 1 || (fields[:opacity] = style.opacity)
+	style.showlegend === nothing || (fields[:showlegend] = style.showlegend)
+	merge!(fields, markevery)
+	isempty(style.fill) || (fields[:fill] = style.fill)
+	isempty(style.fillcolor) || (fields[:fillcolor] = style.fillcolor)
+	if text !== nothing
+		fields[:text] = text
+		isempty(textposition) || (fields[:textposition] = String(textposition))
+		textsize > 0 && (fields[:textfont] = attr(size = textsize))
+	end
+	error_x === nothing || (fields[:error_x] = _error_bar_attr(error_x))
+	error_y === nothing || (fields[:error_y] = _error_bar_attr(error_y))
+	cliponaxis === nothing || (fields[:cliponaxis] = cliponaxis)
+	isempty(yref) || (fields[:yaxis] = String(yref))
+	return GenericTrace(String(trace_type), fields)
+end
+
+# The twin y axis of a Plot/SyncPlot mutator call with `secondary_y = true`:
+# the existing one, or `nothing` when `_ensure_twin_y!` will create it.
+_scat_twin_key(fig, secondary_y::Bool) =
+	secondary_y ? _cmn_twin_y_key(_plot_layout(fig)) : :yaxis
+
+# SubplotFigure calls build their traces in an empty scratch figure (see
+# `_subplot_delegate_mutator!`). While they do, this holds what the scratch
+# figure cannot know about the real one: `figure` and `offset` (its trace
+# count) give the default colours plotly.js will assign, `legend_groups` the
+# legend groups already in use.
+const _SCAT_SUBPLOT_CONTEXT = Base.ScopedValues.ScopedValue{Any}(nothing)
+
+# `_subplot_delegate_mutator!` for this family: the context is read from `sf`
+# inside the delegate (which holds the figure's lock) and set while `mutator`
+# runs on the scratch figure.
+function _scat_subplot_delegate!(sf::SubplotFigure, mutator, args...; kwargs...)
+	in_context = function (target, values...; options...)
+		plot = _plot_obj(getfield(sf, :fig))
+		groups = Set{String}()
+		for trace in plot.data
+			group = get(trace.fields, :legendgroup, nothing)
+			group isa AbstractString && push!(groups, String(group))
+		end
+		context = (figure = sf, offset = length(plot.data), legend_groups = groups)
+		return Base.ScopedValues.with(_SCAT_SUBPLOT_CONTEXT => context) do
+			mutator(target, values...; options...)
+		end
+	end
+	return _subplot_delegate_mutator!(sf, in_context, args...; kwargs...)
+end
+
+# Number of traces that precede the next trace appended to `fig`: its own
+# traces plus, while a SubplotFigure call builds its traces in a scratch
+# figure, the real figure's. Trace positions derived from it (default colours,
+# style cycles) match the ones plotly.js assigns in the final figure.
+function _scat_existing_count(fig)
+	context = _SCAT_SUBPLOT_CONTEXT[]
+	count = length(_plot_data(fig))
+	return context === nothing ? count : context.offset + count
+end
+
+# Default colour plotly.js gives the trace at 1-based position `index` of the
+# final figure (`index` counts from `_scat_existing_count`): read from `fig`,
+# or from the real figure while a SubplotFigure call is building its traces.
+function _scat_default_color(fig, index::Integer)
+	context = _SCAT_SUBPLOT_CONTEXT[]
+	return _default_trace_color(context === nothing ? fig : context.figure, index)
+end
+
+# Shared body of plot_scatter / plot_scatter! (and plot_complex(!)): validate
+# everything, then append one trace per series and apply the figure options.
+function _scatter_impl!(
+	fig,
+	x,
+	y;
+	who::AbstractString,
+	constructor::Bool,
+	secondary_y::Bool = false,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	mode = "lines",
+	dash = "",
+	color = "",
+	legend = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid = true,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	marker_size = 0,
+	marker_symbol = "",
+	marker_color = "",
+	marker_line_color = "",
+	marker_line_width = 0,
+	linewidth = 0,
+	opacity = 1,
+	markevery = nothing,
+	line_shape = "",
+	fill = "",
+	fillcolor = "",
+	text = nothing,
+	textposition::AbstractString = "",
+	textsize::Real = 0,
+	showlegend = nothing,
+	error_x = nothing,
+	error_y = nothing,
+	clip::Bool = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
+	extra_traces = nothing,
+)
+	xs, ys, nested = _scat_series(x, y, who)
+	n = length(ys)
+	lengths = Int[length(series) for series in ys]
+	n_existing = _scat_existing_count(fig)
+	styles = _scat_series_styles(
+		n,
+		n_existing,
+		who;
+		mode = mode,
+		dash = dash,
+		color = color,
+		legend = legend,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		marker_line_color = marker_line_color,
+		marker_line_width = marker_line_width,
+		linewidth = linewidth,
+		opacity = opacity,
+		showlegend = showlegend,
+		line_shape = line_shape,
+		fill = fill,
+		fillcolor = fillcolor,
+	)
+	texts = _scat_series_text(text, nested, lengths, who)
+	position = _scat_choice(textposition, _SCAT_TEXT_POSITIONS, who, "textposition")
+	text_size = _scat_nonnegative(textsize, who, "textsize")
+	marks = _scat_series_markevery(markevery, nested, lengths, who)
+	x_errors = _scat_series_errors(error_x, lengths, who, "error_x")
+	y_errors = _scat_series_errors(error_y, lengths, who, "error_y")
+	_scat_validate_cartesian_options(
+		fig,
+		who;
+		ykey = _scat_twin_key(fig, secondary_y),
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+	)
+
+	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
+	yref = secondary_y ? _cmn_axis_ref(ykey; who = who) : ""
+	cliponaxis = clip ? nothing : false
+	data = _plot_data(fig)
+	for index in 1:n
+		style = styles[index]
+		series_color = style.color
+		if isempty(series_color) && _scat_needs_series_color(style)
+			series_color = _scat_default_color(fig, n_existing + index)
+		end
+		push!(
+			data,
+			_scat_trace(
+				Dict{Symbol, Any}(:x => xs[index], :y => ys[index]),
+				"scatter",
+				style,
+				who;
+				series_color = series_color,
+				markevery = marks[index],
+				text = texts[index],
+				textposition = position,
+				textsize = text_size,
+				error_x = x_errors[index],
+				error_y = y_errors[index],
+				cliponaxis = cliponaxis,
+				yref = yref,
+			),
+		)
+	end
+	extra_traces === nothing || extra_traces(fig, yref)
+	# A constructor's `grid = true` keeps the template grid; a mutator applies
+	# any non-nothing `grid`, so `true` re-enables a grid switched off earlier.
+	constructor || _apply_cartesian_grid_override!(fig, grid, who)
+	_apply_cartesian_plot_options!(
+		fig;
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		width = width,
+		height = height,
+		grid = constructor ? grid : nothing,
+		fontsize = fontsize,
+		title = title,
+		xscale = xscale,
+		yscale = yscale,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
+		ykey = ykey,
+		apply_template = constructor,
+		who = who,
+	)
 	return nothing
 end
 
@@ -6894,304 +7937,158 @@ function _violin_trace(
 end
 
 """
-	function plot_scatter(
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray};
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		mode::Union{String, Vector{String}} = "lines",
-		dash::Union{String, Vector{String}} = "",
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		xscale::String = "",
-		yscale::String = "",
-		marker_size::Union{Int, Vector{Int}} = 0,
-		marker_symbol::Union{String, Vector{String}} = "",
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	)
+	plot_scatter(x, y; kwargs...) -> Plot (or SyncPlot with `show = true`)
+	plot_scatter(y; kwargs...)
 
-Plots a rectangular (Cartesian) plot.
+Line and marker plot of `y` against `x` on Cartesian axes (Plotly `scatter`
+traces). The one-argument form uses `x = 0:length(y)-1` (per series).
 
-#### Arguments
+#### Data
 
-- `x`: x-coordinate data (can be vector of vectors)
-- `y`: y-coordinate data (can be vector of vectors)
+- `x`, `y`: vectors of equal length (numbers, dates or category strings;
+  `NaN`/`missing` values leave a gap). A vector of vectors in `y` draws one
+  trace per series; `x` is then either one vector shared by every series or a
+  vector of vectors with one entry per series. Each series needs as many `x`
+  as `y` values. Ranges, views and abstractly typed containers
+  (`ys = []; push!(ys, v)`) are accepted; data is stored by reference.
+- Matrices and complex values are rejected with an `ArgumentError`: pass
+  `collect(eachcol(A))` for one series per column, and use
+  [`plot_complex`](@ref) for complex data.
 
-#### Keywords
+#### Per-series keywords
 
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `mode`: Plotting mode (default: `"lines"`, can be vector)
-- `dash`: line style ("dash", "dashdot", or "dot", default: `""`, can be vector)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-- `marker_size`: Marker size in pixels (default: `0`, can be vector)
-- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
+Each accepts one value for every series or a vector with one entry per series
+(missing entries take the default, surplus entries are ignored).
 
+- `mode = "lines"`: `"lines"`, `"markers"`, `"text"` or a `+` combination
+  (`"lines+markers"`), or `"none"`; `""` means `"lines"`.
+- `dash = ""`: `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`,
+  `"longdashdot"` or a dash-length list such as `"5px,10px"`.
+- `color = ""`: line (and default marker) colour, a CSS colour string or
+  `Symbol`; `""` uses the template colorway.
+- `legend = ""`: legend name (`AbstractString`, math such as `L"\\alpha"` is
+  typeset).
+- `linewidth = 0`: line width in px (`0`: default).
+- `line_shape = ""`: `"linear"`, `"spline"`, or the step shapes `"hv"`
+  (step after the point), `"vh"`, `"hvh"`, `"vhv"`.
+- `marker_size = 0`: marker diameter in px (`Real`; `0`: default).
+- `marker_symbol = ""`: a Plotly symbol (`"circle"`, `"square-open"`, ...) or a
+  matplotlib code: `"o"`, `"s"`, `"^"`, `"v"`, `"<"`, `">"`, `"D"`, `"d"`,
+  `"x"` (thin x), `"+"` (thin cross), `"*"`, `"p"`, `"h"`, `"."` (small dot).
+- `marker_color = ""`: marker face colour; `"none"` draws hollow markers.
+  With a face colour the edge is `marker_line_color`, otherwise the series
+  colour, 1.5 px wide.
+- `marker_line_color = ""`, `marker_line_width = 0`: marker edge colour and
+  width in px.
+- `opacity = 1`: trace opacity in [0, 1].
+- `fill = ""`: area fill, `"tozeroy"`, `"tozerox"`, `"tonexty"`, `"tonextx"`,
+  `"toself"`, `"tonext"` or `"none"`; `fillcolor = ""` sets its colour.
+- `showlegend = nothing`: `true`/`false` force the legend entry on or off.
+
+#### Other trace keywords
+
+- `markevery = nothing`: draw markers only at some points (`mode` gains
+  `"markers"`): an integer step `k` (points `1:k:n`), a range or vector of
+  1-based indices, or a `Bool` mask. For several series a vector gives one
+  entry per series and a scalar applies to all.
+- `text = nothing`: per-point labels drawn at the points (`mode` gains
+  `"text"`): a string for every point, a vector of labels (strings or numbers;
+  shared by all series), or a vector of label vectors (one per series).
+  `textposition = ""` (`"top center"`, `"middle right"`, ... any of the nine
+  `"<top|middle|bottom> <left|center|right>"`) and `textsize = 0` (px) style
+  them.
+- `error_x = nothing`, `error_y = nothing`: data error bars, given as a vector
+  (symmetric, shared by all series), a vector of vectors (one per series), or
+  a `(minus, plus)` tuple of such for asymmetric bars. Each array has one
+  value per point.
+- `clip = true`: `false` lets markers and text extend past the plot area edge
+  (Plotly `cliponaxis = false`, matplotlib `clip_on=False`).
+
+#### Figure keywords
+
+- `title = ""`, `xlabel = ""`, `ylabel = ""`: text (`AbstractString`, math is
+  typeset).
+- `xscale = ""`, `yscale = ""`: axis type, `"linear"`, `"log"`, `"date"`,
+  `"category"`; log axes label ticks as powers of ten.
+- `xrange = [0, 0]`, `yrange = [0, 0]`: axis range as a 2-element vector or
+  tuple in data units (also on log axes); `[0, 0]` or `nothing` autoscale.
+- `xticks = nothing`, `yticks = nothing`: tick positions; `xticklabels`,
+  `yticklabels`: one label per tick; `xtickformat = ""`, `ytickformat = ""`:
+  d3 tick format (e.g. `".2f"`).
+- `equalar = false`: equal data aspect ratio (one x unit spans as many pixels
+  as one y unit).
+- `grid = true`: `true` keeps the template grid, `false` hides it, `:x`,
+  `:y`, `:both` or `:none` choose the axes with grid lines.
+- `width = 0`, `height = 0`: figure size in px (`0`: automatic);
+  `fontsize = 0`: global font size in px.
+- `show = false`: `true` opens the figure in a window and returns the
+  `SyncPlot`.
+
+Invalid values (unknown modes, symbols or dash names, mismatched lengths,
+non-positive bounds on a log axis, ...) throw an `ArgumentError` that names
+the function.
+
+#### Example
+
+```julia
+x = range(0, 2π; length = 50)
+fig = plot_scatter(x, [sin.(x), cos.(x)]; legend = ["sin", "cos"],
+	mode = ["lines", "lines+markers"], marker_symbol = "o", marker_color = "white",
+	markevery = [nothing, 5], xlabel = "\$t\$", ylabel = "signal")
+```
 """
 function plot_scatter(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	dash::Union{String, Vector{String}} = "",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	marker_size::Union{Int, Vector{Int}} = 0,
-	marker_symbol::Union{String, Vector{String}} = "",
-	linewidth::Union{Real, Vector{<:Real}} = 0,
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	error_x::Union{Nothing, AbstractVector} = nothing,
-	error_y::Union{Nothing, AbstractVector} = nothing,
+	x::AbstractArray,
+	y::AbstractArray;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	mode::Union{AbstractString, AbstractVector} = "lines",
+	dash::Union{AbstractString, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector} = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	marker_size::Union{Real, AbstractVector} = 0,
+	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_line_width::Union{Real, AbstractVector} = 0,
+	linewidth::Union{Real, AbstractVector} = 0,
+	opacity::Union{Real, AbstractVector} = 1,
+	markevery = nothing,
+	line_shape::Union{AbstractString, AbstractVector} = "",
+	fill::Union{AbstractString, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	text = nothing,
+	textposition::AbstractString = "",
+	textsize::Real = 0,
+	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
+	error_x = nothing,
+	error_y = nothing,
+	clip::Bool = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
 	show::Bool = false,
 )
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		trace = Vector{GenericTrace}(undef, length(y))
-		series_count = length(y)
-		modeV = _series_kwarg_vector(
-			mode,
-			series_count,
-			"lines",
-			String,
-		)
-		dashV = _series_kwarg_vector(
-			dash,
-			series_count,
-			"",
-			String,
-		)
-		colorV = _series_kwarg_vector(
-			color,
-			series_count,
-			"",
-			String,
-		)
-		legendV = _series_kwarg_vector(
-			legend,
-			series_count,
-			"",
-			String,
-		)
-		marker_sizeV = _series_kwarg_vector(
-			marker_size,
-			series_count,
-			0,
-			Int,
-		)
-		marker_symbolV = _series_kwarg_vector(
-			marker_symbol,
-			series_count,
-			"",
-			String,
-		)
-		linewidthV = _series_kwarg_vector(
-			linewidth,
-			series_count,
-			0.0,
-			Float64,
-		)
-		showlegendV = _series_kwarg_vector(
-			showlegend,
-			series_count,
-			nothing,
-			Union{Nothing,Bool},
-		)
-
-		if x_nested
-			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
-				mk = Dict{Symbol,Any}()
-				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				trace[n] = scatter(; trace_kw...)
-			end
-		else
-			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
-				mk = Dict{Symbol,Any}()
-				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				trace[n] = scatter(; trace_kw...)
-			end
-		end
-	else
-		mode1 = _first_or_empty(mode)
-		mode1 == "" && (mode1 = "lines")
-		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :mode => mode1, :line => attr(color = _first_or_empty(color), dash = _first_or_empty(dash)), :name => _first_or_empty(legend))
-		mk = Dict{Symbol,Any}()
-		ms = _scalar_or_first(marker_size, 0)
-		if ms isa Real && ms > 0
-			mk[:size] = ms
-		end
-		msym = _first_or_empty(marker_symbol)
-		if msym != ""
-			mk[:symbol] = msym
-		end
-		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		lw = _scalar_or_first(linewidth, 0)
-		if lw isa Real && lw > 0
-			trace_kw[:line][:width] = lw
-		end
-		sl = _scalar_or_first(showlegend, nothing)
-		if sl isa Bool
-			trace_kw[:showlegend] = sl
-		end
-		trace = scatter(; trace_kw...)
-	end
-	layout = _default_cartesian_layout(
-		title = title,
-		xlabel = xlabel,
-		ylabel = ylabel,
-		x_tick0 = _safe_tick0(x),
-		y_tick0 = _safe_tick0(y),
-	)
-	_set_error_bars!(trace, error_x, error_y)
-	fig = Plot(trace, layout)
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
-	end
-	_apply_default_template!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
-end
-
-"""
-	function plot_scatter(
-		y::Union{AbstractRange, Vector, SubArray};
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		mode::Union{String, Vector{String}} = "lines",
-		dash::Union{String, Vector{String}} = "",
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		xscale::String = "",
-		yscale::String = "",
-		marker_size::Union{Int, Vector{Int}} = 0,
-		marker_symbol::Union{String, Vector{String}} = "",
-		linewidth::Union{Real, Vector{<:Real}} = 0,
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	)
-
-Plots a rectangular (Cartesian) plot (x-axis not specified).
-
-#### Arguments
-
-- `y`: y-coordinate data (can be vector of vectors)
-
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `mode`: Plotting mode (default: `"lines"`, can be vector)
-- `dash`: line style ("dash", "dashdot", or "dot", default: `""`, can be vector)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-- `marker_size`: Marker size in pixels (default: `0`, can be vector)
-- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
-- `linewidth`: Line width in pixels (default: `0`, can be vector)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
-
-"""
-function plot_scatter(
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	dash::Union{String, Vector{String}} = "",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	marker_size::Union{Int, Vector{Int}} = 0,
-	marker_symbol::Union{String, Vector{String}} = "",
-	linewidth::Union{Real, Vector{<:Real}} = 0,
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	error_x::Union{Nothing, AbstractVector} = nothing,
-	error_y::Union{Nothing, AbstractVector} = nothing,
-	show::Bool = false,
-)
-	x = _auto_xvalues(y)
-	return plot_scatter(
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_scatter_impl!(
+		fig,
 		x,
 		y;
+		who = "plot_scatter",
+		constructor = true,
 		xlabel = xlabel,
 		ylabel = ylabel,
 		xrange = xrange,
@@ -7209,280 +8106,336 @@ function plot_scatter(
 		yscale = yscale,
 		marker_size = marker_size,
 		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		marker_line_color = marker_line_color,
+		marker_line_width = marker_line_width,
 		linewidth = linewidth,
+		opacity = opacity,
+		markevery = markevery,
+		line_shape = line_shape,
+		fill = fill,
+		fillcolor = fillcolor,
+		text = text,
+		textposition = textposition,
+		textsize = textsize,
 		showlegend = showlegend,
 		error_x = error_x,
 		error_y = error_y,
-		show = show,
+		clip = clip,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
 	)
+	return _scat_maybe_show(fig, show, width, height, title)
 end
 
-"""
-	function plot_stem(
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray};
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		xscale::String = "",
-		yscale::String = "",
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+plot_scatter(y::AbstractArray; kwargs...) =
+	plot_scatter(_auto_xvalues(y; who = "plot_scatter"), y; kwargs...)
+
+# Legend groups that tie each stem series' head and stem traces together. They
+# are unique within the target figure: groups already used by its traces (or,
+# for a SubplotFigure call, by the real figure) are skipped, so a click on one
+# series never toggles another series.
+function _stem_legend_groups(fig, n::Int)
+	used = Set{String}()
+	for trace in _plot_data(fig)
+		group = get(trace.fields, :legendgroup, nothing)
+		group isa AbstractString && push!(used, String(group))
+	end
+	context = _SCAT_SUBPLOT_CONTEXT[]
+	context === nothing || union!(used, context.legend_groups)
+	groups = Vector{String}(undef, n)
+	candidate = 0
+	for index in 1:n
+		group = ""
+		while true
+			candidate += 1
+			group = "plotlysupply:stem:$(candidate)"
+			group in used || break
+		end
+		groups[index] = group
+	end
+	return groups
+end
+
+# One stems trace for a series: `baseline -> y` segments separated by `_GAP`,
+# so a series is drawn by a single trace whatever its length.
+function _stem_segments(x::AbstractVector, y::AbstractVector, baseline::Real)
+	m = length(y)
+	sx = Vector{Any}(undef, 3m)
+	sy = Vector{Any}(undef, 3m)
+	for (k, (xv, yv)) in enumerate(zip(x, y))
+		sx[3k - 2] = xv
+		sx[3k - 1] = xv
+		sx[3k] = _GAP
+		sy[3k - 2] = baseline
+		sy[3k - 1] = yv
+		sy[3k] = _GAP
+	end
+	return sx, sy
+end
+
+# Shared body of plot_stem / plot_stem!: one marker ("head") trace per series,
+# followed by one stems trace per series. Each series' two traces share a
+# unique legend group; the stems never get a legend entry or hover label.
+function _stem_impl!(
+	fig,
+	x,
+	y;
+	who::AbstractString,
+	constructor::Bool,
+	secondary_y::Bool = false,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	color = "",
+	legend = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid = true,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	showlegend = nothing,
+	baseline::Real = 0,
+	marker_size = 0,
+	marker_symbol = "",
+	marker_color = "",
+	linewidth = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
+)
+	xs, ys, _ = _scat_series(x, y, who)
+	(baseline isa Bool || !isfinite(baseline)) && throw(ArgumentError(
+		"$(who): `baseline` must be a finite number; got $(repr(baseline)).",
+	))
+	n = length(ys)
+	n_existing = _scat_existing_count(fig)
+	styles = _scat_series_styles(
+		n,
+		n_existing,
+		who;
+		mode = "markers",
+		color = color,
+		legend = legend,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		linewidth = linewidth,
+		showlegend = showlegend,
+	)
+	_scat_validate_cartesian_options(
+		fig,
+		who;
+		ykey = _scat_twin_key(fig, secondary_y),
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
 	)
 
-Plots a rectangular stem plot.
-
-#### Arguments
-
-- `x`: x-coordinate data (can be vector of vectors)
-- `y`: y-coordinate data (can be vector of vectors)
-
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
-
-"""
-function plot_stem(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	show::Bool = false,
-)
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		trace = Vector{GenericTrace}(undef, length(y))
-		series_count = length(y)
-		colorV = _series_kwarg_vector(
-			color,
-			series_count,
-			"",
-			String,
-		)
-		legendV = _series_kwarg_vector(
-			legend,
-			series_count,
-			"",
-			String,
-		)
-		showlegendV = _series_kwarg_vector(
-			showlegend,
-			series_count,
-			nothing,
-			Union{Nothing,Bool},
-		)
-
-		if x_nested
-			for n in eachindex(y)
-				# Stem heads are drawn as markers; color belongs on `marker`
-				# (a `line` color is ignored for a markers-only trace).
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :name => legendV[n], :mode => "markers")
-				colorV[n] != "" && (trace_kw[:marker] = attr(color = colorV[n]))
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				trace[n] = scatter(; trace_kw...)
-			end
-		else
-			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :name => legendV[n], :mode => "markers")
-				colorV[n] != "" && (trace_kw[:marker] = attr(color = colorV[n]))
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				trace[n] = scatter(; trace_kw...)
-			end
+	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
+	yref = secondary_y ? _cmn_axis_ref(ykey; who = who) : ""
+	groups = _stem_legend_groups(fig, n)
+	heads = Vector{GenericTrace}(undef, n)
+	stems = Vector{GenericTrace}(undef, n)
+	for index in 1:n
+		style = styles[index]
+		series_color = style.color
+		if isempty(series_color) && _scat_needs_series_color(style)
+			series_color = _scat_default_color(fig, n_existing + index)
 		end
-	else
-		color1 = _first_or_empty(color)
-		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :name => _first_or_empty(legend), :mode => "markers")
-		color1 != "" && (trace_kw[:marker] = attr(color = color1))
-		sl = _scalar_or_first(showlegend, nothing)
-		if sl isa Bool
-			trace_kw[:showlegend] = sl
-		end
-		trace = scatter(; trace_kw...)
+		marker = _marker_attr(;
+			color_series = series_color,
+			marker_color = style.marker_color,
+			marker_size = style.marker_size,
+			marker_symbol = style.marker_symbol,
+			who = who,
+		)
+		# A markers-only trace has no line colour for the markers to inherit,
+		# so the series colour becomes the face colour.
+		(haskey(marker.fields, :color) || isempty(series_color)) ||
+			(marker.fields[:color] = String(series_color))
+		name = isempty(style.name) ? "" : _label(style.name)
+		head = Dict{Symbol, Any}(
+			:x => xs[index],
+			:y => ys[index],
+			:mode => "markers",
+			:name => name,
+			:legendgroup => groups[index],
+		)
+		isempty(marker.fields) || (head[:marker] = marker)
+		# An unnamed series has no legend entry (its stems trace would otherwise
+		# make plotly.js draw a legend with one blank entry); `showlegend`
+		# overrides this.
+		head_legend = style.showlegend === nothing ?
+			(isempty(name) ? false : nothing) : style.showlegend
+		head_legend === nothing || (head[:showlegend] = head_legend)
+		isempty(yref) || (head[:yaxis] = yref)
+		heads[index] = GenericTrace("scatter", head)
+
+		stem_x, stem_y = _stem_segments(xs[index], ys[index], baseline)
+		# Stems take the series colour only when one is given (`color`, or the
+		# active style's cycle); the colorway colour resolved above for
+		# white-faced or line-symbol heads stays on the heads.
+		stem_color = isempty(style.color) ? _STEM_DEFAULT_COLOR : String(style.color)
+		stem_width = style.linewidth > 0 ? style.linewidth : _STEM_DEFAULT_LINEWIDTH
+		stem = Dict{Symbol, Any}(
+			:x => stem_x,
+			:y => stem_y,
+			:mode => "lines",
+			:name => name,
+			:line => attr(color = stem_color, width = stem_width),
+			:legendgroup => groups[index],
+			:showlegend => false,
+			:hoverinfo => "skip",
+			# Drawn below the heads (and the other traces of the axes), as in
+			# matplotlib, so a stem never crosses a hollow or white-faced head.
+			:zorder => _STEM_ZORDER,
+		)
+		isempty(yref) || (stem[:yaxis] = yref)
+		stems[index] = GenericTrace("scatter", stem)
 	end
-	layout = _default_cartesian_layout(
-		title = title,
+	append!(_plot_data(fig), heads)
+	append!(_plot_data(fig), stems)
+	# A constructor's `grid = true` keeps the template grid; a mutator applies
+	# any non-nothing `grid`, so `true` re-enables a grid switched off earlier.
+	constructor || _apply_cartesian_grid_override!(fig, grid, who)
+	_apply_cartesian_plot_options!(
+		fig;
 		xlabel = xlabel,
 		ylabel = ylabel,
-		x_tick0 = _safe_tick0(x),
-		y_tick0 = _safe_tick0(y),
+		xrange = xrange,
+		yrange = yrange,
+		width = width,
+		height = height,
+		grid = constructor ? grid : nothing,
+		fontsize = fontsize,
+		title = title,
+		xscale = xscale,
+		yscale = yscale,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
+		ykey = ykey,
+		apply_template = constructor,
+		who = who,
 	)
-	fig = Plot(trace, layout)
-
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
-	end
-	_apply_default_template!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
-
-	# Draw a vertical line from the baseline (y=0) to each stem head. Use the
-	# per-series color so the stems match their markers, defaulting to black.
-	if y_nested
-		if x_nested
-			for n in eachindex(y)
-				stem_color = colorV[n] == "" ? "black" : colorV[n]
-				for m in eachindex(y[n])
-					addtraces!(fig,
-						scatter(
-							x = [x[n][m], x[n][m]],
-							y = [0, y[n][m]],
-							mode = "lines",
-							line = attr(color = stem_color, width = 0.5),
-							showlegend = false,
-						),
-					)
-				end
-			end
-		else
-			for n in eachindex(y)
-				stem_color = colorV[n] == "" ? "black" : colorV[n]
-				for m in eachindex(y[n])
-					addtraces!(fig,
-						scatter(
-							x = [x[m], x[m]],
-							y = [0, y[n][m]],
-							mode = "lines",
-							line = attr(color = stem_color, width = 0.5),
-							showlegend = false,
-						),
-					)
-				end
-			end
-		end
-	else
-		stem_color = _first_or_empty(color) == "" ? "black" : _first_or_empty(color)
-		for m in eachindex(y)
-			addtraces!(fig,
-				scatter(
-					x = [x[m], x[m]],
-					y = [0, y[m]],
-					mode = "lines",
-					line = attr(color = stem_color, width = 0.5),
-					showlegend = false,
-				),
-			)
-		end
-	end
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	return nothing
 end
 
 """
-	function plot_stem(
-		y::Union{AbstractRange, Vector, SubArray};
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		xscale::String = "",
-		yscale::String = "",
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	)
+	plot_stem(x, y; kwargs...) -> Plot (or SyncPlot with `show = true`)
+	plot_stem(y; kwargs...)
 
-Plots a rectangular stem plot (x-axis not specified).
+Stem plot: a marker at every `(x, y)` point joined to `baseline` by a thin
+vertical line (matplotlib `stem`). The one-argument form uses
+`x = 0:length(y)-1` (per series).
 
-#### Arguments
+Each series is drawn by two traces: a marker ("head") trace carrying the legend
+entry, and one stems trace whose segments are separated by gaps. The two share
+a legend group, so clicking the legend entry toggles the whole series. All head
+traces of a call come first, then all stems traces; the stems are drawn below
+every other trace of the axes (plotly.js `zorder = -1`), so they never cross a
+head. Stems never show hover labels or legend entries.
 
-- `y`: y-coordinate data (can be vector of vectors)
+#### Data
+
+- `x`, `y`: vectors of equal length, or a vector of vectors in `y` (one series
+  each) with `x` shared or nested like `y`. Matrices and complex values throw
+  an `ArgumentError`.
 
 #### Keywords
 
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
+Per series (a value for every series, or a vector with one entry per series):
 
+- `color = ""`: head and stem colour (`""`: heads use the colorway, stems are
+  black).
+- `legend = ""`: legend name (an unnamed series has no legend entry);
+  `showlegend = nothing`: force the legend entry on (`true`) or off (`false`).
+- `marker_size = 0` (px), `marker_symbol = ""` (Plotly name or matplotlib code
+  such as `"o"`, `"s"`, `"D"`), `marker_color = ""` (head face colour;
+  `"none"` gives hollow heads).
+- `linewidth = 0`: stem line width in px (`0`: 0.5 px).
+
+Shared:
+
+- `baseline = 0`: the y value the stems start from.
+- `title`, `xlabel`, `ylabel`, `xscale`, `yscale`, `xrange`, `yrange`,
+  `xticks`, `xticklabels`, `yticks`, `yticklabels`, `xtickformat`,
+  `ytickformat`, `equalar`, `grid`, `width`, `height`, `fontsize`, `show`: as
+  for [`plot_scatter`](@ref) (ranges in data units, `grid = true` keeps the
+  template grid).
+
+#### Example
+
+```julia
+n = 0:20
+fig = plot_stem(n, exp.(-n ./ 6) .* cos.(n); legend = "h[n]", baseline = 0,
+	marker_color = "white", xlabel = "\$n\$")
+```
 """
 function plot_stem(
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	x::AbstractArray,
+	y::AbstractArray;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector} = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
+	baseline::Real = 0,
+	marker_size::Union{Real, AbstractVector} = 0,
+	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	linewidth::Union{Real, AbstractVector} = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
 	show::Bool = false,
 )
-	x = _auto_xvalues(y)
-	return plot_stem(
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_stem_impl!(
+		fig,
 		x,
 		y;
+		who = "plot_stem",
+		constructor = true,
 		xlabel = xlabel,
 		ylabel = ylabel,
 		xrange = xrange,
@@ -7497,9 +8450,24 @@ function plot_stem(
 		xscale = xscale,
 		yscale = yscale,
 		showlegend = showlegend,
-		show = show,
-		)
+		baseline = baseline,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		linewidth = linewidth,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
+	)
+	return _scat_maybe_show(fig, show, width, height, title)
 end
+
+plot_stem(y::AbstractArray; kwargs...) =
+	plot_stem(_auto_xvalues(y; who = "plot_stem"), y; kwargs...)
 
 """
 	plot_bar(x, y; kwargs...)
@@ -8061,198 +9029,248 @@ function plot_violin(
 	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
 end
 
-"""
-	function plot_scatterpolar(
-		theta::Union{AbstractRange, Vector, SubArray},
-		r::Union{AbstractRange, Vector, SubArray};
-		trange::Vector = [0, 0],
-		rrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		mode::Union{String, Vector{String}} = "lines",
-		dash::Union{String, Vector{String}} = "",
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		marker_size::Union{Int, Vector{Int}} = 0,
-		marker_symbol::Union{String, Vector{String}} = "",
-		linewidth::Union{Real, Vector{<:Real}} = 0,
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+const _POLAR_DIRECTIONS = ("counterclockwise", "clockwise")
+const _POLAR_THETAUNITS = ("degrees", "radians")
+
+# Shared body of plot_scatterpolar / plot_scatterpolar!: validate everything,
+# append one `scatterpolar` trace per series and set the options of the
+# primary polar subplot (`layout.polar`).
+function _scatterpolar_impl!(
+	fig,
+	theta,
+	r;
+	who::AbstractString,
+	constructor::Bool,
+	trange = [0, 0],
+	rrange = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	mode = "lines",
+	dash = "",
+	color = "",
+	legend = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid = true,
+	marker_size = 0,
+	marker_symbol = "",
+	marker_color = "",
+	marker_line_color = "",
+	marker_line_width = 0,
+	linewidth = 0,
+	opacity = 1,
+	markevery = nothing,
+	line_shape = "",
+	fill = "",
+	fillcolor = "",
+	showlegend = nothing,
+	direction::AbstractString = "",
+	rotation::Union{Nothing, Real} = nothing,
+	thetaunit::AbstractString = "",
+)
+	thetas, rs, nested = _scat_series(theta, r, who; xname = :theta, yname = :r)
+	n = length(rs)
+	lengths = Int[length(series) for series in rs]
+	n_existing = _scat_existing_count(fig)
+	styles = _scat_series_styles(
+		n,
+		n_existing,
+		who;
+		mode = mode,
+		dash = dash,
+		color = color,
+		legend = legend,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		marker_line_color = marker_line_color,
+		marker_line_width = marker_line_width,
+		linewidth = linewidth,
+		opacity = opacity,
+		showlegend = showlegend,
+		line_shape = line_shape,
+		line_shapes = _SCAT_POLAR_LINE_SHAPES,
+		fill = fill,
+		fills = _SCAT_POLAR_FILLS,
+		fillcolor = fillcolor,
 	)
+	marks = _scat_series_markevery(markevery, nested, lengths, who)
+	sector = _checked_range(trange, who, "trange")
+	radial = _checked_range(rrange, who, "rrange")
+	_require_size_option(width, who, "width")
+	_require_size_option(height, who, "height")
+	_require_size_option(fontsize, who, "fontsize")
+	(grid === nothing || grid isa Bool) || throw(ArgumentError(
+		"$(who): `grid` must be true, false or nothing (a polar plot has no x/y " *
+		"axes to select); got $(repr(grid)).",
+	))
+	angular_direction = _scat_choice(direction, _POLAR_DIRECTIONS, who, "direction")
+	(rotation === nothing || (!(rotation isa Bool) && isfinite(rotation))) ||
+		throw(ArgumentError(
+			"$(who): `rotation` must be a finite angle in degrees or nothing; got " *
+			"$(repr(rotation)).",
+		))
+	unit = _scat_choice(thetaunit, _POLAR_THETAUNITS, who, "thetaunit")
 
-Plots a polar plot.
+	data = _plot_data(fig)
+	for index in 1:n
+		style = styles[index]
+		series_color = style.color
+		if isempty(series_color) && _scat_needs_series_color(style)
+			series_color = _scat_default_color(fig, n_existing + index)
+		end
+		fields = Dict{Symbol, Any}(:r => rs[index], :theta => thetas[index])
+		isempty(unit) || (fields[:thetaunit] = unit)
+		push!(
+			data,
+			_scat_trace(
+				fields,
+				"scatterpolar",
+				style,
+				who;
+				series_color = series_color,
+				markevery = marks[index],
+			),
+		)
+	end
+	_apply_figure_title!(fig, title)
+	radial === nothing || relayout!(fig; polar_radialaxis_range = radial)
+	sector === nothing || relayout!(fig; polar_sector = sector)
+	# A constructor keeps the template grid unless `grid = false`; a mutator
+	# leaves it alone unless `grid` is given.
+	if constructor ? grid === false : grid !== nothing
+		relayout!(
+			fig;
+			polar_radialaxis_showgrid = grid,
+			polar_angularaxis_showgrid = grid,
+		)
+	end
+	isempty(angular_direction) ||
+		relayout!(fig; polar_angularaxis_direction = angular_direction)
+	rotation === nothing || relayout!(fig; polar_angularaxis_rotation = rotation)
+	isempty(unit) || relayout!(fig; polar_angularaxis_thetaunit = unit)
+	_apply_figure_size!(fig, who; width = width, height = height)
+	constructor ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	_apply_figure_fontsize!(fig, who, fontsize)
+	return nothing
+end
 
-#### Arguments
+"""
+	plot_scatterpolar(theta, r; kwargs...) -> Plot (or SyncPlot with `show = true`)
 
-- `theta`: Angular coordinate data (can be vector of vectors)
-- `r`: Radial coordinate data (can be vector of vectors)
+Line and marker plot in polar coordinates (Plotly `scatterpolar`): angle
+`theta`, radius `r`.
+
+#### Data
+
+- `theta`: angles, in **degrees** by default; pass `thetaunit = "radians"`
+  for radian data (radian data drawn as degrees collapses into a sliver).
+  Angles grow counterclockwise from the positive x direction unless
+  `direction`/`rotation` say otherwise.
+- `r`: radii, same length as `theta`. A vector of vectors in `r` draws one
+  trace per series; `theta` is shared or nested like `r`. Matrices and
+  complex values throw an `ArgumentError`.
 
 #### Keywords
 
-- `trange`: Range for the angular axis (default: `[0, 0]`)
-- `rrange`: Range for the radial axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `mode`: Plotting mode (default: `"lines"`, can be vector)
-- `dash`: line style ("dash", "dashdot", or "dot", default: `""`, can be vector)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `marker_size`: Marker size in pixels (default: `0`, can be vector)
-- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
-- `linewidth`: Line width in pixels (default: `0`, can be vector)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
+Per series (a value for every series, or a vector with one entry per series):
+`mode = "lines"`, `dash = ""`, `color = ""`, `legend = ""`, `linewidth = 0`,
+`marker_size = 0`, `marker_symbol = ""`, `marker_color = ""`,
+`marker_line_color = ""`, `marker_line_width = 0`, `opacity = 1`,
+`showlegend = nothing`, as for [`plot_scatter`](@ref), and
 
+- `line_shape = ""`: `"linear"` or `"spline"`.
+- `fill = ""`: `"toself"` (fill the closed curve), `"tonext"` or `"none"`;
+  `fillcolor = ""` sets its colour.
+
+Shared:
+
+- `markevery = nothing`: markers only at some points, as for `plot_scatter`.
+- `thetaunit = ""`: `"degrees"` or `"radians"`; also sets the angular tick
+  label unit.
+- `direction = ""`: `"counterclockwise"` or `"clockwise"` angle direction;
+  `rotation = nothing`: angle (degrees) at which `theta = 0` is drawn
+  (`90` puts 0 at the top).
+- `trange = [0, 0]`: angular sector `[start, end]` in degrees (`[0, 0]`: full
+  circle); `rrange = [0, 0]`: radial axis range.
+- `grid = true`: `false` hides the radial and angular grid lines.
+- `title = ""`, `width = 0`, `height = 0`, `fontsize = 0`, `show = false`: as
+  for `plot_scatter`.
+
+#### Example
+
+```julia
+θ = range(0, 2π; length = 181)
+fig = plot_scatterpolar(θ, 1 .+ cos.(θ); thetaunit = "radians", fill = "toself",
+	legend = "cardioid", direction = "clockwise", rotation = 90)
+```
 """
 function plot_scatterpolar(
-	theta::Union{AbstractRange, Vector, SubArray},
-	r::Union{AbstractRange, Vector, SubArray};
-	trange::Vector = [0, 0],
-	rrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	dash::Union{String, Vector{String}} = "",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	marker_size::Union{Int, Vector{Int}} = 0,
-	marker_symbol::Union{String, Vector{String}} = "",
-	linewidth::Union{Real, Vector{<:Real}} = 0,
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	theta::AbstractArray,
+	r::AbstractArray;
+	trange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	rrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	mode::Union{AbstractString, AbstractVector} = "lines",
+	dash::Union{AbstractString, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector} = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	marker_size::Union{Real, AbstractVector} = 0,
+	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_line_width::Union{Real, AbstractVector} = 0,
+	linewidth::Union{Real, AbstractVector} = 0,
+	opacity::Union{Real, AbstractVector} = 1,
+	markevery = nothing,
+	line_shape::Union{AbstractString, AbstractVector} = "",
+	fill::Union{AbstractString, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
+	direction::AbstractString = "",
+	rotation::Union{Nothing, Real} = nothing,
+	thetaunit::AbstractString = "",
 	show::Bool = false,
 )
-	r_nested, theta_nested = _nested_coordinate_mode(r, theta, :r, :theta)
-	if r_nested
-		trace = Vector{GenericTrace}(undef, length(r))
-		series_count = length(r)
-		modeV = _series_kwarg_vector(
-			mode,
-			series_count,
-			"lines",
-			String,
-		)
-		dashV = _series_kwarg_vector(
-			dash,
-			series_count,
-			"",
-			String,
-		)
-		colorV = _series_kwarg_vector(
-			color,
-			series_count,
-			"",
-			String,
-		)
-		legendV = _series_kwarg_vector(
-			legend,
-			series_count,
-			"",
-			String,
-		)
-		marker_sizeV = _series_kwarg_vector(
-			marker_size,
-			series_count,
-			0,
-			Int,
-		)
-		marker_symbolV = _series_kwarg_vector(
-			marker_symbol,
-			series_count,
-			"",
-			String,
-		)
-		linewidthV = _series_kwarg_vector(
-			linewidth,
-			series_count,
-			0.0,
-			Float64,
-		)
-		showlegendV = _series_kwarg_vector(
-			showlegend,
-			series_count,
-			nothing,
-			Union{Nothing,Bool},
-		)
-
-		if theta_nested
-			for n in eachindex(r)
-				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
-				mk = Dict{Symbol,Any}()
-				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				trace[n] = scatterpolar(; trace_kw...)
-			end
-		else
-			for n in eachindex(r)
-				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta, :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
-				mk = Dict{Symbol,Any}()
-				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				trace[n] = scatterpolar(; trace_kw...)
-			end
-		end
-	else
-		mode1 = _first_or_empty(mode)
-		mode1 == "" && (mode1 = "lines")
-		trace_kw = Dict{Symbol,Any}(:r => r, :theta => theta, :mode => mode1, :line => attr(color = _first_or_empty(color), dash = _first_or_empty(dash)), :name => _first_or_empty(legend))
-		mk = Dict{Symbol,Any}()
-		ms = _scalar_or_first(marker_size, 0)
-		if ms isa Real && ms > 0
-			mk[:size] = ms
-		end
-		msym = _first_or_empty(marker_symbol)
-		if msym != ""
-			mk[:symbol] = msym
-		end
-		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		lw = _scalar_or_first(linewidth, 0)
-		if lw isa Real && lw > 0
-			trace_kw[:line][:width] = lw
-		end
-		sl = _scalar_or_first(showlegend, nothing)
-		if sl isa Bool
-			trace_kw[:showlegend] = sl
-		end
-		trace = scatterpolar(; trace_kw...)
-	end
-
-	# Leave `polar.sector` unset by default so the plot shows the full circle;
-	# only constrain the angular axis when the caller supplies `trange`.
-	layout = Layout(title = title)
-	fig = Plot(trace, layout)
-	if !all(rrange .== [0, 0])
-		update_polars!(fig, radialaxis = attr(range = rrange))
-	end
-	if !all(trange .== [0, 0])
-		update_polars!(fig, attr(sector = trange))
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	if !grid
-		update_polars!(fig, radialaxis = attr(showgrid = false), angularaxis = attr(showgrid = false))
-	end
-	_apply_default_template!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	return show ? to_syncplot(fig; width = width > 0 ? width : 960, height = height > 0 ? height : 720, title = title == "" ? "PlotlySupply" : title) : fig
+	fig = Plot(GenericTrace[], Layout())
+	_scatterpolar_impl!(
+		fig,
+		theta,
+		r;
+		who = "plot_scatterpolar",
+		constructor = true,
+		trange = trange,
+		rrange = rrange,
+		width = width,
+		height = height,
+		mode = mode,
+		dash = dash,
+		color = color,
+		legend = legend,
+		title = title,
+		fontsize = fontsize,
+		grid = grid,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		marker_line_color = marker_line_color,
+		marker_line_width = marker_line_width,
+		linewidth = linewidth,
+		opacity = opacity,
+		markevery = markevery,
+		line_shape = line_shape,
+		fill = fill,
+		fillcolor = fillcolor,
+		showlegend = showlegend,
+		direction = direction,
+		rotation = rotation,
+		thetaunit = thetaunit,
+	)
+	return _scat_maybe_show(fig, show, width, height, title)
 end
 
 #endregion
@@ -9476,314 +10494,91 @@ end
 #region Mutating Functions
 
 """
-	function plot_scatter!(
-		fig,
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray};
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		mode::Union{String, Vector{String}} = "lines",
-		dash::Union{String, Vector{String}} = "",
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		xscale::String = "",
-		yscale::String = "",
-		marker_size::Union{Int, Vector{Int}} = 0,
-		marker_symbol::Union{String, Vector{String}} = "",
-		linewidth::Union{Real, Vector{<:Real}} = 0,
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	)
+	plot_scatter!(fig, x, y; kwargs...) -> nothing (SubplotFigure: the figure)
+	plot_scatter!(fig, y; kwargs...)
 
-Adds new scatter traces to an existing figure.
+Append line/marker trace(s) to an existing figure: a `Plot`, a
+[`SyncPlot`](@ref) (its window updates in one transaction) or a
+`SubplotFigure` (the active cell, or `row`/`col`). Takes the data and every
+keyword of [`plot_scatter`](@ref) except `show` (which throws an
+`ArgumentError`), plus:
 
-#### Arguments
+- `secondary_y = false`: draw on a secondary y axis on the right. On a `Plot`
+  or `SyncPlot` the axis is created on first use (`ylabel`, `yscale`,
+  `yrange`, `yticks`, ... then apply to it); on a `SubplotFigure` the cell
+  needs `specs = [Spec(secondary_y = true) ...]`.
+- `row`, `col` (`SubplotFigure` only): the target cell.
 
-- `fig`: Existing `plot figure` to append to
-- `x`: x-coordinate data (can be vector of vectors)
-- `y`: y-coordinate data (can be vector of vectors)
+Figure keywords only change what they name: labels, ranges, scales and ticks
+apply to the primary axes (or the secondary y axis), `grid = nothing` (the
+mutator default) keeps the current grid and `true`/`false`/`:x`/`:y`/`:both`/
+`:none` set it, and a template set with `set_template!` is kept. On a
+`SubplotFigure`, `title`, `width` and `height` are figure-level and are
+ignored with a warning. Invalid input throws before the figure changes.
 
-#### Keywords
+#### Example
 
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `mode`: Plotting mode (default: `"lines"`, can be vector)
-- `dash`: line style (default: `""`, can be vector)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-- `marker_size`: Marker size in pixels (default: `0`, can be vector)
-- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
-- `linewidth`: Line width in pixels (default: `0`, can be vector)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
-
+```julia
+fig = plot_scatter(1:10, (1:10) .^ 2; legend = "data")
+plot_scatter!(fig, 1:10, 10 .* (1:10); legend = "rate", secondary_y = true,
+	ylabel = "rate", dash = "dash")
+```
 """
 function plot_scatter!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	dash::Union{String, Vector{String}} = "",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	marker_size::Union{Int, Vector{Int}} = 0,
-	marker_symbol::Union{String, Vector{String}} = "",
-	linewidth::Union{Real, Vector{<:Real}} = 0,
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	error_x::Union{Nothing, AbstractVector} = nothing,
-	error_y::Union{Nothing, AbstractVector} = nothing,
+	x::AbstractArray,
+	y::AbstractArray;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	mode::Union{AbstractString, AbstractVector} = "lines",
+	dash::Union{AbstractString, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector} = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	marker_size::Union{Real, AbstractVector} = 0,
+	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_line_width::Union{Real, AbstractVector} = 0,
+	linewidth::Union{Real, AbstractVector} = 0,
+	opacity::Union{Real, AbstractVector} = 1,
+	markevery = nothing,
+	line_shape::Union{AbstractString, AbstractVector} = "",
+	fill::Union{AbstractString, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	text = nothing,
+	textposition::AbstractString = "",
+	textsize::Real = 0,
+	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
+	error_x = nothing,
+	error_y = nothing,
+	clip::Bool = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
+	kwargs...,
 )
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	_n0 = length(_plot_data(fig))
-	if y_nested
-		series_count = length(y)
-		modeV = _series_kwarg_vector(
-			mode,
-			series_count,
-			"lines",
-			String,
-		)
-		dashV = _series_kwarg_vector(
-			dash,
-			series_count,
-			"",
-			String,
-		)
-		colorV = _series_kwarg_vector(
-			color,
-			series_count,
-			"",
-			String,
-		)
-		legendV = _series_kwarg_vector(
-			legend,
-			series_count,
-			"",
-			String,
-		)
-		marker_sizeV = _series_kwarg_vector(
-			marker_size,
-			series_count,
-			0,
-			Int,
-		)
-		marker_symbolV = _series_kwarg_vector(
-			marker_symbol,
-			series_count,
-			"",
-			String,
-		)
-		linewidthV = _series_kwarg_vector(
-			linewidth,
-			series_count,
-			0.0,
-			Float64,
-		)
-		showlegendV = _series_kwarg_vector(
-			showlegend,
-			series_count,
-			nothing,
-			Union{Nothing,Bool},
-		)
-
-		if x_nested
-			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
-				mk = Dict{Symbol,Any}()
-				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				push!(_plot_data(fig), scatter(; trace_kw...))
-			end
-		else
-			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(:y => y[n], :x => x, :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
-				mk = Dict{Symbol,Any}()
-				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				push!(_plot_data(fig), scatter(; trace_kw...))
-			end
-		end
-	else
-		mode1 = _first_or_empty(mode)
-		mode1 == "" && (mode1 = "lines")
-		trace_kw = Dict{Symbol,Any}(:y => y, :x => x, :mode => mode1, :line => attr(color = _first_or_empty(color), dash = _first_or_empty(dash)), :name => _first_or_empty(legend))
-		mk = Dict{Symbol,Any}()
-		ms = _scalar_or_first(marker_size, 0)
-		if ms isa Real && ms > 0
-			mk[:size] = ms
-		end
-		msym = _first_or_empty(marker_symbol)
-		if msym != ""
-			mk[:symbol] = msym
-		end
-		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		lw = _scalar_or_first(linewidth, 0)
-		if lw isa Real && lw > 0
-			trace_kw[:line][:width] = lw
-		end
-		sl = _scalar_or_first(showlegend, nothing)
-		if sl isa Bool
-			trace_kw[:showlegend] = sl
-		end
-		push!(_plot_data(fig), scatter(; trace_kw...))
-	end
-	_set_error_bars!(view(_plot_data(fig), (_n0 + 1):length(_plot_data(fig))), error_x, error_y)
-	# apply optional layout updates
-	if title != ""
-		relayout!(fig, title = title)
-	end
-	if xlabel != ""
-		relayout!(fig, xaxis = attr(title_text = xlabel))
-	end
-	if ylabel != ""
-		relayout!(fig, yaxis = attr(title_text = ylabel))
-	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
-	end
-	_apply_default_legend!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
-	_refresh!(fig)
-	return nothing
-end
-
-"""
-	function plot_scatter!(
-		fig,
-		y::Union{AbstractRange, Vector, SubArray};
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		mode::Union{String, Vector{String}} = "lines",
-		dash::Union{String, Vector{String}} = "",
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		xscale::String = "",
-		yscale::String = "",
-		marker_size::Union{Int, Vector{Int}} = 0,
-		marker_symbol::Union{String, Vector{String}} = "",
-		linewidth::Union{Real, Vector{<:Real}} = 0,
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	)
-
-Adds new scatter traces to an existing figure (x-axis not specified, uses indices).
-
-#### Arguments
-
-- `fig`: Existing `plot figure` to append to
-- `y`: y-coordinate data (can be vector of vectors)
-
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `mode`: Plotting mode (default: `"lines"`, can be vector)
-- `dash`: line style (default: `""`, can be vector)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-- `marker_size`: Marker size in pixels (default: `0`, can be vector)
-- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
-- `linewidth`: Line width in pixels (default: `0`, can be vector)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
-
-"""
-function plot_scatter!(
-	fig,
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	dash::Union{String, Vector{String}} = "",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	marker_size::Union{Int, Vector{Int}} = 0,
-	marker_symbol::Union{String, Vector{String}} = "",
-	linewidth::Union{Real, Vector{<:Real}} = 0,
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	error_x::Union{Nothing, AbstractVector} = nothing,
-	error_y::Union{Nothing, AbstractVector} = nothing,
-)
-	x = _auto_xvalues(y)
-	return plot_scatter!(
+	who = "plot_scatter!"
+	secondary_y = _scat_mutator_options(who, kwargs)
+	_scatter_impl!(
 		fig,
 		x,
 		y;
+		who = who,
+		constructor = false,
+		secondary_y = secondary_y,
 		xlabel = xlabel,
 		ylabel = ylabel,
 		xrange = xrange,
@@ -9801,305 +10596,97 @@ function plot_scatter!(
 		yscale = yscale,
 		marker_size = marker_size,
 		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		marker_line_color = marker_line_color,
+		marker_line_width = marker_line_width,
 		linewidth = linewidth,
+		opacity = opacity,
+		markevery = markevery,
+		line_shape = line_shape,
+		fill = fill,
+		fillcolor = fillcolor,
+		text = text,
+		textposition = textposition,
+		textsize = textsize,
 		showlegend = showlegend,
 		error_x = error_x,
 		error_y = error_y,
+		clip = clip,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
 	)
-end
-
-"""
-	function plot_stem!(
-		fig,
-		x::Union{AbstractRange, Vector, SubArray},
-		y::Union{AbstractRange, Vector, SubArray};
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		xscale::String = "",
-		yscale::String = "",
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	)
-
-Adds new stem plot traces to an existing figure.
-
-#### Arguments
-
-- `fig`: Existing `plot figure` to append to
-- `x`: x-coordinate data (can be vector of vectors)
-- `y`: y-coordinate data (can be vector of vectors)
-
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
-
-"""
-function plot_stem!(
-	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-)
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		series_count = length(y)
-		colorV = _series_kwarg_vector(
-			color,
-			series_count,
-			"",
-			String,
-		)
-		legendV = _series_kwarg_vector(
-			legend,
-			series_count,
-			"",
-			String,
-		)
-		showlegendV = _series_kwarg_vector(
-			showlegend,
-			series_count,
-			nothing,
-			Union{Nothing,Bool},
-		)
-
-		if x_nested
-			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(
-					:y => y[n],
-					:x => x[n],
-					:name => legendV[n],
-					:mode => "markers",
-				)
-				colorV[n] != "" &&
-					(trace_kw[:marker] =
-						attr(color = colorV[n]))
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				push!(_plot_data(fig), scatter(; trace_kw...))
-			end
-			for n in eachindex(y)
-				stem_color =
-					colorV[n] == "" ? "black" : colorV[n]
-				for m in eachindex(y[n])
-					push!(_plot_data(fig),
-						scatter(
-							x = [x[n][m], x[n][m]],
-							y = [0, y[n][m]],
-							mode = "lines",
-							line = attr(
-								color = stem_color,
-								width = 0.5,
-							),
-							showlegend = false,
-						),
-					)
-				end
-			end
-		else
-			for n in eachindex(y)
-				trace_kw = Dict{Symbol,Any}(
-					:y => y[n],
-					:x => x,
-					:name => legendV[n],
-					:mode => "markers",
-				)
-				colorV[n] != "" &&
-					(trace_kw[:marker] =
-						attr(color = colorV[n]))
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				push!(_plot_data(fig), scatter(; trace_kw...))
-			end
-			for n in eachindex(y)
-				stem_color =
-					colorV[n] == "" ? "black" : colorV[n]
-				for m in eachindex(y[n])
-					push!(_plot_data(fig),
-						scatter(
-							x = [x[m], x[m]],
-							y = [0, y[n][m]],
-							mode = "lines",
-							line = attr(
-								color = stem_color,
-								width = 0.5,
-							),
-							showlegend = false,
-						),
-					)
-				end
-			end
-		end
-	else
-		color1 = _first_or_empty(color)
-		trace_kw = Dict{Symbol,Any}(
-			:y => y,
-			:x => x,
-			:name => _first_or_empty(legend),
-			:mode => "markers",
-		)
-		color1 != "" &&
-			(trace_kw[:marker] = attr(color = color1))
-		sl = _scalar_or_first(showlegend, nothing)
-		if sl isa Bool
-			trace_kw[:showlegend] = sl
-		end
-		push!(_plot_data(fig), scatter(; trace_kw...))
-		stem_color = color1 == "" ? "black" : color1
-		for m in eachindex(y)
-			push!(_plot_data(fig),
-				scatter(
-					x = [x[m], x[m]],
-					y = [0, y[m]],
-					mode = "lines",
-					line = attr(
-						color = stem_color,
-						width = 0.5,
-					),
-					showlegend = false,
-				),
-			)
-		end
-	end
-	# apply optional layout updates
-	if title != ""
-		relayout!(fig, title = title)
-	end
-	if xlabel != ""
-		relayout!(fig, xaxis = attr(title_text = xlabel))
-	end
-	if ylabel != ""
-		relayout!(fig, yaxis = attr(title_text = ylabel))
-	end
-	if !all(xrange .== [0, 0])
-		update_xaxes!(fig, range = xrange)
-	end
-	if !all(yrange .== [0, 0])
-		update_yaxes!(fig, range = yrange)
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	if !grid
-		update_xaxes!(fig, showgrid = false)
-		update_yaxes!(fig, showgrid = false)
-	end
-	_apply_default_legend!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
-	if xscale != ""
-		update_xaxes!(fig, type = xscale)
-	end
-	if yscale != ""
-		update_yaxes!(fig, type = yscale)
-	end
 	_refresh!(fig)
 	return nothing
 end
 
+plot_scatter!(fig, y::AbstractArray; kwargs...) =
+	plot_scatter!(fig, _auto_xvalues(y; who = "plot_scatter!"), y; kwargs...)
+
 """
-	function plot_stem!(
-		fig,
-		y::Union{AbstractRange, Vector, SubArray};
-		xlabel::String = "",
-		ylabel::String = "",
-		xrange::Vector = [0, 0],
-		yrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		xscale::String = "",
-		yscale::String = "",
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	)
+	plot_stem!(fig, x, y; kwargs...) -> nothing (SubplotFigure: the figure)
+	plot_stem!(fig, y; kwargs...)
 
-Adds new stem plot traces to an existing figure (x-axis not specified, uses indices).
+Append stem series to an existing `Plot`, [`SyncPlot`](@ref) or
+`SubplotFigure` cell (see [`plot_stem`](@ref) for the traces and keywords).
+Takes every keyword of `plot_stem` except `show` (an `ArgumentError`), plus
+`secondary_y = false` (draw on a secondary y axis, created on first use on a
+`Plot`/`SyncPlot`) and `row`/`col` (`SubplotFigure` only). `grid = nothing`
+keeps the current grid; the legend groups of the new series never collide with
+those already in the figure.
 
-#### Arguments
+#### Example
 
-- `fig`: Existing `plot figure` to append to
-- `y`: y-coordinate data (can be vector of vectors)
-
-#### Keywords
-
-- `xlabel`: Label for the x-axis (default: `""`)
-- `ylabel`: Label for the y-axis (default: `""`)
-- `xrange`: Range for the x-axis (default: `[0, 0]`)
-- `yrange`: Range for the y-axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `color`: Color of the plot lines (default: `""`, can be vector)
-- `legend`: Name of the plot lines (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `xscale`: X-axis scale type ("log" for logarithmic, default: `""`)
-- `yscale`: Y-axis scale type ("log" for logarithmic, default: `""`)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
-
+```julia
+fig = plot_stem(0:10, rand(11); legend = "a")
+plot_stem!(fig, 0:10, -rand(11); legend = "b", color = "crimson", marker_symbol = "s")
+```
 """
 function plot_stem!(
 	fig,
-	y::Union{AbstractRange, Vector, SubArray};
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	xscale::String = "",
-	yscale::String = "",
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	x::AbstractArray,
+	y::AbstractArray;
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector} = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
+	baseline::Real = 0,
+	marker_size::Union{Real, AbstractVector} = 0,
+	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	linewidth::Union{Real, AbstractVector} = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
+	kwargs...,
 )
-	x = _auto_xvalues(y)
-	return plot_stem!(
+	who = "plot_stem!"
+	secondary_y = _scat_mutator_options(who, kwargs)
+	_stem_impl!(
 		fig,
 		x,
 		y;
+		who = who,
+		constructor = false,
+		secondary_y = secondary_y,
 		xlabel = xlabel,
 		ylabel = ylabel,
 		xrange = xrange,
@@ -10114,8 +10701,25 @@ function plot_stem!(
 		xscale = xscale,
 		yscale = yscale,
 		showlegend = showlegend,
-		)
+		baseline = baseline,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		linewidth = linewidth,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
+	)
+	_refresh!(fig)
+	return nothing
 end
+
+plot_stem!(fig, y::AbstractArray; kwargs...) =
+	plot_stem!(fig, _auto_xvalues(y; who = "plot_stem!"), y; kwargs...)
 
 """
 	plot_bar!(fig, x, y; kwargs...)
@@ -10615,198 +11219,92 @@ function plot_violin!(
 end
 
 """
-	function plot_scatterpolar!(
-		fig,
-		theta::Union{AbstractRange, Vector, SubArray},
-		r::Union{AbstractRange, Vector, SubArray};
-		trange::Vector = [0, 0],
-		rrange::Vector = [0, 0],
-		width::Int = 0,
-		height::Int = 0,
-		mode::Union{String, Vector{String}} = "lines",
-		dash::Union{String, Vector{String}} = "",
-		color::Union{String, Vector{String}} = "",
-		legend::Union{String, Vector{String}} = "",
-		title::String = "",
-		fontsize::Int = 0,
-		grid::Bool = true,
-		marker_size::Union{Int, Vector{Int}} = 0,
-		marker_symbol::Union{String, Vector{String}} = "",
-		linewidth::Union{Real, Vector{<:Real}} = 0,
-		showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
-	)
+	plot_scatterpolar!(fig, theta, r; kwargs...) -> nothing (SubplotFigure: the figure)
 
-Adds new polar scatter traces to an existing figure.
+Append polar trace(s) to an existing `Plot`, [`SyncPlot`](@ref) or polar
+`SubplotFigure` cell (`row`/`col`). Takes the data and every keyword of
+[`plot_scatterpolar`](@ref) except `show` (an `ArgumentError`); `theta` is in
+degrees unless `thetaunit = "radians"`. Options apply to the primary polar
+subplot (`layout.polar`; a SubplotFigure maps it to the cell's subplot);
+`grid = nothing` (the mutator default) keeps the current grid and `true`/
+`false` set it.
 
-#### Arguments
+#### Example
 
-- `fig`: Existing `plot figure` to append to
-- `theta`: Angular coordinates
-- `r`: Radial coordinates
-
-#### Keywords
-
-- `trange`: Range for the angular axis (default: `[0, 0]`)
-- `rrange`: Range for the radial axis (default: `[0, 0]`)
-- `width`: Width of the plot (default: `0`)
-- `height`: Height of the plot (default: `0`)
-- `mode`: Plotting mode (default: `"lines"`, can be vector)
-- `dash`: line style (default: `""`, can be vector)
-- `color`: Color of the plot (default: `""`, can be vector)
-- `legend`: Legend name (default: `""`, can be vector)
-- `title`: Title of the figure (default: `""`)
-- `fontsize`: Font size for plot text (default: `0`, uses Plotly default)
-- `grid`: Whether to show the grid or not (default: `true`)
-- `marker_size`: Marker size in pixels (default: `0`, can be vector)
-- `marker_symbol`: Marker symbol name (default: `""`, can be vector)
-- `linewidth`: Line width in pixels (default: `0`, can be vector)
-- `showlegend`: Whether to show legend entry (default: `nothing`, can be vector)
-
+```julia
+fig = plot_scatterpolar(0:10:350, ones(36); legend = "unit")
+plot_scatterpolar!(fig, 0:10:350, 0.5 .+ rand(36); legend = "noise", mode = "markers")
+```
 """
 function plot_scatterpolar!(
 	fig,
-	theta::Union{AbstractRange, Vector, SubArray},
-	r::Union{AbstractRange, Vector, SubArray};
-	trange::Vector = [0, 0],
-	rrange::Vector = [0, 0],
-	width::Int = 0,
-	height::Int = 0,
-	mode::Union{String, Vector{String}} = "lines",
-	dash::Union{String, Vector{String}} = "",
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	title::String = "",
-	fontsize::Int = 0,
-	grid::Bool = true,
-	marker_size::Union{Int, Vector{Int}} = 0,
-	marker_symbol::Union{String, Vector{String}} = "",
-	linewidth::Union{Real, Vector{<:Real}} = 0,
-	showlegend::Union{Nothing, Bool, Vector{Bool}} = nothing,
+	theta::AbstractArray,
+	r::AbstractArray;
+	trange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	rrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	width::Real = 0,
+	height::Real = 0,
+	mode::Union{AbstractString, AbstractVector} = "lines",
+	dash::Union{AbstractString, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector} = "",
+	title::AbstractString = "",
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	marker_size::Union{Real, AbstractVector} = 0,
+	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_line_width::Union{Real, AbstractVector} = 0,
+	linewidth::Union{Real, AbstractVector} = 0,
+	opacity::Union{Real, AbstractVector} = 1,
+	markevery = nothing,
+	line_shape::Union{AbstractString, AbstractVector} = "",
+	fill::Union{AbstractString, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
+	direction::AbstractString = "",
+	rotation::Union{Nothing, Real} = nothing,
+	thetaunit::AbstractString = "",
+	kwargs...,
 )
-	r_nested, theta_nested = _nested_coordinate_mode(r, theta, :r, :theta)
-	if r_nested
-		series_count = length(r)
-		modeV = _series_kwarg_vector(
-			mode,
-			series_count,
-			"lines",
-			String,
-		)
-		dashV = _series_kwarg_vector(
-			dash,
-			series_count,
-			"",
-			String,
-		)
-		colorV = _series_kwarg_vector(
-			color,
-			series_count,
-			"",
-			String,
-		)
-		legendV = _series_kwarg_vector(
-			legend,
-			series_count,
-			"",
-			String,
-		)
-		marker_sizeV = _series_kwarg_vector(
-			marker_size,
-			series_count,
-			0,
-			Int,
-		)
-		marker_symbolV = _series_kwarg_vector(
-			marker_symbol,
-			series_count,
-			"",
-			String,
-		)
-		linewidthV = _series_kwarg_vector(
-			linewidth,
-			series_count,
-			0.0,
-			Float64,
-		)
-		showlegendV = _series_kwarg_vector(
-			showlegend,
-			series_count,
-			nothing,
-			Union{Nothing,Bool},
-		)
-
-		if theta_nested
-			for n in eachindex(r)
-				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta[n], :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
-				mk = Dict{Symbol,Any}()
-				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				push!(_plot_data(fig), scatterpolar(; trace_kw...))
-			end
-		else
-			for n in eachindex(r)
-				trace_kw = Dict{Symbol,Any}(:r => r[n], :theta => theta, :mode => modeV[n], :line => attr(color = colorV[n], dash = dashV[n]), :name => legendV[n])
-				mk = Dict{Symbol,Any}()
-				marker_sizeV[n] > 0 && (mk[:size] = marker_sizeV[n])
-				marker_symbolV[n] != "" && (mk[:symbol] = marker_symbolV[n])
-				!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-				linewidthV[n] > 0 && (trace_kw[:line][:width] = linewidthV[n])
-				showlegendV[n] !== nothing && (trace_kw[:showlegend] = showlegendV[n])
-				push!(_plot_data(fig), scatterpolar(; trace_kw...))
-			end
-		end
-	else
-		mode1 = _first_or_empty(mode)
-		mode1 == "" && (mode1 = "lines")
-		trace_kw = Dict{Symbol,Any}(:r => r, :theta => theta, :mode => mode1, :line => attr(color = _first_or_empty(color), dash = _first_or_empty(dash)), :name => _first_or_empty(legend))
-		mk = Dict{Symbol,Any}()
-		ms = _scalar_or_first(marker_size, 0)
-		if ms isa Real && ms > 0
-			mk[:size] = ms
-		end
-		msym = _first_or_empty(marker_symbol)
-		if msym != ""
-			mk[:symbol] = msym
-		end
-		!isempty(mk) && (trace_kw[:marker] = attr(; mk...))
-		lw = _scalar_or_first(linewidth, 0)
-		if lw isa Real && lw > 0
-			trace_kw[:line][:width] = lw
-		end
-		sl = _scalar_or_first(showlegend, nothing)
-		if sl isa Bool
-			trace_kw[:showlegend] = sl
-		end
-		push!(_plot_data(fig), scatterpolar(; trace_kw...))
-	end
-	# apply optional layout updates
-	if title != ""
-		relayout!(fig, title = title)
-	end
-	# Do not clip the angular axis to the data extent by default (full circle);
-	# only constrain it when the caller supplies `trange`.
-	if !all(rrange .== [0, 0])
-		update_polars!(fig, radialaxis = attr(range = rrange))
-	end
-	if !all(trange .== [0, 0])
-		update_polars!(fig, attr(sector = trange))
-	end
-	if width > 0
-		relayout!(fig, width = width)
-	end
-	if height > 0
-		relayout!(fig, height = height)
-	end
-	if !grid
-		update_polars!(fig, radialaxis = attr(showgrid = false), angularaxis = attr(showgrid = false))
-	end
-	_apply_default_legend!(fig)
-	if fontsize > 0
-		relayout!(fig, font = attr(size = fontsize))
-	end
+	who = "plot_scatterpolar!"
+	_scat_mutator_options(who, kwargs) && throw(ArgumentError(
+		"$(who): `secondary_y` addresses a Cartesian y axis; polar traces have none.",
+	))
+	_scatterpolar_impl!(
+		fig,
+		theta,
+		r;
+		who = who,
+		constructor = false,
+		trange = trange,
+		rrange = rrange,
+		width = width,
+		height = height,
+		mode = mode,
+		dash = dash,
+		color = color,
+		legend = legend,
+		title = title,
+		fontsize = fontsize,
+		grid = grid,
+		marker_size = marker_size,
+		marker_symbol = marker_symbol,
+		marker_color = marker_color,
+		marker_line_color = marker_line_color,
+		marker_line_width = marker_line_width,
+		linewidth = linewidth,
+		opacity = opacity,
+		markevery = markevery,
+		line_shape = line_shape,
+		fill = fill,
+		fillcolor = fillcolor,
+		showlegend = showlegend,
+		direction = direction,
+		rotation = rotation,
+		thetaunit = thetaunit,
+	)
 	_refresh!(fig)
 	return nothing
 end
@@ -12375,108 +12873,318 @@ end
 
 # ── Area (filled scatter) ────────────────────────────────────────────
 
-function _area_traces(x, y; color, legend, mode::String, stack::Bool)
-	y_nested, x_nested = _nested_coordinate_mode(y, x, :y, :x)
-	if y_nested
-		colorV = _string_kwarg_vector(color, length(y))
-		legendV = _string_kwarg_vector(legend, length(y))
-		traces = Vector{GenericTrace}(undef, length(y))
-		for n in eachindex(y)
-			xn = x_nested ? x[n] : x
-			kw = Dict{Symbol, Any}(:x => xn, :y => y[n], :mode => mode, :name => legendV[n])
-			colorV[n] == "" || (kw[:line] = attr(color = colorV[n]))
-			stack ? (kw[:stackgroup] = "one") : (kw[:fill] = "tozeroy")
-			traces[n] = scatter(; kw...)
-		end
-		return traces
-	end
-	kw = Dict{Symbol, Any}(:x => x, :y => y, :mode => mode, :fill => "tozeroy", :name => _first_or_empty(legend))
-	c = _first_or_empty(color)
-	c == "" || (kw[:line] = attr(color = c))
-	return scatter(; kw...)
-end
-
-"""
-	plot_area(x, y; color="", legend="", mode="lines", stack=false, kwargs...)
-	plot_area(y; ...)
-
-Filled-area line plot. With a `Vector` of `Vector`s for `y`, pass `stack=true`
-to stack the series (Plotly `stackgroup`), otherwise each is filled to zero.
-"""
-function plot_area(
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	mode::String = "lines",
-	stack::Bool = false,
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-	grid::Bool = true,
-	show::Bool = false,
-)
-	trace = _area_traces(x, y; color = color, legend = legend, mode = mode, stack = stack)
-	fig = Plot(trace, _default_cartesian_layout(title = title, xlabel = xlabel, ylabel = ylabel,
-		x_tick0 = _safe_tick0(x), y_tick0 = _safe_tick0(y)))
-	_apply_cartesian_plot_options!(fig; xlabel = xlabel, ylabel = ylabel, xrange = xrange, yrange = yrange,
-		width = width, height = height, grid = grid, fontsize = fontsize, title = title)
-	return _maybe_show(fig, show, width, height, title)
-end
-
-plot_area(y::Union{AbstractRange, Vector, SubArray}; kwargs...) = plot_area(_auto_xvalues(y), y; kwargs...)
-
-"""
-	plot_area!(fig, x, y; kwargs...)
-	plot_area!(fig, y; ...)
-
-Append filled-area trace(s) to an existing figure.
-"""
-function plot_area!(
+# Shared body of plot_area / plot_area!: one filled scatter trace per series.
+# `stack = true` puts every series of the call in the stack group "one", which
+# also stacks them on earlier `stack = true` areas of the same axes; otherwise
+# each series is filled to zero.
+function _area_impl!(
 	fig,
-	x::Union{AbstractRange, Vector, SubArray},
-	y::Union{AbstractRange, Vector, SubArray};
-	color::Union{String, Vector{String}} = "",
-	legend::Union{String, Vector{String}} = "",
-	mode::String = "lines",
+	x,
+	y;
+	who::AbstractString,
+	constructor::Bool,
+	secondary_y::Bool = false,
+	color = "",
+	legend = "",
+	mode::AbstractString = "lines",
 	stack::Bool = false,
-	xlabel::String = "",
-	ylabel::String = "",
-	xrange::Vector = [0, 0],
-	yrange::Vector = [0, 0],
-	title::String = "",
-	width::Int = 0,
-	height::Int = 0,
-	fontsize::Int = 0,
-	grid::Union{Nothing, Bool} = nothing,
+	hatch::AbstractString = "",
+	showlegend = nothing,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange = [0, 0],
+	yrange = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
 )
-	trace = _area_traces(x, y; color = color, legend = legend, mode = mode, stack = stack)
-	for t in (trace isa AbstractVector ? trace : [trace])
-		push!(_plot_data(fig), t)
+	xs, ys, _ = _scat_series(x, y, who)
+	n = length(ys)
+	n_existing = _scat_existing_count(fig)
+	trace_mode = _scat_mode(mode, who)
+	styles = _scat_series_styles(
+		n,
+		n_existing,
+		who;
+		mode = trace_mode,
+		color = color,
+		legend = legend,
+		showlegend = showlegend,
+	)
+	_hatch_pattern(hatch; who = who)
+	_scat_validate_cartesian_options(
+		fig,
+		who;
+		ykey = _scat_twin_key(fig, secondary_y),
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+	)
+
+	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
+	yref = secondary_y ? _cmn_axis_ref(ykey; who = who) : ""
+	data = _plot_data(fig)
+	for index in 1:n
+		style = styles[index]
+		fields = Dict{Symbol, Any}(
+			:x => xs[index],
+			:y => ys[index],
+			:mode => trace_mode,
+			:name => isempty(style.name) ? "" : _label(style.name),
+		)
+		isempty(style.color) || (fields[:line] = attr(color = style.color))
+		if stack
+			fields[:stackgroup] = "one"
+		else
+			fields[:fill] = "tozeroy"
+		end
+		pattern = _hatch_pattern(hatch; who = who)
+		pattern === nothing || (fields[:fillpattern] = pattern)
+		style.showlegend === nothing || (fields[:showlegend] = style.showlegend)
+		isempty(yref) || (fields[:yaxis] = yref)
+		push!(data, GenericTrace("scatter", fields))
 	end
-	_apply_cartesian_grid_override!(fig, grid)
+	# A constructor's `grid = true` keeps the template grid; a mutator applies
+	# any non-nothing `grid`, so `true` re-enables a grid switched off earlier.
+	constructor || _apply_cartesian_grid_override!(fig, grid, who)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = xlabel,
 		ylabel = ylabel,
 		xrange = xrange,
 		yrange = yrange,
-		title = title,
 		width = width,
 		height = height,
+		grid = constructor ? grid : nothing,
 		fontsize = fontsize,
-		refresh = true,
-		apply_template = false,
+		title = title,
+		xscale = xscale,
+		yscale = yscale,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
+		ykey = ykey,
+		apply_template = constructor,
+		who = who,
 	)
 	return nothing
 end
 
-plot_area!(fig, y::Union{AbstractRange, Vector, SubArray}; kwargs...) = plot_area!(fig, _auto_xvalues(y), y; kwargs...)
+"""
+	plot_area(x, y; kwargs...) -> Plot (or SyncPlot with `show = true`)
+	plot_area(y; kwargs...)
+
+Filled-area plot: each series is a line filled down to zero, or, with
+`stack = true`, stacked on the series before it (Plotly `stackgroup`). The
+one-argument form uses `x = 0:length(y)-1` (per series).
+
+#### Data
+
+- `x`, `y`: vectors of equal length, or a vector of vectors in `y` (one area
+  per series) with `x` shared or nested like `y`. Matrices and complex values
+  throw an `ArgumentError`.
+
+#### Keywords
+
+- `color = ""`: line and fill colour per series (scalar or vector; the fill is
+  the colour at half opacity). `legend = ""`: names per series;
+  `showlegend = nothing`: force legend entries on or off (scalar or vector).
+- `mode = "lines"`: trace mode (`"lines+markers"`, ...).
+- `stack = false`: stack the series of this call, and any later
+  `plot_area!(...; stack = true)` series on the same axes, on top of each
+  other. A single series also joins the stack, so stacks can be built one
+  `plot_area!` call at a time. (Plotly lists stacked areas in reverse order
+  in the legend so the entries follow the stack.)
+- `hatch = ""`: matplotlib hatch pattern drawn over the fill: `"/"`, `"\\\\"`,
+  `"x"`, `"-"`, `"|"`, `"+"`, `"."` (repeat a character for density, e.g.
+  `"///"`).
+- `title`, `xlabel`, `ylabel`, `xscale`, `yscale`, `xrange`, `yrange`,
+  `xticks`, `xticklabels`, `yticks`, `yticklabels`, `xtickformat`,
+  `ytickformat`, `equalar`, `grid`, `width`, `height`, `fontsize`, `show`: as
+  for [`plot_scatter`](@ref) (ranges in data units, `grid = true` keeps the
+  template grid).
+
+#### Example
+
+```julia
+t = 0:10
+fig = plot_area(t, [rand(11), rand(11)]; stack = true, legend = ["a", "b"])
+plot_area!(fig, t, rand(11); stack = true, legend = "c", hatch = "//")
+```
+"""
+function plot_area(
+	x::AbstractArray,
+	y::AbstractArray;
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector} = "",
+	mode::AbstractString = "lines",
+	stack::Bool = false,
+	hatch::AbstractString = "",
+	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
+	show::Bool = false,
+)
+	fig = Plot(GenericTrace[], _default_cartesian_layout())
+	_area_impl!(
+		fig,
+		x,
+		y;
+		who = "plot_area",
+		constructor = true,
+		color = color,
+		legend = legend,
+		mode = mode,
+		stack = stack,
+		hatch = hatch,
+		showlegend = showlegend,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
+	)
+	return _scat_maybe_show(fig, show, width, height, title)
+end
+
+plot_area(y::AbstractArray; kwargs...) =
+	plot_area(_auto_xvalues(y; who = "plot_area"), y; kwargs...)
+
+"""
+	plot_area!(fig, x, y; kwargs...) -> nothing (SubplotFigure: the figure)
+	plot_area!(fig, y; kwargs...)
+
+Append filled-area trace(s) to an existing `Plot`, [`SyncPlot`](@ref) or
+`SubplotFigure` cell (see [`plot_area`](@ref)). Takes every keyword of
+`plot_area` except `show` (an `ArgumentError`), plus `secondary_y = false`
+(draw on a secondary y axis, created on first use on a `Plot`/`SyncPlot`) and
+`row`/`col` (`SubplotFigure` only). `grid = nothing` keeps the current grid.
+With `stack = true` the new series stack on the earlier `stack = true` areas
+of the same axes.
+"""
+function plot_area!(
+	fig,
+	x::AbstractArray,
+	y::AbstractArray;
+	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	legend::Union{AbstractString, AbstractVector} = "",
+	mode::AbstractString = "lines",
+	stack::Bool = false,
+	hatch::AbstractString = "",
+	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
+	xlabel::AbstractString = "",
+	ylabel::AbstractString = "",
+	xrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	title::AbstractString = "",
+	width::Real = 0,
+	height::Real = 0,
+	fontsize::Real = 0,
+	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	yticks = nothing,
+	yticklabels = nothing,
+	xtickformat::AbstractString = "",
+	ytickformat::AbstractString = "",
+	equalar::Bool = false,
+	kwargs...,
+)
+	who = "plot_area!"
+	secondary_y = _scat_mutator_options(who, kwargs)
+	_area_impl!(
+		fig,
+		x,
+		y;
+		who = who,
+		constructor = false,
+		secondary_y = secondary_y,
+		color = color,
+		legend = legend,
+		mode = mode,
+		stack = stack,
+		hatch = hatch,
+		showlegend = showlegend,
+		xlabel = xlabel,
+		ylabel = ylabel,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
+		title = title,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		xtickformat = xtickformat,
+		ytickformat = ytickformat,
+		equalar = equalar,
+	)
+	_refresh!(fig)
+	return nothing
+end
+
+plot_area!(fig, y::AbstractArray; kwargs...) =
+	plot_area!(fig, _auto_xvalues(y; who = "plot_area!"), y; kwargs...)
 
 # ── Candlestick / OHLC ───────────────────────────────────────────────
 
