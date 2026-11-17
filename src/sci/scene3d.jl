@@ -591,14 +591,17 @@ _s3_constructor_layout() = Layout(
 # manual aspect equal to the equal-unit ("data") ratios of the current spans
 # (written for explicit ranges or by `view!`); `auto_camera`, a camera without
 # an eye or with the eye at the automatic distance for the current box and
-# viewport. A cube-shaped manual aspect is never taken as pinned: a user's
-# (1, 1, 1) cannot be told apart.
+# viewport; `auto_ticks`, per axis, an `nticks` that is unset or equal to the
+# automatic count of `_s3_auto_nticks`. A cube-shaped manual aspect is never
+# taken as pinned (a user's (1, 1, 1) cannot be told apart), and a user's
+# `nticks` equal to the automatic count is taken as automatic.
 struct _S3SceneState
 	pinned::Bool
 	auto_camera::Bool
+	auto_ticks::NTuple{3, Bool}
 end
 
-const _S3_NEW_SCENE = _S3SceneState(false, true)
+const _S3_NEW_SCENE = _S3SceneState(false, true, (true, true, true))
 
 # Write the validated options. Constructors apply the default template;
 # mutators keep the figure's template and only refresh the legend. The camera
@@ -642,11 +645,12 @@ function _s3_apply_options!(
 	(target.kind === :scene && target.scenekey === scenekey) || return nothing
 	if state !== nothing
 		# An aspect mode given now replaces what was pinned automatically.
-		opts.aspectmode === nothing || (state = _S3SceneState(false, state.auto_camera))
+		opts.aspectmode === nothing || (state = _S3SceneState(false, state.auto_camera, state.auto_ticks))
 		_s3_finish_scene!(fig, target, state; frame = opts.view === nothing)
 	end
 	opts.view === nothing ||
 		_s3_apply_view!(fig, target, _S3ViewParams(opts.view[1], opts.view[2], :auto, :z, nothing, 1.0))
+	state === nothing || _s3_finish_ticks!(fig, target, state)
 	return nothing
 end
 
@@ -686,6 +690,8 @@ end
 
 const _S3_TEXT3D_DOC = raw"""Scene axis titles and tick labels are drawn by WebGL, which cannot typeset TeX: `$…$` is converted to Unicode and `<b>`/`<i>`/`<sub>`/`<sup>` (`$x_1$` gives x with a subscript 1, `$\mathbf{b}$` a bold b, `$\lambda^2$` λ with a superscript 2, `$\alpha$` α); an unsupported macro is shown as written and warns once."""
 
+const _S3_FRAMING_DOC = raw"""plotly.js sizes an "auto"/"data" scene by the extent of its data and ignores explicit axis ranges, so a scene with a range is written as `aspectmode = "manual"` with the proportions of the axis spans: equal units for "data", and for "auto" the same unless one span exceeds four times another (then a cube). Ratios pinned this way (other than a cube) are updated when later 3-D calls add data. A perspective scene without a camera gets plotly's default camera direction at the automatic distance of [`view!`](@ref), which fits the scene box and room for its tick labels into its viewport (the figure size, else 700×500 px, and the cell domain); later 3-D calls keep such an automatic distance up to date. In a subplot cell, axes with automatic ticks get a tick count that suits the cell size (see [`view!`](@ref))."""
+
 const _S3_OPACITY_LINE_DOC = raw"""translucent scatter3d lines were observed to make other 3-D traces in the same scene vanish, so a line with `opacity < 1` is drawn in the opaque colour it would have over the scene background (`paper_bgcolor` and `scene.bgcolor`, from the layout or the template). Over coloured faces this is an approximation."""
 
 function _s3_scene_doc(constructor::Bool, aspectmode::AbstractString)
@@ -699,7 +705,7 @@ function _s3_scene_doc(constructor::Bool, aspectmode::AbstractString)
 		- `xrange = [0, 0]`, `yrange = [0, 0]`, `zrange = [0, 0]`: axis ranges
 		  `[lo, hi]` (vector or tuple) in data units; `[0, 0]` is automatic.
 		- `aspectmode = $(aspectmode)`: "auto", "cube", "data" or "manual" (set the
-		  ratios with [`scene!`](@ref)).
+		  ratios with [`scene!`](@ref)). $(_S3_FRAMING_DOC)
 		- `perspective::Bool = true`: `false` selects an orthographic projection.
 		- `grid::Bool = true`: `false` hides the grid lines.
 		- `showaxis::Bool = true`: `false` hides the axes.
@@ -721,7 +727,7 @@ function _s3_scene_doc(constructor::Bool, aspectmode::AbstractString)
 	  `zlabel::AbstractString = ""`: new axis titles. $(_S3_TEXT3D_DOC)
 	- `xrange = [0, 0]`, `yrange = [0, 0]`, `zrange = [0, 0]`: axis ranges
 	  `[lo, hi]` in data units, also on a logarithmic scene axis.
-	- `aspectmode = nothing`: "auto", "cube", "data" or "manual".
+	- `aspectmode = nothing`: "auto", "cube", "data" or "manual". $(_S3_FRAMING_DOC)
 	- `perspective::Union{Nothing, Bool} = nothing`: `true`/`false` selects a
 	  perspective/orthographic projection.
 	- `grid::Union{Nothing, Bool} = nothing`: show or hide the grid lines.
@@ -971,9 +977,17 @@ end
 
 # plotly.js draws a perspective scene with a vertical field of view of π/4
 # (gl-plot3d `fovy`, checked in the bundled plotly.min.js), so π/8 is the
-# half angle. 1.05 is the framing margin verified by render (spec F31, V5).
+# half angle.
 const _S3_HALF_FOVY = π / 8
-const _S3_FRAMING = 1.05
+# The automatic camera distance keeps this many font sizes free on each side
+# of the viewport for the tick labels and axis titles drawn outside the scene
+# box (one line of tick labels, its offset and one line of axis title; checked
+# by render at 700×500 px). A tiny viewport keeps at least _S3_MIN_FILL of its
+# half-size for the box.
+const _S3_LABEL_PAD_FONTS = 3.0
+const _S3_MIN_FILL = 0.5
+# plotly.js's default font size (layout.font.size).
+const _S3_DEFAULT_FONT_SIZE = 12.0
 # Viewport assumed when the layout sets no size: savefig's default export size
 # and the margins PlotlyBase's `Layout()` writes (l50 r50 t60 b50).
 const _S3_DEFAULT_SIZE = (700.0, 500.0)
@@ -1162,13 +1176,72 @@ function _s3_drawn_box(p::Plot, scenekey::Symbol)
 	return box
 end
 
-# Camera distance that frames a scene box `box` (the full side lengths) in the
-# target's viewport: the bounding sphere fills the narrower field of view.
-function _s3_auto_distance(fig, target::_CellTarget, box, zoom::Float64 = 1.0)
+# Largest font size that the scene's labels use: layout.font.size and the
+# scene axes' tick and title fonts (plotly.js's 12 when none is set).
+function _s3_label_font_size(p::Plot, scenekey::Symbol)
+	size = _s3_number_field(_cmn_mapping_get(p.layout.fields, :font), :size, _S3_DEFAULT_FONT_SIZE; positive = true)
+	scene = get(p.layout.fields, scenekey, nothing)
+	for axis in (:xaxis, :yaxis, :zaxis)
+		fields = _cmn_mapping_get(scene, axis)
+		for font in (_cmn_mapping_get(fields, :tickfont), _cmn_mapping_get(_cmn_mapping_get(fields, :title), :font))
+			size = max(size, _s3_number_field(font, :size, 0.0))
+		end
+	end
+	return size
+end
+
+_s3_dot(a, b) = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+_s3_cross(a, b) = (a[2] * b[3] - a[3] * b[2], a[3] * b[1] - a[1] * b[3], a[1] * b[2] - a[2] * b[1])
+_s3_norm(a) = sqrt(_s3_dot(a, a))
+
+# The camera's up vector (plotly.js's default (0, 0, 1) when unset or zero).
+function _s3_camera_up(camera)
+	up = _s3_vector3(_cmn_mapping_get(camera, :up))
+	return _s3_norm(up) > 0 ? (up[1], up[2], up[3]) : (0.0, 0.0, 1.0)
+end
+
+# Camera distance at which the scene box `box` (the full side lengths; gl-plot3d
+# scales each axis range to `aspectratio[d]` and centres it on the camera
+# centre) fits the target's viewport, less the label padding, in a perspective
+# view from the unit `direction` (centre to eye) with up vector `up`, divided
+# by `zoom`. The box is centred on the scene origin; `center` is the camera
+# centre the eye looks at. A pinhole camera at center + d·v with right vector r
+# and true up u puts the box corner at offset q from `center` at
+# x = (q·r) / ((d - q·v) tan(fovy/2) w/h) and
+# y = (q·u) / ((d - q·v) tan(fovy/2)) in normalised device coordinates, so
+# |x| ≤ limit_x and |y| ≤ limit_y bound d from below for every corner; the
+# largest bound is the tightest distance that shows the whole box. When `up` is
+# parallel to `direction` (no defined roll) the box's bounding sphere is fitted
+# into the smaller of the two half-angles instead.
+function _s3_auto_distance(fig, target::_CellTarget, box, direction, up, zoom::Float64 = 1.0; center = (0.0, 0.0, 0.0))
+	p = _cmn_plot(fig)
 	width, height = _s3_viewport(fig, target)
-	radius = 0.5 * sqrt(sum(abs2, box))
-	half_angle = atan(min(1.0, width / height) * tan(_S3_HALF_FOVY))
-	return _S3_FRAMING * radius / sin(half_angle) / zoom
+	pad = _S3_LABEL_PAD_FONTS * _s3_label_font_size(p, target.scenekey)
+	limit_x = max(1 - 2 * pad / width, _S3_MIN_FILL)
+	limit_y = max(1 - 2 * pad / height, _S3_MIN_FILL)
+	tan_half = tan(_S3_HALF_FOVY)
+	ratio = width / height
+	v = direction ./ _s3_norm(direction)
+	right = _s3_cross(.-v, up)
+	right_norm = _s3_norm(right)
+	if !(right_norm > 1e-9 * _s3_norm(up))
+		radius = 0.5 * sqrt(sum(abs2, box)) + _s3_norm(center)
+		half_angle = atan(min(limit_x * ratio, limit_y) * tan_half)
+		return radius / sin(half_angle) / zoom
+	end
+	r = right ./ right_norm
+	u = _s3_cross(r, .-v)
+	distance = 0.0
+	for sx in (-0.5, 0.5), sy in (-0.5, 0.5), sz in (-0.5, 0.5)
+		q = (sx * box[1] - center[1], sy * box[2] - center[2], sz * box[3] - center[3])
+		depth = _s3_dot(q, v)
+		distance = max(
+			distance,
+			depth + abs(_s3_dot(q, r)) / (tan_half * ratio * limit_x),
+			depth + abs(_s3_dot(q, u)) / (tan_half * limit_y),
+		)
+	end
+	return distance / zoom
 end
 
 _s3_vector3(mapping, default::Float64 = 0.0) = [
@@ -1192,10 +1265,120 @@ function _s3_scene_state(fig, target::_CellTarget)
 	if !auto_camera
 		box = _s3_drawn_box(p, key)
 		offset = _s3_vector3(eye, NaN) .- _s3_vector3(_cmn_mapping_get(camera, :center))
-		auto_camera = box !== nothing && all(isfinite, offset) &&
-			isapprox(sqrt(sum(abs2, offset)), _s3_auto_distance(fig, target, box); rtol = 1e-9)
+		current = sqrt(sum(abs2, offset))
+		auto_camera = box !== nothing && isfinite(current) && current > 0 && isapprox(
+			current,
+			_s3_auto_distance(
+				fig, target, box, offset ./ current, _s3_camera_up(camera);
+				center = _s3_vector3(_cmn_mapping_get(camera, :center)),
+			);
+			rtol = 1e-9,
+		)
 	end
-	return _S3SceneState(pinned, auto_camera)
+	counts = _s3_auto_nticks(fig, target)
+	auto_ticks = ntuple(3) do d
+		nticks = _cmn_mapping_get(_cmn_mapping_get(scene, (:xaxis, :yaxis, :zaxis)[d]), :nticks)
+		nticks === nothing || (counts !== nothing && _s3_is_real(nticks) && nticks == counts[d])
+	end
+	return _S3SceneState(pinned, auto_camera, auto_ticks)
+end
+
+# plotly.js gives a 3-D axis with automatic ticks `nticks || clamp(L / 40, 4, 9)`
+# ticks, where L is the axis length in pixels it computes from the size of the
+# whole figure canvas (gl3d tick_marks and gl-axes pixel range, plotly.js
+# 2.35.2). A scene in a subplot cell is much smaller than that canvas, so its
+# short edges get four to nine labels that overlap. A scene whose domain is
+# smaller than the plot area therefore gets nticks = clamp(floor(L / 40), 2, 9)
+# per axis from the axis's projected length L in its own viewport (the
+# centre line of the scene box, seen from its camera); 40 px per tick and the
+# upper bound 9 are plotly.js's own, 2 keeps both ends of a short axis
+# labelled. `nothing` for a full-size scene or when the camera cannot tell.
+const _S3_TICK_SPACING_PX = 40.0
+const _S3_MIN_CELL_TICKS = 2
+const _S3_MAX_AUTO_TICKS = 9
+
+function _s3_auto_nticks(fig, target::_CellTarget)
+	full = target.xdomain[2] - target.xdomain[1] >= 1 - 1e-9 && target.ydomain[2] - target.ydomain[1] >= 1 - 1e-9
+	full && return nothing
+	p = _cmn_plot(fig)
+	box = _s3_drawn_box(p, target.scenekey)
+	box === nothing && return nothing
+	lengths = _s3_axis_pixel_lengths(fig, target, box)
+	lengths === nothing && return nothing
+	return map(lengths) do length_px
+		clamp(floor(Int, length_px / _S3_TICK_SPACING_PX), _S3_MIN_CELL_TICKS, _S3_MAX_AUTO_TICKS)
+	end
+end
+
+# Projected length in viewport pixels of the scene box's centre line along each
+# axis (the box has side lengths `box` and is centred on the scene origin),
+# with the scene's camera (plotly.js's default eye (1.25, 1.25, 1.25) when
+# unset) and projection: perspective with the vertical field of view
+# 2·_S3_HALF_FOVY, or orthographic ortho(-w/h, w/h, -1, 1). `nothing` when the
+# camera is degenerate or a point lies behind a perspective eye.
+function _s3_axis_pixel_lengths(fig, target::_CellTarget, box)
+	p = _cmn_plot(fig)
+	camera = _cmn_mapping_get(get(p.layout.fields, target.scenekey, nothing), :camera)
+	orthographic = _cmn_mapping_get(_cmn_mapping_get(camera, :projection), :type) == "orthographic"
+	eye_value = _cmn_mapping_get(camera, :eye)
+	eye = eye_value === nothing ? [1.25, 1.25, 1.25] : _s3_vector3(eye_value, NaN)
+	offset = eye .- _s3_vector3(_cmn_mapping_get(camera, :center))
+	distance = _s3_norm(offset)
+	(isfinite(distance) && distance > 0) || return nothing
+	v = offset ./ distance
+	up = _s3_camera_up(camera)
+	right = _s3_cross(.-v, up)
+	right_norm = _s3_norm(right)
+	right_norm > 1e-9 * _s3_norm(up) || return nothing
+	r = right ./ right_norm
+	u = _s3_cross(r, .-v)
+	width, height = _s3_viewport(fig, target)
+	ratio = width / height
+	tan_half = tan(_S3_HALF_FOVY)
+	function project(point)
+		q = point .- eye
+		x, y, depth = _s3_dot(q, r), _s3_dot(q, u), -_s3_dot(q, v)
+		orthographic && return (x / ratio * width / 2, y * height / 2)
+		depth > 0 || return nothing
+		return (x / (depth * tan_half * ratio) * width / 2, y / (depth * tan_half) * height / 2)
+	end
+	lengths = zeros(3)
+	for d in 1:3
+		half = zeros(3)
+		half[d] = box[d] / 2
+		a, b = project(half), project(.-half)
+		(a === nothing || b === nothing) && return nothing
+		lengths[d] = hypot(a[1] - b[1], a[2] - b[2])
+	end
+	return lengths
+end
+
+# A user's tick placement (tick values, a tick step or a non-automatic tick
+# mode) makes plotly.js ignore `nticks`.
+function _s3_user_ticks(axis_fields)
+	mode = _cmn_mapping_get(axis_fields, :tickmode)
+	(mode !== nothing && mode != "auto") && return true
+	return _cmn_mapping_get(axis_fields, :tickvals) !== nothing || _cmn_mapping_get(axis_fields, :dtick) !== nothing
+end
+
+# Write the automatic tick counts of `_s3_auto_nticks` on the axes whose
+# `nticks` was automatic before the 3-D call (`state`) and whose ticks the user
+# does not place.
+function _s3_finish_ticks!(fig, target::_CellTarget, state::_S3SceneState)
+	counts = _s3_auto_nticks(fig, target)
+	counts === nothing && return nothing
+	p = _cmn_plot(fig)
+	scene = get(p.layout.fields, target.scenekey, nothing)
+	updates = Dict{Symbol, Any}()
+	for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
+		state.auto_ticks[d] || continue
+		fields = _cmn_mapping_get(scene, axis)
+		_s3_user_ticks(fields) && continue
+		_cmn_mapping_get(fields, :nticks) == counts[d] && continue
+		updates[axis] = attr(nticks = counts[d])
+	end
+	isempty(updates) || _merge_scene_layout_attr!(p.layout, target.scenekey, attr(; updates...))
+	return nothing
 end
 
 # Direction of plotly.js's default camera eye (1.25, 1.25, 1.25).
@@ -1237,7 +1420,7 @@ function _s3_finish_scene!(fig, target::_CellTarget, state::_S3SceneState; frame
 	offset = eye === nothing ? fill(NaN, 3) : _s3_vector3(eye, NaN) .- center
 	current = sqrt(sum(abs2, offset))
 	direction = (isfinite(current) && current > 0) ? offset ./ current : collect(_S3_DEFAULT_EYE_DIRECTION)
-	position = center .+ _s3_auto_distance(fig, target, box) .* direction
+	position = center .+ _s3_auto_distance(fig, target, box, direction, _s3_camera_up(camera); center = center) .* direction
 	_merge_scene_layout_attr!(p.layout, key, attr(
 		camera = attr(eye = attr(x = position[1], y = position[2], z = position[3])),
 	))
@@ -1312,7 +1495,11 @@ function _s3_apply_view!(fig, target::_CellTarget, params::_S3ViewParams)
 		end
 	elseif params.distance === :auto
 		aspect, from_data = _s3_effective_aspect(p, key)
-		distance = _s3_auto_distance(fig, target, aspect, params.zoom)
+		center = _cmn_mapping_get(camera, :center)
+		distance = _s3_auto_distance(
+			fig, target, aspect, direction, up, params.zoom;
+			center = [_s3_number_field_signed(center, axis) for axis in (:x, :y, :z)],
+		)
 		if from_data
 			scene_fields[:aspectmode] = "manual"
 			scene_fields[:aspectratio] = attr(x = aspect[1], y = aspect[2], z = aspect[3])
@@ -1353,24 +1540,45 @@ end
 	view!(fig; elev = 30, azim = -60, distance = :auto, up = :z, projection = nothing,
 	      zoom = 1, row = nothing, col = nothing) -> fig
 
-Point the camera of a 3-D scene like matplotlib's `view_init(elev, azim)`. The
-eye sits at `distance * (cosd(elev)cosd(azim), cosd(elev)sind(azim), sind(elev))`
-from the camera centre, looking at it, with the vertical axis pointing up;
-near-vertical views (`|elev| ≥ 89.9`) use the horizontal up vector
-`∓(cosd(azim), sind(azim), 0)`. `fig` is a `Plot` or `SyncPlot` with a 3-D
+Point the camera of a 3-D scene like matplotlib's `ax.view_init(elev, azim)`.
+The camera sits in the direction
+`(cosd(elev) * cosd(azim), cosd(elev) * sind(azim), sind(elev))` from the scene
+centre (the eye is `distance` times that unit vector from the camera centre),
+looks at the centre, and keeps the z axis pointing up. matplotlib's default
+view `elev = 30, azim = -60` puts the camera on the +x, -y, +z side. At
+`(90, -90)` you look straight down with +x to the right and +y up; at `(0, 0)`
+you look along -x with +y to the right and +z up. Near-vertical views
+(`|elev| ≥ 89.9`) use the horizontal up vector `∓(cosd(azim), sind(azim), 0)`,
+which gives exactly that top view. `fig` is a `Plot` or `SyncPlot` with a 3-D
 scene, or a `SubplotFigure`. Every 3-D constructor and mutator also accepts
 `view = (elev, azim)`.
+
+Without `view!` a perspective scene keeps plotly's default direction (eye
+along (1, 1, 1)) at the automatic distance described under `distance`.
 
 # Keywords
 
 - `elev::Real = 30`: elevation above the horizontal plane, in degrees.
 - `azim::Real = -60`: azimuth from the +x axis towards +y, in degrees.
-- `distance = :auto`: `:auto` frames the scene box tightly in a perspective
-  view, using the scene's size in the figure (`layout.width`/`height`, else
-  700×500 px, `layout.margin` and the cell domain); for the "auto" and "data"
-  aspect modes the data proportions are then pinned with
-  `aspectmode = "manual"` so the framing stays right. A positive number is the
-  distance in plotly's normalised scene units.
+- `distance = :auto`: `:auto` puts the camera as close as it can be while
+  all eight corners of the scene box, seen in perspective from this
+  direction, stay inside the scene's viewport (`layout.width`/`height`, else
+  700×500 px, `layout.margin` and the cell domain) less a border of three
+  font sizes (`layout.font.size` or the largest scene axis font, else 12 px)
+  on each side for the tick labels and axis titles. For the "auto" and
+  "data" aspect modes the data proportions are then pinned with
+  `aspectmode = "manual"` so the framing stays right. The 3-D constructors
+  and mutators, `scene!` and `annotate!` recompute an automatic distance
+  (with `zoom = 1`) and such pinned proportions (other than a cube) when they
+  change the scene. A positive number is the distance in plotly's normalised
+  scene units and is kept.
+
+In a scene smaller than the plot area (a subplot cell), axes whose ticks are
+automatic get `nticks` from their length on screen (about one tick per 40 px,
+2 to 9), because plotly.js counts ticks from the size of the whole figure and
+would crowd a small scene with overlapping labels. `view!`, the 3-D
+constructors and mutators, `scene!` and `annotate!` update these counts; a
+count set with `scene!(; nticks)`, tick values or a tick step is kept.
 - `up = :z`: the vertical axis, `:x`, `:y` or `:z` (matplotlib
   `vertical_axis`).
 - `projection = nothing`: "perspective" or "orthographic"; `nothing` keeps the
@@ -1417,7 +1625,9 @@ function view!(
 	_s3_reject_kwargs(who, kwargs)
 	params = _s3_view_params(who; elev, azim, distance, up, projection, zoom)
 	target = _s3_scene_target(fig, who; row, col)
+	state = _s3_scene_state(fig, target)
 	_s3_apply_view!(fig, target, params)
+	_s3_finish_ticks!(fig, target, state)
 	_refresh!(fig)
 	return fig
 end
@@ -1498,7 +1708,11 @@ changes, and keywords left at their defaults leave it as it is. `fig` is a
 
 - `aspectratio = nothing`: `(x, y, z)` or `(x = …, y = …, z = …)`, positive;
   sets `aspectmode = "manual"`.
-- `aspectmode = nothing`: "auto", "cube", "data" or "manual".
+- `aspectmode = nothing`: "auto", "cube", "data" or "manual". plotly.js
+  ignores explicit axis ranges in "auto" and "data", so with a range they are
+  written as `aspectmode = "manual"` with the proportions of the axis spans
+  (equal units for "data"), as in the 3-D constructors; a camera at
+  [`view!`](@ref)'s automatic distance is re-framed for the changed scene.
 - `nticks::Integer = 0`: about how many ticks each axis gets (0: automatic).
 - `showbackground::Union{Nothing, Bool} = nothing`: show or hide the axis
   panes.
@@ -1609,10 +1823,13 @@ function scene!(
 		isempty(fields) || (scene[axis] = attr(; fields...))
 	end
 	state = _s3_scene_state(fig, target)
-	# An aspect set now replaces what was pinned automatically.
-	(mode === nothing) || (state = _S3SceneState(false, state.auto_camera))
+	# An aspect set now replaces what was pinned automatically; a tick count
+	# given now is the user's.
+	(mode === nothing) || (state = _S3SceneState(false, state.auto_camera, state.auto_ticks))
+	nticks > 0 && (state = _S3SceneState(state.pinned, state.auto_camera, (false, false, false)))
 	isempty(scene) || _merge_scene_layout_attr!(layout, key, attr(; scene...))
 	_s3_finish_scene!(fig, target, state)
+	_s3_finish_ticks!(fig, target, state)
 	_refresh!(fig)
 	return fig
 end
@@ -1754,6 +1971,7 @@ function annotate!(
 	state = _s3_scene_state(fig, target)
 	_merge_scene_layout_attr!(layout, target.scenekey, attr(annotations = kept))
 	_s3_finish_scene!(fig, target, state)
+	_s3_finish_ticks!(fig, target, state)
 	_refresh!(fig)
 	return fig
 end
@@ -4710,7 +4928,7 @@ function _s3_subplot!(
 	impl = staged -> begin
 		state = _s3_scene_state(staged, _s3_scene_target(staged, who; row, col))
 		# An aspect mode given now replaces what was pinned automatically.
-		explicit_mode && (state = _S3SceneState(false, state.auto_camera))
+		explicit_mode && (state = _S3SceneState(false, state.auto_camera, state.auto_ticks))
 		captured = Ref{Any}(nothing)
 		wrapped = function (tmp, inner_args...; inner_kwargs...)
 			result = mutator(tmp, inner_args...; inner_kwargs...)
@@ -4737,6 +4955,7 @@ function _s3_subplot!(
 			params = _S3ViewParams(view_angles[1], view_angles[2], :auto, :z, nothing, 1.0)
 			_s3_apply_view!(staged, cell, params)
 		end
+		_s3_finish_ticks!(staged, cell, state)
 		_refresh!(getfield(staged, :fig))
 		return staged
 	end

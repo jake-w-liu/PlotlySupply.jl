@@ -545,7 +545,9 @@ end
 			scaled = subplots(1, 2; sync=false, per_subplot_legends=psl, specs=[Spec(kind="scene") Spec(kind="scene")])
 			plot_surface!(scaled, rand(3, 3); row=1, col=1, colorscale="Viridis", shared_coloraxis=true)
 			plot_surface!(scaled, rand(3, 3); row=1, col=2, shared_coloraxis=true)
-			@test _rsp_fields(_rsp_layout(scaled)[:coloraxis])[:colorscale] == "Viridis"
+			# 2.0 (C20): colormap names are resolved to colour stops.
+			@test _rsp_fields(_rsp_layout(scaled)[:coloraxis])[:colorscale] ==
+				[Any[t, c] for (t, c) in colormap("Viridis")]
 			@test all(get(t.fields, :coloraxis, nothing) == "coloraxis" for t in scaled.plot.data)
 		end
 	end
