@@ -1458,9 +1458,11 @@ Colour (only with `values`):
   quantised into; each non-empty bin is one plotly trace. Ignored with `levels`
   (the bands are the bins).
 - `showscale::Union{Nothing,Bool} = nothing`: draw the colour bar (default on).
-- `colorbar_title::AbstractString = ""`, `colorbar_ticks = nothing` (tick
-  values in data units), `colorbar_ticklabels = nothing` (same length as the
-  ticks).
+- `colorbar_title::AbstractString = ""` (mathtext; a `\$...\$` title is drawn
+  as a typeset annotation beside the bar), `colorbar_title_side = :top`
+  (`:top`, `:right` or `:bottom`, Symbol or String), `colorbar_ticks =
+  nothing` (tick values in data units), `colorbar_ticklabels = nothing` (same
+  length as the ticks).
 - `coloraxis = nothing`: `:shared` (= `"coloraxis"`) or `"coloraxisN"` binds
   the colour bar to `layout.<coloraxis>`; this call writes its colorscale and
   limits there. When that axis already has limits and `crange` is automatic,
@@ -1490,11 +1492,18 @@ Style:
 Figure:
 - `equalar::Bool = true`: equal data aspect (`yaxis.scaleanchor`); `false`
   leaves the axes as they are.
+- `tight::Bool = true`: while an axis autoranges, its range is fitted to the
+  mesh (and the other traces on that axis) without plotly's padding; `false`
+  restores plotly's padded autorange on both axes of the mesh. The fill
+  traces carry the flag; edge, hover and colour-bar traces do not.
 - `title`, `xlabel`, `ylabel::AbstractString = ""` (mathtext labels),
-  `xrange`, `yrange = [0, 0]` (data units, also on log axes), `xscale`,
-  `yscale = ""` (`"linear"`, `"log"`, ...; on a log axis every coordinate must
-  be positive), `width`, `height`, `fontsize::Real = 0` (0 = automatic),
-  `grid = true` (`false`, `:x`, `:y`, `:both`, `:none`).
+  `xrange`, `yrange = [0, 0]`: axis limits `(lower, upper)` in data units,
+  also on log axes, with autorange off; `[0, 0]`, `nothing` or
+  `[nothing, nothing]` leaves the axis automatic, and both bounds are
+  required, different and not Bool. `xscale`, `yscale = ""` (`"linear"`,
+  `"log"`, ...; on a log axis every coordinate must be positive), `width`,
+  `height`, `fontsize::Real = 0` (0 = automatic), `grid = true` (`false`,
+  `:x`, `:y`, `:both`, `:none`).
 - `show::Bool = false`: open a window and return a `SyncPlot`.
 
 #### Plotly encoding
@@ -1526,13 +1535,15 @@ _mesh2d_show_options(; width = 0, height = 0, title = "", kwargs...) = (; width,
 """
 	plot_polygons!(fig, px, py, values = nothing; kwargs...) -> nothing
 	plot_polygons!(fig, x, y, cells, values = nothing; kwargs...) -> nothing
-	plot_polygons!(sf::SubplotFigure, ...; row = nothing, col = nothing, secondary_y = false, kwargs...) -> sf
+	plot_polygons!(sf::SubplotFigure, ...; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
 Add polygons to an existing figure. `fig` is a `Plot` or a `SyncPlot` (one
 renderer transaction; a failing call leaves the figure unchanged). On a
 `SubplotFigure` the polygons go to cell (`row`, `col`) (both or neither;
-default: the active cell), on its secondary y axis with `secondary_y = true`;
-the cell's own colour bar is placed next to it.
+default: the active cell), on its secondary y axis with `secondary_y = true`,
+or into the `k`-th inset from [`inset!`](@ref) with `inset = k`; the cell's
+own colour bar is placed next to it. `xrange`/`yrange` set the target axes'
+limits (data units; on a shared `matches` axis the limits of its group).
 
 Takes the arguments and keywords of [`plot_polygons`](@ref) except `show`
 (passing it throws an `ArgumentError`). Differences:
@@ -1788,12 +1799,12 @@ To mirror a half-plane mesh, call it twice: `plot_pcolormesh!(fig, -X, Y, C)`.
 #### Keywords
 The colour, style and figure keywords of [`plot_polygons`](@ref)
 (`colorscale = "Viridis"`, `crange`, `cmid`, `colornorm`, `levels`,
-`ncolors = 256`, `showscale`, `colorbar_title`, `colorbar_ticks`,
-`colorbar_ticklabels`, `coloraxis`, `edgecolor`, `edgewidth = 0`,
-`opacity = 1`, `hatch`, `hover = false`, `equalar = true`, `title`, `xlabel`,
-`ylabel`, `xrange`, `yrange`, `xscale`, `yscale`, `width`, `height`,
-`fontsize`, `grid = true`, `show = false`), without `color` and `legend`
-(`C` always colours the cells).
+`ncolors = 256`, `showscale`, `colorbar_title`, `colorbar_title_side = :top`,
+`colorbar_ticks`, `colorbar_ticklabels`, `coloraxis`, `edgecolor`,
+`edgewidth = 0`, `opacity = 1`, `hatch`, `hover = false`, `equalar = true`,
+`tight = true`, `title`, `xlabel`, `ylabel`, `xrange`, `yrange`, `xscale`,
+`yscale`, `width`, `height`, `fontsize`, `grid = true`, `show = false`),
+without `color` and `legend` (`C` always colours the cells).
 
 #### Plotly encoding
 The vector form with strictly monotonic `x`, `y`, `edgewidth = 0`, no
@@ -1823,13 +1834,15 @@ end
 """
 	plot_pcolormesh!(fig, X, Y, C; kwargs...) -> nothing
 	plot_pcolormesh!(fig, x, y, C; kwargs...) -> nothing
-	plot_pcolormesh!(sf::SubplotFigure, ...; row = nothing, col = nothing, secondary_y = false, kwargs...) -> sf
+	plot_pcolormesh!(sf::SubplotFigure, ...; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
 Add a pseudocolour mesh to an existing `Plot`, `SyncPlot` (one renderer
 transaction; a failing call leaves the figure unchanged) or SubplotFigure cell
 (`row`/`col`, default the active cell; `secondary_y = true` for the cell's
-secondary y axis). Arguments and keywords as [`plot_pcolormesh`](@ref) except
-`show` (an `ArgumentError`); `grid = nothing` leaves the grid unchanged.
+secondary y axis; `inset = k` for the `k`-th inset from [`inset!`](@ref)).
+Arguments and keywords as [`plot_pcolormesh`](@ref) except `show` (an
+`ArgumentError`); `grid = nothing` leaves the grid unchanged, and
+`xrange`/`yrange` act as for [`plot_polygons!`](@ref).
 
 Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a SubplotFigure.
 
@@ -2176,11 +2189,13 @@ Pseudocolour plot of an unstructured triangular mesh (matplotlib `tripcolor`).
   "rgba(0,0,0,0.35)"` and `edgewidth::Real = 0.5` (px).
 - Colour keywords as [`plot_polygons`](@ref): `colorscale = "Viridis"`,
   `crange`, `cmid`, `colornorm`, `levels`, `ncolors = 256` (flat only),
-  `showscale`, `colorbar_title`, `colorbar_ticks`, `colorbar_ticklabels`,
-  `coloraxis`. Automatic limits are the extrema of the drawn values.
+  `showscale`, `colorbar_title`, `colorbar_title_side = :top`,
+  `colorbar_ticks`, `colorbar_ticklabels`, `coloraxis`. Automatic limits are
+  the extrema of the drawn values.
 - `opacity::Real = 1`, `hover::Bool = false` (flat: centroid markers;
   gouraud: the raster's own hover).
-- Figure keywords as [`plot_polygons`](@ref): `equalar = true`, `title`,
+- Figure keywords as [`plot_polygons`](@ref): `equalar = true`,
+  `tight = true` (on the fill traces or the gouraud raster), `title`,
   `xlabel`, `ylabel`, `xrange`, `yrange`, `xscale`, `yscale`, `width`,
   `height`, `fontsize`, `grid = true`, `show = false`.
 
@@ -2204,13 +2219,15 @@ end
 
 """
 	plot_tripcolor!(fig, x, y, triangles, values; kwargs...) -> nothing
-	plot_tripcolor!(sf::SubplotFigure, x, y, triangles, values; row = nothing, col = nothing, secondary_y = false, kwargs...) -> sf
+	plot_tripcolor!(sf::SubplotFigure, x, y, triangles, values; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
 Add a triangular pseudocolour mesh to an existing `Plot`, `SyncPlot` (one
 renderer transaction; a failing call leaves the figure unchanged) or
-SubplotFigure cell (`row`/`col`, default the active cell). Arguments and
-keywords as [`plot_tripcolor`](@ref) except `show` (an `ArgumentError`);
-`grid = nothing` leaves the grid unchanged.
+SubplotFigure cell (`row`/`col`, default the active cell; `secondary_y`,
+`inset = k` as for [`plot_polygons!`](@ref)). Arguments and keywords as
+[`plot_tripcolor`](@ref) except `show` (an `ArgumentError`); `grid = nothing`
+leaves the grid unchanged, and `xrange`/`yrange` act as for
+[`plot_polygons!`](@ref).
 
 Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a SubplotFigure.
 
@@ -2307,7 +2324,9 @@ edge once, as one line trace.
 #### Keywords
 - `color = "black"`: line colour (String or Symbol; `""` takes the next colour
   of the figure's colour cycle).
-- `linewidth::Real = 0.5`: line width in px.
+- `linewidth::Real = 0`: line width in px; `0` takes the active style's line
+  width ([`with_style`](@ref)), else 0.5 px. The style's dash/marker cycle is
+  not applied (the mesh keeps `dash`).
 - `dash = ""`: `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`,
   `"longdashdot"`, a matplotlib code (`"-"`, `"--"`, `":"`, `"-."`) or a length
   list such as `"5px,3px"`.
@@ -2334,10 +2353,11 @@ end
 
 """
 	plot_triplot!(fig, x, y, triangles; kwargs...) -> nothing
-	plot_triplot!(sf::SubplotFigure, x, y, triangles; row = nothing, col = nothing, secondary_y = false, kwargs...) -> sf
+	plot_triplot!(sf::SubplotFigure, x, y, triangles; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
 Add triangle-mesh edges to an existing `Plot`, `SyncPlot` (one renderer
-transaction) or SubplotFigure cell, e.g. over a [`plot_tripcolor`](@ref).
+transaction) or SubplotFigure cell (`row`/`col`, `secondary_y`, `inset = k`
+as for [`plot_polygons!`](@ref)), e.g. over a [`plot_tripcolor`](@ref).
 Keywords as [`plot_triplot`](@ref) except `show` (an `ArgumentError`);
 `grid = nothing` leaves the grid unchanged.
 
@@ -2705,8 +2725,8 @@ mesh edges.
 - `color = ""`: one colour for every level; `""` colours each level from
   `colorscale = "Viridis"` (`""`: the template's scale) by its position in
   `crange` (default: from the lowest to the highest level).
-- `linewidth::Real = 1` (px), `dash = ""` (as [`plot_triplot`](@ref)),
-  `opacity::Real = 1`.
+- `linewidth::Real = 0` (px; `0` takes the active style's line width, else
+  1 px), `dash = ""` (as [`plot_triplot`](@ref)), `opacity::Real = 1`.
 - `showlabels::Bool = false`: label each level once, at the arc-length
   midpoint of its longest polyline, in the level's colour with a contrasting
   halo; `label_fontsize::Real = 0` (0 = template size).
@@ -2745,10 +2765,11 @@ end
 
 """
 	plot_tricontour!(fig, x, y, triangles, values; kwargs...) -> nothing
-	plot_tricontour!(sf::SubplotFigure, x, y, triangles, values; row = nothing, col = nothing, secondary_y = false, kwargs...) -> sf
+	plot_tricontour!(sf::SubplotFigure, x, y, triangles, values; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
 Add triangular-mesh contour lines to an existing `Plot`, `SyncPlot` (one
-renderer transaction) or SubplotFigure cell, e.g. over a
+renderer transaction) or SubplotFigure cell (`row`/`col`, `secondary_y`,
+`inset = k` as for [`plot_polygons!`](@ref)), e.g. over a
 [`plot_tripcolor`](@ref). Keywords as [`plot_tricontour`](@ref) except `show`
 (an `ArgumentError`); `grid = nothing` leaves the grid unchanged.
 

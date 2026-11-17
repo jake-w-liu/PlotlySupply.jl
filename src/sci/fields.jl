@@ -150,10 +150,13 @@ entries; NaN/`missing` cells are empty, Bool is drawn as 0/1, complex throws.
 - `textsize::Real = 0`: annotation font size (0 = automatic). plotly picks a
   contrasting text colour per cell.
 - `colorscale = "RdBu_r"`, `crange = [0, 0]`, `cmid = nothing`,
-  `colorbar_title = ""`: colour mapping as for [`plot_heatmap`](@ref) (e.g.
-  `crange = (-1, 1)` or `cmid = 0` for a correlation matrix).
+  `colorbar_title = ""`, `colorbar_title_side = :top`: colour mapping and
+  colorbar title as for [`plot_heatmap`](@ref) (e.g. `crange = (-1, 1)` or
+  `cmid = 0` for a correlation matrix).
 - `xlabel = ""`, `ylabel = ""`, `title = ""`.
 - `equalar::Bool = true`: square cells.
+- `tight::Bool = true`: autoranged axes fit the cell edges without padding;
+  `false` restores plotly's padded autorange (as for [`plot_heatmap`](@ref)).
 - `grid = true` (template grid, hidden under the cells), `width = 0`,
   `height = 0`, `fontsize = 0`, `show::Bool = false`.
 
@@ -222,13 +225,14 @@ end
 
 """
 	plot_matrix!(fig, A::AbstractMatrix; kwargs...)
-	plot_matrix!(sf::SubplotFigure, A::AbstractMatrix; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_matrix!(sf::SubplotFigure, A::AbstractMatrix; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append a matrix plot (see [`plot_matrix`](@ref) for the layout and the
 keywords; `show` is not accepted and throws an `ArgumentError`) to `fig`, a
 `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
 together, default: the active cell; `secondary_y` targets the cell's
-secondary y axis). The target y axis is reversed so row 1
+secondary y axis; `inset = k` targets the `k`-th inset from
+[`inset!`](@ref)). The target y axis is reversed so row 1
 is at the top; `grid = nothing` keeps the grid. On a `SubplotFigure`,
 `title`, `width` and `height` are ignored with a warning.
 

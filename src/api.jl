@@ -11175,8 +11175,12 @@ Colour (spec C21):
   bands (BoundaryNorm); excludes `crange`/`cmid`.
 - `showscale::Union{Nothing,Bool} = nothing`: show/hide the colorbar
   (`nothing` = plotly default, shown).
-- `colorbar_title = ""`, `colorbar_ticks = nothing` (tick values in data
-  units), `colorbar_ticklabels = nothing` (same length as `colorbar_ticks`).
+- `colorbar_title = ""`: colorbar title (mathtext; a title in `\$...\$` is
+  drawn as a typeset annotation beside the bar, in single figures and in
+  subplot cells), `colorbar_title_side = :top`: where the title sits, `:top`,
+  `:right` (along the bar) or `:bottom` (Symbol or String).
+- `colorbar_ticks = nothing` (tick values in data units),
+  `colorbar_ticklabels = nothing` (same length as `colorbar_ticks`).
 - `coloraxis = nothing`: `:shared` (or `"coloraxis2"`, ...) binds the trace to
   a shared `layout.coloraxis`, which then receives the colour settings.
 
@@ -11192,8 +11196,12 @@ Cells and text (spec F27):
 
 Axes and figure:
 - `xlabel = ""`, `ylabel = ""`, `title = ""`: text (LaTeX in `\$...\$` allowed).
-- `xrange = [0, 0]`, `yrange = [0, 0]`: axis ranges in data units (also on log
-  axes); `[0, 0]`/`nothing` is automatic.
+- `xrange = [0, 0]`, `yrange = [0, 0]`: axis limits `(lower, upper)` (a
+  2-element vector or tuple) in data units, also on a log axis (converted to
+  the log10 values plotly stores); a range turns the axis's autorange off.
+  `[0, 0]`, `nothing` or `[nothing, nothing]` leaves the axis automatic. Both
+  bounds are required and must differ; Bool bounds throw. Dates and category
+  strings are accepted.
 - `xscale = ""`, `yscale = ""`: axis type, e.g. `"log"`.
 - `xticks = nothing`, `xticklabels = nothing`, `xtickformat = ""`, `yticks`,
   `yticklabels`, `ytickformat`: explicit tick values (data units), their
@@ -11201,6 +11209,10 @@ Axes and figure:
 - `grid::Union{Nothing,Bool,Symbol} = true`: `true` keeps the template grid,
   `false`/`:none` hides it, `:x`/`:y`/`:both` choose the axes.
 - `equalar::Bool = false`: equal data aspect (one x unit = one y unit).
+- `tight::Bool = true`: while an axis autoranges, its range is fitted to the
+  field (the outer cell edges, also on log axes) and the other traces on that
+  axis, without plotly's padding. `false` restores plotly's padded autorange
+  on both axes of the trace. An explicit `xrange`/`yrange` always wins.
 - `width = 0`, `height = 0` (pixels, 0 = automatic), `fontsize = 0`.
 - `show::Bool = false`: open the figure in a window and return a `SyncPlot`.
 
@@ -11797,19 +11809,24 @@ Levels and lines (spec F26):
 - `linecolor = ""`: one colour for every contour line (string, Symbol or
   Colorant); implies `coloring = "none"` unless `"fill"`/`"heatmap"` is given
   and conflicts with `"lines"`.
-- `linewidth::Real = 0` (0 = plotly default), `dash = ""` (`"dash"`, `"dot"`,
-  `"dashdot"`, ... or `"5px,3px"`).
+- `linewidth::Real = 0`: line width in px. `0` is automatic: line contours
+  (`coloring = "lines"`/`"none"`) take the active style's line width
+  ([`with_style`](@ref)), else plotly's default; filled contours keep plotly's
+  thin level boundaries (bands: none).
+- `dash = ""` (`"dash"`, `"dot"`, `"dashdot"`, ... or `"5px,3px"`).
 - `showlabels::Bool = false`, `labelformat = ""` (d3 format, e.g. `".2f"`).
 
 Colour: `colorscale`, `crange` (alias `zrange`), `cmid`, `colornorm`,
-`showscale`, `colorbar_title`, `colorbar_ticks`, `colorbar_ticklabels`,
-`coloraxis` as for [`plot_heatmap`](@ref) (`showscale = true` with
-single-colour lines throws).
+`showscale`, `colorbar_title`, `colorbar_title_side = :top`,
+`colorbar_ticks`, `colorbar_ticklabels`, `coloraxis` as for
+[`plot_heatmap`](@ref) (`showscale = true` with single-colour lines throws).
 
 Axes and figure: `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`,
 `yscale`, `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
-`ytickformat`, `grid = true`, `equalar = false`, `width`, `height`,
-`fontsize`, `show = false`, as for [`plot_heatmap`](@ref).
+`ytickformat`, `grid = true`, `equalar = false`, `tight::Bool = true`,
+`width`, `height`, `fontsize`, `show = false`, as for [`plot_heatmap`](@ref).
+`tight` fits the autoranged axes to the contour grid (filled contours and
+line contours alike); `tight = false` opts the trace out.
 
 Returns a `Plot` (a `SyncPlot` when `show = true`). Invalid input throws an
 `ArgumentError`.
@@ -12292,10 +12309,13 @@ pointing at angle `atan(v, u)` with equal aspect (matplotlib's default
 - `sizeref::Real = 1`: length budget of the longest arrow (see above); 0
   draws nothing; must be finite and ≥ 0.
 - `legend = ""`: legend name; an unnamed quiver has no legend entry.
-- `linewidth::Real = 0`: arrow line width in pixels (0 = plotly default).
+- `linewidth::Real = 0`: arrow line width in pixels; `0` takes the active
+  style's line width ([`with_style`](@ref)), else plotly's default. The
+  style's dash/marker cycle is not applied to arrows.
 - `equalar::Bool = true`: equal data aspect, so arrow angles are true.
 - `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
-  `yrange = [0, 0]` (data units), `xscale = ""`, `yscale = ""`,
+  `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic), `xscale = ""`,
+  `yscale = ""`,
   `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
   `ytickformat`, `grid::Union{Nothing,Bool,Symbol} = true`, `width = 0`,
   `height = 0`, `fontsize = 0`: as for [`plot_heatmap`](@ref).
@@ -13157,14 +13177,16 @@ end
 """
 	plot_heatmap!(fig, x, y, U; kwargs...)
 	plot_heatmap!(fig, U; kwargs...)
-	plot_heatmap!(sf::SubplotFigure, x, y, U; row = nothing, col = nothing, secondary_y = false, kwargs...)
-	plot_heatmap!(sf::SubplotFigure, U; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_heatmap!(sf::SubplotFigure, x, y, U; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
+	plot_heatmap!(sf::SubplotFigure, U; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append a heatmap of `U` (indexed `U[ix, iy]`, `size(U) == (length(x),
 length(y))` or cell edges) to `fig`, a `Plot` or `SyncPlot`, or to a cell of
 a `SubplotFigure` (`row`/`col` together, default: the active cell;
-`secondary_y` targets the cell's secondary y axis). Implicit coordinates are
-0-based, or 1-based when the target x/y axis is (or is made) logarithmic.
+`secondary_y` targets the cell's secondary y axis; `inset = k` targets the
+`k`-th inset added with [`inset!`](@ref), and its parent cell becomes the
+active cell). Implicit coordinates are 0-based, or 1-based when the target
+x/y axis is (or is made) logarithmic.
 
 Takes the keywords of [`plot_heatmap`](@ref) except `show` (passing `show`
 throws an `ArgumentError`), with mutator defaults that leave the figure as it
@@ -13173,7 +13195,10 @@ is: `origin = ""` keeps the y-axis direction (`:upper`/`:lower` set it),
 automatic ranges and empty scales change nothing. The layout keywords act on
 the primary axes of a `Plot`/`SyncPlot` and on the target cell's axes of a
 `SubplotFigure`, where `title`, `width` and `height` are ignored with a
-warning. A user template is kept.
+warning. `xrange`/`yrange` (data units, also on a log axis) set the target
+axes' limits with autorange off, on a shared (`matches`) axis the limits of
+its group; `[0, 0]`/`nothing` leaves them as they are. A user template is
+kept.
 
 Invalid input throws an `ArgumentError` and leaves the figure unchanged.
 Returns `nothing` (`sf` for a `SubplotFigure`).
@@ -13293,14 +13318,15 @@ end
 """
 	plot_contour!(fig, x, y, U; kwargs...)
 	plot_contour!(fig, U; kwargs...)
-	plot_contour!(sf::SubplotFigure, x, y, U; row = nothing, col = nothing, secondary_y = false, kwargs...)
-	plot_contour!(sf::SubplotFigure, U; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_contour!(sf::SubplotFigure, x, y, U; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
+	plot_contour!(sf::SubplotFigure, U; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append contours of `U` (indexed `U[ix, iy]`, `size(U) == (length(x),
 length(y))`) to `fig`, a `Plot` or `SyncPlot`, or to a cell of a
 `SubplotFigure` (`row`/`col` together, default: the active cell;
-`secondary_y` targets the cell's secondary y axis). Implicit coordinates are
-0-based, or 1-based when the target axis is logarithmic.
+`secondary_y` targets the cell's secondary y axis; `inset = k` targets the
+`k`-th inset from [`inset!`](@ref)). Implicit coordinates are 0-based, or
+1-based when the target axis is logarithmic.
 
 Takes the keywords of [`plot_contour`](@ref) except `show` (passing `show`
 throws an `ArgumentError`); `grid = nothing` keeps the grid, and the other
@@ -13308,7 +13334,8 @@ layout keywords change nothing at their defaults. The overlay idiom draws
 one labelled white level without a colorbar or legend entry:
 `plot_contour!(fig, x, y, U; levels = [0.0], linecolor = "white",
 showlabels = true)`. On a `SubplotFigure` the layout keywords act on the
-target cell; `title`, `width` and `height` are ignored with a warning.
+target cell (`xrange`/`yrange` as for [`plot_heatmap!`](@ref)); `title`,
+`width` and `height` are ignored with a warning.
 
 Invalid input throws an `ArgumentError` and leaves the figure unchanged.
 Returns `nothing` (`sf` for a `SubplotFigure`).
@@ -13432,13 +13459,15 @@ end
 
 """
 	plot_quiver!(fig, x, y, u, v; kwargs...)
-	plot_quiver!(sf::SubplotFigure, x, y, u, v; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_quiver!(sf::SubplotFigure, x, y, u, v; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append a vector field (same input forms, arrow scaling and keywords as
 [`plot_quiver`](@ref), except `show`, which throws an `ArgumentError`) to
 `fig`, a `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
 together, default: the active cell; `secondary_y` targets the cell's
-secondary y axis). `equalar = true` (default) locks the
+secondary y axis; `inset = k` targets the `k`-th inset from
+[`inset!`](@ref)). `xrange`/`yrange` act as for [`plot_heatmap!`](@ref).
+`equalar = true` (default) locks the
 data aspect of the target axes; `grid = nothing` keeps the grid (`true`
 re-enables it, `false` hides it). Each call scales its own arrows: the longest
 arrow of this call is `2/3 * sizeref` long in x/y data units. Arrows on an axis that
@@ -18277,10 +18306,17 @@ alpha channel is kept. A 2-D matrix of numbers is not an image (use
 - `origin = :upper`: row 1 at the top (`:lower`: at the bottom, y axis
   pointing up).
 - `equalar::Bool = true`: square pixels (equal data aspect).
+- `tight::Bool = true`: autoranged axes fit the image's pixel edges without
+  padding; `false` restores plotly's padded autorange (as for
+  [`plot_heatmap`](@ref)).
 - `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
-  `yrange = [0, 0]`, `xticks`, `xticklabels`, `xtickformat`, `yticks`,
-  `yticklabels`, `ytickformat`, `grid::Union{Nothing,Bool,Symbol} = true`,
-  `width = 0`, `height = 0`, `fontsize = 0`: as for [`plot_heatmap`](@ref).
+  `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic). The image
+  keeps its orientation: with `origin = :upper` (or a reversed `extent`) the
+  bounds of an explicit range are reordered so that axis still points down
+  (left), e.g. `yrange = (0, 2)` is written as `[2, 0]`. `xticks`,
+  `xticklabels`, `xtickformat`, `yticks`, `yticklabels`, `ytickformat`,
+  `grid::Union{Nothing,Bool,Symbol} = true`, `width = 0`, `height = 0`,
+  `fontsize = 0`: as for [`plot_heatmap`](@ref).
 - `show::Bool = false`: open a window and return a `SyncPlot`.
 
 Returns a `Plot` (a `SyncPlot` when `show = true`).
@@ -18349,12 +18385,14 @@ end
 
 """
 	plot_image!(fig, z; kwargs...)
-	plot_image!(sf::SubplotFigure, z; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_image!(sf::SubplotFigure, z; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append an image (same data forms and keywords as [`plot_image`](@ref), except
 `show`, which throws an `ArgumentError`) to `fig`, a `Plot` or `SyncPlot`, or
 to a cell of a `SubplotFigure` (`row`/`col` together, default: the active
-cell; `secondary_y` targets the cell's secondary y axis). `origin = ""`
+cell; `secondary_y` targets the cell's secondary y axis; `inset = k` targets
+the `k`-th inset from [`inset!`](@ref); `xrange`/`yrange` act as for
+[`plot_heatmap!`](@ref)). `origin = ""`
 (default) keeps the y-axis direction (plotly shows an
 image's first row at the top unless the axis direction was set); `:upper` /
 `:lower` set it, and an `extent` sets both axis directions. `grid = nothing`

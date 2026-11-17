@@ -838,3 +838,108 @@ end
 		end
 	end
 end
+
+# ── 2.0 integration wave 3 (fields-int): X10 line width of the slope traces
+# and the reference-shape probe on log axes, cell (2, 2), its secondary y
+# axis and an inset. ──────────────────────────────────────────────────────────
+
+_rftv3_refs(s) = (_rft(s, :xref), _rft(s, :yref))
+# Slope in decades of the first and last point of a trace.
+_rftv3_decades(t) = (log10(t.fields[:y][end]) - log10(t.fields[:y][1])) / (log10(t.fields[:x][end]) - log10(t.fields[:x][1]))
+
+@testset "sci reference.jl: 2.0 integration (fields-int)" begin
+	@testset "X10 slope guide / triangle take the style's line width" begin
+		loglog() = plot_scatter([1.0, 10.0], [1.0, 100.0]; xscale = "log", yscale = "log")
+		with_style(; linewidth = 3, cycle = :dash_marker) do
+			f = loglog()
+			slope_guide!(f, 2; x = (1, 10), through = (1, 1))
+			@test _rft(f.data[end].fields[:line], :width) == 3
+			@test _rft(f.data[end].fields[:line], :dash) == "dash"     # the guide's own dash, not the cycle's
+			@test f.data[end].fields[:mode] == "lines"
+			slope_triangle!(f, 2, 2, 2)
+			@test _rft(f.data[end].fields[:line], :width) == 3
+			slope_guide!(f, 1; x = (1, 10), through = (1, 1), linewidth = 0.5)
+			@test _rft(f.data[end].fields[:line], :width) == 0.5
+			slope_triangle!(f, 2, 2, 1; linewidth = 2)
+			@test _rft(f.data[end].fields[:line], :width) == 2
+		end
+		f = loglog()
+		slope_guide!(f, 2; x = (1, 10), through = (1, 1))
+		slope_triangle!(f, 2, 2, 2)
+		@test _rft(f.data[end - 1].fields[:line], :width) == 1
+		@test _rft(f.data[end].fields[:line], :width) == 1
+		@test _rft_throws(() -> slope_guide!(f, 2; x = (1, 10), through = (1, 1), linewidth = -1), "slope_guide!: `linewidth` must be >= 0")
+		@test _rft_throws(() -> slope_triangle!(f, 2, 2, 2; linewidth = NaN), "slope_triangle!: `linewidth` must be a finite real number")
+	end
+
+	@testset "probe: log-log axes (data units, slopes in decades)" begin
+		f = plot_scatter([1.0, 10.0], [1.0, 100.0]; xscale = "log", yscale = "log")
+		hline!(f, 10.0); vline!(f, 3.0); hspan!(f, 2.0, 5.0); vspan!(f, 5.0, 7.0)
+		rectangle!(f, 2.0, 20.0, 4.0, 50.0)
+		shapes = _rft_shapes(f)
+		@test [(_rft(s, :type), _rftv3_refs(s)...) for s in shapes] == [
+			("line", "x domain", "y"), ("line", "x", "y domain"), ("rect", "x domain", "y"),
+			("rect", "x", "y domain"), ("rect", "x", "y")]
+		# Shapes take data values on a log axis.
+		@test (_rft(shapes[1], :y0), _rft(shapes[2], :x0)) == (10.0, 3.0)
+		@test [_rft(shapes[5], k) for k in (:x0, :x1, :y0, :y1)] == [2.0, 4.0, 20.0, 50.0]
+		# Annotations (the arrow) take log10 values, as plotly.js requires.
+		arrow!(f, 1.0, 2.0, 6.0, 60.0)
+		a = _rft_annotations(f)[end]
+		@test [_rft(a, k) for k in (:x, :y, :ax, :ay)] ≈ log10.([6.0, 60.0, 1.0, 2.0])
+		@test _rft(a, :axref) == "x"
+		@test _rft_throws(() -> circle!(f, 8.0, 30.0, 0.5), "circle!: a circle is defined by lengths in data units")
+		@test _rft_throws(() -> hline!(f, 0.0), "hline!: `y` = 0.0 cannot be placed on a logarithmic axis")
+		for order in (2, 1, 0.5, -1, -1.5)
+			slope_guide!(f, order; x = (1, 10), through = (3, 30))
+			@test _rftv3_decades(f.data[end]) ≈ order
+			slope_triangle!(f, 3, 30, order; width = 0.5)
+			t = f.data[end]
+			# Corners 1 -> 3 are the hypotenuse: rise / run in decades = order.
+			@test (log10(t.fields[:y][3]) - log10(t.fields[:y][1])) / (log10(t.fields[:x][3]) - log10(t.fields[:x][1])) ≈ order
+		end
+	end
+
+	@testset "probe: cell (2, 2), its secondary y axis and an inset" begin
+		sf = subplots(2, 2; sync = false, specs = [Spec() Spec(); Spec() Spec(secondary_y = true)])
+		plot_scatter!(sf, [0.0, 10.0], [0.0, 100.0]; row = 2, col = 2)
+		plot_scatter!(sf, [0.0, 10.0], [5.0, 1.0]; row = 2, col = 2, secondary_y = true)
+		cell = _RFT._cell_target(sf; row = 2, col = 2)
+		twin = _RFT._cell_target(sf; row = 2, col = 2, secondary_y = true)
+		@test twin.yref != cell.yref
+		inset!(sf, (0.05, 0.6, 0.4, 0.35); row = 2, col = 2)
+		rec = sf.insets[1]
+		plot_scatter!(sf, [1.0, 100.0], [1.0, 1e4]; inset = 1, xscale = "log", yscale = "log")
+
+		x, y = cell.xref, cell.yref
+		hline!(sf, 10.0; row = 2, col = 2); vline!(sf, 3.0; row = 2, col = 2)
+		hspan!(sf, 2.0, 5.0; row = 2, col = 2); vspan!(sf, 5.0, 7.0; row = 2, col = 2)
+		rectangle!(sf, 2.0, 20.0, 4.0, 50.0; row = 2, col = 2); circle!(sf, 8.0, 30.0, 0.5; row = 2, col = 2)
+		@test [_rftv3_refs(s) for s in _rft_shapes(sf)] == [
+			("$x domain", y), (x, "$y domain"), ("$x domain", y), (x, "$y domain"), (x, y), (x, y)]
+		arrow!(sf, 1.0, 2.0, 6.0, 60.0; row = 2, col = 2)
+		@test (_rft(_rft_annotations(sf)[end], :xref), _rft(_rft_annotations(sf)[end], :yref)) == (x, y)
+
+		ty = twin.yref
+		hline!(sf, 3.0; row = 2, col = 2, secondary_y = true); hspan!(sf, 1.5, 2.0; row = 2, col = 2, secondary_y = true)
+		rectangle!(sf, 1.0, 1.0, 2.0, 2.0; row = 2, col = 2, secondary_y = true)
+		circle!(sf, 8.0, 4.0, 0.5; row = 2, col = 2, secondary_y = true)
+		@test [_rftv3_refs(s) for s in _rft_shapes(sf)[(end - 3):end]] == [("$x domain", ty), ("$x domain", ty), (x, ty), (x, ty)]
+		@test _rft_throws(() -> vline!(sf, 1.0; row = 2, col = 2, secondary_y = true), "vline!: unsupported keyword argument `secondary_y`")
+		slope_guide!(sf, 1; x = (2, 8), through = (2, 2), row = 2, col = 2, secondary_y = true)
+		slope_triangle!(sf, 6, 3, -0.2; row = 2, col = 2, secondary_y = true)
+		@test all((t.fields[:xaxis], t.fields[:yaxis]) == (x, ty) for t in sf.plot.data[(end - 1):end])
+
+		# Inset with log-log axes: refs follow the inset; slopes are in decades.
+		n = length(_rft_shapes(sf))
+		hline!(sf, 10.0; inset = 1); vline!(sf, 3.0; inset = 1); rectangle!(sf, 2.0, 20.0, 4.0, 50.0; inset = 1)
+		@test [_rftv3_refs(s) for s in _rft_shapes(sf)[(n + 1):end]] ==
+			[("$(rec.xref) domain", rec.yref), (rec.xref, "$(rec.yref) domain"), (rec.xref, rec.yref)]
+		slope_guide!(sf, 2; x = (1, 10), through = (1, 10), inset = 1)
+		t = sf.plot.data[end]
+		@test (t.fields[:xaxis], t.fields[:yaxis]) == (rec.xref, rec.yref)
+		@test _rftv3_decades(t) ≈ 2
+		@test _rft_throws(() -> circle!(sf, 8.0, 30.0, 0.5; inset = 1), "circle!: a circle is defined by lengths in data units")
+		@test (sf.current_row, sf.current_col) == (2, 2)
+	end
+end
