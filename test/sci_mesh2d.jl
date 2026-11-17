@@ -942,40 +942,104 @@ end
 		@test _m2_throws(() -> plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI; tight = true), "unsupported keyword argument")
 	end
 
-	@testset "X23 ranges: sentinels, validation, log axes, cells" begin
-		for sentinel in ([0, 0], (0, 0), nothing, [nothing, nothing])
-			@test !haskey(_m2v3_axis(plot_pcolormesh(0:3, 0:2, rand(3, 2); xrange = sentinel), :xaxis), :range)
+	@testset "X23 K1 K2 D11 ranges: sentinels, one-sided limits, validation, log axes, cells" begin
+		clip(fig, key) = _M2._fin_sticky_clip(get(_m2v3_layout(fig), key, nothing))
+		# The one-sided limit (D11) on an axis: `(:pinned, range)` on an
+		# equal-aspect axis, else `(autorange, minallowed, maxallowed)`.
+		function lim(fig, key)
+			ax = _m2v3_axis(fig, key)
+			get(ax, :autorange, true) === false && return (:pinned, collect(ax[:range]))
+			opts = _m2v3_d(get(ax, :autorangeoptions, Dict{Symbol, Any}()))
+			return (get(ax, :autorange, true), get(opts, :minallowed, nothing), get(opts, :maxallowed, nothing))
 		end
+		# Sentinels are automatic (K1): no user range, finalize's clip of the
+		# mesh extent; an equal-aspect mesh is pinned to exactly that clip.
+		for sentinel in ([0, 0], (0, 0), nothing, [nothing, nothing])
+			f = plot_pcolormesh(0:3, 0:2, rand(3, 2); xrange = sentinel)
+			@test clip(f, :xaxis) == (0.0, 3.0) && !haskey(_m2v3_axis(f, :xaxis), :range)
+			g = plot_pcolormesh(0:3, 0:2, rand(3, 2); xrange = sentinel, equalar = true)
+			@test clip(g, :xaxis) == (0.0, 3.0)
+			@test _m2v3_axis(g, :xaxis)[:autorange] === false && _m2v3_axis(g, :xaxis)[:range] == [0.0, 3.0]
+			h = plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; yrange = sentinel)
+			@test clip(h, :yaxis) == (0.0, 1.0) && _m2v3_axis(h, :yaxis)[:range] == [0.0, 1.0]
+		end
+		# No user range was recorded: a later trace widens the axis.
+		f = plot_pcolormesh(0:3, 0:2, rand(3, 2); xrange = nothing)
+		plot_scatter!(f, [9.0], [1.0]; mode = "markers")
+		@test clip(f, :xaxis) == (0.0, 9.0)
 		ax = _m2v3_axis(plot_pcolormesh(0:3, 0:2, rand(3, 2); yrange = (0.5, 1.5)), :yaxis)
 		@test collect(ax[:range]) == [0.5, 1.5] && ax[:autorange] === false
-		@test _m2_throws(() -> plot_pcolormesh(0:3, 0:2, rand(3, 2); xrange = [nothing, 2]), "plot_pcolormesh: `xrange` cannot be partial")
-		@test _m2_throws(() -> plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; yrange = [1, 1]), "plot_polygons: the `yrange` bounds must differ")
-		@test _m2_throws(() -> plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; xrange = (true, 2)),
-			"plot_tripcolor: `xrange` bounds must be numbers")
+		# D11: one-sided limits on every mesh function and mutator.
+		for (who, build) in (
+			("plot_polygons", kw -> plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; kw...)),
+			("plot_pcolormesh", kw -> plot_pcolormesh(0:3, 0:2, rand(3, 2); kw...)),
+			("plot_tripcolor", kw -> plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; kw...)),
+			("plot_triplot", kw -> plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI; kw...)),
+			("plot_tricontour", kw -> plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5], kw...)),
+			("plot_pcolormesh!", kw -> (f = plot_pcolormesh(0:3, 0:2, rand(3, 2)); plot_pcolormesh!(f, 0:3, 0:2, rand(3, 2); kw...); f)),
+		)
+			# Fixed bound plus autorange (`savefig` keeps autorange options), or,
+			# on an equal-aspect axis, pinned to the bound and the data's edge.
+			f = build((; xrange = (0.25, nothing)))
+			aspect = haskey(_m2v3_axis(f, :yaxis), :scaleanchor)
+			l = lim(f, :xaxis)
+			@test (l[1] === :pinned) == aspect
+			@test aspect ? (minimum(l[2]) == 0.25 && l[2][1] < l[2][2]) : l == (true, 0.25, nothing)
+			f = build((; yrange = [nothing, 0.75]))
+			l = lim(f, :yaxis)
+			@test aspect ? (l[1] === :pinned && maximum(l[2]) == 0.75 && l[2][1] < l[2][2]) : l == (true, nothing, 0.75)
+			@test clip(f, :yaxis) === nothing
+			@test _m2_throws(() -> build((; xrange = (missing, 2))), "$(who): `xrange` bounds must be numbers (or date/category values); `missing` is not a bound")
+			@test _m2_throws(() -> build((; yrange = (Inf, nothing))), "$(who): `yrange` bounds must be finite")
+			@test _m2_throws(() -> build((; yrange = [1, 1])), "must differ")
+			@test _m2_throws(() -> build((; xrange = (true, 2))), "$(who): `xrange` bounds must be numbers")
+		end
 		f = plot_tripcolor([1.0, 10.0, 1.0], _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; xscale = "log", xrange = (1, 100))
 		@test _m2v3_axis(f, :xaxis)[:range] == [0.0, 2.0] && _m2v3_axis(f, :xaxis)[:autorange] === false
+		# One-sided on a log axis: data units, stored as log10; positive only.
+		f = plot_pcolormesh([1.0, 10, 100], 0:2, rand(2, 2); xscale = "log", xrange = (nothing, 50))
+		@test lim(f, :xaxis)[1:2] == (true, nothing) && lim(f, :xaxis)[3] ≈ log10(50)
+		# Equal-aspect meshes: pinned to the bound and the mesh edge.
+		@test lim(plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; xrange = (0.5, nothing)), :xaxis) == (:pinned, [0.5, 2.0])
+		@test lim(plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; yrange = (nothing, 0.5)), :yaxis) == (:pinned, [0.0, 0.5])
+		@test lim(plot_pcolormesh(0:3, 0:2, rand(3, 2); equalar = true, xrange = (nothing, 2)), :xaxis) == (:pinned, [0.0, 2.0])
+		@test _m2_throws(() -> plot_pcolormesh([1.0, 10, 100], 0:2, rand(2, 2); xscale = "log", xrange = (0, nothing)),
+			"plot_pcolormesh: `xrange` bounds on a logarithmic axis are data values and must be positive")
 		# Cells: data units on a log cell, autorange off.
 		sf = subplots(1, 2; sync = false)
 		plot_pcolormesh!(sf, [1.0, 10, 100], 0:1, rand(2, 1); row = 1, col = 2, xscale = "log")
 		plot_pcolormesh!(sf, [1.0, 10, 100], 0:1, rand(2, 1); row = 1, col = 2, xrange = (1, 1000))
 		@test _m2v3_axis(sf, :xaxis2)[:range] == [0.0, 3.0] && _m2v3_axis(sf, :xaxis2)[:autorange] === false
+		plot_pcolormesh!(sf, [1.0, 10, 100], 0:1, rand(2, 1); row = 1, col = 2, xrange = (10, nothing))
+		@test lim(sf, :xaxis2) == (true, 1.0, nothing)
+		plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; row = 1, col = 1, yrange = [nothing, 1])
+		l = lim(sf, :yaxis)
+		@test l == (true, nothing, 1) || (l[1] === :pinned && l[2][2] == 1)
 		n = length(_M2._plot_data(sf))
-		@test _m2_throws(() -> plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; row = 1, col = 1, yrange = [nothing, 1]),
-			"plot_triplot!: `yrange` cannot be partial")
+		@test _m2_throws(() -> plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; row = 1, col = 1, yrange = [missing, 1]),
+			"plot_triplot!: `yrange` bounds must be numbers")
+		@test _m2_throws(() -> plot_pcolormesh!(sf, [1.0, 10, 100], 0:1, rand(2, 1); row = 1, col = 2, xrange = (0, nothing)),
+			"plot_pcolormesh!: `xrange` bounds on a logarithmic axis are data values and must be positive")
 		@test length(_M2._plot_data(sf)) == n
 		# Shared x: the range goes to the `matches` root, which plotly.js reads.
-		shared = subplots(1, 2; sync = false, shared_xaxes = true)
-		root = only(_M2._fin_match_roots(shared.plot.layout))
-		other = root === :xaxis ? :xaxis2 : :xaxis
-		plot_pcolormesh!(shared, 0:3, 0:1, rand(3, 1); row = 1, col = 2, xrange = (0, 5))
+		shared = subplots(2, 1; sync = false, shared_xaxes = true)
+		root = _M2._fin_match_root(shared.plot.layout.fields, :xaxis)
+		@test root === :xaxis2
+		plot_pcolormesh!(shared, 0:3, 0:1, rand(3, 1); row = 1, col = 1, xrange = (0, 5))
 		@test collect(_m2v3_axis(shared, root)[:range]) == [0, 5]
-		@test !haskey(_m2v3_axis(shared, other), :range)
+		@test !haskey(_m2v3_axis(shared, :xaxis), :range)
+		shared = subplots(2, 1; sync = false, shared_xaxes = true)
+		plot_pcolormesh!(shared, 0:3, 0:1, rand(3, 1); row = 1, col = 1, xrange = (nothing, 5))
+		@test lim(shared, :xaxis2) == (true, nothing, 5)
+		@test _m2v3_d(_m2v3_axis(shared, :xaxis)[:autorangeoptions])[:maxallowed] == 5
+		@test !haskey(_m2v3_axis(shared, :xaxis), :range)
 	end
 
 	@testset "X20 inset = k on every mesh mutator" begin
 		for call in (
 			sf -> plot_polygons!(sf, [[0, 1, 1.0]], [[0, 0, 1.0]], [1.0]; inset = 1),
-			sf -> plot_pcolormesh!(sf, 0:3, 0:2, rand(3, 2); inset = 1),
+			# G51: plot_pcolormesh has no equal aspect by default; ask for it here.
+			sf -> plot_pcolormesh!(sf, 0:3, 0:2, rand(3, 2); inset = 1, equalar = true),
 			sf -> plot_tripcolor!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; inset = 1),
 			sf -> plot_tripcolor!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; inset = 1, shading = :gouraud),
 			sf -> plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; inset = 1),
@@ -997,17 +1061,35 @@ end
 		@test isempty(_M2._plot_data(sf))
 	end
 
-	@testset "D10 mesh mutators finalize the figure" begin
-		for mutate! in (
-			p -> plot_polygons!(p, _M2V3_QX, _M2V3_QY, _M2V3_QUADS),
-			p -> plot_pcolormesh!(p, 0:3, 0:2, rand(3, 2)),
-			p -> plot_tripcolor!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]),
-			p -> plot_triplot!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI),
-			p -> plot_tricontour!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5]),
+	@testset "D10 K3 mesh mutators finalize the figure (sticky contract)" begin
+		# The `matches` root holding a mesh field gets finalize's clip of the
+		# mesh extent (pinned to it under the default equal aspect of polygons
+		# and tripcolor), which a later trace widens; triplot/tricontour draw no
+		# field, so their root keeps plotly's autorange.
+		clip(fig) = _M2._fin_sticky_clip(get(_m2v3_layout(fig), :xaxis, nothing))
+		for (mutate!, extent, pinned) in (
+			(p -> plot_polygons!(p, _M2V3_QX, _M2V3_QY, _M2V3_QUADS), (0.0, 2.0), true),
+			(p -> plot_pcolormesh!(p, 0:3, 0:2, rand(3, 2)), (0.0, 3.0), false),
+			(p -> plot_tripcolor!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]), (0.0, 1.0), true),
+			(p -> plot_triplot!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI), nothing, false),
+			(p -> plot_tricontour!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5]), nothing, false),
 		)
 			p = Plot(GenericTrace[], Layout(xaxis2 = attr(matches = "x", anchor = "y2"), yaxis2 = attr(anchor = "x2")))
 			mutate!(p)
-			@test _m2v3_axis(p, :xaxis)[:autorange] === true
+			ax = _m2v3_axis(p, :xaxis)
+			if extent === nothing
+				@test clip(p) === nothing && ax[:autorange] === true && !haskey(ax, :range)
+				continue
+			end
+			@test clip(p) == extent
+			if pinned
+				@test ax[:autorange] === false && Tuple(Float64.(ax[:range])) == extent
+			else
+				@test ax[:autorange] === true && !haskey(ax, :range)
+			end
+			plot_scatter!(p, [extent[2] + 10.0], [0.5]; mode = "markers")
+			@test clip(p) == (extent[1], extent[2] + 10.0)
+			pinned && @test Tuple(Float64.(_m2v3_axis(p, :xaxis)[:range])) == (extent[1], extent[2] + 10.0)
 		end
 	end
 
@@ -1028,5 +1110,76 @@ end
 		@test line(plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI))[:width] == 0.5
 		@test line(plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5]))[:width] == 1
 		@test _m2_throws(() -> plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI; linewidth = -1), "plot_triplot")
+	end
+end
+
+# ── wave 4 (fields): G30 tick keywords, G51 pcolormesh aspect, Y5 SubplotFigure
+# delegate on the mesh family. ──
+
+@testset "sci mesh2d: wave 4 (fields)" begin
+	mesh_builds = (
+		("plot_polygons", kw -> plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; kw...)),
+		("plot_pcolormesh", kw -> plot_pcolormesh(0:3, 0:2, rand(3, 2); kw...)),
+		("plot_tripcolor", kw -> plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; kw...)),
+		("plot_triplot", kw -> plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI; kw...)),
+		("plot_tricontour", kw -> plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5], kw...)),
+		("plot_tripcolor!", kw -> (f = plot_pcolormesh(0:3, 0:2, rand(3, 2)); plot_tripcolor!(f, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; kw...); f)),
+	)
+
+	@testset "G30 tick keywords on every mesh function" begin
+		for (who, build) in mesh_builds
+			f = build((; xticks = [0, 0.5, 1], xticklabels = ["a", "b", "c"], ytickformat = ".2f", yticks = [0, 1]))
+			ax = _m2v3_axis(f, :xaxis)
+			ay = _m2v3_axis(f, :yaxis)
+			@test ax[:tickmode] == "array" && ax[:tickvals] == [0, 0.5, 1] && ax[:ticktext] == ["a", "b", "c"]
+			@test ay[:tickvals] == [0, 1] && ay[:tickformat] == ".2f"
+			@test _m2_throws(() -> build((; xticklabels = ["a"])), "$(who): `xticklabels` needs `xticks`")
+			@test _m2_throws(() -> build((; yticks = [true])), "$(who): tick values must all be real numbers")
+			@test _m2_throws(() -> build((; xtickformat = 3)), who)
+		end
+		# The ticks follow a log axis set in the same call (data units).
+		f = plot_pcolormesh([1.0, 10, 100], 0:2, rand(2, 2); xscale = "log", xticks = [1, 10, 100])
+		@test _m2v3_axis(f, :xaxis)[:tickvals] == [1, 10, 100] && _m2v3_axis(f, :xaxis)[:type] == "log"
+		# SubplotFigure cell.
+		sf = subplots(1, 2; sync = false)
+		plot_tripcolor!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; row = 1, col = 2, yticks = [0, 0.5, 1])
+		@test _m2v3_axis(sf, :yaxis2)[:tickvals] == [0, 0.5, 1]
+		@test occursin("`xticks = nothing`", string(Base.Docs.doc(plot_polygons)))
+	end
+
+	@testset "G51 plot_pcolormesh keeps matplotlib's auto aspect" begin
+		f = plot_pcolormesh(0:3, 0:2, rand(3, 2))
+		@test !haskey(_m2v3_axis(f, :yaxis), :scaleanchor)
+		g = plot_pcolormesh(0:3, 0:2, rand(3, 2); equalar = true)
+		@test _m2v3_axis(g, :yaxis)[:scaleanchor] == "x"
+		p = plot_scatter([0.0, 1.0], [0.0, 1.0])
+		plot_pcolormesh!(p, 0:3, 0:2, rand(3, 2))
+		@test !haskey(_m2v3_axis(p, :yaxis), :scaleanchor)
+		# The other mesh functions keep the equal aspect of a geometric mesh.
+		@test _m2v3_axis(plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]), :yaxis)[:scaleanchor] == "x"
+		@test _m2v3_axis(plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS), :yaxis)[:scaleanchor] == "x"
+		@test occursin("`equalar = false` by default", string(Base.Docs.doc(plot_pcolormesh)))
+	end
+
+	@testset "Y5 mesh SubplotFigure delegate: errors name the function, colour axes transplant" begin
+		sf = subplots(1, 2; sync = false)
+		@test _m2_throws(() -> plot_pcolormesh!(sf, 0:3, 0:2, rand(3, 2); row = 1, col = 1, show = true),
+			"plot_pcolormesh!: mutators do not take `show`")
+		@test _m2_throws(() -> plot_tricontour!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; row = 1, col = 1, bogus = 1),
+			"plot_tricontour!: unsupported keyword argument(s) `bogus`")
+		@test isempty(_M2._plot_data(sf))
+		@test_logs (:warn, r"plot_polygons!: per-subplot plot_\*! ignores figure-level keyword") plot_polygons!(
+			sf, _M2V3_QX, _M2V3_QY, _M2V3_QUADS, [0.2, 0.9]; row = 1, col = 1, title = "t")
+		# A numbered colour axis is transplanted by the delegate (no separate
+		# transaction) and shared by a second call on another cell.
+		plot_pcolormesh!(sf, 0:3, 0:2, [1.0 2; 3 4; 5 6]; row = 1, col = 2, coloraxis = "coloraxis2")
+		ca = _m2v3_d(_m2v3_layout(sf)[:coloraxis2])
+		@test ca[:cmin] == 1 && ca[:cmax] == 6
+		@test _M2._plot_data(sf)[end].fields[:xaxis] == "x2"
+		plot_tripcolor!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [2.0, 3, 4]; row = 1, col = 1, coloraxis = "coloraxis2")
+		@test _m2v3_d(_m2v3_layout(sf)[:coloraxis2])[:cmax] == 6
+		# A log cell: coordinates are checked against the cell's axis type.
+		relayout!(sf.plot; xaxis2 = attr(type = "log"))
+		@test _m2_throws(() -> plot_pcolormesh!(sf, 0:3, 0:2, rand(3, 2); row = 1, col = 2), "plot_pcolormesh!")
 	end
 end

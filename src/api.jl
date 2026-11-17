@@ -7460,8 +7460,11 @@ function _field2d_subplot!(
 			inset = inset,
 			who = who,
 		)
-		_field2d_cell_ranges!(staged, target, xr, yr, who)
+		# The equal aspect before the ranges: a one-sided limit is written
+		# differently on an aspect-constrained axis.
 		equalar && _apply_equal_aspect!(staged, target; who = who)
+		# An image's y axis without a direction is drawn reversed by plotly.
+		_field2d_cell_ranges!(staged, target, xr, yr, who; implicit_reversed_y = mutator === plot_image!)
 		_finalize_figure!(_StagedPlotMutation(_cmn_plot(staged)))
 		return staged
 	end
@@ -7471,12 +7474,26 @@ end
 # leaves the axis alone) of a SubplotFigure cell, in DATA units: converted to
 # the log10 values Plotly stores on a log axis, written with
 # `autorange = false` on the root of the axis's `matches` group (the only axis
-# plotly.js reads a shared range from).
+# plotly.js reads a shared range from). A one-sided limit (D11) is written by
+# `_field2d_apply_partial_range!` on the group; `implicit_reversed_y` (an
+# image's y axis) keeps plotly's reversed default when the axis states no
+# direction, as on a Plot.
 # (`t` is a `_CellTarget`, defined after this file in src/sci/common.jl.)
-function _field2d_cell_ranges!(fig, t, xr, yr, who::AbstractString)
+function _field2d_cell_ranges!(fig, t, xr, yr, who::AbstractString; implicit_reversed_y::Bool = false)
 	for (checked, key, name) in ((xr, t.xkey, "xrange"), (yr, t.ykey, "yrange"))
 		checked === nothing && continue
 		root = _axes_match_root(fig, key, who)
+		if _field2d_is_partial(checked)
+			_field2d_require_partial_range(fig, root, checked, "", who, name)
+			_field2d_apply_partial_range!(
+				fig,
+				root,
+				checked;
+				implicit_reversed = implicit_reversed_y && name == "yrange",
+				who = who,
+			)
+			continue
+		end
 		layout = _cmn_layout(fig)
 		value = _axis_type(layout, root) == "log" ?
 			_to_axis_range(layout, root, checked; who = "$(who) (`$(name)`)") :
@@ -7490,67 +7507,11 @@ function _field2d_cell_ranges!(fig, t, xr, yr, who::AbstractString)
 	return nothing
 end
 
-# Whether the target cell's x / y axes are logarithmic after a call passing
-# `xscale` / `yscale` ("" keeps the cell's current type).
-function _field2d_subplot_log_axes(
-	sf::SubplotFigure,
-	who::AbstractString;
-	row = nothing,
-	col = nothing,
-	secondary_y::Bool = false,
-	inset = nothing,
-	xscale::AbstractString = "",
-	yscale::AbstractString = "",
-)
-	_require_axis_scale(xscale, who, "xscale")
-	_require_axis_scale(yscale, who, "yscale")
-	target = _cell_target(
-		sf;
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-		who = who,
-	)
-	layout = _plot_layout(getfield(sf, :fig))
-	cell_log(key) = target.kind === :xy && _axis_type(layout, key) == "log"
-	xlog = isempty(xscale) ? cell_log(target.xkey) : xscale == "log"
-	ylog = isempty(yscale) ? cell_log(target.ykey) : yscale == "log"
-	return xlog, ylog
-end
-
-# Coordinates on a logarithmic cell axis must be positive; the scratch figure
-# of the delegate cannot know the cell's axis type, so check it here.
-function _field2d_subplot_check_coordinates(
-	sf::SubplotFigure,
-	who::AbstractString,
-	x,
-	y;
-	kwargs...,
-)
-	xlog, ylog = _field2d_subplot_log_axes(sf, who; kwargs...)
-	xlog && _field2d_check_coordinates(x, who, "x"; log_axis = true)
-	ylog && _field2d_check_coordinates(y, who, "y"; log_axis = true)
-	return nothing
-end
-
-# Implicit coordinates of `U` in a SubplotFigure cell: 0-based, or 1-based on
-# a logarithmic cell axis.
-function _field2d_subplot_implicit_axes(
-	sf::SubplotFigure,
-	who::AbstractString,
-	U;
-	kwargs...,
-)
-	ndims(U) == 2 || throw(ArgumentError(
-		"$(who): `U` must be a matrix indexed U[ix, iy]; got a " *
-		"$(ndims(U))-D array of size $(size(U)).",
-	))
-	xlog, ylog = _field2d_subplot_log_axes(sf, who; kwargs...)
-	return _field2d_implicit_axis(size(U, 1), xlog),
-		_field2d_implicit_axis(size(U, 2), ylog)
-end
-
+# SubplotFigure methods of the field mutators (Y3): the Plot-level mutator
+# runs on the delegate's scratch figure, whose axes are seeded with the cell's
+# type, range and ticks (`_SUBPLOT_SEEDED_AXIS_KEYS`), so implicit
+# coordinates (1-based on a log cell), positivity checks on a log cell and
+# log-aware glyphs (quiver) are computed exactly as on a single figure.
 function plot_heatmap!(
 	sf::SubplotFigure,
 	x::AbstractArray,
@@ -7561,22 +7522,8 @@ function plot_heatmap!(
 	secondary_y::Bool = false,
 	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
-	xscale::AbstractString = "",
-	yscale::AbstractString = "",
 	kwargs...,
 )
-	_field2d_subplot_check_coordinates(
-		sf,
-		"plot_heatmap!",
-		x,
-		y;
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-		xscale = xscale,
-		yscale = yscale,
-	)
 	return _field2d_subplot!(
 		sf,
 		plot_heatmap!,
@@ -7586,8 +7533,6 @@ function plot_heatmap!(
 		secondary_y = secondary_y,
 		inset = inset,
 		equalar = equalar,
-		xscale = xscale,
-		yscale = yscale,
 		kwargs...,
 	)
 end
@@ -7600,32 +7545,17 @@ function plot_heatmap!(
 	secondary_y::Bool = false,
 	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
-	xscale::AbstractString = "",
-	yscale::AbstractString = "",
 	kwargs...,
 )
-	x, y = _field2d_subplot_implicit_axes(
-		sf,
-		"plot_heatmap!",
-		U;
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-		xscale = xscale,
-		yscale = yscale,
-	)
 	return _field2d_subplot!(
 		sf,
 		plot_heatmap!,
-		(x, y, U);
+		(U,);
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
 		inset = inset,
 		equalar = equalar,
-		xscale = xscale,
-		yscale = yscale,
 		kwargs...,
 	)
 end
@@ -7640,22 +7570,8 @@ function plot_contour!(
 	secondary_y::Bool = false,
 	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
-	xscale::AbstractString = "",
-	yscale::AbstractString = "",
 	kwargs...,
 )
-	_field2d_subplot_check_coordinates(
-		sf,
-		"plot_contour!",
-		x,
-		y;
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-		xscale = xscale,
-		yscale = yscale,
-	)
 	return _field2d_subplot!(
 		sf,
 		plot_contour!,
@@ -7665,8 +7581,6 @@ function plot_contour!(
 		secondary_y = secondary_y,
 		inset = inset,
 		equalar = equalar,
-		xscale = xscale,
-		yscale = yscale,
 		kwargs...,
 	)
 end
@@ -7679,107 +7593,19 @@ function plot_contour!(
 	secondary_y::Bool = false,
 	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
-	xscale::AbstractString = "",
-	yscale::AbstractString = "",
 	kwargs...,
 )
-	x, y = _field2d_subplot_implicit_axes(
-		sf,
-		"plot_contour!",
-		U;
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-		xscale = xscale,
-		yscale = yscale,
-	)
 	return _field2d_subplot!(
 		sf,
 		plot_contour!,
-		(x, y, U);
+		(U,);
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
 		inset = inset,
 		equalar = equalar,
-		xscale = xscale,
-		yscale = yscale,
 		kwargs...,
 	)
-end
-
-# Delegated SubplotFigure mutator for traces built against the target cell
-# (quiver and streamline geometry depends on the cell's axis types, which
-# the delegate's scratch figure does not know): append them and apply the
-# common Cartesian options.
-function _field2d_push_traces!(
-	fig,
-	traces::AbstractVector;
-	who::AbstractString,
-	xlabel::AbstractString = "",
-	ylabel::AbstractString = "",
-	title::AbstractString = "",
-	xrange = [0, 0],
-	yrange = [0, 0],
-	xscale::AbstractString = "",
-	yscale::AbstractString = "",
-	xticks = nothing,
-	xticklabels = nothing,
-	xtickformat::AbstractString = "",
-	yticks = nothing,
-	yticklabels = nothing,
-	ytickformat::AbstractString = "",
-	width::Real = 0,
-	height::Real = 0,
-	fontsize::Real = 0,
-	grid::Union{Nothing, Bool, Symbol} = nothing,
-	equalar::Bool = false,
-	kwargs...,
-)
-	_field2d_reject_keywords(who, kwargs)
-	_validate_cartesian_options(
-		fig,
-		who;
-		xrange = xrange,
-		yrange = yrange,
-		xscale = xscale,
-		yscale = yscale,
-		width = width,
-		height = height,
-		fontsize = fontsize,
-		grid = grid,
-	)
-	first_new = length(_plot_data(fig)) + 1
-	append!(_plot_data(fig), traces)
-	_field2d_apply_options!(
-		fig,
-		who;
-		constructor = false,
-		title = title,
-		xlabel = xlabel,
-		ylabel = ylabel,
-		xscale = xscale,
-		yscale = yscale,
-		xrange = xrange,
-		yrange = yrange,
-		xticks = xticks,
-		xticklabels = xticklabels,
-		xtickformat = xtickformat,
-		yticks = yticks,
-		yticklabels = yticklabels,
-		ytickformat = ytickformat,
-		origin = "",
-		equalar = equalar,
-		width = width,
-		height = height,
-		fontsize = fontsize,
-		grid = grid,
-	)
-	# Quiver arrows: the style's line width only (see `_quiver_add!`).
-	_field2d_finish!(fig, first_new; style = (:linewidth,))
-	_refresh!(fig)
-	return nothing
 end
 
 function plot_quiver!(
@@ -7792,54 +7618,18 @@ function plot_quiver!(
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	inset::Union{Nothing, Integer} = nothing,
-	color = "RoyalBlue",
-	sizeref::Real = 1,
-	legend::AbstractString = "",
-	linewidth::Real = 0,
-	xscale::AbstractString = "",
-	yscale::AbstractString = "",
 	equalar::Bool = true,
 	kwargs...,
 )
-	who = "plot_quiver!"
-	haskey(kwargs, :show) && _field2d_reject_keywords(who, kwargs)
-	xlog, ylog = _field2d_subplot_log_axes(
-		sf,
-		who;
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-		xscale = xscale,
-		yscale = yscale,
-	)
-	colour = _field2d_color_string(color, who, "color")
-	_field2d_nonnegative(linewidth, who, "linewidth")
-	trace = _quiver_trace(
-		x,
-		y,
-		u,
-		v;
-		color = colour,
-		sizeref = sizeref,
-		legend = legend,
-		linewidth = linewidth,
-		caller = who,
-		xlog = xlog,
-		ylog = ylog,
-	)
 	return _field2d_subplot!(
 		sf,
-		_field2d_push_traces!,
-		(GenericTrace[trace],);
+		plot_quiver!,
+		(x, y, u, v);
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
 		inset = inset,
 		equalar = equalar,
-		who = who,
-		xscale = xscale,
-		yscale = yscale,
 		kwargs...,
 	)
 end
@@ -13138,6 +12928,26 @@ function _field2d_axis_direction!(fig, letter::Symbol, reversed::Bool; force::Bo
 	axis = get(_plot_layout(fig).fields, key, nothing)
 	current = _cmn_mapping_get(axis, :range)
 	autorange = _cmn_mapping_get(axis, :autorange)
+	if autorange isa AbstractString && autorange in ("min", "max", "min reversed", "max reversed")
+		# A plotly partial autorange (set by the user or another family; the
+		# field families write one-sided limits as autorange options, see
+		# `_field2d_apply_partial_range!`): keep the fixed bound, move it to
+		# the slot of the new direction.
+		endswith(autorange, "reversed") == reversed && return nothing
+		(current isa AbstractVector && length(current) == 2) || return nothing
+		fixed = current[1] === nothing ? current[2] : current[1]
+		base = startswith(autorange, "min") ? "min" : "max"
+		first_slot = (base == "max") != reversed
+		_cmn_merge_layout_key!(
+			fig,
+			key,
+			Dict{Symbol, Any}(
+				:range => first_slot ? Any[fixed, nothing] : Any[nothing, fixed],
+				:autorange => reversed ? base * " reversed" : base,
+			),
+		)
+		return nothing
+	end
 	if (autorange === nothing || autorange === false) &&
 			current isa AbstractVector && length(current) == 2
 		first_bound, last_bound = current[1], current[2]
@@ -13163,6 +12973,46 @@ _field2d_apply_origin!(fig, origin::AbstractString) =
 	isempty(origin) ? nothing :
 	_field2d_axis_direction!(fig, :y, origin == "upper")
 
+# A `Date`/`DateTime` coordinate as the ISO string plotly.js reads on a date
+# axis (Y25): "2020-01-02", "2020-01-02T03:04:05.678". Anything else is
+# returned unchanged. (`Dates` is imported in src/sci/reference.jl; this body
+# resolves it at call time.)
+_field2d_date_value(v) =
+	(v isa Dates.Date || v isa Dates.DateTime) ? string(v) : v
+
+# Tick values with dates converted by `_field2d_date_value` (the shared tick
+# helpers take numbers, or strings on date/category axes); tick presets and
+# `nothing` pass unchanged.
+function _field2d_tick_values(values)
+	(values isa AbstractVector || values isa Tuple) || return values
+	any(v -> v isa Dates.Date || v isa Dates.DateTime, values) || return values
+	return Any[_field2d_date_value(v) for v in values]
+end
+
+# Check the tick keywords before the first write, against the axis types the
+# call ends up with (`_validate_tick_option`; D9 presets pass).
+function _field2d_validate_ticks(
+	fig,
+	who::AbstractString;
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat = "",
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+)
+	for (name, value) in (("xtickformat", xtickformat), ("ytickformat", ytickformat))
+		value isa AbstractString || throw(ArgumentError(
+			"$(who): `$(name)` must be a d3 format string such as \".2f\"; got $(repr(value)).",
+		))
+	end
+	_validate_tick_option(fig, :xaxis, _field2d_tick_values(xticks), xticklabels, xscale, who, "x")
+	_validate_tick_option(fig, :yaxis, _field2d_tick_values(yticks), yticklabels, yscale, who, "y")
+	return nothing
+end
+
 function _field2d_apply_ticks!(
 	fig,
 	who::AbstractString;
@@ -13177,7 +13027,7 @@ function _field2d_apply_ticks!(
 		_apply_ticks!(
 			fig,
 			:xaxis;
-			values = xticks,
+			values = _field2d_tick_values(xticks),
 			labels = xticklabels,
 			format = xtickformat,
 			who = who,
@@ -13187,7 +13037,7 @@ function _field2d_apply_ticks!(
 		_apply_ticks!(
 			fig,
 			:yaxis;
-			values = yticks,
+			values = _field2d_tick_values(yticks),
 			labels = yticklabels,
 			format = ytickformat,
 			who = who,
@@ -13200,7 +13050,11 @@ end
 # figure-option primitives (primary axes only). Constructors (`constructor =
 # true`) keep the template grid for `grid = true` and apply the default
 # template; mutators apply any explicit `grid` and only refresh the legend so
-# a user template survives. Call `_validate_cartesian_options` first.
+# a user template survives. Call `_field2d_validate_cartesian` first.
+# `xrange`/`yrange` come from `_field2d_checked_range`; a one-sided limit
+# (D11) is written after the axis direction (`origin`) is known, unless
+# `partial_ranges = false` (the caller sets the direction afterwards and
+# applies it itself with `_field2d_apply_partial_range!`).
 function _field2d_apply_options!(
 	fig,
 	who::AbstractString;
@@ -13224,6 +13078,7 @@ function _field2d_apply_options!(
 	height,
 	fontsize,
 	grid,
+	partial_ranges::Bool = true,
 )
 	_apply_figure_title!(fig, title)
 	_apply_axis_title!(fig, :x, xlabel)
@@ -13231,8 +13086,8 @@ function _field2d_apply_options!(
 	# Scale before range and ticks: a log axis stores exponents.
 	_apply_axis_scale!(fig, :x, xscale, who)
 	_apply_axis_scale!(fig, :y, yscale, who)
-	_apply_axis_range!(fig, :x, xrange, who)
-	_apply_axis_range!(fig, :y, yrange, who)
+	_apply_axis_range!(fig, :x, _field2d_two_sided(xrange), who)
+	_apply_axis_range!(fig, :y, _field2d_two_sided(yrange), who)
 	_field2d_apply_ticks!(
 		fig,
 		who;
@@ -13244,7 +13099,13 @@ function _field2d_apply_options!(
 		ytickformat = ytickformat,
 	)
 	_field2d_apply_origin!(fig, origin)
+	# The equal aspect first: a one-sided limit is written differently on an
+	# aspect-constrained axis (`_field2d_apply_partial_range!`).
 	equalar && _apply_equal_aspect!(fig, _cell_target(fig; who = who); who = who)
+	if partial_ranges
+		_field2d_apply_partial_range!(fig, :xaxis, xrange; who = who)
+		_field2d_apply_partial_range!(fig, :yaxis, yrange; who = who)
+	end
 	_apply_figure_size!(fig, who; width = width, height = height)
 	(constructor && grid === true) || _apply_axis_grid!(fig, grid, who)
 	constructor ? _apply_default_template!(fig) : _apply_default_legend!(fig)
@@ -13278,33 +13139,312 @@ function _field2d_reject_keywords(who::AbstractString, extra)
 	))
 end
 
-# An axis-range keyword (`xrange`, `yrange`) with the semantics of the range
-# mutators (`xrange!`, X23): `[0, 0]`, `(0, 0)`, `nothing` and
-# `[nothing, nothing]` are the automatic sentinel (`nothing` is returned and
-# the axis is left as it is); otherwise exactly two finite, different bounds
-# that are neither `nothing`/`missing` (partial ranges are not supported)
-# nor Bool. Bounds are DATA values; `_apply_axis_range!` converts them on a
-# log axis. Strings and dates pass for category/date axes.
+# An axis-range keyword (`xrange`, `yrange`) of the 2-D field and mesh
+# families, with the semantics of the range mutators (`xrange!`, X23, D11):
+# - `[0, 0]`, `(0, 0)`, `nothing` and `[nothing, nothing]` are the automatic
+#   sentinel: `nothing` is returned and the axis is left as it is;
+# - a one-sided limit `(lo, nothing)` / `(nothing, hi)` (matplotlib
+#   `set_xlim(left = lo)`) is returned as `Any[lo, nothing]` /
+#   `Any[nothing, hi]`: that bound is fixed and the other side autoranges
+#   (`_field2d_apply_partial_range!`);
+# - otherwise exactly two finite, different bounds, returned as `Any[lo, hi]`.
+# `missing` and Bool bounds throw. Bounds are DATA values (converted on a log
+# axis when applied); strings and dates pass for category/date axes, except
+# that a one-sided bound is a number or a Date/DateTime.
 function _field2d_checked_range(range, who::AbstractString, name::AbstractString)
 	if (range isa AbstractVector || range isa Tuple) && length(range) == 2
 		any(bound -> bound isa Bool, range) && throw(ArgumentError(
 			"$(who): `$(name)` bounds must be numbers (or date/category values); " *
 			"got $(repr(range)).",
 		))
-		all(bound -> bound === nothing, range) && return nothing
-	end
-	checked = _checked_range(range, who, name)
-	checked === nothing && return nothing
-	any(bound -> bound === nothing || bound === missing, checked) &&
-		throw(ArgumentError(
-			"$(who): `$(name)` cannot be partial; give both bounds, or [0, 0] / " *
-			"`nothing` for an automatic range. Got $(repr(range)).",
+		any(bound -> bound === missing, range) && throw(ArgumentError(
+			"$(who): `$(name)` bounds must be numbers (or date/category values); " *
+			"`missing` is not a bound (use `nothing` for an open side, e.g. " *
+			"(0, nothing) fixes only the lower limit). Got $(repr(range)).",
 		))
-	isequal(checked[1], checked[2]) && throw(ArgumentError(
-		"$(who): the `$(name)` bounds must differ; got $(repr(range)) (use " *
-		"[0, 0] or `nothing` for an automatic range).",
+		lower, upper = range[1], range[2]
+		lower === nothing && upper === nothing && return nothing
+		if lower === nothing || upper === nothing
+			bound = something(lower, upper)
+			(bound isa Real && !isfinite(bound)) && throw(ArgumentError(
+				"$(who): `$(name)` bounds must be finite; got $(repr(range)).",
+			))
+			# plotly.js's autorange options (`_field2d_apply_partial_range!`)
+			# take numbers (a category's 0-based position on a category axis)
+			# and dates; it ignores category names and date strings there.
+			bound isa Union{Real, Dates.Date, Dates.DateTime} || throw(ArgumentError(
+				"$(who): the bound of a one-sided `$(name)` must be a number (the " *
+				"0-based position on a category axis) or a Date/DateTime; got " *
+				"$(repr(range)).",
+			))
+			return Any[lower, upper]
+		end
+	end
+	# Two-sided ranges: `_checked_range` rejects equal, non-finite and
+	# malformed bounds.
+	return _checked_range(range, who, name)
+end
+
+# Whether a range returned by `_field2d_checked_range` is a one-sided limit.
+_field2d_is_partial(range) =
+	range !== nothing && (range[1] === nothing || range[2] === nothing)
+
+# The two-sided part of a checked range: `nothing` for the automatic sentinel
+# and for a one-sided limit (applied separately).
+_field2d_two_sided(range) = _field2d_is_partial(range) ? nothing : range
+
+# Whether axis layout entry `axis` points down/left: autorange "reversed" (or
+# a reversed one-sided autorange), or an explicit descending numeric range.
+# `implicit` is the direction plotly.js takes when the axis states none (the y
+# axis of an image is reversed by default).
+function _field2d_axis_reversed(axis; implicit::Bool = false)
+	autorange = _cmn_mapping_get(axis, :autorange)
+	if autorange isa AbstractString
+		return endswith(autorange, "reversed")
+	end
+	current = _cmn_mapping_get(axis, :range)
+	if (autorange === nothing || autorange === false) &&
+			current isa AbstractVector && length(current) == 2 &&
+			current[1] isa Real && current[2] isa Real
+		return current[1] > current[2]
+	end
+	return autorange === nothing && current === nothing && implicit
+end
+
+# Check the bound of a one-sided limit (D11) against the type axis `key` ends
+# up with (`scale` when the call sets one): a number on linear, log and
+# category axes, positive on a log axis. Writes nothing.
+function _field2d_require_partial_range(
+	fig,
+	key::Symbol,
+	range,
+	scale::AbstractString,
+	who::AbstractString,
+	name::AbstractString,
+)
+	_field2d_is_partial(range) || return nothing
+	axis_type = isempty(scale) ? _axis_type(_cmn_layout(fig), key) : String(scale)
+	bound = something(range[1], range[2])
+	if axis_type in _NUMERIC_RANGE_AXIS_TYPES
+		bound isa Real || throw(ArgumentError(
+			"$(who): `$(name)` bounds on a $(axis_type) axis must be numbers; got " *
+			"$(repr(Tuple(range))).",
+		))
+	end
+	axis_type == "log" && !(bound > 0) && throw(ArgumentError(
+		"$(who): `$(name)` bounds on a logarithmic axis are data values and must " *
+		"be positive; got $(repr(Tuple(range))).",
 	))
-	return checked
+	return nothing
+end
+
+# `_validate_cartesian_options` for the field and mesh families, which also
+# take one-sided limits (D11): the shared validator sees only the two-sided
+# part of a range; a one-sided limit is checked by
+# `_field2d_require_partial_range`. With a one-sided limit the axis's old
+# range is replaced, so a scale switch in the same call cannot strand it (the
+# shared check of a stranded old range is skipped for that axis).
+function _field2d_validate_cartesian(
+	fig,
+	who::AbstractString;
+	xrange = nothing,
+	yrange = nothing,
+	xscale::AbstractString = "",
+	yscale::AbstractString = "",
+	width = 0,
+	height = 0,
+	fontsize = 0,
+	grid = nothing,
+)
+	_require_axis_scale(xscale, who, "xscale")
+	_require_axis_scale(yscale, who, "yscale")
+	_validate_cartesian_options(
+		fig,
+		who;
+		xrange = _field2d_two_sided(xrange),
+		yrange = _field2d_two_sided(yrange),
+		xscale = _field2d_is_partial(xrange) ? "" : xscale,
+		yscale = _field2d_is_partial(yrange) ? "" : yscale,
+		width = width,
+		height = height,
+		fontsize = fontsize,
+		grid = grid,
+	)
+	_field2d_require_partial_range(fig, :xaxis, xrange, xscale, who, "xrange")
+	_field2d_require_partial_range(fig, :yaxis, yrange, yscale, who, "yrange")
+	return nothing
+end
+
+# (width, height) in pixels of an image trace's `z` (the lazy C×W×H array of
+# `_image_z`, or nested rows of pixels) or of its PNG `source` (the IHDR
+# header of a "data:image/png;base64," URI); `nothing` when unknown.
+function _field2d_image_size(fields)
+	z = get(fields, :z, nothing)
+	if z isa AbstractArray && ndims(z) == 3
+		return (size(z, 2), size(z, 3))
+	elseif z isa AbstractVector && !isempty(z) && first(z) isa AbstractVector
+		return (length(first(z)), length(z))
+	end
+	source = get(fields, :source, nothing)
+	prefix = "data:image/png;base64,"
+	(source isa AbstractString && startswith(source, prefix)) || return nothing
+	# 24 base64 characters past the prefix cover the 8-byte signature, the
+	# IHDR length and tag and the two 4-byte sizes (32 bytes = 44 characters).
+	ncodeunits(source) >= ncodeunits(prefix) + 44 || return nothing
+	header = try
+		Base64.base64decode(source[(ncodeunits(prefix) + 1):(ncodeunits(prefix) + 44)])
+	catch
+		return nothing
+	end
+	(length(header) >= 24 && header[1:8] == _PNG_SIGNATURE && header[13:16] == codeunits("IHDR")) ||
+		return nothing
+	be32(i) = Int(header[i]) << 24 | Int(header[i + 1]) << 16 | Int(header[i + 2]) << 8 | Int(header[i + 3])
+	return (be32(17), be32(21))
+end
+
+# Extent (lo, hi) in data units along `letter` of the visible traces and
+# data-referenced layout items on axes `members`, as `_finalize_figure!`
+# computes it (field edges, data; unpadded), with image traces measured here
+# (finalize does not size an image's 3-D `z` or a `source`). `nothing` when a
+# trace's extent is not computed, the axis type is not linear/log, or there is
+# no finite extent.
+function _field2d_partial_extent(fig, members::Vector{Symbol}, letter::Char, islog::Bool)
+	p = _cmn_plot(fig)
+	layout = p.layout
+	all(m -> _fin_axis_type(layout, m) in ("-", "linear", "log"), members) || return nothing
+	lo, hi = Inf, -Inf
+	cache = Dict{Any, Union{Nothing, String}}()
+	for trace in p.data
+		trace isa GenericTrace || continue
+		_cmn_trace_kind(trace, cache) == "xy" || continue
+		_fin_visible(trace) || continue
+		_fin_axis_key(get(trace.fields, Symbol(letter, :axis), string(letter))) in members || continue
+		extent = if _fin_trace_type(trace) == "image"
+			size = _field2d_image_size(trace.fields)
+			start = get(trace.fields, Symbol(letter, "0"), 0)
+			step = get(trace.fields, Symbol("d", letter), 1)
+			(islog || size === nothing || !(start isa Real) || !(step isa Real)) ? :unsupported :
+				minmax(start - step / 2, start + step * ((letter == 'x' ? size[1] : size[2]) - 0.5))
+		else
+			_fin_trace_extent(trace, letter, islog)
+		end
+		extent === :unsupported && return nothing
+		extent === nothing && continue
+		lo = min(lo, Float64(extent[1]))
+		hi = max(hi, Float64(extent[2]))
+	end
+	for member in members
+		extent = _fin_layout_item_extent(layout, _fin_axis_ref(member), letter, islog)
+		extent === :unsupported && return nothing
+		extent === nothing && continue
+		lo = min(lo, Float64(extent[1]))
+		hi = max(hi, Float64(extent[2]))
+	end
+	return isfinite(lo) && isfinite(hi) ? (lo, hi) : nothing
+end
+
+# D11: write the one-sided limit `range` (from `_field2d_checked_range`) on
+# axis `key` and its `matches` group. The fixed bound is in plotly's range
+# units (log10 on a log axis).
+#
+# plotly.js 2.35.2's partial autorange ("max" with `range = [lo, null]`) is
+# drawn on screen but lost by `savefig`: after a draw plotly writes the
+# computed range back into the layout (both bounds numeric), and the copy that
+# `Plotly.toImage` draws then fails plotly's range/autorange consistency check
+# and autoranges both sides (probe: first draw x = [2, 7.47], copy
+# [-0.47, 7.47]). So the limit is written as `autorangeoptions.minallowed`
+# (lower bound) or `maxallowed` (upper bound) with `autorange = true` (or
+# "reversed", keeping the direction): plotly then autoranges the open side
+# with the fixed bound as the range end, in the window and in the copy. Every
+# member of a `matches` group needs the option (plotly autoranges each member
+# and unites the ranges); the root gets the autorange.
+#
+# An aspect-constrained axis (equal aspect, or an image's y axis) is
+# re-ranged by plotly for the constraint, which ignores these options (probe:
+# `maxallowed = 2.5` gave x = [-5.7, 7.73]). There the limit is applied as
+# matplotlib's `set_xlim(left = lo)` does, which keeps the other limit where
+# it is: the root is fixed to the fixed bound and the current extent of the
+# group's data on the open side (`_finalize_figure!`'s extent: field edges and
+# data, unpadded). Without a finite extent (no data yet, or traces whose
+# extent is not computed) the options are written as above.
+#
+# A sticky clip `_finalize_figure!` wrote earlier (its exact
+# `autorangeoptions` signature) is dropped from the group: it would clip the
+# open side to the old extent. Other user `autorangeoptions` entries are kept,
+# except the opposite `minallowed`/`maxallowed` (an earlier one-sided limit:
+# the open side autoranges).
+# A two-sided or automatic range is left to the caller.
+function _field2d_apply_partial_range!(
+	fig,
+	key::Symbol,
+	range;
+	implicit_reversed::Bool = false,
+	who::AbstractString,
+)
+	_field2d_is_partial(range) || return nothing
+	layout = _cmn_layout(fig)
+	fields = layout.fields
+	islog = _axis_type(layout, key) == "log"
+	lower, upper = range[1], range[2]
+	fixed = something(lower, upper)
+	if islog
+		(fixed isa Real && fixed > 0) || throw(ArgumentError(
+			"$(who): one-sided limits on a logarithmic axis are data values and " *
+			"must be positive; got $(repr(Tuple(range))).",
+		))
+	end
+	# plotly's range units: log10 on a log axis; on a date axis the autorange
+	# options take epoch milliseconds (a date string there makes plotly.js
+	# 2.35.2 fall back to its empty-axis range, probe p14).
+	to_range(v) = islog ? log10(Float64(v)) :
+		v isa Union{Dates.Date, Dates.DateTime} ?
+			Dates.value(Dates.DateTime(v) - Dates.DateTime(1970)) : v
+	reversed = _field2d_axis_reversed(get(fields, key, nothing); implicit = implicit_reversed)
+	root = something(_fin_match_root(fields, key), key)
+	members = Symbol[key]
+	root === key || push!(members, root)
+	for member in keys(fields)
+		_fin_is_axis_key(member) || continue
+		member in members && continue
+		_fin_match_root(fields, member) === root && push!(members, member)
+	end
+	pinned = nothing
+	if fixed isa Real && any(in(_fin_aspect_axes(layout, _fin_collect_axes(_cmn_plot(fig)))), members)
+		extent = _field2d_partial_extent(fig, members, String(key)[1], islog)
+		if extent !== nothing
+			lo, hi = extent
+			a, b = lower === nothing ? (lo, Float64(fixed)) : (Float64(fixed), hi)
+			# A fixed bound beyond the data inverts the axis, as in matplotlib;
+			# one equal to the far data edge leaves no range to fix.
+			a != b && (pinned = reversed ? Any[to_range(b), to_range(a)] : Any[to_range(a), to_range(b)])
+		end
+	end
+	option, other = lower === nothing ? (:maxallowed, :minallowed) : (:minallowed, :maxallowed)
+	for member in members
+		current = get(fields, member, nothing)
+		old = _cmn_mapping_get(current, :autorangeoptions)
+		user = _fin_sticky_clip(current) === nothing && _is_layout_mapping(old)
+		options = Dict{Symbol, Any}()
+		if user
+			for (name, value) in (old isa PlotlyBase.PlotlyAttribute ? old.fields : old)
+				options[Symbol(name)] = value
+			end
+		end
+		old === nothing || _cmn_delete_layout_fields!(fig, member, (:autorangeoptions,))
+		if pinned === nothing
+			options[option] = to_range(fixed)
+			delete!(options, other)
+		end
+		isempty(options) ||
+			_cmn_merge_layout_key!(fig, member, Dict{Symbol, Any}(:autorangeoptions => attr(; options...)))
+	end
+	if pinned === nothing
+		_cmn_delete_layout_fields!(fig, root, (:range,))
+		_cmn_merge_layout_key!(fig, root, Dict{Symbol, Any}(:autorange => reversed ? "reversed" : true))
+	else
+		_cmn_merge_layout_key!(fig, root, Dict{Symbol, Any}(:range => pinned, :autorange => false))
+	end
+	return nothing
 end
 
 # A Bool keyword given untyped so a wrong value is an ArgumentError naming it.
@@ -13313,6 +13453,24 @@ function _field2d_bool(value, who::AbstractString, name::AbstractString)
 		"$(who): `$(name)` must be true or false; got $(repr(value)).",
 	))
 	return value
+end
+
+# `interpolation` of plot_heatmap / plot_image (G67, matplotlib's imshow
+# `interpolation`) as plotly's `zsmooth`: `:nearest` (default) draws every
+# cell as a flat brick (`nothing`: zsmooth stays unset, plotly's `false`);
+# `:bilinear` interpolates between cell centres. A heatmap uses "best"
+# (bilinear per pixel, valid on non-uniform grids); an image trace only has
+# "fast" (the browser's bilinear image scaling, which plotly.js applies only to
+# a `source` image: see `_image_png_uri`).
+function _field2d_zsmooth(interpolation, who::AbstractString; image::Bool)
+	value = interpolation isa AbstractString ? Symbol(lowercase(strip(interpolation))) :
+		interpolation
+	value === :nearest && return nothing
+	value === :bilinear && return image ? "fast" : "best"
+	throw(ArgumentError(
+		"$(who): `interpolation` must be :nearest or :bilinear; got " *
+		"$(repr(interpolation)).",
+	))
 end
 
 # `colorbar_title_side` (X1): :top (default), :right or :bottom, as a Symbol
@@ -13491,12 +13649,13 @@ function _heatmap_add!(
 	grid,
 	equalar::Bool,
 	tight = true,
+	interpolation = :nearest,
 	xscale::AbstractString,
 	yscale::AbstractString,
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
-	_validate_cartesian_options(
+	_field2d_validate_cartesian(
 		fig,
 		who;
 		xrange = xrange,
@@ -13508,7 +13667,20 @@ function _heatmap_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	_field2d_validate_ticks(
+		fig,
+		who;
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		xscale = xscale,
+		yscale = yscale,
+	)
 	tight_value = _field2d_bool(tight, who, "tight")
+	zsmooth = _field2d_zsmooth(interpolation, who; image = false)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	origin_value = _field2d_origin(origin, who; allow_unset = !constructor)
 	_field2d_nonnegative(xgap, who, "xgap")
@@ -13555,6 +13727,7 @@ function _heatmap_add!(
 	)
 	xgap > 0 && (fields[:xgap] = xgap)
 	ygap > 0 && (fields[:ygap] = ygap)
+	zsmooth === nothing || (fields[:zsmooth] = zsmooth)
 	_field2d_mark_field!(fields, tight_value)
 
 	first_new = length(_plot_data(fig)) + 1
@@ -13642,19 +13815,27 @@ Cells and text (spec F27):
 - `textsize::Real = 0`: cell-text font size (0 = automatic).
 - `origin = :lower`: `:upper` reverses the y axis so `y[1]` is at the top.
 - `xgap::Real = 0`, `ygap::Real = 0`: gaps between cells in pixels.
+- `interpolation = :nearest`: `:nearest` draws every cell as a flat brick;
+  `:bilinear` interpolates the colour between cell centres (plotly
+  `zsmooth = "best"`), as matplotlib's `imshow(interpolation = "bilinear")`.
 
 Axes and figure:
 - `xlabel = ""`, `ylabel = ""`, `title = ""`: text (LaTeX in `\$...\$` allowed).
 - `xrange = [0, 0]`, `yrange = [0, 0]`: axis limits `(lower, upper)` (a
   2-element vector or tuple) in data units, also on a log axis (converted to
   the log10 values plotly stores); a range turns the axis's autorange off.
-  `[0, 0]`, `nothing` or `[nothing, nothing]` leaves the axis automatic. Both
-  bounds are required and must differ; Bool bounds throw. Dates and category
-  strings are accepted.
+  `[0, 0]`, `nothing` or `[nothing, nothing]` leaves the axis automatic. A
+  one-sided limit `(lo, nothing)` or `(nothing, hi)` fixes that bound and
+  lets the other side autorange (matplotlib `set_xlim(left = lo)`); on an
+  equal-aspect axis, which plotly.js re-ranges for the aspect, the other
+  limit is fixed at the current data extent instead (as matplotlib does).
+  Two bounds must differ; Bool and `missing` bounds throw. Dates and
+  category strings are accepted.
 - `xscale = ""`, `yscale = ""`: axis type, e.g. `"log"`.
 - `xticks = nothing`, `xticklabels = nothing`, `xtickformat = ""`, `yticks`,
-  `yticklabels`, `ytickformat`: explicit tick values (data units), their
-  labels (same length), and a d3 tick format.
+  `yticklabels`, `ytickformat`: explicit tick values (data units; `Date`s on
+  a date axis), their labels (same length), and a d3 tick format. Tick
+  presets (`:decades`, `:auto`) work as in `xticks!`.
 - `grid::Union{Nothing,Bool,Symbol} = true`: `true` keeps the template grid,
   `false`/`:none` hides it, `:x`/`:y`/`:both` choose the axes.
 - `equalar::Bool = false`: equal data aspect (one x unit = one y unit).
@@ -13716,6 +13897,7 @@ function plot_heatmap(
 	grid::Union{Nothing, Bool, Symbol} = true,
 	equalar::Bool = false,
 	tight = true,
+	interpolation = :nearest,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
 	show::Bool = false,
@@ -13763,6 +13945,7 @@ function plot_heatmap(
 		grid = grid,
 		equalar = equalar,
 		tight = tight,
+		interpolation = interpolation,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -13965,7 +14148,7 @@ function _contour_add!(
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
-	_validate_cartesian_options(
+	_field2d_validate_cartesian(
 		fig,
 		who;
 		xrange = xrange,
@@ -13976,6 +14159,18 @@ function _contour_add!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+	)
+	_field2d_validate_ticks(
+		fig,
+		who;
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		xscale = xscale,
+		yscale = yscale,
 	)
 	tight_value = _field2d_bool(tight, who, "tight")
 	title_side = _field2d_title_side(colorbar_title_side, who)
@@ -14011,6 +14206,12 @@ function _contour_add!(
 	)
 	_field2d_check_shape(x, y, Z, who; allow_edges = false)
 	bands = spec.kind === :bands
+	# G15: colour-mapped lines at a single or non-uniform levels are one trace
+	# per level (start == end), for which plotly.js builds a degenerate colour
+	# map (every level in the same colour). Their colours are sampled here, and
+	# a carrier trace draws the colorbar, as for bands.
+	line_levels = spec.kind === :per_level && spec.coloring == "lines"
+	carried = bands || line_levels
 	color = _field2d_color(
 		Z,
 		who;
@@ -14021,27 +14222,57 @@ function _contour_add!(
 		levels = nothing,
 		colorscale = colorscale,
 		showscale = single_colour ? false : showscale,
-		colorbar_title = bands ? "" : colorbar_title,
+		colorbar_title = carried ? "" : colorbar_title,
 		colorbar_title_side = title_side,
-		colorbar_ticks = bands ? nothing : colorbar_ticks,
-		colorbar_ticklabels = bands ? nothing : colorbar_ticklabels,
-		coloraxis = bands ? nothing : coloraxis,
+		colorbar_ticks = carried ? nothing : colorbar_ticks,
+		colorbar_ticklabels = carried ? nothing : colorbar_ticklabels,
+		coloraxis = carried ? nothing : coloraxis,
 	)
+	user_crange = _checked_range(zrange, who, "zrange") === nothing ? crange : zrange
+	user_ticklabels = colorbar_ticklabels === nothing ? nothing :
+		_field2d_labels(colorbar_ticklabels, who, "colorbar_ticklabels")
 	band_norm = nothing
 	if bands
 		# Filled bands between non-uniform levels: the band colours and the
 		# stepped colorbar come from the BoundaryNorm of the levels.
 		band_norm = _apply_color_norm(
 			nothing;
-			crange = _checked_range(zrange, who, "zrange") === nothing ? crange : zrange,
+			crange = user_crange,
 			cmid = cmid,
 			colornorm = colornorm,
 			levels = spec.boundaries,
 			stops = colorscale,
 			ticks = colorbar_ticks,
-			ticklabels = colorbar_ticklabels === nothing ? nothing :
-				_field2d_labels(colorbar_ticklabels, who, "colorbar_ticklabels"),
+			ticklabels = user_ticklabels,
 			who = who,
+		)
+	end
+	carrier_norm = band_norm
+	level_colours = String[]
+	if line_levels
+		line_norm = _contour_line_norm(
+			spec,
+			color.values,
+			who;
+			crange = user_crange,
+			cmid = cmid,
+			colornorm = colornorm,
+			colorscale = colorscale,
+			colorbar_ticks = colorbar_ticks,
+			colorbar_ticklabels = user_ticklabels,
+		)
+		level_colours = line_norm.colours
+		carrier_norm = line_norm
+	elseif bands && colorbar_ticks === nothing
+		# matplotlib labels a contour colorbar with FixedLocator(levels,
+		# nbins = 10): at most about ten of the boundaries.
+		keep = _contour_tick_subset(band_norm.tickvals)
+		carrier_norm = (
+			stops = band_norm.stops,
+			cmin = band_norm.cmin,
+			cmax = band_norm.cmax,
+			tickvals = band_norm.tickvals[keep],
+			ticktext = band_norm.ticktext === nothing ? nothing : band_norm.ticktext[keep],
 		)
 	end
 
@@ -14088,8 +14319,21 @@ function _contour_add!(
 			level_contours[:end] = level
 			# plotly needs a positive size; start == end gives one level.
 			level_contours[:size] = 1
+			level_line = copy(line)
+			if line_levels
+				# The level's colour from the colour map (G15); the carrier
+				# below draws the colorbar.
+				level_contours[:coloring] = "none"
+				level_line[:color] = level_colours[index]
+				showlabels && (level_contours[:labelfont] = attr(color = level_colours[index]))
+				fields[:showscale] = false
+				# plotly.js lists a contour trace with coloring "none" in the
+				# legend (contour/style_defaults: only other colourings default
+				# `showlegend` to false); the levels are one field, not series.
+				fields[:showlegend] = false
+			end
 			fields[:contours] = attr(; level_contours...)
-			isempty(line) || (fields[:line] = attr(; line...))
+			isempty(level_line) || (fields[:line] = attr(; level_line...))
 			if index > 1
 				# One colorbar and one hover label for the whole level set.
 				color.coloraxis === nothing && (fields[:showscale] = false)
@@ -14146,20 +14390,23 @@ function _contour_add!(
 			end
 			push!(traces, contour(; fields...))
 		end
+	end
+	if carried
+		# One colorbar for the sampled colours (bands or level lines).
 		colorbar = _field2d_colorbar(
 			colorbar_title,
 			title_side,
 			who;
-			ticks = band_norm.tickvals,
-			ticklabels = band_norm.ticktext,
+			ticks = carrier_norm.tickvals,
+			ticklabels = carrier_norm.ticktext,
 		)
 		if coloraxis === nothing
 			push!(
 				traces,
 				_colorbar_carrier_trace(;
-					stops = band_norm.stops,
-					cmin = band_norm.cmin,
-					cmax = band_norm.cmax,
+					stops = carrier_norm.stops,
+					cmin = carrier_norm.cmin,
+					cmax = carrier_norm.cmax,
 					showscale = showscale !== false,
 					colorbar = colorbar,
 					who = who,
@@ -14170,16 +14417,16 @@ function _contour_add!(
 			push!(
 				traces,
 				_colorbar_carrier_trace(;
-					cmin = band_norm.cmin,
-					cmax = band_norm.cmax,
+					cmin = carrier_norm.cmin,
+					cmax = carrier_norm.cmax,
 					coloraxis = axis_id,
 					who = who,
 				),
 			)
 			axis_fields = Dict{Symbol, Any}(
-				:colorscale => band_norm.stops,
-				:cmin => band_norm.cmin,
-				:cmax => band_norm.cmax,
+				:colorscale => carrier_norm.stops,
+				:cmin => carrier_norm.cmin,
+				:cmax => carrier_norm.cmax,
 			)
 			showscale === nothing || (axis_fields[:showscale] = showscale)
 			colorbar === nothing || (axis_fields[:colorbar] = colorbar)
@@ -14222,11 +14469,99 @@ function _contour_add!(
 	_field2d_finish!(
 		fig,
 		first_new;
-		coloraxis = bands ?
+		coloraxis = carried ?
 			(coloraxis === nothing ? nothing : _normalize_coloraxis(coloraxis, who)) :
 			color.coloraxis,
 	)
 	return nothing
+end
+
+# matplotlib's `FixedLocator(levels, nbins = 10)`, the tick locator of a
+# contour colorbar: every `step`-th level, step = max(ceil(n / 10), 1), from
+# the offset whose subset holds the level closest to zero. Returns the kept
+# indices of `levels`.
+const _CONTOUR_COLORBAR_NBINS = 10
+
+function _contour_tick_subset(levels::AbstractVector{<:Real})
+	n = length(levels)
+	step = max(cld(n, _CONTOUR_COLORBAR_NBINS), 1)
+	best = collect(1:step:n)
+	for offset in 2:min(step, n)
+		candidate = collect(offset:step:n)
+		minimum(abs, levels[candidate]) < minimum(abs, levels[best]) && (best = candidate)
+	end
+	return best
+end
+
+# Colours of colour-mapped contour lines drawn one trace per level (G15) and
+# the colorbar that explains them. matplotlib's line contours normalise
+# between the lowest and the highest level; an explicit `crange` (with a
+# `cmid` two-slope remap) wins, `cmid` alone centres the levels' span on it,
+# and a single level spans the data. Level values and limits are in plotted
+# units (log10 under colornorm = :log). Colorbar ticks sit at the levels
+# (`_contour_tick_subset`) unless `colorbar_ticks` are given.
+function _contour_line_norm(
+	spec,
+	values,
+	who::AbstractString;
+	crange,
+	cmid,
+	colornorm,
+	colorscale,
+	colorbar_ticks,
+	colorbar_ticklabels,
+)
+	log_norm = _normalize_colornorm(colornorm, who) === :log
+	norm = _apply_color_norm(
+		spec.boundaries;
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		stops = colorscale,
+		ticks = colorbar_ticks,
+		ticklabels = colorbar_ticklabels,
+		who = who,
+	)
+	levels = spec.values
+	if norm.cmin !== nothing && norm.cmax !== nothing
+		lower, upper = Float64(norm.cmin), Float64(norm.cmax)
+	else
+		if length(levels) >= 2
+			lower, upper = extrema(levels)
+		else
+			extent = _finite_extrema(values)
+			lower, upper = extent === nothing ? (levels[1], levels[1]) : extent
+		end
+		if norm.cmid !== nothing
+			half = max(upper - norm.cmid, norm.cmid - lower)
+			lower, upper = norm.cmid - half, norm.cmid + half
+		end
+		if !(lower < upper)
+			# A constant field (or no finite value): centre the level.
+			lower, upper = lower - 0.5, upper + 0.5
+		end
+	end
+	stops = _concrete_norm_stops(norm.stops, nothing, who)
+	colours = _sample_colorscale(
+		stops,
+		[clamp((level - lower) / (upper - lower), 0.0, 1.0) for level in levels],
+	)
+	if colorbar_ticks === nothing
+		keep = _contour_tick_subset(levels)
+		tickvals = levels[keep]
+		ticktext = log_norm ? [_log_tick_label(b) for b in spec.boundaries[keep]] : nothing
+	else
+		tickvals = norm.tickvals
+		ticktext = norm.ticktext
+	end
+	return (
+		colours = colours,
+		stops = stops,
+		cmin = lower,
+		cmax = upper,
+		tickvals = tickvals,
+		ticktext = ticktext,
+	)
 end
 
 """
@@ -14254,7 +14589,12 @@ Levels and lines (spec F26):
 - `ncontours::Integer = 0`: number of automatic levels (not with `levels`).
 - `coloring = ""`: `"fill"` (plotly default), `"lines"` (lines coloured by the
   colorscale), `"heatmap"`, or `"none"` (single-colour lines without colorbar
-  or legend entry). A single level defaults to `"lines"`.
+  or legend entry). A single level defaults to `"lines"`. Line contours drawn
+  one trace per level (a single level, non-uniform levels) take the colour of
+  their level on the norm (`crange`, else `levels[1]..levels[end]`, else the
+  data extent; matplotlib `contour(..., cmap = ...)`), and their colorbar,
+  carried by an invisible trace, has its ticks at the levels (at most 10,
+  thinned like matplotlib's level ticks) unless `colorbar_ticks` is given.
 - `linecolor = ""`: one colour for every contour line (string, Symbol or
   Colorant); implies `coloring = "none"` unless `"fill"`/`"heatmap"` is given
   and conflicts with `"lines"`.
@@ -14404,11 +14744,36 @@ const _QUIVER_SHAFT_SCALE = 2 / 3
 const _QUIVER_HEAD_SCALE = 0.3
 const _QUIVER_HEAD_ANGLE = pi / 9
 
-# Arrow polyline of every finite, non-zero vector: origin, tip, gap, head
-# arm, tip, head arm, gap (`_GAP`, serialised as JSON null). On a logarithmic
-# axis the arrow is laid out in axis units (decades) and mapped back, so the
-# arrow direction on screen is atan(v, u) with equal aspect (matplotlib's
-# default `angles = "uv"`); origins there must be positive.
+# Quiver kinds (lead decision D13).
+const _QUIVER_STYLES = (:arrow, :triangle)
+const _QUIVER_PIVOTS = (:tail, :middle, :tip)
+const _QUIVER_SCALES = (:magnitude, :uniform)
+# `headwidth` default of `style = :triangle`: the base is half as wide as the
+# triangle is long (D13).
+const _QUIVER_TRIANGLE_HEADWIDTH = 0.5
+# Colour bins of `colorby` (one trace per non-empty bin, as plot_polygons):
+# 256 bins resolve every step of an 8-bit colormap (the mesh family's
+# `ncolors` default), while the trace count stays bounded by the glyph count.
+const _QUIVER_COLOR_BINS = 256
+# Points per glyph in the trace arrays, the closing gap included: an arrow is
+# tail, tip, gap, head arm, tip, head arm, gap; a triangle is base corner,
+# apex, base corner, first corner again, gap.
+const _QUIVER_ARROW_POINTS = 7
+const _QUIVER_TRIANGLE_POINTS = 5
+
+# Glyph outlines of every finite, non-zero vector, in data units, separated by
+# `_GAP` (JSON null). Returns `(xs, ys, drawn)`: glyph `g` occupies entries
+# `(g - 1) * P + 1 : g * P` (`P` = `_QUIVER_ARROW_POINTS` or
+# `_QUIVER_TRIANGLE_POINTS`) and `drawn[g]` is the index of its vector.
+# - Length: `scale = :magnitude` makes the longest glyph `sizeref *
+#   _QUIVER_SHAFT_SCALE` axis units long and the others proportional to their
+#   magnitude; `:uniform` gives every glyph that length (a direction field).
+# - `style = :arrow`: shaft and two head arms; `:triangle`: a filled isosceles
+#   triangle whose base is `headwidth` times its length.
+# - `pivot`: the part of the glyph at `(x, y)` (`:tail`, `:middle`, `:tip`).
+# On a logarithmic axis the glyph is laid out in axis units (decades) and
+# mapped back, so it points at atan(v, u) on screen with equal aspect
+# (matplotlib's default `angles = "uv"`); origins there must be positive.
 function _quiver_coordinates(
 	x,
 	y,
@@ -14418,6 +14783,10 @@ function _quiver_coordinates(
 	caller::AbstractString,
 	xlog::Bool = false,
 	ylog::Bool = false,
+	style::Symbol = :arrow,
+	pivot::Symbol = :tail,
+	scale::Symbol = :magnitude,
+	headwidth::Real = _QUIVER_TRIANGLE_HEADWIDTH,
 )
 	n = length(x)
 	n == length(y) == length(u) == length(v) || throw(ArgumentError(
@@ -14431,7 +14800,7 @@ function _quiver_coordinates(
 
 	empty_x = Union{Nothing, Float64}[]
 	empty_y = Union{Nothing, Float64}[]
-	n == 0 && return empty_x, empty_y
+	n == 0 && return empty_x, empty_y, Int[]
 
 	# Represent each magnitude as component * shape, where component is the
 	# largest absolute component and shape lies in [1, sqrt(2)]. Comparing
@@ -14484,22 +14853,29 @@ function _quiver_coordinates(
 		n > skipped && @warn(
 			"$caller: all finite vectors have zero magnitude; nothing to draw.",
 		)
-		return empty_x, empty_y
+		return empty_x, empty_y, Int[]
 	end
 
 	# An explicit zero scale is a valid request for no visible arrows.
-	iszero(sizeref) && return empty_x, empty_y
+	iszero(sizeref) && return empty_x, empty_y, Int[]
 
-	output_length = Base.Checked.checked_mul(7, drawable)
-	arrow_x = Vector{Union{Nothing, Float64}}(undef, output_length)
-	arrow_y = Vector{Union{Nothing, Float64}}(undef, output_length)
+	triangle = style === :triangle
+	points = triangle ? _QUIVER_TRIANGLE_POINTS : _QUIVER_ARROW_POINTS
+	output_length = Base.Checked.checked_mul(points, drawable)
+	out_x = Vector{Union{Nothing, Float64}}(undef, output_length)
+	out_y = Vector{Union{Nothing, Float64}}(undef, output_length)
+	drawn = Vector{Int}(undef, drawable)
 	cos_head, sin_head = cos(_QUIVER_HEAD_ANGLE), sin(_QUIVER_HEAD_ANGLE)
-	max_shaft = Float64(sizeref) * _QUIVER_SHAFT_SCALE
+	max_length = Float64(sizeref) * _QUIVER_SHAFT_SCALE
+	# Fraction of the glyph length that lies behind `(x, y)`.
+	behind = pivot === :tail ? 0.0 : pivot === :middle ? 0.5 : 1.0
+	half_base = Float64(headwidth) / 2
 	to_axis_x(value) = xlog ? log10(value) : value
 	to_axis_y(value) = ylog ? log10(value) : value
 	from_axis_x(value) = xlog ? exp10(value) : value
 	from_axis_y(value) = ylog ? exp10(value) : value
 	j = 1
+	g = 0
 
 	@inbounds for (xi, yi, ui, vi, i) in zip(x, y, u, v, 1:n)
 		xf, yf = Float64(xi), Float64(yi)
@@ -14513,43 +14889,80 @@ function _quiver_coordinates(
 		shape = hypot(su, sv)
 		ux, uy = su / shape, sv / shape
 
-		shaft = (component / max_component) *
-			(shape / max_shape) *
-			max_shaft
-		ax, ay = to_axis_x(xf), to_axis_y(yf)
-		tip_x, tip_y = ax + ux * shaft, ay + uy * shaft
+		glyph_length = scale === :uniform ? max_length :
+			(component / max_component) * (shape / max_shape) * max_length
+		anchor_x, anchor_y = to_axis_x(xf), to_axis_y(yf)
+		tail_x = anchor_x - behind * glyph_length * ux
+		tail_y = anchor_y - behind * glyph_length * uy
+		tip_x, tip_y = tail_x + ux * glyph_length, tail_y + uy * glyph_length
 
-		arm = _QUIVER_HEAD_SCALE * shaft
-		head1_x = tip_x - arm * (ux * cos_head - uy * sin_head)
-		head1_y = tip_y - arm * (uy * cos_head + ux * sin_head)
-		head2_x = tip_x - arm * (ux * cos_head + uy * sin_head)
-		head2_y = tip_y - arm * (uy * cos_head - ux * sin_head)
+		if triangle
+			half = half_base * glyph_length
+			corners_x = (
+				from_axis_x(tail_x - half * uy),
+				from_axis_x(tip_x),
+				from_axis_x(tail_x + half * uy),
+			)
+			corners_y = (
+				from_axis_y(tail_y + half * ux),
+				from_axis_y(tip_y),
+				from_axis_y(tail_y - half * ux),
+			)
+			all(isfinite, corners_x) && all(isfinite, corners_y) ||
+				throw(ArgumentError(
+					"$caller: scaled glyph coordinates are non-finite at index $i",
+				))
+			out_x[j], out_y[j] = corners_x[1], corners_y[1]
+			out_x[j + 1], out_y[j + 1] = corners_x[2], corners_y[2]
+			out_x[j + 2], out_y[j + 2] = corners_x[3], corners_y[3]
+			out_x[j + 3], out_y[j + 3] = corners_x[1], corners_y[1]
+			out_x[j + 4], out_y[j + 4] = _GAP, _GAP
+		else
+			arm = _QUIVER_HEAD_SCALE * glyph_length
+			head1_x = tip_x - arm * (ux * cos_head - uy * sin_head)
+			head1_y = tip_y - arm * (uy * cos_head + ux * sin_head)
+			head2_x = tip_x - arm * (ux * cos_head + uy * sin_head)
+			head2_y = tip_y - arm * (uy * cos_head - ux * sin_head)
 
-		points_x = (from_axis_x(tip_x), from_axis_x(head1_x), from_axis_x(head2_x))
-		points_y = (from_axis_y(tip_y), from_axis_y(head1_y), from_axis_y(head2_y))
-		all(isfinite, points_x) && all(isfinite, points_y) ||
-			throw(ArgumentError(
-				"$caller: scaled arrow coordinates are non-finite at index $i",
-			))
-
-		arrow_x[j] = xf
-		arrow_y[j] = yf
-		arrow_x[j + 1] = points_x[1]
-		arrow_y[j + 1] = points_y[1]
-		arrow_x[j + 2] = _GAP
-		arrow_y[j + 2] = _GAP
-		arrow_x[j + 3] = points_x[2]
-		arrow_y[j + 3] = points_y[2]
-		arrow_x[j + 4] = points_x[1]
-		arrow_y[j + 4] = points_y[1]
-		arrow_x[j + 5] = points_x[3]
-		arrow_y[j + 5] = points_y[3]
-		arrow_x[j + 6] = _GAP
-		arrow_y[j + 6] = _GAP
-		j += 7
+			points_x = (
+				from_axis_x(tail_x),
+				from_axis_x(tip_x),
+				from_axis_x(head1_x),
+				from_axis_x(head2_x),
+			)
+			points_y = (
+				from_axis_y(tail_y),
+				from_axis_y(tip_y),
+				from_axis_y(head1_y),
+				from_axis_y(head2_y),
+			)
+			all(isfinite, points_x) && all(isfinite, points_y) ||
+				throw(ArgumentError(
+					"$caller: scaled arrow coordinates are non-finite at index $i",
+				))
+			# The tail is the data point itself for `pivot = :tail` (no
+			# round trip through log10/exp10).
+			out_x[j] = behind == 0 ? xf : points_x[1]
+			out_y[j] = behind == 0 ? yf : points_y[1]
+			out_x[j + 1] = points_x[2]
+			out_y[j + 1] = points_y[2]
+			out_x[j + 2] = _GAP
+			out_y[j + 2] = _GAP
+			out_x[j + 3] = points_x[3]
+			out_y[j + 3] = points_y[3]
+			out_x[j + 4] = points_x[2]
+			out_y[j + 4] = points_y[2]
+			out_x[j + 5] = points_x[4]
+			out_y[j + 5] = points_y[4]
+			out_x[j + 6] = _GAP
+			out_y[j + 6] = _GAP
+		end
+		g += 1
+		drawn[g] = i
+		j += points
 	end
 
-	return arrow_x, arrow_y
+	return out_x, out_y, drawn
 end
 
 # Flatten the accepted quiver input forms into four equal-length vectors:
@@ -14598,43 +15011,295 @@ function _quiver_points(x, y, u, v, who::AbstractString)
 	))
 end
 
-function _quiver_trace(
+function _quiver_choice(value, choices::Tuple, who::AbstractString, name::AbstractString)
+	(value isa Symbol || value isa AbstractString) || throw(ArgumentError(
+		"$(who): `$(name)` must be $(join(repr.(choices), ", ", " or ")); got $(repr(value)).",
+	))
+	symbol = Symbol(lowercase(strip(String(value))))
+	symbol in choices || throw(ArgumentError(
+		"$(who): `$(name)` must be $(join(repr.(choices), ", ", " or ")); got $(repr(value)).",
+	))
+	return symbol
+end
+
+# The glyph keywords of plot_quiver(!) (D13), validated. `pivot = nothing`
+# is the style's default (`:tail` for arrows, `:middle` for triangles);
+# `headwidth = nothing` is `_QUIVER_TRIANGLE_HEADWIDTH`. Triangle-only
+# keywords (`headwidth`, `edgecolor`, `edgewidth`) throw with arrows, and the
+# arrow-only `linewidth` throws with triangles.
+function _quiver_glyph_options(
+	who::AbstractString;
+	style,
+	pivot,
+	scale,
+	headwidth,
+	edgecolor,
+	edgewidth,
+	linewidth,
+	opacity,
+)
+	style_value = _quiver_choice(style, _QUIVER_STYLES, who, "style")
+	triangle = style_value === :triangle
+	pivot_value = pivot === nothing ? (triangle ? :middle : :tail) :
+		_quiver_choice(pivot, _QUIVER_PIVOTS, who, "pivot")
+	scale_value = _quiver_choice(scale, _QUIVER_SCALES, who, "scale")
+	width_value = _QUIVER_TRIANGLE_HEADWIDTH
+	if headwidth !== nothing
+		triangle || throw(ArgumentError(
+			"$(who): `headwidth` sets the base of style = :triangle glyphs; " *
+			"arrows (style = :arrow) have fixed heads.",
+		))
+		(headwidth isa Real && !(headwidth isa Bool) && isfinite(headwidth) && headwidth > 0) ||
+			throw(ArgumentError(
+				"$(who): `headwidth` must be a finite number > 0 (base width as a " *
+				"fraction of the triangle's length); got $(repr(headwidth)).",
+			))
+		width_value = Float64(headwidth)
+	end
+	edge = _field2d_color_string(edgecolor, who, "edgecolor")
+	_field2d_nonnegative(edgewidth, who, "edgewidth")
+	_field2d_nonnegative(linewidth, who, "linewidth")
+	if triangle
+		linewidth > 0 && throw(ArgumentError(
+			"$(who): `linewidth` is the line width of arrows; outline style = " *
+			":triangle glyphs with `edgewidth` (and `edgecolor`).",
+		))
+	elseif !isempty(edge) || edgewidth > 0
+		throw(ArgumentError(
+			"$(who): `edgecolor`/`edgewidth` outline style = :triangle glyphs; " *
+			"arrows are lines (set their width with `linewidth`).",
+		))
+	end
+	(opacity isa Real && !(opacity isa Bool) && isfinite(opacity) && 0 <= opacity <= 1) ||
+		throw(ArgumentError(
+			"$(who): `opacity` must be a number in [0, 1]; got $(repr(opacity)).",
+		))
+	return (
+		style = style_value,
+		pivot = pivot_value,
+		scale = scale_value,
+		headwidth = width_value,
+		edgecolor = edge,
+		edgewidth = Float64(edgewidth),
+		linewidth = linewidth,
+		opacity = Float64(opacity),
+	)
+end
+
+# `colorby` of plot_quiver(!) (D13): `:none`, `:magnitude`, or an array with
+# the shape of `u` (one value per vector, matched to the vectors as `u` is).
+# Returns `:none`, `:magnitude` or the array.
+function _quiver_colorby(colorby, u, who::AbstractString)
+	if colorby isa Symbol || colorby isa AbstractString
+		return _quiver_choice(colorby, (:none, :magnitude), who, "colorby")
+	end
+	colorby isa AbstractArray || throw(ArgumentError(
+		"$(who): `colorby` must be :none, :magnitude or an array of values with " *
+		"the shape of `u`; got $(typeof(colorby)).",
+	))
+	size(colorby) == size(u) || throw(ArgumentError(
+		"$(who): a `colorby` array needs one value per vector, with the shape " *
+		"of `u` $(size(u)); got size $(size(colorby)).",
+	))
+	return colorby
+end
+
+# A colour keyword passed to plot_quiver(!) without `colorby` is an error
+# naming it (it would be silently ignored).
+function _quiver_require_colorby(who::AbstractString; kwargs...)
+	given = String[]
+	for (name, value) in kwargs
+		unset = name === :colorscale ? _is_unset_colorscale(value) :
+			name === :crange ? _is_auto_range(value) :
+			name === :colornorm ? (value === :linear || value == "linear") :
+			name === :colorbar_title ? value == "" :
+			name === :colorbar_title_side ? true :
+			value === nothing
+		unset || push!(given, "`$(name)`")
+	end
+	isempty(given) || throw(ArgumentError(
+		"$(who): $(join(given, ", ")) $(length(given) == 1 ? "colours the glyphs by value and needs" :
+			"colour the glyphs by value and need") `colorby` (:magnitude or an " *
+		"array); got colorby = :none.",
+	))
+	return nothing
+end
+
+# One glyph trace: arrows are lines, triangles filled polygons. `colour = ""`
+# leaves the colour to plotly.
+function _quiver_glyph_trace(
+	xs,
+	ys,
+	colour::AbstractString,
+	glyph;
+	name::AbstractString,
+	showlegend::Bool,
+	group::Union{Nothing, String},
+)
+	fields = Dict{Symbol, Any}(
+		:x => xs,
+		:y => ys,
+		:mode => "lines",
+		:hoverinfo => "skip",
+		:name => name,
+		:showlegend => showlegend,
+	)
+	if glyph.style === :triangle
+		fields[:fill] = "toself"
+		isempty(colour) || (fields[:fillcolor] = colour)
+		# No outline by default; `simplify = false` keeps every vertex of
+		# small triangles.
+		line = Dict{Symbol, Any}(:width => glyph.edgewidth, :simplify => false)
+		if !isempty(glyph.edgecolor)
+			line[:color] = glyph.edgecolor
+		elseif !isempty(colour)
+			line[:color] = colour
+		end
+	else
+		line = isempty(colour) ? Dict{Symbol, Any}() : Dict{Symbol, Any}(:color => colour)
+		glyph.linewidth > 0 && (line[:width] = glyph.linewidth)
+	end
+	isempty(line) || (fields[:line] = attr(; line...))
+	glyph.opacity < 1 && (fields[:opacity] = glyph.opacity)
+	group === nothing || (fields[:legendgroup] = group)
+	return scatter(; fields...)
+end
+
+# The traces of one quiver call: the glyphs in one trace (`colorby = :none`)
+# or one trace per colour bin plus a colorbar carrier, all under one legend
+# entry. Returns `(traces, colour_map)` (`nothing` without `colorby`).
+function _quiver_traces(
+	fig,
 	x,
 	y,
 	u,
-	v;
-	color::AbstractString = "RoyalBlue",
-	sizeref::Real = 1,
-	legend::AbstractString = "",
-	linewidth::Real = 0,
-	caller::AbstractString = "plot_quiver",
-	xlog::Bool = false,
-	ylog::Bool = false,
+	v,
+	who::AbstractString;
+	colour::AbstractString,
+	sizeref,
+	legend::AbstractString,
+	glyph,
+	colorby,
+	xlog::Bool,
+	ylog::Bool,
+	colorscale,
+	crange,
+	cmid,
+	colornorm,
+	levels,
+	showscale,
+	colorbar_title,
+	colorbar_title_side::Symbol,
+	colorbar_ticks,
+	colorbar_ticklabels,
+	coloraxis,
 )
-	xp, yp, up, vp = _quiver_points(x, y, u, v, caller)
-	arrow_x, arrow_y = _quiver_coordinates(
+	xp, yp, up, vp = _quiver_points(x, y, u, v, who)
+	glyph_x, glyph_y, drawn = _quiver_coordinates(
 		xp,
 		yp,
 		up,
 		vp,
 		sizeref;
-		caller = caller,
+		caller = who,
 		xlog = xlog,
 		ylog = ylog,
+		style = glyph.style,
+		pivot = glyph.pivot,
+		scale = glyph.scale,
+		headwidth = glyph.headwidth,
 	)
-	line = isempty(color) ? Dict{Symbol, Any}() : Dict{Symbol, Any}(:color => color)
-	linewidth > 0 && (line[:width] = linewidth)
-	fields = Dict{Symbol, Any}(
-		:x => arrow_x,
-		:y => arrow_y,
-		:mode => "lines",
-		:hoverinfo => "skip",
-		:name => isempty(legend) ? "" : _label(legend),
-		# An unnamed quiver gets no "trace N" legend entry.
-		:showlegend => !isempty(legend),
+	name = isempty(legend) ? "" : _label(legend)
+	group = isempty(legend) ? nothing : "plotlysupply:quiver:" * name
+	if colorby === :none
+		trace = _quiver_glyph_trace(
+			glyph_x,
+			glyph_y,
+			colour,
+			glyph;
+			name = name,
+			# An unnamed quiver gets no "trace N" legend entry.
+			showlegend = !isempty(legend),
+			group = nothing,
+		)
+		return GenericTrace[trace], nothing
+	end
+	values = if colorby === :magnitude
+		Float64[hypot(Float64(up[i]), Float64(vp[i])) for i in drawn]
+	else
+		flat = vec(colorby)
+		Any[flat[i] for i in drawn]
+	end
+	cm = _mesh2d_colour(
+		fig,
+		_Mesh2dTarget(),
+		values;
+		colorscale = colorscale,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
+		who = who,
 	)
-	isempty(line) || (fields[:line] = attr(; line...))
-	return scatter(; fields...)
+	bins, colours = _mesh2d_bins(cm, _QUIVER_COLOR_BINS)
+	points = glyph.style === :triangle ? _QUIVER_TRIANGLE_POINTS : _QUIVER_ARROW_POINTS
+	counts = zeros(Int, length(colours))
+	for b in bins
+		b > 0 && (counts[b] += 1)
+	end
+	bin_x = [Vector{Union{Nothing, Float64}}(undef, counts[b] * points) for b in eachindex(colours)]
+	bin_y = [Vector{Union{Nothing, Float64}}(undef, counts[b] * points) for b in eachindex(colours)]
+	filled = zeros(Int, length(colours))
+	for (g, b) in enumerate(bins)
+		b == 0 && continue
+		source = ((g - 1) * points + 1):(g * points)
+		target = (filled[b] + 1):(filled[b] + points)
+		copyto!(bin_x[b], first(target), glyph_x, first(source), points)
+		copyto!(bin_y[b], first(target), glyph_y, first(source), points)
+		filled[b] += points
+	end
+	traces = GenericTrace[]
+	for b in eachindex(colours)
+		counts[b] == 0 && continue
+		first_trace = isempty(traces)
+		push!(
+			traces,
+			_quiver_glyph_trace(
+				bin_x[b],
+				bin_y[b],
+				colours[b],
+				glyph;
+				name = first_trace ? name : "",
+				showlegend = first_trace && !isempty(legend),
+				group = group,
+			),
+		)
+	end
+	if isempty(traces)
+		# Nothing to colour (no drawable vector, or no finite colour value):
+		# keep one empty glyph trace, as without `colorby`.
+		push!(
+			traces,
+			_quiver_glyph_trace(
+				Union{Nothing, Float64}[],
+				Union{Nothing, Float64}[],
+				"",
+				glyph;
+				name = name,
+				showlegend = !isempty(legend),
+				group = group,
+			),
+		)
+	end
+	carrier = _mesh2d_carrier(cm, who)
+	carrier === nothing || push!(traces, carrier)
+	return traces, cm
 end
 
 function _quiver_add!(
@@ -14649,6 +15314,25 @@ function _quiver_add!(
 	sizeref,
 	legend::AbstractString,
 	linewidth,
+	style = :arrow,
+	pivot = nothing,
+	scale = :magnitude,
+	headwidth = nothing,
+	edgecolor = "",
+	edgewidth = 0,
+	opacity = 1,
+	colorby = :none,
+	colorscale = "",
+	crange = [0, 0],
+	cmid = nothing,
+	colornorm = :linear,
+	levels = nothing,
+	showscale = nothing,
+	colorbar_title = "",
+	colorbar_title_side = :top,
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
 	xlabel::AbstractString,
 	ylabel::AbstractString,
 	title::AbstractString,
@@ -14670,7 +15354,7 @@ function _quiver_add!(
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
-	_validate_cartesian_options(
+	_field2d_validate_cartesian(
 		fig,
 		who;
 		xrange = xrange,
@@ -14682,23 +15366,82 @@ function _quiver_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
-	colour = _field2d_color_string(color, who, "color")
-	_field2d_nonnegative(linewidth, who, "linewidth")
-	trace = _quiver_trace(
+	_field2d_validate_ticks(
+		fig,
+		who;
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		xscale = xscale,
+		yscale = yscale,
+	)
+	glyph = _quiver_glyph_options(
+		who;
+		style = style,
+		pivot = pivot,
+		scale = scale,
+		headwidth = headwidth,
+		edgecolor = edgecolor,
+		edgewidth = edgewidth,
+		linewidth = linewidth,
+		opacity = opacity,
+	)
+	colorby_value = _quiver_colorby(colorby, u, who)
+	title_side = _field2d_title_side(colorbar_title_side, who)
+	if colorby_value === :none
+		_quiver_require_colorby(
+			who;
+			colorscale = colorscale,
+			crange = crange,
+			cmid = cmid,
+			colornorm = colornorm,
+			levels = levels,
+			showscale = showscale,
+			colorbar_title = colorbar_title,
+			colorbar_ticks = colorbar_ticks,
+			colorbar_ticklabels = colorbar_ticklabels,
+			coloraxis = coloraxis,
+		)
+		colour = _field2d_color_string(color === nothing ? "RoyalBlue" : color, who, "color")
+	else
+		color === nothing || throw(ArgumentError(
+			"$(who): `color` sets one colour for every glyph and conflicts with " *
+			"`colorby` (the glyphs are coloured through `colorscale`).",
+		))
+		colour = ""
+	end
+	traces, cm = _quiver_traces(
+		fig,
 		x,
 		y,
 		u,
-		v;
-		color = colour,
+		v,
+		who;
+		colour = colour,
 		sizeref = sizeref,
 		legend = legend,
-		linewidth = linewidth,
-		caller = who,
+		glyph = glyph,
+		colorby = colorby_value,
 		xlog = _field2d_log_axis(fig, :x, xscale),
 		ylog = _field2d_log_axis(fig, :y, yscale),
+		colorscale = colorscale,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_title_side = title_side,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
 	)
 	first_new = length(_plot_data(fig)) + 1
-	push!(_plot_data(fig), trace)
+	append!(_plot_data(fig), traces)
+	cm === nothing || _mesh2d_write_coloraxis!(fig, _Mesh2dTarget(), cm, showscale !== nothing)
 	_field2d_apply_options!(
 		fig,
 		who;
@@ -14723,16 +15466,23 @@ function _quiver_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
-	# Arrows take the style's line width, never its dash/marker cycle.
-	_field2d_finish!(fig, first_new; style = (:linewidth,))
+	# Arrows take the style's line width, never its dash/marker cycle;
+	# triangles keep their own outline (none by default).
+	_field2d_finish!(
+		fig,
+		first_new;
+		coloraxis = cm === nothing ? nothing : cm.coloraxis,
+		style = glyph.style === :arrow ? (:linewidth,) : (),
+	)
 	return nothing
 end
 
 """
 	plot_quiver(x, y, u, v; kwargs...)
 
-Draw a 2-D vector field as arrows: the vector `(u, v)` starts at `(x, y)`.
-Accepted forms:
+Draw a 2-D vector field: one glyph per vector `(u, v)` at `(x, y)`, either an
+arrow (`style = :arrow`, the default) or a filled triangle
+(`style = :triangle`). Accepted forms:
 - four vectors of equal length (one arrow per entry);
 - four matrices of the same size (e.g. from `Y, X = meshgrid(y, x)`);
 - coordinate vectors `x`, `y` with component matrices `u[ix, iy]`,
@@ -14741,36 +15491,78 @@ Accepted forms:
   element in column-major order (e.g. `X`, `Y` from `meshgrid` with `u = -Y[:]`).
 Other sizes throw an `ArgumentError` (a transposed `u`, `v` is reported).
 
-Arrow length is proportional to the magnitude `hypot(u, v)`: the longest
-arrow is `2/3 * sizeref` long in x/y data units (on a log axis, in decades)
-and the others are scaled by their magnitude relative to it, so `sizeref` is
-the length budget of the strongest vector and does not depend on the units
-of `u`, `v`. Set `sizeref` to about the grid spacing so neighbouring arrows do
-not overlap. The arrowhead is 0.3 of each shaft at ±20°. Vectors with a
-non-finite origin or component are skipped with a warning; zero vectors draw
-nothing (a warning when every vector is zero). On a logarithmic axis
-(`xscale`/`yscale = "log"`) the arrows are laid out in axis units (decades),
-pointing at angle `atan(v, u)` with equal aspect (matplotlib's default
-`angles = "uv"`), and origins must be positive.
+Glyph size is proportional to the magnitude `hypot(u, v)`: the longest glyph
+is `2/3 * sizeref` long in x/y data units (on a log axis, in decades) and the
+others are scaled by their magnitude relative to it, so `sizeref` is the
+length budget of the strongest vector and does not depend on the units of
+`u`, `v`. Set `sizeref` to about the grid spacing so neighbouring glyphs do
+not overlap. An arrowhead is 0.3 of its shaft at ±20°; a triangle's base is
+`headwidth` times its length, so its whole size follows the magnitude.
+Glyphs are polygons in data units: they scale with the axes, and with
+`equalar = true` they are not distorted. Vectors with a non-finite origin or
+component are skipped with a warning; zero vectors draw nothing (a warning
+when every vector is zero). On a logarithmic axis (`xscale`/`yscale =
+"log"`) the glyphs are laid out in axis units (decades), pointing at angle
+`atan(v, u)` with equal aspect (matplotlib's default `angles = "uv"`), and
+origins must be positive.
+
+[`plot_quiver3d`](@ref) is the 3-D counterpart: its `style = :cone` draws
+solid cones (like `style = :triangle` here) and `style = :arrow` line arrows.
 
 #### Keywords
-- `color = "RoyalBlue"`: arrow colour (string, Symbol or Colorant).
-- `sizeref::Real = 1`: length budget of the longest arrow (see above); 0
+Glyphs (lead decision D13):
+- `style = :arrow`: `:arrow` (shaft and head, lines) or `:triangle` (one
+  filled isosceles triangle per vector, pointing along `(u, v)`).
+- `pivot = nothing`: the part of the glyph at `(x, y)`: `:tail`, `:middle` or
+  `:tip` (matplotlib's `pivot`); `nothing` is `:tail` for arrows and
+  `:middle` for triangles.
+- `scale = :magnitude`: `:uniform` draws every non-zero vector at the full
+  `2/3 * sizeref` length (a direction field; combine with
+  `colorby = :magnitude` to show the strength by colour).
+- `sizeref::Real = 1`: length budget of the longest glyph (see above); 0
   draws nothing; must be finite and ≥ 0.
-- `legend = ""`: legend name; an unnamed quiver has no legend entry.
+- `headwidth = nothing`: triangle base width as a fraction of its length
+  (> 0; default 0.5). Triangles only.
+- `color = nothing`: one colour for every glyph (string, Symbol or Colorant;
+  `nothing` is "RoyalBlue", `""` leaves it to plotly). Not with `colorby`.
 - `linewidth::Real = 0`: arrow line width in pixels; `0` takes the active
   style's line width ([`with_style`](@ref)), else plotly's default. The
-  style's dash/marker cycle is not applied to arrows.
-- `equalar::Bool = true`: equal data aspect, so arrow angles are true.
+  style's dash/marker cycle is not applied to arrows. Arrows only.
+- `edgecolor = ""`, `edgewidth::Real = 0`: triangle outline colour and width
+  in pixels (default: no outline; `edgecolor = ""` with a width outlines in
+  the fill colour). Triangles only.
+- `opacity::Real = 1`: glyph opacity in [0, 1].
+- `legend = ""`: legend name; one legend entry per call (an unnamed quiver
+  has none).
+
+Colour by value (`colorby`):
+- `colorby = :none`: `:magnitude` colours each glyph by `hypot(u, v)`; an
+  array with the shape of `u` gives one value per vector (NaN/`missing`
+  values are not drawn). The glyphs are binned into $(_QUIVER_COLOR_BINS)
+  colours (one trace per used colour) and a colorbar is added.
+- `colorscale = ""` (template default), `crange = [0, 0]` (automatic: the
+  values' extent), `cmid = nothing`, `colornorm = :linear` (`:log`),
+  `levels = nothing` (discrete bands), `showscale = nothing`,
+  `colorbar_title = ""` (mathtext), `colorbar_title_side = :top`,
+  `colorbar_ticks = nothing`, `colorbar_ticklabels = nothing`,
+  `coloraxis = nothing` (`:shared` or "coloraxisN"): as for
+  [`plot_polygons`](@ref). They need `colorby`; passing one without it throws.
+
+Axes and figure:
+- `equalar::Bool = true`: equal data aspect, so glyph angles are true.
 - `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
-  `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic), `xscale = ""`,
+  `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic; a one-sided
+  `(lo, nothing)`/`(nothing, hi)` fixes one bound; with the equal aspect the
+  other is fixed at the current data extent, as plotly.js re-ranges an
+  equal-aspect axis), `xscale = ""`,
   `yscale = ""`,
   `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
   `ytickformat`, `grid::Union{Nothing,Bool,Symbol} = true`, `width = 0`,
   `height = 0`, `fontsize = 0`: as for [`plot_heatmap`](@ref).
 - `show::Bool = false`: open a window and return a `SyncPlot`.
 
-Returns a `Plot` (a `SyncPlot` when `show = true`).
+Returns a `Plot` (a `SyncPlot` when `show = true`). Invalid input throws an
+`ArgumentError`.
 
 # Example
 ```julia
@@ -14779,6 +15571,9 @@ y = range(-1, 1; length = 7)
 u = [-yi for xi in x, yi in y]                  # u[ix, iy]
 v = [xi for xi in x, yi in y]
 fig = plot_quiver(x, y, u, v; sizeref = 0.3, legend = "rotation")
+# Direction by glyph, strength by colour:
+fig2 = plot_quiver(x, y, u, v; style = :triangle, scale = :uniform,
+	sizeref = 0.3, colorby = :magnitude, colorbar_title = "|v|")
 ```
 """
 function plot_quiver(
@@ -14786,10 +15581,29 @@ function plot_quiver(
 	y::AbstractArray,
 	u::AbstractArray,
 	v::AbstractArray;
-	color = "RoyalBlue",
+	style = :arrow,
+	pivot = nothing,
+	scale = :magnitude,
 	sizeref::Real = 1,
-	legend::AbstractString = "",
+	headwidth = nothing,
+	color = nothing,
 	linewidth::Real = 0,
+	edgecolor = "",
+	edgewidth::Real = 0,
+	opacity::Real = 1,
+	legend::AbstractString = "",
+	colorby = :none,
+	colorscale = "",
+	crange = [0, 0],
+	cmid::Union{Nothing, Real} = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	levels = nothing,
+	showscale::Union{Nothing, Bool} = nothing,
+	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -14819,10 +15633,29 @@ function plot_quiver(
 		u,
 		v;
 		constructor = true,
-		color = color,
+		style = style,
+		pivot = pivot,
+		scale = scale,
 		sizeref = sizeref,
-		legend = legend,
+		headwidth = headwidth,
+		color = color,
 		linewidth = linewidth,
+		edgecolor = edgecolor,
+		edgewidth = edgewidth,
+		opacity = opacity,
+		legend = legend,
+		colorby = colorby,
+		colorscale = colorscale,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
 		xlabel = xlabel,
 		ylabel = ylabel,
 		title = title,
@@ -15695,8 +16528,11 @@ the primary axes of a `Plot`/`SyncPlot` and on the target cell's axes of a
 `SubplotFigure`, where `title`, `width` and `height` are ignored with a
 warning. `xrange`/`yrange` (data units, also on a log axis) set the target
 axes' limits with autorange off, on a shared (`matches`) axis the limits of
-its group; `[0, 0]`/`nothing` leaves them as they are. A user template is
-kept.
+its group; a one-sided limit `(lo, nothing)`/`(nothing, hi)` fixes one bound
+and autoranges the other (on an equal-aspect axis the other is fixed at the
+current data extent); `[0, 0]`/`nothing` leaves them as they are. A user
+template is kept. `interpolation = :bilinear` smooths the heatmap (plotly
+`zsmooth = "best"`).
 
 Invalid input throws an `ArgumentError` and leaves the figure unchanged.
 Returns `nothing` (`sf` for a `SubplotFigure`).
@@ -15747,6 +16583,7 @@ function plot_heatmap!(
 	grid::Union{Nothing, Bool, Symbol} = nothing,
 	equalar::Bool = false,
 	tight = true,
+	interpolation = :nearest,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
 	kwargs...,
@@ -15794,6 +16631,7 @@ function plot_heatmap!(
 		grid = grid,
 		equalar = equalar,
 		tight = tight,
+		interpolation = interpolation,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -15959,18 +16797,19 @@ end
 	plot_quiver!(fig, x, y, u, v; kwargs...)
 	plot_quiver!(sf::SubplotFigure, x, y, u, v; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
-Append a vector field (same input forms, arrow scaling and keywords as
-[`plot_quiver`](@ref), except `show`, which throws an `ArgumentError`) to
-`fig`, a `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
-together, default: the active cell; `secondary_y` targets the cell's
-secondary y axis; `inset = k` targets the `k`-th inset from
-[`inset!`](@ref)). `xrange`/`yrange` act as for [`plot_heatmap!`](@ref).
-`equalar = true` (default) locks the
-data aspect of the target axes; `grid = nothing` keeps the grid (`true`
-re-enables it, `false` hides it). Each call scales its own arrows: the longest
-arrow of this call is `2/3 * sizeref` long in x/y data units. Arrows on an axis that
-is already logarithmic are laid out in decades. On a `SubplotFigure`,
-`title`, `width` and `height` are ignored with a warning.
+Append a vector field (same input forms, glyph kinds, scaling and keywords as
+[`plot_quiver`](@ref): `style`, `pivot`, `scale`, `headwidth`, `colorby`
+and the colour keywords, `edgecolor`, `edgewidth`, `opacity`; except
+`show`, which throws an `ArgumentError`) to `fig`, a `Plot` or `SyncPlot`, or
+to a cell of a `SubplotFigure` (`row`/`col` together, default: the active
+cell; `secondary_y` targets the cell's secondary y axis; `inset = k` targets
+the `k`-th inset from [`inset!`](@ref)). `xrange`/`yrange` act as for
+[`plot_heatmap!`](@ref). `equalar = true` (default) locks the data aspect of
+the target axes; `grid = nothing` keeps the grid (`true` re-enables it,
+`false` hides it). Each call scales its own glyphs: the longest glyph of this
+call is `2/3 * sizeref` long in x/y data units. Glyphs on an axis that is
+already logarithmic are laid out in decades. On a `SubplotFigure`, `title`,
+`width` and `height` are ignored with a warning.
 
 Invalid input throws an `ArgumentError` and leaves the figure unchanged.
 Returns `nothing` (`sf` for a `SubplotFigure`).
@@ -15989,10 +16828,29 @@ function plot_quiver!(
 	y::AbstractArray,
 	u::AbstractArray,
 	v::AbstractArray;
-	color = "RoyalBlue",
+	style = :arrow,
+	pivot = nothing,
+	scale = :magnitude,
 	sizeref::Real = 1,
-	legend::AbstractString = "",
+	headwidth = nothing,
+	color = nothing,
 	linewidth::Real = 0,
+	edgecolor = "",
+	edgewidth::Real = 0,
+	opacity::Real = 1,
+	legend::AbstractString = "",
+	colorby = :none,
+	colorscale = "",
+	crange = [0, 0],
+	cmid::Union{Nothing, Real} = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	levels = nothing,
+	showscale::Union{Nothing, Bool} = nothing,
+	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -16022,10 +16880,29 @@ function plot_quiver!(
 		u,
 		v;
 		constructor = false,
-		color = color,
+		style = style,
+		pivot = pivot,
+		scale = scale,
 		sizeref = sizeref,
-		legend = legend,
+		headwidth = headwidth,
+		color = color,
 		linewidth = linewidth,
+		edgecolor = edgecolor,
+		edgewidth = edgewidth,
+		opacity = opacity,
+		legend = legend,
+		colorby = colorby,
+		colorscale = colorscale,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
 		xlabel = xlabel,
 		ylabel = ylabel,
 		title = title,
@@ -20788,6 +21665,129 @@ function _image_flip(source, flip_rows::Bool, flip_columns::Bool)
 	return flip_columns ? [reverse(row) for row in rows] : rows
 end
 
+# ── `interpolation = :bilinear` images (G67) ──
+# plotly.js 2.35.2 (traces/image/plot.js) smooths an image only when it is a
+# `source` URL: its `_realImage` path needs zsmooth "fast", `!_hasZ`,
+# `_hasSource` and linear axes, and then lets the renderer scale one <image>.
+# A `z` image is always painted as one flat rectangle per pixel, whatever
+# `zsmooth` says. A bilinear image is therefore sent as an 8-bit RGBA PNG data
+# URI, its pixels converted exactly as plotly converts `z` (default
+# zmin/zmax: channel values clamped to the colour model's range).
+
+# Channel `k` of pixel (`r`, `c`) (1-based positions) of flipped image data.
+function _image_channel(data, kind::Symbol, r::Int, c::Int, k::Int)
+	if kind === :array3
+		return data[axes(data, 1)[r], axes(data, 2)[c], axes(data, 3)[k]]
+	end
+	row = data[firstindex(data) + r - 1]
+	pixel = row[firstindex(row) + c - 1]
+	return pixel[firstindex(pixel) + k - 1]
+end
+
+_image_byte(v::Float64) = round(UInt8, clamp(v, 0.0, 255.0))
+
+# H×W image data in plotly colour model `model` ("" is plotly's default for a
+# `z` image, "rgb") as a 4×W×H array of RGBA bytes, the PNG scanline order. A
+# pixel with a non-finite channel has no colour plotly could draw, so it is
+# left fully transparent.
+function _image_rgba_bytes(source, data, model::AbstractString)
+	model = isempty(model) ? "rgb" : model
+	height, width = source.height, source.width
+	out = zeros(UInt8, 4, width, height)
+	hsl = startswith(model, "hsl")
+	# rgba256 carries alpha in 0..255; rgba and hsla in 0..1.
+	alpha_scale = model == "rgba256" ? 1.0 : 255.0
+	has_alpha = _image_colormodel_channels(model) == 4
+	for r in 1:height, c in 1:width
+		v1 = Float64(_image_channel(data, source.kind, r, c, 1))
+		v2 = Float64(_image_channel(data, source.kind, r, c, 2))
+		v3 = Float64(_image_channel(data, source.kind, r, c, 3))
+		a = has_alpha ? Float64(_image_channel(data, source.kind, r, c, 4)) * alpha_scale : 255.0
+		(isfinite(v1) && isfinite(v2) && isfinite(v3) && isfinite(a)) || continue
+		if hsl
+			# plotly's hsl model: hue 0..360, saturation and lightness 0..100 (%).
+			rgb = convert(Colors.RGB{Float64}, Colors.HSL{Float64}(
+				clamp(v1, 0.0, 360.0),
+				clamp(v2, 0.0, 100.0) / 100,
+				clamp(v3, 0.0, 100.0) / 100,
+			))
+			out[1, c, r] = _image_byte(255 * Float64(Colors.red(rgb)))
+			out[2, c, r] = _image_byte(255 * Float64(Colors.green(rgb)))
+			out[3, c, r] = _image_byte(255 * Float64(Colors.blue(rgb)))
+		else
+			out[1, c, r] = _image_byte(v1)
+			out[2, c, r] = _image_byte(v2)
+			out[3, c, r] = _image_byte(v3)
+		end
+		out[4, c, r] = _image_byte(a)
+	end
+	return out
+end
+
+# Adler-32 of `bytes` (RFC 1950 §8.2), reducing every 5552 bytes: the largest
+# run whose sums cannot overflow 32 bits (zlib's NMAX).
+function _image_adler32(bytes::AbstractVector{UInt8})
+	a = UInt32(1)
+	b = UInt32(0)
+	n = length(bytes)
+	i = 1
+	@inbounds while i <= n
+		stop = min(n, i + 5551)
+		for j in i:stop
+			a += bytes[j]
+			b += a
+		end
+		a %= UInt32(65521)
+		b %= UInt32(65521)
+		i = stop + 1
+	end
+	return (b << 16) | a
+end
+
+function _image_png_chunk!(io::IO, type::String, payload::AbstractVector{UInt8})
+	tag = Vector{UInt8}(codeunits(type))
+	write(io, _be_u32(length(payload)), tag, payload)
+	write(io, _be_u32(_crc32(payload, _crc32(tag))))
+	return io
+end
+
+# An 8-bit RGBA PNG of `rgba` (4×W×H). The zlib stream uses stored (level 0)
+# deflate blocks: exact, dependency-free, and still smaller than the JSON
+# `z` arrays it replaces.
+function _image_png(rgba::Array{UInt8, 3})
+	width, height = size(rgba, 2), size(rgba, 3)
+	stride = 4 * width
+	raw = Vector{UInt8}(undef, height * (stride + 1))
+	for r in 1:height
+		start = (r - 1) * (stride + 1)
+		raw[start + 1] = 0x00 # filter type None
+		copyto!(raw, start + 2, rgba, (r - 1) * stride + 1, stride)
+	end
+	zlib = IOBuffer()
+	write(zlib, 0x78, 0x01) # deflate, 32 KiB window, no preset dictionary
+	n = length(raw)
+	position = 1
+	while position <= n
+		len = min(0xffff, n - position + 1)
+		write(zlib, position + len > n ? 0x01 : 0x00) # BFINAL, BTYPE = stored
+		write(zlib, UInt8(len & 0xff), UInt8(len >> 8))
+		write(zlib, UInt8(~len & 0xff), UInt8((~len >> 8) & 0xff))
+		write(zlib, view(raw, position:(position + len - 1)))
+		position += len
+	end
+	write(zlib, _be_u32(_image_adler32(raw)))
+	png = IOBuffer()
+	write(png, _PNG_SIGNATURE)
+	# Bit depth 8, colour type 6 (RGBA), deflate, adaptive filtering, no interlace.
+	_image_png_chunk!(png, "IHDR", vcat(_be_u32(width), _be_u32(height), UInt8[8, 6, 0, 0, 0]))
+	_image_png_chunk!(png, "IDAT", take!(zlib))
+	_image_png_chunk!(png, "IEND", UInt8[])
+	return take!(png)
+end
+
+_image_png_uri(source, data, model::AbstractString) =
+	"data:image/png;base64," * Base64.base64encode(_image_png(_image_rgba_bytes(source, data, model)))
+
 function _image_add!(
 	fig,
 	who::AbstractString,
@@ -20813,10 +21813,11 @@ function _image_add!(
 	grid,
 	equalar::Bool,
 	tight,
+	interpolation = :nearest,
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
-	_validate_cartesian_options(
+	_field2d_validate_cartesian(
 		fig,
 		who;
 		xrange = xrange,
@@ -20826,7 +21827,18 @@ function _image_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	_field2d_validate_ticks(
+		fig,
+		who;
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+	)
 	tight_value = _field2d_bool(tight, who, "tight")
+	zsmooth = _field2d_zsmooth(interpolation, who; image = true)
 	origin_value = _field2d_origin(origin, who; allow_unset = !constructor)
 	source = _image_source(z, who)
 	model = _image_colormodel(colormodel, source, who)
@@ -20839,16 +21851,22 @@ function _image_add!(
 	)
 	data = placement === nothing ? source.data :
 		_image_flip(source, placement.flip_rows, placement.flip_columns)
-	fields = Dict{Symbol, Any}(
-		:z => source.kind === :array3 ? _image_z(data; who = who) : data,
-	)
-	isempty(model) || (fields[:colormodel] = model)
+	fields = Dict{Symbol, Any}()
+	if zsmooth === nothing
+		fields[:z] = source.kind === :array3 ? _image_z(data; who = who) : data
+		isempty(model) || (fields[:colormodel] = model)
+	else
+		# A smoothed image must be a `source` (see `_image_png_uri`); plotly
+		# reads it as "rgba256" and ignores `colormodel`.
+		fields[:source] = _image_png_uri(source, data, model)
+	end
 	if placement !== nothing
 		fields[:x0] = placement.x0
 		fields[:dx] = placement.dx
 		fields[:y0] = placement.y0
 		fields[:dy] = placement.dy
 	end
+	zsmooth === nothing || (fields[:zsmooth] = zsmooth)
 	_field2d_mark_field!(fields, tight_value)
 
 	first_new = length(_plot_data(fig)) + 1
@@ -20876,6 +21894,7 @@ function _image_add!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		partial_ranges = false,
 	)
 	# plotly reverses the y axis of an image by default; write the direction
 	# explicitly so the extent / origin hold.
@@ -20885,6 +21904,11 @@ function _image_add!(
 	elseif !isempty(origin_value)
 		_field2d_axis_direction!(fig, :y, origin_value == "upper"; force = true)
 	end
+	# One-sided limits (D11) after the direction, so the fixed bound lands in
+	# the slot of the image's direction; a y axis that states no direction is
+	# drawn reversed by plotly for an image.
+	_field2d_apply_partial_range!(fig, :xaxis, xrange; who = who)
+	_field2d_apply_partial_range!(fig, :yaxis, yrange; implicit_reversed = true, who = who)
 	_field2d_finish!(fig, first_new)
 	return nothing
 end
@@ -20919,8 +21943,19 @@ alpha channel is kept. A 2-D matrix of numbers is not an image (use
 - `tight::Bool = true`: autoranged axes fit the image's pixel edges without
   padding; `false` restores plotly's padded autorange (as for
   [`plot_heatmap`](@ref)).
+- `interpolation = :nearest`: `:nearest` draws crisp square pixels;
+  `:bilinear` lets the renderer smooth the image when it is scaled, as
+  matplotlib's `imshow(interpolation = "bilinear")`. plotly.js smooths only
+  an image given as a picture, so a bilinear image is sent as an 8-bit RGBA
+  PNG (trace `source`, `zsmooth = "fast"`; channel values are converted from
+  `colormodel` and clamped to its range, a pixel with a non-finite channel is
+  transparent, and the hover shows the RGBA bytes). The smoothing needs
+  linear axes; on a log axis plotly draws the pixels flat.
 - `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
-  `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic). The image
+  `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic; a one-sided
+  `(lo, nothing)`/`(nothing, hi)` fixes one bound and, as plotly.js
+  re-ranges an image's aspect-constrained axes, fixes the other at the
+  image's current extent, as matplotlib's `set_xlim` does). The image
   keeps its orientation: with `origin = :upper` (or a reversed `extent`) the
   bounds of an explicit range are reordered so that axis still points down
   (left), e.g. `yrange = (0, 2)` is written as `[2, 0]`. `xticks`,
@@ -20961,6 +21996,7 @@ function plot_image(
 	grid::Union{Nothing, Bool, Symbol} = true,
 	equalar::Bool = true,
 	tight = true,
+	interpolation = :nearest,
 	show::Bool = false,
 )
 	fig = _field2d_new_figure()
@@ -20989,6 +22025,7 @@ function plot_image(
 		grid = grid,
 		equalar = equalar,
 		tight = tight,
+		interpolation = interpolation,
 	)
 	return _field2d_show(fig, show, width, height, title)
 end
@@ -21002,7 +22039,8 @@ Append an image (same data forms and keywords as [`plot_image`](@ref), except
 to a cell of a `SubplotFigure` (`row`/`col` together, default: the active
 cell; `secondary_y` targets the cell's secondary y axis; `inset = k` targets
 the `k`-th inset from [`inset!`](@ref); `xrange`/`yrange` act as for
-[`plot_heatmap!`](@ref)). `origin = ""`
+[`plot_heatmap!`](@ref); `interpolation = :bilinear` smooths the image as
+for [`plot_image`](@ref)). `origin = ""`
 (default) keeps the y-axis direction (plotly shows an
 image's first row at the top unless the axis direction was set); `:upper` /
 `:lower` set it, and an `extent` sets both axis directions. `grid = nothing`
@@ -21041,6 +22079,7 @@ function plot_image!(
 	grid::Union{Nothing, Bool, Symbol} = nothing,
 	equalar::Bool = true,
 	tight = true,
+	interpolation = :nearest,
 	kwargs...,
 )
 	_field2d_reject_keywords("plot_image!", kwargs)
@@ -21069,6 +22108,7 @@ function plot_image!(
 		grid = grid,
 		equalar = equalar,
 		tight = tight,
+		interpolation = interpolation,
 	)
 	_refresh!(fig)
 	return nothing

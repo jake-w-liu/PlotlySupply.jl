@@ -943,3 +943,75 @@ _rftv3_decades(t) = (log10(t.fields[:y][end]) - log10(t.fields[:y][1])) / (log10
 		@test (sf.current_row, sf.current_col) == (2, 2)
 	end
 end
+
+# Dates is not a declared test dependency (see test/regression_lifecycle.jl):
+# load the stdlib by its UUID.
+const _RFT_Dates = Base.require(Base.PkgId(Base.UUID("ade2ca70-3891-5945-98fb-dc099432e06a"), "Dates"))
+
+@testset "sci reference.jl: wave 4 (fields)" begin
+	@testset "Y25 Date/DateTime positions on a date axis" begin
+		D = _RFT_Dates
+		days = collect(D.Date(2024, 1, 1):D.Day(1):D.Date(2024, 1, 10))
+		ts = plot_scatter(days, collect(1.0:10.0))
+		vline!(ts, D.Date(2024, 1, 4))
+		@test (_rft(_rft_shapes(ts)[end], :x0), _rft(_rft_shapes(ts)[end], :x1)) == ("2024-01-04", "2024-01-04")
+		# Julia promotes [Date, DateTime] to DateTime values.
+		vline!(ts, [D.Date(2024, 1, 5), D.DateTime(2024, 1, 5, 12, 30)])
+		@test [_rft(s, :x0) for s in _rft_shapes(ts)[(end - 1):end]] == ["2024-01-05T00:00:00", "2024-01-05T12:30:00"]
+		vline!(ts, Any[D.Date(2024, 1, 6), D.DateTime(2024, 1, 6, 6)])
+		@test [_rft(s, :x0) for s in _rft_shapes(ts)[(end - 1):end]] == ["2024-01-06", "2024-01-06T06:00:00"]
+		vspan!(ts, D.Date(2024, 1, 2), D.Date(2024, 1, 3); label = "outage")
+		s = _rft_shapes(ts)[end]
+		@test (_rft(s, :x0), _rft(s, :x1), _rft(s, :yref)) == ("2024-01-02", "2024-01-03", "y domain")
+		rectangle!(ts, D.Date(2024, 1, 6), 2.0, D.Date(2024, 1, 8), 4.0)
+		s = _rft_shapes(ts)[end]
+		@test (_rft(s, :type), _rft(s, :x0), _rft(s, :x1), _rft(s, :y0), _rft(s, :y1)) == ("rect", "2024-01-06", "2024-01-08", 2.0, 4.0)
+		# Arrows: annotation x/ax are dates; the label sits at the midpoint in time.
+		arrow!(ts, D.Date(2024, 1, 2), 2.0, D.Date(2024, 1, 5), 8.0; text = "rise")
+		head, label = _rft_annotations(ts)[(end - 1):end]
+		@test (_rft(head, :x), _rft(head, :ax), _rft(head, :axref)) == ("2024-01-05", "2024-01-02", "x")
+		@test (_rft(head, :y), _rft(head, :ay)) == (8.0, 2.0)
+		@test (_rft(label, :x), _rft(label, :y)) == ("2024-01-03T12:00:00", 5.0)
+		arrow!(ts, D.Date(2024, 1, 2), 2.0, D.Date(2024, 1, 5), 8.0; head = :none)
+		@test (_rft(_rft_shapes(ts)[end], :x0), _rft(_rft_shapes(ts)[end], :x1)) == ("2024-01-02", "2024-01-05")
+		# The figure serialises them as strings.
+		@test occursin("\"x0\":\"2024-01-04\"", _rft_json(_rft_plot(ts).layout))
+		# hline! on an explicit date y axis.
+		dy = plot_scatter([1.0, 2.0], [1.0, 2.0])
+		relayout!(dy; yaxis_type = "date")
+		hline!(dy, D.Date(2024, 3, 1))
+		@test _rft(_rft_shapes(dy)[end], :y0) == "2024-03-01"
+		# Errors: a date on a numeric axis (declared, or autotyped by numeric
+		# data), mixed date/number ends, rounded date rectangles.
+		@test _rft_throws(() -> hline!(ts, D.Date(2024, 1, 2)),
+			"hline!: `y` = 2024-01-02 is a date, which can only be placed on a date axis; this axis has type \"linear\"")
+		lin = plot_scatter([1.0, 2.0], [1.0, 2.0]; xscale = "log")
+		@test _rft_throws(() -> vline!(lin, D.Date(2024, 1, 2)), "this axis has type \"log\"")
+		@test _rft_throws(() -> vspan!(ts, D.Date(2024, 1, 2), 3), "vspan!: `x0` and `x1` must both be dates or both be numbers")
+		@test _rft_throws(() -> arrow!(ts, D.Date(2024, 1, 2), 1.0, 5.0, 2.0), "arrow!: `x0` and `x1` must both be dates or both be numbers")
+		@test _rft_throws(() -> rectangle!(ts, D.Date(2024, 1, 2), 1.0, D.Date(2024, 1, 3), 2.0; rounded = 0.1),
+			"rectangle!: a rounded rectangle is defined by lengths in data units, which date corners do not have")
+		n = length(_rft_shapes(ts))
+		@test _rft_throws(() -> vline!(ts, [D.Date(2024, 1, 2), D.Date(2024, 1, 3)]; color = "notacolour"), "vline!")
+		@test length(_rft_shapes(ts)) == n
+		# Numbers are unchanged on numeric axes, and the autotyped axis of an
+		# empty figure takes dates.
+		num = plot_scatter([1.0, 2.0], [1.0, 2.0])
+		vline!(num, 1.5)
+		@test _rft(_rft_shapes(num)[end], :x0) == 1.5
+		blank = Plot()
+		vline!(blank, D.Date(2024, 1, 2))
+		@test _rft(_rft_shapes(blank)[end], :x0) == "2024-01-02"
+		# SubplotFigure cell with date data.
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, days, collect(1.0:10.0); row = 1, col = 2)
+		vspan!(sf, D.Date(2024, 1, 2), D.Date(2024, 1, 3); row = 1, col = 2)
+		s = _rft_shapes(sf)[end]
+		@test (_rft(s, :xref), _rft(s, :x0)) == ("x2", "2024-01-02")
+		plot_scatter!(sf, [1.0, 2.0], [1.0, 2.0]; row = 1, col = 1)
+		@test _rft_throws(() -> vline!(sf, D.Date(2024, 1, 2); row = 1, col = 1), "vline!: `x` = 2024-01-02 is a date")
+		for f in (hline!, vline!, hspan!, vspan!, rectangle!, arrow!)
+			@test occursin("Date", string(Base.Docs.doc(f)))
+		end
+	end
+end

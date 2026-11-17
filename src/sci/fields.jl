@@ -57,10 +57,37 @@ function _matrix_add!(
 	height,
 	fontsize,
 	grid,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 )
 	nrows, ncols = size(A)
-	column_labels = _matrix_labels(xlabels, ncols, who, "xlabels", "column")
-	row_labels = _matrix_labels(ylabels, nrows, who, "ylabels", "row")
+	# Tick keywords (G30): `xticks` replaces the index ticks (columns sit at
+	# x = 1..ncols); `xticklabels` alone labels the index ticks, like
+	# `xlabels`, which it cannot be combined with. Likewise for y and rows.
+	for (letter, labels, values, tick_labels) in (
+		("x", xlabels, xticks, xticklabels),
+		("y", ylabels, yticks, yticklabels),
+	)
+		(labels !== nothing && (values !== nothing || tick_labels !== nothing)) &&
+			throw(ArgumentError(
+				"$(who): pass either `$(letter)labels` (one label per " *
+				"$(letter == "x" ? "column" : "row")) or `$(letter)ticks`/" *
+				"`$(letter)ticklabels`, not both.",
+			))
+	end
+	x_name, y_name = "xlabels", "ylabels"
+	if xticks === nothing && xticklabels !== nothing
+		xlabels, xticklabels, x_name = xticklabels, nothing, "xticklabels"
+	end
+	if yticks === nothing && yticklabels !== nothing
+		ylabels, yticklabels, y_name = yticklabels, nothing, "yticklabels"
+	end
+	column_labels = _matrix_labels(xlabels, ncols, who, x_name, "column")
+	row_labels = _matrix_labels(ylabels, nrows, who, y_name, "row")
 	if text !== nothing
 		(text isa AbstractArray && ndims(text) == 2 && size(text) == size(A)) ||
 			throw(ArgumentError(
@@ -111,12 +138,12 @@ function _matrix_add!(
 		origin = "upper",
 		xgap = 0,
 		ygap = 0,
-		xticks = ticks(ncols, column_labels),
-		xticklabels = column_labels,
-		xtickformat = "",
-		yticks = ticks(nrows, row_labels),
-		yticklabels = row_labels,
-		ytickformat = "",
+		xticks = xticks === nothing ? ticks(ncols, column_labels) : xticks,
+		xticklabels = xticks === nothing ? column_labels : xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks === nothing ? ticks(nrows, row_labels) : yticks,
+		yticklabels = yticks === nothing ? row_labels : yticklabels,
+		ytickformat = ytickformat,
 		width = width,
 		height = height,
 		fontsize = fontsize,
@@ -143,6 +170,11 @@ entries; NaN/`missing` cells are empty, Bool is drawn as 0/1, complex throws.
 - `xlabels = nothing`, `ylabels = nothing`: one tick label per column / row
   (strings or numbers; LaTeX in `\$...\$` allowed). Without labels, matrices
   with up to $(_MATRIX_MAX_INDEX_TICKS) columns/rows get a tick per index.
+- `xticks = nothing`, `xticklabels = nothing`, `xtickformat = ""`, `yticks`,
+  `yticklabels`, `ytickformat`: explicit ticks as for
+  [`plot_heatmap`](@ref); column `j` sits at x = j and row `i` at y = i.
+  `xticks` replaces the index ticks; `xticklabels` alone labels them (one
+  per column, the same as `xlabels`, which it cannot be combined with).
 - `annotate::Bool = true`: write each value into its cell using `fmt`.
 - `fmt = ".2f"`: d3 number format of the annotations (e.g. `".3g"`, `".0%"`).
 - `text = nothing`: per-cell labels `text[i, j]` (same size as `A`) that
@@ -185,6 +217,12 @@ function plot_matrix(
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	equalar::Bool = true,
 	tight = true,
 	grid::Union{Nothing, Bool, Symbol} = true,
@@ -219,6 +257,12 @@ function plot_matrix(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
 	)
 	return _field2d_show(fig, show, width, height, title)
 end
@@ -261,6 +305,12 @@ function plot_matrix!(
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	equalar::Bool = true,
 	tight = true,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
@@ -295,6 +345,12 @@ function plot_matrix!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
 	)
 	_refresh!(fig)
 	return nothing
@@ -883,7 +939,7 @@ function _streamlines_add!(
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
-	_validate_cartesian_options(
+	_field2d_validate_cartesian(
 		fig,
 		who;
 		xrange = xrange,
@@ -894,6 +950,18 @@ function _streamlines_add!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+	)
+	_field2d_validate_ticks(
+		fig,
+		who;
+		xticks = xticks,
+		xticklabels = xticklabels,
+		xtickformat = xtickformat,
+		yticks = yticks,
+		yticklabels = yticklabels,
+		ytickformat = ytickformat,
+		xscale = xscale,
+		yscale = yscale,
 	)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	traces = _streamlines_traces(
@@ -1204,10 +1272,10 @@ function plot_streamlines!(
 	return nothing
 end
 
-# The streamlines are integrated in axis units (decades on a log axis), so
-# they are built here against the target cell's axis types, which the
-# delegate's scratch figure does not know, and appended like quiver arrows
-# (`_field2d_push_traces!`, which applies the layout keywords).
+# The streamlines are integrated in axis units (decades on a log axis); the
+# delegate's scratch figure carries the target cell's axis types
+# (`_SUBPLOT_SEEDED_AXIS_KEYS`), so the Plot-level mutator integrates them
+# exactly as on a single figure with those axes (Y3).
 function plot_streamlines!(
 	sf::SubplotFigure,
 	x::AbstractArray,
@@ -1218,70 +1286,18 @@ function plot_streamlines!(
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	inset::Union{Nothing, Integer} = nothing,
-	density::Real = 1,
-	seeds = nothing,
-	maxlength::Real = 4,
-	direction::Union{Symbol, AbstractString} = :both,
-	arrows::Bool = true,
-	arrowsize::Real = 8,
-	color = "",
-	colorby::Union{Symbol, AbstractString} = :none,
-	colorscale = "",
-	colorbar_title::AbstractString = "",
-	colorbar_title_side::Union{Symbol, AbstractString} = :top,
-	linewidth::Real = 0,
-	legend::AbstractString = "",
 	equalar::Bool = false,
-	xscale::AbstractString = "",
-	yscale::AbstractString = "",
 	kwargs...,
 )
-	who = "plot_streamlines!"
-	haskey(kwargs, :show) && _field2d_reject_keywords(who, kwargs)
-	xlog, ylog = _field2d_subplot_log_axes(
-		sf,
-		who;
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-		xscale = xscale,
-		yscale = yscale,
-	)
-	traces = _streamlines_traces(
-		x,
-		y,
-		U,
-		V,
-		who;
-		xlog = xlog,
-		ylog = ylog,
-		density = density,
-		seeds = seeds,
-		maxlength = maxlength,
-		direction = direction,
-		arrows = arrows,
-		arrowsize = arrowsize,
-		color = color,
-		colorby = colorby,
-		colorscale = colorscale,
-		colorbar_title = colorbar_title,
-		colorbar_title_side = _field2d_title_side(colorbar_title_side, who),
-		linewidth = linewidth,
-		legend = legend,
-	)
 	return _field2d_subplot!(
 		sf,
-		_field2d_push_traces!,
-		(traces,);
+		plot_streamlines!,
+		(x, y, U, V);
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
 		inset = inset,
 		equalar = equalar,
-		who = who,
-		xscale = xscale,
-		yscale = yscale,
 		kwargs...,
 	)
 end
