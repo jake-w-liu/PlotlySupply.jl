@@ -707,7 +707,7 @@ function _transactional_subplot_mutation!(
 		mutation = function (candidate)
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
-			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate))
+			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
 			result[] =
 				mutator(staged, args...; kwargs...)
 			_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
@@ -752,17 +752,27 @@ end
 #
 # - the group-wide attributes (`_SUBPLOT_MATCH_SHARED_KEYS`: axis type, tick
 #   placement and tick-label format) changed on one member are copied to every
-#   member (the root's change wins over a follower's);
+#   member (the root's change wins over a follower's); the tick-label font and
+#   angle (`_SUBPLOT_MATCH_GRID_ONLY_KEYS`) only between the grid axes: an
+#   inset that shares a cell's axis draws its own tick labels in its own
+#   (smaller) font, as matplotlib's `sharex` shares placement, not text style;
+# - each `autorangeoptions` entry (`_SUBPLOT_MATCH_AUTORANGE_OPTIONS`: the
+#   one-sided limits and clips) changed on one member is copied to every
+#   member: plotly.js reads them per axis of a group (render probe of the axes
+#   owner, wave 4 p04: a `minallowed` on the follower alone limits the group,
+#   on the root alone it is ignored);
 # - a `range`/`autorange` changed on a follower moves to the root; a range set
 #   without an `autorange` makes the root state `autorange = false` (the
 #   `autorange = true` `_finalize_figure!` gives group roots would override
 #   it), a range removed without one makes it autorange again;
-# - an axis title set on a member whose tick labels are hidden moves to the
-#   member that shows the group's tick labels in the same column (x) or row
-#   (y): that is where the shared axis is labelled.
+# - an axis title whose TEXT the call set on a member whose tick labels are
+#   hidden moves to the member that shows the group's tick labels in the same
+#   column (x) or row (y): that is where the shared axis is labelled. A call
+#   that only styles titles (`set_fonts!`, `title_font`) moves nothing.
 #
 # Axes that overlay another axis (secondary axes, twins) are never members.
-# Nothing is written when the call changed nothing in a group.
+# Nothing is written when the call changed nothing in a group, so a second
+# identical call writes nothing.
 
 const _SUBPLOT_MATCH_SHARED_KEYS = (
 	:type,
@@ -784,11 +794,23 @@ const _SUBPLOT_MATCH_SHARED_KEYS = (
 	:categoryarray,
 	:minor,
 )
+const _SUBPLOT_MATCH_GRID_ONLY_KEYS = (:tickangle, :tickfont)
+const _SUBPLOT_MATCH_AUTORANGE_OPTIONS = (:minallowed, :maxallowed, :clipmin, :clipmax, :include)
 const _SUBPLOT_MATCH_RANGE_KEYS = (:range, :autorange)
 const _SUBPLOT_MATCH_TRACKED_KEYS = (
 	_SUBPLOT_MATCH_SHARED_KEYS...,
 	_SUBPLOT_MATCH_RANGE_KEYS...,
 	:title,
+)
+# Snapshot names of nested values: `autorangeoptions.<entry>` and the title
+# text (`title` may be a string or a mapping with `text`).
+const _SUBPLOT_MATCH_AUTORANGE_OPTION_NAMES =
+	Tuple(Symbol("autorangeoptions.", entry) for entry in _SUBPLOT_MATCH_AUTORANGE_OPTIONS)
+const _SUBPLOT_MATCH_TITLE_TEXT = Symbol("title.text")
+const _SUBPLOT_MATCH_SNAPSHOT_NAMES = (
+	_SUBPLOT_MATCH_TRACKED_KEYS...,
+	_SUBPLOT_MATCH_AUTORANGE_OPTION_NAMES...,
+	_SUBPLOT_MATCH_TITLE_TEXT,
 )
 
 # Marks an attribute an axis does not state (distinct from every stored value).
@@ -797,12 +819,29 @@ struct _SubplotMatchAbsent end
 struct _SubplotMatchSnapshot
 	# root => members, root first, then the followers in axis-index order
 	groups::Vector{Pair{Symbol, Vector{Symbol}}}
-	# member => tracked attribute => canonical value
+	# member => snapshot name => canonical value
 	values::Dict{Symbol, Dict{Symbol, Any}}
+	# Inset axes: members only for the attributes the whole group shares
+	# (not `_SUBPLOT_MATCH_GRID_ONLY_KEYS`).
+	inset_axes::Set{Symbol}
+end
+
+# The value a snapshot name stands for on `axis` (`nothing`: not stated).
+function _subplot_match_raw_value(axis, name::Symbol)
+	if name === _SUBPLOT_MATCH_TITLE_TEXT
+		title = _cmn_mapping_get(axis, :title)
+		return title isa AbstractString ? title : _cmn_mapping_get(title, :text)
+	end
+	index = findfirst(==(name), _SUBPLOT_MATCH_AUTORANGE_OPTION_NAMES)
+	index === nothing && return _cmn_mapping_get(axis, name)
+	return _cmn_mapping_get(
+		_cmn_mapping_get(axis, :autorangeoptions),
+		_SUBPLOT_MATCH_AUTORANGE_OPTIONS[index],
+	)
 end
 
 function _subplot_match_value(axis, name::Symbol)
-	value = _cmn_mapping_get(axis, name)
+	value = _subplot_match_raw_value(axis, name)
 	return value === nothing ? _SubplotMatchAbsent() : _legend_canonical(value)
 end
 
@@ -835,7 +874,8 @@ end
 
 # The tracked attributes of every shared-axis group of `p` before a mutation;
 # `nothing` when the figure has no group (the sync is then skipped).
-function _subplot_match_snapshot(p::Plot)
+# `inset_axes` are the layout keys of the inset axes (`_subplot_inset_axis_keys`).
+function _subplot_match_snapshot(p::Plot, inset_axes = ())
 	fields = p.layout.fields
 	groups = _subplot_match_groups(fields)
 	isempty(groups) && return nothing
@@ -843,16 +883,67 @@ function _subplot_match_snapshot(p::Plot)
 	for (_, members) in groups, member in members
 		axis = get(fields, member, nothing)
 		values[member] = Dict{Symbol, Any}(
-			name => _subplot_match_value(axis, name) for name in _SUBPLOT_MATCH_TRACKED_KEYS
+			name => _subplot_match_value(axis, name) for name in _SUBPLOT_MATCH_SNAPSHOT_NAMES
 		)
 	end
-	return _SubplotMatchSnapshot(groups, values)
+	return _SubplotMatchSnapshot(groups, values, Set{Symbol}(inset_axes))
+end
+
+# Layout keys of the x and y axes of every inset of `sf`.
+function _subplot_inset_axis_keys(sf::SubplotFigure)
+	keys = Symbol[]
+	for inset in getfield(sf, :insets)
+		push!(keys, inset.xkey, inset.ykey)
+	end
+	return keys
+end
+
+# Whether a call with these raw-verb arguments can change a shared-axis group
+# of `p`: a keyword, a positional dictionary/layout key or a `layout` keyword
+# key names (`xaxis2_type`, "xaxis2.type", `xaxis2 = attr(...)`) one of its
+# members.
+function _subplot_verb_names_group_axis(p::Plot, args, layout_sources)
+	groups = _subplot_match_groups(p.layout.fields)
+	isempty(groups) && return false
+	members = Set{Symbol}()
+	for (_, group) in groups
+		union!(members, group)
+	end
+	names_member(key) = begin
+		m = match(r"^([xy]axis[0-9]*)(?:[._]|$)", string(key))
+		m !== nothing && Symbol(m.captures[1]) in members
+	end
+	for source in (args..., layout_sources...)
+		fields = source isa Layout ? source.fields :
+			source isa PlotlyBase.PlotlyAttribute ? source.fields :
+			source isa AbstractDict ? source : nothing
+		fields === nothing && continue
+		any(names_member, keys(fields)) && return true
+	end
+	return false
 end
 
 # Write `value` (`_SubplotMatchAbsent()`: delete) as attribute `name` of axis
-# `key`, replacing a nested value wholesale.
+# `key`, replacing a nested value wholesale. An `autorangeoptions.<entry>` name
+# writes that entry only (an emptied `autorangeoptions` is removed).
 function _subplot_match_write!(p::Plot, key::Symbol, name::Symbol, value)
-	if value isa _SubplotMatchAbsent
+	index = findfirst(==(name), _SUBPLOT_MATCH_AUTORANGE_OPTION_NAMES)
+	if index !== nothing
+		entry = _SUBPLOT_MATCH_AUTORANGE_OPTIONS[index]
+		if value isa _SubplotMatchAbsent
+			options = _cmn_mapping_get(get(p.layout.fields, key, nothing), :autorangeoptions)
+			options === nothing && return nothing
+			_cmn_delete_layout_fields!(p, key, (entry,); nested = :autorangeoptions)
+			isempty(_symbol_dict(options)) && _cmn_delete_layout_fields!(p, key, (:autorangeoptions,))
+		else
+			_cmn_merge_layout_key!(
+				p,
+				key,
+				Dict{Symbol, Any}(:autorangeoptions => Dict{Symbol, Any}(entry => deepcopy(value)));
+				nested = (:autorangeoptions,),
+			)
+		end
+	elseif value isa _SubplotMatchAbsent
 		_cmn_delete_layout_fields!(p, key, (name,))
 	else
 		_cmn_merge_layout_key!(p, key, Dict{Symbol, Any}(name => deepcopy(value)))
@@ -913,7 +1004,7 @@ function _subplot_match_sync!(p::Plot, snapshot::Union{Nothing, _SubplotMatchSna
 	for (root, members) in snapshot.groups
 		all(member -> haskey(fields, member), members) || continue
 		changed = Dict{Symbol, Vector{Symbol}}()
-		for member in members, name in _SUBPLOT_MATCH_TRACKED_KEYS
+		for member in members, name in _SUBPLOT_MATCH_SNAPSHOT_NAMES
 			before = snapshot.values[member][name]
 			isequal(before, _subplot_match_value(fields[member], name)) && continue
 			push!(get!(() -> Symbol[], changed, name), member)
@@ -921,15 +1012,20 @@ function _subplot_match_sync!(p::Plot, snapshot::Union{Nothing, _SubplotMatchSna
 		isempty(changed) && continue
 
 		# Group-wide attributes: the first member that changed one (the root
-		# when it did) is the source for every member.
-		for name in _SUBPLOT_MATCH_SHARED_KEYS
+		# when it did) is the source for every member. Insets take no part in
+		# the tick-label font and angle.
+		for name in (_SUBPLOT_MATCH_SHARED_KEYS..., _SUBPLOT_MATCH_AUTORANGE_OPTION_NAMES...)
 			sources = get(changed, name, nothing)
 			sources === nothing && continue
+			grid_only = name in _SUBPLOT_MATCH_GRID_ONLY_KEYS
+			grid_only && (sources = filter(m -> !(m in snapshot.inset_axes), sources))
+			isempty(sources) && continue
 			source = first(sources)
-			value = _subplot_match_raw(fields[source], name)
+			value = something(_subplot_match_raw_value(fields[source], name), _SubplotMatchAbsent())
 			canonical = _subplot_match_value(fields[source], name)
 			for member in members
 				member === source && continue
+				grid_only && member in snapshot.inset_axes && continue
 				isequal(_subplot_match_value(fields[member], name), canonical) && continue
 				_subplot_match_write!(p, member, name, value)
 			end
@@ -959,16 +1055,17 @@ function _subplot_match_sync!(p::Plot, snapshot::Union{Nothing, _SubplotMatchSna
 		end
 
 		# A title on an axis with hidden tick labels labels the group's axis.
-		title_sources = get(changed, :title, nothing)
+		# Only a title whose text this call set is a label to move. A call
+		# that only styles titles (`set_fonts!`, `update_xaxes!(title_font =
+		# ...)` write `title.font` on every axis) moves nothing: moving it
+		# would overwrite the text of the axis that shows the labels, also
+		# when the styled title holds text an earlier raw write left there.
+		title_sources = get(changed, _SUBPLOT_MATCH_TITLE_TEXT, nothing)
 		title_sources === nothing && continue
 		for member in title_sources
 			_cmn_mapping_get(fields[member], :showticklabels) === false || continue
 			title = _cmn_mapping_get(fields[member], :title)
 			title === nothing && continue
-			# Only a title that carries text is a label to move. A title that
-			# holds only styling (`set_fonts!`, `update_xaxes!(title_font = ...)`
-			# write `title.font` on every axis) stays where it is: moving it
-			# would overwrite the text of the axis that shows the labels.
 			moved = title isa AbstractString ? Dict{Symbol, Any}(:text => title) : _symbol_dict(title)
 			text = get(moved, :text, nothing)
 			(text isa AbstractString && !isempty(text)) || continue
@@ -1766,10 +1863,19 @@ function _legend_subplot_assignment(p::Plot)
 	ids = Dict{String, Int}()
 	domains = Dict{String, Tuple{Tuple{Float64, Float64}, Tuple{Float64, Float64}}}()
 	trace_keys = Vector{Union{Nothing, String}}(nothing, length(p.data))
+	# Traces on the same x/y axis pair share their key and domain; the lookup
+	# (base axis, inset host over the grid) runs once per pair, not per trace.
+	xy_memo = Dict{Tuple{Any, Any}, Any}()
 	for (index, trace) in enumerate(p.data)
 		trace isa GenericTrace || continue
 		_trace_is_figure_legend_entry(trace) && continue
-		key_domain = _trace_subplot_key_domain(p, trace)
+		fields = trace.fields
+		key_domain = if haskey(fields, :xaxis) || haskey(fields, :yaxis)
+			get!(() -> _trace_subplot_key_domain(p, trace), xy_memo,
+				(get(fields, :xaxis, "x"), get(fields, :yaxis, "y")))
+		else
+			_trace_subplot_key_domain(p, trace)
+		end
 		key_domain === nothing && continue
 		key, domain = key_domain
 		trace_keys[index] = key
@@ -1848,9 +1954,13 @@ function _apply_subplot_legends!(
 	has_figure_entries = false
 	for (index, trace) in enumerate(p.data)
 		trace isa GenericTrace || continue
+		# A trace that already holds its id is not written: on the append-only
+		# path of the SubplotFigure delegate the existing traces are shared
+		# with the live figure (`_subplot_legends_append_only`).
 		if _trace_is_figure_legend_entry(trace)
 			has_figure_entries = true
-			trace.fields[:legend] = _FIGURE_LEGEND_ID
+			get(trace.fields, :legend, nothing) == _FIGURE_LEGEND_ID ||
+				(trace.fields[:legend] = _FIGURE_LEGEND_ID)
 		else
 			key = trace_keys[index]
 			key === nothing && continue
@@ -1859,7 +1969,7 @@ function _apply_subplot_legends!(
 			if old_id !== nothing
 				string(old_id) == new_id ? push!(kept, new_id) : push!(moved, new_id)
 			end
-			trace.fields[:legend] = new_id
+			old_id == new_id || (trace.fields[:legend] = new_id)
 		end
 		if !haskey(trace.fields, :showlegend)
 			trace.fields[:showlegend] =
@@ -3455,10 +3565,8 @@ end
 # PlotlyBase would have written it into the layout or traces as an attribute
 # (or failed with a MethodError).
 for f in (
-	:relayout!,
 	:react!,
 	:restyle!,
-	:update!,
 	:redraw!,
 	:deletetraces!,
 	:movetraces!,
@@ -3469,6 +3577,54 @@ for f in (
 		_verb_reject_cell_keywords($(String(f)), kwargs; whole_figure = true)
 		PlotlyBase.$f(getfield(sf, :fig), args...; kwargs...)
 		return sf
+	end
+end
+
+# `relayout!` and `update!` (its `layout` part) on a SubplotFigure: a change to
+# an axis of a shared-axis group acts on the group, as for every other
+# SubplotFigure call (`_subplot_match_sync!`): `relayout!(sf; yaxis2_type =
+# "log")` makes the whole group logarithmic (plotly.js drops `matches` from an
+# axis whose type differs from the root's). Such a call is staged as one
+# transaction (the live window gets one full refresh); a call that names no
+# group axis is the plain PlotlyBase verb.
+function PlotlyBase.relayout!(sf::SubplotFigure, args...; kwargs...)
+	_verb_reject_cell_keywords("relayout!", kwargs; whole_figure = true)
+	_subplot_synced_layout_verb!(PlotlyBase.relayout!, sf, args, (kwargs,), args...; kwargs...)
+	return sf
+end
+
+function PlotlyBase.update!(sf::SubplotFigure, args...; kwargs...)
+	_verb_reject_cell_keywords("update!", kwargs; whole_figure = true)
+	layout = get(kwargs, :layout, nothing)
+	_subplot_synced_layout_verb!(PlotlyBase.update!, sf, (), layout === nothing ? () : (layout,), args...; kwargs...)
+	return sf
+end
+
+function _subplot_synced_layout_verb!(verb, sf::SubplotFigure, named_args, layout_sources, args...; kwargs...)
+	metadata_lock = getfield(sf, :_lock)
+	lock(metadata_lock)
+	try
+		fig = getfield(sf, :fig)
+		if !_subplot_verb_names_group_axis(_plot_obj(fig), named_args, layout_sources)
+			verb(fig, args...; kwargs...)
+			return nothing
+		end
+		inset_axes = _subplot_inset_axis_keys(sf)
+		mutation = function (candidate)
+			p = _plot_obj(candidate)
+			snapshot = _subplot_match_snapshot(p, inset_axes)
+			verb(p, args...; kwargs...)
+			_subplot_match_sync!(p, snapshot)
+			return nothing
+		end
+		if fig isa SyncPlot
+			_mutate_and_refresh_syncplot!(mutation, fig)
+		else
+			_transactional_full_plot_mutation!(mutation, fig)
+		end
+		return nothing
+	finally
+		unlock(metadata_lock)
 	end
 end
 
@@ -6018,6 +6174,9 @@ function _apply_source_layout_to_added_traces!(
 end
 
 const _SUBPLOT_ROOT_LAYOUT_MODES = (:barmode, :boxmode, :violinmode)
+# Figure-wide gaps between the bars/boxes/violins at one position and between
+# their groups (Z33): plotly has one value of each for every subplot.
+const _SUBPLOT_ROOT_LAYOUT_GAPS = (:bargap, :bargroupgap, :boxgap, :boxgroupgap, :violingap, :violingroupgap)
 
 # Trace types each figure-wide mode arranges.
 function _subplot_mode_trace_types(key::Symbol)
@@ -6026,12 +6185,15 @@ function _subplot_mode_trace_types(key::Symbol)
 	return ("violin",)
 end
 
-# Root modes the caller passed explicitly (a non-empty string keyword).
+# Root modes and gaps the caller passed explicitly (a non-empty string mode
+# keyword, a real gap keyword).
 function _subplot_explicit_root_modes(kwargs)
-	return Tuple(
+	modes = Tuple(
 		key for key in _SUBPLOT_ROOT_LAYOUT_MODES
 		if (value = get(kwargs, key, "")) isa AbstractString && !isempty(value)
 	)
+	gaps = Tuple(key for key in _SUBPLOT_ROOT_LAYOUT_GAPS if get(kwargs, key, nothing) isa Real)
+	return (modes..., gaps...)
 end
 
 # barmode/boxmode/violinmode are single figure-wide plotly attributes, so a
@@ -6046,6 +6208,9 @@ end
 # - An automatic barmode is never copied: a nested histogram's "overlay" would
 #   hide grouped bars in every other cell. The histogram family overlays the
 #   series of one call inside their own cell with a shared `offsetgroup`.
+# - A gap (`_SUBPLOT_ROOT_LAYOUT_GAPS`) reaches the root only when passed
+#   explicitly (`bargap = 0.3`), as the value the mutator validated and wrote
+#   on the scratch figure; an automatic one would change every other cell.
 function _apply_source_root_layout_modes!(
 	target::Plot,
 	source::Plot;
@@ -6069,6 +6234,10 @@ function _apply_source_root_layout_modes!(
 		elseif key !== :barmode
 			get!(target.layout.fields, key, value)
 		end
+	end
+	for key in _SUBPLOT_ROOT_LAYOUT_GAPS
+		key in explicit_keys && haskey(source.layout.fields, key) || continue
+		target.layout.fields[key] = source.layout.fields[key]
 	end
 	return nothing
 end
@@ -6101,6 +6270,61 @@ end
 # the figure to the shared coloraxis, which rewrites existing trace roots.
 _subplot_shared_surface_coloraxis(mutator, kwargs) =
 	mutator === plot_surface! && get(kwargs, :shared_coloraxis, false) === true
+
+"""
+	_subplot_delegate_needs_full_staging(sf, p) -> Bool
+
+Whether a delegate call on `sf` (whose figure is `p`) may write traces that
+already exist, which the append-only fast path shares with the live figure
+(Z82; that path copies only the layout and appends the new traces):
+
+- per-subplot legends whose pass after the append would change an existing
+  trace (`_subplot_legends_append_only`);
+- an existing trace that draws its own colorbar: `_finalize_figure!` moves
+  bars when the plot areas around them give up room;
+- an equal-aspect cell (`scaleanchor`, or an image trace, which plotly.js
+  anchors to its x axis): its colorbars move whenever its fit changes
+  (`_fin_needs_full_staging`, checked here without the data scan).
+"""
+function _subplot_delegate_needs_full_staging(sf::SubplotFigure, p::Plot)
+	for (key, axis) in p.layout.fields
+		(key isa Symbol && _fin_is_axis_key(key)) || continue
+		_fin_axis_key(_fin_field(axis, :scaleanchor)) === nothing || return true
+	end
+	for (index, trace) in enumerate(p.data)
+		trace isa GenericTrace || continue
+		string(get(trace.fields, :type, "")) == "image" && return true
+		slot = _cbar_slot(trace, index)
+		slot !== nothing && slot.shows && return true
+	end
+	return sf.per_subplot_legends && !_subplot_legends_append_only(p)
+end
+
+# Whether the per-subplot legend pass of an append (`_apply_subplot_legends!`)
+# leaves every trace already in `p` as it is: each carries the legend id of
+# its cell (ids follow the order of first appearance, so appended traces never
+# renumber them) and a `showlegend`, and no legend lays entries out in columns
+# (`_legend_extend_columns!` may give an earlier entry a column). Traces added
+# by the raw verbs, or ids left stale by `deletetraces!`, fail the test.
+function _subplot_legends_append_only(p::Plot)
+	for trace in p.data
+		trace isa GenericTrace || continue
+		_legend_column_info(get(trace.fields, :legendgroup, nothing)) === nothing || return false
+	end
+	_, ids, _, trace_keys = _legend_subplot_assignment(p)
+	for (index, trace) in enumerate(p.data)
+		trace isa GenericTrace || continue
+		if _trace_is_figure_legend_entry(trace)
+			get(trace.fields, :legend, nothing) == _FIGURE_LEGEND_ID || return false
+		else
+			key = trace_keys[index]
+			key === nothing && continue
+			get(trace.fields, :legend, nothing) == _legend_id(ids[key]) || return false
+		end
+		haskey(trace.fields, :showlegend) || return false
+	end
+	return true
+end
 
 # Name that prefixes the delegate's own errors and warnings (cell resolution,
 # trace-kind checks, ignored figure-level keywords): `delegate_who` when the
@@ -6402,12 +6626,14 @@ figure. Changes to a shared axis act on its group (`_subplot_match_sync!`). The 
 (axis references such as `scaleanchor` retargeted to the cell), every
 `coloraxis*` layout object and `font` are merged into the figure, colorbars
 are placed next to the cell and the legends refreshed. Figure-wide
-`barmode`/`boxmode`/`violinmode` reach the root only when passed explicitly
-(an automatic box/violin mode fills an unset root). `delegate_who` names the
-public function in the delegate's own errors (default: see
-`_subplot_delegate_who`). Validation errors leave `sf` unchanged; the live
-window gets one append-only update unless the call must rewrite existing
-traces (per-subplot legends, `shared_coloraxis`). Returns `sf`.
+`barmode`/`boxmode`/`violinmode` and the bar/box/violin gaps (`bargap`, ...)
+reach the root only when passed explicitly (an automatic box/violin mode
+fills an unset root). `delegate_who` names the public function in the
+delegate's own errors (default: see `_subplot_delegate_who`). Validation
+errors leave `sf` unchanged; the call is staged append-only (the live window
+gets one addTraces/relayout update) unless it may rewrite existing traces
+(`plot_surface!(...; shared_coloraxis = true)`,
+`_subplot_delegate_needs_full_staging`). Returns `sf`.
 """
 function _subplot_delegate_mutator!(
 	sf::SubplotFigure,
@@ -6429,7 +6655,7 @@ function _subplot_delegate_mutator!(
 		mutation = function (candidate)
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
-			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate))
+			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
 			result[] = _subplot_delegate_mutator_impl!(
 				staged,
 				mutator,
@@ -6447,12 +6673,12 @@ function _subplot_delegate_mutator!(
 		)
 
 		fig = getfield(sf, :fig)
-		# Per-subplot legends and plot_surface!(...; shared_coloraxis=true)
-		# rewrite existing traces. The append-only fast path intentionally
-		# shares those trace roots, so retain full staging for both.
+		# The append-only fast path shares the existing trace roots with the
+		# live figure; a call that may rewrite them is staged fully
+		# (`_subplot_delegate_needs_full_staging`).
 		full_staging =
-			sf.per_subplot_legends ||
-			_subplot_shared_surface_coloraxis(mutator, kwargs)
+			_subplot_shared_surface_coloraxis(mutator, kwargs) ||
+			_subplot_delegate_needs_full_staging(sf, _plot_obj(fig))
 		if full_staging && fig isa SyncPlot
 			_mutate_and_refresh_syncplot!(
 				mutation,
@@ -7947,7 +8173,8 @@ function plot!(
 	args...;
 	kwargs...,
 )
-	return plot_scatter!(sf, args...; kwargs...)
+	# The delegate's own errors (cell resolution, trace kinds) name `plot!`.
+	return plot_scatter!(sf, args...; delegate_who = "plot!", kwargs...)
 end
 
 function plot!(
@@ -9072,15 +9299,9 @@ function _stats_subplot_delegate!(
 				kwargs...,
 			)
 		end
-		# `bargap`/`bargroupgap` are figure-wide plotly settings that the cell
-		# delegate does not carry to the root layout; the mutator above has
-		# validated them (it threw before any change otherwise), so they are
-		# written to the figure here.
-		gaps = Pair{Symbol, Any}[
-			key => values(kwargs)[key] for key in (:bargap, :bargroupgap)
-			if get(values(kwargs), key, nothing) !== nothing
-		]
-		isempty(gaps) || relayout!(sf; gaps...)
+		# `bargap`/`bargroupgap` are figure-wide plotly settings: the cell
+		# delegate carries explicit ones to the root layout in the same
+		# transaction (`_apply_source_root_layout_modes!`).
 		requested = get(values(kwargs), :barmode, "")
 		current = root_barmode === nothing ? "group" : root_barmode
 		if others_grouped && requested isa AbstractString && !isempty(requested) &&

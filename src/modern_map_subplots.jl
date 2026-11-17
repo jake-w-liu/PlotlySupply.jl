@@ -502,6 +502,7 @@ function _append_subplot_title_annotation!(
 	domain;
 	edge::Symbol = :top,
 	offset::Real = 0,
+	name::Union{Nothing, AbstractString} = nothing,
 )
 	text = _subplot_title_text(title)
 	(text === nothing || domain === nothing) && return nothing
@@ -558,6 +559,10 @@ function _append_subplot_title_annotation!(
 	textangle == 0 || (annotation[:textangle] = textangle)
 	xshift == 0 || (annotation[:xshift] = xshift)
 	yshift == 0 || (annotation[:yshift] = yshift)
+	# Named (Z60) so the style and `set_fonts!` give it the title role,
+	# `title!(sf, ...; row, col)` replaces a cell title and the finalizer
+	# moves it with its cell (see `_apply_subplot_title_annotations!`).
+	name === nothing || (annotation[:name] = String(name))
 	push!(annotations, annotation)
 	return nothing
 end
@@ -573,6 +578,15 @@ function _first_occupied_column_domain(
 	for row in rows
 		domain = _subplot_grid_cell_domain(layout, row, col)
 		domain === nothing || return domain
+	end
+	return nothing
+end
+
+# Row of the cell `_first_occupied_column_domain` takes (`nothing`: none).
+function _first_occupied_column_row(layout::Layout, sp::Subplots, col::Int)
+	rows = sp.start_cell == "top-left" ? (1:sp.rows) : (sp.rows:-1:1)
+	for row in rows
+		_subplot_grid_cell_domain(layout, row, col) === nothing || return row
 	end
 	return nothing
 end
@@ -608,7 +622,8 @@ function _apply_subplot_title_annotations!(
 						layout,
 						row,
 						col,
-					),
+					);
+					name = "plotlysupply:title:$(row):$(col)",
 				)
 			end
 		elseif size(titles, 1) == 1
@@ -616,20 +631,23 @@ function _apply_subplot_title_annotations!(
 			# titles are assigned in row-major order to the occupied cells
 			# only, skipping blank cells and the cells a row/col span covers.
 			domains = Any[]
+			cells = Tuple{Int, Int}[]
 			for row in 1:sp.rows, col in 1:sp.cols
 				ismissing(sp.specs[row, col]) && continue
 				push!(domains, _subplot_grid_cell_domain(layout, row, col))
+				push!(cells, (row, col))
 			end
 			length(titles) <= length(domains) || throw(ArgumentError(
 				"Subplots: `subplot_titles` has $(length(titles)) entries but " *
 				"the grid has only $(length(domains)) occupied cell(s); " *
 				"titles for insets are not supported.",
 			))
-			for (title, domain) in zip(titles, domains)
+			for (title, domain, (row, col)) in zip(titles, domains, cells)
 				_append_subplot_title_annotation!(
 					annotations,
 					title,
-					domain,
+					domain;
+					name = "plotlysupply:title:$(row):$(col)",
 				)
 			end
 		else
@@ -644,6 +662,7 @@ function _apply_subplot_title_annotations!(
 
 	if !ismissing(sp.column_titles)
 		for col in 1:sp.cols
+			row = _first_occupied_column_row(layout, sp, col)
 			_append_subplot_title_annotation!(
 				annotations,
 				sp.column_titles[col],
@@ -651,13 +670,15 @@ function _apply_subplot_title_annotations!(
 					layout,
 					sp,
 					col,
-				),
+				);
+				name = row === nothing ? nothing : "plotlysupply:title!:$(row):$(col):column",
 			)
 		end
 	end
 
 	if !ismissing(sp.row_titles)
 		for row in 1:sp.rows
+			col = findlast(c -> _subplot_grid_cell_domain(layout, row, c) !== nothing, 1:sp.cols)
 			_append_subplot_title_annotation!(
 				annotations,
 				sp.row_titles[row],
@@ -667,6 +688,7 @@ function _apply_subplot_title_annotations!(
 					row,
 				);
 				edge = :right,
+				name = col === nothing ? nothing : "plotlysupply:title!:$(row):$(col):row",
 			)
 		end
 	end
@@ -678,6 +700,7 @@ function _apply_subplot_title_annotations!(
 			(x = (0.0, sp.max_width), y = (0.0, 1.0));
 			edge = :bottom,
 			offset = 30,
+			name = "plotlysupply:x_title",
 		)
 	end
 	if !ismissing(sp.y_title)
@@ -687,6 +710,7 @@ function _apply_subplot_title_annotations!(
 			(x = (0.0, 1.0), y = (0.0, 1.0));
 			edge = :left,
 			offset = 40,
+			name = "plotlysupply:y_title",
 		)
 	end
 

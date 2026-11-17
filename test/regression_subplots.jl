@@ -1707,14 +1707,12 @@ end
 		# Process-wide setters take no figure.
 		process_wide = Set(["register_style!", "set_default_legend_position!", "set_default_mathtext!",
 			"set_default_style!", "set_default_template!"])
-		# Known defects in other tracks' code (cross-requested): these raise a
-		# MethodError for `row`/`col` instead of an ArgumentError naming the
-		# function. `@test_broken` turns into an error once they are fixed.
-		cross_requested = Set(["figsize!", "panel_labels!", "remove_inset!", "shared_colorbar!",
+		# Known defects in other tracks' code (cross-requested Z17, Z18, Z19,
+		# Z21, Z22): these raise a MethodError for `row`/`col` instead of an
+		# ArgumentError naming the function. `@test_broken` turns into an error
+		# once they are fixed; then move the name out of this set.
+		cross_requested = Set(["panel_labels!", "remove_inset!", "shared_colorbar!",
 			"subplot_legends!", "tight_layout!"])
-		# Cross-requested Y20 defect: the SubplotFigure `plot!` alias forwards
-		# to plot_scatter!, whose cell errors then name plot_scatter!.
-		misnamed_cell_errors = Set(["plot!"])
 		image = attr(source="data:image/png;base64,iVBORw0KGgo=", x=0, y=1, sizex=0.2, sizey=0.2)
 		geojson = Dict("type" => "FeatureCollection", "features" => [Dict("type" => "Feature", "id" => "A",
 			"properties" => Dict(), "geometry" => Dict("type" => "Polygon",
@@ -1902,11 +1900,7 @@ end
 					snapshot = JSON.json(fresh.plot)
 					bad = attempt(() -> call(fresh, (row=99, col=2)))
 					@test bad isa ArgumentError
-					if name in misnamed_cell_errors
-						@test_broken bad isa ArgumentError && startswith(bad.msg, name * ":")
-					else
-						@test bad isa ArgumentError && startswith(bad.msg, name * ":")
-					end
+					@test bad isa ArgumentError && startswith(bad.msg, name * ":")
 					@test JSON.json(fresh.plot) == snapshot
 				end
 			end
@@ -1962,4 +1956,444 @@ end
 	ylabel!(sf, "amplitude"; row = 1, col = 1)
 	set_fonts!(sf; label = 8, units = :pt)
 	@test title_fields(sf, :yaxis)[:text] == "amplitude"
+end
+
+# ── Wave 5: shared-axis group sync audit (table-driven) ─────────────────────
+
+# The tick-label, autorange-option and title state of every Cartesian axis.
+const _RSP_SYNC_SHARED = (:type, :exponentformat, :showexponent, :tickmode, :tickvals, :ticktext, :tick0,
+	:dtick, :nticks, :tickformat, :tickprefix, :ticksuffix, :separatethousands, :categoryorder,
+	:categoryarray, :minor)
+const _RSP_SYNC_GRID_ONLY = (:tickfont, :tickangle)
+const _RSP_SYNC_LIMITS = (:minallowed, :maxallowed, :clipmin, :clipmax, :include)
+
+_rsp_json(value) = value === nothing ? "null" : JSON.json(value)
+
+function _rsp_title_text(axis)
+	title = get(axis, :title, nothing)
+	title isa AbstractString && return title
+	title === nothing && return nothing
+	return get(_rsp_fields(title), :text, nothing)
+end
+
+# Shared-axis groups of `sf`, read from `matches` (root => members).
+function _rsp_match_groups(sf::SubplotFigure)
+	fields = _rsp_layout(sf)
+	groups = Dict{Symbol, Vector{Symbol}}()
+	for (key, axis) in fields
+		occursin(r"^[xy]axis\d*$", String(key)) || continue
+		a = _rsp_fields(axis)
+		haskey(a, :overlaying) && continue
+		ref = get(a, :matches, nothing)
+		ref === nothing && continue
+		letter = String(key)[1]
+		root = Symbol(letter, "axis", String(ref)[2:end])
+		haskey(fields, root) || continue
+		push!(get!(() -> Symbol[root], groups, root), key)
+	end
+	return groups
+end
+
+# Violations of the group invariants: group-wide attributes equal on every
+# member (tick font/angle on the grid axes, insets keep theirs), every
+# `autorangeoptions` entry equal on every member, range/autorange stated on
+# the root only, no title text on a member whose tick labels are hidden.
+function _rsp_sync_problems(sf::SubplotFigure)
+	fields = _rsp_layout(sf)
+	insets = Set{Symbol}()
+	for inset in sf.insets
+		push!(insets, inset.xkey, inset.ykey)
+	end
+	problems = String[]
+	for (root, members) in _rsp_match_groups(sf)
+		axes = Dict(m => _rsp_fields(fields[m]) for m in members)
+		for name in (_RSP_SYNC_SHARED..., _RSP_SYNC_GRID_ONLY...)
+			considered = name in _RSP_SYNC_GRID_ONLY ? filter(m -> !(m in insets), members) : members
+			values = unique(_rsp_json(get(axes[m], name, nothing)) for m in considered)
+			length(values) <= 1 || push!(problems, "$(root) group: $(name) differs: $(values)")
+		end
+		for entry in _RSP_SYNC_LIMITS
+			values = unique(_rsp_json(get(_rsp_fields(get(axes[m], :autorangeoptions, attr())), entry, nothing))
+				for m in members)
+			length(values) <= 1 || push!(problems, "$(root) group: autorangeoptions.$(entry) differs: $(values)")
+		end
+		for m in members
+			m === root && continue
+			for name in (:range, :autorange)
+				haskey(axes[m], name) && push!(problems, "$(m) (follower of $(root)) states $(name)")
+			end
+		end
+		for m in members
+			get(axes[m], :showticklabels, true) === false || continue
+			text = _rsp_title_text(axes[m])
+			(text isa AbstractString && !isempty(text)) && push!(problems, "$(m) (hidden labels) holds title $(repr(text))")
+		end
+	end
+	return problems
+end
+
+# Everything a styling call must not move, drop or duplicate: the trace
+# count, the axis title texts per axis and the annotation texts.
+function _rsp_content(sf::SubplotFigure)
+	fields = _rsp_layout(sf)
+	titles = sort!([(String(k), _rsp_title_text(_rsp_fields(v))) for (k, v) in fields
+		if occursin(r"^[xy]axis\d*$", String(k)) && _rsp_title_text(_rsp_fields(v)) !== nothing])
+	notes = sort!([string(get(_rsp_fields(a), :text, "")) for a in get(fields, :annotations, Any[])])
+	return (length(sf.plot.data), titles, notes)
+end
+
+function _rsp_sync_figure(mode::Symbol)
+	kw = mode === :x_columns ? (shared_xaxes = true,) :
+		mode === :y_rows ? (shared_yaxes = true,) :
+		mode === :x_rows ? (shared_xaxes = "rows",) :
+		mode === :y_columns ? (shared_yaxes = "columns",) :
+		(shared_xaxes = "all", shared_yaxes = "all")
+	specs = [Spec() Spec(); Spec() Spec(secondary_y = true)]
+	sf = subplots(2, 2; sync = false, specs = specs, subplot_titles = ["a" "b"; "c" "d"], kw...)
+	for r in 1:2, c in 1:2
+		plot_scatter!(sf, [1.0, 2.0, 4.0], [1.0, 3.0, 2.0] .* (r + c); row = r, col = c)
+	end
+	plot_scatter!(sf, [1.0, 2.0, 4.0], [10.0, 20.0, 15.0]; row = 2, col = 2, secondary_y = true)
+	inset!(sf, (0.55, 0.55, 0.4, 0.4); row = 1, col = 1, sharex = true, sharey = true)
+	xlabel!(sf, "x of (1,1)"; row = 1, col = 1)
+	ylabel!(sf, "y of (1,2)"; row = 1, col = 2)
+	return sf
+end
+
+const _RSP_SYNC_TEMPLATE = let t = deepcopy(PlotlySupply.PlotlyBase.templates[:plotly_white])
+	t.layout[:xaxis] = attr(tickformat = ".1f", title = attr(standoff = 5))
+	t.layout[:yaxis] = attr(type = "linear", tickfont = attr(size = 13))
+	t
+end
+
+# (name, styling-only?, idempotent?, call)
+const _RSP_SYNC_CALLS = Any[
+	("set_fonts! (figure)", true, true, sf -> set_fonts!(sf; tick = 9, label = 10, title = 12)),
+	("set_fonts! (cell 1,1)", true, true, sf -> set_fonts!(sf; row = 1, col = 1, tick = 7, label = 8)),
+	("set_fonts! (cell 2,2)", true, true, sf -> set_fonts!(sf; row = 2, col = 2, tick = 7)),
+	("set_template! (name)", true, true, sf -> set_template!(sf, "plotly_dark")),
+	("set_template! (axis defaults)", true, true, sf -> set_template!(sf, _RSP_SYNC_TEMPLATE)),
+	("tight_layout!", true, true, sf -> tight_layout!(sf)),
+	("update_xaxes! title font (all)", true, true, sf -> update_xaxes!(sf; title_font_size = 11)),
+	("update_xaxes! title font (cell)", true, true, sf -> update_xaxes!(sf; row = 1, col = 2, title_font_size = 11)),
+	("xticks! angle (cell)", true, true, sf -> xticks!(sf; angle = 30, row = 1, col = 1)),
+	("xticks! angle (inset)", true, true, sf -> xticks!(sf; angle = 20, inset = 1)),
+	("spines!", true, true, sf -> spines!(sf; style = :open)),
+	("grid!", true, true, sf -> grid!(sf; row = 2, col = 1)),
+	("xlabel! (hidden cell)", false, true, sf -> xlabel!(sf, "moved"; row = 1, col = 2)),
+	("ylabel! (hidden cell)", false, true, sf -> ylabel!(sf, "moved"; row = 2, col = 2)),
+	("xticks! values (cell)", false, true, sf -> xticks!(sf, [1.0, 2.0, 4.0]; row = 1, col = 2)),
+	("yticks! values (inset)", false, true, sf -> yticks!(sf, [2.0, 4.0]; inset = 1)),
+	("xrange! one-sided (follower)", false, true, sf -> xrange!(sf, (0, nothing); row = 1, col = 1)),
+	("yrange! full (cell)", false, true, sf -> yrange!(sf, [0, 20]; row = 1, col = 2)),
+	("keyword log + ticks", false, false, sf -> plot_scatter!(sf, [1.0, 2.0, 4.0], [1.0, 2.0, 3.0]; row = 1, col = 2,
+		xscale = "log", yticks = [1.0, 2.0], ytickformat = ".2f")),
+	("keyword one-sided limit", false, false, sf -> plot_scatter!(sf, [1.0, 2.0], [1.0, 2.0]; row = 1, col = 1,
+		xrange = (nothing, 6))),
+	("relayout! underscore", false, true, sf -> relayout!(sf; xaxis2_dtick = 1, yaxis2_tickformat = ".1f")),
+	("relayout! dotted", false, true, sf -> relayout!(sf, Dict{Symbol, Any}(Symbol("xaxis.nticks") => 4, Symbol("yaxis3.type") => "log"))),
+	("relayout! nested", false, true, sf -> relayout!(sf; xaxis4 = attr(tickprefix = "~"), yaxis = attr(title_text = "via relayout"))),
+	("relayout! follower range", false, true, sf -> relayout!(sf; xaxis_range = [0, 5])),
+	("update! layout", false, true, sf -> update!(sf; layout = Layout(yaxis4_tickangle = 45))),
+	("update_yaxes! (cell)", false, true, sf -> update_yaxes!(sf; row = 2, col = 2, type = "log")),
+	("remove_inset!", false, false, sf -> remove_inset!(sf, 1)),
+]
+
+@testset "shared axes: every call keeps the group invariants (table)" begin
+	for mode in (:x_columns, :y_rows, :x_rows, :y_columns, :all)
+		@testset "$(mode)" begin
+			base = _rsp_sync_figure(mode)
+			@test !isempty(_rsp_match_groups(base))
+			@test isempty(_rsp_sync_problems(base))
+			for (name, styling, idempotent, call) in _RSP_SYNC_CALLS
+				@testset "$(name)" begin
+					sf = _rsp_sync_figure(mode)
+					before = _rsp_content(sf)
+					call(sf)
+					@test isempty(_rsp_sync_problems(sf))
+					styling && @test _rsp_content(sf) == before
+					first_state = JSON.json(sf.plot.layout)
+					if idempotent
+						call(sf)
+						@test JSON.json(sf.plot.layout) == first_state
+					end
+				end
+			end
+		end
+	end
+	# with_style: a figure built under a journal style keeps the invariants.
+	sf = with_style(:ieee) do
+		_rsp_sync_figure(:x_columns)
+	end
+	@test isempty(_rsp_sync_problems(sf))
+end
+
+# Plotly.js operations a recording renderer received.
+_rsp_ops(renderer) = [m.captures[1] for s in renderer.scripts
+	for m in eachmatch(r"Plotly\.(react|addTraces|relayout|restyle|newPlot)\(", s)]
+_rsp_axis_get(sf, key, name) = get(_rsp_axis(sf, key), name, nothing)
+
+@testset "shared axes: relayout!/update! act on the group (Z12, Z29)" begin
+	types(sf) = (_rsp_axis_get(sf, :yaxis, :type), _rsp_axis_get(sf, :yaxis2, :type))
+	for call in (
+		sf -> relayout!(sf; yaxis2_type = "log"),
+		sf -> relayout!(sf, Dict{Symbol, Any}(Symbol("yaxis2.type") => "log")),
+		sf -> relayout!(sf; yaxis2 = attr(type = "log")),
+		sf -> update!(sf; layout = Layout(yaxis2_type = "log")),
+	)
+		sf = subplots(1, 2; sync = false, shared_yaxes = true)
+		@test call(sf) === sf
+		@test types(sf) == ("log", "log")
+	end
+	sf = subplots(1, 2; sync = false, shared_yaxes = true)
+	relayout!(sf; yaxis2_tickvals = [2.0], yaxis2_tickformat = ".1f")
+	@test _rsp_axis_get(sf, :yaxis, :tickvals) == [2.0]
+	@test _rsp_axis_get(sf, :yaxis, :tickformat) == ".1f"
+	# A follower range is the group's: it moves to the root.
+	sf = subplots(2, 1; sync = false, shared_xaxes = true)
+	relayout!(sf; xaxis_range = [0, 5])
+	@test _rsp_axis_get(sf, :xaxis2, :range) == [0, 5]
+	@test _rsp_axis_get(sf, :xaxis2, :autorange) === false
+	@test _rsp_axis_get(sf, :xaxis, :range) === nothing
+	# Without shared axes, or naming no group axis, the verb is the plain one.
+	sf = subplots(1, 2; sync = false)
+	relayout!(sf; yaxis2_type = "log")
+	@test types(sf) == (nothing, "log")
+	sf = subplots(1, 2; sync = false, shared_yaxes = true)
+	plot_scatter!(sf, 1:3, [1.0, 2.0, 3.0]; row = 1, col = 1)
+	renderer = _rsp_live!(sf)
+	relayout!(sf; title_text = "t")
+	@test _rsp_ops(renderer) == ["relayout"]
+	empty!(renderer.scripts)
+	relayout!(sf; yaxis2_type = "log")
+	@test _rsp_ops(renderer) == ["react"]
+	@test types(sf) == ("log", "log")
+	# Cell keywords are still rejected before anything changes.
+	snapshot = JSON.json(sf.plot)
+	@test_throws ArgumentError relayout!(sf; row = 1, yaxis2_type = "linear")
+	@test_throws ArgumentError update!(sf; col = 1, layout = Layout(yaxis2_type = "linear"))
+	@test JSON.json(sf.plot) == snapshot
+	# A failing renderer leaves the model as it was.
+	renderer.fail = true
+	@test_throws PlotlySupply._SyncPlotDesynchronizationError relayout!(sf; yaxis_type = "linear")
+	@test types(sf) == ("log", "log")
+end
+
+@testset "shared axes: only a title text set by the call moves" begin
+	title_text(sf, key) = (t = _rsp_axis_get(sf, key, :title); t === nothing ? nothing :
+		t isa AbstractString ? t : get(_rsp_fields(t), :text, nothing))
+	sf = subplots(2, 1; sync = false, shared_xaxes = true)
+	plot_scatter!(sf, 1:3, [1.0, 2.0, 3.0]; row = 1, col = 1)
+	xlabel!(sf, "bottom"; row = 2, col = 1)
+	# A raw write leaves a text on the hidden-label axis; styling it later
+	# must not move that text over the shown title.
+	PlotlySupply.PlotlyBase.relayout!(sf.plot; xaxis_title_text = "raw top")
+	set_fonts!(sf; label = 9)
+	@test title_text(sf, :xaxis2) == "bottom"
+	update_xaxes!(sf; row = 1, col = 1, title_font_size = 12)
+	@test title_text(sf, :xaxis2) == "bottom"
+	# Setting the text moves it.
+	xlabel!(sf, "moved"; row = 1, col = 1)
+	@test title_text(sf, :xaxis2) == "moved"
+	@test title_text(sf, :xaxis) === nothing
+end
+
+@testset "shared axes: an inset keeps its own tick font and angle" begin
+	sf = subplots(2, 1; sync = false, shared_xaxes = true)
+	plot_scatter!(sf, 1:10, collect(1.0:10); row = 1, col = 1)
+	plot_scatter!(sf, 1:10, collect(1.0:10); row = 2, col = 1)
+	k = inset!(sf, (0.6, 0.6, 0.3, 0.3); row = 1, col = 1, sharex = true)
+	ik = sf.insets[k].xkey
+	inset_font = _rsp_fields(_rsp_axis_get(sf, ik, :tickfont))[:size]
+	set_fonts!(sf; row = 2, col = 1, tick = 7)
+	@test _rsp_fields(_rsp_axis_get(sf, :xaxis, :tickfont))[:size] == 7
+	@test _rsp_fields(_rsp_axis_get(sf, ik, :tickfont))[:size] == inset_font
+	xticks!(sf; angle = 30, inset = k)
+	@test _rsp_axis_get(sf, ik, :tickangle) == 30
+	@test _rsp_axis_get(sf, :xaxis, :tickangle) === nothing
+	@test _rsp_axis_get(sf, :xaxis2, :tickangle) === nothing
+	# Tick placement is the group's (matplotlib `sharex`).
+	xticks!(sf, [2.0, 4.0]; inset = k)
+	@test _rsp_axis_get(sf, :xaxis, :tickvals) == [2.0, 4.0]
+	@test _rsp_axis_get(sf, :xaxis2, :tickvals) == [2.0, 4.0]
+	@test _rsp_axis_get(sf, ik, :tickvals) == [2.0, 4.0]
+end
+
+@testset "shared axes: one-sided limits reach every member" begin
+	limits(sf, key) = (o = _rsp_axis_get(sf, key, :autorangeoptions); o === nothing ? nothing :
+		Dict(k => v for (k, v) in _rsp_fields(o)))
+	sf = subplots(2, 1; sync = false, shared_xaxes = true)
+	plot_scatter!(sf, 1:10, collect(1.0:10); row = 1, col = 1)
+	plot_scatter!(sf, 1:10, collect(1.0:10); row = 2, col = 1, xrange = (nothing, 20))
+	@test limits(sf, :xaxis2) == Dict(:maxallowed => 20)
+	@test limits(sf, :xaxis) == Dict(:maxallowed => 20)
+	# A one-sided limit replaces the earlier one (D11: the open side
+	# autoranges), on the follower as on the root; before the fix the root
+	# kept `maxallowed` and plotly.js united both members' limits.
+	plot_scatter!(sf, 1:10, collect(1.0:10); row = 1, col = 1, xrange = (-5, nothing))
+	@test limits(sf, :xaxis2) == Dict(:minallowed => -5)
+	@test limits(sf, :xaxis) == Dict(:minallowed => -5)
+	# A second identical call writes nothing.
+	layout = JSON.json(sf.plot.layout)
+	plot_scatter!(sf, 1:10, collect(1.0:10); row = 1, col = 1, xrange = (-5, nothing))
+	@test JSON.json(sf.plot.layout) == layout
+	# A limit written on one member reaches the group, its removal too.
+	relayout!(sf; xaxis_autorangeoptions_maxallowed = 30)
+	@test limits(sf, :xaxis2) == Dict(:minallowed => -5, :maxallowed => 30)
+	relayout!(sf; xaxis_autorangeoptions_minallowed = nothing)
+	@test limits(sf, :xaxis2) == Dict(:maxallowed => 30)
+	@test limits(sf, :xaxis) == Dict(:maxallowed => 30)
+end
+
+@testset "shared axes: sticky field ranges are not bounced" begin
+	U = [sin(a / 3) * cos(b / 4) for a in 1:8, b in 1:6]
+	for equalar in (false, true)
+		sf = subplots(2, 1; sync = false, shared_xaxes = true)
+		plot_heatmap!(sf, U; row = 1, col = 1, equalar = equalar)
+		plot_heatmap!(sf, 2 .* U; row = 2, col = 1, equalar = equalar)
+		@test isempty(_rsp_sync_problems(sf))
+		_rsp_live!(sf)
+		plot_scatter!(sf, [2.0, 3.0], [2.0, 3.0]; row = 1, col = 1)
+		for call in (
+			sf -> plot_scatter!(sf, [2.0, 3.0], [2.0, 3.0]; row = 1, col = 1),
+			sf -> xlabel!(sf, "x"; row = 2, col = 1),
+		)
+			call(sf)
+			second = JSON.json(sf.plot.layout)
+			call(sf)
+			@test JSON.json(sf.plot.layout) == second
+		end
+		@test isempty(_rsp_sync_problems(sf))
+	end
+end
+
+@testset "figure-wide gaps through the delegate (Z33)" begin
+	gaps(sf) = (get(_rsp_layout(sf), :bargap, nothing), get(_rsp_layout(sf), :bargroupgap, nothing))
+	sf = subplots(1, 2; sync = false)
+	PlotlySupply._subplot_delegate_mutator!(sf, plot_bar!, ["a", "b"], [1, 2]; row = 1, col = 2,
+		bargap = 0.3, bargroupgap = 0.1)
+	@test gaps(sf) == (0.3, 0.1)
+	# An automatic gap of a mutator never reaches the root.
+	sf = subplots(1, 2; sync = false)
+	plot_histogram!(sf, [1.0, 2, 2, 3]; row = 1, col = 1)
+	plot_bar!(sf, ["a", "b"], [1, 2]; row = 1, col = 2)
+	@test gaps(sf) == (nothing, nothing)
+	# The stats family writes them in the same transaction as the bars.
+	sf = subplots(1, 2; sync = false)
+	renderer = _rsp_live!(sf)
+	plot_bar!(sf, ["a", "b"], [1, 2]; row = 1, col = 2, bargap = 0.25, bargroupgap = 0.05)
+	@test gaps(sf) == (0.25, 0.05)
+	@test length(renderer.scripts) == 1
+	snapshot = JSON.json(sf.plot)
+	@test_throws ArgumentError plot_bar!(sf, ["a"], [1]; row = 1, col = 1, bargap = 2.0)
+	@test JSON.json(sf.plot) == snapshot
+end
+
+@testset "grid titles are named (Z60)" begin
+	names_texts(sf) = [(get(_rsp_fields(a), :name, nothing), _rsp_fields(a)[:text]) for a in _rsp_layout(sf)[:annotations]]
+	sf = subplots(2, 2; sync = false, subplot_titles = ["a" "b"; "c" "d"], column_titles = ["C1", "C2"],
+		row_titles = ["R1", "R2"], x_title = "X", y_title = "Y")
+	@test names_texts(sf) == [
+		("plotlysupply:title:1:1", "a"), ("plotlysupply:title:1:2", "b"),
+		("plotlysupply:title:2:1", "c"), ("plotlysupply:title:2:2", "d"),
+		("plotlysupply:title!:1:1:column", "C1"), ("plotlysupply:title!:1:2:column", "C2"),
+		("plotlysupply:title!:1:2:row", "R1"), ("plotlysupply:title!:2:2:row", "R2"),
+		("plotlysupply:x_title", "X"), ("plotlysupply:y_title", "Y"),
+	]
+	# List form: titles go to the occupied cells in row-major order.
+	sl = subplots(2, 2; sync = false, specs = [Spec() Spec(); Spec(colspan = 2) missing], subplot_titles = ["p" "q" "r"])
+	@test names_texts(sl) == [("plotlysupply:title:1:1", "p"), ("plotlysupply:title:1:2", "q"), ("plotlysupply:title:2:1", "r")]
+	# A journal style and set_fonts! size them as titles.
+	sizes(sf) = [_rsp_fields(_rsp_fields(a)[:font])[:size] for a in _rsp_layout(sf)[:annotations]]
+	journal_size = with_style(:ieee) do
+		PlotlySupply._active_style().title_fontsize
+	end
+	@test journal_size > 0 && journal_size != 16
+	ieee = with_style(:ieee) do
+		subplots(2, 2; sync = false, subplot_titles = ["a" "b"; "c" "d"], x_title = "X", y_title = "Y")
+	end
+	@test all(s -> s ≈ journal_size, sizes(ieee))
+	set_fonts!(ieee; title = 20)
+	@test all(==(20), sizes(ieee))
+	# A cell-scoped call styles that cell's title only.
+	set_fonts!(ieee; row = 1, col = 2, title = 9)
+	@test sizes(ieee) == [20, 9, 20, 20, 20, 20]
+	# title! replaces the cell's grid title instead of adding a second one.
+	title!(ieee, "new b"; row = 1, col = 2)
+	texts = [_rsp_fields(a)[:text] for a in _rsp_layout(ieee)[:annotations]]
+	@test count(==("new b"), texts) == 1
+	@test !("b" in texts)
+	# The default style keeps plotly's make_subplots title size.
+	@test all(==(16), sizes(sf))
+end
+
+@testset "plot! names itself in cell errors (Z23)" begin
+	sf = subplots(1, 2; sync = false)
+	snapshot = JSON.json(sf.plot)
+	catch_error(f) = try
+		f()
+		nothing
+	catch e
+		e
+	end
+	err = catch_error(() -> plot!(sf, [1.0, 2.0], [1.0, 2.0]; row = 99, col = 2))
+	@test err isa ArgumentError && startswith(err.msg, "plot!:")
+	err = catch_error(() -> plot!(sf, [1.0, 2.0], [1.0, 2.0]; row = 1, col = 1, secondary_y = true))
+	@test err isa ArgumentError && startswith(err.msg, "plot!:")
+	err = catch_error(() -> plot!(sf, [1.0, 2.0]; row = 99, col = 1))
+	@test err isa ArgumentError && startswith(err.msg, "plot!:")
+	@test JSON.json(sf.plot) == snapshot
+	@test plot!(sf, [1.0, 2.0], [1.0, 2.0]; row = 1, col = 2) === sf
+	@test length(sf.plot.data) == 1
+end
+
+@testset "SubplotFigure appends are staged append-only (Z82)" begin
+	x = collect(range(0.0, 10.0; length = 100))
+	y = sin.(x)
+	legend_ids(sf) = [get(t.fields, :legend, nothing) for t in sf.plot.data]
+	# Per-subplot legends (the default): an append that changes no existing
+	# trace goes to the live window as addTraces + relayout.
+	sf = subplots(1, 2; sync = false)
+	plot_scatter!(sf, x, y; row = 1, col = 1, legend = "a")
+	renderer = _rsp_live!(sf)
+	plot_scatter!(sf, x, y .+ 1; row = 1, col = 1, legend = "b")
+	@test _rsp_ops(renderer) == ["addTraces", "relayout"]
+	empty!(renderer.scripts)
+	plot_scatter!(sf, x, y .+ 2; row = 1, col = 2, legend = "c")
+	@test _rsp_ops(renderer) == ["addTraces", "relayout"]
+	@test legend_ids(sf) == ["legend", "legend", "legend2"]
+	@test all(t -> haskey(t.fields, :showlegend), sf.plot.data)
+	# A trace added by a raw verb has no legend id yet: the next append gives
+	# it one, which rewrites an existing trace, so that call is staged fully.
+	addtraces!(sf, scatter(x = [1.0, 2.0], y = [1.0, 2.0], name = "raw"))
+	empty!(renderer.scripts)
+	plot_scatter!(sf, x, y; row = 1, col = 2, legend = "d")
+	@test _rsp_ops(renderer) == ["react"]
+	@test legend_ids(sf) == ["legend", "legend", "legend2", "legend", "legend2"]
+	# Existing colorbars and equal-aspect cells may move: full staging.
+	empty!(renderer.scripts)
+	plot_heatmap!(sf, [1.0 2.0; 3.0 4.0]; row = 1, col = 2)
+	@test _rsp_ops(renderer) == ["addTraces", "relayout"]
+	empty!(renderer.scripts)
+	plot_scatter!(sf, x, y; row = 1, col = 1)
+	@test _rsp_ops(renderer) == ["react"]
+	sq = subplots(1, 2; sync = false)
+	plot_scatter!(sq, x, y; row = 1, col = 1)
+	axis_equal!(sq; row = 1, col = 1)
+	renderer = _rsp_live!(sq)
+	plot_scatter!(sq, x, y; row = 1, col = 2)
+	@test _rsp_ops(renderer) == ["react"]
+	# Cost guard: an append into a cell that already holds 200 traces costs
+	# about as many bytes with per-subplot legends as with one figure legend
+	# (measured 942 KB against 697 KB; before Z82 the full staging of every
+	# trace made it 3036 KB).
+	function append_bytes(per_subplot_legends)
+		f = subplots(1, 2; sync = false, per_subplot_legends = per_subplot_legends)
+		for k in 1:200
+			plot_scatter!(f, x, y .+ k; row = 1, col = 1)
+		end
+		plot_scatter!(f, x, y; row = 1, col = 1)
+		return minimum(k -> @allocated(plot_scatter!(f, x, y .+ k; row = 1, col = 1)), 1:5)
+	end
+	@test append_bytes(true) < 2 * append_bytes(false)
 end
