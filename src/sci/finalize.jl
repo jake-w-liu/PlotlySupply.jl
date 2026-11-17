@@ -874,14 +874,16 @@ _fin_bar_unplaced(bar::Dict{Symbol, Any}) =
 	!haskey(bar, :x) && !haskey(bar, :y) && !haskey(bar, :len)
 
 # Pixel width of a vertical colorbar box from its anchor: x padding, bar,
-# ticks, tick labels and a title on its right side.
-function _fin_bar_width(layout::Layout, item::_FinBar, Hp::Float64)
+# ticks, tick labels and a title on its right side. `len_px` overrides the
+# bar length the tick labels are estimated for.
+function _fin_bar_width(layout::Layout, item::_FinBar, Hp::Float64; len_px = nothing)
 	bar = item.bar
 	font = _fin_font_size(layout)
 	thickness = _cbar_string(bar, :thicknessmode, "pixels") == "pixels" ?
 		_cbar_real(bar, :thickness, _CBAR_DEFAULT_THICKNESS) : _CBAR_DEFAULT_THICKNESS
 	xpad = _cbar_real(bar, :xpad, _CBAR_DEFAULT_XPAD)
-	len = _cbar_string(bar, :lenmode, "fraction") == "fraction" ?
+	len = len_px !== nothing ? Float64(len_px) :
+		_cbar_string(bar, :lenmode, "fraction") == "fraction" ?
 		_cbar_real(bar, :len, 1.0) * Hp : _cbar_real(bar, :len, Hp)
 	ypad = _cbar_real(bar, :ypad, 10.0)
 	lo, hi = item.range === nothing ? (NaN, NaN) : item.range
@@ -894,8 +896,31 @@ function _fin_bar_width(layout::Layout, item::_FinBar, Hp::Float64)
 	text = title isa AbstractString ? title : _cmn_mapping_get(title, :text)
 	if side == "right" && text isa AbstractString && !isempty(text)
 		width += 1.4 * _fin_mapping_font_size(title, :font, font) + 4
+	else
+		# A math title drawn beside the bar as an annotation.
+		key = item.coloraxis !== nothing ? item.coloraxis : item.own === nothing ? nothing : item.own.key
+		annotation = key === nothing ? nothing : _fin_right_title_annotation(layout, key)
+		annotation === nothing ||
+			(width += _FIN_MATH_TITLE_EM * _fin_mapping_font_size(annotation, :font, font) + 4)
 	end
 	return width
+end
+
+# Width of a -90 deg MathJax colorbar title, in font sizes: rendered at the
+# default 12 px, `$E_z$`, `$|J_s|$`, `$|E|^2$` and `$\frac{a}{b}$` measured
+# 13.5, 16, 18 and 19 px wide.
+const _FIN_MATH_TITLE_EM = 1.6
+
+# The right-side math title annotation of the bar keyed `key` (coloraxis id
+# or plot-area key, see `_cbar_title_owner`), or `nothing`.
+function _fin_right_title_annotation(layout::Layout, key::AbstractString)
+	annotations = get(layout.fields, :annotations, nothing)
+	annotations isa AbstractVector || return nothing
+	name = _cbar_title_owner(key) * ":right"
+	for item in annotations
+		_cmn_item_name(item) == name && return item
+	end
+	return nothing
 end
 
 # The host cell of an inset (`_cbar_trace_region`-like), `nothing` when its
@@ -1268,7 +1293,7 @@ function _fin_fit!(ctx::_FinContext)
 	p = ctx.p
 	layout = p.layout
 	accs = _fin_collect_axes(p)
-	bars_by_area, area_order, regions, _ = _fin_collect_bars(p, ctx.sf)
+	bars_by_area, area_order, regions, coloraxis_areas = _fin_collect_bars(p, ctx.sf)
 	layout_updates = Dict{Symbol, Any}()
 	wrote = false
 	W, H = _fin_figure_size(ctx, layout)
@@ -1314,7 +1339,9 @@ function _fin_fit!(ctx::_FinContext)
 		end
 	end
 	# M4: the other bars of a plot area (and those of its insets) go to the
-	# right of the first one, side by side.
+	# right of the first one, side by side; in a cell with another plot area
+	# to its right, where they would run into that area, the cell's bars
+	# share its height instead, one below the other.
 	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
 	Wp = max(W - margins.l - margins.r, 1.0)
 	Hp = max(H - margins.t - margins.b, 1.0)
@@ -1332,18 +1359,39 @@ function _fin_fit!(ctx::_FinContext)
 		lead = nothing
 		template = nothing
 		if last_hug !== nothing
-			cursor = last_hug[1] + (last_hug[2] + _FIN_CBAR_GAP) / Wp
+			lead_x, lead_w = last_hug[1], last_hug[2]
 			template = last_hug[3]
 		elseif !isempty(hosts)
 			lead = hosts[1]
 			template = lead.bar
-			cursor = _cbar_real(lead.bar, :x, 1.02) + (_fin_bar_width(layout, lead, Hp) + _FIN_CBAR_GAP) / Wp
+			lead_x = _cbar_real(lead.bar, :x, 1.02)
+			lead_w = _fin_bar_width(layout, lead, Hp)
 		else
-			cursor = region.xdomain[2] + _CBAR_CELL_PAD
+			lead_x = region.xdomain[2] + _CBAR_CELL_PAD
+			lead_w = -_FIN_CBAR_GAP
 		end
-		for item in items
-			item === lead && continue
-			(is_auto(item) && _fin_item_writable(ctx, item)) || continue
+		movable = [item for item in items if item !== lead && is_auto(item) && _fin_item_writable(ctx, item)]
+		# Bars to stack in one column: the lead (when ours to move) and the
+		# others; with no host bar, the inset bars alone.
+		members = if last_hug !== nothing
+			_FinBar[]
+		elseif lead === nothing
+			movable
+		elseif is_auto(lead) && _fin_item_writable(ctx, lead)
+			[lead; movable]
+		else
+			_FinBar[]
+		end
+		column = _fin_bar_column(layout, region, members, lead_x, Wp, Hp)
+		cursor = lead_x + (lead_w + _FIN_CBAR_GAP) / Wp
+		if column !== nothing
+			for (item, placement) in column
+				wrote |= _fin_place_bar!(ctx, layout_updates, item, placement)
+				push!(moved, (item, placement))
+			end
+		end
+		for item in movable
+			column !== nothing && break
 			placement = Dict{Symbol, Any}(:x => cursor, :xanchor => "left", :xref => "paper", :lenmode => "fraction")
 			if item.inset
 				# Level with its inset.
@@ -1362,6 +1410,23 @@ function _fin_fit!(ctx::_FinContext)
 			cursor += (_fin_bar_width(layout, item, Hp) + _FIN_CBAR_GAP) / Wp
 		end
 	end
+	# A coloraxis bar left at the default place for one of its plot areas
+	# (placed before the axis spread to the others) moves next to all of them.
+	for (id, areas) in coloraxis_areas
+		length(areas) >= 2 || continue
+		axis = get(layout.fields, Symbol(id), nothing)
+		_cmn_mapping_get(axis, :showscale) === false && continue
+		bar = _symbol_dict(_cmn_mapping_get(axis, :colorbar))
+		haskey(bar, :x) || continue
+		side = _cbar_string(bar, :orientation, "v") == "h" ? :bottom : :right
+		area_regions = Any[regions[area] for area in areas]
+		target = _cbar_region_placement(side, area_regions)
+		_cbar_placement_matches(bar, target) && continue
+		any(r -> _cbar_placement_matches(bar, _cbar_region_placement(side, Any[r])), area_regions) || continue
+		item = _FinBar(0, nothing, id, bar, nothing, area_regions[1], false)
+		wrote |= _fin_place_bar!(ctx, layout_updates, item, target)
+		push!(moved, (item, target))
+	end
 	# Math titles drawn as annotations follow their bars.
 	annotations = _fin_title_annotations(p, moved)
 	# A math title beside the bar (`title_side = :right`) is an annotation,
@@ -1375,6 +1440,69 @@ function _fin_fit!(ctx::_FinContext)
 	annotations === nothing || (layout_updates[:annotations] = annotations)
 	wrote |= _fin_relayout!(ctx, layout_updates)
 	return wrote
+end
+
+# Paper x at which the nearest other plot area to the right of `xd` starts
+# among those overlapping `yd` vertically (Cartesian cells and domain
+# subplots such as scenes); `nothing` for the rightmost area.
+function _fin_right_obstacle(layout::Layout, xd, yd)
+	nearest = nothing
+	for (key, axis) in layout.fields
+		key isa Symbol || continue
+		name = String(key)
+		dx = nothing
+		dy = nothing
+		if _fin_is_axis_key(key)
+			name[1] == 'x' && _fin_is_base_axis(layout, key) || continue
+			dx = _layout_axis_domain(layout, key)
+			anchor = _fin_axis_key(_cmn_mapping_get(axis, :anchor, "y"))
+			(dx === nothing || anchor === nothing) && continue
+			dy = _cmn_y_axis_domain(layout, anchor)
+		elseif occursin(r"^(scene|polar|ternary|geo|mapbox|map|smith)([2-9]|[1-9][0-9]+)?$", name)
+			domain = _layout_subplot_domain(layout, key)
+			domain === nothing && continue
+			dx, dy = domain
+		else
+			continue
+		end
+		(dx[1] >= xd[2] - 1e-9 && dy[1] < yd[2] - 1e-9 && dy[2] > yd[1] + 1e-9) || continue
+		nearest = nearest === nothing ? dx[1] : min(nearest, dx[1])
+	end
+	return nearest
+end
+
+# Placements that stack the vertical bars `members` of a cell one below the
+# other over the cell's height, in one column at paper x `x`, when side by
+# side they would run into the plot area to the right of the cell (more
+# than the first bar's own width, or half the gap); `nothing` when side by
+# side fits, there is nothing to stack, or the cell is too short for the
+# bars to stay readable (40 px each).
+function _fin_bar_column(layout::Layout, region, members, x::Float64, Wp::Float64, Hp::Float64)
+	length(members) >= 2 || return nothing
+	obstacle = _fin_right_obstacle(layout, region.xdomain, region.ydomain)
+	obstacle === nothing && return nothing
+	# Widths for bars as tall as the cell, so the choice does not depend on
+	# the lengths a previous run gave them.
+	span_px = (region.ydomain[2] - region.ydomain[1]) * Hp
+	widths = [_fin_bar_width(layout, item, Hp; len_px = span_px) for item in members]
+	total = sum(widths) + _FIN_CBAR_GAP * (length(members) - 1)
+	total <= max(widths[1], 0.5 * (obstacle - region.xdomain[2]) * Wp) && return nothing
+	k = length(members)
+	# The end tick labels reach half a line past each bar end.
+	gap = (_CBAR_LINE_EM * _fin_font_size(layout) + 4) / Hp
+	y0, y1 = region.ydomain
+	segment = (y1 - y0 - (k - 1) * gap) / k
+	segment * Hp >= 40 || return nothing
+	column = Tuple{_FinBar, Dict{Symbol, Any}}[]
+	for (i, item) in enumerate(members)
+		top = y1 - (i - 1) * (segment + gap)
+		push!(column, (item, Dict{Symbol, Any}(
+			:x => x, :xanchor => "left", :xref => "paper",
+			:y => top - segment / 2, :yanchor => "middle",
+			:len => segment, :lenmode => "fraction", :ypad => 0,
+		)))
+	end
+	return column
 end
 
 # The layout annotations with the math title of every moved bar redrawn for
@@ -1411,7 +1539,7 @@ end
 
 # Right margin (px) that fits every right-side math colorbar title, or
 # `nothing` when there is none. The title is a -90 deg annotation `xshift` px
-# right of its paper `x`; its rendered width is taken as 1.6 font sizes.
+# right of its paper `x`, `_FIN_MATH_TITLE_EM` font sizes wide.
 function _fin_title_margin(layout::Layout, annotations, W::Float64, margins)
 	(annotations isa AbstractVector && !isempty(annotations)) || return nothing
 	font = _fin_font_size(layout)
@@ -1425,7 +1553,7 @@ function _fin_title_margin(layout::Layout, annotations, W::Float64, margins)
 		shift = _cmn_mapping_get(item, :xshift, 0)
 		(_fin_isfinite_real(x) && _fin_isfinite_real(shift)) || continue
 		size = _fin_mapping_font_size(item, :font, font)
-		edge = (Float64(x) - 1) * Wp + Float64(shift) + 1.6 * size + 4
+		edge = (Float64(x) - 1) * Wp + Float64(shift) + _FIN_MATH_TITLE_EM * size + 4
 		needed = max(something(needed, 0.0), ceil(edge))
 	end
 	(needed === nothing || needed <= 0) && return nothing
