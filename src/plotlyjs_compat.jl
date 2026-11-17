@@ -395,9 +395,11 @@ end
 # lowered JSON objects that are serialized for the renderer.
 
 function _export_source(p::Plot, options::_ExportOptions)
+	options.tight || return _finalize_export_copy(p, options)
 	options.tight || return p
 	export_copy = _clone_plot_model(p)
 	tight_layout!(export_copy)
+	_finalize_figure!(export_copy; size = (options.width, options.height))
 	return export_copy
 end
 
