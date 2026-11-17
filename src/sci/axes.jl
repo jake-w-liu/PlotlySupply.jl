@@ -1556,9 +1556,10 @@ Set the final range with [`xrange!`](@ref) before calling this.
 - `finv`: its inverse; `finv(f(x)) ≈ x` is checked at the same points.
 
 # Keywords
-- `ticks = nothing`: tick values in the secondary units; `nothing` chooses
-  1-2-5 values inside `f(range)` (powers of ten on a log axis spanning a
-  decade or more).
+- `ticks = nothing`: tick values in the secondary units (data values of
+  `f`, never log10 exponents, also on a logarithmic primary axis; each is
+  placed at the DATA position `finv(tick)`); `nothing` chooses 1-2-5 values
+  inside `f(range)` (powers of ten on a log axis spanning a decade or more).
 - `ticklabels = nothing`: one label per tick (through the mathtext layer);
   requires `ticks`. Default: the values with six significant digits.
 - `title::AbstractString = ""`: axis title.

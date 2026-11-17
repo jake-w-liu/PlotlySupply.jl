@@ -6971,7 +6971,7 @@ function _apply_cartesian_plot_options!(
 	)
 	if !primary_y
 		_require_axis_scale(yscale, who, "yscale")
-		_scat_require_axis_range(fig, ykey, yrange, yscale, who, "yrange")
+		_require_axis_range_for_key(fig, ykey, yrange, yscale, who; name = "yrange")
 	end
 	# Tick values/labels and the D9 presets (`:decades`, `:auto`) are checked
 	# against the axis type this call ends up with, before anything is written.
@@ -6988,15 +6988,10 @@ function _apply_cartesian_plot_options!(
 		_apply_axis_scale!(fig, :y, yscale, who)
 		_apply_axis_range!(fig, :y, yrange, who)
 	else
-		_scat_apply_axis_options!(
-			fig,
-			ykey;
-			label = ylabel,
-			scale = yscale,
-			range = yrange,
-			range_name = "yrange",
-			who = who,
-		)
+		# The twin y axis gets the same primitives, addressed by key.
+		_apply_axis_title_to_key!(fig, ykey, ylabel)
+		_apply_axis_scale_to_key!(fig, ykey, yscale, who; name = "yscale")
+		_apply_axis_range_to_key!(fig, ykey, yrange, who; name = "yrange")
 	end
 	_apply_figure_size!(fig, who; width = width, height = height)
 	# `grid = true` keeps the template's grid (the constructor default);

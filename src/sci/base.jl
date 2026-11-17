@@ -131,8 +131,12 @@ end
 
 # Title of the primary x or y axis; an empty label leaves the axis untouched.
 function _apply_axis_title!(fig, letter::Symbol, label::AbstractString)
+	return _apply_axis_title_to_key!(fig, _axis_layout_key(letter), label)
+end
+
+# `_apply_axis_title!` for any Cartesian axis `key` (e.g. a twin y axis).
+function _apply_axis_title_to_key!(fig, key::Symbol, label::AbstractString)
 	isempty(label) && return nothing
-	key = _axis_layout_key(letter)
 	relayout!(fig; Symbol(key, :_title_text) => _label(label))
 	return nothing
 end

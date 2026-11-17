@@ -248,6 +248,33 @@ end
 		@test _bs_get(f, :xaxis, :range) ≈ [1.0, 3.0]
 	end
 
+	@testset "twin y axis: the key-based primitives in _apply_cartesian_plot_options!" begin
+		p = plot_scatter([1.0, 2.0], [1.0, 2.0])
+		plot_scatter!(p, [1.0, 2.0], [10.0, 1000.0]; secondary_y = true, yscale = "log", yrange = (1, 1e4), ylabel = L"$P$ (W)")
+		@test _bs_get(p, :yaxis2, :type) == "log"
+		@test _bs_get(p, :yaxis2, :range) ≈ [0.0, 4.0]
+		@test _bs_get(p, :yaxis2, :exponentformat) == "power"
+		@test _BS._cmn_mapping_get(_bs_get(p, :yaxis2, :title), :text) == _BS._label(L"$P$ (W)")
+		primary = _bs_axis_json(p, :yaxis)
+		opts(; kw...) = _BS._apply_cartesian_plot_options!(p; ykey = :yaxis2, apply_template = false, who = "t", kw...)
+		# A scale switch keeps the twin's data interval.
+		opts(yscale = "linear")
+		@test _bs_get(p, :yaxis2, :range) ≈ [1.0, 1e4]
+		opts(yrange = (-5, 5))
+		@test _bs_get(p, :yaxis2, :range) == [-5, 5]
+		before = _bs_layout_json(p)
+		@test _bs_throws(() -> opts(yrange = ("a", "b")), "t: `yrange` bounds on a linear axis must be numbers")
+		@test _bs_throws(() -> opts(yscale = "log"), "t: the current y range (-5, 5) cannot be shown on a \"log\" axis")
+		@test _bs_throws(() -> opts(yscale = "log", yrange = (0, 5)), "t: `yrange` bounds on a logarithmic axis are data values")
+		@test _bs_throws(() -> opts(yrange = [2, 2]), "t: `yrange`: the range bounds must differ")
+		@test _bs_throws(() -> opts(yticks = :decades), "t: the `:decades` tick preset")
+		@test _bs_layout_json(p) == before
+		opts(yscale = "log", yrange = (1, 10), yticks = :decades)
+		@test _bs_get(p, :yaxis2, :range) == [0.0, 1.0]
+		@test _bs_get(p, :yaxis2, :dtick) == 1
+		@test _bs_axis_json(p, :yaxis) == primary
+	end
+
 	@testset "#100: each primitive writes only the axis it addresses" begin
 		p = _bs_multi_axis_plot()
 		others = Dict(key => _bs_axis_json(p, key) for key in (:xaxis2, :yaxis2, :yaxis3))
