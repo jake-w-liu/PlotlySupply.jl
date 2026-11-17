@@ -15,7 +15,8 @@ const _RS_LIGHT_LEGEND = (bgcolor = "rgba(255,255,255,0.72)", bordercolor = "rgb
 # A trace type PlotlySupply cannot read (no `fields`): style helpers skip it.
 struct _RSOpaqueTrace <: PlotlySupply.PlotlyBase.AbstractTrace end
 
-const _RS_OKABE_ITO = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"]
+# 2.0 (D14): the curated `COLOR_CYCLES[:okabe_ito]` order (high contrast first).
+const _RS_OKABE_ITO = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#000000", "#E69F00", "#56B4E9", "#F0E442"]
 
 _rs_sd(x) = _RS._symbol_dict(x)
 _rs_layout(fig) = _RS._plot_layout(fig).fields
@@ -360,7 +361,7 @@ end
 			_rs_with_defaults(; style = :publication) do
 				fig = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]]; legend = ["a", "b"], title = "T", xlabel = "x", ylabel = "y")
 				fields = fig.layout.fields
-				@test _rs_sd(fields[:font]) == Dict(:family => "STIXGeneral, Times New Roman, serif", :size => 14, :color => "#000000")
+				@test _rs_sd(fields[:font]) == Dict(:family => "Times New Roman, Times, Liberation Serif, serif", :size => 14, :color => "#000000")
 				@test fields[:colorway] == _RS_OKABE_ITO
 				margin = _rs_sd(fields[:margin])
 				@test (margin[:l], margin[:r], margin[:b]) == (10, 10, 10)
@@ -387,7 +388,7 @@ end
 				pie = plot_pie([1, 2, 3]; labels = ["a", "b", "c"], title = "P", fontsize = 11)
 				font = _rs_get(pie, :font)
 				@test font[:size] == 11
-				@test font[:family] == "STIXGeneral, Times New Roman, serif"
+				@test font[:family] == "Times New Roman, Times, Liberation Serif, serif"
 				@test _rs_get(pie, :title)[:text] == "P"
 				@test pie.layout.fields[:colorway] == _RS_OKABE_ITO
 
@@ -426,7 +427,7 @@ end
 			# Subplots get the style on every axis.
 			with_style(:publication) do
 				sf = subplots(1, 2; sync = false, subplot_titles = ["a" "b"])
-				@test _rs_sd(sf.plot.layout.fields[:font])[:family] == "STIXGeneral, Times New Roman, serif"
+				@test _rs_sd(sf.plot.layout.fields[:font])[:family] == "Times New Roman, Times, Liberation Serif, serif"
 				@test _rs_get(sf, :xaxis2)[:linecolor] == "#000000"
 				@test _rs_get(sf, :margin)[:t] > 10
 			end
@@ -900,6 +901,198 @@ end
 			@test [t.fields[:mode] for t in modes.data] == ["lines+markers+text", "markers", "lines+markers", "text"]
 			@test !haskey(unset.data[1].fields, :mode)
 			@test _rs_sd(unset.data[1].fields[:marker])[:symbol] == "circle"
+		end
+
+		@testset "Y22 / D14: contours, error bars and colorbars take the style" begin
+			style = PlotStyle(; linewidth = 2.5, errorbar_width = 1.5, tick_fontsize = 9, label_fontsize = 11,
+				axis_linewidth = 0.75, tick_length = 4, ticks = :inside)
+			fig = Plot([
+				contour(z = [1 2; 3 4], contours = _RS_PB.attr(coloring = "lines")),
+				contour(z = [1 2; 3 4]),                                         # filled: plotly's thin boundaries
+				histogram2dcontour(x = [1, 2], y = [1, 2], contours = _RS_PB.attr(coloring = :none)),
+				contour(z = [1 2; 3 4], contours = _RS_PB.attr(coloring = "lines"), line = _RS_PB.attr(width = 0.3)),
+				scatter(x = 1:3, y = 1:3, error_y = _RS_PB.attr(array = [0.1, 0.2, 0.1])),
+				bar(x = ["a", "b"], y = [1, 2], error_y = _RS_PB.attr(array = [0.1, 0.2]), error_x = _RS_PB.attr(visible = false)),
+				scatter3d(x = [1, 2], y = [1, 2], z = [1, 2], error_z = _RS_PB.attr(array = [0.1, 0.1], thickness = 4)),
+				heatmap(z = [1 2; 3 4], colorbar = _RS_PB.attr(title = "c", ticks = "outside")),
+				heatmap(z = [1 2; 3 4], coloraxis = "coloraxis"),
+				scatter(x = 1:2, y = 1:2, mode = "markers", marker = _RS_PB.attr(color = [1, 2], showscale = true)),
+			], Layout())
+			ids = 1:length(fig.data)
+			_RS._apply_style_trace_defaults!(fig, ids; style = style)
+			line(i) = _rs_sd(get(fig.data[i].fields, :line, nothing))
+			@test line(1)[:width] == 2.5
+			@test !haskey(fig.data[2].fields, :line)
+			@test line(3)[:width] == 2.5
+			@test line(4)[:width] == 0.3
+			@test _rs_sd(fig.data[5].fields[:error_y]) == Dict(:array => [0.1, 0.2, 0.1], :thickness => 1.5)
+			@test _rs_sd(fig.data[6].fields[:error_y])[:thickness] == 1.5
+			@test _rs_sd(fig.data[6].fields[:error_x]) == Dict(:visible => false)
+			@test !haskey(fig.data[5].fields, :error_x)          # never created
+			@test _rs_sd(fig.data[7].fields[:error_z])[:thickness] == 4
+			cb = _rs_sd(fig.data[8].fields[:colorbar])
+			@test _rs_sd(cb[:title]) == Dict(:text => "c", :font => Dict{Symbol, Any}(:size => 11))
+			@test _rs_sd(cb[:tickfont]) == Dict(:size => 9)
+			@test cb[:ticks] == "outside"                         # the caller's
+			@test (cb[:outlinewidth], cb[:tickwidth], cb[:ticklen]) == (0.75, 0.75, 4)
+			# No colour: colorbars live on traces, which set_template! cannot re-derive.
+			@test !haskey(cb, :outlinecolor) && !haskey(cb, :tickcolor)
+			@test !haskey(fig.data[9].fields, :colorbar)          # coloraxis-bound
+			mcb = _rs_sd(_rs_sd(fig.data[10].fields[:marker])[:colorbar])
+			@test _rs_sd(mcb[:tickfont]) == Dict(:size => 9) && mcb[:ticks] == "inside"
+			@test _rs_sd(fig.data[10].fields[:marker])[:color] == [1, 2]
+			# Idempotent.
+			again = _rs_json(fig)
+			_RS._apply_style_trace_defaults!(fig, ids; style = style)
+			@test _rs_json(fig) == again
+			# `explicit = :linewidth` protects a contour's automatic width.
+			c = Plot([contour(z = [1 2; 3 4], contours = _RS_PB.attr(coloring = "lines"))], Layout())
+			_RS._apply_style_trace_defaults!(c, 1; style = style, explicit = :linewidth)
+			@test !haskey(c.data[1].fields, :line)
+			# A style with only font sizes writes no colorbar line attributes.
+			fonts_only = Plot([heatmap(z = [1 2; 3 4])], Layout())
+			_RS._apply_style_trace_defaults!(fonts_only, 1; style = PlotStyle(; tick_fontsize = 9))
+			@test _rs_sd(fonts_only.data[1].fields[:colorbar]) == Dict(:tickfont => Dict{Symbol, Any}(:size => 9))
+			# A malformed error-bar or colorbar container aborts before any write.
+			for bad in (scatter(x = 1:2, y = 1:2, error_y = "0.1"), heatmap(z = [1 2; 3 4], colorbar = 3))
+				broken = Plot([scatter(x = 1:2, y = 1:2), bad], Layout())
+				before = _rs_json(broken)
+				@test_throws ArgumentError _RS._apply_style_trace_defaults!(broken, 1:2; style = style)
+				@test _rs_json(broken) == before
+			end
+		end
+
+		@testset "colorbar and 3-D/polar/ternary line weights at construction (D14)" begin
+			_rs_with_defaults(; style = :ieee) do
+				hm = plot_heatmap(1:3, 1:3, [1 2 3; 4 5 6; 7 8 9]; colorbar_title = "c")
+				cb = _rs_sd(hm.data[1].fields[:colorbar])
+				@test (cb[:outlinewidth], cb[:tickwidth], cb[:ticks]) == (1, 1, "inside")
+				@test cb[:ticklen] ≈ 3.5 * 4 / 3
+				surf = plot_surface([1.0 2; 3 4]; xlabel = "x")
+				for axis in (:xaxis, :yaxis, :zaxis)
+					a = _rs_sd(_rs_get(surf, :scene)[axis])
+					@test (a[:linewidth], a[:tickwidth], a[:gridwidth]) == (1, 1, 1)
+				end
+				pol = plot_scatterpolar([0, 90, 180], [1, 2, 3])
+				@test _rs_sd(_rs_get(pol, :polar)[:radialaxis])[:linewidth] == 1
+				@test _rs_sd(_rs_get(pol, :polar)[:angularaxis])[:tickwidth] == 1
+			end
+			# Unsized/unweighted styles leave plotly's colorbar and scene look.
+			_rs_with_defaults(; style = :publication) do
+				hm = plot_heatmap(1:3, 1:3, [1 2 3; 4 5 6; 7 8 9])
+				cb = _rs_sd(hm.data[1].fields[:colorbar])
+				@test !any(haskey(cb, k) for k in (:outlinewidth, :ticks, :ticklen, :tickwidth))
+				surf = plot_surface([1.0 2; 3 4])
+				@test !haskey(_rs_sd(_rs_get(surf, :scene)[:xaxis]), :linewidth)
+			end
+		end
+
+		@testset ":dash_symbol and :bw_dash_marker cycles on figures (D14)" begin
+			_rs_with_defaults(; style = :ieee) do
+				lines = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1], [2, 2, 2]])
+				@test [_rs_sd(t.fields[:line])[:dash] for t in lines.data] == ["solid", "dash", "dot"]
+				@test all(t -> t.fields[:mode] == "lines", lines.data)   # no markers added
+				marked = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]]; mode = "lines+markers")
+				@test [_rs_sd(t.fields[:marker])[:symbol] for t in marked.data] == ["circle", "square"]
+			end
+			with_style(; cycle = :bw_dash_marker, colorway = :tol_bright) do
+				fig = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]])
+				@test fig.layout.fields[:colorway] == ["#000000"]
+				@test all(t -> t.fields[:mode] == "lines+markers", fig.data)
+				@test [_rs_sd(t.fields[:marker])[:symbol] for t in fig.data] == ["circle", "square"]
+				set_template!(fig, :plotly_dark)
+				@test fig.layout.fields[:colorway] == [_RS_DARK_INK]
+			end
+		end
+
+		@testset "the style reaches every text and line role (table-driven, D14)" begin
+			# Each row: (label, figure key, path, expected value from the style).
+			# The figures cover a Plot and a 2x2 SubplotFigure. Elements another
+			# owner's code leaves unstyled are listed (with the call that would
+			# fix them) in the v4/publication-style cross requests and are not
+			# rows here: subplot titles from `subplots(...; subplot_titles)` (font
+			# size 16), colorbars of traces added by `plot_heatmap!`-type
+			# mutators, error bars of `plot_bar`, and the line width/colour of
+			# `hline!`/`vline!`/`rectangle!`/`arrow!` (fixed 1 px black).
+			px(pt) = pt * 4 / 3
+			getpath(d, path) = begin
+				for k in path
+					d = d isa _RS_PB.PlotlyAttribute || d isa AbstractDict ? _rs_sd(d) : d
+					if k isa Integer
+						d = d isa AbstractVector && k <= length(d) ? d[k] : nothing
+					else
+						d = d isa AbstractDict ? get(d, k, nothing) : nothing
+					end
+					d === nothing && return nothing
+				end
+				d isa _RS_PB.PlotlyAttribute ? _rs_sd(d) : d
+			end
+			for name in (:publication, :ieee)
+				st = _RS._STYLE_REGISTRY[name]
+				num(x) = x == 0 ? nothing : _RS._style_number(x)
+				axis_w = st.axis_linewidth > 0 ? num(st.axis_linewidth) : 1.0
+				figs = _rs_with_defaults(; style = name) do
+					plot = plot_scatter(1:5, [1.0, 2, 3, 4, 5]; error_y = fill(0.2, 5),
+						legend = "a", xlabel = "x", ylabel = "y", title = "T", mode = "lines+markers")
+					plot_scatter!(plot, 1:5, [5.0, 4, 3, 2, 1]; legend = "b")
+					hm = plot_heatmap(1:3, 1:3, [1 2 3; 4 5 6; 7 8 9]; colorbar_title = "c", xlabel = "x")
+					ct = plot_contour(1:5, 1:5, [i * j for i in 1:5, j in 1:5]; coloring = "lines")
+					tri = plot_triplot([0.0, 1, 0, 1], [0.0, 0, 1, 1], [1 2 3; 2 4 3])
+					surf = plot_surface([1.0 2; 3 4]; xlabel = "x", zlabel = "z")
+					sf = subplots(2, 2; sync = false)
+					plot_scatter!(sf, 1:5, [1.0, 2, 3, 4, 5]; error_y = fill(0.2, 5), legend = "s", row = 1, col = 1)
+					plot_contour!(sf, 1:5, 1:5, [i * j for i in 1:5, j in 1:5]; coloring = "lines", row = 2, col = 1)
+					plot_scatter!(sf, 1:5, [5.0, 4, 3, 2, 1]; row = 2, col = 2)
+					xlabel!(sf, "xl"; row = 2, col = 2)
+					(; plot, hm, ct, tri, surf, sf)
+				end
+				size_ok = st.width > 0 ? (num(st.width), num(st.width * 0.75)) : (nothing, nothing)
+				rows = [
+					# text roles
+					("title", :plot, (:layout, :title, :font, :size), num(st.title_fontsize)),
+					("axis title", :plot, (:layout, :xaxis, :title, :font, :size), num(st.label_fontsize)),
+					("tick labels", :plot, (:layout, :yaxis, :tickfont, :size), num(st.tick_fontsize)),
+					("legend", :plot, (:layout, :legend, :font, :size), num(st.legend_fontsize)),
+					("font family", :plot, (:layout, :font, :family), st.font_family),
+					("text ink", :plot, (:layout, :font, :color), "#000000"),
+					("colorbar title", :hm, (:data, 1, :colorbar, :title, :font, :size), num(st.label_fontsize)),
+					("colorbar ticks", :hm, (:data, 1, :colorbar, :tickfont, :size), num(st.tick_fontsize)),
+					("3-D axis title", :surf, (:layout, :scene, :zaxis, :title, :font, :size), num(st.label_fontsize)),
+					("3-D tick labels", :surf, (:layout, :scene, :xaxis, :tickfont, :size), num(st.tick_fontsize)),
+					("2x2 cell tick labels", :sf, (:layout, :xaxis4, :tickfont, :size), num(st.tick_fontsize)),
+					("2x2 cell axis title", :sf, (:layout, :xaxis4, :title, :font, :size), num(st.label_fontsize)),
+					("2x2 legend", :sf, (:layout, :legend, :font, :size), num(st.legend_fontsize)),
+					# line roles
+					("spines", :plot, (:layout, :xaxis, :linewidth), axis_w),
+					("spine ink", :plot, (:layout, :xaxis, :linecolor), "#000000"),
+					("tick width", :plot, (:layout, :xaxis, :tickwidth), num(st.axis_linewidth)),
+					("tick length", :plot, (:layout, :xaxis, :ticklen), num(st.tick_length)),
+					("tick direction", :plot, (:layout, :xaxis, :ticks), st.ticks),
+					("data line", :plot, (:data, 2, :line, :width), num(st.linewidth)),
+					("error bars", :plot, (:data, 1, :error_y, :thickness), num(st.errorbar_width)),
+					("colorbar outline", :hm, (:data, 1, :colorbar, :outlinewidth), num(st.axis_linewidth)),
+					("contour lines", :ct, (:data, 1, :line, :width), num(st.linewidth)),
+					("mesh edges", :tri, (:data, 1, :line, :width), st.linewidth > 0 ? num(st.linewidth) : 0.5),
+					("3-D spines", :surf, (:layout, :scene, :xaxis, :linewidth), num(st.axis_linewidth)),
+					("2x2 cell spines", :sf, (:layout, :xaxis3, :linewidth), axis_w),
+					("2x2 cell tick length", :sf, (:layout, :yaxis2, :ticklen), num(st.tick_length)),
+					("2x2 appended data line", :sf, (:data, 3, :line, :width), num(st.linewidth)),
+					("2x2 error bars", :sf, (:data, 1, :error_y, :thickness), num(st.errorbar_width)),
+					("2x2 contour lines", :sf, (:data, 2, :line, :width), num(st.linewidth)),
+					# figure size
+					("figure width", :plot, (:layout, :width), size_ok[1]),
+					("figure height", :hm, (:layout, :height), size_ok[2]),
+					("2x2 figure width", :sf, (:layout, :width), size_ok[1]),
+				]
+				for (label, key, path, expected) in rows
+					p = _RS._plot_obj(getfield(figs, key))
+					root = path[1] === :layout ? p.layout.fields : Any[t.fields for t in p.data]
+					actual = getpath(root, path[2:end])
+					ok = actual isa Real && expected isa Real ? actual ≈ expected : isequal(actual, expected)
+					ok || @info "style reach" name label actual expected
+					@test ok
+				end
+			end
 		end
 	finally
 		_RS._DEFAULT_TEMPLATE[] = original_template

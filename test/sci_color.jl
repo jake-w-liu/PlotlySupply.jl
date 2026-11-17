@@ -584,6 +584,108 @@ using Test, PlotlySupply
 		end
 	end
 
+	@testset "COLOR_CYCLES: colour-blind-safe cycles in line-safe order (D14)" begin
+		@test Base.ispublic(PlotlySupply, :COLOR_CYCLES) && !Base.isexported(PlotlySupply, :COLOR_CYCLES)
+		@test Set(keys(P.COLOR_CYCLES)) == Set([:okabe_ito, :tol_bright, :tol_vibrant, :tol_muted, :tol_high_contrast])
+		lin(u) = u <= 0.04045 ? u / 12.92 : ((u + 0.055) / 1.055)^2.4
+		contrast_on_white(h) = begin
+			r, g, b = rgb_bytes(h) ./ 255
+			1.05 / (0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b) + 0.05)
+		end
+		lightness(h) = Float64(P.Colors.Lab(parse(P.Colors.RGB, h)).l)
+		# Same colours as the published palettes (ColorSchemes.jl copies of
+		# Okabe-Ito and Paul Tol's schemes); only the order is PlotlySupply's.
+		sources = Dict(:okabe_ito => :okabe_ito, :tol_bright => :tol_bright, :tol_vibrant => :tol_vibrant,
+			:tol_muted => :tol_muted, :tol_high_contrast => :tol_highcontrast)
+		# The documented number of leading colours with contrast >= 3 on white.
+		line_safe = Dict(:okabe_ito => 5, :tol_bright => 4, :tol_vibrant => 4, :tol_muted => 6, :tol_high_contrast => 2)
+		for (name, colours) in P.COLOR_CYCLES
+			published = Set(P._color_hex(c) for c in P.ColorSchemes.colorschemes[sources[name]].colors)
+			@test allunique(colours)
+			@test Set(colours) == published
+			ratios = contrast_on_white.(colours)
+			k = line_safe[name]
+			@test all(>=(3), ratios[1:k])
+			@test all(<(3), ratios[(k + 1):end])
+			@test all(c -> occursin(r"^#[0-9A-F]{6}$", c), colours)
+		end
+		# :tol_high_contrast is the greyscale-safe cycle: well-separated L*.
+		L = lightness.(P.COLOR_CYCLES[:tol_high_contrast])
+		@test issorted(L) && minimum(diff(L)) > 20
+		# Okabe-Ito's first four line colours share a lightness band (why the
+		# journal presets add a dash/symbol cycle).
+		@test maximum(lightness.(P.COLOR_CYCLES[:okabe_ito][1:4])) - minimum(lightness.(P.COLOR_CYCLES[:okabe_ito][1:4])) < 16
+		# Used by PlotStyle; a ColorScheme keeps its own order.
+		@test PlotStyle(; colorway = :tol_vibrant).colorway == P.COLOR_CYCLES[:tol_vibrant]
+		@test PlotStyle(; colorway = :tol_vibrant).colorway !== P.COLOR_CYCLES[:tol_vibrant]
+		@test PlotStyle(; colorway = :tab10).colorway[1] == "#1F77B4"
+		err = thrown(() -> PlotStyle(; colorway = :no_such_cycle))
+		@test err isa ArgumentError && occursin(":tol_high_contrast", sprint(showerror, err))
+		# A user cycle is validated when a style uses it.
+		P.COLOR_CYCLES[:plotlysupply_test] = ["#000000", "0.5"]
+		try
+			@test PlotStyle(; colorway = :plotlysupply_test).colorway == ["#000000", "#808080"]
+			P.COLOR_CYCLES[:plotlysupply_test] = ["#000000", "nope"]
+			@test occursin("colorway[2]", message(() -> PlotStyle(; colorway = :plotlysupply_test)))
+		finally
+			delete!(P.COLOR_CYCLES, :plotlysupply_test)
+		end
+	end
+
+	@testset "colormap print classes: uniform and greyscale-safe maps (D14)" begin
+		classes = P._COLORMAP_PRINT_CLASSES
+		@test Set(keys(classes)) == Set(keys(P.COLORMAPS))
+		lightness(h) = Float64(P.Colors.Lab(parse(P.Colors.RGB, h)).l)
+		step_cv(L) = (d = abs.(diff(L)); m = sum(d) / length(d); sqrt(sum((d .- m) .^ 2) / length(d)) / m)
+		for (name, info) in classes
+			L = lightness.(colormap_colors(name, 64))
+			monotone = all(>(0), diff(L)) || all(<(0), diff(L))
+			# "greyscale-safe" is exactly "L* strictly monotonic" (measured).
+			@test monotone == info.greyscale
+			if info.class === :sequential && info.uniform
+				# Perceptually uniform maps: nearly constant L* steps (CV of
+				# the 63 steps <= 0.2; measured 0.12 viridis .. 0.20 magma).
+				@test step_cv(L) <= 0.2
+			elseif info.class === :rainbow
+				# jet/rainbow/turbo: lightness reverses, steps vary wildly.
+				@test step_cv(L) > 0.5
+			elseif info.class === :diverging
+				# Both ends darker than the middle: the sign is lost in greyscale.
+				@test maximum(L) > max(L[1], L[end]) + 10
+			end
+		end
+		@test classes["twilight"].class === :cyclic
+		@test abs(lightness(colormap_colors("twilight", 2)[1]) - lightness(colormap_colors("twilight", 2)[2])) < 1
+		@test [n for (n, i) in classes if i.uniform && i.greyscale] |> sort == ["cividis", "inferno", "magma", "plasma", "viridis"]
+		# The docstring table lists every map with its class.
+		doc = string(@doc P.COLORMAPS)
+		for name in keys(classes)
+			@test occursin(name, doc)
+		end
+	end
+
+	@testset "_color_option: colour keywords for plotly attributes (G16)" begin
+		opt(v; name = "color") = P._color_option(v; who = "plot_test", name = name)
+		@test opt("0.35") == "#595959"
+		@test opt(" 0 ") == "#000000" && opt("1") == "#FFFFFF"
+		@test opt("red") == "red"
+		@test opt(:steelblue) == "steelblue"
+		@test opt("#AbC") == "#AbC"
+		@test opt("rgba(1,2,3,0.5)") == "rgba(1,2,3,0.5)"
+		@test opt(P.Colors.RGB(1, 0, 0)) == "#FF0000"
+		@test opt("") == "" && opt(nothing) === nothing && opt(missing) === missing
+		@test opt(0.5) === 0.5 && opt(3) === 3
+		@test opt(["0.35", "red", 1.5, P.Colors.RGBA(0, 0, 1, 0.5)]) == Any["#595959", "red", 1.5, "rgba(0,0,255,0.5)"]
+		@test opt(String[]) == Any[]
+		for (bad, needle) in (("1.5", "grey level"), ("-0.1", "grey level"), ("notacolour", "invalid colour"),
+			(true, "must be a colour"), ([["red"]], "must be a colour"), (Dict(), "must be a colour"))
+			msg = message(() -> opt(bad))
+			@test startswith(msg, "ArgumentError: plot_test: `color")
+			@test occursin(needle, msg)
+		end
+		@test occursin("`marker_color[2]`", message(() -> opt(["red", "nope"]; name = "marker_color")))
+	end
+
 	@testset "rendered colorbar uses the resolved scale (SVG gradient)" begin
 		gradient_ends(svg) = begin
 			stops = [m.captures[1] for m in eachmatch(r"<stop[^>]*stop-color=\"([^\"]+)\"", svg)]

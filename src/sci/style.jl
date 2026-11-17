@@ -1,4 +1,4 @@
-# PlotlySupply 2.0 scientific-plotting extensions: PlotStyle presets, set_fonts!, tight_layout!, figsize!.
+# PlotlySupply 2.0 scientific-plotting extensions: PlotStyle presets (incl. journal presets), set_fonts!, tight_layout!, figsize!, journal_width.
 #
 # Public names defined here are exported from this file. Untyped-first-argument
 # mutators that must run as one renderer transaction on `Plot`/`SyncPlot` are
@@ -82,7 +82,9 @@
 #                        axis::Symbol = :x)::Dict{Symbol,Any}
 #       Cartesian axis defaults. Keys: zeroline, showline, mirror, ticks,
 #       automargin, linecolor, linewidth, tickcolor (+ showgrid=false when
-#       `style.grid` is false). Plain attribute names, safe for both
+#       `style.grid` is false; + tickwidth/gridwidth when the style sets
+#       `axis_linewidth`, ticklen when it sets `tick_length`; mirror is
+#       "ticks" for `mirror_ticks = true`). Plain attribute names, safe for both
 #       `attr(; d...)` and `update_xaxes!(fig; d...)`. linecolor/tickcolor are
 #       `_template_ink(template)` (black on light templates, the template's font
 #       colour on dark ones: audit findings 119/131/216/266/283). When the
@@ -100,10 +102,11 @@
 #   _style_layout_defaults(style = _active_style(); template = _style_template(style))
 #       ::Dict{Symbol,Any}
 #       Root layout values: `:font` (Dict family/size/color), `:colorway`
-#       (Vector{String}; for `cycle = :bw` the single ink colour of `template`)
-#       and `:margin` (Dict l/r/t/b/pad), each present only when the style sets
-#       it. Empty for `:default`. Dict values are merged key by key into the
-#       same-named root layout key by `_apply_style_layout!`.
+#       (Vector{String}; for the ink cycles `:bw`/`:bw_dash_marker` the single
+#       ink colour of `template`) and `:margin` (Dict l/r/t/b/pad), each present
+#       only when the style sets it. Empty for `:default`. Dict values are
+#       merged key by key into the same-named root layout key by
+#       `_apply_style_layout!`.
 #
 #   _apply_style_layout!(fig, style = _active_style(); template = …)
 #       Called once at the end of `_apply_default_template!` (after the
@@ -113,7 +116,8 @@
 #       per-side minimum plus the room paper-referenced annotations and the
 #       title need (the `tight_layout!` computation) and sets
 #       `title.automargin=true` (no top margin is reserved for an empty title).
-#       Writes the style's title/label/tick/legend font sizes to every existing
+#       Under a sized style (`width > 0`) it writes layout.width/height where
+#       the figure has none (see `_style_default_figure_size`). Writes the style's title/label/tick/legend font sizes to every existing
 #       axis (cartesian, scene, polar, ternary), the title, the legends and (tick
 #       and label sizes) the colorbars through the same code path as
 #       `set_fonts!` (bare-String titles are converted, never broken). A no-op
@@ -124,17 +128,18 @@
 #   _style_trace_defaults(style, position::Integer)::Dict{Symbol,Any}
 #       Per-trace defaults in PlotlySupply keyword vocabulary for the
 #       `position`-th line-style trace of a figure: `:linewidth`,
-#       `:marker_size`, and for `style.cycle != :none` `:dash`,
+#       `:marker_size`, `:errorbar_width`, and per `style.cycle` `:dash`,
 #       `:marker_symbol`, `:markers` (true = the cycle needs visible markers, so
 #       a "lines" mode should become "lines+markers"). Colour is NOT a per-trace
-#       default: the `:bw` cycle's black comes from the figure colorway
+#       default: the ink cycles' black comes from the figure colorway
 #       (`_style_layout_defaults`), so `set_template!` can re-derive it and
 #       `_default_trace_color` reports it. Empty for `:default`. Prefer
 #       `_apply_style_trace_defaults!`, which applies these to finished traces.
 #
 #   _apply_style_trace_defaults!(fig, trace_indices; style = _active_style(), explicit = ())
-#       Fill the active style's line width, marker size and dash/marker cycle
-#       into the traces at `trace_indices` (1-based positions in the figure's
+#       Fill the active style's line width, marker size, dash/marker cycle,
+#       error-bar thickness and contour line width into the traces at
+#       `trace_indices` (1-based positions in the figure's
 #       data, normally the traces the calling constructor or mutator just
 #       added) wherever the trace leaves them unset. See its docstring.
 #
@@ -152,10 +157,38 @@
 #   _template_is_dark(t), _template_ink(t), _template_legend_colors(t)
 #       Template-derived colours; `set_template!` re-derives every layout value
 #       that still equals the previous template's colour.
+#
+#   _style_default_figure_size(style = _active_style())::Tuple{Float64,Float64}
+#       (width, height) in CSS px of a figure that has no layout.width/height
+#       of its own: the style's `width` and `width * aspect` when the style
+#       sets a width (every journal preset), else the 1.x export default
+#       700 x 500. Not rounded (89 mm = 336.378 px). `_apply_style_layout!`
+#       writes it into every new figure built under a sized style, so the
+#       export honours it through the layout; savefig (math-export) uses it
+#       for figures that carry no size at all. Contract:
+#       <scratch>/v4/publication-style/CONTRACT.md.
+#
+#   _style_ink(fig)::String
+#       Default colour of lines PlotlySupply draws on its own (reference
+#       lines, outlines, arrows): the ink of the figure's template (black on
+#       light templates, light on dark ones).
+#
+#   _style_line_width(role::Symbol; default, style = _active_style())::Float64
+#       px width of a line role (:data, :reference, :axis, :errorbar,
+#       :contour, :mesh) under `style`; `default` when the style leaves the
+#       role unset. Code that draws lines of its own (shapes, mesh edges) uses
+#       it so the style reaches them.
+#
+#   _JOURNALS / _journal_spec(name, who)
+#       The journal presets (`:ieee`, `:aps`, `:nature`, `:elsevier`,
+#       `:springer`, `:aip`): column widths, fonts and line weights taken from
+#       each publisher's author guidelines (cited next to each entry). They
+#       back the built-in styles of the same names, `figsize!(fig, journal)`
+#       and `journal_width`.
 # ─────────────────────────────────────────────────────────────────────────────
 
 export PlotStyle, set_default_style!, get_default_style, with_style, register_style!
-export set_fonts!, tight_layout!, figsize!
+export set_fonts!, tight_layout!, figsize!, journal_width
 
 const _SCI_STYLE_MUTATORS = (:tight_layout!, :figsize!)
 
@@ -233,7 +266,8 @@ function _style_colorant_string(c::PlotlyBase.Colors.Colorant)
 end
 
 # Validate a user colour. `""` means unset. Strings and Symbols are passed
-# through unchanged (after checking they parse); Colorants become hex/rgba.
+# through unchanged (after checking they parse), except matplotlib grey levels
+# ("0.35"), which become "#RRGGBB"; Colorants become hex/rgba.
 function _style_color(value, who::AbstractString, name::AbstractString; allow_empty::Bool = true)
 	if value isa PlotlyBase.Colors.Colorant
 		return _style_colorant_string(value)
@@ -246,6 +280,17 @@ function _style_color(value, who::AbstractString, name::AbstractString; allow_em
 	if isempty(s)
 		allow_empty && return ""
 		throw(ArgumentError("$(who): `$(name)` must not be empty."))
+	end
+	# A number is a matplotlib grey level ("0.35" == "#595959", A1/G16). CSS
+	# and plotly.js know no numeric colours, so it is converted to hex here
+	# rather than passed through (plotly.js would silently use its default).
+	level = tryparse(Float64, strip(s))
+	if level !== nothing
+		(isfinite(level) && 0 <= level <= 1) ||
+			throw(ArgumentError(
+				"$(who): `$(name)` = $(repr(s)) is a matplotlib grey level and must lie in [0, 1].",
+			))
+		return _color_hex(s; who = who)
 	end
 	_style_try_parse_color(s) === nothing &&
 		throw(ArgumentError(
@@ -349,7 +394,21 @@ end
 
 const _STYLE_TICKS = ("outside", "inside", "")
 const _STYLE_SPINES = (:box, :open, :none)
-const _STYLE_CYCLES = (:none, :bw, :dash, :marker, :dash_marker)
+const _STYLE_CYCLES = (:none, :bw, :dash, :marker, :dash_marker, :dash_symbol, :bw_dash_marker)
+# Cycles that fill `line.dash` / `marker.symbol`, and those that also add the
+# markers flag to a lines-only mode so the symbol shows.
+const _STYLE_DASH_CYCLES = (:bw, :dash, :dash_marker, :dash_symbol, :bw_dash_marker)
+const _STYLE_SYMBOL_CYCLES = (:marker, :dash_marker, :dash_symbol, :bw_dash_marker)
+const _STYLE_MARKER_FLAG_CYCLES = (:marker, :dash_marker, :bw_dash_marker)
+# Cycles drawn in the template's single ink colour (the colorway is the ink).
+const _STYLE_INK_CYCLES = (:bw, :bw_dash_marker)
+# Height / width of a sized style that sets no `aspect`: matplotlib's default
+# `figure.figsize` of 6.4 x 4.8 in.
+const _STYLE_DEFAULT_ASPECT = 0.75
+# plotly.js rejects layout.width/height below 10 px; the upper bound only
+# keeps `round(Int, ·)` in range (no canvas comes near 2^31 px).
+const _STYLE_MIN_FIGURE_PX = 10.0
+const _STYLE_MAX_FIGURE_PX = Float64(typemax(Int32))
 # `mathsize` accepts exactly the MathJax 2 size switches the mathtext pipeline
 # accepts (`_MATHTEXT_SIZES`, src/sci/mathtext.jl): `\footnotesize` does not
 # exist in MathJax 2 and would render as a red undefined macro.
@@ -371,7 +430,9 @@ const _STYLE_MARKER_CYCLE = (
 	PlotStyle(; template=nothing, font_family="", fontsize=0, title_fontsize=0,
 		label_fontsize=0, tick_fontsize=0, legend_fontsize=0, font_color="",
 		colorway=nothing, linewidth=0, marker_size=0, ticks="outside", spines=:box,
-		grid=true, legend_frame=true, margin=nothing, mathsize="", cycle=:none)
+		grid=true, legend_frame=true, margin=nothing, mathsize="", cycle=:none,
+		width=0, aspect=0, axis_linewidth=0, tick_length=0, mirror_ticks=false,
+		errorbar_width=0, reference_linewidth=0)
 
 A named bundle of figure defaults (the PlotlySupply analogue of matplotlib
 `rcParams`). The active style is chosen with [`set_default_style!`](@ref) or
@@ -381,11 +442,23 @@ temporarily with [`with_style`](@ref); styles are registered by name with
 - `:default` — exactly the PlotlySupply 1.x look: the package default template
   (see `set_default_template!`), black closed spines, outside ticks, plotly's
   default fonts, colours and margins.
-- `:publication` — black STIX/Times text (`font_family="STIXGeneral, Times New
-  Roman, serif"`, `fontsize=14`, `title_fontsize=16`, `label_fontsize=14`,
-  `tick_fontsize=12`, `legend_fontsize=12`), the Okabe–Ito colour-blind-safe
-  colorway, a closed box, a frameless legend, `\\large` math and a 10 px margin
-  that grows automatically to fit labels and the title.
+- `:publication` — black Times text (`font_family="Times New Roman, Times,
+  Liberation Serif, serif"`, `fontsize=14`, `title_fontsize=16`,
+  `label_fontsize=14`, `tick_fontsize=12`, `legend_fontsize=12`; TrueType
+  faces, so PDF exports embed TrueType rather than Type 3 fonts), the
+  Okabe–Ito colour-blind-safe
+  colorway (`COLOR_CYCLES[:okabe_ito]`, high-contrast colours first), a closed
+  box, a frameless legend, `\\large` math and a 10 px margin that grows
+  automatically to fit labels and the title. It sets no figure size and no
+  per-trace defaults.
+- Journal presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`
+  — sized for the journal's single column (`width`, `aspect = 0.75`), in the
+  journal's font family and sizes, with print line weights (1 pt data lines,
+  0.75 pt axes, ticks, error bars and reference lines, 3.5 pt ticks), the
+  Okabe–Ito colorway and the greyscale-safe `:dash_symbol` cycle. Their
+  numbers, and where each comes from, are listed by [`journal_width`](@ref);
+  [`figsize!`](@ref)`(fig, :ieee; columns = 2)` sizes a figure for any
+  column count the journal defines.
 
 Every field is validated by the constructor and on assignment
 (`style.fontsize = 12`), so an invalid style cannot be built.
@@ -399,9 +472,14 @@ Every field is validated by the constructor and on assignment
   (`Real`, default 0): per-role sizes in px for the figure title, axis titles,
   tick labels and legend text.
 - `font_color=""`: colour of all text (`layout.font.color`).
-- `colorway=nothing`: trace colour cycle; a palette name `Symbol` from
-  `PlotlyBase.colors` (e.g. `:okabe_ito`, `:tab10`, `:tol_bright`), a vector
-  of colours, or a `ColorScheme`. Stored as a `Vector{String}`.
+- `colorway=nothing`: trace colour cycle; a name from
+  [`COLOR_CYCLES`](@ref PlotlySupply.COLOR_CYCLES) (`:okabe_ito`,
+  `:tol_bright`, `:tol_vibrant`, `:tol_muted`, `:tol_high_contrast`:
+  colour-blind-safe, in an order that puts the colours readable as thin
+  lines on white first), any other palette name `Symbol` from
+  `PlotlyBase.colors` (e.g. `:tab10`), a vector of colours (matplotlib grey
+  levels such as `"0.35"` become `"#595959"`), or a `ColorScheme`. Stored as a
+  `Vector{String}`.
 - `linewidth::Real=0`, `marker_size::Real=0`: default trace line width and
   marker size in px.
 - `ticks="outside"`: `"outside"`, `"inside"` or `""`/`:none` (no tick marks).
@@ -423,11 +501,33 @@ Every field is validated by the constructor and on assignment
   `"lines"` mode becomes `"lines+markers"`), `:dash_marker` (both), or `:bw`
   (the dash cycle drawn in one ink colour: the figure colorway becomes the
   template's ink, black on light templates, light on dark ones, so `colorway`
-  is not used). The cycle counts the line-style (scatter-type) traces of a
-  figure, so it continues across `plot_*!` appends.
+  is not used), `:dash_symbol` (the dash cycle and the marker-symbol cycle,
+  without adding markers to a lines-only trace: lines differ by dash, marked
+  series by dash and symbol, so every series stays distinct in greyscale) or
+  `:bw_dash_marker` (`:bw` plus the marker cycle with markers shown: the
+  monochrome cycle). The cycle counts the line-style (scatter-type) traces of
+  a figure, so it continues across `plot_*!` appends.
+- `width::Real=0`: figure width in CSS px given to every new figure that sets
+  no `width` of its own (`0`: unset, plotly's autosize and the 700 × 500 px
+  export default). At least 10 px.
+- `aspect::Real=0`: height / width of such a figure (`0`: 0.75, matplotlib's
+  6.4 × 4.8 in). Used only with `width`; between 0.01 and 100. A figure given
+  only a `width` gets `width * aspect` as height; one given only a `height`
+  keeps the style's width.
+- `axis_linewidth::Real=0`: spine, tick and grid line width in px (`0`: the
+  1.x 1 px spines and plotly's tick and grid widths).
+- `tick_length::Real=0`: tick mark length in px (`0`: plotly's 5 px).
+- `mirror_ticks::Bool=false`: with `spines=:box` and visible ticks, also draw
+  tick marks on the top and right spines (physics-journal style).
+- `errorbar_width::Real=0`: error-bar line thickness in px for traces whose
+  error bars leave it unset.
+- `reference_linewidth::Real=0`: width in px for reference lines and shapes
+  (the `:reference` role of the internal `_style_line_width`). In this release
+  `hline!`, `vline!`, `arrow!` and the schematic shapes still draw their own
+  1 px default.
 
 Numeric fields use `0` as "unset"; negative and non-finite values throw an
-`ArgumentError`.
+`ArgumentError`. Sizes and widths are CSS px (1 pt = 4/3 px, 1 in = 96 px).
 
 `template` defaults to `nothing` rather than `"plotly_white"` so that the
 `:default` style keeps honouring `set_default_template!` exactly as 1.x did.
@@ -472,6 +572,13 @@ mutable struct PlotStyle
 	margin::Union{Nothing, Dict{Symbol, Float64}}
 	mathsize::String
 	cycle::Symbol
+	width::Float64
+	aspect::Float64
+	axis_linewidth::Float64
+	tick_length::Float64
+	mirror_ticks::Bool
+	errorbar_width::Float64
+	reference_linewidth::Float64
 
 	function PlotStyle(
 		template,
@@ -491,11 +598,18 @@ mutable struct PlotStyle
 		legend_frame,
 		margin,
 		mathsize,
-		cycle;
+		cycle,
+		width = 0,
+		aspect = 0,
+		axis_linewidth = 0,
+		tick_length = 0,
+		mirror_ticks = false,
+		errorbar_width = 0,
+		reference_linewidth = 0;
 		who::AbstractString = "PlotStyle",
 	)
 		v(name, value) = _style_validate_field(name, value, who)
-		return new(
+		style = new(
 			v(:template, template),
 			v(:font_family, font_family),
 			v(:fontsize, fontsize),
@@ -514,8 +628,32 @@ mutable struct PlotStyle
 			v(:margin, margin),
 			v(:mathsize, mathsize),
 			v(:cycle, cycle),
+			v(:width, width),
+			v(:aspect, aspect),
+			v(:axis_linewidth, axis_linewidth),
+			v(:tick_length, tick_length),
+			v(:mirror_ticks, mirror_ticks),
+			v(:errorbar_width, errorbar_width),
+			v(:reference_linewidth, reference_linewidth),
 		)
+		_style_check_figure_size(style.width, style.aspect, who)
+		return style
 	end
+end
+
+# `width` and `aspect` together must give a height plotly accepts. Checked
+# wherever either field changes, so a style can never produce a figure size
+# plotly rejects.
+function _style_check_figure_size(width::Float64, aspect::Float64, who::AbstractString)
+	width == 0 && return nothing
+	height = width * (aspect > 0 ? aspect : _STYLE_DEFAULT_ASPECT)
+	_STYLE_MIN_FIGURE_PX <= height <= _STYLE_MAX_FIGURE_PX ||
+		throw(ArgumentError(
+			"$(who): `width` = $(_style_number(width)) px with `aspect` = $(_style_number(aspect > 0 ? aspect : _STYLE_DEFAULT_ASPECT)) " *
+			"gives a height of $(height) px; plotly needs between $(_style_number(_STYLE_MIN_FIGURE_PX)) and " *
+			"$(_style_number(_STYLE_MAX_FIGURE_PX)) px.",
+		))
+	return nothing
 end
 
 function PlotStyle(
@@ -538,6 +676,13 @@ function PlotStyle(
 	margin = nothing,
 	mathsize::AbstractString = "",
 	cycle::Union{AbstractString, Symbol} = :none,
+	width::Real = 0,
+	aspect::Real = 0,
+	axis_linewidth::Real = 0,
+	tick_length::Real = 0,
+	mirror_ticks::Bool = false,
+	errorbar_width::Real = 0,
+	reference_linewidth::Real = 0,
 )
 	return PlotStyle(
 		template,
@@ -558,6 +703,13 @@ function PlotStyle(
 		margin,
 		mathsize,
 		cycle,
+		width,
+		aspect,
+		axis_linewidth,
+		tick_length,
+		mirror_ticks,
+		errorbar_width,
+		reference_linewidth,
 	)
 end
 
@@ -582,11 +734,15 @@ end
 function _style_colorway(value, who::AbstractString)
 	value === nothing && return nothing
 	if value isa Symbol
+		# The curated cycles (`COLOR_CYCLES`, src/sci/color.jl) win over the
+		# ColorSchemes palettes of the same name: same colours, line-safe order.
+		# User-added cycles are validated here, like any colour vector.
+		haskey(COLOR_CYCLES, value) && return _style_colorway(collect(COLOR_CYCLES[value]), who)
 		haskey(PlotlyBase.colors.all, value) ||
 			throw(ArgumentError(
-				"$(who): unknown palette $(repr(value)); use a palette name from " *
-				"`PlotlyBase.colors` (e.g. :okabe_ito, :tab10, :tol_bright), a vector " *
-				"of colours, or a ColorScheme.",
+				"$(who): unknown palette $(repr(value)); use a name from " *
+				"`PlotlySupply.COLOR_CYCLES` ($(join(repr.(sort!(collect(keys(COLOR_CYCLES)))), ", "))) " *
+				"or `PlotlyBase.colors` (e.g. :tab10), a vector of colours, or a ColorScheme.",
 			))
 		return String[_style_colorant_string(c) for c in PlotlyBase.colors.all[value].colors]
 	elseif value isa PlotlyBase.ColorSchemes.ColorScheme
@@ -675,13 +831,29 @@ function _style_validate_field(name::Symbol, value, who::AbstractString)
 		return _style_color(value, who, "font_color")
 	elseif name === :colorway
 		return _style_colorway(value, who)
-	elseif name in (:linewidth, :marker_size)
+	elseif name in (:linewidth, :marker_size, :axis_linewidth, :tick_length, :errorbar_width, :reference_linewidth)
 		return _style_nonnegative(value, who, String(name))
+	elseif name === :width
+		v = _style_nonnegative(value, who, "width")
+		(v == 0 || _STYLE_MIN_FIGURE_PX <= v <= _STYLE_MAX_FIGURE_PX) ||
+			throw(ArgumentError(
+				"$(who): `width` must be 0 (unset) or between $(_style_number(_STYLE_MIN_FIGURE_PX)) and $(_style_number(_STYLE_MAX_FIGURE_PX)) px; got $(value).",
+			))
+		return v
+	elseif name === :aspect
+		v = _style_nonnegative(value, who, "aspect")
+		# A figure is a page element: anything outside 1/100 .. 100 is a typo,
+		# not a layout (and would push the other side past plotly's limits).
+		(v == 0 || 0.01 <= v <= 100) ||
+			throw(ArgumentError(
+				"$(who): `aspect` (height / width) must be 0 (unset) or between 0.01 and 100; got $(value).",
+			))
+		return v
 	elseif name === :ticks
 		return _style_ticks(value, who)
 	elseif name === :spines
 		return _style_symbol_choice(value, _STYLE_SPINES, who, "spines")
-	elseif name in (:grid, :legend_frame)
+	elseif name in (:grid, :legend_frame, :mirror_ticks)
 		value isa Bool ||
 			throw(ArgumentError("$(who): `$(name)` must be a Bool; got $(repr(value))."))
 		return value
@@ -706,7 +878,15 @@ function Base.setproperty!(style::PlotStyle, name::Symbol, value)
 		throw(ArgumentError(
 			"PlotStyle: unknown field `$(name)`; fields are $(join(fieldnames(PlotStyle), ", ")).",
 		))
-	return setfield!(style, name, _style_validate_field(name, value, "PlotStyle"))
+	checked = _style_validate_field(name, value, "PlotStyle")
+	if name === :width || name === :aspect
+		_style_check_figure_size(
+			name === :width ? checked : style.width,
+			name === :aspect ? checked : style.aspect,
+			"PlotStyle",
+		)
+	end
+	return setfield!(style, name, checked)
 end
 
 function Base.copy(style::PlotStyle)
@@ -747,10 +927,19 @@ end
 
 _default_plot_style() = PlotStyle()
 
+# Font families of the built-in styles: TrueType faces first, so PDF/EPS
+# exports embed real (CID TrueType) fonts. STIXGeneral, the 2.0 betas' first
+# choice, is installed as OpenType-CFF (.otf) on macOS and came out of a
+# measured PDF export as Type 3 fonts, which many submission systems reject
+# (D14). Liberation Serif/Sans are the metric-compatible Times/Arial of most
+# Linux systems.
+const _SERIF_FONTS = "Times New Roman, Times, Liberation Serif, serif"
+const _SANS_FONTS = "Arial, Helvetica, Liberation Sans, sans-serif"
+
 _publication_plot_style() = PlotStyle(
 	;
 	template = :plotly_white,
-	font_family = "STIXGeneral, Times New Roman, serif",
+	font_family = _SERIF_FONTS,
 	fontsize = 14,
 	title_fontsize = 16,
 	label_fontsize = 14,
@@ -764,11 +953,152 @@ _publication_plot_style() = PlotStyle(
 	mathsize = "\\large",
 )
 
-const _BUILTIN_STYLE_NAMES = (:default, :publication)
+# ── Journal presets (D14) ────────────────────────────────────────────────────
+#
+# Column widths, page heights, fonts and minimum sizes are taken from each
+# publisher's author guidelines (read 2026-11; the source is next to each
+# entry). Where a guideline is silent the value is a package choice and says
+# so. Every guideline below that sets a minimum line weight asks for 0.3–0.5 pt
+# at most, so all presets share: data lines 1 pt, spines/ticks/error bars/
+# reference lines 0.75 pt, 3.5 pt tick marks (matplotlib's major tick length)
+# and 4.5 pt (6 px) markers. Optica is not offered: its figure widths could
+# not be confirmed from Optica's own guidelines.
+#
+# `columns` lists (column count, width, unit) exactly as published, so a width
+# converts to the exact page size (89 mm stays 336.378 px, 252.28 pt).
+struct _JournalSpec
+	name::Symbol
+	publisher::String
+	columns::Vector{Tuple{Float64, Float64, Symbol}}
+	max_height::Tuple{Float64, Symbol}   # (0.0, :mm): the guideline sets none
+	font_family::String
+	fontsize_pt::Float64                 # every text role
+	ticks::String
+	mirror_ticks::Bool
+	spines::Symbol
+	source::String
+end
+
+const _JOURNALS = (
+	# IEEE Author Center, "Resolution and Size"
+	# (journals.ieeeauthorcenter.ieee.org/create-your-ieee-journal-article/
+	# create-graphics-for-your-article/resolution-and-size/): one column 3.5 in
+	# (88.9 mm, 21 picas), two columns 7.16 in (182 mm, 43 picas). IEEE journal
+	# template: "Use 8 point Times New Roman for Figure labels". Inside,
+	# mirrored ticks: choice (the common IEEE/physics look).
+	_JournalSpec(:ieee, "IEEE", [(1.0, 3.5, :in), (2.0, 7.16, :in)], (0.0, :mm),
+		_SERIF_FONTS, 8.0, "inside", true, :box,
+		"IEEE Author Center, Resolution and Size: 3.5 in / 7.16 in; IEEE template: 8 pt Times New Roman labels"),
+	# APS Physical Review, Information for Authors
+	# (journals.aps.org/prb/info/infoB.html): single column 8.6 cm (3 3/8 in),
+	# lettering at least 2 mm high, lines at least 0.18 mm (0.5 pt); 17.2 cm is
+	# the two-column width of the APS (REVTeX) Word template. 1.5 columns are
+	# allowed but no width is published, so none is offered. Font: choice
+	# (Times, the journal's text face); 9 pt gives a 2.1 mm Times capital.
+	_JournalSpec(:aps, "APS (Physical Review)", [(1.0, 8.6, :cm), (2.0, 17.2, :cm)], (0.0, :mm),
+		_SERIF_FONTS, 9.0, "inside", true, :box,
+		"APS information for authors: 8.6 cm column, lettering >= 2 mm, lines >= 0.5 pt; 17.2 cm from the APS template"),
+	# Nature research figure guide (research-figure-guide.nature.com/figures/
+	# building-and-exporting-figure-panels/): single column 89 mm, double column
+	# 183 mm, at most 170 mm high, Arial or Helvetica, text 5-7 pt. 7 pt is the
+	# largest allowed size; open spines and outside ticks: choice.
+	_JournalSpec(:nature, "Nature", [(1.0, 89.0, :mm), (2.0, 183.0, :mm)], (170.0, :mm),
+		_SANS_FONTS, 7.0, "outside", false, :open,
+		"Nature research figure guide: 89 mm / 183 mm, <= 170 mm high, Arial/Helvetica 5-7 pt"),
+	# Elsevier artwork sizing (www.elsevier.com/about/policies-and-standards/
+	# author/artwork-and-media-instructions/artwork-sizing): single column
+	# 90 mm, 1.5 columns 140 mm, double column 190 mm; text at least 7 pt and
+	# sub/superscripts at least 6 pt; fonts Arial, Courier, Symbol, Times. 9 pt
+	# is chosen so that plotly's superscripts (70 % of the size: <sup> is
+	# "font-size:70%" in plotly.js) stay >= 6 pt (6.3 pt).
+	_JournalSpec(:elsevier, "Elsevier", [(1.0, 90.0, :mm), (1.5, 140.0, :mm), (2.0, 190.0, :mm)], (0.0, :mm),
+		_SANS_FONTS, 9.0, "outside", false, :box,
+		"Elsevier artwork sizing: 90 / 140 / 190 mm; text >= 7 pt, sub/superscripts >= 6 pt"),
+	# Springer Nature instructions for authors (journal figure section, e.g.
+	# Mathematics in Computer Science): "39 mm, 84 mm, 129 mm, or 174 mm wide
+	# and not higher than 234 mm"; Helvetica or Arial, lettering "about 2-3 mm
+	# (8-12 pt)" and consistently sized; lines at least 0.1 mm (0.3 pt). 84 mm
+	# is the single column, 129 mm 1.5 and 174 mm two columns.
+	_JournalSpec(:springer, "Springer", [(1.0, 84.0, :mm), (1.5, 129.0, :mm), (2.0, 174.0, :mm)], (234.0, :mm),
+		"Helvetica, Arial, Liberation Sans, sans-serif", 8.0, "outside", false, :box,
+		"Springer instructions for authors: 84 / 129 / 174 mm, <= 234 mm high, Helvetica/Arial 8-12 pt"),
+	# AIP Publishing author instructions (publishing.aip.org/resources/
+	# researchers/author-instructions/): one column 3.37 in (8.5 cm), two
+	# columns 6.69 in (17 cm), at most 8.25 in deep, lettering at least 8 pt,
+	# lines at least 0.5 pt, figures must read in black and white. Font:
+	# choice (Times).
+	_JournalSpec(:aip, "AIP Publishing", [(1.0, 3.37, :in), (2.0, 6.69, :in)], (8.25, :in),
+		_SERIF_FONTS, 8.0, "inside", true, :box,
+		"AIP author instructions: 3.37 in / 6.69 in, <= 8.25 in deep, lettering >= 8 pt, lines >= 0.5 pt"),
+)
+
+const _JOURNAL_NAMES = Tuple(spec.name for spec in _JOURNALS)
+
+function _journal_spec(name, who::AbstractString)
+	journal = name isa AbstractString ? Symbol(name) : name
+	if journal isa Symbol
+		for spec in _JOURNALS
+			spec.name === journal && return spec
+		end
+	end
+	throw(ArgumentError(
+		"$(who): unknown journal $(repr(name)); journals are $(join(repr.(_JOURNAL_NAMES), ", ")).",
+	))
+end
+
+# Width in CSS px (unrounded) of `columns` columns of `spec`.
+function _journal_width_px(spec::_JournalSpec, columns, who::AbstractString)
+	(columns isa Real && !(columns isa Bool)) ||
+		throw(ArgumentError("$(who): `columns` must be a number; got $(repr(columns))."))
+	for (count, value, unit) in spec.columns
+		count == columns && return value * _STYLE_PX_PER_UNIT[unit]
+	end
+	available = join((_style_number(count) for (count, _, _) in spec.columns), ", ")
+	throw(ArgumentError(
+		"$(who): $(repr(spec.name)) defines figure widths for $(available) column(s); got `columns` = $(repr(columns)).",
+	))
+end
+
+const _PT_PX = 96.0 / 72.0
+
+function _journal_plot_style(spec::_JournalSpec)
+	size_px = spec.fontsize_pt * _PT_PX
+	return PlotStyle(
+		;
+		template = :plotly_white,
+		font_family = spec.font_family,
+		fontsize = size_px,
+		title_fontsize = size_px,
+		label_fontsize = size_px,
+		tick_fontsize = size_px,
+		legend_fontsize = size_px,
+		font_color = "#000000",
+		colorway = :okabe_ito,
+		linewidth = 1.0 * _PT_PX,
+		marker_size = 4.5 * _PT_PX,
+		ticks = spec.ticks,
+		spines = spec.spines,
+		grid = false,
+		legend_frame = false,
+		margin = 4,
+		mathsize = "\\large",
+		cycle = :dash_symbol,
+		width = _journal_width_px(spec, 1.0, "PlotStyle"),
+		aspect = _STYLE_DEFAULT_ASPECT,
+		axis_linewidth = 0.75 * _PT_PX,
+		tick_length = 3.5 * _PT_PX,
+		mirror_ticks = spec.mirror_ticks,
+		errorbar_width = 0.75 * _PT_PX,
+		reference_linewidth = 0.75 * _PT_PX,
+	)
+end
+
+const _BUILTIN_STYLE_NAMES = (:default, :publication, _JOURNAL_NAMES...)
 const _STYLE_LOCK = ReentrantLock()
 const _STYLE_REGISTRY = Dict{Symbol, PlotStyle}(
 	:default => _default_plot_style(),
 	:publication => _publication_plot_style(),
+	(spec.name => _journal_plot_style(spec) for spec in _JOURNALS)...,
 )
 const _ACTIVE_STYLE = Ref{PlotStyle}(_default_plot_style())
 
@@ -803,6 +1133,7 @@ function _style_with_overrides(base::PlotStyle, overrides, who::AbstractString)
 			))
 		setfield!(style, name, _style_validate_field(name, value, who))
 	end
+	_style_check_figure_size(style.width, style.aspect, who)
 	return style
 end
 
@@ -826,7 +1157,8 @@ get_default_style() = copy(_active_style())
 
 Make `style` the active style used by every subsequently created figure.
 `style` is a [`PlotStyle`](@ref) or the name of a registered style (`:default`,
-`:publication`, or a name given to [`register_style!`](@ref)). Keyword arguments
+`:publication`, a journal preset `:ieee`, `:aps`, `:nature`, `:elsevier`,
+`:springer`, `:aip`, or a name given to [`register_style!`](@ref)). Keyword arguments
 override individual `PlotStyle` fields on top of `style`; with no positional
 argument they update fields of the current default. Everything is validated
 before the active style changes, so an invalid call leaves it untouched.
@@ -899,8 +1231,9 @@ with_style(f; kwargs...) = with_style(f, _active_style(); kwargs...)
 
 Register a copy of `style` under `name` so it can be selected with
 `set_default_style!(name)` or `with_style(f, name)`. Re-registering a user name
-replaces it; the built-in names `:default` and `:publication` cannot be
-redefined (`ArgumentError`). Returns `name`.
+replaces it; the built-in names (`:default`, `:publication` and the journal
+presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`) cannot
+be redefined (`ArgumentError`). Returns `name`.
 
 # Example
 ```julia
@@ -991,16 +1324,23 @@ function _style_axis_defaults(
 	axis in (:x, :y) ||
 		throw(ArgumentError("_style_axis_defaults: `axis` must be :x or :y; got $(repr(axis))."))
 	ink = _template_ink(template)
+	boxed = style.spines === :box
 	defaults = Dict{Symbol, Any}(
 		:zeroline => false,
 		:showline => style.spines !== :none,
-		:mirror => style.spines === :box,
+		# plotly's mirror = "ticks" draws the opposite spine with tick marks.
+		:mirror => boxed && style.mirror_ticks && !isempty(style.ticks) ? "ticks" : boxed,
 		:ticks => style.ticks,
 		:automargin => true,
 		:linecolor => ink,
-		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
+		:linewidth => style.axis_linewidth > 0 ? _style_number(style.axis_linewidth) : _DEFAULT_AXIS_LINEWIDTH,
 		:tickcolor => ink,
 	)
+	if style.axis_linewidth > 0
+		defaults[:tickwidth] = _style_number(style.axis_linewidth)
+		style.grid && (defaults[:gridwidth] = _style_number(style.axis_linewidth))
+	end
+	style.tick_length > 0 && (defaults[:ticklen] = _style_number(style.tick_length))
 	style.grid || (defaults[:showgrid] = false)
 	if !_style_template_is_builtin(style)
 		template_axis = _symbol_dict(get(
@@ -1044,7 +1384,7 @@ function _style_layout_defaults(
 	style.fontsize > 0 && (font[:size] = _style_number(style.fontsize))
 	isempty(style.font_color) || (font[:color] = style.font_color)
 	isempty(font) || (defaults[:font] = font)
-	if style.cycle === :bw
+	if style.cycle in _STYLE_INK_CYCLES
 		# Every trace without an explicit colour is drawn in the template's ink.
 		# A one-colour colorway (rather than per-trace colours) keeps the colour
 		# a template-derived layout value that `set_template!` can re-derive.
@@ -1066,14 +1406,15 @@ function _style_trace_defaults(style::PlotStyle, trace_index::Integer)
 	defaults = Dict{Symbol, Any}()
 	style.linewidth > 0 && (defaults[:linewidth] = _style_number(style.linewidth))
 	style.marker_size > 0 && (defaults[:marker_size] = _style_number(style.marker_size))
+	style.errorbar_width > 0 && (defaults[:errorbar_width] = _style_number(style.errorbar_width))
 	cycle = style.cycle
-	if cycle in (:bw, :dash, :dash_marker)
+	if cycle in _STYLE_DASH_CYCLES
 		defaults[:dash] = _STYLE_DASH_CYCLE[mod1(trace_index, length(_STYLE_DASH_CYCLE))]
 	end
-	if cycle in (:marker, :dash_marker)
+	if cycle in _STYLE_SYMBOL_CYCLES
 		defaults[:marker_symbol] =
 			_STYLE_MARKER_CYCLE[mod1(trace_index, length(_STYLE_MARKER_CYCLE))]
-		defaults[:markers] = true
+		cycle in _STYLE_MARKER_FLAG_CYCLES && (defaults[:markers] = true)
 	end
 	return defaults
 end
@@ -1173,8 +1514,8 @@ them unset. Internal; for the trace constructors and their `!` mutators.
   (an empty collection does nothing). A position that is not an integer
   (`Bool` included) or not in `1:length(data)` throws an `ArgumentError`
   before anything is written; repeated positions are styled once.
-- `style::PlotStyle`: the style whose `linewidth`, `marker_size` and `cycle`
-  are applied.
+- `style::PlotStyle`: the style whose `linewidth`, `marker_size`, `cycle` and
+  `errorbar_width` are applied.
 - `explicit`: a `Symbol` or a collection of the caller's keyword names that the
   user passed, from `(:linewidth, :marker_size, :dash, :marker_symbol, :mode)`;
   any other name throws an `ArgumentError`. A listed keyword is never filled,
@@ -1187,10 +1528,31 @@ line-style types `scatter`, `scattergl`, `scatterpolar`, `scatterpolargl`,
 `scatter3d`, `scatterternary`, `scattersmith`, `scattercarpet` and
 `scattergeo` are styled; every one of them has `line.width`, `line.dash`,
 `marker.size`, `marker.symbol` and `mode` in the plotly.js 2.35 schema, and
-the values written are in each type's allowed set. Every other trace (bar,
-histogram, box, violin, heatmap, contour, surface, mesh3d, cone, pie, the map
-scatter types, non-`GenericTrace` traces, …) is skipped and never written, so
-no attribute is ever added to a trace type that lacks it.
+the values written are in each type's allowed set. Three more roles are
+filled on these and other trace types:
+
+- contour lines: `line.width` ← `style.linewidth` on `contour`,
+  `histogram2dcontour` and `contourcarpet` traces whose `contours.coloring`
+  is `"lines"` or `"none"` (the lines are the data; filled contours keep
+  plotly's thin level boundaries);
+- error bars: `thickness` ← `style.errorbar_width` in every `error_x`/`error_y`
+  (and `error_z` on `scatter3d`) container a `scatter`, `scattergl`, `bar`,
+  `histogram` or `scatter3d` trace already has, unless the bars are hidden
+  (`visible = false`). No error-bar container is created.
+
+- colorbars: the colorbar a trace draws itself (trace-level `colorbar` of a
+  colorbar trace type — heatmap, contour, surface, mesh3d, … — and
+  `marker.colorbar`/`line.colorbar` where `showscale = true`; not a trace
+  bound to a layout `coloraxis`) gets `tickfont.size` ← `style.tick_fontsize`,
+  `title.font.size` ← `style.label_fontsize`, and, when the style sets
+  `axis_linewidth`/`tick_length`, the outline and ticks of the axes
+  (`outlinewidth`, `ticks`, `tickwidth`, `ticklen`; no colour, so a later
+  `set_template!` leaves nothing stale). Construction gets the same through
+  `_apply_style_layout!`; this reaches colorbars added later.
+
+Every other trace and attribute (box, violin, pie, the map scatter types,
+non-`GenericTrace` traces, …) is skipped and never written, so no attribute is
+ever added to a trace type that lacks it.
 
 A value counts as unset when the attribute is absent, `nothing`, `missing` or
 `""` (the 1.x `line.dash = ""` sentinel); any other value — a number, a name,
@@ -1199,14 +1561,16 @@ a per-point vector — is the caller's and is kept. Filled where unset:
 - `line.width` ← `style.linewidth`, `marker.size` ← `style.marker_size`
   (each only when the style sets it, i.e. > 0);
 - `line.dash` ← the dash cycle `solid, dash, dot, dashdot` (`cycle` `:bw`,
-  `:dash`, `:dash_marker`);
-- `marker.symbol` ← the marker cycle (`:marker`, `:dash_marker`):
+  `:dash`, `:dash_marker`, `:dash_symbol`, `:bw_dash_marker`);
+- `marker.symbol` ← the marker cycle (`:marker`, `:dash_marker`,
+  `:dash_symbol`, `:bw_dash_marker`):
   `circle, square, diamond, triangle-up, x, triangle-down, cross, star`, and
   for `scatter3d` (which accepts only eight symbols) `circle, square,
   diamond, x, cross, circle-open, square-open, diamond-open`. When the symbol
-  is filled and `mode` (a string or `Symbol`, not in `explicit`) draws lines
-  but no markers, the `markers` flag is added so the symbol shows
-  (`"lines"` → `"lines+markers"`, `"lines+text"` → `"lines+markers+text"`).
+  is filled by `:marker`, `:dash_marker` or `:bw_dash_marker` and `mode` (a
+  string or `Symbol`, not in `explicit`) draws lines but no markers, the
+  `markers` flag is added so the symbol shows (`"lines"` → `"lines+markers"`,
+  `"lines+text"` → `"lines+markers+text"`); `:dash_symbol` never adds it.
   An absent `mode` is left to plotly's own default.
 
 The cycle position of a trace is its rank among the figure's line-style traces
@@ -1224,7 +1588,8 @@ traces of the outer figure are counted too. Colour is never set here: the
 - Nested `line`/`marker` containers are replaced, never mutated in place, so a
   container shared between traces or with the caller is not changed.
 - Under a style with no trace defaults (`:default`: `linewidth = 0`,
-  `marker_size = 0`, `cycle = :none`) nothing is touched.
+  `marker_size = 0`, `errorbar_width = 0`, `cycle = :none`, no font sizes,
+  no axis line weights) nothing is touched.
 
 Returns `nothing`.
 
@@ -1263,22 +1628,33 @@ function _apply_style_trace_defaults!(
 			))
 	end
 	# Nothing to do for a style without trace defaults (`:default`).
-	isempty(_style_trace_defaults(style, 1)) && return nothing
+	plain_defaults = _style_trace_defaults(style, 1)
+	colorbar_defaults = _style_colorbar_trace_defaults(style)
+	isempty(plain_defaults) && isempty(colorbar_defaults) && return nothing
 
 	# All updates are computed first, then committed.
 	pending = Tuple{Int, Dict{Symbol, Any}}[]
 	offset = _STYLE_TRACE_OFFSET[]
 	for index in unique(indices)
 		trace = data[index]
-		_style_is_line_trace(trace) || continue
-		position = offset + count(_style_is_line_trace, view(data, 1:index))
-		updates = _style_trace_default_updates(
-			trace,
-			_style_trace_defaults(style, position),
-			position,
-			explicit_names,
-			"$(who): data[$(index)]",
-		)
+		trace isa GenericTrace || continue
+		where = "$(who): data[$(index)]"
+		updates = Dict{Symbol, Any}()
+		if _style_is_line_trace(trace)
+			position = offset + count(_style_is_line_trace, view(data, 1:index))
+			merge!(updates, _style_trace_default_updates(
+				trace,
+				_style_trace_defaults(style, position),
+				position,
+				explicit_names,
+				where,
+			))
+		elseif _style_trace_type(trace) in _STYLE_CONTOUR_TRACE_TYPES
+			merge!(updates, _style_contour_default_updates(trace, plain_defaults, explicit_names, where))
+		end
+		merge!(updates, _style_errorbar_default_updates(trace, plain_defaults, where))
+		# Built on top of the marker/line updates above (same containers).
+		merge!(updates, _style_colorbar_default_updates(trace, updates, colorbar_defaults, where))
 		isempty(updates) || push!(pending, (Int(index), updates))
 	end
 	for (index, updates) in pending
@@ -1288,6 +1664,97 @@ function _apply_style_trace_defaults!(
 		end
 	end
 	return nothing
+end
+
+# Colorbar defaults of `style` for a trace: the tick-label and title sizes
+# `_apply_style_layout!` gives colorbars at construction (`tick_fontsize`,
+# `label_fontsize`) and the axis-like outline and ticks
+# (`_style_colorbar_line_defaults`).
+function _style_colorbar_trace_defaults(style::PlotStyle)
+	defaults = Dict{Symbol, Any}()
+	style.tick_fontsize > 0 &&
+		(defaults[:tickfont] = Dict{Symbol, Any}(:size => _style_number(style.tick_fontsize)))
+	style.label_fontsize > 0 &&
+		(defaults[:title] = Dict{Symbol, Any}(:font => Dict{Symbol, Any}(:size => _style_number(style.label_fontsize))))
+	merge!(defaults, _style_colorbar_line_defaults(style))
+	return defaults
+end
+
+# Fill `defaults` into the colorbars a trace draws itself: the trace-level
+# `colorbar` of a colorbar trace type, and `marker.colorbar`/`line.colorbar`
+# where that scale is shown. A trace bound to a layout `coloraxis` has its
+# colorbar there and is skipped (the coloraxis is styled at construction).
+# `pending` holds this trace's updates computed so far, which are built on.
+function _style_colorbar_default_updates(trace, pending, defaults, who::AbstractString)
+	updates = Dict{Symbol, Any}()
+	isempty(defaults) && return updates
+	fields = trace.fields
+	current(key) = haskey(pending, key) ? pending[key] : get(fields, key, nothing)
+	bound(d) = !isempty(_style_ref_string(get(d, :coloraxis, nothing)))
+	if _style_trace_type(trace) in _STYLE_TRACE_COLORBAR_TYPES && !bound(fields)
+		filled, changed = _style_fill_nested(current(:colorbar), defaults, "colorbar", who)
+		changed && (updates[:colorbar] = filled)
+	end
+	for sub in (:marker, :line)
+		value = current(sub)
+		(value isa AbstractDict || value isa PlotlyBase.PlotlyAttribute) || continue
+		d = _symbol_dict(value)
+		(get(d, :showscale, false) === true || haskey(d, :colorbar)) || continue
+		bound(d) && continue
+		filled, changed = _style_fill_nested(value, Dict{Symbol, Any}(:colorbar => defaults), String(sub), who)
+		changed && (updates[sub] = filled)
+	end
+	return updates
+end
+
+# Contour trace types (plotly.js 2.35) whose `line.width` draws the contour
+# lines; with `contours.coloring` "lines" or "none" those lines are the data.
+const _STYLE_CONTOUR_TRACE_TYPES = Set{String}(["contour", "histogram2dcontour", "contourcarpet"])
+
+# Trace types with error bars (plotly.js 2.35 schema: `error_x`/`error_y`,
+# plus `error_z` on scatter3d).
+const _STYLE_ERRORBAR_TRACE_TYPES = Dict{String, Tuple{Vararg{Symbol}}}(
+	"scatter" => (:error_x, :error_y),
+	"scattergl" => (:error_x, :error_y),
+	"bar" => (:error_x, :error_y),
+	"histogram" => (:error_x, :error_y),
+	"scatter3d" => (:error_x, :error_y, :error_z),
+)
+
+# `line.width` of a line contour (Y22): the style's line width, as matplotlib's
+# `contour.linewidth` falls back to `lines.linewidth`. Filled contours keep
+# plotly's thin level boundaries (the fill is the data); so does a trace whose
+# `contours.coloring` is not a plain string.
+function _style_contour_default_updates(trace, defaults, explicit, who::AbstractString)
+	(haskey(defaults, :linewidth) && !(:linewidth in explicit)) || return Dict{Symbol, Any}()
+	fields = trace.fields
+	contours = _style_container_dict(get(fields, :contours, nothing), "contours", who)
+	coloring = get(contours, :coloring, "fill")
+	(coloring isa Union{AbstractString, Symbol} && String(coloring) in ("lines", "none")) ||
+		return Dict{Symbol, Any}()
+	line = _style_container_dict(get(fields, :line, nothing), "line", who)
+	_style_value_unset(get(line, :width, nothing)) || return Dict{Symbol, Any}()
+	return Dict{Symbol, Any}(
+		:line => _style_update_path(get(fields, :line, nothing), (), Dict(:width => defaults[:linewidth]), "line", who),
+	)
+end
+
+# `thickness` of every error-bar container the trace already has (none is
+# created), where it is unset and the bars are not hidden (`visible = false`).
+function _style_errorbar_default_updates(trace, defaults, who::AbstractString)
+	updates = Dict{Symbol, Any}()
+	haskey(defaults, :errorbar_width) || return updates
+	keys_for_type = get(_STYLE_ERRORBAR_TRACE_TYPES, _style_trace_type(trace), ())
+	fields = trace.fields
+	for key in keys_for_type
+		container = get(fields, key, nothing)
+		container === nothing && continue
+		bars = _style_container_dict(container, String(key), who)
+		(isempty(bars) || get(bars, :visible, true) === false) && continue
+		_style_value_unset(get(bars, :thickness, nothing)) || continue
+		updates[key] = _style_update_path(container, (), Dict(:thickness => defaults[:errorbar_width]), String(key), who)
+	end
+	return updates
 end
 
 # Field updates (`:line`, `:marker`, `:mode`) that fill `defaults` into one
@@ -1354,8 +1821,35 @@ function _apply_style_layout!(
 	)
 	# Every value is computed against the layout as it will be after the
 	# earlier updates, then everything is committed together.
-	role_layout, role_traces = _font_role_updates(p, roles, nothing, "PlotStyle"; base = updates)
+	role_layout, role_traces = _font_role_updates(
+		p,
+		roles,
+		nothing,
+		"PlotStyle";
+		base = updates,
+		colorbar_lines = _style_colorbar_line_defaults(style),
+	)
 	merge!(updates, role_layout)
+	# Line weights of 3-D, polar and ternary axes (Cartesian axes get theirs
+	# from `_style_axis_defaults`).
+	axis_lines = _style_axis_line_defaults(style)
+	if !isempty(axis_lines)
+		for key in _style_figure_axis_keys(p)
+			name = String(key)
+			subaxes = occursin(r"^scene\d*$", name) ? (:xaxis, :yaxis, :zaxis) :
+				occursin(r"^polar\d*$", name) ? (:radialaxis, :angularaxis) :
+				occursin(r"^ternary\d*$", name) ? (:aaxis, :baxis, :caxis) : ()
+			isempty(subaxes) && continue
+			current = haskey(updates, key) ? updates[key] : get(fields, key, nothing)
+			filled, changed = _style_fill_nested(
+				current,
+				Dict{Symbol, Any}(axis => axis_lines for axis in subaxes),
+				"layout.$(key)",
+				"PlotStyle",
+			)
+			changed && (updates[key] = filled)
+		end
+	end
 	if style.margin !== nothing
 		# The style margin is the minimum on each side; paper-referenced
 		# annotations (subplot titles) and the title get the room they need on
@@ -1371,11 +1865,153 @@ function _apply_style_layout!(
 		updates[:margin] = margin
 		title === nothing || (updates[:title] = title)
 	end
+	merge!(updates, _style_figure_size_updates(fields, style))
 	for (key, value) in updates
 		fields[key] = value
 	end
 	_commit_trace_updates!(p, role_traces)
 	return nothing
+end
+
+# A layout width/height the figure already has (a positive number; anything
+# else, including an absent key or `nothing`, counts as unset).
+_style_size_is_set(value) = value isa Real && !(value isa Bool) && isfinite(value) && value > 0
+
+_style_aspect(style::PlotStyle) = style.aspect > 0 ? style.aspect : _STYLE_DEFAULT_ASPECT
+
+# layout.width/height written by a sized style (`width > 0`) into a new
+# figure: both when the figure has neither; the height that keeps the style's
+# aspect when only a width was given; the style's width when only a height was
+# given. A size the caller gave is never changed. Heights are clamped to
+# plotly's accepted range (only reachable with an extreme `aspect`).
+function _style_figure_size_updates(fields, style::PlotStyle)
+	updates = Dict{Symbol, Any}()
+	style.width > 0 || return updates
+	has_width = _style_size_is_set(get(fields, :width, nothing))
+	has_height = _style_size_is_set(get(fields, :height, nothing))
+	has_width && has_height && return updates
+	width, height = _style_default_figure_size(style)
+	if has_width
+		height = clamp(Float64(fields[:width]) * _style_aspect(style), _STYLE_MIN_FIGURE_PX, _STYLE_MAX_FIGURE_PX)
+	else
+		updates[:width] = _style_number(width)
+	end
+	has_height || (updates[:height] = _style_number(height))
+	return updates
+end
+
+# Colorbar outline and tick marks drawn like the axes: the spine width, the
+# style's tick direction and length. Empty unless the style sets
+# `axis_linewidth` / `tick_length` (not `:default` or `:publication`), so
+# plotly's own colorbar look is kept there. No colour is written: colorbars
+# live on traces, which `set_template!` (a layout-only mutation) cannot
+# re-derive, so they keep plotly's template-independent "#444".
+function _style_colorbar_line_defaults(style::PlotStyle)
+	defaults = Dict{Symbol, Any}()
+	if style.axis_linewidth > 0
+		width = _style_number(style.axis_linewidth)
+		defaults[:outlinewidth] = width
+		defaults[:ticks] = style.ticks
+		defaults[:tickwidth] = width
+	end
+	style.tick_length > 0 && (defaults[:ticklen] = _style_number(style.tick_length))
+	return defaults
+end
+
+# Line weights for one 3-D/polar/ternary axis: spine, tick and grid width and
+# tick length. Tick direction and spine visibility stay with the code that
+# builds those axes.
+function _style_axis_line_defaults(style::PlotStyle)
+	defaults = Dict{Symbol, Any}()
+	if style.axis_linewidth > 0
+		width = _style_number(style.axis_linewidth)
+		defaults[:linewidth] = width
+		defaults[:tickwidth] = width
+		defaults[:gridwidth] = width
+	end
+	style.tick_length > 0 && (defaults[:ticklen] = _style_number(style.tick_length))
+	return defaults
+end
+
+# Fill `defaults` (nested Dicts are sub-containers) into `container` wherever
+# it leaves a value unset (`_style_value_unset`). Returns `(new, changed)`;
+# `new` is `container` itself when nothing changed, else a fresh container
+# (shared containers are never mutated).
+function _style_fill_nested(container, defaults::AbstractDict, where::AbstractString, who::AbstractString)
+	isempty(defaults) && return (container, false)
+	d = _style_container_dict(container, where, who)
+	changed = false
+	for (key, value) in defaults
+		if value isa AbstractDict
+			sub, sub_changed = _style_fill_nested(get(d, key, nothing), value, "$(where).$(key)", who)
+			if sub_changed
+				d[key] = sub
+				changed = true
+			end
+		elseif _style_value_unset(get(d, key, nothing))
+			d[key] = value
+			changed = true
+		end
+	end
+	return changed ? (_style_wrap_like(container, d), true) : (container, false)
+end
+
+"""
+	_style_default_figure_size(style::PlotStyle = _active_style()) -> Tuple{Float64,Float64}
+
+`(width, height)` in CSS px (unrounded) of a figure that has no
+`layout.width`/`layout.height`: the style's `width` and `width * aspect`
+(`aspect` 0 means 0.75) when the style sets a width (every journal preset:
+its single column), else the 1.x export default 700 × 500 px. Internal; the
+export fallback for figures without a size (`savefig`) and the size
+`_apply_style_layout!` writes into figures built under a sized style.
+"""
+function _style_default_figure_size(style::PlotStyle = _active_style())
+	style.width > 0 || return (_DEFAULT_EXPORT_WIDTH_PX, _DEFAULT_EXPORT_HEIGHT_PX)
+	return (style.width, style.width * _style_aspect(style))
+end
+
+"""
+	_style_ink(fig) -> String
+
+Colour of the lines PlotlySupply draws on its own in `fig` (reference lines,
+outlines, arrows): the ink of the figure's template (`_template_ink`: black
+on light templates, the template's light text colour on dark ones), else of
+the active style's template. Internal.
+"""
+_style_ink(fig) = _template_ink(_figure_style_template(fig))
+
+# Line roles `_style_line_width` knows, and the PlotStyle field each reads.
+const _STYLE_LINE_ROLES = (
+	data = :linewidth,
+	contour = :linewidth,
+	mesh = :linewidth,
+	reference = :reference_linewidth,
+	axis = :axis_linewidth,
+	errorbar = :errorbar_width,
+)
+
+"""
+	_style_line_width(role::Symbol; default::Real, style::PlotStyle = _active_style()) -> Float64
+
+Width in px of a line of `role` under `style`, or `default` when the style
+leaves the role unset (its field is 0). Roles: `:data` (trace lines,
+`linewidth`), `:contour` and `:mesh` (contour lines and mesh edges, also
+`linewidth`), `:reference` (reference lines and shapes,
+`reference_linewidth`), `:axis` (spines, ticks, grid, `axis_linewidth`) and
+`:errorbar` (`errorbar_width`). An unknown role or a `default` that is not a
+finite number >= 0 throws an `ArgumentError`. Internal; for code that draws
+lines the trace and axis defaults do not reach (shapes, mesh edges).
+"""
+function _style_line_width(role::Symbol; default::Real, style::PlotStyle = _active_style())
+	who = "_style_line_width"
+	haskey(_STYLE_LINE_ROLES, role) ||
+		throw(ArgumentError(
+			"$(who): unknown line role $(repr(role)); roles are $(join(repr.(keys(_STYLE_LINE_ROLES)), ", ")).",
+		))
+	fallback = _style_nonnegative(default, who, "default")
+	width = getfield(style, _STYLE_LINE_ROLES[role])
+	return width > 0 ? width : fallback
 end
 
 # ── Nested attribute updates (never mutate shared containers) ───────────────
@@ -1657,6 +2293,7 @@ function _font_role_updates(
 	cell::Union{Nothing, _StyleCell},
 	who::AbstractString;
 	base::AbstractDict = Dict{Symbol, Any}(),
+	colorbar_lines::AbstractDict = Dict{Symbol, Any}(),
 )
 	fields = p.layout.fields
 	in_cell = cell !== nothing
@@ -1756,7 +2393,7 @@ function _font_role_updates(
 
 	# Colorbars: trace-level, marker/line-level, and layout coloraxes.
 	trace_new = Pair{Int, Dict{Symbol, Any}}[]
-	if !isempty(colorbar_tick_font) || !isempty(colorbar_title_font)
+	if !isempty(colorbar_tick_font) || !isempty(colorbar_title_font) || !isempty(colorbar_lines)
 		coloraxis_keys = Set{Symbol}()
 		function add_coloraxis!(ref)
 			id = _style_ref_string(ref)
@@ -1780,6 +2417,7 @@ function _font_role_updates(
 					(colorbar = _style_update_path(colorbar, (:tickfont,), colorbar_tick_font, "$(where).colorbar", who))
 				isempty(colorbar_title_font) ||
 					(colorbar = _style_update_path(colorbar, (:title, :font), colorbar_title_font, "$(where).colorbar", who))
+				colorbar = first(_style_fill_nested(colorbar, colorbar_lines, "$(where).colorbar", who))
 				updates[:colorbar] = colorbar
 			end
 			add_coloraxis!(get(trace_fields, :coloraxis, nothing))
@@ -1794,6 +2432,7 @@ function _font_role_updates(
 					(new_sub = _style_update_path(new_sub, (:colorbar, :tickfont), colorbar_tick_font, "$(where).$(sub)", who))
 				isempty(colorbar_title_font) ||
 					(new_sub = _style_update_path(new_sub, (:colorbar, :title, :font), colorbar_title_font, "$(where).$(sub)", who))
+				new_sub = first(_style_fill_nested(new_sub, Dict{Symbol, Any}(:colorbar => colorbar_lines), "$(where).$(sub)", who))
 				updates[sub] = new_sub
 			end
 			isempty(updates) || push!(trace_new, index => updates)
@@ -1801,6 +2440,15 @@ function _font_role_updates(
 		for key in sort!(collect(coloraxis_keys))
 			update!(key, (:colorbar, :tickfont), colorbar_tick_font)
 			update!(key, (:colorbar, :title, :font), colorbar_title_font)
+			if !isempty(colorbar_lines)
+				filled, changed = _style_fill_nested(
+					current(key),
+					Dict{Symbol, Any}(:colorbar => colorbar_lines),
+					"layout.$(key)",
+					who,
+				)
+				changed && (layout_new[key] = filled)
+			end
 		end
 	end
 
@@ -2332,78 +2980,224 @@ end
 # ── figsize! ─────────────────────────────────────────────────────────────────
 
 const _FIGSIZE_UNITS = (:px, :in, :cm, :mm, :pt)
-# plotly.js rejects layout.width/height below 10 px.
-const _FIGSIZE_MIN_PX = 10
-# Overflow guard only (round(Int, ·) must not throw InexactError); no display
-# or export canvas comes anywhere near 2^31 px.
-const _FIGSIZE_MAX_PX = typemax(Int32)
 
-function _figsize_px(width, height, units, who::AbstractString)
-	units isa Symbol ||
-		throw(ArgumentError("$(who): `units` must be a Symbol; got $(repr(units))."))
-	scale = _style_px_per_unit(units, _FIGSIZE_UNITS, who)
-	result = map((("width", width), ("height", height))) do (name, value)
-		v = _style_real(value, who, name)
-		v > 0 || throw(ArgumentError("$(who): `$(name)` must be > 0; got $(value)."))
-		v * scale <= _FIGSIZE_MAX_PX ||
-			throw(ArgumentError(
-				"$(who): `$(name)` = $(value) $(units) exceeds $(_FIGSIZE_MAX_PX) px.",
-			))
-		# Raster export and the browser canvas are whole CSS pixels.
-		px = round(Int, v * scale)
-		px >= _FIGSIZE_MIN_PX ||
-			throw(ArgumentError(
-				"$(who): `$(name)` is $(px) px after conversion from $(value) $(units); plotly requires at least $(_FIGSIZE_MIN_PX) px.",
-			))
-		px
-	end
-	return result[1], result[2]
+# Rejects keywords a figure-size call does not take (`show` included: a
+# mutator never opens a window), naming the function, before anything changes.
+function _figsize_reject_keywords(who::AbstractString, kwargs)
+	isempty(kwargs) && return nothing
+	names = join(("`$(k)`" for k in keys(kwargs)), ", ")
+	hint = haskey(kwargs, :show) ?
+		" (mutators do not take `show`; display the figure with `display(fig)`)" : ""
+	throw(ArgumentError("$(who): unsupported keyword argument(s) $(names)$(hint)."))
 end
 
-function _figsize_impl!(fig, width::Real, height::Real; units::Symbol = :px)
-	w, h = _figsize_px(width, height, units, "figsize!")
+# One size in CSS px, unrounded: finite, positive, at least plotly's 10 px and
+# at most `_STYLE_MAX_FIGURE_PX`.
+function _figsize_length_px(value, scale::Float64, units::Symbol, who::AbstractString, name::AbstractString)
+	v = _style_real(value, who, name)
+	v > 0 || throw(ArgumentError("$(who): `$(name)` must be > 0; got $(value)."))
+	px = v * scale
+	px <= _STYLE_MAX_FIGURE_PX ||
+		throw(ArgumentError(
+			"$(who): `$(name)` = $(value) $(units) exceeds $(_style_number(_STYLE_MAX_FIGURE_PX)) px.",
+		))
+	px >= _STYLE_MIN_FIGURE_PX ||
+		throw(ArgumentError(
+			"$(who): `$(name)` is $(px) px after conversion from $(value) $(units); plotly requires at least $(_style_number(_STYLE_MIN_FIGURE_PX)) px.",
+		))
+	return px
+end
+
+function _figsize_scale(units, who::AbstractString)
+	units isa Symbol ||
+		throw(ArgumentError("$(who): `units` must be a Symbol; got $(repr(units))."))
+	return _style_px_per_unit(units, _FIGSIZE_UNITS, who)
+end
+
+function _figsize_px(width, height, units, who::AbstractString)
+	scale = _figsize_scale(units, who)
+	return (
+		_figsize_length_px(width, scale, units, who, "width"),
+		_figsize_length_px(height, scale, units, who, "height"),
+	)
+end
+
+function _figsize_write!(fig, w::Float64, h::Float64)
 	fields = _plot_layout(fig).fields
-	fields[:width] = w
-	fields[:height] = h
+	# Exact sizes: 89 mm stays 336.378 px so a vector export is 89 mm wide.
+	# Whole sizes are written as Int (JSON `336`, as 1.x wrote them).
+	fields[:width] = _style_number(w)
+	fields[:height] = _style_number(h)
 	_refresh!(fig)
 	return nothing
 end
 
+function _figsize_impl!(fig, width::Real, height::Real; units = :px, kwargs...)
+	_figsize_reject_keywords("figsize!", kwargs)
+	w, h = _figsize_px(width, height, units, "figsize!")
+	return _figsize_write!(fig, w, h)
+end
+
+# (width, height) in px of `columns` columns of `journal`; validated in full
+# before anything is written.
+function _figsize_journal_px(journal, columns, aspect, height, units, who::AbstractString)
+	spec = _journal_spec(journal, who)
+	width_px = _journal_width_px(spec, columns, who)
+	aspect === nothing || height === nothing ||
+		throw(ArgumentError("$(who): pass `aspect` or `height`, not both."))
+	height_px = if height !== nothing
+		_figsize_length_px(height, _figsize_scale(units, who), units, who, "height")
+	else
+		# `units` is still checked, so a typo never passes silently.
+		_figsize_scale(units, who)
+		ratio = if aspect === nothing
+			_style_aspect(_active_style())
+		else
+			value = _style_real(aspect, who, "aspect")
+			0.01 <= value <= 100 ||
+				throw(ArgumentError(
+					"$(who): `aspect` (height / width) must be between 0.01 and 100; got $(aspect).",
+				))
+			value
+		end
+		width_px * ratio
+	end
+	_STYLE_MIN_FIGURE_PX <= height_px ||
+		throw(ArgumentError(
+			"$(who): the height is $(height_px) px; plotly requires at least $(_style_number(_STYLE_MIN_FIGURE_PX)) px.",
+		))
+	limit, limit_unit = spec.max_height
+	if limit > 0
+		limit_px = limit * _STYLE_PX_PER_UNIT[limit_unit]
+		# 1e-9: a height given as exactly the limit in another unit must pass.
+		height_px <= limit_px * (1 + 1e-9) ||
+			throw(ArgumentError(
+				"$(who): $(spec.publisher) figures may be at most $(_style_number(limit)) $(limit_unit) high; " *
+				"the height is $(round(height_px / _STYLE_PX_PER_UNIT[limit_unit]; digits = 2)) $(limit_unit).",
+			))
+	end
+	return width_px, height_px
+end
+
+function _figsize_journal_impl!(fig, journal; columns = 1, aspect = nothing, height = nothing, units = :in, kwargs...)
+	_figsize_reject_keywords("figsize!", kwargs)
+	w, h = _figsize_journal_px(journal, columns, aspect, height, units, "figsize!")
+	return _figsize_write!(fig, w, h)
+end
+
 """
 	figsize!(fig, width::Real, height::Real; units=:px)
-	figsize!(sf::SubplotFigure, width::Real, height::Real; units=:px)
+	figsize!(fig, journal::Symbol; columns=1, aspect=nothing, height=nothing, units=:in)
+	figsize!(sf::SubplotFigure, ...)
 
 Set the figure size, stored as `layout.width`/`layout.height` in CSS pixels so
-displays and exports pick it up. `units` is `:px`, `:in`, `:cm`, `:mm` or
-`:pt`, converted at the CSS reference resolution of 96 px/in (1 pt = 1/72 in)
-and rounded to whole pixels (raster canvases are whole pixels; the rounding
-error is below 0.5 px, 0.13 mm). Both sizes must be finite, positive and at
-least 10 px after conversion (plotly's minimum). Returns `nothing` for a
+displays and exports pick it up.
+
+With `width` and `height`, `units` is `:px`, `:in`, `:cm`, `:mm` or `:pt`,
+converted at the CSS reference resolution of 96 px/in (1 pt = 1/72 in). The
+size is stored exactly (not rounded to whole pixels), so a figure set to
+89 mm is exported 89 mm wide; whole-pixel sizes are stored as integers.
+
+With a `journal` (`:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`,
+`:aip`; see [`journal_width`](@ref) for the widths and their sources), the
+width is the journal's published width for `columns` columns (every journal
+defines 1 and 2; `:elsevier` and `:springer` also 1.5). The height is
+`height` (in `units`, default inches) or `aspect × width` (`aspect` is height
+/ width, 0.01 to 100; default: the active style's aspect, 0.75 when it sets
+none); pass one of `height` and `aspect`, not both. Journals that publish a
+maximum figure height (`:nature` 170 mm, `:springer` 234 mm, `:aip` 8.25 in)
+reject a taller figure.
+
+Both sizes must be finite, positive and at least 10 px after conversion
+(plotly's minimum). Invalid arguments, unknown keywords (`show` included)
+and an unknown journal or column count throw an `ArgumentError` naming
+`figsize!` before anything changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and `sf` for a `SubplotFigure`.
 
 # Example
 ```julia
 fig = plot_scatter(1:10, (1:10) .^ 2)
-figsize!(fig, 3.5, 2.5; units = :in)     # 336 × 240 px
-savefig(fig, "fig.pdf"; width = 336, height = 240)
+figsize!(fig, 3.5, 2.5; units = :in)          # 336 × 240 px
+figsize!(fig, :nature)                         # 89 mm × 66.75 mm
+figsize!(fig, :ieee; columns = 2, height = 3)  # 7.16 in × 3 in
+savefig(fig, "fig.pdf")                        # exported at that size
 ```
 """
-function figsize!(fig, width::Real, height::Real; units::Symbol = :px)
-	return _figsize_impl!(fig, width, height; units = units)
+function figsize!(fig, width::Real, height::Real; kwargs...)
+	return _figsize_impl!(fig, width, height; kwargs...)
 end
 
-function _figsize_subplot_impl!(sf::SubplotFigure, width::Real, height::Real; units::Symbol = :px)
-	_figsize_impl!(sf.fig, width, height; units = units)
+function figsize!(fig, journal::Union{Symbol, AbstractString}; kwargs...)
+	return _figsize_journal_impl!(fig, journal; kwargs...)
+end
+
+function _figsize_subplot_impl!(sf::SubplotFigure, width::Real, height::Real; kwargs...)
+	_figsize_impl!(sf.fig, width, height; kwargs...)
 	return sf
 end
 
-function figsize!(sf::SubplotFigure, width::Real, height::Real; units::Symbol = :px)
-	return _transactional_subplot_mutation!(
-		_figsize_subplot_impl!,
-		sf,
-		(),
-		width,
-		height;
-		units = units,
-	)
+function _figsize_journal_subplot_impl!(sf::SubplotFigure, journal; kwargs...)
+	_figsize_journal_impl!(sf.fig, journal; kwargs...)
+	return sf
+end
+
+function figsize!(sf::SubplotFigure, width::Real, height::Real; kwargs...)
+	# Validated before the transaction, so an invalid call never stages a copy.
+	_figsize_impl_check(width, height; kwargs...)
+	return _transactional_subplot_mutation!(_figsize_subplot_impl!, sf, (), width, height; kwargs...)
+end
+
+function figsize!(sf::SubplotFigure, journal::Union{Symbol, AbstractString}; kwargs...)
+	_figsize_journal_check(journal; kwargs...)
+	return _transactional_subplot_mutation!(_figsize_journal_subplot_impl!, sf, (), journal; kwargs...)
+end
+
+function _figsize_impl_check(width, height; units = :px, kwargs...)
+	_figsize_reject_keywords("figsize!", kwargs)
+	_figsize_px(width, height, units, "figsize!")
+	return nothing
+end
+
+function _figsize_journal_check(journal; columns = 1, aspect = nothing, height = nothing, units = :in, kwargs...)
+	_figsize_reject_keywords("figsize!", kwargs)
+	_figsize_journal_px(journal, columns, aspect, height, units, "figsize!")
+	return nothing
+end
+
+"""
+	journal_width(journal::Symbol; columns = 1, units = :in) -> Float64
+
+The published figure width of `columns` columns of `journal` in `units`
+(`:in`, `:cm`, `:mm`, `:pt` or `:px`; 1 in = 96 px = 72 pt). The same numbers
+size the built-in journal styles (single column) and
+[`figsize!`](@ref)`(fig, journal; columns)`. An unknown journal, column count
+or unit throws an `ArgumentError`.
+
+| journal | columns → width | max. height | text (preset) | source |
+|:--|:--|:--|:--|:--|
+| `:ieee` | 1 → 3.5 in, 2 → 7.16 in | — | Times New Roman 8 pt | IEEE Author Center, "Resolution and Size"; IEEE template (8 pt Times New Roman labels) |
+| `:aps` | 1 → 8.6 cm, 2 → 17.2 cm | — | Times 9 pt (lettering ≥ 2 mm) | APS Physical Review information for authors; APS Word template (17.2 cm) |
+| `:nature` | 1 → 89 mm, 2 → 183 mm | 170 mm | Arial 7 pt (5–7 pt allowed) | Nature research figure guide |
+| `:elsevier` | 1 → 90 mm, 1.5 → 140 mm, 2 → 190 mm | — | Arial 9 pt (≥ 7 pt, sub/superscripts ≥ 6 pt) | Elsevier artwork sizing |
+| `:springer` | 1 → 84 mm, 1.5 → 129 mm, 2 → 174 mm | 234 mm | Helvetica 8 pt (8–12 pt) | Springer instructions for authors |
+| `:aip` | 1 → 3.37 in, 2 → 6.69 in | 8.25 in | Times 8 pt (≥ 8 pt) | AIP Publishing author instructions |
+
+Font families and sizes in the presets follow the guideline where it names
+them and are a package choice otherwise (APS and AIP do not name a font).
+plotly draws `<sup>`/`<sub>` text (e.g. log-axis exponents with
+`exponentformat = "power"`) at 70 % of the font size, which under `:nature`
+is 4.9 pt, below Nature's 5 pt minimum. Optica is not included: its figure
+widths could not be confirmed from Optica's own guidelines.
+
+# Example
+```julia
+journal_width(:ieee)                              # 3.5
+journal_width(:nature; columns = 2, units = :mm)  # 183.0
+```
+"""
+function journal_width(journal::Union{Symbol, AbstractString}; columns = 1, units = :in)
+	who = "journal_width"
+	spec = _journal_spec(journal, who)
+	scale = _figsize_scale(units, who)
+	return _journal_width_px(spec, columns, who) / scale
 end
