@@ -824,3 +824,209 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		@test t_large < 64 * t_small
 	end
 end
+
+# ── 2.0 integration wave 3 (fields-int): X1 colour-bar titles, `tight`, X23
+# ranges, X20 insets, D10 finalize and X10 line widths on the mesh family. ──
+
+const _M2V3_QX = [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
+const _M2V3_QY = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+const _M2V3_QUADS = [1 2 5 4; 2 3 6 5]
+const _M2V3_TX = [0.0, 1.0, 0.0]
+const _M2V3_TY = [0.0, 0.0, 1.0]
+const _M2V3_TRI = [1 2 3]
+
+_m2v3_d(x) = _M2._symbol_dict(x)
+_m2v3_layout(fig) = _M2._plot_obj(fig).layout.fields
+_m2v3_axis(fig, key) = _m2v3_d(get(_m2v3_layout(fig), key, Dict{Symbol, Any}()))
+_m2v3_anns(fig) = [_m2v3_d(a) for a in get(_m2v3_layout(fig), :annotations, Any[])]
+_m2v3_names(fig) = String[String(get(a, :name, "")) for a in _m2v3_anns(fig)]
+_m2v3_meta(fig) = Any[get(t.fields, :meta, nothing) for t in _M2._plot_data(fig)]
+# The colour bar of a figure: on a trace, on a trace's marker, or on a layout
+# colour axis (exactly one is expected).
+function _m2v3_colorbar(fig)
+	bars = Dict{Symbol, Any}[]
+	for t in _M2._plot_data(fig)
+		haskey(t.fields, :colorbar) && push!(bars, _m2v3_d(t.fields[:colorbar]))
+		m = _m2v3_d(get(t.fields, :marker, Dict{Symbol, Any}()))
+		haskey(m, :colorbar) && push!(bars, _m2v3_d(m[:colorbar]))
+	end
+	for (k, v) in _m2v3_layout(fig)
+		startswith(String(k), "coloraxis") || continue
+		c = _m2v3_d(v)
+		haskey(c, :colorbar) && push!(bars, _m2v3_d(c[:colorbar]))
+	end
+	return only(bars)
+end
+function _m2v3_inset_sf()
+	sf = subplots(2, 2; sync = false)
+	inset!(sf, (0.6, 0.6, 0.35, 0.35); row = 2, col = 2)
+	sf.current_row = 1
+	sf.current_col = 1
+	return sf, getfield(sf, :insets)[1]
+end
+
+@testset "sci mesh2d: 2.0 integration (fields-int)" begin
+	coloured = (
+		("plot_polygons", kw -> plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS, [0.2, 0.9]; kw...)),
+		("plot_pcolormesh", kw -> plot_pcolormesh(0:3, 0:2, [1.0 2; 3 4; 5 6]; kw...)),
+		("plot_tripcolor", kw -> plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2.0, 3.0]; kw...)),
+		("plot_tripcolor", kw -> plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2.0, 3.0]; shading = :gouraud, kw...)),
+		("plot_pcolormesh!", kw -> (f = plot_pcolormesh(0:1, 0:1, ones(1, 1); showscale = false);
+			plot_pcolormesh!(f, 0:3, 0:2, [1.0 2; 3 4; 5 6]; kw...); f)),
+	)
+
+	@testset "X1 colorbar_title_side: plain titles" begin
+		for (who, build) in coloured, side in (:top, :right, :bottom)
+			bar = _m2v3_colorbar(build((colorbar_title = "T", colorbar_title_side = side)))
+			@test _m2v3_d(bar[:title]) == Dict{Symbol, Any}(:text => "T", :side => String(side))
+		end
+		# Default :top; a String is accepted.
+		@test _m2v3_d(_m2v3_colorbar(coloured[1][2]((colorbar_title = "T",)))[:title])[:side] == "top"
+		@test _m2v3_d(_m2v3_colorbar(coloured[2][2]((colorbar_title = "T", colorbar_title_side = "Right")))[:title])[:side] == "right"
+		for (who, build) in coloured
+			@test _m2_throws(() -> build((colorbar_title_side = :left,)),
+				"$(who): `colorbar_title_side` must be :top, :right or :bottom; got :left.")
+		end
+		# A uniform-colour mesh has no bar: the keyword is an error, not a no-op.
+		@test _m2_throws(() -> plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; colorbar_title_side = :right),
+			"plot_polygons: `colorbar_title_side` maps cell values to colours")
+	end
+
+	@testset "X1 math colour-bar titles: annotations in figures, cells and insets" begin
+		for (who, build) in coloured, side in (:top, :right)
+			f = build((colorbar_title = "\$T_1\$", colorbar_title_side = side))
+			name = "plotlysupply:colorbar_title:x:$(side)"
+			@test count(==(name), _m2v3_names(f)) == 1
+			ann = only(a for a in _m2v3_anns(f) if a[:name] == name)
+			@test ann[:text] == "\$T_1\$"
+			side === :right && @test ann[:textangle] == -90
+			@test !haskey(_m2v3_colorbar(f), :title)
+		end
+		g = plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2.0, 3.0]; shading = :gouraud,
+			coloraxis = :shared, colorbar_title = "\$g\$")
+		@test "plotlysupply:colorbar_title:coloraxis:top" in _m2v3_names(g)
+		sf = subplots(1, 2; sync = false)
+		plot_pcolormesh!(sf, 0:3, 0:2, [1.0 2; 3 4; 5 6]; row = 1, col = 2,
+			colorbar_title = "\$c\$", colorbar_title_side = :right)
+		@test "plotlysupply:colorbar_title:x2:right" in _m2v3_names(sf)
+		# X51: a numbered colour axis in a cell keeps its math title.
+		sf, rec = _m2v3_inset_sf()
+		plot_polygons!(sf, [[0, 1, 1.0]], [[0, 0, 1.0]], [1.0]; inset = 1,
+			coloraxis = "coloraxis2", colorbar_title = "\$\\beta\$")
+		@test "plotlysupply:colorbar_title:coloraxis2:top" in _m2v3_names(sf)
+		ann = only(a for a in _m2v3_anns(sf) if a[:name] == "plotlysupply:colorbar_title:coloraxis2:top")
+		@test ann[:text] == "\$\\beta\$"
+	end
+
+	@testset "tight: fill traces carry the finalize meta" begin
+		tight, loose = "plotlysupply:field", "plotlysupply:field:loose"
+		@test _m2v3_meta(plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS)) == Any[tight]
+		@test _m2v3_meta(plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; tight = false)) == Any[loose]
+		@test _m2v3_meta(plot_pcolormesh(0:3, 0:2, rand(3, 2))) == Any[tight]
+		@test _m2v3_meta(plot_pcolormesh(0:3, 0:2, rand(3, 2); tight = false)) == Any[loose]
+		@test _m2v3_meta(plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; shading = :gouraud, edges = true)) ==
+			Any[tight, nothing]
+		# Edges, carriers and hover markers are overlays: no meta.
+		f = plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS, [0.2, 0.9]; edgecolor = "black", edgewidth = 1, hover = true)
+		@test count(==(tight), _m2v3_meta(f)) == length(_m2_fills(f))
+		@test all(t -> !haskey(t.fields, :meta), _m2_carriers(f))
+		@test _m2v3_meta(plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI)) == Any[nothing]
+		@test _m2v3_meta(plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5])) == Any[nothing]
+		for (who, call) in (
+			("plot_polygons", () -> plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; tight = 1)),
+			("plot_pcolormesh", () -> plot_pcolormesh(0:3, 0:2, rand(3, 2); tight = nothing)),
+			("plot_tripcolor", () -> plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; tight = "no")),
+		)
+			@test _m2_throws(call, "$(who): `tight` must be true or false")
+		end
+		@test _m2_throws(() -> plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI; tight = true), "unsupported keyword argument")
+	end
+
+	@testset "X23 ranges: sentinels, validation, log axes, cells" begin
+		for sentinel in ([0, 0], (0, 0), nothing, [nothing, nothing])
+			@test !haskey(_m2v3_axis(plot_pcolormesh(0:3, 0:2, rand(3, 2); xrange = sentinel), :xaxis), :range)
+		end
+		ax = _m2v3_axis(plot_pcolormesh(0:3, 0:2, rand(3, 2); yrange = (0.5, 1.5)), :yaxis)
+		@test collect(ax[:range]) == [0.5, 1.5] && ax[:autorange] === false
+		@test _m2_throws(() -> plot_pcolormesh(0:3, 0:2, rand(3, 2); xrange = [nothing, 2]), "plot_pcolormesh: `xrange` cannot be partial")
+		@test _m2_throws(() -> plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; yrange = [1, 1]), "plot_polygons: the `yrange` bounds must differ")
+		@test _m2_throws(() -> plot_tripcolor(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; xrange = (true, 2)),
+			"plot_tripcolor: `xrange` bounds must be numbers")
+		f = plot_tripcolor([1.0, 10.0, 1.0], _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; xscale = "log", xrange = (1, 100))
+		@test _m2v3_axis(f, :xaxis)[:range] == [0.0, 2.0] && _m2v3_axis(f, :xaxis)[:autorange] === false
+		# Cells: data units on a log cell, autorange off.
+		sf = subplots(1, 2; sync = false)
+		plot_pcolormesh!(sf, [1.0, 10, 100], 0:1, rand(2, 1); row = 1, col = 2, xscale = "log")
+		plot_pcolormesh!(sf, [1.0, 10, 100], 0:1, rand(2, 1); row = 1, col = 2, xrange = (1, 1000))
+		@test _m2v3_axis(sf, :xaxis2)[:range] == [0.0, 3.0] && _m2v3_axis(sf, :xaxis2)[:autorange] === false
+		n = length(_M2._plot_data(sf))
+		@test _m2_throws(() -> plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; row = 1, col = 1, yrange = [nothing, 1]),
+			"plot_triplot!: `yrange` cannot be partial")
+		@test length(_M2._plot_data(sf)) == n
+		# Shared x: the range goes to the `matches` root, which plotly.js reads.
+		shared = subplots(1, 2; sync = false, shared_xaxes = true)
+		root = only(_M2._fin_match_roots(shared.plot.layout))
+		other = root === :xaxis ? :xaxis2 : :xaxis
+		plot_pcolormesh!(shared, 0:3, 0:1, rand(3, 1); row = 1, col = 2, xrange = (0, 5))
+		@test collect(_m2v3_axis(shared, root)[:range]) == [0, 5]
+		@test !haskey(_m2v3_axis(shared, other), :range)
+	end
+
+	@testset "X20 inset = k on every mesh mutator" begin
+		for call in (
+			sf -> plot_polygons!(sf, [[0, 1, 1.0]], [[0, 0, 1.0]], [1.0]; inset = 1),
+			sf -> plot_pcolormesh!(sf, 0:3, 0:2, rand(3, 2); inset = 1),
+			sf -> plot_tripcolor!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; inset = 1),
+			sf -> plot_tripcolor!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; inset = 1, shading = :gouraud),
+			sf -> plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; inset = 1),
+			sf -> plot_tricontour!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; inset = 1, levels = [1.5]),
+		)
+			sf, rec = _m2v3_inset_sf()
+			@test call(sf) === sf
+			data = _M2._plot_data(sf)
+			@test !isempty(data)
+			@test all(t -> t.fields[:xaxis] == rec.xref && t.fields[:yaxis] == rec.yref, data)
+			@test _m2v3_axis(sf, rec.ykey)[:scaleanchor] == rec.xref
+			@test !haskey(_m2v3_axis(sf, :yaxis4), :scaleanchor)
+			@test (sf.current_row, sf.current_col) == (2, 2)
+		end
+		sf, rec = _m2v3_inset_sf()
+		@test _m2_throws(() -> plot_pcolormesh!(sf, 0:3, 0:2, rand(3, 2); inset = 2), "unknown inset id 2")
+		@test _m2_throws(() -> plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; inset = 1, show = true),
+			"plot_triplot!: mutators do not take `show`")
+		@test isempty(_M2._plot_data(sf))
+	end
+
+	@testset "D10 mesh mutators finalize the figure" begin
+		for mutate! in (
+			p -> plot_polygons!(p, _M2V3_QX, _M2V3_QY, _M2V3_QUADS),
+			p -> plot_pcolormesh!(p, 0:3, 0:2, rand(3, 2)),
+			p -> plot_tripcolor!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]),
+			p -> plot_triplot!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI),
+			p -> plot_tricontour!(p, _M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5]),
+		)
+			p = Plot(GenericTrace[], Layout(xaxis2 = attr(matches = "x", anchor = "y2"), yaxis2 = attr(anchor = "x2")))
+			mutate!(p)
+			@test _m2v3_axis(p, :xaxis)[:autorange] === true
+		end
+	end
+
+	@testset "X10 mesh lines take the style's line width, not its cycle" begin
+		line(f) = _m2v3_d(f.data[1].fields[:line])
+		with_style(; linewidth = 3, cycle = :dash_marker) do
+			t = plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI)
+			@test line(t)[:width] == 3 && !haskey(line(t), :dash) && t.data[1].fields[:mode] == "lines"
+			@test line(plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5]))[:width] == 3
+			# Explicit widths win; polygon fills keep their hairline outline.
+			@test line(plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI; linewidth = 2))[:width] == 2
+			@test line(plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5], linewidth = 0.25))[:width] == 0.25
+			@test line(plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS, [0.2, 0.9]))[:width] == 0.5
+			sf = subplots(1, 2; sync = false)
+			plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; row = 1, col = 2)
+			@test _m2v3_d(_M2._plot_data(sf)[end].fields[:line])[:width] == 3
+		end
+		@test line(plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI))[:width] == 0.5
+		@test line(plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5]))[:width] == 1
+		@test _m2_throws(() -> plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI; linewidth = -1), "plot_triplot")
+	end
+end

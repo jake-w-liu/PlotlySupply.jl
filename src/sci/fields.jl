@@ -47,10 +47,12 @@ function _matrix_add!(
 	crange,
 	cmid,
 	colorbar_title::AbstractString,
+	colorbar_title_side,
 	xlabel::AbstractString,
 	ylabel::AbstractString,
 	title::AbstractString,
 	equalar::Bool,
+	tight,
 	width,
 	height,
 	fontsize,
@@ -99,6 +101,7 @@ function _matrix_add!(
 		colorscale = colorscale,
 		showscale = nothing,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		colorbar_ticks = nothing,
 		colorbar_ticklabels = nothing,
 		coloraxis = nothing,
@@ -119,6 +122,7 @@ function _matrix_add!(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		tight = tight,
 		xscale = "",
 		yscale = "",
 	)
@@ -146,10 +150,13 @@ entries; NaN/`missing` cells are empty, Bool is drawn as 0/1, complex throws.
 - `textsize::Real = 0`: annotation font size (0 = automatic). plotly picks a
   contrasting text colour per cell.
 - `colorscale = "RdBu_r"`, `crange = [0, 0]`, `cmid = nothing`,
-  `colorbar_title = ""`: colour mapping as for [`plot_heatmap`](@ref) (e.g.
-  `crange = (-1, 1)` or `cmid = 0` for a correlation matrix).
+  `colorbar_title = ""`, `colorbar_title_side = :top`: colour mapping and
+  colorbar title as for [`plot_heatmap`](@ref) (e.g. `crange = (-1, 1)` or
+  `cmid = 0` for a correlation matrix).
 - `xlabel = ""`, `ylabel = ""`, `title = ""`.
 - `equalar::Bool = true`: square cells.
+- `tight::Bool = true`: autoranged axes fit the cell edges without padding;
+  `false` restores plotly's padded autorange (as for [`plot_heatmap`](@ref)).
 - `grid = true` (template grid, hidden under the cells), `width = 0`,
   `height = 0`, `fontsize = 0`, `show::Bool = false`.
 
@@ -174,10 +181,12 @@ function plot_matrix(
 	crange = [0, 0],
 	cmid::Union{Nothing, Real} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
 	equalar::Bool = true,
+	tight = true,
 	grid::Union{Nothing, Bool, Symbol} = true,
 	width::Real = 0,
 	height::Real = 0,
@@ -200,10 +209,12 @@ function plot_matrix(
 		crange = crange,
 		cmid = cmid,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		xlabel = xlabel,
 		ylabel = ylabel,
 		title = title,
 		equalar = equalar,
+		tight = tight,
 		width = width,
 		height = height,
 		fontsize = fontsize,
@@ -214,13 +225,14 @@ end
 
 """
 	plot_matrix!(fig, A::AbstractMatrix; kwargs...)
-	plot_matrix!(sf::SubplotFigure, A::AbstractMatrix; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_matrix!(sf::SubplotFigure, A::AbstractMatrix; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append a matrix plot (see [`plot_matrix`](@ref) for the layout and the
 keywords; `show` is not accepted and throws an `ArgumentError`) to `fig`, a
 `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
 together, default: the active cell; `secondary_y` targets the cell's
-secondary y axis). The target y axis is reversed so row 1
+secondary y axis; `inset = k` targets the `k`-th inset from
+[`inset!`](@ref)). The target y axis is reversed so row 1
 is at the top; `grid = nothing` keeps the grid. On a `SubplotFigure`,
 `title`, `width` and `height` are ignored with a warning.
 
@@ -245,10 +257,12 @@ function plot_matrix!(
 	crange = [0, 0],
 	cmid::Union{Nothing, Real} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
 	equalar::Bool = true,
+	tight = true,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
 	width::Real = 0,
 	height::Real = 0,
@@ -271,10 +285,12 @@ function plot_matrix!(
 		crange = crange,
 		cmid = cmid,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		xlabel = xlabel,
 		ylabel = ylabel,
 		title = title,
 		equalar = equalar,
+		tight = tight,
 		width = width,
 		height = height,
 		fontsize = fontsize,
@@ -644,6 +660,7 @@ function _streamlines_traces(
 	colorby,
 	colorscale,
 	colorbar_title::AbstractString,
+	colorbar_title_side::Symbol,
 	linewidth,
 	legend::AbstractString,
 )
@@ -704,6 +721,9 @@ function _streamlines_traces(
 
 	name = isempty(legend) ? "" : _label(legend)
 	mode = arrows && arrowsize > 0 ? "lines+markers" : "lines"
+	# `linewidth = 0`: the style's width, else 1 px (thinner than plotly's
+	# 2 px line default, like matplotlib's streamplot).
+	line_width = linewidth > 0 ? linewidth : _field2d_style_linewidth(1)
 	function line_trace(px, py, sizes, line_colour, first::Bool)
 		fields = Dict{Symbol, Any}(
 			:x => px,
@@ -713,15 +733,21 @@ function _streamlines_traces(
 			:name => first ? name : "",
 			:showlegend => first && !isempty(name),
 		)
-		line = Dict{Symbol, Any}()
-		linewidth > 0 && (line[:width] = linewidth)
+		line = Dict{Symbol, Any}(:width => line_width)
 		isempty(line_colour) || (line[:color] = line_colour)
-		isempty(line) || (fields[:line] = attr(; line...))
+		fields[:line] = attr(; line...)
 		if mode == "lines+markers"
+			# A per-point `marker.size` array makes plotly.js treat the trace
+			# as a bubble chart, whose markers default to opacity 0.7 and a
+			# 1 px outline in the background colour: hollow-looking arrowheads
+			# (D10 M5). Arrowheads are solid in the line colour: full opacity
+			# and no outline (the marker colour defaults to the line colour).
 			marker = Dict{Symbol, Any}(
 				:symbol => "arrow",
 				:angleref => "previous",
 				:size => sizes,
+				:opacity => 1,
+				:line => attr(width = 0),
 			)
 			isempty(line_colour) || (marker[:color] = line_colour)
 			fields[:marker] = attr(; marker...)
@@ -801,10 +827,7 @@ function _streamlines_traces(
 		bin_colour = _sample_colorscale(stops, (b - 0.5) / nbins)
 		push!(traces, line_trace(bin_x[b], bin_y[b], bin_sizes[b], bin_colour, isempty(traces)))
 	end
-	colorbar = _colorbar_attr(;
-		title = isempty(colorbar_title) ? "" : _label(colorbar_title),
-		who = who,
-	)
+	colorbar = _field2d_colorbar(colorbar_title, colorbar_title_side, who)
 	push!(
 		traces,
 		_colorbar_carrier_trace(;
@@ -836,6 +859,7 @@ function _streamlines_add!(
 	colorby,
 	colorscale,
 	colorbar_title::AbstractString,
+	colorbar_title_side,
 	linewidth,
 	legend::AbstractString,
 	xlabel::AbstractString,
@@ -857,6 +881,8 @@ function _streamlines_add!(
 	grid,
 	equalar::Bool,
 )
+	xrange = _field2d_checked_range(xrange, who, "xrange")
+	yrange = _field2d_checked_range(yrange, who, "yrange")
 	_validate_cartesian_options(
 		fig,
 		who;
@@ -869,6 +895,7 @@ function _streamlines_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	title_side = _field2d_title_side(colorbar_title_side, who)
 	traces = _streamlines_traces(
 		x,
 		y,
@@ -887,9 +914,11 @@ function _streamlines_add!(
 		colorby = colorby,
 		colorscale = colorscale,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = title_side,
 		linewidth = linewidth,
 		legend = legend,
 	)
+	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	_field2d_apply_options!(
 		fig,
@@ -915,6 +944,10 @@ function _streamlines_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	# The width already follows the style (`_field2d_style_linewidth`); the
+	# style's dash/marker cycle would dash the speed bins differently and
+	# replace the arrowheads, so it is not applied.
+	_field2d_finish!(fig, first_new)
 	return nothing
 end
 
@@ -947,19 +980,25 @@ domain widths are dropped.
   start point.
 - `arrows::Bool = true`, `arrowsize::Real = 8`: one arrowhead (marker size in
   pixels) at the middle of each streamline, pointing downstream.
-- `color = ""`: one colour for all lines (default: the template's first
-  colour); not with `colorby = :speed`.
+- `color = ""`: one colour for all lines and arrowheads (default: the
+  template's first colour); not with `colorby = :speed`. Arrowheads are solid
+  (opacity 1, no outline) in their line's colour.
 - `colorby = :none`: `:speed` colours each segment by the local speed
   `hypot(U, V)` (in $(_STREAMLINE_COLOR_BINS) colour bins, one trace each) and
   adds a colorbar.
 - `colorscale = ""`: colorscale for `colorby = :speed` (template default when
-  unset); `colorbar_title = ""`.
-- `linewidth::Real = 1`, `legend = ""` (legend name; unnamed streamlines have
-  no legend entry).
-- `equalar::Bool = false`, `xlabel`, `ylabel`, `title`, `xrange`, `yrange`,
-  `xscale`, `yscale`, `xticks`, `xticklabels`, `xtickformat`, `yticks`,
-  `yticklabels`, `ytickformat`, `grid = true`, `width`, `height`, `fontsize`:
-  as for [`plot_heatmap`](@ref).
+  unset); `colorbar_title = ""` (mathtext; a `\$...\$` title is drawn as a
+  typeset annotation beside the bar), `colorbar_title_side = :top`
+  (`:top`, `:right` or `:bottom`, also as a String).
+- `linewidth::Real = 0`: line width in px; `0` takes the active style's line
+  width ([`with_style`](@ref)) and else 1 px. `legend = ""` (legend name;
+  unnamed streamlines have no legend entry).
+- `equalar::Bool = false`, `xlabel`, `ylabel`, `title`, `xrange`, `yrange`
+  (axis limits in data units, also on log axes; `[0, 0]` or `nothing`:
+  automatic), `xscale`, `yscale`, `xticks`, `xticklabels`, `xtickformat`,
+  `yticks`, `yticklabels`, `ytickformat`, `grid = true`, `width`, `height`,
+  `fontsize`: as for [`plot_heatmap`](@ref). On a log axis the streamlines are
+  integrated in decades, so they follow the field as drawn.
 - `show::Bool = false`: open a window and return a `SyncPlot`.
 
 Returns a `Plot` (a `SyncPlot` when `show = true`).
@@ -989,7 +1028,8 @@ function plot_streamlines(
 	colorby::Union{Symbol, AbstractString} = :none,
 	colorscale = "",
 	colorbar_title::AbstractString = "",
-	linewidth::Real = 1,
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
+	linewidth::Real = 0,
 	legend::AbstractString = "",
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
@@ -1030,6 +1070,7 @@ function plot_streamlines(
 		colorby = colorby,
 		colorscale = colorscale,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		linewidth = linewidth,
 		legend = legend,
 		xlabel = xlabel,
@@ -1056,14 +1097,17 @@ end
 
 """
 	plot_streamlines!(fig, x, y, U, V; kwargs...)
-	plot_streamlines!(sf::SubplotFigure, x, y, U, V; row = nothing, col = nothing, secondary_y = false, kwargs...)
+	plot_streamlines!(sf::SubplotFigure, x, y, U, V; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append streamlines (see [`plot_streamlines`](@ref) for the arguments and
 keywords; `show` is not accepted and throws an `ArgumentError`) to `fig`, a
 `Plot` or `SyncPlot`, or to a cell of a `SubplotFigure` (`row`/`col`
 together, default: the active cell; `secondary_y` targets the cell's
-secondary y axis). `grid = nothing` keeps the grid. On a
-`SubplotFigure`, `title`, `width` and `height` are ignored with a warning.
+secondary y axis; `inset = k` targets the cell's `k`-th inset from
+[`inset!`](@ref) instead). `grid = nothing` keeps the grid; `xrange`/`yrange`
+set the target axes' limits (on a log axis in data units), `[0, 0]` or
+`nothing` leaves them as they are. On a `SubplotFigure`, `title`, `width` and
+`height` are ignored with a warning.
 
 Returns `nothing` (`sf` for a `SubplotFigure`).
 
@@ -1092,7 +1136,8 @@ function plot_streamlines!(
 	colorby::Union{Symbol, AbstractString} = :none,
 	colorscale = "",
 	colorbar_title::AbstractString = "",
-	linewidth::Real = 1,
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
+	linewidth::Real = 0,
 	legend::AbstractString = "",
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
@@ -1133,6 +1178,7 @@ function plot_streamlines!(
 		colorby = colorby,
 		colorscale = colorscale,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		linewidth = linewidth,
 		legend = legend,
 		xlabel = xlabel,
@@ -1158,6 +1204,10 @@ function plot_streamlines!(
 	return nothing
 end
 
+# The streamlines are integrated in axis units (decades on a log axis), so
+# they are built here against the target cell's axis types, which the
+# delegate's scratch figure does not know, and appended like quiver arrows
+# (`_field2d_push_traces!`, which applies the layout keywords).
 function plot_streamlines!(
 	sf::SubplotFigure,
 	x::AbstractArray,
@@ -1167,30 +1217,69 @@ function plot_streamlines!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
+	density::Real = 1,
+	seeds = nothing,
+	maxlength::Real = 4,
+	direction::Union{Symbol, AbstractString} = :both,
+	arrows::Bool = true,
+	arrowsize::Real = 8,
+	color = "",
+	colorby::Union{Symbol, AbstractString} = :none,
+	colorscale = "",
+	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
+	linewidth::Real = 0,
+	legend::AbstractString = "",
 	equalar::Bool = false,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
 	kwargs...,
 )
-	_field2d_subplot_check_coordinates(
+	who = "plot_streamlines!"
+	haskey(kwargs, :show) && _field2d_reject_keywords(who, kwargs)
+	xlog, ylog = _field2d_subplot_log_axes(
 		sf,
-		"plot_streamlines!",
-		x,
-		y;
+		who;
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		xscale = xscale,
 		yscale = yscale,
 	)
+	traces = _streamlines_traces(
+		x,
+		y,
+		U,
+		V,
+		who;
+		xlog = xlog,
+		ylog = ylog,
+		density = density,
+		seeds = seeds,
+		maxlength = maxlength,
+		direction = direction,
+		arrows = arrows,
+		arrowsize = arrowsize,
+		color = color,
+		colorby = colorby,
+		colorscale = colorscale,
+		colorbar_title = colorbar_title,
+		colorbar_title_side = _field2d_title_side(colorbar_title_side, who),
+		linewidth = linewidth,
+		legend = legend,
+	)
 	return _field2d_subplot!(
 		sf,
-		plot_streamlines!,
-		(x, y, U, V);
+		_field2d_push_traces!,
+		(traces,);
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		equalar = equalar,
+		who = who,
 		xscale = xscale,
 		yscale = yscale,
 		kwargs...,

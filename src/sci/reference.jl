@@ -1627,6 +1627,13 @@ arc!(sf::SubplotFigure, cx::Real, cy::Real, r::Real, theta0::Real, theta1::Real;
 # F16d: slope guides
 # ---------------------------------------------------------------------------
 
+# Width of a reference line drawn as a TRACE (slope guide and triangle) whose
+# `linewidth` is `nothing`: the active style's line width (X10), else 1 px.
+# Shapes and annotations (hline!, rectangle!, arrow!, ...) are not traces and
+# keep their explicit 1 px default.
+_ref_trace_linewidth(linewidth) =
+	linewidth === nothing ? _field2d_style_linewidth(1) : linewidth
+
 # Display direction of an axis: -1 when it is reversed (`autorange` containing
 # "reversed", or an explicit decreasing range), else +1.
 function _ref_axis_direction(layout::Layout, key::Symbol)::Int
@@ -1664,7 +1671,7 @@ function _ref_slope_guide!(
 	offset = (0, 0),
 	color = "#777777",
 	dash = "dash",
-	linewidth = 1,
+	linewidth = nothing,
 	legend = "",
 	fontsize = 0,
 	row = nothing,
@@ -1719,7 +1726,14 @@ function _ref_slope_guide!(
 		"$(who): the guide takes non-positive values over the `x` interval, which " *
 		"cannot be drawn on a logarithmic y axis.",
 	))
-	style = _ref_line_style(who; color = color, dash = dash, linewidth = linewidth, opacity = 1, layer = "above")
+	style = _ref_line_style(
+		who;
+		color = color,
+		dash = dash,
+		linewidth = _ref_trace_linewidth(linewidth),
+		opacity = 1,
+		layer = "above",
+	)
 	label_text = _ref_string(label, who, "label")
 	position = _ref_symbol_option(labelpos, who, "labelpos", _REF_TEXT_POSITIONS)
 	shift = _ref_pair(offset, who, "offset")
@@ -1785,7 +1799,7 @@ end
 
 """
 	slope_guide!(fig, order; x, through, label="", labelpos=:mid, offset=(0, 0),
-	             color="#777777", dash="dash", linewidth=1, legend="", fontsize=0,
+	             color="#777777", dash="dash", linewidth=nothing, legend="", fontsize=0,
 	             secondary_y=false)
 	slope_guide!(sf::SubplotFigure, order; row=nothing, col=nothing, inset=nothing, kwargs...)
 
@@ -1809,8 +1823,11 @@ autoranging.
   `:end`/`:start` put it just beyond that end of the guide.
 - `offset::Tuple{Real,Real} = (0, 0)`: extra label shift in px (x right, y
   up), added to a 4 px gap from the line.
-- `color = "#777777"`, `dash = "dash"`, `linewidth::Real = 1`: line style, as
-  for [`hline!`](@ref); the label uses `color` too.
+- `color = "#777777"`, `dash = "dash"`: line style, as for
+  [`hline!`](@ref); the label uses `color` too.
+- `linewidth::Union{Nothing,Real} = nothing`: line width in px (`>= 0`);
+  `nothing` takes the active style's line width ([`with_style`](@ref)), else
+  1 px. The style's dash/marker cycle is not applied: the guide keeps `dash`.
 - `legend::AbstractString = ""`: legend entry of the guide (hidden when empty).
 - `fontsize::Real = 0`: label font size in px (0 = layout default).
 - `secondary_y::Bool = false`, and for a SubplotFigure `row`, `col`, `inset`:
@@ -1853,7 +1870,7 @@ function _ref_slope_triangle!(
 	below = true,
 	labels = nothing,
 	color = "gray",
-	linewidth = 1,
+	linewidth = nothing,
 	fillcolor = "",
 	fontsize = 0,
 	row = nothing,
@@ -1874,7 +1891,7 @@ function _ref_slope_triangle!(
 	is_below = _ref_bool(below, who, "below")
 	run_text, rise_text = _ref_triangle_labels(labels, p, who)
 	edge = _ref_color(color, who, "color")
-	line_width = _ref_nonnegative(linewidth, who, "linewidth")
+	line_width = _ref_nonnegative(_ref_trace_linewidth(linewidth), who, "linewidth")
 	fill = _ref_color(fillcolor, who, "fillcolor"; none_is_empty = true)
 	font_size = _ref_fontsize(fontsize, who)
 	# Horizontal leg in axis units: decades on a log x axis, else a fraction
@@ -1975,7 +1992,7 @@ end
 
 """
 	slope_triangle!(fig, x0, y0, order; width=0.3, below=true, labels=("1", "<order>"),
-	                color="gray", linewidth=1, fillcolor="", fontsize=0, secondary_y=false)
+	                color="gray", linewidth=nothing, fillcolor="", fontsize=0, secondary_y=false)
 	slope_triangle!(sf::SubplotFigure, x0, y0, order; row=nothing, col=nothing, inset=nothing, kwargs...)
 
 Draw a right-angled slope triangle (a "slope marker") whose hypotenuse starts
@@ -1998,7 +2015,10 @@ legend) with corners `(x0, y0)`, the right-angle corner and
 - `labels = ("1", string(order))`: run and rise labels, a 2-tuple or
   2-element vector of strings (`""` omits one; `\$...\$` math works). An
   integral order prints without decimals (`"2"`, not `"2.0"`).
-- `color = "gray"`: outline and label colour; `linewidth::Real = 1`.
+- `color = "gray"`: outline and label colour.
+- `linewidth::Union{Nothing,Real} = nothing`: outline width in px (`>= 0`);
+  `nothing` takes the active style's line width ([`with_style`](@ref)), else
+  1 px.
 - `fillcolor = ""`: fill colour (`""`/`"none"`: unfilled).
 - `fontsize::Real = 0`: label font size in px (0 = layout default).
 - `secondary_y::Bool = false`, and for a SubplotFigure `row`, `col`, `inset`:
