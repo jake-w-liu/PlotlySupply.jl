@@ -9160,8 +9160,9 @@ function _scat_legend_window(layout, key::Symbol, values; padded::Bool, tight_ze
 	axis = get(layout.fields, key, nothing)
 	range = _cmn_mapping_get(axis, :range)
 	autorange = _cmn_mapping_get(axis, :autorange)
-	if autorange !== true && range isa AbstractVector && length(range) == 2 &&
-		all(bound -> bound isa Real && isfinite(bound), range) && range[1] != range[2]
+	is_bound(bound) = bound isa Real && !(bound isa Bool) && isfinite(bound)
+	explicit = autorange !== true && range isa AbstractVector && length(range) == 2
+	if explicit && all(is_bound, range) && range[1] != range[2]
 		return Float64(range[1]), Float64(range[2])
 	end
 	finite = Iterators.filter(isfinite, values)
@@ -9173,6 +9174,17 @@ function _scat_legend_window(layout, key::Symbol, values; padded::Bool, tight_ze
 	# The data spans the axis length minus both pads.
 	scale = (hi - lo) / (1 - pad_lo - pad_hi)
 	lo, hi = lo - pad_lo * scale, hi + pad_hi * scale
+	# A one-sided limit (lead decision D11: `range = [lo, nothing]` or
+	# `[nothing, hi]` next to a partial `autorange`): the fixed bound, and the
+	# padded data extent on the autoscaled side. A data extent that does not
+	# reach past the fixed bound leaves the data-only window.
+	if explicit && count(is_bound, range) == 1 && any(isnothing, range)
+		if is_bound(range[1]) && hi > range[1]
+			return Float64(range[1]), hi
+		elseif is_bound(range[2]) && lo < range[2]
+			return lo, Float64(range[2])
+		end
+	end
 	return autorange == "reversed" ? (hi, lo) : (lo, hi)
 end
 
