@@ -859,15 +859,17 @@ end
 		end
 		shared_colorbar!(sf; title="u", len=0.4)
 		@test _SCB._finalize_figure!(sf) === false
-		# The export at 5.25 x 2 in: the bar keeps room for its title and a
-		# tick label (shorter, plotly.js fails with "axis scaling").
+		# The export at 5.25 x 2 in: the bar keeps room for its title and
+		# three tick label lines (with none, plotly.js fails with "axis
+		# scaling"; with one, its three labels overlap), at most the plot height.
 		size = (5.25 * 96, 2.0 * 96)
 		copy = _SCB._finalize_export_copy(sf.plot, (width=size[1], height=size[2]))
 		bar = _scb_fields(_scb_fields(copy.layout.fields[:coloraxis])[:colorbar])
 		plan = _SCB._room_plan(copy; size=size)
 		font = plan.font
-		need = _SCB._CBAR_LINE_EM * font + 2 + _SCB._CBAR_LINE_EM * font + 4
-		@test bar[:len] * plan.Hp >= need - 1e-6
+		need = _SCB._ROOM_MIN_BAR_LINES * _SCB._CBAR_LINE_EM * font + 2 + _SCB._CBAR_LINE_EM * font + 4
+		@test bar[:len] * plan.Hp >= min(need, plan.Hp) - 1e-6
+		@test bar[:len] <= 1
 		yd = _scb_fields(copy.layout.fields[:yaxis])[:domain]
 		@test bar[:len] > 0.4 * (yd[2] - yd[1])           # the 0.4 ratio was too short here
 		path = tempname() * ".png"

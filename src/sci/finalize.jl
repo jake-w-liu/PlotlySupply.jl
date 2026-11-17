@@ -2533,12 +2533,20 @@ function _room_bar_len(bar::AbstractDict, current::Float64, final::Float64; floo
 	return max(ours ? final : Float64(len), floor)
 end
 
+# Tick label lines a vertical bar's body keeps at least. plotly.js 2.35.2
+# gives an automatic colorbar axis at least five tick intervals
+# (`constrain(_length / 40, 4, 9) + 1`), rounded to a 1-2-5 step: three labels
+# on a typical range, drawn over each other on a body shorter than three
+# label lines (G63 at 5.25 x 2 in).
+const _ROOM_MIN_BAR_LINES = 3
+
 # Shortest length (paper, of `extent_px` px) a vertical bar is drawn with: a
 # title above or below it takes its height from the bar's length, and plotly
 # fails on a bar left without length ("Something went wrong with axis
-# scaling", G63). Room for the title and one tick label line is kept.
+# scaling", G63). Room for the title and `_ROOM_MIN_BAR_LINES` tick label
+# lines is kept.
 function _room_min_bar_len(font::Float64, bar::AbstractDict, extent_px::Float64)
-	need = _CBAR_LINE_EM * _fin_mapping_font_size(bar, :tickfont, font) + 2
+	need = _ROOM_MIN_BAR_LINES * _CBAR_LINE_EM * _fin_mapping_font_size(bar, :tickfont, font) + 2
 	text = _cbar_title_text(bar)
 	if text !== nothing && !isempty(text)
 		title = get(bar, :title, nothing)
