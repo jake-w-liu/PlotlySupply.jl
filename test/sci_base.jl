@@ -82,6 +82,129 @@ end
 		end
 	end
 
+	@testset "D11: _checked_range(partial = true) and _axis_limit_bound" begin
+		# Colour ranges (default) stay strict; axis ranges accept one open end.
+		@test _BS._checked_range((1, nothing), "f", "xrange"; partial = true) == Any[1, nothing]
+		@test _BS._checked_range([nothing, -2.5], "f", "xrange"; partial = true) == Any[nothing, -2.5]
+		@test _BS._checked_range((nothing, nothing), "f", "xrange"; partial = true) === nothing
+		@test _BS._is_one_sided_range(Any[1, nothing])
+		@test !_BS._is_one_sided_range(Any[1, 2])
+		@test !_BS._is_one_sided_range(nothing)
+		for (bad, needle) in (
+			((missing, 1), "f: `xrange`: an open bound of a one-sided limit is written `nothing`"),
+			((nothing, missing), "an open bound of a one-sided limit"),
+			((nothing, Inf), "f: `xrange` bounds must be finite"),
+			((true, nothing), "not Bool"),
+			((1, nothing, 2), "exactly 2 elements"),
+		)
+			@test _bs_throws(() -> _BS._checked_range(bad, "f", "xrange"; partial = true), needle)
+		end
+		# Bounds in the units plotly.js reads in autorangeoptions.
+		@test _BS._axis_limit_bound("log", 100, "f", "x") == 2.0
+		@test _BS._axis_limit_bound("linear", -3, "f", "x") == -3
+		@test _BS._axis_limit_bound("category", 1.5, "f", "x") == 1.5
+		@test _BS._axis_limit_bound("date", "2020-01-01", "f", "x") == 1.5778368e12
+		@test _BS._axis_limit_bound("date", "2020-01-01 12:30:15.5", "f", "x") ==
+			1.5778368e12 + (12 * 3600 + 30 * 60 + 15.5) * 1000
+		@test _BS._axis_limit_bound("-", "2020-01", "f", "x") == 1.5778368e12
+		@test _BS._axis_limit_bound("-", 7, "f", "x") == 7
+		@test _BS._axis_limit_bound("date", _BS.Dates.Date(2020, 1, 1), "f", "x") == 1.5778368e12
+		@test _BS._axis_limit_bound("date", _BS.Dates.DateTime(2020, 1, 1, 0, 0, 1), "f", "x") == 1.5778368e12 + 1000
+		@test _BS._axis_limit_bound("date", 1.0e12, "f", "x") == 1.0e12
+		for (type_name, bound, needle) in (
+			("log", 0, "f: `x` bounds on a logarithmic axis are data values and must be positive"),
+			("log", -1.0, "must be positive"),
+			("date", "01/02/2020", "f: `x`: \"01/02/2020\" is not a date"),
+			("date", "2020-13-01", "is not a valid calendar date"),
+			("date", "2021-02-29", "is not a valid calendar date"),
+			("date", :x, "is not a date"),
+			("linear", "a", "f: `x` bounds on a linear axis must be numbers"),
+		)
+			@test _bs_throws(() -> _BS._axis_limit_bound(type_name, bound, "f", "x"), needle)
+		end
+	end
+
+	@testset "D11: one-sided limits through the key-based primitives" begin
+		p = plot_scatter([1.0, 2.0, 3.0], [1.0, 4.0, 2.0])
+		_BS._apply_axis_range!(p, :y, (0, nothing), "t")
+		@test _bs_get(p, :yaxis, :autorange) === true
+		@test _bs_get(p, :yaxis, :range) === nothing
+		@test _BS._cmn_mapping_get(_bs_get(p, :yaxis, :autorangeoptions), :minallowed) == 0
+		@test _BS._cmn_mapping_get(_bs_get(p, :yaxis, :autorangeoptions), :maxallowed) === nothing
+		# The other end replaces the limit; a full range removes it.
+		_BS._apply_axis_range!(p, :y, (nothing, 10), "t")
+		opts = _bs_get(p, :yaxis, :autorangeoptions)
+		@test _BS._cmn_mapping_get(opts, :minallowed) === nothing
+		@test _BS._cmn_mapping_get(opts, :maxallowed) == 10
+		_BS._apply_axis_range!(p, :y, (-1, 5), "t")
+		@test _bs_get(p, :yaxis, :range) == [-1, 5]
+		@test _bs_get(p, :yaxis, :autorange) === false
+		@test _bs_get(p, :yaxis, :autorangeoptions) === nothing
+		# Reversed axis: the first bound is still the start (its largest value).
+		_BS._apply_axis_range!(p, :y, (5, -1), "t")
+		_BS._apply_axis_range!(p, :y, (6, nothing), "t")
+		@test _bs_get(p, :yaxis, :autorange) == "reversed"
+		@test _BS._cmn_mapping_get(_bs_get(p, :yaxis, :autorangeoptions), :maxallowed) == 6
+		# Log axis: data units in, log10 stored.
+		lg = plot_scatter([1.0, 10.0], [1.0, 2.0]; xscale = "log")
+		_BS._apply_axis_range!(lg, :x, (0.1, nothing), "t")
+		@test _BS._cmn_mapping_get(_bs_get(lg, :xaxis, :autorangeoptions), :minallowed) ≈ -1.0
+		# The limit keeps its data value across a log <-> linear switch.
+		_BS._apply_axis_scale!(lg, :x, "linear", "t")
+		@test _BS._cmn_mapping_get(_bs_get(lg, :xaxis, :autorangeoptions), :minallowed) ≈ 0.1
+		_BS._apply_axis_scale!(lg, :x, "log", "t")
+		@test _BS._cmn_mapping_get(_bs_get(lg, :xaxis, :autorangeoptions), :minallowed) ≈ -1.0
+		# A limit that cannot be shown on the new type is rejected before any
+		# write, unless the call sets a new range.
+		neg = plot_scatter([1.0, 10.0], [1.0, 2.0])
+		_BS._apply_axis_range!(neg, :x, (-5, nothing), "t")
+		before = _bs_layout_json(neg)
+		@test _bs_throws(
+			() -> _BS._validate_cartesian_options(neg, "t"; xscale = "log"),
+			"t: the current one-sided x limit (minimum = -5, maximum = nothing) cannot be shown on a \"log\" axis",
+		)
+		@test _BS._validate_cartesian_options(neg, "t"; xscale = "log", xrange = (1, nothing)) === nothing
+		@test _bs_layout_json(neg) == before
+		# Date axis: milliseconds (plotly.js ignores date strings there).
+		d = plot_scatter(["2020-01-05", "2020-02-01"], [1.0, 2.0])
+		relayout!(d; xaxis_type = "date")
+		_BS._apply_axis_range!(d, :x, ("2020-01-01", nothing), "t")
+		@test _BS._cmn_mapping_get(_bs_get(d, :xaxis, :autorangeoptions), :minallowed) == 1.5778368e12
+		@test _bs_throws(
+			() -> _BS._validate_cartesian_options(d, "t"; xrange = ("1/2/2020", nothing)),
+			"t: `xrange`: \"1/2/2020\" is not a date",
+		)
+		# Sticky field clips are replaced by the limit (a clip on the open end
+		# would freeze it at the data extent).
+		hm = plot_heatmap(collect(0.0:9), collect(0.0:4), rand(10, 5))
+		_BS._apply_axis_range!(hm, :x, (-3, nothing), "t")
+		opts = _bs_get(hm, :xaxis, :autorangeoptions)
+		@test _BS._cmn_mapping_get(opts, :minallowed) == -3
+		for name in (:clipmin, :clipmax, :include)
+			@test _BS._cmn_mapping_get(opts, name) === nothing
+		end
+		# A fixed end beyond every data value would show no data.
+		q = plot_scatter([1.0, 2.0], [1.0, 4.0])
+		before = _bs_layout_json(q)
+		@test _bs_throws(() -> _BS._apply_axis_range!(q, :y, (20, nothing), "t"), "t: `yrange` fixes one end of the axis beyond all of its data")
+		@test _bs_throws(() -> _BS._apply_axis_range!(q, :y, (nothing, 0.5), "t"), "beyond all of its data")
+		@test _bs_layout_json(q) == before
+		_BS._apply_axis_range!(q, :y, (4, nothing), "t")  # touching the data is fine
+		@test _BS._cmn_mapping_get(_bs_get(q, :yaxis, :autorangeoptions), :minallowed) == 4
+		# Aspect-linked axes: the open end comes from the data (5 % margin).
+		e = plot_scatter([0.0, 2.0], [0.0, 1.0])
+		_BS._apply_cartesian_plot_options!(e; xrange = (-2, nothing), equalar = true, apply_template = false, who = "t")
+		@test _bs_get(e, :xaxis, :autorange) === false
+		@test _bs_get(e, :xaxis, :range) ≈ [-2.0, 2.1]
+		@test _bs_get(e, :xaxis, :autorangeoptions) === nothing
+		empty_eq = Plot()
+		_BS._apply_equal_aspect!(empty_eq, _BS._cell_target(empty_eq; who = "t"); who = "t")
+		@test _bs_throws(
+			() -> _BS._apply_axis_range!(empty_eq, :x, (0, nothing), "t"),
+			"t: `xrange` = (0, nothing) is a one-sided limit on an axis with a locked aspect ratio",
+		)
+	end
+
 	@testset "_apply_axis_range!: DATA units on log axes, checked before any write" begin
 		p = plot_scatter([1.0, 10.0, 100.0], [1.0, 2.0, 3.0]; xscale = "log")
 		@test _BS._apply_axis_range!(p, :x, (1, 1000), "t") === nothing
@@ -102,7 +225,6 @@ end
 			([true, false], "not Bool"),
 			((1, Inf), "bounds must be finite"),
 			([1, 2, 3], "exactly 2 elements"),
-			([nothing, 10], "partial ranges"),
 			(("1", "10"), "t: `xrange` bounds on a log axis must be numbers"),
 		)
 			@test _bs_throws(() -> _BS._apply_axis_range!(p, :x, bad, "t"), needle)
@@ -155,7 +277,8 @@ end
 			((xrange = [1, 2, 3],), "t: `xrange` must have exactly 2 elements"),
 			((yrange = [true, false],), "t: `yrange` range bounds must be numbers"),
 			((xrange = (1, NaN),), "t: `xrange` bounds must be finite"),
-			((yrange = [nothing, 1],), "t: `yrange`: partial ranges are not supported"),
+			((yrange = [missing, 1],), "t: `yrange`: an open bound of a one-sided limit is written `nothing`"),
+			((xrange = (0, nothing), xscale = "log"), "t: `xrange` bounds on a logarithmic axis are data values and must be positive"),
 			((xrange = (0, 10), xscale = "log"), "t: `xrange` bounds on a logarithmic axis are data values and must be positive"),
 			((yrange = (-1, 10), yscale = "log"), "t: `yrange` bounds on a logarithmic axis"),
 			((xrange = ("a", "b"), xscale = "linear"), "t: `xrange` bounds on a linear axis must be numbers"),
@@ -173,7 +296,6 @@ end
 		# Public constructors reject before creating anything.
 		@test _bs_throws(() -> plot_scatter([1.0, 2.0], [1.0, 2.0]; xrange = [1, 1]), "plot_scatter: `xrange`: the range bounds must differ")
 		@test _bs_throws(() -> plot_scatter([1.0, 2.0], [1.0, 2.0]; yrange = [true, false]), "not Bool")
-		@test _bs_throws(() -> plot_scatter([1.0, 2.0], [1.0, 2.0]; xrange = [nothing, 1]), "partial ranges")
 		@test _bs_throws(() -> plot_scatter([1.0, 2.0], [1.0, 2.0]; xscale = "linear", xrange = ("a", "b")), "bounds on a linear axis must be numbers")
 		auto = plot_scatter([1.0, 2.0], [1.0, 2.0]; xrange = [nothing, nothing])
 		@test _bs_get(auto, :xaxis, :range) === nothing
