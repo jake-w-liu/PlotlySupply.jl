@@ -227,7 +227,7 @@ using Test, PlotlySupply
 		t = fig.data[end].fields
 		@test t[:x] == [nothing] && t[:y] == [nothing]
 		@test t[:name] == "line only" && t[:showlegend] === true && t[:hoverinfo] == "skip"
-		@test t[:mode] == "lines" && sd(t[:line])[:color] == "red" && sd(t[:line])[:dash] == "dash" && sd(t[:line])[:width] == 3
+		@test t[:mode] == "lines" && sd(t[:line])[:color] == "#FF0000" && sd(t[:line])[:dash] == "dash" && sd(t[:line])[:width] == 3
 		legend_entry!(fig, "marker only"; mode = :markers, color = "#d62728", marker_symbol = "o", marker_size = 10)
 		t = fig.data[end].fields
 		@test t[:mode] == "markers" && sd(t[:marker])[:symbol] == "circle" && sd(t[:marker])[:size] == 10
@@ -239,7 +239,19 @@ using Test, PlotlySupply
 		legend_entry!(fig, " ")
 		@test sd(fig.data[end].fields[:line])[:color] == "rgba(0,0,0,0)"   # spacer: no symbol
 		legend_entry!(fig, " "; color = "blue")
-		@test sd(fig.data[end].fields[:line])[:color] == "blue"
+		@test sd(fig.data[end].fields[:line])[:color] == "#0000FF"
+		# G10/G49: colours are validated and written as CSS plotly.js draws;
+		# matplotlib grey levels become their hex grey.
+		legend_entry!(fig, "grey"; mode = "lines+markers", color = "0.35", marker_color = "0.5", marker_line_color = :black)
+		t = fig.data[end].fields
+		@test sd(t[:line])[:color] == "#595959"
+		@test sd(t[:marker])[:color] == "#808080" && sd(sd(t[:marker])[:line])[:color] == "#000000"
+		legend_entry!(fig, "unfilled patch"; patch = true, color = "black", marker_color = "none", marker_line_width = 1)
+		m = sd(fig.data[end].fields[:marker])
+		@test m[:color] == "rgba(0,0,0,0)" && sd(m[:line])[:color] == "#000000"
+		legend_entry!(fig, "hollow again"; mode = "markers", marker_symbol = "s", marker_color = "None", color = "0")
+		m = sd(fig.data[end].fields[:marker])
+		@test m[:symbol] == "square-open" && m[:color] == "#000000"
 		legend_entry!(fig, "math \$\\sigma\$"; legendgroup = "g1", opacity = 0.5)
 		@test fig.data[end].fields[:name] == PS._label("math \$\\sigma\$")
 		@test fig.data[end].fields[:legendgroup] == "g1" && fig.data[end].fields[:opacity] == 0.5
@@ -257,6 +269,9 @@ using Test, PlotlySupply
 		@test throws_arg(() -> legend_entry!(fig, "x"; row = 1, col = 1), "legend_entry!")
 		@test throws_arg(() -> legend_entry!(fig, "x"; show = true), "`show` is not supported")
 		@test throws_arg(() -> legend_entry!(fig, "<b>\$x\$</b>"), "legend_entry!: invalid label")
+		@test throws_arg(() -> legend_entry!(fig, "x"; color = "nope"), "legend_entry!: `color`: invalid colour \"nope\"")
+		@test throws_arg(() -> legend_entry!(fig, "x"; marker_color = "1.5"), "legend_entry!: `marker_color`: a numeric colour")
+		@test throws_arg(() -> legend_entry!(fig, "x"; marker_line_color = "#12"), "`marker_line_color`")
 		@test length(fig.data) == n && layout_json(fig) == before
 		legend_entry!(fig, "custom dash"; dash = "5px,10px")
 		@test sd(fig.data[end].fields[:line])[:dash] == "5px,10px"

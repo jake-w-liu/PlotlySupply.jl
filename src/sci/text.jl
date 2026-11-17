@@ -68,6 +68,411 @@ function _text_checked_label(s::AbstractString, who::AbstractString; align::Symb
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Text extent estimates (tight_layout!, legend columns, decoration stacking)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Text is measured without the renderer, so these are estimates that err on
+# the large side. The glyph classes follow Verdana, the widest face in
+# plotly's default font stack ("Open Sans", verdana, arial, sans-serif), and
+# MathJax 2's TeX fonts; the calibration renders (plotly.js 2.35.2, 12 and
+# 20 px annotations) are listed with the tests in test/sci_style.jl.
+#
+# Glyph advance classes in em (narrow: i, l, t, punctuation, space; wide: M,
+# W, m, w, @, %; capitals; everything else).
+const _TEXT_EM_NARROW = 0.36
+const _TEXT_EM_WIDE = 0.9
+const _TEXT_EM_CAPITAL = 0.7
+const _TEXT_EM_NORMAL = 0.62
+# plotly.js turns raw newlines into spaces (svg_text_utils), so they are
+# measured as one.
+const _TEXT_NARROW_CHARS = Set("iljtfrI.,:;!|'` ()[]\n\r\t")
+const _TEXT_WIDE_CHARS = Set("MWmw@%")
+# plotly.js line break (svg_text_utils BR_TAG_ALL, applied to `<…>` tokens).
+const _TEXT_BR_TAG = r"<br(\s+[^<>]*)?>"i
+# plotly.js lays plain text out at 1.3 em per line (svg_text_utils
+# LINE_SPACING). A MathJax row with scripts or parentheses is ~1.2 em tall
+# (array rows are spaced 1.2 em apart), one with a fraction, root or stacked
+# operator up to ~1.9 em.
+const _TEXT_PLAIN_LINE_EM = 1.3
+const _TEXT_MATH_ROW_EM = 1.3
+const _TEXT_MATH_TALL_ROW_EM = 1.9
+# Width (em) of a TeX relation or binary-operator glyph (0.78 em) with the
+# thick/medium space MathJax puts on each side, of a Greek letter or other
+# symbol command, and of a command the estimator does not know.
+const _TEXT_EM_MATH_OPERATOR = 1.25
+const _TEXT_EM_SYMBOL = 0.62
+const _TEXT_EM_UNKNOWN = 0.7
+# Script (sub/superscript) size relative to its base.
+const _TEXT_SCRIPT_SCALE = 0.7
+# MathJax 2 size switches (relative to \normalsize).
+const _TEXT_TEX_SIZES = Dict(
+	"tiny" => 0.5, "scriptsize" => 0.7, "footnotesize" => 0.8, "small" => 0.9,
+	"normalsize" => 1.0, "large" => 1.2, "Large" => 1.44, "LARGE" => 1.73,
+	"huge" => 2.07, "Huge" => 2.49,
+)
+# Commands whose single argument is typeset as it is (its width counts).
+const _TEXT_TEX_WRAPPERS = Set([
+	"text", "textbf", "textit", "textrm", "textsf", "texttt", "textup", "emph",
+	"mbox", "hbox", "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mathcal",
+	"mathbb", "mathfrak", "mathscr", "boldsymbol", "bm", "operatorname", "mathnormal",
+	"hat", "bar", "vec", "tilde", "dot", "ddot", "check", "breve", "acute", "grave",
+	"widehat", "widetilde", "overline", "underline", "mathring", "pmb", "displaystyle",
+	"textstyle", "underbrace", "overbrace",
+])
+const _TEXT_TEX_TEXT_MODE = Set([
+	"text", "textbf", "textit", "textrm", "textsf", "texttt", "textup", "emph", "mbox", "hbox",
+])
+# Two-argument constructs drawn one above the other (width = the wider part).
+const _TEXT_TEX_STACKED = Set(["frac", "dfrac", "tfrac", "cfrac", "binom", "dbinom", "tbinom", "overset", "underset", "stackrel"])
+const _TEXT_TEX_BIG_OPERATORS = Set(["sum", "prod", "int", "iint", "iiint", "oint", "coprod", "bigcup", "bigcap", "bigoplus", "bigotimes"])
+const _TEXT_TEX_OPERATORS = Set([
+	"cdot", "times", "pm", "mp", "div", "leq", "geq", "le", "ge", "neq", "ne", "approx",
+	"sim", "simeq", "equiv", "propto", "to", "rightarrow", "leftarrow", "Rightarrow",
+	"Leftarrow", "leftrightarrow", "Leftrightarrow", "mapsto", "in", "notin", "subset",
+	"supset", "subseteq", "supseteq", "cup", "cap", "wedge", "vee", "otimes", "oplus",
+	"ll", "gg", "perp", "parallel", "mid", "circ", "ast", "star", "bullet", "longrightarrow",
+])
+# Explicit spaces (em).
+const _TEXT_TEX_SPACES = Dict(
+	"quad" => 1.0, "qquad" => 2.0, "enspace" => 0.5, "thinspace" => 0.17,
+	"," => 0.17, ":" => 0.22, ";" => 0.28, "!" => -0.17, " " => 0.33,
+)
+
+function _text_char_em(c::Char)
+	c in _TEXT_NARROW_CHARS && return _TEXT_EM_NARROW
+	c in _TEXT_WIDE_CHARS && return _TEXT_EM_WIDE
+	isuppercase(c) && return _TEXT_EM_CAPITAL
+	return _TEXT_EM_NORMAL
+end
+
+# Width (em) of plain text after HTML markup is removed: tags are dropped,
+# entities count as one glyph, and <sub>/<sup> content is set at script size.
+function _text_plain_em(s::AbstractString)
+	width = 0.0
+	scale = 1.0
+	chars = collect(s)
+	i = 1
+	n = length(chars)
+	while i <= n
+		c = chars[i]
+		if c == '<'
+			close = findnext(==('>'), chars, i)
+			if close !== nothing
+				tag = lowercase(String(chars[(i + 1):(close - 1)]))
+				if startswith(tag, "sub") || startswith(tag, "sup")
+					scale = _TEXT_SCRIPT_SCALE
+				elseif startswith(tag, "/sub") || startswith(tag, "/sup")
+					scale = 1.0
+				end
+				i = close + 1
+				continue
+			end
+		elseif c == '&'
+			semi = findnext(==(';'), chars, i)
+			if semi !== nothing && semi - i <= 8
+				width += scale * _TEXT_EM_NORMAL
+				i = semi + 1
+				continue
+			end
+		end
+		width += scale * _text_char_em(c)
+		i += 1
+	end
+	return width
+end
+
+# TeX fragment parser state: `chars` and the read position.
+mutable struct _TextTeX
+	chars::Vector{Char}
+	pos::Int
+end
+
+_text_tex_peek(t::_TextTeX) = t.pos <= length(t.chars) ? t.chars[t.pos] : nothing
+
+# Read a command name after a backslash (letters, or one non-letter).
+function _text_tex_command!(t::_TextTeX)
+	t.pos += 1  # the backslash
+	start = t.pos
+	while t.pos <= length(t.chars) && isletter(t.chars[t.pos])
+		t.pos += 1
+	end
+	if t.pos == start
+		t.pos > length(t.chars) && return ""
+		t.pos += 1
+		return string(t.chars[start])
+	end
+	return String(t.chars[start:(t.pos - 1)])
+end
+
+# Skip spaces; read one argument: a `{…}` group, a command, or one character.
+# Returns (width_em, tall).
+function _text_tex_argument!(t::_TextTeX, text_mode::Bool)
+	while (c = _text_tex_peek(t)) !== nothing && c == ' '
+		t.pos += 1
+	end
+	c = _text_tex_peek(t)
+	c === nothing && return (0.0, false)
+	if c == '{'
+		t.pos += 1
+		return _text_tex_sequence!(t, text_mode; stop = '}')
+	elseif c == '\\'
+		return _text_tex_token!(t, text_mode)
+	end
+	t.pos += 1
+	return (text_mode ? _text_char_em(c) : _text_tex_math_char_em(c), false)
+end
+
+# A `{…}` group read and thrown away (colour names, array column specs).
+function _text_tex_skip_group!(t::_TextTeX)
+	while (c = _text_tex_peek(t)) !== nothing && c == ' '
+		t.pos += 1
+	end
+	_text_tex_peek(t) == '{' || return nothing
+	depth = 0
+	while (c = _text_tex_peek(t)) !== nothing
+		t.pos += 1
+		c == '{' && (depth += 1)
+		c == '}' && (depth -= 1; depth == 0 && return nothing)
+	end
+	return nothing
+end
+
+function _text_tex_math_char_em(c::Char)
+	isspace(c) && return 0.0  # TeX ignores spaces in math mode
+	c in "=+<>" && return _TEXT_EM_MATH_OPERATOR
+	c == '-' && return _TEXT_EM_MATH_OPERATOR
+	return _text_char_em(c)
+end
+
+# One token at the current position (a command with its arguments, a group, a
+# script, a character). Returns (width_em, tall).
+function _text_tex_token!(t::_TextTeX, text_mode::Bool)
+	c = _text_tex_peek(t)
+	c === nothing && return (0.0, false)
+	if c == '{'
+		t.pos += 1
+		return _text_tex_sequence!(t, text_mode; stop = '}')
+	elseif c == '^' || c == '_'
+		t.pos += 1
+		w, tall = _text_tex_argument!(t, text_mode)
+		return (_TEXT_SCRIPT_SCALE * w, tall)
+	elseif c != '\\'
+		t.pos += 1
+		return (text_mode ? _text_char_em(c) : _text_tex_math_char_em(c), false)
+	end
+	name = _text_tex_command!(t)
+	isempty(name) && return (0.0, false)
+	haskey(_TEXT_TEX_SPACES, name) && return (_TEXT_TEX_SPACES[name], false)
+	name in ("{", "}", "\$", "%", "#", "&", "_") && return (_TEXT_EM_NORMAL, false)
+	name in _TEXT_TEX_WRAPPERS && return _text_tex_argument!(t, name in _TEXT_TEX_TEXT_MODE)
+	if name in _TEXT_TEX_STACKED
+		w1, _ = _text_tex_argument!(t, text_mode)
+		w2, _ = _text_tex_argument!(t, text_mode)
+		return (max(w1, w2) + 0.2, true)
+	elseif name == "sqrt"
+		if _text_tex_peek(t) == '['
+			close = findnext(==(']'), t.chars, t.pos)
+			close === nothing || (t.pos = close + 1)
+		end
+		w, _ = _text_tex_argument!(t, text_mode)
+		return (w + 0.9, true)
+	elseif name in ("left", "right", "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr")
+		# The delimiter that follows is one glyph.
+		w, _ = _text_tex_argument!(t, text_mode)
+		return (max(w, 0.4), name in ("Big", "bigg", "Bigg", "Bigl", "Bigr"))
+	elseif name in ("color", "label", "hspace", "vspace", "phantom", "hphantom", "vphantom")
+		_text_tex_skip_group!(t)
+		return (0.0, false)
+	elseif name == "textcolor"
+		_text_tex_skip_group!(t)
+		return _text_tex_argument!(t, text_mode)
+	elseif name == "unicode"
+		_text_tex_skip_group!(t)
+		return (_TEXT_EM_NORMAL, false)
+	elseif name == "begin"
+		_text_tex_skip_group!(t)
+		# Optional column spec of an array: `{c|c}`.
+		_text_tex_peek(t) == '{' && _text_tex_skip_group!(t)
+		rows = _text_tex_rows!(t, text_mode)
+		width = isempty(rows) ? 0.0 : maximum(first, rows)
+		return (width, length(rows) > 1 || any(last, rows))
+	elseif name == "end"
+		_text_tex_skip_group!(t)
+		return (0.0, false)
+	elseif haskey(_TEXT_TEX_SIZES, name)
+		return (0.0, false)  # handled by the enclosing sequence
+	elseif name in _TEXT_TEX_BIG_OPERATORS
+		return (1.0, true)
+	elseif name in _TEXT_TEX_OPERATORS
+		return (_TEXT_EM_MATH_OPERATOR, false)
+	elseif length(name) == 1
+		return (_TEXT_EM_NORMAL, false)
+	elseif all(isletter, name) && length(name) <= 7 && !isuppercase(name[1])
+		# Greek letters and named symbols (\alpha, \infty, \partial, …).
+		return (_TEXT_EM_SYMBOL, false)
+	end
+	return (_TEXT_EM_UNKNOWN, false)
+end
+
+# A token sequence up to `stop` (consumed) or the end. A size switch scales
+# the rest of the sequence. Returns (width_em, tall).
+function _text_tex_sequence!(t::_TextTeX, text_mode::Bool; stop = nothing)
+	width = 0.0
+	tall = false
+	scale = 1.0
+	while (c = _text_tex_peek(t)) !== nothing
+		if stop !== nothing && c == stop
+			t.pos += 1
+			break
+		end
+		if c == '\\'
+			save = t.pos
+			name = _text_tex_command!(t)
+			if haskey(_TEXT_TEX_SIZES, name)
+				scale = _TEXT_TEX_SIZES[name]
+				continue
+			end
+			(name == "\\" || name == "end") && (t.pos = save; break)
+			t.pos = save
+		elseif c == '&'
+			break
+		end
+		w, h = _text_tex_token!(t, text_mode)
+		width += scale * w
+		tall |= h
+	end
+	return (width, tall)
+end
+
+# Rows of an environment body up to `\end{…}`: each row is the sum of its
+# `&`-separated cells (1 em gap between cells). Returns [(width_em, tall), …].
+function _text_tex_rows!(t::_TextTeX, text_mode::Bool)
+	rows = Tuple{Float64, Bool}[]
+	row_width = 0.0
+	row_tall = false
+	cells = 0
+	while true
+		w, tall = _text_tex_sequence!(t, text_mode)
+		row_width += w + (cells > 0 ? 1.0 : 0.0)
+		row_tall |= tall
+		cells += 1
+		c = _text_tex_peek(t)
+		if c == '&'
+			t.pos += 1
+			continue
+		end
+		push!(rows, (row_width, row_tall))
+		row_width, row_tall, cells = 0.0, false, 0
+		c === nothing && break
+		save = t.pos
+		name = _text_tex_command!(t)
+		if name == "\\"
+			continue
+		elseif name == "end"
+			_text_tex_skip_group!(t)
+			break
+		end
+		t.pos = save + 1  # not a row end: skip the backslash and go on
+	end
+	return rows
+end
+
+# Rows (width_em, height_em) of one `$…$` expression. A top-level array (as
+# `mathtext` writes multi-line labels) gives one row per array row.
+function _text_tex_box(math::AbstractString)
+	t = _TextTeX(collect(math), 1)
+	scale = 1.0
+	# Leading size switches and braces around the whole expression.
+	while true
+		while (c = _text_tex_peek(t)) !== nothing && (c == ' ' || c == '{')
+			t.pos += 1
+		end
+		_text_tex_peek(t) == '\\' || break
+		save = t.pos
+		name = _text_tex_command!(t)
+		if haskey(_TEXT_TEX_SIZES, name)
+			scale = _TEXT_TEX_SIZES[name]
+			continue
+		elseif name == "begin"
+			_text_tex_skip_group!(t)
+			_text_tex_peek(t) == '{' && _text_tex_skip_group!(t)
+			rows = _text_tex_rows!(t, false)
+			# Anything after the environment (rare) extends the last row.
+			rest, rest_tall = _text_tex_sequence!(t, false)
+			isempty(rows) && push!(rows, (0.0, false))
+			rows[end] = (rows[end][1] + rest, rows[end][2] || rest_tall)
+			return [(scale * w, scale * (tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM)) for (w, tall) in rows]
+		end
+		t.pos = save
+		break
+	end
+	t.pos = 1
+	w, tall = _text_tex_sequence!(t, false)
+	return [(scale * w, scale * (tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM))]
+end
+
+# Split `s` at unescaped `$` signs into (is_math, segment) pairs.
+function _text_math_segments(s::AbstractString)
+	segments = Tuple{Bool, String}[]
+	buf = IOBuffer()
+	math = false
+	escaped = false
+	for c in s
+		if c == '$' && !escaped
+			push!(segments, (math, String(take!(buf))))
+			math = !math
+		else
+			print(buf, c)
+		end
+		escaped = c == '\\' && !escaped
+	end
+	push!(segments, (math, String(take!(buf))))
+	return [(m, seg) for (m, seg) in segments if !isempty(seg)]
+end
+
+"""
+	_text_extent(text, fontsize) -> (width_px, height_px)
+
+Estimated size of `text` as plotly.js draws it in an annotation, title or
+legend entry at `fontsize` px, without any frame or padding: plain text with
+HTML markup (`<br>`/newline line breaks, tags stripped, `<sub>`/`<sup>` at
+script size) at 1.3 em per line, and MathJax (`\$…\$`, as [`mathtext`](@ref)
+writes it) with TeX commands, braces and size switches interpreted: a
+top-level `array` gives one row per `\\\\`, `\\frac`/`\\sqrt` rows are taller.
+Estimates err on the large side (see the calibration note above). Never
+throws: unknown commands count as one glyph.
+"""
+function _text_extent(text::AbstractString, fontsize::Real)
+	fs = (fontsize isa Real && isfinite(fontsize) && fontsize > 0) ? Float64(fontsize) : 12.0
+	s = String(text)
+	isempty(strip(s)) && return (0.0, 0.0)
+	segments = _text_math_segments(s)
+	# Lines: plain text breaks at <br>/newline; a math segment contributes
+	# its rows (the first continues the current line, further rows add lines).
+	lines = Tuple{Float64, Float64}[(0.0, _TEXT_PLAIN_LINE_EM)]  # (width_em, height_em)
+	for (math, segment) in segments
+		if math
+			rows = _text_tex_box(segment)
+			for (k, (w, h)) in enumerate(rows)
+				k > 1 && push!(lines, (0.0, 0.0))
+				lw, lh = lines[end]
+				lines[end] = (lw + w, max(lh, h))
+			end
+		else
+			parts = split(segment, _TEXT_BR_TAG)
+			for (k, part) in enumerate(parts)
+				k > 1 && push!(lines, (0.0, _TEXT_PLAIN_LINE_EM))
+				lw, lh = lines[end]
+				lines[end] = (lw + _text_plain_em(part), max(lh, _TEXT_PLAIN_LINE_EM))
+			end
+		end
+	end
+	width = maximum(first, lines)
+	height = sum(last, lines)
+	return (width * fs, height * fs)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
 # F15: set_legend! extensions
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -879,11 +1284,36 @@ end
 const _TEXT_DASH_NAMES = ("solid", "dot", "dash", "longdash", "dashdot", "longdashdot")
 const _TEXT_DASH_LIST = r"^\s*\d+(\.\d+)?(px|%)?(\s*,\s*\d+(\.\d+)?(px|%)?)*\s*$"
 
+# One proxy colour keyword, validated and written as canonical CSS
+# ("#RRGGBB" or "rgba(r,g,b,a)") so plotly.js draws what the user named:
+# matplotlib grey levels ("0.35") and Colors.jl names are converted, anything
+# unparseable is an ArgumentError (plotly.js would silently draw its default
+# colour). "" stays "" (unset). "none" keeps its hollow-marker meaning for
+# `marker_color` and is fully transparent for the other keywords.
+function _text_proxy_color(value, name::AbstractString, who::AbstractString)
+	s = strip(String(value))
+	isempty(s) && return ""
+	if lowercase(s) == "none"
+		return name == "marker_color" ? "none" : "rgba(0,0,0,0)"
+	end
+	try
+		return _color_hex(s; who = who)
+	catch err
+		err isa ArgumentError || rethrow()
+		throw(ArgumentError(replace(err.msg, "$(who): " => "$(who): `$(name)`: "; count = 1)))
+	end
+end
+
 function _text_proxy(label, who; mode, color, dash, linewidth, marker_symbol, marker_size, marker_color, marker_line_color, marker_line_width, patch, legendgroup, opacity)
 	isempty(label) && throw(ArgumentError(
 		"$(who): `label` is empty, which would be an entry without text; use " *
 		"\" \" for a blank spacer entry.",
 	))
+	color = _text_proxy_color(color, "color", who)
+	marker_color = _text_proxy_color(marker_color, "marker_color", who)
+	marker_line_color = _text_proxy_color(marker_line_color, "marker_line_color", who)
+	# A patch has no open-symbol variant: "none" is an unfilled square.
+	patch === true && marker_color == "none" && (marker_color = "rgba(0,0,0,0)")
 	dash_s = String(dash)
 	(isempty(dash_s) || dash_s in _TEXT_DASH_NAMES || occursin(_TEXT_DASH_LIST, dash_s)) ||
 		throw(ArgumentError(
@@ -926,13 +1356,18 @@ a trace with null coordinates (`x = y = [null]`, `hoverinfo="skip"`,
 # Keywords
 - `mode = "lines"` (string or Symbol): `"lines"`, `"markers"` or `"lines+markers"`.
 - `color` (string or Symbol): line colour; also the marker colour when
-  `marker_color` is not given.
+  `marker_color` is not given. Every colour keyword takes a CSS colour
+  (`"red"`, `"#1f77b4"`, `"rgba(0,0,255,0.3)"`, `"hsl(…)"`), a matplotlib
+  grey level (`"0.35"`) or a Colors.jl colour name, and is written as
+  `"#RRGGBB"`/`"rgba(…)"`; anything else is an `ArgumentError`. `"none"` is
+  transparent (for `marker_color`: a hollow marker, or an unfilled patch).
 - `dash` (string or Symbol, `""` = solid) and `linewidth::Real` (0 = Plotly
   default): line style; `dash` is a Plotly dash name (`"dash"`, `"dot"`,
   `"dashdot"`, …).
 - `marker_symbol`: Plotly name or matplotlib code (`"o"`, `"s"`, `"^"`, `"x"`, …).
 - `marker_size::Real`, `marker_line_width::Real`: px (0 = default).
-- `marker_color`: face colour; `"none"` draws a hollow marker.
+- `marker_color`: face colour; `"none"` draws a hollow marker (an unfilled
+  square with `patch=true`; give it `marker_line_width > 0`).
 - `marker_line_color`: marker edge colour.
 - `patch::Bool = false`: a filled square (a matplotlib Rectangle handle) in
   `color`/`marker_color`; edge only when `marker_line_width > 0`.
