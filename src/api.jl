@@ -2728,6 +2728,8 @@ function subplots(
 	_apply_default_template!(p)
 	_apply_figure_title!(p, title)
 	_apply_figure_size!(p, "subplots"; width = width, height = height)
+	# Shared axes: keep every `matches` group autoranging (see finalize.jl).
+	_finalize_figure!(p)
 	fig = sync ?
 		plot(
 			p;
@@ -8065,9 +8067,8 @@ function _scat_series_styles(
 	styles = Vector{Any}(undef, n)
 	n == 0 && return styles
 	style = _active_style()
-	template = _style_template(style)
 	for index in 1:n
-		defaults = _style_trace_defaults(style, n_existing + index; template = template)
+		defaults = _style_trace_defaults(style, n_existing + index)
 		trace_mode = modes[index]
 		get(defaults, :markers, false) === true && trace_mode == "lines" &&
 			(trace_mode = "lines+markers")
@@ -18776,6 +18777,7 @@ include("sci/lines.jl")
 include("sci/mesh2d.jl")
 include("sci/fields.jl")
 include("sci/scene3d.jl")
+include("sci/finalize.jl")
 
 """
 	plot_choropleth(locations, z; locationmode=nothing, geojson=nothing,

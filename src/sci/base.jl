@@ -7,6 +7,13 @@
 # false), but unlike `NaN` it survives every strict-JSON serializer.
 const _GAP = nothing
 
+# Tick presets accepted wherever tick values are (`xticks!`/`yticks!`, the
+# `xticks`/`yticks` keywords): `:decades` labels a logarithmic axis at powers of
+# ten only, with unlabelled minor ticks; `:auto` restores Plotly's automatic
+# ticks. Family validators pass a preset through to `_apply_ticks!` unchanged.
+const _TICK_PRESETS = (:decades, :auto)
+_is_tick_preset(value) = value isa Symbol && value in _TICK_PRESETS
+
 # `[0, 0]` (or `(0, 0)`) is the package-wide "automatic range" sentinel;
 # `nothing` is accepted as an explicit synonym.
 function _is_auto_range(range)
