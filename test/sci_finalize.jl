@@ -137,8 +137,8 @@ end
 		xaxis = attr(matches = "x3"),
 		xaxis3 = attr(range = [-12, 126], autorange = false),   # fixed root: untouched
 		xaxis2 = attr(matches = "x4"),
-		xaxis4 = attr(),                                        # free root
-		yaxis = attr(),                                         # free root
+		xaxis4 = attr(showgrid = true),                         # free root
+		yaxis = attr(showgrid = true),                          # free root
 		yaxis2 = attr(matches = "y"),
 		yaxis3 = attr(autorange = "reversed"),                  # explicit: untouched
 		yaxis4 = attr(matches = "y3"),
@@ -146,6 +146,16 @@ end
 	)
 	updates = PlotlySupply._fin_match_group_updates(layout)
 	@test updates == Dict{Symbol, Any}(:xaxis4_autorange => true, :yaxis_autorange => true)
+	# A root that neither the layout nor a trace has is not created (plotly.js
+	# ignores the reference); one a trace references exists.
+	unknown = Layout(xaxis = attr(matches = "x7"))
+	@test isempty(PlotlySupply._fin_match_group_updates(unknown, [scatter(x = [1.0], y = [1.0])]))
+	@test PlotlySupply._fin_match_group_updates(unknown, [scatter(x = [1.0], y = [1.0], xaxis = "x7")]) ==
+		Dict{Symbol, Any}(:xaxis7_autorange => true)
+	m = plot_scatter([1.0, 2.0], [1.0, 2.0])
+	relayout!(m; xaxis_matches = "x7")
+	PlotlySupply._finalize_figure!(m)
+	@test !haskey(m.layout.fields, :xaxis7)
 
 	p = Plot(GenericTrace[], layout)
 	@test PlotlySupply._finalize_figure!(p) === true             # returns whether it wrote

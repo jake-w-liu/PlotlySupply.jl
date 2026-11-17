@@ -89,11 +89,22 @@ end
 # `autorange = true` on the roots every axis ranges over its data again.)
 #
 # Returns the `relayout!` updates that state `autorange = true` on every group
-# root that has neither a range nor an `autorange` entry of its own.
-function _fin_match_group_updates(layout::Layout)
+# root that has neither a range nor an `autorange` entry of its own. A root
+# that neither the layout nor a trace of `data` has does not exist for
+# plotly.js (it ignores the `matches` reference) and is not created.
+function _fin_match_group_updates(layout::Layout, data = ())
 	updates = Dict{Symbol, Any}()
 	fields = layout.fields
+	referenced = Set{Symbol}()
+	for trace in data
+		trace isa GenericTrace || continue
+		for key in (:xaxis, :yaxis)
+			axis = _fin_axis_key(_fin_string(get(trace.fields, key, nothing)))
+			axis === nothing || push!(referenced, axis)
+		end
+	end
 	for root in _fin_match_roots(layout)
+		(haskey(fields, root) || root in referenced) || continue
 		axis = get(fields, root, nothing)
 		_fin_has_range(axis) && continue
 		_fin_field(axis, :autorange) === nothing || continue
@@ -256,6 +267,25 @@ function _fin_image_extent(fields, letter::Char, islog::Bool)
 	return minmax(v0 - 0.5 * dv, v0 + dv * (n - 0.5))
 end
 
+# (lo, hi) of the finite values (positive ones when `islog`), `nothing` when
+# there is none, `:unsupported` for a value that is not a real number. A
+# function barrier: `values` comes out of a trace's `Dict{Symbol, Any}`, and
+# iterating it there would box every element (a million-point range then
+# allocates hundreds of MB).
+function _fin_values_extent(values, islog::Bool)
+	lo, hi = Inf, -Inf
+	for value in values
+		(value === nothing || value === missing) && continue
+		_fin_isreal(value) || return :unsupported
+		x = Float64(value)
+		isfinite(x) || continue
+		islog && x <= 0 && continue
+		lo = min(lo, x)
+		hi = max(hi, x)
+	end
+	return lo <= hi ? (lo, hi) : nothing
+end
+
 # Data extent of a scatter-type trace: its finite coordinates (positive ones
 # on a log axis, as plotly drops the rest), the implicit `x0 + i dx`
 # coordinates, and 0 for `fill = "tozerox"/"tozeroy"`. Error bars extend the
@@ -269,17 +299,9 @@ function _fin_scatter_extent(fields, letter::Char, islog::Bool)
 	values === nothing && return nothing
 	(values isa AbstractVector || values isa Tuple || values isa Base.Generator) ||
 		return :unsupported
-	lo, hi = Inf, -Inf
-	for value in values
-		(value === nothing || value === missing) && continue
-		_fin_isreal(value) || return :unsupported
-		x = Float64(value)
-		isfinite(x) || continue
-		islog && x <= 0 && continue
-		lo = min(lo, x)
-		hi = max(hi, x)
-	end
-	lo <= hi || return nothing
+	extent = _fin_values_extent(values, islog)
+	extent isa Tuple || return extent
+	lo, hi = extent
 	if !islog && _fin_string(get(fields, :fill, nothing)) == "tozero$(letter)"
 		lo = min(lo, 0.0)
 		hi = max(hi, 0.0)
@@ -1391,7 +1413,7 @@ function _fin_fit!(ctx::_FinContext)
 	# M4: the bars of a plot area (and those of its insets) that are ours to
 	# move go side by side right of the first one. In an area with another
 	# plot area to its right they must end before that area's tick labels
-	# (`_fin_inner_area_bars!`).
+	# (`_fin_inner_plan`, `_fin_narrow_columns!`, `_fin_place_inner!`).
 	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
 	Wp = max(W - margins.l - margins.r, 1.0)
 	Hp = max(H - margins.t - margins.b, 1.0)
@@ -1927,10 +1949,14 @@ Normalise the figure after a PlotlySupply constructor or mutator changed it
   height. A single figure without a width or height is sized to the field.
 - M4: further colorbars on the same plot area are placed side by side, or,
   in a cell with another plot area to its right that they would run into,
-  one below the other over the cell's height; the bar of a trace in an inset
-  goes right of the host cell. A coloraxis bar placed before the mutation
-  bound existing traces to it moves next to all of its plot areas. The
-  right margin grows to fit a math colorbar title drawn beside its bar.
+  one below the other over the cell's height; when even that does not end
+  before the tick labels of the next plot area, the cell's grid column gives
+  up the missing width (its cells keep aligned, panel titles follow, and the
+  column widens again when the bars go). Only a cell whose x domain is its
+  grid cell's, or was narrowed here, is narrowed. The bar of a trace in an
+  inset goes right of the host cell. A coloraxis bar placed before the
+  mutation bound existing traces to it moves next to all of its plot areas.
+  The right margin grows to fit a math colorbar title drawn beside its bar.
 
 Explicit user settings (ranges, `autorangeoptions`, domains outside the cell,
 placed colorbars) are never changed. `live` holds the traces of the live
@@ -1963,7 +1989,7 @@ function _fin_run!(fig, live, size, clone_readonly::Bool)
 	end
 	ctx = _FinContext(target, p, sf, readonly, clone_readonly, checked_size,
 		live === nothing ? nothing : collect(Any, live), insets, hosts)
-	updates = _fin_match_group_updates(p.layout)
+	updates = _fin_match_group_updates(p.layout, p.data)
 	_fin_sticky_updates!(updates, p)
 	wrote = _fin_relayout!(ctx, updates)
 	wrote |= _fin_fit!(ctx)
