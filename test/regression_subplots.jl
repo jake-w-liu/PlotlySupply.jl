@@ -46,6 +46,177 @@ function _rsp_live!(sf::SubplotFigure)
 	return renderer
 end
 
+using Dates
+import PlotlySupply.PlotlyBase.JSON
+
+# ── Rendered axes (hidden window) ─────────────────────────────────────────
+# Per Cartesian axis of the rendered figure: plotly's type, range (numbers,
+# or strings on a date axis), the `matches` it kept and the texts of the tick
+# labels that are drawn. `nothing` when the renderer cannot start (the
+# renderer checks are then skipped; the first failure is reported once).
+const _RSP_AXES_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const fl = gd._fullLayout;
+  const out = {};
+  for (const k of Object.keys(fl).filter(k => /^[xy]axis\d*$/.test(k))) {
+    const a = fl[k];
+    const id = k.replace('axis', '');
+    const labels = Array.from(gd.querySelectorAll('g.' + id + 'tick text'))
+      .filter(t => t.getBoundingClientRect().width > 0).map(t => t.textContent);
+    const title = (a.title && a.title.text && !/^Click to enter/.test(a.title.text)) ? a.title.text : null;
+    out[k] = {type: a.type, range: a.range.map(v => (typeof v === 'string') ? v : Number(v)),
+      matches: a.matches || null, labels: labels, title: title};
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+const _RSP_RENDERER_OK = Ref(true)
+
+function _rsp_render_axes(fig)
+	_RSP_RENDERER_OK[] || return nothing
+	p = fig isa SubplotFigure ? fig.plot : fig
+	q = Plot(deepcopy(p.data), deepcopy(p.layout))
+	relayout!(q; width = 700, height = 500)
+	sp = try
+		to_syncplot(q; show = false)
+	catch err
+		_RSP_RENDERER_OK[] = false
+		@warn "regression_subplots: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
+		return nothing
+	end
+	try
+		backend = PlotlySupply._syncplot_backend(sp)
+		script = replace(_RSP_AXES_JS, "__DIV__" => PlotlySupply._json_js(sp.divid))
+		for _ in 1:300
+			raw = Base.invokelatest(() -> backend.run(sp.window, script))
+			(raw === nothing || raw == "null") || return JSON.parse(String(raw))
+			sleep(0.05)
+		end
+		error("regression_subplots: the figure did not render within 15 s")
+	finally
+		close(sp)
+	end
+end
+
+# ── Shared-axis table (G61) ───────────────────────────────────────────────
+const _RSP_SHARE_CELLS = ((1, 1), (1, 2), (2, 1), (2, 2))
+
+# The cells whose `letter` axes plotly.py's sharing `mode` groups together.
+function _rsp_share_groups(letter::Symbol, mode)
+	mode === false && return [[cell] for cell in _RSP_SHARE_CELLS]
+	mode == "all" && return [collect(_RSP_SHARE_CELLS)]
+	per_column = letter === :x ? (mode === true || mode == "columns") : mode == "columns"
+	return per_column ? [[(1, c), (2, c)] for c in 1:2] : [[(r, 1), (r, 2)] for r in 1:2]
+end
+
+# Whether the tick labels of the `letter` axis of `cell` are hidden (only the
+# bottom row keeps x labels, only the first column y labels).
+_rsp_share_hidden(letter::Symbol, mode, cell) = letter === :x ?
+	(cell[1] == 1 && (mode === true || mode == "columns" || mode == "all")) :
+	(cell[2] == 2 && (mode === true || mode == "rows" || mode == "all"))
+
+_rsp_share_index(cell) = (cell[1] - 1) * 2 + cell[2]
+
+# Data of `cell` along the shared letter: positions 2k+1..2k+5 (k the cell's
+# index), or dates 10k..10k+4 days after 2020-01-01.
+_rsp_share_data(scale::Symbol, cell) = scale === :date ?
+	[Date(2020, 1, 1) + Day(10 * _rsp_share_index(cell) + i) for i in 0:4] :
+	Float64[2 * _rsp_share_index(cell) + i for i in 1:5]
+
+const _RSP_SHARE_RANGE = Dict(:date => ["2020-01-15", "2020-02-10"])
+_rsp_share_range(scale::Symbol) = get(_RSP_SHARE_RANGE, scale, [4.0, 9.0])
+
+# A 2 x 2 grid sharing its `letter` axes with `mode`; the scale is applied on
+# cell (1, 1) (`:log` through the plot call, `:reversed` through
+# update_*axes!, `:date` by date data in every cell) and, with `ranged`, the
+# range `_rsp_share_range(scale)` is set on cell (1, 2) with xrange!/yrange!.
+function _rsp_share_figure(letter::Symbol, mode, scale::Symbol, ranged::Bool)
+	kw = letter === :x ? (shared_xaxes = mode,) : (shared_yaxes = mode,)
+	sf = subplots(2, 2; sync = false, kw...)
+	for cell in _RSP_SHARE_CELLS
+		base = _rsp_share_data(scale, cell)
+		values = Float64[1, 3, 2, 5, 4]
+		x, y = letter === :x ? (base, values) : (values, base)
+		scale_kw = (cell == (1, 1) && scale === :log) ?
+			(letter === :x ? (xscale = "log",) : (yscale = "log",)) : NamedTuple()
+		plot_scatter!(sf, x, y; row = cell[1], col = cell[2], scale_kw...)
+	end
+	if scale === :reversed
+		letter === :x ? update_xaxes!(sf; row = 1, col = 1, autorange = "reversed") :
+			update_yaxes!(sf; row = 1, col = 1, autorange = "reversed")
+	end
+	if ranged
+		range = _rsp_share_range(scale)
+		letter === :x ? xrange!(sf, range; row = 1, col = 2) : yrange!(sf, range; row = 1, col = 2)
+	end
+	return sf
+end
+
+_rsp_share_key(sf, letter::Symbol, cell) = begin
+	t = PlotlySupply._cell_target(sf; row = cell[1], col = cell[2])
+	letter === :x ? t.xkey : t.ykey
+end
+
+# ── Completeness: every exported mutator on cell (2, 2) ──────────────────
+# What a call changed on one cell: its layout objects, its traces (by axis /
+# subplot reference, or by domain), the shapes/annotations/images on its axes
+# or named after it (cell titles), its inset records and the legends its
+# traces use.
+function _rsp_cell_state(sf::SubplotFigure, r::Int, c::Int)
+	p = sf.plot
+	refs = p.layout.subplots.grid_ref[r, c]
+	kind = String(first(refs).subplot_kind)
+	ids = Set{String}(string(v) for ref in refs for (k, v) in _rsp_fields(ref.trace_kwargs) if k in (:xaxis, :yaxis, :scene, :subplot, :geo))
+	cell_domain = _rsp_fields(get(_rsp_fields(first(refs).trace_kwargs), :domain, nothing))
+	objects = [JSON.json(get(p.layout.fields, key, nothing)) for ref in refs for key in ref.layout_keys]
+	traces = String[]
+	legends = Set{String}()
+	for trace in p.data
+		trace_kind = first(PlotlySupply._trace_subplot_kind(trace))
+		on_cell = if trace_kind == "xy"
+			kind == "xy" && string(get(trace.fields, :xaxis, "x")) in ids &&
+				string(get(trace.fields, :yaxis, "y")) in ids
+		elseif trace_kind == "domain"
+			domain = _rsp_fields(get(trace.fields, :domain, nothing))
+			kind == "domain" && cell_domain !== nothing && domain !== nothing &&
+				collect(_rsp_fields(domain)[:x]) == collect(cell_domain[:x]) &&
+				collect(_rsp_fields(domain)[:y]) == collect(cell_domain[:y])
+		else
+			any(haskey(trace.fields, k) && string(trace.fields[k]) in ids for k in (:scene, :subplot, :geo))
+		end
+		on_cell || continue
+		push!(traces, JSON.json(trace))
+		push!(legends, string(get(trace.fields, :legend, "legend")))
+	end
+	strip_domain(ref) = replace(string(ref), " domain" => "")
+	items = String[]
+	for key in (:shapes, :annotations, :images)
+		for item in get(p.layout.fields, key, Any[])
+			fields = item isa _RSP_PB.Shape ? item.fields : _rsp_fields(item)
+			on_axes = strip_domain(get(fields, :xref, "")) in ids || strip_domain(get(fields, :yref, "")) in ids
+			named = endswith(string(get(fields, :name, "")), ":$(r):$(c)")
+			(on_axes || named) && push!(items, JSON.json(item))
+		end
+	end
+	legend_objects = [JSON.json(get(p.layout.fields, Symbol(name), nothing)) for name in sort!(collect(legends))]
+	insets = [(record.xkey, record.ykey, JSON.json(get(p.layout.fields, record.xkey, nothing)))
+		for record in sf.insets if (record.row, record.col) == (r, c)]
+	return (objects = objects, traces = traces, items = items, legends = legend_objects, insets = insets)
+end
+
+# A 2 x 2 grid whose cell (2, 2) is of `kind` (the others Cartesian), with a
+# trace in cell (1, 1), which is the active cell.
+function _rsp_complete_figure(kind::AbstractString)
+	specs = kind == "xy" ? [Spec() Spec(); Spec() Spec()] : [Spec() Spec(); Spec() Spec(kind = kind)]
+	sf = subplots(2, 2; sync = false, specs = specs)
+	plot_scatter!(sf, [1.0, 2.0, 3.0], [1.0, 4.0, 9.0]; row = 1, col = 1)
+	subplot!(sf, 1, 1)
+	return sf
+end
+
 @testset "regression: subplots infrastructure" begin
 	@testset "subplots: figure title, size and window options" begin
 		sf = subplots(1, 2; sync=false)
@@ -685,7 +856,7 @@ end
 		axis_before = deepcopy(_rsp_layout(live)[:xaxis2])
 		count_before = length(live.plot.data)
 		renderer.fail = true
-		@test_throws Exception PlotlySupply._subplot_delegate_mutator!(live, drop_ticks, [1.0, 10.0], [1.0, 2.0]; row=1, col=2)
+		@test_throws PlotlySupply._SyncPlotDesynchronizationError PlotlySupply._subplot_delegate_mutator!(live, drop_ticks, [1.0, 10.0], [1.0, 2.0]; row=1, col=2)
 		renderer.fail = false
 		@test _rsp_layout(live)[:xaxis2] == axis_before
 		@test length(live.plot.data) == count_before
@@ -733,6 +904,106 @@ end
 		@test PlotlySupply._subplot_transplanted_root_keys(
 			Plot(GenericTrace[], Layout(coloraxis10=attr(cmin=0), coloraxis2=attr(cmin=1), coloraxisfoo=attr(cmin=2))),
 		) == (:font, :coloraxis, :coloraxis2, :coloraxis10)
+	end
+
+	@testset "real families: style cycles, colour axes and log ranges per cell (Y19, Y21, Y29, Y30, Y32, Y36)" begin
+		# Y32: the dash/marker cycle runs across geo, ternary and xy cells.
+		mixed = subplots(1, 3; sync=false, specs=[Spec(kind="geo") Spec(kind="ternary") Spec()])
+		with_style(; cycle=:dash_marker) do
+			plot_scattergeo!(mixed, [0.0, 1.0], [0.0, 1.0]; row=1, col=1, mode="lines")
+			plot_ternary!(mixed, [0.2, 0.3], [0.3, 0.3], [0.5, 0.4]; row=1, col=2, mode="lines")
+			plot_scatter!(mixed, [1.0, 2.0], [1.0, 2.0]; row=1, col=3)
+		end
+		@test [t[:type] for t in mixed.plot.data] == ["scattergeo", "scatterternary", "scatter"]
+		@test [_rsp_fields(t[:line])[:dash] for t in mixed.plot.data] == ["solid", "dash", "dot"]
+		@test [_rsp_fields(t[:marker])[:symbol] for t in mixed.plot.data] == ["circle", "square", "diamond"]
+		# Y21/Y29: a field family in another cell does not restart the cycle,
+		# exactly as on one figure.
+		cells = subplots(1, 2; sync=false)
+		single = plot_scatter([1.0, 2.0], [1.0, 2.0])
+		with_style(; cycle=:dash) do
+			plot_scatter!(cells, [1.0, 2.0], [1.0, 2.0]; row=1, col=1)
+			plot_contour!(cells, [1.0 2.0; 3.0 4.0]; row=1, col=2)
+			plot_scatter!(cells, [1.0, 2.0], [2.0, 2.0]; row=1, col=2)
+			single = plot_scatter([1.0, 2.0], [1.0, 2.0])
+			plot_contour!(single, [1.0 2.0; 3.0 4.0])
+			plot_scatter!(single, [1.0, 2.0], [2.0, 2.0])
+		end
+		line_dash(t) = haskey(t.fields, :line) ? get(_rsp_fields(t[:line]), :dash, nothing) : nothing
+		@test [line_dash(t) for t in cells.plot.data] == ["solid", nothing, "dash"]
+		@test [line_dash(t) for t in cells.plot.data] == [line_dash(t) for t in single.data]
+		# Y19/Y30: a numbered colour axis from a real family reaches the
+		# figure, its bar placed next to the cell.
+		colour = subplots(1, 2; sync=false)
+		plot_pcolormesh!(colour, [0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [1.0 2.0; 3.0 4.0];
+			row=1, col=2, coloraxis="coloraxis3")
+		axis3 = _rsp_fields(_rsp_layout(colour)[:coloraxis3])
+		@test (axis3[:cmin], axis3[:cmax]) == (1.0, 4.0)
+		@test only(colour.plot.data)[:coloraxis] == "coloraxis3"
+		@test only(colour.plot.data)[:xaxis] == "x2"
+		@test _rsp_fields(axis3[:colorbar])[:x] ≈ _rsp_axis(colour, :xaxis2)[:domain][2] + PlotlySupply._CBAR_CELL_PAD
+		@test !haskey(_rsp_layout(colour), :coloraxis)
+		# Y36: a range keyword on a log cell is in data units and validated.
+		logcell = subplots(1, 2; sync=false)
+		update_xaxes!(logcell; row=1, col=2, type="log")
+		err = try
+			plot_scatter!(logcell, [1.0, 10.0], [1.0, 2.0]; row=1, col=2, xrange=[-1, 1000])
+			nothing
+		catch caught
+			caught
+		end
+		@test err isa ArgumentError && startswith(err.msg, "plot_scatter!:")
+		@test isempty(logcell.plot.data)
+		plot_scatter!(logcell, [1.0, 10.0], [1.0, 2.0]; row=1, col=2, xrange=[1, 1000])
+		@test _rsp_axis(logcell, :xaxis2)[:range] ≈ [0.0, 3.0]
+	end
+
+	@testset "geographic cell updates and map families name themselves (Y20)" begin
+		sf = subplots(1, 3; sync=false, specs=[Spec(kind="geo") Spec(kind="mapbox") Spec(kind="map")])
+		snapshot = JSON.json(sf.plot)
+		message(call) = try
+			call()
+			""
+		catch caught
+			caught isa ArgumentError ? caught.msg : sprint(showerror, caught)
+		end
+		for (call, want) in (
+			(() -> update_geos!(sf; row=1, col=2, showland=true),
+				"update_geos!: subplot cell (1, 2) is a 'mapbox' cell, not a 'geo' cell."),
+			(() -> update_mapboxes!(sf; row=1, col=1, zoom=2),
+				"update_mapboxes!: subplot cell (1, 1) is a 'geo' cell, not a 'mapbox' cell."),
+			(() -> update_maps!(sf; row=1, col=1, zoom=2),
+				"update_maps!: subplot cell (1, 1) is a 'geo' cell, not a 'map' cell."),
+			(() -> update_geos!(sf; row=99, col=1, showland=true), "update_geos!: `row` must be in 1:1; got 99."),
+			(() -> update_mapboxes!(sf; row=1, col=9, zoom=2), "update_mapboxes!: `col` must be in 1:3; got 9."),
+			(() -> update_maps!(sf; row=99, col=3, zoom=2), "update_maps!: `row` must be in 1:1; got 99."),
+			(() -> update_maps!(sf; row=1, col=nothing, zoom=2), "update_maps!: `row` and `col` must be provided together."),
+			(() -> plot_scattermapbox!(sf, [0.0, 1.0], [0.0, 1.0]; row=99, col=2),
+				"plot_scattermapbox!: `row` must be in 1:1; got 99."),
+		)
+			@test message(call) == want
+		end
+		# Shared validators name the family; the SubplotFigure call names itself.
+		@test startswith(message(() -> update_mapboxes!(sf; row=1, col=2, zoom=Inf)), "update_mapboxes!: mapbox: zoom")
+		@test startswith(message(() -> update_mapboxes!(sf; row=1, col=2, style="  ")), "update_mapboxes!: mapbox: style")
+		@test startswith(message(() -> update_maps!(sf; row=1, col=3, zoom=Inf)), "update_maps!: map: zoom")
+		for (name, call) in (
+			("plot_densitymapbox!", () -> plot_densitymapbox!(sf, [0.0, 1], [0.0, 1], [1.0, 2]; row=99, col=2)),
+			("plot_scattermap!", () -> plot_scattermap!(sf, [0.0, 1.0], [0.0, 1.0]; row=1, col=2)),
+			("plot_scattergeo!", () -> plot_scattergeo!(sf, [0.0, 1.0], [0.0, 1.0]; row=1, col=3)),
+		)
+			@test startswith(message(call), name * ": ")
+		end
+		@test JSON.json(sf.plot) == snapshot
+		@test (sf.current_row, sf.current_col) == (1, 1)
+		# The valid calls still update the cell they name.
+		update_maps!(sf; row=1, col=3, zoom=3)
+		map_key = only(first(sf.plot.layout.subplots.grid_ref[1, 3]).layout_keys)
+		@test _rsp_fields(_rsp_layout(sf)[map_key])[:zoom] == 3
+		@test (sf.current_row, sf.current_col) == (1, 3)
+		update_geos!(sf; row=1, col=1, showland=true)
+		@test _rsp_fields(_rsp_layout(sf)[:geo])[:showland] === true
+		@test (sf.current_row, sf.current_col) == (1, 1)
 	end
 
 	@testset "delegate errors name the public function (X52)" begin
@@ -1178,5 +1449,467 @@ end
 		title1 = _rsp_fields(_rsp_axis(sf, :xaxis)[:title])
 		@test title1[:text] == "kept"
 		@test _rsp_fields(title1[:font])[:size] == 11
+	end
+
+	@testset "grid titles go through the mathtext layer (G25, Y38)" begin
+		sf = subplots(
+			2,
+			2;
+			sync=false,
+			subplot_titles=["Panel \$a\$" "b"; "c\nd" missing],
+			column_titles=["col \$x\$", "c2"],
+			row_titles=["r1", "row \$\\alpha\$"],
+			x_title="X \$t\$ (s)",
+			y_title="Y \$v\$",
+		)
+		texts = [_rsp_fields(a)[:text] for a in _rsp_layout(sf)[:annotations]]
+		# Mixed text and math keeps its text (as title!/xlabel! do); plain
+		# titles stay plain and newlines become line breaks.
+		@test texts == [
+			"\$\\text{Panel }a\$", "b", "c<br>d",
+			"\$\\text{col }x\$", "c2",
+			"r1", "\$\\text{row }\\alpha\$",
+			"\$\\text{X }t\\text{ (s)}\$", "\$\\text{Y }v\$",
+		]
+		@test all(t == PlotlySupply._label(t) for t in texts)  # idempotent
+		# A flat list (plotly.py) is read row-major, like the matrix.
+		flat = subplots(1, 2; sync=false, subplot_titles=["\$\\beta\$ map", "plain"])
+		@test [_rsp_fields(a)[:text] for a in _rsp_layout(flat)[:annotations]] ==
+			["\$\\beta\\text{ map}\$", "plain"]
+		# Invalid entries are ArgumentErrors naming the keyword; nothing is built.
+		err = try
+			subplots(1, 2; sync=false, subplot_titles=["\$a", "b"])
+		catch e
+			e
+		end
+		@test err isa ArgumentError
+		@test startswith(err.msg, "subplots: `subplot_titles` entry")
+		@test_throws ArgumentError subplots(1, 2; sync=false, column_titles=["a"])
+		@test_throws ArgumentError subplots(2, 1; sync=false, row_titles=["a", 1])
+		@test_throws ArgumentError subplots(1, 2; sync=false, column_titles="ab")
+		@test_throws ArgumentError subplots(1, 2; sync=false, x_title=3)
+		@test_throws ArgumentError subplots(1, 2; sync=false, y_title="\$x")
+		for name in (:x_title, :y_title, :column_titles)
+			e = try
+				subplots(1, 2; sync=false, name => (name === :column_titles ? ["\$q", "b"] : "\$q"))
+			catch caught
+				caught
+			end
+			@test e isa ArgumentError && occursin("`$(name)`", e.msg)
+		end
+	end
+
+	@testset "shared axes act as one group (G61): sharing x scale x range table" begin
+		modes = (false, true, "rows", "columns", "all")
+		scales = (:linear, :log, :reversed, :date)
+		for letter in (:x, :y), mode in modes, scale in scales, ranged in (false, true)
+			label = "$(letter) shared=$(repr(mode)) $(scale)$(ranged ? " ranged" : "")"
+			@testset "$label" begin
+				sf = _rsp_share_figure(letter, mode, scale, ranged)
+				groups = _rsp_share_groups(letter, mode)
+				expected_range = _rsp_share_range(scale)
+				# ---- model: one type per group, ranges on the root only ----
+				roots = Dict{Any, Symbol}()
+				for group in groups
+					axis_keys = [_rsp_share_key(sf, letter, cell) for cell in group]
+					fields = [_rsp_axis(sf, key) for key in axis_keys]
+					followers = [k for (k, f) in zip(axis_keys, fields) if haskey(f, :matches)]
+					@test length(followers) == length(axis_keys) - 1
+					root = only(k for (k, f) in zip(axis_keys, fields) if !haskey(f, :matches))
+					roots[group] = root
+					@test all(PlotlySupply._fin_match_root(_rsp_layout(sf), k) == root for k in axis_keys)
+					types = [get(f, :type, nothing) for f in fields]
+					if scale === :log && (1, 1) in group
+						@test all(==("log"), types)
+					else
+						@test !any(==("log"), types)
+					end
+					for (key, f) in zip(axis_keys, fields)
+						key === root && continue
+						@test !haskey(f, :range)
+						@test !haskey(f, :autorange)
+					end
+					root_axis = _rsp_axis(sf, root)
+					if ranged && (1, 2) in group
+						want = scale === :log && (1, 1) in group ? log10.(expected_range) : expected_range
+						@test root_axis[:autorange] === false
+						@test scale === :date ? root_axis[:range] == want :
+							isapprox(Float64.(root_axis[:range]), want; atol = 1e-12)
+					elseif scale === :reversed && (1, 1) in group
+						@test root_axis[:autorange] == "reversed"
+					end
+				end
+				# ---- rendered: the group draws one range, labels where expected ----
+				info = _rsp_render_axes(sf)
+				for group in (info === nothing ? () : groups)
+					root = roots[group]
+					data = reduce(vcat, [_rsp_share_data(scale, cell) for cell in group])
+					rendered = [info[String(_rsp_share_key(sf, letter, cell))] for cell in group]
+					want_type = scale === :date ? "date" : (scale === :log && (1, 1) in group) ? "log" : "linear"
+					@test all(a -> a["type"] == want_type, rendered)
+					root_info = info[String(root)]
+					for (cell, a) in zip(group, rendered)
+						key = _rsp_share_key(sf, letter, cell)
+						# plotly kept the `matches` (it drops it on a type mismatch).
+						@test a["matches"] == (key === root ? nothing : PlotlySupply._fin_axis_ref(root))
+						@test a["range"] == root_info["range"]
+						@test isempty(a["labels"]) == _rsp_share_hidden(letter, mode, cell)
+					end
+					drawn = root_info["range"]
+					if ranged && (1, 2) in group
+						if scale === :date
+							@test [first(String(v), 10) for v in drawn] == expected_range
+						else
+							want = scale === :log && (1, 1) in group ? log10.(expected_range) : expected_range
+							@test isapprox(Float64.(drawn), want; atol = 1e-9)
+						end
+					elseif scale === :date
+						lo, hi = Date(first(String(drawn[1]), 10)), Date(first(String(drawn[2]), 10))
+						@test lo <= minimum(data) && hi >= maximum(data)
+					else
+						# Compared in axis units: plotly autoranges lines-only
+						# x data tightly, so a log range is exactly
+						# log10.(extrema(data)) and exp10 of it can round below
+						# the data (2.999999999999999 for 3).
+						bounds = Float64.(drawn)
+						units = scale === :log && (1, 1) in group ? log10.(data) : data
+						@test minimum(bounds) <= minimum(units) + 1e-9 && maximum(bounds) >= maximum(units) - 1e-9
+						reversed = scale === :reversed && (1, 1) in group
+						@test (bounds[1] > bounds[2]) == reversed
+					end
+				end
+			end
+		end
+	end
+
+	@testset "axis helpers on a shared axis act on the group (G61)" begin
+		for letter in (:x, :y), mode in (true, "rows", "columns", "all")
+			@testset "$(letter) shared=$(repr(mode))" begin
+				sf = _rsp_share_figure(letter, mode, :linear, false)
+				label!, range!, ticks! = letter === :x ? (xlabel!, xrange!, xticks!) : (ylabel!, yrange!, yticks!)
+				ticks!(sf, [4.0, 6.0, 8.0], ["a", "b", "c"]; row=1, col=2)
+				label!(sf, "quantity"; row=1, col=2)
+				range!(sf, [3, 9]; row=1, col=2)
+				group = only(g for g in _rsp_share_groups(letter, mode) if (1, 2) in g)
+				axis_keys = [_rsp_share_key(sf, letter, cell) for cell in group]
+				root = only(k for k in axis_keys if !haskey(_rsp_axis(sf, k), :matches))
+				for key in axis_keys
+					axis = _rsp_axis(sf, key)
+					@test axis[:tickvals] == [4.0, 6.0, 8.0]
+					@test axis[:ticktext] == ["a", "b", "c"]
+					@test haskey(axis, :range) == (key === root)
+				end
+				@test _rsp_axis(sf, root)[:range] == [3, 9]
+				@test _rsp_axis(sf, root)[:autorange] === false
+				# The title sits on the axis that shows the group's tick labels
+				# next to cell (1, 2): itself unless its labels are hidden.
+				hidden = _rsp_share_hidden(letter, mode, (1, 2))
+				label_cell = !hidden ? (1, 2) : letter === :x ? (2, 2) : (1, 1)
+				label_key = _rsp_share_key(sf, letter, label_cell)
+				titled = [k for k in axis_keys if haskey(_rsp_axis(sf, k), :title)]
+				@test titled == [label_key]
+				@test _rsp_fields(_rsp_axis(sf, label_key)[:title])[:text] == "quantity"
+				# Axes of other groups are untouched.
+				for cell in _RSP_SHARE_CELLS
+					cell in group && continue
+					@test !haskey(_rsp_axis(sf, _rsp_share_key(sf, letter, cell)), :tickvals)
+				end
+				info = _rsp_render_axes(sf)
+				for cell in (info === nothing ? () : group)
+					a = info[String(_rsp_share_key(sf, letter, cell))]
+					@test isapprox(Float64.(a["range"]), [3.0, 9.0]; atol = 1e-9)
+					@test a["labels"] == (_rsp_share_hidden(letter, mode, cell) ? String[] : ["a", "b", "c"])
+					@test a["title"] == (cell == label_cell ? "quantity" : nothing)
+				end
+			end
+		end
+	end
+
+	@testset "shared axes: delegate keywords, update_*axes! and no-op calls (G61)" begin
+		# A range passed to a plot_*! call on a follower reaches the root.
+		sf = subplots(2, 1; sync=false, shared_xaxes=true)
+		plot_scatter!(sf, 1:10, collect(1.0:10.0); row=1, col=1, xrange=[2, 5])
+		@test !haskey(_rsp_axis(sf, :xaxis), :range)
+		@test _rsp_axis(sf, :xaxis2)[:range] == [2, 5]
+		@test _rsp_axis(sf, :xaxis2)[:autorange] === false
+		# xscale on a follower types the whole group (plotly drops `matches`
+		# from an axis whose type differs from the root's).
+		plot_scatter!(sf, [1.0, 10.0, 100.0], [1.0, 2.0, 3.0]; row=2, col=1, xscale="log")
+		@test _rsp_axis(sf, :xaxis)[:type] == "log"
+		@test _rsp_axis(sf, :xaxis2)[:type] == "log"
+		@test _rsp_axis(sf, :xaxis)[:matches] == "x2"
+		# The delegate seeds a follower's scratch axis with the root's range
+		# (log ticks and range conversions need the group's range), and a range
+		# the mutator removes is removed from the root.
+		seeded = subplots(2, 1; sync=false, shared_xaxes=true)
+		plot_scatter!(seeded, 1:10, collect(1.0:10.0); row=2, col=1)
+		xrange!(seeded, [3, 6]; row=2, col=1)
+		seen = Ref{Any}(nothing)
+		read_range = function (fig, x, y; kwargs...)
+			seen[] = PlotlySupply._cmn_mapping_get(get(PlotlySupply._cmn_layout(fig).fields, :xaxis, nothing), :range)
+			push!(PlotlySupply._plot_data(fig), scatter(x=x, y=y))
+			return nothing
+		end
+		PlotlySupply._subplot_delegate_mutator!(seeded, read_range, [1, 2], [1, 2]; row=1, col=1)
+		@test seen[] == [3, 6]
+		@test _rsp_axis(seeded, :xaxis2)[:range] == [3, 6]
+		@test !haskey(_rsp_axis(seeded, :xaxis), :range)
+		drop_range = function (fig, x, y; kwargs...)
+			push!(PlotlySupply._plot_data(fig), scatter(x=x, y=y))
+			PlotlySupply._cmn_delete_layout_fields!(fig, :xaxis, (:range,))
+			return nothing
+		end
+		PlotlySupply._subplot_delegate_mutator!(seeded, drop_range, [1, 2], [1, 2]; row=1, col=1)
+		@test !haskey(_rsp_axis(seeded, :xaxis2), :range)
+		@test _rsp_axis(seeded, :xaxis2)[:autorange] === true
+		# update_xaxes! with a range on the root: the `autorange = true` the
+		# finalizer gives group roots must not override it.
+		root_ranged = subplots(2, 1; sync=false, shared_xaxes=true)
+		plot_scatter!(root_ranged, 1:10, collect(1.0:10.0); row=2, col=1)
+		@test _rsp_axis(root_ranged, :xaxis2)[:autorange] === true
+		update_xaxes!(root_ranged; row=2, col=1, range=[3, 6])
+		@test _rsp_axis(root_ranged, :xaxis2)[:autorange] === false
+		@test _rsp_axis(root_ranged, :xaxis2)[:range] == [3, 6]
+		# ... and on a follower it moves to the root.
+		update_xaxes!(root_ranged; row=1, col=1, range=[1, 4])
+		@test _rsp_axis(root_ranged, :xaxis2)[:range] == [1, 4]
+		@test !haskey(_rsp_axis(root_ranged, :xaxis), :range)
+		# Clearing the follower's range restores the group's autorange.
+		xrange!(root_ranged, nothing; row=1, col=1)
+		@test !haskey(_rsp_axis(root_ranged, :xaxis2), :range)
+		@test _rsp_axis(root_ranged, :xaxis2)[:autorange] !== false
+		# A secondary y axis (overlaying) is not a member of the y group.
+		sec = subplots(1, 2; sync=false, shared_yaxes=true, specs=[Spec(secondary_y=true) Spec()])
+		plot_scatter!(sec, 1:3, [1.0, 2.0, 3.0]; row=1, col=1)
+		plot_scatter!(sec, 1:3, [10.0, 20.0, 30.0]; row=1, col=1, secondary_y=true, yscale="log")
+		sec_key = PlotlySupply._cell_target(sec; row=1, col=1, secondary_y=true).ykey
+		primary_keys = [PlotlySupply._cell_target(sec; row=1, col=c).ykey for c in 1:2]
+		@test haskey(_rsp_axis(sec, sec_key), :overlaying)
+		@test _rsp_axis(sec, sec_key)[:type] == "log"
+		@test haskey(_rsp_axis(sec, primary_keys[2]), :matches)
+		@test !any(get(_rsp_axis(sec, k), :type, nothing) == "log" for k in primary_keys)
+		# A call that changes nothing in a group sends an append-only update.
+		live = subplots(2, 1; sync=false, shared_xaxes=true, per_subplot_legends=false)
+		plot_scatter!(live, 1:3, [1.0, 2.0, 3.0]; row=2, col=1)
+		xticks!(live, [1.0, 2.0]; row=2, col=1)
+		renderer = _rsp_live!(live)
+		plot_scatter!(live, 1:3, [3.0, 2.0, 1.0]; row=1, col=1)
+		@test occursin("Plotly.addTraces", only(renderer.scripts))
+		@test !occursin("Plotly.relayout", only(renderer.scripts))
+		# Unshared figures are not affected.
+		plain = subplots(2, 1; sync=false)
+		plot_scatter!(plain, 1:3, [1.0, 2.0, 3.0]; row=1, col=1, xrange=[0, 2])
+		@test _rsp_axis(plain, :xaxis)[:range] == [0, 2]
+		@test !haskey(_rsp_axis(plain, :xaxis2), :range)
+	end
+
+	@testset "every exported mutator addresses cell (2, 2) or names itself in an ArgumentError" begin
+		# Process-wide setters take no figure.
+		process_wide = Set(["register_style!", "set_default_legend_position!", "set_default_mathtext!",
+			"set_default_style!", "set_default_template!"])
+		# Known defects in other tracks' code (cross-requested): these raise a
+		# MethodError for `row`/`col` instead of an ArgumentError naming the
+		# function. `@test_broken` turns into an error once they are fixed.
+		cross_requested = Set(["figsize!", "panel_labels!", "remove_inset!", "shared_colorbar!",
+			"subplot_legends!", "tight_layout!"])
+		# Cross-requested Y20 defect: the SubplotFigure `plot!` alias forwards
+		# to plot_scatter!, whose cell errors then name plot_scatter!.
+		misnamed_cell_errors = Set(["plot!"])
+		image = attr(source="data:image/png;base64,iVBORw0KGgo=", x=0, y=1, sizex=0.2, sizey=0.2)
+		geojson = Dict("type" => "FeatureCollection", "features" => [Dict("type" => "Feature", "id" => "A",
+			"properties" => Dict(), "geometry" => Dict("type" => "Polygon",
+			"coordinates" => [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]))])
+		grid3(f) = [f(i, j, k) for i in 0.0:1, j in 0.0:1, k in 0.0:1]
+		none = sf -> nothing
+		xy! = sf -> plot_scatter!(sf, [1.0, 2.0], [1.0, 2.0]; row=2, col=2)
+		dates! = sf -> plot_scatter!(sf, [Date(2008, 1, 1) + Month(i) for i in 0:24], collect(1.0:25.0); row=2, col=2)
+		heat! = sf -> plot_heatmap!(sf, [1.0 2.0; 3.0 4.0]; row=2, col=2)
+		points3d! = sf -> plot_scatter3d!(sf, [0.0, 1], [0.0, 1], [0.0, 1]; row=2, col=2)
+		# (name, kind of cell (2, 2), setup, call(sf, cell keywords))
+		calls = Any[
+			("add_hline!", "xy", none, (sf, rc) -> add_hline!(sf, 0.5; rc...)),
+			("add_hrect!", "xy", none, (sf, rc) -> add_hrect!(sf, 0.2, 0.4; rc...)),
+			("add_vline!", "xy", none, (sf, rc) -> add_vline!(sf, 1.5; rc...)),
+			("add_vrect!", "xy", none, (sf, rc) -> add_vrect!(sf, 1, 2; rc...)),
+			("add_shape!", "xy", none, (sf, rc) -> add_shape!(sf, rect(1, 2, 0.1, 0.2); rc...)),
+			("add_layout_image!", "xy", none, (sf, rc) -> add_layout_image!(sf, image; rc...)),
+			("add_recession_bands!", "xy", dates!, (sf, rc) -> add_recession_bands!(sf; rc...)),
+			("add_trace!", "xy", none, (sf, rc) -> add_trace!(sf, scatter(x=[1, 2], y=[1, 2]); rc...)),
+			("addtraces!", "xy", none, (sf, rc) -> addtraces!(sf, scatter(x=[1, 2], y=[1, 2]); rc...)),
+			("annotate!", "xy", none, (sf, rc) -> annotate!(sf, 1, 1, "a"; rc...)),
+			("annotate!", "scene", points3d!, (sf, rc) -> annotate!(sf, 0, 0, 0, "a"; rc...)),
+			("arc!", "xy", none, (sf, rc) -> arc!(sf, 0, 0, 1, 0, 90; rc...)),
+			("arrow!", "xy", none, (sf, rc) -> arrow!(sf, 0, 0, 1, 1; rc...)),
+			("axis_equal!", "xy", xy!, (sf, rc) -> axis_equal!(sf; rc...)),
+			("axis_off!", "xy", none, (sf, rc) -> axis_off!(sf; rc...)),
+			("circle!", "xy", none, (sf, rc) -> circle!(sf, 0, 0, 1; rc...)),
+			("colorbar!", "xy", heat!, (sf, rc) -> colorbar!(sf; rc..., title="c")),
+			("deletetraces!", "xy", none, (sf, rc) -> deletetraces!(sf, 1; rc...)),
+			("ellipse!", "xy", none, (sf, rc) -> ellipse!(sf, 0, 0, 1, 0.5; rc...)),
+			("extendtraces!", "xy", none, (sf, rc) -> extendtraces!(sf, Dict(:y => [[1.0]]), [1]; rc...)),
+			("figsize!", "xy", none, (sf, rc) -> figsize!(sf, 600, 400; rc...)),
+			("grid!", "xy", none, (sf, rc) -> grid!(sf; rc...)),
+			("hline!", "xy", none, (sf, rc) -> hline!(sf, 0.5; rc...)),
+			("hspan!", "xy", none, (sf, rc) -> hspan!(sf, 0.2, 0.4; rc...)),
+			("inset!", "xy", none, (sf, rc) -> inset!(sf, (0.6, 0.6, 0.3, 0.3); rc...)),
+			("legend_entry!", "xy", none, (sf, rc) -> legend_entry!(sf, "lbl"; rc...)),
+			("movetraces!", "xy", none, (sf, rc) -> movetraces!(sf, 1, 1; rc...)),
+			("panel_labels!", "xy", none, (sf, rc) -> panel_labels!(sf; rc...)),
+			("plot!", "xy", none, (sf, rc) -> plot!(sf, [1.0, 2, 3], [1.0, 2, 3]; rc...)),
+			("plot_area!", "xy", none, (sf, rc) -> plot_area!(sf, [1.0, 2, 3], [1.0, 2, 3]; rc...)),
+			("plot_band!", "xy", none, (sf, rc) -> plot_band!(sf, [1.0, 2, 3], [0.0, 0, 0], [1.0, 1, 1]; rc...)),
+			("plot_bar!", "xy", none, (sf, rc) -> plot_bar!(sf, ["a", "b"], [1, 2]; rc...)),
+			("plot_box!", "xy", none, (sf, rc) -> plot_box!(sf, [1.0, 2, 3]; rc...)),
+			("plot_candlestick!", "xy", none, (sf, rc) -> plot_candlestick!(sf, 1:2, [2, 3], [3, 4], [1.5, 2.5], [2.8, 2.6]; rc...)),
+			("plot_choropleth!", "geo", none, (sf, rc) -> plot_choropleth!(sf, ["Italy"], [2.0]; rc...)),
+			("plot_choroplethmap!", "map", none, (sf, rc) -> plot_choroplethmap!(sf, geojson, ["A"], [1.0]; rc...)),
+			("plot_choroplethmapbox!", "mapbox", none, (sf, rc) -> plot_choroplethmapbox!(sf, geojson, ["A"], [1.0]; rc...)),
+			("plot_complex!", "xy", none, (sf, rc) -> plot_complex!(sf, [1 + 1im, 2 + 0.5im]; rc...)),
+			("plot_contour!", "xy", none, (sf, rc) -> plot_contour!(sf, [1.0 2.0; 3.0 4.0]; rc...)),
+			("plot_densitymap!", "map", none, (sf, rc) -> plot_densitymap!(sf, [0.0, 1], [0.0, 1]; rc...)),
+			("plot_densitymapbox!", "mapbox", none, (sf, rc) -> plot_densitymapbox!(sf, [0.0, 1], [0.0, 1], [1.0, 2]; rc...)),
+			("plot_ecdf!", "xy", none, (sf, rc) -> plot_ecdf!(sf, [1.0, 2, 3]; rc...)),
+			("plot_funnel!", "xy", none, (sf, rc) -> plot_funnel!(sf, [90, 70, 40], ["A", "B", "C"]; rc...)),
+			("plot_funnelarea!", "domain", none, (sf, rc) -> plot_funnelarea!(sf, [3, 2, 1]; rc...)),
+			("plot_heatmap!", "xy", none, (sf, rc) -> plot_heatmap!(sf, [1.0 2.0; 3.0 4.0]; rc...)),
+			("plot_histogram!", "xy", none, (sf, rc) -> plot_histogram!(sf, [1.0, 2, 2, 3]; rc...)),
+			("plot_histogram2d!", "xy", none, (sf, rc) -> plot_histogram2d!(sf, [1.0, 2, 3], [1.0, 2, 3]; rc...)),
+			("plot_hlines!", "xy", none, (sf, rc) -> plot_hlines!(sf, [1.0, 2], 0, 1; rc...)),
+			("plot_image!", "xy", none, (sf, rc) -> plot_image!(sf, fill(UInt8(200), 2, 2, 3); rc...)),
+			("plot_indicator!", "domain", none, (sf, rc) -> plot_indicator!(sf, 5; rc...)),
+			("plot_isosurface!", "scene", none, (sf, rc) -> plot_isosurface!(sf, grid3((i, j, k) -> i), grid3((i, j, k) -> j),
+				grid3((i, j, k) -> k), grid3((i, j, k) -> i + j + k); rc...)),
+			("plot_kde!", "xy", none, (sf, rc) -> plot_kde!(sf, [1.0, 2, 2.5, 3, 4]; rc...)),
+			("plot_matrix!", "xy", none, (sf, rc) -> plot_matrix!(sf, [1.0 2.0; 3.0 4.0]; rc...)),
+			("plot_mesh3d!", "scene", none, (sf, rc) -> plot_mesh3d!(sf, [0.0, 1, 0, 0], [0.0, 0, 1, 0], [0.0, 0, 0, 1]; rc...)),
+			("plot_ohlc!", "xy", none, (sf, rc) -> plot_ohlc!(sf, 1:2, [2, 3], [3, 4], [1.5, 2.5], [2.8, 2.6]; rc...)),
+			("plot_parcoords!", "domain", none, (sf, rc) -> plot_parcoords!(sf, ["a" => [1, 2, 3], "b" => [3, 1, 2]]; rc...)),
+			("plot_pcolormesh!", "xy", none, (sf, rc) -> plot_pcolormesh!(sf, 0.0:2, 0.0:2, [1.0 2.0; 3.0 4.0]; rc...)),
+			("plot_pie!", "domain", none, (sf, rc) -> plot_pie!(sf, [1, 2]; rc...)),
+			("plot_polygons!", "xy", none, (sf, rc) -> plot_polygons!(sf, [[0.0, 1.0, 1.0]], [[0.0, 0.0, 1.0]]; rc...)),
+			("plot_polygons3d!", "scene", none, (sf, rc) -> plot_polygons3d!(sf, [[0.0 0 2; 1 0 2; 1 1 2; 0 1 2]]; rc...)),
+			("plot_quiver!", "xy", none, (sf, rc) -> plot_quiver!(sf, [0.0, 1], [0.0, 1], [1.0, 1], [1.0, 1]; rc...)),
+			("plot_quiver3d!", "scene", none, (sf, rc) -> plot_quiver3d!(sf, [0.0, 1], [0.0, 1], [0.0, 1], [1.0, 1], [1.0, 1], [1.0, 1]; rc...)),
+			("plot_sankey!", "domain", none, (sf, rc) -> plot_sankey!(sf, [0, 1], [1, 2], [5, 3]; rc...)),
+			("plot_scatter!", "xy", none, (sf, rc) -> plot_scatter!(sf, [1.0, 2], [1.0, 2]; rc...)),
+			("plot_scatter3d!", "scene", none, (sf, rc) -> plot_scatter3d!(sf, [0.0, 1], [0.0, 1], [0.0, 1]; rc...)),
+			("plot_scattergeo!", "geo", none, (sf, rc) -> plot_scattergeo!(sf, [0.0, 10], [0.0, 10]; rc...)),
+			("plot_scattermap!", "map", none, (sf, rc) -> plot_scattermap!(sf, [0.0, 10], [0.0, 10]; rc...)),
+			("plot_scattermapbox!", "mapbox", none, (sf, rc) -> plot_scattermapbox!(sf, [0.0, 10], [0.0, 10]; rc...)),
+			("plot_scatterpolar!", "polar", none, (sf, rc) -> plot_scatterpolar!(sf, [1.0, 2], [0.0, 90]; rc...)),
+			("plot_segments!", "xy", none, (sf, rc) -> plot_segments!(sf, [0.0], [0.0], [1.0], [1.0]; rc...)),
+			("plot_segments3d!", "scene", none, (sf, rc) -> plot_segments3d!(sf, [0.0], [0.0], [0.0], [1.0], [1.0], [1.0]; rc...)),
+			("plot_stem!", "xy", none, (sf, rc) -> plot_stem!(sf, [1.0, 2], [1.0, 2]; rc...)),
+			("plot_streamlines!", "xy", none, (sf, rc) -> plot_streamlines!(sf, [0.0, 1, 2], [0.0, 1, 2], ones(3, 3), fill(0.5, 3, 3); rc...)),
+			("plot_streamtube!", "scene", none, (sf, rc) -> plot_streamtube!(sf, grid3((i, j, k) -> i), grid3((i, j, k) -> j),
+				grid3((i, j, k) -> k), grid3((i, j, k) -> 1.0), grid3((i, j, k) -> 0.0), grid3((i, j, k) -> 0.0); rc...)),
+			("plot_sunburst!", "domain", none, (sf, rc) -> plot_sunburst!(sf, ["root", "a", "b"], ["", "root", "root"]; values=[0, 2, 1], rc...)),
+			("plot_surface!", "scene", none, (sf, rc) -> plot_surface!(sf, [1.0 2.0; 3.0 4.0]; rc...)),
+			("plot_ternary!", "ternary", none, (sf, rc) -> plot_ternary!(sf, [0.2, 0.3], [0.3, 0.3], [0.5, 0.4]; rc...)),
+			("plot_treemap!", "domain", none, (sf, rc) -> plot_treemap!(sf, ["root", "a", "b"], ["", "root", "root"]; values=[0, 2, 1], rc...)),
+			("plot_tricontour!", "xy", none, (sf, rc) -> plot_tricontour!(sf, [0.0, 1, 0, 1], [0.0, 0, 1, 1], [1 2 3; 2 4 3], [0.0, 1, 2, 3]; rc...)),
+			("plot_tripcolor!", "xy", none, (sf, rc) -> plot_tripcolor!(sf, [0.0, 1, 0, 1], [0.0, 0, 1, 1], [1 2 3; 2 4 3], [0.0, 1, 2, 3]; rc...)),
+			("plot_triplot!", "xy", none, (sf, rc) -> plot_triplot!(sf, [0.0, 1, 0, 1], [0.0, 0, 1, 1], [1 2 3; 2 4 3]; rc...)),
+			("plot_violin!", "xy", none, (sf, rc) -> plot_violin!(sf, [1.0, 2, 3, 4]; rc...)),
+			("plot_vlines!", "xy", none, (sf, rc) -> plot_vlines!(sf, [1.0, 2], 0, 1; rc...)),
+			("plot_volume!", "scene", none, (sf, rc) -> plot_volume!(sf, grid3((i, j, k) -> i), grid3((i, j, k) -> j),
+				grid3((i, j, k) -> k), grid3((i, j, k) -> i + j + k); rc...)),
+			("plot_waterfall!", "xy", none, (sf, rc) -> plot_waterfall!(sf, ["a", "b"], [1, -1]; rc...)),
+			("plot_wireframe!", "scene", none, (sf, rc) -> plot_wireframe!(sf, [0.0 1; 0 1], [0.0 0; 1 1], [1.0 2.0; 3.0 4.0]; rc...)),
+			("polygon!", "xy", none, (sf, rc) -> polygon!(sf, [0.0, 1, 1], [0.0, 0, 1]; rc...)),
+			("prependtraces!", "xy", none, (sf, rc) -> prependtraces!(sf, Dict(:y => [[1.0]]), [1]; rc...)),
+			("purge!", "xy", none, (sf, rc) -> purge!(sf; rc...)),
+			("react!", "xy", none, (sf, rc) -> react!(sf, sf.plot.data, sf.plot.layout; rc...)),
+			("rectangle!", "xy", none, (sf, rc) -> rectangle!(sf, 0, 0, 1, 1; rc...)),
+			("redraw!", "xy", none, (sf, rc) -> redraw!(sf; rc...)),
+			("relayout!", "xy", none, (sf, rc) -> relayout!(sf; rc..., title_text="t")),
+			("remove_inset!", "xy", sf -> inset!(sf, (0.6, 0.6, 0.3, 0.3); row=2, col=2), (sf, rc) -> remove_inset!(sf, 1; rc...)),
+			("restyle!", "xy", none, (sf, rc) -> restyle!(sf, 1; rc..., opacity=0.5)),
+			("scene!", "scene", points3d!, (sf, rc) -> scene!(sf; rc..., aspectmode="cube")),
+			("secondary_xaxis!", "xy", xy!, (sf, rc) -> secondary_xaxis!(sf, x -> 2x, x -> x / 2; rc...)),
+			("set_fonts!", "xy", none, (sf, rc) -> set_fonts!(sf; rc..., size=14)),
+			("set_legend!", "xy", xy!, (sf, rc) -> set_legend!(sf; rc..., position=:topleft)),
+			("set_template!", "xy", none, (sf, rc) -> set_template!(sf, "plotly_white"; rc...)),
+			("shared_colorbar!", "xy", heat!, (sf, rc) -> shared_colorbar!(sf; rc...)),
+			("slope_guide!", "xy", xy!, (sf, rc) -> slope_guide!(sf, 1; x=(1.0, 2.0), through=(1.0, 1.0), rc...)),
+			("slope_triangle!", "xy", xy!, (sf, rc) -> slope_triangle!(sf, 1.0, 1.0, 1; rc...)),
+			("spines!", "xy", none, (sf, rc) -> spines!(sf; rc..., style=:open)),
+			("subplot!", "xy", none, (sf, rc) -> subplot!(sf, rc.row, rc.col)),
+			("subplot_legends!", "xy", none, (sf, rc) -> subplot_legends!(sf; rc...)),
+			("tight_layout!", "xy", none, (sf, rc) -> tight_layout!(sf; rc...)),
+			("title!", "xy", none, (sf, rc) -> title!(sf, "T"; rc...)),
+			("update!", "xy", none, (sf, rc) -> update!(sf; rc..., title_text="t")),
+			("update_annotations!", "xy", sf -> annotate!(sf, 1, 1, "a"; row=2, col=2), (sf, rc) -> update_annotations!(sf; rc..., opacity=0.5)),
+			("update_geos!", "geo", none, (sf, rc) -> update_geos!(sf; rc..., showland=true)),
+			("update_images!", "xy", sf -> add_layout_image!(sf, image; row=2, col=2), (sf, rc) -> update_images!(sf; rc..., opacity=0.5)),
+			("update_mapboxes!", "mapbox", none, (sf, rc) -> update_mapboxes!(sf; rc..., zoom=2)),
+			("update_maps!", "map", none, (sf, rc) -> update_maps!(sf; rc..., zoom=2)),
+			("update_polars!", "polar", none, (sf, rc) -> update_polars!(sf; rc..., hole=0.1)),
+			("update_scenes!", "scene", none, (sf, rc) -> update_scenes!(sf; rc..., aspectmode="cube")),
+			("update_shapes!", "xy", sf -> add_hline!(sf, 0.5; row=2, col=2), (sf, rc) -> update_shapes!(sf; rc..., opacity=0.5)),
+			("update_ternaries!", "ternary", none, (sf, rc) -> update_ternaries!(sf; rc..., sum=1)),
+			("update_xaxes!", "xy", none, (sf, rc) -> update_xaxes!(sf; rc..., title_text="t")),
+			("update_yaxes!", "xy", none, (sf, rc) -> update_yaxes!(sf; rc..., title_text="t")),
+			("view!", "scene", points3d!, (sf, rc) -> view!(sf; rc..., elev=20, azim=30)),
+			("vline!", "xy", none, (sf, rc) -> vline!(sf, 0.5; rc...)),
+			("vspan!", "xy", none, (sf, rc) -> vspan!(sf, 0.2, 0.4; rc...)),
+			("xlabel!", "xy", none, (sf, rc) -> xlabel!(sf, "x"; rc...)),
+			("xrange!", "xy", none, (sf, rc) -> xrange!(sf, [0, 1]; rc...)),
+			("xticks!", "xy", none, (sf, rc) -> xticks!(sf, [0.0, 1.0]; rc...)),
+			("ylabel!", "xy", none, (sf, rc) -> ylabel!(sf, "y"; rc...)),
+			("yrange!", "xy", none, (sf, rc) -> yrange!(sf, [0, 1]; rc...)),
+			("yticks!", "xy", none, (sf, rc) -> yticks!(sf, [0.0, 1.0]; rc...)),
+			("zlabel!", "scene", points3d!, (sf, rc) -> zlabel!(sf, "z"; rc...)),
+			("zrange!", "scene", points3d!, (sf, rc) -> zrange!(sf, [0, 1]; rc...)),
+		]
+		exported = Set(String(n) for n in names(PlotlySupply) if endswith(String(n), "!"))
+		listed = Set(first(c) for c in calls)
+		# A new exported mutator must be added to this table.
+		@test isempty(setdiff(exported, process_wide, listed))
+		@test isempty(setdiff(listed, exported))
+		attempt(f) = try
+			f()
+			nothing
+		catch err
+			err
+		end
+		for (name, kind, setup, call) in calls
+			@testset "$(name) on a $(kind) cell" begin
+				sf = _rsp_complete_figure(kind)
+				setup(sf)
+				before11 = _rsp_cell_state(sf, 1, 1)
+				before22 = _rsp_cell_state(sf, 2, 2)
+				err = attempt(() -> call(sf, (row=2, col=2)))
+				if name in cross_requested
+					@test_broken err === nothing || (err isa ArgumentError && startswith(err.msg, name * ":"))
+				else
+					if err === nothing
+						@test _rsp_cell_state(sf, 1, 1) == before11
+						if name == "subplot!"
+							# subplot! only selects the cell.
+							@test (sf.current_row, sf.current_col) == (2, 2)
+						else
+							@test _rsp_cell_state(sf, 2, 2) != before22
+						end
+					else
+						@test err isa ArgumentError
+						@test err isa ArgumentError && startswith(err.msg, name * ":")
+					end
+					# Y20: a cell outside the grid is an ArgumentError naming the
+					# function, raised before anything changes.
+					fresh = _rsp_complete_figure(kind)
+					setup(fresh)
+					snapshot = JSON.json(fresh.plot)
+					bad = attempt(() -> call(fresh, (row=99, col=2)))
+					@test bad isa ArgumentError
+					if name in misnamed_cell_errors
+						@test_broken bad isa ArgumentError && startswith(bad.msg, name * ":")
+					else
+						@test bad isa ArgumentError && startswith(bad.msg, name * ":")
+					end
+					@test JSON.json(fresh.plot) == snapshot
+				end
+			end
+		end
 	end
 end

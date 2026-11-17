@@ -986,3 +986,252 @@ end
 		close(host)
 	end
 end
+
+# ── Shape and image verbs (G26), cell keywords on whole-figure verbs (Y31) ──
+
+using Dates
+
+_rv_fields(item) = (item isa _RV_PB.Shape || item isa _RV_PB.PlotlyAttribute) ? item.fields : item
+_rv_refs(item) = (_rv_fields(item)[:xref], _rv_fields(item)[:yref])
+_rv_items(p::Plot, key::Symbol) = collect(get(p.layout.fields, key, Any[]))
+
+# The ArgumentError `f()` throws, or `nothing` when it returns.
+function _rv_argument_error(f)
+	try
+		f()
+	catch err
+		err isa ArgumentError && return err
+		rethrow()
+	end
+	return nothing
+end
+
+@testset "verbs: shape and image verbs on a SubplotFigure (G26)" begin
+	specs = [Spec() Spec(); Spec(kind = "polar") Spec(secondary_y = true)]
+	sf = subplots(2, 2; sync = false, specs = specs)
+	plot_scatter!(sf, 1:10, collect(1.0:10.0); row = 1, col = 1)
+	plot_scatter!(sf, 1:10, collect(1.0:10.0); row = 2, col = 2)
+	cell(r, c; kw...) = PlotlySupply._cell_target(sf; row = r, col = c, kw...)
+	t11, t12, t22 = cell(1, 1), cell(1, 2), cell(2, 2)
+	t22s = cell(2, 2; secondary_y = true)
+	subplot!(sf, 1, 1)
+
+	# One cell: the shape lands on that cell's axes and the cell becomes active.
+	@test add_hline!(sf, 0.5; row = 2, col = 2, line_dash = "dash") === sf
+	shape = last(_rv_items(sf.plot, :shapes))
+	@test _rv_refs(shape) == ("$(t22.xref) domain", t22.yref)
+	@test _rv_fields(shape)[:y0] == 0.5 && _rv_fields(shape)[:y1] == 0.5
+	@test _rv_fields(shape)[:x0] == 0 && _rv_fields(shape)[:x1] == 1
+	@test _rv_fields(_rv_fields(shape)[:line])[:dash] == "dash"
+	@test !haskey(_rv_fields(shape), :row) && !haskey(_rv_fields(shape), :show)
+	@test (sf.current_row, sf.current_col) == (2, 2)
+
+	# Without row/col: the active cell.
+	subplot!(sf, 1, 2)
+	add_vline!(sf, 3)
+	@test _rv_refs(last(_rv_items(sf.plot, :shapes))) == (t12.xref, "$(t12.yref) domain")
+	# secondary_y: the cell's secondary y axis.
+	add_hrect!(sf, 0.2, 0.4; row = 2, col = 2, secondary_y = true, fillcolor = "red")
+	band = last(_rv_items(sf.plot, :shapes))
+	@test _rv_refs(band) == ("$(t22s.xref) domain", t22s.yref)
+	@test t22s.yref != t22.yref
+	@test (_rv_fields(band)[:y0], _rv_fields(band)[:y1]) == (0.2, 0.4)
+
+	# "all": every Cartesian cell (the polar cell is skipped); the active cell stays.
+	subplot!(sf, 1, 1)
+	n_before = length(_rv_items(sf.plot, :shapes))
+	add_vrect!(sf, 2, 4; row = "all", col = "all", opacity = 0.2)
+	added = _rv_items(sf.plot, :shapes)[(n_before + 1):end]
+	@test Set(_rv_refs.(added)) == Set([(t.xref, "$(t.yref) domain") for t in (t11, t12, t22)])
+	@test all(_rv_fields(s)[:opacity] == 0.2 for s in added)
+	@test (sf.current_row, sf.current_col) == (1, 1)
+	n_before = length(_rv_items(sf.plot, :shapes))
+	add_hline!(sf, 1.0; row = 1, col = "all")
+	@test Set(_rv_refs.(_rv_items(sf.plot, :shapes)[(n_before + 1):end])) ==
+		Set([("$(t.xref) domain", t.yref) for t in (t11, t12)])
+
+	# add_shape!: data coordinates; a paper reference becomes the cell's domain.
+	add_shape!(sf, rect(1, 2, 0.1, 0.2); row = 1, col = 2)
+	@test _rv_refs(last(_rv_items(sf.plot, :shapes))) == (t12.xref, t12.yref)
+	add_shape!(sf, _RV_PB.hline(0.5); row = 1, col = 2)
+	@test _rv_refs(last(_rv_items(sf.plot, :shapes))) == ("$(t12.xref) domain", t12.yref)
+	# A vector of coordinates adds one shape each.
+	n_before = length(_rv_items(sf.plot, :shapes))
+	add_hline!(sf, [0.1, 0.9]; row = 1, col = 1)
+	@test [_rv_fields(s)[:y0] for s in _rv_items(sf.plot, :shapes)[(n_before + 1):end]] == [0.1, 0.9]
+	# add_layout_image!: both references are the cell's domain.
+	image = attr(source = "data:image/png;base64,iVBORw0KGgo=", x = 0, y = 1, sizex = 0.2, sizey = 0.2)
+	add_layout_image!(sf, image; row = 2, col = 2)
+	@test _rv_refs(only(_rv_items(sf.plot, :images))) == ("$(t22.xref) domain", "$(t22.yref) domain")
+	@test !haskey(image.fields, :xref)  # the caller's attribute is not mutated
+	# An inset's axes.
+	k = inset!(sf, (0.6, 0.6, 0.3, 0.3); row = 1, col = 1)
+	ti = PlotlySupply._cell_target(sf; inset = k)
+	add_hline!(sf, 0.5; inset = k)
+	@test _rv_refs(last(_rv_items(sf.plot, :shapes))) == ("$(ti.xref) domain", ti.yref)
+
+	# update_shapes! on one cell reaches the Shape entries the verbs add (it
+	# skipped them: their attributes live in `Shape.fields`).
+	update_shapes!(sf; row = 1, col = 2, opacity = 0.3)
+	on12(s) = replace(_rv_fields(s)[:xref], " domain" => "") == t12.xref &&
+		replace(_rv_fields(s)[:yref], " domain" => "") == t12.yref
+	shapes = _rv_items(sf.plot, :shapes)
+	# vline, vrect ("all"), hline (row 1), rect and paper hline on (1, 2).
+	@test count(on12, shapes) == 5
+	@test all(get(_rv_fields(s), :opacity, nothing) == 0.3 for s in shapes if on12(s))
+	@test !any(get(_rv_fields(s), :opacity, nothing) == 0.3 for s in shapes if !on12(s))
+
+	# Errors: ArgumentErrors naming the verb; the figure is unchanged.
+	before = deepcopy(sf.plot.layout)
+	active = (sf.current_row, sf.current_col)
+	for (verb, call) in (
+		("add_hline!", () -> add_hline!(sf, 0.5; row = 2, col = 1)),          # polar cell
+		("add_hline!", () -> add_hline!(sf, 0.5; row = 99, col = 1)),
+		("add_hline!", () -> add_hline!(sf, 0.5; show = true)),
+		("add_hline!", () -> add_hline!(sf, 0.5; xref = "paper")),
+		("add_hline!", () -> add_hline!(sf, NaN)),
+		("add_hline!", () -> add_hline!(sf, nothing)),
+		("add_hline!", () -> add_hline!(sf, Float64[])),
+		("add_hline!", () -> add_hline!(sf)),
+		("add_hline!", () -> add_hline!(sf, 1; row = "all")),
+		("add_hline!", () -> add_hline!(sf, 1; row = "any", col = 1)),
+		("add_hline!", () -> add_hline!(sf, 1; row = "all", col = "all", inset = k)),
+		("add_hrect!", () -> add_hrect!(sf, 0.1; row = 1, col = 1)),
+		("add_vrect!", () -> add_vrect!(sf, 1, Inf; row = 1, col = 1)),
+		("add_vline!", () -> add_vline!(sf, 1; row = 1, col = 1, secondary_y = true)),
+		("add_shape!", () -> add_shape!(sf, rect(1, 2, 3, 4); fillcolor = "red")),
+		("add_shape!", () -> add_shape!(sf, 3)),
+		("add_layout_image!", () -> add_layout_image!(sf, image; row = 2, col = 1)),
+	)
+		err = _rv_argument_error(call)
+		@test err isa ArgumentError
+		@test err !== nothing && startswith(err.msg, verb * ":")
+	end
+	@test sf.plot.layout == before
+	@test (sf.current_row, sf.current_col) == active
+
+	# add_recession_bands!: the bands inside the date span of the cell's
+	# traces, over the cell's height.
+	dated = subplots(1, 2; sync = false)
+	dates = [Date(2007, 1, 1) + Month(i) for i in 0:36]
+	plot_scatter!(dated, collect(1.0:3.0), [1.0, 2.0, 3.0]; row = 1, col = 1)
+	plot_scatter!(dated, dates, collect(1.0:37.0); row = 1, col = 2)
+	@test add_recession_bands!(dated; row = 1, col = 2) === dated
+	bands = _rv_items(dated.plot, :shapes)
+	@test all(_rv_refs(s) == ("x2", "y2 domain") for s in bands)
+	@test all((_rv_fields(s)[:y0], _rv_fields(s)[:y1]) == (0, 1) for s in bands)
+	# The same bands as PlotlyBase computes for a single figure with these dates
+	# (its table has the 2008-01-01 .. 2009-07-01 recession).
+	reference = _RV_PB._recession_band_shapes(Plot(scatter(x = dates, y = collect(1.0:37.0))))
+	span(s) = (_rv_fields(s)[:x0], _rv_fields(s)[:x1])
+	@test span.(bands) == [span(s) for s in (reference isa AbstractVector ? reference : [reference])]
+	@test span.(bands) == [(Date(2008, 1, 1), Date(2009, 7, 1))]
+	err = _rv_argument_error(() -> add_recession_bands!(dated; row = 1, col = 1))
+	@test err !== nothing && startswith(err.msg, "add_recession_bands!:")
+	err = _rv_argument_error(() -> add_recession_bands!(dated; row = 1, col = 2, show = true))
+	@test err !== nothing && startswith(err.msg, "add_recession_bands!:")
+	@test length(_rv_items(dated.plot, :shapes)) == length(bands)
+
+	# A live figure gets one renderer transaction.
+	live = subplots(1, 2; sync = false)
+	plot_scatter!(live, 1:3, [1.0, 2.0, 3.0]; row = 1, col = 2)
+	sp, renderer = _rv_syncplot(live.plot)
+	live.fig = sp
+	add_hline!(live, 2.0; row = 1, col = 2)
+	@test length(renderer.scripts) == 1
+	@test occursin("x2 domain", only(renderer.scripts))
+	@test length(_rv_items(live.plot, :shapes)) == 1
+end
+
+@testset "verbs: shape verbs on a Plot or SyncPlot validate the grid selection (G26)" begin
+	p = plot_scatter(1:3, [1.0, 2.0, 3.0])
+	@test add_hline!(p, 2) === p
+	@test _rv_refs(only(_rv_items(p, :shapes))) == ("x domain", "y")
+	grid = make_subplots(rows = 1, cols = 2)
+	add_vline!(grid, 1; col = 2)
+	@test _rv_refs(only(_rv_items(grid, :shapes))) == ("x2", "y2 domain")
+	add_hline!(grid, 1)
+	@test length(_rv_items(grid, :shapes)) == 3
+	add_vrect!(grid, 1, 2; row = 1, col = [1, 2])
+	@test length(_rv_items(grid, :shapes)) == 5
+	# A non-Cartesian cell is skipped for "all" and rejected by index.
+	mixed = make_subplots(rows = 1, cols = 2, specs = [Spec() Spec(kind = "polar")])
+	add_hline!(mixed, 1)
+	@test _rv_refs(only(_rv_items(mixed, :shapes))) == ("x domain", "y")
+	before = deepcopy(mixed.layout)
+	for (verb, call) in (
+		("add_hline!", () -> add_hline!(mixed, 1; col = 2)),
+		("add_hline!", () -> add_hline!(mixed, 1; row = 5)),
+		("add_hline!", () -> add_hline!(mixed, 1; row = "any")),
+		("add_hline!", () -> add_hline!(mixed, 1; col = [1, 3])),
+		("add_hline!", () -> add_hline!(mixed, 1; show = true)),
+		("add_hline!", () -> add_hline!(mixed, 1; secondary_y = true)),
+		("add_hline!", () -> add_hline!(mixed, 1; inset = 1)),
+		("add_hline!", () -> add_hline!(mixed, 1; yref = "y2")),
+		("add_vline!", () -> add_vline!(mixed, missing)),
+		("add_shape!", () -> add_shape!(mixed, "circle")),
+		("add_layout_image!", () -> add_layout_image!(mixed, attr(source = "s"); opacity = 0.5)),
+		("add_recession_bands!", () -> add_recession_bands!(mixed; show = true)),
+		("add_recession_bands!", () -> add_recession_bands!(mixed; row = 1)),
+	)
+		err = _rv_argument_error(call)
+		@test err !== nothing && startswith(err.msg, verb * ":")
+	end
+	@test mixed.layout == before
+
+	sp, renderer = _rv_syncplot(plot_scatter(1:3, [1.0, 2.0, 3.0]))
+	add_hline!(sp, 2)
+	@test _rv_refs(only(_rv_items(sp.plot, :shapes))) == ("x domain", "y")
+	@test length(renderer.scripts) == 1
+	err = _rv_argument_error(() -> add_hline!(sp, 2; show = true))
+	@test err !== nothing && startswith(err.msg, "add_hline!:")
+	@test length(renderer.scripts) == 1
+	@test length(_rv_items(sp.plot, :shapes)) == 1
+end
+
+@testset "verbs: cell keywords on whole-figure verbs are ArgumentErrors (Y31)" begin
+	# SyncPlot layout updaters defined in plotlyjs_compat.jl.
+	sp, renderer = _rv_syncplot(plot_scatter(1:3, [1.0, 2.0, 3.0]))
+	before = deepcopy(sp.plot.layout)
+	for f in (update_annotations!, update_shapes!, update_images!, update_geos!, update_scenes!, update_ternaries!),
+			key in (:row, :col, :secondary_y, :inset, :show)
+		err = _rv_argument_error(() -> f(sp; key => 1, opacity = 0.5))
+		@test err !== nothing && startswith(err.msg, "$(nameof(f)):") && occursin("`$(key)`", err.msg)
+	end
+	@test isempty(renderer.scripts)
+	@test sp.plot.layout == before
+	# Known gaps in methods outside this track (cross-requested): the Plot
+	# methods of every layout updater and the SyncPlot update_xaxes!/
+	# update_yaxes!/update_polars!/update_mapboxes! still accept `row`/`col`.
+	rejects_row(f, fig) = _rv_argument_error(() -> f(fig; row = 1, col = 1, title_text = "t")) !== nothing
+	@test_broken rejects_row(update_xaxes!, first(_rv_syncplot(plot_scatter(1:3, [1.0, 2.0, 3.0]))))
+	@test_broken rejects_row(update_xaxes!, plot_scatter(1:3, [1.0, 2.0, 3.0]))
+	@test_broken rejects_row(update_shapes!, plot_scatter(1:3, [1.0, 2.0, 3.0]))
+
+	# SubplotFigure verbs that act on the whole figure.
+	sf = subplots(1, 2; sync = false)
+	plot_scatter!(sf, 1:3, [1.0, 2.0, 3.0]; row = 1, col = 1)
+	before = deepcopy(sf.plot.layout)
+	for (name, call) in (
+		("relayout!", () -> relayout!(sf; row = 1, col = 2, title_text = "t")),
+		("restyle!", () -> restyle!(sf, 1; col = 2, opacity = 0.5)),
+		("update!", () -> update!(sf; inset = 1, title_text = "t")),
+		("react!", () -> react!(sf, sf.plot.data, sf.plot.layout; row = 1)),
+		("redraw!", () -> redraw!(sf; show = true)),
+		("deletetraces!", () -> deletetraces!(sf, 1; row = 1)),
+		("movetraces!", () -> movetraces!(sf, 1, 1; secondary_y = true)),
+		("extendtraces!", () -> extendtraces!(sf, Dict(:y => [[4.0]]), [1]; row = 1)),
+		("prependtraces!", () -> prependtraces!(sf, Dict(:y => [[0.0]]), [1]; col = 1)),
+		("purge!", () -> purge!(sf; row = 1, col = 1)),
+		("purge!", () -> purge!(sf; keep = true)),
+	)
+		err = _rv_argument_error(call)
+		@test err !== nothing && startswith(err.msg, name * ":")
+	end
+	@test sf.plot.layout == before
+	@test length(sf.plot.data) == 1
+	@test !haskey(sf.plot.layout.fields, :row)
+	# Without cell keywords they still act on the figure.
+	@test relayout!(sf; title_text = "t") === sf
+	@test sf.plot.layout.fields[:title][:text] == "t"
+end
