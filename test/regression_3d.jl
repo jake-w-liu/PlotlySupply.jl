@@ -595,3 +595,267 @@ _r3_resolved(name) = PlotlySupply._resolve_colorscale(name; who = "test").scale
 		@test _r3_fields(axis(sf, :scene2, :zaxis)[:title])[:text] == "z"
 	end
 end
+
+# Wave-4 3-D items (v4 "threed"); each testset names its item id.
+_v4_fields(value) = value isa PlotlyBase.PlotlyAttribute ? value.fields : value
+_v4_message(f) = try
+	f()
+	""
+catch err
+	err isa ArgumentError || rethrow()
+	err.msg
+end
+_v4_marker(trace) = _v4_fields(trace.fields[:marker])
+_v4_line(trace) = _v4_fields(trace.fields[:line])
+_v4_camera(p::Plot, key::Symbol = :scene) = _v4_fields(_v4_fields(p.layout.fields[key])[:camera])
+_v4_xyz(value) = [Float64(_v4_fields(value)[k]) for k in (:x, :y, :z)]
+_v4_copy(p::Plot) = Plot(copy(p.data), deepcopy(p.layout), p.frames; config = p.config)
+function _v4_surface_data()
+	xs = range(-2, 2; length = 25)
+	ys = range(-1, 1; length = 21)
+	return xs, ys, [exp(-x^2 - 2y^2) for x in xs, y in ys]
+end
+# Largest coordinate of the modelled drawing (box corners, tick labels and axis
+# titles) of scene `key` in `p` exported at `size`, as a fraction of its half
+# viewport, with the camera distance scaled by `scale`.
+function _v4_label_extent(p::Plot, key::Symbol, size, scale::Float64 = 1.0)
+	PS = PlotlySupply
+	return Base.ScopedValues.with(PS._S3_EXPORT_SIZE => (Float64(size[1]), Float64(size[2]))) do
+		camera = _v4_camera(p, key)
+		eye = _v4_xyz(camera[:eye])
+		center = haskey(camera, :center) ? _v4_xyz(camera[:center]) : zeros(3)
+		offset = eye .- center
+		distance = sqrt(sum(abs2, offset))
+		frame = PS._s3_camera_frame(offset ./ distance, PS._s3_camera_up(camera))
+		width, height = PS._s3_viewport(p, PS._s3_layout_target(p, key))
+		corners, quads = PS._s3_label_layout(PS._s3_drawn_box(p, key), Tuple(center), frame, distance * scale,
+			Float64(width), Float64(height), PS._s3_axis_labels(p, key), PS._s3_scene_spans(p, key))
+		points = collect(Iterators.flatten((corners, Iterators.flatten(quads))))
+		return maximum(point -> max(abs(point[1]) / (width / 2), abs(point[2]) / (height / 2)), points)
+	end
+end
+# Ticks plotly.js labels on [lo, hi] with `count` automatic ticks.
+function _v4_labelled(lo, hi, count)
+	step = PlotlySupply._s3_plotly_tick_step(hi - lo, count)
+	return floor(Int, hi / step + 1e-9) - ceil(Int, lo / step - 1e-9) + 1
+end
+
+@testset "regression: 3-D wave 4 (v4 threed)" begin
+	PS = PlotlySupply
+
+	@testset "G34 view!/scene! return nothing on a Plot" begin
+		f = plot_surface(rand(3, 3))
+		@test view!(f; elev = 10, azim = 20) === nothing
+		@test scene!(f; aspectratio = (1, 1, 1)) === nothing
+		@test _v4_fields(_v4_fields(f.layout.fields[:scene])[:aspectratio])[:x] == 1
+	end
+
+	@testset "Y7 the delegate's warnings and errors name the 3-D mutator" begin
+		sf = subplots(1, 2; sync = false, specs = fill(Spec(kind = "scene"), 1, 2))
+		@test_logs (:warn, r"^plot_surface!: per-subplot plot_\*! ignores figure-level keyword\(s\) \[:width\]") match_mode = :any plot_surface!(sf, rand(3, 3); row = 1, col = 1, width = 500)
+		@test_logs (:warn, r"^plot_scatter3d!: per-subplot plot_\*! ignores figure-level keyword\(s\) \[:height\]") match_mode = :any plot_scatter3d!(sf, 1:3, 1:3, 1:3; row = 1, col = 2, height = 300)
+		@test _v4_message(() -> plot_surface!(sf, rand(3, 3); row = 3, col = 1)) == "plot_surface!: `row` must be in 1:1; got 3."
+		@test _v4_message(() -> plot_scatter3d!(sf, 1:3, 1:3, 1:3; row = 1, col = 5)) == "plot_scatter3d!: `col` must be in 1:2; got 5."
+	end
+
+	@testset "G18/G74 scatter3d marker symbols, hollow markers and edges" begin
+		x = [1.0, 2, 3]
+		m(; kw...) = _v4_marker(plot_scatter3d(x, x, x; mode = "markers", kw...).data[1])
+		for (code, symbol) in ("o" => "circle", "." => "circle", "s" => "square", "D" => "diamond", "d" => "diamond",
+			"+" => "cross", "P" => "cross", "x" => "x", "X" => "x", "diamond-open" => "diamond-open")
+			@test m(marker_symbol = code)[:symbol] == symbol
+		end
+		@test m(marker_symbol = ".")[:size] == PS._CMN_POINT_MARKER_SIZE
+		# Hollow: the open symbol in the series colour, no outline.
+		hollow = m(marker_color = "none")
+		@test (hollow[:symbol], hollow[:color], haskey(hollow, :line)) == ("circle-open", "#636EFA", false)
+		@test m(marker_color = :none, marker_symbol = "s")[:symbol] == "square-open"
+		@test m(marker_color = "none", marker_symbol = "x")[:symbol] == "x"
+		ring = m(marker_color = "none", marker_line_width = 2, color = "#123456")
+		@test ring[:color] == "#123456"
+		@test _v4_fields(ring[:line]) == Dict(:color => "#123456", :width => 2.0)
+		# A face colour gets an outline in the series colour (a white face stays visible).
+		white = m(marker_color = "white", color = "blue")
+		@test white[:color] == "white"
+		@test _v4_fields(white[:line]) == Dict(:color => "blue", :width => PS._CMN_DEFAULT_MARKER_EDGE_WIDTH)
+		edge = m(marker_line_color = "red", marker_line_width = 3)
+		@test !haskey(edge, :color)
+		@test _v4_fields(edge[:line]) == Dict(:color => "red", :width => 3.0)
+		@test _v4_fields(m(marker_line_width = 2, color = "green")[:line])[:color] == "green"
+		# Edge colours with an alpha channel are blended like line colours (G62).
+		@test _v4_fields(m(marker_color = "white", marker_line_color = "rgba(0,0,0,0.5)")[:line])[:color] == "#808080"
+		two = plot_scatter3d([x, x], [x, x], [x, 2x]; mode = "markers", marker_line_color = ["red", "blue"], marker_line_width = [1, 2])
+		@test [_v4_fields(_v4_marker(t)[:line])[:color] for t in two.data] == ["red", "blue"]
+		@test [_v4_fields(_v4_marker(t)[:line])[:width] for t in two.data] == [1.0, 2.0]
+		g = plot_scatter3d(x, x, x)
+		@test plot_scatter3d!(g, x, x, x; mode = "markers", marker_color = "none", marker_symbol = "D") === nothing
+		@test _v4_marker(g.data[end])[:symbol] == "diamond-open"
+		@test startswith(_v4_message(() -> plot_scatter3d(x, x, x; marker_symbol = "^")),
+			"plot_scatter3d: `marker_symbol` must be one of \"circle\"")
+		@test _v4_message(() -> plot_scatter3d(x, x, x; marker_line_width = -1)) ==
+			"plot_scatter3d: `marker_line_width` must be >= 0; got -1."
+		@test startswith(_v4_message(() -> plot_scatter3d(x, x, x; marker_line_color = "notacolor")),
+			"plot_scatter3d: `marker_line_color`: invalid colour \"notacolor\"")
+		@test startswith(_v4_message(() -> plot_scatter3d!(g, x, x, x; marker_color = "bogus")),
+			"plot_scatter3d!: `marker_color`: invalid colour \"bogus\"")
+		@test _v4_message(() -> plot_scatter3d(x, x, x; markevery = 0)) ==
+			"plot_scatter3d: an integer `markevery` is a step and must be >= 1; got 0."
+	end
+
+	@testset "G18 scatter3d markevery" begin
+		x = collect(1.0:5)
+		f = plot_scatter3d(x, x, x; mode = "lines", markevery = 2, color = "red", legend = "s")
+		@test length(f.data) == 2
+		line, marked = f.data
+		@test (line.fields[:mode], line.fields[:x], line.fields[:showlegend], haskey(line.fields, :marker)) ==
+			("lines", x, false, false)
+		@test (marked.fields[:mode], marked.fields[:hoverinfo], marked.fields[:name]) == ("lines+markers", "skip", "s")
+		@test get(marked.fields, :showlegend, true) != false
+		@test isequal(marked.fields[:x], [1.0, nothing, 3.0, nothing, 5.0, nothing])
+		@test _v4_line(line)[:color] == _v4_line(marked)[:color] == "red"
+		@test plot_scatter3d(x, x, x; mode = "markers", markevery = [1, 3]).data[1].fields[:x] == [1.0, 3.0]
+		# A split series keeps its colour and the next series the next one.
+		two = plot_scatter3d([x, x], [x, x], [x, 2x]; mode = "lines", markevery = [2, nothing])
+		@test [t.fields[:mode] for t in two.data] == ["lines", "lines+markers", "lines"]
+		@test [_v4_line(t)[:color] for t in two.data] == ["#636EFA", "#636EFA", "#EF553B"]
+		g = plot_scatter3d(x, x, x)
+		@test plot_scatter3d!(g, x, x, x; mode = "lines", markevery = 2) === nothing
+		@test length(g.data) == 3
+	end
+
+	@testset "G62/G81 translucent 3-D line colours are blended over the background" begin
+		tri = [[0.0 0 0; 1 0 0; 0 1 0]]
+		edge(color) = only(_v4_line(t)[:color] for t in plot_polygons3d(tri; edgecolor = color).data if t.fields[:type] == "scatter3d")
+		@test edge("rgba(255,255,255,0.48)") == "#FFFFFF"
+		@test edge("rgba(0,0,0,0.48)") == "#858585"
+		@test edge("#FF000080") == "#FF7F7F"
+		@test edge(PS.Colors.RGBA(1, 0, 0, 0.5)) == "#FF8080"
+		@test edge("0.5") == "#808080"
+		@test edge("red") == "red"
+		seg = ([0.0], [0.0], [0.0], [1.0], [1.0], [1.0])
+		@test _v4_line(plot_segments3d(seg...; color = "rgba(255,0,0,0.5)").data[1])[:color] == "#FF8080"
+		@test _v4_line(plot_scatter3d([1.0, 2], [1.0, 2], [1.0, 2]; color = "rgba(0,0,255,0.5)").data[1])[:color] == "#8080FF"
+		@test _v4_line(plot_wireframe([0.0, 1.0], [0.0, 1.0], rand(2, 2); color = "rgba(0,0,0,0.25)").data[1])[:color] == "#BFBFBF"
+		arrows = plot_quiver3d([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]; style = :arrow, color = "rgba(0,128,0,0.5)")
+		@test _v4_line(arrows.data[1])[:color] == "#80C080"
+		s = plot_surface([0.0, 1, 2], [0.0, 1, 2], rand(3, 3); edges = true, edgecolor = "rgba(0,0,0,0.5)")
+		@test _v4_fields(_v4_fields(s.data[1].fields[:contours])[:x])[:color] == "#808080"
+		mesh = plot_mesh3d([0.0, 1, 0], [0.0, 0, 1], [0.0, 0, 0]; i = [0], j = [1], k = [2], edges = true,
+			edgecolor = "rgba(0,0,0,0.5)")
+		@test [_v4_line(t)[:color] for t in mesh.data if t.fields[:type] == "scatter3d"] == ["#808080"]
+		# Cones are surfaces: the colour scale keeps the alpha channel.
+		cone = plot_quiver3d([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]; color = "rgba(0,128,0,0.5)")
+		@test cone.data[1].fields[:colorscale] == [[0, "rgba(0,128,0,0.5)"], [1, "rgba(0,128,0,0.5)"]]
+		# The background is the figure's, also in a subplot cell.
+		sf = subplots(1, 2; sync = false, specs = fill(Spec(kind = "scene"), 1, 2))
+		plot_segments3d!(sf, seg...; row = 1, col = 2, color = "rgba(255,0,0,0.5)")
+		@test _v4_line(sf.plot.data[end])[:color] == "#FF8080"
+		dark = plot_scatter3d([1.0, 2], [1.0, 2], [1.0, 2])
+		relayout!(dark; paper_bgcolor = "black")
+		@test plot_segments3d!(dark, seg...; color = "rgba(255,255,255,0.5)") === nothing
+		@test _v4_line(dark.data[end])[:color] == "#808080"
+		@test startswith(_v4_message(() -> plot_segments3d(seg...; color = "rgba(1,2)")),
+			"plot_segments3d: `color`: invalid colour \"rgba(1,2)\"")
+	end
+
+	@testset "G45 documented: content outside the scene ranges" begin
+		@test occursin("outside the scene's axis ranges is not drawn", string(@doc annotate!))
+		for f in (plot_quiver3d, plot_segments3d, plot_scatter3d)
+			@test occursin("A scene draws only what lies inside its axis ranges", string(Base.Docs.doc(f)))
+		end
+	end
+
+	@testset "V3 plotly.js tick steps and cell tick counts" begin
+		@test PS._s3_plotly_tick_step(4.25, 2) == 5.0
+		@test PS._s3_plotly_tick_step(2.0, 1) == 5.0
+		@test PS._s3_plotly_tick_step(1.0, 1) == 2.0
+		@test PS._s3_plotly_tick_step(4.25, 3) == 2.0
+		# log(1000)/LN10 is just below 3, as in JavaScript.
+		@test PS._s3_plotly_tick_step(1000.0, 1) == 1000.0
+		@test PS._s3_tick_text_chars(-0.5, 0.5) == 4
+		@test PS._s3_tick_text_chars(12.0, 2.0) == 2
+		@test PS._s3_tick_text_chars(10000.0, 5000.0) == 4
+		@test PS._s3_tick_text_chars(0.0002, 0.0001) == 4
+		xs, ys, Z = _v4_surface_data()
+		f = plot_surface(xs, ys, Z)
+		@test PS._s3_axis_range(f, :scene, 1, nothing) == (-2.125, 2.125)
+		@test PS._s3_axis_range(plot_scatter3d([3.0], [1.0], [1.0]), :scene, 1, nothing) == (2.0, 4.0)
+		@test PS._s3_axis_range(f, :scene, 1, Dict(:range => [0, 5])) == (0.0, 5.0)
+		# Two ticks over 4.25 label only 0; three label -2, 0 and 2 once the
+		# axis is long enough to keep "-2" and "0" apart.
+		@test _v4_labelled(-2.125, 2.125, 2) == 1
+		@test [PS._s3_cell_tick_count(f, :scene, 1, nothing, L, 2, 12.0) for L in (30.0, 60.0, 100.0)] == [2, 3, 3]
+		@test PS._s3_cell_tick_count(f, :scene, 1, Dict(:type => "log"), 100.0, 2, 12.0) == 2
+		@test PS._s3_cell_tick_count(f, :scene, 1, nothing, 400.0, 9, 12.0) == 9
+	end
+
+	@testset "V3 export viewport leaves room for colorbars" begin
+		xs, ys, Z = _v4_surface_data()
+		# 2 xpad + thickness + outline/2 + gap + "0.5" (3 × 0.56 × 12 px) wide,
+		# at x = 1.02 of the plot area: r = (0.02·650 + bar + 12) / 1.02.
+		bar = 2 * 10 + 30 + 0.5 + 4 + 3 * 0.56 * 12
+		f = plot_surface(xs, ys, Z)
+		r = PS._s3_colorbar_right_margin(f, 700.0, 50.0, 50.0)
+		@test r ≈ (0.02 * 650 + bar + 12) / 1.02 atol = 0.01
+		@test PS._s3_colorbar_right_margin(plot_surface(xs, ys, Z; colorbar_title = "amplitude", colorbar_title_side = :right),
+			700.0, 50.0, 50.0) ≈ (0.02 * 650 + bar + 1.4 * 12 + 12) / 1.02 atol = 0.01
+		@test PS._s3_colorbar_right_margin(plot_surface(xs, ys, Z; showscale = false), 700.0, 50.0, 50.0) == 50.0
+		horizontal = plot_surface(xs, ys, Z)
+		horizontal.data[1].fields[:colorbar] = attr(orientation = "h")
+		@test PS._s3_colorbar_right_margin(horizontal, 700.0, 50.0, 50.0) == 50.0
+		width, height = Base.ScopedValues.with(PS._S3_EXPORT_SIZE => (700.0, 500.0)) do
+			PS._s3_viewport(f, PS._s3_layout_target(f, :scene))
+		end
+		@test width ≈ 700 - 50 - r
+		@test height == 500 - 60 - 50
+		# Outside an export the layout margins are used.
+		@test PS._s3_viewport(f, PS._s3_layout_target(f, :scene))[1] == 600
+	end
+
+	@testset "G72/G82/V3 export refit of scene cameras and cell ticks" begin
+		xs, ys, Z = _v4_surface_data()
+		f = plot_surface(xs, ys, Z; xlabel = "Material scale α", ylabel = "Time step Δt", zlabel = "Frequency ratio R")
+		before = PlotlyBase.JSON.json(f)
+		eye0 = _v4_xyz(_v4_camera(f)[:eye])
+		target = _v4_copy(f)
+		@test PS._s3_refit_scenes!(target, f, (700, 500)) === true
+		@test PlotlyBase.JSON.json(f) == before
+		camera = _v4_camera(target)
+		eye = _v4_xyz(camera[:eye])
+		center = _v4_xyz(camera[:center])
+		offset = eye .- center
+		# The direction is kept; the drawing, labels included, uses the viewport.
+		@test offset ./ sqrt(sum(abs2, offset)) ≈ eye0 ./ sqrt(sum(abs2, eye0)) atol = 1e-9
+		@test 0.97 < _v4_label_extent(target, :scene, (700, 500)) <= 1
+		@test _v4_label_extent(target, :scene, (700, 500), 0.97) > 1
+		# Without `pan` the camera centre stays at the origin.
+		fixed = _v4_copy(f)
+		PS._s3_refit_scenes!(fixed, f, (700, 500); pan = false)
+		@test !haskey(_v4_camera(fixed), :center)
+		@test _v4_label_extent(fixed, :scene, (700, 500)) <= 1
+		# A camera the user placed is left alone.
+		user = plot_surface(xs, ys, Z)
+		view!(user; elev = 30, azim = 40, distance = 3)
+		@test PS._s3_refit_scenes!(_v4_copy(user), user, (900, 350)) === false
+		# A 1x3 grid at 900x350: every scene fits its cell, labels included,
+		# and its x and y axes label at least two ticks.
+		sf = subplots(1, 3; sync = false, specs = fill(Spec(kind = "scene"), 1, 3))
+		for c in 1:3
+			plot_surface!(sf, xs, ys, Z .* c; row = 1, col = c, xlabel = "x", ylabel = "y", zlabel = "height")
+		end
+		grid = _v4_copy(sf.plot)
+		@test PS._s3_refit_scenes!(grid, sf.plot, (900, 350)) === true
+		for key in (:scene, :scene2, :scene3)
+			@test 0.9 < _v4_label_extent(grid, key, (900, 350)) <= 1
+			scene = _v4_fields(grid.layout.fields[key])
+			counts = [_v4_fields(scene[axis])[:nticks] for axis in (:xaxis, :yaxis, :zaxis)]
+			@test all(n -> 2 <= n <= 9, counts)
+			@test _v4_labelled(-2.125, 2.125, counts[1]) >= 2
+			@test _v4_labelled(-1.0625, 1.0625, counts[2]) >= 2
+		end
+		@test _v4_message(() -> PS._s3_refit_scenes!(_v4_copy(f), f, (0, 500))) ==
+			"_s3_refit_scenes!: `size` must be (width, height) in px; got (0, 500)."
+		@test _v4_message(() -> PS._s3_refit_scenes!(f, f, (700, 500))) ==
+			"_s3_refit_scenes!: `target` must have its own layout (it is written in place)."
+	end
+end

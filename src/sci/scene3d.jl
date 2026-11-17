@@ -280,14 +280,14 @@ end
 # `Colorant` are written as `_color_hex` gives them ("#595959", or "rgba(…)"
 # with an alpha channel).
 function _s3_color(value, who::AbstractString, name::AbstractString)
-	value isa Colors.Colorant && return _color_hex(value; who = "$(who) (`$(name)`)")
+	value isa Colors.Colorant && return _color_hex(value; who = "$(who): `$(name)`")
 	value isa Symbol && (value = String(value))
 	value isa AbstractString || throw(ArgumentError(
 		"$(who): `$(name)` must be a colour string, Symbol or Colors.jl Colorant; got $(typeof(value)).",
 	))
 	text = String(strip(value))
 	isempty(text) && return ""
-	hex = _color_hex(text; who = "$(who) (`$(name)`)")
+	hex = _color_hex(text; who = "$(who): `$(name)`")
 	return tryparse(Float64, text) === nothing ? text : hex
 end
 
@@ -1071,7 +1071,8 @@ const _S3_CBAR_LABEL_GAP = 4.0
 # 2 xpad + thickness + half the outline + outside tick marks + the gap and the
 # longest tick label (`_S3_CHAR_EM` per character; the bar's own tick text or
 # values, else the end labels of 4 to 10 linear ticks over `range`, 4
-# characters when it is unknown), or a top title when that is wider. A
+# characters when it is unknown), or a top or bottom title (plus 2 xpad) when
+# that is wider. A
 # right-side title adds 1.4 of its font size. `nothing` for a horizontal bar.
 function _s3_colorbar_width(bar, range, font::Float64)
 	fields = bar === nothing ? Dict{Symbol, Any}() : _symbol_dict(bar)
@@ -1115,10 +1116,11 @@ end
 # margin `right`) once plotly.js's auto-margin has made room for its vertical
 # paper-anchored colorbars (traces' own bars and those of the coloraxes the
 # traces use): a bar at `x` (plotly's default 1.02, left-anchored) whose box is
-# w px wide ends x·Wp + w px right of the plot area of width Wp = W - left - r,
-# and plotly widens r until that is at most Wp + r - 12. Measured: a 700x500
-# surface with a 0.1–1 colorbar renders with r = 95 px; this gives 94.6.
-# Horizontal and container-anchored bars are not counted.
+# w px wide ends x·Wp + w px right of the left edge of the plot area, of width
+# Wp = W - left - r, and plotly widens r until that is at most Wp + r - 12.
+# Checked on a render: a 700x500 surface with a 0.1–1 colorbar is drawn with
+# r ≈ 95 px; this estimate gives 97.7 px. Horizontal and container-anchored
+# bars are not counted.
 function _s3_colorbar_right_margin(p::Plot, W::Float64, left::Float64, right::Float64)
 	font = _s3_number_field(_cmn_mapping_get(p.layout.fields, :font), :size, _S3_DEFAULT_FONT_SIZE; positive = true)
 	bars = Tuple{Any, Any}[]
@@ -1166,15 +1168,24 @@ function _s3_colorbar_right_margin(p::Plot, W::Float64, left::Float64, right::Fl
 	return r
 end
 
+# The tick step plotly.js's automatic linear ticks use for `count` ticks over
+# `span` (axes.autoTicks with Lib.roundUp, plotly.js 2.35.2): the power of ten
+# b at or below span/count (floor of log(·)/LN10, as plotly computes it) times
+# the first of 2, 5 and 10 strictly above span/count/b, so 2 gives 5 and 1
+# gives 2.
+function _s3_plotly_tick_step(span::Float64, count::Real)
+	rough = span / count
+	base = 10.0^floor(log(rough) / log(10.0))
+	ratio = rough / base
+	return base * (ratio < 2 ? 2.0 : ratio < 5 ? 5.0 : 10.0)
+end
+
 # Longest end label (characters) of the linear ticks plotly.js puts on
-# [lo, hi] for each tick count in `counts` (the span over the count rounded
-# up to 1, 2 or 5 times a power of ten).
+# [lo, hi] for each tick count in `counts` (`_s3_plotly_tick_step`).
 function _s3_linear_tick_chars(lo::Float64, hi::Float64, counts)
 	chars = 1
 	for count in counts
-		rough = (hi - lo) / count
-		base = 10.0^floor(log10(rough))
-		step = base * (rough / base <= 2 ? 2.0 : rough / base <= 5 ? 5.0 : 10.0)
+		step = _s3_plotly_tick_step(hi - lo, count)
 		first_tick = ceil(lo / step - 1e-9) * step
 		last_tick = floor(hi / step + 1e-9) * step
 		first_tick <= last_tick || continue
@@ -1507,31 +1518,35 @@ function _s3_category_chars(p::Plot, scenekey::Symbol, d::Int)
 	return chars
 end
 
+# The range plotly.js gives scene axis `d` (`fields` its layout entry): the
+# explicit one, else its autorange (the data extent padded by 1/32 of it on
+# each side, ±1 around a single value, reversed for `autorange =
+# "reversed"`); `nothing` without numeric data.
+function _s3_axis_range(p::Plot, scenekey::Symbol, d::Int, fields)
+	range = _s3_explicit_range(fields)
+	range === nothing || return range
+	bounds = _s3_data_bounds(p, scenekey, d)
+	bounds === nothing && return nothing
+	pad = (bounds[2] - bounds[1]) / 32
+	range = bounds[2] > bounds[1] ? (bounds[1] - pad, bounds[2] + pad) : (bounds[1] - 1.0, bounds[1] + 1.0)
+	_cmn_mapping_get(fields, :autorange) == "reversed" && (range = (range[2], range[1]))
+	return range
+end
+
 # The tick labels plotly.js draws on scene axis `d` (`fields` its layout
 # entry): the outermost labelled ticks as fractions of the box edge, and the
-# longest label in characters. The axis range is the explicit one or plotly's
-# autorange (the data extent padded by 1/32 of it on each side, ±1 around a
-# single value, reversed for `autorange = "reversed"`). User tick values (and
-# their tick text) are taken as given. On a linear axis the ticks are the
-# multiples of the step (from `tick0`) inside the range: the user's `dtick`,
-# else for each tick count plotly.js may use (`nticks`, else 4 to 9) the span
-# over the count rounded up to 1, 2 or 5 times a power of ten. Log, date and
-# category axes are taken to have ticks at both ends, five ("0.001", "100k"),
-# eleven ("Jan 1, 2024") and the longest category's characters long. A
-# reversed axis counts both of its mirror placements. (0.5, 0.5, 0) when no
-# tick is labelled.
+# longest label in characters. The axis range is `_s3_axis_range`. User tick
+# values (and their tick text) are taken as given. On a linear axis the ticks
+# are the multiples of the step (from `tick0`) inside the range: the user's
+# `dtick`, else `_s3_plotly_tick_step` for each tick count plotly.js may use
+# (`nticks`, else 4 to 9). Log, date and category axes are taken to have ticks
+# at both ends, five ("0.001", "100k"), eleven ("Jan 1, 2024") and the longest
+# category's characters long. A reversed axis counts both of its mirror
+# placements. (0.5, 0.5, 0) when no tick is labelled.
 function _s3_tick_extent(p::Plot, scenekey::Symbol, d::Int, fields)
 	axis_type = _cmn_mapping_get(fields, :type)
 	log_axis = axis_type == "log"
-	range = _s3_explicit_range(fields)
-	if range === nothing
-		bounds = _s3_data_bounds(p, scenekey, d)
-		if bounds !== nothing
-			pad = (bounds[2] - bounds[1]) / 32
-			range = bounds[2] > bounds[1] ? (bounds[1] - pad, bounds[2] + pad) : (bounds[1] - 1.0, bounds[1] + 1.0)
-			_cmn_mapping_get(fields, :autorange) == "reversed" && (range = (range[2], range[1]))
-		end
-	end
+	range = _s3_axis_range(p, scenekey, d, fields)
 	function result(first, last, chars)
 		chars > 0 || return (0.5, 0.5, 0)
 		(range !== nothing && range[1] > range[2]) || return (first, last, chars)
@@ -1569,11 +1584,7 @@ function _s3_tick_extent(p::Plot, scenekey::Symbol, d::Int, fields)
 		nticks = _cmn_mapping_get(fields, :nticks)
 		counts = (_s3_is_real(nticks) && isinteger(nticks) && nticks >= 1) ? (Int(nticks):Int(nticks)) :
 			(_S3_MIN_PLOTLY_TICKS:_S3_MAX_AUTO_TICKS)
-		map(counts) do count
-			rough = span / count
-			base = 10.0^floor(log10(rough))
-			base * (rough / base <= 2 ? 2.0 : rough / base <= 5 ? 5.0 : 10.0)
-		end
+		map(count -> _s3_plotly_tick_step(span, count), counts)
 	end
 	tick0 = _cmn_mapping_get(fields, :tick0)
 	origin = (_s3_is_real(tick0) && isfinite(tick0)) ? Float64(tick0) : 0.0
@@ -1928,8 +1939,12 @@ end
 # smaller than the plot area therefore gets nticks = clamp(floor(L / 40), 2, 9)
 # per axis from the axis's projected length L in its own viewport (the
 # centre line of the scene box, seen from its camera); 40 px per tick and the
-# upper bound 9 are plotly.js's own, 2 keeps both ends of a short axis
-# labelled. `nothing` for a full-size scene or when the camera cannot tell.
+# upper bound 9 are plotly.js's own. plotly.js rounds the step span/nticks up
+# (`_s3_plotly_tick_step`), so a low count can leave one label on an axis (a
+# span of 4.25 with 2 ticks gets the step 5 and the single label 0); such a
+# linear axis gets the smallest larger count that labels two ticks, as long
+# as the labels stay apart along the axis (`_s3_cell_tick_count`). `nothing`
+# for a full-size scene or when the camera cannot tell.
 const _S3_TICK_SPACING_PX = 40.0
 const _S3_MIN_CELL_TICKS = 2
 const _S3_MAX_AUTO_TICKS = 9
@@ -1944,9 +1959,42 @@ function _s3_auto_nticks(fig, target::_CellTarget)
 	box === nothing && return nothing
 	lengths = _s3_axis_pixel_lengths(fig, target, box)
 	lengths === nothing && return nothing
-	return map(lengths) do length_px
-		clamp(floor(Int, length_px / _S3_TICK_SPACING_PX), _S3_MIN_CELL_TICKS, _S3_MAX_AUTO_TICKS)
+	scene = get(p.layout.fields, target.scenekey, nothing)
+	font = _s3_number_field(_cmn_mapping_get(p.layout.fields, :font), :size, _S3_DEFAULT_FONT_SIZE; positive = true)
+	return map(1:3) do d
+		count = clamp(floor(Int, lengths[d] / _S3_TICK_SPACING_PX), _S3_MIN_CELL_TICKS, _S3_MAX_AUTO_TICKS)
+		fields = _cmn_mapping_get(scene, (:xaxis, :yaxis, :zaxis)[d])
+		return _s3_cell_tick_count(p, target.scenekey, d, fields, lengths[d], count, font)
 	end
+end
+
+# The tick count for linear scene axis `d` (`fields` its layout entry, about
+# `length_px` long in its viewport) starting from `count`: `count` when
+# plotly.js labels at least two ticks with it, else the smallest larger count
+# up to `_S3_MAX_AUTO_TICKS` that does, provided that consecutive labels of
+# that count are at least the widest of them plus one character apart along
+# the axis (`_S3_CHAR_EM` per character at the drawn tick size); `count` when
+# no such count exists or the axis is log, date or category or has no range.
+function _s3_cell_tick_count(p::Plot, scenekey::Symbol, d::Int, fields, length_px::Float64, count::Int, font::Float64)
+	_cmn_mapping_get(fields, :type) in (nothing, "-", "linear") || return count
+	range = _s3_axis_range(p, scenekey, d, fields)
+	range === nothing && return count
+	lo, hi = minmax(range[1], range[2])
+	span = hi - lo
+	(isfinite(span) && span > 0) || return count
+	char_px = _S3_CHAR_EM * _s3_tick_text_size(_s3_number_field(_cmn_mapping_get(fields, :tickfont), :size, font; positive = true))
+	for n in count:_S3_MAX_AUTO_TICKS
+		step = _s3_plotly_tick_step(span, n)
+		first_tick = ceil(lo / step - 1e-9) * step
+		last_tick = floor(hi / step + 1e-9) * step
+		labels = first_tick <= last_tick ? round(Int, (last_tick - first_tick) / step) + 1 : 0
+		if n > count
+			chars = labels > 0 ? max(_s3_tick_text_chars(first_tick, step), _s3_tick_text_chars(last_tick, step)) : 1
+			step / span * length_px >= (chars + 1) * char_px || return count
+		end
+		labels >= 2 && return n
+	end
+	return count
 end
 
 # Projected length in viewport pixels of the scene box's centre line along each
@@ -2116,7 +2164,9 @@ or cut off. Each scene of `reference` whose camera eye PlotlySupply put at
 the automatic distance (`_s3_scene_state`, for the layout size or for
 700×500 px) gets, in `target`, the closest distance at which the box and the
 tick labels and axis titles plotly.js draws around it fit its viewport at
-`size` (`_s3_export_camera`; direction and up kept), and its automatic
+`size` (`_s3_export_camera`; direction and up kept; the plot area is the one
+left after plotly.js's auto-margin makes room for vertical colorbars,
+`_s3_colorbar_right_margin`), and its automatic
 `nticks` that PlotlySupply wrote are recomputed for that viewport. With `pan`
 a camera centre the user left at the origin moves across the view so that
 the drawing is centred in the viewport (the labels often hang off one side
@@ -2329,7 +2379,10 @@ Unknown keywords throw an `ArgumentError`.
 In a scene smaller than the plot area (a subplot cell), axes whose ticks are
 automatic get `nticks` from their length on screen (about one tick per 40 px,
 2 to 9), because plotly.js counts ticks from the size of the whole figure and
-would crowd a small scene with overlapping labels. `view!`, the 3-D
+would crowd a small scene with overlapping labels. plotly.js rounds the tick
+step up, so a low count can leave a single labelled tick; a linear axis then
+gets the smallest higher count (up to 9) that labels two, as long as
+neighbouring labels stay at least one character apart. `view!`, the 3-D
 constructors and mutators, `scene!` and `annotate!` update these counts; a
 count set with `scene!(; nticks)`, tick values or a tick step is kept.
 
@@ -2611,6 +2664,11 @@ it stays attached to the point while the scene rotates, and TeX in `$…$` is
 typeset by MathJax (unlike the WebGL-drawn axis titles). Annotating the same
 point with the same text again replaces that label instead of adding a copy.
 `fig` is a `Plot` or `SyncPlot` with a 3-D scene, or a `SubplotFigure`.
+
+A label at a point outside the scene's axis ranges is not drawn: plotly.js
+hides scene annotations outside the box, where matplotlib draws text beyond
+the axes. To show it, widen the range to include the point and keep the
+proportions of the box with `scene!(fig; aspectratio = …)`.
 
 # Keywords
 
@@ -4234,7 +4292,7 @@ const _S3_QUIVER3D_KEYWORDS_DOC = raw"""
   combined with the other colour keywords it throws.
 - `legend::AbstractString = ""`: legend name.
 
-""" * _S3_COLOR_VALUES_DOC * " A cone (`style = :cone`) is a surface and keeps an alpha channel of its `color`.\n\n" *
+""" * _S3_COLOR_VALUES_DOC * " Cones (`style = :cone`) are surfaces, not lines: their `color` is written to the one-colour colour scale as given, alpha channel included, without blending.\n\n" *
 	_S3_OUTSIDE_RANGE_DOC * "\n"
 
 const _S3_QUIVER3D_HEAD_DOC = raw"""
