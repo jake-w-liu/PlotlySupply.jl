@@ -936,6 +936,23 @@ end
 	@test isempty(PlotlySupply._pdf_type3_fonts(collect(codeunits("<</Subtype /Type0>> /Type3x"))))
 end
 
+@testset "sci export: savefig documents fonts, TIFF and sizes (G22)" begin
+	doc = string(@doc PlotlySupply.savefig)
+	# The MathJax font is set with set_default_mathtext!(; font); the
+	# environment variable is only the fallback (it used to be the only way
+	# documented, with Latin-Modern as a fixed font).
+	@test occursin("set_default_mathtext!", doc)
+	@test occursin("PLOTLYSUPPLY_MATHJAX_SVG_FONT", doc)
+	for font in PlotlySupply._MATHJAX_SVG_FONTS
+		@test occursin("\"$(font)\"", doc)
+	end
+	@test occursin("\\mathcal", doc)
+	for phrase in ("`\"tiff\"`", "fonts::Symbol = :auto", "Type 3", "XResolution/YResolution",
+		"active style's default", "unwritable", "quality 0.92")
+		@test occursin(phrase, doc)
+	end
+end
+
 @testset "sci export: long renderer results arrive in slices" begin
 	chunk = PlotlySupply._RENDERER_RESULT_CHUNK
 	# A fake ElectronCall backend replying from a queue; scripts are recorded.
