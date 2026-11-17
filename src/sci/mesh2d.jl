@@ -837,7 +837,7 @@ function _mesh2d_prepare_figure(fig, who::AbstractString, fo)
 			"$(who): `$(name)` must be a string such as \"log\" (\"\" leaves the axis type unchanged); got $(repr(value)).",
 		))
 	end
-	_validate_cartesian_options(
+	_field2d_validate_cartesian(
 		fig,
 		who;
 		xrange = fo.xrange,
@@ -848,6 +848,18 @@ function _mesh2d_prepare_figure(fig, who::AbstractString, fo)
 		height = fo.height,
 		fontsize = fo.fontsize,
 		grid = fo.grid,
+	)
+	_field2d_validate_ticks(
+		fig,
+		who;
+		xticks = fo.xticks,
+		xticklabels = fo.xticklabels,
+		xtickformat = fo.xtickformat,
+		yticks = fo.yticks,
+		yticklabels = fo.yticklabels,
+		ytickformat = fo.ytickformat,
+		xscale = fo.xscale,
+		yscale = fo.yscale,
 	)
 	_mesh2d_bool(fo.equalar, who, "equalar")
 	# Run the label pipeline once now so an invalid label fails before any
@@ -880,12 +892,17 @@ function _mesh2d_finish!(
 	first_new::Int,
 	coloraxis = nothing,
 )
+	# A one-sided limit (D11) replaces the axis range: its scale is applied
+	# here, then the limit, then the ticks (validated in
+	# `_mesh2d_prepare_figure`) against the final axis type and range.
+	x_partial = _field2d_is_partial(fo.xrange)
+	y_partial = _field2d_is_partial(fo.yrange)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = fo.xlabel,
 		ylabel = fo.ylabel,
-		xrange = fo.xrange,
-		yrange = fo.yrange,
+		xrange = _field2d_two_sided(fo.xrange),
+		yrange = _field2d_two_sided(fo.yrange),
 		width = fo.width,
 		height = fo.height,
 		# Constructors: `true` keeps the template grid. Mutators: `nothing`
@@ -893,13 +910,16 @@ function _mesh2d_finish!(
 		grid = constructor ? fo.grid : nothing,
 		fontsize = fo.fontsize,
 		title = fo.title,
-		xscale = fo.xscale,
-		yscale = fo.yscale,
+		xscale = x_partial ? "" : fo.xscale,
+		yscale = y_partial ? "" : fo.yscale,
 		apply_template = constructor,
 		refresh = false,
 		who = who,
 	)
-	constructor || _apply_axis_grid!(fig, fo.grid, who)
+	x_partial && _apply_axis_scale!(fig, :x, fo.xscale, who)
+	y_partial && _apply_axis_scale!(fig, :y, fo.yscale, who)
+	# The equal aspect before the one-sided limits, which are written
+	# differently on an aspect-constrained axis.
 	if fo.equalar
 		anchor = target.anchor_xref === nothing ? cell.xref : target.anchor_xref
 		_apply_equal_aspect!(
@@ -908,6 +928,19 @@ function _mesh2d_finish!(
 			who = who,
 		)
 	end
+	_field2d_apply_partial_range!(fig, :xaxis, fo.xrange; who = who)
+	_field2d_apply_partial_range!(fig, :yaxis, fo.yrange; who = who)
+	_field2d_apply_ticks!(
+		fig,
+		who;
+		xticks = fo.xticks,
+		xticklabels = fo.xticklabels,
+		xtickformat = fo.xtickformat,
+		yticks = fo.yticks,
+		yticklabels = fo.yticklabels,
+		ytickformat = fo.ytickformat,
+	)
+	constructor || _apply_axis_grid!(fig, fo.grid, who)
 	_field2d_finish!(fig, first_new; coloraxis = coloraxis)
 	constructor || _refresh!(fig)
 	return nothing
@@ -948,19 +981,12 @@ end
 _mesh2d_trace_ref(trace, key::Symbol, default::String) =
 	trace isa GenericTrace ? String(get(trace.fields, key, default)) : default
 
-# Copy into the delegate's scratch figure what the mutator reads from the
-# target cell: the axis types (log axes convert ranges and are validated) and
-# the figure's colour axes (shared limits).
-function _mesh2d_seed_scratch!(staged, live::Plot, cell::_CellTarget)
-	for (source_key, scratch_key) in ((cell.xkey, :xaxis), (cell.ykey, :yaxis))
-		axis = get(live.layout.fields, source_key, nothing)
-		fields = Dict{Symbol, Any}()
-		for name in (:type, :exponentformat)
-			value = _cmn_mapping_get(axis, name)
-			value === nothing || (fields[name] = value)
-		end
-		isempty(fields) || _cmn_merge_layout_key!(staged, scratch_key, fields)
-	end
+# Copy the figure's colour axes into the delegate's scratch figure, so a call
+# bound to a colour axis that already has limits reuses them (a shared norm,
+# `_mesh2d_coloraxis_limits`). The delegate itself seeds the cell's axis type,
+# range and ticks (`_SUBPLOT_SEEDED_AXIS_KEYS`) and transplants every colour
+# axis back (Y5).
+function _mesh2d_seed_scratch!(staged, live::Plot)
 	scratch = _plot_layout(staged)
 	for (key, value) in live.layout.fields
 		occursin(_MESH2D_COLORAXIS_KEY, String(key)) || continue
@@ -969,23 +995,19 @@ function _mesh2d_seed_scratch!(staged, live::Plot, cell::_CellTarget)
 	return nothing
 end
 
-# `coloraxis = "coloraxis2"` and higher (validated again by the mutator).
-_mesh2d_numbered_coloraxis(value) =
-	(value isa AbstractString || value isa Symbol) &&
-	occursin(r"^coloraxis([2-9]|[1-9][0-9]+)$", strip(String(value)))
-
 # Run a mesh mutator `impl(fig, target, args...; constructor = false, kwargs...)`
 # on one cell (or, with `inset = k`, one inset) of a SubplotFigure through
-# `_subplot_delegate_mutator!`. `_finalize_figure!` is never run on the
-# delegate's scratch figure (`_FIELD2D_DEFER_FINALIZE`): its extents would be
-# the new traces' only. A plain call takes the delegate's append-only fast
-# path, which finalizes the figure itself (field-layout contract, CONTRACT.md
-# §4). A numbered colour axis or an explicit `xrange`/`yrange` needs work on
-# the real figure after the transplant, so those calls run as one fully
-# staged transaction that also finalizes explicitly: the ranges go to the
-# root of the cell axis's `matches` group (plotly.js ignores a range on a
-# matched axis; a shared-x cell rendered 0..3 instead of xrange = (0, 5)),
-# in data units converted for a log axis (`_field2d_cell_ranges!`).
+# `_subplot_delegate_mutator!` (delegate errors name `who`).
+# `_finalize_figure!` is never run on the delegate's scratch figure
+# (`_FIELD2D_DEFER_FINALIZE`): its extents would be the new traces' only. A
+# plain call takes the delegate's append-only fast path, which finalizes the
+# figure itself (field-layout contract, CONTRACT.md §4). An explicit
+# `xrange`/`yrange` needs work on the real figure after the transplant, so
+# those calls run as one fully staged transaction that also finalizes
+# explicitly: the ranges go to the root of the cell axis's `matches` group
+# (plotly.js ignores a range on a matched axis; a shared-x cell rendered 0..3
+# instead of xrange = (0, 5)), in data units converted for a log axis
+# (`_field2d_cell_ranges!`).
 function _mesh2d_subplot!(
 	impl::Function,
 	sf::SubplotFigure,
@@ -1006,7 +1028,6 @@ function _mesh2d_subplot!(
 	xr = _field2d_checked_range(get(forwarded, :xrange, nothing), who, "xrange")
 	yr = _field2d_checked_range(get(forwarded, :yrange, nothing), who, "yrange")
 	forwarded = Base.structdiff(forwarded, NamedTuple{(:xrange, :yrange)})
-	numbered = _mesh2d_numbered_coloraxis(get(forwarded, :coloraxis, nothing))
 	metadata_lock = getfield(sf, :_lock)
 	lock(metadata_lock)
 	try
@@ -1024,17 +1045,11 @@ function _mesh2d_subplot!(
 		target = _Mesh2dTarget(cell.xref, in_cell + 1, live.layout, nothing)
 		mutator = function (staged, margs...; mkwargs...)
 			target.coloraxis_write = nothing
-			_mesh2d_seed_scratch!(staged, live, cell)
+			_mesh2d_seed_scratch!(staged, live)
 			return impl(staged, target, margs...; constructor = false, mkwargs...)
 		end
-		if numbered || xr !== nothing || yr !== nothing
-			# X51 workaround (kept): the delegate transplants `layout.coloraxis`
-			# only. A numbered colour axis is merged into the staged figure
-			# inside the same (fully staged) transaction, so a failure leaves
-			# no partial state. Its math colorbar title is converted after the
-			# merge (the delegate's conversion ran before the axis existed).
+		if xr !== nothing || yr !== nothing
 			_transactional_subplot_mutation!(sf, _SUBPLOT_SELECTION_METADATA_FIELDS) do staged_sf
-				first_new = length(_cmn_plot(staged_sf).data) + 1
 				Base.ScopedValues.with(_FIELD2D_DEFER_FINALIZE => true) do
 					_subplot_delegate_mutator_impl!(
 						staged_sf,
@@ -1044,15 +1059,9 @@ function _mesh2d_subplot!(
 						col = cell.col,
 						secondary_y = secondary_y,
 						inset = inset,
+						delegate_who = who,
 						forwarded...,
 					)
-				end
-				written = target.coloraxis_write
-				if written !== nothing
-					id, fields = written
-					_cmn_merge_layout_key!(staged_sf, Symbol(id), fields; nested = (:colorbar,))
-					p = _cmn_plot(staged_sf)
-					_colorbar_math_titles!(p, first_new:length(p.data); coloraxes = (id,))
 				end
 				_field2d_cell_ranges!(staged_sf, cell, xr, yr, who)
 				_finalize_figure!(_StagedPlotMutation(_cmn_plot(staged_sf)))
@@ -1068,6 +1077,7 @@ function _mesh2d_subplot!(
 					col = cell.col,
 					secondary_y = secondary_y,
 					inset = inset,
+					delegate_who = who,
 					forwarded...,
 				)
 			end
@@ -1277,9 +1287,11 @@ function _mesh2d_hover_trace(cx::AbstractVector{Float64}, cy::AbstractVector{Flo
 end
 
 # The figure keywords every mesh function takes, as one NamedTuple. The axis
-# ranges are normalised as for the other field functions (X23): `[0, 0]`,
+# ranges are normalised as for the other field functions (X23, D11): `[0, 0]`,
 # `nothing` and `[nothing, nothing]` become `nothing` (automatic, the axis is
-# left alone); partial, equal or Bool bounds throw.
+# left alone); a one-sided `(lo, nothing)`/`(nothing, hi)` is kept; equal,
+# `missing` or Bool bounds throw. The tick keywords (G30) are checked in
+# `_mesh2d_prepare_figure`.
 _mesh2d_figure_options(
 	who::AbstractString;
 	title = "",
@@ -1289,6 +1301,12 @@ _mesh2d_figure_options(
 	yrange = [0, 0],
 	xscale = "",
 	yscale = "",
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat = "",
 	width = 0,
 	height = 0,
 	fontsize = 0,
@@ -1302,6 +1320,12 @@ _mesh2d_figure_options(
 	yrange = _field2d_checked_range(yrange, who, "yrange"),
 	xscale,
 	yscale,
+	xticks,
+	xticklabels,
+	xtickformat,
+	yticks,
+	yticklabels,
+	ytickformat,
 	width,
 	height,
 	fontsize,
@@ -1370,6 +1394,12 @@ function _mesh2d_polygons_impl!(
 	yscale = "",
 	width = 0,
 	height = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat = "",
 	fontsize = 0,
 	grid = constructor ? true : nothing,
 	equalar = true,
@@ -1377,7 +1407,7 @@ function _mesh2d_polygons_impl!(
 )
 	who = constructor ? "plot_polygons" : "plot_polygons!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	_mesh2d_bool(tight, who, "tight")
@@ -1499,11 +1529,18 @@ Figure:
 - `title`, `xlabel`, `ylabel::AbstractString = ""` (mathtext labels),
   `xrange`, `yrange = [0, 0]`: axis limits `(lower, upper)` in data units,
   also on log axes, with autorange off; `[0, 0]`, `nothing` or
-  `[nothing, nothing]` leaves the axis automatic, and both bounds are
-  required, different and not Bool. `xscale`, `yscale = ""` (`"linear"`,
+  `[nothing, nothing]` leaves the axis automatic; a one-sided
+  `(lo, nothing)`/`(nothing, hi)` fixes that bound and autoranges the other
+  (matplotlib `set_xlim(left = lo)`; with `equalar = true` the other is fixed
+  at the current data extent, as plotly.js re-ranges an equal-aspect axis);
+  two bounds must differ, and Bool or
+  `missing` bounds throw. `xscale`, `yscale = ""` (`"linear"`,
   `"log"`, ...; on a log axis every coordinate must be positive), `width`,
   `height`, `fontsize::Real = 0` (0 = automatic), `grid = true` (`false`,
   `:x`, `:y`, `:both`, `:none`).
+- `xticks = nothing`, `xticklabels = nothing`, `xtickformat = ""`, `yticks`,
+  `yticklabels`, `ytickformat`: explicit ticks (data units), their labels and
+  a d3 tick format, as for [`plot_heatmap`](@ref).
 - `show::Bool = false`: open a window and return a `SyncPlot`.
 
 #### Plotly encoding
@@ -1676,14 +1713,21 @@ function _mesh2d_pcolormesh_impl!(
 	yscale = "",
 	width = 0,
 	height = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat = "",
 	fontsize = 0,
 	grid = constructor ? true : nothing,
-	equalar = true,
+	# G51: matplotlib pcolormesh keeps `aspect = "auto"`.
+	equalar = false,
 	extra...,
 )
 	who = constructor ? "plot_pcolormesh" : "plot_pcolormesh!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	_mesh2d_bool(tight, who, "tight")
@@ -1801,10 +1845,14 @@ The colour, style and figure keywords of [`plot_polygons`](@ref)
 (`colorscale = "Viridis"`, `crange`, `cmid`, `colornorm`, `levels`,
 `ncolors = 256`, `showscale`, `colorbar_title`, `colorbar_title_side = :top`,
 `colorbar_ticks`, `colorbar_ticklabels`, `coloraxis`, `edgecolor`,
-`edgewidth = 0`, `opacity = 1`, `hatch`, `hover = false`, `equalar = true`,
+`edgewidth = 0`, `opacity = 1`, `hatch`, `hover = false`,
 `tight = true`, `title`, `xlabel`, `ylabel`, `xrange`, `yrange`, `xscale`,
-`yscale`, `width`, `height`, `fontsize`, `grid = true`, `show = false`),
-without `color` and `legend` (`C` always colours the cells).
+`yscale`, `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
+`ytickformat`, `width`, `height`, `fontsize`, `grid = true`,
+`show = false`), without `color` and `legend` (`C` always colours the
+cells). Unlike the other mesh functions, `equalar = false` by default (as
+matplotlib's `pcolormesh`, whose axes keep `aspect = "auto"`): pass
+`equalar = true` for a geometric mesh whose x and y share units.
 
 #### Plotly encoding
 The vector form with strictly monotonic `x`, `y`, `edgewidth = 0`, no
@@ -2044,6 +2092,12 @@ function _mesh2d_tripcolor_impl!(
 	yscale = "",
 	width = 0,
 	height = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat = "",
 	fontsize = 0,
 	grid = constructor ? true : nothing,
 	equalar = true,
@@ -2051,7 +2105,7 @@ function _mesh2d_tripcolor_impl!(
 )
 	who = constructor ? "plot_tripcolor" : "plot_tripcolor!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	_mesh2d_bool(tight, who, "tight")
@@ -2283,6 +2337,12 @@ function _mesh2d_triplot_impl!(
 	yscale = "",
 	width = 0,
 	height = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat = "",
 	fontsize = 0,
 	grid = constructor ? true : nothing,
 	equalar = true,
@@ -2290,7 +2350,7 @@ function _mesh2d_triplot_impl!(
 )
 	who = constructor ? "plot_triplot" : "plot_triplot!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
 	line_color = _mesh2d_color(color, who, "color")
 	isempty(line_color) && (line_color = _mesh2d_default_color(fig, target))
@@ -2578,6 +2638,12 @@ function _mesh2d_tricontour_impl!(
 	yscale = "",
 	width = 0,
 	height = 0,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat = "",
 	fontsize = 0,
 	grid = constructor ? true : nothing,
 	equalar = true,
@@ -2585,7 +2651,7 @@ function _mesh2d_tricontour_impl!(
 )
 	who = constructor ? "plot_tricontour" : "plot_tricontour!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
 	tri = _mesh2d_triangulation(x, y, triangles, mask, who)
 	_mesh2d_tri_check_log(tri, xtype, ytype, who)

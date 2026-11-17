@@ -281,12 +281,18 @@ end
 		@test carrier["marker"]["cmin"] == 100 && carrier["marker"]["cmax"] == 500
 		@test carrier["marker"]["colorbar"]["title"]["text"] == "b"
 		@test carrier["marker"]["colorbar"]["tickvals"] == [100, 150, 300, 500]
-		# Non-uniform line levels: one trace per level.
+		# Non-uniform line levels: one trace per level, each in its level's
+		# colour (G15: plotly would draw a single-level trace in one end colour),
+		# plus one colorbar carrier with ticks at the levels.
 		fig = plot_contour(x, y, U; levels = [100, 150, 300], coloring = :lines)
-		@test length(fig.data) == 3
-		vals = [_sf_roundtrip(t)["contours"] for t in fig.data]
+		@test length(fig.data) == 4
+		level_traces = [_sf_roundtrip(t) for t in fig.data[1:3]]
+		vals = [t["contours"] for t in level_traces]
 		@test [(c["start"], c["end"]) for c in vals] == [(100, 100), (150, 150), (300, 300)]
-		@test all(c["coloring"] == "lines" for c in vals)
+		@test all(c["coloring"] == "none" for c in vals)
+		@test length(unique(t["line"]["color"] for t in level_traces)) == 3
+		line_carrier = _sf_roundtrip(fig.data[4])
+		@test line_carrier["type"] == "scatter" && line_carrier["marker"]["colorbar"]["tickvals"] == [100, 150, 300]
 		# A single labelled level in one colour (overlay style).
 		t = _sf_roundtrip(plot_contour(x, y, U; levels = [200], linecolor = "white", showlabels = true,
 			labelformat = ".0f", linewidth = 2, dash = :dash).data[1])

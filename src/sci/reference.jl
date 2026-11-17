@@ -31,6 +31,8 @@
 #   figure unchanged when one is raised.
 # - Plot/SyncPlot methods return `nothing`; SubplotFigure methods return `sf`.
 
+import Dates
+
 const _SCI_REFERENCE_MUTATORS = (
 	:hline!,
 	:vline!,
@@ -325,6 +327,69 @@ end
 _ref_axis_unit(x::Float64, log::Bool) = log ? log10(x) : x
 _ref_from_axis_unit(u::Float64, log::Bool) = log ? exp10(u) : u
 
+# Y25: positions on a date axis may be `Date`/`DateTime` values (hline!,
+# vline!, hspan!, vspan!, rectangle!, arrow!). They are written as ISO
+# strings ("2024-03-01", "2024-03-01T12:30:00"), which plotly.js reads on a
+# date axis in shapes and in annotation `x`/`ax`. Helpers defined by lengths
+# in data units (circles, ellipses, arcs, rounded corners, slope guides) and
+# path shapes (polygon!) take numbers only.
+const _RefPosition = Union{Real, Dates.Date, Dates.DateTime}
+
+_ref_is_date(v) = v isa Dates.Date || v isa Dates.DateTime
+
+# A date position is accepted on a "date" axis and on an autotyped one ("-"),
+# which plotly.js makes a date axis when its traces hold dates.
+_ref_date_axis(axis_type::AbstractString) = axis_type == "date" || axis_type == "-"
+
+# One position on an axis of type `axis_type`: a date (date axes only) or a
+# finite number (positive on a log axis, `_ref_coord`).
+function _ref_position(v, axis_type::String, who::AbstractString, name::AbstractString)
+	if _ref_is_date(v)
+		_ref_date_axis(axis_type) || throw(ArgumentError(
+			"$(who): `$(name)` = $(v) is a date, which can only be placed on a " *
+			"date axis; this axis has type $(repr(axis_type)).",
+		))
+		return v
+	end
+	return _ref_coord(v, axis_type == "log", who, name)
+end
+
+# One position or a vector of them (`_ref_values` with dates allowed).
+function _ref_positions(v, axis_type::String, who::AbstractString, name::AbstractString)::Vector{Any}
+	values = v isa AbstractVector ? v : (v,)
+	out = Any[]
+	sizehint!(out, length(values))
+	for (k, value) in enumerate(values)
+		push!(out, _ref_position(value, axis_type, who, v isa AbstractVector ? "$(name)[$(k)]" : name))
+	end
+	return out
+end
+
+# The two ends of a span/rectangle/arrow on one axis are both dates or both
+# numbers (a number on a date axis is milliseconds since 1970, which is never
+# what a date end paired with it means).
+function _ref_position_pair(a, b, axis_type::String, who::AbstractString, name_a::AbstractString, name_b::AbstractString)
+	pa = _ref_position(a, axis_type, who, name_a)
+	pb = _ref_position(b, axis_type, who, name_b)
+	_ref_is_date(pa) == _ref_is_date(pb) || throw(ArgumentError(
+		"$(who): `$(name_a)` and `$(name_b)` must both be dates or both be " *
+		"numbers; got $(repr(a)) and $(repr(b)).",
+	))
+	return pa, pb
+end
+
+# A position as written to plotly: dates as ISO strings, numbers unchanged.
+_ref_out(v) = _ref_is_date(v) ? string(v) : v
+
+# Annotation coordinate of a position: dates stay dates, numbers become axis
+# units (`_ref_axis_unit`).
+_ref_annotation_unit(v, log::Bool) = _ref_is_date(v) ? v : _ref_axis_unit(Float64(v), log)
+
+# Midpoint of two annotation coordinates (both dates or both axis units).
+_ref_midpoint(a, b) = _ref_is_date(a) ?
+	Dates.DateTime(a) + Dates.Millisecond(div(Dates.value(Dates.DateTime(b) - Dates.DateTime(a)), 2)) :
+	(a + b) / 2
+
 # Shapes whose geometry is a length in data units (a radius, semi-axes, a
 # corner radius) have no fixed size on a logarithmic axis.
 function _ref_require_linear(target, who::AbstractString, what::AbstractString)
@@ -343,12 +408,15 @@ end
 # Resolved drawing target of one call: the Cartesian cell, whether its x / y
 # axes are logarithmic, and whether a twin y axis still has to be created on
 # a plain figure (`secondary_y = true` before any twin exists; the new axis is
-# linear).
+# linear). `xtype`/`ytype` are the axes' declared types (`_axis_type`), which
+# decide whether date positions are accepted.
 struct _RefTarget
 	cell::_CellTarget
 	xlog::Bool
 	ylog::Bool
 	create_twin::Bool
+	xtype::String
+	ytype::String
 end
 
 function _ref_require_xy(cell::_CellTarget, who::AbstractString)
@@ -367,17 +435,35 @@ function _ref_target(fig, who::AbstractString; row, col, secondary_y, inset)
 		base = _cell_target(fig; row = row, col = col, secondary_y = false, inset = inset, who = who)
 		_ref_require_xy(base, who)
 		if _cmn_twin_y_key(layout) === nothing
-			return _RefTarget(base, _axis_type(layout, base.xkey) == "log", false, true)
+			xtype = _ref_effective_type(fig, layout, base.xkey, base.xref, :x)
+			return _RefTarget(base, xtype == "log", false, true, xtype, "linear")
 		end
 	end
 	cell = _cell_target(fig; row = row, col = col, secondary_y = twin, inset = inset, who = who)
 	_ref_require_xy(cell, who)
-	return _RefTarget(
-		cell,
-		_axis_type(layout, cell.xkey) == "log",
-		_axis_type(layout, cell.ykey) == "log",
-		false,
-	)
+	xtype = _ref_effective_type(fig, layout, cell.xkey, cell.xref, :x)
+	ytype = _ref_effective_type(fig, layout, cell.ykey, cell.yref, :y)
+	return _RefTarget(cell, xtype == "log", ytype == "log", false, xtype, ytype)
+end
+
+# The axis type that decides whether dates are accepted: the declared type of
+# axis `key`, or, for an autotyped axis ("-"), "linear" when a trace on it
+# holds numeric coordinates (plotly.js types that axis linear, where a date
+# shape would silently not be drawn); otherwise "-" (dates accepted; plotly.js
+# types the axis from its data).
+function _ref_effective_type(fig, layout::Layout, key::Symbol, ref::String, letter::Symbol)::String
+	declared = _axis_type(layout, key)
+	declared == "-" || return declared
+	ref_field = letter === :x ? :xaxis : :yaxis
+	default_ref = letter === :x ? "x" : "y"
+	for trace in _cmn_plot(fig).data
+		trace_ref = get(trace.fields, ref_field, default_ref)
+		(trace_ref isa AbstractString && String(trace_ref) == ref) || continue
+		values = get(trace.fields, letter, nothing)
+		values isa AbstractArray || continue
+		any(v -> v isa Real && !(v isa Bool), values) && return "linear"
+	end
+	return "-"
 end
 
 # First write of every helper: create the twin y axis when it was requested
@@ -614,7 +700,7 @@ function _ref_axis_lines!(
 	_ref_reject_extra_kwargs(who, kwargs)
 	horizontal || _ref_reject_vertical_secondary_y(who, secondary_y)
 	target = _ref_target(fig, who; row = row, col = col, secondary_y = secondary_y, inset = inset)
-	positions = _ref_values(values, horizontal ? target.ylog : target.xlog, who, horizontal ? "y" : "x")
+	positions = _ref_positions(values, horizontal ? target.ytype : target.xtype, who, horizontal ? "y" : "x")
 	style = _ref_line_style(who; color = color, dash = dash, linewidth = linewidth, opacity = opacity, layer = layer)
 	shape_label = _ref_shape_label(who, label, labelpos, fontsize; line = true)
 	legend_text = _ref_string(legend, who, "legend")
@@ -644,15 +730,15 @@ function _ref_axis_lines!(
 			fields[:x0] = 0
 			fields[:x1] = 1
 			fields[:yref] = cell.yref
-			fields[:y0] = v
-			fields[:y1] = v
+			fields[:y0] = _ref_out(v)
+			fields[:y1] = _ref_out(v)
 		else
 			fields[:yref] = cell.yref * " domain"
 			fields[:y0] = 0
 			fields[:y1] = 1
 			fields[:xref] = cell.xref
-			fields[:x0] = v
-			fields[:x1] = v
+			fields[:x0] = _ref_out(v)
+			fields[:x1] = _ref_out(v)
 		end
 		style.opacity == 1 || (fields[:opacity] = style.opacity)
 		shape_label === nothing || (fields[:label] = shape_label)
@@ -679,7 +765,10 @@ of the plot area at the data value(s) `y`.
 
 `y` is one real number or a vector of them (one line each; an empty vector
 draws nothing). Values are data values on every axis type, including log
-axes, where they must be positive. Each value becomes a Plotly line shape with
+axes, where they must be positive. On a date axis (`type = "date"`, or an
+autotyped axis whose traces hold no numeric coordinates, e.g. `Date` data)
+they may also be `Date`/`DateTime` values, written as ISO date strings; a
+date on any other axis is an `ArgumentError`. Each value becomes a Plotly line shape with
 `xref = "<x> domain"`, `x0 = 0`, `x1 = 1` and `yref` the y axis in data units.
 Calls are additive: calling `hline!` again adds more lines.
 
@@ -722,8 +811,8 @@ hline!(fig, [10, 50]; color = "red", dash = "dash", legend = "thresholds")
 hline!(fig, 2; color = :gray, label = "floor", labelpos = :end)
 ```
 """
-hline!(fig, y::Union{Real, AbstractVector}; kwargs...) = _ref_hline!(fig, y; kwargs...)
-hline!(sf::SubplotFigure, y::Union{Real, AbstractVector}; kwargs...) =
+hline!(fig, y::Union{_RefPosition, AbstractVector}; kwargs...) = _ref_hline!(fig, y; kwargs...)
+hline!(sf::SubplotFigure, y::Union{_RefPosition, AbstractVector}; kwargs...) =
 	_ref_subplot_call!(_ref_hline!, sf, y; kwargs...)
 
 """
@@ -733,7 +822,8 @@ hline!(sf::SubplotFigure, y::Union{Real, AbstractVector}; kwargs...) =
 
 Draw vertical reference lines (matplotlib `axvline`) over the full height of
 the plot area at the data value(s) `x`: one real number or a vector of them
-(positive on a log x axis). Each value becomes a Plotly line shape with
+(positive on a log x axis; `Date`/`DateTime` values on a date axis, as for
+[`hline!`](@ref)). Each value becomes a Plotly line shape with
 `yref = "<y> domain"`, `y0 = 0`, `y1 = 1` and `xref` the x axis in data
 units. Calls are additive.
 
@@ -749,8 +839,8 @@ plot_scatter!(sf, 0:0.1:2, sin.(0:0.1:2); row = 1, col = 2)
 vline!(sf, [0.5, 1.5]; row = 1, col = 2, dash = :dot, legend = "events")
 ```
 """
-vline!(fig, x::Union{Real, AbstractVector}; kwargs...) = _ref_vline!(fig, x; kwargs...)
-vline!(sf::SubplotFigure, x::Union{Real, AbstractVector}; kwargs...) =
+vline!(fig, x::Union{_RefPosition, AbstractVector}; kwargs...) = _ref_vline!(fig, x; kwargs...)
+vline!(sf::SubplotFigure, x::Union{_RefPosition, AbstractVector}; kwargs...) =
 	_ref_subplot_call!(_ref_vline!, sf, x; kwargs...)
 
 # ---------------------------------------------------------------------------
@@ -781,10 +871,8 @@ function _ref_spans!(
 	_ref_reject_extra_kwargs(who, kwargs)
 	horizontal || _ref_reject_vertical_secondary_y(who, secondary_y)
 	target = _ref_target(fig, who; row = row, col = col, secondary_y = secondary_y, inset = inset)
-	log = horizontal ? target.ylog : target.xlog
 	letter = horizontal ? "y" : "x"
-	v0 = _ref_coord(lo, log, who, "$(letter)0")
-	v1 = _ref_coord(hi, log, who, "$(letter)1")
+	v0, v1 = _ref_position_pair(lo, hi, horizontal ? target.ytype : target.xtype, who, "$(letter)0", "$(letter)1")
 	edge = _ref_color(edgecolor, who, "edgecolor"; none_is_empty = true)
 	# The outline is drawn when an edge colour is given (width 1 unless
 	# `linewidth` says otherwise) or when `linewidth > 0` (edge in the fill
@@ -810,12 +898,12 @@ function _ref_spans!(
 			fields[:xref] = cell.xref * " domain"
 			fields[:x0] = 0
 			fields[:x1] = 1
-			fields[:y0] = v0
-			fields[:y1] = v1
+			fields[:y0] = _ref_out(v0)
+			fields[:y1] = _ref_out(v1)
 		else
 			fields[:yref] = cell.yref * " domain"
-			fields[:x0] = v0
-			fields[:x1] = v1
+			fields[:x0] = _ref_out(v0)
+			fields[:x1] = _ref_out(v1)
 			fields[:y0] = 0
 			fields[:y1] = 1
 		end
@@ -834,8 +922,9 @@ _ref_vspan!(fig, x0, x1; kwargs...) = _ref_spans!(fig, x0, x1, false; kwargs...)
 Shade the horizontal band between the data values `y0` and `y1` (either
 order) across the full width of the plot area (matplotlib `axhspan`). The band
 is a Plotly rect shape with `xref = "<x> domain"` (0 to 1) and `yref` the y
-axis in data units; on a log y axis both values must be positive. Calls are
-additive.
+axis in data units; on a log y axis both values must be positive. On a date
+axis both bounds may be `Date`/`DateTime` values (both dates or both numbers;
+see [`hline!`](@ref)). Calls are additive.
 
 # Keywords
 - `color::Union{AbstractString,Symbol} = "#cccccc"`: fill colour (`""` or
@@ -867,8 +956,8 @@ fig = plot_scatter(0:0.1:10, sin.(0:0.1:10))
 hspan!(fig, -0.25, 0.25; color = "steelblue", legend = "tolerance")
 ```
 """
-hspan!(fig, y0::Real, y1::Real; kwargs...) = _ref_hspan!(fig, y0, y1; kwargs...)
-hspan!(sf::SubplotFigure, y0::Real, y1::Real; kwargs...) =
+hspan!(fig, y0::_RefPosition, y1::_RefPosition; kwargs...) = _ref_hspan!(fig, y0, y1; kwargs...)
+hspan!(sf::SubplotFigure, y0::_RefPosition, y1::_RefPosition; kwargs...) =
 	_ref_subplot_call!(_ref_hspan!, sf, y0, y1; kwargs...)
 
 """
@@ -878,7 +967,8 @@ hspan!(sf::SubplotFigure, y0::Real, y1::Real; kwargs...) =
 
 Shade the vertical band between the data values `x0` and `x1` over the full
 height of the plot area (matplotlib `axvspan`): a rect shape with
-`yref = "<y> domain"` and `xref` the x axis in data units. The keywords are
+`yref = "<y> domain"` and `xref` the x axis in data units (`Date`/`DateTime`
+bounds on a date axis, as for [`hspan!`](@ref)). The keywords are
 those of [`hspan!`](@ref) without `secondary_y` (the band covers the whole
 cell height for both y axes). Returns `nothing` for a `Plot`/`SyncPlot` and
 `sf` for a `SubplotFigure`.
@@ -887,10 +977,15 @@ cell height for both y axes). Returns `nothing` for a `Plot`/`SyncPlot` and
 ```julia
 fig = plot_scatter(1:100, cumsum(randn(100)))
 vspan!(fig, 20, 35; color = :orange, label = "event", labelpos = :top_center)
+
+using Dates
+days = Date(2024, 1, 1):Day(1):Date(2024, 3, 31)
+ts = plot_scatter(collect(days), cumsum(randn(length(days))))
+vspan!(ts, Date(2024, 2, 1), Date(2024, 2, 15); label = "outage")
 ```
 """
-vspan!(fig, x0::Real, x1::Real; kwargs...) = _ref_vspan!(fig, x0, x1; kwargs...)
-vspan!(sf::SubplotFigure, x0::Real, x1::Real; kwargs...) =
+vspan!(fig, x0::_RefPosition, x1::_RefPosition; kwargs...) = _ref_vspan!(fig, x0, x1; kwargs...)
+vspan!(sf::SubplotFigure, x0::_RefPosition, x1::_RefPosition; kwargs...) =
 	_ref_subplot_call!(_ref_vspan!, sf, x0, x1; kwargs...)
 
 # ---------------------------------------------------------------------------
@@ -1132,13 +1227,16 @@ function _ref_rectangle!(
 	target = _ref_target(fig, who; row = row, col = col, secondary_y = secondary_y, inset = inset)
 	rho = _ref_nonnegative(rounded, who, "rounded")
 	rho > 0 && _ref_require_linear(target, who, "a rounded rectangle")
-	xa = _ref_coord(x0, target.xlog, who, "x0")
-	ya = _ref_coord(y0, target.ylog, who, "y0")
-	xb = _ref_coord(x1, target.xlog, who, "x1")
-	yb = _ref_coord(y1, target.ylog, who, "y1")
+	xa, xb = _ref_position_pair(x0, x1, target.xtype, who, "x0", "x1")
+	ya, yb = _ref_position_pair(y0, y1, target.ytype, who, "y0", "y1")
+	# The pairs are both dates or both numbers, so `minmax` is defined.
 	xl, xr = minmax(xa, xb)
 	ylo, yhi = minmax(ya, yb)
 	if rho > 0
+		(_ref_is_date(xa) || _ref_is_date(ya)) && throw(ArgumentError(
+			"$(who): a rounded rectangle is defined by lengths in data units, " *
+			"which date corners do not have; use `rounded = 0` with dates.",
+		))
 		limit = min(xr - xl, yhi - ylo) / 2
 		rho <= limit || throw(ArgumentError(
 			"$(who): `rounded` = $(rho) exceeds half the shorter side ($(limit)) " *
@@ -1151,7 +1249,7 @@ function _ref_rectangle!(
 	)
 	return _ref_draw_area!(fig, who, target, style, shape_label, legend_text, cell -> rho > 0 ?
 		Dict{Symbol, Any}(:type => "path", :path => _ref_rounded_rect_path(xl, xr, ylo, yhi, rho)) :
-		Dict{Symbol, Any}(:type => "rect", :x0 => xa, :x1 => xb, :y0 => ya, :y1 => yb))
+		Dict{Symbol, Any}(:type => "rect", :x0 => _ref_out(xa), :x1 => _ref_out(xb), :y0 => _ref_out(ya), :y1 => _ref_out(yb)))
 end
 
 """
@@ -1168,8 +1266,9 @@ for example the blocks of a block diagram (put the text in with `label`).
 both axes (`0 <= rounded <= min(width, height) / 2`); the outline is then a
 Plotly path whose corners are quadratic Bézier curves (`Q`), like matplotlib's
 `"round"` box style. Without rounding the shape is a Plotly `"rect"` and works
-on log axes (corners positive there); a rounded rectangle on a log axis is an
-`ArgumentError`.
+on log axes (corners positive there) and with `Date`/`DateTime` corners on a
+date axis (`x0`/`x1` both dates or both numbers, likewise `y0`/`y1`); a
+rounded rectangle on a log axis or with date corners is an `ArgumentError`.
 
 The other keywords, the return value and additivity are as for
 [`circle!`](@ref).
@@ -1182,9 +1281,9 @@ rectangle!(fig, 6, 1, 9, 3; label = "Detector")
 arrow!(fig, 4, 2, 6, 2)
 ```
 """
-rectangle!(fig, x0::Real, y0::Real, x1::Real, y1::Real; kwargs...) =
+rectangle!(fig, x0::_RefPosition, y0::_RefPosition, x1::_RefPosition, y1::_RefPosition; kwargs...) =
 	_ref_rectangle!(fig, x0, y0, x1, y1; kwargs...)
-rectangle!(sf::SubplotFigure, x0::Real, y0::Real, x1::Real, y1::Real; kwargs...) =
+rectangle!(sf::SubplotFigure, x0::_RefPosition, y0::_RefPosition, x1::_RefPosition, y1::_RefPosition; kwargs...) =
 	_ref_subplot_call!(_ref_rectangle!, sf, x0, y0, x1, y1; kwargs...)
 
 function _ref_polygon!(
@@ -1296,13 +1395,14 @@ function _ref_head_size(v, who::AbstractString)::Float64
 end
 
 # Annotation drawing an arrow from `tail` to `tip` (both in axis units, i.e.
-# log10 on log axes) with heads per `head` (:end at the tip, :start at the
-# tail, :both). The text is empty, so plotly.js starts the shaft exactly at
-# the tail; standoffs are 0 so the head tips touch the end points.
+# log10 on log axes, or dates on a date axis) with heads per `head` (:end at
+# the tip, :start at the tail, :both). The text is empty, so plotly.js starts
+# the shaft exactly at the tail; standoffs are 0 so the head tips touch the
+# end points.
 function _ref_arrow_annotation(
 	cell::_CellTarget,
-	tip::NTuple{2, Float64},
-	tail::NTuple{2, Float64},
+	tip::Tuple{Any, Any},
+	tail::Tuple{Any, Any},
 	head::Symbol,
 	color::String,
 	width::Float64,
@@ -1311,10 +1411,10 @@ function _ref_arrow_annotation(
 	name::String,
 )
 	fields = Dict{Symbol, Any}(
-		:x => tip[1],
-		:y => tip[2],
-		:ax => tail[1],
-		:ay => tail[2],
+		:x => _ref_out(tip[1]),
+		:y => _ref_out(tip[2]),
+		:ax => _ref_out(tail[1]),
+		:ay => _ref_out(tail[2]),
 		:xref => cell.xref,
 		:yref => cell.yref,
 		:axref => cell.xref,
@@ -1338,10 +1438,11 @@ function _ref_arrow_annotation(
 	return attr(fields)
 end
 
-# Text annotation (no arrow) at `pos` (axis units), shifted by `shift` px.
+# Text annotation (no arrow) at `pos` (axis units or dates), shifted by
+# `shift` px.
 function _ref_text_annotation(
 	cell::_CellTarget,
-	pos::NTuple{2, Float64},
+	pos::Tuple{Any, Any},
 	text::String,
 	color::String,
 	size::Float64,
@@ -1351,8 +1452,8 @@ function _ref_text_annotation(
 	yanchor::String = "",
 )
 	fields = Dict{Symbol, Any}(
-		:x => pos[1],
-		:y => pos[2],
+		:x => _ref_out(pos[1]),
+		:y => _ref_out(pos[2]),
 		:xref => cell.xref,
 		:yref => cell.yref,
 		:text => text,
@@ -1391,10 +1492,8 @@ function _ref_arrow!(
 	who = "arrow!"
 	_ref_reject_extra_kwargs(who, kwargs)
 	target = _ref_target(fig, who; row = row, col = col, secondary_y = secondary_y, inset = inset)
-	xa = _ref_coord(x0, target.xlog, who, "x0")
-	ya = _ref_coord(y0, target.ylog, who, "y0")
-	xb = _ref_coord(x1, target.xlog, who, "x1")
-	yb = _ref_coord(y1, target.ylog, who, "y1")
+	xa, xb = _ref_position_pair(x0, x1, target.xtype, who, "x0", "x1")
+	ya, yb = _ref_position_pair(y0, y1, target.ytype, who, "y0", "y1")
 	(xa, ya) == (xb, yb) && throw(ArgumentError(
 		"$(who): the start ($(xa), $(ya)) and end point coincide; an arrow needs a direction.",
 	))
@@ -1412,8 +1511,8 @@ function _ref_arrow!(
 
 	cell = _ref_commit_target!(fig, target, who)
 	name = _ref_item_name(who, cell)
-	tail = (_ref_axis_unit(xa, target.xlog), _ref_axis_unit(ya, target.ylog))
-	tip = (_ref_axis_unit(xb, target.xlog), _ref_axis_unit(yb, target.ylog))
+	tail = (_ref_annotation_unit(xa, target.xlog), _ref_annotation_unit(ya, target.ylog))
+	tip = (_ref_annotation_unit(xb, target.xlog), _ref_annotation_unit(yb, target.ylog))
 	annotations = Any[]
 	if heads === :none
 		# A head-less arrow is a line shape (data units on every axis type).
@@ -1421,10 +1520,10 @@ function _ref_arrow!(
 			:type => "line",
 			:xref => cell.xref,
 			:yref => cell.yref,
-			:x0 => xa,
-			:y0 => ya,
-			:x1 => xb,
-			:y1 => yb,
+			:x0 => _ref_out(xa),
+			:y0 => _ref_out(ya),
+			:x1 => _ref_out(xb),
+			:y1 => _ref_out(yb),
 			:line => _ref_line_attr(line_color, width, ""),
 			:layer => "above",
 			:name => name,
@@ -1436,7 +1535,7 @@ function _ref_arrow!(
 		# The midpoint is taken in axis units, i.e. the visual midpoint (the
 		# geometric mean of the end values on a log axis).
 		pos = position === :start ? tail : position === :end ? tip :
-			((tail[1] + tip[1]) / 2, (tail[2] + tip[2]) / 2)
+			(_ref_midpoint(tail[1], tip[1]), _ref_midpoint(tail[2], tip[2]))
 		push!(annotations, _ref_text_annotation(cell, pos, label, line_color, font_size, shift, name))
 	end
 	_ref_append_items!(fig, :annotations, annotations)
@@ -1449,7 +1548,8 @@ end
 	arrow!(sf::SubplotFigure, x0, y0, x1, y1; row=nothing, col=nothing, inset=nothing, kwargs...)
 
 Draw a straight arrow from `(x0, y0)` to `(x1, y1)` (data values on every axis
-type; positive on log axes). This covers matplotlib `FancyArrowPatch`,
+type; positive on log axes; `Date`/`DateTime` on a date axis, with `x0`/`x1`
+both dates or both numbers, likewise `y0`/`y1`). This covers matplotlib `FancyArrowPatch`,
 `ax.arrow` and `annotate("", xy, xytext, arrowprops=dict(arrowstyle="<->"))`.
 
 The arrow is a Plotly annotation with `x, y` = the end point, `ax, ay` = the
@@ -1488,9 +1588,9 @@ arrow!(fig, 1, 1, 9, 1; head = :both, text = "L = 8", offset = (0, 10))
 arrow!(fig, 5, 4, 8, 2; color = "red", linewidth = 2)
 ```
 """
-arrow!(fig, x0::Real, y0::Real, x1::Real, y1::Real; kwargs...) =
+arrow!(fig, x0::_RefPosition, y0::_RefPosition, x1::_RefPosition, y1::_RefPosition; kwargs...) =
 	_ref_arrow!(fig, x0, y0, x1, y1; kwargs...)
-arrow!(sf::SubplotFigure, x0::Real, y0::Real, x1::Real, y1::Real; kwargs...) =
+arrow!(sf::SubplotFigure, x0::_RefPosition, y0::_RefPosition, x1::_RefPosition, y1::_RefPosition; kwargs...) =
 	_ref_subplot_call!(_ref_arrow!, sf, x0, y0, x1, y1; kwargs...)
 
 function _ref_arc!(
