@@ -869,7 +869,7 @@ end
 			@test set_legend!(sf; showlegend = false) === sf
 			@test sf.plot.layout.fields[:showlegend] === false
 			before = _rs_json(sf)
-			@test_throws ArgumentError set_legend!(sf; position = :nowhere)
+			@test_throws ArgumentError set_legend!(sf; showlegend = true, ncols = -1)
 			@test_throws ArgumentError set_template!(sf, 3)
 			@test _rs_json(sf) == before
 		end

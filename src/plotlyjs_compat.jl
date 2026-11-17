@@ -2271,6 +2271,8 @@ Re-render `p`'s window from the Julia-side model, in place, and return `p`.
   therefore appear in the window. Interactive zoom/pan in the window is reset
   to the model's axis ranges. The model itself is not changed.
 - On a `Plot` that is not shown in a window it is a no-op.
+- On a [`SubplotFigure`](@ref) it acts on the figure it wraps (window or
+  plain `Plot`, as above) and returns the `SubplotFigure`.
 
 A closed window throws an `InvalidStateException`. When plotly.js fails, the
 error is thrown and the usual renderer recovery applies: the window is rebuilt
@@ -2279,7 +2281,7 @@ by the next update.
 
 # Example
 ```julia
-sp = plot_scatter(1:3, [1, 2, 3]; show = true)
+sp = to_syncplot(Plot(scatter(y = [1, 2, 3])))
 sp.plot.data[1][:y] = [3, 2, 1]   # direct model edit, not yet visible
 redraw!(sp)                       # the window now shows [3, 2, 1]
 ```
@@ -2297,14 +2299,15 @@ savejson
 	to_image(sp::SyncPlot; kwargs...)
 
 Render `sp` in its Electron window via `Plotly.toImage` and return the image
-as a data-URL `String` (for `format = "svg"`, an SVG data URL). Keyword
-arguments are passed to `Plotly.toImage` unchanged (`format`, `width`,
-`height`, `scale`, `imageDataOnly`, `setBackground`).
+as a `String` (a data URL unless `imageDataOnly = true`). Keyword arguments
+are passed to `Plotly.toImage` unchanged (`format`, `width`, `height`,
+`scale`, `imageDataOnly`, `setBackground`).
 
 Before capturing, the page is brought up to date without changing the Julia
 model: a page built before a [`set_default_mathtext!`](@ref) `font` or
 `inherit_text_font` change is reloaded with the new MathJax configuration, and
 a renderer left desynchronized by a failed update is rebuilt from `sp.plot`.
+If that reload or rebuild fails, its error is thrown and nothing is captured.
 Throws an `InvalidStateException` when the window is closed, and an
 `ErrorException` when plotly.js returns something other than a string.
 
