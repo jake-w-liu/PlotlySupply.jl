@@ -452,6 +452,12 @@ end
 		@test _rfv3_d(_rf_axis(f, :xaxis)[:autorangeoptions]) == Dict(:maxallowed => 3)
 		plot_heatmap!(f, U; xrange = (1, nothing))
 		@test _rf_limit(f, :xaxis) == (true, 1, nothing)
+		# The open side follows the data: later traces leave the limit and the
+		# autorange in place (finalize writes no range over it).
+		w = plot_heatmap(U; xrange = (nothing, 3))
+		plot_scatter!(w, [-20.0], [1.0]; mode = "markers")
+		plot_heatmap!(w, -10:-7, 0:2, rand(4, 3))
+		@test _rf_limit(w, :xaxis) == (true, nothing, 3) && !haskey(_rf_axis(w, :xaxis), :range)
 		# A user-edited `autorangeoptions` is the user's (finalize no longer
 		# updates it): its entries are kept; an earlier opposite limit is dropped.
 		k = plot_heatmap(U)
