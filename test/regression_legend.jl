@@ -232,7 +232,7 @@ using Test, PlotlySupply
 		# the figure-mode pass the subplot delegate runs after appending traces
 		PS._refresh_subplot_legends!(sf, pl(sf); first_new = 1)
 		d = lg(sf)
-		@test d[:yref] == "container" && d[:bgcolor] == "rgb(255,0,0)"
+		@test d[:yref] == "container" && d[:bgcolor] == "#FF0000"
 		@test pl(sf).layout.fields[:showlegend] === true
 		# an explicit set_legend!(sf) applies them as well
 		sg = subplots(1, 2; sync = false, per_subplot_legends = false, legend_position = :outside_left)
