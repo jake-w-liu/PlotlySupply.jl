@@ -700,6 +700,9 @@ using PlotlySupply
 			msg = sprint(showerror, thrown(() -> PlotStyle(; font_color = "1.5")))
 			@test occursin("PlotStyle: `font_color` = \"1.5\" is a matplotlib grey level and must lie in [0, 1]", msg)
 			@test_throws ArgumentError PlotStyle(; colorway = ["#000000", "-0.2"])
+			grey_fig = plot_scatter(1:3, [1, 2, 3])
+			set_fonts!(grey_fig; color = "0.2")
+			@test sd(grey_fig.layout.fields[:font])[:color] == "#333333"
 			# The new cycles.
 			@test PlotStyle(; cycle = :dash_symbol).cycle === :dash_symbol
 			@test PlotStyle(; cycle = "bw_dash_marker").cycle === :bw_dash_marker
