@@ -5972,10 +5972,20 @@ function plot_scatterpolar!(
 end
 
 # SubplotFigure path of the 2-D field mutators (heatmap, contour, quiver,
-# image, and plot_matrix/plot_streamlines in src/sci/fields.jl). The delegate
-# builds the traces on an empty scratch figure and transplants them into the
-# target cell. Equal aspect is applied afterwards to the cell's own axes (the
-# scratch figure only knows "x"/"y"), inside the same transaction.
+# image, and plot_matrix/plot_streamlines in src/sci/fields.jl), as one
+# transaction (an error leaves the figure unchanged). The delegate builds the
+# traces on an empty scratch figure and transplants them into the target cell
+# (`row`/`col`, the active cell, or `inset = k`). `_finalize_figure!` is never
+# run on the scratch figure (its extents would be the new traces' only).
+# What depends on the cell's own axes is applied afterwards on the real
+# figure, in a fully staged transaction: the axis ranges (the scratch figure
+# does not know that a cell axis is logarithmic or matched to another), the
+# equal aspect (scaleanchor naming the cell's x axis) and `_finalize_figure!`
+# over the whole figure. Without those a call takes the delegate's
+# append-only fast path, which finalizes the figure itself (field-layout
+# contract, CONTRACT.md §4). The style gives field overlays only its line
+# width, which does not depend on the cycle position, so the scratch
+# figure's trace numbering needs no offset.
 function _field2d_subplot!(
 	sf::SubplotFigure,
 	mutator::Function,
@@ -5983,41 +5993,90 @@ function _field2d_subplot!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
 	kwargs...,
 )
-	equalar || return _subplot_delegate_mutator!(
-		sf,
-		mutator,
-		args...;
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		equalar = false,
-		kwargs...,
-	)
 	who = String(get(kwargs, :who, string(nameof(mutator))))
+	haskey(kwargs, :show) && _field2d_reject_keywords(who, kwargs)
+	# `xrange`/`yrange` of a mutator that has them are applied to the cell
+	# below; plot_matrix! has none, so there they stay in `forwarded` and the
+	# mutator rejects them as unknown keywords exactly as on a Plot.
+	forwarded = values(kwargs)
+	xr = yr = nothing
+	if mutator !== plot_matrix!
+		xr = _field2d_checked_range(get(forwarded, :xrange, nothing), who, "xrange")
+		yr = _field2d_checked_range(get(forwarded, :yrange, nothing), who, "yrange")
+		forwarded = Base.structdiff(forwarded, NamedTuple{(:xrange, :yrange)})
+	end
+	if !equalar && xr === nothing && yr === nothing
+		return Base.ScopedValues.with(_FIELD2D_DEFER_FINALIZE => true) do
+			_subplot_delegate_mutator!(
+				sf,
+				mutator,
+				args...;
+				row = row,
+				col = col,
+				secondary_y = secondary_y,
+				inset = inset,
+				equalar = false,
+				forwarded...,
+			)
+		end
+	end
 	return _transactional_subplot_mutation!(
 		sf,
 		_SUBPLOT_SELECTION_METADATA_FIELDS,
 	) do staged
-		_subplot_delegate_mutator_impl!(
-			staged,
-			mutator,
-			args...;
-			row = row,
-			col = col,
+		Base.ScopedValues.with(_FIELD2D_DEFER_FINALIZE => true) do
+			_subplot_delegate_mutator_impl!(
+				staged,
+				mutator,
+				args...;
+				row = row,
+				col = col,
+				secondary_y = secondary_y,
+				inset = inset,
+				equalar = false,
+				forwarded...,
+			)
+		end
+		# The delegate made the target cell active, so this is the cell (or
+		# the inset) the traces went to.
+		target = _cell_target(
+			staged;
 			secondary_y = secondary_y,
-			equalar = false,
-			kwargs...,
-		)
-		_apply_equal_aspect!(
-			staged,
-			_cell_target(staged; secondary_y = secondary_y, who = who);
+			inset = inset,
 			who = who,
 		)
+		_field2d_cell_ranges!(staged, target, xr, yr, who)
+		equalar && _apply_equal_aspect!(staged, target; who = who)
+		_finalize_figure!(_StagedPlotMutation(_cmn_plot(staged)))
 		return staged
 	end
+end
+
+# Explicit `xrange`/`yrange` (validated by `_field2d_checked_range`; `nothing`
+# leaves the axis alone) of a SubplotFigure cell, in DATA units: converted to
+# the log10 values Plotly stores on a log axis, written with
+# `autorange = false` on the root of the axis's `matches` group (the only axis
+# plotly.js reads a shared range from).
+# (`t` is a `_CellTarget`, defined after this file in src/sci/common.jl.)
+function _field2d_cell_ranges!(fig, t, xr, yr, who::AbstractString)
+	for (checked, key, name) in ((xr, t.xkey, "xrange"), (yr, t.ykey, "yrange"))
+		checked === nothing && continue
+		root = _axes_match_root(fig, key, who)
+		layout = _cmn_layout(fig)
+		value = _axis_type(layout, root) == "log" ?
+			_to_axis_range(layout, root, checked; who = "$(who) (`$(name)`)") :
+			checked
+		_cmn_merge_layout_key!(
+			fig,
+			root,
+			Dict{Symbol, Any}(:range => value, :autorange => false),
+		)
+	end
+	return nothing
 end
 
 # Whether the target cell's x / y axes are logarithmic after a call passing
@@ -6028,6 +6087,7 @@ function _field2d_subplot_log_axes(
 	row = nothing,
 	col = nothing,
 	secondary_y::Bool = false,
+	inset = nothing,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
 )
@@ -6038,6 +6098,7 @@ function _field2d_subplot_log_axes(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		who = who,
 	)
 	layout = _plot_layout(getfield(sf, :fig))
@@ -6087,6 +6148,7 @@ function plot_heatmap!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
@@ -6100,6 +6162,7 @@ function plot_heatmap!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -6110,6 +6173,7 @@ function plot_heatmap!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
@@ -6123,6 +6187,7 @@ function plot_heatmap!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
@@ -6135,6 +6200,7 @@ function plot_heatmap!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -6145,6 +6211,7 @@ function plot_heatmap!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
@@ -6160,6 +6227,7 @@ function plot_contour!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
@@ -6173,6 +6241,7 @@ function plot_contour!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -6183,6 +6252,7 @@ function plot_contour!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
@@ -6196,6 +6266,7 @@ function plot_contour!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	equalar::Bool = false,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
@@ -6208,6 +6279,7 @@ function plot_contour!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -6218,6 +6290,7 @@ function plot_contour!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		equalar = equalar,
 		xscale = xscale,
 		yscale = yscale,
@@ -6266,6 +6339,7 @@ function _field2d_push_traces!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	_field2d_apply_options!(
 		fig,
@@ -6291,6 +6365,8 @@ function _field2d_push_traces!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	# Quiver arrows: the style's line width only (see `_quiver_add!`).
+	_field2d_finish!(fig, first_new; style = (:linewidth,))
 	_refresh!(fig)
 	return nothing
 end
@@ -6304,6 +6380,7 @@ function plot_quiver!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	color = "RoyalBlue",
 	sizeref::Real = 1,
 	legend::AbstractString = "",
@@ -6321,6 +6398,7 @@ function plot_quiver!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -6346,6 +6424,7 @@ function plot_quiver!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		equalar = equalar,
 		who = who,
 		xscale = xscale,
@@ -10501,6 +10580,7 @@ function _field2d_color(
 	colorscale,
 	showscale::Union{Nothing, Bool},
 	colorbar_title::AbstractString,
+	colorbar_title_side::Symbol = :top,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -10529,11 +10609,12 @@ function _field2d_color(
 		ticklabels = ticklabels,
 		who = who,
 	)
-	colorbar = _colorbar_attr(;
-		title = isempty(colorbar_title) ? "" : _label(colorbar_title),
+	colorbar = _field2d_colorbar(
+		colorbar_title,
+		colorbar_title_side,
+		who;
 		ticks = norm.tickvals,
 		ticklabels = norm.ticktext,
-		who = who,
 	)
 	axis_id = coloraxis === nothing ? nothing :
 		_normalize_coloraxis(coloraxis, who)
@@ -10748,6 +10829,144 @@ function _field2d_reject_keywords(who::AbstractString, extra)
 	))
 end
 
+# An axis-range keyword (`xrange`, `yrange`) with the semantics of the range
+# mutators (`xrange!`, X23): `[0, 0]`, `(0, 0)`, `nothing` and
+# `[nothing, nothing]` are the automatic sentinel (`nothing` is returned and
+# the axis is left as it is); otherwise exactly two finite, different bounds
+# that are neither `nothing`/`missing` (partial ranges are not supported)
+# nor Bool. Bounds are DATA values; `_apply_axis_range!` converts them on a
+# log axis. Strings and dates pass for category/date axes.
+function _field2d_checked_range(range, who::AbstractString, name::AbstractString)
+	if (range isa AbstractVector || range isa Tuple) && length(range) == 2
+		any(bound -> bound isa Bool, range) && throw(ArgumentError(
+			"$(who): `$(name)` bounds must be numbers (or date/category values); " *
+			"got $(repr(range)).",
+		))
+		all(bound -> bound === nothing, range) && return nothing
+	end
+	checked = _checked_range(range, who, name)
+	checked === nothing && return nothing
+	any(bound -> bound === nothing || bound === missing, checked) &&
+		throw(ArgumentError(
+			"$(who): `$(name)` cannot be partial; give both bounds, or [0, 0] / " *
+			"`nothing` for an automatic range. Got $(repr(range)).",
+		))
+	isequal(checked[1], checked[2]) && throw(ArgumentError(
+		"$(who): the `$(name)` bounds must differ; got $(repr(range)) (use " *
+		"[0, 0] or `nothing` for an automatic range).",
+	))
+	return checked
+end
+
+# A Bool keyword given untyped so a wrong value is an ArgumentError naming it.
+function _field2d_bool(value, who::AbstractString, name::AbstractString)
+	value isa Bool || throw(ArgumentError(
+		"$(who): `$(name)` must be true or false; got $(repr(value)).",
+	))
+	return value
+end
+
+# `colorbar_title_side` (X1): :top (default), :right or :bottom, as a Symbol
+# or string; `_colorbar_title_attr` rejects any other side.
+function _field2d_title_side(side, who::AbstractString)
+	(side isa Symbol || side isa AbstractString) || throw(ArgumentError(
+		"$(who): `colorbar_title_side` must be :top, :right or :bottom; got " *
+		"$(repr(side)).",
+	))
+	value = Symbol(lowercase(strip(String(side))))
+	# Validates the side (and builds nothing for an empty title).
+	_colorbar_title_attr("", value; who = who)
+	return value
+end
+
+# Line width of a field overlay (contour lines, streamlines, mesh edges)
+# whose `linewidth` keyword is 0, i.e. automatic (X10): the active style's
+# line width (`with_style(linewidth = ...)`), else `default` (`nothing`:
+# leave the width to plotly). Overlays take no dash/marker cycle, which would
+# turn one field into a dashed or marked series.
+function _field2d_style_linewidth(default)
+	width = get(_style_trace_defaults(_active_style(), 1), :linewidth, nothing)
+	return width === nothing ? default : width
+end
+
+# Colorbar of a field trace with the title on `side` (X1): the ticks of
+# `_colorbar_attr` plus `title = attr(text, side)`; `nothing` when neither a
+# title nor ticks are set.
+function _field2d_colorbar(
+	title::AbstractString,
+	side::Symbol,
+	who::AbstractString;
+	ticks = nothing,
+	ticklabels = nothing,
+)
+	bar = _colorbar_attr(; ticks = ticks, ticklabels = ticklabels, who = who)
+	title_value = _colorbar_title_attr(title, side; who = who)
+	title_value === nothing && return bar
+	fields = bar === nothing ? Dict{Symbol, Any}() : _symbol_dict(bar)
+	fields[:title] = title_value
+	return attr(; fields...)
+end
+
+# D10 (3): the `tight` flag of a field trace, read by `_finalize_figure!`'s
+# sticky-edge logic (src/sci/finalize.jl, owned by field-layout). Per the
+# field-layout contract (CONTRACT.md §1-2) a trace that draws the field
+# itself carries `meta = "plotlysupply:field"` (tight, the default) or
+# `"plotlysupply:field:loose"` (`tight = false`), compared exactly, so nothing
+# else may go into `meta`. Overlays (quiver arrows, streamlines, edge and
+# carrier traces) carry no field `meta`. Native heatmap/contour/image traces
+# count as tight fields without `meta`; only the loose value opts them out.
+const _FIELD2D_META_TIGHT = "plotlysupply:field"
+const _FIELD2D_META_LOOSE = "plotlysupply:field:loose"
+
+_field2d_field_meta(tight::Bool) = tight ? _FIELD2D_META_TIGHT : _FIELD2D_META_LOOSE
+
+function _field2d_mark_field!(fields::AbstractDict, tight::Bool)
+	fields[:meta] = _field2d_field_meta(tight)
+	return fields
+end
+
+# Inside the SubplotFigure path of a field mutator the traces are first built
+# on the delegate's scratch figure; the SubplotFigure method finalizes the
+# whole figure after the transplant instead (see `_field2d_subplot!`).
+const _FIELD2D_DEFER_FINALIZE = Base.ScopedValues.ScopedValue(false)
+
+# The finishing steps every 2-D field constructor/mutator runs after its
+# traces (indices `first_new:end`) and options are in `fig`:
+# - X1: math colorbar titles of the new traces (and of `coloraxis`) become
+#   annotations (deferred to the delegate inside a SubplotFigure call);
+# - X10: the active style's trace defaults for the new line traces. `style`
+#   lists which of `_STYLE_TRACE_DEFAULT_KEYWORDS` the style may fill: a field
+#   overlay takes the style's line width but not the dash/marker cycle, which
+#   would turn every quiver or streamline into a dashed or marked series;
+# - D10: `_finalize_figure!`.
+function _field2d_finish!(
+	fig,
+	first_new::Int;
+	coloraxis = nothing,
+	style::Tuple{Vararg{Symbol}} = (),
+)
+	last_index = length(_plot_data(fig))
+	if first_new <= last_index
+		indices = first_new:last_index
+		_colorbar_math_titles!(
+			fig,
+			indices;
+			coloraxes = coloraxis === nothing ? () : (coloraxis,),
+		)
+		if !isempty(style)
+			_apply_style_trace_defaults!(
+				fig,
+				indices;
+				explicit = Tuple(
+					name for name in _STYLE_TRACE_DEFAULT_KEYWORDS if !(name in style)
+				),
+			)
+		end
+	end
+	_FIELD2D_DEFER_FINALIZE[] || _finalize_figure!(fig)
+	return nothing
+end
+
 # ── Heatmap ──────────────────────────────────────────────────────────
 
 # Per-cell text of a heatmap (spec F27). `text` uses the `U[ix, iy]` layout of
@@ -10801,6 +11020,7 @@ function _heatmap_add!(
 	colorscale,
 	showscale::Union{Nothing, Bool},
 	colorbar_title::AbstractString,
+	colorbar_title_side = :top,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -10821,9 +11041,12 @@ function _heatmap_add!(
 	fontsize,
 	grid,
 	equalar::Bool,
+	tight = true,
 	xscale::AbstractString,
 	yscale::AbstractString,
 )
+	xrange = _field2d_checked_range(xrange, who, "xrange")
+	yrange = _field2d_checked_range(yrange, who, "yrange")
 	_validate_cartesian_options(
 		fig,
 		who;
@@ -10836,6 +11059,8 @@ function _heatmap_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	tight_value = _field2d_bool(tight, who, "tight")
+	title_side = _field2d_title_side(colorbar_title_side, who)
 	origin_value = _field2d_origin(origin, who; allow_unset = !constructor)
 	_field2d_nonnegative(xgap, who, "xgap")
 	_field2d_nonnegative(ygap, who, "ygap")
@@ -10864,6 +11089,7 @@ function _heatmap_add!(
 		colorscale = colorscale,
 		showscale = showscale,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = title_side,
 		colorbar_ticks = colorbar_ticks,
 		colorbar_ticklabels = colorbar_ticklabels,
 		coloraxis = coloraxis,
@@ -10880,7 +11106,9 @@ function _heatmap_add!(
 	)
 	xgap > 0 && (fields[:xgap] = xgap)
 	ygap > 0 && (fields[:ygap] = ygap)
+	_field2d_mark_field!(fields, tight_value)
 
+	first_new = length(_plot_data(fig)) + 1
 	push!(_plot_data(fig), heatmap(; fields...))
 	_field2d_apply_coloraxis!(fig, color)
 	_field2d_apply_options!(
@@ -10907,6 +11135,7 @@ function _heatmap_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	_field2d_finish!(fig, first_new; coloraxis = color.coloraxis)
 	return nothing
 end
 
@@ -11004,6 +11233,7 @@ function plot_heatmap(
 	colorscale = "",
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -11024,6 +11254,7 @@ function plot_heatmap(
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = true,
 	equalar::Bool = false,
+	tight = true,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
 	show::Bool = false,
@@ -11049,6 +11280,7 @@ function plot_heatmap(
 		colorscale = colorscale,
 		showscale = showscale,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		colorbar_ticks = colorbar_ticks,
 		colorbar_ticklabels = colorbar_ticklabels,
 		coloraxis = coloraxis,
@@ -11069,6 +11301,7 @@ function plot_heatmap(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		tight = tight,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -11250,6 +11483,7 @@ function _contour_add!(
 	colorscale,
 	showscale::Union{Nothing, Bool},
 	colorbar_title::AbstractString,
+	colorbar_title_side,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -11264,9 +11498,12 @@ function _contour_add!(
 	fontsize,
 	grid,
 	equalar::Bool,
+	tight,
 	xscale::AbstractString,
 	yscale::AbstractString,
 )
+	xrange = _field2d_checked_range(xrange, who, "xrange")
+	yrange = _field2d_checked_range(yrange, who, "yrange")
 	_validate_cartesian_options(
 		fig,
 		who;
@@ -11279,6 +11516,8 @@ function _contour_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	tight_value = _field2d_bool(tight, who, "tight")
+	title_side = _field2d_title_side(colorbar_title_side, who)
 	line_color = _field2d_color_string(linecolor, who, "linecolor")
 	_field2d_nonnegative(linewidth, who, "linewidth")
 	dash_value = _field2d_dash(dash, who)
@@ -11322,6 +11561,7 @@ function _contour_add!(
 		colorscale = colorscale,
 		showscale = single_colour ? false : showscale,
 		colorbar_title = bands ? "" : colorbar_title,
+		colorbar_title_side = title_side,
 		colorbar_ticks = bands ? nothing : colorbar_ticks,
 		colorbar_ticklabels = bands ? nothing : colorbar_ticklabels,
 		coloraxis = bands ? nothing : coloraxis,
@@ -11346,9 +11586,18 @@ function _contour_add!(
 
 	base = Dict{Symbol, Any}(:x => x, :y => y, :z => transpose(color.values))
 	_field2d_color_trace_fields!(base, color)
+	# Filled contours draw the field: tight/loose `meta`. Line contours are
+	# overlays and carry no field `meta` (a native contour trace already
+	# counts as tight); `tight = false` still opts them out (CONTRACT.md §1).
+	(spec.coloring in ("lines", "none") && tight_value) ||
+		_field2d_mark_field!(base, tight_value)
 	line = Dict{Symbol, Any}()
 	isempty(line_color) || (line[:color] = line_color)
-	linewidth > 0 && (line[:width] = linewidth)
+	# Line contours take the style's line width when `linewidth = 0` (X10);
+	# filled contours keep plotly's thin level boundaries.
+	line_width = linewidth > 0 ? linewidth :
+		spec.coloring in ("lines", "none") ? _field2d_style_linewidth(nothing) : nothing
+	line_width === nothing || (line[:width] = line_width)
 	isempty(dash_value) || (line[:dash] = dash_value)
 	contours = Dict{Symbol, Any}()
 	(isempty(spec.coloring) || bands) || (contours[:coloring] = spec.coloring)
@@ -11425,6 +11674,7 @@ function _contour_add!(
 				:showscale => false,
 				:showlegend => false,
 			)
+			_field2d_mark_field!(fields, tight_value)
 			if band == 1
 				color.customdata === nothing ||
 					(fields[:customdata] = color.customdata)
@@ -11435,11 +11685,12 @@ function _contour_add!(
 			end
 			push!(traces, contour(; fields...))
 		end
-		colorbar = _colorbar_attr(;
-			title = isempty(colorbar_title) ? "" : _label(colorbar_title),
+		colorbar = _field2d_colorbar(
+			colorbar_title,
+			title_side,
+			who;
 			ticks = band_norm.tickvals,
 			ticklabels = band_norm.ticktext,
-			who = who,
 		)
 		if coloraxis === nothing
 			push!(
@@ -11480,6 +11731,7 @@ function _contour_add!(
 		end
 	end
 
+	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	_field2d_apply_coloraxis!(fig, color)
 	_field2d_apply_options!(
@@ -11505,6 +11757,13 @@ function _contour_add!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+	)
+	_field2d_finish!(
+		fig,
+		first_new;
+		coloraxis = bands ?
+			(coloraxis === nothing ? nothing : _normalize_coloraxis(coloraxis, who)) :
+			color.coloraxis,
 	)
 	return nothing
 end
@@ -11589,6 +11848,7 @@ function plot_contour(
 	colorscale = "",
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -11603,6 +11863,7 @@ function plot_contour(
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = true,
 	equalar::Bool = false,
+	tight = true,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
 	show::Bool = false,
@@ -11635,6 +11896,7 @@ function plot_contour(
 		colorscale = colorscale,
 		showscale = showscale,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		colorbar_ticks = colorbar_ticks,
 		colorbar_ticklabels = colorbar_ticklabels,
 		coloraxis = coloraxis,
@@ -11649,6 +11911,7 @@ function plot_contour(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		tight = tight,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -11939,6 +12202,8 @@ function _quiver_add!(
 	grid,
 	equalar::Bool,
 )
+	xrange = _field2d_checked_range(xrange, who, "xrange")
+	yrange = _field2d_checked_range(yrange, who, "yrange")
 	_validate_cartesian_options(
 		fig,
 		who;
@@ -11966,6 +12231,7 @@ function _quiver_add!(
 		xlog = _field2d_log_axis(fig, :x, xscale),
 		ylog = _field2d_log_axis(fig, :y, yscale),
 	)
+	first_new = length(_plot_data(fig)) + 1
 	push!(_plot_data(fig), trace)
 	_field2d_apply_options!(
 		fig,
@@ -11991,6 +12257,8 @@ function _quiver_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	# Arrows take the style's line width, never its dash/marker cycle.
+	_field2d_finish!(fig, first_new; style = (:linewidth,))
 	return nothing
 end
 
@@ -12934,6 +13202,7 @@ function plot_heatmap!(
 	colorscale = "",
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -12954,6 +13223,7 @@ function plot_heatmap!(
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
 	equalar::Bool = false,
+	tight = true,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
 	kwargs...,
@@ -12979,6 +13249,7 @@ function plot_heatmap!(
 		colorscale = colorscale,
 		showscale = showscale,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		colorbar_ticks = colorbar_ticks,
 		colorbar_ticklabels = colorbar_ticklabels,
 		coloraxis = coloraxis,
@@ -12999,6 +13270,7 @@ function plot_heatmap!(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		tight = tight,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -13075,6 +13347,7 @@ function plot_contour!(
 	colorscale = "",
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side::Union{Symbol, AbstractString} = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -13089,6 +13362,7 @@ function plot_contour!(
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
 	equalar::Bool = false,
+	tight = true,
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
 	kwargs...,
@@ -13121,6 +13395,7 @@ function plot_contour!(
 		colorscale = colorscale,
 		showscale = showscale,
 		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
 		colorbar_ticks = colorbar_ticks,
 		colorbar_ticklabels = colorbar_ticklabels,
 		coloraxis = coloraxis,
@@ -13135,6 +13410,7 @@ function plot_contour!(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		tight = tight,
 		xscale = xscale,
 		yscale = yscale,
 	)
@@ -17897,7 +18173,10 @@ function _image_add!(
 	fontsize,
 	grid,
 	equalar::Bool,
+	tight,
 )
+	xrange = _field2d_checked_range(xrange, who, "xrange")
+	yrange = _field2d_checked_range(yrange, who, "yrange")
 	_validate_cartesian_options(
 		fig,
 		who;
@@ -17908,6 +18187,7 @@ function _image_add!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	tight_value = _field2d_bool(tight, who, "tight")
 	origin_value = _field2d_origin(origin, who; allow_unset = !constructor)
 	source = _image_source(z, who)
 	model = _image_colormodel(colormodel, source, who)
@@ -17930,7 +18210,9 @@ function _image_add!(
 		fields[:y0] = placement.y0
 		fields[:dy] = placement.dy
 	end
+	_field2d_mark_field!(fields, tight_value)
 
+	first_new = length(_plot_data(fig)) + 1
 	push!(_plot_data(fig), image(; fields...))
 	_field2d_apply_options!(
 		fig,
@@ -17964,6 +18246,7 @@ function _image_add!(
 	elseif !isempty(origin_value)
 		_field2d_axis_direction!(fig, :y, origin_value == "upper"; force = true)
 	end
+	_field2d_finish!(fig, first_new)
 	return nothing
 end
 
@@ -18031,6 +18314,7 @@ function plot_image(
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = true,
 	equalar::Bool = true,
+	tight = true,
 	show::Bool = false,
 )
 	fig = _field2d_new_figure()
@@ -18058,6 +18342,7 @@ function plot_image(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		tight = tight,
 	)
 	return _field2d_show(fig, show, width, height, title)
 end
@@ -18107,6 +18392,7 @@ function plot_image!(
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
 	equalar::Bool = true,
+	tight = true,
 	kwargs...,
 )
 	_field2d_reject_keywords("plot_image!", kwargs)
@@ -18134,6 +18420,7 @@ function plot_image!(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		tight = tight,
 	)
 	_refresh!(fig)
 	return nothing

@@ -576,8 +576,8 @@ end
 
 """
 	_mesh2d_colour(fig, target, values; colorscale, crange, cmid, colornorm, levels,
-	               showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels,
-	               coloraxis, who) -> _Mesh2dColourMap
+	               showscale, colorbar_title, colorbar_title_side, colorbar_ticks,
+	               colorbar_ticklabels, coloraxis, who) -> _Mesh2dColourMap
 
 Resolve the colour keywords of a mesh call against `values` (one per cell or
 node; `missing`/NaN/±Inf are not drawn). The limits default to the finite
@@ -597,6 +597,7 @@ function _mesh2d_colour(
 	levels,
 	showscale,
 	colorbar_title,
+	colorbar_title_side::Symbol,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -662,11 +663,14 @@ function _mesh2d_colour(
 	else
 		norm.ticktext
 	end
-	colorbar = _colorbar_attr(;
-		title = isempty(title) ? "" : _label(title),
+	# X1: the title on `colorbar_title_side`; a math title becomes an
+	# annotation in `_mesh2d_finish!` (`_colorbar_math_titles!`).
+	colorbar = _field2d_colorbar(
+		title,
+		colorbar_title_side,
+		who;
 		ticks = norm.tickvals,
 		ticklabels = ticktext,
-		who = who,
 	)
 	return _Mesh2dColourMap(
 		tvals,
@@ -771,6 +775,7 @@ function _mesh2d_heatmap_trace(
 	cm::_Mesh2dColourMap;
 	opacity::Float64,
 	hover::Bool,
+	tight::Bool,
 )
 	nx, ny = size(Z)
 	rows = Vector{Vector{Union{Nothing, Float64}}}(undef, ny)
@@ -814,6 +819,8 @@ function _mesh2d_heatmap_trace(
 	else
 		fields[:hovertemplate] = "(%{x:.4g}, %{y:.4g}): %{z:.4g}<extra></extra>"
 	end
+	# D10: the raster draws the field (sticky axis range unless `tight = false`).
+	_field2d_mark_field!(fields, tight)
 	return GenericTrace("heatmap", fields)
 end
 
@@ -858,8 +865,21 @@ function _mesh2d_prepare_figure(fig, who::AbstractString, fo)
 	return cell, xtype, ytype
 end
 
-# Apply the common figure keywords after the traces were pushed.
-function _mesh2d_finish!(fig, target::_Mesh2dTarget, who::AbstractString, fo, cell::_CellTarget; constructor::Bool)
+# Apply the common figure keywords after the traces (indices `first_new:end`)
+# were pushed, then the field finish (`_field2d_finish!`: math colorbar titles
+# of the new traces and of `coloraxis`, X1; `_finalize_figure!`, D10). Line
+# widths already follow the style (`_field2d_style_linewidth`), so no style
+# pass runs here: fill traces draw cell outlines whose width is `edgewidth`.
+function _mesh2d_finish!(
+	fig,
+	target::_Mesh2dTarget,
+	who::AbstractString,
+	fo,
+	cell::_CellTarget;
+	constructor::Bool,
+	first_new::Int,
+	coloraxis = nothing,
+)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = fo.xlabel,
@@ -888,6 +908,7 @@ function _mesh2d_finish!(fig, target::_Mesh2dTarget, who::AbstractString, fo, ce
 			who = who,
 		)
 	end
+	_field2d_finish!(fig, first_new; coloraxis = coloraxis)
 	constructor || _refresh!(fig)
 	return nothing
 end
@@ -954,7 +975,17 @@ _mesh2d_numbered_coloraxis(value) =
 	occursin(r"^coloraxis([2-9]|[1-9][0-9]+)$", strip(String(value)))
 
 # Run a mesh mutator `impl(fig, target, args...; constructor = false, kwargs...)`
-# on one cell of a SubplotFigure through `_subplot_delegate_mutator!`.
+# on one cell (or, with `inset = k`, one inset) of a SubplotFigure through
+# `_subplot_delegate_mutator!`. `_finalize_figure!` is never run on the
+# delegate's scratch figure (`_FIELD2D_DEFER_FINALIZE`): its extents would be
+# the new traces' only. A plain call takes the delegate's append-only fast
+# path, which finalizes the figure itself (field-layout contract, CONTRACT.md
+# §4). A numbered colour axis or an explicit `xrange`/`yrange` needs work on
+# the real figure after the transplant, so those calls run as one fully
+# staged transaction that also finalizes explicitly: the ranges go to the
+# root of the cell axis's `matches` group (plotly.js ignores a range on a
+# matched axis; a shared-x cell rendered 0..3 instead of xrange = (0, 5)),
+# in data units converted for a log axis (`_field2d_cell_ranges!`).
 function _mesh2d_subplot!(
 	impl::Function,
 	sf::SubplotFigure,
@@ -963,13 +994,23 @@ function _mesh2d_subplot!(
 	row = nothing,
 	col = nothing,
 	secondary_y = false,
+	inset = nothing,
 	kwargs...,
 )
 	_mesh2d_bool(secondary_y, who, "secondary_y")
+	haskey(kwargs, :show) && throw(ArgumentError(
+		"$(who): mutators do not take `show`; the SubplotFigure is shown by " *
+		"`subplots(...; sync=true)` (or `display(sf)`).",
+	))
+	forwarded = values(kwargs)
+	xr = _field2d_checked_range(get(forwarded, :xrange, nothing), who, "xrange")
+	yr = _field2d_checked_range(get(forwarded, :yrange, nothing), who, "yrange")
+	forwarded = Base.structdiff(forwarded, NamedTuple{(:xrange, :yrange)})
+	numbered = _mesh2d_numbered_coloraxis(get(forwarded, :coloraxis, nothing))
 	metadata_lock = getfield(sf, :_lock)
 	lock(metadata_lock)
 	try
-		cell = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, who = who)
+		cell = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, inset = inset, who = who)
 		cell.kind === :xy || throw(ArgumentError(
 			"$(who): subplot cell ($(cell.row), $(cell.col)) is a :$(cell.kind) cell; " *
 			"mesh plots draw on Cartesian x/y axes.",
@@ -986,37 +1027,50 @@ function _mesh2d_subplot!(
 			_mesh2d_seed_scratch!(staged, live, cell)
 			return impl(staged, target, margs...; constructor = false, mkwargs...)
 		end
-		if _mesh2d_numbered_coloraxis(get(kwargs, :coloraxis, nothing))
-			# The delegate transplants `layout.coloraxis` only. A numbered
-			# colour axis is merged into the staged figure inside the same
-			# (fully staged) transaction, so a failure leaves no partial state.
+		if numbered || xr !== nothing || yr !== nothing
+			# X51 workaround (kept): the delegate transplants `layout.coloraxis`
+			# only. A numbered colour axis is merged into the staged figure
+			# inside the same (fully staged) transaction, so a failure leaves
+			# no partial state. Its math colorbar title is converted after the
+			# merge (the delegate's conversion ran before the axis existed).
 			_transactional_subplot_mutation!(sf, _SUBPLOT_SELECTION_METADATA_FIELDS) do staged_sf
-				_subplot_delegate_mutator_impl!(
-					staged_sf,
+				first_new = length(_cmn_plot(staged_sf).data) + 1
+				Base.ScopedValues.with(_FIELD2D_DEFER_FINALIZE => true) do
+					_subplot_delegate_mutator_impl!(
+						staged_sf,
+						mutator,
+						args...;
+						row = cell.row,
+						col = cell.col,
+						secondary_y = secondary_y,
+						inset = inset,
+						forwarded...,
+					)
+				end
+				written = target.coloraxis_write
+				if written !== nothing
+					id, fields = written
+					_cmn_merge_layout_key!(staged_sf, Symbol(id), fields; nested = (:colorbar,))
+					p = _cmn_plot(staged_sf)
+					_colorbar_math_titles!(p, first_new:length(p.data); coloraxes = (id,))
+				end
+				_field2d_cell_ranges!(staged_sf, cell, xr, yr, who)
+				_finalize_figure!(_StagedPlotMutation(_cmn_plot(staged_sf)))
+				return staged_sf
+			end
+		else
+			Base.ScopedValues.with(_FIELD2D_DEFER_FINALIZE => true) do
+				_subplot_delegate_mutator!(
+					sf,
 					mutator,
 					args...;
 					row = cell.row,
 					col = cell.col,
 					secondary_y = secondary_y,
-					kwargs...,
+					inset = inset,
+					forwarded...,
 				)
-				written = target.coloraxis_write
-				if written !== nothing
-					id, fields = written
-					_cmn_merge_layout_key!(staged_sf, Symbol(id), fields; nested = (:colorbar,))
-				end
-				return staged_sf
 			end
-		else
-			_subplot_delegate_mutator!(
-				sf,
-				mutator,
-				args...;
-				row = cell.row,
-				col = cell.col,
-				secondary_y = secondary_y,
-				kwargs...,
-			)
 		end
 	finally
 		unlock(metadata_lock)
@@ -1052,11 +1106,13 @@ function _mesh2d_draw_cells!(
 	hatch,
 	showscale,
 	colorbar_title,
+	colorbar_title_side::Symbol,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
 	hover,
 	legend,
+	tight::Bool,
 	extra_traces::Vector{GenericTrace} = GenericTrace[],
 )
 	ncells = _mesh2d_ncells(rings)
@@ -1082,6 +1138,7 @@ function _mesh2d_draw_cells!(
 			("colornorm", colornorm in (:linear, "linear")),
 			("showscale", showscale === nothing || showscale === false),
 			("colorbar_title", colorbar_title == ""),
+			("colorbar_title_side", colorbar_title_side === :top),
 			("colorbar_ticks", colorbar_ticks === nothing),
 			("colorbar_ticklabels", colorbar_ticklabels === nothing),
 			("coloraxis", coloraxis === nothing),
@@ -1096,7 +1153,7 @@ function _mesh2d_draw_cells!(
 		groups = fill!(Vector{Int}(undef, ncells), 1)
 		xs, ys, counts = _mesh2d_group_coords(rings, groups, 1)
 		if counts[1] > 0 || !isempty(legend_text)
-			push!(traces, _mesh2d_fill_trace(xs[1], ys[1], fill, edge, width, alpha, pattern, legend_text))
+			push!(traces, _mesh2d_fill_trace(xs[1], ys[1], fill, edge, width, alpha, pattern, legend_text, tight))
 		end
 		if hover && ncells > 0
 			cx, cy = _mesh2d_centroids(rings)
@@ -1124,6 +1181,7 @@ function _mesh2d_draw_cells!(
 			levels,
 			showscale,
 			colorbar_title,
+			colorbar_title_side,
 			colorbar_ticks,
 			colorbar_ticklabels,
 			coloraxis,
@@ -1133,7 +1191,7 @@ function _mesh2d_draw_cells!(
 		xs, ys, counts = _mesh2d_group_coords(rings, bins, length(colours))
 		for b in eachindex(colours)
 			counts[b] == 0 && continue
-			push!(traces, _mesh2d_fill_trace(xs[b], ys[b], colours[b], edge, width, alpha, pattern, ""))
+			push!(traces, _mesh2d_fill_trace(xs[b], ys[b], colours[b], edge, width, alpha, pattern, "", tight))
 		end
 		# Cells without a colour (NaN) keep an explicit outline, as in
 		# matplotlib where only their face is masked.
@@ -1167,13 +1225,20 @@ function _mesh2d_draw_cells!(
 	hover_trace === nothing || push!(traces, hover_trace)
 
 	# --- writes ---------------------------------------------------------------
+	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	cm === nothing || _mesh2d_write_coloraxis!(fig, target, cm, showscale !== nothing)
-	_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor)
+	_mesh2d_finish!(
+		fig, target, who, fo, cell;
+		constructor = constructor,
+		first_new = first_new,
+		coloraxis = cm === nothing ? nothing : cm.coloraxis,
+	)
 	return nothing
 end
 
-function _mesh2d_fill_trace(xs, ys, fill::String, edge::String, width::Float64, alpha::Float64, pattern, legend::AbstractString)
+# A fill trace draws the field (D10): `meta` marks it tight or loose.
+function _mesh2d_fill_trace(xs, ys, fill::String, edge::String, width::Float64, alpha::Float64, pattern, legend::AbstractString, tight::Bool)
 	stroke_width = width > 0 ? width : _MESH2D_SEAM_WIDTH
 	fields = Dict{Symbol, Any}(
 		:x => xs,
@@ -1194,6 +1259,7 @@ function _mesh2d_fill_trace(xs, ys, fill::String, edge::String, width::Float64, 
 	)
 	alpha < 1 && (fields[:opacity] = alpha)
 	pattern === nothing || (fields[:fillpattern] = pattern)
+	_field2d_mark_field!(fields, tight)
 	return GenericTrace("scatter", fields)
 end
 
@@ -1210,8 +1276,12 @@ function _mesh2d_hover_trace(cx::AbstractVector{Float64}, cy::AbstractVector{Flo
 	))
 end
 
-# The figure keywords every mesh function takes, as one NamedTuple.
-_mesh2d_figure_options(;
+# The figure keywords every mesh function takes, as one NamedTuple. The axis
+# ranges are normalised as for the other field functions (X23): `[0, 0]`,
+# `nothing` and `[nothing, nothing]` become `nothing` (automatic, the axis is
+# left alone); partial, equal or Bool bounds throw.
+_mesh2d_figure_options(
+	who::AbstractString;
 	title = "",
 	xlabel = "",
 	ylabel = "",
@@ -1224,7 +1294,20 @@ _mesh2d_figure_options(;
 	fontsize = 0,
 	grid,
 	equalar = true,
-) = (; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+) = (;
+	title,
+	xlabel,
+	ylabel,
+	xrange = _field2d_checked_range(xrange, who, "xrange"),
+	yrange = _field2d_checked_range(yrange, who, "yrange"),
+	xscale,
+	yscale,
+	width,
+	height,
+	fontsize,
+	grid,
+	equalar,
+)
 
 # ---------------------------------------------------------------------------
 # plot_polygons
@@ -1271,11 +1354,13 @@ function _mesh2d_polygons_impl!(
 	hatch = "",
 	showscale = nothing,
 	colorbar_title = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
 	hover = false,
 	legend = "",
+	tight = true,
 	title = "",
 	xlabel = "",
 	ylabel = "",
@@ -1292,8 +1377,10 @@ function _mesh2d_polygons_impl!(
 )
 	who = constructor ? "plot_polygons" : "plot_polygons!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
+	title_side = _field2d_title_side(colorbar_title_side, who)
+	_mesh2d_bool(tight, who, "tight")
 	kind = _mesh2d_first_kind(a, who)
 	if kind === :empty
 		kind = _mesh2d_is_cells(c) || (c isa AbstractVector && isempty(c) && d !== nothing) ? :nodes : :polygons
@@ -1322,8 +1409,9 @@ function _mesh2d_polygons_impl!(
 	_mesh2d_draw_cells!(
 		fig, target, rings, values, fo, cell;
 		who, constructor, color, colorscale, crange, cmid, colornorm, levels, ncolors,
-		edgecolor, edgewidth, opacity, hatch, showscale, colorbar_title, colorbar_ticks,
-		colorbar_ticklabels, coloraxis, hover, legend,
+		edgecolor, edgewidth, opacity, hatch, showscale, colorbar_title,
+		colorbar_title_side = title_side, colorbar_ticks, colorbar_ticklabels, coloraxis,
+		hover, legend, tight,
 	)
 	return nothing
 end
@@ -1476,11 +1564,12 @@ function plot_polygons!(
 	row = nothing,
 	col = nothing,
 	secondary_y = false,
+	inset = nothing,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
 		_mesh2d_polygons_impl!, sf, "plot_polygons!", a, b, c, d;
-		row, col, secondary_y, kwargs...,
+		row, col, secondary_y, inset, kwargs...,
 	)
 end
 
@@ -1561,10 +1650,12 @@ function _mesh2d_pcolormesh_impl!(
 	hatch = "",
 	showscale = nothing,
 	colorbar_title = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
 	hover = false,
+	tight = true,
 	title = "",
 	xlabel = "",
 	ylabel = "",
@@ -1581,8 +1672,10 @@ function _mesh2d_pcolormesh_impl!(
 )
 	who = constructor ? "plot_pcolormesh" : "plot_pcolormesh!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
+	title_side = _field2d_title_side(colorbar_title_side, who)
+	_mesh2d_bool(tight, who, "tight")
 	vector_form = X isa AbstractVector
 	if vector_form
 		Y isa AbstractVector || throw(ArgumentError(
@@ -1619,7 +1712,7 @@ function _mesh2d_pcolormesh_impl!(
 		cm = _mesh2d_colour(
 			fig, target, vals;
 			colorscale, crange, cmid, colornorm, levels, showscale, colorbar_title,
-			colorbar_ticks, colorbar_ticklabels, coloraxis, who,
+			colorbar_title_side = title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who,
 		)
 		Z = reshape(copy(cm.tvals), m - 1, n - 1)
 		raw = reshape(Float64[_mesh2d_tvalue(v, who, k) for (k, v) in enumerate(vals)], m - 1, n - 1)
@@ -1634,10 +1727,16 @@ function _mesh2d_pcolormesh_impl!(
 			Z = Z[:, end:-1:1]
 			raw = raw[:, end:-1:1]
 		end
-		trace = _mesh2d_heatmap_trace(xe, ye, Z, raw, cm; opacity = alpha, hover = hover)
+		trace = _mesh2d_heatmap_trace(xe, ye, Z, raw, cm; opacity = alpha, hover = hover, tight = tight)
+		first_new = length(_plot_data(fig)) + 1
 		push!(_plot_data(fig), trace)
 		_mesh2d_write_coloraxis!(fig, target, cm, showscale !== nothing)
-		_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor)
+		_mesh2d_finish!(
+			fig, target, who, fo, cell;
+			constructor = constructor,
+			first_new = first_new,
+			coloraxis = cm.coloraxis,
+		)
 		return nothing
 	end
 
@@ -1659,8 +1758,9 @@ function _mesh2d_pcolormesh_impl!(
 	_mesh2d_draw_cells!(
 		fig, target, rings, vec(cellvals), fo, cell;
 		who, constructor, color = "", colorscale, crange, cmid, colornorm, levels, ncolors,
-		edgecolor, edgewidth, opacity, hatch, showscale, colorbar_title, colorbar_ticks,
-		colorbar_ticklabels, coloraxis, hover, legend = "",
+		edgecolor, edgewidth, opacity, hatch, showscale, colorbar_title,
+		colorbar_title_side = title_side, colorbar_ticks, colorbar_ticklabels, coloraxis,
+		hover, legend = "", tight,
 	)
 	return nothing
 end
@@ -1753,11 +1853,12 @@ function plot_pcolormesh!(
 	row = nothing,
 	col = nothing,
 	secondary_y = false,
+	inset = nothing,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
 		_mesh2d_pcolormesh_impl!, sf, "plot_pcolormesh!", X, Y, C;
-		row, col, secondary_y, kwargs...,
+		row, col, secondary_y, inset, kwargs...,
 	)
 end
 
@@ -1914,11 +2015,13 @@ function _mesh2d_tripcolor_impl!(
 	ncolors = 256,
 	showscale = nothing,
 	colorbar_title = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
 	opacity = 1,
 	hover = false,
+	tight = true,
 	title = "",
 	xlabel = "",
 	ylabel = "",
@@ -1935,8 +2038,10 @@ function _mesh2d_tripcolor_impl!(
 )
 	who = constructor ? "plot_tripcolor" : "plot_tripcolor!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
+	title_side = _field2d_title_side(colorbar_title_side, who)
+	_mesh2d_bool(tight, who, "tight")
 	(shading isa Symbol || shading isa AbstractString) || throw(ArgumentError(
 		"$(who): `shading` must be :flat or :gouraud; got $(repr(shading)).",
 	))
@@ -1983,8 +2088,8 @@ function _mesh2d_tripcolor_impl!(
 			fig, target, rings, cell_values, fo, cell;
 			who, constructor, color = "", colorscale, crange, cmid, colornorm, levels, ncolors,
 			edgecolor = edges ? edgecolor : "", edgewidth = edges ? edge_width : 0,
-			opacity, hatch = "", showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels,
-			coloraxis, hover, legend = "",
+			opacity, hatch = "", showscale, colorbar_title, colorbar_title_side = title_side,
+			colorbar_ticks, colorbar_ticklabels, coloraxis, hover, legend = "", tight,
 		)
 		return nothing
 	end
@@ -2013,20 +2118,26 @@ function _mesh2d_tripcolor_impl!(
 	cm = _mesh2d_colour(
 		fig, target, used_values;
 		colorscale, crange, cmid, colornorm, levels, showscale, colorbar_title,
-		colorbar_ticks, colorbar_ticklabels, coloraxis, who,
+		colorbar_title_side = title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who,
 	)
 	xc, yc, Z = _mesh2d_gouraud_raster(tri, cm.tvals, Int(resolution), who)
 	traces = GenericTrace[]
 	if !isempty(xc)
 		raw = cm.log ? map(v -> isnan(v) ? NaN : exp10(v), Z) : nothing
-		push!(traces, _mesh2d_heatmap_trace(xc, yc, Z, raw, cm; opacity = alpha, hover = hover))
+		push!(traces, _mesh2d_heatmap_trace(xc, yc, Z, raw, cm; opacity = alpha, hover = hover, tight = tight))
 	end
 	if edges && edge_width > 0
 		push!(traces, _mesh2d_edges_trace(tri; color = isempty(edge) ? "rgba(0,0,0,0.35)" : edge, width = edge_width, dash = "", opacity = 1.0, legend = ""))
 	end
+	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	_mesh2d_write_coloraxis!(fig, target, cm, showscale !== nothing)
-	_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor)
+	_mesh2d_finish!(
+		fig, target, who, fo, cell;
+		constructor = constructor,
+		first_new = first_new,
+		coloraxis = cm.coloraxis,
+	)
 	return nothing
 end
 
@@ -2124,11 +2235,12 @@ function plot_tripcolor!(
 	row = nothing,
 	col = nothing,
 	secondary_y = false,
+	inset = nothing,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
 		_mesh2d_tripcolor_impl!, sf, "plot_tripcolor!", x, y, triangles, values;
-		row, col, secondary_y, kwargs...,
+		row, col, secondary_y, inset, kwargs...,
 	)
 end
 
@@ -2140,7 +2252,7 @@ function _mesh2d_triplot_impl!(
 	triangles;
 	constructor::Bool,
 	color = "black",
-	linewidth = 0.5,
+	linewidth = 0,
 	dash = "",
 	opacity = 1,
 	mask = nothing,
@@ -2161,11 +2273,13 @@ function _mesh2d_triplot_impl!(
 )
 	who = constructor ? "plot_triplot" : "plot_triplot!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
 	line_color = _mesh2d_color(color, who, "color")
 	isempty(line_color) && (line_color = _mesh2d_default_color(fig, target))
 	line_width = _mesh2d_nonnegative(linewidth, who, "linewidth")
+	# `linewidth = 0`: the style's line width (X10), else 0.5 px.
+	line_width > 0 || (line_width = Float64(_field2d_style_linewidth(0.5)))
 	line_dash = _mesh2d_dash(dash, who)
 	alpha = _mesh2d_opacity(opacity, who)
 	legend_text = _mesh2d_text(legend, who, "legend")
@@ -2173,8 +2287,9 @@ function _mesh2d_triplot_impl!(
 	tri = _mesh2d_triangulation(x, y, triangles, mask, who)
 	_mesh2d_tri_check_log(tri, xtype, ytype, who)
 	trace = _mesh2d_edges_trace(tri; color = line_color, width = line_width, dash = line_dash, opacity = alpha, legend = legend_text)
+	first_new = length(_plot_data(fig)) + 1
 	push!(_plot_data(fig), trace)
-	_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor)
+	_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor, first_new = first_new)
 	return nothing
 end
 
@@ -2247,11 +2362,12 @@ function plot_triplot!(
 	row = nothing,
 	col = nothing,
 	secondary_y = false,
+	inset = nothing,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
 		_mesh2d_triplot_impl!, sf, "plot_triplot!", x, y, triangles;
-		row, col, secondary_y, kwargs...,
+		row, col, secondary_y, inset, kwargs...,
 	)
 end
 
@@ -2427,7 +2543,7 @@ function _mesh2d_tricontour_impl!(
 	color = "",
 	colorscale = _MESH2D_DEFAULT_COLORSCALE,
 	crange = [0, 0],
-	linewidth = 1,
+	linewidth = 0,
 	dash = "",
 	opacity = 1,
 	showlabels = false,
@@ -2449,7 +2565,7 @@ function _mesh2d_tricontour_impl!(
 )
 	who = constructor ? "plot_tricontour" : "plot_tricontour!"
 	_mesh2d_reject_extra(who, extra)
-	fo = _mesh2d_figure_options(; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
+	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, width, height, fontsize, grid, equalar)
 	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
 	tri = _mesh2d_triangulation(x, y, triangles, mask, who)
 	_mesh2d_tri_check_log(tri, xtype, ytype, who)
@@ -2465,6 +2581,8 @@ function _mesh2d_tricontour_impl!(
 	level_values = _mesh2d_contour_levels(levels, Float64[used[i] ? v[i] : NaN for i in 1:nnodes], who)
 	fixed_color = _mesh2d_color(color, who, "color")
 	line_width = _mesh2d_nonnegative(linewidth, who, "linewidth")
+	# `linewidth = 0`: the style's line width (X10), else 1 px.
+	line_width > 0 || (line_width = Float64(_field2d_style_linewidth(1)))
 	line_dash = _mesh2d_dash(dash, who)
 	alpha = _mesh2d_opacity(opacity, who)
 	_mesh2d_bool(showlabels, who, "showlabels")
@@ -2556,8 +2674,9 @@ function _mesh2d_tricontour_impl!(
 			:cliponaxis => false,
 		)))
 	end
+	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
-	_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor)
+	_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor, first_new = first_new)
 	return nothing
 end
 
@@ -2656,10 +2775,11 @@ function plot_tricontour!(
 	row = nothing,
 	col = nothing,
 	secondary_y = false,
+	inset = nothing,
 	kwargs...,
 )
 	return _mesh2d_subplot!(
 		_mesh2d_tricontour_impl!, sf, "plot_tricontour!", x, y, triangles, values;
-		row, col, secondary_y, kwargs...,
+		row, col, secondary_y, inset, kwargs...,
 	)
 end
