@@ -255,6 +255,24 @@ end
 	@test _SFN._fin_layout_item_extent(Layout(shapes = [attr(type = "path", path = "M0,0")]), "x", 'x', false) === :unsupported
 end
 
+@testset "the extent scan copies no coordinates (K8)" begin
+	n = 1_000_000
+	p = plot_heatmap(reshape(1:n, n, 1))
+	_SFN._finalize_figure!(p)
+	GC.gc()
+	@test @allocated(_SFN._finalize_figure!(p)) < 200_000
+	# Explicit coordinates: every entry is still checked, none is copied.
+	x = collect(Float64, 0:(n - 1))
+	t = heatmap(x = x, z = reshape(collect(1.0:n), 1, n))
+	@test _SFN._fin_trace_extent(t, 'x', false) == (-0.5, n - 0.5)
+	@test @allocated(_SFN._fin_trace_extent(t, 'x', false)) < 10_000
+	x[n ÷ 2] = NaN
+	@test _SFN._fin_trace_extent(t, 'x', false) === :unsupported
+	@test _SFN._fin_trace_extent(heatmap(x = [1.0, 0.0, 10.0], z = [1 2 3]), 'x', true) === :unsupported
+	@test all(_SFN._fin_trace_extent(heatmap(x = [1.0, 10.0, 100.0], z = [1 2 3]), 'x', true) .≈
+		(10^-0.5, 10^2.5))
+end
+
 @testset "sticky clip: written once, follows the data, removed when no longer sticky" begin
 	p = Plot([heatmap(x = _SFN_X, y = _SFN_Y, z = _sfn_z(_SFN_Y, _SFN_X))], Layout())
 	@test _SFN._finalize_figure!(p) === true

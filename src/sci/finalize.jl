@@ -188,20 +188,23 @@ _fin_string(value) =
 # turns the sticky range off for that axis).
 # ---------------------------------------------------------------------------
 
-# l-values (log10 on a log axis) of a coordinate vector that must be entirely
-# numeric; `nothing` when an entry is not a finite (positive on log) number.
-function _fin_lvalues(values, islog::Bool)
-	out = Float64[]
+# Whether every entry of a coordinate vector is a finite number (positive on
+# a log axis). A function barrier that copies nothing: `values` comes out of a
+# trace's `Dict{Symbol, Any}`, and collecting it there boxed every element (a
+# million-point heatmap axis allocated about 30 MB per scan, K8).
+function _fin_all_lvalues(values, islog::Bool)
 	for value in values
-		_fin_isfinite_real(value) || return nothing
-		x = Float64(value)
-		if islog
-			x > 0 || return nothing
-			x = log10(x)
-		end
-		push!(out, x)
+		_fin_isfinite_real(value) || return false
+		islog && !(value > 0) && return false
 	end
-	return out
+	return true
+end
+
+# l-value (log10 on a log axis) of the `k`-th (1-based) entry of a coordinate
+# vector that `_fin_all_lvalues` accepted.
+function _fin_lvalue_at(values::AbstractVector, k::Int, islog::Bool)
+	x = Float64(values[firstindex(values) + k - 1])
+	return islog ? log10(x) : x
 end
 
 _fin_from_l(lo::Float64, hi::Float64, islog::Bool) =
@@ -222,18 +225,18 @@ function _fin_grid_extent(fields, letter::Char, islog::Bool, n::Int, bricks::Boo
 	coords isa Tuple && (coords = collect(coords))
 	scaled = _fin_string(get(fields, Symbol(letter, "type"), nothing)) == "scaled"
 	if !scaled && coords isa AbstractVector && length(coords) >= 2
-		c = _fin_lvalues(coords, islog)
-		c === nothing && return :unsupported
-		m = length(c)
+		_fin_all_lvalues(coords, islog) || return :unsupported
+		m = length(coords)
+		c(k) = _fin_lvalue_at(coords, k, islog)
 		if !bricks
-			first_l, last_l = c[1], c[min(m, n)]
+			first_l, last_l = c(1), c(min(m, n))
 		elseif m >= n + 1
-			first_l, last_l = c[1], c[n + 1]
+			first_l, last_l = c(1), c(n + 1)
 		else
-			first_l = 1.5 * c[1] - 0.5 * c[2]
-			last_l = 1.5 * c[m] - 0.5 * c[m - 1]
+			first_l = 1.5 * c(1) - 0.5 * c(2)
+			last_l = 1.5 * c(m) - 0.5 * c(m - 1)
 			if m < n
-				step = last_l - 0.5 * (c[m - 1] + c[m])
+				step = last_l - 0.5 * (c(m - 1) + c(m))
 				last_l += step * (n - m)
 			end
 		end
