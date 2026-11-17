@@ -1858,6 +1858,9 @@ for (f, _) in vcat(PlotlyBase._layout_obj_updaters, PlotlyBase._layout_vector_up
 		with::PlotlyBase.PlotlyAttribute = attr();
 		kwargs...,
 	)
+		# `row`/`col`/`secondary_y`/`inset`/`show` would become layout
+		# attributes (Y31).
+		_verb_reject_cell_keywords($(String(f)), kwargs)
 		return _mutate_and_refresh_syncplot!(
 			sp;
 			mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -1870,31 +1873,51 @@ for (f, _) in vcat(PlotlyBase._layout_obj_updaters, PlotlyBase._layout_vector_up
 	end
 end
 
+# PlotlyBase's shape/image verbs on a Plot or SyncPlot. `row`/`col` keep
+# PlotlyBase's grid selection ("all", an index or a vector of indices) but are
+# validated first: PlotlyBase only logs a bad string, raises a bare error for
+# an index past the grid and places items on non-Cartesian cells with
+# nonsense axis references. `show`, `secondary_y`, `inset`, `xref`/`yref`
+# (set from the cell) and bad coordinates are ArgumentErrors; PlotlyBase wrote
+# them into the shape (G26). Everything is validated before the figure
+# changes.
 for f in (:add_hrect!, :add_hline!, :add_vrect!, :add_vline!, :add_shape!, :add_layout_image!)
-	@eval function PlotlyBase.$f(sp::SyncPlot, args...; kwargs...)
+	who = String(f)
+	@eval function PlotlyBase.$f(sp::SyncPlot, args...; row = "all", col = "all", kwargs...)
+		_verb_reject_cell_keywords($who, kwargs)
+		key, direction, items = _verb_layout_items($(QuoteNode(f)), $who, args, kwargs)
+		_verb_plot_cell_refs(sp.plot, row, col, $who)
 		return _mutate_and_refresh_syncplot!(
 			sp;
 			mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
 		) do current
-			PlotlyBase.$f(current.layout, args...; kwargs...)
+			targets = _verb_plot_cell_refs(current, row, col, $who)
+			_verb_append_layout_items!(current.layout, key, direction, items, targets)
 		end
 	end
 
 	@eval function PlotlyBase.$f(
 		p::_RefreshablePlot,
 		args...;
+		row = "all",
+		col = "all",
 		kwargs...,
 	)
+		_verb_reject_cell_keywords($who, kwargs)
+		key, direction, items = _verb_layout_items($(QuoteNode(f)), $who, args, kwargs)
+		_verb_plot_cell_refs(p, row, col, $who)
 		return _transactional_full_plot_mutation!(
 			p;
 			mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
 		) do current
-			PlotlyBase.$f(current.layout, args...; kwargs...)
+			targets = _verb_plot_cell_refs(current, row, col, $who)
+			_verb_append_layout_items!(current.layout, key, direction, items, targets)
 		end
 	end
 end
 
 function PlotlyBase.add_recession_bands!(sp::SyncPlot; kwargs...)
+	_verb_reject_cell_keywords("add_recession_bands!", kwargs)
 	new_shapes = Ref{Any}(nothing)
 	_mutate_and_refresh_syncplot!(
 		sp;
@@ -1920,6 +1943,7 @@ function PlotlyBase.add_recession_bands!(
 	p::_RefreshablePlot;
 	kwargs...,
 )
+	_verb_reject_cell_keywords("add_recession_bands!", kwargs)
 	new_shapes = Ref{Any}(nothing)
 	_transactional_full_plot_mutation!(
 		p;
@@ -2347,63 +2371,96 @@ active cell. A `SubplotFigure` call returns `sf`.
 """
 add_trace!
 
+const _VERB_PLOT_CELLS_DOC = """
+On a `Plot` or [`SyncPlot`](@ref), `row`/`col` select cells of its subplot
+grid: `"all"` (the default), an index or a vector of indices; the item is
+added once per selected Cartesian (x/y) cell, on that cell's axes (blank and
+non-Cartesian cells are skipped). An index outside the grid, a single
+non-Cartesian cell, `show`, `secondary_y`, `inset`, `xref`/`yref` (set from
+the cell) and invalid coordinates are `ArgumentError`s, and the figure is left
+unchanged. On a [`SubplotFigure`](@ref) the call targets the active cell (or
+`row`/`col`, `secondary_y`, `inset`); see that method's documentation.
+"""
+
 """
 	add_shape!(p, shape; row = "all", col = "all")
 
-Add a layout [`Shape`](@ref) to `p`. `row`/`col` restrict the shape to a
-subplot cell; `"all"` applies it to every cell. Returns `p`.
+Add a layout [`Shape`](@ref) (or `attr(...)`, or a vector of them) to `p` in
+data coordinates of the selected cells' axes; an `xref`/`yref` of `"paper"`
+or `"… domain"` on the shape becomes a fraction of each cell. Returns `p`.
+
+$(_VERB_PLOT_CELLS_DOC)
 """
 add_shape!
 
 """
 	add_hline!(p, y; row = "all", col = "all", kwargs...)
 
-Add a horizontal line [`Shape`](@ref) at `y` to `p`. `row`/`col` restrict it
-to a subplot cell. Returns `p`.
+Add a horizontal line [`Shape`](@ref) at data value `y` (a vector adds one
+line per entry) across the full width of each selected cell; `kwargs` are
+shape attributes (`line_color`, `line_dash`, ...). Returns `p`.
+
+$(_VERB_PLOT_CELLS_DOC)
 """
 add_hline!
 
 """
 	add_vline!(p, x; row = "all", col = "all", kwargs...)
 
-Add a vertical line [`Shape`](@ref) at `x` to `p`. `row`/`col` restrict it to
-a subplot cell. Returns `p`.
+Add a vertical line [`Shape`](@ref) at data value `x` (a vector adds one line
+per entry) across the full height of each selected cell; `kwargs` are shape
+attributes. Returns `p`.
+
+$(_VERB_PLOT_CELLS_DOC)
 """
 add_vline!
 
 """
 	add_hrect!(p, y0, y1; row = "all", col = "all", kwargs...)
 
-Add a horizontal rectangle [`Shape`](@ref) spanning `y0`–`y1` (full x-range)
-to `p`. `row`/`col` restrict it to a subplot cell. Returns `p`.
+Add a horizontal band [`Shape`](@ref) between data values `y0` and `y1`
+across the full width of each selected cell; `kwargs` are shape attributes
+(`fillcolor`, `opacity`, `line_width`, ...). Returns `p`.
+
+$(_VERB_PLOT_CELLS_DOC)
 """
 add_hrect!
 
 """
 	add_vrect!(p, x0, x1; row = "all", col = "all", kwargs...)
 
-Add a vertical rectangle [`Shape`](@ref) spanning `x0`–`x1` (full y-range) to
-`p`. `row`/`col` restrict it to a subplot cell. Returns `p`.
+Add a vertical band [`Shape`](@ref) between data values `x0` and `x1` across
+the full height of each selected cell; `kwargs` are shape attributes.
+Returns `p`.
+
+$(_VERB_PLOT_CELLS_DOC)
 """
 add_vrect!
 
 """
 	add_layout_image!(p, image; row = "all", col = "all")
 
-Add a layout image (e.g. `attr(source = "...", x = ..., y = ...)`) to `p`.
-`row`/`col` restrict it to a subplot cell. Returns `p`.
+Add a layout image (e.g. `attr(source = "...", x = 0, y = 1, sizex = 0.3,
+sizey = 0.3, xanchor = "left", yanchor = "top")`) to `p`, with `x`, `y`,
+`sizex`, `sizey` as fractions of each selected cell's plot area. Returns `p`.
+
+$(_VERB_PLOT_CELLS_DOC)
 """
 add_layout_image!
 
 """
 	add_recession_bands!(p; kwargs...)
+	add_recession_bands!(sf::SubplotFigure; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Shade US recession bands (vertical spans) on a time-series `Plot` or
 [`SyncPlot`](@ref); `kwargs` are forwarded to the generated band shapes.
+`show`, `row`, `col`, `secondary_y` and `inset` are `ArgumentError`s on a
+`Plot`/`SyncPlot` (it has no cells to select).
 
 Returns the layout's complete shape vector after the update (existing shapes
 followed by the new bands), or `nothing`, leaving the figure unchanged, when no
-trace has date `x` values.
+trace has date `x` values. The [`SubplotFigure`](@ref) method marks the
+selected cells and returns `sf`; see its own documentation.
 """
 add_recession_bands!
 

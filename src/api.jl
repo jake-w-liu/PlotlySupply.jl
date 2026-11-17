@@ -702,8 +702,10 @@ function _transactional_subplot_mutation!(
 		mutation = function (candidate)
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
+			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate))
 			result[] =
 				mutator(staged, args...; kwargs...)
+			_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
 			_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
 			return nothing
 		end
@@ -731,6 +733,240 @@ function _transactional_subplot_mutation!(
 	finally
 		unlock(metadata_lock)
 	end
+end
+
+# ── Shared-axis (`matches`) groups ─────────────────────────────────────────
+#
+# plotly.js (2.35.2, render probes for G61) draws every axis of a `matches`
+# group over the ROOT's range, ignores a range or autorange written on a
+# follower, and drops `matches` from an axis whose type differs from the
+# root's (a log cell next to a linear cell stops being shared and is drawn
+# with its own range). A SubplotFigure call that changes one axis of a group
+# therefore acts on the group (`_subplot_match_sync!`, run on the staged
+# figure after every SubplotFigure mutation and before `_finalize_figure!`):
+#
+# - the group-wide attributes (`_SUBPLOT_MATCH_SHARED_KEYS`: axis type, tick
+#   placement and tick-label format) changed on one member are copied to every
+#   member (the root's change wins over a follower's);
+# - a `range`/`autorange` changed on a follower moves to the root; a range set
+#   without an `autorange` makes the root state `autorange = false` (the
+#   `autorange = true` `_finalize_figure!` gives group roots would override
+#   it), a range removed without one makes it autorange again;
+# - an axis title set on a member whose tick labels are hidden moves to the
+#   member that shows the group's tick labels in the same column (x) or row
+#   (y): that is where the shared axis is labelled.
+#
+# Axes that overlay another axis (secondary axes, twins) are never members.
+# Nothing is written when the call changed nothing in a group.
+
+const _SUBPLOT_MATCH_SHARED_KEYS = (
+	:type,
+	:exponentformat,
+	:showexponent,
+	:tickmode,
+	:tickvals,
+	:ticktext,
+	:tick0,
+	:dtick,
+	:nticks,
+	:tickformat,
+	:tickprefix,
+	:ticksuffix,
+	:separatethousands,
+	:tickangle,
+	:tickfont,
+	:categoryorder,
+	:categoryarray,
+	:minor,
+)
+const _SUBPLOT_MATCH_RANGE_KEYS = (:range, :autorange)
+const _SUBPLOT_MATCH_TRACKED_KEYS = (
+	_SUBPLOT_MATCH_SHARED_KEYS...,
+	_SUBPLOT_MATCH_RANGE_KEYS...,
+	:title,
+)
+
+# Marks an attribute an axis does not state (distinct from every stored value).
+struct _SubplotMatchAbsent end
+
+struct _SubplotMatchSnapshot
+	# root => members, root first, then the followers in axis-index order
+	groups::Vector{Pair{Symbol, Vector{Symbol}}}
+	# member => tracked attribute => canonical value
+	values::Dict{Symbol, Dict{Symbol, Any}}
+end
+
+function _subplot_match_value(axis, name::Symbol)
+	value = _cmn_mapping_get(axis, name)
+	return value === nothing ? _SubplotMatchAbsent() : _legend_canonical(value)
+end
+
+_subplot_match_axis_order(key::Symbol) =
+	(String(key)[1], something(tryparse(Int, String(key)[6:end]), 1))
+
+_subplot_match_overlays(axis) = _cmn_mapping_get(axis, :overlaying) !== nothing
+
+# The `matches` groups of `fields` (a layout's fields): root => members. A
+# chain to an axis the layout does not hold, a cyclic chain and axes that
+# overlay another axis are skipped (plotly.js ignores such references).
+function _subplot_match_groups(fields::AbstractDict)
+	groups = Dict{Symbol, Vector{Symbol}}()
+	for (key, axis) in fields
+		(key isa Symbol && _fin_is_axis_key(key)) || continue
+		_fin_axis_key(_fin_field(axis, :matches)) === nothing && continue
+		_subplot_match_overlays(axis) && continue
+		root = _fin_match_root(fields, key)
+		(root === nothing || root === key || !haskey(fields, root)) && continue
+		_subplot_match_overlays(fields[root]) && continue
+		push!(get!(() -> Symbol[], groups, root), key)
+	end
+	ordered = Pair{Symbol, Vector{Symbol}}[]
+	for root in sort!(collect(keys(groups)); by = _subplot_match_axis_order)
+		followers = sort!(groups[root]; by = _subplot_match_axis_order)
+		push!(ordered, root => Symbol[root; followers])
+	end
+	return ordered
+end
+
+# The tracked attributes of every shared-axis group of `p` before a mutation;
+# `nothing` when the figure has no group (the sync is then skipped).
+function _subplot_match_snapshot(p::Plot)
+	fields = p.layout.fields
+	groups = _subplot_match_groups(fields)
+	isempty(groups) && return nothing
+	values = Dict{Symbol, Dict{Symbol, Any}}()
+	for (_, members) in groups, member in members
+		axis = get(fields, member, nothing)
+		values[member] = Dict{Symbol, Any}(
+			name => _subplot_match_value(axis, name) for name in _SUBPLOT_MATCH_TRACKED_KEYS
+		)
+	end
+	return _SubplotMatchSnapshot(groups, values)
+end
+
+# Write `value` (`_SubplotMatchAbsent()`: delete) as attribute `name` of axis
+# `key`, replacing a nested value wholesale.
+function _subplot_match_write!(p::Plot, key::Symbol, name::Symbol, value)
+	if value isa _SubplotMatchAbsent
+		_cmn_delete_layout_fields!(p, key, (name,))
+	else
+		_cmn_merge_layout_key!(p, key, Dict{Symbol, Any}(name => deepcopy(value)))
+	end
+	return nothing
+end
+
+_subplot_match_raw(axis, name::Symbol) =
+	something(_cmn_mapping_get(axis, name), _SubplotMatchAbsent())
+
+# Position of axis `key` across its own direction: the start of the domain of
+# the axis it is anchored to (an x axis sits at the bottom of its y axis'
+# domain, a y axis at the left of its x axis' domain).
+function _subplot_match_cross_position(layout::Layout, key::Symbol)
+	anchor = _fin_axis_key(_fin_string(_cmn_mapping_get(get(layout.fields, key, nothing), :anchor)))
+	anchor === nothing && return nothing
+	domain = _layout_axis_domain(layout, anchor)
+	return domain === nothing ? nothing : domain[1]
+end
+
+# The member of `members` that shows the group's tick labels next to `member`:
+# its domain overlaps `member`'s and it is the lowest (x) or left-most (y) such
+# member with visible tick labels; `nothing` if there is none.
+function _subplot_match_label_axis(layout::Layout, members, member::Symbol)
+	own = _layout_axis_domain(layout, member)
+	own === nothing && return nothing
+	best = nothing
+	best_position = Inf
+	for other in members
+		other === member && continue
+		_cmn_mapping_get(get(layout.fields, other, nothing), :showticklabels) === false && continue
+		domain = _layout_axis_domain(layout, other)
+		domain === nothing && continue
+		# 1e-9: domains are paper fractions; touching cells do not overlap.
+		min(own[2], domain[2]) - max(own[1], domain[1]) > 1e-9 || continue
+		position = _subplot_match_cross_position(layout, other)
+		position === nothing && continue
+		if position < best_position
+			best = other
+			best_position = position
+		end
+	end
+	return best
+end
+
+"""
+	_subplot_match_sync!(p::Plot, snapshot)
+
+Make the changes a SubplotFigure call made to the axes of a shared-axis
+(`matches`) group act on the group (see the comment above
+`_SUBPLOT_MATCH_SHARED_KEYS`). `snapshot` is `_subplot_match_snapshot(p)`
+taken before the call; `nothing` is a no-op.
+"""
+function _subplot_match_sync!(p::Plot, snapshot::Union{Nothing, _SubplotMatchSnapshot})
+	snapshot === nothing && return nothing
+	layout = p.layout
+	fields = layout.fields
+	for (root, members) in snapshot.groups
+		all(member -> haskey(fields, member), members) || continue
+		changed = Dict{Symbol, Vector{Symbol}}()
+		for member in members, name in _SUBPLOT_MATCH_TRACKED_KEYS
+			before = snapshot.values[member][name]
+			isequal(before, _subplot_match_value(fields[member], name)) && continue
+			push!(get!(() -> Symbol[], changed, name), member)
+		end
+		isempty(changed) && continue
+
+		# Group-wide attributes: the first member that changed one (the root
+		# when it did) is the source for every member.
+		for name in _SUBPLOT_MATCH_SHARED_KEYS
+			sources = get(changed, name, nothing)
+			sources === nothing && continue
+			source = first(sources)
+			value = _subplot_match_raw(fields[source], name)
+			canonical = _subplot_match_value(fields[source], name)
+			for member in members
+				member === source && continue
+				isequal(_subplot_match_value(fields[member], name), canonical) && continue
+				_subplot_match_write!(p, member, name, value)
+			end
+		end
+
+		# Range and autorange live on the root.
+		range_sources = get(changed, :range, nothing)
+		autorange_sources = get(changed, :autorange, nothing)
+		for (name, sources) in ((:range, range_sources), (:autorange, autorange_sources))
+			sources === nothing && continue
+			source = first(sources)
+			source === root ||
+				_subplot_match_write!(p, root, name, _subplot_match_raw(fields[source], name))
+			for member in sources
+				member === root && continue
+				_subplot_match_write!(p, member, name, _SubplotMatchAbsent())
+			end
+		end
+		if range_sources !== nothing && autorange_sources === nothing
+			root_axis = fields[root]
+			autorange = _cmn_mapping_get(root_axis, :autorange)
+			if _cmn_mapping_get(root_axis, :range) === nothing
+				autorange === false && _subplot_match_write!(p, root, :autorange, true)
+			else
+				autorange === false || _subplot_match_write!(p, root, :autorange, false)
+			end
+		end
+
+		# A title on an axis with hidden tick labels labels the group's axis.
+		title_sources = get(changed, :title, nothing)
+		title_sources === nothing && continue
+		for member in title_sources
+			_cmn_mapping_get(fields[member], :showticklabels) === false || continue
+			title = _cmn_mapping_get(fields[member], :title)
+			title === nothing && continue
+			target = _subplot_match_label_axis(layout, members, member)
+			target === nothing && continue
+			_subplot_match_write!(p, target, :title, title)
+			_subplot_match_write!(p, member, :title, _SubplotMatchAbsent())
+		end
+	end
+	return nothing
 end
 
 function _symbol_dict(x)
@@ -2508,6 +2744,20 @@ end
 
 const _SUBPLOTS_START_CELLS = ("top-left", "bottom-left")
 
+# A grid title (`subplot_titles`, `column_titles`, `row_titles`, `x_title`,
+# `y_title`) as the text plotly renders: the mathtext layer (`_label`) keeps
+# the text around `$…$` math and turns newlines into line breaks. A label the
+# layer rejects (an odd number of `$`, an HTML tag next to math, ...) is an
+# ArgumentError naming the keyword.
+function _subplots_title_label(text::AbstractString, name::AbstractString)
+	return try
+		_label(text)
+	catch err
+		err isa ArgumentError || rethrow()
+		throw(ArgumentError("subplots: `$(name)` entry $(repr(text)): $(err.msg)"))
+	end
+end
+
 # Validated relative sizes for `height_ratios` / `width_ratios`: `count`
 # positive finite reals, returned as Float64 in the caller's order.
 function _subplots_checked_ratios(ratios, count::Int, name::AbstractString)
@@ -2571,7 +2821,12 @@ function _subplots_grid_kwargs(
 	# PlotlyBase types `subplot_titles` as a Matrix of String/missing; accept
 	# plotly.py's flat list (a Vector, read in row-major order) and
 	# loosely-typed containers, and reject anything else with an ArgumentError
-	# rather than a conversion MethodError.
+	# rather than a conversion MethodError. Every grid title is a text label
+	# plotly typesets with MathJax, so it goes through the mathtext layer
+	# (`_label`) like `title!` and the axis titles: mixed text and `$…$` math
+	# keeps its text (G25).
+	haskey(grid, :subplot_titles) && grid[:subplot_titles] === missing &&
+		delete!(grid, :subplot_titles)
 	if haskey(grid, :subplot_titles)
 		titles = grid[:subplot_titles]
 		(titles isa AbstractVecOrMat &&
@@ -2581,9 +2836,34 @@ function _subplots_grid_kwargs(
 				"(`missing` skips a cell); got $(repr(titles)).",
 			))
 		as_matrix = titles isa AbstractVector ? reshape(collect(titles), 1, :) : collect(titles)
+		labelled = map(t -> t === missing ? missing : _subplots_title_label(t, "subplot_titles"), as_matrix)
 		grid[:subplot_titles] = any(ismissing, as_matrix) ?
-			Matrix{Union{Missing, String}}(map(t -> t === missing ? missing : String(t), as_matrix)) :
-			Matrix{String}(map(String, as_matrix))
+			Matrix{Union{Missing, String}}(labelled) :
+			Matrix{String}(labelled)
+	end
+	for (name, count, unit) in ((:column_titles, cols, "column"), (:row_titles, rows, "row"))
+		haskey(grid, name) && grid[name] === missing && delete!(grid, name)
+		haskey(grid, name) || continue
+		titles = grid[name]
+		(titles isa AbstractVector && all(t -> t isa AbstractString, titles)) ||
+			throw(ArgumentError(
+				"subplots: `$(name)` must be a vector of strings, one per $(unit) " *
+				"(\"\" for none); got $(repr(titles)).",
+			))
+		length(titles) == count || throw(ArgumentError(
+			"subplots: `$(name)` needs one entry per $(unit) ($(count)); got " *
+			"$(length(titles)).",
+		))
+		grid[name] = String[_subplots_title_label(t, String(name)) for t in titles]
+	end
+	for name in (:x_title, :y_title)
+		haskey(grid, name) && grid[name] === missing && delete!(grid, name)
+		haskey(grid, name) || continue
+		title = grid[name]
+		title isa AbstractString || throw(ArgumentError(
+			"subplots: `$(name)` must be a string; got $(repr(title)).",
+		))
+		grid[name] = _subplots_title_label(title, String(name))
 	end
 	if height_ratios !== nothing
 		haskey(grid, :row_heights) && throw(ArgumentError(
@@ -3013,7 +3293,10 @@ end
 # be driven like a Plot/SyncPlot. The fig-level methods already handle the
 # Electron refresh and their own transactions; `sf` is returned so calls remain
 # chainable on the subplot. These verbs address traces by index or the whole
-# layout, so they take no `row`/`col`.
+# layout, so they take no `row`/`col`: a cell keyword (`row`, `col`,
+# `secondary_y`, `inset`) or `show` is an ArgumentError naming the verb, where
+# PlotlyBase would have written it into the layout or traces as an attribute
+# (or failed with a MethodError).
 for f in (
 	:relayout!,
 	:react!,
@@ -3026,6 +3309,7 @@ for f in (
 	:prependtraces!,
 )
 	@eval function PlotlyBase.$f(sf::SubplotFigure, args...; kwargs...)
+		_verb_reject_cell_keywords($(String(f)), kwargs; whole_figure = true)
 		PlotlyBase.$f(getfield(sf, :fig), args...; kwargs...)
 		return sf
 	end
@@ -3395,6 +3679,510 @@ for (updater, vector_key) in (
 			)
 		end
 	end
+end
+
+# ── PlotlyBase shape/image verbs: add_hline!, add_vline!, add_hrect!,
+# add_vrect!, add_shape!, add_layout_image!, add_recession_bands! ──────────
+#
+# PlotlyBase writes every keyword of these verbs into the new shape, so a
+# `show`, `secondary_y` or `inset` keyword silently became a junk attribute,
+# and it has no SubplotFigure methods (G26). The helpers below are shared by
+# the SubplotFigure methods (here) and the Plot/SyncPlot methods
+# (plotlyjs_compat.jl): they validate the call before anything changes and
+# place the items on the axes of the selected cells.
+
+# Keywords that select a SubplotFigure cell (or ask for a window). PlotlyBase's
+# layout updaters and shape verbs on a Plot/SyncPlot would write them as
+# attributes (`xaxis.row = 1`), so they are rejected there (Y31).
+const _VERB_CELL_KEYWORDS = (:row, :col, :secondary_y, :inset)
+
+function _verb_reject_show(who::AbstractString, kwargs)
+	haskey(kwargs, :show) && throw(ArgumentError(
+		"$(who): figure verbs do not take `show`; display the figure with " *
+		"`display(fig)` (or create it with `show = true`).",
+	))
+	return nothing
+end
+
+"""
+	_verb_reject_cell_keywords(who, kwargs; allow = (), whole_figure = false)
+
+Throw an `ArgumentError` prefixed with `who` when `kwargs` holds `show` or a
+SubplotFigure cell keyword (`row`, `col`, `secondary_y`, `inset`) that is not
+listed in `allow`. The Plot/SyncPlot methods of the PlotlyBase layout updaters
+(`update_xaxes!`, ..., `update_images!`) call it first: PlotlyBase would write
+these keywords into the layout as attributes. `whole_figure = true` words the
+error for a SubplotFigure verb that acts on the whole figure (`relayout!`,
+`restyle!`, ...).
+"""
+function _verb_reject_cell_keywords(who::AbstractString, kwargs; allow = (), whole_figure::Bool = false)
+	_verb_reject_show(who, kwargs)
+	for key in _VERB_CELL_KEYWORDS
+		key in allow && continue
+		haskey(kwargs, key) || continue
+		throw(ArgumentError(
+			whole_figure ?
+				"$(who): `$(key)` selects a cell, but `$(who)` acts on the whole " *
+				"SubplotFigure (traces by index, layout by attribute path); use " *
+				"the cell-aware verbs (`update_xaxes!(sf; row, col, ...)`, " *
+				"`plot_*!(sf, ...; row, col)`, ...) to address one cell." :
+				"$(who): `$(key)` selects a cell of a SubplotFigure (see " *
+				"`subplots`); a Plot or SyncPlot has no cells to select, and " *
+				"PlotlyBase would write `$(key)` into the layout as an attribute.",
+		))
+	end
+	return nothing
+end
+
+# Layout vector and placement of each verb (PlotlyBase's directions): 'h' spans
+# the cell horizontally (x as a fraction of the axis domain, y in data), 'v'
+# vertically, 'X' places the item in data coordinates on both axes (a "paper"
+# or "<axis> domain" reference of the item becomes a fraction of the cell),
+# 'I' places it in domain fractions of both axes.
+const _VERB_LAYOUT_ITEM_VERBS = (
+	(:add_hline!, :shapes, 'h', ("y",)),
+	(:add_vline!, :shapes, 'v', ("x",)),
+	(:add_hrect!, :shapes, 'h', ("y0", "y1")),
+	(:add_vrect!, :shapes, 'v', ("x0", "x1")),
+	(:add_shape!, :shapes, 'X', ("shape",)),
+	(:add_layout_image!, :images, 'I', ("image",)),
+)
+
+function _verb_item_spec(verb::Symbol)
+	for spec in _VERB_LAYOUT_ITEM_VERBS
+		spec[1] === verb && return spec
+	end
+	throw(ArgumentError("unknown layout item verb `$(verb)`."))
+end
+
+# A coordinate of add_hline!/add_vline!/add_hrect!/add_vrect!: a finite number,
+# a date/category value (String, Date, ...) or a non-empty vector of them (one
+# item per entry, as PlotlyBase's `hline`/`rect` build). `nothing`, `missing`,
+# Bool and non-finite numbers would draw nothing or garbage.
+function _verb_check_coordinate(value, name::AbstractString, who::AbstractString)
+	values = value isa AbstractVector ? value : (value,)
+	value isa AbstractVector && isempty(value) && throw(ArgumentError(
+		"$(who): `$(name)` is an empty vector; pass at least one coordinate.",
+	))
+	for v in values
+		bad = v === nothing || v === missing || v isa Bool ||
+			(v isa Real && !isfinite(v)) || v isa AbstractVector
+		bad && throw(ArgumentError(
+			"$(who): `$(name)` must be a finite number, a date/category value " *
+			"or a vector of them; got $(repr(value)).",
+		))
+	end
+	return nothing
+end
+
+function _verb_check_item(item, who::AbstractString)
+	if item isa AbstractDict
+		return PlotlyBase.PlotlyAttribute(Dict{Symbol, Any}(Symbol(k) => v for (k, v) in item))
+	end
+	(item isa PlotlyBase.Shape || item isa PlotlyBase.PlotlyAttribute) || throw(ArgumentError(
+		"$(who): expected a `Shape` (`rect(...)`, `line(...)`, `circle(...)`, " *
+		"`path(...)`), an `attr(...)` or a vector of them; got $(typeof(item)).",
+	))
+	return item
+end
+
+# The items a verb adds, built and validated before anything changes:
+# returns (layout key, direction, items). `args` are the verb's positional
+# arguments after the figure; `kwargs` its attribute keywords.
+function _verb_layout_items(verb::Symbol, who::AbstractString, args, kwargs)
+	_, key, direction, names = _verb_item_spec(verb)
+	length(args) == length(names) || throw(ArgumentError(
+		"$(who): expected $(length(names)) positional argument(s) after the " *
+		"figure ($(join(names, ", "))); got $(length(args)).",
+	))
+	_verb_reject_show(who, kwargs)
+	for ref in (:xref, :yref)
+		haskey(kwargs, ref) && throw(ArgumentError(
+			"$(who): `$(ref)` is set from the target cell's axes; select the " *
+			"cell with `row`/`col` (SubplotFigure: also `secondary_y`, `inset`).",
+		))
+	end
+	base = if verb === :add_shape! || verb === :add_layout_image!
+		isempty(kwargs) || throw(ArgumentError(
+			"$(who): unsupported keyword argument(s) " *
+			"$(join(("`$(k)`" for k in keys(kwargs)), ", ")); set the attributes " *
+			"on the $(verb === :add_shape! ? "shape" : "image") itself.",
+		))
+		args[1]
+	else
+		for (value, name) in zip(args, names)
+			_verb_check_coordinate(value, name, who)
+		end
+		if verb === :add_hline!
+			PlotlyBase.hline(args[1]; kwargs...)
+		elseif verb === :add_vline!
+			PlotlyBase.vline(args[1]; kwargs...)
+		elseif verb === :add_hrect!
+			PlotlyBase.rect(0, 1, args[1], args[2]; kwargs...)
+		else
+			PlotlyBase.rect(args[1], args[2], 0, 1; kwargs...)
+		end
+	end
+	raw = base isa AbstractVector ? base : (base,)
+	isempty(raw) && throw(ArgumentError("$(who): nothing to add (an empty vector)."))
+	items = Any[_verb_check_item(item, who) for item in raw]
+	return key, direction, items
+end
+
+_verb_domain_ref(current, axis::AbstractString) =
+	(current isa AbstractString && (current == "paper" || endswith(current, " domain"))) ?
+		axis * " domain" : String(axis)
+
+# Copies of `items` placed on the axes `xref`/`yref` ("x2", "y3", ...).
+function _verb_place_items(items, direction::Char, xref::AbstractString, yref::AbstractString)
+	placed = Vector{Any}(undef, length(items))
+	for (index, item) in enumerate(items)
+		copy_item = deepcopy(item)
+		fields = copy_item.fields
+		if direction == 'h'
+			fields[:xref] = xref * " domain"
+			fields[:yref] = String(yref)
+		elseif direction == 'v'
+			fields[:xref] = String(xref)
+			fields[:yref] = yref * " domain"
+		elseif direction == 'I'
+			fields[:xref] = xref * " domain"
+			fields[:yref] = yref * " domain"
+		else
+			fields[:xref] = _verb_domain_ref(get(fields, :xref, nothing), xref)
+			fields[:yref] = _verb_domain_ref(get(fields, :yref, nothing), yref)
+		end
+		placed[index] = copy_item
+	end
+	return placed
+end
+
+# Append the items, placed on every (xref, yref) target, to `layout.<key>`.
+# The layout vector is replaced, never mutated in place (a staged figure may
+# share it with the live one).
+function _verb_append_layout_items!(layout::Layout, key::Symbol, direction::Char, items, targets)
+	existing = get(layout.fields, key, nothing)
+	combined = Any[]
+	if existing isa AbstractVector
+		append!(combined, existing)
+	elseif existing !== nothing
+		push!(combined, existing)
+	end
+	for (xref, yref) in targets
+		append!(combined, _verb_place_items(items, direction, xref, yref))
+	end
+	layout.fields[key] = combined
+	return layout
+end
+
+# PlotlyBase `row`/`col` of a Plot: "all" (or `:`), an index or a vector of
+# indices into its subplot grid.
+function _verb_plot_indices(value, count::Int, name::AbstractString, who::AbstractString)
+	(value isa Colon || (value isa AbstractString && value == "all")) && return collect(1:count)
+	ok(i) = i isa Integer && !(i isa Bool) && 1 <= i <= count
+	value isa Integer && ok(value) && return [Int(value)]
+	value isa AbstractVector && !isempty(value) && all(ok, value) && return Int[v for v in value]
+	throw(ArgumentError(
+		"$(who): `$(name)` must be \"all\", an integer in 1:$(count) or a " *
+		"vector of them (the figure's subplot grid has $(count) " *
+		"$(name == "row" ? "row" : "column")(s)); got $(repr(value)).",
+	))
+end
+
+# (xref, yref) of the Cartesian cells of a Plot's subplot grid that PlotlyBase's
+# `row`/`col` select (column-major, as PlotlyBase iterates them). Blank and
+# non-Cartesian cells are skipped when several cells are selected and are an
+# ArgumentError when the call names exactly that cell.
+function _verb_plot_cell_refs(p::Plot, row, col, who::AbstractString)
+	grid_ref = p.layout.subplots.grid_ref
+	rows = _verb_plot_indices(row, size(grid_ref, 1), "row", who)
+	cols = _verb_plot_indices(col, size(grid_ref, 2), "col", who)
+	single = length(rows) == 1 && length(cols) == 1 && row isa Integer && col isa Integer
+	targets = Tuple{String, String}[]
+	for c in cols, r in rows
+		if !isassigned(grid_ref, r, c) || isempty(grid_ref[r, c])
+			single && throw(ArgumentError("$(who): subplot cell ($(r), $(c)) is empty."))
+			continue
+		end
+		ref = first(grid_ref[r, c])
+		kind = String(ref.subplot_kind)
+		if kind != "xy" || length(ref.layout_keys) < 2
+			single && throw(ArgumentError(
+				"$(who): subplot cell ($(r), $(c)) is a '$(kind)' cell; shapes " *
+				"and images need Cartesian x/y axes.",
+			))
+			continue
+		end
+		refs = ref.trace_kwargs.fields
+		push!(targets, (
+			String(get(refs, :xaxis, _fin_axis_ref(ref.layout_keys[1]))),
+			String(get(refs, :yaxis, _fin_axis_ref(ref.layout_keys[2]))),
+		))
+	end
+	isempty(targets) && throw(ArgumentError(
+		"$(who): no Cartesian (x/y) cell matches row = $(repr(row)), col = $(repr(col)).",
+	))
+	return targets
+end
+
+# Validated SubplotFigure `row`/`col` value: `nothing`, an integer or "all".
+function _verb_subplot_selector(value, name::AbstractString, who::AbstractString)
+	(value === nothing || (value isa Integer && !(value isa Bool))) && return value
+	value isa AbstractString && value == "all" && return value
+	throw(ArgumentError(
+		"$(who): `$(name)` must be an integer, \"all\" or `nothing` (the " *
+		"active cell); got $(repr(value)).",
+	))
+end
+
+# Targets (`_CellTarget`s, all Cartesian) of a SubplotFigure verb and the cell
+# that becomes active (`nothing` for "all"): the active cell, the cell
+# `row`/`col` (its secondary y axis with `secondary_y`), inset `inset`, or with
+# "all" every Cartesian cell of the selected rows/columns (blank cells, cells
+# of other kinds and, with `secondary_y`, cells without a secondary y axis are
+# skipped).
+function _verb_subplot_targets(sf::SubplotFigure, row, col, secondary_y::Bool, inset, who::AbstractString)
+	row = _verb_subplot_selector(row, "row", who)
+	col = _verb_subplot_selector(col, "col", who)
+	if row isa AbstractString || col isa AbstractString
+		(row === nothing || col === nothing) && throw(ArgumentError(
+			"$(who): `row` and `col` must be provided together.",
+		))
+		inset === nothing || throw(ArgumentError(
+			"$(who): `inset` selects one inset; it cannot be combined with " *
+			"`row`/`col` = \"all\".",
+		))
+		rows = row isa AbstractString ? (1:sf.rows) : (row,)
+		cols = col isa AbstractString ? (1:sf.cols) : (col,)
+		row isa Integer && !(1 <= row <= sf.rows) && throw(ArgumentError(
+			"$(who): `row` must be in 1:$(sf.rows); got $(row).",
+		))
+		col isa Integer && !(1 <= col <= sf.cols) && throw(ArgumentError(
+			"$(who): `col` must be in 1:$(sf.cols); got $(col).",
+		))
+		grid_ref = _plot_obj(sf.fig).layout.subplots.grid_ref
+		targets = _CellTarget[]
+		for r in rows, c in cols
+			(isassigned(grid_ref, r, c) && !isempty(grid_ref[r, c])) || continue
+			refs = grid_ref[r, c]
+			String(first(refs).subplot_kind) == "xy" || continue
+			secondary_y && length(refs) < 2 && continue
+			push!(targets, _cell_target(sf; row = r, col = c, secondary_y = secondary_y, who = who))
+		end
+		isempty(targets) && throw(ArgumentError(
+			"$(who): no Cartesian (x/y) cell$(secondary_y ? " with a secondary y axis" : "") " *
+			"matches row = $(repr(row)), col = $(repr(col)).",
+		))
+		return targets, nothing
+	end
+	t = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, inset = inset, who = who)
+	t.kind === :xy || throw(ArgumentError(
+		"$(who): subplot cell ($(t.row), $(t.col)) is a :$(t.kind) cell; shapes " *
+		"and images need Cartesian x/y axes.",
+	))
+	return [t], (t.row, t.col)
+end
+
+function _verb_subplot_add_items_impl!(
+	sf::SubplotFigure,
+	key::Symbol,
+	direction::Char,
+	items;
+	row,
+	col,
+	secondary_y::Bool,
+	inset,
+	who::AbstractString,
+)
+	targets, active = _verb_subplot_targets(sf, row, col, secondary_y, inset, who)
+	p = _plot_obj(sf.fig)
+	_verb_append_layout_items!(p.layout, key, direction, items, ((t.xref, t.yref) for t in targets))
+	if active !== nothing
+		sf.current_row, sf.current_col = active
+	end
+	_refresh!(sf.fig)
+	return sf
+end
+
+# Placement sentence of each verb's SubplotFigure docstring.
+const _VERB_PLACEMENT_DOCS = Dict(
+	:add_hline! => "a line across the cell's full width at data value `y` of its y axis",
+	:add_vline! => "a line across the cell's full height at data value `x` of its x axis",
+	:add_hrect! => "a band across the cell's full width between data values `y0` and `y1`",
+	:add_vrect! => "a band across the cell's full height between data values `x0` and `x1`",
+	:add_shape! => "`shape` in data coordinates of the cell's axes (an `xref`/`yref` of " *
+		"`\"paper\"` or `\"… domain\"` on the shape becomes a fraction of the cell)",
+	:add_layout_image! => "`image` with `x`, `y`, `sizex`, `sizey` as fractions of the " *
+		"cell's plot area",
+)
+
+const _VERB_ATTRIBUTE_DOCS =
+	"`attributes...` are shape attributes (`line_color = \"red\"`, " *
+	"`line_dash = \"dash\"`, `fillcolor`, `opacity`, `layer`, ...); a vector of " *
+	"coordinates adds one shape per entry."
+
+for (verb, _, _, names) in _VERB_LAYOUT_ITEM_VERBS
+	who = String(verb)
+	signature = join(names, ", ")
+	whole_item = verb in (:add_shape!, :add_layout_image!)
+	attrs = whole_item ? "" : ", attributes..."
+	attribute_doc = whole_item ?
+		"The item is given whole; attribute keywords are an `ArgumentError`." :
+		_VERB_ATTRIBUTE_DOCS
+	placement = _VERB_PLACEMENT_DOCS[verb]
+	doc = """
+		$(who)(sf::SubplotFigure, $(signature); row=nothing, col=nothing, secondary_y=false, inset=nothing$(attrs))
+
+	PlotlyBase's `$(who)` on cells of a [`SubplotFigure`](@ref): adds
+	$(placement). On a logarithmic axis shape coordinates are data values
+	(plotly converts them).
+
+	- Without `row`/`col`: the active cell. With both: that cell, which becomes
+	  the active cell. `row = "all"` and/or `col = "all"`: every Cartesian cell
+	  of those rows/columns (blank and non-Cartesian cells are skipped; the
+	  active cell is unchanged).
+	- `secondary_y = true`: the cell's secondary y axis; `inset = k`: the axes
+	  of inset `k` (`row`/`col` may then be omitted).
+	- $(attribute_doc)
+
+	`xref`/`yref`, `show`, an unknown cell, a non-Cartesian cell, `nothing`/`NaN`
+	coordinates and the wrong number of arguments are `ArgumentError`s; the
+	figure is then unchanged. Returns `sf`.
+
+	# Example
+	```julia
+	sf = subplots(2, 2; sync = false)
+	plot_scatter!(sf, 1:10, rand(10); row = 2, col = 2)
+	add_hline!(sf, 0.5; row = 2, col = 2, line_dash = "dash")
+	add_vrect!(sf, 2, 4; row = "all", col = 1, fillcolor = "LightGray", opacity = 0.3, line_width = 0)
+	```
+	"""
+	@eval begin
+		@doc $doc function PlotlyBase.$verb(
+			sf::SubplotFigure,
+			args...;
+			row = nothing,
+			col = nothing,
+			secondary_y::Bool = false,
+			inset = nothing,
+			kwargs...,
+		)
+			key, direction, items = _verb_layout_items($(QuoteNode(verb)), $who, args, kwargs)
+			return _transactional_subplot_mutation!(
+				_verb_subplot_add_items_impl!,
+				sf,
+				_SUBPLOT_SELECTION_METADATA_FIELDS,
+				key,
+				direction,
+				items;
+				row = row,
+				col = col,
+				secondary_y = secondary_y,
+				inset = inset,
+				who = $who,
+			)
+		end
+	end
+end
+
+# Recession-band shapes (PlotlyBase's NBER table) for the traces with date x
+# values on `xref`, placed on the cell (x in data, y over the cell's height);
+# `nothing` when no such trace has dates in a recession period's span.
+function _verb_recession_shapes(p::Plot, xref::AbstractString, yref::AbstractString, kwargs)
+	probe = Plot(GenericTrace[])
+	for trace in p.data
+		trace isa GenericTrace || continue
+		String(string(get(trace.fields, :xaxis, "x"))) == xref || continue
+		x = get(trace.fields, :x, nothing)
+		x isa AbstractVector || continue
+		isempty(x) && continue
+		push!(probe.data, GenericTrace(Dict{Symbol, Any}(:type => "scatter", :x => x)))
+	end
+	isempty(probe.data) && return nothing
+	bands = PlotlyBase._recession_band_shapes(probe; kwargs...)
+	bands === nothing && return nothing
+	items = bands isa AbstractVector ? collect(Any, bands) : Any[bands]
+	isempty(items) && return nothing
+	for item in items
+		item.fields[:xref] = String(xref)
+		item.fields[:yref] = yref * " domain"
+		item.fields[:y0] = 0
+		item.fields[:y1] = 1
+	end
+	return items
+end
+
+function _verb_subplot_recession_impl!(
+	sf::SubplotFigure;
+	row,
+	col,
+	secondary_y::Bool,
+	inset,
+	band_kwargs,
+)
+	who = "add_recession_bands!"
+	targets, active = _verb_subplot_targets(sf, row, col, secondary_y, inset, who)
+	p = _plot_obj(sf.fig)
+	shapes = Any[]
+	for t in targets
+		items = _verb_recession_shapes(p, t.xref, t.yref, band_kwargs)
+		items === nothing || append!(shapes, items)
+	end
+	isempty(shapes) && throw(ArgumentError(
+		"$(who): no trace on the selected cell(s) has date x values inside the " *
+		"span of the US recession table; nothing to mark.",
+	))
+	existing = get(p.layout.fields, :shapes, nothing)
+	combined = Any[]
+	existing isa AbstractVector ? append!(combined, existing) :
+		existing === nothing || push!(combined, existing)
+	append!(combined, shapes)
+	p.layout.fields[:shapes] = combined
+	if active !== nothing
+		sf.current_row, sf.current_col = active
+	end
+	_refresh!(sf.fig)
+	return sf
+end
+
+"""
+	add_recession_bands!(sf::SubplotFigure; row=nothing, col=nothing, secondary_y=false, inset=nothing, attributes...)
+
+PlotlyBase's `add_recession_bands!` on cells of a [`SubplotFigure`](@ref):
+shades the US (NBER) recessions that fall inside the date span of the traces
+on the cell's x axis, over the cell's full height. Cell selection as for
+[`add_hline!`](@ref) (`row = "all"`/`col = "all"` marks every Cartesian cell
+of those rows/columns that has date data). `attributes...` override the band
+style (default `fillcolor = "#E6E6E6"`, `opacity = 0.4`, `line_width = 0`,
+`layer = "below"`). No date data in the selected cells, `xref`/`yref` or `show`
+is an `ArgumentError`. Returns `sf`.
+"""
+function PlotlyBase.add_recession_bands!(
+	sf::SubplotFigure;
+	row = nothing,
+	col = nothing,
+	secondary_y::Bool = false,
+	inset = nothing,
+	kwargs...,
+)
+	who = "add_recession_bands!"
+	_verb_reject_show(who, kwargs)
+	for ref in (:xref, :yref)
+		haskey(kwargs, ref) && throw(ArgumentError(
+			"$(who): `$(ref)` is set from the target cell's axes; select the cell " *
+			"with `row`/`col`.",
+		))
+	end
+	return _transactional_subplot_mutation!(
+		_verb_subplot_recession_impl!,
+		sf,
+		_SUBPLOT_SELECTION_METADATA_FIELDS;
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		inset = inset,
+		band_kwargs = kwargs,
+	)
 end
 
 function _subplot_purge_impl!(sf::SubplotFigure)
@@ -5230,24 +6018,44 @@ function _subplot_delegate_axis_keys(
 	)
 end
 
+# The root of the shared-axis (`matches`) group axis `key` follows, or `key`
+# itself when it follows none (or the chain is cyclic / leads to an axis the
+# layout does not hold, which plotly.js ignores).
+function _subplot_match_range_root(fields::AbstractDict, key::Symbol)
+	_subplot_match_overlays(get(fields, key, nothing)) && return key
+	root = _fin_match_root(fields, key)
+	(root === nothing || !haskey(fields, root)) && return key
+	_subplot_match_overlays(fields[root]) && return key
+	return root
+end
+
 # Copy the `_SUBPLOT_SEEDED_AXIS_KEYS` of the target axes onto the scratch
 # figure's `xaxis`/`yaxis` (independent copies: the mutator never reaches the
-# figure's own containers). Returns, per scratch axis, the values seeded.
+# figure's own containers). The range and autorange of an axis that follows a
+# shared-axis group come from the group root, which holds them for the whole
+# group. Returns, per scratch axis, the values seeded, and the group root of
+# each scratch axis whose range was seeded from a root.
 function _subplot_seed_scratch_axes!(scratch::Plot, p::Plot, axis_keys)
 	seeded = Dict{Symbol, Dict{Symbol, Any}}()
-	axis_keys === nothing && return seeded
+	roots = Dict{Symbol, Symbol}()
+	axis_keys === nothing && return seeded, roots
+	fields = p.layout.fields
 	for (scratch_key, cell_key) in zip((:xaxis, :yaxis), axis_keys)
-		axis = get(p.layout.fields, cell_key, nothing)
+		axis = get(fields, cell_key, nothing)
+		root = _subplot_match_range_root(fields, cell_key)
+		root_axis = root === cell_key ? axis : fields[root]
+		root === cell_key || (roots[scratch_key] = root)
 		values = Dict{Symbol, Any}()
 		for name in _SUBPLOT_SEEDED_AXIS_KEYS
-			value = _cmn_mapping_get(axis, name)
+			source = name in _SUBPLOT_MATCH_RANGE_KEYS ? root_axis : axis
+			value = _cmn_mapping_get(source, name)
 			value === nothing || (values[name] = deepcopy(value))
 		end
 		isempty(values) && continue
 		scratch.layout.fields[scratch_key] = attr(; deepcopy(values)...)
 		seeded[scratch_key] = values
 	end
-	return seeded
+	return seeded, roots
 end
 
 # After the mutator ran: drop the seeded values it left unchanged from the
@@ -5318,7 +6126,7 @@ function _subplot_delegate_mutator_impl!(
 	# The scratch axes start as the target axes (type, range, ticks), so the
 	# mutator converts ranges, validates ticks and builds log-aware traces
 	# exactly as on a single figure with those axes.
-	seeded = _subplot_seed_scratch_axes!(tmp, p, axis_keys)
+	seeded, seeded_roots = _subplot_seed_scratch_axes!(tmp, p, axis_keys)
 	# Colorbar titles that plotly cannot typeset are converted after the
 	# traces reach their cell and the colorbars are placed (see
 	# `_place_cell_colorbars!`), not on the scratch figure. The style's
@@ -5367,7 +6175,23 @@ function _subplot_delegate_mutator_impl!(
 	if !isempty(routed) && axis_keys !== nothing
 		for (scratch_key, cell_key) in zip((:xaxis, :yaxis), axis_keys)
 			names = get(removed, scratch_key, nothing)
-			names === nothing || _cmn_delete_layout_fields!(p, cell_key, Tuple(names))
+			names === nothing && continue
+			root = get(seeded_roots, scratch_key, nothing)
+			if root === nothing
+				_cmn_delete_layout_fields!(p, cell_key, Tuple(names))
+			else
+				# A range/autorange seeded from the group root is removed there.
+				_cmn_delete_layout_fields!(
+					p,
+					cell_key,
+					Tuple(n for n in names if !(n in _SUBPLOT_MATCH_RANGE_KEYS)),
+				)
+				_cmn_delete_layout_fields!(
+					p,
+					root,
+					Tuple(n for n in names if n in _SUBPLOT_MATCH_RANGE_KEYS),
+				)
+			end
 		end
 	end
 	_apply_source_root_layout_modes!(
@@ -5403,8 +6227,9 @@ Run the `Plot`-level `mutator(fig, args...; kwargs...)` for one cell of `sf`
 (internal; the SubplotFigure methods of the `plot_*!` families call it). The
 mutator builds its traces on an empty scratch figure whose primary axes carry
 the target axes' type, exponent format, range and tick settings
-(`_SUBPLOT_SEEDED_AXIS_KEYS`), so log cells convert ranges and validate data
-like a single log figure. The traces are then routed to the cell
+(`_SUBPLOT_SEEDED_AXIS_KEYS`; the range of a shared axis is the group
+root's), so log cells convert ranges and validate data like a single log
+figure. Changes to a shared axis act on its group (`_subplot_match_sync!`). The traces are then routed to the cell
 (`row`/`col`, default the active cell; `secondary_y`; or inset `inset` of
 `sf.insets`), the scratch axes' changes are merged into the cell's axes
 (axis references such as `scaleanchor` retargeted to the cell), every
@@ -5437,12 +6262,14 @@ function _subplot_delegate_mutator!(
 		mutation = function (candidate)
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
+			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate))
 			result[] = _subplot_delegate_mutator_impl!(
 				staged,
 				mutator,
 				args...;
 				kwargs...,
 			)
+			_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
 			_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
 			return nothing
 		end

@@ -685,7 +685,7 @@ end
 		axis_before = deepcopy(_rsp_layout(live)[:xaxis2])
 		count_before = length(live.plot.data)
 		renderer.fail = true
-		@test_throws Exception PlotlySupply._subplot_delegate_mutator!(live, drop_ticks, [1.0, 10.0], [1.0, 2.0]; row=1, col=2)
+		@test_throws PlotlySupply._SyncPlotDesynchronizationError PlotlySupply._subplot_delegate_mutator!(live, drop_ticks, [1.0, 10.0], [1.0, 2.0]; row=1, col=2)
 		renderer.fail = false
 		@test _rsp_layout(live)[:xaxis2] == axis_before
 		@test length(live.plot.data) == count_before
