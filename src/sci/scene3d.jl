@@ -1544,7 +1544,9 @@ Point the camera of a 3-D scene like matplotlib's `ax.view_init(elev, azim)`.
 The camera sits in the direction
 `(cosd(elev) * cosd(azim), cosd(elev) * sind(azim), sind(elev))` from the scene
 centre (the eye is `distance` times that unit vector from the camera centre),
-looks at the centre, and keeps the z axis pointing up. matplotlib's default
+looks at the centre, and keeps the z axis pointing up (with `up = :y` or `:x`
+the components are rolled so that axis is vertical, like matplotlib's
+`vertical_axis`). matplotlib's default
 view `elev = 30, azim = -60` puts the camera on the +x, -y, +z side. At
 `(90, -90)` you look straight down with +x to the right and +y up; at `(0, 0)`
 you look along -x with +y to the right and +z up. Near-vertical views
@@ -1572,13 +1574,6 @@ along (1, 1, 1)) at the automatic distance described under `distance`.
   (with `zoom = 1`) and such pinned proportions (other than a cube) when they
   change the scene. A positive number is the distance in plotly's normalised
   scene units and is kept.
-
-In a scene smaller than the plot area (a subplot cell), axes whose ticks are
-automatic get `nticks` from their length on screen (about one tick per 40 px,
-2 to 9), because plotly.js counts ticks from the size of the whole figure and
-would crowd a small scene with overlapping labels. `view!`, the 3-D
-constructors and mutators, `scene!` and `annotate!` update these counts; a
-count set with `scene!(; nticks)`, tick values or a tick step is kept.
 - `up = :z`: the vertical axis, `:x`, `:y` or `:z` (matplotlib
   `vertical_axis`).
 - `projection = nothing`: "perspective" or "orthographic"; `nothing` keeps the
@@ -1590,6 +1585,13 @@ count set with `scene!(; nticks)`, tick values or a tick step is kept.
   cell): the scene to point. Only that scene's camera changes.
 
 Unknown keywords throw an `ArgumentError`.
+
+In a scene smaller than the plot area (a subplot cell), axes whose ticks are
+automatic get `nticks` from their length on screen (about one tick per 40 px,
+2 to 9), because plotly.js counts ticks from the size of the whole figure and
+would crowd a small scene with overlapping labels. `view!`, the 3-D
+constructors and mutators, `scene!` and `annotate!` update these counts; a
+count set with `scene!(; nticks)`, tick values or a tick step is kept.
 
 # Returns
 

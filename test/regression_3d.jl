@@ -403,6 +403,16 @@ _r3_resolved(name) = PlotlySupply._resolve_colorscale(name; who = "test").scale
 		@test length(sf.plot.data) == n
 	end
 
+	@testset "#87/#114 (3-D) no commented-out code or dead helpers" begin
+		src = read(joinpath(pkgdir(PlotlySupply), "src", "sci", "scene3d.jl"), String)
+		@test !occursin(r"^\s*#\s*(fig|trace|layout|p)\s*[.\[]?\S*\s*=[^=]"m, src)
+		for file in ("api.jl", joinpath("sci", "scene3d.jl"))
+			text = read(joinpath(pkgdir(PlotlySupply), "src", file), String)
+			@test !occursin("showlegendV", text)
+			@test !occursin("_tuple_interleave", text)
+		end
+	end
+
 	@testset "X13 (3-D) a legend first made by an append follows the template" begin
 		f = plot_surface(rand(3, 3))
 		relayout!(f; template = PlotlyBase.templates[:plotly_dark])
