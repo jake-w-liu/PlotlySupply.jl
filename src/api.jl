@@ -1561,6 +1561,11 @@ ids were renumbered, e.g. after `deletetraces!`) or to traces that had none
 validated `_legend_options` whose F15 fields (`_legend_layout_ext`) are
 written into every box (the callers lay `ncols` columns out afterwards with
 `_legend_relayout_columns!`); entries new to a column legend join a column.
+`auto_from > 0` (an append whose first new trace has that index) moves a box
+at the package default position (`:topright`, no explicit anchors) to the
+position covering the least of its cell's data (`_legend_best_cell_position`,
+Y17) when the box is new or still sits where that rule put it for the traces
+before the append; a box the user placed elsewhere stays.
 """
 function _apply_subplot_legends!(
 	p::Plot;
@@ -1576,6 +1581,7 @@ function _apply_subplot_legends!(
 	xanchor::AbstractString = "",
 	yanchor::AbstractString = "",
 	ext_opts = nothing,
+	auto_from::Integer = 0,
 )
 	order, ids, domains, trace_keys = _legend_subplot_assignment(p)
 
@@ -1607,6 +1613,15 @@ function _apply_subplot_legends!(
 	end
 
 	colors = _legend_resolve_colors(p, legend_bgcolor, legend_bordercolor, legend_borderwidth)
+	# Cells that received traces in this append (only they can change their
+	# best legend position).
+	appended = Set{String}()
+	if auto_from > 0
+		for index in auto_from:length(p.data)
+			key = trace_keys[index]
+			key === nothing || push!(appended, key)
+		end
+	end
 	# Legend boxes created after construction get the active style's legend
 	# font size, which the style wrote only onto the legends that existed when
 	# the figure was built (an explicit font size already in the box wins).
@@ -1626,6 +1641,14 @@ function _apply_subplot_legends!(
 			xanchor = xanchor,
 			yanchor = yanchor,
 		)
+		auto = key in appended && legend_position === :topright && isempty(xanchor) &&
+			isempty(yanchor) && !replace_placement && _DEFAULT_LEGEND_POSITION[] === :topright
+		if auto && !(created || reassigned)
+			current = _symbol_dict(p.layout.fields[legend_key])
+			earlier = something(_legend_best_cell_position(p, legend_id, xdom, ydom; before = auto_from), :topright)
+			expected = _legend_placement(earlier, xdom, ydom, legend_inset; figure = false)
+			auto = all(k -> get(current, k, nothing) == get(expected, k, nothing), _LEGEND_PLACEMENT_KEYS)
+		end
 		_legend_write_block!(
 			p,
 			legend_key;
@@ -1638,6 +1661,16 @@ function _apply_subplot_legends!(
 			fresh = fresh,
 		)
 		created && _legend_fill_style_font!(p, legend_key, style_font)
+		if auto
+			# Scored once the box carries its frame and font (its size).
+			best = something(_legend_best_cell_position(p, legend_id, xdom, ydom), :topright)
+			_legend_write_block!(
+				p,
+				legend_key;
+				placement = _legend_placement(best, xdom, ydom, legend_inset; figure = false),
+				replace_placement = true,
+			)
+		end
 	end
 	figure_key = Symbol(_FIGURE_LEGEND_ID)
 	if has_figure_entries && !haskey(p.layout.fields, figure_key)
@@ -1724,18 +1757,21 @@ function _apply_figure_legend!(
 end
 
 """
-	_refresh_subplot_legends!(sf, p = sf's Plot; first_new = 1)
+	_refresh_subplot_legends!(sf, p = sf's Plot; first_new = 1, auto = false)
 
 Legend pass after traces were appended to a SubplotFigure: per-subplot
 legends when `sf.per_subplot_legends`, otherwise the figure legend with the
 stored `sf.legend_*` settings. Existing boxes keep their placement/colours;
 in figure mode only traces from `first_new` on are touched, so it is safe on
-the append-only fast transaction path.
+the append-only fast transaction path. `auto = true` (the append paths) lets
+cell legends at the default position follow their cell's data
+(`_apply_subplot_legends!(…; auto_from = first_new)`, Y17).
 """
 function _refresh_subplot_legends!(
 	sf::SubplotFigure,
 	p::Plot = _plot_obj(getfield(sf, :fig));
 	first_new::Integer = 1,
+	auto::Bool = false,
 )
 	if sf.per_subplot_legends
 		_apply_subplot_legends!(
@@ -1745,6 +1781,7 @@ function _refresh_subplot_legends!(
 			legend_bgcolor = sf.legend_bgcolor,
 			legend_bordercolor = sf.legend_bordercolor,
 			legend_borderwidth = sf.legend_borderwidth,
+			auto_from = auto ? first_new : 0,
 		)
 	else
 		_apply_figure_legend!(
@@ -1936,7 +1973,10 @@ current position.
   legend). Each column is as wide as its widest label. When the columns do
   not fit the width available to the legend (its cell for a cell legend, the
   plot area for a figure legend inside it), fewer columns are used and a
-  warning says so. Columns are Plotly legend groups (`traceorder="grouped"`,
+  warning says so. A cell legend above or below its axes (e.g.
+  `position = (1, 1), xanchor = "right", yanchor = "bottom"`) may reach from
+  its anchor over the gap to the next cell of its row, or into the figure
+  margin beside the grid. Columns are Plotly legend groups (`traceorder="grouped"`,
   `layout.legend.groupclick="toggleitem"`): a click toggles one entry, and the
   entries' own legend groups (stem heads, merged duplicates, `legendgroup`
   of `legend_entry!`) no longer link them to other traces. Entries added
@@ -1953,7 +1993,9 @@ current position.
 - `title_side`: where the title sits: `:top`, `:left`, `:top_left`,
   `:top_center`, `:top_right` (`nothing` = unchanged; Plotly puts it on top
   of a vertical legend and left of a horizontal one, a column legend gets it
-  on top).
+  on top). `:top` puts the title above entries that start at the left edge;
+  Plotly also indents the entries by the title's width for `:top_left`, so a
+  matplotlib-style title above the entries is `:top`.
 - `fontsize::Real = 0`: entry font size in px (0 = unchanged).
 - `frame`: `false` = transparent, borderless box; `true` = restore the default
   box (template/style colours); `nothing` = unchanged.
@@ -3671,7 +3713,7 @@ function _subplot_add_trace_impl!(
 	p = _plot_obj(sf.fig)
 	_validate_subplot_traces!(p, (trace,), r, c; secondary_y = secondary_y, who = "add_trace!")
 	PlotlyBase.add_trace!(p, trace; row = r, col = c, secondary_y = secondary_y)
-	_refresh_subplot_legends!(sf, p; first_new = length(p.data))
+	_refresh_subplot_legends!(sf, p; first_new = length(p.data), auto = true)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -3734,7 +3776,7 @@ function _subplot_addtraces_impl!(
 		splice!(p.data, index:(index - 1), staged.data)
 		index
 	end
-	_refresh_subplot_legends!(sf, p; first_new = first_new)
+	_refresh_subplot_legends!(sf, p; first_new = first_new, auto = true)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -5470,7 +5512,7 @@ function _subplot_delegate_mutator_impl!(
 		end
 	end
 	_place_cell_colorbars!(p, start_index)
-	_refresh_subplot_legends!(sf, p; first_new = start_index)
+	_refresh_subplot_legends!(sf, p; first_new = start_index, auto = true)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -8187,15 +8229,20 @@ const _SCAT_TICKS_DOC = """
   `ytickformat = ""`: d3 tick format (e.g. `".2f"`)."""
 const _SCAT_LEGEND_DOC = """
 While the default legend position is `:topright` (see
-[`set_default_legend_position!`](@ref)), the legend of a `Plot`/`SyncPlot`
-goes where its box covers the fewest data points and line segments: the
-corners first (top right, top left, bottom left, bottom right), then the
-middle of the right, left, bottom and top edges, then the centre. Later calls
-of the scatter and line families move it again as data is added, as long as
-it sits where this rule put it; a legend placed anywhere else (`set_legend!`,
-`relayout!`) keeps its place. A trace the estimate does not model (bars,
-heatmaps, other x axes, stacked or polygon fills) or non-numeric coordinates
-make the data extent unknown; the rule then uses the top-right default."""
+[`set_default_legend_position!`](@ref)), the legend of a `Plot`/`SyncPlot`,
+and each cell legend of a `SubplotFigure` (Cartesian cells with any y axes,
+polar cells), goes where its box covers the fewest data points, line segments
+and filled areas (and, in a polar cell, angular tick labels): the corners
+first (top right, top left, bottom left, bottom right), then the middle of
+the right, left, bottom and top edges, then the centre. Later calls of the
+scatter and line families move it again as data is added, as long as it sits
+where this rule put it; a legend placed anywhere else (`set_legend!`,
+`relayout!`) keeps its place. When every position covers something the
+legend takes the one covering the least; move it with `set_legend!` (e.g. to
+an `:outside_*` position) then. A trace the estimate does not model (bars,
+heatmaps, other x axes, stacked fills or fills to another trace) or
+non-numeric coordinates make the data extent unknown; the rule then uses the
+top-right default."""
 const _SCAT_INSET_DOC = """
 `row`/`col` select the cell (default: the active
   cell) and `inset = k` draws on inset `k` (see [`inset!`](@ref)); the axis
@@ -8978,16 +9025,18 @@ end
 # first position of `_SCAT_LEGEND_POSITIONS` (matplotlib's candidate order:
 # the four corners, then the middle of the right, left, bottom and top edges,
 # then the centre) whose estimated box covers the fewest data points (markers,
-# error-bar ends) and line segments of the traces on the main x axis (primary
-# or secondary y). Each call of this family re-evaluates a legend it created,
-# or one that still sits where the rule puts it for the figure as it stood
-# before the call (so the rule placed it); a legend anywhere else was placed by
-# the user (`set_legend!`, `relayout!`) and is never moved. A trace the
-# estimate does not model (another type or x axis, a stacked or polygon fill)
-# or non-numeric coordinates (categories, dates) make the data extent unknown:
-# the legend then goes to, or stays at, the default top-right corner. Known
-# limit: a legend the user puts exactly where the rule would put it is
-# indistinguishable from an automatic one and follows the data too.
+# error-bar ends), line segments and filled areas of the traces on the main x
+# axis (primary or secondary y). Each call of this family re-evaluates a
+# legend it created, or one that still sits where the rule puts it for the
+# figure as it stood before the call (so the rule placed it); a legend
+# anywhere else was placed by the user (`set_legend!`, `relayout!`) and is
+# never moved. A trace the estimate does not model (another type or x axis, a
+# stacked fill or a fill to another trace) or non-numeric coordinates
+# (categories, dates) make the data extent unknown: the legend then goes to,
+# or stays at, the default top-right corner. SubplotFigure cell legends follow
+# the same rule per cell (`_legend_best_cell_position`). Known limit: a legend
+# the user puts exactly where the rule would put it is indistinguishable from
+# an automatic one and follows the data too.
 const _SCAT_LEGEND_POSITIONS =
 	(:topright, :topleft, :bottomleft, :bottomright, :right, :left, :bottom, :top, :center)
 # Legend size estimate in px for a 12 px legend font: one entry per 20 px row
@@ -9130,19 +9179,43 @@ end
 
 # The position of `_SCAT_LEGEND_POSITIONS` for the default legend of `p`, or
 # `nothing` when the data extent is unknown: a visible trace this estimate does
-# not model (another trace type, another x axis, a stacked or polygon fill) or
-# non-numeric coordinates.
+# not model (another trace type, another x axis, a stacked fill or a fill to
+# another trace) or non-numeric coordinates.
 function _scat_best_legend_position(p::Plot)
+	width_px, height_px = _scat_legend_figure_px(p.layout)
+	return _scat_best_legend_position(p, eachindex(p.data), :xaxis, "x", width_px, height_px)
+end
+
+# The scoring of `_scat_best_legend_position` for the traces `indices` of `p`
+# drawn on x axis `xref` (layout key `xkey`, any y axes) in a plot area of
+# `width_px` x `height_px`; `box = (w, h)` is the legend size in px (else the
+# rough per-entry estimate above). `obstacles` are rectangles
+# `(u0, u1, v0, v1)` (fractions of the plot area, e.g. insets) a legend box
+# must not cover: each scores like a filled area, by the share of the box it
+# covers. Used for a Plot (all traces, main axes) and for a SubplotFigure cell
+# legend (the cell's traces, `_legend_best_cell_position`).
+function _scat_best_legend_position(
+	p::Plot,
+	indices,
+	xkey::Symbol,
+	xref::AbstractString,
+	width_px::Float64,
+	height_px::Float64,
+	box = nothing;
+	obstacles = (),
+)
 	layout = p.layout
 	entries = 0
 	widest = 0
 	# (y axis key, x coordinates, y coordinates, kind, line shape): `:points`
 	# are scored where they lie, `:segments` join consecutive points with the
 	# trace's line shape, `:drops` join each point to y = 0 (the area of a
-	# `fill = "tozeroy"` trace).
+	# `fill = "tozeroy"` trace), `:polygon` is the closed area of a
+	# `fill = "toself"` trace (`_scat_legend_fill_scores!`).
 	series = Tuple{Symbol, Vector{Float64}, Vector{Float64}, Symbol, String}[]
 	xpadded = false
-	for trace in p.data
+	for trace_index in indices
+		trace = p.data[trace_index]
 		trace isa GenericTrace || return nothing
 		fields = trace.fields
 		if _trace_will_showlegend(trace)
@@ -9153,14 +9226,15 @@ function _scat_best_legend_position(p::Plot)
 		visible = get(fields, :visible, true)
 		(visible === false || visible == "legendonly") && continue
 		string(get(fields, :type, "scatter")) in ("scatter", "scattergl") || return nothing
-		string(get(fields, :xaxis, "x")) == "x" || return nothing
-		# Stacked or polygon fills cover areas these scores do not model.
+		string(get(fields, :xaxis, "x")) == xref || return nothing
+		# Stacked fills and fills to another trace or to x = 0 cover areas
+		# these scores do not model.
 		haskey(fields, :stackgroup) && return nothing
 		fill = string(get(fields, :fill, ""))
-		fill in ("", "none", "tozeroy") || return nothing
+		fill in ("", "none", "tozeroy", "toself") || return nothing
 		ykey = _axis_layout_key(string(get(fields, :yaxis, "y")), :y)
 		ylog = _axis_type(layout, ykey) == "log"
-		xs = _scat_legend_coords(get(fields, :x, nothing), _axis_type(layout, :xaxis) == "log")
+		xs = _scat_legend_coords(get(fields, :x, nothing), _axis_type(layout, xkey) == "log")
 		ys = _scat_legend_coords(get(fields, :y, nothing), ylog)
 		(xs === nothing || ys === nothing) && return nothing
 		n = min(length(xs), length(ys))
@@ -9179,7 +9253,7 @@ function _scat_best_legend_position(p::Plot)
 		for (letter, error) in ((:y, get(fields, :error_y, nothing)), (:x, get(fields, :error_x, nothing)))
 			bounds = _scat_legend_errors(error, n)
 			bounds === nothing && continue
-			axis_key = letter === :y ? ykey : :xaxis
+			axis_key = letter === :y ? ykey : xkey
 			_axis_type(layout, axis_key) == "log" && continue
 			minus, plus = bounds
 			if letter === :y
@@ -9193,11 +9267,13 @@ function _scat_best_legend_position(p::Plot)
 		push!(series, (ykey, vcat(xs, extra_x), vcat(ys, extra_y), :points, shape))
 		occursin("lines", mode) && push!(series, (ykey, xs, ys, :segments, shape))
 		fill == "tozeroy" && !ylog && push!(series, (ykey, xs, ys, :drops, shape))
+		fill == "toself" && push!(series, (ykey, xs, ys, :polygon, shape))
 	end
-	(entries == 0 || isempty(series)) && return nothing
+	(box === nothing ? entries == 0 || isempty(series) : isempty(series) && isempty(obstacles)) &&
+		return nothing
 
-	xwindow = _scat_legend_window(
-		layout, :xaxis, Iterators.flatten(s[2] for s in series); padded = xpadded,
+	xwindow = isempty(series) ? (0.0, 1.0) : _scat_legend_window(
+		layout, xkey, Iterators.flatten(s[2] for s in series); padded = xpadded,
 	)
 	xwindow === nothing && return nothing
 	ywindows = Dict{Symbol, Any}()
@@ -9213,9 +9289,14 @@ function _scat_best_legend_position(p::Plot)
 		)
 	end
 
-	width_px, height_px = _scat_legend_figure_px(layout)
-	box_w = min(0.6, (_SCAT_LEGEND_SAMPLE_PX + _SCAT_LEGEND_CHAR_PX * widest) / width_px)
-	box_h = min(0.6, (_SCAT_LEGEND_PAD_PX + _SCAT_LEGEND_ROW_PX * entries) / height_px)
+	box_w, box_h = if box === nothing
+		(
+			min(0.6, (_SCAT_LEGEND_SAMPLE_PX + _SCAT_LEGEND_CHAR_PX * widest) / width_px),
+			min(0.6, (_SCAT_LEGEND_PAD_PX + _SCAT_LEGEND_ROW_PX * entries) / height_px),
+		)
+	else
+		(min(0.95, box[1] / width_px), min(0.95, box[2] / height_px))
+	end
 	# The box of each candidate, from the anchor point and anchors the legend
 	# would get there.
 	boxes = map(_SCAT_LEGEND_POSITIONS) do position
@@ -9234,6 +9315,12 @@ function _scat_best_legend_position(p::Plot)
 		v_zero = (0.0 - ylo) / (yhi - ylo)
 		count = length(xs)
 		stride = max(1, cld(count, _SCAT_LEGEND_MAX_POINTS))
+		if kind === :polygon
+			us = [(xs[index] - xlo) / (xhi - xlo) for index in 1:stride:count]
+			vs = [(ys[index] - ylo) / (yhi - ylo) for index in 1:stride:count]
+			_scat_legend_fill_scores!(scores, us, vs, boxes)
+			continue
+		end
 		previous = nothing
 		for index in 1:stride:count
 			u = (xs[index] - xlo) / (xhi - xlo)
@@ -9257,8 +9344,59 @@ function _scat_best_legend_position(p::Plot)
 			previous = (u, v)
 		end
 	end
+	samples = _SCAT_LEGEND_FILL_SAMPLES^2
+	for (a0, a1, b0, b1) in obstacles
+		for (corner, (u0, u1, v0, v1)) in enumerate(boxes)
+			overlap = max(0.0, min(u1, a1) - max(u0, a0)) * max(0.0, min(v1, b1) - max(v0, b0))
+			overlap > 0 && (scores[corner] += ceil(Int, samples * overlap / ((u1 - u0) * (v1 - v0))))
+		end
+	end
 	# `argmin` returns the first minimum: ties keep the candidate order.
 	return _SCAT_LEGEND_POSITIONS[argmin(scores)]
+end
+
+# Samples per box side for `_scat_legend_fill_scores!` (5 x 5 = 25 points: a
+# box covering a filled area outweighs one crossing a few line segments).
+const _SCAT_LEGEND_FILL_SAMPLES = 5
+
+# Add to `scores[k]` the share of candidate box `boxes[k]` a `fill = "toself"`
+# area covers: the number of a regular grid of sample points of the box inside
+# the polygon(s) `us`, `vs` (unit axes coordinates; rings separated by
+# non-finite values, each closed back to its first vertex as plotly.js fills
+# them; even-odd rule).
+function _scat_legend_fill_scores!(scores::Vector{Int}, us::Vector{Float64}, vs::Vector{Float64}, boxes)
+	edges = NTuple{4, Float64}[]
+	start = 0
+	n = length(us)
+	for index in 1:(n + 1)
+		if index <= n && isfinite(us[index]) && isfinite(vs[index])
+			if start == 0
+				start = index
+			else
+				push!(edges, (us[index - 1], vs[index - 1], us[index], vs[index]))
+			end
+		else
+			start != 0 && index - 1 > start &&
+				push!(edges, (us[index - 1], vs[index - 1], us[start], vs[start]))
+			start = 0
+		end
+	end
+	isempty(edges) && return scores
+	k = _SCAT_LEGEND_FILL_SAMPLES
+	for (corner, (u0, u1, v0, v1)) in enumerate(boxes)
+		for a in 1:k, b in 1:k
+			u = u0 + (a - 0.5) / k * (u1 - u0)
+			v = v0 + (b - 0.5) / k * (v1 - v0)
+			inside = false
+			for (x1, y1, x2, y2) in edges
+				if (y1 > v) != (y2 > v) && u < x1 + (v - y1) * (x2 - x1) / (y2 - y1)
+					inside = !inside
+				end
+			end
+			inside && (scores[corner] += 1)
+		end
+	end
+	return scores
 end
 
 function _scat_legend_figure_px(layout)

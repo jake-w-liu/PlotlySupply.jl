@@ -344,6 +344,7 @@ using Test, PlotlySupply
 				"return /^legend[0-9]*\$/.test((g.getAttribute('class')||'').split(' ')[0]);}).map(function(g){return b(g.querySelector('rect.bg'));})," *
 				"ann:Array.from(gd.querySelectorAll('g.annotation')).map(function(a){return b(a.querySelector('g.annotation-text-g'));})," *
 				"xtitle:Array.from(gd.querySelectorAll('g.g-xtitle')).map(b)," *
+				"points:Array.from(gd.querySelectorAll('path.point')).map(b)," *
 				"gtitle:b(gd.querySelector('g.g-gtitle'))});})()"
 			Base.invokelatest(() -> ec.run(win, script))
 		end
@@ -399,5 +400,139 @@ using Test, PlotlySupply
 		@test !any(overlaps(L, a) for L in b["legends"], a in b["ann"])
 		@test !any(overlaps(b["ann"][i], b["ann"][j]) for i in 1:4, j in 1:4 if i < j)
 		@test all(a -> a[2] >= 0, b["ann"])
+	end
+
+	# The cell legend `key` of `f` sits where `_legend_placement` puts `position`
+	# in its cell (the package default inset).
+	function placed_at(f, key::Symbol, position::Symbol)
+		p = pl(f)
+		trace = first(t for t in p.data if get(t.fields, :legend, nothing) == String(key))
+		_, (xd, yd) = PS._trace_subplot_key_domain(p, trace)
+		want = PS._legend_placement(position, xd, yd, PS._DEFAULT_LEGEND_INSET[]; figure = false)
+		have = lg(f, key)
+		return all(k -> get(have, k, nothing) == get(want, k, nothing), PS._LEGEND_PLACEMENT_KEYS)
+	end
+
+	@testset "Y17: SubplotFigure cell legends go where they cover no data" begin
+		# A rising curve takes the top right of its cell, a falling one the top left.
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, 1:10, (1:10) .^ 2; row = 1, col = 1, legend = "rising", mode = "lines+markers")
+		plot_scatter!(sf, 1:10, 10 .- (1:10); row = 1, col = 2, legend = "falling", mode = "lines+markers")
+		@test placed_at(sf, :legend, :topleft)
+		@test placed_at(sf, :legend2, :topright)
+		b = export_boxes(sf)
+		@test length(b["legends"]) == 2 && length(b["points"]) == 20
+		@test !any(overlaps(L, q) for L in b["legends"], q in b["points"])
+
+		# An automatic cell legend follows its cell's data on later appends ...
+		sg = subplots(1, 2; sync = false)
+		plot_scatter!(sg, 1:10, 10 .- (1:10); row = 1, col = 1, legend = "falling")
+		@test placed_at(sg, :legend, :topright)
+		plot_scatter!(sg, 1:10, 1:10; row = 1, col = 1, legend = "rising")
+		@test placed_at(sg, :legend, :right)
+		plot_scatter!(sg, 1:10, fill(5.5, 10); row = 1, col = 1, legend = "flat")
+		@test placed_at(sg, :legend, :bottom)
+		# ... appends to another cell leave it alone ...
+		plot_scatter!(sg, 1:10, 1:10; row = 1, col = 2, legend = "other")
+		@test placed_at(sg, :legend, :bottom) && placed_at(sg, :legend2, :topleft)
+		# ... and a position the user chose stays.
+		set_legend!(sg; row = 1, col = 1, position = :topright)
+		plot_scatter!(sg, 1:10, (1:10) .^ 0.5; row = 1, col = 1, legend = "root")
+		@test placed_at(sg, :legend, :topright)
+		relayout!(sg, legend2 = attr(x = 0.7, y = 0.5))
+		plot_scatter!(sg, 1:10, 10 .- (1:10); row = 1, col = 2, legend = "falling 2")
+		@test (lg(sg, :legend2)[:x], lg(sg, :legend2)[:y]) == (0.7, 0.5)
+
+		# A secondary y axis counts: the crossing lines leave only the right edge free.
+		ss = subplots(1, 1; sync = false, specs = fill(Spec(secondary_y = true), 1, 1))
+		plot_scatter!(ss, 1:10, 1:10; row = 1, col = 1, legend = "primary rising")
+		@test placed_at(ss, :legend, :topleft)
+		plot_scatter!(ss, 1:10, 100 .* (10 .- (1:10)); row = 1, col = 1, secondary_y = true, legend = "secondary falling")
+		@test placed_at(ss, :legend, :right)
+
+		# A `fill = "toself"` area (a band) counts as covered, in a Plot and in a cell.
+		band = plot_band(1:3, 0, [1, 2, 3]; legend = "b")
+		@test (lg(band)[:x], lg(band)[:xanchor]) == (0.02, "left")
+		sb = subplots(1, 2; sync = false)
+		plot_band!(sb, 1:3, 0, [1, 2, 3]; row = 1, col = 2, legend = "b")
+		@test placed_at(sb, :legend, :topleft)
+
+		# Traces the estimate does not model keep the default corner.
+		sk = subplots(1, 2; sync = false)
+		plot_bar!(sk, ["a", "b", "c"], [1, 2, 3]; row = 1, col = 1, legend = "bars")
+		@test placed_at(sk, :legend, :topright)
+		# The rule is off while the default position is not :topright.
+		set_default_legend_position!(:topleft)
+		try
+			sd2 = subplots(1, 1; sync = false)
+			plot_scatter!(sd2, 1:10, 10 .- (1:10); row = 1, col = 1, legend = "falling")
+			@test placed_at(sd2, :legend, :topleft)
+		finally
+			set_default_legend_position!(:topright)
+		end
+	end
+
+	@testset "Y17: polar cell legends avoid data and tick labels" begin
+		# Points at 50-70 degrees on the rim of a square polar cell take its top
+		# right corner, and a wide legend in another corner covers an angular tick
+		# label (135, 225 or 315 degrees): it goes to the bottom edge, over grid only.
+		sp = subplots(1, 1; sync = false, specs = fill(Spec(kind = "polar"), 1, 1))
+		relayout!(sp, width = 500, height = 500)
+		plot_scatterpolar!(sp, [50, 60, 70], [1, 1, 1]; row = 1, col = 1, legend = "measured pattern (dB)", mode = "markers")
+		@test placed_at(sp, :legend, :bottom)
+		b = export_boxes(sp)
+		@test length(b["legends"]) == 1 && length(b["points"]) == 3
+		@test !any(overlaps(b["legends"][1], q) for q in b["points"])
+		# A roomy polar cell keeps the top right corner (it covers nothing there).
+		sq = subplots(1, 2; sync = false, specs = [Spec() Spec(kind = "polar")])
+		plot_scatterpolar!(sq, 0:30:330, fill(1.0, 12); row = 1, col = 2, legend = "pattern", mode = "markers")
+		@test placed_at(sq, :legend, :topright)
+		# No free position (the legend is wider than the room beside the disk):
+		# the position covering the fewest points, then the fewest tick labels.
+		sr = subplots(2, 2; sync = false, specs = [Spec() Spec(kind = "polar"); Spec(secondary_y = true) Spec()])
+		plot_scatter!(sr, 1:5, [1, 4, 9, 16, 25]; row = 1, col = 1, legend = "(1,1)", mode = "lines+markers")
+		plot_scatterpolar!(sr, 0:30:330, fill(1.0, 12); row = 1, col = 2, legend = "polar", mode = "markers")
+		@test placed_at(sr, :legend, :topleft)
+		@test placed_at(sr, :legend2, :topright)
+		# Holes are not modelled: the default corner.
+		sh = subplots(1, 1; sync = false, specs = fill(Spec(kind = "polar"), 1, 1))
+		relayout!(sh, width = 500, height = 500, polar = attr(hole = 0.3))
+		plot_scatterpolar!(sh, [50, 60, 70], [1, 1, 1]; row = 1, col = 1, legend = "measured pattern (dB)", mode = "markers")
+		@test placed_at(sh, :legend, :topright)
+	end
+
+	@testset "G5/Y10: inset traces join the host cell legend, which avoids the inset" begin
+		xs = collect(range(0, 2pi; length = 60))
+		sl = subplots(1, 2; sync = false)
+		plot_scatter!(sl, xs, sin.(xs); legend = "host", row = 1, col = 1)
+		plot_scatter!(sl, xs, cos.(xs); legend = "right cell", row = 1, col = 2)
+		subplot_legends!(sl)
+		k = inset!(sl, (0.55, 0.55, 0.4, 0.4); row = 1, col = 1)
+		plot_scatter!(sl, xs, xs .^ 2; inset = k, legend = "zoom")
+		@test [t.fields[:legend] for t in pl(sl).data] == ["legend", "legend2", "legend"]
+		@test !haskey(pl(sl).layout.fields, :legend3)
+		# Y10: the host legend leaves the inset (top right) and the sine's peak
+		# (top left) free.
+		@test placed_at(sl, :legend, :bottomleft)
+	end
+
+	@testset "Y27: identical entries of scene cells merge into one figure legend" begin
+		zs = [exp(-(a^2 + b^2)) for a in -1:0.5:1, b in -1:0.5:1]
+		sf = subplots(1, 3; sync = false, specs = fill(Spec(kind = "scene"), 1, 3))
+		for c in 1:3
+			plot_surface!(sf, -1:0.5:1, -1:0.5:1, c .* zs; row = 1, col = c)
+			plot_scatter3d!(sf, [0, 3], [0, 0], [0, 0]; color = "red", linewidth = 8, legend = "+x", row = 1, col = c)
+		end
+		# per-cell legends: one "+x" in each cell
+		@test [get(t.fields, :legend, nothing) for t in pl(sf).data if t.fields[:type] == "scatter3d"] ==
+			["legend", "legend2", "legend3"]
+		set_legend!(sf; position = :outside_right)
+		p = pl(sf)
+		@test !sf.per_subplot_legends
+		@test !any(haskey(p.layout.fields, k) for k in (:legend2, :legend3))
+		lines = [t for t in p.data if t.fields[:type] == "scatter3d"]
+		@test count(shown, lines) == 1
+		@test length(unique(t.fields[:legendgroup] for t in lines)) == 1
+		@test startswith(lines[1].fields[:legendgroup], PS._LEGEND_DEDUPE_GROUP_PREFIX)
 	end
 end

@@ -802,25 +802,100 @@ end
 # which the column fit absorbs through the generous label estimates.
 function _legend_plot_area_width(p::Plot)
 	width = _tight_real(get(p.layout.fields, :width, nothing), _TIGHT_DEFAULT_WIDTH)
+	return max(width - _legend_margin_lr(p, :l) - _legend_margin_lr(p, :r), 1.0)
+end
+
+# Left or right figure margin (px): the layout's, the template's, else
+# plotly.js' default.
+function _legend_margin_lr(p::Plot, key::Symbol)
 	margin = _symbol_dict(get(p.layout.fields, :margin, nothing))
-	side(key) = something(
+	return something(
 		_legend_real(get(margin, key, nothing)),
 		_legend_real(_legend_template_layout_value(p, (:margin, key))),
 		_LEGEND_DEFAULT_MARGIN_LR,
 	)
-	return max(width - side(:l) - side(:r), 1.0)
 end
 
 # Width (px) a legend may take before plotly.js wraps it: the cell's share of
-# the plot area for a cell legend, the plot area for a legend anchored inside
-# the paper, half the figure for one anchored left or right of it.
-function _legend_available_width(p::Plot, box::AbstractDict, span::Float64)
+# the plot area for a cell legend (`span < 1`), the plot area for a legend
+# anchored inside the paper, half the figure for one anchored left or right of
+# it. A cell legend in the band above or below its cell (`legend_id` given) may
+# reach from its anchor to the nearest plot area of the same row, or into the
+# figure margin beside the grid (`_legend_band_interval`), as matplotlib's
+# legends above the axes do.
+function _legend_available_width(p::Plot, box::AbstractDict, span::Float64; legend_id = nothing)
 	x = _legend_real(get(box, :x, nothing))
 	area = _legend_plot_area_width(p)
 	if get(box, :xref, "paper") == "paper" && x !== nothing && (x < 0 || x > 1)
 		return _tight_real(get(p.layout.fields, :width, nothing), _TIGHT_DEFAULT_WIDTH) / 2
 	end
-	return area * clamp(span, 0.0, 1.0)
+	cell = area * clamp(span, 0.0, 1.0)
+	(legend_id === nothing || span >= 1 || x === nothing) && return cell
+	get(box, :yref, "paper") == "paper" || return cell
+	domain = _legend_cell_domain(p, String(legend_id))
+	domain === nothing && return cell
+	xdom, ydom = domain
+	y = _legend_real(get(box, :y, nothing))
+	yanchor = get(box, :yanchor, nothing)
+	in_band = y !== nothing && (
+		(yanchor == "bottom" && y >= ydom[2] - 1e-9) || (yanchor == "top" && y <= ydom[1] + 1e-9)
+	)
+	in_band || return cell
+	lo, hi = _legend_band_interval(p, xdom, ydom)
+	reach = get(box, :xanchor, nothing) == "right" ? x - lo :
+		get(box, :xanchor, nothing) == "left" ? hi - x :
+		get(box, :xanchor, nothing) == "center" ? 2 * min(x - lo, hi - x) : nothing
+	reach === nothing && return cell
+	# plotly.js 2.35.2 wraps a horizontal legend anchored inside the paper at
+	# the plot-area width (`computeLegendDimensions`, `_maxWidth = gs.w`).
+	return clamp(reach * area, cell, area)
+end
+
+# Paper domains `(xdom, ydom)` of the cell legend `legend_id` lists (the cell
+# of its first trace), or `nothing`.
+function _legend_cell_domain(p::Plot, legend_id::String)
+	for trace in p.data
+		trace isa GenericTrace || continue
+		_legend_trace_legend_id(trace) == legend_id || continue
+		_trace_is_figure_legend_entry(trace) && continue
+		key_domain = _trace_subplot_key_domain(p, trace)
+		key_domain === nothing || return key_domain[2]
+	end
+	return nothing
+end
+
+# Paper x interval `(lo, hi)` free in the band above or below the cell with
+# domains `xdom` x `ydom`: from the right edge of the nearest plot area to its
+# left whose y domain overlaps the cell's (else the figure's left edge, in the
+# margin) to the left edge of the nearest one to its right (else the figure's
+# right edge).
+function _legend_band_interval(p::Plot, xdom, ydom)
+	area = _legend_plot_area_width(p)
+	lo = -_legend_margin_lr(p, :l) / area
+	hi = 1 + _legend_margin_lr(p, :r) / area
+	for (key, value) in p.layout.fields
+		name = String(key)
+		domains = if occursin(r"^xaxis[0-9]*$", name)
+			entry = _symbol_dict(value)
+			cx = _domain_tuple(get(entry, :domain, nothing))
+			anchor = get(entry, :anchor, nothing)
+			(cx === nothing || !(anchor isa AbstractString) || !startswith(anchor, "y")) && continue
+			cy = _layout_axis_domain(p.layout, _axis_layout_key(anchor, :y))
+			cy === nothing && continue
+			(cx, cy)
+		elseif occursin(r"^(scene|polar|geo|ternary|smith|map|mapbox)[0-9]*$", name)
+			_layout_subplot_domain(p.layout, key)
+		else
+			nothing
+		end
+		domains === nothing && continue
+		cx, cy = domains
+		# another row: no overlap with the cell's y domain
+		(cy[2] <= ydom[1] + 1e-9 || cy[1] >= ydom[2] - 1e-9) && continue
+		cx[2] <= xdom[1] + 1e-9 && (lo = max(lo, cx[2]))
+		cx[1] >= xdom[2] - 1e-9 && (hi = min(hi, cx[1]))
+	end
+	return lo, hi
 end
 
 # Remove the column groups of legend `legend_id` (all legends when `nothing`)
@@ -903,9 +978,11 @@ function _legend_apply_columns!(
 	title = _symbol_dict(get(box, :title, nothing))
 	title_text = get(title, :text, "")
 	has_title = title_text isa AbstractString && !isempty(strip(title_text))
+	# plotly.js 2.35.2 shifts the entries right by the title width for every
+	# side containing "left" ("left" and "top left": `computeLegendDimensions`).
 	title_left = has_title && occursin("left", string(get(title, :side, "top")))
 	title_width = title_left ? _text_extent(title_text, _legend_entry_font_size(p, box))[1] + 2 * _LEGEND_ITEM_GAP : 0.0
-	available = _legend_available_width(p, box, Float64(span))
+	available = _legend_available_width(p, box, Float64(span); legend_id = legend_id)
 	wanted = min(Int(ncols), length(indices))
 	used = wanted
 	columns = _legend_column_assignment(length(indices), used, fill)
@@ -1040,6 +1117,300 @@ function _legend_extend_columns!(p::Plot; first::Integer = 1)
 		end
 	end
 	return nothing
+end
+
+# ── Data-avoiding placement of cell legends (Y17) ────────────────────────────
+#
+# A SubplotFigure cell legend at the package default (top right) goes to the
+# position of `_SCAT_LEGEND_POSITIONS` that covers the least of the cell's
+# data, as a Plot's legend does (`_scat_best_legend_position`): Cartesian
+# cells (any y axes, so a secondary y counts) score their points, line
+# segments and filled areas; polar cells rank the positions by the data they
+# cover (points with their marker radius, line segments, `toself` areas),
+# then by the tick labels they cover (the angular ones around the circle, the
+# radial ones along `radialaxis.angle`), then by how far they reach into the
+# polar disk (its grid), and never take the centre. When every position covers something, the one covering the
+# least is used (ties keep the candidate order, top right first): a legend
+# wider than the room beside a polar disk covers a tick label, and a large
+# legend in a small Cartesian cell can still cross data (place it with
+# `set_legend!(sf; row, col, position)`, e.g. `:outside_right`, then). Cells
+# the estimate does not model (other trace types, categorical or date
+# coordinates, polar sectors, holes or fills to another trace) keep the top
+# right corner.
+
+# Angular tick labels of a polar cell (measured on plotly.js 2.35.2 renders,
+# 12 px font): one every 45 degrees (whatever the size) unless `dtick` or
+# `tickvals` say otherwise, each about 26 x 15 px ("135°"), its near edge
+# 3 px outside the circle.
+const _LEGEND_POLAR_LABEL_GAP = 3.0
+const _LEGEND_POLAR_LABEL_HALF = (13.0, 7.5)
+const _LEGEND_POLAR_LABEL_STEP = 45.0
+# Marker radius (px) assumed when a polar trace does not set `marker.size`
+# (plotly.js' default size 6).
+const _LEGEND_POLAR_MARKER_RADIUS = 3.0
+# The radial tick labels run from the centre to the circle along
+# `radialaxis.angle` (a screen angle, counterclockwise from east, whatever the
+# angular rotation and direction; measured), within about this many px of
+# that line.
+const _LEGEND_POLAR_RADIAL_LABEL_PX = 10.0
+
+# Size (px) of legend box `legend_id` as plotly.js lays it out: column
+# legends by their columns, horizontal ones as one row, vertical ones by
+# their widest entry, plus a title drawn at the left (a title on top widens
+# the box to its own width); the height from `_legend_box_height`. `nothing`
+# when the legend lists nothing or is hidden. `before > 0` counts only the
+# entries of traces before index `before` (the legend before an append).
+function _legend_box_size(p::Plot, legend_id::AbstractString; before::Integer = 0)
+	box = _symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing))
+	get(box, :visible, true) === false && return nothing
+	indices = _legend_entry_indices(p, legend_id)
+	before > 0 && filter!(index -> index < before, indices)
+	isempty(indices) && return nothing
+	widths = _legend_entry_widths(p, box, indices)
+	frame = something(_legend_real(get(box, :borderwidth, nothing)), 0.0)
+	title = _symbol_dict(get(box, :title, nothing))
+	title_text = get(title, :text, "")
+	title_px = title_text isa AbstractString && !isempty(strip(title_text)) ?
+		_text_extent(title_text, _legend_entry_font_size(p, box))[1] + 2 * _LEGEND_ITEM_GAP : 0.0
+	orientation = get(box, :orientation, "v")
+	title_left = title_px > 0 &&
+		occursin("left", string(get(title, :side, orientation == "h" ? "left" : "top")))
+	width = if _legend_column_layout(p, legend_id) !== nothing
+		columns = map(indices) do index
+			info = _legend_column_info(get(p.data[index].fields, :legendgroup, nothing))
+			info === nothing ? 0 : info[3]
+		end
+		_legend_columns_width(widths, columns, frame, 0.0)
+	elseif orientation == "h"
+		sum(widths) + _LEGEND_ITEM_GAP * length(widths) + 2 * frame
+	else
+		maximum(widths) + _LEGEND_ITEM_GAP + 2 * frame
+	end
+	width = title_left ? width + title_px : max(width, title_px + 2 * frame)
+	return (width, _legend_box_height(p, legend_id, indices))
+end
+
+# Slack (px) added to the estimated (width, height) of a cell legend before
+# scoring positions: `_legend_box_size` is within about 5 px of the width and
+# exact in height for the boxes plotly.js 2.35.2 draws (measured: 74.8 vs 78,
+# 107 vs 110, 246.7 vs 242 px wide; 31 and 50 px high), and a Cartesian marker
+# reaches a few px beyond its centre.
+const _LEGEND_CELL_SLACK_PX = (4.0, 2.0)
+
+"""
+	_legend_best_cell_position(p, legend_id, xdom, ydom; before = 0) -> Union{Symbol, Nothing}
+
+The position of `_SCAT_LEGEND_POSITIONS` (relative to the cell's axes) where
+cell legend `legend_id` of the cell with paper domains `xdom` x `ydom` covers
+the least data (see the note above), or `nothing` when the estimate does not
+apply. `before > 0` scores only the traces before index `before` (the cell as
+it was before an append), to tell an automatic placement from the user's.
+"""
+function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, ydom; before::Integer = 0)
+	indices = Int[]
+	for (index, trace) in enumerate(p.data)
+		before > 0 && index >= before && break
+		trace isa GenericTrace || continue
+		_trace_is_figure_legend_entry(trace) && continue
+		_legend_trace_legend_id(trace) == legend_id || continue
+		push!(indices, index)
+	end
+	isempty(indices) && return nothing
+	width_px, height_px = _scat_legend_figure_px(p.layout)
+	w = width_px * (xdom[2] - xdom[1])
+	h = height_px * (ydom[2] - ydom[1])
+	(w > 0 && h > 0) || return nothing
+	legend_size = _legend_box_size(p, legend_id; before = before)
+	legend_size === nothing && return nothing
+	legend_size = (legend_size[1] + _LEGEND_CELL_SLACK_PX[1], legend_size[2] + _LEGEND_CELL_SLACK_PX[2])
+	first_trace = p.data[indices[1]]
+	if string(get(first_trace.fields, :type, "scatter")) in ("scatterpolar", "scatterpolargl")
+		subplot = Symbol(string(get(first_trace.fields, :subplot, "polar")))
+		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size)
+	end
+	# Cartesian cell: the host's traces are scored as data; the traces of an
+	# inset the cell hosts (listed in the host's legend, `_legend_inset_host`)
+	# make the inset's rectangle an obstacle.
+	cell_key = _trace_subplot_key_domain(p, first_trace)
+	cell_key === nothing && return nothing
+	startswith(cell_key[1], "xy:") || return nothing
+	host_x = first(split(cell_key[1][4:end], '|'))
+	main = Int[]
+	obstacles = NTuple{4, Float64}[]
+	for index in indices
+		fields = p.data[index].fields
+		base_x = _legend_base_axis_ref(p.layout, string(get(fields, :xaxis, "x")), :x)
+		if base_x == host_x
+			push!(main, index)
+			continue
+		end
+		base_y = _legend_base_axis_ref(p.layout, string(get(fields, :yaxis, "y")), :y)
+		inset_x = _layout_axis_domain(p.layout, _axis_layout_key(base_x, :x))
+		inset_y = _layout_axis_domain(p.layout, _axis_layout_key(base_y, :y))
+		(inset_x === nothing || inset_y === nothing) && return nothing
+		rect = (
+			(inset_x[1] - xdom[1]) / (xdom[2] - xdom[1]),
+			(inset_x[2] - xdom[1]) / (xdom[2] - xdom[1]),
+			(inset_y[1] - ydom[1]) / (ydom[2] - ydom[1]),
+			(inset_y[2] - ydom[1]) / (ydom[2] - ydom[1]),
+		)
+		rect in obstacles || push!(obstacles, rect)
+	end
+	return _scat_best_legend_position(
+		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size; obstacles = obstacles,
+	)
+end
+
+# Box (fractions of the cell) of each candidate position for a legend of
+# `box_w` x `box_h` (fractions), as `_scat_best_legend_position` builds them.
+function _legend_candidate_boxes(box_w::Float64, box_h::Float64)
+	return map(_SCAT_LEGEND_POSITIONS) do position
+		x, y, xanchor, yanchor = _legend_anchor((0.0, 1.0), (0.0, 1.0), _DEFAULT_LEGEND_INSET[], position)
+		u0 = xanchor == "left" ? x : xanchor == "right" ? x - box_w : x - box_w / 2
+		v0 = yanchor == "bottom" ? y : yanchor == "top" ? y - box_h : y - box_h / 2
+		(u0, u0 + box_w, v0, v0 + box_h)
+	end
+end
+
+# Polar cell of `w` x `h` px (subplot layout key `subplot`): the circle is
+# centred in the cell with radius min(w, h) / 2 (plotly.js polar, full
+# sector); `r` maps linearly from the radial range (explicit, else from
+# min(0, r) to max(r)), `theta` in degrees from `angularaxis.rotation` in its
+# `direction`. `nothing` for sectors, holes, non-linear or categorical axes,
+# other trace types, or non-numeric coordinates.
+function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float64, h::Float64, legend_size)
+	polar = _symbol_dict(get(p.layout.fields, subplot, nothing))
+	radial = _symbol_dict(get(polar, :radialaxis, nothing))
+	angular = _symbol_dict(get(polar, :angularaxis, nothing))
+	sector = get(polar, :sector, nothing)
+	if sector !== nothing
+		(sector isa AbstractVector && length(sector) == 2 && all(v -> v isa Real, sector) &&
+			abs(sector[2] - sector[1]) >= 360) || return nothing
+	end
+	something(_legend_real(get(polar, :hole, nothing)), 0.0) == 0 || return nothing
+	get(angular, :thetaunit, "degrees") == "degrees" || return nothing
+	get(angular, :type, "-") in ("-", "linear") || return nothing
+	get(radial, :type, "-") in ("-", "linear") || return nothing
+	rotation = something(_legend_real(get(angular, :rotation, nothing)), 0.0)
+	turn = get(angular, :direction, "counterclockwise") == "clockwise" ? -1.0 : 1.0
+
+	# (r, theta, draws lines, filled to itself, marker radius in px)
+	series = Tuple{Vector{Float64}, Vector{Float64}, Bool, Bool, Float64}[]
+	for index in indices
+		fields = p.data[index].fields
+		visible = get(fields, :visible, true)
+		(visible === false || visible == "legendonly") && continue
+		string(get(fields, :type, "scatter")) in ("scatterpolar", "scatterpolargl") || return nothing
+		string(get(fields, :subplot, "polar")) == String(subplot) || return nothing
+		fill = string(get(fields, :fill, "none"))
+		fill in ("", "none", "toself") || return nothing
+		r = _scat_legend_coords(get(fields, :r, nothing), false)
+		theta = _scat_legend_coords(get(fields, :theta, nothing), false)
+		(r === nothing || theta === nothing) && return nothing
+		n = min(length(r), length(theta))
+		n == 0 && continue
+		mode = string(get(fields, :mode, "lines"))
+		size = _legend_real(_cmn_mapping_get(get(fields, :marker, nothing), :size))
+		marker = occursin("markers", mode) ?
+			(size === nothing ? _LEGEND_POLAR_MARKER_RADIUS : size / 2) : 0.0
+		push!(series, (r[1:n], theta[1:n], occursin("lines", mode), fill == "toself", marker))
+	end
+	range = get(radial, :range, nothing)
+	lo, hi = if range isa AbstractVector && length(range) == 2 && all(v -> v isa Real && isfinite(v), range)
+		Float64(range[1]), Float64(range[2])
+	else
+		finite = collect(Iterators.filter(isfinite, Iterators.flatten(s[1] for s in series)))
+		isempty(finite) ? (0.0, 1.0) : (min(0.0, minimum(finite)), maximum(finite))
+	end
+	hi == lo && (hi = lo + 1)
+
+	radius = min(w, h) / 2
+	position(rho, angle) = (0.5 + rho * cosd(angle) / w, 0.5 + rho * sind(angle) / h)
+	box_w = min(0.95, legend_size[1] / w)
+	box_h = min(0.95, legend_size[2] / h)
+	boxes = _legend_candidate_boxes(box_w, box_h)
+	data = zeros(Int, length(boxes))
+	for (rs, thetas, lines, filled, marker) in series
+		stride = max(1, cld(length(rs), _SCAT_LEGEND_MAX_POINTS))
+		pad_u, pad_v = marker / w, marker / h
+		us = Float64[]
+		vs = Float64[]
+		previous = nothing
+		for index in 1:stride:length(rs)
+			if !(isfinite(rs[index]) && isfinite(thetas[index]))
+				previous = nothing
+				push!(us, NaN)
+				push!(vs, NaN)
+				continue
+			end
+			rho = clamp((rs[index] - lo) / (hi - lo), 0.0, 1.0) * radius
+			u, v = position(rho, rotation + turn * thetas[index])
+			push!(us, u)
+			push!(vs, v)
+			for (k, (u0, u1, v0, v1)) in enumerate(boxes)
+				hit = (marker > 0 && u0 - pad_u <= u <= u1 + pad_u && v0 - pad_v <= v <= v1 + pad_v) ||
+					(lines && previous !== nothing &&
+						_scat_segment_hits_box(previous[1], previous[2], u, v, u0, u1, v0, v1))
+				hit && (data[k] += 1)
+			end
+			previous = (u, v)
+		end
+		filled && _scat_legend_fill_scores!(data, us, vs, boxes)
+	end
+	labels = zeros(Int, length(boxes))
+	if get(angular, :showticklabels, true) !== false
+		half_u = _LEGEND_POLAR_LABEL_HALF[1] / w
+		half_v = _LEGEND_POLAR_LABEL_HALF[2] / h
+		for angle in _legend_polar_tick_angles(angular)
+			direction = rotation + turn * angle
+			# centre of the label box, its near edge `_LEGEND_POLAR_LABEL_GAP` px
+			# outside the circle
+			rho = radius + _LEGEND_POLAR_LABEL_GAP +
+				abs(cosd(direction)) * _LEGEND_POLAR_LABEL_HALF[1] +
+				abs(sind(direction)) * _LEGEND_POLAR_LABEL_HALF[2]
+			u, v = position(rho, direction)
+			for (k, (u0, u1, v0, v1)) in enumerate(boxes)
+				(u0 < u + half_u && u - half_u < u1 && v0 < v + half_v && v - half_v < v1) &&
+					(labels[k] += 1)
+			end
+		end
+	end
+	if get(radial, :visible, true) !== false && get(radial, :showticklabels, true) !== false
+		start = sector isa AbstractVector && !isempty(sector) && sector[1] isa Real ? Float64(sector[1]) : 0.0
+		angle = something(_legend_real(get(radial, :angle, nothing)), start)
+		u_end, v_end = position(radius, angle)
+		pad_u = _LEGEND_POLAR_RADIAL_LABEL_PX / w
+		pad_v = _LEGEND_POLAR_RADIAL_LABEL_PX / h
+		for (k, (u0, u1, v0, v1)) in enumerate(boxes)
+			_scat_segment_hits_box(0.5, 0.5, u_end, v_end, u0 - pad_u, u1 + pad_u, v0 - pad_v, v1 + pad_v) &&
+				(labels[k] += 1)
+		end
+	end
+	# Depth (px) a box reaches into the disk: its grid lines.
+	depth = map(boxes) do (u0, u1, v0, v1)
+		du = max(u0 - 0.5, 0.0, 0.5 - u1) * w
+		dv = max(v0 - 0.5, 0.0, 0.5 - v1) * h
+		max(radius - hypot(du, dv), 0.0)
+	end
+	ranks = map(eachindex(boxes)) do k
+		_SCAT_LEGEND_POSITIONS[k] === :center ? (typemax(Int), typemax(Int), Inf) :
+			(data[k], labels[k], depth[k])
+	end
+	# `argmin` returns the first minimum: ties keep the candidate order.
+	return _SCAT_LEGEND_POSITIONS[argmin(ranks)]
+end
+
+# Angles (degrees) of the angular tick labels of polar `angularaxis` settings
+# `angular`: its numeric `tickvals`, else every `dtick` degrees (a positive
+# number), else every `_LEGEND_POLAR_LABEL_STEP` (plotly.js' default).
+function _legend_polar_tick_angles(angular::AbstractDict)
+	tickvals = get(angular, :tickvals, nothing)
+	if tickvals isa AbstractVector && !isempty(tickvals)
+		return [Float64(v) for v in tickvals if v isa Real && !(v isa Bool) && isfinite(v)]
+	end
+	dtick = _legend_real(get(angular, :dtick, nothing))
+	step = dtick !== nothing && dtick >= 1 ? dtick : _LEGEND_POLAR_LABEL_STEP
+	return collect(0.0:step:(360.0 - step / 2))
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1305,10 +1676,13 @@ end
 # 16) + 3 px - one per entry for a vertical legend, the longest column for a
 # column legend, rows of the plot-area width for a plain horizontal legend -,
 # a title on top, and the frame + itemGap padding. 0 when it lists nothing.
-function _legend_box_height(p::Plot, legend_id::AbstractString)
+function _legend_box_height(
+	p::Plot,
+	legend_id::AbstractString,
+	indices::Vector{Int} = _legend_entry_indices(p, legend_id),
+)
 	box = _symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing))
 	get(box, :visible, true) === false && return 0.0
-	indices = _legend_entry_indices(p, legend_id)
 	isempty(indices) && return 0.0
 	fontsize = _legend_entry_font_size(p, box)
 	heights = map(indices) do index
