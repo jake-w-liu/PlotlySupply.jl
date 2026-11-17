@@ -22,7 +22,7 @@ import ColorSchemes
 const _SCI_COLOR_MUTATORS = ()
 
 export colormap, colormap_colors, lighten, discrete_colormap
-public COLORMAPS
+public COLORMAPS, COLOR_CYCLES
 
 #region Colour parsing and formatting
 
@@ -188,6 +188,47 @@ function _blend_over(c, alpha::Real, background = "#ffffff"; who::AbstractString
 	return _rgba_string((blend(sr, br), blend(sg, bg), blend(sb, bb), out_alpha))
 end
 
+# A colour keyword value ready to be written into a plotly attribute (G16).
+# plotly.js does not know matplotlib grey levels ("0.35") and silently draws
+# its default colour instead, so they are converted here:
+# - `nothing`, `missing` and `""` (unset sentinels) are returned unchanged;
+# - a grey-level string becomes "#RRGGBB" ("0.35" -> "#595959");
+# - any other valid colour string or Symbol is returned as a `String`,
+#   unchanged ("red" stays "red", so 1.x output is byte-identical);
+# - a Colors.jl `Colorant` becomes "#RRGGBB" or "rgba(r,g,b,a)";
+# - a `Real` is a colorscale value and is returned unchanged;
+# - a vector (per-point or per-trace colours) is converted element by element
+#   into a new `Vector{Any}`; nested vectors are not colours and throw.
+# An invalid colour throws `ArgumentError("<who>: `<name>`: ...")`, so a
+# caller can validate every colour keyword before its first write.
+function _color_option(value; who::AbstractString, name::AbstractString = "color")
+	if value isa AbstractVector
+		return Any[_color_option_scalar(v, who, "$(name)[$(i)]") for (i, v) in enumerate(value)]
+	end
+	return _color_option_scalar(value, who, name)
+end
+
+function _color_option_scalar(value, who::AbstractString, name::AbstractString)
+	(value === nothing || value === missing) && return value
+	value isa Real && !(value isa Bool) && return value
+	if value isa AbstractString || value isa Symbol
+		text = String(value)
+		isempty(text) && return ""
+		parsed = try
+			_parse_color(value, who)
+		catch err
+			err isa ArgumentError || rethrow()
+			message = startswith(err.msg, "$(who): ") ? err.msg[(ncodeunits(who) + 3):end] : err.msg
+			throw(ArgumentError("$(who): `$(name)`: $(message)"))
+		end
+		return tryparse(Float64, strip(text)) === nothing ? text : _rgba_string(parsed)
+	end
+	value isa Colors.Colorant && return _color_hex(value; who = who)
+	throw(ArgumentError(
+		"$(who): `$(name)` must be a colour (string, Symbol or Colorant) or a number; got $(typeof(value)).",
+	))
+end
+
 #endregion
 
 #region Colormap tables
@@ -213,8 +254,47 @@ scheme names.
 You may register your own map by adding an entry, e.g.
 `PlotlySupply.COLORMAPS["ice"] = ["#000033", "#3366cc", "#ffffff"]`; colours are
 validated when the map is used.
+
+# Choosing a map for print
+"Greyscale-safe" means the CIELAB lightness L* changes monotonically from one
+end to the other, so the order of values survives a black-and-white print;
+"uniform" means the map was designed so that equal steps in value look like
+equal steps in colour (matplotlib's perceptually uniform maps; measured here
+as nearly constant L* steps). Both properties are checked by the test suite.
+
+| class | maps | uniform | greyscale-safe |
+|:--|:--|:--|:--|
+| sequential | `viridis plasma inferno magma cividis` | yes | yes |
+| sequential | `Greys gray grey Blues Greens Oranges Purples Reds YlGnBu YlOrRd hot` | no | yes |
+| diverging | `coolwarm seismic bwr RdBu PuOr RdYlBu Spectral PiYG PRGn RdGy BrBG` | no | no (both ends dark) |
+| cyclic | `twilight` | yes | no (returns to its start) |
+| rainbow | `turbo jet rainbow` | no | no |
+
+Recommendations: for magnitudes use `viridis` (or `cividis`, designed for
+colour-vision deficiency; `magma`/`inferno` for a dark-to-light ramp). For
+signed data in colour use `RdBu_r` (ColorBrewer rates RdBu colour-blind
+safe) or `coolwarm`; both lose the sign in greyscale, so when the figure must
+also print in greyscale
+show the magnitude with a sequential map and the sign with contour lines or
+annotations. Avoid `jet`, `rainbow` and `turbo` for data: their lightness is
+not monotonic, so they invent bands and do not survive greyscale.
 """
 const COLORMAPS = Dict{String,Vector{String}}()
+
+# The print properties of every built-in map, as documented in the
+# `COLORMAPS` docstring and checked by test/sci_color.jl. `uniform` is the
+# design property (matplotlib's perceptually uniform maps); `greyscale` is
+# "CIELAB L* strictly monotonic" (measured).
+const _COLORMAP_PRINT_CLASSES = Dict{String, NamedTuple{(:class, :uniform, :greyscale), Tuple{Symbol, Bool, Bool}}}(
+	(name => (class = :sequential, uniform = true, greyscale = true)
+		for name in ("viridis", "plasma", "inferno", "magma", "cividis"))...,
+	(name => (class = :sequential, uniform = false, greyscale = true)
+		for name in ("Greys", "gray", "grey", "Blues", "Greens", "Oranges", "Purples", "Reds", "YlGnBu", "YlOrRd", "hot"))...,
+	(name => (class = :diverging, uniform = false, greyscale = false)
+		for name in ("coolwarm", "seismic", "bwr", "RdBu", "PuOr", "RdYlBu", "Spectral", "PiYG", "PRGn", "RdGy", "BrBG"))...,
+	"twilight" => (class = :cyclic, uniform = true, greyscale = false),
+	(name => (class = :rainbow, uniform = false, greyscale = false) for name in ("turbo", "jet", "rainbow"))...,
+)
 
 # Canonical name => ColorSchemes.jl key, or the explicit colour list of a map
 # that matplotlib defines by a few evenly spaced anchors (matplotlib
@@ -311,6 +391,51 @@ end
 const _PLOTLYJS_DEFAULT_COLORWAY = (
 	"#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
 	"#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+)
+
+"""
+	PlotlySupply.COLOR_CYCLES :: Dict{Symbol,Vector{String}}
+
+Colour-blind-safe trace colour cycles, used by `PlotStyle(; colorway = name)`
+(a name here wins over the `PlotlyBase.colors` palette of the same name) and
+by the built-in `:publication` and journal styles (`:okabe_ito`).
+
+The colours are the published palettes; the ORDER is PlotlySupply's: colours
+that stay readable as thin lines and small markers on white (WCAG contrast
+ratio against white of at least 3) come first, pale ones (yellow, sky blue,
+grey) last, so a figure with few series never draws a near-invisible one.
+
+| name | colours | first n with contrast ≥ 3 on white | source |
+|:--|:--|:--|:--|
+| `:okabe_ito` | blue, vermillion, bluish green, reddish purple, black, orange, sky blue, yellow | 5 | Okabe & Ito, *Color Universal Design* (2008); Nature's figure guide |
+| `:tol_bright` | blue, red, green, purple, yellow, cyan, grey | 4 | P. Tol, *Colour Schemes* (SRON/EPS/TN/09-002), "bright" |
+| `:tol_vibrant` | blue, red, teal, magenta, orange, cyan, grey | 4 | Tol, "vibrant" |
+| `:tol_muted` | indigo, rose, green, wine, purple, olive, teal, cyan, sand | 6 | Tol, "muted" |
+| `:tol_high_contrast` | blue, red, yellow | 2 | Tol, "high-contrast": also distinct in greyscale (CIELAB L* 29, 50, 72) |
+
+Colour alone does not survive greyscale printing for the first four cycles
+(several colours share a lightness); combine them with a dash/marker cycle
+(`PlotStyle(; cycle = :dash_symbol)`, the journal presets' choice), use
+`:tol_high_contrast` for up to three series, or the monochrome
+`cycle = :bw_dash_marker`.
+
+You may add your own cycle, e.g. `PlotlySupply.COLOR_CYCLES[:mine] =
+["#000000", "#E69F00"]`; it is validated when a style uses it.
+"""
+const COLOR_CYCLES = Dict{Symbol, Vector{String}}(
+	# Okabe & Ito's eight colours (hex values as in Nature's figure guide and
+	# ColorSchemes' `okabe_ito`), ordered by contrast on white: 5.2, 3.9, 3.4,
+	# 3.1, 21, then 2.3, 2.3, 1.3 (yellow, which ColorSchemes lists 4th).
+	:okabe_ito => ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#000000", "#E69F00", "#56B4E9", "#F0E442"],
+	# Paul Tol's qualitative schemes; contrast on white in brackets.
+	# bright: blue 4.7, red 3.1, green 4.5, purple 6.1 | yellow 2.0, cyan 1.8, grey 1.9
+	:tol_bright => ["#4477AA", "#EE6677", "#228833", "#AA3377", "#CCBB44", "#66CCEE", "#BBBBBB"],
+	# vibrant: blue 4.8, red 5.2, teal 3.6, magenta 3.9 | orange 2.9, cyan 2.2, grey 1.9
+	:tol_vibrant => ["#0077BB", "#CC3311", "#009988", "#EE3377", "#EE7733", "#33BBEE", "#BBBBBB"],
+	# muted: indigo 12.2, rose 3.7, green 5.7, wine 8.7, purple 5.3, olive 3.0 | teal 2.8, cyan 1.8, sand 1.6
+	:tol_muted => ["#332288", "#CC6677", "#117733", "#882255", "#AA4499", "#999933", "#44AA99", "#88CCEE", "#DDCC77"],
+	# high-contrast: blue 9.6, red 4.6 | yellow 2.1; L* 29, 50, 72 (greyscale-safe)
+	:tol_high_contrast => ["#004488", "#BB5566", "#DDAA33"],
 )
 
 #endregion

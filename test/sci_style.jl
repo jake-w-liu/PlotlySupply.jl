@@ -9,7 +9,16 @@ using PlotlySupply
 	PB = PlotlySupply.PlotlyBase
 	sd(x) = PS._symbol_dict(x)
 	json(x) = PB.JSON.json(x)
-	OKABE_ITO = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"]
+	# 2.0 (D14): `:okabe_ito` names the curated COLOR_CYCLES order (thin-line
+	# readable colours first); a ColorScheme keeps its own (ColorSchemes) order.
+	OKABE_ITO = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#000000", "#E69F00", "#56B4E9", "#F0E442"]
+	OKABE_ITO_CS = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"]
+	thrown(f) = try
+		f()
+		nothing
+	catch err
+		err
+	end
 
 	function fake_syncplot(p)
 		scripts = String[]
@@ -46,7 +55,7 @@ using PlotlySupply
 			@test PlotStyle(; cycle = "dash_marker").cycle === :dash_marker
 			@test PlotStyle(; colorway = :okabe_ito).colorway == OKABE_ITO
 			@test PlotStyle(; colorway = [PB.Colors.RGB(1, 0, 0), "blue", :green]).colorway == ["#FF0000", "blue", "green"]
-			@test PlotStyle(; colorway = PB.colors.all[:okabe_ito]).colorway == OKABE_ITO
+			@test PlotStyle(; colorway = PB.colors.all[:okabe_ito]).colorway == OKABE_ITO_CS
 			@test PlotStyle(; font_color = PB.Colors.RGBA(0, 0, 0, 0.5)).font_color == "rgba(0,0,0,0.5)"
 			@test PlotStyle(; margin = 12).margin == Dict(:l => 12.0, :r => 12.0, :t => 12.0, :b => 12.0)
 			@test PlotStyle(; margin = (l = 5, t = 7)).margin == Dict(:l => 5.0, :t => 7.0)
@@ -100,7 +109,7 @@ using PlotlySupply
 			@test c !== s
 			@test c.colorway !== s.colorway
 			c.colorway[1] = "#123456"
-			@test s.colorway[1] == "#E69F00"
+			@test s.colorway[1] == "#0072B2"
 
 			@test PlotStyle(; fontsize = 12) == PlotStyle(; fontsize = 12)
 			@test hash(PlotStyle(; fontsize = 12)) == hash(PlotStyle(; fontsize = 12))
@@ -121,7 +130,7 @@ using PlotlySupply
 			@test get_default_style() == PlotStyle()
 			pub = PS._STYLE_REGISTRY[:publication]
 			@test pub.template === :plotly_white
-			@test pub.font_family == "STIXGeneral, Times New Roman, serif"
+			@test pub.font_family == "Times New Roman, Times, Liberation Serif, serif"
 			@test pub.font_color == "#000000"
 			@test pub.tick_fontsize < pub.label_fontsize
 			@test pub.colorway == OKABE_ITO
@@ -604,15 +613,18 @@ using PlotlySupply
 			fig = plot_scatter(1:3, [1, 2, 3])
 			@test figsize!(fig, 3.5, 2.5; units = :in) === nothing
 			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (336, 240)
+			# 2.0 (D14): sizes are stored exactly, not rounded to whole pixels,
+			# so a vector export has the requested physical size.
+			@test fig.layout.fields[:width] isa Int
 			figsize!(fig, 10, 5; units = :cm)
-			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (378, 189)
+			@test fig.layout.fields[:width] ≈ 10 * 96 / 2.54
+			@test fig.layout.fields[:height] ≈ 5 * 96 / 2.54
 			figsize!(fig, 100, 50; units = :mm)
-			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (378, 189)
+			@test fig.layout.fields[:width] ≈ 100 * 96 / 25.4
 			figsize!(fig, 252, 180; units = :pt)
 			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (336, 240)
 			figsize!(fig, 800.4, 600.6)
-			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (800, 601)
-			@test fig.layout.fields[:width] isa Int
+			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (800.4, 600.6)
 
 			before = json(fig)
 			@test_throws ArgumentError figsize!(fig, 0, 100)
@@ -635,6 +647,259 @@ using PlotlySupply
 			@test figsize!(sp, 3, 2; units = :in) === nothing
 			@test (sp.plot.layout.fields[:width], sp.plot.layout.fields[:height]) == (288, 192)
 			@test length(scripts) == 1
+			# G32 (figsize! part): unknown keywords, `show` included, name the verb.
+			msg = sprint(showerror, thrown(() -> figsize!(sp, 3, 2; show = true)))
+			@test occursin("figsize!: unsupported keyword argument(s) `show`", msg)
+			@test occursin("figsize!: unsupported keyword argument(s) `bogus`", sprint(showerror, thrown(() -> figsize!(sf, 3, 2; bogus = 1))))
+			@test_throws ArgumentError figsize!(fig, 3, 2; units = "in")
+			@test length(scripts) == 1
+		end
+
+		@testset "PlotStyle size and line-weight fields (D14)" begin
+			s = PlotStyle(; width = 336, aspect = 0.6, axis_linewidth = 1, tick_length = 4.5, mirror_ticks = true,
+				errorbar_width = 1.5, reference_linewidth = 0.75)
+			@test (s.width, s.aspect, s.axis_linewidth, s.tick_length) === (336.0, 0.6, 1.0, 4.5)
+			@test s.mirror_ticks === true && s.errorbar_width === 1.5 && s.reference_linewidth === 0.75
+			# The defaults are "unset" and change nothing.
+			d = PlotStyle()
+			@test (d.width, d.aspect, d.axis_linewidth, d.tick_length, d.mirror_ticks, d.errorbar_width, d.reference_linewidth) ==
+				  (0.0, 0.0, 0.0, 0.0, false, 0.0, 0.0)
+			for (name, bad) in ((:width, 5), (:width, -1), (:width, NaN), (:width, 3e9), (:aspect, 0.001), (:aspect, 101),
+				(:aspect, -1), (:axis_linewidth, -1), (:tick_length, Inf))
+				err = thrown(() -> PlotStyle(; (name => bad,)...))
+				@test err isa ArgumentError
+				@test occursin("PlotStyle: `$(name)`", sprint(showerror, err))
+			end
+			# Wrong types are rejected by the keyword signature.
+			@test_throws TypeError PlotStyle(; mirror_ticks = 1)
+			@test_throws TypeError PlotStyle(; reference_linewidth = "1")
+			s_bad = PlotStyle()
+			@test_throws ArgumentError (s_bad.mirror_ticks = 1)
+			@test_throws ArgumentError (s_bad.errorbar_width = true)
+			# width and aspect together must give a height plotly accepts.
+			@test occursin("height of 5.0 px", sprint(showerror, thrown(() -> PlotStyle(; width = 10, aspect = 0.5))))
+			@test PlotStyle(; width = 20, aspect = 0.5).width == 20
+			s2 = PlotStyle(; width = 20)
+			@test_throws ArgumentError (s2.aspect = 0.4)
+			@test s2.aspect == 0
+			@test_throws ArgumentError (s2.width = 12)
+			@test s2.width == 20
+			@test_throws ArgumentError with_style(() -> nothing; width = 12)
+			@test_throws ArgumentError set_default_style!(:ieee; aspect = 0.02)
+			@test get_default_style() == PlotStyle()
+			# copy / == / hash / show include the new fields.
+			c = copy(s)
+			@test c == s && hash(c) == hash(s)
+			c.mirror_ticks = false
+			@test c != s
+			shown = sprint(show, MIME"text/plain"(), s)
+			@test occursin("aspect = 0.6", shown) && occursin("reference_linewidth = 0.75", shown)
+			# Grey levels are colours (G16): converted, never passed through raw.
+			@test PlotStyle(; font_color = "0.35").font_color == "#595959"
+			@test PlotStyle(; colorway = ["0", "0.5", "red"]).colorway == ["#000000", "#808080", "red"]
+			msg = sprint(showerror, thrown(() -> PlotStyle(; font_color = "1.5")))
+			@test occursin("PlotStyle: `font_color` = \"1.5\" is a matplotlib grey level and must lie in [0, 1]", msg)
+			@test_throws ArgumentError PlotStyle(; colorway = ["#000000", "-0.2"])
+			# The new cycles.
+			@test PlotStyle(; cycle = :dash_symbol).cycle === :dash_symbol
+			@test PlotStyle(; cycle = "bw_dash_marker").cycle === :bw_dash_marker
+			ds = PS._style_trace_defaults(PlotStyle(; cycle = :dash_symbol), 3)
+			@test ds == Dict(:dash => "dot", :marker_symbol => "diamond")
+			bdm = PlotStyle(; cycle = :bw_dash_marker, colorway = :tol_bright)
+			@test PS._style_trace_defaults(bdm, 2) == Dict(:dash => "dash", :marker_symbol => "square", :markers => true)
+			@test PS._style_layout_defaults(bdm)[:colorway] == ["#000000"]
+			@test PS._style_layout_defaults(bdm; template = PB.templates[:plotly_dark])[:colorway] == ["#f2f5fa"]
+			@test PS._style_trace_defaults(PlotStyle(; errorbar_width = 2), 1) == Dict(:errorbar_width => 2)
+		end
+
+		@testset "journal presets and journal_width (D14)" begin
+			@test Base.isexported(PlotlySupply, :journal_width)
+			mm = 96 / 25.4
+			expected = Dict(
+				:ieee => ([1 => 3.5 * 96, 2 => 7.16 * 96], "Times New Roman, Times, Liberation Serif, serif", 8, "inside", true, :box),
+				:aps => ([1 => 86 * mm, 2 => 172 * mm], "Times New Roman, Times, Liberation Serif, serif", 9, "inside", true, :box),
+				:nature => ([1 => 89 * mm, 2 => 183 * mm], "Arial, Helvetica, Liberation Sans, sans-serif", 7, "outside", false, :open),
+				:elsevier => ([1 => 90 * mm, 1.5 => 140 * mm, 2 => 190 * mm], "Arial, Helvetica, Liberation Sans, sans-serif", 9, "outside", false, :box),
+				:springer => ([1 => 84 * mm, 1.5 => 129 * mm, 2 => 174 * mm], "Helvetica, Arial, Liberation Sans, sans-serif", 8, "outside", false, :box),
+				:aip => ([1 => 3.37 * 96, 2 => 6.69 * 96], "Times New Roman, Times, Liberation Serif, serif", 8, "inside", true, :box),
+			)
+			@test Set(PS._JOURNAL_NAMES) == Set(keys(expected))
+			@test PS._BUILTIN_STYLE_NAMES == (:default, :publication, PS._JOURNAL_NAMES...)
+			for (name, (widths, family, pt, ticks, mirror, spines)) in expected
+				st = PS._STYLE_REGISTRY[name]
+				@test st.width ≈ widths[1][2]
+				@test st.aspect == 0.75
+				@test PS._style_default_figure_size(st) == (st.width, st.width * 0.75)
+				@test st.font_family == family
+				px = pt * 4 / 3
+				@test all(f -> getfield(st, f) ≈ px, (:fontsize, :title_fontsize, :label_fontsize, :tick_fontsize, :legend_fontsize))
+				@test (st.ticks, st.mirror_ticks, st.spines) == (ticks, mirror, spines)
+				# Print weights: 1 pt data lines, 0.75 pt axes/error bars/references, 3.5 pt ticks.
+				@test st.linewidth ≈ 4 / 3 && st.axis_linewidth ≈ 1 && st.errorbar_width ≈ 1 && st.reference_linewidth ≈ 1
+				@test st.tick_length ≈ 3.5 * 4 / 3 && st.marker_size ≈ 6
+				@test st.colorway == PS.COLOR_CYCLES[:okabe_ito] && st.cycle === :dash_symbol
+				@test st.template === :plotly_white && st.font_color == "#000000" && !st.grid && !st.legend_frame
+				@test st.mathsize == "\\large"
+				for (columns, px_width) in widths
+					@test journal_width(name; columns = columns, units = :px) ≈ px_width
+					@test journal_width(String(name); columns = columns, units = :mm) ≈ px_width / mm
+				end
+				@test_throws ArgumentError register_style!(name, PlotStyle())
+			end
+			@test journal_width(:ieee) == 3.5
+			@test journal_width(:ieee; columns = 2) ≈ 7.16
+			@test journal_width(:nature; units = :mm) ≈ 89
+			@test journal_width(:aps; units = :cm) ≈ 8.6
+			@test journal_width(:aip; columns = 2, units = :pt) ≈ 6.69 * 72
+			@test journal_width(:springer; columns = 1.5, units = :mm) ≈ 129
+			msg = sprint(showerror, thrown(() -> journal_width(:optica)))
+			@test occursin("journal_width: unknown journal :optica; journals are :ieee, :aps, :nature, :elsevier, :springer, :aip", msg)
+			@test occursin(":ieee defines figure widths for 1, 2 column(s)", sprint(showerror, thrown(() -> journal_width(:ieee; columns = 1.5))))
+			@test_throws ArgumentError journal_width(:ieee; columns = true)
+			@test_throws ArgumentError journal_width(:ieee; columns = "1")
+			@test_throws ArgumentError journal_width(:ieee; units = :furlong)
+			@test_throws ArgumentError journal_width(:ieee; units = "in")
+			# The built-in presets are selectable like any style.
+			with_style(:nature) do
+				@test get_default_style() == PS._STYLE_REGISTRY[:nature]
+			end
+		end
+
+		@testset "figsize! with a journal (D14)" begin
+			mm = 96 / 25.4
+			fig = plot_scatter(1:3, [1, 2, 3])
+			@test figsize!(fig, :nature) === nothing
+			@test fig.layout.fields[:width] ≈ 89 * mm
+			@test fig.layout.fields[:height] ≈ 89 * mm * 0.75
+			figsize!(fig, :ieee; columns = 2, height = 3)
+			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (7.16 * 96, 288)
+			figsize!(fig, "elsevier"; columns = 1.5, aspect = 0.5)
+			@test fig.layout.fields[:width] ≈ 140 * mm && fig.layout.fields[:height] ≈ 70 * mm
+			figsize!(fig, :springer; height = 60, units = :mm)
+			@test fig.layout.fields[:height] ≈ 60 * mm
+			figsize!(fig, :nature; height = 17, units = :cm)        # exactly the 170 mm limit
+			@test fig.layout.fields[:height] ≈ 170 * mm
+			figsize!(fig, :ieee)
+			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (336, 252)
+			# The active style's aspect is the default.
+			with_style(; width = 300, aspect = 0.5) do
+				figsize!(fig, :aip)
+			end
+			@test fig.layout.fields[:height] ≈ 3.37 * 96 * 0.5
+			before = json(fig)
+			for (args, kwargs, needle) in (
+				((:optica,), (;), "unknown journal :optica"),
+				((:aps,), (; columns = 1.5), ":aps defines figure widths for 1, 2 column(s)"),
+				((:ieee,), (; aspect = 0.5, height = 2), "pass `aspect` or `height`, not both"),
+				((:ieee,), (; aspect = 0), "`aspect` (height / width) must be between 0.01 and 100"),
+				((:ieee,), (; aspect = NaN), "`aspect` must be finite"),
+				((:nature,), (; height = 171, units = :mm), "Nature figures may be at most 170 mm high"),
+				((:springer,), (; height = 24, units = :cm), "Springer figures may be at most 234 mm high"),
+				((:aip,), (; height = 9), "AIP Publishing figures may be at most 8.25 in high"),
+				((:ieee,), (; height = 0.05), "plotly requires at least 10 px"),
+				((:ieee,), (; height = -1), "`height` must be > 0"),
+				((:ieee,), (; units = :furlong), "`units` must be one of"),
+				((:ieee,), (; show = true), "unsupported keyword argument(s) `show`"),
+				((:ieee,), (; colums = 2), "unsupported keyword argument(s) `colums`"),
+			)
+				msg = sprint(showerror, thrown(() -> figsize!(fig, args...; kwargs...)))
+				@test startswith(msg, "ArgumentError: figsize!: ")
+				@test occursin(needle, msg)
+			end
+			@test json(fig) == before
+
+			sf = subplots(2, 2; sync = false)
+			@test figsize!(sf, :nature; columns = 2, aspect = 0.8) === sf
+			@test sf.layout.fields[:width] ≈ 183 * mm && sf.layout.fields[:height] ≈ 183 * mm * 0.8
+			sf_before = json(sf.plot)
+			@test_throws ArgumentError figsize!(sf, :nature; height = 200, units = :mm)
+			@test_throws ArgumentError figsize!(sf, :nature; show = true)
+			@test json(sf.plot) == sf_before
+
+			sp, scripts = fake_syncplot(plot_scatter(1:3, [1, 2, 3]))
+			@test figsize!(sp, :aps) === nothing
+			@test sp.plot.layout.fields[:width] ≈ 86 * mm
+			@test length(scripts) == 1
+			@test_throws ArgumentError figsize!(sp, :aps; columns = 3)
+			@test length(scripts) == 1
+		end
+
+		@testset "sized styles size new figures; _style_default_figure_size (D14)" begin
+			@test PS._style_default_figure_size(PlotStyle()) == (700.0, 500.0)
+			@test PS._style_default_figure_size(PS._STYLE_REGISTRY[:publication]) == (700.0, 500.0)
+			@test PS._style_default_figure_size(PlotStyle(; width = 400)) == (400.0, 300.0)
+			@test PS._style_default_figure_size(PlotStyle(; width = 400, aspect = 1.25)) == (400.0, 500.0)
+			with_style(:ieee) do
+				@test PS._style_default_figure_size() == (336.0, 252.0)
+				fig = plot_scatter(1:3, [1, 2, 3])
+				@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (336, 252)
+				@test fig.layout.fields[:width] isa Int
+				# A size the caller gives wins; a lone width keeps the aspect, a
+				# lone height keeps the column width.
+				w = plot_scatter(1:3, [1, 2, 3]; width = 600)
+				@test (w.layout.fields[:width], w.layout.fields[:height]) == (600, 450)
+				h = plot_scatter(1:3, [1, 2, 3]; height = 400)
+				@test (h.layout.fields[:width], h.layout.fields[:height]) == (336, 400)
+				both = plot_scatter(1:3, [1, 2, 3]; width = 500, height = 100)
+				@test (both.layout.fields[:width], both.layout.fields[:height]) == (500, 100)
+				pie = plot_pie([1, 2]; labels = ["a", "b"])
+				@test (pie.layout.fields[:width], pie.layout.fields[:height]) == (336, 252)
+				sf = subplots(2, 2; sync = false)
+				@test (sf.layout.fields[:width], sf.layout.fields[:height]) == (336, 252)
+			end
+			with_style(:nature) do
+				fig = plot_heatmap(1:3, 1:3, [1 2 3; 4 5 6; 7 8 9])
+				@test fig.layout.fields[:width] ≈ 89 * 96 / 25.4
+			end
+			# Unsized styles write no size (plotly autosize, 700 x 500 export).
+			for name in (:default, :publication)
+				fig = with_style(() -> plot_scatter(1:3, [1, 2, 3]), name)
+				@test !haskey(fig.layout.fields, :width) && !haskey(fig.layout.fields, :height)
+			end
+			# An extreme aspect is clamped to plotly's range for a lone width.
+			with_style(; width = 100, aspect = 0.1) do
+				fig = plot_scatter(1:3, [1, 2, 3]; width = 50)
+				@test fig.layout.fields[:height] == 10
+			end
+		end
+
+		@testset "_style_ink, _style_line_width, axis line weights (D14)" begin
+			light = plot_scatter(1:3, [1, 2, 3])
+			@test PS._style_ink(light) == "#000000"
+			dark = plot_scatter(1:3, [1, 2, 3])
+			set_template!(dark, :plotly_dark)
+			@test PS._style_ink(dark) == "#f2f5fa"
+			bare = PB.Plot(PB.scatter(x = 1:2, y = 1:2), PB.Layout())
+			delete!(bare.layout.fields, :template)   # PlotlyBase adds its default template
+			with_style(; template = :plotly_dark) do
+				@test PS._style_ink(bare) == "#f2f5fa"      # no template: the style's
+			end
+			ieee = PS._STYLE_REGISTRY[:ieee]
+			@test PS._style_line_width(:data; default = 2, style = ieee) ≈ 4 / 3
+			@test PS._style_line_width(:contour; default = 2, style = ieee) ≈ 4 / 3
+			@test PS._style_line_width(:mesh; default = 0.5, style = ieee) ≈ 4 / 3
+			@test PS._style_line_width(:reference; default = 2, style = ieee) ≈ 1
+			@test PS._style_line_width(:axis; default = 2, style = ieee) ≈ 1
+			@test PS._style_line_width(:errorbar; default = 2, style = ieee) ≈ 1
+			@test PS._style_line_width(:reference; default = 1.5) === 1.5      # :default style
+			with_style(; reference_linewidth = 3) do
+				@test PS._style_line_width(:reference; default = 1) === 3.0
+			end
+			@test occursin("unknown line role :spine", sprint(showerror, thrown(() -> PS._style_line_width(:spine; default = 1))))
+			@test_throws ArgumentError PS._style_line_width(:data; default = -1)
+			@test_throws ArgumentError PS._style_line_width(:data; default = NaN)
+
+			ax = PS._style_axis_defaults(ieee)
+			@test ax[:mirror] == "ticks" && ax[:ticks] == "inside"
+			@test ax[:linewidth] == 1 && ax[:tickwidth] == 1 && ax[:ticklen] ≈ 3.5 * 4 / 3
+			@test ax[:showgrid] === false && !haskey(ax, :gridwidth)
+			nat = PS._style_axis_defaults(PS._STYLE_REGISTRY[:nature])
+			@test nat[:mirror] === false && nat[:showline] === true && nat[:ticks] == "outside"
+			@test PS._style_axis_defaults(PlotStyle(; mirror_ticks = true, ticks = :none))[:mirror] === true
+			@test PS._style_axis_defaults(PlotStyle(; mirror_ticks = true, spines = :open))[:mirror] === false
+			@test PS._style_axis_defaults(PlotStyle(; axis_linewidth = 2))[:gridwidth] == 2
+			# :default keeps the 1.x frame keys exactly.
+			@test !any(haskey(PS._style_axis_defaults(), k) for k in (:tickwidth, :ticklen, :gridwidth))
 		end
 	finally
 		set_default_style!(:default)
