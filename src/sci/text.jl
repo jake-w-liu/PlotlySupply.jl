@@ -505,14 +505,35 @@ function _legend_position_option(position, who::AbstractString)
 	return _text_pair(position, who, "position")
 end
 
+# plotly.js `legend.title.side` values, by the Symbol `title_side` takes.
+const _LEGEND_TITLE_SIDES = (
+	top = "top", left = "left", top_left = "top left", top_center = "top center",
+	top_right = "top right",
+)
+
+function _legend_title_side(side, who::AbstractString)
+	side === nothing && return nothing
+	(side isa Symbol || side isa AbstractString) || throw(ArgumentError(
+		"$(who): `title_side` must be a Symbol or string; got $(repr(side)).",
+	))
+	name = Symbol(replace(lowercase(strip(String(side))), r"[\s-]+" => "_"))
+	haskey(_LEGEND_TITLE_SIDES, name) || throw(ArgumentError(
+		"$(who): `title_side` must be one of $(join(repr.(keys(_LEGEND_TITLE_SIDES)), ", ")); " *
+		"got $(repr(side)).",
+	))
+	return _LEGEND_TITLE_SIDES[name]
+end
+
 """
-	_legend_options(who; position, inset, bgcolor, bordercolor, borderwidth, showlegend, xanchor, yanchor, orientation, ncols, title, fontsize, frame, dedupe, itemwidth, entrywidth, legend_target)
+	_legend_options(who; position, inset, bgcolor, bordercolor, borderwidth, showlegend, xanchor, yanchor, orientation, ncols, title, fontsize, frame, dedupe, itemwidth, entrywidth, legend_target, title_side)
 
 Validate the keywords of `set_legend!` / `subplot_legends!` before anything is
-written and return them normalized as a NamedTuple (`position` is `nothing`,
-a normalized Symbol or a `Float64` tuple; colours are `String`s; `inset` is a
-`Float64` tuple with `inset_given` telling whether the caller chose it;
-`title` is already passed through `_label`). Throws `ArgumentError("<who>: …")`.
+written and return them normalized as a NamedTuple (`who`; `position` is
+`nothing`, a normalized Symbol or a `Float64` tuple; colours are `String`s;
+`inset` is a `Float64` tuple with `inset_given` telling whether the caller
+chose it; `title` is already passed through `_label`; `title_side` is a
+plotly `legend.title.side` string or `nothing`). Throws
+`ArgumentError("<who>: …")`.
 """
 function _legend_options(
 	who::AbstractString;
@@ -533,6 +554,7 @@ function _legend_options(
 	itemwidth = 0,
 	entrywidth = 0,
 	legend_target = nothing,
+	title_side = nothing,
 )
 	pos = _legend_position_option(position, who)
 	inset_value = inset === nothing ? _DEFAULT_LEGEND_INSET[] :
@@ -567,7 +589,7 @@ function _legend_options(
 	))
 	ew = _text_real(entrywidth, who, "entrywidth")
 	(n > 0 && ew > 0) && throw(ArgumentError(
-		"$(who): pass either `ncols` (entry width as a fraction of the legend) " *
+		"$(who): pass either `ncols` (columns as wide as their labels) " *
 		"or `entrywidth` (px), not both.",
 	))
 	(n > 1 && orient == "v") && throw(ArgumentError(
@@ -587,7 +609,10 @@ function _legend_options(
 		"$(who): `legend_target` must be :cell, :figure or nothing; got $(repr(legend_target)).",
 	))
 	title_label = isempty(title) ? "" : _text_checked_label(title, who)
+	side = _legend_title_side(title_side, who)
 	return (
+		who = String(who),
+		title_side = side,
 		position = pos,
 		inset = inset_value,
 		inset_given = inset !== nothing,
@@ -614,37 +639,407 @@ end
 
 Legend fields of the F15/A3 keywords (validated by `_legend_options`):
 `orientation` (explicit, or "h" when `ncols > 0`), `entrywidth` +
-`entrywidthmode` (`span/ncols` "fraction", or px "pixels"), `itemwidth`,
-`title.text` and `font.size`. Keywords left at their sentinel produce no
-field, so the current value is kept. Nested values are Dicts that
-`_legend_apply_ext!` merges into the existing `title`/`font`.
-
-plotly.js 2.35.2 measures a "fraction" entry width against the width of the
-whole plot area (`_maxWidth = _size.w` for a legend anchored inside the paper),
-so a legend that belongs to one subplot cell passes that cell's width as a
-paper fraction in `span` to get `ncols` columns across the cell.
+`entrywidthmode` (px, "pixels"), `itemwidth`, `title.text`, `title.side` and
+`font.size`. Keywords left at their sentinel produce no field, so the current
+value is kept. Nested values are Dicts that `_legend_apply_ext!` merges into
+the existing `title`/`font`. `ncols` itself is laid out by
+[`_legend_apply_columns!`](@ref) (legend groups, one per column), which needs
+the entries; `span` is accepted for the callers' convenience and unused.
 """
 function _legend_layout_ext(opts; span::Real = 1.0)
-	# A degenerate domain (zero width after a manual relayout) falls back to
-	# the whole plot area rather than writing a zero entry width.
-	width = (isfinite(span) && span > 0) ? min(Float64(span), 1.0) : 1.0
 	ext = Dict{Symbol, Any}()
 	if opts.orientation !== nothing
 		ext[:orientation] = opts.orientation
-	elseif opts.ncols > 0
+	elseif opts.ncols > 1
 		ext[:orientation] = "h"
+	elseif opts.ncols == 1
+		ext[:orientation] = "v"  # one column: plotly's vertical legend
 	end
-	if opts.ncols > 0
-		ext[:entrywidth] = width / opts.ncols
-		ext[:entrywidthmode] = "fraction"
-	elseif opts.entrywidth > 0
+	if opts.entrywidth > 0
 		ext[:entrywidth] = _text_number(opts.entrywidth)
 		ext[:entrywidthmode] = "pixels"
 	end
 	opts.itemwidth > 0 && (ext[:itemwidth] = _text_number(opts.itemwidth))
-	isempty(opts.title) || (ext[:title] = Dict{Symbol, Any}(:text => opts.title))
+	title = Dict{Symbol, Any}()
+	isempty(opts.title) || (title[:text] = opts.title)
+	opts.title_side === nothing || (title[:side] = opts.title_side)
+	isempty(title) || (ext[:title] = title)
 	opts.fontsize > 0 && (ext[:font] = Dict{Symbol, Any}(:size => _text_number(opts.fontsize)))
 	return ext
+end
+
+# ── Legend columns (`ncols`, wrapped horizontal cell legends) ────────────────
+#
+# plotly.js 2.35.2 (components/legend/draw.js, computeLegendDimensions) draws a
+# horizontal legend whose `traceorder` contains "grouped" as one column per
+# legendgroup: the group's entries are stacked, the column is as wide as its
+# widest entry plus `itemGap`, and whole columns wrap onto a new row only when
+# they would pass the legend's maximum width (`_maxWidth`, the plot-area width
+# for a legend anchored inside the paper). Ungrouped horizontal legends instead
+# give every entry the width of the widest one (or an `entrywidth` fraction of
+# `_maxWidth`, which made labels longer than the fraction overlap - G43/G57/G58
+# - and, being proportional to the plot area, fed back into the margin
+# pushing). Columns are therefore legend groups named by the package; the name
+# records the legend id, the fill order ('c' column-major as matplotlib's
+# `ncols`, 'r' row-major for wrapped horizontal cell legends), the column and
+# the column count, so entries added later can join the layout.
+const _LEGEND_COLUMN_GROUP_PREFIX = "plotlysupply:col:"
+const _LEGEND_COLUMN_GROUP_REGEX = r"^plotlysupply:col:(legend[0-9]*):([cr]):([0-9]{1,6})/([0-9]{1,6})$"
+# plotly.js legend constants (components/legend/constants.js itemGap) and
+# attribute defaults (legend.itemwidth, legend.indentation, legend.borderwidth).
+const _LEGEND_ITEM_GAP = 5
+const _LEGEND_DEFAULT_ITEMWIDTH = 30
+# plotly.js layout defaults used to estimate the plot-area width: width 700
+# (the package's savefig default, as tight_layout!) and margin.l/r 80.
+const _LEGEND_DEFAULT_MARGIN_LR = 80.0
+
+_legend_column_group(legend_id::AbstractString, fill::Char, k::Integer, n::Integer) =
+	string(_LEGEND_COLUMN_GROUP_PREFIX, legend_id, ":", fill, ":", k, "/", n)
+
+# (legend id, fill, column, column count) of a package column group, else nothing.
+function _legend_column_info(group)
+	group isa AbstractString || return nothing
+	m = match(_LEGEND_COLUMN_GROUP_REGEX, group)
+	m === nothing && return nothing
+	k = parse(Int, m[3])
+	n = parse(Int, m[4])
+	(1 <= k <= n) || return nothing
+	return (String(m[1]), m[2][1], k, n)
+end
+
+_legend_is_column_group(group) =
+	group isa AbstractString && startswith(group, _LEGEND_COLUMN_GROUP_PREFIX)
+
+# plotly.js sorts legend entries by `legendrank` (default 1000), then by trace order.
+function _legend_rank(trace::GenericTrace)
+	r = get(trace.fields, :legendrank, nothing)
+	return (r isa Real && !(r isa Bool) && isfinite(r)) ? Float64(r) : 1000.0
+end
+
+# Trace indices of the entries legend `legend_id` lists, in plotly's order.
+function _legend_entry_indices(p::Plot, legend_id::AbstractString)
+	indices = Int[]
+	for (index, trace) in enumerate(p.data)
+		trace isa GenericTrace || continue
+		_legend_trace_legend_id(trace) == legend_id || continue
+		_trace_will_showlegend(trace) || continue
+		push!(indices, index)
+	end
+	sort!(indices; by = index -> (_legend_rank(p.data[index]), index))
+	return indices
+end
+
+# Pie-like traces list one entry per slice, which cannot be split over columns.
+_legend_lists_slices(p::Plot, legend_id::AbstractString) = any(p.data) do trace
+	trace isa GenericTrace && _trace_has_slice_legend(trace) &&
+		_legend_trace_legend_id(trace) == legend_id
+end
+
+# Font size (px) plotly.js uses for the entries of legend box `box`: the box's
+# font, the template's legend font, the layout font, the template font, 12.
+function _legend_entry_font_size(p::Plot, box::AbstractDict)
+	for value in (
+		get(_symbol_dict(get(box, :font, nothing)), :size, nothing),
+		_legend_template_layout_value(p, (:legend, :font, :size)),
+		get(_symbol_dict(get(p.layout.fields, :font, nothing)), :size, nothing),
+		_legend_template_layout_value(p, (:font, :size)),
+	)
+		size = _legend_real(value)
+		(size === nothing || size <= 0) || return size
+	end
+	return Float64(_PLOTLY_DEFAULT_FONT_SIZE)
+end
+
+# Estimated px width of each entry of `indices` as plotly.js lays it out
+# (legend/draw.js `getLegendItemWidth`): textGap (indentation + itemwidth + 2
+# itemGap) plus the trace's own `legendwidth`, else the box's `entrywidth` in
+# pixels, else the label.
+function _legend_entry_widths(p::Plot, box::AbstractDict, indices::Vector{Int})
+	fontsize = _legend_entry_font_size(p, box)
+	itemwidth = something(_legend_real(get(box, :itemwidth, nothing)), Float64(_LEGEND_DEFAULT_ITEMWIDTH))
+	indentation = something(_legend_real(get(box, :indentation, nothing)), 0.0)
+	textgap = indentation + itemwidth + 2 * _LEGEND_ITEM_GAP
+	entrywidth = get(box, :entrywidthmode, "pixels") == "fraction" ? nothing :
+		_legend_real(get(box, :entrywidth, nothing))
+	return map(indices) do index
+		fields = p.data[index].fields
+		own = _legend_real(get(fields, :legendwidth, nothing))
+		(own !== nothing && own > 0) && return textgap + own
+		(entrywidth !== nothing && entrywidth > 0) && return textgap + entrywidth
+		name = get(fields, :name, "")
+		return textgap + _text_extent(name isa AbstractString ? name : string(name), fontsize)[1]
+	end
+end
+
+# Column (1-based) of each of `m` entries in `n` columns: column-major ('c',
+# matplotlib's distribution - the first `m mod n` columns take one entry more)
+# or row-major ('r').
+function _legend_column_assignment(m::Int, n::Int, order::Char)
+	n = max(min(n, m), 1)
+	order == 'r' && return [mod1(j, n) for j in 1:m]
+	rows, large = divrem(m, n)
+	columns = Int[]
+	for k in 1:n
+		append!(columns, Iterators.repeated(k, k <= large ? rows + 1 : rows))
+	end
+	return columns
+end
+
+# Estimated px width of a column legend: the columns (widest entry + itemGap
+# each), the frame, and a title drawn at the left.
+function _legend_columns_width(widths::Vector{Float64}, columns::Vector{Int}, frame::Float64, title_width::Float64)
+	isempty(widths) && return 2 * frame + title_width
+	total = 0.0
+	for k in unique(columns)
+		total += maximum(widths[j] for j in eachindex(widths) if columns[j] == k) + _LEGEND_ITEM_GAP
+	end
+	return total + 2 * frame + title_width
+end
+
+# Width (px) of the plot area plotly.js will lay the figure out in, from
+# `layout.width` (else 700 px, the export default) and the left/right margins
+# (layout, template, plotly default 80 px). Automatic margins only shrink it,
+# which the column fit absorbs through the generous label estimates.
+function _legend_plot_area_width(p::Plot)
+	width = _tight_real(get(p.layout.fields, :width, nothing), _TIGHT_DEFAULT_WIDTH)
+	margin = _symbol_dict(get(p.layout.fields, :margin, nothing))
+	side(key) = something(
+		_legend_real(get(margin, key, nothing)),
+		_legend_real(_legend_template_layout_value(p, (:margin, key))),
+		_LEGEND_DEFAULT_MARGIN_LR,
+	)
+	return max(width - side(:l) - side(:r), 1.0)
+end
+
+# Width (px) a legend may take before plotly.js wraps it: the cell's share of
+# the plot area for a cell legend, the plot area for a legend anchored inside
+# the paper, half the figure for one anchored left or right of it.
+function _legend_available_width(p::Plot, box::AbstractDict, span::Float64)
+	x = _legend_real(get(box, :x, nothing))
+	area = _legend_plot_area_width(p)
+	if get(box, :xref, "paper") == "paper" && x !== nothing && (x < 0 || x > 1)
+		return _tight_real(get(p.layout.fields, :width, nothing), _TIGHT_DEFAULT_WIDTH) / 2
+	end
+	return area * clamp(span, 0.0, 1.0)
+end
+
+# Remove the column groups of legend `legend_id` (all legends when `nothing`)
+# from the traces; returns the ids of the legends that had some. An entry whose
+# merged duplicates (`_legend_dedupe!`: hidden members in the group named after
+# the entry's trace index) still exist rejoins their group, so a click toggles
+# them together again.
+function _legend_clear_column_groups!(p::Plot, legend_id = nothing)
+	cleared = Set{String}()
+	merged = Set{String}()
+	for trace in p.data
+		trace isa GenericTrace || continue
+		group = get(trace.fields, :legendgroup, nothing)
+		(group isa AbstractString && startswith(group, _LEGEND_DEDUPE_GROUP_PREFIX)) && push!(merged, group)
+	end
+	for (index, trace) in enumerate(p.data)
+		trace isa GenericTrace || continue
+		info = _legend_column_info(get(trace.fields, :legendgroup, nothing))
+		info === nothing && continue
+		(legend_id === nothing || info[1] == legend_id) || continue
+		delete!(trace.fields, :legendgroup)
+		linked = _LEGEND_DEDUPE_GROUP_PREFIX * info[1] * ":" * string(index)
+		linked in merged && (trace.fields[:legendgroup] = linked)
+		push!(cleared, info[1])
+	end
+	return cleared
+end
+
+# Box fields of a legend after its columns are removed: plotly's own default
+# order would become "grouped" again if other legend groups remain.
+function _legend_uncolumn_box!(p::Plot, legend_id::AbstractString)
+	key = Symbol(legend_id)
+	haskey(p.layout.fields, key) || return nothing
+	d = _symbol_dict(p.layout.fields[key])
+	order = get(d, :traceorder, nothing)
+	if order isa AbstractString && occursin("grouped", order)
+		d[:traceorder] = occursin("reversed", order) ? "reversed" : "normal"
+		p.layout.fields[key] = attr(; d...)
+	end
+	return nothing
+end
+
+"""
+	_legend_apply_columns!(p, legend_id, ncols; fill='c', span=1.0, who="set_legend!") -> Int
+
+Lay the entries of legend `legend_id` out in at most `ncols` columns (legend
+groups, see the note above): column-major (`fill='c'`, as matplotlib's
+`ncols`) or row-major (`fill='r'`, a horizontal legend wrapped into rows).
+The column count is reduced until the estimated legend width fits the width
+available to it (`span` = the cell's paper width for a cell legend), so a
+legend never runs into the neighbouring cell; with `who` non-empty a reduction
+is reported with a warning. Each entry's previous legend group (a stem or
+merged-duplicate group, or a user group) is replaced; the box gets
+`orientation="h"`, `traceorder="grouped"` (keeping "reversed"), no fraction
+`entrywidth` (a pixel one is kept and sizes the entries), and a title on top
+unless `title.side` is set; `layout.legend`
+gets `groupclick="toggleitem"` so a click toggles one entry, not its column.
+Legends that list pie slices, and legends without entries, get no columns.
+Returns the number of columns used (0 = none).
+"""
+function _legend_apply_columns!(
+	p::Plot,
+	legend_id::AbstractString,
+	ncols::Integer;
+	fill::Char = 'c',
+	span::Real = 1.0,
+	who::AbstractString = "set_legend!",
+)
+	legend_id = String(legend_id)
+	_legend_clear_column_groups!(p, legend_id)
+	key = Symbol(legend_id)
+	box = _symbol_dict(get(p.layout.fields, key, nothing))
+	indices = _legend_entry_indices(p, legend_id)
+	if ncols < 1 || isempty(indices) || _legend_lists_slices(p, legend_id)
+		_legend_uncolumn_box!(p, legend_id)
+		return 0
+	end
+	widths = _legend_entry_widths(p, box, indices)
+	frame = something(_legend_real(get(box, :borderwidth, nothing)), 0.0)
+	title = _symbol_dict(get(box, :title, nothing))
+	title_text = get(title, :text, "")
+	has_title = title_text isa AbstractString && !isempty(strip(title_text))
+	title_left = has_title && occursin("left", string(get(title, :side, "top")))
+	title_width = title_left ? _text_extent(title_text, _legend_entry_font_size(p, box))[1] + 2 * _LEGEND_ITEM_GAP : 0.0
+	available = _legend_available_width(p, box, Float64(span))
+	wanted = min(Int(ncols), length(indices))
+	used = wanted
+	columns = _legend_column_assignment(length(indices), used, fill)
+	while used > 1 && _legend_columns_width(widths, columns, frame, title_width) > available
+		used -= 1
+		columns = _legend_column_assignment(length(indices), used, fill)
+	end
+	if used < wanted && !isempty(who)
+		@warn "$(who): $(wanted) legend columns of these labels (about " *
+			"$(round(Int, _legend_columns_width(widths, _legend_column_assignment(length(indices), wanted, fill), frame, title_width))) px) " *
+			"do not fit the $(round(Int, available)) px available to legend " *
+			"$(repr(legend_id)); using $(used). Shorten the labels, use a " *
+			"smaller `fontsize`, or place the legend outside the axes."
+	end
+	for (j, index) in enumerate(indices)
+		p.data[index].fields[:legendgroup] = _legend_column_group(legend_id, fill, columns[j], used)
+	end
+	order = get(box, :traceorder, nothing)
+	box[:traceorder] = (order isa AbstractString && occursin("reversed", order)) ? "reversed+grouped" : "grouped"
+	box[:orientation] = "h"
+	# A fraction `entrywidth` scales with the plot area (G59); a pixel one is
+	# kept, and the widths above already use it.
+	if get(box, :entrywidthmode, "pixels") == "fraction"
+		delete!(box, :entrywidth)
+		delete!(box, :entrywidthmode)
+	end
+	if has_title && !haskey(title, :side)
+		title[:side] = "top"
+		box[:title] = attr(; title...)
+	end
+	p.layout.fields[key] = attr(; box...)
+	_legend_set_groupclick!(p)
+	return used
+end
+
+# plotly.js 2.35.2 reads `groupclick` from `layout.legend` for every legend.
+function _legend_set_groupclick!(p::Plot)
+	haskey(p.layout.fields, :legend) || return nothing
+	d = _symbol_dict(p.layout.fields[:legend])
+	get(d, :groupclick, nothing) == "toggleitem" && return nothing
+	d[:groupclick] = "toggleitem"
+	p.layout.fields[:legend] = attr(; d...)
+	return nothing
+end
+
+# (fill, column count) of the column layout legend `legend_id` has, or nothing.
+function _legend_column_layout(p::Plot, legend_id::AbstractString)
+	for trace in p.data
+		trace isa GenericTrace || continue
+		info = _legend_column_info(get(trace.fields, :legendgroup, nothing))
+		(info !== nothing && info[1] == legend_id) && return (info[2], info[4])
+	end
+	return nothing
+end
+
+_legend_box_orientation(p::Plot, legend_id::AbstractString) =
+	get(_symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing)), :orientation, "v")
+
+"""
+	_legend_relayout_columns!(p, legend_id, opts; span = 1.0, cell = false)
+
+Column layout of legend `legend_id` after an explicit `set_legend!` /
+`subplot_legends!` call with validated options `opts`: `ncols > 1` lays the
+entries out in that many columns (fewer if they do not fit, with a warning);
+`ncols = 1` (a vertical legend) and `orientation = :v` remove the columns;
+otherwise an existing column layout
+is rebalanced over the current entries. A cell legend (`cell = true`) that is
+horizontal without `ncols` is wrapped into as many row-major columns as fit
+the cell (G59), instead of plotly's wrapping at the width of the whole plot
+area. `span` is the legend's share of the plot-area width.
+"""
+function _legend_relayout_columns!(p::Plot, legend_id::AbstractString, opts; span::Real = 1.0, cell::Bool = false)
+	who = isempty(opts.who) ? "set_legend!" : opts.who
+	if opts.ncols > 1 || (opts.ncols == 1 && opts.orientation == "h")
+		_legend_apply_columns!(p, legend_id, opts.ncols; fill = 'c', span = span, who = who)
+		return nothing
+	end
+	if opts.ncols == 1 || opts.orientation == "v"
+		isempty(_legend_clear_column_groups!(p, legend_id)) || _legend_uncolumn_box!(p, legend_id)
+		return nothing
+	end
+	layout = _legend_column_layout(p, legend_id)
+	if layout !== nothing
+		fill, n = layout
+		count = fill == 'r' ? length(p.data) : n
+		_legend_apply_columns!(p, legend_id, count; fill = fill, span = span, who = "")
+	elseif cell && _legend_box_orientation(p, legend_id) == "h"
+		_legend_apply_columns!(p, legend_id, length(p.data); fill = 'r', span = span, who = "")
+	end
+	return nothing
+end
+
+"""
+	_legend_extend_columns!(p; first = 1)
+
+Give entries that joined a column legend after its layout (traces from index
+`first` on that list in a legend whose other entries carry its column groups)
+their column: the next free column, else the last one, for a column-major
+legend; the next slot of the row for a row-major one. Earlier entries are not
+touched, so this is safe on the append-only transaction path; the columns are
+rebalanced by the next `set_legend!`.
+"""
+function _legend_extend_columns!(p::Plot; first::Integer = 1)
+	layouts = Dict{String, Tuple{Char, Int}}()
+	for trace in p.data
+		trace isa GenericTrace || continue
+		info = _legend_column_info(get(trace.fields, :legendgroup, nothing))
+		info === nothing && continue
+		legend_id, fill, _, n = info
+		_legend_trace_legend_id(trace) == legend_id || continue
+		haskey(layouts, legend_id) || (layouts[legend_id] = (fill, n))
+	end
+	isempty(layouts) && return nothing
+	for (legend_id, (fill, n)) in layouts
+		indices = _legend_entry_indices(p, legend_id)
+		used = Set{Int}()
+		for (j, index) in enumerate(indices)
+			trace = p.data[index]
+			info = _legend_column_info(get(trace.fields, :legendgroup, nothing))
+			if info !== nothing && info[1] == legend_id && info[2] == fill && info[4] == n
+				push!(used, info[3])
+				continue
+			end
+			index >= first || continue
+			column = if fill == 'r'
+				mod1(j, n)
+			else
+				length(used) < n ? something(findfirst(k -> !(k in used), 1:n), n) : n
+			end
+			trace.fields[:legendgroup] = _legend_column_group(legend_id, fill, column, n)
+			push!(used, column)
+		end
+	end
+	return nothing
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -731,8 +1126,9 @@ function _text_figure_title!(fig, text, align::Symbol, fontsize::Float64, bold::
 		fontsize > 0 && (updates[:title_font_size] = _text_number(fontsize))
 	end
 	relayout!(fig; updates...)
-	# A legend already drawn above the axes stays clear of the new title.
-	isempty(text) || _legend_title_clearance!(_cmn_plot(fig))
+	# A legend already drawn above the axes stays clear of the new title, and
+	# a figure legend there is re-stacked for the new title band.
+	_legend_stack!(_cmn_plot(fig))
 	return nothing
 end
 
@@ -789,6 +1185,9 @@ function _text_panel_title!(fig, target, text, align::Symbol, fontsize::Float64,
 	_text_drop_centred_cell_title!(fig, xdom, ydom)
 	_upsert_named!(fig, :annotations, name, [attr(annotation)]; who = "title!")
 	_text_refit_panel_label!(fig, target)
+	# D12: above a top axis / a cell legend above the axes; a figure legend
+	# above the plot area moves above the new title.
+	_text_restack!(fig)
 	return nothing
 end
 
@@ -847,6 +1246,347 @@ function _text_refit_panel_label!(fig, target)
 	xshift == 0 ? delete!(entry, :xshift) : (entry[:xshift] = xshift)
 	_upsert_named!(fig, :annotations, name, [attr(entry)]; who = "title!")
 	return nothing
+end
+
+# ── Stacking above the axes (D12, G38, G60) ──────────────────────────────────
+#
+# Above a cell's axes sit, bottom to top: a top x axis (tick labels and title,
+# own or `secondary_xaxis!`), a legend placed above the axes, then the panel
+# title with the outside top panel label on its line; a figure legend drawn
+# above the plot area goes above the stacks of the top row. `_text_restack!`
+# enforces that order after every change of one of them (`title!`,
+# `panel_labels!`, every legend placement). It only RAISES what would overlap
+# the item below it - panel titles and labels through `yshift` (px), legends
+# through `y` (paper) - so a figure that fits is unchanged, a decoration the
+# user moved higher stays there, and a second pass changes nothing. A
+# decoration is not lowered again when what was below it goes away (call
+# `title!`/`panel_labels!` again for that). Room between rows is not made
+# here: a raised panel title of a lower row can reach the x axis of the row
+# above (the layout engine reserves that room, D12).
+
+# plotly.js layout default margin.b (px) and the padding `Plots.autoMargin`
+# adds to a pushing legend (min(12, margins)).
+const _TEXT_DEFAULT_MARGIN_B = 80.0
+const _TEXT_AUTOMARGIN_PAD = 12.0
+# The plot-area height used to convert px to paper never goes below this
+# fraction of the figure height (tiny figures would otherwise send a legend
+# far above the plot).
+const _TEXT_MIN_PLOT_FRACTION = 0.25
+
+function _text_margin(p::Plot, key::Symbol, default::Float64)
+	margin = _symbol_dict(get(p.layout.fields, :margin, nothing))
+	return something(
+		_legend_real(get(margin, key, nothing)),
+		_legend_real(_legend_template_layout_value(p, (:margin, key))),
+		default,
+	)
+end
+
+_text_figure_height(p::Plot) = _tight_real(get(p.layout.fields, :height, nothing), _TIGHT_DEFAULT_HEIGHT)
+
+# Largest plot-area height (px) plotly.js can give the figure: margin pushing
+# only shrinks it.
+_text_plot_height_max(p::Plot) = max(
+	_text_figure_height(p) - _legend_top_margin(p) - _text_margin(p, :b, _TEXT_DEFAULT_MARGIN_B),
+	_TEXT_MIN_PLOT_FRACTION * _text_figure_height(p),
+)
+
+# Estimated height (px) of legend box `legend_id` as plotly.js 2.35.2 lays it
+# out (legend/draw.js computeLegendDimensions): entry rows of max(text height,
+# 16) + 3 px - one per entry for a vertical legend, the longest column for a
+# column legend, rows of the plot-area width for a plain horizontal legend -,
+# a title on top, and the frame + itemGap padding. 0 when it lists nothing.
+function _legend_box_height(p::Plot, legend_id::AbstractString)
+	box = _symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing))
+	get(box, :visible, true) === false && return 0.0
+	indices = _legend_entry_indices(p, legend_id)
+	isempty(indices) && return 0.0
+	fontsize = _legend_entry_font_size(p, box)
+	heights = map(indices) do index
+		name = get(p.data[index].fields, :name, "")
+		max(_text_extent(name isa AbstractString ? name : string(name), fontsize)[2], 16.0) + 3
+	end
+	orientation = get(box, :orientation, "v")
+	order = get(box, :traceorder, "")
+	body = if orientation != "h"
+		sum(heights)
+	elseif order isa AbstractString && occursin("grouped", order)
+		columns = Dict{Any, Float64}()
+		for (j, index) in enumerate(indices)
+			group = get(p.data[index].fields, :legendgroup, "")
+			key = (group isa AbstractString && !isempty(group)) ? group : index
+			columns[key] = get(columns, key, 0.0) + heights[j]
+		end
+		maximum(values(columns))
+	else
+		widths = _legend_entry_widths(p, box, indices)
+		rows = ceil(Int, (sum(widths) + _LEGEND_ITEM_GAP * length(widths)) / _legend_plot_area_width(p))
+		max(rows, 1) * maximum(heights)
+	end
+	frame = something(_legend_real(get(box, :borderwidth, nothing)), 0.0)
+	title = _symbol_dict(get(box, :title, nothing))
+	title_text = get(title, :text, "")
+	if title_text isa AbstractString && !isempty(strip(title_text))
+		side = string(get(title, :side, orientation == "h" ? "left" : "top"))
+		title_size = something(_legend_real(get(_symbol_dict(get(title, :font, nothing)), :size, nothing)), fontsize)
+		h = _text_extent(title_text, title_size)[2]
+		body = occursin("top", side) ? body + h : max(body, h)
+	end
+	return body + 2 * (frame + _LEGEND_ITEM_GAP)
+end
+
+# A legend box drawn above paper height `edge`: paper-referenced, anchored at
+# its bottom edge at or above it.
+function _text_box_above(box::AbstractDict, edge::Float64)
+	get(box, :visible, true) === false && return false
+	get(box, :yref, "paper") == "paper" || return false
+	get(box, :yanchor, nothing) == "bottom" || return false
+	y = _legend_real(get(box, :y, nothing))
+	return y !== nothing && y >= edge - 1e-9
+end
+
+# Top x axes (`side="top"`, own or `overlaying` another axis): the x domain,
+# the top of the y domain they are drawn at, and their depth (px, tick labels
+# + title, `_axes_top_axis_depth`).
+function _text_top_axes(p::Plot)
+	out = Tuple{Tuple{Float64, Float64}, Float64, Float64}[]
+	layout = p.layout
+	for (key, value) in layout.fields
+		occursin(r"^xaxis([2-9]|[1-9][0-9]+)?$", String(key)) || continue
+		axis = _symbol_dict(value)
+		get(axis, :side, "bottom") == "top" || continue
+		get(axis, :visible, true) === false && continue
+		ref = _legend_base_axis_ref(layout, replace(String(key), "axis" => ""), :x)
+		# plotly.js domain default [0, 1] (a plain Plot sets none).
+		xdom = something(_layout_axis_domain(layout, _axis_layout_key(ref, :x)), (0.0, 1.0))
+		anchor = get(axis, :anchor, get(_symbol_dict(get(layout.fields, _axis_layout_key(ref, :x), nothing)), :anchor, "y"))
+		(anchor isa AbstractString && startswith(anchor, "y")) || continue
+		ydom = something(_layout_axis_domain(layout, _axis_layout_key(anchor, :y)), (0.0, 1.0))
+		push!(out, (xdom, ydom[2], _axes_top_axis_depth(layout, axis)))
+	end
+	return out
+end
+
+_text_in_span(x::Real, span) = span[1] - 1e-9 <= x <= span[2] + 1e-9
+
+# Cell legends of `p` (per-subplot legends: the ids traces carry explicitly)
+# with their paper domains; none in figure-legend mode or on a plain Plot.
+function _text_cell_legends(p::Plot)
+	out = Tuple{String, Tuple{Float64, Float64}, Tuple{Float64, Float64}}[]
+	any(t -> t isa GenericTrace && haskey(t.fields, :legend) && !_trace_is_figure_legend_entry(t), p.data) || return out
+	order, ids, domains, _ = _legend_subplot_assignment(p)
+	for key in order
+		xdom, ydom = domains[key]
+		push!(out, (_legend_id(ids[key]), xdom, ydom))
+	end
+	return out
+end
+
+# Figure legends: `legend1000` (legend_entry! proxies) and, without cell
+# legends, `legend`.
+function _text_figure_legend_ids(p::Plot, cell_legends)
+	ids = String[]
+	isempty(cell_legends) && push!(ids, "legend")
+	any(t -> t isa GenericTrace && _trace_is_figure_legend_entry(t), p.data) && push!(ids, _FIGURE_LEGEND_ID)
+	return ids
+end
+
+const _TEXT_STACK_NAME = r"^plotlysupply:(title|panel_label):([0-9]+):([0-9]+)$"
+
+# Text height (px) of annotation `item` at its font size (else the layout's).
+function _text_annotation_height(p::Plot, item::AbstractDict)
+	text = get(item, :text, "")
+	text isa AbstractString || return 0.0
+	size = _legend_real(get(_symbol_dict(get(item, :font, nothing)), :size, nothing))
+	size === nothing && (size = _legend_real(get(_symbol_dict(get(p.layout.fields, :font, nothing)), :size, nothing)))
+	return _text_extent(text, something(size, Float64(_PLOTLY_DEFAULT_FONT_SIZE)))[2]
+end
+
+# px a container-referenced, automargin figure title reserves at the top of
+# the figure (pad.t + text + pad.b), 0 without one.
+function _text_title_band(p::Plot)
+	title = get(p.layout.fields, :title, nothing)
+	d = title isa AbstractString ? Dict{Symbol, Any}(:text => String(title)) : _symbol_dict(title)
+	text = get(d, :text, "")
+	(text isa AbstractString && !isempty(strip(text))) || return 0.0
+	get(d, :automargin, false) === true || return 0.0
+	get(d, :yref, "container") == "container" || return 0.0
+	pad = _symbol_dict(get(d, :pad, nothing))
+	h = _text_extent(text, _legend_title_font_size(p, d))[2]
+	return something(_legend_real(get(pad, :t, nothing)), 0.0) + h +
+		something(_legend_real(get(pad, :b, nothing)), 0.0)
+end
+
+# px container-referenced legends reserve at the bottom of the figure
+# (`:outside_bottom` figure legends).
+function _text_bottom_reserved(p::Plot)
+	total = 0.0
+	for (key, value) in p.layout.fields
+		name = String(key)
+		(name == "legend" || occursin(_LEGEND_ID_PATTERN, name)) || continue
+		box = _symbol_dict(value)
+		get(box, :yref, "paper") == "container" || continue
+		y = _legend_real(get(box, :y, nothing))
+		(y !== nothing && y < 0.5) || continue
+		total = max(total, _legend_box_height(p, name))
+	end
+	return total
+end
+
+"""
+	_text_figure_legend_y(p, clear, height) -> Float64
+
+Paper `y` (with `yanchor="bottom"`) that puts a figure legend of `height` px
+`clear` px above the top of the plot area once plotly.js has grown the top
+margin for it. plotly.js 2.35.2 (`plots.doAutoMargin`) solves the margin from
+the legend's position `y > 1` and size `s = height + 12` together with the
+bottom margin `mb`: `mt = max(margin.t, s + (y - 1) hp)` and the plot area
+`hp = N - mb - mt`, where `N` is the figure height minus the reserved bands
+(container title with automargin, container legends at the bottom). With
+`(y - 1) hp = clear`, `hp = N - mb - max(margin.t, s + clear)`. Every term is
+taken on the side that makes `hp` smaller (the whole title band, the default
+or set `margin.b`), so the legend lands at least `clear` px up; `hp` is kept
+above a quarter of the figure height.
+"""
+function _text_figure_legend_y(p::Plot, clear::Float64, height::Float64)
+	H = _text_figure_height(p)
+	pushed = height + _TEXT_AUTOMARGIN_PAD + clear
+	hp = H - _text_margin(p, :b, _TEXT_DEFAULT_MARGIN_B) - max(_legend_top_margin(p), pushed) -
+		_text_title_band(p) - _text_bottom_reserved(p)
+	hp = max(hp, _TEXT_MIN_PLOT_FRACTION * H)
+	return 1 + clear / hp
+end
+
+"""
+	_text_restack!(fig) -> Bool
+
+Enforce the stacking order above the axes (see the note above) on a `Plot`,
+`SyncPlot`'s plot, staged figure or `SubplotFigure`. Layout only: panel title
+and outside top panel label annotations (`"plotlysupply:title:r:c"`,
+`"plotlysupply:panel_label:r:c"`, `yanchor="bottom"`) get a `yshift` that
+clears a top x axis and a cell legend drawn above the same axes; a cell legend
+above the axes clears a top x axis; a figure legend above the plot area clears
+everything stacked above the top row (by `_LEGEND_TITLE_GAP` px). Nothing is
+lowered, so the pass is idempotent. Returns whether anything changed.
+"""
+function _text_restack!(fig)
+	p = _cmn_plot(fig)
+	items = get(p.layout.fields, :annotations, nothing)
+	stack_items = Dict{Tuple{Int, Int}, Vector{Int}}()
+	if items isa AbstractVector
+		for (index, item) in enumerate(items)
+			name = _cmn_item_name(item)
+			name isa AbstractString || continue
+			m = match(_TEXT_STACK_NAME, name)
+			m === nothing && continue
+			_cmn_mapping_get(item, :yanchor) == "bottom" || continue
+			_cmn_mapping_get(item, :yref) == "paper" || continue
+			push!(get!(stack_items, (parse(Int, m[2]), parse(Int, m[3])), Int[]), index)
+		end
+	end
+	cell_legends = _text_cell_legends(p)
+	figure_ids = _text_figure_legend_ids(p, cell_legends)
+	above = filter(id -> _text_box_above(_symbol_dict(get(p.layout.fields, Symbol(id), nothing)), 1.0), figure_ids)
+	cells_above = filter(cell_legends) do (id, _, ydom)
+		_text_box_above(_symbol_dict(get(p.layout.fields, Symbol(id), nothing)), ydom[2])
+	end
+	(isempty(stack_items) && isempty(above) && isempty(cells_above)) && return false
+
+	changed = false
+	top_axes = _text_top_axes(p)
+	axis_depth(x, edge) = maximum(
+		(depth for (xdom, top, depth) in top_axes if isapprox(top, edge; atol = 1e-6) && _text_in_span(x, xdom));
+		init = 0.0,
+	)
+	hp_max = _text_plot_height_max(p)
+	reach = 0.0   # px the stacks reach above paper y = 1
+
+	# Cell legends above their axes: clear a top x axis; their top in px.
+	legend_tops = Tuple{Tuple{Float64, Float64}, Float64, Float64}[]  # (xdom, edge, px above edge)
+	for (id, xdom, ydom) in cells_above
+		key = Symbol(id)
+		box = _symbol_dict(p.layout.fields[key])
+		height = _legend_box_height(p, id)
+		height > 0 || continue
+		edge = ydom[2]
+		x = something(_legend_real(get(box, :x, nothing)), (xdom[1] + xdom[2]) / 2)
+		depth = axis_depth(clamp(x, xdom[1], xdom[2]), edge)
+		if depth > 0
+			# Converted with the smallest plausible plot area: the legend lands
+			# at least this high.
+			y = edge + (depth + _TEXT_PANEL_GAP) / _text_plot_area_min(p, reach)
+			if y > box[:y] + 1e-6
+				box[:y] = round(y; digits = 4)
+				p.layout.fields[key] = attr(; box...)
+				changed = true
+			end
+		end
+		top = (box[:y] - edge) * hp_max + height
+		push!(legend_tops, (xdom, edge, top))
+		reach = max(reach, (edge - 1) * hp_max + top)
+	end
+
+	# Panel titles and outside top panel labels: above the axis and legends.
+	if !isempty(stack_items)
+		updated = Any[item for item in items]
+		for cell in sort!(collect(keys(stack_items)))
+			indices = stack_items[cell]
+			entries = [_symbol_dict(updated[index]) for index in indices]
+			floor = 0.0
+			for entry in entries
+				edge = _legend_real(get(entry, :y, nothing))
+				x = _legend_real(get(entry, :x, nothing))
+				(edge === nothing || x === nothing) && continue
+				below = axis_depth(x, edge)
+				for (xdom, ledge, top) in legend_tops
+					(isapprox(ledge, edge; atol = 1e-9) && _text_in_span(x, xdom)) && (below = max(below, top))
+				end
+				floor = max(floor, below)
+			end
+			shift_floor = floor + _TEXT_PANEL_GAP
+			for (index, entry) in zip(indices, entries)
+				edge = _legend_real(get(entry, :y, nothing))
+				edge === nothing && continue
+				shift = something(_legend_real(get(entry, :yshift, nothing)), 0.0)
+				if floor > 0 && shift < shift_floor - 1e-6
+					shift = shift_floor
+					entry[:yshift] = _text_number(shift)
+					updated[index] = attr(; entry...)
+					changed = true
+				end
+				reach = max(reach, (edge - 1) * hp_max + shift + _text_annotation_height(p, entry))
+			end
+		end
+		changed && (p.layout.fields[:annotations] = updated)
+	end
+	for (xdom, top, depth) in top_axes
+		reach = max(reach, (top - 1) * hp_max + depth)
+	end
+
+	# Figure legends above the plot area: above the top-row stacks.
+	if reach > 0
+		for id in above
+			key = Symbol(id)
+			box = _symbol_dict(p.layout.fields[key])
+			height = _legend_box_height(p, id)
+			height > 0 || continue
+			y = round(_text_figure_legend_y(p, reach + _LEGEND_TITLE_GAP, height); digits = 4)
+			y > box[:y] + 1e-6 || continue
+			box[:y] = y
+			p.layout.fields[key] = attr(; box...)
+			changed = true
+		end
+	end
+	return changed
+end
+
+# Smallest plausible plot-area height (px) while decorations reach `reach` px
+# above it: as `_text_figure_legend_y`, without a figure legend.
+function _text_plot_area_min(p::Plot, reach::Float64)
+	H = _text_figure_height(p)
+	hp = H - _text_margin(p, :b, _TEXT_DEFAULT_MARGIN_B) - max(_legend_top_margin(p), reach + _TEXT_AUTOMARGIN_PAD) -
+		_text_title_band(p) - _text_bottom_reserved(p)
+	return max(hp, _TEXT_MIN_PLOT_FRACTION * H)
 end
 
 function _text_title_args(align, fontsize, offset)
@@ -1131,6 +1871,7 @@ function _text_write_panel_labels!(fig, targets, texts, format, position, outsid
 	for (name, annotation) in items
 		_upsert_named!(fig, :annotations, name, [annotation]; who = "panel_labels!")
 	end
+	_text_restack!(fig)   # D12 stacking, as for panel titles
 	return nothing
 end
 

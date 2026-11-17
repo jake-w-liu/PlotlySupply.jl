@@ -323,11 +323,19 @@ using Test, PlotlySupply
 		placed = (lg(fig)[:x], lg(fig)[:y])
 		set_legend!(fig; ncols = 3)
 		d = lg(fig)
-		@test d[:orientation] == "h" && d[:entrywidth] ≈ 1 / 3 && d[:entrywidthmode] == "fraction"
+		# G43/G58: columns are legend groups sized by their labels, no entrywidth
+		@test d[:orientation] == "h" && d[:traceorder] == "grouped" && !haskey(d, :entrywidth)
+		@test [t.fields[:legendgroup] for t in pl(fig).data] == ["plotlysupply:col:legend:c:$(k)/3" for k in 1:3]
+		@test d[:groupclick] == "toggleitem"
 		@test (d[:x], d[:y]) == placed                      # position kept
-		set_legend!(fig; entrywidth = 80, itemwidth = 40)
+		set_legend!(fig; entrywidth = 80, itemwidth = 40)   # pixel entries keep the columns
 		d = lg(fig)
 		@test d[:entrywidth] == 80 && d[:entrywidthmode] == "pixels" && d[:itemwidth] == 40
+		@test d[:traceorder] == "grouped" && pl(fig).data[3].fields[:legendgroup] == "plotlysupply:col:legend:c:3/3"
+		set_legend!(fig; ncols = 1)                         # one column: plain vertical legend
+		d = lg(fig)
+		@test d[:orientation] == "v" && d[:traceorder] == "normal"
+		@test !any(t -> haskey(t.fields, :legendgroup), pl(fig).data)
 		set_legend!(fig; title = "Runs \$n\$", fontsize = 9)
 		d = lg(fig)
 		@test sd(d[:title])[:text] == PS._label("Runs \$n\$") && sd(d[:font])[:size] == 9
@@ -418,12 +426,13 @@ using Test, PlotlySupply
 		t12 = cell(sf, 1, 2)
 		@test d[:x] ≈ t12.xdomain[1] + 1.03 * (t12.xdomain[2] - t12.xdomain[1])
 		@test d[:xanchor] == "left" && d[:y] ≈ t12.ydomain[2]
-		# A3 per-cell ncols: entry width scaled to the cell width
+		# A3/G57 per-cell ncols: content-sized columns (one entry → one column)
 		id21 = PS._legend_cell_legend_id(pl(sf), cell(sf, 2, 1))
 		set_legend!(sf; row = 2, col = 1, position = :top, ncols = 2, frame = false)
 		d = lg(sf, Symbol(id21))
-		t21 = cell(sf, 2, 1)
-		@test d[:entrywidth] ≈ (t21.xdomain[2] - t21.xdomain[1]) / 2 && d[:orientation] == "h"
+		owner21 = findfirst(t -> t.fields[:name] == "s21", pl(sf).data)
+		@test d[:orientation] == "h" && d[:traceorder] == "grouped" && !haskey(d, :entrywidth)
+		@test pl(sf).data[owner21].fields[:legendgroup] == "plotlysupply:col:$(id21):c:1/1"
 		@test d[:bgcolor] == "rgba(0,0,0,0)"
 		# other cells untouched by a per-cell call
 		id11 = PS._legend_cell_legend_id(pl(sf), cell(sf, 1, 1))
@@ -455,7 +464,8 @@ using Test, PlotlySupply
 		@test all(t -> !haskey(t.fields, :legend), pl(sm).data)
 		@test count(t -> get(t.fields, :showlegend, true) !== false, pl(sm).data) == 2
 		@test !any(k -> occursin(PS._LEGEND_ID_PATTERN, String(k)), keys(pl(sm).layout.fields))
-		@test lg(sm)[:yref] == "container" && lg(sm)[:entrywidth] ≈ 0.5
+		@test lg(sm)[:yref] == "container" && lg(sm)[:traceorder] == "grouped" && !haskey(lg(sm), :entrywidth)
+		@test [pl(sm).data[k].fields[:legendgroup] for k in 1:2] == ["plotlysupply:col:legend:c:$(k)/2" for k in 1:2]
 		# figure-mode cell placement needs per-subplot legends
 		@test throws_arg(() -> set_legend!(sm; row = 1, col = 1, position = :top), "per-subplot legends")
 		# back to cell legends; the merge is undone
@@ -463,6 +473,84 @@ using Test, PlotlySupply
 		@test sm.per_subplot_legends
 		@test count(t -> get(t.fields, :showlegend, true) !== false, pl(sm).data) == 6
 		@test length(unique(t.fields[:legend] for t in pl(sm).data)) == 3
+	end
+
+	@testset "legend columns: ncols, wrapped cell legends, title_side (G43, G57-G59, G76)" begin
+		group(f, k) = get(pl(f).data[k].fields, :legendgroup, nothing)
+		# column-major as matplotlib: the first `m mod n` columns take one more
+		cm = plot_scatter(x, [x .+ k for k in 1:5]; legend = ["a", "b", "c", "d", "e"])
+		set_legend!(cm; ncols = 2)
+		@test [group(cm, k) for k in 1:5] == ["plotlysupply:col:legend:c:$(k)/2" for k in (1, 1, 1, 2, 2)]
+		@test PS._legend_column_assignment(7, 3, 'c') == [1, 1, 1, 2, 2, 3, 3]
+		@test PS._legend_column_assignment(5, 2, 'r') == [1, 2, 1, 2, 1]
+		@test PS._legend_column_assignment(2, 4, 'c') == [1, 2]
+
+		# columns that do not fit the plot area are reduced, with a warning
+		long = ["Graph eigenvalue error, mesh level 1 (h)", "Doublet projector error at level 2",
+			"Full-model envelope, three frequencies"]
+		lf = plot_scatter(x, [x .+ k for k in 1:3]; legend = long)
+		@test_logs (:warn, r"3 legend columns .* using 2\.") set_legend!(lf; ncols = 3)
+		@test [group(lf, k) for k in 1:3] == ["plotlysupply:col:legend:c:$(k)/2" for k in (1, 1, 2)]
+		wide = plot_scatter(x, [x .+ k for k in 1:3]; legend = long)
+		relayout!(wide; width = 1600)
+		@test_logs set_legend!(wide; ncols = 3)              # wide enough: no warning
+		@test group(wide, 3) == "plotlysupply:col:legend:c:3/3"
+
+		# merged duplicates: the listed entry takes a column, its duplicates rejoin it without columns
+		dp = plot_scatter(x, [x, 2x, 3x]; legend = ["same", "same", "other"], color = ["black", "black", "red"])
+		set_legend!(dp; ncols = 2)
+		@test group(dp, 1) == "plotlysupply:col:legend:c:1/2" && group(dp, 3) == "plotlysupply:col:legend:c:2/2"
+		@test group(dp, 2) == PS._LEGEND_DEDUPE_GROUP_PREFIX * "legend:1" && pl(dp).data[2].fields[:showlegend] === false
+		set_legend!(dp; ncols = 1)
+		@test group(dp, 1) == group(dp, 2) && group(dp, 3) === nothing
+		@test lg(dp)[:traceorder] == "normal"
+
+		# pie legends list slices: never split into columns
+		pp = plot_pie([3, 2, 1]; labels = ["a", "b", "c"])
+		set_legend!(pp; ncols = 2)
+		@test group(pp, 1) === nothing && get(lg(pp), :traceorder, "") != "grouped"
+
+		# entries added later join the last column of a cell legend
+		sc = subplots(1, 2; sync = false)
+		plot_scatter!(sc, x, [x, 2x, 3x]; legend = ["a", "b", "c"], row = 1, col = 1)
+		plot_scatter!(sc, x, x; legend = "z", row = 1, col = 2)
+		set_legend!(sc; row = 1, col = 1, ncols = 2)
+		id = PS._legend_cell_legend_id(pl(sc), cell(sc, 1, 1))
+		@test [group(sc, k) for k in 1:3] == ["plotlysupply:col:$(id):c:$(k)/2" for k in (1, 1, 2)]
+		@test group(sc, 4) === nothing                       # the other cell keeps no columns
+		plot_scatter!(sc, x, 4x; legend = "d", row = 1, col = 1)
+		@test group(sc, 5) == "plotlysupply:col:$(id):c:2/2"
+
+		# G59: a horizontal cell legend wraps row by row inside its cell
+		sh = subplots(1, 3; sync = false)
+		plot_scatter!(sh, x, [x, 2x]; legend = ["two frequencies", "three frequencies"], row = 1, col = 1)
+		plot_scatter!(sh, x, x; legend = "z", row = 1, col = 2)
+		@test_logs set_legend!(sh; row = 1, col = 1, orientation = :h)
+		id = PS._legend_cell_legend_id(pl(sh), cell(sh, 1, 1))
+		infos = [PS._legend_column_info(group(sh, k)) for k in 1:2]
+		@test all(i -> i !== nothing && i[1] == id && i[2] == 'r', infos)
+		@test lg(sh, Symbol(id))[:orientation] == "h"
+		# ... and an explicit pixel entry width is kept and sizes the entries
+		set_legend!(sh; row = 1, col = 1, orientation = :h, entrywidth = 10)
+		@test lg(sh, Symbol(id))[:entrywidth] == 10 && group(sh, 2) == "plotlysupply:col:$(id):r:2/2"
+		set_legend!(sh; row = 1, col = 1, orientation = :v)
+		@test group(sh, 1) === nothing && group(sh, 2) === nothing
+
+		# G76: legend title side
+		ts = plot_scatter(x, [x, 2x]; legend = ["a", "b"])
+		set_legend!(ts; title = "Runs", title_side = :left)
+		@test sd(lg(ts)[:title])[:side] == "left" && sd(lg(ts)[:title])[:text] == "Runs"
+		set_legend!(ts; title_side = "top-center")
+		@test sd(lg(ts)[:title])[:side] == "top center"
+		before = layout_json(ts)
+		@test throws_arg(() -> set_legend!(ts; title_side = :bottom), "set_legend!: `title_side` must be one of")
+		@test layout_json(ts) == before
+		tc = plot_scatter(x, [x, 2x]; legend = ["a", "b"])
+		set_legend!(tc; title = "Runs", ncols = 2)            # a column legend's title goes on top
+		@test sd(lg(tc)[:title])[:side] == "top"
+		sl = grid(1, 2)
+		subplot_legends!(sl; title = "cell", title_side = :top_left)
+		@test all(k -> sd(lg(sl, k)[:title])[:side] == "top left", (:legend, :legend2))
 	end
 
 	@testset "D5: no ambiguities, unknown keywords still raise" begin
