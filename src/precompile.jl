@@ -10,6 +10,8 @@
 #   false)` only, and only the in-process side of an export (the export copy,
 #   the finalizer and the JSON the renderer would receive; html and json
 #   written to an `IOBuffer`). Nothing touches the network or the file system.
+#   ElectronCall is not loaded either: it stays loaded on first desktop or
+#   export use (see electron_backend.jl), so its window code compiles then.
 # - no warnings, and no lasting change of package state: styles go through
 #   `with_style`, which restores the active style; defaults are never set.
 # - the inputs use the argument types a script most often passes:
@@ -89,6 +91,11 @@ function _precompile_workload()
 	_prepare_export(getfield(sf, :fig), ("png", "pdf"), NamedTuple())
 	savefig(IOBuffer(), fig; format = "html")
 	savefig(IOBuffer(), hm; format = "json")
+	# A png/pdf/svg file export would start Electron, so its Julia side is
+	# compiled from directives instead (compiled, not run): this takes about
+	# 0.25 s off the first PNG render (benchmark/README.md).
+	precompile(savefig, (typeof(fig), String))
+	precompile(Core.kwcall, (NamedTuple{(:width, :height), Tuple{Int, Int}}, typeof(savefig), typeof(fig), String))
 	return nothing
 end
 

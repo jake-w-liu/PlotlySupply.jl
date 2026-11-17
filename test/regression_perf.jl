@@ -85,6 +85,33 @@ _perf_state() = (
 		savefig_calls)
 end
 
+# Contents of every `raw"..."` string literal in an expression tree.
+function _perf_raw_strings!(found::Vector{String}, ex)
+	if Meta.isexpr(ex, :macrocall) && ex.args[1] === Symbol("@raw_str")
+		append!(found, filter(arg -> arg isa AbstractString, ex.args))
+	elseif ex isa Expr
+		foreach(arg -> _perf_raw_strings!(found, arg), ex.args)
+	end
+	return found
+end
+
+_perf_parses(ast) = !Meta.isexpr(ast, :error) && !any(ex -> Meta.isexpr(ex, (:error, :incomplete)), ast.args)
+
+@testset "perf: benchmark scripts parse" begin
+	# The benchmarks are not run by the test suite (they take tens of minutes
+	# and start Electron); this keeps them from rotting into syntax errors.
+	dir = joinpath(pkgdir(PlotlySupply), "benchmark")
+	scripts = sort!(filter(name -> endswith(name, ".jl"), readdir(dir)))
+	@test ["benchmarks.jl", "precompile_cost.jl", "scaling.jl", "ttfx.jl"] ⊆ scripts
+	for name in scripts
+		@test _perf_parses(Meta.parseall(read(joinpath(dir, name), String); filename = name))
+	end
+	# The TTFX scenarios are code strings that child processes run.
+	scenarios = _perf_raw_strings!(String[], Meta.parseall(read(joinpath(dir, "ttfx.jl"), String)))
+	@test length(scenarios) >= 8
+	@test all(code -> _perf_parses(Meta.parseall(code)), scenarios)
+end
+
 @testset "perf: constructors keep the caller's data by reference" begin
 	x, y = _perf_wave(10_000)
 	fig = plot_scatter(x, y)
