@@ -459,12 +459,17 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test fig.layout.fields[:legend][:yanchor] == "top"
 
         prev_legend_pos = get_default_legend_position()
-        set_default_legend_position!(:bottomleft)
-        @test get_default_legend_position() == :bottomleft
-        fig2 = plot_scatter(x, y; legend="trace2")
-        @test fig2.layout.fields[:legend][:xanchor] == "left"
-        @test fig2.layout.fields[:legend][:yanchor] == "bottom"
-        set_default_legend_position!(prev_legend_pos)
+        try
+            set_default_legend_position!(:bottomleft)
+            @test get_default_legend_position() == :bottomleft
+            fig2 = plot_scatter(x, y; legend="trace2")
+            @test fig2.layout.fields[:legend][:xanchor] == "left"
+            @test fig2.layout.fields[:legend][:yanchor] == "bottom"
+        finally
+            # a failure above must not leak the default into later testsets
+            set_default_legend_position!(prev_legend_pos)
+        end
+        @test get_default_legend_position() == prev_legend_pos
     end
 
     @testset "Mutating Functions - plot_scatter!" begin
@@ -806,16 +811,18 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         PlotlySupply.subplot!(sf, 1, 2)
         PlotlySupply.plot_stem!(sf, 1:5, rand(5); legend="B")
         PlotlySupply.subplot!(sf, 3) # row 2, col 1
-        PlotlySupply.plot_contour!(sf, rand(5, 5); title="contour")
+        @test_logs (:warn, r"ignores figure-level keyword\(s\) \[:title\]") PlotlySupply.plot_contour!(sf, rand(5, 5); title="contour")
         PlotlySupply.subplot!(sf, 2, 2)
-        PlotlySupply.plot_heatmap!(sf, rand(5, 5); title="heat")
+        @test_logs (:warn, r"ignores figure-level keyword\(s\) \[:title\]") PlotlySupply.plot_heatmap!(sf, rand(5, 5); title="heat")
 
         xlabel!(sf, "x22")
         ylabel!(sf, "y22")
         xrange!(sf, [0, 6])
         yrange!(sf, [0, 6])
 
-        @test length(sf.plot.data) >= 4
+        # scatter + stem (heads and stems traces) + contour + heatmap
+        @test length(sf.plot.data) == 5
+        @test [t[:type] for t in sf.plot.data] == ["scatter", "scatter", "scatter", "contour", "heatmap"]
         @test sf.plot.data[1].fields[:legend] == "legend"
         @test sf.plot.data[2].fields[:legend] == "legend2"
         @test sf.plot.data[end - 1].fields[:legend] == "legend3"
@@ -942,19 +949,32 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             color="purple",
             legend="bundle",
         )
-        @test fig_scatter_multi isa Plot
-        @test length(fig_scatter_multi.data) == 2
+        @test [t[:x] for t in fig_scatter_multi.data] == x_multi
+        @test [t[:y] for t in fig_scatter_multi.data] == y_multi
+        @test [t[:mode] for t in fig_scatter_multi.data] == ["markers", "markers"]
+        @test [t[:line][:dash] for t in fig_scatter_multi.data] == ["dash", "dot"]
+        @test [t[:line][:color] for t in fig_scatter_multi.data] == ["purple", "purple"]
+        @test [t[:name] for t in fig_scatter_multi.data] == ["bundle", "bundle"]
 
-        # y-only vector-of-vectors branch
+        # y-only vector-of-vectors branch: implicit 0-based x, unnamed series
         fig_scatter_yonly = plot_scatter(y_multi)
-        @test fig_scatter_yonly isa Plot
+        @test [t[:y] for t in fig_scatter_yonly.data] == y_multi
+        @test all(t -> t[:x] == 0:3 && t[:name] == "" && t[:showlegend] == false,
+            fig_scatter_yonly.data)
 
         # plot_stem branches: x/y vectors and fontsize path
         fig_stem_multi = plot_stem(x_multi, y_multi; color="black", legend="stem", fontsize=10)
-        @test fig_stem_multi isa Plot
-        @test length(fig_stem_multi.data) > 2
+        heads, stems = _stem_parts(fig_stem_multi)
+        @test [t[:x] for t in heads] == x_multi
+        @test [t[:y] for t in heads] == y_multi
+        @test [t[:name] for t in heads] == ["stem", "stem"]
+        @test [t[:marker][:color] for t in heads] == ["black", "black"]
+        @test [t[:legendgroup] for t in heads] == [t[:legendgroup] for t in stems]
+        @test _lookup(fig_stem_multi.layout, :font, :size) == 10
         fig_stem_yonly = plot_stem(y_multi)
-        @test fig_stem_yonly isa Plot
+        heads_y, _ = _stem_parts(fig_stem_yonly)
+        @test [t[:y] for t in heads_y] == y_multi
+        @test all(t -> t[:x] == 0:3, heads_y)
 
         # plot_scatterpolar branches: theta vectors, mode/dash vector loops, color/legend fill!, fontsize
         theta_multi = [collect(0:30:90), collect(15:30:105)]
@@ -968,24 +988,37 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             legend="polar",
             fontsize=11,
         )
-        @test fig_polar_multi isa Plot
-        @test length(fig_polar_multi.data) == 2
+        @test [t[:theta] for t in fig_polar_multi.data] == theta_multi
+        @test [t[:r] for t in fig_polar_multi.data] == r_multi
+        @test [t[:mode] for t in fig_polar_multi.data] == ["lines", "markers"]
+        @test [t[:line][:dash] for t in fig_polar_multi.data] == ["dash", "dot"]
+        @test [t[:line][:color] for t in fig_polar_multi.data] == ["red", "red"]
+        @test [t[:name] for t in fig_polar_multi.data] == ["polar", "polar"]
+        @test _lookup(fig_polar_multi.layout, :font, :size) == 11
 
-        # heatmap/contour edge branches for dx/dy fallback and fontsize
+        # heatmap/contour on a single-column / single-row grid (no spacing to
+        # infer) with an equal aspect ratio and fontsize
         U13 = rand(1, 3)
         U31 = rand(3, 1)
         fig_heat_dx0 = plot_heatmap([0.0], [0.0, 1.0, 2.0], U13; equalar=true, fontsize=9)
         fig_heat_dy0 = plot_heatmap([0.0, 1.0, 2.0], [0.0], U31; equalar=true)
-        @test fig_heat_dx0 isa Plot
-        @test fig_heat_dy0 isa Plot
+        _test_field_trace(only(fig_heat_dx0.data), "heatmap", [0.0], [0.0, 1.0, 2.0], U13)
+        _test_field_trace(only(fig_heat_dy0.data), "heatmap", [0.0, 1.0, 2.0], [0.0], U31)
 
         fig_contour_dx0 = plot_contour([0.0], [0.0, 1.0, 2.0], U13; equalar=true, fontsize=9)
         fig_contour_dy0 = plot_contour([0.0, 1.0, 2.0], [0.0], U31; equalar=true)
-        @test fig_contour_dx0 isa Plot
-        @test fig_contour_dy0 isa Plot
+        _test_field_trace(only(fig_contour_dx0.data), "contour", [0.0], [0.0, 1.0, 2.0], U13)
+        _test_field_trace(only(fig_contour_dy0.data), "contour", [0.0, 1.0, 2.0], [0.0], U31)
+        for f in (fig_heat_dx0, fig_heat_dy0, fig_contour_dx0, fig_contour_dy0)
+            @test _lookup(f.layout, :yaxis, :scaleanchor) == "x"
+            @test _lookup(f.layout, :yaxis, :scaleratio) == 1
+        end
+        @test _lookup(fig_heat_dx0.layout, :font, :size) == 9
+        @test _lookup(fig_contour_dx0.layout, :font, :size) == 9
 
         fig_quiver_font = plot_quiver(1:5, 1:5, rand(5), rand(5); fontsize=10)
-        @test fig_quiver_font isa Plot
+        @test only(fig_quiver_font.data)[:type] == "scatter"
+        @test _lookup(fig_quiver_font.layout, :font, :size) == 10
 
         # plot_surface shared coloraxis branches (with and without explicit colorscale)
         X = [i for i in 1:3, j in 1:3]
@@ -1009,18 +1042,34 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             shared_coloraxis=true,
             colorscale="Viridis",
         )
-        @test fig_surface_shared_default isa Plot
-        @test fig_surface_shared_scaled isa Plot
+        tr_default = only(fig_surface_shared_default.data)
+        @test tr_default[:coloraxis] == "coloraxis"
+        @test tr_default[:surfacecolor] == C
+        # an empty colorscale leaves the shared axis on plotly's default scale
+        @test !haskey(PlotlySupply._symbol_dict(
+            get(fig_surface_shared_default.layout.fields, :coloraxis, nothing)), :colorscale)
+        @test _lookup(fig_surface_shared_default.layout, :font, :size) == 10
+        tr_scaled = only(fig_surface_shared_scaled.data)
+        @test tr_scaled[:coloraxis] == "coloraxis"
+        # the colour scale lives on the shared axis, not on the trace
+        @test !haskey(tr_scaled.fields, :colorscale)
+        @test _lookup(fig_surface_shared_scaled.layout, :coloraxis, :colorscale) ==
+              PlotlySupply._resolve_colorscale("Viridis"; who="plot_surface").scale
 
         # plot_scatter3d multi branch with fill! paths for mode/color/legend
         x3 = [collect(1:4), collect(1:4)]
         y3 = [collect(1:4), collect(1:4)]
         z3 = [rand(4), rand(4)]
         fig_scatter3d_multi_fill = plot_scatter3d(x3, y3, z3; mode="lines+markers", color="orange", legend="traj", fontsize=10)
-        @test fig_scatter3d_multi_fill isa Plot
+        @test [t[:z] for t in fig_scatter3d_multi_fill.data] == z3
+        @test [t[:mode] for t in fig_scatter3d_multi_fill.data] == ["lines+markers", "lines+markers"]
+        @test [t[:line][:color] for t in fig_scatter3d_multi_fill.data] == ["orange", "orange"]
+        @test [t[:name] for t in fig_scatter3d_multi_fill.data] == ["traj", "traj"]
+        @test _lookup(fig_scatter3d_multi_fill.layout, :font, :size) == 10
 
         fig_quiver3d_font = plot_quiver3d(1:5, 1:5, 1:5, rand(5), rand(5), rand(5); fontsize=10)
-        @test fig_quiver3d_font isa Plot
+        @test only(fig_quiver3d_font.data)[:type] == "cone"
+        @test _lookup(fig_quiver3d_font.layout, :font, :size) == 10
     end
 
     @testset "Coverage Branches - Mutating APIs" begin
@@ -1047,7 +1096,18 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             fontsize=9,
         )
         plot_scatter!(fig_scatter, y_multi)
-        @test fig_scatter isa Plot
+        @test length(fig_scatter.data) == 1 + 2 + 2
+        bundle = fig_scatter.data[2:3]
+        @test [t[:x] for t in bundle] == x_multi
+        @test [t[:y] for t in bundle] == y_multi
+        @test [t[:mode] for t in bundle] == ["markers", "lines"]
+        @test [t[:line][:dash] for t in bundle] == ["dash", "dot"]
+        @test [t[:line][:color] for t in bundle] == ["purple", "purple"]
+        @test [t[:name] for t in bundle] == ["bundle", "bundle"]
+        @test [t[:y] for t in fig_scatter.data[4:5]] == y_multi
+        @test all(t -> t[:x] == 0:3, fig_scatter.data[4:5])
+        _test_cartesian_options(fig_scatter; title="scatter mut", xlabel="x", ylabel="y",
+            xrange=[0, 4], yrange=[0, 1], width=420, height=320, fontsize=9, showgrid=false)
 
         fig_stem = plot_stem(1:4, rand(4))
         plot_stem!(
@@ -1067,7 +1127,17 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             fontsize=9,
         )
         plot_stem!(fig_stem, y_multi)
-        @test fig_stem isa Plot
+        @test length(fig_stem.data) == 2 + 4 + 4
+        heads, stems = _stem_parts(Plot(fig_stem.data[3:6]))
+        @test [t[:x] for t in heads] == x_multi
+        @test [t[:y] for t in heads] == y_multi
+        @test [t[:name] for t in heads] == ["stem", "stem"]
+        @test [t[:line][:color] for t in stems] == ["black", "black"]
+        heads_y, _ = _stem_parts(Plot(fig_stem.data[7:10]))
+        @test [t[:y] for t in heads_y] == y_multi
+        @test all(t -> t[:x] == 0:3, heads_y)
+        _test_cartesian_options(fig_stem; title="stem mut", xlabel="x", ylabel="y",
+            xrange=[0, 4], yrange=[0, 1], width=420, height=320, fontsize=9, showgrid=false)
 
         theta_multi = [collect(0:30:90), collect(15:30:105)]
         r_multi = [rand(4), rand(4)]
@@ -1098,7 +1168,25 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             color=["teal", "brown"],
             legend=["r1", "r2"],
         )
-        @test fig_polar isa Plot
+        @test length(fig_polar.data) == 1 + 2 + 2
+        multi = fig_polar.data[2:3]
+        @test [t[:theta] for t in multi] == theta_multi
+        @test [t[:r] for t in multi] == r_multi
+        @test [t[:mode] for t in multi] == ["lines", "markers"]
+        @test [t[:line][:dash] for t in multi] == ["dash", "dot"]
+        @test [t[:line][:color] for t in multi] == ["red", "red"]
+        mixed = fig_polar.data[4:5]
+        @test all(t -> t[:theta] == 0:30:90, mixed)
+        @test [t[:r] for t in mixed] == r_multi
+        @test [t[:mode] for t in mixed] == ["lines+markers", "lines+markers"]
+        @test [t[:line][:dash] for t in mixed] == ["dash", "dash"]
+        @test [t[:line][:color] for t in mixed] == ["teal", "brown"]
+        @test [t[:name] for t in mixed] == ["r1", "r2"]
+        @test _lookup(fig_polar.layout, :polar, :sector) == [0, 120]
+        @test _lookup(fig_polar.layout, :polar, :radialaxis, :range) == [0, 1]
+        @test _lookup(fig_polar.layout, :polar, :radialaxis, :showgrid) == false
+        @test _lookup(fig_polar.layout, :polar, :angularaxis, :showgrid) == false
+        _test_cartesian_options(fig_polar; title="polar mut", width=420, height=320, fontsize=9)
 
         U13 = rand(1, 3)
         U31 = rand(3, 1)
@@ -1120,7 +1208,6 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             fontsize=9,
         )
         plot_heatmap!(fig_heat, U31; xlabel="x2")
-        @test fig_heat isa Plot
 
         fig_cont = plot_contour(rand(3, 3))
         plot_contour!(
@@ -1140,7 +1227,17 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             fontsize=9,
         )
         plot_contour!(fig_cont, U31; xlabel="x2")
-        @test fig_cont isa Plot
+
+        for (f, type, title) in ((fig_heat, "heatmap", "heat mut"), (fig_cont, "contour", "cont mut"))
+            @test length(f.data) == 3
+            _test_field_trace(f.data[2], type, [0.0], [0.0, 1.0, 2.0], U13)
+            @test (f.data[2][:zmin], f.data[2][:zmax]) == (0, 1)
+            _test_field_trace(f.data[3], type, 0:2, 0:0, U31)
+            # the last mutator's xlabel wins; the others persist
+            _test_cartesian_options(f; title, xlabel="x2", ylabel="y", xrange=[0, 1],
+                yrange=[0, 2], width=400, height=300, fontsize=9)
+            @test _lookup(f.layout, :yaxis, :scaleanchor) == "x"
+        end
 
         fig_quiver = plot_quiver(1:5, 1:5, rand(5), rand(5))
         plot_quiver!(
@@ -1160,7 +1257,10 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             grid=false,
             fontsize=9,
         )
-        @test fig_quiver isa Plot
+        @test length(fig_quiver.data) == 2
+        @test fig_quiver.data[2][:line][:color] == "green"
+        _test_cartesian_options(fig_quiver; title="q mut", xlabel="x", ylabel="y",
+            xrange=[0, 6], yrange=[0, 6], width=400, height=300, fontsize=9, showgrid=false)
 
         X = [i for i in 1:3, j in 1:3]
         Y = [j for i in 1:3, j in 1:3]
@@ -1186,7 +1286,15 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             fontsize=9,
         )
         plot_surface!(fig_surface, X, Y, Z; color=C, shared_coloraxis=true, colorscale="Viridis")
-        @test fig_surface isa Plot
+        @test length(fig_surface.data) == 3
+        # shared_coloraxis binds every surface of the figure to one colour axis
+        @test all(t -> t[:coloraxis] == "coloraxis", fig_surface.data)
+        @test all(t -> t[:surfacecolor] == C, fig_surface.data[2:3])
+        @test _lookup(fig_surface.layout, :coloraxis, :colorscale) ==
+              PlotlySupply._resolve_colorscale("Viridis"; who="plot_surface!").scale
+        _test_scene_options(fig_surface; xrange=[0, 4], yrange=[0, 4], zrange=[0, 1],
+            showgrid=false, visible=false)
+        _test_cartesian_options(fig_surface; title="s mut", width=420, height=320, fontsize=9)
 
         x3 = [collect(1:4), collect(1:4)]
         y3 = [collect(1:4), collect(1:4)]
@@ -1212,7 +1320,15 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             showaxis=false,
             fontsize=9,
         )
-        @test fig_s3 isa Plot
+        @test length(fig_s3.data) == 3
+        @test [t[:z] for t in fig_s3.data[2:3]] == z3
+        @test [t[:mode] for t in fig_s3.data[2:3]] == ["markers", "lines"]
+        @test [t[:line][:color] for t in fig_s3.data[2:3]] == ["orange", "orange"]
+        @test [t[:name] for t in fig_s3.data[2:3]] == ["traj", "traj"]
+        _test_scene_options(fig_s3; xrange=[0, 5], yrange=[0, 5], zrange=[0, 1],
+            aspectmode="cube", showgrid=false, visible=false)
+        @test _lookup(fig_s3.layout, :scene, :camera, :projection, :type) == "orthographic"
+        _test_cartesian_options(fig_s3; title="s3 mut", width=420, height=320, fontsize=9)
 
         fig_q3 = plot_quiver3d(1:4, 1:4, 1:4, rand(4), rand(4), rand(4))
         plot_quiver3d!(
@@ -1236,7 +1352,12 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             showaxis=false,
             fontsize=9,
         )
-        @test fig_q3 isa Plot
+        @test length(fig_q3.data) == 2
+        @test fig_q3.data[2][:colorscale] == [[0, "magenta"], [1, "magenta"]]
+        _test_scene_options(fig_q3; xrange=[0, 5], yrange=[0, 5], zrange=[0, 5],
+            aspectmode="cube", showgrid=false, visible=false)
+        @test _lookup(fig_q3.layout, :scene, :camera, :projection, :type) == "orthographic"
+        _test_cartesian_options(fig_q3; title="q3 mut", width=420, height=320, fontsize=9)
     end
 
     @testset "Coverage Branches - Internal + SyncPlot" begin
@@ -1428,179 +1549,219 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
     @testset "xscale/yscale - scatter" begin
         x = 1:10
-        y = rand(10)
+        y = rand(10) .+ 0.1
         fig = plot_scatter(x, y, xscale="log", yscale="log")
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        # data stay in data units; only the axes are logarithmic
+        @test only(fig.data)[:x] == x && only(fig.data)[:y] == y
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_scatter(x, y2, xscale="log")
-        @test fig2 isa Plot
+        _test_log_axes(fig2; x=true, y=false)
+        @test [t[:y] for t in fig2.data] == y2
 
         # y-only variant
         fig3 = plot_scatter(y, yscale="log")
-        @test fig3 isa Plot
+        _test_log_axes(fig3; x=false, y=true)
+        @test only(fig3.data)[:x] == 0:9 && only(fig3.data)[:y] == y
 
         fig3m = plot_scatter(y2, xscale="log", yscale="log")
-        @test fig3m isa Plot
+        _test_log_axes(fig3m; x=true, y=true)
+        @test [t[:y] for t in fig3m.data] == y2
     end
 
     @testset "marker_size/marker_symbol - scatter" begin
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, mode="markers", marker_size=10, marker_symbol="circle-open")
-        @test fig isa Plot
+        @test only(fig.data)[:mode] == "markers"
+        @test _marker_sizes(fig.data) == [10]
+        @test _marker_symbols(fig.data) == ["circle-open"]
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_scatter(x, y2, mode="markers", marker_size=[8, 12], marker_symbol=["circle", "square"])
-        @test fig2 isa Plot
+        @test _marker_sizes(fig2.data) == [8, 12]
+        @test _marker_symbols(fig2.data) == ["circle", "square"]
 
         # scalar marker on multi-trace
         fig3 = plot_scatter(x, y2, mode="markers", marker_size=6, marker_symbol="diamond")
-        @test fig3 isa Plot
+        @test _marker_sizes(fig3.data) == [6, 6]
+        @test _marker_symbols(fig3.data) == ["diamond", "diamond"]
 
         # y-only with markers
         fig4 = plot_scatter(y, mode="markers", marker_size=5)
-        @test fig4 isa Plot
+        @test _marker_sizes(fig4.data) == [5]
+        @test only(fig4.data)[:x] == 0:9
     end
 
     @testset "showlegend - scatter" begin
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, showlegend=false)
-        @test fig isa Plot
+        @test _showlegends(fig.data) == [false]
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_scatter(x, y2, showlegend=[true, false])
-        @test fig2 isa Plot
+        @test _showlegends(fig2.data) == [true, false]
+        @test fig2.layout[:showlegend] == true
 
         fig3 = plot_scatter(x, y2, showlegend=true)
-        @test fig3 isa Plot
+        @test _showlegends(fig3.data) == [true, true]
 
         # y-only
         fig4 = plot_scatter(y2, showlegend=[false, true])
-        @test fig4 isa Plot
+        @test _showlegends(fig4.data) == [false, true]
+        @test [t[:y] for t in fig4.data] == y2
     end
 
     @testset "xscale/yscale - stem" begin
         x = 1:10
-        y = rand(10)
+        y = rand(10) .+ 0.1
         fig = plot_stem(x, y, xscale="log", yscale="log")
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        heads, _ = _stem_parts(fig)
+        @test only(heads)[:x] == x && only(heads)[:y] == y
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_stem(x, y2, xscale="log")
-        @test fig2 isa Plot
+        _test_log_axes(fig2; x=true, y=false)
+        @test [t[:y] for t in first(_stem_parts(fig2))] == y2
 
         fig3 = plot_stem(y, yscale="log")
-        @test fig3 isa Plot
+        _test_log_axes(fig3; x=false, y=true)
+        @test only(first(_stem_parts(fig3)))[:x] == 0:9
     end
 
     @testset "showlegend - stem" begin
+        # a series' legend entry is its head (marker) trace; stems never show
         x = 1:10
         y2 = [rand(10), rand(10)]
         fig = plot_stem(x, y2, showlegend=[true, false])
-        @test fig isa Plot
+        heads, stems = _stem_parts(fig)
+        @test _showlegends(heads) == [true, false]
+        @test _showlegends(stems) == [false, false]
 
         fig2 = plot_stem(x, y2, showlegend=true)
-        @test fig2 isa Plot
+        @test _showlegends(first(_stem_parts(fig2))) == [true, true]
 
         # single trace
         fig3 = plot_stem(x, rand(10), showlegend=false)
-        @test fig3 isa Plot
+        @test _showlegends(first(_stem_parts(fig3))) == [false]
 
         # y-only
         fig4 = plot_stem(y2, showlegend=[false, true])
-        @test fig4 isa Plot
+        heads4, _ = _stem_parts(fig4)
+        @test _showlegends(heads4) == [false, true]
+        @test [t[:y] for t in heads4] == y2
     end
 
     @testset "xscale/yscale/showlegend - bar" begin
         x = 1:5
-        y = rand(5)
+        y = rand(5) .+ 0.1
         fig = plot_bar(x, y, xscale="log", yscale="log")
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        @test only(fig.data)[:type] == "bar"
+        @test only(fig.data)[:y] == y
 
         y2 = [rand(5), rand(5)]
         fig2 = plot_bar(x, y2, showlegend=[true, false], xscale="log")
-        @test fig2 isa Plot
+        _test_log_axes(fig2; x=true, y=false)
+        @test _showlegends(fig2.data) == [true, false]
 
         fig3 = plot_bar(x, y2, showlegend=true)
-        @test fig3 isa Plot
+        @test _showlegends(fig3.data) == [true, true]
 
         fig4 = plot_bar(x, y, showlegend=false)
-        @test fig4 isa Plot
+        @test _showlegends(fig4.data) == [false]
 
         # y-only
         fig5 = plot_bar(y, xscale="log", yscale="log", showlegend=false)
-        @test fig5 isa Plot
+        _test_log_axes(fig5; x=true, y=true)
+        @test _showlegends(fig5.data) == [false]
 
         fig6 = plot_bar(y2, showlegend=[true, false])
-        @test fig6 isa Plot
+        @test _showlegends(fig6.data) == [true, false]
+        @test all(t -> t[:x] == 0:4, fig6.data)
     end
 
     @testset "xscale/yscale/showlegend - histogram" begin
-        x = randn(200)
+        # On a log x axis the histogram is binned in log10 and drawn as bars
+        # (binning details: regression_stats.jl).
+        x = exp.(randn(200))
         fig = plot_histogram(x, xscale="log", yscale="log")
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        @test only(fig.data)[:type] == "bar"
+        @test sum(only(fig.data)[:y]) == length(x)
 
         xmulti = [randn(100), randn(100) .+ 1.0]
         fig2 = plot_histogram(xmulti, showlegend=[true, false])
-        @test fig2 isa Plot
+        @test [t[:type] for t in fig2.data] == ["histogram", "histogram"]
+        @test _showlegends(fig2.data) == [true, false]
 
         fig3 = plot_histogram(xmulti, showlegend=true)
-        @test fig3 isa Plot
+        @test _showlegends(fig3.data) == [true, true]
 
         fig4 = plot_histogram(x, showlegend=false)
-        @test fig4 isa Plot
+        @test _showlegends(fig4.data) == [false]
+        @test only(fig4.data)[:x] == x
     end
 
     @testset "xscale/yscale/showlegend - box" begin
         x = fill("A", 20)
-        y = randn(20)
+        y = rand(20) .+ 0.1
         fig = plot_box(x, y, xscale="log", yscale="log")
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        @test only(fig.data)[:y] == y
 
         y2 = [randn(20), randn(20)]
         x2 = [fill("A", 20), fill("B", 20)]
         fig2 = plot_box(x2, y2, showlegend=[true, false])
-        @test fig2 isa Plot
+        @test _showlegends(fig2.data) == [true, false]
+        @test [t[:x] for t in fig2.data] == x2
 
         fig3 = plot_box(x, y, showlegend=false)
-        @test fig3 isa Plot
+        @test _showlegends(fig3.data) == [false]
 
         # y-only
         fig4 = plot_box(y2, xscale="log", showlegend=[true, false])
-        @test fig4 isa Plot
+        _test_log_axes(fig4; x=true, y=false)
+        @test _showlegends(fig4.data) == [true, false]
+        @test [t[:y] for t in fig4.data] == y2
 
         fig5 = plot_box(y, showlegend=false)
-        @test fig5 isa Plot
+        @test _showlegends(fig5.data) == [false]
 
         fig6 = plot_box(y2, showlegend=true)
-        @test fig6 isa Plot
+        @test _showlegends(fig6.data) == [true, true]
     end
 
     @testset "xscale/yscale/showlegend - violin" begin
         x = fill("A", 20)
-        y = randn(20)
+        y = rand(20) .+ 0.1
         fig = plot_violin(x, y, xscale="log", yscale="log")
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        @test only(fig.data)[:y] == y
 
-        y2 = [randn(20), randn(20)]
+        y2 = [rand(20) .+ 0.1, rand(20) .+ 0.1]
         x2 = [fill("A", 20), fill("B", 20)]
         fig2 = plot_violin(x2, y2, showlegend=[true, false])
-        @test fig2 isa Plot
+        @test _showlegends(fig2.data) == [true, false]
+        @test [t[:x] for t in fig2.data] == x2
 
         fig3 = plot_violin(x, y, showlegend=false)
-        @test fig3 isa Plot
+        @test _showlegends(fig3.data) == [false]
 
         # y-only
         fig4 = plot_violin(y2, yscale="log", showlegend=[false, true])
-        @test fig4 isa Plot
+        _test_log_axes(fig4; x=false, y=true)
+        @test _showlegends(fig4.data) == [false, true]
+        @test [t[:y] for t in fig4.data] == y2
 
         fig5 = plot_violin(y, showlegend=false)
-        @test fig5 isa Plot
+        @test _showlegends(fig5.data) == [false]
 
         fig6 = plot_violin(y2, showlegend=true)
-        @test fig6 isa Plot
+        @test _showlegends(fig6.data) == [true, true]
     end
 
     @testset "xscale/yscale - heatmap" begin
@@ -1608,10 +1769,13 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         y = 1:20
         U = rand(10, 20)
         fig = plot_heatmap(x, y, U, xscale="log", yscale="log")
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        _test_field_trace(only(fig.data), "heatmap", x, y, U)
 
+        # implicit coordinates are 1-based on a log axis (0 cannot be drawn)
         fig2 = plot_heatmap(U, xscale="log")
-        @test fig2 isa Plot
+        _test_log_axes(fig2; x=true, y=false)
+        _test_field_trace(only(fig2.data), "heatmap", 1:10, 0:19, U)
     end
 
     @testset "xscale/yscale - contour" begin
@@ -1619,27 +1783,34 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         y = 1:20
         U = rand(10, 20)
         fig = plot_contour(x, y, U, xscale="log", yscale="log")
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        _test_field_trace(only(fig.data), "contour", x, y, U)
 
         fig2 = plot_contour(U, yscale="log")
-        @test fig2 isa Plot
+        _test_log_axes(fig2; x=false, y=true)
+        _test_field_trace(only(fig2.data), "contour", 0:9, 1:20, U)
     end
 
     @testset "marker_size/marker_symbol/showlegend - scatterpolar" begin
         theta = 0:10:350
         r = rand(36)
         fig = plot_scatterpolar(theta, r, mode="markers", marker_size=8, marker_symbol="circle-open")
-        @test fig isa Plot
+        @test only(fig.data)[:mode] == "markers"
+        @test _marker_sizes(fig.data) == [8]
+        @test _marker_symbols(fig.data) == ["circle-open"]
 
         r2 = [rand(36), rand(36)]
         fig2 = plot_scatterpolar(theta, r2, marker_size=[6, 10], marker_symbol=["circle", "square"], showlegend=[true, false])
-        @test fig2 isa Plot
+        @test _marker_sizes(fig2.data) == [6, 10]
+        @test _marker_symbols(fig2.data) == ["circle", "square"]
+        @test _showlegends(fig2.data) == [true, false]
 
         fig3 = plot_scatterpolar(theta, r2, showlegend=true, marker_size=5)
-        @test fig3 isa Plot
+        @test _showlegends(fig3.data) == [true, true]
+        @test _marker_sizes(fig3.data) == [5, 5]
 
         fig4 = plot_scatterpolar(theta, r, showlegend=false)
-        @test fig4 isa Plot
+        @test _showlegends(fig4.data) == [false]
     end
 
     @testset "marker_size/marker_symbol/showlegend - scatter3d" begin
@@ -1647,147 +1818,203 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         y = 1:10
         z = rand(10)
         fig = plot_scatter3d(x, y, z, mode="markers", marker_size=8, marker_symbol="circle-open")
-        @test fig isa Plot
+        @test only(fig.data)[:mode] == "markers"
+        @test _marker_sizes(fig.data) == [8]
+        @test _marker_symbols(fig.data) == ["circle-open"]
 
         z2 = [rand(10), rand(10)]
         x2 = [1:10, 1:10]
         y2 = [1:10, 1:10]
         fig2 = plot_scatter3d(x2, y2, z2, marker_size=[6, 10], marker_symbol=["circle", "square"], showlegend=[true, false])
-        @test fig2 isa Plot
+        @test _marker_sizes(fig2.data) == [6, 10]
+        @test _marker_symbols(fig2.data) == ["circle", "square"]
+        @test _showlegends(fig2.data) == [true, false]
 
         fig3 = plot_scatter3d(x2, y2, z2, showlegend=true, marker_size=5)
-        @test fig3 isa Plot
+        @test _showlegends(fig3.data) == [true, true]
+        @test _marker_sizes(fig3.data) == [5, 5]
 
         fig4 = plot_scatter3d(x, y, z, showlegend=false)
-        @test fig4 isa Plot
+        @test _showlegends(fig4.data) == [false]
     end
 
     @testset "mutating variants - new features" begin
         # scatter!
         fig = plot_scatter(1:10, rand(10))
         plot_scatter!(fig, 1:10, rand(10), xscale="log", yscale="log", marker_size=5, marker_symbol="square", showlegend=false)
-        @test fig isa Plot
+        _test_log_axes(fig; x=true, y=true)
+        @test _marker_sizes(fig.data[2:2]) == [5]
+        @test _marker_symbols(fig.data[2:2]) == ["square"]
+        @test _showlegends(fig.data[2:2]) == [false]
 
         y2 = [rand(10), rand(10)]
         plot_scatter!(fig, 1:10, y2, marker_size=[4, 8], marker_symbol=["circle", "diamond"], showlegend=[true, false])
-        @test fig isa Plot
+        @test _marker_sizes(fig.data[3:4]) == [4, 8]
+        @test _marker_symbols(fig.data[3:4]) == ["circle", "diamond"]
+        @test _showlegends(fig.data[3:4]) == [true, false]
 
         plot_scatter!(fig, y2, xscale="log", marker_size=6, showlegend=true)
-        @test fig isa Plot
+        @test length(fig.data) == 6
+        @test [t[:y] for t in fig.data[5:6]] == y2
+        @test _marker_sizes(fig.data[5:6]) == [6, 6]
+        @test _showlegends(fig.data[5:6]) == [true, true]
+        _test_log_axes(fig; x=true, y=true)   # later calls keep the log axes
 
         # stem!
         fig2 = plot_stem(1:5, rand(5))
         plot_stem!(fig2, 1:5, rand(5), xscale="log", yscale="log", showlegend=false)
-        @test fig2 isa Plot
+        _test_log_axes(fig2; x=true, y=true)
+        @test _showlegends(first(_stem_parts(Plot(fig2.data[3:4])))) == [false]
 
         plot_stem!(fig2, 1:5, [rand(5), rand(5)], showlegend=[true, false])
-        @test fig2 isa Plot
+        @test _showlegends(first(_stem_parts(Plot(fig2.data[5:8])))) == [true, false]
 
-        plot_stem!(fig2, [rand(5), rand(5)], showlegend=true, xscale="log")
-        @test fig2 isa Plot
+        y_stem = [rand(5), rand(5)]
+        plot_stem!(fig2, y_stem, showlegend=true, xscale="log")
+        @test length(fig2.data) == 12
+        heads, _ = _stem_parts(Plot(fig2.data[9:12]))
+        @test _showlegends(heads) == [true, true]
+        @test [t[:y] for t in heads] == y_stem
 
         # bar!
         fig3 = plot_bar(1:5, rand(5))
         plot_bar!(fig3, 1:5, rand(5), xscale="log", yscale="log", showlegend=false)
-        @test fig3 isa Plot
+        _test_log_axes(fig3; x=true, y=true)
+        @test _showlegends(fig3.data[2:2]) == [false]
 
         plot_bar!(fig3, 1:5, [rand(5), rand(5)], showlegend=[true, false])
-        @test fig3 isa Plot
+        @test _showlegends(fig3.data[3:4]) == [true, false]
 
         plot_bar!(fig3, [rand(5), rand(5)], xscale="log", showlegend=true)
-        @test fig3 isa Plot
+        @test length(fig3.data) == 6
+        @test _showlegends(fig3.data[5:6]) == [true, true]
+        @test all(t -> t[:type] == "bar", fig3.data)
 
-        # histogram!
+        # histogram!: once the x axis is logarithmic, appended histograms are
+        # log-binned bars
         fig4 = plot_histogram(randn(100))
-        plot_histogram!(fig4, randn(100), xscale="log", showlegend=false)
-        @test fig4 isa Plot
+        h_log = exp.(randn(100))
+        plot_histogram!(fig4, h_log, xscale="log", showlegend=false)
+        _test_log_axes(fig4; x=true, y=false)
+        @test fig4.data[2][:type] == "bar"
+        @test sum(fig4.data[2][:y]) == length(h_log)
+        @test _showlegends(fig4.data[2:2]) == [false]
 
-        plot_histogram!(fig4, [randn(100), randn(100)], showlegend=[true, false])
-        @test fig4 isa Plot
+        plot_histogram!(fig4, [exp.(randn(100)), exp.(randn(100))], showlegend=[true, false])
+        @test length(fig4.data) == 4
+        @test [t[:type] for t in fig4.data[3:4]] == ["bar", "bar"]
+        @test _showlegends(fig4.data[3:4]) == [true, false]
 
         # box!
         fig5 = plot_box(fill("A", 20), randn(20))
         plot_box!(fig5, fill("A", 20), randn(20), xscale="log", showlegend=false)
-        @test fig5 isa Plot
+        _test_log_axes(fig5; x=true, y=false)
+        @test _showlegends(fig5.data[2:2]) == [false]
 
         plot_box!(fig5, [fill("A", 20), fill("B", 20)], [randn(20), randn(20)], showlegend=[true, false])
-        @test fig5 isa Plot
+        @test _showlegends(fig5.data[3:4]) == [true, false]
+        @test [t[:x] for t in fig5.data[3:4]] == [fill("A", 20), fill("B", 20)]
 
         plot_box!(fig5, randn(20), showlegend=false)
-        @test fig5 isa Plot
+        @test _showlegends(fig5.data[5:5]) == [false]
 
         plot_box!(fig5, [randn(20), randn(20)], showlegend=[true, false])
-        @test fig5 isa Plot
+        @test length(fig5.data) == 7
+        @test _showlegends(fig5.data[6:7]) == [true, false]
 
         # violin!
         fig6 = plot_violin(fill("A", 20), randn(20))
-        plot_violin!(fig6, fill("A", 20), randn(20), yscale="log", showlegend=false)
-        @test fig6 isa Plot
+        plot_violin!(fig6, fill("A", 20), rand(20) .+ 0.1, yscale="log", showlegend=false)
+        _test_log_axes(fig6; x=false, y=true)
+        @test _showlegends(fig6.data[2:2]) == [false]
 
         plot_violin!(fig6, [fill("A", 20), fill("B", 20)], [randn(20), randn(20)], showlegend=[true, false])
-        @test fig6 isa Plot
+        @test _showlegends(fig6.data[3:4]) == [true, false]
 
         plot_violin!(fig6, randn(20), showlegend=false)
-        @test fig6 isa Plot
+        @test _showlegends(fig6.data[5:5]) == [false]
 
         plot_violin!(fig6, [randn(20), randn(20)], showlegend=[true, false])
-        @test fig6 isa Plot
+        @test length(fig6.data) == 7
+        @test _showlegends(fig6.data[6:7]) == [true, false]
 
-        # heatmap!
+        # heatmap!: after the axes became log, implicit coordinates are 1-based
         fig7 = plot_heatmap(1:10, 1:20, rand(10, 20))
+        U7 = rand(10, 20)
         plot_heatmap!(fig7, 1:10, 1:20, rand(10, 20), xscale="log", yscale="log")
-        @test fig7 isa Plot
-
-        plot_heatmap!(fig7, rand(10, 20), xscale="log")
-        @test fig7 isa Plot
+        _test_log_axes(fig7; x=true, y=true)
+        plot_heatmap!(fig7, U7, xscale="log")
+        @test length(fig7.data) == 3
+        _test_field_trace(fig7.data[3], "heatmap", 1:10, 1:20, U7)
 
         # contour!
         fig8 = plot_contour(1:10, 1:20, rand(10, 20))
+        U8 = rand(10, 20)
         plot_contour!(fig8, 1:10, 1:20, rand(10, 20), xscale="log", yscale="log")
-        @test fig8 isa Plot
-
-        plot_contour!(fig8, rand(10, 20), yscale="log")
-        @test fig8 isa Plot
+        _test_log_axes(fig8; x=true, y=true)
+        plot_contour!(fig8, U8, yscale="log")
+        @test length(fig8.data) == 3
+        _test_field_trace(fig8.data[3], "contour", 1:10, 1:20, U8)
 
         # scatterpolar!
         fig9 = plot_scatterpolar(0:10:350, rand(36))
         plot_scatterpolar!(fig9, 0:10:350, rand(36), marker_size=8, marker_symbol="square", showlegend=false)
-        @test fig9 isa Plot
+        @test _marker_sizes(fig9.data[2:2]) == [8]
+        @test _marker_symbols(fig9.data[2:2]) == ["square"]
+        @test _showlegends(fig9.data[2:2]) == [false]
 
         plot_scatterpolar!(fig9, 0:10:350, [rand(36), rand(36)], marker_size=[4, 8], showlegend=[true, false])
-        @test fig9 isa Plot
+        @test length(fig9.data) == 4
+        @test _marker_sizes(fig9.data[3:4]) == [4, 8]
+        @test _showlegends(fig9.data[3:4]) == [true, false]
 
         # scatter3d!
         fig10 = plot_scatter3d(1:10, 1:10, rand(10))
         plot_scatter3d!(fig10, 1:10, 1:10, rand(10), marker_size=8, marker_symbol="square", showlegend=false)
-        @test fig10 isa Plot
+        @test _marker_sizes(fig10.data[2:2]) == [8]
+        @test _marker_symbols(fig10.data[2:2]) == ["square"]
+        @test _showlegends(fig10.data[2:2]) == [false]
 
         plot_scatter3d!(fig10, [1:10, 1:10], [1:10, 1:10], [rand(10), rand(10)], marker_size=[4, 8], showlegend=[true, false])
-        @test fig10 isa Plot
+        @test length(fig10.data) == 4
+        @test _marker_sizes(fig10.data[3:4]) == [4, 8]
+        @test _showlegends(fig10.data[3:4]) == [true, false]
     end
 
     @testset "scatter x-vector-of-vectors" begin
         x2 = [collect(1:10), collect(1:10)]
         y2 = [rand(10), rand(10)]
         fig = plot_scatter(x2, y2, marker_size=[4, 8], marker_symbol=["circle", "square"], showlegend=[true, false], xscale="log")
-        @test fig isa Plot
+        @test [t[:x] for t in fig.data] == x2
+        @test [t[:y] for t in fig.data] == y2
+        @test _marker_sizes(fig.data) == [4, 8]
+        @test _marker_symbols(fig.data) == ["circle", "square"]
+        @test _showlegends(fig.data) == [true, false]
+        _test_log_axes(fig; x=true, y=false)
 
         fig2 = plot_scatter(x2, y2, dash=["solid", "dash"])
-        @test fig2 isa Plot
+        @test [t[:line][:dash] for t in fig2.data] == ["solid", "dash"]
     end
 
     @testset "stem x-vector-of-vectors" begin
         x2 = [collect(1:5), collect(1:5)]
         y2 = [rand(5), rand(5)]
         fig = plot_stem(x2, y2, showlegend=[true, false], xscale="log")
-        @test fig isa Plot
+        heads, _ = _stem_parts(fig)
+        @test [t[:x] for t in heads] == x2
+        @test [t[:y] for t in heads] == y2
+        @test _showlegends(heads) == [true, false]
+        _test_log_axes(fig; x=true, y=false)
     end
 
     @testset "scatterpolar theta-vector-of-vectors" begin
         theta2 = [collect(0:10:350), collect(0:10:350)]
         r2 = [rand(36), rand(36)]
         fig = plot_scatterpolar(theta2, r2, marker_size=[4, 8], showlegend=[true, false])
-        @test fig isa Plot
+        @test [t[:theta] for t in fig.data] == theta2
+        @test [t[:r] for t in fig.data] == r2
+        @test _marker_sizes(fig.data) == [4, 8]
+        @test _showlegends(fig.data) == [true, false]
     end
 
     @testset "_apply_showlegend! helper" begin
@@ -1795,6 +2022,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         t1 = scatter(x=[1,2], y=[1,2])
         PlotlySupply._apply_showlegend!(t1, nothing)
         # nothing should not change the trace
+        @test !haskey(t1.fields, :showlegend)
 
         PlotlySupply._apply_showlegend!(t1, false)
         @test t1.showlegend == false
@@ -1891,13 +2119,22 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         x_shared = fill("A", 20)
         y_multi = [randn(20), randn(20) .+ 1.0]
         fig = plot_box(x_shared, y_multi, legend=["g1", "g2"], color=["red", "blue"])
-        @test fig isa Plot
-        @test length(fig.data) == 2
+        @test [t[:type] for t in fig.data] == ["box", "box"]
+        @test all(t -> t[:x] == x_shared, fig.data)
+        @test [t[:y] for t in fig.data] == y_multi
+        @test [t[:name] for t in fig.data] == ["g1", "g2"]
+        @test [t[:marker][:color] for t in fig.data] == ["red", "blue"]
+        # several boxes at one x sit side by side
+        @test fig.layout[:boxmode] == "group"
 
         # plot_violin with shared x and multi y
         fig2 = plot_violin(x_shared, y_multi, legend=["v1", "v2"], color=["red", "blue"])
-        @test fig2 isa Plot
-        @test length(fig2.data) == 2
+        @test [t[:type] for t in fig2.data] == ["violin", "violin"]
+        @test all(t -> t[:x] == x_shared, fig2.data)
+        @test [t[:y] for t in fig2.data] == y_multi
+        @test [t[:name] for t in fig2.data] == ["v1", "v2"]
+        @test [t[:line][:color] for t in fig2.data] == ["red", "blue"]
+        @test fig2.layout[:violinmode] == "group"
     end
 
     @testset "box!/violin! shared-x multi-trace" begin
@@ -1909,12 +2146,22 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         n0 = length(fig.data)
         plot_box!(fig, x_shared, y_multi, legend=["g1", "g2"], color=["red", "blue"])
         @test length(fig.data) == n0 + 2
+        @test all(t -> t[:type] == "box" && t[:x] == x_shared, fig.data[end-1:end])
+        @test [t[:y] for t in fig.data[end-1:end]] == y_multi
+        @test [t[:name] for t in fig.data[end-1:end]] == ["g1", "g2"]
+        @test [t[:marker][:color] for t in fig.data[end-1:end]] == ["red", "blue"]
+        @test fig.layout[:boxmode] == "group"
 
         # plot_violin! with shared x and multi y
         fig2 = plot_violin(randn(20))
         n0 = length(fig2.data)
         plot_violin!(fig2, x_shared, y_multi, legend=["v1", "v2"], color=["red", "blue"])
         @test length(fig2.data) == n0 + 2
+        @test all(t -> t[:type] == "violin" && t[:x] == x_shared, fig2.data[end-1:end])
+        @test [t[:y] for t in fig2.data[end-1:end]] == y_multi
+        @test [t[:name] for t in fig2.data[end-1:end]] == ["v1", "v2"]
+        @test [t[:line][:color] for t in fig2.data[end-1:end]] == ["red", "blue"]
+        @test fig2.layout[:violinmode] == "group"
     end
 
     @testset "surface!(fig, Z) delegation" begin
@@ -1924,6 +2171,9 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         # Z-only variant delegates to X,Y,Z variant internally
         plot_surface!(fig, Z)
         @test length(fig.data) == n0 + 1
+        @test fig.data[end][:type] == "surface"
+        @test fig.data[end][:z] == Z
+        @test fig.data[end][:x] == 0:4 && fig.data[end][:y] == 0:4
     end
 
     @testset "scatterpolar! vector marker_symbol" begin
@@ -1933,6 +2183,11 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         n0 = length(fig.data)
         plot_scatterpolar!(fig, theta, r_multi, marker_symbol=["circle", "square"], marker_size=[4, 8], showlegend=[true, false])
         @test length(fig.data) == n0 + 2
+        added = fig.data[end-1:end]
+        @test [t[:r] for t in added] == r_multi
+        @test _marker_symbols(added) == ["circle", "square"]
+        @test _marker_sizes(added) == [4, 8]
+        @test _showlegends(added) == [true, false]
     end
 
     @testset "scatterpolar! Bool showlegend (multi-trace)" begin
@@ -1942,6 +2197,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         n0 = length(fig.data)
         plot_scatterpolar!(fig, theta, r_multi, showlegend=false)
         @test length(fig.data) == n0 + 2
+        @test _showlegends(fig.data[end-1:end]) == [false, false]
     end
 
     @testset "scatter3d! vector marker kwargs" begin
@@ -1952,6 +2208,11 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         n0 = length(fig.data)
         plot_scatter3d!(fig, x, y, z, marker_size=[4, 8], marker_symbol=["circle", "diamond"], showlegend=[true, false])
         @test length(fig.data) == n0 + 2
+        added = fig.data[end-1:end]
+        @test [t[:z] for t in added] == z
+        @test _marker_sizes(added) == [4, 8]
+        @test _marker_symbols(added) == ["circle", "diamond"]
+        @test _showlegends(added) == [true, false]
     end
 
     @testset "scatter3d! Bool showlegend (multi-trace)" begin
@@ -1962,12 +2223,15 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         n0 = length(fig.data)
         plot_scatter3d!(fig, x, y, z, showlegend=true)
         @test length(fig.data) == n0 + 2
+        @test _showlegends(fig.data[end-1:end]) == [true, true]
     end
 
     @testset "fontsize in helper-using functions" begin
         # Cover fontsize > 0 branch in _apply_cartesian_plot_options!
         fig = plot_bar(1:5, rand(5), fontsize=14)
-        @test fig isa Plot
+        @test _lookup(fig.layout, :font, :size) == 14
+        # the default (fontsize = 0) leaves the template's font alone
+        @test !haskey(plot_bar(1:5, rand(5)).layout.fields, :font)
     end
 
     @testset "SubplotFigure property access" begin
@@ -1982,12 +2246,12 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test sf.rows == 1
         @test sf.cols == 2
 
-        # Test getproperty fallback to fig's :plot
-        @test sf.plot isa Plot
+        # Test getproperty fallback to fig's :plot (sync=false: fig is the Plot)
+        @test sf.plot === sf.fig
 
         # Test getproperty delegation to fig's own properties (covers hasproperty path)
-        @test sf.data isa Vector
-        @test sf.layout isa Layout
+        @test sf.data === sf.plot.data
+        @test sf.layout === sf.plot.layout
     end
 
     @testset "SubplotFigure _resolve_subplot_cell error" begin
@@ -2006,14 +2270,17 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         sf = PlotlySupply.subplots(1, 2; sync=false)
         t1 = scatter(x=[1,2], y=[1,2], name="t1")
         PlotlyBase.add_trace!(sf, t1; row=1, col=1)
-        @test length(sf.plot.data) >= 1
+        @test length(sf.plot.data) == 1
+        @test (sf.plot.data[1][:xaxis], sf.plot.data[1][:yaxis]) == ("x", "y")
         @test sf.current_row == 1
         @test sf.current_col == 1
 
         t2 = scatter(x=[3,4], y=[3,4], name="t2")
         t3 = scatter(x=[5,6], y=[5,6], name="t3")
         PlotlyBase.addtraces!(sf, t2, t3; row=1, col=2)
-        @test length(sf.plot.data) >= 3
+        @test length(sf.plot.data) == 3
+        @test [t[:name] for t in sf.plot.data] == ["t1", "t2", "t3"]
+        @test all(t -> (t[:xaxis], t[:yaxis]) == ("x2", "y2"), sf.plot.data[2:3])
         @test sf.current_row == 1
         @test sf.current_col == 2
     end
@@ -2059,9 +2326,9 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test atomic.plot.layout.fields == layout_before
         @test (atomic.current_row, atomic.current_col) == cell_before
 
-        @test_throws Exception PlotlyBase.addtraces!(atomic, valid; row=2, col=1)
+        @test_throws ArgumentError("addtraces!: `row` must be in 1:1; got 2.") PlotlyBase.addtraces!(atomic, valid; row=2, col=1)
         @test isempty(atomic.plot.data)
-        @test_throws Exception PlotlyBase.addtraces!(
+        @test_throws ArgumentError PlotlyBase.addtraces!(
             atomic,
             valid;
             row=1,
@@ -2092,30 +2359,51 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     @testset "SubplotFigure y-only delegations" begin
         sf = PlotlySupply.subplots(2, 3; sync=false)
 
+        # Each call lands in the active cell: cells (1,1), (1,2), (1,3), (2,1),
+        # (2,2) of a 2x3 grid own the axes x/y, x2/y2, x3/y3, x4/y4, x5/y5.
+        axes_of(t) = (t[:xaxis], t[:yaxis])
+
         # scatter!(sf, y) - y-only
         PlotlySupply.subplot!(sf, 1, 1)
-        PlotlySupply.plot_scatter!(sf, rand(5))
-        @test length(sf.plot.data) >= 1
+        y_sc = rand(5)
+        PlotlySupply.plot_scatter!(sf, y_sc)
+        @test length(sf.plot.data) == 1
+        @test sf.plot.data[1][:x] == 0:4 && sf.plot.data[1][:y] == y_sc
+        @test axes_of(sf.plot.data[1]) == ("x", "y")
 
-        # stem!(sf, y) - y-only
+        # stem!(sf, y) - y-only: heads + stems traces
         PlotlySupply.subplot!(sf, 1, 2)
-        PlotlySupply.plot_stem!(sf, rand(5))
-        @test length(sf.plot.data) >= 2
+        y_st = rand(5)
+        PlotlySupply.plot_stem!(sf, y_st)
+        @test length(sf.plot.data) == 3
+        @test [t[:mode] for t in sf.plot.data[2:3]] == ["markers", "lines"]
+        @test sf.plot.data[2][:x] == 0:4 && sf.plot.data[2][:y] == y_st
+        @test all(t -> axes_of(t) == ("x2", "y2"), sf.plot.data[2:3])
 
         # bar!(sf, y) - y-only
         PlotlySupply.subplot!(sf, 1, 3)
-        PlotlySupply.plot_bar!(sf, rand(5))
-        @test length(sf.plot.data) >= 3
+        y_bar = rand(5)
+        PlotlySupply.plot_bar!(sf, y_bar)
+        @test length(sf.plot.data) == 4
+        @test sf.plot.data[4][:type] == "bar"
+        @test sf.plot.data[4][:x] == 0:4 && sf.plot.data[4][:y] == y_bar
+        @test axes_of(sf.plot.data[4]) == ("x3", "y3")
 
         # box!(sf, x, y) - x,y variant
         PlotlySupply.subplot!(sf, 2, 1)
-        PlotlySupply.plot_box!(sf, fill("A", 10), randn(10))
-        @test length(sf.plot.data) >= 4
+        y_box = randn(10)
+        PlotlySupply.plot_box!(sf, fill("A", 10), y_box)
+        @test length(sf.plot.data) == 5
+        @test sf.plot.data[5][:type] == "box" && sf.plot.data[5][:y] == y_box
+        @test axes_of(sf.plot.data[5]) == ("x4", "y4")
 
         # violin!(sf, x, y) - x,y variant
         PlotlySupply.subplot!(sf, 2, 2)
-        PlotlySupply.plot_violin!(sf, fill("A", 10), randn(10))
-        @test length(sf.plot.data) >= 5
+        y_vio = randn(10)
+        PlotlySupply.plot_violin!(sf, fill("A", 10), y_vio)
+        @test length(sf.plot.data) == 6
+        @test sf.plot.data[6][:type] == "violin" && sf.plot.data[6][:y] == y_vio
+        @test axes_of(sf.plot.data[6]) == ("x5", "y5")
     end
 
     @testset "SubplotFigure heatmap/contour x,y,U delegations" begin
@@ -2123,19 +2411,30 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
         # heatmap!(sf, x, y, U) - x,y,U variant
         PlotlySupply.subplot!(sf, 1, 1)
-        PlotlySupply.plot_heatmap!(sf, 1:5, 1:5, rand(5, 5))
-        @test length(sf.plot.data) >= 1
+        U_heat = rand(5, 5)
+        PlotlySupply.plot_heatmap!(sf, 1:5, 1:5, U_heat)
+        @test length(sf.plot.data) == 1
+        _test_field_trace(sf.plot.data[1], "heatmap", 1:5, 1:5, U_heat)
+        @test (sf.plot.data[1][:xaxis], sf.plot.data[1][:yaxis]) == ("x", "y")
 
         # contour!(sf, x, y, U) - x,y,U variant
         PlotlySupply.subplot!(sf, 1, 2)
-        PlotlySupply.plot_contour!(sf, 1:5, 1:5, rand(5, 5))
-        @test length(sf.plot.data) >= 2
+        U_cont = rand(5, 5)
+        PlotlySupply.plot_contour!(sf, 1:5, 1:5, U_cont)
+        @test length(sf.plot.data) == 2
+        _test_field_trace(sf.plot.data[2], "contour", 1:5, 1:5, U_cont)
+        @test (sf.plot.data[2][:xaxis], sf.plot.data[2][:yaxis]) == ("x2", "y2")
     end
 
     @testset "SubplotFigure quiver delegation" begin
         sf = PlotlySupply.subplots(1, 1; sync=false)
-        PlotlySupply.plot_quiver!(sf, collect(1.0:5.0), collect(1.0:5.0), rand(5), rand(5))
-        @test length(sf.plot.data) >= 1
+        u = rand(5) .+ 0.1
+        PlotlySupply.plot_quiver!(sf, collect(1.0:5.0), collect(1.0:5.0), u, rand(5))
+        tr = only(sf.plot.data)
+        @test (tr[:type], tr[:mode]) == ("scatter", "lines")
+        @test [p0 for (p0, _) in _quiver_shafts(tr)] == [(i, i) for i in 1.0:5.0]
+        # equal aspect on the cell's axes, as for a standalone quiver
+        @test _lookup(sf.plot.layout, :yaxis, :scaleanchor) == "x"
     end
 
     @testset "SubplotFigure 3D delegations" begin
@@ -2146,31 +2445,45 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         X = [Float64(i) for i in 1:3, j in 1:3]
         Y = [Float64(j) for i in 1:3, j in 1:3]
         PlotlySupply.subplot!(sf, 1, 1)
-        PlotlySupply.plot_surface!(sf, X, Y, rand(3, 3))
-        @test length(sf.plot.data) >= 1
+        Z1 = rand(3, 3)
+        PlotlySupply.plot_surface!(sf, X, Y, Z1)
+        @test length(sf.plot.data) == 1
+        @test sf.plot.data[1][:z] == Z1 && sf.plot.data[1][:x] == X
 
         # surface!(sf, Z)
         PlotlySupply.subplot!(sf, 1, 2)
-        PlotlySupply.plot_surface!(sf, rand(3, 3))
-        @test length(sf.plot.data) >= 2
+        Z2 = rand(3, 3)
+        PlotlySupply.plot_surface!(sf, Z2)
+        @test length(sf.plot.data) == 2
+        @test sf.plot.data[2][:z] == Z2 && sf.plot.data[2][:x] == 0:2
 
         # scatter3d!(sf, x, y, z)
         PlotlySupply.subplot!(sf, 2, 1)
-        PlotlySupply.plot_scatter3d!(sf, collect(1.0:3.0), collect(1.0:3.0), rand(3))
-        @test length(sf.plot.data) >= 3
+        z3 = rand(3)
+        PlotlySupply.plot_scatter3d!(sf, collect(1.0:3.0), collect(1.0:3.0), z3)
+        @test length(sf.plot.data) == 3
+        @test sf.plot.data[3][:z] == z3
 
         # quiver3d!(sf, x, y, z, u, v, w)
         PlotlySupply.subplot!(sf, 2, 2)
         PlotlySupply.plot_quiver3d!(sf, collect(1.0:3.0), collect(1.0:3.0), collect(1.0:3.0), rand(3), rand(3), rand(3))
-        @test length(sf.plot.data) >= 4
+        @test length(sf.plot.data) == 4
+
+        # one scene per cell, row-major
+        @test [t[:type] for t in sf.plot.data] == ["surface", "surface", "scatter3d", "cone"]
+        @test [t[:scene] for t in sf.plot.data] == ["scene", "scene2", "scene3", "scene4"]
     end
 
     @testset "SubplotFigure polar delegation" begin
         polar_specs = Union{Missing, Spec}[Spec(kind="polar");;]
         sf = PlotlySupply.subplots(1, 1; sync=false, specs=polar_specs)
 
-        PlotlySupply.plot_scatterpolar!(sf, collect(0.0:30.0:330.0), rand(12))
-        @test length(sf.plot.data) >= 1
+        theta = collect(0.0:30.0:330.0)
+        r = rand(12)
+        PlotlySupply.plot_scatterpolar!(sf, theta, r)
+        tr = only(sf.plot.data)
+        @test (tr[:type], tr[:subplot]) == ("scatterpolar", "polar")
+        @test tr[:theta] == theta && tr[:r] == r
     end
 
     @testset "SubplotFigure set_legend! non-per-subplot path" begin
@@ -2228,8 +2541,11 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     end
 
     @testset "CRC: empty input does not crash" begin
-        @test plot_scatter(Float64[]) isa Plot
-        @test plot_stem(Float64[]) isa Plot
+        f = plot_scatter(Float64[])
+        @test only(f.data)[:type] == "scatter"
+        @test isempty(only(f.data)[:x]) && isempty(only(f.data)[:y])
+        heads, stems = _stem_parts(plot_stem(Float64[]))
+        @test isempty(only(heads)[:y]) && isempty(only(stems)[:y])
     end
 
     @testset "CRC: stem honors color (marker + stem lines)" begin
@@ -2429,7 +2745,8 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     end
 
     @testset "CRC: _apply_showlegend! tolerates over-long vector" begin
-        @test plot_bar([1, 2, 3]; showlegend=[true, false, true, false]) isa Plot
+        # entries beyond the number of series are ignored
+        @test _showlegends(plot_bar([1, 2, 3]; showlegend=[true, false, true, false]).data) == [true]
         b = plot_box([1.0, 2, 3]; showlegend=[true])   # vector for single trace
         @test b.data[1].fields[:showlegend] == true
     end
@@ -3008,7 +3325,9 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test plot_area(1:5, rand(5)).data[1].fields[:fill] == "tozeroy"
         s = plot_area(1:5, [rand(5), rand(5)]; stack=true)
         @test length(s.data) == 2 && s.data[1].fields[:stackgroup] == "one"
-        @test plot_area(rand(5)) isa Plot   # y-only form
+        y_area = rand(5)
+        a = only(plot_area(y_area).data)   # y-only form
+        @test a[:x] == 0:4 && a[:y] == y_area && a[:fill] == "tozeroy"
     end
 
     @testset "Extended: candlestick / ohlc" begin
@@ -5147,6 +5466,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         end
     end
 
+    include("hygiene.jl")
     include("nested_series.jl")
     include("three_d_styling.jl")
     include("extended_mutator_parity.jl")

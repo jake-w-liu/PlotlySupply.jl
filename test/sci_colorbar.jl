@@ -646,7 +646,7 @@ end
 		data_before = deepcopy(failing.plot.data)
 		layout_before = deepcopy(failing.plot.layout)
 		failing_renderer.fail = true
-		@test_throws Exception shared_colorbar!(failing)
+		@test_throws ErrorException("scb renderer failure") shared_colorbar!(failing)
 		@test failing.plot.data == data_before
 		@test failing.plot.layout == layout_before
 	end

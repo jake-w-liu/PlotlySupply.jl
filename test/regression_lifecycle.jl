@@ -1,6 +1,12 @@
 using Test, PlotlySupply
 using Base64
-using Dates
+
+# Dates is not a declared test dependency (Project.toml [extras]/[targets]), so
+# `using Dates` fails under Pkg.test, whose load path is only the test
+# environment. Load the stdlib by its UUID from the resolved manifest
+# (PlotlyBase depends on it); switch back to `using Dates` once Dates is listed
+# in [extras] and the test target.
+const _RL_Dates = Base.require(Base.PkgId(Base.UUID("ade2ca70-3891-5945-98fb-dc099432e06a"), "Dates"))
 
 # Regression tests for the Electron window lifecycle and the PlotlyJS-style
 # `plot`/`to_syncplot` entry points. The fake backend below mirrors the
@@ -1147,7 +1153,7 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 		end
 
 		@testset "shape, image, JSON and devtools entry points" begin
-			months = collect(Date(2007, 1, 1):Month(1):Date(2010, 12, 1))
+			months = collect(_RL_Dates.Date(2007, 1, 1):_RL_Dates.Month(1):_RL_Dates.Date(2010, 12, 1))
 			sp = to_syncplot(
 				Plot(scatter(x = months, y = collect(1.0:length(months)))),
 				show = false,

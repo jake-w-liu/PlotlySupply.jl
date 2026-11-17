@@ -324,3 +324,23 @@ function _quiver_shafts(tr)
     end
     return shafts
 end
+
+# xscale/yscale: the axes asked to be logarithmic are `type = "log"` with
+# power-of-ten tick labels; the others are not logarithmic.
+function _test_log_axes(fig; x::Bool, y::Bool, xaxis::Symbol=:xaxis, yaxis::Symbol=:yaxis)
+    for (axis, islog) in ((xaxis, x), (yaxis, y))
+        d = PlotlySupply._symbol_dict(get(fig.layout.fields, axis, nothing))
+        if islog
+            @test get(d, :type, "-") == "log"
+            @test get(d, :exponentformat, "-") == "power"
+        else
+            @test get(d, :type, "-") != "log"
+        end
+    end
+    return nothing
+end
+
+# Per-trace `showlegend` / marker values of `traces`.
+_showlegends(traces) = [t[:showlegend] for t in traces]
+_marker_sizes(traces) = [t[:marker][:size] for t in traces]
+_marker_symbols(traces) = [t[:marker][:symbol] for t in traces]

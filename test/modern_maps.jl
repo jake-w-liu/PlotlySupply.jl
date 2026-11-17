@@ -1,3 +1,8 @@
+using Test
+using PlotlySupply
+
+isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
+
 mutable struct _ModernMapCustomTrace <: AbstractTrace
     fields::Dict{Symbol,Any}
 end
