@@ -2927,27 +2927,10 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test p.layout.fields[:xaxis][:showgrid] == false
         @test update_xaxes!(p, attr(zeroline=false)) === p
         @test p.layout.fields[:xaxis][:zeroline] == false
-
-        ambiguities = Test.detect_ambiguities(
-            PlotlyBase,
-            PlotlySupply;
-            recursive=false,
-        )
-        relevant = filter(ambiguities) do pair
-            any(method -> method.module === PlotlySupply, pair)
-        end
-        @test isempty(relevant)
-
-        project_file = something(
-            Base.active_project(),
-            normpath(joinpath(@__DIR__, "..", "Project.toml")),
-        )
-        output = IOBuffer()
-        command = `$(Base.julia_cmd()) --startup-file=no --compiled-modules=no --warn-overwrite=yes --project=$(dirname(project_file)) -e $("using PlotlySupply")`
-        process = run(pipeline(ignorestatus(command), stdout=output, stderr=output))
-        diagnostics = String(take!(output))
-        @test success(process)
-        @test !occursin("overwritten in module PlotlySupply", diagnostics)
+        # No PlotlyBase/PlotlySupply method ambiguity and no method overwrite
+        # while loading (a fresh `--compiled-modules=no` process): checked once,
+        # in mutator_parity.jl ("mutator parity has no method ambiguity",
+        # "mutator parity loads without method overwrite").
     end
 
     @testset "CRC: savefig json/html work headlessly" begin

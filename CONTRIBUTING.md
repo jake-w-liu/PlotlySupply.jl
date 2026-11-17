@@ -53,8 +53,8 @@ The test suite opens real (hidden) Electron windows and exports images, so it ne
   `xvfb-run -a -s "-screen 0 1920x1080x24" julia --project -e 'using Pkg; Pkg.test()'`.
 
 Run the whole suite with `julia --project -e 'using Pkg; Pkg.test()'` (or `julia --project=. test/runtests.jl`).
-Every file in `test/` also runs on its own, e.g. `julia --project=. test/regression_scatter.jl`; shared test fixtures live in `test/testutils.jl`.
-New test files named `test/sci_*.jl` or `test/regression_*.jl` are picked up by `test/runtests.jl` automatically. Packages a test file loads with `using` must be listed in `Project.toml` (`[deps]`, or `[extras]` plus `[targets]`), because `Pkg.test()` cannot load anything else.
+Every file in `test/` also runs on its own, e.g. `julia --project=. test/regression_scatter.jl`: it starts with `using Test` and `using PlotlySupply`, and a file that uses the shared fixtures in `test/testutils.jl` loads them with `isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")`.
+New test files named `test/sci_*.jl` or `test/regression_*.jl` are picked up by `test/runtests.jl` automatically; any other test file must be added to its `include` list. Packages a test file loads with `using` must be listed in `Project.toml` (`[deps]`, or `[extras]` plus `[targets]`), because `Pkg.test()` cannot load anything else. Assert the exception type a call throws (`@test_throws ArgumentError ...`), not `Exception`. `test/hygiene.jl` checks these rules.
 
 ## License
 
