@@ -476,3 +476,182 @@ end
 		@test first(_rx_layout(fig)[:annotations])[:text] == first_note[:text]
 	end
 end
+
+# The subplot a SubplotFigure cell routes a trace to, per cell kind.
+function _rx_cell_ref(trace, kind::AbstractString)
+	fields = trace.fields
+	kind == "xy" && return (fields[:xaxis], fields[:yaxis])
+	kind == "domain" && return Tuple(_rx_get(fields[:domain], :x))
+	return fields[:subplot]
+end
+
+@testset "regression: extended charts, v3 consistency" begin
+	@testset "consistency sweep: every constructor and mutator, Plot and SubplotFigure" begin
+		M = reshape(collect(1.0:12.0), 3, 4)
+		title = L"Title $\alpha$"
+		# (constructor, mutator, data (ranges and views), empty data, cell kind,
+		#  stored-as-given field path => data argument, Symbol colour keyword,
+		#  colour field path, expected colour value)
+		cases = (
+			(plot_pie, plot_pie!, (view(M, :, 1),), (Float64[],), "domain",
+				(:values,) => 1, :colors => [:red, :green, :blue], (:marker, :colors), ["red", "green", "blue"]),
+			(plot_funnelarea, plot_funnelarea!, (1:3,), (Int[],), "domain",
+				(:values,) => 1, :colors => [:red, :green, :blue], (:marker, :colors), ["red", "green", "blue"]),
+			(plot_sunburst, plot_sunburst!, (["a", "b", "c"], view(["", "a", "a"], 1:3)), (String[], String[]), "domain",
+				nothing, :colors => [:red, :green, :blue], (:marker, :colors), ["red", "green", "blue"]),
+			(plot_treemap, plot_treemap!, (["a", "b", "c"], ["", "a", "a"]), (String[], String[]), "domain",
+				nothing, :colors => [:red, :green, :blue], (:marker, :colors), ["red", "green", "blue"]),
+			(plot_funnel, plot_funnel!, (1:3, ["a", "b", "c"]), (Int[], String[]), "xy",
+				(:x,) => 1, :color => :teal, (:marker, :color), "teal"),
+			(plot_waterfall, plot_waterfall!, (["a", "b", "c"], view(M, :, 2)), (String[], Float64[]), "xy",
+				(:y,) => 2, nothing, (), nothing),
+			(plot_candlestick, plot_candlestick!, (1:3, view(M, :, 1), view(M, :, 1) .+ 2, view(M, :, 1) .- 1, view(M, :, 1) .+ 1),
+				(Int[], Float64[], Float64[], Float64[], Float64[]), "xy",
+				(:open,) => 2, :increasing_color => :teal, (:increasing, :line, :color), "teal"),
+			(plot_ohlc, plot_ohlc!, (1:3, [1, 2, 3], [3, 4, 5], [0, 1, 2], [2, 3, 4]),
+				(Int[], Float64[], Float64[], Float64[], Float64[]), "xy",
+				(:x,) => 1, :decreasing_color => :orange, (:decreasing, :line, :color), "orange"),
+			(plot_sankey, plot_sankey!, (0:1, 1:2, view([1.0, 2.0], :)), (Int[], Int[], Float64[]), "domain",
+				(:link, :value) => 3, :node_color => :teal, (:node, :color), "teal"),
+			(plot_parcoords, plot_parcoords!, (["a" => 1:3, "b" => view(M, :, 1)],), (Pair{String, Vector{Int}}[],), "domain",
+				nothing, :line_color => :teal, (:line, :color), "teal"),
+			(plot_ternary, plot_ternary!, (1:2, view(M, 1:2, 1), [1, 1]), (Float64[], Float64[], Float64[]), "ternary",
+				(:b,) => 2, :color => :teal, (:marker, :color), "teal"),
+			(plot_indicator, plot_indicator!, (3,), nothing, "domain",
+				nothing, nothing, (), nothing),
+		)
+		for (ctor, mut, data, empty, kind, stored, colour, colour_path, colour_value) in cases
+			who = String(nameof(ctor))
+			# Range / SubArray data, a LaTeXString title and the figure options
+			# through the D7 primitives.
+			fig = ctor(data...; title = title, width = 640.0, height = 480, fontsize = 13.0)
+			layout = _rx_layout(fig)
+			@test _rx_get(layout, :title, :text) == PlotlySupply._label(title)
+			@test (layout[:width], layout[:height]) == (640, 480)
+			@test _rx_get(layout, :font, :size) == 13
+			if stored !== nothing
+				path, position = stored
+				@test _rx_get(_rx_trace(fig), path...) === data[position]
+			end
+			if colour !== nothing
+				coloured = _rx_trace(ctor(data...; (colour,)...))
+				@test _rx_get(coloured, colour_path...) == colour_value
+			end
+			empty === nothing || @test _rx_throws(() -> ctor(empty...), "$(who): `")
+			@test_throws MethodError ctor(data...; no_such_option = 1)
+
+			target = ctor(data...)
+			@test mut(target, data...; title = L"New $\beta$", fontsize = 11) === nothing
+			@test length(target.data) == 2
+			@test _rx_get(_rx_layout(target), :title, :text) == PlotlySupply._label(L"New $\beta$")
+			@test _rx_get(_rx_layout(target), :font, :size) == 11
+			@test _rx_atomic(target, () -> mut(target, data...; show = true), "$(who)!: mutators do not take `show`")
+			@test _rx_atomic(target, () -> mut(target, data...; title = "\$x"), "$(who)!: `title`")
+			empty === nothing || @test _rx_atomic(target, () -> mut(target, empty...), "$(who)!: `")
+			@test_throws MethodError mut(target, data...; no_such_option = 1)
+
+			# A SubplotFigure cell of the right kind; the trace is routed there.
+			sf = subplots(1, 2; sync = false, specs = [Spec(kind = kind) Spec(kind = kind)])
+			@test mut(sf, data...; row = 1, col = 2) === sf
+			@test (sf.current_row, sf.current_col) == (1, 2)
+			cell = PlotlySupply._cell_target(sf; row = 1, col = 2)
+			expected = kind == "xy" ? (cell.xref, cell.yref) :
+				kind == "domain" ? cell.xdomain : "ternary2"
+			@test _rx_cell_ref(last(sf.fig.data), kind) == expected
+			@test _rx_atomic(sf.fig, () -> mut(sf, data...; show = true), "$(who)!: mutators do not take `show`")
+			empty === nothing || @test _rx_atomic(sf.fig, () -> mut(sf, empty...; row = 1, col = 1), "$(who)!: `")
+			@test_throws MethodError mut(sf, data...; no_such_option = 1)
+			wrong = subplots(1, 1; sync = false, specs = reshape([Spec(kind = kind == "xy" ? "domain" : "xy")], 1, 1))
+			@test _rx_atomic(wrong.fig, () -> mut(wrong, data...), "$(who)!: trace type")
+		end
+	end
+
+	@testset "empty data is an ArgumentError naming the argument" begin
+		for (call, needle) in (
+			(() -> plot_pie(Int[]), "plot_pie: `values` is empty"),
+			(() -> plot_funnelarea(Float64[]), "plot_funnelarea: `values` is empty"),
+			(() -> plot_sunburst(String[], String[]), "plot_sunburst: `labels` is empty"),
+			(() -> plot_treemap(String[], String[]), "plot_treemap: `labels` is empty"),
+			(() -> plot_funnel(Int[], String[]), "plot_funnel: `x` is empty"),
+			(() -> plot_waterfall(String[], Float64[]), "plot_waterfall: `x` is empty"),
+			(() -> plot_candlestick(Int[], Int[], Int[], Int[], Int[]), "plot_candlestick: `x` is empty"),
+			(() -> plot_ohlc(Int[], Int[], Int[], Int[], Int[]), "plot_ohlc: `x` is empty"),
+			(() -> plot_sankey(Int[], Int[], Int[]), "plot_sankey: `source` is empty"),
+			(() -> plot_ternary(Int[], Int[], Int[]), "plot_ternary: `a` is empty"),
+		)
+			@test _rx_throws(call, needle)
+		end
+		# Lengths are still checked against the first argument.
+		@test _rx_throws(() -> plot_funnel([1], String[]), "plot_funnel: `y` must have one entry")
+	end
+
+	@testset "plot_ternary applies the active style's trace defaults (X10)" begin
+		style = PlotStyle(; linewidth = 3, marker_size = 9, cycle = :dash_marker)
+		with_style(style) do
+			reference = plot_scatter(1:2, [1, 2]; mode = "lines")
+			plot_scatter!(reference, 1:2, [2, 1]; mode = "lines")
+			fig = plot_ternary([0.5, 0.2], [0.3, 0.5], [0.2, 0.3]; mode = "lines")
+			@test plot_ternary!(fig, [0.1, 0.4], [0.6, 0.3], [0.3, 0.3]; mode = "lines", marker_size = 4) === nothing
+			for index in 1:2
+				@test _rx_get(fig.data[index], :line, :width) == 3
+				@test _rx_get(fig.data[index], :line, :dash) == _rx_get(reference.data[index], :line, :dash)
+				# The caller chose the mode: the `:dash_marker` cycle adds no markers.
+				@test fig.data[index].fields[:mode] == "lines"
+			end
+			@test _rx_get(fig.data[1], :line, :dash) != _rx_get(fig.data[2], :line, :dash)
+			@test _rx_get(fig.data[1], :marker, :size) == 9
+			# An explicit marker size wins over the style.
+			@test _rx_get(fig.data[2], :marker, :size) == 4
+		end
+		plain = _rx_trace(plot_ternary([0.5], [0.3], [0.2]))
+		@test !_rx_has(plain, :line)
+		@test !_rx_has(plain, :marker)
+	end
+
+	@testset "Cartesian extended mutators and annotate! draw into an inset (X20)" begin
+		sf = subplots(1, 1; sync = false)
+		plot_scatter!(sf, 1:10, 1:10)
+		k = inset!(sf, (0.55, 0.55, 0.4, 0.4))
+		inset_target = PlotlySupply._cell_target(sf; inset = k)
+		@test plot_funnel!(sf, [3, 2, 1], ["a", "b", "c"]; inset = k) === sf
+		@test plot_waterfall!(sf, ["a", "b"], [1, 2]; inset = k) === sf
+		@test plot_candlestick!(sf, 1:2, [1, 2], [2, 3], [0.5, 1.5], [1.5, 2.5]; inset = k) === sf
+		@test plot_ohlc!(sf, 1:2, [1, 2], [2, 3], [0.5, 1.5], [1.5, 2.5]; inset = k) === sf
+		@test annotate!(sf, 1, 1, "in"; inset = k) === sf
+		@test length(sf.fig.data) == 5
+		for trace in sf.fig.data[2:end]
+			@test (trace.fields[:xaxis], trace.fields[:yaxis]) == (inset_target.xref, inset_target.yref)
+		end
+		@test (inset_target.xref, inset_target.yref) == ("x2", "y2")
+		note = only(_rx_layout(sf.fig)[:annotations])
+		@test (note[:xref], note[:yref]) == ("x2", "y2")
+		@test _rx_atomic(sf.fig, () -> plot_funnel!(sf, [1], ["a"]; inset = 9), "plot_funnel!: unknown inset id 9")
+		@test _rx_atomic(sf.fig, () -> plot_waterfall!(sf, ["a"], [1]; inset = k, secondary_y = true), "plot_waterfall!: an inset has no secondary y-axis")
+		@test _rx_atomic(sf.fig, () -> plot_ohlc!(sf, 1:1, [1], [2], [0.5], [1.5]; inset = k, row = 2, col = 1), "plot_ohlc!: `row` must be in 1:1")
+		@test _rx_atomic(sf.fig, () -> plot_candlestick!(sf, 1:1, [1], [2], [0.5], [1.5]; inset = true), "plot_candlestick!: `inset` must be an integer")
+
+		# The logarithmic-axis checks read the inset's axes, not the host
+		# cell's: a log host does not block a linear inset ...
+		host_log = subplots(1, 1; sync = false)
+		plot_scatter!(host_log, 1:3, [1, 10, 100]; yscale = "log", xscale = "log")
+		linear_inset = inset!(host_log, (0.1, 0.5, 0.4, 0.4))
+		@test plot_waterfall!(host_log, ["a", "b"], [1, -2]; inset = linear_inset) === host_log
+		@test plot_funnel!(host_log, [2, 1], ["a", "b"]; inset = linear_inset) === host_log
+		@test plot_candlestick!(host_log, 1:2, [-1, 2], [2, 3], [-1.5, 1.5], [1.5, 2.5]; inset = linear_inset) === host_log
+		@test _rx_throws(() -> plot_waterfall!(host_log, ["a"], [1]), "plot_waterfall!: the y axis of this cell is logarithmic")
+		# ... and a log inset is checked even on a linear host.
+		host_linear = subplots(1, 1; sync = false)
+		plot_scatter!(host_linear, 1:3, 1:3)
+		log_inset = inset!(host_linear, (0.1, 0.5, 0.4, 0.4))
+		plot_scatter!(host_linear, 1:3, [1, 10, 100]; inset = log_inset, yscale = "log", xscale = "log")
+		for (call, needle) in (
+			(() -> plot_waterfall!(host_linear, ["a"], [1]; inset = log_inset), "plot_waterfall!: the y axis of this inset is logarithmic"),
+			(() -> plot_funnel!(host_linear, [1], ["a"]; inset = log_inset), "plot_funnel!: the x axis of this inset is logarithmic"),
+			(() -> plot_candlestick!(host_linear, 1:2, [1, -2], [2, 3], [0.5, 1.5], [1.5, 2.5]; inset = log_inset), "plot_candlestick!: `open[2]` is on a logarithmic axis"),
+			(() -> plot_ohlc!(host_linear, [0, 1], [1, 2], [2, 3], [0.5, 1.5], [1.5, 2.5]; inset = log_inset), "plot_ohlc!: `x[1]` is on a logarithmic axis"),
+		)
+			@test _rx_atomic(host_linear.fig, call, needle)
+		end
+		@test plot_waterfall!(host_linear, ["a"], [1]) === host_linear
+	end
+end
