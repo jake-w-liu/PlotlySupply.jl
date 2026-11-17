@@ -283,4 +283,6 @@ export set_legend!, get_default_legend_position, set_default_legend_position!
 export xlabel!, ylabel!, xrange!, yrange!
 export SyncPlot, SubplotFigure, plot, plot!, to_syncplot, msgchannel, toggle_devtools, savefig, make_subplots, subplots, subplot!, subplot_legends!, update_maps!, mgrid
 
+include("precompile.jl")
+
 end
