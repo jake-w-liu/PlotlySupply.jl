@@ -578,9 +578,9 @@ _r3_resolved(name) = PlotlySupply._resolve_colorscale(name; who = "test").scale
 		end
 		# view!, scene! and annotate! with the same kinds of input.
 		f = plot_surface(Zm)
-		@test view!(f; elev = 20, azim = 30) === f
+		@test view!(f; elev = 20, azim = 30) === nothing
 		@test scene!(f; xrange = (0, 4), zrange = [0, 6], xlabel = L"x_1", xticks = 0:2, xticklabels = [L"a", "b", "c"],
-			backgroundcolor = :lightgray) === f
+			backgroundcolor = :lightgray) === nothing
 		@test annotate!(f, 1, 1, 1, L"\alpha"; color = :red) === f
 		before = PlotlyBase.JSON.json(f)
 		@test_throws ArgumentError view!(f; show = true)

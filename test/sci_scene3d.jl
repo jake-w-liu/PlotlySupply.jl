@@ -125,7 +125,7 @@ end
 
 	@testset "view!: matplotlib view_init camera (F31, A10)" begin
 		f = _t3_cube()
-		@test view!(f; elev = 30, azim = -60, distance = 2) === f
+		@test view!(f; elev = 30, azim = -60, distance = 2) === nothing
 		eye = _t3_xyz(_t3_camera(f)[:eye])
 		@test collect(eye) ≈ 2 .* [cosd(30) * cosd(-60), cosd(30) * sind(-60), sind(30)]
 		@test collect(_t3_xyz(_t3_camera(f)[:up])) == [0.0, 0.0, 1.0]
@@ -303,7 +303,7 @@ end
 
 	@testset "scene!: aspect, axes, panes and ticks (A7)" begin
 		f = plot_surface(rand(5, 4))
-		@test scene!(f; aspectratio = (2, 1, 0.5)) === f
+		@test scene!(f; aspectratio = (2, 1, 0.5)) === nothing
 		@test _t3_scene(f)[:aspectmode] == "manual"
 		@test collect(_t3_xyz(_t3_scene(f)[:aspectratio])) == [2.0, 1.0, 0.5]
 		scene!(f; aspectratio = (x = 1, y = 2, z = 3))
@@ -742,8 +742,8 @@ end
 		sp = _t3_syncplot(p, scripts)
 		@test plot_surface!(sp, rand(3, 3)) === nothing
 		@test length(p.data) == 2
-		@test view!(sp; elev = 10, azim = 10) === sp
-		@test scene!(sp; aspectratio = (1, 1, 1)) === sp
+		@test view!(sp; elev = 10, azim = 10) === nothing
+		@test scene!(sp; aspectratio = (1, 1, 1)) === nothing
 		@test annotate!(sp, 1, 1, 1, "x") === sp
 		@test plot_polygons3d!(sp, [[0.0 0 0; 1 0 0; 0 1 0]]) === nothing
 		@test plot_wireframe!(sp, [0.0, 1.0], [0.0, 1.0], rand(2, 2)) === nothing
