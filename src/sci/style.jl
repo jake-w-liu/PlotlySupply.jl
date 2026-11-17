@@ -2259,6 +2259,10 @@ function _tight_layout_impl!(fig; pad::Real = 4)
 	fields = p.layout.fields
 	fields[:margin] = new_margin
 	new_title === nothing || (fields[:title] = new_title)
+	# Decorations stacked above the axes and a figure legend moved to the top
+	# of the figure (`_text_restack!`) need more top margin than the
+	# annotations alone; the pass only raises it.
+	_text_restack!(p)
 	_refresh!(fig)
 	return nothing
 end
@@ -2289,6 +2293,10 @@ clipped:
   annotations sit above the plot area, the estimated title height is added to
   the top margin as well, so the title stays above them. Each enlargement is
   capped at 45 % of the figure width or height.
+- what is stacked above the axes (a legend placed above a cell, panel titles
+  and labels above it, an `:outside_top` figure legend moved under the figure
+  title; see [`set_legend!`](@ref)) keeps its room: the top margin is raised
+  to hold the stack.
 
 The figure size used for the measurement is `layout.width`/`layout.height`
 (see [`figsize!`](@ref)), else 700 × 500 px. A title with `yref="paper"` is

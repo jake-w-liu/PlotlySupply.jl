@@ -1310,16 +1310,10 @@ function _legend_title_clearance(p::Plot, title)
 	get(d, :yanchor, "auto") in ("auto", "top") || return nothing
 
 	pad = _symbol_dict(get(d, :pad, nothing))
-	pad_t = _legend_real(get(pad, :t, nothing))
-	if pad_t === nothing
-		pad_t = Float64(_TEXT_TITLE_TOP_PAD)
+	if _legend_real(get(pad, :t, nothing)) === nothing
 		pad[:t] = _TEXT_TITLE_TOP_PAD
 	end
-	font_size = _legend_title_font_size(p, d)
-	# Lower bound of the drawn text height: one line of text is at least as
-	# tall as its font size; a MathJax expression can be shorter (e.g. `$x$`).
-	text_floor = occursin('$', text) ? font_size / 2 : font_size
-	needed = max(Float64(_LEGEND_TITLE_GAP), ceil(_legend_top_margin(p) - pad_t - text_floor + 1))
+	needed = _legend_title_clearance_pad(p, d)
 	pad_b = _legend_real(get(pad, :b, nothing))
 	changed = get(d, :automargin, nothing) !== true || !haskey(d, :pad) ||
 		pad_b === nothing || pad_b < needed || !(title isa AbstractDict || title isa PlotlyBase.PlotlyAttribute)
@@ -1328,6 +1322,21 @@ function _legend_title_clearance(p::Plot, title)
 	d[:automargin] = true
 	d[:pad] = attr(; pad...)
 	return d
+end
+
+# The `title.pad.b` `_legend_title_clearance` gives title `d` (a Dict with
+# text): the band pad.t (10 px when unset) + text + pad.b must exceed
+# `margin.t`, with the font size as a lower bound of the text height (half of
+# it for MathJax titles).
+function _legend_title_clearance_pad(p::Plot, d::AbstractDict)
+	text = get(d, :text, "")
+	pad_t = _legend_real(get(_symbol_dict(get(d, :pad, nothing)), :t, nothing))
+	pad_t === nothing && (pad_t = Float64(_TEXT_TITLE_TOP_PAD))
+	font_size = _legend_title_font_size(p, d)
+	# Lower bound of the drawn text height: one line of text is at least as
+	# tall as its font size; a MathJax expression can be shorter (e.g. `$x$`).
+	text_floor = (text isa AbstractString && occursin('$', text)) ? font_size / 2 : font_size
+	return max(Float64(_LEGEND_TITLE_GAP), ceil(_legend_top_margin(p) - pad_t - text_floor + 1))
 end
 
 # Apply `_legend_title_clearance` to the figure title of `p` when a legend is
@@ -1341,13 +1350,12 @@ function _legend_title_clearance!(p::Plot)
 	return nothing
 end
 
-# Layout passes after every legend placement: the figure title clears a legend
-# above the plot area, then the decorations above the axes are stacked (D12:
-# panel titles/labels above cell legends, figure legends above both; see
-# `_text_restack!`).
+# Layout pass after every legend placement: the decorations above the axes
+# are stacked (D12: panel titles/labels above cell legends, figure legends
+# above both), or, with nothing stacked, the figure title clears a legend
+# above the plot area (`_text_restack!(p; clearance = true)`).
 function _legend_stack!(p::Plot)
-	_legend_title_clearance!(p)
-	_text_restack!(p)
+	_text_restack!(p; clearance = true)
 	return nothing
 end
 
