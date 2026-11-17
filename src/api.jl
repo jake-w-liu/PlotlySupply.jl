@@ -965,9 +965,23 @@ function _subplot_match_sync!(p::Plot, snapshot::Union{Nothing, _SubplotMatchSna
 			_cmn_mapping_get(fields[member], :showticklabels) === false || continue
 			title = _cmn_mapping_get(fields[member], :title)
 			title === nothing && continue
+			# Only a title that carries text is a label to move. A title that
+			# holds only styling (`set_fonts!`, `update_xaxes!(title_font = ...)`
+			# write `title.font` on every axis) stays where it is: moving it
+			# would overwrite the text of the axis that shows the labels.
+			moved = title isa AbstractString ? Dict{Symbol, Any}(:text => title) : _symbol_dict(title)
+			text = get(moved, :text, nothing)
+			(text isa AbstractString && !isempty(text)) || continue
 			target = _subplot_match_label_axis(layout, members, member)
 			target === nothing && continue
-			_subplot_match_write!(p, target, :title, title)
+			# Merge into the target's title: what the moved title states wins,
+			# the rest of the target's title (font, standoff) is kept.
+			existing = _cmn_mapping_get(fields[target], :title)
+			merged = existing isa AbstractString ? Dict{Symbol, Any}(:text => existing) : _symbol_dict(existing)
+			for (name, value) in moved
+				merged[name] = value
+			end
+			_subplot_match_write!(p, target, :title, merged)
 			_subplot_match_write!(p, member, :title, _SubplotMatchAbsent())
 		end
 	end

@@ -1913,3 +1913,53 @@ end
 		end
 	end
 end
+
+@testset "shared axes: styling a hidden-label axis title keeps the shown title's text" begin
+	# Wave-4 integration regression: `set_fonts!` writes `title.font` on every
+	# axis; on a shared-x column that font-only title of a hidden-label axis was
+	# "moved" to the label-showing axis and replaced its text (the x title of
+	# the bottom panel vanished from the figure).
+	title_fields(sf, key) = (t = get(_rsp_axis(sf, key), :title, nothing);
+		t === nothing ? nothing : _rsp_fields(t))
+	make() = begin
+		sf = subplots(3, 1; sync = false, shared_xaxes = true)
+		for row in 1:3
+			plot_scatter!(sf, 1:3, [1.0, 2.0, 3.0]; row = row, col = 1)
+		end
+		xlabel!(sf, "position"; row = 3, col = 1)
+		sf
+	end
+
+	sf = make()
+	@test title_fields(sf, :xaxis3)[:text] == "position"
+	set_fonts!(sf; label = 8, units = :pt)
+	shown = title_fields(sf, :xaxis3)
+	@test shown[:text] == "position"
+	@test _rsp_fields(shown[:font])[:size] ≈ 8 * 4 / 3
+	# A second pass and an explicit font update change nothing about the text.
+	set_fonts!(sf; label = 9, units = :pt)
+	@test title_fields(sf, :xaxis3)[:text] == "position"
+	update_xaxes!(sf; title_font_size = 11)
+	@test title_fields(sf, :xaxis3)[:text] == "position"
+	@test _rsp_fields(title_fields(sf, :xaxis3)[:font])[:size] == 11
+
+	# A text title set on a hidden-label cell still moves to the shown axis,
+	# and keeps the font the shown axis already had.
+	sf = make()
+	set_fonts!(sf; label = 8, units = :pt)
+	xlabel!(sf, "moved"; row = 1, col = 1)
+	shown = title_fields(sf, :xaxis3)
+	@test shown[:text] == "moved"
+	@test _rsp_fields(shown[:font])[:size] ≈ 8 * 4 / 3
+	hidden = title_fields(sf, :xaxis)
+	@test hidden === nothing || !haskey(hidden, :text)
+
+	# The same for a shared-y row.
+	sf = subplots(1, 3; sync = false, shared_yaxes = true)
+	for col in 1:3
+		plot_scatter!(sf, 1:3, [1.0, 2.0, 3.0]; row = 1, col = col)
+	end
+	ylabel!(sf, "amplitude"; row = 1, col = 1)
+	set_fonts!(sf; label = 8, units = :pt)
+	@test title_fields(sf, :yaxis)[:text] == "amplitude"
+end
