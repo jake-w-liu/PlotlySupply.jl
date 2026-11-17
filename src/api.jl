@@ -3055,21 +3055,36 @@ function _subplot_layout_object_update_impl!(
 	family::Symbol,
 	who::AbstractString,
 	with::PlotlyBase.PlotlyAttribute;
-	row::Integer,
-	col::Integer,
+	row::Union{Nothing, Integer},
+	col::Union{Nothing, Integer},
 	secondary_y::Bool = false,
+	inset = nothing,
 	kwargs...,
 )
-	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = who)
 	p = _plot_obj(sf.fig)
-	key = _subplot_layout_object_key(
-		p,
-		r,
-		c,
-		family,
-		who;
-		secondary_y = secondary_y,
-	)
+	if inset === nothing
+		r, c = _resolve_subplot_cell(sf; row = row, col = col, who = who)
+		key = _subplot_layout_object_key(
+			p,
+			r,
+			c,
+			family,
+			who;
+			secondary_y = secondary_y,
+		)
+	else
+		# An inset's own x/y axis (its cell, when given, must host it).
+		target = _cell_target(
+			sf;
+			row = row,
+			col = col,
+			secondary_y = secondary_y,
+			inset = inset,
+			who = who,
+		)
+		r, c = target.row, target.col
+		key = family === :xaxis ? target.xkey : target.ykey
+	end
 	layout = p.layout
 	# Run PlotlyBase's own updater on a scratch layout holding only this cell's
 	# object, so `with`, `kwargs` and underscore paths (`title_text=...`) mean
@@ -3102,8 +3117,9 @@ function _subplot_layout_object_update!(
 	col,
 	kwargs;
 	secondary_y::Bool = false,
+	inset = nothing,
 )
-	if row === nothing && col === nothing
+	if row === nothing && col === nothing && inset === nothing
 		secondary_y && throw(ArgumentError(
 			"$(who): `secondary_y=true` selects one cell's secondary y axis; " *
 			"pass `row` and `col`.",
@@ -3111,7 +3127,7 @@ function _subplot_layout_object_update!(
 		updater(getfield(sf, :fig), with; kwargs...)
 		return sf
 	end
-	(row === nothing || col === nothing) && throw(ArgumentError(
+	(row === nothing) == (col === nothing) || throw(ArgumentError(
 		"$(who): `row` and `col` must be provided together.",
 	))
 	_warn_ignored_subplot_domain(who, with, kwargs)
@@ -3126,13 +3142,14 @@ function _subplot_layout_object_update!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		kwargs...,
 	)
 end
 
 """
-	update_xaxes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
-	update_yaxes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, secondary_y=false, kwargs...)
+	update_xaxes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, inset=nothing, kwargs...)
+	update_yaxes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, secondary_y=false, inset=nothing, kwargs...)
 	update_polars!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
 	update_scenes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
 	update_ternaries!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, kwargs...)
@@ -3148,6 +3165,11 @@ attributes of that object family (`showgrid=false`, `title_text="t"`, …).
   of the matching kind, otherwise an `ArgumentError` is thrown and nothing
   changes. The grid owns cell domains, so a `domain` value is ignored with a
   warning. `row`/`col` are never written as attributes.
+- `update_xaxes!`/`update_yaxes!` with `inset=k`: only the x (y) axis of
+  inset `k` of `sf.insets` ([`inset!`](@ref), `subplots(...; insets)`) is
+  updated, and its host cell becomes the active cell; `row`/`col` may be
+  omitted (when given they must name the host cell). An unknown id, or
+  `secondary_y=true` with an inset, is an `ArgumentError`.
 
 Returns `sf`.
 
@@ -3156,6 +3178,8 @@ Returns `sf`.
 sf = subplots(1, 2; sync=false)
 update_xaxes!(sf; showgrid=false)                 # every x axis
 update_yaxes!(sf; row=1, col=2, type="log")       # only cell (1, 2)
+k = inset!(sf, (0.6, 0.6, 0.35, 0.35); row=1, col=2)
+update_xaxes!(sf; inset=k, type="log")            # only the inset's x axis
 ```
 """
 function PlotlyBase.update_xaxes!(
@@ -3163,6 +3187,7 @@ function PlotlyBase.update_xaxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	inset = nothing,
 	kwargs...,
 )
 	return _subplot_layout_object_update!(
@@ -3173,7 +3198,8 @@ function PlotlyBase.update_xaxes!(
 		with,
 		row,
 		col,
-		kwargs,
+		kwargs;
+		inset = inset,
 	)
 end
 
@@ -3183,6 +3209,7 @@ function PlotlyBase.update_yaxes!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset = nothing,
 	kwargs...,
 )
 	return _subplot_layout_object_update!(
@@ -3195,6 +3222,7 @@ function PlotlyBase.update_yaxes!(
 		col,
 		kwargs;
 		secondary_y = secondary_y,
+		inset = inset,
 	)
 end
 

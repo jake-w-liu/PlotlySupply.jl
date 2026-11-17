@@ -675,6 +675,15 @@ end
 		no_traces = (fig; kwargs...) -> PlotlySupply._cmn_delete_layout_fields!(fig, :xaxis, (:tickvals,))
 		PlotlySupply._subplot_delegate_mutator!(live, no_traces; row=1, col=2)
 		@test _rsp_axis(live, :xaxis2)[:tickvals] == [1, 10]
+		# A renderer failure rolls the removal back with the traces.
+		update_xaxes!(live; row=1, col=2, tickmode="array", ticktext=["a", "b"])
+		axis_before = deepcopy(_rsp_layout(live)[:xaxis2])
+		count_before = length(live.plot.data)
+		renderer.fail = true
+		@test_throws Exception PlotlySupply._subplot_delegate_mutator!(live, drop_ticks, [1.0, 10.0], [1.0, 2.0]; row=1, col=2)
+		renderer.fail = false
+		@test _rsp_layout(live)[:xaxis2] == axis_before
+		@test length(live.plot.data) == count_before
 	end
 
 	@testset "style cycles continue across cells (X9)" begin
@@ -778,6 +787,36 @@ end
 		@test sf.plot.data[1][:legend] == sf.plot.data[2][:legend]
 		# `inset!` numbers its insets after the grid's.
 		@test inset!(sf, (0.1, 0.1, 0.3, 0.3); row=1, col=1) == 2
+		# update_xaxes!/update_yaxes! address an inset's own axes.
+		subplot!(sf, 1, 1)
+		@test update_xaxes!(sf; inset=1, type="log") === sf
+		@test _rsp_axis(sf, :xaxis3)[:type] == "log"
+		@test !haskey(_rsp_axis(sf, :xaxis2), :type)
+		@test !haskey(_rsp_axis(sf, :xaxis2), :inset) && !haskey(_rsp_axis(sf, :xaxis3), :inset)
+		@test (sf.current_row, sf.current_col) == (1, 2)
+		@test update_yaxes!(sf; row=1, col=1, inset=2, title_text="inset y") === sf
+		inset2_y = sf.insets[2].ykey
+		@test _rsp_fields(_rsp_axis(sf, inset2_y)[:title])[:text] == "inset y"
+		@test !haskey(_rsp_axis(sf, :yaxis), :title) ||
+			get(_rsp_fields(_rsp_axis(sf, :yaxis)[:title]), :text, "") != "inset y"
+		layout_before = deepcopy(sf.plot.layout)
+		for (call, fragment) in (
+			(() -> update_xaxes!(sf; inset=3, type="log"), "unknown inset id 3"),
+			(() -> update_xaxes!(sf; row=1, col=1, inset=1, type="log"), "belongs to cell (1, 2)"),
+			(() -> update_yaxes!(sf; inset=1, secondary_y=true, type="log"), "no secondary y-axis"),
+			(() -> update_xaxes!(sf; row=1, inset=1, type="log"), "together"),
+		)
+			err = try
+				call()
+				nothing
+			catch caught
+				caught
+			end
+			@test err isa ArgumentError
+			@test occursin(fragment, err.msg)
+		end
+		@test sf.plot.layout == layout_before
+		update_xaxes!(sf; inset=1, type="linear")
 		# "to_end" sizes reach the host's edge.
 		to_end = subplots(2, 1; sync=false, insets=[_RSP_PB.Inset(cell=(2, 1), l=0.6, b=0.7)])
 		host = _rsp_axis(to_end, :xaxis2)[:domain]
