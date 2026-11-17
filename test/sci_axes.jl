@@ -1512,7 +1512,7 @@ end
         @test _ax_json(sf.plot.layout) == before && length(sf.insets) == n
         auto = subplots(1, 1; sync = false)
         plot_scatter!(auto, [1.0, 2.0], [1.0, 2.0])
-        @test _ax_throws(() -> inset!(auto, (1.0, 1.0, 0.5, 0.5); coords = :data), "`coords = :data` needs a fixed x range")
+        @test _ax_throws(() -> inset!(auto, (1.0, 1.0, 0.5, 0.5); coords = :data), "`coords = :data` needs a fixed numeric x range")
         # Explicit ranges, a reversed y axis.
         xrange!(auto, (0, 4)); yrange!(auto, (4, 0))
         ki = inset!(auto, (1.0, 1.0, 2.0, 2.0); coords = :data)

@@ -1353,13 +1353,14 @@ SubplotFigure cell or inset (matplotlib `ax.spines[...]` and
   the axis line where plotly.js can draw it (`showline`, `mirror`); a frame
   it cannot draw (an opposite line alone, or mirrored ticks without the
   mirrored line) gets that line as a layout shape on the plot-area edge in
-  the axis's line colour and width (named `"plotlysupply:spine:<xy>:<k>"`;
-  later `spines!` calls replace it).
+  `color`/`linewidth`, else the axis's line colour (the template's ink when
+  unset) and width (named `"plotlysupply:spine:<xy>:<k>"`; later `spines!`
+  calls replace it).
 - `ticks = nothing`: `:mirror` also draws the ticks on the top and right
   frame sides (plotly `mirror = "ticks"`); `:primary` keeps them on the
   bottom and left sides only; `:none` removes the tick marks (major and
-  minor; `xticks!(fig; direction = :inside)` brings them back); `nothing`
-  keeps the current choice.
+  minor; `xticks!(fig; direction = :outside)` brings the major ticks back,
+  `minor = true` the minor ones); `nothing` keeps the current choice.
 - `color = ""`: line colour (CSS/hex string, Symbol or Colors.jl colour);
   `""` keeps it.
 - `linewidth::Real = 0`: line width in px; 0 keeps it.
@@ -2314,8 +2315,8 @@ function _axes_inset_data_bounds(sf, host::_CellTarget, bounds, who::AbstractStr
 		root = _axes_match_root(sf, key, who)
 		r = _axes_known_range(sf, root)
 		r === nothing && throw(ArgumentError(
-			"$(who): `coords = :data` needs a fixed $(letter) range on the host cell " *
-			"(the inset is placed when the call runs); set it with " *
+			"$(who): `coords = :data` needs a fixed numeric $(letter) range on the host " *
+			"cell (the inset is placed when the call runs); set it with " *
 			"`$(letter)range!(sf, (lo, hi); row, col)` first.",
 		))
 		log_axis = _axis_type(layout, root) == "log"
@@ -2399,6 +2400,13 @@ dark ones; outside ticks) and do not push the figure margins. Each call creates
 a new inset (ids are 1, 2, ... in creation order; after
 [`remove_inset!`](@ref) the later ids move down by one). `inset!` on a
 `Plot`/`SyncPlot` is an `ArgumentError`.
+
+Errors (`ArgumentError`, figure unchanged): malformed `bounds` (not four
+finite numbers, a non-positive width or height, `:axes`/`:paper` values
+outside [0, 1]); with `coords = :data` a host axis without a fixed numeric
+range, non-positive bounds on a log host axis, or a box outside the host
+range; an unknown `coords`; a `background` that is not a colour; a
+`fontsize` that is not a positive number; a host cell that is not Cartesian.
 
 # Example
 ```julia
