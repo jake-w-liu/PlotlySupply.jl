@@ -591,7 +591,8 @@ end
 	sp, renderer = _rv_syncplot(p; register = true)
 	try
 		@test redraw!(p) === p
-		@test occursin("await Plotly.redraw(div);", only(renderer.scripts))
+		# 2.0 (#165): redraw! rebuilds the window from the Julia model.
+		@test occursin("await Plotly.newPlot(div,", only(renderer.scripts))
 	finally
 		close(sp)
 	end

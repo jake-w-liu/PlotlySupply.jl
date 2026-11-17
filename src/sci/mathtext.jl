@@ -136,20 +136,13 @@ end
 
 # The size switch applied when a label writer or `mathtext` is not given one:
 # the `set_default_mathtext!` size, or else the active PlotStyle's `mathsize`
-# (`_style_mathsize`, src/sci/style.jl; `\large` under `:publication`).
+# (`_style_mathsize`, src/sci/style.jl; `\large` under `:publication`). Every
+# PlotStyle field write is validated (constructor and `setproperty!`) against
+# `_STYLE_MATHSIZES`, which is built from `_MATHTEXT_SIZES`, so the style's
+# value is always "" or a `\name` switch MathJax 2 knows (X55).
 function _mathtext_default_size()
 	size = _MATHTEXT_SETTINGS[].size
-	isempty(size) || return size
-	style_size = _style_mathsize()
-	isempty(style_size) && return ""
-	name = startswith(style_size, '\\') ? style_size[2:end] : style_size
-	name in _MATHTEXT_SIZES && return "\\" * name
-	throw(ArgumentError(
-		"mathtext: the active PlotStyle's mathsize $(repr(style_size)) is not a " *
-		"MathJax 2 size switch (MathJax 2 has no \\footnotesize); set the style's " *
-		"mathsize to one of $(join(("\\" * s for s in _MATHTEXT_SIZES), ", ")), " *
-		"or override it with set_default_mathtext!(; size = ...).",
-	))
+	return isempty(size) ? _style_mathsize() : size
 end
 
 function _mathtext_align_column(align::Symbol, who::AbstractString)

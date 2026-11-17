@@ -143,11 +143,11 @@
 #       the cycle of `fig` (for builders that work on a temporary figure).
 #
 #   _style_mathsize(style = _active_style())::String
-#       "" or a LaTeX size command for the mathtext pipeline (`:publication` gives
-#       "\\large"). The math size is applied where labels are converted, so
-#       `_label` (src/sci/mathtext.jl, not owned here) must fall back to it when
-#       the `set_default_mathtext!` size is "" (cross-request to the mathtext
-#       owner; until that lands a style's `mathsize` has no effect).
+#       "" or a MathJax 2 size switch for the mathtext pipeline (`:publication`
+#       gives "\\large"). `_label` and `mathtext` (src/sci/mathtext.jl,
+#       `_mathtext_default_size`) fall back to it when the
+#       `set_default_mathtext!` size is "", so every math label of a figure
+#       built under the style gets the same size.
 #
 #   _template_is_dark(t), _template_ink(t), _template_legend_colors(t)
 #       Template-derived colours; `set_template!` re-derives every layout value
@@ -1142,13 +1142,15 @@ function _with_style_trace_offset(f, fig)
 	return Base.ScopedValues.with(f, _STYLE_TRACE_OFFSET => offset)
 end
 
-function _style_trace_type(trace::PlotlyBase.AbstractTrace)
+function _style_trace_type(trace::GenericTrace)
 	value = get(trace.fields, :type, "scatter")
 	return value isa Union{AbstractString, Symbol} ? String(value) : ""
 end
 
+# Only `GenericTrace`s carry plotly attributes PlotlySupply can read; any other
+# `AbstractTrace` subtype in a figure's data is never styled or counted.
 _style_is_line_trace(trace) =
-	trace isa PlotlyBase.AbstractTrace && _style_trace_type(trace) in _STYLE_LINE_TRACE_TYPES
+	trace isa GenericTrace && _style_trace_type(trace) in _STYLE_LINE_TRACE_TYPES
 
 # A trace attribute the constructor left at its "not set" sentinel.
 _style_value_unset(value) =
@@ -1161,44 +1163,74 @@ Fill the per-trace defaults of `style` (the active [`PlotStyle`](@ref) unless
 given) into the traces of `fig` at `trace_indices`, wherever the trace leaves
 them unset. Internal; for the trace constructors and their `!` mutators.
 
+# Arguments
 - `fig`: a `Plot`, `SyncPlot`, `SubplotFigure` or staged mutation target. Only
   the model is written (no renderer refresh), so call it while building the
   traces: in a constructor before the figure is returned or shown, in a
   mutator inside its transaction before `_refresh!`.
 - `trace_indices`: an `Integer` or a collection of 1-based positions in the
-  figure's data, normally exactly the traces the calling function just added.
-  Out-of-range positions throw an `ArgumentError` before anything is written.
-- `explicit`: names of the caller's keywords the user passed, from
-  `(:linewidth, :marker_size, :dash, :marker_symbol, :mode)`. A listed
-  keyword is never filled, even where its trace value is a sentinel (needed
-  for `mode`, whose 1.x default `"lines"` cannot be told apart from an
-  explicit `"lines"`).
+  figure's data, normally exactly the traces the calling function just added
+  (an empty collection does nothing). A position that is not an integer
+  (`Bool` included) or not in `1:length(data)` throws an `ArgumentError`
+  before anything is written; repeated positions are styled once.
+- `style::PlotStyle`: the style whose `linewidth`, `marker_size` and `cycle`
+  are applied.
+- `explicit`: a `Symbol` or a collection of the caller's keyword names that the
+  user passed, from `(:linewidth, :marker_size, :dash, :marker_symbol, :mode)`;
+  any other name throws an `ArgumentError`. A listed keyword is never filled,
+  even where its trace value is a sentinel (needed for `mode`, whose 1.x
+  default `"lines"` cannot be told apart from an explicit `"lines"`).
 
-Only line-style traces (scatter, scattergl, scatterpolar(gl), scatter3d,
-scatterternary, scattersmith, scattercarpet, scattergeo) are styled; other
-positions are skipped. A value counts as unset when the attribute is absent,
-`nothing`, `missing` or `""` (the 1.x `line.color = ""`/`line.dash = ""`
-sentinels). Filled:
+# Which traces and attributes
+Only `GenericTrace`s whose `type` (absent means `"scatter"`) is one of the
+line-style types `scatter`, `scattergl`, `scatterpolar`, `scatterpolargl`,
+`scatter3d`, `scatterternary`, `scattersmith`, `scattercarpet` and
+`scattergeo` are styled; every one of them has `line.width`, `line.dash`,
+`marker.size`, `marker.symbol` and `mode` in the plotly.js 2.35 schema, and
+the values written are in each type's allowed set. Every other trace (bar,
+histogram, box, violin, heatmap, contour, surface, mesh3d, cone, pie, the map
+scatter types, non-`GenericTrace` traces, …) is skipped and never written, so
+no attribute is ever added to a trace type that lacks it.
 
-- `line.width` ← `style.linewidth`, `marker.size` ← `style.marker_size` (when > 0);
-- `line.dash` ← the dash cycle (`cycle` `:bw`, `:dash`, `:dash_marker`);
-- `marker.symbol` ← the marker cycle (`:marker`, `:dash_marker`; scatter3d
-  uses its own eight-symbol cycle), and a `mode` that draws lines but no
-  markers gets the `markers` flag (`"lines"` → `"lines+markers"`,
-  `"lines+text"` → `"lines+markers+text"`) so the markers show. An absent
-  `mode` is left to plotly's own default.
+A value counts as unset when the attribute is absent, `nothing`, `missing` or
+`""` (the 1.x `line.dash = ""` sentinel); any other value — a number, a name,
+a per-point vector — is the caller's and is kept. Filled where unset:
+
+- `line.width` ← `style.linewidth`, `marker.size` ← `style.marker_size`
+  (each only when the style sets it, i.e. > 0);
+- `line.dash` ← the dash cycle `solid, dash, dot, dashdot` (`cycle` `:bw`,
+  `:dash`, `:dash_marker`);
+- `marker.symbol` ← the marker cycle (`:marker`, `:dash_marker`):
+  `circle, square, diamond, triangle-up, x, triangle-down, cross, star`, and
+  for `scatter3d` (which accepts only eight symbols) `circle, square,
+  diamond, x, cross, circle-open, square-open, diamond-open`. When the symbol
+  is filled and `mode` (a string or `Symbol`, not in `explicit`) draws lines
+  but no markers, the `markers` flag is added so the symbol shows
+  (`"lines"` → `"lines+markers"`, `"lines+text"` → `"lines+markers+text"`).
+  An absent `mode` is left to plotly's own default.
 
 The cycle position of a trace is its rank among the figure's line-style traces
-(1 for the first), so the cycle continues across `plot_*!` appends and
-skips non-line traces; inside [`_with_style_trace_offset`](@ref) the line-style
-traces of the outer figure are counted too. Colour is not set here: the `:bw`
-cycle's single ink colour is the figure colorway (written by
-`_apply_default_template!`). Nested `line`/`marker` containers are replaced,
-never mutated in place. Under a style with no trace defaults (`:default`)
-nothing is touched. Returns `nothing`.
+(1 for the first), so the cycle continues across `plot_*!` appends and skips
+non-line traces; inside [`_with_style_trace_offset`](@ref) the line-style
+traces of the outer figure are counted too. Colour is never set here: the
+`:bw` cycle's single ink colour is the figure colorway (written by
+`_apply_default_template!`).
 
+# Guarantees
+- Idempotent: a second call with the same arguments changes nothing (every
+  value it would fill is now set).
+- Atomic: all updates are computed (and every `line`/`marker` value checked to
+  be an attribute container, else `ArgumentError`) before the first write.
+- Nested `line`/`marker` containers are replaced, never mutated in place, so a
+  container shared between traces or with the caller is not changed.
+- Under a style with no trace defaults (`:default`: `linewidth = 0`,
+  `marker_size = 0`, `cycle = :none`) nothing is touched.
+
+Returns `nothing`.
+
+# Example
 Call it after the traces are in the figure and before the figure is returned
-(constructor) or refreshed (mutator), e.g.
+(constructor) or refreshed (mutator):
 
 ```julia
 first_new = length(_plot_data(fig)) + 1
@@ -1215,7 +1247,8 @@ function _apply_style_trace_defaults!(
 	explicit = (),
 )
 	who = "_apply_style_trace_defaults!"
-	for name in explicit
+	explicit_names = explicit isa Symbol ? (explicit,) : explicit
+	for name in explicit_names
 		name in _STYLE_TRACE_DEFAULT_KEYWORDS ||
 			throw(ArgumentError(
 				"$(who): `explicit` entries must be among $(_STYLE_TRACE_DEFAULT_KEYWORDS); got $(repr(name)).",
@@ -1243,7 +1276,7 @@ function _apply_style_trace_defaults!(
 			trace,
 			_style_trace_defaults(style, position),
 			position,
-			explicit,
+			explicit_names,
 			"$(who): data[$(index)]",
 		)
 		isempty(updates) || push!(pending, (Int(index), updates))
@@ -1270,7 +1303,8 @@ function _style_trace_default_updates(trace, defaults, position::Integer, explic
 	fillable(line, :width, :linewidth) && (line_updates[:width] = defaults[:linewidth])
 	fillable(line, :dash, :dash) && (line_updates[:dash] = defaults[:dash])
 	fillable(marker, :size, :marker_size) && (marker_updates[:size] = defaults[:marker_size])
-	if fillable(marker, :symbol, :marker_symbol)
+	symbol_filled = fillable(marker, :symbol, :marker_symbol)
+	if symbol_filled
 		marker_updates[:symbol] = _style_trace_type(trace) == "scatter3d" ?
 			_STYLE_MARKER_CYCLE_3D[mod1(position, length(_STYLE_MARKER_CYCLE_3D))] :
 			defaults[:marker_symbol]
@@ -1280,8 +1314,11 @@ function _style_trace_default_updates(trace, defaults, position::Integer, explic
 		(updates[:line] = _style_update_path(get(fields, :line, nothing), (), line_updates, "line", who))
 	isempty(marker_updates) ||
 		(updates[:marker] = _style_update_path(get(fields, :marker, nothing), (), marker_updates, "marker", who))
+	# The cycle's symbol must be visible: a mode that draws lines but no
+	# markers gets the markers flag (only when this call chose the symbol).
 	mode = get(fields, :mode, nothing)
-	if get(defaults, :markers, false) === true && !(:mode in explicit) && mode isa AbstractString
+	if symbol_filled && get(defaults, :markers, false) === true && !(:mode in explicit) &&
+	   mode isa Union{AbstractString, Symbol}
 		flags = split(String(mode), '+')
 		if "lines" in flags && !("markers" in flags)
 			updates[:mode] = join((flag == "lines" ? "lines+markers" : flag for flag in flags), '+')

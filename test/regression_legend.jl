@@ -92,7 +92,8 @@ using Test, PlotlySupply
 		# hidden legend: nothing to clear
 		m = plot_scatter(x, [x, 2x]; legend = ["a", "b"], title = "T")
 		set_legend!(m; position = :outside_top, showlegend = false)
-		@test pl(m).layout.fields[:title] == "T"
+		# D7: the constructor stores the title as `title.text`; nothing is added.
+		@test sd(pl(m).layout.fields[:title]) == Dict{Symbol, Any}(:text => "T")
 
 		# SubplotFigure figure legend above the grid
 		sf = subplots(1, 2; sync = false)

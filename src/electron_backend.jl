@@ -157,11 +157,149 @@ _is_sandboxed_env() = any(
 )
 
 function _default_electron_app(ec)
-	if _is_sandboxed_env() && isdefined(ec, :development_config)
+	app = if _is_sandboxed_env() && isdefined(ec, :development_config)
 		security = Base.invokelatest(() -> ec.development_config())
-		return Base.invokelatest(() -> ec.default_application(security))
+		Base.invokelatest(() -> ec.default_application(security))
+	else
+		Base.invokelatest(() -> ec.default_application())
 	end
-	return Base.invokelatest(() -> ec.default_application())
+	_record_owned_electron_app!(app)
+	return app
+end
+
+# ── Exit-time shutdown of PlotlySupply's Electron applications (X53) ──
+#
+# ElectronCall starts the Electron main process with Julia's stdout as its own,
+# and its helper processes inherit it too. Its atexit hook only closes the
+# connection (main.js then calls app.quit()) and returns, so the process quits
+# after Julia has exited. Measured on macOS (Electron from ElectronCall's
+# artifact) after 14 mixed `savefig` exports: that took 0.6 s to 77 s, the main
+# process spinning at full CPU, and for that whole time `julia script.jl | cat`
+# stayed blocked on the inherited pipe. Closed while Julia was still alive, the
+# application quit in 1.0-4.1 s in 6 of 8 runs and needed 30 s and 44 s in the
+# other two: the slow quit is Electron's own, not caused by Julia exiting.
+#
+# So every application PlotlySupply itself obtained (`_default_electron_app`;
+# an application a caller passes in is theirs and is never touched) is closed
+# at exit and its process is waited for, bounded. Only a process that has not
+# quit by then is terminated: it is the exact `Base.Process` ElectronCall
+# spawned for that application, so no other process can be reached.
+const _OWNED_ELECTRON_APPS = Any[]
+const _OWNED_ELECTRON_APPS_LOCK = ReentrantLock()
+const _OWNED_ELECTRON_APPS_ATEXIT = Ref(false)
+# Bounds (seconds) of the exit-time shutdown: the close request (it waits for
+# Electron's replies), the graceful quit (above the 1.0-4.1 s of a normal
+# quit, far below a stuck one), then the SIGTERM and SIGKILL stages.
+const _ELECTRON_APP_CLOSE_TIMEOUT_S = 5.0
+const _ELECTRON_APP_QUIT_TIMEOUT_S = 6.0
+const _ELECTRON_APP_TERM_TIMEOUT_S = 3.0
+const _ELECTRON_APP_KILL_TIMEOUT_S = 2.0
+
+# The Electron main process of an ElectronCall `Application`, or `nothing` for
+# anything else (test doubles, foreign objects).
+function _electron_app_process(app)
+	hasproperty(app, :proc) || return nothing
+	proc = try
+		getproperty(app, :proc)
+	catch
+		return nothing
+	end
+	return proc isa Base.Process ? proc : nothing
+end
+
+function _record_owned_electron_app!(app)
+	_electron_app_process(app) === nothing && return nothing
+	lock(_OWNED_ELECTRON_APPS_LOCK) do
+		any(owned -> owned === app, _OWNED_ELECTRON_APPS) ||
+			push!(_OWNED_ELECTRON_APPS, app)
+	end
+	_register_electron_app_atexit!()
+	return nothing
+end
+
+# Registered before any other PlotlySupply exit hook (`_register_export_atexit_locked!`
+# calls it first), so it runs after them: hooks run last-in first-out, and the
+# export window must be closed while its application still exists.
+function _register_electron_app_atexit!()
+	lock(_OWNED_ELECTRON_APPS_LOCK) do
+		_OWNED_ELECTRON_APPS_ATEXIT[] && return nothing
+		atexit(_shutdown_owned_electron_apps_at_exit!)
+		_OWNED_ELECTRON_APPS_ATEXIT[] = true
+		return nothing
+	end
+	return nothing
+end
+
+function _wait_process_exit(proc::Base.Process, timeout_s::Real)
+	process_exited(proc) && return true
+	return timedwait(() -> process_exited(proc), Float64(timeout_s); pollint = 0.05) === :ok
+end
+
+"""
+	_shutdown_electron_app!(app; close_timeout_s, quit_timeout_s, term_timeout_s, kill_timeout_s) -> Symbol
+
+Close an ElectronCall application PlotlySupply owns and wait until its Electron
+main process has exited. Internal; run at exit by
+`_shutdown_owned_electron_apps_at_exit!`.
+
+1. `close(app)` (closes its windows and the connection, so main.js calls
+   `app.quit()`), given at most `close_timeout_s` seconds, then up to
+   `quit_timeout_s` seconds for the process to exit.
+2. Only if it is still running: SIGTERM to that process, then up to
+   `term_timeout_s` seconds; then SIGKILL and up to `kill_timeout_s` seconds.
+
+Returns `:no_process` (not an ElectronCall application: nothing is done),
+`:exited`, `:terminated`, `:killed` or `:running` (still alive after every
+stage; a warning is logged). A failing `close` is logged, not thrown, so
+the remaining stages and other exit hooks still run.
+"""
+function _shutdown_electron_app!(
+	app;
+	close_timeout_s::Real = _ELECTRON_APP_CLOSE_TIMEOUT_S,
+	quit_timeout_s::Real = _ELECTRON_APP_QUIT_TIMEOUT_S,
+	term_timeout_s::Real = _ELECTRON_APP_TERM_TIMEOUT_S,
+	kill_timeout_s::Real = _ELECTRON_APP_KILL_TIMEOUT_S,
+)
+	proc = _electron_app_process(app)
+	proc === nothing && return :no_process
+	if !process_exited(proc) && _export_app_is_alive(app)
+		# `close` waits for Electron's replies; a hung Electron must not hang
+		# Julia's exit, so it runs in its own task with a bound.
+		closer = @async Base.invokelatest(close, app)
+		if timedwait(() -> istaskdone(closer), Float64(close_timeout_s); pollint = 0.05) === :ok
+			try
+				fetch(closer)
+			catch err
+				@warn "PlotlySupply: closing an Electron application at exit failed." exception = err
+			end
+		end
+	end
+	_wait_process_exit(proc, quit_timeout_s) && return :exited
+	kill(proc, Base.SIGTERM)
+	_wait_process_exit(proc, term_timeout_s) && return :terminated
+	kill(proc, Base.SIGKILL)
+	_wait_process_exit(proc, kill_timeout_s) && return :killed
+	@warn "PlotlySupply: an Electron process did not exit at Julia exit." pid = getpid(proc)
+	return :running
+end
+
+function _shutdown_owned_electron_apps_at_exit!()
+	apps = lock(_OWNED_ELECTRON_APPS_LOCK) do
+		owned = copy(_OWNED_ELECTRON_APPS)
+		empty!(_OWNED_ELECTRON_APPS)
+		owned
+	end
+	for app in apps
+		try
+			_shutdown_electron_app!(app)
+		catch err
+			@warn "PlotlySupply: shutting down an Electron application at exit failed." exception = (
+				err,
+				catch_backtrace(),
+			)
+		end
+	end
+	return nothing
 end
 
 function _next_syncplot_id()
@@ -9651,19 +9789,29 @@ _clone_refreshable_plot(p::_RefreshablePlot) = _clone_plot_model(p)
 Base.copy(p::_RefreshablePlot) = _clone_refreshable_plot(p)
 PlotlyBase.fork(p::_RefreshablePlot) = _clone_refreshable_plot(p)
 
+# Renderer transaction of `redraw!` (audit #165): the window is rebuilt from
+# the committed Julia model — `Plotly.purge` + `Plotly.newPlot` with the
+# model's data, layout and config, then its frames, re-added WITHOUT starting
+# playback (a redraw never restarts an animation) — so direct edits to the
+# model (`sp.plot.data[1][:y] = …`, `sp.plot.layout[:title] = …`) reach the
+# renderer. The model is not changed.
+function _prepare_redraw_transaction(target::SyncPlot, current::Plot)
+	script = _plotlyjs_refresh_script(
+		target,
+		current.data,
+		current.layout;
+		model = current,
+		rebuild = true,
+		autoplay = false,
+	)
+	return (script = script, operation = "redraw", commit = () -> current)
+end
+
 function PlotlyBase.redraw!(p::_RefreshablePlot)
-	# A displayed Plot redraws through the same renderer transaction as
-	# redraw!(::SyncPlot), so a renderer marked desynchronized is rebuilt from
-	# the committed model before Plotly.redraw runs. An undisplayed Plot has no
-	# renderer, so the local path is a no-op (PlotlyBase's redraw! semantics).
-	prepare = function (target, current)
-		return (
-			script = _plotlyjs_command_script(target, :redraw),
-			operation = "redraw",
-			commit = () -> current,
-		)
-	end
-	return _transactional_plot_mutation!(p, prepare, () -> p)
+	# A Plot shown in a SyncPlot window redraws through the same renderer
+	# transaction as redraw!(::SyncPlot). An undisplayed Plot has no renderer,
+	# so the local path is a no-op (PlotlyBase's redraw! semantics).
+	return _transactional_plot_mutation!(p, _prepare_redraw_transaction, () -> p)
 end
 
 function PlotlyBase.purge!(p::_RefreshablePlot)
@@ -10815,6 +10963,9 @@ end
 
 function _register_export_atexit_locked!(state::_ExportState)
 	if state === _EXPORT_STATE && !state.atexit_registered
+		# First, so it runs after the export cleanup below (last-in first-out):
+		# the export window is closed before its application is shut down.
+		_register_electron_app_atexit!()
 		atexit(() -> _cleanup_export_state_at_exit!(state))
 		state.atexit_registered = true
 	end

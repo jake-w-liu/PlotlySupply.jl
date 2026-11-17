@@ -1368,12 +1368,16 @@ end
 
 Layout key of the y axis that overlays `"y"` on a plain `Plot`/`SyncPlot`
 (or staged target), creating it when missing: the next free `yaxisN` with
-`overlaying="y"`, `side="right"`, `anchor="x"`, no grid, and the package's
-black outside-tick spine style without `mirror`; the primary y axis's
-`title.font`, `tickfont`, `linecolor`, `linewidth`, `tickcolor`, `ticklen`
-and `tickwidth`, when set, are copied. Idempotent. A SubplotFigure
-cell gets its secondary y axis from `subplots(...; specs=...)` instead, so it
-is an `ArgumentError` here, as is a figure without Cartesian axes.
+`overlaying="y"`, `side="right"`, `anchor="x"`, no grid and no `mirror`,
+framed like the figure's other axes: the active style's spine/tick settings
+(`showline`, `ticks`, `zeroline`, `automargin`, `linewidth`) in the ink of the
+figure's own template (`_figure_axis_defaults(fig; axis = :y)`: black on light
+templates, the template's light text colour on dark ones such as
+`plotly_dark`). The primary y axis's `title.font`, `tickfont`, `linecolor`,
+`linewidth`, `tickcolor`, `ticklen` and `tickwidth`, when set, are then copied
+over those, so both y axes read alike. Idempotent. A SubplotFigure cell gets
+its secondary y axis from `subplots(...; specs=...)` instead, so it is an
+`ArgumentError` here, as is a figure without Cartesian axes.
 """
 function _ensure_twin_y!(fig; who::AbstractString = "_ensure_twin_y!")
 	fig isa SubplotFigure && throw(ArgumentError(
@@ -1404,19 +1408,18 @@ function _ensure_twin_y!(fig; who::AbstractString = "_ensure_twin_y!")
 		index === nothing || (highest = max(highest, index))
 	end
 	key = Symbol("yaxis", highest + 1)
-	fields = Dict{Symbol, Any}(
+	# The style's frame in the ink of the figure's own template (audit #266,
+	# X11: a twin on a plotly_dark figure must not get a black spine). The twin
+	# never mirrors (its mirror would be drawn over the primary's spine) and
+	# never draws a grid of its own.
+	fields = _figure_axis_defaults(p; axis = :y)
+	delete!(fields, :mirror)
+	merge!(fields, Dict{Symbol, Any}(
 		:overlaying => "y",
 		:side => "right",
 		:anchor => "x",
 		:showgrid => false,
-		:zeroline => false,
-		:showline => true,
-		:ticks => "outside",
-		:automargin => true,
-		:linecolor => _DEFAULT_AXIS_LINECOLOR,
-		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
-		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
-	)
+	))
 	# Fonts and spine styling set on the primary y axis before the twin exists
 	# (set_fonts!, styles, dark templates) carry over, so both y axes read
 	# alike. Copied, never aliased.

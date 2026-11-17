@@ -813,13 +813,14 @@ end
 Expanded stops of the colorscale a template applies to a `trace_type` trace that
 sets no colorscale: the template's trace default, else its
 `layout.colorscale.sequential`. `fig_or_template` is a figure (its layout
-template is used), a `Template`, a template name, or `nothing` for the package
-default template (`get_default_template()`). Throws when the template defines
-neither.
+template is used), a `Template`, a template name, or `nothing` for the template
+a new figure gets: the active [`PlotStyle`](@ref)'s template (`_style_template()`),
+which is `get_default_template()` unless the style names one (e.g.
+`with_style(; template = :ggplot2)`). Throws when the template defines neither.
 """
 function _template_colorscale(fig_or_template = nothing; trace_type::AbstractString = "heatmap")
 	template = if fig_or_template === nothing
-		_resolve_template(get_default_template())
+		_style_template()
 	elseif fig_or_template isa PlotlyBase.Template || fig_or_template isa AbstractString ||
 			fig_or_template isa Symbol
 		_template_object(fig_or_template)
