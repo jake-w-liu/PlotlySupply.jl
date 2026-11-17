@@ -1,241 +1,201 @@
-# PlotlySupply
-
-[![Build Status](https://github.com/jake-w-liu/PlotlySupply.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/jake-w-liu/PlotlySupply.jl/actions/workflows/CI.yml?query=branch%3Amain)
-[![Coverage](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl) 
-
-
 # PlotlySupply.jl
 
-**PlotlySupply.jl** is a lightweight Julia module that wraps [`PlotlyBase.jl`](https://github.com/sglyon/PlotlyBase.jl) to supply high-level abstractions for 2D and 3D plot visualizations. It simplifies the creation of line plots, heatmaps, quiver plots, polar plots, and surface plots, with consistent options for customization and layout control. High-level constructors open independent desktop windows through `ElectronCall.jl` (`SyncPlot`) without requiring `PlotlyJS.jl`/`WebIO.jl`.
+[![Build Status](https://github.com/jake-w-liu/PlotlySupply.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/jake-w-liu/PlotlySupply.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Coverage](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jake-w-liu/PlotlySupply.jl)
 
----
+PlotlySupply.jl is a plotting package for scientific figures, built on
+[PlotlyBase.jl](https://github.com/sglyon/PlotlyBase.jl). One call draws a line
+plot, a field, a mesh or a 3-D scene with labelled axes; `!` functions add to
+a figure or to one cell of a subplot grid; `savefig` writes PDF, SVG, EPS, PNG
+or JPEG at an exact physical size. Figures are plain `PlotlyBase.Plot` objects,
+so the whole PlotlyBase API stays available. Windows and image export use
+Electron through ElectronCall.jl; neither PlotlyJS.jl nor Python is needed.
 
+Documentation: [stable](https://jake-w-liu.github.io/PlotlySupply.jl/stable/),
+[dev](https://jake-w-liu.github.io/PlotlySupply.jl/dev/).
 
-## Overview of Functions
-
-### 2D Cartesian Plots
-
-- `plot_scatter(x, y; ...)`: Line or marker plot for 1D data.
-- `plot_scatter(y; ...)`: Uses index as x-axis.
-- `plot_stem(x, y; ...)`: Stem plot using markers and vertical lines.
-- `plot_stem(y; ...)`: Uses index as x-axis.
-- `plot_bar(x, y; ...)` / `plot_bar(y; ...)`: Bar plot.
-- `plot_histogram(x; ...)`: Histogram plot.
-- `plot_box(x, y; ...)` / `plot_box(y; ...)`: Box plot.
-- `plot_violin(x, y; ...)` / `plot_violin(y; ...)`: Violin plot.
-
-### 2D Polar Plots
-
-- `plot_scatterpolar(theta, r; ...)`: Polar plot in angular-radial coordinates.
-
-### 2D Heatmap and Vector Plots
-
-- `plot_heatmap(x, y, U; ...)`: Heatmap of matrix `U` over grid `x`, `y`.
-- `plot_heatmap(U; ...)`: Uses default x/y indices.
-- `plot_contour(x, y, U; ...)`: Contour plot of matrix `U` over grid `x`, `y`.
-- `plot_contour(U; ...)`: Uses default x/y indices.
-- `plot_quiver(x, y, u, v; ...)`: 2D quiver plot with arrows from vectors `(u,v)` at locations `(x,y)`.
-
-### 3D Plots
-
-- `plot_surface(X, Y, Z; ...)`: 3D surface plot with optional surface coloring.
-- `plot_surface(Z; ...)`: Uses index grids as X/Y.
-- `plot_scatter3d(x, y, z; ...)`: 3D scatter or line plot with multiple trace support.
-- `plot_quiver3d(x, y, z, u, v, w; ...)`: 3D vector field rendered with cones.
-- `plot_mesh3d(x, y, z; ...)`: 3D triangular mesh (auto or `i`/`j`/`k` triangulation).
-- `plot_isosurface(x, y, z, value; ...)` / `plot_volume(x, y, z, value; ...)`: volumetric scalar fields.
-- `plot_streamtube(x, y, z, u, v, w; ...)`: 3D streamtubes of a vector field.
-
-### Statistical / Business Charts
-
-- `plot_pie(values; labels, hole, ...)`: Pie / donut chart.
-- `plot_sunburst(labels, parents; values, ...)` / `plot_treemap(...)`: Hierarchical charts.
-- `plot_funnel(x, y; ...)` / `plot_funnelarea(values; ...)`: Funnel charts.
-- `plot_waterfall(x, y; measure, ...)`: Waterfall chart.
-- `plot_indicator(value; mode, reference, gauge_range, ...)`: KPI number / gauge / delta.
-- `plot_sankey(source, target, value; label, ...)`: Sankey flow diagram.
-- `plot_parcoords(dimensions; ...)`: Parallel-coordinates plot.
-- `plot_histogram2d(x, y; ...)`: 2D density histogram.
-- `plot_area(x, y; stack, ...)`: Filled-area line plot.
-- `plot_candlestick(x, open, high, low, close; ...)` / `plot_ohlc(...)`: Financial charts.
-- `plot_ternary(a, b, c; ...)`: Ternary scatter plot.
-- `plot_image(z; ...)`: Display image data.
-
-### Geographic Maps
-
-- `plot_choropleth(locations, z; locationmode, ...)`: Choropleth map.
-- `plot_scattergeo(lon, lat; ...)`: Scatter points on a geographic map.
-- `plot_scattermap(lon, lat; style, zoom, ...)`, `plot_choroplethmap(geojson, locations, z; ...)`, and `plot_densitymap(lon, lat, z=nothing; ...)`: MapLibre-backed tile maps (default `open-street-map` style, no token needed).
-- `update_maps!(fig; zoom, center, bounds, style, ...)`: Update every MapLibre map in a figure, including `map2`, `map3`, and later subplot maps.
-- `make_subplots(...; specs=fill(Spec(kind="map"), rows, cols))`: Create independently routed MapLibre map subplots.
-- The older `plot_scattermapbox`, `plot_choroplethmapbox`, and `plot_densitymapbox` APIs remain available for compatibility with Mapbox-based figures.
-
-### Annotations & Error Bars
-
-- `annotate!(fig, x, y, text; ...)`: Add a text annotation at data coordinates.
-- `plot_scatter`/`plot_bar` accept `error_x` / `error_y` (a vector, or a vector-of-vectors per series); `plot_bar` also accepts `orientation` (`"h"`) and `barmode` (`"group"`/`"stack"`).
-
-All of the above also have mutating `plot_*!(fig, ...)` variants.
-
-### Utilities
-
-- `set_template!(fig, template)`: Apply Plotly template style to a figure.
-- `set_default_template!(template)` / `get_default_template()`: Configure package-wide default template.
-- `set_legend!(fig; position=:topright, ...)`: Place legend with transparent box using symbolic positions (including `:outside_right`).
-- `set_default_legend_position!(...)` / `get_default_legend_position()`: Configure package-wide default legend position.
-- `to_syncplot(fig; timeout_s=15)`: Convert a `PlotlyBase.Plot` to a desktop
-  `SyncPlot` window. It returns only after the initial Plotly render succeeds;
-  `timeout_s` bounds the renderer handshake after the window page loads,
-  including frame loading and autoplay.
-- `plot(...)`: PlotlyJS-style constructor. Returns `Plot` by default; pass `sync=true` to get a `SyncPlot`.
-- `plot(...; frames=[...])` and `plot(data, layout, frames)`: Preserve Plotly animation frames; desktop plots register and autoplay them by default (`sync=true, autoplay=false` or `to_syncplot(...; autoplay=false)` disables autoplay).
-- `savefig(...)`: PlotlyJS-style file export helper. `json`/`html` export works headlessly; `png`/`jpeg`/`svg`/`pdf` render through PlotlySupply's internal Electron export window (no external Kaleido/Python dependency).
-- `make_subplots(...)`, `mgrid(...)`: PlotlyJS-style helpers.
-- `subplots(rows, cols; ...)`: Easy subplot canvas; pass `sync=false` for headless mode.
-- `subplot!(sf, row, col)` / `subplot!(sf, index)`: Select the active subplot cell.
-- `subplot_legends!(fig; position=:topright, ...)`: Place legends per subplot instead of clustering them.
-- `xlabel!(sf, ...)`, `ylabel!(sf, ...)`, `xrange!(sf, ...)`, `yrange!(sf, ...)`: Per-subplot axis helpers.
-
-### Mutating APIs
-
-- `plot_*!(fig, ...)`: Mutating convenience functions (for example `plot_scatter!`, `plot_stem!`, `plot_bar!`, `plot_histogram!`, `plot_box!`, `plot_violin!`, `plot_heatmap!`, `plot_contour!`, `plot_surface!`, `plot_scatter3d!`, `plot_quiver!`, `plot_quiver3d!`) append traces to an existing figure. The figure can be either a `PlotlyBase.Plot` or a `PlotlySupply.SyncPlot`.
-
-### Return Type and Display Behavior
-
-- All high-level constructor APIs (`plot_scatter`, `plot_stem`, `plot_heatmap`, `plot_surface`, etc.) return a `PlotlyBase.Plot` by default.
-- In the REPL, typing `plot_scatter(x, y)` without assignment triggers Julia's display system, which automatically opens an Electron window.
-- Assigning to a variable (`fig = plot_scatter(x, y)`) suppresses display — no window opens. Use `display(fig)` to open the window later.
-- Pass `show=true` to open a window immediately: `plot_scatter(x, y; show=true)` returns a `SyncPlot`.
-- `SyncPlot` forwards properties like `fig.data` and `fig.layout`, so most Plotly-style figure access works unchanged.
-- The wrapped `PlotlyBase.Plot` is available at `fig.plot`.
-
----
-
-## Examples
-
-Please refer the [API documentation](https://jake-w-liu.github.io/PlotlySupply.jl/dev/) for full functionality.
-
-### 2D Line Plot
+## Installation
 
 ```julia
-plot_scatter(0:0.1:2π, sin.(0:0.1:2π); xlabel="x", ylabel="sin(x)", title="Sine Wave")
+# fragment: installs the package
+using Pkg
+Pkg.add("PlotlySupply")
 ```
 
-### Building a Figure + Display
+## Quick tour
+
+Lines on logarithmic axes, with ranges in data units and ticks at powers of ten:
 
 ```julia
 using PlotlySupply
 
-fig = plot_scatter(1:10, rand(10))          # returns Plot, no window
-plot_scatter!(fig, 1:10, rand(10); color="red")
-set_legend!(fig; position=:bottomright)
-display(fig)                                 # opens Electron window
+h = 0.2 ./ 2 .^ (0:6)
+err = 3 .* h .^ 2 .+ 1e-5 .* h
+fig = plot_scatter(h, err; mode = "lines+markers", legend = "measured",
+    xscale = "log", yscale = "log", xrange = [1e-3, 1], yticks = :decades,
+    xlabel = "mesh size \$h\$", ylabel = "error")
+slope_guide!(fig, 2; x = (3e-3, 0.2), through = (0.2, 0.3), label = "\$O(h^2)\$")
 ```
 
-Use `display(fig)` when you're ready to view the figure. In the REPL, the last expression is displayed automatically.
-
-### MATLAB-Like Subplots With Per-Subplot Legends
+A field: matrices are indexed `U[ix, iy]`, so build them with `x` in the outer
+loop. `equalar = true` keeps the aspect ratio, and the axes fit the field
+without padding:
 
 ```julia
-using PlotlySupply
+xs = range(-2, 2; length = 81)
+ys = range(-1, 1; length = 41)
+U = [exp(-x^2 - 3y^2) for x in xs, y in ys]      # size (81, 41)
+fig = plot_heatmap(xs, ys, U; colorscale = "viridis", equalar = true,
+    xlabel = "\$x\$", ylabel = "\$y\$", colorbar_title = "\$|E|^2\$")
+plot_contour!(fig, xs, ys, U; levels = [0.25, 0.5, 0.75], coloring = "none",
+    linecolor = "white")
+```
 
-sf = subplots(2, 2; show=true, legend_position=:topright)
+Subplots with one colorbar for both panels:
 
-plot!(sf, 1:100, cumsum(randn(100)); legend="run A")
+```julia
+sf = subplots(1, 2; sync = false, width = 700, height = 320,
+    subplot_titles = ["(a) t = 0", "(b) t = 1"])
+plot_heatmap!(sf, xs, ys, U; row = 1, col = 1)
+plot_heatmap!(sf, xs, ys, 0.5 .* U; row = 1, col = 2)
+shared_colorbar!(sf; title = "intensity", colorscale = "magma")
+```
+
+A figure for a paper: the `:publication` style (serif fonts, colour-blind-safe
+colours, closed frame), exported at a column width of 3.5 in:
+
+```julia
+t = 0:0.05:10
+fig = with_style(:publication) do
+    plot_scatter(t, [sin.(t), cos.(t)]; legend = ["\$\\sin t\$", "\$\\cos t\$"],
+        xlabel = "time \$t\$ (s)", ylabel = "signal")
+end
+savefig(fig, "signal.pdf"; width = 3.5, height = 2.4, units = :in)
+savefig(fig, "signal.png"; width = 3.5, height = 2.4, units = :in, dpi = 300)
+```
+
+MATLAB-style subplots: `subplot!` selects the active cell, and the axis helpers
+(`xlabel!`, `ylabel!`, `xrange!`, ...) act on the active cell, so call them
+right after drawing into it:
+
+```julia
+sf = subplots(2, 2; sync = false, legend_position = :topright)
+plot!(sf, 1:100, cumsum(randn(100)); legend = "run A")
+xlabel!(sf, "time"); ylabel!(sf, "value"); xrange!(sf, [0, 100])
 subplot!(sf, 1, 2)
-plot_stem!(sf, 1:100, abs.(randn(100)); legend="run B")
-subplot!(sf, 3) # row=2, col=1
+plot_stem!(sf, 1:100, abs.(randn(100)); legend = "run B")
+subplot!(sf, 3)                      # index 3 = row 2, column 1
 plot_contour!(sf, rand(30, 30))
 subplot!(sf, 2, 2)
-plot_heatmap!(sf, rand(30, 30))
-xlabel!(sf, "time")
-ylabel!(sf, "value")
-xrange!(sf, [0, 100])
-display(sf)
+plot_heatmap!(sf, rand(30, 30))      # each colorbar sits next to its own cell
 ```
 
-Each subplot gets its own legend box, positioned inside that subplot by default.
+`subplots(...; sync = true)` (the default) shows the grid in a live window;
+`sync = false` builds it without one. A constructor returns a `Plot`; pass
+`show = true` to open it in a window, or call `display(fig)`.
 
-### PlotlyJS-Style API Compatibility
+## Conventions
 
-```julia
-using PlotlySupply
+- **Matrices are `U[ix, iy]`.** For `plot_heatmap`, `plot_contour`,
+  `plot_quiver`, `plot_streamlines` and `plot_surface`, `U[i, j]` is the value
+  at `(x[i], y[j])` and `size(U) == (length(x), length(y))`. Build it as
+  `[f(x, y) for x in xs, y in ys]`. A transposed matrix raises an
+  `ArgumentError` that says so. `plot_matrix(A)` is the exception: it draws `A`
+  as printed (row 1 at the top). `plot_image` takes an `H x W x 3` (or 4)
+  array with channel values 0 to 255, row 1 at the top.
+- **Ranges are data values, also on log axes.** `xrange = [1e-3, 1]` on a log
+  axis, never exponents. `[0, 0]` or `nothing` means automatic.
+- **Mutators end in `!`** and take a `Plot`, a `SyncPlot` (the window updates)
+  or a `SubplotFigure`. On a `SubplotFigure` they draw into the active cell, or
+  into `row`/`col`; Cartesian mutators also take `secondary_y = true` and
+  `inset = k`. They return `nothing`, or the `SubplotFigure`.
+- **Labels are mathtext.** Titles, axis labels, legend names and annotations
+  may mix text and `$...$` math (`"time \$t\$ (s)"`); an unbalanced `$` is an
+  error and `\$` is a literal dollar sign.
+- **Invalid input is an error, not a broken figure.** Mismatched lengths,
+  wrongly shaped matrices, unknown colormap names and invalid ranges raise an
+  `ArgumentError` naming the function, before the figure is changed.
 
-tr = scatter(x=1:10, y=rand(10), mode="lines+markers")
-lay = Layout(title="Compatibility Mode")
-fig = plot(tr, lay) # returns Plot; use display(fig) to open Electron window
-```
+## Function overview
 
-`ElectronCall.jl` is loaded internally by PlotlySupply when needed (for `display`, `show=true`, `to_syncplot`, and image/PDF `savefig`); users do not need `using ElectronCall`.
+Every function has a `!` form that adds to an existing figure, except where
+the table lists only one name.
 
-### 2D Heatmap
+| Purpose | Functions |
+|---|---|
+| Lines and markers | `plot_scatter`, `plot_scatter!`, `plot_stem`, `plot_stem!`, `plot_area`, `plot_area!`, `plot_band`, `plot_band!`, `plot_segments`, `plot_segments!`, `plot_vlines`, `plot_vlines!`, `plot_hlines`, `plot_hlines!`, `plot_complex`, `plot_complex!`, `plot_scatterpolar`, `plot_scatterpolar!` |
+| Statistics | `plot_bar`, `plot_bar!`, `plot_histogram`, `plot_histogram!`, `plot_histogram2d`, `plot_histogram2d!`, `plot_box`, `plot_box!`, `plot_violin`, `plot_violin!`, `plot_ecdf`, `plot_ecdf!`, `plot_kde`, `plot_kde!` |
+| 2-D fields and meshes | `plot_heatmap`, `plot_heatmap!`, `plot_contour`, `plot_contour!`, `plot_matrix`, `plot_matrix!`, `plot_image`, `plot_image!`, `plot_pcolormesh`, `plot_pcolormesh!`, `plot_polygons`, `plot_polygons!`, `plot_tripcolor`, `plot_tripcolor!`, `plot_triplot`, `plot_triplot!`, `plot_tricontour`, `plot_tricontour!` |
+| Vector fields | `plot_quiver`, `plot_quiver!`, `plot_streamlines`, `plot_streamlines!` |
+| 3-D | `plot_surface`, `plot_surface!`, `plot_wireframe`, `plot_wireframe!`, `plot_scatter3d`, `plot_scatter3d!`, `plot_segments3d`, `plot_segments3d!`, `plot_mesh3d`, `plot_mesh3d!`, `plot_polygons3d`, `plot_polygons3d!`, `plot_quiver3d`, `plot_quiver3d!`, `plot_isosurface`, `plot_isosurface!`, `plot_volume`, `plot_volume!`, `plot_streamtube`, `plot_streamtube!` |
+| 3-D scenes | `view!` (camera), `scene!` (aspect, panes, ticks), `zlabel!`, `zrange!` |
+| Other charts | `plot_pie`, `plot_pie!`, `plot_sunburst`, `plot_sunburst!`, `plot_treemap`, `plot_treemap!`, `plot_funnel`, `plot_funnel!`, `plot_funnelarea`, `plot_funnelarea!`, `plot_waterfall`, `plot_waterfall!`, `plot_indicator`, `plot_indicator!`, `plot_sankey`, `plot_sankey!`, `plot_parcoords`, `plot_parcoords!`, `plot_ternary`, `plot_ternary!`, `plot_candlestick`, `plot_candlestick!`, `plot_ohlc`, `plot_ohlc!` |
+| Maps | `plot_scattergeo`, `plot_scattergeo!`, `plot_choropleth`, `plot_choropleth!`, `plot_scattermap`, `plot_scattermap!`, `plot_choroplethmap`, `plot_choroplethmap!`, `plot_densitymap`, `plot_densitymap!`, `plot_scattermapbox`, `plot_scattermapbox!`, `plot_choroplethmapbox`, `plot_choroplethmapbox!`, `plot_densitymapbox`, `plot_densitymapbox!`, `update_maps!`; trace constructors `scattermap`, `choroplethmap`, `densitymap` |
+| Subplot grids | `subplots`, `subplot!`, `SubplotFigure`, `inset!`, `remove_inset!`, `secondary_xaxis!`, `subplot_legends!`, `panel_labels!`, `make_subplots` (PlotlyJS-style), `mgrid` (PlotlyJS-style grid helper) |
+| Axes and ticks | `xlabel!`, `ylabel!`, `xrange!`, `yrange!`, `xticks!`, `yticks!`, `log_ticks`, `axis_equal!`, `axis_off!`, `grid!`, `spines!` |
+| Figure layout | `title!`, `figsize!`, `tight_layout!` |
+| Legends | `set_legend!`, `legend_entry!`, `set_default_legend_position!`, `get_default_legend_position` |
+| Colour | `colormap`, `colormap_colors`, `discrete_colormap`, `lighten`, `COLORMAPS`, `colorbar!`, `shared_colorbar!` |
+| Text and math | `mathtext`, `annotate!`, `set_fonts!`, `set_default_mathtext!`, `get_default_mathtext` |
+| Reference lines and shapes | `hline!`, `vline!`, `hspan!`, `vspan!`, `slope_guide!`, `slope_triangle!`, `circle!`, `ellipse!`, `arc!`, `arrow!`, `rectangle!`, `polygon!` |
+| Styles and templates | `PlotStyle`, `set_default_style!`, `get_default_style`, `with_style`, `register_style!`, `set_template!`, `set_default_template!`, `get_default_template` |
+| Export | `savefig`, `json` |
+| Windows and PlotlyJS compatibility | `SyncPlot`, `to_syncplot`, `plot`, `plot!` (same as the scatter mutator), `msgchannel`, `toggle_devtools` |
 
-```julia
-x = -5:0.1:5
-y = -5:0.1:5
-U = [sin(sqrt(xi^2 + yj^2)) for yj in y, xi in x]
-plot_heatmap(x, y, U; xlabel="x", ylabel="y", title="Radial Sine")
-```
+PlotlySupply also re-exports PlotlyBase (`scatter`, `Layout`, `attr`,
+`relayout!`, `restyle!`, `add_trace!`, `Spec`, ...), `meshgrid` from
+MeshGrid.jl and the LaTeX string macro `@L_str` from LaTeXStrings.jl.
 
-### 2D Contour
+## Common keywords
 
-```julia
-x = -5:0.1:5
-y = -5:0.1:5
-U = [sin(sqrt(xi^2 + yj^2)) for yj in y, xi in x]
-plot_contour(x, y, U; xlabel="x", ylabel="y", title="Radial Sine Contour")
-```
+Keyword support is grouped by family:
 
-### 3D Surface
+- **2-D Cartesian constructors:** `plot_scatter`, `plot_stem`, `plot_area`, `plot_band`, `plot_segments`, `plot_vlines`, `plot_hlines`, `plot_ecdf`, `plot_kde`, `plot_complex`, `plot_bar`, `plot_histogram`, `plot_box`, `plot_violin`, `plot_histogram2d`, `plot_funnel`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc`, `plot_heatmap`, `plot_contour`, `plot_quiver`, `plot_streamlines`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_polygons`, `plot_tripcolor`, `plot_triplot`, `plot_tricontour`
+- **3-D constructors:** `plot_scatter3d`, `plot_surface`, `plot_wireframe`, `plot_segments3d`, `plot_mesh3d`, `plot_polygons3d`, `plot_quiver3d`, `plot_isosurface`, `plot_volume`, `plot_streamtube`
+- **Colour-mapped constructors:** `plot_heatmap`, `plot_contour`, `plot_histogram2d`, `plot_matrix`, `plot_pcolormesh`, `plot_polygons`, `plot_tripcolor`, `plot_tricontour`, `plot_streamlines`, `plot_surface`, `plot_mesh3d`, `plot_polygons3d`, `plot_quiver3d`, `plot_isosurface`, `plot_volume`, `plot_streamtube`
 
-```julia
-x = y = -2π:0.1:2π
-Y, X = meshgrid(y, x) ## uses MeshGrid.jl
-Z = sin.(sqrt.(X.^2 .+ Y.^2))
-plot_surface(X, Y, Z; title="3D Surface", colorscale="Viridis")
-```
+| Keywords | Meaning | Accepted by | Except |
+|---|---|---|---|
+| `title`, `width`, `height`, `fontsize`, `show` | figure title; size in px (0 = automatic); base font size (0 = template); `show = true` opens a window and returns a `SyncPlot` | every constructor | none |
+| `xlabel`, `ylabel`, `grid` | axis titles; `grid = false` hides the grid | 2-D Cartesian | none |
+| `xrange`, `yrange` | axis limits `[lo, hi]` in data units, also on log axes; `[0, 0]` or `nothing` is automatic | 2-D Cartesian | `plot_matrix` |
+| `xscale`, `yscale` | `"linear"` or `"log"` | 2-D Cartesian | `plot_complex`, `plot_funnel`, `plot_waterfall`, `plot_image`, `plot_matrix` |
+| `xticks`, `yticks`, `xticklabels`, `yticklabels`, `xtickformat`, `ytickformat` | tick values (data units) or the presets `:decades` and `:auto`, their labels, a d3 format | 2-D Cartesian | `plot_funnel`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc`, `plot_matrix`, `plot_pcolormesh`, `plot_polygons`, `plot_tripcolor`, `plot_triplot`, `plot_tricontour` |
+| `equalar` | equal axis scales (aspect ratio 1) | 2-D Cartesian | `plot_bar`, `plot_histogram`, `plot_box`, `plot_violin`, `plot_histogram2d`, `plot_funnel`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc` |
+| `legend` | legend name; unnamed traces get no legend entry | 2-D Cartesian | `plot_histogram2d`, `plot_heatmap`, `plot_contour`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_tripcolor`, `plot_tricontour` |
+| `color` | one colour, or one per series | 2-D Cartesian | `plot_histogram2d`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc`, `plot_heatmap`, `plot_contour`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_tripcolor` |
+| `xlabel`, `ylabel`, `zlabel`, `xrange`, `yrange`, `zrange`, `aspectmode`, `perspective`, `showaxis`, `grid`, `view` | scene axes, ranges, aspect, projection and camera `(elev, azim)` | 3-D | none |
+| `colorscale` | colormap name, colours or `(t, colour)` stops | Colour-mapped | none |
+| `crange` | colour limits `[lo, hi]`; `[0, 0]` is automatic | Colour-mapped | `plot_streamlines` |
+| `cmid` | value at the centre of the colormap (diverging data) | Colour-mapped | `plot_streamlines`, `plot_tricontour` |
+| `colornorm`, `showscale` | `:linear` or `:log` colour mapping; colorbar on or off | Colour-mapped | `plot_matrix`, `plot_streamlines`, `plot_tricontour` |
+| `colorbar_title` | colorbar title (mathtext) | Colour-mapped | `plot_tricontour` |
+| `mode`, `marker_size`, `marker_symbol` | `"lines"`, `"markers"`, `"lines+markers"`; marker size in px; marker symbol | `plot_scatter`, `plot_scatterpolar`, `plot_scatter3d`, `plot_complex` | none |
+| `dash`, `linewidth` | dash pattern (`"dash"`, `"dot"`, `"--"`, ...); line width in px | `plot_scatter`, `plot_scatterpolar`, `plot_scatter3d`, `plot_complex`, `plot_segments`, `plot_segments3d`, `plot_vlines`, `plot_hlines`, `plot_ecdf`, `plot_kde`, `plot_contour`, `plot_triplot`, `plot_tricontour`, `plot_wireframe` | none |
+| `trange`, `rrange`, `rlabel_angle`, `thetaunit`, `direction`, `rotation` | polar sector and radial range, radial label angle, angle unit and orientation | `plot_scatterpolar` | none |
+| `tight` | `false` restores plotly's padded autorange around a field | `plot_heatmap`, `plot_contour`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_polygons`, `plot_tripcolor` | none |
 
----
+`plot_scatterpolar` takes none of the Cartesian axis keywords; use `trange`,
+`rrange` or `update_polars!`. Mutators (`plot_*!`) take the keywords of their
+constructor except `show`. A keyword a function does not take raises an error.
 
-## Common Keyword Arguments
+## Export
 
-These options are accepted by essentially every constructor:
+`savefig(fig, "name.ext"; ...)` writes `png`, `jpeg`, `svg`, `pdf`, `eps`
+(through Ghostscript), `html` or `json`, chosen by the extension:
 
-| Keyword        | Description                                | Default         |
-|----------------|--------------------------------------------|-----------------|
-| `xlabel`, `ylabel` | Axis labels                            | `""`             |
-| `xrange`, `yrange` | Axis ranges as `[min, max]`            | `[0, 0]` (auto)  |
-| `width`, `height` | Plot size in pixels                     | `0` (auto)       |
-| `title`         | Plot title                                | `""`             |
-| `grid`          | Show/hide grid lines                      | `true`           |
-| `color`         | Trace color (scalar or per-series vector) | `""`             |
-| `show`          | Open Electron window immediately           | `false`          |
+- `width`, `height` with `units = :px` (default), `:in`, `:cm`, `:mm` or `:pt`;
+  without them the figure's own size, else 700 x 500 px.
+- `dpi` for PNG and JPEG (stored in the file); vector formats keep their
+  physical size.
+- `background = :transparent`, `tight = true` (trim the margins), and
+  `deterministic = true` (the default: repeated exports are byte-identical).
+- `savefig(fig, ["fig.pdf", "fig.png"])` writes several files from one render.
 
-Family-specific options (passing one to a constructor that doesn't accept it raises a `MethodError`):
-
-| Keyword        | Description                                | Supported by    |
-|----------------|--------------------------------------------|-----------------|
-| `mode`, `dash`, `linewidth`, `marker_size`, `marker_symbol` | Line/marker styling | `plot_scatter`, `plot_scatter3d`, `plot_scatterpolar` |
-| `xscale`, `yscale` | `"log"` axis scale                     | 2-D Cartesian plots |
-| `colorscale`    | Color scale (`""` = Plotly default)       | `plot_heatmap`, `plot_contour`, `plot_surface`, `plot_quiver3d` |
-| `zlabel`, `zrange`, `aspectmode`, `showaxis`, `perspective` | 3-D scene options | `plot_surface`, `plot_scatter3d`, `plot_quiver3d` |
-| `points`        | Outlier display (`"all"`/`"outliers"`/…)  | `plot_box`, `plot_violin` |
-
----
-
-## Notes
-
-- All plots use the `:plotly_white` template by default.
-- Most functions support both scalar and vectorized input (e.g., multiple traces).
-
----
+See the [documentation](https://jake-w-liu.github.io/PlotlySupply.jl/dev/) for
+guides to every area, the matplotlib-to-PlotlySupply table and the migration
+notes from 1.x.
 
 ## License
 
-This package is distributed under the MIT License.
-
----
-
-## Author
-
-Developed by Jake W. Liu. Contributions and issues are welcome.
+MIT License. Developed by Jake W. Liu; contributions and issues are welcome.

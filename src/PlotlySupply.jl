@@ -1,3 +1,22 @@
+"""
+    PlotlySupply
+
+Scientific plotting on top of PlotlyBase.jl: one function per plot type
+(`plot_scatter`, `plot_heatmap`, `plot_surface`, ...) with a mutating `!`
+form, subplot grids ([`subplots`](@ref)), axis, legend, colour and annotation
+helpers, styles for publication figures ([`PlotStyle`](@ref)), and export to
+PNG, JPEG, SVG, PDF, EPS, HTML and JSON ([`savefig`](@ref)). Figures are
+shown in Electron windows ([`SyncPlot`](@ref)); no browser, Kaleido or Python
+is needed.
+
+Conventions: field matrices are indexed `U[ix, iy]`, with
+`size(U) == (length(x), length(y))`; ranges on logarithmic axes are data
+values; labels mix text and `\$...\$` math (see [`mathtext`](@ref)).
+
+The PlotlyBase API (`scatter`, `Layout`, `attr`, `relayout!`, ...),
+`meshgrid` from MeshGrid.jl and `L"..."` from LaTeXStrings.jl are
+re-exported.
+"""
 module PlotlySupply
 
 using LazyArtifacts
