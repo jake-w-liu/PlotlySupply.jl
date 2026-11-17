@@ -45,7 +45,8 @@ would fail on a busy machine.
 
 ## Recorded results (2026-11-18)
 
-Apple M5 (10 cores, 32 GB), macOS, Julia 1.13.1, 1 thread, commit `7104c60`.
+Apple M5 (10 cores, 32 GB), macOS, Julia 1.13.1, 1 thread, commit `7104c60`
+(its `src/` is the `src/` of the commit that added this file).
 The machine was shared: load average 26-49 during the run (25-68 during the
 other runs quoted here), so absolute times are inflated and noisy. Before/after
 comparisons were measured interleaved, run by run, so both sides saw the same
