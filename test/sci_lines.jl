@@ -302,8 +302,13 @@ end
 
 @testset "sci lines: style defaults and legend placement (X10, V5)" begin
 	legend(f) = (_sl_fields(f.layout.fields[:legend])[:x], _sl_fields(f.layout.fields[:legend])[:xanchor])
-	# An ECDF rises from the bottom left to the top right: top left is free.
-	@test legend(plot_ecdf(collect(1.0:10.0); legend = "e")) == (0.02, "left")
+	# An ECDF rises from the bottom left to the top right: with dense steps the
+	# top right is taken and the top left is free.
+	@test legend(plot_ecdf(collect(1.0:100.0); legend = "e")) == (0.02, "left")
+	# With 10 coarse steps the estimated top-right box fits between the last
+	# step's rise at the right edge and the step below it, so the default
+	# corner stays (ties keep the candidate order).
+	@test legend(plot_ecdf(collect(1.0:10.0); legend = "e")) == (0.98, "right")
 	# A band is a polygon fill the estimate does not model: default corner.
 	@test legend(plot_band(1:3, 0, [1, 2, 3]; legend = "b")) == (0.98, "right")
 	# A KDE curve takes the style's width and dash cycle, never its markers.

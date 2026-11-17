@@ -865,8 +865,8 @@ end
 		plot_scatter!(s, 1:3, [[1, 2, 3], [3, 2, 1]]; row = 1, col = 2)
 		s
 	end
-	@test [_rsc_get(_rsc_line(t), :dash) for t in sf.plot.data] == dashes[1:4]
-	@test [_rsc_get(_rsc_marker(t), :symbol) for t in sf.plot.data] == symbols[1:4]
+	@test [_rsc_get(_rsc_line(t), :dash) for t in sf.plot.data] == collect(dashes[1:4])
+	@test [_rsc_get(_rsc_marker(t), :symbol) for t in sf.plot.data] == collect(symbols[1:4])
 	# SyncPlot mutators style the appended traces only.
 	sp = _rsc_syncplot(plot_scatter(1:3, [1, 2, 3]))
 	with_style(; style_kw...) do

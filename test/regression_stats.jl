@@ -427,8 +427,9 @@ end
 	@test_throws ArgumentError plot_box(Any[1.0, 2im])
 	@test_throws ArgumentError plot_violin([[1.0, 2.0], [1im]])
 	matrix = [1.0 4.0; 2.0 5.0; 3.0 6.0]
-	@test_throws MethodError plot_bar(view(matrix, :, 1:2))
-	@test_throws MethodError plot_histogram(view(matrix, :, 1:2))
+	# X29: a 2-D view is an ArgumentError pointing at `eachcol`, not a MethodError.
+	@test_throws ArgumentError plot_bar(view(matrix, :, 1:2))
+	@test_throws ArgumentError plot_histogram(view(matrix, :, 1:2))
 	@test _st_trace(plot_bar(view(matrix, :, 1)))[:y] == [1.0, 2.0, 3.0]
 	# Ragged series with generated positions remain valid.
 	@test length(plot_bar([1:3, 1:5]).data) == 2
