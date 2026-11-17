@@ -153,8 +153,8 @@ end
         @test _ax_throws(() -> xrange!(fig, [1]), "exactly 2 elements")
         @test _ax_throws(() -> xrange!(fig, 1:3), "exactly 2 elements")
         @test _ax_throws(() -> xrange!(fig, 5), "must be a 2-element vector or tuple")
-        @test _ax_throws(() -> xrange!(fig, [nothing, 5]), "partial ranges are not supported")
-        @test _ax_throws(() -> xrange!(fig, (1, missing)), "partial ranges are not supported")
+        @test _ax_throws(() -> xrange!(fig, (1, missing)), "xrange!: `range`: an open bound of a one-sided limit is written `nothing`")
+        @test _ax_throws(() -> xrange!(fig, [nothing, 0.5]), "xrange!: `range` fixes one end of the axis beyond all of its data")
         @test _ax_throws(() -> xrange!(fig, [1, Inf]), "bounds must be finite")
         @test _ax_throws(() -> xrange!(fig, [2, 2]), "the range bounds must differ")
         @test _ax_throws(() -> xrange!(fig, [true, false]), "range bounds must be numbers")
@@ -165,6 +165,141 @@ end
         @test _ax_throws(() -> yrange!(sf, (0, 1); row = 1), "`row` and `col` must be given together")
         @test _ax_throws(() -> yrange!(sf, (0, 1); row = 3, col = 1), "`row` must be in 1:1")
         @test _ax_json(sf.plot.layout) == before
+    end
+
+    @testset "D11/G41: one-sided limits through xrange!/yrange!/zrange!" begin
+        _ao(p, key) = _ax_field(p, key, :autorangeoptions)
+        fig = plot_scatter([1.0, 2.0, 3.0], [1.0, 4.0, 2.0])
+        @test yrange!(fig, (0, nothing)) === nothing
+        @test _ax_field(fig, :yaxis, :autorange) === true
+        @test _ax_field(fig, :yaxis, :range) === nothing
+        @test _ax_get(_ao(fig, :yaxis), :minallowed) == 0
+        xrange!(fig, (nothing, 10))
+        @test _ax_get(_ao(fig, :xaxis), :maxallowed) == 10
+        @test _ax_get(_ao(fig, :xaxis), :minallowed) === nothing
+        # A full range replaces the limit; the sentinel clears both.
+        xrange!(fig, (0, 5))
+        @test _ax_field(fig, :xaxis, :range) == [0, 5] && _ao(fig, :xaxis) === nothing
+        yrange!(fig, nothing)
+        @test _ax_field(fig, :yaxis, :autorange) === true && _ao(fig, :yaxis) === nothing
+        # Reversed axes keep their direction; the first bound is the start.
+        xrange!(fig, (5, 0))
+        xrange!(fig, (nothing, -2))
+        @test _ax_field(fig, :xaxis, :autorange) == "reversed"
+        @test _ax_get(_ao(fig, :xaxis), :minallowed) == -2
+        xrange!(fig, nothing)
+        @test _ax_field(fig, :xaxis, :autorange) == "reversed"
+        # Log axes take data units.
+        lg = plot_scatter([0.1, 10.0], [1.0, 2.0]; xscale = "log")
+        xrange!(lg, (0.01, nothing))
+        @test _ax_get(_ao(lg, :xaxis), :minallowed) ≈ -2.0
+        before = _ax_json(lg.layout)
+        @test _ax_throws(() -> xrange!(lg, (0, nothing)), "xrange!: `range` bounds on a logarithmic axis are data values and must be positive")
+        @test _ax_json(lg.layout) == before
+        # Matched groups: the limit is on every member (plotly.js reads
+        # autorangeoptions per axis), the autorange on the root.
+        sf = subplots(2, 1; sync = false, shared_xaxes = true)
+        plot_scatter!(sf, 1:10, collect(1.0:10.0); row = 1, col = 1)
+        plot_scatter!(sf, 1:10, collect(10.0:-1:1.0); row = 2, col = 1)
+        follower = _AX._cell_target(sf; row = 1, col = 1).xkey
+        root = _AX._axes_match_root(sf, follower, "test")
+        @test xrange!(sf, (-4, nothing); row = 1, col = 1) === sf
+        for key in (root, follower)
+            @test _ax_get(_ao(sf, key), :minallowed) == -4
+        end
+        @test _ax_field(sf, root, :autorange) === true
+        xrange!(sf, (0, 3); row = 2, col = 1)
+        @test _ax_field(sf, root, :range) == [0, 3]
+        @test _ao(sf, root) === nothing && _ao(sf, follower) === nothing
+        # Date axes: milliseconds since 1970.
+        dt = plot_scatter(["2020-01-05", "2020-02-01"], [1.0, 2.0])
+        relayout!(dt; xaxis_type = "date")
+        xrange!(dt, ("2020-01-01", nothing))
+        @test _ax_get(_ao(dt, :xaxis), :minallowed) == 1.5778368e12
+        # Aspect-linked axes: resolved to a full range from the data now, also
+        # when axis_equal! comes after the limit.
+        e = plot_scatter([0.0, 2.0], [0.0, 1.0])
+        xrange!(e, (-2, nothing))
+        axis_equal!(e)
+        @test _ax_field(e, :xaxis, :autorange) === false
+        @test _ax_field(e, :xaxis, :range) ≈ [-2.0, 2.1]
+        @test _ao(e, :xaxis) === nothing
+        yrange!(e, (nothing, 3))
+        @test _ax_field(e, :yaxis, :range) ≈ [-0.05, 3.0]
+        @test _ax_field(e, :yaxis, :autorange) === false
+        # Errors leave the figure unchanged.
+        q = plot_scatter([1.0, 2.0], [1.0, 4.0])
+        before = _ax_json(q.layout)
+        @test _ax_throws(() -> yrange!(q, (20, nothing)), "yrange!: `range` fixes one end of the axis beyond all of its data")
+        @test _ax_throws(() -> yrange!(q, (missing, 3)), "an open bound of a one-sided limit is written `nothing`")
+        @test _ax_json(q.layout) == before
+        # 3-D scenes: the open end comes from the data (+1/32 of the extent).
+        f3 = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0])
+        zrange!(f3, (nothing, 2))
+        zaxis = _ax_get(f3.layout.fields[:scene], :zaxis)
+        @test _ax_get(zaxis, :range) ≈ [-1 / 32, 2.0]
+        @test _ax_get(zaxis, :autorange) === false
+        xrange!(f3, (-1, nothing))
+        @test _ax_get(_ax_get(f3.layout.fields[:scene], :xaxis), :range) ≈ [-1.0, 1 + 1 / 32]
+        before = _ax_json(f3.layout)
+        @test _ax_throws(() -> zrange!(f3, (5, nothing)), "zrange!: `range` = (5, nothing) leaves no room for the data on the z axis")
+        empty3 = subplots(1, 1; sync = false, specs = [Spec(kind = "scene");;])
+        @test _ax_throws(() -> zrange!(empty3, (0, nothing)), "zrange!: `range` = (0, nothing) is a one-sided limit; on a 3-D scene its open end is taken from the data")
+        @test _ax_json(f3.layout) == before
+        # The docstrings describe the one-sided form.
+        for f in (xrange!, yrange!, zrange!)
+            doc = lowercase(replace(string(Base.Docs.doc(f)), r"\s+" => " "))
+            @test occursin("nothing)", doc) && occursin("one-sided", doc)
+        end
+    end
+
+    @testset "G33: equal bounds are an ArgumentError on every range path" begin
+        fig = plot_scatter([1.0, 2.0], [1.0, 2.0])
+        before = _ax_json(fig.layout)
+        for (f, r) in ((xrange!, (2, 2)), (yrange!, [5.0, 5]), (xrange!, ("a", "a")))
+            @test _ax_throws(() -> f(fig, r), "the range bounds must differ")
+        end
+        @test _ax_throws(() -> zrange!(plot_scatter3d([0.0], [0.0], [0.0]), (1, 1)), "zrange!: `range`: the range bounds must differ")
+        @test _ax_json(fig.layout) == before
+        @test _ax_throws(() -> _AX._validate_cartesian_options(fig, "t"; xrange = (2, 2)), "t: `xrange`: the range bounds must differ")
+        @test _ax_throws(() -> plot_scatter([1.0, 2.0], [1.0, 2.0]; yrange = (5, 5)), "plot_scatter: `yrange`: the range bounds must differ")
+    end
+
+    @testset "Y26: scene ranges and axis_equal! keep the scene's proportions" begin
+        pts = collect(0.0:0.1:1.0)
+        f = plot_scatter3d(pts, pts, pts; aspectmode = "data")
+        zrange!(f, [0, 4])
+        scene = f.layout.fields[:scene]
+        @test _ax_get(scene, :aspectmode) == "manual"
+        ratio = _ax_get(scene, :aspectratio)
+        # Drawn spans: x and y autorange 1 + 2/32, z the explicit 4.
+        @test _ax_get(ratio, :z) ≈ 1.0
+        @test _ax_get(ratio, :x) ≈ (17 / 16) / 4
+        @test _ax_get(ratio, :y) ≈ (17 / 16) / 4
+        # Back to automatic: the pinned ratios follow the data again.
+        zrange!(f, nothing)
+        ratio = _ax_get(f.layout.fields[:scene], :aspectratio)
+        @test _ax_get(ratio, :x) ≈ 1.0 && _ax_get(ratio, :z) ≈ 1.0
+        # An automatic camera is re-framed for the new box.
+        g = plot_scatter3d(pts, pts, pts; aspectmode = "data")
+        eye0 = _ax_get(_ax_get(_ax_get(g.layout.fields[:scene], :camera), :eye), :x)
+        zrange!(g, [0, 4])
+        eye1 = _ax_get(_ax_get(_ax_get(g.layout.fields[:scene], :camera), :eye), :x)
+        @test eye0 !== nothing && eye1 !== nothing && eye1 != eye0
+        # axis_equal! on a scene with an explicit range pins it too.
+        h = plot_scatter3d(pts, 2 .* pts, pts)
+        zrange!(h, [0, 2])
+        axis_equal!(h)
+        scene = h.layout.fields[:scene]
+        @test _ax_get(scene, :aspectmode) == "manual"
+        @test _ax_get(_ax_get(scene, :aspectratio), :z) ≈ 2 / (2 * 17 / 16)
+        # Subplot scene cells get tick counts for their size.
+        sf = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene")])
+        plot_scatter3d!(sf, pts, pts, pts; row = 1, col = 1)
+        zrange!(sf, (0, 3); row = 1, col = 1)
+        t = _AX._cell_target(sf; row = 1, col = 1)
+        zaxis = _ax_get(sf.plot.layout.fields[t.scenekey], :zaxis)
+        @test _ax_get(zaxis, :nticks) isa Integer
     end
 
     @testset "C13: log-axis ranges are data units (#36/#52/#76/#209)" begin

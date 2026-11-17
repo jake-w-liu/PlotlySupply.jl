@@ -286,27 +286,84 @@ end
 # ---------------------------------------------------------------------------
 
 # A validated range: `nothing` for the automatic sentinel ([0, 0], (0, 0),
-# `nothing`, [nothing, nothing]), otherwise the two bounds. `_checked_range`
-# (base.jl) rejects wrong lengths, partial ranges (plotly.js 2.35 ignored
-# `range = [null, hi]` with `autorange = "min"` in a render test,
-# probe2_partial.png), Bool and non-finite bounds and equal bounds.
-_axes_checked_range(range, who::AbstractString) = _checked_range(range, who, "range")
+# `nothing`, [nothing, nothing]), otherwise the two bounds, one of which may
+# be `nothing` (a one-sided limit, D11). `_checked_range` (base.jl) rejects
+# wrong lengths, Bool and non-finite bounds and equal bounds.
+_axes_checked_range(range, who::AbstractString) =
+	_checked_range(range, who, "range"; partial = true)
 
 # The checked range in the units Plotly stores for an axis of type
 # `axis_type`: `to_log(checked)` (log10 of the bounds) on a log axis; numeric
 # bounds are required on linear and category axes (a category range is in
 # 0-based category positions). Date axes and autotyped ("-") axes take the
-# bounds as given.
+# bounds of a full range as given. The fixed bound of a one-sided limit is
+# converted by `_axis_limit_bound` (log10; milliseconds on date axes).
 function _axes_axis_range_value(checked, axis_type, who::AbstractString, to_log)
 	checked === nothing && return nothing
-	axis_type == "log" && return to_log(checked)
-	if axis_type in _NUMERIC_RANGE_AXIS_TYPES
-		all(b -> b isa Real, checked) || throw(ArgumentError(
+	if axis_type in _NUMERIC_RANGE_AXIS_TYPES && axis_type != "log"
+		all(b -> b === nothing || b isa Real, checked) || throw(ArgumentError(
 			"$(who): a $(axis_type) axis needs numeric range bounds; got " *
 			"$(repr(Tuple(checked))).",
 		))
 	end
+	_is_one_sided_range(checked) &&
+		return _axis_range_store_value(checked, axis_type, who, "range")
+	axis_type == "log" && return to_log(checked)
 	return checked
+end
+
+# Every axis of a `matches` group whose root is `root` (the root first).
+function _axes_match_members(fig, root::Symbol, who::AbstractString)
+	letter = String(root)[1]
+	members = Symbol[root]
+	for key in keys(_cmn_layout(fig).fields)
+		k = key isa Symbol ? key : (key isa AbstractString ? Symbol(key) : nothing)
+		(k === nothing || k === root || _cmn_axis_index(k, letter) === nothing) && continue
+		_axes_match_root(fig, k, who) === root && push!(members, k)
+	end
+	return members
+end
+
+# Whether a scene axis is drawn reversed: a reversed `autorange`, or a
+# decreasing explicit range in effect.
+function _axes_scene_axis_reversed(axis)
+	auto = _cmn_mapping_get(axis, :autorange)
+	auto isa Symbol && (auto = String(auto))
+	auto isa AbstractString && return auto in _REVERSED_AUTORANGES
+	stored = _s3_explicit_range(axis)
+	return auto !== true && stored !== nothing && stored[2] < stored[1]
+end
+
+# A one-sided limit on a 3-D scene axis as a full range, in axis units: the
+# open end is the data end of the axis widened by 1/32 of the data extent
+# (plotly.js gl3d autorange; ±1 around a single value), taken when the call
+# runs. plotly.js sizes "auto"/"data" scenes by the data extents, not by the
+# ranges, so a scene range must be complete for `_s3_finish_scene!` to pin
+# the proportions (Y26); this is also matplotlib's `set_zlim(bottom = 0)`,
+# which fixes the other end at its current value.
+function _axes_scene_limit_range(fig, scenekey::Symbol, letter::Char, value, who::AbstractString)
+	p = _cmn_plot(fig)
+	d = letter == 'x' ? 1 : letter == 'y' ? 2 : 3
+	bounds = _s3_data_bounds(p, scenekey, d)
+	bounds === nothing && throw(ArgumentError(
+		"$(who): `range` = $(repr(Tuple(value))) is a one-sided limit; on a 3-D " *
+		"scene its open end is taken from the data on the axis, and the $(letter) " *
+		"axis has none yet. Add the data first, or give both bounds.",
+	))
+	extent = bounds[2] - bounds[1]
+	pad = extent > 0 ? extent / 32 : 1.0
+	lower, upper = bounds[1] - pad, bounds[2] + pad
+	reversed = _axes_scene_axis_reversed(_axes_scene_axis_entry(_cmn_layout(fig), scenekey, letter))
+	start, stop = value[1], value[2]
+	fixed_min, fixed_max = reversed ? (stop, start) : (start, stop)
+	lo = fixed_min === nothing ? lower : Float64(fixed_min)
+	hi = fixed_max === nothing ? upper : Float64(fixed_max)
+	lo < hi || throw(ArgumentError(
+		"$(who): `range` = $(repr(Tuple(value))) leaves no room for the data on the " *
+		"$(letter) axis (its open end, taken from the data, is not beyond the fixed " *
+		"bound); give both bounds.",
+	))
+	return reversed ? Any[hi, lo] : Any[lo, hi]
 end
 
 # Write an xy axis range (`nothing` = autorange). The same alias-preserving
@@ -341,9 +398,14 @@ end
 Set the range of axis `letter` of the target cell in DATA units (spec C13):
 on a logarithmic axis the bounds are converted to the log10 values Plotly
 stores. A full range also sets `autorange = false` (finding #25); the
-automatic sentinel deletes the range and sets `autorange = true`. On an xy
-cell whose axis `matches` another, the range is written on the root of the
-matched group, the only axis plotly.js reads it from (finding #265).
+automatic sentinel deletes the range and sets `autorange = true` (`"reversed"`
+on a reversed axis). A one-sided limit (D11) is written by `_write_axis_range!`
+on xy axes and as a full range from the data on scene axes
+(`_axes_scene_limit_range`). On an xy cell whose axis `matches` another, the
+range is written on the root of the matched group, the only axis plotly.js
+reads it from (finding #265), and the limits on every member (plotly.js reads
+`autorangeoptions` per axis; measured, probe p04). A scene call keeps the
+scene's proportions and camera framing with the scene3d helpers (Y26).
 """
 function _axes_range!(
 	fig,
@@ -377,7 +439,13 @@ function _axes_range!(
 			who,
 			r -> _to_axis_range(layout, key, r; who = who),
 		)
-		_axes_write_xy_range!(fig, key, value)
+		members = _axes_match_members(fig, key, who)
+		reversed = _axis_is_reversed(fig, key)
+		if _is_one_sided_range(value)
+			_require_limit_meets_data(fig, key, value, reversed, members, who, "range")
+			value = _resolve_constrained_limit(fig, key, value, reversed, members, who, "range")
+		end
+		_write_axis_range!(fig, key, value; reversed = reversed, members = members)
 	elseif t.kind === :scene
 		# Scene log axes store log10 ranges too (verified render,
 		# probe2_scene_log.png).
@@ -386,14 +454,19 @@ function _axes_range!(
 			:type,
 		)
 		axis_type isa Symbol && (axis_type = String(axis_type))
+		axis_type isa AbstractString || (axis_type = "-")
 		value = _axes_axis_range_value(
 			checked,
 			axis_type,
 			who,
 			r -> Float64[_axes_log10_bound(b, who) for b in r],
 		)
+		_is_one_sided_range(value) &&
+			(value = _axes_scene_limit_range(fig, t.scenekey, letter, value, who))
+		state = _s3_scene_state(fig, t)
+		reversed = _axes_scene_axis_reversed(_axes_scene_axis_entry(layout, t.scenekey, letter))
 		fields = value === nothing ?
-			Dict{Symbol, Any}(:autorange => true) :
+			Dict{Symbol, Any}(:autorange => reversed ? "reversed" : true) :
 			Dict{Symbol, Any}(:range => value, :autorange => false)
 		_axes_write_scene_axis!(fig, t.scenekey, letter, fields)
 		if value === nothing
@@ -402,6 +475,8 @@ function _axes_range!(
 				(:range,),
 			)
 		end
+		_s3_finish_scene!(fig, t, state)
+		_s3_finish_ticks!(fig, t, state)
 	else
 		throw(ArgumentError(
 			"$(who): axis ranges apply to Cartesian (xy) and 3-D scene cells; " *
@@ -485,20 +560,32 @@ or `row`/`col` cell of a SubplotFigure) in DATA units, also on a logarithmic
 scene axis (where Plotly stores log10 values; bounds must be positive).
 
 # Arguments
-- `range`: `(lo, hi)` or `[lo, hi]`. `[0, 0]`, `(0, 0)` and `nothing` restore
-  automatic ranging. Partial ranges and equal bounds are an `ArgumentError`.
+- `range`: `(lo, hi)` or `[lo, hi]`; `hi < lo` reverses the axis. `[0, 0]`,
+  `(0, 0)`, `nothing` and `(nothing, nothing)` restore automatic ranging.
+  `(lo, nothing)` / `(nothing, hi)` is a one-sided limit: the given end is
+  fixed and the other end is taken from the data when the call runs (the
+  data end widened by 1/32 of the data extent, as plotly.js autoranges a
+  scene axis; matplotlib's `set_zlim(bottom = lo)` also fixes the other end
+  at its current value). It needs data on the axis, and a fixed bound
+  beyond the data is an `ArgumentError`. Equal, `Bool` and non-finite bounds
+  are an `ArgumentError`.
 
 # Keywords
 - `row`, `col`: SubplotFigure cell (both or neither; default the active cell,
   which the call makes active).
 
-Writes `scene.zaxis.range` with `autorange = false`. Returns `nothing` (`sf`
-for a SubplotFigure).
+Writes `scene.zaxis.range` with `autorange = false`. The scene keeps its
+proportions: with `aspectmode` `"data"` or `"auto"` (which plotly.js derives
+from the data, ignoring ranges) the scene gets the manual aspect ratios of
+the drawn ranges, an automatic camera is re-framed for the new box, and the
+tick counts of a subplot cell are updated. Returns `nothing` (`sf` for a
+SubplotFigure).
 
 # Example
 ```julia
 fig = plot_surface(rand(10, 10))
 zrange!(fig, (0, 2))
+zrange!(fig, (0, nothing))   # bottom at 0, top from the data
 ```
 """
 function zrange!(fig, range; row = nothing, col = nothing, show = nothing)
@@ -748,7 +835,25 @@ function _axes_equal!(
 )
 	who = "axis_equal!"
 	t = _cell_target(fig; row = row, col = col, inset = inset, who = who)
-	_apply_equal_aspect!(fig, t; ratio = ratio, who = who)
+	if t.kind === :scene
+		# Y26: an "data" scene with explicit ranges is pinned to their
+		# proportions, an automatic camera re-framed, cell tick counts updated.
+		state = _s3_scene_state(fig, t)
+		_apply_equal_aspect!(fig, t; ratio = ratio, who = who)
+		_s3_finish_scene!(fig, t, state)
+		_s3_finish_ticks!(fig, t, state)
+	else
+		_apply_equal_aspect!(fig, t; ratio = ratio, who = who)
+		# plotly.js ignores one-sided limits (D11) on aspect-linked axes.
+		if t.kind === :xy
+			roots = (_axes_match_root(fig, t.xkey, who), _axes_match_root(fig, t.ykey, who))
+			_resolve_linked_limits!(
+				fig,
+				[(root, _axes_match_members(fig, root, who)) for root in roots],
+				who,
+			)
+		end
+	end
 	_axes_select!(fig, t)
 	_axes_finish!(fig)
 	return nothing

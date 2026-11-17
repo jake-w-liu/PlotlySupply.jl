@@ -5959,9 +5959,25 @@ cell, or of an inset.
   through). A reversed range (`hi < lo`) flips the axis. Bounds are numbers
   on linear, log and category axes (category positions are 0-based
   indices); a date axis also takes date strings or `Date`/`DateTime`.
-  `[0, 0]`, `(0, 0)` and `nothing` restore automatic ranging (1.x wrote a
-  literal `[0, 0]` range). Partial ranges and equal bounds are an
-  `ArgumentError`.
+  `[0, 0]`, `(0, 0)`, `nothing` and `(nothing, nothing)` restore automatic
+  ranging (1.x wrote a literal `[0, 0]` range); the axis keeps its direction
+  (a reversed axis autoranges reversed). Equal bounds, `Bool` and non-finite
+  bounds are an `ArgumentError`.
+- One-sided limit: `(lo, nothing)` fixes the left end of the axis at `lo`
+  and `(nothing, hi)` the right end at `hi` (the first bound is always the
+  left end, as in a full range, so on a reversed axis `(lo, nothing)` fixes
+  its largest value; matplotlib `set_xlim(left = lo)`). The open end follows
+  the data, also data added later. Bounds are data values as above (a date
+  string must be in plotly.js's `"yyyy-mm-dd[ HH:MM[:SS]]"` form). Written
+  as an automatic range with `autorangeoptions.minallowed`/`maxallowed`
+  (plotly.js's native partial ranges do not survive static export). Where
+  plotly.js cannot autorange one end — an axis tied by an aspect constraint
+  ([`axis_equal!`](@ref), `equalar`, images) and a 3-D scene axis, whose
+  proportions follow the ranges — the open end is taken from the data when
+  the call runs (5 % margin on xy axes, plotly's 1/32 on scene axes), and
+  that needs data on the axis (else an `ArgumentError`). A fixed bound
+  beyond all the data already on the axis is an `ArgumentError` (no data
+  would be visible).
 
 # Keywords
 - `row`, `col`: SubplotFigure cell (both or neither). Omitted, the active
@@ -5969,17 +5985,21 @@ cell, or of an inset.
   `ArgumentError` on a plain figure.
 - `inset = nothing`: inset id `k` from [`inset!`](@ref) (SubplotFigure only).
 
-The range is written with `autorange = false`, so it applies even where an
-explicit `autorange` was set. When the axis is shared with other cells
-(`shared_xaxes`, i.e. it `matches` another axis), the range is written on
-the axis that owns the shared range, so every cell of the group shows it.
-A 3-D scene cell sets `scene.xaxis.range` (log scene axes alike). Returns
-`nothing` (`sf` for a SubplotFigure).
+A full range is written with `autorange = false`, so it applies even where an
+explicit `autorange` was set, and replaces a one-sided limit. When the axis
+is shared with other cells (`shared_xaxes`, i.e. it `matches` another axis),
+the range is written on the axis that owns the shared range (a one-sided
+limit on every axis of the group), so every cell of the group shows it. A
+3-D scene cell sets `scene.xaxis.range` (log scene axes alike) and keeps the
+scene's proportions: a scene whose aspect follows the data (`aspectmode`
+`"data"`/`"auto"`) gets the matching manual aspect ratios, and an automatic
+camera is re-framed. Returns `nothing` (`sf` for a SubplotFigure).
 
 # Example
 ```julia
 fig = plot_scatter([1e-3, 1.0, 1e3], [1.0, 2.0, 3.0]; xscale = "log")
 xrange!(fig, (1e-4, 1e4))       # data units on the log axis
+xrange!(fig, (1e-4, nothing))    # left end fixed, right end automatic
 xrange!(fig, nothing)            # automatic again
 ```
 """
@@ -6052,7 +6072,9 @@ end
 Set the y-axis range of a `Plot`/`SyncPlot`, of one [`SubplotFigure`](@ref)
 cell, or of an inset; identical to [`xrange!`](@ref) for the y axis: DATA
 units on logarithmic axes (`yrange!(fig, (1, 1e5))`, not exponents),
-`autorange = false`, shared axes, scene cells.
+`autorange = false`, shared axes, scene cells. One-sided limits: `(lo,
+nothing)` fixes the bottom end (`ylim(bottom = 0)`), `(nothing, hi)` the top
+end, the other end follows the data (see [`xrange!`](@ref)).
 
 # Keywords
 - `row`, `col`, `inset`: as for [`xrange!`](@ref).
@@ -6065,6 +6087,7 @@ Returns `nothing` (`sf` for a SubplotFigure).
 ```julia
 fig = plot_scatter(1:10, exp.(1:10); yscale = "log")
 yrange!(fig, (1, 1e5))
+yrange!(fig, (1, nothing))     # bottom at 1, top follows the data
 ```
 """
 function yrange!(
@@ -7470,7 +7493,16 @@ function _apply_cartesian_plot_options!(
 	# Ticks after scale and range: log axes and explicit ranges are known.
 	_scat_apply_ticks!(fig, :xaxis, xticks, xticklabels, xtickformat, who)
 	_scat_apply_ticks!(fig, ykey, yticks, yticklabels, ytickformat, who)
-	equalar && _apply_equal_aspect!(fig, _cell_target(fig; who = who); who = who)
+	if equalar
+		aspect_target = _cell_target(fig; who = who)
+		_apply_equal_aspect!(fig, aspect_target; who = who)
+		# plotly.js ignores one-sided limits (D11) on aspect-linked axes.
+		_resolve_linked_limits!(
+			fig,
+			((aspect_target.xkey, (aspect_target.xkey,)), (aspect_target.ykey, (aspect_target.ykey,))),
+			who,
+		)
+	end
 	# On first construction apply the default template; when appending to an
 	# existing figure only refresh the legend so a user-set template survives.
 	if apply_template
