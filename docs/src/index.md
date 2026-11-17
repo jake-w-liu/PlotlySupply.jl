@@ -97,7 +97,7 @@ plot_heatmap!(sf, rand(30, 30))      # each colorbar sits next to its own cell
   `[f(x, y) for x in xs, y in ys]`. A transposed matrix raises an
   `ArgumentError` that says so. `plot_matrix(A)` is the exception: it draws `A`
   as printed (row 1 at the top). `plot_image` takes an `H x W x 3` (or 4)
-  array, row 1 at the top.
+  array with channel values 0 to 255, row 1 at the top.
 - **Ranges are data values, also on log axes.** `xrange = [1e-3, 1]` on a log
   axis, never exponents. `[0, 0]` or `nothing` means automatic.
 - **Mutators end in `!`** and take a `Plot`, a `SyncPlot` (the window updates)
