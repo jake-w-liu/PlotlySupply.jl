@@ -41,7 +41,7 @@ We are generally not looking to:
 1.  Fork the repository and create a new branch from `main`.
 2.  Make your changes.
 3.  Add tests for your changes (see below).
-4.  Ensure your code is well-documented: every exported function needs a complete docstring, because the documentation build (`docs/make.jl`) fails on missing docstrings.
+4.  Ensure your code is well-documented: every exported function needs a complete docstring, because the documentation build (`docs/make.jl`) fails on missing docstrings and on any other Documenter warning. A new page under `docs/src` is added to the navigation after the main pages automatically.
 5.  Open a pull request.
 
 ### Running the tests
@@ -54,7 +54,7 @@ The test suite opens real (hidden) Electron windows and exports images, so it ne
 
 Run the whole suite with `julia --project -e 'using Pkg; Pkg.test()'` (or `julia --project=. test/runtests.jl`).
 Every file in `test/` also runs on its own, e.g. `julia --project=. test/regression_scatter.jl`: it starts with `using Test` and `using PlotlySupply`, and a file that uses the shared fixtures in `test/testutils.jl` loads them with `isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")`.
-New test files named `test/sci_*.jl` or `test/regression_*.jl` are picked up by `test/runtests.jl` automatically; any other test file must be added to its `include` list. Packages a test file loads with `using` must be listed in `Project.toml` (`[deps]`, or `[extras]` plus `[targets]`), because `Pkg.test()` cannot load anything else. Assert the exception type a call throws (`@test_throws ArgumentError ...`), not `Exception`. `test/hygiene.jl` checks these rules.
+`test/runtests.jl` runs every `test/*.jl` file, so a new test file needs no registration: the files listed in `_TEST_FILES_RUN_FIRST` (`test/testutils.jl`) run first, then all others in name order. Packages a test file loads with `using` must be listed in `Project.toml` (`[deps]`, or `[extras]` plus `[targets]`), because `Pkg.test()` cannot load anything else. Assert the exception type a call throws (`@test_throws ArgumentError ...`), not `Exception`. `test/hygiene.jl` checks these rules.
 
 ## License
 
