@@ -2,7 +2,7 @@
 
 ## Colormap names
 
-Every `colorscale` keyword resolves names through [`COLORMAPS`](@ref) in
+Every `colorscale` keyword resolves names through [`COLORMAPS`](@ref PlotlySupply.COLORMAPS) in
 matplotlib orientation: `"RdBu"` runs from dark red (low) to dark blue (high),
 `"Blues"` from white to dark blue. Lookup is case-insensitive and a `"_r"`
 suffix reverses a map. The built-in names are
@@ -83,7 +83,7 @@ one bar (see [Subplots](subplots.md)). Traces with the same `coloraxis`
 share a colour scale.
 
 ```julia
-fig = plot_heatmap(rand(20, 20); colorbar_title = "\$|E|\$ (V/m)",
+fig = plot_heatmap(rand(20, 20); crange = [0, 1], colorbar_title = "\$|E|\$ (V/m)",
     colorbar_title_side = :right)
 colorbar!(fig; len = 0.6, thickness = 15, ticks = [0, 0.5, 1],
     ticklabels = ["low", "mid", "high"])

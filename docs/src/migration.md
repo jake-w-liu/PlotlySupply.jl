@@ -267,8 +267,8 @@ fig2 = plot_quiver3d([0.0, 1], [0.0, 0], [0.0, 0], [1.0, 0], [0.0, 1], [0.0, 0];
   values where plotly requires non-negative ones).
 - `plot_funnel` uses the package's axis styling.
 - Map functions raise an `ArgumentError` for a keyword that is not an
-  attribute of the trace, and for `show`, `row` or `col` on a `Plot`.
-  Map titles and legend names go through mathtext.
+  attribute of the trace, for empty data, and for `show`, `row` or `col` on
+  a `Plot`. Map titles and legend names go through mathtext.
 
 ```julia
 # fragment: 1.x code

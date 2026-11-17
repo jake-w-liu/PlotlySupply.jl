@@ -98,7 +98,8 @@ Validation and errors
 - Unknown keywords and `show` on mutators, 3-D, mesh and map functions raise
   an `ArgumentError` instead of a `MethodError`.
 - Map functions reject keywords that are not plotly.js attributes of the
-  trace.
+  trace, reject empty data, and pass titles and legend names through
+  `mathtext`.
 
 Export, windows and templates
 
@@ -150,6 +151,8 @@ Subplots
   `panel_labels!`, `title!`.
 - `height_ratios` and `width_ratios`.
 - Per-cell `row`/`col`/`inset` in the axis helpers.
+- `inset = k` in the mutators, including `plot_funnel!`, `plot_waterfall!`,
+  `plot_candlestick!` and `plot_ohlc!` on a `SubplotFigure`.
 
 Annotations and shapes
 

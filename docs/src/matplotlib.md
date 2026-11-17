@@ -161,7 +161,7 @@ plot_contour!(fig2, xs, xs, U; levels = [0.0], coloring = "none", linecolor = "w
 M = [1 2 3; 4 5 6]
 fig3 = plot_heatmap(1:2, 1:3, M; text = string.(M), origin = :upper)
 fig4 = plot_matrix(M)
-fig5 = plot_vlines([1, 2, 3], 0, [0.5, 1.0, 0.25])
+fig5 = plot_vlines([1, 2, 3], 0, [0.5, 1.0, 0.25]; xrange = (0.5, 3.5))
 fig6 = plot_scatter(1:5, [1, 3, 2, 4, 3]; line_shape = "hv")
 ```
 

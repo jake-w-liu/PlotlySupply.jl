@@ -94,6 +94,7 @@ sf = subplots(1, 2; sync = false, specs = [Spec(kind = "map") Spec(kind = "map")
 plot_scattermap!(sf, [2.35], [48.86]; row = 1, col = 1, legend = "Paris")
 plot_scattermap!(sf, [13.40], [52.52]; row = 1, col = 2, legend = "Berlin")
 update_maps!(sf; row = 1, col = 1, zoom = 4, center_lon = 2.35, center_lat = 48.86)
+update_maps!(sf; row = 1, col = 2, zoom = 4, center_lon = 13.40, center_lat = 52.52)
 update_maps!(sf.fig; style = "carto-positron")
 ```
 

@@ -66,7 +66,7 @@ field.
 
 ```julia
 fig = plot_heatmap(xs, ys, U; equalar = true, colorscale = "viridis")
-plot_scatter!(fig, [1.0, 3.0], [0.5, 1.5]; mode = "markers", color = "white",
+plot_scatter!(fig, [1.0, 3.0], [0.5, 1.5]; mode = "markers", color = "red",
     legend = "probes")
 ```
 
@@ -81,12 +81,14 @@ export.
 
 [`plot_image`](@ref) shows an `H x W x 3` (RGB) or `H x W x 4` (RGBA) array,
 or a matrix of Colors.jl colours, with row 1 at the top and square pixels.
-`extent = (x0, x1, y0, y1)` places it in data coordinates.
+Channel values follow plotly's convention, 0 to 255 (multiply data in
+`[0, 1]` by 255); the alpha channel of a floating-point RGBA array is in
+`[0, 1]`. `extent = (x0, x1, y0, y1)` places the image in data coordinates.
 
 ```julia
 img = zeros(40, 60, 3)
-img[:, :, 1] .= range(0, 1; length = 60)'
-img[:, :, 3] .= range(1, 0; length = 40)
+img[:, :, 1] .= 255 .* range(0, 1; length = 60)'
+img[:, :, 3] .= 255 .* range(1, 0; length = 40)
 fig = plot_image(img; extent = (0, 6, 0, 4), xlabel = "x (mm)", ylabel = "y (mm)")
 ```
 

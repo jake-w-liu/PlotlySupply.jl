@@ -51,6 +51,7 @@ fig = plot_heatmap(x, y, U; colorscale = "viridis", equalar = true,
 θ = range(0, 2π; length = 100)
 plot_scatter!(fig, 2 .* cos.(θ), 2 .* sin.(θ); color = "red", legend = "\$r = 2\$")
 plot_scatter!(fig, [-4, 4], [-2, 2]; dash = "dash", color = "white", legend = "cut")
+set_legend!(fig; position = :topleft)
 ```
 
 ## Radial sine contour
