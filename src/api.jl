@@ -8162,7 +8162,8 @@ _stats_trace_on(fields, xref::AbstractString, yref::AbstractString) =
 # task cannot change the cell in between. An explicit `barmode` that changes
 # the layout of bars on other axes (plotly's bar mode is one figure-wide
 # setting; unset means plotly's "group") is reported with one warning after the
-# call succeeds.
+# call succeeds, when some other axes hold two or more bar-like traces (the
+# only bars a mode change moves).
 function _stats_subplot_delegate!(
 	sf::SubplotFigure,
 	mutator,
@@ -8185,15 +8186,22 @@ function _stats_subplot_delegate!(
 			who = who,
 		)
 		cell_traces = Any[]
-		others_barlike = false
+		# Bar-like traces on the OTHER axes, counted per axis pair: plotly.js
+		# positions bars per subplot (one x/y pair; a twin y is its own pair), so
+		# the bar mode only re-arranges a pair that holds two or more of them. A
+		# single series per pair is drawn the same in every mode. Hidden traces
+		# are counted too, which errs towards warning.
+		others_bars = Dict{Tuple{String, String}, Int}()
 		for trace in root.data
 			fields = trace.fields
 			if target.kind === :xy && _stats_trace_on(fields, target.xref, target.yref)
 				push!(cell_traces, fields)
-			else
-				others_barlike |= _stats_is_barlike(trace)
+			elseif _stats_is_barlike(trace)
+				pair = (string(get(fields, :xaxis, "x")), string(get(fields, :yaxis, "y")))
+				others_bars[pair] = get(others_bars, pair, 0) + 1
 			end
 		end
+		others_grouped = any(count -> count >= 2, Base.values(others_bars))
 		root_barmode = get(root.layout.fields, :barmode, nothing)
 		context = _StatsCellContext(root_barmode, cell_traces)
 		result = Base.ScopedValues.with(_STATS_SUBPLOT_CELL => context) do
@@ -8219,7 +8227,7 @@ function _stats_subplot_delegate!(
 		isempty(gaps) || relayout!(sf; gaps...)
 		requested = get(values(kwargs), :barmode, "")
 		current = root_barmode === nothing ? "group" : root_barmode
-		if others_barlike && requested isa AbstractString && !isempty(requested) &&
+		if others_grouped && requested isa AbstractString && !isempty(requested) &&
 			requested != current
 			@warn "$(who): `barmode = $(repr(requested))` replaces the figure-wide " *
 				"bar mode $(repr(current)) for the WHOLE figure: plotly has one " *
@@ -13964,8 +13972,9 @@ plot_stem!(fig, y::AbstractArray; kwargs...) =
 Append bar trace(s) to `fig`: a `Plot`, a [`SyncPlot`](@ref) or a
 [`SubplotFigure`](@ref) cell. Data conventions and keywords are those of
 [`plot_bar`](@ref) (including `orientation`, `barmode`, `error_x`/`error_y`,
-`text`, `textposition`, `texttemplate`, `base`, `opacity`, `hatch` and the
-tick keywords), with these differences:
+`text`, `textposition`, `texttemplate`, `base`, `opacity`, `hatch`, per-bar
+`color`, `barwidth`, `bargap`/`bargroupgap` and the tick keywords), with these
+differences:
 - `grid::Union{Nothing,Bool,Symbol} = nothing` leaves the grid unchanged; any
   other value (also `true`) is applied.
 - `show` is not accepted (`ArgumentError`); display the figure instead.
@@ -13975,7 +13984,7 @@ tick keywords), with these differences:
   apply to those axes. `title`, `width` and `height` are figure-wide and are
   ignored there with a warning, and `barmode` (a single figure-wide plotly
   setting) applies to every cell, with one warning when it re-arranges bars
-  already in other cells.
+  already in other cells; `bargap`/`bargroupgap` are figure-wide as well.
 - On a `Plot`/`SyncPlot`, `secondary_y = true` draws on a secondary y axis on
   the right, created on first use (`ylabel`, `yscale`, `yrange`, `yticks`,
   ... then apply to it). Plotly positions the bars of each y axis

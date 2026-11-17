@@ -1339,3 +1339,25 @@ end
 	# `base` starts the bars at a given value instead.
 	@test _st_trace(plot_bar([1.0, 2]; yscale = "log", base = 0.5))[:base] == 0.5
 end
+
+@testset "stats: the barmode warning names only bars a mode change moves (C29, G79)" begin
+	# One per-bar coloured series in the other cell is drawn the same in every
+	# bar mode: no warning (the per-bar highlight of G79 next to a stack).
+	sf = subplots(1, 2; sync = false)
+	plot_bar!(sf, [3.0, 2, 1]; color = ["grey", "grey", "blue"], row = 1, col = 1)
+	@test_logs plot_bar!(sf, ["a", "b"], [[1, 2], [3, 4]]; barmode = "stack", row = 1, col = 2)
+	@test _st_layout(sf.plot)[:barmode] == "stack"
+	# A primary-axis series and a twin-axis series are positioned per axis
+	# pair, so they are not re-arranged either ...
+	twin = subplots(1, 2; sync = false, specs = [PlotlySupply.Spec(secondary_y = true) PlotlySupply.Spec()])
+	plot_bar!(twin, [1.0, 2]; row = 1, col = 1)
+	plot_bar!(twin, [3.0, 4]; row = 1, col = 1, secondary_y = true)
+	@test _st_trace(twin.plot, 1)[:yaxis] != _st_trace(twin.plot, 2)[:yaxis]
+	@test_logs plot_bar!(twin, [1.0, 2]; barmode = "overlay", row = 1, col = 2)
+	# ... while two series on one axis pair are: one warning.
+	plot_histogram!(twin, randn(10); row = 1, col = 1)
+	@test_logs (:warn, r"figure-wide bar mode \"overlay\"") plot_bar!(
+		twin, [1.0, 2]; barmode = "stack", row = 1, col = 2,
+	)
+	@test _st_layout(twin.plot)[:barmode] == "stack"
+end

@@ -1460,3 +1460,54 @@ end
 	@test radial[:angle] == 70
 	@test radial[:dtick] == 0.5
 end
+
+@testset "oned families: the six tick keywords on every Cartesian constructor and mutator (G30)" begin
+	sample = collect(range(-2, 2; length = 40))
+	members = (
+		(plot_scatter, plot_scatter!, (1:3, [1.0, 2, 3])),
+		(plot_stem, plot_stem!, (1:3, [1.0, 2, 3])),
+		(plot_area, plot_area!, (1:3, [1.0, 2, 3])),
+		(plot_bar, plot_bar!, (1:3, [1.0, 2, 3])),
+		(plot_histogram, plot_histogram!, (sample,)),
+		(plot_box, plot_box!, (sample,)),
+		(plot_violin, plot_violin!, (sample,)),
+		(plot_histogram2d, plot_histogram2d!, (sample, reverse(sample))),
+		(plot_band, plot_band!, (1:3, [0.0, 0, 0], [1.0, 2, 3])),
+		(plot_segments, plot_segments!, ([0.0], [0.0], [1.0], [1.0])),
+		(plot_vlines, plot_vlines!, ([1.0, 2], 0.0, 1.0)),
+		(plot_hlines, plot_hlines!, ([1.0, 2], 0.0, 1.0)),
+		(plot_ecdf, plot_ecdf!, (sample,)),
+		(plot_kde, plot_kde!, (sample,)),
+		(plot_complex, plot_complex!, ([1 + 1im, 2 - 1im],)),
+	)
+	ticks = (xticks = [1, 2, 3], xticklabels = ["a", "b", "c"], yticks = [0, 1, 2], yticklabels = ["p", "q", "r"])
+	formats = (xtickformat = ".1f", ytickformat = ".2f")
+	ticks_set(fig, xkey, ykey) =
+		_rsc_axis(fig, xkey)[:tickvals] == [1, 2, 3] && _rsc_axis(fig, xkey)[:ticktext] == ["a", "b", "c"] &&
+		_rsc_axis(fig, ykey)[:tickvals] == [0, 1, 2] && _rsc_axis(fig, ykey)[:ticktext] == ["p", "q", "r"]
+	formats_set(fig, xkey, ykey) =
+		_rsc_axis(fig, xkey)[:tickformat] == ".1f" && _rsc_axis(fig, ykey)[:tickformat] == ".2f"
+	for (build, mutate!, args) in members
+		name = string(nameof(build))
+		@test ticks_set(build(args...; ticks...), :xaxis, :yaxis)
+		@test formats_set(build(args...; formats...), :xaxis, :yaxis)
+		fig = build(args...)
+		@test mutate!(fig, args...; ticks...) === nothing
+		@test ticks_set(fig, :xaxis, :yaxis)
+		mutate!(fig, args...; formats...)
+		@test formats_set(fig, :xaxis, :yaxis)
+		sf = subplots(1, 2; sync = false)
+		mutate!(sf, args...; row = 1, col = 2, ticks...)
+		mutate!(sf, args...; row = 1, col = 2, formats...)
+		@test ticks_set(sf.plot, :xaxis2, :yaxis2) && formats_set(sf.plot, :xaxis2, :yaxis2)
+		@test !haskey(_rsc_axis_or_empty(sf.plot, :xaxis), :tickvals)
+		# A label count that does not match the values is rejected up front.
+		err = try
+			build(args...; xticks = [1, 2], xticklabels = ["a"])
+			nothing
+		catch caught
+			caught
+		end
+		@test err isa ArgumentError && startswith(err.msg, name * ":")
+	end
+end
