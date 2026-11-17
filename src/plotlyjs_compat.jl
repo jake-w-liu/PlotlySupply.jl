@@ -2372,50 +2372,73 @@ add_recession_bands!
 
 # ── Layout object updaters ──────────────────────────────────────────
 
-for (fn, objs, desc) in (
-	(:update_xaxes!, "`xaxis`", "x-axis"),
-	(:update_yaxes!, "`yaxis`", "y-axis"),
-	(:update_polars!, "`polar`", "polar"),
-	(:update_scenes!, "`scene`", "3D scene"),
-	(:update_ternaries!, "`ternary`", "ternary"),
-	(:update_geos!, "`geo`", "geographic"),
-	(:update_mapboxes!, "`mapbox`", "mapbox"),
+# The layout objects of one family are `name`, `name2`, `name3`, … (plotly's
+# subplot ids); the generated text spells them as separate code spans so the
+# number is part of the name (`scene2`), not glued after a closing backtick.
+for (fn, name, desc) in (
+	(:update_xaxes!, "xaxis", "x-axis"),
+	(:update_yaxes!, "yaxis", "y-axis"),
+	(:update_polars!, "polar", "polar"),
+	(:update_scenes!, "scene", "3D scene"),
+	(:update_ternaries!, "ternary", "ternary"),
+	(:update_geos!, "geo", "geographic"),
+	(:update_mapboxes!, "mapbox", "mapbox"),
 )
-	subplot_note = if fn in (:update_xaxes!, :update_yaxes!, :update_polars!)
-		"On a [`SubplotFigure`](@ref) the update is applied to the whole " *
-		"figure (every $(desc) object, not just the active cell) and `sf` is returned."
-	elseif fn in (:update_geos!, :update_mapboxes!)
-		"On a [`SubplotFigure`](@ref) it also accepts `row`/`col` (given " *
-		"together) to update only that cell's $(objs) object, and returns `sf`."
+	subplot_note = if fn in (:update_geos!, :update_mapboxes!)
+		"On a [`SubplotFigure`](@ref) `sf` the update applies to the `$(name)` " *
+		"object of ONE cell: the cell given by `row`/`col` (pass both) or, " *
+		"without them, the active cell, which then becomes the active cell; " *
+		"call it on `sf.fig` to update every `$(name)` object of the grid. " *
+		"Returns `sf`."
 	else
-		"It has no `SubplotFigure` method; update `sf.fig` instead."
+		secondary = fn === :update_yaxes! ?
+			" (`secondary_y = true`: its secondary y axis)" : ""
+		"On a [`SubplotFigure`](@ref) `sf`, without `row`/`col` every " *
+		"`$(name)` object of the figure is updated (the active cell is " *
+		"unchanged); with `row` and `col` (pass both) only that cell's " *
+		"`$(name)` object$(secondary) is updated and the cell becomes the " *
+		"active cell. Returns `sf`."
 	end
 	doc = """
 		$(fn)(p, with::PlotlyAttribute = attr(); kwargs...)
+		$(fn)(sf::SubplotFigure, with::PlotlyAttribute = attr(); row = nothing, col = nothing, kwargs...)
 
-	Merge the attribute update `with` and `kwargs` into every $(objs)-family
-	layout object ($(objs), $(objs)2, …) of the $(desc) subplots in `p`, which
-	may be a `Plot`, `Layout` or [`SyncPlot`](@ref) (a `SyncPlot` is redrawn in
-	one renderer transaction). Returns the updated `p`.
-	$(subplot_note)
+	Merge the attribute update `with` and `kwargs` (Plotly attributes of the
+	object, nested ones with underscores: `title_text = "t"`) into every
+	$(desc) layout object (`$(name)`, `$(name)2`, `$(name)3`, …) of `p`, which
+	may be a `Plot`, a `Layout` or a [`SyncPlot`](@ref) (a `SyncPlot` is redrawn
+	in one renderer transaction). Returns `p`. `row`/`col` select a cell only
+	on a `SubplotFigure`.
+
+	$(subplot_note) A cell of another kind is an `ArgumentError`, and the
+	figure is left unchanged. See the `SubplotFigure` method's own
+	documentation for the details.
 	"""
 	@eval @doc $doc $fn
 end
 
-for (fn, objs) in (
-	(:update_annotations!, "`annotations`"),
-	(:update_images!, "`images`"),
-	(:update_shapes!, "`shapes`"),
+for (fn, name) in (
+	(:update_annotations!, "annotations"),
+	(:update_images!, "images"),
+	(:update_shapes!, "shapes"),
 )
 	doc = """
 		$(fn)(p::Union{Plot,SyncPlot}, with::PlotlyAttribute = attr(); kwargs...)
 		$(fn)(layout::Layout, with::PlotlyAttribute; kwargs...)
+		$(fn)(sf::SubplotFigure, with::PlotlyAttribute = attr(); row = nothing, col = nothing, kwargs...)
 
 	Merge the attribute update `with` and `kwargs` into every entry of the
-	$(objs) layout array of `p` (a [`SyncPlot`](@ref) is redrawn in one renderer
-	transaction) and return `p`. On a bare `Layout` the `with` argument is
-	required and the call returns `nothing`. It has no `SubplotFigure` method;
-	update `sf.fig` instead.
+	`$(name)` layout array of `p` (a [`SyncPlot`](@ref) is redrawn in one
+	renderer transaction) and return `p`. On a bare `Layout` the `with`
+	argument is required and the call returns `nothing`. `row`/`col` select a
+	cell only on a `SubplotFigure`.
+
+	On a [`SubplotFigure`](@ref) `sf`, without `row`/`col` every entry is
+	updated; with `row` and `col` (pass both) only the entries placed on that
+	Cartesian cell's axes (`xref` and `yref` both name one of them) are updated
+	and the cell becomes the active cell; a non-Cartesian cell is an
+	`ArgumentError`. Returns `sf`. See the `SubplotFigure` method's own
+	documentation for the details.
 	"""
 	@eval @doc $doc $fn
 end
