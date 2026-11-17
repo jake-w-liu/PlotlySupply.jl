@@ -899,7 +899,8 @@ end
 		# The legend box stays inside the host cell.
 		legend2 = _rsp_fields(_rsp_layout(sf)[:legend2])
 		@test legend2[:x] <= _rsp_axis(sf, :xaxis2)[:domain][2]
-		@test legend2[:xanchor] == "right"
+		# Y17: the rising host line and the inset fill the top right; the legend takes the free top left.
+		@test legend2[:xanchor] == "left" && legend2[:x] >= _rsp_axis(sf, :xaxis2)[:domain][1]
 
 		# Inset in a non-(1, 1) cell of a 2 × 2 grid, before any host trace.
 		grid = subplots(2, 2; sync=false)
