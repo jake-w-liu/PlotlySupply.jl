@@ -13808,11 +13808,10 @@ _extended_final_axis_type(fig, key::Symbol, scale::AbstractString) =
 
 # A SubplotFigure mutator runs the Plot mutator on an empty staging figure,
 # which cannot see the target cell's axes. These are the (x, y) axis types of
-# that cell ("-" for both when it is not a Cartesian cell; the delegate then
-# rejects the trace), so the cell's log axes can be checked up front.
-# Current types of the x and y axes a SubplotFigure mutator draws on: the
-# cell's (secondary) axes, or inset `inset`'s axes. Validates `row`/`col`/
-# `inset`/`secondary_y` like the delegate does.
+# the axes the trace will be drawn on, the cell's (secondary y) axes or those
+# of inset `inset` ("-" for both when the cell is not Cartesian; the delegate
+# then rejects the trace), so their log axes can be checked up front.
+# `row`/`col`/`inset`/`secondary_y` are validated as the delegate does.
 function _extended_subplot_axis_types(
 	sf::SubplotFigure,
 	who::AbstractString;
