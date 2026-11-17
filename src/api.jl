@@ -3092,6 +3092,20 @@ with `plot_*!` get a colorbar next to their own cell (see
   for the default `start_cell="top-left"` its FIRST entry sizes the BOTTOM
   row; prefer `height_ratios`. Cell colorbars sit in the gap right of their
   cell, so widen `horizontal_spacing` when neighbouring cells crowd them.
+- Grid titles (`subplot_titles`, `column_titles` — one string per column —,
+  `row_titles` — one per row —, `x_title`, `y_title`) are text labels like
+  [`title!`](@ref): `\$…\$` math mixed with text keeps the text and `\\n`
+  breaks the line. `""` or `missing` leaves a cell untitled.
+- Shared axes (`shared_xaxes`, `shared_yaxes`: `true`, `"rows"`,
+  `"columns"`, `"all"`, as in plotly.py) form one `matches` group per
+  column/row/figure; plotly draws every axis of a group with the root's
+  range and type. Calls on any cell of a group act on the group: the axis
+  type (`xscale = "log"`), tick placement and tick-label format are copied
+  to every axis of the group, a range set on any cell (`xrange!`, the
+  `xrange` keyword, `update_xaxes!(sf; row, col, range)`) becomes the
+  group's range, and an axis title set on a cell whose tick labels are
+  hidden goes to the cell that shows the group's tick labels in that column
+  (x) or row (y). Secondary y axes are never part of a group.
 - `insets`: a vector of `PlotlyBase.Inset(cell=(row, col), kind, l, w, b, h)`
   whose cells lie in the grid. Cartesian insets (`kind="xy"`, the default)
   are registered like the ones [`inset!`](@ref) adds: ids `1, 2, …` in the
@@ -3604,10 +3618,14 @@ function _subplot_layout_vector_update_impl!(
 	end
 	items = get(p.layout.fields, vector_key, nothing)
 	if items isa AbstractVector
+		# `Shape` entries (PlotlyBase's `rect`/`line`/`hline`, the shape verbs)
+		# keep their attributes in `fields`, like `attr(...)` entries.
+		item_field(item, name) =
+			_cmn_mapping_get(item isa PlotlyBase.Shape ? item.fields : item, name)
 		selected = [
 			index for index in eachindex(items)
-			if _subplot_item_ref_matches(_cmn_mapping_get(items[index], :xref), xrefs) &&
-				_subplot_item_ref_matches(_cmn_mapping_get(items[index], :yref), yrefs)
+			if _subplot_item_ref_matches(item_field(items[index], :xref), xrefs) &&
+				_subplot_item_ref_matches(item_field(items[index], :yref), yrefs)
 		]
 		if !isempty(selected)
 			# Apply PlotlyBase's own merge to copies of the selected entries,
@@ -4223,9 +4241,15 @@ spacing, ratios and subplot titles, default template), insets added with
 [`inset!`](@ref) are dropped (the `subplots(...; insets)` ones belong to the
 grid and stay registered) and cell `(1, 1)` becomes active. A figure title or size set by
 `subplots(...; title, width, height)` is removed too. A live window is
-redrawn in one transaction. Returns `sf`.
+redrawn in one transaction. Returns `sf`. `purge!` acts on the whole figure:
+any keyword (`row`, `col`, `show`, ...) is an `ArgumentError`.
 """
-function PlotlyBase.purge!(sf::SubplotFigure)
+function PlotlyBase.purge!(sf::SubplotFigure; kwargs...)
+	_verb_reject_cell_keywords("purge!", kwargs; whole_figure = true)
+	isempty(kwargs) || throw(ArgumentError(
+		"purge!: unsupported keyword argument(s) " *
+		"$(join(("`$(k)`" for k in keys(kwargs)), ", ")); purge! takes only the figure.",
+	))
 	return _transactional_subplot_mutation!(
 		_subplot_purge_impl!,
 		sf,
@@ -6355,26 +6379,42 @@ function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_
 	return xkey, ykey
 end
 
-# `kind` is the subplot kind of the cell (:geo or :mapbox). MapLibre `map`
-# cells are updated by `_transactional_modern_map_subplot_update!`
-# (electron_backend.jl), which owns the alias-preserving map transaction.
+# The layout key of the `kind` (:geo, :mapbox or :map) object of cell
+# (row, col); an empty cell or a cell of another kind is an ArgumentError
+# naming `who`. MapLibre `map` cells are updated by
+# `_transactional_modern_map_subplot_update!` (electron_backend.jl), which owns
+# the alias-preserving map transaction; `update_maps!` only checks the cell here.
 function _subplot_geographic_layout_key(
 	sf::SubplotFigure,
 	row::Int,
 	col::Int,
-	kind::Symbol,
+	kind::Symbol;
+	who::AbstractString = "SubplotFigure",
 )
-	kind in (:geo, :mapbox) || throw(ArgumentError(
-		"Unsupported geographic subplot kind `$kind`.",
+	kind in (:geo, :mapbox, :map) || throw(ArgumentError(
+		"$(who): unsupported geographic subplot kind `$kind`.",
 	))
 	expected_kind = String(kind)
-	target_ref = _subplot_target_ref(_plot_obj(sf.fig), row, col)
+	target_ref = _subplot_target_ref(_plot_obj(sf.fig), row, col; who = who)
 	actual_kind = String(target_ref.subplot_kind)
 	actual_kind == expected_kind || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) is '$actual_kind', " *
-		"not '$expected_kind'.",
+		"$(who): subplot cell ($(row), $(col)) is a '$actual_kind' cell, " *
+		"not a '$expected_kind' cell.",
 	))
 	return only(target_ref.layout_keys)
+end
+
+# Run `f()` so that an ArgumentError raised by a shared validator (whose
+# message names a Plotly family, such as "mapbox: zoom must be …") names the
+# public SubplotFigure function `who` instead. Errors that already start with
+# "`who`:" and other exception types pass through unchanged.
+function _subplot_name_errors(f, who::AbstractString)
+	try
+		return f()
+	catch err
+		(err isa ArgumentError && !startswith(err.msg, who * ":")) || rethrow()
+		throw(ArgumentError("$(who): $(err.msg)"))
+	end
 end
 
 function _subplot_geographic_update_impl!(
@@ -6386,8 +6426,9 @@ function _subplot_geographic_update_impl!(
 	col::Union{Nothing,Integer} = nothing,
 	kwargs...,
 )
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
-	key = _subplot_geographic_layout_key(sf, r, c, kind)
+	who = String(nameof(updater))
+	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = who)
+	key = _subplot_geographic_layout_key(sf, r, c, kind; who = who)
 	layout = _plot_layout(sf.fig)
 	temporary = Layout()
 	existing = get(layout.fields, key, nothing)
@@ -6395,8 +6436,10 @@ function _subplot_geographic_update_impl!(
 	# Plotly's "all defaults"; update it like an empty object.
 	temporary.fields[kind] =
 		existing === nothing ? attr() : deepcopy(existing)
-	updater(temporary, with; kwargs...)
-	kind === :mapbox && _require_valid_mapbox_layouts(temporary)
+	_subplot_name_errors(who) do
+		updater(temporary, with; kwargs...)
+		kind === :mapbox && _require_valid_mapbox_layouts(temporary)
+	end
 	_merge_layout_attr!(
 		layout,
 		key,
@@ -6560,13 +6603,22 @@ function update_maps!(
 	kwargs...,
 )
 	_warn_ignored_subplot_domain("update_maps!", with, kwargs)
-	return _transactional_modern_map_subplot_update!(
-		sf,
-		with;
-		row = row,
-		col = col,
-		kwargs...,
-	)
+	# Resolve and check the cell under the (reentrant) metadata lock, so the
+	# errors name `update_maps!` and the cell cannot change before the
+	# transaction runs.
+	return lock(getfield(sf, :_lock)) do
+		r, c = _resolve_subplot_cell(sf; row = row, col = col, who = "update_maps!")
+		_subplot_geographic_layout_key(sf, r, c, :map; who = "update_maps!")
+		_subplot_name_errors("update_maps!") do
+			_transactional_modern_map_subplot_update!(
+				sf,
+				with;
+				row = r,
+				col = c,
+				kwargs...,
+			)
+		end
+	end
 end
 
 function _subplot_xlabel_impl!(
@@ -21178,10 +21230,11 @@ function _subplot_mapbox_cell_style(
 	sf::SubplotFigure,
 	row,
 	col,
-	style,
+	style;
+	who::AbstractString = "SubplotFigure",
 )
 	style === nothing || return style
-	r, c = _resolve_subplot_cell(sf; row = row, col = col)
+	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = who)
 	p = _plot_obj(getfield(sf, :fig))
 	grid_ref = p.layout.subplots.grid_ref
 	(isassigned(grid_ref, r, c) && !isempty(grid_ref[r, c])) ||
@@ -21213,7 +21266,17 @@ function _subplot_mapbox_delegate!(
 			args...;
 			row = row,
 			col = col,
-			style = _subplot_mapbox_cell_style(sf, row, col, style),
+			style = _subplot_mapbox_cell_style(
+				sf,
+				row,
+				col,
+				style;
+				who = _subplot_delegate_who(
+					mutator,
+					get(kwargs, :delegate_who, nothing),
+					kwargs,
+				),
+			),
 			kwargs...,
 		)
 	end
