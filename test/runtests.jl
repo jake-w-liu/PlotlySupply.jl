@@ -5100,4 +5100,5 @@ end
     include("mutator_parity.jl")
     include("renderer_transactions.jl")
     include("modern_maps.jl")
+    include("mathjax_compat_asset.jl")
 end

@@ -153,7 +153,8 @@ function _savefig_html(io::IO, p::Plot)
 		include_plotlyjs = "cdn",
 		full_html = true,
 	)
-	write(io, _inject_mathjax_svg_font(String(take!(buf))))
+	html = _inject_mathjax_svg_font(String(take!(buf)))
+	write(io, _inline_compatible_plotlyjs(html))
 	return nothing
 end
 
@@ -802,7 +803,10 @@ vector. When a `filename` is given and `format` is `nothing`, the format is
 inferred from the extension (defaulting to `png`).
 
 Supported formats: `"png"`, `"jpeg"`, `"svg"`, `"pdf"`, `"html"`, `"json"`.
-`html` and `json` are produced in-process and need no external dependency;
+`html` and `json` are serialized in-process. HTML files embed the bundled
+Plotly.js renderer used by desktop plots and image exports; mathematical
+text loads MathJax from its CDN when the file is opened. Direct
+`PlotlyBase.show` HTML display retains its own renderer options.
 `png`/`jpeg`/`svg`/`pdf` are rendered through PlotlySupply's internal Electron
 export window (so they require a working Electron, but no Kaleido/Python).
 

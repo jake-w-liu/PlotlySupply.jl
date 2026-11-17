@@ -18,6 +18,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
 
         asset = PlotlySupply._plotlyjs_asset_path()
         asset_uri = PlotlySupply._plotlyjs_asset_uri()
+        render_uri = PlotlySupply._plotlyjs_render_asset_uri()
         @test isfile(asset)
         @test filesize(asset) > 4_000_000
         @test startswith(asset_uri, "file://")
@@ -34,7 +35,8 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
         export_html =
             PlotlySupply._export_window_html("modern-map-export")
         for html in (sync_html, export_html)
-            @test occursin(asset_uri, html)
+            @test occursin(render_uri, html)
+            @test !occursin(asset_uri, html)
             @test !occursin(PlotlySupply._PLOTLY_CDN_URL, html)
         end
 
@@ -56,11 +58,10 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
         saved = IOBuffer()
         PlotlySupply._savefig_html(saved, figure)
         saved_html = String(take!(saved))
+        @test occursin("<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\"></script>", shown_html)
+        @test !occursin("<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\"></script>", saved_html)
+        @test occursin(PlotlySupply._PLOTLYJS_MATH_FONT_REPLACEMENT, saved_html)
         for html in (shown_html, saved_html)
-            @test occursin(
-                "https://cdn.plot.ly/plotly-2.35.2.min.js",
-                html,
-            )
             @test !occursin("plotly-2.33.0", html)
             @test occursin("\"type\":\"scattermap\"", html)
             @test occursin("\"map\"", html)

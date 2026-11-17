@@ -200,7 +200,7 @@ function _syncplot_html(
 	autoplay::Bool,
 	timeout_s::Float64,
 )
-	plotlyjs_uri = _plotlyjs_asset_uri()
+	plotlyjs_uri = _plotlyjs_render_asset_uri()
 	divid_js = _json_js(divid)
 	autoplay_js = autoplay ? "true" : "false"
 	timeout_ms = timeout_s * 1_000
@@ -8942,7 +8942,7 @@ function _inject_mathjax_svg_font(html::AbstractString)
 end
 
 function _export_window_html(divid::String)
-	plotlyjs_uri = _plotlyjs_asset_uri()
+	plotlyjs_uri = _plotlyjs_render_asset_uri()
 	mathjax_config = _mathjax_config_script()
 	return """
 <!doctype html>
