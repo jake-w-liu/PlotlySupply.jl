@@ -205,6 +205,8 @@ end
         order = _test_files_in_run_order(testdir)
         @test sort(order) == filter(name -> !(name in ("runtests.jl", "testutils.jl")), files)
         @test allunique(order)
+        # every file listed to run first exists (a renamed or removed one would be skipped)
+        @test isempty(filter(!in(files), collect(_TEST_FILES_RUN_FIRST)))
         @test order[1:length(_TEST_FILES_RUN_FIRST)] == collect(_TEST_FILES_RUN_FIRST)
         mktempdir() do dir
             for name in ("zz_new.jl", "a_new.jl", "runtests.jl", "testutils.jl", "notes.md", _TEST_FILES_RUN_FIRST...)
@@ -212,9 +214,9 @@ end
             end
             mkdir(joinpath(dir, "fixtures.jl"))
             @test _test_files_in_run_order(dir) == [_TEST_FILES_RUN_FIRST..., "a_new.jl", "zz_new.jl"]
-            rm(joinpath(dir, "hygiene.jl"))
-            @test_throws ArgumentError("_test_files_in_run_order: listed in _TEST_FILES_RUN_FIRST " *
-                "but not in $dir: hygiene.jl") _test_files_in_run_order(dir)
+            rm(joinpath(dir, "nested_series.jl"))
+            @test _test_files_in_run_order(dir) ==
+                [filter(!=("nested_series.jl"), collect(_TEST_FILES_RUN_FIRST))..., "a_new.jl", "zz_new.jl"]
         end
 
         # runtests.jl includes that list, and no test file a second time.
