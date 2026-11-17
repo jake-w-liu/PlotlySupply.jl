@@ -238,8 +238,11 @@ end
 
 Update every MapLibre `layout.map`, `layout.map2`, ... object of `fig`, a
 `Layout`, `Plot` or `SyncPlot` (a figure without a map object gets
-`layout.map`). For one cell of a `SubplotFigure` see
-`update_maps!(sf::SubplotFigure; row, col, ...)`.
+`layout.map`). On a [`SubplotFigure`](@ref) `sf` the update applies to the
+`map` object of ONE cell, the cell given by `row`/`col` (pass both) or the
+active cell, and returns `sf`; call it on `sf.fig` to update every map cell
+(see `update_maps!(sf::SubplotFigure; row, col, ...)`). `row`/`col` select a
+cell only on a `SubplotFigure`.
 
 `with` and the keywords are Plotly `layout.map` attributes: `style` (a
 nonempty style name/URL or a nonempty MapLibre style object), `zoom`,

@@ -41,12 +41,13 @@ densitymap(fields::AbstractDict; kwargs...) =
 
 function _require_finite_map_number(
 	name::AbstractString,
-	value,
+	value;
+	who::AbstractString = "map",
 )
 	value === nothing && return nothing
 	valid = _is_finite_plotly_number(value)
 	valid || throw(ArgumentError(
-		"map: $name must be a finite JavaScript-representable real number, " *
+		"$who: $name must be a finite JavaScript-representable real number, " *
 		"not $(repr(value)).",
 	))
 	return nothing
@@ -55,14 +56,15 @@ end
 function _require_valid_map_view(
 	zoom,
 	center_lon,
-	center_lat,
+	center_lat;
+	who::AbstractString = "map",
 )
 	for (name, value) in (
 		("zoom", zoom),
 		("center_lon", center_lon),
 		("center_lat", center_lat),
 	)
-		_require_finite_map_number(name, value)
+		_require_finite_map_number(name, value; who = who)
 	end
 	return nothing
 end
@@ -84,33 +86,35 @@ end
 # A tile-map `style` (MapLibre `map` or legacy `mapbox` family) is `nothing`
 # (keep / plotly.js default), a nonempty style name or URL, or a nonempty
 # style object. An empty or blank name never finishes loading in plotly.js,
-# so it is rejected up front.
+# so it is rejected up front. `who` prefixes the errors (the public function
+# when called from a plotting function).
 function _require_valid_map_style(
 	style;
 	family::AbstractString = "map",
+	who::AbstractString = family,
 )
 	style === nothing && return nothing
 	object_name = family == "mapbox" ? "Mapbox" : "MapLibre"
 	if style isa AbstractString
 		isempty(strip(style)) && throw(ArgumentError(
-			"$family: style must be a nonempty named style or style URL.",
+			"$who: style must be a nonempty named style or style URL.",
 		))
 		return nothing
 	end
 	if style isa PlotlyBase.PlotlyAttribute
 		isempty(style.fields) && throw(ArgumentError(
-			"$family: a $object_name style object must not be empty.",
+			"$who: a $object_name style object must not be empty.",
 		))
 		return nothing
 	end
 	if style isa AbstractDict || style isa NamedTuple
 		isempty(style) && throw(ArgumentError(
-			"$family: a $object_name style object must not be empty.",
+			"$who: a $object_name style object must not be empty.",
 		))
 		return nothing
 	end
 	throw(ArgumentError(
-		"$family: style must be nothing, a nonempty string, or a " *
+		"$who: style must be nothing, a nonempty string, or a " *
 		"$object_name style object; got $(typeof(style)).",
 	))
 end
@@ -214,10 +218,11 @@ function _map_layout(
 	style,
 	zoom,
 	center_lon,
-	center_lat,
+	center_lat;
+	who::AbstractString = "map",
 )
-	_require_valid_map_view(zoom, center_lon, center_lat)
-	_require_valid_map_style(style)
+	_require_valid_map_view(zoom, center_lon, center_lat; who = who)
+	_require_valid_map_style(style; who = who)
 
 	map_options = Dict{Symbol,Any}()
 	style === nothing ||
@@ -262,11 +267,13 @@ end
 
 # Shared trace builder of choroplethmap (`kind = "choroplethmap"`) and the
 # legacy choroplethmapbox. Per-location marker vectors must match
-# `locations`: plotly.js silently reuses or drops entries otherwise.
+# `locations`: plotly.js silently reuses or drops entries otherwise. Errors
+# name `who`, the public function.
 function _choroplethmap_trace(
 	geojson,
 	locations::AbstractVector,
 	z::AbstractVector;
+	who::AbstractString,
 	kind::AbstractString = "choroplethmap",
 	constructor = choroplethmap,
 	featureidkey::AbstractString,
@@ -277,14 +284,21 @@ function _choroplethmap_trace(
 	legend::AbstractString,
 	trace_kwargs,
 )
-	_require_equal_geo_lengths(
+	_require_map_trace_keywords(
+		who,
 		kind,
+		trace_kwargs;
+		reserved = ("geojson", "locations", "z"),
+	)
+	_require_equal_geo_lengths(
+		who,
 		:locations => locations,
 		:z => z,
 	)
+	_require_nonempty_map_data(who, "locations", locations)
 	# plotly.js draws nothing (and reports no error) without usable GeoJSON.
 	_is_plotly_geojson(geojson) || throw(ArgumentError(
-		"$kind: `geojson` must be a GeoJSON object (Dict, attr or " *
+		"$who: `geojson` must be a GeoJSON object (Dict, attr or " *
 		"NamedTuple) or a nonempty URL string; got $(typeof(geojson)).",
 	))
 	for (name, value) in (
@@ -293,25 +307,26 @@ function _choroplethmap_trace(
 		("marker_opacity", marker_opacity),
 	)
 		_require_map_vector_length(
-			kind,
+			who,
 			name,
 			value,
 			length(locations),
 		)
 	end
 	marker_line_width === nothing || _require_bounded_numeric_option(
-		kind,
+		who,
 		"marker_line_width",
 		marker_line_width;
 		minimum = 0,
 	)
 	marker_opacity === nothing || _require_bounded_numeric_option(
-		kind,
+		who,
 		"marker_opacity",
 		marker_opacity;
 		minimum = 0,
 		maximum = 1,
 	)
+	name = _extended_label(legend, who, "legend")
 
 	kw = _trace_keyword_dict(trace_kwargs)
 	kw[:geojson] = geojson
@@ -319,8 +334,8 @@ function _choroplethmap_trace(
 	kw[:z] = z
 	isempty(featureidkey) ||
 		(kw[:featureidkey] = String(featureidkey))
-	_set_optional_colorscale!(kw, colorscale)
-	isempty(legend) || (kw[:name] = String(legend))
+	_set_optional_colorscale!(kw, colorscale; who = who)
+	isempty(name) || (kw[:name] = name)
 
 	marker = _symbol_dict(get(kw, :marker, nothing))
 	marker_changed = false
@@ -351,30 +366,34 @@ end
 # Shared trace builder of densitymap (`z` may be `nothing`: equal weights)
 # and the legacy densitymapbox. `radius` `nothing` or scalar `0` keeps the
 # plotly.js default; every emitted radius must satisfy the schema min of 1.
+# Errors name `who`, the public function.
 function _densitymap_trace(
 	lon::AbstractVector,
 	lat::AbstractVector,
 	z::Union{Nothing,AbstractVector};
+	who::AbstractString,
 	kind::AbstractString = "densitymap",
 	constructor = densitymap,
 	radius,
 	colorscale,
 	trace_kwargs,
 )
+	_require_map_trace_keywords(who, kind, trace_kwargs; reserved = ("lon", "lat", "z"))
 	if z === nothing
 		_require_equal_geo_lengths(
-			kind,
+			who,
 			:lon => lon,
 			:lat => lat,
 		)
 	else
 		_require_equal_geo_lengths(
-			kind,
+			who,
 			:lon => lon,
 			:lat => lat,
 			:z => z,
 		)
 	end
+	_require_nonempty_map_data(who, "lon", lon)
 
 	radius_is_default =
 		radius === nothing ||
@@ -383,9 +402,9 @@ function _densitymap_trace(
 			!(radius isa Bool) &&
 			radius == 0
 		)
-	_require_map_vector_length(kind, "radius", radius, length(lon))
+	_require_map_vector_length(who, "radius", radius, length(lon))
 	radius_is_default || _require_bounded_numeric_option(
-		kind,
+		who,
 		"radius",
 		radius;
 		minimum = 1,
@@ -396,7 +415,7 @@ function _densitymap_trace(
 	kw[:lat] = lat
 	z === nothing || (kw[:z] = z)
 	radius_is_default || (kw[:radius] = radius)
-	_set_optional_colorscale!(kw, colorscale)
+	_set_optional_colorscale!(kw, colorscale; who = who)
 	return constructor(; kw...)
 end
 
@@ -420,23 +439,27 @@ Scatter points (or lines) on a MapLibre-backed tile map at `(lon, lat)`
   coloured through `marker_colorscale`). `""`/`nothing` keeps the default.
 - `marker_size::Union{Nothing,Real,AbstractVector} = nothing`: marker size in
   pixels (≥ 0), scalar or one per point.
-- `legend::AbstractString = ""`: legend name of the trace.
+- `legend::AbstractString = ""`: legend name of the trace (mathtext).
 - `style = "open-street-map"`: a nonempty MapLibre style name
   (`"carto-positron"`, `"carto-darkmatter"`, `"white-bg"`, ...), style URL, or
   nonempty style object.
 - `zoom = 0`: initial zoom level (finite number).
 - `center_lon = nothing`, `center_lat = nothing`: initial map centre in
   degrees (`nothing` keeps plotly.js' automatic centre).
-- `title::AbstractString = ""`: figure title.
+- `title::AbstractString = ""`: figure title (mathtext, see `mathtext`).
 - `width::Real = 0`, `height::Real = 0`: figure size in pixels (0 = automatic,
   otherwise at least 10; rounded to whole pixels).
 - `fontsize::Real = 0`: global font size (0 = template default, otherwise ≥ 1).
 - `show::Bool = false`: open the figure in a window and return a `SyncPlot`.
-- `kwargs...`: further Plotly `scattermap` trace attributes.
+- `kwargs...`: further plotly.js `scattermap` trace attributes, nested ones
+  written with underscores (`marker_opacity`, `hovertemplate`, ...). A name
+  that is not a `scattermap` attribute of the bundled plotly.js throws
+  `ArgumentError`, as do the positional `lon`/`lat` given again.
 
-Throws `ArgumentError` for mismatched lengths (including per-point `color`
-or `marker_size` vectors), negative sizes, an empty or invalid `style`,
-non-finite view values, or invalid figure sizes.
+Throws `ArgumentError` for empty or mismatched coordinates (including
+per-point `color` or `marker_size` vectors), negative sizes, an empty or
+invalid `style`, non-finite view values, unknown keywords, or invalid figure
+sizes.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -464,19 +487,21 @@ function plot_scattermap(
 	show::Bool = false,
 	kwargs...,
 )
+	who = "plot_scattermap"
 	options = _geo_figure_options(
-		"plot_scattermap";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	layout = _map_layout(style, zoom, center_lon, center_lat)
+	layout = _map_layout(style, zoom, center_lon, center_lat; who = who)
 	trace = _geo_scatter_trace(
 		"scattermap",
 		scattermap,
 		lon,
 		lat;
+		who = who,
 		mode = mode,
 		color = color,
 		marker_size = marker_size,
@@ -539,20 +564,23 @@ function plot_scattermap!(
 	fontsize::Real = 0,
 	kwargs...,
 )
+	who = "plot_scattermap!"
+	_map_mutator_guard(who, kwargs)
 	options = _geo_figure_options(
-		"plot_scattermap!";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	_require_valid_map_view(zoom, center_lon, center_lat)
-	_require_valid_map_style(style)
+	_require_valid_map_view(zoom, center_lon, center_lat; who = who)
+	_require_valid_map_style(style; who = who)
 	trace = _geo_scatter_trace(
 		"scattermap",
 		scattermap,
 		lon,
 		lat;
+		who = who,
 		mode = mode,
 		color = color,
 		marker_size = marker_size,
@@ -590,23 +618,24 @@ Shade GeoJSON features on a MapLibre-backed tile map.
 # Keywords
 - `featureidkey::AbstractString = ""`: feature property matched by
   `locations` (`""` = plotly.js default `"id"`), e.g. `"properties.name"`.
-- `colorscale::Union{AbstractString,AbstractVector} = ""`: Plotly colorscale
-  name or `[[t, color], ...]` stops; `""` keeps the default.
+- `colorscale = ""`: colormap name, colour vector, stops or `ColorScheme`, as
+  for [`plot_choropleth`](@ref); `""` keeps the default.
 - `marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing`:
   boundary colour, scalar or one per location.
 - `marker_line_width::Union{Nothing,Real,AbstractVector} = nothing`: boundary
   width in pixels (≥ 0), scalar or one per location.
 - `marker_opacity::Union{Nothing,Real,AbstractVector} = nothing`: fill opacity
   in [0, 1], scalar or one per location.
-- `legend::AbstractString = ""`: legend name of the trace.
+- `legend::AbstractString = ""`: legend name of the trace (mathtext).
 - `style`, `zoom`, `center_lon`, `center_lat`: map view, as for
   [`plot_scattermap`](@ref).
 - `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_scattermap`](@ref).
-- `kwargs...`: further Plotly `choroplethmap` trace attributes.
+- `kwargs...`: further plotly.js `choroplethmap` trace attributes; unknown
+  names throw, as for [`plot_scattermap`](@ref).
 
-Throws `ArgumentError` for an invalid `geojson`, mismatched lengths
-(including per-location marker vectors), out-of-range marker values, and
-invalid map-view or size values.
+Throws `ArgumentError` for an invalid `geojson`, empty or mismatched
+`locations`/`z` (including per-location marker vectors), out-of-range marker
+values, unknown keywords, and invalid map-view or size values.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -624,7 +653,7 @@ function plot_choroplethmap(
 	locations::AbstractVector,
 	z::AbstractVector;
 	featureidkey::AbstractString = "",
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing,
 	marker_line_width::Union{Nothing,Real,AbstractVector} = nothing,
 	marker_opacity::Union{Nothing,Real,AbstractVector} = nothing,
@@ -640,18 +669,20 @@ function plot_choroplethmap(
 	show::Bool = false,
 	kwargs...,
 )
+	who = "plot_choroplethmap"
 	options = _geo_figure_options(
-		"plot_choroplethmap";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	layout = _map_layout(style, zoom, center_lon, center_lat)
+	layout = _map_layout(style, zoom, center_lon, center_lat; who = who)
 	trace = _choroplethmap_trace(
 		geojson,
 		locations,
 		z;
+		who = who,
 		featureidkey = featureidkey,
 		colorscale = colorscale,
 		marker_line_color = marker_line_color,
@@ -701,7 +732,7 @@ function plot_choroplethmap!(
 	locations::AbstractVector,
 	z::AbstractVector;
 	featureidkey::AbstractString = "",
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing,
 	marker_line_width::Union{Nothing,Real,AbstractVector} = nothing,
 	marker_opacity::Union{Nothing,Real,AbstractVector} = nothing,
@@ -716,19 +747,22 @@ function plot_choroplethmap!(
 	fontsize::Real = 0,
 	kwargs...,
 )
+	who = "plot_choroplethmap!"
+	_map_mutator_guard(who, kwargs)
 	options = _geo_figure_options(
-		"plot_choroplethmap!";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	_require_valid_map_view(zoom, center_lon, center_lat)
-	_require_valid_map_style(style)
+	_require_valid_map_view(zoom, center_lon, center_lat; who = who)
+	_require_valid_map_style(style; who = who)
 	trace = _choroplethmap_trace(
 		geojson,
 		locations,
 		z;
+		who = who,
 		featureidkey = featureidkey,
 		colorscale = colorscale,
 		marker_line_color = marker_line_color,
@@ -767,14 +801,17 @@ tile map.
 - `radius::Union{Nothing,Real,AbstractVector} = nothing`: influence radius of
   each point in pixels, scalar or one per point, each ≥ 1. `nothing` (or `0`)
   keeps plotly.js' default.
-- `colorscale::Union{AbstractString,AbstractVector} = ""`: colorscale name or stops.
+- `colorscale = ""`: colormap name, colour vector, stops or `ColorScheme`, as
+  for [`plot_choropleth`](@ref).
 - `style`, `zoom`, `center_lon`, `center_lat`: map view, as for
   [`plot_scattermap`](@ref).
 - `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_scattermap`](@ref).
-- `kwargs...`: further Plotly `densitymap` trace attributes.
+- `kwargs...`: further plotly.js `densitymap` trace attributes; unknown names
+  throw, as for [`plot_scattermap`](@ref).
 
-Throws `ArgumentError` for mismatched lengths (including a per-point
-`radius`), radii below 1 and invalid map-view or size values.
+Throws `ArgumentError` for empty or mismatched coordinates (including a
+per-point `radius`), radii below 1, unknown keywords and invalid map-view or
+size values.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -788,7 +825,7 @@ function plot_densitymap(
 	lat::AbstractVector,
 	z::Union{Nothing,AbstractVector} = nothing;
 	radius::Union{Nothing,Real,AbstractVector} = nothing,
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	style = "open-street-map",
 	zoom = 0,
 	center_lon = nothing,
@@ -800,18 +837,20 @@ function plot_densitymap(
 	show::Bool = false,
 	kwargs...,
 )
+	who = "plot_densitymap"
 	options = _geo_figure_options(
-		"plot_densitymap";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	layout = _map_layout(style, zoom, center_lon, center_lat)
+	layout = _map_layout(style, zoom, center_lon, center_lat; who = who)
 	trace = _densitymap_trace(
 		lon,
 		lat,
 		z;
+		who = who,
 		radius = radius,
 		colorscale = colorscale,
 		trace_kwargs = kwargs,
@@ -855,7 +894,7 @@ function plot_densitymap!(
 	lat::AbstractVector,
 	z::Union{Nothing,AbstractVector} = nothing;
 	radius::Union{Nothing,Real,AbstractVector} = nothing,
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	style = nothing,
 	zoom = nothing,
 	center_lon = nothing,
@@ -866,19 +905,22 @@ function plot_densitymap!(
 	fontsize::Real = 0,
 	kwargs...,
 )
+	who = "plot_densitymap!"
+	_map_mutator_guard(who, kwargs)
 	options = _geo_figure_options(
-		"plot_densitymap!";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	_require_valid_map_view(zoom, center_lon, center_lat)
-	_require_valid_map_style(style)
+	_require_valid_map_view(zoom, center_lon, center_lat; who = who)
+	_require_valid_map_style(style; who = who)
 	trace = _densitymap_trace(
 		lon,
 		lat,
 		z;
+		who = who,
 		radius = radius,
 		colorscale = colorscale,
 		trace_kwargs = kwargs,

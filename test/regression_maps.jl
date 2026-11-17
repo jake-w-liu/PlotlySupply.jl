@@ -413,3 +413,236 @@ _reg_annotations(fig) = [
 		@test length(p.data) == 2
 	end
 end
+
+# `f()` throws an ArgumentError whose message contains `needle`.
+function _reg_map_throws(f, needle::AbstractString)
+	try
+		f()
+	catch err
+		err isa ArgumentError || return false
+		return occursin(needle, err.msg)
+	end
+	return false
+end
+
+# A call that throws leaves the figure exactly as it was.
+function _reg_map_atomic(fig, f, needle::AbstractString)
+	before = json(fig)
+	return _reg_map_throws(f, needle) && json(fig) == before
+end
+
+# Nested layout value as plain Dicts (PlotlyAttribute compares by identity).
+_reg_plain(value) =
+	value isa Union{PlotlyBase.PlotlyAttribute, AbstractDict} ?
+	Dict{Symbol, Any}(Symbol(key) => _reg_plain(item) for (key, item) in pairs(_reg_fields(value))) :
+	value
+
+@testset "regression: maps, v3 consistency" begin
+	# (constructor, mutator, data (ranges and views), empty data, cell kind,
+	#  name of the empty argument, the trace's subplot key)
+	map_cases = (
+		(plot_choropleth, plot_choropleth!, (["France", "Spain"], 1:2), (String[], Float64[]), "geo", "locations", :geo),
+		(plot_scattergeo, plot_scattergeo!, (1:2, view([1.0, 2.0], :)), (Float64[], Float64[]), "geo", "lon", :geo),
+		(plot_scattermapbox, plot_scattermapbox!, (1:2, [1.0, 2.0]), (Float64[], Float64[]), "mapbox", "lon", :subplot),
+		(plot_choroplethmapbox, plot_choroplethmapbox!, (_REG_MAP_SQUARE, ["A"], 1:1), (_REG_MAP_SQUARE, String[], Float64[]), "mapbox", "locations", :subplot),
+		(plot_densitymapbox, plot_densitymapbox!, (1:2, [1.0, 2.0], 1:2), (Float64[], Float64[], Float64[]), "mapbox", "lon", :subplot),
+		(plot_scattermap, plot_scattermap!, (1:2, view([1.0, 2.0], :)), (Float64[], Float64[]), "map", "lon", :subplot),
+		(plot_choroplethmap, plot_choroplethmap!, (_REG_MAP_SQUARE, ["A"], 1:1), (_REG_MAP_SQUARE, String[], Float64[]), "map", "locations", :subplot),
+		(plot_densitymap, plot_densitymap!, (1:2, [1.0, 2.0]), (Float64[], Float64[]), "map", "lon", :subplot),
+	)
+
+	@testset "figure options go through the D7 primitives (X14)" begin
+		title = L"Map $\alpha$"
+		for (ctor, _, data) in map_cases
+			fig = ctor(data...; title = title, width = 600.4, height = 400, fontsize = 12)
+			layout = _reg_layout(fig)
+			# The title used to be stored raw, so plotly drew the `$` signs.
+			@test _reg_fields(layout[:title])[:text] == PlotlySupply._label(title)
+			@test layout[:width] === 600
+			@test layout[:height] === 400
+			@test _reg_fields(layout[:font])[:size] == 12
+		end
+		# Under a style with a margin the title gets the same fitted padding
+		# and automargin as every other chart's title (geo used to skip the
+		# fit), and an explicit fontsize still wins over the style's size.
+		with_style(:publication) do
+			geo = plot_scattergeo([1.0], [2.0]; title = "Pub", fontsize = 20)
+			pie = plot_pie([1, 2]; title = "Pub", fontsize = 20)
+			@test _reg_plain(_reg_layout(geo)[:title]) == _reg_plain(_reg_layout(pie)[:title])
+			@test haskey(_reg_plain(_reg_layout(geo)[:title]), :pad)
+			@test _reg_fields(_reg_layout(geo)[:font])[:size] == 20
+		end
+		# Invalid titles and sizes name the public function and change nothing.
+		target = plot_scattermap([1.0], [2.0]; title = "A")
+		@test _reg_map_atomic(target, () -> plot_scattermap!(target, [3.0], [4.0]; title = "cost \$5"), "plot_scattermap!: `title`")
+		@test _reg_map_atomic(target, () -> plot_scattermap!(target, [3.0], [4.0]; width = 5), "plot_scattermap!: `width`")
+		@test _reg_map_throws(() -> plot_choropleth(["France"], [1.0]; fontsize = -1), "plot_choropleth: `fontsize`")
+	end
+
+	@testset "keywords, show, empty data and errors on every map function (consistency sweep)" begin
+		for (ctor, mut, data, empty, kind, first_name, subplot_key) in map_cases
+			who = String(nameof(ctor))
+			# Plotly trace attributes still pass through, nested ones with underscores.
+			fig = ctor(data...; hovertemplate = "%{lon}", hoverlabel_bgcolor = "white", legendgroup = "g")
+			trace = only(fig.data)
+			@test trace.fields[:hovertemplate] == "%{lon}"
+			@test _reg_fields(trace.fields[:hoverlabel])[:bgcolor] == "white"
+			@test trace.fields[:legendgroup] == "g"
+			for (call, needle) in (
+				(() -> ctor(data...; no_such_kw = 1), "$(who): unknown keyword `no_such_kw`"),
+				(() -> ctor(data...; xaxis_type = "log"), "$(who): unknown keyword `xaxis_type`"),
+				(() -> ctor(data...; type = "bar"), "$(who): keyword `type`"),
+				(() -> ctor(data...; Symbol(first_name) => [0]), "$(who): keyword `$(first_name)` sets the trace's"),
+				(() -> ctor(empty...), "$(who): `$(first_name)` is empty"),
+			)
+				@test _reg_map_throws(call, needle)
+			end
+
+			target = ctor(data...)
+			@test mut(target, data...; title = L"New $\beta$") === nothing
+			@test length(target.data) == 2
+			@test _reg_fields(_reg_layout(target)[:title])[:text] == PlotlySupply._label(L"New $\beta$")
+			for (call, needle) in (
+				# `show` and `row`/`col` used to become trace attributes.
+				(() -> mut(target, data...; show = true), "$(who)!: mutators do not take `show`"),
+				(() -> mut(target, data...; row = 1, col = 1), "$(who)!: `row`/`col` select a SubplotFigure cell"),
+				(() -> mut(target, data...; no_such_kw = 1), "$(who)!: unknown keyword `no_such_kw`"),
+				(() -> mut(target, empty...), "$(who)!: `$(first_name)` is empty"),
+			)
+				@test _reg_map_atomic(target, call, needle)
+			end
+
+			sf = subplots(1, 2; sync = false, show = false, specs = [Spec(kind = kind) Spec(kind = kind)])
+			@test mut(sf, data...; row = 1, col = 2) === sf
+			@test last(sf.fig.data).fields[subplot_key] == "$(kind)2"
+			for (call, needle) in (
+				(() -> mut(sf, data...; show = true), "mutators do not take `show`"),
+				(() -> mut(sf, data...; row = 1, col = 2, no_such_kw = 1), "$(who)!: unknown keyword `no_such_kw`"),
+				(() -> mut(sf, empty...; row = 1, col = 1), "$(who)!: `$(first_name)` is empty"),
+				(() -> mut(sf, data...; row = 3, col = 1), "`row` must be in 1:1"),
+			)
+				@test _reg_map_atomic(sf.fig, call, needle)
+			end
+		end
+		# Errors raised by the shared validators name the public function.
+		for (call, needle) in (
+			(() -> plot_scattergeo([0.0], [1.0, 2.0]), "plot_scattergeo: lon, lat must share length"),
+			(() -> plot_scattermapbox([0.0], [1.0]; marker_size = -1), "plot_scattermapbox: marker_size"),
+			(() -> plot_densitymap([0.0], [1.0]; radius = 0.5), "plot_densitymap: radius"),
+			(() -> plot_choropleth(["USA"], [1.0]; locationmode = "zip"), "plot_choropleth: `locationmode`"),
+			(() -> plot_choroplethmap(nothing, ["A"], [1.0]), "plot_choroplethmap: `geojson`"),
+			(() -> plot_scattermap([0.0], [1.0]; zoom = NaN), "plot_scattermap: zoom"),
+			(() -> plot_densitymapbox([0.0], [1.0], [1.0]; style = ""), "plot_densitymapbox: style"),
+			(() -> plot_scattermapbox!(Plot(), [0.0], [1.0]; center_lat = Inf), "plot_scattermapbox!: center_lat"),
+			(() -> plot_choroplethmap!(Plot(), _REG_MAP_SQUARE, ["A"], [1.0]; style = ""), "plot_choroplethmap!: style"),
+		)
+			@test _reg_map_throws(call, needle)
+		end
+	end
+
+	@testset "colour scales resolve like every other colorscale keyword; legends are mathtext" begin
+		resolved(name) = PlotlySupply._resolve_colorscale(name; who = "test").scale
+		@test plot_choropleth(["France"], [1.0]; colorscale = :viridis).data[1].fields[:colorscale] == resolved("viridis")
+		@test plot_choroplethmap(_REG_MAP_SQUARE, ["A"], [1.0]; colorscale = "magma_r").data[1].fields[:colorscale] == resolved("magma_r")
+		@test plot_densitymapbox([0.0], [1.0], [1.0]; colorscale = ["white", "red"]).data[1].fields[:colorscale] == resolved(["white", "red"])
+		# "Blues" means the same colours (light to dark) as on a heatmap.
+		@test plot_choroplethmapbox(_REG_MAP_SQUARE, ["A"], [1.0]; colorscale = "Blues").data[1].fields[:colorscale] ==
+			plot_heatmap(rand(2, 2); colorscale = "Blues").data[1].fields[:colorscale]
+		@test !haskey(plot_densitymap([0.0], [1.0]).data[1].fields, :colorscale)
+		@test _reg_map_throws(() -> plot_densitymap([0.0], [1.0]; colorscale = "nope"), "plot_densitymap: unknown colorscale")
+		@test _reg_map_throws(() -> plot_choropleth(["France"], [1.0]; colorscale = "nope"), "plot_choropleth: unknown colorscale")
+
+		legend = L"route $\alpha$"
+		@test plot_scattermap([1.0], [2.0]; legend = legend).data[1].fields[:name] == PlotlySupply._label(legend)
+		@test plot_choroplethmapbox(_REG_MAP_SQUARE, ["A"], [1.0]; legend = legend).data[1].fields[:name] == PlotlySupply._label(legend)
+		@test plot_scattergeo([1.0], [2.0]; legend = "plain").data[1].fields[:name] == "plain"
+		@test _reg_map_throws(() -> plot_scattergeo([1.0], [2.0]; legend = "a \$b"), "plot_scattergeo: `legend`")
+	end
+
+	@testset "scattergeo applies the active style's trace defaults (X10)" begin
+		with_style(PlotStyle(; linewidth = 3, marker_size = 9, cycle = :dash_marker)) do
+			reference = plot_scatter(1:2, [1, 2]; mode = "lines")
+			plot_scatter!(reference, 1:2, [2, 1]; mode = "lines")
+			fig = plot_scattergeo([1.0, 2.0], [2.0, 3.0]; mode = "lines")
+			@test plot_scattergeo!(fig, [1.0, 2.0], [3.0, 4.0]; mode = "lines", marker_size = 4) === nothing
+			for index in 1:2
+				line = _reg_fields(fig.data[index].fields[:line])
+				@test line[:width] == 3
+				@test line[:dash] == _reg_fields(reference.data[index].fields[:line])[:dash]
+				@test fig.data[index].fields[:mode] == "lines"
+			end
+			@test _reg_fields(fig.data[1].fields[:marker])[:size] == 9
+			@test _reg_fields(fig.data[2].fields[:marker])[:size] == 4
+			# Tile-map scatter traces are not line-style traces (no `line.dash`,
+			# icon `marker.symbol`): the style leaves them alone.
+			@test !haskey(plot_scattermap([1.0], [2.0]; mode = "lines").data[1].fields, :line)
+			@test !haskey(plot_scattermapbox([1.0], [2.0]; mode = "lines").data[1].fields, :line)
+		end
+		@test !haskey(plot_scattergeo([1.0], [2.0]).data[1].fields, :line)
+	end
+
+	@testset "update_* docstrings name the receivers and the SubplotFigure rules (#304)" begin
+		for fn in (update_xaxes!, update_yaxes!, update_polars!, update_scenes!, update_ternaries!,
+			update_geos!, update_mapboxes!, update_maps!, update_annotations!, update_images!, update_shapes!)
+			text = string(Base.Docs.doc(fn))
+			# "`scene`2" used to be generated for the numbered objects.
+			@test !occursin(r"`\d", text)
+			@test occursin("SyncPlot", text)
+			@test occursin("SubplotFigure", text)
+			@test occursin("row", text)
+			@test !occursin("has no `SubplotFigure` method", text)
+		end
+		@test occursin("(`scene`, `scene2`, `scene3`, …)", string(Base.Docs.doc(update_scenes!)))
+		@test occursin("object of ONE cell", string(Base.Docs.doc(update_geos!)))
+		# The documented behaviour: whole figure without row/col, one cell with them.
+		sf = subplots(1, 2; sync = false, show = false, specs = [Spec(kind = "scene") Spec(kind = "scene")])
+		@test update_scenes!(sf; row = 1, col = 2, aspectmode = "cube") === sf
+		@test _reg_fields(_reg_layout(sf)[:scene2])[:aspectmode] == "cube"
+		@test !haskey(_reg_fields(_reg_layout(sf)[:scene]), :aspectmode)
+		@test update_scenes!(sf; dragmode = "orbit") === sf
+		@test all(_reg_fields(_reg_layout(sf)[key])[:dragmode] == "orbit" for key in (:scene, :scene2))
+		geo = subplots(1, 2; sync = false, show = false, specs = [Spec(kind = "geo") Spec(kind = "geo")])
+		@test update_geos!(geo; showland = true) === geo
+		@test _reg_fields(_reg_layout(geo)[:geo])[:showland] === true
+		@test !haskey(_reg_fields(_reg_layout(geo)[:geo2]), :showland)
+	end
+
+	@testset "map figures are built offline; tile maps render without network" begin
+		# Every constructor builds a plain figure value: nothing is fetched.
+		# A style whose only layer is a background and whose glyph URL is a
+		# closed local port makes any network request fail the export
+		# ("Map error"), so a successful export needed no network.
+		offline_style = Dict(
+			"version" => 8,
+			"sources" => Dict{String, Any}(),
+			"glyphs" => "http://127.0.0.1:9/{fontstack}/{range}.pbf",
+			"layers" => [Dict("id" => "bg", "type" => "background", "paint" => Dict("background-color" => "#eeeeff"))],
+		)
+		png_magic = UInt8[0x89, 0x50, 0x4e, 0x47]
+		for fig in (
+			plot_scattermap([2.35, 13.4], [48.86, 52.52]; style = offline_style, zoom = 3, center_lon = 8, center_lat = 50),
+			plot_choroplethmap(_REG_MAP_SQUARE, ["A"], [1.0]; style = offline_style, zoom = 3, center_lon = 2.5, center_lat = 2.5),
+			plot_densitymap([0.0, 0.5], [0.0, 0.5], [1, 2]; radius = 20, style = offline_style, zoom = 5),
+			plot_scattermapbox([2.35, 13.4], [48.86, 52.52]; style = offline_style, zoom = 3),
+			plot_choroplethmapbox(_REG_MAP_SQUARE, ["A"], [1.0]; style = offline_style, zoom = 3),
+			plot_densitymapbox([0.0, 0.5], [0.0, 0.5], [1, 2]; radius = 20, style = offline_style, zoom = 5),
+		)
+			bytes = savefig(fig; format = "png", width = 300, height = 200)
+			@test bytes[1:4] == png_magic
+		end
+		# Geo maps fetch their outlines (topojson) from cdn.plot.ly when drawn:
+		# offline the export fails with plotly.js' topojson error, and the
+		# rendering check is skipped rather than failed.
+		geo_bytes = try
+			savefig(plot_scattergeo([2.35], [48.86]; scope = "europe"); format = "png", width = 300, height = 200)
+		catch err
+			occursin("topojson", sprint(showerror, err)) || rethrow()
+			nothing
+		end
+		if geo_bytes === nothing
+			@test_skip geo_bytes !== nothing
+		else
+			@test geo_bytes[1:4] == png_magic
+		end
+	end
+end

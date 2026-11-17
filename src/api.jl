@@ -14986,6 +14986,15 @@ function _extended_require_vector(who::AbstractString, name::AbstractString, val
 	return nothing
 end
 
+# A chart needs at least one data element: plotly.js draws an empty trace
+# without any message, which hides a caller's bug.
+function _extended_require_nonempty(who::AbstractString, name::AbstractString, values)
+	isempty(values) && throw(ArgumentError(
+		"$(who): `$(name)` is empty; pass at least one value.",
+	))
+	return nothing
+end
+
 function _extended_check_length(
 	who::AbstractString,
 	name::AbstractString,
@@ -15189,10 +15198,19 @@ _extended_final_axis_type(fig, key::Symbol, scale::AbstractString) =
 
 # A SubplotFigure mutator runs the Plot mutator on an empty staging figure,
 # which cannot see the target cell's axes. These are the (x, y) axis types of
-# that cell ("-" for both when it is not a Cartesian cell; the delegate then
-# rejects the trace), so the cell's log axes can be checked up front.
-function _extended_subplot_axis_types(sf::SubplotFigure, who::AbstractString; row, col, secondary_y::Bool)
-	target = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, who = who)
+# the axes the trace will be drawn on, the cell's (secondary y) axes or those
+# of inset `inset` ("-" for both when the cell is not Cartesian; the delegate
+# then rejects the trace), so their log axes can be checked up front.
+# `row`/`col`/`inset`/`secondary_y` are validated as the delegate does.
+function _extended_subplot_axis_types(
+	sf::SubplotFigure,
+	who::AbstractString;
+	row,
+	col,
+	secondary_y::Bool,
+	inset = nothing,
+)
+	target = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, inset = inset, who = who)
 	target.kind === :xy || return ("-", "-")
 	return (_axis_type(sf, target.xkey), _axis_type(sf, target.ykey))
 end
@@ -15216,6 +15234,7 @@ function _pie_trace(
 	colors,
 	hole = 0,
 )
+	_extended_require_nonempty(who, "values", values)
 	_extended_check_numbers(who, "values", values; nonnegative = true, numeric_strings = true)
 	(_extended_is_real(hole) && isfinite(hole) && 0 <= hole < 1) || throw(ArgumentError(
 		"$(who): `hole` must be a number in [0, 1) (the hole radius as a " *
@@ -15452,6 +15471,7 @@ function _hierarchy_trace(
 	ids,
 	branchvalues,
 )
+	_extended_require_nonempty(who, "labels", labels)
 	n = length(labels)
 	_extended_check_length(who, "parents", parents, "labels", n)
 	if ids === nothing
@@ -15890,6 +15910,7 @@ end
 function _extended_funnel_trace(who::AbstractString, x, y; color, legend::AbstractString)
 	_extended_require_vector(who, "x", x)
 	_extended_require_vector(who, "y", y)
+	_extended_require_nonempty(who, "x", x)
 	n = length(x)
 	_extended_check_length(who, "y", y, "x", n)
 	_extended_check_numbers(who, "x", x)
@@ -15992,7 +16013,8 @@ end
 	plot_funnel!(fig, x, y; color="", legend="", xlabel="", ylabel="",
 		xrange=[0, 0], yrange=[0, 0], title="", width=0, height=0, fontsize=0,
 		grid=nothing)
-	plot_funnel!(sf::SubplotFigure, x, y; row=nothing, col=nothing, secondary_y=false, kwargs...)
+	plot_funnel!(sf::SubplotFigure, x, y; row=nothing, col=nothing, secondary_y=false,
+		inset=nothing, kwargs...)
 
 Append a funnel trace to `fig` (`Plot`/`SyncPlot`). Arguments and keywords as
 for [`plot_funnel`](@ref) without `show` (an `ArgumentError`); only non-default
@@ -16002,9 +16024,12 @@ not be logarithmic.
 
 On a `SubplotFigure` the trace goes to the `xy` cell `row`, `col` (both or
 neither; default: the active cell; `secondary_y = true` draws against the
-cell's secondary y axis), which becomes the active cell; axis options apply to
-that cell, `title`/`width`/`height` are ignored with a warning. `secondary_y`
-on a single figure is an `ArgumentError`.
+cell's secondary y axis), or to inset `inset` (an id returned by
+[`inset!`](@ref); with `row`/`col` they must name the inset's cell); that cell
+becomes the active cell. Axis options apply to the cell's (or inset's) axes,
+`title`/`width`/`height` are ignored with a warning, and the target x axis
+must not be logarithmic. `secondary_y` on a single figure, and `inset`
+together with `secondary_y`, are an `ArgumentError`.
 
 # Returns
 `nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
@@ -16063,12 +16088,20 @@ function plot_funnel!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	x_type, _ = _extended_subplot_axis_types(sf, "plot_funnel!"; row = row, col = col, secondary_y = secondary_y)
+	x_type, _ = _extended_subplot_axis_types(
+		sf,
+		"plot_funnel!";
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		inset = inset,
+	)
 	x_type == "log" && throw(ArgumentError(
-		"plot_funnel!: the x axis of this cell is logarithmic, but funnel (x) bars " *
-		"start at zero; use a linear axis.",
+		"plot_funnel!: the x axis of this $(inset === nothing ? "cell" : "inset") is " *
+		"logarithmic, but funnel (x) bars start at zero; use a linear axis.",
 	))
 	return _subplot_delegate_mutator!(
 		sf,
@@ -16078,6 +16111,7 @@ function plot_funnel!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		kwargs...,
 	)
 end
@@ -16212,6 +16246,7 @@ function _waterfall_trace(
 )
 	_extended_require_vector(who, "x", x)
 	_extended_require_vector(who, "y", y)
+	_extended_require_nonempty(who, "x", x)
 	n = length(x)
 	_extended_check_length(who, "y", y, "x", n)
 	if measure === nothing
@@ -16320,14 +16355,15 @@ end
 	plot_waterfall!(fig, x, y; measure=nothing, legend="", xlabel="", ylabel="",
 		xrange=[0, 0], yrange=[0, 0], title="", width=0, height=0, fontsize=0,
 		grid=nothing)
-	plot_waterfall!(sf::SubplotFigure, x, y; row=nothing, col=nothing, secondary_y=false, kwargs...)
+	plot_waterfall!(sf::SubplotFigure, x, y; row=nothing, col=nothing, secondary_y=false,
+		inset=nothing, kwargs...)
 
 Append a waterfall trace to `fig` (`Plot`/`SyncPlot`), or to the `xy` cell
 `row`, `col` of a `SubplotFigure`. Arguments and keywords as for
 [`plot_waterfall`](@ref) without `show` (an `ArgumentError`); `grid = nothing`
 keeps the current grid and `grid = true` re-enables a hidden one. See
-[`plot_funnel!`](@ref) for the SubplotFigure and `secondary_y` rules. The
-figure's y axis must not be logarithmic.
+[`plot_funnel!`](@ref) for the SubplotFigure, `inset` and `secondary_y`
+rules. The figure's (cell's, inset's) y axis must not be logarithmic.
 
 # Returns
 `nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
@@ -16385,12 +16421,20 @@ function plot_waterfall!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	_, y_type = _extended_subplot_axis_types(sf, "plot_waterfall!"; row = row, col = col, secondary_y = secondary_y)
+	_, y_type = _extended_subplot_axis_types(
+		sf,
+		"plot_waterfall!";
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		inset = inset,
+	)
 	y_type == "log" && throw(ArgumentError(
-		"plot_waterfall!: the y axis of this cell is logarithmic, but waterfall (y) " *
-		"bars start at zero; use a linear axis.",
+		"plot_waterfall!: the y axis of this $(inset === nothing ? "cell" : "inset") is " *
+		"logarithmic, but waterfall (y) bars start at zero; use a linear axis.",
 	))
 	return _subplot_delegate_mutator!(
 		sf,
@@ -16400,6 +16444,7 @@ function plot_waterfall!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		kwargs...,
 	)
 end
@@ -16922,6 +16967,7 @@ function _ohlc_trace(
 	log_y::Bool,
 )
 	_extended_require_vector(who, "x", x)
+	_extended_require_nonempty(who, "x", x)
 	n = length(x)
 	for (name, values) in (("open", open), ("high", high), ("low", low), ("close", close))
 		_extended_require_vector(who, name, values)
@@ -17158,7 +17204,7 @@ end
 		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
 		fontsize=0, grid=nothing)
 	plot_candlestick!(sf::SubplotFigure, x, open, high, low, close;
-		row=nothing, col=nothing, secondary_y=false, kwargs...)
+		row=nothing, col=nothing, secondary_y=false, inset=nothing, kwargs...)
 
 Append a candlestick trace to `fig` (`Plot`/`SyncPlot`). Arguments and
 keywords as for [`plot_candlestick`](@ref) without `show` (an
@@ -17168,9 +17214,12 @@ left as it is.
 
 On a `SubplotFigure` the trace goes to the `xy` cell `row`, `col` (both or
 neither; default: the active cell; `secondary_y = true` draws against the
-cell's secondary y axis), which becomes the active cell; axis options apply to
-that cell, `title`/`width`/`height` are ignored with a warning. `secondary_y`
-on a single figure is an `ArgumentError`.
+cell's secondary y axis), or to inset `inset` (an id returned by
+[`inset!`](@ref)); that cell becomes the active cell. Axis options apply to the
+cell's (or inset's) axes, and prices must be positive on a logarithmic target
+y axis. `title`/`width`/`height` are ignored with a warning. `secondary_y` on a
+single figure, and `inset` together with `secondary_y`, are an
+`ArgumentError`.
 
 # Returns
 `nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
@@ -17247,9 +17296,17 @@ function plot_candlestick!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	x_type, y_type = _extended_subplot_axis_types(sf, "plot_candlestick!"; row = row, col = col, secondary_y = secondary_y)
+	x_type, y_type = _extended_subplot_axis_types(
+		sf,
+		"plot_candlestick!";
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		inset = inset,
+	)
 	if _extended_subplot_final_type(kwargs, :yscale, y_type) == "log"
 		for (name, values) in (("open", open), ("high", high), ("low", low), ("close", close))
 			_extended_check_numbers("plot_candlestick!", name, values; gaps = true, positive = true)
@@ -17268,6 +17325,7 @@ function plot_candlestick!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		kwargs...,
 	)
 end
@@ -17345,13 +17403,13 @@ end
 		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
 		fontsize=0, grid=nothing)
 	plot_ohlc!(sf::SubplotFigure, x, open, high, low, close;
-		row=nothing, col=nothing, secondary_y=false, kwargs...)
+		row=nothing, col=nothing, secondary_y=false, inset=nothing, kwargs...)
 
 Append an OHLC trace to `fig` (`Plot`/`SyncPlot`), or to the `xy` cell
 `row`, `col` of a `SubplotFigure`. Arguments and keywords as for
 [`plot_ohlc`](@ref) without `show` (an `ArgumentError`); see
-[`plot_candlestick!`](@ref) for the option, SubplotFigure and `secondary_y`
-rules.
+[`plot_candlestick!`](@ref) for the option, SubplotFigure, `inset` and
+`secondary_y` rules.
 
 # Returns
 `nothing` for a `Plot`/`SyncPlot`, `sf` for a `SubplotFigure`.
@@ -17428,9 +17486,17 @@ function plot_ohlc!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
+	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	x_type, y_type = _extended_subplot_axis_types(sf, "plot_ohlc!"; row = row, col = col, secondary_y = secondary_y)
+	x_type, y_type = _extended_subplot_axis_types(
+		sf,
+		"plot_ohlc!";
+		row = row,
+		col = col,
+		secondary_y = secondary_y,
+		inset = inset,
+	)
 	if _extended_subplot_final_type(kwargs, :yscale, y_type) == "log"
 		for (name, values) in (("open", open), ("high", high), ("low", low), ("close", close))
 			_extended_check_numbers("plot_ohlc!", name, values; gaps = true, positive = true)
@@ -17449,6 +17515,7 @@ function plot_ohlc!(
 		row = row,
 		col = col,
 		secondary_y = secondary_y,
+		inset = inset,
 		kwargs...,
 	)
 end
@@ -18407,6 +18474,7 @@ function _sankey_trace(
 	node_color,
 	link_color,
 )
+	_extended_require_nonempty(who, "source", source)
 	n = length(source)
 	_extended_check_length(who, "target", target, "source", n)
 	_extended_check_length(who, "value", value, "source", n)
@@ -18822,6 +18890,7 @@ function _ternary_trace(
 	_extended_require_vector(who, "a", a)
 	_extended_require_vector(who, "b", b)
 	_extended_require_vector(who, "c", c)
+	_extended_require_nonempty(who, "a", a)
 	n = length(a)
 	_extended_check_length(who, "b", b, "a", n)
 	_extended_check_length(who, "c", c, "a", n)
@@ -18921,6 +18990,10 @@ normalises each point to `a + b + c = 1`.
 - `title::AbstractString = ""`, `width::Real = 0`, `height::Real = 0`,
   `fontsize::Real = 0`, `show::Bool = false`: as for [`plot_pie`](@ref).
 
+The active [`PlotStyle`](@ref) fills unset line widths, dashes, marker sizes
+and symbols, as for [`plot_scatter`](@ref). Empty or mismatched components
+throw an `ArgumentError`.
+
 # Returns
 A `Plot`, or a `SyncPlot` when `show = true`.
 
@@ -18953,6 +19026,9 @@ function plot_ternary(
 	title_text = _extended_label(title, who, "title")
 	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
 	fig = Plot(trace, Layout())
+	# The default `mode` has no lines, so a mode with lines was chosen by
+	# the caller and the style's `:dash_marker` cycle must not add markers.
+	_apply_style_trace_defaults!(fig, 1; explicit = (:mode,))
 	_apply_ternary_labels!(fig; corner...)
 	_extended_apply_figure_options!(
 		fig,
@@ -19014,6 +19090,7 @@ function plot_ternary!(
 	title_text = _extended_label(title, who, "title")
 	_extended_validate_sizes(who; width = width, height = height, fontsize = fontsize)
 	push!(_plot_data(fig), trace)
+	_apply_style_trace_defaults!(fig, length(_plot_data(fig)); explicit = (:mode,))
 	_apply_ternary_labels!(fig; corner...)
 	_extended_apply_figure_options!(
 		fig,
@@ -19589,15 +19666,166 @@ function _trace_keyword_dict(kwargs)
 	return result
 end
 
+# Top-level trace attributes of the map trace types, as the bundled plotly.js
+# 2.35.2 (the `plotlyjs` artifact in Artifacts.toml) lists them in
+# `Plotly.PlotSchema.get().traces[kind].attributes` (`_deprecated` dropped).
+# The `kwargs...` of the map constructors and mutators are trace attributes;
+# a name outside this list was silently ignored by plotly.js, so a typo, a
+# layout key or a keyword of another plotting function went unnoticed. Keep
+# the list in step with the bundled plotly.js when it is upgraded.
+const _MAP_TRACE_ATTRIBUTE_NAMES = Dict{String,Set{String}}(
+	"choropleth" => Set{String}([
+		"autocolorscale", "coloraxis", "colorbar", "colorscale", "customdata",
+		"customdatasrc", "featureidkey", "geo", "geojson", "hoverinfo", "hoverinfosrc",
+		"hoverlabel", "hovertemplate", "hovertemplatesrc", "hovertext", "hovertextsrc",
+		"ids", "idssrc", "legend", "legendgroup", "legendgrouptitle", "legendrank",
+		"legendwidth", "locationmode", "locations", "locationssrc", "marker", "meta",
+		"metasrc", "name", "reversescale", "selected", "selectedpoints", "showlegend",
+		"showscale", "stream", "text", "textsrc", "transforms", "uid", "uirevision",
+		"unselected", "visible", "z", "zauto", "zmax", "zmid", "zmin", "zsrc",
+	]),
+	"scattergeo" => Set{String}([
+		"connectgaps", "customdata", "customdatasrc", "featureidkey", "fill",
+		"fillcolor", "geo", "geojson", "hoverinfo", "hoverinfosrc", "hoverlabel",
+		"hovertemplate", "hovertemplatesrc", "hovertext", "hovertextsrc", "ids",
+		"idssrc", "lat", "latsrc", "legend", "legendgroup", "legendgrouptitle",
+		"legendrank", "legendwidth", "line", "locationmode", "locations", "locationssrc",
+		"lon", "lonsrc", "marker", "meta", "metasrc", "mode", "name", "opacity",
+		"selected", "selectedpoints", "showlegend", "stream", "text", "textfont",
+		"textposition", "textpositionsrc", "textsrc", "texttemplate", "texttemplatesrc",
+		"transforms", "uid", "uirevision", "unselected", "visible",
+	]),
+	"scattermapbox" => Set{String}([
+		"below", "cluster", "connectgaps", "customdata", "customdatasrc", "fill",
+		"fillcolor", "hoverinfo", "hoverinfosrc", "hoverlabel", "hovertemplate",
+		"hovertemplatesrc", "hovertext", "hovertextsrc", "ids", "idssrc", "lat",
+		"latsrc", "legend", "legendgroup", "legendgrouptitle", "legendrank",
+		"legendwidth", "line", "lon", "lonsrc", "marker", "meta", "metasrc", "mode",
+		"name", "opacity", "selected", "selectedpoints", "showlegend", "stream",
+		"subplot", "text", "textfont", "textposition", "textsrc", "texttemplate",
+		"texttemplatesrc", "transforms", "uid", "uirevision", "unselected", "visible",
+	]),
+	"choroplethmapbox" => Set{String}([
+		"autocolorscale", "below", "coloraxis", "colorbar", "colorscale", "customdata",
+		"customdatasrc", "featureidkey", "geojson", "hoverinfo", "hoverinfosrc",
+		"hoverlabel", "hovertemplate", "hovertemplatesrc", "hovertext", "hovertextsrc",
+		"ids", "idssrc", "legend", "legendgroup", "legendgrouptitle", "legendrank",
+		"legendwidth", "locations", "locationssrc", "marker", "meta", "metasrc", "name",
+		"reversescale", "selected", "selectedpoints", "showlegend", "showscale",
+		"stream", "subplot", "text", "textsrc", "transforms", "uid", "uirevision",
+		"unselected", "visible", "z", "zauto", "zmax", "zmid", "zmin", "zsrc",
+	]),
+	"densitymapbox" => Set{String}([
+		"autocolorscale", "below", "coloraxis", "colorbar", "colorscale", "customdata",
+		"customdatasrc", "hoverinfo", "hoverinfosrc", "hoverlabel", "hovertemplate",
+		"hovertemplatesrc", "hovertext", "hovertextsrc", "ids", "idssrc", "lat",
+		"latsrc", "legend", "legendgroup", "legendgrouptitle", "legendrank",
+		"legendwidth", "lon", "lonsrc", "meta", "metasrc", "name", "opacity", "radius",
+		"radiussrc", "reversescale", "showlegend", "showscale", "stream", "subplot",
+		"text", "textsrc", "transforms", "uid", "uirevision", "visible", "z", "zauto",
+		"zmax", "zmid", "zmin", "zsrc",
+	]),
+	"scattermap" => Set{String}([
+		"below", "cluster", "connectgaps", "customdata", "customdatasrc", "fill",
+		"fillcolor", "hoverinfo", "hoverinfosrc", "hoverlabel", "hovertemplate",
+		"hovertemplatesrc", "hovertext", "hovertextsrc", "ids", "idssrc", "lat",
+		"latsrc", "legend", "legendgroup", "legendgrouptitle", "legendrank",
+		"legendwidth", "line", "lon", "lonsrc", "marker", "meta", "metasrc", "mode",
+		"name", "opacity", "selected", "selectedpoints", "showlegend", "stream",
+		"subplot", "text", "textfont", "textposition", "textsrc", "texttemplate",
+		"texttemplatesrc", "transforms", "uid", "uirevision", "unselected", "visible",
+	]),
+	"choroplethmap" => Set{String}([
+		"autocolorscale", "below", "coloraxis", "colorbar", "colorscale", "customdata",
+		"customdatasrc", "featureidkey", "geojson", "hoverinfo", "hoverinfosrc",
+		"hoverlabel", "hovertemplate", "hovertemplatesrc", "hovertext", "hovertextsrc",
+		"ids", "idssrc", "legend", "legendgroup", "legendgrouptitle", "legendrank",
+		"legendwidth", "locations", "locationssrc", "marker", "meta", "metasrc", "name",
+		"reversescale", "selected", "selectedpoints", "showlegend", "showscale",
+		"stream", "subplot", "text", "textsrc", "transforms", "uid", "uirevision",
+		"unselected", "visible", "z", "zauto", "zmax", "zmid", "zmin", "zsrc",
+	]),
+	"densitymap" => Set{String}([
+		"autocolorscale", "below", "coloraxis", "colorbar", "colorscale", "customdata",
+		"customdatasrc", "hoverinfo", "hoverinfosrc", "hoverlabel", "hovertemplate",
+		"hovertemplatesrc", "hovertext", "hovertextsrc", "ids", "idssrc", "lat",
+		"latsrc", "legend", "legendgroup", "legendgrouptitle", "legendrank",
+		"legendwidth", "lon", "lonsrc", "meta", "metasrc", "name", "opacity", "radius",
+		"radiussrc", "reversescale", "showlegend", "showscale", "stream", "subplot",
+		"text", "textsrc", "transforms", "uid", "uirevision", "visible", "z", "zauto",
+		"zmax", "zmid", "zmin", "zsrc",
+	]),
+)
+
+# Check the `kwargs...` passthrough of a map constructor or mutator `who`
+# building a `kind` trace. A key is a top-level attribute or a nested path
+# below one in PlotlyBase's underscore form (`marker_opacity`,
+# `hoverlabel_font_size`); no top-level name of these trace types contains an
+# underscore, so the attribute is the part before the first `_`. `reserved`
+# names the attributes the function sets from its own arguments (`lon`,
+# `locations`, ...), which a keyword would silently overwrite or be
+# overwritten by. Reads only, so callers run it before mutating anything.
+function _require_map_trace_keywords(
+	who::AbstractString,
+	kind::AbstractString,
+	kwargs;
+	reserved::Tuple{Vararg{String}},
+)
+	allowed = _MAP_TRACE_ATTRIBUTE_NAMES[kind]
+	for key in keys(kwargs)
+		name = String(key)
+		head = String(first(split(name, '_'; limit = 2)))
+		(head == "type" || head in reserved) && throw(ArgumentError(
+			"$(who): keyword `$(name)` sets the trace's `$(head)`, which " *
+			"$(head == "type" ? "is fixed to $(repr(kind))" : "comes from the positional arguments").",
+		))
+		head in allowed || throw(ArgumentError(
+			"$(who): unknown keyword `$(name)`: it is neither a keyword of " *
+			"$(who) nor a plotly.js `$(kind)` trace attribute (nested " *
+			"attributes are written with underscores, e.g. `hoverlabel_bgcolor`).",
+		))
+	end
+	return nothing
+end
+
+# Map mutators never open a window and address no subplot cell: the
+# SubplotFigure methods take `row`/`col` out before calling them. Without
+# this check these keywords would reach the trace as unknown attributes.
+function _map_mutator_guard(who::AbstractString, kwargs)
+	haskey(kwargs, :show) && throw(ArgumentError(
+		"$(who): mutators do not take `show` (they never open a window); " *
+		"display the figure with `to_syncplot(fig)`, or pass `show = true` " *
+		"to the constructor.",
+	))
+	(haskey(kwargs, :row) || haskey(kwargs, :col)) && throw(ArgumentError(
+		"$(who): `row`/`col` select a SubplotFigure cell; a single figure " *
+		"has one cell, so omit them.",
+	))
+	return nothing
+end
+
+# A map trace needs at least one location: plotly.js draws an empty trace
+# without any message, which hides a caller's bug.
+function _require_nonempty_map_data(who::AbstractString, name::AbstractString, values)
+	isempty(values) && throw(ArgumentError(
+		"$(who): `$(name)` is empty; a map trace needs at least one location.",
+	))
+	return nothing
+end
+
+# Map colour scales are resolved like every other `colorscale` keyword of the
+# package (`_resolve_colorscale`: COLORMAPS / plotly.js / ColorSchemes names,
+# a `"_r"` suffix, colour vectors, `[t, colour]` stops, a `ColorScheme`), so a
+# name means the same colours on a map as on a heatmap. Unset leaves plotly's
+# default.
 function _set_optional_colorscale!(
 	kwargs::Dict{Symbol,Any},
-	colorscale,
+	colorscale;
+	who::AbstractString,
 )
-	if colorscale isa AbstractString
-		isempty(colorscale) || (kwargs[:colorscale] = String(colorscale))
-	elseif colorscale !== nothing
-		kwargs[:colorscale] = colorscale
-	end
+	scale = _resolve_colorscale(colorscale; who = who).scale
+	scale isa AbstractString && isempty(scale) && return kwargs
+	kwargs[:colorscale] = scale
 	return kwargs
 end
 
@@ -19648,9 +19876,10 @@ end
 # `color`: "" / nothing = Plotly default; a String or Symbol is one colour; a
 # vector is per point (colour names or numbers mapped through the colorscale).
 # `marker_size`: nothing = default; a Real or a per-point vector, >= 0.
+# `who` prefixes the errors.
 function _set_geo_marker!(
 	kwargs::Dict{Symbol,Any},
-	kind::AbstractString,
+	who::AbstractString,
 	color,
 	marker_size,
 )
@@ -19668,7 +19897,7 @@ function _set_geo_marker!(
 	end
 	if marker_size !== nothing
 		_require_bounded_numeric_option(
-			kind,
+			who,
 			"marker_size",
 			marker_size;
 			minimum = 0,
@@ -19695,8 +19924,10 @@ end
 # (geo, mapbox and MapLibre families). `0` means automatic. The minimums are
 # the plotly.js schema minimums (`layout.width`/`height` >= 10 px,
 # `font.size` >= 1); pixel sizes are rounded to whole pixels because the
-# Electron window and raster exports are integer-sized. Validates only, so
-# callers can run it before mutating anything.
+# Electron window and raster exports are integer-sized. `title` is the plain
+# text (the window title of `show = true`) and `label` its mathtext form, the
+# figure title. Validates only, so callers can run it before mutating
+# anything.
 function _geo_figure_options(
 	who::AbstractString;
 	title::AbstractString,
@@ -19704,6 +19935,7 @@ function _geo_figure_options(
 	height::Real,
 	fontsize::Real,
 )
+	label = _extended_label(title, who, "title")
 	for (name, value, minimum) in (
 		("width", width, 10),
 		("height", height, 10),
@@ -19719,7 +19951,9 @@ function _geo_figure_options(
 		))
 	end
 	return (
+		who = String(who),
 		title = String(title),
+		label = label,
 		width = round(Int, Float64(width)),
 		height = round(Int, Float64(height)),
 		fontsize = fontsize,
@@ -19728,63 +19962,65 @@ end
 
 # Apply validated `_geo_figure_options` to a constructed (`apply_template =
 # true`) or appended-to (`false`: only the legend is refreshed so a user
-# template survives) figure. A new title is stored as `attr(text = ...)` and
-# keeps the existing title's other attributes (position, font).
+# template survives) figure through the D7 figure-option primitives (see
+# `_apply_basic_plot_options!`): the title is stored as `title.text` and
+# keeps the existing title's other attributes (position, font), and an
+# explicit `fontsize` is applied after the template so it wins over the
+# style's base size.
 function _apply_geo_figure_options!(
 	fig,
 	options;
 	apply_template::Bool,
 )
-	_apply_basic_plot_options!(fig; apply_template = apply_template)
-	title = _title_attr(options.title)
-	if title !== nothing
-		existing = get(_plot_layout(fig).fields, :title, nothing)
-		if _is_layout_mapping(existing)
-			merged = _symbol_dict(existing)
-			merged[:text] = options.title
-			title = attr(; merged...)
-		end
-		relayout!(fig, title = title)
-	end
-	options.width > 0 && relayout!(fig, width = options.width)
-	options.height > 0 && relayout!(fig, height = options.height)
-	options.fontsize > 0 &&
-		relayout!(fig, font = attr(size = options.fontsize))
+	_apply_basic_plot_options!(
+		fig;
+		title = options.label,
+		width = options.width,
+		height = options.height,
+		fontsize = options.fontsize,
+		apply_template = apply_template,
+		who = options.who,
+	)
 	return nothing
 end
 
-# Shared trace builder of scattergeo / scattermapbox / scattermap. Per-point
-# `color` and `marker_size` vectors must match the coordinates: plotly.js
-# silently drops the points past a shorter marker array.
+# Shared trace builder of scattergeo / scattermapbox / scattermap (`kind`).
+# Per-point `color` and `marker_size` vectors must match the coordinates:
+# plotly.js silently drops the points past a shorter marker array. Errors
+# name `who`, the public function.
 function _geo_scatter_trace(
 	kind::AbstractString,
 	constructor,
 	lon::AbstractVector,
 	lat::AbstractVector;
+	who::AbstractString,
 	mode::AbstractString,
 	color,
 	marker_size,
 	legend::AbstractString,
 	trace_kwargs,
 )
+	_require_map_trace_keywords(who, kind, trace_kwargs; reserved = ("lon", "lat"))
 	_require_equal_geo_lengths(
-		kind,
+		who,
 		:lon => lon,
 		:lat => lat,
 	)
-	_require_map_vector_length(kind, "color", color, length(lon))
+	_require_nonempty_map_data(who, "lon", lon)
+	_require_map_vector_length(who, "color", color, length(lon))
 	_require_map_vector_length(
-		kind,
+		who,
 		"marker_size",
 		marker_size,
 		length(lon),
 	)
+	name = _extended_label(legend, who, "legend")
 	kw = _trace_keyword_dict(trace_kwargs)
 	kw[:lon] = lon
 	kw[:lat] = lat
 	kw[:mode] = String(mode)
-	_set_geo_marker!(kw, kind, color, marker_size)
-	isempty(legend) || (kw[:name] = String(legend))
+	_set_geo_marker!(kw, who, color, marker_size)
+	isempty(name) || (kw[:name] = name)
 	return constructor(; kw...)
 end
 
@@ -19799,20 +20035,23 @@ _is_plotly_geojson(value) =
 function _choropleth_trace(
 	locations::AbstractVector,
 	z::AbstractVector;
+	who::AbstractString,
 	locationmode::Union{Nothing,AbstractString},
 	geojson,
 	featureidkey::AbstractString,
 	colorscale,
 	trace_kwargs,
 )
+	_require_map_trace_keywords(who, "choropleth", trace_kwargs; reserved = ("locations", "z"))
 	_require_equal_geo_lengths(
-		"choropleth",
+		who,
 		:locations => locations,
 		:z => z,
 	)
+	_require_nonempty_map_data(who, "locations", locations)
 	has_geojson = _is_plotly_geojson(geojson)
 	geojson === nothing || has_geojson || throw(ArgumentError(
-		"choropleth: `geojson` must be a GeoJSON object (Dict, attr or " *
+		"$(who): `geojson` must be a GeoJSON object (Dict, attr or " *
 		"NamedTuple) or a nonempty URL string; got $(typeof(geojson)).",
 	))
 	# An explicit mode always wins. Otherwise match GeoJSON features when a
@@ -19821,14 +20060,14 @@ function _choropleth_trace(
 		locationmode !== nothing ? String(locationmode) :
 		has_geojson ? "geojson-id" : "country names"
 	mode in _CHOROPLETH_LOCATIONMODES || throw(ArgumentError(
-		"choropleth: `locationmode` must be one of " *
+		"$(who): `locationmode` must be one of " *
 		"$(join(repr.(_CHOROPLETH_LOCATIONMODES), ", ")); got $(repr(mode)).",
 	))
 	mode == "geojson-id" && !has_geojson && throw(ArgumentError(
-		"choropleth: locationmode=\"geojson-id\" requires `geojson`.",
+		"$(who): locationmode=\"geojson-id\" requires `geojson`.",
 	))
 	isempty(featureidkey) || mode == "geojson-id" || throw(ArgumentError(
-		"choropleth: `featureidkey` only applies to GeoJSON locations " *
+		"$(who): `featureidkey` only applies to GeoJSON locations " *
 		"(locationmode=\"geojson-id\"); got locationmode=$(repr(mode)).",
 	))
 	kw = _trace_keyword_dict(trace_kwargs)
@@ -19838,7 +20077,7 @@ function _choropleth_trace(
 	has_geojson && (kw[:geojson] = geojson)
 	isempty(featureidkey) ||
 		(kw[:featureidkey] = String(featureidkey))
-	_set_optional_colorscale!(kw, colorscale)
+	_set_optional_colorscale!(kw, colorscale; who = who)
 	return choropleth(; kw...)
 end
 
@@ -19847,7 +20086,8 @@ function _require_valid_mapbox_view(
 	center_lon,
 	center_lat,
 	bearing = nothing,
-	pitch = nothing,
+	pitch = nothing;
+	who::AbstractString = "mapbox",
 )
 	for (name, value) in (
 		(:zoom, zoom),
@@ -19859,7 +20099,7 @@ function _require_valid_mapbox_view(
 		value === nothing && continue
 		valid = _is_finite_plotly_number(value)
 		valid || throw(ArgumentError(
-			"mapbox: $name must be a finite JavaScript-representable " *
+			"$who: $name must be a finite JavaScript-representable " *
 			"real number, not $(repr(value)).",
 		))
 	end
@@ -20057,10 +20297,11 @@ function _mapbox_layout(
 	style,
 	zoom,
 	center_lon,
-	center_lat,
+	center_lat;
+	who::AbstractString = "mapbox",
 )
-	_require_valid_mapbox_view(zoom, center_lon, center_lat)
-	_require_valid_map_style(style; family = "mapbox")
+	_require_valid_mapbox_view(zoom, center_lon, center_lat; who = who)
+	_require_valid_map_style(style; family = "mapbox", who = who)
 	m = Dict{Symbol, Any}()
 	style === nothing ||
 		(m[:style] = style isa AbstractString ? String(style) : style)
@@ -20230,21 +20471,26 @@ by the values `z`.
 - `featureidkey::AbstractString = ""`: the GeoJSON feature property matched by
   `locations` (plotly.js default `"id"`), e.g. `"properties.name"`. Only valid
   with `"geojson-id"` matching.
-- `colorscale::Union{AbstractString,AbstractVector} = ""`: Plotly colorscale
-  name or `[[t, color], ...]` stops; `""` keeps the default.
+- `colorscale = ""`: a colormap name (`"viridis"`, `"Blues"`, `"RdBu_r"`: any
+  `COLORMAPS`, plotly.js or ColorSchemes.jl name, matplotlib orientation,
+  case-insensitive, `_r` reverses; unknown names throw), a vector of colours
+  or `(t, colour)` stops, or a `ColorScheme`; `""` keeps the default.
 - `scope::AbstractString = ""`: geo scope (`"world"`, `"europe"`, `"usa"`, ...).
 - `projection::AbstractString = ""`: geo projection type (`"mercator"`, ...).
-- `title::AbstractString = ""`: figure title.
+- `title::AbstractString = ""`: figure title (mathtext, see `mathtext`).
 - `width::Real = 0`, `height::Real = 0`: figure size in pixels (0 = automatic,
   otherwise at least 10; rounded to whole pixels).
 - `fontsize::Real = 0`: global font size (0 = template default, otherwise ≥ 1).
 - `show::Bool = false`: open the figure in a window and return a `SyncPlot`.
-- `kwargs...`: further Plotly `choropleth` trace attributes (`zmin`, `zmax`,
-  `hovertext`, `marker_line_color`, ...).
+- `kwargs...`: further plotly.js `choropleth` trace attributes, nested ones
+  written with underscores (`zmin`, `zmax`, `hovertext`, `marker_line_color`,
+  ...). A name that is not a `choropleth` attribute of the bundled plotly.js
+  throws `ArgumentError`, as do the positional `locations`/`z` given again.
 
-Throws `ArgumentError` for mismatched lengths, an unknown `locationmode`,
-`"geojson-id"` matching without `geojson`, `featureidkey` without GeoJSON
-matching, or an invalid size.
+Throws `ArgumentError` for empty or mismatched `locations`/`z`, an unknown
+`locationmode`, `"geojson-id"` matching without `geojson`, `featureidkey`
+without GeoJSON matching, an unknown colorscale or keyword, or an invalid
+size.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -20260,7 +20506,7 @@ function plot_choropleth(
 	locationmode::Union{Nothing,AbstractString} = nothing,
 	geojson = nothing,
 	featureidkey::AbstractString = "",
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	scope::AbstractString = "",
 	projection::AbstractString = "",
 	title::AbstractString = "",
@@ -20270,8 +20516,9 @@ function plot_choropleth(
 	show::Bool = false,
 	kwargs...,
 )
+	who = "plot_choropleth"
 	options = _geo_figure_options(
-		"plot_choropleth";
+		who;
 		title = title,
 		width = width,
 		height = height,
@@ -20280,6 +20527,7 @@ function plot_choropleth(
 	trace = _choropleth_trace(
 		locations,
 		z;
+		who = who,
 		locationmode = locationmode,
 		geojson = geojson,
 		featureidkey = featureidkey,
@@ -20329,7 +20577,7 @@ function plot_choropleth!(
 	locationmode::Union{Nothing,AbstractString} = nothing,
 	geojson = nothing,
 	featureidkey::AbstractString = "",
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	scope::AbstractString = "",
 	projection::AbstractString = "",
 	title::AbstractString = "",
@@ -20338,8 +20586,10 @@ function plot_choropleth!(
 	fontsize::Real = 0,
 	kwargs...,
 )
+	who = "plot_choropleth!"
+	_map_mutator_guard(who, kwargs)
 	options = _geo_figure_options(
-		"plot_choropleth!";
+		who;
 		title = title,
 		width = width,
 		height = height,
@@ -20348,6 +20598,7 @@ function plot_choropleth!(
 	trace = _choropleth_trace(
 		locations,
 		z;
+		who = who,
 		locationmode = locationmode,
 		geojson = geojson,
 		featureidkey = featureidkey,
@@ -20384,14 +20635,20 @@ latitudes `lat` in degrees.
   coloured through `marker_colorscale`). `""`/`nothing` keeps the default.
 - `marker_size::Union{Nothing,Real,AbstractVector} = nothing`: marker size in
   pixels (≥ 0), scalar or one per point.
-- `legend::AbstractString = ""`: legend name of the trace.
+- `legend::AbstractString = ""`: legend name of the trace (mathtext).
 - `scope::AbstractString = ""`, `projection::AbstractString = ""`: geo scope
   and projection type (see [`plot_choropleth`](@ref)).
 - `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_choropleth`](@ref).
-- `kwargs...`: further Plotly `scattergeo` trace attributes.
+- `kwargs...`: further plotly.js `scattergeo` trace attributes (nested ones
+  with underscores, e.g. `marker_symbol`); unknown names throw, as for
+  [`plot_choropleth`](@ref).
 
-Per-point vectors must have the coordinate length; mismatches, negative or
-non-finite sizes, and invalid figure sizes throw `ArgumentError`.
+The active [`PlotStyle`](@ref) fills unset line widths, dashes, marker sizes
+and symbols, as for [`plot_scatter`](@ref).
+
+Per-point vectors must have the coordinate length; empty coordinates,
+mismatches, negative or non-finite sizes, unknown keywords and invalid
+figure sizes throw `ArgumentError`.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -20417,8 +20674,9 @@ function plot_scattergeo(
 	show::Bool = false,
 	kwargs...,
 )
+	who = "plot_scattergeo"
 	options = _geo_figure_options(
-		"plot_scattergeo";
+		who;
 		title = title,
 		width = width,
 		height = height,
@@ -20429,6 +20687,7 @@ function plot_scattergeo(
 		scattergeo,
 		lon,
 		lat;
+		who = who,
 		mode = mode,
 		color = color,
 		marker_size = marker_size,
@@ -20436,6 +20695,9 @@ function plot_scattergeo(
 		trace_kwargs = kwargs,
 	)
 	fig = Plot(trace, _geo_layout(scope, projection))
+	# The default `mode` has no lines, so a mode with lines was chosen by
+	# the caller and the style's `:dash_marker` cycle must not add markers.
+	_apply_style_trace_defaults!(fig, 1; explicit = (:mode,))
 	_apply_geo_figure_options!(fig, options; apply_template = true)
 	return _maybe_show(
 		fig,
@@ -20486,8 +20748,10 @@ function plot_scattergeo!(
 	fontsize::Real = 0,
 	kwargs...,
 )
+	who = "plot_scattergeo!"
+	_map_mutator_guard(who, kwargs)
 	options = _geo_figure_options(
-		"plot_scattergeo!";
+		who;
 		title = title,
 		width = width,
 		height = height,
@@ -20498,6 +20762,7 @@ function plot_scattergeo!(
 		scattergeo,
 		lon,
 		lat;
+		who = who,
 		mode = mode,
 		color = color,
 		marker_size = marker_size,
@@ -20505,6 +20770,7 @@ function plot_scattergeo!(
 		trace_kwargs = kwargs,
 	)
 	push!(_plot_data(fig), trace)
+	_apply_style_trace_defaults!(fig, length(_plot_data(fig)); explicit = (:mode,))
 	_apply_geo_layout_options!(
 		fig;
 		scope = scope,
@@ -20537,10 +20803,12 @@ equivalent.
 - `center_lon = nothing`, `center_lat = nothing`: initial map centre in
   degrees (`nothing` keeps plotly.js' automatic centre).
 - `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_choropleth`](@ref).
-- `kwargs...`: further Plotly `scattermapbox` trace attributes.
+- `kwargs...`: further plotly.js `scattermapbox` trace attributes; unknown
+  names throw, as for [`plot_choropleth`](@ref).
 
-Throws `ArgumentError` for mismatched lengths, an empty or non-string,
-non-object `style`, non-finite view values or invalid sizes.
+Throws `ArgumentError` for empty or mismatched coordinates, an empty or
+non-string, non-object `style`, non-finite view values, unknown keywords or
+invalid sizes.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -20568,19 +20836,21 @@ function plot_scattermapbox(
 	show::Bool = false,
 	kwargs...,
 )
+	who = "plot_scattermapbox"
 	options = _geo_figure_options(
-		"plot_scattermapbox";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	layout = _mapbox_layout(style, zoom, center_lon, center_lat)
+	layout = _mapbox_layout(style, zoom, center_lon, center_lat; who = who)
 	trace = _geo_scatter_trace(
 		"scattermapbox",
 		scattermapbox,
 		lon,
 		lat;
+		who = who,
 		mode = mode,
 		color = color,
 		marker_size = marker_size,
@@ -20643,20 +20913,23 @@ function plot_scattermapbox!(
 	fontsize::Real = 0,
 	kwargs...,
 )
+	who = "plot_scattermapbox!"
+	_map_mutator_guard(who, kwargs)
 	options = _geo_figure_options(
-		"plot_scattermapbox!";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	_require_valid_mapbox_view(zoom, center_lon, center_lat)
-	_require_valid_map_style(style; family = "mapbox")
+	_require_valid_mapbox_view(zoom, center_lon, center_lat; who = who)
+	_require_valid_map_style(style; family = "mapbox", who = who)
 	trace = _geo_scatter_trace(
 		"scattermapbox",
 		scattermapbox,
 		lon,
 		lat;
+		who = who,
 		mode = mode,
 		color = color,
 		marker_size = marker_size,
@@ -20694,21 +20967,23 @@ Shade GeoJSON features on a legacy Mapbox tile map. The MapLibre-based
 # Keywords
 - `featureidkey::AbstractString = ""`: feature property matched by
   `locations` (`""` = plotly.js default `"id"`).
-- `colorscale::Union{AbstractString,AbstractVector} = ""`: colorscale name or stops.
+- `colorscale = ""`: colormap name, colour vector, stops or `ColorScheme`, as
+  for [`plot_choropleth`](@ref).
 - `marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing`:
   boundary colour, scalar or one per location.
 - `marker_line_width::Union{Nothing,Real,AbstractVector} = nothing`: boundary
   width in pixels (≥ 0), scalar or one per location.
 - `marker_opacity::Union{Nothing,Real,AbstractVector} = nothing`: fill opacity
   in [0, 1], scalar or one per location.
-- `legend::AbstractString = ""`: legend name of the trace.
+- `legend::AbstractString = ""`: legend name of the trace (mathtext).
 - `style`, `zoom`, `center_lon`, `center_lat`: map view, as for
   [`plot_scattermapbox`](@ref).
 - `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_choropleth`](@ref).
-- `kwargs...`: further Plotly `choroplethmapbox` trace attributes.
+- `kwargs...`: further plotly.js `choroplethmapbox` trace attributes; unknown
+  names throw, as for [`plot_choropleth`](@ref).
 
-Per-location vectors must have the `locations` length; mismatches and
-out-of-range values throw `ArgumentError`.
+Per-location vectors must have the `locations` length; empty `locations`,
+mismatches, out-of-range values and unknown keywords throw `ArgumentError`.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -20726,7 +21001,7 @@ function plot_choroplethmapbox(
 	locations::AbstractVector,
 	z::AbstractVector;
 	featureidkey::AbstractString = "",
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing,
 	marker_line_width::Union{Nothing,Real,AbstractVector} = nothing,
 	marker_opacity::Union{Nothing,Real,AbstractVector} = nothing,
@@ -20742,18 +21017,20 @@ function plot_choroplethmapbox(
 	show::Bool = false,
 	kwargs...,
 )
+	who = "plot_choroplethmapbox"
 	options = _geo_figure_options(
-		"plot_choroplethmapbox";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	layout = _mapbox_layout(style, zoom, center_lon, center_lat)
+	layout = _mapbox_layout(style, zoom, center_lon, center_lat; who = who)
 	trace = _choroplethmap_trace(
 		geojson,
 		locations,
 		z;
+		who = who,
 		kind = "choroplethmapbox",
 		constructor = choroplethmapbox,
 		featureidkey = featureidkey,
@@ -20809,7 +21086,7 @@ function plot_choroplethmapbox!(
 	locations::AbstractVector,
 	z::AbstractVector;
 	featureidkey::AbstractString = "",
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	marker_line_color::Union{Nothing,AbstractString,Symbol,AbstractVector} = nothing,
 	marker_line_width::Union{Nothing,Real,AbstractVector} = nothing,
 	marker_opacity::Union{Nothing,Real,AbstractVector} = nothing,
@@ -20824,19 +21101,22 @@ function plot_choroplethmapbox!(
 	fontsize::Real = 0,
 	kwargs...,
 )
+	who = "plot_choroplethmapbox!"
+	_map_mutator_guard(who, kwargs)
 	options = _geo_figure_options(
-		"plot_choroplethmapbox!";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	_require_valid_mapbox_view(zoom, center_lon, center_lat)
-	_require_valid_map_style(style; family = "mapbox")
+	_require_valid_mapbox_view(zoom, center_lon, center_lat; who = who)
+	_require_valid_map_style(style; family = "mapbox", who = who)
 	trace = _choroplethmap_trace(
 		geojson,
 		locations,
 		z;
+		who = who,
 		kind = "choroplethmapbox",
 		constructor = choroplethmapbox,
 		featureidkey = featureidkey,
@@ -20875,14 +21155,17 @@ map. The MapLibre-based [`plot_densitymap`](@ref) is the modern equivalent.
 # Keywords
 - `radius::Union{Real,AbstractVector} = 0`: influence radius of each point in
   pixels, scalar or one per point, each ≥ 1. `0` keeps plotly.js' default.
-- `colorscale::Union{AbstractString,AbstractVector} = ""`: colorscale name or stops.
+- `colorscale = ""`: colormap name, colour vector, stops or `ColorScheme`, as
+  for [`plot_choropleth`](@ref).
 - `style`, `zoom`, `center_lon`, `center_lat`: map view, as for
   [`plot_scattermapbox`](@ref).
 - `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_choropleth`](@ref).
-- `kwargs...`: further Plotly `densitymapbox` trace attributes.
+- `kwargs...`: further plotly.js `densitymapbox` trace attributes; unknown
+  names throw, as for [`plot_choropleth`](@ref).
 
-Throws `ArgumentError` for mismatched lengths (including a per-point
-`radius`), radii below 1 and invalid map-view or size values.
+Throws `ArgumentError` for empty or mismatched coordinates (including a
+per-point `radius`), radii below 1, unknown keywords and invalid map-view or
+size values.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -20896,7 +21179,7 @@ function plot_densitymapbox(
 	lat::AbstractVector,
 	z::AbstractVector;
 	radius::Union{Real,AbstractVector} = 0,
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	style = _DEFAULT_MAPBOX_STYLE,
 	zoom = 0,
 	center_lon = nothing,
@@ -20908,18 +21191,20 @@ function plot_densitymapbox(
 	show::Bool = false,
 	kwargs...,
 )
+	who = "plot_densitymapbox"
 	options = _geo_figure_options(
-		"plot_densitymapbox";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	layout = _mapbox_layout(style, zoom, center_lon, center_lat)
+	layout = _mapbox_layout(style, zoom, center_lon, center_lat; who = who)
 	trace = _densitymap_trace(
 		lon,
 		lat,
 		z;
+		who = who,
 		kind = "densitymapbox",
 		constructor = densitymapbox,
 		radius = radius,
@@ -20968,7 +21253,7 @@ function plot_densitymapbox!(
 	lat::AbstractVector,
 	z::AbstractVector;
 	radius::Union{Real,AbstractVector} = 0,
-	colorscale::Union{AbstractString,AbstractVector} = "",
+	colorscale = "",
 	style = nothing,
 	zoom = nothing,
 	center_lon = nothing,
@@ -20979,19 +21264,22 @@ function plot_densitymapbox!(
 	fontsize::Real = 0,
 	kwargs...,
 )
+	who = "plot_densitymapbox!"
+	_map_mutator_guard(who, kwargs)
 	options = _geo_figure_options(
-		"plot_densitymapbox!";
+		who;
 		title = title,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 	)
-	_require_valid_mapbox_view(zoom, center_lon, center_lat)
-	_require_valid_map_style(style; family = "mapbox")
+	_require_valid_mapbox_view(zoom, center_lon, center_lat; who = who)
+	_require_valid_map_style(style; family = "mapbox", who = who)
 	trace = _densitymap_trace(
 		lon,
 		lat,
 		z;
+		who = who,
 		kind = "densitymapbox",
 		constructor = densitymapbox,
 		radius = radius,
