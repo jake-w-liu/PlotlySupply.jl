@@ -6379,21 +6379,16 @@ function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_
 	return xkey, ykey
 end
 
-# The layout key of the `kind` (:geo, :mapbox or :map) object of cell
-# (row, col); an empty cell or a cell of another kind is an ArgumentError
-# naming `who`. MapLibre `map` cells are updated by
-# `_transactional_modern_map_subplot_update!` (electron_backend.jl), which owns
-# the alias-preserving map transaction; `update_maps!` only checks the cell here.
-function _subplot_geographic_layout_key(
+# The layout key of the single `kind` object (:geo, :mapbox, :map, ...) of
+# cell (row, col); an empty cell or a cell of another kind is an ArgumentError
+# naming `who`.
+function _subplot_cell_layout_key(
 	sf::SubplotFigure,
 	row::Int,
 	col::Int,
 	kind::Symbol;
 	who::AbstractString = "SubplotFigure",
 )
-	kind in (:geo, :mapbox, :map) || throw(ArgumentError(
-		"$(who): unsupported geographic subplot kind `$kind`.",
-	))
 	expected_kind = String(kind)
 	target_ref = _subplot_target_ref(_plot_obj(sf.fig), row, col; who = who)
 	actual_kind = String(target_ref.subplot_kind)
@@ -6402,6 +6397,23 @@ function _subplot_geographic_layout_key(
 		"not a '$expected_kind' cell.",
 	))
 	return only(target_ref.layout_keys)
+end
+
+# `kind` is the subplot kind of the cell (:geo or :mapbox). MapLibre `map`
+# cells are updated by `_transactional_modern_map_subplot_update!`
+# (electron_backend.jl), which owns the alias-preserving map transaction;
+# `update_maps!` only checks the cell with `_subplot_cell_layout_key`.
+function _subplot_geographic_layout_key(
+	sf::SubplotFigure,
+	row::Int,
+	col::Int,
+	kind::Symbol;
+	who::AbstractString = "SubplotFigure",
+)
+	kind in (:geo, :mapbox) || throw(ArgumentError(
+		"$(who): unsupported geographic subplot kind `$kind`.",
+	))
+	return _subplot_cell_layout_key(sf, row, col, kind; who = who)
 end
 
 # Run `f()` so that an ArgumentError raised by a shared validator (whose
@@ -6608,7 +6620,7 @@ function update_maps!(
 	# transaction runs.
 	return lock(getfield(sf, :_lock)) do
 		r, c = _resolve_subplot_cell(sf; row = row, col = col, who = "update_maps!")
-		_subplot_geographic_layout_key(sf, r, c, :map; who = "update_maps!")
+		_subplot_cell_layout_key(sf, r, c, :map; who = "update_maps!")
 		_subplot_name_errors("update_maps!") do
 			_transactional_modern_map_subplot_update!(
 				sf,
