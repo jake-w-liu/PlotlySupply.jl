@@ -139,4 +139,4 @@ savefig(sf, "figure2.png"; width = 7, height = 2.7, units = :in, dpi = 600)
 | Missing or inconsistent panel labels | `panel_labels!` on every multi-panel figure. |
 | Legends or labels covering data | `set_legend!` with an outside position, or a position chosen for the data. |
 | Large blank margins | `tight_layout!`, or `savefig(...; tight = true)`. |
-| Wrong page size in the PDF | `pdfinfo figure.pdf` shows the page size; it equals the requested size. |
+| Wrong page size in the PDF | `pdfinfo figure.pdf` shows the page size; `savefig(...; width, height, units = :in)` gives exactly that size (`figsize!` rounds to whole px). |
