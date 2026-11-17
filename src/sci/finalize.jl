@@ -589,6 +589,10 @@ struct _FinContext
 	readonly::Union{Nothing, Base.IdSet{Any}}
 	clone_readonly::Bool
 	size::Union{Nothing, NTuple{2, Float64}}
+	# The traces of the figure before the mutation, in order (`live`).
+	before::Union{Nothing, Vector{Any}}
+	insets::Vector{Any}                 # `_fin_insets`
+	inset_hosts::Set{Symbol}            # x axes of the cells hosting an inset
 end
 
 _fin_trace_writable(ctx::_FinContext, index::Int) =
@@ -923,6 +927,54 @@ function _fin_right_title_annotation(layout::Layout, key::AbstractString)
 	return nothing
 end
 
+# The insets of a figure as `(row, col, xkey, ykey, xref, yref, xdomain,
+# ydomain)`: the SubplotFigure's records, or, for its plot alone (an export
+# copy), every Cartesian axis pair no subplot grid cell uses whose domains lie
+# inside a grid cell's (that cell is its host).
+function _fin_insets(p::Plot, sf)
+	if sf !== nothing
+		return Any[(row = i.row, col = i.col, xkey = i.xkey, ykey = i.ykey, xref = i.xref, yref = i.yref,
+			xdomain = i.xdomain, ydomain = i.ydomain) for i in getfield(sf, :insets)]
+	end
+	layout = p.layout
+	grid_ref = layout.subplots.grid_ref
+	used = Set{Symbol}()
+	cells = Tuple{Int, Int, Symbol, Symbol}[]
+	for r in axes(grid_ref, 1), c in axes(grid_ref, 2)
+		(isassigned(grid_ref, r, c) && !isempty(grid_ref[r, c])) || continue
+		for (i, entry) in enumerate(grid_ref[r, c])
+			fields = entry.trace_kwargs.fields
+			xkey = _fin_axis_key(_fin_string(get(fields, :xaxis, nothing)))
+			ykey = _fin_axis_key(_fin_string(get(fields, :yaxis, nothing)))
+			xkey === nothing || push!(used, xkey)
+			ykey === nothing || push!(used, ykey)
+			i == 1 && xkey !== nothing && ykey !== nothing && push!(cells, (r, c, xkey, ykey))
+		end
+	end
+	found = Any[]
+	isempty(cells) && return found
+	for (key, axis) in layout.fields
+		(_fin_is_axis_key(key) && String(key)[1] == 'x' && !(key in used) && _fin_is_base_axis(layout, key)) ||
+			continue
+		ykey = _fin_axis_key(_cmn_mapping_get(axis, :anchor))
+		(ykey === nothing || ykey in used) && continue
+		xd = _layout_axis_domain(layout, key)
+		yd = _layout_axis_domain(layout, ykey)
+		(xd === nothing || yd === nothing) && continue
+		for (r, c, hx, hy) in cells
+			hxd = _layout_axis_domain(layout, hx)
+			hyd = _layout_axis_domain(layout, hy)
+			(hxd === nothing || hyd === nothing) && continue
+			(xd[1] >= hxd[1] - 1e-9 && xd[2] <= hxd[2] + 1e-9 && yd[1] >= hyd[1] - 1e-9 && yd[2] <= hyd[2] + 1e-9) ||
+				continue
+			push!(found, (row = r, col = c, xkey = key, ykey = ykey, xref = _fin_axis_ref(key),
+				yref = _fin_axis_ref(ykey), xdomain = xd, ydomain = yd))
+			break
+		end
+	end
+	return found
+end
+
 # The host cell of an inset (`_cbar_trace_region`-like), `nothing` when its
 # grid cell cannot be resolved.
 function _fin_inset_host_region(p::Plot, inset)
@@ -945,15 +997,14 @@ end
 
 # The colorbars of a figure grouped by plot area (`_cbar_trace_region` key;
 # the bar of a trace in an inset is listed under the inset's host cell), in
-# trace order. Coloraxis bars are listed under the area of their first trace;
-# `areas` maps a coloraxis id to all area keys it is drawn for.
-function _fin_collect_bars(p::Plot, sf = nothing)
+# trace order, with the area order and the area regions. Coloraxis bars are
+# listed under the area of their first trace.
+function _fin_collect_bars(p::Plot, insets)
 	by_area = Dict{String, Vector{_FinBar}}()
 	order = String[]
 	regions = Dict{String, Any}()
 	coloraxis_areas = Dict{String, Vector{String}}()
 	coloraxis_ranges = Dict{String, Tuple{Float64, Float64}}()
-	insets = sf === nothing ? () : getfield(sf, :insets)
 	for index in eachindex(p.data)
 		trace = p.data[index]
 		trace isa GenericTrace || continue
@@ -1014,7 +1065,7 @@ function _fin_collect_bars(p::Plot, sf = nothing)
 		end
 		filter!(item -> item.slot !== nothing || item.coloraxis !== nothing, items)
 	end
-	return by_area, order, regions, coloraxis_areas
+	return by_area, order, regions
 end
 
 # Write `placement` into bar `item` (only the keys that change).
@@ -1034,6 +1085,19 @@ function _fin_place_bar!(ctx::_FinContext, layout_updates::Dict{Symbol, Any}, it
 	else
 		prefix = item.slot.container === :root ? "colorbar_" : "$(item.slot.container)_colorbar_"
 		_fin_restyle!(ctx, item.index, Dict{Symbol, Any}(Symbol(prefix, key) => value for (key, value) in changes))
+		# restyle! stores `nothing` for a cleared key (the display resets it);
+		# drop it from the trace.
+		cleared = [key for (key, value) in changes if value === nothing]
+		if !isempty(cleared)
+			fields = ctx.p.data[item.index].fields
+			holder = item.slot.container === :root ? fields : get(fields, item.slot.container, nothing)
+			bar = holder isa AbstractDict ? get(holder, :colorbar, nothing) : nothing
+			if bar isa AbstractDict
+				for key in cleared
+					haskey(bar, key) && bar[key] === nothing && delete!(bar, key)
+				end
+			end
+		end
 	end
 	return true
 end
@@ -1092,18 +1156,14 @@ function _fin_reference(ctx::_FinContext, layout::Layout, xkey::Symbol, ykey::Sy
 		yd = _layout_axis_domain(ref_layout, ykey)
 		xd !== nothing && yd !== nothing && return (xd, yd)
 	end
-	if ctx.sf !== nothing
-		for inset in getfield(ctx.sf, :insets)
-			inset.xkey === xkey && inset.ykey === ykey && return (inset.xdomain, inset.ydomain)
-		end
+	for inset in ctx.insets
+		inset.xkey === xkey && inset.ykey === ykey && return (inset.xdomain, inset.ydomain)
 	end
 	sub.rows * sub.cols > 1 && return nothing
 	(xkey === :xaxis && ykey === :yaxis) || return nothing
 	inset_keys = Set{Symbol}()
-	if ctx.sf !== nothing
-		for inset in getfield(ctx.sf, :insets)
-			push!(inset_keys, inset.xkey, inset.ykey)
-		end
+	for inset in ctx.insets
+		push!(inset_keys, inset.xkey, inset.ykey)
 	end
 	for (key, axis) in layout.fields
 		_fin_is_axis_key(key) || continue
@@ -1119,27 +1179,17 @@ _fin_within(d::NTuple{2, Float64}, ref::NTuple{2, Float64}) =
 	d[1] >= ref[1] - 1e-6 && d[2] <= ref[2] + 1e-6 && d[1] < d[2]
 
 # Horizontal room (px) a colorbar may take beyond the right edge of a cell's
-# reference area: part of the right margin at the paper edge, half the gap to
-# the next cell otherwise.
-function _fin_right_allowance(layout::Layout, ref, grid_layout, Wp::Float64)
+# reference area: part of the right margin at the paper edge, else up to the
+# tick labels of the plot area to its right (`_fin_right_neighbour`, at the
+# grid positions), or to the paper edge when there is none.
+function _fin_right_allowance(layout::Layout, accs, ref, grid_layout, Wp::Float64, Hp::Float64)
 	if ref[1][2] >= 1 - 1e-6
 		return max(0.0, _fin_margins_base(layout).r - _FIN_AUTOMARGIN_EXTRA - 4)
 	end
-	ref_layout = grid_layout[]
-	gap = 1.0 - ref[1][2]
-	if ref_layout !== nothing
-		for (key, axis) in ref_layout.fields
-			_fin_is_axis_key(key) && String(key)[1] == 'x' || continue
-			xd = _layout_axis_domain(ref_layout, key)
-			xd === nothing && continue
-			xd[1] >= ref[1][2] - 1e-9 || continue
-			anchor = _fin_axis_key(_cmn_mapping_get(axis, :anchor))
-			yd = anchor === nothing ? nothing : _layout_axis_domain(ref_layout, anchor)
-			yd === nothing || (yd[1] < ref[2][2] && yd[2] > ref[2][1]) || continue
-			gap = min(gap, xd[1] - ref[1][2])
-		end
-	end
-	return max(0.0, 0.5 * gap * Wp)
+	positions = something(grid_layout[], layout)
+	neighbour = _fin_right_neighbour(layout, accs, ref[1], ref[2], Hp; positions = positions)
+	neighbour === nothing && return (1.0 - ref[1][2]) * Wp
+	return max(0.0, (neighbour.x - ref[1][2]) * Wp - neighbour.push - 4)
 end
 
 # Figure px size used for the fit: the export size, the layout size, or the
@@ -1231,7 +1281,7 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 			end
 			pad_px = _FIN_CBAR_PAD * Wp
 			widths = [_fin_bar_width(layout, item, Hp) for item in hug]
-			allow = _fin_right_allowance(layout, ref, grid_layout, Wp)
+			allow = _fin_right_allowance(layout, accs, ref, grid_layout, Wp, Hp)
 			room = isempty(hug) ? 0.0 : max(0.0, pad_px + sum(widths) + _FIN_CBAR_GAP * (length(hug) - 1) - allow)
 			rw = (ref[1][2] - ref[1][1]) * Wp
 			rh = (ref[2][2] - ref[2][1]) * Hp
@@ -1293,7 +1343,7 @@ function _fin_fit!(ctx::_FinContext)
 	p = ctx.p
 	layout = p.layout
 	accs = _fin_collect_axes(p)
-	bars_by_area, area_order, regions, coloraxis_areas = _fin_collect_bars(p, ctx.sf)
+	bars_by_area, area_order, regions = _fin_collect_bars(p, ctx.insets)
 	layout_updates = Dict{Symbol, Any}()
 	wrote = false
 	W, H = _fin_figure_size(ctx, layout)
@@ -1338,60 +1388,57 @@ function _fin_fit!(ctx::_FinContext)
 			hug_end[_fin_axis_ref(xkey)] = (box[1], box[2], placement)
 		end
 	end
-	# M4: the other bars of a plot area (and those of its insets) go to the
-	# right of the first one, side by side; in a cell with another plot area
-	# to its right, where they would run into that area, the cell's bars
-	# share its height instead, one below the other.
+	# M4: the bars of a plot area (and those of its insets) that are ours to
+	# move go side by side right of the first one. In an area with another
+	# plot area to its right they must end before that area's tick labels
+	# (`_fin_inner_area_bars!`).
 	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
 	Wp = max(W - margins.l - margins.r, 1.0)
 	Hp = max(H - margins.t - margins.b, 1.0)
+	fitted = Dict{Symbol, NTuple{2, Float64}}()
+	for ((xkey, ykey), fit) in fits
+		fitted[xkey] = fit.xdomain
+		fitted[ykey] = fit.ydomain
+	end
+	grid_layout = Ref{Any}(nothing)
+	pending = Tuple{Any, Vector{_FinBar}, Any}[]
+	own_default = item -> _cbar_placement(:right, item.own.xdomain, item.own.ydomain, _CBAR_CELL_PAD)
 	for key in area_order
 		items = [item for item in bars_by_area[key] if item.slot !== nothing &&
 			!(item.index in hugged) && _fin_bar_vertical(item.bar)]
 		isempty(items) && continue
 		region = regions[key]
 		last_hug = get(hug_end, key, nothing)
-		(length(items) + (last_hug === nothing ? 0 : 1) >= 2 || any(item -> item.inset, items)) || continue
-		own_default = item -> _cbar_placement(:right, item.own.xdomain, item.own.ydomain, _CBAR_CELL_PAD)
 		is_auto = item -> _fin_bar_unplaced(item.bar) || _fin_bar_owned(item.bar) ||
 			_cbar_placement_matches(item.bar, own_default(item))
 		hosts = [item for item in items if !item.inset]
-		lead = nothing
-		template = nothing
+		lead = (last_hug === nothing && !isempty(hosts)) ? hosts[1] : nothing
+		movable = [item for item in items if item !== lead && is_auto(item) && _fin_item_writable(ctx, item)]
+		lead_ours = lead === nothing || (is_auto(lead) && _fin_item_writable(ctx, lead))
+		if last_hug === nothing && lead_ours && length(movable) + (lead === nothing ? 0 : 1) == length(items)
+			neighbour = _fin_right_neighbour(layout, accs, region.xdomain, region.ydomain, Hp; domains = fitted)
+			if neighbour !== nothing
+				all_bars = lead === nothing ? movable : [lead; movable]
+				members = [[item for item in all_bars if !item.inset]; [item for item in all_bars if item.inset]]
+				push!(pending, (region, members, neighbour))
+				continue
+			end
+		end
+		(length(items) + (last_hug === nothing ? 0 : 1) >= 2 || any(item -> item.inset, items)) || continue
 		if last_hug !== nothing
 			lead_x, lead_w = last_hug[1], last_hug[2]
 			template = last_hug[3]
-		elseif !isempty(hosts)
-			lead = hosts[1]
+		elseif lead !== nothing
 			template = lead.bar
 			lead_x = _cbar_real(lead.bar, :x, 1.02)
 			lead_w = _fin_bar_width(layout, lead, Hp)
 		else
+			template = nothing
 			lead_x = region.xdomain[2] + _CBAR_CELL_PAD
 			lead_w = -_FIN_CBAR_GAP
 		end
-		movable = [item for item in items if item !== lead && is_auto(item) && _fin_item_writable(ctx, item)]
-		# Bars to stack in one column: the lead (when ours to move) and the
-		# others; with no host bar, the inset bars alone.
-		members = if last_hug !== nothing
-			_FinBar[]
-		elseif lead === nothing
-			movable
-		elseif is_auto(lead) && _fin_item_writable(ctx, lead)
-			[lead; movable]
-		else
-			_FinBar[]
-		end
-		column = _fin_bar_column(layout, region, members, lead_x, Wp, Hp)
 		cursor = lead_x + (lead_w + _FIN_CBAR_GAP) / Wp
-		if column !== nothing
-			for (item, placement) in column
-				wrote |= _fin_place_bar!(ctx, layout_updates, item, placement)
-				push!(moved, (item, placement))
-			end
-		end
 		for item in movable
-			column !== nothing && break
 			placement = Dict{Symbol, Any}(:x => cursor, :xanchor => "left", :xref => "paper", :lenmode => "fraction")
 			if item.inset
 				# Level with its inset.
@@ -1410,25 +1457,63 @@ function _fin_fit!(ctx::_FinContext)
 			cursor += (_fin_bar_width(layout, item, Hp) + _FIN_CBAR_GAP) / Wp
 		end
 	end
-	# A coloraxis bar left at the default place for one of its plot areas
-	# (placed before the axis spread to the others) moves next to all of them.
-	for (id, areas) in coloraxis_areas
-		length(areas) >= 2 || continue
+	# Inner areas: their grid columns give up the width their bars still need.
+	# A cell ending where a cell of its column whose narrowing is ours ends
+	# was aligned with it (its own bars may be new).
+	owned_edges = Dict{NTuple{2, Float64}, Vector{Float64}}()
+	for (region, members, _) in pending
+		own = _fin_inner_ownership(ctx, layout, region, members, grid_layout)
+		own.ours && push!(get!(Vector{Float64}, owned_edges, _fin_column_key(own.ref)), region.xdomain[2])
+	end
+	# Cells whose bars of ours this mutation removed (deleted, hidden, moved
+	# to a colour axis): their columns are narrowed only as far as the bars
+	# still there need, so the cells widen again when none is left.
+	planned_keys = Set{Any}(_fin_axis_key(region.key) for (region, _, _) in pending)
+	vacated = Tuple{Symbol, Any}[]
+	for xkey in _fin_vacated_axes(ctx, layout)
+		(xkey in planned_keys || haskey(fitted, xkey) || xkey in ctx.inset_hosts) && continue
+		ref = _fin_cell_reference(ctx, layout, xkey, grid_layout)
+		(ref === nothing || !_fin_narrowable(layout, xkey, ref)) && continue
+		push!(vacated, (xkey, ref))
+		push!(get!(Vector{Float64}, owned_edges, _fin_column_key(ref)), _layout_axis_domain(layout, xkey)[2])
+	end
+	plans = Any[_fin_inner_plan(ctx, layout, region, members, neighbour, Wp, Hp, grid_layout, owned_edges)
+		for (region, members, neighbour) in pending]
+	edges = _fin_narrow_columns!(ctx, layout, layout_updates, plans, Wp, grid_layout, fitted, vacated)
+	for plan in plans
+		right = (plan.xkey !== nothing && haskey(edges, plan.xkey)) ? edges[plan.xkey] : plan.region.xdomain[2]
+		wrote |= _fin_place_inner!(ctx, layout_updates, moved, plan, right, own_default, Wp)
+	end
+	# A mutation that bound traces which existed before it to a coloraxis
+	# after the coloraxis bar was placed for its other traces (a 3-D
+	# `shared_coloraxis = true` call in a cell links the surfaces already in
+	# the figure last): a bar still at that placement moves next to all of
+	# the plot areas using the coloraxis, as `shared_colorbar!` places it.
+	for (id, rebound) in _fin_rebound_coloraxes(ctx)
 		axis = get(layout.fields, Symbol(id), nothing)
 		_cmn_mapping_get(axis, :showscale) === false && continue
 		bar = _symbol_dict(_cmn_mapping_get(axis, :colorbar))
 		haskey(bar, :x) || continue
 		side = _cbar_string(bar, :orientation, "v") == "h" ? :bottom : :right
-		area_regions = Any[regions[area] for area in areas]
-		target = _cbar_region_placement(side, area_regions)
-		_cbar_placement_matches(bar, target) && continue
-		any(r -> _cbar_placement_matches(bar, _cbar_region_placement(side, Any[r])), area_regions) || continue
-		item = _FinBar(0, nothing, id, bar, nothing, area_regions[1], false)
+		all_regions, _ = _cbar_coloraxis_regions(p, id, 1)
+		others = Any[]
+		for (index, trace) in enumerate(p.data)
+			index in rebound && continue
+			slot = _cbar_slot(trace, index)
+			(slot === nothing || slot.coloraxis != id) && continue
+			_cbar_push_region!(others, _cbar_trace_region(p, trace))
+		end
+		(isempty(others) || length(others) == length(all_regions)) && continue
+		_cbar_placement_matches(bar, _cbar_region_placement(side, others)) || continue
+		target = _cbar_region_placement(side, all_regions)
+		item = _FinBar(0, nothing, id, bar, nothing, others[1], false)
 		wrote |= _fin_place_bar!(ctx, layout_updates, item, target)
 		push!(moved, (item, target))
 	end
-	# Math titles drawn as annotations follow their bars.
+	# Math titles drawn as annotations follow their bars; panel titles follow
+	# the cells whose x domain changes here.
 	annotations = _fin_title_annotations(p, moved)
+	annotations = _fin_follow_panel_titles(layout, layout_updates, annotations)
 	# A math title beside the bar (`title_side = :right`) is an annotation,
 	# which plotly does not count in the margins: grow `margin.r` to fit it.
 	needed = _fin_title_margin(layout, annotations === nothing ? get(layout.fields, :annotations, nothing) : annotations,
@@ -1442,67 +1527,280 @@ function _fin_fit!(ctx::_FinContext)
 	return wrote
 end
 
-# Paper x at which the nearest other plot area to the right of `xd` starts
-# among those overlapping `yd` vertically (Cartesian cells and domain
-# subplots such as scenes); `nothing` for the rightmost area.
-function _fin_right_obstacle(layout::Layout, xd, yd)
+# Coloraxis id => indices of the traces this mutation bound to it that
+# existed before it (same index in `ctx.before`) with another or no colour
+# axis. Empty without the pre-mutation traces.
+function _fin_rebound_coloraxes(ctx::_FinContext)
+	out = Dict{String, Set{Int}}()
+	ctx.before === nothing && return out
+	data = ctx.p.data
+	for (index, old) in enumerate(ctx.before)
+		index <= length(data) || break
+		new = data[index]
+		(old isa GenericTrace && new isa GenericTrace) || continue
+		id = _fin_string(get(new.fields, :coloraxis, nothing))
+		id === nothing && continue
+		_fin_string(get(old.fields, :coloraxis, nothing)) == id && continue
+		push!(get!(Set{Int}, out, id), index)
+	end
+	return out
+end
+
+# X axes of the cells whose narrowing was ours by the traces before this
+# mutation (`ctx.before`): one of them had a bar of ours against the cell's
+# right edge (`_fin_inner_ownership`). Empty without the pre-mutation traces.
+function _fin_vacated_axes(ctx::_FinContext, layout::Layout)
+	out = Set{Symbol}()
+	ctx.before === nothing && return out
+	for (index, old) in enumerate(ctx.before)
+		old isa GenericTrace || continue
+		_fin_visible(old) || continue
+		slot = _cbar_slot(old, index)
+		(slot === nothing || slot.coloraxis !== nothing || !slot.shows) && continue
+		bar = _symbol_dict(_cbar_slot_bar(old, slot))
+		(_fin_bar_owned(bar) && _fin_bar_vertical(bar)) || continue
+		xkey = _fin_axis_key(_fin_string(get(old.fields, :xaxis, "x")))
+		xkey === nothing && continue
+		xd = _layout_axis_domain(layout, xkey)
+		xd === nothing && continue
+		isapprox(_cbar_real(bar, :x, NaN), xd[2] + _CBAR_CELL_PAD; atol = 1e-9) && push!(out, xkey)
+	end
+	return out
+end
+
+# Width (px) of what an axis draws left of its plot area: tick labels, ticks
+# and title (the automargin push of `_fin_margins`); 0 for an axis on the
+# right side or hidden.
+function _fin_left_decoration(layout::Layout, accs, ykey::Symbol, dy, Hp::Float64)
+	axis = get(layout.fields, ykey, nothing)
+	_cmn_mapping_get(axis, :visible) === false && return 0.0
+	something(_fin_string(_cmn_mapping_get(axis, :side)), "left") == "left" || return 0.0
+	font = _fin_font_size(layout)
+	shown = _fin_shown_range(layout, ykey, accs)
+	lo, hi = shown === nothing ? (NaN, NaN) : shown
+	chars = _fin_tick_chars(axis, lo, hi, (dy[2] - dy[1]) * Hp, _fin_axis_type(layout, ykey) == "log", true)
+	tickfont = _fin_mapping_font_size(axis, :tickfont, font)
+	return chars * 0.6 * tickfont + _fin_tick_len(axis) + 2 + _fin_title_push(axis, font)
+end
+
+const _FIN_DOMAIN_SUBPLOT = r"^(scene|polar|ternary|geo|mapbox|map|smith)([2-9]|[1-9][0-9]+)?$"
+
+# The nearest other plot area to the right of the area `xd` x `yd` among
+# those overlapping it vertically (Cartesian cells and domain subplots such
+# as scenes): `(x = paper x where it starts, push = px its y axis draws left
+# of it)`, or `nothing` for the rightmost area. Domains and anchors are read
+# from `positions` (with `domains` overriding axis domains), axis styles from
+# `layout`.
+function _fin_right_neighbour(layout::Layout, accs, xd, yd, Hp::Float64;
+		positions::Layout = layout, domains = Dict{Symbol, NTuple{2, Float64}}())
+	domain_of(key) = haskey(domains, key) ? domains[key] : _layout_axis_domain(positions, key)
 	nearest = nothing
-	for (key, axis) in layout.fields
+	push = 0.0
+	for (key, axis) in positions.fields
 		key isa Symbol || continue
-		name = String(key)
-		dx = nothing
-		dy = nothing
+		ykey = nothing
 		if _fin_is_axis_key(key)
-			name[1] == 'x' && _fin_is_base_axis(layout, key) || continue
-			dx = _layout_axis_domain(layout, key)
-			anchor = _fin_axis_key(_cmn_mapping_get(axis, :anchor, "y"))
-			(dx === nothing || anchor === nothing) && continue
-			dy = _cmn_y_axis_domain(layout, anchor)
-		elseif occursin(r"^(scene|polar|ternary|geo|mapbox|map|smith)([2-9]|[1-9][0-9]+)?$", name)
-			domain = _layout_subplot_domain(layout, key)
+			(String(key)[1] == 'x' && _fin_is_base_axis(positions, key)) || continue
+			dx = domain_of(key)
+			ykey = _fin_axis_key(_cmn_mapping_get(axis, :anchor, "y"))
+			(dx === nothing || ykey === nothing) && continue
+			dy = something(domain_of(ykey), (0.0, 1.0))
+		elseif occursin(_FIN_DOMAIN_SUBPLOT, String(key))
+			domain = _layout_subplot_domain(positions, key)
 			domain === nothing && continue
 			dx, dy = domain
 		else
 			continue
 		end
 		(dx[1] >= xd[2] - 1e-9 && dy[1] < yd[2] - 1e-9 && dy[2] > yd[1] + 1e-9) || continue
-		nearest = nearest === nothing ? dx[1] : min(nearest, dx[1])
+		this_push = ykey === nothing ? 0.0 : _fin_left_decoration(layout, accs, ykey, dy, Hp)
+		if nearest === nothing || dx[1] < nearest - 1e-9
+			nearest = dx[1]
+			push = this_push
+		elseif abs(dx[1] - nearest) <= 1e-9
+			push = max(push, this_push)
+		end
 	end
-	return nearest
+	return nearest === nothing ? nothing : (x = nearest, push = push)
 end
 
-# Placements that stack the vertical bars `members` of a cell one below the
-# other over the cell's height, in one column at paper x `x`, when side by
-# side they would run into the plot area to the right of the cell (more
-# than the first bar's own width, or half the gap); `nothing` when side by
-# side fits, there is nothing to stack, or the cell is too short for the
-# bars to stay readable (40 px each).
-function _fin_bar_column(layout::Layout, region, members, x::Float64, Wp::Float64, Hp::Float64)
-	length(members) >= 2 || return nothing
-	obstacle = _fin_right_obstacle(layout, region.xdomain, region.ydomain)
-	obstacle === nothing && return nothing
-	# Widths for bars as tall as the cell, so the choice does not depend on
+# How the bars `members` (all ours to move; host bars first) of a plot area
+# with another plot area to its right (`neighbour`) are laid out: side by
+# side right of the area when they end before the neighbour's tick labels;
+# otherwise one below the other over the area's height (each at least 40 px
+# long). `shrink` is the width (px) still missing, which the area's grid
+# column gives up (`_fin_narrow_columns!`; at most half the grid cell).
+# Only a cell whose x domain is its grid cell's, or was narrowed here (one
+# of its bars that are ours sits against it, or it ends where such a cell of
+# its grid column ends: `owned_edges`), is narrowed (`narrowable`);
+# the bars of a cell whose domain the user narrowed are placed without our
+# mark (`release`), so a later run does not take that domain for ours.
+function _fin_inner_plan(ctx::_FinContext, layout::Layout, region, members::Vector{_FinBar}, neighbour,
+		Wp::Float64, Hp::Float64, grid_layout, owned_edges)
+	xd, yd = region.xdomain, region.ydomain
+	xkey = _fin_axis_key(region.key)
+	own = _fin_inner_ownership(ctx, layout, region, members, grid_layout)
+	ref, shaped = own.ref, own.shaped
+	ours = own.ours || (shaped &&
+		any(e -> isapprox(e, xd[2]; atol = 1e-9), get(owned_edges, _fin_column_key(ref), Float64[])))
+	narrowable = shaped && ours
+	release = shaped && !ours
+	edge = narrowable ? ref[1][2] : xd[2]
+	room = (neighbour.x - edge) * Wp - neighbour.push - 4
+	pad = _CBAR_CELL_PAD * Wp
+	# Widths for bars as long as the area, so the choice does not depend on
 	# the lengths a previous run gave them.
-	span_px = (region.ydomain[2] - region.ydomain[1]) * Hp
+	span_px = (yd[2] - yd[1]) * Hp
 	widths = [_fin_bar_width(layout, item, Hp; len_px = span_px) for item in members]
-	total = sum(widths) + _FIN_CBAR_GAP * (length(members) - 1)
-	total <= max(widths[1], 0.5 * (obstacle - region.xdomain[2]) * Wp) && return nothing
-	k = length(members)
+	n = length(members)
+	side = pad + sum(widths) + _FIN_CBAR_GAP * (n - 1)
 	# The end tick labels reach half a line past each bar end.
-	gap = (_CBAR_LINE_EM * _fin_font_size(layout) + 4) / Hp
-	y0, y1 = region.ydomain
-	segment = (y1 - y0 - (k - 1) * gap) / k
-	segment * Hp >= 40 || return nothing
-	column = Tuple{_FinBar, Dict{Symbol, Any}}[]
-	for (i, item) in enumerate(members)
-		top = y1 - (i - 1) * (segment + gap)
-		push!(column, (item, Dict{Symbol, Any}(
-			:x => x, :xanchor => "left", :xref => "paper",
-			:y => top - segment / 2, :yanchor => "middle",
-			:len => segment, :lenmode => "fraction", :ypad => 0,
-		)))
+	gap_y = (_CBAR_LINE_EM * _fin_font_size(layout) + 4) / Hp
+	segment = (yd[2] - yd[1] - (n - 1) * gap_y) / n
+	column = n >= 2 && side > room && segment * Hp >= 40
+	if column
+		# Top to bottom in the order of their own plot areas (an inset's bar
+		# beside the inset), else in the given order.
+		order = sort(collect(1:n); by = i -> (-round(sum(members[i].own.ydomain); digits = 9), i))
+		members = members[order]
+		widths = widths[order]
 	end
-	return column
+	need = column ? pad + maximum(widths) : side
+	shrink = narrowable ? clamp(need - room, 0.0, 0.5 * (ref[1][2] - ref[1][1]) * Wp) : 0.0
+	return (region = region, members = members, widths = widths, column = column, segment = segment,
+		gap_y = gap_y, xkey = xkey, ref = ref, narrowable = narrowable, release = release, shrink = shrink)
+end
+
+# Whether the x domain of the plot area `region` (bars `members`) may be
+# narrowed (`shaped`: `_fin_narrowable`, not hosting an inset) and is ours:
+# its grid cell's, or narrowed here (one of its bars that are ours sits
+# against it). `ref` is its grid reference.
+function _fin_inner_ownership(ctx::_FinContext, layout::Layout, region, members::Vector{_FinBar}, grid_layout)
+	xd = region.xdomain
+	xkey = _fin_axis_key(region.key)
+	ref = xkey === nothing ? nothing : _fin_cell_reference(ctx, layout, xkey, grid_layout)
+	shaped = ref !== nothing && !(xkey in ctx.inset_hosts) && _fin_narrowable(layout, xkey, ref)
+	ours = shaped && (isapprox(xd[2], ref[1][2]; atol = 1e-9) || any(item -> !item.inset &&
+		_fin_bar_owned(item.bar) && isapprox(_cbar_real(item.bar, :x, NaN), xd[2] + _CBAR_CELL_PAD; atol = 1e-9),
+		members))
+	return (ref = ref, shaped = shaped, ours = ours)
+end
+
+# Key of the grid column of a cell reference.
+_fin_column_key(ref) = (round(ref[1][1]; digits = 9), round(ref[1][2]; digits = 9))
+
+# The grid (or inset) reference of the cell of x axis `xkey`, found through
+# the y axis it is anchored to; `nothing` when there is none.
+function _fin_cell_reference(ctx::_FinContext, layout::Layout, xkey::Symbol, grid_layout)
+	ykey = _fin_axis_key(_cmn_mapping_get(get(layout.fields, xkey, nothing), :anchor, "y"))
+	ykey === nothing && return nothing
+	return _fin_reference(ctx, layout, xkey, ykey, grid_layout)
+end
+
+# Whether the x domain of the cell of `xkey` may be narrowed: an inner grid
+# column, the cell's y domain is its grid cell's, and its x domain is its
+# grid cell's or that narrowed from the right (as `_fin_narrow_columns!`
+# leaves it).
+function _fin_narrowable(layout::Layout, xkey::Symbol, ref)
+	ref[1][2] < 1 - 1e-6 || return false
+	xd = _layout_axis_domain(layout, xkey)
+	ykey = _fin_axis_key(_cmn_mapping_get(get(layout.fields, xkey, nothing), :anchor, "y"))
+	yd = ykey === nothing ? nothing : _layout_axis_domain(layout, ykey)
+	(xd === nothing || yd === nothing) && return false
+	return isapprox(xd[1], ref[1][1]; atol = 1e-9) && xd[2] <= ref[1][2] + 1e-9 && xd[2] > xd[1] &&
+		isapprox(yd[1], ref[2][1]; atol = 1e-9) && isapprox(yd[2], ref[2][2]; atol = 1e-9)
+end
+
+# Narrows every narrowable cell of each grid column that has a plan or a
+# `vacated` cell (whose narrowing was ours; `(xkey, ref)`) by the largest
+# `shrink` of the column's plans (0 without one), so the cells of a column
+# stay aligned; equal-aspect cells (`fitted`) keep their fit. A cell without
+# a plan is narrowable when its x domain is its grid cell's or ends where
+# that of a narrowable planned or vacated cell of its column does. A column with a cell
+# hosting an inset is not narrowed (the inset would stick out of it).
+# Returns the new right edge of each such cell's x axis.
+function _fin_narrow_columns!(ctx::_FinContext, layout::Layout, layout_updates::Dict{Symbol, Any}, plans,
+		Wp::Float64, grid_layout, fitted, vacated)
+	column_key = _fin_column_key
+	shrink = Dict{NTuple{2, Float64}, Float64}()
+	for plan in plans
+		plan.narrowable || continue
+		k = column_key(plan.ref)
+		shrink[k] = max(get(shrink, k, 0.0), plan.shrink)
+	end
+	for (_, ref) in vacated
+		k = column_key(ref)
+		shrink[k] = get(shrink, k, 0.0)
+	end
+	right = Dict{Symbol, Float64}()
+	isempty(shrink) && return right
+	planned = Dict{Symbol, Bool}()
+	owned_edges = Dict{NTuple{2, Float64}, Vector{Float64}}()
+	for plan in plans
+		plan.xkey === nothing && continue
+		planned[plan.xkey] = plan.narrowable
+		plan.narrowable && push!(get!(Vector{Float64}, owned_edges, column_key(plan.ref)), plan.region.xdomain[2])
+	end
+	for (xkey, ref) in vacated
+		planned[xkey] = true
+		push!(get!(Vector{Float64}, owned_edges, column_key(ref)), _layout_axis_domain(layout, xkey)[2])
+	end
+	for key in ctx.inset_hosts
+		ref = _fin_cell_reference(ctx, layout, key, grid_layout)
+		ref === nothing || haskey(shrink, column_key(ref)) && (shrink[column_key(ref)] = 0.0)
+	end
+	for (key, _) in layout.fields
+		(_fin_is_axis_key(key) && String(key)[1] == 'x' && _fin_is_base_axis(layout, key)) || continue
+		haskey(fitted, key) && continue
+		ref = _fin_cell_reference(ctx, layout, key, grid_layout)
+		ref === nothing && continue
+		amount = get(shrink, column_key(ref), nothing)
+		(amount === nothing || !_fin_narrowable(layout, key, ref)) && continue
+		xd = _layout_axis_domain(layout, key)
+		ours = get(planned, key, nothing)
+		if ours === nothing
+			ours = isapprox(xd[2], ref[1][2]; atol = 1e-9) ||
+				any(e -> isapprox(e, xd[2]; atol = 1e-9), get(owned_edges, column_key(ref), Float64[]))
+		end
+		ours || continue
+		edge = ref[1][2] - amount / Wp
+		right[key] = edge
+		isapprox(edge, xd[2]; atol = 1e-9) || (layout_updates[Symbol(key, :_domain)] = [xd[1], edge])
+	end
+	return right
+end
+
+# Places the bars of an inner-area plan against the area's right edge
+# `right` (paper). Returns whether it wrote.
+function _fin_place_inner!(ctx::_FinContext, layout_updates::Dict{Symbol, Any}, moved, plan, right::Float64,
+		own_default, Wp::Float64)
+	members = plan.members
+	yd = plan.region.ydomain
+	# A single bar left where `_place_cell_colorbars!` put it stays as it is.
+	length(members) == 1 && isapprox(right, plan.region.xdomain[2]; atol = 1e-9) &&
+		_cbar_placement_matches(members[1].bar, own_default(members[1])) && return false
+	wrote = false
+	x = right + _CBAR_CELL_PAD
+	for (i, item) in enumerate(members)
+		placement = Dict{Symbol, Any}(:x => x, :xanchor => "left", :xref => plan.release ? nothing : "paper",
+			:lenmode => "fraction", :ypad => 0)
+		if plan.column
+			top = yd[2] - (i - 1) * (plan.segment + plan.gap_y)
+			placement[:y] = top - plan.segment / 2
+			placement[:yanchor] = "middle"
+			placement[:len] = plan.segment
+		else
+			# Level with its own plot area (an inset's bar with the inset).
+			default = own_default(item)
+			for k in (:y, :yanchor, :len)
+				placement[k] = default[k]
+			end
+			x += (plan.widths[i] + _FIN_CBAR_GAP) / Wp
+		end
+		wrote |= _fin_place_bar!(ctx, layout_updates, item, placement)
+		push!(moved, (item, placement))
+	end
+	return wrote
 end
 
 # The layout annotations with the math title of every moved bar redrawn for
@@ -1535,6 +1833,57 @@ function _fin_title_annotations(p::Plot, moved)
 		end
 	end
 	return changed ? result : nothing
+end
+
+const _FIN_PANEL_TITLE_NAME = r"^plotlysupply:title!?:(\d+):(\d+)(:.*)?$"
+
+# `annotations` (the layout's when `nothing`) with every panel title
+# (`title!(fig, text; row, col)`) of a cell whose x domain `layout_updates`
+# changes moved with the domain: a title at the old domain's left edge,
+# centre or right edge (by its `xanchor`) goes to the new one; a title the
+# user moved elsewhere stays. `annotations` unchanged (`nothing` included)
+# when no title moves.
+function _fin_follow_panel_titles(layout::Layout, layout_updates::Dict{Symbol, Any}, annotations)
+	changes = Dict{Symbol, Tuple{NTuple{2, Float64}, NTuple{2, Float64}}}()
+	for (key, value) in layout_updates
+		m = match(r"^(xaxis\d*)_domain$", String(key))
+		m === nothing && continue
+		(value isa AbstractVector && length(value) == 2 && all(_fin_isfinite_real, value)) || continue
+		xkey = Symbol(m.captures[1])
+		old = something(_layout_axis_domain(layout, xkey), (0.0, 1.0))
+		changes[xkey] = (old, (Float64(value[1]), Float64(value[2])))
+	end
+	isempty(changes) && return annotations
+	items = annotations === nothing ? get(layout.fields, :annotations, nothing) : annotations
+	(items isa AbstractVector && !isempty(items)) || return annotations
+	grid_ref = layout.subplots.grid_ref
+	result = collect(Any, items)
+	changed = false
+	for (i, item) in enumerate(result)
+		name = _cmn_item_name(item)
+		name isa AbstractString || continue
+		m = match(_FIN_PANEL_TITLE_NAME, name)
+		m === nothing && continue
+		row = parse(Int, m.captures[1])
+		col = parse(Int, m.captures[2])
+		(checkbounds(Bool, grid_ref, row, col) && isassigned(grid_ref, row, col) &&
+			!isempty(grid_ref[row, col])) || continue
+		xkey = _fin_axis_key(_fin_string(get(first(grid_ref[row, col]).trace_kwargs.fields, :xaxis, nothing)))
+		(xkey === nothing || !haskey(changes, xkey)) && continue
+		old, new = changes[xkey]
+		_fin_string(_cmn_mapping_get(item, :xref, "paper")) == "paper" || continue
+		x = _cmn_mapping_get(item, :x)
+		_fin_isfinite_real(x) || continue
+		anchor = something(_fin_string(_cmn_mapping_get(item, :xanchor, "auto")), "auto")
+		at(d) = anchor == "left" ? d[1] : anchor == "right" ? d[2] : (d[1] + d[2]) / 2
+		isapprox(Float64(x), at(old); atol = 1e-9) || continue
+		isapprox(at(new), at(old); atol = 1e-12) && continue
+		moved = _symbol_dict(item)
+		moved[:x] = at(new)
+		result[i] = _cbar_attr(moved)
+		changed = true
+	end
+	return changed ? result : annotations
 end
 
 # Right margin (px) that fits every right-side math colorbar title, or
@@ -1576,7 +1925,12 @@ Normalise the figure after a PlotlySupply constructor or mutator changed it
   their x axis shrinks toward its colorbar (`constraintoward = "right"`), and
   their colorbars are placed against the fitted plot area with the same
   height. A single figure without a width or height is sized to the field.
-- M4: further colorbars on the same plot area are placed side by side.
+- M4: further colorbars on the same plot area are placed side by side, or,
+  in a cell with another plot area to its right that they would run into,
+  one below the other over the cell's height; the bar of a trace in an inset
+  goes right of the host cell. A coloraxis bar placed before the mutation
+  bound existing traces to it moves next to all of its plot areas. The
+  right margin grows to fit a math colorbar title drawn beside its bar.
 
 Explicit user settings (ranges, `autorangeoptions`, domains outside the cell,
 placed colorbars) are never changed. `live` holds the traces of the live
@@ -1600,7 +1954,15 @@ function _fin_run!(fig, live, size, clone_readonly::Bool)
 		))
 		(Float64(size[1]), Float64(size[2]))
 	end
-	ctx = _FinContext(target, p, fig isa SubplotFigure ? fig : nothing, readonly, clone_readonly, checked_size)
+	sf = fig isa SubplotFigure ? fig : nothing
+	insets = _fin_insets(p, sf)
+	hosts = Set{Symbol}()
+	for inset in insets
+		host = _fin_inset_host_region(p, inset)
+		host === nothing || push!(hosts, _fin_axis_key(host.key))
+	end
+	ctx = _FinContext(target, p, sf, readonly, clone_readonly, checked_size,
+		live === nothing ? nothing : collect(Any, live), insets, hosts)
 	updates = _fin_match_group_updates(p.layout)
 	_fin_sticky_updates!(updates, p)
 	wrote = _fin_relayout!(ctx, updates)

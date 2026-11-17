@@ -389,7 +389,12 @@ end
 		plot_heatmap!(inset, rand(3, 3); row=1, col=2, inset=1)
 		colorbar!(inset; row=1, col=2, ticks=[0, 1])
 		@test _scb_bar(inset.plot.data[1])[:tickvals] == [0.0, 1.0]
-		@test _scb_bar(inset.plot.data[1])[:x] ≈ 0.8 + _SCB._CBAR_CELL_PAD
+		# 2.0 (D10): the bar of an inset trace sits right of its host cell,
+		# level with the inset, not over the host plot.
+		inset_bar = _scb_bar(inset.plot.data[1])
+		@test inset_bar[:x] ≈ 1.0 + _SCB._CBAR_CELL_PAD
+		@test inset_bar[:y] ≈ 0.75
+		@test inset_bar[:len] ≈ 0.3
 	end
 
 	@testset "shared_colorbar! (F7, #51, #231)" begin
@@ -665,5 +670,68 @@ end
 		# Grey levels work wherever colours are parsed.
 		sf = subplots(1, 1; sync=false, legend_bgcolor="0.9")
 		@test sf.legend_bgcolor == "#E6E6E6"
+	end
+
+	@testset "bar details (D10 M4)" begin
+		# A placed bar is exactly as long as its cell: no padding at its ends.
+		right = _SCB._cbar_placement(:right, (0.0, 0.4), (0.2, 0.8), 0.01)
+		@test right[:ypad] == 0 && !haskey(right, :xpad)
+		@test right[:len] ≈ 0.6
+		bottom = _SCB._cbar_placement(:bottom, (0.0, 0.4), (0.2, 0.8), 0.01)
+		@test bottom[:xpad] == 0 && !haskey(bottom, :ypad)
+
+		# shared_colorbar! keeps limits the members set themselves.
+		sf = subplots(1, 2; sync=false)
+		x = collect(range(0, 1; length=5))
+		z = [0.998 * sin(2pi * a) * cos(2pi * b) for a in x, b in x]
+		plot_heatmap!(sf, x, x, z; row=1, col=1, crange=[-1, 1])
+		plot_heatmap!(sf, x, x, 0.5 .* z; row=1, col=2, crange=[-1, 1])
+		shared_colorbar!(sf)
+		axis = _scb_axis(sf, :coloraxis)
+		@test (axis[:cmin], axis[:cmax]) == (-1.0, 1.0)
+		# Without explicit limits the data range is used.
+		auto = subplots(1, 2; sync=false)
+		plot_heatmap!(auto, x, x, z; row=1, col=1)
+		plot_heatmap!(auto, x, x, 0.5 .* z; row=1, col=2)
+		shared_colorbar!(auto)
+		axis = _scb_axis(auto, :coloraxis)
+		@test (axis[:cmin], axis[:cmax]) == extrema(z)
+
+		# A math title on the right sits beside the tick labels; the right
+		# margin grows to fit it.
+		f = subplots(1, 1; sync=false)
+		plot_heatmap!(f, x, x, z)
+		colorbar!(f; title=raw"$E_z$", title_side=:right, ticks=[-1, 0, 1])
+		bar = _scb_bar(f.plot.data[1])
+		note = only(_scb_annotations(f, _SCB._CBAR_TITLE_ANNOTATION_PREFIX))
+		font = _SCB._cbar_font_size(f.plot, bar)
+		labels = 2 * _SCB._CBAR_CHAR_EM * font                               # "-1"
+		@test note[:xshift] ≈ _SCB._CBAR_DEFAULT_XPAD + bar[:thickness] + 3 + labels + 4
+		@test note[:textangle] == -90
+		@test _scb_fields(_scb_layout(f)[:margin])[:r] > 50
+
+		# A title on top clears the end tick label (half a text line above
+		# the bar end when the bar has no end padding).
+		top = subplots(1, 1; sync=false)
+		plot_heatmap!(top, x, x, z)
+		colorbar!(top; title=raw"$E_z$", title_side=:top)
+		note = only(_scb_annotations(top, _SCB._CBAR_TITLE_ANNOTATION_PREFIX))
+		font = _SCB._cbar_font_size(top.plot, _scb_bar(top.plot.data[1]))
+		@test note[:yshift] ≈ 2 + 0.5 * _SCB._CBAR_LINE_EM * font
+		@test note[:yanchor] == "bottom"
+
+		# A bar `_finalize_figure!` placed on a scratch figure is placed again
+		# for the cell it lands in.
+		p = Plot(
+			[heatmap(z=[1 2; 3 4], xaxis="x2", yaxis="y2",
+				colorbar=attr(x=0.9, xanchor="left", xref="paper", len=1.0, lenmode="fraction", y=0.5, ypad=0))],
+			Layout(xaxis2=attr(domain=[0.55, 1.0]), yaxis2=attr(domain=[0.0, 0.45])),
+		)
+		_SCB._place_cell_colorbars!(p, 1)
+		bar = _scb_bar(p.data[1])
+		@test bar[:x] ≈ 1.0 + _SCB._CBAR_CELL_PAD
+		@test bar[:len] ≈ 0.45
+		@test bar[:y] ≈ 0.225
+		@test !haskey(bar, :xref)
 	end
 end

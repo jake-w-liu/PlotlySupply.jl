@@ -71,12 +71,12 @@ const _CBAR_ROOT_TRACE_TYPES = (
 )
 const _CBAR_CONTOUR_TYPES = ("contour", "contourcarpet", "histogram2dcontour")
 
-# Colorbar keys that position a bar. `shared_colorbar!` carries the other
-# settings (ticks, number format, thickness, …) of the bars it removes over
-# to the shared bar, never these.
 # The placement keys `_finalize_figure!` writes on a bar it owns.
 const _CBAR_FINALIZE_KEYS = (:x, :y, :xanchor, :yanchor, :xref, :ypad, :len, :lenmode)
 
+# Colorbar keys that position a bar. `shared_colorbar!` carries the other
+# settings (ticks, number format, thickness, …) of the bars it removes over
+# to the shared bar, never these.
 const _CBAR_GEOMETRY_KEYS = (
 	:x, :y, :xanchor, :yanchor, :xref, :yref, :xpad, :ypad,
 	:len, :lenmode, :orientation,
@@ -967,6 +967,12 @@ end
 
 function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDict)
 	merge!(bar, placement)
+	# An explicit position or length takes the bar out of
+	# `_finalize_figure!`'s hands: its ownership mark is `xref = "paper"`
+	# (`_fin_bar_owned`), which is plotly's default anyway.
+	if (opts.x !== nothing || opts.y !== nothing || opts.len > 0) && _cbar_string(bar, :xref, "") == "paper"
+		delete!(bar, :xref)
+	end
 	if opts.thickness > 0
 		bar[:thickness] = opts.thickness
 		bar[:thicknessmode] = "pixels"
