@@ -5,6 +5,7 @@ end
 PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
 
 @testset "Modern MapLibre maps" begin
+    println(stderr, "PS_TEST_BEGIN modern_maps.jl:7 @testset \"Modern MapLibre maps\" begin"); flush(stderr)
     trace_type(trace) = String(trace.fields[:type])
     model_json(plot) =
         PlotlyBase.JSON.json(
@@ -13,6 +14,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
         )
 
     @testset "renderer asset and HTML version alignment" begin
+        println(stderr, "PS_TEST_BEGIN modern_maps.jl:15 @testset \"renderer asset and HTML version alignment\" begin"); flush(stderr)
         @test PlotlySupply._PLOTLYJS_VERSION == "2.35.2"
         @test PlotlyBase.plotly_version() == "2.35.2"
 
@@ -69,6 +71,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
     end
 
     @testset "schema-independent trace constructors" begin
+        println(stderr, "PS_TEST_BEGIN modern_maps.jl:71 @testset \"schema-independent trace constructors\" begin"); flush(stderr)
         lon = 1:3
         lat = 4:6
         z = 7:9
@@ -106,6 +109,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
     end
 
     @testset "high-level construction and validation" begin
+        println(stderr, "PS_TEST_BEGIN modern_maps.jl:108 @testset \"high-level construction and validation\" begin"); flush(stderr)
         lon = 1.0:1.0:3.0
         lat = 11.0:1.0:13.0
         z = 21.0:1.0:23.0
@@ -289,6 +293,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
     end
 
     @testset "update_maps! is isolated and atomic" begin
+        println(stderr, "PS_TEST_BEGIN modern_maps.jl:291 @testset \"update_maps! is isolated and atomic\" begin"); flush(stderr)
         style = Dict(
             "version" => 8,
             "sources" => Dict{String,Any}(),
@@ -557,6 +562,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
     end
 
     @testset "mixed modern and legacy subplot routing" begin
+        println(stderr, "PS_TEST_BEGIN modern_maps.jl:559 @testset \"mixed modern and legacy subplot routing\" begin"); flush(stderr)
         specs = [
             Spec(kind="map") Spec(kind="mapbox") Spec(kind="scattermap")
             Spec(kind="scattermapbox") missing Spec(kind="densitymap")
@@ -684,6 +690,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
     end
 
     @testset "blank cells, shared axes, and titles" begin
+        println(stderr, "PS_TEST_BEGIN modern_maps.jl:686 @testset \"blank cells, shared axes, and titles\" begin"); flush(stderr)
         blank = subplots(
             1,
             1;
@@ -879,6 +886,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
     end
 
     @testset "large lazy payloads stay bounded" begin
+        println(stderr, "PS_TEST_BEGIN modern_maps.jl:881 @testset \"large lazy payloads stay bounded\" begin"); flush(stderr)
         payload = 1:1_000_000
         geojson = Dict(
             "type" => "FeatureCollection",
@@ -1112,6 +1120,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
     end
 
     @testset "SyncPlot renderer failure rolls back" begin
+        println(stderr, "PS_TEST_BEGIN modern_maps.jl:1114 @testset \"SyncPlot renderer failure rolls back\" begin"); flush(stderr)
         ec = _LifecycleFakeElectron()
         initial = plot_scattermap(
             [0.0],

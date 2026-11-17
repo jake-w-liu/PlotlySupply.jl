@@ -203,6 +203,7 @@ function _exercise_splice_overload!(
 end
 
 @testset "raw Plot layout updater parity" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:205 @testset \"raw Plot layout updater parity\" begin"); flush(stderr)
     updater_fields = (
         update_geos! => :geo,
         update_mapboxes! => :mapbox,
@@ -252,6 +253,7 @@ end
 end
 
 @testset "plot_stem! matches constructor colors" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:254 @testset \"plot_stem! matches constructor colors\" begin"); flush(stderr)
     cases = (
         (
             x=[1, 2, 3],
@@ -319,6 +321,7 @@ end
 end
 
 @testset "per-series styling ignores surplus vector entries" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:321 @testset \"per-series styling ignores surplus vector entries\" begin"); flush(stderr)
     coordinates = UnitRange{Int}[1:3, 4:6]
     style = (
         mode=["markers", "lines", "lines+markers"],
@@ -403,6 +406,7 @@ end
 end
 
 @testset "pie-like traces receive default legend styling" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:405 @testset \"pie-like traces receive default legend styling\" begin"); flush(stderr)
     constructors = (
         () -> plot_pie(
             [3, 2, 1];
@@ -511,6 +515,7 @@ end
 end
 
 @testset "mapbox updaters reject invalid view values atomically" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:513 @testset \"mapbox updaters reject invalid view values atomically\" begin"); flush(stderr)
     invalid_values = (true, NaN, Inf, -Inf, "not-a-number")
     for target_kind in (:plot, :syncplot)
         for option in (:zoom, :center_lon, :center_lat)
@@ -558,6 +563,7 @@ end
 end
 
 @testset "redraw/purge use their exact renderer operations" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:560 @testset \"redraw/purge use their exact renderer operations\" begin"); flush(stderr)
     for target_kind in (:syncplot, :registered_syncplot, :registered_plot)
         p = _mutator_probe_plot()
         sp, scripts = _command_probe_syncplot(
@@ -623,6 +629,7 @@ end
 end
 
 @testset "renderer promises and statuses are observable" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:625 @testset \"renderer promises and statuses are observable\" begin"); flush(stderr)
     sp, state = _renderer_probe_syncplot()
     p = sp.plot
 
@@ -800,6 +807,7 @@ end
 end
 
 @testset "extend/prepend keyword conversion" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:802 @testset \"extend/prepend keyword conversion\" begin"); flush(stderr)
     scalar = PlotlySupply._trace_splice_tovec(4)
     @test scalar == Vector[[4]]
 
@@ -866,6 +874,7 @@ end
 end
 
 @testset "extend/prepend overload and refresh parity" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:868 @testset \"extend/prepend overload and refresh parity\" begin"); flush(stderr)
     for splice! in (extendtraces!, prependtraces!)
         for target_kind in (:plot, :syncplot)
             for form in (
@@ -922,6 +931,7 @@ end
 end
 
 @testset "extend/prepend staging is atomic" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:924 @testset \"extend/prepend staging is atomic\" begin"); flush(stderr)
     updates = AbstractVector[[4], _FailingSpliceVector()]
     for splice! in (extendtraces!, prependtraces!)
         for target_kind in (:plot, :syncplot)
@@ -1009,6 +1019,7 @@ function _test_plot_metadata_clone(
 end
 
 @testset "copy/fork preserve animated plot metadata" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:1011 @testset \"copy/fork preserve animated plot metadata\" begin"); flush(stderr)
     source = _animated_config_plot()
     @test source isa PlotlySupply._RefreshablePlot
     @test which(copy, (typeof(source),)).module === PlotlySupply
@@ -1076,6 +1087,7 @@ end
 end
 
 @testset "public plot materializes abstract containers for safe dispatch" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:1078 @testset \"public plot materializes abstract containers for safe dispatch\" begin"); flush(stderr)
     traces = _MutatorProbeTrace[
         GenericTrace(IdDict{Symbol,Any}(
             :type => "scatter",
@@ -1182,6 +1194,7 @@ end
 end
 
 @testset "non-mutating verbs preserve frames and config" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:1184 @testset \"non-mutating verbs preserve frames and config\" begin"); flush(stderr)
     source = _animated_config_plot()
     operations = (
         p -> restyle(p, Dict(:name => "restyled")),
@@ -1212,6 +1225,7 @@ end
 end
 
 @testset "mutator parity has no method ambiguity" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:1214 @testset \"mutator parity has no method ambiguity\" begin"); flush(stderr)
     ambiguities = Test.detect_ambiguities(
         PlotlyBase,
         PlotlySupply;
@@ -1224,6 +1238,7 @@ end
 end
 
 @testset "mutator parity loads without method overwrite" begin
+    println(stderr, "PS_TEST_BEGIN mutator_parity.jl:1226 @testset \"mutator parity loads without method overwrite\" begin"); flush(stderr)
     project_file = something(
         Base.active_project(),
         normpath(joinpath(@__DIR__, "..", "Project.toml")),

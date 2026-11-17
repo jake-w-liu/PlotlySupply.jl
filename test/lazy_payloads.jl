@@ -19,6 +19,7 @@ function _append_large_lazy_subplot!(
 end
 
 @testset "CRC: large payloads stay lazy" begin
+    println(stderr, "PS_TEST_BEGIN lazy_payloads.jl:21 @testset \"CRC: large payloads stay lazy\" begin"); flush(stderr)
     lazy_x = reinterpret(
         Float64,
         UInt64[
@@ -38,6 +39,7 @@ end
     lazy_matrix = PermutedDimsArray(matrix_parent, (2, 1))
 
     @testset "matrix traces accept lazy arrays" begin
+        println(stderr, "PS_TEST_BEGIN lazy_payloads.jl:40 @testset \"matrix traces accept lazy arrays\" begin"); flush(stderr)
         for (constructor, mutator) in (
             (plot_heatmap, plot_heatmap!),
             (plot_contour, plot_contour!),
@@ -264,6 +266,7 @@ end
     end
 
     @testset "extended traces retain caller payloads" begin
+        println(stderr, "PS_TEST_BEGIN lazy_payloads.jl:266 @testset \"extended traces retain caller payloads\" begin"); flush(stderr)
         labels_parent = ["root", "left", "right"]
         labels = @view labels_parent[:]
         parents_parent = ["", "root", "root"]
@@ -646,6 +649,7 @@ end
     end
 
     @testset "error-bar arrays are shared without flattening" begin
+        println(stderr, "PS_TEST_BEGIN lazy_payloads.jl:648 @testset \"error-bar arrays are shared without flattening\" begin"); flush(stderr)
         x = 1:3
         series = [
             [1.0, 2.0, 3.0],
@@ -701,6 +705,7 @@ end
     end
 
     @testset "million-element constructors stay allocation bounded" begin
+        println(stderr, "PS_TEST_BEGIN lazy_payloads.jl:703 @testset \"million-element constructors stay allocation bounded\" begin"); flush(stderr)
         payload = 1:1_000_000
         field = reshape(payload, length(payload), 1)
         measure = fill("relative", length(payload))

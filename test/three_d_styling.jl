@@ -134,8 +134,10 @@ function _test_rich_three_d_scene(
 end
 
 @testset "CRC: 3D appenders preserve omitted scene styling" begin
+    println(stderr, "PS_TEST_BEGIN three_d_styling.jl:136 @testset \"CRC: 3D appenders preserve omitted scene styling\" begin"); flush(stderr)
     for kind in (:surface_xyz, :surface_z, :scatter3d, :quiver3d)
         @testset "$kind" begin
+            println(stderr, "PS_TEST_BEGIN three_d_styling.jl:138 @testset \"\$kind\" begin"); flush(stderr)
             figure = plot_scatter3d(
                 1:3,
                 1:3,
@@ -159,8 +161,10 @@ end
 end
 
 @testset "CRC: 3D appenders apply explicit scene styling" begin
+    println(stderr, "PS_TEST_BEGIN three_d_styling.jl:161 @testset \"CRC: 3D appenders apply explicit scene styling\" begin"); flush(stderr)
     for kind in (:surface_xyz, :surface_z, :scatter3d, :quiver3d)
         @testset "$kind" begin
+            println(stderr, "PS_TEST_BEGIN three_d_styling.jl:163 @testset \"\$kind\" begin"); flush(stderr)
             figure = plot_scatter3d(
                 1:3,
                 1:3,
@@ -208,8 +212,10 @@ end
 end
 
 @testset "CRC: 3D appenders preserve rich scene siblings" begin
+    println(stderr, "PS_TEST_BEGIN three_d_styling.jl:210 @testset \"CRC: 3D appenders preserve rich scene siblings\" begin"); flush(stderr)
     for kind in (:surface_xyz, :surface_z, :scatter3d, :quiver3d)
         @testset "$kind raw Plot" begin
+            println(stderr, "PS_TEST_BEGIN three_d_styling.jl:212 @testset \"\$kind raw Plot\" begin"); flush(stderr)
             figure = _seed_rich_three_d_scene!(
                 plot_scatter3d(1:3, 1:3, 1:3),
             )
@@ -239,6 +245,7 @@ end
         end
 
         @testset "$kind SubplotFigure" begin
+            println(stderr, "PS_TEST_BEGIN three_d_styling.jl:241 @testset \"\$kind SubplotFigure\" begin"); flush(stderr)
             specs = Union{Missing, Spec}[Spec(kind="scene");;]
             figure = _seed_rich_three_d_scene!(
                 subplots(
@@ -277,6 +284,7 @@ end
 end
 
 @testset "CRC: 3D appenders can select orthographic projection" begin
+    println(stderr, "PS_TEST_BEGIN three_d_styling.jl:279 @testset \"CRC: 3D appenders can select orthographic projection\" begin"); flush(stderr)
     for kind in (:scatter3d, :quiver3d)
         figure = _seed_rich_three_d_scene!(
             plot_scatter3d(1:3, 1:3, 1:3),
@@ -302,6 +310,7 @@ end
 end
 
 @testset "CRC: scatter3d constructor and mutator style parity" begin
+    println(stderr, "PS_TEST_BEGIN three_d_styling.jl:304 @testset \"CRC: scatter3d constructor and mutator style parity\" begin"); flush(stderr)
     style_options = (
         mode=["markers", "lines"],
         color=["red", "blue"],

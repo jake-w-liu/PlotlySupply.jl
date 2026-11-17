@@ -218,9 +218,11 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     error("injected destination write failure")
 
 @testset "transactional export lifecycle" begin
+    println(stderr, "PS_TEST_BEGIN export_transactions.jl:220 @testset \"transactional export lifecycle\" begin"); flush(stderr)
     p = plot_scatter(1:2, 1:2)
 
     @testset "numeric preflight is strict and precedes destination mutation" begin
+        println(stderr, "PS_TEST_BEGIN export_transactions.jl:223 @testset \"numeric preflight is strict and precedes destination mutation\" begin"); flush(stderr)
         invalid = (
             (:width, true),
             (:width, 0),
@@ -297,6 +299,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     end
 
     @testset "filename formats infer as concrete strings" begin
+        println(stderr, "PS_TEST_BEGIN export_transactions.jl:299 @testset \"filename formats infer as concrete strings\" begin"); flush(stderr)
         @test PlotlySupply._filename_export_format("figure.PNG", nothing) == "png"
         @test PlotlySupply._filename_export_format("figure", nothing) == "png"
         mktempdir() do dir
@@ -317,6 +320,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     end
 
     @testset "window construction and readiness are transactional" begin
+        println(stderr, "PS_TEST_BEGIN export_transactions.jl:319 @testset \"window construction and readiness are transactional\" begin"); flush(stderr)
         state = PlotlySupply._ExportState()
         ec = _ExportTestBackend(; ready_mode=:waiting)
         try
@@ -438,6 +442,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     end
 
     @testset "one state lock prevents duplicate and cross-format capture" begin
+        println(stderr, "PS_TEST_BEGIN export_transactions.jl:440 @testset \"one state lock prevents duplicate and cross-format capture\" begin"); flush(stderr)
         state = PlotlySupply._ExportState()
         ec = _ExportTestBackend(
             image_urls=[
@@ -517,6 +522,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     end
 
     @testset "PDF failures reclaim private jobs and directories" begin
+        println(stderr, "PS_TEST_BEGIN export_transactions.jl:519 @testset \"PDF failures reclaim private jobs and directories\" begin"); flush(stderr)
         for failure in (:poll, :start, :timeout)
             state = PlotlySupply._ExportState()
             ec = _ExportTestBackend()
@@ -547,6 +553,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     end
 
     @testset "captured output writes occur after releasing renderer lock" begin
+        println(stderr, "PS_TEST_BEGIN export_transactions.jl:549 @testset \"captured output writes occur after releasing renderer lock\" begin"); flush(stderr)
         state = PlotlySupply._ExportState()
         image_bytes = collect(codeunits("image-payload"))
         pdf_bytes = collect(codeunits("%PDF-payload"))
@@ -587,6 +594,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     end
 
     @testset "PDF copy is exact and bounded" begin
+        println(stderr, "PS_TEST_BEGIN export_transactions.jl:589 @testset \"PDF copy is exact and bounded\" begin"); flush(stderr)
         mktempdir() do dir
             small_path = joinpath(dir, "small.pdf")
             small = [UInt8(index % 251) for index in 0:65_536]
@@ -644,6 +652,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     end
 
     @testset "filename publication is one atomic rename" begin
+        println(stderr, "PS_TEST_BEGIN export_transactions.jl:646 @testset \"filename publication is one atomic rename\" begin"); flush(stderr)
         mktempdir() do dir
             target = joinpath(dir, "figure.png")
             state = PlotlySupply._ExportState()

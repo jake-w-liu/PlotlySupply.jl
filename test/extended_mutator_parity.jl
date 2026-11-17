@@ -114,6 +114,7 @@ function _extended_mutator_keywords(function_object)
 end
 
 @testset "CRC: extended constructors and mutators expose the same options" begin
+    println(stderr, "PS_TEST_BEGIN extended_mutator_parity.jl:116 @testset \"CRC: extended constructors and mutators expose the same options\" begin"); flush(stderr)
     for (constructor, mutator) in (
         (plot_area, plot_area!),
         (plot_candlestick, plot_candlestick!),
@@ -131,6 +132,7 @@ end
 end
 
 @testset "CRC: extended Cartesian mutators apply layout options" begin
+    println(stderr, "PS_TEST_BEGIN extended_mutator_parity.jl:133 @testset \"CRC: extended Cartesian mutators apply layout options\" begin"); flush(stderr)
     area_figure = plot_scatter(1:3, 1:3)
     @test plot_area!(
         area_figure,
@@ -301,6 +303,7 @@ end
 end
 
 @testset "CRC: ternary mutators preserve axis siblings" begin
+    println(stderr, "PS_TEST_BEGIN extended_mutator_parity.jl:303 @testset \"CRC: ternary mutators preserve axis siblings\" begin"); flush(stderr)
     figure = plot_ternary(
         [0.2, 0.3],
         [0.3, 0.4],
@@ -387,6 +390,7 @@ end
 end
 
 @testset "CRC: extended 3D mutators apply and preserve scene options" begin
+    println(stderr, "PS_TEST_BEGIN extended_mutator_parity.jl:389 @testset \"CRC: extended 3D mutators apply and preserve scene options\" begin"); flush(stderr)
     x = [0.0, 1.0, 0.0, 0.0]
     y = [0.0, 0.0, 1.0, 0.0]
     z = [0.0, 0.0, 0.0, 1.0]
@@ -455,6 +459,7 @@ end
 end
 
 @testset "CRC: mesh topology is validated atomically" begin
+    println(stderr, "PS_TEST_BEGIN extended_mutator_parity.jl:457 @testset \"CRC: mesh topology is validated atomically\" begin"); flush(stderr)
     x = [0.0, 1.0, 0.0, 0.0]
     y = [0.0, 0.0, 1.0, 0.0]
     z = [0.0, 0.0, 0.0, 1.0]

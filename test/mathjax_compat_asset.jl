@@ -1,5 +1,7 @@
 @testset "MathJax font-context compatibility asset" begin
+    println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:1 @testset \"MathJax font-context compatibility asset\" begin"); flush(stderr)
     @testset "public update! remains the PlotlyBase binding" begin
+        println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:2 @testset \"public update! remains the PlotlyBase binding\" begin"); flush(stderr)
         @test isdefined(PlotlySupply, :update!)
         @test PlotlySupply.update! === PlotlySupply.PlotlyBase.update!
         @test update! === PlotlySupply.PlotlyBase.update!
@@ -20,6 +22,7 @@
     patched = PlotlySupply._patch_plotlyjs_math_fonts(source)
 
     @testset "guarded reversible font and serialization changes" begin
+        println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:22 @testset \"guarded reversible font and serialization changes\" begin"); flush(stderr)
         @test count(needle, source) == 1
         @test count(replacement, patched) == 1
         @test !occursin(needle, patched)
@@ -44,6 +47,7 @@
     end
 
     @testset "lazy state, shared publication and explicit cleanup" begin
+        println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:46 @testset \"lazy state, shared publication and explicit cleanup\" begin"); flush(stderr)
         mktempdir() do parent
             state = PlotlySupply._PlotlyJSCompatAssetState()
             @test state.asset === nothing
@@ -67,6 +71,7 @@
     end
 
     @testset "concurrent callers publish one complete asset" begin
+        println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:69 @testset \"concurrent callers publish one complete asset\" begin"); flush(stderr)
         mktempdir() do parent
             state = PlotlySupply._PlotlyJSCompatAssetState()
             writes = Threads.Atomic{Int}(0)
@@ -86,6 +91,7 @@
     end
 
     @testset "source, license and write failures do not publish" begin
+        println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:88 @testset \"source, license and write failures do not publish\" begin"); flush(stderr)
         mktempdir() do parent
             input = joinpath(parent, "input");mkdir(input)
             copied = joinpath(input, "plotly.min.js")
@@ -122,6 +128,7 @@
     end
 
     @testset "failed cleanup retains ownership and the primary error" begin
+        println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:124 @testset \"failed cleanup retains ownership and the primary error\" begin"); flush(stderr)
         mktempdir() do parent
             state = PlotlySupply._PlotlyJSCompatAssetState()
             failure = ErrorException("primary write failure")
@@ -154,6 +161,7 @@
     end
 
     @testset "changed published data fail closed without touching the artifact" begin
+        println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:156 @testset \"changed published data fail closed without touching the artifact\" begin"); flush(stderr)
         mktempdir() do parent
             state = PlotlySupply._PlotlyJSCompatAssetState()
             path = PlotlySupply._plotlyjs_render_asset_path(;state,cache_parent=parent)
@@ -173,6 +181,7 @@
     end
 
     @testset "portable HTML source guard and shared rendering routes" begin
+        println(stderr, "PS_TEST_BEGIN mathjax_compat_asset.jl:175 @testset \"portable HTML source guard and shared rendering routes\" begin"); flush(stderr)
         tag = "<script src=\"$(PlotlySupply._PLOTLY_CDN_URL)\"></script>"
         @test_throws ErrorException PlotlySupply._inline_plotlyjs_source("none", patched, license)
         @test_throws ErrorException PlotlySupply._inline_plotlyjs_source(tag*tag, patched, license)

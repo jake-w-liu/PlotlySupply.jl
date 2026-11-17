@@ -709,6 +709,7 @@ function _operation_script_name(operation::Symbol)
 end
 
 @testset "renderer-backed mutation success is staged and incremental" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:711 @testset \"renderer-backed mutation success is staged and incremental\" begin"); flush(stderr)
     operations = (
         :relayout,
         :restyle_int,
@@ -750,6 +751,7 @@ end
 end
 
 @testset "renderer failure rolls back direct and registered mutations" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:752 @testset \"renderer failure rolls back direct and registered mutations\" begin"); flush(stderr)
     operations = (
         :relayout,
         :restyle_int,
@@ -849,6 +851,7 @@ function _apply_full_refresh_operation!(target, operation::Symbol)
 end
 
 @testset "full-refresh compatibility mutations roll back on renderer failure" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:851 @testset \"full-refresh compatibility mutations roll back on renderer failure\" begin"); flush(stderr)
     operations = (
         :addtraces,
         :addtraces_index,
@@ -974,6 +977,7 @@ function _large_high_level_map_fixture(
 end
 
 @testset "high-level append transactions stay incremental and bounded" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:976 @testset \"high-level append transactions stay incremental and bounded\" begin"); flush(stderr)
     for function_name in
         PlotlySupply._TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS
         @test PlotlySupply._is_transactional_high_level_plot_mutator(
@@ -1031,6 +1035,7 @@ end
 end
 
 @testset "high-level append renderer failure restores old payload" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1033 @testset \"high-level append renderer failure restores old payload\" begin"); flush(stderr)
     for registered in (false, true)
         primary = ErrorException(
             "injected-$registered-high-level-map-failure",
@@ -1102,6 +1107,7 @@ end
 end
 
 @testset "high-level fast path falls back for mutable aliases" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1104 @testset \"high-level fast path falls back for mutable aliases\" begin"); flush(stderr)
     shared = Dict{Symbol,Any}(:size => 10)
     trace = scatter(x=[1], y=[1])
     trace.fields[:marker] = shared
@@ -1202,6 +1208,7 @@ end
 end
 
 @testset "existing-trace high-level mutations retain full staging" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1204 @testset \"existing-trace high-level mutations retain full staging\" begin"); flush(stderr)
     old_surface = surface(z=[1.0 2.0; 3.0 4.0])
     p = Plot(old_surface)
     state = _TransactionRendererState()
@@ -1235,6 +1242,7 @@ end
 end
 
 @testset "model-root aliases roll back on renderer failure" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1237 @testset \"model-root aliases roll back on renderer failure\" begin"); flush(stderr)
     for registered in (false, true),
         model_field in (:data, :frames, :config)
         primary = ErrorException(
@@ -1290,6 +1298,7 @@ end
 end
 
 @testset "model-root side effects commit without splitting aliases" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1292 @testset \"model-root side effects commit without splitting aliases\" begin"); flush(stderr)
     for target in (:frames, :config)
         fields = _TransactionModelMutatingFields(
             Dict{Symbol,Any}(
@@ -1510,6 +1519,7 @@ end
 end
 
 @testset "model-root side effects roll back before commit" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1512 @testset \"model-root side effects roll back before commit\" begin"); flush(stderr)
     for target in (:frames, :config)
         fields = _TransactionModelMutatingFields(
             Dict{Symbol,Any}(
@@ -1625,6 +1635,7 @@ end
 end
 
 @testset "custom layouts retain model-root aliases" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1627 @testset \"custom layouts retain model-root aliases\" begin"); flush(stderr)
     trace = scatter(y=[1, 2])
     layout = _TransactionCustomLayout(
         Dict{Symbol,Any}(:title => "custom-layout"),
@@ -1669,6 +1680,7 @@ end
 end
 
 @testset "structural data transactions preserve public roots" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1671 @testset \"structural data transactions preserve public roots\" begin"); flush(stderr)
     p, sp, state = _transaction_fixture()
     original_data = p.data
     first, second = p.data
@@ -1723,6 +1735,7 @@ end
 end
 
 @testset "full-model staging preserves unchanged custom trace identities" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:1725 @testset \"full-model staging preserves unchanged custom trace identities\" begin"); flush(stderr)
     for mode in (:raw, :direct, :registered)
         custom = _TransactionCustomTrace(
             Dict{Symbol,Any}(
@@ -2535,6 +2548,7 @@ end
 end
 
 @testset "custom field dictionaries stage without touching originals" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:2537 @testset \"custom field dictionaries stage without touching originals\" begin"); flush(stderr)
     fields = _TransactionSelfCopyDict(
         Dict{Symbol,Any}(
             :type => "scatter",
@@ -2655,6 +2669,7 @@ function _subplot_metadata_snapshot(sf::SubplotFigure)
 end
 
 @testset "subplot high-level appends use incremental transactions" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:2657 @testset \"subplot high-level appends use incremental transactions\" begin"); flush(stderr)
     for registered in (false, true)
         p, sp, sf, state = _subplot_transaction_fixture(
             ;
@@ -2757,6 +2772,7 @@ end
 end
 
 @testset "subplot layout aliases select safe renderer transactions" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:2759 @testset \"subplot layout aliases select safe renderer transactions\" begin"); flush(stderr)
     p, sp, sf, state = _subplot_transaction_fixture(
         per_subplot_legends=false,
     )
@@ -3023,6 +3039,7 @@ function _apply_subplot_transaction_operation!(
 end
 
 @testset "subplot composites roll back model and metadata together" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3025 @testset \"subplot composites roll back model and metadata together\" begin"); flush(stderr)
     operations = (
         :addtraces,
         :plot_scatter,
@@ -3062,6 +3079,7 @@ end
 end
 
 @testset "purge commits only after its renderer command" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3064 @testset \"purge commits only after its renderer command\" begin"); flush(stderr)
     for registered in (false, true)
         primary = ErrorException(
             "injected-$registered-purge-renderer-failure",
@@ -3131,6 +3149,7 @@ end
 end
 
 @testset "failed recovery marks desync and next mutation repairs it" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3133 @testset \"failed recovery marks desync and next mutation repairs it\" begin"); flush(stderr)
     primary = ErrorException("injected-primary-renderer-failure")
     recovery = ErrorException("injected-renderer-recovery-failure")
     p, sp, state = _transaction_fixture(
@@ -3166,6 +3185,7 @@ end
 end
 
 @testset "post-render interruption forces synchronization recovery" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3168 @testset \"post-render interruption forces synchronization recovery\" begin"); flush(stderr)
     p, sp, state = _transaction_fixture()
     resources = sp._resources
     prepare = function (target, current)
@@ -3207,6 +3227,7 @@ PlotlyBase.JSON.lower(::_TransactionJSONFailure) =
     error("injected transaction JSON failure")
 
 @testset "preflight and serialization failures never touch renderer" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3209 @testset \"preflight and serialization failures never touch renderer\" begin"); flush(stderr)
     p, sp, state = _transaction_fixture()
     snapshot = _transaction_snapshot(p)
     try
@@ -3268,6 +3289,7 @@ PlotlyBase.JSON.lower(::_TransactionJSONFailure) =
 end
 
 @testset "react conversion and model replacement commit only after render" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3270 @testset \"react conversion and model replacement commit only after render\" begin"); flush(stderr)
     for registered in (false, true)
         p, sp, state = _transaction_fixture(; register=registered)
         target = registered ? p : sp
@@ -3345,6 +3367,7 @@ end
 end
 
 @testset "shared nested aliases and large payloads stay efficient" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3347 @testset \"shared nested aliases and large payloads stay efficient\" begin"); flush(stderr)
     state = _TransactionRendererState()
     payload = collect(1:1_000_000)
     shared_marker = Dict{Symbol,Any}(:color => payload)
@@ -3387,6 +3410,7 @@ end
 end
 
 @testset "associative attributes remain atomic renderer values" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3389 @testset \"associative attributes remain atomic renderer values\" begin"); flush(stderr)
     original = Dict{Symbol,Any}(
         :labelalias => Dict("a.b" => "old"),
         :geojson => Dict(
@@ -3451,6 +3475,7 @@ end
 end
 
 @testset "single-trace staging does not clone unrelated trace metadata" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3453 @testset \"single-trace staging does not clone unrelated trace metadata\" begin"); flush(stderr)
     trace_count = 20_000
     p = Plot([
         scatter(y=[ind], name="trace-$ind")
@@ -3503,6 +3528,7 @@ end
 end
 
 @testset "layout and trace aliases remain one staged graph" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3505 @testset \"layout and trace aliases remain one staged graph\" begin"); flush(stderr)
     state = _TransactionRendererState()
     shared_font = Dict{Symbol,Any}(:size => 10)
     trace = scatter(y=[1, 2, 3], mode="text", text=["a", "b", "c"])
@@ -3556,6 +3582,7 @@ end
 end
 
 @testset "aliases through roots and arrays remain one staged graph" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3558 @testset \"aliases through roots and arrays remain one staged graph\" begin"); flush(stderr)
     state = _TransactionRendererState()
     layout = Layout(title="old")
     trace = scatter(y=[1])
@@ -3642,6 +3669,7 @@ end
 end
 
 @testset "incremental alias expansion covers custom graph nodes" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:3644 @testset \"incremental alias expansion covers custom graph nodes\" begin"); flush(stderr)
     for mode in (:raw, :direct)
         shared = Dict{Symbol,Any}(:size => 10)
         trace = scatter(y=[1])
@@ -4454,6 +4482,7 @@ end
 end
 
 @testset "incremental outer-root candidates commit coherently" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:4456 @testset \"incremental outer-root candidates commit coherently\" begin"); flush(stderr)
     custom = _TransactionDataRootMutatingTrace(
         Dict{Symbol,Any}(:type => "scatter"),
         :push,
@@ -4884,6 +4913,7 @@ end
 end
 
 @testset "self-copying alias wrappers remain isolated on failure" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:4886 @testset \"self-copying alias wrappers remain isolated on failure\" begin"); flush(stderr)
     for wrapper_kind in (:array, :dict)
         shared = Dict{Symbol,Any}(:size => 10)
         first = scatter(y=[1])
@@ -4996,6 +5026,7 @@ end
 end
 
 @testset "caller-owned setter containers roll back atomically" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:4998 @testset \"caller-owned setter containers roll back atomically\" begin"); flush(stderr)
     primary = ErrorException("injected-caller-restyle-failure")
     shared = Dict{Symbol,Any}(:size => 3)
     first = scatter(y=[1])
@@ -5120,6 +5151,7 @@ function Base.iterate(values::_RegistryProbeDict, state::Int=1)
 end
 
 @testset "unregistered mutations release the global registry lock" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5122 @testset \"unregistered mutations release the global registry lock\" begin"); flush(stderr)
     p = Plot(scatter(y=[1, 2], name="old"))
     observation = Ref{Any}(nothing)
     update = _RegistryProbeDict(
@@ -5156,6 +5188,7 @@ end
 end
 
 @testset "unregistered reentrant mutations are rejected atomically" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5158 @testset \"unregistered reentrant mutations are rejected atomically\" begin"); flush(stderr)
     p = Plot(scatter(y=[1, 2], name="old"))
     nested_error = Ref{Any}(nothing)
     update = _RegistryProbeDict(
@@ -5181,6 +5214,7 @@ end
 end
 
 @testset "unregistered full-model mutations wait for local owners" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5183 @testset \"unregistered full-model mutations wait for local owners\" begin"); flush(stderr)
     p = Plot(scatter(y=[1, 2], name="old"))
     entered = Channel{Nothing}(1)
     release = Channel{Nothing}(1)
@@ -5225,6 +5259,7 @@ function PlotlyBase.JSON.lower(value::_ReentrantTransactionValue)
 end
 
 @testset "same-task serialization cannot reenter model mutation" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5227 @testset \"same-task serialization cannot reenter model mutation\" begin"); flush(stderr)
     p, sp, state = _transaction_fixture()
     snapshot = _transaction_snapshot(p)
     try
@@ -5309,6 +5344,7 @@ function _blocking_fixture(; register::Bool=false)
 end
 
 @testset "renderer transactions serialize mutation, close, and remapping" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5311 @testset \"renderer transactions serialize mutation, close, and remapping\" begin"); flush(stderr)
     p, sp, state = _blocking_fixture()
     first_task = @async relayout!(sp; title="first")
     take!(state.entered)
@@ -5439,6 +5475,7 @@ end
 end
 
 @testset "replacement reservations and registry generations prevent races" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5441 @testset \"replacement reservations and registry generations prevent races\" begin"); flush(stderr)
     p, sp, state = _blocking_fixture()
     frame_storage = [
         frame(
@@ -5609,6 +5646,7 @@ end
 end
 
 @testset "purge serializes with later renderer mutations" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5611 @testset \"purge serializes with later renderer mutations\" begin"); flush(stderr)
     p, sp, state = _blocking_fixture(; register=true)
     purge_task = @async purge!(p)
     purge_script = take!(state.entered)
@@ -5634,6 +5672,7 @@ end
 end
 
 @testset "compatibility layout updaters share the renderer lock" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5636 @testset \"compatibility layout updaters share the renderer lock\" begin"); flush(stderr)
     p, sp, state = _blocking_fixture()
     relayout_task =
         @async relayout!(sp; title="transaction-title")
@@ -5658,6 +5697,7 @@ end
 end
 
 @testset "layout vector updaters preserve public attribute identities" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5660 @testset \"layout vector updaters preserve public attribute identities\" begin"); flush(stderr)
     shared = attr(text="old-annotation")
     trace = scatter(y=[1])
     trace.fields[:meta] = shared
@@ -5794,6 +5834,7 @@ end
 end
 
 @testset "high-level composites wait before touching the live model" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5796 @testset \"high-level composites wait before touching the live model\" begin"); flush(stderr)
     for operation in (:plot_pie, :set_legend)
         p, sp, state = _blocking_fixture()
         first_task =
@@ -5855,6 +5896,7 @@ end
 end
 
 @testset "subplot metadata commits do not overwrite unrelated state" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5857 @testset \"subplot metadata commits do not overwrite unrelated state\" begin"); flush(stderr)
     state = _BlockingRendererState(
         true,
         String[],
@@ -5962,6 +6004,7 @@ end
 end
 
 @testset "subplot legend defaults resolve after serialization" begin
+    println(stderr, "PS_TEST_BEGIN renderer_transactions.jl:5964 @testset \"subplot legend defaults resolve after serialization\" begin"); flush(stderr)
     for operation in (:subplot_legends, :set_legend)
         state = _BlockingRendererState(
             true,

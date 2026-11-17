@@ -4,6 +4,7 @@ function _nested_series_auto_x_allocated(values)
 end
 
 @testset "CRC: abstract nested-series routing and compact auto coordinates" begin
+    println(stderr, "PS_TEST_BEGIN nested_series.jl:6 @testset \"CRC: abstract nested-series routing and compact auto coordinates\" begin"); flush(stderr)
     series_ranges = UnitRange{Int}[1:3, 4:6]
     coordinate_ranges = UnitRange{Int}[10:12, 20:22]
 
@@ -82,6 +83,7 @@ end
     )
     for (name, make_figure, expected) in constructors
         @testset "$name constructor" begin
+            println(stderr, "PS_TEST_BEGIN nested_series.jl:84 @testset \"\$name constructor\" begin"); flush(stderr)
             fig = make_figure()
             @test length(fig.data) == expected
         end
@@ -97,6 +99,7 @@ end
     )
     for (name, make_figure, expected) in y_only_constructors
         @testset "$name y-only constructor" begin
+            println(stderr, "PS_TEST_BEGIN nested_series.jl:99 @testset \"\$name y-only constructor\" begin"); flush(stderr)
             fig = make_figure()
             @test length(fig.data) == expected
             @test collect(fig.data[1].fields[:y]) == [1, 2, 3]
@@ -129,6 +132,7 @@ end
     )
     for (name, mutate!, expected_delta) in explicit_mutators
         @testset "$name explicit coordinates" begin
+            println(stderr, "PS_TEST_BEGIN nested_series.jl:131 @testset \"\$name explicit coordinates\" begin"); flush(stderr)
             fig = plot_scatter(1:3, 1:3)
             initial_count = length(fig.data)
             @test mutate!(fig) === nothing
@@ -146,6 +150,7 @@ end
     )
     for (name, mutate!, expected_delta, has_generated_x) in y_only_mutators
         @testset "$name generated coordinates" begin
+            println(stderr, "PS_TEST_BEGIN nested_series.jl:148 @testset \"\$name generated coordinates\" begin"); flush(stderr)
             fig = plot_scatter(1:3, 1:3)
             initial_count = length(fig.data)
             @test mutate!(fig) === nothing
@@ -203,6 +208,7 @@ end
 end
 
 @testset "CRC: nested distribution layout modes" begin
+    println(stderr, "PS_TEST_BEGIN nested_series.jl:205 @testset \"CRC: nested distribution layout modes\" begin"); flush(stderr)
     nested = UnitRange{Int}[1:3, 4:6]
     nested_x = UnitRange{Int}[10:12, 20:22]
     singleton = UnitRange{Int}[1:3]

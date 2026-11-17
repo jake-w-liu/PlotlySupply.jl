@@ -421,6 +421,7 @@ function _layout_merge_assert_rollback(
 end
 
 @testset "CRC: Cartesian partial layout merges preserve title styling" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:423 @testset \"CRC: Cartesian partial layout merges preserve title styling\" begin"); flush(stderr)
     raw = plot_scatter([0.0], [0.0])
     _layout_merge_seed_cartesian_axis!(
         raw,
@@ -521,6 +522,7 @@ end
 end
 
 @testset "CRC: polar partial layout merges preserve axis siblings" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:523 @testset \"CRC: polar partial layout merges preserve axis siblings\" begin"); flush(stderr)
     raw = plot_scatterpolar([0.0], [1.0])
     _layout_merge_seed_polar!(raw)
     @test plot_scatterpolar!(
@@ -559,6 +561,7 @@ end
 end
 
 @testset "CRC: map partial merges preserve aliases and roll back" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:561 @testset \"CRC: map partial merges preserve aliases and roll back\" begin"); flush(stderr)
     for kind in (:map, :mapbox)
         for subplot_case in (false, true)
             target = subplot_case ?
@@ -672,6 +675,7 @@ end
 end
 
 @testset "CRC: typed map aliases reject widening atomically" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:674 @testset \"CRC: typed map aliases reject widening atomically\" begin"); flush(stderr)
     for kind in (:map, :mapbox)
         update! = kind === :map ? update_maps! : update_mapboxes!
 
@@ -729,6 +733,7 @@ end
 end
 
 @testset "CRC: representable typed map aliases retain topology" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:731 @testset \"CRC: representable typed map aliases retain topology\" begin"); flush(stderr)
     for kind in (:map, :mapbox)
         update! = kind === :map ? update_maps! : update_mapboxes!
 
@@ -775,6 +780,7 @@ end
 end
 
 @testset "CRC: multi-map preparation rolls back every root" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:777 @testset \"CRC: multi-map preparation rolls back every root\" begin"); flush(stderr)
     for kind in (:map, :mapbox)
         layout = Layout()
         first = Dict{Symbol,Any}(:zoom => 1.0)
@@ -829,6 +835,7 @@ end
 end
 
 @testset "CRC: nested map preparation coalesces or rolls back" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:831 @testset \"CRC: nested map preparation coalesces or rolls back\" begin"); flush(stderr)
     layout = Layout()
     center = Dict{Symbol,Any}(
         :lon => 1.0,
@@ -926,6 +933,7 @@ end
 end
 
 @testset "CRC: heterogeneous String-key map storage stays String-keyed" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:928 @testset \"CRC: heterogeneous String-key map storage stays String-keyed\" begin"); flush(stderr)
     for kind in (:map, :mapbox)
         layout = Layout()
         center = Dict{String,Float64}(
@@ -962,6 +970,7 @@ end
 end
 
 @testset "CRC: converted map values are revalidated before commit" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:964 @testset \"CRC: converted map values are revalidated before commit\" begin"); flush(stderr)
     for kind in (:map, :mapbox)
         layout = Layout()
         root =
@@ -1021,6 +1030,7 @@ end
 end
 
 @testset "CRC: mapbox view validation is JSON-safe and atomic" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:1023 @testset \"CRC: mapbox view validation is JSON-safe and atomic\" begin"); flush(stderr)
     huge = big(10)^1000
     for kwargs in (
         (; bearing=Inf),
@@ -1073,6 +1083,7 @@ end
 end
 
 @testset "CRC: cross-schema map aliases validate before commit" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:1075 @testset \"CRC: cross-schema map aliases validate before commit\" begin"); flush(stderr)
     target = _layout_merge_raw_map(:mapbox)
     shared_root = target.layout.fields[:mapbox]
     target.layout.fields[:map] = shared_root
@@ -1225,6 +1236,7 @@ end
 end
 
 @testset "CRC: immutable map roots remain updateable" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:1227 @testset \"CRC: immutable map roots remain updateable\" begin"); flush(stderr)
     for make_original in (
         () -> Base.ImmutableDict(:zoom => 1.0),
         () -> Base.PersistentDict(:zoom => 1.0),
@@ -1257,6 +1269,7 @@ end
 end
 
 @testset "CRC: hash-indexed mapping keys cannot be corrupted" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:1259 @testset \"CRC: hash-indexed mapping keys cannot be corrupted\" begin"); flush(stderr)
     for kind in (:map, :mapbox)
         root = Dict{Symbol,Any}(:zoom => 1.0)
         holder = Dict{Any,Any}(root => :held)
@@ -1311,6 +1324,7 @@ end
 end
 
 @testset "CRC: unsafe or ambiguous map keys are rejected atomically" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:1313 @testset \"CRC: unsafe or ambiguous map keys are rejected atomically\" begin"); flush(stderr)
     for kind in (:map, :mapbox)
         for duplicate in (
             Dict{Any,Any}(
@@ -1370,6 +1384,7 @@ end
 end
 
 @testset "CRC: unsupported outer storage cannot expose a partial commit" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:1372 @testset \"CRC: unsupported outer storage cannot expose a partial commit\" begin"); flush(stderr)
     seed = _LayoutMergeRejectingDict(
         Dict{Symbol,Any}(),
         false,
@@ -1428,6 +1443,7 @@ function _layout_merge_assert_holder_path(
 end
 
 @testset "CRC: public Cartesian merges retain external and internal aliases" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:1430 @testset \"CRC: public Cartesian merges retain external and internal aliases\" begin"); flush(stderr)
     external = _layout_merge_subplot()
     @test plot_scatter!(
         external,
@@ -2296,6 +2312,7 @@ end
 end
 
 @testset "CRC: recursive geographic and polar aliases stay connected" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:2298 @testset \"CRC: recursive geographic and polar aliases stay connected\" begin"); flush(stderr)
     geographic = _layout_merge_subplot(:geo)
     geo = geographic.layout.fields[:geo]
     projection = attr()
@@ -2394,6 +2411,7 @@ end
 end
 
 @testset "CRC: scene, font, and coloraxis aliases merge recursively" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:2396 @testset \"CRC: scene, font, and coloraxis aliases merge recursively\" begin"); flush(stderr)
     scene_figure = _layout_merge_subplot(:scene)
     scene = scene_figure.layout.fields[:scene]
     xaxis = attr()
@@ -2494,6 +2512,7 @@ end
 end
 
 @testset "CRC: ternary title aliases merge recursively" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:2496 @testset \"CRC: ternary title aliases merge recursively\" begin"); flush(stderr)
     ternary_figure = _layout_merge_subplot(:ternary)
     ternary = ternary_figure.layout.fields[:ternary]
     shared_axis = attr()
@@ -2558,6 +2577,7 @@ end
 end
 
 @testset "CRC: scalar title shorthand preserves nested styling" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:2560 @testset \"CRC: scalar title shorthand preserves nested styling\" begin"); flush(stderr)
     heatmap_figure = _layout_merge_subplot()
     xaxis = heatmap_figure.layout.fields[:xaxis]
     title = attr()
@@ -2597,6 +2617,7 @@ end
 end
 
 @testset "CRC: non-map preparation rejects atomically" begin
+    println(stderr, "PS_TEST_BEGIN layout_merge_preservation.jl:2599 @testset \"CRC: non-map preparation rejects atomically\" begin"); flush(stderr)
     trace = scatter(x=[0.0], y=[0.0])
     trace.fields[:xaxis] = "x"
     trace.fields[:yaxis] = "y"

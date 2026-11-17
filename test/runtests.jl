@@ -227,9 +227,11 @@ function _subplot_counting_syncplot(p::Plot, divid::String)
 end
 
 @testset "PlotlySupply.jl" begin
+    println(stderr, "PS_TEST_BEGIN runtests.jl:229 @testset \"PlotlySupply.jl\" begin"); flush(stderr)
     # Write your tests here.
 
     @testset "plot_scatter" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:232 @testset \"plot_scatter\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false, fontsize=12)
@@ -241,6 +243,7 @@ end
     end
 
     @testset "default cartesian spines stay black after template" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:243 @testset \"default cartesian spines stay black after template\" begin"); flush(stderr)
         function spine_fields(axis)
             return axis isa AbstractDict ? axis : axis.fields
         end
@@ -264,6 +267,7 @@ end
     end
 
     @testset "plot_stem" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:266 @testset \"plot_stem\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_stem(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false)
@@ -275,6 +279,7 @@ end
     end
 
     @testset "plot_bar" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:277 @testset \"plot_bar\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_bar(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false)
@@ -286,6 +291,7 @@ end
     end
 
     @testset "plot_histogram" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:288 @testset \"plot_histogram\" begin"); flush(stderr)
         x = randn(200)
         fig = plot_histogram(x, title="Histogram", xlabel="x", ylabel="count", nbinsx=30, width=500, height=500)
         @test fig isa Plot
@@ -296,6 +302,7 @@ end
     end
 
     @testset "plot_box" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:298 @testset \"plot_box\" begin"); flush(stderr)
         x = fill("group A", 20)
         y = randn(20)
         fig = plot_box(x, y, title="Box", xlabel="group", ylabel="value", width=500, height=500)
@@ -307,6 +314,7 @@ end
     end
 
     @testset "plot_violin" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:309 @testset \"plot_violin\" begin"); flush(stderr)
         x = fill("group A", 20)
         y = randn(20)
         fig = plot_violin(x, y, title="Violin", xlabel="group", ylabel="value", width=500, height=500)
@@ -318,6 +326,7 @@ end
     end
 
     @testset "plot_scatterpolar" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:320 @testset \"plot_scatterpolar\" begin"); flush(stderr)
         theta = 0:0.1:2*pi
         r = sin.(theta)
         fig = plot_scatterpolar(theta, r, title="My Title", trange=[0, 360], rrange=[0, 1], width=500, height=500, grid=false)
@@ -329,6 +338,7 @@ end
     end
 
     @testset "plot_heatmap" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:331 @testset \"plot_heatmap\" begin"); flush(stderr)
         x = 1:10
         y = 1:20
         U = rand(10, 20)
@@ -340,6 +350,7 @@ end
     end
 
     @testset "plot_contour" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:342 @testset \"plot_contour\" begin"); flush(stderr)
         x = 1:10
         y = 1:20
         U = rand(10, 20)
@@ -351,6 +362,7 @@ end
     end
 
     @testset "heatmap and contour preserve x-y matrix orientation without copies" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:353 @testset \"heatmap and contour preserve x-y matrix orientation without copies\" begin"); flush(stderr)
         x = [10, 20]
         y = [100, 200, 300]
         U = [11 12 13; 21 22 23]
@@ -406,6 +418,7 @@ end
     end
 
     @testset "plot_quiver" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:408 @testset \"plot_quiver\" begin"); flush(stderr)
         x = 1:10
         y = 1:10
         u = rand(10)
@@ -415,6 +428,7 @@ end
     end
 
     @testset "plot_surface" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:417 @testset \"plot_surface\" begin"); flush(stderr)
         x = 1:10
         y = 1:20
         X = [i for i in x, j in y]
@@ -428,6 +442,7 @@ end
     end
 
     @testset "plot_scatter3d" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:430 @testset \"plot_scatter3d\" begin"); flush(stderr)
         x = 1:10
         y = 1:10
         z = rand(10)
@@ -442,6 +457,7 @@ end
     end
 
     @testset "plot_quiver3d" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:444 @testset \"plot_quiver3d\" begin"); flush(stderr)
         x = 1:10
         y = 1:10
         z = 1:10
@@ -453,6 +469,7 @@ end
     end
 
     @testset "set_template!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:455 @testset \"set_template!\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y)
@@ -529,6 +546,7 @@ end
     end
 
     @testset "Legend Defaults and Positioning" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:531 @testset \"Legend Defaults and Positioning\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y; legend="trace")
@@ -561,6 +579,7 @@ end
     end
 
     @testset "Mutating Functions - plot_scatter!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:563 @testset \"Mutating Functions - plot_scatter!\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         y2 = rand(10)
@@ -592,6 +611,7 @@ end
     end
 
     @testset "Mutating Functions - plot_stem!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:594 @testset \"Mutating Functions - plot_stem!\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         y2 = rand(10)
@@ -618,6 +638,7 @@ end
     end
 
     @testset "Mutating Functions - plot_bar!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:620 @testset \"Mutating Functions - plot_bar!\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         y2 = rand(10)
@@ -635,6 +656,7 @@ end
     end
 
     @testset "Mutating Functions - plot_histogram!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:637 @testset \"Mutating Functions - plot_histogram!\" begin"); flush(stderr)
         x = randn(200)
         fig = plot_histogram(x, title="Histogram Test")
         initial_trace_count = length(fig.data)
@@ -644,6 +666,7 @@ end
     end
 
     @testset "Mutating Functions - plot_box!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:646 @testset \"Mutating Functions - plot_box!\" begin"); flush(stderr)
         x = fill("A", 20)
         y = randn(20)
         y2 = randn(20) .+ 0.5
@@ -661,6 +684,7 @@ end
     end
 
     @testset "Mutating Functions - plot_violin!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:663 @testset \"Mutating Functions - plot_violin!\" begin"); flush(stderr)
         x = fill("A", 20)
         y = randn(20)
         y2 = randn(20) .+ 0.5
@@ -678,6 +702,7 @@ end
     end
 
     @testset "Mutating Functions - plot_scatterpolar!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:680 @testset \"Mutating Functions - plot_scatterpolar!\" begin"); flush(stderr)
         theta = 0:0.1:2*pi
         r = sin.(theta)
         r2 = cos.(theta)
@@ -690,6 +715,7 @@ end
     end
 
     @testset "Mutating Functions - plot_heatmap!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:692 @testset \"Mutating Functions - plot_heatmap!\" begin"); flush(stderr)
         x = 1:10
         y = 1:20
         U = rand(10, 20)
@@ -703,6 +729,7 @@ end
     end
 
     @testset "Mutating Functions - plot_contour!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:705 @testset \"Mutating Functions - plot_contour!\" begin"); flush(stderr)
         x = 1:10
         y = 1:20
         U = rand(10, 20)
@@ -716,6 +743,7 @@ end
     end
 
     @testset "Mutating Functions - plot_quiver!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:718 @testset \"Mutating Functions - plot_quiver!\" begin"); flush(stderr)
         x = 1:10
         y = 1:10
         u = rand(10)
@@ -731,6 +759,7 @@ end
     end
 
     @testset "Mutating Functions - plot_surface!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:733 @testset \"Mutating Functions - plot_surface!\" begin"); flush(stderr)
         x = 1:10
         y = 1:20
         X = [i for i in x, j in y]
@@ -753,6 +782,7 @@ end
     end
 
     @testset "Mutating Functions - plot_scatter3d!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:755 @testset \"Mutating Functions - plot_scatter3d!\" begin"); flush(stderr)
         x = 1:10
         y = 1:10
         z = rand(10)
@@ -775,6 +805,7 @@ end
     end
 
     @testset "Mutating Functions - plot_quiver3d!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:777 @testset \"Mutating Functions - plot_quiver3d!\" begin"); flush(stderr)
         x = 1:10
         y = 1:10
         z = 1:10
@@ -793,6 +824,7 @@ end
     end
 
     @testset "Mutating Functions - Chaining" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:795 @testset \"Mutating Functions - Chaining\" begin"); flush(stderr)
         # Test method chaining with multiple mutating calls
         x = 1:10
         y1 = rand(10)
@@ -813,6 +845,7 @@ end
     end
 
     @testset "Subplots API" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:815 @testset \"Subplots API\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(2, 2; show=false, title="subplot-api")
         @test sf isa PlotlySupply.SubplotFigure
         @test sf.rows == 2
@@ -877,6 +910,7 @@ end
     end
 
     @testset "Subplots API - Statistical Traces" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:879 @testset \"Subplots API - Statistical Traces\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(2, 2; sync=false, title="subplot-stats")
         @test sf.fig isa Plot
 
@@ -902,6 +936,7 @@ end
     end
 
     @testset "Desktop SyncPlot Interop" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:904 @testset \"Desktop SyncPlot Interop\" begin"); flush(stderr)
         fig = plot_scatter(1:5, rand(5))
 
         sp = nothing
@@ -952,6 +987,7 @@ end
     end
 
     @testset "Coverage Branches - Constructors" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:954 @testset \"Coverage Branches - Constructors\" begin"); flush(stderr)
         x_multi = [collect(0:3), collect(1:4)]
         y_multi = [rand(4), rand(4)]
 
@@ -1046,6 +1082,7 @@ end
     end
 
     @testset "Coverage Branches - Mutating APIs" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1048 @testset \"Coverage Branches - Mutating APIs\" begin"); flush(stderr)
         x_multi = [collect(0:3), collect(1:4)]
         y_multi = [rand(4), rand(4)]
 
@@ -1262,6 +1299,7 @@ end
     end
 
     @testset "Coverage Branches - Internal + SyncPlot" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1264 @testset \"Coverage Branches - Internal + SyncPlot\" begin"); flush(stderr)
         @test PlotlySupply._tuple_interleave(([1, 2], [3, 4], [5, 6])) == [1, 3, 5, 2, 4, 6]
         @test_throws ArgumentError PlotlySupply._plot_obj(1)
 
@@ -1381,6 +1419,7 @@ end
     # ============================================================
 
     @testset "xscale/yscale - scatter" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1383 @testset \"xscale/yscale - scatter\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, xscale="log", yscale="log")
@@ -1399,6 +1438,7 @@ end
     end
 
     @testset "marker_size/marker_symbol - scatter" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1401 @testset \"marker_size/marker_symbol - scatter\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, mode="markers", marker_size=10, marker_symbol="circle-open")
@@ -1418,6 +1458,7 @@ end
     end
 
     @testset "showlegend - scatter" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1420 @testset \"showlegend - scatter\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, showlegend=false)
@@ -1436,6 +1477,7 @@ end
     end
 
     @testset "xscale/yscale - stem" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1438 @testset \"xscale/yscale - stem\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_stem(x, y, xscale="log", yscale="log")
@@ -1450,6 +1492,7 @@ end
     end
 
     @testset "showlegend - stem" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1452 @testset \"showlegend - stem\" begin"); flush(stderr)
         x = 1:10
         y2 = [rand(10), rand(10)]
         fig = plot_stem(x, y2, showlegend=[true, false])
@@ -1468,6 +1511,7 @@ end
     end
 
     @testset "xscale/yscale/showlegend - bar" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1470 @testset \"xscale/yscale/showlegend - bar\" begin"); flush(stderr)
         x = 1:5
         y = rand(5)
         fig = plot_bar(x, y, xscale="log", yscale="log")
@@ -1492,6 +1536,7 @@ end
     end
 
     @testset "xscale/yscale/showlegend - histogram" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1494 @testset \"xscale/yscale/showlegend - histogram\" begin"); flush(stderr)
         x = randn(200)
         fig = plot_histogram(x, xscale="log", yscale="log")
         @test fig isa Plot
@@ -1508,6 +1553,7 @@ end
     end
 
     @testset "xscale/yscale/showlegend - box" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1510 @testset \"xscale/yscale/showlegend - box\" begin"); flush(stderr)
         x = fill("A", 20)
         y = randn(20)
         fig = plot_box(x, y, xscale="log", yscale="log")
@@ -1533,6 +1579,7 @@ end
     end
 
     @testset "xscale/yscale/showlegend - violin" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1535 @testset \"xscale/yscale/showlegend - violin\" begin"); flush(stderr)
         x = fill("A", 20)
         y = randn(20)
         fig = plot_violin(x, y, xscale="log", yscale="log")
@@ -1558,6 +1605,7 @@ end
     end
 
     @testset "xscale/yscale - heatmap" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1560 @testset \"xscale/yscale - heatmap\" begin"); flush(stderr)
         x = 1:10
         y = 1:20
         U = rand(10, 20)
@@ -1569,6 +1617,7 @@ end
     end
 
     @testset "xscale/yscale - contour" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1571 @testset \"xscale/yscale - contour\" begin"); flush(stderr)
         x = 1:10
         y = 1:20
         U = rand(10, 20)
@@ -1580,6 +1629,7 @@ end
     end
 
     @testset "marker_size/marker_symbol/showlegend - scatterpolar" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1582 @testset \"marker_size/marker_symbol/showlegend - scatterpolar\" begin"); flush(stderr)
         theta = 0:10:350
         r = rand(36)
         fig = plot_scatterpolar(theta, r, mode="markers", marker_size=8, marker_symbol="circle-open")
@@ -1597,6 +1647,7 @@ end
     end
 
     @testset "marker_size/marker_symbol/showlegend - scatter3d" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1599 @testset \"marker_size/marker_symbol/showlegend - scatter3d\" begin"); flush(stderr)
         x = 1:10
         y = 1:10
         z = rand(10)
@@ -1617,6 +1668,7 @@ end
     end
 
     @testset "mutating variants - new features" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1619 @testset \"mutating variants - new features\" begin"); flush(stderr)
         # scatter!
         fig = plot_scatter(1:10, rand(10))
         plot_scatter!(fig, 1:10, rand(10), xscale="log", yscale="log", marker_size=5, marker_symbol="square", showlegend=false)
@@ -1721,6 +1773,7 @@ end
     end
 
     @testset "scatter x-vector-of-vectors" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1723 @testset \"scatter x-vector-of-vectors\" begin"); flush(stderr)
         x2 = [collect(1:10), collect(1:10)]
         y2 = [rand(10), rand(10)]
         fig = plot_scatter(x2, y2, marker_size=[4, 8], marker_symbol=["circle", "square"], showlegend=[true, false], xscale="log")
@@ -1731,6 +1784,7 @@ end
     end
 
     @testset "stem x-vector-of-vectors" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1733 @testset \"stem x-vector-of-vectors\" begin"); flush(stderr)
         x2 = [collect(1:5), collect(1:5)]
         y2 = [rand(5), rand(5)]
         fig = plot_stem(x2, y2, showlegend=[true, false], xscale="log")
@@ -1738,6 +1792,7 @@ end
     end
 
     @testset "scatterpolar theta-vector-of-vectors" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1740 @testset \"scatterpolar theta-vector-of-vectors\" begin"); flush(stderr)
         theta2 = [collect(0:10:350), collect(0:10:350)]
         r2 = [rand(36), rand(36)]
         fig = plot_scatterpolar(theta2, r2, marker_size=[4, 8], showlegend=[true, false])
@@ -1745,6 +1800,7 @@ end
     end
 
     @testset "_apply_showlegend! helper" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1747 @testset \"_apply_showlegend! helper\" begin"); flush(stderr)
         # Test the helper directly
         t1 = scatter(x=[1,2], y=[1,2])
         PlotlySupply._apply_showlegend!(t1, nothing)
@@ -1765,6 +1821,7 @@ end
     end
 
     @testset "Legend position normalization" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1767 @testset \"Legend position normalization\" begin"); flush(stderr)
         # Test _normalize_legend_position for all branches
         nlp = PlotlySupply._normalize_legend_position
         @test nlp(:top_left) == :topleft
@@ -1791,6 +1848,7 @@ end
     end
 
     @testset "Legend positions in set_legend!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1793 @testset \"Legend positions in set_legend!\" begin"); flush(stderr)
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y; legend="trace")
@@ -1837,6 +1895,7 @@ end
     end
 
     @testset "box/violin shared-x multi-trace (non-!)" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1839 @testset \"box/violin shared-x multi-trace (non-!)\" begin"); flush(stderr)
         # plot_box with shared x (not vector-of-vectors) and multi y
         x_shared = fill("A", 20)
         y_multi = [randn(20), randn(20) .+ 1.0]
@@ -1851,6 +1910,7 @@ end
     end
 
     @testset "box!/violin! shared-x multi-trace" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1853 @testset \"box!/violin! shared-x multi-trace\" begin"); flush(stderr)
         x_shared = fill("A", 20)
         y_multi = [randn(20), randn(20) .+ 1.0]
 
@@ -1868,6 +1928,7 @@ end
     end
 
     @testset "surface!(fig, Z) delegation" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1870 @testset \"surface!(fig, Z) delegation\" begin"); flush(stderr)
         Z = rand(5, 5)
         fig = plot_surface(rand(5, 5))
         n0 = length(fig.data)
@@ -1877,6 +1938,7 @@ end
     end
 
     @testset "scatterpolar! vector marker_symbol" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1879 @testset \"scatterpolar! vector marker_symbol\" begin"); flush(stderr)
         theta = collect(0:10:350)
         r_multi = [rand(36), rand(36)]
         fig = plot_scatterpolar(theta, rand(36))
@@ -1886,6 +1948,7 @@ end
     end
 
     @testset "scatterpolar! Bool showlegend (multi-trace)" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1888 @testset \"scatterpolar! Bool showlegend (multi-trace)\" begin"); flush(stderr)
         theta = collect(0:10:350)
         r_multi = [rand(36), rand(36)]
         fig = plot_scatterpolar(theta, rand(36))
@@ -1895,6 +1958,7 @@ end
     end
 
     @testset "scatter3d! vector marker kwargs" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1897 @testset \"scatter3d! vector marker kwargs\" begin"); flush(stderr)
         x = [1:5, 1:5]
         y = [1:5, 1:5]
         z = [rand(5), rand(5)]
@@ -1905,6 +1969,7 @@ end
     end
 
     @testset "scatter3d! Bool showlegend (multi-trace)" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1907 @testset \"scatter3d! Bool showlegend (multi-trace)\" begin"); flush(stderr)
         x = [1:5, 1:5]
         y = [1:5, 1:5]
         z = [rand(5), rand(5)]
@@ -1915,12 +1980,14 @@ end
     end
 
     @testset "fontsize in helper-using functions" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1917 @testset \"fontsize in helper-using functions\" begin"); flush(stderr)
         # Cover fontsize > 0 branch in _apply_cartesian_plot_options!
         fig = plot_bar(1:5, rand(5), fontsize=14)
         @test fig isa Plot
     end
 
     @testset "SubplotFigure property access" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1923 @testset \"SubplotFigure property access\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(1, 2; sync=false)
         # Test propertynames
         pnames = propertynames(sf)
@@ -1941,6 +2008,7 @@ end
     end
 
     @testset "SubplotFigure _resolve_subplot_cell error" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1943 @testset \"SubplotFigure _resolve_subplot_cell error\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(2, 2; sync=false)
         # Providing only row should error
         @test_throws ArgumentError PlotlySupply._resolve_subplot_cell(sf; row=1)
@@ -1953,6 +2021,7 @@ end
     end
 
     @testset "SubplotFigure add_trace! and addtraces!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1955 @testset \"SubplotFigure add_trace! and addtraces!\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(1, 2; sync=false)
         t1 = scatter(x=[1,2], y=[1,2], name="t1")
         PlotlyBase.add_trace!(sf, t1; row=1, col=1)
@@ -1969,6 +2038,7 @@ end
     end
 
     @testset "SubplotFigure addtraces! batches atomically" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:1971 @testset \"SubplotFigure addtraces! batches atomically\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(1, 2; sync=false)
         seed = scatter(x=[0], y=[0], name="seed", legendgroup="seed-group")
         PlotlyBase.add_trace!(sf, seed; row=1, col=1)
@@ -2026,6 +2096,7 @@ end
     end
 
     @testset "SubplotFigure addtraces! refreshes once" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2028 @testset \"SubplotFigure addtraces! refreshes once\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(1, 1; sync=false)
         p = Plot(copy(sf.plot.data), sf.plot.layout)
         sf.fig = _subplot_counting_syncplot(p, "counting")
@@ -2040,6 +2111,7 @@ end
     end
 
     @testset "SubplotFigure y-only delegations" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2042 @testset \"SubplotFigure y-only delegations\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(2, 3; sync=false)
 
         # scatter!(sf, y) - y-only
@@ -2069,6 +2141,7 @@ end
     end
 
     @testset "SubplotFigure heatmap/contour x,y,U delegations" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2071 @testset \"SubplotFigure heatmap/contour x,y,U delegations\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(1, 2; sync=false)
 
         # heatmap!(sf, x, y, U) - x,y,U variant
@@ -2083,12 +2156,14 @@ end
     end
 
     @testset "SubplotFigure quiver delegation" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2085 @testset \"SubplotFigure quiver delegation\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(1, 1; sync=false)
         PlotlySupply.plot_quiver!(sf, collect(1.0:5.0), collect(1.0:5.0), rand(5), rand(5))
         @test length(sf.plot.data) >= 1
     end
 
     @testset "SubplotFigure 3D delegations" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2091 @testset \"SubplotFigure 3D delegations\" begin"); flush(stderr)
         scene_specs = Union{Missing, Spec}[Spec(kind="scene") Spec(kind="scene"); Spec(kind="scene") Spec(kind="scene")]
         sf = PlotlySupply.subplots(2, 2; sync=false, specs=scene_specs)
 
@@ -2116,6 +2191,7 @@ end
     end
 
     @testset "SubplotFigure polar delegation" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2118 @testset \"SubplotFigure polar delegation\" begin"); flush(stderr)
         polar_specs = Union{Missing, Spec}[Spec(kind="polar");;]
         sf = PlotlySupply.subplots(1, 1; sync=false, specs=polar_specs)
 
@@ -2124,6 +2200,7 @@ end
     end
 
     @testset "SubplotFigure set_legend! non-per-subplot path" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2126 @testset \"SubplotFigure set_legend! non-per-subplot path\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(1, 2; sync=false, per_subplot_legends=false)
         PlotlySupply.plot_scatter!(sf, 1:5, rand(5); legend="A")
         PlotlySupply.subplot!(sf, 1, 2)
@@ -2137,6 +2214,7 @@ end
     end
 
     @testset "_first_or_empty edge case" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2139 @testset \"_first_or_empty edge case\" begin"); flush(stderr)
         @test PlotlySupply._first_or_empty(String[]) == ""
         @test PlotlySupply._first_or_empty(["hello", "world"]) == "hello"
         @test PlotlySupply._first_or_empty("test") == "test"
@@ -2147,6 +2225,7 @@ end
     # ─────────────────────────────────────────────────────────────────
 
     @testset "CRC: helpers _scalar_or_first / _safe_tick0" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2149 @testset \"CRC: helpers _scalar_or_first / _safe_tick0\" begin"); flush(stderr)
         @test PlotlySupply._scalar_or_first(5, 0) == 5
         @test PlotlySupply._scalar_or_first([7, 8], 0) == 7
         @test PlotlySupply._scalar_or_first(Int[], 0) == 0
@@ -2157,6 +2236,7 @@ end
     end
 
     @testset "CRC: scatter mode is valid 'lines' (never 'line')" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2159 @testset \"CRC: scatter mode is valid 'lines' (never 'line')\" begin"); flush(stderr)
         f = plot_scatter(1:10, [sin.(1:10), cos.(1:10)]; mode=["markers"])
         @test f.data[1].fields[:mode] == "markers"
         @test f.data[2].fields[:mode] == "lines"          # trailing default, not "line"
@@ -2165,12 +2245,14 @@ end
     end
 
     @testset "CRC: multi-series tick0 is scalar, not a Vector" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2167 @testset \"CRC: multi-series tick0 is scalar, not a Vector\" begin"); flush(stderr)
         f = plot_scatter(1:10, [sin.(1:10), cos.(1:10)])
         @test get(f.layout.yaxis, :tick0, 0.0) isa Real
         @test get(f.layout.xaxis, :tick0, 0.0) isa Real
     end
 
     @testset "CRC: single-trace Vector kwargs are scalarized" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2173 @testset \"CRC: single-trace Vector kwargs are scalarized\" begin"); flush(stderr)
         f = plot_scatter([1.0, 2, 3]; mode=["markers"], color=["red"], dash=["dot"], legend=["foo"])
         tr = f.data[1].fields
         @test tr[:mode] == "markers"
@@ -2180,11 +2262,13 @@ end
     end
 
     @testset "CRC: empty input does not crash" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2182 @testset \"CRC: empty input does not crash\" begin"); flush(stderr)
         @test plot_scatter(Float64[]) isa Plot
         @test plot_stem(Float64[]) isa Plot
     end
 
     @testset "CRC: stem honors color (marker + stem lines)" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2187 @testset \"CRC: stem honors color (marker + stem lines)\" begin"); flush(stderr)
         f = plot_stem([0, 1, 2], [3.0, 4.0, 5.0]; color="red")
         @test f.data[1].fields[:marker][:color] == "red"        # head marker colored
         @test !haskey(f.data[1].fields, :line)                  # no unused line on markers trace
@@ -2195,6 +2279,7 @@ end
     end
 
     @testset "CRC: scatterpolar has no default sector (full circle)" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2197 @testset \"CRC: scatterpolar has no default sector (full circle)\" begin"); flush(stderr)
         f = plot_scatterpolar([0, 90, 180], [1, 2, 3])
         @test !haskey(f.layout.fields, :polar)
         f2 = plot_scatterpolar([0, 90, 180], [1, 2, 3]; trange=[0, 180])
@@ -2209,6 +2294,7 @@ end
     end
 
     @testset "CRC: box/violin points=true normalized; group mode" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2211 @testset \"CRC: box/violin points=true normalized; group mode\" begin"); flush(stderr)
         b = plot_box([1, 2], [[1.0, 2, 3], [4.0, 5, 6]]; points=true)
         @test b.data[1].fields[:boxpoints] == "all"
         @test b.layout.fields[:boxmode] == "group"
@@ -2218,6 +2304,7 @@ end
     end
 
     @testset "CRC: heatmap/contour omit empty colorscale, keep given one" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2220 @testset \"CRC: heatmap/contour omit empty colorscale, keep given one\" begin"); flush(stderr)
         @test !haskey(plot_heatmap(rand(3, 3)).data[1].fields, :colorscale)
         @test plot_heatmap(rand(3, 3); colorscale="Viridis").data[1].fields[:colorscale] == "Viridis"
         @test !haskey(plot_contour(rand(3, 3)).data[1].fields, :colorscale)
@@ -2227,11 +2314,13 @@ end
     end
 
     @testset "CRC: dead dx/dy removed; no stray scene in 2-D layouts" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2229 @testset \"CRC: dead dx/dy removed; no stray scene in 2-D layouts\" begin"); flush(stderr)
         @test !haskey(plot_heatmap(rand(3, 3)).layout.fields, :scene)
         @test !haskey(plot_contour(rand(3, 3)).layout.fields, :scene)
     end
 
     @testset "CRC: 3-D ranges target scene axes (not top-level)" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2234 @testset \"CRC: 3-D ranges target scene axes (not top-level)\" begin"); flush(stderr)
         for f in (plot_surface(rand(4, 4); xrange=[0, 3], yrange=[1, 2], zrange=[-1, 1]),
                   plot_scatter3d(1:3, 1:3, 1:3; zrange=[-1, 1]),
                   plot_quiver3d([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]; zrange=[-1, 1]))
@@ -2247,6 +2336,7 @@ end
     end
 
     @testset "CRC: scatter3d broadcasts shared 1-D x/y over z-series" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2249 @testset \"CRC: scatter3d broadcasts shared 1-D x/y over z-series\" begin"); flush(stderr)
         f = plot_scatter3d(1:3, 1:3, [[1.0, 2, 3], [4.0, 5, 6]]; legend=["a", "b"])
         @test length(f.data) == 2
         @test collect(f.data[2].fields[:x]) == [1, 2, 3]
@@ -2258,6 +2348,7 @@ end
     end
 
     @testset "CRC: quiver3d accepts vector color uniformly" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2260 @testset \"CRC: quiver3d accepts vector color uniformly\" begin"); flush(stderr)
         q = plot_quiver3d([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]; color=["red"])
         @test q.data[1].fields[:colorscale] == [[0, "red"], [1, "red"]]
         @test q.data[1].fields[:showscale] == false
@@ -2265,6 +2356,7 @@ end
     end
 
     @testset "CRC: quiver geometry and robustness" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2267 @testset \"CRC: quiver geometry and robustness\" begin"); flush(stderr)
         @test_throws ArgumentError plot_quiver([1.0], [1.0], [1.0, 2.0], [1.0])
         @test_throws ArgumentError plot_quiver!(plot_scatter(1:2, 1:2), [1.0], [1.0], [1.0, 2.0], [1.0])
 
@@ -2367,6 +2459,7 @@ end
     end
 
     @testset "CRC: mutating constructors preserve a user template" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2369 @testset \"CRC: mutating constructors preserve a user template\" begin"); flush(stderr)
         f = plot_scatter(1:5, rand(5)); set_template!(f, "plotly_dark")
         f_template = f.layout.fields[:template]
         plot_scatter!(f, 1:5, rand(5))
@@ -2380,12 +2473,14 @@ end
     end
 
     @testset "CRC: _apply_showlegend! tolerates over-long vector" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2382 @testset \"CRC: _apply_showlegend! tolerates over-long vector\" begin"); flush(stderr)
         @test plot_bar([1, 2, 3]; showlegend=[true, false, true, false]) isa Plot
         b = plot_box([1.0, 2, 3]; showlegend=[true])   # vector for single trace
         @test b.data[1].fields[:showlegend] == true
     end
 
     @testset "CRC: legend block gating + forced visibility" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2388 @testset \"CRC: legend block gating + forced visibility\" begin"); flush(stderr)
         f = plot_scatter(1:5, rand(5))                    # unnamed single trace
         @test !haskey(f.layout.fields, :legend)
         @test plot_scatter(1:5, rand(5); legend="a").layout.fields[:legend][:xanchor] == "right"
@@ -2395,17 +2490,20 @@ end
     end
 
     @testset "CRC: normalize warns on invalid template / legend position" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2397 @testset \"CRC: normalize warns on invalid template / legend position\" begin"); flush(stderr)
         @test (@test_logs (:warn,) PlotlySupply._normalize_template("does_not_exist")) == :plotly_white
         @test (@test_logs (:warn,) PlotlySupply._normalize_legend_position("nowhere")) == :topright
     end
 
     @testset "CRC: _json_js escapes all close-tag sequences" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2402 @testset \"CRC: _json_js escapes all close-tag sequences\" begin"); flush(stderr)
         @test !occursin("</", PlotlySupply._json_js("</SCRIPT>"))
         @test occursin("<\\/", PlotlySupply._json_js("</SCRIPT>"))
         @test !occursin("</", PlotlySupply._json_js(Dict(:k => "a</Style>b")))
     end
 
     @testset "CRC: _file_uri percent-encodes unsafe path bytes" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2408 @testset \"CRC: _file_uri percent-encodes unsafe path bytes\" begin"); flush(stderr)
         @test PlotlySupply._file_uri("/tmp/a b.html") == "file:///tmp/a%20b.html"
         @test PlotlySupply._file_uri("/tmp/a#b?.html") ==
               "file:///tmp/a%23b%3F.html"
@@ -2420,6 +2518,7 @@ end
     end
 
     @testset "CRC: _urldecode_bytes preserves UTF-8" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2422 @testset \"CRC: _urldecode_bytes preserves UTF-8\" begin"); flush(stderr)
         @test String(PlotlySupply._urldecode_bytes("%E4%B8%AD%E6%96%87")) == "中文"
         @test String(PlotlySupply._urldecode_bytes("a%2Fb")) == "a/b"
         @test String(PlotlySupply._urldecode_bytes("a%20b%2Fc")) == "a b/c"
@@ -2429,6 +2528,7 @@ end
     end
 
     @testset "CRC: image export validates and streams data URLs" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2431 @testset \"CRC: image export validates and streams data URLs\" begin"); flush(stderr)
         p = plot_scatter(1:2, 1:2)
 
         function export_data_url(data_url, format)
@@ -2513,6 +2613,7 @@ end
     end
 
     @testset "CRC: savefig validates before opening destinations" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2515 @testset \"CRC: savefig validates before opening destinations\" begin"); flush(stderr)
         p = plot_scatter(1:2, 1:2)
         @test_throws ErrorException savefig(IOBuffer(), p; format="unsupported")
 
@@ -2525,6 +2626,7 @@ end
     end
 
     @testset "CRC: mgrid is type-stable and value-correct" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2527 @testset \"CRC: mgrid is type-stable and value-correct\" begin"); flush(stderr)
         g = mgrid(1:3, 1:2)
         @test eltype(g[1]) == Int && eltype(g[2]) == Int
         @test g[1] == [1 1; 2 2; 3 3]
@@ -2533,11 +2635,13 @@ end
     end
 
     @testset "CRC: meshgrid is reexported" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2535 @testset \"CRC: meshgrid is reexported\" begin"); flush(stderr)
         Y, X = meshgrid(1:2, 1:3)
         @test size(X) == (3, 2)
     end
 
     @testset "CRC: json is a working reexport" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2540 @testset \"CRC: json is a working reexport\" begin"); flush(stderr)
         @test isdefined(PlotlySupply, :json)
         p = plot_scatter(1:2, [3.0, NaN])
         @test json(p; allownan=true) == PlotlyBase.JSON.json(p; allownan=true)
@@ -2547,6 +2651,7 @@ end
     end
 
     @testset "CRC: Plot methods are additive and dispatchable" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2549 @testset \"CRC: Plot methods are additive and dispatchable\" begin"); flush(stderr)
         p = plot_scatter(1:3, 1:3)
         @test p isa PlotlySupply._RefreshablePlot
         @test which(restyle!, (typeof(p), Dict{Symbol, Any})).module === PlotlySupply
@@ -2584,6 +2689,7 @@ end
     end
 
     @testset "CRC: savefig json/html work headlessly" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2586 @testset \"CRC: savefig json/html work headlessly\" begin"); flush(stderr)
         f = plot_scatter(1:5, rand(5); title="α中文")
         io = IOBuffer(); savefig(io, f; format="json"); js = String(take!(io))
         @test occursin("scatter", js)
@@ -2594,6 +2700,7 @@ end
     end
 
     @testset "CRC: SubplotFigure delegations + secondary-y" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2596 @testset \"CRC: SubplotFigure delegations + secondary-y\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(1, 1; sync=false, show=false)
         @test relayout!(sf; title="t") === sf
         @test sf.plot.layout.fields[:title] == "t"
@@ -2610,6 +2717,7 @@ end
     end
 
     @testset "CRC: extended mutators route to heterogeneous subplots" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2612 @testset \"CRC: extended mutators route to heterogeneous subplots\" begin"); flush(stderr)
         specs = [
             PlotlySupply.Spec(kind="domain") PlotlySupply.Spec(kind="xy") PlotlySupply.Spec(kind="scene")
             PlotlySupply.Spec(kind="geo") PlotlySupply.Spec(kind="ternary") PlotlySupply.Spec(kind="mapbox")
@@ -2756,6 +2864,7 @@ end
     end
 
     @testset "CRC: subplot routing rejects incompatible traces atomically" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2758 @testset \"CRC: subplot routing rejects incompatible traces atomically\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(
             1,
             2;
@@ -2816,6 +2925,7 @@ end
     end
 
     @testset "CRC: domain and geo traces receive per-subplot legends" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2818 @testset \"CRC: domain and geo traces receive per-subplot legends\" begin"); flush(stderr)
         sf = PlotlySupply.subplots(
             1,
             2;
@@ -2852,6 +2962,7 @@ end
     ttype(f) = f.data[1].fields[:type]
 
     @testset "Extended: pie / funnelarea" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2854 @testset \"Extended: pie / funnelarea\" begin"); flush(stderr)
         f = plot_pie([3, 2, 1]; labels=["a", "b", "c"], hole=0.3, colors=["red", "green", "blue"])
         @test ttype(f) == "pie"
         @test f.data[1].fields[:hole] == 0.3
@@ -2861,6 +2972,7 @@ end
     end
 
     @testset "Extended: sunburst / treemap" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2863 @testset \"Extended: sunburst / treemap\" begin"); flush(stderr)
         @test ttype(plot_sunburst(["a", "b", "c"], ["", "a", "a"]; values=[10, 3, 2])) == "sunburst"
         @test ttype(plot_treemap(["a", "b"], ["", ""]; values=[1, 2])) == "treemap"
         @test_throws ArgumentError plot_sunburst(["a", "b"], [""])   # length mismatch
@@ -2937,6 +3049,7 @@ end
     end
 
     @testset "Extended: funnel / waterfall" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2939 @testset \"Extended: funnel / waterfall\" begin"); flush(stderr)
         @test ttype(plot_funnel([100, 60, 30], ["A", "B", "C"])) == "funnel"
         w = plot_waterfall(["a", "b", "c"], [10, -3, 5]; measure=["absolute", "relative", "total"])
         @test ttype(w) == "waterfall"
@@ -2945,6 +3058,7 @@ end
     end
 
     @testset "Extended: indicator" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2947 @testset \"Extended: indicator\" begin"); flush(stderr)
         f = plot_indicator(72; reference=50, gauge_range=[0, 100])
         @test ttype(f) == "indicator"
         @test occursin("gauge", f.data[1].fields[:mode])
@@ -2953,6 +3067,7 @@ end
     end
 
     @testset "Extended: area" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2955 @testset \"Extended: area\" begin"); flush(stderr)
         @test plot_area(1:5, rand(5)).data[1].fields[:fill] == "tozeroy"
         s = plot_area(1:5, [rand(5), rand(5)]; stack=true)
         @test length(s.data) == 2 && s.data[1].fields[:stackgroup] == "one"
@@ -2960,18 +3075,21 @@ end
     end
 
     @testset "Extended: candlestick / ohlc" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2962 @testset \"Extended: candlestick / ohlc\" begin"); flush(stderr)
         @test ttype(plot_candlestick(1:3, [1, 2, 3], [2, 3, 4], [0, 1, 2], [1.5, 2.5, 3.5])) == "candlestick"
         @test ttype(plot_ohlc(1:3, [1, 2, 3], [2, 3, 4], [0, 1, 2], [1.5, 2.5, 3.5])) == "ohlc"
         @test_throws ArgumentError plot_candlestick(1:3, [1, 2], [2, 3, 4], [0, 1, 2], [1.5, 2.5, 3.5])
     end
 
     @testset "Extended: histogram2d" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2968 @testset \"Extended: histogram2d\" begin"); flush(stderr)
         f = plot_histogram2d(randn(50), randn(50); nbinsx=10, colorscale="Viridis")
         @test ttype(f) == "histogram2d"
         @test f.data[1].fields[:colorscale] == "Viridis"
     end
 
     @testset "Extended: error bars" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2974 @testset \"Extended: error bars\" begin"); flush(stderr)
         f = plot_scatter(1:5, rand(5); error_y=fill(0.1, 5))
         @test f.data[1].fields[:error_y][:array] == fill(0.1, 5)
         @test f.data[1].fields[:error_y][:visible] == true
@@ -2986,12 +3104,14 @@ end
     end
 
     @testset "Extended: bar orientation / barmode" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2988 @testset \"Extended: bar orientation / barmode\" begin"); flush(stderr)
         h = plot_bar([3, 2, 4], ["a", "b", "c"]; orientation="h")
         @test h.data[1].fields[:orientation] == "h"
         @test plot_bar(["a", "b"], [[1, 2], [3, 4]]; barmode="stack").layout.fields[:barmode] == "stack"
     end
 
     @testset "Extended: annotate!" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:2994 @testset \"Extended: annotate!\" begin"); flush(stderr)
         a = plot_scatter(1:5, rand(5))
         annotate!(a, 3, 0.5, "peak"; arrowhead=2)
         annotate!(a, 1, 0.1, "start"; showarrow=false)
@@ -3001,6 +3121,7 @@ end
     end
 
     @testset "Extended: sankey" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3003 @testset \"Extended: sankey\" begin"); flush(stderr)
         f = plot_sankey([0, 1], [1, 2], [5, 3]; label=["a", "b", "c"])
         @test ttype(f) == "sankey"
         @test f.data[1].fields[:link][:value] == [5, 3]
@@ -3008,6 +3129,7 @@ end
     end
 
     @testset "Extended: parcoords / ternary" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3010 @testset \"Extended: parcoords / ternary\" begin"); flush(stderr)
         p = plot_parcoords(["A" => [1, 2, 3], "B" => [3, 2, 1]]; line_color=[1, 2, 3], colorscale="Viridis")
         @test ttype(p) == "parcoords"
         @test p.data[1].fields[:dimensions][1][:label] == "A"
@@ -3018,6 +3140,7 @@ end
     end
 
     @testset "Extended: image" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3020 @testset \"Extended: image\" begin"); flush(stderr)
         rgb_data = reshape(collect(0:11), 2, 2, 3)
         rgb = plot_image(rgb_data)
         @test ttype(rgb) == "image"
@@ -3039,6 +3162,7 @@ end
     end
 
     @testset "Extended: 3D mesh / field / streamtube" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3041 @testset \"Extended: 3D mesh / field / streamtube\" begin"); flush(stderr)
         @test ttype(plot_mesh3d([0, 1, 0], [0, 0, 1], [0, 0, 0]; i=[0], j=[1], k=[2], color="lightblue")) == "mesh3d"
         iso = plot_isosurface([0, 1, 0, 1], [0, 0, 1, 1], [0, 0, 0, 0], [1.0, 2, 3, 4]; surface_count=3, zrange=[-1, 1])
         @test ttype(iso) == "isosurface"
@@ -3051,6 +3175,7 @@ end
     end
 
     @testset "Extended: geo / mapbox" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3053 @testset \"Extended: geo / mapbox\" begin"); flush(stderr)
         locations_parent = ["unused", "USA", "CAN", "unused"]
         locations = view(locations_parent, 2:3)
         values = 1.0:2.0
@@ -3503,6 +3628,7 @@ end
     end
 
     @testset "CRC: geo/mapbox inputs stay lazy and allocation bounded" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3505 @testset \"CRC: geo/mapbox inputs stay lazy and allocation bounded\" begin"); flush(stderr)
         payload = 1:1_000_000
         geojson = Dict(
             "type" => "FeatureCollection",
@@ -3655,6 +3781,7 @@ end
     end
 
     @testset "CRC: cell-specific geo/mapbox updates" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3657 @testset \"CRC: cell-specific geo/mapbox updates\" begin"); flush(stderr)
         specs = [
             PlotlySupply.Spec(kind="geo") PlotlySupply.Spec(kind="geo")
             PlotlySupply.Spec(kind="mapbox") PlotlySupply.Spec(kind="mapbox")
@@ -3843,6 +3970,7 @@ end
     end
 
     @testset "Extended: mutating preserves template" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3845 @testset \"Extended: mutating preserves template\" begin"); flush(stderr)
         for (mk, add!) in (
             (() -> plot_pie([1, 2]), (g) -> plot_pie!(g, [3, 4])),
             (() -> plot_waterfall(["a"], [1]), (g) -> plot_waterfall!(g, ["b"], [2])),
@@ -3858,6 +3986,7 @@ end
     end
 
     @testset "CRC: atomic restyle/update/movetraces" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:3860 @testset \"CRC: atomic restyle/update/movetraces\" begin"); flush(stderr)
         snapshot_atomic = p -> PlotlyBase.JSON.json(
             Dict(:data => p.data, :layout => p.layout);
             allownan=true,
@@ -4002,6 +4131,7 @@ end
     end
 
     @testset "CRC: bounded extend/prepend traces" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:4004 @testset \"CRC: bounded extend/prepend traces\" begin"); flush(stderr)
         p = Plot(scatter(x=[1, 2, 3], y=[10, 20, 30]))
         extendtraces!(p, Dict(:x => [[4, 5]], :y => [[40, 50]]), [1], 3)
         @test p.data[1][:x] == [3, 4, 5]
@@ -4048,6 +4178,7 @@ end
     end
 
     @testset "CRC: plot frames reach desktop renderer" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:4050 @testset \"CRC: plot frames reach desktop renderer\" begin"); flush(stderr)
         fr = frame(name="frame-sentinel", data=[scatter(y=[2, 3])])
 
         keyword_plot = plot(scatter(y=[1, 2]); frames=[fr])
@@ -4126,7 +4257,9 @@ end
     end
 
     @testset "SyncPlot lifecycle ownership" begin
+        println(stderr, "PS_TEST_BEGIN runtests.jl:4128 @testset \"SyncPlot lifecycle ownership\" begin"); flush(stderr)
         @testset "constructor failure rolls back its temp directory" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4129 @testset \"constructor failure rolls back its temp directory\" begin"); flush(stderr)
             mktempdir() do temp_root
                 ec = _LifecycleFakeElectron(; fail_window=true)
                 plot = Plot(scatter(y=[1, 2, 3]))
@@ -4144,6 +4277,7 @@ end
         end
 
         @testset "constructor awaits and validates the initial render" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4146 @testset \"constructor awaits and validates the initial render\" begin"); flush(stderr)
             plot = Plot(
                 scatter(y=[1, 2, 3]),
                 Layout(),
@@ -4264,6 +4398,7 @@ end
         end
 
         @testset "explicit close is synchronous and idempotent" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4266 @testset \"explicit close is synchronous and idempotent\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron()
             plot = Plot(scatter(y=[1, 2, 3]))
             sp = PlotlySupply._create_syncplot_window(
@@ -4297,6 +4432,7 @@ end
         end
 
         @testset "live image commands use the source renderer exactly once" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4299 @testset \"live image commands use the source renderer exactly once\" begin"); flush(stderr)
             state = _ImageCommandState()
             backend = _image_command_backend(state)
             window = Ref(:image_command_window)
@@ -4531,6 +4667,7 @@ end
         end
 
         @testset "SyncPlot clones own independent windows and resources" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4533 @testset \"SyncPlot clones own independent windows and resources\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron()
             shared_clone_payload = [10, 20, 30]
             plot = Plot(
@@ -4827,6 +4964,7 @@ end
         end
 
         @testset "manual SyncPlot clone requests fail before allocation" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4829 @testset \"manual SyncPlot clone requests fail before allocation\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron()
             resources = PlotlySupply._SyncPlotResources(nothing, ec)
             manual = SyncPlot(
@@ -4855,6 +4993,7 @@ end
         end
 
         @testset "unknown backend state still attempts explicit close" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4857 @testset \"unknown backend state still attempts explicit close\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron(; throw_on_isopen=true)
             plot = Plot(scatter(y=[1, 2, 3]))
             sp = PlotlySupply._create_syncplot_window(
@@ -4880,6 +5019,7 @@ end
         end
 
         @testset "backend close may re-enter close on the owner task" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4882 @testset \"backend close may re-enter close on the owner task\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron()
             plot = Plot(scatter(y=[1, 2, 3]))
             sp = PlotlySupply._create_syncplot_window(
@@ -4908,6 +5048,7 @@ end
         end
 
         @testset "concurrent close waits without holding resource lock" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4910 @testset \"concurrent close waits without holding resource lock\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron(; block_close=true)
             plot = Plot(scatter(y=[1, 2, 3]))
             sp = PlotlySupply._create_syncplot_window(
@@ -4943,6 +5084,7 @@ end
         end
 
         @testset "same-task close retries failed temp cleanup" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4945 @testset \"same-task close retries failed temp cleanup\" begin"); flush(stderr)
             owned_tempdir = mktempdir(; prefix="plotlysupply-cleanup-retry-")
             try
                 write(joinpath(owned_tempdir, "index.html"), "owned")
@@ -4988,6 +5130,7 @@ end
         end
 
         @testset "throwing backend close still releases owned resources" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:4990 @testset \"throwing backend close still releases owned resources\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron(; throw_on_close=true)
             plot = Plot(scatter(y=[1, 2, 3]))
             sp = PlotlySupply._create_syncplot_window(
@@ -5018,6 +5161,7 @@ end
         end
 
         @testset "registry mutation is thread-safe" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:5020 @testset \"registry mutation is thread-safe\" begin"); flush(stderr)
             baseline = _lifecycle_registry_counts()
             ec = _LifecycleFakeElectron()
             plots = [Plot(scatter(y=[i, i + 1])) for i in 1:24]
@@ -5051,6 +5195,7 @@ end
         end
 
         @testset "native close releases registries and large payload" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:5053 @testset \"native close releases registries and large payload\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron()
             baseline = _lifecycle_registry_counts()
             fixture = _native_close_lifecycle_fixture(ec)
@@ -5073,6 +5218,7 @@ end
         end
 
         @testset "open-window watcher remains weak" begin
+            println(stderr, "PS_TEST_BEGIN runtests.jl:5075 @testset \"open-window watcher remains weak\" begin"); flush(stderr)
             ec = _LifecycleFakeElectron()
             fixture = _open_watcher_lifecycle_fixture(ec)
 
