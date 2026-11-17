@@ -15,22 +15,26 @@ using Statistics: median
 const SCALING_QUICK = Ref(false)
 
 """
-	bench_call(f; samples = 3) -> (time = s, bytes = b)
+	bench_call(f; samples = 3) -> (time = s, time_max = s, bytes = b)
 
-Minimum wall time (seconds, GC included) and minimum allocated bytes over
-`samples` runs of `f()`, after one untimed warm-up run that compiles it.
+Minimum and maximum wall time (seconds, GC included) and minimum allocated
+bytes over `samples` runs of `f()`, after one untimed warm-up run that
+compiles it. The maximum shows how noisy the minimum is on a shared machine.
 """
 function bench_call(f; samples::Integer = 3)
+	samples >= 1 || throw(ArgumentError("bench_call: `samples` must be >= 1; got $(samples)."))
 	f()
 	best_time = Inf
+	worst_time = 0.0
 	best_bytes = typemax(Int)
 	for _ in 1:samples
 		GC.gc(false)
 		stats = @timed f()
 		best_time = min(best_time, stats.time)
+		worst_time = max(worst_time, stats.time)
 		best_bytes = min(best_bytes, stats.bytes)
 	end
-	return (time = best_time, bytes = best_bytes)
+	return (time = best_time, time_max = worst_time, bytes = best_bytes)
 end
 
 # Fitted exponent of cost(n) between the two largest sizes (log-log slope).
@@ -47,7 +51,8 @@ struct ScalingRow
 	name::String
 	n::Int
 	unit::String     # what n counts ("points", "cells", ...)
-	time::Float64
+	time::Float64    # minimum over the samples
+	time_max::Float64
 	bytes::Int
 end
 
@@ -136,7 +141,7 @@ function sweep!(rows, fits, group, name, unit, ns, make; expected = "1", samples
 	for n in ns
 		f = make(n)
 		r = bench_call(f; samples = samples)
-		push!(rows, ScalingRow(group, name, n, unit, r.time, r.bytes))
+		push!(rows, ScalingRow(group, name, n, unit, r.time, r.time_max, r.bytes))
 		push!(times, r.time); push!(bytes, r.bytes)
 	end
 	push!(fits, ScalingFit(group, name, unit, collect(ns),
@@ -425,10 +430,11 @@ end
 function scaling_report(rows, fits, rep, mem)
 	io = IOBuffer()
 	println(io, "### Size sweeps\n")
-	println(io, "| group | benchmark | n | unit | min time (ms) | allocated (MB) |")
-	println(io, "|---|---|---:|---|---:|---:|")
+	println(io, "| group | benchmark | n | unit | min time (ms) | max time (ms) | allocated (MB) |")
+	println(io, "|---|---|---:|---|---:|---:|---:|")
 	for r in rows
-		@printf(io, "| %s | %s | %d | %s | %.2f | %.2f |\n", r.group, r.name, r.n, r.unit, 1e3 * r.time, r.bytes / 2^20)
+		@printf(io, "| %s | %s | %d | %s | %.2f | %.2f | %.2f |\n", r.group, r.name, r.n, r.unit,
+			1e3 * r.time, 1e3 * r.time_max, r.bytes / 2^20)
 	end
 	println(io, "\n### Fitted exponents (log-log slope between the two largest sizes)\n")
 	println(io, "| benchmark | sizes | time exponent | bytes exponent | expected |")

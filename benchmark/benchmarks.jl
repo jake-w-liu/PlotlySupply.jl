@@ -156,8 +156,10 @@ function benchmark_main(args)
 	if opts["scaling"]
 		@info "benchmarks: scaling and memory$(opts["quick"] ? " (quick)" : "")"
 		println(io, "\n## Scaling and memory (", labels[end], ")\n")
-		println(io, "Minimum time over repeated runs (GC included) and allocated bytes of that run set. ",
-			"Exponents are the log-log slope between the two largest sizes.\n")
+		println(io, "Minimum and maximum time over 2-3 runs after a warm-up run (GC included; the ",
+			"spread shows how noisy the minimum is on this machine) and the minimum allocated bytes. ",
+			"Exponents are the log-log slope of the minimum time and of the bytes between the two ",
+			"largest sizes.\n")
 		print(io, scaling_run(; quick = opts["quick"]))
 	end
 	@printf(io, "\nLoad average at the end: %s. Total benchmark time: %.0f s.\n",
