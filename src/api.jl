@@ -796,6 +796,46 @@ function _legend_base_axis_ref(layout::Layout, ref::String, letter::Symbol)
 	return current
 end
 
+# Tolerance of the domain containment test below (paper fractions; inset
+# domains are computed from the host domain in floating point).
+const _LEGEND_DOMAIN_TOL = 1e-9
+
+_legend_domain_within(inner, outer) =
+	inner[1] >= outer[1] - _LEGEND_DOMAIN_TOL && inner[2] <= outer[2] + _LEGEND_DOMAIN_TOL
+
+# Grid cell whose legend lists the traces of the x/y axis pair (xref, yref):
+# `nothing` when the pair is a grid cell's own (the common case, decided by
+# comparing ids only), otherwise — an inset (`inset!`, `subplots(...; insets)`)
+# or other extra axes — the Cartesian cell whose plot area contains the pair's
+# domain, as (x ref, y ref, x domain, y domain). A pair inside no cell, or
+# inside several overlapping cells, keeps its own legend.
+function _legend_inset_host(p::Plot, xref::String, yref::String, xdom, ydom)
+	grid_ref = p.layout.subplots.grid_ref
+	cells = Tuple{String, String}[]
+	for index in eachindex(grid_ref)
+		isassigned(grid_ref, index) || continue
+		refs = grid_ref[index]
+		isempty(refs) && continue
+		ref = first(refs)
+		String(ref.subplot_kind) == "xy" || continue
+		routing = ref.trace_kwargs.fields
+		cell = (String(get(routing, :xaxis, "x")), String(get(routing, :yaxis, "y")))
+		cell == (xref, yref) && return nothing
+		push!(cells, cell)
+	end
+	host = nothing
+	for (cell_x, cell_y) in cells
+		cell_xdom = _layout_axis_domain(p.layout, _axis_layout_key(cell_x, :x))
+		cell_ydom = _layout_axis_domain(p.layout, _axis_layout_key(cell_y, :y))
+		(cell_xdom === nothing || cell_ydom === nothing) && continue
+		(_legend_domain_within(xdom, cell_xdom) && _legend_domain_within(ydom, cell_ydom)) ||
+			continue
+		host === nothing || return nothing
+		host = (cell_x, cell_y, cell_xdom, cell_ydom)
+	end
+	return host
+end
+
 function _trace_subplot_key_domain(p::Plot, trace::GenericTrace)
 	fields = trace.fields
 
@@ -805,6 +845,11 @@ function _trace_subplot_key_domain(p::Plot, trace::GenericTrace)
 		xdom = _layout_axis_domain(p.layout, _axis_layout_key(xaxis, :x))
 		ydom = _layout_axis_domain(p.layout, _axis_layout_key(yaxis, :y))
 		(xdom === nothing || ydom === nothing) && return nothing
+		# Traces on an inset are listed in the legend of the cell that hosts it.
+		host = _legend_inset_host(p, xaxis, yaxis, xdom, ydom)
+		if host !== nothing
+			xaxis, yaxis, xdom, ydom = host
+		end
 		return ("xy:" * xaxis * "|" * yaxis, (xdom, ydom))
 	end
 
@@ -1459,6 +1504,21 @@ function _legend_subplot_assignment(p::Plot)
 	return order, ids, domains, trace_keys
 end
 
+# Fill the style's legend font (`_style_legend_font()`) into `layout.<key>.font`
+# where the box sets no value yet.
+function _legend_fill_style_font!(p::Plot, key::Symbol, style_font::AbstractDict)
+	isempty(style_font) && return nothing
+	d = _symbol_dict(get(p.layout.fields, key, nothing))
+	font = _symbol_dict(get(d, :font, nothing))
+	all(name -> haskey(font, name), keys(style_font)) && return nothing
+	for (name, value) in style_font
+		get!(font, name, value)
+	end
+	d[:font] = attr(; font...)
+	p.layout.fields[key] = attr(; d...)
+	return nothing
+end
+
 """
 	_apply_subplot_legends!(p; legend_position, legend_inset, legend_bgcolor, legend_bordercolor, legend_borderwidth, overwrite=false, replace_placement=overwrite, replace_colors=overwrite, fresh=false, xanchor="", yanchor="", ext_opts=nothing)
 
@@ -1519,9 +1579,15 @@ function _apply_subplot_legends!(
 	end
 
 	colors = _legend_resolve_colors(p, legend_bgcolor, legend_bordercolor, legend_borderwidth)
+	# Legend boxes created after construction get the active style's legend
+	# font size, which the style wrote only onto the legends that existed when
+	# the figure was built (an explicit font size already in the box wins).
+	style_font = _style_legend_font()
 	for key in order
 		xdom, ydom = domains[key]
 		legend_id = _legend_id(ids[key])
+		legend_key = _legend_symbol(ids[key])
+		created = fresh || !haskey(p.layout.fields, legend_key)
 		reassigned = legend_id in moved || !(legend_id in kept)
 		placement = _legend_placement(
 			legend_position,
@@ -1534,7 +1600,7 @@ function _apply_subplot_legends!(
 		)
 		_legend_write_block!(
 			p,
-			_legend_symbol(ids[key]);
+			legend_key;
 			placement = placement,
 			colors = colors,
 			ext = ext_opts === nothing ? nothing :
@@ -1543,6 +1609,7 @@ function _apply_subplot_legends!(
 			replace_colors = replace_colors || reassigned,
 			fresh = fresh,
 		)
+		created && _legend_fill_style_font!(p, legend_key, style_font)
 	end
 	figure_key = Symbol(_FIGURE_LEGEND_ID)
 	if has_figure_entries && !haskey(p.layout.fields, figure_key)
@@ -1553,6 +1620,7 @@ function _apply_subplot_legends!(
 			placement = _legend_placement(:outside_bottom, (0.0, 1.0), (0.0, 1.0), legend_inset; figure = true),
 			colors = colors,
 		)
+		_legend_fill_style_font!(p, figure_key, style_font)
 	end
 	_legend_set_showlegend!(p, nothing, overwrite)
 	_legend_title_clearance!(p)
@@ -2542,6 +2610,121 @@ function _subplots_grid_kwargs(
 	return grid
 end
 
+# ── `subplots(...; insets = [Inset(...), ...])` ──────────────────────────────
+#
+# PlotlyBase creates the axes of its `Inset` specifications but keeps no
+# routing record of them, so they are registered in `sf.insets` here: `inset=k`
+# then targets them like the insets `inset!` adds. Only Cartesian insets over
+# a single Cartesian cell are supported (PlotlyBase ignores `colspan` /
+# `rowspan` of an inset, and the inset record is an x/y axis pair).
+
+# A size fraction of an `Inset` (`l`, `b`, or `w`/`h`, which may be "to_end").
+function _subplots_inset_fraction(value, k::Int, name::AbstractString; size::Bool)
+	if size && value isa AbstractString
+		value == "to_end" || throw(ArgumentError(
+			"subplots: `insets[$(k)].$(name)` must be a number or \"to_end\"; got $(repr(value)).",
+		))
+		return nothing
+	end
+	(value isa Real && !(value isa Bool) && isfinite(value) &&
+		(size ? 0 < value <= 1 : 0 <= value < 1)) || throw(ArgumentError(
+		"subplots: `insets[$(k)].$(name)` must be a finite number in " *
+		(size ? "(0, 1]" : "[0, 1)") * " (a fraction of the host cell); got $(repr(value)).",
+	))
+	return Float64(value)
+end
+
+# Validated `insets` keyword (before the grid is built): a vector of
+# `PlotlyBase.Inset` with kind "xy", a host cell inside the grid, no spans and
+# fractions that keep the inset inside its host cell. Returns them as
+# `(row, col, (x0, x1), (y0, y1))` fractions of the host cell.
+function _subplots_checked_insets(insets, rows::Int, cols::Int)
+	insets === missing && return Tuple{Int, Int, NTuple{2, Float64}, NTuple{2, Float64}}[]
+	(insets isa AbstractVector && all(inset -> inset isa PlotlyBase.Inset, insets)) ||
+		throw(ArgumentError(
+			"subplots: `insets` must be a vector of `Inset(...)` specifications; got " *
+			"$(repr(insets)). (`inset!(sf, bounds)` adds an inset to an existing figure.)",
+		))
+	checked = Tuple{Int, Int, NTuple{2, Float64}, NTuple{2, Float64}}[]
+	for (k, inset) in enumerate(insets)
+		inset.kind == "xy" || throw(ArgumentError(
+			"subplots: `insets[$(k)]` has kind $(repr(inset.kind)); only Cartesian " *
+			"(\"xy\") insets are supported.",
+		))
+		(inset.colspan == 1 && inset.rowspan == 1) || throw(ArgumentError(
+			"subplots: `insets[$(k)]` sets colspan/rowspan, which PlotlyBase ignores; " *
+			"an inset lies inside one cell (size it with `w`/`h`).",
+		))
+		r, c = inset.cell
+		(1 <= r <= rows && 1 <= c <= cols) || throw(ArgumentError(
+			"subplots: `insets[$(k)].cell` = $(inset.cell) is outside the " *
+			"$(rows) × $(cols) grid.",
+		))
+		l = _subplots_inset_fraction(inset.l, k, "l"; size = false)
+		b = _subplots_inset_fraction(inset.b, k, "b"; size = false)
+		w = _subplots_inset_fraction(inset.w, k, "w"; size = true)
+		h = _subplots_inset_fraction(inset.h, k, "h"; size = true)
+		x1 = w === nothing ? 1.0 : l + w
+		y1 = h === nothing ? 1.0 : b + h
+		# Tolerance for fractions such as 0.7 + 0.3, which exceed 1 by one ulp.
+		(x1 <= 1 + 1e-12 && y1 <= 1 + 1e-12) || throw(ArgumentError(
+			"subplots: `insets[$(k)]` reaches outside its cell (l + w = $(x1), " *
+			"b + h = $(y1)); both must be at most 1.",
+		))
+		push!(checked, (r, c, (l, min(x1, 1.0)), (b, min(y1, 1.0))))
+	end
+	return checked
+end
+
+# Register the insets PlotlyBase created for `fractions` (from
+# `_subplots_checked_insets`, in the same order): they hold the x/y axes
+# numbered after every grid axis. Their domains are recomputed from the host
+# cell's plot area (PlotlyBase sizes them by one grid column/row, which is
+# wrong for spanning and bottom-left cells), and their tick labels do not push
+# the figure margins (as for `inset!`). Returns the inset records.
+function _subplots_register_insets!(p::Plot, fractions)
+	records = _SubplotInset[]
+	isempty(fractions) && return records
+	layout = p.layout
+	grid_ref = layout.subplots.grid_ref
+	max_x = 0
+	max_y = 0
+	for index in eachindex(grid_ref)
+		isassigned(grid_ref, index) || continue
+		for ref in grid_ref[index]
+			String(ref.subplot_kind) == "xy" || continue
+			x_index = _cmn_axis_index(ref.layout_keys[1], 'x')
+			y_index = _cmn_axis_index(ref.layout_keys[2], 'y')
+			x_index === nothing || (max_x = max(max_x, x_index))
+			y_index === nothing || (max_y = max(max_y, y_index))
+		end
+	end
+	for (k, (r, c, xfrac, yfrac)) in enumerate(fractions)
+		host = isassigned(grid_ref, r, c) ? grid_ref[r, c] : PlotlyBase.SubplotRef[]
+		(!isempty(host) && String(first(host).subplot_kind) == "xy") || throw(ArgumentError(
+			"subplots: the host cell $((r, c)) of `insets[$(k)]` is not a Cartesian " *
+			"(\"xy\") cell.",
+		))
+		hx = something(_layout_axis_domain(layout, first(host).layout_keys[1]), (0.0, 1.0))
+		hy = _cmn_y_axis_domain(layout, first(host).layout_keys[2])
+		xkey = Symbol("xaxis", max_x + k)
+		ykey = Symbol("yaxis", max_y + k)
+		xref = "x$(max_x + k)"
+		yref = "y$(max_y + k)"
+		# PlotlyBase numbers inset axes after the grid's; anything else means
+		# its layout builder changed, and the records would point elsewhere.
+		(_cmn_mapping_get(get(layout.fields, xkey, nothing), :anchor) == yref &&
+			_cmn_mapping_get(get(layout.fields, ykey, nothing), :anchor) == xref) ||
+			error("subplots: PlotlyBase did not create inset $(k) as $(xkey)/$(ykey).")
+		xdomain = (hx[1] + xfrac[1] * (hx[2] - hx[1]), hx[1] + xfrac[2] * (hx[2] - hx[1]))
+		ydomain = (hy[1] + yfrac[1] * (hy[2] - hy[1]), hy[1] + yfrac[2] * (hy[2] - hy[1]))
+		_cmn_merge_layout_key!(p, xkey, Dict{Symbol, Any}(:domain => collect(xdomain), :automargin => false))
+		_cmn_merge_layout_key!(p, ykey, Dict{Symbol, Any}(:domain => collect(ydomain), :automargin => false))
+		push!(records, _SubplotInset(r, c, xkey, ykey, xref, yref, xdomain, ydomain))
+	end
+	return records
+end
+
 # A legend colour keyword of `subplots`: `nothing` takes the style default; a
 # String/Symbol must parse as a colour (CSS name, hex, rgb/rgba/hsl, or a
 # matplotlib grey level such as "0.35") and is stored in the normalised
@@ -2612,6 +2795,16 @@ with `plot_*!` get a colorbar next to their own cell (see
   for the default `start_cell="top-left"` its FIRST entry sizes the BOTTOM
   row; prefer `height_ratios`. Cell colorbars sit in the gap right of their
   cell, so widen `horizontal_spacing` when neighbouring cells crowd them.
+- `insets`: a vector of `PlotlyBase.Inset(cell=(row, col), l, w, b, h)`
+  Cartesian insets. `l`/`b` (in `[0, 1)`) and `w`/`h` (in `(0, 1]`, or
+  `"to_end"`) are fractions of the host cell's plot area; `l + w` and
+  `b + h` must not exceed 1, the host must be a Cartesian cell, and
+  `kind` other than `"xy"` or `colspan`/`rowspan` other than 1 are
+  rejected. The insets are registered like the ones [`inset!`](@ref) adds:
+  ids `1, 2, …` in the given order (before any `inset!` ids), targeted with
+  `inset = k` by the `plot_*!` mutators and axis helpers; their tick labels
+  do not push the figure margins, and their traces are listed in the host
+  cell's legend.
 
 Every option is validated before the figure (or window) is created; invalid
 values throw an `ArgumentError`. Figure-level settings are not changed by the
@@ -2703,6 +2896,7 @@ function subplots(
 		width_ratios,
 		subplot_kwargs,
 	)
+	inset_fractions = _subplots_checked_insets(get(grid_kwargs, :insets, missing), rows_i, cols_i)
 	grid = try
 		Subplots(; rows = rows_i, cols = cols_i, grid_kwargs...)
 	catch err
@@ -2726,6 +2920,7 @@ function subplots(
 	# Build the complete model first, so a live window renders it once.
 	p = Plot(Vector{GenericTrace}(undef, 0), layout)
 	_apply_default_template!(p)
+	inset_records = _subplots_register_insets!(p, inset_fractions)
 	_apply_figure_title!(p, title)
 	_apply_figure_size!(p, "subplots"; width = width, height = height)
 	# Shared axes: keep every `matches` group autoranging (see finalize.jl).
@@ -2754,6 +2949,7 @@ function subplots(
 		bgcolor,
 		bordercolor,
 		Float64(borderwidth),
+		inset_records,
 	)
 end
 
@@ -3168,7 +3364,16 @@ function _subplot_purge_impl!(sf::SubplotFigure)
 	merge!(p.layout.fields, fresh.fields)
 	p.layout.subplots = fresh.subplots
 	_apply_default_template!(p)
+	# Insets added with `inset!` go; those of `subplots(...; insets)` are part
+	# of the grid and are registered again.
 	empty!(sf.insets)
+	append!(
+		sf.insets,
+		_subplots_register_insets!(
+			p,
+			_subplots_checked_insets(p.layout.subplots.insets, sf.rows, sf.cols),
+		),
+	)
 	sf.current_row = 1
 	sf.current_col = 1
 	_refresh!(sf.fig)
@@ -3180,8 +3385,9 @@ end
 
 Remove every trace and every layout setting of `sf` but keep its grid: the
 figure is reset to the empty grid `subplots(...)` created (same specs,
-spacing, ratios and subplot titles, default template), registered insets are
-dropped and cell `(1, 1)` becomes active. A figure title or size set by
+spacing, ratios and subplot titles, default template), insets added with
+[`inset!`](@ref) are dropped (the `subplots(...; insets)` ones belong to the
+grid and stay registered) and cell `(1, 1)` becomes active. A figure title or size set by
 `subplots(...; title, width, height)` is removed too. A live window is
 redrawn in one transaction. Returns `sf`.
 """
@@ -3337,40 +3543,12 @@ function _subplot_add_trace_impl!(
 	p = _plot_obj(sf.fig)
 	_validate_subplot_traces!(p, (trace,), r, c; secondary_y = secondary_y, who = "add_trace!")
 	PlotlyBase.add_trace!(p, trace; row = r, col = c, secondary_y = secondary_y)
-	_subplot_apply_legends!(sf, p)
+	_refresh_subplot_legends!(sf, p; first_new = length(p.data))
 
 	sf.current_row = r
 	sf.current_col = c
 	_refresh!(sf.fig)
 	return sf
-end
-
-# Legend layout after traces were added to a SubplotFigure: per-cell legends,
-# or (per_subplot_legends = false) the figure legend styled with the
-# SubplotFigure's legend options. The figure-legend branch only writes layout
-# (`overwrite=false` keeps a legend set by `set_legend!`/`relayout!`), so it is
-# safe on the append-only fast path that shares existing trace roots.
-function _subplot_apply_legends!(sf::SubplotFigure, p::Plot)
-	if sf.per_subplot_legends
-		_apply_subplot_legends!(
-			p;
-			legend_position = sf.legend_position,
-			legend_inset = sf.legend_inset,
-			legend_bgcolor = sf.legend_bgcolor,
-			legend_bordercolor = sf.legend_bordercolor,
-			legend_borderwidth = sf.legend_borderwidth,
-		)
-	else
-		_apply_default_legend!(
-			p;
-			position = sf.legend_position,
-			inset = sf.legend_inset,
-			bgcolor = sf.legend_bgcolor,
-			bordercolor = sf.legend_bordercolor,
-			borderwidth = sf.legend_borderwidth,
-		)
-	end
-	return nothing
 end
 
 function PlotlyBase.add_trace!(
@@ -3419,14 +3597,16 @@ function _subplot_addtraces_impl!(
 	for trace in traces
 		PlotlyBase.add_trace!(staged, trace; row = r, col = c, secondary_y = secondary_y)
 	end
-	if index === nothing
+	first_new = if index === nothing
 		append!(p.data, staged.data)
+		length(p.data) - length(staged.data) + 1
 	else
 		# Same order as PlotlyBase's addtraces!(p, i, traces...): the first
 		# new trace lands at position `index`.
 		splice!(p.data, index:(index - 1), staged.data)
+		index
 	end
-	_subplot_apply_legends!(sf, p)
+	_refresh_subplot_legends!(sf, p; first_new = first_new)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -4256,17 +4436,10 @@ function _layout_merge_child_paths(paths::Tuple, key::Symbol)
 	)
 end
 
-function _normalize_nested_layout_source(
-	key::Symbol,
-	value,
-)
-	if key === :title && value isa AbstractString
-		return attr(text = String(value))
-	end
-	return value
-end
-
-function _normalize_nested_layout_existing(
+# A nested layout value in the form the deep merge expects, for both the
+# incoming and the existing side: a bare-string `title` is promoted to
+# `attr(text = ...)` (plotly's shorthand); every other value is unchanged.
+function _normalize_nested_layout_value(
 	key::Symbol,
 	value,
 )
@@ -4338,14 +4511,14 @@ function _prepare_layout_mapping_merge!(
 		push!(processed, nested_key)
 		haskey(source_dict, nested_key) || continue
 
-		source_nested = _normalize_nested_layout_source(
+		source_nested = _normalize_nested_layout_value(
 			nested_key,
 			source_dict[nested_key],
 		)
 		source_dict[nested_key] = source_nested
 		_is_layout_mapping(source_nested) || continue
 
-		existing_nested = _normalize_nested_layout_existing(
+		existing_nested = _normalize_nested_layout_value(
 			nested_key,
 			get(target_dict, nested_key, nothing),
 		)
@@ -4599,6 +4772,22 @@ function _subplot_remap_axis_refs(
 	return PlotlyBase.PlotlyAttribute(fields)
 end
 
+# Root layout keys of a scratch figure that `_apply_source_layout_to_added_traces!`
+# merges into the target figure: `font`, `coloraxis` and the numbered colour
+# axes (`coloraxis2`, ...) in index order.
+const _SUBPLOT_NUMBERED_COLORAXIS_KEY = r"^coloraxis([2-9]|[1-9][0-9]+)$"
+
+function _subplot_transplanted_root_keys(source::Plot)
+	numbered = Tuple{Int, Symbol}[]
+	for key in keys(source.layout.fields)
+		m = match(_SUBPLOT_NUMBERED_COLORAXIS_KEY, String(key))
+		m === nothing && continue
+		push!(numbered, (parse(Int, m.captures[1]), Symbol(key)))
+	end
+	sort!(numbered)
+	return (:font, :coloraxis, (key for (_, key) in numbered)...)
+end
+
 function _apply_source_layout_to_added_traces!(
 	target::Plot,
 	source::Plot,
@@ -4799,7 +4988,9 @@ function _apply_source_layout_to_added_traces!(
 		end
 	end
 
-	for key in (:font, :coloraxis)
+	# The root font and every colour axis the mutator wrote ("coloraxis",
+	# "coloraxis2", ...): traces keep the colour-axis id the mutator gave them.
+	for key in _subplot_transplanted_root_keys(source)
 		record_change!(
 			key,
 			_prepare_layout_attr_merge!(
@@ -4844,15 +5035,16 @@ end
 
 # barmode/boxmode/violinmode are single figure-wide plotly attributes, so a
 # per-cell mutator must not let its automatic choice leak into other cells.
-# - An explicit mode (`barmode="stack"`) is written, with a warning when it
-#   replaces a different mode that already arranges traces in other cells.
+# - An explicit mode (`barmode="stack"`) is written to the root.
+# - An explicit boxmode/violinmode that replaces a different mode already
+#   arranging traces in other cells warns. The bar mode is reported by the
+#   stats family's own SubplotFigure delegate (`_stats_subplot_delegate!`), the
+#   only family whose mutators take `barmode`, so it is not warned twice.
 # - An automatic box/violin mode only fills an unset root value (it offsets
 #   boxes but hides no data).
 # - An automatic barmode is never copied: a nested histogram's "overlay" would
-#   hide grouped bars in every other cell. The new bars/histograms of the call
-#   are overlaid inside their own cell instead, by sharing one `offsetgroup`
-#   (under plotly's default "group" mode, traces of one offset group are drawn
-#   at the same positions).
+#   hide grouped bars in every other cell. The histogram family overlays the
+#   series of one call inside their own cell with a shared `offsetgroup`.
 function _apply_source_root_layout_modes!(
 	target::Plot,
 	source::Plot;
@@ -4865,7 +5057,7 @@ function _apply_source_root_layout_modes!(
 		value = source.layout.fields[key]
 		if key in explicit_keys
 			existing = get(target.layout.fields, key, nothing)
-			if existing !== nothing && existing != value &&
+			if key !== :barmode && existing !== nothing && existing != value &&
 					_subplot_mode_used_elsewhere(target, key, start_index)
 				@warn "$(who): `$(key)=$(repr(value))` replaces " *
 					"`$(key)=$(repr(existing))` for the WHOLE figure: plotly " *
@@ -4875,25 +5067,7 @@ function _apply_source_root_layout_modes!(
 			target.layout.fields[key] = value
 		elseif key !== :barmode
 			get!(target.layout.fields, key, value)
-		elseif value == "overlay" && get(target.layout.fields, :barmode, "group") == "group"
-			_subplot_overlay_new_bars!(target, start_index)
 		end
-	end
-	return nothing
-end
-
-# Give the bar/histogram traces `target.data[start_index:end]` (when there are
-# two or more and none has an offset group yet) one offset group of their own.
-function _subplot_overlay_new_bars!(target::Plot, start_index::Int)
-	added = [
-		trace for trace in target.data[start_index:end]
-		if string(get(trace.fields, :type, "scatter")) in _subplot_mode_trace_types(:barmode)
-	]
-	length(added) >= 2 || return nothing
-	any(trace -> haskey(trace.fields, :offsetgroup), added) && return nothing
-	group = "plotlysupply:overlay:$(start_index)"
-	for trace in added
-		trace.fields[:offsetgroup] = group
 	end
 	return nothing
 end
@@ -4927,6 +5101,136 @@ end
 _subplot_shared_surface_coloraxis(mutator, kwargs) =
 	mutator === plot_surface! && get(kwargs, :shared_coloraxis, false) === true
 
+# Name that prefixes the delegate's own errors and warnings (cell resolution,
+# trace-kind checks, ignored figure-level keywords): `delegate_who` when the
+# caller passes it, else a `who` keyword the caller forwards to its mutator
+# (the 2-D field family does), else the mutator's name. A closure (families
+# that wrap the public mutator to set a context) has a generated name, so the
+# exported PlotlySupply function it captures names it; a closure that captures
+# no exported function, or several, falls back to "SubplotFigure".
+function _subplot_delegate_who(mutator, delegate_who, kwargs)
+	delegate_who === nothing || return String(delegate_who)
+	forwarded = get(kwargs, :who, nothing)
+	(forwarded isa AbstractString && !isempty(forwarded)) && return String(forwarded)
+	return _subplot_mutator_name(mutator)
+end
+
+_subplot_is_closure(f::Function) = startswith(String(nameof(f)), "#")
+
+function _subplot_mutator_name(mutator::Function)
+	_subplot_is_closure(mutator) || return String(nameof(mutator))
+	found = Set{Symbol}()
+	_subplot_collect_captured_mutators!(found, mutator)
+	return length(found) == 1 ? String(only(found)) : "SubplotFigure"
+end
+
+# Names of the exported PlotlySupply functions a closure captures, directly or
+# through the closures it captures (a closure with keyword arguments keeps its
+# captures in an inner body closure). Closures are immutable values, so the
+# walk cannot cycle; captured `Core.Box`es (reassigned variables) are skipped.
+function _subplot_collect_captured_mutators!(found::Set{Symbol}, closure::Function)
+	for index in 1:nfields(closure)
+		captured = getfield(closure, index)
+		captured isa Function || continue
+		if _subplot_is_closure(captured)
+			_subplot_collect_captured_mutators!(found, captured)
+		elseif Base.isexported(PlotlySupply, nameof(captured))
+			push!(found, nameof(captured))
+		end
+	end
+	return found
+end
+
+# Attributes of a cell's x/y axes that a mutator reads to behave as it would
+# on a single figure with those axes: the axis type (log axes convert ranges
+# and coordinates, validate positivity and build log-aware traces), the
+# exponent format a log axis already has, the explicit range / autorange
+# (tick helpers derive log ticks from it) and the tick settings (tick presets
+# replace or remove them). The delegate copies them onto the scratch figure's
+# primary axes before the mutator runs and maps the result back.
+const _SUBPLOT_SEEDED_AXIS_KEYS = (
+	:type,
+	:exponentformat,
+	:range,
+	:autorange,
+	:tickmode,
+	:tickvals,
+	:ticktext,
+	:tick0,
+	:dtick,
+	:tickformat,
+	:minor,
+)
+
+# Layout keys (x, y) of the axes the delegate routes traces to: the inset's
+# axes, the cell's x axis with its primary or secondary y axis, or `nothing`
+# for a non-Cartesian cell. Empty cells and a missing secondary axis throw
+# (prefixed with `who`) before the mutator runs.
+function _subplot_delegate_axis_keys(
+	p::Plot,
+	row::Int,
+	col::Int,
+	inset_target,
+	secondary_y::Bool,
+	who::AbstractString,
+)
+	inset_target === nothing || return (inset_target.xkey, inset_target.ykey)
+	ref = _subplot_target_ref(p, row, col; secondary_y = secondary_y, who = who)
+	String(ref.subplot_kind) == "xy" || return nothing
+	refs = ref.trace_kwargs.fields
+	return (
+		_axis_layout_key(String(refs[:xaxis]), :x),
+		_axis_layout_key(String(refs[:yaxis]), :y),
+	)
+end
+
+# Copy the `_SUBPLOT_SEEDED_AXIS_KEYS` of the target axes onto the scratch
+# figure's `xaxis`/`yaxis` (independent copies: the mutator never reaches the
+# figure's own containers). Returns, per scratch axis, the values seeded.
+function _subplot_seed_scratch_axes!(scratch::Plot, p::Plot, axis_keys)
+	seeded = Dict{Symbol, Dict{Symbol, Any}}()
+	axis_keys === nothing && return seeded
+	for (scratch_key, cell_key) in zip((:xaxis, :yaxis), axis_keys)
+		axis = get(p.layout.fields, cell_key, nothing)
+		values = Dict{Symbol, Any}()
+		for name in _SUBPLOT_SEEDED_AXIS_KEYS
+			value = _cmn_mapping_get(axis, name)
+			value === nothing || (values[name] = deepcopy(value))
+		end
+		isempty(values) && continue
+		scratch.layout.fields[scratch_key] = attr(; deepcopy(values)...)
+		seeded[scratch_key] = values
+	end
+	return seeded
+end
+
+# After the mutator ran: drop the seeded values it left unchanged from the
+# scratch axes (they already hold in the cell, and re-writing them would turn
+# an append into a layout change), and return the seeded keys it removed,
+# which the delegate then removes from the cell's axes as well.
+function _subplot_unseed_scratch_axes!(scratch::Plot, seeded)
+	removed = Dict{Symbol, Vector{Symbol}}()
+	for (scratch_key, values) in seeded
+		current = get(scratch.layout.fields, scratch_key, nothing)
+		fields = _symbol_dict(current)
+		gone = Symbol[]
+		for (name, value) in values
+			if !haskey(fields, name)
+				push!(gone, name)
+			elseif isequal(_legend_canonical(fields[name]), _legend_canonical(value))
+				delete!(fields, name)
+			end
+		end
+		isempty(gone) || (removed[scratch_key] = gone)
+		if isempty(fields)
+			delete!(scratch.layout.fields, scratch_key)
+		else
+			scratch.layout.fields[scratch_key] = attr(; fields...)
+		end
+	end
+	return removed
+end
+
 function _subplot_delegate_mutator_impl!(
 	sf::SubplotFigure,
 	mutator::Function,
@@ -4935,9 +5239,10 @@ function _subplot_delegate_mutator_impl!(
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
 	inset::Union{Nothing, Integer} = nothing,
+	delegate_who::Union{Nothing, AbstractString} = nothing,
 	kwargs...,
 )
-	who = String(nameof(mutator))
+	who = _subplot_delegate_who(mutator, delegate_who, kwargs)
 	inset_target = inset === nothing ? nothing : _cell_target(
 		sf;
 		row = row,
@@ -4949,6 +5254,10 @@ function _subplot_delegate_mutator_impl!(
 	r, c = inset_target === nothing ?
 		_resolve_subplot_cell(sf; row = row, col = col, who = who) :
 		(inset_target.row, inset_target.col)
+	p = _plot_obj(sf.fig)
+	# Resolve the target axes first: an empty cell or a missing secondary axis
+	# fails before any trace is built.
+	axis_keys = _subplot_delegate_axis_keys(p, r, c, inset_target, secondary_y, who)
 	# `title`/`width`/`height` are figure-level, not per-cell: the delegate only
 	# transplants traces + per-axis layout, so these would be silently dropped.
 	# Warn instead of leaving the caller wondering why nothing changed.
@@ -4957,17 +5266,24 @@ function _subplot_delegate_mutator_impl!(
 		get(kw, :title, "") != "" && push!(dropped, :title)
 		get(kw, :width, 0) != 0 && push!(dropped, :width)
 		get(kw, :height, 0) != 0 && push!(dropped, :height)
-		isempty(dropped) || @warn "Per-subplot plot_*! ignores figure-level keyword(s) $(dropped); set them on the `subplots(...)` call or via `relayout!(sf; ...)`."
+		isempty(dropped) || @warn "$(who): per-subplot plot_*! ignores figure-level keyword(s) $(dropped); set them on the `subplots(...)` call or via `relayout!(sf; ...)`."
 	end
 	tmp = Plot(Vector{GenericTrace}(undef, 0), Layout())
+	# The scratch axes start as the target axes (type, range, ticks), so the
+	# mutator converts ranges, validates ticks and builds log-aware traces
+	# exactly as on a single figure with those axes.
+	seeded = _subplot_seed_scratch_axes!(tmp, p, axis_keys)
 	# Colorbar titles that plotly cannot typeset are converted after the
 	# traces reach their cell and the colorbars are placed (see
-	# `_place_cell_colorbars!`), not on the scratch figure.
+	# `_place_cell_colorbars!`), not on the scratch figure. The style's
+	# dash/marker cycle continues from the traces already in the figure.
 	Base.ScopedValues.with(_CBAR_DEFER_MATH_TITLES => true) do
-		mutator(_StagedPlotMutation(tmp), args...; kwargs...)
+		_with_style_trace_offset(p) do
+			mutator(_StagedPlotMutation(tmp), args...; kwargs...)
+		end
 	end
+	removed = _subplot_unseed_scratch_axes!(tmp, seeded)
 
-	p = _plot_obj(sf.fig)
 	trace_refs = if inset_target === nothing
 		_validate_subplot_traces!(
 			p,
@@ -5002,6 +5318,12 @@ function _subplot_delegate_mutator_impl!(
 	start_index = length(p.data) + 1
 	append!(p.data, routed)
 	_apply_source_layout_to_added_traces!(p, tmp, start_index)
+	if !isempty(routed) && axis_keys !== nothing
+		for (scratch_key, cell_key) in zip((:xaxis, :yaxis), axis_keys)
+			names = get(removed, scratch_key, nothing)
+			names === nothing || _cmn_delete_layout_fields!(p, cell_key, Tuple(names))
+		end
+	end
 	_apply_source_root_layout_modes!(
 		p,
 		tmp;
@@ -5020,7 +5342,7 @@ function _subplot_delegate_mutator_impl!(
 		end
 	end
 	_place_cell_colorbars!(p, start_index)
-	_subplot_apply_legends!(sf, p)
+	_refresh_subplot_legends!(sf, p; first_new = start_index)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -5028,6 +5350,27 @@ function _subplot_delegate_mutator_impl!(
 	return sf
 end
 
+"""
+	_subplot_delegate_mutator!(sf, mutator, args...; row=nothing, col=nothing, secondary_y=false, inset=nothing, delegate_who=nothing, kwargs...)
+
+Run the `Plot`-level `mutator(fig, args...; kwargs...)` for one cell of `sf`
+(internal; the SubplotFigure methods of the `plot_*!` families call it). The
+mutator builds its traces on an empty scratch figure whose primary axes carry
+the target axes' type, exponent format, range and tick settings
+(`_SUBPLOT_SEEDED_AXIS_KEYS`), so log cells convert ranges and validate data
+like a single log figure. The traces are then routed to the cell
+(`row`/`col`, default the active cell; `secondary_y`; or inset `inset` of
+`sf.insets`), the scratch axes' changes are merged into the cell's axes
+(axis references such as `scaleanchor` retargeted to the cell), every
+`coloraxis*` layout object and `font` are merged into the figure, colorbars
+are placed next to the cell and the legends refreshed. Figure-wide
+`barmode`/`boxmode`/`violinmode` reach the root only when passed explicitly
+(an automatic box/violin mode fills an unset root). `delegate_who` names the
+public function in the delegate's own errors (default: see
+`_subplot_delegate_who`). Validation errors leave `sf` unchanged; the live
+window gets one append-only update unless the call must rewrite existing
+traces (per-subplot legends, `shared_coloraxis`). Returns `sf`.
+"""
 function _subplot_delegate_mutator!(
 	sf::SubplotFigure,
 	mutator::Function,
@@ -5035,7 +5378,8 @@ function _subplot_delegate_mutator!(
 	kwargs...,
 )
 	haskey(kwargs, :show) && throw(ArgumentError(
-		"$(nameof(mutator)): mutators do not take `show`; the SubplotFigure " *
+		"$(_subplot_delegate_who(mutator, get(kwargs, :delegate_who, nothing), kwargs)): " *
+		"mutators do not take `show`; the SubplotFigure " *
 		"is shown by `subplots(...; sync=true)` (or `display(sf)`).",
 	))
 	metadata_lock = getfield(sf, :_lock)
