@@ -70,7 +70,10 @@ end
 	@test _st_layout(fig)[:barmode] == "overlay"
 	@test t1[:opacity] == 0.6 && t2[:opacity] == 0.6
 	@test t1[:bingroup] == t2[:bingroup]
-	@test t1[:offsetgroup] == t2[:offsetgroup] == t1[:bingroup]
+	# One mechanism (X3/K8): the root overlay alone overlays a fresh figure's
+	# series; a shared offsetgroup is used only where the root mode is not
+	# overlay (bars already present, a subplot cell).
+	@test !haskey(t1, :offsetgroup) && !haskey(t2, :offsetgroup)
 	@test t1[:nbinsx] == 20
 
 	# Same call, same JSON; a different call gets its own group.
@@ -424,8 +427,9 @@ end
 	@test_throws ArgumentError plot_box(Any[1.0, 2im])
 	@test_throws ArgumentError plot_violin([[1.0, 2.0], [1im]])
 	matrix = [1.0 4.0; 2.0 5.0; 3.0 6.0]
-	@test_throws MethodError plot_bar(view(matrix, :, 1:2))
-	@test_throws MethodError plot_histogram(view(matrix, :, 1:2))
+	# X29: a 2-D view is an ArgumentError pointing at `eachcol`, not a MethodError.
+	@test_throws ArgumentError plot_bar(view(matrix, :, 1:2))
+	@test_throws ArgumentError plot_histogram(view(matrix, :, 1:2))
 	@test _st_trace(plot_bar(view(matrix, :, 1)))[:y] == [1.0, 2.0, 3.0]
 	# Ragged series with generated positions remain valid.
 	@test length(plot_bar([1:3, 1:5]).data) == 2
@@ -830,4 +834,199 @@ end
 	@test _st_fields(styled[:marker])[:color] == "red"
 	@test haskey(_st_fields(styled[:marker]), :pattern)
 	@test styled[:name] == "s" && styled[:showlegend] === true
+end
+
+# ── wave 3 (oned-int) ────────────────────────────────────────────────────────
+
+_st_error(f) = try
+	f()
+	nothing
+catch err
+	err
+end
+_st_axis_or_empty(fig, key) = _st_fields(get(_st_layout(fig), key, Dict{Symbol, Any}()))
+
+@testset "stats: one overlay mechanism per case (X3, K8)" begin
+	# A figure without other bars: the root overlay alone, no offset slot.
+	fresh = plot_histogram([randn(20), randn(20)])
+	@test _st_layout(fresh)[:barmode] == "overlay"
+	@test all(!haskey(_st_fields(t), :offsetgroup) for t in fresh.data)
+	lines = plot_scatter(1:3, 1:3)
+	plot_histogram!(lines, [randn(20), randn(20)])
+	@test _st_layout(lines)[:barmode] == "overlay"
+	@test all(!haskey(_st_fields(t), :offsetgroup) for t in lines.data)
+	# Grouped bars already present: plotly's "group" mode stays for them and
+	# only the new series share one offset slot (and so overlay).
+	mixed = plot_bar(["a", "b"], [[1, 2], [3, 4]])
+	plot_histogram!(mixed, [randn(20), randn(20)])
+	@test !haskey(_st_layout(mixed), :barmode)
+	@test !haskey(_st_trace(mixed, 1), :offsetgroup) && !haskey(_st_trace(mixed, 2), :offsetgroup)
+	@test _st_trace(mixed, 3)[:offsetgroup] == _st_trace(mixed, 4)[:offsetgroup] == _st_trace(mixed, 3)[:bingroup]
+	@test _st_trace(mixed, 3)[:opacity] == 0.6
+	# An existing root overlay needs neither.
+	again = plot_histogram([randn(20), randn(20)])
+	plot_histogram!(again, [randn(20), randn(20)])
+	@test all(!haskey(_st_fields(t), :offsetgroup) for t in again.data)
+	# SubplotFigure: a cell overlays through the slot; a root overlay set by
+	# the user makes it unnecessary.
+	sf = subplots(1, 1; sync = false)
+	plot_histogram!(sf, [randn(20), randn(20)])
+	cell = [_st_fields(t) for t in sf.plot.data]
+	@test cell[1][:offsetgroup] == cell[2][:offsetgroup]
+	@test !haskey(_st_layout(sf.plot), :barmode)
+	overlaid = subplots(1, 1; sync = false)
+	relayout!(overlaid; barmode = "overlay")
+	plot_histogram!(overlaid, [randn(20), randn(20)])
+	@test all(!haskey(_st_fields(t), :offsetgroup) for t in overlaid.plot.data)
+	# An explicit mode goes to the root.
+	explicit = plot_bar(["a"], [1])
+	plot_histogram!(explicit, [randn(20), randn(20)]; barmode = "stack")
+	@test _st_layout(explicit)[:barmode] == "stack"
+	@test all(!haskey(_st_fields(t), :offsetgroup) for t in explicit.data)
+	# Log-axis bars carry `offset`, which plotly draws overlaid without a slot.
+	logged = plot_bar([1.0, 2.0], [1, 2])
+	plot_histogram!(logged,[exp.(randn(50)), exp.(randn(50))]; xscale = "log")
+	@test all(!haskey(_st_fields(t), :offsetgroup) for t in logged.data)
+end
+
+@testset "stats: ranges have the xrange!/yrange! semantics (X23, 18, 52, 76, 93)" begin
+	builds = (
+		r -> plot_bar([1, 2]; yrange = r),
+		r -> plot_histogram(randn(10); xrange = r),
+		r -> plot_box(randn(10); yrange = r),
+		r -> plot_violin(randn(10); yrange = r),
+		r -> plot_histogram2d(randn(10), randn(10); xrange = r),
+	)
+	mutators = (
+		(f, r) -> plot_bar!(f, [1, 2]; yrange = r),
+		(f, r) -> plot_histogram!(f, randn(10); xrange = r),
+		(f, r) -> plot_box!(f, randn(10); yrange = r),
+		(f, r) -> plot_violin!(f, randn(10); yrange = r),
+		(f, r) -> plot_histogram2d!(f, randn(10), randn(10); xrange = r),
+	)
+	for (build, mutate!) in zip(builds, mutators)
+		for (bad, message) in (
+			((nothing, 2), "partial ranges are not supported"),
+			((false, true), "must be numbers"),
+			([2, 2], "must differ"),
+			((1, 2, 3), "exactly 2 elements"),
+		)
+			err = _st_error(() -> build(bad))
+			@test err isa ArgumentError && occursin(message, err.msg)
+			target = plot_scatter(1:3, 1:3)
+			before = _st_snapshot(target)
+			err = _st_error(() -> mutate!(target, bad))
+			@test err isa ArgumentError && occursin(message, err.msg)
+			@test _st_snapshot(target) == before
+		end
+		for automatic in (nothing, [0, 0], [nothing, nothing], (nothing, nothing))
+			fig = build(automatic)
+			@test !haskey(_st_axis_or_empty(fig, :xaxis), :range)
+			@test !haskey(_st_axis_or_empty(fig, :yaxis), :range)
+		end
+	end
+	# Data units on a log axis, constructor and mutator.
+	@test _st_axis(plot_bar([1, 10, 100]; yscale = "log", yrange = (1, 1000)), :yaxis)[:range] ≈ [0.0, 3.0]
+	target = plot_bar([1, 10, 100])
+	plot_bar!(target, [2, 20, 200]; yscale = "log", yrange = (1, 1000))
+	@test _st_axis(target, :yaxis)[:range] ≈ [0.0, 3.0]
+	@test_throws ArgumentError plot_box(exp.(randn(10)); yscale = "log", yrange = (0, 10))
+end
+
+@testset "stats: tick presets reach the shared tick helper (D9)" begin
+	err = _st_error(() -> plot_bar([1, 2]; yticks = :decades))
+	@test err isa ArgumentError && startswith(err.msg, "plot_bar:") && occursin("logarithmic y axis", err.msg)
+	err = _st_error(() -> plot_histogram(randn(10); xticks = :auto, xticklabels = ["a"]))
+	@test err isa ArgumentError && occursin("cannot be combined with the tick preset", err.msg)
+	err = _st_error(() -> plot_box!(plot_scatter(1:3, 1:3), randn(5); yticks = :decades))
+	@test err isa ArgumentError && startswith(err.msg, "plot_box!:")
+	# On a log axis the preset passes the family's validation (the shared
+	# helper then draws it).
+	fig = plot_bar([1, 10, 100]; yscale = "log")
+	@test PlotlySupply._scat_validate_cartesian_options(fig, "plot_bar"; yticks = :decades) === nothing
+end
+
+@testset "stats: plain log axes label powers of ten (X22)" begin
+	@test _st_axis(plot_bar([1, 10, 100]; yscale = "log"), :yaxis)[:exponentformat] == "power"
+	@test _st_axis(plot_histogram(exp.(randn(50)); xscale = "log"), :xaxis)[:exponentformat] == "power"
+	@test _st_axis(plot_box(exp.(randn(20)); yscale = "log"), :yaxis)[:exponentformat] == "power"
+	@test _st_axis(plot_violin(exp.(randn(20)); yscale = "log"), :yaxis)[:exponentformat] == "power"
+	target = plot_bar([1, 2])
+	plot_bar!(target, [10, 100]; yscale = "log")
+	@test _st_axis(target, :yaxis)[:exponentformat] == "power"
+end
+
+@testset "stats: matrices and 2-D views are rejected with a hint (X29)" begin
+	M = [1.0 4.0; 2.0 5.0; 3.0 6.0]
+	for call in (
+		() -> plot_bar(M),
+		() -> plot_bar(view(M, :, 1:2)),
+		() -> plot_bar(1:3, M),
+		() -> plot_histogram(M),
+		() -> plot_box(M),
+		() -> plot_box(["a", "b", "c"], M),
+		() -> plot_violin(M),
+		() -> plot_violin(1:3, M),
+		() -> plot_histogram2d(M, M),
+		() -> plot_histogram2d(1:3, M),
+	)
+		err = _st_error(call)
+		@test err isa ArgumentError
+		@test occursin("must be a vector", err.msg) && occursin("eachcol", err.msg)
+	end
+	err = _st_error(() -> plot_bar([M, M]))
+	@test err isa ArgumentError && occursin("entries must be scalars", err.msg)
+	# Mutators on a Plot and on a SubplotFigure change nothing.
+	target = plot_scatter(1:3, 1:3)
+	before = _st_snapshot(target)
+	for mutate! in (
+		f -> plot_bar!(f, M),
+		f -> plot_histogram!(f, M),
+		f -> plot_box!(f, M),
+		f -> plot_violin!(f, 1:3, M),
+		f -> plot_histogram2d!(f, M, M),
+	)
+		@test_throws ArgumentError mutate!(target)
+		sf = subplots(1, 1; sync = false)
+		@test_throws ArgumentError mutate!(sf)
+		@test isempty(sf.plot.data)
+	end
+	@test _st_snapshot(target) == before
+	# A column view is a vector.
+	@test collect(_st_trace(plot_bar(view(M, :, 1)))[:y]) == [1.0, 2.0, 3.0]
+end
+
+@testset "stats: inset = k on every SubplotFigure mutator (X20)" begin
+	axis_kw = (; xrange = (0, 3), xlabel = "ix", ylabel = "iy")
+	for (mutate!, log_y) in (
+		(sf -> plot_bar!(sf, [1, 2], [3, 30]; inset = 1, yscale = "log", axis_kw...), true),
+		(sf -> plot_histogram!(sf, [randn(20), randn(20)]; inset = 1, yscale = "log", axis_kw...), true),
+		(sf -> plot_box!(sf, exp.(randn(20)); inset = 1, yscale = "log", axis_kw...), true),
+		(sf -> plot_violin!(sf, exp.(randn(20)); inset = 1, yscale = "log", axis_kw...), true),
+		(sf -> plot_histogram2d!(sf, randn(20), randn(20); inset = 1, axis_kw...), false),
+	)
+		sf = subplots(1, 1; sync = false)
+		inset!(sf, (0.55, 0.55, 0.4, 0.4))
+		@test mutate!(sf) === sf
+		@test all(_st_fields(t)[:xaxis] == "x2" && _st_fields(t)[:yaxis] == "y2" for t in sf.plot.data)
+		inset_x, inset_y = _st_axis(sf.plot, :xaxis2), _st_axis(sf.plot, :yaxis2)
+		@test inset_x[:range] == [0, 3]
+		@test _st_title(inset_x[:title]) == "ix" && _st_title(inset_y[:title]) == "iy"
+		log_y && @test inset_y[:type] == "log"
+		main_x, main_y = _st_axis_or_empty(sf.plot, :xaxis), _st_axis_or_empty(sf.plot, :yaxis)
+		@test !haskey(main_x, :range) && !haskey(main_y, :type)
+		@test !haskey(main_x, :title) || isempty(_st_title(main_x[:title]))
+	end
+	# An unknown inset changes nothing; a Plot takes no `inset`.
+	sf = subplots(1, 1; sync = false)
+	inset!(sf, (0.55, 0.55, 0.4, 0.4))
+	err = _st_error(() -> plot_bar!(sf, [1, 2]; inset = 2))
+	@test err isa ArgumentError && occursin("plot_bar!", err.msg)
+	@test isempty(sf.plot.data)
+	@test_throws ArgumentError plot_box!(plot_scatter(1:3, 1:3), randn(5); inset = 1)
+	# `row = nothing`/`col = nothing` (no cell) are accepted on a Plot, as in
+	# the scatter family.
+	fig = plot_scatter(1:3, 1:3)
+	@test plot_bar!(fig, [1, 2]; row = nothing, col = nothing) === nothing
+	@test_throws ArgumentError plot_bar!(fig, [1, 2]; row = 1)
 end

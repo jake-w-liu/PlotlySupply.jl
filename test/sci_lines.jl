@@ -297,4 +297,34 @@ end
 	@test occursin("where", string(@doc plot_band))
 	@test occursin("silverman", string(@doc plot_kde))
 	@test occursin("unit_circle", string(@doc plot_complex))
+	@test occursin("no `xscale`/`yscale`", string(@doc plot_complex))
+end
+
+@testset "sci lines: style defaults and legend placement (X10, V5)" begin
+	legend(f) = (_sl_fields(f.layout.fields[:legend])[:x], _sl_fields(f.layout.fields[:legend])[:xanchor])
+	# An ECDF rises from the bottom left to the top right: with dense steps the
+	# top right is taken and the top left is free.
+	@test legend(plot_ecdf(collect(1.0:100.0); legend = "e")) == (0.02, "left")
+	# With 10 coarse steps the estimated top-right box fits between the last
+	# step's rise at the right edge and the step below it, so the default
+	# corner stays (ties keep the candidate order).
+	@test legend(plot_ecdf(collect(1.0:10.0); legend = "e")) == (0.98, "right")
+	# A band is a polygon fill the estimate does not model: default corner.
+	@test legend(plot_band(1:3, 0, [1, 2, 3]; legend = "b")) == (0.98, "right")
+	# A KDE curve takes the style's width and dash cycle, never its markers.
+	k = with_style(; cycle = :dash_marker, linewidth = 3) do
+		plot_kde([1.0, 2.0, 4.0]; legend = "k")
+	end
+	@test _sl_get(k.data[1].fields[:line], :width) == 3
+	@test _sl_get(k.data[1].fields[:line], :dash) == "solid"
+	@test k.data[1].fields[:mode] == "lines"
+	@test !haskey(_sl_fields(get(k.data[1].fields, :marker, Dict{Symbol, Any}())), :symbol)
+	# A band's edge is not cycled.
+	b = with_style(; cycle = :dash_marker, linewidth = 3) do
+		plot_band(1:3, 0, [1, 2, 3])
+	end
+	@test !haskey(_sl_fields(b.data[1].fields[:line]), :dash)
+	# A complex plane with `mode = nothing` draws markers.
+	@test plot_complex([1 + 1im, 2im]).data[1].fields[:mode] == "markers"
+	@test plot_complex([1 + 1im, 2im]; mode = "lines").data[1].fields[:mode] == "lines"
 end

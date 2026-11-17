@@ -715,3 +715,490 @@ end
 	@test occursin("secondary_y", string(@doc plot_area!))
 	@test occursin("secondary_y", string(@doc plot_stem!))
 end
+
+# ── wave 3 (oned-int) ────────────────────────────────────────────────────────
+
+_rsc_error(f) = try
+	f()
+	nothing
+catch err
+	err
+end
+_rsc_text(value) = value isa AbstractString ? value : _rsc_get(value, :text)
+_rsc_axis_or_empty(fig, key) =
+	_rsc_fields(get(PlotlySupply._plot_obj(fig).layout.fields, key, Dict{Symbol, Any}()))
+_rsc_line(trace) = _rsc_fields(get(trace.fields, :line, Dict{Symbol, Any}()))
+_rsc_marker(trace) = _rsc_fields(get(trace.fields, :marker, Dict{Symbol, Any}()))
+# Trace contents with arrays collected, to compare figures built from views,
+# ranges and plain vectors.
+_rsc_traces(fig) = [
+	repr(Dict(key => (value isa AbstractArray ? collect(value) : value) for (key, value) in _rsc_fields(trace)))
+	for trace in PlotlySupply._plot_obj(fig).data
+]
+
+@testset "scatter family: ranges have the xrange!/yrange! semantics (X23, 18, 52, 76, 93)" begin
+	for (build, mutate!) in (
+		(r -> plot_scatter(1:3, [1.0, 2, 3]; xrange = r), (f, r) -> plot_scatter!(f, 1:3, [1.0, 2, 3]; xrange = r)),
+		(r -> plot_stem(1:3, [1.0, 2, 3]; yrange = r), (f, r) -> plot_stem!(f, 1:3, [1.0, 2, 3]; yrange = r)),
+		(r -> plot_area(1:3, [1.0, 2, 3]; xrange = r), (f, r) -> plot_area!(f, 1:3, [1.0, 2, 3]; xrange = r)),
+	)
+		for (bad, message) in (
+			((nothing, 2), "partial ranges are not supported"),
+			([1, nothing], "partial ranges are not supported"),
+			((false, true), "must be numbers"),
+			([2, 2], "must differ"),
+			((1, 2, 3), "exactly 2 elements"),
+		)
+			err = _rsc_error(() -> build(bad))
+			@test err isa ArgumentError
+			@test occursin(message, err.msg)
+			fig = build(nothing)
+			snapshot = _rsc_snapshot(fig)
+			err = _rsc_error(() -> mutate!(fig, bad))
+			@test err isa ArgumentError && occursin(message, err.msg) && occursin("!:", err.msg)
+			@test _rsc_unchanged(fig, snapshot)
+		end
+		# Automatic forms: no stored range.
+		for automatic in (nothing, [0, 0], (0, 0), [nothing, nothing], (nothing, nothing))
+			fig = build(automatic)
+			@test !haskey(_rsc_axis_or_empty(fig, :xaxis), :range)
+			@test !haskey(_rsc_axis_or_empty(fig, :yaxis), :range)
+		end
+	end
+	err = _rsc_error(() -> plot_scatter(1:3, [1.0, 2, 3]; xscale = "linear", xrange = ("a", "b")))
+	@test startswith(err.msg, "plot_scatter:") && occursin("numeric `xrange` bounds", err.msg)
+	# Mutator ranges are data values on a log axis, as for `xrange!`.
+	f = plot_scatter([1, 10, 100], [1.0, 2, 3])
+	plot_scatter!(f, [1, 10, 100], [2.0, 3, 4]; xscale = "log", xrange = (1, 1000))
+	@test _rsc_axis(f, :xaxis)[:type] == "log"
+	@test _rsc_axis(f, :xaxis)[:range] ≈ [0.0, 3.0]
+	@test_throws ArgumentError plot_scatter!(f, [1, 10], [1.0, 2]; xrange = (0, 10))
+
+	# Polar sector and radial range: both bounds, distinct, numeric.
+	@test occursin("must differ", _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; trange = (10, 10))).msg)
+	@test occursin("must be numbers", _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; rrange = ("a", "b"))).msg)
+	@test occursin("partial", _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; rrange = (nothing, 2))).msg)
+	auto = plot_scatterpolar([0, 90], [1, 2]; rrange = [nothing, nothing], trange = (0, 0))
+	polar = _rsc_fields(auto.layout.fields[:polar])
+	@test !haskey(polar, :sector)
+	@test !haskey(_rsc_fields(polar[:radialaxis]), :range)
+	# On a log radial axis `rrange` is in data units.
+	logpolar = plot_scatterpolar([0, 90], [1, 100])
+	relayout!(logpolar; polar_radialaxis_type = "log")
+	plot_scatterpolar!(logpolar, [0, 90], [2, 50]; rrange = (1, 100))
+	@test _rsc_fields(_rsc_fields(logpolar.layout.fields[:polar])[:radialaxis])[:range] ≈ [0.0, 2.0]
+	@test_throws ArgumentError plot_scatterpolar!(logpolar, [0, 90], [2, 50]; rrange = (0, 100))
+end
+
+@testset "scatter family: tick presets reach the shared tick helper (D9)" begin
+	# The tick keywords accept the presets `:decades` and `:auto` and forward
+	# them to `_apply_ticks!` (src/sci/base.jl) unchanged; this checks the
+	# family's own validation of them.
+	fig = plot_scatter([1, 10, 100], [1.0, 2, 3]; xscale = "log")
+	validate(; kw...) = PlotlySupply._scat_validate_cartesian_options(fig, "probe"; kw...)
+	@test validate(; xticks = :decades) === nothing                 # x axis already log
+	@test validate(; yscale = "log", yticks = :decades) === nothing
+	@test validate(; xticks = :auto, yticks = :auto) === nothing
+	err = _rsc_error(() -> validate(; yticks = :decades))
+	@test err isa ArgumentError && occursin("logarithmic y axis", err.msg)
+	err = _rsc_error(() -> validate(; xticks = :auto, xticklabels = ["a"]))
+	@test err isa ArgumentError && occursin("cannot be combined with the tick preset", err.msg)
+	@test_throws ArgumentError validate(; xticks = :weekly)
+	# Constructors and mutators of all three families run this validator.
+	for call in (
+		() -> plot_scatter(1:3, [1.0, 2, 3]; xticks = :decades),
+		() -> plot_stem(1:3, [1.0, 2, 3]; yticks = :decades),
+		() -> plot_bar([1, 2]; yticks = :decades),
+		() -> plot_ecdf([1.0, 2.0]; xticks = :decades),
+		() -> plot_scatter!(plot_scatter(1:3, [1.0, 2, 3]), 1:3, [1.0, 2, 3]; xticks = :decades),
+	)
+		err = _rsc_error(call)
+		@test err isa ArgumentError && occursin("needs a logarithmic", err.msg)
+	end
+end
+
+@testset "scatter family: PlotStyle trace defaults on every series (X10)" begin
+	style_kw = (; cycle = :dash_marker, linewidth = 2, marker_size = 7)
+	symbols = PlotlySupply._STYLE_MARKER_CYCLE
+	dashes = PlotlySupply._STYLE_DASH_CYCLE
+	f = with_style(; style_kw...) do
+		g = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]]; legend = ["a", "b"])
+		plot_scatter!(g, 1:3, [2, 2, 2]; legend = "c", mode = "lines")
+		plot_scatter!(g, 1:3, [1, 1, 1]; legend = "d", dash = "longdash", linewidth = 5)
+		plot_vlines!(g, [1.5, 2.5], 0, 1; legend = "v")
+		plot_ecdf!(g, [1.0, 2.0, 3.0]; legend = "e")
+		plot_stem!(g, 1:3, [0.5, -0.5, 0.2]; legend = "s")
+		plot_area!(g, 1:3, [0.1, 0.2, 0.1]; legend = "area")
+		g
+	end
+	d = f.data
+	@test length(d) == 9
+	# Unset keywords take the cycle at the trace's position; explicit ones win.
+	@test [_rsc_get(_rsc_line(t), :dash) for t in d[1:4]] == [dashes[1], dashes[2], dashes[3], "longdash"]
+	@test [_rsc_get(_rsc_line(t), :width) for t in d[1:4]] == [2, 2, 2, 5]
+	@test [t.fields[:mode] for t in d[1:4]] == ["lines+markers", "lines+markers", "lines", "lines+markers"]
+	@test [_rsc_get(_rsc_marker(t), :symbol) for t in d[[1, 2, 4]]] == [symbols[1], symbols[2], symbols[4]]
+	@test all(_rsc_get(_rsc_marker(t), :size) == 7 for t in d[[1, 2, 4]])
+	# Segment collections and ECDF steps: width and dash cycle, no markers.
+	for (index, t) in zip(5:6, d[5:6])
+		@test t.fields[:mode] == "lines"
+		@test _rsc_get(_rsc_line(t), :width) == 2
+		@test _rsc_get(_rsc_line(t), :dash) == dashes[mod1(index, length(dashes))]
+		@test !haskey(_rsc_marker(t), :symbol)
+	end
+	# Stems: the heads take the marker cycle, the stem lines the width only.
+	heads, stems = d[7], d[8]
+	@test heads.fields[:mode] == "markers"
+	@test _rsc_get(_rsc_marker(heads), :symbol) == symbols[mod1(7, length(symbols))]
+	@test _rsc_get(_rsc_line(stems), :width) == 2
+	@test !haskey(_rsc_line(stems), :dash) && stems.fields[:mode] == "lines"
+	# Filled areas: the width only.
+	@test _rsc_get(_rsc_line(d[9]), :width) == 2
+	@test !haskey(_rsc_line(d[9]), :dash) && !haskey(_rsc_marker(d[9]), :symbol)
+	# Without a style width the stems keep their thin default.
+	@test _rsc_get(_rsc_line(plot_stem(1:3, [1.0, 2, 3]).data[2]), :width) == PlotlySupply._STEM_DEFAULT_LINEWIDTH
+
+	# The cycle runs over the whole SubplotFigure, cell after cell.
+	sf = with_style(; style_kw...) do
+		s = subplots(1, 2; sync = false)
+		plot_scatter!(s, 1:3, [[1, 2, 3], [3, 2, 1]]; row = 1, col = 1)
+		plot_scatter!(s, 1:3, [[1, 2, 3], [3, 2, 1]]; row = 1, col = 2)
+		s
+	end
+	@test [_rsc_get(_rsc_line(t), :dash) for t in sf.plot.data] == collect(dashes[1:4])
+	@test [_rsc_get(_rsc_marker(t), :symbol) for t in sf.plot.data] == collect(symbols[1:4])
+	# SyncPlot mutators style the appended traces only.
+	sp = _rsc_syncplot(plot_scatter(1:3, [1, 2, 3]))
+	with_style(; style_kw...) do
+		plot_scatter!(sp, 1:3, [3, 2, 1])
+	end
+	@test !haskey(sp.plot.data[1].fields, :line)
+	@test _rsc_get(_rsc_line(sp.plot.data[2]), :dash) == dashes[2]
+	@test _rsc_get(_rsc_line(sp.plot.data[2]), :width) == 2
+	# plot_complex draws markers by default, styled with the cycle; the unit
+	# circle keeps its own look.
+	c = with_style(; style_kw...) do
+		plot_complex(cis.(range(0, 2pi; length = 8)); unit_circle = true)
+	end
+	@test c.data[1].fields[:mode] == "markers"
+	@test _rsc_get(_rsc_marker(c.data[1]), :symbol) == symbols[1]
+	@test c.data[2].fields[:mode] == "lines" && !haskey(_rsc_marker(c.data[2]), :symbol)
+	# :publication sets fonts and colours, no per-trace defaults.
+	pub = with_style(:publication) do
+		plot_scatter(1:3, [[1, 2, 3], [3, 2, 1], [2, 2, 2], [1, 3, 1]])
+	end
+	@test all(!haskey(t.fields, :line) && t.fields[:mode] == "lines" for t in pub.data)
+end
+
+@testset "scatter family: inset = k on every SubplotFigure mutator (X20)" begin
+	log_kw = (; yscale = "log", yrange = (1, 1000))
+	axis_kw = (; xrange = (0.5, 3.5), xlabel = "ix", ylabel = "iy")
+	cases = (
+		(sf -> plot_scatter!(sf, 1:3, [1.0, 10, 100]; inset = 1, log_kw..., axis_kw...), true),
+		(sf -> plot_stem!(sf, 1:3, [1.0, 10, 100]; inset = 1, baseline = 1, log_kw..., axis_kw...), true),
+		(sf -> plot_area!(sf, 1:3, [1.0, 10, 100]; inset = 1, log_kw..., axis_kw...), true),
+		(sf -> plot!(sf, 1:3, [1.0, 10, 100]; inset = 1, log_kw..., axis_kw...), true),
+		(sf -> plot_band!(sf, 1:3, 1, [2.0, 20, 200]; inset = 1, log_kw..., axis_kw...), true),
+		(sf -> plot_segments!(sf, 1, 1, 3, 100; inset = 1, log_kw..., axis_kw...), true),
+		(sf -> plot_vlines!(sf, [1.5, 2.5], 1, 100; inset = 1, log_kw..., axis_kw...), true),
+		(sf -> plot_hlines!(sf, [2.0, 20.0], 1, 3; inset = 1, log_kw..., axis_kw...), true),
+		(sf -> plot_ecdf!(sf, [1.0, 2.0, 3.0]; inset = 1, axis_kw...), false),
+		(sf -> plot_kde!(sf, [1.0, 2.0, 3.0]; inset = 1, cut = 0, axis_kw...), false),
+		(sf -> plot_complex!(sf, [1 + 1im, 2 + 2im]; inset = 1, axis_kw...), false),
+	)
+	for (mutate!, log_y) in cases
+		sf = subplots(1, 1; sync = false)
+		inset!(sf, (0.55, 0.55, 0.4, 0.4))
+		@test mutate!(sf) === sf
+		@test !isempty(sf.plot.data)
+		@test all(t.fields[:xaxis] == "x2" && t.fields[:yaxis] == "y2" for t in sf.plot.data)
+		inset_x, inset_y = _rsc_axis(sf, :xaxis2), _rsc_axis(sf, :yaxis2)
+		@test inset_x[:range] == [0.5, 3.5]
+		@test _rsc_text(inset_x[:title]) == "ix" && _rsc_text(inset_y[:title]) == "iy"
+		if log_y
+			@test inset_y[:type] == "log" && inset_y[:range] ≈ [0.0, 3.0]
+		end
+		main_x, main_y = _rsc_axis_or_empty(sf, :xaxis), _rsc_axis_or_empty(sf, :yaxis)
+		@test !haskey(main_x, :range) && !haskey(main_y, :type) && !haskey(main_y, :range)
+		@test !haskey(main_x, :title) || isempty(_rsc_text(main_x[:title]))
+	end
+
+	# An inset of a cell other than (1, 1); a wrong cell or id is rejected
+	# before anything changes.
+	grid = subplots(2, 2; sync = false)
+	inset!(grid, (0.6, 0.6, 0.35, 0.35); row = 2, col = 2)
+	plot_scatter!(grid, 1:3, [1, 2, 3]; row = 2, col = 2, inset = 1, xrange = (0, 4))
+	inset_ref = grid.plot.data[1].fields[:xaxis]
+	@test inset_ref ∉ ("x", "x4")
+	@test _rsc_axis(grid, Symbol("xaxis", inset_ref[2:end]))[:range] == [0, 4]
+	@test !haskey(_rsc_axis_or_empty(grid, :xaxis4), :range)
+	err = _rsc_error(() -> plot_stem!(grid, 1:3, [1, 2, 3]; row = 1, col = 1, inset = 1))
+	@test err isa ArgumentError && occursin("belongs to cell (2, 2)", err.msg)
+	err = _rsc_error(() -> plot_ecdf!(grid, [1.0, 2.0]; row = 2, col = 2, inset = 2))
+	@test err isa ArgumentError
+	@test length(grid.plot.data) == 1
+	# A Plot has no insets; a polar cell has no inset axes.
+	@test_throws ArgumentError plot_scatter!(plot_scatter(1:3, 1:3), 1:3, 1:3; inset = 1)
+	polar = subplots(1, 2; sync = false, specs = [PlotlySupply.Spec(kind = "polar") PlotlySupply.Spec()])
+	inset!(polar, (0.55, 0.55, 0.4, 0.4); row = 1, col = 2)
+	@test_throws ArgumentError plot_scatterpolar!(polar, [0, 90], [1, 2]; row = 1, col = 2, inset = 1)
+	@test_throws ArgumentError plot_scatterpolar!(polar, [0, 90], [1, 2]; row = 1, col = 1, secondary_y = true)
+	@test isempty(polar.plot.data)
+end
+
+@testset "scatter family: radial tick labels off the 0° spoke (V4)" begin
+	radial(f) = _rsc_fields(_rsc_fields(PlotlySupply._plot_obj(f).layout.fields[:polar])[:radialaxis])
+	plain = plot_scatterpolar([0, 90, 180], [1, 2, 3])
+	@test radial(plain)[:angle] == PlotlySupply._SCAT_POLAR_RLABEL_ANGLE == 22.5
+	@test radial(plain)[:nticks] == PlotlySupply._SCAT_POLAR_RADIAL_NTICKS
+	sector = plot_scatterpolar([0, 90], [1, 2]; trange = (90, 180))
+	@test radial(sector)[:angle] == 90
+	@test radial(plot_scatterpolar([0, 90], [1, 2]; trange = (0, 360)))[:angle] == 22.5
+	@test radial(plot_scatterpolar([0, 90], [1, 2]; rlabel_angle = -45))[:angle] == -45
+	# An angle set earlier is kept, unless a new sector excludes it.
+	kept = plot_scatterpolar([0, 90], [1, 2]; rlabel_angle = 135)
+	plot_scatterpolar!(kept, [0, 90], [2, 3])
+	@test radial(kept)[:angle] == 135
+	plot_scatterpolar!(kept, [0, 90], [2, 3]; trange = (0, 90))
+	@test radial(kept)[:angle] == 0
+	plot_scatterpolar!(kept, [0, 90], [2, 3]; rlabel_angle = 30)
+	@test radial(kept)[:angle] == 30
+	for bad in (NaN, Inf, true)
+		err = _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; rlabel_angle = bad))
+		@test err isa ArgumentError && occursin("rlabel_angle", err.msg)
+	end
+	snapshot = _rsc_snapshot(kept)
+	@test_throws ArgumentError plot_scatterpolar!(kept, [0, 90], [2, 3]; rlabel_angle = NaN)
+	@test _rsc_unchanged(kept, snapshot)
+	# Tick settings made by the user are kept.
+	ticked = plot_scatterpolar([0, 90], [1, 2])
+	relayout!(ticked; polar_radialaxis_dtick = 0.25, polar_radialaxis_nticks = nothing)
+	plot_scatterpolar!(ticked, [0, 90], [2, 3])
+	@test radial(ticked)[:dtick] == 0.25
+	@test get(radial(ticked), :nticks, nothing) === nothing
+
+	# SubplotFigure: each polar cell gets its own angle; a user angle stays.
+	sf = subplots(1, 2; sync = false, specs = [PlotlySupply.Spec(kind = "polar") PlotlySupply.Spec(kind = "polar")])
+	plot_scatterpolar!(sf, [0, 90], [1, 2]; row = 1, col = 2)
+	polar2() = _rsc_fields(_rsc_fields(sf.plot.layout.fields[:polar2])[:radialaxis])
+	@test polar2()[:angle] == 22.5
+	@test polar2()[:nticks] == PlotlySupply._SCAT_POLAR_RADIAL_NTICKS
+	update_polars!(sf; row = 1, col = 2, radialaxis = attr(angle = 200))
+	plot_scatterpolar!(sf, [0, 90], [3, 4]; row = 1, col = 2)
+	@test polar2()[:angle] == 200
+	plot_scatterpolar!(sf, [0, 90], [3, 4]; row = 1, col = 1, rlabel_angle = 60)
+	@test _rsc_fields(_rsc_fields(sf.plot.layout.fields[:polar])[:radialaxis])[:angle] == 60
+	@test polar2()[:angle] == 200
+	@test occursin("rlabel_angle", string(@doc plot_scatterpolar))
+	@test occursin("rlabel_angle", string(@doc plot_scatterpolar!))
+end
+
+@testset "scatter family: the default legend avoids the data (V5)" begin
+	function placement(f)
+		legend = _rsc_fields(PlotlySupply._plot_obj(f).layout.fields[:legend])
+		return (legend[:x], legend[:y], legend[:xanchor], legend[:yanchor])
+	end
+	TR = (0.98, 0.97, "right", "top")
+	TL = (0.02, 0.97, "left", "top")
+	BL = (0.02, 0.03, "left", "bottom")
+	BR = (0.98, 0.03, "right", "bottom")
+	RIGHT = (0.98, 0.5, "right", "middle")
+	@test placement(plot_scatter(1:10, (10:-1:1) .^ 2; legend = "falling")) == TR
+	@test placement(plot_scatter(1:10, (1:10) .^ 2; legend = "rising")) == TL
+	# Error-bar ends count, with plotly's 5 % autorange padding.
+	y = [2.0, 3.1, 2.8, 4.0, 4.4, 5.1]
+	@test placement(plot_scatter(1:6, y; mode = "markers", error_y = fill(0.3, 6), legend = "e")) == TL
+	# Twin y: the right-axis data is scored on its own scale, inside the plot
+	# area (the right-axis tick labels stay clear).
+	twin = plot_scatter(1:10, (1:10) .^ 2; legend = "left")
+	plot_scatter!(twin, 1:10, 10.0 .^ (1:10); secondary_y = true, yscale = "log", legend = "right")
+	@test placement(twin) == TL
+	# An automatic legend follows the data as series are appended: with all
+	# four corners taken it moves to the middle of the right edge.
+	crossing = plot_scatter(1:10, (10:-1:1) .^ 2; legend = "left: falling")
+	@test placement(crossing) == TR
+	plot_scatter!(crossing, 1:10, 10.0 .^ (1:10) ./ 1e3; secondary_y = true, yscale = "log",
+		legend = "right: rising (log)")
+	@test placement(crossing) == RIGHT
+	moved = plot_scatter([0, 10, 5], [0, 0, 10]; mode = "markers", legend = "a")
+	@test placement(moved) == TR
+	plot_scatter!(moved, [10], [10]; mode = "markers", legend = "b")
+	@test placement(moved) == TL
+	sp = _rsc_syncplot(plot_scatter([0, 10, 5], [0, 0, 10]; mode = "markers", legend = "a"))
+	plot_scatter!(sp, [10], [10]; mode = "markers", legend = "b")
+	@test placement(sp) == TL
+	# The line family takes part.
+	lines = plot_scatter([0, 10, 5], [0, 0, 10]; mode = "markers", legend = "a")
+	plot_segments!(lines, 9, 9, 10, 10; legend = "segment")
+	@test placement(lines) == TL
+	# A position chosen by the user stays.
+	user = plot_scatter(1:10, (1:10) .^ 2; legend = "rising")
+	set_legend!(user; position = :bottomright)
+	plot_scatter!(user, 1:10, 100 .- (1:10) .^ 2; legend = "falling")
+	@test placement(user) == BR
+	relayout!(user; legend_x = 0.5)
+	plot_scatter!(user, 1:10, collect(1:10); legend = "third")
+	@test placement(user)[1] == 0.5
+	# Unknown extents (categories, bars) keep the default corner.
+	@test placement(plot_scatter(["a", "b"], [1, 2]; legend = "cat")) == TR
+	mixed = plot_bar(1:10, (1:10) .^ 2; legend = "bars")
+	plot_scatter!(mixed, 1:10, (1:10) .^ 2; legend = "line")
+	@test placement(mixed) == TR
+	# Off while another default position is set.
+	try
+		set_default_legend_position!(:bottomleft)
+		@test placement(plot_scatter(1:10, (1:10) .^ 2; legend = "rising")) == BL
+	finally
+		set_default_legend_position!(:topright)
+	end
+	# Step lines are scored along their steps.
+	step(shape) = placement(plot_scatter([0.0, 10.0], [0.0, 10.0]; mode = "lines", line_shape = shape, legend = shape))
+	@test step("linear") == TL
+	@test step("vh") == BL
+	@test step("hv") == TR
+	@test occursin("set_legend!", string(@doc plot_scatter))
+end
+
+@testset "consistency sweep: constructors and mutators of the 1-D families" begin
+	x = collect(1.0:5.0)
+	y = [1.0, 3.0, 2.0, 5.0, 4.0]
+	samples = [0.5, 1.2, 2.3, 2.9, 3.1, 4.0, 4.4, 1.7]
+	# (constructor, mutator, data, position of the series argument (0: none),
+	# takes `color`, takes `legend`, takes `xscale`)
+	cases = (
+		(plot_scatter, plot_scatter!, (x, y), 2, true, true, true),
+		(plot_stem, plot_stem!, (x, y), 2, true, true, true),
+		(plot_area, plot_area!, (x, y), 2, true, true, true),
+		(plot_bar, plot_bar!, (x, y), 2, true, true, true),
+		(plot_histogram, plot_histogram!, (samples,), 1, true, true, true),
+		(plot_box, plot_box!, (samples,), 1, true, true, true),
+		(plot_violin, plot_violin!, (samples,), 1, true, true, true),
+		(plot_histogram2d, plot_histogram2d!, (samples, reverse(samples)), 0, false, false, true),
+		(plot_band, plot_band!, (x, y .- 0.5, y .+ 0.5), 0, true, true, true),
+		(plot_segments, plot_segments!, (x, y, x .+ 0.5, y .+ 0.5), 0, true, true, true),
+		(plot_vlines, plot_vlines!, (x, 1.0, 2.0), 0, true, true, true),
+		(plot_hlines, plot_hlines!, (y, 1.0, 2.0), 0, true, true, true),
+		(plot_ecdf, plot_ecdf!, (samples,), 1, true, true, true),
+		(plot_kde, plot_kde!, (samples,), 1, true, true, true),
+		(plot_complex, plot_complex!, (cis.(range(0, 2pi; length = 5)),), 0, true, true, false),
+	)
+	for (ctor, mut, args, series_at, has_color, has_legend, has_scale) in cases
+		# A KDE curve reaches `cut` bandwidths past the data; `cut = 0` keeps
+		# it on the positive log axis of (g).
+		extra = ctor === plot_kde ? (; cut = 0) : NamedTuple()
+		@testset "$(nameof(ctor))" begin
+			# (a) ranges as tuple and as vector.
+			tuple_fig = ctor(args...; extra..., xrange = (0.5, 6), yrange = (0.1, 9))
+			vector_fig = ctor(args...; extra..., xrange = [0.5, 6], yrange = [0.1, 9])
+			@test _rsc_axis(tuple_fig, :xaxis)[:range] == [0.5, 6] == _rsc_axis(vector_fig, :xaxis)[:range]
+			@test _rsc_axis(tuple_fig, :yaxis)[:range] == [0.1, 9] == _rsc_axis(vector_fig, :yaxis)[:range]
+			for bad in ([1], (2, 2), (false, true), (nothing, 2))
+				@test_throws ArgumentError ctor(args...; extra..., xrange = bad)
+			end
+			# (b) Symbol and String colours.
+			if has_color
+				@test _rsc_traces(ctor(args...; extra..., color = :red)) ==
+					_rsc_traces(ctor(args...; extra..., color = "red"))
+			end
+			# (c) LaTeXString and SubString labels.
+			latex = ctor(args...; extra..., title = L"$\alpha$", xlabel = L"$x_1$", ylabel = SubString("abcd", 1, 2))
+			plain = ctor(args...; extra..., title = "\$\\alpha\$", xlabel = "\$x_1\$", ylabel = "ab")
+			@test _rsc_text(latex.layout.fields[:title]) == _rsc_text(plain.layout.fields[:title])
+			@test _rsc_text(_rsc_axis(latex, :xaxis)[:title]) == _rsc_text(_rsc_axis(plain, :xaxis)[:title])
+			@test _rsc_text(_rsc_axis(latex, :yaxis)[:title]) == "ab"
+			if has_legend
+				@test _rsc_traces(ctor(args...; extra..., legend = L"$\beta$")) ==
+					_rsc_traces(ctor(args...; extra..., legend = "\$\\beta\$"))
+			end
+			# (d) SubArray, UnitRange and Vector{Any} inputs; matrices rejected.
+			views = map(a -> a isa AbstractVector ? view(a, :) : a, args)
+			@test _rsc_traces(ctor(views...; extra...)) == _rsc_traces(ctor(args...; extra...))
+			if args[1] === x
+				@test length(ctor(1:5, args[2:end]...; extra...).data) == length(ctor(args...; extra...).data)
+			end
+			if series_at > 0
+				head = args[1:(series_at - 1)]
+				multi = ctor(head..., Any[args[series_at], args[series_at]]; extra...)
+				@test length(multi.data) == 2 * length(ctor(args...; extra...).data)
+				M = hcat(args[series_at], args[series_at])
+				@test_throws ArgumentError ctor(head..., M; extra...)
+				@test_throws ArgumentError ctor(head..., view(M, :, 1:2); extra...)
+			end
+			# (e) `show` on a mutator and (f) unknown keywords.
+			fig = ctor(args...; extra...)
+			snapshot = _rsc_snapshot(fig)
+			err = _rsc_error(() -> mut(fig, args...; extra..., show = true))
+			@test err isa ArgumentError && occursin("mutators do not take `show`", err.msg)
+			err = _rsc_error(() -> mut(fig, args...; extra..., bogus_kw = 1))
+			@test err isa ArgumentError && occursin("unsupported keyword argument(s) `bogus_kw`", err.msg)
+			@test _rsc_unchanged(fig, snapshot)
+			@test_throws MethodError ctor(args...; extra..., bogus_kw = 1)
+			@test mut(fig, args...; extra..., row = nothing, col = nothing) === nothing
+			# (g) a log x axis with a data-unit range: on a Plot, on cell (2, 2)
+			# of a SubplotFigure and on an inset.
+			scale = has_scale ? (; xscale = "log") : NamedTuple()
+			stored = has_scale ? log10.([0.5, 10]) : [0.5, 10]
+			if has_scale
+				logged = ctor(args...; extra..., scale..., xrange = (0.5, 10))
+				@test _rsc_axis(logged, :xaxis)[:type] == "log"
+				@test _rsc_axis(logged, :xaxis)[:range] ≈ stored
+				@test _rsc_axis(logged, :xaxis)[:exponentformat] == "power"   # X22
+				target = ctor(args...; extra...)
+				mut(target, args...; extra..., scale..., xrange = (0.5, 10))
+				@test _rsc_axis(target, :xaxis)[:range] ≈ stored
+			end
+			sf = subplots(2, 2; sync = false)
+			@test mut(sf, args...; extra..., scale..., row = 2, col = 2, xrange = (0.5, 10)) === sf
+			@test _rsc_axis(sf, :xaxis4)[:range] ≈ stored
+			has_scale && @test _rsc_axis(sf, :xaxis4)[:type] == "log"
+			@test !haskey(_rsc_axis_or_empty(sf, :xaxis), :range)
+			ins = subplots(1, 1; sync = false)
+			inset!(ins, (0.55, 0.55, 0.4, 0.4))
+			@test mut(ins, args...; extra..., scale..., inset = 1, xrange = (0.5, 10)) === ins
+			@test all(t.fields[:xaxis] == "x2" for t in ins.plot.data)
+			@test _rsc_axis(ins, :xaxis2)[:range] ≈ stored
+			@test !haskey(_rsc_axis_or_empty(ins, :xaxis), :type)
+		end
+	end
+end
+
+@testset "docstrings list every keyword; Cartesian members take the common set (77, 105, 302, 251, 306)" begin
+	declared(f) = Set{Symbol}(
+		key for method in methods(f) for key in Base.kwarg_decl(method) if key !== Symbol("kwargs...")
+	)
+	documented(f, key) = occursin(Regex("`" * string(key) * "[`\\s=:]"), string(Base.Docs.doc(f)))
+	families = (
+		(plot_scatter, plot_scatter!), (plot_stem, plot_stem!), (plot_area, plot_area!),
+		(plot_scatterpolar, plot_scatterpolar!), (plot_bar, plot_bar!),
+		(plot_histogram, plot_histogram!), (plot_box, plot_box!), (plot_violin, plot_violin!),
+		(plot_histogram2d, plot_histogram2d!), (plot_band, plot_band!),
+		(plot_segments, plot_segments!), (plot_vlines, plot_vlines!), (plot_hlines, plot_hlines!),
+		(plot_ecdf, plot_ecdf!), (plot_kde, plot_kde!), (plot_complex, plot_complex!),
+	)
+	common = (:xlabel, :ylabel, :title, :xrange, :yrange, :xscale, :yscale, :width, :height,
+		:fontsize, :grid, :legend)
+	# Keywords of the common set that make no sense for a member; its docstring
+	# says so.
+	exceptions = Dict{Any, Vector{Symbol}}(
+		plot_histogram2d => [:legend],
+		plot_complex => [:xscale, :yscale],
+		plot_scatterpolar => [:xlabel, :ylabel, :xrange, :yrange, :xscale, :yscale],
+	)
+	for (ctor, mut) in families
+		ctor_keys = declared(ctor)
+		mut_keys = declared(mut)
+		# Every constructor keyword is documented ...
+		@test sort([key for key in ctor_keys if !documented(ctor, key)]) == Symbol[]
+		# ... a mutator takes all of them but `show` ...
+		@test sort(collect(setdiff(ctor_keys, mut_keys))) == [:show]
+		@test documented(mut, :show)
+		# ... and documents its own extras (row/col/secondary_y/inset).
+		@test sort([key for key in setdiff(mut_keys, ctor_keys) if !documented(mut, key)]) == Symbol[]
+		lacking = sort([key for key in common if !(key in ctor_keys)])
+		@test lacking == sort(get(exceptions, ctor, Symbol[]))
+		@test sort([key for key in common if !(key in mut_keys)]) == lacking
+		doc = string(Base.Docs.doc(ctor))
+		@test all(key -> occursin(string(key), doc), lacking)
+	end
+	@test occursin("degrees", string(@doc plot_scatterpolar))
+end
