@@ -5806,8 +5806,8 @@ end
 
 function plot_bar!(
 	sf::SubplotFigure,
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -5828,7 +5828,7 @@ end
 
 function plot_bar!(
 	sf::SubplotFigure,
-	y::AbstractVector;
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -5848,7 +5848,7 @@ end
 
 function plot_histogram!(
 	sf::SubplotFigure,
-	x::AbstractVector;
+	x::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -5868,8 +5868,8 @@ end
 
 function plot_box!(
 	sf::SubplotFigure,
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -5890,7 +5890,7 @@ end
 
 function plot_box!(
 	sf::SubplotFigure,
-	y::AbstractVector;
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -5910,8 +5910,8 @@ end
 
 function plot_violin!(
 	sf::SubplotFigure,
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -5932,7 +5932,7 @@ end
 
 function plot_violin!(
 	sf::SubplotFigure,
-	y::AbstractVector;
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,
@@ -7035,6 +7035,9 @@ const _STATS_OVERLAY_OPACITY = 0.6
 # Trace types whose layout is governed by the figure-wide `layout.barmode`.
 const _STATS_BARMODE_TRACE_TYPES = ("bar", "histogram")
 
+_stats_is_barlike(trace) =
+	trace isa GenericTrace && string(get(trace.fields, :type, "")) in _STATS_BARMODE_TRACE_TYPES
+
 # What the stats rules need to know about the SubplotFigure cell being filled.
 # The subplot delegate runs the mutator on an empty staged Plot, so the
 # histogram overlay rule (figure-wide bar mode) and the box/violin collision
@@ -7092,6 +7095,7 @@ _stats_label(text::AbstractString) = isempty(text) ? "" : _label(text)
 # {re, im} objects that plotly.js silently does not plot. Abstractly typed
 # containers are scanned because their element type says nothing.
 function _stats_check_series(series, who::AbstractString, name::AbstractString)
+	_scat_require_vector(series, who, Symbol(name))
 	element_type = eltype(series)
 	complex_values = element_type !== Union{} && (
 		element_type <: Complex ||
@@ -7100,6 +7104,16 @@ function _stats_check_series(series, who::AbstractString, name::AbstractString)
 	complex_values && throw(ArgumentError(
 		"$(who): `$(name)` has complex values, which Plotly cannot draw; pass " *
 		"real.(v), imag.(v), abs.(v) or angle.(v).",
+	))
+	# A series holds one scalar per sample or bar; arrays inside a series that is
+	# not a vector of vectors (e.g. a vector of matrices) cannot be drawn.
+	array_values = element_type !== Union{} && (
+		element_type <: AbstractArray ||
+		(!isconcretetype(element_type) && any(value -> value isa AbstractArray, series))
+	)
+	array_values && throw(ArgumentError(
+		"$(who): `$(name)` entries must be scalars (one per sample or bar), or " *
+		"`$(name)` a vector of vectors (one per series); got $(typeof(series)).",
 	))
 	return series
 end
@@ -7114,6 +7128,10 @@ function _stats_series_lists(
 	value_name::AbstractString,
 	position_name::AbstractString,
 )
+	# The public methods take any AbstractArray so a matrix gets this
+	# ArgumentError (pointing at `collect(eachcol(A))`), not a MethodError.
+	_scat_require_vector(values, who, Symbol(value_name))
+	positions === nothing || _scat_require_vector(positions, who, Symbol(position_name))
 	values_nested = _is_nested_series(values)
 	positions_nested = positions !== nothing && _is_nested_series(positions)
 	if positions_nested
@@ -7398,7 +7416,9 @@ end
 # (mathtext rejects malformed `$…$`), so a rejected keyword leaves the figure
 # untouched.
 function _stats_validate_options(fig, who::AbstractString, options)
-	_validate_cartesian_options(
+	# The family validator of the scatter family checks ranges with the
+	# `xrange!` semantics and tick values/presets against the final axis type.
+	_scat_validate_cartesian_options(
 		fig,
 		who;
 		xrange = options.xrange,
@@ -7409,47 +7429,14 @@ function _stats_validate_options(fig, who::AbstractString, options)
 		height = options.height,
 		fontsize = options.fontsize,
 		grid = options.grid,
+		xticks = options.xticks,
+		xticklabels = options.xticklabels,
+		yticks = options.yticks,
+		yticklabels = options.yticklabels,
 	)
-	_stats_validate_ticks(fig, :x, options.xticks, options.xticklabels, options.xscale, who)
-	_stats_validate_ticks(fig, :y, options.yticks, options.yticklabels, options.yscale, who)
 	_stats_label(options.title)
 	_stats_label(options.xlabel)
 	_stats_label(options.ylabel)
-	return nothing
-end
-
-function _stats_validate_ticks(
-	fig,
-	letter::Symbol,
-	values,
-	labels,
-	scale::AbstractString,
-	who::AbstractString,
-)
-	name = String(letter)
-	if values === nothing
-		labels === nothing || throw(ArgumentError(
-			"$(who): `$(name)ticklabels` need `$(name)ticks` (one label per tick value).",
-		))
-		return nothing
-	end
-	key = letter === :x ? :xaxis : :yaxis
-	final_type = isempty(scale) ? _axis_type(_plot_layout(fig), key) : String(scale)
-	tick_values = _cmn_tick_values(values, final_type == "log", who)
-	labels === nothing || _cmn_tick_labels(labels, length(tick_values), who)
-	return nothing
-end
-
-function _stats_apply_ticks!(
-	fig,
-	key::Symbol,
-	values,
-	labels,
-	format::AbstractString,
-	who::AbstractString,
-)
-	(values === nothing && labels === nothing && isempty(format)) && return nothing
-	_apply_ticks!(fig, key; values = values, labels = labels, format = format, who = who)
 	return nothing
 end
 
@@ -7465,10 +7452,12 @@ function _stats_apply_options!(fig, who::AbstractString, options; mutator::Bool)
 	# exponents and takes tick values in data units.
 	_apply_axis_scale!(fig, :x, options.xscale, who)
 	_apply_axis_scale!(fig, :y, options.yscale, who)
-	_apply_axis_range!(fig, :x, options.xrange, who)
-	_apply_axis_range!(fig, :y, options.yrange, who)
-	_stats_apply_ticks!(fig, :xaxis, options.xticks, options.xticklabels, options.xtickformat, who)
-	_stats_apply_ticks!(fig, :yaxis, options.yticks, options.yticklabels, options.ytickformat, who)
+	_apply_axis_range!(fig, :x, _scat_range_arg(options.xrange), who)
+	_apply_axis_range!(fig, :y, _scat_range_arg(options.yrange), who)
+	# Tick values, labels and the D9 presets (`:decades`, `:auto`) go to
+	# `_apply_ticks!` unchanged.
+	_scat_apply_ticks!(fig, :xaxis, options.xticks, options.xticklabels, options.xtickformat, who)
+	_scat_apply_ticks!(fig, :yaxis, options.yticks, options.yticklabels, options.ytickformat, who)
 	_apply_figure_size!(fig, who; width = options.width, height = options.height)
 	(mutator || options.grid !== true) && _apply_axis_grid!(fig, options.grid, who)
 	# A new figure gets the default template; an append only refreshes the
@@ -7484,17 +7473,22 @@ function _stats_apply_options!(fig, who::AbstractString, options; mutator::Bool)
 end
 
 # Mutators take the constructor keywords minus `show`; `kwargs...` only exists
-# to turn `show` (and any other unknown keyword) into a clear error.
+# to turn `show` (and any other unknown keyword) into a clear error. As in the
+# scatter family, `row = nothing`/`col = nothing` (no cell) are accepted on a
+# Plot/SyncPlot.
 function _stats_reject_keywords(who::AbstractString, kwargs)
-	isempty(kwargs) && return nothing
-	names = collect(keys(kwargs))
+	names = Symbol[
+		key for (key, value) in pairs(kwargs)
+		if !((key === :row || key === :col) && value === nothing)
+	]
+	isempty(names) && return nothing
 	:show in names && throw(ArgumentError(
 		"$(who): mutators do not take `show`; display the figure with `display(fig)` " *
 		"or pass `show = true` to the constructor.",
 	))
 	throw(ArgumentError(
-		"$(who): unsupported keyword argument(s) $(join(repr.(names), ", ")); see " *
-		"the docstring for the accepted keywords.",
+		"$(who): unsupported keyword argument(s) $(join(("`$(name)`" for name in names), ", ")); " *
+		"see the docstring for the accepted keywords.",
 	))
 end
 
@@ -7514,11 +7508,13 @@ end
 _stats_trace_on(fields, xref::AbstractString, yref::AbstractString) =
 	get(fields, :xaxis, "x") == xref && get(fields, :yaxis, "y") == yref
 
-# Run a stats mutator on a SubplotFigure cell with `_STATS_SUBPLOT_CELL` set to
-# the cell's context. The (reentrant) metadata lock is held from the lookup to
-# the commit so another task cannot change the cell in between. An explicit
-# `barmode` that changes the layout of bars on other axes (plotly's bar mode is
-# one figure-wide setting) is reported with a warning after the call succeeds.
+# Run a stats mutator on a SubplotFigure cell (or inset, `inset = k`) with
+# `_STATS_SUBPLOT_CELL` set to the context of the axes it draws on. The
+# (reentrant) metadata lock is held from the lookup to the commit so another
+# task cannot change the cell in between. An explicit `barmode` that changes
+# the layout of bars on other axes (plotly's bar mode is one figure-wide
+# setting; unset means plotly's "group") is reported with one warning after the
+# call succeeds.
 function _stats_subplot_delegate!(
 	sf::SubplotFigure,
 	mutator,
@@ -7527,11 +7523,19 @@ function _stats_subplot_delegate!(
 	col,
 	secondary_y::Bool,
 	who::AbstractString,
+	inset = nothing,
 	kwargs...,
 )
 	return lock(getfield(sf, :_lock)) do
 		root = _plot_obj(getfield(sf, :fig))
-		target = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, who = who)
+		target = _cell_target(
+			sf;
+			row = row,
+			col = col,
+			secondary_y = secondary_y,
+			inset = inset,
+			who = who,
+		)
 		cell_traces = Any[]
 		others_barlike = false
 		for trace in root.data
@@ -7539,7 +7543,7 @@ function _stats_subplot_delegate!(
 			if target.kind === :xy && _stats_trace_on(fields, target.xref, target.yref)
 				push!(cell_traces, fields)
 			else
-				others_barlike |= get(fields, :type, nothing) in _STATS_BARMODE_TRACE_TYPES
+				others_barlike |= _stats_is_barlike(trace)
 			end
 		end
 		root_barmode = get(root.layout.fields, :barmode, nothing)
@@ -7552,6 +7556,7 @@ function _stats_subplot_delegate!(
 				row = row,
 				col = col,
 				secondary_y = secondary_y,
+				inset = inset,
 				kwargs...,
 			)
 		end
@@ -7560,8 +7565,9 @@ function _stats_subplot_delegate!(
 		if others_barlike && requested isa AbstractString && !isempty(requested) &&
 			requested != current
 			@warn "$(who): `barmode = $(repr(requested))` replaces the figure-wide " *
-				"bar mode $(repr(current)); plotly has one `layout.barmode` for every " *
-				"subplot, so the existing bars and histograms on the other axes change too."
+				"bar mode $(repr(current)) for the WHOLE figure: plotly has one " *
+				"`layout.barmode` for every subplot, so the bars and histograms " *
+				"already in other cells are re-arranged too."
 		end
 		return result
 	end
@@ -7603,8 +7609,81 @@ const _STEM_DEFAULT_LINEWIDTH = 0.5
 # trace on the same axes.
 const _STEM_ZORDER = -1
 
+# Docstring fragments shared by the scatter, statistics and lines.jl families
+# (interpolated into their docstrings; the list items continue with a 2-space
+# indent).
+const _SCAT_RANGE_DOC = """
+`xrange = [0, 0]`, `yrange = [0, 0]`: axis range `[lo, hi]` or `(lo, hi)` in
+  data units, also on a logarithmic axis (bounds must then be positive), with
+  the semantics of [`xrange!`](@ref)/[`yrange!`](@ref): `[0, 0]`, `nothing`
+  or `[nothing, nothing]` autoscale; otherwise both bounds are required (no
+  partial ranges), must differ and must not be `Bool`, and a linear or
+  category axis needs numeric bounds."""
+const _SCAT_TICKS_DOC = """
+`xticks = nothing`, `yticks = nothing`: tick positions in data units, or a
+  preset: `:decades` (one labelled tick per power of ten; logarithmic axis
+  only) or `:auto` (plotly's automatic ticks). `xticklabels`, `yticklabels`:
+  one label per tick value (not with a preset); `xtickformat = ""`,
+  `ytickformat = ""`: d3 tick format (e.g. `".2f"`)."""
+const _SCAT_LEGEND_DOC = """
+While the default legend position is `:topright` (see
+[`set_default_legend_position!`](@ref)), the legend of a `Plot`/`SyncPlot`
+goes where its box covers the fewest data points and line segments: the
+corners first (top right, top left, bottom left, bottom right), then the
+middle of the right, left, bottom and top edges, then the centre. Later calls
+of the scatter and line families move it again as data is added, as long as
+it sits where this rule put it; a legend placed anywhere else (`set_legend!`,
+`relayout!`) keeps its place. A trace the estimate does not model (bars,
+heatmaps, other x axes, stacked or polygon fills) or non-numeric coordinates
+make the data extent unknown; the rule then uses the top-right default."""
+const _SCAT_INSET_DOC = """
+`row`/`col` select the cell (default: the active
+  cell) and `inset = k` draws on inset `k` (see [`inset!`](@ref)); the axis
+  keywords then address the inset's axes."""
+
+# `[nothing, nothing]` (or `(nothing, nothing)`) is an automatic range, as for
+# `xrange!`; the other automatic sentinels (`[0, 0]`, `(0, 0)`, `nothing`) are
+# recognised by `_is_auto_range`.
+_scat_is_unset_range(range) =
+	(range isa AbstractVector || range isa Tuple) && length(range) == 2 &&
+	all(bound -> bound === nothing, range)
+
+# A range keyword as the D7 primitives expect it: `[nothing, nothing]` becomes
+# `nothing` (automatic); everything else is passed on unchanged.
+_scat_range_arg(range) = _scat_is_unset_range(range) ? nothing : range
+
+# Validate a range keyword (`xrange`, `yrange`, `rrange`, `trange`) with the
+# semantics of `xrange!`/`yrange!`: `[0, 0]`, `(0, 0)`, `nothing` and
+# `[nothing, nothing]` are automatic (returns `nothing`); otherwise exactly two
+# finite bounds, neither `nothing`/`missing` (no partial ranges) nor `Bool`, and
+# not equal. Returns the bounds as a 2-element vector. Writes nothing.
+function _scat_checked_range(range, who::AbstractString, name::AbstractString)
+	_scat_is_unset_range(range) && return nothing
+	checked = _checked_range(range, who, name)
+	checked === nothing && return nothing
+	for bound in checked
+		(bound === nothing || bound === missing) && throw(ArgumentError(
+			"$(who): `$(name)` must give both bounds; partial ranges are not " *
+			"supported (use [0, 0] or `nothing` for an automatic range). Got " *
+			"$(repr(range)).",
+		))
+		bound isa Bool && throw(ArgumentError(
+			"$(who): `$(name)` bounds must be numbers (or date/category values); got " *
+			"$(repr(range)).",
+		))
+	end
+	isequal(checked[1], checked[2]) && throw(ArgumentError(
+		"$(who): the `$(name)` bounds must differ; got $(repr(range)) (use [0, 0] or " *
+		"`nothing` for an automatic range).",
+	))
+	return checked
+end
+
 # Range check of any Cartesian axis `key` (`nothing`: an axis that does not
-# exist yet and starts linear) against the axis type the call ends up with.
+# exist yet and starts linear) against the axis type the call ends up with:
+# bounds are data values, positive on a logarithmic axis and numeric on a
+# linear or category axis (an axis whose type is still automatic also takes
+# date strings). Returns the checked bounds, or `nothing` for an automatic range.
 function _scat_require_axis_range(
 	fig,
 	key::Union{Nothing, Symbol},
@@ -7613,7 +7692,7 @@ function _scat_require_axis_range(
 	who::AbstractString,
 	name::AbstractString,
 )
-	checked = _checked_range(range, who, name)
+	checked = _scat_checked_range(range, who, name)
 	checked === nothing && return nothing
 	final_type = !isempty(scale) ? String(scale) :
 		key === nothing ? "-" : _axis_type(_plot_layout(fig), key)
@@ -7624,6 +7703,11 @@ function _scat_require_axis_range(
 				"and must be positive; got $(repr(range)).",
 			))
 		end
+	elseif final_type in ("linear", "category")
+		all(bound -> bound isa Real, checked) || throw(ArgumentError(
+			"$(who): a $(final_type) axis needs numeric `$(name)` bounds; got " *
+			"$(repr(range)).",
+		))
 	end
 	return checked
 end
@@ -7649,6 +7733,8 @@ function _scat_validate_cartesian_options(
 	yticklabels = nothing,
 )
 	primary_y = ykey === :yaxis
+	xrange = _scat_range_arg(xrange)
+	yrange = _scat_range_arg(yrange)
 	_validate_cartesian_options(
 		fig,
 		who;
@@ -7661,10 +7747,11 @@ function _scat_validate_cartesian_options(
 		fontsize = fontsize,
 		grid = grid,
 	)
-	if !primary_y
-		_require_axis_scale(yscale, who, "yscale")
-		_scat_require_axis_range(fig, ykey, yrange, yscale, who, "yrange")
-	end
+	primary_y || _require_axis_scale(yscale, who, "yscale")
+	# The checks of `xrange!`/`yrange!` (partial, Bool and equal bounds, numeric
+	# bounds on linear axes) on top of the D7 length/finiteness/log checks.
+	_scat_require_axis_range(fig, :xaxis, xrange, xscale, who, "xrange")
+	_scat_require_axis_range(fig, ykey, yrange, yscale, who, "yrange")
 	_scat_validate_ticks(fig, :xaxis, xticks, xticklabels, xscale, who, "x")
 	_scat_validate_ticks(fig, ykey, yticks, yticklabels, yscale, who, "y")
 	return nothing
@@ -7685,6 +7772,23 @@ function _scat_validate_ticks(
 	(values === nothing && labels === nothing) && return nothing
 	log_axis = !isempty(scale) ? scale == "log" :
 		key !== nothing && _cmn_is_log_axis(_plot_layout(fig), key)
+	if _is_tick_preset(values)
+		# D9 presets go to `_apply_ticks!` unchanged; they carry no labels, and
+		# `:decades` labels powers of ten, which only a logarithmic axis has.
+		labels === nothing || throw(ArgumentError(
+			"$(who): `$(letter)ticklabels` cannot be combined with the tick preset " *
+			"`$(letter)ticks = $(repr(values))`; give tick values instead.",
+		))
+		if values === :decades && !log_axis
+			axis_type = !isempty(scale) ? String(scale) :
+				key === nothing ? "-" : _axis_type(_plot_layout(fig), key)
+			throw(ArgumentError(
+				"$(who): `$(letter)ticks = :decades` needs a logarithmic $(letter) axis " *
+				"(`$(letter)scale = \"log\"`); the $(letter) axis type is $(repr(axis_type)).",
+			))
+		end
+		return nothing
+	end
 	tickvals = values === nothing ? nothing : _cmn_tick_values(values, log_axis, who)
 	if labels !== nothing
 		tickvals === nothing && throw(ArgumentError(
@@ -7754,28 +7858,32 @@ end
 # are an ArgumentError. `kwargs` iterates `key => value` pairs (a mutator's
 # `kwargs...`). Returns `secondary_y`.
 function _scat_mutator_options(who::AbstractString, kwargs)
+	# Same wording as the statistical family (`_stats_reject_keywords`).
+	any(pair -> first(pair) === :show, kwargs) && throw(ArgumentError(
+		"$(who): mutators do not take `show`; display the figure with `display(fig)` " *
+		"or pass `show = true` to the constructor.",
+	))
 	secondary_y = false
+	unknown = Symbol[]
 	for (key, value) in kwargs
 		if key === :secondary_y
 			value isa Bool || throw(ArgumentError(
 				"$(who): `secondary_y` must be true or false; got $(repr(value)).",
 			))
 			secondary_y = value
-		elseif key === :show
-			throw(ArgumentError(
-				"$(who): `show` is a constructor keyword; a mutator draws into the " *
-				"figure it is given. Display that figure with `display(fig)` or open " *
-				"a window with `to_syncplot(fig)`.",
-			))
 		elseif key === :row || key === :col
 			value === nothing || throw(ArgumentError(
 				"$(who): `row`/`col` select a SubplotFigure cell; a single figure " *
 				"has one cell, so omit them.",
 			))
 		else
-			throw(ArgumentError("$(who): unsupported keyword argument `$(key)`."))
+			push!(unknown, key)
 		end
 	end
+	isempty(unknown) || throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) $(join(("`$(key)`" for key in unknown), ", ")); " *
+		"see the docstring for the accepted keywords.",
+	))
 	return secondary_y
 end
 
@@ -7958,12 +8066,12 @@ function _scat_marker_symbol(value, who::AbstractString)
 end
 
 # Resolved per-series style of a scatter-family call: one NamedTuple per
-# series. The active PlotStyle's trace defaults (`_style_trace_defaults`, for
-# trace `n_existing + i`) fill keywords that are still at their sentinels;
-# under the :default style they are empty and nothing changes.
+# series, holding the validated keyword values exactly as the caller gave them
+# (sentinels included). The active PlotStyle's per-trace defaults (line width,
+# marker size, dash/marker cycle) are filled into the finished traces by
+# `_scat_apply_style!` (`_apply_style_trace_defaults!`), not here.
 function _scat_series_styles(
 	n::Int,
-	n_existing::Int,
 	who::AbstractString;
 	mode = "lines",
 	dash = "",
@@ -8065,22 +8173,15 @@ function _scat_series_styles(
 	)
 
 	styles = Vector{Any}(undef, n)
-	n == 0 && return styles
-	style = _active_style()
 	for index in 1:n
-		defaults = _style_trace_defaults(style, n_existing + index)
-		trace_mode = modes[index]
-		get(defaults, :markers, false) === true && trace_mode == "lines" &&
-			(trace_mode = "lines+markers")
 		styles[index] = (
-			mode = trace_mode,
+			mode = modes[index],
 			name = names[index],
-			color = isempty(colors[index]) ? String(get(defaults, :color, "")) : colors[index],
-			dash = isempty(dashes[index]) ? String(get(defaults, :dash, "")) : dashes[index],
-			linewidth = widths[index] == 0 ? get(defaults, :linewidth, 0) : widths[index],
-			marker_size = sizes[index] == 0 ? get(defaults, :marker_size, 0) : sizes[index],
-			marker_symbol = isempty(symbols[index]) ?
-				String(get(defaults, :marker_symbol, "")) : symbols[index],
+			color = colors[index],
+			dash = dashes[index],
+			linewidth = widths[index],
+			marker_size = sizes[index],
+			marker_symbol = symbols[index],
 			marker_color = faces[index],
 			marker_line_color = edges[index],
 			marker_line_width = edge_widths[index],
@@ -8261,6 +8362,8 @@ const _SCAT_SUBPLOT_CONTEXT = Base.ScopedValues.ScopedValue{Any}(nothing)
 # inside the delegate (which holds the figure's lock) and set while `mutator`
 # runs on the scratch figure.
 function _scat_subplot_delegate!(sf::SubplotFigure, mutator, args...; kwargs...)
+	row = get(kwargs, :row, nothing)
+	col = get(kwargs, :col, nothing)
 	in_context = function (target, values...; options...)
 		plot = _plot_obj(getfield(sf, :fig))
 		groups = Set{String}()
@@ -8268,12 +8371,402 @@ function _scat_subplot_delegate!(sf::SubplotFigure, mutator, args...; kwargs...)
 			group = get(trace.fields, :legendgroup, nothing)
 			group isa AbstractString && push!(groups, String(group))
 		end
-		context = (figure = sf, offset = length(plot.data), legend_groups = groups)
+		context = (
+			figure = sf,
+			offset = length(plot.data),
+			legend_groups = groups,
+			polar = _scat_cell_polar_layout(sf, plot, row, col),
+		)
+		# The style's dash/marker cycle continues the real figure's line-style
+		# traces instead of restarting at the scratch figure's first trace.
 		return Base.ScopedValues.with(_SCAT_SUBPLOT_CONTEXT => context) do
-			mutator(target, values...; options...)
+			_with_style_trace_offset(plot) do
+				mutator(target, values...; options...)
+			end
 		end
 	end
 	return _subplot_delegate_mutator!(sf, in_context, args...; kwargs...)
+end
+
+# Polar subplot layout (`layout.polar2`, ...) of the SubplotFigure cell a call
+# targets (`row`/`col`, else the active cell), or `nothing` when that cell is
+# not a polar subplot or has no layout yet. Read while the delegate holds the
+# figure (it has validated `row`/`col` by then).
+function _scat_cell_polar_layout(sf::SubplotFigure, plot, row, col)
+	r, c = row === nothing || col === nothing ?
+		(getfield(sf, :current_row), getfield(sf, :current_col)) : (Int(row), Int(col))
+	grid_ref = plot.layout.subplots.grid_ref
+	(checkbounds(Bool, grid_ref, r, c) && isassigned(grid_ref, r, c) &&
+		!isempty(grid_ref[r, c])) || return nothing
+	ref = grid_ref[r, c][1]
+	(String(ref.subplot_kind) == "polar" && !isempty(ref.layout_keys)) || return nothing
+	return get(plot.layout.fields, ref.layout_keys[1], nothing)
+end
+
+# Layout of the polar subplot a scatterpolar call draws on: `layout.polar` of
+# `fig`, or, while a SubplotFigure call builds its traces in a scratch figure,
+# the target cell's polar subplot of the real figure.
+function _scat_polar_layout(fig)
+	context = _SCAT_SUBPLOT_CONTEXT[]
+	context === nothing || return context.polar
+	return get(_plot_layout(fig).fields, :polar, nothing)
+end
+
+# ── Default legend position (lead review V5) ────────────────────────────────
+# matplotlib's `loc = "best"` for the package-default legend position: while
+# the default position is :topright, the legend of a Plot/SyncPlot goes to the
+# first position of `_SCAT_LEGEND_POSITIONS` (matplotlib's candidate order:
+# the four corners, then the middle of the right, left, bottom and top edges,
+# then the centre) whose estimated box covers the fewest data points (markers,
+# error-bar ends) and line segments of the traces on the main x axis (primary
+# or secondary y). Each call of this family re-evaluates a legend it created,
+# or one that still sits where the rule puts it for the figure as it stood
+# before the call (so the rule placed it); a legend anywhere else was placed by
+# the user (`set_legend!`, `relayout!`) and is never moved. A trace the
+# estimate does not model (another type or x axis, a stacked or polygon fill)
+# or non-numeric coordinates (categories, dates) make the data extent unknown:
+# the legend then goes to, or stays at, the default top-right corner. Known
+# limit: a legend the user puts exactly where the rule would put it is
+# indistinguishable from an automatic one and follows the data too.
+const _SCAT_LEGEND_POSITIONS =
+	(:topright, :topleft, :bottomleft, :bottomright, :right, :left, :bottom, :top, :center)
+# Legend size estimate in px for a 12 px legend font: one entry per 20 px row
+# plus 10 px padding; 50 px for the sample line and padding plus 7 px per label
+# character. Used only to compare corners, so a rough estimate suffices.
+const _SCAT_LEGEND_ROW_PX = 20.0
+const _SCAT_LEGEND_PAD_PX = 10.0
+const _SCAT_LEGEND_SAMPLE_PX = 50.0
+const _SCAT_LEGEND_CHAR_PX = 7.0
+# Figure size and margins (px) assumed when the layout does not set them:
+# plotly.js' default margins (l = r = 80, t = 100, b = 80) on a 700 x 500 figure
+# (the package's `savefig` default page).
+const _SCAT_LEGEND_FIGURE_PX = (700.0, 500.0)
+const _SCAT_LEGEND_MARGIN_PX = (l = 80.0, r = 80.0, t = 100.0, b = 80.0)
+# Traces longer than this are sampled with a stride when scoring corners
+# (bounds the cost on million-point traces; the score is an estimate anyway).
+const _SCAT_LEGEND_MAX_POINTS = 100_000
+
+_scat_legend_placed(fig) = begin
+	legend = get(_plot_layout(fig).fields, :legend, nothing)
+	_cmn_mapping_get(legend, :x) !== nothing || _cmn_mapping_get(legend, :y) !== nothing
+end
+
+function _scat_layout_px(layout, key::Symbol, default::Float64)
+	value = get(layout.fields, key, nothing)
+	return value isa Real && !(value isa Bool) && value > 0 ? Float64(value) : default
+end
+
+# Coordinates of `values` on an axis of type `axis_type` (log10 on a log axis);
+# `nothing` when a value is neither numeric nor a gap (the extent is unknown).
+function _scat_legend_coords(values, log_axis::Bool)
+	values isa AbstractVector || return nothing
+	out = Vector{Float64}(undef, length(values))
+	for (index, value) in enumerate(values)
+		if value === nothing || value === missing
+			out[index] = NaN
+		elseif value isa Real && !(value isa Bool)
+			v = Float64(value)
+			out[index] = log_axis ? (v > 0 ? log10(v) : NaN) : v
+		else
+			return nothing
+		end
+	end
+	return out
+end
+
+# Error-bar extents `(minus, plus)` of a trace's `error_x`/`error_y` attribute
+# (absolute magnitudes per point), or `nothing`.
+function _scat_legend_errors(error, n::Int)
+	error === nothing && return nothing
+	_cmn_mapping_get(error, :visible) === false && return nothing
+	plus = _cmn_mapping_get(error, :array)
+	plus isa AbstractVector || return nothing
+	minus = _cmn_mapping_get(error, :symmetric) === false ?
+		_cmn_mapping_get(error, :arrayminus) : plus
+	minus isa AbstractVector || (minus = plus)
+	value(v, i) = i <= length(v) && v[i] isa Real && isfinite(v[i]) ? Float64(v[i]) : 0.0
+	return [value(minus, i) for i in 1:n], [value(plus, i) for i in 1:n]
+end
+
+# Whether the segment (x1, y1)-(x2, y2) meets the box [u0, u1] x [v0, v1]
+# (Liang-Barsky clipping).
+function _scat_segment_hits_box(x1, y1, x2, y2, u0, u1, v0, v1)
+	t0, t1 = 0.0, 1.0
+	dx, dy = x2 - x1, y2 - y1
+	for (p, q) in ((-dx, x1 - u0), (dx, u1 - x1), (-dy, y1 - v0), (dy, v1 - y1))
+		if p == 0
+			q < 0 && return false
+		else
+			r = q / p
+			if p < 0
+				r > t1 && return false
+				r > t0 && (t0 = r)
+			else
+				r < t0 && return false
+				r < t1 && (t1 = r)
+			end
+		end
+	end
+	return true
+end
+
+# Share of the axis length plotly.js' autorange leaves empty beyond a padded
+# extreme: plotly.js 2.35.2 `makePadFn` pads it by `0.05 * ax._length` px,
+# while a `tozero` extreme at 0 (a `fill = "tozeroy"` baseline) gets no pad.
+# The few px of marker radius plotly adds as well are ignored.
+const _SCAT_LEGEND_AUTORANGE_PAD = 0.05
+
+# The data window `(lo, hi)` of axis `key` in its stored units: the explicit
+# range, else the extent of `values` (the coordinates drawn on it) widened as
+# plotly's autorange does when `padded` (plotly pads every scatter y axis, and
+# the x axis of traces with markers, text or y error bars). With `tight_zero`,
+# an extreme at exactly 0 is not padded.
+function _scat_legend_window(layout, key::Symbol, values; padded::Bool, tight_zero::Bool = false)
+	axis = get(layout.fields, key, nothing)
+	range = _cmn_mapping_get(axis, :range)
+	autorange = _cmn_mapping_get(axis, :autorange)
+	if autorange !== true && range isa AbstractVector && length(range) == 2 &&
+		all(bound -> bound isa Real && isfinite(bound), range) && range[1] != range[2]
+		return Float64(range[1]), Float64(range[2])
+	end
+	finite = Iterators.filter(isfinite, values)
+	isempty(finite) && return nothing
+	lo, hi = extrema(finite)
+	lo == hi && ((lo, hi) = (lo - 0.5, hi + 0.5))
+	pad_lo = padded && !(tight_zero && lo == 0) ? _SCAT_LEGEND_AUTORANGE_PAD : 0.0
+	pad_hi = padded && !(tight_zero && hi == 0) ? _SCAT_LEGEND_AUTORANGE_PAD : 0.0
+	# The data spans the axis length minus both pads.
+	scale = (hi - lo) / (1 - pad_lo - pad_hi)
+	lo, hi = lo - pad_lo * scale, hi + pad_hi * scale
+	return autorange == "reversed" ? (hi, lo) : (lo, hi)
+end
+
+# Vertices of the line plotly.js draws from (u1, v1) to (u2, v2) for the
+# scatter `line.shape` `shape` (plotly.js 2.35 `line_points`: "hv" goes
+# across then up, "vh" up then across, "hvh"/"vhv" turn at the midpoint;
+# "linear" and "spline" are scored as the straight segment).
+function _scat_legend_step_path(shape::AbstractString, u1, v1, u2, v2)
+	if shape == "hv"
+		return ((u1, v1), (u2, v1), (u2, v2))
+	elseif shape == "vh"
+		return ((u1, v1), (u1, v2), (u2, v2))
+	elseif shape == "hvh"
+		um = (u1 + u2) / 2
+		return ((u1, v1), (um, v1), (um, v2), (u2, v2))
+	elseif shape == "vhv"
+		vm = (v1 + v2) / 2
+		return ((u1, v1), (u1, vm), (u2, vm), (u2, v2))
+	end
+	return ((u1, v1), (u2, v2))
+end
+
+function _scat_legend_path_hits_box(path, u0, u1, v0, v1)
+	for index in 1:(length(path) - 1)
+		a, b = path[index], path[index + 1]
+		_scat_segment_hits_box(a[1], a[2], b[1], b[2], u0, u1, v0, v1) && return true
+	end
+	return false
+end
+
+# The position of `_SCAT_LEGEND_POSITIONS` for the default legend of `p`, or
+# `nothing` when the data extent is unknown: a visible trace this estimate does
+# not model (another trace type, another x axis, a stacked or polygon fill) or
+# non-numeric coordinates.
+function _scat_best_legend_position(p::Plot)
+	layout = p.layout
+	entries = 0
+	widest = 0
+	# (y axis key, x coordinates, y coordinates, kind, line shape): `:points`
+	# are scored where they lie, `:segments` join consecutive points with the
+	# trace's line shape, `:drops` join each point to y = 0 (the area of a
+	# `fill = "tozeroy"` trace).
+	series = Tuple{Symbol, Vector{Float64}, Vector{Float64}, Symbol, String}[]
+	xpadded = false
+	for trace in p.data
+		trace isa GenericTrace || return nothing
+		fields = trace.fields
+		if _trace_will_showlegend(trace)
+			entries += 1
+			name = get(fields, :name, "")
+			widest = max(widest, length(string(name)))
+		end
+		visible = get(fields, :visible, true)
+		(visible === false || visible == "legendonly") && continue
+		string(get(fields, :type, "scatter")) in ("scatter", "scattergl") || return nothing
+		string(get(fields, :xaxis, "x")) == "x" || return nothing
+		# Stacked or polygon fills cover areas these scores do not model.
+		haskey(fields, :stackgroup) && return nothing
+		fill = string(get(fields, :fill, ""))
+		fill in ("", "none", "tozeroy") || return nothing
+		ykey = _axis_layout_key(string(get(fields, :yaxis, "y")), :y)
+		ylog = _axis_type(layout, ykey) == "log"
+		xs = _scat_legend_coords(get(fields, :x, nothing), _axis_type(layout, :xaxis) == "log")
+		ys = _scat_legend_coords(get(fields, :y, nothing), ylog)
+		(xs === nothing || ys === nothing) && return nothing
+		n = min(length(xs), length(ys))
+		n == 0 && continue
+		xs, ys = xs[1:n], ys[1:n]
+		mode = string(get(fields, :mode, "lines+markers"))
+		shape = _cmn_mapping_get(get(fields, :line, nothing), :shape)
+		shape = shape isa AbstractString ? String(shape) : "linear"
+		# plotly.js 2.35.2 scatter `calcAxisExpansion`: the x extremes are padded
+		# with y error bars, or with markers or text unless the trace fills to y = 0.
+		xpadded |= _scat_legend_errors(get(fields, :error_y, nothing), n) !== nothing ||
+			(fill != "tozeroy" && (occursin("markers", mode) || occursin("text", mode)))
+		# Error-bar ends count as points (on linear axes; log axes keep the
+		# points only).
+		extra_x, extra_y = Float64[], Float64[]
+		for (letter, error) in ((:y, get(fields, :error_y, nothing)), (:x, get(fields, :error_x, nothing)))
+			bounds = _scat_legend_errors(error, n)
+			bounds === nothing && continue
+			axis_key = letter === :y ? ykey : :xaxis
+			_axis_type(layout, axis_key) == "log" && continue
+			minus, plus = bounds
+			if letter === :y
+				append!(extra_x, xs, xs)
+				append!(extra_y, ys .- minus, ys .+ plus)
+			else
+				append!(extra_x, xs .- minus, xs .+ plus)
+				append!(extra_y, ys, ys)
+			end
+		end
+		push!(series, (ykey, vcat(xs, extra_x), vcat(ys, extra_y), :points, shape))
+		occursin("lines", mode) && push!(series, (ykey, xs, ys, :segments, shape))
+		fill == "tozeroy" && !ylog && push!(series, (ykey, xs, ys, :drops, shape))
+	end
+	(entries == 0 || isempty(series)) && return nothing
+
+	xwindow = _scat_legend_window(
+		layout, :xaxis, Iterators.flatten(s[2] for s in series); padded = xpadded,
+	)
+	xwindow === nothing && return nothing
+	ywindows = Dict{Symbol, Any}()
+	for key in unique(s[1] for s in series)
+		# A filled area reaches down to 0, which the autorange includes unpadded.
+		filled = any(s -> s[1] === key && s[4] === :drops, series)
+		ywindows[key] = _scat_legend_window(
+			layout,
+			key,
+			Iterators.flatten((Iterators.flatten(s[3] for s in series if s[1] === key), filled ? (0.0,) : ()));
+			padded = true,
+			tight_zero = filled,
+		)
+	end
+
+	width_px, height_px = _scat_legend_figure_px(layout)
+	box_w = min(0.6, (_SCAT_LEGEND_SAMPLE_PX + _SCAT_LEGEND_CHAR_PX * widest) / width_px)
+	box_h = min(0.6, (_SCAT_LEGEND_PAD_PX + _SCAT_LEGEND_ROW_PX * entries) / height_px)
+	# The box of each candidate, from the anchor point and anchors the legend
+	# would get there.
+	boxes = map(_SCAT_LEGEND_POSITIONS) do position
+		x, y, xanchor, yanchor =
+			_legend_anchor((0.0, 1.0), (0.0, 1.0), _DEFAULT_LEGEND_INSET[], position)
+		u0 = xanchor == "left" ? x : xanchor == "right" ? x - box_w : x - box_w / 2
+		v0 = yanchor == "bottom" ? y : yanchor == "top" ? y - box_h : y - box_h / 2
+		return (u0, u0 + box_w, v0, v0 + box_h)
+	end
+	scores = zeros(Int, length(boxes))
+	xlo, xhi = xwindow
+	for (ykey, xs, ys, kind, shape) in series
+		ywindow = ywindows[ykey]
+		ywindow === nothing && continue
+		ylo, yhi = ywindow
+		v_zero = (0.0 - ylo) / (yhi - ylo)
+		count = length(xs)
+		stride = max(1, cld(count, _SCAT_LEGEND_MAX_POINTS))
+		previous = nothing
+		for index in 1:stride:count
+			u = (xs[index] - xlo) / (xhi - xlo)
+			v = (ys[index] - ylo) / (yhi - ylo)
+			if !(isfinite(u) && isfinite(v))
+				previous = nothing
+				continue
+			end
+			path = kind === :segments && previous !== nothing ?
+				_scat_legend_step_path(shape, previous[1], previous[2], u, v) : nothing
+			for (corner, (u0, u1, v0, v1)) in enumerate(boxes)
+				hit = if kind === :segments
+					path !== nothing && _scat_legend_path_hits_box(path, u0, u1, v0, v1)
+				elseif kind === :drops
+					_scat_segment_hits_box(u, v, u, v_zero, u0, u1, v0, v1)
+				else
+					u0 <= u <= u1 && v0 <= v <= v1
+				end
+				hit && (scores[corner] += 1)
+			end
+			previous = (u, v)
+		end
+	end
+	# `argmin` returns the first minimum: ties keep the candidate order.
+	return _SCAT_LEGEND_POSITIONS[argmin(scores)]
+end
+
+function _scat_legend_figure_px(layout)
+	width = _scat_layout_px(layout, :width, _SCAT_LEGEND_FIGURE_PX[1])
+	height = _scat_layout_px(layout, :height, _SCAT_LEGEND_FIGURE_PX[2])
+	margin = get(layout.fields, :margin, nothing)
+	side(name) = begin
+		value = _cmn_mapping_get(margin, name)
+		value isa Real && !(value isa Bool) && value >= 0 ? Float64(value) :
+			Float64(getfield(_SCAT_LEGEND_MARGIN_PX, name))
+	end
+	return max(width - side(:l) - side(:r), 50.0), max(height - side(:t) - side(:b), 50.0)
+end
+
+# Whether the best-position rule applies: on a Plot/SyncPlot (SubplotFigure
+# cell legends are placed by the delegate) while the package default position
+# is :topright.
+_scat_legend_rule_active() =
+	_SCAT_SUBPLOT_CONTEXT[] === nothing && _DEFAULT_LEGEND_POSITION[] === :topright
+
+# Placement keys of the legend at `position` with the package default inset
+# (as `_apply_default_legend!` writes them).
+_scat_position_placement(position::Symbol) = _legend_placement(
+	position, (0.0, 1.0), (0.0, 1.0), _DEFAULT_LEGEND_INSET[]; figure = true,
+)
+
+# Whether the legend of `p` has exactly the placement keys of `placement`.
+function _scat_legend_at(p::Plot, placement)
+	legend = get(p.layout.fields, :legend, nothing)
+	return all(
+		key -> _cmn_mapping_get(legend, key) == get(placement, key, nothing),
+		_LEGEND_PLACEMENT_KEYS,
+	)
+end
+
+# State of the legend of `fig` before a call of this family writes anything:
+# `:none` (not placed yet), `:auto` (where this rule puts it for the figure as
+# it stands, so the rule placed it and it follows the data) or `:fixed`
+# (anywhere else: set by the user, `set_legend!`, `relayout!`, or while the
+# rule is off; never moved).
+function _scat_legend_state(fig)
+	_scat_legend_placed(fig) || return :none
+	_scat_legend_rule_active() || return :fixed
+	p = _plot_obj(fig)
+	any(
+		position -> _scat_legend_at(p, _scat_position_placement(position)),
+		_SCAT_LEGEND_POSITIONS,
+	) || return :fixed
+	position = something(_scat_best_legend_position(p), :topright)
+	return _scat_legend_at(p, _scat_position_placement(position)) ? :auto : :fixed
+end
+
+# After a Plot/SyncPlot call of this family whose legend was `before`
+# (`_scat_legend_state` at the start of the call): a legend the call created
+# (at the default top-right) or one still at its automatic position moves to
+# the position with the least data; a `:fixed` legend stays.
+function _scat_place_legend!(fig, before::Symbol)
+	before === :fixed && return nothing
+	_scat_legend_rule_active() || return nothing
+	_scat_legend_placed(fig) || return nothing
+	p = _plot_obj(fig)
+	# A legend created by this call sits at the package default corner.
+	before === :none && !_scat_legend_at(p, _scat_position_placement(:topright)) && return nothing
+	placement = _scat_position_placement(something(_scat_best_legend_position(p), :topright))
+	_scat_legend_at(p, placement) && return nothing
+	_legend_write_block!(p, :legend; placement = placement, replace_placement = true)
+	_legend_title_clearance!(p)
+	return nothing
 end
 
 # Number of traces that precede the next trace appended to `fig`: its own
@@ -8294,8 +8787,36 @@ function _scat_default_color(fig, index::Integer)
 	return _default_trace_color(context === nothing ? fig : context.figure, index)
 end
 
+# Keyword sets passed as `explicit` to `_apply_style_trace_defaults!` for
+# traces that must take only some of the active PlotStyle's per-trace
+# defaults: filled areas and segment collections take the line width only (no
+# dash cycle, no markers on their vertices); dense curves (ECDF steps, KDE) take
+# the line width and the dash cycle but no cycle markers, which would hide them.
+const _SCAT_STYLE_WIDTH_ONLY = (:dash, :marker_symbol, :marker_size, :mode)
+const _SCAT_STYLE_NO_MARKERS = (:marker_symbol, :marker_size, :mode)
+
+# Fill the active PlotStyle's per-trace defaults into the traces at `indices`
+# (the traces the calling constructor or mutator just appended to `fig`):
+# line width, marker size and the dash/marker cycle wherever the trace leaves
+# them unset, positioned by the trace's rank among the figure's line-style
+# traces. `explicit` lists the keywords the caller set (never filled, e.g.
+# `:mode` when `mode` was passed) plus those the trace kind must not take.
+# Inside a SubplotFigure call the cycle continues the real figure's traces
+# (`_scat_subplot_delegate!` runs the call under `_with_style_trace_offset`).
+# A no-op under the `:default` style.
+function _scat_apply_style!(fig, indices; explicit = ())
+	isempty(indices) && return nothing
+	_apply_style_trace_defaults!(fig, indices; explicit = explicit)
+	return nothing
+end
+
+# `explicit` entry for a `mode` keyword whose default is `nothing` (unset).
+_scat_mode_explicit(mode) = mode === nothing ? () : (:mode,)
+
 # Shared body of plot_scatter / plot_scatter! (and plot_complex(!)): validate
 # everything, then append one trace per series and apply the figure options.
+# `mode = nothing` means `"lines"` (`default_mode`) left to the active style,
+# whose marker cycle may then add markers; an explicit `mode` is kept as given.
 function _scatter_impl!(
 	fig,
 	x,
@@ -8309,7 +8830,8 @@ function _scatter_impl!(
 	yrange = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	mode = "lines",
+	mode = nothing,
+	default_mode::AbstractString = "lines",
 	dash = "",
 	color = "",
 	legend = "",
@@ -8346,14 +8868,15 @@ function _scatter_impl!(
 	extra_traces = nothing,
 )
 	xs, ys, nested = _scat_series(x, y, who)
+	xrange = _scat_range_arg(xrange)
+	yrange = _scat_range_arg(yrange)
 	n = length(ys)
 	lengths = Int[length(series) for series in ys]
 	n_existing = _scat_existing_count(fig)
 	styles = _scat_series_styles(
 		n,
-		n_existing,
 		who;
-		mode = mode,
+		mode = something(mode, default_mode),
 		dash = dash,
 		color = color,
 		legend = legend,
@@ -8393,6 +8916,7 @@ function _scatter_impl!(
 		yticklabels = yticklabels,
 	)
 
+	legend_state = _scat_legend_state(fig)
 	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
 	yref = secondary_y ? _cmn_axis_ref(ykey; who = who) : ""
 	cliponaxis = clip ? nothing : false
@@ -8422,6 +8946,7 @@ function _scatter_impl!(
 			),
 		)
 	end
+	_scat_apply_style!(fig, (length(data) - n + 1):length(data); explicit = _scat_mode_explicit(mode))
 	extra_traces === nothing || extra_traces(fig, yref)
 	# A constructor's `grid = true` keeps the template grid; a mutator applies
 	# any non-nothing `grid`, so `true` re-enables a grid switched off earlier.
@@ -8450,6 +8975,7 @@ function _scatter_impl!(
 		apply_template = constructor,
 		who = who,
 	)
+	_scat_place_legend!(fig, legend_state)
 	return nothing
 end
 
@@ -8739,6 +9265,7 @@ function _stats_bar!(fig, x, y, who::AbstractString, options, bar_options; mutat
 		# y-only form: generated positions 0:n-1 go on the category axis, the
 		# values on the value axis (x for horizontal bars).
 		value_name, position_name = "y", "x"
+		_scat_require_vector(y, who, :y)
 		values, positions = y, _auto_xvalues(y)
 	else
 		# Two-argument form: plotly's convention, `x` and `y` are passed
@@ -8812,6 +9339,16 @@ function _stats_histogram!(fig, x, who::AbstractString, options, histogram_optio
 	(existing_mode === nothing && cell !== nothing) && (existing_mode = cell.barmode)
 	mode = isempty(barmode) ? existing_mode : barmode
 	overlay = shared && (mode === nothing || mode == "overlay")
+	# One mechanism per case for the automatic overlay (no bar mode passed or
+	# set): a plain figure without other bar-like traces gets the root
+	# `barmode = "overlay"`; a SubplotFigure cell, or a figure whose existing
+	# bars are arranged by plotly's default "group" mode, keeps the figure-wide
+	# mode and overlays only this call's series through one shared
+	# `offsetgroup` (traces of one offset group share their positions under
+	# "group"). Under an explicit or existing "overlay" neither is needed.
+	slot_overlay = overlay && mode === nothing &&
+		(cell !== nothing || any(trace -> _stats_is_barlike(trace), _plot_data(fig)))
+	root_overlay = overlay && mode === nothing && !slot_overlay
 	group_id = shared ?
 		_stats_histogram_group_id(
 			sample_list,
@@ -8857,7 +9394,9 @@ function _stats_histogram!(fig, x, who::AbstractString, options, histogram_optio
 				opacity = trace_opacity,
 				pattern = patterns[index],
 				bingroup = group_id,
-				offsetgroup = overlay ? group_id : "",
+				# Log-axis bars set `offset`, which plotly always draws
+				# overlaid, so only these traces need the shared slot.
+				offsetgroup = slot_overlay ? group_id : "",
 			)
 		end
 	end
@@ -8866,7 +9405,7 @@ function _stats_histogram!(fig, x, who::AbstractString, options, histogram_optio
 	append!(_plot_data(fig), traces)
 	if !isempty(barmode)
 		_apply_explicit_layout_mode!(fig, :barmode, barmode)
-	elseif overlay
+	elseif root_overlay
 		_apply_nested_layout_mode!(fig, x, :barmode, "overlay")
 	end
 	_stats_apply_options!(fig, who, options; mutator = mutator)
@@ -8985,23 +9524,30 @@ traces). The one-argument form uses `x = 0:length(y)-1` (per series).
 #### Per-series keywords
 
 Each accepts one value for every series or a vector with one entry per series
-(missing entries take the default, surplus entries are ignored).
+(missing entries take the default, surplus entries are ignored). Keywords left
+at their default take the active [`PlotStyle`](@ref)'s per-trace defaults
+(line width, marker size, dash and marker cycle; none under `:default`).
 
-- `mode = "lines"`: `"lines"`, `"markers"`, `"text"` or a `+` combination
-  (`"lines+markers"`), or `"none"`; `""` means `"lines"`.
+- `mode = nothing`: `"lines"`, `"markers"`, `"text"` or a `+` combination
+  (`"lines+markers"`), or `"none"`; `""` means `"lines"`. `nothing` draws
+  lines, plus markers when the active style has a marker cycle; an explicit
+  `mode` is kept as given.
 - `dash = ""`: `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`,
-  `"longdashdot"` or a dash-length list such as `"5px,10px"`.
+  `"longdashdot"` or a dash-length list such as `"5px,10px"` (`""`: the
+  style's dash cycle, else solid).
 - `color = ""`: line (and default marker) colour, a CSS colour string or
   `Symbol`; `""` uses the template colorway.
 - `legend = ""`: legend name (`AbstractString`, math such as `L"\\alpha"` is
   typeset).
-- `linewidth = 0`: line width in px (`0`: default).
+- `linewidth = 0`: line width in px (`0`: the style's width, else plotly's).
 - `line_shape = ""`: `"linear"`, `"spline"`, or the step shapes `"hv"`
   (step after the point), `"vh"`, `"hvh"`, `"vhv"`.
-- `marker_size = 0`: marker diameter in px (`Real`; `0`: default).
+- `marker_size = 0`: marker diameter in px (`Real`; `0`: the style's size,
+  else plotly's).
 - `marker_symbol = ""`: a Plotly symbol (`"circle"`, `"square-open"`, ...) or a
   matplotlib code: `"o"`, `"s"`, `"^"`, `"v"`, `"<"`, `">"`, `"D"`, `"d"`,
-  `"x"` (thin x), `"+"` (thin cross), `"*"`, `"p"`, `"h"`, `"."` (small dot).
+  `"x"` (thin x), `"+"` (thin cross), `"*"`, `"p"`, `"h"`, `"."` (small dot);
+  `""`: the style's marker cycle, else a circle.
 - `marker_color = ""`: marker face colour; `"none"` draws hollow markers.
   With a face colour the edge is `marker_line_color`, otherwise the series
   colour, 1.5 px wide.
@@ -9037,11 +9583,8 @@ Each accepts one value for every series or a vector with one entry per series
   typeset).
 - `xscale = ""`, `yscale = ""`: axis type, `"linear"`, `"log"`, `"date"`,
   `"category"`; log axes label ticks as powers of ten.
-- `xrange = [0, 0]`, `yrange = [0, 0]`: axis range as a 2-element vector or
-  tuple in data units (also on log axes); `[0, 0]` or `nothing` autoscale.
-- `xticks = nothing`, `yticks = nothing`: tick positions; `xticklabels`,
-  `yticklabels`: one label per tick; `xtickformat = ""`, `ytickformat = ""`:
-  d3 tick format (e.g. `".2f"`).
+- $(_SCAT_RANGE_DOC)
+- $(_SCAT_TICKS_DOC)
 - `equalar = false`: equal data aspect ratio (one x unit spans as many pixels
   as one y unit).
 - `grid = true`: `true` keeps the template grid, `false` hides it, `:x`,
@@ -9050,6 +9593,8 @@ Each accepts one value for every series or a vector with one entry per series
   `fontsize = 0`: global font size in px.
 - `show = false`: `true` opens the figure in a window and returns the
   `SyncPlot`.
+
+$(_SCAT_LEGEND_DOC)
 
 Invalid values (unknown modes, symbols or dash names, mismatched lengths,
 non-positive bounds on a log axis, ...) throw an `ArgumentError` that names
@@ -9073,7 +9618,7 @@ function plot_scatter(
 	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	mode::Union{AbstractString, AbstractVector} = "lines",
+	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
 	color::Union{AbstractString, Symbol, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -9249,9 +9794,10 @@ function _stem_impl!(
 	))
 	n = length(ys)
 	n_existing = _scat_existing_count(fig)
+	xrange = _scat_range_arg(xrange)
+	yrange = _scat_range_arg(yrange)
 	styles = _scat_series_styles(
 		n,
-		n_existing,
 		who;
 		mode = "markers",
 		color = color,
@@ -9262,6 +9808,10 @@ function _stem_impl!(
 		linewidth = linewidth,
 		showlegend = showlegend,
 	)
+	# Without an explicit `linewidth`, stems take the active style's line width
+	# (filled by `_scat_apply_style!`) or, when the style has none, the thin
+	# matplotlib stem width.
+	style_width = haskey(_style_trace_defaults(_active_style(), 1), :linewidth)
 	_scat_validate_cartesian_options(
 		fig,
 		who;
@@ -9280,6 +9830,7 @@ function _stem_impl!(
 		yticklabels = yticklabels,
 	)
 
+	legend_state = _scat_legend_state(fig)
 	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
 	yref = secondary_y ? _cmn_axis_ref(ykey; who = who) : ""
 	groups = _stem_legend_groups(fig, n)
@@ -9325,13 +9876,18 @@ function _stem_impl!(
 		# active style's cycle); the colorway colour resolved above for
 		# white-faced or line-symbol heads stays on the heads.
 		stem_color = isempty(style.color) ? _STEM_DEFAULT_COLOR : String(style.color)
-		stem_width = style.linewidth > 0 ? style.linewidth : _STEM_DEFAULT_LINEWIDTH
+		stem_line = attr(color = stem_color)
+		if style.linewidth > 0
+			stem_line.fields[:width] = style.linewidth
+		elseif !style_width
+			stem_line.fields[:width] = _STEM_DEFAULT_LINEWIDTH
+		end
 		stem = Dict{Symbol, Any}(
 			:x => stem_x,
 			:y => stem_y,
 			:mode => "lines",
 			:name => name,
-			:line => attr(color = stem_color, width = stem_width),
+			:line => stem_line,
 			:legendgroup => groups[index],
 			:showlegend => false,
 			:hoverinfo => "skip",
@@ -9342,8 +9898,14 @@ function _stem_impl!(
 		isempty(yref) || (stem[:yaxis] = yref)
 		stems[index] = GenericTrace("scatter", stem)
 	end
-	append!(_plot_data(fig), heads)
-	append!(_plot_data(fig), stems)
+	data = _plot_data(fig)
+	append!(data, heads)
+	append!(data, stems)
+	# Heads (markers only) take the style's marker size and marker cycle; stems
+	# take its line width only (solid, no markers, as matplotlib's stem lines).
+	first_head = length(data) - 2n + 1
+	_scat_apply_style!(fig, first_head:(first_head + n - 1); explicit = (:linewidth, :dash, :mode))
+	_scat_apply_style!(fig, (first_head + n):length(data); explicit = _SCAT_STYLE_WIDTH_ONLY)
 	# A constructor's `grid = true` keeps the template grid; a mutator applies
 	# any non-nothing `grid`, so `true` re-enables a grid switched off earlier.
 	constructor || _apply_cartesian_grid_override!(fig, grid, who)
@@ -9371,6 +9933,7 @@ function _stem_impl!(
 		apply_template = constructor,
 		who = who,
 	)
+	_scat_place_legend!(fig, legend_state)
 	return nothing
 end
 
@@ -9405,8 +9968,10 @@ Per series (a value for every series, or a vector with one entry per series):
   `showlegend = nothing`: force the legend entry on (`true`) or off (`false`).
 - `marker_size = 0` (px), `marker_symbol = ""` (Plotly name or matplotlib code
   such as `"o"`, `"s"`, `"D"`), `marker_color = ""` (head face colour;
-  `"none"` gives hollow heads).
-- `linewidth = 0`: stem line width in px (`0`: 0.5 px).
+  `"none"` gives hollow heads). Unset, the heads take the active
+  [`PlotStyle`](@ref)'s marker size and marker cycle.
+- `linewidth = 0`: stem line width in px (`0`: the active style's line width,
+  else 0.5 px). Stems are always solid.
 
 Shared:
 
@@ -9414,8 +9979,9 @@ Shared:
 - `title`, `xlabel`, `ylabel`, `xscale`, `yscale`, `xrange`, `yrange`,
   `xticks`, `xticklabels`, `yticks`, `yticklabels`, `xtickformat`,
   `ytickformat`, `equalar`, `grid`, `width`, `height`, `fontsize`, `show`: as
-  for [`plot_scatter`](@ref) (ranges in data units, `grid = true` keeps the
-  template grid).
+  for [`plot_scatter`](@ref) (ranges in data units with the semantics of
+  `xrange!`, tick presets `:decades`/`:auto`, `grid = true` keeps the
+  template grid; a new legend avoids the data).
 
 #### Example
 
@@ -9516,8 +10082,9 @@ Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
   `Vector{Any}`) is multi-series. Every series must have as many values as
   its positions. Bars of several series are grouped (plotly's default
   `barmode`).
-- `AbstractVector` data: vectors, ranges, views. Complex values are an
-  `ArgumentError`.
+- `AbstractVector` data: vectors, ranges, views. Complex values, matrices and
+  other arrays that are not vectors are an `ArgumentError` (pass
+  `collect(eachcol(A))` for one series per column).
 
 #### Keyword Arguments
 - `color::Union{AbstractString,Symbol,AbstractVector} = ""`: bar colour, or one
@@ -9555,13 +10122,10 @@ Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
   repeated for density, e.g. `"//"`), per series when a vector.
 - `xlabel`, `ylabel`, `title::AbstractString = ""`: axis titles and figure
   title (mathtext labels allowed).
-- `xrange`, `yrange = [0, 0]`: axis range `[min, max]` or `(min, max)` in data
-  units (also on log axes); `[0, 0]` or `nothing` autoscales.
+- $(_SCAT_RANGE_DOC)
 - `xscale`, `yscale::AbstractString = ""`: axis type, e.g. `"log"` (log axes
   get power-of-ten tick labels).
-- `xticks`, `yticks = nothing`: tick positions (data units); `xticklabels`,
-  `yticklabels = nothing`: one label per tick; `xtickformat`,
-  `ytickformat::AbstractString = ""`: d3 tick format, e.g. `".2f"`.
+- $(_SCAT_TICKS_DOC)
 - `width`, `height::Real = 0`: figure size in pixels (`0` = automatic).
 - `fontsize::Real = 0`: base font size in pixels (`0` = template default).
 - `grid::Union{Nothing,Bool,Symbol} = true`: `true` keeps the template grid;
@@ -9576,8 +10140,8 @@ plot_bar([3, 5, 2], ["a", "b", "c"]; orientation = "h", hatch = "//")
 ```
 """
 function plot_bar(
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -9627,7 +10191,7 @@ function plot_bar(
 end
 
 function plot_bar(
-	y::AbstractVector;
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -9683,15 +10247,20 @@ Histogram of the samples `x`. Returns a `PlotlyBase.Plot`, or a
 [`SyncPlot`](@ref) window when `show = true`.
 
 #### Data
-- `x::AbstractVector`: the samples (vector, range or view; complex values are
-  an `ArgumentError`). With `orientation = "h"` the samples are binned along
+- `x::AbstractVector`: the samples (vector, range or view; complex values and
+  matrices are an `ArgumentError`). With `orientation = "h"` the samples are binned along
   the y axis and the bars grow along x.
 - Multiple series: a vector of vectors (also `Vector{Any}`). The series of one
-  call share their bins (`bingroup`). They are overlaid: each trace gets
-  opacity 0.6 (unless `opacity` is given) and one shared `offsetgroup`, and the
-  layout `barmode` becomes `"overlay"` unless the figure already has a bar
-  mode. With `barmode = "stack"`/`"group"`/`"relative"` (passed or already set
-  on the figure) they are stacked or grouped on the shared bins instead.
+  call share their bins (`bingroup`). They are overlaid, each trace with
+  opacity 0.6 (unless `opacity` is given): on a figure without other bars or
+  histograms the layout `barmode` becomes `"overlay"`; on a figure whose
+  existing bars use plotly's default (unset) bar mode, and in a
+  `SubplotFigure` cell, the figure-wide mode is left alone and only the
+  series of this call share one `offsetgroup` (drawn at the same positions).
+  Under a bar mode `"overlay"` that is passed or already set, neither is
+  needed. With `barmode = "stack"`/`"group"`/`"relative"` (passed or already
+  set on the figure) the series are stacked or grouped on the shared bins
+  instead.
 - Log binning axis (`xscale = "log"`, `yscale = "log"` with
   `orientation = "h"`, or a mutator target whose binning axis is already
   logarithmic): plotly.js cannot bin there (it draws nothing), so the samples
@@ -9739,7 +10308,7 @@ plot_histogram(a; cumulative = true, histnorm = "probability")
 ```
 """
 function plot_histogram(
-	x::AbstractVector;
+	x::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -9803,6 +10372,9 @@ Box plot. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
   "b". Several `y` series (vector of vectors, sharing `x` or with one `x` per
   series) are grouped side by side (`boxmode = "group"`). For
   `orientation = "h"` the roles swap: `x` holds the samples and `y` the groups.
+- Vectors, ranges and views are accepted; matrices and complex values are an
+  `ArgumentError` (pass `collect(eachcol(A))` for one series per column), and
+  each series needs one group per sample.
 - An existing `boxmode` on the figure is never overwritten.
 
 #### Keyword Arguments
@@ -9833,8 +10405,8 @@ plot_box(repeat(["a", "b"], 50), randn(100); points = "all", jitter = 0.3, point
 ```
 """
 function plot_box(
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -9881,7 +10453,7 @@ function plot_box(
 end
 
 function plot_box(
-	y::AbstractVector;
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -9968,8 +10540,8 @@ plot_violin(randn(200); orientation = "h", side = "positive", points = false)
 ```
 """
 function plot_violin(
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -10017,7 +10589,7 @@ function plot_violin(
 end
 
 function plot_violin(
-	y::AbstractVector;
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -10066,10 +10638,47 @@ end
 
 const _POLAR_DIRECTIONS = ("counterclockwise", "clockwise")
 const _POLAR_THETAUNITS = ("degrees", "radians")
+# Default angle (degrees, plotly's `polar.radialaxis.angle`: 0 points right,
+# counterclockwise) of the radial axis that carries the radial tick labels.
+# plotly.js draws it along 0°, where its labels collide with the angular "0°"
+# label and with data on that spoke (lead review V4); 22.5° is matplotlib's
+# default `rlabel_position`, half way between the 0° and 45° spokes of the
+# default angular grid.
+const _SCAT_POLAR_RLABEL_ANGLE = 22.5
+# Most radial ticks plotly.js may draw on a radial axis without tick settings.
+# Left to itself plotly.js 2.35 puts ten ticks 0.1 apart on r in [0, 0.9] of a
+# 700 x 500 figure, and their labels, drawn along the angled radial axis, run
+# into each other; at most 6 ticks (matplotlib draws about 5 radial rings)
+# keeps them apart (renders compared in the V4 review).
+const _SCAT_POLAR_RADIAL_NTICKS = 6
+
+# Whether angle `a` (degrees) lies in the polar sector `[s1, s2]` (degrees,
+# counterclockwise from s1 to s2, as plotly draws a sector).
+function _scat_angle_in_sector(a::Real, sector)
+	start, stop = Float64(sector[1]), Float64(sector[2])
+	span = stop - start
+	abs(span) >= 360 && return true
+	lo, hi = min(start, stop), max(start, stop)
+	return mod(Float64(a) - lo, 360) <= hi - lo
+end
+
+# The radial range `checked` (data units) as plotly stores it on the radial
+# axis of the polar subplot `polar` (a layout mapping or `nothing`): log10
+# exponents when that axis is logarithmic.
+function _scat_polar_range_value(polar, checked, who::AbstractString)
+	radial = _cmn_mapping_get(polar, :radialaxis)
+	_cmn_mapping_get(radial, :type) == "log" || return checked
+	all(bound -> bound isa Real && bound > 0, checked) || throw(ArgumentError(
+		"$(who): `rrange` bounds on a logarithmic radial axis are data values and " *
+		"must be positive; got $(repr(Tuple(checked))).",
+	))
+	return Float64[log10(bound) for bound in checked]
+end
 
 # Shared body of plot_scatterpolar / plot_scatterpolar!: validate everything,
 # append one `scatterpolar` trace per series and set the options of the
-# primary polar subplot (`layout.polar`).
+# primary polar subplot (`layout.polar`). `mode = nothing` is "lines", left to
+# the active style's marker cycle.
 function _scatterpolar_impl!(
 	fig,
 	theta,
@@ -10078,9 +10687,10 @@ function _scatterpolar_impl!(
 	constructor::Bool,
 	trange = [0, 0],
 	rrange = [0, 0],
+	rlabel_angle::Union{Nothing, Real} = nothing,
 	width::Real = 0,
 	height::Real = 0,
-	mode = "lines",
+	mode = nothing,
 	dash = "",
 	color = "",
 	legend = "",
@@ -10109,9 +10719,8 @@ function _scatterpolar_impl!(
 	n_existing = _scat_existing_count(fig)
 	styles = _scat_series_styles(
 		n,
-		n_existing,
 		who;
-		mode = mode,
+		mode = something(mode, "lines"),
 		dash = dash,
 		color = color,
 		legend = legend,
@@ -10130,8 +10739,20 @@ function _scatterpolar_impl!(
 		fillcolor = fillcolor,
 	)
 	marks = _scat_series_markevery(markevery, nested, lengths, who)
-	sector = _checked_range(trange, who, "trange")
-	radial = _checked_range(rrange, who, "rrange")
+	sector = _scat_checked_range(trange, who, "trange")
+	radial = _scat_checked_range(rrange, who, "rrange")
+	for (bounds, name) in ((sector, "trange"), (radial, "rrange"))
+		bounds === nothing || all(bound -> bound isa Real, bounds) || throw(ArgumentError(
+			"$(who): `$(name)` bounds must be numbers; got $(repr(Tuple(bounds))).",
+		))
+	end
+	polar_layout = _scat_polar_layout(fig)
+	radial === nothing || (radial = _scat_polar_range_value(polar_layout, radial, who))
+	(rlabel_angle === nothing || (!(rlabel_angle isa Bool) && isfinite(rlabel_angle))) ||
+		throw(ArgumentError(
+			"$(who): `rlabel_angle` must be a finite angle in degrees or nothing; got " *
+			"$(repr(rlabel_angle)).",
+		))
 	_require_size_option(width, who, "width")
 	_require_size_option(height, who, "height")
 	_require_size_option(fontsize, who, "fontsize")
@@ -10146,6 +10767,33 @@ function _scatterpolar_impl!(
 			"$(repr(rotation)).",
 		))
 	unit = _scat_choice(thetaunit, _POLAR_THETAUNITS, who, "thetaunit")
+	_stats_label(title)
+	# Angle of the radial axis (where the radial tick labels are drawn): the
+	# caller's `rlabel_angle`; else, on a polar subplot that has no angle yet,
+	# `_SCAT_POLAR_RLABEL_ANGLE` (full circle) or the start of a sector set by
+	# this call; an existing angle outside a new sector moves to its start.
+	existing_angle = _cmn_mapping_get(_cmn_mapping_get(polar_layout, :radialaxis), :angle)
+	existing_sector = _cmn_mapping_get(polar_layout, :sector)
+	axis_angle = if rlabel_angle !== nothing
+		rlabel_angle
+	elseif sector !== nothing && abs(sector[2] - sector[1]) >= 360
+		# A full-circle sector: off the start spoke, as without a sector.
+		existing_angle isa Real ? nothing : sector[1] + _SCAT_POLAR_RLABEL_ANGLE
+	elseif sector !== nothing
+		existing_angle isa Real && _scat_angle_in_sector(existing_angle, sector) ?
+			nothing : sector[1]
+	elseif existing_angle === nothing && existing_sector === nothing
+		_SCAT_POLAR_RLABEL_ANGLE
+	else
+		nothing
+	end
+	# A radial axis without tick settings gets at most
+	# `_SCAT_POLAR_RADIAL_NTICKS` ticks; ticks set earlier are kept.
+	radial_axis = _cmn_mapping_get(polar_layout, :radialaxis)
+	default_nticks = all(
+		key -> _cmn_mapping_get(radial_axis, key) === nothing,
+		(:nticks, :dtick, :tickvals, :tickmode),
+	)
 
 	data = _plot_data(fig)
 	for index in 1:n
@@ -10168,9 +10816,12 @@ function _scatterpolar_impl!(
 			),
 		)
 	end
+	_scat_apply_style!(fig, (length(data) - n + 1):length(data); explicit = _scat_mode_explicit(mode))
 	_apply_figure_title!(fig, title)
 	radial === nothing || relayout!(fig; polar_radialaxis_range = radial)
 	sector === nothing || relayout!(fig; polar_sector = sector)
+	axis_angle === nothing || relayout!(fig; polar_radialaxis_angle = axis_angle)
+	default_nticks && relayout!(fig; polar_radialaxis_nticks = _SCAT_POLAR_RADIAL_NTICKS)
 	# A constructor keeps the template grid unless `grid = false`; a mutator
 	# leaves it alone unless `grid` is given.
 	if constructor ? grid === false : grid !== nothing
@@ -10209,10 +10860,12 @@ Line and marker plot in polar coordinates (Plotly `scatterpolar`): angle
 #### Keywords
 
 Per series (a value for every series, or a vector with one entry per series):
-`mode = "lines"`, `dash = ""`, `color = ""`, `legend = ""`, `linewidth = 0`,
+`mode = nothing`, `dash = ""`, `color = ""`, `legend = ""`, `linewidth = 0`,
 `marker_size = 0`, `marker_symbol = ""`, `marker_color = ""`,
 `marker_line_color = ""`, `marker_line_width = 0`, `opacity = 1`,
-`showlegend = nothing`, as for [`plot_scatter`](@ref), and
+`showlegend = nothing`, as for [`plot_scatter`](@ref) (`mode = nothing` draws
+lines, plus markers under a style with a marker cycle; unset keywords take the
+active [`PlotStyle`](@ref)'s per-trace defaults), and
 
 - `line_shape = ""`: `"linear"` or `"spline"`.
 - `fill = ""`: `"toself"` (fill the closed curve), `"tonext"` or `"none"`;
@@ -10221,16 +10874,37 @@ Per series (a value for every series, or a vector with one entry per series):
 Shared:
 
 - `markevery = nothing`: markers only at some points, as for `plot_scatter`.
-- `thetaunit = ""`: `"degrees"` or `"radians"`; also sets the angular tick
-  label unit.
+- `thetaunit = ""`: `"degrees"` or `"radians"`, the unit of `theta`; also
+  sets the angular tick label unit. `""` keeps the subplot's unit (plotly:
+  degrees).
 - `direction = ""`: `"counterclockwise"` or `"clockwise"` angle direction;
   `rotation = nothing`: angle (degrees) at which `theta = 0` is drawn
   (`90` puts 0 at the top).
-- `trange = [0, 0]`: angular sector `[start, end]` in degrees (`[0, 0]`: full
-  circle); `rrange = [0, 0]`: radial axis range.
+- `trange = [0, 0]`: the drawn angular sector `(start, stop)`, always in
+  degrees of the drawing (plotly `polar.sector`: 0 points right, angles grow
+  counterclockwise, whatever `thetaunit`, `direction` and `rotation` say);
+  `[0, 0]`, `nothing` or `[nothing, nothing]`: the full circle.
+- `rrange = [0, 0]`: radial axis range `(lo, hi)` in data units (positive on
+  a logarithmic radial axis); `[0, 0]`, `nothing` or `[nothing, nothing]`:
+  automatic. Both ranges take two different, non-`Bool` numbers (no partial
+  ranges), as [`xrange!`](@ref) does.
+- `rlabel_angle = nothing`: angle (degrees of the drawing, as `trange`) of
+  the radial axis that carries the radial tick labels (plotly
+  `polar.radialaxis.angle`). `nothing`: 22.5° on a new full-circle subplot
+  (off the 0° spoke, whose angular label and data the labels would hit,
+  matplotlib's default), the start of the sector when `trange` sets one, and
+  otherwise the subplot's current angle. A radial axis without tick settings
+  also gets at most 6 ticks (`polar.radialaxis.nticks`), so that its labels
+  along the angled axis do not run into each other; ticks set with
+  [`update_polars!`](@ref) (`nticks`, `dtick`, `tickvals`, `tickmode`) are
+  kept.
 - `grid = true`: `false` hides the radial and angular grid lines.
 - `title = ""`, `width = 0`, `height = 0`, `fontsize = 0`, `show = false`: as
   for `plot_scatter`.
+
+The Cartesian keywords of `plot_scatter` (`xlabel`, `ylabel`, `xrange`,
+`yrange`, `xscale`, `yscale`, ticks, `equalar`) do not apply to a polar plot:
+use `trange`/`rrange`, or [`update_polars!`](@ref) for the polar axes.
 
 #### Example
 
@@ -10247,7 +10921,7 @@ function plot_scatterpolar(
 	rrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	mode::Union{AbstractString, AbstractVector} = "lines",
+	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
 	color::Union{AbstractString, Symbol, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -10269,6 +10943,7 @@ function plot_scatterpolar(
 	direction::AbstractString = "",
 	rotation::Union{Nothing, Real} = nothing,
 	thetaunit::AbstractString = "",
+	rlabel_angle::Union{Nothing, Real} = nothing,
 	show::Bool = false,
 )
 	fig = Plot(GenericTrace[], Layout())
@@ -10280,6 +10955,7 @@ function plot_scatterpolar(
 		constructor = true,
 		trange = trange,
 		rrange = rrange,
+		rlabel_angle = rlabel_angle,
 		width = width,
 		height = height,
 		mode = mode,
@@ -12128,14 +12804,15 @@ keyword of [`plot_scatter`](@ref) except `show` (which throws an
   or `SyncPlot` the axis is created on first use (`ylabel`, `yscale`,
   `yrange`, `yticks`, ... then apply to it); on a `SubplotFigure` the cell
   needs `specs = [Spec(secondary_y = true) ...]`.
-- `row`, `col` (`SubplotFigure` only): the target cell.
+- `row`, `col`, `inset = nothing` (`SubplotFigure` only): $(_SCAT_INSET_DOC)
 
 Figure keywords only change what they name: labels, ranges, scales and ticks
 apply to the primary axes (or the secondary y axis), `grid = nothing` (the
 mutator default) keeps the current grid and `true`/`false`/`:x`/`:y`/`:both`/
 `:none` set it, and a template set with `set_template!` is kept. On a
 `SubplotFigure`, `title`, `width` and `height` are figure-level and are
-ignored with a warning. Invalid input throws before the figure changes.
+ignored with a warning. Invalid input throws before the figure changes. The
+appended traces continue the active style's dash/marker cycle.
 
 #### Example
 
@@ -12155,7 +12832,7 @@ function plot_scatter!(
 	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	mode::Union{AbstractString, AbstractVector} = "lines",
+	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
 	color::Union{AbstractString, Symbol, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -12256,9 +12933,10 @@ Append stem series to an existing `Plot`, [`SyncPlot`](@ref) or
 `SubplotFigure` cell (see [`plot_stem`](@ref) for the traces and keywords).
 Takes every keyword of `plot_stem` except `show` (an `ArgumentError`), plus
 `secondary_y = false` (draw on a secondary y axis, created on first use on a
-`Plot`/`SyncPlot`) and `row`/`col` (`SubplotFigure` only). `grid = nothing`
-keeps the current grid; the legend groups of the new series never collide with
-those already in the figure.
+`Plot`/`SyncPlot`) and `row`/`col`/`inset` (`SubplotFigure` only: the target
+cell, or inset `k` of [`inset!`](@ref)). `grid = nothing` keeps the current
+grid; the legend groups of the new series never collide with those already in
+the figure.
 
 #### Example
 
@@ -12355,10 +13033,14 @@ tick keywords), with these differences:
   other value (also `true`) is applied.
 - `show` is not accepted (`ArgumentError`); display the figure instead.
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
-  cell) and `secondary_y = true` targets the cell's secondary y axis; the
-  axis keywords apply to that cell's axes. `title`, `width` and `height` are
-  figure-wide and are ignored there with a warning, and `barmode` (a single
-  figure-wide plotly setting) applies to every cell.
+  cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
+  `secondary_y = true` targets the cell's secondary y axis; the axis keywords
+  apply to those axes. `title`, `width` and `height` are figure-wide and are
+  ignored there with a warning, and `barmode` (a single figure-wide plotly
+  setting) applies to every cell, with one warning when it re-arranges bars
+  already in other cells. On a `Plot`/`SyncPlot`, `row`, `col`, `inset` and
+  `secondary_y` are not accepted (`row = nothing`/`col = nothing`, no cell,
+  are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -12371,8 +13053,8 @@ plot_bar!(fig, ["a", "b"], [2, 3]; legend = "2024", text = [2, 3])
 """
 function plot_bar!(
 	fig,
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -12423,7 +13105,7 @@ end
 
 function plot_bar!(
 	fig,
-	y::AbstractVector;
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -12482,13 +13164,18 @@ bin count; `bins`, `histnorm`, `cumulative`, `orientation`, `barmode`, `opacity`
 `hatch`, tick keywords). The series of ONE call share bins and overlay as
 described there; separate calls are binned separately, and appending single
 series one call at a time gives plotly's layout for the figure's `barmode`
-(grouped by default). Differences from the constructor:
+(grouped by default). An explicit `barmode` is figure-wide; on a
+`SubplotFigure` it warns once when it re-arranges bars in other cells.
+Differences from the constructor:
 - `grid::Union{Nothing,Bool,Symbol} = nothing` leaves the grid unchanged; any
   other value (also `true`) is applied.
 - `show` is not accepted (`ArgumentError`).
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
-  cell) and `secondary_y = true` targets its secondary y axis; `title`,
-  `width` and `height` are figure-wide and ignored there with a warning.
+  cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
+  `secondary_y = true` targets its secondary y axis; `title`, `width` and
+  `height` are figure-wide and ignored there with a warning. On a
+  `Plot`/`SyncPlot`, `row`, `col`, `inset` and `secondary_y` are not
+  accepted (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -12501,7 +13188,7 @@ plot_histogram!(fig, [randn(500) .+ 1, randn(500) .- 1]; bins = (-5, 5, 0.25))
 """
 function plot_histogram!(
 	fig,
-	x::AbstractVector;
+	x::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -12562,8 +13249,11 @@ constructor:
   other value (also `true`) is applied.
 - `show` is not accepted (`ArgumentError`).
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
-  cell) and `secondary_y = true` targets its secondary y axis; `title`,
-  `width` and `height` are figure-wide and ignored there with a warning.
+  cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
+  `secondary_y = true` targets its secondary y axis; `title`, `width` and
+  `height` are figure-wide and ignored there with a warning. On a
+  `Plot`/`SyncPlot`, `row`, `col`, `inset` and `secondary_y` are not
+  accepted (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -12576,8 +13266,8 @@ plot_box!(fig, randn(100) .+ 1; legend = "drug", boxmean = "sd")
 """
 function plot_box!(
 	fig,
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -12625,7 +13315,7 @@ end
 
 function plot_box!(
 	fig,
-	y::AbstractVector;
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -12684,8 +13374,11 @@ Append violin trace(s) to `fig`: a `Plot`, a [`SyncPlot`](@ref) or a
   other value (also `true`) is applied.
 - `show` is not accepted (`ArgumentError`).
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
-  cell) and `secondary_y = true` targets its secondary y axis; `title`,
-  `width` and `height` are figure-wide and ignored there with a warning.
+  cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
+  `secondary_y = true` targets its secondary y axis; `title`, `width` and
+  `height` are figure-wide and ignored there with a warning. On a
+  `Plot`/`SyncPlot`, `row`, `col`, `inset` and `secondary_y` are not
+  accepted (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -12698,8 +13391,8 @@ plot_violin!(fig, randn(200) .+ 1; legend = "b", box = true, meanline = true)
 """
 function plot_violin!(
 	fig,
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -12748,7 +13441,7 @@ end
 
 function plot_violin!(
 	fig,
-	y::AbstractVector;
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -12802,9 +13495,12 @@ Append polar trace(s) to an existing `Plot`, [`SyncPlot`](@ref) or polar
 `SubplotFigure` cell (`row`/`col`). Takes the data and every keyword of
 [`plot_scatterpolar`](@ref) except `show` (an `ArgumentError`); `theta` is in
 degrees unless `thetaunit = "radians"`. Options apply to the primary polar
-subplot (`layout.polar`; a SubplotFigure maps it to the cell's subplot);
-`grid = nothing` (the mutator default) keeps the current grid and `true`/
-`false` set it.
+subplot (`layout.polar`; a SubplotFigure maps it to the polar subplot of the
+`row`/`col` cell); `grid = nothing` (the mutator default) keeps the current
+grid and `true`/`false` set it. The radial label angle is set only where the
+subplot has none yet (or with `rlabel_angle`, or when a new `trange` sector
+excludes it), so an angle set earlier is kept. `secondary_y` and `inset`
+(Cartesian axes) are rejected.
 
 #### Example
 
@@ -12821,7 +13517,7 @@ function plot_scatterpolar!(
 	rrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	mode::Union{AbstractString, AbstractVector} = "lines",
+	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
 	color::Union{AbstractString, Symbol, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -12843,6 +13539,7 @@ function plot_scatterpolar!(
 	direction::AbstractString = "",
 	rotation::Union{Nothing, Real} = nothing,
 	thetaunit::AbstractString = "",
+	rlabel_angle::Union{Nothing, Real} = nothing,
 	kwargs...,
 )
 	who = "plot_scatterpolar!"
@@ -12857,6 +13554,7 @@ function plot_scatterpolar!(
 		constructor = false,
 		trange = trange,
 		rrange = rrange,
+		rlabel_angle = rlabel_angle,
 		width = width,
 		height = height,
 		mode = mode,
@@ -15200,7 +15898,7 @@ function _area_impl!(
 	secondary_y::Bool = false,
 	color = "",
 	legend = "",
-	mode::AbstractString = "lines",
+	mode::Union{Nothing, AbstractString} = nothing,
 	stack::Bool = false,
 	hatch::AbstractString = "",
 	showlegend = nothing,
@@ -15225,11 +15923,11 @@ function _area_impl!(
 )
 	xs, ys, _ = _scat_series(x, y, who)
 	n = length(ys)
-	n_existing = _scat_existing_count(fig)
-	trace_mode = _scat_mode(mode, who)
+	trace_mode = _scat_mode(something(mode, "lines"), who)
+	xrange = _scat_range_arg(xrange)
+	yrange = _scat_range_arg(yrange)
 	styles = _scat_series_styles(
 		n,
-		n_existing,
 		who;
 		mode = trace_mode,
 		color = color,
@@ -15255,6 +15953,7 @@ function _area_impl!(
 		yticklabels = yticklabels,
 	)
 
+	legend_state = _scat_legend_state(fig)
 	ykey = secondary_y ? _ensure_twin_y!(fig; who = who) : :yaxis
 	yref = secondary_y ? _cmn_axis_ref(ykey; who = who) : ""
 	data = _plot_data(fig)
@@ -15278,6 +15977,9 @@ function _area_impl!(
 		isempty(yref) || (fields[:yaxis] = yref)
 		push!(data, GenericTrace("scatter", fields))
 	end
+	# The outline takes the active style's line width; a filled area takes no
+	# dash or marker cycle (as matplotlib's fill_between/stackplot).
+	_scat_apply_style!(fig, (length(data) - n + 1):length(data); explicit = _SCAT_STYLE_WIDTH_ONLY)
 	# A constructor's `grid = true` keeps the template grid; a mutator applies
 	# any non-nothing `grid`, so `true` re-enables a grid switched off earlier.
 	constructor || _apply_cartesian_grid_override!(fig, grid, who)
@@ -15305,6 +16007,7 @@ function _area_impl!(
 		apply_template = constructor,
 		who = who,
 	)
+	_scat_place_legend!(fig, legend_state)
 	return nothing
 end
 
@@ -15327,7 +16030,8 @@ one-argument form uses `x = 0:length(y)-1` (per series).
 - `color = ""`: line and fill colour per series (scalar or vector; the fill is
   the colour at half opacity). `legend = ""`: names per series;
   `showlegend = nothing`: force legend entries on or off (scalar or vector).
-- `mode = "lines"`: trace mode (`"lines+markers"`, ...).
+- `mode = nothing`: trace mode (`"lines+markers"`, ...); `nothing` or `""`
+  means `"lines"`.
 - `stack = false`: stack the series of this call, and any later
   `plot_area!(...; stack = true)` series on the same axes, on top of each
   other. A single series also joins the stack, so stacks can be built one
@@ -15339,8 +16043,13 @@ one-argument form uses `x = 0:length(y)-1` (per series).
 - `title`, `xlabel`, `ylabel`, `xscale`, `yscale`, `xrange`, `yrange`,
   `xticks`, `xticklabels`, `yticks`, `yticklabels`, `xtickformat`,
   `ytickformat`, `equalar`, `grid`, `width`, `height`, `fontsize`, `show`: as
-  for [`plot_scatter`](@ref) (ranges in data units, `grid = true` keeps the
+  for [`plot_scatter`](@ref) (ranges in data units with the semantics of
+  `xrange!`, tick presets `:decades`/`:auto`, `grid = true` keeps the
   template grid).
+
+The outline takes the active [`PlotStyle`](@ref)'s line width; areas take no
+dash or marker cycle. A legend created on a figure with stacked areas stays
+at the default corner.
 
 #### Example
 
@@ -15355,7 +16064,7 @@ function plot_area(
 	y::AbstractArray;
 	color::Union{AbstractString, Symbol, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
-	mode::AbstractString = "lines",
+	mode::Union{Nothing, AbstractString} = nothing,
 	stack::Bool = false,
 	hatch::AbstractString = "",
 	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
@@ -15425,9 +16134,10 @@ Append filled-area trace(s) to an existing `Plot`, [`SyncPlot`](@ref) or
 `SubplotFigure` cell (see [`plot_area`](@ref)). Takes every keyword of
 `plot_area` except `show` (an `ArgumentError`), plus `secondary_y = false`
 (draw on a secondary y axis, created on first use on a `Plot`/`SyncPlot`) and
-`row`/`col` (`SubplotFigure` only). `grid = nothing` keeps the current grid.
-With `stack = true` the new series stack on the earlier `stack = true` areas
-of the same axes.
+`row`/`col`/`inset` (`SubplotFigure` only: the target cell, or inset `k` of
+[`inset!`](@ref)). `grid = nothing` keeps the current grid. With
+`stack = true` the new series stack on the earlier `stack = true` areas of the
+same axes.
 """
 function plot_area!(
 	fig,
@@ -15435,7 +16145,7 @@ function plot_area!(
 	y::AbstractArray;
 	color::Union{AbstractString, Symbol, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
-	mode::AbstractString = "lines",
+	mode::Union{Nothing, AbstractString} = nothing,
 	stack::Bool = false,
 	hatch::AbstractString = "",
 	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
@@ -16377,7 +17087,7 @@ a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when `show = true`.
 
 #### Data
 `x`, `y::AbstractVector` of equal length (vectors, ranges or views; complex
-values are an `ArgumentError`). By default plotly bins and counts the samples
+values, matrices and vectors of series are an `ArgumentError`). By default plotly bins and counts the samples
 (a `histogram2d` trace). Two cases are binned in Julia instead and drawn as a
 `heatmap` over the bin edges, whose hover shows the (normalized) count;
 numeric data only, missing and non-finite samples are skipped:
@@ -16418,6 +17128,9 @@ numeric data only, missing and non-finite samples are skipped:
   `ytickformat`, `width`, `height`, `fontsize`, `grid = true`, `show = false`:
   as in [`plot_bar`](@ref).
 
+There is no `legend` keyword: a 2-D histogram is one colour-mapped trace whose
+key is its colorbar (`colorbar_title`), not a legend entry.
+
 #### Example
 ```julia
 x, y = randn(5000), randn(5000)
@@ -16426,8 +17139,8 @@ plot_histogram2d(x, y; colornorm = :log, colorbar_title = "count")
 ```
 """
 function plot_histogram2d(
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -16486,8 +17199,11 @@ keywords are those of [`plot_histogram2d`](@ref), with these differences:
   other value (also `true`) is applied.
 - `show` is not accepted (`ArgumentError`).
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
-  cell) and `secondary_y = true` targets its secondary y axis; `title`,
-  `width` and `height` are figure-wide and ignored there with a warning.
+  cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
+  `secondary_y = true` targets its secondary y axis; `title`, `width` and
+  `height` are figure-wide and ignored there with a warning. On a
+  `Plot`/`SyncPlot`, `row`, `col`, `inset` and `secondary_y` are not
+  accepted (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -16500,8 +17216,8 @@ plot_histogram2d!(fig, randn(5000), randn(5000); colornorm = :log)
 """
 function plot_histogram2d!(
 	fig,
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	xlabel::AbstractString = "",
 	ylabel::AbstractString = "",
 	title::AbstractString = "",
@@ -16552,8 +17268,8 @@ end
 
 function plot_histogram2d!(
 	sf::SubplotFigure,
-	x::AbstractVector,
-	y::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray;
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	secondary_y::Bool = false,

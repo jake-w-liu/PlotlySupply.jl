@@ -67,14 +67,24 @@ function _lines_axis_types(fig, secondary_y::Bool, figure)
 	return xtype, ytype
 end
 
-# First write of a call: the twin y axis of `secondary_y = true`.
+# First write of a call: the twin y axis of `secondary_y = true`. Also returns
+# the legend state before the call (`_scat_legend_state`), for
+# `_lines_apply_figure!`.
 function _lines_target_axis!(fig, who::AbstractString, secondary_y::Bool)
-	secondary_y || return :yaxis, ""
+	legend_state = _scat_legend_state(fig)
+	secondary_y || return :yaxis, "", legend_state
 	ykey = _ensure_twin_y!(fig; who = who)
-	return ykey, _cmn_axis_ref(ykey; who = who)
+	return ykey, _cmn_axis_ref(ykey; who = who), legend_state
 end
 
-function _lines_apply_figure!(fig, who::AbstractString, constructor::Bool, ykey::Symbol, figure)
+function _lines_apply_figure!(
+	fig,
+	who::AbstractString,
+	constructor::Bool,
+	ykey::Symbol,
+	figure,
+	legend_state::Symbol,
+)
 	# A constructor's `grid = true` keeps the template grid; a mutator applies
 	# any non-nothing `grid` (so `true` re-enables a grid switched off earlier).
 	constructor || _apply_cartesian_grid_override!(fig, figure.grid, who)
@@ -82,8 +92,9 @@ function _lines_apply_figure!(fig, who::AbstractString, constructor::Bool, ykey:
 		fig;
 		xlabel = figure.xlabel,
 		ylabel = figure.ylabel,
-		xrange = figure.xrange,
-		yrange = figure.yrange,
+		# `[nothing, nothing]` is an automatic range, as for `xrange!`.
+		xrange = _scat_range_arg(figure.xrange),
+		yrange = _scat_range_arg(figure.yrange),
 		width = figure.width,
 		height = figure.height,
 		grid = constructor ? figure.grid : nothing,
@@ -102,6 +113,9 @@ function _lines_apply_figure!(fig, who::AbstractString, constructor::Bool, ykey:
 		apply_template = constructor,
 		who = who,
 	)
+	# A legend created by this call, or one still at its automatic corner, goes
+	# to the corner with the least data.
+	_scat_place_legend!(fig, legend_state)
 	return nothing
 end
 
@@ -325,9 +339,11 @@ function _band_impl!(
 	_lines_validate_figure(fig, who, secondary_y, figure)
 	xtype, ytype = _lines_axis_types(fig, secondary_y, figure)
 	n_existing = _scat_existing_count(fig)
+	# A band takes none of the active style's per-trace defaults: its outline
+	# width is the `linewidth` keyword (0: no outline) and it has no dash or
+	# markers, so `_scat_apply_style!` is not called for it.
 	styles = _scat_series_styles(
 		n,
-		n_existing,
 		who;
 		color = color,
 		legend = legend,
@@ -369,12 +385,12 @@ function _band_impl!(
 		traces[band] = GenericTrace("scatter", fields)
 	end
 
-	ykey, yref = _lines_target_axis!(fig, who, secondary_y)
+	ykey, yref, legend_state = _lines_target_axis!(fig, who, secondary_y)
 	for trace in traces
 		isempty(yref) || (trace.fields[:yaxis] = yref)
 		push!(_plot_data(fig), trace)
 	end
-	_lines_apply_figure!(fig, who, constructor, ykey, figure)
+	_lines_apply_figure!(fig, who, constructor, ykey, figure, legend_state)
 	return nothing
 end
 
@@ -412,7 +428,13 @@ surround. Error bands: `plot_band(x, y .- e, y .+ e)`.
 - `title`, `xlabel`, `ylabel`, `xscale`, `yscale`, `xrange`, `yrange`,
   `xticks`, `xticklabels`, `yticks`, `yticklabels`, `xtickformat`,
   `ytickformat`, `equalar = false`, `grid = true`, `width`, `height`,
-  `fontsize`, `show = false`: as for [`plot_scatter`](@ref).
+  `fontsize`, `show = false`: as for [`plot_scatter`](@ref) (ranges in data
+  units with the semantics of [`xrange!`](@ref), tick presets
+  `:decades`/`:auto`).
+
+A band takes none of the active [`PlotStyle`](@ref)'s per-trace defaults (its
+outline is the `linewidth` keyword). A legend created on a figure holding a
+band stays at the default corner.
 
 #### Example
 
@@ -471,7 +493,8 @@ Add filled band(s) to an existing `Plot`, [`SyncPlot`](@ref) or
 `SubplotFigure` cell (see [`plot_band`](@ref) for data and keywords). Takes
 every keyword of `plot_band` except `show` (an `ArgumentError`), plus
 `secondary_y = false` (draw against a secondary y axis, created on first use
-on a `Plot`/`SyncPlot`) and `row`/`col` (`SubplotFigure` only). `grid =
+on a `Plot`/`SyncPlot`) and `row`/`col`/`inset` (`SubplotFigure` only: the cell,
+or inset `k` of [`inset!`](@ref)). `grid =
 nothing` (the default here) keeps the current grid.
 
 #### Example
@@ -568,7 +591,6 @@ function _segments_impl!(
 	]
 	style = only(_scat_series_styles(
 		1,
-		_scat_existing_count(fig),
 		who;
 		mode = "lines",
 		dash = dash,
@@ -589,25 +611,33 @@ function _segments_impl!(
 		sy[3k] = _GAP
 	end
 
-	ykey, yref = _lines_target_axis!(fig, who, secondary_y)
+	ykey, yref, legend_state = _lines_target_axis!(fig, who, secondary_y)
+	data = _plot_data(fig)
 	push!(
-		_plot_data(fig),
+		data,
 		_scat_trace(Dict{Symbol, Any}(:x => sx, :y => sy), "scatter", style, who; yref = yref),
 	)
-	_lines_apply_figure!(fig, who, constructor, ykey, figure)
+	# A segment collection takes the style's line width and dash cycle (unless
+	# `linewidth`/`dash` are given) but no cycle markers on its end points.
+	_scat_apply_style!(fig, length(data); explicit = _SCAT_STYLE_NO_MARKERS)
+	_lines_apply_figure!(fig, who, constructor, ykey, figure, legend_state)
 	return nothing
 end
 
 const _SEGMENTS_STYLE_DOC = """
 - `color = ""`: line colour (`""`: the next colorway colour); `linewidth = 0`
-  (px, `0`: default); `dash = ""` (`"dash"`, `"dot"`, ..., as for
-  [`plot_scatter`](@ref)); `opacity = 1`.
+  (px, `0`: the active [`PlotStyle`](@ref)'s line width, else plotly's);
+  `dash = ""` (`"dash"`, `"dot"`, ..., as for [`plot_scatter`](@ref); `""`:
+  the style's dash cycle, else solid); `opacity = 1`. The style's marker
+  cycle does not apply (no markers on the end points).
 - `legend = ""`, `showlegend = nothing`: one legend entry for the whole
   collection.
 - `title`, `xlabel`, `ylabel`, `xscale`, `yscale`, `xrange`, `yrange`,
   `xticks`, `xticklabels`, `yticks`, `yticklabels`, `xtickformat`,
   `ytickformat`, `equalar = false`, `grid = true`, `width`, `height`,
-  `fontsize`, `show = false`: as for `plot_scatter`.
+  `fontsize`, `show = false`: as for `plot_scatter` (ranges in data units
+  with the semantics of [`xrange!`](@ref), tick presets `:decades`/`:auto`;
+  a new legend avoids the data).
 """
 
 """
@@ -680,8 +710,8 @@ end
 
 Add a segment collection (see [`plot_segments`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
-`plot_segments` except `show`, plus `secondary_y = false` and `row`/`col`
-(`SubplotFigure` only); `grid = nothing` keeps the current grid.
+`plot_segments` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
+(`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
 """
 function plot_segments!(
 	fig,
@@ -791,8 +821,8 @@ end
 
 Add vertical lines (see [`plot_vlines`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
-`plot_vlines` except `show`, plus `secondary_y = false` and `row`/`col`
-(`SubplotFigure` only); `grid = nothing` keeps the current grid.
+`plot_vlines` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
+(`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
 """
 function plot_vlines!(
 	fig,
@@ -900,8 +930,8 @@ end
 
 Add horizontal lines (see [`plot_hlines`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
-`plot_hlines` except `show`, plus `secondary_y = false` and `row`/`col`
-(`SubplotFigure` only); `grid = nothing` keeps the current grid.
+`plot_hlines` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
+(`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
 """
 function plot_hlines!(
 	fig,
@@ -974,7 +1004,6 @@ function _ecdf_impl!(
 	n = length(samples)
 	styles = _scat_series_styles(
 		n,
-		_scat_existing_count(fig),
 		who;
 		mode = "lines",
 		dash = dash,
@@ -995,7 +1024,7 @@ function _ecdf_impl!(
 		end
 	end
 
-	ykey, yref = _lines_target_axis!(fig, who, secondary_y)
+	ykey, yref, legend_state = _lines_target_axis!(fig, who, secondary_y)
 	for (series, sample) in enumerate(samples)
 		m = length(sample)
 		ex = Vector{Float64}(undef, m + 1)
@@ -1018,7 +1047,10 @@ function _ecdf_impl!(
 			),
 		)
 	end
-	_lines_apply_figure!(fig, who, constructor, ykey, figure)
+	# Step curves take the style's line width and dash cycle, not its markers.
+	data = _plot_data(fig)
+	_scat_apply_style!(fig, (length(data) - n + 1):length(data); explicit = _SCAT_STYLE_NO_MARKERS)
+	_lines_apply_figure!(fig, who, constructor, ykey, figure, legend_state)
 	return nothing
 end
 
@@ -1027,11 +1059,14 @@ const _ECDF_DOC_KEYWORDS = """
 - `stat = :proportion`: `:proportion` (0 to 1) or `:count` (0 to n).
 - `color = ""`, `dash = ""`, `linewidth = 0`, `legend = ""`,
   `showlegend = nothing`: line style, each a scalar or one entry per series
-  (as for [`plot_scatter`](@ref)).
+  (as for [`plot_scatter`](@ref)); unset `dash`/`linewidth` take the active
+  [`PlotStyle`](@ref)'s dash cycle and line width (never its markers).
 - `title`, `xlabel`, `ylabel`, `xscale`, `yscale`, `xrange`, `yrange`,
   `xticks`, `xticklabels`, `yticks`, `yticklabels`, `xtickformat`,
   `ytickformat`, `equalar = false`, `grid`, `width`, `height`, `fontsize`:
-  as for `plot_scatter`.
+  as for `plot_scatter` (ranges in data units with the semantics of
+  [`xrange!`](@ref), tick presets `:decades`/`:auto`; a new legend avoids the
+  data).
 """
 
 """
@@ -1100,8 +1135,8 @@ end
 
 Add ECDF step line(s) (see [`plot_ecdf`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
-`plot_ecdf` except `show`, plus `secondary_y = false` and `row`/`col`
-(`SubplotFigure` only); `grid = nothing` keeps the current grid.
+`plot_ecdf` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
+(`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
 """
 function plot_ecdf!(
 	fig,
@@ -1246,7 +1281,6 @@ function _kde_impl!(
 	]
 	styles = _scat_series_styles(
 		n,
-		_scat_existing_count(fig),
 		who;
 		mode = "lines",
 		dash = dash,
@@ -1276,7 +1310,7 @@ function _kde_impl!(
 		grid = collect(range(first(sample) - cut * h, last(sample) + cut * h; length = Int(npoints)))
 		return grid, _kde_density(sample, h, grid)
 	end
-	ykey, yref = _lines_target_axis!(fig, who, secondary_y)
+	ykey, yref, legend_state = _lines_target_axis!(fig, who, secondary_y)
 	for (series, (grid, density)) in enumerate(curves)
 		push!(
 			_plot_data(fig),
@@ -1289,7 +1323,11 @@ function _kde_impl!(
 			),
 		)
 	end
-	_lines_apply_figure!(fig, who, constructor, ykey, figure)
+	# Dense curves (`npoints` samples) take the style's line width and dash
+	# cycle, not its markers, which would hide the curve.
+	data = _plot_data(fig)
+	_scat_apply_style!(fig, (length(data) - n + 1):length(data); explicit = _SCAT_STYLE_NO_MARKERS)
+	_lines_apply_figure!(fig, who, constructor, ykey, figure, legend_state)
 	return nothing
 end
 
@@ -1307,11 +1345,14 @@ const _KDE_DOC_KEYWORDS = """
 - `fill = false`: fill the area under the curve (`fill = "tozeroy"`).
 - `color = ""`, `dash = ""`, `linewidth = 0`, `legend = ""`,
   `showlegend = nothing`: line style, each a scalar or one entry per series
-  (as for [`plot_scatter`](@ref)).
+  (as for [`plot_scatter`](@ref)); unset `dash`/`linewidth` take the active
+  [`PlotStyle`](@ref)'s dash cycle and line width (never its markers).
 - `title`, `xlabel`, `ylabel`, `xscale`, `yscale`, `xrange`, `yrange`,
   `xticks`, `xticklabels`, `yticks`, `yticklabels`, `xtickformat`,
   `ytickformat`, `equalar = false`, `grid`, `width`, `height`, `fontsize`:
-  as for `plot_scatter`.
+  as for `plot_scatter` (ranges in data units with the semantics of
+  [`xrange!`](@ref), tick presets `:decades`/`:auto`; a new legend avoids the
+  data).
 """
 
 """
@@ -1382,8 +1423,8 @@ end
 
 Add kernel density curve(s) (see [`plot_kde`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of `plot_kde`
-except `show`, plus `secondary_y = false` and `row`/`col` (`SubplotFigure`
-only); `grid = nothing` keeps the current grid.
+except `show`, plus `secondary_y = false` and `row`/`col`/`inset` (`SubplotFigure`
+only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
 """
 function plot_kde!(
 	fig,
@@ -1486,7 +1527,9 @@ function _complex_impl!(fig, z; who::AbstractString, constructor::Bool, unit_cir
 	extra = unit_circle ?
 		(target, yref) -> push!(_plot_data(target), _complex_unit_circle_trace(yref)) :
 		nothing
-	_scatter_impl!(fig, x, y; who, constructor, extra_traces = extra, kwargs...)
+	# `mode = nothing` draws markers; the unit circle (added after the series)
+	# keeps its own fixed style.
+	_scatter_impl!(fig, x, y; who, constructor, default_mode = "markers", extra_traces = extra, kwargs...)
 	return nothing
 end
 
@@ -1504,19 +1547,22 @@ of vectors (one series each).
 
 #### Keywords
 
-- `mode = "markers"`, `dash`, `color`, `legend`, `linewidth`, `line_shape`,
+- `mode = nothing`, `dash`, `color`, `legend`, `linewidth`, `line_shape`,
   `marker_size`, `marker_symbol`, `marker_color`, `marker_line_color`,
   `marker_line_width`, `opacity`, `showlegend`, `fill`, `fillcolor`,
   `markevery`, `text`, `textposition`, `textsize`, `clip`: as for
   [`plot_scatter`](@ref) (per-series keywords take a scalar or one entry per
-  series).
+  series; unset ones take the active [`PlotStyle`](@ref)'s per-trace
+  defaults). `mode = nothing` draws markers.
 - `unit_circle = false`: add the unit circle (dashed grey, no legend entry or
   hover) after the series.
 - `equalar = true`: one unit on x spans as many pixels as one unit on y.
 - `xlabel = "Re"`, `ylabel = "Im"`, `title`, `xrange`, `yrange`, `xticks`,
   `xticklabels`, `yticks`, `yticklabels`, `xtickformat`, `ytickformat`,
   `grid = true`, `width`, `height`, `fontsize`, `show = false`: as for
-  `plot_scatter` (axis scales stay linear).
+  `plot_scatter` (ranges with the semantics of [`xrange!`](@ref)).
+- There is no `xscale`/`yscale`: the complex plane has linear axes (a log
+  scale cannot show zero or negative parts, and would break `equalar`).
 
 #### Example
 
@@ -1528,7 +1574,7 @@ fig = plot_complex(roots; unit_circle = true, legend = "7th roots of unity")
 function plot_complex(
 	z;
 	unit_circle::Bool = false,
-	mode::Union{AbstractString, AbstractVector} = "markers",
+	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
 	color::Union{AbstractString, Symbol, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -1581,8 +1627,8 @@ end
 
 Add complex-plane series (see [`plot_complex`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
-`plot_complex` except `show`, plus `secondary_y = false` and `row`/`col`
-(`SubplotFigure` only). Defaults differ where they would overwrite the
+`plot_complex` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
+(`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)). Defaults differ where they would overwrite the
 figure: `xlabel = ""`, `ylabel = ""` and `equalar = false` leave the axes as
 they are, and `grid = nothing` keeps the current grid.
 """
@@ -1590,7 +1636,7 @@ function plot_complex!(
 	fig,
 	z;
 	unit_circle::Bool = false,
-	mode::Union{AbstractString, AbstractVector} = "markers",
+	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
 	color::Union{AbstractString, Symbol, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
