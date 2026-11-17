@@ -9,11 +9,20 @@ using Test, PlotlySupply
 # holds a lot of data does not copy that data, and whole-figure operations stay
 # linear in the number of traces and points.
 
-# Minimum allocation of `f()` over three runs after a warm-up run (compiles).
+# Minimum allocation of `f()` over five runs after a warm-up run (compiles).
+# A call occasionally allocates 32-128 KB more than its minimum (seen in about
+# 2% of repeated `plot_bar` calls; not a rehash of the weak Plot registry and
+# not a GC), so the guards compare against bounds far above that.
 function _perf_alloc(f)
 	f()
-	return minimum(_ -> @allocated(f()), 1:3)
+	return minimum(_ -> @allocated(f()), 1:5)
 end
+
+# Bytes of one copy of `n` Float64 values. "Does not copy the data" is
+# checked as "allocates less than a quarter of one copy more": with n = 1e6
+# that is 2 MB, far above the run-to-run noise and far below any copy.
+_perf_copy_bytes(n::Integer) = 8 * n
+_perf_no_copy_bound(n::Integer) = _perf_copy_bytes(n) ÷ 4
 
 _perf_wave(n) = (x = collect(range(0.0, 10.0; length = n)); (x, sin.(x) .+ 0.1 .* cos.(7 .* x)))
 
@@ -137,9 +146,9 @@ end
 end
 
 @testset "perf: constructor allocations do not grow with referenced data" begin
-	# A copy of the data would add 8 bytes per value (0.8 MB for 1e5 points);
-	# the bounds leave room for a few small bookkeeping allocations only.
-	small, large = 100, 100_000
+	# A copy of the data would add 8 bytes per value (8 MB for 1e6 points);
+	# measured, 1e5 points cost at most 48 bytes more than 100 points.
+	small, large = 100, 1_000_000
 	for (name, make) in (
 		"plot_scatter" => n -> (d = _perf_wave(n); () -> plot_scatter(d...)),
 		"plot_scatter lines (range x)" => n -> (r = range(0.0, 1.0; length = n); s = sin.(r);
@@ -150,12 +159,12 @@ end
 		a_small = _perf_alloc(make(small))
 		a_large = _perf_alloc(make(large))
 		@testset "$(name)" begin
-			@test a_large - a_small < 16 * 1024
+			@test a_large - a_small < _perf_no_copy_bound(large)
 		end
 	end
 	# Fields: an n x n matrix is referenced, so a 1000 x 1000 field (8 MB)
-	# costs about as much as a 10 x 10 one. (The remaining difference is
-	# proportional to n, from the coordinate vectors.)
+	# costs about as much as a 10 x 10 one (measured: 75 KB more, in
+	# proportion to the coordinate vectors).
 	for (name, make) in (
 		"plot_heatmap" => n -> (d = _perf_field(n); () -> plot_heatmap(d...)),
 		"plot_contour" => n -> (d = _perf_field(n); () -> plot_contour(d...)),
@@ -164,22 +173,24 @@ end
 		a_small = _perf_alloc(make(10))
 		a_large = _perf_alloc(make(1_000))
 		@testset "$(name)" begin
-			@test a_large - a_small < 256 * 1024
+			@test a_large - a_small < _perf_no_copy_bound(1_000^2)
 		end
 	end
-	# colorbar! restyles the bar; it never touches the field values.
+	# colorbar! restyles the bar; it never copies the field values.
 	allocs = map((10, 1_000)) do n
 		fig = plot_heatmap(_perf_field(n)...)
 		_perf_alloc(() -> colorbar!(fig; title = "u", title_side = :right))
 	end
-	@test allocs[2] - allocs[1] < 256 * 1024
+	@test allocs[2] - allocs[1] < _perf_no_copy_bound(1_000^2)
 end
 
 @testset "perf: mutating a large figure does not copy its data" begin
-	xb, yb = _perf_wave(1_000_000)
+	n = 1_000_000
+	xb, yb = _perf_wave(n)
 	xs, ys = _perf_wave(10)
 	# The staged transaction of a mutator shares the existing traces' arrays:
-	# its cost is the same whether the figure holds 10 or 1e6 points.
+	# its cost is the same whether the figure holds 10 or 1e6 points
+	# (measured: at most 704 bytes apart).
 	for (name, mutate) in (
 		"plot_scatter!" => fig -> plot_scatter!(fig, xs, ys),
 		"relayout!" => fig -> relayout!(fig; title = "t"),
@@ -192,14 +203,14 @@ end
 		a_big = _perf_alloc(() -> mutate(big))
 		a_tiny = _perf_alloc(() -> mutate(tiny))
 		@testset "$(name)" begin
-			@test a_big - a_tiny < 16 * 1024
+			@test a_big - a_tiny < _perf_no_copy_bound(n)
 			@test big.data[1].fields[:x] === xb
 			@test big.data[1].fields[:y] === yb
 		end
 	end
 	# SubplotFigure: a call into one cell does not copy the data of another.
-	allocs = map((10, 1_000_000)) do n
-		x, y = _perf_wave(n)
+	allocs = map((10, n)) do points
+		x, y = _perf_wave(points)
 		sf = subplots(1, 2; sync = false)
 		plot_scatter!(sf, x, y; row = 1, col = 1)
 		a_scatter = _perf_alloc(() -> plot_scatter!(sf, xs, ys; row = 1, col = 2))
@@ -207,8 +218,8 @@ end
 		@test sf.fig.data[1].fields[:x] === x
 		(a_scatter, a_label)
 	end
-	@test allocs[2][1] < allocs[1][1] + 64 * 1024
-	@test allocs[2][2] < allocs[1][2] + 64 * 1024
+	@test allocs[2][1] - allocs[1][1] < _perf_no_copy_bound(n)
+	@test allocs[2][2] - allocs[1][2] < _perf_no_copy_bound(n)
 end
 
 @testset "perf: whole-figure operations scale linearly" begin
