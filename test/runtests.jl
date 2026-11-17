@@ -4862,7 +4862,8 @@ end
                 "__plotlysupply_initial_render",
                 ec.scripts[script_count + 1],
             )
-            @test occursin("Plotly.redraw", last(ec.scripts))
+            # 2.0 (#165): redraw! rebuilds the window from the Julia model.
+            @test occursin("Plotly.newPlot", last(ec.scripts))
             check_clone(redraw_clone, last(ec.windows))
             close(redraw_clone)
 

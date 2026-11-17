@@ -180,6 +180,22 @@ function _rl_error(f)
 	return nothing
 end
 
+# Stand-in for an ElectronCall `Application` whose "Electron process" is a
+# child process the test itself starts (X53 shutdown tests).
+mutable struct _RLExitApp
+	proc::Base.Process
+	exists::Bool
+	on_close::Function
+	closes::Int
+end
+
+function Base.close(app::_RLExitApp)
+	app.closes += 1
+	app.exists = false
+	app.on_close(app)
+	return nothing
+end
+
 const _RL_FIGURES = get(
 	ENV,
 	"PLOTLYSUPPLY_LIFECYCLE_FIGURES",
@@ -714,17 +730,21 @@ end
 				@test PlotlySupply._label("\$x\$") == "\$\\normalsize{x}\$"
 				set_default_mathtext!()
 			end
-			# A style size MathJax 2 does not have fails only for math labels,
-			# and an explicit size still works.
-			with_style(:default; mathsize = "\\footnotesize") do
-				err = _rl_error(() -> PlotlySupply._label("\$x\$"))
-				@test err isa ArgumentError
-				@test occursin("footnotesize", sprint(showerror, err))
-				@test_throws ArgumentError mathtext("\$x\$")
+			# K3 (X55, 2.0): a size MathJax 2 does not have is rejected when the
+			# style is built, so a math label never meets an unknown switch.
+			err = _rl_error(() -> with_style(() -> nothing, :default; mathsize = "\\footnotesize"))
+			@test err isa ArgumentError
+			@test occursin("with_style", sprint(showerror, err))
+			@test occursin("footnotesize", sprint(showerror, err))
+			@test_throws ArgumentError PlotStyle(; mathsize = "\\footnotesize")
+			# A style size is used by every math label; an explicit or package size wins.
+			with_style(:default; mathsize = "\\small") do
+				@test PlotlySupply._label("\$x\$") == "\$\\small{x}\$"
+				@test mathtext("\$x\$") == "\$\\small{x}\$"
 				@test PlotlySupply._label("plain") == "plain"
 				@test mathtext("\$x\$"; size = "Large") == "\$\\Large{x}\$"
-				set_default_mathtext!(; size = "small")
-				@test PlotlySupply._label("\$x\$") == "\$\\small{x}\$"
+				set_default_mathtext!(; size = "normalsize")
+				@test PlotlySupply._label("\$x\$") == "\$\\normalsize{x}\$"
 				set_default_mathtext!()
 			end
 		end
@@ -838,6 +858,114 @@ end
 			)
 			@test isempty(ec.windows)
 		end
+	end
+
+	@testset "X54 to_image/download_image capture an up-to-date page" begin
+		_rl_with_mathtext() do
+			ec = _RLFakeElectron()
+			sp = PlotlySupply._create_syncplot_window(
+				ec,
+				Plot(scatter(y = [1, 2]));
+				app = :fake,
+				show = false,
+			)
+			readiness = PlotlySupply._syncplot_readiness_script()
+			try
+				model = sp.plot
+				# An up-to-date page is captured as is: one script, no reload.
+				before = length(ec.scripts)
+				@test to_image(sp; format = "png") == "ok"
+				@test isempty(ec.loads)
+				@test length(ec.scripts) == before + 1
+				@test occursin("Plotly.toImage(div, {\"format\":\"png\"})", last(ec.scripts))
+
+				# Fails before X54: after a MathJax font change the capture ran
+				# on the stale page. Now the page is reloaded (from the
+				# committed model) first, then captured.
+				set_default_mathtext!(; font = "TeX")
+				before = length(ec.scripts)
+				@test to_image(sp; format = "svg") == "ok"
+				@test length(ec.loads) == 1
+				@test ec.scripts[before + 1] == readiness
+				@test occursin("Plotly.toImage(div, {\"format\":\"svg\"})", ec.scripts[before + 2])
+				@test length(ec.scripts) == before + 2
+				@test sp.plot === model
+				@test PlotlySupply._syncplot_page_mathjax(sp).font == "TeX"
+
+				set_default_mathtext!(; font = "STIX-Web", inherit_text_font = true)
+				before = length(ec.scripts)
+				@test download_image(sp; format = "png", filename = "rl") === nothing
+				@test length(ec.loads) == 2
+				@test ec.scripts[before + 1] == readiness
+				@test occursin("Plotly.downloadImage(div", ec.scripts[before + 2])
+				@test length(ec.scripts) == before + 2
+				@test PlotlySupply._syncplot_page_mathjax(sp) ==
+					(font = "STIX-Web", inherit_text_font = true)
+
+				# A failed reload: no capture of the stale page, the model is kept
+				# and the next capture reloads again.
+				set_default_mathtext!(; font = "Neo-Euler")
+				ec.load_error = ErrorException("rl capture reload failure")
+				before = length(ec.scripts)
+				err = _rl_error(() -> to_image(sp))
+				@test err isa PlotlySupply._SyncPlotDesynchronizationError
+				@test occursin("rl capture reload failure", sprint(showerror, err))
+				@test length(ec.scripts) == before
+				@test sp.plot === model
+				ec.load_error = nothing
+				@test to_image(sp) == "ok"
+				@test length(ec.loads) == 3
+				@test !getfield(sp, :_resources).renderer_desynchronized
+			finally
+				close(sp)
+			end
+			@test_throws InvalidStateException to_image(sp)
+			@test_throws InvalidStateException download_image(sp)
+		end
+	end
+
+	@testset "#165 redraw! re-renders the window from the Julia model" begin
+		ec = _RLFakeElectron()
+		frames = [frame(name = "rl-rd$(i)", data = [attr(y = [i, i])]) for i in 1:2]
+		sp = PlotlySupply._create_syncplot_window(
+			ec,
+			Plot([scatter(y = [1, 2])], Layout(title = "t"), frames);
+			app = :fake,
+			show = false,
+			autoplay = true,
+		)
+		try
+			# Direct model edits bypass the verbs, so the window does not see them.
+			sp.plot.data[1][:y] = [7, 9]
+			sp.plot.layout[:title] = "rl-edited"
+			model = sp.plot
+			data_json = PlotlySupply.PlotlyBase.JSON.json(model.data)
+			before = length(ec.scripts)
+			@test redraw!(sp) === sp
+			@test length(ec.scripts) == before + 1
+			script = last(ec.scripts)
+			# Fails before #165: the script was `Plotly.redraw(div)`, which redraws
+			# plotly.js's own copy and ignores the Julia model.
+			@test !occursin("Plotly.redraw(", script)
+			@test occursin("Plotly.purge(div);", script)
+			@test occursin("await Plotly.newPlot(div, [{\"type\":\"scatter\",\"y\":[7,9]}]", script)
+			@test occursin("\"title\":\"rl-edited\"", script)
+			# Frames are re-added, and a redraw never restarts playback.
+			@test occursin("rl-rd2", script)
+			@test occursin("if (false) Plotly.animate", script)
+			# The model is untouched.
+			@test sp.plot === model
+			@test PlotlySupply.PlotlyBase.JSON.json(model.data) == data_json
+			@test !getfield(sp, :_resources).renderer_desynchronized
+		finally
+			close(sp)
+		end
+		@test_throws InvalidStateException redraw!(sp)
+		# A Plot that is not shown anywhere: a no-op.
+		q = Plot(scatter(y = [1]))
+		q_json = PlotlySupply.PlotlyBase.JSON.json(q)
+		@test redraw!(q) === q
+		@test PlotlySupply.PlotlyBase.JSON.json(q) == q_json
 	end
 
 	@testset "react!(sp, ::Plot) follows the window's autoplay setting" begin
@@ -1226,6 +1354,102 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 			end
 			@test !isopen(sp)
 			@test_throws InvalidStateException toggle_devtools(sp)
+		end
+	end
+
+	@testset "X53 exit-time shutdown of PlotlySupply's Electron applications" begin
+		# Every process below is started by this test, and only those are signalled.
+		@testset "close, then wait for the process" begin
+			# `cat` exits once its stdin closes: a process that quits on close.
+			proc = open(`cat`, "w", devnull)
+			app = _RLExitApp(proc, true, a -> close(a.proc.in), 0)
+			@test PlotlySupply._shutdown_electron_app!(app; quit_timeout_s = 30.0) === :exited
+			@test app.closes == 1
+			@test process_exited(proc) && proc.exitcode == 0 && proc.termsignal == 0
+			# Already exited: nothing more is done.
+			@test PlotlySupply._shutdown_electron_app!(app) === :exited
+			@test app.closes == 1
+		end
+		@testset "a failing close is logged and the wait still runs" begin
+			proc = open(`cat`, "w", devnull)
+			app = _RLExitApp(proc, true, a -> (close(a.proc.in); error("rl close failure")), 0)
+			result = @test_logs (:warn, r"closing an Electron application at exit failed") begin
+				PlotlySupply._shutdown_electron_app!(app; quit_timeout_s = 30.0)
+			end
+			@test result === :exited
+			@test process_exited(proc)
+		end
+		@testset "a process that ignores the close is terminated" begin
+			proc = run(`sleep 120`; wait = false)
+			app = _RLExitApp(proc, true, a -> nothing, 0)
+			try
+				@test PlotlySupply._shutdown_electron_app!(
+					app;
+					quit_timeout_s = 0.2,
+					term_timeout_s = 30.0,
+				) === :terminated
+				@test app.closes == 1
+				@test process_exited(proc) && proc.termsignal == Base.SIGTERM
+			finally
+				process_running(proc) && kill(proc, Base.SIGKILL)
+			end
+		end
+		@testset "objects that are not ElectronCall applications are left alone" begin
+			@test PlotlySupply._shutdown_electron_app!(:fake) === :no_process
+			@test PlotlySupply._shutdown_electron_app!((exists = true,)) === :no_process
+			owned = lock(() -> length(PlotlySupply._OWNED_ELECTRON_APPS), PlotlySupply._OWNED_ELECTRON_APPS_LOCK)
+			@test PlotlySupply._record_owned_electron_app!(:fake) === nothing
+			@test PlotlySupply._record_owned_electron_app!(_RLFakeElectron()) === nothing
+			@test lock(() -> length(PlotlySupply._OWNED_ELECTRON_APPS), PlotlySupply._OWNED_ELECTRON_APPS_LOCK) == owned
+		end
+
+		# Fails before X53: the script's Electron process was still running when
+		# the child Julia finished its exit hooks, and kept the child's stdout
+		# pipe open after it exited (measured 0.6 s to 77 s).
+		@testset "a savefig script's Electron exits before Julia does" begin
+			mktempdir() do dir
+				script = joinpath(dir, "x53.jl")
+				png = joinpath(dir, "a.png")
+				write(script, """
+				const EXPORT_PROC = Ref{Any}(nothing)
+				# Registered before PlotlySupply loads, so it runs after every
+				# PlotlySupply and ElectronCall exit hook (last-in first-out).
+				atexit() do
+					proc = EXPORT_PROC[]
+					println(stderr, "ELECTRON_EXITED=", proc isa Base.Process && process_exited(proc))
+					flush(stderr)
+				end
+				using PlotlySupply
+				savefig(plot_scatter(1:3, [1, 2, 3]), $(repr(png)))
+				EXPORT_PROC[] = PlotlySupply._EXPORT_STATE.app.proc
+				println("SAVED")
+				""")
+				cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) $script`
+				out = Pipe()
+				err = Pipe()
+				child = run(pipeline(cmd; stdout = out, stderr = err); wait = false)
+				close(out.in)
+				close(err.in)
+				out_task = @async read(out, String)
+				err_task = @async read(err, String)
+				try
+					@test timedwait(() -> process_exited(child), 600.0; pollint = 0.1) === :ok
+					# The pipe Electron inherited closes with the child.
+					@test timedwait(() -> istaskdone(out_task), 5.0; pollint = 0.05) === :ok
+					@test timedwait(() -> istaskdone(err_task), 5.0; pollint = 0.05) === :ok
+					@test child.exitcode == 0
+					@test isfile(png)
+					istaskdone(out_task) && @test fetch(out_task) == "SAVED\n"
+					if istaskdone(err_task)
+						log = fetch(err_task)
+						@test occursin("ELECTRON_EXITED=true", log)
+						@test !occursin("did not exit", log)
+						@test !occursin("Warning", log)
+					end
+				finally
+					process_running(child) && kill(child, Base.SIGKILL)
+				end
+			end
 		end
 	end
 end

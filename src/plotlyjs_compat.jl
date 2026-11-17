@@ -1660,15 +1660,8 @@ function PlotlyBase.add_trace!(sp::SyncPlot, trace::GenericTrace; kw...)
 end
 
 function PlotlyBase.redraw!(sp::SyncPlot)
-	prepare = function (target, current)
-		commit = () -> current
-		return (
-			script = _plotlyjs_command_script(target, :redraw),
-			operation = "redraw",
-			commit = commit,
-		)
-	end
-	_syncplot_transaction!(sp, prepare)
+	# Rebuild the window from the committed model (`_prepare_redraw_transaction`).
+	_syncplot_transaction!(sp, _prepare_redraw_transaction)
 	return sp
 end
 
@@ -1713,6 +1706,11 @@ end
 function PlotlyBase.to_image(sp::SyncPlot; kwargs...)
 	_require_open_syncplot_window(sp)
 	js = _syncplot_to_image_script(sp, kwargs)
+	# The capture reads the live page directly: bring it up to date first (a
+	# page built with an older `set_default_mathtext!(; font,
+	# inherit_text_font)` is reloaded, a desynchronized renderer is rebuilt
+	# from the committed model). The model itself is not changed.
+	_syncplot_refresh_page!(sp)
 	ec = _syncplot_backend(sp)
 	result = Base.invokelatest(() -> ec.run(getfield(sp, :window), js))
 	result isa AbstractString || error(
@@ -1724,6 +1722,8 @@ end
 function PlotlyBase.download_image(sp::SyncPlot; kwargs...)
 	_require_open_syncplot_window(sp)
 	js = _syncplot_download_image_script(sp, kwargs)
+	# As in `to_image`: capture an up-to-date page, never a stale one.
+	_syncplot_refresh_page!(sp)
 	ec = _syncplot_backend(sp)
 	Base.invokelatest(() -> ec.run(getfield(sp, :window), js))
 	return nothing
@@ -2261,8 +2261,28 @@ react!
 """
 	redraw!(p)
 
-Redraw `p` in place. On a `Plot` this is a no-op; on a [`SyncPlot`](@ref) it
-refreshes the open Electron window from the Julia-side model.
+Re-render `p`'s window from the Julia-side model, in place, and return `p`.
+
+- On a [`SyncPlot`](@ref), or a `Plot` currently shown in one, the window is
+  rebuilt from the model's data, layout, config and frames (`Plotly.purge`
+  then `Plotly.newPlot`; frames are re-added without starting playback). Edits
+  made directly to the model, which bypass the mutating verbs — e.g.
+  `sp.plot.data[1][:y] = [9, 9, 9]` or `sp.plot.layout[:title] = "new"` —
+  therefore appear in the window. Interactive zoom/pan in the window is reset
+  to the model's axis ranges. The model itself is not changed.
+- On a `Plot` that is not shown in a window it is a no-op.
+
+A closed window throws an `InvalidStateException`. When plotly.js fails, the
+error is thrown and the usual renderer recovery applies: the window is rebuilt
+from the model at once or, if that fails too, marked desynchronized and rebuilt
+by the next update.
+
+# Example
+```julia
+sp = plot_scatter(1:3, [1, 2, 3]; show = true)
+sp.plot.data[1][:y] = [3, 2, 1]   # direct model edit, not yet visible
+redraw!(sp)                       # the window now shows [3, 2, 1]
+```
 """
 redraw!
 
@@ -2277,8 +2297,18 @@ savejson
 	to_image(sp::SyncPlot; kwargs...)
 
 Render `sp` in its Electron window via `Plotly.toImage` and return the image
-as a data-URL `String`. Keyword arguments map to `Plotly.toImage` options
-(`format`, `width`, `height`, `scale`).
+as a data-URL `String` (for `format = "svg"`, an SVG data URL). Keyword
+arguments are passed to `Plotly.toImage` unchanged (`format`, `width`,
+`height`, `scale`, `imageDataOnly`, `setBackground`).
+
+Before capturing, the page is brought up to date without changing the Julia
+model: a page built before a [`set_default_mathtext!`](@ref) `font` or
+`inherit_text_font` change is reloaded with the new MathJax configuration, and
+a renderer left desynchronized by a failed update is rebuilt from `sp.plot`.
+Throws an `InvalidStateException` when the window is closed, and an
+`ErrorException` when plotly.js returns something other than a string.
+
+For files, prefer [`savefig`](@ref), which does not need an open window.
 """
 to_image
 
@@ -2286,9 +2316,11 @@ to_image
 	download_image(sp::SyncPlot; kwargs...)
 
 Trigger a browser-style download of `sp`'s rendered image via
-`Plotly.downloadImage` in its Electron window. Keyword arguments map to
-`Plotly.downloadImage` options (`format`, `width`, `height`, `scale`,
-`filename`).
+`Plotly.downloadImage` in its Electron window. Keyword arguments are passed to
+`Plotly.downloadImage` unchanged (`format`, `width`, `height`, `scale`,
+`filename`). The page is brought up to date first, exactly as in
+[`to_image`](@ref). Returns `nothing`; throws an `InvalidStateException` when
+the window is closed.
 """
 download_image
 

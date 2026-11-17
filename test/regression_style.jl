@@ -12,6 +12,9 @@ const _RS_PB = PlotlySupply.PlotlyBase
 const _RS_DARK_INK = "#f2f5fa"
 const _RS_DARK_LEGEND = (bgcolor = "rgba(17,17,17,0.72)", bordercolor = "rgba(255,255,255,0.25)")
 const _RS_LIGHT_LEGEND = (bgcolor = "rgba(255,255,255,0.72)", bordercolor = "rgba(0,0,0,0.15)")
+# A trace type PlotlySupply cannot read (no `fields`): style helpers skip it.
+struct _RSOpaqueTrace <: PlotlySupply.PlotlyBase.AbstractTrace end
+
 const _RS_OKABE_ITO = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"]
 
 _rs_sd(x) = _RS._symbol_dict(x)
@@ -211,7 +214,8 @@ end
 			# Custom stored legend colours are kept.
 			custom = subplots(1, 1; sync = false, legend_bgcolor = "pink")
 			set_template!(custom, :plotly_dark)
-			@test custom.legend_bgcolor == "pink"
+			# `subplots` stores colours normalised to hex (2.0, `_color_hex`).
+			@test custom.legend_bgcolor == "#FFC0CB"
 			@test custom.legend_bordercolor == _RS_DARK_LEGEND.bordercolor
 
 			# SyncPlot-backed SubplotFigure.
@@ -451,9 +455,16 @@ end
 
 		@testset "_apply_style_trace_defaults!" begin
 			style = PlotStyle(; cycle = :dash_marker, linewidth = 2, marker_size = 6)
-			fig = plot_scatter(1:3, [[1, 2, 3], [2, 3, 4], [3, 4, 5]])
-			old_line = fig.data[1].fields[:line]
-			old_line_json = _RS_PB.JSON.json(old_line)
+			# K6: traces built without any `line`/`marker` container (the 2.0
+			# scatter family writes none when the caller sets nothing) and with
+			# an existing container that must be replaced, not mutated.
+			shared_line = _RS_PB.attr(color = "red")
+			fig = Plot([
+				scatter(x = 1:3, y = [1, 2, 3], mode = "lines"),
+				scatter(x = 1:3, y = [2, 3, 4], mode = "lines", line = shared_line),
+				scatter(x = 1:3, y = [3, 4, 5], mode = "lines", line = shared_line),
+			], Layout())
+			shared_json = _RS_PB.JSON.json(shared_line)
 			@test _RS._apply_style_trace_defaults!(fig, 1:3; style = style) === nothing
 			for (i, (dash, symbol)) in enumerate((("solid", "circle"), ("dash", "square"), ("dot", "diamond")))
 				line = _rs_sd(fig.data[i].fields[:line])
@@ -462,62 +473,202 @@ end
 				@test (marker[:symbol], marker[:size]) == (symbol, 6)
 				@test fig.data[i].fields[:mode] == "lines+markers"
 			end
-			# The container was replaced, not mutated.
-			@test _RS_PB.JSON.json(old_line) == old_line_json
-			# Applying again changes nothing.
+			# Existing entries are kept; the shared container was replaced, not mutated.
+			@test _rs_sd(fig.data[2].fields[:line])[:color] == "red"
+			@test _RS_PB.JSON.json(shared_line) == shared_json
+			@test fig.data[2].fields[:line] !== fig.data[3].fields[:line]
+			# Applying again changes nothing (idempotent), also with repeated positions.
 			again = _rs_json(fig)
 			_RS._apply_style_trace_defaults!(fig, 1:3; style = style)
 			@test _rs_json(fig) == again
+			_RS._apply_style_trace_defaults!(fig, [3, 3, 1]; style = style)
+			@test _rs_json(fig) == again
 
 			# Values the caller set are kept; `explicit` protects sentinels.
-			set = plot_scatter(1:3, [[1, 2, 3], [2, 3, 4]]; dash = ["dot", ""], marker_symbol = ["x", ""], marker_size = [9, 0], linewidth = [4, 0])
+			set = Plot([
+				scatter(x = 1:3, y = 1:3, mode = "lines", line = _RS_PB.attr(dash = "dot", width = 4),
+					marker = _RS_PB.attr(symbol = "x", size = [9, 8, 7])),
+				scatter(x = 1:3, y = 1:3, mode = "lines", line = _RS_PB.attr(dash = "", width = 0),
+					marker = _RS_PB.attr(size = 0)),
+			], Layout())
 			_RS._apply_style_trace_defaults!(set, [1, 2]; style = style, explicit = (:mode,))
-			first_line = _rs_sd(set.data[1].fields[:line])
-			@test (first_line[:dash], first_line[:width]) == ("dot", 4)
-			@test _rs_sd(set.data[1].fields[:marker])[:symbol] == "x"
-			@test _rs_sd(set.data[1].fields[:marker])[:size] == 9
-			@test _rs_sd(set.data[2].fields[:line])[:dash] == "dash"
-			@test _rs_sd(set.data[2].fields[:marker])[:symbol] == "square"
+			@test _rs_sd(set.data[1].fields[:line]) == Dict{Symbol, Any}(:dash => "dot", :width => 4)
+			@test _rs_sd(set.data[1].fields[:marker]) == Dict{Symbol, Any}(:symbol => "x", :size => [9, 8, 7])
+			# "" is the unset sentinel; 0 is an explicit value.
+			@test _rs_sd(set.data[2].fields[:line]) == Dict{Symbol, Any}(:dash => "dash", :width => 0)
+			@test _rs_sd(set.data[2].fields[:marker]) == Dict{Symbol, Any}(:symbol => "square", :size => 0)
 			@test all(t -> t.fields[:mode] == "lines", set.data)
-			kept = plot_scatter(1:3, 1:3)
+			kept = Plot([scatter(x = 1:3, y = 1:3, mode = "lines", line = _RS_PB.attr(dash = ""))], Layout())
 			_RS._apply_style_trace_defaults!(kept, 1; style = style, explicit = [:dash, :linewidth])
-			@test _rs_sd(kept.data[1].fields[:line])[:dash] == ""
-			@test !haskey(_rs_sd(kept.data[1].fields[:line]), :width)
+			@test _rs_sd(kept.data[1].fields[:line]) == Dict{Symbol, Any}(:dash => "")
 			@test _rs_sd(kept.data[1].fields[:marker])[:symbol] == "circle"
+			@test kept.data[1].fields[:mode] == "lines+markers"
+			# A single Symbol is accepted for `explicit`.
+			single = Plot([scatter(x = 1:2, y = 1:2, mode = "lines")], Layout())
+			_RS._apply_style_trace_defaults!(single, 1; style = style, explicit = :mode)
+			@test single.data[1].fields[:mode] == "lines"
+			# A symbol the caller chose is not forced visible: `mode` is the caller's too.
+			chosen = Plot([scatter(x = 1:2, y = 1:2, mode = "lines", marker = _RS_PB.attr(symbol = "star"))], Layout())
+			_RS._apply_style_trace_defaults!(chosen, 1; style = PlotStyle(; cycle = :marker))
+			@test chosen.data[1].fields[:mode] == "lines"
+			@test _rs_sd(chosen.data[1].fields[:marker]) == Dict{Symbol, Any}(:symbol => "star")
+			# A Symbol mode gets the markers flag like a string mode.
+			symmode = Plot([scatter(x = 1:2, y = 1:2, mode = :lines)], Layout())
+			_RS._apply_style_trace_defaults!(symmode, 1; style = PlotStyle(; cycle = :marker))
+			@test symmode.data[1].fields[:mode] == "lines+markers"
 
 			# The cycle counts line-style traces only and continues on append.
-			mixed = plot_heatmap([1 2; 3 4])
-			plot_scatter!(mixed, 1:2, [1, 2])
-			plot_scatter!(mixed, 1:2, [2, 1])
-			plot_bar!(mixed, ["a", "b"], [1, 2])
+			mixed = Plot([heatmap(z = [1 2; 3 4]), scatter(x = 1:2, y = [1, 2]), scatter(x = 1:2, y = [2, 1]), bar(x = ["a", "b"], y = [1, 2])], Layout())
+			bar_json = _RS_PB.JSON.json(mixed.data[4])
 			_RS._apply_style_trace_defaults!(mixed, 1:4; style = PlotStyle(; cycle = :dash))
 			@test _rs_sd(mixed.data[2].fields[:line])[:dash] == "solid"
 			@test _rs_sd(mixed.data[3].fields[:line])[:dash] == "dash"
 			@test !haskey(mixed.data[1].fields, :line)
-			@test !haskey(_rs_sd(get(mixed.data[4].fields, :marker, nothing)), :symbol)
+			@test _RS_PB.JSON.json(mixed.data[4]) == bar_json
+			push!(mixed.data, scatter(x = 1:2, y = [0, 0]))
+			_RS._apply_style_trace_defaults!(mixed, 5; style = PlotStyle(; cycle = :dash))
+			@test _rs_sd(mixed.data[5].fields[:line])[:dash] == "dot"
 
 			# scatter3d uses its own symbol set.
-			cloud = Plot([scatter3d(x = [1, 2], y = [1, 2], z = [1, 2], mode = "lines") for _ in 1:5], Layout())
-			_RS._apply_style_trace_defaults!(cloud, 1:5; style = PlotStyle(; cycle = :marker))
-			@test [_rs_sd(t.fields[:marker])[:symbol] for t in cloud.data] == ["circle", "square", "diamond", "x", "cross"]
+			cloud = Plot([scatter3d(x = [1, 2], y = [1, 2], z = [1, 2], mode = "lines") for _ in 1:9], Layout())
+			_RS._apply_style_trace_defaults!(cloud, 1:9; style = PlotStyle(; cycle = :marker))
+			@test [_rs_sd(t.fields[:marker])[:symbol] for t in cloud.data] ==
+				  ["circle", "square", "diamond", "x", "cross", "circle-open", "square-open", "diamond-open", "circle"]
 			@test all(t -> t.fields[:mode] == "lines+markers", cloud.data)
 
+			# Traces that are not GenericTraces are neither styled nor counted.
+			opaque = Plot(_RS_PB.AbstractTrace[_RSOpaqueTrace(), scatter(x = 1:2, y = 1:2)], Layout())
+			_RS._apply_style_trace_defaults!(opaque, 1:2; style = style)
+			@test _rs_sd(opaque.data[2].fields[:line])[:dash] == "solid"
+			@test _RS._with_style_trace_offset(() -> _RS._STYLE_TRACE_OFFSET[], opaque) == 1
+
 			# :default touches nothing; bad arguments throw before any write.
-			plain = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]])
+			plain = Plot([scatter(x = 1:3, y = [1, 2, 3], mode = "lines"), scatter(x = 1:3, y = [3, 2, 1], mode = "lines")], Layout())
 			before = _rs_json(plain)
 			_RS._apply_style_trace_defaults!(plain, 1:2)
 			@test _rs_json(plain) == before
-			@test_throws ArgumentError _RS._apply_style_trace_defaults!(plain, [1, 3]; style = style)
-			@test_throws ArgumentError _RS._apply_style_trace_defaults!(plain, 0; style = style)
-			@test_throws ArgumentError _RS._apply_style_trace_defaults!(plain, true; style = style)
-			@test_throws ArgumentError _RS._apply_style_trace_defaults!(plain, 1; style = style, explicit = (:color,))
+			_RS._apply_style_trace_defaults!(plain, Int[]; style = style)
 			@test _rs_json(plain) == before
+			for bad in ([1, 3], 0, true, [1.0], Any[1, true])
+				err = try
+					_RS._apply_style_trace_defaults!(plain, bad; style = style)
+					nothing
+				catch caught
+					caught
+				end
+				@test err isa ArgumentError
+				@test occursin("_apply_style_trace_defaults!: trace index", sprint(showerror, err))
+			end
+			@test_throws ArgumentError _RS._apply_style_trace_defaults!(plain, 1; style = style, explicit = (:color,))
+			@test_throws ArgumentError _RS._apply_style_trace_defaults!(plain, 1; style = style, explicit = :color)
+			@test _rs_json(plain) == before
+			# A malformed container aborts the whole call before any write.
+			broken = Plot([scatter(x = 1:2, y = 1:2), scatter(x = 1:2, y = 1:2, line = "solid")], Layout())
+			broken_json = _rs_json(broken)
+			err = try
+				_RS._apply_style_trace_defaults!(broken, 1:2; style = style)
+				nothing
+			catch caught
+				caught
+			end
+			@test err isa ArgumentError
+			@test occursin("data[2]: `line` is a String", sprint(showerror, err))
+			@test _rs_json(broken) == broken_json
 			# The active style is the default.
 			with_style(; linewidth = 3) do
 				_RS._apply_style_trace_defaults!(plain, 2)
 			end
-			@test _rs_sd(plain.data[2].fields[:line])[:width] == 3
-			@test !haskey(_rs_sd(plain.data[1].fields[:line]), :width)
+			@test _rs_sd(plain.data[2].fields[:line]) == Dict{Symbol, Any}(:width => 3)
+			@test !haskey(plain.data[1].fields, :line)
+		end
+
+		@testset "X10: _apply_style_trace_defaults! is safe on every trace type" begin
+			style = PlotStyle(; cycle = :dash_marker, linewidth = 2.5, marker_size = 7)
+			# plotly.js 2.35 trace types without the scatter-style line.dash and
+			# marker.symbol: never written.
+			others = [
+				bar(x = [1, 2], y = [1, 2]), histogram(x = [1, 2, 2]), box(y = [1, 2, 3]),
+				violin(y = [1, 2, 3]), heatmap(z = [1 2; 3 4]), contour(z = [1 2; 3 4]),
+				histogram2d(x = [1, 2], y = [1, 2]), histogram2dcontour(x = [1, 2], y = [1, 2]),
+				surface(z = [1 2; 3 4]), mesh3d(x = [0, 1, 0], y = [0, 0, 1], z = [0, 0, 0]),
+				cone(x = [0], y = [0], z = [0], u = [1], v = [0], w = [0]),
+				streamtube(x = [0, 1], y = [0, 1], z = [0, 1], u = [1, 1], v = [0, 0], w = [0, 0]),
+				isosurface(x = [0, 1], y = [0, 1], z = [0, 1], value = [0, 1]),
+				volume(x = [0, 1], y = [0, 1], z = [0, 1], value = [0, 1]),
+				pie(values = [1, 2]), funnel(x = [1, 2]), funnelarea(values = [1, 2]),
+				waterfall(y = [1, -1]), candlestick(open = [1], high = [2], low = [0], close = [1.5]),
+				ohlc(open = [1], high = [2], low = [0], close = [1.5]), sunburst(labels = ["a"], parents = [""]),
+				treemap(labels = ["a"], parents = [""]), sankey(node = _RS_PB.attr(label = ["a", "b"])),
+				parcoords(dimensions = [_RS_PB.attr(values = [1, 2])]), splom(dimensions = [_RS_PB.attr(values = [1, 2])]),
+				scattermapbox(lat = [0], lon = [0], mode = "lines"), choropleth(locations = ["FRA"], z = [1]),
+				densitymapbox(lat = [0], lon = [0], z = [1]), indicator(value = 1), table(cells = _RS_PB.attr(values = [[1]])),
+				carpet(a = [1, 2], b = [1, 2], y = [1, 2]),
+				_RS_PB.GenericTrace("scattermap"; lat = [0], lon = [0], mode = "lines"),
+			]
+			ofig = Plot(others, Layout())
+			ojson = [_RS_PB.JSON.json(t) for t in ofig.data]
+			_RS._apply_style_trace_defaults!(ofig, 1:length(others); style = style)
+			@test [_RS_PB.JSON.json(t) for t in ofig.data] == ojson
+
+			# Line-style types: every attribute written exists for the type and
+			# takes a value from the type's allowed set (plotly.js 2.35 schema;
+			# scatter3d, scattergl and scatterpolargl accept these four dashes too).
+			lines = [
+				scatter(x = [1, 2], y = [1, 2], mode = "lines"),
+				scattergl(x = [1, 2], y = [1, 2], mode = "lines"),
+				scatterpolar(r = [1, 2], theta = [0, 90], mode = "lines"),
+				scatterpolargl(r = [1, 2], theta = [0, 90], mode = "lines"),
+				scatter3d(x = [1, 2], y = [1, 2], z = [1, 2], mode = "lines"),
+				scatterternary(a = [1, 2], b = [1, 2], c = [1, 2], mode = "lines"),
+				_RS_PB.GenericTrace("scattersmith"; real = [1, 2], imag = [1, 2], mode = "lines"),
+				scattercarpet(a = [1, 2], b = [1, 2], mode = "lines"),
+				scattergeo(lat = [0, 1], lon = [0, 1], mode = "lines"),
+			]
+			lfig = Plot(lines, Layout())
+			_RS._apply_style_trace_defaults!(lfig, 1:length(lines); style = style)
+			dashes = ("solid", "dash", "dot", "dashdot")
+			symbols2d = ("circle", "square", "diamond", "triangle-up", "x", "triangle-down", "cross", "star")
+			symbols3d = ("circle", "square", "diamond", "x", "cross", "circle-open", "square-open", "diamond-open")
+			for (rank, t) in enumerate(lfig.data)
+				line = _rs_sd(t.fields[:line])
+				marker = _rs_sd(t.fields[:marker])
+				@test Set(keys(line)) == Set([:width, :dash])
+				@test Set(keys(marker)) == Set([:size, :symbol])
+				@test line[:width] == 2.5 && marker[:size] == 7
+				@test line[:dash] == dashes[mod1(rank, 4)]
+				is3d = t.fields[:type] == "scatter3d"
+				@test marker[:symbol] == (is3d ? symbols3d : symbols2d)[mod1(rank, 8)]
+				@test t.fields[:mode] == "lines+markers"
+			end
+			ljson = _rs_json(lfig)
+			_RS._apply_style_trace_defaults!(lfig, 1:length(lines); style = style)
+			@test _rs_json(lfig) == ljson
+
+			# Explicit values on every line-style type are never overridden.
+			mine = [
+				_RS_PB.GenericTrace(type; mode = "lines", line = _RS_PB.attr(width = 0.5, dash = "longdash"),
+					marker = _RS_PB.attr(size = [3, 4], symbol = "circle"))
+				for type in ("scatter", "scattergl", "scatterpolar", "scatterpolargl", "scatter3d",
+					"scatterternary", "scattersmith", "scattercarpet", "scattergeo")
+			]
+			mfig = Plot(mine, Layout())
+			mjson = _rs_json(mfig)
+			_RS._apply_style_trace_defaults!(mfig, 1:length(mine); style = style)
+			@test _rs_json(mfig) == mjson
+
+			# Works through SubplotFigure and SyncPlot targets (model only).
+			sf = subplots(1, 2; sync = false)
+			push!(sf.plot.data, scatter(x = 1:2, y = 1:2, xaxis = "x2", yaxis = "y2"))
+			_RS._apply_style_trace_defaults!(sf, length(sf.plot.data); style = style)
+			@test _rs_sd(sf.plot.data[end].fields[:line])[:dash] == "solid"
+			sp, scripts = _rs_syncplot(Plot([scatter(x = 1:2, y = 1:2)], Layout()))
+			try
+				_RS._apply_style_trace_defaults!(sp, 1; style = style)
+				@test _rs_sd(sp.plot.data[1].fields[:line])[:width] == 2.5
+				@test isempty(scripts)
+			finally
+				close(sp)
+			end
 		end
 
 		@testset "_apply_basic_plot_options! and _maybe_show" begin
@@ -647,6 +798,80 @@ end
 			with_style(:publication) do
 				@test _RS._style_legend_font() == Dict{Symbol, Any}(:size => 12.0)
 			end
+		end
+
+		@testset "X11 a twin y axis takes the figure template's ink" begin
+			# Fails before X11: the twin got the black 1.x spine on any template.
+			dark = Plot(GenericTrace[scatter(x = 1:3, y = 1:3)], Layout(template = _RS_PB.templates[:plotly_dark]))
+			key = _RS._ensure_twin_y!(dark)
+			twin = _rs_sd(dark.layout.fields[key])
+			@test key == :yaxis2
+			@test (twin[:linecolor], twin[:tickcolor]) == (_RS_DARK_INK, _RS_DARK_INK)
+			@test (twin[:overlaying], twin[:side], twin[:anchor], twin[:showgrid]) == ("y", "right", "x", false)
+			@test !haskey(twin, :mirror)
+			@test _RS._ensure_twin_y!(dark) == :yaxis2   # idempotent
+			# Light figures keep the exact 1.x twin.
+			light = plot_scatter(1:3, 1:3)
+			_RS._ensure_twin_y!(light)
+			@test _rs_sd(light.layout.fields[:yaxis2]) == Dict{Symbol, Any}(
+				:overlaying => "y", :side => "right", :anchor => "x", :showgrid => false,
+				:zeroline => false, :showline => true, :ticks => "outside", :automargin => true,
+				:linecolor => "#000000", :linewidth => 1.0, :tickcolor => "#000000",
+			)
+			# A colour set on the primary axis still wins (copied after the defaults).
+			custom = plot_scatter(1:3, 1:3)
+			custom.layout.fields[:yaxis] = merge(_rs_sd(custom.layout.fields[:yaxis]), Dict{Symbol, Any}(:linecolor => "#123456"))
+			_RS._ensure_twin_y!(custom)
+			@test _rs_sd(custom.layout.fields[:yaxis2])[:linecolor] == "#123456"
+		end
+
+		@testset "X12 the template colorscale follows the active style" begin
+			ggplot = _RS._template_colorscale(_RS_PB.templates[:ggplot2])
+			white = _RS._template_colorscale(_RS_PB.templates[:plotly_white])
+			@test ggplot != white
+			@test _RS._template_colorscale() == white
+			# Fails before X12: `nothing` meant get_default_template() only.
+			with_style(; template = :ggplot2) do
+				@test _RS._template_colorscale() == ggplot
+				@test _RS._template_colorscale(nothing; trace_type = "contour") ==
+					  _RS._template_colorscale(_RS_PB.templates[:ggplot2]; trace_type = "contour")
+			end
+			_rs_with_defaults(; template = :ggplot2) do
+				@test _RS._template_colorscale() == ggplot
+			end
+		end
+
+		@testset "X6 #266 #268 set_template! re-derives per-cell legend boxes" begin
+			sf = subplots(1, 2; sync = false)
+			plot_scatter!(sf, 1:3, 1:3; legend = "a", row = 1, col = 1)
+			plot_scatter!(sf, 1:3, 3:-1:1; legend = "b", row = 1, col = 2)
+			subplot_legends!(sf)
+			legends(f) = sort!([k for k in keys(f.plot.layout.fields) if startswith(String(k), "legend")])
+			@test legends(sf) == [:legend, :legend2]
+			# A per-cell box with a user colour keeps it.
+			sf.plot.layout.fields[:legend2] = merge(_rs_sd(sf.plot.layout.fields[:legend2]), Dict{Symbol, Any}(:bordercolor => "#00FF00"))
+			@test set_template!(sf, :plotly_dark) === sf
+			for key in (:legend, :legend2)
+				@test _rs_sd(sf.plot.layout.fields[key])[:bgcolor] == _RS_DARK_LEGEND.bgcolor
+			end
+			@test _rs_sd(sf.plot.layout.fields[:legend])[:bordercolor] == _RS_DARK_LEGEND.bordercolor
+			@test _rs_sd(sf.plot.layout.fields[:legend2])[:bordercolor] == "#00FF00"
+			@test (sf.legend_bgcolor, sf.legend_bordercolor) == (_RS_DARK_LEGEND.bgcolor, _RS_DARK_LEGEND.bordercolor)
+			# Every cell's axes are re-inked too.
+			for key in (:xaxis, :yaxis, :xaxis2, :yaxis2)
+				@test _rs_sd(sf.plot.layout.fields[key])[:linecolor] == _RS_DARK_INK
+			end
+			# And back.
+			set_template!(sf, :plotly_white)
+			@test _rs_sd(sf.plot.layout.fields[:legend2])[:bgcolor] == _RS_LIGHT_LEGEND.bgcolor
+			@test _rs_sd(sf.plot.layout.fields[:yaxis2])[:linecolor] == "#000000"
+			# set_legend!(sf; showlegend) (X17) returns the figure and validates first.
+			@test set_legend!(sf; showlegend = false) === sf
+			@test sf.plot.layout.fields[:showlegend] === false
+			before = _rs_json(sf)
+			@test_throws ArgumentError set_legend!(sf; position = :nowhere)
+			@test_throws ArgumentError set_template!(sf, 3)
+			@test _rs_json(sf) == before
 		end
 
 		@testset "style cycle: offset scope and mode flags" begin

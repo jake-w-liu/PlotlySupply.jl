@@ -7,7 +7,13 @@ function _with_mathtext_settings(f, enabled::Bool; size::AbstractString = "")
 	try
 		return f()
 	finally
-		set_default_mathtext!(previous.enabled; size = previous.size)
+		# Restore every setting (X57), not only the ones this helper changes.
+		set_default_mathtext!(
+			previous.enabled;
+			size = previous.size,
+			font = previous.font,
+			inherit_text_font = previous.inherit_text_font,
+		)
 	end
 end
 
@@ -302,6 +308,17 @@ end
 			@test PlotlySupply._label("plain") == "plain"
 		end
 		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = false)
+		# X57: the helper restores font and inherit_text_font too.
+		try
+			set_default_mathtext!(true; size = "small", font = "Latin-Modern", inherit_text_font = true)
+			_with_mathtext_settings(false; size = "huge") do
+				@test get_default_mathtext() == (enabled = false, size = "\\huge", font = "", inherit_text_font = false)
+			end
+			@test get_default_mathtext() ==
+				  (enabled = true, size = "\\small", font = "Latin-Modern", inherit_text_font = true)
+		finally
+			set_default_mathtext!()
+		end
 		# Validation happens before the settings change.
 		@test_throws ArgumentError set_default_mathtext!(true; size = "\\footnotesize")
 		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = false)

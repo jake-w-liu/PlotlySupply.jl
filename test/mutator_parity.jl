@@ -569,7 +569,8 @@ end
             @test p.config === config_ref
             @test sp.divid == divid
             @test length(scripts) == 1
-            @test occursin("await Plotly.redraw(div);", only(scripts))
+            # 2.0 (#165): redraw! rebuilds the window from the Julia model.
+            @test occursin("await Plotly.newPlot(div,", only(scripts))
             @test !occursin("Plotly.react", only(scripts))
 
             empty!(scripts)
