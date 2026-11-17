@@ -437,7 +437,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
     @testset "Legend Defaults and Positioning" begin
         x = 1:10
-        y = rand(10)
+        y = collect(10.0:-1:1) ./ 10   # leaves the top right free (V5 best legend position)
         fig = plot_scatter(x, y; legend="trace")
         @test fig.layout.fields[:legend][:xanchor] == "right"
         @test fig.layout.fields[:legend][:yanchor] == "top"
@@ -2560,7 +2560,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
     @testset "CRC: scatterpolar has no default sector (full circle)" begin
         f = plot_scatterpolar([0, 90, 180], [1, 2, 3])
-        @test !haskey(f.layout.fields, :polar)
+        @test !haskey(f.layout.fields[:polar], :sector)   # radialaxis angle/nticks only (K6)
         f2 = plot_scatterpolar([0, 90, 180], [1, 2, 3]; trange=[0, 180])
         @test haskey(f2.layout.fields, :polar)
         # mutating variant: no data-extent sector, polar grid (not cartesian)
@@ -2754,7 +2754,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     @testset "CRC: legend block gating + forced visibility" begin
         f = plot_scatter(1:5, rand(5))                    # unnamed single trace
         @test !haskey(f.layout.fields, :legend)
-        @test plot_scatter(1:5, rand(5); legend="a").layout.fields[:legend][:xanchor] == "right"
+        @test plot_scatter(1:5, collect(5.0:-1:1); legend="a").layout.fields[:legend][:xanchor] == "right"
         set_legend!(f; position=:topright, showlegend=true)
         @test f.layout.fields[:showlegend] == true
         @test haskey(f.layout.fields, :legend)

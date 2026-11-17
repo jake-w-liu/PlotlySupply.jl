@@ -905,8 +905,8 @@ end
 		(f, r) -> plot_histogram2d!(f, randn(10), randn(10); xrange = r),
 	)
 	for (build, mutate!) in zip(builds, mutators)
+		# One-sided limits (D11): see the parity testset below.
 		for (bad, message) in (
-			((nothing, 2), "partial ranges are not supported"),
 			((false, true), "must be numbers"),
 			([2, 2], "must differ"),
 			((1, 2, 3), "exactly 2 elements"),
@@ -934,10 +934,12 @@ end
 end
 
 @testset "stats: tick presets reach the shared tick helper (D9)" begin
+	# Y34: the messages are those of the shared `_validate_tick_option`.
 	err = _st_error(() -> plot_bar([1, 2]; yticks = :decades))
-	@test err isa ArgumentError && startswith(err.msg, "plot_bar:") && occursin("logarithmic y axis", err.msg)
+	@test err isa ArgumentError && startswith(err.msg, "plot_bar:") &&
+		occursin("needs a logarithmic axis; :yaxis has type", err.msg)
 	err = _st_error(() -> plot_histogram(randn(10); xticks = :auto, xticklabels = ["a"]))
-	@test err isa ArgumentError && occursin("cannot be combined with the tick preset", err.msg)
+	@test err isa ArgumentError && occursin("`xticklabels` need explicit `xticks` values", err.msg)
 	err = _st_error(() -> plot_box!(plot_scatter(1:3, 1:3), randn(5); yticks = :decades))
 	@test err isa ArgumentError && startswith(err.msg, "plot_box!:")
 	# On a log axis the preset passes the family's validation (the shared
@@ -1029,4 +1031,333 @@ end
 	fig = plot_scatter(1:3, 1:3)
 	@test plot_bar!(fig, [1, 2]; row = nothing, col = nothing) === nothing
 	@test_throws ArgumentError plot_bar!(fig, [1, 2]; row = 1)
+end
+
+# ── wave 4 (oned) ────────────────────────────────────────────────────────────
+
+# The axis fields `_apply_axis_range!` (src/sci/base.jl) writes for `range` on
+# an empty figure, or the error it throws (`who = "REF"`).
+function _st_primitive_range(range, letter::Symbol)
+	ref = Plot(GenericTrace[], Layout())
+	err = _st_error(() -> PlotlySupply._apply_axis_range!(ref, letter, range, "REF"))
+	return err, _st_axis_or_empty(ref, letter === :x ? :xaxis : :yaxis)
+end
+
+_st_axis_matches(axis, ref) =
+	all(((key, value),) -> isequal(get(axis, key, nothing), value), pairs(ref)) &&
+	all(key -> isequal(get(axis, key, nothing), get(ref, key, nothing)), (:range, :autorange))
+
+# Constructor, Plot mutator and public name of every family member, called with
+# extra keywords.
+const _ST_MEMBERS = (
+	("plot_bar", (; kw...) -> plot_bar([1, 2, 3], [1.0, 2, 3]; kw...),
+		(f; kw...) -> plot_bar!(f, [1, 2, 3], [2.0, 1, 3]; kw...)),
+	("plot_histogram", (; kw...) -> plot_histogram([1.0, 2, 2, 3]; kw...),
+		(f; kw...) -> plot_histogram!(f, [1.0, 2, 3]; kw...)),
+	("plot_box", (; kw...) -> plot_box([1.0, 2, 3, 4]; kw...),
+		(f; kw...) -> plot_box!(f, [1.0, 2, 3]; kw...)),
+	("plot_violin", (; kw...) -> plot_violin([1.0, 2, 3, 4]; kw...),
+		(f; kw...) -> plot_violin!(f, [1.0, 2, 3]; kw...)),
+	("plot_histogram2d", (; kw...) -> plot_histogram2d([1.0, 2, 3], [3.0, 1, 2]; kw...),
+		(f; kw...) -> plot_histogram2d!(f, [1.0, 2, 3], [3.0, 1, 2]; kw...)),
+)
+
+@testset "stats: one-sided range keywords follow the shared primitive (D11, G41)" begin
+	# The family delegates the range check to `_checked_range` (one-sided
+	# limits are being added there, D11): the same error naming the function
+	# while the primitive rejects them, the primitive's axis fields once it
+	# accepts them.
+	for (who, build, mutate!) in _ST_MEMBERS, letter in (:x, :y),
+			partial in ((nothing, 2), [1, nothing], (0, nothing), [missing, 3])
+		name = letter === :x ? :xrange : :yrange
+		key = letter === :x ? :xaxis : :yaxis
+		ref_err, ref_axis = _st_primitive_range(partial, letter)
+		if ref_err === nothing
+			@test _st_axis_matches(_st_axis_or_empty(build(; name => partial), key), ref_axis)
+			target = build()
+			mutate!(target; name => partial)
+			@test _st_axis_matches(_st_axis_or_empty(target, key), ref_axis)
+		else
+			err = _st_error(() -> build(; name => partial))
+			@test err isa ArgumentError
+			@test err.msg == replace(ref_err.msg, "REF:" => "$(who):"; count = 1)
+			target = build()
+			before = _st_snapshot(target)
+			err = _st_error(() -> mutate!(target; name => partial))
+			@test err isa ArgumentError
+			@test err.msg == replace(ref_err.msg, "REF:" => "$(who)!:"; count = 1)
+			@test _st_snapshot(target) == before
+		end
+	end
+	@test occursin("one-sided limit", string(@doc plot_bar))
+end
+
+@testset "stats: equal range bounds are rejected everywhere (G33)" begin
+	for (who, build, mutate!) in _ST_MEMBERS, (name, equal) in ((:xrange, [2, 2]), (:yrange, (5.0, 5.0)))
+		err = _st_error(() -> build(; name => equal))
+		@test err isa ArgumentError
+		@test startswith(err.msg, "$(who):") && occursin("`$(name)`", err.msg) && occursin("must differ", err.msg)
+		target = build()
+		before = _st_snapshot(target)
+		err = _st_error(() -> mutate!(target; name => equal))
+		@test err isa ArgumentError && startswith(err.msg, "$(who)!:") && occursin("must differ", err.msg)
+		@test _st_snapshot(target) == before
+		# Also on the twin y axis of `secondary_y = true`.
+		name === :yrange || continue
+		twin = plot_scatter(1:3, 1:3)
+		before = _st_snapshot(twin)
+		err = _st_error(() -> mutate!(twin; secondary_y = true, yrange = equal))
+		@test err isa ArgumentError && occursin("must differ", err.msg)
+		@test _st_snapshot(twin) == before
+	end
+end
+
+@testset "stats: secondary_y on a Plot/SyncPlot (G27, C35)" begin
+	for (who, _, mutate!) in _ST_MEMBERS
+		fig = plot_scatter(1:3, [1.0, 2, 3]; ylabel = "left")
+		@test mutate!(fig; secondary_y = true, ylabel = "right", yticks = [1, 2]) === nothing
+		trace = _st_trace(fig, length(fig.data))
+		@test trace[:yaxis] == "y2"
+		@test get(trace, :xaxis, "x") == "x"
+		y2 = _st_axis(fig, :yaxis2)
+		@test y2[:overlaying] == "y" && y2[:side] == "right" && y2[:anchor] == "x"
+		@test _st_title(y2[:title]) == "right"
+		@test y2[:tickvals] == [1.0, 2.0]
+		y1 = _st_axis(fig, :yaxis)
+		@test _st_title(y1[:title]) == "left"
+		@test !haskey(y1, :tickvals)
+		# The twin is reused, never duplicated.
+		mutate!(fig; secondary_y = true)
+		@test _st_trace(fig, length(fig.data))[:yaxis] == "y2"
+		@test !haskey(_st_layout(fig), :yaxis3)
+		# `secondary_y = false` keeps the primary axis.
+		mutate!(fig; secondary_y = false)
+		@test !haskey(_st_trace(fig, length(fig.data)), :yaxis)
+		# Contract: a Bool, no `show`, no unknown keywords; nothing changes.
+		target = plot_scatter(1:3, 1:3)
+		before = _st_snapshot(target)
+		for (bad, message) in (
+			((; secondary_y = "yes"), "`secondary_y` must be true or false"),
+			((; show = true), "mutators do not take `show`"),
+			((; colour = "red"), "unsupported keyword argument(s) `colour`"),
+			((; row = 1), "select a SubplotFigure cell"),
+		)
+			err = _st_error(() -> mutate!(target; bad...))
+			@test err isa ArgumentError && startswith(err.msg, "$(who)!:") && occursin(message, err.msg)
+		end
+		@test _st_snapshot(target) == before
+	end
+	# Log twin: data-unit range and ticks on the twin only.
+	fig = plot_scatter(1:3, [1.0, 2, 3])
+	plot_bar!(fig, [1, 2, 3], [4.0, 40, 400]; secondary_y = true, yscale = "log", yrange = (1, 1000),
+		yticks = [1, 10, 100, 1000])
+	y2 = _st_axis(fig, :yaxis2)
+	@test y2[:type] == "log" && y2[:range] ≈ [0.0, 3.0] && y2[:exponentformat] == "power"
+	@test !haskey(_st_axis(fig, :yaxis), :type)
+	# A horizontal histogram bins along the twin: on a log twin in Julia.
+	fig = plot_scatter([1.0, 2], [1.0, 2])
+	plot_histogram!(fig, exp10.(range(0, 2; length = 50)); orientation = "h", secondary_y = true, yscale = "log")
+	@test _st_trace(fig, 2)[:type] == "bar" && _st_trace(fig, 2)[:yaxis] == "y2"
+	@test _st_axis(fig, :yaxis2)[:type] == "log"
+	# ... and a 2-D histogram on a log twin is binned in Julia too.
+	fig = plot_scatter([1.0, 2], [1.0, 2])
+	plot_histogram2d!(fig, [1.0, 2, 3], [1.0, 10, 100]; secondary_y = true, yscale = "log")
+	@test _st_trace(fig, 2)[:type] == "heatmap" && _st_trace(fig, 2)[:yaxis] == "y2"
+	# Invalid twin options are rejected before anything changes, also on a
+	# twin that already exists with another type.
+	fig = plot_scatter(1:3, 1:3)
+	before = _st_snapshot(fig)
+	@test_throws ArgumentError plot_bar!(fig, [1.0, 2]; secondary_y = true, yscale = "log", yrange = (0, 10))
+	@test_throws ArgumentError plot_box!(fig, randn(5); secondary_y = true, yticks = :decades)
+	@test_throws ArgumentError plot_violin!(fig, randn(5); secondary_y = true, yscale = "lin")
+	@test _st_snapshot(fig) == before
+	# A non-Cartesian figure has no twin y axis.
+	polar = plot_scatterpolar([0, 90], [1, 2])
+	before = _st_snapshot(polar)
+	err = _st_error(() -> plot_bar!(polar, [1.0, 2]; secondary_y = true))
+	@test err isa ArgumentError && startswith(err.msg, "plot_bar!:")
+	@test _st_snapshot(polar) == before
+	# SyncPlot: one transaction with the twin axis.
+	sp, scripts = _st_probe_syncplot(plot_scatter(1:3, 1:3))
+	@test plot_violin!(sp, randn(10); secondary_y = true) === nothing
+	@test _st_trace(sp.plot, 2)[:yaxis] == "y2"
+	@test !isempty(scripts)
+	for who in ("plot_bar!", "plot_histogram!", "plot_box!", "plot_violin!", "plot_histogram2d!")
+		doc = string(Base.Docs.doc(getfield(PlotlySupply, Symbol(who))))
+		@test occursin("`secondary_y = true` draws on a secondary y axis", doc)
+	end
+end
+
+@testset "stats: tick presets on a Plot and in a SubplotFigure cell (Y34)" begin
+	decades = (tickmode = "linear", tick0 = 0, dtick = 1, exponentformat = "power")
+	check(axis) = all(((key, value),) -> isequal(get(axis, key, nothing), value), pairs(decades))
+	@test check(_st_axis(plot_bar([1, 10, 100]; yscale = "log", yticks = :decades), :yaxis))
+	@test check(_st_axis(plot_histogram(exp10.(range(0, 2; length = 20)); xscale = "log", xticks = :decades), :xaxis))
+	@test check(_st_axis(plot_box(exp10.([0.0, 1, 2]); yscale = "log", yticks = :decades), :yaxis))
+	@test check(_st_axis(plot_violin(exp10.([0.0, 1, 2]); yscale = "log", yticks = :decades), :yaxis))
+	@test check(_st_axis(plot_histogram2d(exp10.([0.0, 1, 2]), [1.0, 2, 3]; xscale = "log", xticks = :decades), :xaxis))
+	fig = plot_box([1.0, 2, 3]; yticks = [1, 2])
+	plot_box!(fig, [2.0, 3]; yticks = :auto)
+	@test !haskey(_st_axis(fig, :yaxis), :tickvals)
+	sf = subplots(1, 2; sync = false)
+	plot_bar!(sf, [1, 2, 3], [1.0, 20, 300]; row = 1, col = 2, yscale = "log", yticks = :decades)
+	@test check(_st_axis(sf.plot, :yaxis2))
+	plot_histogram2d!(sf, exp10.([0.0, 1, 2]), [1.0, 2, 3]; row = 1, col = 1, xscale = "log", xticks = :decades)
+	@test check(_st_axis(sf.plot, :xaxis))
+	err = _st_error(() -> plot_violin!(sf, randn(5); row = 1, col = 1, yticks = :decades))
+	@test err isa ArgumentError && startswith(err.msg, "plot_violin!:") && occursin("needs a logarithmic axis", err.msg)
+end
+
+@testset "stats: an inset call reads the inset's own traces (Y6)" begin
+	# The series of one call are grouped when their names collide with boxes
+	# already on the TARGET axes: a box in the host cell does not put
+	# same-named inset boxes into group mode ...
+	sf = subplots(1, 1; sync = false)
+	plot_box!(sf, randn(10); legend = "a")
+	inset!(sf, (0.6, 0.6, 0.3, 0.3))
+	plot_box!(sf, [randn(10), randn(10)]; legend = ["a", "b"], inset = 1)
+	@test all(_st_trace(sf.plot, k)[:xaxis] == "x2" && _st_trace(sf.plot, k)[:yaxis] == "y2" for k in 2:3)
+	@test !haskey(_st_layout(sf.plot), :boxmode)
+	# ... while a box already in the inset does.
+	plot_box!(sf, [randn(10), randn(10)]; legend = ["a", "c"], inset = 1)
+	@test _st_layout(sf.plot)[:boxmode] == "group"
+	# Histogram overlay of one call in an inset: its own offset group.
+	sf = subplots(1, 1; sync = false)
+	plot_bar!(sf, ["p", "q"], [1.0, 2])
+	inset!(sf, (0.6, 0.6, 0.3, 0.3))
+	plot_histogram!(sf, [randn(20), randn(20)]; inset = 1)
+	@test _st_trace(sf.plot, 2)[:offsetgroup] == _st_trace(sf.plot, 3)[:offsetgroup]
+	@test get(_st_layout(sf.plot), :barmode, "group") != "overlay"
+end
+
+@testset "stats: per-bar colours, hatches and widths (G68)" begin
+	# One series: a colour per bar is plotly's `marker.color` array.
+	fig = plot_bar(["a", "b", "c"], [3.0, 5, 2]; color = ["grey", "steelblue", "grey"])
+	@test _st_get(_st_trace(fig), :marker)[:color] == ["grey", "steelblue", "grey"]
+	@test _st_get(_st_trace(plot_bar([3.0, 5, 2]; color = [:red, :green, :blue])), :marker)[:color] ==
+		["red", "green", "blue"]
+	# A one-element vector is the series colour; other lengths are an error.
+	@test _st_get(_st_trace(plot_bar([3.0, 5, 2]; color = ["red"])), :marker)[:color] == "red"
+	err = _st_error(() -> plot_bar([3.0, 5, 2]; color = ["red", "blue"]))
+	@test err isa ArgumentError && startswith(err.msg, "plot_bar:") &&
+		occursin("2 entries for a single series of 3 bars", err.msg)
+	err = _st_error(() -> plot_bar([3.0, 5]; color = ["red", ""]))
+	@test err isa ArgumentError && occursin("per-bar `color` entries must be non-empty", err.msg)
+	err = _st_error(() -> plot_bar([3.0, 5]; color = [1, 2]))
+	@test err isa ArgumentError && occursin("per-bar `color` entries must be", err.msg)
+	# Several series: one entry per series, a vector entry colours its bars.
+	fig = plot_bar([1, 2], [[1.0, 2], [3.0, 4]]; color = ["red", ["blue", "green"]])
+	@test _st_get(_st_trace(fig, 1), :marker)[:color] == "red"
+	@test _st_get(_st_trace(fig, 2), :marker)[:color] == ["blue", "green"]
+	# Missing series entries keep the colour cycle, surplus ones are ignored.
+	fig = plot_bar([1, 2], [[1.0, 2], [3.0, 4]]; color = ["red"])
+	@test !haskey(_st_trace(fig, 2), :marker)
+	@test _st_get(_st_trace(plot_bar([1, 2], [[1.0, 2], [3.0, 4]]; color = ["red", "blue", "x"]), 2), :marker)[:color] == "blue"
+	err = _st_error(() -> plot_bar([1, 2], [[1.0, 2], [3.0, 4]]; color = ["red", ["blue"]]))
+	@test err isa ArgumentError && occursin("1 per-bar entries for series 2, which has 2 bars", err.msg)
+	# Per-bar hatches: pattern arrays, "" leaves a bar plain.
+	pattern = _st_get(_st_trace(plot_bar([1.0, 2, 3]; hatch = ["/", "", "x"])), :marker, :pattern)
+	@test pattern[:shape] == ["/", "", "x"]
+	@test pattern[:fillmode] == "overlay"
+	single = _st_get(_st_trace(plot_bar([1.0]; hatch = "/")), :marker, :pattern)
+	@test pattern[:size][1] ≈ single[:size] && pattern[:solidity][1] ≈ single[:solidity]
+	@test pattern[:size][2] == PlotlySupply._STATS_PATTERN_DEFAULT_SIZE
+	@test pattern[:solidity][2] == PlotlySupply._STATS_PATTERN_DEFAULT_SOLIDITY
+	@test !haskey(_st_trace(plot_bar([1.0, 2]; hatch = ["", ""])), :marker)
+	@test_throws ArgumentError plot_bar([1.0, 2]; hatch = ["/", "?"])
+	@test _st_get(_st_trace(plot_bar([1, 2], [[1.0, 2], [3.0, 4]]; hatch = ["", ["-", "|"]]), 2),
+		:marker, :pattern)[:shape] == ["-", "|"]
+	# Bar widths in data units: a number, per series or per bar.
+	@test _st_trace(plot_bar([1.0, 2, 3]; barwidth = 0.3))[:width] == 0.3
+	@test _st_trace(plot_bar([1.0, 2, 3]; barwidth = [0.1, 0.2, 0.3]))[:width] == [0.1, 0.2, 0.3]
+	fig = plot_bar([1, 2], [[1.0, 2], [3.0, 4]]; barwidth = [0.2, [0.3, 0.4]])
+	@test _st_trace(fig, 1)[:width] == 0.2 && _st_trace(fig, 2)[:width] == [0.3, 0.4]
+	@test !haskey(_st_trace(plot_bar([1.0, 2])), :width)
+	for bad in (0, -1, Inf, true, "1", [0.1, nothing])
+		err = _st_error(() -> plot_bar([1.0, 2]; barwidth = bad))
+		@test err isa ArgumentError && startswith(err.msg, "plot_bar:") && occursin("barwidth", err.msg)
+	end
+	# Mutators take the same keywords and validate before any change.
+	fig = plot_bar([1.0, 2])
+	before = _st_snapshot(fig)
+	@test_throws ArgumentError plot_bar!(fig, [1.0, 2, 3]; color = ["a", "b"])
+	@test_throws ArgumentError plot_bar!(fig, [1.0, 2]; barwidth = -0.5)
+	@test _st_snapshot(fig) == before
+	plot_bar!(fig, [1.0, 2]; color = ["red", "blue"], barwidth = 0.4)
+	@test _st_get(_st_trace(fig, 2), :marker)[:color] == ["red", "blue"] && _st_trace(fig, 2)[:width] == 0.4
+end
+
+@testset "stats: bargap and bargroupgap (G54)" begin
+	fig = plot_bar([1, 2], [[1.0, 2], [3.0, 4]]; bargap = 0.4, bargroupgap = 0.1)
+	@test _st_layout(fig)[:bargap] == 0.4 && _st_layout(fig)[:bargroupgap] == 0.1
+	@test !haskey(_st_layout(plot_bar([1.0, 2])), :bargap)
+	plot_bar!(fig, [1.0, 2]; bargap = 0)
+	@test _st_layout(fig)[:bargap] == 0 && _st_layout(fig)[:bargroupgap] == 0.1
+	before = _st_snapshot(fig)
+	for (name, bad) in ((:bargap, 1.5), (:bargap, -0.1), (:bargroupgap, "x"), (:bargroupgap, NaN))
+		err = _st_error(() -> plot_bar!(fig, [1.0, 2]; name => bad))
+		@test err isa ArgumentError && startswith(err.msg, "plot_bar!:") && occursin("`$(name)`", err.msg)
+	end
+	@test _st_snapshot(fig) == before
+	# On a SubplotFigure the gaps are figure-wide; a bad value changes nothing.
+	sf = subplots(1, 2; sync = false)
+	plot_bar!(sf, [1.0, 2]; row = 1, col = 2, bargap = 0.05, barwidth = 0.3, color = ["red", "blue"])
+	@test _st_layout(sf.plot)[:bargap] == 0.05
+	trace = _st_trace(sf.plot, 1)
+	@test trace[:xaxis] == "x2" && trace[:width] == 0.3 && _st_get(trace, :marker)[:color] == ["red", "blue"]
+	before = _st_snapshot(sf.plot)
+	@test_throws ArgumentError plot_bar!(sf, [1.0, 2]; row = 1, col = 1, bargroupgap = 2)
+	@test _st_snapshot(sf.plot) == before
+	doc = string(@doc plot_bar)
+	for key in ("barwidth", "bargap", "bargroupgap", "one colour per bar", "lower range limit")
+		@test occursin(key, doc)
+	end
+end
+
+@testset "stats: grouped and horizontal bars on a log value axis (G54, G79)" begin
+	# Grouped bars on a log y axis with an explicit range and custom ticks:
+	# the range is in data units and the bars keep plotly's base (they grow
+	# from the axis bottom, its lower range limit; documented).
+	fig = plot_bar([1, 2, 3], [[0.045, 0.11, 0.32], [0.038, 0.07, 0.15]]; yscale = "log",
+		yrange = (0.03, 0.5), yticks = [0.03, 0.05, 0.1, 0.2, 0.4],
+		yticklabels = ["0.03", "0.05", "0.1", "0.2", "0.4"], legend = ["fixed", "refit"])
+	y = _st_axis(fig, :yaxis)
+	@test y[:type] == "log"
+	@test y[:range] ≈ log10.([0.03, 0.5])
+	@test y[:tickvals] == [0.03, 0.05, 0.1, 0.2, 0.4]
+	@test y[:ticktext] == ["0.03", "0.05", "0.1", "0.2", "0.4"]
+	@test all(!haskey(_st_trace(fig, k), :base) for k in 1:2)
+	# Horizontal bars: the value axis is x.
+	fig = plot_bar([100.0, 28.0, 4.13], ["a", "b", "c"]; orientation = "h", xscale = "log",
+		xticks = [1, 10, 100], xticklabels = ["1", "10", "100"], color = ["grey", "grey", "blue"])
+	x = _st_axis(fig, :xaxis)
+	@test x[:type] == "log" && x[:tickvals] == [1.0, 10.0, 100.0]
+	@test _st_trace(fig)[:orientation] == "h" && _st_get(_st_trace(fig), :marker)[:color] == ["grey", "grey", "blue"]
+	# Non-positive data-unit limits on the log value axis are rejected.
+	err = _st_error(() -> plot_bar([1.0, 2]; yscale = "log", yrange = (0, 3)))
+	@test err isa ArgumentError && occursin("must be positive", err.msg)
+	# `base` starts the bars at a given value instead.
+	@test _st_trace(plot_bar([1.0, 2]; yscale = "log", base = 0.5))[:base] == 0.5
+end
+
+@testset "stats: the barmode warning names only bars a mode change moves (C29, G79)" begin
+	# One per-bar coloured series in the other cell is drawn the same in every
+	# bar mode: no warning (the per-bar highlight of G79 next to a stack).
+	sf = subplots(1, 2; sync = false)
+	plot_bar!(sf, [3.0, 2, 1]; color = ["grey", "grey", "blue"], row = 1, col = 1)
+	@test_logs plot_bar!(sf, ["a", "b"], [[1, 2], [3, 4]]; barmode = "stack", row = 1, col = 2)
+	@test _st_layout(sf.plot)[:barmode] == "stack"
+	# A primary-axis series and a twin-axis series are positioned per axis
+	# pair, so they are not re-arranged either ...
+	twin = subplots(1, 2; sync = false, specs = [PlotlySupply.Spec(secondary_y = true) PlotlySupply.Spec()])
+	plot_bar!(twin, [1.0, 2]; row = 1, col = 1)
+	plot_bar!(twin, [3.0, 4]; row = 1, col = 1, secondary_y = true)
+	@test _st_trace(twin.plot, 1)[:yaxis] != _st_trace(twin.plot, 2)[:yaxis]
+	@test_logs plot_bar!(twin, [1.0, 2]; barmode = "overlay", row = 1, col = 2)
+	# ... while two series on one axis pair are: one warning.
+	plot_histogram!(twin, randn(10); row = 1, col = 1)
+	@test_logs (:warn, r"figure-wide bar mode \"overlay\"") plot_bar!(
+		twin, [1.0, 2]; barmode = "stack", row = 1, col = 2,
+	)
+	@test _st_layout(twin.plot)[:barmode] == "stack"
 end
