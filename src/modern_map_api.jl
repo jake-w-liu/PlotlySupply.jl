@@ -282,14 +282,8 @@ function _choroplethmap_trace(
 	marker_line_width,
 	marker_opacity,
 	legend::AbstractString,
-	trace_kwargs,
+	trace,
 )
-	_require_map_trace_keywords(
-		who,
-		kind,
-		trace_kwargs;
-		reserved = ("geojson", "locations", "z"),
-	)
 	_require_equal_geo_lengths(
 		who,
 		:locations => locations,
@@ -327,40 +321,40 @@ function _choroplethmap_trace(
 		maximum = 1,
 	)
 	name = _extended_label(legend, who, "legend")
-
-	kw = _trace_keyword_dict(trace_kwargs)
-	kw[:geojson] = geojson
-	kw[:locations] = locations
-	kw[:z] = z
-	isempty(featureidkey) ||
-		(kw[:featureidkey] = String(featureidkey))
-	_set_optional_colorscale!(kw, colorscale; who = who)
-	isempty(name) || (kw[:name] = name)
-
-	marker = _symbol_dict(get(kw, :marker, nothing))
-	marker_changed = false
-	line = _symbol_dict(get(marker, :line, nothing))
-	if marker_line_color isa Union{AbstractString,Symbol}
+	scale = _map_colorscale(who, colorscale)
+	built = _map_base_trace(
+		who,
+		kind,
+		constructor,
+		trace;
+		reserved = (
+			"geojson" => "the positional arguments",
+			"locations" => "the positional arguments",
+			"z" => "the positional arguments",
+			"featureidkey" => "the `featureidkey` keyword",
+		),
+		controlled = (
+			(:marker, :line, :color) => "marker_line_color",
+			(:marker, :line, :width) => "marker_line_width",
+			(:marker, :opacity) => "marker_opacity",
+		),
+	)
+	_map_set!(built, geojson, :geojson)
+	_map_set!(built, locations, :locations)
+	_map_set!(built, z, :z)
+	isempty(featureidkey) || _map_set!(built, String(featureidkey), :featureidkey)
+	scale === nothing || _map_set!(built, scale, :colorscale)
+	if marker_line_color isa Union{AbstractString, Symbol}
 		text = String(marker_line_color)
-		if !isempty(text)
-			line[:color] = text
-			marker_changed = true
-		end
+		isempty(text) || _map_set!(built, text, :marker, :line, :color)
 	elseif marker_line_color !== nothing
-		line[:color] = marker_line_color
-		marker_changed = true
+		_map_set!(built, marker_line_color, :marker, :line, :color)
 	end
-	if marker_line_width !== nothing
-		line[:width] = marker_line_width
-		marker_changed = true
-	end
-	isempty(line) || (marker[:line] = attr(; line...))
-	if marker_opacity !== nothing
-		marker[:opacity] = marker_opacity
-		marker_changed = true
-	end
-	marker_changed && (kw[:marker] = attr(; marker...))
-	return constructor(; kw...)
+	marker_line_width === nothing ||
+		_map_set!(built, marker_line_width, :marker, :line, :width)
+	marker_opacity === nothing || _map_set!(built, marker_opacity, :marker, :opacity)
+	_map_set_legend!(built, name)
+	return built
 end
 
 # Shared trace builder of densitymap (`z` may be `nothing`: equal weights)
@@ -376,9 +370,9 @@ function _densitymap_trace(
 	constructor = densitymap,
 	radius,
 	colorscale,
-	trace_kwargs,
+	legend::AbstractString,
+	trace,
 )
-	_require_map_trace_keywords(who, kind, trace_kwargs; reserved = ("lon", "lat", "z"))
 	if z === nothing
 		_require_equal_geo_lengths(
 			who,
@@ -410,20 +404,34 @@ function _densitymap_trace(
 		minimum = 1,
 	)
 
-	kw = _trace_keyword_dict(trace_kwargs)
-	kw[:lon] = lon
-	kw[:lat] = lat
-	z === nothing || (kw[:z] = z)
-	radius_is_default || (kw[:radius] = radius)
-	_set_optional_colorscale!(kw, colorscale; who = who)
-	return constructor(; kw...)
+	scale = _map_colorscale(who, colorscale)
+	name = _extended_label(legend, who, "legend")
+	built = _map_base_trace(
+		who,
+		kind,
+		constructor,
+		trace;
+		reserved = (
+			"lon" => "the positional arguments",
+			"lat" => "the positional arguments",
+			"z" => "the positional arguments",
+			"radius" => "the `radius` keyword",
+		),
+	)
+	_map_set!(built, lon, :lon)
+	_map_set!(built, lat, :lat)
+	z === nothing || _map_set!(built, z, :z)
+	radius_is_default || _map_set!(built, radius, :radius)
+	scale === nothing || _map_set!(built, scale, :colorscale)
+	_map_set_legend!(built, name)
+	return built
 end
 
 """
 	plot_scattermap(lon, lat; mode="markers", color="", marker_size=nothing,
-		legend="", style="open-street-map", zoom=0, center_lon=nothing,
-		center_lat=nothing, title="", width=0, height=0, fontsize=0,
-		show=false, kwargs...)
+		colorscale="", legend="", style="open-street-map", zoom=0,
+		center_lon=nothing, center_lat=nothing, title="", width=0, height=0,
+		fontsize=0, trace=nothing, show=false)
 
 Scatter points (or lines) on a MapLibre-backed tile map at `(lon, lat)`
 (degrees). The default `"open-street-map"` style needs no access token.
@@ -436,9 +444,13 @@ Scatter points (or lines) on a MapLibre-backed tile map at `(lon, lat)`
   `"lines"`, `"lines+markers"`, `"text"`, ...).
 - `color::Union{Nothing,AbstractString,Symbol,AbstractVector} = ""`: marker
   colour; one colour, or one value per point (colour names, or numbers
-  coloured through `marker_colorscale`). `""`/`nothing` keeps the default.
+  coloured through `colorscale`). `""`/`nothing` keeps the default.
 - `marker_size::Union{Nothing,Real,AbstractVector} = nothing`: marker size in
   pixels (≥ 0), scalar or one per point.
+- `colorscale = ""`: colour scale of numeric `color` values, resolved like
+  every `colorscale` of the package (`colormap` names with matplotlib
+  orientation, `"_r"` reverses, colour vectors, `[t, colour]` stops, a
+  `ColorScheme`; unknown names throw). Needs `color` as one number per point.
 - `legend::AbstractString = ""`: legend name of the trace (mathtext).
 - `style = "open-street-map"`: a nonempty MapLibre style name
   (`"carto-positron"`, `"carto-darkmatter"`, `"white-bg"`, ...), style URL, or
@@ -450,16 +462,19 @@ Scatter points (or lines) on a MapLibre-backed tile map at `(lon, lat)`
 - `width::Real = 0`, `height::Real = 0`: figure size in pixels (0 = automatic,
   otherwise at least 10; rounded to whole pixels).
 - `fontsize::Real = 0`: global font size (0 = template default, otherwise ≥ 1).
+- `trace = nothing`: raw plotly.js `scattermap` trace attributes as
+  `attr(...)` (or a Dict/NamedTuple), nested ones written with underscores:
+  `trace = attr(hovertemplate = "%{lon}", marker_opacity = 0.7)`. This is
+  the only raw pass-through; its values are passed on unchanged. A name that
+  is not a `scattermap` attribute of the bundled plotly.js throws, as do the
+  attributes set from the arguments above (`lon`, `lat`, `mode`,
+  `marker_color`, `marker_size`, `name`: use `legend`, any `colorscale`).
 - `show::Bool = false`: open the figure in a window and return a `SyncPlot`.
-- `kwargs...`: further plotly.js `scattermap` trace attributes, nested ones
-  written with underscores (`marker_opacity`, `hovertemplate`, ...). A name
-  that is not a `scattermap` attribute of the bundled plotly.js throws
-  `ArgumentError`, as do the positional `lon`/`lat` given again.
 
-Throws `ArgumentError` for empty or mismatched coordinates (including
-per-point `color` or `marker_size` vectors), negative sizes, an empty or
-invalid `style`, non-finite view values, unknown keywords, or invalid figure
-sizes.
+Any other keyword argument throws `ArgumentError`. So do empty or mismatched
+coordinates (including per-point `color` or `marker_size` vectors), negative
+sizes, a `colorscale` without numeric `color`, an unknown colour-scale name,
+an empty or invalid `style`, non-finite view values, or invalid figure sizes.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -475,6 +490,7 @@ function plot_scattermap(
 	mode::AbstractString = "markers",
 	color::Union{Nothing,AbstractString,Symbol,AbstractVector} = "",
 	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
+	colorscale = "",
 	legend::AbstractString = "",
 	style = "open-street-map",
 	zoom = 0,
@@ -484,10 +500,12 @@ function plot_scattermap(
 	width::Real = 0,
 	height::Real = 0,
 	fontsize::Real = 0,
+	trace = nothing,
 	show::Bool = false,
 	kwargs...,
 )
 	who = "plot_scattermap"
+	_map_reject_keywords(who, kwargs; mutator = false)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -496,7 +514,7 @@ function plot_scattermap(
 		fontsize = fontsize,
 	)
 	layout = _map_layout(style, zoom, center_lon, center_lat; who = who)
-	trace = _geo_scatter_trace(
+	built = _geo_scatter_trace(
 		"scattermap",
 		scattermap,
 		lon,
@@ -505,10 +523,11 @@ function plot_scattermap(
 		mode = mode,
 		color = color,
 		marker_size = marker_size,
+		colorscale = colorscale,
 		legend = legend,
-		trace_kwargs = kwargs,
+		trace = trace,
 	)
-	fig = Plot(trace, layout)
+	fig = Plot(built, layout)
 	_apply_geo_figure_options!(fig, options; apply_template = true)
 	return _maybe_show(
 		fig,
@@ -521,9 +540,9 @@ end
 
 """
 	plot_scattermap!(fig, lon, lat; mode="markers", color="",
-		marker_size=nothing, legend="", style=nothing, zoom=nothing,
-		center_lon=nothing, center_lat=nothing, title="", width=0, height=0,
-		fontsize=0, kwargs...)
+		marker_size=nothing, colorscale="", legend="", style=nothing,
+		zoom=nothing, center_lon=nothing, center_lat=nothing, title="",
+		width=0, height=0, fontsize=0, trace=nothing)
 	plot_scattermap!(sf::SubplotFigure, lon, lat; row=nothing, col=nothing, kwargs...)
 
 Append a scattermap trace (see [`plot_scattermap`](@ref) for the arguments
@@ -553,6 +572,7 @@ function plot_scattermap!(
 	mode::AbstractString = "markers",
 	color::Union{Nothing,AbstractString,Symbol,AbstractVector} = "",
 	marker_size::Union{Nothing,Real,AbstractVector} = nothing,
+	colorscale = "",
 	legend::AbstractString = "",
 	style = nothing,
 	zoom = nothing,
@@ -562,10 +582,11 @@ function plot_scattermap!(
 	width::Real = 0,
 	height::Real = 0,
 	fontsize::Real = 0,
+	trace = nothing,
 	kwargs...,
 )
 	who = "plot_scattermap!"
-	_map_mutator_guard(who, kwargs)
+	_map_reject_keywords(who, kwargs; mutator = true)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -575,7 +596,7 @@ function plot_scattermap!(
 	)
 	_require_valid_map_view(zoom, center_lon, center_lat; who = who)
 	_require_valid_map_style(style; who = who)
-	trace = _geo_scatter_trace(
+	built = _geo_scatter_trace(
 		"scattermap",
 		scattermap,
 		lon,
@@ -584,10 +605,11 @@ function plot_scattermap!(
 		mode = mode,
 		color = color,
 		marker_size = marker_size,
+		colorscale = colorscale,
 		legend = legend,
-		trace_kwargs = kwargs,
+		trace = trace,
 	)
-	push!(_plot_data(fig), trace)
+	push!(_plot_data(fig), built)
 	_apply_map_layout_options!(
 		fig;
 		style = style,
@@ -605,7 +627,7 @@ end
 		marker_line_color=nothing, marker_line_width=nothing,
 		marker_opacity=nothing, legend="", style="open-street-map", zoom=0,
 		center_lon=nothing, center_lat=nothing, title="", width=0, height=0,
-		fontsize=0, show=false, kwargs...)
+		fontsize=0, trace=nothing, show=false)
 
 Shade GeoJSON features on a MapLibre-backed tile map.
 
@@ -626,16 +648,22 @@ Shade GeoJSON features on a MapLibre-backed tile map.
   width in pixels (≥ 0), scalar or one per location.
 - `marker_opacity::Union{Nothing,Real,AbstractVector} = nothing`: fill opacity
   in [0, 1], scalar or one per location.
-- `legend::AbstractString = ""`: legend name of the trace (mathtext).
+- `legend::AbstractString = ""`: legend name of the trace (mathtext); a
+  name also shows the trace in the legend (plotly.js hides choropleth
+  traces from the legend by default).
 - `style`, `zoom`, `center_lon`, `center_lat`: map view, as for
   [`plot_scattermap`](@ref).
 - `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_scattermap`](@ref).
-- `kwargs...`: further plotly.js `choroplethmap` trace attributes; unknown
-  names throw, as for [`plot_scattermap`](@ref).
+- `trace = nothing`: raw plotly.js `choroplethmap` trace attributes, the only
+  raw pass-through, as for [`plot_scattermap`](@ref); it may not set
+  `geojson`, `locations`, `z`, `featureidkey`, `marker_line_color`,
+  `marker_line_width`, `marker_opacity`, `name` or any `colorscale` (use the
+  keywords).
 
-Throws `ArgumentError` for an invalid `geojson`, empty or mismatched
-`locations`/`z` (including per-location marker vectors), out-of-range marker
-values, unknown keywords, and invalid map-view or size values.
+Any other keyword argument throws `ArgumentError`. So do an invalid
+`geojson`, empty or mismatched `locations`/`z` (including per-location marker
+vectors), out-of-range marker values, an unknown colour-scale name, and
+invalid map-view or size values.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -666,10 +694,12 @@ function plot_choroplethmap(
 	width::Real = 0,
 	height::Real = 0,
 	fontsize::Real = 0,
+	trace = nothing,
 	show::Bool = false,
 	kwargs...,
 )
 	who = "plot_choroplethmap"
+	_map_reject_keywords(who, kwargs; mutator = false)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -678,7 +708,7 @@ function plot_choroplethmap(
 		fontsize = fontsize,
 	)
 	layout = _map_layout(style, zoom, center_lon, center_lat; who = who)
-	trace = _choroplethmap_trace(
+	built = _choroplethmap_trace(
 		geojson,
 		locations,
 		z;
@@ -689,9 +719,9 @@ function plot_choroplethmap(
 		marker_line_width = marker_line_width,
 		marker_opacity = marker_opacity,
 		legend = legend,
-		trace_kwargs = kwargs,
+		trace = trace,
 	)
-	fig = Plot(trace, layout)
+	fig = Plot(built, layout)
 	_apply_geo_figure_options!(fig, options; apply_template = true)
 	return _maybe_show(
 		fig,
@@ -707,7 +737,7 @@ end
 		colorscale="", marker_line_color=nothing, marker_line_width=nothing,
 		marker_opacity=nothing, legend="", style=nothing, zoom=nothing,
 		center_lon=nothing, center_lat=nothing, title="", width=0, height=0,
-		fontsize=0, kwargs...)
+		fontsize=0, trace=nothing)
 	plot_choroplethmap!(sf::SubplotFigure, geojson, locations, z; row=nothing, col=nothing, kwargs...)
 
 Append a choroplethmap trace (see [`plot_choroplethmap`](@ref) for the
@@ -745,10 +775,11 @@ function plot_choroplethmap!(
 	width::Real = 0,
 	height::Real = 0,
 	fontsize::Real = 0,
+	trace = nothing,
 	kwargs...,
 )
 	who = "plot_choroplethmap!"
-	_map_mutator_guard(who, kwargs)
+	_map_reject_keywords(who, kwargs; mutator = true)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -758,7 +789,7 @@ function plot_choroplethmap!(
 	)
 	_require_valid_map_view(zoom, center_lon, center_lat; who = who)
 	_require_valid_map_style(style; who = who)
-	trace = _choroplethmap_trace(
+	built = _choroplethmap_trace(
 		geojson,
 		locations,
 		z;
@@ -769,9 +800,9 @@ function plot_choroplethmap!(
 		marker_line_width = marker_line_width,
 		marker_opacity = marker_opacity,
 		legend = legend,
-		trace_kwargs = kwargs,
+		trace = trace,
 	)
-	push!(_plot_data(fig), trace)
+	push!(_plot_data(fig), built)
 	_apply_map_layout_options!(
 		fig;
 		style = style,
@@ -786,8 +817,9 @@ end
 
 """
 	plot_densitymap(lon, lat, z=nothing; radius=nothing, colorscale="",
-		style="open-street-map", zoom=0, center_lon=nothing, center_lat=nothing,
-		title="", width=0, height=0, fontsize=0, show=false, kwargs...)
+		legend="", style="open-street-map", zoom=0, center_lon=nothing,
+		center_lat=nothing, title="", width=0, height=0, fontsize=0,
+		trace=nothing, show=false)
 
 Density heatmap of the points `(lon, lat)` (degrees) on a MapLibre-backed
 tile map.
@@ -803,15 +835,18 @@ tile map.
   keeps plotly.js' default.
 - `colorscale = ""`: colormap name, colour vector, stops or `ColorScheme`, as
   for [`plot_choropleth`](@ref).
+- `legend::AbstractString = ""`: legend name of the trace (mathtext); a
+  name also shows the trace in the legend (off by default in plotly.js).
 - `style`, `zoom`, `center_lon`, `center_lat`: map view, as for
   [`plot_scattermap`](@ref).
 - `title`, `width`, `height`, `fontsize`, `show`: as for [`plot_scattermap`](@ref).
-- `kwargs...`: further plotly.js `densitymap` trace attributes; unknown names
-  throw, as for [`plot_scattermap`](@ref).
+- `trace = nothing`: raw plotly.js `densitymap` trace attributes, the only raw
+  pass-through, as for [`plot_scattermap`](@ref); it may not set `lon`,
+  `lat`, `z`, `radius`, `name` or any `colorscale` (use the arguments).
 
-Throws `ArgumentError` for empty or mismatched coordinates (including a
-per-point `radius`), radii below 1, unknown keywords and invalid map-view or
-size values.
+Any other keyword argument throws `ArgumentError`. So do empty or mismatched
+coordinates (including a per-point `radius`), radii below 1, an unknown
+colour-scale name and invalid map-view or size values.
 
 Returns a `Plot`, or a `SyncPlot` when `show=true`.
 
@@ -826,6 +861,7 @@ function plot_densitymap(
 	z::Union{Nothing,AbstractVector} = nothing;
 	radius::Union{Nothing,Real,AbstractVector} = nothing,
 	colorscale = "",
+	legend::AbstractString = "",
 	style = "open-street-map",
 	zoom = 0,
 	center_lon = nothing,
@@ -834,10 +870,12 @@ function plot_densitymap(
 	width::Real = 0,
 	height::Real = 0,
 	fontsize::Real = 0,
+	trace = nothing,
 	show::Bool = false,
 	kwargs...,
 )
 	who = "plot_densitymap"
+	_map_reject_keywords(who, kwargs; mutator = false)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -846,16 +884,17 @@ function plot_densitymap(
 		fontsize = fontsize,
 	)
 	layout = _map_layout(style, zoom, center_lon, center_lat; who = who)
-	trace = _densitymap_trace(
+	built = _densitymap_trace(
 		lon,
 		lat,
 		z;
 		who = who,
 		radius = radius,
 		colorscale = colorscale,
-		trace_kwargs = kwargs,
+		legend = legend,
+		trace = trace,
 	)
-	fig = Plot(trace, layout)
+	fig = Plot(built, layout)
 	_apply_geo_figure_options!(fig, options; apply_template = true)
 	return _maybe_show(
 		fig,
@@ -868,8 +907,9 @@ end
 
 """
 	plot_densitymap!(fig, lon, lat, z=nothing; radius=nothing, colorscale="",
-		style=nothing, zoom=nothing, center_lon=nothing, center_lat=nothing,
-		title="", width=0, height=0, fontsize=0, kwargs...)
+		legend="", style=nothing, zoom=nothing, center_lon=nothing,
+		center_lat=nothing, title="", width=0, height=0, fontsize=0,
+		trace=nothing)
 	plot_densitymap!(sf::SubplotFigure, lon, lat, z=nothing; row=nothing, col=nothing, kwargs...)
 
 Append a densitymap trace (see [`plot_densitymap`](@ref) for the arguments
@@ -895,6 +935,7 @@ function plot_densitymap!(
 	z::Union{Nothing,AbstractVector} = nothing;
 	radius::Union{Nothing,Real,AbstractVector} = nothing,
 	colorscale = "",
+	legend::AbstractString = "",
 	style = nothing,
 	zoom = nothing,
 	center_lon = nothing,
@@ -903,10 +944,11 @@ function plot_densitymap!(
 	width::Real = 0,
 	height::Real = 0,
 	fontsize::Real = 0,
+	trace = nothing,
 	kwargs...,
 )
 	who = "plot_densitymap!"
-	_map_mutator_guard(who, kwargs)
+	_map_reject_keywords(who, kwargs; mutator = true)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -916,16 +958,17 @@ function plot_densitymap!(
 	)
 	_require_valid_map_view(zoom, center_lon, center_lat; who = who)
 	_require_valid_map_style(style; who = who)
-	trace = _densitymap_trace(
+	built = _densitymap_trace(
 		lon,
 		lat,
 		z;
 		who = who,
 		radius = radius,
 		colorscale = colorscale,
-		trace_kwargs = kwargs,
+		legend = legend,
+		trace = trace,
 	)
-	push!(_plot_data(fig), trace)
+	push!(_plot_data(fig), built)
 	_apply_map_layout_options!(
 		fig;
 		style = style,

@@ -3416,7 +3416,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             values;
             colorscale="Blues",
             scope="north america",
-            hovertext=customdata,
+            trace=attr(hovertext=customdata),
         )
         @test ttype(c) == "choropleth"
         @test c.data[1].fields[:locations] === locations
@@ -3436,7 +3436,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             marker_size=marker_size,
             scope="world",
             projection="mercator",
-            customdata=customdata,
+            trace=attr(customdata=customdata),
         )
         @test ttype(geo) == "scattergeo"
         @test geo.data[1].fields[:lon] === lon
@@ -3460,7 +3460,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             lat;
             zoom=0,
             center_lon=-100,
-            hovertext=customdata,
+            trace=attr(hovertext=customdata),
         )
         @test ttype(m) == "scattermapbox"
         @test m.data[1].fields[:lon] === lon
@@ -3493,7 +3493,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             radius=20,
             zoom=0,
             center_lat=10,
-            hovertext=customdata,
+            trace=attr(hovertext=customdata),
         )
         @test ttype(density) == "densitymapbox"
         @test density.data[1].fields[:lon] === lon
@@ -3567,7 +3567,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             marker_opacity=0.75,
             zoom=0,
             center_lon=-90,
-            customdata=customdata,
+            trace=attr(customdata=customdata),
         )
         @test ttype(tiled) == "choroplethmapbox"
         @test tiled.data[1].fields[:geojson] === geojson
@@ -3934,7 +3934,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
                     sf,
                     payload,
                     payload;
-                    customdata=payload,
+                    trace=attr(customdata=payload),
                 ),
                 (:locations, :z, :customdata),
             ),
@@ -3946,7 +3946,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
                     payload;
                     color=payload,
                     marker_size=payload,
-                    customdata=payload,
+                    trace=attr(customdata=payload),
                 ),
                 (:lon, :lat, :customdata),
             ),
@@ -3958,7 +3958,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
                     payload;
                     color=payload,
                     marker_size=payload,
-                    customdata=payload,
+                    trace=attr(customdata=payload),
                 ),
                 (:lon, :lat, :customdata),
             ),
@@ -3969,7 +3969,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
                     payload,
                     payload,
                     payload,
-                    customdata=payload,
+                    trace=attr(customdata=payload),
                 ),
                 (:lon, :lat, :z, :customdata),
             ),
@@ -3980,7 +3980,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
                     geojson,
                     payload,
                     payload,
-                    customdata=payload,
+                    trace=attr(customdata=payload),
                 ),
                 (:locations, :z, :customdata),
             ),

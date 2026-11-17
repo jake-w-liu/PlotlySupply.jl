@@ -131,7 +131,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
             lat;
             color=marker_color,
             marker_size=marker_size,
-            customdata=z,
+            trace=attr(customdata=z),
             style=style,
             zoom=0,
             center_lon=120,
@@ -892,14 +892,14 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
             () -> plot_scattermap(
                 payload,
                 payload;
-                customdata=payload,
+                trace=attr(customdata=payload),
                 style="white-bg",
             ),
             () -> plot_choroplethmap(
                 geojson,
                 payload,
                 payload;
-                customdata=payload,
+                trace=attr(customdata=payload),
                 style="white-bg",
             ),
             () -> plot_densitymap(
@@ -907,7 +907,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
                 payload,
                 payload;
                 radius=payload,
-                customdata=payload,
+                trace=attr(customdata=payload),
                 style="white-bg",
             ),
         )
@@ -925,14 +925,14 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
                 p,
                 payload,
                 payload;
-                customdata=payload,
+                trace=attr(customdata=payload),
             ),
             p -> plot_choroplethmap!(
                 p,
                 geojson,
                 payload,
                 payload;
-                customdata=payload,
+                trace=attr(customdata=payload),
             ),
             p -> plot_densitymap!(
                 p,
@@ -940,7 +940,7 @@ PlotlyBase.JSON.lower(trace::_ModernMapCustomTrace) = trace.fields
                 payload,
                 payload;
                 radius=payload,
-                customdata=payload,
+                trace=attr(customdata=payload),
             ),
         )
         for mutate! in mutators
