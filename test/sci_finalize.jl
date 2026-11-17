@@ -253,11 +253,15 @@ end
 	# Markers inside the field change nothing.
 	push!(p.data, scatter(x = [1.0, 2.0], y = [1.0, 1.5], mode = "markers"))
 	@test _SFN._finalize_figure!(p) === false
-	# Data outside the field: the clip grows to it exactly, without padding.
+	# Data outside the field: the clip grows to it, padded by
+	# `_FIN_OVERLAY_PAD` of the span on that side only (markers and arrow
+	# tips are not cut at the frame, hm_06); the field edges stay exact.
 	push!(p.data, scatter(x = [5.5], y = [-1.0], mode = "markers"))
 	@test _SFN._finalize_figure!(p) === true
-	@test _sfn_clip(p, :xaxis) == (-0.25, 5.5)
-	@test _sfn_clip(p, :yaxis) == (-1.0, 2.25)
+	pad = _SFN._FIN_OVERLAY_PAD
+	@test all(_sfn_clip(p, :xaxis) .≈ (-0.25, 5.5 + pad * 5.75))
+	@test all(_sfn_clip(p, :yaxis) .≈ (-1.0 - pad * 3.25, 2.25))
+	@test _SFN._finalize_figure!(p) === false                # idempotent with the pad
 	pop!(p.data)
 	_SFN._finalize_figure!(p)
 	@test _sfn_clip(p, :xaxis) == _SFN_XE
@@ -327,7 +331,8 @@ end
 
 @testset "equal aspect: pinned ranges, fitted cell, hugging bar" begin
 	g = plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y); equalar = true)
-	@test _SFN._finalize_figure!(g) === true
+	# The constructor finalized the figure already (D10): nothing is left.
+	@test _SFN._finalize_figure!(g) === false
 	# The clip does not survive plotly's aspect constraint (probe p7), so the
 	# range is pinned to it.
 	@test _sfn_get(g, :xaxis, :autorange) === false
@@ -387,18 +392,24 @@ end
 	@test !_SFN._fin_needs_full_staging(plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y)))
 end
 
+# An equal-aspect heatmap figure that was never finalized (constructors
+# finalize, so it is built from PlotlyBase parts).
+_sfn_raw_equal() = Plot([heatmap(x = _SFN_X, y = _SFN_Y, z = _sfn_z(_SFN_Y, _SFN_X))],
+	Layout(yaxis = attr(scaleanchor = "x", constrain = "domain"), xaxis = attr(constrain = "domain")))
+
 @testset "live traces are not written (append-only fast path)" begin
-	g = plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y); equalar = true)
+	g = _sfn_raw_equal()
 	before = JSON.json(g.data[1])
-	@test _SFN._finalize_figure!(g; live = g.data) isa Bool
+	@test _SFN._finalize_figure!(g; live = g.data) === true  # the layout is written
 	@test JSON.json(g.data[1]) == before
 	@test _sfn_get(g, :xaxis, :domain) === nothing          # the cell is left for a full pass
+	@test _sfn_clip(g, :xaxis) == _SFN_XE
 	@test_throws ArgumentError _SFN._finalize_figure!(g; size = (0, 100))
 	@test_throws ArgumentError _SFN._finalize_figure!(g; size = (100,))
 end
 
 @testset "export copy: fitted for the export size, the figure is not changed" begin
-	g = plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y); equalar = true)
+	g = _sfn_raw_equal()
 	before = _sfn_snapshot(g)
 	c = _SFN._finalize_export_copy(g, (width = 800, height = 400))
 	@test c !== g
@@ -411,44 +422,60 @@ end
 	@test _SFN._finalize_export_copy(plain, (width = 700, height = 500)) === plain
 end
 
-@testset "colorbars on one plot area do not overlap (M4, X39)" begin
+@testset "D12: colorbars of one plot area sit side by side in their room (M4, X39)" begin
 	z = _sfn_z(_SFN_X, _SFN_Y)
-	# Single figure: the second bar goes to the right of the first.
+	# Single figure: a lone bar keeps plotly's default place (nothing written).
+	lone = plot_heatmap(_SFN_X, _SFN_Y, z)
+	@test _sfn_bar(lone.data[1]) === nothing || get(_sfn_bar(lone.data[1]), :x, nothing) === nothing
+	# Two bars go side by side right of the plot area, each in its own slot.
 	f = plot_heatmap(_SFN_X, _SFN_Y, z)
 	plot_contour!(f, _SFN_X, _SFN_Y, 2 .* z)
-	_SFN._finalize_figure!(f)
-	first_bar = _sfn_bar(f.data[1])
-	second = _sfn_bar(f.data[2])
-	@test first_bar === nothing || get(first_bar, :x, nothing) === nothing
-	@test second[:x] > 1.02 && second[:xanchor] == "left"
+	a = _sfn_bar(f.data[1])
+	b = _sfn_bar(f.data[2])
+	@test a[:x] ≈ 1 + _SFN._CBAR_CELL_PAD && a[:xanchor] == "left" && a[:xref] == "paper"
+	plan = _SFN._room_plan(f)
+	slot = _SFN._room_slot(plan, :colorbar, "bar:2")
+	@test slot.side === :right && slot.edge == 1.0
+	@test b[:x] ≈ slot.edge + (slot.offset - _SFN._ROOM_GAP) / plan.Wp + _SFN._CBAR_CELL_PAD
+	@test (b[:x] - a[:x]) * plan.Wp >= _SFN._room_slot(plan, :colorbar, "bar:1").px
 	@test _SFN._finalize_figure!(f) === false
 	# A bar placed by the user stays.
 	g = Plot([heatmap(x = _SFN_X, y = _SFN_Y, z = permutedims(z)),
 		contour(x = _SFN_X, y = _SFN_Y, z = permutedims(2 .* z), colorbar = attr(x = 0.3))], Layout())
 	_SFN._finalize_figure!(g)
 	@test _sfn_bar(g.data[2])[:x] == 0.3
-	# colorbar! with an explicit position releases a bar finalize placed.
+	# colorbar! with an explicit position releases a bar finalize placed; a
+	# call without one keeps it where finalize put it.
 	e = plot_heatmap(_SFN_X, _SFN_Y, z; equalar = true)
-	_SFN._finalize_figure!(e)
 	@test _sfn_bar(e.data[1])[:xref] == "paper"
+	colorbar!(e; title = "kept")
+	@test _sfn_bar(e.data[1])[:xref] == "paper"
+	@test _sfn_bar(e.data[1])[:x] ≈ _SFN._layout_axis_domain(e.layout, :xaxis)[2] + _SFN._FIN_CBAR_PAD
 	colorbar!(e; x = 1.2)
 	@test _sfn_bar(e.data[1])[:x] == 1.2
 	@test !haskey(_sfn_bar(e.data[1]), :xref)
 	@test _SFN._finalize_figure!(e) === false
-	# A cell with a plot area to its right: the bars share the cell's
-	# height in one column instead of running into the next cell.
+	# A cell with a plot area to its right gives up the width its two bars
+	# need, so they end before that area's tick labels.
 	sf = subplots(1, 2; sync = false)
 	plot_heatmap!(sf, _SFN_X, _SFN_Y, z; row = 1, col = 1)
 	plot_contour!(sf, _SFN_X, _SFN_Y, 2 .* z; row = 1, col = 1)
 	plot_scatter!(sf, _SFN_X, sin.(_SFN_X); row = 1, col = 2)
+	grid = _SFN._plotlysupply_subplot_layout(sf.plot.layout.subplots)
+	xd = _SFN._layout_axis_domain(sf.plot.layout, :xaxis)
+	yd = _SFN._cmn_y_axis_domain(sf.plot.layout, :yaxis)
+	@test xd[1] == _SFN._layout_axis_domain(grid, :xaxis)[1]
+	@test xd[2] < _SFN._layout_axis_domain(grid, :xaxis)[2]
 	a = _sfn_bar(sf.plot.data[1])
 	b = _sfn_bar(sf.plot.data[2])
-	yd = _SFN._cmn_y_axis_domain(sf.plot.layout, :yaxis)
-	@test a[:x] ≈ b[:x]
-	@test a[:y] > b[:y]
-	@test a[:len] + b[:len] < yd[2] - yd[1]
-	@test a[:y] + a[:len] / 2 ≈ yd[2]
-	@test isapprox(b[:y] - b[:len] / 2, yd[1]; atol = 1e-9)
+	@test a[:x] ≈ xd[2] + _SFN._CBAR_CELL_PAD && b[:x] > a[:x]
+	@test a[:len] ≈ yd[2] - yd[1] && b[:len] ≈ yd[2] - yd[1]
+	@test a[:xref] == "paper" && b[:xref] == "paper"
+	plan = _SFN._room_plan(sf)
+	last_slot = _SFN._room_slot(plan, :colorbar, "bar:2")
+	neighbour = plan.areas[:xaxis2]
+	@test last_slot.offset + last_slot.px <=
+		(neighbour.ref[1][1] - last_slot.edge) * plan.Wp - neighbour.own[:left] + 1e-6
 	@test _SFN._finalize_figure!(sf) === false
 	# The last column keeps them side by side (the margin grows for them).
 	last = subplots(1, 2; sync = false)
@@ -456,6 +483,7 @@ end
 	plot_heatmap!(last, _SFN_X, _SFN_Y, z; row = 1, col = 2)
 	plot_contour!(last, _SFN_X, _SFN_Y, 2 .* z; row = 1, col = 2)
 	@test _sfn_bar(last.plot.data[3])[:x] > _sfn_bar(last.plot.data[2])[:x]
+	@test _SFN._layout_axis_domain(last.plot.layout, :xaxis2)[2] == 1.0
 	# The bar of a trace in an inset goes right of the host cell, level with
 	# the inset, never over the host plot.
 	si = subplots(1, 1; sync = false)
@@ -465,12 +493,14 @@ end
 	inset_bar = _sfn_bar(si.plot.data[2])
 	host = _SFN._layout_axis_domain(si.plot.layout, :xaxis)
 	@test inset_bar[:x] >= something(host, (0.0, 1.0))[2]
+	inset_y = _SFN._layout_axis_domain(si.plot.layout, :yaxis2)
+	@test inset_bar[:y] ≈ (inset_y[1] + inset_y[2]) / 2 && inset_bar[:len] ≈ inset_y[2] - inset_y[1]
 	@test _SFN._finalize_figure!(si) === false
 end
 
-@testset "an inner cell gives up the width its bar needs before the next cell (X33, X39)" begin
+@testset "D12: an inner cell gives up the width its bar needs before the next cell (X33, X39)" begin
 	z = _sfn_z(_SFN_X, _SFN_Y)
-	# Wide tick labels (-8000 ...) do not fit in the default gap of a 1x3 grid.
+	# Wide tick labels (-8000 ...) do not fit in the default gap of a 2x3 grid.
 	sf = subplots(2, 3; sync = false)
 	plot_heatmap!(sf, _SFN_X, _SFN_Y, 1e4 .* z; row = 1, col = 1)
 	plot_scatter!(sf, _SFN_X, sin.(_SFN_X); row = 1, col = 2)
@@ -486,7 +516,7 @@ end
 	bar = _sfn_bar(sf.plot.data[1])
 	@test bar[:x] ≈ xd[2] + _SFN._CBAR_CELL_PAD
 	@test bar[:xref] == "paper"
-	# The bar group ends before the tick labels of the next cell.
+	# The bar ends before the tick labels of the next cell.
 	W, H = 700.0, 500.0
 	accs = _SFN._fin_collect_axes(sf.plot)
 	m = _SFN._fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
@@ -496,7 +526,7 @@ end
 	@test neighbour.push > 20
 	items, _, _ = _SFN._fin_collect_bars(sf.plot, Any[])
 	width = _SFN._fin_bar_width(layout, items["x"][1], Hp)
-	@test (bar[:x] - xd[2]) * Wp + width <= (neighbour.x - xd[2]) * Wp - neighbour.push + 1e-6
+	@test (bar[:x] - xd[2]) * Wp + width <= (neighbour.x - xd[2]) * Wp - neighbour.push + 0.01
 	@test _SFN._finalize_figure!(sf) === false
 	# The export copy is fitted again for the export size.
 	for (w, wider) in ((500, false), (1400, true))
@@ -545,6 +575,110 @@ end
 	@test xd[2] ≈ cell[2]
 	@test title_x() ≈ (cell[1] + cell[2]) / 2
 	@test _SFN._finalize_figure!(st) === false
+	# Removing the bar (showscale = false) widens the cell as well.
+	sw = subplots(1, 2; sync = false)
+	plot_heatmap!(sw, _SFN_X, _SFN_Y, 1e4 .* z; row = 1, col = 1)
+	plot_scatter!(sw, _SFN_X, sin.(_SFN_X); row = 1, col = 2)
+	cell = _SFN._layout_axis_domain(_SFN._plotlysupply_subplot_layout(sw.plot.layout.subplots), :xaxis)
+	@test _SFN._layout_axis_domain(sw.plot.layout, :xaxis)[2] < cell[2]
+	before = deepcopy(sw.plot.data)
+	sw.plot.data[1].fields[:showscale] = false
+	@test _SFN._finalize_figure!(sw; live = before) === true
+	@test _SFN._finalize_figure!(sw) === false
+	@test _SFN._layout_axis_domain(sw.plot.layout, :xaxis)[2] ≈ cell[2]
+end
+
+@testset "D12: horizontal colorbars go below the x tick labels and title (G1, G65)" begin
+	z = _sfn_z(_SFN_X, _SFN_Y)
+	# Single figure: below the x title, the bottom margin grows for it.
+	h = plot_heatmap(_SFN_X, _SFN_Y, z)
+	xlabel!(h, "x label")
+	colorbar!(h; side = :bottom, title = "Amplitude")
+	bar = _sfn_bar(h.data[1])
+	plan = _SFN._room_plan(h)
+	slot = _SFN._room_slot(plan, :colorbar, "bar:1")
+	@test slot.side === :bottom && slot.offset >= plan.areas[:xaxis].own[:bottom] > 30
+	@test bar[:orientation] == "h" && bar[:yanchor] == "top" && bar[:yref] == "paper"
+	@test bar[:y] ≈ 0 - slot.offset / plan.Hp
+	@test bar[:x] ≈ 0.5 && bar[:len] ≈ 1.0
+	@test _SFN._finalize_figure!(h) === false
+	# A later call on the same side without a position keeps the bar and our
+	# mark; a new side moves it.
+	colorbar!(h; side = :bottom, title = "Amplitude (V)")
+	@test _sfn_bar(h.data[1])[:y] == bar[:y] && _sfn_bar(h.data[1])[:yref] == "paper"
+	colorbar!(h; side = :right)
+	bar = _sfn_bar(h.data[1])
+	@test bar[:orientation] == "v" && !haskey(bar, :yref)
+	# 2x2 grid: the upper row gives up the height the bar of cell (1,1)
+	# needs, so the bar stays out of cell (2,1); the row stays aligned.
+	sf = subplots(2, 2; sync = false, vertical_spacing = 0.2)
+	for r in 1:2, c in 1:2
+		plot_heatmap!(sf, _SFN_X, _SFN_Y, z; row = r, col = c)
+		xlabel!(sf, "x label"; row = r, col = c)
+	end
+	colorbar!(sf; row = 1, col = 1, side = :bottom, title = "bottom")
+	layout = sf.plot.layout
+	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
+	yd = _SFN._layout_axis_domain(layout, :yaxis)
+	@test yd[1] > _SFN._layout_axis_domain(grid, :yaxis)[1]
+	@test collect(_SFN._layout_axis_domain(layout, :yaxis2)) ≈ collect(yd)
+	@test collect(_SFN._layout_axis_domain(layout, :yaxis3)) ≈ collect(_SFN._layout_axis_domain(grid, :yaxis3))
+	plan = _SFN._room_plan(sf)
+	slot = _SFN._room_slot(plan, :colorbar, "bar:1")
+	bar = _sfn_bar(sf.plot.data[1])
+	@test bar[:y] ≈ yd[1] - slot.offset / plan.Hp
+	below = _SFN._layout_axis_domain(layout, :yaxis3)[2]
+	@test bar[:y] - slot.px / plan.Hp >= below - 1e-9
+	@test _SFN._finalize_figure!(sf) === false
+	# A bottom bar shared by a row of cells (shared_colorbar!) goes below
+	# their x titles.
+	row = subplots(1, 3; sync = false)
+	for c in 1:3
+		plot_heatmap!(row, _SFN_X, _SFN_Y, c .* z; row = 1, col = c)
+		xlabel!(row, "x title"; row = 1, col = c)
+	end
+	shared_colorbar!(row; side = :bottom, title = "shared")
+	shared = _sfn_fields(_sfn_fields(row.plot.layout.fields[:coloraxis])[:colorbar])
+	plan = _SFN._room_plan(row)
+	slot = _SFN._room_slot(plan, :colorbar, "coloraxis:coloraxis")
+	@test slot.offset > plan.areas[:xaxis].own[:bottom]
+	@test shared[:y] ≈ 0 - slot.offset / plan.Hp && shared[:yref] == "paper"
+	@test shared[:len] ≈ 0.75
+	@test _SFN._finalize_figure!(row) === false
+end
+
+@testset "D12: room requests of other owners (contract)" begin
+	sf = subplots(1, 2; sync = false)
+	plot_scatter!(sf, _SFN_X, sin.(_SFN_X); row = 1, col = 1)
+	plot_scatter!(sf, _SFN_X, cos.(_SFN_X); row = 1, col = 2)
+	plan = _SFN._room_plan(sf)
+	@test isempty(plan.requests)
+	@test _SFN._room_domain(plan, :xaxis) == plan.areas[:xaxis].current
+	@test _SFN._room_slot(plan, :colorbar, "bar:1") === nothing
+	@test_throws ArgumentError _SFN._request_room!(plan, :xaxis, :middle, 10; owner = :test, key = "k")
+	@test_throws ArgumentError _SFN._request_room!(plan, :xaxis, :right, -1; owner = :test, key = "k")
+	@test_throws ArgumentError _SFN._request_room!(plan, :xaxis, :right, Inf; owner = :test, key = "k")
+	_SFN._request_room!(plan, :nosuch, :right, 10; owner = :test, key = "k")
+	@test isempty(plan.requests)
+	# A request on the right of the left cell: the cell gives up what the
+	# gap to its neighbour's tick labels cannot hold.
+	_SFN._request_room!(plan, :xaxis, :right, 80; owner = :test, key = "k", margin_pushed = true)
+	_SFN._room_set_refs!(plan)
+	_SFN._room_solve!(plan)
+	_SFN._room_assign_slots!(plan)
+	slot = _SFN._room_slot(plan, :test, "k")
+	ref = plan.areas[:xaxis].ref
+	gap = (plan.areas[:xaxis2].ref[1][1] - ref[1][2]) * plan.Wp
+	facing = plan.areas[:xaxis2].own[:left]
+	@test slot.edge ≈ ref[1][2] - (_SFN._ROOM_GAP + 80 - (gap - facing)) / plan.Wp
+	@test slot.offset == _SFN._ROOM_GAP && slot.px == 80 && !slot.release
+	@test _SFN._room_domain(plan, :xaxis)[1][2] == slot.edge
+	# Text size helpers.
+	@test _SFN._room_text_width("<b>abc</b>", 10) ≈ 18
+	@test _SFN._room_text_width("ab<br>abcd", 10) ≈ 24
+	@test _SFN._room_text_height("a<br>b", 10) ≈ 28
+	@test _SFN._room_text_height(raw"$\frac{a}{b}$", 10) ≈ 22
+	@test _SFN._room_text_height("", 10) == 0
 end
 
 @testset "a shared scene coloraxis spreading to existing surfaces moves its bar (K11)" begin
@@ -610,12 +744,13 @@ end
 		info = _sfn_render(over)
 		@test close_to(_sfn_range(info, :xaxis), _SFN_XE)
 		@test close_to(_sfn_range(info, :yaxis), _SFN_YE)
-		# Data outside the field: the range grows to it without padding.
+		# Data outside the field: the range grows to it, padded on that side.
 		out = plot_heatmap(_SFN_X, _SFN_Y, z)
 		plot_scatter!(out, [5.5], [-1.0]; mode = "markers")
 		info = _sfn_render(out)
-		@test close_to(_sfn_range(info, :xaxis), (-0.25, 5.5))
-		@test close_to(_sfn_range(info, :yaxis), (-1.0, 2.25))
+		pad = _SFN._FIN_OVERLAY_PAD
+		@test close_to(_sfn_range(info, :xaxis), (-0.25, 5.5 + pad * 5.75))
+		@test close_to(_sfn_range(info, :yaxis), (-1.0 - pad * 3.25, 2.25))
 		# origin = :upper: reversed, still exact.
 		info = _sfn_render(plot_heatmap(_SFN_X, _SFN_Y, z; origin = :upper))
 		@test close_to(_sfn_range(info, :yaxis), (2.25, -0.25))

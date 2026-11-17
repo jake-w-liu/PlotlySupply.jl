@@ -292,9 +292,15 @@ end
 		)
 		b1 = _scb_bar(sf.plot.data[1])
 		@test b1[:orientation] == "h"
-		@test b1[:y] ≈ yd1[1] - _SCB._CBAR_BOTTOM_OFFSET
-		@test b1[:yanchor] == "top"
-		@test b1[:x] ≈ _scb_mid(xd1)
+		# Below the x tick labels (D12, G1): `len` keeps finalize's placement,
+		# centred on the cell, which has its width back (its right bar went).
+		plan = _SCB._room_plan(sf)
+		slot = _SCB._room_slot(plan, :colorbar, "bar:1")
+		@test slot.side === :bottom && slot.offset > plan.areas[:xaxis].own[:bottom] > 0
+		@test b1[:y] ≈ yd1[1] - slot.offset / plan.Hp
+		@test b1[:yanchor] == "top" && b1[:yref] == "paper"
+		@test b1[:x] ≈ _scb_mid(_scb_axis(sf, :xaxis)[:domain])
+		@test _scb_axis(sf, :xaxis)[:domain][2] ≈ 0.45
 		@test b1[:len] ≈ 0.3
 		@test b1[:tickmode] == "array"
 		@test b1[:tickvals] == [0.0, 0.5, 1.0]
@@ -424,7 +430,13 @@ end
 		bar = _scb_axis_bar(grid)
 		top = _scb_axis(grid, :yaxis)[:domain]
 		@test bar[:orientation] == "h"
-		@test bar[:y] ≈ top[1] - _SCB._CBAR_BOTTOM_OFFSET
+		# Below the x tick labels of row 1, which gives up the height the bar
+		# needs so that it stays clear of row 2 (D12, G1).
+		plan = _SCB._room_plan(grid)
+		slot = _SCB._room_slot(plan, :colorbar, "coloraxis:coloraxis")
+		@test bar[:y] ≈ top[1] - slot.offset / plan.Hp
+		@test bar[:y] - slot.px / plan.Hp >= _scb_axis(grid, :yaxis3)[:domain][2] - 1e-9
+		@test collect(_scb_axis(grid, :yaxis2)[:domain]) ≈ collect(top)
 		@test bar[:len] ≈ 0.5
 		@test bar[:x] ≈ 0.5
 
@@ -449,7 +461,8 @@ end
 		layout_before = deepcopy(check.plot.layout)
 		for (kwargs, needle) in (
 			((crange=[1, 0],), "increasing"),
-			((crange=[0, 1], cmid=0.5), "cmid"),
+			((crange=[0, 1], cmid=1.0), "cmid"),
+			((crange=[0, 1], cmid=-0.5), "strictly inside"),
 			((cmid=NaN,), "cmid"),
 			((len=0,), "len"),
 			((side=:left,), "`side`"),
@@ -733,5 +746,139 @@ end
 		@test bar[:len] ≈ 0.45
 		@test bar[:y] ≈ 0.225
 		@test !haskey(bar, :xref)
+	end
+	@testset "a hidden bar keeps the math title of the shown one (G47)" begin
+		r = collect(range(1.0, 2.0; length=6))
+		θ = collect(range(0.0, π; length=9))
+		X = [ri * sin(t) for ri in r, t in θ]
+		Z = [ri * cos(t) for ri in r, t in θ]
+		C = [ri + t for ri in r[1:end-1], t in θ[1:end-1]]
+		T = raw"$|E_\phi|$"
+		for side in (:top, :right)
+			mirror = plot_pcolormesh(X, Z, C; colorscale="magma")
+			plot_pcolormesh!(mirror, -X, Z, C; colorscale="magma", showscale=false)
+			colorbar!(mirror; title=T, title_side=side)
+			notes = _scb_annotations(mirror, _SCB._CBAR_TITLE_ANNOTATION_PREFIX)
+			@test length(notes) == 1
+			@test endswith(notes[1][:name], ":$(side)") && occursin("E_\\phi", notes[1][:text])
+			# A later edit (no new title) keeps it too.
+			colorbar!(mirror; ticks=[1, 2, 3])
+			@test length(_scb_annotations(mirror, _SCB._CBAR_TITLE_ANNOTATION_PREFIX)) == 1
+
+			h = plot_heatmap(rand(4, 4))
+			plot_heatmap!(h, 4:7, 0:3, rand(4, 4); showscale=false)
+			colorbar!(h; title=T, title_side=side)
+			@test length(_scb_annotations(h, _SCB._CBAR_TITLE_ANNOTATION_PREFIX)) == 1
+		end
+		# The hidden bar gets the title on the bar (nothing drawn).
+		h = plot_heatmap(rand(4, 4))
+		plot_heatmap!(h, 4:7, 0:3, rand(4, 4); showscale=false)
+		colorbar!(h; title="plain")
+		@test _scb_title(_scb_bar(h.data[1]))[:text] == "plain"
+		@test isempty(_scb_annotations(h, _SCB._CBAR_TITLE_ANNOTATION_PREFIX))
+	end
+
+	@testset "shared_colorbar! keeps the colours the traces were drawn with (G2)" begin
+		sf = subplots(1, 2; sync=false)
+		plot_heatmap!(sf, [-1.0 0.5; 0.2 1.0]; row=1, col=1)
+		plot_heatmap!(sf, [-2.0 0.5; 0.2 3.0]; row=1, col=2)
+		@test !haskey(sf.plot.data[1].fields, :colorscale)
+		shared_colorbar!(sf)
+		axis = _scb_axis(sf, :coloraxis)
+		# The template's heatmap scale, so plotly's autocolorscale does not
+		# switch signed data to a diverging scale.
+		template = _scb_layout(sf)[:template]
+		@test axis[:colorscale] == _scb_fields(first(template.data[:heatmap]))[:colorscale]
+		# A scale a trace sets wins.
+		named = subplots(1, 2; sync=false)
+		plot_heatmap!(named, rand(2, 2); row=1, col=1, colorscale="viridis")
+		plot_heatmap!(named, rand(2, 2); row=1, col=2)
+		shared_colorbar!(named)
+		@test _scb_axis(named, :coloraxis)[:colorscale] == named.plot.data[1].fields[:colorscale]
+	end
+
+	@testset "shared_colorbar! cmid inside an explicit crange (G8)" begin
+		sf, _ = _scb_heatmap_grid(1, 2)
+		shared_colorbar!(sf; crange=[-1, 3], cmid=0, colorscale="RdBu")
+		axis = _scb_axis(sf, :coloraxis)
+		@test (axis[:cmin], axis[:cmax]) == (-1.0, 3.0)
+		@test !haskey(axis, :cmid)
+		stops = _SCB._cbar_scale_stops(axis[:colorscale], false)
+		base = _SCB._cbar_scale_stops("RdBu", false)
+		# Two-slope remap (F4): the scale's middle (0.5) moves to cmid at 0.25.
+		@test _SCB._cbar_same_stops(stops, _SCB._cbar_scale_stops(_SCB._two_slope_stops(base, 0.25), false))
+		@test first(stops)[2] == first(base)[2] && last(stops)[2] == last(base)[2]
+		@test issorted([Float64(t) for (t, _) in stops])
+		@test stops != base
+		# cmid in the middle of the range: the scale is unchanged.
+		even, _ = _scb_heatmap_grid(1, 2)
+		shared_colorbar!(even; crange=[-1, 1], cmid=0, colorscale="RdBu")
+		@test _SCB._cbar_same_stops(_SCB._cbar_scale_stops(_scb_axis(even, :coloraxis)[:colorscale], false), base)
+	end
+
+	@testset "colorbar! keeps finalize's placement; x and y release it" begin
+		sf = subplots(1, 2; sync=false)
+		plot_heatmap!(sf, 1e4 .* rand(4, 4); row=1, col=1)
+		plot_scatter!(sf, 1:3, 1:3; row=1, col=2)
+		bar = _scb_bar(sf.plot.data[1])
+		@test bar[:xref] == "paper"                      # the cell is narrowed for it
+		x0 = bar[:x]
+		colorbar!(sf; row=1, col=1, title="T")
+		bar = _scb_bar(sf.plot.data[1])
+		@test bar[:xref] == "paper" && bar[:x] ≈ x0 && bar[:len] ≈ 1.0
+		# `len` keeps the placement and our mark, centred on the cell.
+		colorbar!(sf; row=1, col=1, len=0.5)
+		bar = _scb_bar(sf.plot.data[1])
+		@test bar[:xref] == "paper" && bar[:len] ≈ 0.5 && bar[:y] ≈ 0.5
+		# Without `len` again the bar follows the cell.
+		colorbar!(sf; row=1, col=1)
+		@test _scb_bar(sf.plot.data[1])[:len] ≈ 1.0
+		# x/y place it: no mark, finalize leaves it alone.
+		colorbar!(sf; row=1, col=1, x=0.3, y=0.4)
+		bar = _scb_bar(sf.plot.data[1])
+		@test (bar[:x], bar[:y]) == (0.3, 0.4) && !haskey(bar, :xref)
+		@test _SCB._finalize_figure!(sf) === false
+		@test (_scb_bar(sf.plot.data[1])[:x], _scb_bar(sf.plot.data[1])[:y]) == (0.3, 0.4)
+		# A horizontal bar carries the mark on y.
+		colorbar!(sf; row=1, col=1, side=:bottom)
+		bar = _scb_bar(sf.plot.data[1])
+		@test bar[:yref] == "paper" && bar[:yanchor] == "top" && !haskey(bar, :xref)
+		@test _SCB._fin_bar_owned(bar)
+		colorbar!(sf; row=1, col=1, side=:bottom, y=-0.3)
+		bar = _scb_bar(sf.plot.data[1])
+		@test bar[:y] == -0.3 && !haskey(bar, :yref) && !_SCB._fin_bar_owned(bar)
+	end
+
+	@testset "short titled bars still render (G63)" begin
+		x = range(0, 6; length=121)
+		y = range(0, 1.8; length=37)
+		sf = subplots(1, 2; sync=false, horizontal_spacing=0.16)
+		for c in 1:2
+			plot_heatmap!(sf, x, y, [c * sin(a) * b for a in x, b in y]; row=1, col=c, equalar=true,
+				colorscale="cividis")
+		end
+		shared_colorbar!(sf; title="u", len=0.4)
+		@test _SCB._finalize_figure!(sf) === false
+		# The export at 5.25 x 2 in: the bar keeps room for its title and a
+		# tick label (shorter, plotly.js fails with "axis scaling").
+		size = (5.25 * 96, 2.0 * 96)
+		copy = _SCB._finalize_export_copy(sf.plot, (width=size[1], height=size[2]))
+		bar = _scb_fields(_scb_fields(copy.layout.fields[:coloraxis])[:colorbar])
+		plan = _SCB._room_plan(copy; size=size)
+		font = plan.font
+		need = _SCB._CBAR_LINE_EM * font + 2 + _SCB._CBAR_LINE_EM * font + 4
+		@test bar[:len] * plan.Hp >= need - 1e-6
+		yd = _scb_fields(copy.layout.fields[:yaxis])[:domain]
+		@test bar[:len] > 0.4 * (yd[2] - yd[1])           # the 0.4 ratio was too short here
+		path = tempname() * ".png"
+		try
+			savefig(sf, path; width=5.25, height=2.0, units=:in, dpi=100)
+			@test isfile(path) && filesize(path) > 0
+		catch err
+			occursin("axis scaling", sprint(showerror, err)) && rethrow()
+			@warn "sci_colorbar: export unavailable; G63 render check skipped" exception = err
+		finally
+			rm(path; force=true)
+		end
 	end
 end
