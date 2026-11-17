@@ -3234,7 +3234,7 @@ PlotlyBase.JSON.lower(::_TransactionJSONFailure) =
     snapshot = _transaction_snapshot(p)
     try
         @test_throws BoundsError deletetraces!(sp, 3)
-        @test_throws Exception deletetraces!(sp, 1, 1)
+        @test_throws ArgumentError deletetraces!(sp, 1, 1)
         @test_throws DimensionMismatch movetraces!(
             sp,
             [1],

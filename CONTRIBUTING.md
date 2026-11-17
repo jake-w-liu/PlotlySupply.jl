@@ -21,7 +21,7 @@ If you have an idea for a new feature, please provide a clear and detailed expla
 
 ## Project Scope
 
-PlotlySupply.jl aims to be a lightweight wrapper around PlotlyJS.jl, providing high-level abstractions for common 2D and 3D plots. The goal is to simplify the creation of plots with a consistent and intuitive API.
+PlotlySupply.jl is a high-level plotting layer on top of [PlotlyBase.jl](https://github.com/sglyon/PlotlyBase.jl). It provides scientific 2D and 3D plot functions with a consistent API, renders and exports figures through its own [ElectronCall.jl](https://github.com/IanButterworth/ElectronCall.jl) desktop backend, and ships plotly.js 2.35.2 as a lazy artifact. It does not require PlotlyJS.jl or WebIO.jl.
 
 Contributions should align with this scope. We are particularly interested in:
 
@@ -33,16 +33,28 @@ Contributions should align with this scope. We are particularly interested in:
 We are generally not looking to:
 
 - Add highly specialized or niche plot types.
-- Replicate the full functionality of PlotlyJS.jl.
+- Replicate the full functionality of PlotlyBase.jl/plotly.js (the raw trace and layout API stays available through the re-exported PlotlyBase names).
 - Introduce significant new dependencies.
 
 ## Development
 
 1.  Fork the repository and create a new branch from `main`.
 2.  Make your changes.
-3.  Add tests for your changes.
-4.  Ensure your code is well-documented.
+3.  Add tests for your changes (see below).
+4.  Ensure your code is well-documented: every exported function needs a complete docstring, because the documentation build (`docs/make.jl`) fails on missing docstrings.
 5.  Open a pull request.
+
+### Running the tests
+
+The test suite opens real (hidden) Electron windows and exports images, so it needs a display:
+
+- macOS and Windows: run it from a normal desktop session.
+- Headless Linux: run it inside a virtual X server, as CI does, e.g.
+  `xvfb-run -a -s "-screen 0 1920x1080x24" julia --project -e 'using Pkg; Pkg.test()'`.
+
+Run the whole suite with `julia --project -e 'using Pkg; Pkg.test()'` (or `julia --project=. test/runtests.jl`).
+Every file in `test/` also runs on its own, e.g. `julia --project=. test/regression_scatter.jl`: it starts with `using Test` and `using PlotlySupply`, and a file that uses the shared fixtures in `test/testutils.jl` loads them with `isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")`.
+New test files named `test/sci_*.jl` or `test/regression_*.jl` are picked up by `test/runtests.jl` automatically; any other test file must be added to its `include` list. Packages a test file loads with `using` must be listed in `Project.toml` (`[deps]`, or `[extras]` plus `[targets]`), because `Pkg.test()` cannot load anything else. Assert the exception type a call throws (`@test_throws ArgumentError ...`), not `Exception`. `test/hygiene.jl` checks these rules.
 
 ## License
 

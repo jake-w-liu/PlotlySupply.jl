@@ -1,3 +1,7 @@
+using Test
+using PlotlySupply
+using Base64
+
 mutable struct _ExportTestApp
     exists::Bool
 end

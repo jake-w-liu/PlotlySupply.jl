@@ -372,8 +372,8 @@ end
 		@test (sf.current_row, sf.current_col) == (1, 2)
 		@test addtraces!(sf, 4, scatter(y=[1]); row=1, col=1) === sf
 		@test length(sf.plot.data) == 4
-		@test_throws Exception addtraces!(sf, 6, scatter(y=[1]); row=1, col=1)
-		@test_throws Exception addtraces!(sf, 0, scatter(y=[1]); row=1, col=1)
+		@test_throws ArgumentError("addtraces!: insertion index must be in 1:5; got 6.") addtraces!(sf, 6, scatter(y=[1]); row=1, col=1)
+		@test_throws ArgumentError("addtraces!: insertion index must be in 1:5; got 0.") addtraces!(sf, 0, scatter(y=[1]); row=1, col=1)
 		@test length(sf.plot.data) == 4
 	end
 
@@ -536,7 +536,7 @@ end
 			first_surface = failing.plot.data[1]
 			layout_before = deepcopy(failing.plot.layout)
 			failing_renderer.fail = true
-			@test_throws Exception plot_surface!(failing, rand(3, 3); row=1, col=2, shared_coloraxis=true)
+			@test_throws PlotlySupply._SyncPlotDesynchronizationError plot_surface!(failing, rand(3, 3); row=1, col=2, shared_coloraxis=true)
 			@test length(failing.plot.data) == 1
 			@test failing.plot.data[1] === first_surface
 			@test !haskey(failing.plot.data[1].fields, :coloraxis)

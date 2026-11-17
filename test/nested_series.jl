@@ -1,3 +1,8 @@
+using Test
+using PlotlySupply
+
+isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
+
 function _nested_series_auto_x_allocated(values)
     PlotlySupply._auto_xvalues(values)
     return @allocated PlotlySupply._auto_xvalues(values)

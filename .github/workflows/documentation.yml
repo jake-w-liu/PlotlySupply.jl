@@ -3,25 +3,38 @@ name: Documentation
 on:
   push:
     branches:
-      - main # update to match your development branch (master, main, dev, trunk, ...)
+      - main
+    tags: ['*']
   pull_request:
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+# Least privilege: each job asks only for the scopes it needs.
+permissions:
+  contents: read
 jobs:
   cleanup:
-      runs-on: ubuntu-latest
-      permissions: write-all
-      steps:
-        - name: Delete deployment
-          uses: strumwolf/delete-deployment-environment@v2
-          with:
-            token: ${{ secrets.GITHUB_TOKEN }}
-            environment: github-pages
-            onlyRemoveDeployments: true
+    # Clears the old github-pages deployment records before a deploy from main.
+    # It never runs on pull requests, and the build does not depend on its result.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      deployments: write
+    steps:
+      - name: Delete old deployment records
+        uses: strumwolf/delete-deployment-environment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          environment: github-pages
+          onlyRemoveDeployments: true
   build:
+    needs: cleanup
+    # Run whether cleanup succeeded, failed or was skipped (pull requests).
+    if: ${{ !cancelled() }}
     # These permissions are needed to:
     # - Deploy the documentation: https://documenter.juliadocs.org/stable/man/hosting/#Permissions
     # - Delete old caches: https://github.com/julia-actions/cache#usage
-    needs: cleanup
     permissions:
       actions: write
       contents: write
@@ -29,11 +42,11 @@ jobs:
       statuses: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
         with:
-          version: '1.12'
-      - uses: julia-actions/cache@v2
+          version: '1'
+      - uses: julia-actions/cache@v3
       - name: Install dependencies
         shell: julia --color=yes --project=docs {0}
         run: |
@@ -41,9 +54,7 @@ jobs:
           Pkg.develop(PackageSpec(path=pwd()))
           Pkg.instantiate()
       - name: Build and deploy
-        run: julia --project=docs --code-coverage=user docs/make.jl
+        run: julia --color=yes --project=docs docs/make.jl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
-      - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v5
