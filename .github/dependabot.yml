@@ -1,0 +1,12 @@
+# Keeps the GitHub Actions used by .github/workflows on current versions.
+# Julia package compat bounds are maintained by CompatHelper.yml.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      all-actions:
+        patterns:
+          - "*"

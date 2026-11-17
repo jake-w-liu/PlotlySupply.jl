@@ -1,6 +1,21 @@
 /Manifest.toml
 
-test.jl
+/test.jl
 docs/build
 
 .DS_Store
+
+# Resolved environments are machine/Julia-version specific: CI resolves its own.
+Manifest.toml
+docs/Manifest.toml
+docs/build/
+
+# Coverage and allocation output (Pkg.test(coverage=true), julia-actions).
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+*.jl.*.mem
+lcov.info
+
+# Local agent/tool state.
+.claude/
