@@ -21,6 +21,74 @@ _t3_backend(scripts) = (
 )
 _t3_syncplot(p, scripts) =
 	SyncPlot(p, nothing, :t3_window, "t3-div", PlotlySupply._SyncPlotResources(nothing, _t3_backend(scripts)))
+_t3_dot(a, b) = sum(a .* b)
+_t3_cross(a, b) = [a[2] * b[3] - a[3] * b[2], a[3] * b[1] - a[1] * b[3], a[1] * b[2] - a[2] * b[1]]
+_t3_unit(a) = a ./ sqrt(_t3_dot(a, a))
+_t3_norm(a) = sqrt(_t3_dot(a, a))
+
+# Independent model of plotly.js's 3-D projection: a lookAt view matrix from
+# the scene camera and the perspective matrix (fovy = π/4, aspect = viewport
+# width / height). Returns point -> normalised device (x, y).
+function _t3_projector(fig, key::Symbol = :scene; viewport)
+	camera = _t3_camera(fig, key)
+	eye = collect(Float64, _t3_xyz(camera[:eye]))
+	center = haskey(camera, :center) ? collect(Float64, _t3_xyz(camera[:center])) : zeros(3)
+	up = haskey(camera, :up) ? collect(Float64, _t3_xyz(camera[:up])) : [0.0, 0.0, 1.0]
+	f = _t3_unit(center .- eye)
+	s = _t3_unit(_t3_cross(f, up))
+	u = _t3_cross(s, f)
+	view = [s' -_t3_dot(s, eye); u' -_t3_dot(u, eye); -f' _t3_dot(f, eye); 0.0 0.0 0.0 1.0]
+	w, h = viewport
+	t = 1 / tan(π / 8)
+	near, far = 0.01, 1000.0
+	projection = [
+		t/(w / h) 0.0 0.0 0.0
+		0.0 t 0.0 0.0
+		0.0 0.0 (far + near)/(near - far) 2 * far * near/(near - far)
+		0.0 0.0 -1.0 0.0
+	]
+	return point -> (clip = projection * view * [point; 1.0]; (clip[1] / clip[4], clip[2] / clip[4]))
+end
+
+# The largest corner coordinate of the scene box (side lengths `box`, centred
+# on the origin, as gl-plot3d draws it) relative to the viewport half-size less
+# `pad` pixels per side: 1 when the box just fits.
+function _t3_fill(fig, key::Symbol = :scene; viewport, pad, box)
+	project = _t3_projector(fig, key; viewport)
+	w, h = viewport
+	limit_x, limit_y = 1 - 2 * pad / w, 1 - 2 * pad / h
+	worst = 0.0
+	for sx in (-0.5, 0.5), sy in (-0.5, 0.5), sz in (-0.5, 0.5)
+		x, y = project([sx * box[1], sy * box[2], sz * box[3]])
+		worst = max(worst, abs(x) / limit_x, abs(y) / limit_y)
+	end
+	return worst
+end
+
+# Expected automatic tick counts of a cell scene: one tick per 40 px of the
+# projected centre line of each box axis, 2 to 9.
+function _t3_expected_nticks(fig, key::Symbol; viewport, box)
+	project = _t3_projector(fig, key; viewport)
+	w, h = viewport
+	return map(1:3) do d
+		half = zeros(3)
+		half[d] = box[d] / 2
+		(xa, ya), (xb, yb) = project(half), project(-half)
+		clamp(floor(Int, hypot((xa - xb) * w / 2, (ya - yb) * h / 2) / 40), 2, 9)
+	end
+end
+_t3_nticks(fig, key::Symbol = :scene) = [
+	get(_t3_fields(get(_t3_scene(fig, key), axis, Dict{Symbol, Any}())), :nticks, nothing)
+	for axis in (:xaxis, :yaxis, :zaxis)
+]
+_t3_eye(fig, key::Symbol = :scene) = collect(Float64, _t3_xyz(_t3_camera(fig, key)[:eye]))
+_t3_ratio(fig, key::Symbol = :scene) = collect(Float64, _t3_xyz(_t3_scene(fig, key)[:aspectratio]))
+# Viewport of a cell: the default 700×500 figure inside the default margins
+# (600×390 px) times the scene's domain fractions.
+function _t3_cell_viewport(fig, key::Symbol)
+	domain = _t3_fields(_t3_scene(fig, key)[:domain])
+	return (600.0 * (domain[:x][2] - domain[:x][1]), 390.0 * (domain[:y][2] - domain[:y][1]))
+end
 
 @testset "sci: 3-D scenes" begin
 	@testset "_label3d converts TeX for WebGL text (A8)" begin
@@ -73,15 +141,21 @@ _t3_syncplot(p, scripts) =
 		e = 2 .* [cosd(30) * cosd(-60), cosd(30) * sind(-60), sind(30)]
 		@test collect(_t3_xyz(_t3_camera(f)[:eye])) ≈ [e[2], e[3], e[1]]
 		@test collect(_t3_xyz(_t3_camera(f)[:up])) == [0.0, 1.0, 0.0]
-		# Automatic distance frames the unit cube in the default 700×500 figure.
+		# Automatic distance: the unit cube's corners just fit the default
+		# 700×500 figure's viewport (600×390 px inside the default margins)
+		# less three 12 px font sizes per side for the labels.
 		view!(f; elev = 30, azim = -60)
-		radius = 0.5 * sqrt(3)
-		half = atan(min(1.0, 600 / 390) * tan(π / 8))
-		@test sqrt(sum(abs2, collect(_t3_xyz(_t3_camera(f)[:eye])))) ≈ 1.05 * radius / sin(half)
+		@test _t3_fill(f; viewport = (600.0, 390.0), pad = 36.0, box = ones(3)) ≈ 1 atol = 1e-9
+		auto = _t3_norm(collect(_t3_xyz(_t3_camera(f)[:eye])))
 		view!(f; elev = 30, azim = -60, zoom = 2)
-		@test sqrt(sum(abs2, collect(_t3_xyz(_t3_camera(f)[:eye])))) ≈ 1.05 * radius / sin(half) / 2
-		# Spec F31 reference: box (1, 0.25, 0.25) in a 0.32-wide cell of a 900×350
-		# figure with zero margins is framed at distance 1.726.
+		@test _t3_norm(collect(_t3_xyz(_t3_camera(f)[:eye]))) ≈ auto / 2
+		# A larger font leaves more room.
+		relayout!(f; font = attr(size = 20))
+		view!(f; elev = 30, azim = -60)
+		@test _t3_fill(f; viewport = (600.0, 390.0), pad = 60.0, box = ones(3)) ≈ 1 atol = 1e-9
+		@test _t3_norm(collect(_t3_xyz(_t3_camera(f)[:eye]))) > auto
+		# Spec F31 case: box (1, 0.25, 0.25) in a 0.32-wide cell of a 900×350
+		# figure with zero margins (the corner fit replaces 1.x's sphere fit).
 		cell = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; width = 900, height = 350)
 		relayout!(cell; margin = attr(l = 0, r = 0, t = 0, b = 0))
 		_t3_scene(cell)[:domain] = Dict{Symbol, Any}(:x => [0, 0.32], :y => [0, 1])
@@ -89,8 +163,12 @@ _t3_syncplot(p, scripts) =
 		scene!(cell; aspectratio = (1, 0.25, 0.25))
 		view!(cell; elev = 20, azim = -65)
 		eye = collect(_t3_xyz(_t3_camera(cell)[:eye]))
-		@test sqrt(sum(abs2, eye)) ≈ 1.726 atol = 1e-3
+		@test _t3_fill(cell; viewport = (288.0, 350.0), pad = 36.0, box = [1.0, 0.25, 0.25]) ≈ 1 atol = 1e-9
 		@test eye ./ sqrt(sum(abs2, eye)) ≈ [cosd(20) * cosd(-65), cosd(20) * sind(-65), sind(20)]
+		# A camera centre off the box centre still shows the whole box.
+		relayout!(cell; scene_camera_center = attr(x = 0.2, y = 0.0, z = 0.0))
+		view!(cell; elev = 20, azim = -65)
+		@test _t3_fill(cell; viewport = (288.0, 350.0), pad = 36.0, box = [1.0, 0.25, 0.25]) ≈ 1 atol = 1e-9
 		# Projection switch; orthographic zoom scales the scene box.
 		view!(f; projection = "orthographic", zoom = 1.5)
 		@test _t3_fields(_t3_camera(f)[:projection])[:type] == "orthographic"
@@ -123,6 +201,78 @@ _t3_syncplot(p, scripts) =
 		ev = collect(_t3_xyz(_t3_camera(h)[:eye]))
 		@test ev ./ sqrt(sum(abs2, ev)) ≈ [cosd(45), 0.0, sind(45)] atol = 1e-12
 		@test_throws ArgumentError plot_surface(rand(3, 3); view = (10,))
+	end
+
+	@testset "automatic camera, aspect pinning and cell tick counts (v3)" begin
+		# A constructor frames a perspective scene with plotly's default
+		# direction at the automatic distance.
+		f = _t3_cube()
+		eye = _t3_eye(f)
+		@test eye ./ _t3_norm(eye) ≈ fill(1 / sqrt(3), 3)
+		@test _t3_fill(f; viewport = (600.0, 390.0), pad = 36.0, box = ones(3)) ≈ 1 atol = 1e-9
+		# Orthographic scenes keep plotly's camera.
+		@test !haskey(_t3_camera(plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; perspective = false)), :eye)
+		# "data" with an explicit range: plotly ignores the range for the aspect,
+		# so the spans are pinned as manual ratios (autorange spans pad 1/32 per
+		# side, plotly.js gl3d autorange).
+		g = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 1.0]; aspectmode = "data", zrange = (0, 4))
+		@test _t3_scene(g)[:aspectmode] == "manual"
+		@test _t3_ratio(g) ≈ [2.125, 1.0625, 4.0] ./ 4
+		@test _t3_fill(g; viewport = (600.0, 390.0), pad = 36.0, box = _t3_ratio(g)) ≈ 1 atol = 1e-9
+		# A later append re-derives the pinned ratios and re-frames the camera.
+		plot_scatter3d!(g, [0.0, 4.0], [0.0, 1.0], [0.0, 1.0])
+		@test _t3_ratio(g) ≈ [4.25, 1.0625, 4.0] ./ 4.25
+		@test _t3_fill(g; viewport = (600.0, 390.0), pad = 36.0, box = _t3_ratio(g)) ≈ 1 atol = 1e-9
+		# "auto" with a range that makes one span over four times another: a cube.
+		a = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; zrange = (0, 10))
+		@test _t3_scene(a)[:aspectmode] == "manual"
+		@test _t3_ratio(a) ≈ ones(3)
+		# "cube" with a range is left alone.
+		c = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; aspectmode = "cube", zrange = (0, 10))
+		@test _t3_scene(c)[:aspectmode] == "cube"
+		# A user's manual ratio and camera are kept by later calls.
+		scene!(g; aspectratio = (1, 2, 3))
+		relayout!(g; scene_camera_eye = attr(x = 3.0, y = 0.0, z = 0.0))
+		plot_scatter3d!(g, [0.0, 8.0], [0.0, 1.0], [0.0, 1.0])
+		@test _t3_ratio(g) ≈ [1.0, 2.0, 3.0]
+		@test _t3_eye(g) ≈ [3.0, 0.0, 0.0]
+		# A fixed view! distance is kept; an automatic one follows the data.
+		h = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; aspectmode = "data", zrange = (0, 1))
+		view!(h; elev = 20, azim = 10, distance = 3)
+		plot_scatter3d!(h, [0.0, 5.0], [0.0, 1.0], [0.0, 1.0])
+		@test _t3_norm(_t3_eye(h)) ≈ 3
+		view!(h; elev = 20, azim = 10)
+		plot_scatter3d!(h, [0.0, 9.0], [0.0, 1.0], [0.0, 1.0])
+		@test _t3_fill(h; viewport = (600.0, 390.0), pad = 36.0, box = _t3_ratio(h)) ≈ 1 atol = 1e-9
+		@test _t3_eye(h) ./ _t3_norm(_t3_eye(h)) ≈ [cosd(20) * cosd(10), cosd(20) * sind(10), sind(20)]
+		# scene! with an explicit aspect mode and a range pins too.
+		k = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 1.0])
+		scene!(k; aspectmode = "data", zrange = (0, 4))
+		@test _t3_ratio(k) ≈ [2.125, 1.0625, 4.0] ./ 4
+		# A full-size scene keeps plotly's own tick counts.
+		@test _t3_nticks(f) == [nothing, nothing, nothing]
+		# Scene cells: framed in their own viewport, with tick counts for it.
+		sf = _t3_scene_sf(3)
+		plot_scatter3d!(sf, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2, aspectmode = "cube")
+		viewport = _t3_cell_viewport(sf, :scene2)
+		@test _t3_fill(sf, :scene2; viewport, pad = 36.0, box = ones(3)) ≈ 1 atol = 1e-9
+		counts = _t3_expected_nticks(sf, :scene2; viewport, box = ones(3))
+		@test _t3_nticks(sf, :scene2) == counts
+		@test all(2 .<= counts .<= 3)   # a ~170 px cell: plotly would draw 4 to 9
+		@test _t3_nticks(sf, :scene3) == [nothing, nothing, nothing]
+		# view! updates automatic counts; a user's count and tick values are kept.
+		view!(sf; row = 1, col = 2, elev = 90, azim = -90)
+		@test _t3_nticks(sf, :scene2) == _t3_expected_nticks(sf, :scene2; viewport, box = ones(3))
+		scene!(sf; row = 1, col = 2, nticks = 5)
+		plot_scatter3d!(sf, [0.0, 2.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2)
+		@test _t3_nticks(sf, :scene2) == [5, 5, 5]
+		plot_scatter3d!(sf, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 1, aspectmode = "cube")
+		@test _t3_nticks(sf, :scene) == _t3_expected_nticks(sf, :scene; viewport = _t3_cell_viewport(sf, :scene), box = ones(3))
+		t = _t3_scene_sf(3)
+		scene!(t; row = 1, col = 3, xticks = [0, 1])
+		plot_scatter3d!(t, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 3, aspectmode = "cube")
+		@test _t3_nticks(t, :scene3)[1] === nothing
+		@test _t3_nticks(t, :scene3)[2] isa Integer
 	end
 
 	@testset "view!: SubplotFigure cells change only their scene" begin
