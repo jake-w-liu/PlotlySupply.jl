@@ -902,6 +902,17 @@ end
 			@test font2[:size] == 20
 			@test font2[:color] == "red"
 		end
+		# Legend colours follow the active template (X8a) and accept Symbols and
+		# other AbstractStrings (X5).
+		dark = with_style(; template=:plotly_dark) do
+			subplots(1, 1; sync=false)
+		end
+		light = subplots(1, 1; sync=false)
+		@test (dark.legend_bgcolor, dark.legend_bordercolor) == ("rgba(17,17,17,0.72)", "rgba(255,255,255,0.25)")
+		@test (light.legend_bgcolor, light.legend_bordercolor) == ("rgba(255,255,255,0.72)", "rgba(0,0,0,0.15)")
+		named = subplots(1, 1; sync=false, legend_bgcolor=:red, legend_bordercolor=SubString("blue", 1))
+		@test (named.legend_bgcolor, named.legend_bordercolor) == ("#FF0000", "#0000FF")
+		@test_throws ArgumentError subplots(1, 1; sync=false, legend_bgcolor=:notacolour)
 		# The default style sets no legend font.
 		plain = subplots(1, 2; sync=false)
 		plot_scatter!(plain, 1:3, [1.0, 2.0, 3.0]; legend="a", row=1, col=1)
