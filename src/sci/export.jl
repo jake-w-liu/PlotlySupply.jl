@@ -192,8 +192,8 @@ end
 Number of device pixels for a length of `css_px` CSS pixels drawn at `scale`
 (`dpi / 96` for a `dpi` export): the nearest integer (halves round up), at least 1.
 Rounding (not truncating) keeps a physical size exact to half a pixel, e.g.
-8.89 cm at 300 dpi is 1050 px although 8.89 / 2.54 * 96 * 3.125 evaluates to
-1049.9999999999998.
+6.35 cm (2.5 in) at 300 dpi is 750 px although `_physical_to_px(6.35, :cm) *
+3.125` evaluates to 749.9999999999999.
 """
 function _raster_pixels(css_px::Real, scale::Real)::Int
 	value = Float64(css_px) * Float64(scale)

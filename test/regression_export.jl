@@ -270,6 +270,342 @@ end
 	end
 end
 
+# ── 2.0 wave 4 (math-export) ────────────────────────────────────────
+
+# First-IFD tags of a little-endian TIFF: tag => (type, count, value-or-offset),
+# plus the X resolution as a Float64.
+function _reg_tiff(bytes::Vector{UInt8})
+	u16(i) = Int(bytes[i]) | Int(bytes[i + 1]) << 8
+	u32(i) = Int(bytes[i]) | Int(bytes[i + 1]) << 8 | Int(bytes[i + 2]) << 16 | Int(bytes[i + 3]) << 24
+	bytes[1:4] == UInt8['I', 'I', 42, 0] || error("not a little-endian TIFF")
+	ifd = u32(5)
+	tags = Dict{Int,Tuple{Int,Int,Int}}()
+	for k in 0:(u16(ifd + 1) - 1)
+		entry = ifd + 3 + 12k
+		tags[u16(entry)] = (u16(entry + 2), u32(entry + 4), u32(entry + 8))
+	end
+	xres = u32(tags[282][3] + 1) / u32(tags[282][3] + 5)
+	return tags, xres
+end
+
+# Physical page size in points of `value` `units`.
+_reg_points(value, units) = value / PlotlySupply._export_units_per_inch(units, "test") * 72
+
+_reg_page_size(pdf::Vector{UInt8}) = (b = _reg_media_box(pdf); (b[3] - b[1], b[4] - b[2]))
+
+# The PDF page is `w` x `h` pt to 0.01 pt.
+_reg_page_is(pdf::Vector{UInt8}, w, h) =
+	(s = _reg_page_size(pdf); abs(s[1] - w) < 0.01 && abs(s[2] - h) < 0.01)
+
+# A square filled with 30 % red covering the middle of the plot area, no grid.
+function _reg_translucent_square()
+	p = Plot(scatter(
+		x = [0.0, 1.0, 1.0, 0.0, 0.0], y = [0.0, 0.0, 1.0, 1.0, 0.0],
+		fill = "toself", fillcolor = "rgba(255,0,0,0.3)", mode = "lines", line = attr(width = 0),
+	))
+	relayout!(p;
+		xaxis = attr(range = [-0.1, 1.1], visible = false),
+		yaxis = attr(range = [-0.1, 1.1], visible = false),
+		showlegend = false, margin = attr(l = 20, r = 20, t = 20, b = 20),
+		paper_bgcolor = "white", plot_bgcolor = "white",
+	)
+	return p
+end
+
+# RGB of the pixel at the centre of an RGB(A) PNG.
+function _reg_png_centre(png::Vector{UInt8})
+	w, h, channels, pixels = PlotlySupply._png_decode(png)
+	i = ((h ÷ 2) * w + w ÷ 2) * channels
+	return Int.(pixels[(i + 1):(i + 3)])
+end
+
+@testset "regression export: exact physical sizes (G17)" begin
+	p = plot_scatter([1.0, 2.0, 3.0], [1.0, 3.0, 2.0]; title = "exact size")
+	# PDF pages are exact to 0.01 pt for any size; Chromium alone rounds the
+	# page up to whole points and then to 1/300 in.
+	for (w, h, units) in (
+		(8.3, 6, :cm), (85, 60, :mm), (8.89, 6.35, :cm), (3.5, 2.5, :in),
+		(7.16, 4, :in), (88, 66, :mm), (180, 120, :mm),
+	)
+		pw, ph = _reg_page_size(savefig(p; format = "pdf", width = w, height = h, units = units))
+		@test abs(pw - _reg_points(w, units)) < 0.01
+		@test abs(ph - _reg_points(h, units)) < 0.01
+	end
+	pdfinfo = Sys.which("pdfinfo")
+	if pdfinfo !== nothing
+		mktempdir() do dir
+			path = joinpath(dir, "cm.pdf")
+			savefig(p, path; width = 8.3, height = 6, units = :cm)
+			m = match(r"Page size:\s+([0-9.]+) x ([0-9.]+) pts", read(`$pdfinfo $path`, String))
+			@test abs(parse(Float64, m.captures[1]) - 235.276) < 0.01
+			@test abs(parse(Float64, m.captures[2]) - 170.079) < 0.01
+		end
+	end
+
+	# Raster images have round(width_in * dpi) pixels and record the dpi.
+	for (w, units) in ((3.5, :in), (7.16, :in), (88, :mm), (180, :mm)), dpi in (300, 600, 1200)
+		h = units === :in ? 1.0 : 25.0   # short pages keep the 1200-dpi images small
+		inches_w, inches_h = w / PlotlySupply._export_units_per_inch(units, "test"),
+			h / PlotlySupply._export_units_per_inch(units, "test")
+		png = savefig(p; format = "png", width = w, height = h, units = units, dpi = dpi)
+		@test _reg_png_size(png) == (round(Int, inches_w * dpi), round(Int, inches_h * dpi))
+		phys = _reg_png_chunk(png, "pHYs")
+		@test _reg_u32(phys, 1) == round(Int, dpi / 0.0254)
+	end
+	# 6.35 cm at 300 dpi is 749.9999999999999 CSS px * scale: 750 rows, not 749.
+	tall = savefig(p; format = "png", width = 8.89, height = 6.35, units = :cm, dpi = 300)
+	@test _reg_png_size(tall) == (1050, 750)
+	# Every pixel is opaque: the drawing fills the canvas to its edges.
+	_, _, channels, pixels = PlotlySupply._png_decode(tall)
+	@test channels == 4 && all(==(0xff), @view pixels[4:4:end])
+	# JPEG records the dpi in its JFIF header.
+	jpeg = savefig(p; format = "jpeg", width = 88, height = 25, units = :mm, dpi = 600)
+	@test jpeg[14:18] == UInt8[0x01, 0x02, 0x58, 0x02, 0x58]   # dots per inch, 600 x 600
+
+	# Two back-to-back exports of different sizes do not affect each other.
+	small = savefig(p; format = "png", width = 300, height = 200)
+	@test _reg_png_size(small) == (300, 200)
+	@test _reg_png_size(savefig(p; format = "png", width = 640, height = 480)) == (640, 480)
+	@test savefig(p; format = "png", width = 300, height = 200) == small
+	@test _reg_page_is(savefig(p; format = "pdf", width = 300, height = 200), 225, 150)
+	@test _reg_page_is(savefig(p; format = "pdf", width = 640, height = 480), 480, 360)
+end
+
+@testset "regression export: TIFF" begin
+	p = _reg_heatmap("tiff")
+	tiff = savefig(p; format = "tiff", width = 88, height = 66, units = :mm, dpi = 600)
+	tags, xres = _reg_tiff(tiff)
+	@test (tags[256][3], tags[257][3]) == (2079, 1559)
+	@test tags[259][3] == 5 && tags[296][3] == 2
+	@test xres == 600.0
+	# Lossless: the same pixels as the PNG of the same export.
+	png = savefig(p; format = "png", width = 88, height = 66, units = :mm, dpi = 600)
+	@test PlotlySupply._png_size(png) == (2079, 1559)
+	# Default: 300 dpi; `scale` sets 96 * scale dpi.
+	default_tags, default_res = _reg_tiff(savefig(p; format = "tiff", width = 336, height = 252))
+	@test (default_tags[256][3], default_tags[257][3], default_res) == (1050, 788, 300.0)
+	_, scaled_res = _reg_tiff(savefig(p; format = "tiff", width = 336, height = 252, scale = 2))
+	@test scaled_res == 192.0
+	# A transparent background keeps an alpha sample; an opaque one is RGB.
+	@test default_tags[277][3] == 3 && !haskey(default_tags, 338)
+	clear_tags, _ = _reg_tiff(savefig(p; format = "tiff", width = 336, height = 252, background = :transparent))
+	@test clear_tags[277][3] == 4 && clear_tags[338][3] == 2
+	@test savefig(p; format = "tiff", width = 336, height = 252) == savefig(p; format = "tiff", width = 336, height = 252)
+
+	mktempdir() do dir
+		path = joinpath(dir, "figure.tif")
+		@test savefig(p, path; width = 88, height = 66, units = :mm, dpi = 600) == path
+		@test read(path) == tiff
+		tiffinfo = Sys.which("tiffinfo")
+		if tiffinfo !== nothing
+			info = read(`$tiffinfo $path`, String)
+			@test occursin("Image Width: 2079 Image Length: 1559", info)
+			@test occursin(r"Resolution: 600, 600 pixels/inch", info)
+			@test occursin("LZW", info)
+		end
+		sips = Sys.which("sips")
+		if sips !== nothing
+			info = read(`$sips -g pixelWidth -g pixelHeight -g dpiWidth $path`, String)
+			@test occursin("pixelWidth: 2079", info)
+			@test occursin("pixelHeight: 1559", info)
+			@test occursin("dpiWidth: 600", info)
+		end
+		magick = Sys.which("magick")
+		if magick !== nothing
+			@test strip(read(`$magick identify -format "%w %h %x %U" $path`, String)) ==
+				  "2079 1559 600 PixelsPerInch"
+			# Decoded pixels equal the PNG's pixels.
+			rgb = read(`$magick $path -depth 8 rgb:-`)
+			w, h, channels, pixels = PlotlySupply._png_decode(png)
+			@test channels == 4
+			@test rgb == pixels[[k for k in eachindex(pixels) if k % 4 != 0]]
+		end
+	end
+end
+
+@testset "regression export: SVG physical units" begin
+	p = plot_scatter([1.0, 2.0, 3.0], [1.0, 3.0, 2.0]; title = "units")
+	root(svg) = match(r"<svg\b[^>]*>", svg).match
+	mm = root(String(savefig(p; format = "svg", width = 88, height = 66, units = :mm)))
+	@test occursin("width=\"88mm\" height=\"66mm\"", mm)
+	viewbox = parse.(Float64, split(match(r"viewBox=\"([^\"]*)\"", mm).captures[1]))
+	@test viewbox[3] ≈ 88 / 25.4 * 96 && viewbox[4] ≈ 66 / 25.4 * 96
+	@test occursin("width=\"3.5in\" height=\"2.5in\"",
+		root(String(savefig(p; format = "svg", width = 3.5, height = 2.5, units = :in))))
+	@test occursin("width=\"8.3cm\" height=\"6cm\"",
+		root(String(savefig(p; format = "svg", width = 8.3, height = 6, units = :cm))))
+	# Pixel sizes stay unitless CSS px, as in 1.x.
+	px = root(String(savefig(p; format = "svg", width = 400, height = 300)))
+	@test occursin("width=\"400\" height=\"300\"", px)
+end
+
+@testset "regression export: fonts (G44)" begin
+	x = collect(range(0, 1; length = 20))
+	stix = plot_scatter(x, x .^ 2; xlabel = "time (s)", ylabel = raw"$\alpha$ amplitude", title = "STIX title")
+	relayout!(stix; font = attr(family = "STIXGeneral"))
+	plain = plot_scatter(x, x .^ 2; xlabel = "time (s)", ylabel = "amplitude", title = "Plain title")
+	font_objects(pdf) = length(collect(eachmatch(r"/Type\s*/Font\b", _reg_ascii(pdf))))
+
+	# Text drawn in TrueType fonts stays text in :auto: nothing to outline, so
+	# :auto and :embed give the same file.
+	plain_embed = savefig(plain; format = "pdf", fonts = :embed)
+	if isempty(PlotlySupply._pdf_type3_fonts(plain_embed))
+		@test savefig(plain; format = "pdf") == plain_embed
+		@test font_objects(plain_embed) > 0
+		pdftotext = Sys.which("pdftotext")
+		if pdftotext !== nothing
+			mktempdir() do dir
+				path = joinpath(dir, "plain.pdf")
+				write(path, plain_embed)
+				@test occursin("Plain title", read(`$pdftotext $path -`, String))
+			end
+		end
+	end
+
+	# A CFF font (STIX, when installed) is a Type 3 font in Chromium's PDF.
+	stix_embed = savefig(stix; format = "pdf", fonts = :embed)
+	has_type3 = !isempty(PlotlySupply._pdf_type3_fonts(stix_embed))
+	if has_type3
+		# Without Ghostscript :auto keeps them and warns.
+		mktempdir() do empty_path
+			withenv("PATH" => empty_path) do
+				kept = @test_logs (:warn, r"Type 3 fonts") match_mode = :any savefig(stix; format = "pdf")
+				@test !isempty(PlotlySupply._pdf_type3_fonts(kept))
+			end
+		end
+	end
+	if _reg_has_ghostscript()
+		w, h = 3.5, 2.6
+		stix_auto = savefig(stix; format = "pdf", width = w, height = h, units = :in)
+		@test isempty(PlotlySupply._pdf_type3_fonts(stix_auto))
+		has_type3 && @test font_objects(stix_auto) == 0
+		outlined = savefig(plain; format = "pdf", width = w, height = h, units = :in, fonts = :outline)
+		@test font_objects(outlined) == 0
+		# Outlining keeps the exact page and is deterministic.
+		for pdf in (stix_auto, outlined)
+			pw, ph = _reg_page_size(pdf)
+			@test abs(pw - 252) < 0.01 && abs(ph - 187.2) < 0.01
+		end
+		@test savefig(plain; format = "pdf", width = w, height = h, units = :in, fonts = :outline) == outlined
+		pdffonts = Sys.which("pdffonts")
+		if pdffonts !== nothing
+			mktempdir() do dir
+				path = joinpath(dir, "outlined.pdf")
+				write(path, outlined)
+				listing = split(strip(read(`$pdffonts $path`, String)), '\n')
+				@test length(listing) == 2   # the two header lines, no font
+			end
+		end
+
+		# EPS: text is outlines unless fonts = :embed.
+		embedded_font(eps) = occursin("%%BeginResource: procset (PDF Font", _reg_ascii(eps))
+		@test !embedded_font(savefig(plain; format = "eps"))
+		@test embedded_font(savefig(plain; format = "eps", fonts = :embed))
+	else
+		@test_throws ArgumentError savefig(plain; format = "pdf", fonts = :outline)
+	end
+end
+
+@testset "regression export: EPS translucency and page box (G40)" begin
+	if _reg_has_ghostscript()
+		p = _reg_translucent_square()
+		# The PNG shows 30 % red over white at the centre.
+		@test all(abs.(_reg_png_centre(savefig(p; format = "png", width = 400, height = 300)) .- [255, 179, 179]) .<= 2)
+		eps = savefig(p; format = "eps", width = 400, height = 300)
+		text = _reg_ascii(eps)
+		@test occursin("%%BoundingBox: 0 0 300 225", text)
+		@test occursin("%%HiResBoundingBox: 0 0 300 225", text)
+		mktempdir() do dir
+			eps_path = joinpath(dir, "square.eps")
+			png_path = joinpath(dir, "square.png")
+			write(eps_path, eps)
+			gs = PlotlySupply._ghostscript_command()
+			run(pipeline(`$gs -q -dSAFER -dBATCH -dNOPAUSE -sDEVICE=png16m -r96 -dEPSCrop -sOutputFile=$png_path $eps_path`;
+				stdout = devnull, stderr = devnull))
+			drawn = read(png_path)
+			@test PlotlySupply._png_size(drawn) == (400, 300)
+			# The square prints light red (blended), not opaque red.
+			@test all(abs.(_reg_png_centre(drawn) .- [255, 179, 179]) .<= 3)
+		end
+		# A fractional page: the HiRes box is exact, the integer box rounds up.
+		cm = _reg_ascii(savefig(p; format = "eps", width = 8.3, height = 6, units = :cm))
+		@test occursin("%%BoundingBox: 0 0 236 171", cm)
+		@test occursin("%%HiResBoundingBox: 0 0 235.2756 170.0787", cm)
+	else
+		@test_throws ArgumentError savefig(_reg_translucent_square(); format = "eps")
+	end
+end
+
+@testset "regression export: deterministic bytes in every format" begin
+	p = _reg_heatmap("every format")
+	formats = ["png", "jpeg", "tiff", "svg", "pdf", "html", "json"]
+	_reg_has_ghostscript() && push!(formats, "eps")
+	for fmt in formats
+		@test savefig(p; format = fmt, width = 300, height = 220) == savefig(p; format = fmt, width = 300, height = 220)
+	end
+end
+
+@testset "regression export: results longer than one renderer reply" begin
+	chunk = PlotlySupply._RENDERER_RESULT_CHUNK
+	# 20 000 SVG markers make an SVG of several slices.
+	x = collect(1.0:20_000)
+	many = plot_scatter(x, sin.(x); mode = "markers")
+	svg = String(savefig(many; format = "svg"))
+	@test ncodeunits(svg) > chunk
+	@test startswith(svg, "<svg") && endswith(svg, "</svg>")
+	@test count("class=\"point\"", svg) == 20_000
+	@test savefig(many; format = "svg") == codeunits(svg)
+
+	# A slice boundary never splits a UTF-16 surrogate pair: 'a' followed by
+	# U+1D465 pairs puts a high surrogate at every odd index, including the
+	# last unit of the first full slice.
+	pairs = chunk + 500
+	text = PlotlySupply._with_export_window(PlotlySupply._EXPORT_STATE) do ec, app, win, divid
+		script = "(function() { const result = 'a' + '\\u{1D465}'.repeat($(pairs));\n" *
+				 PlotlySupply._RENDERER_RESULT_HANDOFF_JS * "})()"
+		reply = Base.invokelatest(() -> ec.run(win, script))
+		@test reply["resultLength"] == 1 + 2 * pairs
+		fetched = PlotlySupply._fetch_renderer_result(ec, win, reply["resultLength"], "svg")
+		# The page releases the result after the last slice.
+		@test Base.invokelatest(() -> ec.run(win, "typeof window.__plotlysupplyExportResult")) == "undefined"
+		fetched
+	end
+	@test text == "a" * "\U1D465"^pairs
+end
+
+@testset "regression export: robustness" begin
+	# A figure without traces exports at the default size.
+	empty_fig = Plot()
+	@test _reg_png_size(savefig(empty_fig; format = "png")) == (700, 500)
+	@test _reg_page_is(savefig(empty_fig; format = "pdf"), 525, 375)
+	@test _reg_tiff(savefig(empty_fig; format = "tiff"))[1][256][3] == 2188
+	@test occursin("<svg", String(savefig(empty_fig; format = "svg")))
+
+	# Twenty exports in a row reuse one export window.
+	p = plot_scatter([1.0, 2.0, 3.0], [1.0, 3.0, 2.0]; title = "reuse")
+	savefig(p; format = "png")
+	window = PlotlySupply._EXPORT_STATE.window
+	@test window !== nothing
+	formats = ("png", "svg", "pdf", "jpeg", "tiff")
+	for k in 1:20
+		@test !isempty(savefig(p; format = formats[mod1(k, length(formats))], width = 300 + k, height = 200))
+	end
+	@test PlotlySupply._EXPORT_STATE.window === window
+
+	# A live SubplotFigure exports while its window stays open and unchanged.
+	sf = subplots(1, 2; show = false)
+	try
+		plot_scatter!(sf, [1.0, 2.0, 3.0], [3.0, 1.0, 2.0])
+		before = _RegExportJSON.json(sf.plot)
+		@test _reg_png_size(savefig(sf; format = "png", width = 500, height = 250)) == (500, 250)
+		@test _reg_page_is(savefig(sf; format = "pdf", width = 500, height = 250), 375, 187.5)
+		@test isopen(sf.fig)
+		@test _RegExportJSON.json(sf.plot) == before
+	finally
+		close(sf)
+	end
+end
+
 @testset "regression export: concatenated hidden SyncPlots stay hidden" begin
 	a = to_syncplot(plot_scatter([1.0, 2.0], [1.0, 2.0]); show = false)
 	b = to_syncplot(plot_scatter([1.0, 2.0], [2.0, 1.0]); show = false)

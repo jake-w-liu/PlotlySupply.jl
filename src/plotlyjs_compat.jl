@@ -165,6 +165,11 @@ const _EXPORT_KW = (
 	:fonts,
 )
 const _EXPORT_FONT_MODES = (:auto, :embed, :outline)
+# JPEG quality passed to canvas.toDataURL: Chromium's default, which
+# plotly.js's toImage used by passing none (the export window's toDataURL
+# with no quality and with 0.92 gave identical bytes), now stated explicitly
+# so the documented quality does not depend on the browser default.
+const _JPEG_QUALITY = 0.92
 # Resolution of a TIFF export that gives neither `dpi` nor `scale`: TIFF is the
 # raster format journals ask for, and 300 dpi is their usual minimum for
 # figures (a 96-dpi TIFF would be unusable for print).
@@ -802,12 +807,85 @@ function _check_renderer_result(result, what::AbstractString)
 	error("savefig: plotly.js failed while $(what): $(message)")
 end
 
+# Size, in UTF-16 code units, above which a rendered image is fetched from the
+# export window in slices of this size. One ElectronCall reply takes time
+# that grows faster than its length (measured: 2 Mi characters 0.05 s, 8 Mi
+# 0.6 s, 32 Mi 7.7 s, 140 Mi 153 s) and a 170-Mi-character reply (the SVG of a
+# 10^6-marker scatter) crashed the renderer with a V8 out-of-memory error;
+# 2 Mi-character slices were the fastest measured (~40 MiB/s).
+const _RENDERER_RESULT_CHUNK = 2^21
+
+# The end of an image script: a `result` string up to one slice long is
+# returned as it is; a longer one is kept in the page and its length returned,
+# for `_fetch_renderer_result`.
+const _RENDERER_RESULT_HANDOFF_JS = """
+    if (typeof result !== 'string' || result.length <= $(_RENDERER_RESULT_CHUNK)) { return result; }
+    window.__plotlysupplyExportResult = result;
+    window.__plotlysupplyExportResultPos = 0;
+    return {resultLength: result.length};
+"""
+
+# The next slice of the kept result as `[text, done]`; the last slice also
+# releases it. A slice never ends between the two halves of a UTF-16
+# surrogate pair (a lone half would not survive the JSON reply).
+const _FETCH_RESULT_SLICE_JS = """
+(function() {
+  const s = window.__plotlysupplyExportResult;
+  if (typeof s !== 'string') {
+    return {error: 'the rendered image is no longer held by the export window'};
+  }
+  const start = window.__plotlysupplyExportResultPos || 0;
+  let stop = Math.min(s.length, start + $(_RENDERER_RESULT_CHUNK));
+  if (stop < s.length) {
+    const unit = s.charCodeAt(stop - 1);
+    if (unit >= 0xD800 && unit <= 0xDBFF) { stop -= 1; }
+  }
+  const done = stop >= s.length;
+  if (done) {
+    delete window.__plotlysupplyExportResult;
+    delete window.__plotlysupplyExportResultPos;
+  } else {
+    window.__plotlysupplyExportResultPos = stop;
+  }
+  return [s.slice(start, stop), done];
+})()
+"""
+
+# Fetch a rendered image of `total` UTF-16 code units that the image script
+# kept in the export window, slice by slice.
+function _fetch_renderer_result(ec, win, total, fmt::String)
+	(total isa Real && !(total isa Bool) && isinteger(total) && total > _RENDERER_RESULT_CHUNK) || error(
+		"savefig: the renderer reported an invalid $(fmt) image length $(repr(total)).",
+	)
+	# Every slice but the last holds at least _RENDERER_RESULT_CHUNK - 1 units.
+	max_slices = cld(Int(total), _RENDERER_RESULT_CHUNK - 1) + 1
+	io = IOBuffer()
+	for _ in 1:max_slices
+		reply = _check_renderer_result(
+			Base.invokelatest(() -> ec.run(win, _FETCH_RESULT_SLICE_JS)),
+			"fetching the rendered $(fmt) image",
+		)
+		(reply isa AbstractVector && length(reply) == 2 && reply[1] isa AbstractString &&
+		 reply[2] isa Bool) || error(
+			"savefig: unexpected reply while fetching the rendered $(fmt) image: " *
+			"$(summary(reply)).",
+		)
+		write(io, reply[1])
+		reply[2] && return String(take!(io))
+		isempty(reply[1]) &&
+			error("savefig: the export window returned an empty slice of the $(fmt) image.")
+	end
+	error("savefig: the rendered $(fmt) image did not arrive in $(max_slices) slices.")
+end
+
 # Draw the figure once with `Plotly.toImage` on the plain figure object (it
 # lays the figure out in its own hidden div; drawing into the export div
-# first would draw everything twice). svg is returned as plotly.js's data URL.
+# first would draw everything twice). svg is returned as the SVG markup, a
+# raster as a data URL; a result longer than `_RENDERER_RESULT_CHUNK` is
+# fetched in slices.
 # Raster formats are rasterized here, not by toImage: toImage sizes its canvas
-# as width*scale and the canvas truncates that to an integer (8.89 cm at
-# 300 dpi would give 1049 px). The SVG is drawn onto a canvas of exactly
+# as width*scale and the canvas truncates that to an integer (6.35 cm at
+# 300 dpi, 749.9999999999999, would give 749 px). The SVG is drawn onto a canvas of exactly
 # `_format_pixels` device pixels instead, so the pixel count is the nearest
 # integer and the drawing fills it. JPEG has no alpha: transparent areas are
 # composited onto white (a bare canvas would encode them black). A TIFF is
@@ -827,6 +905,9 @@ function _capture_image_data_url(
 	pixels_w, pixels_h = raster ? _format_pixels(options, fmt) : (0, 0)
 	draw = """
 $(_EXPORT_RESET_DIV_JS)
+    // A result an earlier export left behind (its fetch failed) is dropped.
+    delete window.__plotlysupplyExportResult;
+    delete window.__plotlysupplyExportResultPos;
     const scale = $(_json_js(scale));
     const layout = Object.assign({}, $(prepared.layout_js), {width: $width_js, height: $height_js});
     const config = Object.assign({}, $(prepared.config_js));
@@ -839,8 +920,13 @@ $(_EXPORT_RESET_DIV_JS)
     const figure = {data: $(prepared.data_js), layout: layout, config: config};
 """
 	body = if !raster
+		# imageDataOnly: the SVG markup itself, not plotly.js's
+		# encodeURIComponent data URL, which is up to three times longer.
 		draw * """
-    return await Plotly.toImage(figure, {format: 'svg', width: $width_js, height: $height_js, scale: scale});
+    const result = await Plotly.toImage(figure, {
+      format: 'svg', width: $width_js, height: $height_js, scale: scale, imageDataOnly: true
+    });
+$(_RENDERER_RESULT_HANDOFF_JS)
 """
 	else
 		draw * """
@@ -886,12 +972,16 @@ $(_EXPORT_RESET_DIV_JS)
     } finally {
       URL.revokeObjectURL(url);
     }
-    return canvas.toDataURL($(_json_js(fmt == "jpeg" ? "image/jpeg" : "image/png")));
+    const result = $(fmt == "jpeg" ?
+		"canvas.toDataURL('image/jpeg', $(_JPEG_QUALITY))" : "canvas.toDataURL('image/png')");
+$(_RENDERER_RESULT_HANDOFF_JS)
 """
 	end
 	js = _guarded_export_script(divid, options.timeout, body)
 	result = Base.invokelatest(() -> ec.run(win, js))
-	data_url = _check_renderer_result(result, "rendering the $(fmt) image")
+	reply = _check_renderer_result(result, "rendering the $(fmt) image")
+	data_url = reply isa AbstractDict && haskey(reply, "resultLength") ?
+		_fetch_renderer_result(ec, win, reply["resultLength"], fmt) : reply
 	data_url isa AbstractString ||
 		error("Plotly.toImage returned a non-string value for format '$fmt'")
 	if data_url == "data:,"
@@ -910,7 +1000,10 @@ end
 function _write_image_data_url!(io::IO, data_url::String, fmt::String)
 	if fmt == "svg"
 		prefix = "data:image/svg+xml,"
-		if startswith(data_url, prefix)
+		if startswith(data_url, "<svg")
+			# The markup itself (`imageDataOnly`), as the capture script returns it.
+			write(io, data_url)
+		elseif startswith(data_url, prefix)
 			payload = SubString(data_url, ncodeunits(prefix) + 1)
 			write(io, _urldecode_bytes(payload))
 		else
@@ -1913,35 +2006,76 @@ Export a `Plot`, `SyncPlot` or `SubplotFigure` to a file, several files, a
 stream, or a byte vector. The caller's figure is never modified.
 
 # Formats
-`"png"`, `"jpeg"` (`".jpg"` is accepted), `"svg"`, `"pdf"`, `"eps"`, `"html"`,
-`"json"`. With a file name the format comes from the extension (no extension
-means png) unless `format` is given; for a stream or bytes it defaults to
-`"png"`. `png`/`jpeg`/`svg`/`pdf` are drawn by plotly.js in a hidden Electron
-window (no Kaleido or Python needed). `eps` is converted from that PDF by
-Ghostscript (`gs` must be on `PATH`; translucent fills are flattened to
-opaque). `html` and `json` are written in-process. JSON and HTML write
-non-finite numbers (`NaN`, `±Inf`) as `null`, which plotly.js draws as a gap.
+`"png"`, `"jpeg"` (`".jpg"` is accepted), `"tiff"` (`".tif"` is accepted),
+`"svg"`, `"pdf"`, `"eps"`, `"html"`, `"json"`. With a file name the format
+comes from the extension (no extension means png) unless `format` is given;
+for a stream or bytes it defaults to `"png"`. png/jpeg/tiff/svg/pdf are drawn
+by plotly.js in a hidden Electron window (no Kaleido or Python needed); eps is
+converted from a PDF print by Ghostscript (`gs` must be on `PATH`); html and
+json are written in-process. JSON and HTML write non-finite numbers (`NaN`,
+`±Inf`) as `null`, which plotly.js draws as a gap.
+
+What each file contains:
+- png: 8-bit RGBA of exactly `round(width * scale)` x `round(height * scale)`
+  pixels.
+- jpeg: Chromium's baseline JPEG (quality 0.92, lossy); transparent areas are
+  white.
+- tiff: baseline TIFF 6.0 with lossless LZW compression, 8-bit RGB (RGBA with
+  unassociated alpha when a pixel is translucent, e.g. `background =
+  :transparent`) and XResolution/YResolution in dots per inch. It is drawn at
+  300 dpi unless `dpi` or `scale` says otherwise.
+- svg: plotly.js's SVG. Text is `<text>` in the figure's font, which is not
+  embedded (the viewer needs the font); LaTeX labels are glyph paths. With
+  physical `units` the root `width`/`height` carry the unit (`"88mm"`), else
+  CSS px; the `viewBox` is the layout in CSS px.
+- pdf: Chromium's vector PDF on a page of exactly `width x height` (times
+  `scale`) points. Paths stay vector, transparency is kept, images (heatmaps,
+  3-D/WebGL scenes) are embedded losslessly, and LaTeX labels are glyph
+  paths. Text: see `fonts`.
+- eps: Ghostscript `eps2write` (PostScript level 2) of a PDF print, vector,
+  with `%%BoundingBox` = the whole page. EPS has no transparency: every
+  translucent colour is replaced by its blend over the background it is drawn
+  on (the plot area, else the paper; a translucent background is blended over
+  white) and translucent images are composited onto it, so a 30 % band prints
+  light, as in the PDF. A translucent mark drawn over another mark covers it
+  instead of letting it show through; export pdf to keep true transparency.
 
 # Keyword arguments
 - `format::Union{Nothing,AbstractString} = nothing`: output format, overriding
   the extension. Not allowed with a vector of file names.
 - `width`, `height::Real`: figure size in `units`. Default: the figure's
-  `layout.width`/`layout.height` when set, else 700 x 500 px. The size must be
+  `layout.width`/`layout.height` when set, else the active style's default
+  figure size (journal styles set one), else 700 x 500 px. The size must be
   at least 10 px (plotly.js's layout minimum).
 - `units::Symbol = :px`: unit of `width`/`height`: `:px` (CSS pixel, 1/96 in),
-  `:in`, `:cm`, `:mm` or `:pt` (1/72 in).
-- `scale::Real = 1`: uniform magnification. png/jpeg get `scale` times more
-  pixels; svg/pdf/eps get a `scale` times larger page with the same layout
-  (text, markers and lines grow with it).
+  `:in`, `:cm`, `:mm` or `:pt` (1/72 in). The pdf/eps page is exact in points
+  for any size; a raster gets the nearest whole number of pixels.
+- `scale::Real = 1`: uniform magnification. png/jpeg/tiff get `scale` times
+  more pixels; svg/pdf/eps get a `scale` times larger page with the same
+  layout (text, markers and lines grow with it).
 - `dpi::Real`: raster resolution in dots per inch, an alternative to `scale`
-  (passing both is an error). png/jpeg are drawn at `scale = dpi/96` and record
-  the resolution (PNG `pHYs` chunk, JPEG JFIF density), so `width = 3.5,
-  units = :in, dpi = 300` gives a 1050-px-wide PNG that prints 3.5 in wide.
-  Vector formats keep their physical size and ignore `dpi`.
+  (passing both is an error). png/jpeg/tiff are drawn at `scale = dpi/96` and
+  record the resolution (PNG `pHYs` chunk, JPEG JFIF density, TIFF
+  resolution tags), so `width = 3.5, units = :in, dpi = 300` gives a
+  1050-px-wide image that prints 3.5 in wide. Without `dpi`, png/jpeg record
+  `96 * scale` dpi when `units` is physical (none for `:px`, as in 1.x), and
+  tiff always records its resolution. Vector formats keep their physical size
+  and ignore `dpi`.
+- `fonts::Symbol = :auto`: text in pdf and eps. pdf: `:auto` keeps text as
+  text in subset-embedded TrueType (CID) fonts when the figure's fonts are
+  TrueType (Arial, Times New Roman, Verdana, Liberation, DejaVu, …); Chromium
+  can embed other fonts (CFF/OpenType-PS such as STIX or Latin Modern) only
+  as Type 3 fonts, which many journal checks reject, so then the whole page's
+  text is converted to outlines with Ghostscript (without Ghostscript the Type
+  3 fonts are kept and a warning names them). `:embed` keeps Chromium's fonts
+  as they are; `:outline` always draws text as outlines (needs Ghostscript).
+  eps: text is always outlines (no font in the file) unless `:embed`, which
+  lets Ghostscript embed Type 3/Type 42 fonts. Outlined text prints the same
+  but cannot be selected or searched.
 - `deterministic::Bool = true`: make repeated exports of the same figure
   byte-identical: blank the PDF creation/modification dates and the EPS
   creation date, and give SVG/PDF elements fixed ids (`uid`s are set on the
-  export copy only). PNG and JPEG output is deterministic by nature.
+  export copy only). PNG, JPEG and TIFF output is deterministic by nature.
 - `background = nothing`: figure background. `nothing` keeps the figure's own
   colours; a colour (`"white"`, `:black`, `"#ffeedd"`, `"rgba(0,0,0,0.5)"`)
   sets the paper background; `:transparent` clears the paper, plot-area and
@@ -1962,20 +2096,29 @@ bits, and a new file gets the usual mode for new files (umask applied).
 With several file names every distinct format is rendered once, everything is
 validated before anything is drawn, and the files are published one by one.
 
-The MathJax font used for LaTeX labels is `Latin-Modern`; set the environment
-variable `PLOTLYSUPPLY_MATHJAX_SVG_FONT` (letters, digits, `.`, `_`, `-`;
-e.g. `"TeX"` or `"STIX-Web"`) to change it for html and image export.
+LaTeX labels are typeset by MathJax 2.7 in the font chosen with
+[`set_default_mathtext!`](@ref)`(; font = ...)`, one of `"Latin-Modern"` (the
+default), `"TeX"`, `"STIX-Web"`, `"Asana-Math"`, `"Neo-Euler"`,
+`"Gyre-Pagella"` and `"Gyre-Termes"`. When no font is set that way, the
+environment variable `PLOTLYSUPPLY_MATHJAX_SVG_FONT` (same names) is used. The
+font applies to html and image export and to live windows. Under
+Latin-Modern, `\\mathcal` draws Latin Modern's script letters, and
+`\\boldsymbol{\\nabla}`, `\\boldsymbol{\\partial}` and `\\boldsymbol{\\ell}` stay
+upright-regular (the font has no bold glyphs for them; `font = "TeX"` has).
 
 # Errors
-`ArgumentError` for unknown keywords, invalid values, a missing destination
-directory, or EPS without Ghostscript, before any file is touched;
+`ArgumentError` for unknown keywords, invalid values, a missing or unwritable
+destination directory, or EPS (or `fonts = :outline` pdf) without
+Ghostscript, before anything is drawn or any file is touched;
 `ErrorException` for an unsupported format or a renderer failure.
 
 ```julia
 fig = plot_scatter(1:10, rand(10); xlabel = "x", ylabel = "y")
-savefig(fig, "figure.pdf"; width = 3.5, height = 2.5, units = :in)
+savefig(fig, "figure.pdf"; width = 88, height = 66, units = :mm)
+savefig(fig, "figure.tif"; width = 88, height = 66, units = :mm, dpi = 600)
 savefig(fig, "figure.png"; width = 3.5, height = 2.5, units = :in, dpi = 300)
 savefig(fig, ["figure.svg", "figure.eps"]; background = :transparent)
+savefig(fig, "figure-outlined.pdf"; fonts = :outline)
 bytes = savefig(fig; format = "svg")
 ```
 """
