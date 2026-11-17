@@ -71,6 +71,9 @@ const _CBAR_ROOT_TRACE_TYPES = (
 )
 const _CBAR_CONTOUR_TYPES = ("contour", "contourcarpet", "histogram2dcontour")
 
+# The placement keys `_finalize_figure!` writes on a bar it owns.
+const _CBAR_FINALIZE_KEYS = (:x, :y, :xanchor, :yanchor, :xref, :ypad, :len, :lenmode)
+
 # Colorbar keys that position a bar. `shared_colorbar!` carries the other
 # settings (ticks, number format, thickness, …) of the bars it removes over
 # to the shared bar, never these.
@@ -445,7 +448,9 @@ end
 
 # Colorbar geometry next to a plot area: `:right` is a vertical bar left-
 # anchored `pad` to the right of the area, as tall as the area; `:bottom` a
-# horizontal bar centred below it, as wide as the area.
+# horizontal bar centred below it, as wide as the area. The padding along the
+# bar is 0 (plotly's default 10 px at each end would make the coloured bar
+# 20 px shorter than the plot area it labels).
 function _cbar_placement(side::Symbol, xdomain, ydomain, pad::Float64)
 	if side === :right
 		return Dict{Symbol,Any}(
@@ -456,6 +461,7 @@ function _cbar_placement(side::Symbol, xdomain, ydomain, pad::Float64)
 			:yanchor => "middle",
 			:len => ydomain[2] - ydomain[1],
 			:lenmode => "fraction",
+			:ypad => 0,
 		)
 	end
 	return Dict{Symbol,Any}(
@@ -466,6 +472,7 @@ function _cbar_placement(side::Symbol, xdomain, ydomain, pad::Float64)
 		:yanchor => "top",
 		:len => xdomain[2] - xdomain[1],
 		:lenmode => "fraction",
+		:xpad => 0,
 	)
 end
 
@@ -519,9 +526,17 @@ function _place_cell_colorbars!(p::Plot, start_index::Int)
 		end
 		slot.shows || continue
 		existing = _cbar_slot_bar(trace, slot)
-		_cmn_mapping_get(existing, :x) === nothing || continue
-		region = _cbar_trace_region(p, trace)
 		bar = _symbol_dict(existing)
+		# A bar `_finalize_figure!` placed (e.g. on the scratch figure of the
+		# SubplotFigure delegate) is placed again for the cell.
+		owned = _fin_bar_owned(bar)
+		(_cmn_mapping_get(existing, :x) === nothing || owned) || continue
+		if owned
+			for key in _CBAR_FINALIZE_KEYS
+				delete!(bar, key)
+			end
+		end
+		region = _cbar_trace_region(p, trace)
 		side = _cbar_string(bar, :orientation, "v") == "h" ? :bottom : :right
 		for (key, value) in _cbar_placement(
 			side,
@@ -646,30 +661,13 @@ function _cbar_font_size(p::Plot, bar::AbstractDict)
 	return _CBAR_DEFAULT_FONT_SIZE
 end
 
-# Estimated width, in characters, of plotly's automatic tick labels on a bar
-# spanning (lo, hi) (about five ticks; SI/exponent forms above 1e5 or below
-# 1e-3 such as "100k").
-function _cbar_number_chars(lo::Float64, hi::Float64)
-	magnitude = max(abs(lo), abs(hi))
-	sign = lo < 0 ? 1 : 0
-	(magnitude == 0 || !isfinite(magnitude)) && return 1 + sign
-	(magnitude >= 1e5 || magnitude < 1e-3) && return 5 + sign
-	integer_digits = max(1, floor(Int, log10(magnitude)) + 1)
-	step = (hi - lo) / 5
-	decimals = (step >= 1 || step <= 0) ? 0 : min(6, ceil(Int, -log10(step)))
-	return integer_digits + (decimals > 0 ? decimals + 1 : 0) + sign
-end
-
+# Widest tick label of a bar, in characters: its `ticktext`, its `tickvals`
+# or `dtick`, else plotly's automatic ticks over `range` (see
+# `_fin_tick_chars`; a 300 px bar is assumed for the tick count).
 function _cbar_tick_chars(bar::AbstractDict, range)
-	ticktext = get(bar, :ticktext, nothing)
-	if ticktext isa AbstractVector && !isempty(ticktext)
-		return maximum(
-			length(replace(string(label), r"<[^>]*>" => ""))
-			for label in ticktext
-		)
-	end
-	range === nothing && return 3
-	return _cbar_number_chars(range[1], range[2])
+	range === nothing && !haskey(bar, :ticktext) && !haskey(bar, :tickvals) && return 3
+	lo, hi = range === nothing ? (NaN, NaN) : range
+	return _fin_tick_chars(bar, lo, hi, 300.0, false, true)
 end
 
 # Geometry of a bar for title annotations, or `nothing` when it cannot be
@@ -692,6 +690,8 @@ function _cbar_geometry(p::Plot, bar::AbstractDict, range)
 		xanchor = _cbar_string(bar, :xanchor, horizontal ? "center" : "left"),
 		yanchor = _cbar_string(bar, :yanchor, "middle"),
 		xpad = _cbar_real(bar, :xpad, _CBAR_DEFAULT_XPAD),
+		ypad = _cbar_real(bar, :ypad, 10.0),
+		ticklen = _fin_tick_len(bar),
 		font_size = font_size,
 		tick_px = _cbar_tick_chars(bar, range) * _CBAR_CHAR_EM * font_size,
 	)
@@ -720,15 +720,21 @@ function _cbar_title_annotation(name::String, text::String, side::Symbol, g)
 		fields[:x] = g.x
 		fields[:xanchor] = "left"
 		if side === :right
-			fields[:xshift] = anchor_shift + g.xpad + g.thickness + 4 + g.tick_px
+			# Beside the tick labels: bar, ticks, the 3 px label offset,
+			# the labels and a 4 px gap.
+			fields[:xshift] = anchor_shift + g.xpad + g.thickness + g.ticklen + 3 + g.tick_px + 4
 			fields[:y] = (lo + hi) / 2
 			fields[:yanchor] = "middle"
 			fields[:textangle] = -90
 		else
+			# Clear of the end tick label, which is centred on the end of
+			# the coloured bar (`ypad` px inside the bar's extent) and so
+			# reaches half a text line past it.
+			clear = 2 + max(0.0, 0.5 * _CBAR_LINE_EM * g.font_size - g.ypad)
 			fields[:xshift] = anchor_shift + g.xpad
 			fields[:y] = side === :top ? hi : lo
 			fields[:yanchor] = side === :top ? "bottom" : "top"
-			fields[:yshift] = side === :top ? 2 : -2
+			fields[:yshift] = side === :top ? clear : -clear
 		end
 	else
 		lo, hi = _cbar_span(g.x, g.len, g.xanchor)
@@ -961,6 +967,12 @@ end
 
 function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDict)
 	merge!(bar, placement)
+	# An explicit position or length takes the bar out of
+	# `_finalize_figure!`'s hands: its ownership mark is `xref = "paper"`
+	# (`_fin_bar_owned`), which is plotly's default anyway.
+	if (opts.x !== nothing || opts.y !== nothing || opts.len > 0) && _cbar_string(bar, :xref, "") == "paper"
+		delete!(bar, :xref)
+	end
 	if opts.thickness > 0
 		bar[:thickness] = opts.thickness
 		bar[:thicknessmode] = "pixels"
@@ -1704,20 +1716,48 @@ function _shared_colorbar_fill_bar!(p::Plot, bar::Dict{Symbol,Any}, placement, c
 	return bar
 end
 
-# Finite (min, max) over the colour data of all `slots`, or `nothing` when
-# plotly computes some of it (histogram counts, …) or it is constant/empty.
+# (min, max) over the colour limits of all `slots`: a member's explicit
+# limits (`zmin`/`zmax`, `cmin`/`cmax`, or those of the coloraxis it is bound
+# to) where it has them, else the finite extrema of its colour data; `nothing`
+# when plotly computes a member's data without explicit limits (histogram
+# counts, …) or the result is constant/empty.
 function _shared_colorbar_data_range(p::Plot, slots::Vector{_CbarSlot})
 	lo = Inf
 	hi = -Inf
 	for slot in slots
-		values = _cbar_slot_values(p.data[slot.index], slot)
-		values === nothing && return nothing
-		extrema = _cbar_extrema(values)
-		extrema === nothing && continue
-		lo = min(lo, extrema[1])
-		hi = max(hi, extrema[2])
+		trace = p.data[slot.index]
+		part = _cbar_slot_explicit_limits(p, trace, slot)
+		if part === nothing
+			values = _cbar_slot_values(trace, slot)
+			values === nothing && return nothing
+			part = _cbar_extrema(values)
+			part === nothing && continue
+		end
+		lo = min(lo, part[1])
+		hi = max(hi, part[2])
 	end
 	return (isfinite(lo) && lo < hi) ? (lo, hi) : nothing
+end
+
+# Explicit colour limits of a slot: `zmin`/`zmax` or `cmin`/`cmax` on the
+# trace (or its marker/line), else `cmin`/`cmax` of the coloraxis it is bound
+# to; `nothing` when the limits are automatic.
+function _cbar_slot_explicit_limits(p::Plot, trace::GenericTrace, slot::_CbarSlot)
+	source = slot.container === :root ?
+		trace.fields :
+		_symbol_dict(get(trace.fields, slot.container, nothing))
+	for (lo_key, hi_key) in ((:zmin, :zmax), (:cmin, :cmax))
+		lo = _cbar_real(source, lo_key, nothing)
+		hi = _cbar_real(source, hi_key, nothing)
+		(lo !== nothing && hi !== nothing && lo < hi) && return (lo, hi)
+	end
+	if slot.coloraxis !== nothing
+		axis = _symbol_dict(get(p.layout.fields, Symbol(slot.coloraxis), nothing))
+		lo = _cbar_real(axis, :cmin, nothing)
+		hi = _cbar_real(axis, :cmax, nothing)
+		(lo !== nothing && hi !== nothing && lo < hi) && return (lo, hi)
+	end
+	return nothing
 end
 
 # Contours coloured by band or line (`contours.coloring` "fill", the

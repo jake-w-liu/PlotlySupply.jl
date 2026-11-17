@@ -604,7 +604,8 @@ end
 		l = _sf_roundtrip(sf.plot.layout)
 		@test sf.plot.data[end].fields[:xaxis] == "x4" && sf.plot.data[end].fields[:yaxis] == "y4"
 		@test l["yaxis4"]["scaleanchor"] == "x4"
-		@test l["yaxis4"]["autorange"] == "reversed"
+		# D10 M3: an equal-aspect cell's axes are pinned; reversed = range high to low.
+		@test l["yaxis4"]["autorange"] == false && l["yaxis4"]["range"][1] > l["yaxis4"]["range"][2]
 		@test l["xaxis4"]["title"]["text"] == "x"
 		@test !haskey(l["xaxis"], "scaleanchor") && !haskey(l["yaxis"], "scaleanchor")
 		plot_quiver!(sf, [1.0, 2.0], [1.0, 2.0], [1.0, 1.0], [1.0, 0.0]; row = 1, col = 2, legend = "q")
@@ -619,7 +620,8 @@ end
 		@test _sf_roundtrip(sf.plot.layout)["yaxis3"]["scaleanchor"] == "x3"
 		plot_matrix!(sf, [1 2; 3 4]; row = 1, col = 1)
 		l = _sf_roundtrip(sf.plot.layout)
-		@test l["yaxis"]["autorange"] == "reversed" && l["yaxis"]["scaleanchor"] == "x"
+		@test l["yaxis"]["autorange"] == false && l["yaxis"]["range"][1] > l["yaxis"]["range"][2] &&
+			l["yaxis"]["scaleanchor"] == "x"
 		ns = length(sf.plot.data)
 		plot_streamlines!(sf, collect(0.0:0.5:2.0), collect(0.0:0.5:1.0), ones(5, 3), zeros(5, 3);
 			row = 1, col = 2)

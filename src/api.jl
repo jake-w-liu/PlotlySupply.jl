@@ -167,12 +167,14 @@ function _transactional_high_level_plot_mutation!(
 		staged = _StagedPlotMutation(candidate)
 		staged_target[] = staged
 		result[] = mutator(staged, args...; kwargs...)
+		_finalize_figure!(staged; live = _plot_data(fig))
 		return nothing
 	end
 	fast_mutation = function (candidate)
 		staged = _HighLevelStagedPlotMutation(candidate)
 		staged_target[] = staged
 		result[] = mutator(staged, args...; kwargs...)
+		_finalize_figure!(staged; live = _plot_data(fig))
 		return nothing
 	end
 	fast_path_allowed =
@@ -702,6 +704,7 @@ function _transactional_subplot_mutation!(
 			staged_ref[] = staged
 			result[] =
 				mutator(staged, args...; kwargs...)
+			_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
 			return nothing
 		end
 		commit_callback = _ -> _commit_subplot_metadata!(
@@ -5440,6 +5443,7 @@ function _subplot_delegate_mutator!(
 				args...;
 				kwargs...,
 			)
+			_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
 			return nothing
 		end
 		commit_callback = _ -> _commit_subplot_metadata!(

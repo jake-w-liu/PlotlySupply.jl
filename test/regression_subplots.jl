@@ -183,15 +183,16 @@ end
 		plot_scatter!(sf, [0.0, 1], [0.0, 1000]; row=1, col=1)
 		plot_heatmap!(sf, collect(1.0:3), collect(1.0:3), rand(3, 3); row=2, col=1, equalar=true)
 		plot_quiver!(sf, [0.0, 1], [0.0, 1], [0.5, 0.5], [0.2, 0.2]; row=2, col=2)
-		@test _rsp_axis(sf, :xaxis3)[:scaleanchor] == "y3"
-		@test _rsp_axis(sf, :xaxis4)[:scaleanchor] == "y4"
+		# 2.0 (D10 M3, `_apply_equal_aspect!`): the y axis anchors to the x axis.
+		@test _rsp_axis(sf, :yaxis3)[:scaleanchor] == "x3"
+		@test _rsp_axis(sf, :yaxis4)[:scaleanchor] == "x4"
 		@test !haskey(_rsp_axis(sf, :xaxis), :scaleanchor)
 		@test !haskey(_rsp_axis(sf, :xaxis2), :scaleanchor)
 
 		# A cell (1, 1) target keeps its own references.
 		single = subplots(1, 1; sync=false)
 		plot_quiver!(single, [0.0, 1], [0.0, 1], [0.5, 0.5], [0.2, 0.2])
-		@test _rsp_axis(single, :xaxis)[:scaleanchor] == "y"
+		@test _rsp_axis(single, :yaxis)[:scaleanchor] == "x"
 
 		remapped = PlotlySupply._subplot_remap_axis_refs(
 			attr(scaleanchor="y", matches="x", overlaying="free", range=[0, 1]),
@@ -566,9 +567,11 @@ end
 		@test sf.plot.data[end][:xaxis] == "x3"
 		@test sf.plot.data[end][:yaxis] == "y3"
 		@test (sf.current_row, sf.current_col) == (1, 2)
-		# A heatmap colorbar is placed next to the inset.
+		# A heatmap colorbar is placed level with the inset, right of the
+		# host cell (2.0, D10: never over the host plot).
 		plot_heatmap!(sf, rand(3, 3); row=1, col=2, inset=1)
-		@test _rsp_fields(sf.plot.data[end][:colorbar])[:x] ≈ 0.8 + PlotlySupply._CBAR_CELL_PAD
+		@test _rsp_fields(sf.plot.data[end][:colorbar])[:x] ≈ 1.0 + PlotlySupply._CBAR_CELL_PAD
+		@test _rsp_fields(sf.plot.data[end][:colorbar])[:y] ≈ 0.75
 		@test_throws ArgumentError plot_scatter!(sf, [1.0], [1.0]; row=1, col=2, inset=2)
 	end
 
