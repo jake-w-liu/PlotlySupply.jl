@@ -1078,5 +1078,21 @@ end
         @test _ax_json(sf.plot.layout) == before
         @test _ax_throws(() -> remove_inset!(plot_scatter([1.0], [1.0]), 1), "only a SubplotFigure has insets")
         @test _ax_throws(() -> remove_inset!(subplots(1, 1; sync = false), 1), "this figure has no insets")
+
+        # A SyncPlot-backed SubplotFigure: one renderer update per call, none
+        # for a rejected one.
+        sp, state = _ax_syncplot(Plot(GenericTrace[], Layout(Subplots(rows = 1, cols = 1))))
+        sfs = SubplotFigure(sp, 1, 1, 1, 1, true, :topright, (0.02, 0.03), "white", "black", 1.0)
+        plot_scatter!(sfs, [1.0, 2.0], [1.0, 2.0])
+        ks = inset!(sfs, (0.5, 0.5, 0.4, 0.4); background = "white")
+        plot_scatter!(sfs, [1.0, 2.0], [2.0, 1.0]; inset = ks)
+        n = length(state.scripts)
+        ntr = length(sp.plot.data)
+        remove_inset!(sfs, ks)
+        @test length(state.scripts) == n + 1
+        @test isempty(sfs.insets) && length(sp.plot.data) == ntr - 1
+        @test !haskey(sp.plot.layout.fields, :xaxis2)
+        @test _ax_throws(() -> remove_inset!(sfs, 1), "this figure has no insets")
+        @test length(state.scripts) == n + 1
     end
 end
