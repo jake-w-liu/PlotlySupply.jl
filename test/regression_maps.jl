@@ -482,42 +482,66 @@ _reg_plain(value) =
 	@testset "keywords, show, empty data and errors on every map function (consistency sweep)" begin
 		for (ctor, mut, data, empty, kind, first_name, subplot_key) in map_cases
 			who = String(nameof(ctor))
-			# Plotly trace attributes still pass through, nested ones with underscores.
-			fig = ctor(data...; hovertemplate = "%{lon}", hoverlabel_bgcolor = "white", legendgroup = "g")
-			trace = only(fig.data)
-			@test trace.fields[:hovertemplate] == "%{lon}"
-			@test _reg_fields(trace.fields[:hoverlabel])[:bgcolor] == "white"
-			@test trace.fields[:legendgroup] == "g"
+			# G23: raw plotly trace attributes pass through ONE explicit keyword,
+			# `trace` (attr, Dict or NamedTuple; nested names with underscores).
+			for raw in (
+				attr(hovertemplate = "%{lon}", hoverlabel_bgcolor = "white", legendgroup = "g"),
+				Dict(:hovertemplate => "%{lon}", "hoverlabel_bgcolor" => "white", :legendgroup => "g"),
+				(hovertemplate = "%{lon}", hoverlabel_bgcolor = "white", legendgroup = "g"),
+			)
+				trace = only(ctor(data...; trace = raw).data)
+				@test trace.fields[:hovertemplate] == "%{lon}"
+				@test _reg_fields(trace.fields[:hoverlabel])[:bgcolor] == "white"
+				@test trace.fields[:legendgroup] == "g"
+			end
 			for (call, needle) in (
-				(() -> ctor(data...; no_such_kw = 1), "$(who): unknown keyword `no_such_kw`"),
-				(() -> ctor(data...; xaxis_type = "log"), "$(who): unknown keyword `xaxis_type`"),
-				(() -> ctor(data...; type = "bar"), "$(who): keyword `type`"),
-				(() -> ctor(data...; Symbol(first_name) => [0]), "$(who): keyword `$(first_name)` sets the trace's"),
+				# Bare plotly attributes are no longer keywords (2.0).
+				(() -> ctor(data...; hovertemplate = "%{lon}"), "$(who): unknown keyword argument(s) `hovertemplate`"),
+				(() -> ctor(data...; no_such_kw = 1), "$(who): unknown keyword argument(s) `no_such_kw`"),
+				(() -> ctor(data...; xaxis_type = "log"), "$(who): unknown keyword argument(s) `xaxis_type`"),
+				(() -> ctor(data...; trace = (no_such_attr = 1,)), "$(who): `trace` attribute `no_such_attr` is not a plotly.js"),
+				(() -> ctor(data...; trace = Dict(:xaxis_type => "log")), "$(who): `trace` attribute `xaxis_type` is not a plotly.js"),
+				(() -> ctor(data...; trace = attr(bogus = 1)), "$(who): `trace` attribute `bogus` is not a plotly.js"),
+				(() -> ctor(data...; trace = (type = "bar",)), "$(who): `trace` attribute `type` sets the trace's `type`, which is fixed"),
+				(() -> ctor(data...; trace = Dict(Symbol(first_name) => [0])), "$(who): `trace` attribute `$(first_name)` sets the trace's"),
+				(() -> ctor(data...; trace = attr(name = "raw")), "which comes from the `legend` keyword"),
+				(() -> ctor(data...; trace = attr(colorscale = "RdBu")), "$(who): `trace` "),
+				(() -> ctor(data...; trace = "hovertemplate"), "$(who): `trace` must be an `attr(...)`"),
 				(() -> ctor(empty...), "$(who): `$(first_name)` is empty"),
 			)
 				@test _reg_map_throws(call, needle)
 			end
+			# The caller's `trace` attributes are never mutated.
+			raw = attr(hoverlabel = attr(bgcolor = "white"))
+			ctor(data...; trace = raw, legend = "named")
+			@test _reg_plain(raw) == Dict(:hoverlabel => Dict(:bgcolor => "white"))
 
 			target = ctor(data...)
 			@test mut(target, data...; title = L"New $\beta$") === nothing
 			@test length(target.data) == 2
 			@test _reg_fields(_reg_layout(target)[:title])[:text] == PlotlySupply._label(L"New $\beta$")
+			@test mut(target, data...; trace = attr(legendgroup = "m")) === nothing
+			@test last(target.data).fields[:legendgroup] == "m"
 			for (call, needle) in (
 				# `show` and `row`/`col` used to become trace attributes.
 				(() -> mut(target, data...; show = true), "$(who)!: mutators do not take `show`"),
 				(() -> mut(target, data...; row = 1, col = 1), "$(who)!: `row`/`col` select a SubplotFigure cell"),
-				(() -> mut(target, data...; no_such_kw = 1), "$(who)!: unknown keyword `no_such_kw`"),
+				(() -> mut(target, data...; no_such_kw = 1), "$(who)!: unknown keyword argument(s) `no_such_kw`"),
+				(() -> mut(target, data...; hovertemplate = "x"), "$(who)!: unknown keyword argument(s) `hovertemplate`"),
+				(() -> mut(target, data...; trace = (no_such_attr = 1,)), "$(who)!: `trace` attribute `no_such_attr`"),
 				(() -> mut(target, empty...), "$(who)!: `$(first_name)` is empty"),
 			)
 				@test _reg_map_atomic(target, call, needle)
 			end
 
 			sf = subplots(1, 2; sync = false, show = false, specs = [Spec(kind = kind) Spec(kind = kind)])
-			@test mut(sf, data...; row = 1, col = 2) === sf
+			@test mut(sf, data...; row = 1, col = 2, trace = attr(legendgroup = "s")) === sf
 			@test last(sf.fig.data).fields[subplot_key] == "$(kind)2"
+			@test last(sf.fig.data).fields[:legendgroup] == "s"
 			for (call, needle) in (
 				(() -> mut(sf, data...; show = true), "mutators do not take `show`"),
-				(() -> mut(sf, data...; row = 1, col = 2, no_such_kw = 1), "$(who)!: unknown keyword `no_such_kw`"),
+				(() -> mut(sf, data...; row = 1, col = 2, no_such_kw = 1), "$(who)!: unknown keyword argument(s) `no_such_kw`"),
+				(() -> mut(sf, data...; row = 1, col = 2, trace = (no_such_attr = 1,)), "$(who)!: `trace` attribute `no_such_attr`"),
 				(() -> mut(sf, empty...; row = 1, col = 1), "$(who)!: `$(first_name)` is empty"),
 				(() -> mut(sf, data...; row = 3, col = 1), "`row` must be in 1:1"),
 			)
@@ -557,6 +581,71 @@ _reg_plain(value) =
 		@test plot_choroplethmapbox(_REG_MAP_SQUARE, ["A"], [1.0]; legend = legend).data[1].fields[:name] == PlotlySupply._label(legend)
 		@test plot_scattergeo([1.0], [2.0]; legend = "plain").data[1].fields[:name] == "plain"
 		@test _reg_map_throws(() -> plot_scattergeo([1.0], [2.0]; legend = "a \$b"), "plot_scattergeo: `legend`")
+
+		# G24: numeric scatter-map colours go through the same resolution (no
+		# raw `marker_colorscale` route any more; RdBu runs red to blue).
+		for (ctor, mut) in (
+			(plot_scattergeo, plot_scattergeo!),
+			(plot_scattermap, plot_scattermap!),
+			(plot_scattermapbox, plot_scattermapbox!),
+		)
+			who = String(nameof(ctor))
+			marker = _reg_fields(ctor([0.0, 1.0], [0.0, 1.0]; color = [1.0, 2.0], colorscale = "RdBu").data[1].fields[:marker])
+			@test marker[:colorscale] == resolved("RdBu")
+			@test first(marker[:colorscale])[2] == "#67001F" && last(marker[:colorscale])[2] == "#053061"
+			@test marker[:color] == [1.0, 2.0]
+			@test !haskey(_reg_fields(ctor([0.0], [1.0]; color = [3]).data[1].fields[:marker]), :colorscale)
+			target = ctor([0.0], [1.0])
+			@test mut(target, [1.0], [2.0]; color = [5], colorscale = :viridis) === nothing
+			@test _reg_fields(last(target.data).fields[:marker])[:colorscale] == resolved("viridis")
+			for (call, needle) in (
+				(() -> ctor([0.0], [1.0]; color = [1.0], colorscale = "nope"), "$(who): unknown colorscale"),
+				(() -> ctor([0.0], [1.0]; color = "red", colorscale = "RdBu"), "$(who): `colorscale` colours numeric `color` values"),
+				(() -> ctor([0.0], [1.0]; colorscale = "RdBu"), "$(who): `colorscale` colours numeric `color` values"),
+				(() -> ctor([0.0], [1.0]; trace = attr(marker_colorscale = "RdBu")), "$(who): `trace` may not set a `colorscale`"),
+				(() -> ctor([0.0], [1.0]; trace = attr(marker = attr(line = attr(colorscale = "RdBu")))), "$(who): `trace` may not set a `colorscale`"),
+				(() -> ctor([0.0], [1.0]; trace = attr(marker_color = "red")), "$(who): `trace` attribute `marker_color` is set by the `color` keyword"),
+				(() -> ctor([0.0], [1.0]; trace = attr(marker_size = 3)), "$(who): `trace` attribute `marker_size` is set by the `marker_size` keyword"),
+				(() -> ctor([0.0], [1.0]; trace = attr(mode = "lines")), "which comes from the `mode` keyword"),
+			)
+				@test _reg_map_throws(call, needle)
+			end
+			@test _reg_map_atomic(target, () -> mut(target, [1.0], [2.0]; color = [1], colorscale = "nope"), "$(who)!: unknown colorscale")
+			# Other marker attributes still pass through `trace`.
+			marker = _reg_fields(ctor([0.0], [1.0]; color = "red", trace = attr(marker_symbol = "square")).data[1].fields[:marker])
+			@test (marker[:color], marker[:symbol]) == ("red", "square")
+		end
+		@test _reg_map_throws(() -> plot_choropleth(["USA"], [1.0]; trace = attr(locationmode = "ISO-3")), "which comes from the `locationmode` keyword")
+		@test _reg_map_throws(() -> plot_choropleth(["USA"], [1.0]; trace = attr(geojson = _REG_MAP_SQUARE)), "which comes from the `geojson` keyword")
+		@test _reg_map_throws(() -> plot_densitymap([0.0], [1.0]; trace = attr(radius = 3)), "which comes from the `radius` keyword")
+		@test _reg_map_throws(() -> plot_choroplethmap(_REG_MAP_SQUARE, ["A"], [1.0]; trace = attr(marker_opacity = 0.5)), "is set by the `marker_opacity` keyword")
+		@test _reg_map_throws(() -> plot_choroplethmapbox(_REG_MAP_SQUARE, ["A"], [1.0]; trace = attr(marker_line_width = 2)), "is set by the `marker_line_width` keyword")
+
+		# G25: every map function names its trace through `legend` (mathtext via
+		# `_label`). plot_choropleth and the density maps had no `legend`
+		# keyword, so `legend = "..."` became plotly's trace `legend` id. A
+		# name turns on the entry of the trace types plotly hides by default.
+		mixed = "Stations \$\\alpha\$ network"
+		for (ctor, mut, data) in map_cases
+			who = String(nameof(ctor))
+			trace = only(ctor(data...; legend = mixed).data)
+			@test trace.fields[:name] == PlotlySupply._label(mixed)
+			@test occursin("\\text{Stations }", trace.fields[:name]) && occursin("\\text{ network}", trace.fields[:name])
+			@test !haskey(trace.fields, :legend)
+			kind = trace.fields[:type]
+			if kind in ("scattergeo", "scattermap", "scattermapbox")
+				@test !haskey(trace.fields, :showlegend)
+			else
+				@test trace.fields[:showlegend] === true
+				@test only(ctor(data...; legend = "x", trace = attr(showlegend = false)).data).fields[:showlegend] === false
+			end
+			@test !haskey(only(ctor(data...).data).fields, :name)
+			@test !haskey(only(ctor(data...).data).fields, :showlegend)
+			target = ctor(data...)
+			@test mut(target, data...; legend = L"two $\beta$") === nothing
+			@test last(target.data).fields[:name] == PlotlySupply._label(L"two $\beta$")
+			@test _reg_map_atomic(target, () -> mut(target, data...; legend = "a \$b"), "$(who)!: `legend`")
+		end
 	end
 
 	@testset "scattergeo applies the active style's trace defaults (X10)" begin
