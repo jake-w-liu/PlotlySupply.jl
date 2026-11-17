@@ -20,7 +20,7 @@ end
 @testset "sci mathtext: mixed text + math labels" begin
 	@testset "spec examples" begin
 		@test mathtext("(a) Mesh study, \$\\lambda=10^8\$") ==
-			"\$\\text{(a) Mesh study, }\\lambda=10^8\$"
+			"\$\\text{(a) Mesh study, }{\\lambda=10^8}\$"
 		@test mathtext("Time \$t\$ (s)") == "\$\\text{Time }t\\text{ (s)}\$"
 		@test mathtext("line one\nline two") == "line one<br>line two"
 		@test mathtext("5% done") == "5% done"
@@ -167,8 +167,8 @@ end
 
 	@testset "math segments: matplotlib macros, comments, validation" begin
 		@test mathtext("\$\\mathdefault{10^{3}}\$") == "\${10^{3}}\$"
-		@test mathtext("\$\\mathregular{abc}\$ text") == "\$\\mathrm{abc}\\text{ text}\$"
-		@test mathtext("\$20\\degree\$C") == "\$20{^\\circ}\\text{C}\$"
+		@test mathtext("\$\\mathregular{abc}\$ text") == "\${\\mathrm{abc}}\\text{ text}\$"
+		@test mathtext("\$20\\degree\$C") == "\${20{^\\circ}}\\text{C}\$"
 		@test mathtext("\$5\\,\\AA\$") == "\$5\\,\\mathring{\\mathrm{A}}\$"
 		@test mathtext("\$\\mathdefault x\$") == "\$ x\$"
 		# Only whole control words are rewritten, and not inside raw arguments.
@@ -177,7 +177,7 @@ end
 		# `\\` followed by letters is a line break, not a macro.
 		@test mathtext("\$a\\\\degree\$") == "\$a\\\\degree\$"
 		# A raw `%` would comment out the rest of the label; a raw `#` blanks it.
-		@test mathtext("\$50%\$ rate") == "\$50\\%\\text{ rate}\$"
+		@test mathtext("\$50%\$ rate") == "\${50\\%}\\text{ rate}\$"
 		@test mathtext("\$a#b\$") == "\$a\\#b\$"
 		@test mathtext("\$\\text{5% #}\\textbf{9%}x%\$") == "\$\\text{5% #}\\textbf{9%}x\\%\$"
 		@test mathtext("\$\\color{#ff0000}{x}\$") == "\$\\color{#ff0000}{x}\$"
@@ -208,7 +208,7 @@ end
 		@test mathtext("\$\\large x\$ after") == "\${\\large x}\\text{ after}\$"
 		@test mathtext("\$a \\over b\$ c") == "\${a \\over b}\\text{ c}\$"
 		@test mathtext("\${\\bf X}\$ after") == "\${\\bf X}\\text{ after}\$"
-		@test mathtext("before \$\\mathbf{X}\$") == "\$\\text{before }\\mathbf{X}\$"
+		@test mathtext("before \$\\mathbf{X}\$") == "\$\\text{before }{\\mathbf{X}}\$"
 		# A whole-math label keeps its switch unwrapped.
 		@test mathtext("\$\\bf X\$") == "\$\\bf X\$"
 		# Display segments inside mixed labels keep display style locally.
@@ -426,5 +426,84 @@ end
 			@test !("74" in result.literals.main)
 			@test "6C" in result.raw_lt.main && "74" in result.raw_lt.main
 		end
+	end
+end
+
+@testset "sci mathtext: each mixed math piece is its own formula (G71)" begin
+	# A leading sign after text stays unary: the piece is a group.
+	@test mathtext("Mode axis: \$-3.1^\\circ\$") == "\$\\text{Mode axis: }{-3.1^\\circ}\$"
+	@test mathtext("a\$\\pm\$b") == "\$\\text{a}{\\pm}\\text{b}\$"
+	@test mathtext("Value \$=5\$, ok") == "\$\\text{Value }{=5}\\text{, ok}\$"
+	@test mathtext("10\$^{-3}\$ m") == "\$\\text{10}{^{-3}}\\text{ m}\$"
+	@test mathtext("\$x+1\$ and \$y-1\$") == "\${x+1}\\text{ and }{y-1}\$"
+	# Single ordinary symbols are spaced the same either way and stay bare.
+	@test mathtext("Time \$t\$ (s)") == "\$\\text{Time }t\\text{ (s)}\$"
+	@test mathtext("\$\\phi\$ (V)") == "\$\\phi\\text{ (V)}\$"
+	@test mathtext("gain \$\\Omega\$, \$12.5\$ dB") == "\$\\text{gain }\\Omega\\text{, }12.5\\text{ dB}\$"
+	# A piece that is one group already is not wrapped twice.
+	@test mathtext("\${-x}\$ after") == "\${-x}\\text{ after}\$"
+	@test mathtext("\${a}{b}\$ after") == "\${{a}{b}}\\text{ after}\$"
+	@test mathtext("\$\\{a\\}\$ after") == "\${\\{a\\}}\\text{ after}\$"
+	# Whole-math labels and a piece alone on its row are unchanged.
+	@test mathtext("\$-3.1^\\circ\$") == "\$-3.1^\\circ\$"
+	@test mathtext("\$-1\$\nrow") == "\$\\begin{array}{c}{-1}\\\\{\\text{row}}\\end{array}\$"
+	# The label writers share the rule.
+	@test PlotlySupply._label("Mode axis: \$-3.1^\\circ\$") == "\$\\text{Mode axis: }{-3.1^\\circ}\$"
+	@test PlotlySupply._label(PlotlySupply._label("Mode axis: \$-3.1^\\circ\$")) ==
+		PlotlySupply._label("Mode axis: \$-3.1^\\circ\$")
+	@test PlotlySupply._mathtext_is_group("{a}")
+	@test PlotlySupply._mathtext_is_group(" {a{b}c} ")
+	@test !PlotlySupply._mathtext_is_group("{a}{b}")
+	@test !PlotlySupply._mathtext_is_group("\\{a\\}")
+	@test !PlotlySupply._mathtext_is_group("{")
+	@test PlotlySupply._mathtext_is_simple_ord("abc12.5")
+	@test PlotlySupply._mathtext_is_simple_ord(" \\nabla ")
+	@test !PlotlySupply._mathtext_is_simple_ord("\\pm")
+	@test !PlotlySupply._mathtext_is_simple_ord("-1")
+end
+
+# Glyph ids referenced by an exported SVG title (MathJax glyph `<use>` links).
+function _mathtext_title_glyph_ids(label::AbstractString)
+	fig = Plot(scatter(x = [1, 2], y = [1, 2]), Layout(title = attr(text = label)))
+	svg = String(savefig(fig; format = "svg", width = 600, height = 300))
+	return Set(m.captures[1] for m in eachmatch(r"<use[^>]*href=\"#([A-Z]+-[0-9A-F]+)\"", svg))
+end
+
+@testset "sci mathtext: \\mathcal is calligraphic under the default font (G42/G64)" begin
+	previous = get_default_mathtext()
+	try
+		# The page script carries the font name; only Latin-Modern is patched.
+		lm = PlotlySupply._mathjax_config_script("Latin-Modern"; inherit_text_font = false)
+		@test occursin("var FONT = \"Latin-Modern\";", lm)
+		@test occursin("variants[\"-tex-caligraphic\"] = variants[\"script\"]", lm)
+		@test !occursin("__FONT__", lm)
+		@test occursin("var FONT = \"TeX\";", PlotlySupply._mathjax_config_script("TeX"; inherit_text_font = false))
+
+		set_default_mathtext!()   # default font: Latin-Modern
+		@test PlotlySupply._mathjax_svg_font() == "Latin-Modern"
+		ids = _mathtext_title_glyph_ids("\$\\mathcal{E}_h\\ \\mathcal{R}\\ \\mathcal{A}\\ {\\cal L}\\ \\boldsymbol{\\mathcal{B}}\$")
+		# Script alphabet: E -> U+2130, R -> U+211B, A -> U+1D49C, L -> U+2112,
+		# bold B -> U+1D4D1 (bold script); never the roman Main letters.
+		for id in ("LATINMODERNSCRIPT-2130", "LATINMODERNSCRIPT-211B", "LATINMODERNSCRIPT-1D49C",
+			"LATINMODERNSCRIPT-2112", "LATINMODERNSCRIPT-1D4D1")
+			@test id in ids
+		end
+		@test !any(id -> id in ids, ("LATINMODERNMAIN-45", "LATINMODERNMAIN-52", "LATINMODERNMAIN-41", "LATINMODERNMAIN-4C"))
+		# Other alphabets are unaffected by the patch.
+		other = _mathtext_title_glyph_ids("\$\\mathrm{E}\\ \\mathbb{R}\\ \\mathfrak{g}\\ \\mathbf{E}\$")
+		@test "LATINMODERNMAIN-45" in other
+		@test "LATINMODERNDOUBLESTRUCK-211D" in other
+		@test "LATINMODERNFRAKTUR-1D524" in other
+		@test "LATINMODERNNORMAL-1D404" in other
+		# The TeX font has its own calligraphic font.
+		set_default_mathtext!(; font = "TeX")
+		@test "MJCAL-45" in _mathtext_title_glyph_ids("\$\\mathcal{E}\$")
+	finally
+		set_default_mathtext!(
+			previous.enabled;
+			size = previous.size,
+			font = previous.font,
+			inherit_text_font = previous.inherit_text_font,
+		)
 	end
 end

@@ -318,6 +318,11 @@ directly when you write raw Plotly attributes.
     entities plotly knows (`&amp;`, `&lt;`, `&#36;`, …) are decoded, `<br>`
     starts a new line, and any other HTML tag throws an `ArgumentError` (use TeX
     such as `\\textbf{…}` inside the math instead).
+  - Each math part that shares its line with text (or with another math part)
+    is wrapped in a group `{…}`, so it is typeset as its own formula, exactly
+    as TeX and matplotlib typeset every `\$…\$`: in `"Angle: \$-3.1^\\circ\$"` the
+    minus stays a unary sign. A part that is a single ordinary symbol (`\$t\$`,
+    `\$\\phi\$`) is spaced the same either way and is left bare.
   - Math parts are kept verbatim, except that the matplotlib-only macros
     `\\mathdefault{x}` → `{x}`, `\\mathregular` → `\\mathrm`, `\\degree` →
     `{^\\circ}` and `\\AA` → `\\mathring{\\mathrm{A}}` are rewritten, and `%` and
@@ -336,7 +341,8 @@ Returns a `String`.
 
 #### Examples
 ```julia
-mathtext("(a) Mesh study, \\\$\\\\lambda=10^8\\\$")   # "\\\$\\\\text{(a) Mesh study, }\\\\lambda=10^8\\\$"
+mathtext("(a) Mesh study, \\\$\\\\lambda=10^8\\\$")   # "\\\$\\\\text{(a) Mesh study, }{\\\\lambda=10^8}\\\$"
+mathtext("Mode axis: \\\$-3.1^\\\\circ\\\$")           # "\\\$\\\\text{Mode axis: }{-3.1^\\\\circ}\\\$"
 mathtext("Plain <b>bold</b>\\nline 2")             # "Plain <b>bold</b><br>line 2"
 mathtext("Error 5% \\\$\\\\epsilon\\\$\\nsecond"; align = :l)
 ```
@@ -657,11 +663,64 @@ function _mathtext_plain_text_items!(lines, text::AbstractString)
 	return lines
 end
 
+# Control words TeX typesets as ordinary symbols (class Ord): a math piece that
+# is just one of these, or a run of letters, digits and periods, is spaced the
+# same with or without a surrounding group.
+const _MATHTEXT_ORD_SYMBOLS = Set([
+	"alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta", "eta", "theta",
+	"vartheta", "iota", "kappa", "varkappa", "lambda", "mu", "nu", "xi", "omicron", "pi",
+	"varpi", "rho", "varrho", "sigma", "varsigma", "tau", "upsilon", "phi", "varphi", "chi",
+	"psi", "omega", "digamma", "Gamma", "Delta", "Theta", "Lambda", "Xi", "Pi", "Sigma",
+	"Upsilon", "Phi", "Psi", "Omega", "varGamma", "varDelta", "varTheta", "varLambda",
+	"varXi", "varPi", "varSigma", "varUpsilon", "varPhi", "varPsi", "varOmega",
+	"infty", "partial", "nabla", "ell", "hbar", "hslash", "imath", "jmath", "aleph",
+	"beth", "gimel", "daleth", "emptyset", "varnothing", "Re", "Im", "wp", "eth",
+])
+
+function _mathtext_is_simple_ord(tex::AbstractString)
+	body = strip(tex)
+	occursin(r"^[A-Za-z0-9.]+$", body) && return true
+	m = match(r"^\\([A-Za-z]+)$", body)
+	return m !== nothing && m.captures[1] in _MATHTEXT_ORD_SYMBOLS
+end
+
+# Whether the whole piece is one `{…}` group already (its first `{` closes at
+# its last character); escaped braces `\{`/`\}` do not count. Pieces reaching
+# here have balanced braces (`_mathtext_rewrite_math` validated them).
+function _mathtext_is_group(tex::AbstractString)
+	chars = collect(strip(tex))
+	(length(chars) >= 2 && first(chars) == '{' && last(chars) == '}') || return false
+	depth = 0
+	k = 1
+	while k <= length(chars)
+		c = chars[k]
+		if c == '\\'
+			k += 2
+			continue
+		elseif c == '{'
+			depth += 1
+		elseif c == '}'
+			depth -= 1
+			depth == 0 && return k == length(chars)
+		end
+		k += 1
+	end
+	return false
+end
+
 # Render one line: runs of text characters become `\text{…}` (unmatched braces
-# split out as `\{`/`\}`), atoms and math pieces are inserted verbatim.
+# split out as `\{`/`\}`), atoms are inserted verbatim. A math piece that shares
+# its line with text or other pieces is wrapped in a group, so it is typeset as
+# its own formula, as TeX and matplotlib typeset each `$…$`: a leading `-` or
+# `\pm` stays a unary sign and a leading `=` or a trailing `,` gets no spacing
+# against the neighbouring text (G71: "Mode axis: $-3.1^\circ$" printed a
+# binary minus, "axis:  − 3.1°"). Single ordinary symbols are left bare, since
+# a group changes nothing for them; a piece alone on its line is wrapped only
+# when it ends in a font/size switch that would leak into the next row.
 function _mathtext_render_line(items::Vector{_MathtextItem}, wrap_leaks::Bool)
 	chunks = String[]
 	run = Char[]
+	shared = length(items) > 1
 	for item in items
 		if item isa _MathtextChar
 			push!(run, item.c)
@@ -672,7 +731,8 @@ function _mathtext_render_line(items::Vector{_MathtextItem}, wrap_leaks::Bool)
 			push!(chunks, item.tex)
 		elseif item.display
 			push!(chunks, "{\\displaystyle " * item.tex * "}")
-		elseif item.leaks && wrap_leaks
+		elseif ((shared && !_mathtext_is_simple_ord(item.tex)) || (item.leaks && wrap_leaks)) &&
+			   !_mathtext_is_group(item.tex)
 			push!(chunks, "{" * item.tex * "}")
 		else
 			push!(chunks, item.tex)
