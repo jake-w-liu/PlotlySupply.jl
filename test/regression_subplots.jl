@@ -835,9 +835,21 @@ end
 		plot_scatter!(sf, 1:3, [1.0, 2.0, 3.0]; row=1, col=2, inset=1)
 		@test sf.plot.data[end][:xaxis] == "x3"
 
+		# Other kinds pass through to PlotlyBase without an `inset` id; the
+		# Cartesian ids count Cartesian insets only.
+		mixed = subplots(1, 2; sync=false, insets=[
+			_RSP_PB.Inset(cell=(1, 1), kind="scene", l=0.5, w=0.4, b=0.5, h=0.4),
+			_RSP_PB.Inset(cell=(1, 2), l=0.5, w=0.4, b=0.5, h=0.4),
+		])
+		@test haskey(_rsp_layout(mixed), :scene)
+		@test length(mixed.insets) == 1
+		@test (mixed.insets[1].row, mixed.insets[1].col, mixed.insets[1].xkey) == (1, 2, :xaxis3)
+		plot_scatter!(mixed, 1:3, [1.0, 2.0, 3.0]; row=1, col=2, inset=1)
+		@test mixed.plot.data[end][:xaxis] == "x3"
+
 		for (insets, fragment) in (
-			([_RSP_PB.Inset(cell=(1, 2), kind="scene")], "only Cartesian"),
 			([_RSP_PB.Inset(cell=(2, 2))], "outside the 1 × 2 grid"),
+			([_RSP_PB.Inset(cell=(3, 1), kind="map")], "outside the 1 × 2 grid"),
 			([_RSP_PB.Inset(cell=(0, 1))], "outside the 1 × 2 grid"),
 			([_RSP_PB.Inset(cell=(1, 2), colspan=2)], "colspan/rowspan"),
 			([_RSP_PB.Inset(cell=(1, 2), l=0.7, w=0.5)], "reaches outside its cell"),

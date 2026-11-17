@@ -2613,10 +2613,17 @@ end
 # ── `subplots(...; insets = [Inset(...), ...])` ──────────────────────────────
 #
 # PlotlyBase creates the axes of its `Inset` specifications but keeps no
-# routing record of them, so they are registered in `sf.insets` here: `inset=k`
-# then targets them like the insets `inset!` adds. Only Cartesian insets over
-# a single Cartesian cell are supported (PlotlyBase ignores `colspan` /
-# `rowspan` of an inset, and the inset record is an x/y axis pair).
+# routing record of them, so the Cartesian ("xy") ones are registered in
+# `sf.insets` here: `inset=k` then targets them like the insets `inset!` adds.
+# A Cartesian inset must lie inside one Cartesian cell (PlotlyBase ignores
+# `colspan`/`rowspan` of an inset, and the record is an x/y axis pair).
+# Insets of other kinds (map, scene, ...) are passed to PlotlyBase unchanged;
+# their subplots are routed by the map/scene layers, not by `inset=k`.
+
+const _SubplotsCheckedInset = NamedTuple{
+	(:index, :row, :col, :xfrac, :yfrac),
+	Tuple{Int, Int, Int, NTuple{2, Float64}, NTuple{2, Float64}},
+}
 
 # A size fraction of an `Inset` (`l`, `b`, or `w`/`h`, which may be "to_end").
 function _subplots_inset_fraction(value, k::Int, name::AbstractString; size::Bool)
@@ -2635,30 +2642,28 @@ function _subplots_inset_fraction(value, k::Int, name::AbstractString; size::Boo
 end
 
 # Validated `insets` keyword (before the grid is built): a vector of
-# `PlotlyBase.Inset` with kind "xy", a host cell inside the grid, no spans and
-# fractions that keep the inset inside its host cell. Returns them as
-# `(row, col, (x0, x1), (y0, y1))` fractions of the host cell.
+# `PlotlyBase.Inset` whose cells lie inside the grid. Cartesian insets must not
+# span cells and their fractions must keep them inside the host cell; they are
+# returned (with their position `index` in `insets`) as fractions of the host
+# cell, in order. Insets of other kinds are not returned.
 function _subplots_checked_insets(insets, rows::Int, cols::Int)
-	insets === missing && return Tuple{Int, Int, NTuple{2, Float64}, NTuple{2, Float64}}[]
+	checked = _SubplotsCheckedInset[]
+	insets === missing && return checked
 	(insets isa AbstractVector && all(inset -> inset isa PlotlyBase.Inset, insets)) ||
 		throw(ArgumentError(
 			"subplots: `insets` must be a vector of `Inset(...)` specifications; got " *
 			"$(repr(insets)). (`inset!(sf, bounds)` adds an inset to an existing figure.)",
 		))
-	checked = Tuple{Int, Int, NTuple{2, Float64}, NTuple{2, Float64}}[]
 	for (k, inset) in enumerate(insets)
-		inset.kind == "xy" || throw(ArgumentError(
-			"subplots: `insets[$(k)]` has kind $(repr(inset.kind)); only Cartesian " *
-			"(\"xy\") insets are supported.",
-		))
-		(inset.colspan == 1 && inset.rowspan == 1) || throw(ArgumentError(
-			"subplots: `insets[$(k)]` sets colspan/rowspan, which PlotlyBase ignores; " *
-			"an inset lies inside one cell (size it with `w`/`h`).",
-		))
 		r, c = inset.cell
 		(1 <= r <= rows && 1 <= c <= cols) || throw(ArgumentError(
 			"subplots: `insets[$(k)].cell` = $(inset.cell) is outside the " *
 			"$(rows) × $(cols) grid.",
+		))
+		inset.kind == "xy" || continue
+		(inset.colspan == 1 && inset.rowspan == 1) || throw(ArgumentError(
+			"subplots: `insets[$(k)]` sets colspan/rowspan, which PlotlyBase ignores; " *
+			"an inset lies inside one cell (size it with `w`/`h`).",
 		))
 		l = _subplots_inset_fraction(inset.l, k, "l"; size = false)
 		b = _subplots_inset_fraction(inset.b, k, "b"; size = false)
@@ -2671,20 +2676,27 @@ function _subplots_checked_insets(insets, rows::Int, cols::Int)
 			"subplots: `insets[$(k)]` reaches outside its cell (l + w = $(x1), " *
 			"b + h = $(y1)); both must be at most 1.",
 		))
-		push!(checked, (r, c, (l, min(x1, 1.0)), (b, min(y1, 1.0))))
+		push!(checked, (
+			index = k,
+			row = r,
+			col = c,
+			xfrac = (l, min(x1, 1.0)),
+			yfrac = (b, min(y1, 1.0)),
+		))
 	end
 	return checked
 end
 
-# Register the insets PlotlyBase created for `fractions` (from
-# `_subplots_checked_insets`, in the same order): they hold the x/y axes
-# numbered after every grid axis. Their domains are recomputed from the host
-# cell's plot area (PlotlyBase sizes them by one grid column/row, which is
-# wrong for spanning and bottom-left cells), and their tick labels do not push
-# the figure margins (as for `inset!`). Returns the inset records.
-function _subplots_register_insets!(p::Plot, fractions)
+# Register the Cartesian insets PlotlyBase created for `checked` (from
+# `_subplots_checked_insets`, in order): the j-th one holds the x/y axes
+# numbered j after every grid x/y axis (other inset kinds use their own
+# counters). Their domains are recomputed from the host cell's plot area
+# (PlotlyBase sizes them by one grid column/row, which is wrong for spanning
+# and bottom-left cells), and their tick labels do not push the figure margins
+# (as for `inset!`). Returns the inset records.
+function _subplots_register_insets!(p::Plot, checked::Vector{_SubplotsCheckedInset})
 	records = _SubplotInset[]
-	isempty(fractions) && return records
+	isempty(checked) && return records
 	layout = p.layout
 	grid_ref = layout.subplots.grid_ref
 	max_x = 0
@@ -2699,23 +2711,25 @@ function _subplots_register_insets!(p::Plot, fractions)
 			y_index === nothing || (max_y = max(max_y, y_index))
 		end
 	end
-	for (k, (r, c, xfrac, yfrac)) in enumerate(fractions)
+	for (j, inset) in enumerate(checked)
+		k, r, c = inset.index, inset.row, inset.col
 		host = isassigned(grid_ref, r, c) ? grid_ref[r, c] : PlotlyBase.SubplotRef[]
 		(!isempty(host) && String(first(host).subplot_kind) == "xy") || throw(ArgumentError(
-			"subplots: the host cell $((r, c)) of `insets[$(k)]` is not a Cartesian " *
-			"(\"xy\") cell.",
+			"subplots: the host cell $((r, c)) of the Cartesian `insets[$(k)]` is not " *
+			"a Cartesian (\"xy\") cell.",
 		))
 		hx = something(_layout_axis_domain(layout, first(host).layout_keys[1]), (0.0, 1.0))
 		hy = _cmn_y_axis_domain(layout, first(host).layout_keys[2])
-		xkey = Symbol("xaxis", max_x + k)
-		ykey = Symbol("yaxis", max_y + k)
-		xref = "x$(max_x + k)"
-		yref = "y$(max_y + k)"
+		xkey = Symbol("xaxis", max_x + j)
+		ykey = Symbol("yaxis", max_y + j)
+		xref = "x$(max_x + j)"
+		yref = "y$(max_y + j)"
 		# PlotlyBase numbers inset axes after the grid's; anything else means
 		# its layout builder changed, and the records would point elsewhere.
 		(_cmn_mapping_get(get(layout.fields, xkey, nothing), :anchor) == yref &&
 			_cmn_mapping_get(get(layout.fields, ykey, nothing), :anchor) == xref) ||
-			error("subplots: PlotlyBase did not create inset $(k) as $(xkey)/$(ykey).")
+			error("subplots: PlotlyBase did not create `insets[$(k)]` as $(xkey)/$(ykey).")
+		xfrac, yfrac = inset.xfrac, inset.yfrac
 		xdomain = (hx[1] + xfrac[1] * (hx[2] - hx[1]), hx[1] + xfrac[2] * (hx[2] - hx[1]))
 		ydomain = (hy[1] + yfrac[1] * (hy[2] - hy[1]), hy[1] + yfrac[2] * (hy[2] - hy[1]))
 		_cmn_merge_layout_key!(p, xkey, Dict{Symbol, Any}(:domain => collect(xdomain), :automargin => false))
@@ -2795,16 +2809,17 @@ with `plot_*!` get a colorbar next to their own cell (see
   for the default `start_cell="top-left"` its FIRST entry sizes the BOTTOM
   row; prefer `height_ratios`. Cell colorbars sit in the gap right of their
   cell, so widen `horizontal_spacing` when neighbouring cells crowd them.
-- `insets`: a vector of `PlotlyBase.Inset(cell=(row, col), l, w, b, h)`
-  Cartesian insets. `l`/`b` (in `[0, 1)`) and `w`/`h` (in `(0, 1]`, or
-  `"to_end"`) are fractions of the host cell's plot area; `l + w` and
-  `b + h` must not exceed 1, the host must be a Cartesian cell, and
-  `kind` other than `"xy"` or `colspan`/`rowspan` other than 1 are
-  rejected. The insets are registered like the ones [`inset!`](@ref) adds:
-  ids `1, 2, …` in the given order (before any `inset!` ids), targeted with
-  `inset = k` by the `plot_*!` mutators and axis helpers; their tick labels
-  do not push the figure margins, and their traces are listed in the host
-  cell's legend.
+- `insets`: a vector of `PlotlyBase.Inset(cell=(row, col), kind, l, w, b, h)`
+  whose cells lie in the grid. Cartesian insets (`kind="xy"`, the default)
+  are registered like the ones [`inset!`](@ref) adds: ids `1, 2, …` in the
+  order they appear (before any `inset!` ids), targeted with `inset = k` by
+  the `plot_*!` mutators and axis helpers; their tick labels do not push the
+  figure margins and their traces are listed in the host cell's legend. For
+  them `l`/`b` (in `[0, 1)`) and `w`/`h` (in `(0, 1]`, or `"to_end"`) are
+  fractions of the host cell's plot area, `l + w` and `b + h` must not
+  exceed 1, `colspan`/`rowspan` must be 1 and the host must be a Cartesian
+  cell. Insets of other kinds (maps, scenes, ...) are passed to PlotlyBase
+  unchanged and get no `inset` id.
 
 Every option is validated before the figure (or window) is created; invalid
 values throw an `ArgumentError`. Figure-level settings are not changed by the
