@@ -2086,6 +2086,12 @@ title of one panel.
   cell. [`set_fonts!`](@ref) styles it as a title. A left/right-aligned panel
   title moves an outside [`panel_labels!`](@ref) label at the same top corner
   beside the corner (outside the axes), so they do not overlap.
+  A panel title below the first row shares the gap between the rows with the
+  x tick labels and x title of the cell above, and nothing moves the rows
+  apart: with an x title on every cell, widen the gap with `vertical_spacing`
+  in [`subplots`](@ref) (two rows at 500 px with 12 px text need about
+  `vertical_spacing = 0.2`; with the PlotlyBase default, `0.3 / rows` = 0.15,
+  the title overlaps the x title above).
 
 `text` goes through mathtext (`"(a) Mesh study, \$\\lambda=10^8\$"` keeps its
 text); `""` removes the title.

@@ -387,9 +387,16 @@ using Test, PlotlySupply
 		for c in 1:3
 			plot_scatter!(sh, x, [x, 2x]; legend = ["model $(c)", "data $(c)"], row = 1, col = c)
 		end
-		# the cell is 173 px wide: the two columns (about 180 px) become one, with a warning
-		@test_logs (:warn, r"2 legend columns .* using 1\.") set_legend!(sh; row = 1, col = 1,
+		# the cell is 173 px wide, but a legend above it may reach into the left
+		# margin: the two columns (about 180 px) fit, without a warning
+		@test_logs set_legend!(sh; row = 1, col = 1,
 			position = (1.0, 1.0), xanchor = "right", yanchor = "bottom", ncols = 2)
+		@test any(t -> get(t.fields, :legendgroup, "") == "plotlysupply:col:legend:c:2/2", pl(sh).data)
+		# a cell legend inside its axes keeps the cell width: one column, with a warning
+		sn = subplots(1, 3; sync = false)
+		plot_scatter!(sn, x, [x, 2x]; legend = ["model 1", "data 1"], row = 1, col = 1)
+		@test_logs (:warn, r"2 legend columns .* using 1\.") set_legend!(sn; row = 1, col = 1,
+			position = :topleft, ncols = 2)
 		legend_entry!(sh, "Newton"; legend_target = :figure, color = "red")
 		set_legend!(sh; legend_target = :figure, position = :outside_top)
 		panel_labels!(sh; bold = true)

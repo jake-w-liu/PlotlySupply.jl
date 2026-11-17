@@ -659,4 +659,36 @@ using Test, PlotlySupply
 		@test PS._cmn_mapping_get(pl(fig).layout.fields[:xaxis][:title], :text) == "time (s)"
 		@test PS._cmn_mapping_get(pl(fig).layout.fields[:yaxis][:title], :text) == PS._label(String(math))
 	end
+
+	@testset "legend columns: a cell legend above or below its axes uses the band beside it (G83/G77)" begin
+		sf = subplots(1, 3; sync = false)
+		for c in 1:3
+			plot_scatter!(sf, 1:3, 1:3; row = 1, col = c, legend = "s$(c)")
+		end
+		p = pl(sf)
+		area = PS._legend_plot_area_width(p)
+		xd = [PS._layout_axis_domain(p.layout, Symbol("xaxis", k == 1 ? "" : k)) for k in 1:3]
+		yd = PS._layout_axis_domain(p.layout, :yaxis)
+		# the band of the middle cell runs from its neighbours' edges ...
+		lo, hi = PS._legend_band_interval(p, xd[2], yd)
+		@test lo ≈ xd[1][2] && hi ≈ xd[3][1]
+		# ... and beside the outer cells into the figure margins
+		@test PS._legend_band_interval(p, xd[1], yd)[1] ≈ -PS._legend_margin_lr(p, :l) / area
+		@test PS._legend_band_interval(p, xd[3], yd)[2] ≈ 1 + PS._legend_margin_lr(p, :r) / area
+		span = xd[2][2] - xd[2][1]
+		above(xanchor, x) = Dict{Symbol, Any}(:x => x, :xanchor => xanchor, :y => 1.0, :yanchor => "bottom")
+		@test PS._legend_available_width(p, above("right", xd[2][2]), span; legend_id = "legend2") ≈
+			(xd[2][2] - xd[1][2]) * area
+		@test PS._legend_available_width(p, above("left", xd[2][1]), span; legend_id = "legend2") ≈
+			(xd[3][1] - xd[2][1]) * area
+		middle = (xd[2][1] + xd[2][2]) / 2
+		@test PS._legend_available_width(p, above("center", middle), span; legend_id = "legend2") ≈
+			2 * min(middle - xd[1][2], xd[3][1] - middle) * area
+		below = Dict{Symbol, Any}(:x => xd[2][2], :xanchor => "right", :y => 0.0, :yanchor => "top")
+		@test PS._legend_available_width(p, below, span; legend_id = "legend2") ≈ (xd[2][2] - xd[1][2]) * area
+		# inside the axes, or without the legend id: the cell width
+		inside = Dict{Symbol, Any}(:x => xd[2][2], :xanchor => "right", :y => 0.97, :yanchor => "top")
+		@test PS._legend_available_width(p, inside, span; legend_id = "legend2") ≈ span * area
+		@test PS._legend_available_width(p, above("right", xd[2][2]), span) ≈ span * area
+	end
 end

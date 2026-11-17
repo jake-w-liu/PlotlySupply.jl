@@ -404,6 +404,11 @@ unrecognized name warns and falls back to `:topright`; a value that is neither
 a `Symbol` nor a string throws an `ArgumentError`. Figures that already exist
 are not changed. Returns the normalized position.
 
+While the default is `:topright`, the legends of the scatter and line
+families and the cell legends of a [`SubplotFigure`](@ref) go where they cover
+the least data (matplotlib's `loc = "best"`, see [`plot_scatter`](@ref)); any
+other default turns this off.
+
 # Example
 ```julia
 set_default_legend_position!(:outside_bottom)
@@ -8232,7 +8237,7 @@ While the default legend position is `:topright` (see
 [`set_default_legend_position!`](@ref)), the legend of a `Plot`/`SyncPlot`,
 and each cell legend of a `SubplotFigure` (Cartesian cells with any y axes,
 polar cells), goes where its box covers the fewest data points, line segments
-and filled areas (and, in a polar cell, angular tick labels): the corners
+and filled areas (and, in a polar cell, the tick labels): the corners
 first (top right, top left, bottom left, bottom right), then the middle of
 the right, left, bottom and top edges, then the centre. Later calls of the
 scatter and line families move it again as data is added, as long as it sits
