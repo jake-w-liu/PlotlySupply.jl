@@ -534,7 +534,7 @@ end
 			first_surface = failing.plot.data[1]
 			layout_before = deepcopy(failing.plot.layout)
 			failing_renderer.fail = true
-			@test_throws ErrorException("rsp renderer failure") plot_surface!(failing, rand(3, 3); row=1, col=2, shared_coloraxis=true)
+			@test_throws PlotlySupply._SyncPlotDesynchronizationError plot_surface!(failing, rand(3, 3); row=1, col=2, shared_coloraxis=true)
 			@test length(failing.plot.data) == 1
 			@test failing.plot.data[1] === first_surface
 			@test !haskey(failing.plot.data[1].fields, :coloraxis)
