@@ -23,8 +23,9 @@ const _CBAR_CELL_PAD = 0.01
 # Gap between the right-most cell and a bar shared by several cells (spec F7).
 const _CBAR_SHARED_PAD = 0.02
 # Distance below the cell where a `side = :bottom` bar starts, in paper
-# fractions (spec F6): room for the x tick labels and axis title at the
-# default font size.
+# fractions (spec F6). It is the initial placement only, and marks the bar
+# as placed by this package: `_finalize_figure!` moves such a bar below the
+# x tick labels and axis title it measures, into room it reserves (D12).
 const _CBAR_BOTTOM_OFFSET = 0.12
 # Thickness of the bars PlotlySupply places, in px (spec F5); plotly's 30 px
 # default is out of proportion next to a subplot cell.
@@ -72,7 +73,7 @@ const _CBAR_ROOT_TRACE_TYPES = (
 const _CBAR_CONTOUR_TYPES = ("contour", "contourcarpet", "histogram2dcontour")
 
 # The placement keys `_finalize_figure!` writes on a bar it owns.
-const _CBAR_FINALIZE_KEYS = (:x, :y, :xanchor, :yanchor, :xref, :ypad, :len, :lenmode)
+const _CBAR_FINALIZE_KEYS = (:x, :y, :xanchor, :yanchor, :xref, :yref, :xpad, :ypad, :len, :lenmode)
 
 # Colorbar keys that position a bar. `shared_colorbar!` carries the other
 # settings (ticks, number format, thickness, …) of the bars it removes over
@@ -482,8 +483,9 @@ function _cbar_region_placement(side::Symbol, regions)
 	return _cbar_placement(side, xdomain, ydomain, pad)
 end
 
-function _cbar_placement_matches(bar::AbstractDict, placement::AbstractDict)
-	for key in (:x, :y, :len)
+# Whether `bar` sits at `placement` (`len = false`: at any length).
+function _cbar_placement_matches(bar::AbstractDict, placement::AbstractDict; len::Bool = true)
+	for key in (len ? (:x, :y, :len) : (:x, :y))
 		value = _cbar_real(bar, key, nothing)
 		(value !== nothing && isapprox(value, placement[key]; atol = 1e-9)) ||
 			return false
@@ -965,13 +967,25 @@ function _cbar_option_placement(opts, xdomain, ydomain, pad::Float64)
 	return placement
 end
 
-function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDict)
-	merge!(bar, placement)
-	# An explicit position or length takes the bar out of
-	# `_finalize_figure!`'s hands: its ownership mark is `xref = "paper"`
-	# (`_fin_bar_owned`), which is plotly's default anyway.
-	if (opts.x !== nothing || opts.y !== nothing || opts.len > 0) && _cbar_string(bar, :xref, "") == "paper"
-		delete!(bar, :xref)
+# `keep`: the bar may stay where `_finalize_figure!` placed it (false when
+# the call names the cell to place it next to).
+function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDict; keep::Bool = true)
+	explicit = !keep || opts.x !== nothing || opts.y !== nothing
+	if !explicit && _fin_bar_owned(bar) && _fin_bar_vertical(bar) == (opts.side === :right)
+		# `_finalize_figure!` placed this bar in the room it reserved next to
+		# its plot area; it stays there (the finalize pass re-places it). Its
+		# length is `len`, or the area's extent (`_room_bar_len`).
+		bar[:orientation] = placement[:orientation]
+		bar[:len] = placement[:len]
+		bar[:lenmode] = "fraction"
+	else
+		# A position given here (or a new side) takes the bar out of
+		# `_finalize_figure!`'s hands: drop its ownership mark (`xref` /
+		# `yref = "paper"`, see `_fin_bar_owned`; plotly's default anyway).
+		for key in (:xref, :yref)
+			_cbar_string(bar, key, "") == "paper" && delete!(bar, key)
+		end
+		merge!(bar, placement)
 	end
 	if opts.thickness > 0
 		bar[:thickness] = opts.thickness
@@ -1004,8 +1018,22 @@ function _cbar_apply_title!(
 	shows::Bool,
 	range,
 )
+	if !shows
+		# A hidden bar draws nothing. The title annotation named after `key`
+		# belongs to the bar shown in the same plot area (a mirrored mesh:
+		# `plot_pcolormesh!(...; showscale=false)`), so it is never touched.
+		title === nothing && return nothing
+		existing = get(bar, :title, nothing)
+		fields = existing isa AbstractString ?
+			Dict{Symbol,Any}(:text => existing) :
+			_symbol_dict(existing)
+		fields[:text] = title
+		fields[:side] = String(title_side)
+		bar[:title] = _cbar_attr(fields)
+		return nothing
+	end
 	if title !== nothing
-		geometry = (shows && _cbar_is_math(title)) ?
+		geometry = _cbar_is_math(title) ?
 			_cbar_geometry(p, bar, range) :
 			nothing
 		if geometry !== nothing
@@ -1026,7 +1054,7 @@ function _cbar_apply_title!(
 	# No new title: an annotation title follows the (possibly moved) bar.
 	found = _cbar_find_title_annotation(p, key)
 	found === nothing && return nothing
-	geometry = shows ? _cbar_geometry(p, bar, range) : nothing
+	geometry = _cbar_geometry(p, bar, range)
 	if geometry === nothing
 		_cbar_remove_title_annotation!(p, key)
 		fields = _symbol_dict(get(bar, :title, nothing))
@@ -1074,7 +1102,7 @@ function _colorbar_edit_coloraxis!(
 	key = Symbol(id)
 	axis = _symbol_dict(get(p.layout.fields, key, nothing))
 	bar = _symbol_dict(get(axis, :colorbar, nothing))
-	_cbar_apply_options!(bar, opts, _cbar_option_placement(opts, xdomain, ydomain, pad))
+	_cbar_apply_options!(bar, opts, _cbar_option_placement(opts, xdomain, ydomain, pad); keep = region === nothing)
 	_cbar_apply_title!(
 		p,
 		bar,
@@ -1223,14 +1251,21 @@ Edit the colorbars that already exist in a figure.
   `"plotlysupply:colorbar_title:<area>:<side>"`); its distance for `:right`
   is estimated from the tick-label width. The annotation follows later
   `colorbar!` moves but not `relayout!`/`restyle!` edits of the bar.
-- `side::Symbol=:right`: `:right` gives a vertical bar left-anchored at
-  `xdomain[2] + 0.01` and as tall as the cell; `:bottom` a horizontal bar
-  centred `0.12` (paper fraction) below the cell and as wide as it. The
-  geometry is written on every call. A right-side bar and its tick labels
-  sit in the gap to the next cell; with three or more columns at small
-  figure widths, pass a wider `horizontal_spacing` (e.g. `0.15`) to
-  [`subplots`](@ref) so they do not reach that cell's tick labels.
-- `len::Real=0`: bar length as a paper fraction (`0`: the cell's extent).
+- `side::Symbol=:right`: `:right` gives a vertical bar right of the plot
+  area (past a right-side y axis' labels) and as tall as it; `:bottom` a
+  horizontal bar below the cell's x tick labels and x title, centred on the
+  cell and as wide as it. Every figure update reserves room for the bar,
+  its tick labels and its title (decision D12): when the gap to the
+  neighbouring cell is too small the cell's domain shrinks on that side
+  (cells sharing that grid edge shrink alike, at most half the cell), at the
+  figure edge the margin grows; a cell whose domain you set yourself keeps
+  it. Bars of one cell sit side by side. A bar placed this way stays where
+  it is on later calls without `x` or `y` (pass `side` again to keep a
+  bottom bar at the bottom: the default is `:right`); a vertical bar is
+  never drawn shorter than three lines of tick labels plus a title above or
+  below it (at most the plot height).
+- `len::Real=0`: bar length as a paper fraction, centred on the cell (`0`:
+  the cell's extent, following it when its domain changes).
 - `thickness::Real=0`: bar thickness in px (`0`: unchanged).
 - `x`, `y`: explicit bar position (paper fractions) overriding `side`'s.
 - `ticks`: tick values in colour units; `ticklabels` (requires `ticks`, same
@@ -1347,10 +1382,11 @@ function _shared_colorbar_options(
 		(cmid isa Real && !(cmid isa Bool) && isfinite(cmid)) || throw(ArgumentError(
 			"$(who): `cmid` must be a finite number or nothing; got $(repr(cmid)).",
 		))
-		limits === nothing || throw(ArgumentError(
-			"$(who): `cmid` centres an automatic colour range; plotly ignores " *
-			"it once `crange` fixes both limits. Pass a symmetric `crange` " *
-			"instead.",
+		# With an explicit `crange`, `cmid` is a two-slope remap of the
+		# colour scale (F4), which needs it strictly inside the range.
+		(limits === nothing || limits[1] < cmid < limits[2]) || throw(ArgumentError(
+			"$(who): `cmid` = $(cmid) must lie strictly inside `crange` = " *
+			"$(repr(crange)).",
 		))
 		mid = Float64(cmid)
 	end
@@ -1622,12 +1658,29 @@ function _shared_colorbar_apply!(
 	else
 		_shared_colorbar_first_scale(p, slots)
 	end
-	if scale === nothing && !isempty(banded)
-		# Contours and the coloraxis must name the same scale explicitly.
+	if scale === nothing
+		# The scale the traces were drawn with: plotly's coloraxis would
+		# otherwise pick its automatic sequential/diverging palette by the
+		# sign of the data, recolouring every panel; contours and the
+		# coloraxis must also name the same scale explicitly.
+		first_slot = isempty(bound) ? first(banded) : first(bound)
 		scale = (
-			scale = _cbar_default_scale(p, _cbar_trace_type(p.data[first(banded).index])),
+			scale = _cbar_default_scale(p, _cbar_trace_type(p.data[first_slot.index])),
 			reversescale = false,
 		)
+	end
+	if opts.cmid !== nothing && opts.limits !== nothing
+		# Two-slope norm (F4): the scale's middle colour moves to `cmid`.
+		mid_at = (opts.cmid - limits[1]) / (limits[2] - limits[1])
+		if mid_at != 0.5
+			stops = _cbar_scale_stops(scale.scale, scale.reversescale)
+			stops === nothing && throw(ArgumentError(
+				"$(who): `cmid` with an explicit `crange` remaps the colour " *
+				"scale, but the scale $(repr(scale.scale)) cannot be interpreted; " *
+				"pass `colorscale`.",
+			))
+			scale = (scale = _two_slope_stops(stops, mid_at), reversescale = false)
+		end
 	end
 
 	# Rebind every coloured trace; its own bar disappears with it.
@@ -1958,24 +2011,30 @@ with different limits or scales throw an `ArgumentError`.
 - `cells=:all` (SubplotFigure only): `:all`, or a vector of `(row, col)`
   tuples.
 - `colorscale=""`: any colour scale `colormap` accepts; `""` keeps the scale
-  of the carriers, else of the first trace that sets one (plotly's default
-  sequential scale if none does).
+  of the carriers, else of the first trace that sets one, else the scale the
+  traces were drawn with (the template's default for the first trace's type,
+  else its sequential scale; written out so binding does not switch the
+  panels to plotly's automatic diverging palette).
 - `crange=[0, 0]`: colour limits `[cmin, cmax]` (increasing). `[0, 0]` uses
   the carriers' limits, else the global finite min/max of the traces' colour
   data (z, surfacecolor, intensity, value, cone norms, marker colours); when
   a trace's colour data is computed by plotly (histogram2d counts,
   streamtube magnitudes) the limits are left to plotly, which ranges a
   coloraxis over every bound trace.
-- `cmid=nothing`: centre of an automatic colour range (plotly `cmid`);
-  combining it with an explicit `crange` is an `ArgumentError` (plotly would
-  ignore it). With filled contours selected the centred range (`cmid` ± the
-  largest distance to the data) is written out as `cmin`/`cmax`.
+- `cmid=nothing`: with an automatic `crange`, the centre of the colour range
+  (plotly `cmid`; with filled contours selected the centred range, `cmid` ±
+  the largest distance to the data, is written out as `cmin`/`cmax`). With an
+  explicit `crange` it must lie strictly inside it (`ArgumentError`
+  otherwise) and remaps the colour scale in two slopes (as `cmid` does for a
+  single trace): the scale's middle colour sits at `cmid`.
 - `title=""`, `title_side=:top`: bar title (mathtext) and its side, as in
   [`colorbar!`](@ref) (math titles become an annotation).
 - `len::Real=0.75`: bar length as a fraction of the selected cells' extent.
-- `side::Symbol=:right`: `:right` puts a vertical bar `0.02` right of the
-  right-most selected cell, centred on the cells' vertical extent;
-  `:bottom` a horizontal bar centred `0.12` below the lowest cell.
+- `side::Symbol=:right`: `:right` puts a vertical bar right of the
+  right-most selected cells, centred on the cells' vertical extent;
+  `:bottom` a horizontal bar below the lowest cells' x tick labels and
+  titles, centred on their horizontal extent. Room for the bar is reserved
+  (see [`colorbar!`](@ref)).
 - `coloraxis="coloraxis"`: the shared axis id (`:shared` means
   `"coloraxis"`; `"coloraxis2"`, … are allowed).
 
