@@ -950,7 +950,10 @@ function log_ticks(lo::Real, hi::Real; subs = (1,), base::Real = 10)
 end
 
 const _CMN_EXPONENT_FORMATS = ("none", "e", "E", "power", "SI", "B")
-const _CMN_TICK_DIRECTIONS = ("inside", "outside", "")
+# Tick directions: plotly.js 2.35.2 draws ticks "inside" or "outside" the
+# axis line only (its `ticks` enumeration is ["outside", "inside", ""]; there
+# is no crossing "inout" tick). "none" removes the tick marks (`ticks = ""`).
+const _CMN_TICK_DIRECTIONS = ("inside", "outside", "none", "")
 # Minor tick length in px chosen by the 2.0 spec (F8): short enough to read
 # as minor next to Plotly's 5 px major ticks.
 const _CMN_MINOR_TICKLEN = 3
@@ -1219,8 +1222,10 @@ axis is touched.
   times the major length, 3 px by default); on a log axis with array major
   ticks also explicit minor tick values (mantissas 1..9 per decade).
   `minor=false` removes minor ticks.
-- `angle`: `tickangle`; `direction` in ("inside", "outside", "") sets `ticks`
-  ("" leaves it unchanged).
+- `angle`: `tickangle`; `direction` in ("inside", "outside") sets `ticks`,
+  "none" removes the tick marks (`ticks = ""`, also on the minor ticks;
+  conflicts with `minor=true`), "" leaves it unchanged. plotly.js has no
+  ticks crossing the axis line (matplotlib "inout").
 - `tickwidth`, `ticklen`: major tick width/length in px (ADDENDUM A6); 0
   leaves them unchanged. A new `ticklen` also rescales explicit minor ticks.
 """
@@ -1251,8 +1256,14 @@ function _apply_ticks!(
 			"or \"\"; got $(repr(exponentformat)).",
 		))
 	direction in _CMN_TICK_DIRECTIONS || throw(ArgumentError(
-		"$(who): `direction` must be \"inside\", \"outside\" or \"\"; got " *
-		"$(repr(direction)).",
+		"$(who): `direction` must be \"inside\", \"outside\", \"none\" (no tick " *
+		"marks) or \"\" (unchanged); got $(repr(direction))" *
+		(direction in ("both", "inout") ?
+			" (plotly.js draws ticks on one side of the axis line only)." : "."),
+	))
+	(direction == "none" && minor === true) && throw(ArgumentError(
+		"$(who): `direction = \"none\"` removes the tick marks; it cannot be " *
+		"combined with `minor = true`.",
 	))
 	(angle === nothing || isfinite(angle)) || throw(ArgumentError(
 		"$(who): `angle` must be finite; got $(angle).",
@@ -1312,7 +1323,7 @@ function _apply_ticks!(
 	clear_minor_array = false
 	# Minor tick placement removed by `:auto` (and replaced by `:decades`).
 	clear_minor_placement = preset !== nothing
-	if preset === :decades && minor !== false
+	if preset === :decades && minor !== false && direction != "none"
 		minor_fields = Dict{Symbol, Any}(
 			:ticks => direction == "" ? "outside" : direction,
 			:ticklen => _cmn_minor_ticklen(axis_entry, ticklen),
@@ -1339,6 +1350,10 @@ function _apply_ticks!(
 	elseif minor === false || preset === :auto
 		minor_fields = Dict{Symbol, Any}(:ticks => "")
 		clear_minor_array = true
+	elseif direction == "none" &&
+		_cmn_mapping_get(axis_entry, :minor) !== nothing
+		# No tick marks at all: the minor ticks go too.
+		minor_fields = Dict{Symbol, Any}(:ticks => "")
 	elseif ticklen > 0 &&
 		_cmn_mapping_get(_cmn_mapping_get(axis_entry, :minor), :ticklen) !== nothing
 		# Keep explicit minor ticks proportional to the new major length.
@@ -1392,7 +1407,7 @@ function _apply_ticks!(
 	format == "" || (fields[:tickformat] = String(format))
 	exponentformat == "" || (fields[:exponentformat] = String(exponentformat))
 	angle === nothing || (fields[:tickangle] = angle)
-	direction == "" || (fields[:ticks] = String(direction))
+	direction == "" || (fields[:ticks] = direction == "none" ? "" : String(direction))
 	tickwidth > 0 && (fields[:tickwidth] = tickwidth)
 	ticklen > 0 && (fields[:ticklen] = ticklen)
 	minor_fields === nothing || (fields[:minor] = attr(minor_fields))

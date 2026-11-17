@@ -615,12 +615,50 @@ end
         @test _ax_field(lg, :xaxis, :showgrid) === true
         # The y axis has automatic ticks: Plotly's own minor positions.
         @test _ax_get(_ax_get(_ax_axis(lg, :yaxis), :minor), :tickvals) === nothing
+        # G7: a `which = :major` call leaves the minor grid alone.
         grid!(lg; which = :major)
+        @test _ax_get(_ax_get(_ax_axis(lg, :xaxis), :minor), :showgrid) === true
+        grid!(lg; axis = :none)
         @test _ax_get(_ax_get(_ax_axis(lg, :xaxis), :minor), :showgrid) === false
+        @test _ax_field(lg, :xaxis, :showgrid) === false
         sf = _ax_grid(1, 2)
         grid!(sf; axis = :x, cells = :all)
         @test all(_ax_field(sf, k, :showgrid) === false for k in (:yaxis, :yaxis2))
         @test all(_ax_field(sf, k, :showgrid) === true for k in (:xaxis, :xaxis2))
+    end
+
+    @testset "G7: major and minor grids are set and styled separately" begin
+        g = plot_scatter([1e-2, 1e2], [1.0, 2.0]; xscale = "log")
+        grid!(g; which = :major, alpha = 0.5)
+        grid!(g; which = :minor, alpha = 0.1, dash = ":")
+        for k in (:xaxis, :yaxis)
+            # The minor call styled axis.minor and left the major grid as set.
+            @test _ax_field(g, k, :showgrid) === true
+            @test _ax_field(g, k, :gridcolor) == "rgba(0,0,0,0.5)"
+            @test _ax_field(g, k, :griddash) === nothing
+            mn = _ax_get(_ax_axis(g, k), :minor)
+            @test _ax_get(mn, :showgrid) === true
+            @test _ax_get(mn, :gridcolor) == "rgba(0,0,0,0.1)"
+            @test _ax_get(mn, :griddash) == "dot"
+        end
+        # A later major call restyles only the major grid.
+        grid!(g; which = :major, width = 2)
+        @test _ax_field(g, :xaxis, :gridwidth) == 2
+        @test _ax_get(_ax_get(_ax_axis(g, :xaxis), :minor), :gridwidth) === nothing
+        @test _ax_get(_ax_get(_ax_axis(g, :xaxis), :minor), :gridcolor) == "rgba(0,0,0,0.1)"
+        # `axis` selects the axes of the named kind; the other axis hides it.
+        grid!(g; axis = :y, which = :minor)
+        @test _ax_get(_ax_get(_ax_axis(g, :xaxis), :minor), :showgrid) === false
+        @test _ax_get(_ax_get(_ax_axis(g, :yaxis), :minor), :showgrid) === true
+        @test _ax_field(g, :xaxis, :showgrid) === true
+        # `which = :both` styles the major lines; the minor lines follow them.
+        b = plot_scatter([0.0, 1.0], [0.0, 1.0])
+        grid!(b; which = :both, color = :blue)
+        @test _ax_field(b, :xaxis, :gridcolor) == "#0000FF"
+        @test _ax_get(_ax_get(_ax_axis(b, :xaxis), :minor), :showgrid) === true
+        @test _ax_get(_ax_get(_ax_axis(b, :xaxis), :minor), :gridcolor) === nothing
+        # Linear axes get plotly.js's automatic minor positions.
+        @test _ax_get(_ax_get(_ax_axis(b, :xaxis), :minor), :tickvals) === nothing
     end
 
     @testset "secondary_xaxis! (F11)" begin
@@ -1166,7 +1204,9 @@ end
         @test _ax_field(sf, srec.xkey, :matches) == "x" && _ax_field(sf, srec.ykey, :matches) == "y"
         @test _ax_field(sf, srec.xkey, :type) == "log" && _ax_field(sf, srec.ykey, :type) == "log"
         @test _ax_field(sf, :xaxis, :autorange) === true && _ax_field(sf, :yaxis, :autorange) === true
-        @test _ax_field(sf, srec.xkey, :tickfont) === nothing
+        # No halo; the tick font is still one step smaller than the host's.
+        @test _ax_get(_ax_field(sf, srec.xkey, :tickfont), :shadow) === nothing
+        @test _ax_get(_ax_field(sf, srec.xkey, :tickfont), :size) == 10.0
         @test !any(sh -> _ax_get(sh, :name) == "plotlysupply:inset_background:$(srec.xref)", sf.plot.layout.fields[:shapes])
         # A root with an explicit range but no `autorange` key gets false.
         sf2 = subplots(1, 1; sync = false)
@@ -1229,5 +1269,312 @@ end
         @test !haskey(sp.plot.layout.fields, :xaxis2)
         @test _ax_throws(() -> remove_inset!(sfs, 1), "this figure has no insets")
         @test length(state.scripts) == n + 1
+    end
+    @testset "G46/G69: spines! sides, mirrored ticks, tick removal" begin
+        sh(p) = [x for x in something(get(_AX._cmn_plot(p).layout.fields, :shapes, nothing), Any[])
+                 if startswith(string(_ax_get(x, :name)), "plotlysupply:spine:")]
+        fig = plot_scatter([0.0, 1.0], [0.0, 1.0])
+        # Ticks on all four sides: a closed frame with mirrored ticks.
+        @test spines!(fig; ticks = :mirror) === nothing
+        for k in (:xaxis, :yaxis)
+            @test _ax_field(fig, k, :mirror) == "ticks" && _ax_field(fig, k, :showline) === true
+        end
+        @test isempty(sh(fig))
+        # `ticks = nothing` keeps the mirrored ticks; `:primary` drops them.
+        spines!(fig; linewidth = 2)
+        @test _ax_field(fig, :xaxis, :mirror) == "ticks" && _ax_field(fig, :xaxis, :linewidth) == 2
+        spines!(fig; ticks = :primary)
+        @test _ax_field(fig, :xaxis, :mirror) === true
+        # Per side: the left line off keeps bottom/top natively and draws the
+        # right line as a shape in the given colour and width.
+        spines!(fig; left = false, color = "#336699", linewidth = 1.5)
+        @test _ax_field(fig, :yaxis, :showline) === false && _ax_field(fig, :yaxis, :mirror) === false
+        @test _ax_field(fig, :xaxis, :showline) === true && _ax_field(fig, :xaxis, :mirror) === true
+        right = only(sh(fig))
+        @test _ax_get(right, :name) == "plotlysupply:spine:xy:1"
+        @test _ax_get(right, :xref) == "x domain" && _ax_get(right, :yref) == "y domain"
+        @test (_ax_get(right, :x0), _ax_get(right, :x1), _ax_get(right, :y0), _ax_get(right, :y1)) == (1, 1, 0, 1)
+        @test _ax_get(_ax_get(right, :line), :color) == "#336699"
+        @test _ax_get(_ax_get(right, :line), :width) == 1.5
+        @test _ax_get(right, :layer) == "above"
+        # Repeating replaces the line instead of adding one.
+        spines!(fig; left = false)
+        @test length(sh(fig)) == 1
+        # Open frame with mirrored ticks: plotly.js cannot mirror the ticks
+        # without the line, so both own lines become shapes, `mirror = "ticks"`.
+        spines!(fig; style = :open, ticks = :mirror)
+        @test _ax_field(fig, :xaxis, :showline) === false && _ax_field(fig, :xaxis, :mirror) == "ticks"
+        @test _ax_field(fig, :yaxis, :showline) === false && _ax_field(fig, :yaxis, :mirror) == "ticks"
+        edges = sort([(_ax_get(x, :x0), _ax_get(x, :y0), _ax_get(x, :x1), _ax_get(x, :y1)) for x in sh(fig)])
+        @test edges == [(0, 0, 0, 1), (0, 0, 1, 0)]
+        # Top and right only.
+        spines!(fig; style = :none, top = true, right = true, ticks = :primary)
+        edges = sort([(_ax_get(x, :x0), _ax_get(x, :y0), _ax_get(x, :x1), _ax_get(x, :y1)) for x in sh(fig)])
+        @test edges == [(0, 1, 1, 1), (1, 0, 1, 1)]
+        # The box again: native lines, every spine shape removed.
+        spines!(fig)
+        @test isempty(sh(fig)) && _ax_field(fig, :yaxis, :showline) === true
+        @test _ax_field(fig, :yaxis, :mirror) === true
+        # An x axis on top has its own line on the top side.
+        top = plot_scatter([0.0, 1.0], [0.0, 1.0])
+        _AX._cmn_merge_layout_key!(top, :xaxis, Dict{Symbol, Any}(:side => "top"))
+        spines!(top; bottom = false)
+        @test _ax_field(top, :xaxis, :showline) === true && _ax_field(top, :xaxis, :mirror) === false
+        @test isempty(sh(top))
+        # ticks = :none removes the tick marks, minor ticks included.
+        xticks!(fig; minor = true)
+        spines!(fig; ticks = :none)
+        @test _ax_field(fig, :xaxis, :ticks) == "" && _ax_field(fig, :yaxis, :ticks) == ""
+        @test _ax_get(_ax_field(fig, :xaxis, :minor), :ticks) == ""
+        # The shape colour falls back to the ink of the figure's template.
+        dark = plot_scatter([0.0, 1.0], [0.0, 1.0])
+        set_template!(dark, "plotly_dark")
+        _AX._cmn_delete_layout_fields!(dark, :yaxis, (:linecolor,))
+        spines!(dark; left = false)
+        ink = _AX._template_ink(_AX._figure_style_template(_AX._cmn_plot(dark)))
+        @test ink != "#000000"
+        @test _ax_get(_ax_get(only(sh(dark)), :line), :color) == ink
+        # Cells: lines named per cell; other cells untouched.
+        sf = _ax_grid(1, 2)
+        spines!(sf; style = :open, top = true, ticks = :mirror, row = 1, col = 2)
+        names = [_ax_get(x, :name) for x in sh(sf)]
+        @test names == ["plotlysupply:spine:x2y2:1"]
+        @test _ax_field(sf, :xaxis, :mirror) === true
+        # Errors before any change.
+        before = _ax_json(fig.layout)
+        @test _ax_throws(() -> spines!(fig; ticks = :all), "spines!: `ticks` must be :mirror, :primary, :none or `nothing`")
+        @test _ax_throws(() -> spines!(fig; style = :closed), "spines!: `style` must be :box, :open or :none")
+        @test_throws TypeError spines!(fig; left = 1)
+        @test _ax_json(fig.layout) == before
+    end
+
+    @testset "G69/G46: tick direction none, minor ticks on linear axes, length/width" begin
+        fig = plot_scatter(collect(0.0:10.0), collect(0.0:10.0))
+        xticks!(fig; minor = true, ticklen = 8, tickwidth = 2)
+        @test _ax_field(fig, :xaxis, :ticklen) == 8 && _ax_field(fig, :xaxis, :tickwidth) == 2
+        mn = _ax_field(fig, :xaxis, :minor)
+        @test _ax_get(mn, :ticks) == "outside" && _ax_get(mn, :ticklen) ≈ 0.6 * 8
+        @test _ax_get(mn, :tickvals) === nothing   # plotly.js's automatic minor positions
+        xticks!(fig; direction = :none)
+        @test _ax_field(fig, :xaxis, :ticks) == ""
+        @test _ax_get(_ax_field(fig, :xaxis, :minor), :ticks) == ""
+        xticks!(fig; direction = :inside)
+        @test _ax_field(fig, :xaxis, :ticks) == "inside"
+        before = _ax_json(fig.layout)
+        @test _ax_throws(() -> xticks!(fig; direction = :both), "plotly.js draws ticks on one side of the axis line only")
+        @test _ax_throws(() -> yticks!(fig; direction = "inout"), "yticks!: `direction` must be")
+        @test _ax_throws(() -> xticks!(fig; direction = :none, minor = true), "cannot be combined with `minor = true`")
+        @test _ax_json(fig.layout) == before
+    end
+
+    @testset "G75: scientific offset text (offset = :auto | k | :none)" begin
+        ann(p) = [a for a in something(get(_AX._cmn_plot(p).layout.fields, :annotations, nothing), Any[])
+                  if startswith(string(_ax_get(a, :name)), "plotlysupply:offset:")]
+        f = plot_scatter(collect(1.0:10.0), 1e-6 .* collect(1.0:10.0))
+        @test yticks!(f; offset = :auto) === nothing
+        vals = _ax_field(f, :yaxis, :tickvals)
+        txt = _ax_field(f, :yaxis, :ticktext)
+        @test _ax_field(f, :yaxis, :tickmode) == "array"
+        @test length(vals) == length(txt) && issorted(vals)
+        @test vals[1] < 1e-6 && vals[end] > 1e-5   # beyond the data on both sides
+        i = findfirst(==(2.0e-6), vals)
+        @test i !== nothing && txt[i] == "0.2"
+        @test txt[findfirst(==(1.0e-5), vals)] == "1"
+        @test "0" in txt && "−0.2" in txt
+        a = only(ann(f))
+        @test _ax_get(a, :name) == "plotlysupply:offset:y"
+        @test _ax_get(a, :text) == _AX._label("\$\\times 10^{-5}\$")
+        @test (_ax_get(a, :xref), _ax_get(a, :yref)) == ("x domain", "y domain")
+        @test (_ax_get(a, :x), _ax_get(a, :xanchor), _ax_get(a, :y), _ax_get(a, :yanchor)) == (0, "right", 1, "bottom")
+        @test _ax_get(a, :showarrow) === false
+        # An explicit exponent and explicit values on the x axis.
+        xticks!(f, [0, 5, 10]; offset = 1)
+        @test _ax_field(f, :xaxis, :tickvals) == [0.0, 5.0, 10.0]
+        @test _ax_field(f, :xaxis, :ticktext) == ["0", "0.5", "1"]
+        xa = only(filter(x -> _ax_get(x, :name) == "plotlysupply:offset:x", ann(f)))
+        @test _ax_get(xa, :text) == _AX._label("\$\\times 10^{1}\$")
+        @test (_ax_get(xa, :x), _ax_get(xa, :xanchor), _ax_get(xa, :y), _ax_get(xa, :yanchor)) == (1, "right", 0, "top")
+        @test _ax_get(xa, :yshift) < 0
+        # Repeating replaces the label.
+        yticks!(f; offset = -6)
+        @test count(x -> _ax_get(x, :name) == "plotlysupply:offset:y", ann(f)) == 1
+        @test _ax_field(f, :yaxis, :ticktext)[findfirst(==(2.0e-6), _ax_field(f, :yaxis, :tickvals))] == "2"
+        # New tick values without `offset` replace the scaled labels: the
+        # factor goes with them.
+        xticks!(f, [0, 10])
+        @test count(x -> _ax_get(x, :name) == "plotlysupply:offset:x", ann(f)) == 0
+        @test _ax_field(f, :xaxis, :ticktext) === nothing
+        # :auto without a large or small magnitude writes nothing.
+        g = plot_scatter(collect(1.0:10.0), collect(1.0:10.0))
+        yticks!(g; offset = :auto)
+        @test isempty(ann(g)) && _ax_field(g, :yaxis, :tickvals) === nothing
+        # :none removes the factor and its ticks; minor ticks stay.
+        yticks!(g; offset = 2, minor = true)
+        @test length(ann(g)) == 1
+        yticks!(g; offset = :none)
+        @test isempty(ann(g))
+        @test _ax_field(g, :yaxis, :tickvals) === nothing && _ax_field(g, :yaxis, :tickmode) === nothing
+        @test _ax_field(g, :yaxis, :ticktext) === nothing
+        @test _ax_get(_ax_field(g, :yaxis, :minor), :ticks) == "outside"
+        # :auto after a factor that is no longer needed removes it as well.
+        yticks!(g; offset = 3)
+        yticks!(g; offset = :auto)
+        @test isempty(ann(g)) && _ax_field(g, :yaxis, :tickvals) === nothing
+        # Array ticks already on the axis are kept and relabelled.
+        h = plot_scatter(collect(1.0:10.0), 1e7 .* collect(1.0:10.0))
+        yticks!(h, [2e7, 6e7, 1e8])
+        yticks!(h; offset = :auto)
+        @test _ax_field(h, :yaxis, :tickvals) == [2e7, 6e7, 1e8]
+        @test _ax_field(h, :yaxis, :ticktext) == ["0.2", "0.6", "1"]
+        @test _ax_get(only(ann(h)), :text) == _AX._label("\$\\times 10^{8}\$")
+        # A top x axis puts the label above its tick labels.
+        topx = plot_scatter(collect(1.0:10.0), collect(1.0:10.0))
+        _AX._cmn_merge_layout_key!(topx, :xaxis, Dict{Symbol, Any}(:side => "top"))
+        xticks!(topx; offset = 1)
+        ta = only(ann(topx))
+        @test (_ax_get(ta, :y), _ax_get(ta, :yanchor)) == (1, "bottom") && _ax_get(ta, :yshift) > 0
+        # Cells use their own axis references.
+        sf = _ax_grid(1, 2)
+        yticks!(sf; offset = 3, row = 1, col = 2)
+        @test _ax_get(only(ann(sf)), :name) == "plotlysupply:offset:y2"
+        @test _ax_get(only(ann(sf)), :xref) == "x2 domain"
+        # Errors before any change.
+        before = _ax_json(f.layout)
+        lg = plot_scatter([1.0, 10.0], [1.0, 2.0]; xscale = "log")
+        @test _ax_throws(() -> xticks!(lg; offset = 2), "xticks!: `offset` scales the labels of a linear axis")
+        cat = plot_scatter(["a", "b", "c"], [1.0, 2.0, 3.0])
+        @test _ax_throws(() -> xticks!(cat, [0, 1]; offset = 2), "shows text or date data")
+        @test _ax_throws(() -> yticks!(f, [1e-6], ["a"]; offset = -6), "cannot be combined with `labels`")
+        @test _ax_throws(() -> yticks!(f; offset = -6, format = ".2f"), "`format` and `exponentformat`")
+        @test _ax_throws(() -> yticks!(f, :auto; offset = -6), "cannot be combined with `subs` or a tick preset")
+        @test _ax_throws(() -> yticks!(f; offset = 1.5), "`offset` must be :auto, :none, an integer exponent")
+        @test _ax_throws(() -> yticks!(f; offset = true), "`offset` must be")
+        @test _ax_throws(() -> yticks!(f; offset = 400), "`offset` must be")
+        @test _ax_throws(() -> yticks!(f; offset = :sci), "`offset` must be")
+        @test _ax_throws(() -> yticks!(f, [1.0, NaN]; offset = 1), "tick values must be finite numbers")
+        @test _ax_throws(() -> yticks!(f, Float64[]; offset = 1), "`values` must not be empty")
+        @test _ax_throws(() -> yticks!(Plot(); offset = 2), "set a range or add data")
+        @test _ax_json(f.layout) == before
+    end
+
+    @testset "Y9 + insets: template ink, smaller tick font, data coordinates" begin
+        sf = subplots(1, 1; sync = false)
+        plot_heatmap!(sf, collect(0.0:9), collect(0.0:4), rand(10, 5))
+        set_template!(sf, "plotly_dark")
+        ink = _AX._template_ink(_AX._figure_style_template(sf.plot))
+        @test ink != "#000000"
+        # coords = :data on a field plot's tight range (cell edges -0.5 .. 9.5).
+        k = inset!(sf, (5.0, 1.0, 3.0, 2.5); coords = :data)
+        rec = sf.insets[k]
+        @test collect(rec.xdomain) ≈ [0.55, 0.85] && collect(rec.ydomain) ≈ [0.3, 0.8]
+        for key in (rec.xkey, rec.ykey)
+            @test _ax_field(sf, key, :linecolor) == ink && _ax_field(sf, key, :tickcolor) == ink
+            @test _ax_get(_ax_field(sf, key, :tickfont), :size) == 10.0   # 12 / 1.2
+            @test _ax_get(_ax_field(sf, key, :tickfont), :shadow) == "auto"
+        end
+        # The step follows the host's tick font; `fontsize` overrides it.
+        _AX._cmn_merge_layout_key!(sf, :xaxis, Dict{Symbol, Any}(:tickfont => Dict{Symbol, Any}(:size => 18)); nested = (:tickfont,))
+        k2 = inset!(sf, (0.05, 0.05, 0.3, 0.3))
+        @test _ax_get(_ax_field(sf, sf.insets[k2].xkey, :tickfont), :size) == 15.0
+        k3 = inset!(sf, (0.05, 0.6, 0.3, 0.3); fontsize = 7)
+        @test _ax_get(_ax_field(sf, sf.insets[k3].xkey, :tickfont), :size) == 7.0
+        overlaying(fig) = only(Symbol(k) for k in keys(_AX._cmn_plot(fig).layout.fields)
+            if _AX._cmn_axis_index(Symbol(k), 'x') !== nothing && _ax_field(fig, Symbol(k), :overlaying) == "x")
+        # secondary_xaxis! places its ticks over the field plot's tight range
+        # (cell edges -0.5 .. 9.5, not the centres 0 .. 9), which stays pinned
+        # by the figure's clip: f(-0.5) = -0.25 puts a tick 0 at x = -0.25.
+        secondary_xaxis!(sf, v -> v + 0.25, v -> v - 0.25)
+        sec = overlaying(sf)
+        @test _ax_field(sf, sec, :linecolor) == _ax_field(sf, :xaxis, :linecolor)
+        @test any(≈(-0.25), _ax_field(sf, sec, :tickvals))
+        @test all(x -> -0.5 <= x <= 9.5, _ax_field(sf, sec, :tickvals))
+        @test _ax_field(sf, :xaxis, :range) === nothing
+        @test _ax_get(_ax_field(sf, :xaxis, :autorangeoptions), :clipmin) == -0.5
+        @test _ax_get(_ax_field(sf, :xaxis, :autorangeoptions), :clipmax) == 9.5
+        # Y9: without a primary colour the secondary axis takes the template ink.
+        plain = subplots(1, 1; sync = false)
+        plot_scatter!(plain, [1.0, 2.0], [1.0, 2.0])
+        set_template!(plain, "plotly_dark")
+        _AX._cmn_delete_layout_fields!(plain, :xaxis, (:linecolor, :tickcolor))
+        secondary_xaxis!(plain, v -> 2v, v -> v / 2)
+        @test _ax_field(plain, overlaying(plain), :linecolor) == ink
+        @test _ax_field(plain, overlaying(plain), :tickcolor) == ink
+        # Errors before any change.
+        before = _ax_json(sf.plot.layout)
+        n = length(sf.insets)
+        @test _ax_throws(() -> inset!(sf, (8.0, 1.0, 3.0, 1.0); coords = :data), "inset!: the inset's x extent 8.0 .. 11.0 is not inside the host x range")
+        @test _ax_throws(() -> inset!(sf, (1.0, 1.0, -1.0, 1.0); coords = :data), "width and height must be positive")
+        @test _ax_throws(() -> inset!(sf, (1.0, 1.0, 1.0); coords = :data), "4-tuple or 4-vector")
+        @test _ax_throws(() -> inset!(sf, (1.0, NaN, 1.0, 1.0); coords = :data), "must be a finite number")
+        @test _ax_throws(() -> inset!(sf, (0.1, 0.1, 0.2, 0.2); fontsize = 0), "`fontsize` must be a positive number")
+        @test _ax_throws(() -> inset!(sf, (0.1, 0.1, 0.2, 0.2); fontsize = Inf), "`fontsize` must be a positive number")
+        @test _ax_throws(() -> inset!(sf, (0.1, 0.1, 0.2, 0.2); coords = :figure), "`coords` must be :axes")
+        @test _ax_json(sf.plot.layout) == before && length(sf.insets) == n
+        auto = subplots(1, 1; sync = false)
+        plot_scatter!(auto, [1.0, 2.0], [1.0, 2.0])
+        @test _ax_throws(() -> inset!(auto, (1.0, 1.0, 0.5, 0.5); coords = :data), "`coords = :data` needs a fixed x range")
+        # Explicit ranges, a reversed y axis.
+        xrange!(auto, (0, 4)); yrange!(auto, (4, 0))
+        ki = inset!(auto, (1.0, 1.0, 2.0, 2.0); coords = :data)
+        @test collect(auto.insets[ki].xdomain) ≈ [0.25, 0.75] && collect(auto.insets[ki].ydomain) ≈ [0.25, 0.75]
+        # Log host axes take data values.
+        lg = subplots(1, 1; sync = false)
+        plot_scatter!(lg, [1.0, 1000.0], [1.0, 2.0]; xscale = "log")
+        xrange!(lg, (1, 1000)); yrange!(lg, (0, 4))
+        kl = inset!(lg, (10.0, 1.0, 90.0, 2.0); coords = :data)
+        @test collect(lg.insets[kl].xdomain) ≈ [1 / 3, 2 / 3] && collect(lg.insets[kl].ydomain) ≈ [0.25, 0.75]
+        @test _ax_throws(() -> inset!(lg, (-1.0, 1.0, 5.0, 1.0); coords = :data), "logarithmic axis and must be positive")
+    end
+
+    @testset "G11/G12/G46/G75: static export (SVG)" begin
+        ticktexts(svg, cls) = [m.captures[1] for m in
+            eachmatch(Regex("<g class=\"$(cls)\"><text[^>]*>([^<]*)</text>"), svg)]
+        # Tick marks drawn: one "M" segment per tick and side (plotly.js puts a
+        # mirrored tick in the same path as its primary tick).
+        marks(svg, cls) = sum((count(==('M'), m.captures[1]) for m in
+            eachmatch(Regex("<path class=\"$(cls) ticks[^\"]*\" d=\"([^\"]*)\""), svg)); init = 0)
+        result = try
+            # G11: log ticks at 4, 8, 16, 24, 32 without SI suffixes.
+            lg = plot_scatter([4.0, 8.0, 16.0, 24.0, 32.0], [1.0, 2.0, 3.0, 4.0, 5.0]; xscale = "log")
+            xticks!(lg, [4, 8, 16, 24, 32])
+            log_svg = String(savefig(lg; format = "svg", width = 600, height = 400))
+            # G12: secondary_xaxis! tick labels in the export.
+            λ = collect(400.0:10.0:700.0)
+            sec = plot_scatter(λ, sin.(λ ./ 50))
+            secondary_xaxis!(sec, l -> 299792.458 / l, ν -> 299792.458 / ν; ticks = [450, 550, 650], ticklabels = ["P", "Q", "R"])
+            sec_svg = String(savefig(sec; format = "svg", width = 600, height = 400))
+            # G46: mirrored ticks double the tick marks.
+            plain = plot_scatter(collect(0.0:10.0), collect(0.0:10.0))
+            mirrored = plot_scatter(collect(0.0:10.0), collect(0.0:10.0))
+            spines!(mirrored; ticks = :mirror)
+            plain_svg = String(savefig(plain; format = "svg", width = 600, height = 400))
+            mirror_svg = String(savefig(mirrored; format = "svg", width = 600, height = 400))
+            # G75: scaled tick labels in the export.
+            off = plot_scatter(collect(1.0:10.0), 1e-6 .* collect(1.0:10.0))
+            yticks!(off; offset = -6)
+            off_svg = String(savefig(off; format = "svg", width = 600, height = 400))
+            (log_svg, sec_svg, plain_svg, mirror_svg, off_svg)
+        catch err
+            message = sprint(showerror, err)
+            @test occursin("ElectronCall", message) || occursin("Plotly.js", message) ||
+                occursin("Electron", message)
+            nothing
+        end
+        if result !== nothing
+            log_svg, sec_svg, plain_svg, mirror_svg, off_svg = result
+            labels = ticktexts(log_svg, "xtick")
+            @test labels == ["4", "8", "16", "24", "32"]
+            @test !any(l -> occursin(r"[kµmMG]", l), labels)
+            @test ticktexts(sec_svg, "x2tick") == ["P", "Q", "R"]
+            @test ticktexts(sec_svg, "xtick") == ["400", "450", "500", "550", "600", "650", "700"]
+            for cls in ("xtick", "ytick")
+                @test marks(plain_svg, cls) > 0
+                @test marks(mirror_svg, cls) == 2 * marks(plain_svg, cls)
+            end
+            ylabels = ticktexts(off_svg, "ytick")
+            @test !isempty(ylabels) && all(l -> occursin(r"^[\x{2212}0-9.]+$", l), ylabels)
+            @test "10" in ylabels && "2" in ylabels
+            @test occursin("class=\"annotation\"", off_svg)
+        end
     end
 end

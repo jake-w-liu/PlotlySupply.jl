@@ -366,23 +366,6 @@ function _axes_scene_limit_range(fig, scenekey::Symbol, letter::Char, value, who
 	return reversed ? Any[hi, lo] : Any[lo, hi]
 end
 
-# Write an xy axis range (`nothing` = autorange). The same alias-preserving
-# merge as the 1.x SubplotFigure `xrange!`.
-function _axes_write_xy_range!(fig, key::Symbol, value)
-	p = _cmn_plot(fig)
-	preserve_root = _preserve_layout_mapping_root(p, key, ())
-	source = value === nothing ?
-		attr(autorange = true) :
-		attr(range = value, autorange = false)
-	_merge_layout_attr!(
-		p.layout,
-		key,
-		source;
-		mutate_builtin_target = preserve_root,
-	)
-	value === nothing && _cmn_delete_layout_fields!(fig, key, (:range,))
-	return nothing
-end
 
 function _axes_log10_bound(bound, who::AbstractString)
 	(bound isa Real && isfinite(bound) && bound > 0) || throw(ArgumentError(
@@ -619,6 +602,193 @@ end
 # F8: xticks! / yticks!
 # ---------------------------------------------------------------------------
 
+# Scientific offset text (G75, matplotlib `ScalarFormatter(useMathText =
+# True)`): the tick labels show `value / 10^k` and one "×10^k" label sits at
+# the end of the axis. matplotlib's default `axes.formatter.limits = (-5, 6)`
+# decides `:auto`: a factor is used when the largest |tick| has order of
+# magnitude <= -5 or >= 6.
+const _AXES_OFFSET_LIMITS = (-5, 6)
+# Largest |k| accepted: 10^k must stay a finite Float64 with room for ticks.
+const _AXES_OFFSET_MAX_EXPONENT = 300
+# Owner name of the offset annotation ("plotlysupply:offset:<axis ref>").
+const _AXES_OFFSET_NAME = "plotlysupply:offset"
+# Gap in px between the tick labels and the offset text.
+const _AXES_OFFSET_GAP = 3.0
+
+_axes_offset_owner(key::Symbol) = "$(_AXES_OFFSET_NAME):$(_cmn_axis_ref(key))"
+
+function _axes_has_offset(fig, key::Symbol)
+	existing = get(_cmn_layout(fig).fields, :annotations, nothing)
+	existing isa AbstractVector || return false
+	owner = _axes_offset_owner(key)
+	return any(item -> _cmn_name_matches(_cmn_item_name(item), owner), existing)
+end
+
+# Tick label for `v / 10^k`: six significant digits, plotly's minus sign.
+_axes_offset_label(v::Float64) = replace(_axes_format_number(v), "-" => "\u2212")
+
+# Whether a trace on Cartesian axis `key` places non-numeric coordinates
+# (strings, dates, nested category lists) there: plotly.js then types an
+# untyped ("-") axis as a date or category axis.
+function _axes_has_nonnumeric_data(fig, key::Symbol)
+	p = _cmn_plot(fig)
+	letter = String(key)[1]
+	target_ref = _cmn_axis_ref(key)
+	field = letter == 'x' ? :xaxis : :yaxis
+	default_ref = string(letter)
+	cache = Dict{Any, Union{Nothing, String}}()
+	numeric(v) = v === nothing || v === missing || (v isa Real && !(v isa Bool))
+	for trace in p.data
+		trace isa GenericTrace || continue
+		_cmn_trace_kind(trace, cache) == "xy" || continue
+		trace_ref = get(trace.fields, field, default_ref)
+		(trace_ref isa AbstractString || trace_ref isa Symbol) || continue
+		String(trace_ref) == target_ref || continue
+		values = get(trace.fields, Symbol(letter), nothing)
+		(values isa AbstractArray || values isa Tuple) || continue
+		all(numeric, values) || return true
+	end
+	return false
+end
+
+# What `offset` asks of axis `key` (before any write): `(values, labels, k,
+# clear)`. A factor 10^k comes with the scaled tick values and labels; without
+# a factor (k === nothing) `values`/`labels` pass on unchanged, and `clear`
+# says the array ticks of an earlier factor are to be removed (Plotly's
+# automatic ticks again; minor ticks and formats are kept).
+function _axes_offset_plan(fig, key::Symbol, values, labels, offset, subs, format, exponentformat, who::AbstractString)
+	(offset === :auto || offset === :none ||
+		(offset isa Integer && !(offset isa Bool) && abs(offset) <= _AXES_OFFSET_MAX_EXPONENT)) ||
+		throw(ArgumentError(
+			"$(who): `offset` must be :auto, :none, an integer exponent k (|k| <= " *
+			"$(_AXES_OFFSET_MAX_EXPONENT)) or `nothing`; got $(repr(offset)).",
+		))
+	if offset === :none
+		return (values, labels, nothing, values === nothing && subs === nothing && _axes_has_offset(fig, key))
+	end
+	labels === nothing || throw(ArgumentError(
+		"$(who): `offset` writes the tick labels (value / 10^k); it cannot be " *
+		"combined with `labels`.",
+	))
+	(isempty(format) && isempty(exponentformat)) || throw(ArgumentError(
+		"$(who): `offset` writes the tick labels; `format` and `exponentformat` " *
+		"would be ignored by plotly.js, so they cannot be combined with it.",
+	))
+	(subs === nothing && !(values isa Symbol)) || throw(ArgumentError(
+		"$(who): `offset` needs tick values (or the automatic 1-2-5 ticks it " *
+		"computes); it cannot be combined with `subs` or a tick preset.",
+	))
+	layout = _cmn_layout(fig)
+	axis_type = _axis_type(layout, key)
+	axis_type in ("linear", "-") || throw(ArgumentError(
+		"$(who): `offset` scales the labels of a linear axis; $(repr(key)) has " *
+		"type $(repr(axis_type)).",
+	))
+	root = _axes_match_root(fig, key, who)
+	axis_type == "-" && any(m -> _axes_has_nonnumeric_data(fig, m), _axes_match_members(fig, root, who)) &&
+		throw(ArgumentError(
+			"$(who): `offset` scales the labels of a linear axis; $(repr(key)) " *
+			"shows text or date data (plotly.js makes it a category or date axis).",
+		))
+	# The ticks the `:auto` decision looks at (matplotlib: the visible ones).
+	visible = nothing
+	ticks = if values !== nothing
+		(values isa AbstractVector || values isa Tuple || values isa AbstractRange) || throw(ArgumentError(
+			"$(who): tick `values` must be a vector, range or tuple of numbers; got $(typeof(values)).",
+		))
+		out = Float64[]
+		for v in values
+			_is_plain_real(v) || throw(ArgumentError(
+				"$(who): with `offset`, tick values must be finite numbers; got $(repr(v)).",
+			))
+			push!(out, Float64(v))
+		end
+		isempty(out) && throw(ArgumentError("$(who): `values` must not be empty."))
+		out
+	else
+		existing = _cmn_array_tickvals(get(layout.fields, key, nothing))
+		if existing !== nothing && !_axes_has_offset(fig, key) &&
+			!isempty(existing) && all(_is_plain_real, existing)
+			Float64.(existing)
+		else
+			limits = _from_axis_range(layout, root)
+			limits === nothing && (limits = _axes_group_extent(fig, root, who))
+			limits === nothing && throw(ArgumentError(
+				"$(who): `offset` places its own ticks over the axis range; set a " *
+				"range or add data to $(repr(key)) first, or pass tick values.",
+			))
+			lo, hi = minmax(Float64(limits[1]), Float64(limits[2]))
+			lo < hi || throw(ArgumentError(
+				"$(who): the axis range $(lo) .. $(hi) is empty; `offset` cannot " *
+				"place ticks there.",
+			))
+			inner = _axes_linear_ticks(lo, hi, who)
+			step = length(inner) >= 2 ? inner[2] - inner[1] : hi - lo
+			span = hi - lo
+			# Ticks over one more span on each side: the autorange padding and
+			# moderate later changes stay labelled (plotly.js draws only the
+			# ticks inside the range).
+			kmin, kmax = floor(Int, (lo - span) / step), ceil(Int, (hi + span) / step)
+			visible = inner
+			Float64[round(k * step; sigdigits = 12) for k in kmin:kmax]
+		end
+	end
+	k = if offset === :auto
+		largest = maximum(abs, something(visible, ticks))
+		oom = largest == 0 ? 0 : floor(Int, log10(largest))
+		(oom <= _AXES_OFFSET_LIMITS[1] || oom >= _AXES_OFFSET_LIMITS[2]) ? oom : nothing
+	else
+		Int(offset)
+	end
+	if k === nothing
+		return (values, labels, nothing, values === nothing && _axes_has_offset(fig, key))
+	end
+	factor = exp10(k)
+	return (ticks, String[_axes_offset_label(v / factor) for v in ticks], k, false)
+end
+
+# The "×10^k" annotation at the end of axis `key` of cell `t`: an x axis at
+# its right end below (above, for a top axis) the tick labels, a y axis above
+# its top end (right-aligned with a left axis's tick labels).
+function _axes_offset_annotation(fig, t::_CellTarget, key::Symbol, letter::Char, k::Int)
+	layout = _cmn_layout(fig)
+	entry = get(layout.fields, key, nothing)
+	root_size = _tight_root_font_size(name -> get(layout.fields, name, nothing))
+	tickfont = _cmn_mapping_get(entry, :tickfont)
+	size = _axes_size(_cmn_mapping_get(tickfont, :size), root_size)
+	ticks = _cmn_mapping_get(entry, :ticks)
+	ticklen = ticks == "outside" ? _axes_size(_cmn_mapping_get(entry, :ticklen), _AXES_PLOTLY_TICKLEN) : 0.0
+	side = _cmn_mapping_get(entry, :side)
+	side isa Symbol && (side = String(side))
+	font = Dict{Symbol, Any}(:size => size)
+	color = _cmn_mapping_get(tickfont, :color)
+	color isa AbstractString && !isempty(color) && (font[:color] = color)
+	fields = Dict{Symbol, Any}(
+		:text => _label("\$\\times 10^{$(k)}\$"),
+		:showarrow => false,
+		:xref => "$(t.xref) domain",
+		:yref => "$(t.yref) domain",
+		:font => attr(; font...),
+	)
+	if letter == 'x'
+		top = side == "top"
+		fields[:x] = 1
+		fields[:xanchor] = "right"
+		fields[:y] = top ? 1 : 0
+		fields[:yanchor] = top ? "bottom" : "top"
+		depth = ticklen + _AXES_LINE_HEIGHT_EM * size + _AXES_OFFSET_GAP
+		fields[:yshift] = top ? depth : -depth
+	else
+		right = side == "right"
+		fields[:x] = right ? 1 : 0
+		fields[:xanchor] = right ? "left" : "right"
+		fields[:y] = 1
+		fields[:yanchor] = "bottom"
+		fields[:yshift] = _AXES_OFFSET_GAP
+	end
+	return attr(; fields...)
+end
+
 function _axes_ticks!(
 	fig,
 	letter::Char,
@@ -633,6 +803,7 @@ function _axes_ticks!(
 	direction::Union{AbstractString, Symbol} = "",
 	tickwidth::Real = 0,
 	ticklen::Real = 0,
+	offset = nothing,
 	row = nothing,
 	col = nothing,
 	inset = nothing,
@@ -647,9 +818,21 @@ function _axes_ticks!(
 		who = who,
 	)
 	_axes_require_xy(t, who, "tick control")
+	key = letter == 'x' ? t.xkey : t.ykey
+	exponent = nothing
+	clear = false
+	if offset !== nothing
+		values, labels, exponent, clear = _axes_offset_plan(
+			fig, key, values, labels, offset, subs, format, exponentformat, who,
+		)
+	end
+	# New tick values (or a preset/`subs`) replace the labels a factor wrote,
+	# so a factor that `offset` does not write again is removed.
+	drop_factor = exponent === nothing &&
+		(clear || values !== nothing || subs !== nothing) && _axes_has_offset(fig, key)
 	_apply_ticks!(
 		fig,
-		letter == 'x' ? t.xkey : t.ykey;
+		key;
 		values = values,
 		labels = labels,
 		format = format,
@@ -662,6 +845,18 @@ function _axes_ticks!(
 		ticklen = ticklen,
 		who = who,
 	)
+	clear && _cmn_delete_layout_fields!(fig, key, (:tickmode, :tickvals, :ticktext))
+	if exponent !== nothing
+		_upsert_named!(
+			fig,
+			:annotations,
+			_axes_offset_owner(key),
+			[_axes_offset_annotation(fig, t, key, letter, exponent)];
+			who = who,
+		)
+	elseif drop_factor
+		_upsert_named!(fig, :annotations, _axes_offset_owner(key), Any[]; who = who)
+	end
 	_axes_select!(fig, t)
 	_axes_finish!(fig)
 	return nothing
@@ -688,16 +883,35 @@ const _AXES_TICKS_DOC_KEYWORDS = """
   the major length; on a log axis with explicit major ticks at mantissas 1..9
   of every decade); `false` removes them; `nothing` leaves them.
 - `angle::Union{Nothing,Real} = nothing`: tick-label angle in degrees.
-- `direction = ""`: `"inside"`, `"outside"` (or the Symbols); `""` keeps it.
+- `direction = ""`: `"inside"`, `"outside"`, `"none"` (no tick marks, minor
+  ticks included; matplotlib `tick_params(length = 0)`), or the Symbols; `""`
+  keeps it. plotly.js has no ticks crossing the axis line (matplotlib
+  `"inout"`), so `:both`/`:inout` are an `ArgumentError`. Ticks on the top
+  and right frame lines: [`spines!`](@ref)`(fig; ticks = :mirror)`.
 - `tickwidth::Real = 0`, `ticklen::Real = 0`: major tick width/length in px
   (0 keeps them); explicit minor ticks follow the new length.
+- `offset = nothing`: scientific offset text (matplotlib's `×10⁻⁵` at the
+  axis end, `ScalarFormatter(useMathText = True)`), linear axes only. An
+  integer `k` labels the ticks with `value / 10^k` and draws one
+  `"×10^k"` label (mathtext) at the right end of an x axis, below its tick
+  labels, or above the top of a y axis; `:auto` does so with k the order of
+  magnitude of the largest |tick| when that is <= -5 or >= 6 (matplotlib's
+  default limits) and removes the factor otherwise; `:none` removes the
+  factor (and the ticks it placed); `nothing` leaves it, unless the call
+  sets new tick values, `subs` or a preset, which replace the scaled labels
+  and so remove the factor too. The ticks are
+  `values` when given, else the array ticks already on the axis, else 1-2-5
+  ticks computed over the explicit range or the data when the call runs (call
+  it again after changing the range a lot). The text is the annotation named
+  `"plotlysupply:offset:<axis ref>"`. Cannot be combined with `labels`,
+  `subs`, a preset, `format` or `exponentformat`.
 - `row`, `col`: SubplotFigure cell (both or neither; default the active cell,
   which the call makes active). `inset = k` targets inset `k` (see
   [`inset!`](@ref)). Both are an `ArgumentError` on a plain figure.
 """
 
 """
-	xticks!(fig, values=nothing, labels=nothing; format="", exponentformat="", subs=nothing, minor=nothing, angle=nothing, direction="", tickwidth=0, ticklen=0, row=nothing, col=nothing, inset=nothing)
+	xticks!(fig, values=nothing, labels=nothing; format="", exponentformat="", subs=nothing, minor=nothing, angle=nothing, direction="", tickwidth=0, ticklen=0, offset=nothing, row=nothing, col=nothing, inset=nothing)
 	xticks!(sf::SubplotFigure, values=nothing, labels=nothing; ...)
 
 Set the x-axis ticks of a figure, of one SubplotFigure cell or of an inset.
@@ -776,7 +990,7 @@ function xticks!(
 end
 
 """
-	yticks!(fig, values=nothing, labels=nothing; format="", exponentformat="", subs=nothing, minor=nothing, angle=nothing, direction="", tickwidth=0, ticklen=0, row=nothing, col=nothing, inset=nothing, secondary_y=false)
+	yticks!(fig, values=nothing, labels=nothing; format="", exponentformat="", subs=nothing, minor=nothing, angle=nothing, direction="", tickwidth=0, ticklen=0, offset=nothing, row=nothing, col=nothing, inset=nothing, secondary_y=false)
 	yticks!(sf::SubplotFigure, values=nothing, labels=nothing; ...)
 
 Set the y-axis ticks; identical to [`xticks!`](@ref) for the y axis:
@@ -795,6 +1009,8 @@ Returns `nothing` (`sf` for a SubplotFigure).
 fig = plot_scatter([1e-3, 1e3], [1e-2, 1e4]; xscale = "log", yscale = "log")
 yticks!(fig; subs = (1, 2, 5), minor = true)
 yticks!(fig, :decades)
+small = plot_scatter(1:10, 1e-5 .* rand(10))
+yticks!(small; offset = :auto)   # labels 0..1 and "×10⁻⁵" above the axis
 ```
 """
 function yticks!(fig, values = nothing, labels = nothing; show = nothing, kwargs...)
@@ -990,12 +1206,50 @@ end
 # ---------------------------------------------------------------------------
 
 const _AXES_SPINE_STYLES = (:box, :open, :none)
+const _AXES_SPINE_TICKS = (:mirror, :primary, :none)
+# Owner name of the frame lines `spines!` draws as shapes (see below).
+const _AXES_SPINE_SHAPE = "plotlysupply:spine"
+
+# The frame sides of `style` (bottom, top, left, right), adjusted by the
+# per-side keywords.
+function _axes_spine_sides(style_name::Symbol, sides)
+	on = style_name === :box ? (true, true, true, true) :
+		style_name === :open ? (true, false, true, false) : (false, false, false, false)
+	return ntuple(i -> sides[i] === nothing ? on[i] : sides[i], 4)
+end
+
+# Whether a plotly `mirror` value mirrors the ticks.
+_axes_mirrors_ticks(mirror) = mirror isa AbstractString && mirror in ("ticks", "allticks")
+
+# plotly.js draws an axis line on the axis's own side (`showline`) and, with
+# `mirror`, on the opposite side as well; it cannot draw the opposite line
+# alone, nor mirror the ticks without mirroring the line. Those frames are
+# drawn natively where possible: both lines `showline = true` + `mirror`, the
+# own line alone `showline = true, mirror = false`. Otherwise `showline =
+# false` (with `mirror = "ticks"` when the ticks are mirrored, which plotly.js
+# draws without a line; render probe p06) and the wanted lines are layout
+# shapes on the plot-area edge (`"<x> domain"`/`"<y> domain"` references, in
+# the axis's line colour and width), returned as (edge, along-x) pairs.
+function _axes_spine_axis_fields(own_on::Bool, other_on::Bool, mirror_ticks::Bool)
+	if own_on && other_on
+		return (Dict{Symbol, Any}(:showline => true, :mirror => mirror_ticks ? "ticks" : true), (false, false))
+	elseif own_on && !mirror_ticks
+		return (Dict{Symbol, Any}(:showline => true, :mirror => false), (false, false))
+	end
+	fields = Dict{Symbol, Any}(:showline => false, :mirror => mirror_ticks ? "ticks" : false)
+	return (fields, (own_on, other_on))
+end
 
 function _axes_spines!(
 	fig;
 	style::Union{Symbol, AbstractString} = :box,
 	color = "",
 	linewidth::Real = 0,
+	ticks::Union{Nothing, Symbol, AbstractString} = nothing,
+	bottom::Union{Nothing, Bool} = nothing,
+	top::Union{Nothing, Bool} = nothing,
+	left::Union{Nothing, Bool} = nothing,
+	right::Union{Nothing, Bool} = nothing,
 	row = nothing,
 	col = nothing,
 	inset = nothing,
@@ -1006,19 +1260,13 @@ function _axes_spines!(
 	style_name in _AXES_SPINE_STYLES || throw(ArgumentError(
 		"$(who): `style` must be :box, :open or :none; got $(repr(style)).",
 	))
+	ticks_name = ticks === nothing ? nothing : Symbol(ticks)
+	(ticks_name === nothing || ticks_name in _AXES_SPINE_TICKS) || throw(ArgumentError(
+		"$(who): `ticks` must be :mirror, :primary, :none or `nothing`; got $(repr(ticks)).",
+	))
 	_axes_check_size(linewidth, "linewidth", who)
-	fields = Dict{Symbol, Any}()
-	if style_name === :box
-		fields[:showline] = true
-		fields[:mirror] = true
-	elseif style_name === :open
-		fields[:showline] = true
-		fields[:mirror] = false
-	else
-		fields[:showline] = false
-	end
-	_axes_is_unset_color(color) || (fields[:linecolor] = _color_hex(color; who = who))
-	linewidth > 0 && (fields[:linewidth] = linewidth)
+	line_color = _axes_is_unset_color(color) ? nothing : _color_hex(color; who = who)
+	sides = _axes_spine_sides(style_name, (bottom, top, left, right))
 	targets, select = _axes_styling_targets(
 		fig,
 		who;
@@ -1027,8 +1275,60 @@ function _axes_spines!(
 		inset = inset,
 		cells = cells,
 	)
-	for t in targets, key in (t.xkey, t.ykey)
-		_cmn_merge_layout_key!(fig, key, fields)
+	ink = nothing
+	for t in targets
+		shapes = Any[]
+		for (key, letter) in ((t.xkey, 'x'), (t.ykey, 'y'))
+			entry = get(_cmn_layout(fig).fields, key, nothing)
+			side = _cmn_mapping_get(entry, :side)
+			side isa Symbol && (side = String(side))
+			# (own side, opposite side) of this axis in `sides` order.
+			own_index, other_index = letter == 'x' ?
+				(side == "top" ? (2, 1) : (1, 2)) :
+				(side == "right" ? (4, 3) : (3, 4))
+			mirror_ticks = ticks_name === :mirror ||
+				(ticks_name === nothing && _axes_mirrors_ticks(_cmn_mapping_get(entry, :mirror)))
+			fields, drawn = _axes_spine_axis_fields(sides[own_index], sides[other_index], mirror_ticks)
+			line_color === nothing || (fields[:linecolor] = line_color)
+			linewidth > 0 && (fields[:linewidth] = linewidth)
+			if ticks_name === :none
+				fields[:ticks] = ""
+				_cmn_mapping_get(entry, :minor) === nothing || (fields[:minor] = attr(ticks = ""))
+			end
+			_cmn_merge_layout_key!(fig, key, fields; nested = (:minor,))
+			any(drawn) || continue
+			shape_color = something(line_color, _cmn_mapping_get(entry, :linecolor), Some(nothing))
+			if shape_color === nothing
+				ink === nothing && (ink = _template_ink(_figure_style_template(fig)))
+				shape_color = ink
+			end
+			shape_width = linewidth > 0 ? linewidth :
+				something(_cmn_mapping_get(entry, :linewidth), _DEFAULT_AXIS_LINEWIDTH)
+			for (index, on) in ((own_index, drawn[1]), (other_index, drawn[2]))
+				on || continue
+				edge = index in (2, 4) ? 1 : 0   # top/right: the far edge
+				line = attr(color = shape_color, width = shape_width)
+				push!(shapes, letter == 'x' ?
+					attr(type = "line", xref = "$(t.xref) domain", yref = "$(t.yref) domain",
+						x0 = 0, x1 = 1, y0 = edge, y1 = edge, line = line, layer = "above") :
+					attr(type = "line", xref = "$(t.xref) domain", yref = "$(t.yref) domain",
+						x0 = edge, x1 = edge, y0 = 0, y1 = 1, line = line, layer = "above"))
+			end
+		end
+		owner = "$(_AXES_SPINE_SHAPE):$(t.xref)$(t.yref)"
+		named = Any[]
+		for (k, shape) in enumerate(shapes)
+			fields = _symbol_dict(shape)
+			fields[:name] = "$(owner):$(k)"
+			push!(named, attr(; fields...))
+		end
+		# Replaces (or removes) the lines an earlier call drew on this cell;
+		# a frame drawn natively leaves `layout.shapes` untouched.
+		existing = get(_cmn_layout(fig).fields, :shapes, nothing)
+		had_lines = existing isa AbstractVector &&
+			any(item -> _cmn_name_matches(_cmn_item_name(item), owner), existing)
+		(isempty(named) && !had_lines) ||
+			_upsert_named!(fig, :shapes, owner, named; who = who)
 	end
 	select && _axes_select!(fig, only(targets))
 	_axes_finish!(fig)
@@ -1036,16 +1336,30 @@ function _axes_spines!(
 end
 
 """
-	spines!(fig; style=:box, color="", linewidth=0, row=nothing, col=nothing, inset=nothing, cells=nothing)
+	spines!(fig; style=:box, color="", linewidth=0, ticks=nothing, bottom=nothing, top=nothing, left=nothing, right=nothing, row=nothing, col=nothing, inset=nothing, cells=nothing)
 	spines!(sf::SubplotFigure; ...)
 
-Style the axis lines ("spines") of a figure, SubplotFigure cell or inset.
+Style the axis lines ("spines") and the frame ticks of a figure,
+SubplotFigure cell or inset (matplotlib `ax.spines[...]` and
+`tick_params(top = True, right = True)`).
 
 # Keywords
-- `style = :box`: `:box` closes the frame (`showline = true`,
-  `mirror = true`, the package default); `:open` keeps only the bottom and
-  left lines (`mirror = false`); `:none` hides the lines (`showline = false`;
-  ticks stay). Strings are accepted.
+- `style = :box`: `:box` closes the frame (all four lines, the package
+  default); `:open` keeps only the bottom and left lines; `:none` hides the
+  lines (ticks stay). Strings are accepted.
+- `bottom`, `top`, `left`, `right::Union{Nothing,Bool} = nothing`: switch
+  one side of the frame on or off; `nothing` takes the side from `style`
+  (e.g. `spines!(fig; left = false)` keeps bottom, top and right). A side is
+  the axis line where plotly.js can draw it (`showline`, `mirror`); a frame
+  it cannot draw (an opposite line alone, or mirrored ticks without the
+  mirrored line) gets that line as a layout shape on the plot-area edge in
+  the axis's line colour and width (named `"plotlysupply:spine:<xy>:<k>"`;
+  later `spines!` calls replace it).
+- `ticks = nothing`: `:mirror` also draws the ticks on the top and right
+  frame sides (plotly `mirror = "ticks"`); `:primary` keeps them on the
+  bottom and left sides only; `:none` removes the tick marks (major and
+  minor; `xticks!(fig; direction = :inside)` brings them back); `nothing`
+  keeps the current choice.
 - `color = ""`: line colour (CSS/hex string, Symbol or Colors.jl colour);
   `""` keeps it.
 - `linewidth::Real = 0`: line width in px; 0 keeps it.
@@ -1054,13 +1368,19 @@ Style the axis lines ("spines") of a figure, SubplotFigure cell or inset.
 - `cells = nothing`: `:all` styles every xy cell of a SubplotFigure (insets
   excluded) and leaves the active cell unchanged.
 
-Only the cell's primary x/y axes change; secondary axes keep their own line.
-Returns `nothing` (`sf` for a SubplotFigure).
+The sides refer to the frame of the plot area: an x axis placed on top
+(`side = "top"`) has its own line on the top side. Only the cell's primary
+x/y axes change; secondary axes keep their own line. Invalid keywords are an
+`ArgumentError` before anything changes. Returns `nothing` (`sf` for a
+SubplotFigure).
 
 # Example
 ```julia
 fig = plot_scatter(1:10, rand(10))
 spines!(fig; style = :open, linewidth = 1.5)
+spines!(fig; ticks = :mirror)        # ticks on all four sides, closed frame
+xticks!(fig; direction = :inside); yticks!(fig; direction = :inside)
+spines!(fig; left = false)           # bottom, top and right lines only
 ```
 """
 function spines!(fig; show = nothing, kwargs...)
@@ -1152,23 +1472,36 @@ function _axes_grid!(
 		inset = inset,
 		cells = cells,
 	)
-	major_on = which_name in (:major, :both)
-	minor_on = which_name in (:minor, :both)
+	# `axis = :none` hides every grid line; otherwise the call sets the grid
+	# kinds named by `which` and leaves the other kind as it is (G7), so the
+	# major and minor grids can be styled by separate calls.
+	major_on = axis_name === :none || which_name in (:major, :both)
+	minor_on = axis_name === :none || which_name in (:minor, :both)
+	# Styling goes to the grid named by `which`; with `:both` it goes to the
+	# major grid, whose colour, width and dash plotly.js's minor grid follows
+	# (the minor colour as a lighter blend).
+	style_key = which_name === :minor ? :minor : :major
 	for t in targets
 		for (key, on) in (
 			(t.xkey, axis_name in (:both, :x)),
 			(t.ykey, axis_name in (:both, :y)),
 		)
 			entry = get(_cmn_layout(fig).fields, key, nothing)
-			fields = Dict{Symbol, Any}(:showgrid => on && major_on)
+			style = Dict{Symbol, Any}()
 			if on
-				gridcolor === nothing || (fields[:gridcolor] = gridcolor)
-				width > 0 && (fields[:gridwidth] = width)
-				isempty(dash_name) || (fields[:griddash] = dash_name)
+				gridcolor === nothing || (style[:gridcolor] = gridcolor)
+				width > 0 && (style[:gridwidth] = width)
+				isempty(dash_name) || (style[:griddash] = dash_name)
+			end
+			fields = Dict{Symbol, Any}()
+			if major_on
+				fields[:showgrid] = on
+				style_key === :major && merge!(fields, style)
 			end
 			minor_entry = _cmn_mapping_get(entry, :minor)
-			if on && minor_on
+			if minor_on && on
 				minor_fields = Dict{Symbol, Any}(:showgrid => true)
+				style_key === :minor && merge!(minor_fields, style)
 				# Log axis with explicit majors: Plotly's automatic minor
 				# ticks smear (spec F8), so place them at mantissas 1..9.
 				minor_values = _cmn_log_minor_tickvals(
@@ -1182,10 +1515,10 @@ function _axes_grid!(
 					minor_fields[:tickvals] = minor_values
 				end
 				fields[:minor] = attr(minor_fields)
-			elseif minor_entry !== nothing
+			elseif minor_on && minor_entry !== nothing
 				fields[:minor] = attr(showgrid = false)
 			end
-			_cmn_merge_layout_key!(fig, key, fields; nested = (:minor,))
+			isempty(fields) || _cmn_merge_layout_key!(fig, key, fields; nested = (:minor,))
 		end
 	end
 	select && _axes_select!(fig, only(targets))
@@ -1197,16 +1530,23 @@ end
 	grid!(fig; axis=:both, which=:major, color="", width=0, dash="", alpha=nothing, row=nothing, col=nothing, inset=nothing, cells=nothing)
 	grid!(sf::SubplotFigure; ...)
 
-Set the grid lines of a figure, SubplotFigure cell or inset. Each call
-defines the cell's grid completely: the axes selected by `axis` show the grid
-lines selected by `which`; the other grid lines are hidden.
+Set the grid lines of a figure, SubplotFigure cell or inset. A call defines
+the grid kind(s) named by `which` on the cell: the axes selected by `axis`
+show them, the cell's other axis hides them. The kind not named keeps its
+state and style, so the major and minor grids are set (and styled) by
+separate calls, as matplotlib's `ax.grid(which = ...)`.
 
 # Keywords
-- `axis = :both`: `:both`, `:x`, `:y` or `:none` (no grid at all).
+- `axis = :both`: `:both`, `:x`, `:y` or `:none` (no grid at all: major and
+  minor lines of both axes are hidden, whatever `which` says).
 - `which = :major`: `:major`, `:minor` or `:both`. Minor grid lines on a log
-  axis with explicit major ticks sit at mantissas 1..9 of every decade.
+  axis with explicit major ticks sit at mantissas 1..9 of every decade; on
+  other axes plotly.js places them between the major ticks.
 - `color = ""`: grid colour (string, Symbol or Colors.jl colour); `""` keeps
-  Plotly's. Minor lines are drawn in a lighter blend of it by plotly.js.
+  Plotly's. The styling keywords style the kind named by `which`
+  (`axis.minor.gridcolor` etc. for `:minor`); with `:both` they style the
+  major lines and the minor lines follow them (plotly.js draws them in a
+  lighter blend of the major colour unless a `:minor` call gave a colour).
 - `alpha::Union{Nothing,Real} = nothing`: opacity in [0, 1]; turns `color`
   (black when unset) into an rgba colour, e.g. `alpha = 0.15`.
 - `width::Real = 0`: grid line width in px; 0 keeps it.
@@ -1225,6 +1565,7 @@ Styling keywords with `axis = :none` are an `ArgumentError`. Returns
 ```julia
 fig = plot_scatter(1:10, rand(10))
 grid!(fig; axis = :y, alpha = 0.15, dash = "--")
+grid!(fig; axis = :y, which = :minor, alpha = 0.05)   # fainter minor lines
 ```
 """
 function grid!(fig; show = nothing, kwargs...)
@@ -1504,11 +1845,22 @@ function _axes_secondary_xaxis!(
 	# transform, so the ticks are computed for this range, and an automatic
 	# range is frozen to the data extent below.
 	explicit = _from_axis_range(layout, root)
-	limits = explicit === nothing ? _axes_group_extent(fig, root, who) : explicit
+	# A field plot's tight range (cell edges, not centres) is known too.
+	known = explicit === nothing ? _axes_known_range(fig, root) : explicit
+	limits = known === nothing ? _axes_group_extent(fig, root, who) : known
 	limits === nothing && throw(ArgumentError(
 		"$(who): the x range of this cell is unknown; add data or set it with " *
 		"`xrange!` first.",
 	))
+	if known === nothing
+		# A one-sided limit (D11) pins its end of the range frozen below.
+		fixed_min, fixed_max = _stored_axis_limits(layout, root)
+		to_data(v) = log_axis ? exp10(Float64(v)) : Float64(v)
+		limits = (
+			fixed_min === nothing ? limits[1] : to_data(fixed_min),
+			fixed_max === nothing ? limits[2] : to_data(fixed_max),
+		)
+	end
 	lower, upper = minmax(limits...)
 	lower < upper || throw(ArgumentError(
 		"$(who): the x range [$(lower), $(upper)] is empty; set a wider range " *
@@ -1582,6 +1934,7 @@ function _axes_secondary_xaxis!(
 	# margins (as the inset's own axes).
 	in_inset = fig isa SubplotFigure &&
 		any(record -> record.xkey === t.xkey, getfield(fig, :insets))
+	axis_ink = _figure_axis_defaults(_cmn_plot(fig); axis = :x)
 
 	fields = Dict{Symbol, Any}(
 		:overlaying => t.xref,
@@ -1597,9 +1950,11 @@ function _axes_secondary_xaxis!(
 		:mirror => false,
 		:ticks => "outside",
 		:automargin => !in_inset,
-		:linecolor => _DEFAULT_AXIS_LINECOLOR,
-		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
-		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
+		# Y9: the ink of the figure's template (white lines on plotly_dark);
+		# the primary axis's own line style is copied over it below.
+		:linecolor => axis_ink[:linecolor],
+		:linewidth => axis_ink[:linewidth],
+		:tickcolor => axis_ink[:tickcolor],
 		:title => attr(text = title_text),
 	)
 	axis_type == "-" || (fields[:type] = axis_type)
@@ -1609,12 +1964,19 @@ function _axes_secondary_xaxis!(
 		nothing
 
 	# --- write ---
-	if explicit === nothing
-		_axes_write_xy_range!(
+	# A field plot's tight range stays as `_finalize_figure!` keeps it (its
+	# clip pins the autorange to exactly that interval; a range equal to the
+	# clip is turned back into that autorange, finalize.jl `_fin_sticky_updates!`).
+	if known === nothing
+		# Frozen in the axis's direction; one-sided limits of the group go.
+		reversed = _axis_is_reversed(fig, root)
+		frozen = log_axis ? Float64[log10(lower), log10(upper)] : Float64[lower, upper]
+		_write_axis_range!(
 			fig,
 			root,
-			log_axis ? Float64[log10(limits[1]), log10(limits[2])] :
-			Float64[limits[1], limits[2]],
+			reversed ? reverse(frozen) : frozen;
+			reversed = reversed,
+			members = _axes_match_members(fig, root, who),
 		)
 	end
 	_cmn_merge_layout_key!(fig, key, fields; nested = (:title,))
@@ -1653,8 +2015,11 @@ above a wavelength axis. The new axis overlays and `matches` the primary
 axis, so its ticks sit at `x = finv(tick)` and follow zoom and pan.
 
 plotly.js cannot link an axis transform, so the ticks are computed once for
-the primary range: the explicit range when one is set, otherwise the data
-extent of the (shared) axis, which is then written as an explicit range.
+the primary range: the explicit range when one is set, else the tight
+cell-edge range of a heatmap/image cell (which the figure keeps), otherwise
+the data extent of the (shared) axis with any one-sided limit of
+[`xrange!`](@ref) applied, which is then written as an explicit range (in the
+axis's direction).
 Set the final range with [`xrange!`](@ref) before calling this.
 
 # Arguments
@@ -1676,7 +2041,8 @@ Set the final range with [`xrange!`](@ref) before calling this.
 
 The new axis copies the primary x axis's `title.font`, `tickfont`,
 `linecolor`, `linewidth`, `tickcolor`, `ticklen` and `tickwidth` where the
-primary sets them (later changes to the primary are not followed), has no
+primary sets them (else the ink of the figure's template, light on a dark
+template; later changes to the primary are not followed), has no
 grid lines, and (except in an inset) pushes the
 figure margin to fit its labels. Calling it again for the same axis replaces
 the secondary axis (idempotent). The axis needs a hidden dummy trace (named
@@ -1764,34 +2130,54 @@ function _axes_inset!(
 	sharey::Bool = false,
 	background = nothing,
 	ticklabel_halo::Bool = true,
+	fontsize::Union{Nothing, Real} = nothing,
 )
 	who = "inset!"
-	x0, y0, w, h = _axes_inset_bounds(bounds, who)
+	coords_name = Symbol(coords)
+	coords_name in (:axes, :paper, :data) || throw(ArgumentError(
+		"$(who): `coords` must be :axes (fractions of the host cell), :data " *
+		"(host data coordinates) or :paper; got $(repr(coords)).",
+	))
+	host = _cell_target(sf; row = row, col = col, who = who)
+	_axes_require_xy(host, who, "an inset")
+	x0, y0, w, h = coords_name === :data ?
+		_axes_inset_data_bounds(sf, host, bounds, who) :
+		_axes_inset_bounds(bounds, who)
 	fill = background === nothing ? nothing :
 		_cmn_check_color(background, "background", who)
 	(fill === nothing || !isempty(fill)) || throw(ArgumentError(
 		"$(who): `background` must be a colour or `nothing` (the figure's " *
 		"`plot_bgcolor`); got \"\".",
 	))
-	coords_name = Symbol(coords)
-	coords_name in (:axes, :paper) || throw(ArgumentError(
-		"$(who): `coords` must be :axes (fractions of the host cell) or " *
-		":paper; got $(repr(coords)).",
+	(fontsize === nothing || (_is_plain_real(fontsize) && fontsize > 0)) || throw(ArgumentError(
+		"$(who): `fontsize` must be a positive number or `nothing` (one step " *
+		"smaller than the host's tick labels); got $(repr(fontsize)).",
 	))
-	host = _cell_target(sf; row = row, col = col, who = who)
-	_axes_require_xy(host, who, "an inset")
 	fraction(domain, a, b) = (
 		clamp(domain[1] + a * (domain[2] - domain[1]), 0.0, 1.0),
 		clamp(domain[1] + b * (domain[2] - domain[1]), 0.0, 1.0),
 	)
-	xdomain, ydomain = if coords_name === :axes
-		(fraction(host.xdomain, x0, x0 + w), fraction(host.ydomain, y0, y0 + h))
-	else
+	xdomain, ydomain = if coords_name === :paper
 		((x0, min(x0 + w, 1.0)), (y0, min(y0 + h, 1.0)))
+	else
+		(fraction(host.xdomain, x0, x0 + w), fraction(host.ydomain, y0, y0 + h))
 	end
 
 	p = _cmn_plot(sf)
 	layout = p.layout
+	# Y9: frame in the ink of the figure's template (white on plotly_dark).
+	ink = _figure_axis_defaults(p; axis = :x)
+	# Tick labels one matplotlib size step (1.2x) below the host's.
+	root_size = _tight_root_font_size(key -> get(layout.fields, key, nothing))
+	host_tick = _axes_size(
+		_cmn_mapping_get(_cmn_mapping_get(get(layout.fields, host.xkey, nothing), :tickfont), :size),
+		_axes_size(
+			_cmn_mapping_get(_cmn_mapping_get(_axes_template_entry(layout, :xaxis), :tickfont), :size),
+			root_size,
+		),
+	)
+	tick_size = fontsize === nothing ?
+		round(host_tick / _AXES_INSET_FONT_STEP; digits = 1) : Float64(fontsize)
 	index = max(
 		_axes_highest_axis_index(p, 'x'),
 		_axes_highest_axis_index(p, 'y'),
@@ -1805,16 +2191,17 @@ function _axes_inset!(
 		:zeroline => false,
 		# Inset tick labels must not grow the figure margins.
 		:automargin => false,
-		:linecolor => _DEFAULT_AXIS_LINECOLOR,
-		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
-		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
+		:linecolor => ink[:linecolor],
+		:linewidth => ink[:linewidth],
+		:tickcolor => ink[:tickcolor],
+		:tickfont => attr(size = tick_size),
 	)
 	if ticklabel_halo
 		# The tick labels and titles sit outside the inset's (opaque) plot
 		# area, over the host cell's data; plotly.js `font.shadow = "auto"`
 		# draws a halo in the contrast colour of the text behind each glyph
 		# (render-verified over a heatmap, inset_bg_shadow.png).
-		frame[:tickfont] = attr(shadow = _AXES_INSET_HALO)
+		frame[:tickfont] = attr(size = tick_size, shadow = _AXES_INSET_HALO)
 		frame[:title] = attr(font = attr(shadow = _AXES_INSET_HALO))
 	end
 	xfields = merge(frame, Dict{Symbol, Any}(:domain => collect(xdomain), :anchor => yref))
@@ -1879,11 +2266,82 @@ end
 # plotly.js `font.shadow` value for inset tick labels and titles: "auto" is a
 # halo in the contrast colour of the text (white behind dark text).
 const _AXES_INSET_HALO = "auto"
+# One step of matplotlib's relative font sizes ("small" = "medium" / 1.2).
+const _AXES_INSET_FONT_STEP = 1.2
+
+# The drawn range of Cartesian axis `root` in data units, in drawing order,
+# when it is known before rendering: an explicit range, or the tight range of
+# a field plot (`_finalize_figure!`'s autorange clip: `clipmin`/`clipmax`
+# with `include` holding both, which pins the autorange to exactly that
+# interval). `nothing` otherwise.
+function _axes_known_range(fig, root::Symbol)
+	layout = _cmn_layout(fig)
+	explicit = _from_axis_range(layout, root)
+	explicit === nothing || return explicit
+	entry = get(layout.fields, root, nothing)
+	_cmn_mapping_get(entry, :autorange) === false && return nothing
+	options = _cmn_mapping_get(entry, :autorangeoptions)
+	lo, hi = _cmn_mapping_get(options, :clipmin), _cmn_mapping_get(options, :clipmax)
+	include = _cmn_mapping_get(options, :include)
+	(_is_plain_real(lo) && _is_plain_real(hi) && lo < hi) || return nothing
+	(include isa AbstractVector && any(v -> v == lo, include) && any(v -> v == hi, include)) ||
+		return nothing
+	_axis_is_reversed(fig, root) && return (Float64(hi), Float64(lo))
+	return (Float64(lo), Float64(hi))
+end
+
+# `(x0, y0, width, height)` given in the host cell's DATA coordinates, as
+# fractions of the host plot area: the host axes need a fixed range (data
+# units, log axes in data values), and the box must lie inside it.
+function _axes_inset_data_bounds(sf, host::_CellTarget, bounds, who::AbstractString)
+	((bounds isa Tuple || bounds isa AbstractVector) && length(bounds) == 4) ||
+		throw(ArgumentError(
+			"$(who): `bounds` must be (x0, y0, width, height) as a 4-tuple or " *
+			"4-vector; got $(repr(bounds)).",
+		))
+	for (name, v) in zip(("x0", "y0", "width", "height"), bounds)
+		_is_plain_real(v) || throw(ArgumentError(
+			"$(who): bounds `$(name)` must be a finite number; got $(repr(v)).",
+		))
+	end
+	x0, y0, w, h = Float64.(Tuple(bounds))
+	(w > 0 && h > 0) || throw(ArgumentError(
+		"$(who): the inset width and height must be positive; got $(repr(bounds)).",
+	))
+	layout = _cmn_layout(sf)
+	out = Float64[]
+	for (letter, key, a, b) in (('x', host.xkey, x0, x0 + w), ('y', host.ykey, y0, y0 + h))
+		root = _axes_match_root(sf, key, who)
+		r = _axes_known_range(sf, root)
+		r === nothing && throw(ArgumentError(
+			"$(who): `coords = :data` needs a fixed $(letter) range on the host cell " *
+			"(the inset is placed when the call runs); set it with " *
+			"`$(letter)range!(sf, (lo, hi); row, col)` first.",
+		))
+		log_axis = _axis_type(layout, root) == "log"
+		if log_axis
+			(a > 0 && b > 0) || throw(ArgumentError(
+				"$(who): the $(letter) bounds of the inset are on a logarithmic axis " *
+				"and must be positive; got $(a) .. $(b).",
+			))
+		end
+		t(v) = log_axis ? log10(v) : v
+		lo, hi = t(r[1]), t(r[2])
+		fa, fb = (t(a) - lo) / (hi - lo), (t(b) - lo) / (hi - lo)
+		fa, fb = minmax(fa, fb)   # a reversed host axis
+		(fa >= -1e-9 && fb <= 1 + 1e-9) || throw(ArgumentError(
+			"$(who): the inset's $(letter) extent $(a) .. $(b) is not inside the host " *
+			"$(letter) range $(r[1]) .. $(r[2]).",
+		))
+		push!(out, clamp(fa, 0.0, 1.0), clamp(fb - fa, 0.0, 1.0))
+	end
+	return (out[1], out[3], out[2], out[4])
+end
 # Name prefix of the shape drawn by `inset!(...; background = colour)`.
 const _AXES_INSET_BACKGROUND_NAME = "plotlysupply:inset_background"
 
 """
-	inset!(sf::SubplotFigure, bounds; row=nothing, col=nothing, coords=:axes, sharex=false, sharey=false, background=nothing, ticklabel_halo=true) -> Int
+	inset!(sf::SubplotFigure, bounds; row=nothing, col=nothing, coords=:axes, sharex=false, sharey=false, background=nothing, ticklabel_halo=true, fontsize=nothing) -> Int
 
 Add inset axes to a SubplotFigure cell and return the inset id `k`. Pass
 `inset = k` to the axis helpers ([`xlabel!`](@ref), [`xrange!`](@ref),
@@ -1893,14 +2351,19 @@ there with `inset = k` (traces may also name the axes directly: `xaxis` /
 it again.
 
 # Arguments
-- `bounds`: `(x0, y0, width, height)` (tuple or vector), each in [0, 1]:
-  fractions of the host cell's plot area (`coords = :axes`) or of the whole
-  figure (`coords = :paper`); `x0 + width` and `y0 + height` must not exceed 1.
+- `bounds`: `(x0, y0, width, height)` (tuple or vector). With `coords =
+  :axes` / `:paper` each is in [0, 1]: fractions of the host cell's plot area
+  or of the whole figure, and `x0 + width`, `y0 + height` must not exceed 1.
+  With `coords = :data` they are host DATA coordinates (data values on log
+  axes; the inset spans `x0 .. x0 + width`), converted to fractions of the
+  host plot area when the call runs: the host axes need a fixed range
+  ([`xrange!`](@ref)/[`yrange!`](@ref), or a field plot's tight range) and
+  the box must lie inside it.
 
 # Keywords
 - `row`, `col`: host cell (both or neither; default the active cell, which
   the call makes active). The host must be a Cartesian (xy) cell.
-- `coords = :axes`: `:axes` or `:paper`.
+- `coords = :axes`: `:axes`, `:data` or `:paper`.
 - `sharex`, `sharey`: share the host axis range (`matches`); the inset then
   also takes the host's axis type (and exponent format). The shared root
   axis gets an explicit `autorange` (`true` unless it has a range), which
@@ -1921,13 +2384,18 @@ it again.
   the host cell's data (images, heatmaps, dense lines). `false` draws plain
   labels. Browsers and the PNG/PDF exports render the halo; an exported SVG
   viewed outside a browser may ignore it (it is a CSS `text-shadow`).
+- `fontsize = nothing`: inset tick-label size in px; `nothing` is one
+  matplotlib size step (1/1.2) below the host cell's tick labels (their
+  `tickfont.size`, else the template's, else the figure font size) when the
+  call runs, as matplotlib insets usually are.
 
 Background: the inset's plot area is always opaque. plotly.js fills the plot
 area of axes that overlap another cell with the figure's `plot_bgcolor`
 (white under the default template; `relayout!(sf, plot_bgcolor = ...)`
 changes it for every cell), so host data never shows through the inset; use
-`background` for an inset-only colour. The inset axes are boxed (black
-lines, outside ticks) and do not push the figure margins. Each call creates
+`background` for an inset-only colour. The inset axes are boxed (lines and
+ticks in the ink of the figure's template: black on light templates, light on
+dark ones; outside ticks) and do not push the figure margins. Each call creates
 a new inset (ids are 1, 2, ... in creation order; after
 [`remove_inset!`](@ref) the later ids move down by one). `inset!` on a
 `Plot`/`SyncPlot` is an `ArgumentError`.
