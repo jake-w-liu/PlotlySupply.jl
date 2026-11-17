@@ -2,238 +2,28 @@ using Test
 using PlotlySupply
 using Base64
 
-struct _UnsupportedTrace <: AbstractTrace end
-
-mutable struct _LifecycleFakeWindow
-    exists::Bool
-    msg_channel::Channel{Any}
-    uri::String
-    width::Int
-    height::Int
-    title::String
-    show::Bool
-    close_calls::Int
-    throw_on_close::Bool
-    throw_on_isopen::Bool
-    on_close::Any
-    close_entered::Union{Nothing,Channel{Nothing}}
-    close_release::Union{Nothing,Channel{Nothing}}
-end
-
-mutable struct _LifecycleFakeElectron
-    windows::Vector{_LifecycleFakeWindow}
-    scripts::Vector{String}
-    fail_window::Bool
-    throw_on_close::Bool
-    throw_on_isopen::Bool
-    block_close::Bool
-    run_result::Any
-    run_error::Union{Nothing,Exception}
-end
-
-_LifecycleFakeElectron(;
-    fail_window::Bool=false,
-    throw_on_close::Bool=false,
-    throw_on_isopen::Bool=false,
-    block_close::Bool=false,
-    run_result="ok",
-    run_error::Union{Nothing,Exception}=nothing,
-) = _LifecycleFakeElectron(
-    _LifecycleFakeWindow[],
-    String[],
-    fail_window,
-    throw_on_close,
-    throw_on_isopen,
-    block_close,
-    run_result,
-    run_error,
-)
-
-function _lifecycle_fake_window(
-    ec::_LifecycleFakeElectron,
-    app,
-    uri;
-    width,
-    height,
-    title,
-    show,
-)
-    ec.fail_window && error("injected Window construction failure")
-    window = _LifecycleFakeWindow(
-        true,
-        Channel{Any}(1),
-        String(uri),
-        width,
-        height,
-        String(title),
-        show,
-        0,
-        ec.throw_on_close,
-        ec.throw_on_isopen,
-        nothing,
-        ec.block_close ? Channel{Nothing}(1) : nothing,
-        ec.block_close ? Channel{Nothing}(1) : nothing,
-    )
-    push!(ec.windows, window)
-    return window
-end
-
-function _lifecycle_fake_isopen(window::_LifecycleFakeWindow)
-    window.throw_on_isopen && error("injected window isopen failure")
-    return window.exists
-end
-
-function _lifecycle_fake_close(window::_LifecycleFakeWindow)
-    window.close_calls += 1
-    if window.close_entered !== nothing
-        put!(window.close_entered, nothing)
-        take!(window.close_release)
-    end
-    window.on_close === nothing || window.on_close()
-    window.throw_on_close && error("injected window close failure")
-    window.exists = false
-    isopen(window.msg_channel) && close(window.msg_channel)
-    return nothing
-end
-
-function Base.getproperty(ec::_LifecycleFakeElectron, name::Symbol)
-    if name === :Window
-        return (args...; kwargs...) ->
-            _lifecycle_fake_window(ec, args...; kwargs...)
-    elseif name === :isopen
-        return _lifecycle_fake_isopen
-    elseif name === :close
-        return _lifecycle_fake_close
-    elseif name === :msgchannel
-        return window -> window.msg_channel
-    elseif name === :run
-        return function (window, script)
-            push!(ec.scripts, String(script))
-            ec.run_error === nothing || throw(ec.run_error)
-            return ec.run_result
-        end
-    end
-    return getfield(ec, name)
-end
-
-mutable struct _ImageCommandState
-    open::Bool
-    calls::Vector{Tuple{Any,String}}
-    results::Vector{Any}
-    run_error::Union{Nothing,Exception}
-end
-
-_ImageCommandState() =
-    _ImageCommandState(true, Tuple{Any,String}[], Any[], nothing)
-
-function _image_command_backend(state::_ImageCommandState)
-    return (
-        isopen=window -> state.open,
-        close=window -> (state.open = false; nothing),
-        run=function (window, script)
-            push!(state.calls, (window, String(script)))
-            state.run_error === nothing || throw(state.run_error)
-            isempty(state.results) &&
-                error("image command fake has no queued result")
-            return popfirst!(state.results)
-        end,
-    )
-end
-
-function _wait_for_lifecycle(predicate; timeout::Float64=5.0, collect::Bool=false)
-    deadline = time() + timeout
-    while time() < deadline
-        predicate() && return true
-        collect && GC.gc(true)
-        sleep(0.01)
-    end
-    collect && GC.gc(true)
-    return predicate()
-end
-
-function _lifecycle_registry_counts()
-    return lock(PlotlySupply._SYNCPLOT_REGISTRY_LOCK) do
-        length(PlotlySupply._PLOT_SYNCPLOT_MAP)
-    end
-end
-
-function _lifecycle_is_registered(plot, sp)
-    return lock(PlotlySupply._SYNCPLOT_REGISTRY_LOCK) do
-        get(PlotlySupply._PLOT_SYNCPLOT_MAP, plot, nothing) === sp
-    end
-end
-
-function _native_close_lifecycle_fixture(ec::_LifecycleFakeElectron)
-    payload = ones(Float64, 250_000)
-    plot = Plot(scatter(y=payload))
-    sp = PlotlySupply._create_syncplot_window(ec, plot; app=:fake, show=false)
-    old, registered = PlotlySupply._register_displayed_syncplot!(plot, sp)
-    tempdir = getfield(sp, :_resources).tempdir
-    window = sp.window
-    retained_size = Base.summarysize(sp)
-    refs = (WeakRef(payload), WeakRef(plot), WeakRef(sp))
-
-    # This is the notification ElectronCall applies on a native/UI close:
-    # exists becomes false and the per-window message channel closes.
-    window.exists = false
-    close(window.msg_channel)
-    return (; refs, tempdir, window, retained_size, old, registered)
-end
-
-function _open_watcher_lifecycle_fixture(ec::_LifecycleFakeElectron)
-    payload = ones(Float64, 250_000)
-    plot = Plot(scatter(y=payload))
-    sp = PlotlySupply._create_syncplot_window(ec, plot; app=:fake, show=false)
-    tempdir = getfield(sp, :_resources).tempdir
-    window = sp.window
-    retained_size = Base.summarysize(sp)
-    refs = (WeakRef(payload), WeakRef(plot), WeakRef(sp))
-    initially_open = isopen(sp)
-    initial_close_calls = window.close_calls
-    return (;
-        refs,
-        tempdir,
-        window,
-        retained_size,
-        initially_open,
-        initial_close_calls,
-    )
-end
-
-const _subplot_refresh_calls = Ref(0)
-
-function _subplot_counting_backend()
-    open = Ref(true)
-    return (
-        isopen=window -> open[],
-        close=window -> (open[] = false; nothing),
-        run=(window, script) -> begin
-            _subplot_refresh_calls[] += 1
-            return "ok"
-        end,
-    )
-end
-
-function _subplot_counting_syncplot(p::Plot, divid::String)
-    resources = PlotlySupply._SyncPlotResources(
-        nothing,
-        _subplot_counting_backend(),
-    )
-    return SyncPlot(p, nothing, nothing, divid, resources)
-end
+isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
 @testset "PlotlySupply.jl" begin
-    # Write your tests here.
-
     @testset "plot_scatter" begin
         x = 1:10
         y = rand(10)
         fig = plot_scatter(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false, fontsize=12)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test (tr[:type], tr[:mode]) == ("scatter", "lines")
+        @test tr[:x] == x && tr[:y] == y
+        _test_cartesian_options(fig; title="My Title", xlabel="x", ylabel="y",
+            xrange=[0, 10], yrange=[0, 1], width=500, height=500, fontsize=12, showgrid=false)
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_scatter(x, y2, legend=["trace1", "trace2"], mode=["markers", "lines+markers"], color=["red", "blue"])
-        @test fig2 isa Plot
+        @test [t[:type] for t in fig2.data] == ["scatter", "scatter"]
+        @test [t[:y] for t in fig2.data] == y2
+        @test all(t -> t[:x] == x, fig2.data)
+        @test [t[:name] for t in fig2.data] == ["trace1", "trace2"]
+        @test [t[:mode] for t in fig2.data] == ["markers", "lines+markers"]
+        @test [t[:line][:color] for t in fig2.data] == ["red", "blue"]
+        @test fig2.layout[:showlegend] == true
     end
 
     @testset "default cartesian spines stay black after template" begin
@@ -263,65 +53,121 @@ end
         x = 1:10
         y = rand(10)
         fig = plot_stem(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false)
-        @test fig isa Plot
+        heads, stems = _stem_parts(fig)
+        @test only(heads)[:x] == x && only(heads)[:y] == y
+        # One stem per point, from the y = 0 baseline to the point, gap-separated.
+        @test only(stems)[:x] == collect(Iterators.flatten((xi, xi, nothing) for xi in x))
+        @test only(stems)[:y] == collect(Iterators.flatten((0, yi, nothing) for yi in y))
+        @test only(heads)[:legendgroup] == only(stems)[:legendgroup]
+        _test_cartesian_options(fig; title="My Title", xlabel="x", ylabel="y",
+            xrange=[0, 10], yrange=[0, 1], width=500, height=500, showgrid=false)
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_stem(x, y2, legend=["trace1", "trace2"], color=["red", "blue"])
-        @test fig2 isa Plot
+        heads2, stems2 = _stem_parts(fig2)
+        @test [t[:y] for t in heads2] == y2
+        @test [t[:name] for t in heads2] == ["trace1", "trace2"]
+        @test [t[:marker][:color] for t in heads2] == ["red", "blue"]
+        @test [t[:line][:color] for t in stems2] == ["red", "blue"]
+        @test all(t -> t[:showlegend] == false, stems2)
     end
 
     @testset "plot_bar" begin
         x = 1:10
         y = rand(10)
         fig = plot_bar(x, y, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 1], width=500, height=500, grid=false)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test tr[:type] == "bar"
+        @test tr[:x] == x && tr[:y] == y
+        _test_cartesian_options(fig; title="My Title", xlabel="x", ylabel="y",
+            xrange=[0, 10], yrange=[0, 1], width=500, height=500, showgrid=false)
 
         y2 = [rand(10), rand(10)]
         fig2 = plot_bar(x, y2, legend=["trace1", "trace2"], color=["red", "blue"])
-        @test fig2 isa Plot
+        @test [t[:type] for t in fig2.data] == ["bar", "bar"]
+        @test [t[:y] for t in fig2.data] == y2
+        @test [t[:name] for t in fig2.data] == ["trace1", "trace2"]
+        @test [t[:marker][:color] for t in fig2.data] == ["red", "blue"]
     end
 
     @testset "plot_histogram" begin
         x = randn(200)
         fig = plot_histogram(x, title="Histogram", xlabel="x", ylabel="count", nbinsx=30, width=500, height=500)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test tr[:type] == "histogram"
+        @test tr[:x] == x
+        @test tr[:nbinsx] == 30
+        _test_cartesian_options(fig; title="Histogram", xlabel="x", ylabel="count", width=500, height=500)
 
         xmulti = [randn(100), randn(100) .+ 1.0]
         fig2 = plot_histogram(xmulti, legend=["h1", "h2"], color=["red", "blue"], histnorm="probability")
-        @test fig2 isa Plot
+        @test [t[:type] for t in fig2.data] == ["histogram", "histogram"]
+        @test [t[:x] for t in fig2.data] == xmulti
+        @test [t[:name] for t in fig2.data] == ["h1", "h2"]
+        @test [t[:marker][:color] for t in fig2.data] == ["red", "blue"]
+        @test all(t -> t[:histnorm] == "probability", fig2.data)
+        # Several series overlay on shared bins.
+        @test fig2.layout[:barmode] == "overlay"
+        @test fig2.data[1][:bingroup] == fig2.data[2][:bingroup]
     end
 
     @testset "plot_box" begin
         x = fill("group A", 20)
         y = randn(20)
         fig = plot_box(x, y, title="Box", xlabel="group", ylabel="value", width=500, height=500)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test tr[:type] == "box"
+        @test tr[:x] == x && tr[:y] == y
+        _test_cartesian_options(fig; title="Box", xlabel="group", ylabel="value", width=500, height=500)
 
         y2 = [randn(20), randn(20) .+ 0.5]
         fig2 = plot_box(y2, legend=["b1", "b2"], color=["red", "blue"])
-        @test fig2 isa Plot
+        @test [t[:type] for t in fig2.data] == ["box", "box"]
+        @test [t[:y] for t in fig2.data] == y2
+        @test [t[:name] for t in fig2.data] == ["b1", "b2"]
+        @test [t[:marker][:color] for t in fig2.data] == ["red", "blue"]
+        @test [t[:line][:color] for t in fig2.data] == ["red", "blue"]
     end
 
     @testset "plot_violin" begin
         x = fill("group A", 20)
         y = randn(20)
         fig = plot_violin(x, y, title="Violin", xlabel="group", ylabel="value", width=500, height=500)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test tr[:type] == "violin"
+        @test tr[:x] == x && tr[:y] == y
+        _test_cartesian_options(fig; title="Violin", xlabel="group", ylabel="value", width=500, height=500)
 
         y2 = [randn(20), randn(20) .+ 0.5]
         fig2 = plot_violin(y2, legend=["v1", "v2"], color=["red", "blue"], side="positive")
-        @test fig2 isa Plot
+        @test [t[:type] for t in fig2.data] == ["violin", "violin"]
+        @test [t[:y] for t in fig2.data] == y2
+        @test [t[:name] for t in fig2.data] == ["v1", "v2"]
+        @test [t[:line][:color] for t in fig2.data] == ["red", "blue"]
+        @test all(t -> t[:side] == "positive", fig2.data)
     end
 
     @testset "plot_scatterpolar" begin
         theta = 0:0.1:2*pi
         r = sin.(theta)
         fig = plot_scatterpolar(theta, r, title="My Title", trange=[0, 360], rrange=[0, 1], width=500, height=500, grid=false)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test tr[:type] == "scatterpolar"
+        @test tr[:theta] == theta && tr[:r] == r
+        polar = fig.layout[:polar]
+        @test polar[:sector] == [0, 360]
+        @test polar[:radialaxis][:range] == [0, 1]
+        @test polar[:radialaxis][:showgrid] == false
+        @test polar[:angularaxis][:showgrid] == false
+        @test !haskey(fig.layout.fields, :xaxis)
+        _test_cartesian_options(fig; title="My Title", width=500, height=500)
 
         r2 = [sin.(theta), cos.(theta)]
         fig2 = plot_scatterpolar(theta, r2, legend=["trace1", "trace2"], color=["red", "blue"])
-        @test fig2 isa Plot
+        @test [t[:type] for t in fig2.data] == ["scatterpolar", "scatterpolar"]
+        @test [t[:r] for t in fig2.data] == r2
+        @test [t[:name] for t in fig2.data] == ["trace1", "trace2"]
+        @test [t[:line][:color] for t in fig2.data] == ["red", "blue"]
     end
 
     @testset "plot_heatmap" begin
@@ -329,10 +175,19 @@ end
         y = 1:20
         U = rand(10, 20)
         fig = plot_heatmap(x, y, U, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 20], zrange=[0, 1], width=500, height=500, colorscale="Viridis", equalar=true)
-        @test fig isa Plot
+        _test_field_trace(only(fig.data), "heatmap", x, y, U)
+        @test (only(fig.data)[:zmin], only(fig.data)[:zmax]) == (0, 1)
+        @test only(fig.data)[:colorscale] ==
+              PlotlySupply._resolve_colorscale("Viridis"; who="plot_heatmap").scale
+        # equalar: one data unit is as long on y as on x
+        @test fig.layout[:yaxis][:scaleanchor] == "x"
+        @test fig.layout[:yaxis][:scaleratio] == 1
+        _test_cartesian_options(fig; title="My Title", xlabel="x", ylabel="y",
+            xrange=[0, 10], yrange=[0, 20], width=500, height=500)
 
         fig2 = plot_heatmap(U)
-        @test fig2 isa Plot
+        _test_field_trace(only(fig2.data), "heatmap", 0:9, 0:19, U)
+        @test !haskey(fig2.layout[:yaxis], :scaleanchor)
     end
 
     @testset "plot_contour" begin
@@ -340,10 +195,16 @@ end
         y = 1:20
         U = rand(10, 20)
         fig = plot_contour(x, y, U, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 20], zrange=[0, 1], width=500, height=500, colorscale="Viridis", equalar=true, fontsize=11)
-        @test fig isa Plot
+        _test_field_trace(only(fig.data), "contour", x, y, U)
+        @test (only(fig.data)[:zmin], only(fig.data)[:zmax]) == (0, 1)
+        @test only(fig.data)[:colorscale] ==
+              PlotlySupply._resolve_colorscale("Viridis"; who="plot_contour").scale
+        @test fig.layout[:yaxis][:scaleanchor] == "x"
+        _test_cartesian_options(fig; title="My Title", xlabel="x", ylabel="y",
+            xrange=[0, 10], yrange=[0, 20], width=500, height=500, fontsize=11)
 
         fig2 = plot_contour(U)
-        @test fig2 isa Plot
+        _test_field_trace(only(fig2.data), "contour", 0:9, 0:19, U)
     end
 
     @testset "heatmap and contour preserve x-y matrix orientation without copies" begin
@@ -404,10 +265,24 @@ end
     @testset "plot_quiver" begin
         x = 1:10
         y = 1:10
-        u = rand(10)
+        u = rand(10) .+ 0.1
         v = rand(10)
         fig = plot_quiver(x, y, u, v, title="My Title", xlabel="x", ylabel="y", xrange=[0, 10], yrange=[0, 10], width=500, height=500, color="red", sizeref=0.5, grid=false)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test (tr[:type], tr[:mode]) == ("scatter", "lines")
+        @test tr[:line][:color] == "red"
+        # Shafts start at the grid points; the longest arrow is 2/3 * sizeref
+        # data units long and the others scale with their magnitude.
+        shafts = _quiver_shafts(tr)
+        @test length(shafts) == length(x)
+        speed = hypot.(u, v)
+        for (i, (p0, p1)) in enumerate(shafts)
+            @test p0 == (x[i], y[i])
+            @test collect(p1 .- p0) ≈ [u[i], v[i]] ./ maximum(speed) .* (2 / 3 * 0.5)
+        end
+        @test fig.layout[:yaxis][:scaleanchor] == "x"   # equal aspect by default
+        _test_cartesian_options(fig; title="My Title", xlabel="x", ylabel="y",
+            xrange=[0, 10], yrange=[0, 10], width=500, height=500, showgrid=false)
     end
 
     @testset "plot_surface" begin
@@ -417,10 +292,21 @@ end
         Y = [j for i in x, j in y]
         Z = rand(10, 20)
         fig = plot_surface(X, Y, Z, title="My Title", xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10], yrange=[0, 20], zrange=[0, 1], width=500, height=500, colorscale="Viridis", aspectmode="cube", grid=false, showaxis=false)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test tr[:type] == "surface"
+        @test tr[:x] == X && tr[:y] == Y && tr[:z] == Z
+        @test tr[:colorscale] == PlotlySupply._resolve_colorscale("Viridis"; who="plot_surface").scale
+        _test_scene_options(fig; xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10],
+            yrange=[0, 20], zrange=[0, 1], aspectmode="cube", showgrid=false, visible=false)
+        _test_cartesian_options(fig; title="My Title", width=500, height=500)
+        @test !haskey(fig.layout.fields, :xaxis)
 
-        fig2 = plot_surface(Z, surfacecolor=rand(10, 20))
-        @test fig2 isa Plot
+        C = rand(10, 20)
+        fig2 = plot_surface(Z, surfacecolor=C)
+        tr2 = only(fig2.data)
+        # Z[ix, iy]: implicit 0-based x along the first dimension, y along the second.
+        @test tr2[:x] == 0:9 && tr2[:y] == 0:19
+        @test tr2[:z] == Z && tr2[:surfacecolor] == C
     end
 
     @testset "plot_scatter3d" begin
@@ -428,13 +314,24 @@ end
         y = 1:10
         z = rand(10)
         fig = plot_scatter3d(x, y, z, title="My Title", xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10], yrange=[0, 10], zrange=[0, 1], width=500, height=500, mode="markers", color="red", legend="trace1", aspectmode="cube", perspective=false, grid=false, showaxis=false)
-        @test fig isa Plot
+        tr = only(fig.data)
+        @test (tr[:type], tr[:mode], tr[:name]) == ("scatter3d", "markers", "trace1")
+        @test tr[:x] == x && tr[:y] == y && tr[:z] == z
+        @test tr[:line][:color] == "red"
+        _test_scene_options(fig; xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10],
+            yrange=[0, 10], zrange=[0, 1], aspectmode="cube", showgrid=false, visible=false)
+        @test fig.layout[:scene][:camera][:projection][:type] == "orthographic"
+        _test_cartesian_options(fig; title="My Title", width=500, height=500)
 
         z2 = [rand(10), rand(10)]
         x2 = [1:10, 1:10]
         y2 = [1:10, 1:10]
         fig2 = plot_scatter3d(x2, y2, z2, color=["red", "blue"], legend=["trace1", "trace2"], mode=["markers", "lines+markers"])
-        @test fig2 isa Plot
+        @test [t[:type] for t in fig2.data] == ["scatter3d", "scatter3d"]
+        @test [t[:z] for t in fig2.data] == z2
+        @test [t[:name] for t in fig2.data] == ["trace1", "trace2"]
+        @test [t[:mode] for t in fig2.data] == ["markers", "lines+markers"]
+        @test [t[:line][:color] for t in fig2.data] == ["red", "blue"]
     end
 
     @testset "plot_quiver3d" begin
@@ -444,8 +341,18 @@ end
         u = rand(10)
         v = rand(10)
         w = rand(10)
-        fig = plot_quiver3d(x, y, z, u, v, w, title="My Title", xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10], yrange=[0, 10], zrange=[0, 10], width=500, height=500, color="red", colorscale="Viridis", sizeref=0.5, aspectmode="cube", perspective=false, grid=false, showaxis=false)
-        @test fig isa Plot
+        fig = @test_logs (:warn, r"plot_quiver3d: `colorscale` is ignored") plot_quiver3d(x, y, z, u, v, w, title="My Title", xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10], yrange=[0, 10], zrange=[0, 10], width=500, height=500, color="red", colorscale="Viridis", sizeref=0.5, aspectmode="cube", perspective=false, grid=false, showaxis=false)
+        tr = only(fig.data)
+        @test tr[:type] == "cone"
+        @test (tr[:x], tr[:y], tr[:z]) == (x, y, z)
+        @test (tr[:u], tr[:v], tr[:w]) == (u, v, w)
+        @test (tr[:sizemode], tr[:sizeref], tr[:anchor]) == ("scaled", 0.5, "cm")
+        # One uniform colour wins over the colorscale (with the warning above).
+        @test tr[:colorscale] == [[0, "red"], [1, "red"]]
+        @test tr[:showscale] == false
+        _test_scene_options(fig; xlabel="x", ylabel="y", zlabel="z", xrange=[0, 10],
+            yrange=[0, 10], zrange=[0, 10], aspectmode="cube", showgrid=false, visible=false)
+        _test_cartesian_options(fig; title="My Title", width=500, height=500)
     end
 
     @testset "set_template!" begin
@@ -569,26 +476,38 @@ end
         # Test basic scatter! with x and y
         fig = plot_scatter(x, y, title="Scatter Test")
         initial_trace_count = length(fig.data)
-        plot_scatter!(fig, x, y2, color="red", legend="added trace")
-        @test fig isa Plot
+        @test plot_scatter!(fig, x, y2, color="red", legend="added trace") === nothing
         @test length(fig.data) == initial_trace_count + 1
-        
+        added = fig.data[end]
+        @test added[:type] == "scatter"
+        @test added[:x] == x && added[:y] == y2
+        @test (added[:name], added[:line][:color]) == ("added trace", "red")
+        @test fig.data[1][:y] == y                       # existing trace untouched
+        @test _lookup(fig.layout, :title, :text) == "Scatter Test"
+        @test fig.layout[:showlegend] == true
+
         # Test chaining multiple scatter! calls
-        plot_scatter!(fig, x, y3, color="blue", legend="third trace")
+        @test plot_scatter!(fig, x, y3, color="blue", legend="third trace") === nothing
         @test length(fig.data) == initial_trace_count + 2
-        
+        @test (fig.data[end][:y], fig.data[end][:name]) == (y3, "third trace")
+
         # Test scatter! without x (uses indices)
         fig2 = plot_scatter(y, title="Scatter Test 2")
         initial_count = length(fig2.data)
-        plot_scatter!(fig2, y2, color="green", legend="appended")
+        @test plot_scatter!(fig2, y2, color="green", legend="appended") === nothing
         @test length(fig2.data) == initial_count + 1
-        
+        @test fig2.data[end][:x] == 0:9 && fig2.data[end][:y] == y2
+        @test fig2.data[end][:line][:color] == "green"
+
         # Test scatter! with vector of vectors
         y_multi = [rand(10), rand(10)]
         fig3 = plot_scatter(y, title="Multi Scatter")
         initial_count = length(fig3.data)
-        plot_scatter!(fig3, x, y_multi, color=["purple", "orange"], legend=["m1", "m2"])
+        @test plot_scatter!(fig3, x, y_multi, color=["purple", "orange"], legend=["m1", "m2"]) === nothing
         @test length(fig3.data) == initial_count + 2
+        @test [t[:y] for t in fig3.data[end-1:end]] == y_multi
+        @test [t[:name] for t in fig3.data[end-1:end]] == ["m1", "m2"]
+        @test [t[:line][:color] for t in fig3.data[end-1:end]] == ["purple", "orange"]
     end
 
     @testset "Mutating Functions - plot_stem!" begin
@@ -599,22 +518,33 @@ end
         # Test basic stem! with x and y
         fig = plot_stem(x, y, title="Stem Test")
         initial_trace_count = length(fig.data)
-        plot_stem!(fig, x, y2, color="red", legend="added stem")
-        @test fig isa Plot
-        @test length(fig.data) > initial_trace_count  # stem creates 2 traces per call
-        
+        @test plot_stem!(fig, x, y2, color="red", legend="added stem") === nothing
+        # one marker (heads) trace + one stems trace per series
+        @test length(fig.data) == initial_trace_count + 2
+        heads, stems = _stem_parts(Plot(fig.data[initial_trace_count+1:end]))
+        @test only(heads)[:y] == y2
+        @test (only(heads)[:name], only(heads)[:marker][:color]) == ("added stem", "red")
+        @test only(stems)[:line][:color] == "red"
+        @test _lookup(fig.layout, :title, :text) == "Stem Test"
+
         # Test stem! without x (uses indices)
         fig2 = plot_stem(y, title="Stem Test 2")
         initial_count = length(fig2.data)
-        plot_stem!(fig2, y2, color="green", legend="appended")
-        @test length(fig2.data) > initial_count
-        
+        @test plot_stem!(fig2, y2, color="green", legend="appended") === nothing
+        @test length(fig2.data) == initial_count + 2
+        heads2, _ = _stem_parts(Plot(fig2.data[initial_count+1:end]))
+        @test only(heads2)[:x] == 0:9 && only(heads2)[:y] == y2
+
         # Test stem! with vector of vectors
         y_multi = [rand(10), rand(10)]
         fig3 = plot_stem(y, title="Multi Stem")
         initial_count = length(fig3.data)
-        plot_stem!(fig3, x, y_multi, color=["blue", "red"], legend=["s1", "s2"])
-        @test length(fig3.data) > initial_count
+        @test plot_stem!(fig3, x, y_multi, color=["blue", "red"], legend=["s1", "s2"]) === nothing
+        @test length(fig3.data) == initial_count + 4
+        heads3, stems3 = _stem_parts(Plot(fig3.data[initial_count+1:end]))
+        @test [t[:y] for t in heads3] == y_multi
+        @test [t[:name] for t in heads3] == ["s1", "s2"]
+        @test [t[:line][:color] for t in stems3] == ["blue", "red"]
     end
 
     @testset "Mutating Functions - plot_bar!" begin
@@ -624,23 +554,33 @@ end
 
         fig = plot_bar(x, y, title="Bar Test")
         initial_trace_count = length(fig.data)
-        plot_bar!(fig, x, y2, color="red", legend="added bar")
-        @test fig isa Plot
+        @test plot_bar!(fig, x, y2, color="red", legend="added bar") === nothing
         @test length(fig.data) == initial_trace_count + 1
+        @test fig.data[end][:type] == "bar"
+        @test fig.data[end][:x] == x && fig.data[end][:y] == y2
+        @test (fig.data[end][:name], fig.data[end][:marker][:color]) == ("added bar", "red")
+        @test _lookup(fig.layout, :title, :text) == "Bar Test"
 
         fig2 = plot_bar(y, title="Bar Test 2")
         initial_count = length(fig2.data)
-        plot_bar!(fig2, y2, color="green", legend="appended")
+        @test plot_bar!(fig2, y2, color="green", legend="appended") === nothing
         @test length(fig2.data) == initial_count + 1
+        @test fig2.data[end][:x] == 0:9 && fig2.data[end][:y] == y2
+        @test fig2.data[end][:marker][:color] == "green"
     end
 
     @testset "Mutating Functions - plot_histogram!" begin
         x = randn(200)
         fig = plot_histogram(x, title="Histogram Test")
         initial_trace_count = length(fig.data)
-        plot_histogram!(fig, randn(200) .+ 1.0, color="red", legend="h2", nbinsx=20)
-        @test fig isa Plot
+        x2 = randn(200) .+ 1.0
+        @test plot_histogram!(fig, x2, color="red", legend="h2", nbinsx=20) === nothing
         @test length(fig.data) == initial_trace_count + 1
+        added = fig.data[end]
+        @test added[:type] == "histogram"
+        @test added[:x] == x2
+        @test (added[:name], added[:marker][:color], added[:nbinsx]) == ("h2", "red", 20)
+        @test fig.data[1][:x] == x
     end
 
     @testset "Mutating Functions - plot_box!" begin
@@ -650,14 +590,19 @@ end
 
         fig = plot_box(x, y, title="Box Test")
         initial_trace_count = length(fig.data)
-        plot_box!(fig, fill("B", 20), y2, color="red", legend="B")
-        @test fig isa Plot
+        @test plot_box!(fig, fill("B", 20), y2, color="red", legend="B") === nothing
         @test length(fig.data) == initial_trace_count + 1
+        added = fig.data[end]
+        @test added[:type] == "box"
+        @test added[:x] == fill("B", 20) && added[:y] == y2
+        @test (added[:name], added[:marker][:color]) == ("B", "red")
 
         fig2 = plot_box(y, title="Box Test 2")
         initial_count = length(fig2.data)
-        plot_box!(fig2, y2, color="green", legend="appended")
+        @test plot_box!(fig2, y2, color="green", legend="appended") === nothing
         @test length(fig2.data) == initial_count + 1
+        @test fig2.data[end][:y] == y2
+        @test (fig2.data[end][:name], fig2.data[end][:marker][:color]) == ("appended", "green")
     end
 
     @testset "Mutating Functions - plot_violin!" begin
@@ -667,14 +612,19 @@ end
 
         fig = plot_violin(x, y, title="Violin Test")
         initial_trace_count = length(fig.data)
-        plot_violin!(fig, fill("B", 20), y2, color="red", legend="B", side="negative")
-        @test fig isa Plot
+        @test plot_violin!(fig, fill("B", 20), y2, color="red", legend="B", side="negative") === nothing
         @test length(fig.data) == initial_trace_count + 1
+        added = fig.data[end]
+        @test added[:type] == "violin"
+        @test added[:x] == fill("B", 20) && added[:y] == y2
+        @test (added[:name], added[:line][:color], added[:side]) == ("B", "red", "negative")
 
         fig2 = plot_violin(y, title="Violin Test 2")
         initial_count = length(fig2.data)
-        plot_violin!(fig2, y2, color="green", legend="appended")
+        @test plot_violin!(fig2, y2, color="green", legend="appended") === nothing
         @test length(fig2.data) == initial_count + 1
+        @test fig2.data[end][:y] == y2
+        @test (fig2.data[end][:name], fig2.data[end][:line][:color]) == ("appended", "green")
     end
 
     @testset "Mutating Functions - plot_scatterpolar!" begin
@@ -684,9 +634,13 @@ end
         
         fig = plot_scatterpolar(theta, r, title="Polar Test")
         initial_trace_count = length(fig.data)
-        plot_scatterpolar!(fig, theta, r2, color="red", legend="cos trace")
-        @test fig isa Plot
+        @test plot_scatterpolar!(fig, theta, r2, color="red", legend="cos trace") === nothing
         @test length(fig.data) == initial_trace_count + 1
+        added = fig.data[end]
+        @test added[:type] == "scatterpolar"
+        @test added[:theta] == theta && added[:r] == r2
+        @test (added[:name], added[:line][:color]) == ("cos trace", "red")
+        @test _lookup(fig.layout, :title, :text) == "Polar Test"
     end
 
     @testset "Mutating Functions - plot_heatmap!" begin
@@ -697,9 +651,12 @@ end
         
         fig = plot_heatmap(x, y, U, title="Heatmap Test")
         initial_trace_count = length(fig.data)
-        plot_heatmap!(fig, x, y, U2, title="Added Heatmap")
-        @test fig isa Plot
+        @test plot_heatmap!(fig, x, y, U2, title="Added Heatmap") === nothing
         @test length(fig.data) == initial_trace_count + 1
+        _test_field_trace(fig.data[end], "heatmap", x, y, U2)
+        _test_field_trace(fig.data[1], "heatmap", x, y, U)
+        # a mutator's explicit title replaces the figure title
+        @test _lookup(fig.layout, :title, :text) == "Added Heatmap"
     end
 
     @testset "Mutating Functions - plot_contour!" begin
@@ -710,9 +667,11 @@ end
         
         fig = plot_contour(x, y, U, title="Contour Test")
         initial_trace_count = length(fig.data)
-        plot_contour!(fig, x, y, U2, title="Added Contour")
-        @test fig isa Plot
+        @test plot_contour!(fig, x, y, U2, title="Added Contour") === nothing
         @test length(fig.data) == initial_trace_count + 1
+        _test_field_trace(fig.data[end], "contour", x, y, U2)
+        _test_field_trace(fig.data[1], "contour", x, y, U)
+        @test _lookup(fig.layout, :title, :text) == "Added Contour"
     end
 
     @testset "Mutating Functions - plot_quiver!" begin
@@ -725,9 +684,12 @@ end
         
         fig = plot_quiver(x, y, u, v, title="Quiver Test")
         initial_trace_count = length(fig.data)
-        plot_quiver!(fig, x, y, u2, v2, color="red")
-        @test fig isa Plot
+        @test plot_quiver!(fig, x, y, u2, v2, color="red") === nothing
         @test length(fig.data) == initial_trace_count + 1
+        added = fig.data[end]
+        @test (added[:type], added[:mode], added[:line][:color]) == ("scatter", "lines", "red")
+        @test [p0 for (p0, _) in _quiver_shafts(added)] == [(xi, yi) for (xi, yi) in zip(x, y)]
+        @test _lookup(fig.layout, :title, :text) == "Quiver Test"
     end
 
     @testset "Mutating Functions - plot_surface!" begin
@@ -740,16 +702,20 @@ end
         
         fig = plot_surface(X, Y, Z, title="Surface Test")
         initial_trace_count = length(fig.data)
-        plot_surface!(fig, X, Y, Z2, zlabel="Added Surface")
-        @test fig isa Plot
+        @test plot_surface!(fig, X, Y, Z2, zlabel="Added Surface") === nothing
         @test length(fig.data) == initial_trace_count + 1
-        
-        # Test with color matrix
+        @test fig.data[end][:type] == "surface"
+        @test fig.data[end][:x] == X && fig.data[end][:y] == Y && fig.data[end][:z] == Z2
+        @test fig.data[1][:z] == Z
+        _test_scene_options(fig; zlabel="Added Surface")
+
+        # Test with color matrix (`color` is the surfacecolor alias)
         color_map = rand(10, 20)
         fig2 = plot_surface(X, Y, Z)
         initial_count = length(fig2.data)
-        plot_surface!(fig2, X, Y, Z2, color=color_map)
+        @test plot_surface!(fig2, X, Y, Z2, color=color_map) === nothing
         @test length(fig2.data) == initial_count + 1
+        @test fig2.data[end][:surfacecolor] == color_map
     end
 
     @testset "Mutating Functions - plot_scatter3d!" begin
@@ -760,18 +726,24 @@ end
         
         fig = plot_scatter3d(x, y, z, title="3D Scatter Test")
         initial_trace_count = length(fig.data)
-        plot_scatter3d!(fig, x, y, z2, color="red", legend="added trace")
-        @test fig isa Plot
+        @test plot_scatter3d!(fig, x, y, z2, color="red", legend="added trace") === nothing
         @test length(fig.data) == initial_trace_count + 1
-        
+        added = fig.data[end]
+        @test added[:type] == "scatter3d"
+        @test added[:x] == x && added[:y] == y && added[:z] == z2
+        @test (added[:name], added[:line][:color]) == ("added trace", "red")
+
         # Test with vector of vectors
         z_multi = [rand(10), rand(10)]
         x_multi = [1:10, 1:10]
         y_multi = [1:10, 1:10]
         fig2 = plot_scatter3d(x, y, z)
         initial_count = length(fig2.data)
-        plot_scatter3d!(fig2, x_multi, y_multi, z_multi, color=["blue", "green"], legend=["m1", "m2"])
-        @test length(fig2.data) > initial_count
+        @test plot_scatter3d!(fig2, x_multi, y_multi, z_multi, color=["blue", "green"], legend=["m1", "m2"]) === nothing
+        @test length(fig2.data) == initial_count + 2
+        @test [t[:z] for t in fig2.data[end-1:end]] == z_multi
+        @test [t[:name] for t in fig2.data[end-1:end]] == ["m1", "m2"]
+        @test [t[:line][:color] for t in fig2.data[end-1:end]] == ["blue", "green"]
     end
 
     @testset "Mutating Functions - plot_quiver3d!" begin
@@ -787,9 +759,13 @@ end
         
         fig = plot_quiver3d(x, y, z, u, v, w, title="3D Quiver Test")
         initial_trace_count = length(fig.data)
-        plot_quiver3d!(fig, x, y, z, u2, v2, w2, color="red")
-        @test fig isa Plot
+        @test plot_quiver3d!(fig, x, y, z, u2, v2, w2, color="red") === nothing
         @test length(fig.data) == initial_trace_count + 1
+        added = fig.data[end]
+        @test added[:type] == "cone"
+        @test (added[:u], added[:v], added[:w]) == (u2, v2, w2)
+        @test added[:colorscale] == [[0, "red"], [1, "red"]]
+        @test fig.data[1][:u] == u
     end
 
     @testset "Mutating Functions - Chaining" begin
@@ -803,13 +779,17 @@ end
         fig = plot_scatter(x, y1, title="Chained Mutations", xlabel="x", ylabel="y")
         
         # Chain multiple operations
-        plot_scatter!(fig, x, y2, color="red", legend="trace 2") |> 
+        plot_scatter!(fig, x, y2, color="red", legend="trace 2") |>
             _ -> plot_scatter!(fig, x, y3, color="blue", legend="trace 3")
-        
+
         plot_scatter!(fig, x, y4, color="green", legend="trace 4")
-        
-        @test fig isa Plot
-        @test length(fig.data) >= 4
+
+        @test length(fig.data) == 4
+        @test [t[:y] for t in fig.data] == [y1, y2, y3, y4]
+        @test [t[:name] for t in fig.data] == ["", "trace 2", "trace 3", "trace 4"]
+        @test [t[:line][:color] for t in fig.data[2:4]] == ["red", "blue", "green"]
+        # the constructor's figure options survive the appends
+        _test_cartesian_options(fig; title="Chained Mutations", xlabel="x", ylabel="y")
     end
 
     @testset "Subplots API" begin
