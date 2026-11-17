@@ -10664,7 +10664,8 @@ function _validated_mathjax_font(font::AbstractString)
 end
 
 # Page-level MathJax 2.7 extensions, installed by every page PlotlySupply builds
-# (`__INHERIT__` is replaced by `true`/`false`).
+# (`__INHERIT__` is replaced by `true`/`false`, `__FONT__` by the JSON string of
+# the canonical SVG font name).
 #
 # 1. Explicit text metrics. MathJax draws characters it has no glyph for (CJK,
 #    and with `mtextFontInherit` every `\text{…}` run) as SVG <text> that
@@ -10681,9 +10682,40 @@ end
 #    the hidden source <text> plotly is typesetting (same TeX after plotly's own
 #    `<`/`>` rewrite; a label without a math group yet is preferred) and set on
 #    the <div> before MathJax measures it.
+# 3. Calligraphic letters in Latin-Modern. MathJax 2.7.9's Latin-Modern font
+#    data has no calligraphic font: its `-tex-caligraphic` variant (`\mathcal`,
+#    `\cal`) lists the roman Main font, so `\mathcal{E}` came out as an upright
+#    roman E (verified by export: glyph LATINMODERNMAIN-45). The Latin Modern
+#    Math script alphabet (U+1D49C…, MathJax's LatinModernMathJax_Script) is
+#    drawn from the Computer Modern calligraphic design (cmsy), the letters
+#    LaTeX's `\mathcal` prints, so the calligraphic variants are pointed at the
+#    font data's own `script`/`bold-script` variants (same font, offsets and
+#    letter-like-symbol remaps). The patch runs when the font data has loaded,
+#    before anything is typeset. Other fonts have a calligraphic font
+#    (TeX: MathJax_Caligraphic) and are left alone.
 const _MATHJAX_PAGE_EXTENSIONS_JS = raw"""
 (function () {
   var INHERIT = __INHERIT__;
+  var FONT = __FONT__;
+  if (FONT === "Latin-Modern") {
+    var patchCaligraphic = function () {
+      var data = MathJax.OutputJax.SVG.FONTDATA;
+      var variants = data && data.VARIANT;
+      if (!variants || !variants["script"] || !variants["bold-script"]) {
+        throw new Error("PlotlySupply: the Latin-Modern font data has no script variant");
+      }
+      variants["-tex-caligraphic"] = variants["script"];
+      variants["-tex-caligraphic-bold"] = variants["bold-script"];
+    };
+    MathJax.Hub.Register.StartupHook("SVG Jax Ready", function () {
+      var SVG = MathJax.OutputJax.SVG;
+      if (SVG.FONTDATA && SVG.FONTDATA.VARIANT) {
+        patchCaligraphic();
+      } else {
+        MathJax.Hub.Register.LoadHook(SVG.fontDir + "/fontdata.js", patchCaligraphic);
+      }
+    });
+  }
   if (INHERIT) {
     MathJax.Hub.Config({SVG: {mtextFontInherit: true}});
     var MATH = /([^$]*)([$]+[^$]*[$]+)([^$]*)/;
@@ -10749,6 +10781,7 @@ function _mathjax_config_script(
 	extensions = replace(
 		_MATHJAX_PAGE_EXTENSIONS_JS,
 		"__INHERIT__" => inherit_text_font ? "true" : "false",
+		"__FONT__" => _json_js(name),
 	)
 	return "  <script type=\"text/x-mathjax-config\">\n" *
 		"    MathJax.Hub.Config({SVG: {font: \"$(name)\"}});\n" *

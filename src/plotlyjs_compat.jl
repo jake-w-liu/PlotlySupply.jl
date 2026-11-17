@@ -145,11 +145,13 @@ end
 
 # ── savefig: formats, options and validation ────────────────────────
 
-const _SAVEFIG_FORMATS = ("png", "jpeg", "svg", "pdf", "eps", "html", "json")
+const _SAVEFIG_FORMATS = ("png", "jpeg", "tiff", "svg", "pdf", "eps", "html", "json")
 # Formats drawn by plotly.js in the hidden Electron export window.
-const _RENDERER_FORMATS = ("png", "jpeg", "svg", "pdf", "eps")
-# Formats produced by `Plotly.toImage`.
-const _IMAGE_FORMATS = ("png", "jpeg", "svg")
+const _RENDERER_FORMATS = ("png", "jpeg", "tiff", "svg", "pdf", "eps")
+# Formats captured as one image from the export window (TIFF is encoded from
+# the PNG capture).
+const _IMAGE_FORMATS = ("png", "jpeg", "tiff", "svg")
+const _RASTER_FORMATS = ("png", "jpeg", "tiff")
 const _EXPORT_KW = (
 	:width,
 	:height,
@@ -160,7 +162,18 @@ const _EXPORT_KW = (
 	:background,
 	:tight,
 	:timeout,
+	:fonts,
 )
+const _EXPORT_FONT_MODES = (:auto, :embed, :outline)
+# JPEG quality passed to canvas.toDataURL: Chromium's default, which
+# plotly.js's toImage used by passing none (the export window's toDataURL
+# with no quality and with 0.92 gave identical bytes), now stated explicitly
+# so the documented quality does not depend on the browser default.
+const _JPEG_QUALITY = 0.92
+# Resolution of a TIFF export that gives neither `dpi` nor `scale`: TIFF is the
+# raster format journals ask for, and 300 dpi is their usual minimum for
+# figures (a 96-dpi TIFF would be unusable for print).
+const _DEFAULT_TIFF_DPI = 300.0
 # plotly.js declares layout.width/height with `min: 10` and silently replaces
 # smaller values by its 700 x 450 default, so smaller export sizes are rejected.
 const _PLOTLY_MIN_LAYOUT_PX = 10.0
@@ -187,6 +200,9 @@ struct _ExportOptions
 	background::Union{Nothing,String}
 	tight::Bool
 	timeout::Float64        # seconds per renderer step
+	units::Symbol           # unit the caller gave sizes in (:px, :in, :cm, :mm, :pt)
+	scale_given::Bool       # `scale` was passed explicitly
+	fonts::Symbol           # :auto, :embed or :outline (pdf/eps text)
 end
 
 struct _PreparedRendererExport
@@ -222,9 +238,10 @@ Base.showerror(io::IO, err::_ExportTimeoutError) = print(io, err.message)
 function _validate_export_format(fmt::AbstractString)
 	name = lowercase(String(fmt))
 	name == "jpg" && return "jpeg"
+	name == "tif" && return "tiff"
 	name in _SAVEFIG_FORMATS || error(
 		"savefig: unsupported export format $(repr(name)). Supported: " *
-		"png, jpeg (or jpg), svg, pdf, eps, html, json.",
+		"png, jpeg (or jpg), tiff (or tif), svg, pdf, eps, html, json.",
 	)
 	return name
 end
@@ -327,6 +344,29 @@ function _export_length(p::Plot, kwargs, key::Symbol, units::Symbol, default::Fl
 	return px
 end
 
+# Size of a figure that carries no layout.width/height and gets no size
+# keyword: the active style's default figure size (publication-style's
+# `_style_default_figure_size`, CSS px), else the 1.x default 700 x 500 px.
+function _export_default_size()
+	isdefined(@__MODULE__, :_style_default_figure_size) ||
+		return (_DEFAULT_EXPORT_WIDTH_PX, _DEFAULT_EXPORT_HEIGHT_PX)
+	size = Base.invokelatest(_style_default_figure_size)
+	valid(x) = x isa Real && !(x isa Bool) && isfinite(x) && x >= _PLOTLY_MIN_LAYOUT_PX
+	size isa Tuple{Real,Real} && valid(size[1]) && valid(size[2]) || throw(ArgumentError(
+		"savefig: the active style's default figure size $(repr(size)) is not a pair " *
+		"of finite sizes of at least $(Int(_PLOTLY_MIN_LAYOUT_PX)) px.",
+	))
+	return (Float64(size[1]), Float64(size[2]))
+end
+
+function _normalize_export_fonts(value)
+	value === nothing && return :auto
+	value isa Symbol && value in _EXPORT_FONT_MODES && return value
+	throw(ArgumentError(
+		"savefig: `fonts` must be :auto, :embed or :outline; got $(repr(value)).",
+	))
+end
+
 function _normalize_export_options(p::Plot, kwargs)
 	for key in keys(kwargs)
 		key in _EXPORT_KW || throw(ArgumentError(
@@ -339,8 +379,9 @@ function _normalize_export_options(p::Plot, kwargs)
 		"savefig: `units` must be :px, :in, :cm, :mm or :pt; got $(repr(units)).",
 	))
 	_export_units_per_inch(units, "savefig")
-	width = _export_length(p, kwargs, :width, units, _DEFAULT_EXPORT_WIDTH_PX)
-	height = _export_length(p, kwargs, :height, units, _DEFAULT_EXPORT_HEIGHT_PX)
+	default_width, default_height = _export_default_size()
+	width = _export_length(p, kwargs, :width, units, default_width)
+	height = _export_length(p, kwargs, :height, units, default_height)
 
 	scale_value = get(kwargs, :scale, nothing)
 	scale = scale_value === nothing ? 1.0 : _normalize_export_number(:scale, scale_value)
@@ -351,8 +392,15 @@ function _normalize_export_options(p::Plot, kwargs)
 		"scale to dpi / 96).",
 	))
 	# Every magnification a format of this call can use: `scale` for all
-	# formats, or dpi / 96 for raster and 1 for vector output.
-	scales = dpi === nothing ? (scale,) : (dpi / _CSS_PX_PER_INCH, 1.0)
+	# formats (and the 300-dpi TIFF default when neither is given), or dpi / 96
+	# for raster and 1 for vector output.
+	scales = if dpi !== nothing
+		(dpi / _CSS_PX_PER_INCH, 1.0)
+	elseif scale_value === nothing
+		(scale, _DEFAULT_TIFF_DPI / _CSS_PX_PER_INCH)
+	else
+		(scale,)
+	end
 	for factor in scales, (name, size) in (("width", width), ("height", height))
 		scaled = size * factor
 		isfinite(scaled) || throw(ArgumentError(
@@ -379,15 +427,40 @@ function _normalize_export_options(p::Plot, kwargs)
 		_normalize_export_background(get(kwargs, :background, nothing)),
 		tight,
 		_normalize_export_timeout(get(kwargs, :timeout, nothing)),
+		units,
+		scale_value !== nothing,
+		_normalize_export_fonts(get(kwargs, :fonts, nothing)),
 	)
 end
 
 # Magnification used for `fmt`: `dpi` sets the raster resolution (scale =
-# dpi / 96) and leaves vector output at its physical size.
+# dpi / 96) and leaves vector output at its physical size; a TIFF without
+# `dpi` or `scale` is drawn at 300 dpi.
 function _format_scale(options::_ExportOptions, fmt::AbstractString)
-	options.dpi === nothing && return options.scale
-	return fmt in ("png", "jpeg") ? options.dpi / _CSS_PX_PER_INCH : 1.0
+	if options.dpi === nothing
+		fmt == "tiff" && !options.scale_given && return _DEFAULT_TIFF_DPI / _CSS_PX_PER_INCH
+		return options.scale
+	end
+	return fmt in _RASTER_FORMATS ? options.dpi / _CSS_PX_PER_INCH : 1.0
 end
+
+# Resolution recorded in a raster file (PNG pHYs, JPEG JFIF density, TIFF
+# X/YResolution): `dpi` when given, else 96 * scale whenever the size has a
+# physical meaning (a TIFF, or `units` other than :px); `nothing` (no
+# metadata, as in 1.x) for a pixel-sized PNG/JPEG.
+function _format_dpi(options::_ExportOptions, fmt::AbstractString)
+	fmt in _RASTER_FORMATS || return nothing
+	options.dpi === nothing || return options.dpi
+	(fmt == "tiff" || options.units !== :px) || return nothing
+	return _CSS_PX_PER_INCH * _format_scale(options, fmt)
+end
+
+# Device pixels of a raster export of `fmt`: the layout size times the
+# format's scale, rounded to the nearest pixel.
+_format_pixels(options::_ExportOptions, fmt::AbstractString) = (
+	_raster_pixels(options.width, _format_scale(options, fmt)),
+	_raster_pixels(options.height, _format_scale(options, fmt)),
+)
 
 # ── savefig: the export copy ─────────────────────────────────────────
 # The caller's figure is never mutated: `tight` runs on a deep copy, and
@@ -529,11 +602,13 @@ function _prepare_document_export(
 	return _PreparedDocumentExport(figure, resolved)
 end
 
-# Validate everything for `formats` (keywords, Ghostscript for EPS) and build
-# the export copy once. Nothing is drawn and no destination is touched.
+# Validate everything for `formats` (keywords, Ghostscript for EPS and for
+# `fonts = :outline` PDF) and build the export copy once. Nothing is drawn and
+# no destination is touched.
 function _prepare_export(p::Plot, formats, kwargs)
 	options = _normalize_export_options(p, kwargs)
-	"eps" in formats && _ghostscript_command()
+	("eps" in formats || ("pdf" in formats && options.fonts === :outline)) &&
+		_ghostscript_command()
 	source = _export_source(p, options)
 	renderer = any(in(_RENDERER_FORMATS), formats) ?
 		_prepare_renderer_export(p, kwargs; options = options, source = source) : nothing
@@ -732,6 +807,89 @@ function _check_renderer_result(result, what::AbstractString)
 	error("savefig: plotly.js failed while $(what): $(message)")
 end
 
+# Size, in UTF-16 code units, above which a rendered image is fetched from the
+# export window in slices of this size. One ElectronCall reply takes time
+# that grows faster than its length (measured: 2 Mi characters 0.05 s, 8 Mi
+# 0.6 s, 32 Mi 7.7 s, 140 Mi 153 s) and a 170-Mi-character reply (the SVG of a
+# 10^6-marker scatter) crashed the renderer with a V8 out-of-memory error;
+# 2 Mi-character slices were the fastest measured (~40 MiB/s).
+const _RENDERER_RESULT_CHUNK = 2^21
+
+# The end of an image script: a `result` string up to one slice long is
+# returned as it is; a longer one is kept in the page and its length returned,
+# for `_fetch_renderer_result`.
+const _RENDERER_RESULT_HANDOFF_JS = """
+    if (typeof result !== 'string' || result.length <= $(_RENDERER_RESULT_CHUNK)) { return result; }
+    window.__plotlysupplyExportResult = result;
+    window.__plotlysupplyExportResultPos = 0;
+    return {resultLength: result.length};
+"""
+
+# The next slice of the kept result as `[text, done]`; the last slice also
+# releases it. A slice never ends between the two halves of a UTF-16
+# surrogate pair (a lone half would not survive the JSON reply).
+const _FETCH_RESULT_SLICE_JS = """
+(function() {
+  const s = window.__plotlysupplyExportResult;
+  if (typeof s !== 'string') {
+    return {error: 'the rendered image is no longer held by the export window'};
+  }
+  const start = window.__plotlysupplyExportResultPos || 0;
+  let stop = Math.min(s.length, start + $(_RENDERER_RESULT_CHUNK));
+  if (stop < s.length) {
+    const unit = s.charCodeAt(stop - 1);
+    if (unit >= 0xD800 && unit <= 0xDBFF) { stop -= 1; }
+  }
+  const done = stop >= s.length;
+  if (done) {
+    delete window.__plotlysupplyExportResult;
+    delete window.__plotlysupplyExportResultPos;
+  } else {
+    window.__plotlysupplyExportResultPos = stop;
+  }
+  return [s.slice(start, stop), done];
+})()
+"""
+
+# Fetch a rendered image of `total` UTF-16 code units that the image script
+# kept in the export window, slice by slice.
+function _fetch_renderer_result(ec, win, total, fmt::String)
+	(total isa Real && !(total isa Bool) && isinteger(total) && total > _RENDERER_RESULT_CHUNK) || error(
+		"savefig: the renderer reported an invalid $(fmt) image length $(repr(total)).",
+	)
+	# Every slice but the last holds at least _RENDERER_RESULT_CHUNK - 1 units.
+	max_slices = cld(Int(total), _RENDERER_RESULT_CHUNK - 1) + 1
+	io = IOBuffer()
+	for _ in 1:max_slices
+		reply = _check_renderer_result(
+			Base.invokelatest(() -> ec.run(win, _FETCH_RESULT_SLICE_JS)),
+			"fetching the rendered $(fmt) image",
+		)
+		(reply isa AbstractVector && length(reply) == 2 && reply[1] isa AbstractString &&
+		 reply[2] isa Bool) || error(
+			"savefig: unexpected reply while fetching the rendered $(fmt) image: " *
+			"$(summary(reply)).",
+		)
+		write(io, reply[1])
+		reply[2] && return String(take!(io))
+		isempty(reply[1]) &&
+			error("savefig: the export window returned an empty slice of the $(fmt) image.")
+	end
+	error("savefig: the rendered $(fmt) image did not arrive in $(max_slices) slices.")
+end
+
+# Draw the figure once with `Plotly.toImage` on the plain figure object (it
+# lays the figure out in its own hidden div; drawing into the export div
+# first would draw everything twice). svg is returned as the SVG markup, a
+# raster as a data URL; a result longer than `_RENDERER_RESULT_CHUNK` is
+# fetched in slices.
+# Raster formats are rasterized here, not by toImage: toImage sizes its canvas
+# as width*scale and the canvas truncates that to an integer (6.35 cm at
+# 300 dpi, 749.9999999999999, would give 749 px). The SVG is drawn onto a canvas of exactly
+# `_format_pixels` device pixels instead, so the pixel count is the nearest
+# integer and the drawing fills it. JPEG has no alpha: transparent areas are
+# composited onto white (a bare canvas would encode them black). A TIFF is
+# captured as PNG and encoded in Julia.
 function _capture_image_data_url(
 	ec,
 	win,
@@ -743,28 +901,95 @@ function _capture_image_data_url(
 	scale = _format_scale(options, fmt)
 	width_js = _json_js(options.width)
 	height_js = _json_js(options.height)
-	body = """
+	raster = fmt != "svg"
+	pixels_w, pixels_h = raster ? _format_pixels(options, fmt) : (0, 0)
+	draw = """
 $(_EXPORT_RESET_DIV_JS)
+    // A result an earlier export left behind (its fetch failed) is dropped.
+    delete window.__plotlysupplyExportResult;
+    delete window.__plotlysupplyExportResultPos;
+    const scale = $(_json_js(scale));
     const layout = Object.assign({}, $(prepared.layout_js), {width: $width_js, height: $height_js});
-    await Plotly.newPlot(div, $(prepared.data_js), layout, $(prepared.config_js));
-    return await Plotly.toImage(div, {
-      format: $(_json_js(fmt)),
-      width: $width_js,
-      height: $height_js,
-      scale: $(_json_js(scale))
-    });
+    const config = Object.assign({}, $(prepared.config_js));
+    // WebGL canvases (3-D scenes, maps) are embedded as bitmaps; give them
+    // proportionally more pixels at a raster scale above 1 (plotly.js accepts
+    // plotGlPixelRatio in [1, 4] and defaults to 2).
+    if ($(_json_js(raster)) && scale > 1 && config.plotGlPixelRatio == null) {
+      config.plotGlPixelRatio = Math.min(4, 2 * scale);
+    }
+    const figure = {data: $(prepared.data_js), layout: layout, config: config};
 """
+	body = if !raster
+		# imageDataOnly: the SVG markup itself, not plotly.js's
+		# encodeURIComponent data URL, which is up to three times longer.
+		draw * """
+    const result = await Plotly.toImage(figure, {
+      format: 'svg', width: $width_js, height: $height_js, scale: scale, imageDataOnly: true
+    });
+$(_RENDERER_RESULT_HANDOFF_JS)
+"""
+	else
+		draw * """
+    const svg = await Plotly.toImage(figure, {
+      format: 'svg', width: $width_js, height: $height_js, scale: 1, imageDataOnly: true
+    });
+    const pixelsW = $(_json_js(pixels_w));
+    const pixelsH = $(_json_js(pixels_h));
+    // Give the SVG an intrinsic size of exactly pixelsW x pixelsH (its viewBox,
+    // the layout in CSS px, is stretched to it by at most half a pixel), so it
+    // is drawn 1:1. Drawn from its fractional layout size instead, Chromium
+    // leaves the edge rows and columns of the canvas partly transparent.
+    const root = /<svg\\b[^>]*>/.exec(svg);
+    if (!root) { throw new Error('the exported SVG has no <svg> element'); }
+    let tag = root[0]
+      .replace(/(\\s)width="[^"]*"/, function(m, space) { return space + 'width="' + pixelsW + '"'; })
+      .replace(/(\\s)height="[^"]*"/, function(m, space) { return space + 'height="' + pixelsH + '"'; });
+    if (!/\\sviewBox="/.test(tag)) {
+      tag = tag.slice(0, -1) + ' viewBox="0 0 ' + $width_js + ' ' + $height_js + '">';
+    }
+    tag = tag.slice(0, -1) + ' preserveAspectRatio="none">';
+    const sized = svg.slice(0, root.index) + tag + svg.slice(root.index + root[0].length);
+    const canvas = document.createElement('canvas');
+    canvas.width = pixelsW;
+    canvas.height = pixelsH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx || canvas.width !== pixelsW || canvas.height !== pixelsH) {
+      return 'data:,';
+    }
+    const url = URL.createObjectURL(new Blob([sized], {type: 'image/svg+xml;charset=utf-8'}));
+    try {
+      const img = new Image();
+      await new Promise(function(resolve, reject) {
+        img.onload = resolve;
+        img.onerror = function() { reject(new Error('the exported SVG could not be decoded as an image')); };
+        img.src = url;
+      });
+      if ($(_json_js(fmt == "jpeg"))) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, pixelsW, pixelsH);
+      }
+      ctx.drawImage(img, 0, 0, pixelsW, pixelsH);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    const result = $(fmt == "jpeg" ?
+		"canvas.toDataURL('image/jpeg', $(_JPEG_QUALITY))" : "canvas.toDataURL('image/png')");
+$(_RENDERER_RESULT_HANDOFF_JS)
+"""
+	end
 	js = _guarded_export_script(divid, options.timeout, body)
 	result = Base.invokelatest(() -> ec.run(win, js))
-	data_url = _check_renderer_result(result, "rendering the $(fmt) image")
+	reply = _check_renderer_result(result, "rendering the $(fmt) image")
+	data_url = reply isa AbstractDict && haskey(reply, "resultLength") ?
+		_fetch_renderer_result(ec, win, reply["resultLength"], fmt) : reply
 	data_url isa AbstractString ||
 		error("Plotly.toImage returned a non-string value for format '$fmt'")
 	if data_url == "data:,"
 		error(
-			"savefig: Plotly.toImage returned an empty $(fmt) image (\"data:,\"). " *
-			"The requested canvas is $(options.width * scale) x " *
-			"$(options.height * scale) px (width*scale x height*scale), which " *
-			"exceeds the renderer's canvas limit; reduce width, height, scale or dpi.",
+			"savefig: the renderer returned an empty $(fmt) image (\"data:,\"). " *
+			"The requested canvas is $(pixels_w) x $(pixels_h) px (width*scale x " *
+			"height*scale), which exceeds the renderer's canvas limit; reduce " *
+			"width, height, scale or dpi.",
 		)
 	end
 	# ElectronCall normally returns String. This conversion is zero-copy for
@@ -775,7 +1000,10 @@ end
 function _write_image_data_url!(io::IO, data_url::String, fmt::String)
 	if fmt == "svg"
 		prefix = "data:image/svg+xml,"
-		if startswith(data_url, prefix)
+		if startswith(data_url, "<svg")
+			# The markup itself (`imageDataOnly`), as the capture script returns it.
+			write(io, data_url)
+		elseif startswith(data_url, prefix)
 			payload = SubString(data_url, ncodeunits(prefix) + 1)
 			write(io, _urldecode_bytes(payload))
 		else
@@ -797,18 +1025,36 @@ function _write_image_data_url!(io::IO, data_url::String, fmt::String)
 	return nothing
 end
 
-# Decode a captured data URL and apply the per-format post-processing:
-# PNG pHYs / JPEG JFIF density for `dpi`, stable SVG ids for `deterministic`.
+# Decode a captured data URL and apply the per-format post-processing: the
+# resolution (`_format_dpi`) in the PNG pHYs chunk / JPEG JFIF density / TIFF
+# tags, TIFF encoding of the PNG capture, stable SVG ids for `deterministic`,
+# and an SVG width/height in the caller's physical `units`.
 function _finalize_image(data_url::String, fmt::String, options::_ExportOptions)
 	buffer = IOBuffer()
-	_write_image_data_url!(buffer, data_url, fmt)
+	_write_image_data_url!(buffer, data_url, fmt == "tiff" ? "png" : fmt)
 	bytes = take!(buffer)
+	dpi = _format_dpi(options, fmt)
 	if fmt == "png"
-		options.dpi === nothing || (bytes = _png_set_phys(bytes, options.dpi))
+		# The capture script already refuses a canvas of any other size.
+		dpi === nothing || (bytes = _png_set_phys(bytes, dpi))
+	elseif fmt == "tiff"
+		width, height, channels, pixels = _png_decode(bytes)
+		expected = _format_pixels(options, fmt)
+		(width, height) == expected || error(
+			"savefig: the renderer drew a $(width) x $(height) px image; expected " *
+			"$(expected[1]) x $(expected[2]) px.",
+		)
+		bytes = _tiff_encode(width, height, channels, pixels, dpi)
 	elseif fmt == "jpeg"
-		options.dpi === nothing || (bytes = _jpeg_set_density(bytes, options.dpi))
+		dpi === nothing || (bytes = _jpeg_set_density(bytes, dpi))
 	elseif fmt == "svg"
-		options.deterministic && (bytes = collect(codeunits(_svg_stable_ids(String(bytes)))))
+		svg = String(bytes)
+		options.deterministic && (svg = _svg_canonical_root(_svg_stable_ids(svg)))
+		if options.units !== :px
+			scale = _format_scale(options, fmt)
+			svg = _svg_set_physical_size(svg, options.width * scale, options.height * scale, options.units)
+		end
+		bytes = collect(codeunits(svg))
 	end
 	return bytes
 end
@@ -961,10 +1207,163 @@ const _FLATTEN_COLORBAR_GRADIENTS_JS = """
     })();
 """
 
+# EPS has no transparency, and Ghostscript's eps2write either renders a page
+# with transparency to one bitmap or (-dNOTRANSPARENCY, which savefig uses)
+# paints every translucent colour at full strength. Before the EPS page is
+# printed, every translucent fill, stroke and text colour is therefore
+# replaced by its blend over the background it is drawn on: the subplot's
+# plot background inside a cartesian plot area, else the paper background
+# (a translucent background is itself blended over white paper). Element and
+# group `opacity` is folded into those colours. Images (heatmaps) are
+# composited onto that background at their opacity, which also makes
+# transparent pixels (NaN cells) the background colour. What is NOT
+# reproduced: translucent marks over other marks (they cover them instead of
+# letting them show through) and translucent gradient stops other than
+# colorbars. Elements in <defs>/<clipPath>/<mask>/<pattern>/<marker>/<symbol>
+# are never touched (MathJax glyph paths in <defs> take the colour of the
+# <use> that draws them).
+const _FLATTEN_TRANSLUCENCY_JS = """
+    await (async function flattenTranslucency() {
+      var XLINK = 'http://www.w3.org/1999/xlink';
+      var probe = document.createElement('canvas').getContext('2d');
+      function parse(value) {
+        if (!value || value === 'none' || value.indexOf('url(') !== -1) return null;
+        var m = /^rgba?\\(([^)]*)\\)\$/.exec(value.trim());
+        if (!m) {
+          probe.fillStyle = '#000000';
+          probe.fillStyle = value;
+          var norm = String(probe.fillStyle);
+          if (norm.charAt(0) === '#') {
+            var v = parseInt(norm.slice(1, 7), 16);
+            return [(v >> 16) & 255, (v >> 8) & 255, v & 255, 1];
+          }
+          m = /^rgba?\\(([^)]*)\\)\$/.exec(norm);
+          if (!m) return null;
+        }
+        var p = m[1].split(/[\\s,\\/]+/).filter(function(s) { return s.length > 0; });
+        if (p.length < 3) return null;
+        var a = 1;
+        if (p.length > 3) {
+          a = parseFloat(p[3]);
+          if (p[3].indexOf('%') !== -1) a = a / 100;
+          if (!isFinite(a)) a = 1;
+        }
+        return [parseFloat(p[0]), parseFloat(p[1]), parseFloat(p[2]), Math.max(0, Math.min(1, a))];
+      }
+      function over(top, alpha, base) {
+        return [0, 1, 2].map(function(i) { return Math.round(top[i] * alpha + base[i] * (1 - alpha)); });
+      }
+      function css(rgb) { return 'rgb(' + rgb[0] + ', ' + rgb[1] + ', ' + rgb[2] + ')'; }
+      var full = div._fullLayout || {};
+      var paperColour = parse(full.paper_bgcolor || '#ffffff') || [255, 255, 255, 1];
+      var paper = over(paperColour, paperColour[3], [255, 255, 255]);
+      var areas = [];
+      div.querySelectorAll('.bglayer rect.bg').forEach(function(rect) {
+        var style = getComputedStyle(rect);
+        var colour = parse(style.fill);
+        if (!colour) return;
+        var alpha = colour[3] * parseFloat(style.fillOpacity || '1');
+        areas.push({box: rect.getBoundingClientRect(), colour: over(colour, alpha, paper)});
+      });
+      function backgroundAt(el) {
+        var b = el.getBoundingClientRect();
+        var x = b.left + b.width / 2, y = b.top + b.height / 2;
+        for (var i = areas.length - 1; i >= 0; i--) {
+          var r = areas[i].box;
+          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return areas[i].colour;
+        }
+        return paper;
+      }
+      var memo = new Map();
+      var translucentNodes = [];
+      function chainOpacity(node) {
+        if (!node || node === div || node.nodeType !== 1) return 1;
+        if (memo.has(node)) return memo.get(node);
+        var own = parseFloat(getComputedStyle(node).opacity);
+        if (!isFinite(own)) own = 1;
+        if (own < 1) translucentNodes.push(node);
+        var value = own * chainOpacity(node.parentNode);
+        memo.set(node, value);
+        return value;
+      }
+      var hidden = 'defs, clipPath, mask, pattern, marker, symbol';
+      var changes = [];
+      div.querySelectorAll('path, rect, circle, ellipse, line, polyline, polygon, text, tspan, textPath, use').forEach(function(el) {
+        if (el.closest(hidden)) return;
+        var style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        var group = chainOpacity(el);
+        var base = null;
+        var change = {el: el};
+        [['fill', 'fillOpacity'], ['stroke', 'strokeOpacity']].forEach(function(pair) {
+          var colour = parse(style[pair[0]]);
+          if (!colour) return;
+          var opacity = parseFloat(style[pair[1]]);
+          var alpha = colour[3] * (isFinite(opacity) ? opacity : 1) * group;
+          if (alpha >= 1) return;
+          if (alpha <= 0) { change[pair[0]] = 'none'; return; }
+          if (base === null) base = backgroundAt(el);
+          change[pair[0]] = css(over(colour, alpha, base));
+        });
+        if (change.fill !== undefined || change.stroke !== undefined) changes.push(change);
+      });
+      var images = [];
+      div.querySelectorAll('image').forEach(function(el) {
+        if (el.closest(hidden)) return;
+        var style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        images.push({el: el, alpha: chainOpacity(el), base: backgroundAt(el)});
+      });
+      changes.forEach(function(change) {
+        if (change.fill !== undefined) { change.el.style.fill = change.fill; change.el.style.fillOpacity = '1'; }
+        if (change.stroke !== undefined) { change.el.style.stroke = change.stroke; change.el.style.strokeOpacity = '1'; }
+      });
+      for (var k = 0; k < images.length; k++) {
+        var item = images[k];
+        var href = item.el.getAttribute('href') || item.el.getAttributeNS(XLINK, 'href');
+        if (!href) continue;
+        try {
+          var img = new Image();
+          await new Promise(function(resolve, reject) {
+            img.onload = resolve;
+            img.onerror = function() { reject(new Error('image')); };
+            img.src = href;
+          });
+          if (!img.naturalWidth || !img.naturalHeight) continue;
+          var canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = css(item.base);
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.globalAlpha = Math.max(0, Math.min(1, item.alpha));
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(img, 0, 0);
+          var flattened = canvas.toDataURL('image/png');
+          await new Promise(function(resolve) {
+            item.el.addEventListener('load', resolve, {once: true});
+            item.el.addEventListener('error', resolve, {once: true});
+            item.el.setAttribute('href', flattened);
+            if (item.el.hasAttributeNS(XLINK, 'href')) item.el.setAttributeNS(XLINK, 'xlink:href', flattened);
+          });
+        } catch (err) {
+          // A cross-origin image cannot be read back; it keeps its own pixels.
+        }
+      }
+      translucentNodes.forEach(function(node) { node.style.opacity = '1'; });
+    })();
+"""
+
 # Draw the figure for printing: laid out at width x height and magnified by
 # `scale` with a CSS transform, so a PDF `scale` enlarges the page and its
-# content uniformly, exactly like the png/jpeg/svg `scale`.
-function _pdf_render_script(divid::String, prepared::_PreparedRendererExport)
+# content uniformly, exactly like the png/jpeg/svg `scale`. With
+# `flatten_translucency` (the EPS page) translucent colours are blended over
+# their background first (`_FLATTEN_TRANSLUCENCY_JS`).
+function _pdf_render_script(
+	divid::String,
+	prepared::_PreparedRendererExport;
+	flatten_translucency::Bool = false,
+)
 	options = prepared.options
 	scale_js = _json_js(_format_scale(options, "pdf"))
 	body = """
@@ -987,6 +1386,7 @@ $(_EXPORT_RESET_DIV_JS)
     }
     await Plotly.newPlot(div, $(prepared.data_js), layout, config);
 $(_FLATTEN_COLORBAR_GRADIENTS_JS)
+$(flatten_translucency ? _FLATTEN_TRANSLUCENCY_JS : "")
     if (scale !== 1) {
       div.style.transformOrigin = '0 0';
       div.style.transform = 'scale(' + scale + ')';
@@ -1028,9 +1428,11 @@ function _capture_pdf_file(
 	job_id::String;
 	timeout_s::Real = prepared.options.timeout,
 	owner_state::Union{Nothing,_ExportState} = nothing,
+	flatten_translucency::Bool = false,
 )
 	options = prepared.options
-	result = Base.invokelatest(() -> ec.run(win, _pdf_render_script(divid, prepared)))
+	script = _pdf_render_script(divid, prepared; flatten_translucency = flatten_translucency)
+	result = Base.invokelatest(() -> ec.run(win, script))
 	result = _check_renderer_result(result, "drawing the PDF page")
 	result == "ok" ||
 		error("savefig: unexpected result from the PDF render step: $(repr(result))")
@@ -1047,10 +1449,13 @@ function _capture_pdf_file(
 	job_id_js = _json_js(job_id)
 
 	# Electron's printToPDF pageSize is in inches; Chromium prints 96 CSS px
-	# to the inch. The page is the magnified figure.
+	# to the inch. The figure is the magnified layout; the printed page is a
+	# little larger (whole points, `_pdf_request_points`) and `_finalize_pdf`
+	# crops it to the figure exactly.
 	scale = _format_scale(options, "pdf")
-	page_w_in = _json_js(options.width * scale / _CSS_PX_PER_INCH)
-	page_h_in = _json_js(options.height * scale / _CSS_PX_PER_INCH)
+	points_per_px = 72 / _CSS_PX_PER_INCH
+	page_w_in = _json_js(_pdf_request_points(options.width * scale * points_per_px) / 72)
+	page_h_in = _json_js(_pdf_request_points(options.height * scale * points_per_px) / 72)
 
 	js_pdf = """
 (function() {
@@ -1165,29 +1570,72 @@ function _consume_captured_pdf(f, captured::_CapturedPDF; tempdir_remover = noth
 	return result
 end
 
-# Final PDF bytes: the exact requested page box and, when deterministic,
-# blanked creation/modification dates.
-function _finalize_pdf(bytes::Vector{UInt8}, options::_ExportOptions)
-	# 1 CSS px = 72/96 pt.
-	points_per_px = 72 / _CSS_PX_PER_INCH
-	scale = _format_scale(options, "pdf")
-	bytes = _pdf_set_page_box(
-		bytes,
-		options.width * scale * points_per_px,
-		options.height * scale * points_per_px,
-	)
+# Page size of the pdf/eps output in points (1 CSS px = 72/96 pt).
+function _pdf_page_points(options::_ExportOptions)
+	factor = _format_scale(options, "pdf") * 72 / _CSS_PX_PER_INCH
+	return (options.width * factor, options.height * factor)
+end
+
+function _ghostscript_available()
+	try
+		_ghostscript_command()
+		return true
+	catch err
+		err isa ArgumentError || rethrow()
+		return false
+	end
+end
+
+# Final PDF bytes: the exact page box; text converted to outlines for
+# `fonts = :outline`, and for `fonts = :auto` when Chromium wrote Type 3 fonts
+# (it does for every non-TrueType font, e.g. CFF/OpenType fonts such as STIX);
+# blanked creation/modification dates when deterministic. Ghostscript runs in
+# `workdir` (the capture's private directory).
+function _finalize_pdf(
+	bytes::Vector{UInt8},
+	options::_ExportOptions;
+	workdir::Union{Nothing,AbstractString} = nothing,
+)
+	width_pt, height_pt = _pdf_page_points(options)
+	bytes = _pdf_set_page_box(bytes, width_pt, height_pt)
+	outline = options.fonts === :outline
+	if options.fonts === :auto
+		type3 = _pdf_type3_fonts(bytes)
+		if !isempty(type3)
+			if _ghostscript_available()
+				outline = true
+			else
+				@warn "savefig(pdf): the PDF holds Type 3 fonts ($(join(type3, ", "))), " *
+					  "which some journal checks reject, and Ghostscript (`gs`), which " *
+					  "fonts = :auto uses to convert them to outlines, is not on PATH. " *
+					  "Install Ghostscript, or use a TrueType font (e.g. Arial, Times New " *
+					  "Roman, Liberation, DejaVu), or pass fonts = :embed to silence this." maxlog = 1
+			end
+		end
+	end
+	if outline
+		workdir === nothing &&
+			throw(ArgumentError("savefig(pdf): outlining text needs a work directory."))
+		source = joinpath(workdir, "page-text.pdf")
+		target = joinpath(workdir, "page-outlined.pdf")
+		write(source, bytes)
+		_pdf_outline_text(source, target; timeout_s = options.timeout)
+		bytes = _pdf_set_page_box(read(target), width_pt, height_pt)
+	end
 	options.deterministic && (bytes = _pdf_blank_dates(bytes))
 	return bytes
 end
 
-# EPS is converted from the finalized PDF: Ghostscript derives the EPS
-# BoundingBox from the drawn page, so it must see the exact page box.
-function _finalize_eps(captured::_CapturedPDF, pdf_bytes::Vector{UInt8}, options::_ExportOptions)
+# EPS from its own capture (drawn with translucent colours blended over their
+# background): exact page box, Ghostscript eps2write (text as outlines unless
+# `fonts = :embed`), the bounding box set to the whole page, blank dates.
+function _finalize_eps(captured::_CapturedPDF, options::_ExportOptions)
+	width_pt, height_pt = _pdf_page_points(options)
 	pdf_path = joinpath(captured.tempdir, "page.pdf")
-	write(pdf_path, pdf_bytes)
+	write(pdf_path, _pdf_set_page_box(read(captured.path), width_pt, height_pt))
 	eps_path = joinpath(captured.tempdir, "output.eps")
-	_pdf_to_eps(pdf_path, eps_path; timeout_s = options.timeout)
-	bytes = read(eps_path)
+	_pdf_to_eps(pdf_path, eps_path; timeout_s = options.timeout, outline = options.fonts !== :embed)
+	bytes = _eps_set_bounding_box(read(eps_path), width_pt, height_pt)
 	options.deterministic && (bytes = _eps_blank_dates(bytes))
 	return bytes
 end
@@ -1195,7 +1643,10 @@ end
 # ── savefig: rendering ──────────────────────────────────────────────
 
 # Draw every renderer format of one call in the export window while holding
-# its lock. Images are captured first so a failure leaves no PDF behind.
+# its lock. Images are captured first so a failure leaves no PDF behind. pdf
+# and eps are printed separately (the EPS page has its translucent colours
+# blended, `_FLATTEN_TRANSLUCENCY_JS`); if a later print fails, the earlier
+# capture's directory is removed before the error propagates.
 function _capture_renderer_outputs(
 	state::_ExportState,
 	ec,
@@ -1204,28 +1655,50 @@ function _capture_renderer_outputs(
 	divid::String,
 	prepared::_PreparedRendererExport,
 	image_formats::Vector{String},
-	needs_pdf::Bool,
+	pdf_formats::Vector{String},
 	pdf_timeout_s::Real,
 )
 	urls = Dict{String,String}()
 	for fmt in image_formats
 		urls[fmt] = _capture_image_data_url(ec, win, divid, prepared, fmt)
 	end
-	captured = nothing
-	if needs_pdf
-		job_id = _next_pdf_job_id_locked!(state)
-		captured = _capture_pdf_file(
-			ec,
-			app,
-			win,
-			divid,
-			prepared,
-			job_id;
-			timeout_s = pdf_timeout_s,
-			owner_state = state,
-		)
+	captures = Pair{String,_CapturedPDF}[]
+	try
+		for fmt in pdf_formats
+			job_id = _next_pdf_job_id_locked!(state)
+			captured = _capture_pdf_file(
+				ec,
+				app,
+				win,
+				divid,
+				prepared,
+				job_id;
+				timeout_s = pdf_timeout_s,
+				owner_state = state,
+				flatten_translucency = fmt == "eps",
+			)
+			push!(captures, fmt => captured)
+		end
+	catch
+		_discard_captured_pdfs(captures)
+		rethrow()
 	end
-	return (urls, captured)
+	return (urls, captures)
+end
+
+# Remove the private directories of captures that will not be consumed.
+function _discard_captured_pdfs(captures)
+	for (_, captured) in captures
+		try
+			_remove_captured_pdf_tempdir!(captured, nothing)
+		catch cleanup_error
+			@warn "Failed to remove an unused printToPDF capture." tempdir = captured.tempdir exception = (
+				cleanup_error,
+				catch_backtrace(),
+			)
+		end
+	end
+	return nothing
 end
 
 # Produce the bytes of every format in `formats` (each drawn once). Decoding,
@@ -1247,14 +1720,14 @@ function _export_outputs(
 		outputs[fmt] = _document_bytes(fmt, document)
 	end
 	image_formats = String[fmt for fmt in _IMAGE_FORMATS if fmt in formats]
-	needs_pdf = "pdf" in formats || "eps" in formats
-	isempty(image_formats) && !needs_pdf && return outputs
+	pdf_formats = String[fmt for fmt in ("pdf", "eps") if fmt in formats]
+	isempty(image_formats) && isempty(pdf_formats) && return outputs
 	renderer isa _PreparedRendererExport ||
 		throw(ArgumentError("renderer export was not prepared"))
 	options = renderer.options
 	pdf_timeout = pdf_timeout_s === nothing ? options.timeout : pdf_timeout_s
 
-	urls, captured = _with_export_window(
+	urls, captures = _with_export_window(
 		state;
 		ec = ec,
 		timeout_s = window_timeout_s,
@@ -1268,7 +1741,7 @@ function _export_outputs(
 				divid,
 				renderer,
 				image_formats,
-				needs_pdf,
+				pdf_formats,
 				pdf_timeout,
 			)
 		catch err
@@ -1279,11 +1752,16 @@ function _export_outputs(
 		end
 	end
 
-	if captured !== nothing
-		_consume_captured_pdf(captured) do pdf
-			pdf_bytes = _finalize_pdf(read(pdf.path), options)
-			"pdf" in formats && (outputs["pdf"] = pdf_bytes)
-			"eps" in formats && (outputs["eps"] = _finalize_eps(pdf, pdf_bytes, options))
+	for (index, (fmt, captured)) in enumerate(captures)
+		try
+			_consume_captured_pdf(captured) do pdf
+				outputs[fmt] = fmt == "pdf" ?
+					_finalize_pdf(read(pdf.path), options; workdir = pdf.tempdir) :
+					_finalize_eps(pdf, options)
+			end
+		catch
+			_discard_captured_pdfs(captures[(index + 1):end])
+			rethrow()
 		end
 	end
 	for fmt in image_formats
@@ -1370,6 +1848,26 @@ function _create_exclusive_temp(parent::AbstractString)
 	error("savefig: could not create a unique temporary file in $(repr(parent))")
 end
 
+# Fail before anything is drawn when a file cannot be created in the
+# directory of `target` (read-only directory or file system, missing
+# permission): the same exclusive temp file the final write uses is created
+# and removed again.
+function _check_savefig_writable(target::String)
+	parent = dirname(target)
+	path, file = try
+		_create_exclusive_temp(parent)
+	catch err
+		(err isa Base.IOError || err isa SystemError) || rethrow()
+		throw(ArgumentError(
+			"savefig: cannot write to the destination directory $(repr(parent)): " *
+			sprint(showerror, err),
+		))
+	end
+	close(file)
+	rm(path; force = true)
+	return target
+end
+
 # Publish `bytes` at `target` with one rename from a temp file in the same
 # directory. An existing file keeps its permission bits; a new file gets the
 # umask-derived mode of an ordinary new file.
@@ -1444,8 +1942,9 @@ function _savefig_filename(
 )
 	fmt = _filename_export_format(filename, format)
 	plot = _export_plot(p)
-	_resolve_savefig_target(filename)
+	target = _resolve_savefig_target(filename)
 	prepared = _prepare_savefig(plot, fmt, kwargs)
+	_check_savefig_writable(target)
 	return _savefig_atomic(
 		filename,
 		plot,
@@ -1482,6 +1981,7 @@ function _savefig_many(
 	plot = _export_plot(p)
 	distinct = unique(formats)
 	prepared = _prepare_export(plot, distinct, kwargs)
+	foreach(_check_savefig_writable, unique(targets))
 	outputs = _export_outputs(
 		distinct,
 		prepared.renderer,
@@ -1506,35 +2006,76 @@ Export a `Plot`, `SyncPlot` or `SubplotFigure` to a file, several files, a
 stream, or a byte vector. The caller's figure is never modified.
 
 # Formats
-`"png"`, `"jpeg"` (`".jpg"` is accepted), `"svg"`, `"pdf"`, `"eps"`, `"html"`,
-`"json"`. With a file name the format comes from the extension (no extension
-means png) unless `format` is given; for a stream or bytes it defaults to
-`"png"`. `png`/`jpeg`/`svg`/`pdf` are drawn by plotly.js in a hidden Electron
-window (no Kaleido or Python needed). `eps` is converted from that PDF by
-Ghostscript (`gs` must be on `PATH`; translucent fills are flattened to
-opaque). `html` and `json` are written in-process. JSON and HTML write
-non-finite numbers (`NaN`, `±Inf`) as `null`, which plotly.js draws as a gap.
+`"png"`, `"jpeg"` (`".jpg"` is accepted), `"tiff"` (`".tif"` is accepted),
+`"svg"`, `"pdf"`, `"eps"`, `"html"`, `"json"`. With a file name the format
+comes from the extension (no extension means png) unless `format` is given;
+for a stream or bytes it defaults to `"png"`. png/jpeg/tiff/svg/pdf are drawn
+by plotly.js in a hidden Electron window (no Kaleido or Python needed); eps is
+converted from a PDF print by Ghostscript (`gs` must be on `PATH`); html and
+json are written in-process. JSON and HTML write non-finite numbers (`NaN`,
+`±Inf`) as `null`, which plotly.js draws as a gap.
+
+What each file contains:
+- png: 8-bit RGBA of exactly `round(width * scale)` x `round(height * scale)`
+  pixels.
+- jpeg: Chromium's baseline JPEG (quality 0.92, lossy); transparent areas are
+  white.
+- tiff: baseline TIFF 6.0 with lossless LZW compression, 8-bit RGB (RGBA with
+  unassociated alpha when a pixel is translucent, e.g. `background =
+  :transparent`) and XResolution/YResolution in dots per inch. It is drawn at
+  300 dpi unless `dpi` or `scale` says otherwise.
+- svg: plotly.js's SVG. Text is `<text>` in the figure's font, which is not
+  embedded (the viewer needs the font); LaTeX labels are glyph paths. With
+  physical `units` the root `width`/`height` carry the unit (`"88mm"`), else
+  CSS px; the `viewBox` is the layout in CSS px.
+- pdf: Chromium's vector PDF on a page of exactly `width x height` (times
+  `scale`) points. Paths stay vector, transparency is kept, images (heatmaps,
+  3-D/WebGL scenes) are embedded losslessly, and LaTeX labels are glyph
+  paths. Text: see `fonts`.
+- eps: Ghostscript `eps2write` (PostScript level 2) of a PDF print, vector,
+  with `%%BoundingBox` = the whole page. EPS has no transparency: every
+  translucent colour is replaced by its blend over the background it is drawn
+  on (the plot area, else the paper; a translucent background is blended over
+  white) and translucent images are composited onto it, so a 30 % band prints
+  light, as in the PDF. A translucent mark drawn over another mark covers it
+  instead of letting it show through; export pdf to keep true transparency.
 
 # Keyword arguments
 - `format::Union{Nothing,AbstractString} = nothing`: output format, overriding
   the extension. Not allowed with a vector of file names.
 - `width`, `height::Real`: figure size in `units`. Default: the figure's
-  `layout.width`/`layout.height` when set, else 700 x 500 px. The size must be
+  `layout.width`/`layout.height` when set, else the active style's default
+  figure size (journal styles set one), else 700 x 500 px. The size must be
   at least 10 px (plotly.js's layout minimum).
 - `units::Symbol = :px`: unit of `width`/`height`: `:px` (CSS pixel, 1/96 in),
-  `:in`, `:cm`, `:mm` or `:pt` (1/72 in).
-- `scale::Real = 1`: uniform magnification. png/jpeg get `scale` times more
-  pixels; svg/pdf/eps get a `scale` times larger page with the same layout
-  (text, markers and lines grow with it).
+  `:in`, `:cm`, `:mm` or `:pt` (1/72 in). The pdf/eps page is exact in points
+  for any size; a raster gets the nearest whole number of pixels.
+- `scale::Real = 1`: uniform magnification. png/jpeg/tiff get `scale` times
+  more pixels; svg/pdf/eps get a `scale` times larger page with the same
+  layout (text, markers and lines grow with it).
 - `dpi::Real`: raster resolution in dots per inch, an alternative to `scale`
-  (passing both is an error). png/jpeg are drawn at `scale = dpi/96` and record
-  the resolution (PNG `pHYs` chunk, JPEG JFIF density), so `width = 3.5,
-  units = :in, dpi = 300` gives a 1050-px-wide PNG that prints 3.5 in wide.
-  Vector formats keep their physical size and ignore `dpi`.
+  (passing both is an error). png/jpeg/tiff are drawn at `scale = dpi/96` and
+  record the resolution (PNG `pHYs` chunk, JPEG JFIF density, TIFF
+  resolution tags), so `width = 3.5, units = :in, dpi = 300` gives a
+  1050-px-wide image that prints 3.5 in wide. Without `dpi`, png/jpeg record
+  `96 * scale` dpi when `units` is physical (none for `:px`, as in 1.x), and
+  tiff always records its resolution. Vector formats keep their physical size
+  and ignore `dpi`.
+- `fonts::Symbol = :auto`: text in pdf and eps. pdf: `:auto` keeps text as
+  text in subset-embedded TrueType (CID) fonts when the figure's fonts are
+  TrueType (Arial, Times New Roman, Verdana, Liberation, DejaVu, …); Chromium
+  can embed other fonts (CFF/OpenType-PS such as STIX or Latin Modern) only
+  as Type 3 fonts, which many journal checks reject, so then the whole page's
+  text is converted to outlines with Ghostscript (without Ghostscript the Type
+  3 fonts are kept and a warning names them). `:embed` keeps Chromium's fonts
+  as they are; `:outline` always draws text as outlines (needs Ghostscript).
+  eps: text is always outlines (no font in the file) unless `:embed`, which
+  lets Ghostscript embed Type 3/Type 42 fonts. Outlined text prints the same
+  but cannot be selected or searched.
 - `deterministic::Bool = true`: make repeated exports of the same figure
   byte-identical: blank the PDF creation/modification dates and the EPS
   creation date, and give SVG/PDF elements fixed ids (`uid`s are set on the
-  export copy only). PNG and JPEG output is deterministic by nature.
+  export copy only). PNG, JPEG and TIFF output is deterministic by nature.
 - `background = nothing`: figure background. `nothing` keeps the figure's own
   colours; a colour (`"white"`, `:black`, `"#ffeedd"`, `"rgba(0,0,0,0.5)"`)
   sets the paper background; `:transparent` clears the paper, plot-area and
@@ -1555,20 +2096,29 @@ bits, and a new file gets the usual mode for new files (umask applied).
 With several file names every distinct format is rendered once, everything is
 validated before anything is drawn, and the files are published one by one.
 
-The MathJax font used for LaTeX labels is `Latin-Modern`; set the environment
-variable `PLOTLYSUPPLY_MATHJAX_SVG_FONT` (letters, digits, `.`, `_`, `-`;
-e.g. `"TeX"` or `"STIX-Web"`) to change it for html and image export.
+LaTeX labels are typeset by MathJax 2.7 in the font chosen with
+[`set_default_mathtext!`](@ref)`(; font = ...)`, one of `"Latin-Modern"` (the
+default), `"TeX"`, `"STIX-Web"`, `"Asana-Math"`, `"Neo-Euler"`,
+`"Gyre-Pagella"` and `"Gyre-Termes"`. When no font is set that way, the
+environment variable `PLOTLYSUPPLY_MATHJAX_SVG_FONT` (same names) is used. The
+font applies to html and image export and to live windows. Under
+Latin-Modern, `\\mathcal` draws Latin Modern's script letters, and
+`\\boldsymbol{\\nabla}`, `\\boldsymbol{\\partial}` and `\\boldsymbol{\\ell}` stay
+upright-regular (the font has no bold glyphs for them; `font = "TeX"` has).
 
 # Errors
-`ArgumentError` for unknown keywords, invalid values, a missing destination
-directory, or EPS without Ghostscript, before any file is touched;
+`ArgumentError` for unknown keywords, invalid values, a missing or unwritable
+destination directory, or EPS (or `fonts = :outline` pdf) without
+Ghostscript, before anything is drawn or any file is touched;
 `ErrorException` for an unsupported format or a renderer failure.
 
 ```julia
 fig = plot_scatter(1:10, rand(10); xlabel = "x", ylabel = "y")
-savefig(fig, "figure.pdf"; width = 3.5, height = 2.5, units = :in)
+savefig(fig, "figure.pdf"; width = 88, height = 66, units = :mm)
+savefig(fig, "figure.tif"; width = 88, height = 66, units = :mm, dpi = 600)
 savefig(fig, "figure.png"; width = 3.5, height = 2.5, units = :in, dpi = 300)
 savefig(fig, ["figure.svg", "figure.eps"]; background = :transparent)
+savefig(fig, "figure-outlined.pdf"; fonts = :outline)
 bytes = savefig(fig; format = "svg")
 ```
 """
