@@ -7672,6 +7672,153 @@ function _stats_patterns(hatch, count::Int, who::AbstractString)
 	return Any[_hatch_pattern(entry; who = who) for entry in hatches]
 end
 
+# Per-series values of a bar keyword that may also be given bar by bar (G68),
+# for series of `bar_counts` bars (`nested`: the data held several series):
+# - a scalar (`isscalar(value)`): every bar of every series;
+# - one series: a vector with one entry per bar sets each bar (matplotlib's
+#   `bar(color = [...])`), a one-entry vector is the series value, an empty
+#   vector leaves the default, and any other length is an `ArgumentError`;
+# - several series: one entry per series (missing entries keep `default`,
+#   surplus entries are ignored, as for every per-series keyword); an entry
+#   that is itself a vector sets the bars of its series, one entry per bar.
+# Every scalar goes through `convert` (which validates it). Returns one value
+# per series: `default`, a converted scalar, or a `Vector{Any}` of them.
+function _stats_bar_values(
+	value,
+	bar_counts::Vector{Int},
+	nested::Bool,
+	default,
+	who::AbstractString,
+	name::AbstractString,
+	describe::AbstractString;
+	isscalar,
+	convert,
+)
+	count = length(bar_counts)
+	isscalar(value) && return Any[convert(value) for _ in 1:count]
+	value isa AbstractVector || throw(ArgumentError(
+		"$(who): `$(name)` must be $(describe), a vector with one per series, or " *
+		"(for a single series) a vector with one per bar; got $(repr(value)).",
+	))
+	function per_bar(entry, index)
+		length(entry) == bar_counts[index] || throw(ArgumentError(
+			"$(who): `$(name)` gives $(length(entry)) per-bar entries for series " *
+			"$(index), which has $(bar_counts[index]) bars; give one per bar.",
+		))
+		return Any[
+			isscalar(item) ? convert(item) : throw(ArgumentError(
+				"$(who): per-bar `$(name)` entries must be $(describe); got $(repr(item)).",
+			))
+			for item in entry
+		]
+	end
+	function series_entry(entry, index)
+		isscalar(entry) && return convert(entry)
+		entry isa AbstractVector && return per_bar(entry, index)
+		throw(ArgumentError(
+			"$(who): `$(name)` entries must be $(describe) or a vector with one per " *
+			"bar; got $(repr(entry)).",
+		))
+	end
+	out = Any[default for _ in 1:count]
+	if !nested
+		bars = only(bar_counts)
+		if isempty(value)
+			return out
+		elseif length(value) == 1
+			out[1] = series_entry(value[1], 1)
+		elseif length(value) == bars
+			out[1] = per_bar(value, 1)
+		else
+			throw(ArgumentError(
+				"$(who): `$(name)` has $(length(value)) entries for a single series of " *
+				"$(bars) bars; give one value for the series or one per bar.",
+			))
+		end
+		return out
+	end
+	for index in 1:min(count, length(value))
+		out[index] = series_entry(value[index], index)
+	end
+	return out
+end
+
+# Bar colours: per series a colour string ("" = the colour cycle) or a vector
+# of non-empty colours, one per bar (plotly `marker.color` array).
+function _stats_bar_colors(color, bar_counts::Vector{Int}, nested::Bool, who::AbstractString)
+	values = _stats_bar_values(
+		color, bar_counts, nested, "", who, "color", "a colour string or symbol";
+		isscalar = entry -> entry isa AbstractString || entry isa Symbol,
+		convert = entry -> String(entry),
+	)
+	return Any[
+		entry isa AbstractVector ? String[
+			isempty(item) ? throw(ArgumentError(
+				"$(who): per-bar `color` entries must be non-empty colours; got \"\".",
+			)) : item for item in entry
+		] : entry
+		for entry in values
+	]
+end
+
+# Bar widths in data units of the position axis (plotly `width`; `nothing`:
+# plotly's automatic width), per series a number, `nothing` or one per bar.
+function _stats_bar_widths(barwidth, bar_counts::Vector{Int}, nested::Bool, who::AbstractString)
+	check(entry) = (entry isa Real && !(entry isa Bool) && isfinite(entry) && entry > 0) ?
+		entry : throw(ArgumentError(
+			"$(who): `barwidth` values must be positive finite numbers (data units of " *
+			"the position axis) or `nothing`; got $(repr(entry)).",
+		))
+	values = _stats_bar_values(
+		barwidth, bar_counts, nested, nothing, who, "barwidth", "a positive number";
+		isscalar = entry -> entry === nothing || (entry isa Real && !(entry isa Bool)),
+		convert = entry -> entry === nothing ? nothing : check(entry),
+	)
+	return Any[
+		entry isa AbstractVector ? (any(isnothing, entry) ? throw(ArgumentError(
+			"$(who): per-bar `barwidth` entries must be numbers; got `nothing`.",
+		)) : Any[entry...]) : entry
+		for entry in values
+	]
+end
+
+# Bar hatches (`_hatch_pattern`): per series a pattern, `nothing`, or, for
+# per-bar hatches, one pattern whose `shape`, `size` and `solidity` are arrays
+# ("" shape: no hatch on that bar).
+function _stats_bar_patterns(hatch, bar_counts::Vector{Int}, nested::Bool, who::AbstractString)
+	values = _stats_bar_values(
+		hatch, bar_counts, nested, "", who, "hatch", "a hatch string";
+		isscalar = entry -> entry isa AbstractString,
+		convert = entry -> String(entry),
+	)
+	return Any[
+		entry isa AbstractVector ? _stats_per_bar_pattern(entry, who) :
+		_hatch_pattern(entry; who = who)
+		for entry in values
+	]
+end
+
+# Plotly's `marker.pattern` defaults (plotly.js 2.35.2 schema: `size` 8,
+# `solidity` 0.3), written for the bars whose hatch leaves them unset, so the
+# per-bar arrays stay aligned with the bars.
+const _STATS_PATTERN_DEFAULT_SIZE = 8.0
+const _STATS_PATTERN_DEFAULT_SOLIDITY = 0.3
+
+function _stats_per_bar_pattern(hatches::AbstractVector, who::AbstractString)
+	patterns = Any[_hatch_pattern(String(entry); who = who) for entry in hatches]
+	all(isnothing, patterns) && return nothing
+	field(pattern, key, default) =
+		pattern === nothing ? default : get(pattern.fields, key, default)
+	return attr(
+		shape = String[field(pattern, :shape, "") for pattern in patterns],
+		fillmode = "overlay",
+		size = Float64[field(pattern, :size, _STATS_PATTERN_DEFAULT_SIZE) for pattern in patterns],
+		solidity = Float64[
+			field(pattern, :solidity, _STATS_PATTERN_DEFAULT_SOLIDITY) for pattern in patterns
+		],
+	)
+end
+
 # The part of a per-point keyword that belongs to series `index`: a flat vector
 # (shared by every series) or a vector of vectors (one per series). Like the
 # other per-series keywords, a vector of vectors with fewer entries than there
@@ -7892,13 +8039,20 @@ end
 # Validate every common Cartesian keyword before the first write, including
 # tick values against the axis type the call ends with and titles/labels
 # (mathtext rejects malformed `$…$`), so a rejected keyword leaves the figure
-# untouched.
-function _stats_validate_options(fig, who::AbstractString, options)
+# untouched. `ykey` is the y axis the call draws on (see
+# `_scat_validate_cartesian_options`; `nothing`: a twin y axis not created yet).
+function _stats_validate_options(
+	fig,
+	who::AbstractString,
+	options;
+	ykey::Union{Nothing, Symbol} = :yaxis,
+)
 	# The family validator of the scatter family checks ranges with the
 	# `xrange!` semantics and tick values/presets against the final axis type.
 	_scat_validate_cartesian_options(
 		fig,
 		who;
+		ykey = ykey,
 		xrange = options.xrange,
 		yrange = options.yrange,
 		xscale = options.xscale,
@@ -7921,21 +8075,29 @@ end
 # Apply the validated common keywords through the D7 primitives. Constructors
 # keep the template grid for their default `grid = true`; mutators default to
 # `nothing` (unchanged) and apply every explicit value, so `grid = true`
-# re-enables a grid that was switched off earlier.
-function _stats_apply_options!(fig, who::AbstractString, options; mutator::Bool)
+# re-enables a grid that was switched off earlier. The y keywords address
+# `ykey`: the primary y axis, or the twin y axis of `secondary_y = true` (the
+# key-based primitives give it the same semantics as the primary axis).
+function _stats_apply_options!(
+	fig,
+	who::AbstractString,
+	options;
+	mutator::Bool,
+	ykey::Symbol = :yaxis,
+)
 	_apply_figure_title!(fig, options.title)
 	_apply_axis_title!(fig, :x, options.xlabel)
-	_apply_axis_title!(fig, :y, options.ylabel)
+	_apply_axis_title_to_key!(fig, ykey, options.ylabel)
 	# Scale before range and ticks: a logarithmic axis stores its range as
 	# exponents and takes tick values in data units.
 	_apply_axis_scale!(fig, :x, options.xscale, who)
-	_apply_axis_scale!(fig, :y, options.yscale, who)
+	_apply_axis_scale_to_key!(fig, ykey, options.yscale, who; name = "yscale")
 	_apply_axis_range!(fig, :x, _scat_range_arg(options.xrange), who)
-	_apply_axis_range!(fig, :y, _scat_range_arg(options.yrange), who)
+	_apply_axis_range_to_key!(fig, ykey, _scat_range_arg(options.yrange), who; name = "yrange")
 	# Tick values, labels and the D9 presets (`:decades`, `:auto`) go to
 	# `_apply_ticks!` unchanged.
 	_scat_apply_ticks!(fig, :xaxis, options.xticks, options.xticklabels, options.xtickformat, who)
-	_scat_apply_ticks!(fig, :yaxis, options.yticks, options.yticklabels, options.ytickformat, who)
+	_scat_apply_ticks!(fig, ykey, options.yticks, options.yticklabels, options.ytickformat, who)
 	_apply_figure_size!(fig, who; width = options.width, height = options.height)
 	(mutator || options.grid !== true) && _apply_axis_grid!(fig, options.grid, who)
 	# A new figure gets the default template; an append only refreshes the
@@ -7950,24 +8112,32 @@ function _stats_apply_options!(fig, who::AbstractString, options; mutator::Bool)
 	return nothing
 end
 
-# Mutators take the constructor keywords minus `show`; `kwargs...` only exists
-# to turn `show` (and any other unknown keyword) into a clear error. As in the
-# scatter family, `row = nothing`/`col = nothing` (no cell) are accepted on a
-# Plot/SyncPlot.
-function _stats_reject_keywords(who::AbstractString, kwargs)
-	names = Symbol[
-		key for (key, value) in pairs(kwargs)
-		if !((key === :row || key === :col) && value === nothing)
-	]
-	isempty(names) && return nothing
-	:show in names && throw(ArgumentError(
-		"$(who): mutators do not take `show`; display the figure with `display(fig)` " *
-		"or pass `show = true` to the constructor.",
-	))
-	throw(ArgumentError(
-		"$(who): unsupported keyword argument(s) $(join(("`$(name)`" for name in names), ", ")); " *
-		"see the docstring for the accepted keywords.",
-	))
+# Mutators take the constructor keywords minus `show`; their `kwargs...` carry
+# `secondary_y` (a twin y axis on a Plot/SyncPlot, C35) and turn `show` and any
+# other unknown keyword into a clear error. As in the scatter family,
+# `row = nothing`/`col = nothing` (no cell) are accepted on a Plot/SyncPlot.
+# Returns `secondary_y`.
+_stats_mutator_options(who::AbstractString, kwargs) = _scat_mutator_options(who, kwargs)
+
+# The y axis a statistics call draws on (C35): `:yaxis`, or with
+# `secondary_y = true` the twin y axis of a Plot/SyncPlot, created on first use
+# by `_ensure_twin_y!` (which refuses a non-Cartesian figure before writing).
+# Call after every keyword is validated; validate with
+# `ykey = _scat_twin_key(fig, secondary_y)`. Returns the layout key and the
+# trace reference ("y2", ...; "" for the primary axis).
+function _stats_target_y!(fig, secondary_y::Bool, who::AbstractString)
+	secondary_y || return (:yaxis, "")
+	key = _ensure_twin_y!(fig; who = who)
+	return (key, _cmn_axis_ref(key; who = who))
+end
+
+# Bind the traces of one call to the twin y axis (`yref` "" keeps the primary).
+function _stats_bind_y!(traces, yref::AbstractString)
+	isempty(yref) && return traces
+	for trace in traces
+		trace.fields[:yaxis] = yref
+	end
+	return traces
 end
 
 function _stats_maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString)
@@ -8038,6 +8208,15 @@ function _stats_subplot_delegate!(
 				kwargs...,
 			)
 		end
+		# `bargap`/`bargroupgap` are figure-wide plotly settings that the cell
+		# delegate does not carry to the root layout; the mutator above has
+		# validated them (it threw before any change otherwise), so they are
+		# written to the figure here.
+		gaps = Pair{Symbol, Any}[
+			key => values(kwargs)[key] for key in (:bargap, :bargroupgap)
+			if get(values(kwargs), key, nothing) !== nothing
+		]
+		isempty(gaps) || relayout!(sf; gaps...)
 		requested = get(values(kwargs), :barmode, "")
 		current = root_barmode === nothing ? "group" : root_barmode
 		if others_barlike && requested isa AbstractString && !isempty(requested) &&
@@ -8093,10 +8272,11 @@ const _STEM_ZORDER = -1
 const _SCAT_RANGE_DOC = """
 `xrange = [0, 0]`, `yrange = [0, 0]`: axis range `[lo, hi]` or `(lo, hi)` in
   data units, also on a logarithmic axis (bounds must then be positive), with
-  the semantics of [`xrange!`](@ref)/[`yrange!`](@ref): `[0, 0]`, `nothing`
-  or `[nothing, nothing]` autoscale; otherwise both bounds are required (no
-  partial ranges), must differ and must not be `Bool`, and a linear or
-  category axis needs numeric bounds."""
+  exactly the semantics of [`xrange!`](@ref)/[`yrange!`](@ref) (both are
+  checked and applied by the same helpers): `[0, 0]`, `nothing` or
+  `[nothing, nothing]` autoscale; a one-sided limit `(lo, nothing)` or
+  `(nothing, hi)` is handled as `yrange!` handles it; bounds must differ and
+  must not be `Bool`, and a linear or category axis needs numeric bounds."""
 const _SCAT_TICKS_DOC = """
 `xticks = nothing`, `yticks = nothing`: tick positions in data units, or a
   preset: `:decades` (one labelled tick per power of ten; logarithmic axis
@@ -8130,21 +8310,29 @@ _scat_is_unset_range(range) =
 # `nothing` (automatic); everything else is passed on unchanged.
 _scat_range_arg(range) = _scat_is_unset_range(range) ? nothing : range
 
-# Validate a range keyword (`xrange`, `yrange`, `rrange`, `trange`) with the
-# semantics of `xrange!`/`yrange!`: `[0, 0]`, `(0, 0)`, `nothing` and
-# `[nothing, nothing]` are automatic (returns `nothing`); otherwise exactly two
-# finite bounds, neither `nothing`/`missing` (no partial ranges) nor `Bool`, and
-# not equal. Returns the bounds as a 2-element vector. Writes nothing.
+# Validate a polar range keyword (`rrange`, `trange` of plot_scatterpolar):
+# `[0, 0]`, `(0, 0)`, `nothing` and `[nothing, nothing]` are automatic
+# (returns `nothing`); otherwise exactly two finite bounds, neither
+# `nothing`/`missing` nor `Bool`, and not equal. A polar sector or radial range
+# is always two-sided (the one-sided Cartesian limits of D11 do not apply), so
+# this check rejects a missing bound itself, whatever `_checked_range` accepts.
+# Returns the bounds as a 2-element vector. Writes nothing. The Cartesian
+# `xrange`/`yrange` keywords are checked by `_scat_validate_cartesian_options`
+# through the shared primitives instead.
 function _scat_checked_range(range, who::AbstractString, name::AbstractString)
 	_scat_is_unset_range(range) && return nothing
+	# A missing bound is rejected before the shared check, which may accept
+	# one-sided Cartesian limits.
+	if (range isa AbstractVector || range isa Tuple) && length(range) == 2
+		any(bound -> bound === nothing || bound === missing, range) && throw(ArgumentError(
+			"$(who): `$(name)` must give both bounds; partial ranges are not " *
+			"supported here (use [0, 0] or `nothing` for an automatic range). Got " *
+			"$(repr(range)).",
+		))
+	end
 	checked = _checked_range(range, who, name)
 	checked === nothing && return nothing
 	for bound in checked
-		(bound === nothing || bound === missing) && throw(ArgumentError(
-			"$(who): `$(name)` must give both bounds; partial ranges are not " *
-			"supported (use [0, 0] or `nothing` for an automatic range). Got " *
-			"$(repr(range)).",
-		))
 		bound isa Bool && throw(ArgumentError(
 			"$(who): `$(name)` bounds must be numbers (or date/category values); got " *
 			"$(repr(range)).",
@@ -8157,42 +8345,19 @@ function _scat_checked_range(range, who::AbstractString, name::AbstractString)
 	return checked
 end
 
-# Range check of any Cartesian axis `key` (`nothing`: an axis that does not
-# exist yet and starts linear) against the axis type the call ends up with:
-# bounds are data values, positive on a logarithmic axis and numeric on a
-# linear or category axis (an axis whose type is still automatic also takes
-# date strings). Returns the checked bounds, or `nothing` for an automatic range.
-function _scat_require_axis_range(
-	fig,
-	key::Union{Nothing, Symbol},
-	range,
-	scale::AbstractString,
-	who::AbstractString,
-	name::AbstractString,
-)
-	checked = _scat_checked_range(range, who, name)
-	checked === nothing && return nothing
-	final_type = !isempty(scale) ? String(scale) :
-		key === nothing ? "-" : _axis_type(_plot_layout(fig), key)
-	if final_type == "log"
-		for bound in checked
-			(bound isa Real && bound > 0) || throw(ArgumentError(
-				"$(who): `$(name)` bounds on a logarithmic axis are data values " *
-				"and must be positive; got $(repr(range)).",
-			))
-		end
-	elseif final_type in ("linear", "category")
-		all(bound -> bound isa Real, checked) || throw(ArgumentError(
-			"$(who): a $(final_type) axis needs numeric `$(name)` bounds; got " *
-			"$(repr(range)).",
-		))
-	end
-	return checked
-end
-
-# Validate the common Cartesian keywords of a scatter-family call before its
-# first write. `ykey` is the y axis the call draws on: `:yaxis`, an existing
-# twin axis, or `nothing` for a twin that `_ensure_twin_y!` will create.
+# Validate the common Cartesian keywords of a scatter-family (and statistics
+# and lines.jl) call before its first write, through the shared key-based
+# primitives of src/sci/base.jl and src/sci/common.jl, so every family checks
+# ranges, scales and ticks exactly as `_apply_cartesian_plot_options!` and
+# `xrange!`/`xticks!` do. `ykey` is the y axis the call draws on: `:yaxis`, an
+# existing twin axis, or `nothing` for a twin that `_ensure_twin_y!` will
+# create (validated as a fresh axis: no type, no range).
+#
+# Ranges are data units on every axis type (positive on a log axis); which
+# shapes are accepted (automatic sentinels, one-sided limits, equal or Bool
+# bounds, ...) is decided by `_checked_range`, so this family accepts exactly
+# what `xrange!`/`yrange!` accept. Tick values and the D9 presets are checked
+# by `_validate_tick_option` against the axis type the call ends up with.
 function _scat_validate_cartesian_options(
 	fig,
 	who::AbstractString;
@@ -8225,92 +8390,16 @@ function _scat_validate_cartesian_options(
 		fontsize = fontsize,
 		grid = grid,
 	)
-	primary_y || _require_axis_scale(yscale, who, "yscale")
-	# The checks of `xrange!`/`yrange!` (partial, Bool and equal bounds, numeric
-	# bounds on linear axes) on top of the D7 length/finiteness/log checks.
-	_scat_require_axis_range(fig, :xaxis, xrange, xscale, who, "xrange")
-	_scat_require_axis_range(fig, ykey, yrange, yscale, who, "yrange")
-	_scat_validate_ticks(fig, :xaxis, xticks, xticklabels, xscale, who, "x")
-	_scat_validate_ticks(fig, ykey, yticks, yticklabels, yscale, who, "y")
-	return nothing
-end
-
-# Tick values and labels of axis `key` (`nothing`: a twin y axis not created
-# yet), checked as `_apply_ticks!` will check them once the call's `scale` is
-# applied, so a bad tick keyword throws before the figure changes.
-function _scat_validate_ticks(
-	fig,
-	key::Union{Nothing, Symbol},
-	values,
-	labels,
-	scale::AbstractString,
-	who::AbstractString,
-	letter::AbstractString,
-)
-	(values === nothing && labels === nothing) && return nothing
-	log_axis = !isempty(scale) ? scale == "log" :
-		key !== nothing && _cmn_is_log_axis(_plot_layout(fig), key)
-	if _is_tick_preset(values)
-		# D9 presets go to `_apply_ticks!` unchanged; they carry no labels, and
-		# `:decades` labels powers of ten, which only a logarithmic axis has.
-		labels === nothing || throw(ArgumentError(
-			"$(who): `$(letter)ticklabels` cannot be combined with the tick preset " *
-			"`$(letter)ticks = $(repr(values))`; give tick values instead.",
-		))
-		if values === :decades && !log_axis
-			axis_type = !isempty(scale) ? String(scale) :
-				key === nothing ? "-" : _axis_type(_plot_layout(fig), key)
-			throw(ArgumentError(
-				"$(who): `$(letter)ticks = :decades` needs a logarithmic $(letter) axis " *
-				"(`$(letter)scale = \"log\"`); the $(letter) axis type is $(repr(axis_type)).",
-			))
-		end
-		return nothing
+	if !primary_y
+		_require_axis_scale(yscale, who, "yscale")
+		# A twin that does not exist yet starts with no type and no range, as
+		# the y axis of an empty figure does.
+		target, key = ykey === nothing ?
+			(Plot(GenericTrace[], Layout()), :yaxis) : (fig, ykey)
+		_require_axis_range_for_key(target, key, yrange, yscale, who; name = "yrange")
 	end
-	tickvals = values === nothing ? nothing : _cmn_tick_values(values, log_axis, who)
-	if labels !== nothing
-		tickvals === nothing && throw(ArgumentError(
-			"$(who): `$(letter)ticklabels` needs `$(letter)ticks` (one tick value per label).",
-		))
-		_cmn_tick_labels(labels, length(tickvals), who)
-	end
-	return nothing
-end
-
-# Title, scale and range of a non-primary Cartesian axis (the twin y axis of
-# `secondary_y = true`) with the semantics of the D7 primitives: the label
-# goes through `_label`, a log axis gets power exponents unless an exponent
-# format is already set, and the range is given in data units.
-function _scat_apply_axis_options!(
-	fig,
-	key::Symbol;
-	label::AbstractString = "",
-	scale::AbstractString = "",
-	range = nothing,
-	range_name::AbstractString = "range",
-	who::AbstractString,
-)
-	isempty(label) || relayout!(fig; Symbol(key, :_title_text) => _label(label))
-	if !isempty(scale)
-		relayout!(fig; Symbol(key, :_type) => String(scale))
-		if scale == "log"
-			axis = get(_plot_layout(fig).fields, key, nothing)
-			_cmn_mapping_get(axis, :exponentformat) === nothing &&
-				relayout!(fig; Symbol(key, :_exponentformat) => "power")
-		end
-	end
-	checked = _checked_range(range, who, range_name)
-	if checked !== nothing
-		layout = _plot_layout(fig)
-		value = _axis_type(layout, key) == "log" ?
-			_to_axis_range(layout, key, checked; who = "$(who) (`$(range_name)`)") :
-			checked
-		relayout!(
-			fig;
-			Symbol(key, :_range) => value,
-			Symbol(key, :_autorange) => false,
-		)
-	end
+	_validate_tick_option(fig, :xaxis, xticks, xticklabels, xscale, who, "x")
+	_validate_tick_option(fig, ykey, yticks, yticklabels, yscale, who, "y")
 	return nothing
 end
 
@@ -8336,7 +8425,7 @@ end
 # are an ArgumentError. `kwargs` iterates `key => value` pairs (a mutator's
 # `kwargs...`). Returns `secondary_y`.
 function _scat_mutator_options(who::AbstractString, kwargs)
-	# Same wording as the statistical family (`_stats_reject_keywords`).
+	# Shared with the statistical family (`_stats_mutator_options`).
 	any(pair -> first(pair) === :show, kwargs) && throw(ArgumentError(
 		"$(who): mutators do not take `show`; display the figure with `display(fig)` " *
 		"or pass `show = true` to the constructor.",
@@ -8822,6 +8911,74 @@ function _scat_trace(
 	cliponaxis === nothing || (fields[:cliponaxis] = cliponaxis)
 	isempty(yref) || (fields[:yaxis] = String(yref))
 	return GenericTrace(String(trace_type), fields)
+end
+
+# plotly.js layout `font.color` default (`Color.defaultLine`, plotly.js 2.35.2
+# schema): the colour of text when neither the layout nor its template sets one.
+const _SCAT_PLOTLY_FONT_COLOR = "#444"
+
+# Colour plotly draws trace text in when the trace sets none: the figure's
+# `layout.font.color`, else its template's, else plotly's default. Inside a
+# SubplotFigure call the real figure is read (the scratch figure has neither).
+function _scat_text_color(fig)
+	context = _SCAT_SUBPLOT_CONTEXT[]
+	layout = _plot_layout(context === nothing ? fig : context.figure)
+	value = _cmn_mapping_get(get(layout.fields, :font, nothing), :color)
+	(value isa AbstractString && !isempty(value)) && return String(value)
+	template = _figure_template(layout)
+	if template !== nothing
+		font = get(_template_layout_fields(template), :font, nothing)
+		value = _cmn_mapping_get(font, :color)
+		(value isa AbstractString && !isempty(value)) && return String(value)
+	end
+	return _SCAT_PLOTLY_FONT_COLOR
+end
+
+# `markevery` hides the skipped markers through `selectedpoints` (see
+# `_markevery_fields`), and plotly.js 2.35.2 then also dims the TEXT of every
+# unselected point unless `unselected.textfont.color` or
+# `selected.textfont.color` is set (`makeSelectedTextStyleFns`: unselected
+# text is `addOpacity(color, DESELECTDIM)` otherwise), so labels of the
+# skipped points faded (G28). For the traces at `indices` that have both, pin
+# the text colour: `textfont.color` and `unselected.textfont.color` get the
+# trace's own text colour, else the colour plotly would draw the text in
+# (`_scat_text_color`, read after the template is applied), so every label is
+# drawn alike. Pinned labels keep that colour if the template changes later.
+function _scat_pin_markevery_text!(fig, indices)
+	data = _plot_data(fig)
+	color = nothing
+	for index in indices
+		fields = data[index].fields
+		(haskey(fields, :selectedpoints) && get(fields, :text, nothing) !== nothing) || continue
+		textfont_fields = _scat_attr_fields(get(fields, :textfont, nothing))
+		text_color = get(textfont_fields, :color, nothing)
+		if !(text_color isa AbstractString && !isempty(text_color))
+			color === nothing && (color = _scat_text_color(fig))
+			text_color = color
+		end
+		textfont_fields[:color] = text_color
+		fields[:textfont] = attr(textfont_fields)
+		unselected_fields = _scat_attr_fields(get(fields, :unselected, nothing))
+		unselected_textfont = _scat_attr_fields(get(unselected_fields, :textfont, nothing))
+		unselected_textfont[:color] = text_color
+		unselected_fields[:textfont] = attr(unselected_textfont)
+		fields[:unselected] = attr(unselected_fields)
+	end
+	return nothing
+end
+
+# A fresh `Dict{Symbol, Any}` copy of a plotly attribute value (a
+# `PlotlyAttribute` or a dictionary; anything else gives an empty one).
+function _scat_attr_fields(value)
+	out = Dict{Symbol, Any}()
+	if value isa PlotlyBase.PlotlyAttribute
+		merge!(out, value.fields)
+	elseif value isa AbstractDict
+		for (key, entry) in value
+			out[Symbol(key)] = entry
+		end
+	end
+	return out
 end
 
 # The twin y axis of a Plot/SyncPlot mutator call with `secondary_y = true`:
@@ -9399,6 +9556,7 @@ function _scatter_impl!(
 	yref = secondary_y ? _cmn_axis_ref(ykey; who = who) : ""
 	cliponaxis = clip ? nothing : false
 	data = _plot_data(fig)
+	first_new = length(data) + 1
 	for index in 1:n
 		style = styles[index]
 		series_color = style.color
@@ -9453,14 +9611,19 @@ function _scatter_impl!(
 		apply_template = constructor,
 		who = who,
 	)
+	# After the template: the pinned colour is the one plotly would use.
+	_scat_pin_markevery_text!(fig, first_new:(first_new + n - 1))
 	_scat_place_legend!(fig, legend_state)
 	return nothing
 end
 
+# One bar trace. `color` is one colour ("" = the colour cycle) or one per bar;
+# `width` (plotly `width`, data units of the position axis) is `nothing`
+# (automatic), one number or one per bar.
 function _bar_trace(;
 	x,
 	y,
-	color::AbstractString = "",
+	color::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	name::AbstractString = "",
 	orientation::AbstractString = "",
 	showlegend::Union{Nothing, Bool} = nothing,
@@ -9472,10 +9635,16 @@ function _bar_trace(;
 	pattern = nothing,
 	error_x = nothing,
 	error_y = nothing,
+	width = nothing,
 )
 	kw = Dict{Symbol, Any}(:x => x, :y => y, :name => String(name))
 	marker = Dict{Symbol, Any}()
-	isempty(color) || (marker[:color] = String(color))
+	if color isa AbstractVector
+		marker[:color] = String[String(entry) for entry in color]
+	else
+		isempty(color) || (marker[:color] = String(color))
+	end
+	width === nothing || (kw[:width] = width)
 	pattern === nothing || (marker[:pattern] = pattern)
 	isempty(marker) || (kw[:marker] = attr(; marker...))
 	isempty(orientation) || (kw[:orientation] = String(orientation))
@@ -9732,7 +9901,16 @@ end
 
 # ── Family implementations (shared by constructor and mutator) ───────────────
 
-function _stats_bar!(fig, x, y, who::AbstractString, options, bar_options; mutator::Bool)
+function _stats_bar!(
+	fig,
+	x,
+	y,
+	who::AbstractString,
+	options,
+	bar_options;
+	mutator::Bool,
+	secondary_y::Bool = false,
+)
 	o = bar_options
 	orientation = _stats_orientation(o.orientation, who)
 	horizontal = orientation == "h"
@@ -9751,13 +9929,17 @@ function _stats_bar!(fig, x, y, who::AbstractString, options, bar_options; mutat
 		value_name, position_name = horizontal ? ("x", "y") : ("y", "x")
 		values, positions = horizontal ? (x, y) : (y, x)
 	end
-	value_list, position_list, _ =
+	value_list, position_list, nested =
 		_stats_series_lists(values, positions, who, value_name, position_name)
 	count = length(value_list)
-	colors = _stats_colors(o.color, count, who)
+	bar_counts = Int[length(series) for series in value_list]
+	colors = _stats_bar_colors(o.color, bar_counts, nested, who)
 	names = _stats_names(o.legend, count)
 	showlegends = _stats_showlegends(o.showlegend, count)
-	patterns = _stats_patterns(o.hatch, count, who)
+	patterns = _stats_bar_patterns(o.hatch, bar_counts, nested, who)
+	widths = _stats_bar_widths(o.barwidth, bar_counts, nested, who)
+	bargap = _stats_number(o.bargap, who, "bargap", 0, 1)
+	bargroupgap = _stats_number(o.bargroupgap, who, "bargroupgap", 0, 1)
 	traces = Vector{GenericTrace}(undef, count)
 	for index in 1:count
 		series = value_list[index]
@@ -9779,17 +9961,30 @@ function _stats_bar!(fig, x, y, who::AbstractString, options, bar_options; mutat
 			pattern = patterns[index],
 			error_x = _stats_error_bars(o.error_x, index, points, who, "error_x"),
 			error_y = _stats_error_bars(o.error_y, index, points, who, "error_y"),
+			width = widths[index],
 		)
 	end
-	_stats_validate_options(fig, who, options)
+	_stats_validate_options(fig, who, options; ykey = _scat_twin_key(fig, secondary_y))
 
-	append!(_plot_data(fig), traces)
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
 	_apply_explicit_layout_mode!(fig, :barmode, barmode)
-	_stats_apply_options!(fig, who, options; mutator = mutator)
+	# Figure-wide plotly settings: written only when given.
+	bargap === nothing || relayout!(fig; bargap = bargap)
+	bargroupgap === nothing || relayout!(fig; bargroupgap = bargroupgap)
+	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
 	return nothing
 end
 
-function _stats_histogram!(fig, x, who::AbstractString, options, histogram_options; mutator::Bool)
+function _stats_histogram!(
+	fig,
+	x,
+	who::AbstractString,
+	options,
+	histogram_options;
+	mutator::Bool,
+	secondary_y::Bool = false,
+)
 	o = histogram_options
 	orientation = _stats_orientation(o.orientation, who)
 	histnorm = _stats_choice(o.histnorm, _STATS_HISTNORMS, who, "histnorm")
@@ -9835,10 +10030,12 @@ function _stats_histogram!(fig, x, who::AbstractString, options, histogram_optio
 	trace_opacity = opacity !== nothing ? opacity :
 		overlay ? _STATS_OVERLAY_OPACITY : nothing
 	horizontal = orientation == "h"
+	# The y axis this call draws on (`nothing`: a twin it creates).
+	check_ykey = _scat_twin_key(fig, secondary_y)
 	log_axis = _stats_log_axis(
 		fig,
 		horizontal ? options.yscale : options.xscale,
-		horizontal ? :yaxis : :xaxis,
+		horizontal ? check_ykey : :xaxis,
 	)
 	if log_axis
 		traces = _stats_log_histogram_traces(
@@ -9878,15 +10075,16 @@ function _stats_histogram!(fig, x, who::AbstractString, options, histogram_optio
 			)
 		end
 	end
-	_stats_validate_options(fig, who, options)
+	_stats_validate_options(fig, who, options; ykey = check_ykey)
 
-	append!(_plot_data(fig), traces)
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
 	if !isempty(barmode)
 		_apply_explicit_layout_mode!(fig, :barmode, barmode)
 	elseif root_overlay
 		_apply_nested_layout_mode!(fig, x, :barmode, "overlay")
 	end
-	_stats_apply_options!(fig, who, options; mutator = mutator)
+	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
 	return nothing
 end
 
@@ -9899,6 +10097,7 @@ function _stats_distribution!(
 	distribution_options;
 	kind::Symbol,
 	mutator::Bool,
+	secondary_y::Bool = false,
 )
 	o = distribution_options
 	orientation = _stats_orientation(o.orientation, who)
@@ -9972,11 +10171,12 @@ function _stats_distribution!(
 		positions !== nothing ||
 		_stats_positions_collide(fig, names, String(kind), horizontal)
 	)
-	_stats_validate_options(fig, who, options)
+	_stats_validate_options(fig, who, options; ykey = _scat_twin_key(fig, secondary_y))
 
-	append!(_plot_data(fig), traces)
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
 	group && _apply_nested_layout_mode!(fig, values, mode_key, "group")
-	_stats_apply_options!(fig, who, options; mutator = mutator)
+	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
 	return nothing
 end
 
@@ -10047,7 +10247,10 @@ at their default take the active [`PlotStyle`](@ref)'s per-trace defaults
   shared by all series), or a vector of label vectors (one per series).
   `textposition = ""` (`"top center"`, `"middle right"`, ... any of the nine
   `"<top|middle|bottom> <left|center|right>"`) and `textsize = 0` (px) style
-  them.
+  them. With `markevery`, every label is still drawn at full strength: the
+  text colour is fixed to the figure's font colour at the time of the call
+  (plotly would otherwise fade the labels of the points without a marker), so
+  a later template change does not recolour these labels.
 - `error_x = nothing`, `error_y = nothing`: data error bars, given as a vector
   (symmetric, shared by all series), a vector of vectors (one per series), or
   a `(minus, plus)` tuple of such for asymmetric bars. Each array has one
@@ -10564,9 +10767,32 @@ Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
   other arrays that are not vectors are an `ArgumentError` (pass
   `collect(eachcol(A))` for one series per column).
 
+- Logarithmic value axis (`yscale = "log"`, or `xscale = "log"` for
+  horizontal bars): bars keep plotly's base 0, which lies below every log
+  axis, so each bar grows from the bottom (left) edge of the axis, its lower
+  range limit, as in matplotlib. The bar heights therefore read against the
+  axis limit: fix it with `yrange`/`xrange` (data units) for figures that
+  compare bars, or pass `base` to start the bars at a given value. Tick
+  keywords (`yticks`, `yticklabels`, `:decades`) apply as on any log axis.
+
 #### Keyword Arguments
-- `color::Union{AbstractString,Symbol,AbstractVector} = ""`: bar colour, or one
-  colour per series (`""` uses the colour cycle).
+- `color::Union{AbstractString,Symbol,AbstractVector} = ""`: bar colour (`""`
+  uses the colour cycle). Several series: a vector with one colour per series,
+  where an entry may itself be a vector with one colour per bar of that
+  series. A single series: a vector with one colour per bar colours each bar
+  (as matplotlib's `bar(color = [...])`), a one-element vector is the series
+  colour, and any other length is an `ArgumentError`. The legend shows the
+  first bar's colour for a per-bar series.
+- `barwidth = nothing`: bar width in data units of the position axis (1 =
+  the spacing of categories), as matplotlib's `width`: a number for every
+  bar, or vectors following the `color` rule (one per series, or one per bar).
+  A width does not move the bar centre; under the default grouped `barmode`
+  the series still take their own slots. `nothing`: plotly's automatic width.
+- `bargap = nothing`, `bargroupgap = nothing`: figure-wide plotly gaps in
+  [0, 1], the fraction of the position spacing between neighbouring bar
+  groups and between the bars of one group (`nothing` leaves them unchanged:
+  plotly's defaults 0.2 and 0). On a `SubplotFigure` they apply to every
+  cell (plotly has one value per figure).
 - `legend::Union{AbstractString,AbstractVector{<:AbstractString}} = ""`: trace
   name(s) shown in the legend (mathtext labels allowed).
 - `showlegend::Union{Nothing,Bool,AbstractVector{Bool}} = nothing`: force the
@@ -10595,9 +10821,10 @@ Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
   without an entry get none, surplus entries are ignored; each entry must have
   one value per bar of its series.
 - `opacity::Union{Nothing,Real} = nothing`: trace opacity in [0, 1].
-- `hatch::Union{AbstractString,AbstractVector{<:AbstractString}} = ""`:
-  matplotlib hatch (`"/"`, `"\\\\"`, `"x"`, `"-"`, `"|"`, `"+"`, `"."`,
-  repeated for density, e.g. `"//"`), per series when a vector.
+- `hatch::Union{AbstractString,AbstractVector} = ""`: matplotlib hatch
+  (`"/"`, `"\\\\"`, `"x"`, `"-"`, `"|"`, `"+"`, `"."`, repeated for density,
+  e.g. `"//"`); vectors follow the `color` rule (one per series, or one per
+  bar, where `""` leaves a bar plain).
 - `xlabel`, `ylabel`, `title::AbstractString = ""`: axis titles and figure
   title (mathtext labels allowed).
 - $(_SCAT_RANGE_DOC)
@@ -10615,6 +10842,8 @@ Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
 fig = plot_bar(["Q1", "Q2", "Q3"], [[10, 12, 9], [11, 14, 11]];
 	legend = ["2023", "2024"], error_y = [[1, 1, 2], [2, 1, 1]], text = [[10, 12, 9], [11, 14, 11]])
 plot_bar([3, 5, 2], ["a", "b", "c"]; orientation = "h", hatch = "//")
+# One highlighted bar, narrower bars:
+plot_bar(["a", "b", "c"], [3, 5, 2]; color = ["grey", "steelblue", "grey"], barwidth = 0.5)
 ```
 """
 function plot_bar(
@@ -10649,7 +10878,10 @@ function plot_bar(
 	texttemplate::AbstractString = "",
 	base = nothing,
 	opacity::Union{Nothing, Real} = nothing,
-	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	hatch::Union{AbstractString, AbstractVector} = "",
+	barwidth = nothing,
+	bargap = nothing,
+	bargroupgap = nothing,
 	show::Bool = false,
 )
 	fig = Plot(GenericTrace[], _default_cartesian_layout())
@@ -10662,7 +10894,8 @@ function plot_bar(
 			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
 			ytickformat),
 		(; color, legend, showlegend, orientation, barmode, error_x, error_y, text,
-			textposition, texttemplate, base, opacity, hatch);
+			textposition, texttemplate, base, opacity, hatch, barwidth, bargap,
+			bargroupgap);
 		mutator = false,
 	)
 	return _stats_maybe_show(fig, show, width, height, title)
@@ -10699,7 +10932,10 @@ function plot_bar(
 	texttemplate::AbstractString = "",
 	base = nothing,
 	opacity::Union{Nothing, Real} = nothing,
-	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	hatch::Union{AbstractString, AbstractVector} = "",
+	barwidth = nothing,
+	bargap = nothing,
+	bargroupgap = nothing,
 	show::Bool = false,
 )
 	fig = Plot(GenericTrace[], _default_cartesian_layout())
@@ -10712,7 +10948,8 @@ function plot_bar(
 			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
 			ytickformat),
 		(; color, legend, showlegend, orientation, barmode, error_x, error_y, text,
-			textposition, texttemplate, base, opacity, hatch);
+			textposition, texttemplate, base, opacity, hatch, barwidth, bargap,
+			bargroupgap);
 		mutator = false,
 	)
 	return _stats_maybe_show(fig, show, width, height, title)
@@ -11364,8 +11601,9 @@ Shared:
   `[0, 0]`, `nothing` or `[nothing, nothing]`: the full circle.
 - `rrange = [0, 0]`: radial axis range `(lo, hi)` in data units (positive on
   a logarithmic radial axis); `[0, 0]`, `nothing` or `[nothing, nothing]`:
-  automatic. Both ranges take two different, non-`Bool` numbers (no partial
-  ranges), as [`xrange!`](@ref) does.
+  automatic. Both ranges take two different, non-`Bool` numbers; a polar
+  sector or radial range always gives both bounds (a one-sided limit such as
+  `(nothing, 2)` is an `ArgumentError`).
 - `rlabel_angle = nothing`: angle (degrees of the drawing, as `trange`) of
   the radial axis that carries the radial tick labels (plotly
   `polar.radialaxis.angle`). `nothing`: 22.5° on a new full-circle subplot
@@ -13725,9 +13963,14 @@ tick keywords), with these differences:
   apply to those axes. `title`, `width` and `height` are figure-wide and are
   ignored there with a warning, and `barmode` (a single figure-wide plotly
   setting) applies to every cell, with one warning when it re-arranges bars
-  already in other cells. On a `Plot`/`SyncPlot`, `row`, `col`, `inset` and
-  `secondary_y` are not accepted (`row = nothing`/`col = nothing`, no cell,
-  are ignored).
+  already in other cells.
+- On a `Plot`/`SyncPlot`, `secondary_y = true` draws on a secondary y axis on
+  the right, created on first use (`ylabel`, `yscale`, `yrange`, `yticks`,
+  ... then apply to it). Plotly positions the bars of each y axis
+  separately, so bars on the two axes at the same positions overlap (as with
+  matplotlib's `twinx`); shift the positions and set `barwidth` to place them
+  side by side. `row`, `col` and `inset` are not accepted there
+  (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -13771,10 +14014,13 @@ function plot_bar!(
 	texttemplate::AbstractString = "",
 	base = nothing,
 	opacity::Union{Nothing, Real} = nothing,
-	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	hatch::Union{AbstractString, AbstractVector} = "",
+	barwidth = nothing,
+	bargap = nothing,
+	bargroupgap = nothing,
 	kwargs...,
 )
-	_stats_reject_keywords("plot_bar!", kwargs)
+	secondary_y = _stats_mutator_options("plot_bar!", kwargs)
 	_stats_bar!(
 		fig,
 		x,
@@ -13784,8 +14030,10 @@ function plot_bar!(
 			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
 			ytickformat),
 		(; color, legend, showlegend, orientation, barmode, error_x, error_y, text,
-			textposition, texttemplate, base, opacity, hatch);
+			textposition, texttemplate, base, opacity, hatch, barwidth, bargap,
+			bargroupgap);
 		mutator = true,
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
@@ -13822,10 +14070,13 @@ function plot_bar!(
 	texttemplate::AbstractString = "",
 	base = nothing,
 	opacity::Union{Nothing, Real} = nothing,
-	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
+	hatch::Union{AbstractString, AbstractVector} = "",
+	barwidth = nothing,
+	bargap = nothing,
+	bargroupgap = nothing,
 	kwargs...,
 )
-	_stats_reject_keywords("plot_bar!", kwargs)
+	secondary_y = _stats_mutator_options("plot_bar!", kwargs)
 	_stats_bar!(
 		fig,
 		nothing,
@@ -13835,8 +14086,10 @@ function plot_bar!(
 			fontsize, grid, xticks, xticklabels, xtickformat, yticks, yticklabels,
 			ytickformat),
 		(; color, legend, showlegend, orientation, barmode, error_x, error_y, text,
-			textposition, texttemplate, base, opacity, hatch);
+			textposition, texttemplate, base, opacity, hatch, barwidth, bargap,
+			bargroupgap);
 		mutator = true,
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
@@ -13860,9 +14113,11 @@ Differences from the constructor:
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
   cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
   `secondary_y = true` targets its secondary y axis; `title`, `width` and
-  `height` are figure-wide and ignored there with a warning. On a
-  `Plot`/`SyncPlot`, `row`, `col`, `inset` and `secondary_y` are not
-  accepted (`row = nothing`/`col = nothing`, no cell, are ignored).
+  `height` are figure-wide and ignored there with a warning.
+- On a `Plot`/`SyncPlot`, `secondary_y = true` draws on a secondary y axis on
+  the right, created on first use (`ylabel`, `yscale`, `yrange`, `yticks`,
+  ... then apply to it); `row`, `col` and `inset` are not accepted there
+  (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -13906,7 +14161,7 @@ function plot_histogram!(
 	hatch::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	kwargs...,
 )
-	_stats_reject_keywords("plot_histogram!", kwargs)
+	secondary_y = _stats_mutator_options("plot_histogram!", kwargs)
 	_stats_histogram!(
 		fig,
 		x,
@@ -13917,6 +14172,7 @@ function plot_histogram!(
 		(; color, legend, showlegend, nbinsx, bins, histnorm, cumulative,
 			orientation, barmode, opacity, hatch);
 		mutator = true,
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
@@ -13938,9 +14194,11 @@ constructor:
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
   cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
   `secondary_y = true` targets its secondary y axis; `title`, `width` and
-  `height` are figure-wide and ignored there with a warning. On a
-  `Plot`/`SyncPlot`, `row`, `col`, `inset` and `secondary_y` are not
-  accepted (`row = nothing`/`col = nothing`, no cell, are ignored).
+  `height` are figure-wide and ignored there with a warning.
+- On a `Plot`/`SyncPlot`, `secondary_y = true` draws on a secondary y axis on
+  the right, created on first use (`ylabel`, `yscale`, `yrange`, `yticks`,
+  ... then apply to it); `row`, `col` and `inset` are not accepted there
+  (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -13983,7 +14241,7 @@ function plot_box!(
 	pointpos::Union{Nothing, Real} = nothing,
 	kwargs...,
 )
-	_stats_reject_keywords("plot_box!", kwargs)
+	secondary_y = _stats_mutator_options("plot_box!", kwargs)
 	_stats_distribution!(
 		fig,
 		x,
@@ -13996,6 +14254,7 @@ function plot_box!(
 			pointpos);
 		kind = :box,
 		mutator = true,
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
@@ -14031,7 +14290,7 @@ function plot_box!(
 	pointpos::Union{Nothing, Real} = nothing,
 	kwargs...,
 )
-	_stats_reject_keywords("plot_box!", kwargs)
+	secondary_y = _stats_mutator_options("plot_box!", kwargs)
 	_stats_distribution!(
 		fig,
 		nothing,
@@ -14044,6 +14303,7 @@ function plot_box!(
 			pointpos);
 		kind = :box,
 		mutator = true,
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
@@ -14063,9 +14323,11 @@ Append violin trace(s) to `fig`: a `Plot`, a [`SyncPlot`](@ref) or a
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
   cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
   `secondary_y = true` targets its secondary y axis; `title`, `width` and
-  `height` are figure-wide and ignored there with a warning. On a
-  `Plot`/`SyncPlot`, `row`, `col`, `inset` and `secondary_y` are not
-  accepted (`row = nothing`/`col = nothing`, no cell, are ignored).
+  `height` are figure-wide and ignored there with a warning.
+- On a `Plot`/`SyncPlot`, `secondary_y = true` draws on a secondary y axis on
+  the right, created on first use (`ylabel`, `yscale`, `yrange`, `yticks`,
+  ... then apply to it); `row`, `col` and `inset` are not accepted there
+  (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -14109,7 +14371,7 @@ function plot_violin!(
 	pointpos::Union{Nothing, Real} = nothing,
 	kwargs...,
 )
-	_stats_reject_keywords("plot_violin!", kwargs)
+	secondary_y = _stats_mutator_options("plot_violin!", kwargs)
 	_stats_distribution!(
 		fig,
 		x,
@@ -14122,6 +14384,7 @@ function plot_violin!(
 			jitter, pointpos);
 		kind = :violin,
 		mutator = true,
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
@@ -14158,7 +14421,7 @@ function plot_violin!(
 	pointpos::Union{Nothing, Real} = nothing,
 	kwargs...,
 )
-	_stats_reject_keywords("plot_violin!", kwargs)
+	secondary_y = _stats_mutator_options("plot_violin!", kwargs)
 	_stats_distribution!(
 		fig,
 		nothing,
@@ -14171,6 +14434,7 @@ function plot_violin!(
 			jitter, pointpos);
 		kind = :violin,
 		mutator = true,
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
@@ -17568,8 +17832,10 @@ end
 # misread (1-D: 115 bins spanning 2..31 for start=-2, end=2, size=0.25; 2-D:
 # a renderer "Invalid array length" error for start=0, end=30, size=1). Such
 # histograms are binned in Julia instead.
-function _stats_log_axis(fig, scale::AbstractString, key::Symbol)
+function _stats_log_axis(fig, scale::AbstractString, key::Union{Nothing, Symbol})
 	isempty(scale) || return scale == "log"
+	# `nothing`: a twin y axis this call creates, which starts linear.
+	key === nothing && return false
 	return _axis_type(_plot_layout(fig), key) == "log"
 end
 
@@ -17734,7 +18000,16 @@ _stats_matrix_rows(matrix::AbstractMatrix) =
 # Non-finite colour values are gaps; JSON `null` is plotly's gap marker.
 _stats_json_value(value) = value isa Real && !isfinite(value) ? _GAP : value
 
-function _stats_histogram2d!(fig, x, y, who::AbstractString, options, color_options; mutator::Bool)
+function _stats_histogram2d!(
+	fig,
+	x,
+	y,
+	who::AbstractString,
+	options,
+	color_options;
+	mutator::Bool,
+	secondary_y::Bool = false,
+)
 	o = color_options
 	(_is_nested_series(x) || _is_nested_series(y)) && throw(ArgumentError(
 		"$(who): takes one set of paired samples `x`, `y`; got a vector of series.",
@@ -17752,8 +18027,10 @@ function _stats_histogram2d!(fig, x, y, who::AbstractString, options, color_opti
 	coloraxis = o.coloraxis === nothing ? nothing : _normalize_coloraxis(o.coloraxis, who)
 	colorbar_title = _stats_label(o.colorbar_title)
 
+	# The y axis this call draws on (`nothing`: a twin it creates).
+	check_ykey = _scat_twin_key(fig, secondary_y)
 	xlog = _stats_log_axis(fig, options.xscale, :xaxis)
-	ylog = _stats_log_axis(fig, options.yscale, :yaxis)
+	ylog = _stats_log_axis(fig, options.yscale, check_ykey)
 	if norm === :log || xlog || ylog
 		x_edges, y_edges, counts = _stats_histogram2d_counts(
 			x, y, nbinsx, nbinsy, histnorm, who; xlog = xlog, ylog = ylog,
@@ -17842,11 +18119,12 @@ function _stats_histogram2d!(fig, x, y, who::AbstractString, options, color_opti
 			end
 		end
 	end
-	_stats_validate_options(fig, who, options)
+	_stats_validate_options(fig, who, options; ykey = check_ykey)
 
-	push!(_plot_data(fig), trace)
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	push!(_plot_data(fig), only(_stats_bind_y!(GenericTrace[trace], yref)))
 	isempty(layout_fields) || relayout!(fig; layout_fields...)
-	_stats_apply_options!(fig, who, options; mutator = mutator)
+	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
 	return nothing
 end
 
@@ -17972,9 +18250,11 @@ keywords are those of [`plot_histogram2d`](@ref), with these differences:
 - On a `SubplotFigure`, `row`/`col` select the cell (default: the current
   cell), `inset = k` draws on inset `k` (see [`inset!`](@ref)) and
   `secondary_y = true` targets its secondary y axis; `title`, `width` and
-  `height` are figure-wide and ignored there with a warning. On a
-  `Plot`/`SyncPlot`, `row`, `col`, `inset` and `secondary_y` are not
-  accepted (`row = nothing`/`col = nothing`, no cell, are ignored).
+  `height` are figure-wide and ignored there with a warning.
+- On a `Plot`/`SyncPlot`, `secondary_y = true` draws on a secondary y axis on
+  the right, created on first use (`ylabel`, `yscale`, `yrange`, `yticks`,
+  ... then apply to it); `row`, `col` and `inset` are not accepted there
+  (`row = nothing`/`col = nothing`, no cell, are ignored).
 
 Every keyword is validated before the figure changes. Returns `nothing` for a
 `Plot`/`SyncPlot` and the `SubplotFigure` for a subplot target.
@@ -18021,7 +18301,7 @@ function plot_histogram2d!(
 	coloraxis = nothing,
 	kwargs...,
 )
-	_stats_reject_keywords("plot_histogram2d!", kwargs)
+	secondary_y = _stats_mutator_options("plot_histogram2d!", kwargs)
 	_stats_histogram2d!(
 		fig,
 		x,
@@ -18033,6 +18313,7 @@ function plot_histogram2d!(
 		(; nbinsx, nbinsy, histnorm, colorscale, crange, cmid, colornorm, levels,
 			showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis);
 		mutator = true,
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
