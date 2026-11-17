@@ -485,7 +485,7 @@ end
 		@test all(t["z"][j][i] == A[i, j] for i in 1:3, j in 1:5)
 		@test t["texttemplate"] == "%{z:.2f}"
 		l = _sf_roundtrip(fig.layout)
-		@test l["yaxis"]["autorange"] == "reversed"               # row 1 at the top
+		@test l["yaxis"]["autorange"] === false && l["yaxis"]["range"][1] > l["yaxis"]["range"][2]  # K4: pinned descending, row 1 at the top
 		@test l["xaxis"]["tickvals"] == 1:5 && l["xaxis"]["ticktext"] == ["a", "b", "c", "d", "e"]
 		@test l["yaxis"]["ticktext"] == ["r1", "r2", "r3"]
 		@test l["yaxis"]["scaleanchor"] == "x"

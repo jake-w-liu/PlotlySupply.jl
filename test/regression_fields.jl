@@ -560,7 +560,7 @@ end
 		A = [10i + j for i in 1:2, j in 1:3]
 		m = plot_matrix(A)
 		mj = _RF_JSON.parse(_RF_JSON.json(m.data[1]))
-		@test _rf_axis(m, :yaxis)[:autorange] == "reversed"
+		@test _rf_axis(m, :yaxis)[:autorange] === false && issorted(_rf_axis(m, :yaxis)[:range]; rev = true)  # K4: pinned descending, row 1 at the top
 		cell(i, j) = mj["transpose"] ? mj["z"][j][i] : mj["z"][i][j]
 		@test all(cell(i, j) == A[i, j] for i in 1:2, j in 1:3)
 	end

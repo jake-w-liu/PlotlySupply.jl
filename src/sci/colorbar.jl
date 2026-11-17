@@ -1251,16 +1251,19 @@ Edit the colorbars that already exist in a figure.
   `"plotlysupply:colorbar_title:<area>:<side>"`); its distance for `:right`
   is estimated from the tick-label width. The annotation follows later
   `colorbar!` moves but not `relayout!`/`restyle!` edits of the bar.
-- `side::Symbol=:right`: `:right` gives a vertical bar left of the cell's
-  right edge (past a right-side y axis' labels) and as tall as the cell;
-  `:bottom` a horizontal bar below the cell's x tick labels and x title,
-  centred on the cell and as wide as it. Every figure update reserves room
-  for the bar, its tick labels and its title (decision D12): when the gap to
-  the neighbouring cell is too small the cell's domain shrinks on that side
+- `side::Symbol=:right`: `:right` gives a vertical bar right of the plot
+  area (past a right-side y axis' labels) and as tall as it; `:bottom` a
+  horizontal bar below the cell's x tick labels and x title, centred on the
+  cell and as wide as it. Every figure update reserves room for the bar,
+  its tick labels and its title (decision D12): when the gap to the
+  neighbouring cell is too small the cell's domain shrinks on that side
   (cells sharing that grid edge shrink alike, at most half the cell), at the
   figure edge the margin grows; a cell whose domain you set yourself keeps
-  it. A bar placed this way stays where it is on later calls without `x` or
-  `y`; the side is re-placed when it changes.
+  it. Bars of one cell sit side by side. A bar placed this way stays where
+  it is on later calls without `x` or `y` (pass `side` again to keep a
+  bottom bar at the bottom: the default is `:right`); a bar with a title
+  above or below it is never drawn shorter than the title plus one tick
+  label.
 - `len::Real=0`: bar length as a paper fraction, centred on the cell (`0`:
   the cell's extent, following it when its domain changes).
 - `thickness::Real=0`: bar thickness in px (`0`: unchanged).

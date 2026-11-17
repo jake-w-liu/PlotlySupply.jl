@@ -655,6 +655,9 @@ struct _FinContext
 	insets::Vector{Any}                 # `_fin_insets`
 	inset_hosts::Set{Symbol}            # x axes of the cells hosting an inset
 	grid::Base.RefValue{Any}            # `_fin_grid_layout` cache
+	# Trace bars this run placed without our mark (`release`): their mark
+	# was dropped here, not by the mutation (`_room_vacated!`).
+	released::Set{Int}
 end
 
 # The layout of the bare subplot grid (`_plotlysupply_subplot_layout`): the
@@ -1667,6 +1670,13 @@ const _ROOM_OPPOSITE = Dict(:top => :bottom, :bottom => :top, :left => :right, :
 # Gap (px) between the axis labels and the first decoration on a side, and
 # between two decorations stacked on one side.
 const _ROOM_GAP = 4.0
+# Extra px between drawn axis labels and a decoration: the label estimates
+# run a pixel or two short of what plotly draws (measured: x tick labels plus
+# title 50.2 px against 48.1 estimated; a bar's tick labels within 1 px).
+const _ROOM_LABEL_PAD = 4.0
+# How far (font sizes) the glyphs of a plain title on top of a horizontal
+# colorbar rise above the bar's `y` (measured: 4 px at 12 px).
+const _FIN_HBAR_TITLE_RISE = 0.35
 # A plot area gives up at most this share of its grid cell's width (left +
 # right) or height (top + bottom); a decoration needing more overlaps.
 const _ROOM_MAX_SHARE = 0.5
@@ -1893,6 +1903,9 @@ end
 
 _room_px(plan, side::Symbol) = side === :left || side === :right ? plan.Wp : plan.Hp
 
+# Px a side's own axis labels take, with `_ROOM_LABEL_PAD` when there are any.
+_room_label_px(own::Real) = own > 0 ? Float64(own) + _ROOM_LABEL_PAD : 0.0
+
 # Plot-area key of a `_cbar_trace_region` key: "x3" -> :xaxis3, "scene2" ->
 # :scene2; `nothing` for paper/domain-trace regions.
 function _room_region_area(key::AbstractString)
@@ -2037,6 +2050,7 @@ function _room_vacated!(plan::_RoomPlan)
 	data = plan.p.data
 	for (index, old) in enumerate(ctx.before)
 		(old isa GenericTrace && _fin_visible(old)) || continue
+		index in ctx.released && continue
 		slot = _cbar_slot(old, index)
 		(slot === nothing || slot.coloraxis !== nothing || !slot.shows) && continue
 		bar = _symbol_dict(_cbar_slot_bar(old, slot))
@@ -2142,7 +2156,7 @@ end
 function _room_needs(plan::_RoomPlan, by_side)
 	need = Dict{Tuple{Symbol, Symbol}, Float64}()
 	for (key, a) in plan.areas, side in _ROOM_SIDES
-		total = a.own[side]
+		total = _room_label_px(a.own[side])
 		for request in get(by_side, (key, side), ())
 			total += _ROOM_GAP + request.px
 		end
@@ -2179,7 +2193,9 @@ function _room_solve!(plan::_RoomPlan)
 			gap = nb.gap * _room_px(plan, side)
 			facing = maximum(need[(k, opposite)] for k in nb.keys)
 			shares = all(k -> _room_flexible(plan.areas[k]) && haskey(by_side, (k, opposite)), nb.keys)
-			allowance = shares ? max(gap - facing, gap / 2) : max(gap - facing, 0.0)
+			# `_ROOM_GAP` is kept between the last decoration and what the
+			# neighbour draws on the facing side.
+			allowance = shares ? max(gap - facing - _ROOM_GAP, gap / 2) : max(gap - facing - _ROOM_GAP, 0.0)
 			room = need[(key, side)] - allowance
 			room > 0 || continue
 			g = (side, round(_room_edge(a.ref, side); digits = 9))
@@ -2235,7 +2251,7 @@ function _room_assign_slots!(plan::_RoomPlan)
 		edge = _room_edge(a.final, side)
 		release = a.managed && !a.writable[side] &&
 			abs(_room_edge(a.current, side) - _room_edge(a.ref, side)) > 1e-9
-		offset = a.own[side] + _ROOM_GAP
+		offset = _room_label_px(a.own[side]) + _ROOM_GAP
 		for request in list
 			push!(get!(Vector{Any}, plan.slots, (request.owner, request.key)), (area = key, side = side,
 				px = request.px, edge = edge, offset = offset, domain_x = a.final[1], domain_y = a.final[2],
@@ -2454,10 +2470,17 @@ function _fin_bar_title_annotation(p::Plot, item::_FinBar)
 	return _cbar_find_title_annotation(p, key)
 end
 
-# Px a math title annotation adds above a horizontal bar (`title_side =
-# :top`); a plain title is inside plotly's colorbar box.
+# Px a horizontal bar's title reaches above its `y` (`title_side = :top`): a
+# math title annotation drawn above it, or the glyphs of a plain title (in
+# plotly's colorbar box, which they overhang a little).
 function _fin_hbar_above(plan, item::_FinBar)
-	_cbar_title_text(item.bar) === nothing || return 0.0
+	text = _cbar_title_text(item.bar)
+	if text !== nothing
+		isempty(text) && return 0.0
+		title = get(item.bar, :title, nothing)
+		something(_fin_string(_cmn_mapping_get(title, :side)), "top") == "top" || return 0.0
+		return _FIN_HBAR_TITLE_RISE * _fin_mapping_font_size(title, :font, plan.font)
+	end
 	found = _fin_bar_title_annotation(plan.p, item)
 	(found === nothing || found.side !== :top) && return 0.0
 	return _FIN_MATH_TITLE_H * plan.font + 4
@@ -2479,6 +2502,7 @@ function _fin_hbar_depth(plan, item::_FinBar)
 		side = something(_fin_string(_cmn_mapping_get(get(bar, :title, nothing), :side)), "top")
 		side in ("top", "bottom") &&
 			(depth += _CBAR_LINE_EM * _fin_mapping_font_size(get(bar, :title, nothing), :font, font) + 4)
+		depth += _fin_hbar_above(plan, item)
 	else
 		found = _fin_bar_title_annotation(plan.p, item)
 		found !== nothing && found.side in (:top, :bottom) && (depth += _FIN_MATH_TITLE_H * font + 4)
@@ -2548,9 +2572,12 @@ function _room_shared_matches(bar::AbstractDict, regions, side::Symbol)
 	return false
 end
 
-# Tolerance (px) of `_room_bar_anchored`: the axis-label estimates of two
-# runs at different figure sizes differ by a pixel or so.
+# Tolerance of `_room_bar_anchored`: px (the axis-label estimates of two
+# runs differ by a pixel or so), and the share of the bar's px offset from
+# the edge (the offset was converted to paper with the plot height of its
+# run; other decorations growing the margins since change that height).
 const _ROOM_ANCHOR_TOL = 2.0
+const _ROOM_ANCHOR_SHARE = 0.5
 
 # Px of the paper's plot region at the size the figure itself is finalized
 # for (its layout size, else the default). An export copy (`ctx.size`) is
@@ -2567,16 +2594,22 @@ end
 
 # Whether a bar of ours sits where the first decoration of `side` goes for
 # the CURRENT domain (`edge`; `own` px of axis labels; `pad` the paper pad of
-# a vertical bar), within `_ROOM_ANCHOR_TOL` px: the evidence that a shrunk
-# side is ours. A domain the user moved leaves the bar off that spot.
+# a vertical bar): its px offset from the edge matches within
+# `_ROOM_ANCHOR_TOL` px plus `_ROOM_ANCHOR_SHARE` of that offset. This is the
+# evidence that a shrunk side is ours; a domain the user moved leaves the bar
+# off that spot (a vertical bar right of an area without right-side labels,
+# offset 0, must match exactly).
 function _room_bar_anchored(plan, item::_FinBar, side::Symbol, edge::Float64, own::Float64, pad::Float64)
 	_fin_bar_owned(item.bar) || return false
 	Wd, Hd = _room_design_px(plan)
 	if side === :right
-		return abs((_cbar_real(item.bar, :x, NaN) - edge - pad) * Wd - own) <= _ROOM_ANCHOR_TOL
+		depth = _room_label_px(own)
+		at = (_cbar_real(item.bar, :x, NaN) - edge - pad) * Wd
+	else
+		depth = _room_label_px(own) + _ROOM_GAP + _fin_hbar_above(plan, item)
+		at = (edge - _cbar_real(item.bar, :y, NaN)) * Hd
 	end
-	depth = own + _ROOM_GAP + _fin_hbar_above(plan, item)
-	return abs((edge - _cbar_real(item.bar, :y, NaN)) * Hd - depth) <= _ROOM_ANCHOR_TOL
+	return abs(at - depth) <= _ROOM_ANCHOR_TOL + _ROOM_ANCHOR_SHARE * depth
 end
 
 function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
@@ -2783,6 +2816,8 @@ function _room_place!(plan::_RoomPlan, ::Val{:colorbar})
 		_room_same_place(item.bar, placement) && !_room_needs_mark(plan, key, item, placement) && continue
 		plan.wrote |= _fin_place_bar!(plan.ctx, plan.updates, item, placement)
 		push!(plan.moved, (item, placement))
+		mark = entry.side === :right ? :xref : :yref
+		item.coloraxis === nothing && get(placement, mark, nothing) === nothing && push!(plan.ctx.released, item.index)
 	end
 	return nothing
 end
@@ -2917,12 +2952,15 @@ end
 Normalise the figure after a PlotlySupply constructor or mutator changed it
 (decision D10); returns whether anything was written.
 
-- M1: every root axis of a shared-axis (`matches`) group that has neither a
-  range nor an `autorange` entry gets `autorange = true` (plotly.js otherwise
-  collapses the group when another group has a fixed range).
+- M1: every root axis of a shared-axis (`matches`) group without an
+  `autorange` entry gets one: `true`, or `false` when it has a range
+  (plotly.js 2.35 otherwise collapses a group, or carries one group's fixed
+  range over to the next, Y37).
 - M2: axes that carry a field trace (`_fin_field_kind`) and autorange get the
   sticky clip (`_fin_sticky_clip`), or are pinned to it on an equal-aspect
-  cell; see `_fin_sticky_updates!`.
+  cell (`autorange = false`; a reversed axis gets a descending `range`); data
+  of other traces beyond the field widens it by `_FIN_OVERLAY_PAD` of the
+  span on that side; see `_fin_sticky_updates!`.
 - M3: equal-aspect cells are fitted into their grid cell (inset, or paper),
   less the room their other decorations take (D12), their x axis shrinks
   toward its colorbar (`constraintoward = "right"`), and their colorbars are
@@ -2943,6 +2981,8 @@ Normalise the figure after a PlotlySupply constructor or mutator changed it
   evidence that the shrink is ours (D12). A coloraxis bar placed before the
   mutation bound existing traces to it moves next to all of its plot areas.
   The right margin grows to fit a math colorbar title drawn beside its bar.
+  The fit and the room solve run again after a pass that wrote (at most
+  `_FIN_FIT_ROUNDS`), so a second call writes nothing.
 
 Explicit user settings (ranges, `autorangeoptions`, domains outside the cell,
 placed colorbars) are never changed. `live` holds the traces of the live
@@ -2994,7 +3034,7 @@ function _fin_context(fig, live, size, clone_readonly::Bool)
 		host === nothing || push!(hosts, _fin_axis_key(host.key))
 	end
 	return _FinContext(target, p, sf, readonly, clone_readonly, checked_size,
-		live === nothing ? nothing : collect(Any, live), insets, hosts, Ref{Any}(nothing))
+		live === nothing ? nothing : collect(Any, live), insets, hosts, Ref{Any}(nothing), Set{Int}())
 end
 
 """
