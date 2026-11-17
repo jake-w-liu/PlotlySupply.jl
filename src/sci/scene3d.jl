@@ -295,6 +295,15 @@ function _s3_choice(value, choices, who::AbstractString, name::AbstractString)
 	return String(value)
 end
 
+# `colorbar_title_side`: :top, :right or :bottom (strings are accepted too).
+function _s3_title_side(value, who::AbstractString)
+	side = value isa AbstractString ? Symbol(value) : value
+	(side isa Symbol && side in _CBAR_TITLE_SIDES) || throw(ArgumentError(
+		"$(who): `colorbar_title_side` must be :top, :right or :bottom; got $(repr(value)).",
+	))
+	return side
+end
+
 const _S3_ASPECTMODES = ("auto", "cube", "data", "manual")
 const _S3_LINE_DASHES = ("solid", "dot", "dash", "longdash", "dashdot", "longdashdot")
 const _S3_MARKER_SYMBOLS = (
@@ -428,8 +437,9 @@ function _s3_check_numeric_array(values, who::AbstractString, name::AbstractStri
 end
 
 # Boolean masks serialize as JSON true/false, which plotly treats as
-# categories; send them as 0/1 instead. Other arrays are returned as the same
-# object (lazy payloads keep their identity).
+# categories; send them as 0/1 instead. Every 3-D coordinate, vector and value
+# array goes through this (#92). Other arrays are returned as the same object
+# (lazy payloads keep their identity).
 _s3_plottable(values) = (values isa AbstractArray && eltype(values) <: Bool) ? UInt8.(values) : values
 
 # Every element must be a real number (non-finite values are allowed and
@@ -576,11 +586,32 @@ _s3_constructor_layout() = Layout(
 	),
 )
 
+# What PlotlySupply set automatically in a scene before a 3-D call, so the
+# call may update it (`_s3_scene_state`, `_s3_finish_scene!`): `pinned`, a
+# manual aspect equal to the equal-unit ("data") ratios of the current spans
+# (written for explicit ranges or by `view!`); `auto_camera`, a camera without
+# an eye or with the eye at the automatic distance for the current box and
+# viewport. A cube-shaped manual aspect is never taken as pinned: a user's
+# (1, 1, 1) cannot be told apart.
+struct _S3SceneState
+	pinned::Bool
+	auto_camera::Bool
+end
+
+const _S3_NEW_SCENE = _S3SceneState(false, true)
+
 # Write the validated options. Constructors apply the default template;
 # mutators keep the figure's template and only refresh the legend. The camera
 # (`view`) is applied last because its automatic distance depends on the
 # figure size and the scene aspect.
-function _s3_apply_options!(fig, opts::_S3Options, who::AbstractString; constructor::Bool, scenekey::Symbol = :scene)
+function _s3_apply_options!(
+	fig,
+	opts::_S3Options,
+	who::AbstractString;
+	constructor::Bool,
+	scenekey::Symbol = :scene,
+	state::Union{Nothing, _S3SceneState} = nothing,
+)
 	_apply_figure_title!(fig, opts.title)
 	scene = Dict{Symbol, Any}()
 	opts.aspectmode === nothing || (scene[:aspectmode] = opts.aspectmode)
@@ -601,14 +632,34 @@ function _s3_apply_options!(fig, opts::_S3Options, who::AbstractString; construc
 	end
 	isempty(scene) || _merge_scene_layout_attr!(_plot_layout(fig), scenekey, attr(; scene...))
 	_apply_figure_size!(fig, who; width = opts.width, height = opts.height)
-	constructor ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	# A legend first created by an append gets the box of the figure's own
+	# template (dark on plotly_dark), as in the other families (X13).
+	constructor ? _apply_default_template!(fig) :
+		_apply_default_legend!(fig; _figure_legend_defaults(fig)...)
 	_apply_figure_fontsize!(fig, who, opts.fontsize)
-	if opts.view !== nothing
-		target = _cell_target(fig; who = who)
-		target.kind === :scene &&
-			_s3_apply_view!(fig, target, _S3ViewParams(opts.view[1], opts.view[2], :auto, :z, nothing, 1.0))
+	(opts.view === nothing && state === nothing) && return nothing
+	target = _cell_target(fig; who = who)
+	(target.kind === :scene && target.scenekey === scenekey) || return nothing
+	if state !== nothing
+		# An aspect mode given now replaces what was pinned automatically.
+		opts.aspectmode === nothing || (state = _S3SceneState(false, state.auto_camera))
+		_s3_finish_scene!(fig, target, state; frame = opts.view === nothing)
 	end
+	opts.view === nothing ||
+		_s3_apply_view!(fig, target, _S3ViewParams(opts.view[1], opts.view[2], :auto, :z, nothing, 1.0))
 	return nothing
+end
+
+# The scene state a Plot-level mutator records before it adds traces
+# (`_s3_finish_scene!`), or `nothing` when there is nothing to finish: inside
+# the SubplotFigure delegate (the staged figure is empty; `_s3_subplot!`
+# finishes the real cell) or when `fig` holds no 3-D scene yet.
+function _s3_mutator_state(fig, who::AbstractString)
+	_S3_CELL_CONTEXT[] === nothing || return nothing
+	isempty(_plot_data(fig)) && return _S3_NEW_SCENE
+	target = _cell_target(fig; who = who)
+	(target.kind === :scene && target.scenekey === :scene) || return nothing
+	return _s3_scene_state(fig, target)
 end
 
 # `show = true` opens an Electron window sized like the figure; 960×720 and
@@ -709,7 +760,12 @@ function _s3_color_doc(colorscale_default::AbstractString, note::AbstractString)
 	- `showscale::Union{Nothing, Bool} = nothing`: show or hide the colorbar
 	  (`nothing`: plotly's default).
 	- `colorbar_title::AbstractString = ""`: colorbar title (TeX is typeset by
-	  MathJax).
+	  MathJax; a `\$…\$` title is drawn as a layout annotation named
+	  `"plotlysupply:colorbar_title:<scene or coloraxis id>:<side>"` next to the
+	  bar, because plotly.js misplaces MathJax colorbar titles).
+	- `colorbar_title_side = :top`: where the title sits: `:top`, `:right`
+	  (rotated along the bar, right of the tick labels) or `:bottom`. Other
+	  values throw, even without a title.
 	- `colorbar_ticks = nothing`, `colorbar_ticklabels = nothing`: colorbar tick
 	  positions (data values) and their labels.
 	- `coloraxis = nothing`: `:shared` (= "coloraxis") or "coloraxis2", …:
@@ -779,11 +835,15 @@ function _s3_color_spec(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
 	log_unsupported::AbstractString = "",
 )
+	# Validated even without a title, so a typo never passes silently.
+	title_side = _s3_title_side(colorbar_title_side, who)
+	title = _colorbar_title_attr(colorbar_title, title_side; who = who)
 	norm = _normalize_colornorm(colornorm, who)
 	if norm === :log && !isempty(log_unsupported)
 		throw(ArgumentError("$(who): colornorm=:log is not supported here: $(log_unsupported)"))
@@ -813,12 +873,14 @@ function _s3_color_spec(
 	if colorbar_ticklabels !== nothing && ticktext !== nothing
 		ticktext = String[_label(label) for label in ticktext]
 	end
-	colorbar = _colorbar_attr(
-		title = isempty(colorbar_title) ? "" : _label(colorbar_title),
-		ticks = res.tickvals,
-		ticklabels = ticktext,
-		who = who,
-	)
+	colorbar = _colorbar_attr(ticks = res.tickvals, ticklabels = ticktext, who = who)
+	if title !== nothing
+		# `title.side` comes from `colorbar_title_side`; a math title is moved
+		# to an annotation by `_colorbar_math_titles!` once the trace is placed.
+		bar = colorbar === nothing ? Dict{Symbol, Any}() : _symbol_dict(colorbar)
+		bar[:title] = title
+		colorbar = attr(; bar...)
+	end
 	colorbar === nothing || (fields[:colorbar] = colorbar)
 	if coloraxis === nothing
 		merge!(trace, fields)
@@ -831,13 +893,14 @@ end
 
 # True when any colour-scale keyword differs from its default; used to reject
 # them next to a uniform colour.
-function _s3_colormap_requested(; colorscale, crange, cmid, colornorm, levels, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis)
+function _s3_colormap_requested(; colorscale, crange, cmid, colornorm, levels, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who::AbstractString)
 	return !_is_unset_colorscale(colorscale) ||
 		!_is_auto_range(crange) ||
 		cmid !== nothing ||
 		!(colornorm === :linear || colornorm == "linear") ||
 		levels !== nothing ||
 		!isempty(colorbar_title) ||
+		_s3_title_side(colorbar_title_side, who) !== :top ||
 		colorbar_ticks !== nothing ||
 		colorbar_ticklabels !== nothing ||
 		coloraxis !== nothing
@@ -976,31 +1039,85 @@ _s3_trace_in_scene(trace, id::String) =
 	String(get(trace.fields, :type, "")) in _S3_TRACE_TYPES &&
 	String(get(trace.fields, :scene, "scene")) == id
 
-# Extent of each scene axis in plotly's axis units: an explicit range, else
-# the data extent of the scene's traces (equal bounds count as 2, plotly's
-# ±1 autorange padding). `nothing` when some axis has neither.
+# `aspectmode` of a scene layout entry ("auto" when unset, plotly's default).
+function _s3_scene_aspectmode(scene)
+	value = _cmn_mapping_get(scene, :aspectmode)
+	return value isa Union{AbstractString, Symbol} ? String(value) : "auto"
+end
+
+# The manual aspect ratios of a scene (plotly.js defaults each to 1).
+_s3_manual_ratio(scene) =
+	[_s3_number_field(_cmn_mapping_get(scene, :aspectratio), key, 1.0; positive = true) for key in (:x, :y, :z)]
+
+# (lo, hi) of an explicit numeric scene-axis range in plotly's axis units
+# (log10 exponents on a log axis), or `nothing` when the axis autoranges.
+function _s3_explicit_range(axis_fields)
+	explicit = _cmn_mapping_get(axis_fields, :range)
+	((explicit isa AbstractVector || explicit isa Tuple) && length(explicit) == 2) || return nothing
+	all(b -> _s3_is_real(b) && isfinite(b), explicit) || return nothing
+	explicit[1] == explicit[2] && return nothing
+	return (Float64(explicit[1]), Float64(explicit[2]))
+end
+
+_s3_has_explicit_range(scene) =
+	any(axis -> _s3_explicit_range(_cmn_mapping_get(scene, axis)) !== nothing, (:xaxis, :yaxis, :zaxis))
+
+# Data extent (lo, hi) of scene axis `d` (1 = x, 2 = y, 3 = z) in axis units:
+# the finite values of the scene's 3-D traces (log10 of the positive ones on a
+# log axis) and the positions of its visible annotations (already in axis
+# units), which plotly.js gl3d both counts. `nothing` without a finite value.
+function _s3_data_bounds(p::Plot, scenekey::Symbol, d::Int)
+	scene = get(p.layout.fields, scenekey, nothing)
+	axis = (:xaxis, :yaxis, :zaxis)[d]
+	coordinate = (:x, :y, :z)[d]
+	log_axis = _cmn_mapping_get(_cmn_mapping_get(scene, axis), :type) == "log"
+	bounds = [Inf, -Inf]
+	id = String(scenekey)
+	for trace in p.data
+		_s3_trace_in_scene(trace, id) || continue
+		_s3_extend_bounds!(bounds, get(trace.fields, coordinate, nothing), log_axis)
+	end
+	annotations = _cmn_mapping_get(scene, :annotations)
+	if annotations isa AbstractVector
+		for item in annotations
+			_cmn_mapping_get(item, :visible) === false && continue
+			_s3_extend_bounds!(bounds, Any[_cmn_mapping_get(item, coordinate)], false)
+		end
+	end
+	return bounds[1] <= bounds[2] ? (bounds[1], bounds[2]) : nothing
+end
+
+# Drawn span of each scene axis in plotly's axis units: an explicit range as
+# given, else the data extent padded by 1/32 of itself on each side, or 2 for
+# a single value (plotly.js gl3d autorange: `lo -= P/32, hi += P/32`, then
+# `lo == hi` widens to ±1). `nothing` when some axis has neither.
 function _s3_scene_spans(p::Plot, scenekey::Symbol)
 	scene = get(p.layout.fields, scenekey, nothing)
-	id = String(scenekey)
 	spans = zeros(3)
-	for (d, axis, coordinate) in ((1, :xaxis, :x), (2, :yaxis, :y), (3, :zaxis, :z))
-		axis_fields = _cmn_mapping_get(scene, axis)
-		explicit = _cmn_mapping_get(axis_fields, :range)
-		if (explicit isa AbstractVector || explicit isa Tuple) && length(explicit) == 2 &&
-				all(b -> _s3_is_real(b) && isfinite(b), explicit) && explicit[1] != explicit[2]
-			spans[d] = abs(Float64(explicit[2]) - Float64(explicit[1]))
+	for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
+		explicit = _s3_explicit_range(_cmn_mapping_get(scene, axis))
+		if explicit !== nothing
+			spans[d] = abs(explicit[2] - explicit[1])
 			continue
 		end
-		log_axis = _cmn_mapping_get(axis_fields, :type) == "log"
-		bounds = [Inf, -Inf]
-		for trace in p.data
-			_s3_trace_in_scene(trace, id) || continue
-			_s3_extend_bounds!(bounds, get(trace.fields, coordinate, nothing), log_axis)
-		end
-		bounds[1] <= bounds[2] || return nothing
-		spans[d] = bounds[2] > bounds[1] ? bounds[2] - bounds[1] : 2.0
+		bounds = _s3_data_bounds(p, scenekey, d)
+		bounds === nothing && return nothing
+		extent = bounds[2] - bounds[1]
+		spans[d] = extent > 0 ? extent * 17 / 16 : 2.0
 	end
 	return spans
+end
+
+# Aspect ratios (largest 1) that give the scene's drawn spans the proportions
+# `mode` asks for: "data" equal units on all axes, "auto" the same unless one
+# span exceeds four times another, then a cube (plotly.js's rule). `nothing`
+# when the spans are unknown.
+function _s3_derived_aspect(p::Plot, scenekey::Symbol, mode::AbstractString)
+	spans = _s3_scene_spans(p, scenekey)
+	spans === nothing && return nothing
+	largest = maximum(spans)
+	mode == "auto" && largest / minimum(spans) > 4 && return ones(3)
+	return spans ./ largest
 end
 
 # The scene's aspect ratios `a` (largest 1 for automatic modes) and whether
@@ -1008,22 +1125,123 @@ end
 # a camera that depends on them pins them with `aspectmode = "manual"`.
 function _s3_effective_aspect(p::Plot, scenekey::Symbol)
 	scene = get(p.layout.fields, scenekey, nothing)
-	mode_value = _cmn_mapping_get(scene, :aspectmode)
-	mode = mode_value isa Union{AbstractString, Symbol} ? String(mode_value) : "auto"
-	if mode == "manual"
-		ratio = _cmn_mapping_get(scene, :aspectratio)
-		# plotly.js's aspectratio defaults are 1 per axis.
-		return ([_s3_number_field(ratio, key, 1.0; positive = true) for key in (:x, :y, :z)], false)
-	elseif mode == "cube"
-		return (ones(3), false)
+	mode = _s3_scene_aspectmode(scene)
+	mode == "manual" && return (_s3_manual_ratio(scene), false)
+	mode == "cube" && return (ones(3), false)
+	derived = _s3_derived_aspect(p, scenekey, mode)
+	derived === nothing && return (ones(3), false)
+	return (derived, true)
+end
+
+# The box plotly.js draws for the scene, in the units of the camera: the
+# manual ratios, a unit cube for "cube", and for "auto"/"data" the data
+# extents (1 for a single value) divided by their geometric mean over the axes
+# of the same type, with "auto" falling back to the cube when one exceeds four
+# times another (gl3d scene layout, plotly.js 2.35.2). Unlike
+# `_s3_effective_aspect` it predicts an unpinned "auto"/"data" scene exactly.
+# `nothing` when the data cannot tell.
+function _s3_drawn_box(p::Plot, scenekey::Symbol)
+	scene = get(p.layout.fields, scenekey, nothing)
+	mode = _s3_scene_aspectmode(scene)
+	mode == "manual" && return _s3_manual_ratio(scene)
+	mode == "cube" && return ones(3)
+	extents = zeros(3)
+	types = String[]
+	for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
+		bounds = _s3_data_bounds(p, scenekey, d)
+		bounds === nothing && return nothing
+		extents[d] = bounds[2] > bounds[1] ? bounds[2] - bounds[1] : 1.0
+		axis_type = _cmn_mapping_get(_cmn_mapping_get(scene, axis), :type)
+		push!(types, axis_type isa AbstractString && !isempty(axis_type) ? String(axis_type) : "linear")
 	end
-	spans = _s3_scene_spans(p, scenekey)
-	spans === nothing && return (ones(3), false)
-	largest = maximum(spans)
-	# plotly.js "auto" draws a cube when one axis spans more than four times
-	# another (gl3d scene layout), otherwise the data proportions.
-	mode != "data" && largest / minimum(spans) > 4 && return (ones(3), true)
-	return (spans ./ largest, true)
+	box = map(1:3) do d
+		group = [extents[k] for k in 1:3 if types[k] == types[d]]
+		extents[d] / prod(group)^(1 / length(group))
+	end
+	mode == "auto" && maximum(box) / minimum(box) > 4 && return ones(3)
+	return box
+end
+
+# Camera distance that frames a scene box `box` (the full side lengths) in the
+# target's viewport: the bounding sphere fills the narrower field of view.
+function _s3_auto_distance(fig, target::_CellTarget, box, zoom::Float64 = 1.0)
+	width, height = _s3_viewport(fig, target)
+	radius = 0.5 * sqrt(sum(abs2, box))
+	half_angle = atan(min(1.0, width / height) * tan(_S3_HALF_FOVY))
+	return _S3_FRAMING * radius / sin(half_angle) / zoom
+end
+
+_s3_vector3(mapping, default::Float64 = 0.0) = [
+	(value = _cmn_mapping_get(mapping, key); (_s3_is_real(value) && isfinite(value)) ? Float64(value) : default)
+	for key in (:x, :y, :z)
+]
+
+function _s3_scene_state(fig, target::_CellTarget)
+	p = _cmn_plot(fig)
+	key = target.scenekey
+	scene = get(p.layout.fields, key, nothing)
+	pinned = false
+	if _s3_scene_aspectmode(scene) == "manual"
+		derived = _s3_derived_aspect(p, key, "data")
+		pinned = derived !== nothing && !all(isone, derived) &&
+			isapprox(_s3_manual_ratio(scene), derived; rtol = 1e-9)
+	end
+	camera = _cmn_mapping_get(scene, :camera)
+	eye = _cmn_mapping_get(camera, :eye)
+	auto_camera = eye === nothing
+	if !auto_camera
+		box = _s3_drawn_box(p, key)
+		offset = _s3_vector3(eye, NaN) .- _s3_vector3(_cmn_mapping_get(camera, :center))
+		auto_camera = box !== nothing && all(isfinite, offset) &&
+			isapprox(sqrt(sum(abs2, offset)), _s3_auto_distance(fig, target, box); rtol = 1e-9)
+	end
+	return _S3SceneState(pinned, auto_camera)
+end
+
+# Direction of plotly.js's default camera eye (1.25, 1.25, 1.25).
+const _S3_DEFAULT_EYE_DIRECTION = (1.0, 1.0, 1.0) ./ sqrt(3.0)
+
+# After a 3-D call changed a scene (`state` taken before it):
+# 1. aspect: plotly.js scales "auto"/"data" scenes by the data extents and
+#    ignores explicit axis ranges, which distorts a scene with a range. Such a
+#    scene is written as `aspectmode = "manual"` with the ratios of the drawn
+#    spans (equal units for "data"); a scene pinned before is re-derived.
+# 2. camera (`frame`): a perspective camera without an eye, or at the
+#    automatic distance, is moved to the automatic distance for the new box
+#    and the scene's viewport, keeping its direction (plotly's default
+#    direction when it had none), so the scene neither overflows its domain
+#    (plotly's fixed default eye clips elongated and narrow scenes) nor goes
+#    stale when data is added.
+function _s3_finish_scene!(fig, target::_CellTarget, state::_S3SceneState; frame::Bool = true)
+	p = _cmn_plot(fig)
+	key = target.scenekey
+	scene = get(p.layout.fields, key, nothing)
+	mode = _s3_scene_aspectmode(scene)
+	pin_mode = (mode in ("auto", "data") && _s3_has_explicit_range(scene)) ? mode :
+		(mode == "manual" && state.pinned) ? "data" : nothing
+	if pin_mode !== nothing
+		derived = _s3_derived_aspect(p, key, pin_mode)
+		derived === nothing || _merge_scene_layout_attr!(p.layout, key, attr(
+			aspectmode = "manual",
+			aspectratio = attr(x = derived[1], y = derived[2], z = derived[3]),
+		))
+	end
+	(frame && state.auto_camera) || return nothing
+	scene = get(p.layout.fields, key, nothing)
+	camera = _cmn_mapping_get(scene, :camera)
+	_cmn_mapping_get(_cmn_mapping_get(camera, :projection), :type) == "orthographic" && return nothing
+	box = _s3_drawn_box(p, key)
+	box === nothing && return nothing
+	center = _s3_vector3(_cmn_mapping_get(camera, :center))
+	eye = _cmn_mapping_get(camera, :eye)
+	offset = eye === nothing ? fill(NaN, 3) : _s3_vector3(eye, NaN) .- center
+	current = sqrt(sum(abs2, offset))
+	direction = (isfinite(current) && current > 0) ? offset ./ current : collect(_S3_DEFAULT_EYE_DIRECTION)
+	position = center .+ _s3_auto_distance(fig, target, box) .* direction
+	_merge_scene_layout_attr!(p.layout, key, attr(
+		camera = attr(eye = attr(x = position[1], y = position[2], z = position[3])),
+	))
+	return nothing
 end
 
 struct _S3ViewParams
@@ -1094,10 +1312,7 @@ function _s3_apply_view!(fig, target::_CellTarget, params::_S3ViewParams)
 		end
 	elseif params.distance === :auto
 		aspect, from_data = _s3_effective_aspect(p, key)
-		width, height = _s3_viewport(fig, target)
-		radius = 0.5 * sqrt(sum(abs2, aspect))
-		half_angle = atan(min(1.0, width / height) * tan(_S3_HALF_FOVY))
-		distance = _S3_FRAMING * radius / sin(half_angle) / params.zoom
+		distance = _s3_auto_distance(fig, target, aspect, params.zoom)
 		if from_data
 			scene_fields[:aspectmode] = "manual"
 			scene_fields[:aspectratio] = attr(x = aspect[1], y = aspect[2], z = aspect[3])
@@ -1393,7 +1608,11 @@ function scene!(
 		end
 		isempty(fields) || (scene[axis] = attr(; fields...))
 	end
+	state = _s3_scene_state(fig, target)
+	# An aspect set now replaces what was pinned automatically.
+	(mode === nothing) || (state = _S3SceneState(false, state.auto_camera))
 	isempty(scene) || _merge_scene_layout_attr!(layout, key, attr(; scene...))
+	_s3_finish_scene!(fig, target, state)
 	_refresh!(fig)
 	return fig
 end
@@ -1531,7 +1750,10 @@ function annotate!(
 		end
 	end
 	push!(kept, attr(; entry...))
+	# Scene annotations count in plotly's scene extent (camera framing).
+	state = _s3_scene_state(fig, target)
 	_merge_scene_layout_attr!(layout, target.scenekey, attr(annotations = kept))
+	_s3_finish_scene!(fig, target, state)
 	_refresh!(fig)
 	return fig
 end
@@ -1571,17 +1793,95 @@ function _s3_write_coloraxis!(fig, spec::_S3ColorSpec)
 	return nothing
 end
 
-function _s3_construct(traces::Vector{GenericTrace}, specs, opts::_S3Options, who::AbstractString, show::Bool)
+# Draw the math colorbar titles of the traces `first_index:end` and of the
+# colour axes of `specs` as annotations (X1). Run after the options, because
+# the annotation offsets depend on the font size. Inside the SubplotFigure
+# delegate `_colorbar_math_titles!` does nothing: the delegate converts the
+# titles once the bars are placed in the cell. A colour axis given a new
+# plain title loses the annotation an earlier math title left.
+function _s3_colorbar_titles!(fig, first_index::Int, specs)
+	ids = String[]
+	for spec in specs
+		(spec.axis === nothing || spec.axis in ids) && continue
+		push!(ids, spec.axis)
+		title = _cmn_mapping_get(get(spec.axis_fields, :colorbar, nothing), :title)
+		title === nothing && continue
+		_cbar_is_math(_cmn_mapping_get(title, :text)) ||
+			_cbar_remove_title_annotation!(_plot_obj(fig), spec.axis)
+	end
+	_colorbar_math_titles!(fig, first_index:length(_plot_data(fig)); coloraxes = ids)
+	return nothing
+end
+
+# Style defaults (X10) for the line traces a scatter3d, wireframe or
+# segments3d call adds: `explicit` names the keywords that are never filled
+# from the active `PlotStyle` (see `_apply_style_trace_defaults!`), and
+# `fallback_width` is written where neither the caller nor the style set a
+# line width.
+struct _S3StyleRequest
+	explicit::Tuple{Vararg{Symbol}}
+	fallback_width::Union{Nothing, Float64}
+end
+
+# scatter3d takes every style default; `mode` counts as set when given.
+_s3_scatter3d_style(mode) = _S3StyleRequest(mode === nothing ? () : (:mode,), nothing)
+
+# Wireframes and segments are line collections (matplotlib styles them with
+# `lines.linewidth` only, not with the property cycle): only the style's line
+# width applies, else 1 px as in 1.x; an explicit `linewidth` (0 = plotly's
+# default) is kept.
+_s3_collection_style(linewidth) = _S3StyleRequest(
+	linewidth === nothing ? (:dash, :marker_size, :marker_symbol, :mode) :
+		(:linewidth, :dash, :marker_size, :marker_symbol, :mode),
+	linewidth === nothing ? 1.0 : nothing,
+)
+
+function _s3_apply_style!(fig, first_index::Int, request::_S3StyleRequest)
+	data = _plot_data(fig)
+	indices = first_index:length(data)
+	_apply_style_trace_defaults!(fig, indices; explicit = request.explicit)
+	request.fallback_width === nothing && return nothing
+	for index in indices
+		fields = data[index].fields
+		line = _symbol_dict(get(fields, :line, nothing))
+		_style_value_unset(get(line, :width, nothing)) || continue
+		line[:width] = request.fallback_width
+		fields[:line] = attr(; line...)
+	end
+	return nothing
+end
+
+function _s3_construct(
+	traces::Vector{GenericTrace},
+	specs,
+	opts::_S3Options,
+	who::AbstractString,
+	show::Bool;
+	style::Union{Nothing, _S3StyleRequest} = nothing,
+)
 	fig = Plot(traces, _s3_constructor_layout())
 	foreach(spec -> _s3_write_coloraxis!(fig, spec), specs)
-	_s3_apply_options!(fig, opts, who; constructor = true)
+	style === nothing || _s3_apply_style!(fig, 1, style)
+	_s3_apply_options!(fig, opts, who; constructor = true, state = _S3_NEW_SCENE)
+	_s3_colorbar_titles!(fig, 1, specs)
 	return _s3_show(fig, show, opts)
 end
 
-function _s3_append!(fig, traces::Vector{GenericTrace}, specs, opts::_S3Options, who::AbstractString)
+function _s3_append!(
+	fig,
+	traces::Vector{GenericTrace},
+	specs,
+	opts::_S3Options,
+	who::AbstractString;
+	style::Union{Nothing, _S3StyleRequest} = nothing,
+)
+	state = _s3_mutator_state(fig, who)
+	first_index = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	foreach(spec -> _s3_write_coloraxis!(fig, spec), specs)
-	_s3_apply_options!(fig, opts, who; constructor = false)
+	style === nothing || _s3_apply_style!(fig, first_index, style)
+	_s3_apply_options!(fig, opts, who; constructor = false, state)
+	_s3_colorbar_titles!(fig, first_index, specs)
 	_refresh!(fig)
 	return nothing
 end
@@ -1701,6 +2001,7 @@ function _s3_surface_trace(
 	levels,
 	showscale,
 	colorbar_title,
+	colorbar_title_side,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -1744,7 +2045,7 @@ function _s3_surface_trace(
 			"$(who): a uniform `color` cannot be combined with `surfacecolor`.",
 		))
 		_s3_colormap_requested(; colorscale, crange, cmid, colornorm, levels, colorbar_title,
-			colorbar_ticks, colorbar_ticklabels, coloraxis = axis) && throw(ArgumentError(
+			colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis = axis, who) && throw(ArgumentError(
 			"$(who): a uniform `color` cannot be combined with colour-scale keywords " *
 			"(colorscale, crange, cmid, colornorm, levels, colorbar_*, coloraxis, shared_coloraxis).",
 		))
@@ -1764,6 +2065,7 @@ function _s3_surface_trace(
 			levels,
 			showscale,
 			colorbar_title,
+			colorbar_title_side,
 			colorbar_ticks,
 			colorbar_ticklabels,
 			coloraxis = axis,
@@ -1847,6 +2149,7 @@ function plot_surface(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -1875,7 +2178,7 @@ function plot_surface(
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	trace, spec = _s3_surface_trace(nothing, X, Y, Z; surfacecolor, color, opacity, lighting, edges,
 		edgecolor, edgewidth, colorscale, crange, cmid, colornorm, levels, showscale, colorbar_title,
-		colorbar_ticks, colorbar_ticklabels, coloraxis, shared_coloraxis, who)
+		colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, shared_coloraxis, who)
 	return _s3_construct(GenericTrace[trace], (spec,), opts, who, show)
 end
 
@@ -1905,6 +2208,7 @@ function plot_surface!(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -1932,11 +2236,14 @@ function plot_surface!(
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	trace, spec = _s3_surface_trace(fig, X, Y, Z; surfacecolor, color, opacity, lighting, edges,
 		edgecolor, edgewidth, colorscale, crange, cmid, colornorm, levels, showscale, colorbar_title,
-		colorbar_ticks, colorbar_ticklabels, coloraxis, shared_coloraxis, who)
+		colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, shared_coloraxis, who)
+	state = _s3_mutator_state(fig, who)
+	first_index = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), GenericTrace[trace])
 	_s3_write_coloraxis!(fig, spec)
 	shared_coloraxis && _s3_link_shared_surfaces!(_plot_obj(fig), !_is_unset_colorscale(colorscale))
-	_s3_apply_options!(fig, opts, who; constructor = false)
+	_s3_apply_options!(fig, opts, who; constructor = false, state)
+	_s3_colorbar_titles!(fig, first_index, (spec,))
 	_refresh!(fig)
 	return nothing
 end
@@ -2104,9 +2411,9 @@ function _s3_scatter3d_trace(
 	width_value > 0 && (line[:width] = linewidth)
 	isempty(dash_value) || (line[:dash] = dash_value)
 	fields = Dict{Symbol, Any}(
-		:x => x,
-		:y => y,
-		:z => z,
+		:x => _s3_plottable(x),
+		:y => _s3_plottable(y),
+		:z => _s3_plottable(z),
 		:mode => trace_mode,
 		:line => attr(; line...),
 		:name => String(legend),
@@ -2148,6 +2455,7 @@ function _s3_scatter3d_traces(
 	for (name, values) in (("x", x), ("y", y), ("z", z))
 		eltype(values) <: Complex && _s3_check_numeric_array(values, who, name)
 	end
+	mode === nothing && (mode = "")
 	color = _s3_color_text(color)
 	marker_color = _s3_color_text(marker_color)
 	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x)
@@ -2232,7 +2540,7 @@ function plot_scatter3d(
 	x::AbstractVector,
 	y::AbstractVector,
 	z::AbstractVector;
-	mode::Union{AbstractString, AbstractVector{<:AbstractString}} = "lines",
+	mode::Union{Nothing, AbstractString, AbstractVector{<:AbstractString}} = nothing,
 	color::Union{AbstractString, Symbol, AbstractVector{<:Union{AbstractString, Symbol}}} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	marker_size::Union{Real, AbstractVector{<:Real}} = 0,
@@ -2269,7 +2577,7 @@ function plot_scatter3d(
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	traces = _s3_scatter3d_traces(nothing, x, y, z; mode, color, legend, marker_size, marker_symbol,
 		marker_color, linewidth, dash, opacity, text, textposition, textsize, showlegend, who)
-	return _s3_construct(traces, (), opts, who, show)
+	return _s3_construct(traces, (), opts, who, show; style = _s3_scatter3d_style(mode))
 end
 
 function plot_scatter3d!(
@@ -2277,7 +2585,7 @@ function plot_scatter3d!(
 	x::AbstractVector,
 	y::AbstractVector,
 	z::AbstractVector;
-	mode::Union{AbstractString, AbstractVector{<:AbstractString}} = "lines",
+	mode::Union{Nothing, AbstractString, AbstractVector{<:AbstractString}} = nothing,
 	color::Union{AbstractString, Symbol, AbstractVector{<:Union{AbstractString, Symbol}}} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	marker_size::Union{Real, AbstractVector{<:Real}} = 0,
@@ -2313,22 +2621,26 @@ function plot_scatter3d!(
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	traces = _s3_scatter3d_traces(fig, x, y, z; mode, color, legend, marker_size, marker_symbol,
 		marker_color, linewidth, dash, opacity, text, textposition, textsize, showlegend, who)
-	return _s3_append!(fig, traces, (), opts, who)
+	return _s3_append!(fig, traces, (), opts, who; style = _s3_scatter3d_style(mode))
 end
 
 const _S3_SCATTER3D_KEYWORDS_DOC = raw"""
-- `mode = "lines"`: "lines", "markers", "lines+markers", "text", "none" or
-  another "+"-joined combination (`""` means "lines").
+- `mode = nothing`: "lines", "markers", "lines+markers", "text", "none" or
+  another "+"-joined combination (`nothing` and `""` mean "lines"; when
+  `mode` is not given, a `PlotStyle` with a marker cycle adds markers).
 - `color = ""`: line colour (String or Symbol; the markers use it too unless
   `marker_color` is set); `""` takes the next colorway colour.
 - `legend = ""`: legend name.
 - `showlegend = nothing`: `true`/`false` shows or hides the legend entry.
-- `linewidth = 0`: line width in px (0: plotly's default).
+- `linewidth = 0`: line width in px (0: the active `PlotStyle`'s, else
+  plotly's default).
 - `dash = ""`: "solid", "dot", "dash", "longdash", "dashdot" or
-  "longdashdot" (`""`: solid).
-- `marker_size = 0`: marker size in px (0: plotly's default).
+  "longdashdot" (`""`: the style's dash cycle, else solid).
+- `marker_size = 0`: marker size in px (0: the style's, else plotly's
+  default).
 - `marker_symbol = ""`: "circle", "circle-open", "cross", "diamond",
-  "diamond-open", "square", "square-open" or "x".
+  "diamond-open", "square", "square-open" or "x" (`""`: the style's marker
+  cycle, else plotly's default).
 - `marker_color = ""`: marker colour (String or Symbol).
 - `opacity = 1`: in [0, 1]; """ * _S3_OPACITY_LINE_DOC * raw""" Markers are blended the same way.
 - `text = nothing`: point labels, one string per point or one string for all
@@ -2344,6 +2656,11 @@ const _S3_SCATTER3D_KEYWORDS_DOC = raw"""
 take a vector with one entry per series (missing entries take the default,
 extra entries are ignored); with several series `text` is a vector of
 per-series label vectors.
+
+Under a `PlotStyle` (`set_default_style!`/`with_style`) the unset line width, dash,
+marker size and marker symbol of each trace are filled from the style; the
+dash and marker cycles continue across `plot_scatter3d!` calls and, in a
+`SubplotFigure`, across the whole figure.
 """
 
 @doc _s3_doc(
@@ -2401,7 +2718,7 @@ function _s3_vector_field(who::AbstractString, arrays::Pair...)
 		_s3_array(values, who, name)
 	end
 	_s3_check_lengths(who, arrays...)
-	flat = map(((name, values),) -> _s3_flat(values), arrays)
+	flat = map(((name, values),) -> _s3_flat(_s3_plottable(values)), arrays)
 	for ((name, _), values) in zip(arrays, flat)
 		for (index, value) in pairs(values)
 			_s3_is_real(value) || throw(ArgumentError(
@@ -2439,6 +2756,7 @@ function _s3_quiver3d_traces(
 	levels,
 	showscale,
 	colorbar_title,
+	colorbar_title_side,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -2459,7 +2777,7 @@ function _s3_quiver3d_traces(
 		colorscale = ""
 	end
 	colormap = _s3_colormap_requested(; colorscale, crange, cmid, colornorm, levels, colorbar_title,
-		colorbar_ticks, colorbar_ticklabels, coloraxis)
+		colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 	if !isempty(uniform) && colormap
 		throw(ArgumentError(
 			"$(who): a uniform `color` cannot be combined with colour-scale keywords " *
@@ -2486,7 +2804,7 @@ function _s3_quiver3d_traces(
 		spec = _S3ColorSpec()
 		if isempty(uniform)
 			spec = _s3_color_spec(nothing, who; colorscale, crange, cmid, colornorm, levels, showscale,
-				colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis,
+				colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis,
 				log_unsupported = "cone colours are computed by plotly from the vector norms.")
 			merge!(fields, spec.trace)
 		else
@@ -2590,6 +2908,7 @@ function plot_quiver3d(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -2617,7 +2936,7 @@ function plot_quiver3d(
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	traces, specs = _s3_quiver3d_traces(nothing, x, y, z, u, v, w; style, sizemode, sizeref, anchor,
 		headsize, linewidth, color, legend, colorscale, crange, cmid, colornorm, levels, showscale,
-		colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
+		colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 	return _s3_construct(traces, specs, opts, who, show)
 end
 
@@ -2644,6 +2963,7 @@ function plot_quiver3d!(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -2670,7 +2990,7 @@ function plot_quiver3d!(
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	traces, specs = _s3_quiver3d_traces(fig, x, y, z, u, v, w; style, sizemode, sizeref, anchor,
 		headsize, linewidth, color, legend, colorscale, crange, cmid, colornorm, levels, showscale,
-		colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
+		colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 	return _s3_append!(fig, traces, specs, opts, who)
 end
 
@@ -2752,7 +3072,8 @@ warning. By default each cone is centred on its point (`anchor = "cm"`);
 function _s3_line_style(color, linewidth, dash, opacity, fig, scenekey::Symbol, who::AbstractString; default_color::AbstractString)
 	line_color = _s3_color(color, who, "color")
 	isempty(line_color) && (line_color = default_color)
-	width = _s3_nonnegative(linewidth, who, "linewidth")
+	# `nothing`: the width comes from the active style (`_s3_collection_style`).
+	width = linewidth === nothing ? 0.0 : _s3_nonnegative(linewidth, who, "linewidth")
 	dash_value = _s3_dash(dash, who)
 	alpha = _s3_unit_interval(opacity, who, "opacity")
 	line = Dict{Symbol, Any}(:color => _s3_line_color(line_color, alpha, fig, scenekey, who))
@@ -2787,7 +3108,8 @@ end
 
 # Non-finite coordinates become gaps (`_GAP`, JSON null) rather than NaN,
 # which strict JSON cannot carry.
-_s3_gap_value(value) = (_s3_is_real(value) && isfinite(value)) ? Float64(value) : _GAP
+# A Bool element is 0/1, as `_s3_plottable` draws Bool arrays.
+_s3_gap_value(value) = (value isa Real && isfinite(value)) ? Float64(value) : _GAP
 
 """
 	_mesh_edge_trace(x, y, z, faces; color, width, who) -> GenericTrace
@@ -2866,6 +3188,7 @@ function _s3_mesh3d_traces(
 	levels,
 	showscale,
 	colorbar_title,
+	colorbar_title_side,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -2874,7 +3197,7 @@ function _s3_mesh3d_traces(
 	for (name, values) in (("x", x), ("y", y), ("z", z))
 		_s3_array(values, who, name)
 	end
-	px, py, pz = _s3_flat(x), _s3_flat(y), _s3_flat(z)
+	px, py, pz = _s3_flat(_s3_plottable(x)), _s3_flat(_s3_plottable(y)), _s3_flat(_s3_plottable(z))
 	vertex_count = length(px)
 	(length(py) == vertex_count && length(pz) == vertex_count) || throw(ArgumentError(
 		"$(who): x, y, z must share length; got $(length(px)), $(length(py)), $(length(pz)).",
@@ -2903,7 +3226,7 @@ function _s3_mesh3d_traces(
 	end
 	uniform = _s3_uniform_color(color, who)
 	colormap = _s3_colormap_requested(; colorscale, crange, cmid, colornorm, levels, colorbar_title,
-		colorbar_ticks, colorbar_ticklabels, coloraxis)
+		colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 	spec = _S3ColorSpec()
 	if intensity !== nothing
 		(isempty(uniform) && facecolor === nothing) || throw(ArgumentError(
@@ -2930,7 +3253,7 @@ function _s3_mesh3d_traces(
 			"vertex"
 		end
 		spec = _s3_color_spec(_s3_plottable(values), who; values_key = :intensity, colorscale, crange,
-			cmid, colornorm, levels, showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis)
+			cmid, colornorm, levels, showscale, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis)
 		merge!(fields, spec.trace)
 		mode == "cell" && (fields[:intensitymode] = "cell")
 	else
@@ -3000,6 +3323,7 @@ function plot_mesh3d(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -3027,7 +3351,7 @@ function plot_mesh3d(
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	traces, specs = _s3_mesh3d_traces(nothing, x, y, z; i, j, k, intensity, intensitymode, facecolor,
 		color, opacity, flatshading, lighting, edges, edgecolor, edgewidth, legend, colorscale, crange,
-		cmid, colornorm, levels, showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels,
+		cmid, colornorm, levels, showscale, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels,
 		coloraxis, who)
 	return _s3_construct(traces, specs, opts, who, show)
 end
@@ -3058,6 +3382,7 @@ function plot_mesh3d!(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -3084,7 +3409,7 @@ function plot_mesh3d!(
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	traces, specs = _s3_mesh3d_traces(fig, x, y, z; i, j, k, intensity, intensitymode, facecolor,
 		color, opacity, flatshading, lighting, edges, edgecolor, edgewidth, legend, colorscale, crange,
-		cmid, colornorm, levels, showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels,
+		cmid, colornorm, levels, showscale, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels,
 		coloraxis, who)
 	return _s3_append!(fig, traces, specs, opts, who)
 end
@@ -3174,6 +3499,8 @@ function _s3_field_points(who::AbstractString, coordinates::NTuple{3, Any}, fiel
 	for (name, values) in fields
 		_s3_array(values, who, name)
 	end
+	coordinates = map(_s3_plottable, coordinates)
+	fields = map(field -> first(field) => _s3_plottable(last(field)), fields)
 	all_arrays = (coordinates..., map(last, fields)...)
 	count = length(first(all_arrays))
 	if all(a -> length(a) == count, all_arrays)
@@ -3232,6 +3559,7 @@ function _s3_field3d_trace(
 	levels,
 	showscale,
 	colorbar_title,
+	colorbar_title_side,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -3257,7 +3585,7 @@ function _s3_field3d_trace(
 		fields[:caps] = attr(x = attr(show = caps), y = attr(show = caps), z = attr(show = caps))
 	end
 	spec = _s3_color_spec(nothing, who; colorscale, crange, cmid, colornorm, levels, showscale,
-		colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis,
+		colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis,
 		log_unsupported = "plotly computes the $(kind) levels from the raw values; pass log10.(value) instead.")
 	merge!(fields, spec.trace)
 	return GenericTrace(kind; fields...), spec
@@ -3285,6 +3613,7 @@ for (fn, fn!, kind, default_opacity) in (
 			levels = nothing,
 			showscale::Union{Nothing, Bool} = nothing,
 			colorbar_title::AbstractString = "",
+			colorbar_title_side = :top,
 			colorbar_ticks = nothing,
 			colorbar_ticklabels = nothing,
 			coloraxis = nothing,
@@ -3312,7 +3641,7 @@ for (fn, fn!, kind, default_opacity) in (
 				aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 			trace, spec = _s3_field3d_trace($kind, x, y, z, value; isomin, isomax, surface_count,
 				opacity, caps, colorscale, crange, cmid, colornorm, levels, showscale, colorbar_title,
-				colorbar_ticks, colorbar_ticklabels, coloraxis, who)
+				colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 			return _s3_construct(GenericTrace[trace], (spec,), opts, who, show)
 		end
 
@@ -3334,6 +3663,7 @@ for (fn, fn!, kind, default_opacity) in (
 			levels = nothing,
 			showscale::Union{Nothing, Bool} = nothing,
 			colorbar_title::AbstractString = "",
+			colorbar_title_side = :top,
 			colorbar_ticks = nothing,
 			colorbar_ticklabels = nothing,
 			coloraxis = nothing,
@@ -3360,7 +3690,7 @@ for (fn, fn!, kind, default_opacity) in (
 				aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 			trace, spec = _s3_field3d_trace($kind, x, y, z, value; isomin, isomax, surface_count,
 				opacity, caps, colorscale, crange, cmid, colornorm, levels, showscale, colorbar_title,
-				colorbar_ticks, colorbar_ticklabels, coloraxis, who)
+				colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 			return _s3_append!(fig, GenericTrace[trace], (spec,), opts, who)
 		end
 	end
@@ -3381,6 +3711,7 @@ function _s3_streamtube_trace(
 	levels,
 	showscale,
 	colorbar_title,
+	colorbar_title_side,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -3391,7 +3722,7 @@ function _s3_streamtube_trace(
 	ref = _s3_nonnegative(sizeref, who, "sizeref")
 	ref > 0 && (fields[:sizeref] = sizeref)
 	spec = _s3_color_spec(nothing, who; colorscale, crange, cmid, colornorm, levels, showscale,
-		colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis,
+		colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis,
 		log_unsupported = "streamtube colours are computed by plotly from the vector norms.")
 	merge!(fields, spec.trace)
 	return GenericTrace("streamtube"; fields...), spec
@@ -3412,6 +3743,7 @@ function plot_streamtube(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -3438,7 +3770,7 @@ function plot_streamtube(
 	opts = _s3_constructor_options(who; xrange, yrange, zrange, xlabel, ylabel, zlabel,
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	trace, spec = _s3_streamtube_trace(x, y, z, u, v, w; sizeref, colorscale, crange, cmid, colornorm,
-		levels, showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
+		levels, showscale, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 	return _s3_construct(GenericTrace[trace], (spec,), opts, who, show)
 end
 
@@ -3458,6 +3790,7 @@ function plot_streamtube!(
 	levels = nothing,
 	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
+	colorbar_title_side = :top,
 	colorbar_ticks = nothing,
 	colorbar_ticklabels = nothing,
 	coloraxis = nothing,
@@ -3483,7 +3816,7 @@ function plot_streamtube!(
 	opts = _s3_options(who, fig; xrange, yrange, zrange, xlabel, ylabel, zlabel,
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	trace, spec = _s3_streamtube_trace(x, y, z, u, v, w; sizeref, colorscale, crange, cmid, colornorm,
-		levels, showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
+		levels, showscale, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 	return _s3_append!(fig, GenericTrace[trace], (spec,), opts, who)
 end
 
@@ -3603,6 +3936,7 @@ function _s3_explicit_polygons(faces, who::AbstractString)
 			"$(who): face $(f) must be a k×3 matrix of vertex coordinates with k ≥ 3; got " *
 			(face isa AbstractArray ? join(size(face), "×") * " $(typeof(face))" : string(typeof(face))) * ".",
 		))
+		face = _s3_plottable(face)
 		ids = Vector{Int}(undef, size(face, 1))
 		for (r, row) in enumerate(axes(face, 1))
 			point = ntuple(3) do c
@@ -3630,6 +3964,9 @@ end
 function _s3_indexed_polygons(x, y, z, faces, who::AbstractString)
 	for (name, values) in (("x", x), ("y", y), ("z", z))
 		_s3_array(values, who, name)
+	end
+	x, y, z = _s3_plottable(x), _s3_plottable(y), _s3_plottable(z)
+	for (name, values) in (("x", x), ("y", y), ("z", z))
 		_s3_all_finite(values, who, name)
 	end
 	n = _s3_check_lengths(who, "x" => x, "y" => y, "z" => z)
@@ -3683,6 +4020,7 @@ function _s3_polygons3d_traces(
 	levels,
 	showscale,
 	colorbar_title,
+	colorbar_title_side,
 	colorbar_ticks,
 	colorbar_ticklabels,
 	coloraxis,
@@ -3716,7 +4054,7 @@ function _s3_polygons3d_traces(
 		end
 	else
 		(colorscale !== nothing || _s3_colormap_requested(; colorscale = "", crange, cmid, colornorm, levels,
-			colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis)) && throw(ArgumentError(
+			colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)) && throw(ArgumentError(
 			"$(who): colour-scale keywords need per-face `values`.",
 		))
 		isempty(uniform) && (uniform = _s3_default_color(fig, _s3_next_index(fig)))
@@ -3746,7 +4084,7 @@ function _s3_polygons3d_traces(
 	else
 		spec = _s3_color_spec(intensity, who; values_key = :intensity,
 			colorscale = colorscale === nothing ? "Viridis" : colorscale, crange, cmid, colornorm, levels,
-			showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis)
+			showscale, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis)
 		merge!(fields, spec.trace)
 		fields[:intensitymode] = "cell"
 	end
@@ -3789,6 +4127,7 @@ for (positional, prepare) in (
 			levels = nothing,
 			showscale::Union{Nothing, Bool} = nothing,
 			colorbar_title::AbstractString = "",
+			colorbar_title_side = :top,
 			colorbar_ticks = nothing,
 			colorbar_ticklabels = nothing,
 			coloraxis = nothing,
@@ -3817,7 +4156,7 @@ for (positional, prepare) in (
 			px, py, pz, polygons = $prepare
 			traces, specs = _s3_polygons3d_traces(nothing, px, py, pz, polygons, values; color, opacity,
 				lighting, edgecolor, edgewidth, legend, colorscale, crange, cmid, colornorm, levels,
-				showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
+				showscale, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 			return _s3_construct(traces, specs, opts, who, show)
 		end
 
@@ -3838,6 +4177,7 @@ for (positional, prepare) in (
 			levels = nothing,
 			showscale::Union{Nothing, Bool} = nothing,
 			colorbar_title::AbstractString = "",
+			colorbar_title_side = :top,
 			colorbar_ticks = nothing,
 			colorbar_ticklabels = nothing,
 			coloraxis = nothing,
@@ -3865,7 +4205,7 @@ for (positional, prepare) in (
 			px, py, pz, polygons = $prepare
 			traces, specs = _s3_polygons3d_traces(fig, px, py, pz, polygons, values; color, opacity,
 				lighting, edgecolor, edgewidth, legend, colorscale, crange, cmid, colornorm, levels,
-				showscale, colorbar_title, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
+				showscale, colorbar_title, colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who)
 			return _s3_append!(fig, traces, specs, opts, who)
 		end
 	end
@@ -4023,7 +4363,7 @@ function plot_wireframe(
 	rstride::Integer = 1,
 	cstride::Integer = 1,
 	color = "black",
-	linewidth::Real = 1,
+	linewidth::Union{Nothing, Real} = nothing,
 	dash = "",
 	opacity::Real = 1,
 	legend::AbstractString = "",
@@ -4050,7 +4390,7 @@ function plot_wireframe(
 	opts = _s3_constructor_options(who; xrange, yrange, zrange, xlabel, ylabel, zlabel,
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	trace = _s3_wireframe_trace(nothing, X, Y, Z; rstride, cstride, color, linewidth, dash, opacity, legend, who)
-	return _s3_construct(GenericTrace[trace], (), opts, who, show)
+	return _s3_construct(GenericTrace[trace], (), opts, who, show; style = _s3_collection_style(linewidth))
 end
 
 function plot_wireframe!(
@@ -4061,7 +4401,7 @@ function plot_wireframe!(
 	rstride::Integer = 1,
 	cstride::Integer = 1,
 	color = "black",
-	linewidth::Real = 1,
+	linewidth::Union{Nothing, Real} = nothing,
 	dash = "",
 	opacity::Real = 1,
 	legend::AbstractString = "",
@@ -4087,7 +4427,7 @@ function plot_wireframe!(
 	opts = _s3_options(who, fig; xrange, yrange, zrange, xlabel, ylabel, zlabel,
 		aspectmode, perspective, grid, showaxis, title, width, height, fontsize, view)
 	trace = _s3_wireframe_trace(fig, X, Y, Z; rstride, cstride, color, linewidth, dash, opacity, legend, who)
-	return _s3_append!(fig, GenericTrace[trace], (), opts, who)
+	return _s3_append!(fig, GenericTrace[trace], (), opts, who; style = _s3_collection_style(linewidth))
 end
 
 function _s3_pair_segments(x0, y0, z0, x1, y1, z1, who::AbstractString)
@@ -4140,7 +4480,7 @@ for (typed, prepare) in (
 		function plot_segments3d(
 			$(typed...);
 			color = "#999999",
-			linewidth::Real = 1,
+			linewidth::Union{Nothing, Real} = nothing,
 			dash = "",
 			opacity::Real = 1,
 			legend::AbstractString = "",
@@ -4169,14 +4509,14 @@ for (typed, prepare) in (
 			px, py, pz, pairs = $prepare
 			line = _s3_line_style(color, linewidth, dash, opacity, nothing, :scene, who; default_color = "#999999")
 			trace = _s3_segment_trace(px, py, pz, pairs; line, legend)
-			return _s3_construct(GenericTrace[trace], (), opts, who, show)
+			return _s3_construct(GenericTrace[trace], (), opts, who, show; style = _s3_collection_style(linewidth))
 		end
 
 		function plot_segments3d!(
 			fig,
 			$(typed...);
 			color = "#999999",
-			linewidth::Real = 1,
+			linewidth::Union{Nothing, Real} = nothing,
 			dash = "",
 			opacity::Real = 1,
 			legend::AbstractString = "",
@@ -4204,13 +4544,15 @@ for (typed, prepare) in (
 			px, py, pz, pairs = $prepare
 			line = _s3_line_style(color, linewidth, dash, opacity, fig, :scene, who; default_color = "#999999")
 			trace = _s3_segment_trace(px, py, pz, pairs; line, legend)
-			return _s3_append!(fig, GenericTrace[trace], (), opts, who)
+			return _s3_append!(fig, GenericTrace[trace], (), opts, who; style = _s3_collection_style(linewidth))
 		end
 	end
 end
 
 const _S3_LINE_KEYWORDS_DOC = raw"""
-- `linewidth::Real = 1`: line width in px (0: plotly's default).
+- `linewidth = nothing`: line width in px: `nothing` takes the active
+  `PlotStyle`'s line width, else 1; 0 gives plotly's default. (The style's
+  dash and marker cycles do not apply to these line collections.)
 - `dash = ""`: "solid", "dot", "dash", "longdash", "dashdot" or
   "longdashdot" (`""`: solid).
 - `opacity::Real = 1`: in [0, 1]; """ * _S3_OPACITY_LINE_DOC * "\n" * raw"""
@@ -4313,14 +4655,17 @@ segment out.
 
 #region SubplotFigure methods
 
-# Run a 3-D mutator in a SubplotFigure cell. The common case goes through
-# `_subplot_delegate_mutator!` (append-only fast path). Three things need the
-# whole staged figure and therefore the full transactional path: `view`
-# (the camera framing depends on the cell's domain), a colour axis other
-# than "coloraxis" (the delegate only transplants the first one), and
-# `shared_coloraxis` (existing surfaces join the shared axis). Ranges on a
-# logarithmic cell scene are converted here because the delegate runs the
-# mutator on an empty figure that cannot see the cell's axis types.
+# Run a 3-D mutator in a SubplotFigure cell. The delegate
+# (`_subplot_delegate_mutator_impl!`) runs the mutator on an empty staging
+# figure and routes its traces and scene settings to the cell; everything that
+# needs the real cell is done here, on the whole staged figure, inside one
+# transaction: the cell's aspect and automatic camera (`_s3_finish_scene!`,
+# which depend on all of the cell's data and its domain), `view`, a colour
+# axis other than "coloraxis" (the delegate only transplants the first one),
+# `shared_coloraxis` (existing surfaces join the shared axis) and the colorbar
+# title annotations the delegate cannot see. Ranges on a logarithmic cell
+# scene are converted here because the staging figure cannot see the cell's
+# axis types. The full staging copies the model graph, not the data payloads.
 function _s3_subplot!(
 	sf::SubplotFigure,
 	mutator::Function,
@@ -4331,6 +4676,7 @@ function _s3_subplot!(
 	secondary_y::Bool = false,
 	kwargs...,
 )
+	haskey(kwargs, :show) && _s3_reject_kwargs(who, (show = kwargs[:show],))
 	options = Dict{Symbol, Any}(kwargs)
 	view_value = pop!(options, :view, nothing)
 	view_angles = _s3_view(view_value, who)
@@ -4351,13 +4697,20 @@ function _s3_subplot!(
 		options[key] = _s3_stored_range(layout, target.scenekey, axis, checked, who, String(key))
 	end
 	context = _S3CellContext(current, target.scenekey, length(current.data))
-	if view_angles === nothing && !shared && extra_axis === nothing
-		return Base.ScopedValues.with(_S3_CELL_CONTEXT => context) do
-			_subplot_delegate_mutator!(sf, mutator, args...; row, col, secondary_y, options...)
-		end
-	end
+	# A plain colorbar title for a colour axis whose earlier math title is an
+	# annotation: the staging figure cannot see that annotation, so it is
+	# removed here.
+	axis_id = shared ? "coloraxis" :
+		axis_value === nothing ? nothing : _normalize_coloraxis(axis_value, who)
+	title_value = get(options, :colorbar_title, "")
+	retitle = axis_id !== nothing && title_value isa AbstractString && !isempty(title_value) &&
+		!_cbar_is_math(_label(title_value))
 	colorscale_given = !_is_unset_colorscale(get(options, :colorscale, ""))
+	explicit_mode = get(options, :aspectmode, nothing) !== nothing
 	impl = staged -> begin
+		state = _s3_scene_state(staged, _s3_scene_target(staged, who; row, col))
+		# An aspect mode given now replaces what was pinned automatically.
+		explicit_mode && (state = _S3SceneState(false, state.auto_camera))
 		captured = Ref{Any}(nothing)
 		wrapped = function (tmp, inner_args...; inner_kwargs...)
 			result = mutator(tmp, inner_args...; inner_kwargs...)
@@ -4365,15 +4718,24 @@ function _s3_subplot!(
 				(captured[] = get(_plot_layout(tmp).fields, Symbol(extra_axis), nothing))
 			return result
 		end
-		_subplot_delegate_mutator_impl!(staged, wrapped, args...; row, col, secondary_y, options...)
+		# The style's dash/marker cycle continues over the whole figure (X10).
+		_with_style_trace_offset(staged) do
+			_subplot_delegate_mutator_impl!(staged, wrapped, args...; row, col, secondary_y, options...)
+		end
 		if extra_axis !== nothing
 			fields = captured[] === nothing ? Dict{Symbol, Any}() : _symbol_dict(captured[])
 			_s3_write_coloraxis!(staged, _S3ColorSpec(Dict{Symbol, Any}(), extra_axis, fields))
+			# The delegate converted the math titles before this axis had its
+			# colorbar settings.
+			_colorbar_math_titles!(staged, (); coloraxes = (extra_axis,))
 		end
+		retitle && _cbar_remove_title_annotation!(_cmn_plot(staged), axis_id)
 		shared && _s3_link_shared_surfaces!(_cmn_plot(staged), colorscale_given)
+		cell = _s3_scene_target(staged, who)
+		_s3_finish_scene!(staged, cell, state; frame = view_angles === nothing)
 		if view_angles !== nothing
 			params = _S3ViewParams(view_angles[1], view_angles[2], :auto, :z, nothing, 1.0)
-			_s3_apply_view!(staged, _s3_scene_target(staged, who), params)
+			_s3_apply_view!(staged, cell, params)
 		end
 		_refresh!(getfield(staged, :fig))
 		return staged
