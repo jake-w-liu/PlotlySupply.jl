@@ -243,6 +243,33 @@ end
 		end
 	end
 
+	@testset "SubplotFigure log-axis checks run on the delegate's seeded axes (Y4)" begin
+		# The SubplotFigure methods no longer pre-check the cell: the Plot
+		# methods see the target axes (here the secondary y) through the
+		# delegate's seeding, and the message names no target kind.
+		function log_twin()
+			twin = subplots(1, 1; sync = false, specs = Union{Missing, Spec}[Spec(secondary_y = true);;])
+			plot_scatter!(twin, 1:3, [1, 2, 3])
+			plot_scatter!(twin, 1:3, [1, 10, 100]; secondary_y = true, yscale = "log")
+			return twin
+		end
+		twin = log_twin()
+		@test _rx_atomic(twin.fig, () -> plot_waterfall!(twin, ["a"], [1]; secondary_y = true),
+			"plot_waterfall!: the waterfall (y) axis is logarithmic, but waterfall (y) bars start at zero")
+		@test _rx_atomic(twin.fig, () -> plot_candlestick!(twin, 1:2, [1, -2], [2, 3], [0.5, 1.5], [1.5, 2.5]; secondary_y = true),
+			"plot_candlestick!: `open[2]` is on a logarithmic axis")
+		@test _rx_atomic(twin.fig, () -> plot_ohlc!(twin, 1:2, [1, 2], [2, 3], [-0.5, 1.5], [1.5, 2.5]; secondary_y = true),
+			"plot_ohlc!: `low[1]` is on a logarithmic axis")
+		@test plot_waterfall!(twin, ["a"], [1]) === twin
+		@test last(twin.fig.data).fields[:yaxis] == "y"
+		@test plot_candlestick!(log_twin(), 1:2, [1, 2], [2, 3], [0.5, 1.5], [1.5, 2.5]; secondary_y = true) isa SubplotFigure
+		# An explicit linear scale wins over the cell's log axis.
+		log_cell = subplots(1, 1; sync = false)
+		plot_scatter!(log_cell, 1:3, [1, 10, 100]; yscale = "log")
+		@test plot_ohlc!(log_cell, 1:2, [1, 2], [2, 3], [0, 1], [1, 2]; yscale = "linear") === log_cell
+		@test _rx_get(log_cell.fig.layout, :yaxis, :type) == "linear"
+	end
+
 	@testset "SubplotFigure funnel/waterfall reject a log value axis in the cell" begin
 		sf = subplots(1, 2; sync = false)
 		plot_scatter!(sf, [1, 10], [1, 10]; row = 1, col = 1, xscale = "log", yscale = "log")
@@ -407,6 +434,123 @@ end
 		@test label[:x] ≈ (domain[1] + domain[2]) / 2
 	end
 
+	@testset "coords = :figure is the whole figure, :paper the plot area (G39, G73)" begin
+		# Rendered position of a paper-referenced annotation, in px from the
+		# figure's left/bottom edge, for figure size W x H and margins m.
+		px(a, W, H, m) = (
+			m.l + a[:x] * (W - m.l - m.r) + get(a, :xshift, 0),
+			m.b + a[:y] * (H - m.t - m.b) + get(a, :yshift, 0),
+		)
+		margins(target) = (l = _rx_get(_rx_layout(target)[:margin], :l), r = _rx_get(_rx_layout(target)[:margin], :r),
+			t = _rx_get(_rx_layout(target)[:margin], :t), b = _rx_get(_rx_layout(target)[:margin], :b))
+		fig = plot_scatter(1:3, 1:3; width = 600, height = 400)
+		relayout!(fig; margin = attr(l = 60, r = 40, t = 50, b = 70))
+
+		# :paper keeps plotly's meaning (any finite value, no shift).
+		annotate!(fig, 0.5, -0.2, "below the axes"; coords = :paper, showarrow = false)
+		paper = last(_rx_layout(fig)[:annotations])
+		@test (paper[:xref], paper[:yref], paper[:x], paper[:y]) == ("paper", "paper", 0.5, -0.2)
+		@test !_rx_has(paper, :xshift) && !_rx_has(paper, :yshift) && !_rx_has(paper, :name)
+
+		# :figure: (0.25, 0.75) of the canvas, at every figure size.
+		annotate!(fig, 0.25, 0.75, "inside"; coords = "figure", showarrow = false)
+		inside = last(_rx_layout(fig)[:annotations])
+		@test (inside[:xref], inside[:yref], inside[:x], inside[:y]) == ("paper", "paper", 0.25, 0.75)
+		@test inside[:xshift] ≈ 0.25 * (60 + 40) - 60
+		@test inside[:yshift] ≈ 0.75 * (50 + 70) - 70
+		@test inside[:name] == "plotlysupply:figure:0.25:0.75:0.0:0.0"
+		@test margins(fig) == (l = 60, r = 40, t = 50, b = 70)   # text over the plot: no reservation
+		for (W, H) in ((600, 400), (1000, 700), (300, 900))
+			@test all(px(inside, W, H, margins(fig)) .≈ (0.25 * W, 0.75 * H))
+		end
+
+		# A caption at the bottom edge raises the bottom margin above the tick
+		# labels; the earlier figure annotation is re-placed for the new margin.
+		annotate!(fig, 0.5, 0.0, "Caption line one<br>line two"; coords = :figure, showarrow = false)
+		caption = last(_rx_layout(fig)[:annotations])
+		m = margins(fig)
+		@test m.b > 70 && (m.l, m.r, m.t) == (60, 40, 50)
+		@test m.b >= 2 * 1.4 * 12 + 4 + 1.4 * 12   # two text lines, the gap, the x tick labels
+		@test caption[:yshift] ≈ -m.b
+		for (W, H) in ((600, 400), (1000, 700))
+			@test all(px(caption, W, H, m) .≈ (0.5 * W, 0.0))
+			@test all(px(_rx_layout(fig)[:annotations][2], W, H, m) .≈ (0.25 * W, 0.75 * H))
+		end
+		# A second caption above the first needs more room; both stay put.
+		annotate!(fig, 0.5, 0.12, "Higher caption"; coords = :figure, showarrow = false, yanchor = "bottom")
+		m2 = margins(fig)
+		@test m2.b > m.b
+		@test all(px(_rx_layout(fig)[:annotations][3], 600, 400, m2) .≈ (300, 0.0))
+		@test all(px(last(_rx_layout(fig)[:annotations]), 600, 400, m2) .≈ (300, 0.12 * 400))
+
+		# `offset` adds to the figure shift; an explicit `xref` keeps that
+		# coordinate in plotly units.
+		annotate!(fig, 0.5, 0.5, "offset"; coords = :figure, showarrow = false, offset = (10, -5))
+		offset = last(_rx_layout(fig)[:annotations])
+		@test all(px(offset, 600, 400, margins(fig)) .≈ (310, 195))
+		annotate!(fig, 2, 0.9, "data x"; coords = :figure, xref = "x", showarrow = false)
+		mixed = last(_rx_layout(fig)[:annotations])
+		@test (mixed[:xref], mixed[:x], mixed[:yref], mixed[:y]) == ("x", 2, "paper", 0.9)
+		@test !_rx_has(mixed, :xshift) && mixed[:name] == "plotlysupply:figure:-:0.9:0.0:0.0"
+		# With an arrow the offset moves the text; the head is at the figure point.
+		annotate!(fig, 0.9, 0.9, "arrow"; coords = :figure, offset = (-20, -20))
+		arrow = last(_rx_layout(fig)[:annotations])
+		@test (arrow[:ax], arrow[:ay]) == (-20, 20)
+		@test all(px(arrow, 600, 400, margins(fig)) .≈ (540, 360))
+
+		count = length(_rx_layout(fig)[:annotations])
+		for (call, needle) in (
+			(() -> annotate!(fig, 0.5, -0.1, "x"; coords = :figure), "annotate!: `y` = -0.1 is outside the figure"),
+			(() -> annotate!(fig, 1.5, 0.1, "x"; coords = :figure), "use `coords = :paper`"),
+			(() -> annotate!(fig, 0.5, 0.1, "x"; coords = :figure, name = "n"), "`name` cannot be set with `coords = :figure`"),
+			(() -> annotate!(fig, 0.5, 0.1, "x"; coords = :figure, showarrow = false, yshift = 3), "`yshift` cannot be combined"),
+			(() -> annotate!(fig, 0.5, 0.1, "x"; coords = :canvas), "`coords` must be :data, :axes, :paper or :figure"),
+		)
+			@test _rx_atomic(fig, call, needle)
+		end
+		@test length(_rx_layout(fig)[:annotations]) == count
+
+		# SubplotFigure: figure fractions ignore the cell.
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1, xlabel = "time")
+		plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2, xlabel = "time")
+		@test annotate!(sf, 0.5, 0.01, "Two-line caption<br>below both panels"; coords = :figure,
+			showarrow = false, yanchor = "bottom") === sf
+		note = only(_rx_layout(sf.fig)[:annotations])
+		sm = margins(sf.fig)
+		@test (note[:xref], note[:yref]) == ("paper", "paper")
+		for (W, H) in ((700, 500), (900, 650))
+			@test all(px(note, W, H, sm) .≈ (W / 2, 0.01 * H))
+		end
+		@test sm.b >= 0.01 * 500 + 2 * 1.4 * 12 + 4
+	end
+
+	@testset "coords = :axes anchors by the position in the cell on every cell kind (G70)" begin
+		sf = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec()])
+		plot_surface!(sf, rand(3, 3); row = 1, col = 1)
+		plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2)
+		for (x, y, xanchor, yanchor) in ((0.05, 0.95, "left", "top"), (0.5, 0.5, "center", "middle"), (0.9, 0.1, "right", "bottom"))
+			annotate!(sf, x, y, "3-D"; row = 1, col = 1, coords = :axes, showarrow = false)
+			scene = last(_rx_layout(sf.fig)[:annotations])
+			@test (scene[:xref], scene[:xanchor], scene[:yanchor]) == ("paper", xanchor, yanchor)
+			domain = PlotlySupply._cell_target(sf; row = 1, col = 1).xdomain
+			@test scene[:x] ≈ domain[1] + x * (domain[2] - domain[1])
+			# plotly's own rule on a 2-D cell's domain reference gives the same
+			# anchors, so nothing is written there.
+			annotate!(sf, x, y, "2-D"; row = 1, col = 2, coords = :axes, showarrow = false)
+			flat = last(_rx_layout(sf.fig)[:annotations])
+			@test flat[:xref] == "x domain" && !_rx_has(flat, :xanchor) && !_rx_has(flat, :yanchor)
+			@test PlotlySupply._annotation_auto_xanchor(x) == xanchor
+			@test PlotlySupply._annotation_auto_yanchor(y) == yanchor
+		end
+		# An explicit anchor wins; with an arrow plotly centres the text itself.
+		annotate!(sf, 0.05, 0.95, "kept"; row = 1, col = 1, coords = :axes, showarrow = false, xanchor = "center")
+		kept = last(_rx_layout(sf.fig)[:annotations])
+		@test (kept[:xanchor], kept[:yanchor]) == ("center", "top")
+		annotate!(sf, 0.05, 0.95, "arrow"; row = 1, col = 1, coords = :axes)
+		@test !_rx_has(last(_rx_layout(sf.fig)[:annotations]), :xanchor)
+	end
+
 	@testset "coordinate systems, log axes and offsets" begin
 		fig = plot_scatter(1:100, (1:100) .^ 2; yscale = "log", xscale = "log")
 		annotate!(fig, 50, 1000, "knee"; offset = (30, 20), color = "firebrick")
@@ -420,7 +564,7 @@ end
 		panel = last(_rx_layout(fig)[:annotations])
 		@test (panel[:xref], panel[:yref], panel[:x], panel[:y]) == ("x domain", "y domain", 0.02, 0.95)
 		@test (panel[:xshift], panel[:yshift]) == (4, -2)
-		annotate!(fig, 0.5, 1.02, "caption"; coords = :figure, showarrow = false)
+		annotate!(fig, 0.5, 1.02, "caption"; coords = :paper, showarrow = false)
 		@test (last(_rx_layout(fig)[:annotations])[:xref], last(_rx_layout(fig)[:annotations])[:yref]) == ("paper", "paper")
 		annotate!(fig, 10, 100, "tail"; axref = "x", ayref = "y", ax = 100, ay = 10_000, arrowcolor = "black", color = "red")
 		tail = last(_rx_layout(fig)[:annotations])
@@ -638,15 +782,15 @@ end
 		@test plot_waterfall!(host_log, ["a", "b"], [1, -2]; inset = linear_inset) === host_log
 		@test plot_funnel!(host_log, [2, 1], ["a", "b"]; inset = linear_inset) === host_log
 		@test plot_candlestick!(host_log, 1:2, [-1, 2], [2, 3], [-1.5, 1.5], [1.5, 2.5]; inset = linear_inset) === host_log
-		@test _rx_throws(() -> plot_waterfall!(host_log, ["a"], [1]), "plot_waterfall!: the y axis of this cell is logarithmic")
+		@test _rx_throws(() -> plot_waterfall!(host_log, ["a"], [1]), "plot_waterfall!: the waterfall (y) axis is logarithmic")
 		# ... and a log inset is checked even on a linear host.
 		host_linear = subplots(1, 1; sync = false)
 		plot_scatter!(host_linear, 1:3, 1:3)
 		log_inset = inset!(host_linear, (0.1, 0.5, 0.4, 0.4))
 		plot_scatter!(host_linear, 1:3, [1, 10, 100]; inset = log_inset, yscale = "log", xscale = "log")
 		for (call, needle) in (
-			(() -> plot_waterfall!(host_linear, ["a"], [1]; inset = log_inset), "plot_waterfall!: the y axis of this inset is logarithmic"),
-			(() -> plot_funnel!(host_linear, [1], ["a"]; inset = log_inset), "plot_funnel!: the x axis of this inset is logarithmic"),
+			(() -> plot_waterfall!(host_linear, ["a"], [1]; inset = log_inset), "plot_waterfall!: the waterfall (y) axis is logarithmic"),
+			(() -> plot_funnel!(host_linear, [1], ["a"]; inset = log_inset), "plot_funnel!: the funnel (x) axis is logarithmic"),
 			(() -> plot_candlestick!(host_linear, 1:2, [1, -2], [2, 3], [0.5, 1.5], [1.5, 2.5]; inset = log_inset), "plot_candlestick!: `open[2]` is on a logarithmic axis"),
 			(() -> plot_ohlc!(host_linear, [0, 1], [1, 2], [2, 3], [0.5, 1.5], [1.5, 2.5]; inset = log_inset), "plot_ohlc!: `x[1]` is on a logarithmic axis"),
 		)

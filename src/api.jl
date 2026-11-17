@@ -15208,32 +15208,6 @@ end
 _extended_final_axis_type(fig, key::Symbol, scale::AbstractString) =
 	isempty(scale) ? _axis_type(fig, key) : String(scale)
 
-# A SubplotFigure mutator runs the Plot mutator on an empty staging figure,
-# which cannot see the target cell's axes. These are the (x, y) axis types of
-# the axes the trace will be drawn on, the cell's (secondary y) axes or those
-# of inset `inset` ("-" for both when the cell is not Cartesian; the delegate
-# then rejects the trace), so their log axes can be checked up front.
-# `row`/`col`/`inset`/`secondary_y` are validated as the delegate does.
-function _extended_subplot_axis_types(
-	sf::SubplotFigure,
-	who::AbstractString;
-	row,
-	col,
-	secondary_y::Bool,
-	inset = nothing,
-)
-	target = _cell_target(sf; row = row, col = col, secondary_y = secondary_y, inset = inset, who = who)
-	target.kind === :xy || return ("-", "-")
-	return (_axis_type(sf, target.xkey), _axis_type(sf, target.ykey))
-end
-
-# Final type of a SubplotFigure cell axis: an explicit `xscale`/`yscale`
-# keyword wins over the cell's current type.
-function _extended_subplot_final_type(kwargs, name::Symbol, cell_type::AbstractString)
-	scale = get(kwargs, name, "")
-	return scale isa AbstractString && !isempty(scale) ? String(scale) : cell_type
-end
-
 # ── Pie / funnel-area ────────────────────────────────────────────────
 
 # Trace of the slice charts (`pie`, `funnelarea`). Validates everything, then
@@ -15939,10 +15913,13 @@ function _extended_funnel_trace(who::AbstractString, x, y; color, legend::Abstra
 	return funnel(; kw...)
 end
 
+# Funnel and waterfall bars start at zero, which a log value axis cannot show.
+# `fig` is the target figure, or the delegate's staging figure seeded with the
+# target cell's, secondary-y or inset axes, so the message names no target.
 function _extended_require_linear_value_axis(fig, who::AbstractString, key::Symbol, what::AbstractString)
 	_axis_type(fig, key) == "log" && throw(ArgumentError(
-		"$(who): the $(what) axis of this figure is logarithmic, but $(what) " *
-		"bars start at zero; use a linear axis.",
+		"$(who): the $(what) axis is logarithmic, but $(what) bars start at " *
+		"zero; use a linear axis.",
 	))
 	return nothing
 end
@@ -16103,18 +16080,8 @@ function plot_funnel!(
 	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	x_type, _ = _extended_subplot_axis_types(
-		sf,
-		"plot_funnel!";
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-	)
-	x_type == "log" && throw(ArgumentError(
-		"plot_funnel!: the x axis of this $(inset === nothing ? "cell" : "inset") is " *
-		"logarithmic, but funnel (x) bars start at zero; use a linear axis.",
-	))
+	# The delegate seeds the staging figure with the target axes' types (cell,
+	# secondary y or inset), so the Plot method's log-axis check sees them.
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_funnel!,
@@ -16436,18 +16403,8 @@ function plot_waterfall!(
 	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	_, y_type = _extended_subplot_axis_types(
-		sf,
-		"plot_waterfall!";
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-	)
-	y_type == "log" && throw(ArgumentError(
-		"plot_waterfall!: the y axis of this $(inset === nothing ? "cell" : "inset") is " *
-		"logarithmic, but waterfall (y) bars start at zero; use a linear axis.",
-	))
+	# The delegate seeds the staging figure with the target axes' types (cell,
+	# secondary y or inset), so the Plot method's log-axis check sees them.
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_waterfall!,
@@ -17311,21 +17268,9 @@ function plot_candlestick!(
 	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	x_type, y_type = _extended_subplot_axis_types(
-		sf,
-		"plot_candlestick!";
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-	)
-	if _extended_subplot_final_type(kwargs, :yscale, y_type) == "log"
-		for (name, values) in (("open", open), ("high", high), ("low", low), ("close", close))
-			_extended_check_numbers("plot_candlestick!", name, values; gaps = true, positive = true)
-		end
-	end
-	_extended_subplot_final_type(kwargs, :xscale, x_type) == "log" &&
-		_extended_check_numbers("plot_candlestick!", "x", x; positive = true)
+	# The delegate seeds the staging figure with the target axes' types (cell,
+	# secondary y or inset), so the Plot method's positivity checks on log
+	# axes see them.
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_candlestick!,
@@ -17501,21 +17446,9 @@ function plot_ohlc!(
 	inset::Union{Nothing, Integer} = nothing,
 	kwargs...,
 )
-	x_type, y_type = _extended_subplot_axis_types(
-		sf,
-		"plot_ohlc!";
-		row = row,
-		col = col,
-		secondary_y = secondary_y,
-		inset = inset,
-	)
-	if _extended_subplot_final_type(kwargs, :yscale, y_type) == "log"
-		for (name, values) in (("open", open), ("high", high), ("low", low), ("close", close))
-			_extended_check_numbers("plot_ohlc!", name, values; gaps = true, positive = true)
-		end
-	end
-	_extended_subplot_final_type(kwargs, :xscale, x_type) == "log" &&
-		_extended_check_numbers("plot_ohlc!", "x", x; positive = true)
+	# The delegate seeds the staging figure with the target axes' types (cell,
+	# secondary y or inset), so the Plot method's positivity checks on log
+	# axes see them.
 	return _subplot_delegate_mutator!(
 		sf,
 		plot_ohlc!,
@@ -18076,7 +18009,19 @@ const _ANNOTATION_ATTRIBUTE_NAMES = (
 	:yanchor, :yclick, :yref, :yshift,
 )
 
-const _ANNOTATION_COORDS = (:data, :axes, :figure)
+const _ANNOTATION_COORDS = (:data, :axes, :paper, :figure)
+
+# `name` of an annotation placed in whole-figure fractions (`coords =
+# :figure`): the prefix, then "<fx>:<fy>:<dx>:<dy>" (the figure fractions,
+# "-" for a coordinate given through an explicit `xref`/`yref`, and the px
+# shift of `offset`), so `_figure_annotations_place!` can re-place it.
+const _FIGURE_ANNOTATION_PREFIX = "plotlysupply:figure:"
+
+# plotly.js 2.35.2 "auto" anchor of a paper- or domain-referenced annotation
+# without an arrow (annotations/draw.js: `t < 1/3 ? "left" : t > 2/3 ?
+# "right" : "center"` with t = x, and t = 1 - y for the vertical anchor).
+_annotation_auto_xanchor(fraction::Real) = fraction < 1 / 3 ? "left" : fraction > 2 / 3 ? "right" : "center"
+_annotation_auto_yanchor(fraction::Real) = fraction > 2 / 3 ? "top" : fraction < 1 / 3 ? "bottom" : "middle"
 
 # Plotly reference strings: "paper", or an axis ("x", "x2", …) optionally
 # followed by " domain" (fractions of that axis' domain). Arrow tails also
@@ -18154,8 +18099,18 @@ function _annotation_coordinate(
 			return ref, _annotation_fraction(value, who, name, "a fraction of the axis domain")
 		return ref, _annotation_data_position(layout, key, value, who, name)
 	end
-	if coords === :figure
-		return "paper", _annotation_fraction(value, who, name, "a figure fraction")
+	if coords === :paper
+		return "paper", _annotation_fraction(value, who, name, "a fraction of the plot area")
+	elseif coords === :figure
+		# Whole-figure fractions; `_extended_annotate!` adds the px shift that
+		# turns this paper position into the figure position.
+		fraction = _annotation_fraction(value, who, name, "a figure fraction")
+		0 <= fraction <= 1 || throw(ArgumentError(
+			"$(who): `$(name)` = $(repr(value)) is outside the figure: `coords = :figure` " *
+			"takes fractions of the whole figure in [0, 1]. For plotly's paper " *
+			"coordinates (fractions of the plot area, negative below it) use `coords = :paper`.",
+		))
+		return "paper", fraction
 	elseif coords === :axes
 		fraction = _annotation_fraction(value, who, name, "a fraction of the axes")
 		if target.kind === :xy
@@ -18204,6 +18159,121 @@ end
 
 const _ANNOTATION_ALIGN = Dict("left" => :l, "center" => :c, "right" => :r)
 
+# ── Whole-figure annotations (`coords = :figure`) ──
+#
+# plotly.js annotations reference only the paper (the plot area inside the
+# margins) or axes, so a figure fraction f is drawn at paper fraction f
+# shifted by f * (l + r) - l px horizontally and f * (t + b) - b px
+# vertically (l, r, t, b: the rendered margins in px). The shift does not
+# depend on the figure size, so the position stays right in a `savefig` of
+# another size as long as the margins do not change. A caption that reaches
+# into the bottom margin also gets room there below the x-axis tick labels
+# and title: `margin.b` is raised so they and the caption do not overlap.
+
+# Gap (px) kept between the bottom-axis decorations and a caption below them.
+const _FIGURE_ANNOTATION_GAP = 4.0
+
+# (fx, fy, dx, dy) of an annotation placed by `coords = :figure` (`nothing`
+# for a coordinate given through `xref`/`yref`), or `nothing` for any other
+# annotation.
+function _figure_annotation_spec(item)
+	name = _cmn_mapping_get(item, :name)
+	(name isa AbstractString && startswith(name, _FIGURE_ANNOTATION_PREFIX)) || return nothing
+	parts = split(name[(ncodeunits(_FIGURE_ANNOTATION_PREFIX) + 1):end], ':')
+	length(parts) == 4 || return nothing
+	fraction(part) = part == "-" ? nothing : tryparse(Float64, part)
+	fx, fy = fraction(parts[1]), fraction(parts[2])
+	dx, dy = tryparse(Float64, parts[3]), tryparse(Float64, parts[4])
+	(dx === nothing || dy === nothing) && return nothing
+	(parts[1] != "-" && fx === nothing) && return nothing
+	(parts[2] != "-" && fy === nothing) && return nothing
+	return (fx = fx, fy = fy, dx = dx, dy = dy)
+end
+
+# Estimated height (px) of annotation text: 1.4 em per line, 2.2 em for a
+# line with typeset math that has sub/superscripts or fractions (the D12
+# text-height rule). Lines are split at `<br>` and, in the `\begin{array}`
+# form `_label` gives multi-line math text, at `\\`.
+function _figure_annotation_text_height(text, fontsize::Float64)
+	text isa AbstractString || return 1.4 * fontsize
+	height = 0.0
+	for segment in split(text, r"<br\s*/?>")
+		lines = occursin("\\begin{array}", segment) ? split(segment, "\\\\") : (segment,)
+		math = occursin('$', segment)
+		for line in lines
+			tall = math && (occursin('^', line) || occursin('_', line) || occursin("\\frac", line))
+			height += (tall ? 2.2 : 1.4) * fontsize
+		end
+	end
+	return height
+end
+
+function _figure_annotation_fontsize(item, layout::Layout)
+	size = _cmn_mapping_get(_cmn_mapping_get(item, :font), :size)
+	(size isa Real && !(size isa Bool) && isfinite(size) && size > 0) && return Float64(size)
+	base = _cmn_mapping_get(get(layout.fields, :font, nothing), :size)
+	(base isa Real && !(base isa Bool) && isfinite(base) && base > 0) && return Float64(base)
+	return 12.0
+end
+
+# Figure size (px) used for the bottom-margin reservation: the layout size,
+# else plotly's default 700 x 500 (`savefig`'s default size as well).
+function _figure_annotation_size(layout::Layout)
+	side(key, default) = (v = get(layout.fields, key, nothing);
+		v isa Real && !(v isa Bool) && isfinite(v) && v > 0 ? Float64(v) : default)
+	return side(:width, _DEFAULT_EXPORT_WIDTH_PX), side(:height, _DEFAULT_EXPORT_HEIGHT_PX)
+end
+
+# Re-place every whole-figure annotation of `annotations` (the figure's
+# annotation list, items replaced, never mutated) for the current margins of
+# `p`, raising the bottom margin when a caption reaches below the plot area.
+# Returns the new `margin.b` (px) to write, or `nothing`.
+function _figure_annotations_place!(p::Plot, annotations::Vector{Any})
+	specs = [(index, spec) for (index, item) in pairs(annotations)
+		for spec in (_figure_annotation_spec(item),) if spec !== nothing]
+	isempty(specs) && return nothing
+	layout = p.layout
+	W, H = _figure_annotation_size(layout)
+	accs = _fin_collect_axes(p)
+	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
+	# Room the bottom x-axis tick labels and title take (their automargin push
+	# plus plotly's extra), measured with a zero base margin.
+	probe = Layout(copy(layout.fields))
+	probe_margin = _symbol_dict(get(layout.fields, :margin, nothing))
+	probe_margin[:b] = 0
+	probe.fields[:margin] = probe_margin
+	push = _fin_margins(probe, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[]).b
+	axis_room = push > 0 ? push + _FIN_AUTOMARGIN_EXTRA : 0.0
+
+	needed = margins.b
+	for (index, spec) in specs
+		spec.fy === nothing && continue
+		item = annotations[index]
+		_cmn_mapping_get(item, :showarrow) === false || continue
+		height = _figure_annotation_text_height(_cmn_mapping_get(item, :text), _figure_annotation_fontsize(item, layout))
+		anchor = something(_cmn_mapping_get(item, :yanchor), "auto")
+		anchor == "auto" && (anchor = _annotation_auto_yanchor(spec.fy))
+		y0 = spec.fy * H + spec.dy
+		below = anchor == "top" ? height : anchor == "middle" ? height / 2 : 0.0
+		bottom, top = y0 - below, y0 - below + height
+		# Only text that reaches into the bottom margin is a caption below the
+		# axes; text over the plot area is left where it is.
+		bottom < margins.b || continue
+		needed = max(needed, min(top + _FIGURE_ANNOTATION_GAP + axis_room, H / 2))
+	end
+	new_b = needed > margins.b + 0.5 ? Float64(ceil(needed)) : nothing
+	b = new_b === nothing ? margins.b : new_b
+
+	for (index, spec) in specs
+		item = annotations[index]
+		fields = _symbol_dict(item)
+		spec.fx === nothing || (fields[:xshift] = round(spec.fx * (margins.l + margins.r) - margins.l + spec.dx; digits = 2))
+		spec.fy === nothing || (fields[:yshift] = round(spec.fy * (margins.t + b) - b + spec.dy; digits = 2))
+		annotations[index] = attr(; fields...)
+	end
+	return new_b
+end
+
 # Build the annotation for `target` (a `_CellTarget`) and append it to the
 # figure's annotations. Everything is validated before the layout is written.
 function _extended_annotate!(
@@ -18226,7 +18296,7 @@ function _extended_annotate!(
 	layout = _plot_layout(fig)
 	coordinate_system = Symbol(coords)
 	coordinate_system in _ANNOTATION_COORDS || throw(ArgumentError(
-		"$(who): `coords` must be :data, :axes or :figure; got $(repr(coords)).",
+		"$(who): `coords` must be :data, :axes, :paper or :figure; got $(repr(coords)).",
 	))
 	_require_size_option(fontsize, who, "fontsize")
 	font_px = fontsize
@@ -18283,6 +18353,29 @@ function _extended_annotate!(
 	y_ref, y_position = _annotation_coordinate(layout, target, :y, y, coordinate_system, yref, who)
 	_annotation_tail!(entry, layout, :x, who)
 	_annotation_tail!(entry, layout, :y, who)
+	# Coordinates in whole-figure fractions (an explicit `xref`/`yref` wins).
+	figure_x = coordinate_system === :figure && xref === nothing
+	figure_y = coordinate_system === :figure && yref === nothing
+	if figure_x || figure_y
+		haskey(entry, :name) && throw(ArgumentError(
+			"$(who): `name` cannot be set with `coords = :figure` (it marks the " *
+			"annotation as placed in figure fractions).",
+		))
+		for (taken, key) in ((figure_x, :xshift), (figure_y, :yshift))
+			taken && haskey(entry, key) && throw(ArgumentError(
+				"$(who): `$(key)` cannot be combined with `coords = :figure` (the " *
+				"shift places the annotation in the figure); use `offset`.",
+			))
+		end
+	end
+	# G70: cell fractions of a pie, polar, ternary, 3-D or map cell become
+	# figure ("paper") fractions, where plotly's automatic anchor would follow
+	# the position in the figure. Anchor by the position in the cell instead,
+	# as plotly does for the "x domain" references of a Cartesian cell.
+	if coordinate_system === :axes && target.kind !== :xy && !showarrow
+		xref === nothing && !haskey(entry, :xanchor) && (entry[:xanchor] = _annotation_auto_xanchor(x))
+		yref === nothing && !haskey(entry, :yanchor) && (entry[:yanchor] = _annotation_auto_yanchor(y))
+	end
 	if dx != 0 || dy != 0
 		shift_keys = showarrow ? (:ax, :ay, :axref, :ayref) : (:xshift, :yshift)
 		for key in shift_keys
@@ -18314,11 +18407,23 @@ function _extended_annotate!(
 	entry[:yref] = y_ref
 	entry[:text] = label
 	entry[:showarrow] = showarrow
+	if figure_x || figure_y
+		# Without an arrow the offset is a shift, which the placement adds to
+		# the figure shift; with an arrow it moved the text (`ax`/`ay`).
+		shift_x, shift_y = showarrow ? (0.0, 0.0) : (Float64(dx), Float64(dy))
+		entry[:name] = _FIGURE_ANNOTATION_PREFIX *
+			"$(figure_x ? Float64(x_position) : "-"):$(figure_y ? Float64(y_position) : "-"):$(shift_x):$(shift_y)"
+	end
 
 	existing = get(layout.fields, :annotations, nothing)
 	annotations = existing === nothing ? Any[] : collect(Any, existing)
 	push!(annotations, attr(; entry...))
-	relayout!(fig, annotations = annotations)
+	margin_b = _figure_annotations_place!(_plot_obj(fig), annotations)
+	if margin_b === nothing
+		relayout!(fig, annotations = annotations)
+	else
+		relayout!(fig; annotations = annotations, margin_b = margin_b)
+	end
 	return nothing
 end
 
@@ -18343,7 +18448,24 @@ at that position.
     logarithmic axis give the data value (`x = 1000`), not its exponent.
   - `:axes`: fractions of the axes area, `(0, 0)` bottom left, `(1, 1)` top
     right (of the cell's domain for pie, polar, ternary, 3-D and map cells).
-  - `:figure`: fractions of the whole figure (plotly "paper" coordinates).
+    Without an arrow the text is anchored by its position in the cell (left
+    of 1/3 of the width left-aligned, right of 2/3 right-aligned, else
+    centred; likewise bottom/middle/top), on every kind of cell.
+  - `:paper`: plotly "paper" coordinates, fractions of the plot area inside
+    the figure margins (of the whole subplot grid on a `SubplotFigure`);
+    values below 0 or above 1 reach into the margins.
+  - `:figure`: fractions of the whole figure, `(0, 0)` its bottom-left
+    corner and `(1, 1)` its top-right corner (matplotlib's `fig.text`), each
+    in `[0, 1]`; use it for footnotes and captions. The text is drawn at the
+    plot-area position shifted by the figure margins, so it keeps its place
+    in any `savefig` size as long as the margins do not change. Text without
+    an arrow that reaches below the plot area is a caption: the bottom margin
+    is raised so the caption sits below the x-axis tick labels and title
+    (at most half the figure height). Each `annotate!` re-places the figure
+    annotations already present for the margins at that time; margins
+    changed later (a legend moved below the plot, `tight_layout!`) are not
+    followed until the next `annotate!`. `name` and `xshift`/`yshift`
+    cannot be combined with it (use `offset`).
 - `offset = (0, 0)`: `(dx, dy)` in px, `dy` upwards. With an arrow the text
   moves by the offset and the arrow head stays at `(x, y)`; without an arrow the
   whole annotation is shifted.
@@ -18375,6 +18497,8 @@ cell becomes the active cell. On a single figure, `row`/`col`/`inset` throw an
 fig = plot_scatter(1:100, (1:100) .^ 2; yscale = "log")
 annotate!(fig, 50, 2500, "knee"; offset = (30, 30), color = "firebrick")
 annotate!(fig, 0.02, 0.95, "(a)"; coords = :axes, showarrow = false, fontsize = 16)
+annotate!(fig, 0.5, 0.01, "Source: simulation"; coords = :figure, showarrow = false,
+	yanchor = "bottom")
 ```
 """
 function annotate!(
