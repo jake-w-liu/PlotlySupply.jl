@@ -2037,12 +2037,9 @@ end
 
 # ── tight_layout! ────────────────────────────────────────────────────────────
 
-# plotly.js lays annotation text out with 1.3 em line spacing
-# (svg_text_utils LINE_SPACING) inside `borderpad`+`borderwidth` (defaults 1, 1).
-const _TIGHT_LINE_HEIGHT_EM = 1.3
-# Average advance of a proportional sans-serif glyph, used only to estimate how
-# far left/right-anchored annotation text overhangs the plot area.
-const _TIGHT_CHAR_WIDTH_EM = 0.6
+# Text sizes (plain lines at 1.3 em, MathJax rows, glyph widths) come from
+# `_text_extent` (src/sci/text.jl); plotly.js draws annotation text inside
+# `borderpad`+`borderwidth` (defaults 1, 1) on each side.
 # Figure size assumed when the layout has none: the package's savefig default.
 const _TIGHT_DEFAULT_WIDTH = 700.0
 const _TIGHT_DEFAULT_HEIGHT = 500.0
@@ -2083,7 +2080,8 @@ function _tight_root_font_size(lookup)
 end
 
 # Height in px of the figure title block as plotly.js lays it out (title and
-# subtitle lines at 1.3 em plus title.pad.t/b), or 0 without title text.
+# subtitle text, see `_text_extent`, plus title.pad.t/b), or 0 without title
+# text.
 function _tight_title_height(title, lookup, root_size::Float64)
 	text = _tight_title_text(title)
 	isempty(text) && return 0.0
@@ -2097,7 +2095,7 @@ function _tight_title_height(title, lookup, root_size::Float64)
 		Float64(round(_TIGHT_TITLE_SIZE_FACTOR * root_size)),
 	)
 	size = _tight_real(get(_symbol_dict(get(d, :font, nothing)), :size, nothing), default_size)
-	height = length(_tight_lines(text)) * size * _TIGHT_LINE_HEIGHT_EM
+	height = _text_extent(text, size)[2]
 	subtitle = _symbol_dict(get(d, :subtitle, nothing))
 	subtitle_text = get(subtitle, :text, "")
 	if subtitle_text isa AbstractString && !isempty(subtitle_text)
@@ -2105,7 +2103,7 @@ function _tight_title_height(title, lookup, root_size::Float64)
 			get(_symbol_dict(get(subtitle, :font, nothing)), :size, nothing),
 			Float64(round(_TIGHT_SUBTITLE_SIZE_FACTOR * size)),
 		)
-		height += length(_tight_lines(subtitle_text)) * subtitle_size * _TIGHT_LINE_HEIGHT_EM
+		height += _text_extent(subtitle_text, subtitle_size)[2]
 	end
 	pad = _symbol_dict(get(d, :pad, nothing))
 	return height + _tight_real(get(pad, :t, nothing), 0.0) + _tight_real(get(pad, :b, nothing), 0.0)
@@ -2161,11 +2159,10 @@ function _tight_annotation_overhang(layout::Layout, lookup, width::Float64, heig
 		(px === nothing && py === nothing) && continue
 
 		size = _tight_real(get(_symbol_dict(get(d, :font, nothing)), :size, nothing), root_size)
-		lines = _tight_lines(text)
-		longest = maximum(length(replace(line, r"<[^>]*>" => "")) for line in lines)
+		text_width, text_height = _text_extent(text, size)
 		frame = 2 * (_tight_real(get(d, :borderpad, nothing), 1.0) + _tight_real(get(d, :borderwidth, nothing), 1.0))
-		box_height = length(lines) * size * _TIGHT_LINE_HEIGHT_EM + frame
-		box_width = longest * size * _TIGHT_CHAR_WIDTH_EM + frame
+		box_height = text_height + frame
+		box_width = text_width + frame
 		angle = mod(_tight_real(get(d, :textangle, nothing), 0.0), 180.0)
 		if 45 < angle < 135
 			box_height, box_width = box_width, box_height
@@ -2262,6 +2259,10 @@ function _tight_layout_impl!(fig; pad::Real = 4)
 	fields = p.layout.fields
 	fields[:margin] = new_margin
 	new_title === nothing || (fields[:title] = new_title)
+	# Decorations stacked above the axes and a figure legend moved to the top
+	# of the figure (`_text_restack!`) need more top margin than the
+	# annotations alone; the pass only raises it.
+	_text_restack!(p)
 	_refresh!(fig)
 	return nothing
 end
@@ -2282,11 +2283,20 @@ clipped:
   keeps `pad` px from the top edge;
 - paper-referenced annotations above, below or beside the plot area (subplot
   titles, panel labels) are measured and the margin on that side is enlarged
-  by their estimated extent (text height 1.3 em per line, width 0.6 em per
-  character; annotations in data coordinates are not measured). When such
+  by their estimated extent (plain text 1.3 em per `<br>` line with
+  per-glyph widths; TeX labels such as those [`mathtext`](@ref) writes are
+  measured as typeset: one row per row of a multi-line `array`, commands,
+  braces and `\\text{…}` wrappers stripped, scripts at 70 %, fractions and
+  roots taller. The estimate errs on the large side, by up to about 20 % for
+  text and more for very short TeX labels. Annotations in data coordinates
+  are not measured). When such
   annotations sit above the plot area, the estimated title height is added to
   the top margin as well, so the title stays above them. Each enlargement is
   capped at 45 % of the figure width or height.
+- what is stacked above the axes (a legend placed above a cell, panel titles
+  and labels above it, an `:outside_top` figure legend moved under the figure
+  title; see [`set_legend!`](@ref)) keeps its room: the top margin is raised
+  to hold the stack.
 
 The figure size used for the measurement is `layout.width`/`layout.height`
 (see [`figsize!`](@ref)), else 700 × 500 px. A title with `yref="paper"` is

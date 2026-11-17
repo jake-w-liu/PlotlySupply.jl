@@ -404,6 +404,11 @@ unrecognized name warns and falls back to `:topright`; a value that is neither
 a `Symbol` nor a string throws an `ArgumentError`. Figures that already exist
 are not changed. Returns the normalized position.
 
+While the default is `:topright`, the legends of the scatter and line
+families and the cell legends of a [`SubplotFigure`](@ref) go where they cover
+the least data (matplotlib's `loc = "best"`, see [`plot_scatter`](@ref)); any
+other default turns this off.
+
 # Example
 ```julia
 set_default_legend_position!(:outside_bottom)
@@ -1310,16 +1315,10 @@ function _legend_title_clearance(p::Plot, title)
 	get(d, :yanchor, "auto") in ("auto", "top") || return nothing
 
 	pad = _symbol_dict(get(d, :pad, nothing))
-	pad_t = _legend_real(get(pad, :t, nothing))
-	if pad_t === nothing
-		pad_t = Float64(_TEXT_TITLE_TOP_PAD)
+	if _legend_real(get(pad, :t, nothing)) === nothing
 		pad[:t] = _TEXT_TITLE_TOP_PAD
 	end
-	font_size = _legend_title_font_size(p, d)
-	# Lower bound of the drawn text height: one line of text is at least as
-	# tall as its font size; a MathJax expression can be shorter (e.g. `$x$`).
-	text_floor = occursin('$', text) ? font_size / 2 : font_size
-	needed = max(Float64(_LEGEND_TITLE_GAP), ceil(_legend_top_margin(p) - pad_t - text_floor + 1))
+	needed = _legend_title_clearance_pad(p, d)
 	pad_b = _legend_real(get(pad, :b, nothing))
 	changed = get(d, :automargin, nothing) !== true || !haskey(d, :pad) ||
 		pad_b === nothing || pad_b < needed || !(title isa AbstractDict || title isa PlotlyBase.PlotlyAttribute)
@@ -1330,6 +1329,21 @@ function _legend_title_clearance(p::Plot, title)
 	return d
 end
 
+# The `title.pad.b` `_legend_title_clearance` gives title `d` (a Dict with
+# text): the band pad.t (10 px when unset) + text + pad.b must exceed
+# `margin.t`, with the font size as a lower bound of the text height (half of
+# it for MathJax titles).
+function _legend_title_clearance_pad(p::Plot, d::AbstractDict)
+	text = get(d, :text, "")
+	pad_t = _legend_real(get(_symbol_dict(get(d, :pad, nothing)), :t, nothing))
+	pad_t === nothing && (pad_t = Float64(_TEXT_TITLE_TOP_PAD))
+	font_size = _legend_title_font_size(p, d)
+	# Lower bound of the drawn text height: one line of text is at least as
+	# tall as its font size; a MathJax expression can be shorter (e.g. `$x$`).
+	text_floor = (text isa AbstractString && occursin('$', text)) ? font_size / 2 : font_size
+	return max(Float64(_LEGEND_TITLE_GAP), ceil(_legend_top_margin(p) - pad_t - text_floor + 1))
+end
+
 # Apply `_legend_title_clearance` to the figure title of `p` when a legend is
 # drawn above the plot area (audit: an `:outside_top` legend overlapped the title).
 function _legend_title_clearance!(p::Plot)
@@ -1338,6 +1352,15 @@ function _legend_title_clearance!(p::Plot)
 	title === nothing && return nothing
 	d = _legend_title_clearance(p, title)
 	d === nothing || (p.layout.fields[:title] = attr(; d...))
+	return nothing
+end
+
+# Layout pass after every legend placement: the decorations above the axes
+# are stacked (D12: panel titles/labels above cell legends, figure legends
+# above both), or, with nothing stacked, the figure title clears a legend
+# above the plot area (`_text_restack!(p; clearance = true)`).
+function _legend_stack!(p::Plot)
+	_text_restack!(p; clearance = true)
 	return nothing
 end
 
@@ -1360,7 +1383,8 @@ end
 function _legend_group_for_signature(trace::GenericTrace)
 	group = get(trace.fields, :legendgroup, "")
 	group isa AbstractString || return _legend_canonical(group)
-	return startswith(group, _LEGEND_DEDUPE_GROUP_PREFIX) ? "" : String(group)
+	(startswith(group, _LEGEND_DEDUPE_GROUP_PREFIX) || _legend_is_column_group(group)) && return ""
+	return String(group)
 end
 
 function _legend_has_explicit_color(trace::GenericTrace)
@@ -1422,9 +1446,11 @@ end
 Merge legend entries that look identical (same name and style, see
 `_legend_style_signature`) within each legend: all members join one
 `legendgroup` (the first member's own group, else a generated one) so a click
-toggles them together, and only the first keeps `showlegend`. When a legend
-had no user legend groups, its `traceorder` is pinned to "normal" so the new
-groups do not switch plotly to grouped spacing. Returns whether anything changed.
+toggles them together, and only the first keeps `showlegend`. A first member
+that sits in a legend column (`_legend_apply_columns!`) keeps its column group
+and the hidden members get a generated group. When a legend had no user
+legend groups, its `traceorder` is pinned to "normal" so the new groups do
+not switch plotly to grouped spacing. Returns whether anything changed.
 """
 function _legend_dedupe!(p::Plot; legend_ids = nothing)
 	groups = _legend_dedupe_groups(p; legend_ids = legend_ids)
@@ -1434,10 +1460,12 @@ function _legend_dedupe!(p::Plot; legend_ids = nothing)
 		first_trace = p.data[members[1]]
 		legend_id = _legend_trace_legend_id(first_trace)
 		group = get(first_trace.fields, :legendgroup, "")
-		if !(group isa AbstractString) || isempty(group)
+		in_column = _legend_is_column_group(group)
+		if !(group isa AbstractString) || isempty(group) || in_column
 			group = _LEGEND_DEDUPE_GROUP_PREFIX * legend_id * ":" * string(members[1])
 		end
 		for (k, index) in enumerate(members)
+			(k == 1 && in_column) && continue
 			trace = p.data[index]
 			trace.fields[:legendgroup] = group
 			k > 1 && (trace.fields[:showlegend] = false)
@@ -1450,7 +1478,8 @@ function _legend_dedupe!(p::Plot; legend_ids = nothing)
 			_legend_trace_legend_id(trace) == legend_id || return false
 			group = get(trace.fields, :legendgroup, "")
 			return group isa AbstractString && !isempty(group) &&
-				!startswith(group, _LEGEND_DEDUPE_GROUP_PREFIX)
+				!startswith(group, _LEGEND_DEDUPE_GROUP_PREFIX) &&
+				!_legend_is_column_group(group)
 		end
 		user_groups && continue
 		key = Symbol(legend_id)
@@ -1535,7 +1564,13 @@ is also rebuilt when its id now belongs to traces that had another id (the
 ids were renumbered, e.g. after `deletetraces!`) or to traces that had none
 (a new cell). `fresh` rebuilds every box from scratch. `ext_opts` are
 validated `_legend_options` whose F15 fields (`_legend_layout_ext`) are
-written into every box, with `ncols` scaled to the width of each cell.
+written into every box (the callers lay `ncols` columns out afterwards with
+`_legend_relayout_columns!`); entries new to a column legend join a column.
+`auto_from > 0` (an append whose first new trace has that index) moves a box
+at the package default position (`:topright`, no explicit anchors) to the
+position covering the least of its cell's data (`_legend_best_cell_position`,
+Y17) when the box is new or still sits where that rule put it for the traces
+before the append; a box the user placed elsewhere stays.
 """
 function _apply_subplot_legends!(
 	p::Plot;
@@ -1551,6 +1586,7 @@ function _apply_subplot_legends!(
 	xanchor::AbstractString = "",
 	yanchor::AbstractString = "",
 	ext_opts = nothing,
+	auto_from::Integer = 0,
 )
 	order, ids, domains, trace_keys = _legend_subplot_assignment(p)
 
@@ -1582,6 +1618,15 @@ function _apply_subplot_legends!(
 	end
 
 	colors = _legend_resolve_colors(p, legend_bgcolor, legend_bordercolor, legend_borderwidth)
+	# Cells that received traces in this append (only they can change their
+	# best legend position).
+	appended = Set{String}()
+	if auto_from > 0
+		for index in auto_from:length(p.data)
+			key = trace_keys[index]
+			key === nothing || push!(appended, key)
+		end
+	end
 	# Legend boxes created after construction get the active style's legend
 	# font size, which the style wrote only onto the legends that existed when
 	# the figure was built (an explicit font size already in the box wins).
@@ -1601,6 +1646,14 @@ function _apply_subplot_legends!(
 			xanchor = xanchor,
 			yanchor = yanchor,
 		)
+		auto = key in appended && legend_position === :topright && isempty(xanchor) &&
+			isempty(yanchor) && !replace_placement && _DEFAULT_LEGEND_POSITION[] === :topright
+		if auto && !(created || reassigned)
+			current = _symbol_dict(p.layout.fields[legend_key])
+			earlier = something(_legend_best_cell_position(p, legend_id, xdom, ydom; before = auto_from), :topright)
+			expected = _legend_placement(earlier, xdom, ydom, legend_inset; figure = false)
+			auto = all(k -> get(current, k, nothing) == get(expected, k, nothing), _LEGEND_PLACEMENT_KEYS)
+		end
 		_legend_write_block!(
 			p,
 			legend_key;
@@ -1613,6 +1666,16 @@ function _apply_subplot_legends!(
 			fresh = fresh,
 		)
 		created && _legend_fill_style_font!(p, legend_key, style_font)
+		if auto
+			# Scored once the box carries its frame and font (its size).
+			best = something(_legend_best_cell_position(p, legend_id, xdom, ydom), :topright)
+			_legend_write_block!(
+				p,
+				legend_key;
+				placement = _legend_placement(best, xdom, ydom, legend_inset; figure = false),
+				replace_placement = true,
+			)
+		end
 	end
 	figure_key = Symbol(_FIGURE_LEGEND_ID)
 	if has_figure_entries && !haskey(p.layout.fields, figure_key)
@@ -1625,8 +1688,10 @@ function _apply_subplot_legends!(
 		)
 		_legend_fill_style_font!(p, figure_key, style_font)
 	end
+	# Entries that joined a column legend (`ncols`) take a column.
+	_legend_extend_columns!(p)
 	_legend_set_showlegend!(p, nothing, overwrite)
-	_legend_title_clearance!(p)
+	_legend_stack!(p)
 
 	return p
 end
@@ -1688,24 +1753,30 @@ function _apply_figure_legend!(
 			fresh = fresh,
 		)
 	end
+	# New entries of a column legend (`ncols`) take a column; earlier traces
+	# are not touched (append-only path).
+	_legend_extend_columns!(p; first = start)
 	_legend_set_showlegend!(p, nothing, explicit)
-	_legend_title_clearance!(p)
+	_legend_stack!(p)
 	return p
 end
 
 """
-	_refresh_subplot_legends!(sf, p = sf's Plot; first_new = 1)
+	_refresh_subplot_legends!(sf, p = sf's Plot; first_new = 1, auto = false)
 
 Legend pass after traces were appended to a SubplotFigure: per-subplot
 legends when `sf.per_subplot_legends`, otherwise the figure legend with the
 stored `sf.legend_*` settings. Existing boxes keep their placement/colours;
 in figure mode only traces from `first_new` on are touched, so it is safe on
-the append-only fast transaction path.
+the append-only fast transaction path. `auto = true` (the append paths) lets
+cell legends at the default position follow their cell's data
+(`_apply_subplot_legends!(…; auto_from = first_new)`, Y17).
 """
 function _refresh_subplot_legends!(
 	sf::SubplotFigure,
 	p::Plot = _plot_obj(getfield(sf, :fig));
 	first_new::Integer = 1,
+	auto::Bool = false,
 )
 	if sf.per_subplot_legends
 		_apply_subplot_legends!(
@@ -1715,6 +1786,7 @@ function _refresh_subplot_legends!(
 			legend_bgcolor = sf.legend_bgcolor,
 			legend_bordercolor = sf.legend_bordercolor,
 			legend_borderwidth = sf.legend_borderwidth,
+			auto_from = auto ? first_new : 0,
 		)
 	else
 		_apply_figure_legend!(
@@ -1778,6 +1850,9 @@ function _apply_default_legend!(
 			replace_colors = overwrite,
 		)
 	end
+	# Entries without a column in a column legend (`ncols`) - the new
+	# traces - take one; entries already laid out are not touched.
+	_legend_extend_columns!(p)
 	if showlegend isa Bool
 		# Explicit caller override (e.g. force a legend for a single unnamed trace).
 		p.layout.fields[:showlegend] = showlegend
@@ -1785,7 +1860,7 @@ function _apply_default_legend!(
 		any(trace -> trace isa GenericTrace && _trace_will_showlegend(trace), p.data)
 		p.layout.fields[:showlegend] = true
 	end
-	_legend_title_clearance!(p)
+	_legend_stack!(p)
 	return p
 end
 
@@ -1836,8 +1911,9 @@ function _legend_apply_plot!(fig, opts; traces::Bool)
 		replace_colors = true,
 	)
 	traces && opts.dedupe && _legend_dedupe!(p)
+	traces && _legend_relayout_columns!(p, "legend", opts)
 	_legend_set_showlegend!(p, opts.showlegend, false)
-	_legend_title_clearance!(p)
+	_legend_stack!(p)
 	_refresh!(fig)
 	return fig
 end
@@ -1849,7 +1925,7 @@ _set_legend_impl!(fig; options) = _legend_apply_plot!(fig, options; traces = fal
 _set_legend_traces_impl!(fig; options) = _legend_apply_plot!(fig, options; traces = true)
 
 """
-	set_legend!(fig; position=nothing, inset=nothing, bgcolor=nothing, bordercolor=nothing, borderwidth=nothing, showlegend=nothing, xanchor="", yanchor="", orientation=nothing, ncols=0, title="", fontsize=0, frame=nothing, dedupe=true, itemwidth=0, entrywidth=0, legend_target=nothing, row=nothing, col=nothing)
+	set_legend!(fig; position=nothing, inset=nothing, bgcolor=nothing, bordercolor=nothing, borderwidth=nothing, showlegend=nothing, xanchor="", yanchor="", orientation=nothing, ncols=0, title="", title_side=nothing, fontsize=0, frame=nothing, dedupe=true, itemwidth=0, entrywidth=0, legend_target=nothing, row=nothing, col=nothing)
 
 Place and style the legend of a `Plot`, [`SyncPlot`](@ref) or
 [`SubplotFigure`](@ref). Keywords left at their defaults leave the
@@ -1894,14 +1970,37 @@ current position.
 
 # Appearance
 - `orientation`: `:v`/`:h` (or `"v"`/`"h"`, `:vertical`/`:horizontal`);
-  `nothing` = horizontal for outside top/bottom and when `ncols > 0`, else vertical.
-- `ncols::Integer = 0`: number of columns of a horizontal legend (sets
-  `entrywidth = 1/ncols` with `entrywidthmode = "fraction"`).
+  `nothing` = horizontal for outside top/bottom and when `ncols > 1`, else
+  vertical. A horizontal *cell* legend wraps its entries into as many
+  columns as fit the cell (it never runs into the neighbouring cell).
+- `ncols::Integer = 0`: lay the entries out in this many columns, filled
+  column by column as matplotlib's `ncols` does (`ncols = 1` is a vertical
+  legend). Each column is as wide as its widest label. When the columns do
+  not fit the width available to the legend (its cell for a cell legend, the
+  plot area for a figure legend inside it), fewer columns are used and a
+  warning says so. A cell legend above or below its axes (e.g.
+  `position = (1, 1), xanchor = "right", yanchor = "bottom"`) may reach from
+  its anchor over the gap to the next cell of its row, or into the figure
+  margin beside the grid. Columns are Plotly legend groups (`traceorder="grouped"`,
+  `layout.legend.groupclick="toggleitem"`): a click toggles one entry, and the
+  entries' own legend groups (stem heads, merged duplicates, `legendgroup`
+  of `legend_entry!`) no longer link them to other traces. Entries added
+  later join the last column; call `set_legend!` again to rebalance.
+  Legends that list pie slices are not split into columns.
 - `entrywidth::Real = 0`: width of each entry in px (`entrywidthmode = "pixels"`);
-  cannot be combined with `ncols`.
+  cannot be combined with `ncols` in one call. A column legend keeps its
+  columns, each entry `entrywidth` wide.
 - `itemwidth::Real = 0`: width of the symbol part of each entry in px
-  (Plotly requires at least 30).
+  (Plotly requires at least 30). Plotly's row height (font size × 1.3, at
+  least 16 px, plus 3 px) and the gaps between entries are fixed; `fontsize`
+  is the way to a more compact legend.
 - `title::AbstractString = ""`: legend title (mathtext allowed, through `_label`).
+- `title_side`: where the title sits: `:top`, `:left`, `:top_left`,
+  `:top_center`, `:top_right` (`nothing` = unchanged; Plotly puts it on top
+  of a vertical legend and left of a horizontal one, a column legend gets it
+  on top). `:top` puts the title above entries that start at the left edge;
+  Plotly also indents the entries by the title's width for `:top_left`, so a
+  matplotlib-style title above the entries is `:top`.
 - `fontsize::Real = 0`: entry font size in px (0 = unchanged).
 - `frame`: `false` = transparent, borderless box; `true` = restore the default
   box (template/style colours); `nothing` = unchanged.
@@ -1966,6 +2065,7 @@ function set_legend!(
 	itemwidth::Real = 0,
 	entrywidth::Real = 0,
 	legend_target::Union{Nothing, Symbol} = nothing,
+	title_side::Union{Nothing, Symbol, AbstractString} = nothing,
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	show = nothing,
@@ -1979,12 +2079,15 @@ function set_legend!(
 		"set_legend!";
 		position, inset, bgcolor, bordercolor, borderwidth, showlegend,
 		xanchor, yanchor, orientation, ncols, title, fontsize, frame, dedupe,
-		itemwidth, entrywidth, legend_target,
+		itemwidth, entrywidth, legend_target, title_side,
 	)
 	p = _plot_obj(fig)
+	# Legend columns (`ncols`, an orientation change of a column legend) are
+	# legend groups on the traces.
 	needs_trace_edits =
 		any(_legend_hides_unnamed, p.data) ||
-		(options.dedupe && !isempty(_legend_dedupe_groups(p)))
+		(options.dedupe && !isempty(_legend_dedupe_groups(p))) ||
+		options.ncols > 0 || _legend_column_layout(p, "legend") !== nothing
 	return _transactional_high_level_plot_mutation!(
 		needs_trace_edits ? _set_legend_traces_impl! : _set_legend_impl!,
 		fig;
@@ -2032,7 +2135,11 @@ function _legend_set_cell_mode!(sf::SubplotFigure, p::Plot, opts)
 	sf.per_subplot_legends = true
 	_legend_store_settings!(sf, opts)
 	position = opts.position === nothing ? sf.legend_position : opts.position
-	was_per || _legend_undo_dedupe!(p)
+	if !was_per
+		# Legend ids change with the mode: columns are laid out again below.
+		_legend_clear_column_groups!(p)
+		_legend_undo_dedupe!(p)
+	end
 	_apply_subplot_legends!(
 		p;
 		legend_position = position,
@@ -2049,7 +2156,19 @@ function _legend_set_cell_mode!(sf::SubplotFigure, p::Plot, opts)
 		ext_opts = opts,
 	)
 	opts.dedupe && _legend_dedupe!(p)
+	_legend_relayout_cell_columns!(p, opts)
 	opts.showlegend === nothing || (p.layout.fields[:showlegend] = opts.showlegend)
+	return nothing
+end
+
+# `_legend_relayout_columns!` for every cell legend of `p`, each fitted to its
+# cell's width.
+function _legend_relayout_cell_columns!(p::Plot, opts)
+	order, ids, domains, _ = _legend_subplot_assignment(p)
+	for key in order
+		xdom = domains[key][1]
+		_legend_relayout_columns!(p, _legend_id(ids[key]), opts; span = xdom[2] - xdom[1], cell = true)
+	end
 	return nothing
 end
 
@@ -2063,6 +2182,7 @@ function _legend_set_figure_mode!(sf::SubplotFigure, p::Plot, opts)
 		for key in collect(keys(p.layout.fields))
 			occursin(_LEGEND_ID_PATTERN, String(key)) && delete!(p.layout.fields, key)
 		end
+		_legend_clear_column_groups!(p)
 		_legend_undo_dedupe!(p)
 	end
 	_apply_figure_legend!(
@@ -2082,6 +2202,7 @@ function _legend_set_figure_mode!(sf::SubplotFigure, p::Plot, opts)
 		explicit = true,
 	)
 	opts.dedupe && _legend_dedupe!(p; legend_ids = ("legend",))
+	_legend_relayout_columns!(p, "legend", opts)
 	opts.showlegend === nothing || (p.layout.fields[:showlegend] = opts.showlegend)
 	return nothing
 end
@@ -2120,6 +2241,7 @@ function _legend_set_figure_entry_legend!(sf::SubplotFigure, p::Plot, opts)
 		replace_colors = true,
 	)
 	opts.dedupe && _legend_dedupe!(p; legend_ids = (_FIGURE_LEGEND_ID,))
+	_legend_relayout_columns!(p, _FIGURE_LEGEND_ID, opts)
 	opts.showlegend === nothing || _legend_set_visible!(p, key, opts.showlegend)
 	return nothing
 end
@@ -2191,6 +2313,7 @@ function _legend_set_cell!(sf::SubplotFigure, p::Plot, opts, row, col)
 		replace_colors = true,
 	)
 	opts.dedupe && _legend_dedupe!(p; legend_ids = (legend_id,))
+	_legend_relayout_columns!(p, legend_id, opts; span = target.xdomain[2] - target.xdomain[1], cell = true)
 	opts.showlegend === nothing || _legend_set_visible!(p, key, opts.showlegend)
 	return nothing
 end
@@ -2221,7 +2344,7 @@ function _set_subplot_legend_impl!(
 			_legend_set_figure_mode!(sf, p, opts)
 		end
 	end
-	_legend_title_clearance!(p)
+	_legend_stack!(p)
 	_refresh!(sf.fig)
 	return sf
 end
@@ -2245,6 +2368,7 @@ function set_legend!(
 	itemwidth::Real = 0,
 	entrywidth::Real = 0,
 	legend_target::Union{Nothing, Symbol} = nothing,
+	title_side::Union{Nothing, Symbol, AbstractString} = nothing,
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	show = nothing,
@@ -2254,7 +2378,7 @@ function set_legend!(
 		"set_legend!";
 		position, inset, bgcolor, bordercolor, borderwidth, showlegend,
 		xanchor, yanchor, orientation, ncols, title, fontsize, frame, dedupe,
-		itemwidth, entrywidth, legend_target,
+		itemwidth, entrywidth, legend_target, title_side,
 	)
 	(row === nothing) == (col === nothing) || throw(ArgumentError(
 		"set_legend!: `row` and `col` must be given together.",
@@ -2322,13 +2446,14 @@ function _subplot_legends_impl!(fig; options)
 		ext_opts = opts,
 	)
 	opts.dedupe && _legend_dedupe!(p)
+	_legend_relayout_cell_columns!(p, opts)
 	opts.showlegend === nothing || (p.layout.fields[:showlegend] = opts.showlegend)
 	_refresh!(fig)
 	return fig
 end
 
 """
-	subplot_legends!(fig; position=nothing, inset=nothing, bgcolor=nothing, bordercolor=nothing, borderwidth=nothing, showlegend=nothing, xanchor="", yanchor="", orientation=nothing, ncols=0, title="", fontsize=0, frame=nothing, dedupe=true, itemwidth=0, entrywidth=0)
+	subplot_legends!(fig; position=nothing, inset=nothing, bgcolor=nothing, bordercolor=nothing, borderwidth=nothing, showlegend=nothing, xanchor="", yanchor="", orientation=nothing, ncols=0, title="", title_side=nothing, fontsize=0, frame=nothing, dedupe=true, itemwidth=0, entrywidth=0)
 
 Give each subplot its own legend box, placed inside (or, for outside
 positions, next to) that subplot's axes, instead of Plotly's single legend.
@@ -2344,9 +2469,9 @@ in [`set_legend!`](@ref); the 1.x names `legend_inset`, `legend_bgcolor`,
 - On a `Plot`/[`SyncPlot`](@ref) built with subplots it assigns the legends
   once (`position = nothing` means `get_default_legend_position()`).
 
-`ncols` gives each cell's legend that many columns across its cell. Returns
-`fig`. Invalid values throw an `ArgumentError` before anything is changed;
-`show` is not accepted.
+`ncols` gives each cell's legend that many columns (fewer, with a warning,
+where they do not fit the cell). Returns `fig`. Invalid values throw an
+`ArgumentError` before anything is changed; `show` is not accepted.
 
 # Example
 ```julia
@@ -2374,6 +2499,7 @@ function subplot_legends!(
 	dedupe::Bool = true,
 	itemwidth::Real = 0,
 	entrywidth::Real = 0,
+	title_side::Union{Nothing, Symbol, AbstractString} = nothing,
 	legend_inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -2396,6 +2522,7 @@ function subplot_legends!(
 		showlegend, xanchor, yanchor, orientation, ncols, title, fontsize,
 		frame, dedupe, itemwidth, entrywidth,
 		legend_target = nothing,
+		title_side,
 	)
 	return _transactional_high_level_plot_mutation!(
 		_subplot_legends_impl!,
@@ -2429,6 +2556,7 @@ function subplot_legends!(
 	dedupe::Bool = true,
 	itemwidth::Real = 0,
 	entrywidth::Real = 0,
+	title_side::Union{Nothing, Symbol, AbstractString} = nothing,
 	legend_inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -2451,6 +2579,7 @@ function subplot_legends!(
 		showlegend, xanchor, yanchor, orientation, ncols, title, fontsize,
 		frame, dedupe, itemwidth, entrywidth,
 		legend_target = :cell,
+		title_side,
 	)
 	return _transactional_subplot_mutation!(
 		_subplot_figure_legends_impl!,
@@ -3589,7 +3718,7 @@ function _subplot_add_trace_impl!(
 	p = _plot_obj(sf.fig)
 	_validate_subplot_traces!(p, (trace,), r, c; secondary_y = secondary_y, who = "add_trace!")
 	PlotlyBase.add_trace!(p, trace; row = r, col = c, secondary_y = secondary_y)
-	_refresh_subplot_legends!(sf, p; first_new = length(p.data))
+	_refresh_subplot_legends!(sf, p; first_new = length(p.data), auto = true)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -3652,7 +3781,7 @@ function _subplot_addtraces_impl!(
 		splice!(p.data, index:(index - 1), staged.data)
 		index
 	end
-	_refresh_subplot_legends!(sf, p; first_new = first_new)
+	_refresh_subplot_legends!(sf, p; first_new = first_new, auto = true)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -5388,7 +5517,7 @@ function _subplot_delegate_mutator_impl!(
 		end
 	end
 	_place_cell_colorbars!(p, start_index)
-	_refresh_subplot_legends!(sf, p; first_new = start_index)
+	_refresh_subplot_legends!(sf, p; first_new = start_index, auto = true)
 
 	sf.current_row = r
 	sf.current_col = c
@@ -8105,15 +8234,20 @@ const _SCAT_TICKS_DOC = """
   `ytickformat = ""`: d3 tick format (e.g. `".2f"`)."""
 const _SCAT_LEGEND_DOC = """
 While the default legend position is `:topright` (see
-[`set_default_legend_position!`](@ref)), the legend of a `Plot`/`SyncPlot`
-goes where its box covers the fewest data points and line segments: the
-corners first (top right, top left, bottom left, bottom right), then the
-middle of the right, left, bottom and top edges, then the centre. Later calls
-of the scatter and line families move it again as data is added, as long as
-it sits where this rule put it; a legend placed anywhere else (`set_legend!`,
-`relayout!`) keeps its place. A trace the estimate does not model (bars,
-heatmaps, other x axes, stacked or polygon fills) or non-numeric coordinates
-make the data extent unknown; the rule then uses the top-right default."""
+[`set_default_legend_position!`](@ref)), the legend of a `Plot`/`SyncPlot`,
+and each cell legend of a `SubplotFigure` (Cartesian cells with any y axes,
+polar cells), goes where its box covers the fewest data points, line segments
+and filled areas (and, in a polar cell, the tick labels): the corners
+first (top right, top left, bottom left, bottom right), then the middle of
+the right, left, bottom and top edges, then the centre. Later calls of the
+scatter and line families move it again as data is added, as long as it sits
+where this rule put it; a legend placed anywhere else (`set_legend!`,
+`relayout!`) keeps its place. When every position covers something the
+legend takes the one covering the least; move it with `set_legend!` (e.g. to
+an `:outside_*` position) then. A trace the estimate does not model (bars,
+heatmaps, other x axes, stacked fills or fills to another trace) or
+non-numeric coordinates make the data extent unknown; the rule then uses the
+top-right default."""
 const _SCAT_INSET_DOC = """
 `row`/`col` select the cell (default: the active
   cell) and `inset = k` draws on inset `k` (see [`inset!`](@ref)); the axis
@@ -8896,16 +9030,18 @@ end
 # first position of `_SCAT_LEGEND_POSITIONS` (matplotlib's candidate order:
 # the four corners, then the middle of the right, left, bottom and top edges,
 # then the centre) whose estimated box covers the fewest data points (markers,
-# error-bar ends) and line segments of the traces on the main x axis (primary
-# or secondary y). Each call of this family re-evaluates a legend it created,
-# or one that still sits where the rule puts it for the figure as it stood
-# before the call (so the rule placed it); a legend anywhere else was placed by
-# the user (`set_legend!`, `relayout!`) and is never moved. A trace the
-# estimate does not model (another type or x axis, a stacked or polygon fill)
-# or non-numeric coordinates (categories, dates) make the data extent unknown:
-# the legend then goes to, or stays at, the default top-right corner. Known
-# limit: a legend the user puts exactly where the rule would put it is
-# indistinguishable from an automatic one and follows the data too.
+# error-bar ends), line segments and filled areas of the traces on the main x
+# axis (primary or secondary y). Each call of this family re-evaluates a
+# legend it created, or one that still sits where the rule puts it for the
+# figure as it stood before the call (so the rule placed it); a legend
+# anywhere else was placed by the user (`set_legend!`, `relayout!`) and is
+# never moved. A trace the estimate does not model (another type or x axis, a
+# stacked fill or a fill to another trace) or non-numeric coordinates
+# (categories, dates) make the data extent unknown: the legend then goes to,
+# or stays at, the default top-right corner. SubplotFigure cell legends follow
+# the same rule per cell (`_legend_best_cell_position`). Known limit: a legend
+# the user puts exactly where the rule would put it is indistinguishable from
+# an automatic one and follows the data too.
 const _SCAT_LEGEND_POSITIONS =
 	(:topright, :topleft, :bottomleft, :bottomright, :right, :left, :bottom, :top, :center)
 # Legend size estimate in px for a 12 px legend font: one entry per 20 px row
@@ -9048,19 +9184,43 @@ end
 
 # The position of `_SCAT_LEGEND_POSITIONS` for the default legend of `p`, or
 # `nothing` when the data extent is unknown: a visible trace this estimate does
-# not model (another trace type, another x axis, a stacked or polygon fill) or
-# non-numeric coordinates.
+# not model (another trace type, another x axis, a stacked fill or a fill to
+# another trace) or non-numeric coordinates.
 function _scat_best_legend_position(p::Plot)
+	width_px, height_px = _scat_legend_figure_px(p.layout)
+	return _scat_best_legend_position(p, eachindex(p.data), :xaxis, "x", width_px, height_px)
+end
+
+# The scoring of `_scat_best_legend_position` for the traces `indices` of `p`
+# drawn on x axis `xref` (layout key `xkey`, any y axes) in a plot area of
+# `width_px` x `height_px`; `box = (w, h)` is the legend size in px (else the
+# rough per-entry estimate above). `obstacles` are rectangles
+# `(u0, u1, v0, v1)` (fractions of the plot area, e.g. insets) a legend box
+# must not cover: each scores like a filled area, by the share of the box it
+# covers. Used for a Plot (all traces, main axes) and for a SubplotFigure cell
+# legend (the cell's traces, `_legend_best_cell_position`).
+function _scat_best_legend_position(
+	p::Plot,
+	indices,
+	xkey::Symbol,
+	xref::AbstractString,
+	width_px::Float64,
+	height_px::Float64,
+	box = nothing;
+	obstacles = (),
+)
 	layout = p.layout
 	entries = 0
 	widest = 0
 	# (y axis key, x coordinates, y coordinates, kind, line shape): `:points`
 	# are scored where they lie, `:segments` join consecutive points with the
 	# trace's line shape, `:drops` join each point to y = 0 (the area of a
-	# `fill = "tozeroy"` trace).
+	# `fill = "tozeroy"` trace), `:polygon` is the closed area of a
+	# `fill = "toself"` trace (`_scat_legend_fill_scores!`).
 	series = Tuple{Symbol, Vector{Float64}, Vector{Float64}, Symbol, String}[]
 	xpadded = false
-	for trace in p.data
+	for trace_index in indices
+		trace = p.data[trace_index]
 		trace isa GenericTrace || return nothing
 		fields = trace.fields
 		if _trace_will_showlegend(trace)
@@ -9071,14 +9231,15 @@ function _scat_best_legend_position(p::Plot)
 		visible = get(fields, :visible, true)
 		(visible === false || visible == "legendonly") && continue
 		string(get(fields, :type, "scatter")) in ("scatter", "scattergl") || return nothing
-		string(get(fields, :xaxis, "x")) == "x" || return nothing
-		# Stacked or polygon fills cover areas these scores do not model.
+		string(get(fields, :xaxis, "x")) == xref || return nothing
+		# Stacked fills and fills to another trace or to x = 0 cover areas
+		# these scores do not model.
 		haskey(fields, :stackgroup) && return nothing
 		fill = string(get(fields, :fill, ""))
-		fill in ("", "none", "tozeroy") || return nothing
+		fill in ("", "none", "tozeroy", "toself") || return nothing
 		ykey = _axis_layout_key(string(get(fields, :yaxis, "y")), :y)
 		ylog = _axis_type(layout, ykey) == "log"
-		xs = _scat_legend_coords(get(fields, :x, nothing), _axis_type(layout, :xaxis) == "log")
+		xs = _scat_legend_coords(get(fields, :x, nothing), _axis_type(layout, xkey) == "log")
 		ys = _scat_legend_coords(get(fields, :y, nothing), ylog)
 		(xs === nothing || ys === nothing) && return nothing
 		n = min(length(xs), length(ys))
@@ -9097,7 +9258,7 @@ function _scat_best_legend_position(p::Plot)
 		for (letter, error) in ((:y, get(fields, :error_y, nothing)), (:x, get(fields, :error_x, nothing)))
 			bounds = _scat_legend_errors(error, n)
 			bounds === nothing && continue
-			axis_key = letter === :y ? ykey : :xaxis
+			axis_key = letter === :y ? ykey : xkey
 			_axis_type(layout, axis_key) == "log" && continue
 			minus, plus = bounds
 			if letter === :y
@@ -9111,11 +9272,13 @@ function _scat_best_legend_position(p::Plot)
 		push!(series, (ykey, vcat(xs, extra_x), vcat(ys, extra_y), :points, shape))
 		occursin("lines", mode) && push!(series, (ykey, xs, ys, :segments, shape))
 		fill == "tozeroy" && !ylog && push!(series, (ykey, xs, ys, :drops, shape))
+		fill == "toself" && push!(series, (ykey, xs, ys, :polygon, shape))
 	end
-	(entries == 0 || isempty(series)) && return nothing
+	(box === nothing ? entries == 0 || isempty(series) : isempty(series) && isempty(obstacles)) &&
+		return nothing
 
-	xwindow = _scat_legend_window(
-		layout, :xaxis, Iterators.flatten(s[2] for s in series); padded = xpadded,
+	xwindow = isempty(series) ? (0.0, 1.0) : _scat_legend_window(
+		layout, xkey, Iterators.flatten(s[2] for s in series); padded = xpadded,
 	)
 	xwindow === nothing && return nothing
 	ywindows = Dict{Symbol, Any}()
@@ -9131,9 +9294,14 @@ function _scat_best_legend_position(p::Plot)
 		)
 	end
 
-	width_px, height_px = _scat_legend_figure_px(layout)
-	box_w = min(0.6, (_SCAT_LEGEND_SAMPLE_PX + _SCAT_LEGEND_CHAR_PX * widest) / width_px)
-	box_h = min(0.6, (_SCAT_LEGEND_PAD_PX + _SCAT_LEGEND_ROW_PX * entries) / height_px)
+	box_w, box_h = if box === nothing
+		(
+			min(0.6, (_SCAT_LEGEND_SAMPLE_PX + _SCAT_LEGEND_CHAR_PX * widest) / width_px),
+			min(0.6, (_SCAT_LEGEND_PAD_PX + _SCAT_LEGEND_ROW_PX * entries) / height_px),
+		)
+	else
+		(min(0.95, box[1] / width_px), min(0.95, box[2] / height_px))
+	end
 	# The box of each candidate, from the anchor point and anchors the legend
 	# would get there.
 	boxes = map(_SCAT_LEGEND_POSITIONS) do position
@@ -9152,6 +9320,12 @@ function _scat_best_legend_position(p::Plot)
 		v_zero = (0.0 - ylo) / (yhi - ylo)
 		count = length(xs)
 		stride = max(1, cld(count, _SCAT_LEGEND_MAX_POINTS))
+		if kind === :polygon
+			us = [(xs[index] - xlo) / (xhi - xlo) for index in 1:stride:count]
+			vs = [(ys[index] - ylo) / (yhi - ylo) for index in 1:stride:count]
+			_scat_legend_fill_scores!(scores, us, vs, boxes)
+			continue
+		end
 		previous = nothing
 		for index in 1:stride:count
 			u = (xs[index] - xlo) / (xhi - xlo)
@@ -9175,8 +9349,59 @@ function _scat_best_legend_position(p::Plot)
 			previous = (u, v)
 		end
 	end
+	samples = _SCAT_LEGEND_FILL_SAMPLES^2
+	for (a0, a1, b0, b1) in obstacles
+		for (corner, (u0, u1, v0, v1)) in enumerate(boxes)
+			overlap = max(0.0, min(u1, a1) - max(u0, a0)) * max(0.0, min(v1, b1) - max(v0, b0))
+			overlap > 0 && (scores[corner] += ceil(Int, samples * overlap / ((u1 - u0) * (v1 - v0))))
+		end
+	end
 	# `argmin` returns the first minimum: ties keep the candidate order.
 	return _SCAT_LEGEND_POSITIONS[argmin(scores)]
+end
+
+# Samples per box side for `_scat_legend_fill_scores!` (5 x 5 = 25 points: a
+# box covering a filled area outweighs one crossing a few line segments).
+const _SCAT_LEGEND_FILL_SAMPLES = 5
+
+# Add to `scores[k]` the share of candidate box `boxes[k]` a `fill = "toself"`
+# area covers: the number of a regular grid of sample points of the box inside
+# the polygon(s) `us`, `vs` (unit axes coordinates; rings separated by
+# non-finite values, each closed back to its first vertex as plotly.js fills
+# them; even-odd rule).
+function _scat_legend_fill_scores!(scores::Vector{Int}, us::Vector{Float64}, vs::Vector{Float64}, boxes)
+	edges = NTuple{4, Float64}[]
+	start = 0
+	n = length(us)
+	for index in 1:(n + 1)
+		if index <= n && isfinite(us[index]) && isfinite(vs[index])
+			if start == 0
+				start = index
+			else
+				push!(edges, (us[index - 1], vs[index - 1], us[index], vs[index]))
+			end
+		else
+			start != 0 && index - 1 > start &&
+				push!(edges, (us[index - 1], vs[index - 1], us[start], vs[start]))
+			start = 0
+		end
+	end
+	isempty(edges) && return scores
+	k = _SCAT_LEGEND_FILL_SAMPLES
+	for (corner, (u0, u1, v0, v1)) in enumerate(boxes)
+		for a in 1:k, b in 1:k
+			u = u0 + (a - 0.5) / k * (u1 - u0)
+			v = v0 + (b - 0.5) / k * (v1 - v0)
+			inside = false
+			for (x1, y1, x2, y2) in edges
+				if (y1 > v) != (y2 > v) && u < x1 + (v - y1) * (x2 - x1) / (y2 - y1)
+					inside = !inside
+				end
+			end
+			inside && (scores[corner] += 1)
+		end
+	end
+	return scores
 end
 
 function _scat_legend_figure_px(layout)
@@ -9243,7 +9468,7 @@ function _scat_place_legend!(fig, before::Symbol)
 	placement = _scat_position_placement(something(_scat_best_legend_position(p), :topright))
 	_scat_legend_at(p, placement) && return nothing
 	_legend_write_block!(p, :legend; placement = placement, replace_placement = true)
-	_legend_title_clearance!(p)
+	_legend_stack!(p)
 	return nothing
 end
 

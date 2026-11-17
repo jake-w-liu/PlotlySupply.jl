@@ -227,7 +227,7 @@ using Test, PlotlySupply
 		t = fig.data[end].fields
 		@test t[:x] == [nothing] && t[:y] == [nothing]
 		@test t[:name] == "line only" && t[:showlegend] === true && t[:hoverinfo] == "skip"
-		@test t[:mode] == "lines" && sd(t[:line])[:color] == "red" && sd(t[:line])[:dash] == "dash" && sd(t[:line])[:width] == 3
+		@test t[:mode] == "lines" && sd(t[:line])[:color] == "#FF0000" && sd(t[:line])[:dash] == "dash" && sd(t[:line])[:width] == 3
 		legend_entry!(fig, "marker only"; mode = :markers, color = "#d62728", marker_symbol = "o", marker_size = 10)
 		t = fig.data[end].fields
 		@test t[:mode] == "markers" && sd(t[:marker])[:symbol] == "circle" && sd(t[:marker])[:size] == 10
@@ -239,7 +239,19 @@ using Test, PlotlySupply
 		legend_entry!(fig, " ")
 		@test sd(fig.data[end].fields[:line])[:color] == "rgba(0,0,0,0)"   # spacer: no symbol
 		legend_entry!(fig, " "; color = "blue")
-		@test sd(fig.data[end].fields[:line])[:color] == "blue"
+		@test sd(fig.data[end].fields[:line])[:color] == "#0000FF"
+		# G10/G49: colours are validated and written as CSS plotly.js draws;
+		# matplotlib grey levels become their hex grey.
+		legend_entry!(fig, "grey"; mode = "lines+markers", color = "0.35", marker_color = "0.5", marker_line_color = :black)
+		t = fig.data[end].fields
+		@test sd(t[:line])[:color] == "#595959"
+		@test sd(t[:marker])[:color] == "#808080" && sd(sd(t[:marker])[:line])[:color] == "#000000"
+		legend_entry!(fig, "unfilled patch"; patch = true, color = "black", marker_color = "none", marker_line_width = 1)
+		m = sd(fig.data[end].fields[:marker])
+		@test m[:color] == "rgba(0,0,0,0)" && sd(m[:line])[:color] == "#000000"
+		legend_entry!(fig, "hollow again"; mode = "markers", marker_symbol = "s", marker_color = "None", color = "0")
+		m = sd(fig.data[end].fields[:marker])
+		@test m[:symbol] == "square-open" && m[:color] == "#000000"
 		legend_entry!(fig, "math \$\\sigma\$"; legendgroup = "g1", opacity = 0.5)
 		@test fig.data[end].fields[:name] == PS._label("math \$\\sigma\$")
 		@test fig.data[end].fields[:legendgroup] == "g1" && fig.data[end].fields[:opacity] == 0.5
@@ -257,6 +269,9 @@ using Test, PlotlySupply
 		@test throws_arg(() -> legend_entry!(fig, "x"; row = 1, col = 1), "legend_entry!")
 		@test throws_arg(() -> legend_entry!(fig, "x"; show = true), "`show` is not supported")
 		@test throws_arg(() -> legend_entry!(fig, "<b>\$x\$</b>"), "legend_entry!: invalid label")
+		@test throws_arg(() -> legend_entry!(fig, "x"; color = "nope"), "legend_entry!: `color`: invalid colour \"nope\"")
+		@test throws_arg(() -> legend_entry!(fig, "x"; marker_color = "1.5"), "legend_entry!: `marker_color`: a numeric colour")
+		@test throws_arg(() -> legend_entry!(fig, "x"; marker_line_color = "#12"), "`marker_line_color`")
 		@test length(fig.data) == n && layout_json(fig) == before
 		legend_entry!(fig, "custom dash"; dash = "5px,10px")
 		@test sd(fig.data[end].fields[:line])[:dash] == "5px,10px"
@@ -308,11 +323,19 @@ using Test, PlotlySupply
 		placed = (lg(fig)[:x], lg(fig)[:y])
 		set_legend!(fig; ncols = 3)
 		d = lg(fig)
-		@test d[:orientation] == "h" && d[:entrywidth] ≈ 1 / 3 && d[:entrywidthmode] == "fraction"
+		# G43/G58: columns are legend groups sized by their labels, no entrywidth
+		@test d[:orientation] == "h" && d[:traceorder] == "grouped" && !haskey(d, :entrywidth)
+		@test [t.fields[:legendgroup] for t in pl(fig).data] == ["plotlysupply:col:legend:c:$(k)/3" for k in 1:3]
+		@test d[:groupclick] == "toggleitem"
 		@test (d[:x], d[:y]) == placed                      # position kept
-		set_legend!(fig; entrywidth = 80, itemwidth = 40)
+		set_legend!(fig; entrywidth = 80, itemwidth = 40)   # pixel entries keep the columns
 		d = lg(fig)
 		@test d[:entrywidth] == 80 && d[:entrywidthmode] == "pixels" && d[:itemwidth] == 40
+		@test d[:traceorder] == "grouped" && pl(fig).data[3].fields[:legendgroup] == "plotlysupply:col:legend:c:3/3"
+		set_legend!(fig; ncols = 1)                         # one column: plain vertical legend
+		d = lg(fig)
+		@test d[:orientation] == "v" && d[:traceorder] == "normal"
+		@test !any(t -> haskey(t.fields, :legendgroup), pl(fig).data)
 		set_legend!(fig; title = "Runs \$n\$", fontsize = 9)
 		d = lg(fig)
 		@test sd(d[:title])[:text] == PS._label("Runs \$n\$") && sd(d[:font])[:size] == 9
@@ -403,12 +426,13 @@ using Test, PlotlySupply
 		t12 = cell(sf, 1, 2)
 		@test d[:x] ≈ t12.xdomain[1] + 1.03 * (t12.xdomain[2] - t12.xdomain[1])
 		@test d[:xanchor] == "left" && d[:y] ≈ t12.ydomain[2]
-		# A3 per-cell ncols: entry width scaled to the cell width
+		# A3/G57 per-cell ncols: content-sized columns (one entry → one column)
 		id21 = PS._legend_cell_legend_id(pl(sf), cell(sf, 2, 1))
 		set_legend!(sf; row = 2, col = 1, position = :top, ncols = 2, frame = false)
 		d = lg(sf, Symbol(id21))
-		t21 = cell(sf, 2, 1)
-		@test d[:entrywidth] ≈ (t21.xdomain[2] - t21.xdomain[1]) / 2 && d[:orientation] == "h"
+		owner21 = findfirst(t -> t.fields[:name] == "s21", pl(sf).data)
+		@test d[:orientation] == "h" && d[:traceorder] == "grouped" && !haskey(d, :entrywidth)
+		@test pl(sf).data[owner21].fields[:legendgroup] == "plotlysupply:col:$(id21):c:1/1"
 		@test d[:bgcolor] == "rgba(0,0,0,0)"
 		# other cells untouched by a per-cell call
 		id11 = PS._legend_cell_legend_id(pl(sf), cell(sf, 1, 1))
@@ -440,7 +464,8 @@ using Test, PlotlySupply
 		@test all(t -> !haskey(t.fields, :legend), pl(sm).data)
 		@test count(t -> get(t.fields, :showlegend, true) !== false, pl(sm).data) == 2
 		@test !any(k -> occursin(PS._LEGEND_ID_PATTERN, String(k)), keys(pl(sm).layout.fields))
-		@test lg(sm)[:yref] == "container" && lg(sm)[:entrywidth] ≈ 0.5
+		@test lg(sm)[:yref] == "container" && lg(sm)[:traceorder] == "grouped" && !haskey(lg(sm), :entrywidth)
+		@test [pl(sm).data[k].fields[:legendgroup] for k in 1:2] == ["plotlysupply:col:legend:c:$(k)/2" for k in 1:2]
 		# figure-mode cell placement needs per-subplot legends
 		@test throws_arg(() -> set_legend!(sm; row = 1, col = 1, position = :top), "per-subplot legends")
 		# back to cell legends; the merge is undone
@@ -448,6 +473,84 @@ using Test, PlotlySupply
 		@test sm.per_subplot_legends
 		@test count(t -> get(t.fields, :showlegend, true) !== false, pl(sm).data) == 6
 		@test length(unique(t.fields[:legend] for t in pl(sm).data)) == 3
+	end
+
+	@testset "legend columns: ncols, wrapped cell legends, title_side (G43, G57-G59, G76)" begin
+		group(f, k) = get(pl(f).data[k].fields, :legendgroup, nothing)
+		# column-major as matplotlib: the first `m mod n` columns take one more
+		cm = plot_scatter(x, [x .+ k for k in 1:5]; legend = ["a", "b", "c", "d", "e"])
+		set_legend!(cm; ncols = 2)
+		@test [group(cm, k) for k in 1:5] == ["plotlysupply:col:legend:c:$(k)/2" for k in (1, 1, 1, 2, 2)]
+		@test PS._legend_column_assignment(7, 3, 'c') == [1, 1, 1, 2, 2, 3, 3]
+		@test PS._legend_column_assignment(5, 2, 'r') == [1, 2, 1, 2, 1]
+		@test PS._legend_column_assignment(2, 4, 'c') == [1, 2]
+
+		# columns that do not fit the plot area are reduced, with a warning
+		long = ["Graph eigenvalue error, mesh level 1 (h)", "Doublet projector error at level 2",
+			"Full-model envelope, three frequencies"]
+		lf = plot_scatter(x, [x .+ k for k in 1:3]; legend = long)
+		@test_logs (:warn, r"3 legend columns .* using 2\.") set_legend!(lf; ncols = 3)
+		@test [group(lf, k) for k in 1:3] == ["plotlysupply:col:legend:c:$(k)/2" for k in (1, 1, 2)]
+		wide = plot_scatter(x, [x .+ k for k in 1:3]; legend = long)
+		relayout!(wide; width = 1600)
+		@test_logs set_legend!(wide; ncols = 3)              # wide enough: no warning
+		@test group(wide, 3) == "plotlysupply:col:legend:c:3/3"
+
+		# merged duplicates: the listed entry takes a column, its duplicates rejoin it without columns
+		dp = plot_scatter(x, [x, 2x, 3x]; legend = ["same", "same", "other"], color = ["black", "black", "red"])
+		set_legend!(dp; ncols = 2)
+		@test group(dp, 1) == "plotlysupply:col:legend:c:1/2" && group(dp, 3) == "plotlysupply:col:legend:c:2/2"
+		@test group(dp, 2) == PS._LEGEND_DEDUPE_GROUP_PREFIX * "legend:1" && pl(dp).data[2].fields[:showlegend] === false
+		set_legend!(dp; ncols = 1)
+		@test group(dp, 1) == group(dp, 2) && group(dp, 3) === nothing
+		@test lg(dp)[:traceorder] == "normal"
+
+		# pie legends list slices: never split into columns
+		pp = plot_pie([3, 2, 1]; labels = ["a", "b", "c"])
+		set_legend!(pp; ncols = 2)
+		@test group(pp, 1) === nothing && get(lg(pp), :traceorder, "") != "grouped"
+
+		# entries added later join the last column of a cell legend
+		sc = subplots(1, 2; sync = false)
+		plot_scatter!(sc, x, [x, 2x, 3x]; legend = ["a", "b", "c"], row = 1, col = 1)
+		plot_scatter!(sc, x, x; legend = "z", row = 1, col = 2)
+		set_legend!(sc; row = 1, col = 1, ncols = 2)
+		id = PS._legend_cell_legend_id(pl(sc), cell(sc, 1, 1))
+		@test [group(sc, k) for k in 1:3] == ["plotlysupply:col:$(id):c:$(k)/2" for k in (1, 1, 2)]
+		@test group(sc, 4) === nothing                       # the other cell keeps no columns
+		plot_scatter!(sc, x, 4x; legend = "d", row = 1, col = 1)
+		@test group(sc, 5) == "plotlysupply:col:$(id):c:2/2"
+
+		# G59: a horizontal cell legend wraps row by row inside its cell
+		sh = subplots(1, 3; sync = false)
+		plot_scatter!(sh, x, [x, 2x]; legend = ["two frequencies", "three frequencies"], row = 1, col = 1)
+		plot_scatter!(sh, x, x; legend = "z", row = 1, col = 2)
+		@test_logs set_legend!(sh; row = 1, col = 1, orientation = :h)
+		id = PS._legend_cell_legend_id(pl(sh), cell(sh, 1, 1))
+		infos = [PS._legend_column_info(group(sh, k)) for k in 1:2]
+		@test all(i -> i !== nothing && i[1] == id && i[2] == 'r', infos)
+		@test lg(sh, Symbol(id))[:orientation] == "h"
+		# ... and an explicit pixel entry width is kept and sizes the entries
+		set_legend!(sh; row = 1, col = 1, orientation = :h, entrywidth = 10)
+		@test lg(sh, Symbol(id))[:entrywidth] == 10 && group(sh, 2) == "plotlysupply:col:$(id):r:2/2"
+		set_legend!(sh; row = 1, col = 1, orientation = :v)
+		@test group(sh, 1) === nothing && group(sh, 2) === nothing
+
+		# G76: legend title side
+		ts = plot_scatter(x, [x, 2x]; legend = ["a", "b"])
+		set_legend!(ts; title = "Runs", title_side = :left)
+		@test sd(lg(ts)[:title])[:side] == "left" && sd(lg(ts)[:title])[:text] == "Runs"
+		set_legend!(ts; title_side = "top-center")
+		@test sd(lg(ts)[:title])[:side] == "top center"
+		before = layout_json(ts)
+		@test throws_arg(() -> set_legend!(ts; title_side = :bottom), "set_legend!: `title_side` must be one of")
+		@test layout_json(ts) == before
+		tc = plot_scatter(x, [x, 2x]; legend = ["a", "b"])
+		set_legend!(tc; title = "Runs", ncols = 2)            # a column legend's title goes on top
+		@test sd(lg(tc)[:title])[:side] == "top"
+		sl = grid(1, 2)
+		subplot_legends!(sl; title = "cell", title_side = :top_left)
+		@test all(k -> sd(lg(sl, k)[:title])[:side] == "top left", (:legend, :legend2))
 	end
 
 	@testset "D5: no ambiguities, unknown keywords still raise" begin
@@ -555,5 +658,37 @@ using Test, PlotlySupply
 		PS._apply_cartesian_plot_options!(fig; xlabel = sub, ylabel = math, title = sub, who = "t")
 		@test PS._cmn_mapping_get(pl(fig).layout.fields[:xaxis][:title], :text) == "time (s)"
 		@test PS._cmn_mapping_get(pl(fig).layout.fields[:yaxis][:title], :text) == PS._label(String(math))
+	end
+
+	@testset "legend columns: a cell legend above or below its axes uses the band beside it (G83/G77)" begin
+		sf = subplots(1, 3; sync = false)
+		for c in 1:3
+			plot_scatter!(sf, 1:3, 1:3; row = 1, col = c, legend = "s$(c)")
+		end
+		p = pl(sf)
+		area = PS._legend_plot_area_width(p)
+		xd = [PS._layout_axis_domain(p.layout, Symbol("xaxis", k == 1 ? "" : k)) for k in 1:3]
+		yd = PS._layout_axis_domain(p.layout, :yaxis)
+		# the band of the middle cell runs from its neighbours' edges ...
+		lo, hi = PS._legend_band_interval(p, xd[2], yd)
+		@test lo ≈ xd[1][2] && hi ≈ xd[3][1]
+		# ... and beside the outer cells into the figure margins
+		@test PS._legend_band_interval(p, xd[1], yd)[1] ≈ -PS._legend_margin_lr(p, :l) / area
+		@test PS._legend_band_interval(p, xd[3], yd)[2] ≈ 1 + PS._legend_margin_lr(p, :r) / area
+		span = xd[2][2] - xd[2][1]
+		above(xanchor, x) = Dict{Symbol, Any}(:x => x, :xanchor => xanchor, :y => 1.0, :yanchor => "bottom")
+		@test PS._legend_available_width(p, above("right", xd[2][2]), span; legend_id = "legend2") ≈
+			(xd[2][2] - xd[1][2]) * area
+		@test PS._legend_available_width(p, above("left", xd[2][1]), span; legend_id = "legend2") ≈
+			(xd[3][1] - xd[2][1]) * area
+		middle = (xd[2][1] + xd[2][2]) / 2
+		@test PS._legend_available_width(p, above("center", middle), span; legend_id = "legend2") ≈
+			2 * min(middle - xd[1][2], xd[3][1] - middle) * area
+		below = Dict{Symbol, Any}(:x => xd[2][2], :xanchor => "right", :y => 0.0, :yanchor => "top")
+		@test PS._legend_available_width(p, below, span; legend_id = "legend2") ≈ (xd[2][2] - xd[1][2]) * area
+		# inside the axes, or without the legend id: the cell width
+		inside = Dict{Symbol, Any}(:x => xd[2][2], :xanchor => "right", :y => 0.97, :yanchor => "top")
+		@test PS._legend_available_width(p, inside, span; legend_id = "legend2") ≈ span * area
+		@test PS._legend_available_width(p, above("right", xd[2][2]), span) ≈ span * area
 	end
 end

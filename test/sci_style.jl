@@ -571,8 +571,12 @@ using PlotlySupply
 			])
 			tight_layout!(labelled)
 			m = sd(labelled.layout.fields[:margin])
-			# 10 characters at 12 px * 0.6 em + 2*(borderpad+borderwidth), 0.05 of 700 px left of the plot.
-			@test m[:l] == 4 + ceil(0.05 * 700 + 10 * 12 * 0.6 + 4)
+			# Estimated text width at 12 px + 2*(borderpad+borderwidth), 0.05 of 700 px left of the plot.
+			label_width = PS._text_extent("left label", 12)[1]
+			@test m[:l] == 4 + ceil(0.05 * 700 + label_width + 4)
+			# plotly.js 2.35.2 draws "left label" 51 px wide at 12 px
+			# (Verdana); the estimate must not fall short of that.
+			@test 51 <= label_width <= 65
 			@test (m[:r], m[:t], m[:b]) == (4, 4, 4)
 
 			huge = plot_scatter(1:3, [1, 2, 3])
@@ -591,6 +595,32 @@ using PlotlySupply
 			title_room = ceil(round(1.4 * 12) * 1.3 + 4)
 			@test sd(titled.layout.fields[:margin])[:t] == 4 + annotation_room + title_room
 			@test_throws ArgumentError tight_layout!(titled; pad = -1)
+
+			# G37: two-line TeX panel titles are measured as typeset. mathtext
+			# writes "(a) …\n$u_x$ = …" as one `\begin{array}` expression;
+			# plotly.js 2.35.2 typesets it 147 x 33 px (frame included) at
+			# 12 px, so it needs neither side margins nor less than 33 px
+			# (+ the 4 px title gap) above the cells.
+			for math in (false, true)
+				g37 = subplots(1, 2; sync = false)
+				for c in 1:2
+					plot_scatter!(g37, 1:3, [1, 4, 9]; row = 1, col = c)
+					title!(g37, "(a) Mixed enhanced strain\n" * (math ? "\$u_x\$ = 0.3973" : "u_x = 0.3973"); row = 1, col = c)
+				end
+				figsize!(g37, 8, 3.5; units = :in)
+				tight_layout!(g37)
+				gm = sd(g37.layout.fields[:margin])
+				@test gm[:l] == 4 && gm[:r] == 4
+				@test 4 + 4 + 33 <= gm[:t] <= 4 + 4 + 33 * 1.3
+			end
+			# Figure titles are measured the same way (array rows, not raw TeX).
+			tex_title = plot_scatter(1:3, [1, 2, 3])
+			tex_title.layout.fields[:title] = PB.attr(text = PS._label("Line one\n\$\\sigma_{xx}\$ two"))
+			relayout!(tex_title, annotations = [PB.attr(text = "above", x = 0.5, y = 1, xref = "paper", yref = "paper", yanchor = "bottom", showarrow = false)])
+			tight_layout!(tex_title)
+			title_size = round(1.4 * 12)
+			@test sd(tex_title.layout.fields[:margin])[:t] ==
+				  4 + ceil(12 * 1.3 + 4) + ceil(2 * 1.3 * title_size + 4)
 
 			sp, scripts = fake_syncplot(plot_scatter(1:3, [1, 2, 3]; title = "T"))
 			@test tight_layout!(sp) === nothing

@@ -309,8 +309,9 @@ end
 	# step's rise at the right edge and the step below it, so the default
 	# corner stays (ties keep the candidate order).
 	@test legend(plot_ecdf(collect(1.0:10.0); legend = "e")) == (0.98, "right")
-	# A band is a polygon fill the estimate does not model: default corner.
-	@test legend(plot_band(1:3, 0, [1, 2, 3]; legend = "b")) == (0.98, "right")
+	# A band is a polygon fill the estimate covers as an area: it fills the top
+	# right, so the legend takes the free top left.
+	@test legend(plot_band(1:3, 0, [1, 2, 3]; legend = "b")) == (0.02, "left")
 	# A KDE curve takes the style's width and dash cycle, never its markers.
 	k = with_style(; cycle = :dash_marker, linewidth = 3) do
 		plot_kde([1.0, 2.0, 4.0]; legend = "k")
