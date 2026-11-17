@@ -1218,15 +1218,302 @@ end
     @test isempty(relevant)
 end
 
+# Julia's method-overwrite warning names the module that loses the method
+# ("Method definition f(...) in module PlotlySupply at a overwritten at b") or,
+# for a method of another module, the module that redefines it ("... overwritten
+# in module PlotlySupply at b").
+const _OVERWRITE_BY_PLOTLYSUPPLY =
+    r"Method definition [^\n]* in module PlotlySupply [^\n]*overwritten|overwritten in module PlotlySupply"
+
+# Runs `code` in a fresh Julia process with method-overwrite warnings enabled and
+# the flags of this test process (`Base.julia_cmd()`: same compiled-module and
+# coverage settings, hence the same package cache); returns (process, output).
+function _run_with_overwrite_warnings(code::AbstractString; project::AbstractString)
+    output = IOBuffer()
+    command = `$(Base.julia_cmd()) --startup-file=no --warn-overwrite=yes --project=$project -e $code`
+    process = run(pipeline(ignorestatus(command), stdout=output, stderr=output))
+    return process, String(take!(output))
+end
+
 @testset "mutator parity loads without method overwrite" begin
-    project_file = something(
+    project = dirname(something(
         Base.active_project(),
         normpath(joinpath(@__DIR__, "..", "Project.toml")),
-    )
-    output = IOBuffer()
-    command = `$(Base.julia_cmd()) --startup-file=no --compiled-modules=no --warn-overwrite=yes --project=$(dirname(project_file)) -e $("using PlotlySupply")`
-    process = run(pipeline(ignorestatus(command), stdout=output, stderr=output))
-    diagnostics = String(take!(output))
+    ))
+    # The pattern matches both forms of the warning Julia prints.
+    probe = """
+        module _OverwriteOwner; g(x::Int) = 1; end
+        module PlotlySupply
+            import .._OverwriteOwner
+            f(x::Int) = 1
+            f(x::Int) = 2
+            _OverwriteOwner.g(x::Int) = 2
+        end
+        """
+    process, diagnostics = _run_with_overwrite_warnings(probe; project)
     @test success(process)
-    @test !occursin("overwritten in module PlotlySupply", diagnostics)
+    @test length(collect(eachmatch(_OVERWRITE_BY_PLOTLYSUPPLY, diagnostics))) == 2
+
+    # Since Julia 1.10 a method overwrite while precompiling is an error: the
+    # package then loads from source without a cache, printing the warning, and
+    # `Base.isprecompiled` is false. Overwrites at load time (`__init__`) print the
+    # warning too. A cached load is therefore the complete check; the former
+    # `--compiled-modules=no` reload of every dependency added ~2 minutes.
+    process, diagnostics = _run_with_overwrite_warnings(
+        "using PlotlySupply; print(\"cached=\", Base.isprecompiled(Base.PkgId(PlotlySupply)))";
+        project,
+    )
+    @test success(process)
+    @test !occursin(_OVERWRITE_BY_PLOTLYSUPPLY, diagnostics)
+    if Base.JLOptions().use_compiled_modules == 1
+        @test occursin("cached=true", diagnostics)
+    end
+end
+
+# ---------------------------------------------------------------------------
+# C44 / G36: every exported `plot_*` constructor and its `plot_*!` mutator take
+# the same keywords, the mutator without `show`. The pairs and their keyword
+# sets are read from the method signatures, so a new function or keyword cannot
+# be left out of the comparison.
+# ---------------------------------------------------------------------------
+
+# Keywords a Plot/SyncPlot mutator may declare beyond its constructor's: the
+# SubplotFigure cell selectors and `show`, which it accepts only to reject them
+# with an ArgumentError naming the function.
+const _PARITY_GUARD_KEYWORDS = (:row, :col, :secondary_y, :inset, :show)
+
+_parity_is_slurp(keyword) = endswith(string(keyword), "...")
+_parity_keywords(ms) = Set{Symbol}(
+    keyword for m in ms for keyword in Base.kwarg_decl(m) if !_parity_is_slurp(keyword)
+)
+function _parity_first_argument(m::Method)
+    parameters = Base.unwrap_unionall(m.sig).parameters
+    return length(parameters) >= 2 ? parameters[2] : Union{}
+end
+_parity_own_methods(f) = [m for m in methods(f) if m.module === PlotlySupply]
+
+# Exported (constructor, mutator) name pairs: `plot_x` with a `plot_x!`.
+function _plot_function_pairs()
+    found = Tuple{Symbol, Symbol}[]
+    for name in names(PlotlySupply)
+        text = string(name)
+        (startswith(text, "plot_") && !endswith(text, "!")) || continue
+        bang = Symbol(text, "!")
+        isdefined(PlotlySupply, bang) && push!(found, (name, bang))
+    end
+    return sort!(found)
+end
+
+@testset "every plot_* constructor and mutator take the same keywords (C44, G36)" begin
+    pairs = _plot_function_pairs()
+    # Discovery reaches every family (api.jl, sci/lines.jl, sci/fields.jl,
+    # sci/mesh2d.jl, sci/scene3d.jl and the map sources).
+    for pair in ((:plot_scatter, :plot_scatter!), (:plot_bar, :plot_bar!),
+            (:plot_band, :plot_band!), (:plot_heatmap, :plot_heatmap!),
+            (:plot_streamlines, :plot_streamlines!), (:plot_polygons, :plot_polygons!),
+            (:plot_surface, :plot_surface!), (:plot_polygons3d, :plot_polygons3d!),
+            (:plot_scattermap, :plot_scattermap!), (:plot_pie, :plot_pie!))
+        @test pair in pairs
+    end
+    for (ctor_name, mut_name) in pairs
+        ctor = getfield(PlotlySupply, ctor_name)
+        mut = getfield(PlotlySupply, mut_name)
+        ctor_keywords = _parity_keywords(_parity_own_methods(ctor))
+        # The Plot/SyncPlot implementation: methods whose first argument takes a Plot.
+        figure_methods = [m for m in _parity_own_methods(mut) if Plot <: _parity_first_argument(m)]
+        cell_methods = [m for m in _parity_own_methods(mut) if _parity_first_argument(m) === SubplotFigure]
+        mut_keywords = _parity_keywords(figure_methods)
+        @testset "$mut_name" begin
+            @test :show in ctor_keywords
+            @test !isempty(figure_methods)
+            @test setdiff(ctor_keywords, (:show,)) == setdiff(mut_keywords, _PARITY_GUARD_KEYWORDS)
+            # The SubplotFigure method takes the cell selectors and forwards the
+            # constructor keywords it does not declare itself to the Plot
+            # implementation; it declares none the constructor lacks.
+            @test !isempty(cell_methods)
+            @test all(m -> any(_parity_is_slurp, Base.kwarg_decl(m)), cell_methods)
+            @test issubset(_parity_keywords(cell_methods), union(ctor_keywords, _PARITY_GUARD_KEYWORDS))
+        end
+    end
+end
+
+# One valid call per pair, and the subplot kind its traces need. A new pair
+# without an entry here fails the test below.
+function _parity_sample_calls()
+    U = [1.0 2.0 3.0; 4.0 5.0 6.0]
+    g = [0.0, 1.0]
+    X3 = [x for x in g, y in g, z in g]
+    Y3 = [y for x in g, y in g, z in g]
+    Z3 = [z for x in g, y in g, z in g]
+    V3 = X3 .+ Y3 .+ Z3
+    geojson = Dict(
+        "type" => "FeatureCollection",
+        "features" => [Dict(
+            "type" => "Feature", "id" => "A", "properties" => Dict(),
+            "geometry" => Dict("type" => "Polygon", "coordinates" => [[[0, 0], [1, 0], [1, 1], [0, 0]]]),
+        )],
+    )
+    triangle = ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1 2 3])
+    return Dict{Symbol, Tuple{Tuple, NamedTuple, String}}(
+        :plot_area => (([1, 2, 3], [1.0, 2.0, 3.0]), (;), "xy"),
+        :plot_band => (([1, 2, 3], [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]), (;), "xy"),
+        :plot_bar => (([1, 2, 3], [1.0, 2.0, 3.0]), (;), "xy"),
+        :plot_box => (([1.0, 2.0, 3.0],), (;), "xy"),
+        :plot_candlestick => (([1, 2], [1.0, 2.0], [2.0, 3.0], [0.5, 1.5], [1.5, 2.5]), (;), "xy"),
+        :plot_choropleth => ((["FRA", "DEU"], [1.0, 2.0]), (;), "geo"),
+        :plot_choroplethmap => ((geojson, ["A"], [1.0]), (;), "map"),
+        :plot_choroplethmapbox => ((geojson, ["A"], [1.0]), (;), "mapbox"),
+        :plot_complex => (([1.0 + 1im, 2.0 - 1im],), (;), "xy"),
+        :plot_contour => ((U,), (;), "xy"),
+        :plot_densitymap => (([0.0, 1.0], [1.0, 2.0]), (;), "map"),
+        :plot_densitymapbox => (([0.0, 1.0], [1.0, 2.0], [1.0, 2.0]), (;), "mapbox"),
+        :plot_ecdf => (([1.0, 2.0, 3.0],), (;), "xy"),
+        :plot_funnel => (([3.0, 2.0, 1.0], ["a", "b", "c"]), (;), "xy"),
+        :plot_funnelarea => (([3.0, 2.0, 1.0],), (;), "domain"),
+        :plot_heatmap => ((U,), (;), "xy"),
+        :plot_histogram => (([1.0, 2.0, 2.0, 3.0],), (;), "xy"),
+        :plot_histogram2d => (([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]), (;), "xy"),
+        :plot_hlines => (([1.0, 2.0], 0.0, 1.0), (;), "xy"),
+        :plot_image => ((fill(UInt8(128), 2, 3, 3),), (;), "xy"),
+        :plot_indicator => ((42,), (;), "domain"),
+        :plot_isosurface => ((X3, Y3, Z3, V3), (;), "scene"),
+        :plot_kde => (([1.0, 2.0, 2.5, 3.0],), (;), "xy"),
+        :plot_matrix => (([1.0 2.0; 3.0 4.0],), (;), "xy"),
+        :plot_mesh3d => ((g[[1, 2, 1, 1]], g[[1, 1, 2, 1]], g[[1, 1, 1, 2]]),
+            (; i = [0, 0, 0, 1], j = [1, 2, 3, 2], k = [2, 3, 1, 3]), "scene"),
+        :plot_ohlc => (([1, 2], [1.0, 2.0], [2.0, 3.0], [0.5, 1.5], [1.5, 2.5]), (;), "xy"),
+        :plot_parcoords => ((["a" => [1.0, 2.0], "b" => [3.0, 4.0]],), (;), "domain"),
+        :plot_pcolormesh => (([0.0, 1.0, 2.0], [0.0, 1.0], [1.0; 2.0;;]), (;), "xy"),
+        :plot_pie => (([1.0, 2.0],), (;), "domain"),
+        :plot_polygons => (([[0.0, 1.0, 1.0]], [[0.0, 0.0, 1.0]]), (;), "xy"),
+        :plot_polygons3d => (([[0.0 0.0 0.0; 1.0 0.0 0.0; 0.0 1.0 0.0]],), (;), "scene"),
+        :plot_quiver => (([0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [0.0, 1.0]), (;), "xy"),
+        :plot_quiver3d => (([0.0], [0.0], [0.0], [1.0], [0.0], [0.0]), (;), "scene"),
+        :plot_sankey => (([0, 1], [1, 2], [1.0, 2.0]), (;), "domain"),
+        :plot_scatter => (([1, 2, 3], [1.0, 2.0, 3.0]), (;), "xy"),
+        :plot_scatter3d => (([1.0, 2.0], [1.0, 2.0], [1.0, 2.0]), (;), "scene"),
+        :plot_scattergeo => (([0.0, 1.0], [1.0, 2.0]), (;), "geo"),
+        :plot_scattermap => (([0.0, 1.0], [1.0, 2.0]), (;), "map"),
+        :plot_scattermapbox => (([0.0, 1.0], [1.0, 2.0]), (;), "mapbox"),
+        :plot_scatterpolar => (([0.0, 90.0], [1.0, 2.0]), (;), "polar"),
+        :plot_segments => (([0.0], [0.0], [1.0], [1.0]), (;), "xy"),
+        :plot_segments3d => (([0.0], [0.0], [0.0], [1.0], [1.0], [1.0]), (;), "scene"),
+        :plot_stem => (([1.0, 2.0, 3.0],), (;), "xy"),
+        :plot_streamlines => (([0.0, 1.0, 2.0], [0.0, 1.0, 2.0], ones(3, 3), ones(3, 3)), (;), "xy"),
+        :plot_streamtube => ((vec(X3), vec(Y3), vec(Z3), ones(8), zeros(8), zeros(8)), (;), "scene"),
+        :plot_sunburst => ((["root", "a"], ["", "root"]), (;), "domain"),
+        :plot_surface => ((U,), (;), "scene"),
+        :plot_ternary => (([0.2, 0.3], [0.3, 0.3], [0.5, 0.4]), (;), "ternary"),
+        :plot_treemap => ((["root", "a"], ["", "root"]), (;), "domain"),
+        :plot_tricontour => ((triangle..., [1.0, 2.0, 3.0]), (;), "xy"),
+        :plot_tripcolor => ((triangle..., [1.0, 2.0, 3.0]), (;), "xy"),
+        :plot_triplot => (triangle, (;), "xy"),
+        :plot_violin => (([1.0, 2.0, 3.0],), (;), "xy"),
+        :plot_vlines => (([1.0, 2.0], 0.0, 1.0), (;), "xy"),
+        :plot_volume => ((X3, Y3, Z3, V3), (;), "scene"),
+        :plot_waterfall => ((["a", "b"], [1.0, -0.5]), (;), "xy"),
+        :plot_wireframe => (([0.0, 1.0], [0.0, 1.0], [1.0 2.0; 3.0 4.0]), (;), "scene"),
+    )
+end
+
+function _parity_thrown(f)
+    try
+        f()
+    catch err
+        return err
+    end
+    return nothing
+end
+
+# A rejection of `keyword` by `who`: an ArgumentError whose message starts with
+# the function name and names the keyword.
+_parity_rejects(err, who, keyword) = err isa ArgumentError &&
+    startswith(err.msg, "$who: ") && occursin(string(keyword), err.msg)
+
+# Julia's own rejection of an undeclared keyword.
+_parity_method_rejects(err, keyword) =
+    err isa MethodError && occursin(string(keyword), sprint(showerror, err))
+
+# Mutators that report an unknown keyword as a MethodError on an internal staging
+# type (`plot_pie!(::PlotlySupply._HighLevelStagedPlotMutation, ...)`) instead of
+# an ArgumentError naming the function (cross-requested in wave 4, G36).
+const _PARITY_UNKNOWN_KEYWORD_METHODERROR = (
+    :plot_candlestick!, :plot_funnel!, :plot_funnelarea!, :plot_indicator!, :plot_ohlc!,
+    :plot_parcoords!, :plot_pie!, :plot_sankey!, :plot_sunburst!, :plot_ternary!,
+    :plot_treemap!, :plot_waterfall!,
+)
+
+# Source file of a mutator's SubplotFigure method(s).
+_parity_cell_source(mut) = minimum(
+    basename(string(m.file)) for m in _parity_own_methods(mut) if _parity_first_argument(m) === SubplotFigure
+)
+
+@testset "every plot_* pair rejects unknown keywords and `show` atomically (G36)" begin
+    samples = _parity_sample_calls()
+    json = PlotlyBase.JSON.json
+    unknown = :g36_not_a_keyword
+    bad = NamedTuple{(unknown,)}((1,))
+    # Every keyword set compiles its own specialization of a slurping method, and
+    # the SubplotFigure methods forward their keywords to the Plot method, whose
+    # rejection is checked for every pair, so the unknown keyword goes through a
+    # cell once per (source file, subplot kind, error form) family; `show` goes
+    # through every one.
+    cell_families = Set{Tuple{String, String, Bool}}()
+    for (ctor_name, mut_name) in _plot_function_pairs()
+        @testset "$mut_name" begin
+            @test haskey(samples, ctor_name)
+            haskey(samples, ctor_name) || continue
+            args, keywords, kind = samples[ctor_name]
+            ctor = getfield(PlotlySupply, ctor_name)
+            mut = getfield(PlotlySupply, mut_name)
+            mut_rejects(err) = if mut_name in _PARITY_UNKNOWN_KEYWORD_METHODERROR
+                @test _parity_method_rejects(err, unknown)
+                @test_broken _parity_rejects(err, mut_name, unknown)
+            else
+                @test _parity_rejects(err, mut_name, unknown)
+            end
+
+            # Constructors: Julia's MethodError for a declared keyword list, or the
+            # function's own ArgumentError where trace attributes pass through.
+            err = _parity_thrown(() -> ctor(args...; keywords..., bad...))
+            @test _parity_method_rejects(err, unknown) || _parity_rejects(err, ctor_name, unknown)
+
+            # Plot: rejected before anything is written.
+            fig = ctor(args...; keywords...)
+            before = json(fig)
+            mut_rejects(_parity_thrown(() -> mut(fig, args...; keywords..., bad...)))
+            @test _parity_rejects(_parity_thrown(() -> mut(fig, args...; keywords..., show = true)), mut_name, :show)
+            @test json(fig) == before
+
+            # SubplotFigure cell of the kind the traces need.
+            sf = kind == "xy" ? subplots(1, 2; sync = false) :
+                subplots(1, 2; sync = false, specs = [Spec(kind = kind) Spec(kind = kind)])
+            before = json(sf.plot)
+            family = (_parity_cell_source(mut), kind, mut_name in _PARITY_UNKNOWN_KEYWORD_METHODERROR)
+            if !(family in cell_families)
+                push!(cell_families, family)
+                mut_rejects(_parity_thrown(() -> mut(sf, args...; keywords..., row = 1, col = 2, bad...)))
+            end
+            @test _parity_rejects(
+                _parity_thrown(() -> mut(sf, args...; keywords..., row = 1, col = 2, show = true)),
+                mut_name, :show)
+            @test json(sf.plot) == before
+            # the same call without the bad keyword is accepted
+            @test mut(sf, args...; keywords..., row = 1, col = 2) === sf
+            @test json(sf.plot) != before
+        end
+    end
+end
+
+# G36 / Y38: a subplot title is a label like any other, so text mixed with
+# `$...$` math is wrapped the same way as `title` and `xlabel`.
+@testset "subplot_titles render mixed mathtext like title and axis labels (G36, Y38)" begin
+    mixed = "Field \$E_z\$ (V/m)"
+    expected = "\$\\text{Field }E_z\\text{ (V/m)}\$"
+    fig = plot_scatter(1:3, [1.0, 2.0, 3.0]; title = mixed, xlabel = mixed)
+    @test fig.layout.fields[:title][:text] == expected
+    @test fig.layout.xaxis[:title][:text] == expected
+    sf = subplots(1, 3; sync = false, subplot_titles = [mixed, "plain", "\$E_z\$"])
+    @test [annotation[:text] for annotation in sf.plot.layout.fields[:annotations]] ==
+        [expected, "plain", "\$E_z\$"]
 end

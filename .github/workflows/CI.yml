@@ -53,13 +53,17 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         with:
+          # Coverage instrumentation slows the suite down; one job (Linux, latest
+          # Julia) measures it and uploads it, the others only test.
+          coverage: ${{ matrix.os == 'ubuntu-latest' && matrix.version == '1' }}
           # The tests open real Electron windows. Linux runners have no display, so
           # run Julia (and the Electron processes it starts) inside a virtual X server.
           # PlotlySupply disables Electron's SUID sandbox when CI/GITHUB_ACTIONS is set.
           prefix: ${{ runner.os == 'Linux' && 'xvfb-run --auto-servernum --server-args=-screen\ 0\ 1920x1080x24' || '' }}
       - uses: julia-actions/julia-processcoverage@v1
+        if: matrix.os == 'ubuntu-latest' && matrix.version == '1'
       - name: Show coverage info
-        if: runner.os == 'Linux' && matrix.version == '1'
+        if: matrix.os == 'ubuntu-latest' && matrix.version == '1'
         shell: julia --color=yes {0}
         run: |
           using Pkg
@@ -71,6 +75,7 @@ jobs:
           report = LocalCoverage.eval_coverage_metrics(coverage, ".")
           show(report)
       - uses: codecov/codecov-action@v7
+        if: matrix.os == 'ubuntu-latest' && matrix.version == '1'
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}

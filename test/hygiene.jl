@@ -5,6 +5,8 @@
 using Test
 using PlotlySupply
 
+isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
+
 # Package names declared in a section of a Project.toml: the `Name = "uuid"`
 # entries of [deps]/[extras] and the names in `test = [...]` of [targets].
 # Pkg writes these sections in this flat form; the file is read as text because
@@ -84,13 +86,29 @@ function _hygiene_symbols!(symbols::Set{Symbol}, ex)
     return symbols
 end
 
-# Whether a top-level expression calls `include(<file>)` (also inside the
-# `isdefined(...) || include(...)` guard).
-function _hygiene_includes(ex, file::AbstractString)
+# Whether an expression calls `include(<file>)` (also inside the
+# `isdefined(...) || include(...)` guard); `file` is a literal name or the
+# variable holding it.
+function _hygiene_includes(ex, file::Union{AbstractString, Symbol})
     ex isa Expr || return false
     ex.head === :call && ex.args[1] === :include && length(ex.args) == 2 &&
         ex.args[2] == file && return true
     return any(arg -> _hygiene_includes(arg, file), ex.args)
+end
+
+# Whether an expression holds `for f in _test_files_in_run_order(...)` with a
+# body that calls `include(f)`.
+function _hygiene_runs_listed_files(ex)
+    ex isa Expr || return false
+    if ex.head === :for
+        spec = ex.args[1]
+        if Meta.isexpr(spec, :(=)) && spec.args[1] isa Symbol &&
+           Meta.isexpr(spec.args[2], :call) && spec.args[2].args[1] === :_test_files_in_run_order &&
+           _hygiene_includes(ex.args[2], spec.args[1])
+            return true
+        end
+    end
+    return any(_hygiene_runs_listed_files, ex.args)
 end
 
 @testset "Test-suite hygiene" begin
@@ -116,6 +134,14 @@ end
             Meta.parse("isdefined(@__MODULE__, :X) || include(\"testutils.jl\")"),
             "testutils.jl",
         )
+        @test !_hygiene_includes(Meta.parse("include(\"other.jl\")"), "testutils.jl")
+        @test _hygiene_runs_listed_files(Meta.parseall(
+            "@testset \"all\" begin\n for f in _test_files_in_run_order(@__DIR__)\n include(f)\n end\nend",
+        ))
+        @test !_hygiene_runs_listed_files(Meta.parseall(
+            "for f in _test_files_in_run_order(@__DIR__)\n println(f)\nend",
+        ))
+        @test !_hygiene_runs_listed_files(Meta.parseall("for f in readdir()\n include(f)\nend"))
         mktemp() do path, io
             write(io, "[deps]\nFoo = \"0a1b2c3d-0000-0000-0000-000000000000\"\n\n" *
                 "[extras]\nBar = \"0a1b2c3d-0000-0000-0000-000000000001\"\n" *
@@ -174,13 +200,30 @@ end
     end
 
     @testset "runtests.jl runs every test file" begin
-        runner = parsed["runtests.jl"]
-        auto = name -> startswith(name, "sci_") || startswith(name, "regression_")
-        skipped = filter(files) do name
-            name in ("runtests.jl", "testutils.jl") && return false
-            return !auto(name) && !any(ex -> _hygiene_includes(ex, name), runner.args)
+        # The run order lists every test file once: the fixed first files, then
+        # the rest in name order; files that are not `.jl` sources are left out.
+        order = _test_files_in_run_order(testdir)
+        @test sort(order) == filter(name -> !(name in ("runtests.jl", "testutils.jl")), files)
+        @test allunique(order)
+        # every file listed to run first exists (a renamed or removed one would be skipped)
+        @test isempty(filter(!in(files), collect(_TEST_FILES_RUN_FIRST)))
+        @test order[1:length(_TEST_FILES_RUN_FIRST)] == collect(_TEST_FILES_RUN_FIRST)
+        mktempdir() do dir
+            for name in ("zz_new.jl", "a_new.jl", "runtests.jl", "testutils.jl", "notes.md", _TEST_FILES_RUN_FIRST...)
+                write(joinpath(dir, name), "")
+            end
+            mkdir(joinpath(dir, "fixtures.jl"))
+            @test _test_files_in_run_order(dir) == [_TEST_FILES_RUN_FIRST..., "a_new.jl", "zz_new.jl"]
+            rm(joinpath(dir, "nested_series.jl"))
+            @test _test_files_in_run_order(dir) ==
+                [filter(!=("nested_series.jl"), collect(_TEST_FILES_RUN_FIRST))..., "a_new.jl", "zz_new.jl"]
         end
-        @test isempty(skipped)
+
+        # runtests.jl includes that list, and no test file a second time.
+        runner = parsed["runtests.jl"]
+        @test _hygiene_runs_listed_files(runner)
+        @test isempty(filter(
+            name -> name != "testutils.jl" && _hygiene_includes(runner, name), files))
     end
 
     @testset "failure assertions name the exception" begin

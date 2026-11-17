@@ -9,6 +9,38 @@ using PlotlySupply
 
 const _PLOTLYSUPPLY_TESTUTILS = true
 
+# Test files that runtests.jl runs first, in this order (the static suite checks
+# first, then the pre-2.0 suites in the order they were added).
+const _TEST_FILES_RUN_FIRST = (
+    "hygiene.jl",
+    "nested_series.jl",
+    "three_d_styling.jl",
+    "extended_mutator_parity.jl",
+    "layout_merge_preservation.jl",
+    "lazy_payloads.jl",
+    "export_transactions.jl",
+    "mutator_parity.jl",
+    "renderer_transactions.jl",
+    "modern_maps.jl",
+)
+
+# Every test file in `testdir`, in the order runtests.jl runs them: the files of
+# `_TEST_FILES_RUN_FIRST`, then every other `*.jl` file except the runner and
+# this file in name order, so a new test file runs without being registered.
+# A listed file that no longer exists is skipped here, so the rest of the suite
+# still runs, and reported by hygiene.jl.
+function _test_files_in_run_order(testdir::AbstractString)
+    available = sort!(filter(
+        name -> endswith(name, ".jl") && !(name in ("runtests.jl", "testutils.jl")) &&
+            isfile(joinpath(testdir, name)),
+        readdir(testdir),
+    ))
+    return vcat(
+        filter(in(available), collect(_TEST_FILES_RUN_FIRST)),
+        filter(!in(_TEST_FILES_RUN_FIRST), available),
+    )
+end
+
 struct _UnsupportedTrace <: AbstractTrace end
 
 mutable struct _LifecycleFakeWindow
