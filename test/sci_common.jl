@@ -721,4 +721,142 @@ end
         @test sfs.current_col == 2
         close(sp2)
     end
+
+    @testset "_apply_ticks! presets :decades / :auto (D9)" begin
+        function decade_plot(lo, hi, letter)
+            v = exp10.(range(log10(lo), log10(hi); length = 20))
+            return letter === :x ?
+                plot_scatter(v, collect(1.0:20); xscale = "log") :
+                plot_scatter(collect(1.0:20), v; yscale = "log")
+        end
+        # k = max(1, ceil(n / 8)): 1.2, 3 and 8 decades label every decade
+        # (unlabelled minor ticks at 2..9), 13 decades every second one (minor
+        # ticks at every decade).
+        for (lo, hi, step, minor_dtick) in (
+            (1.0, 10^1.2, 1, "D1"),
+            (0.1, 100.0, 1, "D1"),
+            (1e-4, 1e4, 1, "D1"),
+            (1e-6, 1e7, 2, 1),
+        )
+            for (letter, key) in ((:x, :xaxis), (:y, :yaxis))
+                p = decade_plot(lo, hi, letter)
+                _CMN._apply_ticks!(p, key; values = [lo, hi], labels = ["a", "b"], who = "t")
+                _CMN._apply_ticks!(p, key; values = :decades, who = "t")
+                ax = _cmn_axis(p, key)
+                @test ax[:tickmode] == "linear"
+                @test ax[:tick0] == 0
+                @test ax[:dtick] == step
+                @test ax[:exponentformat] == "power"
+                @test _cmn_get(ax, :tickvals) === nothing
+                @test _cmn_get(ax, :ticktext) === nothing
+                minor = ax[:minor]
+                @test _cmn_get(minor, :dtick) == minor_dtick
+                @test _cmn_get(minor, :tickmode) == "linear"
+                @test _cmn_get(minor, :tick0) == 0
+                @test _cmn_get(minor, :ticks) == "outside"
+                @test _cmn_get(minor, :tickvals) === nothing
+                # The other axis is untouched.
+                other = key === :xaxis ? :yaxis : :xaxis
+                @test _cmn_get(_cmn_axis(p, other), :tickmode) === nothing
+            end
+        end
+        # The explicit range wins over the data extent (13 decades of data,
+        # 20-decade range: k = 3); a later call recomputes the step.
+        p = decade_plot(1e-6, 1e7, :x)
+        relayout!(p; xaxis_range = [-10, 10])
+        _CMN._apply_ticks!(p, :xaxis; values = :decades)
+        @test _cmn_axis(p, :xaxis)[:dtick] == 3
+        relayout!(p; xaxis_range = [0, 2])
+        _CMN._apply_ticks!(p, :xaxis; values = :decades)
+        @test _cmn_axis(p, :xaxis)[:dtick] == 1
+        # No range and no data: one decade.
+        empty = Plot()
+        relayout!(empty; xaxis_type = "log")
+        _CMN._apply_ticks!(empty, :xaxis; values = :decades)
+        @test _cmn_axis(empty, :xaxis)[:dtick] == 1
+        # Keywords combine: an explicit exponent format, no minor ticks.
+        p = decade_plot(1e-3, 1e3, :y)
+        _CMN._apply_ticks!(p, :yaxis; values = :decades, exponentformat = "e", minor = false, direction = "inside")
+        ax = _cmn_axis(p, :yaxis)
+        @test ax[:exponentformat] == "e"
+        @test _cmn_get(ax[:minor], :ticks) == ""
+        @test _cmn_get(ax[:minor], :dtick) === nothing
+        @test ax[:ticks] == "inside"
+        # An automatic "~g" left by array ticks goes (it would print 1e+06).
+        lin = plot_scatter([1.0, 10.0, 100.0], [1.0, 2.0, 3.0])
+        _CMN._apply_ticks!(lin, :xaxis; values = [1, 10, 100])
+        @test _cmn_axis(lin, :xaxis)[:tickformat] == "~g"
+        relayout!(lin; xaxis_type = "log")
+        _CMN._apply_ticks!(lin, :xaxis; values = :decades)
+        @test _cmn_get(_cmn_axis(lin, :xaxis), :tickformat) === nothing
+
+        # :auto: Plotly's automatic ticks again, on any axis type.
+        p = decade_plot(1e-2, 1e3, :x)
+        _CMN._apply_ticks!(p, :xaxis; values = :decades, format = ".0e")
+        _CMN._apply_ticks!(p, :xaxis; values = :auto)
+        ax = _cmn_axis(p, :xaxis)
+        for name in (:tickmode, :tickvals, :ticktext, :tick0, :dtick)
+            @test _cmn_get(ax, name) === nothing
+        end
+        @test ax[:tickformat] == ".0e"  # a format the user set is kept
+        @test _cmn_get(ax[:minor], :ticks) == ""
+        for name in (:tickmode, :tickvals, :tick0, :dtick)
+            @test _cmn_get(ax[:minor], name) === nothing
+        end
+        @test ax[:type] == "log" && ax[:exponentformat] == "power"
+        lin = plot_scatter([0.0, 1.0], [2.0, 3.0])
+        _CMN._apply_ticks!(lin, :yaxis; values = [2, 3], labels = ["two", "three"], minor = true)
+        _CMN._apply_ticks!(lin, :yaxis; values = :auto, minor = true)
+        ax = _cmn_axis(lin, :yaxis)
+        for name in (:tickmode, :tickvals, :ticktext, :tickformat)
+            @test _cmn_get(ax, name) === nothing
+        end
+        @test _cmn_get(ax[:minor], :ticks) == "outside"
+
+        # Errors, before anything changes.
+        lin = plot_scatter([0.0, 1.0], [2.0, 3.0])
+        lg = decade_plot(1.0, 100.0, :x)
+        for (fig, kw, needle) in (
+            (lin, (values = :decades,), "t: the `:decades` tick preset labels powers of ten and needs a logarithmic axis; :xaxis has type \"-\""),
+            (lg, (values = :decade,), "t: unknown tick preset :decade; use :decades or :auto"),
+            (lg, (values = :decades, labels = ["a"]), "t: the tick preset :decades chooses the ticks and their labels"),
+            (lg, (values = :auto, subs = (1, 2)), "t: pass either the tick preset :auto or `subs`, not both"),
+            (lg, (values = :decades, exponentformat = "bogus"), "`exponentformat` must be one of"),
+        )
+            before = _cmn_json(fig.layout)
+            @test _cmn_throws(() -> _CMN._apply_ticks!(fig, :xaxis; who = "t", kw...), needle)
+            @test _cmn_json(fig.layout) == before
+        end
+        cat = plot_bar(["a", "b"], [1.0, 2.0])
+        relayout!(cat; xaxis_type = "category")
+        @test _cmn_throws(() -> _CMN._apply_ticks!(cat, :xaxis; values = :decades, who = "t"), "has type \"category\"")
+        _CMN._apply_ticks!(cat, :xaxis; values = :auto)
+        @test _cmn_get(_cmn_axis(cat, :xaxis), :tickmode) === nothing
+    end
+
+    @testset "_validate_tick_option (constructor keywords)" begin
+        lin = plot_scatter([0.0, 1.0], [2.0, 3.0])
+        lg = plot_scatter([1.0, 10.0], [2.0, 3.0]; xscale = "log")
+        v = _CMN._validate_tick_option
+        @test v(lin, :xaxis, nothing, nothing, "", "t", "x") === nothing
+        @test v(lin, :xaxis, :decades, nothing, "log", "t", "x") === nothing   # the call makes it log
+        @test v(lg, :xaxis, :decades, nothing, "", "t", "x") === nothing
+        @test v(lin, :yaxis, :auto, nothing, "", "t", "y") === nothing
+        @test v(lin, nothing, :auto, nothing, "", "t", "y") === nothing        # axis not created yet
+        @test v(lin, :xaxis, [1, 2], ["a", "b"], "", "t", "x") === nothing
+        before = _cmn_json(lin.layout)
+        for (args, needle) in (
+            ((lin, :xaxis, :decades, nothing, "", "t", "x"), "t: the `:decades` tick preset labels powers of ten and needs a logarithmic axis; :xaxis has type \"-\""),
+            ((lg, :xaxis, :decades, nothing, "linear", "t", "x"), "has type \"linear\""),
+            ((lin, nothing, :decades, nothing, "", "t", "y"), "the axis has type \"-\""),
+            ((lin, :xaxis, :tens, nothing, "", "t", "x"), "t: unknown tick preset :tens"),
+            ((lg, :xaxis, :decades, ["a"], "", "t", "x"), "t: `xticks = :decades` chooses the tick labels; `xticklabels` need explicit `xticks` values."),
+            ((lin, :yaxis, nothing, ["a"], "", "t", "y"), "t: `yticklabels` needs `yticks`"),
+            ((lin, :xaxis, [1, 2], ["a"], "", "t", "x"), "got 1 tick labels for 2 tick values"),
+            ((lg, :xaxis, [0, 10], nothing, "", "t", "x"), "positive"),
+        )
+            @test _cmn_throws(() -> v(args...), needle)
+        end
+        @test _cmn_json(lin.layout) == before
+    end
 end

@@ -30,7 +30,7 @@ const _SCI_AXES_MUTATORS = (
 )
 
 export zlabel!, zrange!, xticks!, yticks!, axis_equal!, axis_off!, spines!, grid!
-export secondary_xaxis!, inset!
+export secondary_xaxis!, inset!, remove_inset!
 
 # ---------------------------------------------------------------------------
 # Shared plumbing
@@ -286,34 +286,11 @@ end
 # ---------------------------------------------------------------------------
 
 # A validated range: `nothing` for the automatic sentinel ([0, 0], (0, 0),
-# `nothing`, [nothing, nothing]), otherwise the two bounds. Partial ranges
-# are rejected: plotly.js 2.35 ignored `range = [null, hi]` with
-# `autorange = "min"` in a render test (probe2_partial.png).
-function _axes_checked_range(range, who::AbstractString)
-	if (range isa AbstractVector || range isa Tuple) &&
-		length(range) == 2 &&
-		all(b -> b === nothing, range)
-		return nothing
-	end
-	checked = _checked_range(range, who, "range")
-	checked === nothing && return nothing
-	for bound in checked
-		(bound === nothing || bound === missing) && throw(ArgumentError(
-			"$(who): partial ranges are not supported; give both bounds, or " *
-			"[0, 0] / `nothing` for an automatic range. Got $(repr(range)).",
-		))
-		bound isa Bool && throw(ArgumentError(
-			"$(who): range bounds must be numbers (or date/category values); " *
-			"got $(repr(range)).",
-		))
-	end
-	lower, upper = checked
-	isequal(lower, upper) && throw(ArgumentError(
-		"$(who): the range bounds must differ; got $(repr(range)) (use " *
-		"[0, 0] or `nothing` for an automatic range).",
-	))
-	return checked
-end
+# `nothing`, [nothing, nothing]), otherwise the two bounds. `_checked_range`
+# (base.jl) rejects wrong lengths, partial ranges (plotly.js 2.35 ignored
+# `range = [null, hi]` with `autorange = "min"` in a render test,
+# probe2_partial.png), Bool and non-finite bounds and equal bounds.
+_axes_checked_range(range, who::AbstractString) = _checked_range(range, who, "range")
 
 # The checked range in the units Plotly stores for an axis of type
 # `axis_type`: `to_log(checked)` (log10 of the bounds) on a log axis; numeric
@@ -323,7 +300,7 @@ end
 function _axes_axis_range_value(checked, axis_type, who::AbstractString, to_log)
 	checked === nothing && return nothing
 	axis_type == "log" && return to_log(checked)
-	if axis_type in ("linear", "category")
+	if axis_type in _NUMERIC_RANGE_AXIS_TYPES
 		all(b -> b isa Real, checked) || throw(ArgumentError(
 			"$(who): a $(axis_type) axis needs numeric range bounds; got " *
 			"$(repr(Tuple(checked))).",
@@ -641,7 +618,26 @@ Only that axis changes (other cells keep their ticks).
 
 # Arguments
 - `values`: tick positions in DATA units, also on log axes (vector, range or
-  tuple; strings on category axes). Sets `tickmode = "array"`.
+  tuple; strings on category axes). Sets `tickmode = "array"`. Or a preset:
+  - `:decades` (logarithmic axes only): labels at powers of ten only
+    (1, 10, 10², …, matplotlib's look) with unlabelled minor ticks.
+    Every decade is labelled up to 8 decades; a longer axis labels every
+    k-th decade, k = ceil(n/8), and the minor ticks mark the decades in
+    between (on ≤ 8 decades they mark 2..9). n is taken from the explicit
+    axis range, else from the data on the axis, when the call runs: call it
+    again after changing the range a lot. Writes `tickmode = "linear"`,
+    `tick0 = 0`, `dtick = k`, `exponentformat = "power"` (or the
+    `exponentformat` keyword) and `minor` (`dtick` `"D1"` or 1; `minor =
+    false` omits it). A d3 `format` set earlier still takes precedence.
+    Without the preset, Plotly's automatic log ticks label intermediate
+    digits ("2", "5") on axes spanning less than about 4-7 decades. An axis
+    spanning less than two decades gets only one or two labels this way;
+    keep the automatic ticks (or pass values) there.
+  - `:auto`: back to Plotly's automatic ticks on any axis type: removes
+    `tickmode`, `tickvals`, `ticktext`, `tick0`, `dtick`, the automatic
+    `"~g"` format and the minor tick placement; minor ticks are switched off
+    unless `minor = true`.
+  A preset cannot be combined with `labels` or `subs`.
 - `labels`: one label per value; each goes through the mathtext layer, so a
   TeX label such as `L"\\pi/2"` (LaTeXStrings) typesets. Without labels,
   numeric ticks on a linear axis are printed with the d3 format `"~g"`
@@ -650,9 +646,10 @@ Only that axis changes (other cells keep their ticks).
 
 $(_AXES_TICKS_DOC_KEYWORDS)
 Errors (`ArgumentError`, before anything changes): mismatched label count,
-non-finite or (log axis) non-positive values, `subs` on a linear axis, an
-unknown `exponentformat`/`direction`, a non-xy cell. Returns `nothing` (`sf`
-for a SubplotFigure).
+non-finite or (log axis) non-positive values, `subs` on a linear axis,
+`:decades` on a non-logarithmic axis, an unknown preset Symbol, an unknown
+`exponentformat`/`direction`, a non-xy cell. Returns `nothing` (`sf` for a
+SubplotFigure).
 
 # Example
 ```julia
@@ -661,6 +658,9 @@ fig = plot_scatter(x, sin.(x))
 xticks!(fig, [0, π/2, π, 3π/2, 2π], ["0", "π/2", "π", "3π/2", "2π"])
 lg = plot_scatter([4, 8, 16, 32], [1.0, 2, 3, 4]; xscale = "log")
 xticks!(lg, 2 .^ (2:5); minor = true)
+f = plot_scatter([1e-3, 1e5], [1.0, 2.0]; xscale = "log")
+xticks!(f, :decades)     # 10⁻³ … 10⁵, minor ticks at 2..9
+xticks!(f, :auto)        # Plotly's automatic ticks again
 ```
 """
 function xticks!(fig, values = nothing, labels = nothing; show = nothing, kwargs...)
@@ -692,7 +692,10 @@ end
 	yticks!(fig, values=nothing, labels=nothing; format="", exponentformat="", subs=nothing, minor=nothing, angle=nothing, direction="", tickwidth=0, ticklen=0, row=nothing, col=nothing, inset=nothing, secondary_y=false)
 	yticks!(sf::SubplotFigure, values=nothing, labels=nothing; ...)
 
-Set the y-axis ticks; identical to [`xticks!`](@ref) for the y axis.
+Set the y-axis ticks; identical to [`xticks!`](@ref) for the y axis:
+`values` in DATA units (also on log axes), or the presets `:decades` (log
+axes: labels at powers of ten only, unlabelled minor ticks) and `:auto`
+(Plotly's automatic ticks again).
 `secondary_y = true` targets the secondary y axis (a twin created by a
 `secondary_y=true` plot call, or a `Spec(secondary_y=true)` subplot cell).
 
@@ -704,6 +707,7 @@ Returns `nothing` (`sf` for a SubplotFigure).
 ```julia
 fig = plot_scatter([1e-3, 1e3], [1e-2, 1e4]; xscale = "log", yscale = "log")
 yticks!(fig; subs = (1, 2, 5), minor = true)
+yticks!(fig, :decades)
 ```
 """
 function yticks!(fig, values = nothing, labels = nothing; show = nothing, kwargs...)
@@ -1156,15 +1160,17 @@ function _axes_real_value(v, what::AbstractString, who::AbstractString)
 	return Float64(v)
 end
 
-# Union of the data extents of every x axis whose `matches` chain ends at
-# `root` (a shared axis group autoranges over all of them).
+# Union of the data extents of every axis (of the root's letter) whose
+# `matches` chain ends at `root` (a shared axis group autoranges over all of
+# them).
 function _axes_group_extent(fig, root::Symbol, who::AbstractString)
 	layout = _cmn_layout(fig)
+	letter = String(root)[1]
 	keys_in_group = Symbol[root]
 	for key in keys(layout.fields)
 		(key isa Symbol || key isa AbstractString) || continue
 		k = Symbol(key)
-		_cmn_axis_index(k, 'x') === nothing && continue
+		_cmn_axis_index(k, letter) === nothing && continue
 		k === root && continue
 		_axes_match_root(fig, k, who) === root && push!(keys_in_group, k)
 	end
@@ -1552,9 +1558,10 @@ Set the final range with [`xrange!`](@ref) before calling this.
 - `finv`: its inverse; `finv(f(x)) ≈ x` is checked at the same points.
 
 # Keywords
-- `ticks = nothing`: tick values in the secondary units; `nothing` chooses
-  1-2-5 values inside `f(range)` (powers of ten on a log axis spanning a
-  decade or more).
+- `ticks = nothing`: tick values in the secondary units (data values of
+  `f`, never log10 exponents, also on a logarithmic primary axis; each is
+  placed at the DATA position `finv(tick)`); `nothing` chooses 1-2-5 values
+  inside `f(range)` (powers of ten on a log axis spanning a decade or more).
 - `ticklabels = nothing`: one label per tick (through the mathtext layer);
   requires `ticks`. Default: the values with six significant digits.
 - `title::AbstractString = ""`: axis title.
@@ -1650,9 +1657,17 @@ function _axes_inset!(
 	coords::Union{Symbol, AbstractString} = :axes,
 	sharex::Bool = false,
 	sharey::Bool = false,
+	background = nothing,
+	ticklabel_halo::Bool = true,
 )
 	who = "inset!"
 	x0, y0, w, h = _axes_inset_bounds(bounds, who)
+	fill = background === nothing ? nothing :
+		_cmn_check_color(background, "background", who)
+	(fill === nothing || !isempty(fill)) || throw(ArgumentError(
+		"$(who): `background` must be a colour or `nothing` (the figure's " *
+		"`plot_bgcolor`); got \"\".",
+	))
 	coords_name = Symbol(coords)
 	coords_name in (:axes, :paper) || throw(ArgumentError(
 		"$(who): `coords` must be :axes (fractions of the host cell) or " *
@@ -1689,8 +1704,17 @@ function _axes_inset!(
 		:linewidth => _DEFAULT_AXIS_LINEWIDTH,
 		:tickcolor => _DEFAULT_AXIS_LINECOLOR,
 	)
+	if ticklabel_halo
+		# The tick labels and titles sit outside the inset's (opaque) plot
+		# area, over the host cell's data; plotly.js `font.shadow = "auto"`
+		# draws a halo in the contrast colour of the text behind each glyph
+		# (render-verified over a heatmap, inset_bg_shadow.png).
+		frame[:tickfont] = attr(shadow = _AXES_INSET_HALO)
+		frame[:title] = attr(font = attr(shadow = _AXES_INSET_HALO))
+	end
 	xfields = merge(frame, Dict{Symbol, Any}(:domain => collect(xdomain), :anchor => yref))
 	yfields = merge(frame, Dict{Symbol, Any}(:domain => collect(ydomain), :anchor => xref))
+	root_autorange = Dict{Symbol, Bool}()
 	for (share, host_key, fields) in ((sharex, host.xkey, xfields), (sharey, host.ykey, yfields))
 		share || continue
 		root = _axes_match_root(sf, host_key, who)
@@ -1698,11 +1722,45 @@ function _axes_inset!(
 		# Matched axes must have the same type.
 		axis_type = _axis_type(layout, root)
 		axis_type == "-" || (fields[:type] = axis_type)
-		exponent = _cmn_mapping_get(get(layout.fields, root, nothing), :exponentformat)
+		root_entry = get(layout.fields, root, nothing)
+		exponent = _cmn_mapping_get(root_entry, :exponentformat)
 		exponent isa AbstractString && (fields[:exponentformat] = exponent)
+		# plotly.js 2.35.2 (cartesian layout defaults) does not reset its
+		# "explicit range seen" flag between match groups: a group whose root
+		# leaves `autorange` unset gets `autorange = false`, and so the default
+		# range [-1, 4], whenever an earlier group has an explicit range (an
+		# `xrange!`, a `secondary_xaxis!`). Stating the root's autorange (true
+		# unless it has a range) keeps the shared range as it was.
+		_cmn_mapping_get(root_entry, :autorange) === nothing &&
+			(root_autorange[root] = first(_stored_axis_range(layout, root)) === nothing)
 	end
-	_cmn_merge_layout_key!(sf, xkey, xfields)
-	_cmn_merge_layout_key!(sf, ykey, yfields)
+	_cmn_merge_layout_key!(sf, xkey, xfields; nested = (:title,))
+	_cmn_merge_layout_key!(sf, ykey, yfields; nested = (:title,))
+	for (root, value) in root_autorange
+		_cmn_merge_layout_key!(sf, root, Dict{Symbol, Any}(:autorange => value))
+	end
+	if fill !== nothing
+		# Drawn in the inset's own shape layer: above the plot-area fill and
+		# the host cell, below the inset's traces.
+		_upsert_named!(
+			sf,
+			:shapes,
+			"$(_AXES_INSET_BACKGROUND_NAME):$(xref)",
+			[attr(
+				type = "rect",
+				xref = "$(xref) domain",
+				yref = "$(yref) domain",
+				x0 = 0,
+				x1 = 1,
+				y0 = 0,
+				y1 = 1,
+				layer = "below",
+				fillcolor = fill,
+				line = attr(width = 0),
+			)];
+			who = who,
+		)
+	end
 	insets = getfield(sf, :insets)
 	push!(
 		insets,
@@ -1713,14 +1771,21 @@ function _axes_inset!(
 	return length(insets)
 end
 
+# plotly.js `font.shadow` value for inset tick labels and titles: "auto" is a
+# halo in the contrast colour of the text (white behind dark text).
+const _AXES_INSET_HALO = "auto"
+# Name prefix of the shape drawn by `inset!(...; background = colour)`.
+const _AXES_INSET_BACKGROUND_NAME = "plotlysupply:inset_background"
+
 """
-	inset!(sf::SubplotFigure, bounds; row=nothing, col=nothing, coords=:axes, sharex=false, sharey=false) -> Int
+	inset!(sf::SubplotFigure, bounds; row=nothing, col=nothing, coords=:axes, sharex=false, sharey=false, background=nothing, ticklabel_halo=true) -> Int
 
 Add inset axes to a SubplotFigure cell and return the inset id `k`. Pass
 `inset = k` to the axis helpers ([`xlabel!`](@ref), [`xrange!`](@ref),
 [`xticks!`](@ref), [`grid!`](@ref), ...) to style it; plot calls route traces
 there with `inset = k` (traces may also name the axes directly: `xaxis` /
-`yaxis` are `sf.insets[k].xref` / `.yref`).
+`yaxis` are `sf.insets[k].xref` / `.yref`). [`remove_inset!`](@ref) deletes
+it again.
 
 # Arguments
 - `bounds`: `(x0, y0, width, height)` (tuple or vector), each in [0, 1]:
@@ -1732,13 +1797,35 @@ there with `inset = k` (traces may also name the axes directly: `xaxis` /
   the call makes active). The host must be a Cartesian (xy) cell.
 - `coords = :axes`: `:axes` or `:paper`.
 - `sharex`, `sharey`: share the host axis range (`matches`); the inset then
-  also takes the host's axis type (and exponent format).
+  also takes the host's axis type (and exponent format). The shared root
+  axis gets an explicit `autorange` (`true` unless it has a range), which
+  plotly.js 2.35 needs to keep the shared range automatic when another
+  axis group of the figure has an explicit range. A log host axis
+  gives a log inset axis; an unshared inset axis gets its own scale through
+  the plot calls (`xscale = "log"` with `inset = k`) and its own range
+  through `xrange!(sf, (lo, hi); inset = k)` (DATA units on log axes).
+- `background = nothing`: the inset's plot-area colour. `nothing` uses the
+  figure's `plot_bgcolor` (see below); a colour string (`"white"`,
+  `"#f5f5f5"`, `"rgba(255,255,255,0.8)"`) draws a filled rectangle named
+  `"$(_AXES_INSET_BACKGROUND_NAME):<x ref>"` on the inset's domain, above the
+  host data and below the inset's traces. A translucent colour lets the
+  `plot_bgcolor` fill show through, not the host data.
+- `ticklabel_halo::Bool = true`: draw the inset's tick labels and axis
+  titles with a halo in the contrasting colour (plotly.js
+  `tickfont.shadow = "auto"`), so they stay readable where they extend over
+  the host cell's data (images, heatmaps, dense lines). `false` draws plain
+  labels. Browsers and the PNG/PDF exports render the halo; an exported SVG
+  viewed outside a browser may ignore it (it is a CSS `text-shadow`).
 
-The inset axes are boxed (black lines, outside ticks) and do not push the
-figure margins. Each call creates a new inset (ids are 1, 2, ... in creation
-order). plotly.js has no opaque background for overlapping axes, so host data
-under the inset stays visible. `inset!` on a `Plot`/`SyncPlot` is an
-`ArgumentError`.
+Background: the inset's plot area is always opaque. plotly.js fills the plot
+area of axes that overlap another cell with the figure's `plot_bgcolor`
+(white under the default template; `relayout!(sf, plot_bgcolor = ...)`
+changes it for every cell), so host data never shows through the inset; use
+`background` for an inset-only colour. The inset axes are boxed (black
+lines, outside ticks) and do not push the figure margins. Each call creates
+a new inset (ids are 1, 2, ... in creation order; after
+[`remove_inset!`](@ref) the later ids move down by one). `inset!` on a
+`Plot`/`SyncPlot` is an `ArgumentError`.
 
 # Example
 ```julia
@@ -1746,6 +1833,7 @@ sf = subplots(1, 1; sync = false)
 x = collect(0:0.01:10)
 plot_scatter!(sf, x, sin.(x) .* exp.(-x ./ 5))
 k = inset!(sf, (0.55, 0.55, 0.4, 0.4))
+plot_scatter!(sf, x, sin.(x) .* exp.(-x ./ 5); inset = k)
 xrange!(sf, (2, 3); inset = k)
 ```
 """
@@ -1763,5 +1851,121 @@ end
 function inset!(fig, bounds; kwargs...)
 	throw(ArgumentError(
 		"inset! needs a SubplotFigure; use subplots(1,1; sync=false)",
+	))
+end
+
+# Whether layout item `item` (annotation, shape, image) is placed on one of
+# the axis references in `refs` ("x5", or "x5 domain").
+function _axes_item_uses_refs(item, refs::Set{String})
+	mapping = item isa PlotlyBase.AbstractLayoutAttribute ? item.fields : item
+	for field in (:xref, :yref)
+		ref = _cmn_mapping_get(mapping, field)
+		ref isa Symbol && (ref = String(ref))
+		ref isa AbstractString || continue
+		base = replace(String(ref), r"\s*domain$" => "")
+		base in refs && return true
+	end
+	return false
+end
+
+function _axes_remove_inset!(sf::SubplotFigure, k)
+	who = "remove_inset!"
+	(k isa Integer && !(k isa Bool)) || throw(ArgumentError(
+		"$(who): the inset id must be an integer; got $(repr(k)).",
+	))
+	insets = getfield(sf, :insets)
+	1 <= k <= length(insets) || throw(ArgumentError(
+		"$(who): unknown inset id $(k); " *
+		(isempty(insets) ?
+			"this figure has no insets." :
+			"valid ids are 1:$(length(insets))."),
+	))
+	p = _cmn_plot(sf)
+	layout = p.layout
+	t = _cell_target(sf; inset = Int(k), who = who)
+	# The inset's axes and every axis overlaying them (a secondary x axis
+	# added with `secondary_xaxis!(...; inset = k)`).
+	axis_keys = _axes_cell_axis_keys(layout, t)
+	refs = Set{String}(_cmn_axis_ref(key; who = who) for key in axis_keys)
+	# Another axis that `matches` one of them would be left pointing at a
+	# removed axis.
+	for (key, value) in layout.fields
+		(key isa Symbol || key isa AbstractString) || continue
+		Symbol(key) in axis_keys && continue
+		occursin(_CMN_AXIS_KEY_PATTERN, String(key)) || continue
+		ref = _cmn_mapping_get(value, :matches)
+		ref isa Symbol && (ref = String(ref))
+		(ref isa AbstractString && ref in refs) && throw(ArgumentError(
+			"$(who): $(repr(Symbol(key))) shares its range with inset $(k) " *
+			"(`matches = $(repr(ref))`); remove that link first.",
+		))
+	end
+
+	# --- write ---
+	keep = Bool[
+		!(
+			trace isa GenericTrace && (
+				(let r = get(trace.fields, :xaxis, nothing)
+					(r isa Symbol || r isa AbstractString) && String(r) in refs
+				end) ||
+				(let r = get(trace.fields, :yaxis, nothing)
+					(r isa Symbol || r isa AbstractString) && String(r) in refs
+				end)
+			)
+		) for trace in p.data
+	]
+	all(keep) || keepat!(p.data, keep)
+	for field in (:annotations, :shapes, :images)
+		items = get(layout.fields, field, nothing)
+		items isa AbstractVector || continue
+		kept = filter(item -> !_axes_item_uses_refs(item, refs), items)
+		length(kept) == length(items) && continue
+		relayout!(_cmn_relayout_target(sf); (field => kept,)...)
+	end
+	for key in axis_keys
+		_cmn_mapping_delete!(layout.fields, (key,))
+	end
+	deleteat!(insets, Int(k))
+	_axes_select!(sf, t)
+	_axes_finish!(sf)
+	return sf
+end
+
+"""
+	remove_inset!(sf::SubplotFigure, k::Integer) -> sf
+
+Delete inset `k` of a [`SubplotFigure`](@ref) (an id returned by
+[`inset!`](@ref)): its x/y axes, any axis overlaying them (a
+[`secondary_xaxis!`](@ref) of the inset), the traces drawn on those axes and
+the annotations, shapes (including the `background` rectangle) and images
+placed on them. The ids of later insets
+move down by one (`sf.insets` is a list); a new [`inset!`](@ref) can be
+created afterwards. The host cell becomes the active cell.
+
+Errors (`ArgumentError`, figure unchanged): an unknown id, or another axis
+that `matches` one of the inset's axes. On a `Plot`/`SyncPlot` it is an
+`ArgumentError` (only SubplotFigures have insets).
+
+# Example
+```julia
+sf = subplots(1, 1; sync = false)
+plot_scatter!(sf, 1:10, rand(10))
+k = inset!(sf, (0.6, 0.6, 0.35, 0.35))
+remove_inset!(sf, k)
+```
+"""
+function remove_inset!(sf::SubplotFigure, k; show = nothing)
+	_axes_reject_show(show, "remove_inset!")
+	return _transactional_subplot_mutation!(
+		_axes_remove_inset!,
+		sf,
+		_SUBPLOT_INSET_METADATA_FIELDS,
+		k,
+	)
+end
+
+function remove_inset!(fig, k; kwargs...)
+	throw(ArgumentError(
+		"remove_inset!: only a SubplotFigure has insets (see `inset!`).",
 	))
 end

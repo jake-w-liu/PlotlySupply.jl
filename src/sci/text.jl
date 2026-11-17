@@ -360,6 +360,7 @@ function _text_panel_title!(fig, target, text, align::Symbol, fontsize::Float64,
 	name = "plotlysupply:title:$(target.row):$(target.col)"
 	if isempty(text)
 		_upsert_named!(fig, :annotations, name, Any[]; who = "title!")
+		_text_refit_panel_label!(fig, target)
 		return nothing
 	end
 	xdom = target.xdomain
@@ -382,6 +383,64 @@ function _text_panel_title!(fig, target, text, align::Symbol, fontsize::Float64,
 	fontsize > 0 && (annotation[:font] = attr(size = _text_number(fontsize)))
 	_text_drop_centred_cell_title!(fig, xdom, ydom)
 	_upsert_named!(fig, :annotations, name, [attr(annotation)]; who = "title!")
+	_text_refit_panel_label!(fig, target)
+	return nothing
+end
+
+# A panel title aligned to a corner and an outside panel label at that corner
+# would print on top of each other: both sit `_TEXT_PANEL_GAP` px above it.
+# The label then moves beside the corner, outside the axes (left of a top-left
+# corner, right of a top-right one) on the title's line, where it reads
+# "(a) Title"; the title keeps its place. `_text_panel_title_side` is the
+# alignment of the panel title of cell (row, col) (`nothing` without one).
+function _text_panel_title_side(fig, row::Integer, col::Integer)
+	items = get(_cmn_layout(fig).fields, :annotations, nothing)
+	items isa AbstractVector || return nothing
+	name = "plotlysupply:title:$(row):$(col)"
+	for item in items
+		_cmn_item_name(item) == name || continue
+		anchor = _cmn_mapping_get(item, :xanchor)
+		anchor == "left" && return :left
+		anchor == "right" && return :right
+		return :center
+	end
+	return nothing
+end
+
+# `xanchor` and `xshift` of an outside top panel label at the left (`left`)
+# or right corner, given the side of the cell's panel title.
+function _text_panel_label_xplacement(left::Bool, title_side)
+	title_side === (left ? :left : :right) ||
+		return (left ? "left" : "right", 0)
+	return (left ? "right" : "left", left ? -_TEXT_PANEL_GAP : _TEXT_PANEL_GAP)
+end
+
+# Re-place the outside top panel label of `target` after its panel title
+# changed (see `_text_panel_title_side`). Other labels are left alone.
+function _text_refit_panel_label!(fig, target)
+	name = "plotlysupply:panel_label:$(target.row):$(target.col)"
+	items = get(_cmn_layout(fig).fields, :annotations, nothing)
+	items isa AbstractVector || return nothing
+	index = findfirst(item -> _cmn_item_name(item) == name, items)
+	index === nothing && return nothing
+	label = items[index]
+	_cmn_mapping_get(label, :yanchor) == "bottom" || return nothing
+	x = _cmn_mapping_get(label, :x)
+	y = _cmn_mapping_get(label, :y)
+	(x isa Real && y isa Real) || return nothing
+	isapprox(y, target.ydomain[2]; atol = 1e-9) || return nothing
+	left = isapprox(x, target.xdomain[1]; atol = 1e-9)
+	(left || isapprox(x, target.xdomain[2]; atol = 1e-9)) || return nothing
+	xanchor, xshift = _text_panel_label_xplacement(
+		left,
+		_text_panel_title_side(fig, target.row, target.col),
+	)
+	entry = _symbol_dict(label)
+	old_shift = get(entry, :xshift, 0)
+	(get(entry, :xanchor, nothing) == xanchor && old_shift == xshift) && return nothing
+	entry[:xanchor] = xanchor
+	xshift == 0 ? delete!(entry, :xshift) : (entry[:xshift] = xshift)
+	_upsert_named!(fig, :annotations, name, [attr(entry)]; who = "title!")
 	return nothing
 end
 
@@ -413,7 +472,9 @@ title of one panel.
   just above the cell's axes (`x` = left edge / centre / right edge of the cell
   per `align`, `yanchor="bottom"`, 4 px gap). Calling it again replaces it; it
   also replaces a centred `subplot_titles`/`column_titles` annotation of that
-  cell. [`set_fonts!`](@ref) styles it as a title.
+  cell. [`set_fonts!`](@ref) styles it as a title. A left/right-aligned panel
+  title moves an outside [`panel_labels!`](@ref) label at the same top corner
+  beside the corner (outside the axes), so they do not overlap.
 
 `text` goes through mathtext (`"(a) Mesh study, \$\\lambda=10^8\$"` keeps its
 text); `""` removes the title.
@@ -604,7 +665,7 @@ function _text_panel_cells(sf::SubplotFigure, cells, who::AbstractString)
 	return out
 end
 
-function _text_panel_label_annotation(target, text, position::Symbol, outside::Bool, fontsize::Float64, bold::Bool, row::Int, col::Int)
+function _text_panel_label_annotation(target, text, position::Symbol, outside::Bool, fontsize::Float64, bold::Bool, row::Int, col::Int, title_side = nothing)
 	left = position in (:topleft, :bottomleft)
 	top = position in (:topleft, :topright)
 	xdom = target.xdomain
@@ -622,6 +683,11 @@ function _text_panel_label_annotation(target, text, position::Symbol, outside::B
 	if outside
 		annotation[:yanchor] = top ? "bottom" : "top"
 		annotation[:yshift] = top ? _TEXT_PANEL_GAP : -_TEXT_PANEL_GAP
+		if top
+			xanchor, xshift = _text_panel_label_xplacement(left, title_side)
+			annotation[:xanchor] = xanchor
+			xshift == 0 || (annotation[:xshift] = xshift)
+		end
 	else
 		annotation[:yanchor] = top ? "top" : "bottom"
 		annotation[:xshift] = left ? _TEXT_PANEL_GAP : -_TEXT_PANEL_GAP
@@ -651,7 +717,10 @@ function _text_write_panel_labels!(fig, targets, texts, format, position, outsid
 		text = replace(format, "{}" => label)
 		push!(items, (
 			"plotlysupply:panel_label:$(row):$(col)",
-			_text_panel_label_annotation(target, text, position, outside, fs, bold, row, col),
+			_text_panel_label_annotation(
+				target, text, position, outside, fs, bold, row, col,
+				_text_panel_title_side(fig, row, col),
+			),
 		))
 	end
 	for (name, annotation) in items
@@ -678,7 +747,11 @@ again replaces the labels instead of adding more.
   `:bottomleft`, `:bottomright`.
 - `outside::Bool = true`: `true` puts the label just outside the corner
   (above the axes for top corners, `yanchor="bottom"`); `false` inside it,
-  4 px from both edges.
+  4 px from both edges. When the cell has a panel title ([`title!`](@ref)
+  with `row`/`col`) aligned to the same corner (`align = :left` for
+  `:topleft`, `:right` for `:topright`), an outside label moves beside the
+  corner, outside the axes on the title's line ("(a) Title"), so the two
+  never overlap; centred titles (also `subplot_titles`) leave it in place.
 - `bold::Bool = false`: bold label (`<b>`, or `\\textbf` for math labels).
 - `fontsize::Real = 0`: font size in px (0 = Plotly default).
 - `cells`: `:all` or a vector of `(row, col)` tuples (SubplotFigure only;
