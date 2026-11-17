@@ -6918,6 +6918,15 @@ function _apply_showlegend!(trace, showlegend)
 	return nothing
 end
 
+# Common Cartesian keywords of a constructor (`apply_template = true`) or
+# mutator (`apply_template = false`, usually `refresh = true`), applied through
+# the D7 primitives (src/sci/base.jl) to the PRIMARY axes (`xaxis`/`yaxis`, or
+# the twin `ykey`): every option is validated first, then title, labels,
+# scale, range (DATA units on log axes; a scale switch keeps the data interval
+# of an explicit range), size, grid (`true` keeps the template grid), ticks
+# (`xticks`/`yticks` take values or the D9 presets `:decades`/`:auto`, see
+# `_apply_ticks!`), equal aspect, template/legend and font size. Works on a
+# figure that already holds traces and on an empty one.
 function _apply_cartesian_plot_options!(
 	fig;
 	xlabel::AbstractString = "",
@@ -6964,6 +6973,10 @@ function _apply_cartesian_plot_options!(
 		_require_axis_scale(yscale, who, "yscale")
 		_scat_require_axis_range(fig, ykey, yrange, yscale, who, "yrange")
 	end
+	# Tick values/labels and the D9 presets (`:decades`, `:auto`) are checked
+	# against the axis type this call ends up with, before anything is written.
+	_validate_tick_option(fig, :xaxis, xticks, xticklabels, xscale, who, "x")
+	_validate_tick_option(fig, ykey, yticks, yticklabels, yscale, who, "y")
 
 	_apply_figure_title!(fig, title)
 	_apply_axis_title!(fig, :x, xlabel)

@@ -1084,13 +1084,123 @@ function _cmn_check_tick_size(value, name::AbstractString, who::AbstractString)
 	return nothing
 end
 
+# ── D9: tick presets (`:decades`, `:auto`) ──────────────────────────────────
+
+# Lead decision D9: `:decades` labels at most about this many powers of ten;
+# a longer axis labels every k-th decade, k = max(1, ceil(n_decades / 8)).
+# Eight 10ⁿ labels fit a 350 px axis without overlapping (lead renders
+# p2_d/p2_e); the minor ticks still mark every decade.
+const _CMN_DECADES_MAX_LABELS = 8
+
+# A `Symbol` tick value that is not one of `_TICK_PRESETS` is a typo, not a
+# vector of tick values.
+function _cmn_check_tick_preset(values, who::AbstractString)
+	values isa Symbol || return nothing
+	_is_tick_preset(values) || throw(ArgumentError(
+		"$(who): unknown tick preset $(repr(values)); use " *
+		"$(join(repr.(_TICK_PRESETS), " or ")), or pass tick values.",
+	))
+	return nothing
+end
+
+# The checks a preset needs against the axis type the call ends up with;
+# shared by `_apply_ticks!` and `_validate_tick_option`.
+function _cmn_require_preset_use(preset::Symbol, labels, subs, key, axis_type::AbstractString, who::AbstractString)
+	labels === nothing || throw(ArgumentError(
+		"$(who): the tick preset $(repr(preset)) chooses the ticks and their " *
+		"labels; tick `labels` need explicit tick values.",
+	))
+	subs === nothing || throw(ArgumentError(
+		"$(who): pass either the tick preset $(repr(preset)) or `subs`, not both.",
+	))
+	if preset === :decades && axis_type != "log"
+		throw(ArgumentError(
+			"$(who): the `:decades` tick preset labels powers of ten and needs a " *
+			"logarithmic axis; " *
+			(key === nothing ? "the axis" : repr(key)) *
+			" has type $(repr(axis_type)) (set `xscale`/`yscale = \"log\"` first).",
+		))
+	end
+	return nothing
+end
+
+# Decades spanned by log axis `key`: the explicit range of its matched group's
+# root, else the data extent of the group, else 1 (lead decision D9).
+function _cmn_decade_count(fig, key::Symbol, who::AbstractString)
+	root = _axes_match_root(fig, key, who)
+	limits = _from_axis_range(_cmn_layout(fig), root)
+	limits === nothing && (limits = _axes_group_extent(fig, root, who))
+	limits === nothing && return 1.0
+	lower, upper = minmax(limits...)
+	(lower > 0 && upper > 0) || return 1.0
+	return log10(upper / lower)
+end
+
+"""
+	_validate_tick_option(fig, key, values, labels, scale, who, letter)
+
+Check the `xticks`/`xticklabels` (`letter = "x"`) or y keywords of a
+constructor or mutator before its first write, against the axis type the call
+ends up with (`scale` when given, else the current type of `key`; `key =
+nothing` is an axis that does not exist yet). Tick presets (`:decades`,
+`:auto`; D9) pass when they apply to that axis type; other values are checked
+as `_apply_ticks!` will check them. Writes nothing.
+"""
+function _validate_tick_option(
+	fig,
+	key::Union{Nothing, Symbol},
+	values,
+	labels,
+	scale::AbstractString,
+	who::AbstractString,
+	letter::AbstractString,
+)
+	(values === nothing && labels === nothing) && return nothing
+	axis_type = !isempty(scale) ? String(scale) :
+		key === nothing ? "-" : _axis_type(_cmn_layout(fig), key)
+	_cmn_check_tick_preset(values, who)
+	if _is_tick_preset(values)
+		labels === nothing || throw(ArgumentError(
+			"$(who): `$(letter)ticks = $(repr(values))` chooses the tick labels; " *
+			"`$(letter)ticklabels` need explicit `$(letter)ticks` values.",
+		))
+		_cmn_require_preset_use(values, nothing, nothing, key, axis_type, who)
+		return nothing
+	end
+	tickvals = values === nothing ? nothing : _cmn_tick_values(values, axis_type == "log", who)
+	if labels !== nothing
+		tickvals === nothing && throw(ArgumentError(
+			"$(who): `$(letter)ticklabels` needs `$(letter)ticks` (one tick value per label).",
+		))
+		_cmn_tick_labels(labels, length(tickvals), who)
+	end
+	return nothing
+end
+
 """
 	_apply_ticks!(fig, key::Symbol; values=nothing, labels=nothing, format="", exponentformat="", minor=nothing, subs=nothing, angle=nothing, direction="", tickwidth=0, ticklen=0, who)
 
-Set the ticks of Cartesian axis `key` (spec F8). Only that axis is touched.
+Set the ticks of Cartesian axis `key` (spec F8, lead decision D9). Only that
+axis is touched.
 
 - `values`: tick positions in data units (also on log axes); sets
-  `tickmode="array"`. Numbers, or strings on category/date axes.
+  `tickmode="array"`. Numbers, or strings on category/date axes. Or a tick
+  preset (`_TICK_PRESETS`):
+  - `:decades` (log axes only; any other axis type is an `ArgumentError`
+    naming it): labels at powers of ten only (`tickmode="linear"`, `tick0=0`,
+    `dtick=k`, k = max(1, ceil(n_decades / 8)) with n_decades from the
+    explicit range of the axis (its `matches` root), else the data extent,
+    else 1), `exponentformat="power"` (or the `exponentformat` keyword), and
+    unlabelled minor ticks (`minor.dtick = "D1"`, the digits 2..9, when k == 1,
+    else `minor.dtick = 1`, every decade) unless `minor=false`. The step is
+    computed from the range/data at call time. Stale array ticks and an
+    automatic "~g" format are removed.
+  - `:auto`: removes the tick placement the helpers write (`tickmode`,
+    `tickvals`, `ticktext`, `tick0`, `dtick`, the minor tick placement
+    `minor.tickmode/tickvals/tick0/dtick` and an automatic "~g" format), so
+    Plotly's automatic ticks are back; minor ticks are switched off unless
+    `minor=true`. Works on every axis type.
+  A preset cannot be combined with `labels` or `subs`.
 - `labels`: one label per value, each passed through `_label`. Without labels,
   numeric array ticks on a linear axis default to `tickformat="~g"` unless
   `format`, `exponentformat` or an existing `tickformat` says otherwise. On a
@@ -1149,12 +1259,18 @@ function _apply_ticks!(
 	))
 	_cmn_check_tick_size(tickwidth, "tickwidth", who)
 	_cmn_check_tick_size(ticklen, "ticklen", who)
+	_cmn_check_tick_preset(values, who)
+	preset = _is_tick_preset(values) ? values : nothing
+	preset === nothing ||
+		_cmn_require_preset_use(preset, labels, subs, key, _axis_type(layout, key), who)
 	(subs !== nothing && values !== nothing) && throw(ArgumentError(
 		"$(who): pass either tick `values` or `subs`, not both.",
 	))
 
 	tickvals = nothing
-	if subs !== nothing
+	if preset !== nothing
+		# handled below
+	elseif subs !== nothing
 		log_axis || throw(ArgumentError(
 			"$(who): `subs` places ticks per decade and needs a logarithmic " *
 			"axis; $(repr(key)) has type $(repr(_axis_type(layout, key))).",
@@ -1188,14 +1304,31 @@ function _apply_ticks!(
 		ticktext = _cmn_tick_labels(labels, length(tickvals), who)
 	end
 
+	decade_step = preset === :decades ?
+		max(1, ceil(Int, _cmn_decade_count(fig, key, who) / _CMN_DECADES_MAX_LABELS)) :
+		0
+
 	minor_fields = nothing
 	clear_minor_array = false
-	if minor === true
+	# Minor tick placement removed by `:auto` (and replaced by `:decades`).
+	clear_minor_placement = preset !== nothing
+	if preset === :decades && minor !== false
+		minor_fields = Dict{Symbol, Any}(
+			:ticks => direction == "" ? "outside" : direction,
+			:ticklen => _cmn_minor_ticklen(axis_entry, ticklen),
+			:tickmode => "linear",
+			:tick0 => 0,
+			:dtick => decade_step == 1 ? "D1" : 1,
+		)
+		clear_minor_placement = false
+		clear_minor_array = true
+	elseif minor === true
 		minor_fields = Dict{Symbol, Any}(
 			:ticks => direction == "" ? "outside" : direction,
 			:ticklen => _cmn_minor_ticklen(axis_entry, ticklen),
 		)
-		majors = tickvals === nothing ? _cmn_array_tickvals(axis_entry) : tickvals
+		majors = preset !== nothing ? nothing :
+			tickvals === nothing ? _cmn_array_tickvals(axis_entry) : tickvals
 		minor_values = _cmn_log_minor_tickvals(fig, key, majors, who)
 		if minor_values === nothing
 			clear_minor_array = true
@@ -1203,7 +1336,7 @@ function _apply_ticks!(
 			minor_fields[:tickmode] = "array"
 			minor_fields[:tickvals] = minor_values
 		end
-	elseif minor === false
+	elseif minor === false || preset === :auto
 		minor_fields = Dict{Symbol, Any}(:ticks => "")
 		clear_minor_array = true
 	elseif ticklen > 0 &&
@@ -1218,13 +1351,23 @@ function _apply_ticks!(
 	existing_format = _cmn_mapping_get(axis_entry, :tickformat)
 	numeric_array = tickvals !== nothing && eltype(tickvals) === Float64
 	# An automatic "~g" left by an earlier call goes when it would hide the
-	# requested exponent format, or when the axis is (now) logarithmic.
+	# requested exponent format, when the axis is (now) logarithmic, or when a
+	# preset hands the labels back to Plotly / to the power format.
 	drop_auto_format =
 		format == "" &&
 		existing_format == _CMN_AUTO_TICKFORMAT &&
-		(exponentformat != "" || (log_axis && numeric_array && ticktext === nothing))
+		(
+			exponentformat != "" ||
+			preset !== nothing ||
+			(log_axis && numeric_array && ticktext === nothing)
+		)
 	fields = Dict{Symbol, Any}()
-	if tickvals !== nothing
+	if preset === :decades
+		fields[:tickmode] = "linear"
+		fields[:tick0] = 0
+		fields[:dtick] = decade_step
+		exponentformat == "" && (fields[:exponentformat] = "power")
+	elseif tickvals !== nothing
 		fields[:tickmode] = "array"
 		fields[:tickvals] = tickvals
 		ticktext === nothing || (fields[:ticktext] = ticktext)
@@ -1256,14 +1399,25 @@ function _apply_ticks!(
 
 	_cmn_merge_layout_key!(fig, key, fields; nested = (:minor,))
 	drop_auto_format && _cmn_delete_layout_fields!(fig, key, (:tickformat,))
-	if tickvals !== nothing && ticktext === nothing
+	if preset === :decades
+		_cmn_delete_layout_fields!(fig, key, (:tickvals, :ticktext))
+	elseif preset === :auto
+		_cmn_delete_layout_fields!(fig, key, (:tickmode, :tickvals, :ticktext, :tick0, :dtick))
+	elseif tickvals !== nothing && ticktext === nothing
 		_cmn_delete_layout_fields!(fig, key, (:ticktext,))
 	end
-	if clear_minor_array
+	if clear_minor_placement
 		_cmn_delete_layout_fields!(
 			fig,
 			key,
-			(:tickmode, :tickvals);
+			(:tickmode, :tickvals, :tick0, :dtick);
+			nested = :minor,
+		)
+	elseif clear_minor_array
+		_cmn_delete_layout_fields!(
+			fig,
+			key,
+			preset === :decades ? (:tickvals,) : (:tickmode, :tickvals);
 			nested = :minor,
 		)
 	end

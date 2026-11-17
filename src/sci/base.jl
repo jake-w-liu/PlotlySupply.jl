@@ -15,18 +15,29 @@ const _TICK_PRESETS = (:decades, :auto)
 _is_tick_preset(value) = value isa Symbol && value in _TICK_PRESETS
 
 # `[0, 0]` (or `(0, 0)`) is the package-wide "automatic range" sentinel;
-# `nothing` is accepted as an explicit synonym.
+# `nothing` and `[nothing, nothing]` are accepted as explicit synonyms.
 function _is_auto_range(range)
 	range === nothing && return true
 	(range isa AbstractVector || range isa Tuple) || return false
 	length(range) == 2 || return false
 	lower, upper = range[1], range[2]
-	return lower isa Real && upper isa Real && iszero(lower) && iszero(upper)
+	(lower === nothing && upper === nothing) && return true
+	return lower isa Real && upper isa Real &&
+		!(lower isa Bool) && !(upper isa Bool) &&
+		iszero(lower) && iszero(upper)
 end
 
 # Validate a user-supplied axis/colour range and return it as a 2-element
 # vector, or `nothing` when it is the automatic sentinel. `who` names the
 # calling function and `name` the keyword, for the error message.
+#
+# Rejected (ArgumentError, nothing is written by the caller): anything but a
+# 2-element vector/tuple, partial ranges (`nothing`/`missing` bounds; plotly.js
+# 2.35 ignores `range = [null, hi]`), `Bool` bounds, non-finite numbers and
+# equal bounds (an empty axis). A reversed range (`upper < lower`) is valid: it
+# flips the axis, as matplotlib's `set_xlim(hi, lo)`. Bounds are not otherwise
+# typed here: date axes take strings or dates, and callers check what their
+# axis or colour scale needs (`_require_axis_range`, `_apply_axis_range!`).
 function _checked_range(range, who::AbstractString, name::AbstractString)
 	_is_auto_range(range) && return nothing
 	(range isa AbstractVector || range isa Tuple) ||
@@ -39,11 +50,26 @@ function _checked_range(range, who::AbstractString, name::AbstractString)
 		))
 	lower, upper = range[1], range[2]
 	for bound in (lower, upper)
+		(bound === nothing || bound === missing) &&
+			throw(ArgumentError(
+				"$(who): `$(name)`: partial ranges are not supported; give both " *
+				"bounds, or [0, 0] / `nothing` for an automatic range. Got $(repr(range)).",
+			))
+		bound isa Bool &&
+			throw(ArgumentError(
+				"$(who): `$(name)` range bounds must be numbers (or date/category " *
+				"values), not Bool; got $(repr(range)).",
+			))
 		bound isa Real && !isfinite(bound) &&
 			throw(ArgumentError(
 				"$(who): `$(name)` bounds must be finite; got $(repr(range)).",
 			))
 	end
+	isequal(lower, upper) &&
+		throw(ArgumentError(
+			"$(who): `$(name)`: the range bounds must differ; got $(repr(range)) " *
+			"(use [0, 0] or `nothing` for an automatic range).",
+		))
 	return Any[lower, upper]
 end
 
@@ -115,9 +141,74 @@ end
 # These are the complete `layout.xaxis.type` enumeration of plotly.js.
 const _AXIS_SCALE_TYPES = ("linear", "log", "date", "category", "multicategory", "-")
 
+# Axis types whose `range` plotly.js reads as numbers: positions on linear
+# axes, log10 exponents on log axes, 0-based category indices on category
+# axes. Date axes (and autotyped "-" axes, which may become date axes) also
+# take date strings.
+const _NUMERIC_RANGE_AXIS_TYPES = ("linear", "log", "category", "multicategory")
+
+_axis_range_name(letter::Symbol) = letter === :x ? "xrange" : "yrange"
+_axis_scale_name(letter::Symbol) = letter === :x ? "xscale" : "yscale"
+
+# The `range` stored on axis `key`, if it is a 2-element vector/tuple, and
+# whether it is in effect (`autorange` unset or `false`).
+function _stored_axis_range(layout::Layout, key::Symbol)
+	entry = get(layout.fields, key, nothing)
+	stored = _cmn_mapping_get(entry, :range)
+	((stored isa AbstractVector || stored isa Tuple) && length(stored) == 2) ||
+		return (nothing, false)
+	autorange = _cmn_mapping_get(entry, :autorange)
+	return (stored, autorange === nothing || autorange === false)
+end
+
+_is_plain_real(v) = v isa Real && !(v isa Bool) && isfinite(v)
+
+# How the range stored on axis `key` must change when its type becomes
+# `new_type`, so it keeps showing the same DATA interval: plotly.js stores a
+# log axis's range as log10 exponents, so switching between log and a linear
+# ("linear" or autotyped "-") axis converts the bounds (`exp10` / `log10`).
+# Returns `(:keep, nothing)` (no range, or no log/linear switch),
+# `(:set, value)` or `(:drop, nothing)` when the range has no meaning on the
+# new axis (non-positive or non-numeric bounds on a log axis, a log10 range
+# on a date/category axis).
+function _axis_range_for_scale(layout::Layout, key::Symbol, new_type::AbstractString)
+	old_log = _axis_type(layout, key) == "log"
+	new_log = new_type == "log"
+	old_log == new_log && return (:keep, nothing)
+	stored, _ = _stored_axis_range(layout, key)
+	stored === nothing && return (:keep, nothing)
+	lower, upper = stored[1], stored[2]
+	numeric = _is_plain_real(lower) && _is_plain_real(upper)
+	if old_log
+		(numeric && new_type in ("linear", "-")) || return (:drop, nothing)
+		return (:set, Float64[exp10(Float64(lower)), exp10(Float64(upper))])
+	end
+	(numeric && lower > 0 && upper > 0) || return (:drop, nothing)
+	return (:set, Float64[log10(Float64(lower)), log10(Float64(upper))])
+end
+
+# The stored range of axis `key` in data units, for error messages.
+function _stored_range_text(layout::Layout, key::Symbol)
+	stored, _ = _stored_axis_range(layout, key)
+	stored === nothing && return "nothing"
+	if _axis_type(layout, key) == "log" &&
+		_is_plain_real(stored[1]) && _is_plain_real(stored[2])
+		return repr((exp10(Float64(stored[1])), exp10(Float64(stored[2]))))
+	end
+	return repr(Tuple(stored))
+end
+
 # Axis scale of the primary x or y axis. `""` leaves the axis type unchanged.
 # A logarithmic axis gets power-of-ten tick labels (10², not "100" / "1µ")
 # unless an exponent format was already chosen.
+#
+# An explicit range keeps its DATA interval across a switch between a log and
+# a linear axis: plotly.js stores log ranges as exponents, so [0, 3] on a log
+# axis becomes [1, 1000] on the linear axis and vice versa. A range that has no
+# meaning on the new type (non-positive bounds on a log axis, a log10 range on
+# a date/category axis) is removed, so the axis autoranges;
+# `_validate_cartesian_options` rejects that case unless the same call sets a
+# new range. Annotations and shapes placed on the axis are not converted.
 function _apply_axis_scale!(
 	fig,
 	letter::Symbol,
@@ -125,40 +216,103 @@ function _apply_axis_scale!(
 	who::AbstractString,
 )
 	isempty(scale) && return nothing
-	name = letter === :x ? "xscale" : "yscale"
+	return _apply_axis_scale_to_key!(
+		fig,
+		_axis_layout_key(letter),
+		scale,
+		who;
+		name = _axis_scale_name(letter),
+	)
+end
+
+# `_apply_axis_scale!` for any Cartesian axis `key` (e.g. a twin y axis);
+# `name` is the keyword named in errors.
+function _apply_axis_scale_to_key!(
+	fig,
+	key::Symbol,
+	scale::AbstractString,
+	who::AbstractString;
+	name::AbstractString = "scale",
+)
+	isempty(scale) && return nothing
 	scale in _AXIS_SCALE_TYPES ||
 		throw(ArgumentError(
 			"$(who): `$(name)` must be one of $(join(repr.(_AXIS_SCALE_TYPES), ", ")) " *
 			"or \"\" (unchanged); got $(repr(scale)).",
 		))
-	key = _axis_layout_key(letter)
+	action, converted = _axis_range_for_scale(_plot_layout(fig), key, scale)
 	relayout!(fig; Symbol(key, :_type) => String(scale))
+	if action === :set
+		relayout!(fig; Symbol(key, :_range) => converted)
+	elseif action === :drop
+		relayout!(fig; Symbol(key, :_autorange) => true)
+		_cmn_delete_layout_fields!(fig, key, (:range,))
+	end
 	if scale == "log"
 		axis = get(_plot_layout(fig).fields, key, nothing)
-		existing = axis === nothing ? nothing : get(axis, :exponentformat, nothing)
+		existing = axis === nothing ? nothing : _cmn_mapping_get(axis, :exponentformat)
 		(existing === nothing || (existing isa AbstractDict && isempty(existing))) &&
 			relayout!(fig; Symbol(key, :_exponentformat) => "power")
 	end
 	return nothing
 end
 
+# Bound types an axis of type `axis_type` can take in its range: numbers on
+# linear/log/category axes, anything `_checked_range` accepted (date strings,
+# dates, numbers) on date and autotyped axes.
+function _require_range_bound_types(checked, axis_type::AbstractString, who::AbstractString, name::AbstractString)
+	axis_type in _NUMERIC_RANGE_AXIS_TYPES || return nothing
+	all(b -> b isa Real, checked) ||
+		throw(ArgumentError(
+			"$(who): `$(name)` bounds on a $(axis_type) axis must be numbers" *
+			(axis_type == "category" ? " (0-based category positions)" : "") *
+			"; got $(repr(Tuple(checked))).",
+		))
+	return nothing
+end
+
 # Range of the primary x or y axis, given in DATA units on every axis type.
 # Plotly stores the range of a logarithmic axis as log10 exponents, so the
 # bounds are converted there (non-positive bounds are an error). The automatic
-# sentinel (`[0, 0]`, `(0, 0)`, `nothing`) leaves the axis autoranging. Apply
-# the axis scale before the range so the conversion sees the final axis type.
+# sentinel (`[0, 0]`, `(0, 0)`, `nothing`) leaves the axis untouched. A
+# reversed range (`upper < lower`) flips the axis. Linear, log and category
+# axes need numeric bounds; date and autotyped axes keep strings/dates as
+# given (never numerically converted).
+#
+# Call order: the range may be applied before or after the traces are added
+# (it does not depend on the data); apply the axis scale of the same call
+# first (`_apply_axis_scale!`), so the conversion sees the final axis type. On
+# an axis that is already logarithmic (an earlier constructor or `xscale`)
+# the range is converted without repeating the scale.
 function _apply_axis_range!(
 	fig,
 	letter::Symbol,
 	range,
 	who::AbstractString,
 )
-	name = letter === :x ? "xrange" : "yrange"
+	return _apply_axis_range_to_key!(
+		fig,
+		_axis_layout_key(letter),
+		range,
+		who;
+		name = _axis_range_name(letter),
+	)
+end
+
+# `_apply_axis_range!` for any Cartesian axis `key` (e.g. a twin y axis).
+function _apply_axis_range_to_key!(
+	fig,
+	key::Symbol,
+	range,
+	who::AbstractString;
+	name::AbstractString = "range",
+)
 	checked = _checked_range(range, who, name)
 	checked === nothing && return nothing
-	key = _axis_layout_key(letter)
 	layout = _plot_layout(fig)
-	value = _axis_type(layout, key) == "log" ?
+	axis_type = _axis_type(layout, key)
+	_require_range_bound_types(checked, axis_type, who, name)
+	value = axis_type == "log" ?
 		_to_axis_range(layout, key, checked; who = "$(who) (`$(name)`)") :
 		checked
 	relayout!(
@@ -214,6 +368,8 @@ end
 
 # Range check that also knows the axis type the call will end up with: the
 # requested `scale` when one is given, otherwise the axis's current type.
+# A scale switch that would drop an explicit range (see `_apply_axis_scale!`)
+# is an error unless this call sets a new range.
 function _require_axis_range(
 	fig,
 	letter::Symbol,
@@ -221,14 +377,48 @@ function _require_axis_range(
 	scale::AbstractString,
 	who::AbstractString,
 )
-	name = letter === :x ? "xrange" : "yrange"
+	return _require_axis_range_for_key(
+		fig,
+		_axis_layout_key(letter),
+		range,
+		scale,
+		who;
+		name = _axis_range_name(letter),
+	)
+end
+
+# `_require_axis_range` for any Cartesian axis `key` (e.g. a twin y axis);
+# `name` is the range keyword named in errors.
+function _require_axis_range_for_key(
+	fig,
+	key::Symbol,
+	range,
+	scale::AbstractString,
+	who::AbstractString;
+	name::AbstractString = "range",
+)
+	letter = String(key)[1]
 	checked = _checked_range(range, who, name)
-	checked === nothing && return nothing
-	key = _axis_layout_key(letter)
-	final_type = isempty(scale) ? _axis_type(_plot_layout(fig), key) : scale
+	layout = _plot_layout(fig)
+	final_type = isempty(scale) ? _axis_type(layout, key) : String(scale)
+	if checked === nothing
+		if !isempty(scale)
+			action, _ = _axis_range_for_scale(layout, key, final_type)
+			_, active = _stored_axis_range(layout, key)
+			(action === :drop && active) && throw(ArgumentError(
+				"$(who): the current $(letter) range $(_stored_range_text(layout, key)) " *
+				"cannot be shown on a $(repr(final_type)) axis" *
+				(final_type == "log" ? " (log-axis bounds must be positive numbers)" : "") *
+				"; pass a new `$(name)` in the same call, or clear the range first " *
+				"with `$(letter)range!(fig, nothing)`.",
+			))
+		end
+		return nothing
+	end
+	_require_range_bound_types(checked, final_type, who, name)
 	if final_type == "log"
 		for bound in checked
-			(bound isa Real && bound > 0) ||
+			bound > 0 ||
 				throw(ArgumentError(
 					"$(who): `$(name)` bounds on a logarithmic axis are data values " *
 					"and must be positive; got $(repr(range)).",
@@ -240,7 +430,9 @@ end
 
 # Validate the common Cartesian keywords of a constructor or mutator without
 # touching the figure. Call this before the first write; the `_apply_*`
-# helpers above then cannot fail half-way.
+# helpers above then cannot fail half-way. Ranges are DATA units on every
+# axis type (positive on a log axis); see `_checked_range` for the shapes that
+# are rejected.
 function _validate_cartesian_options(
 	fig,
 	who::AbstractString;

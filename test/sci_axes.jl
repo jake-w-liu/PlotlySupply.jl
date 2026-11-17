@@ -818,4 +818,265 @@ end
         @test _ax_json(sp.plot.layout) == before
         @test length(state.scripts) == n && length(sf.insets) == 1
     end
+
+    @testset "helpers on every target write only the addressed axes (v3)" begin
+        # Layout keys whose JSON differs between two snapshots.
+        snapshot(fig) = Dict{Symbol, String}(Symbol(k) => _ax_json(v) for (k, v) in _AX._cmn_plot(fig).layout.fields)
+        changed(a, b) = Set(k for k in union(keys(a), keys(b)) if get(a, k, nothing) != get(b, k, nothing))
+        line_plot() = plot_scatter([1.0, 2.0, 3.0], [1.0, 4.0, 9.0])
+        function inset_grid()
+            sf = _ax_grid(2, 2)
+            k = inset!(sf, (0.5, 0.5, 0.4, 0.4); row = 2, col = 1)
+            plot_scatter!(sf, [1.0, 2.0], [3.0, 4.0]; inset = k)
+            return sf
+        end
+        function twin_plot()
+            p = line_plot()
+            plot_scatter!(p, [1.0, 2.0, 3.0], [10.0, 20.0, 30.0]; secondary_y = true)
+            return p
+        end
+        # name, factory, x keywords, y keywords, cell keywords (`nothing`: the
+        # helper does not apply), title/panel keywords and the top-level key
+        # they write, whether a secondary x axis there moves the figure title.
+        targets = (
+            (:plot, line_plot, (;), (;), (;), (;), :title, (;), true),
+            (:syncplot, () -> first(_ax_syncplot(line_plot())), (;), (;), (;), (;), :title, (;), true),
+            (:cell11, () -> _ax_grid(2, 2), (row = 1, col = 1), (row = 1, col = 1), (row = 1, col = 1),
+                (row = 1, col = 1), :annotations, (cells = [(1, 1)],), true),
+            (:cell22, () -> _ax_grid(2, 2), (row = 2, col = 2), (row = 2, col = 2), (row = 2, col = 2),
+                (row = 2, col = 2), :annotations, (cells = [(2, 2)],), false),
+            (:inset21, inset_grid, (inset = 1,), (inset = 1,), (inset = 1,), nothing, nothing, nothing, false),
+            (:secondary_y, twin_plot, (;), (secondary_y = true,), nothing, nothing, nothing, nothing, false),
+        )
+        resolved = Dict{Symbol, Tuple{Symbol, Symbol}}()
+        for (name, make, xkw, ykw, ckw, tkw, tkey, pkw, top) in targets
+            probe = make()
+            X = _AX._cell_target(probe; xkw...).xkey
+            Y = _AX._cell_target(probe; ykw...).ykey
+            resolved[name] = (X, Y)
+            cases = Any[
+                ("xlabel!", f -> xlabel!(f, L"$t$ (s)"; xkw...), Set([X]),
+                    f -> _ax_get(_ax_field(f, X, :title), :text) == PlotlySupply._label(L"$t$ (s)")),
+                ("ylabel!", f -> ylabel!(f, "amplitude"; ykw...), Set([Y]),
+                    f -> _ax_get(_ax_field(f, Y, :title), :text) == "amplitude"),
+                ("xrange!", f -> xrange!(f, (1.5, 2.5); xkw...), Set([X]),
+                    f -> _ax_field(f, X, :range) == [1.5, 2.5] && _ax_field(f, X, :autorange) === false),
+                ("yrange!", f -> yrange!(f, (2, 8); ykw...), Set([Y]),
+                    f -> _ax_field(f, Y, :range) == [2, 8]),
+                ("xticks!", f -> xticks!(f, [1, 2, 3]; xkw...), Set([X]),
+                    f -> _ax_field(f, X, :tickvals) == [1.0, 2.0, 3.0]),
+                ("yticks!", f -> yticks!(f, [2, 4], ["two", "four"]; ykw...), Set([Y]),
+                    f -> _ax_field(f, Y, :ticktext) == ["two", "four"]),
+            ]
+            if ckw !== nothing
+                append!(cases, Any[
+                    ("grid!", f -> grid!(f; color = "#ff0000", ckw...), Set([X, Y]),
+                        f -> _ax_field(f, X, :gridcolor) !== nothing && _ax_field(f, X, :gridcolor) == _ax_field(f, Y, :gridcolor)),
+                    ("spines!", f -> spines!(f; style = :open, ckw...), Set([X, Y]),
+                        f -> _ax_field(f, X, :mirror) === false && _ax_field(f, Y, :mirror) === false),
+                    ("axis_equal!", f -> axis_equal!(f; ckw...), Set([X, Y]),
+                        f -> _ax_field(f, Y, :scaleanchor) == _AX._cmn_axis_ref(X)),
+                    ("axis_off!", f -> axis_off!(f; ckw...), Set([X, Y]),
+                        f -> _ax_field(f, X, :visible) === false && _ax_field(f, Y, :visible) === false),
+                    # A secondary x axis is a new axis overlaying X; it freezes
+                    # X's automatic range (its ticks are computed for it) and,
+                    # in a top cell, lifts the figure title above it.
+                    ("secondary_xaxis!", f -> secondary_xaxis!(f, v -> 2v, v -> v / 2; ckw...), nothing,
+                        f -> _ax_field(f, X, :autorange) === false),
+                ])
+            end
+            if tkw !== nothing
+                push!(cases, ("title!", f -> title!(f, L"Run $\alpha$"; tkw...), Set([tkey]), f -> true))
+                push!(cases, ("panel_labels!", f -> panel_labels!(f; pkw...), Set([:annotations]), f -> true))
+            end
+            for (helper, call, expected, check) in cases
+                fig = make()
+                if expected === nothing
+                    new_key = Symbol("xaxis", _AX._axes_highest_axis_index(_AX._cmn_plot(fig), 'x') + 1)
+                    expected = Set([X, new_key])
+                    top && push!(expected, :title)
+                end
+                before = snapshot(fig)
+                call(fig)
+                written = changed(before, snapshot(fig))
+                @test (name, helper, written) == (name, helper, expected)
+                @test (name, helper, check(fig)) == (name, helper, true)
+            end
+        end
+        # The targets resolve to the axes they name.
+        @test resolved[:plot] == (:xaxis, :yaxis)
+        @test resolved[:syncplot] == (:xaxis, :yaxis)
+        @test resolved[:cell11] == (:xaxis, :yaxis)
+        @test resolved[:cell22] == (:xaxis4, :yaxis4)
+        @test resolved[:inset21] == (:xaxis5, :yaxis5)
+        @test resolved[:secondary_y] == (:xaxis, :yaxis2)
+        # axis_off! on a cell hides the axes overlaying it (the twin y) too.
+        p = twin_plot()
+        before = snapshot(p)
+        axis_off!(p)
+        @test changed(before, snapshot(p)) == Set([:xaxis, :yaxis, :yaxis2])
+    end
+
+    @testset "D9 tick presets through xticks!/yticks! on every target" begin
+        xs = exp10.(range(-3, 5; length = 30))   # 8 decades -> dtick 1
+        ys = exp10.(range(-6, 7; length = 30))   # 13 decades -> dtick 2
+        loglog() = plot_scatter(xs, ys; xscale = "log", yscale = "log")
+        function check_decades(fig, X, Y)
+            @test _ax_field(fig, X, :tickmode) == "linear"
+            @test _ax_field(fig, X, :tick0) == 0
+            @test _ax_field(fig, X, :dtick) == 1
+            @test _ax_get(_ax_field(fig, X, :minor), :dtick) == "D1"
+            @test _ax_field(fig, Y, :dtick) == 2
+            @test _ax_get(_ax_field(fig, Y, :minor), :dtick) == 1
+            @test _ax_field(fig, Y, :exponentformat) == "power"
+        end
+        function check_auto(fig, X)
+            for name in (:tickmode, :tick0, :dtick, :tickvals, :ticktext)
+                @test _ax_field(fig, X, name) === nothing
+            end
+            @test _ax_get(_ax_field(fig, X, :minor), :ticks) == ""
+        end
+        # Plot
+        p = loglog()
+        @test xticks!(p, :decades) === nothing
+        yticks!(p, :decades)
+        check_decades(p, :xaxis, :yaxis)
+        xticks!(p, :auto)
+        check_auto(p, :xaxis)
+        @test _ax_field(p, :yaxis, :dtick) == 2   # the other axis keeps its preset
+        # SyncPlot: one renderer update per call, none for a rejected call.
+        sp, state = _ax_syncplot(loglog())
+        n = length(state.scripts)
+        xticks!(sp, :decades)
+        yticks!(sp, :decades)
+        check_decades(sp, :xaxis, :yaxis)
+        @test length(state.scripts) == n + 2
+        lin_sp, lin_state = _ax_syncplot(plot_scatter([1.0, 2.0], [1.0, 2.0]))
+        before = _ax_json(lin_sp.plot.layout)
+        m = length(lin_state.scripts)
+        @test _ax_throws(() -> xticks!(lin_sp, :decades), "xticks!: the `:decades` tick preset labels powers of ten and needs a logarithmic axis; :xaxis has type")
+        @test _ax_json(lin_sp.plot.layout) == before
+        @test length(lin_state.scripts) == m
+        xticks!(lin_sp, :auto)
+        @test _ax_field(lin_sp, :xaxis, :tickmode) === nothing
+        # SubplotFigure cell (2,2) and an inset of cell (2,1).
+        sf = _ax_grid(2, 2)
+        plot_scatter!(sf, xs, ys; row = 2, col = 2, xscale = "log", yscale = "log")
+        @test xticks!(sf, :decades; row = 2, col = 2) === sf
+        yticks!(sf, :decades; row = 2, col = 2)
+        check_decades(sf, :xaxis4, :yaxis4)
+        @test _ax_field(sf, :xaxis, :tickmode) === nothing
+        k = inset!(sf, (0.5, 0.5, 0.4, 0.4); row = 2, col = 1)
+        plot_scatter!(sf, xs, ys; inset = k, xscale = "log", yscale = "log")
+        rec = sf.insets[k]
+        xticks!(sf, :decades; inset = k)
+        yticks!(sf, :decades; inset = k)
+        check_decades(sf, rec.xkey, rec.ykey)
+        @test _ax_field(sf, :xaxis3, :tickmode) === nothing   # the host cell
+        yticks!(sf, :auto; inset = k)
+        check_auto(sf, rec.ykey)
+        before = _ax_json(sf.plot.layout)
+        @test _ax_throws(() -> xticks!(sf, :decades; row = 1, col = 1), "has type \"-\"")
+        @test _ax_throws(() -> xticks!(sf, :decades, ["a"]; row = 2, col = 2), "chooses the ticks and their labels")
+        @test _ax_throws(() -> yticks!(sf, :decade; row = 2, col = 2), "yticks!: unknown tick preset :decade")
+        @test _ax_json(sf.plot.layout) == before
+        # A log twin y axis (secondary_y).
+        t = plot_scatter(xs, collect(1.0:30))
+        plot_scatter!(t, xs, ys; secondary_y = true)
+        relayout!(t; yaxis2_type = "log")
+        yticks!(t, :decades; secondary_y = true)
+        @test _ax_field(t, :yaxis2, :dtick) == 2
+        @test _ax_field(t, :yaxis, :tickmode) === nothing
+        @test _ax_throws(() -> yticks!(t, :decades), ":yaxis has type")
+        # The constructor keyword path shared by the families.
+        c = plot_scatter([1.0, 10.0], [1.0, 2.0])
+        _AX._apply_cartesian_plot_options!(c; xscale = "log", xticks = :decades, who = "t")
+        @test _ax_field(c, :xaxis, :dtick) == 1
+        @test _ax_throws(() -> _AX._apply_cartesian_plot_options!(c; yticks = :decades, who = "t"), "t: the `:decades` tick preset")
+        @test _ax_throws(() -> _AX._apply_cartesian_plot_options!(c; xticks = :decades, xticklabels = ["a"], who = "t"), "`xticklabels` need explicit `xticks` values")
+    end
+
+    @testset "inset!: background, halo, sharing, removal and re-creation" begin
+        z = [sin(i / 3) * cos(j / 4) for i in 1:8, j in 1:6]
+        sf = subplots(1, 2; sync = false)
+        xs = exp10.(range(0, 4; length = 20))
+        plot_scatter!(sf, xs, 1 ./ xs; row = 1, col = 1, xscale = "log", yscale = "log")
+        plot_heatmap!(sf, collect(1.0:8), collect(1.0:6), z; row = 1, col = 2)
+        # Over a heatmap: an opaque background shape and haloed labels.
+        k = inset!(sf, (0.5, 0.5, 0.4, 0.4); row = 1, col = 2, background = "#fff8e7")
+        rec = sf.insets[k]
+        bg_name = "plotlysupply:inset_background:$(rec.xref)"
+        bg = only(filter(sh -> _ax_get(sh, :name) == bg_name, sf.plot.layout.fields[:shapes]))
+        @test _ax_get(bg, :xref) == "$(rec.xref) domain" && _ax_get(bg, :yref) == "$(rec.yref) domain"
+        @test (_ax_get(bg, :x0), _ax_get(bg, :x1), _ax_get(bg, :y0), _ax_get(bg, :y1)) == (0, 1, 0, 1)
+        @test _ax_get(bg, :layer) == "below" && _ax_get(bg, :fillcolor) == "#fff8e7"
+        for key in (rec.xkey, rec.ykey)
+            @test _ax_get(_ax_field(sf, key, :tickfont), :shadow) == "auto"
+            @test _ax_get(_ax_get(_ax_field(sf, key, :title), :font), :shadow) == "auto"
+            @test _ax_field(sf, key, :automargin) === false
+        end
+        # The halo survives an axis title.
+        xlabel!(sf, "f (Hz)"; inset = k)
+        @test _ax_get(_ax_get(_ax_field(sf, rec.xkey, :title), :font), :shadow) == "auto"
+        @test _ax_get(_ax_field(sf, rec.xkey, :title), :text) == "f (Hz)"
+        # Its own log axes, ranges in data units.
+        plot_scatter!(sf, [1.0, 10.0, 100.0], [2.0, 1.0, 3.0]; inset = k, xscale = "log")
+        @test _ax_field(sf, rec.xkey, :type) == "log"
+        xrange!(sf, (1, 1000); inset = k)
+        @test _ax_field(sf, rec.xkey, :range) == [0.0, 3.0]
+        @test _ax_throws(() -> xrange!(sf, (0, 10); inset = k), "must be positive")
+        # Shared with a log host: same type, `matches`, explicit root autorange.
+        s = inset!(sf, (0.1, 0.1, 0.45, 0.45); row = 1, col = 1, sharex = true, sharey = true, ticklabel_halo = false)
+        srec = sf.insets[s]
+        @test _ax_field(sf, srec.xkey, :matches) == "x" && _ax_field(sf, srec.ykey, :matches) == "y"
+        @test _ax_field(sf, srec.xkey, :type) == "log" && _ax_field(sf, srec.ykey, :type) == "log"
+        @test _ax_field(sf, :xaxis, :autorange) === true && _ax_field(sf, :yaxis, :autorange) === true
+        @test _ax_field(sf, srec.xkey, :tickfont) === nothing
+        @test !any(sh -> _ax_get(sh, :name) == "plotlysupply:inset_background:$(srec.xref)", sf.plot.layout.fields[:shapes])
+        # A root with an explicit range but no `autorange` key gets false.
+        sf2 = subplots(1, 1; sync = false)
+        plot_scatter!(sf2, [1.0, 2.0], [3.0, 4.0]; xrange = (0, 5))
+        _AX._cmn_delete_layout_fields!(sf2, :xaxis, (:autorange,))
+        inset!(sf2, (0.5, 0.5, 0.4, 0.4); sharex = true)
+        @test _ax_field(sf2, :xaxis, :autorange) === false
+        @test _ax_field(sf2, :xaxis, :range) == [0, 5]
+        # Validation before any write.
+        before = _ax_json(sf.plot.layout)
+        ninsets = length(sf.insets)
+        @test _ax_throws(() -> inset!(sf, (0.1, 0.1, 0.3, 0.3); background = 3), "inset!: `background` must be a colour string or symbol")
+        @test _ax_throws(() -> inset!(sf, (0.1, 0.1, 0.3, 0.3); background = ""), "inset!: `background` must be a colour or `nothing`")
+        @test _ax_json(sf.plot.layout) == before && length(sf.insets) == ninsets
+
+        # Removal: axes, the overlaying secondary x axis, traces, background.
+        secondary_xaxis!(sf, v -> 2v, v -> v / 2; inset = k)
+        n_before = length(sf.plot.data)
+        on_inset = count(tr -> get(tr.fields, :yaxis, "y") == rec.yref, sf.plot.data)
+        axis_keys = _AX._axes_cell_axis_keys(sf.plot.layout, _AX._cell_target(sf; inset = k))
+        @test length(axis_keys) == 3
+        @test remove_inset!(sf, k) === sf
+        @test length(sf.insets) == ninsets - 1
+        @test sf.insets[1].xkey == srec.xkey          # later ids move down
+        for key in axis_keys
+            @test !haskey(sf.plot.layout.fields, key)
+        end
+        @test length(sf.plot.data) == n_before - on_inset
+        @test !any(sh -> _ax_get(sh, :name) == bg_name, sf.plot.layout.fields[:shapes])
+        @test (sf.current_row, sf.current_col) == (1, 2)
+        # Re-creation works.
+        k2 = inset!(sf, (0.5, 0.5, 0.4, 0.4); row = 1, col = 2)
+        @test k2 == length(sf.insets) == 2
+        plot_scatter!(sf, [1.0, 2.0], [1.0, 2.0]; inset = k2)
+        @test haskey(sf.plot.layout.fields, sf.insets[k2].xkey)
+        # Errors leave the figure unchanged.
+        before = _ax_json(sf.plot.layout)
+        @test _ax_throws(() -> remove_inset!(sf, 9), "remove_inset!: unknown inset id 9; valid ids are 1:2.")
+        @test _ax_throws(() -> remove_inset!(sf, true), "the inset id must be an integer")
+        @test _ax_json(sf.plot.layout) == before
+        relayout!(sf; xaxis9 = attr(matches = sf.insets[k2].xref))
+        before = _ax_json(sf.plot.layout)
+        @test _ax_throws(() -> remove_inset!(sf, k2), "remove_inset!: :xaxis9 shares its range with inset 2")
+        @test _ax_json(sf.plot.layout) == before
+        @test _ax_throws(() -> remove_inset!(plot_scatter([1.0], [1.0]), 1), "only a SubplotFigure has insets")
+        @test _ax_throws(() -> remove_inset!(subplots(1, 1; sync = false), 1), "this figure has no insets")
+    end
 end

@@ -478,4 +478,82 @@ using Test, PlotlySupply
 			set_default_legend_position!(original)
 		end
 	end
+
+	@testset "panel labels and corner-aligned panel titles never overlap" begin
+		sf = grid(1, 2)
+		panel_labels!(sf; bold = true)
+		label(r, c) = only(named(sf, "plotlysupply:panel_label:$(r):$(c)"))
+		ptitle(r, c) = only(named(sf, "plotlysupply:title:$(r):$(c)"))
+		# A left-aligned title at the label's corner: the label moves beside
+		# the corner (outside the axes), the title keeps the corner.
+		title!(sf, L"Mesh, $h = 0.1$"; row = 1, col = 1, align = :left)
+		t11 = cell(sf, 1, 1)
+		@test label(1, 1)[:x] == t11.xdomain[1] && label(1, 1)[:y] == t11.ydomain[2]
+		@test label(1, 1)[:xanchor] == "right" && label(1, 1)[:xshift] == -PS._TEXT_PANEL_GAP
+		@test label(1, 1)[:yanchor] == "bottom" && label(1, 1)[:yshift] == PS._TEXT_PANEL_GAP
+		@test ptitle(1, 1)[:x] == t11.xdomain[1] && ptitle(1, 1)[:xanchor] == "left"
+		@test ptitle(1, 1)[:text] == PS._label(L"Mesh, $h = 0.1$"; align = :l)
+		# A centred title leaves the label at the corner.
+		title!(sf, "Error"; row = 1, col = 2)
+		@test label(1, 2)[:xanchor] == "left" && !haskey(label(1, 2), :xshift)
+		# Removing the title puts the label back.
+		title!(sf, ""; row = 1, col = 1)
+		@test isempty(named(sf, "plotlysupply:title:1:1"))
+		@test label(1, 1)[:xanchor] == "left" && !haskey(label(1, 1), :xshift)
+		# Title first, then labels; the right corner mirrors the left one.
+		title!(sf, "Error"; row = 1, col = 2, align = :right)
+		panel_labels!(sf; position = :topright)
+		@test label(1, 2)[:x] == cell(sf, 1, 2).xdomain[2]
+		@test label(1, 2)[:xanchor] == "left" && label(1, 2)[:xshift] == PS._TEXT_PANEL_GAP
+		@test label(1, 1)[:xanchor] == "right" && !haskey(label(1, 1), :xshift)
+		# A title at the other corner, inside labels and bottom labels stay put.
+		title!(sf, "Mesh"; row = 1, col = 1, align = :right)
+		panel_labels!(sf)
+		@test label(1, 1)[:xanchor] == "left" && !haskey(label(1, 1), :xshift)
+		title!(sf, "Mesh"; row = 1, col = 1, align = :left)
+		panel_labels!(sf; outside = false)
+		@test label(1, 1)[:xanchor] == "left" && label(1, 1)[:xshift] == PS._TEXT_PANEL_GAP
+		@test label(1, 1)[:yanchor] == "top"
+		panel_labels!(sf; position = :bottomleft)
+		@test label(1, 1)[:xanchor] == "left" && label(1, 1)[:yanchor] == "top"
+		@test !haskey(label(1, 1), :xshift)
+		# Only the panel label of the retitled cell is rewritten.
+		panel_labels!(sf)
+		before_12 = PB.JSON.json(label(1, 2))
+		title!(sf, "Mesh 2"; row = 1, col = 1, align = :left)
+		@test PB.JSON.json(label(1, 2)) == before_12
+		@test label(1, 1)[:xanchor] == "right"
+	end
+
+	@testset "#19: LaTeXString and SubString labels in every text/axis helper" begin
+		sub = SubString("xx time (s) yy", 4, 11)            # "time (s)"
+		math = L"$\alpha_1$ (rad)"
+		@test sub isa SubString && math isa AbstractString && !(math isa String)
+		sf = grid(2, 2)
+		title!(sf, math)
+		@test PS._cmn_mapping_get(pl(sf).layout.fields[:title], :text) == PS._label(String(math))
+		title!(sf, sub; row = 1, col = 1, align = :left)
+		@test only(named(sf, "plotlysupply:title:1:1"))[:text] == PS._label(String(sub); align = :l)
+		panel_labels!(sf; labels = [sub, math, SubString("abc", 2, 2), "d"], format = SubString("[({})]", 2, 5))
+		@test only(named(sf, "plotlysupply:panel_label:1:2"))[:text] == PS._label("(" * String(math) * ")"; align = :l)
+		@test only(named(sf, "plotlysupply:panel_label:2:1"))[:text] == PS._label("(b)"; align = :l)
+		xlabel!(sf, math; row = 2, col = 2)
+		ylabel!(sf, sub; row = 2, col = 2)
+		@test PS._cmn_mapping_get(pl(sf).layout.fields[:xaxis4][:title], :text) == PS._label(String(math))
+		@test PS._cmn_mapping_get(pl(sf).layout.fields[:yaxis4][:title], :text) == "time (s)"
+		xticks!(sf, [1, 2], [math, sub]; row = 2, col = 2)
+		@test pl(sf).layout.fields[:xaxis4][:ticktext] == [PS._label(String(math)), "time (s)"]
+		secondary_xaxis!(sf, v -> 2v, v -> v / 2; row = 2, col = 2, title = math, ticks = [2, 4], ticklabels = [sub, math])
+		sec = pl(sf).layout.fields[:xaxis5]
+		@test PS._cmn_mapping_get(sec[:title], :text) == PS._label(String(math))
+		@test sec[:ticktext] == ["time (s)", PS._label(String(math))]
+		fig = plot_scatter(x, x)
+		legend_entry!(fig, math; color = SubString("xred", 2, 4))
+		legend_entry!(fig, sub)
+		names = [get(t.fields, :name, nothing) for t in pl(fig).data]
+		@test PS._label(String(math)) in names && "time (s)" in names
+		PS._apply_cartesian_plot_options!(fig; xlabel = sub, ylabel = math, title = sub, who = "t")
+		@test PS._cmn_mapping_get(pl(fig).layout.fields[:xaxis][:title], :text) == "time (s)"
+		@test PS._cmn_mapping_get(pl(fig).layout.fields[:yaxis][:title], :text) == PS._label(String(math))
+	end
 end
