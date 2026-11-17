@@ -620,7 +620,7 @@ Only that axis changes (other cells keep their ticks).
 - `values`: tick positions in DATA units, also on log axes (vector, range or
   tuple; strings on category axes). Sets `tickmode = "array"`. Or a preset:
   - `:decades` (logarithmic axes only): labels at powers of ten only
-    (10⁰, 10¹, …, matplotlib's look) with unlabelled minor ticks.
+    (1, 10, 10², …, matplotlib's look) with unlabelled minor ticks.
     Every decade is labelled up to 8 decades; a longer axis labels every
     k-th decade, k = ceil(n/8), and the minor ticks mark the decades in
     between (on ≤ 8 decades they mark 2..9). n is taken from the explicit
@@ -629,8 +629,10 @@ Only that axis changes (other cells keep their ticks).
     `tick0 = 0`, `dtick = k`, `exponentformat = "power"` (or the
     `exponentformat` keyword) and `minor` (`dtick` `"D1"` or 1; `minor =
     false` omits it). A d3 `format` set earlier still takes precedence.
-    Without it Plotly's automatic log ticks (the default) label intermediate
-    digits ("2", "5") on axes spanning less than about 4-7 decades.
+    Without the preset, Plotly's automatic log ticks label intermediate
+    digits ("2", "5") on axes spanning less than about 4-7 decades. An axis
+    spanning less than two decades gets only one or two labels this way;
+    keep the automatic ticks (or pass values) there.
   - `:auto`: back to Plotly's automatic ticks on any axis type: removes
     `tickmode`, `tickvals`, `ticktext`, `tick0`, `dtick`, the automatic
     `"~g"` format and the minor tick placement; minor ticks are switched off
