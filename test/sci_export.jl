@@ -178,14 +178,38 @@ end
 	@test _sci_media_box(fixed) == [0.0, 0.12, 252.0, 189.12]
 	@test _sci_pdf_xref_valid(fixed)
 	@test length(fixed) == length(pdf) + 3   # y0 "0" became "0.12"
+	@test PlotlySupply._pdf_set_page_box(fixed, 252, 189) == fixed   # already exact
 
-	# Already exact, too far from the request, or an unknown layout: unchanged.
-	@test PlotlySupply._pdf_set_page_box(fixed, 252, 189) == fixed
-	@test PlotlySupply._pdf_set_page_box(pdf, 300, 200) == pdf
+	# 2.0 (G17): savefig asks Chromium for ceil(size) + 1 whole points and
+	# crops the page to the exact size at its top-left corner; 8.3 x 6 cm is
+	# 235.2756 x 170.0787 pt, requested as 237 x 172 pt.
+	@test PlotlySupply._pdf_request_points(235.2755905511811) == 237.0
+	@test PlotlySupply._pdf_request_points(252.0) == 253.0
+	@test PlotlySupply._pdf_request_points(252.0 + 1e-12) == 253.0
+	large = _sci_pdf("[0 0 237 172.08]")
+	cropped = PlotlySupply._pdf_set_page_box(large, 8.3 / 2.54 * 72, 6.0 / 2.54 * 72)
+	box = _sci_media_box(cropped)
+	@test box[3] - box[1] ≈ 235.2756 atol = 1e-4
+	@test box[4] - box[2] ≈ 170.0787 atol = 1e-4
+	@test box[4] == 172.08   # top edge kept
+	@test _sci_pdf_xref_valid(cropped)
+
+	# A page box far from the request, or a layout the patcher cannot rewrite,
+	# is an error: a wrong page size is never returned silently.
+	far = try
+		PlotlySupply._pdf_set_page_box(pdf, 300, 200)
+		nothing
+	catch err
+		err
+	end
+	@test far isa ErrorException
+	@test occursin("no page box near the requested 300.0 x 200.0 pt", sprint(showerror, far))
+	@test occursin("252.0 x 189.12", sprint(showerror, far))
+	@test_throws ErrorException PlotlySupply._pdf_set_page_box(collect(codeunits("%PDF-1.4\n%%EOF")), 252, 189)
 	stream_xref = copy(pdf)
 	xref_at = findlast("xref\n0 6", String(copy(pdf)))
 	stream_xref[first(xref_at):(first(xref_at) + 3)] = codeunits("XREF")
-	@test PlotlySupply._pdf_set_page_box(stream_xref, 252, 189) == stream_xref
+	@test_throws ErrorException PlotlySupply._pdf_set_page_box(stream_xref, 252, 189)
 	@test_throws ArgumentError PlotlySupply._pdf_set_page_box(pdf, 0, 189)
 	@test_throws ArgumentError PlotlySupply._pdf_set_page_box(pdf, 252, Inf)
 

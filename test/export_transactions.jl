@@ -49,6 +49,43 @@ mutable struct _ExportTestBackend
     close::Any
 end
 
+# 2.0 (G17): savefig asks Chromium for a page of ceil(size) + 1 whole points
+# and crops it to the figure, so a fake printToPDF payload must be a PDF with
+# such a page (526 x 376 pt for the default 700 x 500 px = 525 x 375 pt
+# figure) and a classic xref table. `label` marks the payload.
+function _export_test_pdf(label::AbstractString; media::AbstractString = "[0 0 526 376]")
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox $media /Contents 4 0 R >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+    ]
+    io = IOBuffer()
+    write(io, "%PDF-1.4\n%$(label)\n")
+    offsets = Int[]
+    for (index, body) in enumerate(objects)
+        push!(offsets, position(io))
+        write(io, "$index 0 obj\n$body\nendobj\n")
+    end
+    xref = position(io)
+    write(io, "xref\n0 $(length(objects) + 1)\n0000000000 65535 f \n")
+    for offset in offsets
+        write(io, lpad(string(offset), 10, '0'), " 00000 n \n")
+    end
+    write(io, "trailer\n<< /Size $(length(objects) + 1) /Root 1 0 R >>\nstartxref\n$xref\n%%EOF\n")
+    return take!(io)
+end
+
+# The label of a finalized fake PDF, checking that its page was cropped to
+# the default 525 x 375 pt figure at the top-left of the 526 x 376 pt page.
+function _export_test_pdf_label(bytes::Vector{UInt8})
+    text = String(copy(bytes))
+    box = match(r"/MediaBox \[([^\]]*)\]", text)
+    box !== nothing && split(box.captures[1]) == ["0", "1", "525", "376"] ||
+        error("fake PDF page was not cropped: $(box === nothing ? "no box" : box.match)")
+    return String(match(r"^%PDF-1\.4\n%([^\n]*)\n", text).captures[1])
+end
+
 function _export_test_match(script::String, pattern::Regex, description::String)
     matched = match(pattern, script)
     matched === nothing && error("fake could not find $description in renderer script")
@@ -136,7 +173,7 @@ function _ExportTestBackend(;
     image_urls::Vector{String}=String[
         "data:image/png;base64,$(base64encode(UInt8[0x50, 0x4e, 0x47]))",
     ],
-    pdf_payloads::Vector{Vector{UInt8}}=Vector{UInt8}[collect(codeunits("%PDF-test"))],
+    pdf_payloads::Vector{Vector{UInt8}}=Vector{UInt8}[_export_test_pdf("test")],
 )
     ec = _ExportTestBackend(
         _ExportTestApp(true),
@@ -296,7 +333,11 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
             script = only(ec.image_scripts)
             @test occursin("width: 12.5", script)
             @test occursin("height: 10.5", script)
-            @test occursin("scale: 2.0", script)
+            # 2.0 (G17): the SVG is drawn at scale 1 and rasterized onto a
+            # canvas of round(12.5 * 2) x round(10.5 * 2) device pixels.
+            @test occursin("const scale = 2.0;", script)
+            @test occursin("const pixelsW = 25;", script)
+            @test occursin("const pixelsH = 21;", script)
         finally
             _cleanup_export_test_state(state)
         end
@@ -450,9 +491,9 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
                 "data:image/png;base64,$(base64encode(codeunits("IMAGE")))",
             ],
             pdf_payloads=[
-                collect(codeunits("%PDF-A")),
-                collect(codeunits("%PDF-B")),
-                collect(codeunits("%PDF-C")),
+                _export_test_pdf("A"),
+                _export_test_pdf("B"),
+                _export_test_pdf("C"),
             ],
         )
         try
@@ -494,7 +535,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
             put!(ec.pdf_poll_release, nothing)
             @test fetch(pdf_task) === nothing
             @test fetch(image_task) === nothing
-            @test String(take!(pdf_io)) == "%PDF-A"
+            @test _export_test_pdf_label(take!(pdf_io)) == "A"
             @test String(take!(image_io)) == "IMAGE"
 
             pdf_outputs = [IOBuffer(), IOBuffer()]
@@ -510,8 +551,8 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
                 for index in eachindex(pdf_outputs)
             ]
             foreach(fetch, jobs)
-            @test Set(String(take!(io)) for io in pdf_outputs) ==
-                  Set(("%PDF-B", "%PDF-C"))
+            @test Set(_export_test_pdf_label(take!(io)) for io in pdf_outputs) ==
+                  Set(("B", "C"))
             @test length(unique(ec.pdf_job_ids)) == 3
             @test isempty(ec.pdf_jobs)
             @test all(path -> !ispath(path), ec.pdf_tempdirs)
@@ -555,7 +596,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
     @testset "captured output writes occur after releasing renderer lock" begin
         state = PlotlySupply._ExportState()
         image_bytes = collect(codeunits("image-payload"))
-        pdf_bytes = collect(codeunits("%PDF-payload"))
+        pdf_bytes = _export_test_pdf("payload")
         ec = _ExportTestBackend(
             image_urls=[
                 "data:image/png;base64,$(base64encode(image_bytes))",
@@ -586,7 +627,7 @@ Base.unsafe_write(::_ExportFailingIO, ::Ptr{UInt8}, ::UInt) =
                 ec=ec,
             )
             @test pdf_io.lock_was_free
-            @test take!(pdf_io.buffer) == pdf_bytes
+            @test _export_test_pdf_label(take!(pdf_io.buffer)) == "payload"
         finally
             _cleanup_export_test_state(state)
         end
