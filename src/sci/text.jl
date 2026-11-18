@@ -1448,9 +1448,28 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 		)
 		rect in obstacles || push!(obstacles, rect)
 	end
+	# With every position covering data the legend goes below its cell, when
+	# its entries side by side fit the cell's width (a wider one would run
+	# over its neighbours: it keeps the position covering the least).
+	outside = _legend_row_width(p, legend_id, before) <= w ? :outside_bottom : nothing
 	return _scat_best_legend_position(
-		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size; obstacles = obstacles,
+		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size;
+		obstacles = obstacles, outside = outside,
 	)
+end
+
+# Width (px) of legend `legend_id` laid out as one row (the `:outside_bottom`
+# orientation): its entries side by side with their gaps and the frame;
+# `Inf` when it lists nothing. `before > 0` counts the entries before trace
+# index `before` only.
+function _legend_row_width(p::Plot, legend_id::AbstractString, before::Integer = 0)
+	box = _symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing))
+	indices = _legend_entry_indices(p, legend_id)
+	before > 0 && filter!(index -> index < before, indices)
+	isempty(indices) && return Inf
+	widths = _legend_entry_widths(p, box, indices)
+	frame = something(_legend_real(get(box, :borderwidth, nothing)), 0.0)
+	return sum(widths) + _LEGEND_ITEM_GAP * length(widths) + 2 * frame
 end
 
 # Box (fractions of the cell) of each candidate position for a legend of

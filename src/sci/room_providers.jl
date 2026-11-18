@@ -206,6 +206,17 @@ function _lt_anchored_at(plan, y::Float64, edge::Float64, offset::Float64, outwa
 	return abs((y - edge) * outward * Hp - offset) <= _LT_ANCHOR_TOL + _LT_ANCHOR_SHARE * offset
 end
 
+# Whether `layout` (of `p`) holds anything `_lt_decorations` places: a legend
+# box (`legend`, `legend2`, ...), annotations, or a figure title with text.
+function _lt_has_decorations(layout, p)
+	items = get(layout.fields, :annotations, nothing)
+	(items isa AbstractVector && !isempty(items)) && return true
+	for key in keys(layout.fields)
+		key isa Symbol && startswith(String(key), "legend") && return true
+	end
+	return _text_title_dict(p) !== nothing
+end
+
 # Legend box `id` of `p` as a Dict, or `nothing` when it draws nothing.
 function _lt_legend_box(plan, id::String)
 	d = _symbol_dict(get(plan.layout.fields, Symbol(id), nothing))
@@ -282,7 +293,7 @@ end
 
 # Depth (px) of a legend box perpendicular to `side`.
 function _lt_legend_depth(plan, id::String, side::Symbol)
-	size = _legend_box_size(plan.p, id)
+	size = _lt_box_size(plan, id)
 	size === nothing && return 0.0
 	return side in (:top, :bottom) ? Float64(size[2]) : Float64(size[1])
 end
@@ -310,6 +321,9 @@ function _lt_decorations(plan)
 	out = _LtDecor[]
 	p = plan.p
 	layout = plan.layout
+	# Nothing to place: no legend box, no annotation (panel titles and
+	# labels, captions) and no figure title.
+	_lt_has_decorations(layout, p) || return out
 	cells = _lt_cell_areas(plan)
 	single = layout.subplots.rows * layout.subplots.cols == 1
 	boxes_of = Dict{Symbol, Vector{Tuple{_RoomBox, Float64}}}()
@@ -480,6 +494,32 @@ function _lt_find_annotation(items, name::AbstractString)
 	return nothing
 end
 
+# Per-plan memo of what the providers ask about the figure again in the
+# measure and the place phase (`_room_build` makes one plan per pass; the
+# traces and legend boxes of the figure do not change while a plan is solved,
+# the providers only collect updates): the cell legend assignment and the
+# size of each legend box. Weak keys: an entry goes with its plan.
+const _LT_PLAN_MEMO = WeakKeyDict{Any, Dict{Any, Any}}()
+_lt_plan_memo(plan) = get!(() -> Dict{Any, Any}(), _LT_PLAN_MEMO, plan)
+
+# The cell legend assignment of the figure of `plan` (`(order, ids)`, or
+# `nothing` when it needs more legends than there are legend ids).
+function _lt_legend_assignment(plan)
+	return get!(_lt_plan_memo(plan), :assignment) do
+		try
+			order, ids, _, _ = _legend_subplot_assignment(plan.p)
+			(order, ids)
+		catch err
+			err isa ArgumentError || rethrow()
+			nothing
+		end
+	end
+end
+
+# `_legend_box_size` of legend `id` of the plan's figure, once per plan.
+_lt_box_size(plan, id::AbstractString) =
+	get!(() -> _legend_box_size(plan.p, id), _lt_plan_memo(plan), (:box_size, String(id)))
+
 # Cell legends (per-subplot legends; a single figure's legend counts as the
 # legend of its plot area) and the figure legends of a grid.
 function _lt_legend_decorations!(out, plan, cells, single::Bool, boxes)
@@ -487,12 +527,9 @@ function _lt_legend_decorations!(out, plan, cells, single::Bool, boxes)
 	cell_mode = any(t -> t isa GenericTrace && haskey(t.fields, :legend) && !_trace_is_figure_legend_entry(t), p.data)
 	cell_ids = Tuple{String, Symbol}[]
 	if cell_mode
-		order, ids, _, _ = try
-			_legend_subplot_assignment(p)
-		catch err
-			err isa ArgumentError || rethrow()
-			return out      # more cell legends than legend ids: nothing is placed
-		end
+		assignment = _lt_legend_assignment(plan)
+		assignment === nothing && return out    # more cell legends than legend ids: nothing is placed
+		order, ids = assignment
 		for key in order
 			area = _lt_legend_area(key)
 			(area !== nothing && haskey(plan.areas, area)) || continue
@@ -744,7 +781,7 @@ end
 # from its estimated width and `x`/`xanchor` (`"auto"`: plotly.js anchors
 # left up to x = 1/3, right from 2/3, centred between).
 function _lt_legend_tick_clearance(plan, a, id::String, d::AbstractDict)
-	size = _legend_box_size(plan.p, id)
+	size = _lt_box_size(plan, id)
 	x = _lt_real(get(d, :x, nothing))
 	(size === nothing || x === nothing) && return 0.0
 	w = Float64(size[1])

@@ -895,4 +895,115 @@ using Test, PlotlySupply
 		top, bottom = plan.areas[:xaxis].room[:bottom], plan.areas[:xaxis2].room[:top]
 		@test top > 0 && bottom > 0
 	end
+	@testset "v6 K3: the best-position scoring reads the data in place (no copies)" begin
+		n = 1_000_000
+		xs = collect(range(0, 100; length = n))
+		f = plot_scatter(xs, sin.(xs); legend = "data")
+		p = pl(f)
+		PS._scat_best_legend_position(p)
+		@test (@allocated PS._scat_best_legend_position(p)) < 4 * 2^20
+		# a list of coordinate vectors has the window of the chained vector: finite values only
+		layout = PB.Layout()
+		a, b = [1.0, NaN, 3.0], [-2.0, Inf, 0.5]
+		@test PS._scat_legend_window(layout, :xaxis, Vector{Float64}[a, b]; padded = false) ==
+			PS._scat_legend_window(layout, :xaxis, vcat(a, b); padded = false) == (-2.0, 3.0)
+		@test PS._scat_legend_window(layout, :xaxis, Vector{Float64}[Float64[], Float64[]]; padded = false) === nothing
+	end
+
+	@testset "v6 S2/Q17/Q28/Z72: the default legend is never over data while a place is free, else outside" begin
+		# S2: three rising lines leave the top-left and bottom-right corners free
+		f = plot_scatter(1:5, [[1, 2, 3, 4, 5], [2, 3, 4, 5, 6], [0, 1, 2, 3, 4]]; legend = ["a", "b", "c"])
+		@test PS._scat_best_legend_position(pl(f)) in (:topleft, :bottomright)
+		@test lg(f)[:x] < 0.5 || lg(f)[:yanchor] == "bottom"
+		# data on every corner and edge: the legend goes beside the axes ...
+		xs = collect(range(0, 1; length = 40))
+		function full_figure(; kwargs...)
+			fig = plot_scatter(xs, [0 .* xs, 0.25 .+ 0 .* xs, 0.5 .+ 0 .* xs, 0.75 .+ 0 .* xs, 1 .+ 0 .* xs];
+				legend = ["a", "b", "c", "d", "e"], kwargs...)
+			for k in 1:4
+				plot_scatter!(fig, fill(k / 5, 40), xs; mode = "lines", legend = "v$k")
+			end
+			return fig
+		end
+		f = full_figure()
+		@test PS._scat_best_legend_position(pl(f)) === :outside_right
+		@test lg(f)[:x] > 1 && lg(f)[:xanchor] == "left" && !haskey(lg(f), :orientation)
+		# ... and below them at a journal column width
+		f = full_figure(width = 300, height = 250)
+		@test PS._scat_best_legend_position(pl(f)) === :outside_bottom
+		@test lg(f)[:yref] == "container" && lg(f)[:orientation] == "h"
+		# the room is reserved: the right margin holds the legend after the finalizer ran
+		f = full_figure()
+		PS._finalize_figure!(f)
+		@test sd(pl(f).layout.fields[:margin])[:r] > 50       # beyond the plotly.js margin of the 1.x figures
+		@test PS._finalize_figure!(f) === false
+		# an appended trace keeps a legend the rule placed following the data; a legend
+		# the user placed stays
+		f = full_figure()
+		plot_scatter!(f, xs, xs; legend = "g")
+		@test lg(f)[:x] > 1
+		f = full_figure()
+		set_legend!(f; position = :topright)
+		plot_scatter!(f, xs, xs .^ 2; legend = "g")
+		@test lg(f)[:x] < 1 && lg(f)[:xanchor] == "right" && lg(f)[:yanchor] == "top"
+		# the centre is never chosen
+		f = plot_scatter(xs, [xs, 1 .- xs, 0.5 .+ 0 .* xs, 0.2 .+ 0 .* xs, 0.8 .+ 0 .* xs, 0.35 .+ 0 .* xs, 0.65 .+ 0 .* xs];
+			legend = ["a", "b", "c", "d", "e", "f", "g"])
+		@test PS._scat_best_legend_position(pl(f)) !== :center
+		# Q17: quiver glyphs fill the corners of the field, the legend is not left at the top right
+		g = range(-2, 2; length = 9)
+		X = [a for a in g, b in g]; Y = [b for a in g, b in g]
+		q = plot_quiver(X, Y, -Y, X; sizeref = 1.0, legend = "F", colorby = :magnitude, style = :triangle)
+		@test lg(q)[:x] > 1
+		@test PS._finalize_figure!(q) === false      # settled after the call: the legend room converged
+	end
+
+	@testset "v6 Z72: a cell legend with no free position goes below its cell when its row fits" begin
+		xs = collect(range(0, 1; length = 30))
+		# a grid of markers over the whole cell, one trace per name
+		gx, gy = repeat(xs, 30), repeat(xs, inner = 30)
+		function frame_cell!(sf, col; names = ("a", "b"))
+			for name in names
+				plot_scatter!(sf, gx, gy; mode = "markers", legend = name, row = 1, col = col)
+			end
+		end
+		sf = subplots(1, 2; sync = false)
+		frame_cell!(sf, 1)
+		plot_scatter!(sf, xs, xs; row = 1, col = 2, legend = "free")
+		one, two = lg(sf, :legend), lg(sf, :legend2)
+		@test one[:yanchor] == "top" && one[:orientation] == "h" && one[:y] < 0.5   # under the cell
+		@test two[:yanchor] == "top" && !haskey(two, :orientation) && two[:y] > 0.5  # a free corner
+		# its room is reserved: the cell gave up height, the legend is below its plot area
+		PS._finalize_figure!(sf)
+		@test PS._finalize_figure!(sf) === false
+		bottom = PS._layout_axis_domain(pl(sf).layout, :yaxis)[1]
+		@test lg(sf, :legend)[:y] < bottom
+		# a legend wider than its cell keeps an inside position (the least covered one)
+		narrow = subplots(1, 4; sync = false)
+		for c in 1:4
+			frame_cell!(narrow, c; names = ("a rather long label", "another long one", "a third long label", "and a fourth long label"))
+		end
+		@test all(c -> !haskey(lg(narrow, Symbol(c == 1 ? "legend" : "legend$c")), :orientation), 1:4)
+	end
+
+	@testset "v6: nothing to place returns at once; legend assignment and box sizes are computed once per plan" begin
+		bare = plot_scatter(1:5, 1:5)
+		@test isempty(PS._lt_decorations(PS._room_plan(bare; size = (300, 200))))
+		sf = subplots(3, 3; sync = false)
+		for r in 1:3, c in 1:3
+			plot_scatter!(sf, 1:4, (1:4) .* r; row = r, col = c, legend = "s$r$c")
+		end
+		plan = PS._room_plan(sf; size = (600, 400))
+		decorations = PS._lt_decorations(plan)
+		@test count(d -> d.role in (:cell_legend, :inside_legend), decorations) == 9
+		first_call = PS._lt_legend_assignment(plan)
+		@test first_call !== nothing && length(first_call[1]) == 9
+		@test PS._lt_legend_assignment(plan) === first_call        # the memo, not a recomputation
+		@test PS._lt_box_size(plan, "legend") === PS._lt_box_size(plan, "legend")
+		# the cell scan gives the assignment the per-trace lookup gave
+		order, ids, domains, keys_ = PS._legend_subplot_assignment(pl(sf))
+		@test order == ["xy:x|y", "xy:x2|y2", "xy:x3|y3", "xy:x4|y4", "xy:x5|y5", "xy:x6|y6", "xy:x7|y7", "xy:x8|y8", "xy:x9|y9"]
+		@test [ids[k] for k in order] == collect(1:9)
+		@test length(PS._legend_inset_cells(pl(sf))) == 9
+	end
 end
