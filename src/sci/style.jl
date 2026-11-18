@@ -3345,7 +3345,9 @@ them and are a package choice otherwise (APS and AIP do not name a font).
 plotly draws `<sup>`/`<sub>` text (e.g. log-axis exponents with
 `exponentformat = "power"`) at 70 % of the font size, which under `:nature`
 is 4.9 pt, below Nature's 5 pt minimum. Optica is not included: its figure
-widths could not be confirmed from Optica's own guidelines.
+widths could not be confirmed from Optica's own guidelines (rechecked 2026-11:
+the Journal Style Guide names no column width or figure-text size, only that a
+figure stays inside the text margins).
 
 # Example
 ```julia
