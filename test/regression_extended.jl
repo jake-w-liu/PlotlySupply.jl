@@ -471,7 +471,8 @@ end
 		annotate!(fig, 0.5, 0.0, "Caption line one<br>line two"; coords = :figure, showarrow = false)
 		caption = last(_rx_layout(fig)[:annotations])
 		m = margins(fig)
-		@test m.b > 70 && (m.l, m.r, m.t) == (60, 40, 50)
+		@test m.b > 70
+		@test (m.l, m.r, m.t) == (60, 40, 50)
 		@test m.b >= 2 * 1.4 * 12 + 4 + 1.4 * 12   # two text lines, the gap, the x tick labels
 		@test caption[:yshift] ≈ -m.b
 		for (W, H) in ((600, 400), (1000, 700))
