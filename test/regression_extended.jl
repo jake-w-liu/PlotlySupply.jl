@@ -1155,4 +1155,42 @@ _rx_font(a) = PlotlySupply._symbol_dict(a[:font])
 		@test _rx_throws(() -> PlotlySupply._figure_annotations_place!(caption, items; size = (600,)),
 			"_figure_annotations_place!: `size`")
 	end
+
+	@testset "a bottom figure legend moves above a caption and the margin holds both (Z47)" begin
+		for order in (:caption_first, :legend_first)
+			fig = plot_scatter(1:3, 1:3; width = 600, height = 400, legend = "a")
+			plot_scatter!(fig, 1:3, 3:-1:1; legend = "b")
+			if order === :caption_first
+				annotate!(fig, 0.5, 0.0, "Source: simulation"; coords = :figure, showarrow = false, anchor = :bottom)
+				set_legend!(fig; position = :outside_bottom, ncols = 2)
+			else
+				set_legend!(fig; position = :outside_bottom, ncols = 2)
+				annotate!(fig, 0.5, 0.0, "Source: simulation"; coords = :figure, showarrow = false, anchor = :bottom)
+			end
+			layout = _rx_layout(fig)
+			legend = PlotlySupply._symbol_dict(layout[:legend])
+			caption = PlotlySupply._symbol_dict(only(layout[:annotations]))
+			height = PlotlySupply._legend_box_size(fig, "legend")[2]
+			band = legend[:y] * 400
+			@test legend[:yref] == "container" && legend[:yanchor] == "bottom"
+			@test band > 0                                           # no longer at the figure bottom
+			@test band >= PlotlySupply._figure_annotation_text_height("Source: simulation", 12.0) - 1
+			margin_b = _rx_get(layout, :margin, :b)
+			@test margin_b >= band + height                          # the legend sits inside the margin
+			@test caption[:yshift] ≈ -margin_b                       # the caption stays at the figure bottom
+			# idempotent: another finalize writes nothing
+			before = PlotlySupply.PlotlyBase.JSON.json(fig)
+			PlotlySupply._finalize_figure!(fig)
+			@test PlotlySupply.PlotlyBase.JSON.json(fig) == before
+		end
+		# without a caption the legend stays at the container bottom
+		plain = plot_scatter(1:3, 1:3; width = 600, height = 400, legend = "a")
+		set_legend!(plain; position = :outside_bottom)
+		@test PlotlySupply._symbol_dict(_rx_layout(plain)[:legend])[:y] == 0.0
+		# a caption above the bottom margin (over the plot area) leaves the legend alone
+		over = plot_scatter(1:3, 1:3; width = 600, height = 400, legend = "a")
+		set_legend!(over; position = :outside_bottom)
+		annotate!(over, 0.5, 0.9, "over the plot"; coords = :figure, showarrow = false)
+		@test PlotlySupply._symbol_dict(_rx_layout(over)[:legend])[:y] == 0.0
+	end
 end

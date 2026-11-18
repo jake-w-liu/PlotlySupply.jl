@@ -1942,8 +1942,12 @@ function _fin_place_figure_annotations!(ctx::_FinContext, accs, W::Float64, H::F
 	existing isa AbstractVector || return false
 	any(item -> _figure_annotation_spec(item) !== nothing, existing) || return false
 	annotations = collect(Any, existing)
-	new_b = _figure_annotations_place!(ctx.p, annotations; size = (W, H), accs = accs)
+	legends = Dict{Symbol, Float64}()
+	new_b = _figure_annotations_place!(ctx.p, annotations; size = (W, H), accs = accs, legends = legends)
 	updates = Dict{Symbol, Any}()
+	for (key, y) in legends
+		isequal(_cmn_mapping_get(get(layout.fields, key, nothing), :y), y) || (updates[Symbol(key, "_y")] = y)
+	end
 	all(i -> isequal(_symbol_dict(existing[i]), _symbol_dict(annotations[i])), eachindex(annotations)) ||
 		(updates[:annotations] = annotations)
 	new_b === nothing || (updates[:margin_b] = new_b)

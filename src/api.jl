@@ -21547,6 +21547,10 @@ legends, colorbars) and the export size:
 - `annotations` is the figure's annotation list; matching items are replaced
   in it (the items themselves and `p` are never mutated), all others are
   left as they are;
+- `legends`: an optional dictionary that receives `legend key => y` (a
+  container fraction) for every legend anchored at the bottom of the figure
+  container (`:outside_bottom`): with a caption below the axes it must sit
+  above the caption band, and the returned margin holds both;
 - `size = (W, H)`: the figure size in px to place for (the export size on the
   `savefig` copy); default: the layout size, else the style's default size;
 - `accs`: the axis extents of `p` (`_fin_collect_axes(p)`), when the caller
@@ -21554,7 +21558,8 @@ legends, colorbars) and the export size:
 It is pure in `p` and idempotent: calling it again after the returned margin
 and the replaced annotations are written changes nothing.
 """
-function _figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = nothing, accs = nothing)
+function _figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = nothing, accs = nothing,
+	legends::Union{Nothing, AbstractDict} = nothing)
 	specs = [(index, spec) for (index, item) in pairs(annotations)
 		for spec in (_figure_annotation_spec(item),) if spec !== nothing]
 	isempty(specs) && return nothing
@@ -21578,6 +21583,7 @@ function _figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = no
 	axis_room = push > 0 ? push + _FIN_AUTOMARGIN_EXTRA : 0.0
 
 	needed = margins.b
+	caption_band = 0.0
 	for (index, spec) in specs
 		spec.fy === nothing && continue
 		item = annotations[index]
@@ -21592,6 +21598,25 @@ function _figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = no
 		# axes; text over the plot area is left where it is.
 		bottom < margins.b || continue
 		needed = max(needed, min(top + _FIGURE_ANNOTATION_GAP + axis_room, H / 2))
+		caption_band = max(caption_band, top + _FIGURE_ANNOTATION_GAP)
+	end
+	# A legend anchored at the bottom of the container (`:outside_bottom` on a
+	# figure) is drawn where the caption is: it moves up to sit above the
+	# caption band, and the margin holds both. Its new `y` is written to
+	# `legends` (layout key => container fraction) for the caller.
+	if caption_band > 0
+		for (key, value) in layout.fields
+			name = String(key)
+			(name == "legend" || occursin(r"^legend\d+$", name)) || continue
+			box = _symbol_dict(value)
+			(_fin_string(get(box, :yref, nothing)) == "container" && _fin_string(get(box, :yanchor, nothing)) == "bottom") || continue
+			y = get(box, :y, nothing)
+			(y isa Real && !(y isa Bool) && 0 <= y <= 0.35) || continue
+			extent = _legend_box_size(p, name)
+			extent === nothing && continue
+			needed = max(needed, min(caption_band + extent[2] + _FIGURE_ANNOTATION_GAP + axis_room, H / 2))
+			legends === nothing || (legends[key] = round(caption_band / H; digits = 5))
+		end
 	end
 	new_b = needed > margins.b + 0.5 ? Float64(ceil(needed)) : nothing
 	b = new_b === nothing ? margins.b : new_b
@@ -21923,12 +21948,14 @@ function _extended_annotate!(
 	existing = get(layout.fields, :annotations, nothing)
 	annotations = existing === nothing ? Any[] : collect(Any, existing)
 	push!(annotations, attr(; entry...))
-	margin_b = _figure_annotations_place!(_plot_obj(fig), annotations)
-	if margin_b === nothing
-		relayout!(fig, annotations = annotations)
-	else
-		relayout!(fig; annotations = annotations, margin_b = margin_b)
+	legends = Dict{Symbol, Float64}()
+	margin_b = _figure_annotations_place!(_plot_obj(fig), annotations; legends = legends)
+	updates = Dict{Symbol, Any}(:annotations => annotations)
+	margin_b === nothing || (updates[:margin_b] = margin_b)
+	for (key, y) in legends
+		isequal(_cmn_mapping_get(get(layout.fields, key, nothing), :y), y) || (updates[Symbol(key, "_y")] = y)
 	end
+	relayout!(fig; updates...)
 	return nothing
 end
 
@@ -21971,11 +21998,13 @@ Position:
     in any `savefig` size as long as the margins do not change. Text without
     an arrow that reaches below the plot area is a caption: the bottom margin
     is raised so the caption sits below the x-axis tick labels and title
-    (at most half the figure height). Each `annotate!` re-places the figure
-    annotations already present for the margins at that time; margins
-    changed later (a legend moved below the plot, `tight_layout!`) are not
-    followed until the next `annotate!`. `name` and `xshift`/`yshift`
-    cannot be combined with it (use `offset`).
+    (at most half the figure height); a legend at the bottom of the figure
+    (`set_legend!(fig; position = :outside_bottom)`) is moved up above the
+    caption. The figure annotations are placed again whenever the figure is
+    finalized (after every later mutation: `figsize!`, `tight_layout!`,
+    legends, colorbars; and for the size of a `savefig`), so they follow the
+    margins. `name` and `xshift`/`yshift` cannot be combined with it (use
+    `offset`).
 - `xcoords`, `ycoords = nothing`: the coordinate system of `x` or of `y`
   alone (same values as `coords`, which they default to), as matplotlib's
   `xycoords = (…, …)`: `annotate!(fig, 3.5, 1.02, "peak"; ycoords = :axes)`
