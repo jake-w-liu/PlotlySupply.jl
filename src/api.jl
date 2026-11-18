@@ -2851,7 +2851,9 @@ in [`set_legend!`](@ref); the 1.x names `legend_inset`, `legend_bgcolor`,
 
 `ncols` gives each cell's legend that many columns (fewer, with a warning,
 where they do not fit the cell). Returns `fig`. Invalid values throw an
-`ArgumentError` before anything is changed; `show` is not accepted.
+`ArgumentError` before anything is changed; `show` is not accepted, and
+`row`/`col` are not either on a SubplotFigure (the legends of every cell are
+set; give one cell its legend with `legend =` on the plot call).
 
 # Example
 ```julia

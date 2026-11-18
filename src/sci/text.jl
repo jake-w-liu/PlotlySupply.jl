@@ -2043,6 +2043,8 @@ again replaces the labels instead of adding more.
   labels are assigned in the given order).
 
 Returns `nothing` for a `Plot`/`SyncPlot`, the `SubplotFigure` otherwise.
+`row`/`col` are not accepted (an `ArgumentError`): the call labels the whole
+figure; pick cells with `cells`.
 
 # Example
 ```julia
