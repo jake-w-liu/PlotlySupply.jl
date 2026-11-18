@@ -1992,6 +1992,8 @@ end
 # inside the range are labelled, so a short bar can show one (range 0.1-0.9,
 # n = 2: only 0.5) or none.
 function _fin_auto_tick_count(lo::Float64, hi::Float64, n::Int)
+	# An empty or unknown range has nothing to count (and nothing to fix).
+	(isfinite(lo) && isfinite(hi) && hi > lo && n >= 1) || return typemax(Int)
 	rough = (hi - lo) / n
 	base = exp10(floor(log10(rough)))
 	x = rough / base

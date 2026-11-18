@@ -1140,6 +1140,13 @@ end
 	@test _SCB._fin_bar_two_ticks(0.0, 3.3, 3) == [0.0, 2.0]
 	@test _SCB._fin_bar_two_ticks(0.0, 4.4, 3) == [0.0, 2.0, 4.0]
 	@test _SCB._fin_bar_two_ticks(1e-5, 9e-5, 2) == [2.0e-5, 8.0e-5]
+	# An empty or unknown range has nothing to count (a one-value choropleth
+	# crashed the thinning with an InexactError before this guard).
+	for (lo, hi) in ((1.0, 1.0), (NaN, 1.0), (0.0, Inf), (2.0, 1.0))
+		@test _SCB._fin_auto_tick_count(lo, hi, 2) == typemax(Int)
+	end
+	const_heatmap = plot_heatmap(collect(1.0:20.0), collect(1.0:3.0), fill(5.0, 20, 3); equalar = true)
+	@test _SCB._finalize_figure!(const_heatmap) === false
 	@test _SCB._fin_bar_two_ticks(1.0, 1.0, 2) === nothing
 	@test _SCB._fin_bar_two_ticks(NaN, 1.0, 2) === nothing
 	# hm_02: a wide equal-aspect heatmap, a 60 px bar.
