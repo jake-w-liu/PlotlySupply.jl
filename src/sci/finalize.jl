@@ -1726,6 +1726,9 @@ const _FIN_WRAP_BREAK = "<br />"
 # 0.46 em), so a wrapped line fits.
 const _FIN_WRAP_PAD = 4.0
 const _FIN_WRAP_CHAR_EM = 0.55
+# Share of the text-extent estimate the widest measured face fills (Verdana and
+# DejaVu Sans 0.96-0.98 of it, plotly.js 2.35.2).
+const _FIN_WRAP_WIDTH_SHARE = 0.98
 # Markup other than line breaks: such a title is left as written.
 const _FIN_WRAP_MARKUP = r"<(?!br\s*/?>)"i
 
@@ -1789,7 +1792,11 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 		extent = vertical ? H : W
 		room = 2 * min(centre, extent - centre) - 2 * _FIN_WRAP_PAD
 		max_chars = max(1, floor(Int, room / (_FIN_WRAP_CHAR_EM * size)))
-		wrapped = _fin_wrap_title(plain, max_chars)
+		# A title that fits is left on one line: the char count above errs on
+		# the large side (0.55 em against 0.46-0.5 drawn), so the width comes
+		# from the text-extent estimate (widest face measured, share 0.98).
+		wrapped = _text_extent(plain, size)[1] * _FIN_WRAP_WIDTH_SHARE <= room ? plain :
+			_fin_wrap_title(plain, max_chars)
 		wrapped == plain || push!(wrapped_keys, key)
 		wrapped == text && continue
 		title = _cmn_mapping_get(axis, :title)

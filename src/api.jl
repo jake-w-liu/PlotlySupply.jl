@@ -13770,6 +13770,7 @@ function _field2d_view_extent(fig, members, islog::Bool)
 	acc = _FinAxisAcc()      # glyphs by their anchors (a group with a field)
 	drawn = _FinAxisAcc()    # every trace by what it draws (glyphs alone)
 	drawn_ok = true          # every drawn extent was computed
+	glyphs = false           # a glyph trace (quiver) sits on the group
 	cache = Dict{Any, Union{Nothing, String}}()
 	for trace in p.data
 		trace isa GenericTrace || continue
@@ -13782,7 +13783,7 @@ function _field2d_view_extent(fig, members, islog::Bool)
 		else
 			extent = _fin_trace_extent(trace, letter, islog)
 			anchors = kind === nothing ? _field2d_anchor_extent(trace, letter, islog) : nothing
-			anchors === nothing || (drawn.glyphs = true)
+			anchors === nothing || (glyphs = true)
 			anchored = anchors === nothing ? extent : anchors
 		end
 		anchored === :unsupported && return nothing
@@ -13793,7 +13794,7 @@ function _field2d_view_extent(fig, members, islog::Bool)
 			_fin_acc_extend!(drawn, extent, kind !== nothing)
 		end
 	end
-	view = (isfinite(acc.flo) && isfinite(acc.fhi)) ? acc : (drawn.glyphs && drawn_ok) ? drawn : nothing
+	view = (isfinite(acc.flo) && isfinite(acc.fhi)) ? acc : (glyphs && drawn_ok) ? drawn : nothing
 	view === nothing && return nothing
 	for member in members
 		extent = _fin_layout_item_extent(layout, _fin_axis_ref(member), letter, islog)

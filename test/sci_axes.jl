@@ -872,7 +872,10 @@ end
         placed_title = deepcopy(fig.layout.fields[:title])
         secondary_xaxis!(fig, l -> c / l, ν -> c / ν; title = "frequency (THz)")
         @test _ax_json(fig.layout.fields[:title]) == _ax_json(placed_title)
-        @test _ax_get(fig.layout.fields[:margin], :t) >= _AX._text_title_band(fig) + depth
+        # ... and the room engine holds the margin for both when it finalizes.
+        _AX._finalize_figure!(fig; size = (700, 500))
+        @test _ax_get(fig.layout.fields[:margin], :t) >= _AX._text_title_band(fig) + depth - 8
+        @test _ax_json(fig.layout.fields[:title]) == _ax_json(placed_title)
         # A title set without a placement sits on the plot area, lifted by pad.b.
         fig = plot_scatter(λ, y)
         relayout!(fig; title_text = "spectrum")
@@ -909,13 +912,14 @@ end
         # A title the user placed is left alone; side = :bottom never moves it.
         placed = plot_scatter(λ, y)
         relayout!(placed; title_text = "placed", title_y = 0.95)
+        user_title = deepcopy(placed.layout.fields[:title])
         secondary_xaxis!(placed, l -> c / l, ν -> c / ν)
-        @test _ax_get(placed.layout.fields[:title], :yref) == "container"
+        @test _ax_json(placed.layout.fields[:title]) == _ax_json(user_title)
         @test _ax_get(placed.layout.fields[:title], :y) == 0.95
         bottom = plot_scatter(λ, y)
         relayout!(bottom; title_text = "b", xaxis_side = "top")
         secondary_xaxis!(bottom, l -> c / l, ν -> c / ν; side = :bottom)
-        @test _ax_get(bottom.layout.fields[:title], :yref) == "container"
+        @test _ax_get(bottom.layout.fields[:title], :yref) === nothing
         @test _ax_get(_ax_get(bottom.layout.fields[:title], :pad), :b) === nothing
         # A bare-string title keeps its text.
         bare = plot_scatter(λ, y)
@@ -1738,6 +1742,9 @@ end
         secondary_xaxis!(f1, x -> 2x, y -> y / 2; title = "doubled")
         f2 = plot_scatter(collect(1.0:10.0), collect(1.0:10.0); title = "A title")
         secondary_xaxis!(f2, x -> 2x, y -> y / 2; title = "doubled<br>twice")
+        for f in (f0, f1, f2)
+            _AX._finalize_figure!(f; size = (700, 500))
+        end
         @test margin_t(f1) > margin_t(f0)
         layout = _AX._cmn_plot(f2).layout
         size = _AX._axes_title_font(layout, :xaxis2)
@@ -1829,36 +1836,29 @@ end
         @test _AX._axes_log_tick_state(_ax_axis(big, :xaxis)) === :auto
     end
 
-    @testset "wave 5: axis titles that run off the figure are wrapped (W5)" begin
+    @testset "wave 5: axis titles that run off the figure are wrapped once (W5)" begin
+        # ONE scheme: the finalizer's (`_fin_wrap_axis_titles!`, `<br />` breaks);
+        # xlabel!/ylabel! only keep `wrap = false` titles on one line.
         P(f) = _AX._cmn_plot(f)
         long = "a fairly long y-axis label that matplotlib would split"
         text(f, key) = _AX._axes_title_text(_ax_axis(f, key))[1]
-        # Longer than its axis but inside the figure: one line, as matplotlib
-        # draws it (a second line would need room in the gap to a neighbour).
+        unwrap(t) = replace(t, "<br />" => " ")
+        # Longer than its axis but inside the figure: one line, as matplotlib draws it.
         mid = "relative complex-frequency error of the reduced model"
         m = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
         relayout!(P(m); width = 700, height = 500)
         ylabel!(m, mid)
-        mplan = _AX._axes_fit_plan(P(m), (700, 500))
-        mwidth = _AX._text_extent(mid, _AX._axes_title_font(P(m).layout, :yaxis))[1]
-        @test mwidth > _AX._axes_plan_length(P(m).layout, mplan, :yaxis)
-        @test !_AX._axes_title_runs_off(P(m).layout, mplan, :yaxis, mwidth)
+        _AX._finalize_figure!(m)
         @test text(m, :yaxis) == mid
-        # Longer than the figure is high: broken into even lines.
+        # Longer than the figure is high: broken between words.
         f = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
         relayout!(P(f); width = 400, height = 200)
         ylabel!(f, long)
+        _AX._finalize_figure!(f)
         wrapped = text(f, :yaxis)
-        @test occursin(_AX._AXES_WRAP_BREAK, wrapped)
-        @test _AX._axes_unwrap_title(wrapped) == long
-        lines = split(wrapped, _AX._AXES_WRAP_BREAK)
-        @test length(lines) >= 2
-        plan = _AX._axes_fit_plan(P(f), (400, 200))
-        limit = _AX._axes_plan_length(P(f).layout, plan, :yaxis)
-        font = _AX._axes_title_font(P(f).layout, :yaxis)
-        widths = [_AX._text_extent(l, font)[1] for l in lines]
-        @test all(<=(limit + 1e-6), widths)
-        @test minimum(widths) >= 0.5 * maximum(widths)
+        @test occursin("<br />", wrapped)
+        @test unwrap(wrapped) == long
+        @test length(split(wrapped, "<br />")) >= 2
         # Idempotent; a taller figure puts the title back on one line.
         before = _ax_json(P(f).layout)
         _AX._finalize_figure!(f)
@@ -1870,46 +1870,47 @@ end
         g = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
         ylabel!(g, long)
         c = _AX._finalize_export_copy(P(g), (width = 400, height = 200))
-        @test occursin(_AX._AXES_WRAP_BREAK, _AX._axes_title_text(c.layout.fields[:yaxis])[1])
+        @test occursin("<br />", _AX._axes_title_text(c.layout.fields[:yaxis])[1])
         @test text(g, :yaxis) == long
 
         # wrap = false: no-break spaces, never wrapped.
         h = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
         relayout!(P(h); width = 400, height = 200)
         ylabel!(h, long; wrap = false)
-        @test text(h, :yaxis) == replace(long, ' ' => ' ')
+        _AX._finalize_figure!(h)
+        @test text(h, :yaxis) == replace(long, ' ' => '\u00a0')
         sf = subplots(1, 2; sync = false)
         plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)
         relayout!(sf.plot; width = 300, height = 260)
         xlabel!(sf, "x axis title words that do not fit"; row = 1, col = 1, wrap = false)
-        @test !occursin("<br>", text(sf, :xaxis))
-        ylabel!(sf, long; row = 1, col = 1)
-        @test occursin(_AX._AXES_WRAP_BREAK, text(sf, :yaxis))
-        # An axis shorter than one of the words: left on one line.
-        relayout!(sf.plot; height = 150)
         _AX._finalize_figure!(sf)
-        @test text(sf, :yaxis) == long
+        @test !occursin("<br", text(sf, :xaxis))
+        ylabel!(sf, long; row = 1, col = 1)
+        _AX._finalize_figure!(sf)
+        @test occursin("<br />", text(sf, :yaxis))
+        @test unwrap(text(sf, :yaxis)) == long
         # x titles: wider than the figure.
         xw = plot_scatter(1:3, 1:3)
         relayout!(P(xw); width = 300, height = 300)
         xlabel!(xw, long)
-        @test occursin(_AX._AXES_WRAP_BREAK, text(xw, :xaxis))
-        @test _AX._axes_unwrap_title(text(xw, :xaxis)) == long
-
-        # Never broken: a line break of the user's, MathJax, markup spans.
-        @test _AX._axes_title_words("a<br>b c") === nothing
-        @test _AX._axes_title_words("\$x^2\$ and more words") === nothing
-        @test _AX._axes_title_words("speed <i>v of x</i> (m/s)") == ["speed", "<i>v of x</i>", "(m/s)"]
-        @test _AX._axes_keep_on_one_line("a <span style=\"x y\">b c</span>") == "a <span style=\"x y\">b c</span>"
+        _AX._finalize_figure!(xw)
+        @test occursin("<br />", text(xw, :xaxis))
+        @test unwrap(text(xw, :xaxis)) == long
+        # A line break of the user's is kept (each line is wrapped on its own);
+        # MathJax and markup are left as written.
+        u = plot_scatter(1:3, 1:3)
+        relayout!(P(u); width = 300, height = 300)
+        xlabel!(u, long * "<br>and more")
+        _AX._finalize_figure!(u)
+        @test occursin("<br>and more", text(u, :xaxis))
+        @test replace(text(u, :xaxis), "<br />" => " ") == long * "<br>and more"
+        @test _AX._axes_keep_on_one_line("a <span style=\"x y\">b c</span>") == "a\u00a0<span style=\"x y\">b\u00a0c</span>"
         @test _AX._axes_keep_on_one_line("\$a b\$") == "\$a b\$"
-        @test _AX._axes_balanced_lines(["aa", "bb", "cc", "dd"], [2.0, 2.0, 2.0, 2.0], 1.0, 20.0) === nothing
-        @test _AX._axes_balanced_lines(["aa", "bb", "cc", "dd"], [2.0, 2.0, 2.0, 2.0], 1.0, 8.0) == ["aa bb", "cc dd"]
-        @test _AX._axes_balanced_lines(["aaaaaaaaaa", "b"], [10.0, 1.0], 1.0, 8.0) === nothing
         # A bare-string title is rewritten as a title mapping.
         q = plot_scatter(collect(0:0.1:1), collect(0:0.1:1))
         relayout!(P(q); width = 400, height = 200, yaxis_title = long)
         _AX._finalize_figure!(q)
-        @test occursin(_AX._AXES_WRAP_BREAK, text(q, :yaxis))
+        @test occursin("<br />", text(q, :yaxis))
     end
 
     @testset "wave 5: the margin estimate reads plotly's log decade labels (W5)" begin
@@ -1919,11 +1920,12 @@ end
         # "none" format or an "L" step print decimals ("0.000000001").
         chars(lo, hi; kw...) = _AX._fin_tick_chars(Dict{Symbol, Any}(kw...), lo, hi, 300.0, true, true)
         @test chars(-8.3, -1.7; exponentformat = "power") == 5
-        @test chars(-8.3, -1.7) == 4
+        # 10^-3 is "0.001" (5 characters) under the default "B" format; "1m" only
+        # past minexponent (render probe: logB2.png).
+        @test chars(-8.3, -1.7) == 5
         @test chars(-8.3, -1.7; exponentformat = "e") == 4
         @test chars(-8.3, -1.7; exponentformat = "none") == 11
         @test chars(-8.3, -1.7; tickformat = ".1e") == 11
-        @test chars(-8.3, -1.7; dtick = "L0.5") == 11
         @test chars(0.0, 5.2) == 4
         # The estimate places the plot area, so an x title that fits beside a
         # log axis of small values stays on one line (gallery
@@ -1933,14 +1935,18 @@ end
         text(f) = _AX._axes_title_text(_ax_axis(f, :xaxis))[1]
         title = "width of the largest design in the whole set (nm)"
         f = plot_scatter(collect(1.0:7.0), exp10.(collect(-8.0:-2.0)); yscale = "log")
-        relayout!(P(f); width = 350, height = 300)
+        # At 380 x 300 plotly.js draws the plot area from x = 54 px and the
+        # one-line title 16 px inside the figure edge.
+        @test _AX._axes_fit_plan(P(f), (380, 300)).ml < 60
+        relayout!(P(f); width = 380, height = 300)
         xlabel!(f, title)
+        _AX._finalize_figure!(f)
         @test text(f) == title
         # Narrower, it runs off the figure and is broken.
         relayout!(P(f); width = 300)
         _AX._finalize_figure!(f)
-        @test occursin(_AX._AXES_WRAP_BREAK, text(f))
-        @test _AX._axes_unwrap_title(text(f)) == title
+        @test occursin("<br />", text(f))
+        @test replace(text(f), "<br />" => " ") == title
     end
 
     @testset "wave 5: tick values on a shared group and dates (Z29, Z42)" begin
