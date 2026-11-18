@@ -2118,6 +2118,7 @@ const _STYLE_TRACE_COLORBAR_TYPES = Set{String}([
 
 const _STYLE_PANEL_TITLE_NAME = r"^plotlysupply:title!?:(\d+):(\d+)(:.*)?$"
 const _STYLE_CELL_ITEM_NAME = r"^plotlysupply:[^:]+:(\d+):(\d+)(:.*)?$"
+const _STYLE_FIGURE_LABEL_NAME = r"^plotlysupply:[xy]_title$"
 
 # Font dict for one element. Figure-wide calls write only role sizes (family,
 # base size and colour go to layout.font and cascade); cell-scoped calls write
@@ -2251,6 +2252,12 @@ function _annotation_role_font(annotation, cell, title_font, annotation_font)
 	if title_match !== nothing
 		cell === nothing && return title_font
 		return names_cell(title_match) ? title_font : nothing
+	end
+	# `subplots(...; x_title, y_title)`: labels of the whole grid, drawn in
+	# the title size like the grid's other titles (plotly's make_subplots
+	# gives them all one size); they belong to no cell.
+	if occursin(_STYLE_FIGURE_LABEL_NAME, name_string)
+		return cell === nothing ? title_font : nothing
 	end
 	cell === nothing && return annotation_font
 	item_match = match(_STYLE_CELL_ITEM_NAME, name_string)
