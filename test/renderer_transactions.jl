@@ -6091,6 +6091,7 @@ end
         p, sp, state = many_trace_fixture(n)
         try
             update_xaxes!(sp; title_text="warm")
+            update_xaxes!(sp; title_text="warm again")   # the second call compiles a path of its own
             return @allocated update_xaxes!(sp; title_text="measured")
         finally
             close(sp)
@@ -6104,11 +6105,42 @@ end
     function plot_verb_allocs(n)
         p = Plot([scatter(x=collect(1:50), y=rand(50)) for _ in 1:n], Layout(title="m"))
         update_xaxes!(p; title_text="warm")
+        update_xaxes!(p; title_text="warm again")
         return @allocated update_xaxes!(p; title_text="measured")
     end
     psmall, plarge = plot_verb_allocs(4), plot_verb_allocs(400)
     @test plarge < 400_000
     @test plarge < 3 * psmall
+
+    # a layout object that a trace also holds (an alias) is followed: the traces
+    # are staged then and the renderer gets a full refresh, not just a relayout
+    shared_axis = attr(title_text="shared")
+    shared_layout = Layout(title="aliased")
+    shared_layout.fields[:xaxis] = shared_axis
+    shared_trace = scatter(x=[1, 2], y=[3, 4])
+    shared_trace.fields[:meta] = shared_axis
+    other_trace = scatter(x=[1, 2], y=[5, 6])
+    alias_state = _TransactionRendererState(Any[])
+    alias_plot = Plot([shared_trace, other_trace], shared_layout)
+    alias_sp = SyncPlot(alias_plot, nothing, :transaction_window, "alias-div",
+        PlotlySupply._SyncPlotResources(nothing, _transaction_backend(alias_state)))
+    try
+        @test PlotlySupply._traces_may_alias_layout(alias_plot)
+        update_xaxes!(alias_sp; title_text="changed")
+        @test only(alias_state.scripts) |> s -> occursin("Plotly.react", s) || occursin("Plotly.restyle", s) || occursin("Plotly.update", s)
+        @test alias_plot.data[1].fields[:meta] === alias_plot.layout.fields[:xaxis]
+        @test alias_plot.layout.fields[:xaxis][:title_text] == "changed"
+        @test alias_plot.data[2] === other_trace
+    finally
+        close(alias_sp)
+    end
+    # no alias: the traces are shared, not staged
+    plain_plot, plain_sp, _ = many_trace_fixture(3)
+    try
+        @test !PlotlySupply._traces_may_alias_layout(plain_plot)
+    finally
+        close(plain_sp)
+    end
 
     # a layout-only verb that fails after the renderer rejected it rolls back
     # the model and re-renders the old figure (Plotly.newPlot)

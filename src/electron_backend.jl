@@ -7554,6 +7554,63 @@ end
 
 _noop_plot_commit(::Plot) = nothing
 
+# Whether a mutable object below the layout (outside its template) can also be
+# reached from a trace. Such an alias has to be followed through the staged
+# copy of the traces, so a layout-only mutation may share the traces only when
+# this is false. Conservative: a value this walk cannot classify, or one nested
+# deeper than 16 levels, counts as an alias. Numeric arrays are not entered, so
+# the cost follows the structure of the figure, not its data.
+function _traces_may_alias_layout(p::Plot)
+	layout = p.layout
+	layout isa Layout || return true
+	ids = IdDict{Any,Nothing}()
+	seen = IdDict{Any,Nothing}()
+	for (key, value) in layout.fields
+		key === :template && continue
+		_collect_graph_mutable_identities!(ids, value, seen)
+	end
+	isempty(ids) && return false
+	for trace in p.data
+		trace isa GenericTrace || return true
+		_reaches_layout_identity(trace.fields, ids, 0) && return true
+	end
+	return false
+end
+
+function _reaches_layout_identity(value, ids::IdDict{Any,Nothing}, depth::Int)::Bool
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa BigInt ||
+			value isa BigFloat
+		return false
+	end
+	depth > 16 && return true
+	haskey(ids, value) && return true
+	if value isa AbstractDict
+		for child in values(value)
+			_reaches_layout_identity(child, ids, depth + 1) && return true
+		end
+		return false
+	elseif value isa AbstractArray
+		_candidate_array_elements_may_carry_identity(eltype(value)) || return false
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_reaches_layout_identity(value[ind], ids, depth + 1) && return true
+		end
+		return false
+	elseif value isa PlotlyBase.AbstractPlotlyAttribute
+		return _reaches_layout_identity(getfield(value, :fields), ids, depth + 1)
+	end
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_reaches_layout_identity(getfield(value, ind), ids, depth + 1) && return true
+	end
+	return false
+end
+
 function _prepare_full_model_mutation_transaction(
 	sp::Union{Nothing,SyncPlot},
 	p::Plot,
@@ -7578,7 +7635,8 @@ function _prepare_full_model_mutation_transaction(
 	# cloned: staging then costs O(layout), not O(traces).
 	share_traces = mutation_scope !== nothing &&
 		get(mutation_scope, :data_untouched, false) === true &&
-		p.data isa Vector && all(t -> t isa GenericTrace, p.data)
+		p.data isa Vector && all(t -> t isa GenericTrace, p.data) &&
+		!_traces_may_alias_layout(p)
 	staged_data = share_traces ? p.data : copy(p.data)
 	memo[p.data] = staged_data
 	if !share_traces
@@ -7984,17 +8042,24 @@ function _prepare_full_model_mutation_transaction(
 			!replace_frames_root && !replace_config_root &&
 			data_unchanged &&
 			p.layout isa Layout && candidate.layout isa Layout
+		# A trace changed through an alias of a layout object (staged copies
+		# of the traces exist then) needs a restyle: take the full refresh.
+		traces_unchanged =
+			all(original -> original isa GenericTrace, keys(staged_traces)) &&
+			all(isempty, values(_staged_trace_deltas(staged_traces, memo)))
 		delta = _plotly_leaf_deltas(
 			p.layout.fields,
 			candidate.layout.fields,
 			memo,
 		)
-		_incremental_renderer_side_effects(
-			IdDict{AbstractTrace,AbstractTrace}(),
-			IdDict{AbstractTrace,Dict{String,Any}}(),
-			candidate.layout,
-			delta,
-		) || (layout_delta = delta)
+		traces_unchanged &&
+			!_incremental_renderer_side_effects(
+				IdDict{AbstractTrace,AbstractTrace}(),
+				IdDict{AbstractTrace,Dict{String,Any}}(),
+				candidate.layout,
+				delta,
+			) &&
+			(layout_delta = delta)
 	end
 	script = if sp === nothing
 		nothing

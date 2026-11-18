@@ -271,4 +271,16 @@ end
         @test _global_defaults_diff(before, _global_defaults_snapshot()) == Symbol[]
         @test get_default_legend_position() == :topright
     end
+
+    @testset "every docs page is in the manual's navigation" begin
+        # A strict (warnonly = false) docs build ignores a page that docs/make.jl
+        # does not list and fails on any link to it.
+        docs = joinpath(dirname(testdir), "docs")
+        if isfile(joinpath(docs, "make.jl")) && isdir(joinpath(docs, "src"))
+            make = read(joinpath(docs, "make.jl"), String)
+            pages = filter(name -> endswith(name, ".md"), readdir(joinpath(docs, "src")))
+            @test !isempty(pages)
+            @test all(page -> occursin("\"$page\"", make), pages)
+        end
+    end
 end
