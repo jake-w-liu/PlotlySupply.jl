@@ -1,19 +1,8 @@
-/test.jl
-.DS_Store
-
-# Resolved environments are machine/Julia-version specific: CI resolves its own.
+# Julia environments resolve their own manifests (root, docs/, test/, examples/)
 Manifest.toml
-docs/Manifest.toml
-
-# Documenter output (docs/make.jl).
-docs/build/
-
-# Coverage and allocation output (Pkg.test(coverage=true), julia-actions).
-*.jl.cov
-*.jl.*.cov
-*.jl.mem
-*.jl.*.mem
-lcov.info
-
-# Local agent/tool state.
+Manifest-v*.toml
+# Claude Code worktrees and local settings
 .claude/
+test.jl
+docs/build
+.DS_Store
