@@ -1043,6 +1043,48 @@ _rx_font(a) = PlotlySupply._symbol_dict(a[:font])
 		PlotlySupply._finalize_figure!(fig)
 		@test fitted(fig)[1] > before[1]
 		@test PlotlySupply._finalize_figure!(fig) == false
+		# wrap: the breaks are chosen again for the export size (a narrow,
+		# tall export takes more lines at a larger size than the live breaks
+		# would get), and kept when the text was replaced after annotate!.
+		pangram = "the quick brown fox: jumps over the lazy dog"
+		function wrapped_figure()
+			f = plot_scatter([0.0, 10.0], [0.0, 5.0]; mode = "markers", width = 700, height = 500)
+			xrange!(f, (0, 10)); yrange!(f, (0, 5))
+			annotate!(f, 5, 2.5, pangram; fit = (4, 1), wrap = true)
+			return f
+		end
+		function set_last!(f, key, value)
+			items = collect(Any, f.layout.fields[:annotations])
+			fields = PlotlySupply._symbol_dict(items[end])
+			fields[key] = value
+			items[end] = attr(; fields...)
+			relayout!(f; annotations = items)
+		end
+		narrow_export(f) = _rx_last(PlotlySupply._finalize_export_copy(f, (width = 300, height = 900)))
+		tall = wrapped_figure()
+		live = _rx_last(tall)
+		@test live[:name] == "plotlysupply:fit:4.0:1.0:0.0:wrap:c:$(pangram)"
+		@test PlotlySupply._annotation_fit_spec(live).wrap == (align = :c, source = pangram)
+		narrow = narrow_export(tall)
+		lines(a) = count("<br>", a[:text]) + 1
+		@test lines(narrow) > lines(live)
+		@test narrow[:text] in [PlotlySupply._label(c) for c in PlotlySupply._annotation_wrap_candidates(pangram)]
+		@test PlotlySupply._finalize_figure!(tall) == false
+		# The same annotation without the wrap spec keeps the live breaks at a
+		# smaller size in that export.
+		kept = wrapped_figure()
+		set_last!(kept, :name, "plotlysupply:fit:4.0:1.0:0.0")
+		kept_export = narrow_export(kept)
+		@test kept_export[:text] == live[:text]
+		@test _rx_font(narrow)[:size] > _rx_font(kept_export)[:size]
+		# A text replaced after annotate! is kept (and only resized).
+		set_last!(tall, :text, "edited text")
+		@test narrow_export(tall)[:text] == "edited text"
+		# Malformed fit names are not fitted annotations.
+		for name in ("plotlysupply:fit:1:1", "plotlysupply:fit:1:1:0:wrap", "plotlysupply:fit:1:1:0:wrap:x:text",
+				"plotlysupply:fit:1:1:0:nowrap:c:text")
+			@test PlotlySupply._annotation_fit_spec(attr(name = name)) === nothing
+		end
 		# Fractions of the axes; a pie cell scales the box to the cell.
 		annotate!(fig, 0.5, 0.5, "axes box"; coords = :axes, fit = (0.2, 0.1))
 		@test _rx_last(fig)[:name] == "plotlysupply:fit:0.2:0.1:0.0"

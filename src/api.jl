@@ -20761,6 +20761,9 @@ end
 # and border (rotated by `textangle`) fits the box. It is computed when the
 # annotation is added and again by `_finalize_figure!` (room owner
 # `:annotate`), with the final plot-area size, domains and export size.
+# With `wrap = true` the name goes on with ":wrap:<a>:<source>" (a: the
+# alignment l, c or r; source: the text as passed), and the line breaks are
+# chosen again with the size.
 const _ANNOTATION_FIT_PREFIX = "plotlysupply:fit:"
 # plotly.js `font.size` has `min: 1`; a box too small for any text gets that.
 const _ANNOTATION_FIT_MIN_FONT = 1.0
@@ -20768,13 +20771,20 @@ const _ANNOTATION_FIT_MIN_FONT = 1.0
 function _annotation_fit_spec(item)
 	name = _cmn_mapping_get(item, :name)
 	(name isa AbstractString && startswith(name, _ANNOTATION_FIT_PREFIX)) || return nothing
-	parts = split(name[(ncodeunits(_ANNOTATION_FIT_PREFIX) + 1):end], ':')
-	length(parts) == 3 || return nothing
-	values = [tryparse(Float64, part) for part in parts]
+	# limit = 6: the source text of a wrapped annotation may contain ':'.
+	parts = split(name[(ncodeunits(_ANNOTATION_FIT_PREFIX) + 1):end], ':'; limit = 6)
+	wrap = nothing
+	if length(parts) == 6
+		(parts[4] == "wrap" && parts[5] in ("l", "c", "r")) || return nothing
+		wrap = (align = Symbol(parts[5]), source = String(parts[6]))
+	elseif length(parts) != 3
+		return nothing
+	end
+	values = [tryparse(Float64, part) for part in parts[1:3]]
 	any(isnothing, values) && return nothing
 	w, h, fmax = values
 	(isfinite(w) && w > 0 && isfinite(h) && h > 0 && isfinite(fmax) && fmax >= 0) || return nothing
-	return (w = w, h = h, fmax = fmax)
+	return (w = w, h = h, fmax = fmax, wrap = wrap)
 end
 
 # Domain of axis `key` (`letter` :x or :y): a domain queued in `updates` (the
@@ -20873,14 +20883,20 @@ function _annotation_fit_box(layout::Layout, accs, updates, item, spec, Wp::Real
 	return spec.w * px, spec.h * py
 end
 
+# Padding, border width (px) and text angle (degrees) of annotation `item`,
+# with plotly's defaults.
+_annotation_fit_frame(item) = (
+	_annotation_number(_cmn_mapping_get(item, :borderpad), 1.0),
+	_annotation_number(_cmn_mapping_get(item, :borderwidth), 1.0),
+	_annotation_number(_cmn_mapping_get(item, :textangle), 0.0),
+)
+
 # Font size (px) of a fitted annotation, or `nothing` when it cannot be
 # computed; `base_font` is the figure font size (the cap when fmax is 0).
 function _annotation_fit_size(layout::Layout, accs, updates, item, spec, Wp::Real, Hp::Real, base_font::Real)
 	box = _annotation_fit_box(layout, accs, updates, item, spec, Wp, Hp)
 	box === nothing && return nothing
-	pad = _annotation_number(_cmn_mapping_get(item, :borderpad), 1.0)
-	border = _annotation_number(_cmn_mapping_get(item, :borderwidth), 1.0)
-	angle = _annotation_number(_cmn_mapping_get(item, :textangle), 0.0)
+	pad, border, angle = _annotation_fit_frame(item)
 	cap = spec.fmax > 0 ? spec.fmax : Float64(base_font)
 	return _annotation_fit_font(_cmn_mapping_get(item, :text), box[1], box[2], pad, border, angle, cap)
 end
@@ -20944,17 +20960,14 @@ function _annotation_greedy_wrap(paragraphs, widths, space::Float64, limit::Floa
 	return join(lines, "\n")
 end
 
-# `text` with line breaks inserted so that it fits a `box_w` x `box_h` px box
-# at the largest font size (see `_annotation_fit_font`); among layouts
-# reaching the same size the one with the fewest lines. For each line count
-# the candidate is the narrowest greedy layout with that many lines: greedy
-# breaking at the smallest width limit that gives it, and the limits worth
-# trying are the widths of runs of consecutive words.
-function _annotation_wrap(text::AbstractString, who::AbstractString, align::Symbol, box_w::Real, box_h::Real,
-		pad::Real, border::Real, angle::Real, cap::Real)
+# The layouts of `text` worth trying for `wrap = true`, most lines first: for
+# each line count the narrowest greedy layout with that many lines (greedy
+# breaking at the smallest width limit that gives it; the limits worth trying
+# are the widths of runs of consecutive words). They do not depend on the box.
+function _annotation_wrap_candidates(text::AbstractString)
 	paragraphs = _annotation_words(text)
 	widths = [[_text_extent(word, 1.0)[1] for word in words] for words in paragraphs]
-	all(isempty, widths) && return text
+	all(isempty, widths) && return [String(text)]
 	space = _text_extent("a a", 1.0)[1] - _text_extent("aa", 1.0)[1]
 	limits = Float64[]
 	for word_widths in widths, i in eachindex(word_widths)
@@ -20964,7 +20977,7 @@ function _annotation_wrap(text::AbstractString, who::AbstractString, align::Symb
 			push!(limits, run)
 		end
 	end
-	best_text, best_font = text, -Inf
+	candidates = String[]
 	counts = Set{Int}()
 	for limit in sort!(unique!(limits))
 		# The relative tolerance keeps a run whose width equals the limit up to
@@ -20973,13 +20986,43 @@ function _annotation_wrap(text::AbstractString, who::AbstractString, align::Symb
 		lines = count(==('\n'), candidate) + 1
 		lines in counts && continue
 		push!(counts, lines)
-		label = _extended_label(candidate, who, "text"; align = align)
-		font = _annotation_fit_font(label, box_w, box_h, pad, border, angle, cap; rounded = false)
-		# Limits ascend, so line counts descend: `>=` prefers fewer lines at
-		# the same size.
-		font >= best_font && ((best_text, best_font) = (candidate, font))
+		push!(candidates, candidate)
 	end
-	return best_text
+	return candidates
+end
+
+# Index of the label (of `_annotation_wrap_candidates`, typeset) that fits a
+# `box_w` x `box_h` px box at the largest font size (see
+# `_annotation_fit_font`); among those reaching the same size the one with
+# the fewest lines.
+function _annotation_wrap_best(labels, box_w::Real, box_h::Real, pad::Real, border::Real, angle::Real, cap::Real)
+	best, best_font = firstindex(labels), -Inf
+	for (index, label) in pairs(labels)
+		font = _annotation_fit_font(label, box_w, box_h, pad, border, angle, cap; rounded = false)
+		# Candidates come with line counts descending: `>=` prefers fewer
+		# lines at the same size.
+		font >= best_font && ((best, best_font) = (index, font))
+	end
+	return best
+end
+
+# The text of a `wrap = true` annotation (`wrap`: from its spec, `text`: as
+# drawn now) broken to fit `box` (px) at the largest size, or `nothing` to
+# keep `text`: when it is not one of the layouts of the source any more (the
+# text was edited after `annotate!`, or the mathtext settings changed, which
+# would typeset the layouts differently).
+function _annotation_rewrap(wrap, text, box, pad::Real, border::Real, angle::Real, cap::Real)
+	text isa AbstractString || return nothing
+	labels = try
+		[_label(candidate; align = wrap.align) for candidate in _annotation_wrap_candidates(wrap.source)]
+	catch err
+		# `annotate!` typeset this source; a failure now can only come from
+		# changed mathtext settings, and the text already drawn stays.
+		err isa ArgumentError || rethrow()
+		return nothing
+	end
+	text in labels || return nothing
+	return labels[_annotation_wrap_best(labels, box[1], box[2], pad, border, angle, cap)]
 end
 
 """
@@ -20988,8 +21031,9 @@ end
 Room owner `:annotate` (D12 provider): re-fits the font size of every
 `annotate!(...; fit = (w, h))` annotation to its box with the final domains,
 plot-area size and (on the `savefig` copy) export size of this finalize
-pass. Edits only those items of `_room_annotations!(plan)`; a figure without
-fitted annotations is left untouched (its annotation list is not copied).
+pass, and chooses the line breaks of a `wrap = true` one again. Edits only
+those items of `_room_annotations!(plan)`; a figure without fitted
+annotations is left untouched (its annotation list is not copied).
 """
 function _room_place!(plan, ::Val{:annotate})
 	existing = get(plan.layout.fields, :annotations, nothing)
@@ -20999,11 +21043,18 @@ function _room_place!(plan, ::Val{:annotate})
 	for (index, item) in pairs(annotations)
 		spec = _annotation_fit_spec(item)
 		spec === nothing && continue
-		size = _annotation_fit_size(plan.layout, plan.accs, plan.updates, item, spec, plan.Wp, plan.Hp, plan.font)
-		size === nothing && continue
+		box = _annotation_fit_box(plan.layout, plan.accs, plan.updates, item, spec, plan.Wp, plan.Hp)
+		box === nothing && continue
+		pad, border, angle = _annotation_fit_frame(item)
+		cap = spec.fmax > 0 ? spec.fmax : Float64(plan.font)
+		text = _cmn_mapping_get(item, :text)
+		wrapped = spec.wrap === nothing ? nothing : _annotation_rewrap(spec.wrap, text, box, pad, border, angle, cap)
+		rewrapped = wrapped !== nothing && wrapped != text
+		size = _annotation_fit_font(rewrapped ? wrapped : text, box[1], box[2], pad, border, angle, cap)
 		current = _cmn_mapping_get(_cmn_mapping_get(item, :font), :size)
-		(current isa Real && !(current isa Bool) && abs(current - size) < 0.05) && continue
+		(!rewrapped && current isa Real && !(current isa Bool) && abs(current - size) < 0.05) && continue
 		fields = _symbol_dict(item)
+		rewrapped && (fields[:text] = wrapped)
 		font = _symbol_dict(get(fields, :font, nothing))
 		font[:size] = size
 		fields[:font] = attr(; font...)
@@ -21419,6 +21470,7 @@ function _extended_annotate!(
 		fmax = font_px > 0 ? Float64(font_px) : _annotation_number(get(font, :size, nothing), 0.0)
 		fit_box = (w = w, h = h, fmax = fmax)
 		entry[:name] = _ANNOTATION_FIT_PREFIX * "$(w):$(h):$(fmax)"
+		wrap && (entry[:name] *= ":wrap:$(_ANNOTATION_ALIGN[align]):$(text)")
 	end
 	wrap && fit_box === nothing && throw(ArgumentError(
 		"$(who): `wrap = true` breaks the text into lines that fit the `fit` box; pass `fit = (w, h)`.",
@@ -21434,7 +21486,6 @@ function _extended_annotate!(
 	entry[:xref] = x_ref
 	entry[:yref] = y_ref
 	entry[:showarrow] = draw_arrow
-	label_text = text
 	if fit_box !== nothing
 		p = _plot_obj(fig)
 		accs = _fin_collect_axes(p)
@@ -21442,19 +21493,21 @@ function _extended_annotate!(
 		base_font = _fin_font_size(layout)
 		cap = fit_box.fmax > 0 ? fit_box.fmax : base_font
 		if wrap
+			labels = [_extended_label(candidate, who, "text"; align = _ANNOTATION_ALIGN[align])
+				for candidate in _annotation_wrap_candidates(text)]
 			pad_px = _annotation_number(get(entry, :borderpad, nothing), 1.0)
 			border_px = _annotation_number(get(entry, :borderwidth, nothing), 1.0)
 			box = _annotation_fit_box(layout, accs, nothing, entry, fit_box, Wp, Hp)
 			# Without a known scale only the box shape (w : h) counts.
 			box === nothing && ((box, pad_px, border_px) = ((fit_box.w, fit_box.h), 0.0, 0.0))
-			label_text = _annotation_wrap(text, who, _ANNOTATION_ALIGN[align], box[1], box[2], pad_px, border_px,
-				-angle, cap)
+			entry[:text] = labels[_annotation_wrap_best(labels, box[1], box[2], pad_px, border_px, -angle, cap)]
+		else
+			entry[:text] = _extended_label(text, who, "text"; align = _ANNOTATION_ALIGN[align])
 		end
-		entry[:text] = _extended_label(label_text, who, "text"; align = _ANNOTATION_ALIGN[align])
 		fitted = _annotation_fit_size(layout, accs, nothing, entry, fit_box, Wp, Hp, base_font)
 		fitted === nothing || (font[:size] = fitted)
 	else
-		entry[:text] = _extended_label(label_text, who, "text"; align = _ANNOTATION_ALIGN[align])
+		entry[:text] = _extended_label(text, who, "text"; align = _ANNOTATION_ALIGN[align])
 	end
 	isempty(font) || (entry[:font] = attr(; font...))
 	if figure_x || figure_y
@@ -21569,12 +21622,17 @@ Text and box:
   rectangle `x0 … x1`, `y0 … y1` use `annotate!(fig, (x0 + x1) / 2,
   (y0 + y1) / 2, text; fit = (x1 - x0, y1 - y0))`. The size is computed
   again whenever the figure is finalized (figure size, margins, ranges,
-  `savefig` size). `fit` draws no arrow; it cannot be combined with
+  `savefig` size). Data units are measured on the axis ranges: set them
+  (`xrange!`, `yrange!`) for an exact fit, as an autoranged axis is measured
+  on its data extent, without the padding plotly adds (around markers, for
+  instance). `fit` draws no arrow; it cannot be combined with
   `coords = :figure`, `name`, or category, date and logarithmic axes.
 - `wrap::Bool = false`: with `fit`, break the text into lines (at spaces
   outside `\$…\$`; `\\n` and `<br>` stay line breaks) so that it fits at the
-  largest size. The breaks are chosen for the figure size when `annotate!` is
-  called; the size follows later changes.
+  largest size, fewest lines on a tie. The breaks are chosen again with the
+  size (figure size, margins, ranges, `savefig` size), unless the text was
+  replaced or the mathtext settings changed after `annotate!` (the text is
+  then kept and only resized).
 
 Arrow:
 - `showarrow = nothing`: draw an arrow from the text to `(x, y)`; `nothing`
@@ -21615,9 +21673,10 @@ annotate!(fig, 80, 6400, "label"; showarrow = false, anchor = :topleft, offset =
 annotate!(fig, 0.5, 0.01, "Source: simulation"; coords = :figure, showarrow = false,
 	anchor = :bottom)
 
-block = plot_scatter([0, 4], [0, 1]; mode = "markers")
-rectangle!(block, 0, 0, 4, 1)
-annotate!(block, 2, 0.5, "a long label wrapped to fit the box"; fit = (4, 1), wrap = true)
+block = plot_scatter([1, 4], [0.5, 1.5]; mode = "markers")
+xrange!(block, (0, 5)); yrange!(block, (0, 2))    # `fit` measures the box on these
+rectangle!(block, 0.5, 0.5, 4.5, 1.5)
+annotate!(block, 2.5, 1, "a long label wrapped to fit the box"; fit = (4, 1), wrap = true)
 ```
 """
 function annotate!(
