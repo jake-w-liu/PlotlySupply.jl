@@ -102,7 +102,9 @@ savefig(sf, "fields.pdf")                  # 17.2 cm wide page
 ```
 
 [Figures for papers](https://jake-w-liu.github.io/PlotlySupply.jl/dev/papers/)
-has complete examples (convergence plot, field maps, 3-D surfaces, schematic).
+has complete examples (convergence plot, field maps, 3-D surfaces, schematic), and
+the [Gallery](https://jake-w-liu.github.io/PlotlySupply.jl/dev/gallery/) shows 44 figures,
+each with its script in `docs/gallery/`.
 
 MATLAB-style subplots: `subplot!` selects the active cell, and the axis helpers
 (`xlabel!`, `ylabel!`, `xrange!`, ...) act on the active cell, so call them

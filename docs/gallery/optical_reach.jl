@@ -36,7 +36,7 @@ fig = with_style(:ieee) do
 		yticks!(sf, [0, 0.5, 1]; row = row, col = 1)
 		set_legend!(sf; row = row, col = 1, title = family)
 	end
-	xrange!(sf, (0, 0.32); row = 2, col = 1)
+	xrange!(sf, (0, 0.42); row = 2, col = 1)                      # room for the legends right of the curves
 	xlabel!(sf, "prescribed amplitude \$r_0=|r_{21}(k_m)|\$"; row = 2, col = 1)
 	plot_band!(sf, xx, 0.59 .* xx, xx; row = 1, col = 2, color = light, opacity = 0.6,
 		legend = "\$0.59\\,t_{\\mathrm{geom}}/K\$ to \$t_{\\mathrm{geom}}/K\$")

@@ -1,6 +1,7 @@
 # h- and p-refinement: hollow experiment markers, formula lines, a min/max band, a guide.
 #
-# Catalogue: math-deepdebug 5, math-d3-d4 (log-log convergence, dashed bound, band, annotation).
+# Catalogue: math-deepdebug 5; math-d3-d4 "log-log / semilogy convergence with an N^-p guide", "log-log dashed
+#   bound plus markevery sparse markers", "limit overlays"; optical "ratio curves with a marker ladder".
 # Replaces: loglog with mfc='none', fill_between, markevery=8, a dashed N^-2 guide with ax.text,
 #   ax.annotate(arrowprops=...), a boxed ax.text in axes coordinates, open spines, a legend row above.
 # 2.0: `plot_band!`, `markevery`, `slope_guide!`, `annotate!` with an offset and a background box,

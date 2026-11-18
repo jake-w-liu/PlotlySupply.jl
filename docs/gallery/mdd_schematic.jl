@@ -23,7 +23,7 @@ fig = with_style(:ieee) do
 	end
 	arrow!(sf, 4.6, 1.75, 6.5, 1.75; color = "black", linewidth = 1.5, cell...)
 	circle!(sf, 8.6, 1.75, 0.95; fillcolor = lighten(green, 0.9), edgecolor = green, dash = "dash", layer = "below", cell...)
-	plot_scatter!(sf, [8.6, 9.55], [1.75, 1.75]; mode = "lines+markers", color = blue, linewidth = 3, cell...)
+	plot_scatter!(sf, [8.6, 9.55], [1.75, 1.75]; mode = "lines+markers", color = blue, linewidth = 3, dash = "solid", cell...)
 	for (x, y, text, kw) in ((2.1, 3.1, "outgoing field \$e^{-ikr}/r\$", ()), (2.1, 0.3, "\$1<\\rho<R/a\$", ()),
 		(1.1, 0.7, "\$r=R\$", (color = blue,)), (5.55, 2.2, "\$x=R/r\$", ()),
 		(5.55, 1.3, "\$F=re^{ikr}(\\mathbf{E},\\mathbf{V})\$", ()), (8.6, 3.1, "analytic disk \$|x|<\\rho\$", ()),
@@ -42,6 +42,7 @@ fig = with_style(:ieee) do
 			legend = label, xscale = "log", yscale = "log")
 		hline!(sf, limit; row = 2, col = 1, color = color, dash = "dot")
 	end
+	set_legend!(sf; row = 2, col = 1, position = (0.5, 0.45), xanchor = "center", yanchor = "middle")   # between the curves
 	xticks!(sf, l, string.(l); row = 2, col = 1, minor = false)
 	yticks!(sf, [1, 2, 5, 10, 20], ["1", "2", "5", "10", "20"]; row = 2, col = 1, minor = false)
 	# (c) trace singular values with the curve label at the end of each curve

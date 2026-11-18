@@ -1,6 +1,7 @@
 # Dots at grouped categorical positions: filled and hollow markers, group names under the ticks.
 #
-# Catalogue: optical "dot comparison with categorical-grouped x positions (filled vs hollow markers)".
+# Catalogue: optical "dot comparison with categorical-grouped x positions (filled vs hollow markers)";
+#   chama-python A10 (annotated comparison of dot strips against curves).
 # Replaces: integer x positions with gaps between groups, one tick label per point, group names
 #   placed with annotate(xycoords=("data", "axes fraction"), xytext=(0, -12)), dotted nominal lines
 #   with a right-aligned grey text and a legend above the axes at the left.

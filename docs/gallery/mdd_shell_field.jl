@@ -1,6 +1,8 @@
 # A polar field drawn on a mirrored meridional disk with circles and a text core, beside branches.
 #
-# Catalogue: math-deepdebug 4, math-d3-d4 "polar-to-Cartesian field map" (meridional map).
+# Catalogue: math-deepdebug 4; math-d3-d4 "polar-to-Cartesian meridional field map" and "2x2 mixed panel
+#   composite (field map + trajectories + convergence panels)" (panels a and b here, c and d are the
+#   refinement plots of mdd_convergence_band).
 # Replaces: pcolormesh on a (r, theta) mesh mirrored to a full disk (magma, fixed 0..1), a narrow
 #   colorbar, Circle patches, a multi-line ax.text in the core, open/filled branch markers.
 # 2.0: `plot_pcolormesh!` takes the curvilinear node arrays, `equalar = true` keeps the disk round,

@@ -1,6 +1,6 @@
 # An analytic response surface with 3-D curves and samples, beside an equal-aspect ellipse.
 #
-# Catalogue: topo "3D analytic response surface with markers, 3D curves and a 2D ellipse companion".
+# Catalogue: topo "3D facecolor-mapped parametric surface (torus)" (the same calls as chama_a9), topo "3D analytic response surface with markers, 3D curves and a 2D ellipse companion".
 # Replaces: plot_surface (one colour, alpha, light edges) with ax.plot curves and ax.scatter samples
 #   in 3-D, fraction tick labels, box aspect (1.3, 1, .85), view_init(24, -61), and a 2-D orbit
 #   ellipse with text lines and a two-column legend above the axes.

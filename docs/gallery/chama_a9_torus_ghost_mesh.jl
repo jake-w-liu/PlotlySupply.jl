@@ -3,8 +3,8 @@
 # Catalogue: chama-python A9, chama-audit G.
 # Replaces: Line3DCollection (ghost edges) under a Poly3DCollection with cmap='coolwarm' and a
 #   symmetric clim, view_init(elev=65, azim=-70), a hand-placed colorbar axes.
-# 2.0: `scene!` fixes equal axes, `plot_segments3d!` draws the ghost mesh, `plot_polygons3d!` with a diverging scale and a
-#   symmetric `crange`, `shared_colorbar!` for the bar.
+# 2.0: `scene!` fixes equal axes, `plot_segments3d!` draws the ghost mesh, `plot_polygons3d!` takes a
+#   diverging scale with a symmetric `crange`, and `shared_colorbar!` draws the bar.
 using PlotlySupply
 
 outdir = isempty(ARGS) ? (@__DIR__) : first(ARGS)

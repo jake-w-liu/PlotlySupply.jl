@@ -1,7 +1,8 @@
 # Theory lines against hollow-marker data, with a shorter residual row of stems below.
 #
-# Catalogue: math-deepdebug 6, math-deepdebug "linear-axis line plots with hollow markers",
-#   math-d3-d4 "linear overlays".
+# Catalogue: math-deepdebug 6 and "linear-axis line plots with hollow markers"; math-d3-d4 "linear / semilogx /
+#   loglog line overlays", "normalized profile / front plots"; topo "linear parameter-sweep line plots", "linear
+#   line plot with a horizontal limit line" (the sweeps and limit lines are the same calls on other data).
 # Replaces: plt.subplots(2, 2, sharex='col', height_ratios=[1.5, 1]), ax.plot(x[::3], y[::3], 'o',
 #   mfc='none'), ax.vlines stems, tick_params(direction='in'), a boxed ax.text in axes coordinates.
 # 2.0: `height_ratios`, `shared_xaxes = "columns"`, `plot_vlines!` stems and an `annotate!`
@@ -25,7 +26,7 @@ fig = with_style(:aps) do
 			plot_scatter!(sf, x, y; row = 1, col = col, color = c)
 			plot_scatter!(sf, xs, y[1:6:end]; row = 1, col = col, mode = "markers", marker_symbol = m,
 				marker_size = 8, color = c, (col == 1 ? (legend = label,) : NamedTuple())...)
-			plot_vlines!(sf, xs .+ dx, 0, scale .* r; row = 2, col = col, color = c)
+			plot_vlines!(sf, xs .+ dx, 0, scale .* r; row = 2, col = col, color = c, dash = "solid")
 			plot_scatter!(sf, xs .+ dx, scale .* r; row = 2, col = col, mode = "markers",
 				marker_symbol = "circle", marker_size = 4, color = c)
 		end

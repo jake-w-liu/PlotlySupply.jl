@@ -96,7 +96,9 @@ savefig(sf, "fields.pdf")                  # 17.2 cm wide page
 ```
 
 [Figures for papers](papers.md)
-has complete examples (convergence plot, field maps, 3-D surfaces, schematic).
+has complete examples (convergence plot, field maps, 3-D surfaces, schematic), and
+the [Gallery](gallery.md) shows 44 figures, each with its script, that recreate the
+figure types of three research projects.
 
 MATLAB-style subplots: `subplot!` selects the active cell, and the axis helpers
 (`xlabel!`, `ylabel!`, `xrange!`, ...) act on the active cell, so call them
@@ -172,6 +174,7 @@ plot_heatmap!(sf, rand(30, 30))      # each colorbar sits next to its own cell
 - [Other charts and maps](charts.md): pie, sunburst, Sankey, financial charts,
   geographic and tile maps.
 - [Figures for papers](papers.md): from data to a camera-ready figure.
+- [Gallery](gallery.md): 44 complete figures with their scripts (`docs/gallery/`).
 - [Performance](performance.md): load time, time to first figure, the precompile workload and the benchmarks.
 - [Coming from matplotlib](matplotlib.md) and [Migrating from 1.x](migration.md).
 
