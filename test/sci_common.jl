@@ -317,14 +317,21 @@ end
         sf = subplots(1, 2; sync = false, subplot_titles = ["left" "right"])
         n_titles = length(sf.plot.layout.fields[:annotations])
         @test n_titles == 2
+        # The grid titles are named per cell (Z60), so a named item for cell
+        # (1, 2) replaces that cell's grid title and leaves the other alone.
         name = "plotlysupply:title:1:2"
+        @test count(a -> _cmn_get(a, :name) == name, sf.plot.layout.fields[:annotations]) == 1
         _CMN._upsert_named!(sf, :annotations, name, [attr(text = "first", x = 0.5, y = 1.0, xref = "paper", yref = "paper")])
         _CMN._upsert_named!(sf, :annotations, name, [attr(text = "second", x = 0.5, y = 1.0, xref = "paper", yref = "paper")])
         anns = sf.plot.layout.fields[:annotations]
-        @test length(anns) == n_titles + 1
+        @test length(anns) == n_titles
         @test count(a -> _cmn_get(a, :name) == name, anns) == 1
         @test _cmn_get(anns[end], :text) == "second"
-        @test [_cmn_get(a, :text) for a in anns[1:n_titles]] == ["left", "right"]
+        @test [_cmn_get(a, :text) for a in anns[1:(n_titles - 1)]] == ["left"]
+        # An item under a name no grid title carries is added after them.
+        _CMN._upsert_named!(sf, :annotations, "plotlysupply:note:1:2", [attr(text = "note", x = 0.5, y = 0.5, xref = "paper", yref = "paper")])
+        anns = sf.plot.layout.fields[:annotations]
+        @test [_cmn_get(a, :text) for a in anns] == ["left", "second", "note"]
 
         p = Plot()
         _CMN._upsert_named!(p, :shapes, "plotlysupply:span:0:0", [attr(type = "rect"), attr(type = "line")])
