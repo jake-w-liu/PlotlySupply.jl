@@ -1596,3 +1596,102 @@ end
 	@test !haskey(h.layout.fields, :margin) || !haskey(_sfn_fields(h.layout.fields[:margin]), :t) ||
 		_sfn_fields(h.layout.fields[:margin])[:t] >= 60
 end
+
+@testset "Q38: figsize! on a figure with content re-solves the room for the new size" begin
+	build() = with_style(:ieee) do
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1, xlabel = "x", ylabel = "y")
+		plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2, xlabel = "x", ylabel = "y")
+		sf
+	end
+	sf = build()
+	narrow = _SFN._layout_axis_domain(sf.plot.layout, :xaxis2)
+	@test narrow[1] > 0.6                    # the y title and labels took room in a 3.5 in figure
+	figsize!(sf, :ieee; columns = 2, aspect = 0.38)
+	sized_first = with_style(:ieee) do
+		g = subplots(1, 2; sync = false)
+		figsize!(g, :ieee; columns = 2, aspect = 0.38)
+		plot_scatter!(g, 1:3, 1:3; row = 1, col = 1, xlabel = "x", ylabel = "y")
+		plot_scatter!(g, 1:3, 1:3; row = 1, col = 2, xlabel = "x", ylabel = "y")
+		g
+	end
+	# The gap widened at the old size is given back: same as sizing first.
+	for k in (:xaxis, :xaxis2)
+		@test collect(_SFN._layout_axis_domain(sf.plot.layout, k)) ≈ collect(_SFN._layout_axis_domain(sized_first.plot.layout, k))
+	end
+	@test _SFN._layout_axis_domain(sf.plot.layout, :xaxis2)[1] ≈ 0.55 atol = 1e-9
+	@test !haskey(sf.plot.layout.fields, :meta) || !haskey(_sfn_fields(sf.plot.layout.fields[:meta]), Symbol("plotlysupply:room"))
+	@test _SFN._finalize_figure!(sf) === false
+	# And back to a column: the room is taken again.
+	figsize!(sf, :ieee; columns = 1, aspect = 0.75)
+	@test collect(_SFN._layout_axis_domain(sf.plot.layout, :xaxis2)) ≈ collect(narrow) atol = 1e-6
+	@test _SFN._finalize_figure!(sf) === false
+	# A domain the user narrowed is theirs and survives a resize.
+	h = build()
+	relayout!(h.plot; xaxis2_domain = [0.8, 1.0])
+	figsize!(h, :ieee; columns = 2, aspect = 0.38)
+	@test collect(_SFN._layout_axis_domain(h.plot.layout, :xaxis2)) ≈ [0.8, 1.0]
+end
+
+# Boxes (px) of the annotations of `p` once their math has rendered.
+const _SFN_ANN_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const root = gd.getBoundingClientRect();
+  const out = {W: root.width, ann: []};
+  for (const g of gd.querySelectorAll('g.annotation')) {
+    const r = g.getBoundingClientRect();
+    out.ann.push({text: g.textContent, math: g.querySelectorAll('.annotation-text-math-group, g[class*=math]').length,
+      left: r.left - root.left, right: r.right - root.left, top: r.top - root.top, bottom: r.bottom - root.top, w: r.width});
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+function _sfn_annotation_boxes(p::Plot)
+	sp = try
+		to_syncplot(p; show = false)
+	catch err
+		@warn "sci_finalize: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
+		return nothing
+	end
+	try
+		backend = _SFN._syncplot_backend(sp)
+		script = replace(_SFN_ANN_JS, "__DIV__" => _SFN._json_js(sp.divid))
+		for _ in 1:400
+			raw = Base.invokelatest(() -> backend.run(sp.window, script))
+			if !(raw === nothing || raw == "null")
+				d = JSON.parse(String(raw))
+				!isempty(d["ann"]) && all(a -> a["w"] > 1 && a["math"] > 0, d["ann"]) && return d
+			end
+			sleep(0.05)
+		end
+		return nothing
+	finally
+		close(sp)
+	end
+end
+
+@testset "Q28: a math colorbar title is not clipped by the right figure edge (3.5 in, 7.16 in)" begin
+	x = collect(range(0, 1; length = 24)); y = collect(range(0, 1; length = 24))
+	Z = [sin(3a) * cos(3b) for a in x, b in y]
+	for cols in (1, 2), title in (raw"$|E_z|^2$ (V$^2$/m$^2$)", raw"$\mathrm{Re}\,\epsilon_{\mathrm{eff}}(\omega)$")
+		with_style(:ieee) do
+			f = plot_heatmap(x, y, Z; colorbar_title = title, colorbar_title_side = :right, xlabel = "x", ylabel = "y")
+			figsize!(f, :ieee; columns = cols, aspect = 0.75)
+			W = f.layout.fields[:width]; H = f.layout.fields[:height]
+			@test W ≈ (cols == 1 ? 3.5 : 7.16) * 96 atol = 1e-6
+			@test _SFN._finalize_figure!(f) === false
+			# The margin holds the title: its estimate is inside the figure.
+			@test _sfn_fields(f.layout.fields[:margin])[:r] > 50
+			c = _SFN._finalize_export_copy(f, (width = W, height = H))
+			info = _sfn_annotation_boxes(c)
+			info === nothing && return
+			for a in info["ann"]
+				@test a["right"] <= info["W"] - 0.5
+				@test a["left"] >= 0
+			end
+		end
+	end
+end
