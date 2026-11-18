@@ -64,13 +64,21 @@ function checked_metrics(ec,window,path,font,mode,columns)
     end
     return d
 end
-# Draw `plot` in the export window exactly as the PDF/EPS export does (same
-# prepared copy, same `Plotly.newPlot` step) and call `f(ec, window)` while the
+# Draw `plot` in the export window as the image export does (the prepared
+# export copy, drawn with `Plotly.newPlot`) and call `f(ec, window)` while the
 # drawn figure is in the page.
 function drawn(f,plot,width,height)
     prepared=PS._prepare_export(plot,("pdf",),(width=width,height=height)).renderer
     PS._with_export_window(PS._EXPORT_STATE) do ec,app,win,divid
-        drawing=Base.invokelatest(()->ec.run(win,PS._pdf_render_script(divid,prepared)))
+        # The same draw as the SVG/PNG export (`Plotly.toImage` on the figure
+        # object); the PDF step would additionally flatten colorbar gradients.
+        js=PS._guarded_export_script(divid,60.0,"""
+$(PS._EXPORT_RESET_DIV_JS)
+    const layout=Object.assign({},$(prepared.layout_js),{width:$(PS._json_js(width)),height:$(PS._json_js(height))});
+    await Plotly.newPlot(div,$(prepared.data_js),layout,Object.assign({},$(prepared.config_js)));
+    return 'ok';
+""")
+        drawing=Base.invokelatest(()->ec.run(win,js))
         drawing=="ok" || error("the export window did not draw the figure: "*repr(drawing))
         f(ec,win)
     end
@@ -114,7 +122,7 @@ end
 # version and that reading the model JSON does not change it.
 function check_live_mathjax(ec,sp,out)
     deadline=time()+30
-    local state
+    local state,raw
     while true
         raw=Base.invokelatest(()->ec.run(sp.window,"""JSON.stringify({mathjax_type:typeof MathJax,
           version:typeof MathJax==='undefined'?null:MathJax.version,

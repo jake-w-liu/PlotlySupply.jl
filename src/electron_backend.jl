@@ -7573,38 +7573,26 @@ function _prepare_full_model_mutation_transaction(
 	mutation_scope !== nothing && get(mutation_scope, :template_untouched, false) === true &&
 		_share_untouched_template!(memo, p.layout, (), (;))
 	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
-	# A layout-only updater with plain traces and a plain layout cannot reach a
-	# trace: the traces are not staged (an object shared between a trace and
-	# the layout is committed in place, so the trace sees it either way), which
-	# keeps the call O(layout keys) instead of O(traces).
-	layout_only_plain =
-		mutation_scope !== nothing &&
-		get(mutation_scope, :template_untouched, false) === true &&
-		isempty(mutation_scope.trace_indices) &&
-		p.layout isa Layout &&
-		all(trace -> trace isa GenericTrace, p.data)
-	staged_data = layout_only_plain ? p.data : copy(p.data)
-	layout_only_plain || (memo[p.data] = staged_data)
+	staged_data = copy(p.data)
+	memo[p.data] = staged_data
 	# Clone custom roots first. Their general deepcopy discovers every shared
 	# object; optimized GenericTrace/Layout cloning can then reuse those memoized
 	# counterparts without deep-copying ordinary numeric payloads globally.
-	if !layout_only_plain
-		for original in p.data
-			original isa GenericTrace && continue
-			get!(
-				() -> _clone_trace_for_mutation(original, memo),
-				staged_traces,
-				original,
-			)
-		end
-		for ind in eachindex(staged_data)
-			original = p.data[ind]
-			staged_data[ind] = get!(
-				() -> _clone_trace_for_mutation(original, memo),
-				staged_traces,
-				original,
-			)
-		end
+	for original in p.data
+		original isa GenericTrace && continue
+		get!(
+			() -> _clone_trace_for_mutation(original, memo),
+			staged_traces,
+			original,
+		)
+	end
+	for ind in eachindex(staged_data)
+		original = p.data[ind]
+		staged_data[ind] = get!(
+			() -> _clone_trace_for_mutation(original, memo),
+			staged_traces,
+			original,
+		)
 	end
 	staged_layout = _clone_layout_for_mutation(p.layout, memo)
 	if p.layout isa Layout && staged_layout isa Layout

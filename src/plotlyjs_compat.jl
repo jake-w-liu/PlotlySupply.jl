@@ -603,6 +603,9 @@ function _prepare_document_export(
 )
 	resolved = options === nothing ? _normalize_export_options(p, kwargs) : options
 	figure = source === nothing ? _export_source(p, resolved; pan = false) : source
+	# The export copy is a new Plot with a new random div id; the page keeps the
+	# figure's own id so two exports of one figure are the same bytes.
+	figure === p || (figure.divid = p.divid)
 	return _PreparedDocumentExport(figure, resolved)
 end
 
@@ -1272,6 +1275,16 @@ const _FLATTEN_TRANSLUCENCY_JS = """
       var full = div._fullLayout || {};
       var paperColour = parse(full.paper_bgcolor || '#ffffff') || [255, 255, 255, 1];
       var paper = over(paperColour, paperColour[3], [255, 255, 255]);
+      // A WebGL scene with a translucent background is printed as a bitmap with
+      // an alpha mask, which Ghostscript's -dNOTRANSPARENCY drops (the scene
+      // turns black in the EPS): give each scene the opaque colour it shows.
+      var sceneUpdate = {};
+      Object.keys(full).forEach(function(key) {
+        if (!/^scene[0-9]*\$/.test(key) || !full[key]) return;
+        var bg = parse(full[key].bgcolor || 'rgba(0,0,0,0)');
+        if (bg && bg[3] < 1) sceneUpdate[key + '.bgcolor'] = css(over(bg, bg[3], paper));
+      });
+      if (Object.keys(sceneUpdate).length > 0) await Plotly.relayout(div, sceneUpdate);
       var areas = [];
       div.querySelectorAll('.bglayer rect.bg').forEach(function(rect) {
         var style = getComputedStyle(rect);

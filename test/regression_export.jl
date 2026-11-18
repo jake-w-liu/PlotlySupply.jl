@@ -642,3 +642,23 @@ end
 	positions = [first(findfirst(name * "=\"", root)) for name in ("xmlns", "width", "height", "viewBox", "style")]
 	@test issorted(positions)
 end
+
+@testset "regression export: exact page and pixel sizes for every units value (Z66)" begin
+	fig = plot_scatter(1:5, [1, 3, 2, 5, 4.0]; xlabel = "x", ylabel = "y")
+	points_per = Dict(:in => 72.0, :cm => 72 / 2.54, :mm => 72 / 25.4, :pt => 1.0, :px => 0.75)
+	per_inch = Dict(:in => 1.0, :cm => 2.54, :mm => 25.4, :pt => 72.0, :px => 96.0)
+	for (w, h, units) in ((8.3, 6.0, :cm), (3.5, 2.5, :in), (89, 60, :mm), (252, 180, :pt), (336, 252, :px), (7.16, 3, :in), (183, 100, :mm))
+		box = _reg_media_box(savefig(fig; format = "pdf", width = w, height = h, units = units))
+		@test isapprox(box[3] - box[1], w * points_per[units]; atol = 0.01)
+		@test isapprox(box[4] - box[2], h * points_per[units]; atol = 0.01)
+		if _reg_has_ghostscript()
+			eps = _reg_ascii(savefig(fig; format = "eps", width = w, height = h, units = units))
+			bb = parse.(Float64, match(r"%%HiResBoundingBox: (\S+) (\S+) (\S+) (\S+)", eps).captures)
+			@test isapprox(bb[3], w * points_per[units]; atol = 0.01) && isapprox(bb[4], h * points_per[units]; atol = 0.01)
+		end
+		for dpi in (300, 600)
+			png = savefig(fig; format = "png", width = w, height = h, units = units, dpi = dpi)
+			@test _reg_png_size(png) == (round(Int, w / per_inch[units] * dpi), round(Int, h / per_inch[units] * dpi))
+		end
+	end
+end

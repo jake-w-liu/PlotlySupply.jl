@@ -1065,3 +1065,8 @@ end
 		end
 	end
 end
+
+@testset "sci export: EPS flattening opaques translucent 3-D scene backgrounds" begin
+	js = PlotlySupply._FLATTEN_TRANSLUCENCY_JS
+	@test occursin("sceneUpdate", js) && occursin(".bgcolor", js) && occursin("Plotly.relayout(div, sceneUpdate)", js)
+end
