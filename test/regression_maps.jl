@@ -369,7 +369,8 @@ _reg_annotations(fig) = [
 			color=:red,
 		)
 		layout = fig.layout.fields
-		@test _reg_fields(layout[:title]) == Dict(:text => "ab")
+		# the figure title carries the layout engine's placement (D12) beside the text
+		@test _reg_fields(layout[:title])[:text] == "ab"
 		@test layout[:width] === 600
 		@test layout[:height] === 400
 		@test _reg_fields(layout[:font])[:size] == 12.5
