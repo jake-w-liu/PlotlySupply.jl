@@ -42,13 +42,15 @@ jobs:
           # Native binaries for the runner (aarch64 on macos-latest); setup-julia v3
           # refuses x86_64 on Apple Silicon unless forced.
           arch: default
-      - name: Install xvfb (headless Linux display for Electron)
+      - name: Prepare Linux Display (a virtual X server for Electron)
         if: runner.os == 'Linux'
         run: |
-          if ! command -v xvfb-run >/dev/null 2>&1; then
+          if ! command -v Xvfb >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y xvfb
           fi
+          Xvfb :99 -screen 0 1920x1080x24 >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
@@ -56,10 +58,6 @@ jobs:
           # Coverage instrumentation slows the suite down; one job (Linux, latest
           # Julia) measures it and uploads it, the others only test.
           coverage: ${{ matrix.os == 'ubuntu-latest' && matrix.version == '1' }}
-          # The tests open real Electron windows. Linux runners have no display, so
-          # run Julia (and the Electron processes it starts) inside a virtual X server.
-          # PlotlySupply disables Electron's SUID sandbox when CI/GITHUB_ACTIONS is set.
-          prefix: ${{ runner.os == 'Linux' && 'xvfb-run --auto-servernum --server-args=-screen\ 0\ 1920x1080x24' || '' }}
       - uses: julia-actions/julia-processcoverage@v1
         if: matrix.os == 'ubuntu-latest' && matrix.version == '1'
       - name: Show coverage info
