@@ -246,4 +246,29 @@ end
         end
         @test isempty(offenders)
     end
+
+    @testset "package defaults are guarded between test files" begin
+        # runtests.jl snapshots the active style, default template, default
+        # legend position, mathtext settings and style registry around every
+        # file and fails the file that leaves one changed.
+        runner = parsed["runtests.jl"]
+        @test _hygiene_includes(runner, "testutils.jl")
+        @test occursin("_global_defaults_snapshot", read(joinpath(testdir, "runtests.jl"), String))
+
+        before = _global_defaults_snapshot()
+        @test _global_defaults_diff(before, _global_defaults_snapshot()) == Symbol[]
+        try
+            set_default_style!(:publication)
+            set_default_template!("plotly_dark")
+            set_default_legend_position!(:bottomleft)
+            PlotlySupply._MATHTEXT_SETTINGS[] = PlotlySupply._MathtextSettings(false, "", "", false)
+            register_style!(:hygiene_probe_style, PlotStyle())
+            @test Set(_global_defaults_diff(before, _global_defaults_snapshot())) ==
+                Set([:style, :template, :legend_position, :mathtext, :style_registry])
+        finally
+            _global_defaults_restore!(before)
+        end
+        @test _global_defaults_diff(before, _global_defaults_snapshot()) == Symbol[]
+        @test get_default_legend_position() == :topright
+    end
 end

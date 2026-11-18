@@ -51,6 +51,59 @@ function _test_files_in_run_order(testdir::AbstractString)
     )
 end
 
+# The package-wide defaults a test file must leave as it found them: the active
+# style, the default template, the default legend position, the mathtext
+# settings and the names in the style registry. A file that changes one and
+# does not restore it changes what every later file of the full run measures
+# (a style or margin leaking from an earlier file), so runtests.jl compares
+# this snapshot at the end of every file and restores it.
+_global_defaults_snapshot() = (
+    style = deepcopy(PlotlySupply._ACTIVE_STYLE[]),
+    style_ref = PlotlySupply._ACTIVE_STYLE[],
+    template = PlotlySupply._DEFAULT_TEMPLATE[],
+    legend_position = PlotlySupply._DEFAULT_LEGEND_POSITION[],
+    mathtext = PlotlySupply._MATHTEXT_SETTINGS[],
+    registry = Set(keys(PlotlySupply._STYLE_REGISTRY)),
+)
+
+# Field-by-field equality of two values (mutable structs compare by identity
+# with `==`, and a PlotStyle holds vectors and tuples).
+function _same_value(a, b)
+    a === b && return true
+    typeof(a) === typeof(b) || return false
+    if a isa AbstractArray || a isa AbstractDict || a isa Tuple || a isa NamedTuple
+        return isequal(a, b)
+    end
+    if isstructtype(typeof(a)) && fieldcount(typeof(a)) > 0
+        return all(i -> _same_value(getfield(a, i), getfield(b, i)), 1:fieldcount(typeof(a)))
+    end
+    return isequal(a, b)
+end
+
+# Names of the defaults that differ between two snapshots (empty when equal).
+function _global_defaults_diff(before, after)
+    changed = Symbol[]
+    _same_value(before.style, after.style) || push!(changed, :style)
+    _same_value(before.template, after.template) || push!(changed, :template)
+    before.legend_position == after.legend_position || push!(changed, :legend_position)
+    _same_value(before.mathtext, after.mathtext) || push!(changed, :mathtext)
+    before.registry == after.registry || push!(changed, :style_registry)
+    return changed
+end
+
+function _global_defaults_restore!(snapshot)
+    # The saved reference unless that object was changed in place.
+    PlotlySupply._ACTIVE_STYLE[] = _same_value(snapshot.style_ref, snapshot.style) ?
+        snapshot.style_ref : deepcopy(snapshot.style)
+    PlotlySupply._DEFAULT_TEMPLATE[] = snapshot.template
+    PlotlySupply._DEFAULT_LEGEND_POSITION[] = snapshot.legend_position
+    PlotlySupply._MATHTEXT_SETTINGS[] = snapshot.mathtext
+    for name in collect(keys(PlotlySupply._STYLE_REGISTRY))
+        name in snapshot.registry || delete!(PlotlySupply._STYLE_REGISTRY, name)
+    end
+    return nothing
+end
+
 struct _UnsupportedTrace <: AbstractTrace end
 
 mutable struct _LifecycleFakeWindow

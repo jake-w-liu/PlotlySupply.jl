@@ -7573,26 +7573,34 @@ function _prepare_full_model_mutation_transaction(
 	mutation_scope !== nothing && get(mutation_scope, :template_untouched, false) === true &&
 		_share_untouched_template!(memo, p.layout, (), (;))
 	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
-	staged_data = copy(p.data)
+	# A layout-only mutation (the `update_xaxes!` family) writes no trace, so
+	# when every trace is an ordinary GenericTrace they are shared instead of
+	# cloned: staging then costs O(layout), not O(traces).
+	share_traces = mutation_scope !== nothing &&
+		get(mutation_scope, :data_untouched, false) === true &&
+		p.data isa Vector && all(t -> t isa GenericTrace, p.data)
+	staged_data = share_traces ? p.data : copy(p.data)
 	memo[p.data] = staged_data
-	# Clone custom roots first. Their general deepcopy discovers every shared
-	# object; optimized GenericTrace/Layout cloning can then reuse those memoized
-	# counterparts without deep-copying ordinary numeric payloads globally.
-	for original in p.data
-		original isa GenericTrace && continue
-		get!(
-			() -> _clone_trace_for_mutation(original, memo),
-			staged_traces,
-			original,
-		)
-	end
-	for ind in eachindex(staged_data)
-		original = p.data[ind]
-		staged_data[ind] = get!(
-			() -> _clone_trace_for_mutation(original, memo),
-			staged_traces,
-			original,
-		)
+	if !share_traces
+		# Clone custom roots first. Their general deepcopy discovers every shared
+		# object; optimized GenericTrace/Layout cloning can then reuse those memoized
+		# counterparts without deep-copying ordinary numeric payloads globally.
+		for original in p.data
+			original isa GenericTrace && continue
+			get!(
+				() -> _clone_trace_for_mutation(original, memo),
+				staged_traces,
+				original,
+			)
+		end
+		for ind in eachindex(staged_data)
+			original = p.data[ind]
+			staged_data[ind] = get!(
+				() -> _clone_trace_for_mutation(original, memo),
+				staged_traces,
+				original,
+			)
+		end
 	end
 	staged_layout = _clone_layout_for_mutation(p.layout, memo)
 	if p.layout isa Layout && staged_layout isa Layout
@@ -7961,10 +7969,39 @@ function _prepare_full_model_mutation_transaction(
 		end
 	end
 
+	# A layout-only mutation that left data, frames and config alone is sent as
+	# the leaves it changed (Plotly.relayout), like `relayout!`: its cost follows
+	# the keys written, not the size of the figure. Anything the incremental
+	# path cannot express (renderer side effects, a replaced root) refreshes
+	# the whole figure as before.
+	layout_delta = nothing
+	if sp !== nothing &&
+			early_script === nothing &&
+			mutation_scope !== nothing &&
+			get(mutation_scope, :data_untouched, false) === true &&
+			!frames_changed && !config_changed &&
+			!replace_layout_root && !replace_data_root &&
+			!replace_frames_root && !replace_config_root &&
+			data_unchanged &&
+			p.layout isa Layout && candidate.layout isa Layout
+		delta = _plotly_leaf_deltas(
+			p.layout.fields,
+			candidate.layout.fields,
+			memo,
+		)
+		_incremental_renderer_side_effects(
+			IdDict{AbstractTrace,AbstractTrace}(),
+			IdDict{AbstractTrace,Dict{String,Any}}(),
+			candidate.layout,
+			delta,
+		) || (layout_delta = delta)
+	end
 	script = if sp === nothing
 		nothing
 	elseif early_script !== nothing
 		early_script
+	elseif layout_delta !== nothing
+		_plotlyjs_relayout_script(sp, layout_delta)
 	else
 		_plotlyjs_refresh_script(
 			sp,
@@ -8028,7 +8065,8 @@ function _prepare_full_model_mutation_transaction(
 	end
 	return (
 		script = script,
-		operation = frames_changed ? "newPlot" : "react",
+		operation = frames_changed ? "newPlot" :
+			(layout_delta !== nothing ? "relayout" : "react"),
 		commit = commit,
 	)
 end
@@ -8695,7 +8733,17 @@ _trace_mutation_scope(indices) = (
 	trace_indices = collect(indices),
 	layout = false,
 )
+# The mutation writes the layout only: no trace is touched or added, and the
+# layout's template is not written.
 const _LAYOUT_ONLY_MUTATION_SCOPE = (
+	trace_indices = (),
+	layout = true,
+	template_untouched = true,
+	data_untouched = true,
+)
+# `add_trace!`: the layout is written (axes it creates) and a trace is appended,
+# but no existing trace is changed.
+const _APPEND_TRACE_MUTATION_SCOPE = (
 	trace_indices = (),
 	layout = true,
 	template_untouched = true,

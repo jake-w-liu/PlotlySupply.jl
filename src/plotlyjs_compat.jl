@@ -573,6 +573,80 @@ function _assign_export_uids!(data::AbstractVector)
 	return data
 end
 
+# ── typed arrays for the renderer ───────────────────────────────────
+# A large dense numeric array (a 2000 x 2000 heatmap is 4 million numbers) costs
+# far more as JSON text than as bytes: about 19 characters per number against
+# 10.7 for base64 of a Float64, and the export window has to parse every digit.
+# plotly.js (2.28 and later; the bundled one is 2.35) reads a data array given
+# as `{dtype, bdata, shape}`, so the arrays that carry the data of a trace are
+# sent that way once they have `_EXPORT_TYPED_ARRAY_MIN` elements. Smaller
+# arrays, other attributes and other element types (Int64, dates, strings, ...:
+# plotly.js has no 64-bit integer dtype) stay JSON, as does everything on a
+# big-endian host. The export window is the only consumer: html and json files
+# keep plain JSON arrays.
+const _EXPORT_TYPED_ARRAY_MIN = Ref(50_000)
+const _EXPORT_TYPED_ARRAY_KEYS = (:x, :y, :z, :r, :theta, :lat, :lon)
+
+struct _TypedArrayPayload
+	dtype::String
+	bdata::String
+	shape::Union{Nothing,String}
+end
+
+function PlotlyBase.JSON.lower(payload::_TypedArrayPayload)
+	out = Dict{String,Any}("dtype" => payload.dtype, "bdata" => payload.bdata)
+	payload.shape === nothing || (out["shape"] = payload.shape)
+	return out
+end
+
+_typed_array_dtype(::Type{Float64}) = "f8"
+_typed_array_dtype(::Type{Float32}) = "f4"
+_typed_array_dtype(::Type{Int32}) = "i4"
+_typed_array_dtype(::Type{Int16}) = "i2"
+_typed_array_dtype(::Type{Int8}) = "i1"
+_typed_array_dtype(::Type{UInt32}) = "u4"
+_typed_array_dtype(::Type{UInt16}) = "u2"
+_typed_array_dtype(::Type{UInt8}) = "u1"
+_typed_array_dtype(::Type) = nothing
+
+# The payload for `value`, or `nothing` when it stays JSON. JSON.jl writes a
+# matrix as an array of its columns (`[[1,4],[2,5],[3,6]]` for `[1 2 3; 4 5 6]`),
+# so the typed array has the same layout: the bytes are the matrix in memory
+# order and `shape` is "columns, rows".
+function _typed_array_payload(value)
+	ENDIAN_BOM == 0x04030201 || return nothing
+	value isa AbstractArray || return nothing
+	ndims(value) in (1, 2) || return nothing
+	length(value) >= _EXPORT_TYPED_ARRAY_MIN[] || return nothing
+	dtype = _typed_array_dtype(eltype(value))
+	dtype === nothing && return nothing
+	dense = value isa DenseArray ? value : collect(value)
+	flat = vec(dense)
+	shape = ndims(value) == 2 ? "$(size(value, 2)), $(size(value, 1))" : nothing
+	return _TypedArrayPayload(dtype, Base64.base64encode(flat), shape)
+end
+
+# `data` (lowered traces) with the large data arrays of each trace replaced by
+# typed-array payloads. A trace that changes is copied; the figure is not touched.
+function _export_typed_arrays(data::AbstractVector)
+	out = Any[]
+	sizehint!(out, length(data))
+	for trace in data
+		changed = nothing
+		if trace isa AbstractDict
+			for key in _EXPORT_TYPED_ARRAY_KEYS, name in (key, String(key))
+				haskey(trace, name) || continue
+				payload = _typed_array_payload(trace[name])
+				payload === nothing && continue
+				changed === nothing && (changed = copy(trace))
+				changed[name] = payload
+			end
+		end
+		push!(out, changed === nothing ? trace : changed)
+	end
+	return out
+end
+
 function _prepare_renderer_export(
 	p::Plot,
 	kwargs;
@@ -588,7 +662,7 @@ function _prepare_renderer_export(
 	resolved.deterministic && _assign_export_uids!(data)
 	_scat_export_line_simplify!(data)
 	return _PreparedRendererExport(
-		_json_js(data),
+		_json_js(_export_typed_arrays(data)),
 		_json_js(layout),
 		_json_js(figure.config),
 		resolved,
@@ -1345,6 +1419,23 @@ const _FLATTEN_TRANSLUCENCY_JS = """
       changes.forEach(function(change) {
         if (change.fill !== undefined) { change.el.style.fill = change.fill; change.el.style.fillOpacity = '1'; }
         if (change.stroke !== undefined) { change.el.style.stroke = change.stroke; change.el.style.strokeOpacity = '1'; }
+      });
+      // A translucent area fill (a band, a fill between curves) is blended with
+      // the plot background above, so it is opaque now: drawn after the curves
+      // of earlier traces it would hide them. Move such a trace below the other
+      // traces of its layer, keeping the order of the moved ones (the curves
+      // then show at full strength where the page would tint them through the
+      // fill).
+      var fillAnchors = new Map();
+      changes.forEach(function(change) {
+        if (change.fill === undefined || !change.el.classList.contains('js-fill')) return;
+        var trace = change.el.closest('g.trace');
+        var layer = trace && trace.parentNode;
+        if (!layer || trace.parentNode !== layer) return;
+        if (!fillAnchors.has(layer)) fillAnchors.set(layer, layer.firstElementChild);
+        var anchor = fillAnchors.get(layer);
+        if (anchor === trace) fillAnchors.set(layer, trace.nextElementSibling);
+        else if (anchor) layer.insertBefore(trace, anchor);
       });
       for (var k = 0; k < images.length; k++) {
         var item = images[k];
@@ -2117,7 +2208,11 @@ What each file contains:
   before the export fails with a timeout error.
 
 `html` and `json` validate every keyword but ignore the size, resolution and
-renderer options; `background` and `tight` apply to all formats.
+renderer options; `background` and `tight` apply to all formats. The 3-D scene cameras of an
+html or json file are not panned: a camera centre PlotlySupply had moved to frame
+the data (or one the live window kept after a pan) is written back at the centre of
+the scene box (camera `center = (0, 0, 0)`), the pivot of interactive rotation, so the
+interactive page orbits the middle of the scene.
 
 A file is written atomically: the output goes to a temporary file in the same
 directory, which then replaces the destination in one rename. A symbolic link
@@ -2226,7 +2321,7 @@ function PlotlyBase.add_trace!(
 )
 	return _transactional_full_plot_mutation!(
 		p;
-		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+		mutation_scope = _APPEND_TRACE_MUTATION_SCOPE,
 	) do current
 		_invoke_plot_add_trace!(current, trace; kw...)
 	end
@@ -2235,7 +2330,7 @@ end
 function PlotlyBase.add_trace!(sp::SyncPlot, trace::GenericTrace; kw...)
 	return _mutate_and_refresh_syncplot!(
 		sp;
-		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
+		mutation_scope = _APPEND_TRACE_MUTATION_SCOPE,
 	) do current
 		_invoke_plot_add_trace!(current, trace; kw...)
 	end
