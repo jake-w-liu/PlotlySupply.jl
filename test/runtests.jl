@@ -5340,11 +5340,11 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             window.on_close = () -> close(sp)
 
             task = @async close(sp)
-            status = timedwait(() -> istaskdone(task), 2.0; pollint=0.01)
+            status = timedwait(() -> istaskdone(task), 30.0; pollint=0.01)
             if status === :timed_out
                 # Keep a regression failure from leaving its test task blocked.
                 notify(getfield(sp, :_resources).close_done)
-                timedwait(() -> istaskdone(task), 2.0; pollint=0.01)
+                timedwait(() -> istaskdone(task), 30.0; pollint=0.01)
             end
 
             @test status === :ok

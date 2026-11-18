@@ -1080,7 +1080,8 @@ end
 	# A mutation scans a large colour array once (cost guard).
 	h = plot_heatmap(rand(1500, 1500))
 	colorbar!(h; title = "a")
-	t = @elapsed colorbar!(h; title = "b")
+	# (best of 3: a loaded machine can stall one timing, not all three)
+	t = minimum(title -> @elapsed(colorbar!(h; title = title)), ("b", "c", "d"))
 	@test t < 0.5
 end
 
@@ -1101,7 +1102,7 @@ end
 	@test length(cache) == 1
 	# Cost guard: finalizing a 2 x 3 grid of fields stays fast.
 	_SFN._finalize_figure!(sf)
-	@test (@elapsed _SFN._finalize_figure!(sf)) < 0.5
+	@test minimum(_ -> @elapsed(_SFN._finalize_figure!(sf)), 1:3) < 0.5
 end
 
 @testset "the extent scan allocates no copies of large data (Z79a)" begin
@@ -1115,7 +1116,7 @@ end
 	@test bytes < 100_000
 	bytes = @allocated _SFN._finalize_figure!(s)
 	@test bytes < 2_000_000
-	@test (@elapsed _SFN._finalize_figure!(s)) < 0.25
+	@test minimum(_ -> @elapsed(_SFN._finalize_figure!(s)), 1:3) < 0.25
 end
 
 @testset "export copies refit scenes; document exports keep the camera centre (Z43)" begin

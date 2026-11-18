@@ -41,7 +41,7 @@ We are generally not looking to:
 1.  Fork the repository and create a new branch from `main`.
 2.  Make your changes.
 3.  Add tests for your changes (see below).
-4.  Ensure your code is well-documented: every exported function needs a complete docstring, because the documentation build (`docs/make.jl`) fails on missing docstrings and on any other Documenter warning. A new page under `docs/src` is added to the navigation after the main pages automatically.
+4.  Ensure your code is well-documented: every exported function needs a complete docstring, because the documentation build (`docs/make.jl`) fails on missing docstrings and on any other Documenter warning. A new page under `docs/src` must be listed in `PAGES` in `docs/make.jl` to appear in the navigation.
 5.  Open a pull request.
 
 ### Running the tests
