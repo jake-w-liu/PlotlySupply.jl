@@ -22,6 +22,7 @@ const PAGES = Any[
 		"Other charts and maps" => "charts.md",
 	],
 	"Figures for papers" => "papers.md",
+	"Performance" => "performance.md",
 	"Examples" => "example.md",
 	"Coming from matplotlib" => "matplotlib.md",
 	"Migrating from 1.x" => "migration.md",

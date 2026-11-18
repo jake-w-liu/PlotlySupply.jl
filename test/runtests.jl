@@ -5542,6 +5542,14 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     # (testutils.jl) first, then all the rest, including the sci_* and
     # regression_* suites, in name order. A new file needs no registration.
     for test_file in _test_files_in_run_order(@__DIR__)
+        defaults_before = _global_defaults_snapshot()
         include(test_file)
+        # A file that changes a package-wide default must put it back: what it
+        # leaves would change every later file of this run.
+        leaked = _global_defaults_diff(defaults_before, _global_defaults_snapshot())
+        @testset "$(basename(test_file)) leaves the package defaults as it found them" begin
+            @test leaked == Symbol[]
+        end
+        isempty(leaked) || _global_defaults_restore!(defaults_before)
     end
 end

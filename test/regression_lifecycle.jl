@@ -97,7 +97,11 @@ function _rl_native_close!(window::_RLFakeWindow)
 	return nothing
 end
 
-function _rl_wait(predicate; timeout::Float64=10.0, collect::Bool=false)
+# The wait returns as soon as the predicate holds; the timeout only bounds a real
+# hang. It is 60 s because a loaded machine (load average above 60, three full
+# suites at once) needed more than the former 10 s for a GC finalizer and the
+# task it schedules to run (2 of 3 full runs failed the finalizer test).
+function _rl_wait(predicate; timeout::Float64=60.0, collect::Bool=false)
 	deadline = time() + timeout
 	while time() < deadline
 		predicate() && return true
@@ -1351,9 +1355,9 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 				))
 				@test !devtools_open()
 				@test toggle_devtools(sp) === nothing
-				@test _rl_wait(devtools_open; timeout = 10.0)
+				@test _rl_wait(devtools_open; timeout = 30.0)
 				@test toggle_devtools(sp) === nothing
-				@test _rl_wait(() -> !devtools_open(); timeout = 10.0)
+				@test _rl_wait(() -> !devtools_open(); timeout = 30.0)
 				@test isopen(sp)
 			finally
 				close(sp)

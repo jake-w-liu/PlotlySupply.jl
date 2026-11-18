@@ -887,6 +887,8 @@ end
             expected_operation =
                 operation === :plot_pie ? "Plotly.addTraces" :
                 operation === :set_legend ? "Plotly.relayout" :
+                operation === :update_geos ? "Plotly.relayout" :
+                operation === :add_hline ? "Plotly.relayout" :
                 operation === :extendtraces ? "Plotly.extendTraces" :
                 operation === :prependtraces ? "Plotly.prependTraces" :
                 "Plotly.react"
@@ -5649,7 +5651,7 @@ end
 
     put!(state.release, nothing)
     geo_script = take!(state.entered)
-    @test occursin("Plotly.react", geo_script)
+    @test occursin("Plotly.relayout", geo_script)   # layout-only: the changed leaves (Z1)
     @test occursin("\"bgcolor\":\"red\"", geo_script)
     put!(state.release, nothing)
     @test fetch(relayout_task) === sp
@@ -6027,6 +6029,142 @@ end
         @test fetch(first_task) === sf
         @test fetch(second_task) === sf
         @test sf.legend_position == :bottom
+        close(sp)
+    end
+end
+
+# Z1/Q30: a layout-only update_* verb on a window costs what it writes. The
+# renderer gets the leaves it changed (Plotly.relayout), no trace is cloned or
+# serialised, and the work does not grow with the number of traces.
+@testset "layout-only update_* verbs are incremental (Z1, Q30)" begin
+    function many_trace_fixture(n; register::Bool=false, outcomes=Any[])
+        state = _TransactionRendererState(outcomes)
+        p = Plot(
+            [scatter(x=collect(1:50), y=rand(50), name="t$i") for i in 1:n],
+            Layout(title="many-traces"),
+        )
+        resources = PlotlySupply._SyncPlotResources(nothing, _transaction_backend(state))
+        sp = SyncPlot(p, nothing, :transaction_window, "transaction-div", resources)
+        if register
+            PlotlySupply._register_displayed_syncplot!(p, sp)
+        end
+        return p, sp, state
+    end
+
+    for (verb, kw, key) in (
+        (update_xaxes!, (; title_text="a"), "xaxis"),
+        (update_yaxes!, (; title_text="b"), "yaxis"),
+        (update_geos!, (; bgcolor="red"), "geo"),
+    )
+        p, sp, state = many_trace_fixture(40)
+        traces_before = copy(p.data)
+        fields_before = [t.fields for t in p.data]
+        try
+            verb(sp; kw...)
+            @test length(state.scripts) == 1
+            script = only(state.scripts)
+            @test occursin("Plotly.relayout", script)
+            @test !occursin("Plotly.react", script)
+            @test !occursin("\"type\":\"scatter\"", script)   # no trace payload
+            @test occursin(key, script)
+            # the model is updated and every trace is the same object
+            @test all(i -> p.data[i] === traces_before[i], eachindex(traces_before))
+            @test all(i -> p.data[i].fields === fields_before[i], eachindex(fields_before))
+        finally
+            close(sp)
+        end
+    end
+
+    # a registered Plot goes through the same path
+    p, sp, state = many_trace_fixture(10; register=true)
+    try
+        update_xaxes!(p; title_text="reg")
+        @test occursin("Plotly.relayout", only(state.scripts))
+        @test p.layout[:xaxis][:title][:text] == "reg" ||
+            p.layout[:xaxis][:title_text] == "reg"
+    finally
+        close(sp)
+    end
+
+    # cost does not grow with the number of traces: 4 vs 400 traces
+    function verb_allocs(n)
+        p, sp, state = many_trace_fixture(n)
+        try
+            update_xaxes!(sp; title_text="warm")
+            update_xaxes!(sp; title_text="warm again")   # the second call compiles a path of its own
+            return @allocated update_xaxes!(sp; title_text="measured")
+        finally
+            close(sp)
+        end
+    end
+    small, large = verb_allocs(4), verb_allocs(400)
+    @test large < 400_000
+    @test large < 3 * small
+
+    # ... and so does the plain model path (no window)
+    function plot_verb_allocs(n)
+        p = Plot([scatter(x=collect(1:50), y=rand(50)) for _ in 1:n], Layout(title="m"))
+        update_xaxes!(p; title_text="warm")
+        update_xaxes!(p; title_text="warm again")
+        return @allocated update_xaxes!(p; title_text="measured")
+    end
+    psmall, plarge = plot_verb_allocs(4), plot_verb_allocs(400)
+    @test plarge < 400_000
+    @test plarge < 3 * psmall
+
+    # a layout object that a trace also holds (an alias) is followed: the traces
+    # are staged then and the renderer gets a full refresh, not just a relayout
+    shared_axis = attr(title_text="shared")
+    shared_layout = Layout(title="aliased")
+    shared_layout.fields[:xaxis] = shared_axis
+    shared_trace = scatter(x=[1, 2], y=[3, 4])
+    shared_trace.fields[:meta] = shared_axis
+    other_trace = scatter(x=[1, 2], y=[5, 6])
+    alias_state = _TransactionRendererState(Any[])
+    alias_plot = Plot([shared_trace, other_trace], shared_layout)
+    alias_sp = SyncPlot(alias_plot, nothing, :transaction_window, "alias-div",
+        PlotlySupply._SyncPlotResources(nothing, _transaction_backend(alias_state)))
+    try
+        @test PlotlySupply._traces_may_alias_layout(alias_plot)
+        update_xaxes!(alias_sp; title_text="changed")
+        @test only(alias_state.scripts) |> s -> occursin("Plotly.react", s) || occursin("Plotly.restyle", s) || occursin("Plotly.update", s)
+        @test alias_plot.data[1].fields[:meta] === alias_plot.layout.fields[:xaxis]
+        @test alias_plot.layout.fields[:xaxis][:title_text] == "changed"
+        @test alias_plot.data[2] === other_trace
+    finally
+        close(alias_sp)
+    end
+    # no alias: the traces are shared, not staged
+    plain_plot, plain_sp, _ = many_trace_fixture(3)
+    try
+        @test !PlotlySupply._traces_may_alias_layout(plain_plot)
+    finally
+        close(plain_sp)
+    end
+
+    # a layout-only verb that fails after the renderer rejected it rolls back
+    # the model and re-renders the old figure (Plotly.newPlot)
+    p, sp, state = many_trace_fixture(3; outcomes=Any[ErrorException("boom"), "ok"])
+    json_before = PlotlyBase.JSON.json(p; allownan=true)
+    try
+        @test_throws ErrorException update_xaxes!(sp; title_text="never")
+        @test PlotlyBase.JSON.json(p; allownan=true) == json_before
+        @test length(state.scripts) == 2
+        @test occursin("Plotly.relayout", state.scripts[1])
+        @test occursin("Plotly.newPlot", state.scripts[2])
+    finally
+        close(sp)
+    end
+
+    # add_trace! appends a trace: it still refreshes the whole figure and does
+    # not touch the caller's data vector when the renderer fails
+    p, sp, state = many_trace_fixture(3; outcomes=Any[ErrorException("boom"), "ok"])
+    n_before = length(p.data)
+    try
+        @test_throws ErrorException add_trace!(sp, scatter(y=[1, 2], name="added"))
+        @test length(p.data) == n_before
+        @test occursin("Plotly.react", state.scripts[1])
+    finally
         close(sp)
     end
 end

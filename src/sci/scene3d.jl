@@ -1599,7 +1599,10 @@ _s3_visible_chars(text::AbstractString) =
 
 # JavaScript string length (UTF-16 code units), which gl-axes compares with 4.
 _s3_js_length(text::AbstractString) =
-	sum(c -> (isvalid(c) && codepoint(c) > 0xFFFF) ? 2 : 1, text; init = 0)
+	# `c::Char`: an untyped closure compiles `isvalid(::Any)`, which loading ElectronCall
+	# (it brings URIs.isvalid(::URI)) invalidates together with everything above it
+	# (the second export of a session recompiled for 0.7 s).
+	sum((c::Char) -> (isvalid(c) && codepoint(c) > 0xFFFF) ? 2 : 1, text; init = 0)
 
 # Characters of plotly.js's tick label for `value` on a linear axis with tick
 # step `step`: sign, integer digits and as many decimals as the step needs (an

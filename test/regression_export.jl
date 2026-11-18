@@ -1,4 +1,5 @@
 using Test, PlotlySupply
+using Base64
 using PlotlySupply: PlotlyBase
 
 # Live-renderer export regressions (hidden Electron export window). Pure byte
@@ -534,6 +535,120 @@ end
 	else
 		@test_throws ArgumentError savefig(_reg_translucent_square(); format = "eps")
 	end
+end
+
+# P6 (ppmraw) image as (width, height, bytes of r, g, b triples).
+function _reg_ppm(data::Vector{UInt8})
+	text = String(UInt8[b < 0x80 ? b : UInt8('?') for b in data[1:min(end, 120)]])
+	m = match(r"^P6\s+(?:#[^\n]*\n\s*)?(\d+)\s+(\d+)\s+255\s", text)
+	m === nothing && error("not a P6 image")
+	w, h = parse(Int, m.captures[1]), parse(Int, m.captures[2])
+	return w, h, data[(ncodeunits(m.match) + 1):end]
+end
+
+@testset "regression export: an EPS band does not hide the curves under it" begin
+	if _reg_has_ghostscript()
+		x = collect(range(0.0, 1.0; length = 50))
+		p = plot_scatter(x, fill(0.5, 50); color = "#ff0000", linewidth = 8,
+			xrange = [0, 1], yrange = [0, 1])
+		plot_band!(p, x, fill(0.2, 50), fill(0.8, 50); color = "#0000ff", opacity = 0.3)
+		red_pixels(raster) = begin
+			w, h, bytes = _reg_ppm(raster)
+			count(i -> bytes[i] > 200 && bytes[i + 1] < 90 && bytes[i + 2] < 90, 1:3:(3 * w * h))
+		end
+		mktempdir() do dir
+			gs = PlotlySupply._ghostscript_command()
+			function rasterize(bytes, name)
+				path = joinpath(dir, name)
+				write(path, bytes)
+				return read(pipeline(`$gs -q -dSAFER -dBATCH -dNOPAUSE -sDEVICE=ppmraw -r96 -dEPSCrop -sOutputFile=- $path`;
+					stderr = devnull))
+			end
+			eps_red = red_pixels(rasterize(savefig(p; format = "eps", width = 400, height = 300), "band.eps"))
+			# The line is 8 px thick and about 300 px long: it is drawn at full
+			# strength, not hidden by the blended band.
+			@test eps_red > 1500
+		end
+	end
+end
+
+@testset "regression export: large data arrays travel as typed arrays" begin
+	PS = PlotlySupply
+	decode(payload, T) = reinterpret(T, Base64.base64decode(payload.bdata))
+	old_min = PS._EXPORT_TYPED_ARRAY_MIN[]
+	try
+		PS._EXPORT_TYPED_ARRAY_MIN[] = 10
+		# the JSON layout of a matrix is an array of its columns: same here
+		m = reshape(collect(1.0:24.0), 4, 6)
+		@test PlotlyBase.JSON.json(m) == "[[1.0,2.0,3.0,4.0],[5.0,6.0,7.0,8.0],[9.0,10.0,11.0,12.0],[13.0,14.0,15.0,16.0],[17.0,18.0,19.0,20.0],[21.0,22.0,23.0,24.0]]"
+		mp = PS._typed_array_payload(m)
+		@test (mp.dtype, mp.shape) == ("f8", "6, 4")
+		@test decode(mp, Float64) == vec(m)
+		@test PlotlyBase.JSON.lower(mp) == Dict("dtype" => "f8", "bdata" => mp.bdata, "shape" => "6, 4")
+
+		# vectors, other dtypes, NaN and Inf, views, adjoints and ranges
+		v = [1.5, NaN, Inf, -Inf, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+		vp = PS._typed_array_payload(v)
+		@test vp.shape === nothing && vp.dtype == "f8"
+		@test isequal(decode(vp, Float64), v)
+		@test decode(PS._typed_array_payload(Float32.(1:20)), Float32) == Float32.(1:20)
+		@test PS._typed_array_payload(Int32.(1:20)).dtype == "i4"
+		@test PS._typed_array_payload(UInt8.(1:20)).dtype == "u1"
+		@test decode(PS._typed_array_payload(view(collect(1.0:40.0), 1:2:40)), Float64) == collect(1.0:2:39)
+		@test decode(PS._typed_array_payload(range(0, 1; length = 25)), Float64) == collect(range(0, 1; length = 25))
+		adj = PS._typed_array_payload(adjoint(m))
+		@test adj.shape == "4, 6" && decode(adj, Float64) == vec(collect(adjoint(m)))
+
+		# what stays JSON: short arrays, 64-bit integers, non-numbers, 3-D arrays
+		@test PS._typed_array_payload(collect(1.0:9)) === nothing
+		@test PS._typed_array_payload(collect(1:20)) === nothing
+		@test PS._typed_array_payload(string.(1:20)) === nothing
+		@test PS._typed_array_payload(fill(missing, 20)) === nothing
+		@test PS._typed_array_payload(zeros(3, 3, 3)) === nothing
+		@test PS._typed_array_payload("text") === nothing
+		@test PS._typed_array_payload(nothing) === nothing
+
+		# a lowered trace is copied, not changed; only the data keys convert
+		trace = Dict{Symbol,Any}(:type => "heatmap", :z => m, :x => collect(1:6),
+			:marker => Dict(:color => collect(1.0:20)), :text => string.(1:20))
+		out = PS._export_typed_arrays(Any[trace, "kept"])
+		@test out[2] == "kept"
+		@test trace[:z] === m
+		@test out[1][:z] isa PS._TypedArrayPayload
+		@test out[1][:x] === trace[:x] && out[1][:marker] === trace[:marker] && out[1][:text] === trace[:text]
+		string_keyed = Dict{String,Any}("type" => "scatter", "y" => collect(1.0:20))
+		@test PS._export_typed_arrays(Any[string_keyed])[1]["y"] isa PS._TypedArrayPayload
+		@test string_keyed["y"] isa Vector{Float64}
+
+		# the figure drawn from typed arrays is the figure drawn from JSON
+		x = collect(range(-2, 2; length = 40)); y = collect(range(-1, 1; length = 30))
+		z = [exp(-(a^2 + 3b^2)) for a in x, b in y]
+		heat = plot_heatmap(x, y, z; show = false)
+		surf = plot_surface(x, y, z; show = false)
+		line = plot_scatter(x, sin.(x); show = false)
+		for fig in (heat, surf, line), fmt in ("png", "svg")
+			PS._EXPORT_TYPED_ARRAY_MIN[] = 10
+			prepared = PS._prepare_savefig(fig, fmt, (;))
+			@test occursin("\"bdata\"", prepared.data_js)
+			typed = savefig(fig; format = fmt, width = 400, height = 300)
+			PS._EXPORT_TYPED_ARRAY_MIN[] = typemax(Int)
+			@test !occursin("\"bdata\"", PS._prepare_savefig(fig, fmt, (;)).data_js)
+			plain = savefig(fig; format = fmt, width = 400, height = 300)
+			@test typed == plain
+		end
+	finally
+		PS._EXPORT_TYPED_ARRAY_MIN[] = old_min
+	end
+
+	# the default threshold: a 1000 x 1000 heatmap is sent as bytes (about
+	# 10.7 characters per number, not about 19 as JSON text)
+	z = [sin(0.01i) * cos(0.013j) for i in 1:1000, j in 1:1000]
+	data_js = PS._prepare_savefig(plot_heatmap(z; show = false), "png", (;)).data_js
+	@test occursin("\"bdata\"", data_js)
+	@test sizeof(data_js) < 12 * length(z)
+	# html and json documents keep plain arrays
+	html = String(savefig(plot_heatmap(z[1:300, 1:300]; show = false); format = "html"))
+	@test !occursin("\"bdata\":", html)   # (plotly.js itself mentions the word)
 end
 
 @testset "regression export: deterministic bytes in every format" begin

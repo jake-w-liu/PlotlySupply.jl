@@ -7554,6 +7554,63 @@ end
 
 _noop_plot_commit(::Plot) = nothing
 
+# Whether a mutable object below the layout (outside its template) can also be
+# reached from a trace. Such an alias has to be followed through the staged
+# copy of the traces, so a layout-only mutation may share the traces only when
+# this is false. Conservative: a value this walk cannot classify, or one nested
+# deeper than 16 levels, counts as an alias. Numeric arrays are not entered, so
+# the cost follows the structure of the figure, not its data.
+function _traces_may_alias_layout(p::Plot)
+	layout = p.layout
+	layout isa Layout || return true
+	ids = IdDict{Any,Nothing}()
+	seen = IdDict{Any,Nothing}()
+	for (key, value) in layout.fields
+		key === :template && continue
+		_collect_graph_mutable_identities!(ids, value, seen)
+	end
+	isempty(ids) && return false
+	for trace in p.data
+		trace isa GenericTrace || return true
+		_reaches_layout_identity(trace.fields, ids, 0) && return true
+	end
+	return false
+end
+
+function _reaches_layout_identity(value, ids::IdDict{Any,Nothing}, depth::Int)::Bool
+	if isbits(value) ||
+			value isa Symbol ||
+			value isa String ||
+			value isa Type ||
+			value isa Module ||
+			value isa BigInt ||
+			value isa BigFloat
+		return false
+	end
+	depth > 16 && return true
+	haskey(ids, value) && return true
+	if value isa AbstractDict
+		for child in values(value)
+			_reaches_layout_identity(child, ids, depth + 1) && return true
+		end
+		return false
+	elseif value isa AbstractArray
+		_candidate_array_elements_may_carry_identity(eltype(value)) || return false
+		for ind in eachindex(value)
+			isassigned(value, ind) || continue
+			_reaches_layout_identity(value[ind], ids, depth + 1) && return true
+		end
+		return false
+	elseif value isa PlotlyBase.AbstractPlotlyAttribute
+		return _reaches_layout_identity(getfield(value, :fields), ids, depth + 1)
+	end
+	for ind in 1:fieldcount(typeof(value))
+		isdefined(value, ind) || continue
+		_reaches_layout_identity(getfield(value, ind), ids, depth + 1) && return true
+	end
+	return false
+end
+
 function _prepare_full_model_mutation_transaction(
 	sp::Union{Nothing,SyncPlot},
 	p::Plot,
@@ -7573,26 +7630,35 @@ function _prepare_full_model_mutation_transaction(
 	mutation_scope !== nothing && get(mutation_scope, :template_untouched, false) === true &&
 		_share_untouched_template!(memo, p.layout, (), (;))
 	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
-	staged_data = copy(p.data)
+	# A layout-only mutation (the `update_xaxes!` family) writes no trace, so
+	# when every trace is an ordinary GenericTrace they are shared instead of
+	# cloned: staging then costs O(layout), not O(traces).
+	share_traces = mutation_scope !== nothing &&
+		get(mutation_scope, :data_untouched, false) === true &&
+		p.data isa Vector && all(t -> t isa GenericTrace, p.data) &&
+		!_traces_may_alias_layout(p)
+	staged_data = share_traces ? p.data : copy(p.data)
 	memo[p.data] = staged_data
-	# Clone custom roots first. Their general deepcopy discovers every shared
-	# object; optimized GenericTrace/Layout cloning can then reuse those memoized
-	# counterparts without deep-copying ordinary numeric payloads globally.
-	for original in p.data
-		original isa GenericTrace && continue
-		get!(
-			() -> _clone_trace_for_mutation(original, memo),
-			staged_traces,
-			original,
-		)
-	end
-	for ind in eachindex(staged_data)
-		original = p.data[ind]
-		staged_data[ind] = get!(
-			() -> _clone_trace_for_mutation(original, memo),
-			staged_traces,
-			original,
-		)
+	if !share_traces
+		# Clone custom roots first. Their general deepcopy discovers every shared
+		# object; optimized GenericTrace/Layout cloning can then reuse those memoized
+		# counterparts without deep-copying ordinary numeric payloads globally.
+		for original in p.data
+			original isa GenericTrace && continue
+			get!(
+				() -> _clone_trace_for_mutation(original, memo),
+				staged_traces,
+				original,
+			)
+		end
+		for ind in eachindex(staged_data)
+			original = p.data[ind]
+			staged_data[ind] = get!(
+				() -> _clone_trace_for_mutation(original, memo),
+				staged_traces,
+				original,
+			)
+		end
 	end
 	staged_layout = _clone_layout_for_mutation(p.layout, memo)
 	if p.layout isa Layout && staged_layout isa Layout
@@ -7961,10 +8027,46 @@ function _prepare_full_model_mutation_transaction(
 		end
 	end
 
+	# A layout-only mutation that left data, frames and config alone is sent as
+	# the leaves it changed (Plotly.relayout), like `relayout!`: its cost follows
+	# the keys written, not the size of the figure. Anything the incremental
+	# path cannot express (renderer side effects, a replaced root) refreshes
+	# the whole figure as before.
+	layout_delta = nothing
+	if sp !== nothing &&
+			early_script === nothing &&
+			mutation_scope !== nothing &&
+			get(mutation_scope, :data_untouched, false) === true &&
+			!frames_changed && !config_changed &&
+			!replace_layout_root && !replace_data_root &&
+			!replace_frames_root && !replace_config_root &&
+			data_unchanged &&
+			p.layout isa Layout && candidate.layout isa Layout
+		# A trace changed through an alias of a layout object (staged copies
+		# of the traces exist then) needs a restyle: take the full refresh.
+		traces_unchanged =
+			all(original -> original isa GenericTrace, keys(staged_traces)) &&
+			all(isempty, values(_staged_trace_deltas(staged_traces, memo)))
+		delta = _plotly_leaf_deltas(
+			p.layout.fields,
+			candidate.layout.fields,
+			memo,
+		)
+		traces_unchanged &&
+			!_incremental_renderer_side_effects(
+				IdDict{AbstractTrace,AbstractTrace}(),
+				IdDict{AbstractTrace,Dict{String,Any}}(),
+				candidate.layout,
+				delta,
+			) &&
+			(layout_delta = delta)
+	end
 	script = if sp === nothing
 		nothing
 	elseif early_script !== nothing
 		early_script
+	elseif layout_delta !== nothing
+		_plotlyjs_relayout_script(sp, layout_delta)
 	else
 		_plotlyjs_refresh_script(
 			sp,
@@ -8028,7 +8130,8 @@ function _prepare_full_model_mutation_transaction(
 	end
 	return (
 		script = script,
-		operation = frames_changed ? "newPlot" : "react",
+		operation = frames_changed ? "newPlot" :
+			(layout_delta !== nothing ? "relayout" : "react"),
 		commit = commit,
 	)
 end
@@ -8699,7 +8802,17 @@ _trace_mutation_scope(indices) = (
 	trace_indices = collect(indices),
 	layout = false,
 )
+# The mutation writes the layout only: no trace is touched or added, and the
+# layout's template is not written.
 const _LAYOUT_ONLY_MUTATION_SCOPE = (
+	trace_indices = (),
+	layout = true,
+	template_untouched = true,
+	data_untouched = true,
+)
+# `add_trace!`: the layout is written (axes it creates) and a trace is appended,
+# but no existing trace is changed.
+const _APPEND_TRACE_MUTATION_SCOPE = (
 	trace_indices = (),
 	layout = true,
 	template_untouched = true,

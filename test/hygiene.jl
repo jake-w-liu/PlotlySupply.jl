@@ -246,4 +246,53 @@ end
         end
         @test isempty(offenders)
     end
+
+    @testset "package defaults are guarded between test files" begin
+        # runtests.jl snapshots the active style, default template, default
+        # legend position and mathtext settings around every
+        # file and fails the file that leaves one changed.
+        runner = parsed["runtests.jl"]
+        @test _hygiene_includes(runner, "testutils.jl")
+        @test occursin("_global_defaults_snapshot", read(joinpath(testdir, "runtests.jl"), String))
+
+        before = _global_defaults_snapshot()
+        @test _global_defaults_diff(before, _global_defaults_snapshot()) == Symbol[]
+        try
+            set_default_style!(:publication)
+            set_default_template!("plotly_dark")
+            set_default_legend_position!(:bottomleft)
+            PlotlySupply._MATHTEXT_SETTINGS[] = PlotlySupply._MathtextSettings(false, "", "", false)
+            @test Set(_global_defaults_diff(before, _global_defaults_snapshot())) ==
+                Set([:style, :template, :legend_position, :mathtext])
+        finally
+            _global_defaults_restore!(before)
+        end
+        @test _global_defaults_diff(before, _global_defaults_snapshot()) == Symbol[]
+        @test get_default_legend_position() == :topright
+
+        # A file run on its own is checked when its process ends.
+        mktempdir() do dir
+            utils = joinpath(testdir, "testutils.jl")
+            function exit_code(body)
+                script = joinpath(dir, "probe.jl")
+                write(script, "using Test, PlotlySupply\ninclude($(repr(utils)))\n" * body)
+                cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) $script`
+                return run(pipeline(ignorestatus(cmd); stdout = devnull, stderr = devnull)).exitcode
+            end
+            @test exit_code("set_default_legend_position!(:bottom); set_default_legend_position!(:topright)\n") == 0
+            @test exit_code("set_default_legend_position!(:bottom)\n") == 1
+        end
+    end
+
+    @testset "every docs page is in the manual's navigation" begin
+        # A strict (warnonly = false) docs build ignores a page that docs/make.jl
+        # does not list and fails on any link to it.
+        docs = joinpath(dirname(testdir), "docs")
+        if isfile(joinpath(docs, "make.jl")) && isdir(joinpath(docs, "src"))
+            make = read(joinpath(docs, "make.jl"), String)
+            pages = filter(name -> endswith(name, ".md"), readdir(joinpath(docs, "src")))
+            @test !isempty(pages)
+            @test all(page -> occursin("\"$page\"", make), pages)
+        end
+    end
 end

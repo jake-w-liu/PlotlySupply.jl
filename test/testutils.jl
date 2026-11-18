@@ -51,6 +51,69 @@ function _test_files_in_run_order(testdir::AbstractString)
     )
 end
 
+# The package-wide defaults a test file must leave as it found them: the active
+# style, the default template, the default legend position and the mathtext
+# settings. (Styles a file registers by name are not defaults: the docs
+# examples register `:talk` and `:paper`, and nothing reads those back.) A file that changes one and
+# does not restore it changes what every later file of the full run measures
+# (a style or margin leaking from an earlier file), so runtests.jl compares
+# this snapshot at the end of every file and restores it.
+_global_defaults_snapshot() = (
+    style = deepcopy(PlotlySupply._ACTIVE_STYLE[]),
+    style_ref = PlotlySupply._ACTIVE_STYLE[],
+    template = PlotlySupply._DEFAULT_TEMPLATE[],
+    legend_position = PlotlySupply._DEFAULT_LEGEND_POSITION[],
+    mathtext = PlotlySupply._MATHTEXT_SETTINGS[],
+)
+
+# Field-by-field equality of two values (mutable structs compare by identity
+# with `==`, and a PlotStyle holds vectors and tuples).
+function _same_value(a, b)
+    a === b && return true
+    typeof(a) === typeof(b) || return false
+    if a isa AbstractArray || a isa AbstractDict || a isa Tuple || a isa NamedTuple
+        return isequal(a, b)
+    end
+    if isstructtype(typeof(a)) && fieldcount(typeof(a)) > 0
+        return all(i -> _same_value(getfield(a, i), getfield(b, i)), 1:fieldcount(typeof(a)))
+    end
+    return isequal(a, b)
+end
+
+# Names of the defaults that differ between two snapshots (empty when equal).
+function _global_defaults_diff(before, after)
+    changed = Symbol[]
+    _same_value(before.style, after.style) || push!(changed, :style)
+    _same_value(before.template, after.template) || push!(changed, :template)
+    before.legend_position == after.legend_position || push!(changed, :legend_position)
+    _same_value(before.mathtext, after.mathtext) || push!(changed, :mathtext)
+    return changed
+end
+
+function _global_defaults_restore!(snapshot)
+    # The saved reference unless that object was changed in place.
+    PlotlySupply._ACTIVE_STYLE[] = _same_value(snapshot.style_ref, snapshot.style) ?
+        snapshot.style_ref : deepcopy(snapshot.style)
+    PlotlySupply._DEFAULT_TEMPLATE[] = snapshot.template
+    PlotlySupply._DEFAULT_LEGEND_POSITION[] = snapshot.legend_position
+    PlotlySupply._MATHTEXT_SETTINGS[] = snapshot.mathtext
+    return nothing
+end
+
+# Run on its own (`julia --project=. test/<file>.jl`) a file that includes this
+# one is checked when the process ends: the defaults it started with must be
+# the defaults it leaves. (Under runtests.jl every file is checked as it ends.)
+if !isdefined(@__MODULE__, :_GLOBAL_DEFAULTS_AT_START)
+    const _GLOBAL_DEFAULTS_AT_START = _global_defaults_snapshot()
+    atexit() do
+        leaked = _global_defaults_diff(_GLOBAL_DEFAULTS_AT_START, _global_defaults_snapshot())
+        if !isempty(leaked)
+            println(stderr, "ERROR: the test run changed package defaults and did not restore them: ", leaked)
+            exit(1)
+        end
+    end
+end
+
 struct _UnsupportedTrace <: AbstractTrace end
 
 mutable struct _LifecycleFakeWindow
@@ -189,7 +252,7 @@ function _image_command_backend(state::_ImageCommandState)
     )
 end
 
-function _wait_for_lifecycle(predicate; timeout::Float64=30.0, collect::Bool=false)
+function _wait_for_lifecycle(predicate; timeout::Float64=60.0, collect::Bool=false)
     deadline = time() + timeout
     while time() < deadline
         predicate() && return true
