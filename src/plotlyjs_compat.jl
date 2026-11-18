@@ -234,15 +234,15 @@ end
 
 Base.showerror(io::IO, err::_ExportTimeoutError) = print(io, err.message)
 
-# Unsupported formats keep raising `ErrorException`, as in 1.x.
+# An unsupported format is invalid user input: `ArgumentError`.
 function _validate_export_format(fmt::AbstractString)
 	name = lowercase(String(fmt))
 	name == "jpg" && return "jpeg"
 	name == "tif" && return "tiff"
-	name in _SAVEFIG_FORMATS || error(
+	name in _SAVEFIG_FORMATS || throw(ArgumentError(
 		"savefig: unsupported export format $(repr(name)). Supported: " *
 		"png, jpeg (or jpg), tiff (or tif), svg, pdf, eps, html, json.",
-	)
+	))
 	return name
 end
 
@@ -603,6 +603,9 @@ function _prepare_document_export(
 )
 	resolved = options === nothing ? _normalize_export_options(p, kwargs) : options
 	figure = source === nothing ? _export_source(p, resolved; pan = false) : source
+	# The export copy is a new Plot with a new random div id; the page keeps the
+	# figure's own id so two exports of one figure are the same bytes.
+	figure === p || (figure.divid = p.divid)
 	return _PreparedDocumentExport(figure, resolved)
 end
 
@@ -1272,6 +1275,16 @@ const _FLATTEN_TRANSLUCENCY_JS = """
       var full = div._fullLayout || {};
       var paperColour = parse(full.paper_bgcolor || '#ffffff') || [255, 255, 255, 1];
       var paper = over(paperColour, paperColour[3], [255, 255, 255]);
+      // A WebGL scene with a translucent background is printed as a bitmap with
+      // an alpha mask, which Ghostscript's -dNOTRANSPARENCY drops (the scene
+      // turns black in the EPS): give each scene the opaque colour it shows.
+      var sceneUpdate = {};
+      Object.keys(full).forEach(function(key) {
+        if (!/^scene[0-9]*\$/.test(key) || !full[key]) return;
+        var bg = parse(full[key].bgcolor || 'rgba(0,0,0,0)');
+        if (bg && bg[3] < 1) sceneUpdate[key + '.bgcolor'] = css(over(bg, bg[3], paper));
+      });
+      if (Object.keys(sceneUpdate).length > 0) await Plotly.relayout(div, sceneUpdate);
       var areas = [];
       div.querySelectorAll('.bglayer rect.bg').forEach(function(rect) {
         var style = getComputedStyle(rect);
@@ -2124,10 +2137,10 @@ Latin-Modern, `\\mathcal` draws Latin Modern's script letters, and
 upright-regular (the font has no bold glyphs for them; `font = "TeX"` has).
 
 # Errors
-`ArgumentError` for unknown keywords, invalid values, a missing or unwritable
-destination directory, or EPS (or `fonts = :outline` pdf) without
-Ghostscript, before anything is drawn or any file is touched;
-`ErrorException` for an unsupported format or a renderer failure.
+`ArgumentError` for unknown keywords, invalid values, an unsupported format, a
+missing or unwritable destination directory, or EPS (or `fonts = :outline`
+pdf) without Ghostscript, before anything is drawn or any file is touched;
+`ErrorException` for a renderer failure.
 
 ```julia
 fig = plot_scatter(1:10, rand(10); xlabel = "x", ylabel = "y")

@@ -1486,6 +1486,7 @@ end
 
 function _do_relayout!(p::Plot, args...; kwargs...)
 	memo = IdDict{Any,Any}()
+	_share_untouched_template!(memo, p.layout, args, kwargs)
 	setter_origins = IdDict{Any,Nothing}()
 	staged_layout = _clone_layout_for_mutation(p.layout, memo)
 	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
@@ -7023,6 +7024,40 @@ function _transactional_plot_mutation!(
 	end
 end
 
+# True when a relayout call can write below `layout.template`: a keyword whose
+# name starts with "template", or an argument that is not a plain mapping or
+# attribute (it could carry such a key in a form this check cannot read).
+function _relayout_may_write_template(args, kwargs)
+	for key in keys(kwargs)
+		startswith(String(key), "template") && return true
+	end
+	for arg in args
+		fields = arg isa AbstractDict ? arg :
+			(arg isa PlotlyBase.AbstractPlotlyAttribute || arg isa PlotlyBase.AbstractLayout) ?
+			getfield(arg, :fields) : nothing
+		fields isa AbstractDict || return true
+		for key in keys(fields)
+			startswith(String(key), "template") && return true
+		end
+	end
+	return false
+end
+
+# A layout's template is tens of kilobytes (every trace type's defaults) and no
+# relayout that does not name it can change it, so staging shares it: seeding
+# the clone memo with the template mapped to itself makes the staged layout
+# point at the original template, which then compares unchanged by identity.
+# This keeps a small relayout O(keys written) instead of O(layout + template).
+function _share_untouched_template!(memo::IdDict{Any,Any}, layout, args, kwargs)
+	layout isa Layout || return memo
+	template = get(layout.fields, :template, nothing)
+	(template === nothing || isbits(template) || template isa AbstractString || template isa Symbol) &&
+		return memo
+	_relayout_may_write_template(args, kwargs) && return memo
+	memo[template] = template
+	return memo
+end
+
 function _prepare_relayout_transaction(
 	sp::SyncPlot,
 	p::Plot,
@@ -7030,6 +7065,7 @@ function _prepare_relayout_transaction(
 	kwargs,
 )
 	memo = IdDict{Any,Any}()
+	_share_untouched_template!(memo, p.layout, args, kwargs)
 	setter_origins = IdDict{Any,Nothing}()
 	staged_layout = _clone_layout_for_mutation(p.layout, memo)
 	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
@@ -7531,6 +7567,11 @@ function _prepare_full_model_mutation_transaction(
 	# while retaining immutable and bulk numeric payloads. A shared memo keeps
 	# aliases between traces and layout intact without deep-copying plot data.
 	memo = IdDict{Any,Any}()
+	# The layout updaters (`update_xaxes!`, ...) merge into axes, scenes, shapes
+	# and the like and cannot write the template: share it (see
+	# `_share_untouched_template!`).
+	mutation_scope !== nothing && get(mutation_scope, :template_untouched, false) === true &&
+		_share_untouched_template!(memo, p.layout, (), (;))
 	staged_traces = IdDict{AbstractTrace,AbstractTrace}()
 	staged_data = copy(p.data)
 	memo[p.data] = staged_data
@@ -8657,6 +8698,7 @@ _trace_mutation_scope(indices) = (
 const _LAYOUT_ONLY_MUTATION_SCOPE = (
 	trace_indices = (),
 	layout = true,
+	template_untouched = true,
 )
 
 function PlotlyBase.addtraces!(sp::SyncPlot, traces::AbstractTrace...)
@@ -10668,10 +10710,10 @@ function _mathjax_svg_font()
 	font = strip(get(ENV, _MATHJAX_SVG_FONT_ENV_VAR, ""))
 	isempty(font) && return _MATHJAX_SVG_FONT_DEFAULT
 	canonical = _mathjax_font_name(font)
-	canonical === nothing && error(
-		"Invalid $(_MATHJAX_SVG_FONT_ENV_VAR) value $(repr(String(font))): expected " *
+	canonical === nothing && throw(ArgumentError(
+		"mathtext: invalid $(_MATHJAX_SVG_FONT_ENV_VAR) value $(repr(String(font))): expected " *
 		"one of the MathJax SVG fonts $(join(_MATHJAX_SVG_FONTS, ", ")).",
-	)
+	))
 	return canonical
 end
 

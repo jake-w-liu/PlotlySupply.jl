@@ -236,6 +236,14 @@ end
 	@test occursin("<text>1a2b3c</text>", stable)   # text content untouched
 	@test PlotlySupply._svg_stable_ids(stable) == stable
 	@test PlotlySupply._svg_stable_ids("<svg></svg>") == "<svg></svg>"
+	# The patched Plotly.js keeps the quotes of url("#…") in a style attribute as
+	# &quot;; such a reference must be rewritten too (Z90: heatmap SVGs differed).
+	quoted = """<svg><defs id="defs-1a2b3c"><linearGradient id="g1a2b3c-cbt0"/></defs>""" *
+			 """<rect style="fill: url(&quot;#g1a2b3c-cbt0&quot;);"/><rect style="fill: url(&#39;#g1a2b3c-cbt0&#39;);"/></svg>"""
+	quoted_stable = PlotlySupply._svg_stable_ids(quoted)
+	@test !occursin("1a2b3c", quoted_stable)
+	@test occursin("url(&quot;#g000000-cbt0&quot;)", quoted_stable)
+	@test occursin("url(&#39;#g000000-cbt0&#39;)", quoted_stable)
 
 	eps = collect(codeunits("%!PS-Adobe-3.0 EPSF-3.0\n%%CreationDate: D:20261116\n%%Pages: 1\nx %%CreationDate: keep\n"))
 	blank = String(PlotlySupply._eps_blank_dates(eps))
@@ -330,7 +338,7 @@ end
 	@test PlotlySupply._validate_export_format("jpg") == "jpeg"
 	@test PlotlySupply._validate_export_format("JPG") == "jpeg"
 	@test PlotlySupply._validate_export_format("eps") == "eps"
-	@test_throws ErrorException PlotlySupply._validate_export_format("bmp")
+	@test_throws ArgumentError PlotlySupply._validate_export_format("bmp")
 	@test PlotlySupply._filename_export_format("figure.jpg", nothing) == "jpeg"
 	@test PlotlySupply._filename_export_format("figure.EPS", nothing) == "eps"
 	@test PlotlySupply._filename_export_format("figure.png", "SVG") == "svg"
@@ -405,7 +413,7 @@ end
 		@test occursin("SVG: {font: \"TeX\"}", String(savefig(p; format = "html")))
 	end
 	withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => "bad\"font") do
-		@test_throws ErrorException savefig(p; format = "html")
+		@test_throws ArgumentError savefig(p; format = "html")
 	end
 	@test_throws ArgumentError PlotlySupply._mathjax_config_script("x\"); alert(1); (\"")
 	@test_throws ArgumentError PlotlySupply._export_window_html("bad id")
@@ -531,7 +539,7 @@ end
 			@test_throws ArgumentError savefig(p, names_bad; kwargs...)
 			@test read(untouched, String) == "sentinel"
 		end
-		@test_throws ErrorException savefig(p, [untouched, joinpath(dir, "x.bmp")])
+		@test_throws ArgumentError savefig(p, [untouched, joinpath(dir, "x.bmp")])
 		@test read(untouched, String) == "sentinel"
 		mktempdir() do empty_path
 			withenv("PATH" => empty_path) do
@@ -595,7 +603,7 @@ end
 	@test PlotlySupply._validate_export_format("TIFF") == "tiff"
 	@test PlotlySupply._filename_export_format("figure.TIF", nothing) == "tiff"
 	@test PlotlySupply._filename_export_format("figure.tiff", nothing) == "tiff"
-	@test_throws ErrorException PlotlySupply._validate_export_format("bmp")
+	@test_throws ArgumentError PlotlySupply._validate_export_format("bmp")
 
 	p = _sci_plot()
 	o = _sci_options(p)
@@ -1056,4 +1064,9 @@ end
 			chmod(locked, 0o755)
 		end
 	end
+end
+
+@testset "sci export: EPS flattening opaques translucent 3-D scene backgrounds" begin
+	js = PlotlySupply._FLATTEN_TRANSLUCENCY_JS
+	@test occursin("sceneUpdate", js) && occursin(".bgcolor", js) && occursin("Plotly.relayout(div, sceneUpdate)", js)
 end
