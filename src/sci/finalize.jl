@@ -3672,8 +3672,17 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	# The fit and the room solve read what they write (a bar's length changes
 	# its tick-label estimate, fitted domains the margins): a pass that wrote
 	# runs again, so that the next `_finalize_figure!` writes nothing.
+	# The axis fits (decade ticks, wrapped titles) read the domains the fit
+	# and the room solve move, so a pass that wrote also re-runs them; a
+	# second `_finalize_figure!` then writes nothing (subplots-verbs, W5B).
 	for _ in 1:_FIN_FIT_ROUNDS
-		_fin_fit!(ctx, accs) || break
+		fitted = _fin_fit!(ctx, accs)
+		refit = false
+		if fitted
+			again = _axes_finalize_updates!(Dict{Symbol, Any}(), p, _fin_figure_size(ctx, p.layout), accs)
+			refit = !isempty(again) && _fin_relayout!(ctx, again)
+		end
+		(fitted || refit) || break
 		wrote = true
 	end
 	# M5: 3-D scenes are framed for the final domains and margins, at the

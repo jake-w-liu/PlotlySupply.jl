@@ -881,8 +881,9 @@ _v5_width(p::Plot, key::Symbol) = (d = _v4_fields(_v5_scene(p, key)[:domain]); d
 _v5_tickfont(p::Plot, key::Symbol, axis::Symbol) = _v4_fields(_v5_axis(p, key, axis)[:tickfont])[:size]
 _v5_scene_sf(rows, cols) = subplots(rows, cols; sync = false, specs = fill(Spec(kind = "scene"), rows, cols))
 function _v5_with_style(f, style)
-	# `set_default_style!()` keeps the active style: restore the previous one.
-	previous = get_default_style()
+	# `set_default_style!()` keeps the current style: restore the previous one
+	# explicitly, or the style leaks into every later test file.
+	previous = PlotlySupply._active_style()
 	set_default_style!(style)
 	try
 		return f()

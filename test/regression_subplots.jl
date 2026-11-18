@@ -1606,7 +1606,9 @@ end
 				hidden = _rsp_share_hidden(letter, mode, (1, 2))
 				label_cell = !hidden ? (1, 2) : letter === :x ? (2, 2) : (1, 1)
 				label_key = _rsp_share_key(sf, letter, label_cell)
-				titled = [k for k in axis_keys if haskey(_rsp_axis(sf, k), :title)]
+				# A journal style writes the title font on every axis: only a title
+				# TEXT counts as the group's title.
+				titled = [k for k in axis_keys if _rsp_title_text(_rsp_axis(sf, k)) !== nothing]
 				@test titled == [label_key]
 				@test _rsp_fields(_rsp_axis(sf, label_key)[:title])[:text] == "quantity"
 				# Axes of other groups are untouched.
@@ -1707,12 +1709,6 @@ end
 		# Process-wide setters take no figure.
 		process_wide = Set(["register_style!", "set_default_legend_position!", "set_default_mathtext!",
 			"set_default_style!", "set_default_template!"])
-		# Known defects in other tracks' code would be listed here: they raise a
-		# MethodError for `row`/`col` instead of an ArgumentError naming the
-		# function, as a `@test_broken` that turns into an error once fixed.
-		# (Z17, Z18 and Z21, `panel_labels!`, `subplot_legends!` and
-		# `tight_layout!`, are fixed: they are tested like the others.)
-		cross_requested = Set{String}()
 		image = attr(source="data:image/png;base64,iVBORw0KGgo=", x=0, y=1, sizex=0.2, sizey=0.2)
 		geojson = Dict("type" => "FeatureCollection", "features" => [Dict("type" => "Feature", "id" => "A",
 			"properties" => Dict(), "geometry" => Dict("type" => "Polygon",
@@ -1878,31 +1874,27 @@ end
 				before11 = _rsp_cell_state(sf, 1, 1)
 				before22 = _rsp_cell_state(sf, 2, 2)
 				err = attempt(() -> call(sf, (row=2, col=2)))
-				if name in cross_requested
-					@test_broken err === nothing || (err isa ArgumentError && startswith(err.msg, name * ":"))
-				else
-					if err === nothing
-						@test _rsp_cell_state(sf, 1, 1) == before11
-						if name == "subplot!"
-							# subplot! only selects the cell.
-							@test (sf.current_row, sf.current_col) == (2, 2)
-						else
-							@test _rsp_cell_state(sf, 2, 2) != before22
-						end
+				if err === nothing
+					@test _rsp_cell_state(sf, 1, 1) == before11
+					if name == "subplot!"
+						# subplot! only selects the cell.
+						@test (sf.current_row, sf.current_col) == (2, 2)
 					else
-						@test err isa ArgumentError
-						@test err isa ArgumentError && startswith(err.msg, name * ":")
+						@test _rsp_cell_state(sf, 2, 2) != before22
 					end
-					# Y20: a cell outside the grid is an ArgumentError naming the
-					# function, raised before anything changes.
-					fresh = _rsp_complete_figure(kind)
-					setup(fresh)
-					snapshot = JSON.json(fresh.plot)
-					bad = attempt(() -> call(fresh, (row=99, col=2)))
-					@test bad isa ArgumentError
-					@test bad isa ArgumentError && startswith(bad.msg, name * ":")
-					@test JSON.json(fresh.plot) == snapshot
+				else
+					@test err isa ArgumentError
+					@test err isa ArgumentError && startswith(err.msg, name * ":")
 				end
+				# Y20: a cell outside the grid is an ArgumentError naming the
+				# function, raised before anything changes.
+				fresh = _rsp_complete_figure(kind)
+				setup(fresh)
+				snapshot = JSON.json(fresh.plot)
+				bad = attempt(() -> call(fresh, (row=99, col=2)))
+				@test bad isa ArgumentError
+				@test bad isa ArgumentError && startswith(bad.msg, name * ":")
+				@test JSON.json(fresh.plot) == snapshot
 			end
 		end
 	end
@@ -1969,6 +1961,7 @@ const _RSP_SYNC_LIMITS = (:minallowed, :maxallowed, :clipmin, :clipmax, :include
 
 _rsp_json(value) = value === nothing ? "null" : JSON.json(value)
 
+# The text of an axis title (`nothing` when it has none, e.g. only a font).
 function _rsp_title_text(axis)
 	title = get(axis, :title, nothing)
 	title isa AbstractString && return title
@@ -2104,6 +2097,38 @@ const _RSP_SYNC_CALLS = Any[
 	("update! layout", false, true, sf -> update!(sf; layout = Layout(yaxis4_tickangle = 45))),
 	("update_yaxes! (cell)", false, true, sf -> update_yaxes!(sf; row = 2, col = 2, type = "log")),
 	("remove_inset!", false, false, sf -> remove_inset!(sf, 1)),
+	# One-sided limits (D11) through every entry point.
+	("xrange! one-sided (root cell)", false, true, sf -> xrange!(sf, (nothing, 6); row = 2, col = 1)),
+	("yrange! one-sided (cell)", false, true, sf -> yrange!(sf, (0, nothing); row = 2, col = 2)),
+	("keyword one-sided y limit", false, true, sf -> plot_scatter!(sf, [1.0, 2.0], [1.0, 2.0]; row = 2, col = 1,
+		yrange = (0, nothing))),
+	("update_xaxes! autorangeoptions", false, true, sf -> update_xaxes!(sf; row = 1, col = 2,
+		autorangeoptions = attr(minallowed = 0))),
+	("relayout! autorangeoptions", false, true, sf -> relayout!(sf; xaxis2_autorangeoptions_maxallowed = 30)),
+	("one-sided limit then full range", false, true, sf -> (xrange!(sf, (0, nothing); row = 1, col = 1);
+		xrange!(sf, [1, 3]; row = 2, col = 1))),
+	# `_axes_finalize_updates!`: decade ticks and wrapped titles.
+	# Under a paper style the finalizer writes decade ticks on log axes.
+	("log decade ticks (keyword)", false, true, sf -> with_style(:ieee) do
+		plot_scatter!(sf, [1.0, 10.0, 1e3, 1e5], [1.0, 10.0, 1e3, 1e5]; row = 2, col = 1, xscale = "log", yscale = "log")
+	end),
+	("log decade ticks (relayout!)", false, true, sf -> with_style(:ieee) do
+		relayout!(sf; xaxis_type = "log", yaxis3_type = "log")
+	end),
+	("log decade ticks (figsize!)", false, true, sf -> (relayout!(sf; xaxis_type = "log"); figsize!(sf, :ieee))),
+	("wrapped long x title", false, true, sf -> xlabel!(sf, "A very long shared axis title that runs well past the width of its column " ^ 2;
+		row = 1, col = 2)),
+	("wrapped long y title", false, true, sf -> ylabel!(sf, "A very long shared axis title that runs well past the height of its row " ^ 2;
+		row = 2, col = 1)),
+	# Calls whose room reservations move the domains.
+	("heatmap colorbar (cell)", false, true, sf -> plot_heatmap!(sf, [1.0 2 3; 4 5 6]; row = 1, col = 2)),
+	("panel title (cell)", false, true, sf -> title!(sf, "panel"; row = 1, col = 2)),
+	("panel_labels!", false, true, sf -> panel_labels!(sf)),
+	("figsize! :ieee", true, true, sf -> figsize!(sf, :ieee)),
+	("set_style under with_style", false, true, sf -> with_style(:ieee) do
+		xlabel!(sf, "styled"; row = 1, col = 2)
+		set_fonts!(sf; tick = 7)
+	end),
 ]
 
 @testset "shared axes: every call keeps the group invariants (table)" begin
@@ -2148,6 +2173,87 @@ const _RSP_SYNC_CALLS = Any[
 		_rsp_sync_figure(:x_columns)
 	end
 	@test isempty(_rsp_sync_problems(sf))
+end
+
+@testset "shared axes: the finalizer's axis fits reach a fixed point in one call" begin
+	# Decade ticks of a log axis read the domain the room solve moves: a
+	# second `_finalize_figure!` must write nothing, and neither may the
+	# next call of the same kind.
+	for mode in (:x_columns, :y_rows, :x_rows, :all)
+		sf = _rsp_sync_figure(mode)
+		with_style(:ieee) do
+			plot_scatter!(sf, [1.0, 10.0, 1e3, 1e5], [1.0, 10.0, 1e3, 1e5]; row = 2, col = 1,
+				xscale = "log", yscale = "log")
+			@test PlotlySupply._finalize_figure!(sf) === false
+			ticks = [get(_rsp_axis(sf, k), :dtick, nothing) for k in (:xaxis3, :yaxis3)]
+			@test any(!isnothing, ticks)
+			before = JSON.json(sf.plot.layout)
+			plot_scatter!(sf, [1.0, 10.0, 1e3, 1e5], [1.0, 10.0, 1e3, 1e5]; row = 2, col = 1,
+				xscale = "log", yscale = "log")
+			@test JSON.json(sf.plot.layout) == before
+		end
+		@test isempty(_rsp_sync_problems(sf))
+	end
+end
+
+@testset "shared axes: a title text lives on the members that show tick labels, once each" begin
+	# x groups of `sf`: root => (members carrying a title starting with `text`,
+	# members whose tick labels are shown).
+	function carriers(sf, text)
+		out = Dict{Symbol, Tuple{Vector{Symbol}, Vector{Symbol}}}()
+		inset_keys = Set(k for inset in sf.insets for k in (inset.xkey, inset.ykey))
+		for (root, members) in _rsp_match_groups(sf)
+			startswith(String(root), "xaxis") || continue
+			# Insets take no title; the finalizer wraps a long title with
+			# `<br>` (after a zero-width space) where the figure is narrow.
+			members = filter(m -> !(m in inset_keys), members)
+			axes = Dict(m => _rsp_fields(_rsp_layout(sf)[m]) for m in members)
+			plain(t) = replace(t, "\u200b<br>" => " ", "<br>" => " ", "\u200b" => "")
+			titled = sort([m for m in members if (t = _rsp_title_text(axes[m]); t isa AbstractString && startswith(plain(t), text))])
+			shown = sort([m for m in members if get(axes[m], :showticklabels, true) !== false])
+			out[root] = (titled, shown)
+		end
+		return out
+	end
+	long = "A very long shared axis title that runs well past the width of its column "
+	for mode in (:x_columns, :x_rows, :all), (label, text) in (("short", "T"), ("long (wrapped)", long ^ 2))
+		@testset "$(mode) $(label)" begin
+			prefix = text[1:min(end, 20)]
+			sf = _rsp_sync_figure(mode)
+			for cell in ((1, 1), (1, 2), (2, 1), (2, 2))
+				xlabel!(sf, text; row = cell[1], col = cell[2])
+			end
+			# Labelled through every cell: the title is on every member that
+			# shows tick labels and on no hidden one (a hidden member's call
+			# moved its title to the shown one, never duplicating it).
+			info = carriers(sf, prefix)
+			@test !isempty(info)
+			for (root, (titled, shown)) in info
+				@test titled == shown
+			end
+			@test isempty(_rsp_sync_problems(sf))
+			# Styling, journal size and style, and a repeated call neither
+			# move nor duplicate it.
+			set_fonts!(sf; label = 9)
+			figsize!(sf, :ieee)
+			with_style(:ieee) do
+				xlabel!(sf, text; row = 1, col = 1)
+			end
+			for (root, (titled, shown)) in carriers(sf, prefix)
+				@test titled == shown
+			end
+			@test isempty(_rsp_sync_problems(sf))
+			again = JSON.json(sf.plot.layout)
+			xlabel!(sf, text; row = 1, col = 1)
+			@test JSON.json(sf.plot.layout) == again
+		end
+	end
+	# A single call names one cell of a shared column: one titled member.
+	sf = _rsp_sync_figure(:x_columns)
+	xlabel!(sf, "only"; row = 1, col = 2)
+	# Cell (1, 2) hides its tick labels: the title is on the shown axis of
+	# its column, (2, 2), and nowhere else.
+	@test Dict(k => first(v) for (k, v) in carriers(sf, "only")) == Dict(:xaxis3 => Symbol[], :xaxis4 => [:xaxis4])
 end
 
 # Plotly.js operations a recording renderer received.
@@ -2420,4 +2526,28 @@ end
 		return minimum(k -> @allocated(plot_scatter!(f, x, y .+ k; row = 1, col = 1)), 1:5)
 	end
 	@test append_bytes(true) < 2 * append_bytes(false)
+end
+
+@testset "6x6 heatmap grid: one append stays O(decorations), not O(data) (W5B perf guard)" begin
+	# Measured on the merged tree: about 15 MB for the 36th append, of which
+	# about 90 % is `_finalize_figure!` (36 cells' rooms and colorbars). The
+	# cost must not depend on the size of the matrices.
+	cells = [(i, j) for i in 1:6 for j in 1:6]
+	append_bytes(n) = begin
+		field = [sin(a / 5) * cos(b / 7) for a in 1:n, b in 1:n]
+		sf = subplots(6, 6; sync = false)
+		for k in 1:35
+			plot_heatmap!(sf, field; row = cells[k][1], col = cells[k][2])
+		end
+		plot_heatmap!(sf, field; row = 6, col = 6)   # compile and warm up
+		sf = subplots(6, 6; sync = false)
+		for k in 1:35
+			plot_heatmap!(sf, field; row = cells[k][1], col = cells[k][2])
+		end
+		@allocated plot_heatmap!(sf, field; row = 6, col = 6)
+	end
+	small = append_bytes(20)
+	large = append_bytes(200)
+	@test small < 40 * 2^20
+	@test large < 1.5 * small
 end

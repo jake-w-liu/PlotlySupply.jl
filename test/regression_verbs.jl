@@ -132,12 +132,15 @@ _rv_calls(script::AbstractString) =
 	built = plot_scatter(1:3, [4, 5, 6]; title = "T")
 	sp, renderer = _rv_syncplot(built)
 	try
-		@test relayout!(sp; title_x = 0.5) === sp
-		@test built.layout.fields[:title][:text] == "T"
+		# The builder's title is already placed at x = 0.5 (`_apply_figure_title!`),
+		# so a different x is the change that must reach the window.
 		@test built.layout.fields[:title][:x] == 0.5
+		@test relayout!(sp; title_x = 0.25) === sp
+		@test built.layout.fields[:title][:text] == "T"
+		@test built.layout.fields[:title][:x] == 0.25
 		script = only(renderer.scripts)
 		@test _rv_calls(script) == ["await Plotly.relayout"]
-		@test occursin("\"title.x\":0.5", script)
+		@test occursin("\"title.x\":0.25", script)
 	finally
 		close(sp)
 	end
@@ -1200,13 +1203,25 @@ end
 	end
 	@test isempty(renderer.scripts)
 	@test sp.plot.layout == before
-	# Known gaps in methods outside this track (cross-requested): the Plot
-	# methods of every layout updater and the SyncPlot update_xaxes!/
-	# update_yaxes!/update_polars!/update_mapboxes! still accept `row`/`col`.
-	rejects_row(f, fig) = _rv_argument_error(() -> f(fig; row = 1, col = 1, title_text = "t")) !== nothing
-	@test_broken rejects_row(update_xaxes!, first(_rv_syncplot(plot_scatter(1:3, [1.0, 2.0, 3.0]))))
-	@test_broken rejects_row(update_xaxes!, plot_scatter(1:3, [1.0, 2.0, 3.0]))
-	@test_broken rejects_row(update_shapes!, plot_scatter(1:3, [1.0, 2.0, 3.0]))
+	# The Plot (and displayed SyncPlot) methods of every layout updater reject
+	# the cell keywords before anything changes: PlotlyBase writes them into
+	# the layout as attributes.
+	updaters = (update_xaxes!, update_yaxes!, update_polars!, update_mapboxes!, update_geos!,
+		update_scenes!, update_ternaries!, update_annotations!, update_shapes!, update_images!)
+	for f in updaters, key in (:row, :col, :secondary_y, :inset, :show)
+		for fig in (plot_scatter(1:3, [1.0, 2.0, 3.0]), first(_rv_syncplot(plot_scatter(1:3, [1.0, 2.0, 3.0]))))
+			plain = fig isa SyncPlot ? fig.plot : fig
+			snapshot = deepcopy(plain.layout)
+			err = _rv_argument_error(() -> f(fig; key => 1, title_text = "t"))
+			@test err !== nothing && startswith(err.msg, "$(nameof(f)):") && occursin("`$(key)`", err.msg)
+			@test plain.layout == snapshot
+		end
+	end
+	# Without a cell keyword they still work.
+	pl = plot_scatter(1:3, [1.0, 2.0, 3.0])
+	update_xaxes!(pl; title_text = "t")
+	@test pl.layout.fields[:xaxis][:title][:text] == "t"
+	@test !haskey(pl.layout.fields[:xaxis], :row)
 
 	# SubplotFigure verbs that act on the whole figure.
 	sf = subplots(1, 2; sync = false)

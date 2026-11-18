@@ -9075,6 +9075,8 @@ function PlotlyBase.update!(
 end
 
 function PlotlyBase.update_xaxes!(sp::SyncPlot, args...; kwargs...)
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_xaxes!", kwargs)
 	return _mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -9084,6 +9086,8 @@ function PlotlyBase.update_xaxes!(sp::SyncPlot, args...; kwargs...)
 end
 
 function PlotlyBase.update_yaxes!(sp::SyncPlot, args...; kwargs...)
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_yaxes!", kwargs)
 	return _mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -9093,6 +9097,8 @@ function PlotlyBase.update_yaxes!(sp::SyncPlot, args...; kwargs...)
 end
 
 function PlotlyBase.update_polars!(sp::SyncPlot, args...; kwargs...)
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_polars!", kwargs)
 	return _mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -9106,6 +9112,8 @@ function PlotlyBase.update_mapboxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_mapboxes!", kwargs)
 	return _mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10131,6 +10139,8 @@ function PlotlyBase.update_xaxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_xaxes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10144,6 +10154,8 @@ function PlotlyBase.update_yaxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_yaxes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10157,6 +10169,8 @@ function PlotlyBase.update_polars!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_polars!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10170,6 +10184,8 @@ function PlotlyBase.update_geos!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_geos!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10183,6 +10199,8 @@ function PlotlyBase.update_mapboxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_mapboxes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10212,6 +10230,8 @@ function PlotlyBase.update_scenes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_scenes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10225,6 +10245,8 @@ function PlotlyBase.update_ternaries!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_ternaries!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10238,6 +10260,8 @@ function PlotlyBase.update_annotations!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_annotations!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10252,6 +10276,8 @@ function PlotlyBase.update_shapes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_shapes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10266,6 +10292,8 @@ function PlotlyBase.update_images!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	# `row`/`col`/`secondary_y`/`inset`/`show` would become layout attributes (Y31).
+	_verb_reject_cell_keywords("update_images!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
