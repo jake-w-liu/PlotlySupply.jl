@@ -1176,6 +1176,29 @@ end
 		@test haskey(_rs_get(ieee_fig, :xaxis), :dtick)
 		default_fig = plot_scatter(x, 1:6; xscale = "log")
 		@test !haskey(_rs_get(default_fig, :xaxis), :dtick)
+		# The figure remembers the rule of the style it was built under: a mutation
+		# after the `with_style` block still gives decade labels (exports too).
+		@test _RS._style_log_ticks(ieee_fig.layout) === :decades
+		@test _RS._style_log_ticks(default_fig.layout) === :auto
+		@test _rs_get(ieee_fig, :meta)[:plotlysupply][:log_ticks] == "decades"
+		after = with_style(() -> plot_scatter(x, 1:6; xscale = "log"), :ieee)
+		xlabel!(after, "x")
+		@test haskey(_rs_get(after, :xaxis), :dtick)
+		@test !haskey(_RS._plot_layout(plot_scatter(1:3, 1:3)).fields, :meta)
+		# A meta the user wrote is kept next to it; a non-container meta is left alone.
+		kept = with_style(:ieee) do
+			f = Plot(GenericTrace[scatter(x = 1:3, y = 1:3)], Layout(meta = attr(note = "n")))
+			_RS._apply_default_template!(f; fresh = true)
+			f
+		end
+		@test _rs_get(kept, :meta)[:note] == "n"
+		@test _rs_get(kept, :meta)[:plotlysupply][:log_ticks] == "decades"
+		text_meta = with_style(:ieee) do
+			f = Plot(GenericTrace[scatter(x = 1:3, y = 1:3)], Layout(meta = "m"))
+			_RS._apply_default_template!(f; fresh = true)
+			f
+		end
+		@test text_meta.layout.fields[:meta] == "m"
 		# An axis with tick values of its own is never changed.
 		own = with_style(:ieee) do
 			f = plot_scatter(x, 1:6; xscale = "log", xticks = [1, 100, 1e5])

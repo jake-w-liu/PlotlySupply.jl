@@ -414,6 +414,9 @@ const _STYLE_MAX_FIGURE_PX = Float64(typemax(Int32))
 # exist in MathJax 2 and would render as a red undefined macro.
 const _STYLE_MATHSIZES = ("", ("\\" * name for name in _MATHTEXT_SIZES)...)
 const _STYLE_LOG_TICKS = (:auto, :decades)
+# Key under `layout.meta` where a style records what a figure must remember
+# after the `with_style` block that built it ended (the log tick rule).
+const _STYLE_META_KEY = :plotlysupply
 const _STYLE_MARGIN_KEYS = (:l, :r, :t, :b, :pad)
 const _STYLE_DASH_CYCLE = ("solid", "dash", "dot", "dashdot")
 const _STYLE_MARKER_CYCLE = (
@@ -1906,6 +1909,19 @@ function _apply_style_layout!(
 		updates[:margin] = _style_domain_subplot_margin(p, updates, style, "PlotStyle")
 	end
 	merge!(updates, _style_figure_size_updates(fields, style))
+	# The figure remembers the log tick rule of the style it is built under.
+	if style.log_ticks !== :auto
+		meta = haskey(updates, :meta) ? updates[:meta] : get(fields, :meta, nothing)
+		if meta === nothing || meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute
+			updates[:meta] = _style_update_path(
+				meta,
+				(_STYLE_META_KEY,),
+				Dict{Symbol, Any}(:log_ticks => String(style.log_ticks)),
+				"layout.meta",
+				"PlotStyle",
+			)
+		end
+	end
 	for (key, value) in updates
 		fields[key] = value
 	end
@@ -2051,6 +2067,25 @@ decades or more; `:publication` and the journal presets) or `:auto` (plotly's
 adaptive labels). Reads `PlotStyle.log_ticks`. Internal; `_axes_log_tick_updates!` (src/sci/axes.jl) applies it.
 """
 _style_log_ticks(style::PlotStyle = _active_style()) = style.log_ticks
+
+"""
+	_style_log_ticks(layout::Layout) -> Symbol
+
+The log-axis tick rule of a figure: the one the style it was built under
+recorded in `layout.meta.plotlysupply.log_ticks` (`_apply_style_layout!`), so
+a figure made inside `with_style(:ieee)` keeps its decade labels when it is
+exported or changed after the block; the active style's rule when it recorded
+none. Internal.
+"""
+function _style_log_ticks(layout::PlotlyBase.Layout)
+	meta = get(layout.fields, :meta, nothing)
+	(meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute) || return _style_log_ticks()
+	own = get(_symbol_dict(meta), _STYLE_META_KEY, nothing)
+	(own isa AbstractDict || own isa PlotlyBase.PlotlyAttribute) || return _style_log_ticks()
+	value = get(_symbol_dict(own), :log_ticks, nothing)
+	value isa AbstractString && Symbol(value) in _STYLE_LOG_TICKS && return Symbol(value)
+	return _style_log_ticks()
+end
 
 """
 	_style_ink(fig) -> String
