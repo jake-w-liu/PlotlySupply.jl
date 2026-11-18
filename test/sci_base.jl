@@ -438,4 +438,48 @@ end
 			"t: the current y range (0, 5) cannot be shown on a \"log\" axis",
 		)
 	end
+
+	@testset "wave 5: the one encoder of one-sided limits (Z38)" begin
+		# The view extent a one-sided limit is checked and completed against:
+		# the finalizer's field extent (exact), else the data (to be padded).
+		h = plot_heatmap(1:5, 1:4, reshape(collect(1.0:20.0), 5, 4))
+		@test _BS._axis_group_view_extent(h, :xaxis, (:xaxis,), false) == ((0.5, 5.5), false)
+		s = plot_scatter([1.0, 3.0], [2.0, 4.0])
+		@test _BS._axis_group_view_extent(s, :xaxis, (:xaxis,), false) == ((1.0, 3.0), true)
+		e = plot_scatter(Float64[], Float64[])
+		@test _BS._axis_group_view_extent(e, :xaxis, (:xaxis,), false)[1] === nothing
+		# A user clip is kept as the view; only the finalizer's clip is dropped.
+		relayout!(_BS._cmn_plot(s); xaxis_autorangeoptions = attr(clipmin = 0.5, clipmax = 2.5))
+		@test _BS._axis_group_view_extent(s, :xaxis, (:xaxis,), false) == ((0.5, 2.5), false)
+		_BS._drop_finalizer_clip!(s, :xaxis)
+		@test _bs_get(s, :xaxis, :autorangeoptions) !== nothing
+		@test _BS._fin_sticky_clip(get(_bs_fields(h), :xaxis, nothing)) !== nothing
+		_BS._drop_finalizer_clip!(h, :xaxis)
+		@test _BS._fin_sticky_clip(get(_bs_fields(h), :xaxis, nothing)) === nothing
+		# Every member of a matches group gets the limit; a full range clears it.
+		g = plot_scatter([1.0, 3.0], [2.0, 4.0])
+		relayout!(_BS._cmn_plot(g); yaxis2 = attr(matches = "y", anchor = "x", domain = [0.5, 1]))
+		_BS._apply_axis_range_to_key!(g, :yaxis2, (nothing, 10), "yrange!"; name = "range")
+		for key in (:yaxis, :yaxis2)
+			@test _BS._cmn_mapping_get(_bs_get(g, key, :autorangeoptions), :maxallowed) == 10
+		end
+		_BS._apply_axis_range_to_key!(g, :yaxis, (0, 10), "yrange!"; name = "range")
+		@test _bs_get(g, :yaxis, :range) == [0, 10]
+		for key in (:yaxis, :yaxis2)
+			@test _BS._cmn_mapping_get(_bs_get(g, key, :autorangeoptions), :maxallowed) === nothing
+		end
+		# Log axes store log10; a bound outside the data is refused before any write.
+		l = plot_scatter([1.0, 10.0, 100.0], [1.0, 2.0, 3.0]; xscale = "log")
+		_BS._apply_axis_range_to_key!(l, :xaxis, (10, nothing), "xrange!"; name = "range")
+		@test _BS._cmn_mapping_get(_bs_get(l, :xaxis, :autorangeoptions), :minallowed) == 1.0
+		before = _bs_layout_json(l)
+		@test _bs_throws(() -> _BS._apply_axis_range_to_key!(l, :xaxis, (1000, nothing), "xrange!"; name = "range"),
+			"xrange!: `range` fixes one end of the axis beyond all of its data")
+		@test _bs_layout_json(l) == before
+		# Z28: an empty constructor title writes nothing.
+		t = plot_scatter([1.0, 2.0], [1.0, 2.0])
+		before = _bs_layout_json(t)
+		_BS._apply_figure_title!(t, "")
+		@test _bs_layout_json(t) == before
+	end
 end

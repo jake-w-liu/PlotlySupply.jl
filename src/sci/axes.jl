@@ -230,12 +230,17 @@ function _axes_scene_axis_entry(layout::Layout, scenekey::Symbol, letter::Char)
 end
 
 """
-	_axes_label!(fig_or_sf, letter, label; row, col, inset, secondary_y, who)
+	_axes_label!(fig_or_sf, letter, label; row, col, inset, secondary_y, wrap = true, who)
 
 Write the title of axis `letter` ('x', 'y' or 'z') of the target cell: an xy
-axis gets `title.text = _label(label)`, a 3-D scene axis
-`scene.<letter>axis.title.text = _label3d(label)`. An empty `label` clears the
-title. Other cell kinds (and 'z' on an xy cell) are an `ArgumentError`.
+axis gets `title.text = _label(label)` (with `wrap = false` passed through
+`_axes_keep_on_one_line`, so `_finalize_figure!` never breaks it into
+lines; see "Axis titles longer than their axis"), a 3-D scene axis
+`scene.<letter>axis.title.text = _label3d(label)`, after which the scene3d
+finish steps (`_s3_finish_scene!`, `_s3_finish_ticks!`) keep the scene's
+automatic camera and tick counts current, as a range change does. An empty
+`label` clears the title. Other cell kinds (and 'z' on an xy cell) are an
+`ArgumentError`.
 """
 function _axes_label!(
 	fig,
@@ -245,6 +250,7 @@ function _axes_label!(
 	col = nothing,
 	inset = nothing,
 	secondary_y::Bool = false,
+	wrap::Bool = true,
 	who::AbstractString,
 )
 	t = _cell_target(
@@ -261,15 +267,21 @@ function _axes_label!(
 			"3-D scene cell.",
 		))
 		text = _label(label)
+		wrap || (text = _axes_keep_on_one_line(text))
 		_axes_write_axis_title!(fig, letter == 'x' ? t.xkey : t.ykey, text)
 	elseif t.kind === :scene
 		text = _axes_label3d(label)
+		# The scene3d finish step keeps an automatic camera at the automatic
+		# distance and the cell's tick counts current (Z45), as `zrange!` does.
+		state = _s3_scene_state(fig, t)
 		_axes_write_scene_axis!(
 			fig,
 			t.scenekey,
 			letter,
 			Dict{Symbol, Any}(:title => attr(text = text)),
 		)
+		_s3_finish_scene!(fig, t, state)
+		_s3_finish_ticks!(fig, t, state)
 	else
 		throw(ArgumentError(
 			"$(who): axis titles apply to Cartesian (xy) and 3-D scene cells; " *
@@ -382,13 +394,15 @@ Set the range of axis `letter` of the target cell in DATA units (spec C13):
 on a logarithmic axis the bounds are converted to the log10 values Plotly
 stores. A full range also sets `autorange = false` (finding #25); the
 automatic sentinel deletes the range and sets `autorange = true` (`"reversed"`
-on a reversed axis). A one-sided limit (D11) is written by `_write_axis_range!`
-on xy axes and as a full range from the data on scene axes
-(`_axes_scene_limit_range`). On an xy cell whose axis `matches` another, the
-range is written on the root of the matched group, the only axis plotly.js
-reads it from (finding #265), and the limits on every member (plotly.js reads
-`autorangeoptions` per axis; measured, probe p04). A scene call keeps the
-scene's proportions and camera framing with the scene3d helpers (Y26).
+on a reversed axis). On xy axes the write is the package's range encoder
+(`_write_axis_group_range!`, the half of `_apply_axis_range_to_key!` after
+the bound checks): a one-sided limit (D11) as `autorangeoptions` limits, the
+range on the root of a `matches` group, the only axis plotly.js reads it from
+(finding #265), and the limits on every member (plotly.js reads
+`autorangeoptions` per axis; measured, probe p04). On scene axes a one-sided
+limit becomes a full range from the data (`_axes_scene_limit_range`). A scene
+call keeps the scene's proportions and camera framing with the scene3d
+helpers (Y26).
 """
 function _axes_range!(
 	fig,
@@ -422,13 +436,8 @@ function _axes_range!(
 			who,
 			r -> _to_axis_range(layout, key, r; who = who),
 		)
-		members = _axes_match_members(fig, key, who)
-		reversed = _axis_is_reversed(fig, key)
-		if _is_one_sided_range(value)
-			_require_limit_meets_data(fig, key, value, reversed, members, who, "range")
-			value = _resolve_constrained_limit(fig, key, value, reversed, members, who, "range")
-		end
-		_write_axis_range!(fig, key, value; reversed = reversed, members = members)
+		# The package's one range encoder (base.jl), as the range keywords.
+		_write_axis_group_range!(fig, key, value, who, "range")
 	elseif t.kind === :scene
 		# Scene log axes store log10 ranges too (verified render,
 		# probe2_scene_log.png).
@@ -627,17 +636,15 @@ end
 # Tick label for `v / 10^k`: six significant digits, plotly's minus sign.
 _axes_offset_label(v::Float64) = replace(_axes_format_number(v), "-" => "\u2212")
 
-# Whether a trace on Cartesian axis `key` places non-numeric coordinates
-# (strings, dates, nested category lists) there: plotly.js then types an
-# untyped ("-") axis as a date or category axis.
-function _axes_has_nonnumeric_data(fig, key::Symbol)
+# Whether a trace on Cartesian axis `key` places a coordinate `v` with
+# `pred(v)` there (its `x`/`y` values; implied coordinates are numbers).
+function _axes_axis_values_any(pred, fig, key::Symbol)
 	p = _cmn_plot(fig)
 	letter = String(key)[1]
 	target_ref = _cmn_axis_ref(key)
 	field = letter == 'x' ? :xaxis : :yaxis
 	default_ref = string(letter)
 	cache = Dict{Any, Union{Nothing, String}}()
-	numeric(v) = v === nothing || v === missing || (v isa Real && !(v isa Bool))
 	for trace in p.data
 		trace isa GenericTrace || continue
 		_cmn_trace_kind(trace, cache) == "xy" || continue
@@ -646,10 +653,24 @@ function _axes_has_nonnumeric_data(fig, key::Symbol)
 		String(trace_ref) == target_ref || continue
 		values = get(trace.fields, Symbol(letter), nothing)
 		(values isa AbstractArray || values isa Tuple) || continue
-		all(numeric, values) || return true
+		any(pred, values) && return true
 	end
 	return false
 end
+
+# Whether a trace on Cartesian axis `key` places non-numeric coordinates
+# (strings, dates, nested category lists) there: plotly.js then types an
+# untyped ("-") axis as a date or category axis.
+_axes_has_nonnumeric_data(fig, key::Symbol) = _axes_axis_values_any(
+	v -> !(v === nothing || v === missing || (v isa Real && !(v isa Bool))),
+	fig,
+	key,
+)
+
+# Whether a trace on Cartesian axis `key` places `Date`/`DateTime` values
+# there: plotly.js then types an untyped ("-") axis as a date axis.
+_axes_has_date_data(fig, key::Symbol) =
+	_axes_axis_values_any(v -> v isa Union{Dates.Date, Dates.DateTime}, fig, key)
 
 # What `offset` asks of axis `key` (before any write): `(values, labels, k,
 # clear)`. A factor 10^k comes with the scaled tick values and labels; without
@@ -938,6 +959,15 @@ Only that axis changes (other cells keep their ticks).
     `tickmode`, `tickvals`, `ticktext`, `tick0`, `dtick`, the automatic
     `"~g"` format and the minor tick placement; minor ticks are switched off
     unless `minor = true`.
+  A log axis without any tick setting is labelled by Plotly, except where
+  its labels would collide at the size the figure is drawn (a narrow
+  journal-column panel: "5678" run together) and, when the active style
+  labels log axes by decades (`PlotStyle` `log_ticks = :decades`), on an
+  axis spanning two decades or more: there each render (`savefig` included)
+  shows decade labels with unlabelled minor ticks, as `:decades` does, and
+  Plotly's labels again once they fit. Tick values, a preset (`:auto`
+  included), `format` or `minor` set with `xticks!` make the axis's ticks
+  the user's and turn this off.
   A preset cannot be combined with `labels` or `subs`.
 - `labels`: one label per value; each goes through the mathtext layer, so a
   TeX label such as `L"\\pi/2"` (LaTeXStrings) typesets. Without labels,
@@ -1036,6 +1066,689 @@ function yticks!(
 		kwargs...,
 	)
 	return sf
+end
+
+# ---------------------------------------------------------------------------
+# Log-axis tick labels: the paper-style rule (W7) and narrow axes (Z70)
+# ---------------------------------------------------------------------------
+#
+# plotly.js 2.35.2 labels an automatic log axis (axes.js `calcTicks` /
+# `autoTicks`, read in the bundled plotly.min.js): with nt = clamp(L / m, 4,
+# 9) + 1 for an axis of L px (m = 80 on x, 40 on y) and e = (decades shown) /
+# nt, the tick step is `ceil(e)` decades when e > 0.7, linear ticks ("L")
+# when less than one decade is shown, else "D2" (labels at 1, 2, 5 of every
+# decade) for e > 0.3 and "D1" (1, 2, ..., 9). Decade labels in the power
+# format are drawn at 1.25 x the tick font, the digit labels of "D1"/"D2" at
+# 0.75 x; under "D1" a decade label on an x axis moves right by 0.5
+# (negative exponent) or 0.25 of its font size. nt ignores the label widths,
+# so on a narrow axis (a journal column) the digit labels run into each
+# other and into the decade labels (publication-style rep/small/aps.png: the
+# "2" after 10⁻¹, "5678" read as one number).
+#
+# `_axes_log_tick_updates!` (run by `_finalize_figure!` after every mutation
+# and on the export copy at its real size) therefore gives a log axis with no
+# tick setting decade labels every k decades and unlabelled minor ticks at
+# the other digits when
+# - the active style says so (`_style_log_ticks() == :decades`, D15 rule 2:
+#   `:publication` and the journal presets) and the axis shows two decades or
+#   more (W7), or
+# - plotly's automatic labels would overlap at the axis's estimated length
+#   (Z70; matplotlib labels no minor ticks on an axis spanning more than one
+#   decade either);
+# with k = ceil(decades / 8) (lead decision D9), raised until neighbouring
+# decade labels clear each other. What it writes has its own signature
+# (`_axes_is_fitted_decades`: `tick0`/`dtick` without `tickmode`), so later
+# runs re-fit k, and hand the axis back to plotly's labels (removing exactly
+# those fields) once they fit again. An axis with any tick setting of the
+# user's, `xticks!(fig, :decades)` included, is never touched.
+#
+# Axis fields that place ticks or format their labels: an axis stating none
+# of them shows plotly's automatic ticks.
+const _AXES_TICK_PLACEMENT_KEYS = (
+	:tickmode, :tickvals, :ticktext, :tick0, :dtick, :nticks, :tickformat, :ticklabelstep, :minor,
+)
+# plotly.js 2.35.2 log tick-label sizes relative to the tick font (formatLog).
+const _AXES_LOG_DECADE_FONT = 1.25
+const _AXES_LOG_DIGIT_FONT = 0.75
+# Clear space (px) plotly's labels need before they collide: on an x axis
+# their advance boxes (side bearings included) must not intersect; on a y axis
+# their ink may touch, as on plotly's own "D1" axes at the default size ("9"
+# just under "10"), but not overlap by more than 1 px. Checked against the
+# label boxes plotly.js renders (scratch v5/axes/v05.jl: the modelled gaps of
+# x labels are within 1.5 px of the rendered ones).
+const _AXES_TICK_COLLISION_CLEARANCE_X = 0.0
+const _AXES_TICK_COLLISION_CLEARANCE_Y = -1.0
+# Space (in tick-font sizes) the decade labels the fit writes keep between
+# each other.
+const _AXES_DECADE_LABEL_GAP_EM = 0.5
+# Share of the estimated axis length the label fit relies on: the estimate
+# (`_fin_margins`, within 10 px of the rendered length without colorbars)
+# does not see every margin push (colorbars), and an axis that comes out
+# shorter must still fit its labels.
+const _AXES_TICK_LENGTH_SAFETY = 0.95
+# Vertical ink of a tick label on a y axis, in units of its font size s,
+# from plotly.js 2.35.2 (svg_text_utils / axes.js): the baseline sits
+# MID_SHIFT = 0.35 s below the tick, digits rise 0.72 s (cap height) above
+# the baseline, and a `<sup>` (font 70 %, dy -0.6 em) tops out at
+# 0.42 s + 0.72 x 0.7 s = 0.92 s above it.
+const _AXES_TICK_BELOW = 0.35
+const _AXES_TICK_DIGIT_ABOVE = 0.37
+const _AXES_TICK_SUP_ABOVE = 0.57
+# Decades a `:decades` axis must show under the paper styles (D15 rule 2).
+const _AXES_STYLE_DECADES_MIN_SPAN = 2.0
+# Padding plotly.js gives an autoranged scatter axis, as a share of the data
+# span on each side: 5 % of the axis length per side, the data filling 90 %.
+const _AXES_AUTORANGE_PAD = 0.05 / 0.9
+
+_axes_real_value_or(value, default) =
+	(value isa Real && !(value isa Bool) && isfinite(value)) ? Float64(value) : default
+
+# Whether an axis's `minor` entry states anything (`relayout!` leaves removed
+# attributes behind as `nothing`).
+function _axes_minor_stated(minor)
+	minor === nothing && return false
+	minor isa PlotlyBase.PlotlyAttribute && (minor = minor.fields)
+	minor isa AbstractDict || return true
+	return any(v -> v !== nothing, values(minor))
+end
+
+_axes_is_whole_number(value, low::Real) =
+	value isa Real && !(value isa Bool) && isfinite(value) && isinteger(value) && value >= low
+
+# Whether the tick fields of `axis` are the signature `_axes_log_tick_updates!`
+# writes: `tick0 = 0` and an integer decade step `dtick` WITHOUT `tickmode`
+# (plotly.js then takes tickmode "linear"; the `:decades` preset of
+# `_apply_ticks!` states `tickmode = "linear"`, so a user's preset never
+# matches), and a minor placement `tickmode = "linear"`, `tick0 = 0`,
+# `dtick = "D1"` or 1.
+function _axes_is_fitted_decades(axis)
+	_cmn_mapping_get(axis, :tickmode) === nothing || return false
+	_axes_real_value_or(_cmn_mapping_get(axis, :tick0), NaN) == 0 || return false
+	_axes_is_whole_number(_cmn_mapping_get(axis, :dtick), 1) || return false
+	for key in (:tickvals, :ticktext, :nticks, :tickformat, :ticklabelstep)
+		_cmn_mapping_get(axis, key) === nothing || return false
+	end
+	minor = _cmn_mapping_get(axis, :minor)
+	_cmn_mapping_get(minor, :tickmode) == "linear" || return false
+	_axes_real_value_or(_cmn_mapping_get(minor, :tick0), NaN) == 0 || return false
+	(_cmn_mapping_get(minor, :tickvals) === nothing && _cmn_mapping_get(minor, :nticks) === nothing) ||
+		return false
+	minor_dtick = _cmn_mapping_get(minor, :dtick)
+	return minor_dtick == "D1" || (_axes_is_whole_number(minor_dtick, 1) && minor_dtick == 1)
+end
+
+# `:auto` (no tick setting: plotly's automatic ticks), `:fitted` (the decade
+# ticks `_axes_log_tick_updates!` wrote) or `:user` (any other tick setting,
+# the `:decades` preset of `xticks!` included).
+function _axes_log_tick_state(axis)
+	stated(key) = key === :minor ? _axes_minor_stated(_cmn_mapping_get(axis, :minor)) :
+		_cmn_mapping_get(axis, key) !== nothing
+	any(stated, _AXES_TICK_PLACEMENT_KEYS) || return :auto
+	return _axes_is_fitted_decades(axis) ? :fitted : :user
+end
+
+# Tick-mark direction of axis `key` ("inside", "outside" or "" for none): its
+# own `ticks`, else its template's, else plotly's default "".
+function _axes_tick_direction(layout::Layout, key::Symbol)
+	ticks = _cmn_mapping_get(get(layout.fields, key, nothing), :ticks)
+	ticks === nothing &&
+		(ticks = _cmn_mapping_get(_axes_template_entry(layout, Symbol(String(key)[1], "axis")), :ticks))
+	return ticks in ("inside", "outside") ? String(ticks) : ""
+end
+
+# plotly.js's automatic choice for a log axis of `len` px showing `span`
+# decades (see the comment above): an integer decade step, :D1, :D2, or
+# :linear.
+function _axes_plotly_log_dtick(span::Float64, len::Float64, letter::Char)
+	nt = clamp(len / (letter == 'y' ? 40.0 : 80.0), 4.0, 9.0) + 1.0
+	e = span / nt
+	e > 0.7 && return ceil(Int, e)
+	span < 1 && return :linear
+	return e > 0.3 ? :D2 : :D1
+end
+
+# Whether plotly writes the label of decade `n` in the power format: the
+# "power" exponent format, and the default "B" and "SI" ones past 10¹⁴ or
+# under 10⁻¹⁵ (plotly formatLog).
+_axes_power_decade(n::Int, exponentformat) =
+	exponentformat == "power" ||
+	((exponentformat === nothing || exponentformat in ("B", "SI")) && (n > 14 || n < -15))
+
+# Text of the label of decade `n` (plotly formatLog / numFormat): "10ⁿ" in
+# the power format (1 and 10 written out); "1e+n" in the "e"/"E" formats past
+# two digits; an SI prefix ("1k", "100μ") in "B"/"SI" from the thousands on;
+# else the number.
+function _axes_decade_label(n::Int, exponentformat)
+	if _axes_power_decade(n, exponentformat)
+		n == 0 && return "1"
+		n == 1 && return "10"
+		return "10<sup>" * (n < 0 ? "−" : "") * string(abs(n)) * "</sup>"
+	end
+	if exponentformat in ("e", "E") && abs(n) > 2
+		return "1" * exponentformat * (n > 0 ? "+" : "−") * string(abs(n))
+	end
+	if (exponentformat === nothing || exponentformat in ("B", "SI")) && abs(n) >= 3
+		group = fld(n, 3)
+		prefixes = Dict(-5 => "f", -4 => "p", -3 => "n", -2 => "μ", -1 => "m", 1 => "k", 2 => "M",
+			3 => exponentformat == "SI" ? "G" : "B", 4 => "T")
+		prefix = get(prefixes, group, nothing)
+		prefix === nothing || return "1" * "0"^(n - 3 * group) * prefix
+	end
+	return _axes_format_number(exp10(Float64(n)))
+end
+
+# Font size (px) plotly draws the label of decade `n` at: 1.25 x the tick
+# font `f` in the power format (also "1" and "10"), else `f`.
+_axes_decade_font(n::Int, exponentformat, f::Float64) =
+	_axes_power_decade(n, exponentformat) ? _AXES_LOG_DECADE_FONT * f : f
+
+# Extent (px) of a tick label of text `text` drawn at font `s` on an axis of
+# direction `letter`, towards lower and towards higher data values, measured
+# from its tick: half its width each way on an x axis; its ink below and
+# above the tick on a y axis (swapped on a reversed y axis).
+function _axes_tick_label_extent(text::AbstractString, s::Float64, letter::Char, reversed::Bool)
+	if letter == 'x'
+		half = _text_extent(text, s)[1] / 2
+		return (half, half)
+	end
+	above = (occursin("<sup>", text) ? _AXES_TICK_SUP_ABOVE : _AXES_TICK_DIGIT_ABOVE) * s
+	below = _AXES_TICK_BELOW * s
+	return reversed ? (above, below) : (below, above)
+end
+
+# The rows of labels (each: position px along the axis in increasing data
+# order, extent towards lower values, extent towards higher values) plotly
+# draws for `choice` (`_axes_plotly_log_dtick`, or an integer decade step)
+# on a log axis showing [a, b] (log10) over `len` px; `reversed` for a
+# reversed axis. Labels in different rows cannot collide: under "D1" plotly
+# lowers the decade labels of an x axis by half their font size, below the
+# digit labels, where only a superscript (the "−1" of 10⁻¹) reaches up into
+# the digits' row.
+function _axes_log_tick_labels(choice, a::Float64, b::Float64, len::Float64, letter::Char,
+	f::Float64, exponentformat, reversed::Bool)
+	digits = NTuple{3, Float64}[]
+	decades = NTuple{3, Float64}[]
+	choice === :linear && return (digits, decades)
+	ppd = len / (b - a)
+	toward_high = reversed ? -1.0 : 1.0
+	lowered = choice === :D1 && letter == 'x'
+	for n in floor(Int, a):ceil(Int, b)
+		if a - 1e-9 <= n <= b + 1e-9 && (!(choice isa Integer) || mod(n, choice) == 0)
+			text = _axes_decade_label(n, exponentformat)
+			s = _axes_decade_font(n, exponentformat, f)
+			lo, hi = _axes_tick_label_extent(text, s, letter, reversed)
+			# plotly formatLog under "D1": a decade label moves along an x axis
+			# by 0.5 s (negative exponent) or 0.25 s towards higher values, and
+			# a plain-number one up a y axis by s / 6.
+			shift = choice !== :D1 ? 0.0 :
+				letter == 'x' ? s * (n < 0 ? 0.5 : 0.25) :
+				_axes_power_decade(n, exponentformat) ? 0.0 : toward_high * s / 6
+			centre = (n - a) * ppd + shift
+			if lowered
+				push!(decades, (centre, lo, hi))
+				sup = match(r"<sup>(.*)</sup>", text)
+				if sup !== nothing
+					w = s * _TEXT_SCRIPT_SCALE * _text_plain_em(sup.captures[1])
+					push!(digits, (centre + hi - w / 2, w / 2, w / 2))
+				end
+			else
+				push!(digits, (centre, lo, hi))
+			end
+		end
+		choice isa Integer && continue
+		for m in (choice === :D1 ? (2:9) : (2, 5))
+			position = n + log10(m)
+			a - 1e-9 <= position <= b + 1e-9 || continue
+			lo, hi = _axes_tick_label_extent(string(m), _AXES_LOG_DIGIT_FONT * f, letter, reversed)
+			push!(digits, ((position - a) * ppd, lo, hi))
+		end
+	end
+	return (sort!(digits; by = first), sort!(decades; by = first))
+end
+
+# Whether neighbouring labels in a row of `rows` (`_axes_log_tick_labels`)
+# come closer than `clearance` px.
+function _axes_tick_labels_overlap(rows, clearance::Float64)
+	for labels in rows, i in 2:length(labels)
+		(p0, _, hi0), (p1, lo1, _) = labels[i - 1], labels[i]
+		p1 - p0 < hi0 + lo1 + clearance && return true
+	end
+	return false
+end
+
+# Decade step of the decade labels on a log axis showing [a, b] over `len`
+# px: D9's ceil(n / 8), raised until neighbouring decade labels keep
+# `_AXES_DECADE_LABEL_GAP_EM` between them (never past the decades shown, so
+# one label always remains).
+function _axes_decade_step(a::Float64, b::Float64, len::Float64, letter::Char, f::Float64,
+	exponentformat, reversed::Bool)
+	step = max(1, ceil(Int, (b - a) / _CMN_DECADES_MAX_LABELS))
+	limit = max(step, floor(Int, b - a))
+	gap = _AXES_DECADE_LABEL_GAP_EM * f
+	while step < limit &&
+		_axes_tick_labels_overlap(_axes_log_tick_labels(step, a, b, len, letter, f, exponentformat, reversed), gap)
+		step += 1
+	end
+	return step
+end
+
+# Tick font size (px) of axis `key`: its `tickfont.size`, else the template's,
+# else the layout font size.
+function _axes_tick_font(layout::Layout, key::Symbol)
+	root = _tight_root_font_size(k -> get(layout.fields, k, nothing))
+	template_axis = _axes_template_entry(layout, Symbol(String(key)[1], "axis"))
+	return _axes_size(
+		_cmn_mapping_get(_cmn_mapping_get(get(layout.fields, key, nothing), :tickfont), :size),
+		_axes_size(_cmn_mapping_get(_cmn_mapping_get(template_axis, :tickfont), :size), root),
+	)
+end
+
+# What the axis fits of `_axes_finalize_updates!` read: the extents of the
+# traces on every axis (`_fin_collect_axes`) and the estimated plot-area size
+# (px) of the figure (`_fin_margins`).
+struct _AxesFitPlan
+	accs::AbstractDict{Symbol}   # Dict{Symbol, _FinAxisAcc}; finalize.jl is included after this file
+	Wp::Float64
+	Hp::Float64
+end
+
+function _axes_fit_plan(p::Plot, size)
+	accs = _fin_collect_axes(p)
+	W, H = Float64(size[1]), Float64(size[2])
+	margins = _fin_margins(p.layout, accs, W, H, Dict{Symbol, Any}(), ())
+	return _AxesFitPlan(accs, max(W - margins.l - margins.r, 1.0), max(H - margins.t - margins.b, 1.0))
+end
+
+_axes_has_log_axis(layout::Layout) =
+	any(k -> _fin_is_axis_key(k) && _fin_axis_type(layout, k) == "log", keys(layout.fields))
+
+# Plot-area length (px) of axis `key` under `plan`.
+function _axes_plan_length(layout::Layout, plan::_AxesFitPlan, key::Symbol)
+	domain = _fin_domain(layout, key)
+	return (domain[2] - domain[1]) * (String(key)[1] == 'x' ? plan.Wp : plan.Hp)
+end
+
+"""
+	_axes_finalize_updates!(updates, p::Plot, size) -> updates
+
+The axis fits `_finalize_figure!` runs for a figure of `size = (width,
+height)` px, after every mutation and on the export copy: log-axis tick
+labels (`_axes_log_tick_updates!`, W7/Z70) and axis titles longer than their
+axis (`_axes_title_wrap_updates!`, W5). Figures without a log axis or a long
+plain axis title return at once, without reading the trace data.
+"""
+function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size)
+	layout = p.layout
+	log_axes = _axes_has_log_axis(layout)
+	wrap = _axes_title_wrap_candidates(layout, size)
+	(log_axes || !isempty(wrap)) || return updates
+	plan = _axes_fit_plan(p, size)
+	log_axes && _axes_log_tick_updates!(updates, p, plan)
+	isempty(wrap) || _axes_title_wrap_updates!(updates, p, plan, wrap)
+	return updates
+end
+
+"""
+	_axes_log_tick_updates!(updates, p::Plot, size_or_plan; mode = _style_log_ticks()) -> updates
+
+Add to `updates` (`relayout!` keys, `nothing` removes) the tick settings the
+log axes of `p` need for a figure of `size = (width, height)` px (or an
+`_AxesFitPlan`; see the comment above): decade labels on a log axis without
+a tick setting when `mode == :decades` and the axis shows two decades or
+more, or when plotly's automatic labels would overlap; a re-fitted decade
+step on an axis that has them; plotly's automatic labels back when neither
+holds any more. A `matches` group is decided once (any member whose labels
+would overlap) and written on every member without a tick setting of the
+user's. Axes with one are never touched. Figures without a log axis cost
+nothing. Idempotent.
+"""
+function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, size; mode::Symbol = _style_log_ticks())
+	_axes_has_log_axis(p.layout) || return updates
+	return _axes_log_tick_updates!(updates, p, _axes_fit_plan(p, size); mode = mode)
+end
+
+function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_AxesFitPlan; mode::Symbol = _style_log_ticks())
+	layout = p.layout
+	fields = layout.fields
+	groups = Dict{Symbol, Vector{Symbol}}()
+	for key in keys(fields)
+		_fin_is_axis_key(key) || continue
+		_fin_axis_type(layout, key) == "log" || continue
+		root = _fin_match_root(fields, key)
+		root === nothing && continue
+		push!(get!(Vector{Symbol}, groups, root), key)
+	end
+	for (root, members) in groups
+		(root in members || !haskey(fields, root)) || push!(members, root)
+		states = Dict(m => _axes_log_tick_state(get(fields, m, nothing)) for m in members)
+		writable = Symbol[m for m in members if states[m] !== :user]
+		isempty(writable) && continue
+		view = _axes_log_view(layout, root, members, plan.accs)
+		want = false
+		step = 1
+		if view !== nothing
+			a, b = view
+			letter = String(root)[1]
+			reversed = _axis_is_reversed(p, root)
+			want = mode === :decades && b - a >= _AXES_STYLE_DECADES_MIN_SPAN - 1e-9
+			for m in writable
+				axis = get(fields, m, nothing)
+				_cmn_mapping_get(axis, :showticklabels) === false && continue
+				_cmn_mapping_get(axis, :visible) === false && continue
+				full = _axes_plan_length(layout, plan, m)
+				len = _AXES_TICK_LENGTH_SAFETY * full
+				len > 1 || continue
+				f = _axes_tick_font(layout, m)
+				exponentformat = _cmn_mapping_get(axis, :exponentformat)
+				if !want
+					choice = _axes_plotly_log_dtick(b - a, full, letter)
+					want = _axes_tick_labels_overlap(
+						_axes_log_tick_labels(choice, a, b, len, letter, f, exponentformat, reversed),
+						letter == 'x' ? _AXES_TICK_COLLISION_CLEARANCE_X : _AXES_TICK_COLLISION_CLEARANCE_Y,
+					)
+				end
+				step = max(step, _axes_decade_step(a, b, len, letter, f, exponentformat, reversed))
+			end
+		end
+		for m in writable
+			axis = get(fields, m, nothing)
+			if want
+				_axes_fitted_decades_updates!(updates, layout, m, axis, step)
+			elseif states[m] === :fitted
+				# plotly's own labels fit again (a wider figure, fewer decades):
+				# hand the axis back to them.
+				for name in (:tick0, :dtick, :minor_tickmode, :minor_tick0, :minor_dtick, :minor_ticks, :minor_ticklen)
+					updates[Symbol(m, :_, name)] = nothing
+				end
+			end
+		end
+	end
+	return updates
+end
+
+# Visible range (log10) of the log axis group `root` with `members`: the
+# group's fixed range or clip, else the data extent of its members widened by
+# the padding plotly gives an autorange (5 % of the axis length on each side,
+# so the data fills 90 %); `nothing` without data.
+function _axes_log_view(layout::Layout, root::Symbol, members, accs)
+	shown = nothing
+	for m in (root, members...)
+		shown = _fin_shown_range(layout, m, accs)
+		shown === nothing || break
+	end
+	shown === nothing && return nothing
+	a, b = shown
+	(isfinite(a) && isfinite(b) && b - a > 1e-9) || return nothing
+	axis = get(layout.fields, root, nothing)
+	auto = _fin_field(axis, :autorange)
+	fixed = _fin_range_pair(_fin_field(axis, :range)) !== nothing && (auto === false || auto === nothing)
+	if !fixed && _fin_sticky_clip(axis) === nothing
+		pad = _AXES_AUTORANGE_PAD * (b - a)
+		a, b = a - pad, b + pad
+	end
+	return (a, b)
+end
+
+# Add to `updates` what axis `key` (state `:auto` or `:fitted`) needs to show
+# decade labels every `step` decades with unlabelled minor ticks: the
+# signature of `_axes_is_fitted_decades`, minor ticks in the direction of the
+# major ones (none when the axis has no tick marks). Only differences are
+# written.
+function _axes_fitted_decades_updates!(updates, layout::Layout, key::Symbol, axis, step::Int)
+	minor = _cmn_mapping_get(axis, :minor)
+	direction = _axes_tick_direction(layout, key)
+	want = Pair{Symbol, Any}[
+		:tick0 => 0,
+		:dtick => step,
+		:minor_tickmode => "linear",
+		:minor_tick0 => 0,
+		:minor_dtick => step == 1 ? "D1" : 1,
+		:minor_ticks => direction,
+	]
+	isempty(direction) || push!(want, :minor_ticklen => _cmn_minor_ticklen(axis, 0))
+	for (name, value) in want
+		path = String(name)
+		current = startswith(path, "minor_") ? _cmn_mapping_get(minor, Symbol(path[7:end])) :
+			_cmn_mapping_get(axis, name)
+		(current !== nothing && isequal(current, value)) && continue
+		updates[Symbol(key, :_, name)] = value
+	end
+	return updates
+end
+
+"""
+	_axes_apply_style_log_ticks!(fig; size = nothing, mode = _style_log_ticks()) -> Bool
+
+Apply the log-axis tick rule (`_axes_log_tick_updates!`) to `fig` (a `Plot`,
+`SyncPlot` or `SubplotFigure`) at `size = (width, height)` px (default: the
+figure's layout size, else the active style's default figure size). Returns
+whether anything was written. Idempotent; never changes an axis with a tick
+setting of its own. `_finalize_figure!` applies the rule after every
+mutation and on the export copy, so callers rarely need this directly.
+"""
+function _axes_apply_style_log_ticks!(fig; size = nothing, mode::Symbol = _style_log_ticks())
+	mode in (:auto, :decades) || throw(ArgumentError(
+		"_axes_apply_style_log_ticks!: `mode` must be :auto or :decades; got $(repr(mode)).",
+	))
+	p = _cmn_plot(fig)
+	if size === nothing
+		w = get(p.layout.fields, :width, nothing)
+		h = get(p.layout.fields, :height, nothing)
+		dw, dh = _style_default_figure_size()
+		size = (_axes_real_value_or(w, dw), _axes_real_value_or(h, dh))
+	end
+	updates = _axes_log_tick_updates!(Dict{Symbol, Any}(), p, size; mode = mode)
+	isempty(updates) && return false
+	relayout!(_cmn_relayout_target(fig); updates...)
+	return true
+end
+
+# ---------------------------------------------------------------------------
+# Axis titles longer than their axis (W5)
+# ---------------------------------------------------------------------------
+#
+# plotly.js draws an axis title on one line centred on its axis, so a title
+# longer than the axis runs past it: into the neighbouring cell's title in a
+# grid, and off the figure when it is longer than the figure is high (gallery
+# optical_infra: a y title clipped at both ends). `_finalize_figure!` breaks
+# such a title into lines no longer than the axis, at the spaces between
+# words, with lines of even length (`_axes_title_wrap_updates!`), at the real
+# size of every render (the export copy too); automargin then makes room for
+# the extra line. Its line breaks are marked (`_AXES_WRAP_BREAK`, a zero-width
+# space before `<br>`: invisible, and plotly.js itself writes U+200B into
+# empty lines), so the next run starts again from the one-line title and a
+# title that fits again is put back on one line. Titles with a line break of
+# the user's, MathJax titles (with `$`) and words joined by no-break spaces
+# (U+00A0; what `xlabel!(...; wrap = false)` writes) are never broken.
+
+const _AXES_WRAP_BREAK = "\u200b<br>"
+
+# Original one-line text of a title `_axes_title_wrap_updates!` broke.
+_axes_unwrap_title(text::AbstractString) = replace(String(text), _AXES_WRAP_BREAK => " ")
+
+# The words of `text` between its breakable spaces: ASCII spaces outside
+# markup tags and outside tag pairs (`<i>a b</i>` stays whole). `nothing` for
+# a title that is never broken (a line break of its own, MathJax).
+function _axes_title_words(text::String)
+	occursin('$', text) && return nothing
+	occursin(_TEXT_BR_TAG, text) && return nothing
+	words = String[]
+	current = IOBuffer()
+	depth = 0
+	i = firstindex(text)
+	while i <= lastindex(text)
+		c = text[i]
+		if c == '<'
+			close = findnext('>', text, i)
+			if close !== nothing
+				tag = text[i:close]
+				print(current, tag)
+				name = lowercase(strip(text[nextind(text, i):prevind(text, close)]))
+				if startswith(name, "/")
+					depth = max(depth - 1, 0)
+				elseif !endswith(name, "/")
+					depth += 1
+				end
+				i = nextind(text, close)
+				continue
+			end
+		end
+		if c == ' ' && depth == 0
+			word = String(take!(current))
+			isempty(word) || push!(words, word)
+		else
+			print(current, c)
+		end
+		i = nextind(text, i)
+	end
+	word = String(take!(current))
+	isempty(word) || push!(words, word)
+	return words
+end
+
+"""
+	_axes_keep_on_one_line(text) -> String
+
+`text` with its breakable spaces (outside markup tags) turned into no-break
+spaces (U+00A0), so `_finalize_figure!` never breaks it into lines; MathJax
+text (`\$`) is returned unchanged. Used by `xlabel!`/`ylabel!` with
+`wrap = false`.
+"""
+function _axes_keep_on_one_line(text::AbstractString)
+	s = String(text)
+	occursin('$', s) && return s
+	out = IOBuffer()
+	inside = false
+	for c in s
+		c == '<' && (inside = true)
+		c == '>' && (inside = false)
+		print(out, (c == ' ' && !inside) ? '\u00a0' : c)
+	end
+	return String(take!(out))
+end
+
+# `words` (widths `em` in em) broken into the fewest lines no wider than
+# `limit` em, then with the widest line as narrow as that number of lines
+# allows; `nothing` when one line fits or one word alone is wider.
+function _axes_balanced_lines(words::Vector{String}, em::Vector{Float64}, space::Float64, limit::Float64)
+	n = length(words)
+	n >= 2 || return nothing
+	total = sum(em) + (n - 1) * space
+	total <= limit && return nothing
+	maximum(em) <= limit || return nothing
+	# Greedy breaks for a width bound: the lines' word ranges.
+	function breaks(bound)
+		ranges = UnitRange{Int}[]
+		start = 1
+		width = em[1]
+		for k in 2:n
+			if width + space + em[k] <= bound + 1e-9
+				width += space + em[k]
+			else
+				push!(ranges, start:(k - 1))
+				start = k
+				width = em[k]
+			end
+		end
+		push!(ranges, start:n)
+		return ranges
+	end
+	lines = length(breaks(limit))
+	# The narrowest bound that still gives that many lines is the width of
+	# one of the runs of consecutive words; the line count only falls as the
+	# bound grows, so bisect the sorted run widths.
+	prefix = cumsum(em)
+	candidates = Float64[]
+	for i in 1:n, j in i:n
+		w = prefix[j] - (i > 1 ? prefix[i - 1] : 0.0) + (j - i) * space
+		w <= limit + 1e-9 && push!(candidates, w)
+	end
+	sort!(unique!(candidates))
+	lo, hi = 1, length(candidates)   # candidates[end] is the widest line of `breaks(limit)` or wider
+	while lo < hi
+		mid = (lo + hi) >>> 1
+		length(breaks(candidates[mid])) <= lines ? (hi = mid) : (lo = mid + 1)
+	end
+	return [join(words[r], " ") for r in breaks(candidates[lo])]
+end
+
+# Text of axis `key`'s title and whether it is stored as a bare string.
+function _axes_title_text(axis)
+	title = _cmn_mapping_get(axis, :title)
+	title isa AbstractString && return (String(title), true)
+	text = _cmn_mapping_get(title, :text)
+	return (text isa AbstractString ? String(text) : "", false)
+end
+
+# Font size (px) of axis `key`'s title: its `title.font.size`, else the
+# template's, else plotly's 1.2 x the layout font.
+function _axes_title_font(layout::Layout, key::Symbol)
+	root = _tight_root_font_size(k -> get(layout.fields, k, nothing))
+	template_title = _cmn_mapping_get(_axes_template_entry(layout, Symbol(String(key)[1], "axis")), :title)
+	title = _cmn_mapping_get(get(layout.fields, key, nothing), :title)
+	return _axes_size(
+		title isa AbstractString ? nothing : _cmn_mapping_get(_cmn_mapping_get(title, :font), :size),
+		_axes_size(
+			_cmn_mapping_get(_cmn_mapping_get(template_title, :font), :size),
+			Float64(round(_AXES_TITLE_FONT_FACTOR * root)),
+		),
+	)
+end
+
+# Axes of `layout` whose title may need breaking or joining at a figure of
+# `size` px: titles our breaks are in, and breakable titles longer than half
+# the figure's extent along the axis' domain (no axis is longer than that
+# extent). Cheap: reads no trace data.
+function _axes_title_wrap_candidates(layout::Layout, size)
+	candidates = Symbol[]
+	W, H = Float64(size[1]), Float64(size[2])
+	for (key, axis) in layout.fields
+		_fin_is_axis_key(key) || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		text, _ = _axes_title_text(axis)
+		isempty(text) && continue
+		if occursin(_AXES_WRAP_BREAK, text)
+			push!(candidates, key)
+			continue
+		end
+		words = _axes_title_words(text)
+		(words === nothing || length(words) < 2) && continue
+		domain = _fin_domain(layout, key)
+		extent = (domain[2] - domain[1]) * (String(key)[1] == 'x' ? W : H)
+		_text_extent(text, _axes_title_font(layout, key))[1] > 0.5 * extent && push!(candidates, key)
+	end
+	return candidates
+end
+
+"""
+	_axes_title_wrap_updates!(updates, p::Plot, plan::_AxesFitPlan, keys) -> updates
+
+Add to `updates` the title text of each axis of `keys`
+(`_axes_title_wrap_candidates`) at the plot-area size of `plan`: broken into
+even lines no longer than the axis when its one-line text is longer, else
+the one-line text (see the comment above). Only changes are written.
+"""
+function _axes_title_wrap_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_AxesFitPlan, keys)
+	layout = p.layout
+	for key in keys
+		axis = get(layout.fields, key, nothing)
+		stored, bare = _axes_title_text(axis)
+		text = _axes_unwrap_title(stored)
+		words = _axes_title_words(text)
+		words === nothing && continue
+		font = _axes_title_font(layout, key)
+		limit = _axes_plan_length(layout, plan, key) / font
+		em = Float64[_text_plain_em(word) for word in words]
+		lines = _axes_balanced_lines(words, em, _text_char_em(' '), limit)
+		want = lines === nothing ? text : join(lines, _AXES_WRAP_BREAK)
+		want == stored && continue
+		if bare
+			updates[Symbol(key, :_title)] = Dict{Symbol, Any}(:text => want)
+		else
+			updates[Symbol(key, :_title_text)] = want
+		end
+	end
+	return updates
 end
 
 # ---------------------------------------------------------------------------
@@ -1230,14 +1943,78 @@ _axes_mirrors_ticks(mirror) = mirror isa AbstractString && mirror in ("ticks", "
 # draws without a line; render probe p06) and the wanted lines are layout
 # shapes on the plot-area edge (`"<x> domain"`/`"<y> domain"` references, in
 # the axis's line colour and width), returned as (edge, along-x) pairs.
-function _axes_spine_axis_fields(own_on::Bool, other_on::Bool, mirror_ticks::Bool)
-	if own_on && other_on
+function _axes_spine_axis_fields(own_on::Bool, other_on::Bool, mirror_ticks::Bool; bounded::Bool = false)
+	if !bounded && own_on && other_on
 		return (Dict{Symbol, Any}(:showline => true, :mirror => mirror_ticks ? "ticks" : true), (false, false))
-	elseif own_on && !mirror_ticks
+	elseif !bounded && own_on && !mirror_ticks
 		return (Dict{Symbol, Any}(:showline => true, :mirror => false), (false, false))
 	end
 	fields = Dict{Symbol, Any}(:showline => false, :mirror => mirror_ticks ? "ticks" : false)
 	return (fields, (own_on, other_on))
+end
+
+const _AXES_SPINE_SIDE_NAMES = ("bottom", "top", "left", "right")
+
+# A per-side keyword of `spines!`: `nothing` (from `style`), `true`/`false`,
+# or a data interval `(lo, hi)` (the side is drawn over that interval only).
+# Returns `(switch, interval)`: the side's on/off override and the interval
+# as given, or `nothing`.
+function _axes_spine_side_option(value, name::AbstractString, who::AbstractString)
+	(value === nothing || value isa Bool) && return (value, nothing)
+	((value isa Tuple || value isa AbstractVector) && length(value) == 2) || throw(ArgumentError(
+		"$(who): `$(name)` must be true, false, `nothing` or a data interval " *
+		"(lo, hi) over which the line is drawn; got $(repr(value)).",
+	))
+	lo, hi = value[1], value[2]
+	for bound in (lo, hi)
+		ok = (bound isa Real && !(bound isa Bool) && isfinite(bound)) ||
+			bound isa Dates.Date || bound isa Dates.DateTime
+		ok || throw(ArgumentError(
+			"$(who): `$(name)` bounds must be finite numbers or dates (data " *
+			"values of the axis); got $(repr(value)).",
+		))
+	end
+	(lo isa Real) == (hi isa Real) || throw(ArgumentError(
+		"$(who): `$(name)` bounds must both be numbers or both be dates; got $(repr(value)).",
+	))
+	isequal(lo, hi) && throw(ArgumentError(
+		"$(who): `$(name)` bounds must differ; got $(repr(value)).",
+	))
+	return (true, (lo, hi))
+end
+
+# The ends of a bounded spine on axis `key` in the units plotly.js reads in
+# shape coordinates: data values (plotly maps them through the axis, log10 on
+# a log axis, where they must be positive), dates as date strings. An untyped
+# ("-") axis is the type plotly.js gives it from its data: a date axis when it
+# holds dates, numeric when it holds numbers (either kind of bound is taken
+# while it holds neither).
+function _axes_spine_interval(fig, key::Symbol, interval, name::AbstractString, who::AbstractString)
+	axis_type = _axis_type(fig, key)
+	dates = axis_type == "date" || (axis_type == "-" && _axes_has_date_data(fig, key))
+	out = Any[]
+	for bound in interval
+		if bound isa Real
+			dates && throw(ArgumentError(
+				"$(who): `$(name)` is drawn along date axis $(repr(key)); give dates, " *
+				"not numbers; got $(repr(interval)).",
+			))
+			(axis_type == "log" && bound <= 0) && throw(ArgumentError(
+				"$(who): `$(name)` is drawn along logarithmic axis $(repr(key)); its " *
+				"bounds are data values and must be positive; got $(repr(interval)).",
+			))
+			push!(out, Float64(bound))
+		else
+			(dates || (axis_type == "-" && _axis_data_extent(fig, key) === nothing)) ||
+				throw(ArgumentError(
+					"$(who): `$(name)` has date bounds but axis $(repr(key)) " *
+					(axis_type == "-" ? "holds numeric data" : "has type $(repr(axis_type))") *
+					"; give numbers.",
+				))
+			push!(out, string(bound))
+		end
+	end
+	return out
 end
 
 function _axes_spines!(
@@ -1246,10 +2023,10 @@ function _axes_spines!(
 	color = "",
 	linewidth::Real = 0,
 	ticks::Union{Nothing, Symbol, AbstractString} = nothing,
-	bottom::Union{Nothing, Bool} = nothing,
-	top::Union{Nothing, Bool} = nothing,
-	left::Union{Nothing, Bool} = nothing,
-	right::Union{Nothing, Bool} = nothing,
+	bottom = nothing,
+	top = nothing,
+	left = nothing,
+	right = nothing,
 	row = nothing,
 	col = nothing,
 	inset = nothing,
@@ -1266,7 +2043,12 @@ function _axes_spines!(
 	))
 	_axes_check_size(linewidth, "linewidth", who)
 	line_color = _axes_is_unset_color(color) ? nothing : _color_hex(color; who = who)
-	sides = _axes_spine_sides(style_name, (bottom, top, left, right))
+	options = ntuple(
+		i -> _axes_spine_side_option((bottom, top, left, right)[i], _AXES_SPINE_SIDE_NAMES[i], who),
+		4,
+	)
+	sides = _axes_spine_sides(style_name, map(first, options))
+	intervals = map(last, options)
 	targets, select = _axes_styling_targets(
 		fig,
 		who;
@@ -1275,8 +2057,18 @@ function _axes_spines!(
 		inset = inset,
 		cells = cells,
 	)
+	# Every target's bounded sides in shape units, checked before any write.
+	# `side_axis(t, i)` is the axis a side's line runs along: bottom/top along
+	# the x axis, left/right along the y axis.
+	side_axis(t, i) = i <= 2 ? t.xkey : t.ykey
+	target_intervals = map(targets) do t
+		ntuple(4) do i
+			intervals[i] === nothing ? nothing :
+				_axes_spine_interval(fig, side_axis(t, i), intervals[i], _AXES_SPINE_SIDE_NAMES[i], who)
+		end
+	end
 	ink = nothing
-	for t in targets
+	for (t, bounded) in zip(targets, target_intervals)
 		shapes = Any[]
 		for (key, letter) in ((t.xkey, 'x'), (t.ykey, 'y'))
 			entry = get(_cmn_layout(fig).fields, key, nothing)
@@ -1288,7 +2080,14 @@ function _axes_spines!(
 				(side == "right" ? (4, 3) : (3, 4))
 			mirror_ticks = ticks_name === :mirror ||
 				(ticks_name === nothing && _axes_mirrors_ticks(_cmn_mapping_get(entry, :mirror)))
-			fields, drawn = _axes_spine_axis_fields(sides[own_index], sides[other_index], mirror_ticks)
+			# A bounded side is a shape over its interval; plotly.js's axis
+			# line always spans the whole plot area (Z37).
+			fields, drawn = _axes_spine_axis_fields(
+				sides[own_index],
+				sides[other_index],
+				mirror_ticks;
+				bounded = bounded[own_index] !== nothing || bounded[other_index] !== nothing,
+			)
 			line_color === nothing || (fields[:linecolor] = line_color)
 			linewidth > 0 && (fields[:linewidth] = linewidth)
 			if ticks_name === :none
@@ -1308,11 +2107,17 @@ function _axes_spines!(
 				on || continue
 				edge = index in (2, 4) ? 1 : 0   # top/right: the far edge
 				line = attr(color = shape_color, width = shape_width)
+				span = bounded[index]
+				# Along the axis: the whole plot area ("<ref> domain", 0..1),
+				# or the side's data interval (data units on the axis).
+				along_ref, a0, a1 = span === nothing ?
+					("$(letter == 'x' ? t.xref : t.yref) domain", 0, 1) :
+					(letter == 'x' ? t.xref : t.yref, span[1], span[2])
 				push!(shapes, letter == 'x' ?
-					attr(type = "line", xref = "$(t.xref) domain", yref = "$(t.yref) domain",
-						x0 = 0, x1 = 1, y0 = edge, y1 = edge, line = line, layer = "above") :
-					attr(type = "line", xref = "$(t.xref) domain", yref = "$(t.yref) domain",
-						x0 = edge, x1 = edge, y0 = 0, y1 = 1, line = line, layer = "above"))
+					attr(type = "line", xref = along_ref, yref = "$(t.yref) domain",
+						x0 = a0, x1 = a1, y0 = edge, y1 = edge, line = line, layer = "above") :
+					attr(type = "line", xref = "$(t.xref) domain", yref = along_ref,
+						x0 = edge, x1 = edge, y0 = a0, y1 = a1, line = line, layer = "above"))
 			end
 		end
 		owner = "$(_AXES_SPINE_SHAPE):$(t.xref)$(t.yref)"
@@ -1340,22 +2145,28 @@ end
 	spines!(sf::SubplotFigure; ...)
 
 Style the axis lines ("spines") and the frame ticks of a figure,
-SubplotFigure cell or inset (matplotlib `ax.spines[...]` and
-`tick_params(top = True, right = True)`).
+SubplotFigure cell or inset (matplotlib `ax.spines[...]`, including
+`set_bounds`, and `tick_params(top = True, right = True)`).
 
 # Keywords
 - `style = :box`: `:box` closes the frame (all four lines, the package
   default); `:open` keeps only the bottom and left lines; `:none` hides the
   lines (ticks stay). Strings are accepted.
-- `bottom`, `top`, `left`, `right::Union{Nothing,Bool} = nothing`: switch
-  one side of the frame on or off; `nothing` takes the side from `style`
-  (e.g. `spines!(fig; left = false)` keeps bottom, top and right). A side is
-  the axis line where plotly.js can draw it (`showline`, `mirror`); a frame
-  it cannot draw (an opposite line alone, or mirrored ticks without the
-  mirrored line) gets that line as a layout shape on the plot-area edge in
-  `color`/`linewidth`, else the axis's line colour (the template's ink when
-  unset) and width (named `"plotlysupply:spine:<xy>:<k>"`; later `spines!`
-  calls replace it).
+- `bottom`, `top`, `left`, `right = nothing`: switch one side of the frame
+  on (`true`) or off (`false`); `nothing` takes the side from `style` (e.g.
+  `spines!(fig; left = false)` keeps bottom, top and right). A data interval
+  `(lo, hi)` draws the side only over that interval (matplotlib
+  `ax.spines["left"].set_bounds(lo, hi)`, a "range frame"): bottom/top run
+  along the x axis, left/right along the y axis, in DATA units (data values
+  on a log axis, where they must be positive; `Date`/`DateTime` values on a
+  date axis). The axis line of that axis is then hidden and every side it
+  owns is drawn as a shape; ticks and tick labels are unchanged.
+  A side is the axis line where plotly.js can draw it (`showline`,
+  `mirror`); a frame it cannot draw (an opposite line alone, mirrored ticks
+  without the mirrored line, or a bounded side) gets that line as a layout
+  shape on the plot-area edge in `color`/`linewidth`, else the axis's line
+  colour (the template's ink when unset) and width (named
+  `"plotlysupply:spine:<xy>:<k>"`; later `spines!` calls replace it).
 - `ticks = nothing`: `:mirror` also draws the ticks on the top and right
   frame sides (plotly `mirror = "ticks"`); `:primary` keeps them on the
   bottom and left sides only; `:none` removes the tick marks (major and
@@ -1382,6 +2193,7 @@ spines!(fig; style = :open, linewidth = 1.5)
 spines!(fig; ticks = :mirror)        # ticks on all four sides, closed frame
 xticks!(fig; direction = :inside); yticks!(fig; direction = :inside)
 spines!(fig; left = false)           # bottom, top and right lines only
+spines!(fig; style = :open, bottom = (1, 10), left = (0, 1))   # range frame
 ```
 """
 function spines!(fig; show = nothing, kwargs...)
@@ -1751,7 +2563,9 @@ function _axes_top_axis_depth(layout::Layout, axis::AbstractDict{Symbol})
 			_cmn_mapping_get(title, :standoff),
 			_axes_size(_cmn_mapping_get(template_title, :standoff), _AXES_TITLE_STANDOFF),
 		)
-		depth += standoff + length(_tight_lines(text)) * _AXES_LINE_HEIGHT_EM * title_size
+		# The text-extent estimate shared with the decoration stack (D12):
+		# 1.3 em per plain line, taller rows for MathJax fractions and roots.
+		depth += standoff + _text_extent(text, title_size)[2]
 	end
 	return depth
 end
@@ -2001,6 +2815,10 @@ function _axes_secondary_xaxis!(
 			),
 		)
 	end
+	# The stack above the axes changed (D12, Z15): panel titles, legends above
+	# the cell and the figure title band move above the new top axis, and the
+	# top margin grows to hold them.
+	_text_restack!(fig)
 	_axes_select!(fig, t)
 	_axes_finish!(fig)
 	return nothing
@@ -2093,7 +2911,12 @@ end
 # F12: inset!
 # ---------------------------------------------------------------------------
 
-function _axes_inset_bounds(bounds, who::AbstractString)
+# `(x0, y0, width, height)` of `inset!` as fractions. With `unit = true`
+# (`coords = :paper`) every value and both far edges lie in [0, 1]. With
+# `unit = false` (`coords = :axes`) the box may reach outside the host plot
+# area (matplotlib `inset_axes([1.05, 0, 0.25, 1])`); `_axes_inset!` then
+# checks that it stays inside the figure.
+function _axes_inset_bounds(bounds, who::AbstractString; unit::Bool = true)
 	((bounds isa Tuple || bounds isa AbstractVector) && length(bounds) == 4) ||
 		throw(ArgumentError(
 			"$(who): `bounds` must be (x0, y0, width, height) as a 4-tuple or " *
@@ -2101,16 +2924,19 @@ function _axes_inset_bounds(bounds, who::AbstractString)
 		))
 	values = Float64[]
 	for (name, v) in zip(("x0", "y0", "width", "height"), bounds)
-		(v isa Real && !(v isa Bool) && isfinite(v) && 0 <= v <= 1) ||
-			throw(ArgumentError(
-				"$(who): bounds `$(name)` must be a number in [0, 1]; got $(repr(v)).",
-			))
+		(v isa Real && !(v isa Bool) && isfinite(v)) || throw(ArgumentError(
+			"$(who): bounds `$(name)` must be a finite number; got $(repr(v)).",
+		))
+		(unit && !(0 <= v <= 1)) && throw(ArgumentError(
+			"$(who): bounds `$(name)` must be a number in [0, 1]; got $(repr(v)).",
+		))
 		push!(values, Float64(v))
 	end
 	x0, y0, w, h = values
 	(w > 0 && h > 0) || throw(ArgumentError(
 		"$(who): the inset width and height must be positive; got $(repr(bounds)).",
 	))
+	unit || return (x0, y0, w, h)
 	# Tolerance for fractions such as 0.7 + 0.3, which exceed 1 by one ulp.
 	x0 + w <= 1 + 1e-12 || throw(ArgumentError(
 		"$(who): x0 + width = $(x0 + w) exceeds 1.",
@@ -2120,6 +2946,10 @@ function _axes_inset_bounds(bounds, who::AbstractString)
 	))
 	return (x0, y0, w, h)
 end
+
+# Tolerance (paper fraction) for an inset domain computed from host-relative
+# fractions: rounding of e.g. 0.55 + 0.45 * (0.6 - 0.55) may pass 1 by an ulp.
+const _AXES_INSET_DOMAIN_TOL = 1e-9
 
 function _axes_inset!(
 	sf::SubplotFigure,
@@ -2143,7 +2973,7 @@ function _axes_inset!(
 	_axes_require_xy(host, who, "an inset")
 	x0, y0, w, h = coords_name === :data ?
 		_axes_inset_data_bounds(sf, host, bounds, who) :
-		_axes_inset_bounds(bounds, who)
+		_axes_inset_bounds(bounds, who; unit = coords_name === :paper)
 	fill = background === nothing ? nothing :
 		_cmn_check_color(background, "background", who)
 	(fill === nothing || !isempty(fill)) || throw(ArgumentError(
@@ -2155,14 +2985,30 @@ function _axes_inset!(
 		"smaller than the host's tick labels); got $(repr(fontsize)).",
 	))
 	fraction(domain, a, b) = (
-		clamp(domain[1] + a * (domain[2] - domain[1]), 0.0, 1.0),
-		clamp(domain[1] + b * (domain[2] - domain[1]), 0.0, 1.0),
+		domain[1] + a * (domain[2] - domain[1]),
+		domain[1] + b * (domain[2] - domain[1]),
 	)
 	xdomain, ydomain = if coords_name === :paper
 		((x0, min(x0 + w, 1.0)), (y0, min(y0 + h, 1.0)))
 	else
 		(fraction(host.xdomain, x0, x0 + w), fraction(host.ydomain, y0, y0 + h))
 	end
+	# An `:axes` box outside the host plot area (Z36) must still lie inside
+	# the figure: plotly.js draws axes only within paper [0, 1] and clamps a
+	# domain outside it, which would squeeze the inset and change its scale.
+	for (letter, domain) in (("x", xdomain), ("y", ydomain))
+		(domain[1] >= -_AXES_INSET_DOMAIN_TOL && domain[2] <= 1 + _AXES_INSET_DOMAIN_TOL) ||
+			throw(ArgumentError(
+				"$(who): the inset's $(letter) extent is paper " *
+				"$(round(domain[1]; digits = 3)) .. $(round(domain[2]; digits = 3)), " *
+				"outside the figure (plotly.js draws axes only inside paper [0, 1]). " *
+				"Keep it inside the figure; for a panel beside the axes give it its own " *
+				"grid cell, e.g. `subplots(1, 2; width_ratios = [4, 1], " *
+				"shared_yaxes = true)`.",
+			))
+	end
+	xdomain = (clamp(xdomain[1], 0.0, 1.0), clamp(xdomain[2], 0.0, 1.0))
+	ydomain = (clamp(ydomain[1], 0.0, 1.0), clamp(ydomain[2], 0.0, 1.0))
 
 	p = _cmn_plot(sf)
 	layout = p.layout
@@ -2352,9 +3198,16 @@ there with `inset = k` (traces may also name the axes directly: `xaxis` /
 it again.
 
 # Arguments
-- `bounds`: `(x0, y0, width, height)` (tuple or vector). With `coords =
-  :axes` / `:paper` each is in [0, 1]: fractions of the host cell's plot area
-  or of the whole figure, and `x0 + width`, `y0 + height` must not exceed 1.
+- `bounds`: `(x0, y0, width, height)` (tuple or vector).
+  With `coords = :axes` they are fractions of the host cell's plot area; the
+  box may reach outside it (matplotlib `inset_axes([1.05, 0, 0.25, 1])`: a
+  panel beside the axes, e.g. with `sharey = true`) as long as it stays
+  inside the figure (plotly.js draws axes only inside the figure; a box past
+  its edge is an `ArgumentError`). A panel beside a cell that already
+  reaches the figure edge needs a grid cell of its own instead:
+  `subplots(1, 2; width_ratios = [4, 1], shared_yaxes = true)`.
+  With `coords = :paper` each is in [0, 1] (fractions of the whole figure),
+  and `x0 + width`, `y0 + height` must not exceed 1.
   With `coords = :data` they are host DATA coordinates (data values on log
   axes; the inset spans `x0 .. x0 + width`), converted to fractions of the
   host plot area when the call runs: the host axes need a fixed range
@@ -2402,8 +3255,9 @@ a new inset (ids are 1, 2, ... in creation order; after
 `Plot`/`SyncPlot` is an `ArgumentError`.
 
 Errors (`ArgumentError`, figure unchanged): malformed `bounds` (not four
-finite numbers, a non-positive width or height, `:axes`/`:paper` values
-outside [0, 1]); with `coords = :data` a host axis without a fixed numeric
+finite numbers, a non-positive width or height, `:paper` values outside
+[0, 1], an `:axes` box reaching outside the figure); with `coords = :data` a
+host axis without a fixed numeric
 range, non-positive bounds on a log host axis, or a box outside the host
 range; an unknown `coords`; a `background` that is not a colour; a
 `fontsize` that is not a positive number; a host cell that is not Cartesian.
@@ -2523,8 +3377,9 @@ placed on them. The ids of later insets
 move down by one (`sf.insets` is a list); a new [`inset!`](@ref) can be
 created afterwards. The host cell becomes the active cell.
 
-Errors (`ArgumentError`, figure unchanged): an unknown id, or another axis
-that `matches` one of the inset's axes. On a `Plot`/`SyncPlot` it is an
+Errors (`ArgumentError`, figure unchanged): an unknown id, another axis
+that `matches` one of the inset's axes, or any keyword (an inset id is unique
+in the figure, so `row`/`col` do not apply). On a `Plot`/`SyncPlot` it is an
 `ArgumentError` (only SubplotFigures have insets).
 
 # Example
@@ -2535,8 +3390,14 @@ k = inset!(sf, (0.6, 0.6, 0.35, 0.35))
 remove_inset!(sf, k)
 ```
 """
-function remove_inset!(sf::SubplotFigure, k; show = nothing)
+function remove_inset!(sf::SubplotFigure, k; show = nothing, kwargs...)
 	_axes_reject_show(show, "remove_inset!")
+	isempty(kwargs) || throw(ArgumentError(
+		"remove_inset!: unsupported keyword(s) " *
+		"$(join(("`$(name)`" for name in keys(kwargs)), ", ")); an inset is " *
+		"addressed by its id alone (`remove_inset!(sf, k)`; ids are unique in " *
+		"the figure, so `row`/`col` do not apply).",
+	))
 	return _transactional_subplot_mutation!(
 		_axes_remove_inset!,
 		sf,

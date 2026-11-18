@@ -751,8 +751,9 @@ end
 # figure after every SubplotFigure mutation and before `_finalize_figure!`):
 #
 # - the group-wide attributes (`_SUBPLOT_MATCH_SHARED_KEYS`: axis type, tick
-#   placement and tick-label format) changed on one member are copied to every
-#   member (the root's change wins over a follower's);
+#   placement, tick-label format and the `autorangeoptions` that carry a
+#   one-sided limit, Z38) changed on one member are copied to every member
+#   (the root's change wins over a follower's);
 # - a `range`/`autorange` changed on a follower moves to the root; a range set
 #   without an `autorange` makes the root state `autorange = false` (the
 #   `autorange = true` `_finalize_figure!` gives group roots would override
@@ -783,6 +784,7 @@ const _SUBPLOT_MATCH_SHARED_KEYS = (
 	:categoryorder,
 	:categoryarray,
 	:minor,
+	:autorangeoptions,
 )
 const _SUBPLOT_MATCH_RANGE_KEYS = (:range, :autorange)
 const _SUBPLOT_MATCH_TRACKED_KEYS = (
@@ -6782,6 +6784,7 @@ function _subplot_xlabel_impl!(
 	row = nothing,
 	col = nothing,
 	inset = nothing,
+	wrap::Bool = true,
 )
 	_axes_label!(
 		sf,
@@ -6790,14 +6793,15 @@ function _subplot_xlabel_impl!(
 		row = row,
 		col = col,
 		inset = inset,
+		wrap = wrap,
 		who = "xlabel!",
 	)
 	return sf
 end
 
 """
-	xlabel!(fig, label; row=nothing, col=nothing, inset=nothing)
-	xlabel!(sf::SubplotFigure, label; row=nothing, col=nothing, inset=nothing)
+	xlabel!(fig, label; row=nothing, col=nothing, inset=nothing, wrap=true)
+	xlabel!(sf::SubplotFigure, label; row=nothing, col=nothing, inset=nothing, wrap=true)
 
 Set the x-axis title of a `Plot`/`SyncPlot`, of one
 [`SubplotFigure`](@ref) cell, or of an inset.
@@ -6814,6 +6818,17 @@ Set the x-axis title of a `Plot`/`SyncPlot`, of one
   cell selected by [`subplot!`](@ref) is used; the targeted cell becomes the
   active cell. An `ArgumentError` on a plain figure.
 - `inset = nothing`: inset id `k` from [`inset!`](@ref) (SubplotFigure only).
+- `wrap::Bool = true`: a title longer than its axis is broken into lines of
+  even length, no longer than the axis, at the spaces between words, for the
+  size each render has (the export size included): plotly.js would draw it on
+  one line past the axis, off the figure when it is longer than the figure.
+  Spaces inside markup (`<i>a b</i>`), MathJax titles and titles with a line
+  break of their own (`<br>`) are never broken, nor is a title on an axis
+  shorter than one of its words (shorten the title or enlarge the figure
+  there). `wrap = false` keeps the
+  title on one line (its spaces are stored as no-break spaces, U+00A0; one
+  no-break space keeps two words together). 3-D scene titles are never
+  broken.
 
 Throws `ArgumentError` (figure unchanged) for cells without x/y or scene
 axes. Returns `nothing` (`sf` for a SubplotFigure, for chaining).
@@ -6832,6 +6847,7 @@ function xlabel!(
 	row = nothing,
 	col = nothing,
 	inset = nothing,
+	wrap::Bool = true,
 	show = nothing,
 )
 	_axes_reject_show(show, "xlabel!")
@@ -6842,6 +6858,7 @@ function xlabel!(
 		row = row,
 		col = col,
 		inset = inset,
+		wrap = wrap,
 		who = "xlabel!",
 	)
 	return nothing
@@ -6853,6 +6870,7 @@ function xlabel!(
 	row = nothing,
 	col = nothing,
 	inset = nothing,
+	wrap::Bool = true,
 	show = nothing,
 )
 	_axes_reject_show(show, "xlabel!")
@@ -6864,6 +6882,7 @@ function xlabel!(
 		row = row,
 		col = col,
 		inset = inset,
+		wrap = wrap,
 	)
 end
 
@@ -6874,6 +6893,7 @@ function _subplot_ylabel_impl!(
 	col = nothing,
 	inset = nothing,
 	secondary_y::Bool = false,
+	wrap::Bool = true,
 )
 	_axes_label!(
 		sf,
@@ -6883,21 +6903,22 @@ function _subplot_ylabel_impl!(
 		col = col,
 		inset = inset,
 		secondary_y = secondary_y,
+		wrap = wrap,
 		who = "ylabel!",
 	)
 	return sf
 end
 
 """
-	ylabel!(fig, label; row=nothing, col=nothing, inset=nothing, secondary_y=false)
-	ylabel!(sf::SubplotFigure, label; row=nothing, col=nothing, inset=nothing, secondary_y=false)
+	ylabel!(fig, label; row=nothing, col=nothing, inset=nothing, secondary_y=false, wrap=true)
+	ylabel!(sf::SubplotFigure, label; row=nothing, col=nothing, inset=nothing, secondary_y=false, wrap=true)
 
 Set the y-axis title of a `Plot`/`SyncPlot`, of one
 [`SubplotFigure`](@ref) cell, or of an inset; identical to
 [`xlabel!`](@ref) for the y axis.
 
 # Keywords
-- `row`, `col`, `inset`: as for [`xlabel!`](@ref).
+- `row`, `col`, `inset`, `wrap`: as for [`xlabel!`](@ref).
 - `secondary_y::Bool = false`: target the secondary y axis: the twin of a
   plain figure (created by a `secondary_y=true` plot call) or the secondary
   axis of a `Spec(secondary_y=true)` subplot cell. Without one it is an
@@ -6921,6 +6942,7 @@ function ylabel!(
 	col = nothing,
 	inset = nothing,
 	secondary_y::Bool = false,
+	wrap::Bool = true,
 	show = nothing,
 )
 	_axes_reject_show(show, "ylabel!")
@@ -6932,6 +6954,7 @@ function ylabel!(
 		col = col,
 		inset = inset,
 		secondary_y = secondary_y,
+		wrap = wrap,
 		who = "ylabel!",
 	)
 	return nothing
@@ -6944,6 +6967,7 @@ function ylabel!(
 	col = nothing,
 	inset = nothing,
 	secondary_y::Bool = false,
+	wrap::Bool = true,
 	show = nothing,
 )
 	_axes_reject_show(show, "ylabel!")
@@ -6956,6 +6980,7 @@ function ylabel!(
 		col = col,
 		inset = inset,
 		secondary_y = secondary_y,
+		wrap = wrap,
 	)
 end
 

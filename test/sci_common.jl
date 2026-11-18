@@ -859,4 +859,20 @@ end
         end
         @test _cmn_json(lin.layout) == before
     end
+
+    @testset "wave 5: date and string tick values (Z42)" begin
+        D = _CMN.Dates
+        @test _CMN._cmn_tick_values([D.Date(2020, 1, 1), D.Date(2020, 3, 1)], false, "t") == ["2020-01-01", "2020-03-01"]
+        @test _CMN._cmn_tick_values([D.DateTime(2020, 1, 1, 6), D.DateTime(2020, 1, 2)], false, "t") ==
+            ["2020-01-01T06:00:00", "2020-01-02T00:00:00"]
+        @test _CMN._cmn_tick_values(Any[D.Date(2020, 1, 1), "2020-02-01"], false, "t") == ["2020-01-01", "2020-02-01"]
+        @test _CMN._cmn_tick_values(["a", "b"], false, "t") == ["a", "b"]
+        @test _cmn_throws(() -> _CMN._cmn_tick_values([D.Date(2020, 1, 1)], true, "t"),
+            "t: a logarithmic axis needs numeric tick values; got dates.")
+        @test _cmn_throws(() -> _CMN._cmn_tick_values(["a"], true, "t"),
+            "t: a logarithmic axis needs numeric tick values; got strings.")
+        @test _cmn_throws(() -> _CMN._cmn_tick_values(Any[1.0, D.Date(2020, 1, 1)], false, "t"),
+            "(or all strings or dates on a category/date axis)")
+        @test _CMN._cmn_tick_values([1, 2.5], false, "t") == [1.0, 2.5]
+    end
 end

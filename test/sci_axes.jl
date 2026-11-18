@@ -797,9 +797,12 @@ end
         # Validation; a failed call registers nothing.
         before = _ax_json(sf.plot.layout)
         n = length(sf.insets)
-        @test _ax_throws(() -> inset!(sf, (0.5, 0.5, 0.6, 0.4)), "inset!: x0 + width = 1.1 exceeds 1")
-        @test _ax_throws(() -> inset!(sf, (0.5, 0.7, 0.4, 0.4)), "y0 + height")
-        @test _ax_throws(() -> inset!(sf, (-0.1, 0.5, 0.4, 0.4)), "bounds `x0` must be a number in [0, 1]")
+        # Z36: :axes bounds may leave the cell, not the figure (cell (2, 1) is
+        # about [0, 0.45] x [0, 0.43] of the paper).
+        @test _ax_throws(() -> inset!(sf, (0.5, 0.5, 2.0, 0.4)), "inset!: the inset's x extent is paper")
+        @test _ax_throws(() -> inset!(sf, (0.5, 0.5, 2.0, 0.4)), "outside the figure")
+        @test _ax_throws(() -> inset!(sf, (0.5, 0.7, 0.4, 2.0)), "inset!: the inset's y extent is paper")
+        @test _ax_throws(() -> inset!(sf, (-0.1, 0.5, 0.4, 0.4)), "inset!: the inset's x extent is paper")
         @test _ax_throws(() -> inset!(sf, (0.1, 0.1, 0.0, 0.2)), "width and height must be positive")
         @test _ax_throws(() -> inset!(sf, (0.1, 0.1, 0.2)), "`bounds` must be (x0, y0, width, height)")
         @test _ax_throws(() -> inset!(sf, (0.1, 0.1, 0.2, 0.2); coords = :figure), "`coords` must be :axes")
@@ -853,17 +856,31 @@ end
         c = 299792.458
         λ = collect(400.0:5:700.0)
         y = exp.(-((λ .- 550) ./ 60) .^ 2)
-        fig = plot_scatter(λ, y; title = "spectrum")
-        relayout!(fig; xaxis_tickfont = attr(size = 16), xaxis_title_font = attr(size = 18, family = "Arial"),
+        style_x!(f) = relayout!(f; xaxis_tickfont = attr(size = 16), xaxis_title_font = attr(size = 18, family = "Arial"),
             xaxis_linecolor = "#123456", xaxis_linewidth = 2)
+        # tick labels 16 px, title 18 px, standoff 15, ticks 5, linewidth 2.
+        depth = 5 + 1.3 * 16 + 1 + 15 + 1.3 * 18
+        # A constructor title has the `title!` placement (Z28): it stays at the
+        # top of the figure and the decoration stack (D12) moves the plot area
+        # down below it and the top axis.
+        fig = plot_scatter(λ, y; title = "spectrum")
+        style_x!(fig)
+        placed_title = deepcopy(fig.layout.fields[:title])
+        secondary_xaxis!(fig, l -> c / l, ν -> c / ν; title = "frequency (THz)")
+        @test _ax_json(fig.layout.fields[:title]) == _ax_json(placed_title)
+        @test _ax_get(fig.layout.fields[:margin], :t) >= _AX._text_title_band(fig) + depth
+        # A title set without a placement sits on the plot area, lifted by pad.b.
+        fig = plot_scatter(λ, y)
+        relayout!(fig; title_text = "spectrum")
+        style_x!(fig)
         secondary_xaxis!(fig, l -> c / l, ν -> c / ν; title = "frequency (THz)")
         title = fig.layout.fields[:title]
         @test _ax_get(title, :text) == "spectrum"
         @test (_ax_get(title, :yref), _ax_get(title, :y), _ax_get(title, :yanchor)) == ("paper", 1, "bottom")
         @test _ax_get(title, :automargin) === true
         pad = _ax_get(_ax_get(title, :pad), :b)
-        # tick labels 16 px, title 18 px, standoff 15, ticks 5, linewidth 2, gap 6.
-        @test pad == ceil(5 + 1.3 * 16 + 1 + 15 + 1.3 * 18 + 6)
+        # The top axis and a gap of 6 px.
+        @test pad == ceil(depth + 6)
         ax2 = _ax_axis(fig, :xaxis2)
         @test _ax_get(_ax_get(ax2, :tickfont), :size) == 16
         @test _ax_get(_ax_get(_ax_get(ax2, :title), :font), :family) == "Arial"
@@ -886,13 +903,13 @@ end
         secondary_xaxis!(notitle, l -> c / l, ν -> c / ν)
         @test pad_of(notitle) < pad_of(small)
         # A title the user placed is left alone; side = :bottom never moves it.
-        placed = plot_scatter(λ, y; title = "placed")
-        relayout!(placed; title_y = 0.95)
+        placed = plot_scatter(λ, y)
+        relayout!(placed; title_text = "placed", title_y = 0.95)
         secondary_xaxis!(placed, l -> c / l, ν -> c / ν)
         @test _ax_get(placed.layout.fields[:title], :yref) === nothing
         @test _ax_get(placed.layout.fields[:title], :y) == 0.95
-        bottom = plot_scatter(λ, y; title = "b")
-        relayout!(bottom; xaxis_side = "top")
+        bottom = plot_scatter(λ, y)
+        relayout!(bottom; title_text = "b", xaxis_side = "top")
         secondary_xaxis!(bottom, l -> c / l, ν -> c / ν; side = :bottom)
         @test _ax_get(bottom.layout.fields[:title], :yref) === nothing
         # A bare-string title keeps its text.
@@ -986,7 +1003,7 @@ end
         @test (sf.current_row, sf.current_col) == (1, 2)
         before = _ax_json(sp.plot.layout)
         n = length(state.scripts)
-        @test _ax_throws(() -> inset!(sf, (0.9, 0.9, 0.2, 0.2)), "exceeds 1")
+        @test _ax_throws(() -> inset!(sf, (0.9, 0.9, 0.2, 0.2)), "outside the figure")
         @test _ax_throws(() -> xrange!(sf, (1, 1); inset = k), "the range bounds must differ")
         @test _ax_json(sp.plot.layout) == before
         @test length(state.scripts) == n && length(sf.insets) == 1
@@ -1344,7 +1361,7 @@ end
         before = _ax_json(fig.layout)
         @test _ax_throws(() -> spines!(fig; ticks = :all), "spines!: `ticks` must be :mirror, :primary, :none or `nothing`")
         @test _ax_throws(() -> spines!(fig; style = :closed), "spines!: `style` must be :box, :open or :none")
-        @test_throws TypeError spines!(fig; left = 1)
+        @test _ax_throws(() -> spines!(fig; left = 1), "spines!: `left` must be true, false, `nothing` or a data interval")
         @test _ax_json(fig.layout) == before
     end
 
@@ -1576,5 +1593,316 @@ end
             @test "10" in ylabels && "2" in ylabels
             @test occursin("class=\"annotation\"", off_svg)
         end
+    end
+
+    @testset "wave 5: one-sided limits on groups, clips and aspect-linked axes (Z38)" begin
+        # Keyword path on a shared axis: every member of the matches group
+        # carries the limit (the cell's scratch result is synced group-wide).
+        sf = subplots(1, 2; sync = false, shared_yaxes = true)
+        plot_scatter!(sf, 1:3, [1.0, 2, 3]; row = 1, col = 1)
+        plot_scatter!(sf, 1:3, [2.0, 5, 3]; row = 1, col = 2, yrange = (0, nothing))
+        for key in (:yaxis, :yaxis2)
+            opts = _ax_field(sf, key, :autorangeoptions)
+            @test _ax_get(opts, :minallowed) == 0
+            @test _ax_get(opts, :clipmin) === nothing
+        end
+        @test _ax_field(sf, :yaxis, :autorange) === true
+
+        # A user `matches` group on a plain figure: the limit lands on root and member.
+        f = plot_scatter(1:3, [1.0, 2, 3])
+        relayout!(f; yaxis2 = attr(matches = "y", anchor = "x", domain = [0.5, 1]))
+        _AX._apply_axis_range_to_key!(f, :yaxis2, (0, nothing), "t"; name = "yrange")
+        @test _ax_get(_ax_field(f, :yaxis, :autorangeoptions), :minallowed) == 0
+        @test _ax_get(_ax_field(f, :yaxis2, :autorangeoptions), :minallowed) == 0
+
+        # The finalizer's sticky clip is replaced, not merged into.
+        fh = plot_heatmap(1:5, 1:4, reshape(collect(1.0:20.0), 5, 4))
+        @test _AX._fin_sticky_clip(_ax_axis(fh, :xaxis)) == (0.5, 5.5)
+        xrange!(fh, (0, nothing))
+        @test _ax_json(_ax_field(fh, :xaxis, :autorangeoptions)) == _ax_json(Dict(:minallowed => 0))
+
+        # Aspect-linked axes: the one-sided limit pins the range, the other
+        # end at the field edge (not padded data), and drops the clip.
+        fe = plot_heatmap(1:10, 1:6, reshape(collect(1.0:60.0), 10, 6); equalar = true)
+        @test _ax_field(fe, :xaxis, :range) == [0.5, 10.5]
+        xrange!(fe, (0, nothing))
+        @test _ax_field(fe, :xaxis, :range) == [0.0, 10.5]
+        @test _ax_field(fe, :xaxis, :autorange) === false
+        @test _ax_field(fe, :xaxis, :autorangeoptions) === nothing
+        before = _ax_json(_AX._cmn_plot(fe).layout)
+        @test _ax_throws(() -> xrange!(fe, (11, nothing)), "xrange!: `range` fixes one end of the axis beyond all of its data")
+        @test _ax_json(_AX._cmn_plot(fe).layout) == before
+        xrange!(fe, (10.4, nothing))     # inside the last cell: allowed
+        @test _ax_field(fe, :xaxis, :range) == [10.4, 10.5]
+    end
+
+    @testset "wave 5: constructor title placement equals title! (Z28)" begin
+        f1 = plot_scatter(1:3, 1:3; title = "Constructor title")
+        f2 = plot_scatter(1:3, 1:3)
+        title!(f2, "Constructor title")
+        t1 = _AX._cmn_plot(f1).layout.fields[:title]
+        @test _ax_json(t1) == _ax_json(_AX._cmn_plot(f2).layout.fields[:title])
+        @test _ax_get(t1, :yref) == "container" && _ax_get(t1, :yanchor) == "top"
+        @test _ax_get(t1, :x) == 0.5 && _ax_get(t1, :xanchor) == "center"
+        @test _ax_json(_AX._cmn_plot(f1).layout.fields[:margin]) == _ax_json(_AX._cmn_plot(f2).layout.fields[:margin])
+        f3 = plot_scatter(1:3, 1:3; title = "")
+        @test isempty(_AX._tight_title_text(get(_AX._cmn_plot(f3).layout.fields, :title, nothing)))
+    end
+
+    @testset "wave 5: remove_inset! rejects row/col (Z22)" begin
+        sf = _ax_grid(2, 2)
+        k = inset!(sf, (0.5, 0.5, 0.4, 0.4); row = 2, col = 2)
+        before = _ax_json(sf.plot.layout)
+        @test _ax_throws(() -> remove_inset!(sf, k; row = 2, col = 2), "remove_inset!: unsupported keyword(s) `row`, `col`")
+        @test _ax_throws(() -> remove_inset!(sf, k; col = 2), "remove_inset!: unsupported keyword(s) `col`")
+        @test _ax_json(sf.plot.layout) == before && length(sf.insets) == 1
+        @test remove_inset!(sf, k) === sf
+        @test isempty(sf.insets)
+    end
+
+    @testset "wave 5: insets beside the axes, inside the figure (Z36)" begin
+        sf = subplots(1, 2; sync = false, horizontal_spacing = 0.3)
+        x = collect(range(0, 1; length = 20))
+        plot_scatter!(sf, x, sin.(4 .* x); row = 1, col = 1)
+        plot_scatter!(sf, x, cos.(4 .* x); row = 1, col = 2)
+        host = _AX._cell_target(sf; row = 1, col = 1)
+        k = inset!(sf, (1.05, 0.0, 0.25, 1.0); row = 1, col = 1, sharey = true)
+        rec = sf.insets[k]
+        hx = host.xdomain
+        @test collect(rec.xdomain) ≈ [hx[1] + 1.05 * (hx[2] - hx[1]), hx[1] + 1.30 * (hx[2] - hx[1])]
+        @test rec.xdomain[1] > hx[2] && rec.xdomain[2] < 1
+        @test collect(rec.ydomain) ≈ collect(host.ydomain)
+        @test _ax_field(sf, rec.ykey, :matches) == "y"
+        before = _ax_json(sf.plot.layout)
+        @test _ax_throws(() -> inset!(sf, (0.0, -0.4, 0.5, 0.3); row = 1, col = 1), "inset!: the inset's y extent is paper -0.4")
+        @test _ax_throws(() -> inset!(sf, (1.05, 0.0, 0.25, 1.0); row = 1, col = 2), "outside the figure")
+        @test _ax_throws(() -> inset!(sf, (1.05, 0.0, 0.25, 1.0); row = 1, col = 2), "width_ratios")
+        @test _ax_throws(() -> inset!(sf, (0.9, 0.0, 0.25, 1.0); coords = :paper), "x0 + width = 1.15 exceeds 1")
+        @test _ax_throws(() -> inset!(sf, (NaN, 0.0, 0.25, 1.0)), "inset!")
+        @test _ax_json(sf.plot.layout) == before && length(sf.insets) == 1
+    end
+
+    @testset "wave 5: spines! bounds per side in data units (Z37)" begin
+        f = plot_scatter(collect(1.0:10.0), collect(range(0, 1; length = 10)))
+        spines!(f; style = :open, bottom = (2, 9), left = (0, 1))
+        spine(fig, n) = only(s for s in _AX._cmn_plot(fig).layout.fields[:shapes] if _ax_get(s, :name) == "plotlysupply:spine:xy:$n")
+        b, l = spine(f, 1), spine(f, 2)
+        @test (_ax_get(b, :xref), _ax_get(b, :yref)) == ("x", "y domain")
+        @test (_ax_get(b, :x0), _ax_get(b, :x1), _ax_get(b, :y0), _ax_get(b, :y1)) == (2.0, 9.0, 0, 0)
+        @test (_ax_get(l, :xref), _ax_get(l, :yref)) == ("x domain", "y")
+        @test (_ax_get(l, :y0), _ax_get(l, :y1)) == (0.0, 1.0)
+        @test _ax_field(f, :xaxis, :showline) === false && _ax_field(f, :yaxis, :showline) === false
+        before = _ax_json(_AX._cmn_plot(f).layout)
+        @test _ax_throws(() -> spines!(f; left = (1, 1)), "spines!: `left` bounds must differ; got (1, 1).")
+        @test _ax_throws(() -> spines!(f; left = "a"), "spines!: `left` must be true, false, `nothing` or a data interval (lo, hi)")
+        @test _ax_throws(() -> spines!(f; bottom = (1, Inf)), "spines!: `bottom`")
+        @test _ax_throws(() -> spines!(f; bottom = (1, 2, 3)), "spines!: `bottom`")
+        @test _ax_json(_AX._cmn_plot(f).layout) == before
+        flog = plot_scatter([1.0, 10, 100], [1.0, 2, 3]; xscale = "log")
+        @test _ax_throws(() -> spines!(flog; bottom = (0, 10)), "spines!: `bottom` is drawn along logarithmic axis :xaxis; its bounds are data values and must be positive")
+        spines!(flog; style = :open, bottom = (1, 100))
+        @test (_ax_get(spine(flog, 1), :x0), _ax_get(spine(flog, 1), :x1)) == (1.0, 100.0)
+        fd = plot_scatter([_AX.Dates.Date(2020, 1, 1), _AX.Dates.Date(2020, 6, 1)], [1.0, 2.0])
+        spines!(fd; style = :open, bottom = (_AX.Dates.Date(2020, 2, 1), _AX.Dates.Date(2020, 5, 1)))
+        @test (_ax_get(spine(fd, 1), :x0), _ax_get(spine(fd, 1), :x1)) == ("2020-02-01", "2020-05-01")
+        # An untyped axis is typed by its data, as plotly.js types it.
+        @test _AX._axis_type(fd, :xaxis) == "-"
+        @test _ax_throws(() -> spines!(fd; bottom = (1, 2)), "spines!: `bottom` is drawn along date axis :xaxis; give dates")
+        @test _ax_throws(() -> spines!(f; bottom = (_AX.Dates.Date(2020, 2, 1), _AX.Dates.Date(2020, 5, 1))),
+            "spines!: `bottom` has date bounds but axis :xaxis holds numeric data")
+        g = plot_scatter(1:3, 1:3)
+        spines!(g; style = :open, bottom = true)
+        @test _ax_field(g, :xaxis, :showline) === true
+    end
+
+    @testset "wave 5: 3-D labels run the scene finish steps (Z45)" begin
+        f = plot_surface(reshape(collect(1.0:25.0), 5, 5))
+        relayout!(_AX._cmn_plot(f); scene_camera = nothing)
+        @test _ax_get(_ax_get(_ax_axis(f, :scene), :camera), :eye) === nothing
+        xlabel!(f, "a long x axis title")
+        scene = _ax_axis(f, :scene)
+        @test _ax_get(_ax_get(_ax_get(scene, :xaxis), :title), :text) == "a long x axis title"
+        eye = _ax_get(_ax_get(scene, :camera), :eye)
+        @test eye !== nothing && all(isfinite, (_ax_get(eye, :x), _ax_get(eye, :y), _ax_get(eye, :z)))
+    end
+
+    @testset "wave 5: secondary_xaxis! restacks the figure title (Z15)" begin
+        margin_t(f) = _ax_get(_AX._cmn_plot(f).layout.fields[:margin], :t)
+        f0 = plot_scatter(collect(1.0:10.0), collect(1.0:10.0); title = "A title")
+        f1 = plot_scatter(collect(1.0:10.0), collect(1.0:10.0); title = "A title")
+        secondary_xaxis!(f1, x -> 2x, y -> y / 2; title = "doubled")
+        f2 = plot_scatter(collect(1.0:10.0), collect(1.0:10.0); title = "A title")
+        secondary_xaxis!(f2, x -> 2x, y -> y / 2; title = "doubled<br>twice")
+        @test margin_t(f1) > margin_t(f0)
+        layout = _AX._cmn_plot(f2).layout
+        size = _AX._axes_title_font(layout, :xaxis2)
+        @test margin_t(f2) - margin_t(f1) ≈ _AX._text_extent("a<br>b", size)[2] - _AX._text_extent("a", size)[2] atol = 1.5
+    end
+
+    @testset "wave 5: log-axis tick labels never collide (Z70) and the paper rule (W7)" begin
+        P(f) = _AX._cmn_plot(f)
+        upd(f, size; mode = :auto) = _AX._axes_log_tick_updates!(Dict{Symbol, Any}(), P(f), size; mode = mode)
+        narrow = plot_scatter([0.0125, 0.2], [1.0, 2.0]; xscale = "log")
+        # 700 x 500: plotly's "D1" labels fit (rendered gaps measured, v05).
+        @test isempty(upd(narrow, (700, 500)))
+        # A journal-column panel: they collide, so decade labels only.
+        u = upd(narrow, (250, 200))
+        @test u[:xaxis_tick0] == 0 && u[:xaxis_dtick] == 1
+        @test u[:xaxis_minor_tickmode] == "linear" && u[:xaxis_minor_dtick] == "D1" && u[:xaxis_minor_tick0] == 0
+        @test u[:xaxis_minor_ticks] == "outside" && u[:xaxis_minor_ticklen] > 0
+        @test !haskey(u, :xaxis_tickmode) && !haskey(u, :xaxis_exponentformat)
+        @test !any(k -> startswith(String(k), "yaxis"), keys(u))
+        # Applied, idempotent, and handed back to plotly when the labels fit again.
+        @test _AX._axes_apply_style_log_ticks!(narrow; size = (250, 200), mode = :auto)
+        @test _AX._axes_log_tick_state(_ax_axis(narrow, :xaxis)) === :fitted
+        @test !_AX._axes_apply_style_log_ticks!(narrow; size = (250, 200), mode = :auto)
+        @test _AX._axes_apply_style_log_ticks!(narrow; size = (1400, 1000), mode = :auto)
+        @test _AX._axes_log_tick_state(_ax_axis(narrow, :xaxis)) === :auto
+        @test _ax_field(narrow, :xaxis, :dtick) === nothing && _ax_field(narrow, :xaxis, :tick0) === nothing
+        @test _ax_field(narrow, :xaxis, :exponentformat) == "power"
+        @test _AX._axes_apply_style_log_ticks!(narrow; size = (250, 200), mode = :auto)
+        @test _AX._axes_log_tick_state(_ax_axis(narrow, :xaxis)) === :fitted
+        @test _ax_throws(() -> _AX._axes_apply_style_log_ticks!(narrow; mode = :sparse), "`mode` must be :auto or :decades")
+
+        # A user's tick setting is never touched, the `:decades` preset included.
+        user = plot_scatter([0.0125, 0.2], [1.0, 2.0]; xscale = "log")
+        xticks!(user, [0.02, 0.05, 0.1])
+        @test isempty(upd(user, (150, 120)))
+        preset = plot_scatter([1.0, 1e6], [1.0, 2.0]; xscale = "log")
+        xticks!(preset, :decades)
+        @test _AX._axes_log_tick_state(_ax_axis(preset, :xaxis)) === :user
+        @test isempty(upd(preset, (120, 100); mode = :decades))
+        tf = plot_scatter([0.0125, 0.2], [1.0, 2.0]; xscale = "log")
+        relayout!(P(tf); xaxis_tickformat = "")
+        @test isempty(upd(tf, (150, 120)))
+
+        # W7: under a paper style (mode :decades) an axis of two decades or
+        # more shows decade labels at any size; fewer decades keep plotly's.
+        three = plot_scatter([1.0, 1000.0], [1.0, 2.0]; xscale = "log")
+        @test isempty(upd(three, (700, 500)))
+        d = upd(three, (700, 500); mode = :decades)
+        @test d[:xaxis_dtick] == 1 && d[:xaxis_minor_dtick] == "D1"
+        few = plot_scatter([1.0, 30.0], [1.0, 2.0]; xscale = "log")
+        @test isempty(upd(few, (700, 500); mode = :decades))
+        @test _AX._style_log_ticks() in (:auto, :decades)
+        @test hasfield(PlotStyle, :log_ticks) || _AX._style_log_ticks(PlotStyle()) === :auto
+
+        # The decade step: D9's ceil(n / 8), raised until the labels clear.
+        wide = plot_scatter([1e-12, 1.0], [1.0, 2.0]; xscale = "log")
+        w = upd(wide, (700, 500); mode = :decades)
+        @test w[:xaxis_dtick] == 2 && w[:xaxis_minor_dtick] == 1
+        @test upd(wide, (160, 140); mode = :decades)[:xaxis_dtick] > 2
+        a, b = _AX._axes_log_view(P(wide).layout, :xaxis, [:xaxis], _AX._fin_collect_axes(P(wide)))
+        @test a ≈ -12 - 12 * _AX._AXES_AUTORANGE_PAD && b ≈ 12 * _AX._AXES_AUTORANGE_PAD
+        # y axes: the ink of stacked labels (plotly's 2-decade "D1" y axis at
+        # 700 x 500 keeps its labels; on a short axis they collide).
+        ylog = plot_scatter([1.0, 2.0], [1.0, 100.0]; yscale = "log")
+        @test isempty(upd(ylog, (700, 500)))
+        # Shorter, plotly labels 1, 2, 5 per decade ("D2"), which still fit.
+        @test isempty(upd(ylog, (300, 220)))
+        @test upd(ylog, (250, 150))[:yaxis_dtick] == 1
+
+        # A shared log axis is decided once for the group and written on its members.
+        sf = subplots(1, 2; sync = false, shared_xaxes = true)
+        plot_scatter!(sf, [0.0125, 0.2], [1.0, 2.0]; row = 1, col = 1, xscale = "log")
+        plot_scatter!(sf, [0.0125, 0.2], [2.0, 3.0]; row = 1, col = 2, xscale = "log")
+        @test isempty(_AX._axes_log_tick_updates!(Dict{Symbol, Any}(), sf.plot, (500, 250); mode = :auto))
+        g = _AX._axes_log_tick_updates!(Dict{Symbol, Any}(), sf.plot, (400, 250); mode = :auto)
+        @test g[:xaxis_dtick] == 1 && g[:xaxis2_dtick] == 1
+        @test g[:xaxis_minor_dtick] == "D1" && g[:xaxis2_minor_dtick] == "D1"
+
+        # The finalizer applies the rule at the figure's own size after each
+        # mutation, and at the export size on the export copy only.
+        live = plot_scatter([0.0125, 0.2], [1.0, 2.0]; xscale = "log")
+        relayout!(P(live); width = 250, height = 200)
+        xlabel!(live, "h")
+        @test _AX._axes_log_tick_state(_ax_axis(live, :xaxis)) === :fitted
+        big = plot_scatter([0.0125, 0.2], [1.0, 2.0]; xscale = "log")
+        copy_plot = _AX._finalize_export_copy(P(big), (width = 250, height = 200))
+        @test copy_plot !== P(big)
+        @test _AX._axes_log_tick_state(copy_plot.layout.fields[:xaxis]) === :fitted
+        @test _AX._axes_log_tick_state(_ax_axis(big, :xaxis)) === :auto
+    end
+
+    @testset "wave 5: axis titles longer than their axis are wrapped (W5)" begin
+        P(f) = _AX._cmn_plot(f)
+        long = "a fairly long y-axis label that matplotlib would split"
+        text(f, key) = _AX._axes_title_text(_ax_axis(f, key))[1]
+        f = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
+        relayout!(P(f); width = 400, height = 200)
+        ylabel!(f, long)
+        wrapped = text(f, :yaxis)
+        @test occursin(_AX._AXES_WRAP_BREAK, wrapped)
+        @test _AX._axes_unwrap_title(wrapped) == long
+        lines = split(wrapped, _AX._AXES_WRAP_BREAK)
+        @test length(lines) >= 2
+        plan = _AX._axes_fit_plan(P(f), (400, 200))
+        limit = _AX._axes_plan_length(P(f).layout, plan, :yaxis)
+        font = _AX._axes_title_font(P(f).layout, :yaxis)
+        widths = [_AX._text_extent(l, font)[1] for l in lines]
+        @test all(<=(limit + 1e-6), widths)
+        @test minimum(widths) >= 0.5 * maximum(widths)
+        # Idempotent; a taller figure puts the title back on one line.
+        before = _ax_json(P(f).layout)
+        _AX._finalize_figure!(f)
+        @test _ax_json(P(f).layout) == before
+        relayout!(P(f); height = 1200)
+        _AX._finalize_figure!(f)
+        @test text(f, :yaxis) == long
+        # The export copy is wrapped for its size; the figure is not.
+        g = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
+        ylabel!(g, long)
+        c = _AX._finalize_export_copy(P(g), (width = 400, height = 200))
+        @test occursin(_AX._AXES_WRAP_BREAK, _AX._axes_title_text(c.layout.fields[:yaxis])[1])
+        @test text(g, :yaxis) == long
+
+        # wrap = false: no-break spaces, never wrapped.
+        h = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
+        relayout!(P(h); width = 400, height = 200)
+        ylabel!(h, long; wrap = false)
+        @test text(h, :yaxis) == replace(long, ' ' => ' ')
+        sf = subplots(1, 2; sync = false)
+        plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)
+        relayout!(sf.plot; width = 300, height = 260)
+        xlabel!(sf, "x axis title words that do not fit"; row = 1, col = 1, wrap = false)
+        @test !occursin("<br>", text(sf, :xaxis))
+        ylabel!(sf, long; row = 1, col = 1)
+        @test occursin(_AX._AXES_WRAP_BREAK, text(sf, :yaxis))
+        # An axis shorter than one of the words: left on one line.
+        relayout!(sf.plot; height = 150)
+        _AX._finalize_figure!(sf)
+        @test text(sf, :yaxis) == long
+
+        # Never broken: a line break of the user's, MathJax, markup spans.
+        @test _AX._axes_title_words("a<br>b c") === nothing
+        @test _AX._axes_title_words("\$x^2\$ and more words") === nothing
+        @test _AX._axes_title_words("speed <i>v of x</i> (m/s)") == ["speed", "<i>v of x</i>", "(m/s)"]
+        @test _AX._axes_keep_on_one_line("a <span style=\"x y\">b c</span>") == "a <span style=\"x y\">b c</span>"
+        @test _AX._axes_keep_on_one_line("\$a b\$") == "\$a b\$"
+        @test _AX._axes_balanced_lines(["aa", "bb", "cc", "dd"], [2.0, 2.0, 2.0, 2.0], 1.0, 20.0) === nothing
+        @test _AX._axes_balanced_lines(["aa", "bb", "cc", "dd"], [2.0, 2.0, 2.0, 2.0], 1.0, 8.0) == ["aa bb", "cc dd"]
+        @test _AX._axes_balanced_lines(["aaaaaaaaaa", "b"], [10.0, 1.0], 1.0, 8.0) === nothing
+        # A bare-string title is rewritten as a title mapping.
+        q = plot_scatter(collect(0:0.1:1), collect(0:0.1:1))
+        relayout!(P(q); width = 400, height = 200, yaxis_title = long)
+        _AX._finalize_figure!(q)
+        @test occursin(_AX._AXES_WRAP_BREAK, text(q, :yaxis))
+    end
+
+    @testset "wave 5: tick values on a shared group and dates (Z29, Z42)" begin
+        sf = subplots(1, 2; sync = false, shared_yaxes = true)
+        plot_scatter!(sf, 1:3, [1.0, 10, 100]; row = 1, col = 1, yscale = "log")
+        plot_scatter!(sf, 1:3, [2.0, 20, 50]; row = 1, col = 2, yscale = "log")
+        yticks!(sf, [1, 10, 100]; row = 1, col = 2)
+        @test _ax_field(sf, :yaxis, :tickvals) == _ax_field(sf, :yaxis2, :tickvals) == [1.0, 10.0, 100.0]
+        fd = plot_scatter([_AX.Dates.Date(2020, 1, 1), _AX.Dates.Date(2020, 6, 1)], [1.0, 2.0])
+        xticks!(fd, [_AX.Dates.Date(2020, 1, 1), _AX.Dates.Date(2020, 3, 1)], ["Jan", "Mar"])
+        @test _ax_field(fd, :xaxis, :tickvals) == ["2020-01-01", "2020-03-01"]
+        @test _ax_field(fd, :xaxis, :ticktext) == ["Jan", "Mar"]
+        fk = plot_scatter([_AX.Dates.Date(2020, 1, 1), _AX.Dates.Date(2020, 6, 1)], [1.0, 2.0];
+            xticks = [_AX.Dates.DateTime(2020, 1, 1, 12), _AX.Dates.DateTime(2020, 3, 1)])
+        @test _ax_field(fk, :xaxis, :tickvals) == ["2020-01-01T12:00:00", "2020-03-01T00:00:00"]
+        flog = plot_scatter([1.0, 10, 100], [1.0, 2, 3]; xscale = "log")
+        @test _ax_throws(() -> xticks!(flog, [_AX.Dates.Date(2020, 1, 1)]), "xticks!: a logarithmic axis needs numeric tick values; got dates.")
     end
 end

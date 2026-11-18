@@ -964,22 +964,27 @@ const _CMN_MINOR_TICKLEN_RATIO = 0.6
 # The d3 format written by default for numeric array ticks on linear axes.
 const _CMN_AUTO_TICKFORMAT = "~g"
 
+# Tick values in the form plotly.js reads: numbers (`Float64`), or strings on
+# category/date axes. `Date`/`DateTime` values (Z42) become plotly date
+# strings ("2020-03-01", "2020-03-01T12:00:00"; plotly.js parses the `T`
+# form), and may be mixed with date strings; they are an error on a log axis.
 function _cmn_tick_values(values, log_axis::Bool, who::AbstractString)
 	(values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
 		"$(who): tick values must be a vector or tuple; got $(typeof(values)).",
 	))
 	isempty(values) && return Float64[]
-	if all(v -> v isa AbstractString, values)
+	if all(v -> v isa AbstractString || v isa Dates.Date || v isa Dates.DateTime, values)
 		log_axis && throw(ArgumentError(
-			"$(who): a logarithmic axis needs numeric tick values; got strings.",
+			"$(who): a logarithmic axis needs numeric tick values; got " *
+			(all(v -> v isa AbstractString, values) ? "strings." : "dates."),
 		))
-		return String[String(v) for v in values]
+		return String[v isa AbstractString ? String(v) : string(v) for v in values]
 	end
 	out = Float64[]
 	for v in values
 		(v isa Real && !(v isa Bool)) || throw(ArgumentError(
-			"$(who): tick values must all be real numbers (or all strings " *
-			"on a category/date axis); got $(repr(v)).",
+			"$(who): tick values must all be real numbers (or all strings or " *
+			"dates on a category/date axis); got $(repr(v)).",
 		))
 		isfinite(v) || throw(ArgumentError(
 			"$(who): tick value $(v) is not finite.",
