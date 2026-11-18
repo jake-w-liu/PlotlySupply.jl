@@ -349,9 +349,11 @@ using PlotlySupply
 			# The axis container that existed before was replaced, not mutated.
 			@test json(old_xaxis) == old_xaxis_json
 
-			# Subplot titles above the plot area raise the top margin.
+			# Subplot titles above the plot area raise the top margin (D12: the
+			# room providers do, when the figure is finalized after the change).
 			sf = subplots(1, 2; sync = false, title = "", subplot_titles = ["a" "b"])
 			PS._apply_style_layout!(sf.fig, pub)
+			PS._finalize_figure!(sf)
 			@test sd(sf.layout.fields[:margin])[:t] > 10
 			@test sd(sf.layout.fields[:margin])[:l] == 10
 		end
@@ -547,12 +549,14 @@ using PlotlySupply
 			title = sd(fig.layout.fields[:title])
 			@test title[:text] == "T"
 			@test title[:automargin] === true
-			@test sd(title[:pad]) == Dict(:t => 4)
+			# The constructor placed the title like `title!` (Z28): its explicit
+			# `pad.t` (_TEXT_TITLE_TOP_PAD) is kept, not replaced by the margin.
+			@test sd(title[:pad])[:t] == 10
 
 			tight_layout!(fig; pad = 2.5)
 			@test sd(fig.layout.fields[:margin])[:l] == 2.5
 			# An explicit title pad set by the user (here by the previous call) is kept.
-			@test sd(sd(fig.layout.fields[:title])[:pad]) == Dict(:t => 4)
+			@test sd(sd(fig.layout.fields[:title])[:pad])[:t] == 10
 			tight_layout!(fig; pad = 0)
 			@test sd(fig.layout.fields[:margin])[:b] == 0
 
@@ -594,15 +598,24 @@ using PlotlySupply
 			@test sd(huge.layout.fields[:margin])[:l] == 0.45 * 700
 
 			# Subplot titles above the plot area: their height, and the title's.
+			# D12: the room providers stack them (a gap, the title line, a gap)
+			# and raise the top margin from the tight minimum to hold them.
 			sf = subplots(1, 2; sync = false, title = "", subplot_titles = ["a" "b"])
 			subplot_title_size = sd(sd(sf.layout.fields[:annotations][1])[:font])[:size]
-			annotation_room = ceil(subplot_title_size * 1.3 + 4)
 			@test tight_layout!(sf) === sf
-			@test sd(sf.layout.fields[:margin]) == Dict(:l => 4, :r => 4, :t => 4 + annotation_room, :b => 4)
+			plan = PS._room_plan(sf)
+			line = PS._room_slot(plan, PS._LT_OWNER, "line:xaxis")
+			@test line.offset == PS._ROOM_GAP && line.px >= subplot_title_size * 1.3
+			@test sd(sf.layout.fields[:margin]) ==
+				  Dict(:l => 4, :r => 4, :t => ceil(line.offset + line.px + PS._ROOM_GAP), :b => 4)
 			titled = subplots(1, 2; sync = false, title = "Figure", subplot_titles = ["a" "b"])
 			tight_layout!(titled)
-			title_room = ceil(round(1.4 * 12) * 1.3 + 4)
-			@test sd(titled.layout.fields[:margin])[:t] == 4 + annotation_room + title_room
+			plan = PS._room_plan(titled)
+			line = PS._room_slot(plan, PS._LT_OWNER, "line:xaxis")
+			band = PS._room_slot(plan, PS._LT_OWNER, "figure_title")
+			@test band.offset ≈ line.offset + line.px + PS._ROOM_GAP
+			@test band.px >= round(1.4 * 12) * 1.3
+			@test sd(titled.layout.fields[:margin])[:t] == ceil(band.offset + band.px + PS._ROOM_GAP)
 			@test_throws ArgumentError tight_layout!(titled; pad = -1)
 
 			# G37: two-line TeX panel titles are measured as typeset. mathtext
@@ -637,6 +650,30 @@ using PlotlySupply
 			@test sd(sp.plot.layout.fields[:margin])[:t] == 4
 			@test :tight_layout! in PS._SCI_STYLE_MUTATORS
 			@test :figsize! in PS._SCI_STYLE_MUTATORS
+			# Z68: without a layout size, the active style's figure size is measured
+			# (a figure made outside the sized style has none).
+			ieee = plot_scatter(1:3, [1, 2, 3])
+			relayout!(ieee, annotations = [PB.attr(text = "left label", x = -0.05, y = 0.5, xref = "paper",
+				yref = "paper", xanchor = "right", showarrow = false)])
+			with_style(() -> tight_layout!(ieee), :ieee)
+			@test !haskey(ieee.layout.fields, :width)
+			ieee_width = with_style(() -> PS._style_default_figure_size()[1], :ieee)
+			@test ieee_width < 700
+			ieee_font = PS._tight_root_font_size(k -> get(ieee.layout.fields, k, nothing))
+			@test sd(ieee.layout.fields[:margin])[:l] ==
+				  4 + ceil(0.05 * ieee_width + PS._text_extent("left label", ieee_font)[1] + 4)
+
+			# Z48: a caption placed in figure fractions keeps the room under the
+			# x axis that `annotate!` reserved: the room providers hold it.
+			captioned = plot_scatter(1:3, [1, 2, 3]; xlabel = "time")
+			annotate!(captioned, 0.5, 0.01, "Figure 1. A caption."; coords = :figure, showarrow = false, yanchor = "bottom")
+			reserved = sd(captioned.layout.fields[:margin])[:b]
+			tight_layout!(captioned)
+			@test sd(captioned.layout.fields[:margin])[:b] >= reserved
+			caption = sd(only(captioned.layout.fields[:annotations]))
+			margins = PS._room_plan(captioned).margins
+			# re-placed for the new margins: still at 1 % of the figure height
+			@test caption[:yshift] ≈ round(0.01 * (margins.t + margins.b) - margins.b; digits = 2)
 		end
 
 		@testset "figsize!" begin

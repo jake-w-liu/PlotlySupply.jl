@@ -472,6 +472,198 @@ function _text_extent(text::AbstractString, fontsize::Real)
 	return (width * fs, height * fs)
 end
 
+# ── Baseline depth ──────────────────────────────────────────────────────────
+# plotly.js aligns annotations by their box: titles of one line placed at the
+# same `y` with `yanchor = "bottom"` share the bottom of their boxes, not their
+# baselines, and the baseline sits higher in a plain-text box (the font's
+# descent) than in a MathJax box (the depth of the expression). The depths
+# below (em; MathJax 2 TeX font metrics, rounded) estimate where it sits:
+# descenders (g, j, p, q, y, Q, comma, semicolon; also an italic f and the
+# Greek letters with a tail) 0.2, delimiters ((, ), [, ], \{, \}, |, /, a
+# radical) 0.25, large operators 0.36, a fraction 0.47; a subscript is lowered
+# 0.15 em (0.25 with a superscript on the same base) and set at script size.
+const _TEXT_DEPTH_DESCENDER_EM = 0.2
+const _TEXT_DEPTH_DELIMITER_EM = 0.25
+const _TEXT_DEPTH_BIG_OPERATOR_EM = 0.36
+const _TEXT_DEPTH_FRACTION_EM = 0.47
+const _TEXT_DEPTH_SUB_EM = 0.15
+const _TEXT_DEPTH_SUBSUP_EM = 0.25
+const _TEXT_DEPTH_DESCENDERS = Set("gjpqyQ,;")
+const _TEXT_DEPTH_DELIMITERS = Set("()[]|/")
+const _TEXT_DEPTH_GREEK = Set([
+	"beta", "gamma", "zeta", "eta", "mu", "xi", "rho", "varrho", "phi", "varphi", "chi", "psi",
+])
+const _TEXT_DEPTH_DELIMITER_COMMANDS = Set([
+	"{", "}", "|", "langle", "rangle", "lfloor", "rfloor", "lceil", "rceil", "vert", "Vert",
+	"lvert", "rvert", "lVert", "rVert", "backslash",
+])
+# Upright fonts and text mode, where an f has no tail.
+const _TEXT_DEPTH_UPRIGHT = Set([
+	"text", "textbf", "textrm", "textsf", "texttt", "textup", "mbox", "hbox", "mathrm", "mathbf",
+	"mathsf", "mathtt", "operatorname", "boldsymbol", "bm", "pmb",
+])
+const _TEXT_DEPTH_SWITCHES = Dict("rm" => true, "bf" => true, "sf" => true, "tt" => true, "it" => false)
+# Box bottom to baseline, px, beyond the depth: half of `_TEXT_ANNOTATION_FRAME`
+# plus the font descent (0.2 em) for plain text, 0.25 px for MathJax.
+# Calibrated against the plotly.js 2.35.2 renderer (the bottom of the box
+# plotly anchors, to the baseline; titles at 12 and 13 px, sans and serif,
+# plain, scripts, delimiters, fractions and large operators): plain text
+# within 0.4 px, MathJax within 0.8 px. plotly.js rounds box sizes and
+# positions to whole px, so baselines meet within about 1 px; at 16 px it
+# draws MathJax up to 5 px below its box (measured), deeper than estimated.
+const _TEXT_PLAIN_DESCENT_EM = 0.2
+const _TEXT_MATH_BASELINE_PX = 0.25
+# With `inherit_text_font` (`set_default_mathtext!`), MathJax 2.7.9 draws the
+# text runs of a math label (`\text{…}`, `\textbf{…}`, `\mbox{…}`) in the
+# label's font, measured by the browser: their depth is the font's descent at
+# a size of MathJax's own (measured 2.45 to 3.48 px for 12 to 16 px labels,
+# sans and serif), whatever the glyphs.
+const _TEXT_INHERITED_TEXT_DEPTH_PX = 3.0
+
+# A depth scan of a TeX fragment: the parser state, whether text runs are
+# drawn in the label's font (`inherit`; they are skipped and noted in `text`).
+mutable struct _TextDepthScan
+	t::_TextTeX
+	inherit::Bool
+	text::Bool
+end
+
+# Depth (em) of one TeX argument (group, command or character).
+function _text_tex_depth_argument!(scan::_TextDepthScan, upright::Bool)
+	t = scan.t
+	while (c = _text_tex_peek(t)) !== nothing && c == ' '
+		t.pos += 1
+	end
+	c = _text_tex_peek(t)
+	c === nothing && return 0.0
+	c == '{' && (t.pos += 1; return _text_tex_depth_sequence!(scan, upright; stop = '}'))
+	c == '\\' && return _text_tex_depth_command!(scan, upright)
+	t.pos += 1
+	return _text_tex_depth_char(c, upright)
+end
+
+function _text_tex_depth_char(c::Char, upright::Bool)
+	c in _TEXT_DEPTH_DELIMITERS && return _TEXT_DEPTH_DELIMITER_EM
+	(c in _TEXT_DEPTH_DESCENDERS || (!upright && c == 'f')) && return _TEXT_DEPTH_DESCENDER_EM
+	return 0.0
+end
+
+# Depth (em) of the command at the current position, with its arguments.
+function _text_tex_depth_command!(scan::_TextDepthScan, upright::Bool)
+	t = scan.t
+	name = _text_tex_command!(t)
+	isempty(name) && return 0.0
+	if scan.inherit && name in _TEXT_TEX_TEXT_MODE
+		# Drawn in the label's font: its depth is the font's (the caller).
+		_text_tex_depth_argument!(scan, true)
+		scan.text = true
+		return 0.0
+	end
+	name in _TEXT_DEPTH_DELIMITER_COMMANDS && return _TEXT_DEPTH_DELIMITER_EM
+	name in _TEXT_DEPTH_UPRIGHT && return _text_tex_depth_argument!(scan, true)
+	name in ("textit", "mathit", "emph") && return _text_tex_depth_argument!(scan, false)
+	name in _TEXT_TEX_WRAPPERS && return _text_tex_depth_argument!(scan, upright)
+	if name in _TEXT_TEX_STACKED
+		_text_tex_depth_argument!(scan, upright)
+		base = _text_tex_depth_argument!(scan, upright)
+		return name in ("overset", "stackrel") ? base : _TEXT_DEPTH_FRACTION_EM
+	elseif name == "sqrt"
+		if _text_tex_peek(t) == '['
+			close = findnext(==(']'), t.chars, t.pos)
+			close === nothing || (t.pos = close + 1)
+		end
+		return max(_TEXT_DEPTH_DELIMITER_EM, _text_tex_depth_argument!(scan, upright))
+	elseif name in ("left", "right", "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr")
+		delimiter = _text_tex_depth_argument!(scan, upright)
+		return delimiter > 0 ? max(delimiter, _TEXT_DEPTH_DELIMITER_EM) : 0.0
+	elseif name in ("color", "label", "hspace", "vspace", "phantom", "hphantom", "vphantom", "unicode")
+		_text_tex_skip_group!(t)
+		return 0.0
+	elseif name == "textcolor"
+		_text_tex_skip_group!(t)
+		return _text_tex_depth_argument!(scan, upright)
+	elseif name in _TEXT_TEX_BIG_OPERATORS
+		return _TEXT_DEPTH_BIG_OPERATOR_EM
+	elseif name in _TEXT_DEPTH_GREEK
+		return _TEXT_DEPTH_DESCENDER_EM
+	end
+	return 0.0
+end
+
+# Depth (em) of a TeX sequence up to `stop` (consumed) or the end. A size
+# switch scales the rest of the sequence.
+function _text_tex_depth_sequence!(scan::_TextDepthScan, upright::Bool; stop::Union{Nothing, Char} = nothing)
+	t = scan.t
+	depth = 0.0
+	scale = 1.0
+	superscript = false     # the current base already has a superscript
+	while (c = _text_tex_peek(t)) !== nothing
+		if stop !== nothing && c == stop
+			t.pos += 1
+			break
+		elseif c == ' '
+			t.pos += 1
+		elseif c == '^'
+			t.pos += 1
+			_text_tex_depth_argument!(scan, upright)       # raised: no depth
+			superscript = true
+		elseif c == '_'
+			t.pos += 1
+			script = _text_tex_depth_argument!(scan, upright)
+			while (n = _text_tex_peek(t)) !== nothing && n == ' '
+				t.pos += 1
+			end
+			shift = (superscript || _text_tex_peek(t) == '^') ? _TEXT_DEPTH_SUBSUP_EM : _TEXT_DEPTH_SUB_EM
+			depth = max(depth, scale * (shift + _TEXT_SCRIPT_SCALE * script))
+		elseif c == '\\'
+			save = t.pos
+			name = _text_tex_command!(t)
+			if haskey(_TEXT_DEPTH_SWITCHES, name)
+				upright = _TEXT_DEPTH_SWITCHES[name]
+				continue
+			elseif haskey(_TEXT_TEX_SIZES, name)
+				scale = _TEXT_TEX_SIZES[name]
+				continue
+			end
+			t.pos = save
+			depth = max(depth, scale * _text_tex_depth_command!(scan, upright))
+			superscript = false
+		else
+			depth = max(depth, scale * _text_tex_depth_argument!(scan, upright))
+			superscript = false
+		end
+	end
+	return depth
+end
+
+"""
+	_text_baseline_depth(text, fontsize) -> Union{Float64, Nothing}
+
+Estimated px from the bottom of the box plotly.js draws around annotation
+`text` at `fontsize` px (its default 1 px padding and border included) up to
+the baseline of its last line: half the frame plus the font descent for plain
+text, the depth of the expression for MathJax (the first `\$…\$` segment, the
+part plotly.js typesets; its text runs as the label's font draws them under
+`inherit_text_font`). `nothing` when it is not estimated: a multi-row MathJax
+array or `<sub>` markup.
+"""
+function _text_baseline_depth(text::AbstractString, fontsize::Real)
+	fs = (fontsize isa Real && isfinite(fontsize) && fontsize > 0) ? Float64(fontsize) : 12.0
+	s = String(text)
+	isempty(strip(s)) && return nothing
+	segments = _text_math_segments(s)
+	index = findfirst(first, segments)
+	if index === nothing
+		occursin(r"<sub\b"i, s) && return nothing
+		return _TEXT_ANNOTATION_FRAME / 2 + _TEXT_PLAIN_DESCENT_EM * fs
+	end
+	math = segments[index][2]
+	(occursin("\\begin", math) || occursin("\\\\", math)) && return nothing
+	scan = _TextDepthScan(_TextTeX(collect(math), 1), _MATHTEXT_SETTINGS[].inherit_text_font, false)
+	depth = _TEXT_MATH_BASELINE_PX + fs * _text_tex_depth_sequence!(scan, false)
+	return scan.text ? max(depth, _TEXT_INHERITED_TEXT_DEPTH_PX) : depth
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # F15: set_legend! extensions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1742,10 +1934,11 @@ title of one panel.
   `loc="left"`; `:right` → right edge), `xref="paper"`, and is pinned
   `_TEXT_TITLE_TOP_PAD` (10) px below the top of the figure with
   `automargin=true`, so the plot area moves down instead of overlapping it.
-  When a legend sits above the plot area (`set_legend!(…; position =
-  :outside_top)`), `title.pad.b` is also set so the legend is laid out below
-  the title (see [`set_legend!`](@ref)). Existing title styling (font
-  family/colour) is kept.
+  Panel titles, panel labels and legends placed above the top row stay
+  below it: the top margin grows to hold them. A legend above the plot area
+  that is not placed by the package (`relayout!`) gets a `title.pad.b`
+  instead, so it is laid out below the title (see [`set_legend!`](@ref)).
+  Existing title styling (font family/colour) is kept.
 - Panel title: an annotation named `"plotlysupply:title:<row>:<col>"` placed
   just above the cell's axes (`x` = left edge / centre / right edge of the cell
   per `align`, `yanchor="bottom"`, 4 px gap). Calling it again replaces it; it
@@ -1753,12 +1946,14 @@ title of one panel.
   cell. [`set_fonts!`](@ref) styles it as a title. A left/right-aligned panel
   title moves an outside [`panel_labels!`](@ref) label at the same top corner
   beside the corner (outside the axes), so they do not overlap.
-  A panel title below the first row shares the gap between the rows with the
-  x tick labels and x title of the cell above, and nothing moves the rows
-  apart: with an x title on every cell, widen the gap with `vertical_spacing`
-  in [`subplots`](@ref) (two rows at 500 px with 12 px text need about
-  `vertical_spacing = 0.2`; with the PlotlyBase default, `0.3 / rows` = 0.15,
-  the title overlaps the x title above).
+  The title sits above everything placed above the axes (a top x axis, also
+  from [`secondary_xaxis!`](@ref), and a legend placed above the axes), and
+  follows the axes whenever the layout changes (the fitted plot area of an
+  equal-aspect cell). A title below the first row clears the x tick labels
+  and x title of the cell above: the two cells give up height for it (each
+  at most two thirds of its height; a figure too small for that still
+  overlaps, so make it taller or widen `vertical_spacing`). The top margin grows for titles of
+  the first row. `offset` moves it farther out and its room grows with it.
 
 `text` goes through mathtext (`"(a) Mesh study, \$\\lambda=10^8\$"` keeps its
 text); `""` removes the title.
@@ -2032,17 +2227,27 @@ again replaces the labels instead of adding more.
   `:bottomleft`, `:bottomright`.
 - `outside::Bool = true`: `true` puts the label just outside the corner
   (above the axes for top corners, `yanchor="bottom"`); `false` inside it,
-  4 px from both edges. When the cell has a panel title ([`title!`](@ref)
-  with `row`/`col`) aligned to the same corner (`align = :left` for
-  `:topleft`, `:right` for `:topright`), an outside label moves beside the
-  corner, outside the axes on the title's line ("(a) Title"), so the two
-  never overlap; centred titles (also `subplot_titles`) leave it in place.
+  4 px from both edges. An outside top label sits on the line of the cell's
+  panel title, above a top x axis and a legend placed above the axes; an
+  outside bottom label below the x axis. Rows move apart and the figure
+  margins grow so that labels neither overlap anything nor are clipped, and
+  every label follows its axes (the fitted plot area of an equal-aspect
+  cell) whenever the layout changes. When the cell has a panel title
+  ([`title!`](@ref) with `row`/`col`) aligned to the same corner
+  (`align = :left` for `:topleft`, `:right` for `:topright`), or a centred
+  title too wide to clear the label in a narrow cell, an outside label
+  moves beside the corner, outside the axes on the title's line
+  ("(a) Title"; past the end of a title wider than the cell), when the
+  figure has room there. The line then rises clear of the top y tick label
+  under the label.
 - `bold::Bool = false`: bold label (`<b>`, or `\\textbf` for math labels).
 - `fontsize::Real = 0`: font size in px (0 = Plotly default).
 - `cells`: `:all` or a vector of `(row, col)` tuples (SubplotFigure only;
   labels are assigned in the given order).
 
 Returns `nothing` for a `Plot`/`SyncPlot`, the `SubplotFigure` otherwise.
+Invalid values throw an `ArgumentError` before anything is changed; `show`
+is not accepted, nor are `row`/`col` (select cells with `cells`).
 
 # Example
 ```julia
@@ -2063,10 +2268,13 @@ function panel_labels!(
 	bold::Bool = false,
 	fontsize::Real = 0,
 	cells = :all,
+	row = nothing,
+	col = nothing,
 	show = nothing,
 )
 	who = "panel_labels!"
 	_text_reject_show(show, who)
+	_text_reject_panel_cell(row, col)
 	fs = _text_panel_label_args(labels, format, position, fontsize, who)
 	cells === :all || throw(ArgumentError(
 		"$(who): `cells` selects SubplotFigure cells; a single figure has one panel, so omit it.",
@@ -2076,6 +2284,15 @@ function panel_labels!(
 	_text_write_panel_labels!(fig, [(1, 1, target)], texts, format, position, outside, fs, bold)
 	_refresh!(fig)
 	return nothing
+end
+
+# `panel_labels!` labels a set of cells (`cells`), never one `row`/`col`.
+function _text_reject_panel_cell(row, col)
+	(row === nothing && col === nothing) && return nothing
+	throw(ArgumentError(
+		"panel_labels!: `row`/`col` are not supported; choose the labelled cells with " *
+		"`cells = [(row, col), …]`.",
+	))
 end
 
 function _text_panel_labels_sf_impl!(sf::SubplotFigure; labels, format, position, outside, bold, fontsize, cells)
@@ -2099,9 +2316,12 @@ function panel_labels!(
 	bold::Bool = false,
 	fontsize::Real = 0,
 	cells = :all,
+	row = nothing,
+	col = nothing,
 	show = nothing,
 )
 	_text_reject_show(show, "panel_labels!")
+	_text_reject_panel_cell(row, col)
 	_text_panel_label_args(labels, format, position, fontsize, "panel_labels!")
 	return _transactional_subplot_mutation!(
 		_text_panel_labels_sf_impl!,

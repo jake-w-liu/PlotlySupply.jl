@@ -51,34 +51,44 @@ using Test, PlotlySupply
 		end
 	end
 
-	@testset "outside_top legend stays clear of the figure title" begin
+	# The D12 room plan of `f` as `_finalize_figure!` left it, and the slot of
+	# decoration `key` of the `:legend_titles` providers in it.
+	plan_of(f) = PS._room_plan(f)
+	slot_of(plan, key) = PS._room_slot(plan, PS._LT_OWNER, key)
+	margin_t(f) = sd(pl(f).layout.fields[:margin])[:t]
+
+	@testset "outside_top legend stays clear of the figure title (D12)" begin
 		# constructor title, then a legend above the axes
 		fig = plot_scatter(x, [x, 2x]; legend = ["a", "b"], title = "T")
 		set_legend!(fig; position = :outside_top)
 		p = pl(fig)
+		plan = plan_of(fig)
+		leg, band = slot_of(plan, "legend:legend"), slot_of(plan, "figure_title")
+		d = lg(fig)
+		# the legend at its slot above the axes, in paper coordinates
+		@test d[:yanchor] == "bottom" && get(d, :yref, "paper") == "paper"
+		@test d[:y] ≈ PS._lt_outside(plan, leg.edge, leg.offset, :top)
+		# the title pinned to the top of the figure, its band beyond the legend
 		t = sd(p.layout.fields[:title])
-		@test t[:text] == "T" && t[:automargin] === true
-		pad = sd(t[:pad])
-		@test pad[:t] == PS._TEXT_TITLE_TOP_PAD
-		# the title band exceeds margin.t, so plotly reserves it above the legend
-		@test pad[:t] + PS._legend_title_font_size(p, t) + pad[:b] > PS._legend_top_margin(p)
-		@test pad[:b] >= PS._LEGEND_TITLE_GAP
-		# exact value for a known margin and font size
-		relayout!(fig; margin_t = 80, title_font_size = 20)
+		@test t[:text] == "T" && t[:y] == 1 && t[:yanchor] == "top"
+		@test sd(t[:pad])[:t] == PS._TEXT_TITLE_TOP_PAD
+		@test band.offset ≈ leg.offset + leg.px + PS._ROOM_GAP
+		# the top margin holds both
+		@test margin_t(fig) >= band.offset + band.px + PS._ROOM_GAP
+		# a larger margin of the user's is never reduced
+		relayout!(fig; margin_t = 300)
 		set_legend!(fig; position = :outside_top)
-		@test sd(sd(p.layout.fields[:title])[:pad])[:b] == 80 - PS._TEXT_TITLE_TOP_PAD - 20 + 1
-		# never reduced
-		relayout!(fig; title_pad_b = 120)
-		set_legend!(fig; position = :outside_top)
-		@test sd(sd(p.layout.fields[:title])[:pad])[:b] == 120
+		@test margin_t(fig) == 300
 
-		# title! after the legend, with math (half the font size as height bound)
+		# title! after the legend, with math
 		g = plot_scatter(x, [x, 2x]; legend = ["a", "b"])
 		set_legend!(g; position = :outside_top, ncols = 2)
 		title!(g, "Fit \$\\alpha\$")
-		q = pl(g)
-		t = sd(q.layout.fields[:title])
-		@test sd(t[:pad])[:b] == ceil(PS._legend_top_margin(q) - PS._TEXT_TITLE_TOP_PAD - PS._legend_title_font_size(q, t) / 2 + 1)
+		plan = plan_of(g)
+		leg, band = slot_of(plan, "legend:legend"), slot_of(plan, "figure_title")
+		@test band.offset ≈ leg.offset + leg.px + PS._ROOM_GAP
+		@test margin_t(g) >= band.offset + band.px + PS._ROOM_GAP
+		@test sd(pl(g).layout.fields[:title])[:yanchor] == "top"
 
 		# no legend above the axes: title! leaves pad.b alone
 		h = plot_scatter(x, [x, 2x]; legend = ["a", "b"])
@@ -92,16 +102,23 @@ using Test, PlotlySupply
 		# hidden legend: nothing to clear
 		m = plot_scatter(x, [x, 2x]; legend = ["a", "b"], title = "T")
 		set_legend!(m; position = :outside_top, showlegend = false)
-		# D7: the constructor stores the title as `title.text`; nothing is added.
-		@test sd(pl(m).layout.fields[:title]) == Dict{Symbol, Any}(:text => "T")
+		# The constructor placed the title like `title!` (Z28); a hidden legend
+		# adds no clearance (`pad.b`) to it.
+		@test sd(pl(m).layout.fields[:title])[:text] == "T"
+		@test !haskey(sd(sd(pl(m).layout.fields[:title])[:pad]), :b)
 
-		# SubplotFigure figure legend above the grid
+		# SubplotFigure figure legend above the grid, the title above it
 		sf = subplots(1, 2; sync = false)
 		plot_scatter!(sf, x, x; legend = "a", row = 1, col = 1)
 		plot_scatter!(sf, x, 2x; legend = "b", row = 1, col = 2)
 		title!(sf, "Grid")
 		set_legend!(sf; position = :outside_top)
-		@test haskey(sd(sd(pl(sf).layout.fields[:title])[:pad]), :b)
+		plan = plan_of(sf)
+		fl, band = slot_of(plan, "figure_legend:legend"), slot_of(plan, "figure_title")
+		@test lg(sf)[:y] ≈ PS._lt_outside(plan, 1.0, fl.offset, :top)
+		@test band.offset ≈ fl.offset + fl.px + PS._ROOM_GAP
+		@test sd(pl(sf).layout.fields[:title])[:y] == 1
+		@test margin_t(sf) >= band.offset + band.px + PS._ROOM_GAP
 	end
 
 	@testset "#4/#43/#63/#82/#212 (C12): blank-named traces get no legend entry" begin
@@ -256,14 +273,33 @@ using Test, PlotlySupply
 		plot_scatter!(sf, x, [x, 2x]; legend = ["model", "measured"], row = 1, col = 2)
 		title!(sf, "(b) Ellipse"; row = 1, col = 2, align = :left)
 		panel_labels!(sf)
-		@test ann(sf, "plotlysupply:title:1:2")[:yshift] == PS._TEXT_PANEL_GAP   # nothing below it yet
+		decor(plan, key) = only(d for d in PS._lt_decorations(plan) if d.key == key)
+		raise_of(plan, key, name) = only(e[3] for e in decor(plan, key).data if e[1] == name)
+		# nothing below the title yet: at the top edge, with its own gap; the
+		# label beside the left-aligned title sits over the y tick labels, so
+		# the line rises clear of the top one
+		plan = plan_of(sf)
+		line = slot_of(plan, "line:xaxis2")
+		raise = raise_of(plan, "line:xaxis2", "plotlysupply:title:1:2")
+		@test line.offset + raise >= PS._LT_TICK_REACH * PS._lt_y_tick_font(plan, plan.areas[:xaxis2], :left) + 1 - 1e-9
+		@test ann(sf, "plotlysupply:title:1:2")[:y] ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP + raise, :top)
+		@test line.offset == PS._ROOM_GAP
+		@test ann(sf, "plotlysupply:title:1:2")[:yshift] == PS._TEXT_PANEL_GAP
 		set_legend!(sf; row = 1, col = 2, position = (0.5, 1.0), yanchor = "bottom", orientation = :h)
 		lh = PS._legend_box_height(pl(sf), "legend2")
 		@test lh > 16
-		@test ann(sf, "plotlysupply:title:1:2")[:yshift] ≈ lh + PS._TEXT_PANEL_GAP
+		# order above the axes: the legend, then the title line
+		plan = plan_of(sf)
+		leg, line = slot_of(plan, "legend:legend2"), slot_of(plan, "line:xaxis2")
+		@test leg.px ≈ lh && line.offset ≈ leg.offset + leg.px + PS._ROOM_GAP
+		@test lg(sf, :legend2)[:y] ≈ PS._lt_outside(plan, leg.edge, leg.offset, :top)
+		title_y = ann(sf, "plotlysupply:title:1:2")[:y]
+		@test title_y ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP, :top)
 		# the label rides on the title's line; the other cell is unchanged
-		@test ann(sf, "plotlysupply:panel_label:1:2")[:yshift] == ann(sf, "plotlysupply:title:1:2")[:yshift]
-		@test ann(sf, "plotlysupply:panel_label:1:1")[:yshift] == PS._TEXT_PANEL_GAP
+		@test ann(sf, "plotlysupply:panel_label:1:2")[:y] == title_y
+		other = slot_of(plan, "line:xaxis")
+		@test other.offset == PS._ROOM_GAP
+		@test ann(sf, "plotlysupply:panel_label:1:1")[:y] ≈ PS._lt_outside(plan, other.edge, 0.0, :top)
 		@test !PS._text_restack!(sf)                                             # idempotent
 		# a higher user offset is kept
 		title!(sf, "(b) Ellipse"; row = 1, col = 2, align = :left, offset = (0, 80))
@@ -271,82 +307,133 @@ using Test, PlotlySupply
 		# entries added later grow the legend and the stack follows
 		plot_scatter!(sf, x, 3x; legend = "a much longer third entry name", row = 1, col = 2)
 		@test PS._legend_box_height(pl(sf), "legend2") >= lh
-		@test ann(sf, "plotlysupply:panel_label:1:2")[:yshift] ≈ PS._legend_box_height(pl(sf), "legend2") + PS._TEXT_PANEL_GAP
+		plan = plan_of(sf)
+		leg, line = slot_of(plan, "legend:legend2"), slot_of(plan, "line:xaxis2")
+		# now wider than the cell, the legend rises clear of the top y tick label
+		lift = decor(plan, "legend:legend2").data.lift
+		@test lift > 0 && leg.offset + lift >= PS._LT_TICK_REACH * PS._lt_y_tick_font(plan, plan.areas[:xaxis2], :left) + 1 - 1e-9
+		@test leg.px ≈ PS._legend_box_height(pl(sf), "legend2") + lift
+		@test lg(sf, :legend2)[:y] ≈ PS._lt_outside(plan, leg.edge, leg.offset + lift, :top)
+		@test line.offset ≈ leg.offset + leg.px + PS._ROOM_GAP
+		@test ann(sf, "plotlysupply:panel_label:1:2")[:y] ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP, :top)
 
-		# below a top x axis (secondary_xaxis!) and the legend above it (order: axis, legend, title)
+		# Z15: a top x axis (secondary_xaxis!) added after the title, then the
+		# legend above it (order: axis, legend, title)
 		ss = subplots(1, 2; sync = false)
 		plot_scatter!(ss, x, [x, 2x]; legend = ["model", "data"], row = 1, col = 1)
 		plot_scatter!(ss, x, x; legend = "z", row = 1, col = 2)
-		secondary_xaxis!(ss, v -> 2v, v -> v / 2; title = "frequency (Hz)", row = 1, col = 1)
 		title!(ss, "(a) top axis"; row = 1, col = 1, align = :left)
-		depth = maximum(t[3] for t in PS._text_top_axes(pl(ss)))
+		before = ann(ss, "plotlysupply:title:1:1")[:y]
+		secondary_xaxis!(ss, v -> 2v, v -> v / 2; title = "frequency (Hz)", row = 1, col = 1)
+		plan = plan_of(ss)
+		depth = plan.areas[:xaxis].own[:top]
 		@test depth > 20
-		@test ann(ss, "plotlysupply:title:1:1")[:yshift] ≈ depth + PS._TEXT_PANEL_GAP
+		line = slot_of(plan, "line:xaxis")
+		@test line.offset ≈ PS._room_label_px(depth) + PS._ROOM_GAP
+		@test ann(ss, "plotlysupply:title:1:1")[:y] > before
+		@test ann(ss, "plotlysupply:title:1:1")[:y] ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP, :top)
 		set_legend!(ss; row = 1, col = 1, position = (0.5, 1.0), xanchor = "center", yanchor = "bottom", orientation = :h)
-		box = lg(ss)
-		offset = (box[:y] - 1) * PS._text_plot_height(pl(ss))
-		@test isapprox(offset, depth + PS._TEXT_PANEL_GAP; atol = PS._TEXT_STACK_TOL)
-		@test isapprox(ann(ss, "plotlysupply:title:1:1")[:yshift],
-			offset + PS._legend_box_height(pl(ss), "legend") + PS._TEXT_PANEL_GAP; atol = 2 * PS._TEXT_STACK_TOL)
+		plan = plan_of(ss)
+		leg, line = slot_of(plan, "legend:legend"), slot_of(plan, "line:xaxis")
+		@test leg.offset ≈ PS._room_label_px(plan.areas[:xaxis].own[:top]) + PS._ROOM_GAP
+		@test line.offset ≈ leg.offset + leg.px + PS._ROOM_GAP
+		@test lg(ss)[:y] ≈ PS._lt_outside(plan, leg.edge, leg.offset, :top)
+		@test ann(ss, "plotlysupply:title:1:1")[:y] ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP, :top)
 		@test !PS._text_restack!(ss)
 	end
 
 	@testset "D12/G38: an :outside_top figure legend goes above the panel titles, under the figure title" begin
 		sg = subplots(1, 2; sync = false, per_subplot_legends = false)
 		figsize!(sg, 7.2, 4.0; units = :in)
-		H = 4.0 * 96
 		for c in 1:2
 			plot_scatter!(sg, x, x .* c; legend = "run $(c)", row = 1, col = c)
 		end
 		set_legend!(sg; position = :outside_top)
-		@test lg(sg)[:y] > 1 && !haskey(lg(sg), :yref)          # nothing stacked yet: unchanged
+		@test lg(sg)[:y] > 1 && !haskey(lg(sg), :yref)
 		title!(sg, "(a) structured meshes"; row = 1, col = 1)
+		plan = plan_of(sg)
+		fl, line = slot_of(plan, "figure_legend:legend"), slot_of(plan, "line:xaxis")
 		box = lg(sg)
-		@test box[:yref] == "container" && box[:yanchor] == "top" && box[:x] == 0.5
-		@test box[:y] ≈ round(1 - PS._TEXT_PANEL_GAP / H; digits = 4)
-		lh = PS._legend_box_height(pl(sg), "legend")
-		title_h = PS._text_extent("(a) structured meshes", 12)[2]
-		margin_t() = sd(pl(sg).layout.fields[:margin])[:t]
-		# room for the legend, the gap and the panel title (yshift + text + annotation frame)
-		@test margin_t() >= PS._TEXT_PANEL_GAP + lh + PS._LEGEND_TITLE_GAP + PS._TEXT_PANEL_GAP + title_h
-		# a figure title goes on top, the legend right under it, with no clearance pad.b
+		@test get(box, :yref, "paper") == "paper" && box[:yanchor] == "bottom" && box[:x] == 0.5
+		# above the panel title line, which is above the axes
+		@test fl.offset ≈ line.offset + line.px + PS._ROOM_GAP
+		@test box[:y] ≈ PS._lt_outside(plan, 1.0, fl.offset, :top)
+		@test margin_t(sg) >= fl.offset + fl.px + PS._ROOM_GAP
+		# a figure title goes on top, beyond the legend
 		title!(sg, "Convergence")
-		band = PS._text_title_band(pl(sg))
-		@test band > 20
-		@test lg(sg)[:y] ≈ round(1 - band / H; digits = 4)
+		plan = plan_of(sg)
+		fl, band = slot_of(plan, "figure_legend:legend"), slot_of(plan, "figure_title")
+		@test band.offset ≈ fl.offset + fl.px + PS._ROOM_GAP
+		@test lg(sg)[:y] ≈ PS._lt_outside(plan, 1.0, fl.offset, :top)
 		@test !haskey(sd(sd(pl(sg).layout.fields[:title])[:pad]), :b)
-		@test margin_t() >= band + lh + PS._LEGEND_TITLE_GAP + title_h
+		@test margin_t(sg) >= band.offset + band.px + PS._ROOM_GAP
 		@test !PS._text_restack!(sg)
 		# tight_layout! keeps that room
 		tight_layout!(sg)
-		@test margin_t() >= band + lh + PS._LEGEND_TITLE_GAP + title_h
+		plan = plan_of(sg)
+		band = slot_of(plan, "figure_title")
+		@test margin_t(sg) >= band.offset + band.px + PS._ROOM_GAP
 		@test !PS._text_restack!(sg)
 		# a legend the user placed elsewhere is not moved
 		set_legend!(sg; position = (0.2, 1.1))
 		@test lg(sg)[:y] == 1.1 && get(lg(sg), :yref, "paper") == "paper"
 
-		# single figure: an outside panel label is a stack too
+		# single figure: an outside panel label goes on the line above the legend
 		f = plot_scatter(x, [x, 2x]; legend = ["model", "data"])
 		set_legend!(f; position = :outside_top)
 		@test get(lg(f), :yref, "paper") == "paper"
 		panel_labels!(f)
-		@test lg(f)[:yref] == "container" && lg(f)[:yanchor] == "top"
+		plan = plan_of(f)
+		leg, line = slot_of(plan, "legend:legend"), slot_of(plan, "line:xaxis")
+		@test line.offset ≈ leg.offset + leg.px + PS._ROOM_GAP
+		@test get(lg(f), :yref, "paper") == "paper" && lg(f)[:y] ≈ PS._lt_outside(plan, leg.edge, leg.offset, :top)
 	end
 
-	# Rendered geometry, read back from the export window after `savefig`.
-	function export_boxes(fig)
-		savefig(fig; format = "svg")
+	# Rendered geometry of the SVG `savefig` exports (K6: measured from that SVG,
+	# laid out in the export window, not from whatever the window shows), in px
+	# from the top-left corner of the figure. `legends`: the background box of
+	# each legend; `ann`: the text box of each annotation; `xtitle`: every x
+	# axis title; `ytitle`: every y axis title; `points`: every marker;
+	# `plots`: every plot area; `ticks`: every tick label; `colorbars`: every
+	# colorbar (bar, ticks and title); `gtitle`: the figure title (`nothing`
+	# without one); `W`/`H`: the figure size.
+	export_geometry_js = raw"""
+	(function(svgText){
+	var c=document.createElement('div');
+	c.style.position='absolute';c.style.left='0px';c.style.top='0px';
+	c.innerHTML=svgText;document.body.appendChild(c);
+	try{
+	var root=c.querySelector('svg');var R=root.getBoundingClientRect();
+	var b=function(e){if(!e)return null;var r=e.getBoundingClientRect();
+	 if(r.width===0&&r.height===0)return null;return [r.left-R.left,r.top-R.top,r.right-R.left,r.bottom-R.top];};
+	var cls=function(e){return (e.getAttribute('class')||'').split(' ')[0];};
+	var out={W:R.width,H:R.height,legends:[],ann:[],xtitle:[],ytitle:[],points:[],plots:[],ticks:[],colorbars:[],gtitle:null};
+	c.querySelectorAll('g.infolayer > g').forEach(function(g){
+	 var k=cls(g),bx;
+	 if(/^legend[0-9]*$/.test(k)){bx=b(g.querySelector('rect.bg'))||b(g);if(bx)out.legends.push(bx);}
+	 else if(/^g-x[0-9]*title$/.test(k)){bx=b(g);if(bx)out.xtitle.push(bx);}
+	 else if(/^g-y[0-9]*title$/.test(k)){bx=b(g);if(bx)out.ytitle.push(bx);}
+	 else if(k==='g-gtitle'){out.gtitle=b(g);}
+	});
+	c.querySelectorAll('g.annotation').forEach(function(a){var bx=b(a.querySelector('g.annotation-text-g'));if(bx)out.ann.push(bx);});
+	c.querySelectorAll('path.point').forEach(function(e){var bx=b(e);if(bx)out.points.push(bx);});
+	c.querySelectorAll('g.colorbar').forEach(function(g){var bx=b(g);if(bx)out.colorbars.push(bx);});
+	['xaxislayer-above','yaxislayer-above'].forEach(function(layer){
+	 c.querySelectorAll('g.'+layer+' text').forEach(function(t){var bx=b(t);if(bx)out.ticks.push(bx);});});
+	c.querySelectorAll('g.overplot > g').forEach(function(pg){
+	 var m=/translate\(([-0-9.e]+)[ ,]+([-0-9.e]+)\)/.exec(pg.getAttribute('transform')||'');
+	 var id=/url\(['"]?#([^'")]+)['"]?\)/.exec(pg.getAttribute('clip-path')||'');
+	 var r=id?c.querySelector('clipPath[id="'+id[1]+'"] rect'):null;
+	 if(m&&r){var x=+m[1],y=+m[2];out.plots.push([x,y,x+(+r.getAttribute('width')),y+(+r.getAttribute('height'))]);}
+	});
+	return JSON.stringify(out);
+	}finally{c.remove();}
+	})
+	"""
+	function export_boxes(fig; kwargs...)
+		svg = String(savefig(fig; format = "svg", kwargs...))
 		raw = PS._with_export_window(PS._EXPORT_STATE) do ec, app, win, divid
-			script = "(function(){var gd=document.getElementById($(PS._json_js(divid)));" *
-				"var b=function(e){if(!e)return null;var r=e.getBoundingClientRect();return [r.left,r.top,r.right,r.bottom];};" *
-				"return JSON.stringify({" *
-				"legends:Array.from(gd.querySelectorAll('g.infolayer > g')).filter(function(g){" *
-				"return /^legend[0-9]*\$/.test((g.getAttribute('class')||'').split(' ')[0]);}).map(function(g){return b(g.querySelector('rect.bg'));})," *
-				"ann:Array.from(gd.querySelectorAll('g.annotation')).map(function(a){return b(a.querySelector('g.annotation-text-g'));})," *
-				"xtitle:Array.from(gd.querySelectorAll('g.g-xtitle')).map(b)," *
-				"points:Array.from(gd.querySelectorAll('path.point')).map(b)," *
-				"gtitle:b(gd.querySelector('g.g-gtitle'))});})()"
-			Base.invokelatest(() -> ec.run(win, script))
+			Base.invokelatest(() -> ec.run(win, export_geometry_js * "(" * PS._json_js(svg) * ")"))
 		end
 		return PB.JSON.parse(String(raw))
 	end
@@ -541,5 +628,271 @@ using Test, PlotlySupply
 		@test count(shown, lines) == 1
 		@test length(unique(t.fields[:legendgroup] for t in lines)) == 1
 		@test startswith(lines[1].fields[:legendgroup], PS._LEGEND_DEDUPE_GROUP_PREFIX)
+	end
+
+	@testset "W3: the best legend position avoids reference shapes and annotations" begin
+		f = plot_scatter([0.0, 1.0, 2.0, 3.0], [0.0, 0.2, 0.1, 0.3]; legend = "data")
+		yrange!(f, (0, 3))
+		@test PS._scat_best_legend_position(pl(f)) === :topright          # the data is at the bottom
+		# a dashed reference circle through the top right corner
+		relayout!(f; shapes = [attr(type = "circle", xref = "x", yref = "y", x0 = 1.8, x1 = 3.3,
+			y0 = 1.8, y1 = 3.3, line = attr(dash = "dash"))])
+		@test PS._scat_best_legend_position(pl(f)) === :topleft
+		# and a note at the top left: a free position is still chosen
+		relayout!(f; annotations = [attr(text = "a long note text here", x = 0.3, y = 2.8, xref = "x",
+			yref = "y", showarrow = false)])
+		p = pl(f)
+		scores = PS._scat_legend_scores(p, eachindex(p.data), :xaxis, "x", PS._scat_legend_figure_px(p.layout)...)
+		index(position) = findfirst(==(position), PS._SCAT_LEGEND_POSITIONS)
+		@test scores[index(:topright)] > 0 && scores[index(:topleft)] > 0
+		best = PS._scat_best_legend_position(p)
+		@test scores[index(best)] == 0 && minimum(scores) == 0
+	end
+
+	@testset "Z80: best legend position at 1e5 points (allocations, one scoring per append)" begin
+		xs = collect(range(0, 10; length = 100_000))
+		f = plot_scatter(xs, sin.(xs); legend = "sine")
+		PS._scat_best_legend_position(pl(f))
+		@test @allocated(PlotlySupply._scat_best_legend_position(pl(f))) < 16_000_000
+		g = plot_scatter(xs, [sin.(xs), cos.(xs)]; legend = ["s", "c"], mode = "lines+markers")
+		restyle!(g; line_shape = "hv")
+		PS._scat_best_legend_position(pl(g))
+		@test @allocated(PlotlySupply._scat_best_legend_position(pl(g))) < 16_000_000
+		# The append placed the legend and remembered where: reading the state
+		# again does not score the 2e5 points.
+		h = plot_scatter(xs, sin.(xs); legend = "a")
+		plot_scatter!(h, xs, cos.(xs); legend = "b")
+		@test get(PS._SCAT_LEGEND_AUTO, pl(h), nothing) === :topright
+		PS._scat_legend_state(h)
+		@test PS._scat_legend_state(h) === :auto
+		@test @allocated(PS._scat_legend_state(h)) < 100_000
+		# an explicit position is the user's: forgotten, and kept on appends
+		set_legend!(h; position = :topleft)
+		@test !haskey(PS._SCAT_LEGEND_AUTO, pl(h))
+		@test PS._scat_legend_state(h) === :fixed
+		plot_scatter!(h, xs, 2 .* cos.(xs); legend = "c")
+		@test lg(h)[:xanchor] == "left"
+	end
+
+	@testset "Z78: a legend over a heatmap stays clear of its colorbar" begin
+		z = [sin(0.3 * i) * cos(0.25 * j) for i in 1:30, j in 1:20]
+		f = plot_heatmap(collect(range(-pi, pi; length = 30)), collect(range(0, 2; length = 20)), z;
+			title = "field", xlabel = "x", ylabel = "y", colorbar_title = "|E|^2 (a.u.)")
+		plot_scatter!(f, [-2.0, 2.0], [0.5, 1.5]; legend = "reference", color = "white")
+		b = export_boxes(f; width = 700, height = 500)
+		@test length(b["legends"]) == 1 && length(b["plots"]) == 1
+		legend, plot = b["legends"][1], b["plots"][1]
+		# inside the plot area (plotly draws it there only when nothing is left
+		# to push the margin: measured 40 px into the colorbar before)
+		@test legend[1] >= plot[1] - 0.5 && legend[3] <= plot[3] + 0.5
+		@test legend[2] >= plot[2] - 0.5 && legend[4] <= plot[4] + 0.5
+	end
+
+	@testset "Z48: an :outside_bottom figure legend stacks above bottom captions" begin
+		function captioned(; tight = false, legend_first = false, grid = true)
+			f = if grid
+				sf = subplots(1, 2; sync = false)
+				plot_scatter!(sf, 1:5, [1, 3, 2, 4, 3]; row = 1, col = 1, legend = "alpha", xlabel = "time t", ylabel = "y")
+				plot_scatter!(sf, 1:5, [2, 1, 3, 2, 4]; row = 1, col = 2, legend = "beta", xlabel = "time t")
+				sf
+			else
+				plot_scatter(1:5, [[1, 3, 2, 4, 3], [2, 1, 3, 2, 4]]; legend = ["alpha", "beta"], xlabel = "time t")
+			end
+			legend_first && set_legend!(f; position = :outside_bottom)
+			annotate!(f, 0.5, 0.01, "Figure 1. A caption below the figure."; coords = :figure,
+				showarrow = false, yanchor = "bottom")
+			legend_first || set_legend!(f; position = :outside_bottom)
+			tight && tight_layout!(f)
+			return f
+		end
+		for kw in ((;), (legend_first = true,), (tight = true,), (grid = false,), (grid = false, tight = true))
+			f = captioned(; kw...)
+			d = lg(f)
+			# still container-referenced at the bottom, now on the caption band
+			@test d[:yref] == "container" && d[:yanchor] == "bottom" && d[:x] == 0.5
+			band = 0.01 * 500 + 1.4 * 12 + PS._FIGURE_ANNOTATION_GAP
+			@test d[:y] ≈ round(band / 500; digits = 6)
+			b = export_boxes(f; width = 700, height = 500)
+			@test length(b["legends"]) == 1 && length(b["ann"]) == 1 && !isempty(b["xtitle"])
+			caption = b["ann"][1]
+			@test !overlaps(b["legends"][1], caption)
+			@test !any(overlaps(t, caption) || overlaps(t, b["legends"][1]) for t in b["xtitle"])
+			@test !any(overlaps(q, caption) for q in b["plots"])
+			# the caption stays at its figure fraction (rendered within 2 px)
+			@test isapprox(500 - caption[4], 0.01 * 500; atol = 2)
+			@test caption[2] >= 0 && caption[4] <= 500
+		end
+		# without a caption the legend keeps the bottom edge of the figure
+		g = plot_scatter(1:5, [[1, 3, 2, 4, 3], [2, 1, 3, 2, 4]]; legend = ["alpha", "beta"])
+		set_legend!(g; position = :outside_bottom)
+		@test lg(g)[:y] == 0
+	end
+
+	# Every pair of rendered decorations (`export_boxes`) that overlap, every
+	# decoration over a plot area or a tick label, and every one clipped by
+	# the figure edge, as readable strings (empty: a clean figure).
+	function layout_defects(b)
+		items = Tuple{String, Vector{Float64}}[]
+		for (kind, key) in (("legend", "legends"), ("annotation", "ann"), ("x title", "xtitle"),
+			("y title", "ytitle"), ("colorbar", "colorbars"))
+			for (i, box) in enumerate(b[key])
+				push!(items, ("$(kind) $(i)", Float64.(box)))
+			end
+		end
+		b["gtitle"] === nothing || push!(items, ("figure title", Float64.(b["gtitle"])))
+		defects = String[]
+		for i in eachindex(items), j in eachindex(items)
+			i < j && overlaps(items[i][2], items[j][2]) && push!(defects, "$(items[i][1]) / $(items[j][1])")
+		end
+		for (name, box) in items, (kind, key) in (("plot", "plots"), ("tick", "ticks")), other in b[key]
+			overlaps(box, other) && push!(defects, "$(name) / $(kind) $(round.(Float64.(other); digits = 1))")
+		end
+		for (name, box) in items
+			(box[1] >= -0.5 && box[2] >= -0.5 && box[3] <= b["W"] + 0.5 && box[4] <= b["H"] + 0.5) ||
+				push!(defects, "$(name) clipped $(round.(box; digits = 1))")
+		end
+		return unique(defects)
+	end
+
+	@testset "D12 acceptance: a 2x2 grid with every kind of decoration, at 700x500 and IEEE size" begin
+		function acceptance_grid()
+			xs = collect(range(0, 1; length = 30))
+			sf = subplots(2, 2; sync = false)
+			plot_scatter!(sf, xs, sin.(4xs); legend = "sin", row = 1, col = 2)
+			plot_scatter!(sf, xs, cos.(4xs); legend = "cos", row = 1, col = 2)
+			plot_scatter!(sf, xs, xs .^ 2; row = 1, col = 1)
+			plot_heatmap!(sf, xs, xs, [sin(6a) * cos(6b) for a in xs, b in xs]; row = 2, col = 2)
+			plot_scatter!(sf, xs, exp.(xs); row = 2, col = 1)
+			for r in 1:2, c in 1:2
+				xlabel!(sf, "x title"; row = r, col = c)
+				ylabel!(sf, "y title"; row = r, col = c)
+			end
+			title!(sf, "first line<br>second line"; row = 1, col = 1)
+			title!(sf, "\$\\alpha_1 + \\beta^2\$ math"; row = 1, col = 2)
+			title!(sf, "plain title"; row = 2, col = 1)
+			title!(sf, "another"; row = 2, col = 2)
+			panel_labels!(sf)
+			set_legend!(sf; row = 1, col = 2, position = :outside_top)
+			colorbar!(sf; row = 2, col = 2, title = "z")
+			legend_entry!(sf, "model"; legend_target = :figure, color = "red")
+			legend_entry!(sf, "data"; legend_target = :figure, color = "blue")
+			set_legend!(sf; legend_target = :figure, position = :outside_top)
+			return sf
+		end
+		sf = acceptance_grid()
+		b = export_boxes(sf; width = 700, height = 500)
+		@test length(b["plots"]) == 4 && length(b["legends"]) == 2 && length(b["ann"]) == 8
+		@test length(b["xtitle"]) == 4 && length(b["ytitle"]) == 4 && length(b["colorbars"]) == 1
+		@test layout_defects(b) == String[]
+		# the export copy is re-placed at another size too
+		b = export_boxes(sf; width = 900, height = 650)
+		@test layout_defects(b) == String[]
+		# The IEEE single-column size: the rows give up most of their cells
+		# (`_ROOM_MAX_SHARE`) and nothing overlaps.
+		w, h = with_style(() -> PS._style_default_figure_size(), :ieee)
+		@test (w, h) == (336, 252)
+		b = with_style(:ieee) do
+			export_boxes(acceptance_grid(); width = round(Int, w), height = round(Int, h))
+		end
+		@test length(b["plots"]) == 4 && length(b["legends"]) == 2 && length(b["ann"]) == 8
+		@test layout_defects(b) == String[]
+		@test all(p -> p[4] - p[2] > 5, b["plots"])
+	end
+
+	@testset "Z65/Z97: panel labels are not clipped under journal margins (no tight_layout! needed)" begin
+		for style in (:publication, :ieee, :nature)
+			for outside in (true, false)
+				b = with_style(style) do
+					w, h = PS._style_default_figure_size()
+					fig = plot_scatter(1:5, [1, 4, 2, 5, 3]; xlabel = "x", ylabel = "y", title = "A title")
+					panel_labels!(fig; labels = ["a"], position = :topleft, outside = outside)
+					export_boxes(fig; width = round(Int, w), height = round(Int, h))
+				end
+				@test length(b["ann"]) == 1
+				defects = layout_defects(b)
+				# an inside label sits over its plot area by design; it must not
+				# be clipped (an outside one touches nothing at all)
+				outside ? (@test defects == String[]) : (@test !any(d -> occursin("clipped", d), defects))
+				label = b["ann"][1]
+				@test label[1] >= -0.5 && label[2] >= -0.5 && label[3] <= b["W"] + 0.5 && label[4] <= b["H"] + 0.5
+			end
+		end
+	end
+
+	@testset "D12: what reaches past a narrow cell clears its top y tick label; labels clear wide titles" begin
+		xs = collect(range(0, 1; length = 20))
+		size = (520, 260)
+		# the tick label font of the figures below (the default style's)
+		reach_of(plan, key) = PS._LT_TICK_REACH * PS._lt_y_tick_font(plan, plan.areas[key], :left) + 1
+		# a label beside a left-aligned title, over the y tick labels of cell 1;
+		# a centred title wider than cell 2, its label beside the title's end
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, xs, xs; row = 1, col = 1)
+		plot_scatter!(sf, xs, 2 .* xs; row = 1, col = 2)
+		relayout!(sf; yaxis_range = [0, 1], yaxis_dtick = 0.5, yaxis2_range = [0, 2], yaxis2_dtick = 1)
+		title!(sf, "(left)"; row = 1, col = 1, align = :left)
+		title!(sf, "a long centred panel title over a narrow cell"; row = 1, col = 2)
+		panel_labels!(sf)
+		plan = PS._room_plan(sf; size = size)
+		lines = Dict(d.key => d for d in PS._lt_decorations(plan))
+		for (key, area) in (("line:xaxis", :xaxis), ("line:xaxis2", :xaxis2))
+			line = slot_of(plan, key)
+			@test all(entry -> line.offset + entry[3] >= reach_of(plan, area) - 1e-9, lines[key].data)
+		end
+		b = export_boxes(sf; width = size[1], height = size[2])
+		@test length(b["ann"]) == 4
+		@test layout_defects(b) == String[]
+		@test !PS._text_restack!(sf)
+		# a legend wider than its cell, above the axes
+		sl = subplots(1, 3; sync = false)
+		for c in 1:3
+			plot_scatter!(sl, xs, c .* xs; row = 1, col = c)
+		end
+		plot_scatter!(sl, xs, [xs, 2 .* xs]; legend = ["first series", "second series"], row = 1, col = 3)
+		relayout!(sl; yaxis3_range = [0, 3], yaxis3_dtick = 1.5)
+		set_legend!(sl; row = 1, col = 3, position = :outside_top, orientation = :h)
+		plan = PS._room_plan(sl; size = size)
+		legend = only(d for d in PS._lt_decorations(plan) if d.key == "legend:legend3")
+		@test legend.role === :cell_legend
+		@test legend.data.lift > 0
+		@test slot_of(plan, legend.key).offset + legend.data.lift >= reach_of(plan, :xaxis3) - 1e-9
+		b = export_boxes(sl; width = size[1], height = size[2])
+		@test length(b["legends"]) == 1
+		@test layout_defects(b) == String[]
+	end
+
+	@testset "D12: axis labels between cells get room; a user domain wider than that is kept" begin
+		xs = collect(range(0, 1; length = 20))
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, xs, xs; row = 1, col = 1)
+		plot_scatter!(sf, xs, 1000 .* xs; row = 1, col = 2)
+		title!(sf, "(a)"; row = 1, col = 1)          # a request: the room is solved
+		dom() = PS._layout_axis_domain(pl(sf).layout, :xaxis2)
+		ref = dom()[1]
+		ylabel!(sf, "y title"; row = 1, col = 2)
+		first = dom()[1]
+		@test first > ref
+		# the room grows with the title (a side shrunk before only grows)
+		relayout!(sf; yaxis2_title_font_size = 40)
+		PS._finalize_figure!(sf)
+		@test dom()[1] > first
+		@test PS._finalize_figure!(sf) === false
+		plan = plan_of(sf)
+		a = plan.areas[:xaxis2]
+		@test (dom()[1] - plan.areas[:xaxis].current[1][2]) * plan.Wp >= PS._room_label_px(a.own[:left]) - 1e-6
+		# a domain the user narrowed farther is kept
+		relayout!(sf; xaxis2_domain = [0.8, 1.0])
+		PS._finalize_figure!(sf)
+		@test collect(dom()) == [0.8, 1.0]
+		# a row gap between the x axis above (axis title) and a title line below:
+		# both rows give up height for it
+		sr = subplots(2, 1; sync = false)
+		plot_scatter!(sr, xs, xs; row = 1, col = 1)
+		plot_scatter!(sr, xs, xs; row = 2, col = 1)
+		xlabel!(sr, "x title"; row = 1, col = 1)
+		title!(sr, "lower panel"; row = 2, col = 1)
+		plan = PS._room_plan(sr; size = (300, 200))
+		top, bottom = plan.areas[:xaxis].room[:bottom], plan.areas[:xaxis2].room[:top]
+		@test top > 0 && bottom > 0
 	end
 end

@@ -2076,8 +2076,9 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test nlp(:outside_bottom) == :outside_bottom
         @test nlp(:bottom_outside) == :outside_bottom
         @test nlp(:outsidebottom) == :outside_bottom
-        # Invalid position defaults to :topright
-        @test nlp(:invalid_position_xyz) == :topright
+        # Invalid position defaults to :topright, with a warning (Z7: the
+        # warning is expected, not printed into the test log)
+        @test (@test_logs (:warn, r"Unrecognized legend position") nlp(:invalid_position_xyz)) == :topright
     end
 
     @testset "Legend positions in set_legend!" begin

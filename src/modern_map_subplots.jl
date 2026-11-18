@@ -623,6 +623,7 @@ function _apply_subplot_title_annotations!(
 						row,
 						col,
 					);
+					offset = _TEXT_PANEL_GAP,
 					name = "plotlysupply:title:$(row):$(col)",
 				)
 			end
@@ -647,6 +648,7 @@ function _apply_subplot_title_annotations!(
 					annotations,
 					title,
 					domain;
+					offset = _TEXT_PANEL_GAP,
 					name = "plotlysupply:title:$(row):$(col)",
 				)
 			end
