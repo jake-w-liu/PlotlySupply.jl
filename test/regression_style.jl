@@ -1304,6 +1304,21 @@ end
 			_rs_get(default_polar, :margin) == Dict(:l => 50, :r => 50, :t => 60, :b => 50)
 	end
 
+	@testset "journal width survives the equal-aspect size fit" begin
+		# A single equal-aspect figure drops the blank rows: only the fitted side is
+		# rounded; the journal column (89 mm) keeps its exact size.
+		fig = with_style(:nature) do
+			plot_polygons([[0.0, 1.0, 0.5], [2.0, 3.0, 2.5]], [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], [1.0, 2.0])
+		end
+		_RS._finalize_figure!(fig)
+		fields = _RS._plot_layout(fig).fields
+		@test fields[:width] ≈ journal_width(:nature; units = :px)
+		@test fields[:height] isa Integer && fields[:height] < fields[:width]
+		plain = plot_polygons([[0.0, 1.0, 0.5], [2.0, 3.0, 2.5]], [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], [1.0, 2.0])
+		_RS._finalize_figure!(plain)
+		@test _RS._plot_layout(plain).fields[:width] == 700
+	end
+
 	@testset "Z73: reference lines follow reference_linewidth (docstring and drawing)" begin
 		doc = string(Base.Docs.doc(Base.Docs.Binding(PlotlySupply, :PlotStyle)))
 		@test !occursin("still draw their own", doc)

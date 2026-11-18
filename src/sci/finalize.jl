@@ -1630,9 +1630,13 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 			low = min(W, _FIN_MIN_FIGURE_WIDTH * min(1.0, W / _DEFAULT_EXPORT_WIDTH_PX))
 			newW = clamp(round(W - fit.free_px), low, W)
 		end
-		size_updates = Dict{Symbol, Any}(:width => round(Int, newW), :height => round(Int, newH))
+		# Only the side that was fitted is rounded to whole px: the other keeps
+		# its size exactly (a journal column, 89 mm = 336.378 px, stays 89 mm).
+		newW = newW == W ? W : Float64(round(Int, newW))
+		newH = newH == H ? H : Float64(round(Int, newH))
+		size_updates = Dict{Symbol, Any}(:width => _style_number(newW), :height => _style_number(newH))
 		wrote |= _fin_relayout!(ctx, size_updates)
-		W, H = Float64(round(Int, newW)), Float64(round(Int, newH))
+		W, H = newW, newH
 		wrote |= _fin_wrap_axis_titles!(ctx, accs, W, H)
 		plan, fits = _fin_plan_and_fit(ctx, accs, bars, W, H)
 	end
