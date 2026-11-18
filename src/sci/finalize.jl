@@ -798,7 +798,21 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 	end
 	(isfinite(lo) && isfinite(hi) && hi > lo) || return 4 + extra
 	if islog
-		return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), floor(Int, lo):ceil(Int, hi)) + extra
+		# plotly formatLog writes decade labels ("0.01", "100μ", "1e−8", or "10⁻⁸"
+		# at 1.25 x the tick font with its exponent at 70 %; `_axes_decade_label`)
+		# unless a `tickformat`, the "none" format or an "L" step prints decimals.
+		format = _cmn_mapping_get(mapping, :exponentformat)
+		log_dtick = _cmn_mapping_get(mapping, :dtick)
+		(_cmn_mapping_get(mapping, :tickformat) !== nothing || format == "none" ||
+			(log_dtick isa AbstractString && startswith(log_dtick, "L"))) &&
+			return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), floor(Int, lo):ceil(Int, hi)) + extra
+		return maximum(floor(Int, lo):ceil(Int, hi)) do e
+			label = _axes_decade_label(e, format)
+			sup = match(r"<sup>(.*)</sup>", label)
+			chars = sup === nothing ? length(label) :
+				length(label) - length(sup.match) + _TEXT_SCRIPT_SCALE * length(sup.captures[1])
+			ceil(Int, _axes_decade_font(e, format, 1.0) * chars - 1e-9)
+		end + extra
 	end
 	dtick = _cmn_mapping_get(mapping, :dtick)
 	step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) :

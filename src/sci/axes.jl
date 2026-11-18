@@ -961,12 +961,10 @@ Only that axis changes (other cells keep their ticks).
     unless `minor = true`.
   A log axis without any tick setting is labelled by Plotly, except where
   its labels would collide at the size the figure is drawn (a narrow
-  journal-column panel: "5678" run together) and, when the active style
-  labels log axes by decades (`PlotStyle` `log_ticks = :decades`), on an
-  axis spanning two decades or more: there each render (`savefig` included)
-  shows decade labels with unlabelled minor ticks, as `:decades` does, and
-  Plotly's labels again once they fit. Tick values, a preset (`:auto`
-  included), `format` or `minor` set with `xticks!` make the axis's ticks
+  journal-column panel: "5678" run together): there each render (`savefig`
+  included) shows decade labels with unlabelled minor ticks, as `:decades`
+  does, and Plotly's labels again once they fit. Tick values, the
+  `:decades` preset or a `format` set with `xticks!` make the axis's ticks
   the user's and turn this off.
   A preset cannot be combined with `labels` or `subs`.
 - `labels`: one label per value; each goes through the mathtext layer, so a
@@ -1575,9 +1573,13 @@ end
 # estimate (Verdana glyph classes), which errs on the large side for the
 # faces plotly.js renders (measured, plotly.js 2.35.2, 20 px titles: Verdana
 # and DejaVu Sans 0.96-0.98 of it, Arial/Helvetica 0.85, Georgia 0.84-0.87,
-# STIX Two Text 0.81-0.83, Times New Roman 0.77-0.78): no title of these
-# faces that runs off is left on one line; one in a narrow face that would
-# just fit (within about a fifth of the figure) may be broken.
+# STIX Two Text 0.81-0.83, Times New Roman 0.77-0.78; a 13 px DejaVu Sans
+# title in gallery optical_validation 0.96). The decision takes the share the
+# widest of them fills (`_AXES_TITLE_WIDTH_FACTOR`), and the axis centre from
+# the estimated plot area (`_fin_margins`): no title in these faces that runs
+# off is left on one line, while one in a narrower face that just fits may be
+# broken (optical_validation (d): its DejaVu Sans x title, 5 px inside the
+# figure edge, stays on one line).
 # The line breaks are marked (`_AXES_WRAP_BREAK`, a zero-width space before
 # `<br>`: invisible, and plotly.js itself writes U+200B into empty lines), so
 # the next run starts again from the one-line title and a title that fits
@@ -1586,6 +1588,9 @@ end
 # `xlabel!(...; wrap = false)` writes) are never broken.
 
 const _AXES_WRAP_BREAK = "\u200b<br>"
+# Share of the text-extent estimate the widest measured face fills (Verdana
+# and DejaVu Sans, 0.96-0.98; see the comment above).
+const _AXES_TITLE_WIDTH_FACTOR = 0.98
 
 # Original one-line text of a title `_axes_title_wrap_updates!` broke.
 _axes_unwrap_title(text::AbstractString) = replace(String(text), _AXES_WRAP_BREAK => " ")
@@ -1776,7 +1781,7 @@ function _axes_title_wrap_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_A
 		em = Float64[_text_plain_em(word) for word in words]
 		space = _text_char_em(' ')
 		width = (sum(em) + (length(words) - 1) * space) * font
-		lines = _axes_title_runs_off(layout, plan, key, width) ?
+		lines = _axes_title_runs_off(layout, plan, key, _AXES_TITLE_WIDTH_FACTOR * width) ?
 			_axes_balanced_lines(words, em, space, _axes_plan_length(layout, plan, key) / font) :
 			nothing
 		want = lines === nothing ? text : join(lines, _AXES_WRAP_BREAK)

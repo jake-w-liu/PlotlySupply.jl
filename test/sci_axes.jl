@@ -1907,6 +1907,37 @@ end
         @test occursin(_AX._AXES_WRAP_BREAK, text(q, :yaxis))
     end
 
+    @testset "wave 5: the margin estimate reads plotly's log decade labels (W5)" begin
+        # plotly formatLog labels a log axis by decades: "10⁻⁹" (power format,
+        # 1.25 x the tick font, its exponent at 70 %: 5 characters' room),
+        # "100μ" (the default "B"), "1e−9" ("e"); only a `tickformat`, the
+        # "none" format or an "L" step print decimals ("0.000000001").
+        chars(lo, hi; kw...) = _AX._fin_tick_chars(Dict{Symbol, Any}(kw...), lo, hi, 300.0, true, true)
+        @test chars(-8.3, -1.7; exponentformat = "power") == 5
+        @test chars(-8.3, -1.7) == 4
+        @test chars(-8.3, -1.7; exponentformat = "e") == 4
+        @test chars(-8.3, -1.7; exponentformat = "none") == 11
+        @test chars(-8.3, -1.7; tickformat = ".1e") == 11
+        @test chars(-8.3, -1.7; dtick = "L0.5") == 11
+        @test chars(0.0, 5.2) == 4
+        # The estimate places the plot area, so an x title that fits beside a
+        # log axis of small values stays on one line (gallery
+        # optical_validation (d): the "0.000000001" estimate moved the axis
+        # right, and its title, 5 px inside the figure edge, was broken).
+        P(f) = _AX._cmn_plot(f)
+        text(f) = _AX._axes_title_text(_ax_axis(f, :xaxis))[1]
+        title = "width of the largest design in the whole set (nm)"
+        f = plot_scatter(collect(1.0:7.0), exp10.(collect(-8.0:-2.0)); yscale = "log")
+        relayout!(P(f); width = 350, height = 300)
+        xlabel!(f, title)
+        @test text(f) == title
+        # Narrower, it runs off the figure and is broken.
+        relayout!(P(f); width = 300)
+        _AX._finalize_figure!(f)
+        @test occursin(_AX._AXES_WRAP_BREAK, text(f))
+        @test _AX._axes_unwrap_title(text(f)) == title
+    end
+
     @testset "wave 5: tick values on a shared group and dates (Z29, Z42)" begin
         sf = subplots(1, 2; sync = false, shared_yaxes = true)
         plot_scatter!(sf, 1:3, [1.0, 10, 100]; row = 1, col = 1, yscale = "log")
