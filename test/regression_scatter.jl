@@ -1749,7 +1749,7 @@ end
 	@test row[:side] == "bottom" && row[:overlaying] == "x" && row[:matches] == "x"
 	@test row[:tickvals] == [2.0, 5.5]
 	@test row[:ticktext] == ["<br>g1", "<br>g2"]
-	@test row[:showline] == false && row[:tickcolor] == "rgba(0,0,0,0)"
+	@test row[:showline] == false && row[:tickcolor] == "rgba(0,0,0,0)" && row[:tickangle] == 0
 	@test get(row, :ticks, nothing) == get(_rsc_axis(f, :xaxis), :ticks, nothing)
 	@test _rsc_text(row[:title]) == "groups"
 	@test _rsc_axis(f, :xaxis)[:range] == [0, 7]

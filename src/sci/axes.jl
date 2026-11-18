@@ -1982,6 +1982,9 @@ function _axes_secondary_xaxis!(
 		primary_ticks isa AbstractString ? (fields[:ticks] = primary_ticks) : delete!(fields, :ticks)
 		fields[:tickcolor] = "rgba(0,0,0,0)"
 		fields[:showline] = false
+		# Horizontal: plotly.js tilts labels it finds close together, which
+		# would break the line offset above (render: optical_cividis (d)).
+		fields[:tickangle] = 0
 		# plotly.js reserves a title line below an axis whose title text is ""
 		# (render probe: a blank band under the row), so no title leaves the
 		# text unset.
@@ -2101,7 +2104,8 @@ cell, are not moved: leave room with `vertical_spacing`.
 
 Second label row: `side = :bottom` on a bottom primary axis draws no axis
 line and no tick marks; its labels sit one text line below the primary tick
-labels, which suits group captions under grouped ticks (`f = finv =
+labels (one line per line of the primary's tick labels at call time) and are
+never tilted, which suits group captions under grouped ticks (`f = finv =
 identity`, `ticks` at the group centres). Its `title` is drawn below that
 row, so give the axis title there and leave the primary's empty:
 
