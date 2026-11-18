@@ -401,10 +401,13 @@ mutable struct _FinAxisAcc
 	alo::Float64
 	ahi::Float64
 	scanned::Bool
+	# Quiver/streamline glyphs on the axis (traces carrying an anchor extent,
+	# D16): a group of glyphs without a field is padded on both sides (D13).
+	glyphs::Bool
 	# (index in `p.data`, field kind) of the visible traces on the axis.
 	traces::Vector{Tuple{Int, Union{Nothing, Symbol}}}
 end
-_FinAxisAcc() = _FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, true,
+_FinAxisAcc() = _FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, true, false,
 	Tuple{Int, Union{Nothing, Symbol}}[])
 
 # `extent` is the drawn extent, `anchor` the extent of the anchor points.
@@ -492,16 +495,19 @@ function _fin_collect_axes(p::Plot)
 		_fin_visible(trace) || continue
 		kind = _fin_field_kind(trace)
 		is_image = _fin_trace_type(trace) == "image"
+		is_glyph = false
 		xkey = _fin_axis_key(get(trace.fields, :xaxis, "x"))
 		ykey = _fin_axis_key(get(trace.fields, :yaxis, "y"))
 		for (letter, key) in (('x', xkey), ('y', ykey))
 			key === nothing && continue
 			acc = get!(accs, key) do
-				_FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, false,
+				_FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, false, false,
 					Tuple{Int, Union{Nothing, Symbol}}[])
 			end
 			kind === :tight && (acc.tight = true)
 			kind === :loose && (acc.loose = true)
+			kind === nothing && (is_glyph || (is_glyph = _fin_anchor_extent(trace, 'x', false) !== nothing ||
+				_fin_anchor_extent(trace, 'y', false) !== nothing)) && (acc.glyphs = true)
 			letter == 'y' && is_image && xkey !== nothing && (acc.image_x = xkey)
 			acc.unsupported && continue
 			if !(_fin_axis_type(layout, key) in ("-", "linear", "log"))
@@ -624,14 +630,19 @@ end
 # the fields (in log10 units on a log axis). Data units.
 function _fin_padded_extent(acc::_FinAxisAcc, islog::Bool)
 	lo, hi = acc.alo, acc.ahi
-	(isfinite(acc.flo) && isfinite(acc.fhi)) || return (lo, hi)
+	field = isfinite(acc.flo) && isfinite(acc.fhi)
+	# D13: quiver/streamline glyphs without a field are all overlay (their
+	# drawn extent, in `alo/ahi` by `_fin_sticky_updates!`), padded on both
+	# sides: plotly.js autoranges line traces without padding, which cuts the
+	# arrowheads at the frame.
+	(field || acc.glyphs) || return (lo, hi)
 	tol(v) = 1e-12 * max(abs(v), 1.0)
 	l(v) = islog ? log10(v) : v
 	span = l(hi) - l(lo)
 	span > 0 || return (lo, hi)
 	pad = _FIN_OVERLAY_PAD * span
-	lo_out = lo < acc.flo - tol(acc.flo)
-	hi_out = hi > acc.fhi + tol(acc.fhi)
+	lo_out = !field || lo < acc.flo - tol(acc.flo)
+	hi_out = !field || hi > acc.fhi + tol(acc.fhi)
 	new_lo = lo_out ? (islog ? exp10(log10(lo) - pad) : lo - pad) : lo
 	new_hi = hi_out ? (islog ? exp10(log10(hi) + pad) : hi + pad) : hi
 	return (new_lo, new_hi)
@@ -681,6 +692,7 @@ function _fin_sticky_updates!(updates::Dict{Symbol, Any}, p::Plot, accs = _fin_c
 			macc === nothing && continue
 			acc.tight |= macc.tight
 			acc.loose |= macc.loose
+			acc.glyphs |= macc.glyphs
 			acc.unsupported |= macc.unsupported
 			macc.image_x === nothing || (acc.image_x = macc.image_x)
 		end
@@ -689,18 +701,24 @@ function _fin_sticky_updates!(updates::Dict{Symbol, Any}, p::Plot, accs = _fin_c
 		mode, reversed = _fin_axis_mode(root_axis, clip, islog, implicit_reversed)
 		mode === :explicit && continue
 		# Extents are scanned only for the groups that can be sticky (Z81).
-		if acc.tight && !acc.loose && !acc.unsupported
+		if (acc.tight || acc.glyphs) && !acc.loose && !acc.unsupported
 			for member in members
 				macc = get(accs, member, nothing)
 				macc === nothing && continue
 				acc.unsupported |= macc.unsupported
+				acc.lo = min(acc.lo, macc.lo)
+				acc.hi = max(acc.hi, macc.hi)
 				acc.alo = min(acc.alo, macc.alo)
 				acc.ahi = max(acc.ahi, macc.ahi)
 				acc.flo = min(acc.flo, macc.flo)
 				acc.fhi = max(acc.fhi, macc.fhi)
 			end
+			# Glyphs without a field: the view is what everything draws (D13).
+			if !acc.tight
+				acc.alo, acc.ahi = acc.lo, acc.hi
+			end
 		end
-		sticky = acc.tight && !acc.loose && !acc.unsupported &&
+		sticky = (acc.tight || acc.glyphs) && !acc.loose && !acc.unsupported &&
 			isfinite(acc.alo) && isfinite(acc.ahi) && acc.alo < acc.ahi &&
 			(!islog || acc.alo > 0)
 		if sticky
@@ -1716,94 +1734,35 @@ end
 # W5: axis titles longer than the figure
 # ---------------------------------------------------------------------------
 
-# Line break `_fin_wrap_axis_titles!` writes. A user's line breaks are `<br>`
-# (`_label` turns "\n" into it); plotly.js breaks lines at both. Every pass
-# first joins the lines at this break again, then wraps for the current size.
-const _FIN_WRAP_BREAK = "<br />"
-# Px a wrapped title keeps from the figure edges, and the mean glyph width
-# (font sizes) the wrap assumes: a little above DejaVu Sans' (render probe
-# W5: 26 characters of the optical_infra y title at 13 px drew 155 px long,
-# 0.46 em), so a wrapped line fits.
+# W5: the axes owner decides where a long axis title breaks
+# (`_axes_title_wrap_updates!`, src/sci/axes.jl; `_axes_finalize_updates!` runs
+# in every finalize pass) and marks its breaks `_AXES_WRAP_BREAK`. What a
+# wrapped title needs from the layout is ours: plotly.js 2.35.2 (axes.js
+# drawTitle) moves a left or top title out by its extra lines only when
+# `title.standoff` is set (without it they run into the tick labels), and its
+# automargin does not count the extra lines in full (`_fin_wrap_margins!`).
+# Px a wrapped title keeps from the figure edges.
 const _FIN_WRAP_PAD = 4.0
-const _FIN_WRAP_CHAR_EM = 0.55
-# Markup other than line breaks: such a title is left as written.
-const _FIN_WRAP_MARKUP = r"<(?!br\s*/?>)"i
 
-# `line` broken between words into lines of at most `max_chars` characters
-# (a longer word keeps a line of its own).
-function _fin_wrap_line(line::AbstractString, max_chars::Int)
-	_fin_text_chars(line) <= max_chars && return String(line)
-	lines = String[]
-	current = ""
-	for word in split(line, ' '; keepempty = false)
-		candidate = isempty(current) ? String(word) : current * " " * word
-		if isempty(current) || _fin_text_chars(candidate) <= max_chars
-			current = candidate
-		else
-			push!(lines, current)
-			current = String(word)
-		end
-	end
-	isempty(current) || push!(lines, current)
-	return join(lines, _FIN_WRAP_BREAK)
-end
+# Whether the title of `axis` carries a line break of the axes owner's wrap.
+_fin_title_is_wrapped(axis) = occursin(_AXES_WRAP_BREAK, _fin_title_text(axis))
 
-# `text` with every line (between the user's breaks, which are kept as
-# written) wrapped at `max_chars`.
-function _fin_wrap_title(text::AbstractString, max_chars::Int)
-	out = IOBuffer()
-	start = 1
-	for m in eachmatch(_FIN_LINE_BREAK, text)
-		print(out, _fin_wrap_line(SubString(text, start, prevind(text, m.offset)), max_chars), m.match)
-		start = m.offset + ncodeunits(m.match)
-	end
-	print(out, _fin_wrap_line(SubString(text, start), max_chars))
-	return String(take!(out))
-end
-
-# W5: a plain axis title longer than the figure can show along its axis
-# (centred on the axis, `_FIN_WRAP_PAD` from the figure edges, figure
-# `W` x `H` px) is broken into lines between words; a title that fits again
-# (a larger export, a shorter text) is joined again. Math (`$…$`) and styled
-# titles are left as written.
+# W5: `title.standoff` follows the wrap. Written for titles with the axes
+# owner's breaks (when the user set none) and removed again, when it is ours,
+# once the title is on one line. On export copies (`size` given) a wrapped
+# title at the left or bottom paper edge also gets the margin its lines need.
 function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 	layout = ctx.p.layout
-	font = _fin_font_size(layout)
-	# The margins with the push of the axis labels (a `tight_layout!` margin
-	# of 4 px puts the plot area where the labels end, not at 4 px:
-	# optical_cividis wrapped a title that fits).
-	m = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
-	Wp, Hp = max(W - m.l - m.r, 1.0), max(H - m.t - m.b, 1.0)
 	updates = Dict{Symbol, Any}()
 	wrapped_keys = Symbol[]
 	for (key, axis) in layout.fields
 		(key isa Symbol && _fin_is_axis_key(key)) || continue
-		_cmn_mapping_get(axis, :visible) === false && continue
-		text = _fin_title_text(axis)
-		(isempty(text) || occursin('$', text) || occursin(_FIN_WRAP_MARKUP, text)) && continue
-		plain = replace(text, _FIN_WRAP_BREAK => " ")
-		size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
-		vertical = String(key)[1] == 'y'
-		d = vertical ? _cmn_y_axis_domain(layout, key) : _fin_domain(layout, key)
-		centre = vertical ? m.b + (d[1] + d[2]) / 2 * Hp : m.l + (d[1] + d[2]) / 2 * Wp
-		extent = vertical ? H : W
-		room = 2 * min(centre, extent - centre) - 2 * _FIN_WRAP_PAD
-		max_chars = max(1, floor(Int, room / (_FIN_WRAP_CHAR_EM * size)))
-		wrapped = _fin_wrap_title(plain, max_chars)
-		wrapped == plain || push!(wrapped_keys, key)
-		wrapped == text && continue
 		title = _cmn_mapping_get(axis, :title)
-		if title isa AbstractString
-			updates[Symbol(key, :_title)] = Dict{Symbol, Any}(:text => wrapped)
-			wrapped == plain || (updates[Symbol(key, :_title_standoff)] = _FIN_WRAP_STANDOFF)
-			continue
-		end
-		updates[Symbol(key, :_title_text)] = wrapped
-		# plotly.js 2.35.2 (axes.js drawTitle) moves a left or top title out
-		# by its extra lines only when `title.standoff` is set; without it
-		# they run into the tick labels. Ours goes with our breaks.
-		standoff = _cmn_mapping_get(title, :standoff)
-		if wrapped != plain
+		title === nothing && continue
+		wrapped = _fin_title_is_wrapped(axis)
+		standoff = title isa AbstractString ? nothing : _cmn_mapping_get(title, :standoff)
+		if wrapped
+			push!(wrapped_keys, key)
 			standoff === nothing && (updates[Symbol(key, :_title_standoff)] = _FIN_WRAP_STANDOFF)
 		elseif _fin_isfinite_real(standoff) && standoff == _FIN_WRAP_STANDOFF
 			updates[Symbol(key, :_title_standoff)] = nothing
@@ -1813,7 +1772,9 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 	# Export copies only (`size` given): a margin grown on the figure itself
 	# would outlive the wrap (a later font or size change joins the lines
 	# again; composite_2x2 kept a 155 px left margin).
-	ctx.size === nothing && return wrote
+	(ctx.size === nothing || isempty(wrapped_keys)) && return wrote
+	m = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
+	Hp = max(H - m.t - m.b, 1.0)
 	return _fin_wrap_margins!(ctx, accs, wrapped_keys, Hp) || wrote
 end
 
@@ -2600,6 +2561,70 @@ function _room_label_evidence(plan::_RoomPlan, a::_RoomArea, side::Symbol)
 	return shrink <= limit + 2.0
 end
 
+# The domains the room solve wrote, kept in `layout.meta` under
+# `_ROOM_RECORD_KEY` as `area key => [x0, x1, y0, y1]`: a domain that still
+# equals its record is PlotlySupply's and is given back when the room is no
+# longer needed (a font change after labels shrank), also when no decoration
+# or label estimate of today proves it; one the user changed is theirs.
+const _ROOM_RECORD_KEY = Symbol("plotlysupply:room")
+
+function _room_record(layout::Layout)
+	meta = get(layout.fields, :meta, nothing)
+	raw = meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute ? _cmn_mapping_get(meta, _ROOM_RECORD_KEY) : nothing
+	raw isa AbstractDict || return Dict{String, Vector{Float64}}()
+	out = Dict{String, Vector{Float64}}()
+	for (k, v) in raw
+		(v isa AbstractVector && length(v) == 4 && all(_fin_isfinite_real, v)) || continue
+		out[String(k)] = Float64.(v)
+	end
+	return out
+end
+
+_room_box_vector(box::_RoomBox) = Float64[box[1][1], box[1][2], box[2][1], box[2][2]]
+
+function _room_recorded(plan::_RoomPlan, a::_RoomArea)
+	rec = get(_room_record(plan.layout), String(a.key), nothing)
+	rec === nothing && return false
+	return all(isapprox.(rec, _room_box_vector(a.current); atol = 1e-9))
+end
+
+# Record the domains this pass wrote in `layout.meta` (only our key; the
+# user's own `meta` is never touched). The record is bookkeeping, written
+# straight into the layout (it needs no redraw: plotly.js ignores it). A
+# `meta` that is not a mapping is the user's: nothing is recorded then, and
+# the domains are only given back with the evidence of the labels and
+# decorations. Returns whether the record changed.
+function _room_record_write!(plan::_RoomPlan)
+	layout = plan.layout
+	meta = get(layout.fields, :meta, nothing)
+	holder = meta isa PlotlyBase.PlotlyAttribute ? meta.fields : meta
+	(holder === nothing || holder isa AbstractDict) || return false
+	record = _room_record(layout)
+	new = copy(record)
+	same(u, v) = all(isapprox.(u, v; atol = 1e-9))
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.managed && !a.frozen && a.ref !== nothing) || continue
+		name = String(a.key)
+		ref = _room_box_vector(a.ref)
+		if a.final != a.current
+			same(_room_box_vector(a.final), ref) ? delete!(new, name) : (new[name] = _room_box_vector(a.final))
+		elseif haskey(new, name) && (same(new[name], ref) || !same(new[name], _room_box_vector(a.current)))
+			delete!(new, name)
+		end
+	end
+	new == record && return false
+	if isempty(new)
+		holder === nothing && return false
+		delete!(holder, _ROOM_RECORD_KEY)
+		isempty(holder) && delete!(layout.fields, :meta)
+	else
+		holder === nothing && (holder = Dict{Any, Any}(); layout.fields[:meta] = holder)
+		holder[_ROOM_RECORD_KEY] = Dict{Any, Any}(Symbol(name) => box for (name, box) in new)
+	end
+	return true
+end
+
 # Px from the grid edge of `a` on `side` to the neighbours `keys`, an
 # equal-aspect neighbour counted from where its fit drew it (`current`; a fit
 # that leaves slack ends short of its grid edge).
@@ -2751,7 +2776,7 @@ function _room_solve!(plan::_RoomPlan)
 			ref_edge = _room_edge(a.ref, side)
 			cur_edge = _room_edge(a.current, side)
 			a.writable[side] = abs(cur_edge - ref_edge) <= 1e-9 || _room_evidence(plan, a, side) ||
-				_room_label_evidence(plan, a, side)
+				_room_label_evidence(plan, a, side) || _room_recorded(plan, a)
 			sign = side === :left || side === :bottom ? 1.0 : -1.0
 			edges[side] = a.writable[side] ? ref_edge + sign * a.room[side] / _room_px(plan, side) : cur_edge
 		end
@@ -2865,7 +2890,8 @@ function _room_build(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspec
 			_room_requests!(plan, Val(owner))
 		end
 		_room_set_refs!(plan)
-		(isempty(plan.requests) && isempty(plan.vacated) && !_room_labels_overflow(plan)) && return plan
+		(isempty(plan.requests) && isempty(plan.vacated) && !_room_labels_overflow(plan) &&
+			!any(a -> a.managed && _room_recorded(plan, a), values(plan.areas))) && return plan
 		for _ in 1:4
 			_room_solve!(plan)
 			_room_assign_slots!(plan)
@@ -2929,6 +2955,7 @@ function _room_write_domains!(plan::_RoomPlan)
 			end
 		end
 	end
+	_room_record_write!(plan) && (plan.wrote = true)
 	return plan
 end
 
@@ -3388,21 +3415,21 @@ end
 
 # ---------------------------------------------------------------------------
 # Grid titles (Z20): `subplots(...; x_title, y_title)` draws them as paper
-# annotations named `plotlysupply:grid_title:x` (below the bottom row) and
-# `plotlysupply:grid_title:y` (left of the left column, rotated -90 deg).
+# annotations named `plotlysupply:x_title` (below the bottom row) and
+# `plotlysupply:y_title` (left of the left column, rotated -90 deg); the names
+# are subplots-verbs' (Z60).
 # Each takes a `:figure` request on its side, nearest the axes: it is placed
 # past the outermost axis labels on that paper edge, and the margin grows to
 # hold it (annotations do not push plotly's automargin).
 # ---------------------------------------------------------------------------
 
-const _FIN_GRID_TITLE_PREFIX = "plotlysupply:grid_title:"
+const _FIN_GRID_TITLE_NAMES = Dict("plotlysupply:x_title" => "x", "plotlysupply:y_title" => "y")
 
 # "x" / "y" for a grid title annotation, else `nothing`.
 function _fin_grid_title_letter(item)
 	name = _cmn_mapping_get(item, :name)
-	(name isa AbstractString && startswith(name, _FIN_GRID_TITLE_PREFIX)) || return nothing
-	letter = name[(ncodeunits(_FIN_GRID_TITLE_PREFIX) + 1):end]
-	return letter in ("x", "y") ? letter : nothing
+	name isa AbstractString || return nothing
+	return get(_FIN_GRID_TITLE_NAMES, String(name), nothing)
 end
 
 function _room_requests!(plan, ::Val{:grid_titles})
