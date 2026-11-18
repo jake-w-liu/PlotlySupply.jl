@@ -881,11 +881,13 @@ _v5_width(p::Plot, key::Symbol) = (d = _v4_fields(_v5_scene(p, key)[:domain]); d
 _v5_tickfont(p::Plot, key::Symbol, axis::Symbol) = _v4_fields(_v5_axis(p, key, axis)[:tickfont])[:size]
 _v5_scene_sf(rows, cols) = subplots(rows, cols; sync = false, specs = fill(Spec(kind = "scene"), rows, cols))
 function _v5_with_style(f, style)
+	previous = get_default_style()
 	set_default_style!(style)
 	try
 		return f()
 	finally
-		set_default_style!()
+		# `set_default_style!()` keeps the active style; restore the one before.
+		set_default_style!(previous)
 	end
 end
 

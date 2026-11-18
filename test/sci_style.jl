@@ -549,12 +549,13 @@ using PlotlySupply
 			title = sd(fig.layout.fields[:title])
 			@test title[:text] == "T"
 			@test title[:automargin] === true
-			@test sd(title[:pad]) == Dict(:t => 4)
+			# The constructor's title placement (Z28, `title!`) already has `pad.t = 10`: a pad
+			# of the figure's own is kept, `tight_layout!` only fills one that is missing.
+			@test sd(title[:pad])[:t] == 10
 
 			tight_layout!(fig; pad = 2.5)
 			@test sd(fig.layout.fields[:margin])[:l] == 2.5
-			# An explicit title pad set by the user (here by the previous call) is kept.
-			@test sd(sd(fig.layout.fields[:title])[:pad]) == Dict(:t => 4)
+			@test sd(sd(fig.layout.fields[:title])[:pad])[:t] == 10
 			tight_layout!(fig; pad = 0)
 			@test sd(fig.layout.fields[:margin])[:b] == 0
 
@@ -598,13 +599,23 @@ using PlotlySupply
 			# Subplot titles above the plot area: their height, and the title's.
 			sf = subplots(1, 2; sync = false, title = "", subplot_titles = ["a" "b"])
 			subplot_title_size = sd(sd(sf.layout.fields[:annotations][1])[:font])[:size]
-			annotation_room = ceil(subplot_title_size * 1.3 + 4)
 			@test tight_layout!(sf) === sf
-			@test sd(sf.layout.fields[:margin]) == Dict(:l => 4, :r => 4, :t => 4 + annotation_room, :b => 4)
+			sf_margin = sd(sf.layout.fields[:margin])
+			@test (sf_margin[:l], sf_margin[:r], sf_margin[:b]) == (4, 4, 4)
+			# The room above the cells is the `:grid_titles` room provider's (D12; the
+			# subplot titles are named `plotlysupply:title:r:c`): at least the title text
+			# and its frame above the pad, and no more than a gap of a few px beyond.
+			title_text_height = PS._text_extent("a", subplot_title_size)[2]
+			@test 4 + title_text_height + 4 <= sf_margin[:t] <= 4 + title_text_height + 4 + 12
 			titled = subplots(1, 2; sync = false, title = "Figure", subplot_titles = ["a" "b"])
 			tight_layout!(titled)
-			title_room = ceil(round(1.4 * 12) * 1.3 + 4)
-			@test sd(titled.layout.fields[:margin])[:t] == 4 + annotation_room + title_room
+			# The figure title (text plus its `pad.t = 10`) comes on top of the panel titles.
+			figure_title_height = PS._tight_title_height(
+				titled.layout.fields[:title],
+				key -> get(titled.layout.fields, key, nothing),
+				12.0,
+			)
+			@test sd(titled.layout.fields[:margin])[:t] >= sf_margin[:t] + figure_title_height
 			@test_throws ArgumentError tight_layout!(titled; pad = -1)
 
 			# G37: two-line TeX panel titles are measured as typeset. mathtext
