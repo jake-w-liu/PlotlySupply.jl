@@ -2910,6 +2910,7 @@ function _room_solve!(plan::_RoomPlan)
 			group[g] = max(get(group, g, 0.0), room)
 		end
 	end
+	_room_equalize_coloraxis!(plan, group)
 	for key in plan.area_order
 		a = plan.areas[key]
 		for side in _ROOM_SIDES
@@ -2946,6 +2947,33 @@ function _room_solve!(plan::_RoomPlan)
 		a.final = ((edges[:left], edges[:right]), (edges[:bottom], edges[:top]))
 	end
 	return plan
+end
+
+# Q18: a colour axis shared by several plot areas has its bar beyond the
+# union of them, and only the areas at that edge give up room for it; where
+# that room is taken inside the grid (the bar sits in a gap before the next
+# cell) the other areas of the axis give up the same, so cells showing one
+# colour scale are drawn alike (two identical scene cells differed by the
+# bar's width). A bar that goes to the margin takes nothing from any area.
+function _room_equalize_coloraxis!(plan::_RoomPlan, group::Dict{Tuple{Symbol, Float64}, Float64})
+	for entry in values(plan.bar_items)
+		(hasproperty(entry, :edge_areas) && entry.item.coloraxis !== nothing && !entry.keep_default) || continue
+		side = entry.side
+		edge_key(k) = (side, round(_room_edge(plan.areas[k].ref, side); digits = 9))
+		room = 0.0
+		for k in entry.edge_areas
+			plan.areas[k].ref === nothing && continue
+			room = max(room, get(group, edge_key(k), 0.0))
+		end
+		room > 0 || continue
+		for k in entry.areas
+			k in entry.edge_areas && continue
+			a = plan.areas[k]
+			(_room_flexible(a) && !(a.aspect && side === :right)) || continue
+			group[edge_key(k)] = max(get(group, edge_key(k), 0.0), room)
+		end
+	end
+	return group
 end
 
 # The slot of every request: edge of the area's final domain, offset past
@@ -3813,6 +3841,7 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	# (see `_FinAxes`).
 	accs = _fin_collect_axes(p)
 	_fin_sticky_updates!(updates, p, accs)
+	_fin_domain_margin_updates!(updates, p, _fin_figure_size(ctx, p.layout)[2])
 	# Log-axis tick labels and long axis titles at this figure size
 	# (W7/Z70/W5, src/sci/axes.jl).
 	_axes_finalize_updates!(updates, p, _fin_figure_size(ctx, p.layout), accs)
@@ -3837,6 +3866,43 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	# export size when there is one (scene3d.jl; layout writes only).
 	_s3_finalize_scenes!(p, ctx.size) && (wrote = true)
 	return wrote
+end
+
+# Q26: polar and ternary subplots draw their tick labels outside the disc or
+# triangle, where plotly's automargin does not count them, so a margin of a
+# few px (a journal style's) clips them and lets a title overlap them. The
+# style gives the margin that room when it is applied
+# (`_style_domain_subplot_margin`); a title or a larger font added later
+# needs it again: every side of an explicit margin that is smaller than one
+# line of tick text plus offset (at the top also the title block) is grown.
+# Margins only grow, and a figure without a margin of its own keeps plotly's
+# generous default.
+function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height::Float64)
+	fields = p.layout.fields
+	any(key -> occursin(r"^(polar|ternary)\d*$", String(key)), keys(fields)) || return updates
+	margin = get(fields, :margin, nothing)
+	margin === nothing && return updates
+	lookup(key) = get(fields, key, nothing)
+	root = _tight_root_font_size(lookup)
+	tick = root
+	for (key, axis) in fields
+		occursin(r"^(polar|ternary)\d*$", String(key)) || continue
+		for name in (:angularaxis, :aaxis, :baxis, :caxis)
+			size = _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, 0.0)
+			size > tick && (tick = size)
+		end
+	end
+	label_room = ceil(1.2 * tick + 8)
+	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
+	cap = _TIGHT_MAX_MARGIN_FRACTION * height
+	for (side, room) in ((:l, label_room), (:r, label_room), (:b, label_room),
+			(:t, label_room + (title_room > 0 ? title_room + 4 : 0)))
+		have = _cmn_mapping_get(margin, side)
+		_fin_isfinite_real(have) || continue
+		want = min(room, cap)
+		want > have + 1e-9 && (updates[Symbol(:margin_, side)] = _style_number(want))
+	end
+	return updates
 end
 
 # Passes of `_fin_fit!` per finalize run; a figure converges in two or three.

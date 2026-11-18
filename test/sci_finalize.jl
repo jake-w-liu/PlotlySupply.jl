@@ -1521,3 +1521,78 @@ end
 		end
 	end
 end
+
+@testset "Q18: cells of one colour axis give up the same room for a bar between grid cells" begin
+	xs = collect(range(-2, 2; length = 20)); ys = collect(range(-2, 2; length = 20))
+	Z = [exp(-(x^2 + y^2)) * cos(2x) for y in ys, x in xs]
+	sf = subplots(1, 3; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene") Spec()])
+	for c in 1:2
+		plot_surface!(sf, xs, ys, Z .* c; row = 1, col = c, xlabel = "x", ylabel = "y", zlabel = "z",
+			shared_coloraxis = true, crange = (-2, 2))
+	end
+	plot_scatter!(sf, xs, Z[10, :]; row = 1, col = 3)
+	figsize!(sf, 900, 350)
+	layout = sf.plot.layout
+	d1 = _SFN._layout_subplot_domain(layout, :scene)
+	d2 = _SFN._layout_subplot_domain(layout, :scene2)
+	w1, w2 = d1[1][2] - d1[1][1], d2[1][2] - d2[1][1]
+	@test w1 ≈ w2 atol = 1e-9
+	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
+	# Narrower than the grid cell (the bar sits in the gap before cell 3), at the cell's left edge.
+	gw = _SFN._layout_subplot_domain(grid, :scene)
+	@test w1 < gw[1][2] - gw[1][1] - 1e-3
+	@test d1[1][1] ≈ gw[1][1] atol = 1e-9
+	@test d2[1][1] ≈ _SFN._layout_subplot_domain(grid, :scene2)[1][1] atol = 1e-9
+	# the bar is right of the second scene, left of the third cell
+	bar = _sfn_fields(_sfn_fields(layout.fields[:coloraxis])[:colorbar])
+	@test d2[1][2] < bar[:x] < _SFN._layout_axis_domain(layout, :xaxis)[1]
+	@test _SFN._finalize_figure!(sf) === false
+	# The bar leaves: both give the room back.
+	relayout!(sf.plot; coloraxis_showscale = false)
+	_SFN._finalize_figure!(sf)
+	# (the bar is gone from the plan only with the coloraxis; either both are back or both stay equal)
+	e1 = _SFN._layout_subplot_domain(layout, :scene); e2 = _SFN._layout_subplot_domain(layout, :scene2)
+	@test (e1[1][2] - e1[1][1]) ≈ (e2[1][2] - e2[1][1]) atol = 1e-9
+	# At the paper edge the bar goes to the margin: no cell is narrowed for it.
+	sg = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene")])
+	for c in 1:2
+		plot_surface!(sg, xs, ys, Z .* c; row = 1, col = c, shared_coloraxis = true, crange = (-2, 2))
+	end
+	figsize!(sg, 800, 400)
+	f1 = _SFN._layout_subplot_domain(sg.plot.layout, :scene)
+	f2 = _SFN._layout_subplot_domain(sg.plot.layout, :scene2)
+	@test (f1[1][2] - f1[1][1]) ≈ (f2[1][2] - f2[1][1]) atol = 1e-9
+end
+
+@testset "Q26: a title added later to a polar figure under a small style margin gets its margin" begin
+	th = collect(0:10:350)
+	r = 1 .+ 0.3 .* cos.(deg2rad.(3 .* th))
+	with_style(:ieee) do
+		f = plot_scatterpolar(th, r)
+		m0 = _sfn_fields(f.layout.fields[:margin])
+		@test m0[:t] == m0[:l]                                  # no title yet: one label of room
+		title!(f, "A polar pattern with a long title")
+		m1 = _sfn_fields(f.layout.fields[:margin])
+		root = _SFN._tight_root_font_size(k -> get(f.layout.fields, k, nothing))
+		want = ceil(1.2 * root + 8) + ceil(_SFN._tight_title_height(f.layout.fields[:title], k -> get(f.layout.fields, k, nothing), root)) + 4
+		@test m1[:t] >= want - 1e-9
+		@test m1[:l] == m0[:l] && m1[:b] == m0[:b] && m1[:r] == m0[:r]
+		@test _SFN._finalize_figure!(f) === false
+		# A smaller title does not shrink it again (margins only grow).
+		title!(f, "T")
+		@test _sfn_fields(f.layout.fields[:margin])[:t] >= m1[:t]
+	end
+	# Larger tick fonts after construction grow every side.
+	with_style(:ieee) do
+		g = plot_scatterpolar(th, r)
+		m0 = _sfn_fields(g.layout.fields[:margin])
+		relayout!(g; font_size = 30)
+		_SFN._finalize_figure!(g)
+		m1 = _sfn_fields(g.layout.fields[:margin])
+		@test all(m1[s] > m0[s] for s in (:l, :r, :b, :t))
+	end
+	# No margin of its own (plotly's generous default): nothing is written.
+	h = plot_scatterpolar(th, r; title = "Long title here")
+	@test !haskey(h.layout.fields, :margin) || !haskey(_sfn_fields(h.layout.fields[:margin]), :t) ||
+		_sfn_fields(h.layout.fields[:margin])[:t] >= 60
+end
