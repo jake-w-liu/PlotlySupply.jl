@@ -727,6 +727,14 @@ end
 # linear/log/category axes, anything `_checked_range` accepted (date strings,
 # dates, numbers) on date and autotyped axes.
 function _require_range_bound_types(checked, axis_type::AbstractString, who::AbstractString, name::AbstractString)
+	if axis_type == "-" || axis_type == "date"
+		# An autotyped or date axis takes numbers and date values; anything
+		# else (("a", "b")) is an error here, not a silently broken axis.
+		for b in checked
+			(b === nothing || b isa Real) || _date_bound_ms(b, who, name)
+		end
+		return nothing
+	end
 	axis_type in _NUMERIC_RANGE_AXIS_TYPES || return nothing
 	all(b -> b === nothing || b isa Real, checked) ||
 		throw(ArgumentError(

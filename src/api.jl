@@ -12725,6 +12725,42 @@ function _scat_angle_in_sector(a::Real, sector)
 	return mod(Float64(a) - lo, 360) <= hi - lo
 end
 
+# A one-sided radial limit of `rrange` (exactly one bound `nothing`, the other
+# a finite non-Bool number): the 2-element vector, else `nothing` (automatic or
+# two-sided: `_scat_checked_range` decides those).
+function _scat_polar_radial_limit(rrange, who::AbstractString)
+	_scat_is_unset_range(rrange) && return nothing
+	(rrange isa AbstractVector || rrange isa Tuple) && length(rrange) == 2 || return nothing
+	count(b -> b === nothing, rrange) == 1 || return nothing
+	checked = _checked_range(rrange, who, "rrange"; partial = true)
+	checked === nothing && return nothing
+	fixed = checked[1] === nothing ? checked[2] : checked[1]
+	fixed isa Real || throw(ArgumentError(
+		"$(who): `rrange` bounds must be numbers; got $(repr(Tuple(checked))).",
+	))
+	return checked
+end
+
+# The fixed bound of a one-sided radial limit in plotly's units (log10 on a
+# logarithmic radial axis, where it must be positive).
+function _scat_polar_limit_value(polar, limit, who::AbstractString)
+	radial = _cmn_mapping_get(polar, :radialaxis)
+	_cmn_mapping_get(radial, :type) == "log" || return limit
+	all(b -> b === nothing || b > 0, limit) || throw(ArgumentError(
+		"$(who): `rrange` bounds on a logarithmic radial axis are data values and " *
+		"must be positive; got $(repr(Tuple(limit))).",
+	))
+	return Any[b === nothing ? nothing : log10(Float64(b)) for b in limit]
+end
+
+# Remove the one-sided limit of the radial axis (a new range of any kind
+# replaces it).
+function _scat_polar_clear_limit!(fig)
+	radial = _cmn_mapping_get(_scat_polar_layout(fig), :radialaxis)
+	_cmn_mapping_delete!(radial, (:autorangeoptions,))
+	return nothing
+end
+
 # The radial range `checked` (data units) as plotly stores it on the radial
 # axis of the polar subplot `polar` (a layout mapping or `nothing`): log10
 # exponents when that axis is logarithmic.
@@ -12803,7 +12839,11 @@ function _scatterpolar_impl!(
 	)
 	marks = _scat_series_markevery(markevery, nested, lengths, who)
 	sector = _scat_checked_range(trange, who, "trange")
-	radial = _scat_checked_range(rrange, who, "rrange")
+	# D11: the radial range may be one-sided, `(0, nothing)` / `(nothing, 5)`
+	# (plotly.js honours `autorangeoptions` on the radial axis, also in
+	# savefig); the angular sector is always two-sided.
+	radial_limit = _scat_polar_radial_limit(rrange, who)
+	radial = radial_limit === nothing ? _scat_checked_range(rrange, who, "rrange") : nothing
 	for (bounds, name) in ((sector, "trange"), (radial, "rrange"))
 		bounds === nothing || all(bound -> bound isa Real, bounds) || throw(ArgumentError(
 			"$(who): `$(name)` bounds must be numbers; got $(repr(Tuple(bounds))).",
@@ -12811,6 +12851,7 @@ function _scatterpolar_impl!(
 	end
 	polar_layout = _scat_polar_layout(fig)
 	radial === nothing || (radial = _scat_polar_range_value(polar_layout, radial, who))
+	radial_limit === nothing || (radial_limit = _scat_polar_limit_value(polar_layout, radial_limit, who))
 	(rlabel_angle === nothing || (!(rlabel_angle isa Bool) && isfinite(rlabel_angle))) ||
 		throw(ArgumentError(
 			"$(who): `rlabel_angle` must be a finite angle in degrees or nothing; got " *
@@ -12881,7 +12922,16 @@ function _scatterpolar_impl!(
 	end
 	_scat_apply_style!(fig, (length(data) - n + 1):length(data); explicit = _scat_mode_explicit(mode))
 	_apply_figure_title!(fig, title)
-	radial === nothing || relayout!(fig; polar_radialaxis_range = radial)
+	if radial !== nothing
+		# A full range replaces an earlier one-sided limit.
+		_scat_polar_clear_limit!(fig)
+		relayout!(fig; polar_radialaxis_range = radial)
+	elseif radial_limit !== nothing
+		_scat_polar_clear_limit!(fig)
+		relayout!(fig; polar_radialaxis_autorange = true)
+		radial_limit[1] === nothing || relayout!(fig; polar_radialaxis_autorangeoptions_minallowed = radial_limit[1])
+		radial_limit[2] === nothing || relayout!(fig; polar_radialaxis_autorangeoptions_maxallowed = radial_limit[2])
+	end
 	sector === nothing || relayout!(fig; polar_sector = sector)
 	axis_angle === nothing || relayout!(fig; polar_radialaxis_angle = axis_angle)
 	default_nticks && relayout!(fig; polar_radialaxis_nticks = _SCAT_POLAR_RADIAL_NTICKS)
@@ -12949,9 +12999,12 @@ Shared:
   `[0, 0]`, `nothing` or `[nothing, nothing]`: the full circle.
 - `rrange = [0, 0]`: radial axis range `(lo, hi)` in data units (positive on
   a logarithmic radial axis); `[0, 0]`, `nothing` or `[nothing, nothing]`:
-  automatic. Both ranges take two different, non-`Bool` numbers; a polar
-  sector or radial range always gives both bounds (a one-sided limit such as
-  `(nothing, 2)` is an `ArgumentError`).
+  automatic. Both ranges take two different, non-`Bool` numbers. `rrange`
+  may also be a one-sided limit, `(0, nothing)` or `(nothing, 5)`: that end
+  is fixed and the other follows the data (`autorange` with
+  `autorangeoptions.minallowed`/`maxallowed`, which `savefig` keeps); the
+  angular sector `trange` always gives both bounds (`(nothing, 2)` is an
+  `ArgumentError`).
 - `rlabel_angle = nothing`: angle (degrees of the drawing, as `trange`) of
   the radial axis that carries the radial tick labels (plotly
   `polar.radialaxis.angle`). `nothing`: 22.5° on a new full-circle subplot
@@ -13770,6 +13823,7 @@ function _field2d_view_extent(fig, members, islog::Bool)
 	acc = _FinAxisAcc()      # glyphs by their anchors (a group with a field)
 	drawn = _FinAxisAcc()    # every trace by what it draws (glyphs alone)
 	drawn_ok = true          # every drawn extent was computed
+	glyphs = false           # some trace carries anchors (quiver/streamline glyphs)
 	cache = Dict{Any, Union{Nothing, String}}()
 	for trace in p.data
 		trace isa GenericTrace || continue
@@ -13782,7 +13836,7 @@ function _field2d_view_extent(fig, members, islog::Bool)
 		else
 			extent = _fin_trace_extent(trace, letter, islog)
 			anchors = kind === nothing ? _field2d_anchor_extent(trace, letter, islog) : nothing
-			anchors === nothing || (drawn.glyphs = true)
+			anchors === nothing || (glyphs = true)
 			anchored = anchors === nothing ? extent : anchors
 		end
 		anchored === :unsupported && return nothing
@@ -13793,7 +13847,7 @@ function _field2d_view_extent(fig, members, islog::Bool)
 			_fin_acc_extend!(drawn, extent, kind !== nothing)
 		end
 	end
-	view = (isfinite(acc.flo) && isfinite(acc.fhi)) ? acc : (drawn.glyphs && drawn_ok) ? drawn : nothing
+	view = (isfinite(acc.flo) && isfinite(acc.fhi)) ? acc : (glyphs && drawn_ok) ? drawn : nothing
 	view === nothing && return nothing
 	for member in members
 		extent = _fin_layout_item_extent(layout, _fin_axis_ref(member), letter, islog)
