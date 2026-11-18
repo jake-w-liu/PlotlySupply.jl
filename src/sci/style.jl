@@ -1226,6 +1226,15 @@ Returns the value of `f()`. The active style is a global setting, not a
 task-local one: figures created concurrently by other tasks while `f` runs also
 see `style`.
 
+A figure carries the style it was built under (every style but the 1.x
+`:default` look is recorded, without the template, in
+`layout.meta.plotlysupply.style`; it survives JSON round trips): mutators,
+`savefig` and the layout engine read that record instead of the active style,
+so `fig = with_style(:ieee) do ... end` followed, after the block, by more
+calls on `fig` gives what the same calls give inside it. A figure without a
+record (built under `:default`) that a mutator changes inside a `with_style`
+block adopts that style from then on.
+
 # Example
 ```julia
 fig = with_style(:publication; fontsize = 12) do
@@ -1841,6 +1850,19 @@ function _style_trace_default_updates(trace, defaults, position::Integer, explic
 	return updates
 end
 
+# `meta` (a layout.meta value) with the record of `style` added under
+# `plotlysupply.style` (and the log tick rule under `plotlysupply.log_ticks`,
+# kept for readers of 2.0 betas); `nothing` when `style` is the default look
+# (nothing to record) or `meta` is not a container the record can live in.
+function _style_meta_with_record(meta, style::PlotStyle)
+	record = _style_record(style)
+	isempty(record) && return nothing
+	(meta === nothing || meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute) || return nothing
+	own = Dict{Symbol, Any}(:style => record)
+	style.log_ticks === :auto || (own[:log_ticks] = String(style.log_ticks))
+	return _style_update_path(meta, (_STYLE_META_KEY,), own, "layout.meta", "PlotStyle")
+end
+
 function _apply_style_layout!(
 	fig,
 	style::PlotStyle = _active_style();
@@ -1917,15 +1939,9 @@ function _apply_style_layout!(
 	# The figure carries the style it is built under (`_style_record`): what a
 	# later mutator, the finalizer or an export needs although the active style
 	# has changed since (`_figure_style`).
-	record = _style_record(style)
-	if !isempty(record)
-		meta = haskey(updates, :meta) ? updates[:meta] : get(fields, :meta, nothing)
-		if meta === nothing || meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute
-			own = Dict{Symbol, Any}(:style => record)
-			style.log_ticks === :auto || (own[:log_ticks] = String(style.log_ticks))
-			updates[:meta] = _style_update_path(meta, (_STYLE_META_KEY,), own, "layout.meta", "PlotStyle")
-		end
-	end
+	meta = haskey(updates, :meta) ? updates[:meta] : get(fields, :meta, nothing)
+	recorded_meta = _style_meta_with_record(meta, style)
+	recorded_meta === nothing || (updates[:meta] = recorded_meta)
 	for (key, value) in updates
 		fields[key] = value
 	end
@@ -2094,12 +2110,13 @@ _style_log_ticks(style::PlotStyle = _active_style()) = style.log_ticks
 The log-axis tick rule of a figure: the one of the style it was built under
 (`_figure_style`; also recorded as `layout.meta.plotlysupply.log_ticks`), so a
 figure made inside `with_style(:ieee)` keeps its decade labels when it is
-exported or changed after the block; the active style's rule for a figure that
-carries no style. Internal.
+exported or changed after the block; `:auto` (plotly's labels) for a figure that
+carries no style, whatever style is active: the labels of a figure never depend
+on the style active when it is finalized (K1). Internal.
 """
 function _style_log_ticks(layout::PlotlyBase.Layout)
 	recorded = _figure_recorded_style(layout)
-	return recorded === nothing ? _style_log_ticks() : recorded.log_ticks
+	return recorded === nothing ? :auto : recorded.log_ticks
 end
 
 # ── The style a figure carries ───────────────────────────────────────────────
@@ -2190,19 +2207,34 @@ function _figure_style(fig)
 end
 
 """
-	_with_figure_style(f, fig)
+	_with_figure_style(f, fig; adopt = false)
 
 Run `f()` with `_active_style()` returning the style `fig` carries (the active
 style when it carries none), so every function below that reads the active
 style (trace defaults, legend and axis frames, the finalizer's sizes, the
 export size) sees the figure's own. Internal; the entry of mutators,
 `_finalize_figure!` and `savefig`.
+
+`adopt = true` (the mutators): a figure that carries no style takes the active
+one first when that is not the default look (`_style_record`), so what the
+mutation writes under `with_style(:ieee)` (decade ticks, trace widths) is
+still what the finalizer, later mutators and exports give once the block has
+ended. A mutation never changes the figure's style otherwise.
 """
-function _with_figure_style(f, fig)
+function _with_figure_style(f, fig; adopt::Bool = false)
+	adopt && _style_adopt!(fig)
 	recorded = _figure_recorded_style(fig)
 	scoped = _STYLE_SCOPE[]
 	(recorded === nothing ? scoped === nothing : recorded === scoped) && return f()
 	return Base.ScopedValues.with(f, _STYLE_SCOPE => recorded)
+end
+
+function _style_adopt!(fig)
+	_figure_recorded_style(fig) === nothing || return nothing
+	layout = _cmn_plot(fig).layout
+	meta = _style_meta_with_record(get(layout.fields, :meta, nothing), _active_style())
+	meta === nothing || (layout.fields[:meta] = meta)
+	return nothing
 end
 
 """

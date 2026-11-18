@@ -935,9 +935,12 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 	if islog
 		tickformat = _cmn_mapping_get(mapping, :tickformat)
 		decades = floor(Int, lo):ceil(Int, hi)
-		# A d3 `tickformat` writes the plain numbers.
-		(tickformat isa AbstractString && !isempty(tickformat)) &&
-			return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), decades) + extra
+		# A d3 `tickformat`, and an "L<step>" dtick (linear steps in log
+		# space), write the plain numbers.
+		dtick = _cmn_mapping_get(mapping, :dtick)
+		plain = (tickformat isa AbstractString && !isempty(tickformat)) ||
+			(dtick isa AbstractString && startswith(dtick, "L"))
+		plain && return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), decades) + extra
 		format = something(_fin_string(_cmn_mapping_get(mapping, :exponentformat)), "B")
 		minexponent = _cmn_mapping_get(mapping, :minexponent)
 		minexponent = _fin_isfinite_real(minexponent) ? Float64(minexponent) : 3.0

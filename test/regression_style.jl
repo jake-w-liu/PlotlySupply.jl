@@ -1339,3 +1339,132 @@ end
 		@test occursin("Optica is not included", string(Base.Docs.doc(Base.Docs.Binding(PlotlySupply, :journal_width))))
 	end
 end
+
+# K1 (wave 6): a figure carries its style. Everything a figure built inside
+# `with_style` does afterwards (mutators, `_finalize_figure!`, `savefig`)
+# gives what the same calls give inside the block.
+@testset "a figure carries its style (K1)" begin
+	x = collect(range(1.0, 1000.0; length = 12))
+	y = sqrt.(x)
+	json_of(f) = _RS_PB.JSON.json(f isa PlotlySupply.SubplotFigure ? f.plot : _RS._plot_obj(f))
+	builders = (
+		plain = () -> plot_scatter(x, y; xscale = "log", yscale = "log", xlabel = "x", ylabel = "y", legend = "a"),
+		cells = () -> begin
+			sf = subplots(1, 2; sync = false)
+			plot_scatter!(sf, x, y; row = 1, col = 1, legend = "a")
+			sf
+		end,
+	)
+	mutators = (
+		scatter = f -> plot_scatter!(f, x, 2 .* y; legend = "b"),
+		bars = f -> plot_bar!(f, [1, 2, 3], [3, 2, 1]),
+		labels = f -> (xlabel!(f, "time \$t\$ (s)"); ylabel!(f, "amplitude")),
+		fonts = f -> set_fonts!(f; tick = 9),
+		reference = f -> hline!(f, 3.0),
+		legend = f -> set_legend!(f; position = :bottomright),
+		errorbars = f -> plot_scatter!(f, x, y; error_y = 0.1 .* y),
+	)
+	@testset "$(bname) / $(mname)" for (bname, build) in pairs(builders), (mname, mutate) in pairs(mutators)
+		inside = with_style(:ieee) do
+			f = build()
+			mutate(f)
+			f
+		end
+		outside = with_style(build, :ieee)
+		mutate(outside)
+		@test json_of(inside) == json_of(outside)
+		# Settled under any active style.
+		@test _RS._finalize_figure!(outside) === false
+		@test with_style(() -> _RS._finalize_figure!(outside), :nature) === false
+		@test with_style(() -> _RS._finalize_figure!(inside), :default) === false
+	end
+	@testset "record" begin
+		f = with_style(:ieee) do
+			plot_scatter(x, y)
+		end
+		style = _RS._figure_recorded_style(f)
+		@test style isa PlotlySupply.PlotStyle
+		@test style.width == with_style(() -> get_default_style().width, :ieee)
+		@test style.log_ticks === :decades
+		@test _RS._figure_style(f).font_family == with_style(() -> get_default_style().font_family, :ieee)
+		# Survives a JSON round trip of the layout meta.
+		meta = _RS_PB.JSON.parse(_RS_PB.JSON.json(_rs_layout(f)[:meta]))
+		g = plot_scatter(x, y)
+		_RS._plot_layout(g).fields[:meta] = meta
+		@test _RS._style_record(_RS._figure_recorded_style(g)) == _RS._style_record(style)
+		# :default records nothing; a figure without a record follows the active style.
+		d = plot_scatter(x, y)
+		@test _RS._figure_recorded_style(d) === nothing
+		@test with_style(() -> _RS._figure_style(d).width > 0, :ieee)
+		# A damaged record is ignored (the active style applies).
+		h = plot_scatter(x, y)
+		_RS._plot_layout(h).fields[:meta] = Dict(:plotlysupply => Dict(:style => Dict(:spines => "nonsense")))
+		@test _RS._figure_recorded_style(h) === nothing
+	end
+	@testset "a default-built figure adopts the style of the block that mutates it" begin
+		f = plot_scatter(x, y)
+		@test _RS._figure_recorded_style(f) === nothing
+		with_style(:ieee) do
+			plot_scatter!(f, x, 2 .* y; xscale = "log", yscale = "log")
+		end
+		@test _RS._figure_recorded_style(f) isa PlotlySupply.PlotStyle
+		@test _RS._style_log_ticks(f.layout) === :decades
+		@test _RS._finalize_figure!(f) === false
+		# A figure that stays default is never stamped by a mutation under :default.
+		g = plot_scatter(x, y)
+		plot_scatter!(g, x, 2 .* y)
+		@test _RS._figure_recorded_style(g) === nothing
+		@test !haskey(_RS._plot_layout(g).fields, :meta)
+		# Finalizing under a style does not stamp (it writes nothing).
+		h = plot_scatter(x, y)
+		with_style(() -> _RS._finalize_figure!(h), :ieee)
+		@test _RS._figure_recorded_style(h) === nothing
+	end
+	@testset "reading the figure's style is cheap (cached decode)" begin
+		f = with_style(() -> plot_scatter(x, y), :ieee)
+		_RS._figure_style(f)
+		@test (@elapsed for _ in 1:20_000
+			_RS._figure_style(f)
+		end) < 1.0
+	end
+	@testset "sizes of a size-less figure never follow the active style" begin
+		f = plot_scatter(x, y)
+		with_style(:ieee) do
+			xlabel!(f, "x")
+		end
+		g = plot_scatter(x, y)
+		xlabel!(g, "x")
+		@test _rs_get(f, :xaxis)[:title] == _rs_get(g, :xaxis)[:title]
+		@test _RS._figure_default_size() == (700.0, 500.0)
+		@test with_style(() -> _RS._figure_default_size(), :ieee) == (700.0, 500.0)
+		ieee_fig = with_style(() -> plot_scatter(x, y), :ieee)
+		@test _RS._with_figure_style(() -> _RS._figure_default_size(), ieee_fig) ==
+			with_style(() -> _RS._style_default_figure_size(), :ieee)
+	end
+	@testset "export size and fonts follow the figure" begin
+		f = with_style(:ieee) do
+			plot_scatter(x, y; xlabel = "x", ylabel = "y")
+		end
+		o_in = with_style(() -> PlotlySupply._normalize_export_options(f, (;)), :ieee)
+		o_out = PlotlySupply._normalize_export_options(f, (;))
+		@test (o_in.width, o_in.height) == (o_out.width, o_out.height)
+	end
+	@testset "Q23: an L dtick on a log axis counts plain numbers" begin
+		log_auto = _RS._fin_tick_chars(Dict{Symbol, Any}(), -6.0, 0.0, 200.0, true, true)
+		log_l = _RS._fin_tick_chars(Dict{Symbol, Any}(:dtick => "L0.5"), -6.0, 0.0, 200.0, true, true)
+		log_fmt = _RS._fin_tick_chars(Dict{Symbol, Any}(:tickformat => ".3f"), -6.0, 0.0, 200.0, true, true)
+		@test log_l == log_fmt
+		@test log_l != log_auto
+	end
+	@testset "Q24: quiver default colour follows a style's colorway" begin
+		args = ([1.0, 2.0], [1.0, 2.0], [1.0, 0.5], [0.5, 1.0])
+		colour(f) = _rs_sd(f.data[1].fields[:line])[:color]
+		@test colour(plot_quiver(args...)) == "RoyalBlue"
+		ieee = with_style(() -> plot_quiver(args...), :ieee)
+		@test colour(ieee) == "#0072B2"
+		@test colour(plot_quiver(args...; color = "red")) == "red"
+		# Second quiver in a styled figure takes the second colour; outside the block too.
+		plot_quiver!(ieee, args...)
+		@test colour(PlotlySupply.PlotlyBase.Plot(ieee.data[2:2], ieee.layout)) == "#D55E00"
+	end
+end
