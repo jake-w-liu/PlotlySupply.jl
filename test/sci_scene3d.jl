@@ -738,7 +738,8 @@ _t3_centred(fig, key::Symbol = :scene) = maximum(abs, _t3_drawing(fig, key).mid)
 		@test _t3_fields(_t3_axis(sf, :xaxis, :scene2)[:title])[:text] == "x<sub>1</sub>"
 		@test _t3_axis(sf, :zaxis, :scene2)[:range] == [0, 2]
 		@test unframed(:scene) == before1
-		@test !haskey(_t3_camera(sf, :scene), :projection)
+		@test get(_t3_fields(get(_t3_camera(sf, :scene), :projection, Dict{Symbol, Any}())), :type, "perspective") == "perspective"
+		@test _t3_fields(_t3_camera(sf, :scene2)[:projection])[:type] == "orthographic"
 		@test_throws ArgumentError plot_surface!(sf, rand(3, 3); row = 1, col = 2, secondary_y = true)
 		@test_throws ArgumentError plot_surface!(sf, rand(3, 3); row = 1, col = 2, show = true)
 		mixed = subplots(1, 2; sync = false, specs = [Spec(kind = "xy") Spec(kind = "scene")])
