@@ -214,6 +214,12 @@ entry only); columns that do not fit the cell are reduced with a warning.
 plotly.js also indents the entries by the title width for `:top_left`. A
 cell legend above or below its axes may reach over the gap to the next cell
 or into the figure margin.
+Widths are estimated at `layout.width` (else 700 px); if the export is
+narrower, plotly grows the margin. A cell legend wider than its cell (long
+labels) overflows it even in one column, and a position that equals the rule's
+choice still follows the data. A figure legend taller than the plot area
+(a long legend above a small panel in a short figure) is clipped by plotly
+with a scrollbar in a window; a `tight = true` export shows it whole.
 
 ## Titles and panel labels
 

@@ -235,10 +235,14 @@ savefig(fig_schem, "schematic.pdf")
 
 ```julia
 savefig(fig_conv, "fig1.pdf")                          # vector, exact page size
-savefig(fig_conv, "fig1.eps")                          # needs Ghostscript
 savefig(fig_conv, "fig1.tif"; dpi = 600)               # raster, LZW, 600 dpi tags
 savefig(fig_conv, "fig1.png"; dpi = 300)
-savefig(fig_conv, ["fig1.svg", "fig1.pdf"])            # several files, one render
+savefig(fig_conv, ["fig1.svg", "fig1b.pdf"])           # several files, one render
+```
+
+```julia
+# fragment: needs Ghostscript (gs) on PATH
+savefig(fig_conv, "fig1.eps")                          # vector, text as outlines
 ```
 
 | Format | What you get |
@@ -272,7 +276,7 @@ pixels at `dpi = 600`).
 
 ## 10. Colour and greyscale
 
-- The presets use the Okabe-Ito palette (`COLOR_CYCLES[:okabe_ito]`) in an
+- The presets use the Okabe-Ito palette (`PlotlySupply.COLOR_CYCLES[:okabe_ito]`) in an
   order whose first colours read well as thin lines. Other colour-blind-safe
   cycles: `:tol_bright`, `:tol_vibrant`, `:tol_muted`, `:tol_high_contrast`
   (`colorway = :tol_bright` in a [`PlotStyle`](@ref)).

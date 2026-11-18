@@ -13,5 +13,5 @@ Modules = [PlotlySupply, PlotlyBase]
 Order   = [:function, :type, :constant, :macro]
 Public  = true
 Private = false
-Filter  = s -> !(any(x -> x === s, (PlotlySupply.COLORMAPS, PlotlySupply.json)) || (try parentmodule(s) === PlotlySupply catch; false end))
+Filter  = s -> !(any(x -> x === s, (PlotlySupply.COLORMAPS, PlotlySupply.COLOR_CYCLES, PlotlySupply.json)) || (try parentmodule(s) === PlotlySupply catch; false end))
 ```

@@ -27,7 +27,9 @@ entry per series: `mode`, `dash`, `color`, `legend`, `linewidth`,
   `"^"`, ...).
 - `marker_color = "white"` or `"none"` draws open markers; the outline takes
   the line colour, and `marker_line_width` sets its width.
-- `markevery = k` puts markers on every `k`-th point only.
+- `markevery = k` puts markers on every `k`-th point only; with `text`, every
+  label is kept at full strength and its colour is fixed when you call, so a
+  later template change does not recolour it.
 - `line_shape = "hv"` draws a step plot (matplotlib `step(where="post")`).
 
 ```julia
@@ -149,8 +151,8 @@ ylabel!(fig, "mA"; secondary_y = true)
 
 ## Line-style cycles
 
-A [`PlotStyle`](@ref) with `cycle = :dash`, `:marker`, `:dash_marker` or
-`:bw` gives each new line-type trace the next dash pattern or marker symbol,
+A [`PlotStyle`](@ref) with `cycle = :dash`, `:marker`, `:dash_marker`,
+`:dash_symbol` or `:bw` gives each new line-type trace the next dash pattern or marker symbol,
 for figures that must read in greyscale. Keywords you pass win over the cycle.
 `plot_segments`, `plot_vlines`, `plot_hlines`, `plot_ecdf` and `plot_kde` take
 only the width and dash from the style (no markers).

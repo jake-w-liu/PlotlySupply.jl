@@ -18,6 +18,31 @@ fig2 = plot_bar(groups, [3.0, 5.0, 2.0]; text = ["3.0", "5.0", "2.0"],
 fig3 = plot_bar([4.0, 2.0, 7.0]; orientation = "h")
 ```
 
+Bar options:
+
+- A `color`, `hatch` or `barwidth` vector with one entry per bar sets each bar
+  of a single series (a vector of any other length is an `ArgumentError`);
+  nested series take per-bar vectors per series.
+- `barwidth` is in data units of the position axis and does not move the bar
+  centres.
+- `bargap` and `bargroupgap` (fractions in `[0, 1]`) are figure-wide and apply
+  to every cell of a `SubplotFigure`.
+- On a logarithmic value axis, bars keep plotly's base 0 and grow from the
+  axis bottom (the lower range limit), as in matplotlib. Set `yrange`/`xrange`
+  for comparisons, or pass `base`.
+- `secondary_y = true` works on `plot_bar!`, `plot_histogram!`, `plot_box!`,
+  `plot_violin!` and `plot_histogram2d!` for a `Plot` or `SyncPlot`; the
+  y-axis keywords then address the twin. Bars on a twin are positioned
+  separately from the primary bars, so they overlap at equal positions (like
+  matplotlib's `twinx`): shift the positions and set `barwidth` to put them side
+  by side.
+
+```julia
+fig = plot_bar(["a", "b", "c"], [3.0, 5.0, 2.0]; color = ["#0072B2", "#D55E00", "#009E73"],
+    barwidth = [0.8, 0.5, 0.8], bargap = 0.2)
+fig2 = plot_bar([1.0, 10.0, 100.0]; yscale = "log", yrange = (0.5, 200))
+```
+
 ## Histograms
 
 [`plot_histogram`](@ref) bins samples. `nbinsx` is an approximate bin count
@@ -81,7 +106,8 @@ fig2 = plot_kde([s, s .+ 2]; legend = ["a", "b"], bandwidth = :scott, fill = tru
 
 The statistical mutators take `row`, `col` and `inset` on a `SubplotFigure`.
 `barmode` is a figure-wide plotly setting: passing it in one cell re-arranges
-the bars of every cell (with a warning when that changes other cells).
+the bars of every cell, with a warning only when another axis pair holds two
+or more bar-like traces.
 
 ```julia
 sf = subplots(1, 2; sync = false)

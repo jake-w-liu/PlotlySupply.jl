@@ -131,21 +131,66 @@ fig = plot_polygons(px, py, [1.0, 2.0]; colorscale = "viridis",
 
 ## Vector fields
 
-[`plot_quiver`](@ref) draws an arrow from each `(x, y)` along `(u, v)`;
-arrow length is proportional to the magnitude, and `sizeref` sets the length
-of the longest arrow (2/3 of `sizeref` in data units). Equal axis scales are
-on by default (`equalar = true`).
-[`plot_streamlines`](@ref) integrates streamlines of a gridded field
-`U[ix, iy]`, `V[ix, iy]`; `colorby = :speed` colours them by speed with a
-colorbar.
+[`plot_quiver`](@ref) draws one glyph per vector `(u, v)` at `(x, y)`; equal
+axis scales are on by default (`equalar = true`). `sizeref` is the length of
+the longest glyph in data units (decades on a log axis). Two kinds, chosen by
+`style`:
+
+- `style = :arrow` (default): a line arrow whose length is proportional to
+  the magnitude.
+- `style = :triangle`: one filled isosceles triangle per vector, pointing
+  along `(u, v)`; its length and base together are proportional to the
+  magnitude. `headwidth` (default 0.5) is the base as a fraction of the length.
+  Triangles are polygons in data units, so they scale with the axes like the
+  arrows do, and `edgecolor`/`edgewidth` outline them (default: no edge).
+
+Further keywords: `pivot = :tail | :middle | :tip` (the part of the glyph at
+`(x, y)`; default `:tail` for arrows, `:middle` for triangles);
+`scale = :magnitude` (default) or `:uniform` (every non-zero vector at the
+full `sizeref`: a direction field); `colorby = :magnitude`, or an array of
+values with the shape of `u`, colours the glyphs through the colour keywords
+(`colorscale`, `crange`, `cmid`, `colornorm`, `levels`, `colorbar_title`,
+`colorbar_title_side`, `coloraxis`, `showscale`) and draws a colorbar; `color`
+is then an error. `scale = :uniform` with `colorby = :magnitude` gives
+direction by glyph and strength by colour. `opacity` and `legend` apply as
+elsewhere; zero and `NaN` vectors are skipped. [`plot_quiver3d`](@ref) has
+`style = :cone` (default) or `:arrow` for the same choice in 3-D.
 
 ```julia
-gx = range(-2, 2; length = 15)
-gy = range(-1, 1; length = 9)
-qx = vec([x for x in gx, y in gy])
-qy = vec([y for x in gx, y in gy])
-fig = plot_quiver(qx, qy, -qy, qx; sizeref = 0.4, color = "black", legend = "flow")
+gx = range(-2, 2; length = 13)
+qx = vec([x for x in gx, y in gx])
+qy = vec([y for x in gx, y in gx])
+u = -qy .* (1 .+ 0.5 .* hypot.(qx, qy))
+v = qx .* (1 .+ 0.5 .* hypot.(qx, qy))
+fig_quiver = subplots(2, 3; sync = false, width = 900, height = 620,
+    subplot_titles = ["arrow", "triangle", "triangle, tip", "uniform arrow",
+        "uniform triangle", "colour by magnitude"])
+plot_quiver!(fig_quiver, qx, qy, u, v; row = 1, col = 1, sizeref = 0.5, color = "black")
+plot_quiver!(fig_quiver, qx, qy, u, v; row = 1, col = 2, style = :triangle, sizeref = 0.5,
+    color = "black")
+plot_quiver!(fig_quiver, qx, qy, u, v; row = 1, col = 3, style = :triangle, pivot = :tip,
+    sizeref = 0.5, color = "black")
+plot_quiver!(fig_quiver, qx, qy, u, v; row = 2, col = 1, scale = :uniform, sizeref = 0.4,
+    color = "black")
+plot_quiver!(fig_quiver, qx, qy, u, v; row = 2, col = 2, style = :triangle, scale = :uniform,
+    sizeref = 0.4, color = "black")
+plot_quiver!(fig_quiver, qx, qy, u, v; row = 2, col = 3, style = :triangle, scale = :uniform,
+    sizeref = 0.4, colorby = :magnitude, colorscale = "viridis", colorbar_title = "\$|\\mathbf{F}|\$")
 ```
+
+![The quiver kinds on a rotation field](assets/fields_quiver_kinds.png)
+
+An overlay does not widen the tight axes of a field under it: a quiver or
+streamline overlay contributes its anchor points (the positions of the
+glyphs, the seed grid of streamlines), not the length of its arrows. Anchors
+inside the field leave the axes tight on the field, and the part of an arrow
+beyond the frame is clipped (as in matplotlib); `pivot = :tip` or an explicit
+`xrange`/`yrange` shows arrows whole. A quiver or streamline plot without a
+field under it autoranges on what it draws, with the normal padding.
+
+[`plot_streamlines`](@ref) integrates streamlines of a gridded field
+`U[ix, iy]`, `V[ix, iy]`; `colorby = :speed` colours them by speed with a
+colorbar. The arrowheads are filled in the line colour.
 
 ```julia
 sx = range(-2, 2; length = 41)
@@ -156,3 +201,25 @@ fig = plot_heatmap(sx, sy, hypot.(Us, Vs); colorscale = "Greys", showscale = fal
 plot_streamlines!(fig, sx, sy, Us, Vs; colorby = :speed, colorscale = "viridis",
     colorbar_title = "speed")
 ```
+
+## Other field options
+
+- One-sided limits work on field axes like anywhere else (`xrange = (0, nothing)`;
+  see [Axes and ticks](axes.md)). On equal-aspect and image axes the limit pins
+  the range to `[bound, the data's current far edge]`, as matplotlib's
+  `set_xlim` does, and that edge does not follow data added later.
+  An image's y axis keeps plotly's reversed default, also in subplot cells.
+- `interpolation = :bilinear` smooths a heatmap (`zsmooth = "best"`) or an
+  image (a PNG source with smoothing; linear axes only, and hover shows the
+  RGBA pixel).
+- [`plot_pcolormesh`](@ref) defaults to `equalar = false` (matplotlib's `auto`
+  aspect); pass `equalar = true` for a physical-space mesh and check that a
+  circle is round.
+- Contours with non-uniform `levels` colour each level and add no legend
+  entries.
+- `plot_matrix` and the mesh functions (`plot_pcolormesh`, `plot_polygons`,
+  `plot_tripcolor`, `plot_triplot`, `plot_tricontour`) take `xticks`, `yticks`,
+  `xticklabels`, `yticklabels`, `xtickformat` and `ytickformat`.
+- `shared_colorbar!` honours the members' explicit colour limits
+  (`zrange = (-1, 1)` keeps the tick at -1), and a second colour-mapped trace
+  on the same axes (contour over heatmap) draws its own bar beside the first.

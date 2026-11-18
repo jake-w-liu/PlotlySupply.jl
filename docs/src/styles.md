@@ -13,10 +13,20 @@ Built-in styles:
 - `:default` is the PlotlySupply 1.x look: the default template
   (`plotly_white`), black closed spines, outside ticks, plotly's fonts,
   colours and margins.
-- `:publication` uses black STIX/Times text (14 px labels, 12 px ticks and
-  legend, 16 px title), the Okabe–Ito colour-blind-safe palette, a closed
-  frame, a frameless legend, `\large` math and a 10 px margin that grows to
-  fit labels and title.
+- `:publication` uses black Times New Roman text (14 px labels, 12 px ticks and
+  legend, 16 px title; a TrueType face, so PDF export embeds real fonts), the
+  Okabe-Ito colour-blind-safe palette, a closed frame, a frameless legend,
+  `\large` math and a 10 px margin that grows to fit labels and title. It sets
+  no figure size.
+- `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip` are the journal
+  presets: the journal's font family and size in points, 1 pt data lines,
+  0.75 pt axes, ticks, error bars and reference lines, 3.5 pt ticks (inside and
+  mirrored on all four sides for `:ieee`, `:aps`, `:aip`; outside otherwise;
+  `:nature` draws only the left and bottom axes), Okabe-Ito colours with the
+  greyscale-safe `:dash_symbol` cycle, and the single-column width at aspect
+  ratio 0.75 as the default figure size. The table with widths, maximum heights
+  and sources is in [Figures for papers](papers.md); `journal_width` returns
+  any width and `figsize!(fig, :ieee; columns = 2)` sizes a figure.
 
 ```julia
 using PlotlySupply
@@ -48,9 +58,25 @@ end
 get_default_style()
 ```
 
-`cycle = :dash`, `:marker`, `:dash_marker` or `:bw` give successive line
-traces different dash patterns or markers (`:bw` also draws them all in one
-ink colour), so figures stay readable in greyscale.
+`cycle = :dash`, `:marker`, `:dash_marker`, `:dash_symbol` or `:bw` give
+successive line traces different dash patterns or markers (`:bw` also draws
+them all in one ink colour), so figures stay readable in greyscale.
+
+Fields added in 2.0 to `PlotStyle`: `width` and `aspect` (the default figure
+size: a new figure that sets no size of its own gets `width` px and height
+`aspect * width`, and `savefig` uses it), `axis_linewidth` (spine, tick and
+grid width), `tick_length`, `mirror_ticks` (ticks on the top and right of a
+closed frame), `errorbar_width` and `reference_linewidth`. Sizes are CSS px;
+1 pt = 4/3 px. `colorway` takes a name from `COLOR_CYCLES` (`:okabe_ito`,
+`:tol_bright`, `:tol_vibrant`, `:tol_muted`, `:tol_high_contrast`), a
+`PlotlyBase.colors` palette name, or a list of colours; grey levels such as
+`"0.35"` are accepted in colours. Under a style that sets `linewidth`,
+`errorbar_width`, `axis_linewidth` or `tick_length`, contour line widths,
+error-bar thickness and trace colorbar fonts, outline and ticks follow it;
+under `:default` nothing new is written. The colorbar defaults write no
+colours (a colorbar keeps plotly's grey, so a template switch cannot leave a
+stale colour behind). `reference_linewidth` is the default width of `hline!`,
+`vline!`, `arrow!`, `arc!`, the schematic shapes and span outlines.
 
 ## Templates
 
@@ -72,8 +98,10 @@ get_default_template()
 
 ## Figure size and margins
 
-[`figsize!`](@ref) sets the figure size in pixels or physical units (96 px per
-inch); [`tight_layout!`](@ref) shrinks the margins to a small pad while
+[`figsize!`](@ref) sets the figure size in pixels, physical units (96 px per
+inch) or a journal (`figsize!(fig, :nature; columns = 2, aspect = 0.6)`, or
+`height = 6, units = :cm`; a figure taller than the journal's maximum is an
+`ArgumentError`); [`tight_layout!`](@ref) shrinks the margins to a small pad while
 keeping room for tick labels, axis titles and the title.
 
 ```julia

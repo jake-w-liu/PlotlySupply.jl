@@ -91,15 +91,29 @@ colorbar!(fig; len = 0.6, thickness = 15, ticks = [0, 0.5, 1],
 
 ## Colour cycles
 
-The trace colours come from the template's `colorway`. The `:publication`
-style uses the Okabe–Ito palette, which stays distinguishable for the common
-forms of colour blindness. A [`PlotStyle`](@ref) takes any palette from
-`PlotlyBase.colors` (`:okabe_ito`, `:tab10`, `:tol_bright`, ...) or a list of
-colours as `colorway`, and `cycle = :bw` draws all lines in black with a dash
-cycle.
+The trace colours come from the template's `colorway`. The journal presets and
+`:publication` use the Okabe-Ito palette, which stays distinguishable for the
+common forms of colour blindness, in an order whose first colours read well as
+thin lines. `COLOR_CYCLES` holds the colour-blind-safe cycles by name:
+`:okabe_ito`, `:tol_bright`, `:tol_vibrant`, `:tol_muted` and
+`:tol_high_contrast`. A [`PlotStyle`](@ref) takes any of them, any palette from
+`PlotlyBase.colors` (`:tab10`, ...) or a list of colours as `colorway`, and
+`cycle = :bw` draws all lines in black with a dash cycle. A symbol `colorway`
+looks in `COLOR_CYCLES` before `PlotlyBase.colors`.
 
 ```julia
 fig = with_style(PlotStyle(; colorway = :tol_bright)) do
     plot_scatter(1:10, [rand(10) for _ in 1:3]; legend = ["a", "b", "c"])
 end
+PlotlySupply.COLOR_CYCLES[:okabe_ito]
 ```
+
+## Colour maps for print
+
+The [`COLORMAPS`](@ref PlotlySupply.COLORMAPS) docstring has a table of which
+maps are perceptually uniform and which keep their order in greyscale:
+`viridis`, `plasma`, `inferno`, `magma` and `cividis` are both; the
+ColorBrewer sequentials (`Greys`, `Blues`, ...) are greyscale-safe; diverging
+maps lose the sign in greyscale, and `jet`, `rainbow` and `turbo` are neither.
+The orientation of several maps changed in 2.0, see
+[Migrating from 1.x](migration.md).

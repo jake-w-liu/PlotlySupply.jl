@@ -182,6 +182,9 @@ the table lists only one name.
 | Export | `savefig`, `json` |
 | Windows and PlotlyJS compatibility | `SyncPlot`, `to_syncplot`, `plot`, `plot!` (same as the scatter mutator), `msgchannel`, `toggle_devtools` |
 
+`COLORMAPS` and `COLOR_CYCLES` are public, not exported: write
+`PlotlySupply.COLORMAPS`.
+
 PlotlySupply also re-exports PlotlyBase (`scatter`, `Layout`, `attr`,
 `relayout!`, `restyle!`, `add_trace!`, `Spec`, ...), `meshgrid` from
 MeshGrid.jl and the LaTeX string macro `@L_str` from LaTeXStrings.jl.
