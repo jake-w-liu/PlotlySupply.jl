@@ -1002,7 +1002,7 @@ end
 function _mesh2d_new_figure(show, who::AbstractString)
 	_mesh2d_bool(show, who, "show")
 	fig = Plot(GenericTrace[], _default_cartesian_layout())
-	_apply_default_template!(fig)
+	_apply_default_template!(fig; fresh = true)
 	return fig
 end
 

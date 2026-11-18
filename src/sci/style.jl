@@ -413,6 +413,10 @@ const _STYLE_MAX_FIGURE_PX = Float64(typemax(Int32))
 # accepts (`_MATHTEXT_SIZES`, src/sci/mathtext.jl): `\footnotesize` does not
 # exist in MathJax 2 and would render as a red undefined macro.
 const _STYLE_MATHSIZES = ("", ("\\" * name for name in _MATHTEXT_SIZES)...)
+const _STYLE_LOG_TICKS = (:auto, :decades)
+# Key under `layout.meta` where a style records what a figure must remember
+# after the `with_style` block that built it ended (the log tick rule).
+const _STYLE_META_KEY = :plotlysupply
 const _STYLE_MARGIN_KEYS = (:l, :r, :t, :b, :pad)
 const _STYLE_DASH_CYCLE = ("solid", "dash", "dot", "dashdot")
 const _STYLE_MARKER_CYCLE = (
@@ -432,7 +436,7 @@ const _STYLE_MARKER_CYCLE = (
 		colorway=nothing, linewidth=0, marker_size=0, ticks="outside", spines=:box,
 		grid=true, legend_frame=true, margin=nothing, mathsize="", cycle=:none,
 		width=0, aspect=0, axis_linewidth=0, tick_length=0, mirror_ticks=false,
-		errorbar_width=0, reference_linewidth=0)
+		errorbar_width=0, reference_linewidth=0, log_ticks=:auto)
 
 A named bundle of figure defaults (the PlotlySupply analogue of matplotlib
 `rcParams`). The active style is chosen with [`set_default_style!`](@ref) or
@@ -449,13 +453,15 @@ temporarily with [`with_style`](@ref); styles are registered by name with
   Okabe–Ito colour-blind-safe
   colorway (`COLOR_CYCLES[:okabe_ito]`, high-contrast colours first), a closed
   box, a frameless legend, `\\large` math and a 10 px margin that grows
-  automatically to fit labels and the title. It sets no figure size and no
-  per-trace defaults.
+  automatically to fit labels and the title, and decade-only tick labels on
+  logarithmic axes spanning two decades or more (`log_ticks = :decades`). It
+  sets no figure size and no per-trace defaults.
 - Journal presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`
   — sized for the journal's single column (`width`, `aspect = 0.75`), in the
   journal's font family and sizes, with print line weights (1 pt data lines,
   0.75 pt axes, ticks, error bars and reference lines, 3.5 pt ticks), the
-  Okabe–Ito colorway and the greyscale-safe `:dash_symbol` cycle. Their
+  Okabe–Ito colorway, the greyscale-safe `:dash_symbol` cycle and decade-only
+  log tick labels. Their
   numbers, and where each comes from, are listed by [`journal_width`](@ref);
   [`figsize!`](@ref)`(fig, :ieee; columns = 2)` sizes a figure for any
   column count the journal defines.
@@ -526,6 +532,14 @@ Every field is validated by the constructor and on assignment
   line width of `hline!`, `vline!`, `arrow!`, `arc!`, the schematic shapes
   (`circle!`, `ellipse!`, `rectangle!`, `polygon!`) and an `hspan!`/`vspan!`
   outline. `0` keeps their 1 px default.
+- `log_ticks=:auto`: tick labels of a logarithmic axis that has no tick
+  setting of its own. `:auto` keeps plotly's adaptive labels; `:decades` labels
+  decades only (every k-th decade on a long axis, unlabelled minor ticks
+  between) once the axis shows two decades or more, so that the minor labels
+  `2`, `5` of a narrow column-width panel never collide. `:publication` and
+  every journal preset use `:decades`; `:default` keeps `:auto`. An axis
+  that has `tickvals`, `dtick`, `tickmode` or `ticktext` set by the user is
+  never changed.
 
 Numeric fields use `0` as "unset"; negative and non-finite values throw an
 `ArgumentError`. Sizes and widths are CSS px (1 pt = 4/3 px, 1 in = 96 px).
@@ -580,6 +594,7 @@ mutable struct PlotStyle
 	mirror_ticks::Bool
 	errorbar_width::Float64
 	reference_linewidth::Float64
+	log_ticks::Symbol
 
 	function PlotStyle(
 		template,
@@ -606,7 +621,8 @@ mutable struct PlotStyle
 		tick_length = 0,
 		mirror_ticks = false,
 		errorbar_width = 0,
-		reference_linewidth = 0;
+		reference_linewidth = 0,
+		log_ticks = :auto;
 		who::AbstractString = "PlotStyle",
 	)
 		v(name, value) = _style_validate_field(name, value, who)
@@ -636,6 +652,7 @@ mutable struct PlotStyle
 			v(:mirror_ticks, mirror_ticks),
 			v(:errorbar_width, errorbar_width),
 			v(:reference_linewidth, reference_linewidth),
+			v(:log_ticks, log_ticks),
 		)
 		_style_check_figure_size(style.width, style.aspect, who)
 		return style
@@ -684,6 +701,7 @@ function PlotStyle(
 	mirror_ticks::Bool = false,
 	errorbar_width::Real = 0,
 	reference_linewidth::Real = 0,
+	log_ticks::Union{AbstractString, Symbol} = :auto,
 )
 	return PlotStyle(
 		template,
@@ -711,6 +729,7 @@ function PlotStyle(
 		mirror_ticks,
 		errorbar_width,
 		reference_linewidth,
+		log_ticks,
 	)
 end
 
@@ -868,6 +887,8 @@ function _style_validate_field(name::Symbol, value, who::AbstractString)
 		return String(value)
 	elseif name === :cycle
 		return _style_symbol_choice(value, _STYLE_CYCLES, who, "cycle")
+	elseif name === :log_ticks
+		return _style_symbol_choice(value, _STYLE_LOG_TICKS, who, "log_ticks")
 	end
 	throw(ArgumentError(
 		"$(who): unknown PlotStyle field `$(name)`; fields are $(join(fieldnames(PlotStyle), ", ")).",
@@ -952,6 +973,7 @@ _publication_plot_style() = PlotStyle(
 	legend_frame = false,
 	margin = 10,
 	mathsize = "\\large",
+	log_ticks = :decades,
 )
 
 # ── Journal presets (D14) ────────────────────────────────────────────────────
@@ -1091,6 +1113,7 @@ function _journal_plot_style(spec::_JournalSpec)
 		mirror_ticks = spec.mirror_ticks,
 		errorbar_width = 0.75 * _PT_PX,
 		reference_linewidth = 0.75 * _PT_PX,
+		log_ticks = :decades,
 	)
 end
 
@@ -1652,6 +1675,8 @@ function _apply_style_trace_defaults!(
 			))
 		elseif _style_trace_type(trace) in _STYLE_CONTOUR_TRACE_TYPES
 			merge!(updates, _style_contour_default_updates(trace, plain_defaults, explicit_names, where))
+		elseif _style_trace_type(trace) in _STYLE_OUTLINE_TRACE_TYPES
+			merge!(updates, _style_outline_default_updates(trace, plain_defaults, explicit_names, where))
 		end
 		merge!(updates, _style_errorbar_default_updates(trace, plain_defaults, where))
 		# Built on top of the marker/line updates above (same containers).
@@ -1733,6 +1758,22 @@ function _style_contour_default_updates(trace, defaults, explicit, who::Abstract
 	coloring = get(contours, :coloring, "fill")
 	(coloring isa Union{AbstractString, Symbol} && String(coloring) in ("lines", "none")) ||
 		return Dict{Symbol, Any}()
+	line = _style_container_dict(get(fields, :line, nothing), "line", who)
+	_style_value_unset(get(line, :width, nothing)) || return Dict{Symbol, Any}()
+	return Dict{Symbol, Any}(
+		:line => _style_update_path(get(fields, :line, nothing), (), Dict(:width => defaults[:linewidth]), "line", who),
+	)
+end
+
+# Box and violin traces draw their box, whiskers, median and violin outline
+# with `line.width` (plotly's default 2 px).
+const _STYLE_OUTLINE_TRACE_TYPES = Set{String}(["box", "violin"])
+
+# `line.width` of a box or violin: the style's line width where unset (the
+# thick 2 px default would outweigh the 0.75 pt axes of a journal style).
+function _style_outline_default_updates(trace, defaults, explicit, who::AbstractString)
+	(haskey(defaults, :linewidth) && !(:linewidth in explicit)) || return Dict{Symbol, Any}()
+	fields = trace.fields
 	line = _style_container_dict(get(fields, :line, nothing), "line", who)
 	_style_value_unset(get(line, :width, nothing)) || return Dict{Symbol, Any}()
 	return Dict{Symbol, Any}(
@@ -1865,13 +1906,58 @@ function _apply_style_layout!(
 		)
 		updates[:margin] = margin
 		title === nothing || (updates[:title] = title)
+		updates[:margin] = _style_domain_subplot_margin(p, updates, style, "PlotStyle")
 	end
 	merge!(updates, _style_figure_size_updates(fields, style))
+	# The figure remembers the log tick rule of the style it is built under.
+	if style.log_ticks !== :auto
+		meta = haskey(updates, :meta) ? updates[:meta] : get(fields, :meta, nothing)
+		if meta === nothing || meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute
+			updates[:meta] = _style_update_path(
+				meta,
+				(_STYLE_META_KEY,),
+				Dict{Symbol, Any}(:log_ticks => String(style.log_ticks)),
+				"layout.meta",
+				"PlotStyle",
+			)
+		end
+	end
 	for (key, value) in updates
 		fields[key] = value
 	end
 	_commit_trace_updates!(p, role_traces)
 	return nothing
+end
+
+# Polar and ternary subplots draw their tick labels (the angular labels, the
+# ternary corner labels) outside the disc/triangle, in the margin, and plotly's
+# `automargin` only grows the margin for Cartesian axes: a style margin of a
+# few px clips the label at the bottom of a polar plot and lets the title
+# overlap the one at the top (probe polar.jl, `plot_scatterpolar(...; title)`
+# under :publication/:ieee). A style margin therefore never goes below the room
+# of one tick label on a figure that has such a subplot, nor, at the top,
+# below that room plus the figure title.
+function _style_domain_subplot_margin(p::Plot, updates::AbstractDict, style::PlotStyle, who::AbstractString)
+	fields = p.layout.fields
+	margin = updates[:margin]
+	any(key -> occursin(r"^(polar|ternary)\d*$", String(key)), keys(fields)) || return margin
+	lookup(key) = haskey(updates, key) ? updates[key] : get(fields, key, nothing)
+	root = _tight_root_font_size(lookup)
+	tick = style.tick_fontsize > 0 ? style.tick_fontsize : root
+	# One line of tick text plus plotly's offset between the disc and its labels.
+	label_room = ceil(1.2 * tick + 8)
+	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
+	current = _style_container_dict(margin, "layout.margin", who)
+	height = _tight_real(lookup(:height), Float64(_style_default_figure_size()[2]))
+	cap = _TIGHT_MAX_MARGIN_FRACTION * height
+	floors = Dict{Symbol, Any}()
+	for (side, room) in ((:l, label_room), (:r, label_room), (:b, label_room), (:t, label_room + (title_room > 0 ? title_room + 4 : 0)))
+		have = _tight_real(get(current, side, nothing), 0.0)
+		want = min(room, cap)
+		want > have && (floors[side] = _style_number(want))
+	end
+	isempty(floors) && return margin
+	return _style_update_path(margin, (), floors, "layout.margin", who)
 end
 
 # A layout width/height the figure already has (a positive number; anything
@@ -1978,11 +2064,28 @@ end
 The style's rule for logarithmic axes without a user tick setting (lead
 decision D15, rule 2): `:decades` (decade labels only on an axis spanning two
 decades or more; `:publication` and the journal presets) or `:auto` (plotly's
-adaptive labels). Reads `PlotStyle.log_ticks`; `:auto` while the field does
-not exist. Internal; `_axes_log_tick_updates!` (src/sci/axes.jl) applies it.
+adaptive labels). Reads `PlotStyle.log_ticks`. Internal; `_axes_log_tick_updates!` (src/sci/axes.jl) applies it.
 """
-_style_log_ticks(style::PlotStyle = _active_style()) =
-	hasfield(PlotStyle, :log_ticks) ? getfield(style, :log_ticks) : :auto
+_style_log_ticks(style::PlotStyle = _active_style()) = style.log_ticks
+
+"""
+	_style_log_ticks(layout::Layout) -> Symbol
+
+The log-axis tick rule of a figure: the one the style it was built under
+recorded in `layout.meta.plotlysupply.log_ticks` (`_apply_style_layout!`), so
+a figure made inside `with_style(:ieee)` keeps its decade labels when it is
+exported or changed after the block; the active style's rule when it recorded
+none. Internal.
+"""
+function _style_log_ticks(layout::PlotlyBase.Layout)
+	meta = get(layout.fields, :meta, nothing)
+	(meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute) || return _style_log_ticks()
+	own = get(_symbol_dict(meta), _STYLE_META_KEY, nothing)
+	(own isa AbstractDict || own isa PlotlyBase.PlotlyAttribute) || return _style_log_ticks()
+	value = get(_symbol_dict(own), :log_ticks, nothing)
+	value isa AbstractString && Symbol(value) in _STYLE_LOG_TICKS && return Symbol(value)
+	return _style_log_ticks()
+end
 
 """
 	_style_ink(fig) -> String
@@ -3242,7 +3345,9 @@ them and are a package choice otherwise (APS and AIP do not name a font).
 plotly draws `<sup>`/`<sub>` text (e.g. log-axis exponents with
 `exponentformat = "power"`) at 70 % of the font size, which under `:nature`
 is 4.9 pt, below Nature's 5 pt minimum. Optica is not included: its figure
-widths could not be confirmed from Optica's own guidelines.
+widths could not be confirmed from Optica's own guidelines (rechecked 2026-11:
+the Journal Style Guide names no column width or figure-text size, only that a
+figure stays inside the text margins).
 
 # Example
 ```julia

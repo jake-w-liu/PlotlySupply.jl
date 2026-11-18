@@ -1396,7 +1396,7 @@ function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size, accs
 end
 
 """
-	_axes_log_tick_updates!(updates, p::Plot, size_or_plan; mode = _style_log_ticks()) -> updates
+	_axes_log_tick_updates!(updates, p::Plot, size_or_plan; mode = _style_log_ticks(p.layout)) -> updates
 
 Add to `updates` (`relayout!` keys, `nothing` removes) the tick settings the
 log axes of `p` need for a figure of `size = (width, height)` px (or an
@@ -1409,12 +1409,12 @@ would overlap) and written on every member without a tick setting of the
 user's. Axes with one are never touched. Figures without a log axis cost
 nothing. Idempotent.
 """
-function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, size; mode::Symbol = _style_log_ticks())
+function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, size; mode::Symbol = _style_log_ticks(p.layout))
 	_axes_has_log_axis(p.layout) || return updates
 	return _axes_log_tick_updates!(updates, p, _axes_fit_plan(p, size); mode = mode)
 end
 
-function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_AxesFitPlan; mode::Symbol = _style_log_ticks())
+function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_AxesFitPlan; mode::Symbol = _style_log_ticks(p.layout))
 	layout = p.layout
 	fields = layout.fields
 	groups = Dict{Symbol, Vector{Symbol}}()
@@ -1530,20 +1530,23 @@ function _axes_fitted_decades_updates!(updates, layout::Layout, key::Symbol, axi
 end
 
 """
-	_axes_apply_style_log_ticks!(fig; size = nothing, mode = _style_log_ticks()) -> Bool
+	_axes_apply_style_log_ticks!(fig; size = nothing, mode = nothing) -> Bool
 
 Apply the log-axis tick rule (`_axes_log_tick_updates!`) to `fig` (a `Plot`,
 `SyncPlot` or `SubplotFigure`) at `size = (width, height)` px (default: the
-figure's layout size, else the active style's default figure size). Returns
+figure's layout size, else the active style's default figure size) with the
+rule the figure was built under (`_style_log_ticks(layout)`; `mode` overrides
+it). Returns
 whether anything was written. Idempotent; never changes an axis with a tick
 setting of its own. `_finalize_figure!` applies the rule after every
 mutation and on the export copy, so callers rarely need this directly.
 """
-function _axes_apply_style_log_ticks!(fig; size = nothing, mode::Symbol = _style_log_ticks())
+function _axes_apply_style_log_ticks!(fig; size = nothing, mode::Union{Nothing, Symbol} = nothing)
+	p = _cmn_plot(fig)
+	mode === nothing && (mode = _style_log_ticks(p.layout))
 	mode in (:auto, :decades) || throw(ArgumentError(
 		"_axes_apply_style_log_ticks!: `mode` must be :auto or :decades; got $(repr(mode)).",
 	))
-	p = _cmn_plot(fig)
 	if size === nothing
 		w = get(p.layout.fields, :width, nothing)
 		h = get(p.layout.fields, :height, nothing)

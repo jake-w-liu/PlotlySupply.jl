@@ -37,7 +37,10 @@ using Test, PlotlySupply
 			# cividis follows plotly.js/plotly.py (viridisLite), not matplotlib.
 			"cividis" => ("#00204D", "#FFEA46"),
 		)
-		@test Set(keys(P.COLORMAPS)) == Set(keys(ends))
+		# The registry holds exactly the built-in maps, apart from "ice": test/docs_examples.jl
+		# runs the registration example of docs/src/colors.md before this file when the
+		# whole suite runs, and COLORMAPS is a user-extensible global.
+		@test Set(keys(P.COLORMAPS)) ∪ Set(["ice"]) == Set(keys(ends)) ∪ Set(["ice"])
 		for (name, (first_colour, last_colour)) in ends
 			scale = resolve(name).scale
 			@test scale[1] == Any[0.0, first_colour]
@@ -634,7 +637,7 @@ using Test, PlotlySupply
 
 	@testset "colormap print classes: uniform and greyscale-safe maps (D14)" begin
 		classes = P._COLORMAP_PRINT_CLASSES
-		@test Set(keys(classes)) == Set(keys(P.COLORMAPS))
+		@test Set(keys(classes)) == setdiff(Set(keys(P.COLORMAPS)), Set(["ice"]))  # "ice": docs example, see above
 		lightness(h) = Float64(P.Colors.Lab(parse(P.Colors.RGB, h)).l)
 		step_cv(L) = (d = abs.(diff(L)); m = sum(d) / length(d); sqrt(sum((d .- m) .^ 2) / length(d)) / m)
 		for (name, info) in classes

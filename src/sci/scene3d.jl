@@ -655,7 +655,7 @@ function _s3_apply_options!(
 	_apply_figure_size!(fig, who; width = opts.width, height = opts.height)
 	# A legend first created by an append gets the box of the figure's own
 	# template (dark on plotly_dark), as in the other families (X13).
-	constructor ? _apply_default_template!(fig) :
+	constructor ? _apply_default_template!(fig; fresh = true) :
 		_apply_default_legend!(fig; _figure_legend_defaults(fig)...)
 	_apply_figure_fontsize!(fig, who, opts.fontsize)
 	(opts.view === nothing && state === nothing) && return nothing
@@ -962,7 +962,7 @@ const _S3_CELL_CONTEXT = Base.ScopedValues.ScopedValue{Union{Nothing, _S3CellCon
 # the figure exists (`fig === nothing`) are read from it.
 function _s3_new_figure_layout()
 	scratch = Plot(GenericTrace[], _s3_constructor_layout())
-	_apply_default_template!(scratch)
+	_apply_default_template!(scratch; fresh = true)
 	return scratch.layout
 end
 

@@ -350,6 +350,10 @@ function _band_impl!(
 		showlegend = showlegend,
 	)
 	traces = Vector{GenericTrace}(undef, n)
+	# A constructor's figure has no template yet (`_apply_default_template!`
+	# runs after the traces), so its default colours come from the layout a new
+	# figure gets: the active style's colorway, not plotly's.
+	colour_source = constructor && any(isempty(st.color) for st in styles) ? _s3_new_figure_layout() : fig
 	for band in 1:n
 		xi = xs[band]
 		_scat_check_values(xi, who, :x)
@@ -367,7 +371,7 @@ function _band_impl!(
 		px, py = _band_polygon(xv, lv, uv, mask, edge_width > 0)
 
 		style = styles[band]
-		band_color = isempty(style.color) ? _scat_default_color(fig, n_existing + band) : style.color
+		band_color = isempty(style.color) ? _scat_default_color(colour_source, n_existing + band) : style.color
 		line_color = isempty(edge) ? band_color : edge
 		fields = Dict{Symbol, Any}(
 			:x => px,

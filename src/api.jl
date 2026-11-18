@@ -430,11 +430,24 @@ end
 # constructors' `apply_template = true` path, `subplots`, `make_subplots`):
 # `_apply_style_layout!` writes colorbar fonts onto existing traces, which a
 # registered fast-path mutation cannot stage.
-function _apply_default_template!(fig)
+#
+# `fresh = true` is for the constructors only: nothing else references the
+# figure yet, so the template and the axis defaults are written straight into
+# its Layout instead of through the transactional `relayout!`/`update_xaxes!`
+# (each of which clones the template-bearing layout: 1.6 MB of allocation per
+# plot, Z79). The JSON is identical to the transactional path's.
+function _apply_default_template!(fig; fresh::Bool = false)
 	style = _active_style()
 	template = _style_template(style)
-	relayout!(fig, template = template)
-	_apply_default_cartesian_axes!(fig; style = style, template = template)
+	# A figure shown in a window (`SyncPlot`) always takes the transactional path.
+	fresh = fresh && fig isa Plot
+	if fresh
+		# A private copy: the style's template object is shared by every figure.
+		PlotlyBase.relayout!(_plot_layout(fig); template = deepcopy(template))
+	else
+		relayout!(fig, template = template)
+	end
+	_apply_default_cartesian_axes!(fig; style = style, template = template, fresh = fresh)
 	_apply_default_legend!(fig; _style_legend_defaults(style; template = template)...)
 	_apply_style_layout!(fig, style; template = template)
 	return nothing
@@ -490,6 +503,7 @@ function _apply_default_cartesian_axes!(
 	fig;
 	style = _active_style(),
 	template::PlotlyBase.Template = _style_template(style),
+	fresh::Bool = false,
 )
 	fields = _plot_layout(fig).fields
 	layout_keys = collect(keys(fields))
@@ -508,9 +522,12 @@ function _apply_default_cartesian_axes!(
 			push!(grid_updates, Symbol(key, "_showgrid") => showgrid)
 		end
 	end
-	x_defaults === nothing || update_xaxes!(fig; x_defaults...)
-	y_defaults === nothing || update_yaxes!(fig; y_defaults...)
-	isempty(grid_updates) || relayout!(fig; grid_updates...)
+	# `fresh`: the constructor's own Layout, written directly (see
+	# `_apply_default_template!`).
+	target = fresh ? _plot_layout(fig) : fig
+	x_defaults === nothing || update_xaxes!(target; x_defaults...)
+	y_defaults === nothing || update_yaxes!(target; y_defaults...)
+	isempty(grid_updates) || (fresh ? PlotlyBase.relayout!(target; grid_updates...) : relayout!(fig; grid_updates...))
 	return nothing
 end
 
@@ -3537,7 +3554,7 @@ function subplots(
 
 	# Build the complete model first, so a live window renders it once.
 	p = Plot(Vector{GenericTrace}(undef, 0), layout)
-	_apply_default_template!(p)
+	_apply_default_template!(p; fresh = true)
 	inset_records = _subplots_register_insets!(p, inset_fractions)
 	_apply_figure_title!(p, title)
 	_apply_figure_size!(p, "subplots"; width = width, height = height)
@@ -8617,7 +8634,7 @@ function _apply_cartesian_plot_options!(
 	# On first construction apply the default template; when appending to an
 	# existing figure only refresh the legend so a user-set template survives.
 	if apply_template
-		_apply_default_template!(fig)
+		_apply_default_template!(fig; fresh = true)
 	else
 		_apply_default_legend!(fig)
 	end
@@ -9252,7 +9269,7 @@ function _stats_apply_options!(
 	if mutator
 		_apply_default_legend!(fig)
 	else
-		_apply_default_template!(fig)
+		_apply_default_template!(fig; fresh = true)
 	end
 	_apply_figure_fontsize!(fig, who, options.fontsize)
 	mutator && _refresh!(fig)
@@ -9407,9 +9424,8 @@ const _SCAT_TEXT_POSITIONS = (
 	"bottom center",
 	"bottom right",
 )
-# Stem lines keep the 1.x look (thin black) unless a colour, a line width or
-# an active PlotStyle says otherwise.
-const _STEM_DEFAULT_COLOR = "black"
+# Stem lines keep the 1.x look (thin, in the template's ink: black on light
+# templates) unless a colour, a line width or an active PlotStyle says otherwise.
 const _STEM_DEFAULT_LINEWIDTH = 0.5
 # plotly.js `zorder` of stems traces: below the default layer 0 of every other
 # trace on the same axes.
@@ -12159,7 +12175,15 @@ function _stem_impl!(
 		# Stems take the series colour only when one is given (`color`, or the
 		# active style's cycle); the colorway colour resolved above for
 		# white-faced or line-symbol heads stays on the heads.
-		stem_color = isempty(style.color) ? _STEM_DEFAULT_COLOR : String(style.color)
+		stem_color = if !isempty(style.color)
+			String(style.color)
+		else
+			# A constructor's figure carries PlotlyBase's own template until
+			# `_apply_default_template!` runs: the active style's one decides.
+			ink = constructor ? _template_ink(_style_template()) : _style_ink(fig)
+			# The 1.x spelling on light templates.
+			ink == _DEFAULT_AXIS_LINECOLOR ? "black" : ink
+		end
 		stem_line = attr(color = stem_color)
 		if style.linewidth > 0
 			stem_line.fields[:width] = style.linewidth
@@ -13207,7 +13231,7 @@ function _scatterpolar_impl!(
 	rotation === nothing || relayout!(fig; polar_angularaxis_rotation = rotation)
 	isempty(unit) || relayout!(fig; polar_angularaxis_thetaunit = unit)
 	_apply_figure_size!(fig, who; width = width, height = height)
-	constructor ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	constructor ? _apply_default_template!(fig; fresh = true) : _apply_default_legend!(fig)
 	_apply_figure_fontsize!(fig, who, fontsize)
 	return nothing
 end
@@ -13837,7 +13861,7 @@ function _field2d_apply_options!(
 	equalar && _field2d_equal_aspect!(fig, _cell_target(fig; secondary_y = ykey !== :yaxis, who = who), who)
 	_apply_figure_size!(fig, who; width = width, height = height)
 	(constructor && grid === true) || _apply_axis_grid!(fig, grid, who)
-	constructor ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	constructor ? _apply_default_template!(fig; fresh = true) : _apply_default_legend!(fig)
 	_apply_figure_fontsize!(fig, who, fontsize)
 	return nothing
 end
@@ -17864,7 +17888,7 @@ function _apply_basic_plot_options!(
 	_apply_figure_title!(fig, title)
 	_apply_figure_size!(fig, who; width = width, height = height)
 	if apply_template
-		_apply_default_template!(fig)
+		_apply_default_template!(fig; fresh = true)
 	else
 		# A legend first created by an append gets the box that matches the
 		# figure's own template (dark on plotly_dark), not the light default.
@@ -18129,7 +18153,7 @@ function _extended_apply_figure_options!(
 )
 	_apply_figure_title!(fig, title)
 	_apply_figure_size!(fig, who; width = width, height = height)
-	apply_template ? _apply_default_template!(fig) : _apply_default_legend!(fig)
+	apply_template ? _apply_default_template!(fig; fresh = true) : _apply_default_legend!(fig)
 	_apply_figure_fontsize!(fig, who, fontsize)
 	return nothing
 end
