@@ -82,9 +82,11 @@ format. Check a file with `pdffonts figure.pdf`.
 - An unwritable destination directory, an unsupported `format` and an invalid
   `PLOTLYSUPPLY_MATHJAX_SVG_FONT` raise an `ArgumentError` before anything is
   drawn.
-- Lines are exported with every vertex (`line.simplify = false`), so thin
-  features of a long line survive; `plot_scatter(...; simplify = true)` opts
-  in to plotly.js' line simplification for a figure.
+- Static exports (PDF, SVG, EPS, PNG, JPEG, TIFF) draw every vertex of a line
+  (`line.simplify = false`), so the peaks of a dense curve do not show as
+  corners at high resolution; windows and HTML files keep plotly.js' line
+  simplification. `plot_scatter(...; simplify = true)` (or `false`) sets it
+  for a trace explicitly, in every output.
 
 Several files from one render, and export to a stream:
 

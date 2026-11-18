@@ -890,6 +890,20 @@ end
 	plot_scatter!(sf, 1:3, [1, 2, 3]; row = 1, col = 1); plot_scatter!(sf, 1:3, [3, 2, 1]; row = 1, col = 2)
 	update_xaxes!(sf; row = 1, col = 2, title_text = "x")
 	@test !haskey(sf.fig.layout[:xaxis], :title) && haskey(sf.fig.layout[:xaxis2], :title)
+	# CHANGELOG 2.0.0 entries added with the wave-5b merge.
+	@test plot_scatterpolar(0:10, 1:11; rrange = (nothing, 12)) isa Plot
+	@test_throws ArgumentError plot_scatter(1:3, [1, 2, 3]; yrange = ("a", "b"))
+	psf = subplots(1, 2; sync = false)
+	@test_throws ArgumentError panel_labels!(psf; row = 1, col = 1)
+	@test_throws ArgumentError update_xaxes!(plot_scatter(1:3, 1:3); row = 1, col = 1, title_text = "x")
+	band = with_style(:ieee) do
+		plot_band(1:3, [1, 1, 1], [2, 2, 2])
+	end
+	@test string(band.data[1][:fillcolor]) != "#636EFA" && !occursin("99, 110, 250", string(band.data[1][:fillcolor]))
+	lf = plot_scatter(1:3, 1:3)
+	xlabel!(lf, "a very long x axis title that has to be written on one line only"; wrap = false)
+	ylabel!(lf, "a very long y axis title"; wrap = false)
+	@test occursin("\u00a0", lf.layout[:xaxis][:title][:text])           # no-break spaces keep it on one line
 	# HTML export: the page embeds plotly.js and two exports of one figure are the same bytes (export.md).
 	mktempdir() do dir
 		fig = plot_scatter(1:5, rand(5))

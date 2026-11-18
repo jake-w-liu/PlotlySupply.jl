@@ -304,7 +304,7 @@ pixels at `dpi = 600`).
 A colorbar, an outside legend, a panel title, a panel label and a secondary
 axis each take room from the cell they belong to, or from the figure margin,
 never from a neighbouring panel: the cell's plot area shrinks on that side
-(cells that share the grid edge shrink alike, by at most half the cell). A
+(cells that share the grid edge shrink alike, by at most two thirds of the cell). A
 figure that already fits is not changed; explicit domains, legend positions
 and colorbar `x`/`y` that you set are kept; repeating a call gives the same
 figure. See [Subplots](subplots.md) for the details and the exceptions.

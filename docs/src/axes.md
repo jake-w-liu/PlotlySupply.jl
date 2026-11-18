@@ -91,6 +91,12 @@ f = plot_scatter([1e-3, 1e3], [1e-2, 1e4]; xscale = "log", yscale = "log")
 yticks!(f; subs = (1, 2, 5), minor = true)
 ```
 
+## Long axis titles
+
+An axis title that would run off the figure is broken between words when the
+figure is finalized; the margin and the title standoff grow to hold the lines.
+`xlabel!(fig, text; wrap = false)` (and `ylabel!`) keep the title on one line.
+
 ## Tick values, labels and format
 
 [`xticks!`](@ref) and [`yticks!`](@ref) take tick values in data units and an

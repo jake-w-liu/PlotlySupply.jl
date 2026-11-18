@@ -99,7 +99,9 @@ sits at `(x, y)`, `background`/`edgecolor` draw a box, and
 `fit = (w, h)` with `wrap = true` shrinks and breaks the text to fill a box
 in data units. With `coords = :figure`, text without an arrow that reaches below the
 plot area is a caption: the bottom margin grows so it sits below the x tick
-labels and title. `name`, `xshift` and `yshift` cannot be combined with
+labels and title; the figure legend placed below the plot (`:outside_bottom`)
+moves up above the caption. Figure annotations are placed again at every
+finalize and on the copy `savefig` exports. `name`, `xshift` and `yshift` cannot be combined with
 `:figure` (use `offset`), and values outside `[0, 1]` raise an
 `ArgumentError`. Margins that change after the last `annotate!` (a legend
 moved below the plot, `tight_layout!`) are not followed until the next call.

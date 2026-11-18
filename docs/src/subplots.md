@@ -156,8 +156,8 @@ figure margin, never from a neighbouring cell. The rules:
 
 - A cell gives up room on the side where its decorations need more than the
   gap to the next cell holds: its plot area shrinks, and the cells that share
-  that grid edge shrink alike, by at most half a cell. At the edge of the
-  figure the margin grows instead. A bottom colorbar sits below the x tick
+  that grid edge shrink alike, by at most two thirds of a cell. At the edge of
+  the figure the margin grows instead. A bottom colorbar sits below the x tick
   labels and the x title.
 - Above a cell the stack is, from the axes upwards: the secondary x axis, a
   legend placed above the axes, the panel title; a panel label sits at the
@@ -165,7 +165,13 @@ figure margin, never from a neighbouring cell. The rules:
   axes without one).
 - A figure that already fits is not changed. Domains, legend positions and
   colorbar `x`/`y` that you set yourself always win, and the result is
-  idempotent: repeating a call, or exporting, gives the same layout.
+  idempotent: repeating a call, or exporting, gives the same layout. The
+  domains the engine narrows are recorded in `layout.meta["plotlysupply:room"]`
+  (area => `[x0, x1, y0, y1]`): a domain equal to its record is given back when
+  the room is no longer needed, any other narrowed domain is yours and is kept
+  (a `meta` that is not a dictionary switches the record off).
+- Equal-aspect cells place their titles, panel labels and corner legends on the
+  fitted plot box, not on the cell.
 - Sizes are estimated from the figure size in pixels (`layout.width`, else
   700), the font sizes and the text lengths, generously, and the layout is
   fitted again on the copy that `savefig` exports at its real size. Set the
@@ -217,7 +223,10 @@ or into the figure margin.
 Widths are estimated at `layout.width` (else 700 px); if the export is
 narrower, plotly grows the margin. A cell legend wider than its cell (long
 labels) overflows it even in one column, and a position that equals the rule's
-choice still follows the data. A figure legend taller than the plot area
+choice still follows the data. A legend you place inside a cell is kept even
+when it is taller or wider than the plot area: it overflows, and the engine asks
+for no room for it (room taken from the cell would shrink the plot and make the
+overflow worse), so use `ncols`, a smaller `fontsize` or an outside position. A figure legend taller than the plot area
 (a long legend above a small panel in a short figure) is clipped by plotly
 with a scrollbar in a window; a `tight = true` export shows it whole.
 
