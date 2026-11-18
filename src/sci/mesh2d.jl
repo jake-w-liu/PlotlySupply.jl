@@ -78,6 +78,8 @@ const _MESH2D_COLORAXIS_KEY = r"^coloraxis([2-9]|[1-9][0-9]+)?$"
 # SubplotFigure path fills it from the target cell because the mutator runs on
 # the delegate's empty scratch figure:
 # - `anchor_xref`: x axis id the equal-aspect `scaleanchor` must name;
+# - `overlay_y`: the cell's y axis is an overlaying twin (`secondary_y`), whose
+#   equal aspect is kept by its range (`_field2d_overlay_aspect!`);
 # - `color_index`: 1-based position of the new uniform-colour trace in the
 #   cell's colour cycle;
 # - `defaults`: the layout whose template supplies default colours/scales;
@@ -89,31 +91,47 @@ mutable struct _Mesh2dTarget
 	color_index::Union{Nothing, Int}
 	defaults::Any
 	coloraxis_write::Union{Nothing, Tuple{String, Dict{Symbol, Any}}}
+	overlay_y::Bool
 end
 
-_Mesh2dTarget() = _Mesh2dTarget(nothing, nothing, nothing, nothing)
+_Mesh2dTarget() = _Mesh2dTarget(nothing, nothing, nothing, nothing, false)
 
 # ---------------------------------------------------------------------------
 # Keyword and scalar validation
 # ---------------------------------------------------------------------------
 
-function _mesh2d_reject_extra(who::AbstractString, extra)
-	isempty(extra) && return nothing
+# The keywords a mesh function takes beyond its documented list (its
+# `extra...`). A Plot/SyncPlot mutator accepts `secondary_y::Bool` (Z31: the
+# mesh is drawn on the twin y axis, created on first use); it is returned
+# (`false` when absent). `show` on a mutator, `row`/`col`, `secondary_y` on a
+# constructor and every other keyword are an ArgumentError.
+function _mesh2d_reject_extra(who::AbstractString, extra; constructor::Bool = false)
+	secondary_y = false
+	isempty(extra) && return secondary_y
 	names = collect(keys(extra))
 	:show in names && throw(ArgumentError(
 		"$(who): mutators do not take `show`; the mesh is added to the figure " *
 		"you pass (display it, or call `to_syncplot(fig)` for a window).",
 	))
-	for name in (:row, :col, :secondary_y)
+	for name in (:row, :col)
 		name in names && throw(ArgumentError(
 			"$(who): `$(name)` selects a SubplotFigure cell; a Plot or SyncPlot " *
 			"has a single cell, so omit it.",
 		))
 	end
-	throw(ArgumentError(
+	unknown = Symbol[]
+	for (name, value) in pairs(extra)
+		if name === :secondary_y && !constructor
+			secondary_y = _mesh2d_bool(value, who, "secondary_y")
+		else
+			push!(unknown, name)
+		end
+	end
+	isempty(unknown) || throw(ArgumentError(
 		"$(who): unsupported keyword argument(s) " *
-		"$(join(("`$(name)`" for name in names), ", ")).",
+		"$(join(("`$(name)`" for name in unknown), ", ")).",
 	))
+	return secondary_y
 end
 
 _mesh2d_is_real(v) = v isa Real && !(v isa Bool)
@@ -561,6 +579,16 @@ function _mesh2d_tvalue(v, who::AbstractString, i::Int)
 	return isfinite(v) ? Float64(v) : NaN
 end
 
+# The colour value of every entry (`_mesh2d_tvalue`), into a new vector. A
+# function barrier: the loop is compiled for the concrete type of `values`.
+function _mesh2d_tvalues(values, who::AbstractString)
+	tvals = Vector{Float64}(undef, length(values))
+	for (i, v) in enumerate(values)
+		tvals[i] = _mesh2d_tvalue(v, who, i)
+	end
+	return tvals
+end
+
 function _mesh2d_check_values(values, n::Int, who::AbstractString, what::AbstractString)
 	(values isa AbstractVector) || throw(ArgumentError(
 		"$(who): `values` must be a vector; got $(typeof(values)).",
@@ -585,6 +613,11 @@ extrema of the values (plotly's `zmid` symmetry when only `cmid` is given; a
 constant field gets `±0.5` like plotly). With a `coloraxis` that already has
 numeric limits and an automatic `crange`, those limits are reused (a shared
 norm, as matplotlib's `Normalize` keeps its first autoscale).
+
+`validated = true` says `values` is a `Vector{Float64}` that
+`_mesh2d_cell_values` produced (NaN = not drawn): when the norm returns the
+values unchanged (linear, no levels) they are the colour values as they are,
+without a second copy (Z84). `cm.tvals` is only ever read.
 """
 function _mesh2d_colour(
 	fig,
@@ -602,6 +635,7 @@ function _mesh2d_colour(
 	colorbar_ticklabels,
 	coloraxis,
 	who::AbstractString,
+	validated::Bool = false,
 )
 	norm_kind = _normalize_colornorm(colornorm, who)
 	axis_id = coloraxis === nothing ? nothing : _normalize_coloraxis(coloraxis, who)
@@ -630,9 +664,10 @@ function _mesh2d_colour(
 		ticklabels = colorbar_ticklabels,
 		who = who,
 	)
-	tvals = Vector{Float64}(undef, length(values))
-	for (i, v) in enumerate(norm.values)
-		tvals[i] = _mesh2d_tvalue(v, who, i)
+	tvals = if validated && norm.values === values && values isa Vector{Float64}
+		values
+	else
+		_mesh2d_tvalues(norm.values, who)
 	end
 	cmin, cmax = norm.cmin, norm.cmax
 	if cmin === nothing
@@ -830,16 +865,21 @@ end
 
 # Validate the common figure keywords and resolve the drawing cell; nothing is
 # written. Returns `(cell, xtype, ytype)` where the axis types are the ones the
-# call ends with (the requested scale, else the current axis type).
-function _mesh2d_prepare_figure(fig, who::AbstractString, fo)
+# call ends with (the requested scale, else the current axis type). With
+# `secondary_y` (Z31) the y keywords are checked against the twin y axis (a
+# new twin when the figure has none yet); `cell` stays the primary cell until
+# `_mesh2d_bind_y!` creates the twin.
+function _mesh2d_prepare_figure(fig, who::AbstractString, fo; secondary_y::Bool = false)
 	for (name, value) in (("xscale", fo.xscale), ("yscale", fo.yscale))
 		value isa AbstractString || throw(ArgumentError(
 			"$(who): `$(name)` must be a string such as \"log\" (\"\" leaves the axis type unchanged); got $(repr(value)).",
 		))
 	end
+	twin_key = _scat_twin_key(fig, secondary_y)
 	_field2d_validate_cartesian(
 		fig,
 		who;
+		ykey = twin_key,
 		xrange = fo.xrange,
 		yrange = fo.yrange,
 		xscale = fo.xscale,
@@ -860,6 +900,7 @@ function _mesh2d_prepare_figure(fig, who::AbstractString, fo)
 		ytickformat = fo.ytickformat,
 		xscale = fo.xscale,
 		yscale = fo.yscale,
+		ykey = twin_key,
 	)
 	_mesh2d_bool(fo.equalar, who, "equalar")
 	# Run the label pipeline once now so an invalid label fails before any
@@ -873,15 +914,34 @@ function _mesh2d_prepare_figure(fig, who::AbstractString, fo)
 	))
 	layout = _plot_layout(fig)
 	xtype = isempty(fo.xscale) ? _axis_type(layout, :xaxis) : String(fo.xscale)
-	ytype = isempty(fo.yscale) ? _axis_type(layout, :yaxis) : String(fo.yscale)
+	# A twin created by this call starts autotyped.
+	ytype = !isempty(fo.yscale) ? String(fo.yscale) :
+		twin_key === nothing ? "-" : _axis_type(layout, twin_key)
 	return cell, xtype, ytype
+end
+
+# Z31: bind the call's new `traces` to the twin y axis of `secondary_y = true`
+# (created on first use by `_ensure_twin_y!`; call after every keyword is
+# validated) and return the cell the call draws on. Without `secondary_y`
+# `cell` is returned unchanged.
+function _mesh2d_bind_y!(fig, traces, cell::_CellTarget, secondary_y::Bool, who::AbstractString)
+	secondary_y || return cell
+	_, yref = _stats_target_y!(fig, true, who)
+	_stats_bind_y!(traces, yref)
+	return _cell_target(fig; secondary_y = true, who = who)
 end
 
 # Apply the common figure keywords after the traces (indices `first_new:end`)
 # were pushed, then the field finish (`_field2d_finish!`: math colorbar titles
-# of the new traces and of `coloraxis`, X1; `_finalize_figure!`, D10). Line
-# widths already follow the style (`_field2d_style_linewidth`), so no style
-# pass runs here: fill traces draw cell outlines whose width is `edgewidth`.
+# of the new traces and of `coloraxis`, X1; style trace defaults, Z61;
+# `_finalize_figure!`, D10). The figure options go through
+# `_apply_cartesian_plot_options!` on the cell's axes (`cell.ykey` is a twin y
+# axis with `secondary_y`), whose range primitive writes full ranges and the
+# one-sided limits of D11; then the equal aspect, after which the one-sided
+# limits on the now aspect-linked axes become full ranges
+# (`_resolve_linked_limits!`, Z54). Line widths already follow the style
+# (`_field2d_style_linewidth`): fill traces draw cell outlines whose width is
+# `edgewidth`.
 function _mesh2d_finish!(
 	fig,
 	target::_Mesh2dTarget,
@@ -892,17 +952,12 @@ function _mesh2d_finish!(
 	first_new::Int,
 	coloraxis = nothing,
 )
-	# A one-sided limit (D11) replaces the axis range: its scale is applied
-	# here, then the limit, then the ticks (validated in
-	# `_mesh2d_prepare_figure`) against the final axis type and range.
-	x_partial = _field2d_is_partial(fo.xrange)
-	y_partial = _field2d_is_partial(fo.yrange)
 	_apply_cartesian_plot_options!(
 		fig;
 		xlabel = fo.xlabel,
 		ylabel = fo.ylabel,
-		xrange = _field2d_two_sided(fo.xrange),
-		yrange = _field2d_two_sided(fo.yrange),
+		xrange = fo.xrange,
+		yrange = fo.yrange,
 		width = fo.width,
 		height = fo.height,
 		# Constructors: `true` keeps the template grid. Mutators: `nothing`
@@ -910,36 +965,31 @@ function _mesh2d_finish!(
 		grid = constructor ? fo.grid : nothing,
 		fontsize = fo.fontsize,
 		title = fo.title,
-		xscale = x_partial ? "" : fo.xscale,
-		yscale = y_partial ? "" : fo.yscale,
-		apply_template = constructor,
-		refresh = false,
-		who = who,
-	)
-	x_partial && _apply_axis_scale!(fig, :x, fo.xscale, who)
-	y_partial && _apply_axis_scale!(fig, :y, fo.yscale, who)
-	# The equal aspect before the one-sided limits, which are written
-	# differently on an aspect-constrained axis.
-	if fo.equalar
-		anchor = target.anchor_xref === nothing ? cell.xref : target.anchor_xref
-		_apply_equal_aspect!(
-			fig,
-			_CellTarget(:xy, cell.row, cell.col, cell.xkey, cell.ykey, anchor, cell.yref, :none, cell.xdomain, cell.ydomain);
-			who = who,
-		)
-	end
-	_field2d_apply_partial_range!(fig, :xaxis, fo.xrange; who = who)
-	_field2d_apply_partial_range!(fig, :yaxis, fo.yrange; who = who)
-	_field2d_apply_ticks!(
-		fig,
-		who;
+		xscale = fo.xscale,
+		yscale = fo.yscale,
 		xticks = fo.xticks,
 		xticklabels = fo.xticklabels,
 		xtickformat = fo.xtickformat,
 		yticks = fo.yticks,
 		yticklabels = fo.yticklabels,
 		ytickformat = fo.ytickformat,
+		ykey = cell.ykey,
+		apply_template = constructor,
+		refresh = false,
+		who = who,
 	)
+	if fo.equalar
+		# Inside a SubplotFigure call the scratch figure's x axis stands for
+		# the cell's (`target.anchor_xref`).
+		anchor = target.anchor_xref === nothing ? cell.xref : target.anchor_xref
+		_apply_equal_aspect!(
+			fig,
+			_CellTarget(:xy, cell.row, cell.col, cell.xkey, cell.ykey, anchor, cell.yref, :none, cell.xdomain, cell.ydomain);
+			who = who,
+		)
+		target.overlay_y ? _field2d_overlay_aspect!(fig, cell.ykey, true) : _field2d_overlay_aspect!(fig, cell.ykey)
+		_resolve_linked_limits!(fig, ((cell.xkey, (cell.xkey,)), (cell.ykey, (cell.ykey,))), who)
+	end
 	constructor || _apply_axis_grid!(fig, fo.grid, who)
 	_field2d_finish!(fig, first_new; coloraxis = coloraxis)
 	constructor || _refresh!(fig)
@@ -957,16 +1007,9 @@ function _mesh2d_new_figure(show, who::AbstractString)
 end
 
 # The constructor result: the Plot, or a window showing it (the figure size
-# and title, which the mesh call has validated, size and name the window).
-function _mesh2d_show(fig, show::Bool, fo)
-	show || return fig
-	return to_syncplot(
-		fig;
-		width = fo.width > 0 ? fo.width : _SYNCPLOT_DEFAULT_WIDTH,
-		height = fo.height > 0 ? fo.height : _SYNCPLOT_DEFAULT_HEIGHT,
-		title = isempty(fo.title) ? _SYNCPLOT_DEFAULT_TITLE : fo.title,
-	)
-end
+# and title, which the mesh call has validated, size and name the window;
+# `to_syncplot` maps the 0 / "" sentinels to its defaults, Z25).
+_mesh2d_show(fig, show::Bool, fo) = _maybe_show(fig, show, fo.width, fo.height, fo.title)
 
 # Default fill colour of a new uniform-colour trace.
 function _mesh2d_default_color(fig, target::_Mesh2dTarget)
@@ -1042,7 +1085,8 @@ function _mesh2d_subplot!(
 				_mesh2d_trace_ref(trace, :yaxis, "y") == cell.yref,
 			live.data,
 		)
-		target = _Mesh2dTarget(cell.xref, in_cell + 1, live.layout, nothing)
+		overlay_y = _cmn_mapping_get(get(live.layout.fields, cell.ykey, nothing), :overlaying) !== nothing
+		target = _Mesh2dTarget(cell.xref, in_cell + 1, live.layout, nothing, overlay_y)
 		mutator = function (staged, margs...; mkwargs...)
 			target.coloraxis_write = nothing
 			_mesh2d_seed_scratch!(staged, live)
@@ -1124,6 +1168,7 @@ function _mesh2d_draw_cells!(
 	legend,
 	tight::Bool,
 	extra_traces::Vector{GenericTrace} = GenericTrace[],
+	secondary_y::Bool = false,
 )
 	ncells = _mesh2d_ncells(rings)
 	edge = _mesh2d_color(edgecolor, who, "edgecolor"; allow_face = true)
@@ -1235,6 +1280,7 @@ function _mesh2d_draw_cells!(
 	hover_trace === nothing || push!(traces, hover_trace)
 
 	# --- writes ---------------------------------------------------------------
+	cell = _mesh2d_bind_y!(fig, traces, cell, secondary_y, who)
 	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	cm === nothing || _mesh2d_write_coloraxis!(fig, target, cm, showscale !== nothing)
@@ -1287,10 +1333,11 @@ function _mesh2d_hover_trace(cx::AbstractVector{Float64}, cy::AbstractVector{Flo
 end
 
 # The figure keywords every mesh function takes, as one NamedTuple. The axis
-# ranges are normalised as for the other field functions (X23, D11): `[0, 0]`,
-# `nothing` and `[nothing, nothing]` become `nothing` (automatic, the axis is
-# left alone); a one-sided `(lo, nothing)`/`(nothing, hi)` is kept; equal,
-# `missing` or Bool bounds throw. The tick keywords (G30) are checked in
+# ranges are checked as for the other field functions (X23, D11, Z53:
+# `_checked_range(...; partial = true)`): `[0, 0]`, `nothing` and
+# `[nothing, nothing]` become `nothing` (automatic, the axis is left alone); a
+# one-sided `(start, nothing)`/`(nothing, stop)` is kept; equal, `missing` or
+# Bool bounds throw. The tick keywords (G30) are checked in
 # `_mesh2d_prepare_figure`.
 _mesh2d_figure_options(
 	who::AbstractString;
@@ -1406,9 +1453,9 @@ function _mesh2d_polygons_impl!(
 	extra...,
 )
 	who = constructor ? "plot_polygons" : "plot_polygons!"
-	_mesh2d_reject_extra(who, extra)
+	secondary_y = _mesh2d_reject_extra(who, extra; constructor = constructor)
 	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
-	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
+	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo; secondary_y = secondary_y)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	_mesh2d_bool(tight, who, "tight")
 	kind = _mesh2d_first_kind(a, who)
@@ -1441,7 +1488,7 @@ function _mesh2d_polygons_impl!(
 		who, constructor, color, colorscale, crange, cmid, colornorm, levels, ncolors,
 		edgecolor, edgewidth, opacity, hatch, showscale, colorbar_title,
 		colorbar_title_side = title_side, colorbar_ticks, colorbar_ticklabels, coloraxis,
-		hover, legend, tight,
+		hover, legend, tight, secondary_y,
 	)
 	return nothing
 end
@@ -1530,11 +1577,12 @@ Figure:
   `xrange`, `yrange = [0, 0]`: axis limits `(lower, upper)` in data units,
   also on log axes, with autorange off; `[0, 0]`, `nothing` or
   `[nothing, nothing]` leaves the axis automatic; a one-sided
-  `(lo, nothing)`/`(nothing, hi)` fixes that bound and autoranges the other
-  (matplotlib `set_xlim(left = lo)`; with `equalar = true` the other is fixed
-  at the current data extent, as plotly.js re-ranges an equal-aspect axis);
-  two bounds must differ, and Bool or
-  `missing` bounds throw. `xscale`, `yscale = ""` (`"linear"`,
+  `(start, nothing)`/`(nothing, stop)` fixes the start (left/bottom end) or
+  the stop of the axis and autoranges the other end, as [`xrange!`](@ref)
+  does (matplotlib `set_xlim(left = start)`; with `equalar = true` the other
+  end is fixed at the mesh's current view, as plotly.js re-ranges an
+  equal-aspect axis); two bounds must differ, Bool bounds throw, and an open
+  bound is written `nothing`. `xscale`, `yscale = ""` (`"linear"`,
   `"log"`, ...; on a log axis every coordinate must be positive), `width`,
   `height`, `fontsize::Real = 0` (0 = automatic), `grid = true` (`false`,
   `:x`, `:y`, `:both`, `:none`).
@@ -1570,7 +1618,7 @@ end
 _mesh2d_show_options(; width = 0, height = 0, title = "", kwargs...) = (; width, height, title)
 
 """
-	plot_polygons!(fig, px, py, values = nothing; kwargs...) -> nothing
+	plot_polygons!(fig, px, py, values = nothing; secondary_y = false, kwargs...) -> nothing
 	plot_polygons!(fig, x, y, cells, values = nothing; kwargs...) -> nothing
 	plot_polygons!(sf::SubplotFigure, ...; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
@@ -1589,6 +1637,12 @@ Takes the arguments and keywords of [`plot_polygons`](@ref) except `show`
   leaves them as they are.
 - `title`/`width`/`height` on a SubplotFigure are figure-level and ignored
   with a warning (set them on `subplots` or with `relayout!`).
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a SubplotFigure.
 
@@ -1625,17 +1679,18 @@ end
 # plot_pcolormesh
 # ---------------------------------------------------------------------------
 
-# Cell values of a (possibly node-valued) C on an m x n node grid: C of size
-# (m-1, n-1) is per cell; (m, n) is per node and each cell gets the mean of its
-# 4 corners (a non-finite or missing corner leaves the cell undrawn).
+# Cell values of a (possibly node-valued) C on an m x n node grid, validated
+# in place into one Matrix{Float64} (Z84: no Matrix{Any}, no later pass over
+# C): C of size (m-1, n-1) is per cell; (m, n) is per node and each cell gets
+# the mean of its 4 corners. `missing`, `nothing` and non-finite entries (a
+# non-finite or missing corner) are NaN: the cell is not drawn. Entries are
+# numbered column-major in error messages. A function barrier over `C`, so a
+# Matrix{Float64} input is read without boxing.
 function _mesh2d_cell_values(C::AbstractMatrix, m::Int, n::Int, who::AbstractString)
 	if size(C) == (m - 1, n - 1)
-		out = Matrix{Any}(undef, m - 1, n - 1)
+		out = Matrix{Float64}(undef, m - 1, n - 1)
 		for j in 1:(n - 1), i in 1:(m - 1)
-			out[i, j] = C[i, j]
-		end
-		for (k, v) in enumerate(out)
-			_mesh2d_tvalue(v, who, k)
+			out[i, j] = _mesh2d_tvalue(C[i, j], who, (j - 1) * (m - 1) + i)
 		end
 		return out
 	elseif size(C) == (m, n)
@@ -1643,7 +1698,7 @@ function _mesh2d_cell_values(C::AbstractMatrix, m::Int, n::Int, who::AbstractStr
 		for j in 1:n, i in 1:m
 			node[i, j] = _mesh2d_tvalue(C[i, j], who, (j - 1) * m + i)
 		end
-		out = Matrix{Any}(undef, m - 1, n - 1)
+		out = Matrix{Float64}(undef, m - 1, n - 1)
 		for j in 1:(n - 1), i in 1:(m - 1)
 			out[i, j] = (node[i, j] + node[i + 1, j] + node[i + 1, j + 1] + node[i, j + 1]) / 4
 		end
@@ -1726,9 +1781,9 @@ function _mesh2d_pcolormesh_impl!(
 	extra...,
 )
 	who = constructor ? "plot_pcolormesh" : "plot_pcolormesh!"
-	_mesh2d_reject_extra(who, extra)
+	secondary_y = _mesh2d_reject_extra(who, extra; constructor = constructor)
 	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
-	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
+	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo; secondary_y = secondary_y)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	_mesh2d_bool(tight, who, "tight")
 	vector_form = X isa AbstractVector
@@ -1763,14 +1818,17 @@ function _mesh2d_pcolormesh_impl!(
 		_mesh2d_ncolors(ncolors, who)
 		alpha = _mesh2d_opacity(opacity, who)
 		_mesh2d_bool(hover, who, "hover")
-		vals = vec(cellvals)
 		cm = _mesh2d_colour(
-			fig, target, vals;
+			fig, target, vec(cellvals);
 			colorscale, crange, cmid, colornorm, levels, showscale, colorbar_title,
 			colorbar_title_side = title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, who,
+			validated = true,
 		)
-		Z = reshape(copy(cm.tvals), m - 1, n - 1)
-		raw = reshape(Float64[_mesh2d_tvalue(v, who, k) for (k, v) in enumerate(vals)], m - 1, n - 1)
+		# Views of the validated values, not copies (Z84): under a linear norm
+		# `cm.tvals` IS `cellvals`; neither is written, the trace builder copies
+		# into its own rows, and the flips below index into new arrays.
+		Z = reshape(cm.tvals, m - 1, n - 1)
+		raw = cellvals
 		xe, ye = xv, yv
 		if xe[1] > xe[end]
 			xe = reverse(xe)
@@ -1783,6 +1841,7 @@ function _mesh2d_pcolormesh_impl!(
 			raw = raw[:, end:-1:1]
 		end
 		trace = _mesh2d_heatmap_trace(xe, ye, Z, raw, cm; opacity = alpha, hover = hover, tight = tight)
+		cell = _mesh2d_bind_y!(fig, (trace,), cell, secondary_y, who)
 		first_new = length(_plot_data(fig)) + 1
 		push!(_plot_data(fig), trace)
 		_mesh2d_write_coloraxis!(fig, target, cm, showscale !== nothing)
@@ -1815,7 +1874,7 @@ function _mesh2d_pcolormesh_impl!(
 		who, constructor, color = "", colorscale, crange, cmid, colornorm, levels, ncolors,
 		edgecolor, edgewidth, opacity, hatch, showscale, colorbar_title,
 		colorbar_title_side = title_side, colorbar_ticks, colorbar_ticklabels, coloraxis,
-		hover, legend = "", tight,
+		hover, legend = "", tight, secondary_y,
 	)
 	return nothing
 end
@@ -1880,7 +1939,7 @@ function plot_pcolormesh(X::AbstractArray, Y::AbstractArray, C::AbstractMatrix; 
 end
 
 """
-	plot_pcolormesh!(fig, X, Y, C; kwargs...) -> nothing
+	plot_pcolormesh!(fig, X, Y, C; secondary_y = false, kwargs...) -> nothing
 	plot_pcolormesh!(fig, x, y, C; kwargs...) -> nothing
 	plot_pcolormesh!(sf::SubplotFigure, ...; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
@@ -1891,6 +1950,12 @@ secondary y axis; `inset = k` for the `k`-th inset from [`inset!`](@ref)).
 Arguments and keywords as [`plot_pcolormesh`](@ref) except `show` (an
 `ArgumentError`); `grid = nothing` leaves the grid unchanged, and
 `xrange`/`yrange` act as for [`plot_polygons!`](@ref).
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a SubplotFigure.
 
@@ -2104,9 +2169,9 @@ function _mesh2d_tripcolor_impl!(
 	extra...,
 )
 	who = constructor ? "plot_tripcolor" : "plot_tripcolor!"
-	_mesh2d_reject_extra(who, extra)
+	secondary_y = _mesh2d_reject_extra(who, extra; constructor = constructor)
 	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
-	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
+	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo; secondary_y = secondary_y)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	_mesh2d_bool(tight, who, "tight")
 	(shading isa Symbol || shading isa AbstractString) || throw(ArgumentError(
@@ -2156,7 +2221,7 @@ function _mesh2d_tripcolor_impl!(
 			who, constructor, color = "", colorscale, crange, cmid, colornorm, levels, ncolors,
 			edgecolor = edges ? edgecolor : "", edgewidth = edges ? edge_width : 0,
 			opacity, hatch = "", showscale, colorbar_title, colorbar_title_side = title_side,
-			colorbar_ticks, colorbar_ticklabels, coloraxis, hover, legend = "", tight,
+			colorbar_ticks, colorbar_ticklabels, coloraxis, hover, legend = "", tight, secondary_y,
 		)
 		return nothing
 	end
@@ -2196,6 +2261,7 @@ function _mesh2d_tripcolor_impl!(
 	if edges && edge_width > 0
 		push!(traces, _mesh2d_edges_trace(tri; color = isempty(edge) ? "rgba(0,0,0,0.35)" : edge, width = edge_width, dash = "", opacity = 1.0, legend = ""))
 	end
+	cell = _mesh2d_bind_y!(fig, traces, cell, secondary_y, who)
 	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	_mesh2d_write_coloraxis!(fig, target, cm, showscale !== nothing)
@@ -2272,7 +2338,7 @@ function plot_tripcolor(x::AbstractVector, y::AbstractVector, triangles, values:
 end
 
 """
-	plot_tripcolor!(fig, x, y, triangles, values; kwargs...) -> nothing
+	plot_tripcolor!(fig, x, y, triangles, values; secondary_y = false, kwargs...) -> nothing
 	plot_tripcolor!(sf::SubplotFigure, x, y, triangles, values; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
 Add a triangular pseudocolour mesh to an existing `Plot`, `SyncPlot` (one
@@ -2282,6 +2348,12 @@ SubplotFigure cell (`row`/`col`, default the active cell; `secondary_y`,
 [`plot_tripcolor`](@ref) except `show` (an `ArgumentError`); `grid = nothing`
 leaves the grid unchanged, and `xrange`/`yrange` act as for
 [`plot_polygons!`](@ref).
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a SubplotFigure.
 
@@ -2349,9 +2421,9 @@ function _mesh2d_triplot_impl!(
 	extra...,
 )
 	who = constructor ? "plot_triplot" : "plot_triplot!"
-	_mesh2d_reject_extra(who, extra)
+	secondary_y = _mesh2d_reject_extra(who, extra; constructor = constructor)
 	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
-	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
+	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo; secondary_y = secondary_y)
 	line_color = _mesh2d_color(color, who, "color")
 	isempty(line_color) && (line_color = _mesh2d_default_color(fig, target))
 	line_width = _mesh2d_nonnegative(linewidth, who, "linewidth")
@@ -2364,6 +2436,7 @@ function _mesh2d_triplot_impl!(
 	tri = _mesh2d_triangulation(x, y, triangles, mask, who)
 	_mesh2d_tri_check_log(tri, xtype, ytype, who)
 	trace = _mesh2d_edges_trace(tri; color = line_color, width = line_width, dash = line_dash, opacity = alpha, legend = legend_text)
+	cell = _mesh2d_bind_y!(fig, (trace,), cell, secondary_y, who)
 	first_new = length(_plot_data(fig)) + 1
 	push!(_plot_data(fig), trace)
 	_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor, first_new = first_new)
@@ -2412,7 +2485,7 @@ function plot_triplot(x::AbstractVector, y::AbstractVector, triangles; show = fa
 end
 
 """
-	plot_triplot!(fig, x, y, triangles; kwargs...) -> nothing
+	plot_triplot!(fig, x, y, triangles; secondary_y = false, kwargs...) -> nothing
 	plot_triplot!(sf::SubplotFigure, x, y, triangles; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
 Add triangle-mesh edges to an existing `Plot`, `SyncPlot` (one renderer
@@ -2420,6 +2493,12 @@ transaction) or SubplotFigure cell (`row`/`col`, `secondary_y`, `inset = k`
 as for [`plot_polygons!`](@ref)), e.g. over a [`plot_tripcolor`](@ref).
 Keywords as [`plot_triplot`](@ref) except `show` (an `ArgumentError`);
 `grid = nothing` leaves the grid unchanged.
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a SubplotFigure.
 
@@ -2650,9 +2729,9 @@ function _mesh2d_tricontour_impl!(
 	extra...,
 )
 	who = constructor ? "plot_tricontour" : "plot_tricontour!"
-	_mesh2d_reject_extra(who, extra)
+	secondary_y = _mesh2d_reject_extra(who, extra; constructor = constructor)
 	fo = _mesh2d_figure_options(who; title, xlabel, ylabel, xrange, yrange, xscale, yscale, xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat, width, height, fontsize, grid, equalar)
-	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo)
+	cell, xtype, ytype = _mesh2d_prepare_figure(fig, who, fo; secondary_y = secondary_y)
 	tri = _mesh2d_triangulation(x, y, triangles, mask, who)
 	_mesh2d_tri_check_log(tri, xtype, ytype, who)
 	nnodes = length(tri.x)
@@ -2760,6 +2839,7 @@ function _mesh2d_tricontour_impl!(
 			:cliponaxis => false,
 		)))
 	end
+	cell = _mesh2d_bind_y!(fig, traces, cell, secondary_y, who)
 	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	_mesh2d_finish!(fig, target, who, fo, cell; constructor = constructor, first_new = first_new)
@@ -2830,7 +2910,7 @@ function plot_tricontour(x::AbstractVector, y::AbstractVector, triangles, values
 end
 
 """
-	plot_tricontour!(fig, x, y, triangles, values; kwargs...) -> nothing
+	plot_tricontour!(fig, x, y, triangles, values; secondary_y = false, kwargs...) -> nothing
 	plot_tricontour!(sf::SubplotFigure, x, y, triangles, values; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...) -> sf
 
 Add triangular-mesh contour lines to an existing `Plot`, `SyncPlot` (one
@@ -2838,6 +2918,12 @@ renderer transaction) or SubplotFigure cell (`row`/`col`, `secondary_y`,
 `inset = k` as for [`plot_polygons!`](@ref)), e.g. over a
 [`plot_tripcolor`](@ref). Keywords as [`plot_tricontour`](@ref) except `show`
 (an `ArgumentError`); `grid = nothing` leaves the grid unchanged.
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a SubplotFigure.
 

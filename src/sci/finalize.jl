@@ -380,8 +380,10 @@ mutable struct _FinAxisAcc
 	# Extent of the field traces alone (data units); the rest is overlays.
 	flo::Float64
 	fhi::Float64
+	# Quiver/streamline glyphs (traces carrying an anchor extent, D16).
+	glyphs::Bool
 end
-_FinAxisAcc() = _FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf)
+_FinAxisAcc() = _FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, false)
 
 function _fin_acc_extend!(acc::_FinAxisAcc, extent, field::Bool = false)
 	if extent === :unsupported
@@ -411,6 +413,19 @@ function _fin_collect_axes(p::Plot)
 	layout = p.layout
 	accs = Dict{Symbol, _FinAxisAcc}()
 	cache = Dict{Any, Union{Nothing, String}}()
+	# D16 (fields one-hop): on a `matches` group that holds a field, a quiver
+	# or streamline overlay counts with its anchor points
+	# (`_field2d_anchor_extent`), so arrows drawn from points inside the field
+	# do not widen its tight axes; elsewhere it counts with what it draws (and
+	# marks the group `glyphs`, see `_fin_padded_extent`).
+	field_roots = Set{Symbol}()
+	for trace in p.data
+		(trace isa GenericTrace && _fin_visible(trace) && _fin_field_kind(trace) !== nothing) || continue
+		for (field, default) in ((:xaxis, "x"), (:yaxis, "y"))
+			key = _fin_axis_key(get(trace.fields, field, default))
+			key === nothing || push!(field_roots, something(_fin_match_root(layout.fields, key), key))
+		end
+	end
 	for trace in p.data
 		trace isa GenericTrace || continue
 		_cmn_trace_kind(trace, cache) == "xy" || continue
@@ -431,7 +446,11 @@ function _fin_collect_axes(p::Plot)
 				acc.unsupported = true
 				continue
 			end
-			_fin_acc_extend!(acc, _fin_trace_extent(trace, letter, axis_type == "log"), kind !== nothing)
+			islog = axis_type == "log"
+			anchors = kind === nothing ? _field2d_anchor_extent(trace, letter, islog) : nothing
+			anchors === nothing || (acc.glyphs = true)
+			on_field = anchors !== nothing && something(_fin_match_root(layout.fields, key), key) in field_roots
+			_fin_acc_extend!(acc, on_field ? anchors : _fin_trace_extent(trace, letter, islog), kind !== nothing)
 		end
 	end
 	for (key, acc) in accs
@@ -536,14 +555,18 @@ end
 # the fields (in log10 units on a log axis). Data units.
 function _fin_padded_extent(acc::_FinAxisAcc, islog::Bool)
 	lo, hi = acc.lo, acc.hi
-	(isfinite(acc.flo) && isfinite(acc.fhi)) || return (lo, hi)
+	field = isfinite(acc.flo) && isfinite(acc.fhi)
+	# D13 (fields one-hop): quiver/streamline glyphs without a field are all
+	# overlay, padded on both sides: plotly.js autoranges line traces without
+	# padding, which cuts the arrowheads at the frame.
+	(field || acc.glyphs) || return (lo, hi)
 	tol(v) = 1e-12 * max(abs(v), 1.0)
 	l(v) = islog ? log10(v) : v
 	span = l(hi) - l(lo)
 	span > 0 || return (lo, hi)
 	pad = _FIN_OVERLAY_PAD * span
-	lo_out = lo < acc.flo - tol(acc.flo)
-	hi_out = hi > acc.fhi + tol(acc.fhi)
+	lo_out = !field || lo < acc.flo - tol(acc.flo)
+	hi_out = !field || hi > acc.fhi + tol(acc.fhi)
 	new_lo = lo_out ? (islog ? exp10(log10(lo) - pad) : lo - pad) : lo
 	new_hi = hi_out ? (islog ? exp10(log10(hi) + pad) : hi + pad) : hi
 	return (new_lo, new_hi)
@@ -599,12 +622,13 @@ function _fin_sticky_updates!(updates::Dict{Symbol, Any}, p::Plot)
 			acc.hi = max(acc.hi, macc.hi)
 			acc.flo = min(acc.flo, macc.flo)
 			acc.fhi = max(acc.fhi, macc.fhi)
+			acc.glyphs |= macc.glyphs
 		end
 		clip = _fin_sticky_clip(root_axis)
 		implicit_reversed = String(root)[1] == 'y' && acc.image_x !== nothing
 		mode, reversed = _fin_axis_mode(root_axis, clip, islog, implicit_reversed)
 		mode === :explicit && continue
-		sticky = acc.tight && !acc.loose && !acc.unsupported &&
+		sticky = (acc.tight || acc.glyphs) && !acc.loose && !acc.unsupported &&
 			isfinite(acc.lo) && isfinite(acc.hi) && acc.lo < acc.hi &&
 			(!islog || acc.lo > 0)
 		if sticky

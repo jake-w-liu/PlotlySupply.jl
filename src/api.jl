@@ -7497,50 +7497,24 @@ function _field2d_subplot!(
 			inset = inset,
 			who = who,
 		)
-		# The equal aspect before the ranges: a one-sided limit is written
-		# differently on an aspect-constrained axis.
-		equalar && _apply_equal_aspect!(staged, target; who = who)
-		# An image's y axis without a direction is drawn reversed by plotly.
-		_field2d_cell_ranges!(staged, target, xr, yr, who; implicit_reversed_y = mutator === plot_image!)
+		# The ranges with the D11 primitives on the cell's axis groups, then the
+		# equal aspect, which turns one-sided limits into full ranges
+		# (`_resolve_linked_limits!`, Z54).
+		_field2d_cell_ranges!(staged, target, xr, yr, who)
+		equalar && _field2d_equal_aspect!(staged, target, who)
 		_finalize_figure!(_StagedPlotMutation(_cmn_plot(staged)))
 		return staged
 	end
 end
 
-# Explicit `xrange`/`yrange` (validated by `_field2d_checked_range`; `nothing`
-# leaves the axis alone) of a SubplotFigure cell, in DATA units: converted to
-# the log10 values Plotly stores on a log axis, written with
-# `autorange = false` on the root of the axis's `matches` group (the only axis
-# plotly.js reads a shared range from). A one-sided limit (D11) is written by
-# `_field2d_apply_partial_range!` on the group; `implicit_reversed_y` (an
-# image's y axis) keeps plotly's reversed default when the axis states no
-# direction, as on a Plot.
-# (`t` is a `_CellTarget`, defined after this file in src/sci/common.jl.)
-function _field2d_cell_ranges!(fig, t, xr, yr, who::AbstractString; implicit_reversed_y::Bool = false)
-	for (checked, key, name) in ((xr, t.xkey, "xrange"), (yr, t.ykey, "yrange"))
-		checked === nothing && continue
-		root = _axes_match_root(fig, key, who)
-		if _field2d_is_partial(checked)
-			_field2d_require_partial_range(fig, root, checked, "", who, name)
-			_field2d_apply_partial_range!(
-				fig,
-				root,
-				checked;
-				implicit_reversed = implicit_reversed_y && name == "yrange",
-				who = who,
-			)
-			continue
-		end
-		layout = _cmn_layout(fig)
-		value = _axis_type(layout, root) == "log" ?
-			_to_axis_range(layout, root, checked; who = "$(who) (`$(name)`)") :
-			checked
-		_cmn_merge_layout_key!(
-			fig,
-			root,
-			Dict{Symbol, Any}(:range => value, :autorange => false),
-		)
-	end
+# Explicit `xrange`/`yrange` (checked by `_field2d_checked_range`; `nothing`
+# leaves the axis alone) of a SubplotFigure cell `t` (a `_CellTarget`,
+# defined in src/sci/common.jl), in DATA units, written by
+# `_field2d_write_range!` on the `matches` group of the cell's axis (a shared
+# axis takes its range from the group root).
+function _field2d_cell_ranges!(fig, t, xr, yr, who::AbstractString)
+	_field2d_write_range!(fig, t.xkey, xr, who, "xrange")
+	_field2d_write_range!(fig, t.ykey, yr, who, "yrange")
 	return nothing
 end
 
@@ -12687,13 +12661,15 @@ end
 # itself (PlotlyBase serialises a Julia matrix column by column, which is the
 # `[iy][ix]` order plotly reads them in).
 
-# Whether the primary `letter` axis is logarithmic once a call that passes
-# `scale` ("" keeps the current type) has been applied. `fig === nothing`
-# stands for a figure that does not exist yet.
-function _field2d_log_axis(fig, letter::Symbol, scale::AbstractString)
+# Whether axis `axis` (`:x`/`:y` for the primary axes, or a layout key such as
+# a twin `:yaxis2`; `nothing` for a twin y axis the call creates) is
+# logarithmic once a call that passes `scale` ("" keeps the current type) has
+# been applied. `fig === nothing` stands for a figure that does not exist yet.
+function _field2d_log_axis(fig, axis::Union{Nothing, Symbol}, scale::AbstractString)
 	isempty(scale) || return scale == "log"
-	fig === nothing && return false
-	return _axis_type(_plot_layout(fig), _axis_layout_key(letter)) == "log"
+	(fig === nothing || axis === nothing) && return false
+	key = axis in (:x, :y) ? _axis_layout_key(axis) : axis
+	return _axis_type(_plot_layout(fig), key) == "log"
 end
 
 # Implicit coordinates of a matrix dimension of length `n`: the 0-based
@@ -12827,8 +12803,9 @@ function _field2d_color_string(color, who::AbstractString, name::AbstractString)
 	if color isa AbstractString || color isa Symbol
 		text = strip(String(color))
 		isempty(text) && return ""
-		_parse_color(text, who)
-		return String(text)
+		# `_color_option` (G16/Z63) checks the colour and writes a matplotlib
+		# grey level ("0.35") as the hex colour plotly.js can draw.
+		return String(_color_option(String(text); who = who, name = name))
 	elseif color isa Colors.Colorant
 		return _color_hex(color; who = who)
 	end
@@ -12846,6 +12823,13 @@ function _field2d_nonnegative(value, who::AbstractString, name::AbstractString)
 		))
 	return value
 end
+
+# Whether two checked colour ranges (`_checked_range`, `zlimits` numeric) give
+# the same limits: (0, 1) and [0.0, 1.0] do; non-numeric `crange` bounds do
+# not (`_apply_color_norm` reports those when `crange` is used alone).
+_field2d_same_limits(zlimits, climits) =
+	all(b -> b isa Real && !(b isa Bool), climits) &&
+	Float64(zlimits[1]) == Float64(climits[1]) && Float64(zlimits[2]) == Float64(climits[2])
 
 # Colour keywords of plot_heatmap(!) / plot_contour(!) (spec C21) resolved
 # through `_apply_color_norm`. Returns the matrix to plot (log10 values for
@@ -12872,14 +12856,17 @@ function _field2d_color(
 )
 	zlimits = _checked_range(zrange, who, "zrange")
 	if zlimits !== nothing
-		_checked_range(crange, who, "crange") === nothing || throw(ArgumentError(
-			"$(who): `zrange` is an alias of `crange`; pass only one of them.",
-		))
 		(all(b -> b isa Real && !(b isa Bool), zlimits) && zlimits[1] < zlimits[2]) ||
 			throw(ArgumentError(
 				"$(who): `zrange` must be numeric colour limits (lower, upper) " *
 				"with lower < upper; got $(repr(zrange)).",
 			))
+		# Z3: the alias may repeat `crange`; only different limits conflict.
+		climits = _checked_range(crange, who, "crange")
+		climits === nothing || _field2d_same_limits(zlimits, climits) || throw(ArgumentError(
+			"$(who): `zrange` is an alias of `crange`, and they differ " *
+			"(zrange = $(repr(zrange)), crange = $(repr(crange))); pass one of them.",
+		))
 	end
 	ticklabels = colorbar_ticklabels === nothing ? nothing :
 		_field2d_labels(colorbar_ticklabels, who, "colorbar_ticklabels")
@@ -12964,21 +12951,23 @@ function _field2d_origin(origin, who::AbstractString; allow_unset::Bool)
 	return value
 end
 
-# Make the primary `letter` axis decrease (`reversed = true`) or increase
-# along the screen direction. An explicit range is reordered; otherwise the
-# autorange direction is written. An increasing direction is only written
-# when the axis is currently reversed, unless `force` (plotly reverses the y
-# axis of image traces by default).
-function _field2d_axis_direction!(fig, letter::Symbol, reversed::Bool; force::Bool = false)
-	key = _axis_layout_key(letter)
+# Make axis `axis` (`:x`/`:y` for the primary axes, or a layout key such as a
+# twin `:yaxis2`) decrease (`reversed = true`) or increase along the screen
+# direction. An explicit range is reordered; otherwise the autorange direction
+# is written (a one-sided limit, stored as `autorangeoptions`, keeps its data
+# value). An increasing direction is only written when the axis is currently
+# reversed, unless `force` (plotly reverses the y axis of image traces by
+# default).
+function _field2d_axis_direction!(fig, axis::Symbol, reversed::Bool; force::Bool = false)
+	key = axis in (:x, :y) ? _axis_layout_key(axis) : axis
 	axis = get(_plot_layout(fig).fields, key, nothing)
 	current = _cmn_mapping_get(axis, :range)
 	autorange = _cmn_mapping_get(axis, :autorange)
 	if autorange isa AbstractString && autorange in ("min", "max", "min reversed", "max reversed")
-		# A plotly partial autorange (set by the user or another family; the
-		# field families write one-sided limits as autorange options, see
-		# `_field2d_apply_partial_range!`): keep the fixed bound, move it to
-		# the slot of the new direction.
+		# A plotly partial autorange (set by the user with `relayout!`; the
+		# package writes one-sided limits as autorange options, see
+		# `_write_axis_range!`): keep the fixed bound, move it to the slot of
+		# the new direction.
 		endswith(autorange, "reversed") == reversed && return nothing
 		(current isa AbstractVector && length(current) == 2) || return nothing
 		fixed = current[1] === nothing ? current[2] : current[1]
@@ -13013,11 +13002,11 @@ function _field2d_axis_direction!(fig, letter::Symbol, reversed::Bool; force::Bo
 	return nothing
 end
 
-# `origin = "upper"` points the y axis down (first row / y value at the top),
-# "lower" up; "" leaves the axis alone.
-_field2d_apply_origin!(fig, origin::AbstractString) =
+# `origin = "upper"` points the y axis `key` down (first row / y value at the
+# top), "lower" up; "" leaves the axis alone.
+_field2d_apply_origin!(fig, origin::AbstractString; key::Symbol = :yaxis) =
 	isempty(origin) ? nothing :
-	_field2d_axis_direction!(fig, :y, origin == "upper")
+	_field2d_axis_direction!(fig, key, origin == "upper")
 
 # A `Date`/`DateTime` coordinate as the ISO string plotly.js reads on a date
 # axis (Y25): "2020-01-02", "2020-01-02T03:04:05.678". Anything else is
@@ -13026,17 +13015,10 @@ _field2d_apply_origin!(fig, origin::AbstractString) =
 _field2d_date_value(v) =
 	(v isa Dates.Date || v isa Dates.DateTime) ? string(v) : v
 
-# Tick values with dates converted by `_field2d_date_value` (the shared tick
-# helpers take numbers, or strings on date/category axes); tick presets and
-# `nothing` pass unchanged.
-function _field2d_tick_values(values)
-	(values isa AbstractVector || values isa Tuple) || return values
-	any(v -> v isa Dates.Date || v isa Dates.DateTime, values) || return values
-	return Any[_field2d_date_value(v) for v in values]
-end
-
 # Check the tick keywords before the first write, against the axis types the
-# call ends up with (`_validate_tick_option`; D9 presets pass).
+# call ends up with (`_validate_tick_option`; D9 presets pass). `ykey` is the
+# y axis the call draws on (`nothing`: a twin y axis it creates, Z31). Date
+# tick values are read by the shared helpers (`_cmn_tick_values`, Z42).
 function _field2d_validate_ticks(
 	fig,
 	who::AbstractString;
@@ -13048,14 +13030,15 @@ function _field2d_validate_ticks(
 	ytickformat = "",
 	xscale::AbstractString = "",
 	yscale::AbstractString = "",
+	ykey::Union{Nothing, Symbol} = :yaxis,
 )
 	for (name, value) in (("xtickformat", xtickformat), ("ytickformat", ytickformat))
 		value isa AbstractString || throw(ArgumentError(
 			"$(who): `$(name)` must be a d3 format string such as \".2f\"; got $(repr(value)).",
 		))
 	end
-	_validate_tick_option(fig, :xaxis, _field2d_tick_values(xticks), xticklabels, xscale, who, "x")
-	_validate_tick_option(fig, :yaxis, _field2d_tick_values(yticks), yticklabels, yscale, who, "y")
+	_validate_tick_option(fig, :xaxis, xticks, xticklabels, xscale, who, "x")
+	_validate_tick_option(fig, ykey, yticks, yticklabels, yscale, who, "y")
 	return nothing
 end
 
@@ -13068,39 +13051,26 @@ function _field2d_apply_ticks!(
 	yticks,
 	yticklabels,
 	ytickformat::AbstractString,
+	ykey::Symbol = :yaxis,
 )
-	if xticks !== nothing || xticklabels !== nothing || !isempty(xtickformat)
-		_apply_ticks!(
-			fig,
-			:xaxis;
-			values = _field2d_tick_values(xticks),
-			labels = xticklabels,
-			format = xtickformat,
-			who = who,
-		)
-	end
-	if yticks !== nothing || yticklabels !== nothing || !isempty(ytickformat)
-		_apply_ticks!(
-			fig,
-			:yaxis;
-			values = _field2d_tick_values(yticks),
-			labels = yticklabels,
-			format = ytickformat,
-			who = who,
-		)
-	end
+	_scat_apply_ticks!(fig, :xaxis, xticks, xticklabels, xtickformat, who)
+	_scat_apply_ticks!(fig, ykey, yticks, yticklabels, ytickformat, who)
 	return nothing
 end
 
 # Common Cartesian options of the 2-D field functions, applied through the
-# figure-option primitives (primary axes only). Constructors (`constructor =
+# figure-option primitives to the x axis and to `ykey` (the primary y axis,
+# or the twin of `secondary_y = true`, Z31). Constructors (`constructor =
 # true`) keep the template grid for `grid = true` and apply the default
 # template; mutators apply any explicit `grid` and only refresh the legend so
 # a user template survives. Call `_field2d_validate_cartesian` first.
-# `xrange`/`yrange` come from `_field2d_checked_range`; a one-sided limit
-# (D11) is written after the axis direction (`origin`) is known, unless
-# `partial_ranges = false` (the caller sets the direction afterwards and
-# applies it itself with `_field2d_apply_partial_range!`).
+# `xrange`/`yrange` come from `_field2d_checked_range` and are written by
+# `_field2d_write_range!` (the D11 primitives of `xrange!`): a full range
+# before the ticks, a one-sided limit after the axis direction (`origin`) is
+# known, unless `partial_ranges = false` (the caller sets the direction
+# afterwards and writes the limit itself). The equal aspect is followed by
+# `_resolve_linked_limits!` (Z54): plotly.js ignores one-sided limits on
+# aspect-linked axes, so the ones already there become full ranges.
 function _field2d_apply_options!(
 	fig,
 	who::AbstractString;
@@ -13125,15 +13095,16 @@ function _field2d_apply_options!(
 	fontsize,
 	grid,
 	partial_ranges::Bool = true,
+	ykey::Symbol = :yaxis,
 )
 	_apply_figure_title!(fig, title)
 	_apply_axis_title!(fig, :x, xlabel)
-	_apply_axis_title!(fig, :y, ylabel)
+	_apply_axis_title_to_key!(fig, ykey, ylabel)
 	# Scale before range and ticks: a log axis stores exponents.
 	_apply_axis_scale!(fig, :x, xscale, who)
-	_apply_axis_scale!(fig, :y, yscale, who)
-	_apply_axis_range!(fig, :x, _field2d_two_sided(xrange), who)
-	_apply_axis_range!(fig, :y, _field2d_two_sided(yrange), who)
+	_apply_axis_scale_to_key!(fig, ykey, yscale, who; name = "yscale")
+	_field2d_write_range!(fig, :xaxis, _field2d_two_sided(xrange), who, "xrange")
+	_field2d_write_range!(fig, ykey, _field2d_two_sided(yrange), who, "yrange")
 	_field2d_apply_ticks!(
 		fig,
 		who;
@@ -13143,15 +13114,14 @@ function _field2d_apply_options!(
 		yticks = yticks,
 		yticklabels = yticklabels,
 		ytickformat = ytickformat,
+		ykey = ykey,
 	)
-	_field2d_apply_origin!(fig, origin)
-	# The equal aspect first: a one-sided limit is written differently on an
-	# aspect-constrained axis (`_field2d_apply_partial_range!`).
-	equalar && _apply_equal_aspect!(fig, _cell_target(fig; who = who); who = who)
+	_field2d_apply_origin!(fig, origin; key = ykey)
 	if partial_ranges
-		_field2d_apply_partial_range!(fig, :xaxis, xrange; who = who)
-		_field2d_apply_partial_range!(fig, :yaxis, yrange; who = who)
+		_field2d_write_range!(fig, :xaxis, _field2d_one_sided(xrange), who, "xrange")
+		_field2d_write_range!(fig, ykey, _field2d_one_sided(yrange), who, "yrange")
 	end
+	equalar && _field2d_equal_aspect!(fig, _cell_target(fig; secondary_y = ykey !== :yaxis, who = who), who)
 	_apply_figure_size!(fig, who; width = width, height = height)
 	(constructor && grid === true) || _apply_axis_grid!(fig, grid, who)
 	constructor ? _apply_default_template!(fig) : _apply_default_legend!(fig)
@@ -13159,140 +13129,124 @@ function _field2d_apply_options!(
 	return nothing
 end
 
+# Equal data aspect on cell `target` (a `_CellTarget`), then Z54: the
+# one-sided limits on its now aspect-linked axis groups become full ranges
+# (`_resolve_linked_limits!`, as `axis_equal!` and
+# `_apply_cartesian_plot_options!` do).
+function _field2d_equal_aspect!(fig, target, who::AbstractString)
+	_apply_equal_aspect!(fig, target; who = who)
+	_field2d_overlay_aspect!(fig, target.ykey)
+	roots = (_axes_match_root(fig, target.xkey, who), _axes_match_root(fig, target.ykey, who))
+	_resolve_linked_limits!(fig, [(root, _axes_match_members(fig, root, who)) for root in roots], who)
+	return nothing
+end
+
+# An overlaying (twin, `secondary_y`) y axis shares the primary axis's domain,
+# so plotly.js cannot keep its equal aspect by shrinking that domain
+# (`constrain = "domain"` left the glyphs stretched, render probe p07); it does
+# by widening the twin's range (`constrain = "range"`). `overlaying` says
+# whether `ykey` is such a twin; the mesh SubplotFigure path passes it, as its
+# scratch figure's y axis stands for the cell's twin.
+function _field2d_overlay_aspect!(
+	fig,
+	ykey::Symbol,
+	overlaying::Bool = _cmn_mapping_get(get(_cmn_layout(fig).fields, ykey, nothing), :overlaying) !== nothing,
+)
+	overlaying || return nothing
+	_cmn_merge_layout_key!(fig, ykey, Dict{Symbol, Any}(:constrain => "range"))
+	return nothing
+end
+
 # A fresh Cartesian figure for a 2-D field constructor.
 _field2d_new_figure() = Plot(GenericTrace[], _default_cartesian_layout())
 
-_field2d_show(fig, show::Bool, width, height, title::AbstractString) =
-	show ? to_syncplot(
-		fig;
-		width = width > 0 ? width : 960,
-		height = height > 0 ? height : 720,
-		title = isempty(title) ? "PlotlySupply" : title,
-	) : fig
-
-# Mutators do not open windows: a `show` keyword (or any other unknown
-# keyword) is an ArgumentError naming the function.
+# The keywords a Plot/SyncPlot field mutator takes through `kwargs...`:
+# `secondary_y::Bool` (Z31) draws on the twin y axis (created on first use by
+# `_ensure_twin_y!`), and is returned (`false` when absent). Mutators do not
+# open windows: a `show` keyword, or any other unknown keyword, is an
+# ArgumentError naming the function.
 function _field2d_reject_keywords(who::AbstractString, extra)
-	isempty(extra) && return nothing
+	secondary_y = false
+	isempty(extra) && return secondary_y
 	names = collect(keys(extra))
 	:show in names && throw(ArgumentError(
 		"$(who): mutators do not take `show`; the traces are added to the " *
 		"figure you pass (display it, or call `to_syncplot(fig)` for a window).",
 	))
-	throw(ArgumentError(
+	unknown = Symbol[]
+	for (name, value) in pairs(extra)
+		if name === :secondary_y
+			value isa Bool || throw(ArgumentError(
+				"$(who): `secondary_y` must be true or false; got $(repr(value)).",
+			))
+			secondary_y = value
+		else
+			push!(unknown, name)
+		end
+	end
+	isempty(unknown) || throw(ArgumentError(
 		"$(who): unsupported keyword argument(s) " *
-		"$(join(("`$(name)`" for name in names), ", ")).",
+		"$(join(("`$(name)`" for name in unknown), ", ")).",
 	))
+	return secondary_y
 end
 
 # An axis-range keyword (`xrange`, `yrange`) of the 2-D field and mesh
-# families, with the semantics of the range mutators (`xrange!`, X23, D11):
+# families: the shared D11 check (`_checked_range(...; partial = true)`, Z53),
+# so the keywords take exactly what `xrange!` takes:
 # - `[0, 0]`, `(0, 0)`, `nothing` and `[nothing, nothing]` are the automatic
 #   sentinel: `nothing` is returned and the axis is left as it is;
-# - a one-sided limit `(lo, nothing)` / `(nothing, hi)` (matplotlib
-#   `set_xlim(left = lo)`) is returned as `Any[lo, nothing]` /
-#   `Any[nothing, hi]`: that bound is fixed and the other side autoranges
-#   (`_field2d_apply_partial_range!`);
-# - otherwise exactly two finite, different bounds, returned as `Any[lo, hi]`.
-# `missing` and Bool bounds throw. Bounds are DATA values (converted on a log
-# axis when applied); strings and dates pass for category/date axes, except
-# that a one-sided bound is a number or a Date/DateTime.
-function _field2d_checked_range(range, who::AbstractString, name::AbstractString)
-	if (range isa AbstractVector || range isa Tuple) && length(range) == 2
-		any(bound -> bound isa Bool, range) && throw(ArgumentError(
-			"$(who): `$(name)` bounds must be numbers (or date/category values); " *
-			"got $(repr(range)).",
-		))
-		any(bound -> bound === missing, range) && throw(ArgumentError(
-			"$(who): `$(name)` bounds must be numbers (or date/category values); " *
-			"`missing` is not a bound (use `nothing` for an open side, e.g. " *
-			"(0, nothing) fixes only the lower limit). Got $(repr(range)).",
-		))
-		lower, upper = range[1], range[2]
-		lower === nothing && upper === nothing && return nothing
-		if lower === nothing || upper === nothing
-			bound = something(lower, upper)
-			(bound isa Real && !isfinite(bound)) && throw(ArgumentError(
-				"$(who): `$(name)` bounds must be finite; got $(repr(range)).",
-			))
-			# plotly.js's autorange options (`_field2d_apply_partial_range!`)
-			# take numbers (a category's 0-based position on a category axis)
-			# and dates; it ignores category names and date strings there.
-			bound isa Union{Real, Dates.Date, Dates.DateTime} || throw(ArgumentError(
-				"$(who): the bound of a one-sided `$(name)` must be a number (the " *
-				"0-based position on a category axis) or a Date/DateTime; got " *
-				"$(repr(range)).",
-			))
-			return Any[lower, upper]
-		end
-	end
-	# Two-sided ranges: `_checked_range` rejects equal, non-finite and
-	# malformed bounds.
-	return _checked_range(range, who, name)
-end
+# - a one-sided limit `(start, nothing)` / `(nothing, stop)` fixes the start
+#   (left/bottom end) or the stop of the axis, as matplotlib's
+#   `set_xlim(left = ...)` / `set_ylim(bottom = ...)`; the other end follows
+#   the data;
+# - otherwise two finite, different bounds (`hi < lo` flips the axis).
+# Bounds are DATA values; their type against the axis is checked by
+# `_field2d_validate_cartesian`, and `_field2d_write_range!` writes them.
+_field2d_checked_range(range, who::AbstractString, name::AbstractString) =
+	_checked_range(range, who, name; partial = true)
 
-# Whether a range returned by `_field2d_checked_range` is a one-sided limit.
-_field2d_is_partial(range) =
-	range !== nothing && (range[1] === nothing || range[2] === nothing)
+# The full-range part of a checked range (`nothing` for the sentinel and for a
+# one-sided limit) and its one-sided part (`nothing` otherwise): a full range
+# is written before the ticks, a one-sided limit once the axis direction is
+# known (the start of a reversed axis is its maximum).
+_field2d_two_sided(range) = _is_one_sided_range(range) ? nothing : range
+_field2d_one_sided(range) = _is_one_sided_range(range) ? range : nothing
 
-# The two-sided part of a checked range: `nothing` for the automatic sentinel
-# and for a one-sided limit (applied separately).
-_field2d_two_sided(range) = _field2d_is_partial(range) ? nothing : range
-
-# Whether axis layout entry `axis` points down/left: autorange "reversed" (or
-# a reversed one-sided autorange), or an explicit descending numeric range.
-# `implicit` is the direction plotly.js takes when the axis states none (the y
-# axis of an image is reversed by default).
-function _field2d_axis_reversed(axis; implicit::Bool = false)
-	autorange = _cmn_mapping_get(axis, :autorange)
-	if autorange isa AbstractString
-		return endswith(autorange, "reversed")
+# Write checked `range` (DATA units) on axis `key` with the package's D11
+# primitives, as `_apply_axis_range_to_key!` does for one axis and `xrange!`
+# for a `matches` group (Z53): the range is written on the group root, a
+# one-sided limit as the `autorangeoptions` limit on every member (the
+# encoding that survives `savefig`, Z38), checked against the data, and made a
+# full range when the group is aspect-linked (`_resolve_constrained_limit`).
+# The fixed end of a one-sided limit is the START of the axis as drawn
+# (`(lo, nothing)` on a reversed axis fixes its maximum). `nothing` leaves the
+# axis alone.
+function _field2d_write_range!(fig, key::Symbol, range, who::AbstractString, name::AbstractString)
+	range === nothing && return nothing
+	root = _axes_match_root(fig, key, who)
+	members = _axes_match_members(fig, root, who)
+	axis_type = _axis_type(_plot_layout(fig), root)
+	_require_range_bound_types(range, axis_type, who, name)
+	value = _axis_range_store_value(range, axis_type, who, name)
+	reversed = _axis_is_reversed(fig, root)
+	if _is_one_sided_range(value)
+		_require_limit_meets_data(fig, root, value, reversed, members, who, name)
+		value = _resolve_constrained_limit(fig, root, value, reversed, members, who, name)
 	end
-	current = _cmn_mapping_get(axis, :range)
-	if (autorange === nothing || autorange === false) &&
-			current isa AbstractVector && length(current) == 2 &&
-			current[1] isa Real && current[2] isa Real
-		return current[1] > current[2]
-	end
-	return autorange === nothing && current === nothing && implicit
-end
-
-# Check the bound of a one-sided limit (D11) against the type axis `key` ends
-# up with (`scale` when the call sets one): a number on linear, log and
-# category axes, positive on a log axis. Writes nothing.
-function _field2d_require_partial_range(
-	fig,
-	key::Symbol,
-	range,
-	scale::AbstractString,
-	who::AbstractString,
-	name::AbstractString,
-)
-	_field2d_is_partial(range) || return nothing
-	axis_type = isempty(scale) ? _axis_type(_cmn_layout(fig), key) : String(scale)
-	bound = something(range[1], range[2])
-	if axis_type in _NUMERIC_RANGE_AXIS_TYPES
-		bound isa Real || throw(ArgumentError(
-			"$(who): `$(name)` bounds on a $(axis_type) axis must be numbers; got " *
-			"$(repr(Tuple(range))).",
-		))
-	end
-	axis_type == "log" && !(bound > 0) && throw(ArgumentError(
-		"$(who): `$(name)` bounds on a logarithmic axis are data values and must " *
-		"be positive; got $(repr(Tuple(range))).",
-	))
+	_write_axis_range!(fig, root, value; reversed = reversed, members = members)
 	return nothing
 end
 
-# `_validate_cartesian_options` for the field and mesh families, which also
-# take one-sided limits (D11): the shared validator sees only the two-sided
-# part of a range; a one-sided limit is checked by
-# `_field2d_require_partial_range`. With a one-sided limit the axis's old
-# range is replaced, so a scale switch in the same call cannot strand it (the
-# shared check of a stranded old range is skipped for that axis).
+# `_validate_cartesian_options` for the field and mesh families on the y axis
+# `ykey` of the call (`nothing`: the twin y axis that `secondary_y = true`
+# creates, Z31), with the shared D11 range checks: bound types against the
+# axis type the call ends up with, positive bounds on a log axis, a readable
+# date for the fixed end of a one-sided limit. Writes nothing.
 function _field2d_validate_cartesian(
 	fig,
 	who::AbstractString;
+	ykey::Union{Nothing, Symbol} = :yaxis,
 	xrange = nothing,
 	yrange = nothing,
 	xscale::AbstractString = "",
@@ -13302,22 +13256,19 @@ function _field2d_validate_cartesian(
 	fontsize = 0,
 	grid = nothing,
 )
-	_require_axis_scale(xscale, who, "xscale")
-	_require_axis_scale(yscale, who, "yscale")
-	_validate_cartesian_options(
+	_scat_validate_cartesian_options(
 		fig,
 		who;
-		xrange = _field2d_two_sided(xrange),
-		yrange = _field2d_two_sided(yrange),
-		xscale = _field2d_is_partial(xrange) ? "" : xscale,
-		yscale = _field2d_is_partial(yrange) ? "" : yscale,
+		ykey = ykey,
+		xrange = xrange,
+		yrange = yrange,
+		xscale = xscale,
+		yscale = yscale,
 		width = width,
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
 	)
-	_field2d_require_partial_range(fig, :xaxis, xrange, xscale, who, "xrange")
-	_field2d_require_partial_range(fig, :yaxis, yrange, yscale, who, "yrange")
 	return nothing
 end
 
@@ -13348,149 +13299,107 @@ function _field2d_image_size(fields)
 	return (be32(17), be32(21))
 end
 
-# Extent (lo, hi) in data units along `letter` of the visible traces and
-# data-referenced layout items on axes `members`, as `_finalize_figure!`
-# computes it (field edges, data; unpadded), with image traces measured here
-# (finalize does not size an image's 3-D `z` or a `source`). `nothing` when a
-# trace's extent is not computed, the axis type is not linear/log, or there is
-# no finite extent.
-function _field2d_partial_extent(fig, members::Vector{Symbol}, letter::Char, islog::Bool)
+# (lo, hi) along `letter` of an image trace's pixel edges, measured from its
+# 3-D `z` or PNG `source` (`_field2d_image_size`) where finalize's
+# `_fin_image_extent` does not; `:unsupported` when unknown or on a log axis.
+function _field2d_image_extent(fields, letter::Char, islog::Bool)
+	extent = _fin_image_extent(fields, letter, islog)
+	(extent === :unsupported && !islog) || return extent
+	size = _field2d_image_size(fields)
+	start = get(fields, Symbol(letter, "0"), 0)
+	step = get(fields, Symbol("d", letter), 1)
+	(size === nothing || !_fin_isfinite_real(start) || !_fin_isfinite_real(step)) && return :unsupported
+	n = letter == 'x' ? size[1] : size[2]
+	n >= 1 || return nothing
+	return minmax(Float64(start) - step / 2, Float64(start) + step * (n - 0.5))
+end
+
+# The `meta` key of a quiver/streamline trace's anchor extent (D16; the name
+# agreed with the finalizer owner).
+const _FIELD2D_ANCHOR_META = :plotlysupply_anchor_extent
+
+# D16: the extent of the anchor points a quiver or streamline trace carries in
+# `meta.plotlysupply_anchor_extent` = [xmin, xmax, ymin, ymax] (data units),
+# as `(lo, hi)` along `letter`. `nothing` for any other trace, a malformed
+# entry, or a non-positive anchor on a log axis.
+function _field2d_anchor_extent(trace::GenericTrace, letter::Char, islog::Bool)
+	extent = _cmn_mapping_get(get(trace.fields, :meta, nothing), _FIELD2D_ANCHOR_META)
+	(extent isa AbstractVector && length(extent) == 4 && all(_fin_isfinite_real, extent)) ||
+		return nothing
+	lo, hi = letter == 'x' ? (extent[1], extent[2]) : (extent[3], extent[4])
+	(lo <= hi && (!islog || lo > 0)) || return nothing
+	return (Float64(lo), Float64(hi))
+end
+
+# Mark quiver/streamline `traces` with the extent of their anchor points (D16):
+# `meta = Dict(:plotlysupply_anchor_extent => [xmin, xmax, ymin, ymax])`, in
+# data units. `_finalize_figure!` counts them by it on axes that hold a field,
+# so arrows drawn from points inside a field do not widen its tight axes (their
+# parts beyond the frame are clipped, as in matplotlib). Without a finite
+# anchor nothing is written.
+function _field2d_mark_anchors!(traces, xmin, xmax, ymin, ymax)
+	all(isfinite, (xmin, xmax, ymin, ymax)) || return traces
+	(xmin <= xmax && ymin <= ymax) || return traces
+	for trace in traces
+		trace.fields[:meta] = Dict{Symbol, Any}(
+			_FIELD2D_ANCHOR_META => Float64[xmin, xmax, ymin, ymax],
+		)
+	end
+	return traces
+end
+
+# The view `_finalize_figure!` gives the axis group `members` (axes of one
+# letter) when it holds a field or an image, measured from the traces now: the
+# union of the field extents (brick or node edges, image pixel edges) and the
+# other data on the group, padded by `_FIN_OVERLAY_PAD` where an overlay
+# reaches past the fields (`_fin_padded_extent`; quiver and streamline
+# overlays count with their anchor points, D16). A group of quiver/streamline
+# glyphs without a field gets what they draw, padded on both sides (D13).
+# Data units. `nothing` when the group holds neither, an axis is not
+# linear/log, or a trace or layout item has an extent not computed here.
+# `_resolve_constrained_limit` takes the open end of a one-sided limit on an
+# aspect-linked axis from it (Z53).
+function _field2d_view_extent(fig, members, islog::Bool)
 	p = _cmn_plot(fig)
 	layout = p.layout
+	isempty(members) && return nothing
+	letter = String(first(members))[1]
 	all(m -> _fin_axis_type(layout, m) in ("-", "linear", "log"), members) || return nothing
-	lo, hi = Inf, -Inf
+	acc = _FinAxisAcc()      # glyphs by their anchors (a group with a field)
+	drawn = _FinAxisAcc()    # every trace by what it draws (glyphs alone)
+	drawn_ok = true          # every drawn extent was computed
 	cache = Dict{Any, Union{Nothing, String}}()
 	for trace in p.data
 		trace isa GenericTrace || continue
 		_cmn_trace_kind(trace, cache) == "xy" || continue
 		_fin_visible(trace) || continue
 		_fin_axis_key(get(trace.fields, Symbol(letter, :axis), string(letter))) in members || continue
-		extent = if _fin_trace_type(trace) == "image"
-			size = _field2d_image_size(trace.fields)
-			start = get(trace.fields, Symbol(letter, "0"), 0)
-			step = get(trace.fields, Symbol("d", letter), 1)
-			(islog || size === nothing || !(start isa Real) || !(step isa Real)) ? :unsupported :
-				minmax(start - step / 2, start + step * ((letter == 'x' ? size[1] : size[2]) - 0.5))
+		kind = _fin_field_kind(trace)
+		if _fin_trace_type(trace) == "image"
+			extent = anchored = _field2d_image_extent(trace.fields, letter, islog)
 		else
-			_fin_trace_extent(trace, letter, islog)
+			extent = _fin_trace_extent(trace, letter, islog)
+			anchors = kind === nothing ? _field2d_anchor_extent(trace, letter, islog) : nothing
+			anchors === nothing || (drawn.glyphs = true)
+			anchored = anchors === nothing ? extent : anchors
 		end
-		extent === :unsupported && return nothing
-		extent === nothing && continue
-		lo = min(lo, Float64(extent[1]))
-		hi = max(hi, Float64(extent[2]))
+		anchored === :unsupported && return nothing
+		_fin_acc_extend!(acc, anchored, kind !== nothing)
+		if extent === :unsupported
+			drawn_ok = false
+		elseif drawn_ok
+			_fin_acc_extend!(drawn, extent, kind !== nothing)
+		end
 	end
+	view = (isfinite(acc.flo) && isfinite(acc.fhi)) ? acc : (drawn.glyphs && drawn_ok) ? drawn : nothing
+	view === nothing && return nothing
 	for member in members
 		extent = _fin_layout_item_extent(layout, _fin_axis_ref(member), letter, islog)
 		extent === :unsupported && return nothing
-		extent === nothing && continue
-		lo = min(lo, Float64(extent[1]))
-		hi = max(hi, Float64(extent[2]))
+		_fin_acc_extend!(view, extent)
 	end
-	return isfinite(lo) && isfinite(hi) ? (lo, hi) : nothing
-end
-
-# D11: write the one-sided limit `range` (from `_field2d_checked_range`) on
-# axis `key` and its `matches` group. The fixed bound is in plotly's range
-# units (log10 on a log axis).
-#
-# plotly.js 2.35.2's partial autorange ("max" with `range = [lo, null]`) is
-# drawn on screen but lost by `savefig`: after a draw plotly writes the
-# computed range back into the layout (both bounds numeric), and the copy that
-# `Plotly.toImage` draws then fails plotly's range/autorange consistency check
-# and autoranges both sides (probe: first draw x = [2, 7.47], copy
-# [-0.47, 7.47]). So the limit is written as `autorangeoptions.minallowed`
-# (lower bound) or `maxallowed` (upper bound) with `autorange = true` (or
-# "reversed", keeping the direction): plotly then autoranges the open side
-# with the fixed bound as the range end, in the window and in the copy. Every
-# member of a `matches` group needs the option (plotly autoranges each member
-# and unites the ranges); the root gets the autorange.
-#
-# An aspect-constrained axis (equal aspect, or an image's y axis) is
-# re-ranged by plotly for the constraint, which ignores these options (probe:
-# `maxallowed = 2.5` gave x = [-5.7, 7.73]). There the limit is applied as
-# matplotlib's `set_xlim(left = lo)` does, which keeps the other limit where
-# it is: the root is fixed to the fixed bound and the current extent of the
-# group's data on the open side (`_finalize_figure!`'s extent: field edges and
-# data, unpadded). Without a finite extent (no data yet, or traces whose
-# extent is not computed) the options are written as above.
-#
-# A sticky clip `_finalize_figure!` wrote earlier (its exact
-# `autorangeoptions` signature) is dropped from the group: it would clip the
-# open side to the old extent. Other user `autorangeoptions` entries are kept,
-# except the opposite `minallowed`/`maxallowed` (an earlier one-sided limit:
-# the open side autoranges).
-# A two-sided or automatic range is left to the caller.
-function _field2d_apply_partial_range!(
-	fig,
-	key::Symbol,
-	range;
-	implicit_reversed::Bool = false,
-	who::AbstractString,
-)
-	_field2d_is_partial(range) || return nothing
-	layout = _cmn_layout(fig)
-	fields = layout.fields
-	islog = _axis_type(layout, key) == "log"
-	lower, upper = range[1], range[2]
-	fixed = something(lower, upper)
-	if islog
-		(fixed isa Real && fixed > 0) || throw(ArgumentError(
-			"$(who): one-sided limits on a logarithmic axis are data values and " *
-			"must be positive; got $(repr(Tuple(range))).",
-		))
-	end
-	# plotly's range units: log10 on a log axis; on a date axis the autorange
-	# options take epoch milliseconds (a date string there makes plotly.js
-	# 2.35.2 fall back to its empty-axis range, probe p14).
-	to_range(v) = islog ? log10(Float64(v)) :
-		v isa Union{Dates.Date, Dates.DateTime} ?
-			Dates.value(Dates.DateTime(v) - Dates.DateTime(1970)) : v
-	reversed = _field2d_axis_reversed(get(fields, key, nothing); implicit = implicit_reversed)
-	root = something(_fin_match_root(fields, key), key)
-	members = Symbol[key]
-	root === key || push!(members, root)
-	for member in keys(fields)
-		_fin_is_axis_key(member) || continue
-		member in members && continue
-		_fin_match_root(fields, member) === root && push!(members, member)
-	end
-	pinned = nothing
-	if fixed isa Real && any(in(_fin_aspect_axes(layout, _fin_collect_axes(_cmn_plot(fig)))), members)
-		extent = _field2d_partial_extent(fig, members, String(key)[1], islog)
-		if extent !== nothing
-			lo, hi = extent
-			a, b = lower === nothing ? (lo, Float64(fixed)) : (Float64(fixed), hi)
-			# A fixed bound beyond the data inverts the axis, as in matplotlib;
-			# one equal to the far data edge leaves no range to fix.
-			a != b && (pinned = reversed ? Any[to_range(b), to_range(a)] : Any[to_range(a), to_range(b)])
-		end
-	end
-	option, other = lower === nothing ? (:maxallowed, :minallowed) : (:minallowed, :maxallowed)
-	for member in members
-		current = get(fields, member, nothing)
-		old = _cmn_mapping_get(current, :autorangeoptions)
-		user = _fin_sticky_clip(current) === nothing && _is_layout_mapping(old)
-		options = Dict{Symbol, Any}()
-		if user
-			for (name, value) in (old isa PlotlyBase.PlotlyAttribute ? old.fields : old)
-				options[Symbol(name)] = value
-			end
-		end
-		old === nothing || _cmn_delete_layout_fields!(fig, member, (:autorangeoptions,))
-		if pinned === nothing
-			options[option] = to_range(fixed)
-			delete!(options, other)
-		end
-		isempty(options) ||
-			_cmn_merge_layout_key!(fig, member, Dict{Symbol, Any}(:autorangeoptions => attr(; options...)))
-	end
-	if pinned === nothing
-		_cmn_delete_layout_fields!(fig, root, (:range,))
-		_cmn_merge_layout_key!(fig, root, Dict{Symbol, Any}(:autorange => reversed ? "reversed" : true))
-	else
-		_cmn_merge_layout_key!(fig, root, Dict{Symbol, Any}(:range => pinned, :autorange => false))
-	end
-	return nothing
+	(view.lo < view.hi && (!islog || view.lo > 0)) || return nothing
+	return _fin_padded_extent(view, islog)
 end
 
 # A Bool keyword given untyped so a wrong value is an ArgumentError naming it.
@@ -13587,10 +13496,14 @@ const _FIELD2D_DEFER_FINALIZE = Base.ScopedValues.ScopedValue(false)
 # traces (indices `first_new:end`) and options are in `fig`:
 # - X1: math colorbar titles of the new traces (and of `coloraxis`) become
 #   annotations (deferred to the delegate inside a SubplotFigure call);
-# - X10: the active style's trace defaults for the new line traces. `style`
-#   lists which of `_STYLE_TRACE_DEFAULT_KEYWORDS` the style may fill: a field
-#   overlay takes the style's line width but not the dash/marker cycle, which
-#   would turn every quiver or streamline into a dashed or marked series;
+# - X10/Z61: the active style's trace defaults for every new trace
+#   (`_apply_style_trace_defaults!`): the colorbar fonts, outline and ticks of
+#   a field or carrier trace, the line width of contour lines, and for line
+#   traces the entries of `_STYLE_TRACE_DEFAULT_KEYWORDS` listed in `style`
+#   (a field overlay takes the style's line width but not the dash/marker
+#   cycle, which would turn every quiver or streamline into a dashed or
+#   marked series). Constructors get the same colorbar defaults from the
+#   template pass; filling them here again changes nothing set;
 # - D10: `_finalize_figure!`.
 function _field2d_finish!(
 	fig,
@@ -13606,15 +13519,13 @@ function _field2d_finish!(
 			indices;
 			coloraxes = coloraxis === nothing ? () : (coloraxis,),
 		)
-		if !isempty(style)
-			_apply_style_trace_defaults!(
-				fig,
-				indices;
-				explicit = Tuple(
-					name for name in _STYLE_TRACE_DEFAULT_KEYWORDS if !(name in style)
-				),
-			)
-		end
+		_apply_style_trace_defaults!(
+			fig,
+			indices;
+			explicit = Tuple(
+				name for name in _STYLE_TRACE_DEFAULT_KEYWORDS if !(name in style)
+			),
+		)
 	end
 	_FIELD2D_DEFER_FINALIZE[] || _finalize_figure!(fig)
 	return nothing
@@ -13698,12 +13609,15 @@ function _heatmap_add!(
 	interpolation = :nearest,
 	xscale::AbstractString,
 	yscale::AbstractString,
+	secondary_y::Bool = false,
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
+	twin_key = _scat_twin_key(fig, secondary_y)
 	_field2d_validate_cartesian(
 		fig,
 		who;
+		ykey = twin_key,
 		xrange = xrange,
 		yrange = yrange,
 		xscale = xscale,
@@ -13724,6 +13638,7 @@ function _heatmap_add!(
 		ytickformat = ytickformat,
 		xscale = xscale,
 		yscale = yscale,
+		ykey = twin_key,
 	)
 	tight_value = _field2d_bool(tight, who, "tight")
 	zsmooth = _field2d_zsmooth(interpolation, who; image = false)
@@ -13742,7 +13657,7 @@ function _heatmap_add!(
 		y,
 		who,
 		"y";
-		log_axis = _field2d_log_axis(fig, :y, yscale),
+		log_axis = _field2d_log_axis(fig, twin_key, yscale),
 	)
 	_field2d_check_shape(x, y, Z, who; allow_edges = true)
 	color = _field2d_color(
@@ -13776,6 +13691,8 @@ function _heatmap_add!(
 	zsmooth === nothing || (fields[:zsmooth] = zsmooth)
 	_field2d_mark_field!(fields, tight_value)
 
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	isempty(yref) || (fields[:yaxis] = yref)
 	first_new = length(_plot_data(fig)) + 1
 	push!(_plot_data(fig), heatmap(; fields...))
 	_field2d_apply_coloraxis!(fig, color)
@@ -13802,6 +13719,7 @@ function _heatmap_add!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		ykey = ykey,
 	)
 	_field2d_finish!(fig, first_new; coloraxis = color.coloraxis)
 	return nothing
@@ -13832,7 +13750,8 @@ Colour (spec C21):
   `(t, colour)` stops, or a `ColorScheme`; `""` uses the template's. Unknown
   names throw with suggestions.
 - `crange = [0, 0]`: colour limits `(lower, upper)`; `[0, 0]`/`nothing` is
-  automatic. `zrange` is an alias (passing both throws).
+  automatic. `zrange` is an alias (passing both with different limits
+  throws).
 - `cmid::Union{Nothing,Real} = nothing`: colour midpoint. With an automatic
   `crange` it is plotly's `zmid`; inside an explicit `crange` the colorscale
   is remapped so its centre sits at `cmid` (two-slope norm).
@@ -13871,11 +13790,14 @@ Axes and figure:
   2-element vector or tuple) in data units, also on a log axis (converted to
   the log10 values plotly stores); a range turns the axis's autorange off.
   `[0, 0]`, `nothing` or `[nothing, nothing]` leaves the axis automatic. A
-  one-sided limit `(lo, nothing)` or `(nothing, hi)` fixes that bound and
-  lets the other side autorange (matplotlib `set_xlim(left = lo)`); on an
-  equal-aspect axis, which plotly.js re-ranges for the aspect, the other
-  limit is fixed at the current data extent instead (as matplotlib does).
-  Two bounds must differ; Bool and `missing` bounds throw. Dates and
+  one-sided limit `(start, nothing)` or `(nothing, stop)` fixes the start
+  (left/bottom end) or the stop of the axis and lets the other end follow
+  the data, exactly as [`xrange!`](@ref) (matplotlib
+  `set_xlim(left = start)`; on a reversed axis, e.g. `origin = :upper`, the
+  start is the larger value); on an equal-aspect axis, which plotly.js
+  re-ranges for the aspect, the other end is fixed at the field's current
+  view instead (as matplotlib does). Two bounds must differ; Bool bounds
+  throw, and an open bound is written `nothing` (not `missing`). Dates and
   category strings are accepted.
 - `xscale = ""`, `yscale = ""`: axis type, e.g. `"log"`.
 - `xticks = nothing`, `xticklabels = nothing`, `xtickformat = ""`, `yticks`,
@@ -13995,7 +13917,7 @@ function plot_heatmap(
 		xscale = xscale,
 		yscale = yscale,
 	)
-	return _field2d_show(fig, show, width, height, title)
+	return _maybe_show(fig, show, width, height, title)
 end
 
 function plot_heatmap(
@@ -14191,12 +14113,15 @@ function _contour_add!(
 	tight,
 	xscale::AbstractString,
 	yscale::AbstractString,
+	secondary_y::Bool = false,
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
+	twin_key = _scat_twin_key(fig, secondary_y)
 	_field2d_validate_cartesian(
 		fig,
 		who;
+		ykey = twin_key,
 		xrange = xrange,
 		yrange = yrange,
 		xscale = xscale,
@@ -14217,6 +14142,7 @@ function _contour_add!(
 		ytickformat = ytickformat,
 		xscale = xscale,
 		yscale = yscale,
+		ykey = twin_key,
 	)
 	tight_value = _field2d_bool(tight, who, "tight")
 	title_side = _field2d_title_side(colorbar_title_side, who)
@@ -14248,7 +14174,7 @@ function _contour_add!(
 		y,
 		who,
 		"y";
-		log_axis = _field2d_log_axis(fig, :y, yscale),
+		log_axis = _field2d_log_axis(fig, twin_key, yscale),
 	)
 	_field2d_check_shape(x, y, Z, who; allow_edges = false)
 	bands = spec.kind === :bands
@@ -14485,6 +14411,8 @@ function _contour_add!(
 		end
 	end
 
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	_stats_bind_y!(traces, yref)
 	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	_field2d_apply_coloraxis!(fig, color)
@@ -14511,6 +14439,7 @@ function _contour_add!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		ykey = ykey,
 	)
 	_field2d_finish!(
 		fig,
@@ -14767,7 +14696,7 @@ function plot_contour(
 		xscale = xscale,
 		yscale = yscale,
 	)
-	return _field2d_show(fig, show, width, height, title)
+	return _maybe_show(fig, show, width, height, title)
 end
 
 function plot_contour(
@@ -15057,6 +14986,25 @@ function _quiver_points(x, y, u, v, who::AbstractString)
 	))
 end
 
+# D16: (xmin, xmax, ymin, ymax) of the anchor points of a quiver call: every
+# position whose x and y are finite (positive on a log axis), drawn or not
+# (matplotlib's quiver counts all of its offsets in the data limits).
+# Infinite bounds when there is none.
+function _quiver_anchor_extent(xp, yp, xlog::Bool, ylog::Bool)
+	xmin = ymin = Inf
+	xmax = ymax = -Inf
+	usable(value, islog) = value isa Real && !(value isa Bool) && isfinite(value) && (!islog || value > 0)
+	for i in eachindex(xp, yp)
+		a, b = xp[i], yp[i]
+		(usable(a, xlog) && usable(b, ylog)) || continue
+		xmin = min(xmin, Float64(a))
+		xmax = max(xmax, Float64(a))
+		ymin = min(ymin, Float64(b))
+		ymax = max(ymax, Float64(b))
+	end
+	return xmin, xmax, ymin, ymax
+end
+
 function _quiver_choice(value, choices::Tuple, who::AbstractString, name::AbstractString)
 	(value isa Symbol || value isa AbstractString) || throw(ArgumentError(
 		"$(who): `$(name)` must be $(join(repr.(choices), ", ", " or ")); got $(repr(value)).",
@@ -15257,6 +15205,7 @@ function _quiver_traces(
 	)
 	name = isempty(legend) ? "" : _label(legend)
 	group = isempty(legend) ? nothing : "plotlysupply:quiver:" * name
+	anchors = _quiver_anchor_extent(xp, yp, xlog, ylog)
 	if colorby === :none
 		trace = _quiver_glyph_trace(
 			glyph_x,
@@ -15268,7 +15217,7 @@ function _quiver_traces(
 			showlegend = !isempty(legend),
 			group = nothing,
 		)
-		return GenericTrace[trace], nothing
+		return _field2d_mark_anchors!(GenericTrace[trace], anchors...), nothing
 	end
 	values = if colorby === :magnitude
 		Float64[hypot(Float64(up[i]), Float64(vp[i])) for i in drawn]
@@ -15343,6 +15292,9 @@ function _quiver_traces(
 			),
 		)
 	end
+	# The glyph traces carry the anchor extent (D16); the colorbar carrier
+	# draws nothing.
+	_field2d_mark_anchors!(traces, anchors...)
 	carrier = _mesh2d_carrier(cm, who)
 	carrier === nothing || push!(traces, carrier)
 	return traces, cm
@@ -15397,12 +15349,15 @@ function _quiver_add!(
 	fontsize,
 	grid,
 	equalar::Bool,
+	secondary_y::Bool = false,
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
+	twin_key = _scat_twin_key(fig, secondary_y)
 	_field2d_validate_cartesian(
 		fig,
 		who;
+		ykey = twin_key,
 		xrange = xrange,
 		yrange = yrange,
 		xscale = xscale,
@@ -15423,6 +15378,7 @@ function _quiver_add!(
 		ytickformat = ytickformat,
 		xscale = xscale,
 		yscale = yscale,
+		ykey = twin_key,
 	)
 	glyph = _quiver_glyph_options(
 		who;
@@ -15472,7 +15428,7 @@ function _quiver_add!(
 		glyph = glyph,
 		colorby = colorby_value,
 		xlog = _field2d_log_axis(fig, :x, xscale),
-		ylog = _field2d_log_axis(fig, :y, yscale),
+		ylog = _field2d_log_axis(fig, twin_key, yscale),
 		colorscale = colorscale,
 		crange = crange,
 		cmid = cmid,
@@ -15485,6 +15441,8 @@ function _quiver_add!(
 		colorbar_ticklabels = colorbar_ticklabels,
 		coloraxis = coloraxis,
 	)
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	_stats_bind_y!(traces, yref)
 	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	cm === nothing || _mesh2d_write_coloraxis!(fig, _Mesh2dTarget(), cm, showscale !== nothing)
@@ -15511,6 +15469,7 @@ function _quiver_add!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		ykey = ykey,
 	)
 	# Arrows take the style's line width, never its dash/marker cycle;
 	# triangles keep their own outline (none by default).
@@ -15551,6 +15510,19 @@ when every vector is zero). On a logarithmic axis (`xscale`/`yscale =
 "log"`) the glyphs are laid out in axis units (decades), pointing at angle
 `atan(v, u)` with equal aspect (matplotlib's default `angles = "uv"`), and
 origins must be positive.
+
+Axis limits (lead decision D16): on its own (no field on its axes) a quiver
+shows every drawn glyph whole: the axes span the glyphs plus a 2.5 % pad on
+each side (plotly.js would autorange line traces without padding and cut the
+arrowheads at the frame), and later traces widen them. Over a field ([`plot_heatmap`](@ref),
+[`plot_contour`](@ref), [`plot_image`](@ref), a mesh) the glyphs count with
+their anchor points `(x, y)`, as in matplotlib: anchors inside the field keep
+the axes tight on the field, and the parts of glyphs that reach past it are
+clipped by the frame; anchors outside it widen the axes to them (plus a 2.5 %
+pad). To show edge glyphs whole, draw them from inside (`pivot = :tip` or
+`:middle` for vectors pointing out of the field) or pass an explicit
+`xrange`/`yrange`. Each trace stores its anchor extent in
+`meta.plotlysupply_anchor_extent = [xmin, xmax, ymin, ymax]`.
 
 [`plot_quiver3d`](@ref) is the 3-D counterpart: its `style = :cone` draws
 solid cones (like `style = :triangle` here) and `style = :arrow` line arrows.
@@ -15598,9 +15570,9 @@ Axes and figure:
 - `equalar::Bool = true`: equal data aspect, so glyph angles are true.
 - `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
   `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic; a one-sided
-  `(lo, nothing)`/`(nothing, hi)` fixes one bound; with the equal aspect the
-  other is fixed at the current data extent, as plotly.js re-ranges an
-  equal-aspect axis), `xscale = ""`,
+  `(start, nothing)`/`(nothing, stop)` fixes one end of the axis as
+  [`xrange!`](@ref) does; with the equal aspect the other end is fixed at the
+  current view, as plotly.js re-ranges an equal-aspect axis), `xscale = ""`,
   `yscale = ""`,
   `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
   `ytickformat`, `grid::Union{Nothing,Bool,Symbol} = true`, `width = 0`,
@@ -15721,7 +15693,7 @@ function plot_quiver(
 		grid = grid,
 		equalar = equalar,
 	)
-	return _field2d_show(fig, show, width, height, title)
+	return _maybe_show(fig, show, width, height, title)
 end
 
 #endregion
@@ -16552,7 +16524,7 @@ function plot_scatterpolar!(
 end
 
 """
-	plot_heatmap!(fig, x, y, U; kwargs...)
+	plot_heatmap!(fig, x, y, U; secondary_y = false, kwargs...)
 	plot_heatmap!(fig, U; kwargs...)
 	plot_heatmap!(sf::SubplotFigure, x, y, U; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 	plot_heatmap!(sf::SubplotFigure, U; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
@@ -16574,11 +16546,18 @@ the primary axes of a `Plot`/`SyncPlot` and on the target cell's axes of a
 `SubplotFigure`, where `title`, `width` and `height` are ignored with a
 warning. `xrange`/`yrange` (data units, also on a log axis) set the target
 axes' limits with autorange off, on a shared (`matches`) axis the limits of
-its group; a one-sided limit `(lo, nothing)`/`(nothing, hi)` fixes one bound
-and autoranges the other (on an equal-aspect axis the other is fixed at the
-current data extent); `[0, 0]`/`nothing` leaves them as they are. A user
+its group; a one-sided limit `(start, nothing)`/`(nothing, stop)` fixes one
+end of the axis and autoranges the other, as [`xrange!`](@ref) does (on an
+equal-aspect axis the other end is fixed at the current view);
+`[0, 0]`/`nothing` leaves them as they are. A user
 template is kept. `interpolation = :bilinear` smooths the heatmap (plotly
 `zsmooth = "best"`).
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Invalid input throws an `ArgumentError` and leaves the figure unchanged.
 Returns `nothing` (`sf` for a `SubplotFigure`).
@@ -16634,7 +16613,7 @@ function plot_heatmap!(
 	yscale::AbstractString = "",
 	kwargs...,
 )
-	_field2d_reject_keywords("plot_heatmap!", kwargs)
+	secondary_y = _field2d_reject_keywords("plot_heatmap!", kwargs)
 	_heatmap_add!(
 		fig,
 		"plot_heatmap!",
@@ -16680,6 +16659,7 @@ function plot_heatmap!(
 		interpolation = interpolation,
 		xscale = xscale,
 		yscale = yscale,
+		secondary_y = secondary_y,
 	)
 	_refresh!(fig)
 	return nothing
@@ -16693,12 +16673,14 @@ function plot_heatmap!(
 	kwargs...,
 )
 	x = _field2d_implicit_axis(size(U, 1), _field2d_log_axis(fig, :x, xscale))
-	y = _field2d_implicit_axis(size(U, 2), _field2d_log_axis(fig, :y, yscale))
+	# The y axis the call draws on: the twin of `secondary_y = true` (Z31).
+	ykey = get(kwargs, :secondary_y, false) === true ? _scat_twin_key(fig, true) : :yaxis
+	y = _field2d_implicit_axis(size(U, 2), _field2d_log_axis(fig, ykey, yscale))
 	return plot_heatmap!(fig, x, y, U; xscale = xscale, yscale = yscale, kwargs...)
 end
 
 """
-	plot_contour!(fig, x, y, U; kwargs...)
+	plot_contour!(fig, x, y, U; secondary_y = false, kwargs...)
 	plot_contour!(fig, U; kwargs...)
 	plot_contour!(sf::SubplotFigure, x, y, U; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 	plot_contour!(sf::SubplotFigure, U; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
@@ -16718,6 +16700,12 @@ one labelled white level without a colorbar or legend entry:
 showlabels = true)`. On a `SubplotFigure` the layout keywords act on the
 target cell (`xrange`/`yrange` as for [`plot_heatmap!`](@ref)); `title`,
 `width` and `height` are ignored with a warning.
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Invalid input throws an `ArgumentError` and leaves the figure unchanged.
 Returns `nothing` (`sf` for a `SubplotFigure`).
@@ -16776,7 +16764,7 @@ function plot_contour!(
 	yscale::AbstractString = "",
 	kwargs...,
 )
-	_field2d_reject_keywords("plot_contour!", kwargs)
+	secondary_y = _field2d_reject_keywords("plot_contour!", kwargs)
 	_contour_add!(
 		fig,
 		"plot_contour!",
@@ -16822,6 +16810,7 @@ function plot_contour!(
 		tight = tight,
 		xscale = xscale,
 		yscale = yscale,
+		secondary_y = secondary_y,
 	)
 	_refresh!(fig)
 	return nothing
@@ -16835,12 +16824,14 @@ function plot_contour!(
 	kwargs...,
 )
 	x = _field2d_implicit_axis(size(U, 1), _field2d_log_axis(fig, :x, xscale))
-	y = _field2d_implicit_axis(size(U, 2), _field2d_log_axis(fig, :y, yscale))
+	# The y axis the call draws on: the twin of `secondary_y = true` (Z31).
+	ykey = get(kwargs, :secondary_y, false) === true ? _scat_twin_key(fig, true) : :yaxis
+	y = _field2d_implicit_axis(size(U, 2), _field2d_log_axis(fig, ykey, yscale))
 	return plot_contour!(fig, x, y, U; xscale = xscale, yscale = yscale, kwargs...)
 end
 
 """
-	plot_quiver!(fig, x, y, u, v; kwargs...)
+	plot_quiver!(fig, x, y, u, v; secondary_y = false, kwargs...)
 	plot_quiver!(sf::SubplotFigure, x, y, u, v; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append a vector field (same input forms, glyph kinds, scaling and keywords as
@@ -16856,6 +16847,12 @@ the target axes; `grid = nothing` keeps the grid (`true` re-enables it,
 call is `2/3 * sizeref` long in x/y data units. Glyphs on an axis that is
 already logarithmic are laid out in decades. On a `SubplotFigure`, `title`,
 `width` and `height` are ignored with a warning.
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Invalid input throws an `ArgumentError` and leaves the figure unchanged.
 Returns `nothing` (`sf` for a `SubplotFigure`).
@@ -16917,7 +16914,7 @@ function plot_quiver!(
 	equalar::Bool = true,
 	kwargs...,
 )
-	_field2d_reject_keywords("plot_quiver!", kwargs)
+	secondary_y = _field2d_reject_keywords("plot_quiver!", kwargs)
 	_quiver_add!(
 		fig,
 		"plot_quiver!",
@@ -16967,6 +16964,7 @@ function plot_quiver!(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		secondary_y = secondary_y,
 	)
 	_refresh!(fig)
 	return nothing
@@ -21984,12 +21982,15 @@ function _image_add!(
 	equalar::Bool,
 	tight,
 	interpolation = :nearest,
+	secondary_y::Bool = false,
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
+	twin_key = _scat_twin_key(fig, secondary_y)
 	_field2d_validate_cartesian(
 		fig,
 		who;
+		ykey = twin_key,
 		xrange = xrange,
 		yrange = yrange,
 		width = width,
@@ -22006,6 +22007,7 @@ function _image_add!(
 		yticks = yticks,
 		yticklabels = yticklabels,
 		ytickformat = ytickformat,
+		ykey = twin_key,
 	)
 	tight_value = _field2d_bool(tight, who, "tight")
 	zsmooth = _field2d_zsmooth(interpolation, who; image = true)
@@ -22039,6 +22041,8 @@ function _image_add!(
 	zsmooth === nothing || (fields[:zsmooth] = zsmooth)
 	_field2d_mark_field!(fields, tight_value)
 
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	isempty(yref) || (fields[:yaxis] = yref)
 	first_new = length(_plot_data(fig)) + 1
 	push!(_plot_data(fig), image(; fields...))
 	_field2d_apply_options!(
@@ -22065,20 +22069,23 @@ function _image_add!(
 		fontsize = fontsize,
 		grid = grid,
 		partial_ranges = false,
+		ykey = ykey,
 	)
 	# plotly reverses the y axis of an image by default; write the direction
 	# explicitly so the extent / origin hold.
 	if placement !== nothing
 		_field2d_axis_direction!(fig, :x, placement.x_reversed; force = true)
-		_field2d_axis_direction!(fig, :y, placement.y_reversed; force = true)
+		_field2d_axis_direction!(fig, ykey, placement.y_reversed; force = true)
 	elseif !isempty(origin_value)
-		_field2d_axis_direction!(fig, :y, origin_value == "upper"; force = true)
+		_field2d_axis_direction!(fig, ykey, origin_value == "upper"; force = true)
 	end
-	# One-sided limits (D11) after the direction, so the fixed bound lands in
-	# the slot of the image's direction; a y axis that states no direction is
-	# drawn reversed by plotly for an image.
-	_field2d_apply_partial_range!(fig, :xaxis, xrange; who = who)
-	_field2d_apply_partial_range!(fig, :yaxis, yrange; implicit_reversed = true, who = who)
+	# One-sided limits (D11) after the direction: the fixed end is the start
+	# (left/bottom) of the axis as drawn, and a y axis that states no direction
+	# is drawn reversed by plotly for an image. The image axes are
+	# aspect-linked, so the limit becomes a full range whose open end is the
+	# image's current view (`_resolve_constrained_limit`).
+	_field2d_write_range!(fig, :xaxis, _field2d_one_sided(xrange), who, "xrange")
+	_field2d_write_range!(fig, ykey, _field2d_one_sided(yrange), who, "yrange")
 	_field2d_finish!(fig, first_new)
 	return nothing
 end
@@ -22123,9 +22130,11 @@ alpha channel is kept. A 2-D matrix of numbers is not an image (use
   linear axes; on a log axis plotly draws the pixels flat.
 - `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
   `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic; a one-sided
-  `(lo, nothing)`/`(nothing, hi)` fixes one bound and, as plotly.js
-  re-ranges an image's aspect-constrained axes, fixes the other at the
-  image's current extent, as matplotlib's `set_xlim` does). The image
+  `(start, nothing)`/`(nothing, stop)` fixes the start (left/bottom end) or
+  the stop of the axis as drawn and, as plotly.js re-ranges an image's
+  aspect-constrained axes, fixes the other end at the image's current
+  extent, as matplotlib's `set_xlim`/`set_ylim` do: with `origin = :upper`,
+  `yrange = (2, nothing)` puts y = 2 at the bottom). The image
   keeps its orientation: with `origin = :upper` (or a reversed `extent`) the
   bounds of an explicit range are reordered so that axis still points down
   (left), e.g. `yrange = (0, 2)` is written as `[2, 0]`. `xticks`,
@@ -22197,11 +22206,11 @@ function plot_image(
 		tight = tight,
 		interpolation = interpolation,
 	)
-	return _field2d_show(fig, show, width, height, title)
+	return _maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_image!(fig, z; kwargs...)
+	plot_image!(fig, z; secondary_y = false, kwargs...)
 	plot_image!(sf::SubplotFigure, z; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append an image (same data forms and keywords as [`plot_image`](@ref), except
@@ -22216,6 +22225,12 @@ image's first row at the top unless the axis direction was set); `:upper` /
 `:lower` set it, and an `extent` sets both axis directions. `grid = nothing`
 keeps the grid. On a `SubplotFigure`, `title`, `width` and `height` are
 ignored with a warning.
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Invalid input throws an `ArgumentError` and leaves the figure unchanged.
 Returns `nothing` (`sf` for a `SubplotFigure`).
@@ -22252,7 +22267,7 @@ function plot_image!(
 	interpolation = :nearest,
 	kwargs...,
 )
-	_field2d_reject_keywords("plot_image!", kwargs)
+	secondary_y = _field2d_reject_keywords("plot_image!", kwargs)
 	_image_add!(
 		fig,
 		"plot_image!",
@@ -22279,6 +22294,7 @@ function plot_image!(
 		equalar = equalar,
 		tight = tight,
 		interpolation = interpolation,
+		secondary_y = secondary_y,
 	)
 	_refresh!(fig)
 	return nothing

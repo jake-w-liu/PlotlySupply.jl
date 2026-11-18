@@ -522,9 +522,10 @@ Every field is validated by the constructor and on assignment
 - `errorbar_width::Real=0`: error-bar line thickness in px for traces whose
   error bars leave it unset.
 - `reference_linewidth::Real=0`: width in px for reference lines and shapes
-  (the `:reference` role of the internal `_style_line_width`). In this release
-  `hline!`, `vline!`, `arrow!` and the schematic shapes still draw their own
-  1 px default.
+  (the `:reference` role of the internal `_style_line_width`): the default
+  line width of `hline!`, `vline!`, `arrow!`, `arc!`, the schematic shapes
+  (`circle!`, `ellipse!`, `rectangle!`, `polygon!`) and an `hspan!`/`vspan!`
+  outline. `0` keeps their 1 px default.
 
 Numeric fields use `0` as "unset"; negative and non-finite values throw an
 `ArgumentError`. Sizes and widths are CSS px (1 pt = 4/3 px, 1 in = 96 px).

@@ -338,16 +338,28 @@ end
 
 	@testset "X23 K1 range sentinels are automatic: the sticky field extent, no user range" begin
 		# Field extents per build (heatmap U: brick edges of 0:3 x 0:2; contour:
-		# nodes; the mutators draw on plot_heatmap(U), streamlines reach y = 3).
-		# `pinned`: an equal-aspect group, which finalize pins to its clip.
+		# nodes; the mutators draw on plot_heatmap(U)). `pinned`: an
+		# equal-aspect group, which finalize pins to its clip.
+		# K5 / D16: a field alone, or with overlays whose anchors lie inside it,
+		# is exactly tight (the quiver! anchor (1, 1) is inside). An overlay
+		# whose anchors lie outside widens the axis to them plus
+		# `_FIN_OVERLAY_PAD` (2.5 %) of the span on that side only: the
+		# streamlines! grid reaches y = 3, past the field's top edge 2.5.
 		hm = ((-0.5, 3.5), (-0.5, 2.5))
+		pad(lo, hi) = PlotlySupply._FIN_OVERLAY_PAD * (hi - lo)
+		# Extrema of every finite coordinate the traces draw on `axis`.
+		function drawn(fig, axis)
+			letter = Symbol(string(axis)[1])
+			vals = Float64[v for t in fig.data for v in get(t.fields, letter, ()) if v isa Real && isfinite(v)]
+			return extrema(vals)
+		end
 		sticky = Dict(
 			"plot_heatmap" => (hm, false),
 			"plot_contour" => (((0.0, 3.0), (0.0, 2.0)), false),
 			"plot_heatmap!" => (hm, false),
 			"plot_contour!" => (hm, false),
 			"plot_quiver!" => (hm, true),
-			"plot_streamlines!" => ((hm[1], (-0.5, 3.0)), false),
+			"plot_streamlines!" => ((hm[1], (-0.5, 3.0 + pad(-0.5, 3.0))), false),
 		)
 		for (who, build) in range_builds, (index, (key, axis)) in enumerate(((:xrange, :xaxis), (:yrange, :yaxis)))
 			for sentinel in ([0, 0], (0, 0), nothing, [nothing, nothing], (nothing, nothing))
@@ -361,27 +373,100 @@ end
 					else
 						@test !haskey(ax, :range) && get(ax, :autorange, true) !== false
 					end
+				elseif who in ("plot_quiver", "plot_streamlines")
+					# D13: glyphs without a field span what they draw plus the
+					# overlay pad on both sides (plotly.js autoranges line traces
+					# unpadded and would cut the arrowheads at the frame); the
+					# quiver's default equal aspect pins that clip.
+					lo, hi = drawn(fig, axis)
+					clip = _rf_clip(fig, axis)
+					@test clip !== nothing && collect(clip) ≈ [lo - pad(lo, hi), hi + pad(lo, hi)]
+					if who == "plot_quiver"
+						@test ax[:autorange] === false && collect(ax[:range]) ≈ collect(clip)
+					else
+						@test !haskey(ax, :range) && get(ax, :autorange, true) !== false
+					end
 				else
-					# No field on the axis (quiver, streamlines), or an image, whose
-					# 3-D z finalize does not measure yet (cross-request): plotly's
-					# own autorange, nothing pinned.
+					# An image, whose 3-D z finalize does not measure yet
+					# (cross-request): plotly's own autorange, nothing pinned.
 					@test _rf_clip(fig, axis) === nothing
 					@test !haskey(ax, :range) && get(ax, :autorange, true) !== false
 				end
 			end
 		end
 		# No user range was recorded: a later trace widens the automatic axis,
-		# while an explicit range stays put.
+		# while an explicit range stays put. A marker is its own anchor: one
+		# past the field's right edge widens the axis to it plus the overlay
+		# pad on that side (the left edge stays at the field).
+		widened = (-0.5, 10.0 + pad(-0.5, 10.0))
 		f = plot_heatmap(U; xrange = nothing)
 		plot_scatter!(f, [10.0], [1.0]; mode = "markers")
-		@test _rf_clip(f, :xaxis) == (-0.5, 10.0) && !haskey(_rf_axis(f, :xaxis), :range)
+		@test _rf_clip(f, :xaxis) == widened && !haskey(_rf_axis(f, :xaxis), :range)
 		g = plot_heatmap(U; xrange = (1, 3))
 		plot_scatter!(g, [10.0], [1.0]; mode = "markers")
 		@test collect(_rf_axis(g, :xaxis)[:range]) == [1, 3] && _rf_clip(g, :xaxis) === nothing
 		q = plot_heatmap(U)
 		plot_quiver!(q, [1.0], [1.0], [1.0], [1.0]; xrange = [0, 0])
 		plot_scatter!(q, [10.0], [1.0]; mode = "markers")
-		@test _rf_clip(q, :xaxis) == (-0.5, 10.0) && collect(_rf_axis(q, :xaxis)[:range]) == [-0.5, 10.0]
+		@test _rf_clip(q, :xaxis) == widened && Tuple(_rf_axis(q, :xaxis)[:range]) == widened
+	end
+
+	@testset "D16 K5 quiver and streamline overlays count with their anchors" begin
+		pad(lo, hi) = PlotlySupply._FIN_OVERLAY_PAD * (hi - lo)
+		# hm_06: a quiver on the field's own grid. The anchors are the cell
+		# centres, inside the brick edges, so both axes are exactly the field
+		# (no white band) although the arrows reach past the top and right.
+		xg = range(0, 4; length = 9)
+		hm = plot_heatmap(xg, xg, [x * y for x in xg, y in xg]; equalar = true)
+		plot_quiver!(hm, xg, xg, [1.0 for x in xg, y in xg], [0.5 for x in xg, y in xg]; sizeref = 0.5)
+		glyph_x = filter(v -> v !== nothing, hm.data[2].fields[:x])
+		@test maximum(glyph_x) > 4.25
+		for axis in (:xaxis, :yaxis)
+			@test _rf_clip(hm, axis) == (-0.25, 4.25)
+			@test _rf_axis(hm, axis)[:autorange] === false && collect(_rf_axis(hm, axis)[:range]) == [-0.25, 4.25]
+		end
+		@test hm.data[2].fields[:meta] == Dict(:plotlysupply_anchor_extent => [0.0, 4.0, 0.0, 4.0])
+		# Anchors outside the field: the axis reaches the anchors plus the pad,
+		# on that side only.
+		out = plot_heatmap(U)
+		plot_quiver!(out, [6.0], [1.0], [1.0], [0.0]; equalar = false)
+		@test _rf_clip(out, :xaxis) == (-0.5, 6.0 + pad(-0.5, 6.0)) && _rf_clip(out, :yaxis) == (-0.5, 2.5)
+		# Streamlines on the field's grid: tight on the field.
+		st = plot_heatmap(0:3, 0:2, U)
+		plot_streamlines!(st, 0:3, 0:2, ones(4, 3), fill(0.5, 4, 3))
+		@test _rf_clip(st, :xaxis) == (-0.5, 3.5) && _rf_clip(st, :yaxis) == (-0.5, 2.5)
+		@test all(t -> t.fields[:meta] == Dict(:plotlysupply_anchor_extent => [0.0, 3.0, 0.0, 2.0]), st.data[2:end])
+		# Without a field the axes show the drawn glyphs whole (D13): their
+		# extent padded by the overlay pad on both sides (plotly.js autoranges
+		# line traces without padding, which cut the arrowheads at the frame);
+		# pinned on the equal-aspect quiver, an autorange clip without it.
+		alone = plot_quiver([0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0])
+		for (axis, coords) in ((:xaxis, :x), (:yaxis, :y))
+			lo, hi = extrema(filter(!isnothing, alone.data[1].fields[coords]))
+			want = (lo - pad(lo, hi), hi + pad(lo, hi))
+			@test _rf_clip(alone, axis) == want
+			@test _rf_limit(alone, axis) == (:pinned, collect(want))
+		end
+		free = plot_quiver([0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]; equalar = false)
+		lo, hi = extrema(filter(!isnothing, free.data[1].fields[:x]))
+		@test _rf_clip(free, :xaxis) == (lo - pad(lo, hi), hi + pad(lo, hi)) && !haskey(_rf_axis(free, :xaxis), :range)
+		# Streamlines alone: the lines' extent, padded the same way.
+		sl = plot_streamlines(0:3, 0:2, ones(4, 3), fill(0.5, 4, 3))
+		lo, hi = extrema(v for t in sl.data for v in get(t.fields, :x, Any[]) if v isa Real && isfinite(v))
+		@test _rf_clip(sl, :xaxis) == (lo - pad(lo, hi), hi + pad(lo, hi))
+		# A later trace widens the glyph view (the sticky contract).
+		plot_scatter!(free, [9.0], [0.5]; mode = "markers")
+		@test _rf_clip(free, :xaxis)[2] == 9.0 + pad(lo, 9.0)
+		# The anchor extent is every finite position, drawn or not (a zero or
+		# NaN vector still anchors), over the colorby traces too; the colorbar
+		# carrier has none.
+		cb = Base.CoreLogging.with_logger(Base.CoreLogging.NullLogger()) do
+			plot_quiver([0.0, 1.0, 5.0, NaN], [0.0, 2.0, -1.0, 3.0], [1.0, 0.0, 1.0, 1.0], [0.0, 0.0, NaN, 1.0]; colorby = :magnitude)
+		end
+		glyphs = filter(t -> haskey(t.fields, :meta), cb.data)
+		@test !isempty(glyphs) && length(glyphs) == length(cb.data) - 1
+		@test all(t -> t.fields[:meta] == Dict(:plotlysupply_anchor_extent => [0.0, 5.0, -1.0, 2.0]), glyphs)
+		@test PlotlySupply._fin_field_kind(glyphs[1]) === nothing
 	end
 
 	@testset "X23 D11 K2 range keywords: two-sided, one-sided and invalid limits" begin
@@ -394,57 +479,90 @@ end
 				ax = _rf_axis(build(NamedTuple{(key,)}((given,))), axis)
 				@test collect(ax[:range]) == (flipped ? [3, 1] : [1, 3]) && ax[:autorange] === false
 			end
-			# D11: a one-sided limit fixes that edge and autoranges the other
+			# D11 (Z53: the shared `_checked_range(...; partial = true)` and range
+			# primitives, as `xrange!`): a one-sided limit fixes the START (first
+			# bound) or the STOP of the axis and autoranges the other end
 			# (`autorangeoptions.minallowed`/`maxallowed`, which `savefig` keeps).
 			# On an aspect-constrained axis (equal aspect, an image's axes) it is
-			# pinned to the bound and the data's other edge, as matplotlib does.
-			# An image's y axis (reversed by default, also when plot_image! adds
-			# one) keeps its direction.
+			# pinned to the bound and the current view's other end, as matplotlib
+			# does. An image's y axis is reversed (plotly's default, also when
+			# plot_image! adds one), where the start is the larger value.
 			reversed = who in ("plot_image", "plot_image!") && key === :yrange
 			fig = build(NamedTuple{(key,)}(((1, nothing),)))
 			aspect = haskey(_rf_axis(fig, :yaxis), :scaleanchor) || who in ("plot_image", "plot_image!")
 			lim = _rf_limit(fig, axis)
 			@test (lim[1] === :pinned) == aspect
 			if aspect
-				@test minimum(lim[2]) == 1 && (lim[2][1] > lim[2][2]) == reversed
+				@test lim[2][1] == 1 && (lim[2][1] > lim[2][2]) == reversed
 			else
 				@test lim == (reversed ? "reversed" : true, 1, nothing) && !haskey(_rf_axis(fig, axis), :range)
 			end
+			# The limit is the user's: no finalize clip is left on the axis (a
+			# pinned full range equal to a clip would be taken for finalize's
+			# own and moved by the next trace).
 			@test _rf_clip(fig, axis) === nothing
-			lim = _rf_limit(build(NamedTuple{(key,)}(([nothing, 2],))), axis)
+			lim = _rf_limit(build(NamedTuple{(key,)}(([nothing, 1],))), axis)
 			if aspect
-				@test lim[1] === :pinned && maximum(lim[2]) == 2 && (lim[2][1] > lim[2][2]) == reversed
+				@test lim[1] === :pinned && lim[2][2] == 1 && (lim[2][1] > lim[2][2]) == reversed
 			else
-				@test lim == (reversed ? "reversed" : true, nothing, 2)
+				@test lim == (reversed ? "reversed" : true, nothing, 1)
 			end
-			# Invalid limits name the function and the keyword.
-			@test occursin("$(who): `$(key)` bounds must be numbers (or date/category values); `missing` is not a bound",
+			# Invalid limits name the function and the keyword (the D11 messages
+			# of the shared range check).
+			@test occursin("$(who): `$(key)`: an open bound of a one-sided limit is written `nothing`",
 				msg(build, key, (missing, 2)))
-			equal = msg(build, key, [2, 2])
-			@test startswith(equal, "ArgumentError: $(who):") && occursin("`$(key)`", equal) && occursin("must differ", equal)
-			@test occursin("$(who): `$(key)` bounds must be numbers", msg(build, key, (true, false)))
-			@test occursin("$(who): `$(key)` bounds must be numbers", msg(build, key, Any[false, 1]))
+			@test occursin("$(who): `$(key)`: the range bounds must differ", msg(build, key, [2, 2]))
+			@test occursin("$(who): `$(key)` range bounds must be numbers (or date/category values), not Bool",
+				msg(build, key, (true, false)))
+			@test occursin("$(who): `$(key)` range bounds must be numbers", msg(build, key, Any[false, 1]))
 			@test occursin("$(who): `$(key)` bounds must be finite", msg(build, key, (Inf, nothing)))
-			@test occursin("$(who): the bound of a one-sided `$(key)` must be a number", msg(build, key, (nothing, [1, 2])))
-			@test occursin("$(who): the bound of a one-sided `$(key)` must be a number", msg(build, key, ("a", nothing)))
+			# The fixed end of a one-sided limit on an autotyped axis is a number
+			# or a date (plotly.js reads date limits in milliseconds).
+			@test occursin("$(who): `$(key)`: [1, 2] is not a date", msg(build, key, (nothing, [1, 2])))
+			@test occursin("$(who): `$(key)`: \"a\" is not a date", msg(build, key, ("a", nothing)))
 		end
 		@test collect(_rf_axis(plot_image(zeros(UInt8, 2, 2, 3); origin = :lower, yrange = (1, 3)), :yaxis)[:range]) == [1, 3]
-		# Pinned on an image: the fixed bound and the image's pixel edge.
+		# Pinned on an image: the fixed bound and the image's pixel edge. With
+		# `origin = :upper` (y reversed) the start is the bottom of the image,
+		# the larger y, as matplotlib's `set_ylim(bottom = 1)` on an inverted
+		# axis.
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 2, 3); origin = :lower, yrange = (nothing, 1)), :yaxis) == (:pinned, [-0.5, 1.0])
-		@test _rf_limit(plot_image(zeros(UInt8, 2, 2, 3); yrange = (1, nothing)), :yaxis) == (:pinned, [1.5, 1.0])
+		@test _rf_limit(plot_image(zeros(UInt8, 2, 2, 3); yrange = (1, nothing)), :yaxis) == (:pinned, [1.0, -0.5])
+		@test _rf_limit(plot_image(zeros(UInt8, 2, 2, 3); yrange = (nothing, 0)), :yaxis) == (:pinned, [1.5, 0.0])
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 3, 3); xrange = (nothing, 1)), :xaxis) == (:pinned, [-0.5, 1.0])
+		# A stop beyond the data on the far side leaves no room: an error.
+		@test occursin("plot_image: `yrange` = (nothing, 2) leaves no room for the data",
+			_rfv3_msg(() -> plot_image(zeros(UInt8, 2, 2, 3); yrange = (nothing, 2))))
 		# ... also for a bilinear image, sized from its PNG header.
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 3, 3); interpolation = :bilinear, xrange = (1, nothing)), :xaxis) == (:pinned, [1.0, 2.5])
-		# ... and on an equal-aspect quiver: the glyphs' extent (tails at x = 0).
-		@test _rf_limit(plot_quiver([0.0, 1, 2, 3], [0.0, 1, 0, 1], ones(4), [1.0, 0, -1, 0]; xrange = (nothing, 2.5)), :xaxis) == (:pinned, [0.0, 2.5])
-		# An explicitly reversed axis keeps its direction under a one-sided limit.
+		# ... `xrange!` on an image takes the same view (Z53: one implementation).
+		im = plot_image(zeros(UInt8, 2, 3, 3))
+		xrange!(im, (1, nothing))
+		@test _rf_limit(im, :xaxis) == (:pinned, [1.0, 2.5])
+		# ... and on an equal-aspect quiver without a field: the glyph view
+		# (their extent and the overlay pad, as finalize shows them), so the
+		# glyphs at the open end stay whole; `xrange!` gives the same.
+		qv = plot_quiver([0.0, 1, 2, 3], [0.0, 1, 0, 1], ones(4), [1.0, 0, -1, 0]; xrange = (nothing, 2.5))
+		gx = filter(v -> v !== nothing, qv.data[1].fields[:x])
+		ql = _rf_limit(qv, :xaxis)
+		@test ql[1] === :pinned && ql[2][2] == 2.5 &&
+			ql[2][1] ≈ minimum(gx) - PlotlySupply._FIN_OVERLAY_PAD * (maximum(gx) - minimum(gx))
+		qv2 = plot_quiver([0.0, 1, 2, 3], [0.0, 1, 0, 1], ones(4), [1.0, 0, -1, 0])
+		xrange!(qv2, (nothing, 2.5))
+		@test _rf_limit(qv2, :xaxis) == ql
+		# On a reversed axis without an aspect lock the first bound is the
+		# start too: `maxallowed` (the bottom of an `origin = :upper` heatmap).
 		h = plot_heatmap(U; origin = :upper, yrange = (0.5, nothing))
-		@test _rf_limit(h, :yaxis) == ("reversed", 0.5, nothing) && !haskey(_rf_axis(h, :yaxis), :range)
+		@test _rf_limit(h, :yaxis) == ("reversed", nothing, 0.5) && !haskey(_rf_axis(h, :yaxis), :range)
 		h = plot_heatmap(U; origin = :upper, yrange = (nothing, 1.5))
-		@test _rf_limit(h, :yaxis) == ("reversed", nothing, 1.5)
+		@test _rf_limit(h, :yaxis) == ("reversed", 1.5, nothing)
+		# The keyword and `yrange!` write the same limit (Z53).
+		h2 = plot_heatmap(U; origin = :upper)
+		yrange!(h2, (0.5, nothing))
+		@test _rf_limit(h2, :yaxis) == _rf_limit(plot_heatmap(U; origin = :upper, yrange = (0.5, nothing)), :yaxis)
 		# A one-sided limit on an axis finalize had clipped drops that clip (the
-		# open side would otherwise stay clipped to the old extent); other user
-		# `autorangeoptions` are kept; a new one-sided limit replaces the old.
+		# open side would otherwise stay clipped to the old extent); a new
+		# one-sided limit replaces the old.
 		f = plot_heatmap(U)
 		@test _rf_clip(f, :xaxis) == (-0.5, 3.5)
 		plot_heatmap!(f, U; xrange = (nothing, 3))
@@ -458,14 +576,13 @@ end
 		plot_scatter!(w, [-20.0], [1.0]; mode = "markers")
 		plot_heatmap!(w, -10:-7, 0:2, rand(4, 3))
 		@test _rf_limit(w, :xaxis) == (true, nothing, 3) && !haskey(_rf_axis(w, :xaxis), :range)
-		# A user-edited `autorangeoptions` is the user's (finalize no longer
-		# updates it): its entries are kept; an earlier opposite limit is dropped.
+		# A one-sided limit replaces the limit and autorange-clip entries of
+		# `autorangeoptions` (`_write_axis_range!`: an `include` or clip left on
+		# the open end would freeze it), as `xrange!` does.
 		k = plot_heatmap(U)
 		relayout!(k; xaxis_autorangeoptions_include = -5, xaxis_autorangeoptions_minallowed = -1)
 		plot_heatmap!(k, U; xrange = (nothing, 3))
-		ko = _rfv3_d(_rf_axis(k, :xaxis)[:autorangeoptions])
-		@test ko[:include] == -5 && ko[:maxallowed] == 3 && !haskey(ko, :minallowed)
-		@test ko[:clipmin] == -0.5 && ko[:clipmax] == 3.5
+		@test _rfv3_d(_rf_axis(k, :xaxis)[:autorangeoptions]) == Dict(:maxallowed => 3)
 		# A date bound is written in epoch milliseconds (plotly.js ignores a date
 		# string in the autorange options).
 		Dt = Base.require(Base.PkgId(Base.UUID("ade2ca70-3891-5945-98fb-dc099432e06a"), "Dates"))
@@ -475,6 +592,7 @@ end
 		f = plot_heatmap(U)
 		@test _rf_thrown(() -> plot_heatmap!(f, U; xrange = [1, 1])) isa ArgumentError
 		@test _rf_thrown(() -> plot_heatmap!(f, U; xrange = (missing, 1))) isa ArgumentError
+		@test _rf_thrown(() -> plot_heatmap!(f, U; xrange = (10, nothing))) isa ArgumentError
 		@test length(f.data) == 1 && _rf_clip(f, :xaxis) == (-0.5, 3.5)
 	end
 
@@ -509,10 +627,11 @@ end
 		plot_contour!(sf, rand(2, 2); row = 1, col = 1, yrange = [nothing, 1])
 		@test _rf_limit(sf, :yaxis) == (true, nothing, 1)
 		# An image in a cell keeps plotly's reversed y default under a one-sided
-		# limit (pinned: an image's axes are aspect-constrained), as on a Plot.
+		# limit (pinned: an image's axes are aspect-constrained), as on a Plot:
+		# the stop is the top of the image, the smaller y.
 		sfi = subplots(1, 2; sync = false)
 		plot_image!(sfi, zeros(UInt8, 2, 2, 3); row = 1, col = 2, yrange = (nothing, 1))
-		@test _rf_limit(sfi, :yaxis2) == (:pinned, [1.0, -0.5])
+		@test _rf_limit(sfi, :yaxis2) == (:pinned, [1.5, 1.0])
 		@test occursin("plot_matrix!: unsupported keyword argument(s) `xrange`", _rfv3_msg(() ->
 			plot_matrix!(sf, rand(2, 2); xrange = (0, 1))))
 		# Shared x: plotly.js reads a matched axis's range from the group root
@@ -597,8 +716,13 @@ end
 		@test all(t -> get(t.fields, :meta, nothing) == tight, filter(t -> get(t.fields, :type, "") == "contour", bands.data))
 		@test plot_image(zeros(UInt8, 2, 2, 3); tight = false).data[1].fields[:meta] == loose
 		@test plot_matrix(U).data[1].fields[:meta] == tight
-		@test all(t -> !haskey(t.fields, :meta), plot_quiver([0.0], [0.0], [1.0], [1.0]).data)
-		@test all(t -> !haskey(t.fields, :meta), plot_streamlines(0:3, 0:3, ones(4, 4), ones(4, 4)).data)
+		# Overlays carry no field `meta`; quiver and streamline traces carry
+		# their anchor extent there instead (D16), which is not a field mark.
+		for overlay in (plot_quiver([0.0], [0.0], [1.0], [1.0]), plot_streamlines(0:3, 0:3, ones(4, 4), ones(4, 4)))
+			@test all(t -> PlotlySupply._fin_field_kind(t) === nothing, overlay.data)
+		end
+		@test plot_quiver([0.0], [0.0], [1.0], [1.0]).data[1].fields[:meta] == Dict(:plotlysupply_anchor_extent => [0.0, 0.0, 0.0, 0.0])
+		@test plot_streamlines(0:3, 0:3, ones(4, 4), ones(4, 4)).data[1].fields[:meta] == Dict(:plotlysupply_anchor_extent => [0.0, 3.0, 0.0, 3.0])
 		p = plot_heatmap(U)
 		plot_heatmap!(p, U; tight = false)
 		@test p.data[2].fields[:meta] == loose
@@ -616,18 +740,32 @@ end
 		# A mutator on a Plot runs `_finalize_figure!`: the `matches` root that
 		# holds a field gets finalize's clip of the field extent (autoranging
 		# within it, or pinned to it on an equal-aspect group), which a later
-		# trace widens; a root without a field keeps plotly's autorange.
+		# trace widens; a root without a field keeps plotly's autorange, unless
+		# it holds quiver/streamline glyphs (`:glyphs`, D13): then the clip is
+		# what they draw plus the overlay pad on both sides.
 		for (name, mutate!, extent, pinned) in (
 			("heatmap!", p -> plot_heatmap!(p, U), (-0.5, 3.5), false),
 			("contour!", p -> plot_contour!(p, U), (0.0, 3.0), false),
 			("matrix!", p -> plot_matrix!(p, U), (0.5, 3.5), true),
-			("quiver!", p -> plot_quiver!(p, [0.0], [0.0], [1.0], [1.0]), nothing, false),
+			("quiver!", p -> plot_quiver!(p, [0.0], [0.0], [1.0], [1.0]), :glyphs, true),
 			("image!", p -> plot_image!(p, zeros(UInt8, 2, 2, 3)), nothing, false),
-			("streamlines!", p -> plot_streamlines!(p, 0:3, 0:3, ones(4, 4), ones(4, 4)), nothing, false),
+			("streamlines!", p -> plot_streamlines!(p, 0:3, 0:3, ones(4, 4), ones(4, 4)), :glyphs, false),
 		)
 			p = Plot(GenericTrace[], Layout(xaxis2 = attr(matches = "x", anchor = "y2"), yaxis2 = attr(anchor = "x2")))
 			mutate!(p)
 			ax = _rf_axis(p, :xaxis)
+			if extent === :glyphs
+				lo, hi = extrema(Float64[v for t in p.data for v in get(t.fields, :x, ()) if v isa Real && isfinite(v)])
+				pad = PlotlySupply._FIN_OVERLAY_PAD * (hi - lo)
+				clip = _rf_clip(p, :xaxis)
+				@test clip !== nothing && collect(clip) ≈ [lo - pad, hi + pad]
+				if pinned
+					@test ax[:autorange] === false && collect(ax[:range]) ≈ collect(clip)
+				else
+					@test get(ax, :autorange, true) === true && !haskey(ax, :range)
+				end
+				continue
+			end
 			if extent === nothing
 				@test _rf_clip(p, :xaxis) === nothing
 				@test !haskey(ax, :range) && get(ax, :autorange, true) === true
@@ -639,8 +777,11 @@ end
 			else
 				@test ax[:autorange] === true && !haskey(ax, :range)
 			end
-			plot_scatter!(p, [extent[2] + 10.0], [0.5]; mode = "markers")
-			widened = (extent[1], extent[2] + 10.0)
+			# A marker past the field: the axis reaches it plus the overlay pad
+			# (2.5 % of the span) on that side; the field side stays tight.
+			marker = extent[2] + 10.0
+			plot_scatter!(p, [marker], [0.5]; mode = "markers")
+			widened = (extent[1], marker + PlotlySupply._FIN_OVERLAY_PAD * (marker - extent[1]))
 			@test _rf_clip(p, :xaxis) == widened
 			pinned && @test Tuple(Float64.(_rf_axis(p, :xaxis)[:range])) == widened
 		end
@@ -1159,5 +1300,270 @@ end
 		@test occursin("plot_heatmap: `xrange` bounds on a linear axis must be numbers", _rfv3_msg(() ->
 			plot_heatmap(U; xscale = "linear", xrange = (D.Date(2024, 1, 1), nothing))))
 		@test occursin("plot_contour", _rfv3_msg(() -> plot_contour(U; xscale = "log", xticks = [D.Date(2024, 1, 1)])))
+	end
+end
+
+@testset "regression: 2-D fields, wave 5 (fields)" begin
+	U5 = [Float64(i + 2j) for i in 0:3, j in 0:2]   # U[ix, iy], 4 x 3
+	pad(lo, hi) = PlotlySupply._FIN_OVERLAY_PAD * (hi - lo)
+
+	@testset "Z3 zrange is an alias of crange: only different limits conflict" begin
+		for (who, build) in (("plot_heatmap", kw -> plot_heatmap(U5; kw...)), ("plot_contour", kw -> plot_contour(U5; kw...)))
+			# The same limits through both keywords (any spelling) are one request.
+			for (z, c) in (((0, 10), [0, 10]), ([0.0, 10.0], (0, 10)), ((0, 10), (0, 10)))
+				t = build((; zrange = z, crange = c)).data[1]
+				@test t.fields[:zmin] == 0 && t.fields[:zmax] == 10
+			end
+			# A sentinel on either side leaves the other in charge.
+			@test build((; zrange = (0, 10), crange = [0, 0])).data[1].fields[:zmax] == 10
+			@test build((; zrange = nothing, crange = (1, 5))).data[1].fields[:zmax] == 5
+			err = _rfv3_msg(() -> build((; zrange = (0, 1), crange = (0, 2))))
+			@test occursin("$(who): `zrange` is an alias of `crange`, and they differ", err)
+			@test occursin("zrange = (0, 1), crange = (0, 2)", err)
+		end
+		# The mutator checks the same.
+		f = plot_heatmap(U5)
+		@test occursin("plot_heatmap!: `zrange` is an alias of `crange`",
+			_rfv3_msg(() -> plot_heatmap!(f, U5; zrange = (0, 1), crange = (0, 3))))
+		@test length(f.data) == 1
+	end
+
+	@testset "Z25 field constructors show through the shared `_maybe_show`" begin
+		# No private show helper is left in the field family; the constructors
+		# return through the package's one `_maybe_show` (no window is opened
+		# here: `show = false` is the identity).
+		@test !isdefined(PlotlySupply, :_field2d_show)
+		src = read(joinpath(pkgdir(PlotlySupply), "src", "api.jl"), String)
+		@test !occursin("_field2d_show", src)
+		f = plot_heatmap(U5)
+		@test PlotlySupply._maybe_show(f, false, 0, 0, "") === f
+	end
+
+	@testset "Z31 secondary_y on the Plot/SyncPlot field and mesh mutators" begin
+		tx, ty, tri = [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [1 2 3; 2 4 3]
+		calls = (
+			("plot_heatmap!", (f; kw...) -> plot_heatmap!(f, 0:3, 0:2, U5; kw...)),
+			("plot_contour!", (f; kw...) -> plot_contour!(f, 0:3, 0:2, U5; kw...)),
+			("plot_quiver!", (f; kw...) -> plot_quiver!(f, [1.0, 2.0], [1.0, 2.0], [1.0, 0.0], [0.0, 1.0]; kw...)),
+			("plot_image!", (f; kw...) -> plot_image!(f, zeros(UInt8, 2, 2, 3); kw...)),
+			("plot_streamlines!", (f; kw...) -> plot_streamlines!(f, 0:3, 0:2, ones(4, 3), ones(4, 3); kw...)),
+			("plot_polygons!", (f; kw...) -> plot_polygons!(f, [[0.0, 1.0, 1.0]], [[0.0, 0.0, 1.0]]; kw...)),
+			("plot_pcolormesh!", (f; kw...) -> plot_pcolormesh!(f, 0:4, 0:3, U5; kw...)),
+			("plot_tripcolor!", (f; kw...) -> plot_tripcolor!(f, tx, ty, tri, [1.0, 2.0, 3.0, 4.0]; kw...)),
+			("plot_triplot!", (f; kw...) -> plot_triplot!(f, tx, ty, tri; kw...)),
+			("plot_tricontour!", (f; kw...) -> plot_tricontour!(f, tx, ty, tri, [1.0, 2.0, 3.0, 4.0]; levels = [2.5], kw...)),
+		)
+		for (who, call) in calls
+			f = plot_scatter(1:3, [10.0, 20.0, 30.0])
+			call(f; secondary_y = true, ylabel = "right", yrange = (0, 4))
+			new = f.data[2:end]
+			@test !isempty(new) && all(t -> get(t.fields, :yaxis, "y") == "y2", new)
+			y2 = _rf_axis(f, :yaxis2)
+			@test y2[:overlaying] == "y" && y2[:side] == "right"
+			@test PlotlySupply._symbol_dict(y2[:title])[:text] == "right"
+			@test collect(y2[:range]) == [0, 4] && y2[:autorange] === false
+			# The y keywords address the twin only: the primary y axis keeps its
+			# scatter state (no range, no title, no aspect lock).
+			y = _rf_axis(f, :yaxis)
+			@test !haskey(y, :range) && !haskey(y, :scaleanchor) && !haskey(y, :title)
+			# A second call reuses the twin.
+			call(f; secondary_y = true)
+			@test !haskey(_rf_layout(f), :yaxis3)
+			@test all(t -> get(t.fields, :yaxis, "y") == "y2", f.data[2:end])
+			# `secondary_y` must be a Bool; a failing call leaves the figure as it
+			# was (no twin, no traces).
+			g = plot_scatter(1:3, 1:3)
+			@test occursin("$(who): `secondary_y` must be true or false", _rfv3_msg(() -> call(g; secondary_y = 1)))
+			@test occursin("$(who):", _rfv3_msg(() -> call(g; secondary_y = true, yrange = (1, 1))))
+			@test length(g.data) == 1 && !haskey(_rf_layout(g), :yaxis2)
+		end
+		# plot_matrix! draws its rows downwards on the twin.
+		f = plot_scatter(1:3, 1:3)
+		plot_matrix!(f, U5; secondary_y = true)
+		@test f.data[2].fields[:yaxis] == "y2"
+		@test get(_rf_axis(f, :yaxis2), :autorange, nothing) == "reversed" ||
+			(_rf_axis(f, :yaxis2)[:autorange] === false && issorted(_rf_axis(f, :yaxis2)[:range]; rev = true))
+		# The equal aspect locks the twin to x (plot_quiver! default), not the
+		# primary y axis.
+		q = plot_scatter(1:3, 1:3)
+		plot_quiver!(q, [1.0, 2.0], [1.0, 2.0], [1.0, 0.0], [0.0, 1.0]; secondary_y = true)
+		@test _rf_axis(q, :yaxis2)[:scaleanchor] == "x" && !haskey(_rf_axis(q, :yaxis), :scaleanchor)
+		# The twin overlays the primary axis and shares its domain: plotly.js
+		# keeps the aspect by widening the twin's range (render probe p07).
+		@test _rf_axis(q, :yaxis2)[:constrain] == "range"
+		m = plot_scatter(1:3, 1:3)
+		plot_polygons!(m, [[0.0, 1.0, 1.0]], [[0.0, 0.0, 1.0]]; secondary_y = true)
+		@test _rf_axis(m, :yaxis2)[:constrain] == "range" && _rf_axis(m, :yaxis2)[:scaleanchor] == "x"
+		@test get(_rf_axis(plot_quiver([0.0], [0.0], [1.0], [1.0]), :yaxis), :constrain, "domain") == "domain"
+		# A log twin: implicit coordinates start at 1, the twin gets the type,
+		# the primary axis does not; positivity is checked against the twin.
+		h = plot_scatter(1:3, [-1.0, 0.0, 1.0])
+		plot_heatmap!(h, U5; secondary_y = true, yscale = "log")
+		@test _rf_axis(h, :yaxis2)[:type] == "log" && !haskey(_rf_axis(h, :yaxis), :type)
+		@test collect(h.data[2].fields[:y]) == [1, 2, 3]
+		h = plot_scatter(1:3, [-1.0, 0.0, 1.0])
+		@test occursin("positive", _rfv3_msg(() -> plot_pcolormesh!(h, 0:4, 0:3, U5; secondary_y = true, yscale = "log")))
+		@test length(h.data) == 1 && !haskey(_rf_layout(h), :yaxis2)
+		# A one-sided limit on the twin (D11).
+		s = plot_scatter(1:3, 1:3)
+		plot_contour!(s, 0:3, 0:2, U5; secondary_y = true, yrange = (0.5, nothing))
+		@test _rf_limit(s, :yaxis2) == (true, 0.5, nothing)
+		# Constructors have no twin.
+		@test occursin("unsupported keyword", _rfv3_msg(() -> plot_pcolormesh(0:4, 0:3, U5; secondary_y = true)))
+		@test _rf_thrown(() -> plot_heatmap(U5; secondary_y = true)) isa MethodError
+	end
+
+	@testset "Z31 the six tick keywords on every field and mesh function" begin
+		tx, ty, tri = [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [1 2 3; 2 4 3]
+		ticks = (; xticks = [0, 1], xticklabels = ["a", "b"], yticks = [0, 1], yticklabels = ["c", "d"],
+			xtickformat = "", ytickformat = "")
+		fmts = (; xtickformat = ".1f", ytickformat = ".2f")
+		for (who, build) in (
+			("plot_heatmap", kw -> plot_heatmap(0:3, 0:2, U5; kw...)),
+			("plot_contour", kw -> plot_contour(0:3, 0:2, U5; kw...)),
+			("plot_quiver", kw -> plot_quiver([0.0, 1.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]; kw...)),
+			("plot_image", kw -> plot_image(zeros(UInt8, 2, 2, 3); kw...)),
+			("plot_streamlines", kw -> plot_streamlines(0:3, 0:2, ones(4, 3), ones(4, 3); kw...)),
+			("plot_polygons", kw -> plot_polygons([[0.0, 1.0, 1.0]], [[0.0, 0.0, 1.0]]; kw...)),
+			("plot_pcolormesh", kw -> plot_pcolormesh(0:4, 0:3, U5; kw...)),
+			("plot_tripcolor", kw -> plot_tripcolor(tx, ty, tri, [1.0, 2.0, 3.0, 4.0]; kw...)),
+			("plot_triplot", kw -> plot_triplot(tx, ty, tri; kw...)),
+			("plot_tricontour", kw -> plot_tricontour(tx, ty, tri, [1.0, 2.0, 3.0, 4.0]; levels = [2.5], kw...)),
+		)
+			f = build(ticks)
+			x, y = _rf_axis(f, :xaxis), _rf_axis(f, :yaxis)
+			@test x[:tickvals] == [0, 1] && x[:ticktext] == ["a", "b"]
+			@test y[:tickvals] == [0, 1] && y[:ticktext] == ["c", "d"]
+			g = build(fmts)
+			@test _rf_axis(g, :xaxis)[:tickformat] == ".1f" && _rf_axis(g, :yaxis)[:tickformat] == ".2f"
+			@test occursin("$(who):", _rfv3_msg(() -> build((; xticks = [0, 1], xticklabels = ["a"]))))
+		end
+	end
+
+	@testset "Z53 Z54 one-sided limits: one D11 implementation, pinned after the equal aspect" begin
+		# The keyword writes what `xrange!` writes, on every axis kind.
+		for (build, key, value, axis) in (
+			(kw -> plot_heatmap(0:9, 0:4, rand(10, 5); kw...), :xrange, (2, nothing), :xaxis),
+			(kw -> plot_heatmap(0:9, 0:4, rand(10, 5); origin = :upper, kw...), :yrange, (1, nothing), :yaxis),
+			(kw -> plot_heatmap(1:10, 1:5, rand(10, 5); xscale = "log", kw...), :xrange, (2, nothing), :xaxis),
+			(kw -> plot_contour(0:9, 0:4, rand(10, 5); kw...), :yrange, (nothing, 3), :yaxis),
+			(kw -> plot_pcolormesh(0:10, 0:5, rand(10, 5); kw...), :xrange, (nothing, 7), :xaxis),
+			(kw -> plot_streamlines(0:3, 0:2, ones(4, 3), ones(4, 3); kw...), :xrange, (1, nothing), :xaxis),
+		)
+			keyword = build(NamedTuple{(key,)}((value,)))
+			verb = build((;))
+			(axis === :xaxis ? xrange! : yrange!)(verb, value)
+			@test _rf_limit(keyword, axis) == _rf_limit(verb, axis)
+			@test _rf_limit(keyword, axis)[1] !== :pinned
+		end
+		# Z54: a one-sided limit on an equal-aspect field is pinned to the bound
+		# and the field's edge (`_resolve_linked_limits!` after the aspect), as
+		# `xrange!` on the same figure pins it.
+		he = plot_heatmap(0:9, 0:4, rand(10, 5); equalar = true, xrange = (2, nothing))
+		@test _rf_limit(he, :xaxis) == (:pinned, [2.0, 9.5])
+		he2 = plot_heatmap(0:9, 0:4, rand(10, 5); equalar = true)
+		xrange!(he2, (2, nothing))
+		@test _rf_limit(he2, :xaxis) == (:pinned, [2.0, 9.5])
+		# A limit set before the aspect lock is resolved when the lock arrives.
+		pre = plot_heatmap(0:9, 0:4, rand(10, 5); yrange = (nothing, 3))
+		@test _rf_limit(pre, :yaxis) == (true, nothing, 3)
+		plot_heatmap!(pre, 0:9, 0:4, rand(10, 5); equalar = true)
+		@test _rf_limit(pre, :yaxis) == (:pinned, [-0.5, 3.0])
+		# The mesh path, and a SubplotFigure cell.
+		pm = plot_pcolormesh(0:10, 0:5, rand(10, 5); equalar = true, yrange = (1, nothing))
+		@test _rf_limit(pm, :yaxis) == (:pinned, [1.0, 5.0])
+		sf = subplots(1, 2; sync = false)
+		plot_heatmap!(sf, 0:3, 0:2, U5; row = 1, col = 2, xrange = (1, nothing), equalar = true)
+		@test _rf_limit(sf, :xaxis2) == (:pinned, [1.0, 3.5])
+		# A fixed bound equal to the field edge stays the user's: a later field
+		# beyond it does not move it (keyword and `xrange!` alike).
+		edge = plot_heatmap(0:3, 0:2, U5; equalar = true)
+		plot_heatmap!(edge, 0:3, 0:2, U5; xrange = (-0.5, nothing))
+		plot_heatmap!(edge, -6:-3, 0:2, U5)
+		@test _rf_limit(edge, :xaxis) == (:pinned, [-0.5, 3.5])
+		edge2 = plot_heatmap(0:3, 0:2, U5; equalar = true)
+		xrange!(edge2, (-0.5, nothing))
+		plot_heatmap!(edge2, -6:-3, 0:2, U5)
+		@test _rf_limit(edge2, :xaxis) == (:pinned, [-0.5, 3.5])
+		# The open end of a one-sided limit on a field mutator includes the new
+		# field (measured now, not from the clip of the previous finalize).
+		grow = plot_heatmap(0:3, 0:2, U5; equalar = true)
+		plot_heatmap!(grow, 4:7, 0:2, U5; xrange = (1, nothing))
+		@test _rf_limit(grow, :xaxis) == (:pinned, [1.0, 7.5])
+		# A field with an overlay outside it: the open end carries the pad.
+		ov = plot_heatmap(0:3, 0:2, U5; equalar = true)
+		plot_scatter!(ov, [6.0], [1.0]; mode = "markers")
+		plot_heatmap!(ov, 0:3, 0:2, U5; xrange = (0, nothing))
+		@test _rf_limit(ov, :xaxis) == (:pinned, [0.0, 6.0 + pad(-0.5, 6.0)])
+	end
+
+	@testset "Z61 every field and mesh mutator applies the style's trace defaults" begin
+		bar_keys = (:tickfont, :outlinewidth, :ticks, :ticklen, :tickwidth)
+		bar(t) = PlotlySupply._symbol_dict(t.fields[:colorbar])
+		carrier_bar(fig) = PlotlySupply._symbol_dict(
+			PlotlySupply._symbol_dict(only(t for t in fig.data if haskey(t.fields, :marker) &&
+				haskey(PlotlySupply._symbol_dict(t.fields[:marker]), :colorbar)).fields[:marker])[:colorbar])
+		with_style(:ieee) do
+			ref = bar(plot_heatmap(U5; colorbar_title = "c").data[1])
+			@test all(k -> haskey(ref, k), bar_keys)
+			for (name, mutate!, read) in (
+				("heatmap!", f -> plot_heatmap!(f, U5; colorbar_title = "c"), f -> bar(f.data[end])),
+				("contour!", f -> plot_contour!(f, U5), f -> bar(f.data[end])),
+				("pcolormesh!", f -> plot_pcolormesh!(f, 0:4, 0:3, U5), f -> bar(f.data[end])),
+				("tripcolor!", f -> plot_tripcolor!(f, [0.0, 1, 0], [0.0, 0, 1], [1 2 3], [1.0, 2, 3]; shading = :gouraud), f -> bar(only(t for t in f.data if haskey(t.fields, :colorbar)))),
+				("quiver! colorby", f -> plot_quiver!(f, [0.0, 1.0], [0.0, 1.0], [1.0, 2.0], [0.0, 1.0]; colorby = :magnitude), carrier_bar),
+				("streamlines! colorby", f -> plot_streamlines!(f, 0:3, 0:3, ones(4, 4), [Float64(x) for x in 0:3, y in 0:3]; colorby = :speed), carrier_bar),
+			)
+				f = plot_scatter(1:3, 1:3)
+				mutate!(f)
+				got = read(f)
+				@test all(k -> get(got, k, nothing) == ref[k], bar_keys)
+			end
+			# Contour lines take the style's line width on a mutator too.
+			lw = PlotlySupply._symbol_dict(plot_contour(U5; coloring = "lines").data[1].fields[:line])[:width]
+			f = plot_scatter(1:3, 1:3)
+			plot_contour!(f, U5; coloring = "lines")
+			@test PlotlySupply._symbol_dict(f.data[end].fields[:line])[:width] == lw
+		end
+	end
+
+	@testset "Z63 colour keywords go through the shared colour parser" begin
+		grey = PlotlySupply._color_option("0.35"; who = "t", name = "color")
+		@test grey == "#595959"
+		line(t) = PlotlySupply._symbol_dict(t.fields[:line])
+		@test line(plot_quiver([0.0], [0.0], [1.0], [1.0]; color = "0.35").data[1])[:color] == grey
+		@test line(plot_quiver([0.0], [0.0], [1.0], [1.0]; color = :red).data[1])[:color] ==
+			PlotlySupply._color_option(:red; who = "t", name = "color")
+		@test line(plot_quiver([0.0], [0.0], [1.0], [1.0]; style = :triangle, edgecolor = "0.35", edgewidth = 1).data[1])[:color] == grey
+		@test line(plot_contour(U5; linecolor = "0.35").data[1])[:color] == grey
+		@test line(plot_streamlines(0:3, 0:2, ones(4, 3), ones(4, 3); color = "0.35").data[1])[:color] == grey
+		rgba = "rgba(255, 0, 0, 0.5)"
+		@test line(plot_quiver([0.0], [0.0], [1.0], [1.0]; color = rgba).data[1])[:color] ==
+			PlotlySupply._color_option(rgba; who = "t", name = "color")
+		C = PlotlySupply.Colors
+		@test line(plot_quiver([0.0], [0.0], [1.0], [1.0]; color = C.RGB(1, 0, 0)).data[1])[:color] == "#FF0000"
+		for (who, call) in (
+			("plot_quiver", () -> plot_quiver([0.0], [0.0], [1.0], [1.0]; color = "notacolour")),
+			("plot_contour", () -> plot_contour(U5; linecolor = "notacolour")),
+			("plot_streamlines", () -> plot_streamlines(0:3, 0:2, ones(4, 3), ones(4, 3); color = "notacolour")),
+			("plot_quiver!", () -> plot_quiver!(plot_heatmap(U5), [0.0], [0.0], [1.0], [1.0]; style = :triangle, edgecolor = "notacolour", edgewidth = 1)),
+		)
+			@test occursin("$(who): `", _rfv3_msg(call)) && occursin("invalid colour \"notacolour\"", _rfv3_msg(call))
+		end
+	end
+
+	@testset "Z42 Date tick values on field and scatter axes" begin
+		D = _RF_Dates
+		days = collect(D.Date(2024, 1, 1):D.Day(1):D.Date(2024, 1, 5))
+		s = plot_scatter(days, 1:5)
+		xticks!(s, [D.Date(2024, 1, 3), D.DateTime(2024, 1, 4, 12)])
+		@test _rf_axis(s, :xaxis)[:tickvals] == ["2024-01-03T00:00:00", "2024-01-04T12:00:00"]
+		@test _rf_axis(plot_scatter(days, 1:5; xticks = [D.Date(2024, 1, 2)]), :xaxis)[:tickvals] == ["2024-01-02"]
+		@test _rf_axis(plot_contour(days, 0:2, rand(5, 3); xticks = [D.Date(2024, 1, 2)]), :xaxis)[:tickvals] == ["2024-01-02"]
+		h = plot_heatmap(days, 0:2, rand(5, 3))
+		plot_heatmap!(h, days, 0:2, rand(5, 3); xticks = [D.DateTime(2024, 1, 2, 6)])
+		@test _rf_axis(h, :xaxis)[:tickvals] == ["2024-01-02T06:00:00"]
+		@test occursin("needs numeric tick values; got dates",
+			_rfv3_msg(() -> plot_heatmap(U5; xscale = "log", xticks = [D.Date(2024, 1, 1)])))
 	end
 end

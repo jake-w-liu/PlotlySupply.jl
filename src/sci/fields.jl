@@ -63,6 +63,7 @@ function _matrix_add!(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
+	secondary_y::Bool = false,
 )
 	nrows, ncols = size(A)
 	# Tick keywords (G30): `xticks` replaces the index ticks (columns sit at
@@ -152,6 +153,7 @@ function _matrix_add!(
 		tight = tight,
 		xscale = "",
 		yscale = "",
+		secondary_y = secondary_y,
 	)
 	return nothing
 end
@@ -264,11 +266,11 @@ function plot_matrix(
 		yticklabels = yticklabels,
 		ytickformat = ytickformat,
 	)
-	return _field2d_show(fig, show, width, height, title)
+	return _maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_matrix!(fig, A::AbstractMatrix; kwargs...)
+	plot_matrix!(fig, A::AbstractMatrix; secondary_y = false, kwargs...)
 	plot_matrix!(sf::SubplotFigure, A::AbstractMatrix; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append a matrix plot (see [`plot_matrix`](@ref) for the layout and the
@@ -279,6 +281,12 @@ secondary y axis; `inset = k` targets the `k`-th inset from
 [`inset!`](@ref)). The target y axis is reversed so row 1
 is at the top; `grid = nothing` keeps the grid. On a `SubplotFigure`,
 `title`, `width` and `height` are ignored with a warning.
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Returns `nothing` (`sf` for a `SubplotFigure`).
 
@@ -319,7 +327,7 @@ function plot_matrix!(
 	fontsize::Real = 0,
 	kwargs...,
 )
-	_field2d_reject_keywords("plot_matrix!", kwargs)
+	secondary_y = _field2d_reject_keywords("plot_matrix!", kwargs)
 	_matrix_add!(
 		fig,
 		"plot_matrix!",
@@ -351,6 +359,7 @@ function plot_matrix!(
 		yticks = yticks,
 		yticklabels = yticklabels,
 		ytickformat = ytickformat,
+		secondary_y = secondary_y,
 	)
 	_refresh!(fig)
 	return nothing
@@ -812,6 +821,9 @@ function _streamlines_traces(
 	end
 	data_x(point) = _stream_to_data(grid.x, point[1])
 	data_y(point) = _stream_to_data(grid.y, point[2])
+	# D16: the anchor extent of the streamlines is the field grid they are
+	# integrated on (every line and seed lies inside it).
+	anchors = (xs[1], xs[end], ys[1], ys[end])
 
 	if !by_speed
 		px = Union{Nothing, Float64}[]
@@ -828,7 +840,7 @@ function _streamlines_traces(
 			push!(py, _GAP)
 			push!(sizes, 0.0)
 		end
-		return GenericTrace[line_trace(px, py, sizes, colour, true)]
+		return _field2d_mark_anchors!(GenericTrace[line_trace(px, py, sizes, colour, true)], anchors...)
 	end
 
 	# colorby = :speed: every segment takes the colour bin of its mean speed;
@@ -839,7 +851,10 @@ function _streamlines_traces(
 	]
 	finite_speeds = [s for line_speeds in speeds for s in line_speeds if isfinite(s)]
 	if isempty(finite_speeds)
-		return GenericTrace[line_trace(Union{Nothing, Float64}[], Union{Nothing, Float64}[], Float64[], "", true)]
+		return _field2d_mark_anchors!(
+			GenericTrace[line_trace(Union{Nothing, Float64}[], Union{Nothing, Float64}[], Float64[], "", true)],
+			anchors...,
+		)
 	end
 	low, high = extrema(finite_speeds)
 	# A uniform speed has no range to map: give it the low end of the scale.
@@ -883,6 +898,7 @@ function _streamlines_traces(
 		bin_colour = _sample_colorscale(stops, (b - 0.5) / nbins)
 		push!(traces, line_trace(bin_x[b], bin_y[b], bin_sizes[b], bin_colour, isempty(traces)))
 	end
+	_field2d_mark_anchors!(traces, anchors...)
 	colorbar = _field2d_colorbar(colorbar_title, colorbar_title_side, who)
 	push!(
 		traces,
@@ -936,12 +952,15 @@ function _streamlines_add!(
 	fontsize,
 	grid,
 	equalar::Bool,
+	secondary_y::Bool = false,
 )
 	xrange = _field2d_checked_range(xrange, who, "xrange")
 	yrange = _field2d_checked_range(yrange, who, "yrange")
+	twin_key = _scat_twin_key(fig, secondary_y)
 	_field2d_validate_cartesian(
 		fig,
 		who;
+		ykey = twin_key,
 		xrange = xrange,
 		yrange = yrange,
 		xscale = xscale,
@@ -962,6 +981,7 @@ function _streamlines_add!(
 		ytickformat = ytickformat,
 		xscale = xscale,
 		yscale = yscale,
+		ykey = twin_key,
 	)
 	title_side = _field2d_title_side(colorbar_title_side, who)
 	traces = _streamlines_traces(
@@ -971,7 +991,7 @@ function _streamlines_add!(
 		V,
 		who;
 		xlog = _field2d_log_axis(fig, :x, xscale),
-		ylog = _field2d_log_axis(fig, :y, yscale),
+		ylog = _field2d_log_axis(fig, twin_key, yscale),
 		density = density,
 		seeds = seeds,
 		maxlength = maxlength,
@@ -986,6 +1006,8 @@ function _streamlines_add!(
 		linewidth = linewidth,
 		legend = legend,
 	)
+	ykey, yref = _stats_target_y!(fig, secondary_y, who)
+	_stats_bind_y!(traces, yref)
 	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	_field2d_apply_options!(
@@ -1011,6 +1033,7 @@ function _streamlines_add!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		ykey = ykey,
 	)
 	# The width already follows the style (`_field2d_style_linewidth`); the
 	# style's dash/marker cycle would dash the speed bins differently and
@@ -1036,6 +1059,16 @@ points are spread matplotlib-style: an occupancy grid of
 `round(30 * density)` cells per side is visited in a spiral from the boundary
 inwards and every free cell starts a streamline; streamlines shorter than 0.1
 domain widths are dropped.
+
+Axis limits (lead decision D16): on their own (no field on their axes) the
+axes span what the streamlines draw plus a 2.5 % pad on each side, so the
+arrowheads at the frame stay whole. Over a field (e.g. a heatmap of the same grid) they count
+with their grid `x` × `y`, as matplotlib's `streamplot` does: a grid inside
+the field keeps the axes tight on the field, and an arrowhead that reaches
+past the frame is clipped; a grid beyond the field widens the axes to it
+(plus a 2.5 % pad). Pass an explicit `xrange`/`yrange` to show the edge
+arrowheads whole. Each line trace stores the grid extent in
+`meta.plotlysupply_anchor_extent = [xmin, xmax, ymin, ymax]`.
 
 #### Keywords
 - `density::Real = 1`: streamline spacing (2 draws about twice as many).
@@ -1160,11 +1193,11 @@ function plot_streamlines(
 		grid = grid,
 		equalar = equalar,
 	)
-	return _field2d_show(fig, show, width, height, title)
+	return _maybe_show(fig, show, width, height, title)
 end
 
 """
-	plot_streamlines!(fig, x, y, U, V; kwargs...)
+	plot_streamlines!(fig, x, y, U, V; secondary_y = false, kwargs...)
 	plot_streamlines!(sf::SubplotFigure, x, y, U, V; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Append streamlines (see [`plot_streamlines`](@ref) for the arguments and
@@ -1176,6 +1209,12 @@ secondary y axis; `inset = k` targets the cell's `k`-th inset from
 set the target axes' limits (on a log axis in data units), `[0, 0]` or
 `nothing` leaves them as they are. On a `SubplotFigure`, `title`, `width` and
 `height` are ignored with a warning.
+
+On a `Plot`/`SyncPlot`, `secondary_y = true` draws on the figure's secondary
+y axis (created on first use on the right, overlaying the primary one, as for
+[`plot_scatter!`](@ref)); `ylabel`, `yscale`, `yrange` and the y tick keywords
+then address that axis, and `equalar` locks its aspect to the x axis (kept
+by widening the twin's range: the twin shares the primary axis's domain).
 
 Returns `nothing` (`sf` for a `SubplotFigure`).
 
@@ -1227,7 +1266,7 @@ function plot_streamlines!(
 	equalar::Bool = false,
 	kwargs...,
 )
-	_field2d_reject_keywords("plot_streamlines!", kwargs)
+	secondary_y = _field2d_reject_keywords("plot_streamlines!", kwargs)
 	_streamlines_add!(
 		fig,
 		"plot_streamlines!",
@@ -1267,6 +1306,7 @@ function plot_streamlines!(
 		fontsize = fontsize,
 		grid = grid,
 		equalar = equalar,
+		secondary_y = secondary_y,
 	)
 	_refresh!(fig)
 	return nothing
