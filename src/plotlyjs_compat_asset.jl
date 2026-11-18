@@ -41,7 +41,7 @@ _PlotlyJSCompatAssetState() =
 	_PlotlyJSCompatAssetState(ReentrantLock(), nothing, Set{String}(), false)
 const _PLOTLYJS_COMPAT_ASSET_STATE = _PlotlyJSCompatAssetState()
 
-_plotlyjs_text_digest(text::AbstractString) = bytes2hex(SHA.sha256(text))
+_plotlyjs_text_digest(text::AbstractString) = bytes2hex(SHA.sha256(IOBuffer(text)))
 _plotlyjs_file_digest(path::AbstractString) =
 	open(io -> bytes2hex(SHA.sha256(io)), path)
 _remove_plotlyjs_compat_directory(path) = rm(path; recursive = true, force = true)
