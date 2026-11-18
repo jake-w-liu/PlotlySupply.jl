@@ -140,7 +140,6 @@ Plot functions
   `plot_image!` apply equal aspect by default.
 - `plot_bar` with one series: `color`, `hatch` and `barwidth` vectors with one
   entry per bar set each bar (1.x used the first entry only).
-- `plot_pcolormesh` defaults to `equalar = false`.
 - `plot_image(interpolation = :bilinear)` writes a PNG source; contours with
   non-uniform levels are one trace per level.
 - `plot_quiver`/`plot_streamlines` overlays do not widen a field's tight axes;
@@ -232,6 +231,8 @@ Plot keywords
 - Fields: `levels`, `cmid`, `colornorm = :log`, `text`, `origin`, `tight`.
   Fields fit their axes exactly and keep the colorbar as tall as the field
   under `equalar = true`.
+  `plot_pcolormesh` keeps matplotlib's automatic aspect (`equalar = false`);
+  pass `equalar = true` for a mesh that draws physical space.
 - 3-D: `view`, `edges`, `lighting`, `style = :arrow` for `plot_quiver3d`;
   `plot_scatter3d` `marker_line_color`, `marker_line_width`, `markevery`,
   hollow markers and the matplotlib marker codes.
