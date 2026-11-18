@@ -1330,7 +1330,10 @@ function _fin_place_bar!(ctx::_FinContext, layout_updates::Dict{Symbol, Any}, it
 		end
 	else
 		prefix = item.slot.container === :root ? "colorbar_" : "$(item.slot.container)_colorbar_"
-		_fin_restyle!(ctx, item.index, Dict{Symbol, Any}(Symbol(prefix, key) => value for (key, value) in changes))
+		# `restyle!` spreads an array over the traces it addresses: a value that
+		# is itself an array (`tickvals`) goes in one slot per trace.
+		_fin_restyle!(ctx, item.index, Dict{Symbol, Any}(
+			Symbol(prefix, key) => (value isa AbstractVector ? Any[value] : value) for (key, value) in changes))
 		# restyle! stores `nothing` for a cleared key (the display resets it);
 		# drop it from the trace.
 		cleared = [key for (key, value) in changes if value === nothing]
@@ -1591,7 +1594,7 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 					:x => x, :xanchor => "left", :xref => "paper",
 					:y => (yd[1] + yd[2]) / 2, :yanchor => "middle",
 					:len => _room_bar_len(item.bar, _room_span(_fin_domain(layout, ykey)), yd[2] - yd[1];
-						floor = _room_min_bar_len(_fin_font_size(layout), item.bar, Hp)),
+						floor = _room_min_bar_len(_fin_font_size(layout), item.bar, Hp), cell = _room_span(ref[2])),
 					:lenmode => "fraction", :ypad => 0,
 				))
 				push!(boxes, (x, width))
@@ -1899,6 +1902,19 @@ const _FIN_WRAP_STANDOFF = 10.0
 # the labels of a horizontal bar keep one font size between them.
 const _FIN_BAR_TICK_SPACING_EM = 2.0
 
+# Whether `bar` carries the two tick values `_fin_bar_two_ticks` writes for a
+# bar whose thinned automatic ticks would leave one label (V2): explicit
+# values (`tickmode = "array"`, two `tickvals`, no `ticktext`) next to the
+# `nticks` of the thinning, which plotly.js ignores in that mode and which is
+# the mark (a bar of the user's with explicit ticks has none).
+function _fin_bar_two_ticks_written(bar::Dict{Symbol, Any})
+	_cbar_string(bar, :tickmode, "") == "array" || return false
+	_fin_isfinite_real(get(bar, :nticks, nothing)) || return false
+	haskey(bar, :ticktext) && return false
+	values = get(bar, :tickvals, nothing)
+	return (values isa AbstractVector || values isa Tuple) && length(values) >= 2
+end
+
 # `(automatic, ours)`: whether the ticks of `bar` are plotly's automatic ones,
 # and whether its `nticks` is ours (written with an explicit `tickmode =
 # "auto"` by `_fin_thin_bar_ticks!`; an `nticks` set without it is the user's).
@@ -1906,6 +1922,7 @@ function _fin_bar_tick_state(bar::Dict{Symbol, Any})
 	mode = _cbar_string(bar, :tickmode, "")
 	nticks = get(bar, :nticks, nothing)
 	mode == "auto" && _fin_isfinite_real(nticks) && return (true, true)
+	_fin_bar_two_ticks_written(bar) && return (true, true)
 	values = get(bar, :tickvals, nothing)
 	explicit = (values isa AbstractVector || values isa Tuple) && !isempty(values)
 	automatic = mode in ("", "auto") && (nticks === nothing || isequal(nticks, 0)) &&
@@ -1942,6 +1959,38 @@ function _fin_bar_nticks(layout::Layout, item::_FinBar, Wp::Float64, Hp::Float64
 	return wanted < default ? wanted : nothing
 end
 
+# How many labels plotly.js 2.35.2 (axes.js autoTicks, linear axis) draws on
+# a colour range [lo, hi] with `nticks = n`: the step is the rough step
+# (hi - lo) / n rounded UP to 2, 5 or 10 x 10^k, and only its multiples
+# inside the range are labelled, so a short bar can show one (range 0.1-0.9,
+# n = 2: only 0.5) or none.
+function _fin_auto_tick_count(lo::Float64, hi::Float64, n::Int)
+	rough = (hi - lo) / n
+	base = exp10(floor(log10(rough)))
+	x = rough / base
+	step = (x <= 2 + 1e-9 ? 2.0 : x <= 5 + 1e-9 ? 5.0 : 10.0) * base
+	return floor(Int, hi / step + 1e-9) - ceil(Int, lo / step - 1e-9) + 1
+end
+
+# V2: tick values for a bar of at most `n` labels (n >= 2) whose range
+# [lo, hi] the automatic placement would label less than twice: the
+# multiples of the largest 1, 2 or 5 x 10^k that has at least two inside the
+# range; with more than `n`, the first and last for n = 2, else the first
+# `n`. `nothing` when the range is empty or not finite.
+function _fin_bar_two_ticks(lo::Float64, hi::Float64, n::Int)
+	(isfinite(lo) && isfinite(hi) && hi > lo) || return nothing
+	top = floor(Int, log10(hi - lo))
+	for exponent in top:-1:(top - 12), mult in (5.0, 2.0, 1.0)
+		step = mult * exp10(exponent)
+		first = ceil(Int, lo / step - 1e-9)
+		last = floor(Int, hi / step + 1e-9)
+		last - first + 1 >= 2 || continue
+		ks = last - first + 1 <= n ? (first:last) : n == 2 ? [first, last] : (first:(first + n - 1))
+		return [round(k * step; digits = max(0, -exponent)) for k in ks]
+	end
+	return nothing
+end
+
 # Thin the automatic ticks of every short colorbar (`_fin_bar_nticks`) and
 # drop the `nticks` written earlier for a bar that is long enough again.
 # Bars with ticks of their own (values, a step or a user `nticks`) are left
@@ -1955,10 +2004,23 @@ function _fin_thin_bar_ticks!(ctx::_FinContext, Wp::Float64, Hp::Float64)
 		automatic, ours = _fin_bar_tick_state(item.bar)
 		automatic || continue
 		n = _fin_bar_nticks(ctx.p.layout, item, Wp, Hp)
-		change = if n !== nothing
-			Dict{Symbol, Any}(:tickmode => "auto", :nticks => n)
+		# A bar always shows two labels at least (V2): when the thinned
+		# automatic ticks would leave fewer, the two values are written.
+		values = nothing
+		if n !== nothing && item.range !== nothing && _fin_auto_tick_count(item.range[1], item.range[2], n) < 2
+			values = _fin_bar_two_ticks(item.range[1], item.range[2], n)
+		end
+		wrote_values = _fin_bar_two_ticks_written(item.bar)
+		change = if values !== nothing
+			Dict{Symbol, Any}(:tickmode => "array", :tickvals => values, :nticks => n)
+		elseif n !== nothing
+			change = Dict{Symbol, Any}(:tickmode => "auto", :nticks => n)
+			wrote_values && (change[:tickvals] = nothing)
+			change
 		elseif ours
-			Dict{Symbol, Any}(:tickmode => nothing, :nticks => nothing)
+			change = Dict{Symbol, Any}(:tickmode => nothing, :nticks => nothing)
+			wrote_values && (change[:tickvals] = nothing)
+			change
 		else
 			continue
 		end
@@ -3178,14 +3240,20 @@ end
 
 # Length (paper) of a trace bar of ours next to a plot area whose extent
 # along the bar goes from `current` to `final` (paper spans): a `len` other
-# than the current extent is the user's (`colorbar!(...; len)`) and is kept;
-# otherwise the bar follows the area. Never shorter than `floor`
-# (`_room_min_bar_len`), which counts as ours too.
-function _room_bar_len(bar::AbstractDict, current::Float64, final::Float64; floor::Float64 = 0.0)
+# than the current extent is the user's (`colorbar!(...; len)`) and is kept,
+# but never longer than an area that is drawn smaller than before (an
+# equal-aspect cell fitted inside its grid cell, V3: the bar ran past the plot
+# box and into the cell title); otherwise the bar follows the area. Never
+# shorter than `floor` (`_room_min_bar_len`), which counts as ours too.
+function _room_bar_len(bar::AbstractDict, current::Float64, final::Float64; floor::Float64 = 0.0,
+		cell::Float64 = current)
 	len = _cbar_real(bar, :len, nothing)
 	ours = len === nothing || !(len > 0) || _cbar_string(bar, :lenmode, "fraction") != "fraction" ||
 		isapprox(len, current; atol = 1e-9) || isapprox(len, max(current, floor); atol = 1e-9)
-	return max(ours ? final : Float64(len), floor)
+	ours && return max(final, floor)
+	len = Float64(len)
+	final < cell - 1e-9 && (len = min(len, final))
+	return max(len, floor)
 end
 
 # Tick label lines a vertical bar's body keeps at least. plotly.js 2.35.2
@@ -3426,8 +3494,10 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 			yd = slot.domain_y
 			placement[:y] = (yd[1] + yd[2]) / 2
 			placement[:yanchor] = "middle"
-			placement[:len] = _room_bar_len(item.bar, _room_span(plan.areas[slot.area].current[2]), _room_span(yd);
-				floor = _room_min_bar_len(plan.font, item.bar, plan.Hp))
+			area = plan.areas[slot.area]
+			placement[:len] = _room_bar_len(item.bar, _room_span(area.current[2]), _room_span(yd);
+				floor = _room_min_bar_len(plan.font, item.bar, plan.Hp),
+				cell = area.ref === nothing ? _room_span(area.current[2]) : _room_span(area.ref[2]))
 		end
 		return placement
 	end

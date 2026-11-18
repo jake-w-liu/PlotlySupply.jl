@@ -962,17 +962,23 @@ end
 		# A wide equal-aspect strip: the bar is as short as the strip.
 		f = plot_heatmap(x, y, z; equalar = true)
 		bar = _scb_bar(f.data[1])
-		@test bar[:tickmode] == "auto" && bar[:nticks] isa Integer && 2 <= bar[:nticks] < 5
+		# nticks = 2 over the colour range -1 to 1.4 would label 0 alone (the
+		# step is rounded up to 2): the two values are written (V2).
+		@test bar[:nticks] isa Integer && 2 <= bar[:nticks] < 5
+		@test bar[:tickmode] in ("auto", "array")
 		@test _SCB._fin_bar_tick_state(_SCB._symbol_dict(bar)) == (true, true)
 		# A long bar keeps plotly's count; our nticks goes when the bar grows.
 		g = plot_heatmap(x, x, [a * b for a in x, b in x])
 		@test !haskey(_scb_fields(g.data[1].fields), :colorbar) || !haskey(_scb_bar(g.data[1]), :nticks)
+		f = plot_heatmap(x, y, z; equalar = false)
+		colorbar!(f; len = 0.05)
+		@test haskey(_scb_bar(f.data[1]), :nticks)
 		colorbar!(f; len = 1.0)
 		relayout!(f; height = 900)
 		_SCB._finalize_figure!(f)
 		bar = _scb_bar(f.data[1])
 		@test bar[:len] == 1.0
-		@test !haskey(bar, :nticks) && !haskey(bar, :tickmode)
+		@test !haskey(bar, :nticks) && !haskey(bar, :tickmode) && !haskey(bar, :tickvals)
 		# Ticks of the user's own are never touched: an nticks set without
 		# our tickmode mark, on a bar that then gets short.
 		h = plot_heatmap(x, x, [a * b for a in x, b in x])
@@ -981,10 +987,10 @@ end
 		@test _scb_bar(h.data[1])[:nticks] == 7 && !haskey(_scb_bar(h.data[1]), :tickmode)
 		@test _SCB._fin_bar_tick_state(_SCB._symbol_dict(_scb_bar(h.data[1]))) == (false, false)
 		k = plot_heatmap(x, y, z; equalar = true)
-		@test _scb_bar(k.data[1])[:tickmode] == "auto"
+		@test _scb_bar(k.data[1])[:tickmode] in ("auto", "array") && haskey(_scb_bar(k.data[1]), :nticks)
 		colorbar!(k; ticks = [0.0, 1.0])
 		bar = _scb_bar(k.data[1])
-		@test bar[:tickmode] == "array" && !haskey(bar, :nticks)
+		@test bar[:tickmode] == "array" && !haskey(bar, :nticks) && bar[:tickvals] == [0.0, 1.0]
 		_SCB._finalize_figure!(k)
 		@test _scb_bar(k.data[1])[:tickmode] == "array"
 		# A short horizontal bar: labels one font size apart.
@@ -1062,4 +1068,161 @@ end
 	@test _SCB._fin_bar_tick_state(Dict{Symbol, Any}(user_bar)) == (false, false)
 	shared_colorbar!(sf; crange = [-1, 1], len = 1.0)
 	@test _scb_axis_bar(sf)[:nticks] == 3
+end
+
+# ---------------------------------------------------------------------------
+# Wave 6
+# ---------------------------------------------------------------------------
+
+# Rendered colorbars of `p` in a hidden window at its own size: per bar the
+# number of tick labels drawn, its px box and the box of the plot areas;
+# `nothing` when the renderer cannot start.
+const _SCB_BARS_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  if (gd.querySelectorAll('g.colorbar').length < __BARS__) return null;
+  const root = gd.getBoundingClientRect();
+  const out = {bars: [], axes: {}, W: root.width, H: root.height};
+  for (const g of gd.querySelectorAll('g.colorbar')) {
+    const el = g.querySelector('.cboutline') || g.querySelector('.cbfills') || g.querySelector('rect.cbbg');
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    const labels = [...g.querySelectorAll('g.cbaxis text, .cbaxis text')].filter(t => {
+      const b = t.getBoundingClientRect(); return b.width > 0 && b.height > 0; });
+    let right = null;
+    for (const t of g.querySelectorAll('text, g.math-group')) {
+      const b = t.getBoundingClientRect();
+      if (b.width > 0 && b.height > 0) right = right === null ? b.right - root.left : Math.max(right, b.right - root.left);
+    }
+    out.bars.push({x0: r.left - root.left, x1: r.right - root.left, y0: r.top - root.top, y1: r.bottom - root.top,
+      labels: labels.length, right: right});
+  }
+  for (const k of Object.keys(gd._fullLayout).filter(k => /^[xy]axis\d*$/.test(k))) {
+    const a = gd._fullLayout[k];
+    out.axes[k] = {offset: a._offset, length: a._length};
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+function _scb_render(p::Plot; bars::Int = 1)
+	sp = try
+		to_syncplot(p; show = false)
+	catch err
+		@warn "sci_colorbar: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
+		return nothing
+	end
+	try
+		backend = _SCB._syncplot_backend(sp)
+		script = replace(_SCB_BARS_JS, "__DIV__" => _SCB._json_js(sp.divid), "__BARS__" => string(bars))
+		for _ in 1:300
+			raw = Base.invokelatest(() -> backend.run(sp.window, script))
+			(raw === nothing || raw == "null") || return _SCB_PB.JSON.parse(String(raw))
+			sleep(0.05)
+		end
+		error("sci_colorbar: the figure did not render within 15 s")
+	finally
+		close(sp)
+	end
+end
+
+@testset "V2: a colorbar always shows two tick labels at least" begin
+	# The step plotly rounds up to (0.5 on 0.1 .. 0.9 with nticks = 2) can
+	# leave one multiple, or none, in the range.
+	@test _SCB._fin_auto_tick_count(0.1, 0.9, 2) == 1
+	@test _SCB._fin_auto_tick_count(0.0, 1.0, 2) == 3
+	@test _SCB._fin_auto_tick_count(-1.0, 1.4, 2) == 1
+	@test _SCB._fin_bar_two_ticks(0.1, 0.9, 2) == [0.2, 0.8]
+	@test _SCB._fin_bar_two_ticks(-1.0, 1.4, 2) == [-1.0, 1.0]
+	@test _SCB._fin_bar_two_ticks(0.0, 1.0, 2) == [0.0, 1.0]
+	@test _SCB._fin_bar_two_ticks(100.0, 130.0, 3) == [100.0, 120.0]
+	@test _SCB._fin_bar_two_ticks(0.0, 3.3, 3) == [0.0, 2.0]
+	@test _SCB._fin_bar_two_ticks(0.0, 4.4, 3) == [0.0, 2.0, 4.0]
+	@test _SCB._fin_bar_two_ticks(1e-5, 9e-5, 2) == [2.0e-5, 8.0e-5]
+	@test _SCB._fin_bar_two_ticks(1.0, 1.0, 2) === nothing
+	@test _SCB._fin_bar_two_ticks(NaN, 1.0, 2) === nothing
+	# hm_02: a wide equal-aspect heatmap, a 60 px bar.
+	xw = collect(range(-12, 126; length = 70)); yw = collect(range(0, 15.8; length = 12))
+	z = [sin(0.12 * a) * cos(0.3 * b) for a in xw, b in yw]
+	f = plot_heatmap(xw, yw, z; equalar = true, width = 700, height = 450)
+	bar = _scb_bar(f.data[1])
+	@test bar[:tickmode] == "array" && length(bar[:tickvals]) == 2 && bar[:nticks] == 2
+	lo, hi = extrema(z)
+	@test all(v -> lo <= v <= hi, bar[:tickvals])
+	@test _SCB._fin_bar_tick_state(_SCB._symbol_dict(bar)) == (true, true)
+	@test _SCB._finalize_figure!(f) === false
+	info = _scb_render(f)
+	info === nothing || @test only(info["bars"])["labels"] >= 2
+	# The count follows the bar: made long again, the ticks are plotly's.
+	f = plot_heatmap(xw, yw, z; equalar = false, crange = (0.1, 0.9), width = 700, height = 450)
+	colorbar!(f; len = 0.05)
+	bar = _scb_bar(f.data[1])
+	@test bar[:tickmode] == "array" && bar[:tickvals] == [0.2, 0.8] && bar[:nticks] == 2
+	colorbar!(f; len = 1.0)
+	relayout!(f; height = 1400, width = 700)
+	_SCB._finalize_figure!(f)
+	bar = _scb_bar(f.data[1])
+	@test !haskey(bar, :tickvals) && !haskey(bar, :nticks) && !haskey(bar, :tickmode)
+	@test _SCB._finalize_figure!(f) === false
+	# Ticks of the user's own are never replaced, whatever the bar length.
+	g = plot_heatmap(xw, yw, z; equalar = true)
+	colorbar!(g; ticks = [-0.5, 0.0, 0.5])
+	@test _scb_bar(g.data[1])[:tickvals] == [-0.5, 0.0, 0.5] && !haskey(_scb_bar(g.data[1]), :nticks)
+	_SCB._finalize_figure!(g)
+	@test _scb_bar(g.data[1])[:tickvals] == [-0.5, 0.0, 0.5]
+	# Two explicit ticks with an nticks of the user's but no mark: still theirs
+	# (a user's `tickvals` without our nticks have no mark either).
+	h = plot_heatmap(xw, yw, z; equalar = true)
+	colorbar!(h; ticks = [-0.2, 0.2])
+	_SCB._finalize_figure!(h)
+	@test _scb_bar(h.data[1])[:tickvals] == [-0.2, 0.2] && !haskey(_scb_bar(h.data[1]), :nticks)
+	# shared bar: the ticks written for a cell bar are not copied.
+	sf = subplots(1, 2; sync = false)
+	for c in 1:2
+		plot_heatmap!(sf, xw, yw, z; row = 1, col = c, crange = (0.1, 0.9))
+		colorbar!(sf; row = 1, col = c, len = 0.05)
+	end
+	@test all(t -> _scb_bar(t)[:tickmode] == "array", sf.plot.data)
+	relayout!(sf.plot; height = 900)
+	shared_colorbar!(sf; len = 1.0)
+	@test !haskey(_scb_axis_bar(sf), :tickvals) && !haskey(_scb_axis_bar(sf), :nticks)
+	@test _SCB._finalize_figure!(sf) === false
+end
+
+@testset "V3 / Q5: the colorbar of an equal-aspect cell spans the fitted plot box" begin
+	xs = range(-1.35, 1.4; length = 20); ys = range(-1.05, 1.45; length = 18)
+	z = [sin(a) * cos(b) for a in xs, b in ys]
+	sf = subplots(1, 2; sync = false, horizontal_spacing = 0.12)
+	plot_heatmap!(sf, xs, ys, z; row = 1, col = 1, equalar = true, xrange = (-3.0, 3.0), yrange = (-1.05, 1.45),
+		showscale = false)
+	plot_heatmap!(sf, xs, ys, z; row = 1, col = 2, equalar = true, xrange = (-3.0, 3.0), yrange = (-1.05, 1.45))
+	colorbar!(sf; row = 1, col = 2, len = 0.82)
+	relayout!(sf.plot; width = 1000, height = 500)
+	_SCB._finalize_figure!(sf)
+	layout = sf.plot.layout
+	yd = _SCB._layout_axis_domain(layout, :yaxis2)
+	# Shorter than its cell, so the fit narrows the box: the bar is the box.
+	@test yd[2] - yd[1] < 0.99
+	bar = _scb_bar(sf.plot.data[2])
+	@test bar[:len] <= (yd[2] - yd[1]) + 1e-9
+	@test bar[:len] ≈ yd[2] - yd[1] atol = 1e-9
+	@test bar[:y] ≈ (yd[1] + yd[2]) / 2 atol = 1e-9
+	@test _SCB._finalize_figure!(sf) === false
+	info = _scb_render(sf.plot; bars = 1)
+	if info !== nothing
+		b = only(info["bars"])
+		ay = info["axes"]["yaxis2"]
+		@test abs(b["y0"] - ay["offset"]) <= 2 && abs(b["y1"] - (ay["offset"] + ay["length"])) <= 2
+	end
+	# A shorter len than the box is the user's and is kept (the bar does not
+	# grow); a wider figure refits the box and the bar follows nothing but its len.
+	colorbar!(sf; row = 1, col = 2, len = 0.3)
+	_SCB._finalize_figure!(sf)
+	@test _scb_bar(sf.plot.data[2])[:len] ≈ 0.3 atol = 1e-9
+	# _room_bar_len: user len clamps only when the area is drawn smaller.
+	@test _SCB._room_bar_len(Dict{Symbol, Any}(:len => 0.82, :lenmode => "fraction"), 1.0, 0.5) == 0.5
+	@test _SCB._room_bar_len(Dict{Symbol, Any}(:len => 0.3, :lenmode => "fraction"), 1.0, 0.5) == 0.3
+	@test _SCB._room_bar_len(Dict{Symbol, Any}(:len => 0.82, :lenmode => "fraction"), 0.4, 0.4) == 0.82
+	@test _SCB._room_bar_len(Dict{Symbol, Any}(:len => 1.0, :lenmode => "fraction"), 1.0, 0.5) == 0.5
 end
