@@ -919,10 +919,18 @@ _fin_title_text(mapping) = begin
 end
 
 function _fin_title_push(mapping, font::Float64)
-	isempty(_fin_title_text(mapping)) && return 0.0
+	text = _fin_title_text(mapping)
+	isempty(text) && return 0.0
 	size = _fin_mapping_font_size(_cmn_mapping_get(mapping, :title), :font, round(1.2 * font))
-	return _FIN_TITLE_BASE + _FIN_TITLE_PER_PX * size
+	# Every further line of a multi-line title adds one line height.
+	lines = 1 + count(_FIN_LINE_BREAK, text)
+	return _FIN_TITLE_BASE + _FIN_TITLE_PER_PX * size + (lines - 1) * _FIN_LINE_EM * size
 end
+
+# Line breaks plotly.js draws (svg_text_utils: `<br>`, `<br/>`, `<br />`) and
+# the distance of the lines, in font sizes (svg_text_utils LINE_SPACING).
+const _FIN_LINE_BREAK = r"<br\s*/?>"i
+const _FIN_LINE_EM = 1.3
 
 function _fin_tick_len(mapping)
 	_fin_string(_cmn_mapping_get(mapping, :ticks)) == "outside" || return 0.0
@@ -1075,6 +1083,9 @@ function _fin_bar_width(layout::Layout, item::_FinBar, Hp::Float64; len_px = not
 	ypad = _cbar_real(bar, :ypad, 10.0)
 	lo, hi = item.range === nothing ? (NaN, NaN) : item.range
 	chars = _fin_tick_chars(bar, lo, hi, max(len - 2ypad, 1.0), false, true)
+	# An offset (`colorbar!(...; offset)`): the last label carries "×10^k".
+	chars > 0 && _cbar_string(bar, :showexponent, "") == "last" &&
+		_cbar_string(bar, :exponentformat, "") == "power" && (chars += _FIN_BAR_OFFSET_CHARS)
 	tickfont = _fin_mapping_font_size(bar, :tickfont, font)
 	labels = chars == 0 ? 0.0 : chars * 0.6 * tickfont + 5.5
 	width = xpad + thickness + _fin_tick_len(bar) + labels
@@ -1092,6 +1103,10 @@ function _fin_bar_width(layout::Layout, item::_FinBar, Hp::Float64; len_px = not
 	end
 	return width
 end
+
+# Characters "×10^k" adds to a tick label: "×10" and a superscript exponent
+# of up to two characters at about half width.
+const _FIN_BAR_OFFSET_CHARS = 4
 
 # Width of a -90 deg MathJax colorbar title, in font sizes: rendered at the
 # default 12 px, `$E_z$`, `$|J_s|$`, `$|E|^2$` and `$\frac{a}{b}$` measured
@@ -1568,6 +1583,7 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 	bars = _fin_collect_bars(p, ctx.insets)
 	wrote = false
 	W, H = _fin_figure_size(ctx, layout)
+	wrote |= _fin_wrap_axis_titles!(ctx, accs, W, H)
 	plan, fits = _fin_plan_and_fit(ctx, accs, bars, W, H)
 	# M3a: a single figure without a size is sized to its equal-aspect cell.
 	if ctx.size === nothing && ctx.sf === nothing && layout.subplots.rows * layout.subplots.cols == 1 &&
@@ -1588,6 +1604,7 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 		size_updates = Dict{Symbol, Any}(:width => round(Int, newW), :height => round(Int, newH))
 		wrote |= _fin_relayout!(ctx, size_updates)
 		W, H = Float64(round(Int, newW)), Float64(round(Int, newH))
+		wrote |= _fin_wrap_axis_titles!(ctx, accs, W, H)
 		plan, fits = _fin_plan_and_fit(ctx, accs, bars, W, H)
 	end
 	layout_updates = plan.updates
@@ -1661,7 +1678,222 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 			(layout_updates[:annotations] = annotations)
 	end
 	wrote |= _fin_relayout!(ctx, layout_updates)
+	wrote |= _fin_thin_bar_ticks!(ctx, plan.Wp, plan.Hp)
 	wrote |= _fin_place_figure_annotations!(ctx, accs, W, H)
+	return wrote
+end
+
+# ---------------------------------------------------------------------------
+# W5: axis titles longer than the figure
+# ---------------------------------------------------------------------------
+
+# Line break `_fin_wrap_axis_titles!` writes. A user's line breaks are `<br>`
+# (`_label` turns "\n" into it); plotly.js breaks lines at both. Every pass
+# first joins the lines at this break again, then wraps for the current size.
+const _FIN_WRAP_BREAK = "<br />"
+# Px a wrapped title keeps from the figure edges, and the mean glyph width
+# (font sizes) the wrap assumes: a little above DejaVu Sans' (render probe
+# W5: 26 characters of the optical_infra y title at 13 px drew 155 px long,
+# 0.46 em), so a wrapped line fits.
+const _FIN_WRAP_PAD = 4.0
+const _FIN_WRAP_CHAR_EM = 0.55
+# Markup other than line breaks: such a title is left as written.
+const _FIN_WRAP_MARKUP = r"<(?!br\s*/?>)"i
+
+# `line` broken between words into lines of at most `max_chars` characters
+# (a longer word keeps a line of its own).
+function _fin_wrap_line(line::AbstractString, max_chars::Int)
+	_fin_text_chars(line) <= max_chars && return String(line)
+	lines = String[]
+	current = ""
+	for word in split(line, ' '; keepempty = false)
+		candidate = isempty(current) ? String(word) : current * " " * word
+		if isempty(current) || _fin_text_chars(candidate) <= max_chars
+			current = candidate
+		else
+			push!(lines, current)
+			current = String(word)
+		end
+	end
+	isempty(current) || push!(lines, current)
+	return join(lines, _FIN_WRAP_BREAK)
+end
+
+# `text` with every line (between the user's breaks, which are kept as
+# written) wrapped at `max_chars`.
+function _fin_wrap_title(text::AbstractString, max_chars::Int)
+	out = IOBuffer()
+	start = 1
+	for m in eachmatch(_FIN_LINE_BREAK, text)
+		print(out, _fin_wrap_line(SubString(text, start, prevind(text, m.offset)), max_chars), m.match)
+		start = m.offset + ncodeunits(m.match)
+	end
+	print(out, _fin_wrap_line(SubString(text, start), max_chars))
+	return String(take!(out))
+end
+
+# W5: a plain axis title longer than the figure can show along its axis
+# (centred on the axis, `_FIN_WRAP_PAD` from the figure edges, figure
+# `W` x `H` px) is broken into lines between words; a title that fits again
+# (a larger export, a shorter text) is joined again. Math (`$…$`) and styled
+# titles are left as written.
+function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
+	layout = ctx.p.layout
+	font = _fin_font_size(layout)
+	m = _fin_margins_base(layout)
+	Wp, Hp = max(W - m.l - m.r, 1.0), max(H - m.t - m.b, 1.0)
+	updates = Dict{Symbol, Any}()
+	wrapped_keys = Symbol[]
+	for (key, axis) in layout.fields
+		(key isa Symbol && _fin_is_axis_key(key)) || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		text = _fin_title_text(axis)
+		(isempty(text) || occursin('$', text) || occursin(_FIN_WRAP_MARKUP, text)) && continue
+		plain = replace(text, _FIN_WRAP_BREAK => " ")
+		size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
+		vertical = String(key)[1] == 'y'
+		d = vertical ? _cmn_y_axis_domain(layout, key) : _fin_domain(layout, key)
+		centre = vertical ? m.b + (d[1] + d[2]) / 2 * Hp : m.l + (d[1] + d[2]) / 2 * Wp
+		extent = vertical ? H : W
+		room = 2 * min(centre, extent - centre) - 2 * _FIN_WRAP_PAD
+		max_chars = max(1, floor(Int, room / (_FIN_WRAP_CHAR_EM * size)))
+		wrapped = _fin_wrap_title(plain, max_chars)
+		wrapped == plain || push!(wrapped_keys, key)
+		wrapped == text && continue
+		title = _cmn_mapping_get(axis, :title)
+		if title isa AbstractString
+			updates[Symbol(key, :_title)] = Dict{Symbol, Any}(:text => wrapped)
+			wrapped == plain || (updates[Symbol(key, :_title_standoff)] = _FIN_WRAP_STANDOFF)
+			continue
+		end
+		updates[Symbol(key, :_title_text)] = wrapped
+		# plotly.js 2.35.2 (axes.js drawTitle) moves a left or top title out
+		# by its extra lines only when `title.standoff` is set; without it
+		# they run into the tick labels. Ours goes with our breaks.
+		standoff = _cmn_mapping_get(title, :standoff)
+		if wrapped != plain
+			standoff === nothing && (updates[Symbol(key, :_title_standoff)] = _FIN_WRAP_STANDOFF)
+		elseif _fin_isfinite_real(standoff) && standoff == _FIN_WRAP_STANDOFF
+			updates[Symbol(key, :_title_standoff)] = nothing
+		end
+	end
+	wrote = _fin_relayout!(ctx, updates)
+	return _fin_wrap_margins!(ctx, accs, wrapped_keys, Hp) || wrote
+end
+
+# plotly.js's automargin does not count the extra lines of a wrapped title
+# in full (render probe W5: from a 4 px `tight_layout!` margin the third line
+# ran over the tick labels): a wrapped title at the left or bottom paper edge
+# gets the margin its axis labels need (`_fin_y_labels_px` /
+# `_fin_x_labels_px`, which count the lines) plus `_FIN_WRAP_PAD`. Like every
+# margin the finalizer writes, it only grows.
+function _fin_wrap_margins!(ctx::_FinContext, accs, keys::Vector{Symbol}, Hp::Float64)
+	isempty(keys) && return false
+	layout = ctx.p.layout
+	base = _fin_margins_base(layout)
+	need = Dict{Symbol, Float64}()
+	for key in keys
+		axis = get(layout.fields, key, nothing)
+		vertical = String(key)[1] == 'y'
+		side = something(_fin_string(_cmn_mapping_get(axis, :side)), vertical ? "left" : "bottom")
+		side in ("left", "bottom") || continue
+		anchor = _fin_axis_key(_cmn_mapping_get(axis, :anchor, vertical ? "x" : "y"))
+		anchor === nothing && continue
+		# The axis is drawn at its anchor's start: only one at the paper edge
+		# pushes the margin.
+		edge = vertical ? _fin_domain(layout, anchor)[1] : _cmn_y_axis_domain(layout, anchor)[1]
+		edge <= 1e-9 || continue
+		px = vertical ? _fin_y_labels_px(layout, accs, key, _cmn_y_axis_domain(layout, key), Hp) :
+			_fin_x_labels_px(layout, key)
+		letter = vertical ? :l : :b
+		need[letter] = max(get(need, letter, 0.0), px + _FIN_WRAP_PAD)
+	end
+	updates = Dict{Symbol, Any}()
+	for (letter, px) in need
+		have = getfield(base, letter)
+		px > have + 0.5 && (updates[Symbol(:margin_, letter)] = ceil(px))
+	end
+	return _fin_relayout!(ctx, updates)
+end
+
+# `title.standoff` (px between tick labels and title) written with wrapped
+# lines: plotly's base gap (axes.js: 10 px plus half a font size).
+const _FIN_WRAP_STANDOFF = 10.0
+
+# ---------------------------------------------------------------------------
+# Z11 (G76): automatic ticks of short colorbars
+# ---------------------------------------------------------------------------
+
+# Least distance (font sizes) between the tick labels of a vertical colorbar;
+# the labels of a horizontal bar keep one font size between them.
+const _FIN_BAR_TICK_SPACING_EM = 2.0
+
+# `(automatic, ours)`: whether the ticks of `bar` are plotly's automatic ones,
+# and whether its `nticks` is ours (written with an explicit `tickmode =
+# "auto"` by `_fin_thin_bar_ticks!`; an `nticks` set without it is the user's).
+function _fin_bar_tick_state(bar::Dict{Symbol, Any})
+	mode = _cbar_string(bar, :tickmode, "")
+	nticks = get(bar, :nticks, nothing)
+	mode == "auto" && _fin_isfinite_real(nticks) && return (true, true)
+	values = get(bar, :tickvals, nothing)
+	explicit = (values isa AbstractVector || values isa Tuple) && !isempty(values)
+	automatic = mode in ("", "auto") && (nticks === nothing || isequal(nticks, 0)) &&
+		get(bar, :dtick, nothing) === nothing && !explicit
+	return (automatic, false)
+end
+
+# `nticks` that keeps the automatic tick labels of `item`'s bar apart at the
+# length it is drawn with (plot area `Wp` x `Hp` px), or `nothing` when
+# plotly's own count does. plotly.js 2.35.2 (axes.js prepTicks) asks a
+# colorbar for clamp(length / m, 4, 9) + 1 ticks, m = 40 px for a vertical
+# bar (axis id "y…") and 80 px for a horizontal one: at least 5 ticks, which
+# a short bar cannot hold. With `nticks = n` the tick step is at least the
+# colour range / n, so the labels are at least length / n px apart.
+function _fin_bar_nticks(layout::Layout, item::_FinBar, Wp::Float64, Hp::Float64)
+	bar = item.bar
+	vertical = _fin_bar_vertical(bar)
+	span = vertical ? Hp : Wp
+	len = _cbar_string(bar, :lenmode, "fraction") == "fraction" ? _cbar_real(bar, :len, 1.0) * span :
+		_cbar_real(bar, :len, span)
+	# The bar's axis runs between the pads at both ends (default 10 px).
+	axis_px = len - 2 * _cbar_real(bar, vertical ? :ypad : :xpad, 10.0)
+	axis_px > 0 || return nothing
+	font = _fin_mapping_font_size(bar, :tickfont, _fin_font_size(layout))
+	spacing = if vertical
+		_FIN_BAR_TICK_SPACING_EM * font
+	else
+		lo, hi = item.range === nothing ? (NaN, NaN) : item.range
+		max(_fin_tick_chars(bar, lo, hi, axis_px, false, false), 1) * 0.6 * font + font
+	end
+	default = clamp(axis_px / (vertical ? 40.0 : 80.0), 4.0, 9.0) + 1
+	# Two ticks at least: a bar shows where its colour range starts and how it grows.
+	wanted = max(2, floor(Int, axis_px / spacing))
+	return wanted < default ? wanted : nothing
+end
+
+# Thin the automatic ticks of every short colorbar (`_fin_bar_nticks`) and
+# drop the `nticks` written earlier for a bar that is long enough again.
+# Bars with ticks of their own (values, a step or a user `nticks`) are left
+# alone.
+function _fin_thin_bar_ticks!(ctx::_FinContext, Wp::Float64, Hp::Float64)
+	by_area, order, _ = _fin_collect_bars(ctx.p, ctx.insets)
+	updates = Dict{Symbol, Any}()
+	wrote = false
+	for key in order, item in by_area[key]
+		_fin_item_writable(ctx, item) || continue
+		automatic, ours = _fin_bar_tick_state(item.bar)
+		automatic || continue
+		n = _fin_bar_nticks(ctx.p.layout, item, Wp, Hp)
+		change = if n !== nothing
+			Dict{Symbol, Any}(:tickmode => "auto", :nticks => n)
+		elseif ours
+			Dict{Symbol, Any}(:tickmode => nothing, :nticks => nothing)
+		else
+			continue
+		end
+		wrote |= _fin_place_bar!(ctx, updates, item, change)
+	end
+	wrote |= _fin_relayout!(ctx, updates)
 	return wrote
 end
 
@@ -2141,6 +2373,10 @@ end
 function _room_add_domain_area!(plan::_RoomPlan, key::Symbol, grid::Bool)
 	haskey(plan.areas, key) && return nothing
 	domain = _layout_subplot_domain(plan.layout, key)
+	# Outside a grid a subplot without a domain fills the plot area
+	# (plotly.js's default domain); a grid places every cell itself.
+	domain === nothing && !grid && plan.layout.subplots.rows * plan.layout.subplots.cols == 1 &&
+		(domain = ((0.0, 1.0), (0.0, 1.0)))
 	domain === nothing && return nothing
 	plan.areas[key] = _room_new_area(key, nothing, :domain, grid, _room_box(domain[1], domain[2]))
 	push!(plan.area_order, key)
@@ -2679,6 +2915,12 @@ end
 
 _room_bar_key(item::_FinBar) = item.coloraxis !== nothing ? "coloraxis:$(item.coloraxis)" : "bar:$(item.index)"
 
+# Plot areas whose legend plotly.js 2.35.2 does not move again when an
+# automargin push redraws a geo or map figure (render probe Z49: the legend
+# kept its place for the first margins and ran into the bar placed for the
+# grown ones; with the margin set beforehand both match).
+const _FIN_MARGIN_FIRST_SUBPLOT = r"^(geo|map|mapbox)([2-9]|[1-9][0-9]+)?$"
+
 # The math title annotation of a bar (`_cbar_find_title_annotation`).
 function _fin_bar_title_annotation(p::Plot, item::_FinBar)
 	key = item.coloraxis !== nothing ? item.coloraxis : item.own === nothing ? nothing : item.own.key
@@ -2857,6 +3099,9 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 				_CBAR_CELL_PAD)
 			span = _room_span(a.current[2])
 			lead = keep_default ? 0.02 * plan.Wp : _CBAR_CELL_PAD * plan.Wp
+			# Z49: the margin of a map's bar is reserved here (with plotly's
+			# automargin extra), so plotly never grows it.
+			reserve = occursin(_FIN_MARGIN_FIRST_SUBPLOT, String(area_key))
 			for item in group
 				key = _room_bar_key(item)
 				plan.bar_items[key] = (item = item, side = side, keep_default = keep_default)
@@ -2864,8 +3109,9 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 					_fin_bar_width(layout, item, plan.Hp; len_px = _room_bar_len(item.bar, span, span) * plan.Hp) +
 					max(0.0, lead - _ROOM_GAP) :
 					_fin_hbar_depth(plan, item)
+				reserve && (px += _FIN_AUTOMARGIN_EXTRA)
 				_request_room!(plan, area_key, side, px; owner = :colorbar, key = key, order = 10,
-					anchored = anchored, margin_pushed = true)
+					anchored = anchored, margin_pushed = !reserve)
 			end
 		end
 	end
@@ -2876,8 +3122,9 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 		key = _room_bar_key(item)
 		plan.bar_items[key] = entry
 		for k in entry.edge_areas
-			_request_room!(plan, k, entry.side, entry.px; owner = :colorbar, key = key, order = 10,
-				anchored = entry.anchored, margin_pushed = true)
+			reserve = occursin(_FIN_MARGIN_FIRST_SUBPLOT, String(k))
+			_request_room!(plan, k, entry.side, entry.px + (reserve ? _FIN_AUTOMARGIN_EXTRA : 0.0); owner = :colorbar,
+				key = key, order = 10, anchored = entry.anchored, margin_pushed = !reserve)
 		end
 	end
 	return nothing

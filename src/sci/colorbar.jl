@@ -46,6 +46,13 @@ const _CBAR_SIDES = (:right, :bottom)
 const _CBAR_TITLE_SIDES = (:top, :right, :bottom)
 # plotly.js `colorbar.exponentformat` values.
 const _CBAR_EXPONENT_FORMATS = ("none", "e", "E", "power", "SI", "B")
+# `colorbar!(...; offset)` values (Z56).
+const _CBAR_OFFSETS = (:auto, :always, :none)
+# `offset = :auto`: plotly.js takes a common 10^k out of the tick labels when
+# |k| > `minexponent` (axes.js autoTickRound, k = floor(log10 of the largest
+# |range end|)); 4 gives k <= -5 or k >= 5, close to matplotlib's
+# ScalarFormatter (k <= -5 or k >= 6, `_AXES_OFFSET_LIMITS`).
+const _CBAR_OFFSET_MIN_EXPONENT = 4
 # Owner prefix of the annotations that carry math colorbar titles.
 const _CBAR_TITLE_ANNOTATION_PREFIX = "plotlysupply:colorbar_title:"
 
@@ -945,10 +952,23 @@ function _colorbar_options(
 	exponentformat::AbstractString,
 	outlinewidth,
 	title_side::Symbol,
+	offset = nothing,
 )
 	side in _CBAR_SIDES || throw(ArgumentError(
 		"$(who): `side` must be :right or :bottom; got $(repr(side)).",
 	))
+	(offset === nothing || (offset isa Symbol && offset in _CBAR_OFFSETS)) || throw(ArgumentError(
+		"$(who): `offset` must be :auto, :always, :none or nothing; got $(repr(offset)).",
+	))
+	if offset === :auto || offset === :always
+		(isempty(tickformat) && isempty(exponentformat)) || throw(ArgumentError(
+			"$(who): `offset` writes the tick label format (`exponentformat = \"power\"`); " *
+			"it cannot be combined with `tickformat` or `exponentformat`.",
+		))
+		ticklabels === nothing || throw(ArgumentError(
+			"$(who): `offset` scales the tick labels; it cannot be combined with `ticklabels`.",
+		))
+	end
 	title_side in _CBAR_TITLE_SIDES || throw(ArgumentError(
 		"$(who): `title_side` must be :top, :right or :bottom; got $(repr(title_side)).",
 	))
@@ -997,6 +1017,7 @@ function _colorbar_options(
 		tickformat = String(tickformat),
 		exponentformat = String(exponentformat),
 		outlinewidth = outline,
+		offset = offset,
 	)
 end
 
@@ -1033,6 +1054,9 @@ function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDi
 		bar[:thicknessmode] = "pixels"
 	end
 	if opts.ticks !== nothing
+		# An `nticks` `_finalize_figure!` wrote for automatic ticks
+		# (`_fin_bar_tick_state`) goes with them.
+		_cbar_string(bar, :tickmode, "") == "auto" && delete!(bar, :nticks)
 		bar[:tickmode] = "array"
 		bar[:tickvals] = opts.ticks
 		if opts.ticklabels === nothing
@@ -1040,6 +1064,23 @@ function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDi
 		else
 			bar[:ticktext] = opts.ticklabels
 		end
+	end
+	if opts.offset === :none
+		# Only an offset written here (`showexponent = "last"`) is removed.
+		if _cbar_string(bar, :showexponent, "") == "last"
+			delete!(bar, :showexponent)
+			delete!(bar, :minexponent)
+			_cbar_string(bar, :exponentformat, "") == "power" && delete!(bar, :exponentformat)
+		end
+	elseif opts.offset !== nothing
+		# One "×10^k" on the last (top / right) tick label, the others
+		# scaled by 10^-k (plotly.js axes.js tickText: `showexponent`).
+		# Explicit labels or a d3 format would hide it.
+		bar[:exponentformat] = "power"
+		bar[:showexponent] = "last"
+		bar[:minexponent] = opts.offset === :always ? 0 : _CBAR_OFFSET_MIN_EXPONENT
+		delete!(bar, :tickformat)
+		delete!(bar, :ticktext)
 	end
 	isempty(opts.tickformat) || (bar[:tickformat] = opts.tickformat)
 	isempty(opts.exponentformat) || (bar[:exponentformat] = opts.exponentformat)
@@ -1280,7 +1321,8 @@ end
 """
 	colorbar!(fig; coloraxis=nothing, title="", title_side=:top, side=:right,
 		len=0, thickness=0, x=nothing, y=nothing, ticks=nothing,
-		ticklabels=nothing, tickformat="", exponentformat="", outlinewidth=nothing)
+		ticklabels=nothing, tickformat="", exponentformat="", outlinewidth=nothing,
+		offset=nothing)
 	colorbar!(sf::SubplotFigure; row=nothing, col=nothing, coloraxis=nothing, ...)
 
 Edit the colorbars that already exist in a figure.
@@ -1331,6 +1373,24 @@ Edit the colorbars that already exist in a figure.
 - `tickformat::AbstractString=""`: d3 format such as `".2f"`;
   `exponentformat::AbstractString=""`: `"none"`, `"e"`, `"E"`, `"power"`,
   `"SI"` or `"B"`; `outlinewidth`: outline width in px (`nothing`: unchanged).
+- `offset=nothing`: one common factor for the tick labels, like
+  matplotlib's offset text: `:auto` takes 10^k out of the labels when the
+  largest end of the colour range has |k| ≥ 5 (k = ⌊log10⌋; plotly.js
+  decides at every draw, so it follows later range changes), `:always`
+  whenever k ≠ 0; the labels show the scaled values and only the last (top
+  or right) one carries "×10^k" (`exponentformat = "power"`, `showexponent =
+  "last"`, `minexponent`). It replaces an earlier `tickformat` or tick
+  label text and cannot be combined with `tickformat`, `exponentformat` or
+  `ticklabels`. `:none` removes such an offset; `nothing` leaves it.
+
+Short bars (a cell of a wide equal-aspect field, `len` small) get fewer
+automatic ticks: every figure update sets `nticks` (with `tickmode =
+"auto"`) so that the labels stay two font sizes apart (horizontal bars: one
+font size between labels), and removes it when the bar is long enough
+again. Bars with `ticks`, a `dtick` or an `nticks` of your own keep them
+(the mark of a thinned bar is the `tickmode = "auto"` written with its
+`nticks`: to set `nticks` on such a bar with `restyle!`, clear `tickmode` in
+the same call).
 
 All options are validated first (`ArgumentError`); the change is applied in
 one transaction (a live window redraws once). Returns `nothing` for a
@@ -1362,6 +1422,7 @@ function colorbar!(
 	tickformat::AbstractString = "",
 	exponentformat::AbstractString = "",
 	outlinewidth = nothing,
+	offset = nothing,
 	kwargs...,
 )
 	_cbar_reject_keywords("colorbar!", kwargs,
@@ -1371,7 +1432,7 @@ function colorbar!(
 		_colorbar_impl!,
 		fig;
 		row, col, coloraxis, title, title_side, side, len, thickness, x, y,
-		ticks, ticklabels, tickformat, exponentformat, outlinewidth,
+		ticks, ticklabels, tickformat, exponentformat, outlinewidth, offset,
 	))
 end
 
@@ -1392,6 +1453,7 @@ function colorbar!(
 	tickformat::AbstractString = "",
 	exponentformat::AbstractString = "",
 	outlinewidth = nothing,
+	offset = nothing,
 	kwargs...,
 )
 	_cbar_reject_keywords("colorbar!", kwargs,
@@ -1402,7 +1464,7 @@ function colorbar!(
 		sf,
 		_SUBPLOT_SELECTION_METADATA_FIELDS;
 		row, col, coloraxis, title, title_side, side, len, thickness, x, y,
-		ticks, ticklabels, tickformat, exponentformat, outlinewidth,
+		ticks, ticklabels, tickformat, exponentformat, outlinewidth, offset,
 	))
 end
 

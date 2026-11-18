@@ -883,4 +883,145 @@ end
 			rm(path; force=true)
 		end
 	end
+
+	@testset "keywords a colorbar call does not take: ArgumentError naming it, nothing changes (Z19)" begin
+		snapshot(p) = (_SCB_PB.JSON.json(p.layout), [_SCB_PB.JSON.json(t) for t in p.data])
+		p = plot_heatmap(rand(4, 4))
+		before = snapshot(p)
+		err = _scb_error(() -> colorbar!(p; show = true))
+		@test err isa ArgumentError
+		@test startswith(err.msg, "colorbar!: unsupported keyword argument(s) `show`")
+		@test occursin("display(fig)", err.msg)
+		err = _scb_error(() -> colorbar!(p; secondary_y = true, title = "t"))
+		@test err isa ArgumentError && occursin("`secondary_y`", err.msg) &&
+			occursin("a single figure has one cell", err.msg)
+		err = _scb_error(() -> shared_colorbar!(p; inset = 1))
+		@test err isa ArgumentError && startswith(err.msg, "shared_colorbar!: unsupported keyword") &&
+			occursin("a single figure has one cell", err.msg)
+		@test snapshot(p) == before
+		sf, _ = _scb_heatmap_grid(1, 2)
+		before = snapshot(sf.plot)
+		err = _scb_error(() -> colorbar!(sf; inset = 1))
+		@test err isa ArgumentError && occursin("an inset's bar is edited through its host cell", err.msg)
+		err = _scb_error(() -> shared_colorbar!(sf; row = 1, col = 2))
+		@test err isa ArgumentError && startswith(err.msg, "shared_colorbar!:") &&
+			occursin("cells=[(row, col)", err.msg)
+		err = _scb_error(() -> shared_colorbar!(sf; show = false))
+		@test err isa ArgumentError && occursin("mutators do not take `show`", err.msg)
+		@test snapshot(sf.plot) == before
+	end
+
+	@testset "offset: one ×10^k on the last tick label (Z56)" begin
+		p = plot_heatmap(3e-5 .+ 1e-5 .* rand(6, 6))
+		colorbar!(p; tickformat = ".2f")
+		colorbar!(p; offset = :auto)
+		bar = _scb_bar(p.data[1])
+		@test bar[:exponentformat] == "power" && bar[:showexponent] == "last"
+		@test bar[:minexponent] == _SCB._CBAR_OFFSET_MIN_EXPONENT == 4
+		# The d3 format would hide the exponent: replaced.
+		@test !haskey(bar, :tickformat)
+		colorbar!(p; offset = :always)
+		@test _scb_bar(p.data[1])[:minexponent] == 0
+		# The finalizer's width estimate counts the "×10^k" of the last label.
+		layout = p.layout
+		by_area, order, _ = _SCB._fin_collect_bars(p, Any[])
+		item = by_area[order[1]][1]
+		with_offset = _SCB._fin_bar_width(layout, item, 400.0)
+		colorbar!(p; offset = :none)
+		bar = _scb_bar(p.data[1])
+		@test !haskey(bar, :showexponent) && !haskey(bar, :minexponent) && !haskey(bar, :exponentformat)
+		by_area, order, _ = _SCB._fin_collect_bars(p, Any[])
+		@test with_offset > _SCB._fin_bar_width(layout, by_area[order[1]][1], 400.0)
+		# :none leaves a format the user set alone.
+		colorbar!(p; exponentformat = "e")
+		colorbar!(p; offset = :none)
+		@test _scb_bar(p.data[1])[:exponentformat] == "e"
+		# Errors before any change.
+		snapshot = _SCB_PB.JSON.json(p.data[1])
+		@test _scb_throws(() -> colorbar!(p; offset = :sometimes), "colorbar!: `offset` must be :auto, :always, :none")
+		@test _scb_throws(() -> colorbar!(p; offset = 3), "`offset` must be")
+		@test _scb_throws(() -> colorbar!(p; offset = :auto, tickformat = ".1f"), "cannot be combined with `tickformat`")
+		@test _scb_throws(() -> colorbar!(p; offset = :auto, exponentformat = "SI"), "`exponentformat`")
+		@test _scb_throws(() -> colorbar!(p; offset = :auto, ticks = [1e-5, 2e-5], ticklabels = ["a", "b"]),
+			"cannot be combined with `ticklabels`")
+		@test _SCB_PB.JSON.json(p.data[1]) == snapshot
+		# A shared coloraxis bar and a subplot cell take it too.
+		sf, _ = _scb_heatmap_grid(1, 2; scale = 1e6)
+		colorbar!(sf; row = 1, col = 2, offset = :auto)
+		@test _scb_bar(sf.plot.data[2])[:showexponent] == "last"
+		@test !haskey(_scb_fields(sf.plot.data[1].fields), :colorbar) ||
+			!haskey(_scb_bar(sf.plot.data[1]), :showexponent)
+		shared_colorbar!(sf)
+		colorbar!(sf; coloraxis = :shared, offset = :auto)
+		@test _scb_axis_bar(sf)[:exponentformat] == "power"
+	end
+
+	@testset "short bars get fewer automatic ticks (Z11)" begin
+		x = collect(range(0, 6; length = 61)); y = collect(range(0, 0.4; length = 5))
+		z = [sin(a) + b for a in x, b in y]
+		# A wide equal-aspect strip: the bar is as short as the strip.
+		f = plot_heatmap(x, y, z; equalar = true)
+		bar = _scb_bar(f.data[1])
+		@test bar[:tickmode] == "auto" && bar[:nticks] isa Integer && 2 <= bar[:nticks] < 5
+		@test _SCB._fin_bar_tick_state(_SCB._symbol_dict(bar)) == (true, true)
+		# A long bar keeps plotly's count; our nticks goes when the bar grows.
+		g = plot_heatmap(x, x, [a * b for a in x, b in x])
+		@test !haskey(_scb_fields(g.data[1].fields), :colorbar) || !haskey(_scb_bar(g.data[1]), :nticks)
+		colorbar!(f; len = 1.0)
+		relayout!(f; height = 900)
+		_SCB._finalize_figure!(f)
+		bar = _scb_bar(f.data[1])
+		@test bar[:len] == 1.0
+		@test !haskey(bar, :nticks) && !haskey(bar, :tickmode)
+		# Ticks of the user's own are never touched: an nticks set without
+		# our tickmode mark, on a bar that then gets short.
+		h = plot_heatmap(x, x, [a * b for a in x, b in x])
+		restyle!(h, 1; colorbar_nticks = 7)
+		colorbar!(h; len = 0.1)
+		@test _scb_bar(h.data[1])[:nticks] == 7 && !haskey(_scb_bar(h.data[1]), :tickmode)
+		@test _SCB._fin_bar_tick_state(_SCB._symbol_dict(_scb_bar(h.data[1]))) == (false, false)
+		k = plot_heatmap(x, y, z; equalar = true)
+		@test _scb_bar(k.data[1])[:tickmode] == "auto"
+		colorbar!(k; ticks = [0.0, 1.0])
+		bar = _scb_bar(k.data[1])
+		@test bar[:tickmode] == "array" && !haskey(bar, :nticks)
+		_SCB._finalize_figure!(k)
+		@test _scb_bar(k.data[1])[:tickmode] == "array"
+		# A short horizontal bar: labels one font size apart.
+		w = plot_heatmap(x, x, [1e4 * a * b for a in x, b in x])
+		colorbar!(w; side = :bottom, len = 0.12)
+		bar = _scb_bar(w.data[1])
+		@test get(bar, :nticks, 0) isa Integer && 2 <= get(bar, :nticks, 0) < 5
+		# The count follows plotly.js's rule (axes.js: clamp(L / 40, 4, 9) + 1
+		# for a vertical bar): long enough, no nticks.
+		item = _SCB._FinBar(1, nothing, nothing, Dict{Symbol, Any}(:len => 1.0, :lenmode => "fraction"),
+			(0.0, 1.0), nothing, false)
+		@test _SCB._fin_bar_nticks(Layout(), item, 600.0, 400.0) === nothing
+		item.bar[:len] = 0.25
+		@test _SCB._fin_bar_nticks(Layout(), item, 600.0, 400.0) == 3   # (100 - 20) px / 24 px
+	end
+
+	@testset "shared bar of equal-aspect cells: right of the cells, title inside the figure (Z98)" begin
+		sf = subplots(1, 2; sync = false)
+		plot_heatmap!(sf, rand(30, 10); row = 1, col = 1, equalar = true)
+		plot_heatmap!(sf, rand(30, 10); row = 1, col = 2, equalar = true)
+		shared_colorbar!(sf; title = "\$|E|^2\$", title_side = :right)
+		layout = sf.plot.layout
+		bar = _scb_axis_bar(sf)
+		right = _SCB._layout_axis_domain(layout, :xaxis2)
+		@test bar[:x] >= right[2] && bar[:xanchor] == "left"
+		# Not longer than the fitted plot boxes it sits beside.
+		@test bar[:len] <= _scb_span(_SCB._layout_axis_domain(layout, :yaxis)) + 1e-9
+		# The math title beside the bar is inside the right margin the
+		# finalizer reserves for it.
+		titles = _scb_annotations(sf, _SCB._CBAR_TITLE_ANNOTATION_PREFIX)
+		@test length(titles) == 1
+		margin_r = _scb_fields(layout.fields[:margin])[:r]
+		W = 700.0
+		Wp = W - _scb_fields(layout.fields[:margin])[:l] - margin_r
+		title = titles[1]
+		@test title[:xref] == "paper" && title[:x] >= bar[:x]
+		@test (title[:x] - 1) * Wp + get(title, :xshift, 0) + 1.6 * 12 <= margin_r
+		@test _SCB._finalize_figure!(sf) === false
+	end
 end
