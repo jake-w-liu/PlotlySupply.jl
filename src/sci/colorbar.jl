@@ -174,9 +174,50 @@ function _cbar_real_extrema(values)
 	return isfinite(lo) ? (lo, hi) : nothing
 end
 
+# Floating-point colour data (Z83): Base's vectorized `extrema` (about 1 ms
+# for 4e6 values, against 7-9 ms for a filtering loop) is the answer when
+# both ends are finite, as NaN propagates through it and ±Inf would be an
+# end; otherwise one branch-free pass skips NaN and ±Inf as above. A permuted
+# array (an image's lazy C x W x H `z`) has the extrema of its parent.
+function _cbar_real_extrema(values::AbstractArray{T}) where {T <: Base.IEEEFloat}
+	isempty(values) && return nothing
+	lo, hi = extrema(values)
+	isfinite(lo) && isfinite(hi) && return (Float64(lo), Float64(hi))
+	lo = T(Inf)
+	hi = T(-Inf)
+	@inbounds @simd for i in eachindex(values)
+		x = values[i]
+		finite = isfinite(x)
+		lo = min(lo, ifelse(finite, x, T(Inf)))
+		hi = max(hi, ifelse(finite, x, T(-Inf)))
+	end
+	return isfinite(lo) ? (Float64(lo), Float64(hi)) : nothing
+end
+_cbar_real_extrema(values::PermutedDimsArray{T}) where {T <: Base.IEEEFloat} =
+	_cbar_real_extrema(parent(values))
+
+# Z83: within one call (a colorbar mutation, a `_finalize_figure!` run) each
+# colour array is scanned once: `_cbar_extrema` keeps its results by array
+# identity while `_CBAR_EXTREMA_MEMO` holds a dictionary. Nothing in such a
+# call changes colour data in place (new data comes as new arrays), and the
+# memo ends with the call, so it cannot go stale.
+const _CBAR_EXTREMA_MEMO = Base.ScopedValues.ScopedValue{Union{Nothing, IdDict{Any, Any}}}(nothing)
+
+function _cbar_with_extrema_memo(f)
+	_CBAR_EXTREMA_MEMO[] === nothing || return f()
+	return Base.ScopedValues.with(f, _CBAR_EXTREMA_MEMO => IdDict{Any, Any}())
+end
+
 # Finite (min, max) of possibly nested colour data (matrices, vectors of rows,
 # `nothing` gaps); `nothing` when there is no finite number.
 function _cbar_extrema(values)
+	values isa AbstractArray || return _cbar_extrema_scan(values)
+	memo = _CBAR_EXTREMA_MEMO[]
+	memo === nothing && return _cbar_extrema_scan(values)
+	return get!(() -> _cbar_extrema_scan(values), memo, values)
+end
+
+function _cbar_extrema_scan(values)
 	values isa AbstractArray{<:Real} && return _cbar_real_extrema(values)
 	values isa Real && return _cbar_real_extrema((values,))
 	(values isa AbstractArray || values isa Tuple || values isa Base.Generator) ||
@@ -1080,6 +1121,23 @@ end
 const _CBAR_NO_COLOUR_HINT =
 	"(heatmap, contour, surface, histogram2d, colour-mapped markers, …)"
 
+# Keywords a colorbar call does not take (`show` included: a mutator never
+# opens a window), rejected with an ArgumentError naming the function before
+# anything changes. `cell_hint` says how the call selects cells instead.
+function _cbar_reject_keywords(who::AbstractString, kwargs, cell_hint::AbstractString = "")
+	isempty(kwargs) && return nothing
+	names = join(("`$(key)`" for key in keys(kwargs)), ", ")
+	hints = String[]
+	haskey(kwargs, :show) &&
+		push!(hints, "mutators do not take `show`; display the figure with `display(fig)`")
+	any(key -> key in (:row, :col, :secondary_y, :inset), keys(kwargs)) && !isempty(cell_hint) &&
+		push!(hints, cell_hint)
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) $(names)" *
+		(isempty(hints) ? "" : " ($(join(hints, "; ")))") * ".",
+	))
+end
+
 function _colorbar_edit_coloraxis!(
 	p::Plot,
 	id::String,
@@ -1304,13 +1362,17 @@ function colorbar!(
 	tickformat::AbstractString = "",
 	exponentformat::AbstractString = "",
 	outlinewidth = nothing,
+	kwargs...,
 )
-	return _transactional_high_level_plot_mutation!(
+	_cbar_reject_keywords("colorbar!", kwargs,
+		"a single figure has one cell; omit the cell keywords")
+	# One colour-range scan per array for the call and its finalizer (Z83).
+	return _cbar_with_extrema_memo(() -> _transactional_high_level_plot_mutation!(
 		_colorbar_impl!,
 		fig;
 		row, col, coloraxis, title, title_side, side, len, thickness, x, y,
 		ticks, ticklabels, tickformat, exponentformat, outlinewidth,
-	)
+	))
 end
 
 function colorbar!(
@@ -1330,14 +1392,18 @@ function colorbar!(
 	tickformat::AbstractString = "",
 	exponentformat::AbstractString = "",
 	outlinewidth = nothing,
+	kwargs...,
 )
-	return _transactional_subplot_mutation!(
+	_cbar_reject_keywords("colorbar!", kwargs,
+		"select the cell with `row`/`col`; an inset's bar is edited through its host cell")
+	# One colour-range scan per array for the call and its finalizer (Z83).
+	return _cbar_with_extrema_memo(() -> _transactional_subplot_mutation!(
 		_colorbar_subplot_impl!,
 		sf,
 		_SUBPLOT_SELECTION_METADATA_FIELDS;
 		row, col, coloraxis, title, title_side, side, len, thickness, x, y,
 		ticks, ticklabels, tickformat, exponentformat, outlinewidth,
-	)
+	))
 end
 
 # ── shared_colorbar! ────────────────────────────────────────────────────────
@@ -2064,12 +2130,16 @@ function shared_colorbar!(
 	len::Real = 0.75,
 	side::Symbol = :right,
 	coloraxis::Union{AbstractString,Symbol} = "coloraxis",
+	kwargs...,
 )
-	return _transactional_high_level_plot_mutation!(
+	_cbar_reject_keywords("shared_colorbar!", kwargs,
+		"a single figure has one cell; omit the cell keywords")
+	# One colour-range scan per array for the call and its finalizer (Z83).
+	return _cbar_with_extrema_memo(() -> _transactional_high_level_plot_mutation!(
 		_shared_colorbar_impl!,
 		fig;
 		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis,
-	)
+	))
 end
 
 function shared_colorbar!(
@@ -2083,11 +2153,15 @@ function shared_colorbar!(
 	len::Real = 0.75,
 	side::Symbol = :right,
 	coloraxis::Union{AbstractString,Symbol} = "coloraxis",
+	kwargs...,
 )
-	return _transactional_subplot_mutation!(
+	_cbar_reject_keywords("shared_colorbar!", kwargs,
+		"select cells with `cells=[(row, col), …]`")
+	# One colour-range scan per array for the call and its finalizer (Z83).
+	return _cbar_with_extrema_memo(() -> _transactional_subplot_mutation!(
 		_shared_colorbar_subplot_impl!,
 		sf,
 		();
 		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis,
-	)
+	))
 end

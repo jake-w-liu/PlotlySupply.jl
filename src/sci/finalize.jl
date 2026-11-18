@@ -261,10 +261,14 @@ end
 
 # An image: pixel `i` (0-based) is centred on `x0 + i * dx` (plotly defaults
 # 0 and 1), so the extent is half a pixel beyond the outer centres (probe p3:
-# a 5 x 3 image spans x = [-0.5, 4.5], y = [2.5, -0.5]).
+# a 5 x 3 image spans x = [-0.5, 4.5], y = [2.5, -0.5]). The pixel counts come
+# from `z` (a C x W x H array as `plot_image` stores it, nested rows of
+# pixels) or from the header of a PNG `source` (Z40).
 function _fin_image_extent(fields, letter::Char, islog::Bool)
 	islog && return :unsupported
-	n = _cmn_grid_count(get(fields, :z, nothing), letter, false)
+	pixels = _field2d_image_size(fields)
+	n = pixels === nothing ? _cmn_grid_count(get(fields, :z, nothing), letter, false) :
+		(letter == 'x' ? pixels[1] : pixels[2])
 	n === nothing && return :unsupported
 	n >= 1 || return nothing
 	start = get(fields, Symbol(letter, "0"), 0)
@@ -280,7 +284,9 @@ end
 # function barrier: `values` comes out of a trace's `Dict{Symbol, Any}`, and
 # iterating it there would box every element (a million-point range then
 # allocates hundreds of MB).
-function _fin_values_extent(values, islog::Bool)
+_fin_values_extent(values, islog::Bool) = _fin_values_extent_loop(values, islog)
+
+function _fin_values_extent_loop(values, islog::Bool)
 	lo, hi = Inf, -Inf
 	for value in values
 		(value === nothing || value === missing) && continue
@@ -293,6 +299,11 @@ function _fin_values_extent(values, islog::Bool)
 	end
 	return lo <= hi ? (lo, hi) : nothing
 end
+
+# Floating-point coordinates on a linear axis: the vectorized scan the
+# colour ranges use (same result: finite values only, `nothing` without any).
+_fin_values_extent(values::AbstractArray{<:Base.IEEEFloat}, islog::Bool) =
+	islog ? _fin_values_extent_loop(values, true) : _cbar_real_extrema(values)
 
 # Data extent of a scatter-type trace: its finite coordinates (positive ones
 # on a log axis, as plotly drops the rest), the implicit `x0 + i dx`
@@ -369,24 +380,36 @@ function _fin_layout_item_extent(layout::Layout, ref::String, letter::Char, islo
 	return lo <= hi ? (lo, hi) : nothing
 end
 
-# What the traces put on one Cartesian axis.
+# What the traces put on one Cartesian axis. The flags and `image_x` are
+# collected for every axis; the extents only when first asked for
+# (`get(::_FinAxes, key, default)`, Z81).
 mutable struct _FinAxisAcc
 	tight::Bool
 	loose::Bool
 	unsupported::Bool
 	image_x::Union{Nothing, Symbol}   # on a y axis: the x axis of an image trace
+	# Drawn extent of everything on the axis (data units): what plotly
+	# autoranges to.
 	lo::Float64
 	hi::Float64
 	# Extent of the field traces alone (data units); the rest is overlays.
 	flo::Float64
 	fhi::Float64
+	# The extent a sticky field range covers (D16): the fields, the anchor
+	# points of overlays that carry them (`_fin_anchor_extent`) and the drawn
+	# extent of every other overlay.
+	alo::Float64
+	ahi::Float64
+	scanned::Bool
+	# (index in `p.data`, field kind) of the visible traces on the axis.
+	traces::Vector{Tuple{Int, Union{Nothing, Symbol}}}
 end
-_FinAxisAcc() = _FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf)
+_FinAxisAcc() = _FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, true,
+	Tuple{Int, Union{Nothing, Symbol}}[])
 
-function _fin_acc_extend!(acc::_FinAxisAcc, extent, field::Bool = false)
-	if extent === :unsupported
-		acc.unsupported = true
-	elseif extent isa Tuple
+# `extent` is the drawn extent, `anchor` the extent of the anchor points.
+function _fin_acc_extend!(acc::_FinAxisAcc, extent, field::Bool = false, anchor = extent)
+	if extent isa Tuple
 		acc.lo = min(acc.lo, extent[1])
 		acc.hi = max(acc.hi, extent[2])
 		if field
@@ -394,8 +417,39 @@ function _fin_acc_extend!(acc::_FinAxisAcc, extent, field::Bool = false)
 			acc.fhi = max(acc.fhi, extent[2])
 		end
 	end
+	if anchor === :unsupported
+		acc.unsupported = true
+	elseif anchor isa Tuple
+		acc.alo = min(acc.alo, anchor[1])
+		acc.ahi = max(acc.ahi, anchor[2])
+	end
 	return acc
 end
+
+# The extents of the Cartesian axes of a plot: the flags of every axis,
+# extents computed per axis on first use and kept for the plot as it is.
+# Valid while the traces, the axis types and the data-referenced shapes and
+# annotations stay as they are: `_fin_run!` keeps one for the whole run, whose
+# writes (ranges, autorange options, domains, colorbar placements, margins,
+# the size, paper-referenced annotations) change none of them.
+struct _FinAxes
+	p::Plot
+	accs::Dict{Symbol, _FinAxisAcc}
+end
+
+Base.keys(axes::_FinAxes) = keys(axes.accs)
+Base.haskey(axes::_FinAxes, key) = haskey(axes.accs, key)
+
+function Base.get(axes::_FinAxes, key, default)
+	acc = get(axes.accs, key, nothing)
+	acc === nothing && return default
+	acc.scanned || _fin_scan_axis!(axes.p, key, acc)
+	return acc
+end
+
+# The flag records of every axis (extents not computed).
+_fin_axis_records(axes::_FinAxes) = axes.accs
+_fin_axis_records(accs::AbstractDict) = accs
 
 # Overlays (lines, markers, arrows, shapes) that reach past the field get this
 # share of the view's span as padding on that side only, so arrowheads, line
@@ -407,11 +461,32 @@ const _FIN_OVERLAY_PAD = 0.025
 _fin_axis_type(layout::Layout, key::Symbol) =
 	something(_fin_string(_cmn_mapping_get(get(layout.fields, key, nothing), :type)), "-")
 
+# D16: the extent of an overlay's anchor points along `letter` (quiver
+# positions, streamline seed grid), from `trace.meta` key
+# `plotlysupply_anchor_extent` = (xmin, xmax, ymin, ymax) in data units;
+# `nothing` when the trace carries none or it is not four finite numbers in
+# order (positive on a log axis), so the drawn extent is used.
+const _FIN_ANCHOR_META_KEY = "plotlysupply_anchor_extent"
+
+function _fin_anchor_extent(trace::GenericTrace, letter::Char, islog::Bool)
+	meta = get(trace.fields, :meta, nothing)
+	meta isa PlotlyBase.PlotlyAttribute && (meta = meta.fields)
+	meta isa AbstractDict || return nothing
+	value = get(meta, _FIN_ANCHOR_META_KEY, nothing)
+	value === nothing && (value = get(meta, Symbol(_FIN_ANCHOR_META_KEY), nothing))
+	(value isa AbstractVector || value isa Tuple) && length(value) == 4 || return nothing
+	all(_fin_isfinite_real, value) || return nothing
+	lo, hi = letter == 'x' ? (value[1], value[2]) : (value[3], value[4])
+	lo <= hi || return nothing
+	islog && lo <= 0 && return nothing
+	return (Float64(lo), Float64(hi))
+end
+
 function _fin_collect_axes(p::Plot)
 	layout = p.layout
 	accs = Dict{Symbol, _FinAxisAcc}()
 	cache = Dict{Any, Union{Nothing, String}}()
-	for trace in p.data
+	for (index, trace) in enumerate(p.data)
 		trace isa GenericTrace || continue
 		_cmn_trace_kind(trace, cache) == "xy" || continue
 		_fin_visible(trace) || continue
@@ -421,29 +496,40 @@ function _fin_collect_axes(p::Plot)
 		ykey = _fin_axis_key(get(trace.fields, :yaxis, "y"))
 		for (letter, key) in (('x', xkey), ('y', ykey))
 			key === nothing && continue
-			acc = get!(_FinAxisAcc, accs, key)
+			acc = get!(accs, key) do
+				_FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, false,
+					Tuple{Int, Union{Nothing, Symbol}}[])
+			end
 			kind === :tight && (acc.tight = true)
 			kind === :loose && (acc.loose = true)
 			letter == 'y' && is_image && xkey !== nothing && (acc.image_x = xkey)
 			acc.unsupported && continue
-			axis_type = _fin_axis_type(layout, key)
-			if !(axis_type in ("-", "linear", "log"))
+			if !(_fin_axis_type(layout, key) in ("-", "linear", "log"))
 				acc.unsupported = true
 				continue
 			end
-			_fin_acc_extend!(acc, _fin_trace_extent(trace, letter, axis_type == "log"), kind !== nothing)
+			push!(acc.traces, (index, kind))
 		end
 	end
-	for (key, acc) in accs
-		acc.unsupported && continue
-		_fin_acc_extend!(acc, _fin_layout_item_extent(
-			layout,
-			_fin_axis_ref(key),
-			String(key)[1],
-			_fin_axis_type(layout, key) == "log",
-		))
+	return _FinAxes(p, accs)
+end
+
+# The extents of axis `key` (a data scan of the traces on it).
+function _fin_scan_axis!(p::Plot, key::Symbol, acc::_FinAxisAcc)
+	acc.scanned = true
+	acc.unsupported && return acc
+	layout = p.layout
+	letter = String(key)[1]
+	islog = _fin_axis_type(layout, key) == "log"
+	for (index, kind) in acc.traces
+		trace = p.data[index]
+		extent = _fin_trace_extent(trace, letter, islog)
+		anchor = kind === nothing ? _fin_anchor_extent(trace, letter, islog) : nothing
+		_fin_acc_extend!(acc, extent, kind !== nothing, anchor === nothing ? extent : anchor)
+		acc.unsupported && return acc
 	end
-	return accs
+	_fin_acc_extend!(acc, _fin_layout_item_extent(layout, _fin_axis_ref(key), letter, islog))
+	return acc
 end
 
 # ---------------------------------------------------------------------------
@@ -522,7 +608,7 @@ function _fin_aspect_axes(layout::Layout, accs)
 		push!(linked, key)
 		push!(linked, target)
 	end
-	for (key, acc) in accs
+	for (key, acc) in _fin_axis_records(accs)
 		acc.image_x === nothing && continue
 		_fin_field(get(layout.fields, key, nothing), :scaleanchor) === nothing || continue
 		push!(linked, key)
@@ -531,11 +617,13 @@ function _fin_aspect_axes(layout::Layout, accs)
 	return linked
 end
 
-# The sticky view of an axis group: the union of all extents, padded by
+# The sticky view of an axis group: the union of the field extents and the
+# overlays' anchor extents (D16: an overlay with anchor points counts them,
+# not its glyphs; any other overlay its drawn extent), padded by
 # `_FIN_OVERLAY_PAD` of the span on each side where an overlay reaches past
 # the fields (in log10 units on a log axis). Data units.
 function _fin_padded_extent(acc::_FinAxisAcc, islog::Bool)
-	lo, hi = acc.lo, acc.hi
+	lo, hi = acc.alo, acc.ahi
 	(isfinite(acc.flo) && isfinite(acc.fhi)) || return (lo, hi)
 	tol(v) = 1e-12 * max(abs(v), 1.0)
 	l(v) = islog ? log10(v) : v
@@ -567,10 +655,9 @@ end
 #
 # A group that stops qualifying gets the signature removed and, if pinned, its
 # autorange back. User ranges and user `autorangeoptions` are never touched.
-function _fin_sticky_updates!(updates::Dict{Symbol, Any}, p::Plot)
+function _fin_sticky_updates!(updates::Dict{Symbol, Any}, p::Plot, accs = _fin_collect_axes(p))
 	layout = p.layout
 	fields = layout.fields
-	accs = _fin_collect_axes(p)
 	groups = Dict{Symbol, Vector{Symbol}}()
 	for key in union(keys(accs), (k for k in keys(fields) if _fin_is_axis_key(k)))
 		root = _fin_match_root(fields, key)
@@ -587,26 +674,35 @@ function _fin_sticky_updates!(updates::Dict{Symbol, Any}, p::Plot)
 			members) && continue
 		islog = _fin_axis_type(layout, root) == "log"
 		any(m -> (_fin_axis_type(layout, m) == "log") != islog, members) && continue
+		records = _fin_axis_records(accs)
 		acc = _FinAxisAcc()
 		for member in members
-			macc = get(accs, member, nothing)
+			macc = get(records, member, nothing)
 			macc === nothing && continue
 			acc.tight |= macc.tight
 			acc.loose |= macc.loose
 			acc.unsupported |= macc.unsupported
 			macc.image_x === nothing || (acc.image_x = macc.image_x)
-			acc.lo = min(acc.lo, macc.lo)
-			acc.hi = max(acc.hi, macc.hi)
-			acc.flo = min(acc.flo, macc.flo)
-			acc.fhi = max(acc.fhi, macc.fhi)
 		end
 		clip = _fin_sticky_clip(root_axis)
 		implicit_reversed = String(root)[1] == 'y' && acc.image_x !== nothing
 		mode, reversed = _fin_axis_mode(root_axis, clip, islog, implicit_reversed)
 		mode === :explicit && continue
+		# Extents are scanned only for the groups that can be sticky (Z81).
+		if acc.tight && !acc.loose && !acc.unsupported
+			for member in members
+				macc = get(accs, member, nothing)
+				macc === nothing && continue
+				acc.unsupported |= macc.unsupported
+				acc.alo = min(acc.alo, macc.alo)
+				acc.ahi = max(acc.ahi, macc.ahi)
+				acc.flo = min(acc.flo, macc.flo)
+				acc.fhi = max(acc.fhi, macc.fhi)
+			end
+		end
 		sticky = acc.tight && !acc.loose && !acc.unsupported &&
-			isfinite(acc.lo) && isfinite(acc.hi) && acc.lo < acc.hi &&
-			(!islog || acc.lo > 0)
+			isfinite(acc.alo) && isfinite(acc.ahi) && acc.alo < acc.ahi &&
+			(!islog || acc.alo > 0)
 		if sticky
 			lo, hi = _fin_padded_extent(acc, islog)
 			for member in members
@@ -838,7 +934,8 @@ _fin_automargin(axis) = (v = _cmn_mapping_get(axis, :automargin);
 	v === true || (v isa AbstractString && !isempty(v) && v != "false"))
 
 # [lo, hi] in l-units shown by an axis: its fixed range, the sticky clip, or
-# the data extent collected for it; `nothing` when unknown.
+# the data extent collected for it with plotly's autorange padding; `nothing`
+# when unknown.
 function _fin_shown_range(layout::Layout, key::Symbol, accs)
 	fields = layout.fields
 	root = something(_fin_match_root(fields, key), key)
@@ -855,9 +952,16 @@ function _fin_shown_range(layout::Layout, key::Symbol, accs)
 	end
 	acc = get(accs, key, nothing)
 	(acc === nothing || !(acc.lo < acc.hi)) && return nothing
-	islog && return acc.lo > 0 ? (log10(acc.lo), log10(acc.hi)) : nothing
-	return (acc.lo, acc.hi)
+	islog && acc.lo <= 0 && return nothing
+	lo, hi = islog ? (log10(acc.lo), log10(acc.hi)) : (acc.lo, acc.hi)
+	# plotly.js pads the autorange of padded traces (scatter, bars) by 5 % of
+	# the axis length on each side, which can add a longer tick label (data
+	# up to 975 shows a "1000" tick).
+	pad = _FIN_AUTORANGE_PAD * (hi - lo)
+	return (lo - pad, hi + pad)
 end
+
+const _FIN_AUTORANGE_PAD = 0.05
 
 _fin_domain(layout::Layout, key::Symbol) =
 	something(_layout_axis_domain(layout, key), (0.0, 1.0))
@@ -1106,7 +1210,8 @@ function _fin_collect_bars(p::Plot, insets)
 			end
 		end
 		regions[region.key] = region
-		range = _cbar_slot_range(trace, slot)
+		# A trace without a bar of its own needs no colour range.
+		range = (slot.coloraxis !== nothing || slot.shows) ? _cbar_slot_range(trace, slot) : nothing
 		if slot.coloraxis !== nothing
 			areas = get!(Vector{String}, coloraxis_areas, slot.coloraxis)
 			if isempty(areas)
@@ -1208,7 +1313,7 @@ function _fin_aspect_cells(layout::Layout, accs)
 			push!(cells, (key, target, ratio_of(axis)))
 		end
 	end
-	for (key, acc) in accs
+	for (key, acc) in _fin_axis_records(accs)
 		acc.image_x === nothing && continue
 		_fin_field(get(fields, key, nothing), :scaleanchor) === nothing || continue
 		push!(cells, (acc.image_x, key, 1.0))
@@ -1261,32 +1366,57 @@ _fin_within(d::NTuple{2, Float64}, ref::NTuple{2, Float64}) =
 # reference area: part of the right margin at the paper edge, else up to the
 # tick labels of the plot area to its right (`_fin_right_neighbour`, at the
 # grid positions), or to the paper edge when there is none.
-function _fin_right_allowance(layout::Layout, accs, ref, grid_layout, Wp::Float64, Hp::Float64)
+# `area_cache` keeps the plot areas per positions layout for one fit (Z82).
+function _fin_right_allowance(layout::Layout, accs, ref, grid_layout, Wp::Float64, Hp::Float64;
+		area_cache::IdDict{Any, Any} = IdDict{Any, Any}())
 	if ref[1][2] >= 1 - 1e-6
 		return max(0.0, _fin_margins_base(layout).r - _FIN_AUTOMARGIN_EXTRA - 4)
 	end
 	positions = something(grid_layout[], layout)
-	neighbour = _fin_right_neighbour(layout, accs, ref[1], ref[2], Hp; positions = positions)
+	areas = get!(() -> _fin_plot_area_boxes(positions), area_cache, positions)
+	neighbour = _fin_right_neighbour(layout, accs, ref[1], ref[2], Hp; positions = positions, areas = areas)
 	neighbour === nothing && return (1.0 - ref[1][2]) * Wp
 	return max(0.0, (neighbour.x - ref[1][2]) * Wp - neighbour.push - 4)
 end
 
 # Figure px size used for the fit: the export size, the layout size, or the
-# package export defaults for a size the layout leaves open.
+# size an export without one gets (the active style's figure size, else the
+# package default 700 x 500) for a side the layout leaves open.
 function _fin_figure_size(ctx::_FinContext, layout::Layout)
 	ctx.size === nothing || return ctx.size
+	return _fin_layout_size(layout)
+end
+
+function _fin_layout_size(layout::Layout)
 	w = get(layout.fields, :width, nothing)
 	h = get(layout.fields, :height, nothing)
+	W0, H0 = _style_default_figure_size()
 	return (
-		_fin_isfinite_real(w) && w > 0 ? Float64(w) : _DEFAULT_EXPORT_WIDTH_PX,
-		_fin_isfinite_real(h) && h > 0 ? Float64(h) : _DEFAULT_EXPORT_HEIGHT_PX,
+		_fin_isfinite_real(w) && w > 0 ? Float64(w) : Float64(W0),
+		_fin_isfinite_real(h) && h > 0 ? Float64(h) : Float64(H0),
 	)
+end
+
+# Whether M3a may size the figure (Z67): it has no size, or exactly the size
+# a sized (journal) style writes into every new figure (`_apply_style_layout!`,
+# within half a px); that size is the style's default, not a choice for this
+# figure, and M3a only removes the blank rows (or columns) around the fitted
+# cell, so the column width a journal style sets is kept for a wide field.
+function _fin_size_is_free(layout::Layout)
+	w = get(layout.fields, :width, nothing)
+	h = get(layout.fields, :height, nothing)
+	w === nothing && h === nothing && return true
+	(_fin_isfinite_real(w) && _fin_isfinite_real(h)) || return false
+	_active_style().width > 0 || return false
+	W0, H0 = _style_default_figure_size()
+	return abs(w - W0) <= 0.5 && abs(h - H0) <= 0.5
 end
 
 # Single figures without a size (decision D10 M3a): the default width, the
 # height derived from the field aspect; a tall field keeps the default height
-# and derives the width. Bounds: height 200..default, width 300..default (px);
-# whatever the bounds cut off is absorbed by the domain fit.
+# and derives the width. Bounds: height 200..default, width 300..default (px)
+# at the 700 x 500 default, scaled down with a smaller default; whatever the
+# bounds cut off is absorbed by the domain fit.
 const _FIN_MIN_FIGURE_HEIGHT = 200.0
 const _FIN_MIN_FIGURE_WIDTH = 300.0
 
@@ -1310,6 +1440,9 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 	isempty(cells) && return results
 	domains = Dict{Symbol, NTuple{2, Float64}}()
 	placed = Dict{Tuple{Symbol, Symbol}, Any}()
+	# Nothing is written during the fit, so the plot areas of a positions
+	# layout hold for all cells and both passes.
+	area_cache = IdDict{Any, Any}()
 	# Two passes: the margins depend on where the fitted cells and bars end up.
 	for pass in 1:2
 		bar_boxes = Any[]
@@ -1357,7 +1490,7 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 			pad_px = _FIN_CBAR_PAD * Wp
 			widths = [_fin_bar_width(layout, item, Hp) for item in hug]
 			bars_px = isempty(hug) ? 0.0 : pad_px + sum(widths) + _FIN_CBAR_GAP * (length(hug) - 1)
-			allow = _fin_right_allowance(layout, accs, ref, grid_layout, Wp, Hp)
+			allow = _fin_right_allowance(layout, accs, ref, grid_layout, Wp, Hp; area_cache = area_cache)
 			room = max(0.0, bars_px - allow)
 			red = get(reduce, xkey, nothing)
 			fref = red === nothing ? ref : ((ref[1][1] + red[:left] / Wp, ref[1][2]),
@@ -1429,26 +1562,28 @@ end
 # (`_room_build`), the equal-aspect cells fitted inside it, the size of a
 # single equal-aspect figure, and the decorations placed in their room.
 # Returns whether anything was written.
-function _fin_fit!(ctx::_FinContext)
+function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 	p = ctx.p
 	layout = p.layout
-	accs = _fin_collect_axes(p)
 	bars = _fin_collect_bars(p, ctx.insets)
 	wrote = false
 	W, H = _fin_figure_size(ctx, layout)
 	plan, fits = _fin_plan_and_fit(ctx, accs, bars, W, H)
 	# M3a: a single figure without a size is sized to its equal-aspect cell.
 	if ctx.size === nothing && ctx.sf === nothing && layout.subplots.rows * layout.subplots.cols == 1 &&
-			get(layout.fields, :width, nothing) === nothing && get(layout.fields, :height, nothing) === nothing &&
-			haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1
+			_fin_size_is_free(layout) && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1
 		fit = fits[(:xaxis, :yaxis)]
 		# Wide field: keep the width and drop the blank rows above and below
 		# the plot box; tall field: keep the height and drop the blank columns.
+		# The bounds are for the 700 x 500 default; a smaller (journal) size
+		# scales them.
 		newW, newH = W, H
 		if fit.slack_px > 1
-			newH = clamp(round(H - fit.slack_px), _FIN_MIN_FIGURE_HEIGHT, H)
+			low = min(H, _FIN_MIN_FIGURE_HEIGHT * min(1.0, H / _DEFAULT_EXPORT_HEIGHT_PX))
+			newH = clamp(round(H - fit.slack_px), low, H)
 		elseif fit.free_px > 1
-			newW = clamp(round(W - fit.free_px), _FIN_MIN_FIGURE_WIDTH, W)
+			low = min(W, _FIN_MIN_FIGURE_WIDTH * min(1.0, W / _DEFAULT_EXPORT_WIDTH_PX))
+			newW = clamp(round(W - fit.free_px), low, W)
 		end
 		size_updates = Dict{Symbol, Any}(:width => round(Int, newW), :height => round(Int, newH))
 		wrote |= _fin_relayout!(ctx, size_updates)
@@ -1526,7 +1661,25 @@ function _fin_fit!(ctx::_FinContext)
 			(layout_updates[:annotations] = annotations)
 	end
 	wrote |= _fin_relayout!(ctx, layout_updates)
+	wrote |= _fin_place_figure_annotations!(ctx, accs, W, H)
 	return wrote
+end
+
+# Z47: whole-figure annotations (`annotate!(...; coords = :figure)`) are
+# shifted by the margins (`_figure_annotations_place!`): re-place them for
+# the margins this pass leaves, at the size the figure is finalized for.
+function _fin_place_figure_annotations!(ctx::_FinContext, accs, W::Float64, H::Float64)
+	layout = ctx.p.layout
+	existing = get(layout.fields, :annotations, nothing)
+	existing isa AbstractVector || return false
+	any(item -> _figure_annotation_spec(item) !== nothing, existing) || return false
+	annotations = collect(Any, existing)
+	new_b = _figure_annotations_place!(ctx.p, annotations; size = (W, H), accs = accs)
+	updates = Dict{Symbol, Any}()
+	all(i -> isequal(_symbol_dict(existing[i]), _symbol_dict(annotations[i])), eachindex(annotations)) ||
+		(updates[:annotations] = annotations)
+	new_b === nothing || (updates[:margin_b] = new_b)
+	return _fin_relayout!(ctx, updates)
 end
 
 # The room plan and the equal-aspect fits of a figure W x H px. Equal-aspect
@@ -1609,33 +1762,42 @@ end
 
 const _FIN_DOMAIN_SUBPLOT = r"^(scene|polar|ternary|geo|mapbox|map|smith)([2-9]|[1-9][0-9]+)?$"
 
-# The nearest other plot area to the right of the area `xd` x `yd` among
-# those overlapping it vertically (Cartesian cells and domain subplots such
-# as scenes): `(x = paper x where it starts, push = px its y axis draws left
-# of it)`, or `nothing` for the rightmost area. Domains and anchors are read
-# from `positions` (with `domains` overriding axis domains), axis styles from
-# `layout`.
-function _fin_right_neighbour(layout::Layout, accs, xd, yd, Hp::Float64;
-		positions::Layout = layout, domains = Dict{Symbol, NTuple{2, Float64}}())
+# The plot areas of `positions` (`domains` overriding axis domains): per
+# base x axis `(dx, dy, ykey)`, per domain subplot (scene, polar, ...)
+# `(dx, dy, nothing)`.
+function _fin_plot_area_boxes(positions::Layout, domains = Dict{Symbol, NTuple{2, Float64}}())
 	domain_of(key) = haskey(domains, key) ? domains[key] : _layout_axis_domain(positions, key)
-	nearest = nothing
-	push = 0.0
+	boxes = Tuple{Any, Any, Union{Nothing, Symbol}}[]
 	for (key, axis) in positions.fields
 		key isa Symbol || continue
-		ykey = nothing
 		if _fin_is_axis_key(key)
 			(String(key)[1] == 'x' && _fin_is_base_axis(positions, key)) || continue
 			dx = domain_of(key)
 			ykey = _fin_axis_key(_cmn_mapping_get(axis, :anchor, "y"))
 			(dx === nothing || ykey === nothing) && continue
-			dy = something(domain_of(ykey), (0.0, 1.0))
+			push!(boxes, (dx, something(domain_of(ykey), (0.0, 1.0)), ykey))
 		elseif occursin(_FIN_DOMAIN_SUBPLOT, String(key))
 			domain = _layout_subplot_domain(positions, key)
 			domain === nothing && continue
-			dx, dy = domain
-		else
-			continue
+			push!(boxes, (domain[1], domain[2], nothing))
 		end
+	end
+	return boxes
+end
+
+# The nearest other plot area to the right of the area `xd` x `yd` among
+# those overlapping it vertically (Cartesian cells and domain subplots such
+# as scenes): `(x = paper x where it starts, push = px its y axis draws left
+# of it)`, or `nothing` for the rightmost area. Domains and anchors are read
+# from `positions` (with `domains` overriding axis domains), axis styles from
+# `layout`. `areas` is `_fin_plot_area_boxes(positions, domains)`, passed in
+# when several cells are checked against the same positions (Z82).
+function _fin_right_neighbour(layout::Layout, accs, xd, yd, Hp::Float64;
+		positions::Layout = layout, domains = Dict{Symbol, NTuple{2, Float64}}(),
+		areas = _fin_plot_area_boxes(positions, domains))
+	nearest = nothing
+	push = 0.0
+	for (dx, dy, ykey) in areas
 		(dx[1] >= xd[2] - 1e-9 && dy[1] < yd[2] - 1e-9 && dy[2] > yd[1] + 1e-9) || continue
 		this_push = ykey === nothing ? 0.0 : _fin_left_decoration(layout, accs, ykey, dy, Hp)
 		if nearest === nothing || dx[1] < nearest - 1e-9
@@ -1667,7 +1829,7 @@ end
 # Both fall back to doing nothing, so an owner without a provider is a no-op.
 # ---------------------------------------------------------------------------
 
-const _ROOM_OWNERS = (:colorbar, :legend_titles)
+const _ROOM_OWNERS = (:colorbar, :legend_titles, :grid_titles)
 const _ROOM_SIDES = (:top, :bottom, :left, :right)
 const _ROOM_OPPOSITE = Dict(:top => :bottom, :bottom => :top, :left => :right, :right => :left)
 # Gap (px) between the axis labels and the first decoration on a side, and
@@ -2142,6 +2304,36 @@ function _room_evidence(plan::_RoomPlan, a::_RoomArea, side::Symbol)
 	return false
 end
 
+# A side shrunk for its own axis labels (Z71) carries no request; the
+# evidence that the shrink is ours is that it is no deeper than the room the
+# labels need now (2 px tolerance): what an earlier pass wrote. A deeper
+# shrink is the user's.
+function _room_label_evidence(plan::_RoomPlan, a::_RoomArea, side::Symbol)
+	(a.own[side] > 0 && a.room[side] > 0) || return false
+	sign = side === :left || side === :bottom ? 1.0 : -1.0
+	shrink = sign * (_room_edge(a.current, side) - _room_edge(a.ref, side)) * _room_px(plan, side)
+	return shrink > 0 && shrink <= a.room[side] + 2.0
+end
+
+# Whether the axis labels of a grid cell reach into the gap the neighbour
+# needs (Z71): a figure without requests is solved only then.
+function _room_labels_overflow(plan::_RoomPlan)
+	need = _room_needs(plan, _room_by_side(plan))
+	for key in plan.area_order
+		a = plan.areas[key]
+		_room_flexible(a) || continue
+		for side in _ROOM_SIDES
+			a.own[side] > 0 || continue
+			a.aspect && side === :right && continue
+			nb = _room_neighbour(plan, a, side)
+			nb === nothing && continue
+			facing = maximum(need[(k, _ROOM_OPPOSITE[side])] for k in nb.keys)
+			need[(key, side)] > nb.gap * _room_px(plan, side) - facing - _ROOM_GAP && return true
+		end
+	end
+	return false
+end
+
 # The requests per (area, side), nearest the axes first (`order`, then the
 # request order).
 function _room_by_side(plan::_RoomPlan)
@@ -2188,18 +2380,38 @@ function _room_solve!(plan::_RoomPlan)
 		a = plan.areas[key]
 		_room_flexible(a) || continue
 		for side in _ROOM_SIDES
-			haskey(by_side, (key, side)) || continue
+			# A side with requests, or with axis labels that may not fit in
+			# the gap to the neighbour (Z71: a y title between two cells).
+			(haskey(by_side, (key, side)) || a.own[side] > 0) || continue
 			a.aspect && side === :right && continue
 			nb = _room_neighbour(plan, a, side)
 			nb === nothing && continue
 			opposite = _ROOM_OPPOSITE[side]
 			gap = nb.gap * _room_px(plan, side)
 			facing = maximum(need[(k, opposite)] for k in nb.keys)
-			shares = all(k -> _room_flexible(plan.areas[k]) && haskey(by_side, (k, opposite)), nb.keys)
-			# `_ROOM_GAP` is kept between the last decoration and what the
-			# neighbour draws on the facing side.
-			allowance = shares ? max(gap - facing - _ROOM_GAP, gap / 2) : max(gap - facing - _ROOM_GAP, 0.0)
-			room = need[(key, side)] - allowance
+			movers = all(k -> _room_flexible(plan.areas[k]), nb.keys)
+			if haskey(by_side, (key, side))
+				shares = movers && all(k -> haskey(by_side, (k, opposite)), nb.keys)
+				# `_ROOM_GAP` is kept between the last decoration and what the
+				# neighbour draws on the facing side.
+				allowance = shares ? max(gap - facing - _ROOM_GAP, gap / 2) : max(gap - facing - _ROOM_GAP, 0.0)
+				room = need[(key, side)] - allowance
+			else
+				# Labels only. A neighbour taking room for requests on the
+				# facing side already leaves these labels their px (its
+				# allowance subtracts them); two label sides split the gap.
+				allowance = if movers && all(k -> haskey(by_side, (k, opposite)), nb.keys)
+					gap - _ROOM_GAP
+				elseif movers
+					max(gap - facing - _ROOM_GAP, (gap - _ROOM_GAP) / 2)
+				else
+					max(gap - facing - _ROOM_GAP, 0.0)
+				end
+				# Room only when the unpadded estimate overflows: labels a
+				# pixel or two inside the pad leave their cell alone.
+				a.own[side] - allowance > 0 || continue
+				room = need[(key, side)] - allowance
+			end
 			room > 0 || continue
 			g = (side, round(_room_edge(a.ref, side); digits = 9))
 			group[g] = max(get(group, g, 0.0), room)
@@ -2231,7 +2443,8 @@ function _room_solve!(plan::_RoomPlan)
 		for side in _ROOM_SIDES
 			ref_edge = _room_edge(a.ref, side)
 			cur_edge = _room_edge(a.current, side)
-			a.writable[side] = abs(cur_edge - ref_edge) <= 1e-9 || _room_evidence(plan, a, side)
+			a.writable[side] = abs(cur_edge - ref_edge) <= 1e-9 || _room_evidence(plan, a, side) ||
+				_room_label_evidence(plan, a, side)
 			sign = side === :left || side === :bottom ? 1.0 : -1.0
 			edges[side] = a.writable[side] ? ref_edge + sign * a.room[side] / _room_px(plan, side) : cur_edge
 		end
@@ -2344,8 +2557,8 @@ function _room_build(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspec
 		for owner in _ROOM_OWNERS
 			_room_requests!(plan, Val(owner))
 		end
-		(isempty(plan.requests) && isempty(plan.vacated)) && return plan
 		_room_set_refs!(plan)
+		(isempty(plan.requests) && isempty(plan.vacated) && !_room_labels_overflow(plan)) && return plan
 		for _ in 1:4
 			_room_solve!(plan)
 			_room_assign_slots!(plan)
@@ -2596,10 +2809,7 @@ const _ROOM_ANCHOR_SHARE = 0.5
 # this one; the margins (px) are taken as equal at both sizes.
 function _room_design_px(plan)
 	plan.ctx.size === nothing && return plan.Wp, plan.Hp
-	w = get(plan.layout.fields, :width, nothing)
-	h = get(plan.layout.fields, :height, nothing)
-	W0 = _fin_isfinite_real(w) && w > 0 ? Float64(w) : _DEFAULT_EXPORT_WIDTH_PX
-	H0 = _fin_isfinite_real(h) && h > 0 ? Float64(h) : _DEFAULT_EXPORT_HEIGHT_PX
+	W0, H0 = _fin_layout_size(plan.layout)
 	return max(plan.Wp + W0 - plan.W, 1.0), max(plan.Hp + H0 - plan.H, 1.0)
 end
 
@@ -2850,6 +3060,67 @@ function _room_needs_mark(plan::_RoomPlan, key::String, item::_FinBar, placement
 	return false
 end
 
+# ---------------------------------------------------------------------------
+# Grid titles (Z20): `subplots(...; x_title, y_title)` draws them as paper
+# annotations named `plotlysupply:grid_title:x` (below the bottom row) and
+# `plotlysupply:grid_title:y` (left of the left column, rotated -90 deg).
+# Each takes a `:figure` request on its side, nearest the axes: it is placed
+# past the outermost axis labels on that paper edge, and the margin grows to
+# hold it (annotations do not push plotly's automargin).
+# ---------------------------------------------------------------------------
+
+const _FIN_GRID_TITLE_PREFIX = "plotlysupply:grid_title:"
+
+# "x" / "y" for a grid title annotation, else `nothing`.
+function _fin_grid_title_letter(item)
+	name = _cmn_mapping_get(item, :name)
+	(name isa AbstractString && startswith(name, _FIN_GRID_TITLE_PREFIX)) || return nothing
+	letter = name[(ncodeunits(_FIN_GRID_TITLE_PREFIX) + 1):end]
+	return letter in ("x", "y") ? letter : nothing
+end
+
+function _room_requests!(plan, ::Val{:grid_titles})
+	annotations = get(plan.layout.fields, :annotations, nothing)
+	annotations isa AbstractVector || return nothing
+	for item in annotations
+		letter = _fin_grid_title_letter(item)
+		letter === nothing && continue
+		_cmn_mapping_get(item, :visible) === false && continue
+		text = _cmn_mapping_get(item, :text)
+		(text isa AbstractString && !isempty(text)) || continue
+		px = _room_text_height(text, _fin_mapping_font_size(item, :font, plan.font))
+		_request_room!(plan, :figure, letter == "x" ? :bottom : :left, px;
+			owner = :grid_titles, key = letter, order = 5)
+	end
+	return nothing
+end
+
+function _room_place!(plan, ::Val{:grid_titles})
+	any(r -> r.owner === :grid_titles, plan.requests) || return nothing
+	annotations = _room_annotations!(plan)
+	for (i, item) in enumerate(annotations)
+		letter = _fin_grid_title_letter(item)
+		letter === nothing && continue
+		slot = _room_slot(plan, :grid_titles, letter)
+		slot === nothing && continue
+		fields = _symbol_dict(item)
+		shift = -round(slot.offset; digits = 2)
+		if letter == "x"
+			fields[:y] = slot.edge
+			fields[:yref] = "paper"
+			fields[:yanchor] = "top"
+			fields[:yshift] = shift
+		else
+			fields[:x] = slot.edge
+			fields[:xref] = "paper"
+			fields[:xanchor] = "right"
+			fields[:xshift] = shift
+		end
+		isequal(_symbol_dict(item), fields) || (annotations[i] = _cbar_attr(fields))
+	end
+	return nothing
+end
+
 # The layout annotations (`base`, else the layout's) with the math title of
 # every moved bar redrawn for its new placement; `base` (`nothing` included)
 # when no title annotation changes.
@@ -3005,17 +3276,24 @@ function _finalize_figure!(fig; live = nothing, size = nothing)
 	return _fin_run!(fig, live, size, false)
 end
 
-function _fin_run!(fig, live, size, clone_readonly::Bool)
+# Colour ranges are scanned once per run (Z83, `_cbar_with_extrema_memo`).
+_fin_run!(fig, live, size, clone_readonly::Bool) =
+	_cbar_with_extrema_memo(() -> _fin_run_scoped!(fig, live, size, clone_readonly))
+
+function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	ctx = _fin_context(fig, live, size, clone_readonly)
 	p = ctx.p
 	updates = _fin_match_group_updates(p.layout, p.data)
-	_fin_sticky_updates!(updates, p)
+	# One collection for the run (Z81): no write of the run changes an extent
+	# (see `_FinAxes`).
+	accs = _fin_collect_axes(p)
+	_fin_sticky_updates!(updates, p, accs)
 	wrote = _fin_relayout!(ctx, updates)
 	# The fit and the room solve read what they write (a bar's length changes
 	# its tick-label estimate, fitted domains the margins): a pass that wrote
 	# runs again, so that the next `_finalize_figure!` writes nothing.
 	for _ in 1:_FIN_FIT_ROUNDS
-		_fin_fit!(ctx) || break
+		_fin_fit!(ctx, accs) || break
 		wrote = true
 	end
 	return wrote
@@ -3049,16 +3327,20 @@ function _fin_context(fig, live, size, clone_readonly::Bool)
 end
 
 """
-	_finalize_export_copy(p::Plot, options) -> Plot
+	_finalize_export_copy(p::Plot, options; pan = true) -> Plot
 
 The figure `savefig` renders: `p` itself when `_finalize_figure!` has nothing
 to change for the export size `options.width` x `options.height`, otherwise a
 copy (private layout; traces shared except those it writes, which are cloned)
-re-fitted for that size. `p` is never mutated.
+re-fitted for that size, its 3-D scene cameras and tick counts included
+(`_s3_refit_scenes!`; `pan = false` keeps every camera centre, for HTML/JSON
+documents whose rotation pivot is the centre, Z43). `p` is never mutated.
 """
-function _finalize_export_copy(p::Plot, options)
+function _finalize_export_copy(p::Plot, options; pan::Bool = true)
 	copy_plot = Plot(copy(p.data), deepcopy(p.layout), p.frames; config = p.config)
-	wrote = _fin_run!(copy_plot, p.data, (options.width, options.height), true)
+	size = (options.width, options.height)
+	wrote = _fin_run!(copy_plot, p.data, size, true)
+	wrote |= _s3_refit_scenes!(copy_plot, p, size; pan = pan)
 	return wrote ? copy_plot : p
 end
 

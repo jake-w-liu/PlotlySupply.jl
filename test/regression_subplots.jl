@@ -1710,7 +1710,7 @@ end
 		# Known defects in other tracks' code (cross-requested): these raise a
 		# MethodError for `row`/`col` instead of an ArgumentError naming the
 		# function. `@test_broken` turns into an error once they are fixed.
-		cross_requested = Set(["figsize!", "panel_labels!", "remove_inset!", "shared_colorbar!",
+		cross_requested = Set(["figsize!", "panel_labels!", "remove_inset!",
 			"subplot_legends!", "tight_layout!"])
 		# Cross-requested Y20 defect: the SubplotFigure `plot!` alias forwards
 		# to plot_scatter!, whose cell errors then name plot_scatter!.

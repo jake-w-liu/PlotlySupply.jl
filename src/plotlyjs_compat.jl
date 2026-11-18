@@ -467,12 +467,15 @@ _format_pixels(options::_ExportOptions, fmt::AbstractString) = (
 # backgrounds and deterministic trace uids are written into the freshly
 # lowered JSON objects that are serialized for the renderer.
 
-function _export_source(p::Plot, options::_ExportOptions)
-	options.tight || return _finalize_export_copy(p, options)
+# `pan = false` for HTML/JSON documents: their scene cameras keep their
+# centres, the pivot of interactive rotation (Z43).
+function _export_source(p::Plot, options::_ExportOptions; pan::Bool = true)
+	options.tight || return _finalize_export_copy(p, options; pan = pan)
 	options.tight || return p
 	export_copy = _clone_plot_model(p)
 	tight_layout!(export_copy)
 	_finalize_figure!(export_copy; size = (options.width, options.height))
+	_s3_refit_scenes!(export_copy, p, (options.width, options.height); pan = pan)
 	return export_copy
 end
 
@@ -598,7 +601,7 @@ function _prepare_document_export(
 	source::Union{Nothing,Plot} = nothing,
 )
 	resolved = options === nothing ? _normalize_export_options(p, kwargs) : options
-	figure = source === nothing ? _export_source(p, resolved) : source
+	figure = source === nothing ? _export_source(p, resolved; pan = false) : source
 	return _PreparedDocumentExport(figure, resolved)
 end
 
@@ -609,11 +612,17 @@ function _prepare_export(p::Plot, formats, kwargs)
 	options = _normalize_export_options(p, kwargs)
 	("eps" in formats || ("pdf" in formats && options.fonts === :outline)) &&
 		_ghostscript_command()
-	source = _export_source(p, options)
-	renderer = any(in(_RENDERER_FORMATS), formats) ?
+	wants_renderer = any(in(_RENDERER_FORMATS), formats)
+	wants_document = any(in(("html", "json")), formats)
+	source = _export_source(p, options; pan = wants_renderer)
+	# A document keeps its scene centres; with scenes it needs its own copy.
+	document_source = (wants_renderer && wants_document &&
+		any(key -> key isa Symbol && occursin(_S3_SCENE_KEY, String(key)), keys(p.layout.fields))) ?
+		_export_source(p, options; pan = false) : source
+	renderer = wants_renderer ?
 		_prepare_renderer_export(p, kwargs; options = options, source = source) : nothing
-	document = any(in(("html", "json")), formats) ?
-		_prepare_document_export(p, kwargs; options = options, source = source) : nothing
+	document = wants_document ?
+		_prepare_document_export(p, kwargs; options = options, source = document_source) : nothing
 	return (renderer = renderer, document = document)
 end
 
