@@ -872,6 +872,27 @@ function _fin_nice_step(span::Float64, len_px::Float64, vertical::Bool)
 	return 10.0 * base
 end
 
+# Characters (at the tick font size) of plotly's label of the decade 10^p on
+# a log axis (plotly.js 2.35.2 axes.js formatLog with whole-decade ticks):
+# "10<sup>−p</sup>" drawn at 1.25 font sizes, the exponent at 70 %, for
+# exponentformat "power" (and "SI"/"B" past 10^14 / 10^-15); "1e−p" for
+# "e"/"E" past 10^±2; a number of at most three digits with an SI suffix
+# ("100µ", "10k") for "SI"/"B" past 10^±minexponent; else the plain number
+# ("none": 10^-15 is "0.000000000000001").
+function _fin_log_label_chars(p::Int, format::AbstractString, minexponent::Float64)
+	si = format == "SI" || format == "B"
+	if format == "power" || (si && (p > 14 || p < -15))
+		p == 0 && return 2
+		p == 1 && return 3
+		return ceil(Int, 1.25 * (2 + 0.7 * (ndigits(abs(p)) + (p < 0 ? 1 : 0))))
+	elseif (format == "e" || format == "E") && abs(p) > 2
+		return 3 + ndigits(abs(p))
+	elseif si && abs(p) > minexponent
+		return 4
+	end
+	return _fin_number_chars(exp10(p), max(0, -p))
+end
+
 # Widest tick label (characters) of an axis or colorbar mapping showing
 # [lo, hi] (l-units: log10 on a log axis) over `len_px`.
 function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, islog::Bool, vertical::Bool)
@@ -894,7 +915,15 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 	end
 	(isfinite(lo) && isfinite(hi) && hi > lo) || return 4 + extra
 	if islog
-		return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), floor(Int, lo):ceil(Int, hi)) + extra
+		tickformat = _cmn_mapping_get(mapping, :tickformat)
+		decades = floor(Int, lo):ceil(Int, hi)
+		# A d3 `tickformat` writes the plain numbers.
+		(tickformat isa AbstractString && !isempty(tickformat)) &&
+			return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), decades) + extra
+		format = something(_fin_string(_cmn_mapping_get(mapping, :exponentformat)), "B")
+		minexponent = _cmn_mapping_get(mapping, :minexponent)
+		minexponent = _fin_isfinite_real(minexponent) ? Float64(minexponent) : 3.0
+		return maximum(e -> _fin_log_label_chars(e, format, minexponent), decades) + extra
 	end
 	dtick = _cmn_mapping_get(mapping, :dtick)
 	step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) :
@@ -1740,7 +1769,10 @@ end
 function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 	layout = ctx.p.layout
 	font = _fin_font_size(layout)
-	m = _fin_margins_base(layout)
+	# The margins with the push of the axis labels (a `tight_layout!` margin
+	# of 4 px puts the plot area where the labels end, not at 4 px:
+	# optical_cividis wrapped a title that fits).
+	m = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
 	Wp, Hp = max(W - m.l - m.r, 1.0), max(H - m.t - m.b, 1.0)
 	updates = Dict{Symbol, Any}()
 	wrapped_keys = Symbol[]
@@ -1778,13 +1810,17 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 		end
 	end
 	wrote = _fin_relayout!(ctx, updates)
+	# Export copies only (`size` given): a margin grown on the figure itself
+	# would outlive the wrap (a later font or size change joins the lines
+	# again; composite_2x2 kept a 155 px left margin).
+	ctx.size === nothing && return wrote
 	return _fin_wrap_margins!(ctx, accs, wrapped_keys, Hp) || wrote
 end
 
 # plotly.js's automargin does not count the extra lines of a wrapped title
 # in full (render probe W5: from a 4 px `tight_layout!` margin the third line
-# ran over the tick labels): a wrapped title at the left or bottom paper edge
-# gets the margin its axis labels need (`_fin_y_labels_px` /
+# ran over the tick labels): on an export copy, a wrapped title at the left or
+# bottom paper edge gets the margin its axis labels need (`_fin_y_labels_px` /
 # `_fin_x_labels_px`, which count the lines) plus `_FIN_WRAP_PAD`. Like every
 # margin the finalizer writes, it only grows.
 function _fin_wrap_margins!(ctx::_FinContext, accs, keys::Vector{Symbol}, Hp::Float64)
@@ -2540,15 +2576,41 @@ function _room_evidence(plan::_RoomPlan, a::_RoomArea, side::Symbol)
 	return false
 end
 
-# A side shrunk for its own axis labels (Z71) carries no request; the
-# evidence that the shrink is ours is that it is no deeper than the room the
-# labels need now (2 px tolerance): what an earlier pass wrote. A deeper
-# shrink is the user's.
+# A side shrunk for axis labels (Z71) carries no request; the evidence that
+# the shrink is ours is that it is no deeper than what the labels on that
+# side of its alignment group (same grid edge) take, padded, or than the room
+# solved now (2 px tolerance): what an earlier pass wrote, also after the
+# labels got smaller (a font change, a shorter title), when the side is
+# given back. A deeper shrink is the user's.
 function _room_label_evidence(plan::_RoomPlan, a::_RoomArea, side::Symbol)
-	(a.own[side] > 0 && a.room[side] > 0) || return false
 	sign = side === :left || side === :bottom ? 1.0 : -1.0
 	shrink = sign * (_room_edge(a.current, side) - _room_edge(a.ref, side)) * _room_px(plan, side)
-	return shrink > 0 && shrink <= a.room[side] + 2.0
+	shrink > 0 || return false
+	ref_edge = _room_edge(a.ref, side)
+	limit = 0.0
+	for b in values(plan.areas)
+		(b.managed && b.ref !== nothing) || continue
+		abs(_room_edge(b.ref, side) - ref_edge) <= 1e-9 || continue
+		limit = max(limit, _room_label_px(b.own[side]))
+	end
+	# A side without labels in its group has no label shrink to recognise
+	# (its requests have evidence of their own, `_room_evidence`).
+	limit > 0 || return false
+	a.own[side] > 0 && (limit = max(limit, a.room[side]))
+	return shrink <= limit + 2.0
+end
+
+# Px from the grid edge of `a` on `side` to the neighbours `keys`, an
+# equal-aspect neighbour counted from where its fit drew it (`current`; a fit
+# that leaves slack ends short of its grid edge).
+function _room_fitted_gap(plan::_RoomPlan, a::_RoomArea, side::Symbol, keys)
+	edge = _room_edge(a.ref, side)
+	opposite = _ROOM_OPPOSITE[side]
+	gap = minimum(keys) do k
+		b = plan.areas[k]
+		abs(edge - _room_edge(b.aspect ? b.current : b.ref, opposite))
+	end
+	return gap * _room_px(plan, side)
 end
 
 # Whether the axis labels of a grid cell reach into the gap the neighbour
@@ -2560,11 +2622,13 @@ function _room_labels_overflow(plan::_RoomPlan)
 		_room_flexible(a) || continue
 		for side in _ROOM_SIDES
 			a.own[side] > 0 || continue
-			a.aspect && side === :right && continue
+			a.aspect && continue
 			nb = _room_neighbour(plan, a, side)
 			nb === nothing && continue
 			facing = maximum(need[(k, _ROOM_OPPOSITE[side])] for k in nb.keys)
-			need[(key, side)] > nb.gap * _room_px(plan, side) - facing - _ROOM_GAP && return true
+			gap = any(k -> plan.areas[k].aspect, nb.keys) ? _room_fitted_gap(plan, a, side, nb.keys) :
+				nb.gap * _room_px(plan, side)
+			need[(key, side)] > gap - facing - _ROOM_GAP && return true
 		end
 	end
 	return false
@@ -2636,12 +2700,19 @@ function _room_solve!(plan::_RoomPlan)
 				# Labels only. A neighbour taking room for requests on the
 				# facing side already leaves these labels their px (its
 				# allowance subtracts them); two label sides split the gap.
-				allowance = if movers && all(k -> haskey(by_side, (k, opposite)), nb.keys)
-					gap - _ROOM_GAP
-				elseif movers
-					max(gap - facing - _ROOM_GAP, (gap - _ROOM_GAP) / 2)
+				# Never on an equal-aspect cell: room there rescales its fit
+				# (audit_d, chama_a5: one panel of a row drawn smaller).
+				a.aspect && continue
+				# An equal-aspect neighbour does not move for these labels,
+				# and the gap counts from where its fit drew it.
+				fitted = any(k -> plan.areas[k].aspect, nb.keys)
+				label_gap = fitted ? _room_fitted_gap(plan, a, side, nb.keys) : gap
+				allowance = if !fitted && movers && all(k -> haskey(by_side, (k, opposite)), nb.keys)
+					label_gap - _ROOM_GAP
+				elseif !fitted && movers
+					max(label_gap - facing - _ROOM_GAP, (label_gap - _ROOM_GAP) / 2)
 				else
-					max(gap - facing - _ROOM_GAP, 0.0)
+					max(label_gap - facing - _ROOM_GAP, 0.0)
 				end
 				# Room only when the unpadded estimate overflows: labels a
 				# pixel or two inside the pad leave their cell alone.

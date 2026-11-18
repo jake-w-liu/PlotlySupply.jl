@@ -1224,12 +1224,20 @@ end
 	for line in split(title[:text], _SFN._FIN_WRAP_BREAK)
 		@test length(line) * _SFN._FIN_WRAP_CHAR_EM * 14 <= 227
 	end
-	# The left margin holds the lines (plotly's automargin does not).
+	# The figure's own margin is left alone (it would outlive the wrap); a
+	# tight export copy gets a left margin that holds the lines (plotly's
+	# automargin does not count them in full).
 	layout = sf.plot.layout
-	accs = _SFN._fin_collect_axes(sf.plot)
-	need = _SFN._fin_y_labels_px(layout, accs, :yaxis, (0.0, 1.0), 100.0)
-	@test _sfn_fields(layout.fields[:margin])[:l] >= need
+	@test _sfn_fields(layout.fields[:margin])[:l] == 50
 	@test _SFN._finalize_figure!(sf) === false
+	tight = _SFN._ExportOptions(578.0, 227.0, 1.0, nothing, true, nothing, true, 30.0, :px, false, :auto)
+	copy = _SFN._export_source(sf.plot, tight)
+	copy_title = _sfn_fields(copy.layout.fields[:yaxis][:title])
+	@test occursin(_SFN._FIN_WRAP_BREAK, copy_title[:text])
+	accs = _SFN._fin_collect_axes(copy)
+	need = _SFN._fin_y_labels_px(copy.layout, accs, :yaxis, (0.0, 1.0), 100.0)
+	@test _sfn_fields(copy.layout.fields[:margin])[:l] >= need
+	@test _sfn_fields(layout.fields[:margin])[:l] == 50
 	# A larger figure: one line again, our standoff gone.
 	figsize!(sf, 1400, 900)
 	title = _sfn_fields(_sfn_axis(sf, :yaxis)[:title])
@@ -1250,6 +1258,86 @@ end
 	@test _SFN._fin_title_push(axis, 12.0) ≈ _SFN._fin_title_push(Dict(:title => "a"), 12.0) + _SFN._FIN_LINE_EM * 14
 end
 
+@testset "a title wrapped while the fonts were large leaves no room behind (composite_2x2)" begin
+	sf = subplots(2, 2; sync = false, horizontal_spacing = 0.27, vertical_spacing = 0.2)
+	plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)
+	plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2)
+	set_fonts!(sf; size = 16, label = 20)
+	for c in 1:2
+		plot_scatter!(sf, 1:8, 10.0 .^ -(2 .* (1:8)); row = 2, col = c, yscale = "log")
+		ylabel!(sf, "Relative frequency difference"; row = 2, col = c)
+	end
+	layout = sf.plot.layout
+	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
+	# Wrapped at the large font (the bottom row is 156 px tall) ...
+	@test occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text])
+	# ... with neither a grown margin nor a narrowed cell.
+	@test _sfn_fields(layout.fields[:margin])[:l] == 50
+	for k in (:xaxis, :xaxis2, :xaxis3, :xaxis4)
+		@test collect(_SFN._layout_axis_domain(layout, k)) ≈ collect(_SFN._layout_axis_domain(grid, k))
+	end
+	# Smaller fonts: one line again, the layout as before.
+	set_fonts!(sf; size = 9, label = 9.2, tick = 7.5, units = :pt)
+	@test _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text] == "Relative frequency difference"
+	@test _sfn_fields(layout.fields[:margin])[:l] == 50
+	@test collect(_SFN._layout_axis_domain(layout, :xaxis4)) ≈ collect(_SFN._layout_axis_domain(grid, :xaxis4))
+end
+
+@testset "equal-aspect cells of a row keep one size when labels fill the gap (audit_d)" begin
+	sf = subplots(1, 3; sync = false, horizontal_spacing = 0.04)
+	figsize!(sf, 826, 288)
+	for k in 1:3
+		plot_heatmap!(sf, collect(range(0, 1.2; length = 13)), collect(range(0, 1.07; length = 11)), rand(13, 11);
+			row = 1, col = k, equalar = true, showscale = false)
+	end
+	layout = sf.plot.layout
+	plan = _SFN._room_plan(sf)
+	# The middle cell's tick labels need more than the grid gap ...
+	gap = 0.04 * plan.Wp
+	@test plan.areas[:xaxis2].own[:left] > gap - _SFN._ROOM_GAP
+	# ... yet no cell is narrowed for them: the fits stay alike.
+	widths = [(d = _SFN._layout_axis_domain(layout, k); d[2] - d[1]) for k in (:xaxis, :xaxis2, :xaxis3)]
+	heights = [(d = _SFN._layout_axis_domain(layout, k); d[2] - d[1]) for k in (:yaxis, :yaxis2, :yaxis3)]
+	@test maximum(widths) - minimum(widths) <= 1e-6
+	@test maximum(heights) - minimum(heights) <= 1e-6
+	@test all(a -> a.room[:left] == 0, values(plan.areas))
+	@test _SFN._finalize_figure!(sf) === false
+end
+
+@testset "log-axis tick labels are estimated as plotly writes them" begin
+	# plotly.js 2.35.2 formatLog: "10^-15" at 1.25 font sizes (power), "1e-15"
+	# (e), "100µ" (SI/B past 10^±minexponent), the plain number otherwise.
+	chars = _SFN._fin_log_label_chars
+	@test chars(-15, "power", 3.0) == 6 && chars(0, "power", 3.0) == 2 && chars(1, "power", 3.0) == 3
+	@test chars(2, "power", 3.0) == 4
+	@test chars(-15, "e", 3.0) == 5 && chars(2, "E", 3.0) == 3
+	@test chars(-4, "B", 3.0) == 4 && chars(-3, "B", 3.0) == 5 && chars(-16, "SI", 3.0) == 6
+	@test chars(-4, "B", 5.0) == 6
+	@test chars(-15, "none", 3.0) == 17
+	axis = Dict{Symbol, Any}(:exponentformat => "power")
+	@test _SFN._fin_tick_chars(axis, -15.7, -0.6, 300.0, true, true) == 6
+	# A d3 format writes plain numbers; plotly's default format is "B".
+	@test _SFN._fin_tick_chars(Dict{Symbol, Any}(:tickformat => ".1e"), -15.7, -0.6, 300.0, true, true) == 18
+	@test _SFN._fin_tick_chars(Dict{Symbol, Any}(), -14.7, -4.2, 300.0, true, true) == 4
+	@test _SFN._fin_tick_chars(Dict{Symbol, Any}(), -15.7, -4.2, 300.0, true, true) == 6
+	# Renderer: the estimate covers the drawn labels without running far past them.
+	f = plot_scatter(1:15, 10.0 .^ -(1:15); yscale = "log")
+	info = _sfn_render(f)
+	if info === nothing
+		@test_skip "renderer unavailable"
+	else
+		layout = f.layout
+		accs = _SFN._fin_collect_axes(f)
+		axis = layout.fields[:yaxis]
+		tickfont = _SFN._fin_mapping_font_size(axis, :tickfont, _SFN._fin_font_size(layout))
+		lo, hi = _SFN._fin_shown_range(layout, :yaxis, accs)
+		estimate = _SFN._fin_tick_chars(axis, lo, hi, 300.0, true, true) * 0.6 * tickfont
+		drawn = info["axes"]["xaxis"]["offset"] - info["axes"]["yaxis"]["labels_left"]
+		@test drawn <= estimate + _SFN._fin_tick_len(axis) + 2
+		@test estimate <= drawn + 20
+	end
+end
+
 @testset "a map's colorbar margin is reserved before plotly draws (Z49)" begin
 	fig = plot_choropleth(["France", "Germany", "Spain"], [1.0, 2.0, 3.0]; scope = "europe", legend = "Regions")
 	plot_scattergeo!(fig, [2.35, 13.40], [48.86, 52.52]; legend = "cities")
@@ -1267,7 +1355,7 @@ end
 	@test all(r -> r.margin_pushed, _SFN._room_plan(h).requests)
 end
 
-@testset "renderer: bars past a twin axis; grid titles; geo legend (Z32, Z20, Z49)" begin
+@testset "renderer: bars past a twin axis; grid titles (Z32, Z20)" begin
 	f = plot_scatter(1:10, rand(10); legend = "line")
 	plot_histogram2d!(f, randn(400) .* 2 .+ 5, randn(400) .* 2 .+ 5; secondary_y = true)
 	ylabel!(f, "twin title"; secondary_y = true)
