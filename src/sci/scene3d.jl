@@ -708,7 +708,7 @@ end
 
 const _S3_TEXT3D_DOC = raw"""Scene axis titles and tick labels are drawn by WebGL, which cannot typeset TeX: `$…$` is converted to Unicode and `<b>`/`<i>`/`<sub>`/`<sup>` (`$x_1$` gives x with a subscript 1, `$\mathbf{b}$` a bold b, `$\lambda^2$` λ with a superscript 2, `$\alpha$` α); an unsupported macro is shown as written and warns once."""
 
-const _S3_FRAMING_DOC = raw"""plotly.js sizes an "auto"/"data" scene by the extent of its data and ignores explicit axis ranges, so a scene with a range is written as `aspectmode = "manual"` with the proportions of the axis spans: equal units for "data", and for "auto" the same unless one span exceeds four times another (then a cube). Ratios pinned this way (other than a cube) are updated when later 3-D calls add data. A perspective scene without a camera gets plotly's default camera direction at the automatic distance of [`view!`](@ref), which fits the scene box with its tick labels and axis titles into its viewport (the figure size, else the style's default figure size, and the cell domain); later PlotlySupply calls and `savefig` keep such an automatic camera up to date. In a subplot cell, axes with automatic ticks get a tick count that suits the cell size, and scene tick labels are drawn at the requested font size (see [`view!`](@ref))."""
+const _S3_FRAMING_DOC = raw"""plotly.js sizes an "auto"/"data" scene by the extent of its data and ignores explicit axis ranges, so a scene with a range is written as `aspectmode = "manual"` with the proportions of the axis spans: equal units for "data", and for "auto" the same unless one span exceeds four times another (then a cube). Ratios pinned this way (other than a cube) are updated when later 3-D calls add data. A perspective scene without a camera gets plotly's default camera direction at the automatic distance of [`view!`](@ref), which fits the scene box with its tick labels and axis titles into its viewport (the figure size, else the style's default figure size, and the cell domain); later PlotlySupply calls and `savefig` keep such an automatic camera up to date. In a subplot cell, axes with automatic ticks get a tick count that suits the cell size, and scene tick labels are drawn at the requested font size (see [`view!`](@ref)). The framing also keeps the labels clear of each other: the offsets of tick labels and axis titles from the box (constants of plotly.js, which PlotlySupply's Plotly.js asset reads per scene from `layout.meta`) are pulled in as far as the labels stay apart; when the axis titles of a scene still cannot be kept apart, PlotlySupply draws them itself as paper annotations named `plotlysupply:scene3d:<scene>:title:<x|y|z>` along the projected axes (wrapped at a space or set smaller if need be; the scene's own title then holds a blank and its text is kept in the scene's `plotlysupply` record), and the end tick labels of two axes that meet at a box corner and overlap there are resolved by dropping one end tick of one axis (its tick values are written, recorded, and derived again after every change; ticks you place yourself are never touched). A user camera, `view!` with a `distance`, or a figure rendered by a Plotly.js without PlotlySupply's patch keeps plotly.js's own offsets and titles."""
 
 const _S3_OPACITY_LINE_DOC = raw"""translucent scatter3d lines were observed to make other 3-D traces in the same scene vanish, so a line with `opacity < 1` or a colour with an alpha channel is drawn in the opaque colour it would have over the scene background (`paper_bgcolor` and `scene.bgcolor`, from the layout or the template). Over coloured faces this is an approximation."""
 
@@ -1507,6 +1507,68 @@ const _S3_LINE_EM = 1.25
 # Free pixels kept between a label and the viewport edge.
 const _S3_LABEL_MARGIN_PX = 2.0
 
+# ── Label pads ───────────────────────────────────────────────────────────────
+#
+# gl-axes pushes tick labels out of the box by `tickPad` and axis titles by a
+# further `labelPad` (module constants 18 and 30 in plotly.js 2.35.2, which no
+# layout attribute reaches). The Plotly.js asset PlotlySupply renders with
+# (`src/plotlyjs_compat_asset.jl`) reads them per scene from
+# `layout.meta["plotlysupply:gl3d"][scene key] = [tickPad, labelPad]`, so a
+# small scene can pull its labels in; a renderer without that patch (a plain
+# PlotlyBase display) ignores the record and draws the constants. The model
+# reads the same record (the constants without it).
+const _S3_PADS_KEY = Symbol("plotlysupply:gl3d")
+const _S3_GL_DEFAULT_PADS = (_S3_GL_TICK_PAD, _S3_GL_LABEL_PAD)
+
+function _s3_pads_record(layout::Layout)
+	meta = get(layout.fields, :meta, nothing)
+	meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute || return nothing
+	record = _cmn_mapping_get(meta, _S3_PADS_KEY)
+	return record isa AbstractDict ? record : nothing
+end
+
+# The (tickPad, labelPad) pair, in gl-axes units, recorded for scene `key`;
+# gl-axes's constants without a valid record.
+function _s3_scene_pads(p::Plot, key::Symbol)
+	record = _s3_pads_record(p.layout)
+	record === nothing && return _S3_GL_DEFAULT_PADS
+	raw = _cmn_mapping_get(record, key)
+	((raw isa AbstractVector || raw isa Tuple) && length(raw) == 2 &&
+		all(v -> _s3_is_real(v) && isfinite(v) && v >= 0, raw)) || return _S3_GL_DEFAULT_PADS
+	return (Float64(raw[1]), Float64(raw[2]))
+end
+
+# Record `pads` for scene `key` in `layout.meta` (only this key of `meta`; a
+# `meta` that is not a mapping is the user's and is left alone). The default
+# constants are recorded by removing the entry. Returns whether the layout
+# changed.
+function _s3_write_pads!(layout::Layout, key::Symbol, pads::NTuple{2, Float64})
+	meta = get(layout.fields, :meta, nothing)
+	holder = meta isa PlotlyBase.PlotlyAttribute ? meta.fields : meta
+	(holder === nothing || holder isa AbstractDict) || return false
+	record = _s3_pads_record(layout)
+	current = record === nothing ? nothing : _cmn_mapping_get(record, key)
+	if pads == _S3_GL_DEFAULT_PADS
+		current === nothing && return false
+		_cmn_mapping_delete!(record, (key,))
+		if isempty(record)
+			delete!(holder, _S3_PADS_KEY)
+			isempty(holder) && delete!(layout.fields, :meta)
+		end
+		return true
+	end
+	same = (current isa AbstractVector || current isa Tuple) && length(current) == 2 &&
+		all(i -> _s3_is_real(current[i]) && current[i] == pads[i], 1:2)
+	same && return false
+	if holder === nothing
+		holder = Dict{Any, Any}()
+		layout.fields[:meta] = holder
+	end
+	record === nothing && (record = Dict{Any, Any}(); holder[_S3_PADS_KEY] = record)
+	record[key] = Float64[pads[1], pads[2]]
+	return true
+end
+
 # The labels gl-axes draws for one scene axis. `ticklen` is the tick length
 # gl-axes uses when another axis's labels are pushed along this one;
 # `tick_lo`/`tick_hi` are the outermost labelled ticks as fractions of the
@@ -1524,6 +1586,9 @@ struct _S3AxisLabels
 	title_chars::Int
 	title_lines::Int
 	title_along::Bool
+	tick_pad::Float64
+	label_pad::Float64
+	title_text::String
 end
 
 # Characters a label shows: HTML tags (<b>, <sub>, ...) count as nothing, an
@@ -1655,10 +1720,22 @@ end
 const _S3_GL_TEXT_REFERENCE_SIZE = 12.0
 _s3_tick_text_size(size::Float64) = size * size / _S3_GL_TEXT_REFERENCE_SIZE
 
+# The text axis `d` of `scene` (a layout entry) is titled with: its layout
+# title, or, where the title is `_S3_TITLE_HIDDEN` because PlotlySupply draws
+# it as an annotation (`_s3_apply_titles!`), the text its mark kept.
+function _s3_title_source(scene, d::Int)
+	fields = _cmn_mapping_get(scene, (:xaxis, :yaxis, :zaxis)[d])
+	title = _cmn_mapping_get(fields, :title)
+	raw = title isa AbstractString ? title : _cmn_mapping_get(title, :text)
+	mark = _s3_mark(scene)
+	(mark !== nothing && raw == _S3_TITLE_HIDDEN && !isempty(mark.titles[d])) && return mark.titles[d]
+	return raw
+end
+
 # The labels of the three axes of scene `scenekey` as plotly.js lays them out:
 # an untitled axis is titled with its letter, a title's font size defaults to
 # round(1.2 × layout.font.size) and a tick font's to layout.font.size (12).
-function _s3_axis_labels(p::Plot, scenekey::Symbol)
+function _s3_axis_labels(p::Plot, scenekey::Symbol; pads = _s3_scene_pads(p, scenekey), tick_override = nothing)
 	font = _s3_number_field(_cmn_mapping_get(p.layout.fields, :font), :size, _S3_DEFAULT_FONT_SIZE; positive = true)
 	scene = get(p.layout.fields, scenekey, nothing)
 	return ntuple(3) do d
@@ -1670,12 +1747,13 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol)
 		shown = visible && _cmn_mapping_get(fields, :showticklabels) !== false
 		tick_size = _s3_number_field(_cmn_mapping_get(fields, :tickfont), :size, font; positive = true)
 		title = _cmn_mapping_get(fields, :title)
-		raw = title isa AbstractString ? title : _cmn_mapping_get(title, :text)
+		raw = _s3_title_source(scene, d)
 		text = raw === nothing ? string("xyz"[d]) : string(raw)
 		title_font = title isa AbstractString ? nothing : _cmn_mapping_get(title, :font)
 		title_size = _s3_number_field(title_font, :size, round(1.2 * font); positive = true)
 		lines = split(replace(text, r"<br\s*/?>"i => "\n"), '\n')
-		tick_lo, tick_hi, tick_chars = shown ? _s3_tick_extent(p, scenekey, d, fields) : (0.5, 0.5, 0)
+		tick_lo, tick_hi, tick_chars = !shown ? (0.5, 0.5, 0) : (tick_override !== nothing && haskey(tick_override, d)) ? tick_override[d] :
+			_s3_tick_extent(p, scenekey, d, fields)
 		_S3AxisLabels(
 			visible,
 			marks,
@@ -1689,6 +1767,9 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol)
 			visible ? maximum(_s3_visible_chars, lines) : 0,
 			length(lines),
 			_s3_js_length(text) > 4,
+			pads[1],
+			pads[2],
+			text,
 		)
 	end
 end
@@ -1768,6 +1849,28 @@ function _s3_text_quad(at, along, half_len::Float64, half_thick::Float64)
 	end
 end
 
+# Whether two convex quadrilaterals (four corners each) overlap by more than
+# `tolerance` px along every separating axis candidate (separating-axis test).
+function _s3_quads_intersect(a, b; tolerance::Float64 = 0.0)
+	for quad in (a, b), k in 1:4
+		p, q = quad[k], quad[mod1(k + 1, 4)]
+		nx, ny = p[2] - q[2], q[1] - p[1]
+		lo_a, hi_a, lo_b, hi_b = Inf, -Inf, Inf, -Inf
+		for point in a
+			t = point[1] * nx + point[2] * ny
+			lo_a, hi_a = min(lo_a, t), max(hi_a, t)
+		end
+		for point in b
+			t = point[1] * nx + point[2] * ny
+			lo_b, hi_b = min(lo_b, t), max(hi_b, t)
+		end
+		scale = hypot(nx, ny)
+		scale > 0 || continue
+		(hi_a - lo_b <= tolerance * scale || hi_b - lo_a <= tolerance * scale) && return false
+	end
+	return true
+end
+
 # What plotly.js draws of the scene seen from center + distance·v (camera
 # frame `frame` = (v, r, u)) in a `width`×`height` px viewport, in px from the
 # viewport centre with y up: the eight box corners, and per drawn axis the
@@ -1775,6 +1878,13 @@ end
 # axis spans in data units (a tick label runs along the screen direction
 # gl-axes measures for one data unit), or `nothing`.
 function _s3_label_layout(box, center, frame, distance::Float64, width::Float64, height::Float64, labels, spans)
+	corners, quads, _ = _s3_label_layout_tagged(box, center, frame, distance, width, height, labels, spans)
+	return corners, quads
+end
+
+# `_s3_label_layout` with, per rectangle, the axis (1-3) and kind (`:tick` or
+# `:title`) it belongs to.
+function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::Float64, height::Float64, labels, spans; own::Bool = false)
 	v, r, u = frame
 	eye = center .+ distance .* v
 	tan_half = tan(_S3_HALF_FOVY)
@@ -1787,7 +1897,9 @@ function _s3_label_layout(box, center, frame, distance::Float64, width::Float64,
 	end
 	corners = [project(_s3_corner(box, i)) for i in 0:7]
 	quads = NTuple{4, NTuple{2, Float64}}[]
-	any(label -> label.visible, labels) || return corners, quads
+	tags = Tuple{Int, Symbol}[]
+	any(label -> label.visible, labels) || return corners, quads, tags, _S3Title[]
+	geoms = Any[nothing, nothing, nothing]
 	edges, signs = _s3_cube_edges(box, eye, project)
 	# World length of one gl-axes pad unit: depth of the scene origin over the
 	# viewport height (gl-axes: pixelRatio · w / drawingBufferHeight).
@@ -1818,27 +1930,164 @@ function _s3_label_layout(box, center, frame, distance::Float64, width::Float64,
 		end
 		low, high = copy(edge), copy(edge)
 		low[a], high[a] = -box[a] / 2, box[a] / 2
+		geoms[a] = (project(low), project(high))
 		if label.ticks_shown
-			offset .+= (_S3_GL_TICK_PAD * unit) .* minor
+			offset .+= (label.tick_pad * unit) .* minor
 			pushed = findall(!iszero, minor)
-			for fraction in (label.tick_lo, label.tick_hi)
+			for (end_tag, fraction) in ((:tick_lo, label.tick_lo), (:tick_hi, label.tick_hi))
 				at = copy(edge)
 				at[a] = (fraction - 0.5) * box[a]
 				at .+= offset
 				along = length(pushed) == 1 ? screen_direction(at, pushed[1]) : (1.0, 0.0)
-				label.tick_chars > 0 && push!(quads, _s3_text_quad(
-					project(at), along, 0.5 * label.tick_chars * _S3_CHAR_EM * label.tick_size, 0.5 * label.tick_size,
-				))
+				if label.tick_chars > 0
+					push!(quads, _s3_text_quad(
+						project(at), along, 0.5 * label.tick_chars * _S3_CHAR_EM * label.tick_size, 0.5 * label.tick_size,
+					))
+					push!(tags, (a, end_tag))
+				end
 			end
 		end
 		label.title_chars > 0 || continue
-		offset .+= (_S3_GL_LABEL_PAD * unit) .* minor
+		own && continue
+		offset .+= (label.label_pad * unit) .* minor
 		at = (low .+ high) ./ 2 .+ offset
 		along = label.title_along ? screen_direction(at, a) : (1.0, 0.0)
 		thick = label.title_size * (1 + _S3_LINE_EM * (label.title_lines - 1))
 		push!(quads, _s3_text_quad(project(at), along, 0.5 * label.title_chars * _S3_CHAR_EM * label.title_size, 0.5 * thick))
+		push!(tags, (a, :title))
 	end
-	return corners, quads
+	placed = _S3Title[]
+	if own
+		centroid = (sum(first, corners) / 8, sum(last, corners) / 8)
+		placed, title_quads, _ = _s3_place_titles_laddered(labels, geoms, copy(quads), centroid)
+		for (title, quad) in zip(placed, title_quads)
+			push!(quads, quad)
+			push!(tags, (title.axis, :title))
+		end
+	end
+	return corners, quads, tags, placed
+end
+
+# ── Axis titles drawn by PlotlySupply ────────────────────────────────────────
+#
+# gl-axes draws each axis title at a fixed pad from its edge, along the edge,
+# and lets titles run over each other and over tick labels when the scene is
+# small or the titles are long. When the titles of a scene cannot be kept
+# apart that way (`_s3_fit_with_pads`), PlotlySupply draws them itself: the
+# scene's own title is replaced by `_S3_TITLE_HIDDEN` (the text is kept in
+# the scene's mark) and a paper annotation named
+# `plotlysupply:scene3d:<scene>:title:<letter>` is written at the projected
+# middle of the axis edge, rotated along it, pushed out until it clears the
+# tick labels, and, when titles still meet, slid, wrapped at a space or set
+# smaller (`_S3_OWN_LADDER`).
+const _S3_TITLE_HIDDEN = " "
+const _S3_OWN_LADDER = ((1.0, false), (1.0, true), (0.9, true), (0.8, true), (0.7, true))
+const _S3_OWN_STEP_PX = 2.0
+const _S3_OWN_MAX_PUSH_PX = 400.0
+# An edge that projects shorter than this many title font sizes carries its
+# title horizontally.
+const _S3_OWN_MIN_EDGE_FONTS = 2.0
+
+struct _S3Title
+	axis::Int
+	center::NTuple{2, Float64}
+	angle::Float64
+	size::Float64
+	text::String
+	lines::Int
+end
+
+# `text` broken in two lines at the space (outside HTML tags and `$…$`)
+# nearest its middle, as `(text with <br>, longest line's characters)`;
+# `nothing` without a usable space.
+function _s3_wrap_title(text::AbstractString)
+	occursin(r"<br\s*/?>"i, text) && return nothing
+	spaces = Int[]
+	in_tag = false
+	in_math = false
+	for (index, char) in pairs(text)
+		if char == '<'
+			in_tag = true
+		elseif char == '>'
+			in_tag = false
+		elseif char == '$'
+			in_math = !in_math
+		elseif char == ' ' && !in_tag && !in_math
+			push!(spaces, index)
+		end
+	end
+	isempty(spaces) && return nothing
+	total = _s3_visible_chars(text)
+	best = argmin(index -> abs(_s3_visible_chars(text[1:prevind(text, index)]) - total / 2), spaces)
+	first_line = text[1:prevind(text, best)]
+	second_line = text[nextind(text, best):end]
+	(isempty(strip(first_line)) || isempty(strip(second_line))) && return nothing
+	return string(first_line, "<br>", second_line), max(_s3_visible_chars(first_line), _s3_visible_chars(second_line))
+end
+
+# The titles of the scene drawn at `scale` times their font sizes (`wrap`:
+# wrapped where possible) around the tick-label rectangles `ticks`, from the
+# projected edge ends `geoms` of the axes (`labels` as `_s3_axis_labels`) and
+# the box's centroid on screen: `(titles, quads, ok)` where `ok` says that no
+# title meets a tick label or another title.
+function _s3_place_titles(labels, geoms, ticks, centroid, scale::Float64, wrap::Bool)
+	titles = _S3Title[]
+	quads = NTuple{4, NTuple{2, Float64}}[]
+	for a in 1:3
+		label = labels[a]
+		(label.visible && label.title_chars > 0 && geoms[a] !== nothing) || continue
+		lo, hi = geoms[a]
+		text, chars, lines = label.title_text, label.title_chars, label.title_lines
+		if wrap && lines == 1
+			wrapped = _s3_wrap_title(text)
+			wrapped === nothing || ((text, chars) = wrapped; lines = 2)
+		end
+		size = label.title_size * scale
+		half_len = 0.5 * chars * _S3_CHAR_EM * size
+		half_thick = 0.5 * size * (1 + _S3_LINE_EM * (lines - 1))
+		dx, dy = hi[1] - lo[1], hi[2] - lo[2]
+		edge = hypot(dx, dy)
+		center = ((lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
+		if label.title_along && edge >= _S3_OWN_MIN_EDGE_FONTS * size
+			t = (dx / edge, dy / edge)
+			(t[1] < -1e-9 || (abs(t[1]) <= 1e-9 && t[2] < 0)) && (t = (-t[1], -t[2]))
+			n = (-t[2], t[1])
+		else
+			t = (1.0, 0.0)
+			n = (center[1] - centroid[1], center[2] - centroid[2])
+			len = hypot(n[1], n[2])
+			n = len > 1e-9 ? (n[1] / len, n[2] / len) : (0.0, 1.0)
+		end
+		(n[1] * (center[1] - centroid[1]) + n[2] * (center[2] - centroid[2]) < 0) && (n = (-n[1], -n[2]))
+		push_px = half_thick + 2.0
+		at = center
+		quad = nothing
+		while true
+			at = (center[1] + push_px * n[1], center[2] + push_px * n[2])
+			quad = _s3_text_quad(at, t, half_len, half_thick)
+			push_px >= _S3_OWN_MAX_PUSH_PX && break
+			any(tick -> _s3_quads_intersect(quad, tick; tolerance = _S3_LABEL_TOUCH_PX), ticks) || break
+			push_px += _S3_OWN_STEP_PX
+		end
+		push!(titles, _S3Title(a, at, rad2deg(atan(t[2], t[1])), size, text, lines))
+		push!(quads, quad)
+	end
+	ok = all(quad -> !any(tick -> _s3_quads_intersect(quad, tick; tolerance = _S3_LABEL_TOUCH_PX), ticks), quads)
+	for i in eachindex(quads), j in (i + 1):length(quads)
+		_s3_quads_intersect(quads[i], quads[j]; tolerance = _S3_LABEL_TOUCH_PX) && (ok = false)
+	end
+	return titles, quads, ok
+end
+
+# `_s3_place_titles` down `_S3_OWN_LADDER` until one placement is clear (the
+# last one otherwise): `(titles, quads, ok)`.
+function _s3_place_titles_laddered(labels, geoms, ticks, centroid)
+	result = nothing
+	for (scale, wrap) in _S3_OWN_LADDER
+		result = _s3_place_titles(labels, geoms, ticks, centroid, scale, wrap)
+		result[3] && break
+	end
+	return result
 end
 
 # Pan steps and tolerance (px) for centring an exported scene's drawing.
@@ -1945,18 +2194,18 @@ end
 # region (labels that do not fit even then get the latter). When `up` is
 # parallel to `direction`:
 # `_s3_auto_distance` and `center`.
-function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center, pan::Bool, zoom::Float64 = 1.0)
+function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center, pan::Bool, zoom::Float64 = 1.0, pads = nothing, own::Bool = false)
 	c0 = (Float64(center[1]), Float64(center[2]), Float64(center[3]))
 	frame = _s3_camera_frame(direction, up)
 	frame === nothing && return (_s3_auto_distance(fig, target, box, direction, up, zoom; center = c0), c0)
 	p = _cmn_plot(fig)
 	width, height = _s3_viewport(fig, target)
 	ratio = width / height
-	labels = _s3_axis_labels(p, target.scenekey)
+	labels = pads === nothing ? _s3_axis_labels(p, target.scenekey) : _s3_axis_labels(p, target.scenekey; pads = pads)
 	spans = _s3_scene_spans(p, target.scenekey)
 	v, r, u = frame
 	function extent(c, distance)
-		corners, quads = _s3_label_layout(box, c, frame, distance, width, height, labels, spans)
+		corners, quads, _ = _s3_label_layout_tagged(box, c, frame, distance, width, height, labels, spans; own = own)
 		xmin, xmax, ymin, ymax = Inf, -Inf, Inf, -Inf
 		for point in corners
 			xmin, xmax = min(xmin, point[1]), max(xmax, point[1])
@@ -2084,10 +2333,14 @@ struct _S3Mark
 	nticks::NTuple{3, Int}
 	font::NTuple{3, Float64}
 	font_written::NTuple{3, Float64}
+	titles::NTuple{3, String}
+	tickvals::NTuple{3, Tuple{Vararg{Float64}}}
 end
 
+Base.:(==)(a::_S3Mark, b::_S3Mark) = all(name -> getfield(a, name) == getfield(b, name), fieldnames(_S3Mark))
+
 const _S3_ORIGIN = (0.0, 0.0, 0.0)
-const _S3_NEW_MARK = _S3Mark(true, 1.0, true, nothing, _S3_ORIGIN, (0, 0, 0), _S3_ORIGIN, _S3_ORIGIN)
+const _S3_NEW_MARK = _S3Mark(true, 1.0, true, nothing, _S3_ORIGIN, (0, 0, 0), _S3_ORIGIN, _S3_ORIGIN, ("", "", ""), ((), (), ()))
 
 # The mark of a scene layout entry, or `nothing`. Malformed entries (edited by
 # hand) read as their defaults.
@@ -2115,12 +2368,30 @@ function _s3_mark(scene)
 		counts,
 		something(triple(:fontsize), _S3_ORIGIN),
 		something(triple(:fontwritten), _S3_ORIGIN),
+		_s3_mark_titles(field(:titles)),
+		_s3_mark_tickvals(field(:tickvals)),
 	)
+end
+
+# The three title texts of a mark's `titles` entry (empty where absent).
+function _s3_mark_titles(value)
+	(value isa AbstractVector || value isa Tuple) && length(value) == 3 || return ("", "", "")
+	return ntuple(i -> value[i] isa AbstractString ? String(value[i]) : "", 3)
+end
+
+# The tick values of a mark's `tickvals` entry (none where absent).
+function _s3_mark_tickvals(value)
+	(value isa AbstractVector || value isa Tuple) && length(value) == 3 || return ((), (), ())
+	return ntuple(3) do i
+		list = value[i]
+		((list isa AbstractVector || list isa Tuple) && all(v -> _s3_is_real(v) && isfinite(v), list)) ?
+			Tuple(Float64(v) for v in list) : ()
+	end
 end
 
 # Write `mark` on scene `key` of `layout`; returns whether it changed.
 function _s3_write_mark!(layout::Layout, key::Symbol, mark::_S3Mark)
-	_s3_mark(get(layout.fields, key, nothing)) === mark && return false
+	_s3_mark(get(layout.fields, key, nothing)) == mark && return false
 	value = attr(
 		auto = mark.auto,
 		zoom = mark.zoom,
@@ -2130,6 +2401,8 @@ function _s3_write_mark!(layout::Layout, key::Symbol, mark::_S3Mark)
 		nticks = collect(mark.nticks),
 		fontsize = collect(mark.font),
 		fontwritten = collect(mark.font_written),
+		titles = collect(mark.titles),
+		tickvals = [collect(t) for t in mark.tickvals],
 	)
 	_merge_scene_layout_attr!(layout, key, attr(; _S3_MARK_KEY => value))
 	return true
@@ -2193,7 +2466,9 @@ end
 # span of 4.25 with 2 ticks gets the step 5 and the single label 0); such a
 # linear axis gets the smallest larger count that labels two ticks, as long
 # as the labels stay apart along the axis (`_s3_cell_tick_count`). `nothing`
-# for a full-size scene or when the camera cannot tell.
+# for a full-size scene none of whose axes is shorter than four ticks' worth
+# (plotly.js's own lower bound; a short axis of a small figure gets the counts
+# too) or when the camera cannot tell.
 const _S3_TICK_SPACING_PX = 40.0
 const _S3_MIN_CELL_TICKS = 2
 const _S3_MAX_AUTO_TICKS = 9
@@ -2202,12 +2477,16 @@ const _S3_MIN_PLOTLY_TICKS = 4
 
 function _s3_auto_nticks(fig, target::_CellTarget)
 	full = target.xdomain[2] - target.xdomain[1] >= 1 - 1e-9 && target.ydomain[2] - target.ydomain[1] >= 1 - 1e-9
-	full && return nothing
 	p = _cmn_plot(fig)
 	box = _s3_drawn_box(p, target.scenekey)
 	box === nothing && return nothing
 	lengths = _s3_axis_pixel_lengths(fig, target, box)
 	lengths === nothing && return nothing
+	# A scene that fills the figure keeps plotly.js's count unless an axis is
+	# so short in px that plotly.js's lower bound of four ticks (and its
+	# canvas-based length, which grows with the export scale) crowds it (a
+	# scene in a single-column figure).
+	full && all(L -> floor(Int, L / _S3_TICK_SPACING_PX) >= _S3_MIN_PLOTLY_TICKS, lengths) && return nothing
 	scene = get(p.layout.fields, target.scenekey, nothing)
 	font = _s3_number_field(_cmn_mapping_get(p.layout.fields, :font), :size, _S3_DEFAULT_FONT_SIZE; positive = true)
 	return map(1:3) do d
@@ -2307,11 +2586,12 @@ function _s3_finish_ticks!(fig, target::_CellTarget, state::_S3SceneState)
 	p = _cmn_plot(fig)
 	scene = get(p.layout.fields, target.scenekey, nothing)
 	updates = Dict{Symbol, Any}()
-	recorded = collect(something(_s3_mark(scene), _S3_NEW_MARK).nticks)
+	mark = something(_s3_mark(scene), _S3_NEW_MARK)
+	recorded = collect(mark.nticks)
 	for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
 		state.auto_ticks[d] || continue
 		fields = _cmn_mapping_get(scene, axis)
-		_s3_user_ticks(fields) && continue
+		(_s3_user_ticks(fields) && !_s3_ours_tickvals(mark, d, fields)) && continue
 		recorded[d] = counts[d]
 		_cmn_mapping_get(fields, :nticks) == counts[d] && continue
 		updates[axis] = attr(nticks = counts[d])
@@ -2355,6 +2635,307 @@ function _s3_finish_scene!(fig, target::_CellTarget, state::_S3SceneState; frame
 	return nothing
 end
 
+# ── Corner tick labels ───────────────────────────────────────────────────────
+#
+# Two axes whose label edges meet at a box corner each end a tick there, and
+# the two tick labels can lie on each other (the z tick "-1" on the x tick
+# "-0.5" at the bottom-left corner of a radiation pattern). Where the end tick
+# labels of two axes of the framed scene (linear axes with automatic ticks)
+# intersect, `_s3_trim_corner_ticks!` writes the tick values of the axis with
+# more ticks, as the multiples of plotly.js's step `_s3_plotly_tick_step`
+# inside its range for the tick count the 40 px rule gives, without that end
+# tick; the written values are recorded in the scene's mark (`tickvals`) and
+# are PlotlySupply's as long as they equal the record: the next pass starts
+# from the automatic ticks again, so data or size changes never leave a
+# stale trim, and a tick placement of the user's is never touched.
+
+# Whether the tick values of axis `d` (layout entry `fields`) are the ones
+# `_s3_trim_corner_ticks!` wrote (the mark's record).
+function _s3_ours_tickvals(mark::_S3Mark, d::Int, fields)
+	record = mark.tickvals[d]
+	current = _cmn_mapping_get(fields, :tickvals)
+	return !isempty(record) && current isa AbstractVector && length(current) == length(record) &&
+		all(i -> current[i] == record[i], eachindex(record))
+end
+
+# The ticks plotly.js's step puts inside `range` (ascending) for `count`.
+function _s3_nice_ticks(range, count::Int)
+	lo, hi = Float64(range[1]), Float64(range[2])
+	(isfinite(lo) && isfinite(hi) && hi > lo) || return (Float64[], 0.0)
+	step = _s3_plotly_tick_step(hi - lo, max(count, 1))
+	first_index = ceil(Int, lo / step - 1e-9)
+	last_index = floor(Int, hi / step + 1e-9)
+	return [round(k * step; sigdigits = 12) for k in first_index:last_index], step
+end
+
+# `(lo, hi, chars)` of the tick labels at `values` (ascending, step `step`) on
+# an axis with `range`: the `_s3_tick_extent` triple.
+function _s3_ticks_extent(values, step::Float64, range)
+	isempty(values) && return (0.5, 0.5, 0)
+	span = range[2] - range[1]
+	lo, hi = (values[1] - range[1]) / span, (values[end] - range[1]) / span
+	chars = max(_s3_tick_text_chars(values[1], step), _s3_tick_text_chars(values[end], step))
+	return (clamp(lo, 0.0, 1.0), clamp(hi, 0.0, 1.0), chars)
+end
+
+function _s3_trim_corner_ticks!(p::Plot, target::_CellTarget)
+	key = target.scenekey
+	layout = p.layout
+	scene = get(layout.fields, key, nothing)
+	camera = _cmn_mapping_get(scene, :camera)
+	_cmn_mapping_get(_cmn_mapping_get(camera, :projection), :type) == "orthographic" && return false
+	box = _s3_drawn_box(p, key)
+	box === nothing && return false
+	mark = something(_s3_mark(scene), _S3_NEW_MARK)
+	eye_value = _cmn_mapping_get(camera, :eye)
+	eye_value === nothing && return false
+	center = _s3_vector3(_cmn_mapping_get(camera, :center))
+	offset = _s3_vector3(eye_value, NaN) .- center
+	distance = _s3_norm(offset)
+	(isfinite(distance) && distance > 0) || return false
+	frame = _s3_camera_frame(offset ./ distance, _s3_camera_up(camera))
+	frame === nothing && return false
+	axes = (:xaxis, :yaxis, :zaxis)
+	lengths = _s3_axis_pixel_lengths(p, target, box)
+	lengths === nothing && return false
+	values = Vector{Union{Nothing, Vector{Float64}}}(nothing, 3)
+	steps = zeros(3)
+	ranges = Vector{Any}(nothing, 3)
+	for d in 1:3
+		fields = _cmn_mapping_get(scene, axes[d])
+		(_s3_user_ticks(fields) && !_s3_ours_tickvals(mark, d, fields)) && continue
+		_cmn_mapping_get(fields, :type) in (nothing, "-", "linear") || continue
+		(_cmn_mapping_get(fields, :visible) === false || _cmn_mapping_get(fields, :showticklabels) === false) && continue
+		range = _s3_axis_range(p, key, d, fields)
+		(range === nothing || !(range[1] < range[2])) && continue
+		nticks = _cmn_mapping_get(fields, :nticks)
+		count = (_s3_is_real(nticks) && isinteger(nticks) && nticks >= 1) ? Int(nticks) :
+			clamp(floor(Int, lengths[d] / _S3_TICK_SPACING_PX), _S3_MIN_PLOTLY_TICKS, _S3_MAX_AUTO_TICKS)
+		list, step = _s3_nice_ticks(range, count)
+		length(list) >= 2 || continue
+		values[d], steps[d], ranges[d] = list, step, range
+	end
+	trimmed = Set{Int}()
+	width, height = _s3_viewport(p, target)
+	spans = _s3_scene_spans(p, key)
+	for _ in 1:6
+		overrides = Dict{Int, NTuple{3, Any}}(d => _s3_ticks_extent(values[d], steps[d], ranges[d]) for d in 1:3 if values[d] !== nothing)
+		length(overrides) >= 2 || break
+		labels = _s3_axis_labels(p, key; tick_override = overrides)
+		_, quads, tags, _ = _s3_label_layout_tagged(box, Tuple(center), frame, distance, width, height, labels, spans)
+		is_tick(t) = tags[t][2] in (:tick_lo, :tick_hi)
+		hit = nothing
+		for i in eachindex(quads), j in (i + 1):length(quads)
+			(tags[i][1] != tags[j][1] && is_tick(i) && is_tick(j) &&
+				_s3_quads_intersect(quads[i], quads[j]; tolerance = _S3_LABEL_TOUCH_PX)) || continue
+			hit = (i, j)
+			break
+		end
+		hit === nothing && break
+		choices = [t for t in hit if values[tags[t][1]] !== nothing && length(values[tags[t][1]]) >= 3]
+		isempty(choices) && break
+		pick = argmax(t -> (length(values[tags[t][1]]), tags[t][1]), choices)
+		d = tags[pick][1]
+		tags[pick][2] == :tick_lo ? popfirst!(values[d]) : pop!(values[d])
+		push!(trimmed, d)
+	end
+	wrote = false
+	new_marks = collect(Tuple{Vararg{Float64}}, mark.tickvals)
+	updates = Dict{Symbol, Any}()
+	for d in 1:3
+		fields = _cmn_mapping_get(scene, axes[d])
+		current = _cmn_mapping_get(fields, :tickvals)
+		same(list) = current isa AbstractVector && length(current) == length(list) && all(i -> current[i] == list[i], eachindex(list))
+		if d in trimmed
+			same(values[d]) || (updates[axes[d]] = attr(tickvals = values[d]))
+			new_marks[d] = Tuple(values[d])
+		elseif !isempty(mark.tickvals[d])
+			# Ours from an earlier pass and no longer needed (or replaced by the
+			# user): the automatic ticks again.
+			if same(mark.tickvals[d])
+				_cmn_mapping_delete!(fields, (:tickvals,))
+				wrote = true
+			end
+			new_marks[d] = ()
+		end
+	end
+	isempty(updates) || (_merge_scene_layout_attr!(layout, key, attr(; updates...)); wrote = true)
+	wrote |= _s3_write_mark!(layout, key, _s3_marked(get(layout.fields, key, nothing); tickvals = Tuple(new_marks)))
+	return wrote
+end
+
+# ── Label pad choice ─────────────────────────────────────────────────────────
+#
+# gl-axes's constant pads (18 and 30 units, about 22 and 36 px) are made for
+# one-line labels in a large scene; in a grid cell they cost most of the
+# viewport. `_s3_pad_candidates` lists smaller pads, from the least that holds
+# one tick label's half length (the labels are pushed along the axis they
+# run along) and a title line past it, to the constants; `_s3_fit_with_pads`
+# frames the scene with each in turn and keeps the first whose axis titles
+# touch no other label, falling back to the one with the fewest collisions.
+# One unit is 1/(2 tan(fovy/2)) px at the depth of the scene centre.
+const _S3_PAD_UNIT_PX = 1 / (2 * tan(_S3_HALF_FOVY))
+const _S3_PAD_GAP_PX = 3.0
+const _S3_PAD_STEPS = (1.0, 1.4, 2.0, 2.8)
+# Overlap (px) between two label rectangles that still counts as apart.
+const _S3_LABEL_TOUCH_PX = 1.0
+
+function _s3_pad_candidates(labels)
+	tick_half = 0.0
+	title_half = 0.0
+	for label in labels
+		label.visible || continue
+		label.ticks_shown && (tick_half = max(tick_half, 0.5 * label.tick_chars * _S3_CHAR_EM * label.tick_size))
+		title_half = max(title_half, 0.5 * label.title_size * (1 + _S3_LINE_EM * (label.title_lines - 1)))
+	end
+	tick_px = tick_half + _S3_PAD_GAP_PX
+	title_px = tick_half + title_half + 2 * _S3_PAD_GAP_PX
+	tp0, lp0 = tick_px / _S3_PAD_UNIT_PX, title_px / _S3_PAD_UNIT_PX
+	out = NTuple{2, Float64}[]
+	for m in _S3_PAD_STEPS
+		pads = (min(m * tp0, _S3_GL_TICK_PAD), min(m * lp0, _S3_GL_LABEL_PAD))
+		pads = (round(pads[1]; digits = 3), round(pads[2]; digits = 3))
+		(isempty(out) || pads != out[end]) && push!(out, pads)
+		pads == _S3_GL_DEFAULT_PADS && return out
+	end
+	push!(out, _S3_GL_DEFAULT_PADS)
+	return out
+end
+
+# Number of pairs of label rectangles of the drawing at camera centre `c`,
+# distance `distance`, that overlap where one of them is an axis title.
+function _s3_title_collisions(box, c, frame, distance::Float64, width::Float64, height::Float64, labels, spans; own::Bool = false)
+	_, quads, tags, _ = _s3_label_layout_tagged(box, c, frame, distance, width, height, labels, spans; own = own)
+	count = 0
+	for i in eachindex(quads), j in (i + 1):length(quads)
+		(tags[i][2] == :title || tags[j][2] == :title) || continue
+		_s3_quads_intersect(quads[i], quads[j]; tolerance = _S3_LABEL_TOUCH_PX) && (count += 1)
+	end
+	return count
+end
+
+# `(distance, camera centre, pads, own)` of `_s3_export_camera` with the best of
+# the pads of `_s3_pad_candidates` (see above); when every one of them leaves
+# titles colliding, the smallest tick pad with the titles drawn by PlotlySupply
+# (`own`, see "Axis titles drawn by PlotlySupply") if that collides less. `up`
+# parallel to `direction` has no label model: the constants.
+function _s3_fit_with_pads(fig, target::_CellTarget, box, direction, up; center, pan::Bool, zoom::Float64 = 1.0)
+	frame = _s3_camera_frame(direction, up)
+	if frame === nothing
+		distance, c = _s3_export_camera(fig, target, box, direction, up; center, pan, zoom, pads = _S3_GL_DEFAULT_PADS)
+		return distance, c, _S3_GL_DEFAULT_PADS, false
+	end
+	p = _cmn_plot(fig)
+	width, height = _s3_viewport(fig, target)
+	spans = _s3_scene_spans(p, target.scenekey)
+	candidates = _s3_pad_candidates(_s3_axis_labels(p, target.scenekey; pads = _S3_GL_DEFAULT_PADS))
+	best = nothing
+	for pads in candidates
+		distance, c = _s3_export_camera(fig, target, box, direction, up; center, pan, zoom, pads)
+		labels = _s3_axis_labels(p, target.scenekey; pads)
+		collisions = _s3_title_collisions(box, c, frame, distance, width, height, labels, spans)
+		(best === nothing || collisions < best[1]) && (best = (collisions, distance, c, pads, false))
+		collisions == 0 && break
+	end
+	if best[1] > 0
+		own_pads = (candidates[1][1], _S3_GL_LABEL_PAD)
+		distance, c = _s3_export_camera(fig, target, box, direction, up; center, pan, zoom, pads = own_pads, own = true)
+		labels = _s3_axis_labels(p, target.scenekey; pads = own_pads)
+		collisions = _s3_title_collisions(box, c, frame, distance, width, height, labels, spans; own = true)
+		collisions < best[1] && (best = (collisions, distance, c, own_pads, true))
+	end
+	return best[2], best[3], best[4], best[5]
+end
+
+# Write the titles of the scene as the fit at (`look_at`, `distance`) decided
+# (`own`: drawn by PlotlySupply). Returns whether the layout changed.
+function _s3_set_titles!(p::Plot, target::_CellTarget, box, direction, up, look_at, distance::Float64, pads, own::Bool)
+	labels = _s3_axis_labels(p, target.scenekey; pads = pads)
+	placed = nothing
+	frame = own ? _s3_camera_frame(direction, up) : nothing
+	if frame !== nothing
+		width, height = _s3_viewport(p, target)
+		_, _, _, placed = _s3_label_layout_tagged(box, look_at, frame, distance, width, height, labels,
+			_s3_scene_spans(p, target.scenekey); own = true)
+	end
+	return _s3_apply_titles!(p, target, labels, placed)
+end
+
+# Make the titles of scene `target` as `placed` says: the `_S3Title`s PlotlySupply draws as annotations (the scene's own titles are replaced by `_S3_TITLE_HIDDEN`, their text kept in the mark), or, with `placed === nothing`, the scene's own titles (restored from the mark; annotations removed). `labels` are the scene's `_s3_axis_labels`. A title the user changed since (its text is no longer `_S3_TITLE_HIDDEN`) is theirs and shown as it is. Returns whether the layout changed.
+function _s3_apply_titles!(p::Plot, target::_CellTarget, labels, placed)
+	key = target.scenekey
+	layout = p.layout
+	scene = get(layout.fields, key, nothing)
+	mark = something(_s3_mark(scene), _S3_NEW_MARK)
+	axes = (:xaxis, :yaxis, :zaxis)
+	letters = ("x", "y", "z")
+	mine = Dict{Int, _S3Title}()
+	placed === nothing || foreach(t -> mine[t.axis] = t, placed)
+	titles = ["", "", ""]
+	updates = Dict{Symbol, Any}()
+	fonts = Vector{Any}(nothing, 3)
+	for d in 1:3
+		fields = _cmn_mapping_get(scene, axes[d])
+		title = _cmn_mapping_get(fields, :title)
+		raw = title isa AbstractString ? title : _cmn_mapping_get(title, :text)
+		fonts[d] = title isa AbstractString ? nothing : _cmn_mapping_get(title, :font)
+		if haskey(mine, d)
+			titles[d] = labels[d].title_text
+			raw == _S3_TITLE_HIDDEN || (updates[axes[d]] = attr(title = attr(text = _S3_TITLE_HIDDEN)))
+		elseif raw == _S3_TITLE_HIDDEN && !isempty(mark.titles[d])
+			updates[axes[d]] = attr(title = attr(text = mark.titles[d]))
+		end
+	end
+	prefix = string("plotlysupply:scene3d:", key, ":")
+	existing = get(layout.fields, :annotations, nothing)
+	kept = Any[]
+	old = Any[]
+	if existing isa AbstractVector
+		for item in existing
+			name = _cmn_mapping_get(item, :name)
+			push!((name isa AbstractString && startswith(name, prefix)) ? old : kept, item)
+		end
+	end
+	new = Any[]
+	if !isempty(mine)
+		area = _s3_plot_area(p)
+		width, height = _s3_viewport(p, target)
+		plot_w = max(area.width - area.l - area.r, 1.0)
+		plot_h = max(area.height - area.t - area.b, 1.0)
+		cx = area.l + plot_w * target.xdomain[1] + width / 2
+		cy = area.t + plot_h * (1 - target.ydomain[2]) + height / 2
+		for t in placed
+			font = Dict{Symbol, Any}(:size => round(t.size; digits = 3))
+			for name in (:color, :family)
+				value = _cmn_mapping_get(fonts[t.axis], name)
+				value isa AbstractString && (font[name] = String(value))
+			end
+			push!(new, Dict{Symbol, Any}(
+				:name => string(prefix, "title:", letters[t.axis]),
+				:xref => "paper", :yref => "paper",
+				:x => round((cx + t.center[1] - area.l) / plot_w; digits = 6),
+				:y => round(1 - (cy - t.center[2] - area.t) / plot_h; digits = 6),
+				:text => t.text,
+				:showarrow => false,
+				:xanchor => "center", :yanchor => "middle", :align => "center",
+				:textangle => round(-t.angle; digits = 2),
+				:font => font,
+			))
+		end
+	end
+	changed = !isempty(updates)
+	isempty(updates) || _merge_scene_layout_attr!(layout, key, attr(; updates...))
+	if !(length(old) == length(new) && all(i -> old[i] == new[i], eachindex(new)))
+		combined = vcat(kept, new)
+		isempty(combined) ? delete!(layout.fields, :annotations) : (layout.fields[:annotations] = combined)
+		changed = true
+	end
+	marked = _s3_write_mark!(layout, key, _s3_marked(get(layout.fields, key, nothing); titles = Tuple(titles)))
+	return changed | marked
+end
+
+
+
 # Move a perspective camera to the automatic distance for the scene's box and
 # viewport, keeping its direction (plotly's default direction without an eye)
 # and up vector, and record it in the scene's mark as automatic. Without
@@ -2388,9 +2969,12 @@ function _s3_frame_camera!(fig, target::_CellTarget; fit_labels::Bool = false, p
 	look_at = Tuple(center)
 	if fit_labels
 		start = owned_center ? _S3_ORIGIN : look_at
-		distance, look_at = _s3_export_camera(fig, target, box, direction, up;
+		distance, look_at, pads, own = _s3_fit_with_pads(fig, target, box, direction, up;
 			center = start, pan = pan && owned_center, zoom = mark.zoom)
+		pads_written = _s3_write_pads!(p.layout, key, pads)
+		pads_written |= _s3_set_titles!(p, target, box, direction, up, look_at, distance, pads, own)
 	else
+		pads_written = false
 		distance = _s3_auto_distance(fig, target, box, direction, up, mark.zoom; center = center)
 	end
 	position = look_at .+ distance .* direction
@@ -2398,8 +2982,8 @@ function _s3_frame_camera!(fig, target::_CellTarget; fit_labels::Bool = false, p
 	same_eye = eye !== nothing && isapprox(_s3_vector3(eye, NaN), collect(position); rtol = 1e-6)
 	if !moved && same_eye
 		# Unchanged: only make sure the mark records the camera as it is.
-		return _s3_write_mark!(p.layout, key, _s3_marked(scene; auto = true,
-			pan = owned_center, eye = Tuple(_s3_vector3(eye, NaN)), center = Tuple(center)))
+		return _s3_write_mark!(p.layout, key, _s3_marked(get(p.layout.fields, key, nothing); auto = true,
+			pan = owned_center, eye = Tuple(_s3_vector3(eye, NaN)), center = Tuple(center))) | pads_written
 	end
 	fields = Dict{Symbol, Any}(:eye => attr(x = position[1], y = position[2], z = position[3]))
 	at_origin = all(iszero, look_at)
@@ -2487,6 +3071,13 @@ function _s3_frame_scene!(p::Plot, key::Symbol, pan::Bool)
 	wrote = _s3_compensate_tick_fonts!(p, key)
 	target = _s3_layout_target(p, key)
 	state = _s3_scene_state(p, target)
+	if !state.auto_camera
+		# Titles drawn by PlotlySupply belong to the camera it framed: a camera
+		# of the user's gets the scene's own titles back.
+		mark = _s3_mark(get(p.layout.fields, key, nothing))
+		(mark !== nothing && any(!isempty, mark.titles)) &&
+			(wrote |= _s3_apply_titles!(p, target, _s3_axis_labels(p, key), nothing))
+	end
 	any(state.auto_ticks) || state.auto_camera || return wrote
 	# The framing places the tick labels of the current counts, and the counts
 	# follow the framing: repeat until neither changes (two rounds in
@@ -2494,6 +3085,7 @@ function _s3_frame_scene!(p::Plot, key::Symbol, pan::Bool)
 	for _ in 1:_S3_REFIT_ROUNDS
 		changed = state.auto_camera && _s3_frame_camera!(p, target; fit_labels = true, pan = pan)
 		changed |= any(state.auto_ticks) && _s3_finish_ticks!(p, target, state)
+		changed |= state.auto_camera && _s3_trim_corner_ticks!(p, target)
 		changed || break
 		wrote = true
 	end

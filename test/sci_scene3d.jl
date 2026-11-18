@@ -732,7 +732,9 @@ _t3_centred(fig, key::Symbol = :scene) = maximum(abs, _t3_drawing(fig, key).mid)
 			  PlotlySupply._blend_over(PlotlySupply._default_trace_color(sf.plot, 4), 0.5, "#ff0000"; who = "test")
 		# Scene keywords go to the target cell's scene only (the first scene's
 		# camera is re-framed for the plot area the new colorbar leaves).
-		unframed(key) = Dict(k => PlotlyBase.JSON.json(v) for (k, v) in _t3_scene(sf, key) if !(k in (:camera, :plotlysupply)))
+		# (the tick counts of the axes follow the framing, so they are framing too)
+		unframed(key) = Dict(k => PlotlyBase.JSON.json(k in (:xaxis, :yaxis, :zaxis) ? Dict(a => b for (a, b) in _t3_fields(v) if a !== :nticks) : v)
+			for (k, v) in _t3_scene(sf, key) if !(k in (:camera, :plotlysupply)))
 		before1 = unframed(:scene)
 		plot_surface!(sf, rand(3, 3); row = 1, col = 2, xlabel = "\$x_1\$", zrange = [0, 2], perspective = false)
 		@test _t3_fields(_t3_axis(sf, :xaxis, :scene2)[:title])[:text] == "x<sub>1</sub>"
