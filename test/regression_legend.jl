@@ -281,7 +281,7 @@ using Test, PlotlySupply
 		plan = plan_of(sf)
 		line = slot_of(plan, "line:xaxis2")
 		raise = raise_of(plan, "line:xaxis2", "plotlysupply:title:1:2")
-		@test line.offset + raise >= PS._LT_TICK_REACH * 12 + 1 - 1e-9
+		@test line.offset + raise >= PS._LT_TICK_REACH * PS._lt_y_tick_font(plan, plan.areas[:xaxis2], :left) + 1 - 1e-9
 		@test ann(sf, "plotlysupply:title:1:2")[:y] ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP + raise, :top)
 		@test line.offset == PS._ROOM_GAP
 		@test ann(sf, "plotlysupply:title:1:2")[:yshift] == PS._TEXT_PANEL_GAP
@@ -311,7 +311,7 @@ using Test, PlotlySupply
 		leg, line = slot_of(plan, "legend:legend2"), slot_of(plan, "line:xaxis2")
 		# now wider than the cell, the legend rises clear of the top y tick label
 		lift = decor(plan, "legend:legend2").data.lift
-		@test lift > 0 && leg.offset + lift >= PS._LT_TICK_REACH * 12 + 1 - 1e-9
+		@test lift > 0 && leg.offset + lift >= PS._LT_TICK_REACH * PS._lt_y_tick_font(plan, plan.areas[:xaxis2], :left) + 1 - 1e-9
 		@test leg.px ≈ PS._legend_box_height(pl(sf), "legend2") + lift
 		@test lg(sf, :legend2)[:y] ≈ PS._lt_outside(plan, leg.edge, leg.offset + lift, :top)
 		@test line.offset ≈ leg.offset + leg.px + PS._ROOM_GAP
@@ -801,8 +801,9 @@ using Test, PlotlySupply
 
 	@testset "D12: what reaches past a narrow cell clears its top y tick label; labels clear wide titles" begin
 		xs = collect(range(0, 1; length = 20))
-		reach = PS._LT_TICK_REACH * 12 + 1
 		size = (520, 260)
+		# the tick label font of the figures below (the default style's)
+		reach_of(plan, key) = PS._LT_TICK_REACH * PS._lt_y_tick_font(plan, plan.areas[key], :left) + 1
 		# a label beside a left-aligned title, over the y tick labels of cell 1;
 		# a centred title wider than cell 2, its label beside the title's end
 		sf = subplots(1, 2; sync = false)
@@ -814,9 +815,9 @@ using Test, PlotlySupply
 		panel_labels!(sf)
 		plan = PS._room_plan(sf; size = size)
 		lines = Dict(d.key => d for d in PS._lt_decorations(plan))
-		for key in ("line:xaxis", "line:xaxis2")
+		for (key, area) in (("line:xaxis", :xaxis), ("line:xaxis2", :xaxis2))
 			line = slot_of(plan, key)
-			@test all(entry -> line.offset + entry[3] >= reach - 1e-9, lines[key].data)
+			@test all(entry -> line.offset + entry[3] >= reach_of(plan, area) - 1e-9, lines[key].data)
 		end
 		b = export_boxes(sf; width = size[1], height = size[2])
 		@test length(b["ann"]) == 4
@@ -834,7 +835,7 @@ using Test, PlotlySupply
 		legend = only(d for d in PS._lt_decorations(plan) if d.key == "legend:legend3")
 		@test legend.role === :cell_legend
 		@test legend.data.lift > 0
-		@test slot_of(plan, legend.key).offset + legend.data.lift >= reach - 1e-9
+		@test slot_of(plan, legend.key).offset + legend.data.lift >= reach_of(plan, :xaxis3) - 1e-9
 		b = export_boxes(sl; width = size[1], height = size[2])
 		@test length(b["legends"]) == 1
 		@test layout_defects(b) == String[]

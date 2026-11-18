@@ -2774,11 +2774,7 @@ function _room_solve!(plan::_RoomPlan)
 			a.writable[side] = abs(cur_edge - ref_edge) <= 1e-9 || _room_evidence(plan, a, side) ||
 				_room_label_evidence(plan, a, side)
 			sign = side === :left || side === :bottom ? 1.0 : -1.0
-			want = ref_edge + sign * a.room[side] / _room_px(plan, side)
-			# A side without requests shrunk earlier (by us or the user) is
-			# only shrunk further, when its axis labels need more room.
-			grow = !haskey(by_side, (key, side)) && sign * (want - cur_edge) > 1e-9
-			edges[side] = a.writable[side] || grow ? want : cur_edge
+			edges[side] = a.writable[side] ? ref_edge + sign * a.room[side] / _room_px(plan, side) : cur_edge
 		end
 		# A domain the user set never inverts.
 		(edges[:left] < edges[:right] && edges[:bottom] < edges[:top]) || continue

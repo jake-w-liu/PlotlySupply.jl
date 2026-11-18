@@ -603,7 +603,7 @@ using Test, PlotlySupply
 		line = PS._room_slot(plan, PS._LT_OWNER, "line:xaxis")
 		entry = only(e for e in only(d for d in PS._lt_decorations(plan) if d.key == "line:xaxis").data
 			if e[1] == "plotlysupply:panel_label:1:1")
-		@test line.offset + entry[3] >= PS._LT_TICK_REACH * 12 + 1 - 1e-9
+		@test line.offset + entry[3] >= PS._LT_TICK_REACH * PS._lt_y_tick_font(plan, plan.areas[:xaxis], :left) + 1 - 1e-9
 		@test label(1, 1)[:x] == t11.xdomain[1] &&
 			  label(1, 1)[:y] ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP + entry[3], :top)
 		@test label(1, 1)[:xanchor] == "right" && label(1, 1)[:xshift] == -PS._TEXT_PANEL_GAP

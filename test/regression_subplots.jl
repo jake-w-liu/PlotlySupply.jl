@@ -1707,11 +1707,12 @@ end
 		# Process-wide setters take no figure.
 		process_wide = Set(["register_style!", "set_default_legend_position!", "set_default_mathtext!",
 			"set_default_style!", "set_default_template!"])
-		# Known defects in other tracks' code (cross-requested Z17, Z18, Z19,
-		# Z21, Z22): these raise a MethodError for `row`/`col` instead of an
-		# ArgumentError naming the function. `@test_broken` turns into an error
-		# once they are fixed; then move the name out of this set.
-		cross_requested = Set(["panel_labels!", "subplot_legends!", "tight_layout!"])
+		# Known defects in other tracks' code would be listed here: they raise a
+		# MethodError for `row`/`col` instead of an ArgumentError naming the
+		# function, as a `@test_broken` that turns into an error once fixed.
+		# (Z17, Z18 and Z21, `panel_labels!`, `subplot_legends!` and
+		# `tight_layout!`, are fixed: they are tested like the others.)
+		cross_requested = Set{String}()
 		image = attr(source="data:image/png;base64,iVBORw0KGgo=", x=0, y=1, sizex=0.2, sizey=0.2)
 		geojson = Dict("type" => "FeatureCollection", "features" => [Dict("type" => "Feature", "id" => "A",
 			"properties" => Dict(), "geometry" => Dict("type" => "Polygon",
