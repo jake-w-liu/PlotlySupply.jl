@@ -202,20 +202,23 @@ function _apply_figure_fontsize!(fig, who::AbstractString, fontsize)
 	return nothing
 end
 
-# Figure title; an empty title leaves the layout untouched. A title without a
-# placement yet gets the one `title!` gives (Z28: centred over the plot area,
-# `_TEXT_TITLE_TOP_PAD` px below the top edge of the figure, `automargin`);
-# a placed title (`title!`, `secondary_xaxis!`, `relayout!`) keeps it and only
-# its text changes.
+# Figure title of a constructor's or mutator's `title` keyword. An empty title
+# leaves the layout untouched. The label is converted first (`_label`), so an
+# invalid label raises the converter's own `ArgumentError` before anything is
+# written. A title without a placement yet gets the one `title!` gives (Z28:
+# centred over the plot area, `xref = "paper"`, pinned below the top of the
+# figure with `yref = "container"`, `yanchor = "top"` and `automargin`, so the
+# plot area moves down instead of overlapping it), not plotly's template
+# position at the left; a title that is already placed (`title!`,
+# `secondary_xaxis!`, `relayout!`) keeps its placement and only its text
+# changes.
 function _apply_figure_title!(fig, title::AbstractString)
 	isempty(title) && return nothing
+	label = _label(title)
 	current = get(_cmn_layout(fig).fields, :title, nothing)
 	placed = any(key -> _cmn_mapping_get(current, key) !== nothing, (:x, :xanchor, :xref, :y, :yanchor, :yref))
-	placed && (relayout!(fig, title_text = _label(title)); return nothing)
-	relayout!(fig; title_text = _label(title), title_x = 0.5, title_xanchor = "center",
-		title_xref = "paper", title_yref = "container", title_y = 1, title_yanchor = "top",
-		title_automargin = true, title_pad_t = _TEXT_TITLE_TOP_PAD, title_pad_l = 0, title_pad_r = 0)
-	_legend_stack!(_cmn_plot(fig))
+	placed && (relayout!(fig, title_text = label); return nothing)
+	_text_figure_title!(fig, title, :center, 0.0, false, (0, 0))
 	return nothing
 end
 
@@ -371,12 +374,15 @@ lists its group). `value` is in the axis's range units (log10 on a log axis):
   "reversed"` when it was reversed), its range and every one-sided limit of
   the group are removed;
 - `[a, b]`: a fixed range (`autorange = false`; `b < a` flips the axis); the
-  group's one-sided limits are removed;
+  group's one-sided limits are removed, and so is the autorange clip of
+  `_finalize_figure!` (its exact signature, `_fin_sticky_clip`), so the
+  finalizer reads the range as the user's and never resets it;
 - `[a, nothing]` / `[nothing, b]`: a one-sided limit (D11) fixing the start /
   end of the axis: `autorange = true` (or `"reversed"`), and on every member
   `autorangeoptions.minallowed` / `maxallowed` (the start is the maximum of a
-  reversed axis) in place of earlier limits and autorange clips (plotly.js
-  does not share `autorangeoptions` across a `matches` group).
+  reversed axis) in place of earlier limits and of the finalizer's autorange
+  clip (plotly.js does not share `autorangeoptions` across a `matches`
+  group). Other `autorangeoptions` the user set are kept.
 """
 function _write_axis_range!(
 	fig,
@@ -401,10 +407,11 @@ function _write_axis_range!(
 		_cmn_merge_layout_key!(fig, key, Dict{Symbol, Any}(:autorange => auto_value))
 		_cmn_delete_layout_fields!(fig, key, (:range,))
 		for member in members
+			_drop_finalizer_clip!(fig, member)
 			_cmn_delete_layout_fields!(
 				fig,
 				member,
-				(_AXIS_LIMIT_OPTION_KEYS..., _AXIS_CLIP_OPTION_KEYS...);
+				_AXIS_LIMIT_OPTION_KEYS;
 				nested = :autorangeoptions,
 			)
 			_cmn_merge_layout_key!(
@@ -421,17 +428,84 @@ function _write_axis_range!(
 			Dict{Symbol, Any}(:range => Any[value[1], value[2]], :autorange => false),
 		)
 		for member in members
+			_drop_finalizer_clip!(fig, member)
 			_delete_axis_options!(fig, member, _AXIS_LIMIT_OPTION_KEYS)
 		end
 	end
 	return nothing
 end
 
+# Remove the autorange clip `_finalize_figure!` wrote on axis `key` (only its
+# exact signature, `_fin_sticky_clip`; user `autorangeoptions` stay). A clip
+# left next to a one-sided limit would freeze the open end at the data extent
+# of the moment; next to a fixed range equal to it, the finalizer would read
+# the range as its own pin and could reset it.
+function _drop_finalizer_clip!(fig, key::Symbol)
+	entry = get(_cmn_layout(fig).fields, key, nothing)
+	_fin_sticky_clip(entry) === nothing && return nothing
+	_delete_axis_options!(fig, key, _AXIS_CLIP_OPTION_KEYS)
+	return nothing
+end
+
+# The interval (data units, also on a log axis; `log_axis` makes a clip or
+# field extent that is not positive unusable) that axes `members` (one
+# `matches` group) show when plotly autoranges them, and whether it is still
+# to be widened by the default margin:
+# - the autorange clip on `key` (`_finalize_figure!`'s sticky field range or a
+#   user clip), exact;
+# - else, for a group the finalizer would pin (a tight field, no loose field,
+#   every extent computed: `_fin_collect_axes`), the extent it would clip to
+#   (field edges, not cell centres; overlays padded, `_fin_padded_extent`),
+#   exact;
+# - else the data extent of the group (`_axis_data_extent`), to be widened;
+# - `nothing` when the group has no data.
+function _axis_group_view_extent(fig, key::Symbol, members, log_axis::Bool)
+	p = _cmn_plot(fig)
+	layout = p.layout
+	options = _cmn_mapping_get(get(layout.fields, key, nothing), :autorangeoptions)
+	clip_lo = _cmn_mapping_get(options, :clipmin)
+	clip_hi = _cmn_mapping_get(options, :clipmax)
+	if _is_plain_real(clip_lo) && _is_plain_real(clip_hi) && clip_lo < clip_hi &&
+		(!log_axis || clip_lo > 0)
+		return ((Float64(clip_lo), Float64(clip_hi)), false)
+	end
+	accs = _fin_collect_axes(p)
+	acc = _FinAxisAcc()
+	for member in members
+		macc = get(accs, member, nothing)
+		macc === nothing && continue
+		acc.tight |= macc.tight
+		acc.loose |= macc.loose
+		acc.unsupported |= macc.unsupported
+		acc.lo = min(acc.lo, macc.lo)
+		acc.hi = max(acc.hi, macc.hi)
+		acc.flo = min(acc.flo, macc.flo)
+		acc.fhi = max(acc.fhi, macc.fhi)
+		acc.alo = min(acc.alo, macc.alo)
+		acc.ahi = max(acc.ahi, macc.ahi)
+	end
+	# The same condition and extent as the sticky range of `_fin_sticky_updates!`
+	# (`alo`/`ahi`: fields, overlay anchor points and other overlays, D16).
+	if acc.tight && !acc.loose && !acc.unsupported && isfinite(acc.alo) && isfinite(acc.ahi) &&
+		acc.alo < acc.ahi && (!log_axis || acc.alo > 0)
+		return (_fin_padded_extent(acc, log_axis), false)
+	end
+	lower, upper = Inf, -Inf
+	for member in members
+		e = _axis_data_extent(fig, member)
+		e === nothing && continue
+		lower = min(lower, e[1])
+		upper = max(upper, e[2])
+	end
+	lower <= upper || return (nothing, true)
+	return ((lower, upper), true)
+end
+
 # A one-sided `value` (range units) for axis `key` of group `members`: kept as
 # it is, unless the group is tied by an aspect constraint (see
 # `_axis_aspect_linked`), where it becomes a full range whose open end comes
-# from the data when the call runs: the autorange clip `_finalize_figure!`
-# keeps on a field axis (field edges united with the other data), else the
+# from the data when the call runs (`_axis_group_view_extent`): the autorange
+# clip of a field axis or the field edges united with the other data, else the
 # data extent of the group widened by 5 % of its span on that side
 # (matplotlib's default axes margin, so markers at the edge stay whole).
 function _resolve_constrained_limit(fig, key::Symbol, value, reversed::Bool, members, who::AbstractString, name::AbstractString)
@@ -439,30 +513,12 @@ function _resolve_constrained_limit(fig, key::Symbol, value, reversed::Bool, mem
 	any(member -> _axis_aspect_linked(p, member), members) || return value
 	layout = p.layout
 	log_axis = _axis_type(layout, key) == "log"
-	options = _cmn_mapping_get(get(layout.fields, key, nothing), :autorangeoptions)
-	clip_lo = _cmn_mapping_get(options, :clipmin)
-	clip_hi = _cmn_mapping_get(options, :clipmax)
-	padded = !(_is_plain_real(clip_lo) && _is_plain_real(clip_hi) && clip_lo < clip_hi &&
-		(!log_axis || clip_lo > 0))
+	extent, padded = _axis_group_view_extent(fig, key, members, log_axis)
 	# A group holding a field or an image takes the view `_finalize_figure!`
 	# gives it, measured now (field edges, image pixels, overlay pad): a clip
 	# may predate this call's traces, and centres miss the half cell (Z53).
 	view = _field2d_view_extent(fig, members, log_axis)
-	view === nothing || (padded = false)
-	extent = if view !== nothing
-		view
-	elseif padded
-		lower, upper = Inf, -Inf
-		for member in members
-			e = _axis_data_extent(fig, member)
-			e === nothing && continue
-			lower = min(lower, e[1])
-			upper = max(upper, e[2])
-		end
-		lower <= upper ? (lower, upper) : nothing
-	else
-		(Float64(clip_lo), Float64(clip_hi))
-	end
+	view === nothing || ((extent, padded) = (view, false))
 	extent === nothing && throw(ArgumentError(
 		"$(who): `$(name)` = $(repr(Tuple(value))) is a one-sided limit on an axis " *
 		"with a locked aspect ratio, where plotly.js cannot autorange one end; the " *
@@ -497,18 +553,16 @@ end
 # A one-sided `value` (range units) whose fixed bound lies beyond every data
 # value already on the axes `members` would show an axis without data (the
 # open end autoranges to the data on the far side of the fixed end, so the
-# axis also flips; render probe p05). That is an ArgumentError. An axis
-# without numeric data yet (or a date axis) is not checked.
+# axis also flips; render probe p05). That is an ArgumentError. The data is
+# what the group shows (`_axis_group_view_extent`: a field reaches its cell
+# edges, not only its cell centres). An axis without numeric data yet (or a
+# date axis) is not checked.
 function _require_limit_meets_data(fig, key::Symbol, value, reversed::Bool, members, who::AbstractString, name::AbstractString)
-	lower, upper = Inf, -Inf
-	for member in members
-		e = _axis_data_extent(fig, member)
-		e === nothing && continue
-		lower = min(lower, e[1])
-		upper = max(upper, e[2])
-	end
-	lower <= upper || return nothing
-	if _axis_type(_cmn_layout(fig), key) == "log"
+	log_axis = _axis_type(_cmn_layout(fig), key) == "log"
+	extent, _ = _axis_group_view_extent(fig, key, members, log_axis)
+	extent === nothing && return nothing
+	lower, upper = extent
+	if log_axis
 		lower, upper = log10(lower), log10(upper)
 	end
 	start, stop = value[1], value[2]
@@ -727,12 +781,31 @@ function _axis_range_store_value(checked, axis_type::AbstractString, who::Abstra
 	return Any[_axis_limit_bound(axis_type, b, who, name) for b in checked]
 end
 
-# `_apply_axis_range!` for any Cartesian axis `key` (e.g. a twin y axis).
-# A one-sided limit `(lo, nothing)` / `(nothing, hi)` (D11) fixes that end of
-# the axis and lets the other end follow the data (see `_write_axis_range!`);
-# on an axis tied by an aspect constraint the open end is taken from the data
-# when the call runs (`_resolve_constrained_limit`). A full range replaces
-# earlier one-sided limits of the axis.
+"""
+	_apply_axis_range_to_key!(fig, key, range, who; name = "range")
+
+THE range encoder of the package (D11, Z38): every Cartesian range a
+constructor keyword (`xrange`/`yrange`), a mutator or `xrange!`/`yrange!`
+sets goes through it. `range` is in DATA units on every axis type, as the
+user gave it: `nothing`/`[0, 0]`/`(nothing, nothing)` leave the axis alone, a
+full range `(lo, hi)` fixes it (`hi < lo` flips it), a one-sided limit
+`(lo, nothing)` / `(nothing, hi)` fixes one end. The bounds are checked
+(`_checked_range`, numbers on linear/log/category axes, positive on a log
+axis) and converted to plotly's range units: log10 on a log axis, epoch
+milliseconds for the fixed bound of a one-sided limit on a date axis (a date
+string there makes plotly.js 2.35.2 fall back to its empty-axis range), the
+0-based position on a category axis.
+
+The write follows `matches`: the range goes to the root of the axis's group
+(the only axis plotly.js reads it from) and one-sided limits to every member.
+A one-sided limit is `autorange = true` (`"reversed"` on a reversed axis)
+with `autorangeoptions.minallowed`/`maxallowed` (`_write_axis_range!`), the
+form that survives `savefig` (plotly.js's native partial ranges do not). On an
+axis tied by an aspect constraint, where plotly.js ignores those options, the
+open end is taken from the data when the call runs and the range is pinned
+(`_resolve_constrained_limit`); a fixed bound beyond all data on the axis is
+an `ArgumentError`. A full range replaces earlier one-sided limits.
+"""
 function _apply_axis_range_to_key!(
 	fig,
 	key::Symbol,
@@ -742,15 +815,25 @@ function _apply_axis_range_to_key!(
 )
 	checked = _checked_range(range, who, name; partial = true)
 	checked === nothing && return nothing
-	axis_type = _axis_type(_plot_layout(fig), key)
+	root = _axes_match_root(fig, key, who)
+	axis_type = _axis_type(_plot_layout(fig), root)
 	_require_range_bound_types(checked, axis_type, who, name)
-	value = _axis_range_store_value(checked, axis_type, who, name)
-	reversed = _axis_is_reversed(fig, key)
+	_write_axis_group_range!(fig, root, _axis_range_store_value(checked, axis_type, who, name), who, name)
+	return nothing
+end
+
+# Write `value` (plotly range units, from `_axis_range_store_value`; `nothing`
+# for an automatic range) on the `matches` group whose root is `root`: the
+# group-aware half of `_apply_axis_range_to_key!`, shared with `xrange!` /
+# `yrange!` (`_axes_range!`), which check and convert the bounds themselves.
+function _write_axis_group_range!(fig, root::Symbol, value, who::AbstractString, name::AbstractString)
+	members = _axes_match_members(fig, root, who)
+	reversed = _axis_is_reversed(fig, root)
 	if _is_one_sided_range(value)
-		_require_limit_meets_data(fig, key, value, reversed, (key,), who, name)
-		value = _resolve_constrained_limit(fig, key, value, reversed, (key,), who, name)
+		_require_limit_meets_data(fig, root, value, reversed, members, who, name)
+		value = _resolve_constrained_limit(fig, root, value, reversed, members, who, name)
 	end
-	_write_axis_range!(fig, key, value; reversed = reversed)
+	_write_axis_range!(fig, root, value; reversed = reversed, members = members)
 	return nothing
 end
 

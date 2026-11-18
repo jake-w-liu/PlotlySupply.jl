@@ -1973,6 +1973,18 @@ function _style_default_figure_size(style::PlotStyle = _active_style())
 end
 
 """
+	_style_log_ticks(style::PlotStyle = _active_style()) -> Symbol
+
+The style's rule for logarithmic axes without a user tick setting (lead
+decision D15, rule 2): `:decades` (decade labels only on an axis spanning two
+decades or more; `:publication` and the journal presets) or `:auto` (plotly's
+adaptive labels). Reads `PlotStyle.log_ticks`; `:auto` while the field does
+not exist. Internal; `_axes_log_tick_updates!` (src/sci/axes.jl) applies it.
+"""
+_style_log_ticks(style::PlotStyle = _active_style()) =
+	hasfield(PlotStyle, :log_ticks) ? getfield(style, :log_ticks) : :auto
+
+"""
 	_style_ink(fig) -> String
 
 Colour of the lines PlotlySupply draws on its own in `fig` (reference lines,
