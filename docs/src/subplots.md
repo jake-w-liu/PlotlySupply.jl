@@ -37,8 +37,47 @@ plot_bar!(sf, 1:100, abs.(randn(100)); row = 2, col = 1)
 xrange!(sf, (0, 101); row = 2, col = 1)   # shared: both rows change
 ```
 
-With `shared_xaxes`/`shared_yaxes`, a range set on any cell is written to the
-axis that owns the shared range, so every cell of the group shows it.
+### Shared axes act as a group
+
+With `shared_xaxes`/`shared_yaxes` the axes of a column or row form a group.
+What you set on any cell applies to the whole group: the axis type (linear or
+log), tick placement and format, tick font and angle, and a range or
+one-sided limit (written on the axis that owns the shared range). This holds
+for the keywords, the axis helpers, `update_xaxes!`/`update_yaxes!` and a
+`relayout!` or `update!` that names a group axis. Secondary y axes are
+excluded.
+
+- An axis title set on a cell whose tick labels are hidden goes to the cell
+  that shows the labels (x: the bottom cell of the column, y: the left cell of
+  the row). Calls that only style a title (`set_fonts!`, `title_font`) never
+  move it; it moves only when the call sets its text.
+- An inset that shares a cell's axis keeps its own tick font and angle.
+- Grid titles (`subplot_titles`, `column_titles`, `row_titles`, `x_title`,
+  `y_title`) are named annotations (`plotlysupply:title:<row>:<col>`, column and row
+  titles `plotlysupply:title!:<row>:<col>:column` / `:row`,
+  `plotlysupply:x_title`, `plotlysupply:y_title`), so `title!(sf, text; row,
+  col)` replaces one instead of adding a second. They go through mathtext
+  (`$...$` works, an unbalanced `$` is an error), follow the active style's
+  title size, and `set_fonts!(sf; title = ...)` restyles them.
+  `column_titles` and `row_titles` need one string per column or row. plotly.py
+  puts `column_titles` and the top row's `subplot_titles` at the same place, so
+  give one or the other.
+
+```julia
+sf = subplots(2, 2; sync = false, shared_xaxes = true, shared_yaxes = true,
+    column_titles = ["\$\\alpha = 1\$", "\$\\alpha = 2\$"])
+for r in 1:2, c in 1:2
+    plot_scatter!(sf, 1:5, rand(5); row = r, col = c)
+end
+xrange!(sf, (1, 10); row = 1, col = 1)        # the whole shared column changes
+xlabel!(sf, "\$x\$"; row = 1, col = 1)         # the label goes to the bottom cell
+```
+
+Whole-figure verbs (`relayout!`, `restyle!`, `update!`, `purge!`, `figsize!`,
+...) reject the cell keywords `row`, `col`, `secondary_y` and `inset`; `add_hline!`,
+`add_vline!`, `add_hrect!`, `add_vrect!`, `add_shape!`, `add_layout_image!` and
+`add_recession_bands!` take them, and `hline!`, `vline!` and the shape helpers
+do the same on a `SubplotFigure`.
 
 ## Insets
 
@@ -94,6 +133,52 @@ plot_contour!(sf2, rand(10, 10); row = 1, col = 2)
 colorbar!(sf2; row = 1, col = 2, title = "level", side = :bottom)
 ```
 
+`colorbar!` details:
+
+- `len` is a paper fraction centred on the cell; `len = 0` (the default) is
+  the cell's extent and follows it. A call with `len` keeps the layout
+  engine's placement; only `x` or `y` take the bar out of its hands.
+- `side` defaults to `:right`: calling `colorbar!` without `side` on a bottom
+  bar moves it back to the right, so pass `side = :bottom` again.
+- A vertical bar is never drawn shorter than three lines of tick labels plus a
+  title above or below it (at most the plot height); a shorter `len` is
+  raised to that.
+- A math (`$...$`) title is an annotation next to the bar; it follows later
+  `colorbar!` moves, but not `relayout!` edits of the bar.
+- In `shared_colorbar!`, an explicit `crange` is the colour limit of every
+  bound trace, and `cmid` inside it builds a two-slope colour scale.
+
+## Room for decorations
+
+A colorbar, an outside legend, a panel title, a panel label and a secondary
+x axis each get their own room, taken from the cell they belong to or from the
+figure margin, never from a neighbouring cell. The rules:
+
+- A cell gives up room on the side where its decorations need more than the
+  gap to the next cell holds: its plot area shrinks, and the cells that share
+  that grid edge shrink alike, by at most half a cell. At the edge of the
+  figure the margin grows instead. A bottom colorbar sits below the x tick
+  labels and the x title.
+- Above a cell the stack is, from the axes upwards: the secondary x axis, a
+  legend placed above the axes, the panel title; a panel label sits at the
+  left on the title's line (beside the corner of an aligned title, above the
+  axes without one).
+- A figure that already fits is not changed. Domains, legend positions and
+  colorbar `x`/`y` that you set yourself always win, and the result is
+  idempotent: repeating a call, or exporting, gives the same layout.
+- Sizes are estimated from the figure size in pixels (`layout.width`, else
+  700), the font sizes and the text lengths, generously, and the layout is
+  fitted again on the copy that `savefig` exports at its real size. Set the
+  size first (`figsize!`, or `width`/`height`): a layout fitted at a
+  smaller size keeps the room it asked for.
+- Known limits: a bottom bar released because its cell's domain is yours is not
+  re-placed later; after you relayout a y domain a bar keeps its old `len`
+  until the next `colorbar!` call; equal-aspect cells in one row can end up
+  slightly different in height when only one of them narrows for a bar.
+- Overlays on a field (quiver, streamlines, scatter) widen the field's tight
+  axes only where their anchor points lie outside the field, by 2.5 % of the
+  span; arrow parts beyond the frame are clipped.
+
 ## Legends
 
 Each cell has its own legend by default (`per_subplot_legends = true`).
@@ -111,6 +196,30 @@ for c in 1:3
 end
 set_legend!(sf; position = :outside_bottom, ncols = 2)    # one legend, two entries
 ```
+
+Where the default legend goes: while the default position is `:topright`, a
+cell legend moves to the position that covers the least data (matplotlib's
+`loc = "best"`) each time traces are appended to the cell. This applies to
+the line and marker families, band and fill traces, secondary y axes, polar
+cells and insets. A legend placed with `set_legend!` or `relayout!` stays
+put; setting another default position turns the rule off. When no position is
+free, the one that covers least is taken (a legend wider than its cell can
+cross data). Cells with other trace types, category or date coordinates keep
+the top right.
+
+`set_legend!(...; ncols = k)` lays the entries out in `k` columns (as
+legend groups named `plotlysupply:col:...`, so clicking an entry toggles that
+entry only); columns that do not fit the cell are reduced with a warning.
+`title_side = :top` puts the legend title above the entries like matplotlib;
+plotly.js also indents the entries by the title width for `:top_left`. A
+cell legend above or below its axes may reach over the gap to the next cell
+or into the figure margin.
+Widths are estimated at `layout.width` (else 700 px); if the export is
+narrower, plotly grows the margin. A cell legend wider than its cell (long
+labels) overflows it even in one column, and a position that equals the rule's
+choice still follows the data. A figure legend taller than the plot area
+(a long legend above a small panel in a short figure) is clipped by plotly
+with a scrollbar in a window; a `tight = true` export shows it whole.
 
 ## Titles and panel labels
 

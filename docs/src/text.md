@@ -82,14 +82,36 @@ title!(fig, "(a) Mesh study, \$\\lambda = 10^8\$"; align = :left, bold = true)
 
 ## Annotations
 
-[`annotate!`](@ref) places text at a data point, with an arrow by default.
-`coords = :axes` uses fractions of the plot area, `offset = (dx, dy)` shifts
-the text in pixels, and on log axes the coordinates are data values.
+[`annotate!`](@ref) places text at a point, with an arrow by default. The
+`coords` keyword says what `(x, y)` mean:
+
+| `coords` | `(x, y)` are | Use it for |
+|---|---|---|
+| `:data` (default) | data values of the axes (data values on log axes too) | labels on features |
+| `:axes` | fractions of the axes area, `(0, 0)` bottom left, `(1, 1)` top right | corner labels, `(a)` |
+| `:paper` | plotly paper coordinates: fractions of the plot area inside the margins (of the whole grid on a `SubplotFigure`); below 0 or above 1 reaches into the margins | text outside the axes |
+| `:figure` | fractions of the whole figure in `[0, 1]`, `(0, 0)` its bottom-left corner (matplotlib `fig.text`) | footnotes and captions |
+
+`xcoords`/`ycoords` set the system of one coordinate (`ycoords = :axes` puts
+the text at data x just above the axes). `offset = (dx, dy)` shifts the text
+(`units = :px`, or `:pt`), `anchor` chooses the point of the text box that
+sits at `(x, y)`, `background`/`edgecolor` draw a box, and
+`fit = (w, h)` with `wrap = true` shrinks and breaks the text to fill a box
+in data units. With `coords = :figure`, text without an arrow that reaches below the
+plot area is a caption: the bottom margin grows so it sits below the x tick
+labels and title. `name`, `xshift` and `yshift` cannot be combined with
+`:figure` (use `offset`), and values outside `[0, 1]` raise an
+`ArgumentError`. Margins that change after the last `annotate!` (a legend
+moved below the plot, `tight_layout!`) are not followed until the next call.
+Caption heights are estimates (1.4 em per line, 2.2 em for math with
+fractions or sub/superscripts).
 
 ```julia
 fig = plot_scatter([1, 10, 100], [1, 100, 10_000]; xscale = "log", yscale = "log")
 annotate!(fig, 10, 100, "knee"; offset = (30, -20))
 annotate!(fig, 0.05, 0.95, "\$\\propto x^2\$"; coords = :axes, showarrow = false)
+annotate!(fig, 0.5, 0.01, "Source: simulation"; coords = :figure, showarrow = false,
+    anchor = :bottom)
 ```
 
 A 3-D form `annotate!(fig, x, y, z, text)` labels a point of a scene.

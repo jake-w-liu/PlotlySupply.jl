@@ -4,14 +4,19 @@
 Scientific plotting on top of PlotlyBase.jl: one function per plot type
 (`plot_scatter`, `plot_heatmap`, `plot_surface`, ...) with a mutating `!`
 form, subplot grids ([`subplots`](@ref)), axis, legend, colour and annotation
-helpers, styles for publication figures ([`PlotStyle`](@ref)), and export to
-PNG, JPEG, SVG, PDF, EPS, HTML and JSON ([`savefig`](@ref)). Figures are
-shown in Electron windows ([`SyncPlot`](@ref)); no browser, Kaleido or Python
-is needed.
+helpers, styles for publication figures (the journal presets `:ieee`, `:aps`,
+`:nature`, `:elsevier`, `:springer` and `:aip` of [`PlotStyle`](@ref), sized
+with [`figsize!`](@ref)`(fig, :ieee; columns = 2)`), and export to PNG, JPEG,
+TIFF, SVG, PDF, EPS, HTML and JSON at exact physical sizes
+([`savefig`](@ref)). Figures are shown in Electron windows
+([`SyncPlot`](@ref)); no browser, Kaleido or Python is needed.
 
 Conventions: field matrices are indexed `U[ix, iy]`, with
 `size(U) == (length(x), length(y))`; ranges on logarithmic axes are data
-values; labels mix text and `\$...\$` math (see [`mathtext`](@ref)).
+values, and `(lo, nothing)` / `(nothing, hi)` fix one end of an axis and
+autorange the other; labels mix text and `\$...\$` math (see
+[`mathtext`](@ref)); colorbars, legends, panel titles and labels take room
+from their own cell, never from a neighbour.
 
 The PlotlyBase API (`scatter`, `Layout`, `attr`, `relayout!`, ...),
 `meshgrid` from MeshGrid.jl and `L"..."` from LaTeXStrings.jl are

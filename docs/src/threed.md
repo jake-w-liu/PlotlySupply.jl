@@ -36,6 +36,20 @@ x = [0.0, 1, 1, 0]; y = [0.0, 0, 1, 1]; z = zeros(4)
 plot_segments3d!(fig, x, y, z, [1 2; 2 3; 3 4; 4 1]; color = "gray", dash = "dash")
 ```
 
+Markers take the matplotlib codes `o . s D d + P x X` as well as plotly names,
+`marker_line_color`/`marker_line_width` for the outline, `markevery = k` for
+every `k`-th point, and `marker_color = "none"` for hollow markers (the outline
+is then drawn in the series colour).
+
+```julia
+fig = plot_scatter3d(cos.(t), sin.(t), t ./ 4π; mode = "lines+markers", markevery = 10,
+    marker_symbol = "s", marker_color = "none", marker_line_width = 1.5,
+    legend = "helix")
+```
+
+With `markevery` on a series that also has lines or text, the markers are a
+second trace of that series.
+
 ## Meshes and polygons
 
 [`plot_mesh3d`](@ref) draws a triangle mesh (`i`, `j`, `k` 0-based plotly
@@ -84,9 +98,23 @@ scene!(fig; aspectratio = (2, 1, 0.5), showbackground = false, nticks = 4)
 view!(fig; elev = 90, azim = -90, projection = "orthographic")   # top view, +y up
 ```
 
+`view!` and `scene!` return `nothing` for a `Plot` or `SyncPlot` (the figure
+changes in place) and the `SubplotFigure` for a grid.
+
 Without `view!` a perspective scene keeps plotly's default viewing direction
-at a distance that fits the box and its tick labels into the figure, and the
-3-D functions keep that distance up to date as data is added.
+at a distance that fits the box, its tick labels and its axis titles into the
+cell, and the 3-D functions keep that distance up to date as data is added or
+the figure is resized; `savefig` frames the scene again for the export size.
+Because the labels must fit, a flat scene can fill less of its cell than you
+want, and scenes with different data get different distances. A positive
+`distance` (plotly's normalised units, about 2.2 for the default view) fixes
+it, so that scenes in different cells are drawn at the same size:
+`view!(sf; row = 1, col = c, elev = 25, azim = -55, distance = 4)`. `zoom`
+divides the distance of the automatic framing.
+
+In a scene cell smaller than the plot area, axes with automatic ticks get
+about one tick per 40 px (2 to 9), raised until two ticks are labelled when
+they fit; `scene!(; nticks)` or tick values you set are kept.
 
 ## Axis titles and ranges
 
@@ -105,6 +133,12 @@ zrange!(fig, (0, 2))
 A scene with an explicit range is drawn with `aspectmode = "manual"` and the
 proportions of the axis spans, because plotly.js ignores ranges in its
 automatic aspect modes.
+
+Content outside the scene ranges is hidden, not clipped at the box; widen the
+range or filter the data if a surface seems to lose its edge. Line, edge,
+arrow and marker colours with an alpha channel (`rgba(...)`, `#RRGGBBAA`) are
+drawn opaque, blended over the scene background, as `opacity < 1` already was;
+cones keep the alpha in their colour scale.
 
 ## In subplots
 

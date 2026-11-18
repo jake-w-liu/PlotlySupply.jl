@@ -234,6 +234,7 @@ set_fonts!
 
 ```@docs
 COLORMAPS
+COLOR_CYCLES
 colormap
 colormap_colors
 discrete_colormap
@@ -270,5 +271,6 @@ set_template!
 set_default_template!
 get_default_template
 figsize!
+journal_width
 tight_layout!
 ```

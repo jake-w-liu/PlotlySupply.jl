@@ -4,7 +4,9 @@ PlotlySupply.jl is a plotting package for scientific figures, built on
 [PlotlyBase.jl](https://github.com/sglyon/PlotlyBase.jl). One call draws a line
 plot, a field, a mesh or a 3-D scene with labelled axes; `!` functions add to
 a figure or to one cell of a subplot grid; [`savefig`](@ref) writes PDF, SVG,
-EPS, PNG or JPEG at an exact physical size. Figures are plain
+EPS, PNG, JPEG or TIFF at an exact physical size. Journal presets (`:ieee`,
+`:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`) set the column width,
+fonts in points, line weights and colour-blind-safe colours. Figures are plain
 `PlotlyBase.Plot` objects, so the whole PlotlyBase API stays available.
 Windows and image export use Electron through ElectronCall.jl; neither
 PlotlyJS.jl nor Python is needed.
@@ -16,6 +18,12 @@ PlotlyJS.jl nor Python is needed.
 using Pkg
 Pkg.add("PlotlySupply")
 ```
+
+The package precompiles a workload of the common calls, so the first figure
+of a session takes about half a second instead of half a minute. The price is
+a longer one-time precompilation after each install or update (minutes) and a
+larger package image (about 70 MB). To skip the workload, see
+[Performance](performance.md).
 
 ## Quick tour
 
@@ -56,18 +64,39 @@ plot_heatmap!(sf, xs, ys, 0.5 .* U; row = 1, col = 2)
 shared_colorbar!(sf; title = "intensity", colorscale = "magma")
 ```
 
-A figure for a paper: the `:publication` style (serif fonts, colour-blind-safe
-colours, closed frame), exported at a column width of 3.5 in:
+A figure for a paper. A journal preset sets the fonts (in points), line
+weights, colour-blind-safe colours and the single-column width; `savefig`
+without a size uses that width, so the PDF page is exactly 3.5 in wide with
+Times New Roman embedded. `figsize!(fig, :ieee; columns = 2)` and
+`journal_width(:nature; columns = 2, units = :mm)` give the other widths:
 
 ```julia
 t = 0:0.05:10
-fig = with_style(:publication) do
+fig = with_style(:ieee) do
     plot_scatter(t, [sin.(t), cos.(t)]; legend = ["\$\\sin t\$", "\$\\cos t\$"],
         xlabel = "time \$t\$ (s)", ylabel = "signal")
 end
-savefig(fig, "signal.pdf"; width = 3.5, height = 2.4, units = :in)
-savefig(fig, "signal.png"; width = 3.5, height = 2.4, units = :in, dpi = 300)
+savefig(fig, "signal.pdf")                 # 3.5 in x 2.625 in, fonts embedded
+savefig(fig, "signal.tif"; dpi = 600)      # TIFF, LZW, 2100 x 1575 px
 ```
+
+A two-panel figure at the double-column width, drawn after the size is set:
+
+```julia
+w = journal_width(:aps; columns = 2, units = :px)
+sf = with_style(:aps) do
+    sf = subplots(1, 2; sync = false, width = w, height = 0.4w)
+    plot_scatter!(sf, t, sin.(t); row = 1, col = 1, ylabel = "\$u\$", xlabel = "\$t\$")
+    plot_heatmap!(sf, xs, ys, U; row = 1, col = 2, colorscale = "RdBu_r", zrange = (-1, 1),
+        xlabel = "\$x\$", colorbar_title = "\$|E|\$")
+    panel_labels!(sf; labels = :abc, format = "({})")
+    sf
+end
+savefig(sf, "fields.pdf")                  # 17.2 cm wide page
+```
+
+[Figures for papers](papers.md)
+has complete examples (convergence plot, field maps, 3-D surfaces, schematic).
 
 MATLAB-style subplots: `subplot!` selects the active cell, and the axis helpers
 (`xlabel!`, `ylabel!`, `xrange!`, ...) act on the active cell, so call them
@@ -99,7 +128,17 @@ plot_heatmap!(sf, rand(30, 30))      # each colorbar sits next to its own cell
   as printed (row 1 at the top). `plot_image` takes an `H x W x 3` (or 4)
   array with channel values 0 to 255, row 1 at the top.
 - **Ranges are data values, also on log axes.** `xrange = [1e-3, 1]` on a log
-  axis, never exponents. `[0, 0]` or `nothing` means automatic.
+  axis, never exponents. `[0, 0]`, `(0, 0)` or `nothing` means automatic. A
+  one-sided limit fixes one end and autoranges the other:
+  `yrange = (0, nothing)` or `xrange!(fig, (nothing, 10))` (matplotlib's
+  `set_ylim(bottom = 0)`); the first bound is always the left or bottom end.
+  Equal bounds and non-positive bounds on a log axis raise an `ArgumentError`.
+- **Decorations get their own room.** A colorbar, an outside legend, a panel
+  title or label takes room from its own cell or from the figure margin, never
+  from a neighbouring panel; a figure that already fits, and any position you
+  set yourself, is left alone. Choose the figure size first (journal
+  `figsize!`, or `width`/`height`): the layout is fitted for the size the figure
+  has when you call, and again at the export size.
 - **Mutators end in `!`** and take a `Plot`, a `SyncPlot` (the window updates)
   or a `SubplotFigure`. On a `SubplotFigure` they draw into the active cell, or
   into `row`/`col`; Cartesian mutators also take `secondary_y = true` and
@@ -133,6 +172,7 @@ plot_heatmap!(sf, rand(30, 30))      # each colorbar sits next to its own cell
 - [Other charts and maps](charts.md): pie, sunburst, Sankey, financial charts,
   geographic and tile maps.
 - [Figures for papers](papers.md): from data to a camera-ready figure.
+- [Performance](performance.md): load time, time to first figure, the precompile workload and the benchmarks.
 - [Coming from matplotlib](matplotlib.md) and [Migrating from 1.x](migration.md).
 
 Every exported name is documented in the [API reference](api.md); the
@@ -151,9 +191,9 @@ Keyword support is grouped by family:
 |---|---|---|---|
 | `title`, `width`, `height`, `fontsize`, `show` | figure title; size in px (0 = automatic); base font size (0 = template); `show = true` opens a window and returns a `SyncPlot` | every constructor | none |
 | `xlabel`, `ylabel`, `grid` | axis titles; `grid = false` hides the grid | 2-D Cartesian | none |
-| `xrange`, `yrange` | axis limits `[lo, hi]` in data units, also on log axes; `[0, 0]` or `nothing` is automatic | 2-D Cartesian | `plot_matrix` |
+| `xrange`, `yrange` | axis limits `[lo, hi]` in data units, also on log axes; `(lo, nothing)` or `(nothing, hi)` fixes one end; `[0, 0]` or `nothing` is automatic | 2-D Cartesian | `plot_matrix` |
 | `xscale`, `yscale` | `"linear"` or `"log"` | 2-D Cartesian | `plot_complex`, `plot_funnel`, `plot_waterfall`, `plot_image`, `plot_matrix` |
-| `xticks`, `yticks`, `xticklabels`, `yticklabels`, `xtickformat`, `ytickformat` | tick values (data units) or the presets `:decades` and `:auto`, their labels, a d3 format | 2-D Cartesian | `plot_funnel`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc`, `plot_matrix`, `plot_pcolormesh`, `plot_polygons`, `plot_tripcolor`, `plot_triplot`, `plot_tricontour` |
+| `xticks`, `yticks`, `xticklabels`, `yticklabels`, `xtickformat`, `ytickformat` | tick values (data units) or the presets `:decades` and `:auto`, their labels, a d3 format | 2-D Cartesian | none |
 | `equalar` | equal axis scales (aspect ratio 1) | 2-D Cartesian | `plot_bar`, `plot_histogram`, `plot_box`, `plot_violin`, `plot_histogram2d`, `plot_funnel`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc` |
 | `legend` | legend name; unnamed traces get no legend entry | 2-D Cartesian | `plot_histogram2d`, `plot_heatmap`, `plot_contour`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_tripcolor`, `plot_tricontour` |
 | `color` | one colour, or one per series | 2-D Cartesian | `plot_histogram2d`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc`, `plot_heatmap`, `plot_contour`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_tripcolor` |

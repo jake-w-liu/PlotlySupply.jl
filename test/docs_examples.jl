@@ -422,3 +422,341 @@ end
 		@test contour.fields[:colorbar][:x] < heatmap.fields[:colorbar][:x]
 	end
 end
+
+# --- wave 5b: the touch-up pass -------------------------------------------------------
+
+# Keyword names a docstring's signature block declares after the `;`.
+function _docs_signature_keywords(doc::AbstractString, name::Symbol)
+	m = match(r"(?s)^```julia\n(.*?)\n```", doc)
+	m === nothing && return Set{Symbol}()
+	sigs = String[]
+	cur = ""
+	for l in split(m.captures[1], '\n')
+		if occursin(Regex("^\\s*" * string(name) * "\\("), l) || (!isempty(cur) && !occursin(r"\)\s*(->.*)?$", cur))
+			cur = isempty(cur) ? String(l) : cur * " " * l
+			if occursin(r"\)\s*(->.*)?$", cur)
+				push!(sigs, cur)
+				cur = ""
+			end
+		end
+	end
+	kws = Set{Symbol}()
+	for sig in sigs
+		i = findfirst(';', sig)
+		i === nothing && continue
+		rest = sig[i+1:end]
+		j = findlast(')', rest)
+		j === nothing || (rest = rest[1:j-1])
+		depth = 0
+		start = 1
+		parts = String[]
+		for (k, c) in enumerate(rest)
+			if c in "([{"
+				depth += 1
+			elseif c in ")]}"
+				depth -= 1
+			elseif c == ',' && depth == 0
+				push!(parts, rest[start:k-1])
+				start = k + 1
+			end
+		end
+		push!(parts, rest[start:end])
+		for p in strip.(parts)
+			(isempty(p) || endswith(p, "...")) && continue
+			mm = match(r"^([A-Za-z_][A-Za-z0-9_]*)", p)
+			mm === nothing || push!(kws, Symbol(mm.captures[1]))
+		end
+	end
+	return kws
+end
+
+# Keyword names of every method of `f` (without the slurp), and whether one slurps.
+function _docs_method_keywords(f)
+	kws = Set{Symbol}()
+	slurp = false
+	for m in methods(f), k in Base.kwarg_decl(m)
+		endswith(string(k), "...") ? (slurp = true) : push!(kws, k)
+	end
+	return kws, slurp
+end
+
+@testset "docstring keyword lists match the signatures" begin
+	checked = 0
+	for n in _docs_own_names()
+		f = getfield(PlotlySupply, n)
+		f isa Function || continue
+		doc = string(Base.Docs.doc(Base.Docs.Binding(PlotlySupply, n)))
+		keywords, slurps = _docs_method_keywords(f)
+		# A mutator's docstring may refer to its constructor's keyword list.
+		if endswith(string(n), "!") && isdefined(PlotlySupply, Symbol(chop(string(n))))
+			doc *= string(Base.Docs.doc(Base.Docs.Binding(PlotlySupply, Symbol(chop(string(n))))))
+		end
+		# `show` is declared by mutators only to reject it with a clear message.
+		undocumented = sort!([k for k in setdiff(keywords, Set([:show, :kwargs])) if
+			!(occursin("`$(k)", doc) || occursin("$(k) =", doc) || occursin("$(k)=", doc))])
+		listed = slurps ? Symbol[] : sort!(collect(setdiff(_docs_signature_keywords(doc, n), keywords, Set([:kwargs]))))
+		ok = isempty(undocumented) && isempty(listed)
+		ok || @error "docstring of `$(n)`: undocumented keywords $(undocumented), listed but not accepted $(listed)"
+		@test ok
+		checked += 1
+	end
+	@test checked > 150
+end
+
+# Archetype table of docs/src/matplotlib.md: every right-hand side runs on the block's data.
+@testset "matplotlib archetype table runs" begin
+	text = _docs_read("docs/src/matplotlib.md")
+	i = findfirst("## Figure archetypes from real projects", text)
+	@test i !== nothing
+	section = text[first(i):end]
+	data = match(r"(?s)```julia\n(.*?)\n```", section).captures[1]
+	rows = String[]
+	for line in split(section, '\n')
+		startswith(line, "| ") || continue
+		cells = split(line, r"(?<!\\)\|")
+		length(cells) >= 4 || continue
+		cell = strip(cells[3])
+		(startswith(cell, "`") && endswith(cell, "`")) || continue
+		push!(rows, replace(cell[2:end-1], "\\|" => "|"))
+	end
+	@test length(rows) >= 40
+	mktempdir() do dir
+		cd(dir) do
+			for (k, code) in enumerate(rows)
+				mod = _docs_new_module()
+				@testset "row $(k)" begin
+					@test (Base.include_string(mod, data, "matplotlib.md"); Base.include_string(mod, code, "matplotlib.md row $(k)"); true)
+				end
+			end
+		end
+	end
+end
+
+# --- the papers page ----------------------------------------------------------------------
+
+# Page size in points of a Chromium PDF (the /MediaBox of its first page).
+function _docs_pdf_page(path)
+	m = match(r"/MediaBox \[([-\d. ]+)\]", String(read(path)))
+	m === nothing && error("no /MediaBox in $(path)")
+	v = parse.(Float64, split(m.captures[1]))
+	return (v[3] - v[1], v[4] - v[2])
+end
+
+# ImageWidth, ImageLength and the X resolution (dpi) of a little-endian baseline TIFF.
+function _docs_tiff_info(path)
+	b = read(path)
+	String(b[1:2]) == "II" || error("not a little-endian TIFF")
+	u16(o) = Int(b[o+1]) | Int(b[o+2]) << 8
+	u32(o) = u16(o) | u16(o + 2) << 16
+	ifd = u32(4)
+	info = Dict{Int,Any}()
+	for k in 0:u16(ifd)-1
+		e = ifd + 2 + 12k
+		tag, typ = u16(e), u16(e + 2)
+		if typ == 3
+			info[tag] = u16(e + 8)
+		elseif typ == 4
+			info[tag] = u32(e + 8)
+		elseif typ == 5
+			o = u32(e + 8)
+			info[tag] = u32(o) / u32(o + 4)
+		end
+	end
+	return info[256], info[257], info[282]
+end
+
+@testset "papers.md examples have the documented sizes" begin
+	mod = _docs_new_module()
+	mktempdir() do dir
+		cd(dir) do
+			for b in filter(!_docs_is_fragment, _docs_blocks("docs/src/papers.md"))
+				@test _docs_eval(mod, b)
+			end
+			fig(name) = Base.invokelatest(getfield, mod, name)
+			# Figure widths are the journals' column widths, in CSS px.
+			@test fig(:fig_conv).fig.layout[:width] ≈ journal_width(:ieee; columns = 2, units = :px)
+			@test fig(:fig_fields).fig.layout[:width] ≈ journal_width(:aps; columns = 2, units = :px)
+			@test fig(:fig_surf).fig.layout[:width] ≈ journal_width(:nature; columns = 2, units = :px)
+			@test fig(:fig_schem).layout[:width] ≈ journal_width(:ieee; units = :px)
+			# PDF pages: exact sizes in points.
+			w, h = _docs_pdf_page("signal.pdf")
+			@test w ≈ 3.5 * 72 atol = 0.01
+			@test h ≈ 3.5 * 72 * 0.75 atol = 0.01
+			@test _docs_pdf_page("convergence.pdf")[1] ≈ 7.16 * 72 atol = 0.01
+			@test _docs_pdf_page("fields.pdf")[1] ≈ journal_width(:aps; columns = 2, units = :pt) atol = 0.01
+			@test _docs_pdf_page("surfaces.pdf")[1] ≈ journal_width(:nature; columns = 2, units = :pt) atol = 0.01
+			@test _docs_pdf_page("schematic.pdf")[1] ≈ 252 atol = 0.01
+			# Text is embedded TrueType, never Type 3.
+			bytes = String(read("signal.pdf"))
+			@test !occursin("/Type3", bytes)
+			@test occursin("/TrueType", bytes) || occursin("/CIDFontType2", bytes)
+			# TIFF and PNG pixel sizes at the stated dpi.
+			tw, th, tdpi = _docs_tiff_info("fig1.tif")
+			@test tdpi == 600
+			@test tw == round(Int, 7.16 * 600)
+			png = read("fig1.png")
+			@test png[1:8] == UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+			@test (Int(png[17]) << 24 | Int(png[18]) << 16 | Int(png[19]) << 8 | Int(png[20])) == round(Int, 7.16 * 300)
+			@test isfile("fig1.svg") && isfile("fig1b.pdf")
+		end
+	end
+end
+
+@testset "journal presets match the papers page" begin
+	widths = (
+		(:ieee, 1, 3.5, :in), (:ieee, 2, 7.16, :in),
+		(:aps, 1, 8.6, :cm), (:aps, 2, 17.2, :cm),
+		(:nature, 1, 89, :mm), (:nature, 2, 183, :mm),
+		(:elsevier, 1, 90, :mm), (:elsevier, 1.5, 140, :mm), (:elsevier, 2, 190, :mm),
+		(:springer, 1, 84, :mm), (:springer, 1.5, 129, :mm), (:springer, 2, 174, :mm),
+		(:aip, 1, 3.37, :in), (:aip, 2, 6.69, :in),
+	)
+	for (j, c, w, u) in widths
+		@test journal_width(j; columns = c, units = u) ≈ w
+	end
+	text = _docs_read("docs/src/papers.md")
+	for (j, size_pt, ticks) in ((:ieee, 8, "inside"), (:aps, 9, "inside"), (:nature, 7, "outside"),
+			(:elsevier, 9, "outside"), (:springer, 8, "outside"), (:aip, 8, "inside"))
+		@test occursin("| `:$(j)` |", text)
+		st = with_style(get_default_style, j)
+		@test st.fontsize * 0.75 ≈ size_pt
+		@test st.tick_fontsize * 0.75 ≈ size_pt
+		@test st.label_fontsize * 0.75 ≈ size_pt
+		@test st.legend_fontsize * 0.75 ≈ size_pt
+		@test st.linewidth * 0.75 ≈ 1
+		@test st.axis_linewidth * 0.75 ≈ 0.75
+		@test st.tick_length * 0.75 ≈ 3.5
+		@test st.ticks == ticks
+		@test st.cycle === :dash_symbol
+		@test st.colorway == PlotlySupply.COLOR_CYCLES[:okabe_ito]
+		@test st.aspect == 0.75
+		@test st.width ≈ journal_width(j; units = :px)
+	end
+	# Optica is documented as absent, and journals with a maximum height reject a taller figure.
+	@test occursin("Optica is not included", text)
+	@test_throws ArgumentError journal_width(:optica)
+	fig = plot_scatter(1:3, 1:3)
+	@test_throws ArgumentError figsize!(fig, :nature; height = 200, units = :mm)
+	@test_throws ArgumentError figsize!(fig, :aip; height = 9, units = :in)
+	figsize!(fig, :nature; columns = 2, height = 6, units = :cm)
+	@test fig.layout[:width] ≈ 183 * 96 / 25.4
+	@test fig.layout[:height] ≈ 60 * 96 / 25.4
+end
+
+@testset "colour scale orientation table of the migration page" begin
+	text = _docs_read("docs/src/migration.md")
+	for (name, low, high) in (("Greys", "#FFFFFF", "#000000"), ("Blues", "#F7FBFF", "#08306B"),
+			("Greens", "#F7FCF5", "#00441B"), ("YlGnBu", "#FFFFD9", "#081D58"),
+			("YlOrRd", "#FFFFCC", "#800026"), ("RdBu", "#67001F", "#053061"))
+		stops = colormap(name)
+		@test stops[1][2] == low
+		@test stops[end][2] == high
+		@test colormap(name * "_r")[1][2] == high      # the 1.x direction
+		@test occursin("`\"$(name)\"`", text) && occursin("`\"$(name)_r\"`", text)
+	end
+	# The explicit-stops recipe of the page.
+	fig = plot_heatmap(randn(4, 3); colorscale = [(0, "rgb(0,0,0)"), (1, "rgb(255,255,255)")])
+	@test fig.data[1][:colorscale][1][2] in ("rgb(0,0,0)", "#000000")
+	@test PlotlySupply.COLOR_CYCLES[:okabe_ito][1] == "#0072B2"
+end
+
+@testset "docs claims: one-sided limits, quiver kinds, maps, annotate coords" begin
+	# One-sided limits (axes.md, README Conventions).
+	fig = plot_scatter(1:10, (1:10) .^ 2)
+	yrange!(fig, (0, nothing))
+	ax = fig.layout[:yaxis]
+	@test ax[:autorange] === true && ax[:autorangeoptions][:minallowed] == 0
+	xrange!(fig, (nothing, 12))
+	@test fig.layout[:xaxis][:autorangeoptions][:maxallowed] == 12
+	@test_throws ArgumentError yrange!(fig, (nothing, 0))      # beyond all data
+	@test_throws ArgumentError yrange!(fig, (1, 1))
+	yrange!(fig, nothing)
+	@test fig.layout[:yaxis][:autorange] === true && !haskey(fig.layout[:yaxis], :range)
+	logfig = plot_scatter([1e-2, 1, 1e3], [1.0, 2, 3]; xscale = "log", xrange = (1e-3, nothing))
+	@test logfig.layout[:xaxis][:autorangeoptions][:minallowed] ≈ -3
+	@test plot_scatter(1:10, 1:10; yrange = (5, nothing)).layout[:yaxis][:autorangeoptions][:minallowed] == 5
+	# Quiver kinds (fields.md).
+	qx = [0.0, 1, 2]; qy = [0.0, 1, 0]; u = [1.0, 2, 3]; v = [0.0, 1, 1]
+	arrows = plot_quiver(qx, qy, u, v)
+	tri = plot_quiver(qx, qy, u, v; style = :triangle, pivot = :tip, scale = :uniform)
+	@test arrows.data[1][:type] == "scatter" && tri.data[1][:fill] == "toself"
+	byc = plot_quiver(qx, qy, u, v; style = :triangle, colorby = :magnitude, colorscale = "viridis")
+	@test length(byc.data) >= 1
+	@test_throws ArgumentError plot_quiver(qx, qy, u, v; colorby = :magnitude, color = "red")
+	@test_throws ArgumentError plot_quiver(qx, qy, u, v; style = :square)
+	@test_throws ArgumentError plot_quiver(qx, qy, u, v; pivot = :nose)
+	# Maps: `trace` is the only pass-through; `legend` names choropleth traces (charts.md).
+	@test_throws ArgumentError plot_scattergeo([2.35], [48.86]; hovertemplate = "x")
+	@test_throws ArgumentError plot_scattergeo([2.35], [48.86]; trace = attr(name = "x"))
+	geo = plot_scattergeo([2.35], [48.86]; trace = attr(hovertemplate = "%{lat}"))
+	@test geo.data[1][:hovertemplate] == "%{lat}"
+	chor = plot_choropleth(["France"], [1.0]; locationmode = "country names", legend = "GDP")
+	@test chor.data[1][:name] == "GDP" && chor.data[1][:showlegend] === true
+	# annotate! coordinates (text.md).
+	fig = plot_scatter(1:3, 1:3)
+	annotate!(fig, 0.5, 0.02, "Source"; coords = :figure, showarrow = false)
+	@test_throws ArgumentError annotate!(fig, 0.5, 1.5, "x"; coords = :figure, showarrow = false)
+	@test_throws ArgumentError annotate!(fig, 0.5, 0.5, "x"; coords = :figure, name = "n")
+	annotate!(fig, 0.5, 1.2, "above"; coords = :paper, showarrow = false)
+	annotate!(fig, 0.1, 0.9, "(a)"; coords = :axes, showarrow = false)
+	# 3-D return values (threed.md).
+	f3 = plot_surface(rand(5, 5))
+	@test view!(f3; elev = 20, azim = 30) === nothing
+	@test scene!(f3; nticks = 4) === nothing
+	sf3 = subplots(1, 1; sync = false, specs = fill(Spec(kind = "scene"), 1, 1))
+	plot_surface!(sf3, rand(5, 5))
+	@test view!(sf3; elev = 20, azim = 30) === sf3
+	# Tick keywords on every 2-D constructor (README keyword table).
+	@test plot_waterfall(["a", "b"], [1.0, 2]; yticks = [0, 1, 2]).layout[:yaxis][:tickvals] == [0.0, 1.0, 2.0]
+	@test plot_matrix(rand(3, 3); xticks = [1, 2], xticklabels = ["a", "b"]).layout[:xaxis][:ticktext] == ["a", "b"]
+end
+
+@testset "docs claims: export, styles and the performance page" begin
+	mktempdir() do dir
+		cd(dir) do
+			fig = with_style(:ieee) do
+				plot_scatter(1:5, rand(5); xlabel = "\$t\$ (s)")
+			end
+			# No size given: the style's default size (3.5 in x 2.625 in).
+			savefig(fig, "a.pdf")
+			w, h = _docs_pdf_page("a.pdf")
+			@test w ≈ 252 atol = 0.01
+			@test h ≈ 189 atol = 0.01
+			# TIFF: default 300 dpi, tags set; PNG pixel count rounds.
+			savefig(fig, "a.tiff")
+			@test _docs_tiff_info("a.tiff") == (1050, 788, 300)      # 3.5 in x 2.625 in at 300 dpi
+			@test_throws ErrorException savefig(fig, "a.xyz")
+			@test_throws ArgumentError savefig(fig, joinpath(dir, "missing-dir", "a.pdf"))
+			@test_throws ArgumentError savefig(fig, "b.pdf"; fonts = :nothing)
+			# Deterministic by default.
+			savefig(fig, "c1.pdf"); savefig(fig, "c2.pdf")
+			@test read("c1.pdf") == read("c2.pdf")
+			# HTML embeds plotly.js.
+			savefig(fig, "a.html")
+			@test filesize("a.html") > 1_000_000
+		end
+	end
+	# The opt-out preference named on the performance page is the PrecompileTools key.
+	perf = _docs_read("docs/src/performance.md")
+	@test occursin("precompile_workload", perf)
+	wl = joinpath(dirname(dirname(pathof(PlotlySupply))), "src", "precompile.jl")
+	@test isfile(wl)
+	@test occursin("@compile_workload", read(wl, String))
+	# Shared-axis groups (subplots.md).
+	sf = subplots(2, 2; sync = false, shared_xaxes = true, shared_yaxes = true,
+		column_titles = ["\$\\alpha = 1\$", "\$\\alpha = 2\$"])
+	for r in 1:2, c in 1:2
+		plot_scatter!(sf, 1:5, rand(5); row = r, col = c)
+	end
+	xrange!(sf, (1, 10); row = 1, col = 1)
+	xlabel!(sf, "\$x\$"; row = 1, col = 1)
+	lay = sf.fig.layout
+	@test lay[:xaxis3][:range] == [1, 10]                       # the root of the shared column
+	@test lay[:xaxis3][:title][:text] == "\$x\$"                # the label goes to the bottom cell
+	@test lay[:xaxis][:matches] == "x3"
+	names = [a[:name] for a in lay[:annotations] if haskey(a, :name)]
+	@test "plotlysupply:title!:1:1:column" in names
+	title!(sf, "T"; row = 1, col = 2)
+	@test "plotlysupply:title:1:2" in [a[:name] for a in sf.fig.layout[:annotations] if haskey(a, :name)]
+	@test_throws ArgumentError relayout!(sf; row = 1)
+end

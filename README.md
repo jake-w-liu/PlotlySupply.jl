@@ -6,10 +6,13 @@
 PlotlySupply.jl is a plotting package for scientific figures, built on
 [PlotlyBase.jl](https://github.com/sglyon/PlotlyBase.jl). One call draws a line
 plot, a field, a mesh or a 3-D scene with labelled axes; `!` functions add to
-a figure or to one cell of a subplot grid; `savefig` writes PDF, SVG, EPS, PNG
-or JPEG at an exact physical size. Figures are plain `PlotlyBase.Plot` objects,
-so the whole PlotlyBase API stays available. Windows and image export use
-Electron through ElectronCall.jl; neither PlotlyJS.jl nor Python is needed.
+a figure or to one cell of a subplot grid; `savefig` writes PDF, SVG, EPS, PNG,
+JPEG or TIFF at an exact physical size. Journal presets (`:ieee`, `:aps`,
+`:nature`, `:elsevier`, `:springer`, `:aip`) set the column width, fonts in
+points, line weights and colour-blind-safe colours. Figures are plain
+`PlotlyBase.Plot` objects, so the whole PlotlyBase API stays available.
+Windows and image export use Electron through ElectronCall.jl; neither
+PlotlyJS.jl nor Python is needed.
 
 Documentation: [stable](https://jake-w-liu.github.io/PlotlySupply.jl/stable/),
 [dev](https://jake-w-liu.github.io/PlotlySupply.jl/dev/).
@@ -21,6 +24,12 @@ Documentation: [stable](https://jake-w-liu.github.io/PlotlySupply.jl/stable/),
 using Pkg
 Pkg.add("PlotlySupply")
 ```
+
+The package precompiles a workload of the common calls, so the first figure
+of a session takes about half a second instead of half a minute. The price is
+a longer one-time precompilation after each install or update (minutes) and a
+larger package image (about 70 MB). To skip the workload, see
+[Performance](https://jake-w-liu.github.io/PlotlySupply.jl/dev/performance/).
 
 ## Quick tour
 
@@ -61,18 +70,39 @@ plot_heatmap!(sf, xs, ys, 0.5 .* U; row = 1, col = 2)
 shared_colorbar!(sf; title = "intensity", colorscale = "magma")
 ```
 
-A figure for a paper: the `:publication` style (serif fonts, colour-blind-safe
-colours, closed frame), exported at a column width of 3.5 in:
+A figure for a paper. A journal preset sets the fonts (in points), line
+weights, colour-blind-safe colours and the single-column width; `savefig`
+without a size uses that width, so the PDF page is exactly 3.5 in wide with
+Times New Roman embedded. `figsize!(fig, :ieee; columns = 2)` and
+`journal_width(:nature; columns = 2, units = :mm)` give the other widths:
 
 ```julia
 t = 0:0.05:10
-fig = with_style(:publication) do
+fig = with_style(:ieee) do
     plot_scatter(t, [sin.(t), cos.(t)]; legend = ["\$\\sin t\$", "\$\\cos t\$"],
         xlabel = "time \$t\$ (s)", ylabel = "signal")
 end
-savefig(fig, "signal.pdf"; width = 3.5, height = 2.4, units = :in)
-savefig(fig, "signal.png"; width = 3.5, height = 2.4, units = :in, dpi = 300)
+savefig(fig, "signal.pdf")                 # 3.5 in x 2.625 in, fonts embedded
+savefig(fig, "signal.tif"; dpi = 600)      # TIFF, LZW, 2100 x 1575 px
 ```
+
+A two-panel figure at the double-column width, drawn after the size is set:
+
+```julia
+w = journal_width(:aps; columns = 2, units = :px)
+sf = with_style(:aps) do
+    sf = subplots(1, 2; sync = false, width = w, height = 0.4w)
+    plot_scatter!(sf, t, sin.(t); row = 1, col = 1, ylabel = "\$u\$", xlabel = "\$t\$")
+    plot_heatmap!(sf, xs, ys, U; row = 1, col = 2, colorscale = "RdBu_r", zrange = (-1, 1),
+        xlabel = "\$x\$", colorbar_title = "\$|E|\$")
+    panel_labels!(sf; labels = :abc, format = "({})")
+    sf
+end
+savefig(sf, "fields.pdf")                  # 17.2 cm wide page
+```
+
+[Figures for papers](https://jake-w-liu.github.io/PlotlySupply.jl/dev/papers/)
+has complete examples (convergence plot, field maps, 3-D surfaces, schematic).
 
 MATLAB-style subplots: `subplot!` selects the active cell, and the axis helpers
 (`xlabel!`, `ylabel!`, `xrange!`, ...) act on the active cell, so call them
@@ -104,7 +134,17 @@ plot_heatmap!(sf, rand(30, 30))      # each colorbar sits next to its own cell
   as printed (row 1 at the top). `plot_image` takes an `H x W x 3` (or 4)
   array with channel values 0 to 255, row 1 at the top.
 - **Ranges are data values, also on log axes.** `xrange = [1e-3, 1]` on a log
-  axis, never exponents. `[0, 0]` or `nothing` means automatic.
+  axis, never exponents. `[0, 0]`, `(0, 0)` or `nothing` means automatic. A
+  one-sided limit fixes one end and autoranges the other:
+  `yrange = (0, nothing)` or `xrange!(fig, (nothing, 10))` (matplotlib's
+  `set_ylim(bottom = 0)`); the first bound is always the left or bottom end.
+  Equal bounds and non-positive bounds on a log axis raise an `ArgumentError`.
+- **Decorations get their own room.** A colorbar, an outside legend, a panel
+  title or label takes room from its own cell or from the figure margin, never
+  from a neighbouring panel; a figure that already fits, and any position you
+  set yourself, is left alone. Choose the figure size first (journal
+  `figsize!`, or `width`/`height`): the layout is fitted for the size the figure
+  has when you call, and again at the export size.
 - **Mutators end in `!`** and take a `Plot`, a `SyncPlot` (the window updates)
   or a `SubplotFigure`. On a `SubplotFigure` they draw into the active cell, or
   into `row`/`col`; Cartesian mutators also take `secondary_y = true` and
@@ -126,21 +166,24 @@ the table lists only one name.
 | Lines and markers | `plot_scatter`, `plot_scatter!`, `plot_stem`, `plot_stem!`, `plot_area`, `plot_area!`, `plot_band`, `plot_band!`, `plot_segments`, `plot_segments!`, `plot_vlines`, `plot_vlines!`, `plot_hlines`, `plot_hlines!`, `plot_complex`, `plot_complex!`, `plot_scatterpolar`, `plot_scatterpolar!` |
 | Statistics | `plot_bar`, `plot_bar!`, `plot_histogram`, `plot_histogram!`, `plot_histogram2d`, `plot_histogram2d!`, `plot_box`, `plot_box!`, `plot_violin`, `plot_violin!`, `plot_ecdf`, `plot_ecdf!`, `plot_kde`, `plot_kde!` |
 | 2-D fields and meshes | `plot_heatmap`, `plot_heatmap!`, `plot_contour`, `plot_contour!`, `plot_matrix`, `plot_matrix!`, `plot_image`, `plot_image!`, `plot_pcolormesh`, `plot_pcolormesh!`, `plot_polygons`, `plot_polygons!`, `plot_tripcolor`, `plot_tripcolor!`, `plot_triplot`, `plot_triplot!`, `plot_tricontour`, `plot_tricontour!` |
-| Vector fields | `plot_quiver`, `plot_quiver!`, `plot_streamlines`, `plot_streamlines!` |
+| Vector fields | `plot_quiver` (arrows or triangles), `plot_quiver!`, `plot_streamlines`, `plot_streamlines!` |
 | 3-D | `plot_surface`, `plot_surface!`, `plot_wireframe`, `plot_wireframe!`, `plot_scatter3d`, `plot_scatter3d!`, `plot_segments3d`, `plot_segments3d!`, `plot_mesh3d`, `plot_mesh3d!`, `plot_polygons3d`, `plot_polygons3d!`, `plot_quiver3d`, `plot_quiver3d!`, `plot_isosurface`, `plot_isosurface!`, `plot_volume`, `plot_volume!`, `plot_streamtube`, `plot_streamtube!` |
 | 3-D scenes | `view!` (camera), `scene!` (aspect, panes, ticks), `zlabel!`, `zrange!` |
 | Other charts | `plot_pie`, `plot_pie!`, `plot_sunburst`, `plot_sunburst!`, `plot_treemap`, `plot_treemap!`, `plot_funnel`, `plot_funnel!`, `plot_funnelarea`, `plot_funnelarea!`, `plot_waterfall`, `plot_waterfall!`, `plot_indicator`, `plot_indicator!`, `plot_sankey`, `plot_sankey!`, `plot_parcoords`, `plot_parcoords!`, `plot_ternary`, `plot_ternary!`, `plot_candlestick`, `plot_candlestick!`, `plot_ohlc`, `plot_ohlc!` |
 | Maps | `plot_scattergeo`, `plot_scattergeo!`, `plot_choropleth`, `plot_choropleth!`, `plot_scattermap`, `plot_scattermap!`, `plot_choroplethmap`, `plot_choroplethmap!`, `plot_densitymap`, `plot_densitymap!`, `plot_scattermapbox`, `plot_scattermapbox!`, `plot_choroplethmapbox`, `plot_choroplethmapbox!`, `plot_densitymapbox`, `plot_densitymapbox!`, `update_maps!`; trace constructors `scattermap`, `choroplethmap`, `densitymap` |
 | Subplot grids | `subplots`, `subplot!`, `SubplotFigure`, `inset!`, `remove_inset!`, `secondary_xaxis!`, `subplot_legends!`, `panel_labels!`, `make_subplots` (PlotlyJS-style), `mgrid` (PlotlyJS-style grid helper) |
 | Axes and ticks | `xlabel!`, `ylabel!`, `xrange!`, `yrange!`, `xticks!`, `yticks!`, `log_ticks`, `axis_equal!`, `axis_off!`, `grid!`, `spines!` |
-| Figure layout | `title!`, `figsize!`, `tight_layout!` |
+| Figure layout | `title!`, `figsize!` (pixels, physical units or a journal), `journal_width`, `tight_layout!` |
 | Legends | `set_legend!`, `legend_entry!`, `set_default_legend_position!`, `get_default_legend_position` |
-| Colour | `colormap`, `colormap_colors`, `discrete_colormap`, `lighten`, `COLORMAPS`, `colorbar!`, `shared_colorbar!` |
+| Colour | `colormap`, `colormap_colors`, `discrete_colormap`, `lighten`, `COLORMAPS`, `COLOR_CYCLES`, `colorbar!`, `shared_colorbar!` |
 | Text and math | `mathtext`, `annotate!`, `set_fonts!`, `set_default_mathtext!`, `get_default_mathtext` |
 | Reference lines and shapes | `hline!`, `vline!`, `hspan!`, `vspan!`, `slope_guide!`, `slope_triangle!`, `circle!`, `ellipse!`, `arc!`, `arrow!`, `rectangle!`, `polygon!` |
-| Styles and templates | `PlotStyle`, `set_default_style!`, `get_default_style`, `with_style`, `register_style!`, `set_template!`, `set_default_template!`, `get_default_template` |
+| Styles and templates | `PlotStyle` (journal presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`), `set_default_style!`, `get_default_style`, `with_style`, `register_style!`, `set_template!`, `set_default_template!`, `get_default_template` |
 | Export | `savefig`, `json` |
 | Windows and PlotlyJS compatibility | `SyncPlot`, `to_syncplot`, `plot`, `plot!` (same as the scatter mutator), `msgchannel`, `toggle_devtools` |
+
+The two colour tables are public but not exported: write
+`PlotlySupply.COLORMAPS` and `PlotlySupply.COLOR_CYCLES`.
 
 PlotlySupply also re-exports PlotlyBase (`scatter`, `Layout`, `attr`,
 `relayout!`, `restyle!`, `add_trace!`, `Spec`, ...), `meshgrid` from
@@ -158,9 +201,9 @@ Keyword support is grouped by family:
 |---|---|---|---|
 | `title`, `width`, `height`, `fontsize`, `show` | figure title; size in px (0 = automatic); base font size (0 = template); `show = true` opens a window and returns a `SyncPlot` | every constructor | none |
 | `xlabel`, `ylabel`, `grid` | axis titles; `grid = false` hides the grid | 2-D Cartesian | none |
-| `xrange`, `yrange` | axis limits `[lo, hi]` in data units, also on log axes; `[0, 0]` or `nothing` is automatic | 2-D Cartesian | `plot_matrix` |
+| `xrange`, `yrange` | axis limits `[lo, hi]` in data units, also on log axes; `(lo, nothing)` or `(nothing, hi)` fixes one end; `[0, 0]` or `nothing` is automatic | 2-D Cartesian | `plot_matrix` |
 | `xscale`, `yscale` | `"linear"` or `"log"` | 2-D Cartesian | `plot_complex`, `plot_funnel`, `plot_waterfall`, `plot_image`, `plot_matrix` |
-| `xticks`, `yticks`, `xticklabels`, `yticklabels`, `xtickformat`, `ytickformat` | tick values (data units) or the presets `:decades` and `:auto`, their labels, a d3 format | 2-D Cartesian | `plot_funnel`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc`, `plot_matrix`, `plot_pcolormesh`, `plot_polygons`, `plot_tripcolor`, `plot_triplot`, `plot_tricontour` |
+| `xticks`, `yticks`, `xticklabels`, `yticklabels`, `xtickformat`, `ytickformat` | tick values (data units) or the presets `:decades` and `:auto`, their labels, a d3 format | 2-D Cartesian | none |
 | `equalar` | equal axis scales (aspect ratio 1) | 2-D Cartesian | `plot_bar`, `plot_histogram`, `plot_box`, `plot_violin`, `plot_histogram2d`, `plot_funnel`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc` |
 | `legend` | legend name; unnamed traces get no legend entry | 2-D Cartesian | `plot_histogram2d`, `plot_heatmap`, `plot_contour`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_tripcolor`, `plot_tricontour` |
 | `color` | one colour, or one per series | 2-D Cartesian | `plot_histogram2d`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc`, `plot_heatmap`, `plot_contour`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_tripcolor` |
@@ -181,16 +224,25 @@ constructor except `show`. A keyword a function does not take raises an error.
 
 ## Export
 
-`savefig(fig, "name.ext"; ...)` writes `png`, `jpeg`, `svg`, `pdf`, `eps`
-(through Ghostscript), `html` or `json`, chosen by the extension:
+`savefig(fig, "name.ext"; ...)` writes `pdf`, `svg`, `eps` (through Ghostscript),
+`png`, `jpeg`, `tiff` (`.tif`), `html` or `json`, chosen by the extension:
 
 - `width`, `height` with `units = :px` (default), `:in`, `:cm`, `:mm` or `:pt`;
-  without them the figure's own size, else 700 x 500 px.
-- `dpi` for PNG and JPEG (stored in the file); vector formats keep their
-  physical size.
+  without them the figure's own size, else the active style's default size
+  (a journal preset sets one), else 700 x 500 px. PDF and EPS pages have
+  exactly that size in points; PNG, JPEG and TIFF get `round(width * scale)`
+  pixels.
+- `dpi` for PNG, JPEG and TIFF (stored in the file); TIFF is lossless LZW with
+  its resolution tags, 300 dpi unless told otherwise.
+- `fonts = :auto` (PDF): text stays text in embedded TrueType fonts. Chromium can
+  embed STIX or Latin Modern only as Type 3; `:auto` then outlines the page's
+  text with Ghostscript. `:embed` and `:outline` force either. EPS text is
+  outlines.
 - `background = :transparent`, `tight = true` (trim the margins), and
   `deterministic = true` (the default: repeated exports are byte-identical).
 - `savefig(fig, ["fig.pdf", "fig.png"])` writes several files from one render.
+- HTML embeds plotly.js (about 4.5 MB per file); MathJax is loaded from its CDN
+  when the figure has math.
 
 See the [documentation](https://jake-w-liu.github.io/PlotlySupply.jl/dev/) for
 guides to every area, the matplotlib-to-PlotlySupply table and the migration

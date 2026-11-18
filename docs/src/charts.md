@@ -80,10 +80,24 @@ fig3 = plot_scattermap([2.35, 13.40], [48.86, 52.52]; zoom = 3, center_lon = 8,
 update_maps!(fig3; style = "carto-positron", zoom = 4)
 ```
 
-The map constructors accept further plotly.js trace attributes as keywords
-(nested ones with underscores, such as `marker_opacity`); a name that is not
-an attribute of the trace type raises an `ArgumentError`. Colour scales
-follow the package's colormap names (matplotlib orientation).
+Raw plotly.js trace attributes go in the `trace` keyword, the only
+pass-through on the map functions: `trace = attr(hovertemplate = "%{lat}",
+customdata = ids)`. A bare plotly keyword (`hovertemplate = ...`) raises an
+`ArgumentError` that says so, and `trace` may not set `name`, `colorscale`,
+the positional data or anything a package keyword controls. Scatter maps take
+`colorscale` with a numeric `color`; `plot_choropleth`, `plot_densitymap` and
+their `*mapbox` forms take `legend`, the trace's legend name (shown in the
+legend, `$...$` math allowed). The mutators reject `show`, and `row`/`col` on
+a `Plot`. Colour scales follow the package's colormap names (matplotlib
+orientation).
+
+```julia
+fig4 = plot_scattergeo([2.35, 13.40], [48.86, 52.52]; scope = "europe",
+    color = [1.0, 2.0], colorscale = "viridis", marker_size = 12,
+    trace = attr(hovertemplate = "lat %{lat}<extra></extra>"))
+fig5 = plot_choropleth(["France", "Germany"], [1.0, 2.0]; locationmode = "country names",
+    scope = "europe", legend = "GDP index")
+```
 
 In a subplot grid, map cells are created with `specs`, the map mutators take
 `row`/`col`, and [`update_maps!`](@ref) changes one cell (call it on `sf.fig`

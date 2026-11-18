@@ -3147,10 +3147,11 @@ re-exported from MeshGrid.jl.
 meshgrid
 
 """
-	json(args...; kwargs...)
+	json(args...; pretty = false, kwargs...)
 
 Serialize to JSON — re-exported from `JSON.jl` via PlotlyBase; e.g.
-`json(p, 2)` pretty-prints a figure's JSON specification.
+`json(p, 2)` or `json(p; pretty = true)` pretty-prints a figure's JSON
+specification (`pretty` and the other keywords are those of `JSON.json`).
 """
 json
 

@@ -193,3 +193,82 @@ set_fonts!(fig3; title = 12, label = 10, tick = 8, units = :pt)
 # fragment: needs Ghostscript (gs) on PATH
 savefig(fig2, "bars.eps"; width = 3.5, height = 2.5, units = :in)
 ```
+
+## Figure archetypes from real projects
+
+The rows below cover the figure types that appear in real matplotlib projects
+(66 figure archetypes from convergence studies, FEM field maps, 3-D surfaces,
+schematics and optical device figures; archetypes that differ only in data
+share a row), each as the matplotlib construct and the PlotlySupply
+statements that draw it. Every statement in the right column is run by the test suite on
+the data of the block below, so a row that stops working fails the build. The
+`;` separates statements; a row creates its own figure.
+
+```julia
+using PlotlySupply
+
+x = collect(range(0.0, 1.0; length = 20))
+y = sin.(2π .* x)
+ys = [y, cos.(2π .* x)]
+lo, hi = y .- 0.2, y .+ 0.2
+h = 0.5 ./ 2 .^ (0:5)
+errs = [2 .* h, 3 .* h .^ 2, 5 .* h .^ 3]
+U = [sin(3a) * cos(2b) for a in x, b in x]                    # U[ix, iy]
+r = range(1, 2; length = 9);  θ = range(0, π; length = 33)
+X = [ri * cos(t) for ri in r, t in θ];  Y = [ri * sin(t) for ri in r, t in θ]
+C = [sin(3t) / ri for ri in r[1:end-1], t in θ[1:end-1]]       # one value per cell
+tx = [0.0, 1.0, 0.0, 1.0, 0.5];  ty = [0.0, 0.0, 1.0, 1.0, 0.5]
+tri = [1 2 5; 2 4 5; 4 3 5; 3 1 5];  tv = tx .+ ty
+px = [[0.0, 1, 1, 0], [1.0, 2, 2, 1]];  py = [[0.0, 0, 1, 1], [0.0, 0, 1, 1]];  pv = [1.0, 2.0]
+vx = [0.0, 1, 0, 0];  vy = [0.0, 0, 1, 0];  vz = [0.0, 0, 0, 1]
+faces = [[1, 2, 3], [1, 2, 4], [1, 3, 4], [2, 3, 4]];  fv = [1.0, 2.0, 3.0, 4.0]
+s = range(0, 2π; length = 41)
+Zt = [(2 + cos(v)) * cos(u) for u in s, v in s]               # torus x, y, z grids
+Yt = [(2 + cos(v)) * sin(u) for u in s, v in s]
+Zs = [sin(v) for u in s, v in s]
+```
+
+| matplotlib archetype | PlotlySupply |
+|---|---|
+| 1x2 log-log convergence with custom log ticks and a hand-built legend | `sf = subplots(1, 2; sync = false); plot_scatter!(sf, h, errs; row = 1, col = 1, xscale = "log", yscale = "log", xticks = :decades, mode = "lines+markers", legend = ["p=1", "p=2", "p=3"]); plot_scatter!(sf, h, errs; row = 1, col = 2, xscale = "log", yscale = "log", legend = ["a", "b", "c"]); set_legend!(sf; position = :outside_bottom, ncols = 3)` |
+| log-x curves, open and filled markers, shared-y panels, legend on top, slope reference with text | `sf = subplots(1, 2; sync = false, shared_yaxes = true); plot_scatter!(sf, h, errs; row = 1, col = 1, xscale = "log", marker_color = ["none", "white", "black"], mode = "lines+markers", legend = ["a", "b", "c"]); slope_guide!(sf, 2; row = 1, col = 1, x = (h[end], h[1]), through = (h[3], errs[2][3]), label = "2"); set_legend!(sf; position = :outside_top)` |
+| solid markers plus `x` markers for partial-load points, log x | `plot_scatter(h, errs[1]; xscale = "log", mode = "lines+markers", marker_symbol = "circle", legend = "converged"); fig = plot_scatter(h, errs[1]; xscale = "log", mode = "markers", marker_symbol = "x", legend = "partial")` |
+| many lines: linestyle encodes mesh, colour encodes method, mixed legend from proxy handles | `fig = plot_scatter(x, [y, 2 .* y, y .+ 1, 2 .* y .+ 1]; color = ["#b33c38", "#b33c38", "#245e9c", "#245e9c"], dash = ["solid", "dash", "solid", "dash"], legend = ["A/coarse", "A/fine", "B/coarse", "B/fine"]); legend_entry!(fig, "method"; color = "gray")` |
+| `PolyCollection` of an FEM mesh coloured by cell value, 1x3 panels, ONE shared colorbar | `sf = subplots(1, 3; sync = false); for c in 1:3; plot_polygons!(sf, px, py, c .* pv; row = 1, col = c, edgecolor = "black", crange = (0, 4)); end; shared_colorbar!(sf; title = "\|u\|")` |
+| mesh field map plus an adjacent line plot, colorbar bound to one axes | `sf = subplots(1, 2; sync = false, width_ratios = [2, 1]); plot_polygons!(sf, px, py, pv; row = 1, col = 1, colorbar_title = "u"); plot_scatter!(sf, x, y; row = 1, col = 2)` |
+| `Poly3DCollection` of a hex-mesh exterior, 1x3 with a common colorbar and `view_init` | `sf = subplots(1, 3; sync = false, specs = fill(Spec(kind = "scene"), 1, 3)); for c in 1:3; plot_polygons3d!(sf, vx, vy, vz, faces, c .* fv; row = 1, col = c); view!(sf; row = 1, col = c, elev = 25, azim = -60); end; shared_colorbar!(sf; title = "u")` |
+| single-colour 3-D block with a text label at a 3-D point | `fig = plot_polygons3d(vx, vy, vz, faces, fv; colorscale = "Blues", showscale = false, crange = (0, 2)); annotate!(fig, 0.5, 0.5, 0.5, "C")` |
+| torus with a diverging map, faint wireframe of the reference mesh, top-down camera, colorbar axes | `fig = plot_surface(Zt, Yt, Zs; colorscale = "RdBu_r", cmid = 0); plot_wireframe!(fig, Zt, Yt, Zs; opacity = 0.2, color = "gray"); view!(fig; elev = 90, azim = -90, projection = "orthographic"); colorbar!(fig; title = "u", len = 0.6)` |
+| 3-D parametric surface coloured by a facecolor array, axes off, `text2D`, standalone colorbar | `fig = plot_surface(Zt, Yt, Zs; surfacecolor = Zs, colorscale = "viridis"); scene!(fig; showaxis = false); annotate!(fig, 0.05, 0.95, "(a)"; coords = :axes, showarrow = false)` |
+| 3-D mesh with per-polygon colours (cut planes) | `fig = plot_mesh3d(vx, vy, vz; i = [0, 0, 0, 1], j = [1, 2, 3, 2], k = [2, 3, 1, 3], intensity = fv, intensitymode = "cell", edges = true); fig2 = plot_polygons3d(vx, vy, vz, faces, fv)` |
+| tetrahedron with `quiver` basis arrows and a custom `Arrow3D` | `fig = plot_polygons3d(vx, vy, vz, faces, fv; opacity = 0.4); plot_quiver3d!(fig, vx, vy, vz, vy, vz, vx; style = :arrow, color = "black")` |
+| analytic response surface with markers and 3-D curves, plus a 2-D ellipse companion | `sf = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec(kind = "xy")]); plot_surface!(sf, Zt, Yt, Zs; row = 1, col = 1, colorscale = "viridis"); plot_scatter3d!(sf, [0.0, 1], [0.0, 1], [0.0, 1]; row = 1, col = 1, marker_symbol = "o", marker_color = "none", marker_line_color = "black"); plot_scatter!(sf, cos.(s), 0.5 .* sin.(s); row = 1, col = 2)` |
+| dashboard: scatter strips with multi-line `annotate`, curve overlay, `suptitle`, footnote | `fig = plot_scatter(x, y; mode = "markers", title = "Comparison"); annotate!(fig, 0.5, 0.4, "peak\nvalue"; offset = (20, 20)); annotate!(fig, 0.5, 0.01, "Source: simulation"; coords = :figure, showarrow = false, anchor = :bottom)` |
+| print fitting and vector export: `figsize`, `dpi`, EPS, `metadata={"CreationDate": None}` | `fig = with_style(:ieee) do; plot_scatter(x, y; xlabel = "\$x\$"); end; savefig(fig, "arch.pdf"; width = 3.5, height = 2.5, units = :in)` |
+| shaded min/max band with bounding lines and a dashed secondary curve | `fig = plot_band(x, lo, hi; color = "#0072B2", opacity = 0.2, legend = "range"); plot_scatter!(fig, x, y; legend = "mean"); plot_scatter!(fig, x, hi; dash = "dash", legend = "bound")` |
+| theory line against hollow-marker data points, limit line | `fig = plot_scatter(x, y; legend = "theory"); plot_scatter!(fig, x[1:3:end], y[1:3:end]; mode = "markers", marker_color = "none", marker_line_width = 1.5, legend = "data"); hline!(fig, 0.0; dash = "dot")` |
+| schematic from patches, `FancyArrowPatch` and text on an axis-off equal-aspect axes | `fig = plot_scatter(Float64[], Float64[]; xrange = (0, 10), yrange = (0, 4), equalar = true); rectangle!(fig, 1, 1, 4, 3; rounded = 0.2, label = "A"); arrow!(fig, 4, 2, 6, 2; text = "beam"); circle!(fig, 8, 2, 1); annotate!(fig, 8, 3.4, "ring"; showarrow = false); axis_off!(fig)` |
+| `pcolormesh` on a polar-to-Cartesian mesh, mirrored to a full disk, circle overlays | `fig = plot_pcolormesh(X, Y, C; colorscale = "magma", equalar = true); plot_pcolormesh!(fig, -X, Y, C; colorscale = "magma", showscale = false, equalar = true); circle!(fig, 0, 0, 1.5; edgecolor = "white")` |
+| `tripcolor` with Gouraud shading and a mask, white outlines, colorbar | `fig = plot_tripcolor(tx, ty, tri, tv; shading = :gouraud, colorscale = "viridis"); plot_triplot!(fig, tx, ty, tri; color = "white", linewidth = 1)` |
+| complex-plane scatter of poles with per-point offset labels, filled and hollow markers | `z = [0.5 + 0.5im, -0.5 + 0.2im, 0.1 - 0.8im]; fig = plot_complex(z; mode = "markers", marker_color = ["black", "none", "black"], unit_circle = true); annotate!(fig, 0.5, 0.5, "p1"; offset = (10, 10))` |
+| `markevery` sparse markers plus `axhline` limit lines on log-log | `fig = plot_scatter(h, errs[2]; xscale = "log", yscale = "log", mode = "lines+markers", markevery = 2); hline!(fig, 1e-3; dash = "dash")` |
+| 2x2 composite (field map, trajectories, two convergence panels) with panel-letter titles | `sf = subplots(2, 2; sync = false); plot_heatmap!(sf, x, x, U; row = 1, col = 1); plot_scatter!(sf, y, x; row = 1, col = 2); plot_scatter!(sf, h, errs; row = 2, col = 1, xscale = "log", yscale = "log"); plot_scatter!(sf, x, y; row = 2, col = 2); panel_labels!(sf)` |
+| scientific-notation offset text on the axis | `fig = plot_scatter(x, 1e7 .* x); yticks!(fig; offset = :auto)` |
+| single curve with a star extrapolation marker | `fig = plot_scatter(x, y; legend = "fit"); plot_scatter!(fig, [1.2], [0.3]; mode = "markers", marker_symbol = "star", marker_size = 12, legend = "limit")` |
+| stacked `pcolormesh` maps with a white contour outline and one shared vertical colorbar | `sf = subplots(2, 1; sync = false); for r in 1:2; plot_heatmap!(sf, x, x, r .* U; row = r, col = 1, colorscale = "inferno"); plot_contour!(sf, x, x, U; row = r, col = 1, levels = [0.0], coloring = "none", linecolor = "white"); end; shared_colorbar!(sf; title = "\|E\|^2")` |
+| side-by-side parameter-space heatmaps, `sharey`, one colorbar | `sf = subplots(1, 3; sync = false, shared_yaxes = true); for c in 1:3; plot_heatmap!(sf, x, x, c .* U; row = 1, col = c, colorscale = "magma"); end; shared_colorbar!(sf)` |
+| line plots with distinct linestyles, hand-placed panel letters, frameless legends | `sf = subplots(1, 2; sync = false); plot_scatter!(sf, x, ys; row = 1, col = 1, dash = ["solid", "dash"], legend = ["a", "b"]); plot_scatter!(sf, x, ys; row = 1, col = 2); panel_labels!(sf); set_legend!(sf; frame = false)` |
+| optimization history on a log y axis with fading alpha, scatter with categorical x ticks | `fig = plot_scatter(1:20, [10.0 .^ (-0.1 .* (1:20)) .* k for k in (1, 2, 3)]; yscale = "log", opacity = [0.3, 0.6, 1.0]); fig2 = plot_scatter(["a", "b", "c"], [1.0, 2.0, 1.5]; mode = "markers")` |
+| grouped bars on a log y axis with custom ticks, plus a power-versus-channel line | `fig = plot_bar(["a", "b", "c"], [[1.0, 10, 100], [2.0, 20, 50]]; yscale = "log", yrange = (0.5, 200), yticks = [1, 10, 100], legend = ["x", "y"])` |
+| ratio curves with a marker ladder, hand-built `Line2D` legend, `fillstyle` full versus none | `fig = plot_scatter(x, ys; mode = "lines+markers", marker_color = ["none", "black"], legend = ["open", "filled"]); legend_entry!(fig, "proxy"; color = "gray", dash = "dash")` |
+| ECDF/step curves, white-edged markers, `vlines` tick strips, `LogLocator(subs)` | `fig = plot_ecdf(randn(100); legend = "ECDF"); plot_vlines!(fig, [-1.0, 0.0, 1.0], 0, 0.05; color = "black"); fig2 = plot_scatter(h, errs[1]; xscale = "log", marker_line_color = "white", mode = "markers"); xticks!(fig2; subs = (1, 2, 5))` |
+| converged-fraction curves with a sequential colour ramp and a band spanning two rows | `cols = colormap_colors("viridis", 3); sf = subplots(2, 2; sync = false, specs = [Spec() Spec(rowspan = 2); Spec() missing]); plot_scatter!(sf, x, [y, 2 .* y, 3 .* y]; row = 1, col = 1, color = cols); plot_band!(sf, x, lo, hi; row = 1, col = 2)` |
+| pixel-pattern `imshow` with a `ListedColormap`, `Rectangle` cells and wavevector arrows | `fig = plot_heatmap(x, x, round.(U); colorscale = discrete_colormap(["#ffffff", "#444444", "#0072B2"]), showscale = false); rectangle!(fig, 0.2, 0.2, 0.6, 0.6; edgecolor = "white"); arrow!(fig, 0.5, 0.5, 0.8, 0.8)` |
+| `imshow` with dashed and solid white outlines, bilinear map plus contour, `LogNorm` matrix with outlined cells | `fig = plot_heatmap(x, x, U; colorscale = "cividis", interpolation = :bilinear); rectangle!(fig, 0.2, 0.2, 0.6, 0.6; edgecolor = "white", dash = "dash", fillcolor = "rgba(0,0,0,0)"); fig2 = plot_heatmap(1:4, 1:4, abs.(U[1:4, 1:4]) .+ 1e-3; colornorm = :log)` |
+| horizontal bars on a log x axis with value labels (for `orientation = "h"` the values come first), stacked vertical bars | `fig = plot_bar([1.0, 10, 100], ["a", "b", "c"]; orientation = "h", xscale = "log", xrange = (0.5, 200), text = ["1", "10", "100"], textposition = "outside"); fig2 = plot_bar(["p", "q"], [[1.0, 2], [3.0, 1]]; barmode = "stack")` |
+| log-log data plus a reference line, `axhspan` tolerance bands, `axvline` thresholds, secondary x axis | `fig = plot_scatter(h, errs[2]; xscale = "log", yscale = "log", mode = "markers"); hspan!(fig, 1e-3, 1e-2; opacity = 0.2); vline!(fig, 0.1; dash = "dot"); secondary_xaxis!(fig, v -> 1 / v, v -> 1 / v; title = "1/h")` |
+| dot comparison on categorical-grouped x positions, filled versus hollow markers | `fig = plot_scatter(["a", "b", "c"], [[1.0, 2, 3], [1.5, 2.5, 2.0]]; mode = "markers", marker_color = ["black", "none"], legend = ["x", "y"])` |
+| annotated `imshow` with per-cell mathtext labels and a colorbar | `fig = plot_matrix([1.0 0.5; 0.5 1.0]; xlabels = ["\$a\$", "\$b\$"], ylabels = ["\$a\$", "\$b\$"], colorbar_title = "\$r\$")` |
+| `pcolormesh` strips with non-uniform edges, log y, categorical ticks | `fig = plot_pcolormesh([0.0, 0.1, 0.4, 1.0], [1.0, 10, 100, 1000], rand(3, 3); yscale = "log", xticks = [0.05, 0.25, 0.7], xticklabels = ["a", "b", "c"])` |
+| phase-plane schematic: unit circle fill, arc arrows, leader lines, markers with white edges | `fig = plot_scatter(Float64[], Float64[]; xrange = (-2, 2), yrange = (-2, 2), equalar = true); circle!(fig, 0, 0, 1; fillcolor = "rgba(0,114,178,0.2)"); arc!(fig, 0, 0, 1.4, 20, 100; arrow = :end); annotate!(fig, 1, 0, "fixed point"; xytext = (1.5, 0.8), head = :none); plot_scatter!(fig, [0.0], [0.0]; mode = "markers", marker_line_color = "white", marker_size = 10)` |
+| axes the layout checker measured by hand: tight bounding boxes, `constrained_layout`, `subplots_adjust` | not needed: colorbars, legends, titles and panel labels reserve their own room; `savefig(...; tight = true)` and `tight_layout!(fig)` trim the margins |

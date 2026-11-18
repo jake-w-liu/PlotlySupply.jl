@@ -2,20 +2,30 @@
 
 ## 2.0.0 (unreleased)
 
-2.0 turns PlotlySupply into a toolkit for scientific and publication figures.
-Every name exported by 1.9.3 is still exported. The behaviour changes below
-are listed with before/after code in the documentation page "Migrating from
-1.x".
+2.0 turns PlotlySupply into a toolkit for scientific and publication figures:
+journal presets with exact column widths, fonts in points and embedded fonts,
+TIFF/PDF/EPS export at exact sizes, tight field plots, layouts in which
+colorbars, legends and titles never overlap their neighbours, and a much
+faster first figure. Every name exported by 1.9.3 is still exported. The
+behaviour changes below are listed with before/after code in the documentation
+page "Migrating from 1.x".
+
+It includes the fixes of 1.9.4 (listed at the end).
 
 ### Breaking changes
 
 Colours
 
-- Named colour scales follow matplotlib's orientation (`"RdBu"` runs from
-  red to blue, `"Blues"` from light to dark), in every function that takes a
-  `colorscale`, including 3-D, hierarchy and map plots. Traces store the
+- Named colour scales follow matplotlib's orientation, in every function that
+  takes a `colorscale`, including 3-D, hierarchy and map plots. **`"Greys"`,
+  `"Blues"`, `"Greens"`, `"YlGnBu"`, `"YlOrRd"` and `"RdBu"` run the other way
+  round than in 1.x** (plotly.js's `"Greys"` was black to white, now it is
+  white to black; `"RdBu"` ran blue to red, now red to blue). Use the name with
+  `_r` (`"Greys_r"`, `"RdBu_r"`) for the 1.x direction. Traces store the
   resolved colour stops instead of the name. Unknown names raise an
-  `ArgumentError`.
+  `ArgumentError` (1.x fell back to `"RdBu"`).
+- `:publication` and `colorway = :okabe_ito` use the Okabe-Ito cycle in a
+  line-safe order starting with `#0072B2` (1.x started with `#E69F00`).
 
 Axes and ranges
 
@@ -23,14 +33,23 @@ Axes and ranges
   `xrange`/`yrange` keywords of constructors and mutators (1.x: exponents).
 - `[0, 0]`, `(0, 0)` and `nothing` restore automatic ranging.
 - Explicit ranges are written with `autorange = false`.
-- Partial ranges, equal bounds, `Bool` bounds and strings on numeric axes
-  raise an `ArgumentError`.
+- Equal bounds, `Bool` bounds and strings on numeric axes raise an
+  `ArgumentError`. One-sided limits `(lo, nothing)` and `(nothing, hi)` are
+  accepted (see "Added").
+- The automatic sentinels keep a reversed axis reversed.
 - On shared subplot axes, a range applies to the whole shared group.
 - Mutators change only the primary axes.
 - `grid = nothing` (the mutator default) keeps the grid.
 - `tick0` is no longer written.
 - Logarithmic axes label ticks as powers of ten.
 - Changing an axis scale converts an explicit range.
+- `grid!(which = :major | :minor)` changes only that grid (1.x: each call
+  defined the whole grid).
+- `xticks!`/`yticks!(direction = :both | :inout)` raise an `ArgumentError`.
+- `zrange!`/`axis_equal!` on a 3-D scene pin `aspectmode = "manual"` with the
+  drawn proportions.
+- Inset tick labels default to one size step smaller, and inset frames follow
+  the template colours.
 
 Labels and titles
 
@@ -52,6 +71,12 @@ Legends
 - The default legend of line plots moves to the corner with the least data
   (the matplotlib "best" placement).
 - Legend boxes follow the template.
+- Cell legends of a `SubplotFigure` at the default `:topright` move to the
+  least-covered position when traces are appended; a legend placed by you
+  stays.
+- `set_legend!(ncols = k)` lays columns out as legend groups; a click toggles
+  one entry.
+- `legend_entry!` validates colours and writes hex CSS.
 
 Subplots
 
@@ -61,6 +86,20 @@ Subplots
   only that cell.
 - Colorbars sit next to their cell.
 - Only an explicit `barmode` applies to the whole figure.
+- Cells give up room for colorbars, outside legends, panel titles and labels
+  (their plot area shrinks, never a neighbour's); bottom colorbars sit below
+  the tick labels; a vertical colorbar is at least three tick-label lines
+  tall. Domains you set are kept.
+- On shared axes a call on any cell acts on the whole group (type, ticks,
+  tick font, range); a title set on a hidden-label cell goes to the labelled
+  one; styling-only calls never move a title.
+- Grid titles (`subplot_titles`, `column_titles`, `row_titles`, `x_title`,
+  `y_title`) go through mathtext, are named annotations and follow the style's
+  title size.
+- Whole-figure verbs (`relayout!`, `restyle!`, `update!`, ...) reject cell
+  keywords; `add_hline!` and the other `add_*` helpers reject `show`,
+  `secondary_y`, `inset`, `xref`, `yref` on a `Plot` and take `row`/`col` on a
+  `SubplotFigure`.
 - Arguments are validated.
 - `to_image` on a `sync = false` grid raises an `ArgumentError`.
 
@@ -79,6 +118,16 @@ Plot functions
 - `plot_quiver` separates arrows with `null`, anchors equal aspect on the y
   axis and hides unnamed arrows from the legend. `plot_quiver!` and
   `plot_image!` apply equal aspect by default.
+- `plot_bar` with one series: `color`, `hatch` and `barwidth` vectors with one
+  entry per bar set each bar (1.x used the first entry only).
+- `plot_pcolormesh` defaults to `equalar = false`.
+- `plot_image(interpolation = :bilinear)` writes a PNG source; contours with
+  non-uniform levels are one trace per level.
+- `plot_quiver`/`plot_streamlines` overlays do not widen a field's tight axes;
+  `plot_quiver` `color` defaults to `nothing`.
+- `view!(fig)` and `scene!(fig)` return `nothing` on a `Plot` or `SyncPlot`.
+- 3-D colours with an alpha channel are drawn opaque, blended over the
+  background; `plot_scatter3d(marker_color = ...)` adds a 1.5 px outline.
 - `plot_quiver3d` cones use `sizemode = "scaled"`.
 - `plot_surface(...; color = "gray")` draws one colour.
 - 3-D scenes get an explicit camera at a fitted distance.
@@ -99,13 +148,30 @@ Validation and errors
   an `ArgumentError` instead of a `MethodError`.
 - Map functions reject keywords that are not plotly.js attributes of the
   trace, reject empty data, and pass titles and legend names through
-  `mathtext`.
+  `mathtext`. Raw plotly.js attributes go in `trace = attr(...)`; bare
+  keywords such as `hovertemplate` raise an `ArgumentError`.
+- `legend` of `plot_choropleth` and the density maps is the trace's legend
+  name (with `showlegend = true`).
+- `annotate!(coords = :figure)` now means fractions of the whole figure in
+  `[0, 1]`; plotly's paper coordinates are `coords = :paper`.
 
 Export, windows and templates
 
 - `savefig` uses the figure's `layout.width`/`layout.height` when no size is
   given (1.x: always 700 x 500 px).
 - Exports are deterministic by default.
+- A figure without a size exports at the active style's default size.
+- PDF with `fonts = :auto`: text of a page with Type 3 fonts is outlined by
+  Ghostscript (TrueType figures are unchanged). EPS text is outlined and its
+  bounding box is the page; translucent EPS colours are blended.
+- Raster sizes are rounded, not truncated; PNG/JPEG with physical units record
+  `96 * scale` dpi; SVG with physical units carries them (`88mm`).
+- `.tif`/`.tiff` are a format; an unwritable destination raises an
+  `ArgumentError` before rendering.
+- HTML export embeds plotly.js (about 4.5 MB per file).
+- `figsize!` stores exact, unrounded sizes; its errors are `ArgumentError`.
+- The `:publication` font family is "Times New Roman, Times, Liberation Serif,
+  serif" (PDF embeds TrueType).
 - `redraw!` rebuilds the page from the Julia figure.
 - At exit, Julia waits for the Electron processes it started.
 - Dark templates use light axis lines and ticks.
@@ -133,11 +199,30 @@ Plot keywords
 - Fields: `levels`, `cmid`, `colornorm = :log`, `text`, `origin`, `tight`.
   Fields fit their axes exactly and keep the colorbar as tall as the field
   under `equalar = true`.
-- 3-D: `view`, `edges`, `lighting`, `style = :arrow` for `plot_quiver3d`.
+- 3-D: `view`, `edges`, `lighting`, `style = :arrow` for `plot_quiver3d`;
+  `plot_scatter3d` `marker_line_color`, `marker_line_width`, `markevery`,
+  hollow markers and the matplotlib marker codes.
+- `plot_quiver`: `style = :triangle`, `pivot`, `scale = :uniform`, `headwidth`,
+  `colorby` (with the colour and colorbar keywords), `edgecolor`, `edgewidth`,
+  `opacity`.
+- Bars: `barwidth`, per-bar `color`/`hatch` vectors, `bargap`/`bargroupgap`
+  on subplots; `secondary_y` on `plot_bar!`, `plot_histogram!`, `plot_box!`,
+  `plot_violin!`, `plot_histogram2d!`.
+- Maps: `trace = attr(...)`; `colorscale` on scatter maps; `legend` on
+  choropleth and density maps.
 - Polar plots: `rlabel_angle`.
 
 Axes and ticks
 
+- One-sided limits: `xrange`, `yrange` and `zrange` (keywords and `xrange!`,
+  `yrange!`, `zrange!`) take `(lo, nothing)` and `(nothing, hi)`.
+- `spines!` keywords `bottom`, `top`, `left`, `right` (also over a data
+  interval) and `ticks = :mirror | :primary | :none`; `xticks!(offset = ...)`
+  and `direction = :none`; `inset!(coords = :data, fontsize = ...)`.
+- Tick keywords (`xticks`, `yticks`, `xticklabels`, ...) on `plot_matrix`,
+  `plot_pcolormesh`, `plot_polygons`, `plot_tripcolor`, `plot_triplot`,
+  `plot_tricontour`, `plot_funnel`, `plot_waterfall`, `plot_candlestick`,
+  `plot_ohlc`.
 - `xticks!`, `yticks!` (values, labels, d3 formats, `subs`, minor ticks,
   `:decades`).
 - `log_ticks`, `axis_equal!`, `axis_off!`, `grid!`, `spines!`.
@@ -160,7 +245,8 @@ Annotations and shapes
 - `slope_guide!`, `slope_triangle!`.
 - `circle!`, `ellipse!`, `rectangle!`, `polygon!`, `arc!`, `arrow!`.
 - `legend_entry!`.
-- `annotate!` with `coords` and `offset`.
+- `annotate!` with `coords` (`:data`, `:axes`, `:paper`, `:figure`), `offset`,
+  `anchor`, `background`, `fit`/`wrap` and `xytext`.
 
 Text and colours
 
@@ -172,12 +258,31 @@ Styles and export
 
 - `PlotStyle`, `set_default_style!`, `get_default_style`, `with_style`,
   `register_style!`, with the built-in styles `:default` and `:publication`.
+- Journal presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`
+  (fonts in points, 1 pt lines, journal ticks, Okabe-Ito colours, greyscale-safe
+  `:dash_symbol` cycle, single-column width), `journal_width`, and
+  `figsize!(fig, :ieee; columns = 2, aspect = 0.4)` (a taller figure than the
+  journal's maximum is an error). Optica is not included: its widths could not
+  be confirmed.
+- `PlotStyle` fields `width`, `aspect`, `axis_linewidth`, `tick_length`,
+  `mirror_ticks`, `errorbar_width`, `reference_linewidth`; `COLOR_CYCLES`
+  (`:okabe_ito`, `:tol_bright`, `:tol_vibrant`, `:tol_muted`,
+  `:tol_high_contrast`); greyscale-safe and uniform colormaps are tabulated in
+  the `COLORMAPS` docstring; grey levels such as `"0.35"` are accepted as
+  colours.
 - `figsize!`, `tight_layout!`.
 - `savefig` options:
   - EPS output (through Ghostscript);
+  - TIFF output (`.tif`/`.tiff`, LZW, resolution tags);
+  - the `fonts` keyword (`:auto`, `:embed`, `:outline`) for PDF and EPS;
+  - exact PDF/EPS page sizes in points;
   - physical `units`, `dpi`, `background`, `tight`, `deterministic` and
     `timeout`;
   - several files from one render.
+- A precompile workload: the first figure of a session takes about half a
+  second instead of half a minute; the one-time precompilation takes minutes
+  longer and the package image grows by about 50 MB. Opt out with the
+  `precompile_workload` preference. A benchmark suite lives in `benchmark/`.
 
 ### Fixed
 
@@ -252,9 +357,25 @@ Labels, templates and windows
 - `subplots(...; sync = false)` no longer writes "PlotlySupply" as the figure
   title.
 
+Layout
+
+- Colorbars, outside legends, panel titles and panel labels no longer overlap
+  neighbouring panels, and fields fit their axes without a white border.
+- The axis title of a shared-axis grid keeps its text when fonts are
+  restyled.
+
 ### Removed
 
 - No exported names were removed.
 - The internal helper `_safe_tick0` was removed, and `tick0` is no longer
   written to axes.
 - 1.x behaviour that 2.0 replaces is listed under "Breaking changes".
+
+## 1.9.4 (2026-11-18)
+
+Patch release on the 1.x line, included in 2.0.0.
+
+- Math legend entries are sized to their text and no longer clipped
+  (plotly.js is patched at load time to give math text groups an explicit font
+  family and size); SVG output keeps its quotes.
+- Asset hashing is linear on Julia 1.12 (it was quadratic).
