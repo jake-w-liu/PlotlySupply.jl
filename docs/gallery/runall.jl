@@ -11,32 +11,37 @@ const GALLERY_DIR = @__DIR__
 
 # Stand-in for `savefig` in a dry run: the figure is built (every call of the script runs) but
 # nothing is rendered; an empty file is written so that scripts that read their output back work.
+const DRY_FIGURES = Pair{String, Any}[]     # (file name => figure) of the last dry run
+
 function _gallery_dry_savefig(fig, path::AbstractString; kwargs...)
 	write(path, "")
+	push!(DRY_FIGURES, basename(path) => fig)
 	return path
 end
 function _gallery_dry_savefig(fig, paths::AbstractVector{<:AbstractString}; kwargs...)
 	foreach(p -> write(p, ""), paths)
+	push!(DRY_FIGURES, basename(first(paths)) => fig)
 	return paths
 end
 
 """
-    run_gallery(args; render = true) -> Int
+    run_gallery(args; render = true, dir = GALLERY_DIR) -> Int
 
-Run the gallery scripts. `args = [outdir, names...]` as on the command line. With
+Run the gallery scripts of `dir`. `args = [outdir, names...]` as on the command line. With
 `render = false` every `savefig` call is replaced by a stand-in that writes an empty file, so the
 scripts are executed in full without the cost of exporting. Returns the exit status: 0 when every
 script ran, 1 otherwise.
 """
-function run_gallery(args::Vector{String}; render::Bool = true)
+function run_gallery(args::Vector{String}; render::Bool = true, dir::AbstractString = GALLERY_DIR)
 	outdir = isempty(args) ? nothing : mkpath(abspath(first(args)))
 	wanted = [endswith(a, ".jl") ? a : a * ".jl" for a in args[2:end]]
-	scripts = sort!(filter(f -> endswith(f, ".jl") && f != "runall.jl", readdir(GALLERY_DIR)))
+	scripts = sort!(filter(f -> endswith(f, ".jl") && f != "runall.jl", readdir(dir)))
 	isempty(wanted) || (scripts = filter(in(wanted), scripts))
 	for w in wanted
 		w in scripts || (println("unknown gallery script: ", w); return 1)
 	end
 	# The scripts read their output directory from ARGS[1] (or use their own directory).
+	render || empty!(DRY_FIGURES)
 	saved_args = copy(ARGS)
 	empty!(ARGS)
 	outdir === nothing || push!(ARGS, outdir)
@@ -46,7 +51,7 @@ function run_gallery(args::Vector{String}; render::Bool = true)
 			m = Module(Symbol("gallery_", replace(f, "." => "_")))
 			t0 = time()
 			try
-				path = joinpath(GALLERY_DIR, f)
+				path = joinpath(dir, f)
 				if render
 					Base.include(m, path)
 				else

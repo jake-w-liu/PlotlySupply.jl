@@ -761,3 +761,142 @@ end
 	@test "plotlysupply:title:1:2" in [a[:name] for a in sf.fig.layout[:annotations] if haskey(a, :name)]
 	@test_throws ArgumentError relayout!(sf; row = 1)
 end
+
+# --- wave 6: the gallery --------------------------------------------------------------------
+
+const _GALLERY_DIR = joinpath(_DOCS_ROOT, "docs", "gallery")
+_gallery_scripts() = sort!(filter(f -> endswith(f, ".jl") && f != "runall.jl", readdir(_GALLERY_DIR)))
+
+# Width and height of a PNG from its IHDR chunk (and the signature check).
+function _docs_png_size(path::AbstractString)
+	bytes = read(path)
+	length(bytes) >= 24 || return nothing
+	bytes[1:8] == UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] || return nothing
+	be32(i) = Int(bytes[i]) << 24 | Int(bytes[i + 1]) << 16 | Int(bytes[i + 2]) << 8 | Int(bytes[i + 3])
+	return (be32(17), be32(21))
+end
+
+@testset "gallery scripts are self-contained and listed on the gallery page" begin
+	scripts = _gallery_scripts()
+	@test 35 <= length(scripts) <= 50
+	page = _docs_read("docs/src/gallery.md")
+	@test occursin("gallery.md", _docs_read("docs/make.jl"))
+	for f in scripts
+		name = f[1:end-3]
+		src = _docs_read(joinpath("docs", "gallery", f))
+		@testset "$name" begin
+			@test count(==('\n'), src) <= 80                          # short enough to read in one go
+			# header: what it shows, the catalogue entries it covers, the matplotlib idiom, the 2.0 calls
+			@test occursin(r"\A# [^\n]+\.\n#\n# Catalogue: "m, src)
+			@test occursin(r"^# Replaces: "m, src) && occursin(r"^# 2\.0: "m, src)
+			@test !occursin(r"/Users/|/tmp|/home/|[A-Z]:[\\]", src)      # no absolute paths
+			@test occursin("isempty(ARGS) ? (@__DIR__) : first(ARGS)", src)
+			@test occursin("using PlotlySupply", src)
+			@test occursin("scale = 2", src)                          # rendered at 2x
+			@test occursin("`$(name)`", page) && occursin("(assets/gallery/$(name).png)", page)
+			png = joinpath(_DOCS_SRC, "assets", "gallery", name * ".png")
+			@test isfile(png)
+			size = _docs_png_size(png)
+			@test size !== nothing && size[1] >= 400 && size[2] >= 250
+		end
+	end
+	# Every figure of the page belongs to a script.
+	for m in eachmatch(r"\]\(assets/gallery/([A-Za-z0-9_]+)\.png\)", page)
+		@test (m.captures[1] * ".jl") in scripts
+	end
+end
+
+@testset "the gallery runner runs every script (dry run) and reports failures" begin
+	runner = Module(:_GalleryRunner)
+	Base.include(runner, joinpath(_GALLERY_DIR, "runall.jl"))
+	args0 = copy(ARGS)
+	mktempdir() do out
+		# Every script of the gallery is executed in full; savefig is a stand-in, nothing is rendered.
+		status = redirect_stdout(devnull) do
+			Base.invokelatest(runner.run_gallery, String[out]; render = false)
+		end
+		@test status == 0
+		@test sort(filter(endswith(".png"), readdir(out))) == [f[1:end-3] * ".png" for f in _gallery_scripts()]
+		# Settled figures: after the last PlotlySupply call of a script, finalizing the figure (outside
+		# the `with_style` block it was built in) writes nothing.
+		unsettled = String[]
+		for (name, fig) in runner.DRY_FIGURES
+			f = fig isa SubplotFigure ? fig.fig : fig
+			PlotlySupply._finalize_figure!(f) && push!(unsettled, name)
+		end
+		@test isempty(unsettled)
+		# One script is rendered for real: a PNG of twice the figure's pixels (3.5 in at 96 dpi, 2x).
+		status = redirect_stdout(devnull) do
+			Base.invokelatest(runner.run_gallery, String[out, "endpoint_star"])
+		end
+		@test status == 0
+		size = _docs_png_size(joinpath(out, "endpoint_star.png"))
+		@test size !== nothing && abs(size[1] - 672) <= 2
+		@test ARGS == args0                                           # the runner restores ARGS
+	end
+	# A failing script is reported, the others still run, and the exit status is 1.
+	mktempdir() do dir
+		write(joinpath(dir, "good.jl"), "using PlotlySupply\nglobal ran_good = true\n")
+		write(joinpath(dir, "bad.jl"), "error(\"boom\")\n")
+		write(joinpath(dir, "runall.jl"), "# not a gallery script\n")
+		out = redirect_stdout(devnull) do
+			Base.invokelatest(runner.run_gallery, String[joinpath(dir, "o")]; render = false, dir = dir)
+		end
+		@test out == 1
+		@test redirect_stdout(devnull) do
+			Base.invokelatest(runner.run_gallery, String[joinpath(dir, "o"), "good"]; render = false, dir = dir)
+		end == 0
+		@test redirect_stdout(devnull) do
+			Base.invokelatest(runner.run_gallery, String[joinpath(dir, "o"), "nosuch"]; render = false, dir = dir)
+		end == 1
+	end
+end
+
+@testset "docs claims of wave 6: paper log ticks, HTML export, migration before/after" begin
+	# Under a paper style a log axis of two decades or more labels decades only by itself;
+	# the default style keeps plotly's labels (axes.md, papers.md).
+	x = 10.0 .^ range(-3, 1; length = 20)
+	paper = with_style(:ieee) do
+		plot_scatter(x, x .^ 2; xscale = "log", yscale = "log")
+	end
+	plain = plot_scatter(x, x .^ 2; xscale = "log", yscale = "log")
+	PlotlySupply._finalize_figure!(paper); PlotlySupply._finalize_figure!(plain)
+	@test paper.layout[:xaxis][:dtick] == 1
+	@test !haskey(plain.layout[:xaxis], :dtick)
+	@test paper.layout[:meta][:plotlysupply][:log_ticks] == "decades"
+	@test !PlotlySupply._finalize_figure!(paper)                  # settled: a second call writes nothing
+	# Optica is documented as absent; the six presets exist (papers.md).
+	@test_throws ArgumentError journal_width(:optica)
+	@test all(j -> journal_width(j) > 0, (:ieee, :aps, :nature, :elsevier, :springer, :aip))
+	# Migration page, 2.0 side of the before/after blocks (the 1.x side was run on v1.9.4:
+	# 1.x stored the colour scale name, accepted exponents on log axes, changed every cell on
+	# update_xaxes!, drew one trace per stem point and read a colour vector per series).
+	f = [1.0, 10, 100, 1000]; g = [1.0, 50, 100, 20]
+	@test plot_scatter(f, g; xscale = "log", xrange = [1, 1000]).layout[:xaxis][:range] == [0.0, 3.0]
+	@test_throws ArgumentError plot_scatter(f, g; xscale = "log", xrange = [0, 3])
+	logfig = plot_scatter(f, g; xscale = "log"); annotate!(logfig, 10, 50, "peak")
+	@test logfig.layout[:annotations][1][:x] == 1.0               # data value 10 is x = 1 in log10
+	@test plot_stem(1:5, [1, 2, 3, 2, 1]).data |> length == 2
+	bar = plot_bar([4.0, 2.0, 7.0]; orientation = "h").data[1]
+	@test bar[:x] == [4.0, 2.0, 7.0] && collect(bar[:y]) == 0:2
+	@test plot_bar(["a", "b", "c"], [1.0, 2, 3]; color = ["red", "green", "blue"]).data[1][:marker][:color] ==
+		["red", "green", "blue"]
+	@test !haskey(plot_scatter(1:5, 1:5).layout[:xaxis], :tick0)
+	@test_throws ArgumentError plot_scatter(1:3, [1, 2])
+	@test_throws ArgumentError plot_heatmap(1:4, 1:3, permutedims(randn(4, 3)))
+	@test plot_scatter(1:3, [1, 2, 3]; title = "Run 3").layout[:title_text] == "Run 3"
+	sf = subplots(1, 2; sync = false)
+	@test !haskey(sf.fig.layout, :title)
+	plot_scatter!(sf, 1:3, [1, 2, 3]; row = 1, col = 1); plot_scatter!(sf, 1:3, [3, 2, 1]; row = 1, col = 2)
+	update_xaxes!(sf; row = 1, col = 2, title_text = "x")
+	@test !haskey(sf.fig.layout[:xaxis], :title) && haskey(sf.fig.layout[:xaxis2], :title)
+	# HTML export: the page embeds plotly.js and two exports of one figure are the same bytes (export.md).
+	mktempdir() do dir
+		fig = plot_scatter(1:5, rand(5))
+		savefig(fig, joinpath(dir, "a.html")); savefig(fig, joinpath(dir, "b.html"))
+		@test filesize(joinpath(dir, "a.html")) > 1_000_000
+		@test read(joinpath(dir, "a.html")) == read(joinpath(dir, "b.html"))
+		# `simplify = true` is an option of the scatter constructors (export.md); the default exports every vertex.
+		@test plot_scatter(1:5, 1:5; simplify = true).data[1][:line][:simplify] === true
+	end
+end
