@@ -975,8 +975,15 @@ end
 	z = [sin(a) + b for a in x, b in y]
 	with_style(:ieee) do
 		W, H = _SFN._style_default_figure_size()
-		@test _SFN._fin_size_is_free(Layout(width = W, height = H))
-		@test !_SFN._fin_size_is_free(Layout(width = W + 10, height = H))
+		# The style's size is the FIGURE's (K1): a layout that carries the
+		# style's record (a figure built under it) has it free; a bare layout
+		# of the same size does not, whatever style is active.
+		carried = plot_scatter(1:3, 1:3).layout
+		carried.fields[:width] = W; carried.fields[:height] = H
+		@test _SFN._fin_size_is_free(carried)
+		@test !_SFN._fin_size_is_free(Layout(width = W, height = H))
+		carried.fields[:width] = W + 10
+		@test !_SFN._fin_size_is_free(carried)
 		# Wide field: the width is kept, blank rows go; the lower bound
 		# scales with the journal size (100 px at 500 px tall).
 		f = plot_heatmap(x, y, z; equalar = true)

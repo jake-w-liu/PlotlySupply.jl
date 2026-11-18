@@ -1074,7 +1074,7 @@ function _s3_plot_area(p::Plot)
 	fields = p.layout.fields
 	size = _S3_EXPORT_SIZE[]
 	if size === nothing
-		default_width, default_height = _figure_default_size()
+		default_width, default_height = _figure_default_size(p)
 		size = (
 			_s3_number_field(fields, :width, Float64(default_width); positive = true),
 			_s3_number_field(fields, :height, Float64(default_height); positive = true),

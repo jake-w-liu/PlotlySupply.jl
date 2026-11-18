@@ -2079,17 +2079,18 @@ function _style_default_figure_size(style::PlotStyle = _active_style())
 end
 
 """
-	_figure_default_size() -> Tuple{Float64,Float64}
+	_figure_default_size(fig = nothing) -> Tuple{Float64,Float64}
 
 Size (px) a figure without `layout.width`/`layout.height` is laid out at by a
-mutator or `_finalize_figure!`: the default size of the style the figure
-carries (inside `_with_figure_style`), else the 1.x 700 x 500. It never
-follows the globally active style, so a figure is settled under any active
-style (K1); only an export of a figure without a size does (`savefig`).
-Internal.
+mutator or `_finalize_figure!`: the default size of the style `fig` (a figure
+or its `Layout`) carries, else of the style installed by `_with_figure_style`,
+else the 1.x 700 x 500. It never follows the globally active style, so a
+figure is settled under any active style (K1); only an export of a figure
+without a size does (`savefig`). Internal.
 """
-function _figure_default_size()
-	carried = _STYLE_SCOPE[]
+function _figure_default_size(fig = nothing)
+	carried = fig === nothing ? nothing : _figure_recorded_style(fig)
+	carried === nothing && (carried = _STYLE_SCOPE[])
 	carried === nothing && return (_DEFAULT_EXPORT_WIDTH_PX, _DEFAULT_EXPORT_HEIGHT_PX)
 	return _style_default_figure_size(carried)
 end

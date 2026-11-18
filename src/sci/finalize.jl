@@ -1455,7 +1455,7 @@ end
 function _fin_layout_size(layout::Layout)
 	w = get(layout.fields, :width, nothing)
 	h = get(layout.fields, :height, nothing)
-	W0, H0 = _figure_default_size()
+	W0, H0 = _figure_default_size(layout)
 	return (
 		_fin_isfinite_real(w) && w > 0 ? Float64(w) : Float64(W0),
 		_fin_isfinite_real(h) && h > 0 ? Float64(h) : Float64(H0),
@@ -1472,9 +1472,9 @@ function _fin_size_is_free(layout::Layout)
 	h = get(layout.fields, :height, nothing)
 	w === nothing && h === nothing && return true
 	(_fin_isfinite_real(w) && _fin_isfinite_real(h)) || return false
-	carried = _STYLE_SCOPE[]
+	carried = something(_figure_recorded_style(layout), _STYLE_SCOPE[], Some(nothing))
 	(carried !== nothing && carried.width > 0) || return false
-	W0, H0 = _figure_default_size()
+	W0, H0 = _style_default_figure_size(carried)
 	return abs(w - W0) <= 0.5 && abs(h - H0) <= 0.5
 end
 

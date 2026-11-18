@@ -21884,7 +21884,7 @@ end
 # the layout size, else the active style's default figure size (700 x 500
 # under `:default`, `savefig`'s default size as well).
 function _figure_annotation_size(layout::Layout)
-	default_w, default_h = _figure_default_size()
+	default_w, default_h = _figure_default_size(layout)
 	side(key, default) = (v = get(layout.fields, key, nothing);
 		v isa Real && !(v isa Bool) && isfinite(v) && v > 0 ? Float64(v) : default)
 	return side(:width, default_w), side(:height, default_h)
