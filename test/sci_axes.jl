@@ -6,6 +6,7 @@ const _AX = PlotlySupply
 # 9 px tick / 11 px title style here), so start from the default.
 set_default_style!(:default)
 const _AX_PB = PlotlySupply.PlotlyBase
+const _AX_BREAK = PlotlySupply._FIN_WRAP_BREAK   # the finalizer's title line break
 
 function _ax_throws(f, needle::AbstractString)
     err = try
@@ -1841,12 +1842,12 @@ end
     end
 
     @testset "wave 5: axis titles that run off the figure are wrapped once (W5)" begin
-        # ONE scheme: the finalizer's (`_fin_wrap_axis_titles!`, `<br />` breaks);
+        # ONE scheme: the finalizer's (`_fin_wrap_axis_titles!`, `_FIN_WRAP_BREAK` breaks);
         # xlabel!/ylabel! only keep `wrap = false` titles on one line.
         P(f) = _AX._cmn_plot(f)
         long = "a fairly long y-axis label that matplotlib would split"
         text(f, key) = _AX._axes_title_text(_ax_axis(f, key))[1]
-        unwrap(t) = replace(t, "<br />" => " ")
+        unwrap(t) = replace(t, _AX_BREAK => " ")
         # Longer than its axis but inside the figure: one line, as matplotlib draws it.
         mid = "relative complex-frequency error of the reduced model"
         m = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
@@ -1860,9 +1861,9 @@ end
         ylabel!(f, long)
         _AX._finalize_figure!(f)
         wrapped = text(f, :yaxis)
-        @test occursin("<br />", wrapped)
+        @test occursin(_AX_BREAK, wrapped)
         @test unwrap(wrapped) == long
-        @test length(split(wrapped, "<br />")) >= 2
+        @test length(split(wrapped, _AX_BREAK)) >= 2
         # Idempotent; a taller figure puts the title back on one line.
         before = _ax_json(P(f).layout)
         _AX._finalize_figure!(f)
@@ -1874,7 +1875,7 @@ end
         g = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
         ylabel!(g, long)
         c = _AX._finalize_export_copy(P(g), (width = 400, height = 200))
-        @test occursin("<br />", _AX._axes_title_text(c.layout.fields[:yaxis])[1])
+        @test occursin(_AX_BREAK, _AX._axes_title_text(c.layout.fields[:yaxis])[1])
         @test text(g, :yaxis) == long
 
         # wrap = false: no-break spaces, never wrapped.
@@ -1891,14 +1892,14 @@ end
         @test !occursin("<br", text(sf, :xaxis))
         ylabel!(sf, long; row = 1, col = 1)
         _AX._finalize_figure!(sf)
-        @test occursin("<br />", text(sf, :yaxis))
+        @test occursin(_AX_BREAK, text(sf, :yaxis))
         @test unwrap(text(sf, :yaxis)) == long
         # x titles: wider than the figure.
         xw = plot_scatter(1:3, 1:3)
         relayout!(P(xw); width = 300, height = 300)
         xlabel!(xw, long)
         _AX._finalize_figure!(xw)
-        @test occursin("<br />", text(xw, :xaxis))
+        @test occursin(_AX_BREAK, text(xw, :xaxis))
         @test unwrap(text(xw, :xaxis)) == long
         # A line break of the user's is kept (each line is wrapped on its own);
         # MathJax and markup are left as written.
@@ -1907,14 +1908,14 @@ end
         xlabel!(u, long * "<br>and more")
         _AX._finalize_figure!(u)
         @test occursin("<br>and more", text(u, :xaxis))
-        @test replace(text(u, :xaxis), "<br />" => " ") == long * "<br>and more"
+        @test replace(text(u, :xaxis), _AX_BREAK => " ") == long * "<br>and more"
         @test _AX._axes_keep_on_one_line("a <span style=\"x y\">b c</span>") == "a\u00a0<span style=\"x y\">b\u00a0c</span>"
         @test _AX._axes_keep_on_one_line("\$a b\$") == "\$a b\$"
         # A bare-string title is rewritten as a title mapping.
         q = plot_scatter(collect(0:0.1:1), collect(0:0.1:1))
         relayout!(P(q); width = 400, height = 200, yaxis_title = long)
         _AX._finalize_figure!(q)
-        @test occursin("<br />", text(q, :yaxis))
+        @test occursin(_AX_BREAK, text(q, :yaxis))
     end
 
     @testset "wave 5: the margin estimate reads plotly's log decade labels (W5)" begin
@@ -1949,8 +1950,8 @@ end
         # Narrower, it runs off the figure and is broken.
         relayout!(P(f); width = 300)
         _AX._finalize_figure!(f)
-        @test occursin("<br />", text(f))
-        @test replace(text(f), "<br />" => " ") == title
+        @test occursin(_AX_BREAK, text(f))
+        @test replace(text(f), _AX_BREAK => " ") == title
     end
 
     @testset "wave 5: tick values on a shared group and dates (Z29, Z42)" begin

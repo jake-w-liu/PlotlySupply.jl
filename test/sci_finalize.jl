@@ -1257,16 +1257,16 @@ end
 	ylabel!(sf, "\$\\alpha\$ a math title that is much too long for this small figure to show"; row = 1, col = 1)
 	@test !occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text])
 	# The wrapper itself.
-	@test _SFN._fin_wrap_line("aa bb cc", 5) == "aa bb<br />cc"
-	@test _SFN._fin_wrap_line("averyveryverylongword x", 5) == "averyveryverylongword<br />x"
-	@test _SFN._fin_wrap_title("one two<br>three four", 7) == "one two<br>three<br />four"
+	@test _SFN._fin_wrap_line("aa bb cc", 5) == "aa bb" * _SFN._FIN_WRAP_BREAK * "cc"
+	@test _SFN._fin_wrap_line("averyveryverylongword x", 5) == "averyveryverylongword" * _SFN._FIN_WRAP_BREAK * "x"
+	@test _SFN._fin_wrap_title("one two<br>three four", 7) == "one two<br>three" * _SFN._FIN_WRAP_BREAK * "four"
 	# Extra lines widen the label estimate.
 	axis = Dict{Symbol, Any}(:title => Dict{Symbol, Any}(:text => "a<br />b"))
 	@test _SFN._fin_title_push(axis, 12.0) ≈ _SFN._fin_title_push(Dict(:title => "a"), 12.0) + _SFN._FIN_LINE_EM * 14
 end
 
 @testset "a title wrapped while the fonts were large leaves no room behind (composite_2x2)" begin
-	sf = subplots(2, 2; sync = false, horizontal_spacing = 0.27, vertical_spacing = 0.2)
+	sf = subplots(2, 2; sync = false, horizontal_spacing = 0.2, vertical_spacing = 0.2)
 	plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)
 	plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2)
 	set_fonts!(sf; size = 16, label = 20)
@@ -1276,10 +1276,11 @@ end
 	end
 	layout = sf.plot.layout
 	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
-	# Wrapped at the large font (the bottom row is 156 px tall) ...
+	# Wrapped at the large font (the bottom row is 156 px tall; the finalizer's
+	# wrap, `_FIN_WRAP_BREAK`, is the only one) ...
 	@test occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text])
 	# ... with no grown margin; the right-hand cells give up the room the
-	# three lines need in the gap (Z71), the left ones keep their domains.
+	# wrapped title needs in the 20 % gap (Z71), the left ones keep their domains.
 	@test _sfn_fields(layout.fields[:margin])[:l] == 50
 	for k in (:xaxis, :xaxis3)
 		@test collect(_SFN._layout_axis_domain(layout, k)) ≈ collect(_SFN._layout_axis_domain(grid, k))
@@ -1301,7 +1302,7 @@ end
 	@test _SFN._finalize_figure!(sf) === false
 	# A domain the user narrowed after the solve is theirs and is kept.
 	function build()
-		g = subplots(2, 2; sync = false, horizontal_spacing = 0.27, vertical_spacing = 0.2)
+		g = subplots(2, 2; sync = false, horizontal_spacing = 0.2, vertical_spacing = 0.2)
 		plot_scatter!(g, 1:3, 1:3; row = 1, col = 1)
 		plot_scatter!(g, 1:3, 1:3; row = 1, col = 2)
 		set_fonts!(g; size = 16, label = 20)
@@ -1312,7 +1313,7 @@ end
 		return g
 	end
 	g = build()
-	@test _SFN._layout_axis_domain(g.plot.layout, :xaxis4)[1] > 0.635
+	@test _SFN._layout_axis_domain(g.plot.layout, :xaxis4)[1] > 0.6
 	relayout!(g.plot; xaxis4_domain = [0.8, 1.0])
 	set_fonts!(g; size = 9, label = 9.2, tick = 7.5, units = :pt)
 	@test collect(_SFN._layout_axis_domain(g.plot.layout, :xaxis4)) ≈ [0.8, 1.0]
@@ -1434,4 +1435,377 @@ end
 	f = plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y))
 	plot_quiver!(f, [0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0])
 	@test _sfn_clip(f, :xaxis) == _SFN_XE && _sfn_clip(f, :yaxis) == _SFN_YE
+end
+
+# ---------------------------------------------------------------------------
+# Wave 6
+# ---------------------------------------------------------------------------
+
+# Drawn boxes (px, [left, top, right, bottom]) of the y title and the tick
+# labels of every Cartesian axis of `p` in a hidden window at its own size;
+# `nothing` when the renderer cannot start.
+const _SFN_TITLE_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const root = gd.getBoundingClientRect();
+  const box = els => { let b = null; for (const t of els) { const r = t.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const q = [r.left - root.left, r.top - root.top, r.right - root.left, r.bottom - root.top];
+    b = b === null ? q : [Math.min(b[0], q[0]), Math.min(b[1], q[1]), Math.max(b[2], q[2]), Math.max(b[3], q[3])]; } return b; };
+  const out = {axes: {}};
+  for (const k of Object.keys(gd._fullLayout).filter(k => /^[xy]axis\d*$/.test(k))) {
+    const id = k.replace('axis', '');
+    out.axes[k] = {ticks: box(gd.querySelectorAll('g.' + id + 'tick text')), title: box(gd.querySelectorAll('.g-' + id + 'title text'))};
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+function _sfn_measure_titles(p::Plot)
+	sp = try
+		to_syncplot(p; show = false)
+	catch err
+		@warn "sci_finalize: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
+		return nothing
+	end
+	try
+		backend = _SFN._syncplot_backend(sp)
+		script = replace(_SFN_TITLE_JS, "__DIV__" => _SFN._json_js(sp.divid))
+		for _ in 1:300
+			raw = Base.invokelatest(() -> backend.run(sp.window, script))
+			(raw === nothing || raw == "null") || return JSON.parse(String(raw))
+			sleep(0.05)
+		end
+		error("sci_finalize: the figure did not render within 15 s")
+	finally
+		close(sp)
+	end
+end
+
+@testset "V1: a wrapped y title keeps its standoff from the tick labels (tight export, 3-4 lines)" begin
+	# The break is a bare <br> (plotly.js counts the extra lines of a title
+	# with a greedy regex that sees `<br />` ... `<br />` as one tag).
+	@test endswith(_SFN._FIN_WRAP_BREAK, "<br>") && !occursin("/", _SFN._FIN_WRAP_BREAK)
+	@test _SFN._fin_wrap_line("aa bb cc", 5) == "aa bb" * _SFN._FIN_WRAP_BREAK * "cc"
+	@test count("<br", _SFN._fin_wrap_line("aaa bbb ccc ddd eee", 3)) == 4
+	text = "a fairly long y-axis label that matplotlib would split"
+	for (tight, cols) in ((true, 1), (false, 1))
+		with_style(PlotStyle(; font_family = "DejaVu Sans, Arial, sans-serif", fontsize = 8 * 96 / 72,
+				spines = :open, grid = false)) do
+			sf = subplots(1, 2; sync = false, horizontal_spacing = 0.14)
+			x = range(0, 1; length = 20)
+			plot_scatter!(sf, x, x .^ 2; row = 1, col = 1)
+			plot_scatter!(sf, x, sqrt.(x); row = 1, col = 2)
+			ylabel!(sf, text; row = 1, col = 1)
+			xlabel!(sf, "x"; row = 1, col = 1)
+			figsize!(sf, 153, 60; units = :mm)
+			W, H = sf.plot.layout.fields[:width], sf.plot.layout.fields[:height]
+			c = if tight
+				q = _SFN._clone_plot_model(sf.plot)
+				tight_layout!(q)
+				_SFN._finalize_figure!(q; size = (W, H))
+				q
+			else
+				_SFN._finalize_export_copy(sf.plot, (width = W, height = H))
+			end
+			title = _sfn_fields(_sfn_fields(c.layout.fields[:yaxis])[:title])
+			@test count(_SFN._FIN_LINE_BREAK, title[:text]) >= (tight ? 2 : 1)
+			info = _sfn_measure_titles(c)
+			info === nothing && return
+			a = info["axes"]["yaxis"]
+			# Standoff 10 px (plotly's own base gap for one line), the figure's
+			# left edge is not crossed.
+			@test a["ticks"][1] - a["title"][3] >= 8
+			@test a["title"][1] >= -0.5
+		end
+	end
+end
+
+@testset "Q18: cells of one colour axis give up the same room for a bar between grid cells" begin
+	xs = collect(range(-2, 2; length = 20)); ys = collect(range(-2, 2; length = 20))
+	Z = [exp(-(x^2 + y^2)) * cos(2x) for y in ys, x in xs]
+	sf = subplots(1, 3; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene") Spec()])
+	for c in 1:2
+		plot_surface!(sf, xs, ys, Z .* c; row = 1, col = c, xlabel = "x", ylabel = "y", zlabel = "z",
+			shared_coloraxis = true, crange = (-2, 2))
+	end
+	plot_scatter!(sf, xs, Z[10, :]; row = 1, col = 3)
+	figsize!(sf, 900, 350)
+	layout = sf.plot.layout
+	d1 = _SFN._layout_subplot_domain(layout, :scene)
+	d2 = _SFN._layout_subplot_domain(layout, :scene2)
+	w1, w2 = d1[1][2] - d1[1][1], d2[1][2] - d2[1][1]
+	@test w1 ≈ w2 atol = 1e-9
+	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
+	# Narrower than the grid cell (the bar sits in the gap before cell 3), at the cell's left edge.
+	gw = _SFN._layout_subplot_domain(grid, :scene)
+	@test w1 < gw[1][2] - gw[1][1] - 1e-3
+	@test d1[1][1] ≈ gw[1][1] atol = 1e-9
+	@test d2[1][1] ≈ _SFN._layout_subplot_domain(grid, :scene2)[1][1] atol = 1e-9
+	# the bar is right of the second scene, left of the third cell
+	bar = _sfn_fields(_sfn_fields(layout.fields[:coloraxis])[:colorbar])
+	@test d2[1][2] < bar[:x] < _SFN._layout_axis_domain(layout, :xaxis)[1]
+	@test _SFN._finalize_figure!(sf) === false
+	# The bar leaves: both give the room back.
+	relayout!(sf.plot; coloraxis_showscale = false)
+	_SFN._finalize_figure!(sf)
+	# (the bar is gone from the plan only with the coloraxis; either both are back or both stay equal)
+	e1 = _SFN._layout_subplot_domain(layout, :scene); e2 = _SFN._layout_subplot_domain(layout, :scene2)
+	@test (e1[1][2] - e1[1][1]) ≈ (e2[1][2] - e2[1][1]) atol = 1e-9
+	# At the paper edge the bar goes to the margin: no cell is narrowed for it.
+	sg = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene")])
+	for c in 1:2
+		plot_surface!(sg, xs, ys, Z .* c; row = 1, col = c, shared_coloraxis = true, crange = (-2, 2))
+	end
+	figsize!(sg, 800, 400)
+	f1 = _SFN._layout_subplot_domain(sg.plot.layout, :scene)
+	f2 = _SFN._layout_subplot_domain(sg.plot.layout, :scene2)
+	@test (f1[1][2] - f1[1][1]) ≈ (f2[1][2] - f2[1][1]) atol = 1e-9
+end
+
+@testset "Q26: a title added later to a polar figure under a small style margin gets its margin" begin
+	th = collect(0:10:350)
+	r = 1 .+ 0.3 .* cos.(deg2rad.(3 .* th))
+	with_style(:ieee) do
+		f = plot_scatterpolar(th, r)
+		m0 = _sfn_fields(f.layout.fields[:margin])
+		@test m0[:t] == m0[:l]                                  # no title yet: one label of room
+		title!(f, "A polar pattern with a long title")
+		m1 = _sfn_fields(f.layout.fields[:margin])
+		root = _SFN._tight_root_font_size(k -> get(f.layout.fields, k, nothing))
+		want = ceil(1.2 * root + 8) + ceil(_SFN._tight_title_height(f.layout.fields[:title], k -> get(f.layout.fields, k, nothing), root)) + 4
+		@test m1[:t] >= want - 1e-9
+		@test m1[:l] == m0[:l] && m1[:b] == m0[:b] && m1[:r] == m0[:r]
+		@test _SFN._finalize_figure!(f) === false
+		# A smaller title does not shrink it again (margins only grow).
+		title!(f, "T")
+		@test _sfn_fields(f.layout.fields[:margin])[:t] >= m1[:t]
+	end
+	# Larger tick fonts after construction grow every side.
+	with_style(:ieee) do
+		g = plot_scatterpolar(th, r)
+		m0 = _sfn_fields(g.layout.fields[:margin])
+		relayout!(g; font_size = 30)
+		_SFN._finalize_figure!(g)
+		m1 = _sfn_fields(g.layout.fields[:margin])
+		@test all(m1[s] > m0[s] for s in (:l, :r, :b, :t))
+	end
+	# No margin of its own (plotly's generous default): nothing is written.
+	h = plot_scatterpolar(th, r; title = "Long title here")
+	@test !haskey(h.layout.fields, :margin) || !haskey(_sfn_fields(h.layout.fields[:margin]), :t) ||
+		_sfn_fields(h.layout.fields[:margin])[:t] >= 60
+end
+
+@testset "Q38: figsize! on a figure with content re-solves the room for the new size" begin
+	build() = with_style(:ieee) do
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1, xlabel = "x", ylabel = "y")
+		plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2, xlabel = "x", ylabel = "y")
+		sf
+	end
+	sf = build()
+	narrow = _SFN._layout_axis_domain(sf.plot.layout, :xaxis2)
+	@test narrow[1] > 0.6                    # the y title and labels took room in a 3.5 in figure
+	figsize!(sf, :ieee; columns = 2, aspect = 0.38)
+	sized_first = with_style(:ieee) do
+		g = subplots(1, 2; sync = false)
+		figsize!(g, :ieee; columns = 2, aspect = 0.38)
+		plot_scatter!(g, 1:3, 1:3; row = 1, col = 1, xlabel = "x", ylabel = "y")
+		plot_scatter!(g, 1:3, 1:3; row = 1, col = 2, xlabel = "x", ylabel = "y")
+		g
+	end
+	# The gap widened at the old size is given back: same as sizing first.
+	for k in (:xaxis, :xaxis2)
+		@test collect(_SFN._layout_axis_domain(sf.plot.layout, k)) ≈ collect(_SFN._layout_axis_domain(sized_first.plot.layout, k))
+	end
+	@test _SFN._layout_axis_domain(sf.plot.layout, :xaxis2)[1] ≈ 0.55 atol = 1e-9
+	@test !haskey(sf.plot.layout.fields, :meta) || !haskey(_sfn_fields(sf.plot.layout.fields[:meta]), Symbol("plotlysupply:room"))
+	@test _SFN._finalize_figure!(sf) === false
+	# And back to a column: the room is taken again.
+	figsize!(sf, :ieee; columns = 1, aspect = 0.75)
+	@test collect(_SFN._layout_axis_domain(sf.plot.layout, :xaxis2)) ≈ collect(narrow) atol = 1e-6
+	@test _SFN._finalize_figure!(sf) === false
+	# A domain the user narrowed is theirs and survives a resize.
+	h = build()
+	relayout!(h.plot; xaxis2_domain = [0.8, 1.0])
+	figsize!(h, :ieee; columns = 2, aspect = 0.38)
+	@test collect(_SFN._layout_axis_domain(h.plot.layout, :xaxis2)) ≈ [0.8, 1.0]
+end
+
+# Boxes (px) of the annotations of `p` once their math has rendered.
+const _SFN_ANN_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const root = gd.getBoundingClientRect();
+  const out = {W: root.width, ann: []};
+  for (const g of gd.querySelectorAll('g.annotation')) {
+    const r = g.getBoundingClientRect();
+    out.ann.push({text: g.textContent, math: g.querySelectorAll('.annotation-text-math-group, g[class*=math]').length,
+      left: r.left - root.left, right: r.right - root.left, top: r.top - root.top, bottom: r.bottom - root.top, w: r.width});
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+function _sfn_annotation_boxes(p::Plot)
+	sp = try
+		to_syncplot(p; show = false)
+	catch err
+		@warn "sci_finalize: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
+		return nothing
+	end
+	try
+		backend = _SFN._syncplot_backend(sp)
+		script = replace(_SFN_ANN_JS, "__DIV__" => _SFN._json_js(sp.divid))
+		for _ in 1:400
+			raw = Base.invokelatest(() -> backend.run(sp.window, script))
+			if !(raw === nothing || raw == "null")
+				d = JSON.parse(String(raw))
+				!isempty(d["ann"]) && all(a -> a["w"] > 1 && a["math"] > 0, d["ann"]) && return d
+			end
+			sleep(0.05)
+		end
+		return nothing
+	finally
+		close(sp)
+	end
+end
+
+@testset "Q28: a math colorbar title is not clipped by the right figure edge (3.5 in, 7.16 in)" begin
+	x = collect(range(0, 1; length = 24)); y = collect(range(0, 1; length = 24))
+	Z = [sin(3a) * cos(3b) for a in x, b in y]
+	for cols in (1, 2), title in (raw"$|E_z|^2$ (V$^2$/m$^2$)", raw"$\mathrm{Re}\,\epsilon_{\mathrm{eff}}(\omega)$")
+		with_style(:ieee) do
+			f = plot_heatmap(x, y, Z; colorbar_title = title, colorbar_title_side = :right, xlabel = "x", ylabel = "y")
+			figsize!(f, :ieee; columns = cols, aspect = 0.75)
+			W = f.layout.fields[:width]; H = f.layout.fields[:height]
+			@test W ≈ (cols == 1 ? 3.5 : 7.16) * 96 atol = 1e-6
+			@test _SFN._finalize_figure!(f) === false
+			# The margin holds the title: its estimate is inside the figure.
+			@test _sfn_fields(f.layout.fields[:margin])[:r] > 50
+			c = _SFN._finalize_export_copy(f, (width = W, height = H))
+			info = _sfn_annotation_boxes(c)
+			info === nothing && return
+			for a in info["ann"]
+				@test a["right"] <= info["W"] - 0.5
+				@test a["left"] >= 0
+			end
+		end
+	end
+end
+
+# ---------------------------------------------------------------------------
+# Per-mutation cost (Q27, subplots owner (c))
+# ---------------------------------------------------------------------------
+
+@testset "cost: layout and key lookups answer like the copies they replaced" begin
+	# `_layout_axis_domain` / `_layout_subplot_domain` read without copying the entry.
+	l = Layout(xaxis = attr(domain = [0.1, 0.4]),
+		scene = attr(domain = attr(x = [0.0, 0.5], y = [0.25, 1.0])), xaxis4 = attr(domain = [0.3]))
+	l.fields[:yaxis2] = Dict{Any, Any}("domain" => (0.2, 0.9))      # a String-keyed mapping
+	l.fields[:xaxis3] = nothing
+	@test _SFN._layout_axis_domain(l, :xaxis) == (0.1, 0.4)
+	@test _SFN._layout_axis_domain(l, :yaxis2) == (0.2, 0.9)
+	@test _SFN._layout_axis_domain(l, :xaxis3) === nothing
+	@test _SFN._layout_axis_domain(l, :xaxis4) === nothing        # not a pair
+	@test _SFN._layout_axis_domain(l, :xaxis9) === nothing        # absent
+	@test _SFN._layout_subplot_domain(l, :scene) == ((0.0, 0.5), (0.25, 1.0))
+	@test _SFN._layout_subplot_domain(l, :scene2) === nothing
+	# Reference classification, cached.
+	for ref in ("x", "y", "x2", "y13", "x10")
+		@test _SFN._fin_axis_key(ref) === Symbol(ref[1], "axis", ref[2:end])
+		@test _SFN._fin_axis_key(ref) === _SFN._fin_axis_key(Symbol(ref)) === _SFN._fin_axis_key(ref)
+	end
+	for ref in ("", "x1", "x0", "xx", "z", "x02", "X", "xaxis", " x", 3, nothing, 'x')
+		@test _SFN._fin_axis_key(ref) === nothing
+	end
+	for key in (:xaxis, :yaxis2, :xaxis12)
+		@test _SFN._fin_is_axis_key(key) && _SFN._fin_is_axis_key(key)
+	end
+	for key in (:xaxis1, :xaxis0, :scene, :x, "xaxis", 3, :yaxis02)
+		@test !_SFN._fin_is_axis_key(key)
+	end
+	@test _SFN._axis_layout_key("x", :x) === :xaxis
+	@test _SFN._axis_layout_key("y12", :y) === :yaxis12
+	@test _SFN._axis_layout_key("q", :x) === :xaxisq               # as `replace(r"^[xy]" => "")` did
+	@test _SFN._axis_layout_key("", :y) === :yaxis
+	# The caches are bounded: unknown keys cannot grow them without limit.
+	for i in 1:(_SFN._FIN_KEY_CACHE_LIMIT + 50)
+		_SFN._fin_axis_key("z$i"); _SFN._fin_is_axis_key(Symbol("k$i"))
+	end
+	@test length(_SFN._FIN_AXIS_KEY_CACHE) <= _SFN._FIN_KEY_CACHE_LIMIT
+	@test length(_SFN._FIN_IS_AXIS_KEY_CACHE) <= _SFN._FIN_KEY_CACHE_LIMIT
+	@test _SFN._fin_axis_key("x2") === :xaxis2                     # still answers when full
+	# The legend host search keeps its answers: a grid cell's own pair has no host,
+	# an inset inside a cell is hosted by it.
+	sf = subplots(2, 2; sync = false)
+	for r in 1:2, c in 1:2
+		plot_scatter!(sf, 1:3, 1:3; row = r, col = c)
+	end
+	p = sf.plot
+	@test _SFN._legend_inset_host(p, "x2", "y2", (0.6, 1.0), (0.6, 1.0)) === nothing
+end
+
+@testset "cost: the room plan keeps its overlay scan and legend assignment per plan" begin
+	f = plot_scatter(1:10, rand(10); legend = "line")
+	plot_histogram2d!(f, randn(40) .* 2 .+ 5, randn(40) .* 2 .+ 5; secondary_y = true)
+	plan = _SFN._room_plan(f)
+	list = _SFN._room_overlays(plan)
+	@test any(item -> item[2] == 'y' && item[4] == "right", list)
+	@test _SFN._room_overlays(plan) === list                      # not scanned again
+	sf = subplots(2, 2; sync = false)
+	for r in 1:2, c in 1:2
+		plot_scatter!(sf, 1:3, 1:3; row = r, col = c, legend = "s$(r)$(c)")
+	end
+	plan = _SFN._room_plan(sf)
+	a1 = _SFN._room_legend_assignment(plan)
+	@test _SFN._room_legend_assignment(plan) === a1
+	@test a1[1] == _SFN._legend_subplot_assignment(sf.plot)[1]
+end
+
+@testset "cost: an append to a many-cell grid does not pay for every cell twice (Q27)" begin
+	grid(n) = begin
+		sf = subplots(n, n; sync = false)
+		for r in 1:n, c in 1:n
+			plot_scatter!(sf, 1:5, [1.0, 3.0, 2.0, 5.0, 4.0]; row = r, col = c, xlabel = "x", ylabel = "y")
+		end
+		sf
+	end
+	cost(sf) = begin
+		for _ in 1:3
+			plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)
+		end
+		minimum(@allocated(plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)) for _ in 1:5)
+	end
+	small, large = cost(grid(2)), cost(grid(6))
+	# Linear in the number of cells at most (9x the cells): the plan no longer
+	# scans every layout entry or every cell's pairs once per cell.
+	@test large <= 8.0 * small
+	@test large < 2.6e6
+	# One 6 x 6 grid of heatmaps with a bar each: the bars are decorations, so
+	# the finalizer pays for them, but per cell no more than a 2 x 2 grid does.
+	hgrid(n) = begin
+		sf = subplots(n, n; sync = false)
+		for r in 1:n, c in 1:n
+			plot_heatmap!(sf, [1.0 2.0; 3.0 4.0]; row = r, col = c)
+		end
+		sf
+	end
+	h2, h6 = hgrid(2), hgrid(6)
+	_SFN._finalize_figure!(h2); _SFN._finalize_figure!(h6)
+	f2 = minimum(@allocated(_SFN._finalize_figure!(h2)) for _ in 1:5)
+	f6 = minimum(@allocated(_SFN._finalize_figure!(h6)) for _ in 1:5)
+	@test f6 / 36 <= 1.3 * f2 / 4
+	@test f6 < 2.4e6
+	# xlabel! on a 200-trace figure: no per-trace copies.
+	big = plot_scatter(1:10, 1:10)
+	for i in 1:199
+		plot_scatter!(big, 1:10, (1:10) .* i)
+	end
+	for _ in 1:3
+		xlabel!(big, "a")
+	end
+	@test minimum(@allocated(xlabel!(big, "b")) for _ in 1:5) < 3.6e5
 end

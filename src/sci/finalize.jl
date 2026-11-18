@@ -20,15 +20,40 @@
 
 const _FIN_AXIS_KEY = r"^[xy]axis([2-9]|[1-9][0-9]+)?$"
 
-_fin_is_axis_key(key) = key isa Symbol && occursin(_FIN_AXIS_KEY, String(key))
+# The classification of a layout key or axis reference allocates a string and
+# a regex match, and the finalizer asks it for every layout entry many times
+# per run (an append to a 6 x 6 grid: thousands of calls). The answers are
+# remembered; the tables are bounded (a user's own keys cannot grow them
+# without limit) and locked (finalizers of different figures may run on
+# different tasks).
+const _FIN_KEY_CACHE_LIMIT = 4096
+const _FIN_KEY_CACHE_LOCK = ReentrantLock()
+const _FIN_IS_AXIS_KEY_CACHE = Dict{Symbol, Bool}()
+const _FIN_AXIS_KEY_CACHE = Dict{String, Union{Nothing, Symbol}}()
+
+function _fin_is_axis_key(key)
+	key isa Symbol || return false
+	@lock _FIN_KEY_CACHE_LOCK begin
+		known = get(_FIN_IS_AXIS_KEY_CACHE, key, nothing)
+		known === nothing || return known
+		answer = occursin(_FIN_AXIS_KEY, String(key))
+		length(_FIN_IS_AXIS_KEY_CACHE) < _FIN_KEY_CACHE_LIMIT && (_FIN_IS_AXIS_KEY_CACHE[key] = answer)
+		return answer
+	end
+end
 
 # Layout key of an axis reference: "x" -> :xaxis, "y3" -> :yaxis3; `nothing`
 # for anything that is not a Cartesian axis reference.
 function _fin_axis_key(ref)
 	(ref isa AbstractString || ref isa Symbol) || return nothing
-	m = match(r"^([xy])([2-9]|[1-9][0-9]+)?$", String(ref))
-	m === nothing && return nothing
-	return Symbol(m.captures[1], "axis", something(m.captures[2], ""))
+	text = String(ref)
+	@lock _FIN_KEY_CACHE_LOCK begin
+		haskey(_FIN_AXIS_KEY_CACHE, text) && return _FIN_AXIS_KEY_CACHE[text]
+		m = match(r"^([xy])([2-9]|[1-9][0-9]+)?$", text)
+		answer = m === nothing ? nothing : Symbol(m.captures[1], "axis", something(m.captures[2], ""))
+		length(_FIN_AXIS_KEY_CACHE) < _FIN_KEY_CACHE_LIMIT && (_FIN_AXIS_KEY_CACHE[text] = answer)
+		return answer
+	end
 end
 
 # Axis reference of a layout key: :xaxis -> "x", :yaxis3 -> "y3".
@@ -68,6 +93,8 @@ end
 # The root of the `matches` chain that starts at `key` (`key` itself when it
 # matches nothing); `nothing` for a cyclic chain.
 function _fin_match_root(fields::AbstractDict, key::Symbol)
+	# Most axes match nothing: no table for them.
+	_fin_axis_key(_fin_field(get(fields, key, nothing), :matches)) === nothing && return key
 	seen = Set{Symbol}((key,))
 	root = key
 	while true
@@ -1034,7 +1061,7 @@ function _fin_margins(layout::Layout, accs, W::Float64, H::Float64, domains, bar
 	push_b = 0.0
 	Hp = max(H - base.t - base.b, 1.0)
 	Wp = max(W - base.l - base.r, 1.0)
-	domain_of(key) = get(domains, key, _fin_domain(layout, key))
+	domain_of(key) = haskey(domains, key) ? domains[key] : _fin_domain(layout, key)
 	for (key, axis) in fields
 		_fin_is_axis_key(key) || continue
 		_cmn_mapping_get(axis, :visible) === false && continue
@@ -1330,7 +1357,10 @@ function _fin_place_bar!(ctx::_FinContext, layout_updates::Dict{Symbol, Any}, it
 		end
 	else
 		prefix = item.slot.container === :root ? "colorbar_" : "$(item.slot.container)_colorbar_"
-		_fin_restyle!(ctx, item.index, Dict{Symbol, Any}(Symbol(prefix, key) => value for (key, value) in changes))
+		# `restyle!` spreads an array over the traces it addresses: a value that
+		# is itself an array (`tickvals`) goes in one slot per trace.
+		_fin_restyle!(ctx, item.index, Dict{Symbol, Any}(
+			Symbol(prefix, key) => (value isa AbstractVector ? Any[value] : value) for (key, value) in changes))
 		# restyle! stores `nothing` for a cleared key (the display resets it);
 		# drop it from the trace.
 		cleared = [key for (key, value) in changes if value === nothing]
@@ -1591,7 +1621,7 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 					:x => x, :xanchor => "left", :xref => "paper",
 					:y => (yd[1] + yd[2]) / 2, :yanchor => "middle",
 					:len => _room_bar_len(item.bar, _room_span(_fin_domain(layout, ykey)), yd[2] - yd[1];
-						floor = _room_min_bar_len(_fin_font_size(layout), item.bar, Hp)),
+						floor = _room_min_bar_len(_fin_font_size(layout), item.bar, Hp), cell = _room_span(ref[2])),
 					:lenmode => "fraction", :ypad => 0,
 				))
 				push!(boxes, (x, width))
@@ -1738,10 +1768,16 @@ end
 # W5: axis titles longer than the figure
 # ---------------------------------------------------------------------------
 
-# Line break `_fin_wrap_axis_titles!` writes. A user's line breaks are `<br>`
-# (`_label` turns "\n" into it); plotly.js breaks lines at both. Every pass
-# first joins the lines at this break again, then wraps for the current size.
-const _FIN_WRAP_BREAK = "<br />"
+# Line break `_fin_wrap_axis_titles!` writes. A user's line breaks are a bare
+# `<br>` (`_label` turns "\n" into it); ours is a zero-width space (U+200B)
+# before one, which draws the same and tells the two apart: every pass first
+# joins the lines at this break again, then wraps for the current size.
+# It must be a bare `<br>`: plotly.js 2.35 counts a title's extra lines with
+# `/<br(\s+.*)?>/g`, whose greedy `.*` makes `<br />` ... `<br />` ONE match, so
+# a title of three or more lines written with `<br />` was placed one line
+# (two for four lines) too close to its tick labels and drew over them
+# (optical_infra, V1: gap 0 px instead of the 11 px of `title.standoff`).
+const _FIN_WRAP_BREAK = "\u200b<br>"
 # Px a wrapped title keeps from the figure edges, and the mean glyph width
 # (font sizes) the wrap assumes: a little above DejaVu Sans' (render probe
 # W5: 26 characters of the optical_infra y title at 13 px drew 155 px long,
@@ -1893,6 +1929,19 @@ const _FIN_WRAP_STANDOFF = 10.0
 # the labels of a horizontal bar keep one font size between them.
 const _FIN_BAR_TICK_SPACING_EM = 2.0
 
+# Whether `bar` carries the two tick values `_fin_bar_two_ticks` writes for a
+# bar whose thinned automatic ticks would leave one label (V2): explicit
+# values (`tickmode = "array"`, two `tickvals`, no `ticktext`) next to the
+# `nticks` of the thinning, which plotly.js ignores in that mode and which is
+# the mark (a bar of the user's with explicit ticks has none).
+function _fin_bar_two_ticks_written(bar::Dict{Symbol, Any})
+	_cbar_string(bar, :tickmode, "") == "array" || return false
+	_fin_isfinite_real(get(bar, :nticks, nothing)) || return false
+	haskey(bar, :ticktext) && return false
+	values = get(bar, :tickvals, nothing)
+	return (values isa AbstractVector || values isa Tuple) && length(values) >= 2
+end
+
 # `(automatic, ours)`: whether the ticks of `bar` are plotly's automatic ones,
 # and whether its `nticks` is ours (written with an explicit `tickmode =
 # "auto"` by `_fin_thin_bar_ticks!`; an `nticks` set without it is the user's).
@@ -1900,6 +1949,7 @@ function _fin_bar_tick_state(bar::Dict{Symbol, Any})
 	mode = _cbar_string(bar, :tickmode, "")
 	nticks = get(bar, :nticks, nothing)
 	mode == "auto" && _fin_isfinite_real(nticks) && return (true, true)
+	_fin_bar_two_ticks_written(bar) && return (true, true)
 	values = get(bar, :tickvals, nothing)
 	explicit = (values isa AbstractVector || values isa Tuple) && !isempty(values)
 	automatic = mode in ("", "auto") && (nticks === nothing || isequal(nticks, 0)) &&
@@ -1936,6 +1986,40 @@ function _fin_bar_nticks(layout::Layout, item::_FinBar, Wp::Float64, Hp::Float64
 	return wanted < default ? wanted : nothing
 end
 
+# How many labels plotly.js 2.35.2 (axes.js autoTicks, linear axis) draws on
+# a colour range [lo, hi] with `nticks = n`: the step is the rough step
+# (hi - lo) / n rounded UP to 2, 5 or 10 x 10^k, and only its multiples
+# inside the range are labelled, so a short bar can show one (range 0.1-0.9,
+# n = 2: only 0.5) or none.
+function _fin_auto_tick_count(lo::Float64, hi::Float64, n::Int)
+	# An empty or unknown range has nothing to count (and nothing to fix).
+	(isfinite(lo) && isfinite(hi) && hi > lo && n >= 1) || return typemax(Int)
+	rough = (hi - lo) / n
+	base = exp10(floor(log10(rough)))
+	x = rough / base
+	step = (x <= 2 + 1e-9 ? 2.0 : x <= 5 + 1e-9 ? 5.0 : 10.0) * base
+	return floor(Int, hi / step + 1e-9) - ceil(Int, lo / step - 1e-9) + 1
+end
+
+# V2: tick values for a bar of at most `n` labels (n >= 2) whose range
+# [lo, hi] the automatic placement would label less than twice: the
+# multiples of the largest 1, 2 or 5 x 10^k that has at least two inside the
+# range; with more than `n`, the first and last for n = 2, else the first
+# `n`. `nothing` when the range is empty or not finite.
+function _fin_bar_two_ticks(lo::Float64, hi::Float64, n::Int)
+	(isfinite(lo) && isfinite(hi) && hi > lo) || return nothing
+	top = floor(Int, log10(hi - lo))
+	for exponent in top:-1:(top - 12), mult in (5.0, 2.0, 1.0)
+		step = mult * exp10(exponent)
+		first = ceil(Int, lo / step - 1e-9)
+		last = floor(Int, hi / step + 1e-9)
+		last - first + 1 >= 2 || continue
+		ks = last - first + 1 <= n ? (first:last) : n == 2 ? [first, last] : (first:(first + n - 1))
+		return [round(k * step; digits = max(0, -exponent)) for k in ks]
+	end
+	return nothing
+end
+
 # Thin the automatic ticks of every short colorbar (`_fin_bar_nticks`) and
 # drop the `nticks` written earlier for a bar that is long enough again.
 # Bars with ticks of their own (values, a step or a user `nticks`) are left
@@ -1949,10 +2033,23 @@ function _fin_thin_bar_ticks!(ctx::_FinContext, Wp::Float64, Hp::Float64)
 		automatic, ours = _fin_bar_tick_state(item.bar)
 		automatic || continue
 		n = _fin_bar_nticks(ctx.p.layout, item, Wp, Hp)
-		change = if n !== nothing
-			Dict{Symbol, Any}(:tickmode => "auto", :nticks => n)
+		# A bar always shows two labels at least (V2): when the thinned
+		# automatic ticks would leave fewer, the two values are written.
+		values = nothing
+		if n !== nothing && item.range !== nothing && _fin_auto_tick_count(item.range[1], item.range[2], n) < 2
+			values = _fin_bar_two_ticks(item.range[1], item.range[2], n)
+		end
+		wrote_values = _fin_bar_two_ticks_written(item.bar)
+		change = if values !== nothing
+			Dict{Symbol, Any}(:tickmode => "array", :tickvals => values, :nticks => n)
+		elseif n !== nothing
+			change = Dict{Symbol, Any}(:tickmode => "auto", :nticks => n)
+			wrote_values && (change[:tickvals] = nothing)
+			change
 		elseif ours
-			Dict{Symbol, Any}(:tickmode => nothing, :nticks => nothing)
+			change = Dict{Symbol, Any}(:tickmode => nothing, :nticks => nothing)
+			wrote_values && (change[:tickvals] = nothing)
+			change
 		else
 			continue
 		end
@@ -2228,6 +2325,11 @@ mutable struct _RoomPlan
 	vacated::Set{Tuple{Symbol, Symbol}}
 	moved::Vector{Tuple{_FinBar, Dict{Symbol, Any}}}
 	wrote::Bool
+	# Per-plan results of scans that read the whole layout or every trace and
+	# cannot change while the plan is built (`_room_overlays`,
+	# `_room_legend_assignment`): nothing writes the figure between its
+	# measure and place phases.
+	memo::Dict{Symbol, Any}
 end
 
 _room_requests!(plan, ::Val) = nothing
@@ -2413,21 +2515,48 @@ function _room_own_extents(plan::_RoomPlan, xkey::Symbol, ykey::Symbol, cur)
 			_room_y_title_overhang(layout, ykey))
 	xref, yref = _fin_axis_ref(xkey), _fin_axis_ref(ykey)
 	# Overlaying axes: a twin y axis on the right, a secondary x axis on top.
-	for (key, axis) in layout.fields
-		_fin_is_axis_key(key) || continue
-		over = _fin_string(_cmn_mapping_get(axis, :overlaying))
-		over === nothing && continue
-		letter = String(key)[1]
-		if letter == 'y' && over == yref &&
-				something(_fin_string(_cmn_mapping_get(axis, :side)), "left") == "right"
+	for (key, letter, over, side) in _room_overlays(plan)
+		if letter == 'y' && over == yref && side == "right"
 			own[:right] = max(own[:right], _fin_y_labels_px(layout, plan.accs, key, cur[2], plan.Hp) +
 				_room_y_title_overhang(layout, key))
-		elseif letter == 'x' && over == xref &&
-				something(_fin_string(_cmn_mapping_get(axis, :side)), "bottom") == "top"
+		elseif letter == 'x' && over == xref && side == "top"
 			own[:top] = max(own[:top], _fin_x_labels_px(layout, key))
 		end
 	end
 	return own
+end
+
+# `(key, 'x' | 'y', overlaid axis reference, side)` of the axes of the layout
+# that overlay another, in layout order. One scan per plan: scanning every
+# layout entry for every plot area made the plan quadratic in the cells.
+function _room_overlays(plan::_RoomPlan)
+	haskey(plan.memo, :overlays) && return plan.memo[:overlays]
+	list = Tuple{Symbol, Char, String, String}[]
+	for (key, axis) in plan.layout.fields
+		_fin_is_axis_key(key) || continue
+		over = _fin_string(_cmn_mapping_get(axis, :overlaying))
+		over === nothing && continue
+		letter = String(key)[1]
+		side = something(_fin_string(_cmn_mapping_get(axis, :side)), letter == 'y' ? "left" : "bottom")
+		push!(list, (key, letter, over, side))
+	end
+	plan.memo[:overlays] = list
+	return list
+end
+
+# `_legend_subplot_assignment(plan.p)` (order, ids, domains, trace keys), or
+# the `ArgumentError` it throws, computed once per plan: the measure and the
+# place phase of the legend providers both ask for it.
+function _room_legend_assignment(plan::_RoomPlan)
+	haskey(plan.memo, :legend_assignment) || (plan.memo[:legend_assignment] = try
+		_legend_subplot_assignment(plan.p)
+	catch err
+		err isa ArgumentError || rethrow()
+		err
+	end)
+	answer = plan.memo[:legend_assignment]
+	answer isa ArgumentError && throw(answer)
+	return answer
 end
 
 function _room_new_area(key::Symbol, ykey, kind::Symbol, grid::Bool, cur)
@@ -2842,6 +2971,7 @@ function _room_solve!(plan::_RoomPlan)
 			group[g] = max(get(group, g, 0.0), room)
 		end
 	end
+	_room_equalize_coloraxis!(plan, group)
 	for key in plan.area_order
 		a = plan.areas[key]
 		for side in _ROOM_SIDES
@@ -2878,6 +3008,33 @@ function _room_solve!(plan::_RoomPlan)
 		a.final = ((edges[:left], edges[:right]), (edges[:bottom], edges[:top]))
 	end
 	return plan
+end
+
+# Q18: a colour axis shared by several plot areas has its bar beyond the
+# union of them, and only the areas at that edge give up room for it; where
+# that room is taken inside the grid (the bar sits in a gap before the next
+# cell) the other areas of the axis give up the same, so cells showing one
+# colour scale are drawn alike (two identical scene cells differed by the
+# bar's width). A bar that goes to the margin takes nothing from any area.
+function _room_equalize_coloraxis!(plan::_RoomPlan, group::Dict{Tuple{Symbol, Float64}, Float64})
+	for entry in values(plan.bar_items)
+		(hasproperty(entry, :edge_areas) && entry.item.coloraxis !== nothing && !entry.keep_default) || continue
+		side = entry.side
+		edge_key(k) = (side, round(_room_edge(plan.areas[k].ref, side); digits = 9))
+		room = 0.0
+		for k in entry.edge_areas
+			plan.areas[k].ref === nothing && continue
+			room = max(room, get(group, edge_key(k), 0.0))
+		end
+		room > 0 || continue
+		for k in entry.areas
+			k in entry.edge_areas && continue
+			a = plan.areas[k]
+			(_room_flexible(a) && !(a.aspect && side === :right)) || continue
+			group[edge_key(k)] = max(get(group, edge_key(k), 0.0), room)
+		end
+	end
+	return group
 end
 
 # The slot of every request: edge of the area's final domain, offset past
@@ -2959,7 +3116,7 @@ function _room_new_plan(ctx::_FinContext, accs, bars, W::Float64, H::Float64, ma
 		max(H - margins.t - margins.b, 1.0), _fin_font_size(layout), margins, Dict{Symbol, _RoomArea}(),
 		Symbol[], _RoomRequest[], Dict{Tuple{Symbol, String}, Vector{Any}}(), Dict{Symbol, Any}(), nothing,
 		bars, aspect, skip, Dict{String, Any}(), Set{Tuple{Symbol, Symbol}}(),
-		Tuple{_FinBar, Dict{Symbol, Any}}[], false)
+		Tuple{_FinBar, Dict{Symbol, Any}}[], false, Dict{Symbol, Any}())
 end
 
 # The plan of a figure W x H (`aspect`: x axis => y axis of the equal-aspect
@@ -3172,14 +3329,20 @@ end
 
 # Length (paper) of a trace bar of ours next to a plot area whose extent
 # along the bar goes from `current` to `final` (paper spans): a `len` other
-# than the current extent is the user's (`colorbar!(...; len)`) and is kept;
-# otherwise the bar follows the area. Never shorter than `floor`
-# (`_room_min_bar_len`), which counts as ours too.
-function _room_bar_len(bar::AbstractDict, current::Float64, final::Float64; floor::Float64 = 0.0)
+# than the current extent is the user's (`colorbar!(...; len)`) and is kept,
+# but never longer than an area that is drawn smaller than before (an
+# equal-aspect cell fitted inside its grid cell, V3: the bar ran past the plot
+# box and into the cell title); otherwise the bar follows the area. Never
+# shorter than `floor` (`_room_min_bar_len`), which counts as ours too.
+function _room_bar_len(bar::AbstractDict, current::Float64, final::Float64; floor::Float64 = 0.0,
+		cell::Float64 = current)
 	len = _cbar_real(bar, :len, nothing)
 	ours = len === nothing || !(len > 0) || _cbar_string(bar, :lenmode, "fraction") != "fraction" ||
 		isapprox(len, current; atol = 1e-9) || isapprox(len, max(current, floor); atol = 1e-9)
-	return max(ours ? final : Float64(len), floor)
+	ours && return max(final, floor)
+	len = Float64(len)
+	final < cell - 1e-9 && (len = min(len, final))
+	return max(len, floor)
 end
 
 # Tick label lines a vertical bar's body keeps at least. plotly.js 2.35.2
@@ -3420,8 +3583,10 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 			yd = slot.domain_y
 			placement[:y] = (yd[1] + yd[2]) / 2
 			placement[:yanchor] = "middle"
-			placement[:len] = _room_bar_len(item.bar, _room_span(plan.areas[slot.area].current[2]), _room_span(yd);
-				floor = _room_min_bar_len(plan.font, item.bar, plan.Hp))
+			area = plan.areas[slot.area]
+			placement[:len] = _room_bar_len(item.bar, _room_span(area.current[2]), _room_span(yd);
+				floor = _room_min_bar_len(plan.font, item.bar, plan.Hp),
+				cell = area.ref === nothing ? _room_span(area.current[2]) : _room_span(area.ref[2]))
 		end
 		return placement
 	end
@@ -3709,8 +3874,21 @@ Normalise the figure after a PlotlySupply constructor or mutator changed it
   evidence that the shrink is ours (D12). A coloraxis bar placed before the
   mutation bound existing traces to it moves next to all of its plot areas.
   The right margin grows to fit a math colorbar title drawn beside its bar.
+  When a coloraxis bar sits between grid cells, every cell of the axis gives
+  up the same room (cells showing one colour scale are drawn alike). A bar
+  with a `len` of the user's is never longer than the plot area it is drawn
+  next to once the area is fitted smaller than its grid cell. A short bar is
+  thinned to `nticks` labels and always shows two labels at least: when
+  plotly's rounding of the step would label the range once, the two values
+  are written as `tickvals` (marked by the `nticks` next to them).
   The fit and the room solve run again after a pass that wrote (at most
   `_FIN_FIT_ROUNDS`), so a second call writes nothing.
+- Titles: a plain axis title longer than the figure is broken between words
+  with `_FIN_WRAP_BREAK` (a zero-width space before a bare `<br>`; plotly.js
+  counts the extra lines of a title with a regex that sees a run of
+  `<br />` as one tag) and rejoined when it fits again. On a polar or ternary
+  figure an explicit margin smaller than one line of tick text (and, at the
+  top, the title block) is grown to it.
 - M5: the 3-D scenes PlotlySupply manages are framed for the final domains
   and margins, at `size` when given (`_s3_finalize_scenes!`: camera
   distance, tick counts and tick font sizes).
@@ -3737,6 +3915,7 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	# (see `_FinAxes`).
 	accs = _fin_collect_axes(p)
 	_fin_sticky_updates!(updates, p, accs)
+	_fin_domain_margin_updates!(updates, p, _fin_figure_size(ctx, p.layout)[2])
 	# Log-axis tick labels and long axis titles at this figure size
 	# (W7/Z70/W5, src/sci/axes.jl).
 	_axes_finalize_updates!(updates, p, _fin_figure_size(ctx, p.layout), accs)
@@ -3761,6 +3940,43 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	# export size when there is one (scene3d.jl; layout writes only).
 	_s3_finalize_scenes!(p, ctx.size) && (wrote = true)
 	return wrote
+end
+
+# Q26: polar and ternary subplots draw their tick labels outside the disc or
+# triangle, where plotly's automargin does not count them, so a margin of a
+# few px (a journal style's) clips them and lets a title overlap them. The
+# style gives the margin that room when it is applied
+# (`_style_domain_subplot_margin`); a title or a larger font added later
+# needs it again: every side of an explicit margin that is smaller than one
+# line of tick text plus offset (at the top also the title block) is grown.
+# Margins only grow, and a figure without a margin of its own keeps plotly's
+# generous default.
+function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height::Float64)
+	fields = p.layout.fields
+	any(key -> occursin(r"^(polar|ternary)\d*$", String(key)), keys(fields)) || return updates
+	margin = get(fields, :margin, nothing)
+	margin === nothing && return updates
+	lookup(key) = get(fields, key, nothing)
+	root = _tight_root_font_size(lookup)
+	tick = root
+	for (key, axis) in fields
+		occursin(r"^(polar|ternary)\d*$", String(key)) || continue
+		for name in (:angularaxis, :aaxis, :baxis, :caxis)
+			size = _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, 0.0)
+			size > tick && (tick = size)
+		end
+	end
+	label_room = ceil(1.2 * tick + 8)
+	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
+	cap = _TIGHT_MAX_MARGIN_FRACTION * height
+	for (side, room) in ((:l, label_room), (:r, label_room), (:b, label_room),
+			(:t, label_room + (title_room > 0 ? title_room + 4 : 0)))
+		have = _cmn_mapping_get(margin, side)
+		_fin_isfinite_real(have) || continue
+		want = min(room, cap)
+		want > have + 1e-9 && (updates[Symbol(:margin_, side)] = _style_number(want))
+	end
+	return updates
 end
 
 # Passes of `_fin_fit!` per finalize run; a figure converges in two or three.

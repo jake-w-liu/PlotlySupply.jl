@@ -1056,7 +1056,7 @@ function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDi
 	if opts.ticks !== nothing
 		# An `nticks` `_finalize_figure!` wrote for automatic ticks
 		# (`_fin_bar_tick_state`) goes with them.
-		_cbar_string(bar, :tickmode, "") == "auto" && delete!(bar, :nticks)
+		_fin_bar_tick_state(bar)[2] && delete!(bar, :nticks)
 		bar[:tickmode] = "array"
 		bar[:tickvals] = opts.ticks
 		if opts.ticklabels === nothing
@@ -1390,7 +1390,13 @@ font size between labels), and removes it when the bar is long enough
 again. Bars with `ticks`, a `dtick` or an `nticks` of your own keep them
 (the mark of a thinned bar is the `tickmode = "auto"` written with its
 `nticks`: to set `nticks` on such a bar with `restyle!`, clear `tickmode` in
-the same call).
+the same call). A bar always shows two tick labels at least: when the
+thinned automatic ticks would label the range once or not at all (plotly
+labels only multiples of its rounded step: range 0.1 to 0.9 with `nticks = 2`
+shows 0.5 alone), the two values are written as `tickvals` next to the
+`nticks` (`tickmode = "array"`; the `nticks` is the mark and is ignored by
+plotly.js in that mode), and removed again with it. Ticks given with
+`ticks`, `restyle!` or `shared_colorbar!` replace them.
 
 All options are validated first (`ArgumentError`); the change is applied in
 one transaction (a live window redraws once). Returns `nothing` for a
@@ -1682,7 +1688,9 @@ function _shared_colorbar_carried(p::Plot, slots::Vector{_CbarSlot})
 				found === nothing || (title = found)
 			end
 		end
-		tickvals = get(bar, :tickvals, nothing)
+		# Two tick values the finalizer wrote for a short bar are not the
+		# user's ticks (`_fin_bar_tick_state`).
+		tickvals = _fin_bar_tick_state(bar)[2] ? nothing : get(bar, :tickvals, nothing)
 		if tickvals isa AbstractVector && !isempty(tickvals) &&
 				all(v -> v isa Real && !(v isa Bool) && isfinite(v), tickvals)
 			ticktext = get(bar, :ticktext, nothing)
