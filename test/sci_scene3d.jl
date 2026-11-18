@@ -50,21 +50,6 @@ function _t3_projector(fig, key::Symbol = :scene; viewport)
 	return point -> (clip = projection * view * [point; 1.0]; (clip[1] / clip[4], clip[2] / clip[4]))
 end
 
-# The largest corner coordinate of the scene box (side lengths `box`, centred
-# on the origin, as gl-plot3d draws it) relative to the viewport half-size less
-# `pad` pixels per side: 1 when the box just fits.
-function _t3_fill(fig, key::Symbol = :scene; viewport, pad, box)
-	project = _t3_projector(fig, key; viewport)
-	w, h = viewport
-	limit_x, limit_y = 1 - 2 * pad / w, 1 - 2 * pad / h
-	worst = 0.0
-	for sx in (-0.5, 0.5), sy in (-0.5, 0.5), sz in (-0.5, 0.5)
-		x, y = project([sx * box[1], sy * box[2], sz * box[3]])
-		worst = max(worst, abs(x) / limit_x, abs(y) / limit_y)
-	end
-	return worst
-end
-
 # Expected automatic tick counts of a cell scene: one tick per 40 px of the
 # projected centre line of each box axis, 2 to 9.
 function _t3_expected_nticks(fig, key::Symbol; viewport, box)
@@ -89,6 +74,51 @@ function _t3_cell_viewport(fig, key::Symbol)
 	domain = _t3_fields(_t3_scene(fig, key)[:domain])
 	return (600.0 * (domain[:x][2] - domain[:x][1]), 390.0 * (domain[:y][2] - domain[:y][1]))
 end
+_t3_center(fig, key::Symbol = :scene) = (c = _t3_camera(fig, key); haskey(c, :center) ? collect(Float64, _t3_xyz(c[:center])) : zeros(3))
+# Unit direction from the camera centre to the eye.
+_t3_dir(fig, key::Symbol = :scene) = _t3_unit(_t3_eye(fig, key) .- _t3_center(fig, key))
+_t3_distance(fig, key::Symbol = :scene) = _t3_norm(_t3_eye(fig, key) .- _t3_center(fig, key))
+# The drawing of scene `key` as PlotlySupply frames it (box corners plus the
+# tick-label and title rectangles of `_s3_label_layout`), seen from its camera
+# with the distance scaled by `scale`, in its viewport (`_s3_viewport`):
+# `extent` is the largest coordinate over the half viewport less
+# `_S3_LABEL_MARGIN_PX` (1 when it just fits), `mid` the drawing's centre in
+# px, and `corners` the box corners in px as the model projects them.
+function _t3_drawing(fig, key::Symbol = :scene; scale = 1.0)
+	PS = PlotlySupply
+	p = fig isa SubplotFigure ? fig.plot : fig
+	camera = _t3_camera(fig, key)
+	center = _t3_center(fig, key)
+	offset = _t3_eye(fig, key) .- center
+	distance = _t3_norm(offset)
+	frame = PS._s3_camera_frame(offset ./ distance, PS._s3_camera_up(camera))
+	w, h = PS._s3_viewport(p, PS._s3_layout_target(p, key))
+	corners, quads = PS._s3_label_layout(PS._s3_drawn_box(p, key), Tuple(center), frame, distance * scale,
+		Float64(w), Float64(h), PS._s3_axis_labels(p, key), PS._s3_scene_spans(p, key))
+	points = collect(Iterators.flatten((corners, Iterators.flatten(quads))))
+	xs, ys = first.(points), last.(points)
+	m = PS._S3_LABEL_MARGIN_PX
+	extent = max(maximum(abs, xs) / (w / 2 - m), maximum(abs, ys) / (h / 2 - m))
+	return (; extent, mid = ((minimum(xs) + maximum(xs)) / 2, (minimum(ys) + maximum(ys)) / 2),
+		viewport = (Float64(w), Float64(h)), corners)
+end
+# The scene (box side lengths `box`, as gl-plot3d draws it) is framed: the
+# model's box is `box`, its corners are where the independent projector puts
+# them for the camera written, and the drawing just fits the viewport (a 1 %
+# closer camera overflows it).
+function _t3_framed(fig, key::Symbol = :scene; box)
+	isapprox(collect(PlotlySupply._s3_drawn_box(fig isa SubplotFigure ? fig.plot : fig, key)), box; rtol = 1e-9) || return false
+	d = _t3_drawing(fig, key)
+	project = _t3_projector(fig, key; viewport = d.viewport)
+	w, h = d.viewport
+	corners = (project([sx, sy, sz] .* box) for sz in (-0.5, 0.5) for sy in (-0.5, 0.5) for sx in (-0.5, 0.5))
+	agree = all(zip(d.corners, corners)) do (model, ndc)
+		isapprox(model[1], ndc[1] * w / 2; atol = 1e-6 * w) && isapprox(model[2], ndc[2] * h / 2; atol = 1e-6 * h)
+	end
+	return agree && isapprox(d.extent, 1; atol = 2e-3) && _t3_drawing(fig, key; scale = 0.99).extent > 1
+end
+# The drawing is centred in its viewport (the camera centre was panned).
+_t3_centred(fig, key::Symbol = :scene) = maximum(abs, _t3_drawing(fig, key).mid) <= 1.0
 
 @testset "sci: 3-D scenes" begin
 	@testset "_label3d converts TeX for WebGL text (A8)" begin
@@ -141,19 +171,22 @@ end
 		e = 2 .* [cosd(30) * cosd(-60), cosd(30) * sind(-60), sind(30)]
 		@test collect(_t3_xyz(_t3_camera(f)[:eye])) ≈ [e[2], e[3], e[1]]
 		@test collect(_t3_xyz(_t3_camera(f)[:up])) == [0.0, 1.0, 0.0]
-		# Automatic distance: the unit cube's corners just fit the default
-		# 700×500 figure's viewport (600×390 px inside the default margins)
-		# less three 12 px font sizes per side for the labels.
+		# Automatic distance: the unit cube, its tick labels and its axis titles
+		# just fit the scene's viewport, centred by moving the camera centre.
 		view!(f; elev = 30, azim = -60)
-		@test _t3_fill(f; viewport = (600.0, 390.0), pad = 36.0, box = ones(3)) ≈ 1 atol = 1e-9
-		auto = _t3_norm(collect(_t3_xyz(_t3_camera(f)[:eye])))
+		@test _t3_framed(f; box = ones(3))
+		@test _t3_centred(f)
+		@test _t3_dir(f) ≈ [cosd(30) * cosd(-60), cosd(30) * sind(-60), sind(30)]
+		auto = _t3_distance(f)
+		# zoom divides the fitted distance.
 		view!(f; elev = 30, azim = -60, zoom = 2)
-		@test _t3_norm(collect(_t3_xyz(_t3_camera(f)[:eye]))) ≈ auto / 2
+		@test _t3_distance(f) ≈ auto / 2 rtol = 1e-6
+		@test _t3_drawing(f).extent > 1.5
 		# A larger font leaves more room.
 		relayout!(f; font = attr(size = 20))
 		view!(f; elev = 30, azim = -60)
-		@test _t3_fill(f; viewport = (600.0, 390.0), pad = 60.0, box = ones(3)) ≈ 1 atol = 1e-9
-		@test _t3_norm(collect(_t3_xyz(_t3_camera(f)[:eye]))) > auto
+		@test _t3_framed(f; box = ones(3))
+		@test _t3_distance(f) > auto
 		# Spec F31 case: box (1, 0.25, 0.25) in a 0.32-wide cell of a 900×350
 		# figure with zero margins (the corner fit replaces 1.x's sphere fit).
 		cell = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; width = 900, height = 350)
@@ -162,13 +195,13 @@ end
 		@test PlotlySupply._s3_viewport(cell, PlotlySupply._s3_scene_target(cell, "test")) == (288.0, 350.0)
 		scene!(cell; aspectratio = (1, 0.25, 0.25))
 		view!(cell; elev = 20, azim = -65)
-		eye = collect(_t3_xyz(_t3_camera(cell)[:eye]))
-		@test _t3_fill(cell; viewport = (288.0, 350.0), pad = 36.0, box = [1.0, 0.25, 0.25]) ≈ 1 atol = 1e-9
-		@test eye ./ sqrt(sum(abs2, eye)) ≈ [cosd(20) * cosd(-65), cosd(20) * sind(-65), sind(20)]
-		# A camera centre off the box centre still shows the whole box.
+		@test _t3_framed(cell; box = [1.0, 0.25, 0.25])
+		@test _t3_dir(cell) ≈ [cosd(20) * cosd(-65), cosd(20) * sind(-65), sind(20)]
+		# A camera centre the user set is kept, and the whole drawing still fits.
 		relayout!(cell; scene_camera_center = attr(x = 0.2, y = 0.0, z = 0.0))
 		view!(cell; elev = 20, azim = -65)
-		@test _t3_fill(cell; viewport = (288.0, 350.0), pad = 36.0, box = [1.0, 0.25, 0.25]) ≈ 1 atol = 1e-9
+		@test _t3_center(cell) == [0.2, 0.0, 0.0]
+		@test _t3_framed(cell; box = [1.0, 0.25, 0.25])
 		# Projection switch; orthographic zoom scales the scene box.
 		view!(f; projection = "orthographic", zoom = 1.5)
 		@test _t3_fields(_t3_camera(f)[:projection])[:type] == "orthographic"
@@ -195,11 +228,9 @@ end
 		@test_throws ArgumentError view!(plot_scatter(1:2, 1:2))
 		# `view = (elev, azim)` on constructors and mutators.
 		h = plot_surface(rand(3, 3); view = (10, 20), aspectmode = "cube")
-		ev = collect(_t3_xyz(_t3_camera(h)[:eye]))
-		@test ev ./ sqrt(sum(abs2, ev)) ≈ [cosd(10) * cosd(20), cosd(10) * sind(20), sind(10)]
+		@test _t3_dir(h) ≈ [cosd(10) * cosd(20), cosd(10) * sind(20), sind(10)]
 		plot_scatter3d!(h, 1:2, 1:2, 1:2; view = (45, 0))
-		ev = collect(_t3_xyz(_t3_camera(h)[:eye]))
-		@test ev ./ sqrt(sum(abs2, ev)) ≈ [cosd(45), 0.0, sind(45)] atol = 1e-12
+		@test _t3_dir(h) ≈ [cosd(45), 0.0, sind(45)] atol = 1e-9
 		@test_throws ArgumentError plot_surface(rand(3, 3); view = (10,))
 	end
 
@@ -207,9 +238,8 @@ end
 		# A constructor frames a perspective scene with plotly's default
 		# direction at the automatic distance.
 		f = _t3_cube()
-		eye = _t3_eye(f)
-		@test eye ./ _t3_norm(eye) ≈ fill(1 / sqrt(3), 3)
-		@test _t3_fill(f; viewport = (600.0, 390.0), pad = 36.0, box = ones(3)) ≈ 1 atol = 1e-9
+		@test _t3_dir(f) ≈ fill(1 / sqrt(3), 3)
+		@test _t3_framed(f; box = ones(3))
 		# Orthographic scenes keep plotly's camera.
 		@test !haskey(_t3_camera(plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; perspective = false)), :eye)
 		# "data" with an explicit range: plotly ignores the range for the aspect,
@@ -218,11 +248,11 @@ end
 		g = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 1.0]; aspectmode = "data", zrange = (0, 4))
 		@test _t3_scene(g)[:aspectmode] == "manual"
 		@test _t3_ratio(g) ≈ [2.125, 1.0625, 4.0] ./ 4
-		@test _t3_fill(g; viewport = (600.0, 390.0), pad = 36.0, box = _t3_ratio(g)) ≈ 1 atol = 1e-9
+		@test _t3_framed(g; box = _t3_ratio(g))
 		# A later append re-derives the pinned ratios and re-frames the camera.
 		plot_scatter3d!(g, [0.0, 4.0], [0.0, 1.0], [0.0, 1.0])
 		@test _t3_ratio(g) ≈ [4.25, 1.0625, 4.0] ./ 4.25
-		@test _t3_fill(g; viewport = (600.0, 390.0), pad = 36.0, box = _t3_ratio(g)) ≈ 1 atol = 1e-9
+		@test _t3_framed(g; box = _t3_ratio(g))
 		# "auto" with a range that makes one span over four times another: a cube.
 		a = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; zrange = (0, 10))
 		@test _t3_scene(a)[:aspectmode] == "manual"
@@ -243,8 +273,8 @@ end
 		@test _t3_norm(_t3_eye(h)) ≈ 3
 		view!(h; elev = 20, azim = 10)
 		plot_scatter3d!(h, [0.0, 9.0], [0.0, 1.0], [0.0, 1.0])
-		@test _t3_fill(h; viewport = (600.0, 390.0), pad = 36.0, box = _t3_ratio(h)) ≈ 1 atol = 1e-9
-		@test _t3_eye(h) ./ _t3_norm(_t3_eye(h)) ≈ [cosd(20) * cosd(10), cosd(20) * sind(10), sind(20)]
+		@test _t3_framed(h; box = _t3_ratio(h))
+		@test _t3_dir(h) ≈ [cosd(20) * cosd(10), cosd(20) * sind(10), sind(20)]
 		# scene! with an explicit aspect mode and a range pins too.
 		k = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 1.0])
 		scene!(k; aspectmode = "data", zrange = (0, 4))
@@ -255,7 +285,7 @@ end
 		sf = _t3_scene_sf(3)
 		plot_scatter3d!(sf, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2, aspectmode = "cube")
 		viewport = _t3_cell_viewport(sf, :scene2)
-		@test _t3_fill(sf, :scene2; viewport, pad = 36.0, box = ones(3)) ≈ 1 atol = 1e-9
+		@test _t3_framed(sf, :scene2; box = ones(3))
 		counts = _t3_expected_nticks(sf, :scene2; viewport, box = ones(3))
 		@test _t3_nticks(sf, :scene2) == counts
 		@test all(2 .<= counts .<= 3)   # a ~170 px cell: plotly would draw 4 to 9
@@ -294,8 +324,7 @@ end
 		@test_throws ArgumentError view!(sf; row = 1, col = 4)
 		# view = (elev, azim) through a cell mutator touches only that scene.
 		plot_scatter3d!(sf, 1:3, 1:3, 1:3; row = 1, col = 1, view = (0, 180))
-		eye = collect(_t3_xyz(_t3_camera(sf, :scene)[:eye]))
-		@test eye ./ sqrt(sum(abs2, eye)) ≈ [-1.0, 0.0, 0.0] atol = 1e-12
+		@test _t3_dir(sf, :scene) ≈ [-1.0, 0.0, 0.0] atol = 1e-9
 		@test PlotlyBase.JSON.json(_t3_layout(sf)[:scene3]) != before3   # changed above only by view!
 		mixed = subplots(1, 2; sync = false, specs = [Spec(kind = "xy") Spec(kind = "scene")])
 		@test_throws ArgumentError view!(mixed; row = 1, col = 1)
@@ -701,12 +730,15 @@ end
 		plot_scatter3d!(sf, 1:2, 1:2, 1:2; row = 1, col = 2, opacity = 0.5)
 		@test _t3_fields(sf.plot.data[end].fields[:line])[:color] ==
 			  PlotlySupply._blend_over(PlotlySupply._default_trace_color(sf.plot, 4), 0.5, "#ff0000"; who = "test")
-		# Scene keywords go to the target cell's scene only.
-		before1 = PlotlyBase.JSON.json(_t3_layout(sf)[:scene])
+		# Scene keywords go to the target cell's scene only (the first scene's
+		# camera is re-framed for the plot area the new colorbar leaves).
+		unframed(key) = Dict(k => PlotlyBase.JSON.json(v) for (k, v) in _t3_scene(sf, key) if !(k in (:camera, :plotlysupply)))
+		before1 = unframed(:scene)
 		plot_surface!(sf, rand(3, 3); row = 1, col = 2, xlabel = "\$x_1\$", zrange = [0, 2], perspective = false)
 		@test _t3_fields(_t3_axis(sf, :xaxis, :scene2)[:title])[:text] == "x<sub>1</sub>"
 		@test _t3_axis(sf, :zaxis, :scene2)[:range] == [0, 2]
-		@test PlotlyBase.JSON.json(_t3_layout(sf)[:scene]) == before1
+		@test unframed(:scene) == before1
+		@test !haskey(_t3_camera(sf, :scene), :projection)
 		@test_throws ArgumentError plot_surface!(sf, rand(3, 3); row = 1, col = 2, secondary_y = true)
 		@test_throws ArgumentError plot_surface!(sf, rand(3, 3); row = 1, col = 2, show = true)
 		mixed = subplots(1, 2; sync = false, specs = [Spec(kind = "xy") Spec(kind = "scene")])
