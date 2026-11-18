@@ -48,8 +48,13 @@ const _SFN_RENDER_JS = raw"""
     // Tick labels and the axis title.
     const labels = [...gd.querySelectorAll('g.' + id + 'tick text'), ...gd.querySelectorAll('.g-' + id + 'title text')];
     out.axes[k] = {range: a.range.map(Number), offset: a._offset, length: a._length,
-      labels_left: extent(labels, 'left'), labels_bottom: extent(labels, 'bottom')};
+      labels_left: extent(labels, 'left'), labels_bottom: extent(labels, 'bottom'),
+      labels_right: extent(labels, 'right')};
   }
+  out.annotations = [...gd.querySelectorAll('g.annotation')].map(g => {
+    const parts = g.querySelectorAll('text, g.math-group');
+    return {text: g.textContent, box: [extent(parts, 'left'), extent(parts, 'top'), extent(parts, 'right'), extent(parts, 'bottom')]};
+  });
   for (const g of gd.querySelectorAll('g.colorbar')) {
     const el = g.querySelector('.cboutline') || g.querySelector('.cbfills') || g.querySelector('rect.cbbg');
     if (!el) continue;
@@ -958,6 +963,419 @@ end
 		info = _sfn_render(tall; width = 700, height = 450, bars = 1)
 		centre = (info["axes"]["yaxis"]["labels_left"] + only(info["colorbars"])["labels_right"]) / 2
 		@test abs(centre - 350) <= 15
+	end
+end
+
+# ---------------------------------------------------------------------------
+# Wave 5 (layout-engine)
+# ---------------------------------------------------------------------------
+
+@testset "a journal style's own size is free for M3a; a user size is kept (Z67)" begin
+	x = collect(range(0, 6; length = 61)); y = collect(range(0, 0.6; length = 7))
+	z = [sin(a) + b for a in x, b in y]
+	with_style(:ieee) do
+		W, H = _SFN._style_default_figure_size()
+		@test _SFN._fin_size_is_free(Layout(width = W, height = H))
+		@test !_SFN._fin_size_is_free(Layout(width = W + 10, height = H))
+		# Wide field: the width is kept, blank rows go; the lower bound
+		# scales with the journal size (100 px at 500 px tall).
+		f = plot_heatmap(x, y, z; equalar = true)
+		@test f.layout.fields[:width] == round(Int, W)
+		@test 100 <= f.layout.fields[:height] < H
+		@test f.layout.fields[:height] >= round(_SFN._FIN_MIN_FIGURE_HEIGHT * H / _SFN._DEFAULT_EXPORT_HEIGHT_PX)
+		# Tall field: the height is kept.
+		t = plot_heatmap(y, x, permutedims(z); equalar = true)
+		@test t.layout.fields[:height] == round(Int, H) && t.layout.fields[:width] < W
+		# A size the user gave stays.
+		u = plot_heatmap(x, y, z)
+		figsize!(u, 400, 300)
+		plot_heatmap!(u, x, y, z; equalar = true)
+		@test u.layout.fields[:width] == 400 && u.layout.fields[:height] == 300
+	end
+	@test _SFN._fin_size_is_free(Layout())
+	d = plot_heatmap(x, y, z; equalar = true)
+	@test d.layout.fields[:width] == 700 && d.layout.fields[:height] < 500
+end
+
+@testset "images give their axes the pixel extent (Z40)" begin
+	f = plot_image(rand(UInt8, 4, 6, 3))
+	@test _sfn_clip(f, :xaxis) == (-0.5, 5.5)
+	@test _sfn_clip(f, :yaxis) == (-0.5, 3.5)
+	g = plot_image(rand(5, 7, 3); interpolation = :bilinear)
+	@test haskey(g.data[end].fields, :source)
+	@test _sfn_clip(g, :xaxis) == (-0.5, 6.5)
+	@test _sfn_clip(g, :yaxis) == (-0.5, 4.5)
+end
+
+@testset "equal aspect resolves a one-sided linked limit (Z54)" begin
+	f = plot_heatmap(collect(0:9), collect(0:4), rand(10, 5))
+	xrange!(f, (2, nothing))
+	plot_heatmap!(f, collect(0:9), collect(0:4), rand(10, 5); equalar = true)
+	x = _sfn_axis(f, :xaxis)
+	@test _sfn_get(f, :xaxis, :autorange) === false
+	range = _sfn_get(f, :xaxis, :range)
+	@test range[1] == 2 && 9 < range[2] <= 9.5 + 1e-9
+end
+
+@testset "D16: overlays whose anchors are inside the field keep the range tight" begin
+	f = plot_heatmap(collect(0.0:4.0), collect(0.0:4.0), rand(5, 5))
+	# An overlay drawn past the field (arrows from anchors inside it).
+	plot_scatter!(f, [0.0, 5.5, 4.0, 4.0], [0.0, 2.0, 4.0, 5.0]; mode = "lines")
+	q = f.data[end]
+	loose = _sfn_clip(f, :xaxis)
+	@test loose[1] == -0.5 && loose[2] ≈ 5.5 + _SFN._FIN_OVERLAY_PAD * 6.0
+	q.fields[:meta] = Dict("plotlysupply_anchor_extent" => [0.0, 4.0, 0.0, 4.0])
+	_SFN._finalize_figure!(f)
+	@test _sfn_clip(f, :xaxis) == (-0.5, 4.5) && _sfn_clip(f, :yaxis) == (-0.5, 4.5)
+	# A PlotlyAttribute meta with Symbol keys reads the same.
+	with_meta(meta) = (t = GenericTrace("scatter"); t.fields[:meta] = meta; t)
+	symbol_meta = PlotlyBase.PlotlyAttribute(Dict{Symbol, Any}(:plotlysupply_anchor_extent => [1, 2, 3, 4]))
+	@test _SFN._fin_anchor_extent(with_meta(symbol_meta), 'y', false) == (3.0, 4.0)
+	@test _SFN._fin_anchor_extent(with_meta(symbol_meta), 'x', true) == (1.0, 2.0)
+	@test _SFN._fin_anchor_extent(with_meta(Dict("plotlysupply_anchor_extent" => [-1, 2, 3, 4])), 'x', true) === nothing
+	# Anchors outside the field: their extent counts, padded on that side.
+	q.fields[:meta] = Dict("plotlysupply_anchor_extent" => [0.0, 6.0, 0.0, 4.0])
+	_SFN._finalize_figure!(f)
+	clip = _sfn_clip(f, :xaxis)
+	@test clip[1] == -0.5 && clip[2] ≈ 6.0 + _SFN._FIN_OVERLAY_PAD * 6.5
+	@test _sfn_clip(f, :yaxis) == (-0.5, 4.5)
+	# Malformed meta: ignored (the drawn extent counts).
+	for bad in (Dict("plotlysupply_anchor_extent" => [0.0, 4.0]), Dict("plotlysupply_anchor_extent" => [4.0, 0.0, 0.0, 4.0]),
+		Dict("plotlysupply_anchor_extent" => [NaN, 4.0, 0.0, 4.0]), "plotlysupply:field")
+		@test _SFN._fin_anchor_extent(with_meta(bad), 'x', false) === nothing
+	end
+end
+
+@testset "axis records are scanned once per run, lazily (Z81)" begin
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, _SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y); row = 1, col = 1)
+	plot_scatter!(sf, 1:10, rand(10); row = 1, col = 2)
+	axes = _SFN._fin_collect_axes(sf.plot)
+	@test haskey(axes, :xaxis) && haskey(axes, :xaxis2)
+	@test all(acc -> !acc.scanned, values(_SFN._fin_axis_records(axes)))
+	acc = get(axes, :xaxis, nothing)
+	@test acc.scanned && (acc.flo, acc.fhi) == (-0.25, 4.25)
+	@test !_SFN._fin_axis_records(axes)[:xaxis2].scanned
+	@test get(axes, :nope, :missing) === :missing
+	# The run reads every record once: a second finalize changes nothing.
+	@test _SFN._finalize_figure!(sf) === false
+end
+
+@testset "one colour scan per array per call (Z83)" begin
+	z = rand(50, 50)
+	@test _SFN._cbar_extrema(z) == extrema(z)
+	calls = _SFN._cbar_with_extrema_memo() do
+		_SFN._cbar_extrema(z); _SFN._cbar_extrema(z)
+		memo = _SFN._CBAR_EXTREMA_MEMO[]
+		(length(memo), memo[z])
+	end
+	@test calls == (1, extrema(z))
+	@test _SFN._CBAR_EXTREMA_MEMO[] === nothing
+	# The fast path agrees with the plain scan on every special value.
+	cases = Any[Float64[], [NaN, NaN], [1.0, NaN, -Inf, 3.0, Inf], Float32[2, NaN, -1], [5.0], [-0.0, 0.0]]
+	for values in cases
+		@test _SFN._cbar_real_extrema(values) == _SFN._cbar_real_extrema(Any[v for v in values])
+	end
+	@test _SFN._cbar_real_extrema(PermutedDimsArray([1.0 NaN; 3.0 -2.0], (2, 1))) == (-2.0, 3.0)
+	# A mutation scans a large colour array once (cost guard).
+	h = plot_heatmap(rand(1500, 1500))
+	colorbar!(h; title = "a")
+	t = @elapsed colorbar!(h; title = "b")
+	@test t < 0.5
+end
+
+@testset "plot areas are found once per fit (Z82)" begin
+	sf = subplots(2, 3; sync = false)
+	for c in 1:3
+		plot_heatmap!(sf, _SFN_X, _SFN_Y, 1e4 .* _sfn_z(_SFN_X, _SFN_Y); row = 1, col = c)
+	end
+	layout = sf.plot.layout
+	accs = _SFN._fin_collect_axes(sf.plot)
+	grid = Ref{Any}(_SFN._plotlysupply_subplot_layout(layout.subplots))
+	ref = (_SFN._layout_axis_domain(grid[], :xaxis), _SFN._layout_axis_domain(grid[], :yaxis))
+	cache = IdDict{Any, Any}()
+	a = _SFN._fin_right_allowance(layout, accs, ref, grid, 600.0, 400.0; area_cache = cache)
+	@test length(cache) == 1
+	b = _SFN._fin_right_allowance(layout, accs, ref, grid, 600.0, 400.0; area_cache = cache)
+	@test a == b == _SFN._fin_right_allowance(layout, accs, ref, grid, 600.0, 400.0)
+	@test length(cache) == 1
+	# Cost guard: finalizing a 2 x 3 grid of fields stays fast.
+	_SFN._finalize_figure!(sf)
+	@test (@elapsed _SFN._finalize_figure!(sf)) < 0.5
+end
+
+@testset "the extent scan allocates no copies of large data (Z79a)" begin
+	n = 1_000_000
+	s = plot_scatter(collect(1.0:n), rand(n))
+	_SFN._finalize_figure!(s)
+	axes = _SFN._fin_collect_axes(_sfn_plot(s))
+	get(axes, :xaxis, nothing)
+	axes = _SFN._fin_collect_axes(_sfn_plot(s))
+	bytes = @allocated get(axes, :xaxis, nothing)
+	@test bytes < 100_000
+	bytes = @allocated _SFN._finalize_figure!(s)
+	@test bytes < 2_000_000
+	@test (@elapsed _SFN._finalize_figure!(s)) < 0.25
+end
+
+@testset "export copies refit scenes; document exports keep the camera centre (Z43)" begin
+	x = collect(range(-1, 1; length = 12))
+	f = plot_surface(x, x, [a^2 - b for a in x, b in x])
+	opts = (width = 900.0, height = 300.0)
+	live = _sfn_snapshot(f)
+	pan = _SFN._finalize_export_copy(f, opts)
+	still = _SFN._finalize_export_copy(f, opts; pan = false)
+	@test _sfn_snapshot(f) == live
+	camera(p) = _sfn_fields(_sfn_fields(p.layout.fields[:scene])[:camera])
+	center(p) = (c = get(camera(p), :center, nothing); c === nothing ? (0.0, 0.0, 0.0) :
+		(c = _sfn_fields(c); (Float64(c[:x]), Float64(c[:y]), Float64(c[:z]))))
+	@test center(still) == center(f)
+	# The export copy is framed for its size: the eye differs from the live one.
+	eye(p) = (e = _sfn_fields(camera(p)[:eye]); (e[:x], e[:y], e[:z]))
+	@test eye(still) != eye(f)
+	@test eye(pan) == eye(still) || center(pan) != center(f)
+	# The renderer path takes `pan`, the document path passes `pan = false`.
+	options = _SFN._ExportOptions(900.0, 300.0, 1.0, nothing, true, nothing, false, 30.0, :px, false, :auto)
+	@test center(_SFN._export_source(f, options; pan = false)) == center(f)
+	tight = _SFN._ExportOptions(900.0, 300.0, 1.0, nothing, true, nothing, true, 30.0, :px, false, :auto)
+	@test center(_SFN._export_source(f, tight; pan = false)) == center(f)
+	@test _sfn_snapshot(f) == live
+end
+
+@testset "whole-figure annotations follow the margins every run leaves (Z47)" begin
+	f = plot_scatter(1:10, rand(10))
+	annotate!(f, 0.02, 0.98, "(a)"; coords = :figure, showarrow = false)
+	item() = _sfn_fields(f.layout.fields[:annotations][1])
+	before = item()[:xshift]
+	# A y title widens the left margin estimate.
+	ylabel!(f, "A y title")
+	after = item()[:xshift]
+	@test after != before
+	# What the placement gives for the margins the run left: no change.
+	copy_items = collect(Any, f.layout.fields[:annotations])
+	@test _SFN._figure_annotations_place!(f, copy_items; size = (700.0, 500.0)) === nothing
+	@test _sfn_fields(copy_items[1])[:xshift] == after
+	@test _SFN._finalize_figure!(f) === false
+end
+
+@testset "grid titles get room past the outer axis labels (Z20)" begin
+	sf = subplots(2, 2; sync = false, x_title = "Shared x title", y_title = "Shared y title (units)")
+	for r in 1:2, c in 1:2
+		plot_scatter!(sf, 1:10, 1000 .* (1:10); row = r, col = c)
+	end
+	layout = sf.plot.layout
+	names = [_sfn_fields(a)[:name] for a in layout.fields[:annotations] if haskey(_sfn_fields(a), :name)]
+	@test "plotlysupply:grid_title:x" in names && "plotlysupply:grid_title:y" in names
+	find(name) = _sfn_fields(only(a for a in layout.fields[:annotations] if get(_sfn_fields(a), :name, "") == name))
+	ytitle = find("plotlysupply:grid_title:y")
+	xtitle = find("plotlysupply:grid_title:x")
+	plan = _SFN._room_plan(sf)
+	left = maximum(a.own[:left] for a in values(plan.areas))
+	bottom = maximum(a.own[:bottom] for a in values(plan.areas))
+	@test ytitle[:xanchor] == "right" && ytitle[:xshift] <= -left
+	@test xtitle[:yanchor] == "top" && xtitle[:yshift] <= -bottom
+	margin = _sfn_fields(layout.fields[:margin])
+	@test margin[:l] >= -ytitle[:xshift] + _SFN._room_text_height("Shared y title (units)", 12.0)
+	@test margin[:b] >= -xtitle[:yshift] + _SFN._room_text_height("Shared x title", 12.0)
+	@test _SFN._finalize_figure!(sf) === false
+	# The grid title owner is listed with the other room owners.
+	@test :grid_titles in _SFN._ROOM_OWNERS
+end
+
+@testset "a y title in the gap takes room from its own cell (Z71)" begin
+	with_style(:ieee) do
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, 1:10, rand(10); row = 1, col = 1)
+		plot_scatter!(sf, 1:10, 1000 .* rand(10); row = 1, col = 2)
+		ylabel!(sf, "left y"; row = 1, col = 1)
+		ylabel!(sf, "Amplitude (a.u.)"; row = 1, col = 2)
+		layout = sf.plot.layout
+		grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
+		d1 = _SFN._layout_axis_domain(layout, :xaxis)
+		d2 = _SFN._layout_axis_domain(layout, :xaxis2)
+		@test d2[1] > _SFN._layout_axis_domain(grid, :xaxis2)[1]
+		@test d1 == _SFN._layout_axis_domain(grid, :xaxis)
+		plan = _SFN._room_plan(sf)
+		a = plan.areas[:xaxis2]
+		@test (d2[1] - d1[2]) * plan.Wp >= _SFN._room_label_px(a.own[:left]) + _SFN._ROOM_GAP - 1e-6
+		@test _SFN._finalize_figure!(sf) === false
+	end
+	# Labels that fit the gap leave the grid alone (2 x 3 default spacing).
+	sf = subplots(2, 3; sync = false)
+	plot_scatter!(sf, _SFN_X, sin.(_SFN_X); row = 1, col = 2)
+	grid = _SFN._plotlysupply_subplot_layout(sf.plot.layout.subplots)
+	for k in (:xaxis2, :xaxis3)
+		@test collect(_SFN._layout_axis_domain(sf.plot.layout, k)) ≈ collect(_SFN._layout_axis_domain(grid, k))
+	end
+end
+
+@testset "an axis title longer than the figure is wrapped (W5)" begin
+	long = "a fairly long y-axis label that matplotlib would split"
+	sf = subplots(1, 2; sync = false)
+	plot_scatter!(sf, 1:10, rand(10); row = 1, col = 1)
+	plot_scatter!(sf, 1:10, rand(10); row = 1, col = 2)
+	ylabel!(sf, long; row = 1, col = 1)
+	figsize!(sf, 578, 227)
+	title = _sfn_fields(_sfn_axis(sf, :yaxis)[:title])
+	@test occursin(_SFN._FIN_WRAP_BREAK, title[:text])
+	@test replace(title[:text], _SFN._FIN_WRAP_BREAK => " ") == long
+	@test title[:standoff] == _SFN._FIN_WRAP_STANDOFF
+	# Every line fits the figure height.
+	for line in split(title[:text], _SFN._FIN_WRAP_BREAK)
+		@test length(line) * _SFN._FIN_WRAP_CHAR_EM * 14 <= 227
+	end
+	# The figure's own margin is left alone (it would outlive the wrap); a
+	# tight export copy gets a left margin that holds the lines (plotly's
+	# automargin does not count them in full).
+	layout = sf.plot.layout
+	@test _sfn_fields(layout.fields[:margin])[:l] == 50
+	@test _SFN._finalize_figure!(sf) === false
+	tight = _SFN._ExportOptions(578.0, 227.0, 1.0, nothing, true, nothing, true, 30.0, :px, false, :auto)
+	copy = _SFN._export_source(sf.plot, tight)
+	copy_title = _sfn_fields(copy.layout.fields[:yaxis][:title])
+	@test occursin(_SFN._FIN_WRAP_BREAK, copy_title[:text])
+	accs = _SFN._fin_collect_axes(copy)
+	need = _SFN._fin_y_labels_px(copy.layout, accs, :yaxis, (0.0, 1.0), 100.0)
+	@test _sfn_fields(copy.layout.fields[:margin])[:l] >= need
+	@test _sfn_fields(layout.fields[:margin])[:l] == 50
+	# A larger figure: one line again, our standoff gone.
+	figsize!(sf, 1400, 900)
+	title = _sfn_fields(_sfn_axis(sf, :yaxis)[:title])
+	@test title[:text] == long && get(title, :standoff, nothing) === nothing
+	# The user's own breaks and math titles are kept as written.
+	ylabel!(sf, "first<br>second line of a title that is much too long for this small figure"; row = 1, col = 1)
+	figsize!(sf, 400, 150)
+	text = _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text]
+	@test startswith(text, "first<br>second")
+	ylabel!(sf, "\$\\alpha\$ a math title that is much too long for this small figure to show"; row = 1, col = 1)
+	@test !occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text])
+	# The wrapper itself.
+	@test _SFN._fin_wrap_line("aa bb cc", 5) == "aa bb<br />cc"
+	@test _SFN._fin_wrap_line("averyveryverylongword x", 5) == "averyveryverylongword<br />x"
+	@test _SFN._fin_wrap_title("one two<br>three four", 7) == "one two<br>three<br />four"
+	# Extra lines widen the label estimate.
+	axis = Dict{Symbol, Any}(:title => Dict{Symbol, Any}(:text => "a<br />b"))
+	@test _SFN._fin_title_push(axis, 12.0) ≈ _SFN._fin_title_push(Dict(:title => "a"), 12.0) + _SFN._FIN_LINE_EM * 14
+end
+
+@testset "a title wrapped while the fonts were large leaves no room behind (composite_2x2)" begin
+	sf = subplots(2, 2; sync = false, horizontal_spacing = 0.27, vertical_spacing = 0.2)
+	plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)
+	plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2)
+	set_fonts!(sf; size = 16, label = 20)
+	for c in 1:2
+		plot_scatter!(sf, 1:8, 10.0 .^ -(2 .* (1:8)); row = 2, col = c, yscale = "log")
+		ylabel!(sf, "Relative frequency difference"; row = 2, col = c)
+	end
+	layout = sf.plot.layout
+	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
+	# Wrapped at the large font (the bottom row is 156 px tall) ...
+	@test occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text])
+	# ... with neither a grown margin nor a narrowed cell.
+	@test _sfn_fields(layout.fields[:margin])[:l] == 50
+	for k in (:xaxis, :xaxis2, :xaxis3, :xaxis4)
+		@test collect(_SFN._layout_axis_domain(layout, k)) ≈ collect(_SFN._layout_axis_domain(grid, k))
+	end
+	# Smaller fonts: one line again, the layout as before.
+	set_fonts!(sf; size = 9, label = 9.2, tick = 7.5, units = :pt)
+	@test _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text] == "Relative frequency difference"
+	@test _sfn_fields(layout.fields[:margin])[:l] == 50
+	@test collect(_SFN._layout_axis_domain(layout, :xaxis4)) ≈ collect(_SFN._layout_axis_domain(grid, :xaxis4))
+end
+
+@testset "equal-aspect cells of a row keep one size when labels fill the gap (audit_d)" begin
+	sf = subplots(1, 3; sync = false, horizontal_spacing = 0.04)
+	figsize!(sf, 826, 288)
+	for k in 1:3
+		plot_heatmap!(sf, collect(range(0, 1.2; length = 13)), collect(range(0, 1.07; length = 11)), rand(13, 11);
+			row = 1, col = k, equalar = true, showscale = false)
+	end
+	layout = sf.plot.layout
+	plan = _SFN._room_plan(sf)
+	# The middle cell's tick labels need more than the grid gap ...
+	gap = 0.04 * plan.Wp
+	@test plan.areas[:xaxis2].own[:left] > gap - _SFN._ROOM_GAP
+	# ... yet no cell is narrowed for them: the fits stay alike.
+	widths = [(d = _SFN._layout_axis_domain(layout, k); d[2] - d[1]) for k in (:xaxis, :xaxis2, :xaxis3)]
+	heights = [(d = _SFN._layout_axis_domain(layout, k); d[2] - d[1]) for k in (:yaxis, :yaxis2, :yaxis3)]
+	@test maximum(widths) - minimum(widths) <= 1e-6
+	@test maximum(heights) - minimum(heights) <= 1e-6
+	@test all(a -> a.room[:left] == 0, values(plan.areas))
+	@test _SFN._finalize_figure!(sf) === false
+end
+
+@testset "log-axis tick labels are estimated as plotly writes them" begin
+	# plotly.js 2.35.2 formatLog: "10^-15" at 1.25 font sizes (power), "1e-15"
+	# (e), "100µ" (SI/B past 10^±minexponent), the plain number otherwise.
+	chars = _SFN._fin_log_label_chars
+	@test chars(-15, "power", 3.0) == 6 && chars(0, "power", 3.0) == 2 && chars(1, "power", 3.0) == 3
+	@test chars(2, "power", 3.0) == 4
+	@test chars(-15, "e", 3.0) == 5 && chars(2, "E", 3.0) == 3
+	@test chars(-4, "B", 3.0) == 4 && chars(-3, "B", 3.0) == 5 && chars(-16, "SI", 3.0) == 6
+	@test chars(-4, "B", 5.0) == 6
+	@test chars(-15, "none", 3.0) == 17
+	axis = Dict{Symbol, Any}(:exponentformat => "power")
+	@test _SFN._fin_tick_chars(axis, -15.7, -0.6, 300.0, true, true) == 6
+	# A d3 format writes plain numbers; plotly's default format is "B".
+	@test _SFN._fin_tick_chars(Dict{Symbol, Any}(:tickformat => ".1e"), -15.7, -0.6, 300.0, true, true) == 18
+	@test _SFN._fin_tick_chars(Dict{Symbol, Any}(), -14.7, -4.2, 300.0, true, true) == 4
+	@test _SFN._fin_tick_chars(Dict{Symbol, Any}(), -15.7, -4.2, 300.0, true, true) == 6
+	# Renderer: the estimate covers the drawn labels without running far past them.
+	f = plot_scatter(1:15, 10.0 .^ -(1:15); yscale = "log")
+	info = _sfn_render(f)
+	if info === nothing
+		@test_skip "renderer unavailable"
+	else
+		layout = f.layout
+		accs = _SFN._fin_collect_axes(f)
+		axis = layout.fields[:yaxis]
+		tickfont = _SFN._fin_mapping_font_size(axis, :tickfont, _SFN._fin_font_size(layout))
+		lo, hi = _SFN._fin_shown_range(layout, :yaxis, accs)
+		estimate = _SFN._fin_tick_chars(axis, lo, hi, 300.0, true, true) * 0.6 * tickfont
+		drawn = info["axes"]["xaxis"]["offset"] - info["axes"]["yaxis"]["labels_left"]
+		@test drawn <= estimate + _SFN._fin_tick_len(axis) + 2
+		@test estimate <= drawn + 20
+	end
+end
+
+@testset "a map's colorbar margin is reserved before plotly draws (Z49)" begin
+	fig = plot_choropleth(["France", "Germany", "Spain"], [1.0, 2.0, 3.0]; scope = "europe", legend = "Regions")
+	plot_scattergeo!(fig, [2.35, 13.40], [48.86, 52.52]; legend = "cities")
+	plan = _SFN._room_plan(fig)
+	@test haskey(plan.areas, :geo)
+	requests = [r for r in plan.requests if r.owner === :colorbar]
+	@test length(requests) == 1 && !requests[1].margin_pushed
+	margin = _sfn_fields(fig.layout.fields[:margin])
+	by_area, order, _ = _SFN._fin_collect_bars(fig, Any[])
+	width = _SFN._fin_bar_width(fig.layout, by_area[order[1]][1], 390.0)
+	@test margin[:r] >= width + _SFN._FIN_AUTOMARGIN_EXTRA
+	@test _SFN._finalize_figure!(fig) === false
+	# Cartesian bars still leave the margin to plotly's automargin.
+	h = plot_heatmap(rand(4, 4))
+	@test all(r -> r.margin_pushed, _SFN._room_plan(h).requests)
+end
+
+@testset "renderer: bars past a twin axis; grid titles (Z32, Z20)" begin
+	f = plot_scatter(1:10, rand(10); legend = "line")
+	plot_histogram2d!(f, randn(400) .* 2 .+ 5, randn(400) .* 2 .+ 5; secondary_y = true)
+	ylabel!(f, "twin title"; secondary_y = true)
+	info = _sfn_render(f; bars = 1)
+	if info === nothing
+		@test_skip "renderer unavailable"
+	else
+		bar = only(info["colorbars"])
+		@test bar["x0"] >= info["axes"]["yaxis2"]["labels_right"] + 2
+		@test bar["labels_right"] <= 700
+		sf = subplots(2, 2; sync = false, x_title = "Shared x title", y_title = "Shared y title (units)")
+		for r in 1:2, c in 1:2
+			plot_scatter!(sf, 1:10, 1000 .* (1:10); row = r, col = c)
+		end
+		info = _sfn_render(sf)
+		titles = info["annotations"]
+		ybox = only(a["box"] for a in titles if occursin("Shared y", a["text"]))
+		xbox = only(a["box"] for a in titles if occursin("Shared x", a["text"]))
+		@test ybox[1] >= 0 && ybox[3] <= minimum(info["axes"][k]["labels_left"] for k in ("yaxis", "yaxis3"))
+		@test xbox[4] <= 500 && xbox[2] >= maximum(info["axes"][k]["labels_bottom"] for k in ("xaxis3", "xaxis4"))
 	end
 end
 

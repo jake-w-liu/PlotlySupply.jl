@@ -1711,8 +1711,7 @@ end
 		# Z21, Z22): these raise a MethodError for `row`/`col` instead of an
 		# ArgumentError naming the function. `@test_broken` turns into an error
 		# once they are fixed; then move the name out of this set.
-		cross_requested = Set(["panel_labels!", "remove_inset!", "shared_colorbar!",
-			"subplot_legends!", "tight_layout!"])
+		cross_requested = Set(["panel_labels!", "remove_inset!", "subplot_legends!", "tight_layout!"])
 		image = attr(source="data:image/png;base64,iVBORw0KGgo=", x=0, y=1, sizex=0.2, sizey=0.2)
 		geojson = Dict("type" => "FeatureCollection", "features" => [Dict("type" => "Feature", "id" => "A",
 			"properties" => Dict(), "geometry" => Dict("type" => "Polygon",

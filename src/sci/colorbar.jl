@@ -46,6 +46,13 @@ const _CBAR_SIDES = (:right, :bottom)
 const _CBAR_TITLE_SIDES = (:top, :right, :bottom)
 # plotly.js `colorbar.exponentformat` values.
 const _CBAR_EXPONENT_FORMATS = ("none", "e", "E", "power", "SI", "B")
+# `colorbar!(...; offset)` values (Z56).
+const _CBAR_OFFSETS = (:auto, :always, :none)
+# `offset = :auto`: plotly.js takes a common 10^k out of the tick labels when
+# |k| > `minexponent` (axes.js autoTickRound, k = floor(log10 of the largest
+# |range end|)); 4 gives k <= -5 or k >= 5, close to matplotlib's
+# ScalarFormatter (k <= -5 or k >= 6, `_AXES_OFFSET_LIMITS`).
+const _CBAR_OFFSET_MIN_EXPONENT = 4
 # Owner prefix of the annotations that carry math colorbar titles.
 const _CBAR_TITLE_ANNOTATION_PREFIX = "plotlysupply:colorbar_title:"
 
@@ -174,9 +181,50 @@ function _cbar_real_extrema(values)
 	return isfinite(lo) ? (lo, hi) : nothing
 end
 
+# Floating-point colour data (Z83): Base's vectorized `extrema` (about 1 ms
+# for 4e6 values, against 7-9 ms for a filtering loop) is the answer when
+# both ends are finite, as NaN propagates through it and ±Inf would be an
+# end; otherwise one branch-free pass skips NaN and ±Inf as above. A permuted
+# array (an image's lazy C x W x H `z`) has the extrema of its parent.
+function _cbar_real_extrema(values::AbstractArray{T}) where {T <: Base.IEEEFloat}
+	isempty(values) && return nothing
+	lo, hi = extrema(values)
+	isfinite(lo) && isfinite(hi) && return (Float64(lo), Float64(hi))
+	lo = T(Inf)
+	hi = T(-Inf)
+	@inbounds @simd for i in eachindex(values)
+		x = values[i]
+		finite = isfinite(x)
+		lo = min(lo, ifelse(finite, x, T(Inf)))
+		hi = max(hi, ifelse(finite, x, T(-Inf)))
+	end
+	return isfinite(lo) ? (Float64(lo), Float64(hi)) : nothing
+end
+_cbar_real_extrema(values::PermutedDimsArray{T}) where {T <: Base.IEEEFloat} =
+	_cbar_real_extrema(parent(values))
+
+# Z83: within one call (a colorbar mutation, a `_finalize_figure!` run) each
+# colour array is scanned once: `_cbar_extrema` keeps its results by array
+# identity while `_CBAR_EXTREMA_MEMO` holds a dictionary. Nothing in such a
+# call changes colour data in place (new data comes as new arrays), and the
+# memo ends with the call, so it cannot go stale.
+const _CBAR_EXTREMA_MEMO = Base.ScopedValues.ScopedValue{Union{Nothing, IdDict{Any, Any}}}(nothing)
+
+function _cbar_with_extrema_memo(f)
+	_CBAR_EXTREMA_MEMO[] === nothing || return f()
+	return Base.ScopedValues.with(f, _CBAR_EXTREMA_MEMO => IdDict{Any, Any}())
+end
+
 # Finite (min, max) of possibly nested colour data (matrices, vectors of rows,
 # `nothing` gaps); `nothing` when there is no finite number.
 function _cbar_extrema(values)
+	values isa AbstractArray || return _cbar_extrema_scan(values)
+	memo = _CBAR_EXTREMA_MEMO[]
+	memo === nothing && return _cbar_extrema_scan(values)
+	return get!(() -> _cbar_extrema_scan(values), memo, values)
+end
+
+function _cbar_extrema_scan(values)
 	values isa AbstractArray{<:Real} && return _cbar_real_extrema(values)
 	values isa Real && return _cbar_real_extrema((values,))
 	(values isa AbstractArray || values isa Tuple || values isa Base.Generator) ||
@@ -904,10 +952,23 @@ function _colorbar_options(
 	exponentformat::AbstractString,
 	outlinewidth,
 	title_side::Symbol,
+	offset = nothing,
 )
 	side in _CBAR_SIDES || throw(ArgumentError(
 		"$(who): `side` must be :right or :bottom; got $(repr(side)).",
 	))
+	(offset === nothing || (offset isa Symbol && offset in _CBAR_OFFSETS)) || throw(ArgumentError(
+		"$(who): `offset` must be :auto, :always, :none or nothing; got $(repr(offset)).",
+	))
+	if offset === :auto || offset === :always
+		(isempty(tickformat) && isempty(exponentformat)) || throw(ArgumentError(
+			"$(who): `offset` writes the tick label format (`exponentformat = \"power\"`); " *
+			"it cannot be combined with `tickformat` or `exponentformat`.",
+		))
+		ticklabels === nothing || throw(ArgumentError(
+			"$(who): `offset` scales the tick labels; it cannot be combined with `ticklabels`.",
+		))
+	end
 	title_side in _CBAR_TITLE_SIDES || throw(ArgumentError(
 		"$(who): `title_side` must be :top, :right or :bottom; got $(repr(title_side)).",
 	))
@@ -956,6 +1017,7 @@ function _colorbar_options(
 		tickformat = String(tickformat),
 		exponentformat = String(exponentformat),
 		outlinewidth = outline,
+		offset = offset,
 	)
 end
 
@@ -992,6 +1054,9 @@ function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDi
 		bar[:thicknessmode] = "pixels"
 	end
 	if opts.ticks !== nothing
+		# An `nticks` `_finalize_figure!` wrote for automatic ticks
+		# (`_fin_bar_tick_state`) goes with them.
+		_cbar_string(bar, :tickmode, "") == "auto" && delete!(bar, :nticks)
 		bar[:tickmode] = "array"
 		bar[:tickvals] = opts.ticks
 		if opts.ticklabels === nothing
@@ -999,6 +1064,23 @@ function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDi
 		else
 			bar[:ticktext] = opts.ticklabels
 		end
+	end
+	if opts.offset === :none
+		# Only an offset written here (`showexponent = "last"`) is removed.
+		if _cbar_string(bar, :showexponent, "") == "last"
+			delete!(bar, :showexponent)
+			delete!(bar, :minexponent)
+			_cbar_string(bar, :exponentformat, "") == "power" && delete!(bar, :exponentformat)
+		end
+	elseif opts.offset !== nothing
+		# One "×10^k" on the last (top / right) tick label, the others
+		# scaled by 10^-k (plotly.js axes.js tickText: `showexponent`).
+		# Explicit labels or a d3 format would hide it.
+		bar[:exponentformat] = "power"
+		bar[:showexponent] = "last"
+		bar[:minexponent] = opts.offset === :always ? 0 : _CBAR_OFFSET_MIN_EXPONENT
+		delete!(bar, :tickformat)
+		delete!(bar, :ticktext)
 	end
 	isempty(opts.tickformat) || (bar[:tickformat] = opts.tickformat)
 	isempty(opts.exponentformat) || (bar[:exponentformat] = opts.exponentformat)
@@ -1079,6 +1161,23 @@ end
 
 const _CBAR_NO_COLOUR_HINT =
 	"(heatmap, contour, surface, histogram2d, colour-mapped markers, …)"
+
+# Keywords a colorbar call does not take (`show` included: a mutator never
+# opens a window), rejected with an ArgumentError naming the function before
+# anything changes. `cell_hint` says how the call selects cells instead.
+function _cbar_reject_keywords(who::AbstractString, kwargs, cell_hint::AbstractString = "")
+	isempty(kwargs) && return nothing
+	names = join(("`$(key)`" for key in keys(kwargs)), ", ")
+	hints = String[]
+	haskey(kwargs, :show) &&
+		push!(hints, "mutators do not take `show`; display the figure with `display(fig)`")
+	any(key -> key in (:row, :col, :secondary_y, :inset), keys(kwargs)) && !isempty(cell_hint) &&
+		push!(hints, cell_hint)
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) $(names)" *
+		(isempty(hints) ? "" : " ($(join(hints, "; ")))") * ".",
+	))
+end
 
 function _colorbar_edit_coloraxis!(
 	p::Plot,
@@ -1222,7 +1321,8 @@ end
 """
 	colorbar!(fig; coloraxis=nothing, title="", title_side=:top, side=:right,
 		len=0, thickness=0, x=nothing, y=nothing, ticks=nothing,
-		ticklabels=nothing, tickformat="", exponentformat="", outlinewidth=nothing)
+		ticklabels=nothing, tickformat="", exponentformat="", outlinewidth=nothing,
+		offset=nothing)
 	colorbar!(sf::SubplotFigure; row=nothing, col=nothing, coloraxis=nothing, ...)
 
 Edit the colorbars that already exist in a figure.
@@ -1273,6 +1373,24 @@ Edit the colorbars that already exist in a figure.
 - `tickformat::AbstractString=""`: d3 format such as `".2f"`;
   `exponentformat::AbstractString=""`: `"none"`, `"e"`, `"E"`, `"power"`,
   `"SI"` or `"B"`; `outlinewidth`: outline width in px (`nothing`: unchanged).
+- `offset=nothing`: one common factor for the tick labels, like
+  matplotlib's offset text: `:auto` takes 10^k out of the labels when the
+  largest end of the colour range has |k| ≥ 5 (k = ⌊log10⌋; plotly.js
+  decides at every draw, so it follows later range changes), `:always`
+  whenever k ≠ 0; the labels show the scaled values and only the last (top
+  or right) one carries "×10^k" (`exponentformat = "power"`, `showexponent =
+  "last"`, `minexponent`). It replaces an earlier `tickformat` or tick
+  label text and cannot be combined with `tickformat`, `exponentformat` or
+  `ticklabels`. `:none` removes such an offset; `nothing` leaves it.
+
+Short bars (a cell of a wide equal-aspect field, `len` small) get fewer
+automatic ticks: every figure update sets `nticks` (with `tickmode =
+"auto"`) so that the labels stay two font sizes apart (horizontal bars: one
+font size between labels), and removes it when the bar is long enough
+again. Bars with `ticks`, a `dtick` or an `nticks` of your own keep them
+(the mark of a thinned bar is the `tickmode = "auto"` written with its
+`nticks`: to set `nticks` on such a bar with `restyle!`, clear `tickmode` in
+the same call).
 
 All options are validated first (`ArgumentError`); the change is applied in
 one transaction (a live window redraws once). Returns `nothing` for a
@@ -1304,13 +1422,18 @@ function colorbar!(
 	tickformat::AbstractString = "",
 	exponentformat::AbstractString = "",
 	outlinewidth = nothing,
+	offset = nothing,
+	kwargs...,
 )
-	return _transactional_high_level_plot_mutation!(
+	_cbar_reject_keywords("colorbar!", kwargs,
+		"a single figure has one cell; omit the cell keywords")
+	# One colour-range scan per array for the call and its finalizer (Z83).
+	return _cbar_with_extrema_memo(() -> _transactional_high_level_plot_mutation!(
 		_colorbar_impl!,
 		fig;
 		row, col, coloraxis, title, title_side, side, len, thickness, x, y,
-		ticks, ticklabels, tickformat, exponentformat, outlinewidth,
-	)
+		ticks, ticklabels, tickformat, exponentformat, outlinewidth, offset,
+	))
 end
 
 function colorbar!(
@@ -1330,14 +1453,19 @@ function colorbar!(
 	tickformat::AbstractString = "",
 	exponentformat::AbstractString = "",
 	outlinewidth = nothing,
+	offset = nothing,
+	kwargs...,
 )
-	return _transactional_subplot_mutation!(
+	_cbar_reject_keywords("colorbar!", kwargs,
+		"select the cell with `row`/`col`; an inset's bar is edited through its host cell")
+	# One colour-range scan per array for the call and its finalizer (Z83).
+	return _cbar_with_extrema_memo(() -> _transactional_subplot_mutation!(
 		_colorbar_subplot_impl!,
 		sf,
 		_SUBPLOT_SELECTION_METADATA_FIELDS;
 		row, col, coloraxis, title, title_side, side, len, thickness, x, y,
-		ticks, ticklabels, tickformat, exponentformat, outlinewidth,
-	)
+		ticks, ticklabels, tickformat, exponentformat, outlinewidth, offset,
+	))
 end
 
 # ── shared_colorbar! ────────────────────────────────────────────────────────
@@ -2064,12 +2192,16 @@ function shared_colorbar!(
 	len::Real = 0.75,
 	side::Symbol = :right,
 	coloraxis::Union{AbstractString,Symbol} = "coloraxis",
+	kwargs...,
 )
-	return _transactional_high_level_plot_mutation!(
+	_cbar_reject_keywords("shared_colorbar!", kwargs,
+		"a single figure has one cell; omit the cell keywords")
+	# One colour-range scan per array for the call and its finalizer (Z83).
+	return _cbar_with_extrema_memo(() -> _transactional_high_level_plot_mutation!(
 		_shared_colorbar_impl!,
 		fig;
 		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis,
-	)
+	))
 end
 
 function shared_colorbar!(
@@ -2083,11 +2215,15 @@ function shared_colorbar!(
 	len::Real = 0.75,
 	side::Symbol = :right,
 	coloraxis::Union{AbstractString,Symbol} = "coloraxis",
+	kwargs...,
 )
-	return _transactional_subplot_mutation!(
+	_cbar_reject_keywords("shared_colorbar!", kwargs,
+		"select cells with `cells=[(row, col), …]`")
+	# One colour-range scan per array for the call and its finalizer (Z83).
+	return _cbar_with_extrema_memo(() -> _transactional_subplot_mutation!(
 		_shared_colorbar_subplot_impl!,
 		sf,
 		();
 		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis,
-	)
+	))
 end

@@ -1451,7 +1451,9 @@ Lock the data aspect of cell `t` (spec F9). For an `:xy` cell the y axis gets
 the pixels of one x unit, as matplotlib `set_aspect(ratio)`), and both axes
 get `constrain = "domain"` so explicit ranges are honoured. A stale
 `scaleanchor`/`scaleratio` on the x axis is removed: it would form a loop or
-chain this cell to another cell's axis. A `:scene` cell gets
+chain this cell to another cell's axis. One-sided limits already on the two
+axes (or their `matches` groups) become full ranges, whose open end comes
+from the data (`_resolve_linked_limits!`). A `:scene` cell gets
 `aspectmode = "data"` (`ratio` must be 1). Other kinds are an `ArgumentError`.
 """
 function _apply_equal_aspect!(
@@ -1481,6 +1483,14 @@ function _apply_equal_aspect!(
 			Dict{Symbol, Any}(:constrain => "domain"),
 		)
 		_cmn_delete_layout_fields!(fig, t.xkey, (:scaleanchor, :scaleratio))
+		# plotly.js ignores one-sided limits (D11) on aspect-linked axes: a
+		# limit set before the constraint becomes a full range now (Z54).
+		roots = (_axes_match_root(fig, t.xkey, who), _axes_match_root(fig, t.ykey, who))
+		_resolve_linked_limits!(
+			fig,
+			[(root, _axes_match_members(fig, root, who)) for root in unique(roots)],
+			who,
+		)
 		return nothing
 	elseif t.kind === :scene
 		ratio == 1 || throw(ArgumentError(

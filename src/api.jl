@@ -20800,14 +20800,15 @@ end
 # Re-place every whole-figure annotation of `annotations` (the figure's
 # annotation list, items replaced, never mutated) for the current margins of
 # `p`, raising the bottom margin when a caption reaches below the plot area.
-# Returns the new `margin.b` (px) to write, or `nothing`.
-function _figure_annotations_place!(p::Plot, annotations::Vector{Any})
+# Returns the new `margin.b` (px) to write, or `nothing`. `size` (px) and
+# `accs` (`_fin_collect_axes(p)`) are given by `_finalize_figure!` (Z47).
+function _figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = nothing, accs = nothing)
 	specs = [(index, spec) for (index, item) in pairs(annotations)
 		for spec in (_figure_annotation_spec(item),) if spec !== nothing]
 	isempty(specs) && return nothing
 	layout = p.layout
-	W, H = _figure_annotation_size(layout)
-	accs = _fin_collect_axes(p)
+	W, H = size === nothing ? _figure_annotation_size(layout) : (Float64(size[1]), Float64(size[2]))
+	accs === nothing && (accs = _fin_collect_axes(p))
 	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
 	# Room the bottom x-axis tick labels and title take (their automargin push
 	# plus plotly's extra), measured with a zero base margin.
