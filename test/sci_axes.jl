@@ -1,6 +1,10 @@
 using Test, PlotlySupply
 
 const _AX = PlotlySupply
+# The tests below assume the package's default style. Earlier test files of a
+# full run can leave another default style behind (the full suite showed a
+# 9 px tick / 11 px title style here), so start from the default.
+set_default_style!(:default)
 const _AX_PB = PlotlySupply.PlotlyBase
 
 function _ax_throws(f, needle::AbstractString)
