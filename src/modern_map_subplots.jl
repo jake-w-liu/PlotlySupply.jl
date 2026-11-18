@@ -696,7 +696,6 @@ function _apply_subplot_title_annotations!(
 	# The grid titles are named so that `_finalize_figure!` places them past
 	# the axis labels and grows the margin for them (Z20).
 	if !ismissing(sp.x_title)
-		n_before = length(annotations)
 		_append_subplot_title_annotation!(
 			annotations,
 			sp.x_title,
@@ -705,10 +704,8 @@ function _apply_subplot_title_annotations!(
 			offset = 30,
 			name = "plotlysupply:x_title",
 		)
-		length(annotations) > n_before && (annotations[end][:name] = "plotlysupply:grid_title:x")
 	end
 	if !ismissing(sp.y_title)
-		n_before = length(annotations)
 		_append_subplot_title_annotation!(
 			annotations,
 			sp.y_title,
@@ -717,7 +714,6 @@ function _apply_subplot_title_annotations!(
 			offset = 40,
 			name = "plotlysupply:y_title",
 		)
-		length(annotations) > n_before && (annotations[end][:name] = "plotlysupply:grid_title:y")
 	end
 
 	layout.fields[:annotations] = annotations

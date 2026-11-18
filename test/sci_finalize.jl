@@ -1171,10 +1171,10 @@ end
 	end
 	layout = sf.plot.layout
 	names = [_sfn_fields(a)[:name] for a in layout.fields[:annotations] if haskey(_sfn_fields(a), :name)]
-	@test "plotlysupply:grid_title:x" in names && "plotlysupply:grid_title:y" in names
+	@test "plotlysupply:x_title" in names && "plotlysupply:y_title" in names
 	find(name) = _sfn_fields(only(a for a in layout.fields[:annotations] if get(_sfn_fields(a), :name, "") == name))
-	ytitle = find("plotlysupply:grid_title:y")
-	xtitle = find("plotlysupply:grid_title:x")
+	ytitle = find("plotlysupply:y_title")
+	xtitle = find("plotlysupply:x_title")
 	plan = _SFN._room_plan(sf)
 	left = maximum(a.own[:left] for a in values(plan.areas))
 	bottom = maximum(a.own[:bottom] for a in values(plan.areas))
