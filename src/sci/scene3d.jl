@@ -725,7 +725,9 @@ function _s3_scene_doc(constructor::Bool, aspectmode::AbstractString)
 		  `zlabel::AbstractString = ""`: axis titles (`""` gives "x", "y" and "z").
 		  $(_S3_TEXT3D_DOC)
 		- `xrange = [0, 0]`, `yrange = [0, 0]`, `zrange = [0, 0]`: axis ranges
-		  `[lo, hi]` (vector or tuple) in data units; `[0, 0]` is automatic.
+		  `[lo, hi]` (vector or tuple) in data units; `[0, 0]` is automatic. A
+		  one-sided limit such as `(0, nothing)` fixes one end; the other is
+		  the data's end widened by 1/32 of its extent, as `zrange!` gives it.
 		- `aspectmode = $(aspectmode)`: "auto", "cube", "data" or "manual" (set the
 		  ratios with [`scene!`](@ref)). $(_S3_FRAMING_DOC)
 		- `perspective::Bool = true`: `false` selects an orthographic projection.
@@ -748,7 +750,10 @@ function _s3_scene_doc(constructor::Bool, aspectmode::AbstractString)
 	- `xlabel::AbstractString = ""`, `ylabel::AbstractString = ""`,
 	  `zlabel::AbstractString = ""`: new axis titles. $(_S3_TEXT3D_DOC)
 	- `xrange = [0, 0]`, `yrange = [0, 0]`, `zrange = [0, 0]`: axis ranges
-	  `[lo, hi]` in data units, also on a logarithmic scene axis.
+	  `[lo, hi]` in data units, also on a logarithmic scene axis. A one-sided
+	  limit such as `(0, nothing)` fixes one end; the other is the end of all
+	  the scene's data (this call's included) widened by 1/32 of its extent,
+	  as `zrange!` gives it.
 	- `aspectmode = nothing`: "auto", "cube", "data" or "manual". $(_S3_FRAMING_DOC)
 	- `perspective::Union{Nothing, Bool} = nothing`: `true`/`false` selects a
 	  perspective/orthographic projection.
@@ -1022,6 +1027,10 @@ const _S3_HALF_FOVY = π / 8
 # half-size for the box.
 const _S3_LABEL_PAD_FONTS = 3.0
 const _S3_MIN_FILL = 0.5
+# The smallest share of the region the box is given when tick labels and axis
+# titles do not fit around a larger one (their offsets are fixed in px, so a
+# small cell needs a small box: a title cut off by the viewport is worse).
+const _S3_FAR_FILL = 0.4
 # plotly.js's default font size (layout.font.size).
 const _S3_DEFAULT_FONT_SIZE = 12.0
 # An orthographic scene is framed independently of the eye distance
@@ -1434,6 +1443,10 @@ end
 # length) with up vector `up`: the unit direction, screen right and screen
 # up. `nothing` when `up` is parallel to `direction` (no defined roll).
 function _s3_camera_frame(direction, up)
+	# Tuples throughout: the framing search evaluates this frame hundreds of
+	# times and a vector would allocate in every dot product.
+	direction = (Float64(direction[1]), Float64(direction[2]), Float64(direction[3]))
+	up = (Float64(up[1]), Float64(up[2]), Float64(up[3]))
 	v = direction ./ _s3_norm(direction)
 	right = _s3_cross(.-v, up)
 	right_norm = _s3_norm(right)
@@ -1829,7 +1842,15 @@ function _s3_label_layout(box, center, frame, distance::Float64, width::Float64,
 end
 
 # Pan steps and tolerance (px) for centring an exported scene's drawing.
-const _S3_PAN_ROUNDS = 8
+const _S3_PAN_ROUNDS = 40
+const _S3_PAN_MIN_STEP = 1 / 64
+# Steps of `_s3_export_camera` that pull its lower distance bound closer while the
+# drawing still fits at it, and the factor of each.
+const _S3_NEAR_ROUNDS = 60
+const _S3_NEAR_STEP = 0.8
+# Relative width of the distance bracket at which the search stops: the drawing
+# then differs from the closest fit by well under 0.2 % of the viewport.
+const _S3_DISTANCE_RTOL = 2e-4
 const _S3_PAN_TOLERANCE_PX = 0.5
 
 # ── Legends over a scene ─────────────────────────────────────────────────────
@@ -1919,9 +1940,10 @@ end
 # over it). With `pan` the camera centre moves across the view from `center`
 # until the drawing is centred in that region (labels often hang off one side
 # of the box); without it `center` is kept. The distance is found by
-# bisection between the one at which the bare box fills the region and the
-# one at which it fills `_S3_MIN_FILL` of it (labels that do not fit even
-# then get the latter). When `up` is parallel to `direction`:
+# bisection between one closer than any that fits (the bare box overflows
+# the region) and the one at which the bare box fills `_S3_FAR_FILL` of the
+# region (labels that do not fit even then get the latter). When `up` is
+# parallel to `direction`:
 # `_s3_auto_distance` and `center`.
 function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center, pan::Bool, zoom::Float64 = 1.0)
 	c0 = (Float64(center[1]), Float64(center[2]), Float64(center[3]))
@@ -1936,59 +1958,94 @@ function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center,
 	function extent(c, distance)
 		corners, quads = _s3_label_layout(box, c, frame, distance, width, height, labels, spans)
 		xmin, xmax, ymin, ymax = Inf, -Inf, Inf, -Inf
-		for point in Iterators.flatten((corners, Iterators.flatten(quads)))
+		for point in corners
+			xmin, xmax = min(xmin, point[1]), max(xmax, point[1])
+			ymin, ymax = min(ymin, point[2]), max(ymax, point[2])
+		end
+		for quad in quads, point in quad
 			xmin, xmax = min(xmin, point[1]), max(xmax, point[1])
 			ymin, ymax = min(ymin, point[2]), max(ymax, point[2])
 		end
 		return (xmin, xmax, ymin, ymax)
 	end
+	# The region the drawing may use, chosen for the drawing's proportions at
+	# the distance where the bare box fills the viewport (less the margin).
+	full_x = max(1 - 2 * _S3_LABEL_MARGIN_PX / width, _S3_MIN_FILL)
+	full_y = max(1 - 2 * _S3_LABEL_MARGIN_PX / height, _S3_MIN_FILL)
+	e0 = extent(c0, _s3_box_distance(box, c0, frame, ratio, full_x, full_y))
+	region = _s3_free_region(p, target, width, height, (e0[2] - e0[1], e0[4] - e0[3]))
+	goal_x, goal_y = (region[1] + region[2]) / 2, (region[3] + region[4]) / 2
 	# The camera centre for `distance` and whether the drawing then fits.
 	# Moving the camera across the view moves each point on screen by the move
 	# over the point's depth; moving it by the pixels the drawing is off centre
-	# at the depth of the scene origin converges in a few rounds.
-	# The region the drawing may use, chosen for the drawing's proportions at
-	# the distance where the bare box fills the viewport.
-	full = _s3_box_distance(
-		box, c0, frame, ratio,
-		max(1 - 2 * _S3_LABEL_MARGIN_PX / width, _S3_MIN_FILL),
-		max(1 - 2 * _S3_LABEL_MARGIN_PX / height, _S3_MIN_FILL),
-	)
-	e0 = extent(c0, full)
-	region = _s3_free_region(p, target, width, height, (e0[2] - e0[1], e0[4] - e0[3]))
-	goal_x, goal_y = (region[1] + region[2]) / 2, (region[3] + region[4]) / 2
-	function place(distance)
-		c = c0
+	# (from the region's centre) at the depth of the scene origin converges in
+	# a few rounds.
+	function place(distance, start = c0)
+		c = start
 		e = extent(c, distance)
 		if pan
+			off(e) = ((e[1] + e[2]) / 2 - goal_x, (e[3] + e[4]) / 2 - goal_y)
 			for _ in 1:_S3_PAN_ROUNDS
-				off_x, off_y = (e[1] + e[2]) / 2 - goal_x, (e[3] + e[4]) / 2 - goal_y
+				off_x, off_y = off(e)
 				max(abs(off_x), abs(off_y)) <= _S3_PAN_TOLERANCE_PX && break
 				world_per_px = 2 * tan(_S3_HALF_FOVY) * (_s3_dot(c, v) + distance) / height
-				c = c .+ (off_x * world_per_px) .* r .+ (off_y * world_per_px) .* u
-				e = extent(c, distance)
+				# Close to the box the step can overshoot (points near or behind
+				# the eye move far on screen): halve it until the drawing is
+				# nearer the goal.
+				scale = 1.0
+				moved = false
+				while scale >= _S3_PAN_MIN_STEP
+					c2 = c .+ (scale * off_x * world_per_px) .* r .+ (scale * off_y * world_per_px) .* u
+					e2 = extent(c2, distance)
+					(ox, oy) = off(e2)
+					if hypot(ox, oy) < hypot(off_x, off_y)
+						c, e, moved = c2, e2, true
+						break
+					end
+					scale /= 2
+				end
+				moved || break
 			end
 		end
 		return c, e[1] >= region[1] && e[2] <= region[2] && e[3] >= region[3] && e[4] <= region[4]
 	end
-	fill_x = (region[2] - region[1]) / width
-	fill_y = (region[4] - region[3]) / height
-	near = _s3_box_distance(box, c0, frame, ratio, max(fill_x, _S3_MIN_FILL), max(fill_y, _S3_MIN_FILL))
-	far = _s3_box_distance(box, c0, frame, ratio, _S3_MIN_FILL * fill_x, _S3_MIN_FILL * fill_y)
+	# Distance bounds (a region narrowed by a legend is a fraction `share` of
+	# the full one). Closer than `near` nothing fits: without `pan` a box
+	# corner seen from `center` leaves the viewport less the margin, which
+	# holds the region; with `pan` the box (which holds the scene origin, seen
+	# at the view centre) spans more than the region, as some corner is
+	# farther than the region's width from the view centre. At `far` the bare
+	# box fills `_S3_FAR_FILL` of the region.
+	share_x = min((region[2] - region[1]) / width / full_x, 1.0)
+	share_y = min((region[4] - region[3]) / height / full_y, 1.0)
+	near = pan ? _s3_box_distance(box, c0, frame, ratio, 2 * full_x * share_x, 2 * full_y * share_y) :
+		_s3_box_distance(box, c0, frame, ratio, full_x, full_y)
+	far = _s3_box_distance(box, c0, frame, ratio, _S3_FAR_FILL * share_x, _S3_FAR_FILL * share_y)
 	# The fitted distance and camera centre, before `zoom`.
 	function fitted()
 		far <= near && return (near, first(place(near)))
-		c_near, fits_near = place(near)
-		fits_near && return (near, c_near)
 		c_far, fits_far = place(far)
 		fits_far || return (far, c_far)
+		# `near` is an estimate of a distance too close to fit; where the
+		# drawing still fits there (a panned drawing may use the region more
+		# fully than the estimate allows) it is the new `far` and the estimate
+		# moves closer.
+		c_near, fits_near = place(near, c_far)
+		for _ in 1:_S3_NEAR_ROUNDS
+			fits_near || break
+			(far, c_far) = (near, c_near)
+			near *= _S3_NEAR_STEP
+			c_near, fits_near = place(near, c_far)
+		end
+		fits_near && return (far, c_far)
 		# The box shrinks towards the centre as the camera backs away while
 		# the label offsets stay fixed in pixels, so the drawing fits from one
 		# distance on.
 		for _ in 1:60
 			mid = (near + far) / 2
-			c_mid, fits_mid = place(mid)
+			c_mid, fits_mid = place(mid, c_far)
 			fits_mid ? ((far, c_far) = (mid, c_mid)) : (near = mid)
-			far - near <= 1e-6 * far && break
+			far - near <= _S3_DISTANCE_RTOL * far && break
 		end
 		return (far, c_far)
 	end
@@ -1996,7 +2053,7 @@ function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center,
 	zoom == 1 && return (distance, c)
 	# `zoom` divides the fitted distance; the drawing is centred again there.
 	distance /= zoom
-	return (distance, first(place(distance)))
+	return (distance, first(place(distance, c)))
 end
 
 _s3_vector3(mapping, default::Float64 = 0.0) = [
@@ -2305,7 +2362,8 @@ end
 # sizes for the labels, at the mark's zoom) is used and the centre is kept:
 # 3-D calls write it at once, and `_s3_finalize_scenes!` refines it. With
 # `fit_labels` the camera is placed by `_s3_export_camera` (box, tick labels
-# and axis titles fill the viewport, then the mark's zoom); when the mark owns
+# and axis titles fill the viewport clear of legends over it, then the mark's
+# zoom); when the mark owns
 # the camera centre (`pan`; a centre at the origin is taken as owned) the fit
 # starts from the origin and, with `pan`, moves the centre to centre the
 # drawing; a centre the user set is kept. A centre that ends at the origin is
@@ -2461,7 +2519,8 @@ margins and plotly.js's auto-margin, times the scene domain):
 - an automatic perspective camera (`_s3_auto_camera`) is moved, along its
   direction and with its up vector, to the closest distance at which the
   scene box and the tick labels and axis titles plotly.js draws around it
-  fill the viewport (`_s3_export_camera`), divided by the `view!` zoom; with
+  fill the viewport, clear of any legend placed over it
+  (`_s3_export_camera`, `_s3_free_region`), divided by the `view!` zoom; with
   `pan` a camera centre PlotlySupply owns moves so that the drawing is
   centred (labels often hang off one side of the box), a user's centre is
   kept;
@@ -2691,9 +2750,12 @@ along (1, 1, 1)) at the automatic distance described under `distance`.
   data, titles, fonts, `figsize!`, colorbars, ...) frames the scene again for
   its current viewport (with this call's `zoom`), and `savefig` frames it for
   the export size, so the live window, an export at the layout size and an
-  export at any other size show the same framing. A positive number is the
-  distance in plotly's normalised scene units and is kept, as is a camera
-  you set with `relayout!`.
+  export at any other size show the same framing. A legend placed over the
+  scene (a subplot cell's legend sits at the cell's top right) is kept clear:
+  the drawing fills the part of the viewport beside or below it. A positive
+  number is the distance in plotly's normalised scene units from the camera
+  centre (the box centre, unless you set a centre of your own) and is kept,
+  as is a camera you set with `relayout!`.
 - `up = :z`: the vertical axis, `:x`, `:y` or `:z` (matplotlib
   `vertical_axis`).
 - `projection = nothing`: "perspective" or "orthographic"; `nothing` keeps the
@@ -2865,6 +2927,9 @@ changes, and keywords left at their defaults leave it as it is. `fig` is a
   unsupported macro is shown as written and warns once.
 - `xrange = [0, 0]`, `yrange = [0, 0]`, `zrange = [0, 0]`: axis ranges
   `[lo, hi]` in data units, also on a logarithmic axis (`[0, 0]`: unchanged).
+  A one-sided limit such as `(0, nothing)` fixes one end; the other is the
+  end of the scene's data widened by 1/32 of its extent, as `zrange!` gives
+  it (an `ArgumentError` when the scene has no data on that axis yet).
 - `xticks = nothing`, `yticks = nothing`, `zticks = nothing`: tick positions
   (data values).
 - `xticklabels = nothing`, `yticklabels = nothing`, `zticklabels = nothing`:
@@ -3151,18 +3216,27 @@ function _s3_write_coloraxis!(fig, spec::_S3ColorSpec)
 	else
 		_cmn_merge_layout_key!(fig, key, spec.axis_fields; nested = (:colorbar,))
 	end
-	# The colour axis's colorbar takes the active style's colorbar defaults
-	# (tick and title font sizes, outline and tick widths) where it leaves them
-	# unset, as a trace's own colorbar does (`_apply_style_trace_defaults!`
-	# skips traces bound to a colour axis, and a mutator's new colour axis was
-	# not there when the figure was styled).
+	# Inside the SubplotFigure delegate (`_S3_CELL_CONTEXT`) the scratch
+	# figure's colour axis replaces the figure's key by key, so a colorbar
+	# written here would drop the bar the finalizer placed: `_s3_subplot!`
+	# styles the merged axis instead.
+	_S3_CELL_CONTEXT[] === nothing && _s3_style_coloraxis_bar!(fig, key)
+	return nothing
+end
+
+# The colour axis `key`'s colorbar takes the active style's colorbar defaults
+# (tick and title font sizes, outline and tick widths) where it leaves them
+# unset, as a trace's own colorbar does (`_apply_style_trace_defaults!`
+# skips traces bound to a colour axis, and a mutator's new colour axis was
+# not there when the figure was styled). Placement keys are left as they are.
+function _s3_style_coloraxis_bar!(fig, key::Symbol)
 	defaults = _style_colorbar_trace_defaults(_active_style())
-	if !isempty(defaults)
-		layout = _cmn_layout(fig)
-		filled, changed = _style_fill_nested(get(layout.fields, key, nothing),
-			Dict{Symbol, Any}(:colorbar => defaults), "layout.$(key)", "_s3_write_coloraxis!")
-		changed && (layout.fields[key] = filled)
-	end
+	isempty(defaults) && return nothing
+	layout = _cmn_layout(fig)
+	haskey(layout.fields, key) || return nothing
+	filled, changed = _style_fill_nested(layout.fields[key],
+		Dict{Symbol, Any}(:colorbar => defaults), "layout.$(key)", "_s3_write_coloraxis!")
+	changed && (layout.fields[key] = filled)
 	return nothing
 end
 
@@ -6398,6 +6472,9 @@ function _s3_subplot!(
 			# colorbar settings.
 			_colorbar_math_titles!(staged, (); coloraxes = (extra_axis,))
 		end
+		# The style's colorbar defaults, on the merged colour axis (see
+		# `_s3_write_coloraxis!`).
+		axis_id === nothing || _s3_style_coloraxis_bar!(staged, Symbol(axis_id))
 		retitle && _cbar_remove_title_annotation!(_cmn_plot(staged), axis_id)
 		shared && _s3_link_shared_surfaces!(_cmn_plot(staged), colorscale_given)
 		cell = _s3_scene_target(staged, who)

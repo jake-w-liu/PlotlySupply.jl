@@ -467,8 +467,8 @@ _format_pixels(options::_ExportOptions, fmt::AbstractString) = (
 # backgrounds and deterministic trace uids are written into the freshly
 # lowered JSON objects that are serialized for the renderer.
 
-# `pan = false` for HTML/JSON documents: their scene cameras keep their
-# centres, the pivot of interactive rotation (Z43).
+# `pan = false` for HTML/JSON documents: their scene cameras are not panned
+# (centre at the box centre, the pivot of interactive rotation, Z43).
 function _export_source(p::Plot, options::_ExportOptions; pan::Bool = true)
 	options.tight || return _finalize_export_copy(p, options; pan = pan)
 	options.tight || return p

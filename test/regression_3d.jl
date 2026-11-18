@@ -640,6 +640,30 @@ function _v4_labelled(lo, hi, count)
 	return floor(Int, hi / step + 1e-9) - ceil(Int, lo / step - 1e-9) + 1
 end
 
+# Whether a count above `count` (up to plotly.js's 9) labels two ticks of
+# scene axis `d` of `p` on [lo, hi] with consecutive labels at least the
+# widest of them plus one character apart along the axis as drawn at `size`
+# (K4: the rule `_s3_cell_tick_count` follows; the counts are scanned while
+# the labels stay apart, as their spacing only shrinks with the count).
+function _v4_two_labels_fit(p::Plot, key::Symbol, d::Int, lo, hi, count, size)
+	PS = PlotlySupply
+	length_px = Base.ScopedValues.with(PS._S3_EXPORT_SIZE => (Float64(size[1]), Float64(size[2]))) do
+		PS._s3_axis_pixel_lengths(p, PS._s3_layout_target(p, key), PS._s3_drawn_box(p, key))[d]
+	end
+	axis = _v4_fields(_v4_fields(p.layout.fields[key])[(:xaxis, :yaxis, :zaxis)[d]])
+	layout_font = _v4_fields(get(p.layout.fields, :font, Dict{Symbol, Any}()))
+	font = haskey(axis, :tickfont) ? _v4_fields(axis[:tickfont])[:size] : get(layout_font, :size, 12)
+	char_px = PS._S3_CHAR_EM * PS._s3_tick_text_size(Float64(font))
+	for n in (count + 1):9
+		step = PS._s3_plotly_tick_step(hi - lo, n)
+		first_tick, last_tick = ceil(lo / step - 1e-9) * step, floor(hi / step + 1e-9) * step
+		chars = max(PS._s3_tick_text_chars(first_tick, step), PS._s3_tick_text_chars(last_tick, step))
+		step / (hi - lo) * length_px >= (chars + 1) * char_px || return false
+		_v4_labelled(lo, hi, n) >= 2 && return true
+	end
+	return false
+end
+
 @testset "regression: 3-D wave 4 (v4 threed)" begin
 	PS = PlotlySupply
 
@@ -841,15 +865,15 @@ end
 		@test _v4_label_extent(target, :scene, (900, 350), 0.97) > 1
 		# Without `pan` the camera centre returns to the origin.
 		fixed = _v4_copy(f)
-		PS._s3_refit_scenes!(fixed, f, (900, 350); pan = false)
+		PS._s3_refit_scenes!(fixed, f, (700, 500); pan = false)
 		@test !haskey(_v4_camera(fixed), :center)
-		@test _v4_label_extent(fixed, :scene, (900, 350)) <= 1
+		@test _v4_label_extent(fixed, :scene, (700, 500)) <= 1
 		# A camera the user placed is left alone.
 		user = plot_surface(xs, ys, Z)
 		view!(user; elev = 30, azim = 40, distance = 3)
 		@test PS._s3_refit_scenes!(_v4_copy(user), user, (900, 350)) === false
 		# A 1x3 grid at 900x350: every scene fits its cell, labels included,
-		# and its x and y axes label at least two ticks.
+		# and its x and y axes label two ticks whenever two labels fit (K4).
 		sf = subplots(1, 3; sync = false, specs = fill(Spec(kind = "scene"), 1, 3))
 		for c in 1:3
 			plot_surface!(sf, xs, ys, Z .* c; row = 1, col = c, xlabel = "x", ylabel = "y", zlabel = "height")
@@ -861,8 +885,9 @@ end
 			scene = _v4_fields(grid.layout.fields[key])
 			counts = [_v4_fields(scene[axis])[:nticks] for axis in (:xaxis, :yaxis, :zaxis)]
 			@test all(n -> 2 <= n <= 9, counts)
-			@test _v4_labelled(-2.125, 2.125, counts[1]) >= 2
-			@test _v4_labelled(-1.0625, 1.0625, counts[2]) >= 2
+			for (d, (lo, hi)) in ((1, (-2.125, 2.125)), (2, (-1.0625, 1.0625)))
+				@test _v4_labelled(lo, hi, counts[d]) >= 2 || !_v4_two_labels_fit(grid, key, d, lo, hi, counts[d], (900, 350))
+			end
 		end
 		@test _v4_message(() -> PS._s3_refit_scenes!(_v4_copy(f), f, (0, 500))) ==
 			"_s3_refit_scenes!: `size` must be (width, height) in px; got (0, 500)."
@@ -878,19 +903,18 @@ _v5_center(camera) = haskey(camera, :center) ? _v4_xyz(camera[:center]) : zeros(
 _v5_offset(p::Plot, key::Symbol = :scene) = (c = _v4_camera(p, key); _v4_xyz(c[:eye]) .- _v5_center(c))
 _v5_distance(p::Plot, key::Symbol = :scene) = sqrt(sum(abs2, _v5_offset(p, key)))
 _v5_width(p::Plot, key::Symbol) = (d = _v4_fields(_v5_scene(p, key)[:domain]); d[:x][2] - d[:x][1])
-_v5_tickfont(p::Plot, key::Symbol, axis::Symbol) = _v4_fields(_v5_axis(p, key, axis)[:tickfont])[:size]
-_v5_scene_sf(rows, cols) = subplots(rows, cols; sync = false, specs = fill(Spec(kind = "scene"), rows, cols))
-function _v5_with_style(f, style)
-	# `set_default_style!()` keeps the current style: restore the previous one
-	# explicitly, or the style leaks into every later test file.
-	previous = PlotlySupply._active_style()
-	set_default_style!(style)
-	try
-		return f()
-	finally
-		set_default_style!(previous)
-	end
+# The size a scene axis draws its tick labels at: its `tickfont.size`, else
+# (plotly.js's inheritance) the figure font size, else plotly's 12.
+function _v5_tickfont(p::Plot, key::Symbol, axis::Symbol)
+	axis_fields = _v5_axis(p, key, axis)
+	haskey(axis_fields, :tickfont) && return _v4_fields(axis_fields[:tickfont])[:size]
+	font = get(p.layout.fields, :font, nothing)
+	return font === nothing ? 12 : get(_v4_fields(font), :size, 12)
 end
+_v5_scene_sf(rows, cols) = subplots(rows, cols; sync = false, specs = fill(Spec(kind = "scene"), rows, cols))
+# Run `f` under `style`; `with_style` restores the previous style afterwards
+# (`set_default_style!()` without arguments would keep `style` active).
+_v5_with_style(f, style) = with_style(f, style)
 
 @testset "regression: 3-D wave 5 (v5 threed)" begin
 	PS = PlotlySupply
@@ -898,25 +922,32 @@ end
 
 	@testset "W6 identical cells give identical scenes (topo_torus layout)" begin
 		# Three equal scene cells sharing one colour axis whose colorbar the
-		# finalizer places, above a full-width 2-D row.
-		sf = subplots(2, 3; sync = false, height_ratios = [2, 1],
-			specs = [Spec(kind = "scene") Spec(kind = "scene") Spec(kind = "scene"); Spec(colspan = 3) missing missing])
-		for c in 1:3
-			plot_surface!(sf, xs, ys, Z .* c; row = 1, col = c, shared_coloraxis = true, crange = (0, 3))
-			view!(sf; row = 1, col = c, elev = 33, azim = -61)
-		end
-		colorbar!(sf; coloraxis = :shared, len = 0.3, y = 0.78)
-		plot_heatmap!(sf, 1:4, 1:3, rand(3, 4); row = 2, col = 1, showscale = false)
-		p = sf.plot
-		keys3 = (:scene, :scene2, :scene3)
-		widths = [_v5_width(p, k) for k in keys3]
-		@test maximum(widths) - minimum(widths) < 1e-9
-		distances = [_v5_distance(p, k) for k in keys3]
-		@test maximum(distances) / minimum(distances) - 1 < 1e-6
-		@test all(k -> _v5_offset(p, k) ./ _v5_distance(p, k) ≈ _v5_offset(p, :scene) ./ _v5_distance(p, :scene), keys3)
-		for axis in (:xaxis, :yaxis, :zaxis)
-			@test length(unique(get(_v5_axis(p, k, axis), :nticks, nothing) for k in keys3)) == 1
-			@test length(unique(_v5_tickfont(p, k, axis) for k in keys3)) == 1
+		# finalizer places (beside the last cell drawn so far, then beside the
+		# row), above a full-width 2-D row; also under a style with colorbar
+		# defaults (topo_torus's), whose styled shared bar must not lose its
+		# placement and leave the middle cell narrowed.
+		for style in (:default, PlotStyle(; tick_fontsize = 9))
+			with_style(style) do
+				sf = subplots(2, 3; sync = false, height_ratios = [2, 1],
+					specs = [Spec(kind = "scene") Spec(kind = "scene") Spec(kind = "scene"); Spec(colspan = 3) missing missing])
+				for c in 1:3
+					plot_surface!(sf, xs, ys, Z; row = 1, col = c, shared_coloraxis = true, crange = (0, 1))
+					view!(sf; row = 1, col = c, elev = 33, azim = -61)
+				end
+				colorbar!(sf; coloraxis = :shared, len = 0.3, y = 0.78)
+				plot_heatmap!(sf, 1:4, 1:3, rand(4, 3); row = 2, col = 1, showscale = false)
+				p = sf.plot
+				keys3 = (:scene, :scene2, :scene3)
+				widths = [_v5_width(p, k) for k in keys3]
+				@test maximum(widths) - minimum(widths) < 1e-9
+				distances = [_v5_distance(p, k) for k in keys3]
+				@test maximum(distances) / minimum(distances) - 1 < 1e-6
+				@test all(k -> _v5_offset(p, k) ./ _v5_distance(p, k) ≈ _v5_offset(p, :scene) ./ _v5_distance(p, :scene), keys3)
+				for axis in (:xaxis, :yaxis, :zaxis)
+					@test length(unique(get(_v5_axis(p, k, axis), :nticks, nothing) for k in keys3)) == 1
+					@test length(unique(PlotlyBase.JSON.json(get(_v5_axis(p, k, axis), :tickfont, nothing)) for k in keys3)) == 1
+				end
+			end
 		end
 	end
 
@@ -938,9 +969,13 @@ end
 		@test PS._s3_finalize_scenes!(f) === false
 		@test 0.97 < _v4_label_extent(f, :scene, (700, 500)) <= 1
 		d0 = _v5_distance(f)
-		zlabel!(f, "A very long z axis title that needs room")
+		# (Titles that fit the 232 px tall viewport at 900 x 350: a 40-character
+		# z title, about 314 px long at 14 px, overflows at any distance.)
+		zlabel!(f, "A long z title")
 		xlabel!(f, "A long x axis title")
-		@test _v5_distance(f) != d0
+		# (Longer titles never bring the camera closer; the distance is found to
+		# 2e-4, so a small change may not show in it.)
+		@test _v5_distance(f) >= d0 * (1 - 2e-4)
 		@test PS._s3_finalize_scenes!(f) === false
 		@test 0.97 < _v4_label_extent(f, :scene, (700, 500)) <= 1
 		zrange!(f, (0, 3))
@@ -954,7 +989,7 @@ end
 		sf = _v5_scene_sf(1, 2)
 		plot_surface!(sf, xs, ys, Z; row = 1, col = 2)
 		d0 = _v5_distance(sf.plot, :scene2)
-		xlabel!(sf, "A very long x axis title"; row = 1, col = 2)
+		xlabel!(sf, "A long x title"; row = 1, col = 2)
 		@test _v5_distance(sf.plot, :scene2) > d0
 		@test PS._s3_finalize_scenes!(sf.plot) === false
 		@test 0.97 < _v4_label_extent(sf.plot, :scene2, (700, 500)) <= 1
@@ -970,6 +1005,43 @@ end
 		raw = Plot(PlotlyBase.GenericTrace("surface"; z = Z))
 		@test PS._s3_finalize_scenes!(raw, (700, 500)) === false
 		@test !haskey(raw.layout.fields, :scene)
+	end
+
+	@testset "W6 an elongated scene seen nearly end-on is centred and fills its viewport" begin
+		# The camera centre is moved to centre the drawing; close to a long
+		# box the first pan step overshoots (labels near the eye), which used
+		# to make the search stop at a distance that left a fifth of the
+		# viewport empty.
+		h = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; aspectmode = "data", zrange = (0, 1))
+		view!(h; elev = 20, azim = 10)
+		plot_scatter3d!(h, [0.0, 9.0], [0.0, 1.0], [0.0, 1.0])
+		@test 0.97 < _v4_label_extent(h, :scene, (700, 500)) <= 1
+		@test _v4_label_extent(h, :scene, (700, 500), 0.97) > 1
+		@test PS._s3_finalize_scenes!(h) === false
+		# The same in a cell, at another size.
+		sf = _v5_scene_sf(1, 2)
+		plot_scatter3d!(sf, [0.0, 9.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2, aspectmode = "data")
+		view!(sf; row = 1, col = 2, elev = 20, azim = 10)
+		other = PS._export_source(sf.plot, PS._normalize_export_options(sf.plot, (width = 900, height = 350)))
+		@test 0.97 < _v4_label_extent(other, :scene2, (900, 350)) <= 1
+	end
+
+	@testset "W6 a small cell gives its box room for the labels (no title cut off by the viewport)" begin
+		# 7.16 in wide, three columns: the fixed pixel offsets of plotly.js's tick
+		# labels and titles leave a box of under half the cell; the old floor of
+		# half the cell left the y title outside the viewport.
+		with_style(:ieee) do
+			sf = subplots(1, 3; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene") Spec(kind = "scene")])
+			for c in 1:3
+				plot_surface!(sf, xs, ys, Z; row = 1, col = c, xlabel = "x", ylabel = "y", zlabel = "z", showscale = false)
+			end
+			figsize!(sf, :ieee; columns = 2, aspect = 0.32)
+			size_px = (sf.plot.layout.fields[:width], sf.plot.layout.fields[:height])
+			for key in (:scene, :scene2, :scene3)
+				@test 0.97 < _v4_label_extent(sf.plot, key, size_px) <= 1
+			end
+			@test PS._s3_finalize_scenes!(sf.plot) === false
+		end
 	end
 
 	@testset "W6 a user camera is kept; zoom scales the fitted distance" begin
@@ -989,9 +1061,14 @@ end
 		auto = _v5_distance(k)
 		view!(k; elev = 30, azim = -60, zoom = 1.5)
 		@test _v5_distance(k) ≈ auto / 1.5 rtol = 1e-6
-		# The zoom survives an export at another size.
-		at = PS._export_source(k, PS._normalize_export_options(k, (width = 900, height = 350)))
-		@test _v4_label_extent(at, :scene, (900, 350)) ≈ 1.5 rtol = 0.05
+		# The zoom survives an export at another size: the distance fitted there
+		# divided by 1.5, so the drawing overflows the viewport.
+		opts = PS._normalize_export_options(k, (width = 900, height = 350))
+		unzoomed = plot_surface(xs, ys, Z)
+		view!(unzoomed; elev = 30, azim = -60)
+		at = PS._export_source(k, opts)
+		@test _v5_distance(at) ≈ _v5_distance(PS._export_source(unzoomed, opts)) / 1.5 rtol = 1e-5
+		@test _v4_label_extent(at, :scene, (900, 350)) > 1.2
 	end
 
 	@testset "W6 scene tick and title fonts follow the style" begin
@@ -1072,11 +1149,16 @@ end
 		plot_scatter3d!(sf, [0.0, 1.0], [0.0, 1.0], [0.0, 8.0]; row = 1, col = 2)
 		plot_surface!(sf, xs, ys, Z; row = 1, col = 2, zrange = (-1, nothing))
 		@test _v5_axis(sf.plot, :scene2, :zaxis)[:range] ≈ [-1, 8 + 8 / 32]
-		# A reversed axis keeps its direction.
+		# A reversed axis keeps its direction; the bounds are in the order the
+		# axis is drawn, as zrange! takes them.
 		r = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 4.0])
 		relayout!(r; scene_zaxis_autorange = "reversed")
+		r2 = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 4.0])
+		relayout!(r2; scene_zaxis_autorange = "reversed")
 		scene!(r; zrange = (1, nothing))
-		@test _v5_axis(r, :scene, :zaxis)[:range] ≈ [4 + 4 / 32, 1]
+		zrange!(r2, (1, nothing))
+		@test _v5_axis(r, :scene, :zaxis)[:range] ≈ [1, -4 / 32]
+		@test _v5_axis(r, :scene, :zaxis)[:range] == _v5_axis(r2, :scene, :zaxis)[:range]
 		# On a log axis the fixed bound is a data value, as with xrange!.
 		l = plot_scatter3d([1.0, 100.0], [0.0, 1.0], [0.0, 1.0])
 		relayout!(l; scene_xaxis_type = "log")
@@ -1153,5 +1235,53 @@ end
 		@test PlotlyBase.JSON.json(f) == before
 		annotate!(f, 0.5, 0.5, 0.5, "t"; bgcolor = "0.9")
 		@test _v4_fields(only(_v5_scene(f)[:annotations]))[:bgcolor] == "#E6E6E6"
+	end
+
+	@testset "Z44 scene-grid legends: clear of the scenes; one figure legend dedupes" begin
+		build() = begin
+			sf = _v5_scene_sf(1, 3)
+			for c in 1:3
+				plot_surface!(sf, xs, ys, Z .* c; row = 1, col = c, xlabel = "x", ylabel = "y", zlabel = "height",
+					showscale = false)
+				plot_scatter3d!(sf, collect(xs), zeros(length(xs)), fill(2.0 * c, length(xs)); row = 1, col = c,
+					legend = "ridge", color = "black")
+			end
+			sf
+		end
+		sf = build()
+		p = sf.plot
+		area = PS._s3_plot_area(p)
+		plot_w, plot_h = area.width - area.l - area.r, area.height - area.t - area.b
+		for key in (:scene, :scene2, :scene3)
+			ridge = only(t for t in p.data if get(t.fields, :scene, "scene") == String(key) && get(t.fields, :name, "") == "ridge")
+			id = string(get(ridge.fields, :legend, "legend"))
+			box = _v4_fields(p.layout.fields[Symbol(id)])
+			# Each cell legend lists its own cell's entry, at the cell's top right.
+			@test (box[:xanchor], box[:yanchor], get(box, :xref, "paper"), get(box, :yref, "paper")) == ("right", "top", "paper", "paper")
+			w, h = PS._legend_box_size(p, id)
+			legend = (area.l + box[:x] * plot_w - w, area.t + (1 - box[:y]) * plot_h, area.l + box[:x] * plot_w, area.t + (1 - box[:y]) * plot_h + h)
+			# The drawing (box corners, tick labels, titles) stays out of it.
+			camera = _v4_camera(p, key)
+			center = _v5_center(camera)
+			offset = _v4_xyz(camera[:eye]) .- center
+			distance = sqrt(sum(abs2, offset))
+			target = PS._s3_layout_target(p, key)
+			vw, vh = PS._s3_viewport(p, target)
+			corners, quads = PS._s3_label_layout(PS._s3_drawn_box(p, key), Tuple(center),
+				PS._s3_camera_frame(offset ./ distance, PS._s3_camera_up(camera)), distance, vw, vh,
+				PS._s3_axis_labels(p, key), PS._s3_scene_spans(p, key))
+			cx = area.l + plot_w * target.xdomain[1] + vw / 2
+			cy = area.t + plot_h * (1 - target.ydomain[2]) + vh / 2
+			points = [(cx + q[1], cy - q[2]) for q in Iterators.flatten((corners, Iterators.flatten(quads)))]
+			drawing = (minimum(first, points), minimum(last, points), maximum(first, points), maximum(last, points))
+			@test drawing[3] <= legend[1] || drawing[2] >= legend[4]
+			# ... and still fills the rest of its cell.
+			@test drawing[3] - drawing[1] > 0.6 * vw || drawing[4] - drawing[2] > 0.6 * vh
+		end
+		# One figure legend for the grid lists the identical entries once.
+		set_legend!(sf; position = :outside_bottom)
+		shown = [t for t in sf.plot.data if get(t.fields, :name, "") == "ridge" && get(t.fields, :showlegend, true) != false]
+		@test length(shown) == 1
+		@test PS._s3_finalize_scenes!(sf.plot) === false
 	end
 end
