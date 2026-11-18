@@ -9403,9 +9403,8 @@ const _SCAT_TEXT_POSITIONS = (
 	"bottom center",
 	"bottom right",
 )
-# Stem lines keep the 1.x look (thin black) unless a colour, a line width or
-# an active PlotStyle says otherwise.
-const _STEM_DEFAULT_COLOR = "black"
+# Stem lines keep the 1.x look (thin, in the template's ink: black on light
+# templates) unless a colour, a line width or an active PlotStyle says otherwise.
 const _STEM_DEFAULT_LINEWIDTH = 0.5
 # plotly.js `zorder` of stems traces: below the default layer 0 of every other
 # trace on the same axes.
@@ -11918,7 +11917,15 @@ function _stem_impl!(
 		# Stems take the series colour only when one is given (`color`, or the
 		# active style's cycle); the colorway colour resolved above for
 		# white-faced or line-symbol heads stays on the heads.
-		stem_color = isempty(style.color) ? _STEM_DEFAULT_COLOR : String(style.color)
+		stem_color = if !isempty(style.color)
+			String(style.color)
+		else
+			# A constructor's figure carries PlotlyBase's own template until
+			# `_apply_default_template!` runs: the active style's one decides.
+			ink = constructor ? _template_ink(_style_template()) : _style_ink(fig)
+			# The 1.x spelling on light templates.
+			ink == _DEFAULT_AXIS_LINECOLOR ? "black" : ink
+		end
 		stem_line = attr(color = stem_color)
 		if style.linewidth > 0
 			stem_line.fields[:width] = style.linewidth

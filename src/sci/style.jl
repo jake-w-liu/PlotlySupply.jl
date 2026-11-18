@@ -1672,6 +1672,8 @@ function _apply_style_trace_defaults!(
 			))
 		elseif _style_trace_type(trace) in _STYLE_CONTOUR_TRACE_TYPES
 			merge!(updates, _style_contour_default_updates(trace, plain_defaults, explicit_names, where))
+		elseif _style_trace_type(trace) in _STYLE_OUTLINE_TRACE_TYPES
+			merge!(updates, _style_outline_default_updates(trace, plain_defaults, explicit_names, where))
 		end
 		merge!(updates, _style_errorbar_default_updates(trace, plain_defaults, where))
 		# Built on top of the marker/line updates above (same containers).
@@ -1753,6 +1755,22 @@ function _style_contour_default_updates(trace, defaults, explicit, who::Abstract
 	coloring = get(contours, :coloring, "fill")
 	(coloring isa Union{AbstractString, Symbol} && String(coloring) in ("lines", "none")) ||
 		return Dict{Symbol, Any}()
+	line = _style_container_dict(get(fields, :line, nothing), "line", who)
+	_style_value_unset(get(line, :width, nothing)) || return Dict{Symbol, Any}()
+	return Dict{Symbol, Any}(
+		:line => _style_update_path(get(fields, :line, nothing), (), Dict(:width => defaults[:linewidth]), "line", who),
+	)
+end
+
+# Box and violin traces draw their box, whiskers, median and violin outline
+# with `line.width` (plotly's default 2 px).
+const _STYLE_OUTLINE_TRACE_TYPES = Set{String}(["box", "violin"])
+
+# `line.width` of a box or violin: the style's line width where unset (the
+# thick 2 px default would outweigh the 0.75 pt axes of a journal style).
+function _style_outline_default_updates(trace, defaults, explicit, who::AbstractString)
+	(haskey(defaults, :linewidth) && !(:linewidth in explicit)) || return Dict{Symbol, Any}()
+	fields = trace.fields
 	line = _style_container_dict(get(fields, :line, nothing), "line", who)
 	_style_value_unset(get(line, :width, nothing)) || return Dict{Symbol, Any}()
 	return Dict{Symbol, Any}(
@@ -1885,6 +1903,7 @@ function _apply_style_layout!(
 		)
 		updates[:margin] = margin
 		title === nothing || (updates[:title] = title)
+		updates[:margin] = _style_domain_subplot_margin(p, updates, style, "PlotStyle")
 	end
 	merge!(updates, _style_figure_size_updates(fields, style))
 	for (key, value) in updates
@@ -1892,6 +1911,37 @@ function _apply_style_layout!(
 	end
 	_commit_trace_updates!(p, role_traces)
 	return nothing
+end
+
+# Polar and ternary subplots draw their tick labels (the angular labels, the
+# ternary corner labels) outside the disc/triangle, in the margin, and plotly's
+# `automargin` only grows the margin for Cartesian axes: a style margin of a
+# few px clips the label at the bottom of a polar plot and lets the title
+# overlap the one at the top (probe polar.jl, `plot_scatterpolar(...; title)`
+# under :publication/:ieee). A style margin therefore never goes below the room
+# of one tick label on a figure that has such a subplot, nor, at the top,
+# below that room plus the figure title.
+function _style_domain_subplot_margin(p::Plot, updates::AbstractDict, style::PlotStyle, who::AbstractString)
+	fields = p.layout.fields
+	margin = updates[:margin]
+	any(key -> occursin(r"^(polar|ternary)\d*$", String(key)), keys(fields)) || return margin
+	lookup(key) = haskey(updates, key) ? updates[key] : get(fields, key, nothing)
+	root = _tight_root_font_size(lookup)
+	tick = style.tick_fontsize > 0 ? style.tick_fontsize : root
+	# One line of tick text plus plotly's offset between the disc and its labels.
+	label_room = ceil(1.2 * tick + 8)
+	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
+	current = _style_container_dict(margin, "layout.margin", who)
+	height = _tight_real(lookup(:height), Float64(_style_default_figure_size()[2]))
+	cap = _TIGHT_MAX_MARGIN_FRACTION * height
+	floors = Dict{Symbol, Any}()
+	for (side, room) in ((:l, label_room), (:r, label_room), (:b, label_room), (:t, label_room + (title_room > 0 ? title_room + 4 : 0)))
+		have = _tight_real(get(current, side, nothing), 0.0)
+		want = min(room, cap)
+		want > have && (floors[side] = _style_number(want))
+	end
+	isempty(floors) && return margin
+	return _style_update_path(margin, (), floors, "layout.margin", who)
 end
 
 # A layout width/height the figure already has (a positive number; anything

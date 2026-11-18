@@ -588,8 +588,8 @@ end
 			# plotly.js 2.35 trace types without the scatter-style line.dash and
 			# marker.symbol: never written.
 			others = [
-				bar(x = [1, 2], y = [1, 2]), histogram(x = [1, 2, 2]), box(y = [1, 2, 3]),
-				violin(y = [1, 2, 3]), heatmap(z = [1 2; 3 4]), contour(z = [1 2; 3 4]),
+				bar(x = [1, 2], y = [1, 2]), histogram(x = [1, 2, 2]), 
+				heatmap(z = [1 2; 3 4]), contour(z = [1 2; 3 4]),
 				histogram2d(x = [1, 2], y = [1, 2]), histogram2dcontour(x = [1, 2], y = [1, 2]),
 				surface(z = [1 2; 3 4]), mesh3d(x = [0, 1, 0], y = [0, 0, 1], z = [0, 0, 0]),
 				cone(x = [0], y = [0], z = [0], u = [1], v = [0], w = [0]),
@@ -610,6 +610,13 @@ end
 			ojson = [_RS_PB.JSON.json(t) for t in ofig.data]
 			_RS._apply_style_trace_defaults!(ofig, 1:length(others); style = style)
 			@test [_RS_PB.JSON.json(t) for t in ofig.data] == ojson
+			# Box and violin outlines take the style's line width (v5b) and nothing else.
+			outlines = Plot([box(y = [1, 2, 3]), violin(y = [1, 2, 3])], Layout())
+			_RS._apply_style_trace_defaults!(outlines, 1:2; style = style)
+			@test [_RS_PB.JSON.json(t) for t in outlines.data] == [
+				"{\"line\":{\"width\":2.5},\"type\":\"box\",\"y\":[1,2,3]}",
+				"{\"line\":{\"width\":2.5},\"type\":\"violin\",\"y\":[1,2,3]}",
+			]
 
 			# Line-style types: every attribute written exists for the type and
 			# takes a value from the type's allowed set (plotly.js 2.35 schema;
@@ -675,7 +682,10 @@ end
 		@testset "_apply_basic_plot_options! and _maybe_show" begin
 			fig = Plot(GenericTrace[pie(values = [1, 2], labels = ["a", "b"])], Layout())
 			_RS._apply_basic_plot_options!(fig; title = SubString("Pie"), width = 400.0, height = 300, fontsize = 12.5)
-			@test _rs_get(fig, :title) == Dict(:text => "Pie")
+			# A title without a placement gets `title!`'s (Z28): centred, pinned
+			# below the top of the figure with automargin.
+			@test _rs_get(fig, :title)[:text] == "Pie"
+			@test _rs_get(fig, :title)[:automargin] === true
 			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (400.0, 300)
 			@test _rs_get(fig, :font)[:size] == 12.5
 			@test fig.layout.fields[:template] == _RS_PB.templates[:plotly_white]
@@ -1058,7 +1068,9 @@ end
 					("colorbar title", :hm, (:data, 1, :colorbar, :title, :font, :size), num(st.label_fontsize)),
 					("colorbar ticks", :hm, (:data, 1, :colorbar, :tickfont, :size), num(st.tick_fontsize)),
 					("3-D axis title", :surf, (:layout, :scene, :zaxis, :title, :font, :size), num(st.label_fontsize)),
-					("3-D tick labels", :surf, (:layout, :scene, :xaxis, :tickfont, :size), num(st.tick_fontsize)),
+					# gl3d draws a tick label size^2/12 px large, so the scene writes sqrt(12 s)
+					# for a tick label of s px (src/sci/scene3d.jl, `_S3_GL_TEXT_REFERENCE_SIZE`).
+					("3-D tick labels", :surf, (:layout, :scene, :xaxis, :tickfont, :size), sqrt(12 * st.tick_fontsize)),
 					("2x2 cell tick labels", :sf, (:layout, :xaxis4, :tickfont, :size), num(st.tick_fontsize)),
 					("2x2 cell axis title", :sf, (:layout, :xaxis4, :title, :font, :size), num(st.label_fontsize)),
 					("2x2 legend", :sf, (:layout, :legend, :font, :size), num(st.legend_fontsize)),
@@ -1097,5 +1109,195 @@ end
 	finally
 		_RS._DEFAULT_TEMPLATE[] = original_template
 		set_default_style!(original_style)
+	end
+end
+
+# ── v5b publication-style: integration (Z16, Z79b, W7, Z73, D15.4 and the reach audit) ──
+
+@testset "v5b publication-style" begin
+	_v5b_json(p) = _RS_PB.JSON.json(_RS._plot_obj(p); allownan = true)
+	_v5b_line(trace) = _rs_sd(get(trace.fields, :line, Dict{Symbol, Any}()))
+
+	@testset "Z16: figsize! rejects cell keywords and show with its own name" begin
+		fig = plot_scatter(1:3, 1:3)
+		sf = subplots(2, 2; sync = false)
+		for call in (
+			() -> figsize!(sf, 600, 400; row = 2, col = 2),
+			() -> figsize!(sf, :ieee; col = 1),
+			() -> figsize!(sf, 600, 400; show = true),
+			() -> figsize!(fig, 600, 400; show = true),
+			() -> figsize!(fig, :ieee; row = 1),
+			() -> figsize!(sf, :ieee; show = true),
+		)
+			err = try
+				call()
+				nothing
+			catch e
+				e
+			end
+			@test err isa ArgumentError
+			err isa ArgumentError && @test startswith(err.msg, "figsize!:")
+		end
+		# Nothing changed by the rejected calls.
+		@test !haskey(_RS._plot_layout(sf.fig).fields, :width)
+		@test !haskey(fig.layout.fields, :width)
+	end
+
+	@testset "W7: PlotStyle.log_ticks" begin
+		@test PlotStyle().log_ticks === :auto
+		@test PlotStyle(; log_ticks = "decades").log_ticks === :decades
+		@test_throws ArgumentError PlotStyle(; log_ticks = :minor)
+		@test_throws ArgumentError PlotStyle(; log_ticks = "")
+		s = PlotStyle()
+		s.log_ticks = :decades
+		@test s.log_ticks === :decades
+		@test_throws ArgumentError (s.log_ticks = :every)
+		@test_throws ArgumentError (s.log_ticks = 1)
+		@test s.log_ticks === :decades
+		@test copy(s) == s
+		@test hash(copy(s)) == hash(s)
+		@test PlotStyle(; log_ticks = :decades) != PlotStyle()
+		@test occursin("log_ticks = :decades", sprint(show, MIME("text/plain"), s))
+		# :default keeps plotly's labels; every paper style asks for decades.
+		@test _RS._STYLE_REGISTRY[:default].log_ticks === :auto
+		for name in (:publication, :ieee, :aps, :nature, :elsevier, :springer, :aip)
+			@test _RS._STYLE_REGISTRY[name].log_ticks === :decades
+			@test with_style(() -> _RS._style_log_ticks(), name) === :decades
+		end
+		@test _RS._style_log_ticks() === :auto
+		@test with_style(() -> _RS._style_log_ticks(), :ieee; log_ticks = :auto) === :auto
+		@test_throws ArgumentError set_default_style!(:ieee; log_ticks = :nope)
+		# The rule reaches the axes: a 5-decade log axis at column width gets decade labels.
+		x = 10.0 .^ (0:5)
+		ieee_fig = with_style(() -> plot_scatter(x, 1:6; xscale = "log"), :ieee)
+		with_style(:ieee) do
+			@test _RS._axes_apply_style_log_ticks!(ieee_fig) || haskey(_rs_get(ieee_fig, :xaxis), :dtick)
+		end
+		@test haskey(_rs_get(ieee_fig, :xaxis), :dtick)
+		default_fig = plot_scatter(x, 1:6; xscale = "log")
+		@test !haskey(_rs_get(default_fig, :xaxis), :dtick)
+		# An axis with tick values of its own is never changed.
+		own = with_style(:ieee) do
+			f = plot_scatter(x, 1:6; xscale = "log", xticks = [1, 100, 1e5])
+			_RS._axes_apply_style_log_ticks!(f)
+			f
+		end
+		@test !haskey(_rs_get(own, :xaxis), :dtick)
+	end
+
+	@testset "Z79b: constructors write the template straight into a new layout" begin
+		base() = Plot(
+			GenericTrace[scatter(x = 1:3, y = 1:3)],
+			_RS._default_cartesian_layout(; title = "t", xlabel = "x", ylabel = "y"),
+		)
+		two_axes() = Plot(
+			GenericTrace[scatter(x = 1:3, y = 1:3), scatter(x = 1:3, y = 3:-1:1, xaxis = "x2", yaxis = "y2")],
+			Layout(
+				xaxis = attr(domain = [0, 0.45]), yaxis = attr(),
+				xaxis2 = attr(domain = [0.55, 1], anchor = "y2"), yaxis2 = attr(anchor = "x2"),
+				xaxis_showgrid = false,
+			),
+		)
+		for style in (:default, :publication, :ieee, :nature), make in (base, two_axes)
+			with_style(style) do
+				a = make()
+				b = make()
+				_RS._apply_default_template!(a; fresh = true)
+				_RS._apply_default_template!(b)
+				@test _v5b_json(a) == _v5b_json(b)
+				# A private copy of the template, not the style's shared object.
+				@test a.layout.fields[:template] == _RS._style_template(_RS._active_style())
+				@test a.layout.fields[:template] !== _RS._style_template(_RS._active_style())
+			end
+		end
+		with_style(:default) do
+			a = base()
+			_RS._apply_default_template!(a; fresh = true)
+			b = base()
+			_RS._apply_default_template!(b; fresh = true)
+			@test a.layout.fields[:template] !== b.layout.fields[:template]
+		end
+		# A figure in a window takes the transactional path (its window is refreshed).
+		sp, scripts = _rs_syncplot(base())
+		try
+			_RS._apply_default_template!(sp; fresh = true)
+			@test haskey(sp.plot.layout.fields, :template)
+			@test !isempty(scripts)
+		finally
+			close(sp)
+		end
+		# Cost of the fixed part of a constructor (measured 224 KB scatter, 222 KB bar).
+		for style in (:default, :publication)
+			with_style(style) do
+				plot_scatter(1:2, [1, 2]); plot_bar(1:2, [1, 2])
+				@test @allocated(plot_scatter(1:2, [1, 2])) < 500_000
+				@test @allocated(plot_bar(1:2, [1, 2])) < 500_000
+			end
+		end
+	end
+
+	@testset "reach: box, violin, band, stem and polar under a paper style" begin
+		st = _RS._STYLE_REGISTRY[:ieee]
+		with_style(:ieee) do
+			@test _v5b_line(_RS._plot_obj(plot_box([1.0, 2, 3, 4])).data[1])[:width] ≈ st.linewidth
+			@test _v5b_line(_RS._plot_obj(plot_violin([1.0, 2, 3, 4])).data[1])[:width] ≈ st.linewidth
+			band = _RS._plot_obj(plot_band(1:3, [1.0, 2, 3], [2.0, 3, 4])).data[1]
+			@test _v5b_line(band)[:color] == _RS_OKABE_ITO[1]
+			fig = plot_scatter(1:3, 1:3)
+			plot_band!(fig, 1:3, [1.0, 2, 3], [2.0, 3, 4])
+			@test _v5b_line(fig.data[2])[:color] == _RS_OKABE_ITO[2]
+		end
+		# :default keeps plotly's thick box outline and its own default colour.
+		@test !haskey(_v5b_line(_RS._plot_obj(plot_box([1.0, 2, 3, 4])).data[1]), :width)
+		@test _v5b_line(_RS._plot_obj(plot_band(1:3, [1.0, 2, 3], [2.0, 3, 4])).data[1])[:color] ==
+			_RS._default_trace_color(plot_scatter(1:2, 1:2), 1)
+		# An explicit line width of the caller is kept.
+		boxed = _RS._plot_obj(plot_box([1.0, 2, 3, 4]))
+		boxed.data[1].fields[:line] = attr(width = 3)
+		with_style(:ieee) do
+			_RS._apply_style_trace_defaults!(boxed, 1)
+		end
+		@test _v5b_line(boxed.data[1])[:width] == 3
+		# Stems take the template's ink: 1.x "black" on light templates.
+		@test _v5b_line(_RS._plot_obj(plot_stem(1:3, [1.0, 2, 3])).data[2])[:color] == "black"
+		dark = with_style(() -> plot_stem(1:3, [1.0, 2, 3]), PlotStyle(; template = :plotly_dark))
+		@test _v5b_line(_RS._plot_obj(dark).data[2])[:color] == _RS_DARK_INK
+		# Polar labels live in the margin: a small style margin grows to hold them
+		# and, at the top, the figure title (probe: label clipped, title over "90").
+		for name in (:publication, :ieee)
+			stp = _RS._STYLE_REGISTRY[name]
+			room = ceil(1.2 * stp.tick_fontsize + 8)
+			fig = with_style(() -> plot_scatterpolar(0:30:330, 1:12; title = "Polar title"), name)
+			margin = _rs_get(fig, :margin)
+			@test margin[:l] == room && margin[:r] == room && margin[:b] == room
+			@test margin[:t] > room + 10
+			untitled = with_style(() -> plot_scatterpolar(0:30:330, 1:12), name)
+			@test _rs_get(untitled, :margin)[:t] == room
+			cartesian = with_style(() -> plot_scatter(1:3, 1:3; title = "T"), name)
+			@test _rs_get(cartesian, :margin)[:l] == _RS._style_number(stp.margin[:l])
+		end
+		default_polar = plot_scatterpolar(0:30:330, 1:12; title = "Polar title")
+		@test !haskey(_RS._plot_layout(default_polar).fields, :margin) ||
+			_rs_get(default_polar, :margin) == Dict(:l => 50, :r => 50, :t => 60, :b => 50)
+	end
+
+	@testset "Z73: reference lines follow reference_linewidth (docstring and drawing)" begin
+		doc = string(Base.Docs.doc(Base.Docs.Binding(PlotlySupply, :PlotStyle)))
+		@test !occursin("still draw their own", doc)
+		@test occursin("log_ticks", doc)
+		reference_width(name) = with_style(name) do
+			fig = plot_scatter(1:3, 1:3)
+			hline!(fig, 2); vline!(fig, 2); rectangle!(fig, 1, 1, 2, 2)
+			[_rs_sd(_rs_sd(s)[:line])[:width] for s in fig.layout.fields[:shapes]]
+		end
+		@test all(==(0.75 * 96 / 72), reference_width(:ieee))
+		@test all(==(1), reference_width(:default))
+	end
+
+	@testset "D15.4: Optica is not shipped (widths and fonts not confirmed from Optica's guide)" begin
+		@test !haskey(_RS._STYLE_REGISTRY, :optica)
+		@test_throws ArgumentError journal_width(:optica)
+		@test_throws ArgumentError with_style(() -> nothing, :optica)
+		@test occursin("Optica is not included", string(Base.Docs.doc(Base.Docs.Binding(PlotlySupply, :journal_width))))
 	end
 end

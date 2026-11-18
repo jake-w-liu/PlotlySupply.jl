@@ -349,10 +349,12 @@ using PlotlySupply
 			# The axis container that existed before was replaced, not mutated.
 			@test json(old_xaxis) == old_xaxis_json
 
-			# Subplot titles above the plot area raise the top margin.
+			# Subplot titles above the plot area do not widen the style margin: the
+			# room they need is reserved by the layout engine (`:grid_titles`
+			# room provider, D12) when the figure is rendered.
 			sf = subplots(1, 2; sync = false, title = "", subplot_titles = ["a" "b"])
 			PS._apply_style_layout!(sf.fig, pub)
-			@test sd(sf.layout.fields[:margin])[:t] > 10
+			@test sd(sf.layout.fields[:margin])[:t] == 10
 			@test sd(sf.layout.fields[:margin])[:l] == 10
 		end
 
