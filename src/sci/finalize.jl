@@ -3872,8 +3872,21 @@ Normalise the figure after a PlotlySupply constructor or mutator changed it
   evidence that the shrink is ours (D12). A coloraxis bar placed before the
   mutation bound existing traces to it moves next to all of its plot areas.
   The right margin grows to fit a math colorbar title drawn beside its bar.
+  When a coloraxis bar sits between grid cells, every cell of the axis gives
+  up the same room (cells showing one colour scale are drawn alike). A bar
+  with a `len` of the user's is never longer than the plot area it is drawn
+  next to once the area is fitted smaller than its grid cell. A short bar is
+  thinned to `nticks` labels and always shows two labels at least: when
+  plotly's rounding of the step would label the range once, the two values
+  are written as `tickvals` (marked by the `nticks` next to them).
   The fit and the room solve run again after a pass that wrote (at most
   `_FIN_FIT_ROUNDS`), so a second call writes nothing.
+- Titles: a plain axis title longer than the figure is broken between words
+  with `_FIN_WRAP_BREAK` (a zero-width space before a bare `<br>`; plotly.js
+  counts the extra lines of a title with a regex that sees a run of
+  `<br />` as one tag) and rejoined when it fits again. On a polar or ternary
+  figure an explicit margin smaller than one line of tick text (and, at the
+  top, the title block) is grown to it.
 - M5: the 3-D scenes PlotlySupply manages are framed for the final domains
   and margins, at `size` when given (`_s3_finalize_scenes!`: camera
   distance, tick counts and tick font sizes).
