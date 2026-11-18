@@ -1550,7 +1550,7 @@ function _axes_apply_style_log_ticks!(fig; size = nothing, mode::Union{Nothing, 
 	if size === nothing
 		w = get(p.layout.fields, :width, nothing)
 		h = get(p.layout.fields, :height, nothing)
-		dw, dh = _style_default_figure_size()
+		dw, dh = _figure_default_size(p)
 		size = (_axes_real_value_or(w, dw), _axes_real_value_or(h, dh))
 	end
 	updates = _axes_log_tick_updates!(Dict{Symbol, Any}(), p, size; mode = mode)

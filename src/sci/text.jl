@@ -993,7 +993,7 @@ end
 # (layout, template, plotly default 80 px). Automatic margins only shrink it,
 # which the column fit absorbs through the generous label estimates.
 function _legend_plot_area_width(p::Plot)
-	width = _tight_real(get(p.layout.fields, :width, nothing), Float64(_style_default_figure_size()[1]))
+	width = _tight_real(get(p.layout.fields, :width, nothing), Float64(_figure_default_size(p)[1]))
 	return max(width - _legend_margin_lr(p, :l) - _legend_margin_lr(p, :r), 1.0)
 end
 
@@ -1019,7 +1019,7 @@ function _legend_available_width(p::Plot, box::AbstractDict, span::Float64; lege
 	x = _legend_real(get(box, :x, nothing))
 	area = _legend_plot_area_width(p)
 	if get(box, :xref, "paper") == "paper" && x !== nothing && (x < 0 || x > 1)
-		return _tight_real(get(p.layout.fields, :width, nothing), Float64(_style_default_figure_size()[1])) / 2
+		return _tight_real(get(p.layout.fields, :width, nothing), Float64(_figure_default_size(p)[1])) / 2
 	end
 	cell = area * clamp(span, 0.0, 1.0)
 	(legend_id === nothing || span >= 1 || x === nothing) && return cell

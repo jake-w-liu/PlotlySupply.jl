@@ -163,18 +163,23 @@ function _transactional_high_level_plot_mutation!(
 )
 	result = Ref{Any}(nothing)
 	staged_target = Ref{Any}(nothing)
+	# A mutation runs with the style the figure carries (K1), not the active one.
 	full_mutation = function (candidate)
 		staged = _StagedPlotMutation(candidate)
 		staged_target[] = staged
-		result[] = mutator(staged, args...; kwargs...)
-		_finalize_figure!(staged; live = _plot_data(fig))
+		_with_figure_style(staged; adopt = true) do
+			result[] = mutator(staged, args...; kwargs...)
+			_finalize_figure!(staged; live = _plot_data(fig))
+		end
 		return nothing
 	end
 	fast_mutation = function (candidate)
 		staged = _HighLevelStagedPlotMutation(candidate)
 		staged_target[] = staged
-		result[] = mutator(staged, args...; kwargs...)
-		_finalize_figure!(staged; live = _plot_data(fig))
+		_with_figure_style(staged; adopt = true) do
+			result[] = mutator(staged, args...; kwargs...)
+			_finalize_figure!(staged; live = _plot_data(fig))
+		end
 		return nothing
 	end
 	fast_path_allowed =
@@ -725,10 +730,12 @@ function _transactional_subplot_mutation!(
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
 			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
-			result[] =
-				mutator(staged, args...; kwargs...)
-			_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
-			_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
+			_with_figure_style(staged; adopt = true) do
+				result[] =
+					mutator(staged, args...; kwargs...)
+				_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
+				_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
+			end
 			return nothing
 		end
 		commit_callback = _ -> _commit_subplot_metadata!(
@@ -1540,7 +1547,7 @@ _legend_figure_template(p::Plot, style) =
 # translucent box in the template background on dark ones, transparent when
 # the style has `legend_frame=false`.
 function _legend_default_colors(p::Plot)
-	style = _active_style()
+	style = _figure_style(p)
 	d = _style_legend_defaults(style; template = _legend_figure_template(p, style))
 	return (bgcolor = d.bgcolor, bordercolor = d.bordercolor, borderwidth = d.borderwidth)
 end
@@ -2039,7 +2046,7 @@ function _apply_subplot_legends!(
 	# Legend boxes created after construction get the active style's legend
 	# font size, which the style wrote only onto the legends that existed when
 	# the figure was built (an explicit font size already in the box wins).
-	style_font = _style_legend_font()
+	style_font = _style_legend_font(_figure_style(p))
 	for key in order
 		xdom, ydom = domains[key]
 		legend_id = _legend_id(ids[key])
@@ -6736,14 +6743,16 @@ function _subplot_delegate_mutator!(
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
 			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
-			result[] = _subplot_delegate_mutator_impl!(
-				staged,
-				mutator,
-				args...;
-				kwargs...,
-			)
-			_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
-			_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
+			_with_figure_style(staged; adopt = true) do
+				result[] = _subplot_delegate_mutator_impl!(
+					staged,
+					mutator,
+					args...;
+					kwargs...,
+				)
+				_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
+				_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
+			end
 			return nothing
 		end
 		commit_callback = _ -> _commit_subplot_metadata!(
@@ -15834,6 +15843,17 @@ end
 # `colorby` of plot_quiver(!) (D13): `:none`, `:magnitude`, or an array with
 # the shape of `u` (one value per vector, matched to the vectors as `u` is).
 # Returns `:none`, `:magnitude` or the array.
+# Default colour of a quiver's glyphs: "RoyalBlue" (1.x) unless the figure's
+# layout or the style it carries has a colorway, then the colorway's colour for
+# the position the quiver trace takes (Q24: a paper style's cycle reaches it).
+function _quiver_default_color(fig)
+	colorway = _nonempty_vector(_field(_colour_layout(fig), :colorway))
+	colorway === nothing && (colorway = _figure_style(fig).colorway)
+	colorway === nothing && return "RoyalBlue"
+	index = _scat_existing_count(fig) + 1
+	return _color_hex(colorway[mod1(index, length(colorway))]; who = "plot_quiver")
+end
+
 function _quiver_colorby(colorby, u, who::AbstractString)
 	if colorby isa Symbol || colorby isa AbstractString
 		return _quiver_choice(colorby, (:none, :magnitude), who, "colorby")
@@ -16158,7 +16178,7 @@ function _quiver_add!(
 			colorbar_ticklabels = colorbar_ticklabels,
 			coloraxis = coloraxis,
 		)
-		colour = _field2d_color_string(color === nothing ? "RoyalBlue" : color, who, "color")
+		colour = _field2d_color_string(color === nothing ? _quiver_default_color(fig) : color, who, "color")
 	else
 		color === nothing || throw(ArgumentError(
 			"$(who): `color` sets one colour for every glyph and conflicts with " *
@@ -16293,7 +16313,9 @@ Glyphs (lead decision D13):
 - `headwidth = nothing`: triangle base width as a fraction of its length
   (> 0; default 0.5). Triangles only.
 - `color = nothing`: one colour for every glyph (string, Symbol or Colorant;
-  `nothing` is "RoyalBlue", `""` leaves it to plotly). Not with `colorby`.
+  `nothing` is "RoyalBlue" under the `:default` style and the next colour of
+  the colorway under a style that sets one, the figure's own `colorway`
+  included; `""` leaves it to plotly). Not with `colorby`.
 - `linewidth::Real = 0`: arrow line width in pixels; `0` takes the active
   style's line width ([`with_style`](@ref)), else plotly's default. The
   style's dash/marker cycle is not applied to arrows. Arrows only.
@@ -21874,7 +21896,7 @@ end
 # the layout size, else the active style's default figure size (700 x 500
 # under `:default`, `savefig`'s default size as well).
 function _figure_annotation_size(layout::Layout)
-	default_w, default_h = _style_default_figure_size()
+	default_w, default_h = _figure_default_size(layout)
 	side(key, default) = (v = get(layout.fields, key, nothing);
 		v isa Real && !(v isa Bool) && isfinite(v) && v > 0 ? Float64(v) : default)
 	return side(:width, default_w), side(:height, default_h)

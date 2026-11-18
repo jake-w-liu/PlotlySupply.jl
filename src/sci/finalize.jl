@@ -962,9 +962,12 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 	if islog
 		tickformat = _cmn_mapping_get(mapping, :tickformat)
 		decades = floor(Int, lo):ceil(Int, hi)
-		# A d3 `tickformat` writes the plain numbers.
-		(tickformat isa AbstractString && !isempty(tickformat)) &&
-			return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), decades) + extra
+		# A d3 `tickformat`, and an "L<step>" dtick (linear steps in log
+		# space), write the plain numbers.
+		dtick = _cmn_mapping_get(mapping, :dtick)
+		plain = (tickformat isa AbstractString && !isempty(tickformat)) ||
+			(dtick isa AbstractString && startswith(dtick, "L"))
+		plain && return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), decades) + extra
 		format = something(_fin_string(_cmn_mapping_get(mapping, :exponentformat)), "B")
 		minexponent = _cmn_mapping_get(mapping, :minexponent)
 		minexponent = _fin_isfinite_real(minexponent) ? Float64(minexponent) : 3.0
@@ -1482,7 +1485,7 @@ end
 function _fin_layout_size(layout::Layout)
 	w = get(layout.fields, :width, nothing)
 	h = get(layout.fields, :height, nothing)
-	W0, H0 = _style_default_figure_size()
+	W0, H0 = _figure_default_size(layout)
 	return (
 		_fin_isfinite_real(w) && w > 0 ? Float64(w) : Float64(W0),
 		_fin_isfinite_real(h) && h > 0 ? Float64(h) : Float64(H0),
@@ -1499,8 +1502,9 @@ function _fin_size_is_free(layout::Layout)
 	h = get(layout.fields, :height, nothing)
 	w === nothing && h === nothing && return true
 	(_fin_isfinite_real(w) && _fin_isfinite_real(h)) || return false
-	_active_style().width > 0 || return false
-	W0, H0 = _style_default_figure_size()
+	carried = something(_figure_recorded_style(layout), _STYLE_SCOPE[], Some(nothing))
+	(carried !== nothing && carried.width > 0) || return false
+	W0, H0 = _style_default_figure_size(carried)
 	return abs(w - W0) <= 0.5 && abs(h - H0) <= 0.5
 end
 
@@ -3904,8 +3908,11 @@ function _finalize_figure!(fig; live = nothing, size = nothing)
 end
 
 # Colour ranges are scanned once per run (Z83, `_cbar_with_extrema_memo`).
-_fin_run!(fig, live, size, clone_readonly::Bool) =
+# The run reads the style the figure carries (K1): its sizes, margins and
+# decade-tick rule never depend on the style active when it runs.
+_fin_run!(fig, live, size, clone_readonly::Bool) = _with_figure_style(fig) do
 	_cbar_with_extrema_memo(() -> _fin_run_scoped!(fig, live, size, clone_readonly))
+end
 
 function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	ctx = _fin_context(fig, live, size, clone_readonly)

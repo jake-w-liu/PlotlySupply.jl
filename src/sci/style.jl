@@ -1132,7 +1132,12 @@ const _ACTIVE_STYLE = Ref{PlotStyle}(_default_plot_style())
 The style constructors consult (see the internal-API comment at the top of
 src/sci/style.jl). Returned by reference: internal callers must not mutate it.
 """
-_active_style() = _ACTIVE_STYLE[]
+_active_style() = (scoped = _STYLE_SCOPE[]; scoped === nothing ? _ACTIVE_STYLE[] : scoped)
+
+# The style a figure carries (see `_figure_style`) while one of its mutators,
+# `_finalize_figure!` or an export runs: `_with_figure_style` installs it here,
+# `_active_style()` returns it in place of the global active style.
+const _STYLE_SCOPE = Base.ScopedValues.ScopedValue{Union{Nothing, PlotStyle}}(nothing)
 
 function _style_lookup(style::PlotStyle, ::AbstractString)
 	return style
@@ -1221,6 +1226,15 @@ Returns the value of `f()`. The active style is a global setting, not a
 task-local one: figures created concurrently by other tasks while `f` runs also
 see `style`.
 
+A figure carries the style it was built under (every style but the 1.x
+`:default` look is recorded, without the template, in
+`layout.meta.plotlysupply.style`; it survives JSON round trips): mutators,
+`savefig` and the layout engine read that record instead of the active style,
+so `fig = with_style(:ieee) do ... end` followed, after the block, by more
+calls on `fig` gives what the same calls give inside it. A figure without a
+record (built under `:default`) that a mutator changes inside a `with_style`
+block adopts that style from then on.
+
 # Example
 ```julia
 fig = with_style(:publication; fontsize = 12) do
@@ -1300,13 +1314,13 @@ end
 
 # The template the colours of something added to an EXISTING figure must match:
 # the figure's own template, else (none usable) the active style's.
-_figure_style_template(fig; style::PlotStyle = _active_style()) =
+_figure_style_template(fig; style::PlotStyle = _figure_style(fig)) =
 	something(_figure_template(fig), _style_template(style))
 
 # Legend box for a legend that a mutator creates on an existing figure: the
 # style's frame choice in the colours of the figure's template (a dark box on
 # a plotly_dark figure). Splat into `_apply_default_legend!(fig; ...)`.
-_figure_legend_defaults(fig; style::PlotStyle = _active_style()) =
+_figure_legend_defaults(fig; style::PlotStyle = _figure_style(fig)) =
 	_style_legend_defaults(style; template = _figure_style_template(fig; style = style))
 
 # Font of a legend created after the figure was built (e.g. a SubplotFigure's
@@ -1319,7 +1333,7 @@ _style_legend_font(style::PlotStyle = _active_style()) =
 
 # Frame of a Cartesian axis that is added to an existing figure (a twin or
 # secondary axis): `_style_axis_defaults` in the ink of the figure's template.
-_figure_axis_defaults(fig; axis::Symbol = :x, style::PlotStyle = _active_style()) =
+_figure_axis_defaults(fig; axis::Symbol = :x, style::PlotStyle = _figure_style(fig)) =
 	_style_axis_defaults(style; template = _figure_style_template(fig; style = style), axis = axis)
 
 # Whether a template specification (as stored in `PlotStyle.template` or
@@ -1522,10 +1536,10 @@ _style_value_unset(value) =
 	value === nothing || value === missing || (value isa AbstractString && isempty(value))
 
 """
-	_apply_style_trace_defaults!(fig, trace_indices; style = _active_style(), explicit = ())
+	_apply_style_trace_defaults!(fig, trace_indices; style = _figure_style(fig), explicit = ())
 
-Fill the per-trace defaults of `style` (the active [`PlotStyle`](@ref) unless
-given) into the traces of `fig` at `trace_indices`, wherever the trace leaves
+Fill the per-trace defaults of `style` (the [`PlotStyle`](@ref) the figure carries,
+else the active one, unless given) into the traces of `fig` at `trace_indices`, wherever the trace leaves
 them unset. Internal; for the trace constructors and their `!` mutators.
 
 # Arguments
@@ -1632,7 +1646,7 @@ _apply_style_trace_defaults!(fig, first_new:length(_plot_data(fig));
 function _apply_style_trace_defaults!(
 	fig,
 	trace_indices;
-	style::PlotStyle = _active_style(),
+	style::PlotStyle = _figure_style(fig),
 	explicit = (),
 )
 	who = "_apply_style_trace_defaults!"
@@ -1836,6 +1850,19 @@ function _style_trace_default_updates(trace, defaults, position::Integer, explic
 	return updates
 end
 
+# `meta` (a layout.meta value) with the record of `style` added under
+# `plotlysupply.style` (and the log tick rule under `plotlysupply.log_ticks`,
+# kept for readers of 2.0 betas); `nothing` when `style` is the default look
+# (nothing to record) or `meta` is not a container the record can live in.
+function _style_meta_with_record(meta, style::PlotStyle)
+	record = _style_record(style)
+	isempty(record) && return nothing
+	(meta === nothing || meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute) || return nothing
+	own = Dict{Symbol, Any}(:style => record)
+	style.log_ticks === :auto || (own[:log_ticks] = String(style.log_ticks))
+	return _style_update_path(meta, (_STYLE_META_KEY,), own, "layout.meta", "PlotStyle")
+end
+
 function _apply_style_layout!(
 	fig,
 	style::PlotStyle = _active_style();
@@ -1909,19 +1936,12 @@ function _apply_style_layout!(
 		updates[:margin] = _style_domain_subplot_margin(p, updates, style, "PlotStyle")
 	end
 	merge!(updates, _style_figure_size_updates(fields, style))
-	# The figure remembers the log tick rule of the style it is built under.
-	if style.log_ticks !== :auto
-		meta = haskey(updates, :meta) ? updates[:meta] : get(fields, :meta, nothing)
-		if meta === nothing || meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute
-			updates[:meta] = _style_update_path(
-				meta,
-				(_STYLE_META_KEY,),
-				Dict{Symbol, Any}(:log_ticks => String(style.log_ticks)),
-				"layout.meta",
-				"PlotStyle",
-			)
-		end
-	end
+	# The figure carries the style it is built under (`_style_record`): what a
+	# later mutator, the finalizer or an export needs although the active style
+	# has changed since (`_figure_style`).
+	meta = haskey(updates, :meta) ? updates[:meta] : get(fields, :meta, nothing)
+	recorded_meta = _style_meta_with_record(meta, style)
+	recorded_meta === nothing || (updates[:meta] = recorded_meta)
 	for (key, value) in updates
 		fields[key] = value
 	end
@@ -1948,7 +1968,7 @@ function _style_domain_subplot_margin(p::Plot, updates::AbstractDict, style::Plo
 	label_room = ceil(1.2 * tick + 8)
 	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
 	current = _style_container_dict(margin, "layout.margin", who)
-	height = _tight_real(lookup(:height), Float64(_style_default_figure_size()[2]))
+	height = _tight_real(lookup(:height), Float64(_figure_default_size()[2]))
 	cap = _TIGHT_MAX_MARGIN_FRACTION * height
 	floors = Dict{Symbol, Any}()
 	for (side, room) in ((:l, label_room), (:r, label_room), (:b, label_room), (:t, label_room + (title_room > 0 ? title_room + 4 : 0)))
@@ -2059,6 +2079,23 @@ function _style_default_figure_size(style::PlotStyle = _active_style())
 end
 
 """
+	_figure_default_size(fig = nothing) -> Tuple{Float64,Float64}
+
+Size (px) a figure without `layout.width`/`layout.height` is laid out at by a
+mutator or `_finalize_figure!`: the default size of the style `fig` (a figure
+or its `Layout`) carries, else of the style installed by `_with_figure_style`,
+else the 1.x 700 x 500. It never follows the globally active style, so a
+figure is settled under any active style (K1); only an export of a figure
+without a size does (`savefig`). Internal.
+"""
+function _figure_default_size(fig = nothing)
+	carried = fig === nothing ? nothing : _figure_recorded_style(fig)
+	carried === nothing && (carried = _STYLE_SCOPE[])
+	carried === nothing && return (_DEFAULT_EXPORT_WIDTH_PX, _DEFAULT_EXPORT_HEIGHT_PX)
+	return _style_default_figure_size(carried)
+end
+
+"""
 	_style_log_ticks(style::PlotStyle = _active_style()) -> Symbol
 
 The style's rule for logarithmic axes without a user tick setting (lead
@@ -2071,20 +2108,134 @@ _style_log_ticks(style::PlotStyle = _active_style()) = style.log_ticks
 """
 	_style_log_ticks(layout::Layout) -> Symbol
 
-The log-axis tick rule of a figure: the one the style it was built under
-recorded in `layout.meta.plotlysupply.log_ticks` (`_apply_style_layout!`), so
-a figure made inside `with_style(:ieee)` keeps its decade labels when it is
-exported or changed after the block; the active style's rule when it recorded
-none. Internal.
+The log-axis tick rule of a figure: the one of the style it was built under
+(`_figure_style`; also recorded as `layout.meta.plotlysupply.log_ticks`), so a
+figure made inside `with_style(:ieee)` keeps its decade labels when it is
+exported or changed after the block; `:auto` (plotly's labels) for a figure that
+carries no style, whatever style is active: the labels of a figure never depend
+on the style active when it is finalized (K1). Internal.
 """
 function _style_log_ticks(layout::PlotlyBase.Layout)
+	recorded = _figure_recorded_style(layout)
+	return recorded === nothing ? :auto : recorded.log_ticks
+end
+
+# ── The style a figure carries ───────────────────────────────────────────────
+
+# `PlotStyle()` with every field at its constructor default: the baseline a
+# figure's recorded style is relative to (`:default` records nothing).
+const _STYLE_BASELINE = PlotStyle()
+# Fields recorded on a figure. The template is the figure's own `layout.template`.
+const _STYLE_RECORD_FIELDS = Tuple(f for f in fieldnames(PlotStyle) if f !== :template)
+
+_style_record_value(value::Symbol) = String(value)
+_style_record_value(value::AbstractDict) = Dict{Symbol, Any}(Symbol(k) => v for (k, v) in value)
+_style_record_value(value::AbstractVector) = collect(value)
+_style_record_value(value) = value
+
+"""
+	_style_record(style::PlotStyle) -> Dict{Symbol,Any}
+
+The fields of `style` that differ from `PlotStyle()` (the template excluded),
+JSON-ready (symbols as strings): empty for the 1.x `:default` look. Written by
+`_apply_style_layout!` to `layout.meta.plotlysupply.style` of every figure
+built under a non-default style, so a figure carries its style: `_figure_style`
+reads it back (it survives JSON round trips). Internal.
+"""
+function _style_record(style::PlotStyle)
+	record = Dict{Symbol, Any}()
+	for name in _STYLE_RECORD_FIELDS
+		value = getfield(style, name)
+		isequal(value, getfield(_STYLE_BASELINE, name)) && continue
+		record[name] = _style_record_value(value)
+	end
+	return record
+end
+
+# `container[key]` of a Dict or PlotlyAttribute with Symbol or String keys,
+# without copying (the figure's meta also holds the layout engine's rooms).
+function _style_meta_get(container, key::Symbol)
+	container isa PlotlyBase.PlotlyAttribute && (container = container.fields)
+	container isa AbstractDict || return nothing
+	value = get(container, key, nothing)
+	value === nothing && (value = get(container, String(key), nothing))
+	return value
+end
+
+# One-entry cache of the last decoded record (figures are used in bursts).
+const _STYLE_DECODED = Ref{Any}(nothing)
+
+# The style recorded on `fig` (`layout.meta.plotlysupply.style`), or `nothing`
+# when the figure carries none or the record is unusable (a hand-edited or
+# foreign JSON: the figure then follows the active style). The template of the
+# returned style is the figure's own.
+function _figure_recorded_style(fig)
+	layout = fig isa PlotlyBase.Layout ? fig : _cmn_plot(fig).layout
 	meta = get(layout.fields, :meta, nothing)
-	(meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute) || return _style_log_ticks()
-	own = get(_symbol_dict(meta), _STYLE_META_KEY, nothing)
-	(own isa AbstractDict || own isa PlotlyBase.PlotlyAttribute) || return _style_log_ticks()
-	value = get(_symbol_dict(own), :log_ticks, nothing)
-	value isa AbstractString && Symbol(value) in _STYLE_LOG_TICKS && return Symbol(value)
-	return _style_log_ticks()
+	meta === nothing && return nothing
+	own = _style_meta_get(meta, _STYLE_META_KEY)
+	record = _style_meta_get(own, :style)
+	(record isa AbstractDict || record isa PlotlyBase.PlotlyAttribute) || return nothing
+	template = get(layout.fields, :template, nothing)
+	cached = _STYLE_DECODED[]
+	if cached !== nothing && cached[1] === record && cached[2] === template
+		return cached[3]
+	end
+	style = try
+		overrides = Dict{Symbol, Any}(Symbol(k) => v for (k, v) in _symbol_dict(record))
+		decoded = _style_with_overrides(_STYLE_BASELINE, overrides, "figure style")
+		(template isa PlotlyBase.Template || template isa Symbol) && (decoded.template = template)
+		decoded
+	catch err
+		err isa ArgumentError || rethrow()
+		return nothing
+	end
+	_STYLE_DECODED[] = (record, template, style)
+	return style
+end
+
+"""
+	_figure_style(fig) -> PlotStyle
+
+The style of `fig`: the one it was built under (recorded by
+`_apply_style_layout!`, so it outlives the `with_style` block), else the active
+style. Internal; what a mutator, the finalizer and an export consult instead of
+`_active_style()`.
+"""
+function _figure_style(fig)
+	recorded = _figure_recorded_style(fig)
+	return recorded === nothing ? _active_style() : recorded
+end
+
+"""
+	_with_figure_style(f, fig; adopt = false)
+
+Run `f()` with `_active_style()` returning the style `fig` carries (the active
+style when it carries none), so every function below that reads the active
+style (trace defaults, legend and axis frames, the finalizer's sizes, the
+export size) sees the figure's own. Internal; the entry of mutators,
+`_finalize_figure!` and `savefig`.
+
+`adopt = true` (the mutators): a figure that carries no style takes the active
+one first when that is not the default look (`_style_record`), so what the
+mutation writes under `with_style(:ieee)` (decade ticks, trace widths) is
+still what the finalizer, later mutators and exports give once the block has
+ended. A mutation never changes the figure's style otherwise.
+"""
+function _with_figure_style(f, fig; adopt::Bool = false)
+	adopt && _style_adopt!(fig)
+	recorded = _figure_recorded_style(fig)
+	scoped = _STYLE_SCOPE[]
+	(recorded === nothing ? scoped === nothing : recorded === scoped) && return f()
+	return Base.ScopedValues.with(f, _STYLE_SCOPE => recorded)
+end
+
+function _style_adopt!(fig)
+	_figure_recorded_style(fig) === nothing || return nothing
+	layout = _cmn_plot(fig).layout
+	meta = _style_meta_with_record(get(layout.fields, :meta, nothing), _active_style())
+	meta === nothing || (layout.fields[:meta] = meta)
+	return nothing
 end
 
 """
