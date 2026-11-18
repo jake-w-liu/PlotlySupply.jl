@@ -408,7 +408,9 @@ end
 		t = _sf_roundtrip(fig.data[1])
 		@test t["z"][1][1] == [255, 0, 0] && t["z"][2][3] == [0, 0, 255]
 		@test !haskey(t, "colormodel")
-		@test _sf_axis(fig, :yaxis)["autorange"] == "reversed"   # row 1 at the top
+		# row 1 at the top: finalize pins the image's pixel edges, descending
+		yr = _sf_axis(fig, :yaxis)["range"]
+		@test _sf_axis(fig, :yaxis)["autorange"] == false && yr[1] > yr[2]
 		@test _sf_axis(fig, :yaxis)["scaleanchor"] == "x"        # square pixels
 		rgba = zeros(UInt8, 2, 2, 4)
 		@test plot_image(rgba).data[1].fields[:colormodel] == "rgba256"
@@ -453,7 +455,7 @@ end
 		@test t[:x0] == 0.5 && t[:dx] == 1.0
 		@test t[:y0] == 0.5 && t[:dy] == 1.0
 		yax = _sf_axis(fig, :yaxis)
-		@test yax["autorange"] == true                           # bottom < top: y points up
+		@test yax["autorange"] == false && yax["range"] == [0.0, 2.0]   # bottom < top: y points up
 		# Rows are flipped so row 1 lands at y0 + 1 * dy = 1.5, the top row.
 		tz = _sf_roundtrip(fig.data[1])["z"]
 		@test tz[2][1] == [255, 0, 0] && tz[1][1] == [0, 0, 0]
@@ -465,18 +467,23 @@ end
 		rt = _sf_roundtrip(rev.data[1])
 		@test rt["x0"] == 0.5 && rt["dx"] == 1.0
 		@test rt["z"][2][4] == [255, 0, 0]                       # column 1 at x = 3.5 (left = 4)
-		@test _sf_axis(rev, :xaxis)["autorange"] == "reversed"
+		@test _sf_axis(rev, :xaxis)["autorange"] == false && _sf_axis(rev, :xaxis)["range"] == [4.0, 0.0]
 		@test _sf_thrown(() -> plot_image(img; extent = (0, 0, 0, 2))) isa ArgumentError
 		@test _sf_thrown(() -> plot_image(img; extent = (0, 1, 2))) isa ArgumentError
 		@test _sf_thrown(() -> plot_image(img; extent = (0, 1, 0, Inf))) isa ArgumentError
-		@test _sf_axis(plot_image(img; origin = :lower), :yaxis)["autorange"] == true
+		low_y = _sf_axis(plot_image(img; origin = :lower), :yaxis)
+		@test low_y["autorange"] == false && low_y["range"] == [-0.5, 1.5]
 		@test _sf_thrown(() -> plot_image(img; origin = :left)) isa ArgumentError
 		# The mutator keeps the axis direction unless asked.
 		fig = plot_heatmap(x, y, U)
 		@test plot_image!(fig, img) === nothing
-		@test !haskey(_sf_axis(fig, :yaxis), "autorange")
+		# (no direction was given: plotly shows the image's row 1 at the top, and
+		# finalize pins the axis the way plotly would draw it, descending)
+		keep = _sf_axis(fig, :yaxis)["range"]
+		@test _sf_axis(fig, :yaxis)["autorange"] == false && keep[1] > keep[2]
 		plot_image!(fig, img; origin = :upper)
-		@test _sf_axis(fig, :yaxis)["autorange"] == "reversed"
+		up = _sf_axis(fig, :yaxis)["range"]
+		@test _sf_axis(fig, :yaxis)["autorange"] == false && up[1] > up[2]
 		@test _sf_thrown(() -> plot_image!(fig, img; show = true)) isa ArgumentError
 		@test length(fig.data) == 3
 	end

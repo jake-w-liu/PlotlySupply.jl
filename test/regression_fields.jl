@@ -387,10 +387,12 @@ end
 						@test !haskey(ax, :range) && get(ax, :autorange, true) !== false
 					end
 				else
-					# An image, whose 3-D z finalize does not measure yet
-					# (cross-request): plotly's own autorange, nothing pinned.
-					@test _rf_clip(fig, axis) === nothing
-					@test !haskey(ax, :range) && get(ax, :autorange, true) !== false
+					# An image: finalize measures its pixel edges; the
+					# aspect-linked axes are pinned to them (a y axis
+					# descending: plotly shows row 1 at the top).
+					clip = _rf_clip(fig, axis)
+					@test clip !== nothing
+					@test ax[:autorange] === false && sort(Float64.(ax[:range])) == collect(clip)
 				end
 			end
 		end
@@ -531,7 +533,8 @@ end
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 2, 3); yrange = (nothing, 0)), :yaxis) == (:pinned, [1.5, 0.0])
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 3, 3); xrange = (nothing, 1)), :xaxis) == (:pinned, [-0.5, 1.0])
 		# A stop beyond the data on the far side leaves no room: an error.
-		@test occursin("plot_image: `yrange` = (nothing, 2) leaves no room for the data",
+		# (the message is the shared D11 one, `_require_limit_meets_data`)
+		@test occursin("plot_image: `yrange` fixes one end of the axis beyond all of its data",
 			_rfv3_msg(() -> plot_image(zeros(UInt8, 2, 2, 3); yrange = (nothing, 2))))
 		# ... also for a bilinear image, sized from its PNG header.
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 3, 3); interpolation = :bilinear, xrange = (1, nothing)), :xaxis) == (:pinned, [1.0, 2.5])
@@ -582,7 +585,10 @@ end
 		k = plot_heatmap(U)
 		relayout!(k; xaxis_autorangeoptions_include = -5, xaxis_autorangeoptions_minallowed = -1)
 		plot_heatmap!(k, U; xrange = (nothing, 3))
-		@test _rfv3_d(_rf_axis(k, :xaxis)[:autorangeoptions]) == Dict(:maxallowed => 3)
+		# (the user's own `include` stays: "other autorangeoptions the user set
+		# are kept", `_write_axis_range!`; the earlier `minallowed` is replaced)
+		opts = _rfv3_d(_rf_axis(k, :xaxis)[:autorangeoptions])
+		@test opts[:maxallowed] == 3 && !haskey(opts, :minallowed) && opts[:include] == -5
 		# A date bound is written in epoch milliseconds (plotly.js ignores a date
 		# string in the autorange options).
 		Dt = Base.require(Base.PkgId(Base.UUID("ade2ca70-3891-5945-98fb-dc099432e06a"), "Dates"))
@@ -748,7 +754,7 @@ end
 			("contour!", p -> plot_contour!(p, U), (0.0, 3.0), false),
 			("matrix!", p -> plot_matrix!(p, U), (0.5, 3.5), true),
 			("quiver!", p -> plot_quiver!(p, [0.0], [0.0], [1.0], [1.0]), :glyphs, true),
-			("image!", p -> plot_image!(p, zeros(UInt8, 2, 2, 3)), nothing, false),
+			("image!", p -> plot_image!(p, zeros(UInt8, 2, 2, 3)), (-0.5, 1.5), true),
 			("streamlines!", p -> plot_streamlines!(p, 0:3, 0:3, ones(4, 4), ones(4, 4)), :glyphs, false),
 		)
 			p = Plot(GenericTrace[], Layout(xaxis2 = attr(matches = "x", anchor = "y2"), yaxis2 = attr(anchor = "x2")))
@@ -764,11 +770,6 @@ end
 				else
 					@test get(ax, :autorange, true) === true && !haskey(ax, :range)
 				end
-				continue
-			end
-			if extent === nothing
-				@test _rf_clip(p, :xaxis) === nothing
-				@test !haskey(ax, :range) && get(ax, :autorange, true) === true
 				continue
 			end
 			@test _rf_clip(p, :xaxis) == extent
