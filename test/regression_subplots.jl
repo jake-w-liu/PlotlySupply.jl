@@ -11,6 +11,14 @@ _rsp_layout(sf::SubplotFigure) = sf.plot.layout.fields
 _rsp_axis(sf::SubplotFigure, key::Symbol) = _rsp_fields(_rsp_layout(sf)[key])
 _rsp_span(domain) = domain[2] - domain[1]
 
+# The text of an axis title (`nothing` when it has none, e.g. only a font).
+function _rsp_title_text(axis)
+	title = get(axis, :title, nothing)
+	title isa AbstractString && return title
+	title === nothing && return nothing
+	return get(_rsp_fields(title), :text, nothing)
+end
+
 # Recording renderer for SyncPlot-backed figures; `fail` makes every script
 # throw so rollback can be checked.
 mutable struct _RSPRenderer
@@ -1606,7 +1614,9 @@ end
 				hidden = _rsp_share_hidden(letter, mode, (1, 2))
 				label_cell = !hidden ? (1, 2) : letter === :x ? (2, 2) : (1, 1)
 				label_key = _rsp_share_key(sf, letter, label_cell)
-				titled = [k for k in axis_keys if haskey(_rsp_axis(sf, k), :title)]
+				# A journal style writes the title font on every axis: only a title
+				# TEXT counts as the group's title.
+				titled = [k for k in axis_keys if _rsp_title_text(_rsp_axis(sf, k)) !== nothing]
 				@test titled == [label_key]
 				@test _rsp_fields(_rsp_axis(sf, label_key)[:title])[:text] == "quantity"
 				# Axes of other groups are untouched.
@@ -1958,13 +1968,6 @@ const _RSP_SYNC_GRID_ONLY = (:tickfont, :tickangle)
 const _RSP_SYNC_LIMITS = (:minallowed, :maxallowed, :clipmin, :clipmax, :include)
 
 _rsp_json(value) = value === nothing ? "null" : JSON.json(value)
-
-function _rsp_title_text(axis)
-	title = get(axis, :title, nothing)
-	title isa AbstractString && return title
-	title === nothing && return nothing
-	return get(_rsp_fields(title), :text, nothing)
-end
 
 # Shared-axis groups of `sf`, read from `matches` (root => members).
 function _rsp_match_groups(sf::SubplotFigure)
