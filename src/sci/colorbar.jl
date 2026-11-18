@@ -1695,9 +1695,15 @@ function _shared_colorbar_carried(p::Plot, slots::Vector{_CbarSlot})
 			end
 		end
 		if first_bar && !isempty(bar)
+			# An `nticks` the finalizer wrote to thin the ticks of this (short)
+			# cell bar (`_fin_bar_tick_state`: `tickmode = "auto"` + `nticks`)
+			# is not a setting of the user's: copied without its mark it would
+			# stay on the shared bar as if it were, however long that bar is.
+			thinned = _fin_bar_tick_state(bar)[2]
 			for (key, value) in bar
 				key in _CBAR_GEOMETRY_KEYS && continue
 				key in (:title, :tickvals, :ticktext, :tickmode) && continue
+				thinned && key === :nticks && continue
 				settings[key] = value
 			end
 			first_bar = false

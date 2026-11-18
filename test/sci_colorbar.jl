@@ -1025,3 +1025,41 @@ end
 		@test _SCB._finalize_figure!(sf) === false
 	end
 end
+
+@testset "a shared bar does not inherit the thinned tick count of a cell bar" begin
+	# Each cell of a 3-row grid first gets a short bar of its own, whose
+	# automatic ticks the finalizer thins (`tickmode = "auto"` + `nticks`).
+	# `shared_colorbar!` copies the settings of the first cell bar to the shared
+	# bar: that `nticks` is the finalizer's, not the user's, and must not come
+	# along (it stayed at 4 on a bar three rows tall: field_maps, index_maps).
+	make() = begin
+		sf = subplots(3, 1; sync = false, shared_xaxes = true, vertical_spacing = 0.05)
+		for row in 1:3
+			plot_heatmap!(sf, 0:5, 0:2, [sin(i + j + row) for i in 0:5, j in 0:2]; row = row, col = 1,
+				crange = (-1, 1))
+		end
+		sf
+	end
+	sf = make()
+	cell_bar = _scb_bar(sf.plot.data[1])
+	# Precondition of the test: the short cell bars are thinned.
+	@test get(cell_bar, :tickmode, nothing) == "auto" && get(cell_bar, :nticks, 0) >= 2
+	shared_colorbar!(sf; crange = [-1, 1], len = 1.0)
+	bar = _scb_axis_bar(sf)
+	# The tall bar has plotly's own tick count: no `nticks`, or one that
+	# carries the finalizer's mark and is therefore updated with the length.
+	@test !haskey(bar, :nticks) || get(bar, :tickmode, nothing) == "auto"
+	@test !haskey(bar, :nticks)
+	@test _SCB._finalize_figure!(sf) === false
+
+	# An `nticks` of the user's on the cell bar is a setting and is copied.
+	# (written without the finalizer's `tickmode = "auto"` mark, as a user's
+	# `restyle!(fig, 1; colorbar_nticks = 3, colorbar_tickmode = nothing)` leaves it)
+	sf = make()
+	user_bar = _scb_bar(sf.plot.data[1])
+	user_bar[:nticks] = 3
+	delete!(user_bar, :tickmode)
+	@test _SCB._fin_bar_tick_state(Dict{Symbol, Any}(user_bar)) == (false, false)
+	shared_colorbar!(sf; crange = [-1, 1], len = 1.0)
+	@test _scb_axis_bar(sf)[:nticks] == 3
+end
