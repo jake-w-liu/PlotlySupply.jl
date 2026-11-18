@@ -182,8 +182,8 @@ the table lists only one name.
 | Export | `savefig`, `json` |
 | Windows and PlotlyJS compatibility | `SyncPlot`, `to_syncplot`, `plot`, `plot!` (same as the scatter mutator), `msgchannel`, `toggle_devtools` |
 
-`COLORMAPS` and `COLOR_CYCLES` are public, not exported: write
-`PlotlySupply.COLORMAPS`.
+The two colour tables are public but not exported: write
+`PlotlySupply.COLORMAPS` and `PlotlySupply.COLOR_CYCLES`.
 
 PlotlySupply also re-exports PlotlyBase (`scatter`, `Layout`, `attr`,
 `relayout!`, `restyle!`, `add_trace!`, `Spec`, ...), `meshgrid` from
