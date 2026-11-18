@@ -44,8 +44,8 @@ const TTFX_SCENARIOS = [
 		using PlotlySupply
 		x = collect(range(0, 1; length = 40)); y = collect(range(0, 2; length = 60))
 		U = [sin(3xi) * cos(2yj) for xi in x, yj in y]
-		println("RESULT first_plot_heatmap=", @elapsed plot_heatmap(x, y, U; xlabel = "x", ylabel = "y", colorbar_title = "u"))
-		println("RESULT second_plot_heatmap=", @elapsed plot_heatmap(x, y, 2 .* U; xlabel = "x", ylabel = "y", colorbar_title = "u"))
+		println("RESULT first_plot_heatmap=", @elapsed plot_heatmap(x, y, U; xlabel = "x", ylabel = "y"))
+		println("RESULT second_plot_heatmap=", @elapsed plot_heatmap(x, y, 2 .* U; xlabel = "x", ylabel = "y"))
 		""",
 	),
 	(

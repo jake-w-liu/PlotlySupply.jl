@@ -270,6 +270,19 @@ end
         end
         @test _global_defaults_diff(before, _global_defaults_snapshot()) == Symbol[]
         @test get_default_legend_position() == :topright
+
+        # A file run on its own is checked when its process ends.
+        mktempdir() do dir
+            utils = joinpath(testdir, "testutils.jl")
+            function exit_code(body)
+                script = joinpath(dir, "probe.jl")
+                write(script, "using Test, PlotlySupply\ninclude($(repr(utils)))\n" * body)
+                cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) $script`
+                return run(pipeline(ignorestatus(cmd); stdout = devnull, stderr = devnull)).exitcode
+            end
+            @test exit_code("set_default_legend_position!(:bottom); set_default_legend_position!(:topright)\n") == 0
+            @test exit_code("set_default_legend_position!(:bottom)\n") == 1
+        end
     end
 
     @testset "every docs page is in the manual's navigation" begin

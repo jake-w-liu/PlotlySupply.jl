@@ -104,6 +104,20 @@ function _global_defaults_restore!(snapshot)
     return nothing
 end
 
+# Run on its own (`julia --project=. test/<file>.jl`) a file that includes this
+# one is checked when the process ends: the defaults it started with must be
+# the defaults it leaves. (Under runtests.jl every file is checked as it ends.)
+if !isdefined(@__MODULE__, :_GLOBAL_DEFAULTS_AT_START)
+    const _GLOBAL_DEFAULTS_AT_START = _global_defaults_snapshot()
+    atexit() do
+        leaked = _global_defaults_diff(_GLOBAL_DEFAULTS_AT_START, _global_defaults_snapshot())
+        if !isempty(leaked)
+            println(stderr, "ERROR: the test run changed package defaults and did not restore them: ", leaked)
+            exit(1)
+        end
+    end
+end
+
 struct _UnsupportedTrace <: AbstractTrace end
 
 mutable struct _LifecycleFakeWindow
