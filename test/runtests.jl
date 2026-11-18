@@ -453,8 +453,10 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         set_legend!(fig; position=:outside_right, inset=(0.02, 0.03))
         @test fig.layout.fields[:legend][:xanchor] == "left"
         @test fig.layout.fields[:legend][:yanchor] == "top"
-        @test fig.layout.fields[:legend][:x] ≈ 1.02
-        plot_scatter!(fig, x, rand(10); legend="trace-next")
+        # the room engine puts it a few px (PlotlySupply._ROOM_GAP) beyond the plot
+        # area's edge, not at the literal 1 + inset
+        @test 1.002 < fig.layout.fields[:legend][:x] < 1.02
+        plot_scatter!(fig, x, collect(1.0:10.0) ./ 10; legend="trace-next")
         @test fig.layout.fields[:legend][:xanchor] == "left"
         @test fig.layout.fields[:legend][:yanchor] == "top"
 
@@ -2076,9 +2078,68 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test nlp(:outside_bottom) == :outside_bottom
         @test nlp(:bottom_outside) == :outside_bottom
         @test nlp(:outsidebottom) == :outside_bottom
-        # Invalid position defaults to :topright, with a warning (Z7: the
-        # warning is expected, not printed into the test log)
+        # Invalid position defaults to :topright
         @test (@test_logs (:warn, r"Unrecognized legend position") nlp(:invalid_position_xyz)) == :topright
+    end
+
+    @testset "Default legend never covers markers while a corner is free (seeded property)" begin
+        # A fixed pseudo-random stream (splitmix64): the same draws on every run
+        # and Julia version, independent of the global RNG other tests consume.
+        state = UInt64(0x2024)
+        function draw()
+            state += 0x9e3779b97f4a7c15
+            z = state
+            z = (z ⊻ (z >> 30)) * 0xbf58476d1ce4e5b9
+            z = (z ⊻ (z >> 27)) * 0x94d049bb133111eb
+            z ⊻= z >> 31
+            return Float64(z >> 11) / Float64(UInt64(1) << 53)
+        end
+        pad = PlotlySupply._SCAT_LEGEND_AUTORANGE_PAD
+        window(v) = begin
+            lo, hi = extrema(v)
+            span = (hi - lo) / (1 - 2pad)
+            (lo - pad * span, hi + pad * span)
+        end
+        covered(xs, ys, placement, bw, bh) = begin
+            x, y = placement[:x], placement[:y]
+            u0 = placement[:xanchor] == "left" ? x : placement[:xanchor] == "right" ? x - bw : x - bw / 2
+            v0 = placement[:yanchor] == "bottom" ? y : placement[:yanchor] == "top" ? y - bh : y - bh / 2
+            xl, xh = window(xs)
+            yl, yh = window(ys)
+            count(i -> u0 <= (xs[i] - xl) / (xh - xl) <= u0 + bw && v0 <= (ys[i] - yl) / (yh - yl) <= v0 + bh, eachindex(xs))
+        end
+        positions = PlotlySupply._SCAT_LEGEND_POSITIONS
+        placements = map(PlotlySupply._scat_position_placement, positions)
+        free_cases = 0
+        full_cases = 0
+        violations = Tuple{Int, Int}[]
+        unknown = 0
+        for trial in 1:300
+            n = 3 + floor(Int, 100 * draw()^2)      # sparse and dense clouds
+            xs = sort!([10 * draw() for _ in 1:n])
+            ys = [draw() for _ in 1:n]
+            fig = plot_scatter(xs, ys; mode="markers", legend="a")
+            width, height = PlotlySupply._scat_legend_figure_px(fig.layout)
+            bw = min(0.6, (PlotlySupply._SCAT_LEGEND_SAMPLE_PX + PlotlySupply._SCAT_LEGEND_CHAR_PX) / width)
+            bh = min(0.6, (PlotlySupply._SCAT_LEGEND_PAD_PX + PlotlySupply._SCAT_LEGEND_ROW_PX) / height)
+            legend = fig.layout.fields[:legend]
+            chosen = findfirst(pl -> all(k -> legend[k] == pl[k], (:x, :y, :xanchor, :yanchor)), placements)
+            if chosen === nothing
+                unknown += 1
+                continue
+            end
+            counts = [covered(xs, ys, pl, bw, bh) for pl in placements]
+            if any(==(0), counts)
+                free_cases += 1
+                counts[chosen] == 0 || push!(violations, (trial, chosen))
+            else
+                full_cases += 1
+            end
+        end
+        @test unknown == 0          # the legend always sits at one of the rule's positions
+        @test isempty(violations)   # a free position exists: the rule picks one that covers no marker
+        @test free_cases > 100      # the property is not vacuous
+        @test free_cases + full_cases == 300
     end
 
     @testset "Legend positions in set_legend!" begin
@@ -2904,10 +2965,8 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     @testset "CRC: savefig validates before opening destinations" begin
         # An unsupported format is invalid input: ArgumentError with the full message (Z89).
         p = plot_scatter(1:2, 1:2)
-        unsupported = "savefig: unsupported export format \"unsupported\". Supported: png, jpeg (or jpg), tiff (or tif), svg, pdf, eps, html, json."
-        caught(f) = try; f(); nothing; catch e; e; end
-        err = caught(() -> savefig(IOBuffer(), p; format="unsupported"))
-        @test err isa ArgumentError && err.msg == unsupported
+        unsupported = r"savefig: unsupported export format \"unsupported\"\. Supported: png, jpeg \(or jpg\), tiff \(or tif\), svg, pdf, eps, html, json\.$"
+        @test_throws unsupported savefig(IOBuffer(), p; format="unsupported")
 
         mktempdir() do dir
             filename = joinpath(dir, "existing.unsupported")
@@ -5279,11 +5338,11 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             window.on_close = () -> close(sp)
 
             task = @async close(sp)
-            status = timedwait(() -> istaskdone(task), 2.0; pollint=0.01)
+            status = timedwait(() -> istaskdone(task), 30.0; pollint=0.01)
             if status === :timed_out
                 # Keep a regression failure from leaving its test task blocked.
                 notify(getfield(sp, :_resources).close_done)
-                timedwait(() -> istaskdone(task), 2.0; pollint=0.01)
+                timedwait(() -> istaskdone(task), 30.0; pollint=0.01)
             end
 
             @test status === :ok

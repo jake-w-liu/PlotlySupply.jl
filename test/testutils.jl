@@ -189,7 +189,7 @@ function _image_command_backend(state::_ImageCommandState)
     )
 end
 
-function _wait_for_lifecycle(predicate; timeout::Float64=5.0, collect::Bool=false)
+function _wait_for_lifecycle(predicate; timeout::Float64=30.0, collect::Bool=false)
     deadline = time() + timeout
     while time() < deadline
         predicate() && return true

@@ -1440,9 +1440,11 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 				err_task = @async read(err, String)
 				try
 					@test timedwait(() -> process_exited(child), 600.0; pollint = 0.1) === :ok
-					# The pipe Electron inherited closes with the child.
-					@test timedwait(() -> istaskdone(out_task), 5.0; pollint = 0.05) === :ok
-					@test timedwait(() -> istaskdone(err_task), 5.0; pollint = 0.05) === :ok
+					# The pipe Electron inherited closes with the child. The wait returns as
+					# soon as it does; 60 s only bounds a real hang (a loaded machine
+					# needed more than the former 5 s once).
+					@test timedwait(() -> istaskdone(out_task), 60.0; pollint = 0.05) === :ok
+					@test timedwait(() -> istaskdone(err_task), 60.0; pollint = 0.05) === :ok
 					@test child.exitcode == 0
 					@test isfile(png)
 					istaskdone(out_task) && @test fetch(out_task) == "SAVED\n"
