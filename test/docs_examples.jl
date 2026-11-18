@@ -720,7 +720,8 @@ end
 			# No size given: the style's default size (3.5 in x 2.625 in).
 			savefig(fig, "a.pdf")
 			w, h = _docs_pdf_page("a.pdf")
-			@test w ≈ 252 atol = 0.01 && h ≈ 189 atol = 0.01
+			@test w ≈ 252 atol = 0.01
+			@test h ≈ 189 atol = 0.01
 			# TIFF: default 300 dpi, tags set; PNG pixel count rounds.
 			savefig(fig, "a.tiff")
 			@test _docs_tiff_info("a.tiff") == (1050, 788, 300)      # 3.5 in x 2.625 in at 300 dpi
