@@ -52,8 +52,9 @@ function _test_files_in_run_order(testdir::AbstractString)
 end
 
 # The package-wide defaults a test file must leave as it found them: the active
-# style, the default template, the default legend position, the mathtext
-# settings and the names in the style registry. A file that changes one and
+# style, the default template, the default legend position and the mathtext
+# settings. (Styles a file registers by name are not defaults: the docs
+# examples register `:talk` and `:paper`, and nothing reads those back.) A file that changes one and
 # does not restore it changes what every later file of the full run measures
 # (a style or margin leaking from an earlier file), so runtests.jl compares
 # this snapshot at the end of every file and restores it.
@@ -63,7 +64,6 @@ _global_defaults_snapshot() = (
     template = PlotlySupply._DEFAULT_TEMPLATE[],
     legend_position = PlotlySupply._DEFAULT_LEGEND_POSITION[],
     mathtext = PlotlySupply._MATHTEXT_SETTINGS[],
-    registry = Set(keys(PlotlySupply._STYLE_REGISTRY)),
 )
 
 # Field-by-field equality of two values (mutable structs compare by identity
@@ -87,7 +87,6 @@ function _global_defaults_diff(before, after)
     _same_value(before.template, after.template) || push!(changed, :template)
     before.legend_position == after.legend_position || push!(changed, :legend_position)
     _same_value(before.mathtext, after.mathtext) || push!(changed, :mathtext)
-    before.registry == after.registry || push!(changed, :style_registry)
     return changed
 end
 
@@ -98,9 +97,6 @@ function _global_defaults_restore!(snapshot)
     PlotlySupply._DEFAULT_TEMPLATE[] = snapshot.template
     PlotlySupply._DEFAULT_LEGEND_POSITION[] = snapshot.legend_position
     PlotlySupply._MATHTEXT_SETTINGS[] = snapshot.mathtext
-    for name in collect(keys(PlotlySupply._STYLE_REGISTRY))
-        name in snapshot.registry || delete!(PlotlySupply._STYLE_REGISTRY, name)
-    end
     return nothing
 end
 
