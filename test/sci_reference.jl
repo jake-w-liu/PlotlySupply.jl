@@ -1,5 +1,10 @@
 using Test, PlotlySupply
 
+# These tests assert on the package's own defaults: an earlier file of the full run
+# may leave a publication style active (`set_default_style!()` without an
+# argument keeps the active style), which changes colorbar fonts and line widths.
+set_default_style!(:default)
+
 const _RFT = PlotlySupply
 const _RFT_PB = PlotlySupply.PlotlyBase
 # The Markdown stdlib is not a test dependency; take the module that defines

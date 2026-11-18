@@ -1,6 +1,11 @@
 using Test, PlotlySupply
 using PlotlySupply: PlotlyBase
 
+# These tests assert on the package's own defaults: an earlier file of the full run
+# may leave a publication style active (`set_default_style!()` without an
+# argument keeps the active style), which changes colorbar fonts and line widths.
+set_default_style!(:default)
+
 # Regression tests for the audit findings fixed in the 2-D field functions
 # (plot_heatmap, plot_contour, plot_quiver, plot_image and their mutators).
 # Each testset names the finding ids it covers.
@@ -411,6 +416,22 @@ end
 		plot_quiver!(q, [1.0], [1.0], [1.0], [1.0]; xrange = [0, 0])
 		plot_scatter!(q, [10.0], [1.0]; mode = "markers")
 		@test _rf_clip(q, :xaxis) == widened && Tuple(_rf_axis(q, :xaxis)[:range]) == widened
+	end
+
+	@testset "D13 glyphs without a field are padded in axis units (log axes, other traces)" begin
+		q = Base.CoreLogging.with_logger(Base.CoreLogging.NullLogger()) do
+			plot_quiver([1.0, 10.0], [1.0, 10.0], [1.0, 1.0], [0.0, 0.0]; xscale = "log", yscale = "log")
+		end
+		drawn_x = Float64[v for v in q.data[1].fields[:x] if v !== nothing]
+		clip = _rf_clip(q, :xaxis)
+		@test clip !== nothing && 0 < clip[1] < minimum(drawn_x) && clip[2] > maximum(drawn_x)
+		# the pad is the overlay pad of the span in decades, on both sides
+		span = log10(maximum(drawn_x)) - log10(minimum(drawn_x))
+		@test log10(clip[2]) - log10(maximum(drawn_x)) ≈ PlotlySupply._FIN_OVERLAY_PAD * span
+		@test log10(minimum(drawn_x)) - log10(clip[1]) ≈ PlotlySupply._FIN_OVERLAY_PAD * span
+		# another trace on the group widens the glyph view by what it draws
+		plot_scatter!(q, [1000.0], [5.0]; mode = "markers")
+		@test _rf_clip(q, :xaxis)[2] >= 1000.0
 	end
 
 	@testset "D16 K5 quiver and streamline overlays count with their anchors" begin

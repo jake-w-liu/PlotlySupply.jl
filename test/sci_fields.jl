@@ -1,6 +1,11 @@
 using Test, PlotlySupply
 using PlotlySupply: PlotlyBase
 
+# These tests assert on the package's own defaults: an earlier file of the full run
+# may leave a publication style active (`set_default_style!()` without an
+# argument keeps the active style), which changes colorbar fonts and line widths.
+set_default_style!(:default)
+
 # 2-D fields: plot_heatmap, plot_contour, plot_quiver, plot_image (src/api.jl)
 # and plot_matrix, plot_streamlines (src/sci/fields.jl). Audit-finding
 # regressions live in test/regression_fields.jl.
