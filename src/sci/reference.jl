@@ -562,6 +562,15 @@ _ref_subplot_call!(impl!, sf::SubplotFigure, args...; kwargs...) =
 # Shape styles
 # ---------------------------------------------------------------------------
 
+# Default colour and width of the lines these functions draw (Z64/Y23):
+# `color = nothing` is the ink of the figure's template (`_style_ink`: black
+# on light templates, the template's light text colour on dark ones) and
+# `linewidth = nothing` the active style's `reference_linewidth` (the
+# `:reference` role of `_style_line_width`), 1 px when the style leaves it
+# unset. Anything else is the caller's value, validated by the style helpers.
+_ref_ink(fig, color) = color === nothing ? _style_ink(fig) : color
+_ref_width(linewidth) = linewidth === nothing ? _style_line_width(:reference; default = 1) : linewidth
+
 # Line style of a line/path outline: colour ("" = Plotly default), width
 # (px, >= 0), dash, opacity, layer.
 function _ref_line_style(who::AbstractString; color, dash, linewidth, opacity, layer)
@@ -681,9 +690,9 @@ function _ref_axis_lines!(
 	fig,
 	values,
 	horizontal::Bool;
-	color = "black",
+	color = nothing,
 	dash = "",
-	linewidth = 1,
+	linewidth = nothing,
 	opacity = 1,
 	layer = "above",
 	legend = "",
@@ -701,7 +710,14 @@ function _ref_axis_lines!(
 	horizontal || _ref_reject_vertical_secondary_y(who, secondary_y)
 	target = _ref_target(fig, who; row = row, col = col, secondary_y = secondary_y, inset = inset)
 	positions = _ref_positions(values, horizontal ? target.ytype : target.xtype, who, horizontal ? "y" : "x")
-	style = _ref_line_style(who; color = color, dash = dash, linewidth = linewidth, opacity = opacity, layer = layer)
+	style = _ref_line_style(
+		who;
+		color = _ref_ink(fig, color),
+		dash = dash,
+		linewidth = _ref_width(linewidth),
+		opacity = opacity,
+		layer = layer,
+	)
 	shape_label = _ref_shape_label(who, label, labelpos, fontsize; line = true)
 	legend_text = _ref_string(legend, who, "legend")
 	proxy = (isempty(legend_text) || isempty(positions)) ? nothing : _proxy_trace(
@@ -756,7 +772,7 @@ _ref_hline!(fig, y; kwargs...) = _ref_axis_lines!(fig, y, true; kwargs...)
 _ref_vline!(fig, x; kwargs...) = _ref_axis_lines!(fig, x, false; kwargs...)
 
 """
-	hline!(fig, y; color="black", dash="", linewidth=1, opacity=1, layer="above",
+	hline!(fig, y; color=nothing, dash="", linewidth=nothing, opacity=1, layer="above",
 	       legend="", label="", labelpos="", fontsize=0, secondary_y=false)
 	hline!(sf::SubplotFigure, y; row=nothing, col=nothing, inset=nothing, kwargs...)
 
@@ -773,12 +789,16 @@ date on any other axis is an `ArgumentError`. Each value becomes a Plotly line s
 Calls are additive: calling `hline!` again adds more lines.
 
 # Keywords
-- `color::Union{AbstractString,Symbol} = "black"`: line colour (any colour
-  `colormap`/CSS understands; `""` uses Plotly's default).
+- `color = nothing`: line colour (any colour `colormap`/CSS understands; `""`
+  uses Plotly's default). `nothing` is the ink of the figure's template:
+  black on light templates, the template's light text colour on dark ones
+  (`plotly_dark`), so the line stays visible.
 - `dash::Union{AbstractString,Symbol} = ""`: `""` (solid), `"solid"`, `"dot"`,
   `"dash"`, `"longdash"`, `"dashdot"`, `"longdashdot"`, a matplotlib code
   (`"-"`, `"--"`, `":"`, `"-."`) or a dash-length list such as `"5px,3px"`.
-- `linewidth::Real = 1`: line width in px (`>= 0`).
+- `linewidth = nothing`: line width in px (`>= 0`). `nothing` is the active
+  style's `reference_linewidth` (see [`PlotStyle`](@ref); 0.75 pt under the
+  journal styles), 1 px when the style leaves it unset.
 - `opacity::Real = 1`: opacity in `[0, 1]`.
 - `layer::Union{AbstractString,Symbol} = "above"`: `"above"` the traces,
   `"below"` everything (grid lines included) or `"between"` the grid lines
@@ -816,7 +836,7 @@ hline!(sf::SubplotFigure, y::Union{_RefPosition, AbstractVector}; kwargs...) =
 	_ref_subplot_call!(_ref_hline!, sf, y; kwargs...)
 
 """
-	vline!(fig, x; color="black", dash="", linewidth=1, opacity=1, layer="above",
+	vline!(fig, x; color=nothing, dash="", linewidth=nothing, opacity=1, layer="above",
 	       legend="", label="", labelpos="", fontsize=0)
 	vline!(sf::SubplotFigure, x; row=nothing, col=nothing, inset=nothing, kwargs...)
 
@@ -874,10 +894,10 @@ function _ref_spans!(
 	letter = horizontal ? "y" : "x"
 	v0, v1 = _ref_position_pair(lo, hi, horizontal ? target.ytype : target.xtype, who, "$(letter)0", "$(letter)1")
 	edge = _ref_color(edgecolor, who, "edgecolor"; none_is_empty = true)
-	# The outline is drawn when an edge colour is given (width 1 unless
-	# `linewidth` says otherwise) or when `linewidth > 0` (edge in the fill
-	# colour, as matplotlib's axhspan draws it).
-	width = linewidth === nothing ? (isempty(edge) ? 0.0 : 1.0) :
+	# The outline is drawn when an edge colour is given (the reference width,
+	# `_ref_width`, unless `linewidth` says otherwise) or when `linewidth > 0`
+	# (edge in the fill colour, as matplotlib's axhspan draws it).
+	width = linewidth === nothing ? (isempty(edge) ? 0.0 : _ref_width(nothing)) :
 		_ref_nonnegative(linewidth, who, "linewidth")
 	style = _ref_area_style(
 		who;
@@ -933,7 +953,8 @@ see [`hline!`](@ref)). Calls are additive.
 - `edgecolor::Union{AbstractString,Symbol} = ""`: outline colour (`""`/`"none"`:
   the outline, when drawn, uses the fill colour).
 - `linewidth::Union{Nothing,Real} = nothing`: outline width in px; `nothing`
-  draws a 1 px outline when `edgecolor` is given and none otherwise.
+  draws an outline of the style's `reference_linewidth` (1 px when unset)
+  when `edgecolor` is given and none otherwise.
 - `layer = "below"`: `"below"` (under grid lines and traces), `"between"`
   (above the grid, under the traces) or `"above"`.
 - `legend::AbstractString = ""`: when non-empty, adds a legend entry (a filled
@@ -993,8 +1014,10 @@ vspan!(sf::SubplotFigure, x0::_RefPosition, x1::_RefPosition; kwargs...) =
 # ---------------------------------------------------------------------------
 
 # Keywords shared by circle!/ellipse!/rectangle!/polygon! are validated here
-# (before the first write); returns (style, label, legend).
+# (before the first write); returns (style, label, legend). `edgecolor` and
+# `linewidth` of `nothing` are the defaults of `_ref_ink` / `_ref_width`.
 function _ref_schematic_options(
+	fig,
 	who::AbstractString;
 	fillcolor,
 	edgecolor,
@@ -1010,8 +1033,8 @@ function _ref_schematic_options(
 	style = _ref_area_style(
 		who;
 		fillcolor = fillcolor,
-		edgecolor = edgecolor,
-		linewidth = linewidth,
+		edgecolor = _ref_ink(fig, edgecolor),
+		linewidth = _ref_width(linewidth),
 		dash = dash,
 		opacity = opacity,
 		layer = layer,
@@ -1026,8 +1049,8 @@ function _ref_circle!(
 	cy,
 	r;
 	fillcolor = "",
-	edgecolor = "black",
-	linewidth = 1,
+	edgecolor = nothing,
+	linewidth = nothing,
 	dash = "",
 	opacity = 1,
 	layer = "above",
@@ -1049,6 +1072,7 @@ function _ref_circle!(
 	y = _ref_finite(cy, who, "cy")
 	radius = _ref_positive(r, who, "r")
 	style, shape_label, legend_text = _ref_schematic_options(
+		fig,
 		who;
 		fillcolor, edgecolor, linewidth, dash, opacity, layer, legend, label, labelpos, fontsize,
 	)
@@ -1062,7 +1086,7 @@ function _ref_circle!(
 end
 
 """
-	circle!(fig, cx, cy, r; fillcolor="", edgecolor="black", linewidth=1, dash="",
+	circle!(fig, cx, cy, r; fillcolor="", edgecolor=nothing, linewidth=nothing, dash="",
 	        opacity=1, layer="above", legend="", label="", labelpos="", fontsize=0,
 	        secondary_y=false)
 	circle!(sf::SubplotFigure, cx, cy, r; row=nothing, col=nothing, inset=nothing, kwargs...)
@@ -1076,8 +1100,11 @@ there): `ArgumentError`.
 
 # Keywords
 - `fillcolor = ""`: fill colour (`""`/`"none"`: unfilled).
-- `edgecolor = "black"`: outline colour (`""`/`"none"`: no outline).
-- `linewidth::Real = 1`: outline width in px (`0`: no outline).
+- `edgecolor = nothing`: outline colour (`""`/`"none"`: no outline);
+  `nothing` is the template's ink, as `color` of [`hline!`](@ref).
+- `linewidth = nothing`: outline width in px (`0`: no outline); `nothing` is
+  the style's `reference_linewidth`, 1 px when unset, as for
+  [`hline!`](@ref).
 - `dash = ""`: outline dash, as for [`hline!`](@ref).
 - `opacity::Real = 1`, `layer = "above"`: as for [`hline!`](@ref).
 - `legend::AbstractString = ""`: legend entry (a filled square for a filled
@@ -1113,8 +1140,8 @@ function _ref_ellipse!(
 	angle = 0,
 	degrees = true,
 	fillcolor = "",
-	edgecolor = "black",
-	linewidth = 1,
+	edgecolor = nothing,
+	linewidth = nothing,
 	dash = "",
 	opacity = 1,
 	layer = "above",
@@ -1138,6 +1165,7 @@ function _ref_ellipse!(
 	semi_b = _ref_positive(b, who, "b")
 	phi = _ref_angle(angle, _ref_bool(degrees, who, "degrees"), who, "angle")
 	style, shape_label, legend_text = _ref_schematic_options(
+		fig,
 		who;
 		fillcolor, edgecolor, linewidth, dash, opacity, layer, legend, label, labelpos, fontsize,
 	)
@@ -1161,8 +1189,8 @@ function _ref_ellipse!(
 end
 
 """
-	ellipse!(fig, cx, cy, a, b; angle=0, degrees=true, fillcolor="", edgecolor="black",
-	         linewidth=1, dash="", opacity=1, layer="above", legend="", label="",
+	ellipse!(fig, cx, cy, a, b; angle=0, degrees=true, fillcolor="", edgecolor=nothing,
+	         linewidth=nothing, dash="", opacity=1, layer="above", legend="", label="",
 	         labelpos="", fontsize=0, secondary_y=false)
 	ellipse!(sf::SubplotFigure, cx, cy, a, b; row=nothing, col=nothing, inset=nothing, kwargs...)
 
@@ -1207,8 +1235,8 @@ function _ref_rectangle!(
 	y1;
 	rounded = 0,
 	fillcolor = "",
-	edgecolor = "black",
-	linewidth = 1,
+	edgecolor = nothing,
+	linewidth = nothing,
 	dash = "",
 	opacity = 1,
 	layer = "above",
@@ -1244,6 +1272,7 @@ function _ref_rectangle!(
 		))
 	end
 	style, shape_label, legend_text = _ref_schematic_options(
+		fig,
 		who;
 		fillcolor, edgecolor, linewidth, dash, opacity, layer, legend, label, labelpos, fontsize,
 	)
@@ -1253,7 +1282,7 @@ function _ref_rectangle!(
 end
 
 """
-	rectangle!(fig, x0, y0, x1, y1; rounded=0, fillcolor="", edgecolor="black", linewidth=1,
+	rectangle!(fig, x0, y0, x1, y1; rounded=0, fillcolor="", edgecolor=nothing, linewidth=nothing,
 	           dash="", opacity=1, layer="above", legend="", label="", labelpos="",
 	           fontsize=0, secondary_y=false)
 	rectangle!(sf::SubplotFigure, x0, y0, x1, y1; row=nothing, col=nothing, inset=nothing, kwargs...)
@@ -1292,8 +1321,8 @@ function _ref_polygon!(
 	y;
 	closed = true,
 	fillcolor = "",
-	edgecolor = "black",
-	linewidth = 1,
+	edgecolor = nothing,
+	linewidth = nothing,
 	dash = "",
 	opacity = 1,
 	layer = "above",
@@ -1322,6 +1351,7 @@ function _ref_polygon!(
 	xs = _ref_values(x, target.xlog, who, "x")
 	ys = _ref_values(y, target.ylog, who, "y")
 	style, shape_label, legend_text = _ref_schematic_options(
+		fig,
 		who;
 		fillcolor, edgecolor, linewidth, dash, opacity, layer, legend, label, labelpos, fontsize,
 	)
@@ -1332,7 +1362,7 @@ function _ref_polygon!(
 end
 
 """
-	polygon!(fig, x, y; closed=true, fillcolor="", edgecolor="black", linewidth=1, dash="",
+	polygon!(fig, x, y; closed=true, fillcolor="", edgecolor=nothing, linewidth=nothing, dash="",
 	         opacity=1, layer="above", legend="", label="", labelpos="", fontsize=0,
 	         secondary_y=false)
 	polygon!(sf::SubplotFigure, x, y; row=nothing, col=nothing, inset=nothing, kwargs...)
@@ -1476,8 +1506,8 @@ function _ref_arrow!(
 	x1,
 	y1;
 	head = :end,
-	color = "black",
-	linewidth = 1,
+	color = nothing,
+	linewidth = nothing,
 	headsize = 1,
 	text = "",
 	textpos = :mid,
@@ -1498,7 +1528,8 @@ function _ref_arrow!(
 		"$(who): the start ($(xa), $(ya)) and end point coincide; an arrow needs a direction.",
 	))
 	heads = _ref_symbol_option(head, who, "head", _REF_ARROW_HEADS)
-	line_color = _ref_color(color, who, "color")
+	line_color = _ref_color(_ref_ink(fig, color), who, "color")
+	linewidth = _ref_width(linewidth)
 	width = heads === :none ? _ref_nonnegative(linewidth, who, "linewidth") : _ref_arrow_width(linewidth, who)
 	size = _ref_head_size(headsize, who)
 	label_text = _ref_string(text, who, "text")
@@ -1543,7 +1574,7 @@ function _ref_arrow!(
 end
 
 """
-	arrow!(fig, x0, y0, x1, y1; head=:end, color="black", linewidth=1, headsize=1, text="",
+	arrow!(fig, x0, y0, x1, y1; head=:end, color=nothing, linewidth=nothing, headsize=1, text="",
 	       textpos=:mid, offset=(0, 0), fontsize=0, secondary_y=false)
 	arrow!(sf::SubplotFigure, x0, y0, x1, y1; row=nothing, col=nothing, inset=nothing, kwargs...)
 
@@ -1562,9 +1593,11 @@ is done for you).
 - `head::Union{Symbol,AbstractString} = :end`: arrowheads at `:end`
   (`(x1, y1)`), `:start`, `:both` (`"<->"`, e.g. dimension arrows) or `:none`
   (a plain line, drawn as a Plotly line shape).
-- `color = "black"`: arrow and text colour (`""` uses Plotly's default).
-- `linewidth::Real = 1`: shaft width in px (`>= 0.1` when a head is drawn,
-  plotly.js's minimum).
+- `color = nothing`: arrow and text colour (`""` uses Plotly's default);
+  `nothing` is the template's ink, as for [`hline!`](@ref).
+- `linewidth = nothing`: shaft width in px (`>= 0.1` when a head is drawn,
+  plotly.js's minimum); `nothing` is the style's `reference_linewidth`, 1 px
+  when unset, as for [`hline!`](@ref).
 - `headsize::Real = 1`: head size relative to the line width (`>= 0.3`,
   plotly.js's minimum).
 - `text::AbstractString = ""`: optional label, typeset like every annotation
@@ -1602,8 +1635,8 @@ function _ref_arc!(
 	theta1;
 	degrees = true,
 	arrow = :none,
-	color = "black",
-	linewidth = 1,
+	color = nothing,
+	linewidth = nothing,
 	dash = "",
 	headsize = 1,
 	opacity = 1,
@@ -1633,7 +1666,8 @@ function _ref_arc!(
 		"($(in_degrees ? rad2deg(abs(span)) : abs(span)) $(in_degrees ? "degrees" : "rad")).",
 	))
 	heads = _ref_symbol_option(arrow, who, "arrow", _REF_ARROW_HEADS)
-	style = _ref_line_style(who; color = color, dash = dash, linewidth = linewidth, opacity = opacity, layer = layer)
+	linewidth = _ref_width(linewidth)
+	style = _ref_line_style(who; color = _ref_ink(fig, color), dash = dash, linewidth = linewidth, opacity = opacity, layer = layer)
 	heads === :none || _ref_arrow_width(linewidth, who)
 	size = _ref_head_size(headsize, who)
 	n = max(_REF_ARC_MIN_POINTS, ceil(Int, _REF_ARC_POINTS_PER_TURN * abs(span) / 2π))
@@ -1685,8 +1719,8 @@ function _ref_arc!(
 end
 
 """
-	arc!(fig, cx, cy, r, theta0, theta1; degrees=true, arrow=:none, color="black",
-	     linewidth=1, dash="", headsize=1, opacity=1, layer="above", secondary_y=false)
+	arc!(fig, cx, cy, r, theta0, theta1; degrees=true, arrow=:none, color=nothing,
+	     linewidth=nothing, dash="", headsize=1, opacity=1, layer="above", secondary_y=false)
 	arc!(sf::SubplotFigure, cx, cy, r, theta0, theta1; row=nothing, col=nothing, inset=nothing, kwargs...)
 
 Draw the circular arc of radius `r > 0` about `(cx, cy)` (data units) from
@@ -1702,8 +1736,9 @@ Not available on log axes (`ArgumentError`).
 - `arrow::Union{Symbol,AbstractString} = :none`: arrowheads at the `:end`
   (`theta1`), `:start`, `:both` or `:none`, pointing along the arc (each head is
   an annotation on the tangent at that end).
-- `color = "black"`, `linewidth::Real = 1` (`>= 0.1` with heads), `dash = ""`,
-  `opacity::Real = 1`, `layer = "above"`: line style, as for [`hline!`](@ref).
+- `color = nothing`, `linewidth = nothing` (`>= 0.1` with heads), `dash = ""`,
+  `opacity::Real = 1`, `layer = "above"`: line style, as for [`hline!`](@ref)
+  (`nothing`: the template's ink and the style's `reference_linewidth`).
 - `headsize::Real = 1`: head size relative to the line width (`>= 0.3`).
 - `secondary_y::Bool = false`, and for a SubplotFigure `row`, `col`, `inset`:
   as for [`hline!`](@ref).

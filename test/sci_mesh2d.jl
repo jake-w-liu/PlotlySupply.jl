@@ -428,7 +428,8 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		before = _m2_json(fig)
 		@test _m2_throws(() -> plot_polygons!(fig, [[0.0, 1.0, 0.5]], [[0.0, 0.0, 1.0]]; show = true), "mutators do not take `show`")
 		@test _m2_throws(() -> plot_polygons!(fig, [[0.0, 1.0, 0.5]], [[0.0, 0.0, 1.0]]; row = 1, col = 1), "`row` selects a SubplotFigure cell")
-		@test _m2_throws(() -> plot_polygons!(fig, [[0.0, 1.0, 0.5]], [[0.0, 0.0, 1.0]]; secondary_y = true), "`secondary_y` selects a SubplotFigure cell")
+		# Z31: `secondary_y` is a Plot keyword now; it must be a Bool.
+		@test _m2_throws(() -> plot_polygons!(fig, [[0.0, 1.0, 0.5]], [[0.0, 0.0, 1.0]]; secondary_y = :yes), "plot_polygons!: `secondary_y` must be true or false")
 		@test _m2_throws(() -> plot_polygons!(fig, [[0.0, 1.0, 0.5]], [[0.0, 0.0, 1.0]], [1.0]; crange = (1, 0)), "lower bound")
 		@test _m2_throws(() -> plot_pcolormesh!(fig, [0.0 1.0; 0.0 1.0], [0.0 0.0; 1.0 1.0], ones(1, 1); show = false), "mutators do not take `show`")
 		@test _m2_throws(() -> plot_tripcolor!(fig, _M2_TX, _M2_TY, _M2_TRI, _M2_TX; show = true), "mutators do not take `show`")
@@ -511,6 +512,7 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		t = _M2._cell_target(sf; row = 1, col = 1, secondary_y = true)
 		@test sf.plot.data[end].fields[:yaxis] == t.yref
 		@test _m2_get(sf.plot.layout.fields[t.ykey], :scaleanchor) == "x"
+		@test _m2_get(sf.plot.layout.fields[t.ykey], :constrain) == "range"     # overlaying twin
 		# numbered colour axis: written in the same transaction
 		plot_polygons!(sf, _M2_QX, _M2_QY, _M2_QUADS, [0.0, 4.0]; row = 1, col = 2, coloraxis = "coloraxis2", colorbar_title = "c2")
 		axis = sf.plot.layout.fields[:coloraxis2]
@@ -963,10 +965,12 @@ end
 			h = plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS; yrange = sentinel)
 			@test clip(h, :yaxis) == (0.0, 1.0) && _m2v3_axis(h, :yaxis)[:range] == [0.0, 1.0]
 		end
-		# No user range was recorded: a later trace widens the axis.
+		# No user range was recorded: a later trace widens the axis. A marker
+		# past the mesh (K5 / D16) reaches the marker plus the overlay pad
+		# (2.5 % of the span) on that side; the mesh side stays tight.
 		f = plot_pcolormesh(0:3, 0:2, rand(3, 2); xrange = nothing)
 		plot_scatter!(f, [9.0], [1.0]; mode = "markers")
-		@test clip(f, :xaxis) == (0.0, 9.0)
+		@test clip(f, :xaxis) == (0.0, 9.0 + _M2._FIN_OVERLAY_PAD * 9.0)
 		ax = _m2v3_axis(plot_pcolormesh(0:3, 0:2, rand(3, 2); yrange = (0.5, 1.5)), :yaxis)
 		@test collect(ax[:range]) == [0.5, 1.5] && ax[:autorange] === false
 		# D11: one-sided limits on every mesh function and mutator.
@@ -989,10 +993,11 @@ end
 			l = lim(f, :yaxis)
 			@test aspect ? (l[1] === :pinned && maximum(l[2]) == 0.75 && l[2][1] < l[2][2]) : l == (true, nothing, 0.75)
 			@test clip(f, :yaxis) === nothing
-			@test _m2_throws(() -> build((; xrange = (missing, 2))), "$(who): `xrange` bounds must be numbers (or date/category values); `missing` is not a bound")
+			# The D11 messages of the shared range check (Z53).
+			@test _m2_throws(() -> build((; xrange = (missing, 2))), "$(who): `xrange`: an open bound of a one-sided limit is written `nothing`")
 			@test _m2_throws(() -> build((; yrange = (Inf, nothing))), "$(who): `yrange` bounds must be finite")
-			@test _m2_throws(() -> build((; yrange = [1, 1])), "must differ")
-			@test _m2_throws(() -> build((; xrange = (true, 2))), "$(who): `xrange` bounds must be numbers")
+			@test _m2_throws(() -> build((; yrange = [1, 1])), "$(who): `yrange`: the range bounds must differ")
+			@test _m2_throws(() -> build((; xrange = (true, 2))), "$(who): `xrange` range bounds must be numbers (or date/category values), not Bool")
 		end
 		f = plot_tripcolor([1.0, 10.0, 1.0], _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; xscale = "log", xrange = (1, 100))
 		@test _m2v3_axis(f, :xaxis)[:range] == [0.0, 2.0] && _m2v3_axis(f, :xaxis)[:autorange] === false
@@ -1017,7 +1022,7 @@ end
 		@test l == (true, nothing, 1) || (l[1] === :pinned && l[2][2] == 1)
 		n = length(_M2._plot_data(sf))
 		@test _m2_throws(() -> plot_triplot!(sf, _M2V3_TX, _M2V3_TY, _M2V3_TRI; row = 1, col = 1, yrange = [missing, 1]),
-			"plot_triplot!: `yrange` bounds must be numbers")
+			"plot_triplot!: `yrange`: an open bound of a one-sided limit is written `nothing`")
 		@test _m2_throws(() -> plot_pcolormesh!(sf, [1.0, 10, 100], 0:1, rand(2, 1); row = 1, col = 2, xrange = (0, nothing)),
 			"plot_pcolormesh!: `xrange` bounds on a logarithmic axis are data values and must be positive")
 		@test length(_M2._plot_data(sf)) == n
@@ -1087,9 +1092,13 @@ end
 			else
 				@test ax[:autorange] === true && !haskey(ax, :range)
 			end
-			plot_scatter!(p, [extent[2] + 10.0], [0.5]; mode = "markers")
-			@test clip(p) == (extent[1], extent[2] + 10.0)
-			pinned && @test Tuple(Float64.(_m2v3_axis(p, :xaxis)[:range])) == (extent[1], extent[2] + 10.0)
+			# A marker past the mesh: the axis reaches it plus the overlay pad
+			# (K5 / D16), on that side only.
+			marker = extent[2] + 10.0
+			plot_scatter!(p, [marker], [0.5]; mode = "markers")
+			widened = (extent[1], marker + _M2._FIN_OVERLAY_PAD * (marker - extent[1]))
+			@test clip(p) == widened
+			pinned && @test Tuple(Float64.(_m2v3_axis(p, :xaxis)[:range])) == widened
 		end
 	end
 
@@ -1181,5 +1190,40 @@ end
 		# A log cell: coordinates are checked against the cell's axis type.
 		relayout!(sf.plot; xaxis2 = attr(type = "log"))
 		@test _m2_throws(() -> plot_pcolormesh!(sf, 0:3, 0:2, rand(3, 2); row = 1, col = 2), "plot_pcolormesh!")
+	end
+end
+
+@testset "sci mesh2d: wave 5 (fields)" begin
+	@testset "Z84 rectilinear plot_pcolormesh validates the cell values in place" begin
+		C = rand(1000, 1000)
+		Cn = rand(1001, 1001)
+		Cm = Matrix{Union{Missing, Float64}}(C)
+		Cm[3, 7] = missing
+		# Warm up (compilation is not counted).
+		for _ in 1:2
+			_M2._mesh2d_cell_values(C, 1001, 1001, "t")
+			_M2._mesh2d_cell_values(Cn, 1001, 1001, "t")
+			_M2._mesh2d_cell_values(Cm, 1001, 1001, "t")
+			plot_pcolormesh(0:1000, 0:1000, C)
+		end
+		# One Float64 matrix per cell value (8 MB here), read straight from `C`:
+		# no Matrix{Any} copy and no boxing per entry. 64 KiB covers the array
+		# headers.
+		slack = 64 * 1024
+		@test @allocated(_M2._mesh2d_cell_values(C, 1001, 1001, "t")) <= sizeof(C) + slack
+		@test @allocated(_M2._mesh2d_cell_values(Cm, 1001, 1001, "t")) <= sizeof(C) + slack
+		# Node values: the node matrix and the cell means.
+		@test @allocated(_M2._mesh2d_cell_values(Cn, 1001, 1001, "t")) <= sizeof(Cn) + sizeof(C) + slack
+		v = _M2._mesh2d_cell_values(Cm, 1001, 1001, "t")
+		@test v isa Matrix{Float64} && isnan(v[3, 7]) && v[1, 1] == C[1, 1]
+		# The whole call: the validated values (8 MB, also the colour values
+		# under a linear norm), the trace's z rows (about 9 MB, kept) and small
+		# bookkeeping. The 1.x path held a Matrix{Any} copy and a second pass
+		# (about 168 MB); 4x the input is a guard well below that.
+		@test @allocated(plot_pcolormesh(0:1000, 0:1000, C)) < 4 * sizeof(C)
+		# The values themselves are unchanged by the in-place path.
+		z = plot_pcolormesh(0:2, 0:2, [1.0 NaN; 3.0 4.0]).data[1].fields[:z]
+		@test z == [[1.0, 3.0], [nothing, 4.0]]
+		@test _m2_throws(() -> plot_pcolormesh(0:2, 0:2, Any[1.0 "a"; 3.0 4.0]), "plot_pcolormesh: colour values must be real numbers or missing; entry 3 is \"a\"")
 	end
 end

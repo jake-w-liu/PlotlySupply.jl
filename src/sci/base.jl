@@ -444,7 +444,14 @@ function _resolve_constrained_limit(fig, key::Symbol, value, reversed::Bool, mem
 	clip_hi = _cmn_mapping_get(options, :clipmax)
 	padded = !(_is_plain_real(clip_lo) && _is_plain_real(clip_hi) && clip_lo < clip_hi &&
 		(!log_axis || clip_lo > 0))
-	extent = if padded
+	# A group holding a field or an image takes the view `_finalize_figure!`
+	# gives it, measured now (field edges, image pixels, overlay pad): a clip
+	# may predate this call's traces, and centres miss the half cell (Z53).
+	view = _field2d_view_extent(fig, members, log_axis)
+	view === nothing || (padded = false)
+	extent = if view !== nothing
+		view
+	elseif padded
 		lower, upper = Inf, -Inf
 		for member in members
 			e = _axis_data_extent(fig, member)
@@ -477,6 +484,13 @@ function _resolve_constrained_limit(fig, key::Symbol, value, reversed::Bool, mem
 		"the open end, taken from the data, is not beyond the fixed bound; give " *
 		"both bounds.",
 	))
+	# The full range is the caller's limit (every caller writes it next): drop
+	# `_finalize_figure!`'s clip, or a range that happens to equal it is taken
+	# for finalize's own view and moved by the next trace (fields one-hop).
+	for member in members
+		_fin_sticky_clip(get(layout.fields, member, nothing)) === nothing ||
+			_delete_axis_options!(fig, member, _AXIS_CLIP_OPTION_KEYS)
+	end
 	return reversed ? Any[hi, lo] : Any[lo, hi]
 end
 

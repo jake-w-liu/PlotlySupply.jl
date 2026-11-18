@@ -1015,3 +1015,37 @@ const _RFT_Dates = Base.require(Base.PkgId(Base.UUID("ade2ca70-3891-5945-98fb-dc
 		end
 	end
 end
+
+@testset "sci reference.jl: wave 5 (fields)" begin
+	@testset "Z64 reference lines and shapes: the style's reference width, the template's ink" begin
+		line(item) = (_rft(item, :line, :color), _rft(item, :line, :width))
+		draw!(f) = (hline!(f, 1); vline!(f, 1); circle!(f, 0, 0, 1); ellipse!(f, 0, 0, 2, 1);
+			rectangle!(f, 0, 0, 1, 1); polygon!(f, [0, 1, 1], [0, 0, 1]); vspan!(f, 0, 1; edgecolor = "red"))
+		# Default style, light template: black ink, 1 px.
+		f = plot_scatter(1:3, 1:3)
+		draw!(f)
+		shapes = _rft_shapes(f)
+		@test length(shapes) == 7
+		@test all(s -> line(s) == ("#000000", 1), shapes[1:6])
+		@test line(shapes[7])[2] == 1
+		# A journal style: its `reference_linewidth` (0.75 pt in px).
+		with_style(:ieee) do
+			g = plot_scatter(1:3, 1:3)
+			draw!(g)
+			@test all(s -> line(s)[2] ≈ 0.75 * _RFT._PT_PX, _rft_shapes(g))
+			# An explicit width wins.
+			hline!(g, 2; linewidth = 3)
+			@test line(_rft_shapes(g)[end])[2] == 3
+		end
+		# A dark template: the template's light ink, so the line stays visible.
+		d = plot_scatter(1:3, 1:3)
+		relayout!(d; template = _RFT_PB.templates[:plotly_dark])
+		draw!(d)
+		ink = _RFT._style_ink(d)
+		# (hex colours are written upper-case: "#f2f5fa" -> "#F2F5FA")
+		@test lowercase(ink) != "#000000" && all(s -> lowercase(line(s)[1]) == lowercase(ink), _rft_shapes(d)[1:6])
+		# An explicit colour wins.
+		hline!(d, 2; color = "red")
+		@test line(_rft_shapes(d)[end])[1] != ink
+	end
+end

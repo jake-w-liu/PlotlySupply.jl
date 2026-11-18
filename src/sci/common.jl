@@ -969,17 +969,20 @@ function _cmn_tick_values(values, log_axis::Bool, who::AbstractString)
 		"$(who): tick values must be a vector or tuple; got $(typeof(values)).",
 	))
 	isempty(values) && return Float64[]
-	if all(v -> v isa AbstractString, values)
+	# Z42: `Date`/`DateTime` ticks (date axes) are written as the ISO strings
+	# plotly.js reads there ("2020-01-02", "2020-01-02T03:04:05.678").
+	if all(v -> v isa AbstractString || v isa Dates.Date || v isa Dates.DateTime, values)
 		log_axis && throw(ArgumentError(
-			"$(who): a logarithmic axis needs numeric tick values; got strings.",
+			"$(who): a logarithmic axis needs numeric tick values; got " *
+			"$(any(v -> v isa AbstractString, values) ? "strings" : "dates").",
 		))
-		return String[String(v) for v in values]
+		return String[v isa AbstractString ? String(v) : string(v) for v in values]
 	end
 	out = Float64[]
 	for v in values
 		(v isa Real && !(v isa Bool)) || throw(ArgumentError(
-			"$(who): tick values must all be real numbers (or all strings " *
-			"on a category/date axis); got $(repr(v)).",
+			"$(who): tick values must all be real numbers (or all strings or " *
+			"dates on a category/date axis); got $(repr(v)).",
 		))
 		isfinite(v) || throw(ArgumentError(
 			"$(who): tick value $(v) is not finite.",

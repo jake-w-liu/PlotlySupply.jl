@@ -640,6 +640,9 @@ end
 		ly = _sf_roundtrip(sy.plot.layout)
 		@test ly["yaxis3"]["scaleanchor"] == "x2"
 		@test !haskey(ly["yaxis"], "scaleanchor") && !haskey(ly["yaxis2"], "scaleanchor")
+		# The overlaying twin keeps the aspect by its range (it shares the
+		# cell's domain), not by a domain it cannot shrink.
+		@test ly["yaxis3"]["constrain"] == "range"
 		# Log cell axes are honoured for coordinate checks of the delegated methods.
 		sl = subplots(1, 2; sync = false)
 		plot_heatmap!(sl, [1.0, 2.0, 4.0, 8.0], y, U; row = 1, col = 2, xscale = "log")
