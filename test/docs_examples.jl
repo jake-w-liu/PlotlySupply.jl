@@ -725,7 +725,7 @@ end
 			# TIFF: default 300 dpi, tags set; PNG pixel count rounds.
 			savefig(fig, "a.tiff")
 			@test _docs_tiff_info("a.tiff") == (1050, 788, 300)      # 3.5 in x 2.625 in at 300 dpi
-			@test_throws Exception savefig(fig, "a.xyz")
+			@test_throws ErrorException savefig(fig, "a.xyz")
 			@test_throws ArgumentError savefig(fig, joinpath(dir, "missing-dir", "a.pdf"))
 			@test_throws ArgumentError savefig(fig, "b.pdf"; fonts = :nothing)
 			# Deterministic by default.
