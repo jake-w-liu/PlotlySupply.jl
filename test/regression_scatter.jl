@@ -1733,13 +1733,18 @@ end
 	relayout!(moved; title_y = 0.9)
 	plot_bar!(moved, [1, 2], [1.0, 2]; title = "M2")
 	@test _title(moved)[:y] == 0.9 && _title(moved)[:text] == "M2"
-	# A top secondary axis keeps the placement and reserves its depth below
-	# the title (`pad.b`), so the two do not overlap (render probe p06).
+	# A top secondary axis keeps the placement. The two do not overlap: the
+	# room engine holds the top margin for the title band above the axis
+	# (`_axes_title_clearance` leaves a container-placed title to it), so the
+	# margin grows by the depth of the top axis (lead render check
+	# k4_title_top_axis.png: title clear of the top tick labels).
+	plain = plot_scatter(1:3, [1.0, 2, 3]; title = "T")
 	top = plot_scatter(1:3, [1.0, 2, 3]; title = "T")
 	secondary_xaxis!(top, v -> 2v, v -> v / 2)
 	@test _title(top)[:yref] == "container" && _title(top)[:yanchor] == "top" && _title(top)[:y] == 1
-	@test _rsc_get(_title(top)[:pad], :b) > 0
 	@test _rsc_get(_title(top)[:pad], :t) == 10
+	top_margin(fig) = _rsc_get(PlotlySupply._plot_obj(fig).layout.fields[:margin], :t)
+	@test top_margin(top) >= top_margin(plain) + 10
 end
 
 @testset "secondary_xaxis!: side = :bottom on a bottom axis is a second label row (W5)" begin

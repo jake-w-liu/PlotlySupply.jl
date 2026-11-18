@@ -1212,9 +1212,11 @@ end
 			plot_pcolormesh(0:1000, 0:1000, C)
 		end
 		# One Float64 matrix per cell value (8 MB here), read straight from `C`:
-		# no Matrix{Any} copy and no boxing per entry. 64 KiB covers the array
-		# headers.
-		slack = 64 * 1024
+		# no Matrix{Any} copy and no boxing per entry (either costs 8 MB or
+		# more). 1 MiB covers the array headers and what the allocator adds in
+		# a long test process (the count is 16.04 MB alone and was 16.40 MB in
+		# the full suite; 64 KiB failed there).
+		slack = 2^20
 		@test @allocated(_M2._mesh2d_cell_values(C, 1001, 1001, "t")) <= sizeof(C) + slack
 		@test @allocated(_M2._mesh2d_cell_values(Cm, 1001, 1001, "t")) <= sizeof(C) + slack
 		# Node values: the node matrix and the cell means.

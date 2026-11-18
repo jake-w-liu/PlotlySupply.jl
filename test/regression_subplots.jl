@@ -11,6 +11,14 @@ _rsp_layout(sf::SubplotFigure) = sf.plot.layout.fields
 _rsp_axis(sf::SubplotFigure, key::Symbol) = _rsp_fields(_rsp_layout(sf)[key])
 _rsp_span(domain) = domain[2] - domain[1]
 
+# The text of an axis title (`nothing` when it has none, e.g. only a font).
+function _rsp_title_text(axis)
+	title = get(axis, :title, nothing)
+	title isa AbstractString && return title
+	title === nothing && return nothing
+	return get(_rsp_fields(title), :text, nothing)
+end
+
 # Recording renderer for SyncPlot-backed figures; `fail` makes every script
 # throw so rollback can be checked.
 mutable struct _RSPRenderer
@@ -1961,14 +1969,6 @@ const _RSP_SYNC_LIMITS = (:minallowed, :maxallowed, :clipmin, :clipmax, :include
 
 _rsp_json(value) = value === nothing ? "null" : JSON.json(value)
 
-# The text of an axis title (`nothing` when it has none, e.g. only a font).
-function _rsp_title_text(axis)
-	title = get(axis, :title, nothing)
-	title isa AbstractString && return title
-	title === nothing && return nothing
-	return get(_rsp_fields(title), :text, nothing)
-end
-
 # Shared-axis groups of `sf`, read from `matches` (root => members).
 function _rsp_match_groups(sf::SubplotFigure)
 	fields = _rsp_layout(sf)
@@ -2121,7 +2121,9 @@ const _RSP_SYNC_CALLS = Any[
 	("wrapped long y title", false, true, sf -> ylabel!(sf, "A very long shared axis title that runs well past the height of its row " ^ 2;
 		row = 2, col = 1)),
 	# Calls whose room reservations move the domains.
-	("heatmap colorbar (cell)", false, true, sf -> plot_heatmap!(sf, [1.0 2 3; 4 5 6]; row = 1, col = 2)),
+	# (not idempotent as a call: a second heatmap brings a second colorbar,
+	# which needs room of its own; the finalize check below covers the rest)
+	("heatmap colorbar (cell)", false, false, sf -> plot_heatmap!(sf, [1.0 2 3; 4 5 6]; row = 1, col = 2)),
 	("panel title (cell)", false, true, sf -> title!(sf, "panel"; row = 1, col = 2)),
 	("panel_labels!", false, true, sf -> panel_labels!(sf)),
 	("figsize! :ieee", true, true, sf -> figsize!(sf, :ieee)),
@@ -2159,6 +2161,10 @@ const _RSP_SYNC_CALLS = Any[
 						@test isempty(_rsp_sync_problems(sf))
 						styling && @test _rsp_content(sf) == before
 						first_state = JSON.json(sf.plot.layout)
+						# Whatever the call did, the figure is settled: finalizing
+						# it again writes nothing (D10/D12).
+						@test PlotlySupply._finalize_figure!(sf) === false
+						@test JSON.json(sf.plot.layout) == first_state
 						if idempotent
 							call(sf)
 							@test JSON.json(sf.plot.layout) == first_state

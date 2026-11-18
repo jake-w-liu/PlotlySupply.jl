@@ -2967,12 +2967,14 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         p = plot_scatter(1:2, 1:2)
         unsupported = r"savefig: unsupported export format \"unsupported\"\. Supported: png, jpeg \(or jpg\), tiff \(or tif\), svg, pdf, eps, html, json\.$"
         @test_throws unsupported savefig(IOBuffer(), p; format="unsupported")
+        @test_throws ArgumentError savefig(IOBuffer(), p; format="unsupported")
 
         mktempdir() do dir
             filename = joinpath(dir, "existing.unsupported")
             write(filename, "sentinel")
-            err = caught(() -> savefig(filename, p; format="unsupported"))
-            @test err isa ArgumentError && err.msg == unsupported
+            # the existing file is neither opened nor replaced
+            @test_throws unsupported savefig(filename, p; format="unsupported")
+            @test_throws ArgumentError savefig(filename, p; format="unsupported")
             @test read(filename, String) == "sentinel"
         end
     end

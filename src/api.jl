@@ -14129,6 +14129,9 @@ function _field2d_view_extent(fig, members, islog::Bool)
 	end
 	view = (isfinite(acc.flo) && isfinite(acc.fhi)) ? acc : (glyphs && drawn_ok) ? drawn : nothing
 	view === nothing && return nothing
+	# Glyphs without a field are padded on both sides, as the finalizer shows
+	# them (`_FinAxisAcc.glyphs`, `_fin_padded_extent`).
+	view === drawn && (drawn.glyphs = true)
 	for member in members
 		extent = _fin_layout_item_extent(layout, _fin_axis_ref(member), letter, islog)
 		extent === :unsupported && return nothing
