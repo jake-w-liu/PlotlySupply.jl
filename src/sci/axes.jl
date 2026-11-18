@@ -235,7 +235,7 @@ end
 Write the title of axis `letter` ('x', 'y' or 'z') of the target cell: an xy
 axis gets `title.text = _label(label)` (with `wrap = false` passed through
 `_axes_keep_on_one_line`, so `_finalize_figure!` never breaks it into
-lines; see "Axis titles longer than their axis"), a 3-D scene axis
+lines; see "Axis titles that run off the figure"), a 3-D scene axis
 `scene.<letter>axis.title.text = _label3d(label)`, after which the scene3d
 finish steps (`_s3_finish_scene!`, `_s3_finish_ticks!`) keep the scene's
 automatic camera and tick counts current, as a range change does. An empty
@@ -1344,19 +1344,32 @@ function _axes_tick_font(layout::Layout, key::Symbol)
 end
 
 # What the axis fits of `_axes_finalize_updates!` read: the extents of the
-# traces on every axis (`_fin_collect_axes`) and the estimated plot-area size
-# (px) of the figure (`_fin_margins`).
+# traces on every axis (`_fin_collect_axes`), the figure size `W` x `H` and
+# the estimated plot area (px, `_fin_margins`): its size `Wp` x `Hp` and its
+# left and bottom margins `ml`, `mb`.
 struct _AxesFitPlan
 	accs::AbstractDict{Symbol}   # Dict{Symbol, _FinAxisAcc}; finalize.jl is included after this file
+	W::Float64
+	H::Float64
 	Wp::Float64
 	Hp::Float64
+	ml::Float64
+	mb::Float64
 end
 
 function _axes_fit_plan(p::Plot, size)
 	accs = _fin_collect_axes(p)
 	W, H = Float64(size[1]), Float64(size[2])
 	margins = _fin_margins(p.layout, accs, W, H, Dict{Symbol, Any}(), ())
-	return _AxesFitPlan(accs, max(W - margins.l - margins.r, 1.0), max(H - margins.t - margins.b, 1.0))
+	return _AxesFitPlan(
+		accs,
+		W,
+		H,
+		max(W - margins.l - margins.r, 1.0),
+		max(H - margins.t - margins.b, 1.0),
+		Float64(margins.l),
+		Float64(margins.b),
+	)
 end
 
 _axes_has_log_axis(layout::Layout) =
@@ -1373,14 +1386,14 @@ end
 
 The axis fits `_finalize_figure!` runs for a figure of `size = (width,
 height)` px, after every mutation and on the export copy: log-axis tick
-labels (`_axes_log_tick_updates!`, W7/Z70) and axis titles longer than their
-axis (`_axes_title_wrap_updates!`, W5). Figures without a log axis or a long
-plain axis title return at once, without reading the trace data.
+labels (`_axes_log_tick_updates!`, W7/Z70) and axis titles that would run
+off the figure (`_axes_title_wrap_updates!`, W5). Figures without a log axis
+or a long plain axis title return at once, without reading the trace data.
 """
 function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size)
 	layout = p.layout
 	log_axes = _axes_has_log_axis(layout)
-	wrap = _axes_title_wrap_candidates(layout, size)
+	wrap = _axes_title_wrap_candidates(layout)
 	(log_axes || !isempty(wrap)) || return updates
 	plan = _axes_fit_plan(p, size)
 	log_axes && _axes_log_tick_updates!(updates, p, plan)
@@ -1544,22 +1557,33 @@ function _axes_apply_style_log_ticks!(fig; size = nothing, mode::Symbol = _style
 end
 
 # ---------------------------------------------------------------------------
-# Axis titles longer than their axis (W5)
+# Axis titles that run off the figure (W5)
 # ---------------------------------------------------------------------------
 #
 # plotly.js draws an axis title on one line centred on its axis, so a title
-# longer than the axis runs past it: into the neighbouring cell's title in a
-# grid, and off the figure when it is longer than the figure is high (gallery
-# optical_infra: a y title clipped at both ends). `_finalize_figure!` breaks
-# such a title into lines no longer than the axis, at the spaces between
-# words, with lines of even length (`_axes_title_wrap_updates!`), at the real
-# size of every render (the export copy too); automargin then makes room for
-# the extra line. Its line breaks are marked (`_AXES_WRAP_BREAK`, a zero-width
-# space before `<br>`: invisible, and plotly.js itself writes U+200B into
-# empty lines), so the next run starts again from the one-line title and a
-# title that fits again is put back on one line. Titles with a line break of
-# the user's, MathJax titles (with `$`) and words joined by no-break spaces
-# (U+00A0; what `xlabel!(...; wrap = false)` writes) are never broken.
+# longer than the figure around its axis is cut off at the figure edge
+# (gallery optical_infra: a y title clipped at both ends). `_finalize_figure!`
+# breaks such a title into lines no longer than the axis, at the spaces
+# between words, with lines of even length (`_axes_title_wrap_updates!`), at
+# the real size of every render (the export copy too); automargin then makes
+# room for the extra lines. A title that is longer than its axis but stays
+# inside the figure is left on one line, as matplotlib draws it: a second line
+# needs room across the axis, which between two grid cells is the gap to the
+# neighbouring plot (gallery optical_validation (c): the wrapped title ran
+# into panel (a)), and titles about as long as their axis are common in
+# papers (loglog_convergence, composite_2x2). The width is the text-extent
+# estimate (Verdana glyph classes), which errs on the large side for the
+# faces plotly.js renders (measured, plotly.js 2.35.2, 20 px titles: Verdana
+# and DejaVu Sans 0.96-0.98 of it, Arial/Helvetica 0.85, Georgia 0.84-0.87,
+# STIX Two Text 0.81-0.83, Times New Roman 0.77-0.78): no title of these
+# faces that runs off is left on one line; one in a narrow face that would
+# just fit (within about a fifth of the figure) may be broken.
+# The line breaks are marked (`_AXES_WRAP_BREAK`, a zero-width space before
+# `<br>`: invisible, and plotly.js itself writes U+200B into empty lines), so
+# the next run starts again from the one-line title and a title that fits
+# again is put back on one line. Titles with a line break of the user's,
+# MathJax titles (with `$`) and words joined by no-break spaces (U+00A0; what
+# `xlabel!(...; wrap = false)` writes) are never broken.
 
 const _AXES_WRAP_BREAK = "\u200b<br>"
 
@@ -1695,13 +1719,14 @@ function _axes_title_font(layout::Layout, key::Symbol)
 	)
 end
 
-# Axes of `layout` whose title may need breaking or joining at a figure of
-# `size` px: titles our breaks are in, and breakable titles longer than half
-# the figure's extent along the axis' domain (no axis is longer than that
-# extent). Cheap: reads no trace data.
-function _axes_title_wrap_candidates(layout::Layout, size)
+# Axes of `layout` whose title may need breaking or joining: titles our
+# breaks are in, and breakable titles that may reach a figure edge. The
+# centre of an axis lies in the plot area, which automargin only shrinks, so
+# a title no longer than twice the smaller of the layout's margins on its
+# two ends stays inside the figure. Cheap: reads no trace data.
+function _axes_title_wrap_candidates(layout::Layout)
 	candidates = Symbol[]
-	W, H = Float64(size[1]), Float64(size[2])
+	base = _fin_margins_base(layout)
 	for (key, axis) in layout.fields
 		_fin_is_axis_key(key) || continue
 		_cmn_mapping_get(axis, :visible) === false && continue
@@ -1713,20 +1738,31 @@ function _axes_title_wrap_candidates(layout::Layout, size)
 		end
 		words = _axes_title_words(text)
 		(words === nothing || length(words) < 2) && continue
-		domain = _fin_domain(layout, key)
-		extent = (domain[2] - domain[1]) * (String(key)[1] == 'x' ? W : H)
-		_text_extent(text, _axes_title_font(layout, key))[1] > 0.5 * extent && push!(candidates, key)
+		reach = 2 * (String(key)[1] == 'x' ? min(base.l, base.r) : min(base.t, base.b))
+		_text_extent(text, _axes_title_font(layout, key))[1] > reach && push!(candidates, key)
 	end
 	return candidates
+end
+
+# Whether a one-line title `width` px long, centred on axis `key`, reaches
+# past an edge of the figure of `plan` (the axis centre from the estimated
+# plot area).
+function _axes_title_runs_off(layout::Layout, plan::_AxesFitPlan, key::Symbol, width::Float64)
+	domain = _fin_domain(layout, key)
+	mid = (domain[1] + domain[2]) / 2
+	centre, extent = String(key)[1] == 'x' ?
+		(plan.ml + mid * plan.Wp, plan.W) : (plan.mb + mid * plan.Hp, plan.H)
+	return width / 2 > min(centre, extent - centre)
 end
 
 """
 	_axes_title_wrap_updates!(updates, p::Plot, plan::_AxesFitPlan, keys) -> updates
 
 Add to `updates` the title text of each axis of `keys`
-(`_axes_title_wrap_candidates`) at the plot-area size of `plan`: broken into
-even lines no longer than the axis when its one-line text is longer, else
-the one-line text (see the comment above). Only changes are written.
+(`_axes_title_wrap_candidates`) for the figure of `plan`: broken into even
+lines no longer than the axis when its one-line text, centred on the axis,
+would run off the figure (`_axes_title_runs_off`), else the one-line text
+(see the comment above). Only changes are written.
 """
 function _axes_title_wrap_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_AxesFitPlan, keys)
 	layout = p.layout
@@ -1737,9 +1773,12 @@ function _axes_title_wrap_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_A
 		words = _axes_title_words(text)
 		words === nothing && continue
 		font = _axes_title_font(layout, key)
-		limit = _axes_plan_length(layout, plan, key) / font
 		em = Float64[_text_plain_em(word) for word in words]
-		lines = _axes_balanced_lines(words, em, _text_char_em(' '), limit)
+		space = _text_char_em(' ')
+		width = (sum(em) + (length(words) - 1) * space) * font
+		lines = _axes_title_runs_off(layout, plan, key, width) ?
+			_axes_balanced_lines(words, em, space, _axes_plan_length(layout, plan, key) / font) :
+			nothing
 		want = lines === nothing ? text : join(lines, _AXES_WRAP_BREAK)
 		want == stored && continue
 		if bare

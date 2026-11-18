@@ -6818,17 +6818,17 @@ Set the x-axis title of a `Plot`/`SyncPlot`, of one
   cell selected by [`subplot!`](@ref) is used; the targeted cell becomes the
   active cell. An `ArgumentError` on a plain figure.
 - `inset = nothing`: inset id `k` from [`inset!`](@ref) (SubplotFigure only).
-- `wrap::Bool = true`: a title longer than its axis is broken into lines of
-  even length, no longer than the axis, at the spaces between words, for the
-  size each render has (the export size included): plotly.js would draw it on
-  one line past the axis, off the figure when it is longer than the figure.
-  Spaces inside markup (`<i>a b</i>`), MathJax titles and titles with a line
-  break of their own (`<br>`) are never broken, nor is a title on an axis
-  shorter than one of its words (shorten the title or enlarge the figure
-  there). `wrap = false` keeps the
-  title on one line (its spaces are stored as no-break spaces, U+00A0; one
-  no-break space keeps two words together). 3-D scene titles are never
-  broken.
+- `wrap::Bool = true`: a title that, drawn on one line centred on its axis,
+  would run off the figure (plotly.js cuts it at the figure edge) is broken
+  into lines of even length, no longer than the axis, at the spaces between
+  words, for the size each render has (the export size included). A title
+  longer than its axis that stays inside the figure keeps one line, as in
+  matplotlib. Spaces inside markup (`<i>a b</i>`), MathJax titles and titles
+  with a line break of their own (`<br>`) are never broken, nor is a title on
+  an axis shorter than one of its words (shorten the title or enlarge the
+  figure there). `wrap = false` keeps the title on one line (its spaces are
+  stored as no-break spaces, U+00A0; one no-break space keeps two words
+  together). 3-D scene titles are never broken.
 
 Throws `ArgumentError` (figure unchanged) for cells without x/y or scene
 axes. Returns `nothing` (`sf` for a SubplotFigure, for chaining).

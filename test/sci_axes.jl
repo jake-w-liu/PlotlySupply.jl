@@ -1824,10 +1824,22 @@ end
         @test _AX._axes_log_tick_state(_ax_axis(big, :xaxis)) === :auto
     end
 
-    @testset "wave 5: axis titles longer than their axis are wrapped (W5)" begin
+    @testset "wave 5: axis titles that run off the figure are wrapped (W5)" begin
         P(f) = _AX._cmn_plot(f)
         long = "a fairly long y-axis label that matplotlib would split"
         text(f, key) = _AX._axes_title_text(_ax_axis(f, key))[1]
+        # Longer than its axis but inside the figure: one line, as matplotlib
+        # draws it (a second line would need room in the gap to a neighbour).
+        mid = "relative complex-frequency error of the reduced model"
+        m = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
+        relayout!(P(m); width = 700, height = 500)
+        ylabel!(m, mid)
+        mplan = _AX._axes_fit_plan(P(m), (700, 500))
+        mwidth = _AX._text_extent(mid, _AX._axes_title_font(P(m).layout, :yaxis))[1]
+        @test mwidth > _AX._axes_plan_length(P(m).layout, mplan, :yaxis)
+        @test !_AX._axes_title_runs_off(P(m).layout, mplan, :yaxis, mwidth)
+        @test text(m, :yaxis) == mid
+        # Longer than the figure is high: broken into even lines.
         f = plot_scatter(collect(0:0.1:1), collect(0:0.1:1) .^ 2)
         relayout!(P(f); width = 400, height = 200)
         ylabel!(f, long)
@@ -1872,6 +1884,12 @@ end
         relayout!(sf.plot; height = 150)
         _AX._finalize_figure!(sf)
         @test text(sf, :yaxis) == long
+        # x titles: wider than the figure.
+        xw = plot_scatter(1:3, 1:3)
+        relayout!(P(xw); width = 300, height = 300)
+        xlabel!(xw, long)
+        @test occursin(_AX._AXES_WRAP_BREAK, text(xw, :xaxis))
+        @test _AX._axes_unwrap_title(text(xw, :xaxis)) == long
 
         # Never broken: a line break of the user's, MathJax, markup spans.
         @test _AX._axes_title_words("a<br>b c") === nothing
