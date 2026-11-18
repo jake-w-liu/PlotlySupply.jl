@@ -1025,7 +1025,7 @@ _v5_with_style(f, style) = with_style(f, style)
 
 	@testset "W6 a small cell gives its box room for the labels (no title cut off by the viewport)" begin
 		# 7.16 in wide, three columns: the fixed pixel offsets of plotly.js's tick
-		# labels and titles leave a box of a fifth of the cell; the old floor of
+		# labels and titles leave a box of under half the cell; the old floor of
 		# half the cell left the y title outside the viewport.
 		with_style(:ieee) do
 			sf = subplots(1, 3; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene") Spec(kind = "scene")])

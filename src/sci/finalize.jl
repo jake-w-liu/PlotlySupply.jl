@@ -3668,7 +3668,7 @@ The figure `savefig` renders: `p` itself when `_finalize_figure!` has nothing
 to change for the export size `options.width` x `options.height`, otherwise a
 copy (private layout; traces shared except those it writes, which are cloned)
 re-fitted for that size, its 3-D scene cameras and tick counts included
-(`_s3_refit_scenes!`; `pan = false` keeps every camera centre, for HTML/JSON
+(`_s3_refit_scenes!`; `pan = false` puts every camera centre PlotlySupply moved back at the origin, for HTML/JSON
 documents whose rotation pivot is the centre, Z43). `p` is never mutated.
 """
 function _finalize_export_copy(p::Plot, options; pan::Bool = true)

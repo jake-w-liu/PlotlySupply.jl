@@ -1129,16 +1129,19 @@ end
 	camera(p) = _sfn_fields(_sfn_fields(p.layout.fields[:scene])[:camera])
 	center(p) = (c = get(camera(p), :center, nothing); c === nothing ? (0.0, 0.0, 0.0) :
 		(c = _sfn_fields(c); (Float64(c[:x]), Float64(c[:y]), Float64(c[:z]))))
-	@test center(still) == center(f)
+	# A document keeps the rotation pivot at the scene origin: no centre, where
+	# the live figure's camera centre was panned to centre its drawing.
+	@test center(f) != (0.0, 0.0, 0.0)
+	@test center(still) == (0.0, 0.0, 0.0)
 	# The export copy is framed for its size: the eye differs from the live one.
 	eye(p) = (e = _sfn_fields(camera(p)[:eye]); (e[:x], e[:y], e[:z]))
 	@test eye(still) != eye(f)
 	@test eye(pan) == eye(still) || center(pan) != center(f)
 	# The renderer path takes `pan`, the document path passes `pan = false`.
 	options = _SFN._ExportOptions(900.0, 300.0, 1.0, nothing, true, nothing, false, 30.0, :px, false, :auto)
-	@test center(_SFN._export_source(f, options; pan = false)) == center(f)
+	@test center(_SFN._export_source(f, options; pan = false)) == (0.0, 0.0, 0.0)
 	tight = _SFN._ExportOptions(900.0, 300.0, 1.0, nothing, true, nothing, true, 30.0, :px, false, :auto)
-	@test center(_SFN._export_source(f, tight; pan = false)) == center(f)
+	@test center(_SFN._export_source(f, tight; pan = false)) == (0.0, 0.0, 0.0)
 	@test _sfn_snapshot(f) == live
 end
 

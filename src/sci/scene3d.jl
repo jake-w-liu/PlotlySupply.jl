@@ -1030,7 +1030,7 @@ const _S3_MIN_FILL = 0.5
 # The smallest share of the region the box is given when tick labels and axis
 # titles do not fit around a larger one (their offsets are fixed in px, so a
 # small cell needs a small box: a title cut off by the viewport is worse).
-const _S3_FAR_FILL = 0.2
+const _S3_FAR_FILL = 0.4
 # plotly.js's default font size (layout.font.size).
 const _S3_DEFAULT_FONT_SIZE = 12.0
 # An orthographic scene is framed independently of the eye distance
@@ -1443,6 +1443,10 @@ end
 # length) with up vector `up`: the unit direction, screen right and screen
 # up. `nothing` when `up` is parallel to `direction` (no defined roll).
 function _s3_camera_frame(direction, up)
+	# Tuples throughout: the framing search evaluates this frame hundreds of
+	# times and a vector would allocate in every dot product.
+	direction = (Float64(direction[1]), Float64(direction[2]), Float64(direction[3]))
+	up = (Float64(up[1]), Float64(up[2]), Float64(up[3]))
 	v = direction ./ _s3_norm(direction)
 	right = _s3_cross(.-v, up)
 	right_norm = _s3_norm(right)
@@ -1844,6 +1848,9 @@ const _S3_PAN_MIN_STEP = 1 / 64
 # drawing still fits at it, and the factor of each.
 const _S3_NEAR_ROUNDS = 60
 const _S3_NEAR_STEP = 0.8
+# Relative width of the distance bracket at which the search stops: the drawing
+# then differs from the closest fit by well under 0.2 % of the viewport.
+const _S3_DISTANCE_RTOL = 2e-4
 const _S3_PAN_TOLERANCE_PX = 0.5
 
 # ── Legends over a scene ─────────────────────────────────────────────────────
@@ -1951,7 +1958,11 @@ function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center,
 	function extent(c, distance)
 		corners, quads = _s3_label_layout(box, c, frame, distance, width, height, labels, spans)
 		xmin, xmax, ymin, ymax = Inf, -Inf, Inf, -Inf
-		for point in Iterators.flatten((corners, Iterators.flatten(quads)))
+		for point in corners
+			xmin, xmax = min(xmin, point[1]), max(xmax, point[1])
+			ymin, ymax = min(ymin, point[2]), max(ymax, point[2])
+		end
+		for quad in quads, point in quad
 			xmin, xmax = min(xmin, point[1]), max(xmax, point[1])
 			ymin, ymax = min(ymin, point[2]), max(ymax, point[2])
 		end
@@ -2034,7 +2045,7 @@ function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center,
 			mid = (near + far) / 2
 			c_mid, fits_mid = place(mid, c_far)
 			fits_mid ? ((far, c_far) = (mid, c_mid)) : (near = mid)
-			far - near <= 1e-6 * far && break
+			far - near <= _S3_DISTANCE_RTOL * far && break
 		end
 		return (far, c_far)
 	end
