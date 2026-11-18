@@ -2524,3 +2524,27 @@ end
 	end
 	@test append_bytes(true) < 2 * append_bytes(false)
 end
+
+@testset "6x6 heatmap grid: one append stays O(decorations), not O(data) (W5B perf guard)" begin
+	# Measured on the merged tree: about 15 MB for the 36th append, of which
+	# about 90 % is `_finalize_figure!` (36 cells' rooms and colorbars). The
+	# cost must not depend on the size of the matrices.
+	cells = [(i, j) for i in 1:6 for j in 1:6]
+	append_bytes(n) = begin
+		field = [sin(a / 5) * cos(b / 7) for a in 1:n, b in 1:n]
+		sf = subplots(6, 6; sync = false)
+		for k in 1:35
+			plot_heatmap!(sf, field; row = cells[k][1], col = cells[k][2])
+		end
+		plot_heatmap!(sf, field; row = 6, col = 6)   # compile and warm up
+		sf = subplots(6, 6; sync = false)
+		for k in 1:35
+			plot_heatmap!(sf, field; row = cells[k][1], col = cells[k][2])
+		end
+		@allocated plot_heatmap!(sf, field; row = 6, col = 6)
+	end
+	small = append_bytes(20)
+	large = append_bytes(200)
+	@test small < 40 * 2^20
+	@test large < 1.5 * small
+end
