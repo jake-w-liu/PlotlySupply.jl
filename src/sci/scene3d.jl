@@ -1027,6 +1027,10 @@ const _S3_HALF_FOVY = π / 8
 # half-size for the box.
 const _S3_LABEL_PAD_FONTS = 3.0
 const _S3_MIN_FILL = 0.5
+# The smallest share of the region the box is given when tick labels and axis
+# titles do not fit around a larger one (their offsets are fixed in px, so a
+# small cell needs a small box: a title cut off by the viewport is worse).
+const _S3_FAR_FILL = 0.2
 # plotly.js's default font size (layout.font.size).
 const _S3_DEFAULT_FONT_SIZE = 12.0
 # An orthographic scene is framed independently of the eye distance
@@ -1930,7 +1934,7 @@ end
 # until the drawing is centred in that region (labels often hang off one side
 # of the box); without it `center` is kept. The distance is found by
 # bisection between one closer than any that fits (the bare box overflows
-# the region) and the one at which the bare box fills `_S3_MIN_FILL` of the
+# the region) and the one at which the bare box fills `_S3_FAR_FILL` of the
 # region (labels that do not fit even then get the latter). When `up` is
 # parallel to `direction`:
 # `_s3_auto_distance` and `center`.
@@ -2000,12 +2004,12 @@ function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center,
 	# holds the region; with `pan` the box (which holds the scene origin, seen
 	# at the view centre) spans more than the region, as some corner is
 	# farther than the region's width from the view centre. At `far` the bare
-	# box fills `_S3_MIN_FILL` of the region.
+	# box fills `_S3_FAR_FILL` of the region.
 	share_x = min((region[2] - region[1]) / width / full_x, 1.0)
 	share_y = min((region[4] - region[3]) / height / full_y, 1.0)
 	near = pan ? _s3_box_distance(box, c0, frame, ratio, 2 * full_x * share_x, 2 * full_y * share_y) :
 		_s3_box_distance(box, c0, frame, ratio, full_x, full_y)
-	far = _s3_box_distance(box, c0, frame, ratio, _S3_MIN_FILL * share_x, _S3_MIN_FILL * share_y)
+	far = _s3_box_distance(box, c0, frame, ratio, _S3_FAR_FILL * share_x, _S3_FAR_FILL * share_y)
 	# The fitted distance and camera centre, before `zoom`.
 	function fitted()
 		far <= near && return (near, first(place(near)))

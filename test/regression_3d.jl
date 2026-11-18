@@ -1004,6 +1004,43 @@ _v5_with_style(f, style) = with_style(f, style)
 		@test !haskey(raw.layout.fields, :scene)
 	end
 
+	@testset "W6 an elongated scene seen nearly end-on is centred and fills its viewport" begin
+		# The camera centre is moved to centre the drawing; close to a long
+		# box the first pan step overshoots (labels near the eye), which used
+		# to make the search stop at a distance that left a fifth of the
+		# viewport empty.
+		h = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; aspectmode = "data", zrange = (0, 1))
+		view!(h; elev = 20, azim = 10)
+		plot_scatter3d!(h, [0.0, 9.0], [0.0, 1.0], [0.0, 1.0])
+		@test 0.97 < _v4_label_extent(h, :scene, (700, 500)) <= 1
+		@test _v4_label_extent(h, :scene, (700, 500), 0.97) > 1
+		@test PS._s3_finalize_scenes!(h) === false
+		# The same in a cell, at another size.
+		sf = _v5_scene_sf(1, 2)
+		plot_scatter3d!(sf, [0.0, 9.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2, aspectmode = "data")
+		view!(sf; row = 1, col = 2, elev = 20, azim = 10)
+		other = PS._export_source(sf.plot, PS._normalize_export_options(sf.plot, (width = 900, height = 350)))
+		@test 0.97 < _v4_label_extent(other, :scene2, (900, 350)) <= 1
+	end
+
+	@testset "W6 a small cell gives its box room for the labels (no title cut off by the viewport)" begin
+		# 7.16 in wide, three columns: the fixed pixel offsets of plotly.js's tick
+		# labels and titles leave a box of a fifth of the cell; the old floor of
+		# half the cell left the y title outside the viewport.
+		with_style(:ieee) do
+			sf = subplots(1, 3; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene") Spec(kind = "scene")])
+			for c in 1:3
+				plot_surface!(sf, xs, ys, Z; row = 1, col = c, xlabel = "x", ylabel = "y", zlabel = "z", showscale = false)
+			end
+			figsize!(sf, :ieee; columns = 2, aspect = 0.32)
+			size_px = (sf.plot.layout.fields[:width], sf.plot.layout.fields[:height])
+			for key in (:scene, :scene2, :scene3)
+				@test 0.97 < _v4_label_extent(sf.plot, key, size_px) <= 1
+			end
+			@test PS._s3_finalize_scenes!(sf.plot) === false
+		end
+	end
+
 	@testset "W6 a user camera is kept; zoom scales the fitted distance" begin
 		g = plot_surface(xs, ys, Z)
 		relayout!(g; scene_camera_center = attr(x = 0.1, y = 0.0, z = 0.0))
