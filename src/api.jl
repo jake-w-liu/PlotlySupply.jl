@@ -1150,6 +1150,7 @@ end
 # axis many times per run, and a `_symbol_dict` copy of each entry made these
 # two the largest allocation of an append to a 6 x 6 grid.
 function _layout_axis_domain(layout::Layout, key::Symbol)
+	# Read in place (no copy of the axis mapping).
 	return _domain_tuple(_cmn_mapping_get(get(layout.fields, key, nothing), :domain))
 end
 
@@ -1194,33 +1195,12 @@ _legend_domain_within(inner, outer) =
 # or other extra axes — the Cartesian cell whose plot area contains the pair's
 # domain, as (x ref, y ref, x domain, y domain). A pair inside no cell, or
 # inside several overlapping cells, keeps its own legend.
-function _legend_inset_host(p::Plot, xref::String, yref::String, xdom, ydom)
-	grid_ref = p.layout.subplots.grid_ref
-	# The common case first, without building the list of cells: the pair is
-	# a grid cell's own.
-	for index in eachindex(grid_ref)
-		isassigned(grid_ref, index) || continue
-		refs = grid_ref[index]
-		isempty(refs) && continue
-		ref = first(refs)
-		String(ref.subplot_kind) == "xy" || continue
-		routing = ref.trace_kwargs.fields
-		String(get(routing, :xaxis, "x")) == xref && String(get(routing, :yaxis, "y")) == yref && return nothing
-	end
-	cells = Tuple{String, String}[]
-	for index in eachindex(grid_ref)
-		isassigned(grid_ref, index) || continue
-		refs = grid_ref[index]
-		isempty(refs) && continue
-		ref = first(refs)
-		String(ref.subplot_kind) == "xy" || continue
-		routing = ref.trace_kwargs.fields
-		push!(cells, (String(get(routing, :xaxis, "x")), String(get(routing, :yaxis, "y"))))
+function _legend_inset_host(p::Plot, xref::String, yref::String, xdom, ydom; cells = _legend_inset_cells(p))
+	for (cell_x, cell_y, _, _) in cells
+		(cell_x, cell_y) == (xref, yref) && return nothing
 	end
 	host = nothing
-	for (cell_x, cell_y) in cells
-		cell_xdom = _layout_axis_domain(p.layout, _axis_layout_key(cell_x, :x))
-		cell_ydom = _layout_axis_domain(p.layout, _axis_layout_key(cell_y, :y))
+	for (cell_x, cell_y, cell_xdom, cell_ydom) in cells
 		(cell_xdom === nothing || cell_ydom === nothing) && continue
 		(_legend_domain_within(xdom, cell_xdom) && _legend_domain_within(ydom, cell_ydom)) ||
 			continue
@@ -1230,7 +1210,32 @@ function _legend_inset_host(p::Plot, xref::String, yref::String, xdom, ydom)
 	return host
 end
 
-function _trace_subplot_key_domain(p::Plot, trace::GenericTrace)
+# The Cartesian cells of the grid of `p` as (x ref, y ref, x domain, y
+# domain), the domains `nothing` when the axis has none. One pass over the
+# grid: callers that look up many axis pairs (`_legend_subplot_assignment`)
+# compute it once.
+function _legend_inset_cells(p::Plot)
+	grid_ref = p.layout.subplots.grid_ref
+	cells = Tuple{String, String, Any, Any}[]
+	for index in eachindex(grid_ref)
+		isassigned(grid_ref, index) || continue
+		refs = grid_ref[index]
+		isempty(refs) && continue
+		ref = first(refs)
+		String(ref.subplot_kind) == "xy" || continue
+		routing = ref.trace_kwargs.fields
+		cell_x = String(get(routing, :xaxis, "x"))
+		cell_y = String(get(routing, :yaxis, "y"))
+		push!(cells, (
+			cell_x, cell_y,
+			_layout_axis_domain(p.layout, _axis_layout_key(cell_x, :x)),
+			_layout_axis_domain(p.layout, _axis_layout_key(cell_y, :y)),
+		))
+	end
+	return cells
+end
+
+function _trace_subplot_key_domain(p::Plot, trace::GenericTrace; cells = nothing)
 	fields = trace.fields
 
 	if haskey(fields, :xaxis) || haskey(fields, :yaxis)
@@ -1240,7 +1245,8 @@ function _trace_subplot_key_domain(p::Plot, trace::GenericTrace)
 		ydom = _layout_axis_domain(p.layout, _axis_layout_key(yaxis, :y))
 		(xdom === nothing || ydom === nothing) && return nothing
 		# Traces on an inset are listed in the legend of the cell that hosts it.
-		host = _legend_inset_host(p, xaxis, yaxis, xdom, ydom)
+		host = cells === nothing ? _legend_inset_host(p, xaxis, yaxis, xdom, ydom) :
+			_legend_inset_host(p, xaxis, yaxis, xdom, ydom; cells = cells)
 		if host !== nothing
 			xaxis, yaxis, xdom, ydom = host
 		end
@@ -1665,10 +1671,10 @@ function _legend_template_layout_value(p::Plot, path::Tuple)
 	t = _legend_layout_template(p)
 	t === nothing && return nothing
 	value = _template_layout_fields(t)
+	# Read in place: `_symbol_dict` copies a whole template mapping per key.
 	for key in path
-		d = _symbol_dict(value)
-		haskey(d, key) || return nothing
-		value = d[key]
+		value = _cmn_mapping_get(value, key)
+		value === nothing && return nothing
 	end
 	return value
 end
@@ -1922,12 +1928,15 @@ function _legend_subplot_assignment(p::Plot)
 	# Traces on the same x/y axis pair share their key and domain; the lookup
 	# (base axis, inset host over the grid) runs once per pair, not per trace.
 	xy_memo = Dict{Tuple{Any, Any}, Any}()
+	# The grid's cells, read once, on the first pair that needs them.
+	cells = Ref{Any}(nothing)
+	grid_cells() = cells[] === nothing ? (cells[] = _legend_inset_cells(p)) : cells[]
 	for (index, trace) in enumerate(p.data)
 		trace isa GenericTrace || continue
 		_trace_is_figure_legend_entry(trace) && continue
 		fields = trace.fields
 		key_domain = if haskey(fields, :xaxis) || haskey(fields, :yaxis)
-			get!(() -> _trace_subplot_key_domain(p, trace), xy_memo,
+			get!(() -> _trace_subplot_key_domain(p, trace; cells = grid_cells()), xy_memo,
 				(get(fields, :xaxis, "x"), get(fields, :yaxis, "y")))
 		else
 			_trace_subplot_key_domain(p, trace)
@@ -2068,7 +2077,13 @@ function _apply_subplot_legends!(
 			current = _symbol_dict(p.layout.fields[legend_key])
 			earlier = something(_legend_best_cell_position(p, legend_id, xdom, ydom; before = auto_from), :topright)
 			expected = _legend_placement(earlier, xdom, ydom, legend_inset; figure = false)
-			auto = all(k -> get(current, k, nothing) == get(expected, k, nothing), _LEGEND_PLACEMENT_KEYS)
+			# An outside position is matched by anchors and orientation: the
+			# layout engine sets its coordinates in the room it reserved.
+			auto = all(
+				k -> get(current, k, nothing) == get(expected, k, nothing),
+				earlier in _SCAT_LEGEND_OUTSIDE_POSITIONS ?
+					(:xanchor, :yanchor, :xref, :yref, :orientation) : _LEGEND_PLACEMENT_KEYS,
+			)
 		end
 		_legend_write_block!(
 			p,
@@ -10404,6 +10419,18 @@ end
 # The few px of marker radius plotly adds as well are ignored.
 const _SCAT_LEGEND_AUTORANGE_PAD = 0.05
 
+# The finite extent of `values`, widening `(lo, hi)`. A function barrier: with
+# a concrete vector type the loop allocates nothing.
+function _scat_legend_extent(values, lo::Float64, hi::Float64)
+	for value in values
+		v = Float64(value)::Float64
+		isfinite(v) || continue
+		v < lo && (lo = v)
+		v > hi && (hi = v)
+	end
+	return lo, hi
+end
+
 # The data window `(lo, hi)` of axis `key` in its stored units: the explicit
 # range, else the extent of `values` (the coordinates drawn on it) widened as
 # plotly's autorange does when `padded` (plotly pads every scatter y axis, and
@@ -10424,14 +10451,12 @@ function _scat_legend_window(
 	if explicit && all(is_bound, range) && range[1] != range[2]
 		return Float64(range[1]), Float64(range[2])
 	end
-	# One typed pass over the finite values (`values` may chain several
-	# coordinate vectors of a million points each).
+	# One typed pass over the finite values. `values` is one coordinate vector
+	# or a collection of them (a million points each: nothing is chained or
+	# copied; each part is scanned by a function barrier).
 	lo, hi = Inf, -Inf
-	for value in values
-		v = Float64(value)::Float64
-		isfinite(v) || continue
-		v < lo && (lo = v)
-		v > hi && (hi = v)
+	for part in (values isa AbstractVector{<:Real} ? (values,) : values)
+		lo, hi = _scat_legend_extent(part, lo, hi)
 	end
 	lo > hi && return nothing
 	lo == hi && ((lo, hi) = (lo - 0.5, hi + 0.5))
@@ -10464,7 +10489,13 @@ end
 # another trace) or non-numeric coordinates.
 function _scat_best_legend_position(p::Plot)
 	width_px, height_px = _scat_legend_figure_px(p.layout)
-	return _scat_best_legend_position(p, eachindex(p.data), :xaxis, "x", width_px, height_px)
+	# The legend box as its font and entries make it (the rough per-entry
+	# estimate assumes a 12 px font: far too small for a long label or large
+	# fonts, and too large for a journal style's 8 pt text).
+	size = _legend_box_size(p, "legend")
+	box = size === nothing ? nothing :
+		(size[1] + _LEGEND_CELL_SLACK_PX[1], size[2] + _LEGEND_CELL_SLACK_PX[2])
+	return _scat_best_legend_position(p, eachindex(p.data), :xaxis, "x", width_px, height_px, box)
 end
 
 # The scoring of `_scat_best_legend_position` for the traces `indices` of `p`
@@ -10474,7 +10505,9 @@ end
 # `(u0, u1, v0, v1)` (fractions of the plot area, e.g. insets) a legend box
 # must not cover: each scores like a filled area, by the share of the box it
 # covers. The shapes and annotations drawn on the plot area score too
-# (`_scat_legend_reference_scores!`). Used for a Plot (all traces, main axes)
+# (`_scat_legend_reference_scores!`). When no position is free of data the
+# result is `outside` (default: `_scat_outside_legend_position(width_px)`;
+# `nothing`: the position covering the least). Used for a Plot (all traces, main axes)
 # and for a SubplotFigure cell legend (the cell's traces,
 # `_legend_best_cell_position`).
 function _scat_best_legend_position(
@@ -10486,13 +10519,36 @@ function _scat_best_legend_position(
 	height_px::Float64,
 	box = nothing;
 	obstacles = (),
+	outside::Union{Nothing, Symbol} = _scat_outside_legend_position(width_px),
 )
 	scores = _scat_legend_scores(p, indices, xkey, xref, width_px, height_px, box; obstacles = obstacles)
 	scores === nothing && return nothing
 	# `argmin` returns the first minimum: ties keep the candidate order, and a
-	# position covering nothing (score 0) wins over every covering one.
+	# position covering nothing (score 0) wins over every covering one. The
+	# centre is not chosen while a corner or an edge is free: a legend in the
+	# middle of a plot hides whatever the estimate does not model (thin
+	# glyphs, a trace of another x axis) and reads as a mistake. When every
+	# other candidate covers something the default legend is not drawn over
+	# data: it goes `outside` the plot area (the room providers reserve its
+	# room); `outside = nothing` (a cell legend too wide for its cell) takes
+	# the candidate covering the least, centre included.
+	free = argmin(@view scores[1:(end - 1)])
+	scores[free] == 0 && return _SCAT_LEGEND_POSITIONS[free]
+	outside === nothing || return outside
 	return _SCAT_LEGEND_POSITIONS[argmin(scores)]
 end
+
+# Plot areas (or cells) narrower than this many px (a journal column is about
+# 250 px wide) put a default legend that fits nowhere inside below the axes;
+# wider ones put it beside them.
+const _SCAT_LEGEND_BELOW_PX = 360.0
+# The outside positions the best-position rule can choose.
+const _SCAT_LEGEND_OUTSIDE_POSITIONS = (:outside_right, :outside_bottom)
+
+# Where the default legend goes when no inside position is free of data, for
+# a plot area `width_px` wide: right of it, or below it at column width.
+_scat_outside_legend_position(width_px::Real) =
+	width_px < _SCAT_LEGEND_BELOW_PX ? :outside_bottom : :outside_right
 
 # One scored series: y axis key, coordinates (log10 on a log axis) and how
 # they are drawn (`:points` where they lie, `:segments` joining consecutive
@@ -10585,7 +10641,7 @@ function _scat_legend_scores(
 	# `shapes/calc_autorange`): their extents join the windows.
 	shape_x, shape_y = _scat_legend_shape_extents(layout, xref, xlog)
 	xwindow = isempty(series) ? (0.0, 1.0) : _scat_legend_window(
-		layout, xkey, Iterators.flatten((Iterators.flatten(s[2] for s in series), shape_x)); padded = xpadded,
+		layout, xkey, push!(Vector{Float64}[s[2] for s in series], shape_x); padded = xpadded,
 	)
 	xwindow === nothing && return nothing
 	# Concretely typed, so the scoring loop below is type-stable (with `Any`
@@ -10597,11 +10653,11 @@ function _scat_legend_scores(
 		window = _scat_legend_window(
 			layout,
 			key,
-			Iterators.flatten((
-				Iterators.flatten(s[3] for s in series if s[1] === key),
+			push!(
+				Vector{Float64}[s[3] for s in series if s[1] === key],
 				get(shape_y, key, Float64[]),
-				filled ? (0.0,) : (),
-			));
+				filled ? [0.0] : Float64[],
+			);
 			padded = true,
 			tight_zero = filled,
 		)
@@ -10941,8 +10997,12 @@ function _scat_legend_fill_scores!(scores::Vector{Int}, us::Vector{Float64}, vs:
 end
 
 function _scat_legend_figure_px(layout)
-	width = _scat_layout_px(layout, :width, _SCAT_LEGEND_FIGURE_PX[1])
-	height = _scat_layout_px(layout, :height, _SCAT_LEGEND_FIGURE_PX[2])
+	# The figure size the export will use when the layout sets none: the
+	# active style's (a journal column under `with_style(:ieee)`), else the
+	# package default page.
+	default_width, default_height = _style_default_figure_size()
+	width = _scat_layout_px(layout, :width, Float64(default_width))
+	height = _scat_layout_px(layout, :height, Float64(default_height))
 	margin = get(layout.fields, :margin, nothing)
 	side(name) = begin
 		value = _cmn_mapping_get(margin, name)
@@ -10965,13 +11025,20 @@ _scat_position_placement(position::Symbol) = _legend_placement(
 )
 
 # Whether the legend of `p` has exactly the placement keys of `placement`.
-function _scat_legend_at(p::Plot, placement)
+function _scat_legend_at(p::Plot, placement; keys = _LEGEND_PLACEMENT_KEYS)
 	legend = get(p.layout.fields, :legend, nothing)
-	return all(
-		key -> _cmn_mapping_get(legend, key) == get(placement, key, nothing),
-		_LEGEND_PLACEMENT_KEYS,
-	)
+	return all(key -> _cmn_mapping_get(legend, key) == get(placement, key, nothing), keys)
 end
+
+# Whether the legend of `p` is at `position`. An outside position is matched
+# by its anchors, container references and orientation only: the layout
+# engine places the legend in the room it reserved (`x` or `y`), so the
+# coordinates are not the ones `_legend_placement` writes.
+_scat_legend_is(p::Plot, position::Symbol) = _scat_legend_at(
+	p, _scat_position_placement(position);
+	keys = position in _SCAT_LEGEND_OUTSIDE_POSITIONS ?
+		(:xanchor, :yanchor, :xref, :yref, :orientation) : _LEGEND_PLACEMENT_KEYS,
+)
 
 # State of the legend of `fig` before a call of this family writes anything:
 # `:none` (not placed yet), `:auto` (where this rule puts it for the figure as
@@ -10983,15 +11050,15 @@ function _scat_legend_state(fig)
 	_scat_legend_rule_active() || return :fixed
 	p = _plot_obj(fig)
 	any(
-		position -> _scat_legend_at(p, _scat_position_placement(position)),
-		_SCAT_LEGEND_POSITIONS,
+		position -> _scat_legend_is(p, position),
+		(_SCAT_LEGEND_POSITIONS..., _SCAT_LEGEND_OUTSIDE_POSITIONS...),
 	) || return :fixed
 	# Still where the last call of this family put it: the rule placed it,
 	# without scoring the figure again (one scoring per call).
 	placed = get(_SCAT_LEGEND_AUTO, p, nothing)
-	placed !== nothing && _scat_legend_at(p, _scat_position_placement(placed)) && return :auto
+	placed !== nothing && _scat_legend_is(p, placed) && return :auto
 	position = something(_scat_best_legend_position(p), :topright)
-	return _scat_legend_at(p, _scat_position_placement(position)) ? :auto : :fixed
+	return _scat_legend_is(p, position) ? :auto : :fixed
 end
 
 # After a Plot/SyncPlot call of this family whose legend was `before`
@@ -11004,11 +11071,11 @@ function _scat_place_legend!(fig, before::Symbol)
 	_scat_legend_placed(fig) || return nothing
 	p = _plot_obj(fig)
 	# A legend created by this call sits at the package default corner.
-	before === :none && !_scat_legend_at(p, _scat_position_placement(:topright)) && return nothing
+	before === :none && !_scat_legend_is(p, :topright) && return nothing
 	position = something(_scat_best_legend_position(p), :topright)
 	_SCAT_LEGEND_AUTO[p] = position
 	placement = _scat_position_placement(position)
-	_scat_legend_at(p, placement) && return nothing
+	_scat_legend_is(p, position) && return nothing
 	_legend_write_block!(p, :legend; placement = placement, replace_placement = true)
 	_legend_stack!(p)
 	return nothing
@@ -13853,6 +13920,11 @@ function _field2d_apply_options!(
 	partial_ranges::Bool = true,
 	ykey::Symbol = :yaxis,
 )
+	# The legend rule of the scatter family (`_scat_place_legend!`) also places
+	# the legend of the field glyph traces (quiver and streamlines are scatter
+	# traces): a legend this call creates, or one at its automatic position,
+	# avoids the data (the first line of this function sees the new traces).
+	legend_state = constructor ? :none : _scat_legend_state(fig)
 	_apply_figure_title!(fig, title)
 	_apply_axis_title!(fig, :x, xlabel)
 	_apply_axis_title_to_key!(fig, ykey, ylabel)
@@ -13881,6 +13953,7 @@ function _field2d_apply_options!(
 	_apply_figure_size!(fig, who; width = width, height = height)
 	(constructor && grid === true) || _apply_axis_grid!(fig, grid, who)
 	constructor ? _apply_default_template!(fig; fresh = true) : _apply_default_legend!(fig)
+	_scat_place_legend!(fig, legend_state)
 	_apply_figure_fontsize!(fig, who, fontsize)
 	return nothing
 end

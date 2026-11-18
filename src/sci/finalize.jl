@@ -3987,7 +3987,11 @@ function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height
 end
 
 # Passes of `_fin_fit!` per finalize run; a figure converges in two or three.
-const _FIN_FIT_ROUNDS = 4
+# An equal-aspect field with a colorbar and a legend beside it (the default
+# legend of a field that fills its corners goes outside, `_scat_place_legend!`)
+# approaches its fixed point in about ten (measured on the quiver of the
+# regression_legend test: 4 rounds left a second call writing, 12 settle).
+const _FIN_FIT_ROUNDS = 12
 
 # The `_FinContext` of a finalize run (see `_fin_run!`).
 function _fin_context(fig, live, size, clone_readonly::Bool)
