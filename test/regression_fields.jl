@@ -1,6 +1,11 @@
 using Test, PlotlySupply
 using PlotlySupply: PlotlyBase
 
+# These tests assert on the package's own defaults: an earlier file of the full run
+# may leave a publication style active (`set_default_style!()` without an
+# argument keeps the active style), which changes colorbar fonts and line widths.
+set_default_style!(:default)
+
 # Regression tests for the audit findings fixed in the 2-D field functions
 # (plot_heatmap, plot_contour, plot_quiver, plot_image and their mutators).
 # Each testset names the finding ids it covers.
@@ -387,10 +392,12 @@ end
 						@test !haskey(ax, :range) && get(ax, :autorange, true) !== false
 					end
 				else
-					# An image, whose 3-D z finalize does not measure yet
-					# (cross-request): plotly's own autorange, nothing pinned.
-					@test _rf_clip(fig, axis) === nothing
-					@test !haskey(ax, :range) && get(ax, :autorange, true) !== false
+					# An image: finalize measures its pixel edges; the
+					# aspect-linked axes are pinned to them (a y axis
+					# descending: plotly shows row 1 at the top).
+					clip = _rf_clip(fig, axis)
+					@test clip !== nothing
+					@test ax[:autorange] === false && sort(Float64.(ax[:range])) == collect(clip)
 				end
 			end
 		end
@@ -409,6 +416,22 @@ end
 		plot_quiver!(q, [1.0], [1.0], [1.0], [1.0]; xrange = [0, 0])
 		plot_scatter!(q, [10.0], [1.0]; mode = "markers")
 		@test _rf_clip(q, :xaxis) == widened && Tuple(_rf_axis(q, :xaxis)[:range]) == widened
+	end
+
+	@testset "D13 glyphs without a field are padded in axis units (log axes, other traces)" begin
+		q = Base.CoreLogging.with_logger(Base.CoreLogging.NullLogger()) do
+			plot_quiver([1.0, 10.0], [1.0, 10.0], [1.0, 1.0], [0.0, 0.0]; xscale = "log", yscale = "log")
+		end
+		drawn_x = Float64[v for v in q.data[1].fields[:x] if v !== nothing]
+		clip = _rf_clip(q, :xaxis)
+		@test clip !== nothing && 0 < clip[1] < minimum(drawn_x) && clip[2] > maximum(drawn_x)
+		# the pad is the overlay pad of the span in decades, on both sides
+		span = log10(maximum(drawn_x)) - log10(minimum(drawn_x))
+		@test log10(clip[2]) - log10(maximum(drawn_x)) ≈ PlotlySupply._FIN_OVERLAY_PAD * span
+		@test log10(minimum(drawn_x)) - log10(clip[1]) ≈ PlotlySupply._FIN_OVERLAY_PAD * span
+		# another trace on the group widens the glyph view by what it draws
+		plot_scatter!(q, [1000.0], [5.0]; mode = "markers")
+		@test _rf_clip(q, :xaxis)[2] >= 1000.0
 	end
 
 	@testset "D16 K5 quiver and streamline overlays count with their anchors" begin
@@ -531,7 +554,8 @@ end
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 2, 3); yrange = (nothing, 0)), :yaxis) == (:pinned, [1.5, 0.0])
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 3, 3); xrange = (nothing, 1)), :xaxis) == (:pinned, [-0.5, 1.0])
 		# A stop beyond the data on the far side leaves no room: an error.
-		@test occursin("plot_image: `yrange` = (nothing, 2) leaves no room for the data",
+		# (the message is the shared D11 one, `_require_limit_meets_data`)
+		@test occursin("plot_image: `yrange` fixes one end of the axis beyond all of its data",
 			_rfv3_msg(() -> plot_image(zeros(UInt8, 2, 2, 3); yrange = (nothing, 2))))
 		# ... also for a bilinear image, sized from its PNG header.
 		@test _rf_limit(plot_image(zeros(UInt8, 2, 3, 3); interpolation = :bilinear, xrange = (1, nothing)), :xaxis) == (:pinned, [1.0, 2.5])
@@ -582,7 +606,10 @@ end
 		k = plot_heatmap(U)
 		relayout!(k; xaxis_autorangeoptions_include = -5, xaxis_autorangeoptions_minallowed = -1)
 		plot_heatmap!(k, U; xrange = (nothing, 3))
-		@test _rfv3_d(_rf_axis(k, :xaxis)[:autorangeoptions]) == Dict(:maxallowed => 3)
+		# (the user's own `include` stays: "other autorangeoptions the user set
+		# are kept", `_write_axis_range!`; the earlier `minallowed` is replaced)
+		opts = _rfv3_d(_rf_axis(k, :xaxis)[:autorangeoptions])
+		@test opts[:maxallowed] == 3 && !haskey(opts, :minallowed) && opts[:include] == -5
 		# A date bound is written in epoch milliseconds (plotly.js ignores a date
 		# string in the autorange options).
 		Dt = Base.require(Base.PkgId(Base.UUID("ade2ca70-3891-5945-98fb-dc099432e06a"), "Dates"))
@@ -748,7 +775,7 @@ end
 			("contour!", p -> plot_contour!(p, U), (0.0, 3.0), false),
 			("matrix!", p -> plot_matrix!(p, U), (0.5, 3.5), true),
 			("quiver!", p -> plot_quiver!(p, [0.0], [0.0], [1.0], [1.0]), :glyphs, true),
-			("image!", p -> plot_image!(p, zeros(UInt8, 2, 2, 3)), nothing, false),
+			("image!", p -> plot_image!(p, zeros(UInt8, 2, 2, 3)), (-0.5, 1.5), true),
 			("streamlines!", p -> plot_streamlines!(p, 0:3, 0:3, ones(4, 4), ones(4, 4)), :glyphs, false),
 		)
 			p = Plot(GenericTrace[], Layout(xaxis2 = attr(matches = "x", anchor = "y2"), yaxis2 = attr(anchor = "x2")))
@@ -764,11 +791,6 @@ end
 				else
 					@test get(ax, :autorange, true) === true && !haskey(ax, :range)
 				end
-				continue
-			end
-			if extent === nothing
-				@test _rf_clip(p, :xaxis) === nothing
-				@test !haskey(ax, :range) && get(ax, :autorange, true) === true
 				continue
 			end
 			@test _rf_clip(p, :xaxis) == extent
