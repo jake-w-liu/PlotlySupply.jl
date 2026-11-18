@@ -7097,15 +7097,14 @@ Set the x-axis title of a `Plot`/`SyncPlot`, of one
 - `inset = nothing`: inset id `k` from [`inset!`](@ref) (SubplotFigure only).
 - `wrap::Bool = true`: a title that, drawn on one line centred on its axis,
   would run off the figure (plotly.js cuts it at the figure edge) is broken
-  into lines of even length, no longer than the axis, at the spaces between
-  words, for the size each render has (the export size included). A title
-  longer than its axis that stays inside the figure keeps one line, as in
-  matplotlib. Spaces inside markup (`<i>a b</i>`), MathJax titles and titles
-  with a line break of their own (`<br>`) are never broken, nor is a title on
-  an axis shorter than one of its words (shorten the title or enlarge the
-  figure there). `wrap = false` keeps the title on one line (its spaces are
-  stored as no-break spaces, U+00A0; one no-break space keeps two words
-  together). 3-D scene titles are never broken.
+  between words into lines that fit, for the size each render has (the export
+  size included); the finalizer does it, and joins the lines again when the
+  figure is large enough. A title longer than its axis that stays inside the
+  figure keeps one line, as in matplotlib. MathJax titles and markup other
+  than `<br>` are left as written; the lines on either side of a line break
+  of your own (`<br>`) are wrapped on their own. `wrap = false` keeps the title
+  on one line (its spaces are stored as no-break spaces, U+00A0; one no-break
+  space keeps two words together). 3-D scene titles are never broken.
 
 Throws `ArgumentError` (figure unchanged) for cells without x/y or scene
 axes. Returns `nothing` (`sf` for a SubplotFigure, for chaining).

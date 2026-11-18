@@ -1734,35 +1734,101 @@ end
 # W5: axis titles longer than the figure
 # ---------------------------------------------------------------------------
 
-# W5: the axes owner decides where a long axis title breaks
-# (`_axes_title_wrap_updates!`, src/sci/axes.jl; `_axes_finalize_updates!` runs
-# in every finalize pass) and marks its breaks `_AXES_WRAP_BREAK`. What a
-# wrapped title needs from the layout is ours: plotly.js 2.35.2 (axes.js
-# drawTitle) moves a left or top title out by its extra lines only when
-# `title.standoff` is set (without it they run into the tick labels), and its
-# automargin does not count the extra lines in full (`_fin_wrap_margins!`).
-# Px a wrapped title keeps from the figure edges.
+# Line break `_fin_wrap_axis_titles!` writes. A user's line breaks are `<br>`
+# (`_label` turns "\n" into it); plotly.js breaks lines at both. Every pass
+# first joins the lines at this break again, then wraps for the current size.
+const _FIN_WRAP_BREAK = "<br />"
+# Px a wrapped title keeps from the figure edges, and the mean glyph width
+# (font sizes) the wrap assumes: a little above DejaVu Sans' (render probe
+# W5: 26 characters of the optical_infra y title at 13 px drew 155 px long,
+# 0.46 em), so a wrapped line fits.
 const _FIN_WRAP_PAD = 4.0
+const _FIN_WRAP_CHAR_EM = 0.55
+# Share of the text-extent estimate the widest measured face fills (Verdana and
+# DejaVu Sans 0.96-0.98 of it, plotly.js 2.35.2).
+const _FIN_WRAP_WIDTH_SHARE = 0.98
+# Markup other than line breaks: such a title is left as written.
+const _FIN_WRAP_MARKUP = r"<(?!br\s*/?>)"i
 
-# Whether the title of `axis` carries a line break of the axes owner's wrap.
-_fin_title_is_wrapped(axis) = occursin(_AXES_WRAP_BREAK, _fin_title_text(axis))
+# `line` broken between words into lines of at most `max_chars` characters
+# (a longer word keeps a line of its own).
+function _fin_wrap_line(line::AbstractString, max_chars::Int)
+	_fin_text_chars(line) <= max_chars && return String(line)
+	lines = String[]
+	current = ""
+	for word in split(line, ' '; keepempty = false)
+		candidate = isempty(current) ? String(word) : current * " " * word
+		if isempty(current) || _fin_text_chars(candidate) <= max_chars
+			current = candidate
+		else
+			push!(lines, current)
+			current = String(word)
+		end
+	end
+	isempty(current) || push!(lines, current)
+	return join(lines, _FIN_WRAP_BREAK)
+end
 
-# W5: `title.standoff` follows the wrap. Written for titles with the axes
-# owner's breaks (when the user set none) and removed again, when it is ours,
-# once the title is on one line. On export copies (`size` given) a wrapped
-# title at the left or bottom paper edge also gets the margin its lines need.
+# `text` with every line (between the user's breaks, which are kept as
+# written) wrapped at `max_chars`.
+function _fin_wrap_title(text::AbstractString, max_chars::Int)
+	out = IOBuffer()
+	start = 1
+	for m in eachmatch(_FIN_LINE_BREAK, text)
+		print(out, _fin_wrap_line(SubString(text, start, prevind(text, m.offset)), max_chars), m.match)
+		start = m.offset + ncodeunits(m.match)
+	end
+	print(out, _fin_wrap_line(SubString(text, start), max_chars))
+	return String(take!(out))
+end
+
+# W5: a plain axis title longer than the figure can show along its axis
+# (centred on the axis, `_FIN_WRAP_PAD` from the figure edges, figure
+# `W` x `H` px) is broken into lines between words; a title that fits again
+# (a larger export, a shorter text) is joined again. Math (`$…$`) and styled
+# titles are left as written.
 function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 	layout = ctx.p.layout
+	font = _fin_font_size(layout)
+	# The margins with the push of the axis labels (a `tight_layout!` margin
+	# of 4 px puts the plot area where the labels end, not at 4 px:
+	# optical_cividis wrapped a title that fits).
+	m = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
+	Wp, Hp = max(W - m.l - m.r, 1.0), max(H - m.t - m.b, 1.0)
 	updates = Dict{Symbol, Any}()
 	wrapped_keys = Symbol[]
 	for (key, axis) in layout.fields
 		(key isa Symbol && _fin_is_axis_key(key)) || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		text = _fin_title_text(axis)
+		(isempty(text) || occursin('$', text) || occursin(_FIN_WRAP_MARKUP, text)) && continue
+		plain = replace(text, _FIN_WRAP_BREAK => " ")
+		size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
+		vertical = String(key)[1] == 'y'
+		d = vertical ? _cmn_y_axis_domain(layout, key) : _fin_domain(layout, key)
+		centre = vertical ? m.b + (d[1] + d[2]) / 2 * Hp : m.l + (d[1] + d[2]) / 2 * Wp
+		extent = vertical ? H : W
+		room = 2 * min(centre, extent - centre) - 2 * _FIN_WRAP_PAD
+		max_chars = max(1, floor(Int, room / (_FIN_WRAP_CHAR_EM * size)))
+		# A title that fits is left on one line: the char count above errs on
+		# the large side (0.55 em against 0.46-0.5 drawn), so the width comes
+		# from the text-extent estimate (widest face measured, share 0.98).
+		wrapped = _text_extent(plain, size)[1] * _FIN_WRAP_WIDTH_SHARE <= room ? plain :
+			_fin_wrap_title(plain, max_chars)
+		wrapped == plain || push!(wrapped_keys, key)
+		wrapped == text && continue
 		title = _cmn_mapping_get(axis, :title)
-		title === nothing && continue
-		wrapped = _fin_title_is_wrapped(axis)
-		standoff = title isa AbstractString ? nothing : _cmn_mapping_get(title, :standoff)
-		if wrapped
-			push!(wrapped_keys, key)
+		if title isa AbstractString
+			updates[Symbol(key, :_title)] = Dict{Symbol, Any}(:text => wrapped)
+			wrapped == plain || (updates[Symbol(key, :_title_standoff)] = _FIN_WRAP_STANDOFF)
+			continue
+		end
+		updates[Symbol(key, :_title_text)] = wrapped
+		# plotly.js 2.35.2 (axes.js drawTitle) moves a left or top title out
+		# by its extra lines only when `title.standoff` is set; without it
+		# they run into the tick labels. Ours goes with our breaks.
+		standoff = _cmn_mapping_get(title, :standoff)
+		if wrapped != plain
 			standoff === nothing && (updates[Symbol(key, :_title_standoff)] = _FIN_WRAP_STANDOFF)
 		elseif _fin_isfinite_real(standoff) && standoff == _FIN_WRAP_STANDOFF
 			updates[Symbol(key, :_title_standoff)] = nothing
@@ -1772,9 +1838,7 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 	# Export copies only (`size` given): a margin grown on the figure itself
 	# would outlive the wrap (a later font or size change joins the lines
 	# again; composite_2x2 kept a 155 px left margin).
-	(ctx.size === nothing || isempty(wrapped_keys)) && return wrote
-	m = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
-	Hp = max(H - m.t - m.b, 1.0)
+	ctx.size === nothing && return wrote
 	return _fin_wrap_margins!(ctx, accs, wrapped_keys, Hp) || wrote
 end
 

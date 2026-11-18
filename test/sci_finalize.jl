@@ -1223,14 +1223,12 @@ end
 	ylabel!(sf, long; row = 1, col = 1)
 	figsize!(sf, 578, 227)
 	title = _sfn_fields(_sfn_axis(sf, :yaxis)[:title])
-	# The axes owner breaks the title (`_AXES_WRAP_BREAK`); the finalizer
-	# gives the lines their standoff.
-	@test occursin(_SFN._AXES_WRAP_BREAK, title[:text])
-	@test replace(title[:text], _SFN._AXES_WRAP_BREAK => " ") == long
+	@test occursin(_SFN._FIN_WRAP_BREAK, title[:text])
+	@test replace(title[:text], _SFN._FIN_WRAP_BREAK => " ") == long
 	@test title[:standoff] == _SFN._FIN_WRAP_STANDOFF
 	# Every line fits the figure height.
-	for line in split(title[:text], _SFN._AXES_WRAP_BREAK)
-		@test _SFN._text_plain_em(String(line)) * 14 <= 227
+	for line in split(title[:text], _SFN._FIN_WRAP_BREAK)
+		@test length(line) * _SFN._FIN_WRAP_CHAR_EM * 14 <= 227
 	end
 	# The figure's own margin is left alone (it would outlive the wrap); a
 	# tight export copy gets a left margin that holds the lines (plotly's
@@ -1241,7 +1239,7 @@ end
 	tight = _SFN._ExportOptions(578.0, 227.0, 1.0, nothing, true, nothing, true, 30.0, :px, false, :auto)
 	copy = _SFN._export_source(sf.plot, tight)
 	copy_title = _sfn_fields(copy.layout.fields[:yaxis][:title])
-	@test occursin(_SFN._AXES_WRAP_BREAK, copy_title[:text])
+	@test occursin(_SFN._FIN_WRAP_BREAK, copy_title[:text])
 	accs = _SFN._fin_collect_axes(copy)
 	need = _SFN._fin_y_labels_px(copy.layout, accs, :yaxis, (0.0, 1.0), 100.0)
 	@test _sfn_fields(copy.layout.fields[:margin])[:l] >= need
@@ -1256,7 +1254,11 @@ end
 	text = _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text]
 	@test startswith(text, "first<br>second")
 	ylabel!(sf, "\$\\alpha\$ a math title that is much too long for this small figure to show"; row = 1, col = 1)
-	@test !occursin(_SFN._AXES_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text])
+	@test !occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text])
+	# The wrapper itself.
+	@test _SFN._fin_wrap_line("aa bb cc", 5) == "aa bb<br />cc"
+	@test _SFN._fin_wrap_line("averyveryverylongword x", 5) == "averyveryverylongword<br />x"
+	@test _SFN._fin_wrap_title("one two<br>three four", 7) == "one two<br>three<br />four"
 	# Extra lines widen the label estimate.
 	axis = Dict{Symbol, Any}(:title => Dict{Symbol, Any}(:text => "a<br />b"))
 	@test _SFN._fin_title_push(axis, 12.0) ≈ _SFN._fin_title_push(Dict(:title => "a"), 12.0) + _SFN._FIN_LINE_EM * 14
@@ -1274,7 +1276,7 @@ end
 	layout = sf.plot.layout
 	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
 	# Wrapped at the large font (the bottom row is 156 px tall) ...
-	@test occursin(_SFN._AXES_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text])
+	@test occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text])
 	# ... with no grown margin; the right-hand cells give up the room the
 	# three lines need in the gap (Z71), the left ones keep their domains.
 	@test _sfn_fields(layout.fields[:margin])[:l] == 50

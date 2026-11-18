@@ -597,6 +597,10 @@ function _lt_title_decoration!(out, plan)
 		decor.area === :figure && return true
 		plan.areas[decor.area].current[2][2] >= highest - _LT_EDGE_TOL
 	end
+	# A top x axis (own or `secondary_xaxis!`) at the top edge counts too: its
+	# tick labels and title are drawn up to the margin edge.
+	at_top = at_top || any(a -> a.own[:top] > 0 && a.current[2][2] >= highest - _LT_EDGE_TOL,
+		values(plan.areas))
 	at_top || return out
 	pad = _symbol_dict(get(d, :pad, nothing))
 	pad_b = something(_legend_real(get(pad, :b, nothing)), 0.0)

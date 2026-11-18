@@ -1383,20 +1383,15 @@ end
 
 The axis fits `_finalize_figure!` runs for a figure of `size = (width,
 height)` px, after every mutation and on the export copy: log-axis tick
-labels (`_axes_log_tick_updates!`, W7/Z70) and axis titles that would run
-off the figure (`_axes_title_wrap_updates!`, W5). Figures without a log axis
-or a long plain axis title return at once, without reading the trace data.
-`accs` is the run's `_fin_collect_axes(p)` when the caller already has it, so
-the extents are not collected a second time.
+labels (`_axes_log_tick_updates!`, W7/Z70). Figures without a log axis return
+at once, without reading the trace data. `accs` is the run's
+`_fin_collect_axes(p)` when the caller already has it, so the extents are not
+collected a second time.
 """
 function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size, accs = nothing)
-	layout = p.layout
-	log_axes = _axes_has_log_axis(layout)
-	wrap = _axes_title_wrap_candidates(layout)
-	(log_axes || !isempty(wrap)) || return updates
+	_axes_has_log_axis(p.layout) || return updates
 	plan = accs === nothing ? _axes_fit_plan(p, size) : _axes_fit_plan(p, size, accs)
-	log_axes && _axes_log_tick_updates!(updates, p, plan)
-	isempty(wrap) || _axes_title_wrap_updates!(updates, p, plan, wrap)
+	_axes_log_tick_updates!(updates, p, plan)
 	return updates
 end
 
@@ -1495,7 +1490,13 @@ function _axes_log_view(layout::Layout, root::Symbol, members, accs)
 	auto = _fin_field(axis, :autorange)
 	fixed = _fin_range_pair(_fin_field(axis, :range)) !== nothing && (auto === false || auto === nothing)
 	if !fixed && _fin_sticky_clip(axis) === nothing
-		pad = _AXES_AUTORANGE_PAD * (b - a)
+		# `_fin_shown_range` already widened the data extent by its own pad
+		# (`_FIN_AUTORANGE_PAD` of the extent on each side): take that back
+		# and apply plotly's exact one.
+		extent = (b - a) / (1 + 2 * _FIN_AUTORANGE_PAD)
+		a += _FIN_AUTORANGE_PAD * extent
+		b -= _FIN_AUTORANGE_PAD * extent
+		pad = _AXES_AUTORANGE_PAD * extent
 		a, b = a - pad, b + pad
 	end
 	return (a, b)
@@ -1561,80 +1562,12 @@ end
 #
 # plotly.js draws an axis title on one line centred on its axis, so a title
 # longer than the figure around its axis is cut off at the figure edge
-# (gallery optical_infra: a y title clipped at both ends). `_finalize_figure!`
-# breaks such a title into lines no longer than the axis, at the spaces
-# between words, with lines of even length (`_axes_title_wrap_updates!`), at
-# the real size of every render (the export copy too); automargin then makes
-# room for the extra lines. A title that is longer than its axis but stays
-# inside the figure is left on one line, as matplotlib draws it: a second line
-# needs room across the axis, which between two grid cells is the gap to the
-# neighbouring plot (gallery optical_validation (c): the wrapped title ran
-# into panel (a)), and titles about as long as their axis are common in
-# papers (loglog_convergence, composite_2x2). The width is the text-extent
-# estimate (Verdana glyph classes), which errs on the large side for the
-# faces plotly.js renders (measured, plotly.js 2.35.2, 20 px titles: Verdana
-# and DejaVu Sans 0.96-0.98 of it, Arial/Helvetica 0.85, Georgia 0.84-0.87,
-# STIX Two Text 0.81-0.83, Times New Roman 0.77-0.78; a 13 px DejaVu Sans
-# title in gallery optical_validation 0.96). The decision takes the share the
-# widest of them fills (`_AXES_TITLE_WIDTH_FACTOR`), and the axis centre from
-# the estimated plot area (`_fin_margins`): no title in these faces that runs
-# off is left on one line, while one in a narrower face that just fits may be
-# broken (optical_validation (d): its DejaVu Sans x title, 5 px inside the
-# figure edge, stays on one line).
-# The line breaks are marked (`_AXES_WRAP_BREAK`, a zero-width space before
-# `<br>`: invisible, and plotly.js itself writes U+200B into empty lines), so
-# the next run starts again from the one-line title and a title that fits
-# again is put back on one line. Titles with a line break of the user's,
-# MathJax titles (with `$`) and words joined by no-break spaces (U+00A0; what
-# `xlabel!(...; wrap = false)` writes) are never broken.
-
-const _AXES_WRAP_BREAK = "\u200b<br>"
-# Share of the text-extent estimate the widest measured face fills (Verdana
-# and DejaVu Sans, 0.96-0.98; see the comment above).
-const _AXES_TITLE_WIDTH_FACTOR = 0.98
-
-# Original one-line text of a title `_axes_title_wrap_updates!` broke.
-_axes_unwrap_title(text::AbstractString) = replace(String(text), _AXES_WRAP_BREAK => " ")
-
-# The words of `text` between its breakable spaces: ASCII spaces outside
-# markup tags and outside tag pairs (`<i>a b</i>` stays whole). `nothing` for
-# a title that is never broken (a line break of its own, MathJax).
-function _axes_title_words(text::String)
-	occursin('$', text) && return nothing
-	occursin(_TEXT_BR_TAG, text) && return nothing
-	words = String[]
-	current = IOBuffer()
-	depth = 0
-	i = firstindex(text)
-	while i <= lastindex(text)
-		c = text[i]
-		if c == '<'
-			close = findnext('>', text, i)
-			if close !== nothing
-				tag = text[i:close]
-				print(current, tag)
-				name = lowercase(strip(text[nextind(text, i):prevind(text, close)]))
-				if startswith(name, "/")
-					depth = max(depth - 1, 0)
-				elseif !endswith(name, "/")
-					depth += 1
-				end
-				i = nextind(text, close)
-				continue
-			end
-		end
-		if c == ' ' && depth == 0
-			word = String(take!(current))
-			isempty(word) || push!(words, word)
-		else
-			print(current, c)
-		end
-		i = nextind(text, i)
-	end
-	word = String(take!(current))
-	isempty(word) || push!(words, word)
-	return words
-end
+# (gallery optical_infra: a y title clipped at both ends). The finalizer
+# breaks such a title between words (`_fin_wrap_axis_titles!`, which also
+# keeps the margin of an export copy and the standoff of the extra lines);
+# titles with a line break of the user's, MathJax titles and words joined by
+# no-break spaces (U+00A0; what `xlabel!(...; wrap = false)` writes) are
+# never broken.
 
 """
 	_axes_keep_on_one_line(text) -> String
@@ -1655,51 +1588,6 @@ function _axes_keep_on_one_line(text::AbstractString)
 		print(out, (c == ' ' && !inside) ? '\u00a0' : c)
 	end
 	return String(take!(out))
-end
-
-# `words` (widths `em` in em) broken into the fewest lines no wider than
-# `limit` em, then with the widest line as narrow as that number of lines
-# allows; `nothing` when one line fits or one word alone is wider.
-function _axes_balanced_lines(words::Vector{String}, em::Vector{Float64}, space::Float64, limit::Float64)
-	n = length(words)
-	n >= 2 || return nothing
-	total = sum(em) + (n - 1) * space
-	total <= limit && return nothing
-	maximum(em) <= limit || return nothing
-	# Greedy breaks for a width bound: the lines' word ranges.
-	function breaks(bound)
-		ranges = UnitRange{Int}[]
-		start = 1
-		width = em[1]
-		for k in 2:n
-			if width + space + em[k] <= bound + 1e-9
-				width += space + em[k]
-			else
-				push!(ranges, start:(k - 1))
-				start = k
-				width = em[k]
-			end
-		end
-		push!(ranges, start:n)
-		return ranges
-	end
-	lines = length(breaks(limit))
-	# The narrowest bound that still gives that many lines is the width of
-	# one of the runs of consecutive words; the line count only falls as the
-	# bound grows, so bisect the sorted run widths.
-	prefix = cumsum(em)
-	candidates = Float64[]
-	for i in 1:n, j in i:n
-		w = prefix[j] - (i > 1 ? prefix[i - 1] : 0.0) + (j - i) * space
-		w <= limit + 1e-9 && push!(candidates, w)
-	end
-	sort!(unique!(candidates))
-	lo, hi = 1, length(candidates)   # candidates[end] is the widest line of `breaks(limit)` or wider
-	while lo < hi
-		mid = (lo + hi) >>> 1
-		length(breaks(candidates[mid])) <= lines ? (hi = mid) : (lo = mid + 1)
-	end
-	return [join(words[r], " ") for r in breaks(candidates[lo])]
 end
 
 # Text of axis `key`'s title and whether it is stored as a bare string.
@@ -1723,77 +1611,6 @@ function _axes_title_font(layout::Layout, key::Symbol)
 			Float64(round(_AXES_TITLE_FONT_FACTOR * root)),
 		),
 	)
-end
-
-# Axes of `layout` whose title may need breaking or joining: titles our
-# breaks are in, and breakable titles that may reach a figure edge. The
-# centre of an axis lies in the plot area, which automargin only shrinks, so
-# a title no longer than twice the smaller of the layout's margins on its
-# two ends stays inside the figure. Cheap: reads no trace data.
-function _axes_title_wrap_candidates(layout::Layout)
-	candidates = Symbol[]
-	base = _fin_margins_base(layout)
-	for (key, axis) in layout.fields
-		_fin_is_axis_key(key) || continue
-		_cmn_mapping_get(axis, :visible) === false && continue
-		text, _ = _axes_title_text(axis)
-		isempty(text) && continue
-		if occursin(_AXES_WRAP_BREAK, text)
-			push!(candidates, key)
-			continue
-		end
-		words = _axes_title_words(text)
-		(words === nothing || length(words) < 2) && continue
-		reach = 2 * (String(key)[1] == 'x' ? min(base.l, base.r) : min(base.t, base.b))
-		_text_extent(text, _axes_title_font(layout, key))[1] > reach && push!(candidates, key)
-	end
-	return candidates
-end
-
-# Whether a one-line title `width` px long, centred on axis `key`, reaches
-# past an edge of the figure of `plan` (the axis centre from the estimated
-# plot area).
-function _axes_title_runs_off(layout::Layout, plan::_AxesFitPlan, key::Symbol, width::Float64)
-	domain = _fin_domain(layout, key)
-	mid = (domain[1] + domain[2]) / 2
-	centre, extent = String(key)[1] == 'x' ?
-		(plan.ml + mid * plan.Wp, plan.W) : (plan.mb + mid * plan.Hp, plan.H)
-	return width / 2 > min(centre, extent - centre)
-end
-
-"""
-	_axes_title_wrap_updates!(updates, p::Plot, plan::_AxesFitPlan, keys) -> updates
-
-Add to `updates` the title text of each axis of `keys`
-(`_axes_title_wrap_candidates`) for the figure of `plan`: broken into even
-lines no longer than the axis when its one-line text, centred on the axis,
-would run off the figure (`_axes_title_runs_off`), else the one-line text
-(see the comment above). Only changes are written.
-"""
-function _axes_title_wrap_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_AxesFitPlan, keys)
-	layout = p.layout
-	for key in keys
-		axis = get(layout.fields, key, nothing)
-		stored, bare = _axes_title_text(axis)
-		text = _axes_unwrap_title(stored)
-		words = _axes_title_words(text)
-		words === nothing && continue
-		font = _axes_title_font(layout, key)
-		em = Float64[_text_plain_em(word) for word in words]
-		space = _text_char_em(' ')
-		width = (sum(em) + (length(words) - 1) * space) * font
-		lines = _axes_title_runs_off(layout, plan, key, _AXES_TITLE_WIDTH_FACTOR * width) ?
-			_axes_balanced_lines(words, em, space, _axes_plan_length(layout, plan, key) / font) :
-			nothing
-		want = lines === nothing ? text : join(lines, _AXES_WRAP_BREAK)
-		want == stored && continue
-		if bare
-			updates[Symbol(key, :_title)] = Dict{Symbol, Any}(:text => want)
-		else
-			updates[Symbol(key, :_title_text)] = want
-		end
-	end
-	return updates
 end
 
 # ---------------------------------------------------------------------------
@@ -2633,14 +2450,15 @@ function _axes_is_top_cell(fig, t::_CellTarget)
 	return true
 end
 
-# Title placement that keeps the figure title clear of a top axis of depth
-# `depth` px: the title sits on the plot area (`yref="paper"`, `y=1`,
-# `yanchor="bottom"`) lifted by `pad.b`, and `automargin` grows the top margin
-# to fit it. plotly.js grows a margin to the larger of its pushers rather than
-# their sum, so with the default container placement the title and the top
-# axis overlap. `nothing` when the user placed the title (any of `y`, `yref`,
-# `yanchor` set to something other than this placement). A larger `pad.b` from
-# an earlier call (another top axis) is kept.
+# Title placement that keeps a figure title with no placement of its own clear
+# of a top axis of depth `depth` px: the title sits on the plot area
+# (`yref="paper"`, `y=1`, `yanchor="bottom"`) lifted by `pad.b`, and
+# `automargin` grows the top margin to fit it (plotly.js grows a margin to the
+# larger of its pushers, not their sum). The `title!`/constructor placement
+# (container, top) is kept: the room engine clears it when the figure is
+# finalized. `nothing` when that is so or the user placed the title (any of
+# `y`, `yref`, `yanchor` set to something else). A larger `pad.b` from an
+# earlier call (another top axis) is kept.
 function _axes_title_clearance(layout::Layout, depth::Float64)
 	title = get(layout.fields, :title, nothing)
 	fields = Dict{Symbol, Any}()
@@ -2653,17 +2471,18 @@ function _axes_title_clearance(layout::Layout, depth::Float64)
 	yanchor = _cmn_mapping_get(title, :yanchor)
 	ours = yref == "paper" && y isa Real && y == 1 && yanchor == "bottom"
 	untouched = yref === nothing && y === nothing && yanchor === nothing
-	# The `title!` (and constructor) placement at the top of the container:
-	# plotly.js reserves `pad.b` below such a title when it grows the top
-	# margin, so the axis depth goes into `pad.b` and the placement is kept.
+	# The `title!` (and constructor) placement at the top of the container.
 	container = yref == "container" && y isa Real && y == 1 && yanchor == "top"
 	(ours || untouched || container) || return nothing
+	# The `title!` placement (and the constructor's, Z28) is kept as it is: the
+	# D12 room engine (`_lt_title_decoration!`) holds the top margin for the
+	# title band above the top axis when the figure is finalized.
+	container && return nothing
 	pad_b = ceil(depth + _AXES_FIGURE_TITLE_GAP)
-	if ours || container
+	if ours
 		existing = _cmn_mapping_get(_cmn_mapping_get(title, :pad), :b)
 		existing isa Real && !(existing isa Bool) && (pad_b = max(pad_b, Float64(existing)))
 	end
-	container && return Dict{Symbol, Any}(:pad => attr(b = pad_b))
 	fields[:yref] = "paper"
 	fields[:y] = 1
 	fields[:yanchor] = "bottom"
