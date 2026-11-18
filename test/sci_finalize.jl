@@ -1257,16 +1257,16 @@ end
 	ylabel!(sf, "\$\\alpha\$ a math title that is much too long for this small figure to show"; row = 1, col = 1)
 	@test !occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text])
 	# The wrapper itself.
-	@test _SFN._fin_wrap_line("aa bb cc", 5) == "aa bb<br />cc"
-	@test _SFN._fin_wrap_line("averyveryverylongword x", 5) == "averyveryverylongword<br />x"
-	@test _SFN._fin_wrap_title("one two<br>three four", 7) == "one two<br>three<br />four"
+	@test _SFN._fin_wrap_line("aa bb cc", 5) == "aa bb" * _SFN._FIN_WRAP_BREAK * "cc"
+	@test _SFN._fin_wrap_line("averyveryverylongword x", 5) == "averyveryverylongword" * _SFN._FIN_WRAP_BREAK * "x"
+	@test _SFN._fin_wrap_title("one two<br>three four", 7) == "one two<br>three" * _SFN._FIN_WRAP_BREAK * "four"
 	# Extra lines widen the label estimate.
 	axis = Dict{Symbol, Any}(:title => Dict{Symbol, Any}(:text => "a<br />b"))
 	@test _SFN._fin_title_push(axis, 12.0) ≈ _SFN._fin_title_push(Dict(:title => "a"), 12.0) + _SFN._FIN_LINE_EM * 14
 end
 
 @testset "a title wrapped while the fonts were large leaves no room behind (composite_2x2)" begin
-	sf = subplots(2, 2; sync = false, horizontal_spacing = 0.27, vertical_spacing = 0.2)
+	sf = subplots(2, 2; sync = false, horizontal_spacing = 0.2, vertical_spacing = 0.2)
 	plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)
 	plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2)
 	set_fonts!(sf; size = 16, label = 20)
@@ -1276,10 +1276,11 @@ end
 	end
 	layout = sf.plot.layout
 	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
-	# Wrapped at the large font (the bottom row is 156 px tall) ...
+	# Wrapped at the large font (the bottom row is 156 px tall; the finalizer's
+	# wrap, `_FIN_WRAP_BREAK`, is the only one) ...
 	@test occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text])
 	# ... with no grown margin; the right-hand cells give up the room the
-	# three lines need in the gap (Z71), the left ones keep their domains.
+	# wrapped title needs in the 20 % gap (Z71), the left ones keep their domains.
 	@test _sfn_fields(layout.fields[:margin])[:l] == 50
 	for k in (:xaxis, :xaxis3)
 		@test collect(_SFN._layout_axis_domain(layout, k)) ≈ collect(_SFN._layout_axis_domain(grid, k))
@@ -1301,7 +1302,7 @@ end
 	@test _SFN._finalize_figure!(sf) === false
 	# A domain the user narrowed after the solve is theirs and is kept.
 	function build()
-		g = subplots(2, 2; sync = false, horizontal_spacing = 0.27, vertical_spacing = 0.2)
+		g = subplots(2, 2; sync = false, horizontal_spacing = 0.2, vertical_spacing = 0.2)
 		plot_scatter!(g, 1:3, 1:3; row = 1, col = 1)
 		plot_scatter!(g, 1:3, 1:3; row = 1, col = 2)
 		set_fonts!(g; size = 16, label = 20)
@@ -1312,7 +1313,7 @@ end
 		return g
 	end
 	g = build()
-	@test _SFN._layout_axis_domain(g.plot.layout, :xaxis4)[1] > 0.635
+	@test _SFN._layout_axis_domain(g.plot.layout, :xaxis4)[1] > 0.6
 	relayout!(g.plot; xaxis4_domain = [0.8, 1.0])
 	set_fonts!(g; size = 9, label = 9.2, tick = 7.5, units = :pt)
 	@test collect(_SFN._layout_axis_domain(g.plot.layout, :xaxis4)) ≈ [0.8, 1.0]
@@ -1434,4 +1435,89 @@ end
 	f = plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y))
 	plot_quiver!(f, [0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0])
 	@test _sfn_clip(f, :xaxis) == _SFN_XE && _sfn_clip(f, :yaxis) == _SFN_YE
+end
+
+# ---------------------------------------------------------------------------
+# Wave 6
+# ---------------------------------------------------------------------------
+
+# Drawn boxes (px, [left, top, right, bottom]) of the y title and the tick
+# labels of every Cartesian axis of `p` in a hidden window at its own size;
+# `nothing` when the renderer cannot start.
+const _SFN_TITLE_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const root = gd.getBoundingClientRect();
+  const box = els => { let b = null; for (const t of els) { const r = t.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const q = [r.left - root.left, r.top - root.top, r.right - root.left, r.bottom - root.top];
+    b = b === null ? q : [Math.min(b[0], q[0]), Math.min(b[1], q[1]), Math.max(b[2], q[2]), Math.max(b[3], q[3])]; } return b; };
+  const out = {axes: {}};
+  for (const k of Object.keys(gd._fullLayout).filter(k => /^[xy]axis\d*$/.test(k))) {
+    const id = k.replace('axis', '');
+    out.axes[k] = {ticks: box(gd.querySelectorAll('g.' + id + 'tick text')), title: box(gd.querySelectorAll('.g-' + id + 'title text'))};
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+function _sfn_measure_titles(p::Plot)
+	sp = try
+		to_syncplot(p; show = false)
+	catch err
+		@warn "sci_finalize: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
+		return nothing
+	end
+	try
+		backend = _SFN._syncplot_backend(sp)
+		script = replace(_SFN_TITLE_JS, "__DIV__" => _SFN._json_js(sp.divid))
+		for _ in 1:300
+			raw = Base.invokelatest(() -> backend.run(sp.window, script))
+			(raw === nothing || raw == "null") || return JSON.parse(String(raw))
+			sleep(0.05)
+		end
+		error("sci_finalize: the figure did not render within 15 s")
+	finally
+		close(sp)
+	end
+end
+
+@testset "V1: a wrapped y title keeps its standoff from the tick labels (tight export, 3-4 lines)" begin
+	# The break is a bare <br> (plotly.js counts the extra lines of a title
+	# with a greedy regex that sees `<br />` ... `<br />` as one tag).
+	@test endswith(_SFN._FIN_WRAP_BREAK, "<br>") && !occursin("/", _SFN._FIN_WRAP_BREAK)
+	@test _SFN._fin_wrap_line("aa bb cc", 5) == "aa bb" * _SFN._FIN_WRAP_BREAK * "cc"
+	@test count("<br", _SFN._fin_wrap_line("aaa bbb ccc ddd eee", 3)) == 4
+	text = "a fairly long y-axis label that matplotlib would split"
+	for (tight, cols) in ((true, 1), (false, 1))
+		with_style(PlotStyle(; font_family = "DejaVu Sans, Arial, sans-serif", fontsize = 8 * 96 / 72,
+				spines = :open, grid = false)) do
+			sf = subplots(1, 2; sync = false, horizontal_spacing = 0.14)
+			x = range(0, 1; length = 20)
+			plot_scatter!(sf, x, x .^ 2; row = 1, col = 1)
+			plot_scatter!(sf, x, sqrt.(x); row = 1, col = 2)
+			ylabel!(sf, text; row = 1, col = 1)
+			xlabel!(sf, "x"; row = 1, col = 1)
+			figsize!(sf, 153, 60; units = :mm)
+			W, H = sf.plot.layout.fields[:width], sf.plot.layout.fields[:height]
+			c = if tight
+				q = _SFN._clone_plot_model(sf.plot)
+				tight_layout!(q)
+				_SFN._finalize_figure!(q; size = (W, H))
+				q
+			else
+				_SFN._finalize_export_copy(sf.plot, (width = W, height = H))
+			end
+			title = _sfn_fields(_sfn_fields(c.layout.fields[:yaxis])[:title])
+			@test count(_SFN._FIN_LINE_BREAK, title[:text]) >= (tight ? 2 : 1)
+			info = _sfn_measure_titles(c)
+			info === nothing && return
+			a = info["axes"]["yaxis"]
+			# Standoff 10 px (plotly's own base gap for one line), the figure's
+			# left edge is not crossed.
+			@test a["ticks"][1] - a["title"][3] >= 8
+			@test a["title"][1] >= -0.5
+		end
+	end
 end

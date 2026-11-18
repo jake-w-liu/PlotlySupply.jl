@@ -1738,10 +1738,16 @@ end
 # W5: axis titles longer than the figure
 # ---------------------------------------------------------------------------
 
-# Line break `_fin_wrap_axis_titles!` writes. A user's line breaks are `<br>`
-# (`_label` turns "\n" into it); plotly.js breaks lines at both. Every pass
-# first joins the lines at this break again, then wraps for the current size.
-const _FIN_WRAP_BREAK = "<br />"
+# Line break `_fin_wrap_axis_titles!` writes. A user's line breaks are a bare
+# `<br>` (`_label` turns "\n" into it); ours is a zero-width space (U+200B)
+# before one, which draws the same and tells the two apart: every pass first
+# joins the lines at this break again, then wraps for the current size.
+# It must be a bare `<br>`: plotly.js 2.35 counts a title's extra lines with
+# `/<br(\s+.*)?>/g`, whose greedy `.*` makes `<br />` ... `<br />` ONE match, so
+# a title of three or more lines written with `<br />` was placed one line
+# (two for four lines) too close to its tick labels and drew over them
+# (optical_infra, V1: gap 0 px instead of the 11 px of `title.standoff`).
+const _FIN_WRAP_BREAK = "\u200b<br>"
 # Px a wrapped title keeps from the figure edges, and the mean glyph width
 # (font sizes) the wrap assumes: a little above DejaVu Sans' (render probe
 # W5: 26 characters of the optical_infra y title at 13 px drew 155 px long,
