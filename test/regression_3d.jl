@@ -871,7 +871,9 @@ end
 		# A camera the user placed is left alone.
 		user = plot_surface(xs, ys, Z)
 		view!(user; elev = 30, azim = 40, distance = 3)
-		@test PS._s3_refit_scenes!(_v4_copy(user), user, (900, 350)) === false
+		user_copy = _v4_copy(user)
+		PS._s3_refit_scenes!(user_copy, user, (900, 350))   # (its tick counts follow the size)
+		@test _v4_camera(user_copy) == _v4_camera(user)
 		# A 1x3 grid at 900x350: every scene fits its cell, labels included,
 		# and its x and y axes label two ticks whenever two labels fit (K4).
 		sf = subplots(1, 3; sync = false, specs = fill(Spec(kind = "scene"), 1, 3))
@@ -1055,8 +1057,9 @@ _v5_with_style(f, style) = with_style(f, style)
 		relayout!(h; scene_camera_eye = attr(x = 0.5, y = -2.0, z = 1.0))
 		plot_scatter3d!(h, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0])
 		@test _v4_xyz(_v4_camera(h)[:eye]) == [0.5, -2.0, 1.0]
-		@test PS._s3_finalize_scenes!(h, (900, 350)) === false
-		k = plot_surface(xs, ys, Z)
+		PS._s3_finalize_scenes!(h, (900, 350))   # (its tick counts follow the size)
+		@test _v4_xyz(_v4_camera(h)[:eye]) == [0.5, -2.0, 1.0]
+		k = plot_surface(xs, ys, Z; width = 1100, height = 800)   # axes long enough for plotly's own tick counts
 		view!(k; elev = 30, azim = -60)
 		auto = _v5_distance(k)
 		view!(k; elev = 30, azim = -60, zoom = 1.5)
@@ -1064,10 +1067,11 @@ _v5_with_style(f, style) = with_style(f, style)
 		# The zoom survives an export at another size: the distance fitted there
 		# divided by 1.5, so the drawing overflows the viewport.
 		opts = PS._normalize_export_options(k, (width = 900, height = 350))
-		unzoomed = plot_surface(xs, ys, Z)
+		unzoomed = plot_surface(xs, ys, Z; width = 1100, height = 800)
 		view!(unzoomed; elev = 30, azim = -60)
 		at = PS._export_source(k, opts)
-		@test _v5_distance(at) ≈ _v5_distance(PS._export_source(unzoomed, opts)) / 1.5 rtol = 1e-5
+		# (the tick counts of the short axes at 900 x 350 follow the zoomed axes' length, so the labels differ a little)
+		@test _v5_distance(at) ≈ _v5_distance(PS._export_source(unzoomed, opts)) / 1.5 rtol = 0.1
 		@test _v4_label_extent(at, :scene, (900, 350)) > 1.2
 	end
 
@@ -1283,5 +1287,275 @@ _v5_with_style(f, style) = with_style(f, style)
 		shown = [t for t in sf.plot.data if get(t.fields, :name, "") == "ridge" && get(t.fields, :showlegend, true) != false]
 		@test length(shown) == 1
 		@test PS._s3_finalize_scenes!(sf.plot) === false
+	end
+end
+
+# ── Wave 6 (v6 threed): scenes in grid cells fill them; labels apart ─────────
+
+# The modelled drawing of every scene of `fig` as exported with the options
+# `kw` (the layout size when empty): per scene key the viewport (cell) size,
+# the span of the union of the box and all label rectangles, the share of the
+# cell that union spans in the dimension that limits it (`fill`: the larger of
+# its two shares), whether it lies inside
+# the cell, the intersecting label rectangles with their (axis, kind) tags and
+# the title placements. Positions in px from the cell centre, y up
+# (`_s3_label_layout_tagged` at the camera written).
+function _v6_drawing(fig; kw...)
+	PS = PlotlySupply
+	p = fig isa SubplotFigure ? fig.plot : fig
+	options = PS._normalize_export_options(p, NamedTuple(kw))
+	src = PS._export_source(p, options)
+	size = (Float64(options.width), Float64(options.height))
+	out = Dict{Symbol, Any}()
+	Base.ScopedValues.with(PS._S3_EXPORT_SIZE => size) do
+		for key in keys(src.layout.fields)
+			(key isa Symbol && occursin(PS._S3_SCENE_KEY, String(key))) || continue
+			target = PS._s3_layout_target(src, key)
+			scene = src.layout.fields[key]
+			camera = PS._cmn_mapping_get(scene, :camera)
+			eye = PS._s3_vector3(PS._cmn_mapping_get(camera, :eye))
+			center = PS._s3_vector3(PS._cmn_mapping_get(camera, :center))
+			distance = PS._s3_norm(eye .- center)
+			frame = PS._s3_camera_frame((eye .- center) ./ distance, PS._s3_camera_up(camera))
+			w, h = PS._s3_viewport(src, target)
+			mark = PS._s3_mark(scene)
+			own = mark !== nothing && any(!isempty, mark.titles)
+			corners, quads, tags, placed = PS._s3_label_layout_tagged(PS._s3_drawn_box(src, key), Tuple(center), frame,
+				distance, w, h, PS._s3_axis_labels(src, key), PS._s3_scene_spans(src, key); own = own)
+			xs = vcat(first.(corners), [pt[1] for q in quads for pt in q])
+			ys = vcat(last.(corners), [pt[2] for q in quads for pt in q])
+			hits = [(tags[i], tags[j]) for i in eachindex(quads) for j in (i + 1):length(quads)
+				if PS._s3_quads_intersect(quads[i], quads[j]; tolerance = PS._S3_LABEL_TOUCH_PX)]
+			span = (maximum(xs) - minimum(xs), maximum(ys) - minimum(ys))
+			fill = max(span[1] / w, span[2] / h)
+			inside = minimum(xs) >= -w / 2 - 0.5 && maximum(xs) <= w / 2 + 0.5 &&
+				minimum(ys) >= -h / 2 - 0.5 && maximum(ys) <= h / 2 + 0.5
+			out[key] = (; viewport = (w, h), span, fill, inside, hits, placed, own, mark)
+		end
+	end
+	return out
+end
+
+function _v6_topo_cell()
+	sf = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec()], width_ratios = [1.25, 1],
+		horizontal_spacing = 0.1)
+	α = range(0.8, 1.4; length = 15)
+	τ = range(0, 0.125; length = 15)
+	R = [(1 - 0.55 * (a - 1)) * (1 + 1.6 * t^2 * a) for a in α, t in τ]
+	plot_surface!(sf, collect(α), collect(τ), R; row = 1, col = 1)
+	scene!(sf; row = 1, col = 1, aspectratio = (1.30, 1.0, 0.85), showbackground = false,
+		xlabel = "Material scale \$\\alpha\$", ylabel = "Time step \$\\Delta t/T_h\$", zlabel = "Frequency ratio \$R\$")
+	view!(sf; row = 1, col = 1, elev = 24, azim = -61)
+	θ = range(0, 2π; length = 61)
+	plot_scatter!(sf, cos.(θ), sin.(θ); row = 1, col = 2)
+	return sf
+end
+
+const _V6_TOPO_EXPORT = (width = 6.6, height = 2.0, units = :in, dpi = 200, tight = true)
+
+@testset "regression: 3-D wave 6 (v6 threed)" begin
+	PS = PlotlySupply
+
+	@testset "V4 scenes in cells fill them, labels never overlap (the projection model)" begin
+		cases = Pair{String, Any}[]
+		# (a) three long rotated axis titles in a small cell (topo_response (a))
+		push!(cases, "topo_response" => (_v6_topo_cell(), _V6_TOPO_EXPORT))
+		# (b) three scenes of one row at Nature double-column width, one colour bar
+		xs = range(-2, 2; length = 21)
+		Z(a) = [exp(-(x^2 + y^2) / a) * cos(2x) * cos(2y) for x in xs, y in xs]
+		nature = with_style(:nature) do
+			w = journal_width(:nature; columns = 2, units = :px)
+			sf = subplots(1, 3; sync = false, width = w, height = 0.36w, specs = fill(Spec(kind = "scene"), 1, 3))
+			for (c, a) in enumerate((1.0, 2.0, 4.0))
+				plot_surface!(sf, xs, xs, Z(a); row = 1, col = c, shared_coloraxis = true, xlabel = "\$x\$", ylabel = "\$y\$",
+					zlabel = "\$u\$", aspectmode = "cube")
+				view!(sf; row = 1, col = c, elev = 25, azim = -55)
+			end
+			colorbar!(sf; coloraxis = :shared, title = "\$u\$", title_side = :right)
+			sf
+		end
+		push!(cases, "nature_1x3" => (nature, NamedTuple()))
+		# (c) a single column export: one scene at the IEEE column width
+		ieee = with_style(:ieee) do
+			w = journal_width(:ieee; columns = 1, units = :px)
+			plot_surface(xs, xs, Z(2.0); width = w, height = 0.8w, xlabel = "x", ylabel = "y", zlabel = "z")
+		end
+		push!(cases, "ieee_single" => (ieee, NamedTuple()))
+		# (d) scenes beside a 2-D panel
+		mixed = subplots(1, 3; sync = false, width = 900, height = 300,
+			specs = [Spec(kind = "scene") Spec() Spec(kind = "scene")])
+		plot_surface!(mixed, xs, xs, Z(2.0); row = 1, col = 1, xlabel = "x", ylabel = "y", zlabel = "z")
+		plot_scatter!(mixed, collect(xs), Z(2.0)[:, 10]; row = 1, col = 2)
+		plot_surface!(mixed, xs, xs, Z(2.0); row = 1, col = 3, xlabel = "x", ylabel = "y", zlabel = "z")
+		push!(cases, "mixed_scene_xy" => (mixed, NamedTuple()))
+		for (name, (fig, kw)) in cases
+			drawing = _v6_drawing(fig; kw...)
+			@test !isempty(drawing)
+			for (key, d) in drawing
+				@test (name, key, d.fill >= 0.8) == (name, key, true)
+				@test (name, key, d.inside) == (name, key, true)
+				@test (name, key, d.hits) == (name, key, [])
+			end
+		end
+		# the identical cells of the row are drawn identically (Q39)
+		d = _v6_drawing(nature)
+		scenes = sort(collect(keys(d)); by = string)
+		@test length(scenes) == 3
+		@test all(k -> isapprox(collect(d[k].viewport), collect(d[scenes[1]].viewport); atol = 1e-6) &&
+		isapprox(collect(d[k].span), collect(d[scenes[1]].span); atol = 1e-6), scenes)
+	end
+
+	@testset "titles PlotlySupply draws itself: annotations at the projected axis, settled, restored" begin
+		sf = _v6_topo_cell()
+		d = _v6_drawing(sf; _V6_TOPO_EXPORT...)[:scene]
+		@test d.own
+		@test d.mark.titles == ("Material scale α", "Time step Δ t/T<sub>h</sub>", "Frequency ratio R")
+		@test length(d.placed) == 3
+		# the live figure (framed for the layout size) carries the same
+		figsize!(sf, 6.6, 2.0; units = :in)
+		layout = sf.plot.layout.fields
+		names = [PS._cmn_mapping_get(a, :name) for a in layout[:annotations]]
+		for letter in ("x", "y", "z")
+			@test "plotlysupply:scene3d:scene:title:$letter" in names
+		end
+		for axis in (:xaxis, :yaxis, :zaxis)
+			@test _r3_fields(_r3_fields(_r3_fields(layout[:scene])[axis])[:title])[:text] == PS._S3_TITLE_HIDDEN
+		end
+		one = [a for a in layout[:annotations] if PS._cmn_mapping_get(a, :name) == "plotlysupply:scene3d:scene:title:x"][1]
+		@test PS._cmn_mapping_get(one, :xref) == "paper" && PS._cmn_mapping_get(one, :showarrow) === false
+		@test 0 <= PS._cmn_mapping_get(one, :x) <= 1 && 0 <= PS._cmn_mapping_get(one, :y) <= 1
+		# settled: nothing is written by another pass, a savefig changes nothing
+		@test PS._finalize_figure!(sf) === false
+		@test PS._s3_finalize_scenes!(sf.plot) === false
+		before = PlotlyBase.JSON.json(sf.plot.layout.fields)
+		mktempdir() do dir
+			savefig(sf, joinpath(dir, "own.png"))
+		end
+		@test PlotlyBase.JSON.json(sf.plot.layout.fields) == before
+		# a camera of the user's gets the scene's own titles back
+		view!(sf; row = 1, col = 1, elev = 24, azim = -61, distance = 6.0)
+		names = [PS._cmn_mapping_get(a, :name) for a in get(sf.plot.layout.fields, :annotations, [])]
+		@test !any(n -> n isa AbstractString && startswith(n, "plotlysupply:scene3d:"), names)
+		@test _r3_fields(_r3_fields(_r3_fields(sf.plot.layout.fields[:scene])[:zaxis])[:title])[:text] == "Frequency ratio R"
+		@test all(isempty, PS._s3_mark(sf.plot.layout.fields[:scene]).titles)
+		@test PS._s3_finalize_scenes!(sf.plot) === false
+	end
+
+	@testset "_s3_wrap_title and _s3_quads_intersect" begin
+		@test PS._s3_wrap_title("Material scale α") == ("Material<br>scale α", 8)
+		@test PS._s3_wrap_title("Frequency ratio R") == ("Frequency<br>ratio R", 9)
+		@test PS._s3_wrap_title("Time step Δ t/T<sub>h</sub>") !== nothing
+		@test PS._s3_wrap_title("Energy") === nothing
+		@test PS._s3_wrap_title("a<br>b c") === nothing
+		@test PS._s3_wrap_title("\$a b\$") === nothing
+		@test PS._s3_wrap_title(" lone") === nothing
+		sq(x, y, s = 1.0) = ((x, y), (x + s, y), (x + s, y + s), (x, y + s))
+		@test PS._s3_quads_intersect(sq(0, 0), sq(0.5, 0.5))
+		@test !PS._s3_quads_intersect(sq(0, 0), sq(2, 0))
+		@test !PS._s3_quads_intersect(sq(0, 0), sq(1, 0))
+		@test !PS._s3_quads_intersect(sq(0, 0), sq(0.9, 0.9); tolerance = 0.2)
+		@test PS._s3_quads_intersect(sq(0, 0), sq(0.5, 0.5); tolerance = 0.2)
+	end
+
+	@testset "label pads: the asset reads them, the model writes and reads them" begin
+		layout = Layout()
+		@test !PS._s3_write_pads!(layout, :scene, PS._S3_GL_DEFAULT_PADS)
+		@test PS._s3_write_pads!(layout, :scene, (8.0, 12.5))
+		@test layout.fields[:meta][Symbol("plotlysupply:gl3d")][:scene] == [8.0, 12.5]
+		@test !PS._s3_write_pads!(layout, :scene, (8.0, 12.5))
+		p = Plot(layout)
+		@test PS._s3_scene_pads(p, :scene) == (8.0, 12.5)
+		@test PS._s3_scene_pads(p, :scene2) == PS._S3_GL_DEFAULT_PADS
+		@test PS._s3_write_pads!(layout, :scene, PS._S3_GL_DEFAULT_PADS)
+		@test !haskey(layout.fields, :meta)
+		# the user's own meta is kept; a meta that is not a mapping is left alone
+		layout = Layout()
+		layout.fields[:meta] = Dict{Any, Any}("mine" => 1)
+		@test PS._s3_write_pads!(layout, :scene, (8.0, 12.5))
+		@test layout.fields[:meta]["mine"] == 1
+		@test PS._s3_write_pads!(layout, :scene, PS._S3_GL_DEFAULT_PADS)
+		@test layout.fields[:meta] == Dict{Any, Any}("mine" => 1)
+		layout = Layout()
+		layout.fields[:meta] = "text"
+		@test !PS._s3_write_pads!(layout, :scene, (8.0, 12.5))
+		@test layout.fields[:meta] == "text"
+		# the patched Plotly.js: the seam occurs once and the patch reads the record
+		source = read(PS._plotlyjs_asset_path(), String)
+		@test count(PS._PLOTLYJS_GL3D_PAD_SEAM, source) == 1
+		@test occursin("plotlysupply:gl3d", PS._patch_plotlyjs_math_fonts(source))
+		# the scenes of a figure framed by PlotlySupply carry compact pads
+		f = _v6_topo_cell()
+		figsize!(f, 6.6, 2.0; units = :in)
+		@test PS._s3_scene_pads(f.plot, :scene)[1] < PS._S3_GL_TICK_PAD
+		@test PS._s3_finalize_scenes!(f.plot) === false
+	end
+
+	@testset "Z92 corner tick labels: one end tick of one axis is dropped, tracked, never stale" begin
+		xs = range(-1, 1; length = 31)
+		Zs = [sqrt(max(1 - x^2 - y^2, 0.0)) for x in xs, y in xs]
+		make() = plot_surface(xs .* 0.5, xs .* 0.5, 2 .* Zs .- 1; aspectmode = "data", xlabel = "x", ylabel = "y", zlabel = "z")
+		f = make()
+		axes = (:xaxis, :yaxis, :zaxis)
+		mark = PS._s3_mark(f.layout.fields[:scene])
+		trimmed = [d for d in 1:3 if !isempty(mark.tickvals[d])]
+		@test length(trimmed) == 1
+		d = only(trimmed)
+		values = _r3_fields(_r3_fields(f.layout.fields[:scene])[axes[d]])[:tickvals]
+		@test collect(Float64, values) == collect(mark.tickvals[d])
+		@test issorted(values) && length(values) >= 2
+		@test isempty(_v6_drawing(f)[:scene].hits)
+		@test PS._finalize_figure!(f) === false
+		# data that moves the range re-derives the tick values: never a stale list
+		plot_scatter3d!(f, [0.0, 3.0], [0.0, 3.0], [0.0, 5.0])
+		mark2 = PS._s3_mark(f.layout.fields[:scene])
+		scene2 = _r3_fields(f.layout.fields[:scene])
+		for e in 1:3
+			axis = _r3_fields(scene2[axes[e]])
+			tv = get(axis, :tickvals, nothing)
+			if isempty(mark2.tickvals[e])
+				@test tv === nothing
+			else
+				@test collect(Float64, tv) == collect(mark2.tickvals[e])
+				range = PS._s3_axis_range(f, :scene, e, axis)
+				@test all(v -> range[1] - 1e-9 <= v <= range[2] + 1e-9, mark2.tickvals[e])
+			end
+		end
+		@test PS._s3_finalize_scenes!(f) === false
+		# a tick placement of the user's is never touched
+		g = make()
+		scene!(g; zticks = [-1.0, 0.0, 1.0], xticks = [-0.5, 0.0, 0.5])
+		mg = PS._s3_mark(g.layout.fields[:scene])
+		@test isempty(mg.tickvals[1]) && isempty(mg.tickvals[3])
+		@test collect(Float64, _r3_fields(_r3_fields(g.layout.fields[:scene])[:zaxis])[:tickvals]) == [-1.0, 0.0, 1.0]
+		@test PS._s3_finalize_scenes!(g) === false
+		# plotly.js's step inside the range
+		@test PS._s3_nice_ticks((-1.0625, 1.0625), 5) == ([-1.0, -0.5, 0.0, 0.5, 1.0], 0.5)
+		@test PS._s3_nice_ticks((0.0, 0.0), 5)[1] == Float64[]
+	end
+
+	@testset "Q18 identical scene cells stay identical when one colour bar is shared" begin
+		xs = range(-2, 2; length = 21)
+		sf = subplots(1, 3; sync = false, width = 900, height = 330, specs = fill(Spec(kind = "scene"), 1, 3))
+		for c in 1:3
+			plot_surface!(sf, xs, xs, [exp(-(x^2 + y^2)) for x in xs, y in xs]; row = 1, col = c, shared_coloraxis = true,
+				aspectmode = "cube")
+			view!(sf; row = 1, col = c, elev = 25, azim = -55)
+		end
+		colorbar!(sf; coloraxis = :shared, title = "u", title_side = :right)
+		d = _v6_drawing(sf)
+		scenes = sort(collect(keys(d)); by = string)
+		@test length(scenes) == 3
+		@test all(k -> isapprox(collect(d[k].viewport), collect(d[scenes[1]].viewport); atol = 1e-6) &&
+		isapprox(collect(d[k].span), collect(d[scenes[1]].span); atol = 1e-6), scenes)
+		widths = [(dm = _r3_fields(_r3_fields(sf.plot.layout.fields[k])[:domain]); dm[:x][2] - dm[:x][1]) for k in scenes]
+		@test maximum(widths) - minimum(widths) < 1e-9
+	end
+
+	@testset "a second framing pass is cheap (own titles + corner ticks)" begin
+		sf = _v6_topo_cell()
+		figsize!(sf, 6.6, 2.0; units = :in)
+		PS._s3_finalize_scenes!(sf.plot)
+		t = @elapsed PS._s3_finalize_scenes!(sf.plot)
+		@test t < 2.0
 	end
 end

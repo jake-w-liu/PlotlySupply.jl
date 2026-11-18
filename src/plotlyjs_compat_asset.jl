@@ -19,8 +19,18 @@ const _PLOTLYJS_SVG_QUOTE_TRANSFORMS = (
 	raw""".replace(u,"'"),i.isIE()&&(w=(w=(w=w.replace(/"/gi,"'"))""" =>
 		raw""",i.isIE()&&(w=(w=(w=w.replace(/"/gi,"'"))""",
 )
+# gl-axes3d pushes scene tick labels and axis titles out of the box by the
+# constants tickPad = 18 and labelPad = 30 that no layout attribute reaches.
+# A scene reads its own pair from `layout.meta["plotlysupply:gl3d"][scene id]`
+# (written by PlotlySupply's 3-D framing, src/sci/scene3d.jl) and keeps the
+# constants without it.
+const _PLOTLYJS_GL3D_PAD_SEAM =
+	raw"""o.prototype.merge=function(t,e){for(var r=this,o=0;o<3;++o){var s=e[a[o]];s.visible?("""
+const _PLOTLYJS_GL3D_PAD_REPLACEMENT =
+	raw"""o.prototype.merge=function(t,e){var _g=t.meta&&t.meta["plotlysupply:gl3d"],_h=_g&&e._scene&&_g[e._scene.id];for(var r=this,o=0;o<3;++o){var s=e[a[o]];_h&&_h.length>=2&&isFinite(_h[0])&&isFinite(_h[1])&&_h[0]>=0&&_h[1]>=0&&(r.tickPad[o]=+_h[0],r.labelPad[o]=+_h[1]);s.visible?("""
 const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_MATH_FONT_SEAM => _PLOTLYJS_MATH_FONT_REPLACEMENT,
+	_PLOTLYJS_GL3D_PAD_SEAM => _PLOTLYJS_GL3D_PAD_REPLACEMENT,
 	_PLOTLYJS_SVG_QUOTE_TRANSFORMS...,
 )
 

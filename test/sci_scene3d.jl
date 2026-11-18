@@ -279,8 +279,17 @@ _t3_centred(fig, key::Symbol = :scene) = maximum(abs, _t3_drawing(fig, key).mid)
 		k = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 1.0])
 		scene!(k; aspectmode = "data", zrange = (0, 4))
 		@test _t3_ratio(k) ≈ [2.125, 1.0625, 4.0] ./ 4
-		# A full-size scene keeps plotly's own tick counts.
+		# A full-size scene keeps plotly's own tick counts (a unit cube at
+		# 600 x 390 px has axes of four ticks' length or more) ...
 		@test _t3_nticks(f) == [nothing, nothing, nothing]
+		# ... unless one of its axes is shorter than that (plotly.js's lower
+		# bound crowds it; its count also follows the export scale): the counts
+		# of a cell, and plotly's own again once the scene grows.
+		small = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; aspectmode = "cube", width = 300, height = 220)
+		@test all(n -> 2 <= n <= 3, _t3_nticks(small))
+		relayout!(small; width = 700, height = 500)
+		view!(small; elev = 30, azim = 40)
+		@test _t3_nticks(small) == [nothing, nothing, nothing]
 		# Scene cells: framed in their own viewport, with tick counts for it.
 		sf = _t3_scene_sf(3)
 		plot_scatter3d!(sf, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2, aspectmode = "cube")
@@ -732,7 +741,9 @@ _t3_centred(fig, key::Symbol = :scene) = maximum(abs, _t3_drawing(fig, key).mid)
 			  PlotlySupply._blend_over(PlotlySupply._default_trace_color(sf.plot, 4), 0.5, "#ff0000"; who = "test")
 		# Scene keywords go to the target cell's scene only (the first scene's
 		# camera is re-framed for the plot area the new colorbar leaves).
-		unframed(key) = Dict(k => PlotlyBase.JSON.json(v) for (k, v) in _t3_scene(sf, key) if !(k in (:camera, :plotlysupply)))
+		# (the tick counts of the axes follow the framing, so they are framing too)
+		unframed(key) = Dict(k => PlotlyBase.JSON.json(k in (:xaxis, :yaxis, :zaxis) ? Dict(a => b for (a, b) in _t3_fields(v) if a !== :nticks) : v)
+			for (k, v) in _t3_scene(sf, key) if !(k in (:camera, :plotlysupply)))
 		before1 = unframed(:scene)
 		plot_surface!(sf, rand(3, 3); row = 1, col = 2, xlabel = "\$x_1\$", zrange = [0, 2], perspective = false)
 		@test _t3_fields(_t3_axis(sf, :xaxis, :scene2)[:title])[:text] == "x<sub>1</sub>"
