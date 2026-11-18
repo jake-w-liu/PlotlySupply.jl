@@ -261,3 +261,29 @@ end
 	@test per_series_low > 0
 	@test per_series_high < 2 * per_series_low
 end
+
+# Loading the export backend (ElectronCall, on the first export) must not
+# invalidate compiled PlotlySupply code: it used to (an untyped closure called
+# `isvalid(::Any)`, which URIs' `isvalid(::URI)` invalidates together with every
+# caller above it), so the second export of a session recompiled `savefig` for
+# 0.7 s. Counted in a fresh process through the runtime's own invalidation log.
+@testset "loading the export backend invalidates no PlotlySupply method" begin
+	script = """
+	using PlotlySupply
+	x = collect(range(0, 2pi; length = 20))
+	plot_scatter(x, sin.(x); xlabel = "x")    # compiled code from the package image in use
+	log = ccall(:jl_debug_method_invalidation, Any, (Cint,), 1)
+	PlotlySupply._electroncall()
+	ccall(:jl_debug_method_invalidation, Any, (Cint,), 0)
+	owned = [mi for mi in log if mi isa Core.MethodInstance && mi.def isa Method && mi.def.module === PlotlySupply]
+	println("INVALIDATED=", length(owned))
+	for mi in first(unique(owned), 5)
+	    println("  ", mi)
+	end
+	"""
+	cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $script`
+	out = read(pipeline(cmd; stderr = devnull), String)
+	m = match(r"INVALIDATED=(\d+)", out)
+	@test m !== nothing
+	m === nothing || @test parse(Int, m.captures[1]) == 0
+end

@@ -78,7 +78,9 @@ const TTFX_SCENARIOS = [
 		dir = mktempdir()
 		# The Julia side of a png/pdf export (export copy, finalizer, JSON
 		# for the renderer) and the complete html export: no Electron.
-		println("RESULT first_export_model=", @elapsed PlotlySupply._prepare_export(fig, ("png", "pdf"), NamedTuple()))
+		# (an older release without these internals reports only the html rows)
+		isdefined(PlotlySupply, :_prepare_export) &&
+			println("RESULT first_export_model=", @elapsed PlotlySupply._prepare_export(fig, ("png", "pdf"), NamedTuple()))
 		println("RESULT first_savefig_html=", @elapsed savefig(fig, joinpath(dir, "f.html")))
 		println("RESULT second_savefig_html=", @elapsed savefig(fig, joinpath(dir, "g.html")))
 		""",
@@ -98,7 +100,8 @@ const TTFX_SCENARIOS = [
 		# A second export window (a fresh export state) on the Electron
 		# application that is already running, with every Julia method
 		# compiled: the cost of a window and its page alone.
-		println("RESULT second_export_window=", @elapsed PlotlySupply._ensure_export_window(PlotlySupply._ExportState()))
+		isdefined(PlotlySupply, :_ExportState) && isdefined(PlotlySupply, :_ensure_export_window) &&
+			println("RESULT second_export_window=", @elapsed PlotlySupply._ensure_export_window(PlotlySupply._ExportState()))
 		""",
 	),
 	(
@@ -113,12 +116,15 @@ const TTFX_SCENARIOS = [
 		# reports the time this process spent compiling (inference and code
 		# generation) inside each stage; the rest of the first window is the
 		# Electron application's start-up and the window's page load.
-		println("RESULT split_export_model=", @elapsed PlotlySupply._prepare_export(fig, ("png",), NamedTuple()))
-		println("RESULT split_load_electroncall=", @elapsed PlotlySupply._electroncall())
-		s = @timed PlotlySupply._ensure_export_window()
-		println("RESULT split_first_window=", s.time)
-		println("RESULT split_first_window_julia_compile=", s.compile_time)
-		println("RESULT split_first_window_electron_and_page=", s.time - s.compile_time)
+		# (an older release without these internals reports only the first render)
+		if all(name -> isdefined(PlotlySupply, name), (:_prepare_export, :_electroncall, :_ensure_export_window))
+			println("RESULT split_export_model=", @elapsed PlotlySupply._prepare_export(fig, ("png",), NamedTuple()))
+			println("RESULT split_load_electroncall=", @elapsed PlotlySupply._electroncall())
+			s = @timed PlotlySupply._ensure_export_window()
+			println("RESULT split_first_window=", s.time)
+			println("RESULT split_first_window_julia_compile=", s.compile_time)
+			println("RESULT split_first_window_electron_and_page=", s.time - s.compile_time)
+		end
 		s = @timed savefig(fig, joinpath(dir, "a.png"); width = 700, height = 500)
 		println("RESULT split_first_png_render=", s.time)
 		println("RESULT split_first_png_render_julia_compile=", s.compile_time)
