@@ -1857,3 +1857,11 @@ end
 		@test err isa ArgumentError && startswith(err.msg, "plot_bar:")
 	end
 end
+
+@testset "scatter family: one-sided limit on an equal-aspect axis pins the open end (Z51, D11)" begin
+	f = plot_scatter(1:5, [1.0, 2, 3, 4, 5]; equalar = true, yrange = (0, nothing))
+	range = _rsc_axis(f, :yaxis)[:range]
+	@test range[1] == 0 && range[2] >= 5
+	z = plot_complex([1 + 1im, 2 + 0.5im]; yrange = (0, nothing))
+	@test _rsc_axis(z, :yaxis)[:range][1] == 0
+end
