@@ -1695,3 +1695,117 @@ end
 		end
 	end
 end
+
+# ---------------------------------------------------------------------------
+# Per-mutation cost (Q27, subplots owner (c))
+# ---------------------------------------------------------------------------
+
+@testset "cost: layout and key lookups answer like the copies they replaced" begin
+	# `_layout_axis_domain` / `_layout_subplot_domain` read without copying the entry.
+	l = Layout(xaxis = attr(domain = [0.1, 0.4]),
+		scene = attr(domain = attr(x = [0.0, 0.5], y = [0.25, 1.0])), xaxis4 = attr(domain = [0.3]))
+	l.fields[:yaxis2] = Dict{Any, Any}("domain" => (0.2, 0.9))      # a String-keyed mapping
+	l.fields[:xaxis3] = nothing
+	@test _SFN._layout_axis_domain(l, :xaxis) == (0.1, 0.4)
+	@test _SFN._layout_axis_domain(l, :yaxis2) == (0.2, 0.9)
+	@test _SFN._layout_axis_domain(l, :xaxis3) === nothing
+	@test _SFN._layout_axis_domain(l, :xaxis4) === nothing        # not a pair
+	@test _SFN._layout_axis_domain(l, :xaxis9) === nothing        # absent
+	@test _SFN._layout_subplot_domain(l, :scene) == ((0.0, 0.5), (0.25, 1.0))
+	@test _SFN._layout_subplot_domain(l, :scene2) === nothing
+	# Reference classification, cached.
+	for ref in ("x", "y", "x2", "y13", "x10")
+		@test _SFN._fin_axis_key(ref) === Symbol(ref[1], "axis", ref[2:end])
+		@test _SFN._fin_axis_key(ref) === _SFN._fin_axis_key(Symbol(ref)) === _SFN._fin_axis_key(ref)
+	end
+	for ref in ("", "x1", "x0", "xx", "z", "x02", "X", "xaxis", " x", 3, nothing, 'x')
+		@test _SFN._fin_axis_key(ref) === nothing
+	end
+	for key in (:xaxis, :yaxis2, :xaxis12)
+		@test _SFN._fin_is_axis_key(key) && _SFN._fin_is_axis_key(key)
+	end
+	for key in (:xaxis1, :xaxis0, :scene, :x, "xaxis", 3, :yaxis02)
+		@test !_SFN._fin_is_axis_key(key)
+	end
+	@test _SFN._axis_layout_key("x", :x) === :xaxis
+	@test _SFN._axis_layout_key("y12", :y) === :yaxis12
+	@test _SFN._axis_layout_key("q", :x) === :xaxisq               # as `replace(r"^[xy]" => "")` did
+	@test _SFN._axis_layout_key("", :y) === :yaxis
+	# The caches are bounded: unknown keys cannot grow them without limit.
+	for i in 1:(_SFN._FIN_KEY_CACHE_LIMIT + 50)
+		_SFN._fin_axis_key("z$i"); _SFN._fin_is_axis_key(Symbol("k$i"))
+	end
+	@test length(_SFN._FIN_AXIS_KEY_CACHE) <= _SFN._FIN_KEY_CACHE_LIMIT
+	@test length(_SFN._FIN_IS_AXIS_KEY_CACHE) <= _SFN._FIN_KEY_CACHE_LIMIT
+	@test _SFN._fin_axis_key("x2") === :xaxis2                     # still answers when full
+	# The legend host search keeps its answers: a grid cell's own pair has no host,
+	# an inset inside a cell is hosted by it.
+	sf = subplots(2, 2; sync = false)
+	for r in 1:2, c in 1:2
+		plot_scatter!(sf, 1:3, 1:3; row = r, col = c)
+	end
+	p = sf.plot
+	@test _SFN._legend_inset_host(p, "x2", "y2", (0.6, 1.0), (0.6, 1.0)) === nothing
+end
+
+@testset "cost: the room plan keeps its overlay scan and legend assignment per plan" begin
+	f = plot_scatter(1:10, rand(10); legend = "line")
+	plot_histogram2d!(f, randn(40) .* 2 .+ 5, randn(40) .* 2 .+ 5; secondary_y = true)
+	plan = _SFN._room_plan(f)
+	list = _SFN._room_overlays(plan)
+	@test any(item -> item[2] == 'y' && item[4] == "right", list)
+	@test _SFN._room_overlays(plan) === list                      # not scanned again
+	sf = subplots(2, 2; sync = false)
+	for r in 1:2, c in 1:2
+		plot_scatter!(sf, 1:3, 1:3; row = r, col = c, legend = "s$(r)$(c)")
+	end
+	plan = _SFN._room_plan(sf)
+	a1 = _SFN._room_legend_assignment(plan)
+	@test _SFN._room_legend_assignment(plan) === a1
+	@test a1[1] == _SFN._legend_subplot_assignment(sf.plot)[1]
+end
+
+@testset "cost: an append to a many-cell grid does not pay for every cell twice (Q27)" begin
+	grid(n) = begin
+		sf = subplots(n, n; sync = false)
+		for r in 1:n, c in 1:n
+			plot_scatter!(sf, 1:5, [1.0, 3.0, 2.0, 5.0, 4.0]; row = r, col = c, xlabel = "x", ylabel = "y")
+		end
+		sf
+	end
+	cost(sf) = begin
+		for _ in 1:3
+			plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)
+		end
+		minimum(@allocated(plot_scatter!(sf, 1:3, 1:3; row = 1, col = 1)) for _ in 1:5)
+	end
+	small, large = cost(grid(2)), cost(grid(6))
+	# Linear in the number of cells at most (9x the cells): the plan no longer
+	# scans every layout entry or every cell's pairs once per cell.
+	@test large <= 8.0 * small
+	@test large < 2.6e6
+	# One 6 x 6 grid of heatmaps with a bar each: the bars are decorations, so
+	# the finalizer pays for them, but per cell no more than a 2 x 2 grid does.
+	hgrid(n) = begin
+		sf = subplots(n, n; sync = false)
+		for r in 1:n, c in 1:n
+			plot_heatmap!(sf, [1.0 2.0; 3.0 4.0]; row = r, col = c)
+		end
+		sf
+	end
+	h2, h6 = hgrid(2), hgrid(6)
+	_SFN._finalize_figure!(h2); _SFN._finalize_figure!(h6)
+	f2 = minimum(@allocated(_SFN._finalize_figure!(h2)) for _ in 1:5)
+	f6 = minimum(@allocated(_SFN._finalize_figure!(h6)) for _ in 1:5)
+	@test f6 / 36 <= 1.3 * f2 / 4
+	@test f6 < 2.4e6
+	# xlabel! on a 200-trace figure: no per-trace copies.
+	big = plot_scatter(1:10, 1:10)
+	for i in 1:199
+		plot_scatter!(big, 1:10, (1:10) .* i)
+	end
+	for _ in 1:3
+		xlabel!(big, "a")
+	end
+	@test minimum(@allocated(xlabel!(big, "b")) for _ in 1:5) < 3.6e5
+end

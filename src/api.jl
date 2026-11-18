@@ -1133,20 +1133,23 @@ function _domain_tuple(x)
 end
 
 function _axis_layout_key(axis_ref::AbstractString, axis::Symbol)
-	suffix = replace(axis_ref, r"^[xy]" => "")
-	return Symbol((axis === :x ? "xaxis" : "yaxis") * suffix)
+	# The reference without its leading "x"/"y" (no regex: called for every
+	# axis pair of every legend and finalize pass).
+	suffix = !isempty(axis_ref) && first(axis_ref) in ('x', 'y') ? SubString(axis_ref, 2) : axis_ref
+	return Symbol(axis === :x ? "xaxis" : "yaxis", suffix)
 end
 
+# Read through `_cmn_mapping_get`: the finalizer asks for the domain of every
+# axis many times per run, and a `_symbol_dict` copy of each entry made these
+# two the largest allocation of an append to a 6 x 6 grid.
 function _layout_axis_domain(layout::Layout, key::Symbol)
-	entry = _symbol_dict(get(layout.fields, key, nothing))
-	return _domain_tuple(get(entry, :domain, nothing))
+	return _domain_tuple(_cmn_mapping_get(get(layout.fields, key, nothing), :domain))
 end
 
 function _layout_subplot_domain(layout::Layout, key::Symbol)
-	entry = _symbol_dict(get(layout.fields, key, nothing))
-	domain = _symbol_dict(get(entry, :domain, nothing))
-	xdom = _domain_tuple(get(domain, :x, nothing))
-	ydom = _domain_tuple(get(domain, :y, nothing))
+	domain = _cmn_mapping_get(get(layout.fields, key, nothing), :domain)
+	xdom = _domain_tuple(_cmn_mapping_get(domain, :x))
+	ydom = _domain_tuple(_cmn_mapping_get(domain, :y))
 	(xdom === nothing || ydom === nothing) && return nothing
 	return (xdom, ydom)
 end
@@ -1186,6 +1189,17 @@ _legend_domain_within(inner, outer) =
 # inside several overlapping cells, keeps its own legend.
 function _legend_inset_host(p::Plot, xref::String, yref::String, xdom, ydom)
 	grid_ref = p.layout.subplots.grid_ref
+	# The common case first, without building the list of cells: the pair is
+	# a grid cell's own.
+	for index in eachindex(grid_ref)
+		isassigned(grid_ref, index) || continue
+		refs = grid_ref[index]
+		isempty(refs) && continue
+		ref = first(refs)
+		String(ref.subplot_kind) == "xy" || continue
+		routing = ref.trace_kwargs.fields
+		String(get(routing, :xaxis, "x")) == xref && String(get(routing, :yaxis, "y")) == yref && return nothing
+	end
 	cells = Tuple{String, String}[]
 	for index in eachindex(grid_ref)
 		isassigned(grid_ref, index) || continue
@@ -1194,9 +1208,7 @@ function _legend_inset_host(p::Plot, xref::String, yref::String, xdom, ydom)
 		ref = first(refs)
 		String(ref.subplot_kind) == "xy" || continue
 		routing = ref.trace_kwargs.fields
-		cell = (String(get(routing, :xaxis, "x")), String(get(routing, :yaxis, "y")))
-		cell == (xref, yref) && return nothing
-		push!(cells, cell)
+		push!(cells, (String(get(routing, :xaxis, "x")), String(get(routing, :yaxis, "y"))))
 	end
 	host = nothing
 	for (cell_x, cell_y) in cells

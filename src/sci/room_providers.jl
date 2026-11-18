@@ -488,7 +488,7 @@ function _lt_legend_decorations!(out, plan, cells, single::Bool, boxes)
 	cell_ids = Tuple{String, Symbol}[]
 	if cell_mode
 		order, ids, _, _ = try
-			_legend_subplot_assignment(p)
+			_room_legend_assignment(plan)
 		catch err
 			err isa ArgumentError || rethrow()
 			return out      # more cell legends than legend ids: nothing is placed

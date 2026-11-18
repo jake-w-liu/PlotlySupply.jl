@@ -20,15 +20,40 @@
 
 const _FIN_AXIS_KEY = r"^[xy]axis([2-9]|[1-9][0-9]+)?$"
 
-_fin_is_axis_key(key) = key isa Symbol && occursin(_FIN_AXIS_KEY, String(key))
+# The classification of a layout key or axis reference allocates a string and
+# a regex match, and the finalizer asks it for every layout entry many times
+# per run (an append to a 6 x 6 grid: thousands of calls). The answers are
+# remembered; the tables are bounded (a user's own keys cannot grow them
+# without limit) and locked (finalizers of different figures may run on
+# different tasks).
+const _FIN_KEY_CACHE_LIMIT = 4096
+const _FIN_KEY_CACHE_LOCK = ReentrantLock()
+const _FIN_IS_AXIS_KEY_CACHE = Dict{Symbol, Bool}()
+const _FIN_AXIS_KEY_CACHE = Dict{String, Union{Nothing, Symbol}}()
+
+function _fin_is_axis_key(key)
+	key isa Symbol || return false
+	@lock _FIN_KEY_CACHE_LOCK begin
+		known = get(_FIN_IS_AXIS_KEY_CACHE, key, nothing)
+		known === nothing || return known
+		answer = occursin(_FIN_AXIS_KEY, String(key))
+		length(_FIN_IS_AXIS_KEY_CACHE) < _FIN_KEY_CACHE_LIMIT && (_FIN_IS_AXIS_KEY_CACHE[key] = answer)
+		return answer
+	end
+end
 
 # Layout key of an axis reference: "x" -> :xaxis, "y3" -> :yaxis3; `nothing`
 # for anything that is not a Cartesian axis reference.
 function _fin_axis_key(ref)
 	(ref isa AbstractString || ref isa Symbol) || return nothing
-	m = match(r"^([xy])([2-9]|[1-9][0-9]+)?$", String(ref))
-	m === nothing && return nothing
-	return Symbol(m.captures[1], "axis", something(m.captures[2], ""))
+	text = String(ref)
+	@lock _FIN_KEY_CACHE_LOCK begin
+		haskey(_FIN_AXIS_KEY_CACHE, text) && return _FIN_AXIS_KEY_CACHE[text]
+		m = match(r"^([xy])([2-9]|[1-9][0-9]+)?$", text)
+		answer = m === nothing ? nothing : Symbol(m.captures[1], "axis", something(m.captures[2], ""))
+		length(_FIN_AXIS_KEY_CACHE) < _FIN_KEY_CACHE_LIMIT && (_FIN_AXIS_KEY_CACHE[text] = answer)
+		return answer
+	end
 end
 
 # Axis reference of a layout key: :xaxis -> "x", :yaxis3 -> "y3".
@@ -68,6 +93,8 @@ end
 # The root of the `matches` chain that starts at `key` (`key` itself when it
 # matches nothing); `nothing` for a cyclic chain.
 function _fin_match_root(fields::AbstractDict, key::Symbol)
+	# Most axes match nothing: no table for them.
+	_fin_axis_key(_fin_field(get(fields, key, nothing), :matches)) === nothing && return key
 	seen = Set{Symbol}((key,))
 	root = key
 	while true
@@ -1034,7 +1061,7 @@ function _fin_margins(layout::Layout, accs, W::Float64, H::Float64, domains, bar
 	push_b = 0.0
 	Hp = max(H - base.t - base.b, 1.0)
 	Wp = max(W - base.l - base.r, 1.0)
-	domain_of(key) = get(domains, key, _fin_domain(layout, key))
+	domain_of(key) = haskey(domains, key) ? domains[key] : _fin_domain(layout, key)
 	for (key, axis) in fields
 		_fin_is_axis_key(key) || continue
 		_cmn_mapping_get(axis, :visible) === false && continue
@@ -2296,6 +2323,11 @@ mutable struct _RoomPlan
 	vacated::Set{Tuple{Symbol, Symbol}}
 	moved::Vector{Tuple{_FinBar, Dict{Symbol, Any}}}
 	wrote::Bool
+	# Per-plan results of scans that read the whole layout or every trace and
+	# cannot change while the plan is built (`_room_overlays`,
+	# `_room_legend_assignment`): nothing writes the figure between its
+	# measure and place phases.
+	memo::Dict{Symbol, Any}
 end
 
 _room_requests!(plan, ::Val) = nothing
@@ -2481,21 +2513,48 @@ function _room_own_extents(plan::_RoomPlan, xkey::Symbol, ykey::Symbol, cur)
 			_room_y_title_overhang(layout, ykey))
 	xref, yref = _fin_axis_ref(xkey), _fin_axis_ref(ykey)
 	# Overlaying axes: a twin y axis on the right, a secondary x axis on top.
-	for (key, axis) in layout.fields
-		_fin_is_axis_key(key) || continue
-		over = _fin_string(_cmn_mapping_get(axis, :overlaying))
-		over === nothing && continue
-		letter = String(key)[1]
-		if letter == 'y' && over == yref &&
-				something(_fin_string(_cmn_mapping_get(axis, :side)), "left") == "right"
+	for (key, letter, over, side) in _room_overlays(plan)
+		if letter == 'y' && over == yref && side == "right"
 			own[:right] = max(own[:right], _fin_y_labels_px(layout, plan.accs, key, cur[2], plan.Hp) +
 				_room_y_title_overhang(layout, key))
-		elseif letter == 'x' && over == xref &&
-				something(_fin_string(_cmn_mapping_get(axis, :side)), "bottom") == "top"
+		elseif letter == 'x' && over == xref && side == "top"
 			own[:top] = max(own[:top], _fin_x_labels_px(layout, key))
 		end
 	end
 	return own
+end
+
+# `(key, 'x' | 'y', overlaid axis reference, side)` of the axes of the layout
+# that overlay another, in layout order. One scan per plan: scanning every
+# layout entry for every plot area made the plan quadratic in the cells.
+function _room_overlays(plan::_RoomPlan)
+	haskey(plan.memo, :overlays) && return plan.memo[:overlays]
+	list = Tuple{Symbol, Char, String, String}[]
+	for (key, axis) in plan.layout.fields
+		_fin_is_axis_key(key) || continue
+		over = _fin_string(_cmn_mapping_get(axis, :overlaying))
+		over === nothing && continue
+		letter = String(key)[1]
+		side = something(_fin_string(_cmn_mapping_get(axis, :side)), letter == 'y' ? "left" : "bottom")
+		push!(list, (key, letter, over, side))
+	end
+	plan.memo[:overlays] = list
+	return list
+end
+
+# `_legend_subplot_assignment(plan.p)` (order, ids, domains, trace keys), or
+# the `ArgumentError` it throws, computed once per plan: the measure and the
+# place phase of the legend providers both ask for it.
+function _room_legend_assignment(plan::_RoomPlan)
+	haskey(plan.memo, :legend_assignment) || (plan.memo[:legend_assignment] = try
+		_legend_subplot_assignment(plan.p)
+	catch err
+		err isa ArgumentError || rethrow()
+		err
+	end)
+	answer = plan.memo[:legend_assignment]
+	answer isa ArgumentError && throw(answer)
+	return answer
 end
 
 function _room_new_area(key::Symbol, ykey, kind::Symbol, grid::Bool, cur)
@@ -3055,7 +3114,7 @@ function _room_new_plan(ctx::_FinContext, accs, bars, W::Float64, H::Float64, ma
 		max(H - margins.t - margins.b, 1.0), _fin_font_size(layout), margins, Dict{Symbol, _RoomArea}(),
 		Symbol[], _RoomRequest[], Dict{Tuple{Symbol, String}, Vector{Any}}(), Dict{Symbol, Any}(), nothing,
 		bars, aspect, skip, Dict{String, Any}(), Set{Tuple{Symbol, Symbol}}(),
-		Tuple{_FinBar, Dict{Symbol, Any}}[], false)
+		Tuple{_FinBar, Dict{Symbol, Any}}[], false, Dict{Symbol, Any}())
 end
 
 # The plan of a figure W x H (`aspect`: x axis => y axis of the equal-aspect
