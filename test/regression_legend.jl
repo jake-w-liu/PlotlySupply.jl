@@ -799,6 +799,21 @@ using Test, PlotlySupply
 		@test all(p -> p[4] - p[2] > 5, b["plots"])
 	end
 
+	@testset "Z65/Z97: panel labels are not clipped under journal margins (no tight_layout! needed)" begin
+		for style in (:publication, :ieee, :nature)
+			for outside in (true, false)
+				b = with_style(style) do
+					w, h = PS._style_default_figure_size()
+					fig = plot_scatter(1:5, [1, 4, 2, 5, 3]; xlabel = "x", ylabel = "y", title = "A title")
+					panel_labels!(fig; labels = ["a"], position = :topleft, outside = outside)
+					export_boxes(fig; width = round(Int, w), height = round(Int, h))
+				end
+				@test length(b["ann"]) == 1
+				@test layout_defects(b) == String[]
+			end
+		end
+	end
+
 	@testset "D12: what reaches past a narrow cell clears its top y tick label; labels clear wide titles" begin
 		xs = collect(range(0, 1; length = 20))
 		size = (520, 260)
