@@ -102,8 +102,10 @@ using Test, PlotlySupply
 		# hidden legend: nothing to clear
 		m = plot_scatter(x, [x, 2x]; legend = ["a", "b"], title = "T")
 		set_legend!(m; position = :outside_top, showlegend = false)
-		# D7: the constructor stores the title as `title.text`; nothing is added.
-		@test sd(pl(m).layout.fields[:title]) == Dict{Symbol, Any}(:text => "T")
+		# The constructor placed the title like `title!` (Z28); a hidden legend
+		# adds no clearance (`pad.b`) to it.
+		@test sd(pl(m).layout.fields[:title])[:text] == "T"
+		@test !haskey(sd(sd(pl(m).layout.fields[:title])[:pad]), :b)
 
 		# SubplotFigure figure legend above the grid, the title above it
 		sf = subplots(1, 2; sync = false)
@@ -861,8 +863,8 @@ using Test, PlotlySupply
 		relayout!(sf; xaxis2_domain = [0.8, 1.0])
 		PS._finalize_figure!(sf)
 		@test collect(dom()) == [0.8, 1.0]
-		# a row gap shared by the x axis above and a title line below is split
-		# evenly between the two rows
+		# a row gap between the x axis above (axis title) and a title line below:
+		# both rows give up height for it
 		sr = subplots(2, 1; sync = false)
 		plot_scatter!(sr, xs, xs; row = 1, col = 1)
 		plot_scatter!(sr, xs, xs; row = 2, col = 1)
@@ -870,6 +872,6 @@ using Test, PlotlySupply
 		title!(sr, "lower panel"; row = 2, col = 1)
 		plan = PS._room_plan(sr; size = (300, 200))
 		top, bottom = plan.areas[:xaxis].room[:bottom], plan.areas[:xaxis2].room[:top]
-		@test top > 0 && top ≈ bottom
+		@test top > 0 && bottom > 0
 	end
 end

@@ -10422,36 +10422,6 @@ function _scat_legend_window(
 	return reversed ? (hi, lo) : (lo, hi)
 end
 
-# Vertices of the line plotly.js draws from (u1, v1) to (u2, v2) for the
-# scatter `line.shape` `shape` (plotly.js 2.35 `line_points`: "hv" goes
-# across then up, "vh" up then across, "hvh"/"vhv" turn at the midpoint;
-# "linear" and "spline" are scored as the straight segment). Always four
-# vertices (shorter paths repeat their end point; a zero-length piece at a
-# vertex hits a box only where the piece before it does), so the scoring loop
-# over a long trace stays type-stable and allocation-free.
-function _scat_legend_step_path(shape::AbstractString, u1::Float64, v1::Float64, u2::Float64, v2::Float64)
-	if shape == "hv"
-		return ((u1, v1), (u2, v1), (u2, v2), (u2, v2))
-	elseif shape == "vh"
-		return ((u1, v1), (u1, v2), (u2, v2), (u2, v2))
-	elseif shape == "hvh"
-		um = (u1 + u2) / 2
-		return ((u1, v1), (um, v1), (um, v2), (u2, v2))
-	elseif shape == "vhv"
-		vm = (v1 + v2) / 2
-		return ((u1, v1), (u1, vm), (u2, vm), (u2, v2))
-	end
-	return ((u1, v1), (u2, v2), (u2, v2), (u2, v2))
-end
-
-function _scat_legend_path_hits_box(path, u0, u1, v0, v1)
-	for index in 1:(length(path) - 1)
-		a, b = path[index], path[index + 1]
-		_scat_segment_hits_box(a[1], a[2], b[1], b[2], u0, u1, v0, v1) && return true
-	end
-	return false
-end
-
 # The position of `_SCAT_LEGEND_POSITIONS` for the default legend of `p`, or
 # `nothing` when the data extent is unknown: a visible trace this estimate does
 # not model (another trace type, another x axis, a stacked fill or a fill to

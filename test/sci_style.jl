@@ -549,12 +549,14 @@ using PlotlySupply
 			title = sd(fig.layout.fields[:title])
 			@test title[:text] == "T"
 			@test title[:automargin] === true
-			@test sd(title[:pad]) == Dict(:t => 4)
+			# The constructor placed the title like `title!` (Z28): its explicit
+			# `pad.t` (_TEXT_TITLE_TOP_PAD) is kept, not replaced by the margin.
+			@test sd(title[:pad])[:t] == 10
 
 			tight_layout!(fig; pad = 2.5)
 			@test sd(fig.layout.fields[:margin])[:l] == 2.5
 			# An explicit title pad set by the user (here by the previous call) is kept.
-			@test sd(sd(fig.layout.fields[:title])[:pad]) == Dict(:t => 4)
+			@test sd(sd(fig.layout.fields[:title])[:pad])[:t] == 10
 			tight_layout!(fig; pad = 0)
 			@test sd(fig.layout.fields[:margin])[:b] == 0
 
