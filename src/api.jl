@@ -3348,17 +3348,28 @@ with `plot_*!` get a colorbar next to their own cell (see
 - Grid titles (`subplot_titles`, `column_titles` — one string per column —,
   `row_titles` — one per row —, `x_title`, `y_title`) are text labels like
   [`title!`](@ref): `\$…\$` math mixed with text keeps the text and `\\n`
-  breaks the line. `""` or `missing` leaves a cell untitled.
+  breaks the line. `""` or `missing` leaves a cell untitled. They are named
+  layout annotations: a cell title `"plotlysupply:title:<row>:<col>"` (the
+  panel title [`title!`](@ref)`(sf, text; row, col)` replaces), a column or
+  row title `"plotlysupply:title!:<row>:<col>:column"`/`":row"` (the cell it
+  sits above or beside), `"plotlysupply:x_title"` and
+  `"plotlysupply:y_title"`; the active style sizes them as titles and
+  [`set_fonts!`](@ref)`(sf; title)` restyles them.
 - Shared axes (`shared_xaxes`, `shared_yaxes`: `true`, `"rows"`,
   `"columns"`, `"all"`, as in plotly.py) form one `matches` group per
   column/row/figure; plotly draws every axis of a group with the root's
-  range and type. Calls on any cell of a group act on the group: the axis
-  type (`xscale = "log"`), tick placement and tick-label format are copied
-  to every axis of the group, a range set on any cell (`xrange!`, the
-  `xrange` keyword, `update_xaxes!(sf; row, col, range)`) becomes the
-  group's range, and an axis title set on a cell whose tick labels are
-  hidden goes to the cell that shows the group's tick labels in that column
-  (x) or row (y). Secondary y axes are never part of a group.
+  range and type. Calls on any cell of a group act on the group, whether
+  they are keywords, axis helpers, `update_xaxes!`/`update_yaxes!` or
+  `relayout!`/`update!` on an axis of the group: the axis type
+  (`xscale = "log"`), tick placement, tick-label format, font and angle are
+  copied to every axis of the group (an inset that shares a cell's axis
+  keeps its own tick-label font and angle), a one-sided limit
+  (`xrange = (0, nothing)`) is set on every axis of the group, a range set
+  on any cell (`xrange!`, the `xrange` keyword, `update_xaxes!(sf; row,
+  col, range)`) becomes the group's range, and an axis title set on a cell
+  whose tick labels are hidden goes to the cell that shows the group's tick
+  labels in that column (x) or row (y). Secondary y axes are never part of
+  a group.
 - `insets`: a vector of `PlotlyBase.Inset(cell=(row, col), kind, l, w, b, h)`
   whose cells lie in the grid. Cartesian insets (`kind="xy"`, the default)
   are registered like the ones [`inset!`](@ref) adds: ids `1, 2, …` in the

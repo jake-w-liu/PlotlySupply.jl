@@ -2042,18 +2042,25 @@ function _rsp_content(sf::SubplotFigure)
 	return (length(sf.plot.data), titles, notes)
 end
 
+# `:removed_cell`: shared columns and rows with cell (2, 2) removed
+# (`missing` spec), the secondary y axis in cell (1, 2).
 function _rsp_sync_figure(mode::Symbol)
 	kw = mode === :x_columns ? (shared_xaxes = true,) :
 		mode === :y_rows ? (shared_yaxes = true,) :
 		mode === :x_rows ? (shared_xaxes = "rows",) :
 		mode === :y_columns ? (shared_yaxes = "columns",) :
+		mode === :removed_cell ? (shared_xaxes = true, shared_yaxes = true) :
 		(shared_xaxes = "all", shared_yaxes = "all")
-	specs = [Spec() Spec(); Spec() Spec(secondary_y = true)]
+	removed = mode === :removed_cell
+	specs = removed ? [Spec() Spec(secondary_y = true); Spec() missing] :
+		[Spec() Spec(); Spec() Spec(secondary_y = true)]
 	sf = subplots(2, 2; sync = false, specs = specs, subplot_titles = ["a" "b"; "c" "d"], kw...)
 	for r in 1:2, c in 1:2
+		removed && (r, c) == (2, 2) && continue
 		plot_scatter!(sf, [1.0, 2.0, 4.0], [1.0, 3.0, 2.0] .* (r + c); row = r, col = c)
 	end
-	plot_scatter!(sf, [1.0, 2.0, 4.0], [10.0, 20.0, 15.0]; row = 2, col = 2, secondary_y = true)
+	secondary = removed ? (1, 2) : (2, 2)
+	plot_scatter!(sf, [1.0, 2.0, 4.0], [10.0, 20.0, 15.0]; row = secondary[1], col = secondary[2], secondary_y = true)
 	inset!(sf, (0.55, 0.55, 0.4, 0.4); row = 1, col = 1, sharex = true, sharey = true)
 	xlabel!(sf, "x of (1,1)"; row = 1, col = 1)
 	ylabel!(sf, "y of (1,2)"; row = 1, col = 2)
@@ -2100,7 +2107,7 @@ const _RSP_SYNC_CALLS = Any[
 ]
 
 @testset "shared axes: every call keeps the group invariants (table)" begin
-	for mode in (:x_columns, :y_rows, :x_rows, :y_columns, :all)
+	for mode in (:x_columns, :y_rows, :x_rows, :y_columns, :all, :removed_cell)
 		@testset "$(mode)" begin
 			base = _rsp_sync_figure(mode)
 			@test !isempty(_rsp_match_groups(base))
@@ -2109,13 +2116,28 @@ const _RSP_SYNC_CALLS = Any[
 				@testset "$(name)" begin
 					sf = _rsp_sync_figure(mode)
 					before = _rsp_content(sf)
-					call(sf)
-					@test isempty(_rsp_sync_problems(sf))
-					styling && @test _rsp_content(sf) == before
-					first_state = JSON.json(sf.plot.layout)
-					if idempotent
+					state = JSON.json(sf.plot)
+					# On `:removed_cell` a call that addresses the removed
+					# cell is an ArgumentError that leaves the figure as it
+					# was; elsewhere every call applies.
+					err = try
 						call(sf)
-						@test JSON.json(sf.plot.layout) == first_state
+						nothing
+					catch caught
+						mode === :removed_cell || rethrow()
+						caught
+					end
+					if err !== nothing
+						@test err isa ArgumentError
+						@test JSON.json(sf.plot) == state
+					else
+						@test isempty(_rsp_sync_problems(sf))
+						styling && @test _rsp_content(sf) == before
+						first_state = JSON.json(sf.plot.layout)
+						if idempotent
+							call(sf)
+							@test JSON.json(sf.plot.layout) == first_state
+						end
 					end
 				end
 			end
@@ -2363,9 +2385,11 @@ end
 	@test _rsp_ops(renderer) == ["addTraces", "relayout"]
 	@test legend_ids(sf) == ["legend", "legend", "legend2"]
 	@test all(t -> haskey(t.fields, :showlegend), sf.plot.data)
-	# A trace added by a raw verb has no legend id yet: the next append gives
-	# it one, which rewrites an existing trace, so that call is staged fully.
-	addtraces!(sf, scatter(x = [1.0, 2.0], y = [1.0, 2.0], name = "raw"))
+	# A trace added through the underlying figure has no legend id yet: the
+	# next append gives it one, which rewrites an existing trace, so that call
+	# is staged fully.
+	addtraces!(sf.fig, scatter(x = [1.0, 2.0], y = [1.0, 2.0], xaxis = "x", yaxis = "y", name = "raw"))
+	@test !haskey(sf.plot.data[end].fields, :legend)
 	empty!(renderer.scripts)
 	plot_scatter!(sf, x, y; row = 1, col = 2, legend = "d")
 	@test _rsp_ops(renderer) == ["react"]
