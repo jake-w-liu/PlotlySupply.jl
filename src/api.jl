@@ -2978,8 +2978,6 @@ function subplot_legends!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
-	row = nothing,
-	col = nothing,
 )
 	_text_reject_show(show, "subplot_legends!")
 	_legend_reject_cell_keywords(row, col, "subplot_legends!")

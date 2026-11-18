@@ -2319,8 +2319,6 @@ function panel_labels!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
-	row = nothing,
-	col = nothing,
 )
 	_text_reject_show(show, "panel_labels!")
 	_text_reject_panel_cell(row, col)
