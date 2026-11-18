@@ -2968,7 +2968,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         # input is requested of the export owner (`showerror` of an ArgumentError
         # starts with "ArgumentError: ", so the pattern is not anchored there).
         p = plot_scatter(1:2, 1:2)
-        unsupported = r"savefig: unsupported export format \"unsupported\"\. Supported: png, jpeg \(or jpg\), svg, pdf, eps, html, json\.$"
+        unsupported = r"savefig: unsupported export format \"unsupported\"\. Supported: png, jpeg \(or jpg\), tiff \(or tif\), svg, pdf, eps, html, json\.$"
         @test_throws unsupported savefig(IOBuffer(), p; format="unsupported")
 
         mktempdir() do dir

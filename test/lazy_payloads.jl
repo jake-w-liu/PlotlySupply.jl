@@ -767,7 +767,11 @@ end
         for construct in constructors
             construct()
             GC.gc()
-            @test @allocated(construct()) < 2_000_000
+            # A copy of one payload is sizeof(Int) * 1e6 = 8 MB, so half of that
+            # catches any copy; a figure itself costs a data-independent 1-2.3 MB
+            # (PlotlyBase containers, subplot bookkeeping: the same at 1e4 and 4e6
+            # elements).
+            @test @allocated(construct()) < sizeof(Int) * length(payload) ÷ 2
         end
 
         warm_subplot = subplots(
