@@ -1074,7 +1074,7 @@ function _s3_plot_area(p::Plot)
 	fields = p.layout.fields
 	size = _S3_EXPORT_SIZE[]
 	if size === nothing
-		default_width, default_height = _style_default_figure_size()
+		default_width, default_height = _figure_default_size()
 		size = (
 			_s3_number_field(fields, :width, Float64(default_width); positive = true),
 			_s3_number_field(fields, :height, Float64(default_height); positive = true),
@@ -3230,7 +3230,7 @@ end
 # skips traces bound to a colour axis, and a mutator's new colour axis was
 # not there when the figure was styled). Placement keys are left as they are.
 function _s3_style_coloraxis_bar!(fig, key::Symbol)
-	defaults = _style_colorbar_trace_defaults(_active_style())
+	defaults = _style_colorbar_trace_defaults(_figure_style(fig))
 	isempty(defaults) && return nothing
 	layout = _cmn_layout(fig)
 	haskey(layout.fields, key) || return nothing

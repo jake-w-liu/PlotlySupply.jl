@@ -8604,11 +8604,15 @@ function _transactional_full_plot_mutation!(
 	mutation_scope = nothing,
 	preserve_layout_vector::Union{Nothing,Symbol} = nothing,
 )
+	# The mutation runs with the style the figure carries (K1).
+	scoped_mutation = candidate -> _with_figure_style(candidate) do
+		mutation(candidate)
+	end
 	prepare = (target, current) ->
 		_prepare_full_model_mutation_transaction(
 			target,
 			current,
-			mutation,
+			scoped_mutation,
 			commit_callback,
 			mutation_scope,
 			preserve_layout_vector,
@@ -8617,7 +8621,7 @@ function _transactional_full_plot_mutation!(
 		prepared = _prepare_full_model_mutation_transaction(
 			nothing,
 			p,
-			mutation,
+			scoped_mutation,
 			commit_callback,
 			mutation_scope,
 			preserve_layout_vector,

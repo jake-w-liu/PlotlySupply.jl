@@ -1452,7 +1452,7 @@ end
 function _fin_layout_size(layout::Layout)
 	w = get(layout.fields, :width, nothing)
 	h = get(layout.fields, :height, nothing)
-	W0, H0 = _style_default_figure_size()
+	W0, H0 = _figure_default_size()
 	return (
 		_fin_isfinite_real(w) && w > 0 ? Float64(w) : Float64(W0),
 		_fin_isfinite_real(h) && h > 0 ? Float64(h) : Float64(H0),
@@ -1469,8 +1469,9 @@ function _fin_size_is_free(layout::Layout)
 	h = get(layout.fields, :height, nothing)
 	w === nothing && h === nothing && return true
 	(_fin_isfinite_real(w) && _fin_isfinite_real(h)) || return false
-	_active_style().width > 0 || return false
-	W0, H0 = _style_default_figure_size()
+	carried = _STYLE_SCOPE[]
+	(carried !== nothing && carried.width > 0) || return false
+	W0, H0 = _figure_default_size()
 	return abs(w - W0) <= 0.5 && abs(h - H0) <= 0.5
 end
 
@@ -3726,8 +3727,11 @@ function _finalize_figure!(fig; live = nothing, size = nothing)
 end
 
 # Colour ranges are scanned once per run (Z83, `_cbar_with_extrema_memo`).
-_fin_run!(fig, live, size, clone_readonly::Bool) =
+# The run reads the style the figure carries (K1): its sizes, margins and
+# decade-tick rule never depend on the style active when it runs.
+_fin_run!(fig, live, size, clone_readonly::Bool) = _with_figure_style(fig) do
 	_cbar_with_extrema_memo(() -> _fin_run_scoped!(fig, live, size, clone_readonly))
+end
 
 function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	ctx = _fin_context(fig, live, size, clone_readonly)

@@ -347,6 +347,9 @@ end
 # Size of a figure that carries no layout.width/height and gets no size
 # keyword: the active style's default figure size (publication-style's
 # `_style_default_figure_size`, CSS px), else the 1.x default 700 x 500 px.
+# `p` is the figure being exported: the style it carries decides, the active
+# style only when it carries none (K1).
+_export_default_size(p::Plot) = _with_figure_style(_export_default_size, p)
 function _export_default_size()
 	isdefined(@__MODULE__, :_style_default_figure_size) ||
 		return (_DEFAULT_EXPORT_WIDTH_PX, _DEFAULT_EXPORT_HEIGHT_PX)
@@ -379,7 +382,7 @@ function _normalize_export_options(p::Plot, kwargs)
 		"savefig: `units` must be :px, :in, :cm, :mm or :pt; got $(repr(units)).",
 	))
 	_export_units_per_inch(units, "savefig")
-	default_width, default_height = _export_default_size()
+	default_width, default_height = _export_default_size(p)
 	width = _export_length(p, kwargs, :width, units, default_width)
 	height = _export_length(p, kwargs, :height, units, default_height)
 

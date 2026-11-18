@@ -163,18 +163,23 @@ function _transactional_high_level_plot_mutation!(
 )
 	result = Ref{Any}(nothing)
 	staged_target = Ref{Any}(nothing)
+	# A mutation runs with the style the figure carries (K1), not the active one.
 	full_mutation = function (candidate)
 		staged = _StagedPlotMutation(candidate)
 		staged_target[] = staged
-		result[] = mutator(staged, args...; kwargs...)
-		_finalize_figure!(staged; live = _plot_data(fig))
+		_with_figure_style(staged) do
+			result[] = mutator(staged, args...; kwargs...)
+			_finalize_figure!(staged; live = _plot_data(fig))
+		end
 		return nothing
 	end
 	fast_mutation = function (candidate)
 		staged = _HighLevelStagedPlotMutation(candidate)
 		staged_target[] = staged
-		result[] = mutator(staged, args...; kwargs...)
-		_finalize_figure!(staged; live = _plot_data(fig))
+		_with_figure_style(staged) do
+			result[] = mutator(staged, args...; kwargs...)
+			_finalize_figure!(staged; live = _plot_data(fig))
+		end
 		return nothing
 	end
 	fast_path_allowed =
@@ -725,10 +730,12 @@ function _transactional_subplot_mutation!(
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
 			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
-			result[] =
-				mutator(staged, args...; kwargs...)
-			_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
-			_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
+			_with_figure_style(staged) do
+				result[] =
+					mutator(staged, args...; kwargs...)
+				_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
+				_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
+			end
 			return nothing
 		end
 		commit_callback = _ -> _commit_subplot_metadata!(
@@ -1528,7 +1535,7 @@ _legend_figure_template(p::Plot, style) =
 # translucent box in the template background on dark ones, transparent when
 # the style has `legend_frame=false`.
 function _legend_default_colors(p::Plot)
-	style = _active_style()
+	style = _figure_style(p)
 	d = _style_legend_defaults(style; template = _legend_figure_template(p, style))
 	return (bgcolor = d.bgcolor, bordercolor = d.bordercolor, borderwidth = d.borderwidth)
 end
@@ -2027,7 +2034,7 @@ function _apply_subplot_legends!(
 	# Legend boxes created after construction get the active style's legend
 	# font size, which the style wrote only onto the legends that existed when
 	# the figure was built (an explicit font size already in the box wins).
-	style_font = _style_legend_font()
+	style_font = _style_legend_font(_figure_style(p))
 	for key in order
 		xdom, ydom = domains[key]
 		legend_id = _legend_id(ids[key])
@@ -6724,14 +6731,16 @@ function _subplot_delegate_mutator!(
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
 			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
-			result[] = _subplot_delegate_mutator_impl!(
-				staged,
-				mutator,
-				args...;
-				kwargs...,
-			)
-			_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
-			_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
+			_with_figure_style(staged) do
+				result[] = _subplot_delegate_mutator_impl!(
+					staged,
+					mutator,
+					args...;
+					kwargs...,
+				)
+				_subplot_match_sync!(_plot_obj(candidate), match_snapshot)
+				_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
+			end
 			return nothing
 		end
 		commit_callback = _ -> _commit_subplot_metadata!(
@@ -21862,7 +21871,7 @@ end
 # the layout size, else the active style's default figure size (700 x 500
 # under `:default`, `savefig`'s default size as well).
 function _figure_annotation_size(layout::Layout)
-	default_w, default_h = _style_default_figure_size()
+	default_w, default_h = _figure_default_size()
 	side(key, default) = (v = get(layout.fields, key, nothing);
 		v isa Real && !(v isa Bool) && isfinite(v) && v > 0 ? Float64(v) : default)
 	return side(:width, default_w), side(:height, default_h)
