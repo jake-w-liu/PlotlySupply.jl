@@ -1010,10 +1010,6 @@ const _S3_LABEL_PAD_FONTS = 3.0
 const _S3_MIN_FILL = 0.5
 # plotly.js's default font size (layout.font.size).
 const _S3_DEFAULT_FONT_SIZE = 12.0
-# Viewport assumed when the layout sets no size: savefig's default export size
-# and the margins PlotlyBase's `Layout()` writes (l50 r50 t60 b50).
-const _S3_DEFAULT_SIZE = (700.0, 500.0)
-const _S3_DEFAULT_MARGIN = (l = 50.0, r = 50.0, t = 60.0, b = 50.0)
 # An orthographic scene is framed independently of the eye distance
 # (plotly.js projects with ortho(-w/h, w/h, -1, 1)); 2 keeps the eye outside
 # any scene box whose largest aspect ratio is 1.
@@ -1030,32 +1026,49 @@ function _s3_number_field(mapping, key::Symbol, default::Float64; positive::Bool
 	return Float64(value)
 end
 
-# Figure size (px) that `_s3_viewport` uses instead of the layout's: the
-# default size when a camera is checked against the size it may have been
-# framed for (`_s3_scene_state`).
-const _S3_VIEWPORT_SIZE = Base.ScopedValues.ScopedValue{Union{Nothing, NTuple{2, Float64}}}(nothing)
-# The export size in `_s3_refit_scenes!`: `_s3_viewport` then also leaves the
-# room plotly's auto-margin makes for colorbars (`_s3_colorbar_right_margin`).
+# The figure size (px) scenes are framed for when it is not the layout's: the
+# export size while `_s3_finalize_scenes!` frames an export copy.
 const _S3_EXPORT_SIZE = Base.ScopedValues.ScopedValue{Union{Nothing, NTuple{2, Float64}}}(nothing)
+# `(plot, area)` while `_s3_finalize_scenes!` frames `plot`: its
+# `_s3_plot_area`, computed once per run (the run writes nothing it depends on).
+const _S3_AREA = Base.ScopedValues.ScopedValue{Any}(nothing)
+# Data extents (`_s3_data_bounds`) already scanned during one
+# `_s3_finalize_scenes!` run, keyed by (objectid(plot), scene key, axis): the
+# run does not change data, and the framing reads each extent many times.
+const _S3_BOUNDS_CACHE = Base.ScopedValues.ScopedValue{Union{Nothing, Dict{Tuple{UInt, Symbol, Int}, Any}}}(nothing)
 
-# Pixel size of the scene's viewport: the plot area (figure size minus
-# margins) times the scene's domain fractions.
+# Figure size and margins (px) the scenes of `p` are drawn with: the size of
+# `_S3_EXPORT_SIZE`, else the layout's `width`/`height`, else the active
+# style's default figure size (`_style_default_figure_size`, also savefig's
+# default); the layout margins (plotly.js's defaults where unset) grown by
+# plotly.js's auto-margin for the tick labels and titles of Cartesian axes on
+# the paper edges (`_fin_margins`, the estimate `_finalize_figure!` uses) and
+# for vertical colorbars right of the plot area
+# (`_s3_colorbar_right_margin`). A live window auto-margins like an export.
+function _s3_plot_area(p::Plot)
+	cached = _S3_AREA[]
+	cached !== nothing && cached[1] === p && return cached[2]
+	fields = p.layout.fields
+	size = _S3_EXPORT_SIZE[]
+	if size === nothing
+		default_width, default_height = _style_default_figure_size()
+		size = (
+			_s3_number_field(fields, :width, Float64(default_width); positive = true),
+			_s3_number_field(fields, :height, Float64(default_height); positive = true),
+		)
+	end
+	width, height = size
+	margins = _fin_margins(p.layout, _fin_collect_axes(p), width, height, Dict{Symbol, Any}(), ())
+	right = _s3_colorbar_right_margin(p, width, margins.l, margins.r)
+	return (width = width, height = height, l = margins.l, r = right, t = margins.t, b = margins.b)
+end
+
+# Pixel size of the scene's viewport: the plot area (`_s3_plot_area`: figure
+# size minus margins) times the scene's domain fractions.
 function _s3_viewport(fig, target::_CellTarget)
-	fields = _cmn_layout(fig).fields
-	export_size = _S3_EXPORT_SIZE[]
-	override = export_size !== nothing ? export_size : _S3_VIEWPORT_SIZE[]
-	width = override !== nothing ? override[1] :
-		_s3_number_field(fields, :width, _S3_DEFAULT_SIZE[1]; positive = true)
-	height = override !== nothing ? override[2] :
-		_s3_number_field(fields, :height, _S3_DEFAULT_SIZE[2]; positive = true)
-	margin = get(fields, :margin, nothing)
-	left = _s3_number_field(margin, :l, _S3_DEFAULT_MARGIN.l)
-	right = _s3_number_field(margin, :r, _S3_DEFAULT_MARGIN.r)
-	export_size === nothing || (right = _s3_colorbar_right_margin(_cmn_plot(fig), width, left, right))
-	top = _s3_number_field(margin, :t, _S3_DEFAULT_MARGIN.t)
-	bottom = _s3_number_field(margin, :b, _S3_DEFAULT_MARGIN.b)
-	plot_width = max(width - left - right, 1.0)
-	plot_height = max(height - top - bottom, 1.0)
+	area = _s3_plot_area(_cmn_plot(fig))
+	plot_width = max(area.width - area.l - area.r, 1.0)
+	plot_height = max(area.height - area.t - area.b, 1.0)
 	return (
 		max(plot_width * (target.xdomain[2] - target.xdomain[1]), 1.0),
 		max(plot_height * (target.ydomain[2] - target.ydomain[1]), 1.0),
@@ -1247,7 +1260,14 @@ _s3_has_explicit_range(scene) =
 # the finite values of the scene's 3-D traces (log10 of the positive ones on a
 # log axis) and the positions of its visible annotations (already in axis
 # units), which plotly.js gl3d both counts. `nothing` without a finite value.
+# Inside `_s3_finalize_scenes!` each extent is scanned once (`_S3_BOUNDS_CACHE`).
 function _s3_data_bounds(p::Plot, scenekey::Symbol, d::Int)
+	cache = _S3_BOUNDS_CACHE[]
+	cache === nothing && return _s3_scan_bounds(p, scenekey, d)
+	return get!(() -> _s3_scan_bounds(p, scenekey, d), cache, (objectid(p), scenekey, d))
+end
+
+function _s3_scan_bounds(p::Plot, scenekey::Symbol, d::Int)
 	scene = get(p.layout.fields, scenekey, nothing)
 	axis = (:xaxis, :yaxis, :zaxis)[d]
 	coordinate = (:x, :y, :z)[d]
@@ -1810,10 +1830,10 @@ const _S3_PAN_TOLERANCE_PX = 0.5
 # which it fills `_S3_MIN_FILL` of it (labels that do not fit even then get
 # the latter). When `up` is parallel to `direction`: `_s3_auto_distance` and
 # `center`.
-function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center, pan::Bool)
+function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center, pan::Bool, zoom::Float64 = 1.0)
 	c0 = (Float64(center[1]), Float64(center[2]), Float64(center[3]))
 	frame = _s3_camera_frame(direction, up)
-	frame === nothing && return (_s3_auto_distance(fig, target, box, direction, up; center = c0), c0)
+	frame === nothing && return (_s3_auto_distance(fig, target, box, direction, up, zoom; center = c0), c0)
 	p = _cmn_plot(fig)
 	width, height = _s3_viewport(fig, target)
 	ratio = width / height
@@ -1855,21 +1875,29 @@ function _s3_export_camera(fig, target::_CellTarget, box, direction, up; center,
 		max(1 - 2 * _S3_LABEL_MARGIN_PX / height, _S3_MIN_FILL),
 	)
 	far = _s3_box_distance(box, c0, frame, ratio, _S3_MIN_FILL, _S3_MIN_FILL)
-	far <= near && return (near, first(place(near)))
-	c_near, fits_near = place(near)
-	fits_near && return (near, c_near)
-	c_far, fits_far = place(far)
-	fits_far || return (far, c_far)
-	# The box shrinks towards the centre as the camera backs away while the
-	# label offsets stay fixed in pixels, so the drawing fits from one
-	# distance on.
-	for _ in 1:60
-		mid = (near + far) / 2
-		c_mid, fits_mid = place(mid)
-		fits_mid ? ((far, c_far) = (mid, c_mid)) : (near = mid)
-		far - near <= 1e-6 * far && break
+	# The fitted distance and camera centre, before `zoom`.
+	function fitted()
+		far <= near && return (near, first(place(near)))
+		c_near, fits_near = place(near)
+		fits_near && return (near, c_near)
+		c_far, fits_far = place(far)
+		fits_far || return (far, c_far)
+		# The box shrinks towards the centre as the camera backs away while
+		# the label offsets stay fixed in pixels, so the drawing fits from one
+		# distance on.
+		for _ in 1:60
+			mid = (near + far) / 2
+			c_mid, fits_mid = place(mid)
+			fits_mid ? ((far, c_far) = (mid, c_mid)) : (near = mid)
+			far - near <= 1e-6 * far && break
+		end
+		return (far, c_far)
 	end
-	return (far, c_far)
+	distance, c = fitted()
+	zoom == 1 && return (distance, c)
+	# `zoom` divides the fitted distance; the drawing is centred again there.
+	distance /= zoom
+	return (distance, first(place(distance)))
 end
 
 _s3_vector3(mapping, default::Float64 = 0.0) = [
@@ -1877,17 +1905,104 @@ _s3_vector3(mapping, default::Float64 = 0.0) = [
 	for key in (:x, :y, :z)
 ]
 
-# The figure sizes a scene's automatic camera and tick counts may have been
-# computed for: the current one, and the default size when the layout now
-# sets one (the scene was framed before `figsize!` or a `width`/`height`).
-function _s3_framing_sizes(fig)
-	fields = _cmn_layout(fig).fields
-	override = _S3_VIEWPORT_SIZE[]
-	current = override !== nothing ? override : (
-		_s3_number_field(fields, :width, _S3_DEFAULT_SIZE[1]; positive = true),
-		_s3_number_field(fields, :height, _S3_DEFAULT_SIZE[2]; positive = true),
+# ── Framing mark ──────────────────────────────────────────────────────────────
+#
+# What PlotlySupply wrote on a scene to frame it is recorded on the scene as
+# `scene.plotlysupply` (plotly.js ignores the key; checked on a render and
+# through `relayout`): whether the camera is automatic, the `view!` zoom,
+# whether the camera centre is PlotlySupply's to move (`pan`), the eye and
+# centre last written, the tick counts written (0: none) and, per axis, the
+# tick font size asked for and the size written for it
+# (`_s3_compensate_tick_fonts!`). A camera, tick count or tick font that no
+# longer matches its record was set by someone else and is kept. Scenes
+# without the mark (figures built without PlotlySupply's 3-D functions) are
+# never re-framed.
+const _S3_MARK_KEY = :plotlysupply
+
+struct _S3Mark
+	auto::Bool
+	zoom::Float64
+	pan::Bool
+	eye::Union{Nothing, NTuple{3, Float64}}
+	center::NTuple{3, Float64}
+	nticks::NTuple{3, Int}
+	font::NTuple{3, Float64}
+	font_written::NTuple{3, Float64}
+end
+
+const _S3_ORIGIN = (0.0, 0.0, 0.0)
+const _S3_NEW_MARK = _S3Mark(true, 1.0, true, nothing, _S3_ORIGIN, (0, 0, 0), _S3_ORIGIN, _S3_ORIGIN)
+
+# The mark of a scene layout entry, or `nothing`. Malformed entries (edited by
+# hand) read as their defaults.
+function _s3_mark(scene)
+	raw = _cmn_mapping_get(scene, _S3_MARK_KEY)
+	raw === nothing && return nothing
+	field(key) = _cmn_mapping_get(raw, key)
+	function triple(key)
+		value = field(key)
+		((value isa AbstractVector || value isa Tuple) && length(value) == 3 &&
+			all(v -> _s3_is_real(v) && isfinite(v), value)) || return nothing
+		return (Float64(value[1]), Float64(value[2]), Float64(value[3]))
+	end
+	counts = triple(:nticks)
+	counts = counts === nothing ? (0, 0, 0) :
+		map(n -> (isinteger(n) && 0 <= n <= typemax(Int32)) ? Int(n) : 0, counts)
+	zoom = field(:zoom)
+	zoom = (_s3_is_real(zoom) && isfinite(zoom) && zoom > 0) ? Float64(zoom) : 1.0
+	return _S3Mark(
+		field(:auto) === true,
+		zoom,
+		field(:pan) === true,
+		triple(:eye),
+		something(triple(:center), _S3_ORIGIN),
+		counts,
+		something(triple(:fontsize), _S3_ORIGIN),
+		something(triple(:fontwritten), _S3_ORIGIN),
 	)
-	return current == _S3_DEFAULT_SIZE ? (current,) : (current, _S3_DEFAULT_SIZE)
+end
+
+# Write `mark` on scene `key` of `layout`; returns whether it changed.
+function _s3_write_mark!(layout::Layout, key::Symbol, mark::_S3Mark)
+	_s3_mark(get(layout.fields, key, nothing)) === mark && return false
+	value = attr(
+		auto = mark.auto,
+		zoom = mark.zoom,
+		pan = mark.pan,
+		eye = mark.eye === nothing ? Float64[] : collect(mark.eye),
+		center = collect(mark.center),
+		nticks = collect(mark.nticks),
+		fontsize = collect(mark.font),
+		fontwritten = collect(mark.font_written),
+	)
+	_merge_scene_layout_attr!(layout, key, attr(; _S3_MARK_KEY => value))
+	return true
+end
+
+# The scene's mark (a new one when it has none) with the fields in `changes`
+# replaced.
+function _s3_marked(scene; changes...)
+	mark = something(_s3_mark(scene), _S3_NEW_MARK)
+	values = Dict{Symbol, Any}(name => getfield(mark, name) for name in fieldnames(_S3Mark))
+	for (name, value) in changes
+		values[name] = value
+	end
+	return _S3Mark((values[name] for name in fieldnames(_S3Mark))...)
+end
+
+_s3_same_point(a, b) = isapprox(collect(Float64, a), collect(Float64, b); rtol = 1e-9, atol = 1e-12)
+
+# Whether the scene's camera is automatic: it has no eye (plotly's default
+# camera, unless the mark says the user fixed it), or its eye and centre are
+# the ones the mark records for an automatic camera.
+function _s3_auto_camera(scene)
+	camera = _cmn_mapping_get(scene, :camera)
+	eye = _cmn_mapping_get(camera, :eye)
+	mark = _s3_mark(scene)
+	eye === nothing && return mark === nothing || mark.auto
+	(mark === nothing || !mark.auto || mark.eye === nothing) && return false
+	_s3_same_point(_s3_vector3(eye, NaN), mark.eye) || return false
+	return _s3_same_point(_s3_vector3(_cmn_mapping_get(camera, :center)), mark.center)
 end
 
 function _s3_scene_state(fig, target::_CellTarget)
@@ -1900,35 +2015,13 @@ function _s3_scene_state(fig, target::_CellTarget)
 		pinned = derived !== nothing && !all(isone, derived) &&
 			isapprox(_s3_manual_ratio(scene), derived; rtol = 1e-9)
 	end
-	camera = _cmn_mapping_get(scene, :camera)
-	eye = _cmn_mapping_get(camera, :eye)
-	sizes = _s3_framing_sizes(fig)
-	auto_camera = eye === nothing
-	if !auto_camera
-		box = _s3_drawn_box(p, key)
-		offset = _s3_vector3(eye, NaN) .- _s3_vector3(_cmn_mapping_get(camera, :center))
-		current = sqrt(sum(abs2, offset))
-		auto_camera = box !== nothing && isfinite(current) && current > 0 && any(sizes) do size
-			isapprox(
-				current,
-				Base.ScopedValues.with(_S3_VIEWPORT_SIZE => size) do
-					_s3_auto_distance(
-						fig, target, box, offset ./ current, _s3_camera_up(camera);
-						center = _s3_vector3(_cmn_mapping_get(camera, :center)),
-					)
-				end;
-				rtol = 1e-9,
-			)
-		end
-	end
-	counts = [Base.ScopedValues.with(() -> _s3_auto_nticks(fig, target), _S3_VIEWPORT_SIZE => size) for size in sizes]
+	mark = _s3_mark(scene)
 	auto_ticks = ntuple(3) do d
 		nticks = _cmn_mapping_get(_cmn_mapping_get(scene, (:xaxis, :yaxis, :zaxis)[d]), :nticks)
 		nticks === nothing && return true
-		_s3_is_real(nticks) || return false
-		return any(c -> c !== nothing && nticks == c[d], counts)
+		return mark !== nothing && mark.nticks[d] > 0 && _s3_is_real(nticks) && nticks == mark.nticks[d]
 	end
-	return _S3SceneState(pinned, auto_camera, auto_ticks)
+	return _S3SceneState(pinned, _s3_auto_camera(scene), auto_ticks)
 end
 
 # plotly.js gives a 3-D axis with automatic ticks `nticks || clamp(L / 40, 4, 9)`
@@ -2050,23 +2143,27 @@ end
 
 # Write the automatic tick counts of `_s3_auto_nticks` on the axes whose
 # `nticks` was automatic before the 3-D call (`state`) and whose ticks the user
-# does not place. Returns whether it wrote.
+# does not place, and record them in the scene's mark. Returns whether it
+# wrote.
 function _s3_finish_ticks!(fig, target::_CellTarget, state::_S3SceneState)
 	counts = _s3_auto_nticks(fig, target)
 	counts === nothing && return false
 	p = _cmn_plot(fig)
 	scene = get(p.layout.fields, target.scenekey, nothing)
 	updates = Dict{Symbol, Any}()
+	recorded = collect(something(_s3_mark(scene), _S3_NEW_MARK).nticks)
 	for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
 		state.auto_ticks[d] || continue
 		fields = _cmn_mapping_get(scene, axis)
 		_s3_user_ticks(fields) && continue
+		recorded[d] = counts[d]
 		_cmn_mapping_get(fields, :nticks) == counts[d] && continue
 		updates[axis] = attr(nticks = counts[d])
 	end
-	isempty(updates) && return false
-	_merge_scene_layout_attr!(p.layout, target.scenekey, attr(; updates...))
-	return true
+	isempty(updates) || _merge_scene_layout_attr!(p.layout, target.scenekey, attr(; updates...))
+	marked = _s3_write_mark!(p.layout, target.scenekey,
+		_s3_marked(get(p.layout.fields, target.scenekey, nothing); nticks = Tuple(recorded)))
+	return !isempty(updates) || marked
 end
 
 # Direction of plotly.js's default camera eye (1.25, 1.25, 1.25).
@@ -2103,35 +2200,59 @@ function _s3_finish_scene!(fig, target::_CellTarget, state::_S3SceneState; frame
 end
 
 # Move a perspective camera to the automatic distance for the scene's box and
-# viewport (`_s3_auto_distance`; with `fit_labels` the export framing of
-# `_s3_export_camera`, which with `pan` also moves the camera centre), keeping
-# its direction (plotly's default direction without an eye) and up vector.
-# Returns whether the camera changed.
+# viewport, keeping its direction (plotly's default direction without an eye)
+# and up vector, and record it in the scene's mark as automatic. Without
+# `fit_labels` the quick estimate `_s3_auto_distance` (a border of three font
+# sizes for the labels, at the mark's zoom) is used and the centre is kept:
+# 3-D calls write it at once, and `_s3_finalize_scenes!` refines it. With
+# `fit_labels` the camera is placed by `_s3_export_camera` (box, tick labels
+# and axis titles fill the viewport, then the mark's zoom); when the mark owns
+# the camera centre (`pan`; a centre at the origin is taken as owned) the fit
+# starts from the origin and, with `pan`, moves the centre to centre the
+# drawing; a centre the user set is kept. A centre that ends at the origin is
+# removed. Returns whether the layout changed (an eye or centre that moves by
+# less than 1e-6 of the distance is not rewritten).
 function _s3_frame_camera!(fig, target::_CellTarget; fit_labels::Bool = false, pan::Bool = false)
 	p = _cmn_plot(fig)
 	key = target.scenekey
-	camera = _cmn_mapping_get(get(p.layout.fields, key, nothing), :camera)
+	scene = get(p.layout.fields, key, nothing)
+	camera = _cmn_mapping_get(scene, :camera)
 	_cmn_mapping_get(_cmn_mapping_get(camera, :projection), :type) == "orthographic" && return false
 	box = _s3_drawn_box(p, key)
 	box === nothing && return false
+	mark = something(_s3_mark(scene), _S3_NEW_MARK)
 	center = _s3_vector3(_cmn_mapping_get(camera, :center))
 	eye = _cmn_mapping_get(camera, :eye)
 	offset = eye === nothing ? fill(NaN, 3) : _s3_vector3(eye, NaN) .- center
 	current = sqrt(sum(abs2, offset))
 	direction = (isfinite(current) && current > 0) ? offset ./ current : collect(_S3_DEFAULT_EYE_DIRECTION)
 	up = _s3_camera_up(camera)
-	look_at = center
+	owned_center = all(iszero, center) || (mark.pan && _s3_same_point(center, mark.center))
+	look_at = Tuple(center)
 	if fit_labels
-		distance, look_at = _s3_export_camera(fig, target, box, direction, up; center = center, pan = pan)
+		start = owned_center ? _S3_ORIGIN : look_at
+		distance, look_at = _s3_export_camera(fig, target, box, direction, up;
+			center = start, pan = pan && owned_center, zoom = mark.zoom)
 	else
-		distance = _s3_auto_distance(fig, target, box, direction, up; center = center)
+		distance = _s3_auto_distance(fig, target, box, direction, up, mark.zoom; center = center)
 	end
 	position = look_at .+ distance .* direction
-	moved = !isapprox(collect(look_at), center; rtol = 1e-12, atol = 1e-12)
-	!moved && eye !== nothing && isapprox(_s3_vector3(eye, NaN), position; rtol = 1e-12) && return false
+	moved = !isapprox(collect(look_at), center; rtol = 1e-6, atol = 1e-9 * distance)
+	same_eye = eye !== nothing && isapprox(_s3_vector3(eye, NaN), collect(position); rtol = 1e-6)
+	if !moved && same_eye
+		# Unchanged: only make sure the mark records the camera as it is.
+		return _s3_write_mark!(p.layout, key, _s3_marked(scene; auto = true,
+			pan = owned_center, eye = Tuple(_s3_vector3(eye, NaN)), center = Tuple(center)))
+	end
 	fields = Dict{Symbol, Any}(:eye => attr(x = position[1], y = position[2], z = position[3]))
-	moved && (fields[:center] = attr(x = look_at[1], y = look_at[2], z = look_at[3]))
+	at_origin = all(iszero, look_at)
+	(moved && !at_origin) && (fields[:center] = attr(x = look_at[1], y = look_at[2], z = look_at[3]))
 	_merge_scene_layout_attr!(p.layout, key, attr(camera = attr(; fields...)))
+	if moved && at_origin
+		_cmn_mapping_delete!(_cmn_mapping_get(get(p.layout.fields, key, nothing), :camera), (:center,))
+	end
+	_s3_write_mark!(p.layout, key, _s3_marked(get(p.layout.fields, key, nothing); auto = true,
+		pan = owned_center, eye = Tuple(position), center = Tuple(look_at)))
 	return true
 end
 
@@ -2151,32 +2272,152 @@ end
 const _S3_SCENE_KEY = r"^scene([2-9]|[1-9][0-9]+)?$"
 const _S3_REFIT_ROUNDS = 4
 
+# ── Tick fonts ────────────────────────────────────────────────────────────────
+#
+# gl3d draws a scene tick label `tickfont.size`²/12 px large
+# (`_s3_tick_text_size`), a 2-D tick label and any axis title (2-D or scene)
+# `size` px. So that a scene's tick labels come out the size the style, a
+# `set_fonts!` call or the user asked for (`s` px, like the 2-D panels next to
+# them), a framed scene's axes get `tickfont.size = sqrt(12 s)`; the mark
+# records `s` and the size written. The size asked for is the axis's
+# `tickfont.size` unless it is the size PlotlySupply wrote, else
+# `layout.font.size`, else the template's, else plotly's 12.
+function _s3_base_font_size(p::Plot)
+	size = _cmn_mapping_get(_cmn_mapping_get(p.layout.fields, :font), :size)
+	(_s3_is_real(size) && isfinite(size) && size > 0) && return Float64(size)
+	template = _template_object(get(p.layout.fields, :template, nothing))
+	if template !== nothing
+		size = _cmn_mapping_get(_field(template.layout, :font), :size)
+		(_s3_is_real(size) && isfinite(size) && size > 0) && return Float64(size)
+	end
+	return _S3_DEFAULT_FONT_SIZE
+end
+
+# Write the compensated tick font sizes of scene `key` (see above) and record
+# them in its mark; returns whether the layout changed.
+function _s3_compensate_tick_fonts!(p::Plot, key::Symbol)
+	scene = get(p.layout.fields, key, nothing)
+	mark = something(_s3_mark(scene), _S3_NEW_MARK)
+	base = _s3_base_font_size(p)
+	asked = zeros(3)
+	written = zeros(3)
+	updates = Dict{Symbol, Any}()
+	for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
+		current = _cmn_mapping_get(_cmn_mapping_get(_cmn_mapping_get(scene, axis), :tickfont), :size)
+		given = _s3_is_real(current) && isfinite(current) && current > 0
+		asked[d] = if given && mark.font_written[d] > 0 && isapprox(current, mark.font_written[d]; rtol = 1e-9)
+			mark.font[d]
+		else
+			given ? Float64(current) : base
+		end
+		written[d] = sqrt(_S3_GL_TEXT_REFERENCE_SIZE * asked[d])
+		# plotly draws an axis without a tick font at layout.font.size.
+		drawn = given ? Float64(current) : base
+		isapprox(drawn, written[d]; rtol = 1e-9) && continue
+		updates[axis] = attr(tickfont = attr(size = written[d]))
+	end
+	isempty(updates) || _merge_scene_layout_attr!(p.layout, key, attr(; updates...))
+	marked = _s3_write_mark!(p.layout, key, _s3_marked(get(p.layout.fields, key, nothing);
+		font = Tuple(asked), font_written = Tuple(written)))
+	return !isempty(updates) || marked
+end
+
+# ── Framing at finalize and export time ──────────────────────────────────────
+
+# Frame scene `key` of `p` (see `_s3_finalize_scenes!`); returns whether the
+# layout changed.
+function _s3_frame_scene!(p::Plot, key::Symbol, pan::Bool)
+	wrote = _s3_compensate_tick_fonts!(p, key)
+	target = _s3_layout_target(p, key)
+	state = _s3_scene_state(p, target)
+	any(state.auto_ticks) || state.auto_camera || return wrote
+	# The framing places the tick labels of the current counts, and the counts
+	# follow the framing: repeat until neither changes (two rounds in
+	# practice; the bound stops an alternation).
+	for _ in 1:_S3_REFIT_ROUNDS
+		changed = state.auto_camera && _s3_frame_camera!(p, target; fit_labels = true, pan = pan)
+		changed |= any(state.auto_ticks) && _s3_finish_ticks!(p, target, state)
+		changed || break
+		wrote = true
+	end
+	return wrote
+end
+
+"""
+	_s3_finalize_scenes!(p::Plot, size = nothing; pan = true) -> Bool
+
+Frame the 3-D scenes PlotlySupply manages (those with a framing mark, see
+`_s3_mark`) for the figure size `size = (width, height)` px, or, when `size`
+is `nothing`, for the layout's size (else the active style's default figure
+size, `_style_default_figure_size`). `_finalize_figure!` runs it after every
+PlotlySupply mutation (`size` = `nothing`) and on the export copy `savefig`
+renders (`size` = the export size), and the 3-D constructors run it on the
+figure they return, so the live window, a `savefig` at the layout size and a
+`savefig` at any other size show the same framing for their size.
+
+Per scene, in its viewport (`_s3_viewport`: the plot area left by the
+margins and plotly.js's auto-margin, times the scene domain):
+- the tick fonts are compensated for gl3d's quadratic tick text size
+  (`_s3_compensate_tick_fonts!`);
+- an automatic perspective camera (`_s3_auto_camera`) is moved, along its
+  direction and with its up vector, to the closest distance at which the
+  scene box and the tick labels and axis titles plotly.js draws around it
+  fill the viewport (`_s3_export_camera`), divided by the `view!` zoom; with
+  `pan` a camera centre PlotlySupply owns moves so that the drawing is
+  centred (labels often hang off one side of the box), a user's centre is
+  kept;
+- the automatic tick counts of a scene smaller than the plot area
+  (`_s3_auto_nticks`) are recomputed.
+User cameras, user tick counts and tick placements, orthographic cameras and
+scenes without the mark are left alone. Running it twice writes nothing the
+second time. Returns whether anything was written. Throws an `ArgumentError`
+for a `size` that is not two positive finite numbers.
+"""
+function _s3_finalize_scenes!(p::Plot, size = nothing; pan::Bool = true)
+	frame_size = if size === nothing
+		nothing
+	else
+		((size isa Tuple || size isa AbstractVector) && length(size) == 2 &&
+			all(v -> _s3_is_real(v) && isfinite(v) && v > 0, size)) || throw(ArgumentError(
+			"_s3_finalize_scenes!: `size` must be (width, height) in px; got $(repr(size)).",
+		))
+		(Float64(size[1]), Float64(size[2]))
+	end
+	scenes = Symbol[]
+	for (key, value) in p.layout.fields
+		(key isa Symbol && occursin(_S3_SCENE_KEY, String(key)) && _s3_mark(value) !== nothing) || continue
+		push!(scenes, key)
+	end
+	isempty(scenes) && return false
+	sort!(scenes; by = String)
+	return Base.ScopedValues.with(
+		_S3_EXPORT_SIZE => frame_size,
+		_S3_BOUNDS_CACHE => Dict{Tuple{UInt, Symbol, Int}, Any}(),
+		_S3_AREA => nothing,
+	) do
+		area = _s3_plot_area(p)
+		Base.ScopedValues.with(_S3_AREA => (p, area)) do
+			wrote = false
+			for key in scenes
+				wrote |= _s3_frame_scene!(p, key, pan)
+			end
+			wrote
+		end
+	end
+end
+
 """
 	_s3_refit_scenes!(target::Plot, reference::Plot, size; pan = true) -> Bool
 
 Re-frame the 3-D scenes of `target` for an export at `size = (width, height)`
-px. `target` is the figure about to be rendered: a copy of `reference` (the
-figure as the user built it, before export-only changes such as
-`tight_layout!` margins) with a layout of its own, which is written in place.
-PlotlySupply frames a scene for the figure size of its layout (else 700×500
-px) when the scene changes; an export at another size would show it too small
-or cut off. Each scene of `reference` whose camera eye PlotlySupply put at
-the automatic distance (`_s3_scene_state`, for the layout size or for
-700×500 px) gets, in `target`, the closest distance at which the box and the
-tick labels and axis titles plotly.js draws around it fit its viewport at
-`size` (`_s3_export_camera`; direction and up kept; the plot area is the one
-left after plotly.js's auto-margin makes room for vertical colorbars,
-`_s3_colorbar_right_margin`), and its automatic
-`nticks` that PlotlySupply wrote are recomputed for that viewport. With `pan`
-a camera centre the user left at the origin moves across the view so that
-the drawing is centred in the viewport (the labels often hang off one side
-of the box); rotating an interactive (HTML) export then turns about that
-point, so a document export should pass `pan = false`.
-Scenes without a camera eye or tick counts of PlotlySupply's (figures built
-without it), user cameras, user tick counts and orthographic scenes are left
-alone. Returns whether anything was written. Throws an `ArgumentError` for a
-`size` that is not two positive finite numbers or a `target` that shares
-`reference`'s layout.
+px: `_s3_finalize_scenes!(target, size; pan)`. `target` is the figure about
+to be rendered: a copy of `reference` (the figure as the user built it) with
+a layout of its own, which is written in place; `reference` is not changed.
+`_finalize_figure!` already does this on the export copy `savefig` renders,
+so on such a copy this writes nothing. With `pan = false` camera centres
+PlotlySupply moved return to the origin. Returns whether anything was
+written. Throws an `ArgumentError` for a `size` that is not two positive
+finite numbers or a `target` that shares `reference`'s layout.
 """
 function _s3_refit_scenes!(target::Plot, reference::Plot, size; pan::Bool = true)
 	((size isa Tuple || size isa AbstractVector) && length(size) == 2 &&
@@ -2186,34 +2427,7 @@ function _s3_refit_scenes!(target::Plot, reference::Plot, size; pan::Bool = true
 	target.layout === reference.layout && throw(ArgumentError(
 		"_s3_refit_scenes!: `target` must have its own layout (it is written in place).",
 	))
-	export_size = (Float64(size[1]), Float64(size[2]))
-	wrote = false
-	for key in collect(keys(target.layout.fields))
-		(key isa Symbol && occursin(_S3_SCENE_KEY, String(key))) || continue
-		haskey(reference.layout.fields, key) || continue
-		scene = reference.layout.fields[key]
-		camera = _cmn_mapping_get(scene, :camera)
-		framed = _cmn_mapping_get(camera, :eye) !== nothing
-		pan_scene = pan && all(iszero, _s3_vector3(_cmn_mapping_get(camera, :center)))
-		state = _s3_scene_state(reference, _s3_layout_target(reference, key))
-		written = ntuple(3) do d
-			_cmn_mapping_get(_cmn_mapping_get(scene, (:xaxis, :yaxis, :zaxis)[d]), :nticks) !== nothing
-		end
-		ticks = _S3SceneState(state.pinned, state.auto_camera, state.auto_ticks .& written)
-		cell = _s3_layout_target(target, key)
-		Base.ScopedValues.with(_S3_EXPORT_SIZE => export_size) do
-			# The framing places the tick labels of the current counts, and the
-			# counts follow the framing: repeat until neither changes (two
-			# rounds in practice; the bound stops an alternation).
-			for _ in 1:_S3_REFIT_ROUNDS
-				changed = framed && state.auto_camera && _s3_frame_camera!(target, cell; fit_labels = true, pan = pan_scene)
-				changed |= any(ticks.auto_ticks) && _s3_finish_ticks!(target, cell, ticks)
-				changed || break
-				wrote = true
-			end
-		end
-	end
-	return wrote
+	return _s3_finalize_scenes!(target, size; pan = pan)
 end
 
 struct _S3ViewParams
@@ -2309,6 +2523,20 @@ function _s3_apply_view!(fig, target::_CellTarget, params::_S3ViewParams)
 	params.projection === nothing || (camera_fields[:projection] = attr(type = projection))
 	scene_fields[:camera] = attr(; camera_fields...)
 	_merge_scene_layout_attr!(p.layout, key, attr(; scene_fields...))
+	# The mark: an automatic perspective camera is re-framed (at this zoom) by
+	# later calls and exports; a fixed distance or an orthographic view is
+	# the user's. A centre at the origin or the one PlotlySupply moved stays
+	# PlotlySupply's to move; any other centre is the user's.
+	old = something(_s3_mark(scene), _S3_NEW_MARK)
+	written = (c[1] + distance * direction[1], c[2] + distance * direction[2], c[3] + distance * direction[3])
+	automatic = projection == "perspective" && params.distance === :auto
+	_s3_write_mark!(p.layout, key, _s3_marked(get(p.layout.fields, key, nothing);
+		auto = automatic,
+		zoom = params.zoom,
+		pan = all(iszero, c) || (old.pan && _s3_same_point(c, old.center)),
+		eye = automatic ? written : nothing,
+		center = Tuple(c),
+	))
 	return nothing
 end
 
@@ -2887,6 +3115,8 @@ function _s3_construct(
 	_s3_split_markevery!(_plot_data(fig), 1, markevery)
 	_s3_apply_options!(fig, opts, who; constructor = true, state = _S3_NEW_SCENE)
 	_s3_colorbar_titles!(fig, 1, specs)
+	# Constructors do not run `_finalize_figure!`; frame the scene as it would.
+	_s3_finalize_scenes!(fig)
 	return _s3_show(fig, show, opts)
 end
 
