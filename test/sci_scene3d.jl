@@ -279,8 +279,17 @@ _t3_centred(fig, key::Symbol = :scene) = maximum(abs, _t3_drawing(fig, key).mid)
 		k = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 1.0])
 		scene!(k; aspectmode = "data", zrange = (0, 4))
 		@test _t3_ratio(k) ≈ [2.125, 1.0625, 4.0] ./ 4
-		# A full-size scene keeps plotly's own tick counts.
+		# A full-size scene keeps plotly's own tick counts (a unit cube at
+		# 600 x 390 px has axes of four ticks' length or more) ...
 		@test _t3_nticks(f) == [nothing, nothing, nothing]
+		# ... unless one of its axes is shorter than that (plotly.js's lower
+		# bound crowds it; its count also follows the export scale): the counts
+		# of a cell, and plotly's own again once the scene grows.
+		small = plot_scatter3d([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; aspectmode = "cube", width = 300, height = 220)
+		@test all(n -> 2 <= n <= 3, _t3_nticks(small))
+		relayout!(small; width = 700, height = 500)
+		view!(small; elev = 30, azim = 40)
+		@test _t3_nticks(small) == [nothing, nothing, nothing]
 		# Scene cells: framed in their own viewport, with tick counts for it.
 		sf = _t3_scene_sf(3)
 		plot_scatter3d!(sf, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2, aspectmode = "cube")

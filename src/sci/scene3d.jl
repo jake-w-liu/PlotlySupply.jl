@@ -1589,6 +1589,7 @@ struct _S3AxisLabels
 	tick_pad::Float64
 	label_pad::Float64
 	title_text::String
+	title_own::Bool
 end
 
 # Characters a label shows: HTML tags (<b>, <sub>, ...) count as nothing, an
@@ -1720,16 +1721,17 @@ end
 const _S3_GL_TEXT_REFERENCE_SIZE = 12.0
 _s3_tick_text_size(size::Float64) = size * size / _S3_GL_TEXT_REFERENCE_SIZE
 
-# The text axis `d` of `scene` (a layout entry) is titled with: its layout
-# title, or, where the title is `_S3_TITLE_HIDDEN` because PlotlySupply draws
-# it as an annotation (`_s3_apply_titles!`), the text its mark kept.
+# The text axis `d` of `scene` (a layout entry) is titled with, and whether
+# PlotlySupply draws it: its layout title, or, where the title is
+# `_S3_TITLE_HIDDEN` because PlotlySupply draws it as an annotation
+# (`_s3_apply_titles!`), the text its mark kept.
 function _s3_title_source(scene, d::Int)
 	fields = _cmn_mapping_get(scene, (:xaxis, :yaxis, :zaxis)[d])
 	title = _cmn_mapping_get(fields, :title)
 	raw = title isa AbstractString ? title : _cmn_mapping_get(title, :text)
 	mark = _s3_mark(scene)
-	(mark !== nothing && raw == _S3_TITLE_HIDDEN && !isempty(mark.titles[d])) && return mark.titles[d]
-	return raw
+	(mark !== nothing && raw == _S3_TITLE_HIDDEN && !isempty(mark.titles[d])) && return mark.titles[d], true
+	return raw, false
 end
 
 # The labels of the three axes of scene `scenekey` as plotly.js lays them out:
@@ -1747,7 +1749,7 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol; pads = _s3_scene_pads(p, sce
 		shown = visible && _cmn_mapping_get(fields, :showticklabels) !== false
 		tick_size = _s3_number_field(_cmn_mapping_get(fields, :tickfont), :size, font; positive = true)
 		title = _cmn_mapping_get(fields, :title)
-		raw = _s3_title_source(scene, d)
+		raw, own_title = _s3_title_source(scene, d)
 		text = raw === nothing ? string("xyz"[d]) : string(raw)
 		title_font = title isa AbstractString ? nothing : _cmn_mapping_get(title, :font)
 		title_size = _s3_number_field(title_font, :size, round(1.2 * font); positive = true)
@@ -1770,6 +1772,7 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol; pads = _s3_scene_pads(p, sce
 			pads[1],
 			pads[2],
 			text,
+			own_title,
 		)
 	end
 end
@@ -1884,7 +1887,8 @@ end
 
 # `_s3_label_layout` with, per rectangle, the axis (1-3) and kind (`:tick` or
 # `:title`) it belongs to.
-function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::Float64, height::Float64, labels, spans; own::Bool = false)
+function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::Float64, height::Float64, labels, spans; own = nothing)
+	own === nothing && (own = any(label -> label.title_own, labels))
 	v, r, u = frame
 	eye = center .+ distance .* v
 	tan_half = tan(_S3_HALF_FOVY)
@@ -2468,7 +2472,8 @@ end
 # as the labels stay apart along the axis (`_s3_cell_tick_count`). `nothing`
 # for a full-size scene none of whose axes is shorter than four ticks' worth
 # (plotly.js's own lower bound; a short axis of a small figure gets the counts
-# too) or when the camera cannot tell.
+# too) or when the camera cannot tell. `false` for a full-size scene that
+# keeps plotly.js's own count (counts this module wrote earlier are removed).
 const _S3_TICK_SPACING_PX = 40.0
 const _S3_MIN_CELL_TICKS = 2
 const _S3_MAX_AUTO_TICKS = 9
@@ -2486,7 +2491,7 @@ function _s3_auto_nticks(fig, target::_CellTarget)
 	# so short in px that plotly.js's lower bound of four ticks (and its
 	# canvas-based length, which grows with the export scale) crowds it (a
 	# scene in a single-column figure).
-	full && all(L -> floor(Int, L / _S3_TICK_SPACING_PX) >= _S3_MIN_PLOTLY_TICKS, lengths) && return nothing
+	full && all(L -> floor(Int, L / _S3_TICK_SPACING_PX) >= _S3_MIN_PLOTLY_TICKS, lengths) && return false
 	scene = get(p.layout.fields, target.scenekey, nothing)
 	font = _s3_number_field(_cmn_mapping_get(p.layout.fields, :font), :size, _S3_DEFAULT_FONT_SIZE; positive = true)
 	return map(1:3) do d
@@ -2588,6 +2593,22 @@ function _s3_finish_ticks!(fig, target::_CellTarget, state::_S3SceneState)
 	updates = Dict{Symbol, Any}()
 	mark = something(_s3_mark(scene), _S3_NEW_MARK)
 	recorded = collect(mark.nticks)
+	if counts === false
+		# plotly.js's own count: take back the counts written for a smaller scene.
+		removed = false
+		for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
+			recorded[d] > 0 || continue
+			fields = _cmn_mapping_get(scene, axis)
+			if _cmn_mapping_get(fields, :nticks) == recorded[d]
+				_cmn_mapping_delete!(fields, (:nticks,))
+				removed = true
+			end
+			recorded[d] = 0
+		end
+		marked = _s3_write_mark!(p.layout, target.scenekey,
+			_s3_marked(get(p.layout.fields, target.scenekey, nothing); nticks = Tuple(recorded)))
+		return removed | marked
+	end
 	for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
 		state.auto_ticks[d] || continue
 		fields = _cmn_mapping_get(scene, axis)

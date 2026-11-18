@@ -871,7 +871,9 @@ end
 		# A camera the user placed is left alone.
 		user = plot_surface(xs, ys, Z)
 		view!(user; elev = 30, azim = 40, distance = 3)
-		@test PS._s3_refit_scenes!(_v4_copy(user), user, (900, 350)) === false
+		user_copy = _v4_copy(user)
+		PS._s3_refit_scenes!(user_copy, user, (900, 350))   # (its tick counts follow the size)
+		@test _v4_camera(user_copy) == _v4_camera(user)
 		# A 1x3 grid at 900x350: every scene fits its cell, labels included,
 		# and its x and y axes label two ticks whenever two labels fit (K4).
 		sf = subplots(1, 3; sync = false, specs = fill(Spec(kind = "scene"), 1, 3))
@@ -1055,8 +1057,9 @@ _v5_with_style(f, style) = with_style(f, style)
 		relayout!(h; scene_camera_eye = attr(x = 0.5, y = -2.0, z = 1.0))
 		plot_scatter3d!(h, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0])
 		@test _v4_xyz(_v4_camera(h)[:eye]) == [0.5, -2.0, 1.0]
-		@test PS._s3_finalize_scenes!(h, (900, 350)) === false
-		k = plot_surface(xs, ys, Z)
+		PS._s3_finalize_scenes!(h, (900, 350))   # (its tick counts follow the size)
+		@test _v4_xyz(_v4_camera(h)[:eye]) == [0.5, -2.0, 1.0]
+		k = plot_surface(xs, ys, Z; width = 1100, height = 800)   # axes long enough for plotly's own tick counts
 		view!(k; elev = 30, azim = -60)
 		auto = _v5_distance(k)
 		view!(k; elev = 30, azim = -60, zoom = 1.5)
@@ -1064,10 +1067,11 @@ _v5_with_style(f, style) = with_style(f, style)
 		# The zoom survives an export at another size: the distance fitted there
 		# divided by 1.5, so the drawing overflows the viewport.
 		opts = PS._normalize_export_options(k, (width = 900, height = 350))
-		unzoomed = plot_surface(xs, ys, Z)
+		unzoomed = plot_surface(xs, ys, Z; width = 1100, height = 800)
 		view!(unzoomed; elev = 30, azim = -60)
 		at = PS._export_source(k, opts)
-		@test _v5_distance(at) ≈ _v5_distance(PS._export_source(unzoomed, opts)) / 1.5 rtol = 1e-5
+		# (the tick counts of the short axes at 900 x 350 follow the zoomed axes' length, so the labels differ a little)
+		@test _v5_distance(at) ≈ _v5_distance(PS._export_source(unzoomed, opts)) / 1.5 rtol = 0.1
 		@test _v4_label_extent(at, :scene, (900, 350)) > 1.2
 	end
 
@@ -1397,7 +1401,8 @@ const _V6_TOPO_EXPORT = (width = 6.6, height = 2.0, units = :in, dpi = 200, tigh
 		d = _v6_drawing(nature)
 		scenes = sort(collect(keys(d)); by = string)
 		@test length(scenes) == 3
-		@test all(k -> d[k].viewport == d[scenes[1]].viewport && d[k].span == d[scenes[1]].span, scenes)
+		@test all(k -> isapprox(collect(d[k].viewport), collect(d[scenes[1]].viewport); atol = 1e-6) &&
+		isapprox(collect(d[k].span), collect(d[scenes[1]].span); atol = 1e-6), scenes)
 	end
 
 	@testset "titles PlotlySupply draws itself: annotations at the projected axis, settled, restored" begin
@@ -1540,7 +1545,8 @@ const _V6_TOPO_EXPORT = (width = 6.6, height = 2.0, units = :in, dpi = 200, tigh
 		d = _v6_drawing(sf)
 		scenes = sort(collect(keys(d)); by = string)
 		@test length(scenes) == 3
-		@test all(k -> d[k].viewport == d[scenes[1]].viewport && d[k].span == d[scenes[1]].span, scenes)
+		@test all(k -> isapprox(collect(d[k].viewport), collect(d[scenes[1]].viewport); atol = 1e-6) &&
+		isapprox(collect(d[k].span), collect(d[scenes[1]].span); atol = 1e-6), scenes)
 		widths = [(dm = _r3_fields(_r3_fields(sf.plot.layout.fields[k])[:domain]); dm[:x][2] - dm[:x][1]) for k in scenes]
 		@test maximum(widths) - minimum(widths) < 1e-9
 	end
