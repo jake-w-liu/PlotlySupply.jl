@@ -1506,7 +1506,9 @@ end
 # `$...$` math is wrapped the same way as `title` and `xlabel`.
 @testset "subplot_titles render mixed mathtext like title and axis labels (G36, Y38)" begin
     mixed = "Field \$E_z\$ (V/m)"
-    expected = "\$\\text{Field }E_z\\text{ (V/m)}\$"
+    # K3: `_label` brackets every math run in braces (`{E_z}`) so a run next to
+    # `\text{…}` cannot merge with it; titles, axis labels and panel titles agree.
+    expected = "\$\\text{Field }{E_z}\\text{ (V/m)}\$"
     fig = plot_scatter(1:3, [1.0, 2.0, 3.0]; title = mixed, xlabel = mixed)
     @test fig.layout.fields[:title][:text] == expected
     @test fig.layout.xaxis[:title][:text] == expected

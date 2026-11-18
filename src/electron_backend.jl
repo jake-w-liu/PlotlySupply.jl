@@ -9075,6 +9075,7 @@ function PlotlyBase.update!(
 end
 
 function PlotlyBase.update_xaxes!(sp::SyncPlot, args...; kwargs...)
+	_verb_reject_cell_keywords("update_xaxes!", kwargs)
 	return _mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -9084,6 +9085,7 @@ function PlotlyBase.update_xaxes!(sp::SyncPlot, args...; kwargs...)
 end
 
 function PlotlyBase.update_yaxes!(sp::SyncPlot, args...; kwargs...)
+	_verb_reject_cell_keywords("update_yaxes!", kwargs)
 	return _mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -9093,6 +9095,7 @@ function PlotlyBase.update_yaxes!(sp::SyncPlot, args...; kwargs...)
 end
 
 function PlotlyBase.update_polars!(sp::SyncPlot, args...; kwargs...)
+	_verb_reject_cell_keywords("update_polars!", kwargs)
 	return _mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -9106,6 +9109,7 @@ function PlotlyBase.update_mapboxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_mapboxes!", kwargs)
 	return _mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10131,6 +10135,7 @@ function PlotlyBase.update_xaxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_xaxes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10144,6 +10149,7 @@ function PlotlyBase.update_yaxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_yaxes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10157,6 +10163,7 @@ function PlotlyBase.update_polars!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_polars!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10170,6 +10177,7 @@ function PlotlyBase.update_geos!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_geos!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10183,6 +10191,7 @@ function PlotlyBase.update_mapboxes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_mapboxes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10212,6 +10221,7 @@ function PlotlyBase.update_scenes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_scenes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10225,6 +10235,7 @@ function PlotlyBase.update_ternaries!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_ternaries!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10238,6 +10249,7 @@ function PlotlyBase.update_annotations!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_annotations!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10252,6 +10264,7 @@ function PlotlyBase.update_shapes!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_shapes!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10266,6 +10279,7 @@ function PlotlyBase.update_images!(
 	with::PlotlyBase.PlotlyAttribute = attr();
 	kwargs...,
 )
+	_verb_reject_cell_keywords("update_images!", kwargs)
 	return _transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
@@ -10640,10 +10654,10 @@ function _mathjax_svg_font()
 	font = strip(get(ENV, _MATHJAX_SVG_FONT_ENV_VAR, ""))
 	isempty(font) && return _MATHJAX_SVG_FONT_DEFAULT
 	canonical = _mathjax_font_name(font)
-	canonical === nothing && error(
-		"Invalid $(_MATHJAX_SVG_FONT_ENV_VAR) value $(repr(String(font))): expected " *
+	canonical === nothing && throw(ArgumentError(
+		"mathtext: invalid $(_MATHJAX_SVG_FONT_ENV_VAR) value $(repr(String(font))): expected " *
 		"one of the MathJax SVG fonts $(join(_MATHJAX_SVG_FONTS, ", ")).",
-	)
+	))
 	return canonical
 end
 

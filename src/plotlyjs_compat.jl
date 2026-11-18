@@ -234,15 +234,15 @@ end
 
 Base.showerror(io::IO, err::_ExportTimeoutError) = print(io, err.message)
 
-# Unsupported formats keep raising `ErrorException`, as in 1.x.
+# An unsupported format is invalid user input: `ArgumentError`.
 function _validate_export_format(fmt::AbstractString)
 	name = lowercase(String(fmt))
 	name == "jpg" && return "jpeg"
 	name == "tif" && return "tiff"
-	name in _SAVEFIG_FORMATS || error(
+	name in _SAVEFIG_FORMATS || throw(ArgumentError(
 		"savefig: unsupported export format $(repr(name)). Supported: " *
 		"png, jpeg (or jpg), tiff (or tif), svg, pdf, eps, html, json.",
-	)
+	))
 	return name
 end
 

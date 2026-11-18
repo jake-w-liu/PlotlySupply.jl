@@ -2901,18 +2901,18 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     end
 
     @testset "CRC: savefig validates before opening destinations" begin
-        # The message is pinned, not the type: the format check raises an
-        # ErrorException (1.x behaviour), and an ArgumentError for this invalid
-        # input is requested of the export owner (`showerror` of an ArgumentError
-        # starts with "ArgumentError: ", so the pattern is not anchored there).
+        # An unsupported format is invalid input: ArgumentError with the full message (Z89).
         p = plot_scatter(1:2, 1:2)
-        unsupported = r"savefig: unsupported export format \"unsupported\"\. Supported: png, jpeg \(or jpg\), svg, pdf, eps, html, json\.$"
-        @test_throws unsupported savefig(IOBuffer(), p; format="unsupported")
+        unsupported = "savefig: unsupported export format \"unsupported\". Supported: png, jpeg (or jpg), tiff (or tif), svg, pdf, eps, html, json."
+        caught(f) = try; f(); nothing; catch e; e; end
+        err = caught(() -> savefig(IOBuffer(), p; format="unsupported"))
+        @test err isa ArgumentError && err.msg == unsupported
 
         mktempdir() do dir
             filename = joinpath(dir, "existing.unsupported")
             write(filename, "sentinel")
-            @test_throws unsupported savefig(filename, p; format="unsupported")
+            err = caught(() -> savefig(filename, p; format="unsupported"))
+            @test err isa ArgumentError && err.msg == unsupported
             @test read(filename, String) == "sentinel"
         end
     end

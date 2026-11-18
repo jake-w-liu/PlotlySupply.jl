@@ -1052,7 +1052,9 @@ function _svg_stable_ids(svg::String)::String
 	uid = String(m.captures[1])
 	uid == "000000" && return svg
 	# An id attribute value, or the target of a url(#…) / href="#…" reference.
-	token = r"(?:id=\"|url\(['\"]?#|href=\"#)[^\"'()\s<>]*"
+	# plotly.js serializes the quotes of `url("#…")` inside a style attribute as
+	# `&quot;` (the patched asset keeps them), so that spelling is a reference too.
+	token = r"(?:id=\"|url\((?:['\"]|&quot;|&#39;|&apos;)?#|href=\"#)[^\"'()\s<>&]*"
 	return replace(svg, token => t -> replace(t, uid => "000000"))
 end
 

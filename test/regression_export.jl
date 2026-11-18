@@ -624,3 +624,21 @@ end
 		close(b)
 	end
 end
+
+@testset "regression export: SVG bytes are stable across many exports (Z58, Z90)" begin
+	heat = _reg_heatmap("stable heat")
+	line = plot_scatter([1.0, 2.0, 3.0], [3.0, 1.0, 2.0]; title = "stable line")
+	reference = (heat = savefig(heat; format = "svg"), line = savefig(line; format = "svg"))
+	for _ in 1:8
+		@test savefig(heat; format = "svg") == reference.heat
+		@test savefig(line; format = "svg") == reference.line
+	end
+	# No random plotly.js id survives: one uid in defs, clips and the colorbar gradient.
+	svg = String(reference.heat)
+	@test length(unique(m.captures[1] for m in eachmatch(r"\bg([0-9a-f]{6})-cb", svg))) == 1
+	@test only(unique(m.captures[1] for m in eachmatch(r"\bg([0-9a-f]{6})-cb", svg))) == "000000"
+	# The root tag's attributes come in the canonical order.
+	root = match(r"^<svg[^>]*>", svg).match
+	positions = [first(findfirst(name * "=\"", root)) for name in ("xmlns", "width", "height", "viewBox", "style")]
+	@test issorted(positions)
+end

@@ -686,7 +686,7 @@ end
 			end
 			withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => "bogus") do
 				err = _rl_error(PlotlySupply._mathjax_svg_font)
-				@test err isa ErrorException
+				@test err isa ArgumentError
 				@test occursin("PLOTLYSUPPLY_MATHJAX_SVG_FONT", err.msg)
 				@test occursin("Gyre-Termes", err.msg)
 				set_default_mathtext!(; font = "TeX")
@@ -844,7 +844,7 @@ end
 				set_default_mathtext!()
 				withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => "bogus") do
 					scripts = length(ec.scripts)
-					@test_throws ErrorException relayout!(sp; title = "f")
+					@test_throws ArgumentError relayout!(sp; title = "f")
 					@test length(ec.scripts) == scripts
 					@test live_title() == "d"
 				end
@@ -856,7 +856,7 @@ end
 		# A window cannot be built with an invalid environment font.
 		withenv("PLOTLYSUPPLY_MATHJAX_SVG_FONT" => "bogus") do
 			ec = _RLFakeElectron()
-			@test_throws ErrorException PlotlySupply._create_syncplot_window(
+			@test_throws ArgumentError PlotlySupply._create_syncplot_window(
 				ec,
 				Plot(scatter(y = [1]));
 				app = :fake,

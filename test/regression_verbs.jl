@@ -1200,13 +1200,12 @@ end
 	end
 	@test isempty(renderer.scripts)
 	@test sp.plot.layout == before
-	# Known gaps in methods outside this track (cross-requested): the Plot
-	# methods of every layout updater and the SyncPlot update_xaxes!/
-	# update_yaxes!/update_polars!/update_mapboxes! still accept `row`/`col`.
+	# The Plot methods of every layout updater and the SyncPlot update_xaxes!/
+	# update_yaxes!/update_polars!/update_mapboxes! reject cell keywords (Z24).
 	rejects_row(f, fig) = _rv_argument_error(() -> f(fig; row = 1, col = 1, title_text = "t")) !== nothing
-	@test_broken rejects_row(update_xaxes!, first(_rv_syncplot(plot_scatter(1:3, [1.0, 2.0, 3.0]))))
-	@test_broken rejects_row(update_xaxes!, plot_scatter(1:3, [1.0, 2.0, 3.0]))
-	@test_broken rejects_row(update_shapes!, plot_scatter(1:3, [1.0, 2.0, 3.0]))
+	@test rejects_row(update_xaxes!, first(_rv_syncplot(plot_scatter(1:3, [1.0, 2.0, 3.0]))))
+	@test rejects_row(update_xaxes!, plot_scatter(1:3, [1.0, 2.0, 3.0]))
+	@test rejects_row(update_shapes!, plot_scatter(1:3, [1.0, 2.0, 3.0]))
 
 	# SubplotFigure verbs that act on the whole figure.
 	sf = subplots(1, 2; sync = false)
