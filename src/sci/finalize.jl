@@ -401,10 +401,13 @@ mutable struct _FinAxisAcc
 	alo::Float64
 	ahi::Float64
 	scanned::Bool
+	# Quiver/streamline glyphs on the axis (traces carrying an anchor extent,
+	# D16): a group of glyphs without a field is padded on both sides (D13).
+	glyphs::Bool
 	# (index in `p.data`, field kind) of the visible traces on the axis.
 	traces::Vector{Tuple{Int, Union{Nothing, Symbol}}}
 end
-_FinAxisAcc() = _FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, true,
+_FinAxisAcc() = _FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, true, false,
 	Tuple{Int, Union{Nothing, Symbol}}[])
 
 # `extent` is the drawn extent, `anchor` the extent of the anchor points.
@@ -492,16 +495,19 @@ function _fin_collect_axes(p::Plot)
 		_fin_visible(trace) || continue
 		kind = _fin_field_kind(trace)
 		is_image = _fin_trace_type(trace) == "image"
+		is_glyph = false
 		xkey = _fin_axis_key(get(trace.fields, :xaxis, "x"))
 		ykey = _fin_axis_key(get(trace.fields, :yaxis, "y"))
 		for (letter, key) in (('x', xkey), ('y', ykey))
 			key === nothing && continue
 			acc = get!(accs, key) do
-				_FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, false,
+				_FinAxisAcc(false, false, false, nothing, Inf, -Inf, Inf, -Inf, Inf, -Inf, false, false,
 					Tuple{Int, Union{Nothing, Symbol}}[])
 			end
 			kind === :tight && (acc.tight = true)
 			kind === :loose && (acc.loose = true)
+			kind === nothing && (is_glyph || (is_glyph = _fin_anchor_extent(trace, 'x', false) !== nothing ||
+				_fin_anchor_extent(trace, 'y', false) !== nothing)) && (acc.glyphs = true)
 			letter == 'y' && is_image && xkey !== nothing && (acc.image_x = xkey)
 			acc.unsupported && continue
 			if !(_fin_axis_type(layout, key) in ("-", "linear", "log"))
@@ -624,14 +630,19 @@ end
 # the fields (in log10 units on a log axis). Data units.
 function _fin_padded_extent(acc::_FinAxisAcc, islog::Bool)
 	lo, hi = acc.alo, acc.ahi
-	(isfinite(acc.flo) && isfinite(acc.fhi)) || return (lo, hi)
+	field = isfinite(acc.flo) && isfinite(acc.fhi)
+	# D13: quiver/streamline glyphs without a field are all overlay (their
+	# drawn extent, in `alo/ahi` by `_fin_sticky_updates!`), padded on both
+	# sides: plotly.js autoranges line traces without padding, which cuts the
+	# arrowheads at the frame.
+	(field || acc.glyphs) || return (lo, hi)
 	tol(v) = 1e-12 * max(abs(v), 1.0)
 	l(v) = islog ? log10(v) : v
 	span = l(hi) - l(lo)
 	span > 0 || return (lo, hi)
 	pad = _FIN_OVERLAY_PAD * span
-	lo_out = lo < acc.flo - tol(acc.flo)
-	hi_out = hi > acc.fhi + tol(acc.fhi)
+	lo_out = !field || lo < acc.flo - tol(acc.flo)
+	hi_out = !field || hi > acc.fhi + tol(acc.fhi)
 	new_lo = lo_out ? (islog ? exp10(log10(lo) - pad) : lo - pad) : lo
 	new_hi = hi_out ? (islog ? exp10(log10(hi) + pad) : hi + pad) : hi
 	return (new_lo, new_hi)
@@ -681,6 +692,7 @@ function _fin_sticky_updates!(updates::Dict{Symbol, Any}, p::Plot, accs = _fin_c
 			macc === nothing && continue
 			acc.tight |= macc.tight
 			acc.loose |= macc.loose
+			acc.glyphs |= macc.glyphs
 			acc.unsupported |= macc.unsupported
 			macc.image_x === nothing || (acc.image_x = macc.image_x)
 		end
@@ -689,18 +701,24 @@ function _fin_sticky_updates!(updates::Dict{Symbol, Any}, p::Plot, accs = _fin_c
 		mode, reversed = _fin_axis_mode(root_axis, clip, islog, implicit_reversed)
 		mode === :explicit && continue
 		# Extents are scanned only for the groups that can be sticky (Z81).
-		if acc.tight && !acc.loose && !acc.unsupported
+		if (acc.tight || acc.glyphs) && !acc.loose && !acc.unsupported
 			for member in members
 				macc = get(accs, member, nothing)
 				macc === nothing && continue
 				acc.unsupported |= macc.unsupported
+				acc.lo = min(acc.lo, macc.lo)
+				acc.hi = max(acc.hi, macc.hi)
 				acc.alo = min(acc.alo, macc.alo)
 				acc.ahi = max(acc.ahi, macc.ahi)
 				acc.flo = min(acc.flo, macc.flo)
 				acc.fhi = max(acc.fhi, macc.fhi)
 			end
+			# Glyphs without a field: the view is what everything draws (D13).
+			if !acc.tight
+				acc.alo, acc.ahi = acc.lo, acc.hi
+			end
 		end
-		sticky = acc.tight && !acc.loose && !acc.unsupported &&
+		sticky = (acc.tight || acc.glyphs) && !acc.loose && !acc.unsupported &&
 			isfinite(acc.alo) && isfinite(acc.ahi) && acc.alo < acc.ahi &&
 			(!islog || acc.alo > 0)
 		if sticky

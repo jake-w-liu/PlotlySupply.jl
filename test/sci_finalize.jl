@@ -1412,3 +1412,23 @@ end
 end
 
 end
+
+@testset "D13/D16: glyphs without a field are padded on both sides; with one they stay tight" begin
+	pad(lo, hi) = _SFN._FIN_OVERLAY_PAD * (hi - lo)
+	alone = plot_quiver([0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0])
+	for (axis, coords) in ((:xaxis, :x), (:yaxis, :y))
+		lo, hi = extrema(filter(!isnothing, alone.data[1].fields[coords]))
+		# The drawn extent (arrowheads included), padded on both sides.
+		clip = _sfn_clip(alone, axis)
+		@test clip !== nothing && clip[1] < lo - 0.5 * pad(lo, hi) && clip[2] > hi + 0.5 * pad(lo, hi)
+	end
+	free = plot_quiver([0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]; equalar = false)
+	lo, hi = extrema(filter(!isnothing, free.data[1].fields[:x]))
+	@test _sfn_clip(free, :xaxis) == (lo - pad(lo, hi), hi + pad(lo, hi))
+	@test _SFN._finalize_figure!(free) === false
+	# A later trace widens the view; a heatmap under the glyphs makes them
+	# anchors again: the axes are tight on the field.
+	f = plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y))
+	plot_quiver!(f, [0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0])
+	@test _sfn_clip(f, :xaxis) == _SFN_XE && _sfn_clip(f, :yaxis) == _SFN_YE
+end
