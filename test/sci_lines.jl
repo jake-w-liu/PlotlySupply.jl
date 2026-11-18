@@ -329,3 +329,53 @@ end
 	@test plot_complex([1 + 1im, 2im]).data[1].fields[:mode] == "markers"
 	@test plot_complex([1 + 1im, 2im]; mode = "lines").data[1].fields[:mode] == "lines"
 end
+
+# ── wave 5 (oned) ────────────────────────────────────────────────────────────
+
+@testset "lines: colour keywords take grey levels and Colorants, reject unknown names (Z63, Z10)" begin
+	Colors = PlotlySupply.Colors
+	line_color(fig, k = 1) = _sl_get(_sl_get(PlotlySupply._plot_obj(fig).data[k].fields, :line, Dict{Symbol, Any}()), :color)
+	for (value, expected) in (("0.35", "#595959"), (Colors.RGB(1, 0, 0), "#FF0000"), (:navy, "navy"))
+		@test line_color(plot_segments([0.0], [0.0], [1.0], [1.0]; color = value)) == expected
+		@test line_color(plot_vlines([1.0], 0, 1; color = value)) == expected
+		@test line_color(plot_hlines([1.0], 0, 1; color = value)) == expected
+		@test line_color(plot_ecdf([1.0, 2, 3]; color = value)) == expected
+		@test line_color(plot_kde([1.0, 2, 4]; color = value)) == expected
+		@test line_color(plot_complex([1 + 1im, 2im]; mode = "lines", color = value)) == expected
+		@test line_color(plot_band(1:3, 0, [1, 2, 3]; edgecolor = value, linewidth = 1)) == expected
+		f = plot_ecdf([1.0, 2, 3])
+		plot_ecdf!(f, [2.0, 3]; color = value)
+		@test line_color(f, 2) == expected
+	end
+	# A band's fill takes the colour at its opacity (G16 conversion first).
+	@test plot_band(1:3, 0, [1, 2, 3]; color = "0.35").data[1].fields[:fillcolor] == "rgba(89,89,89,0.25)"
+	for (who, call) in (
+		("plot_band", () -> plot_band(1:3, 0, [1, 2, 3]; edgecolor = "nope")),
+		("plot_band", () -> plot_band(1:3, 0, [1, 2, 3]; color = "nope")),
+		("plot_segments", () -> plot_segments([0.0], [0.0], [1.0], [1.0]; color = "nope")),
+		("plot_ecdf", () -> plot_ecdf([1.0, 2]; color = "nope")),
+		("plot_kde", () -> plot_kde([1.0, 2, 4]; color = "nope")),
+		("plot_complex", () -> plot_complex([1 + 1im]; color = "nope")),
+	)
+		err = try
+			call()
+			nothing
+		catch caught
+			caught
+		end
+		@test err isa ArgumentError && startswith(err.msg, who * ": `")
+		@test err isa ArgumentError && occursin("invalid colour", err.msg)
+	end
+	target = plot_ecdf([1.0, 2, 3])
+	snapshot = _sl_snapshot(target)
+	@test_throws ArgumentError plot_ecdf!(target, [1.0, 2]; color = "nope")
+	@test _sl_unchanged(target, snapshot)
+end
+
+@testset "lines: plot_complex takes `simplify` (Z35)" begin
+	@test _sl_get(plot_complex([1 + 1im, 2im]; mode = "lines", simplify = false).data[1].fields[:line], :simplify) === false
+	f = plot_complex([1 + 1im, 2im])
+	plot_complex!(f, [2 + 2im, 1im]; mode = "lines", simplify = true)
+	@test _sl_get(f.data[2].fields[:line], :simplify) === true
+	@test occursin("simplify", string(@doc plot_complex))
+end

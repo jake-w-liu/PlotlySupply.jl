@@ -1229,9 +1229,10 @@ end
 # ── wave 4 (oned) ────────────────────────────────────────────────────────────
 
 # The axis fields `_apply_axis_range!` (src/sci/base.jl) writes for `range` on
-# an empty figure, or the error it throws (`who = "REF"`).
-function _rsc_primitive_range(range, letter::Symbol)
-	ref = Plot(GenericTrace[], Layout())
+# `ref` (the figure a call builds without the range: an aspect-locked figure
+# such as plot_complex's pins a one-sided limit to the data, D11), or the
+# error it throws (`who = "REF"`).
+function _rsc_primitive_range(range, letter::Symbol, ref = Plot(GenericTrace[], Layout()))
 	err = _rsc_error(() -> PlotlySupply._apply_axis_range!(ref, letter, range, "REF"))
 	return err, _rsc_axis_or_empty(ref, letter === :x ? :xaxis : :yaxis)
 end
@@ -1267,7 +1268,9 @@ const _RSC_ONE_SIDED = ((nothing, 2), [1, nothing], (0, nothing), (nothing, 2.5)
 	)
 	for (who, letter, build, mutate!) in cases, partial in _RSC_ONE_SIDED
 		key = letter === :x ? :xaxis : :yaxis
-		ref_err, ref_axis = _rsc_primitive_range(partial, letter)
+		# K7: the reference is the primitive applied to the family's own figure
+		# (an empty figure has no aspect lock, so it never matched plot_complex).
+		ref_err, ref_axis = _rsc_primitive_range(partial, letter, build(nothing))
 		if ref_err === nothing
 			fig = build(partial)
 			@test _rsc_axis_matches(_rsc_axis_or_empty(fig, key), ref_axis)
@@ -1299,6 +1302,15 @@ const _RSC_ONE_SIDED = ((nothing, 2), [1, nothing], (0, nothing), (nothing, 2.5)
 	# A fixed bound past the data leaves the data-only window.
 	@test window(attr(range = [12, nothing], autorange = "max")) == (free_lo, free_hi)
 	@test window(attr(range = [0, 20], autorange = false)) == (0.0, 20.0)
+	# Wave 5: the encoding `_write_axis_range!` stores (`autorange` with
+	# `autorangeoptions.minallowed`/`maxallowed`) is read the same way.
+	@test window(attr(autorange = true, autorangeoptions = attr(minallowed = 0))) == (0.0, free_hi)
+	@test window(attr(autorange = true, autorangeoptions = attr(maxallowed = 20))) == (free_lo, 20.0)
+	@test window(attr(autorange = true, autorangeoptions = attr(minallowed = 12))) == (free_lo, free_hi)
+	@test window(attr(autorange = "reversed", autorangeoptions = attr(minallowed = 0))) == (free_hi, 0.0)
+	# What the keywords write is what the estimate reads.
+	stored = plot_scatter([1.0, 2], [5.0, 10.0]; yrange = (0, nothing))
+	@test PlotlySupply._scat_legend_window(stored.layout, :yaxis, [5.0, 10.0]; padded = true) == (0.0, free_hi)
 end
 
 @testset "scatter family: equal range bounds are rejected everywhere (G33)" begin
@@ -1510,4 +1522,296 @@ end
 		end
 		@test err isa ArgumentError && startswith(err.msg, name * ":")
 	end
+end
+
+# ── wave 5 (oned) ────────────────────────────────────────────────────────────
+
+import Dates
+
+# The lowered data and layout `savefig` hands the renderer for `fig`
+# (`_prepare_renderer_export`, the PNG/SVG/PDF path), parsed back from JSON.
+function _rsc_export(fig)
+	prepared = PlotlySupply._prepare_renderer_export(PlotlySupply._plot_obj(fig), (;))
+	json = PlotlySupply.PlotlyBase.JSON
+	return json.parse(prepared.data_js), json.parse(prepared.layout_js)
+end
+
+_rsc_limits(fig, key) = PlotlySupply._stored_axis_limits(PlotlySupply._plot_obj(fig).layout, key)
+
+@testset "scatter family: one-sided limits on twin, log, date and shared axes (Z51, Z52, Z38)" begin
+	y5 = [1.0, 2, 3, 4, 5]
+	# The twin y axis of a Plot: the bound goes to that axis only.
+	f = plot_scatter(1:5, y5)
+	plot_scatter!(f, 1:5, 10 .* y5; secondary_y = true, yrange = (0, nothing))
+	@test _rsc_limits(f, :yaxis2) == (0, nothing)
+	@test _rsc_get(_rsc_axis(f, :yaxis2), :autorange) === true
+	@test _rsc_limits(f, :yaxis) == (nothing, nothing)
+	# A log axis stores the bound in log10 units.
+	logy = [1.0, 10, 100, 1e3, 1e4]
+	@test _rsc_limits(plot_scatter(1:5, logy; yscale = "log", yrange = (1e-2, nothing)), :yaxis) == (-2, nothing)
+	@test _rsc_limits(plot_scatter(1:5, logy; yscale = "log", yrange = (nothing, 1e6)), :yaxis) == (nothing, 6)
+	# A date axis stores epoch milliseconds.
+	days = Dates.Date(2020, 1, 1) .+ Dates.Day.(0:9)
+	f = plot_scatter(days, 1.0:10; xrange = (Dates.Date(2019, 12, 20), nothing))
+	@test _rsc_limits(f, :xaxis) == (1000 * Dates.datetime2unix(Dates.DateTime(2019, 12, 20)), nothing)
+	# Stem and area take the same path.
+	@test _rsc_limits(plot_stem(1:5, y5; yrange = (-1, nothing)), :yaxis) == (-1, nothing)
+	@test _rsc_limits(plot_area(1:5, y5; yrange = (nothing, 8)), :yaxis) == (nothing, 8)
+	# Shared axes: the bound set through one cell reaches every member of the
+	# `matches` group (before wave 5 only the follower kept it, and the PNG
+	# ignored it: probe d11_shared_lo).
+	sf = subplots(1, 2; sync = false, shared_yaxes = true)
+	plot_scatter!(sf, 1:5, y5; row = 1, col = 1)
+	plot_scatter!(sf, 1:5, y5 .+ 1; row = 1, col = 2, yrange = (0, nothing))
+	@test _rsc_limits(sf.plot, :yaxis) == (0, nothing)
+	@test _rsc_limits(sf.plot, :yaxis2) == (0, nothing)
+	# Z38: the export copy savefig renders keeps the encoding.
+	_, layout = _rsc_export(sf)
+	@test layout["yaxis"]["autorangeoptions"]["minallowed"] == 0
+	@test layout["yaxis"]["autorange"] === true
+	_, layout = _rsc_export(plot_scatter(1:5, logy; yscale = "log", yrange = (1e-2, nothing)))
+	@test layout["yaxis"]["autorangeoptions"]["minallowed"] == -2
+	# Bad bounds name the function, and a mutator changes nothing first.
+	err = _rsc_error(() -> plot_scatter(1:3, [1.0, 2, 3]; yrange = ("a", "b")))
+	@test err isa ArgumentError && startswith(err.msg, "plot_scatter:")
+	target = plot_scatter(1:3, [1.0, 2, 3])
+	snapshot = _rsc_snapshot(target)
+	err = _rsc_error(() -> plot_scatter!(target, 1:3, [1.0, 2, 3]; yrange = ("a", nothing)))
+	@test err isa ArgumentError && startswith(err.msg, "plot_scatter!:")
+	@test _rsc_unchanged(target, snapshot)
+end
+
+@testset "scatter family: colour keywords take grey levels and Colorants, reject unknown names (Z63, Z10)" begin
+	Colors = PlotlySupply.Colors
+	cases = (
+		("0.35", "#595959"),
+		(Colors.RGB(1, 0, 0), "#FF0000"),
+		(Colors.RGBA(0, 0, 1, 0.5), "rgba(0,0,255,0.5)"),
+		("rgba(0,0,0,0.5)", "rgba(0,0,0,0.5)"),
+		(:navy, "navy"),
+		("#1f77b4", "#1f77b4"),
+	)
+	for (value, expected) in cases
+		@test _rsc_line(plot_scatter(1:3, [1.0, 2, 3]; color = value).data[1])[:color] == expected
+		f = plot_scatter(1:3, [1.0, 2, 3])
+		plot_scatter!(f, 1:3, [3.0, 2, 1]; color = value)
+		@test _rsc_line(f.data[2])[:color] == expected
+		m = plot_scatter(1:3, [1.0, 2, 3]; mode = "markers", marker_color = value, marker_line_color = value)
+		@test _rsc_marker(m.data[1])[:color] == expected
+		@test _rsc_get(_rsc_marker(m.data[1])[:line], :color) == expected
+		a = plot_scatter(1:3, [1.0, 2, 3]; fill = "tozeroy", fillcolor = value)
+		@test a.data[1].fields[:fillcolor] == expected
+		stem_colors = [_rsc_line(t)[:color] for t in plot_stem(1:3, [1.0, 2, 3]; color = value).data
+			if haskey(_rsc_line(t), :color)]
+		@test !isempty(stem_colors) && all(==(expected), stem_colors)
+		@test _rsc_line(plot_area(1:3, [1.0, 2, 3]; color = value).data[1])[:color] == expected
+		@test _rsc_line(plot_scatterpolar([0.0, 90], [1.0, 2]; color = value).data[1])[:color] == expected
+	end
+	# Per-series vectors mix the forms.
+	two = plot_scatter(1:3, [[1.0, 2, 3], [3.0, 2, 1]]; color = ["0.2", Colors.RGB(0, 0, 1)])
+	@test [_rsc_line(t)[:color] for t in two.data] == ["#333333", "#0000FF"]
+	# "none" stays a hollow marker face.
+	hollow = plot_scatter(1:3, [1.0, 2, 3]; mode = "markers", marker_symbol = "o", marker_color = "none")
+	@test !haskey(_rsc_marker(hollow.data[1]), :color)
+	# SyncPlot and SubplotFigure mutators convert too.
+	sp = _rsc_syncplot(plot_scatter(1:3, [1.0, 2, 3]))
+	plot_scatter!(sp, 1:3, [3.0, 2, 1]; color = "0.35")
+	@test _rsc_line(sp.plot.data[2])[:color] == "#595959"
+	sf = subplots(1, 2; sync = false)
+	plot_scatter!(sf, 1:3, [1.0, 2, 3]; row = 1, col = 2, color = "0.35")
+	@test _rsc_line(sf.plot.data[end])[:color] == "#595959"
+	# Unknown colours throw an ArgumentError naming the function and keyword,
+	# before anything is written.
+	for (who, call) in (
+		("plot_scatter", () -> plot_scatter(1:3, [1.0, 2, 3]; color = "notacolour")),
+		("plot_scatter", () -> plot_scatter(1:3, [1.0, 2, 3]; marker_line_color = "zzz")),
+		("plot_stem", () -> plot_stem(1:3, [1.0, 2, 3]; color = "nope")),
+		("plot_area", () -> plot_area(1:3, [1.0, 2, 3]; color = "nope")),
+		("plot_scatterpolar", () -> plot_scatterpolar([0.0, 90], [1.0, 2]; color = "nope")),
+	)
+		err = _rsc_error(call)
+		@test err isa ArgumentError && startswith(err.msg, who * ": `")
+		@test err isa ArgumentError && occursin("invalid colour", err.msg)
+	end
+	target = plot_scatter(1:3, [1.0, 2, 3])
+	snapshot = _rsc_snapshot(target)
+	err = _rsc_error(() -> plot_scatter!(target, 1:3, [1.0, 2, 3]; fillcolor = "nope"))
+	@test err isa ArgumentError && startswith(err.msg, "plot_scatter!: `fillcolor`:")
+	@test _rsc_unchanged(target, snapshot)
+	@test occursin("grey", string(@doc plot_scatter)) && occursin("Colorant", string(@doc plot_scatter))
+end
+
+@testset "scatter family: `simplify` keyword; exports draw every vertex (Z35)" begin
+	# The figure itself only carries an explicit choice.
+	@test !haskey(plot_scatter(1:3, [1.0, 2, 3]).data[1].fields, :line)
+	@test _rsc_line(plot_scatter(1:3, [1.0, 2, 3]; simplify = true).data[1])[:simplify] === true
+	@test _rsc_line(plot_scatter(1:3, [1.0, 2, 3]; simplify = false).data[1])[:simplify] === false
+	two = plot_scatter(1:3, [[1.0, 2, 3], [3.0, 2, 1]]; simplify = [true, nothing])
+	@test _rsc_line(two.data[1])[:simplify] === true
+	@test !haskey(_rsc_line(two.data[2]), :simplify)
+	g = plot_scatter(1:3, [1.0, 2, 3])
+	plot_scatter!(g, 1:3, [3.0, 2, 1]; simplify = true)
+	@test _rsc_line(g.data[2])[:simplify] === true
+	@test _rsc_line(plot_complex([1 + 1im, 2 + 0im]; mode = "lines", simplify = true).data[1])[:simplify] === true
+	err = _rsc_error(() -> plot_scatter(1:3, [1.0, 2, 3]; simplify = [1]))
+	@test err isa ArgumentError && startswith(err.msg, "plot_scatter: `simplify`")
+	# savefig: every line-drawing scatter trace without a choice gets
+	# `simplify = false` (plotly.js' default `true` facets dense curves at
+	# 600 dpi: probe p03, 153 of 4000 vertices drawn); markers-only traces,
+	# explicit choices, other trace types and the caller's figure are left alone.
+	e = plot_scatter(1:3, [[1.0, 2, 3], [3.0, 2, 1], [2.0, 2, 2]];
+		mode = ["lines", "markers", "lines+markers"], simplify = [nothing, nothing, true])
+	plot_ecdf!(e, [1.0, 2, 3])
+	push!(e.data, bar(x = ["a"], y = [1]))
+	data, _ = _rsc_export(e)
+	@test data[1]["line"]["simplify"] === false
+	@test !haskey(get(data[2], "line", Dict{String, Any}()), "simplify")
+	@test data[3]["line"]["simplify"] === true
+	@test data[4]["line"]["simplify"] === false
+	@test !haskey(get(data[5], "line", Dict{String, Any}()), "simplify")
+	@test !haskey(e.data[1].fields, :line)
+	@test occursin("simplify", string(@doc plot_scatter))
+end
+
+@testset "scatter family: the plot! alias names itself in its errors (Z23)" begin
+	p = plot_scatter(1:3, [1.0, 2, 3])
+	snapshot = _rsc_snapshot(p)
+	for call in (
+		() -> plot!(p, 1:3, [1.0]),
+		() -> plot!(p, [1.0, 2]; show = true),
+		() -> plot!(p, 1:3, [1.0, 2, 3]; color = "nope"),
+	)
+		err = _rsc_error(call)
+		@test err isa ArgumentError && startswith(err.msg, "plot!:")
+	end
+	@test _rsc_unchanged(p, snapshot)
+	sp = _rsc_syncplot(plot_scatter(1:3, [1.0, 2, 3]))
+	err = _rsc_error(() -> plot!(sp, 1:3, [1.0]))
+	@test err isa ArgumentError && startswith(err.msg, "plot!:")
+	sf = subplots(1, 2; sync = false)
+	for call in (() -> plot!(sf, 1:3, [1.0, 2, 3]; row = 9, col = 1), () -> plot!(sf, 1:3, [1.0]))
+		err = _rsc_error(call)
+		@test err isa ArgumentError && startswith(err.msg, "plot!:")
+	end
+	# plot_scatter! keeps its own name.
+	@test startswith(_rsc_error(() -> plot_scatter!(p, 1:3, [1.0])).msg, "plot_scatter!:")
+	@test startswith(_rsc_error(() -> plot_scatter!(sf, 1:3, [1.0])).msg, "plot_scatter!:")
+	@test plot!(sf, 1:3, [1.0, 2, 3]; row = 1, col = 2) === sf
+	@test length(sf.plot.data) == 1
+	@test occursin("Its errors name", string(@doc plot!))
+end
+
+@testset "oned constructors: `title` gets the title! placement (Z28)" begin
+	_title(fig) = _rsc_fields(PlotlySupply._plot_obj(fig).layout.fields[:title])
+	reference = plot_scatter(1:3, [1.0, 2, 3])
+	title!(reference, "T")
+	expected = _title(reference)
+	@test expected[:yref] == "container" && expected[:y] == 1 && expected[:yanchor] == "top"
+	for fig in (
+		plot_scatter(1:3, [1.0, 2, 3]; title = "T"),
+		plot_stem(1:3, [1.0, 2, 3]; title = "T"),
+		plot_area(1:3, [1.0, 2, 3]; title = "T"),
+		plot_scatterpolar([0.0, 90], [1.0, 2]; title = "T"),
+		plot_bar(["a", "b"], [1.0, 2]; title = "T"),
+		plot_histogram([1.0, 2, 2, 3]; title = "T"),
+		plot_box([1.0, 2, 3, 4]; title = "T"),
+		plot_band(1:3, [0.0, 0, 0], [1.0, 2, 3]; title = "T"),
+		plot_ecdf([1.0, 2, 3]; title = "T"),
+		plot_complex([1 + 1im, 2 - 1im]; title = "T"),
+	)
+		@test _title(fig) == expected
+	end
+	# A placed title keeps its placement; a mutator's `title` only changes the text.
+	left = plot_scatter(1:3, [1.0, 2, 3])
+	title!(left, "L"; align = :left)
+	plot_scatter!(left, 1:3, [3.0, 2, 1]; title = "L2")
+	@test _title(left)[:text] == "L2" && _title(left)[:xanchor] == "left" && _title(left)[:x] == 0
+	moved = plot_scatter(1:3, [1.0, 2, 3]; title = "M")
+	relayout!(moved; title_y = 0.9)
+	plot_bar!(moved, [1, 2], [1.0, 2]; title = "M2")
+	@test _title(moved)[:y] == 0.9 && _title(moved)[:text] == "M2"
+	# A top secondary axis keeps the placement and reserves its depth below
+	# the title (`pad.b`), so the two do not overlap (render probe p06).
+	top = plot_scatter(1:3, [1.0, 2, 3]; title = "T")
+	secondary_xaxis!(top, v -> 2v, v -> v / 2)
+	@test _title(top)[:yref] == "container" && _title(top)[:yanchor] == "top" && _title(top)[:y] == 1
+	@test _rsc_get(_title(top)[:pad], :b) > 0
+	@test _rsc_get(_title(top)[:pad], :t) == 10
+end
+
+@testset "secondary_xaxis!: side = :bottom on a bottom axis is a second label row (W5)" begin
+	f = plot_scatter([1.0, 2, 3, 5, 6], [1.0, 2, 3, 2, 1]; mode = "markers")
+	xticks!(f, [1, 2, 3, 5, 6], ["a", "b", "c", "d", "e"])
+	xrange!(f, (0, 7))
+	secondary_xaxis!(f, identity, identity; side = :bottom, ticks = [2, 5.5],
+		ticklabels = ["g1", "g2"], title = "groups")
+	row = _rsc_axis(f, :xaxis2)
+	@test row[:side] == "bottom" && row[:overlaying] == "x" && row[:matches] == "x"
+	@test row[:tickvals] == [2.0, 5.5]
+	@test row[:ticktext] == ["<br>g1", "<br>g2"]
+	@test row[:showline] == false && row[:tickcolor] == "rgba(0,0,0,0)"
+	@test get(row, :ticks, nothing) == get(_rsc_axis(f, :xaxis), :ticks, nothing)
+	@test _rsc_text(row[:title]) == "groups"
+	@test _rsc_axis(f, :xaxis)[:range] == [0, 7]
+	@test "plotlysupply:secondary_xaxis:x:row" in [get(t.fields, :name, "") for t in f.data]
+	# Two-line primary labels push the row down two lines.
+	g = plot_scatter([1.0, 2], [1.0, 2])
+	xticks!(g, [1, 2], ["a<br>b", "c"])
+	secondary_xaxis!(g, identity, identity; side = :bottom, ticks = [1.5], ticklabels = ["G"])
+	@test _rsc_axis(g, :xaxis2)[:ticktext] == ["<br><br>G"]
+	# Without a title the text stays unset: plotly.js reserves a title line
+	# below an axis titled "" (render probe p14: a 24 px blank band).
+	title_text(fig) = _rsc_get(_rsc_get(_rsc_axis(fig, :xaxis2), :title, Dict{Symbol, Any}()), :text)
+	@test title_text(g) === nothing
+	# A top secondary axis and the row coexist; a second row call replaces the
+	# row, including its title.
+	secondary_xaxis!(f, v -> 10v, v -> v / 10)
+	secondary_xaxis!(f, identity, identity; side = :bottom, ticks = [2], ticklabels = ["only"])
+	@test count(k -> occursin(r"^xaxis\d+$", String(k)), keys(f.layout.fields)) == 2
+	@test _rsc_axis(f, :xaxis2)[:ticktext] == ["<br>only"]
+	@test title_text(f) === nothing
+	@test _rsc_axis(f, :xaxis3)[:side] == "top"
+	# The same side on a top primary is still an error, raised before any change.
+	t = plot_scatter([1.0, 2], [1.0, 2])
+	relayout!(t; xaxis_side = "top")
+	snapshot = _rsc_snapshot(t)
+	err = _rsc_error(() -> secondary_xaxis!(t, identity, identity; side = :top))
+	@test err isa ArgumentError && occursin("already on the top", err.msg)
+	@test _rsc_unchanged(t, snapshot)
+	@test occursin("second label row", string(@doc secondary_xaxis!))
+end
+
+# A vector that counts element reads (getindex), to bound the passes a call
+# makes over the caller's data.
+struct _RscCountingVector <: AbstractVector{Float64}
+	data::Vector{Float64}
+	reads::Base.RefValue{Int}
+end
+Base.size(v::_RscCountingVector) = size(v.data)
+Base.IndexStyle(::Type{_RscCountingVector}) = IndexLinear()
+Base.getindex(v::_RscCountingVector, i::Int) = (v.reads[] += 1; v.data[i])
+
+@testset "scatter family: a million points are neither copied nor rescanned (performance)" begin
+	n = 1_000_000
+	x = collect(range(0, 100; length = n))
+	y = sin.(x)
+	# The traces hold the caller's vectors, in constructors and appends.
+	f = plot_scatter(x, y; legend = "data")
+	@test f.data[1].fields[:x] === x && f.data[1].fields[:y] === y
+	g = plot_scatter(1:10, collect(1.0:10); legend = "a")
+	plot_scatter!(g, x, y; legend = "b")
+	@test g.data[2].fields[:y] === y
+	# The best-legend estimate reads a Float64 trace in place, and its scoring
+	# loop is type-stable: before wave 5 it boxed every point (about 905 MiB
+	# and 1 s per call for this trace, twice per named append).
+	@test PlotlySupply._scat_legend_coords(y, false) === y
+	p = PlotlySupply._plot_obj(f)
+	PlotlySupply._scat_best_legend_position(p)
+	@test (@allocated PlotlySupply._scat_best_legend_position(p)) < 16 * 2^20
+	# One pass over a non-Float64 vector (the conversion), none without a legend.
+	counted = _RscCountingVector(copy(y), Ref(0))
+	plot_scatter(x, counted)
+	@test counted.reads[] == 0
+	plot_scatter(x, counted; legend = "data")
+	@test counted.reads[] <= n
 end

@@ -1712,9 +1712,9 @@ end
 		# function. `@test_broken` turns into an error once they are fixed.
 		cross_requested = Set(["figsize!", "panel_labels!", "remove_inset!", "shared_colorbar!",
 			"subplot_legends!", "tight_layout!"])
-		# Cross-requested Y20 defect: the SubplotFigure `plot!` alias forwards
-		# to plot_scatter!, whose cell errors then name plot_scatter!.
-		misnamed_cell_errors = Set(["plot!"])
+		# Functions whose cell errors still name another function (none: the
+		# `plot!` alias names itself since wave 5, Z23).
+		misnamed_cell_errors = Set{String}()
 		image = attr(source="data:image/png;base64,iVBORw0KGgo=", x=0, y=1, sizex=0.2, sizey=0.2)
 		geojson = Dict("type" => "FeatureCollection", "features" => [Dict("type" => "Feature", "id" => "A",
 			"properties" => Dict(), "geometry" => Dict("type" => "Polygon",

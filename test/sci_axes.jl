@@ -696,7 +696,11 @@ end
         before = _ax_json(fig.layout)
         @test _ax_throws(() -> secondary_xaxis!(fig, l -> (l - 550)^2, identity), "`f` must be strictly monotone")
         @test _ax_throws(() -> secondary_xaxis!(fig, l -> c / l, ν -> ν), "`finv` does not invert `f`")
-        @test _ax_throws(() -> secondary_xaxis!(fig, l -> c / l, ν -> c / ν; side = :bottom), "already on the bottom")
+        # Wave 5 (W5): `side = :bottom` on a bottom primary is a second label
+        # row; the same side is still rejected on a top primary.
+        topfig = deepcopy(fig)
+        relayout!(topfig; xaxis_side = "top")
+        @test _ax_throws(() -> secondary_xaxis!(topfig, l -> c / l, ν -> c / ν; side = :top), "already on the top")
         @test _ax_throws(() -> secondary_xaxis!(fig, l -> c / l, ν -> c / ν; side = :left), "`side` must be :top or :bottom")
         @test _ax_throws(() -> secondary_xaxis!(fig, l -> c / l, ν -> c / ν; ticklabels = ["a"]), "`ticklabels` need explicit `ticks`")
         @test _ax_throws(() -> secondary_xaxis!(fig, l -> c / l, ν -> c / ν; ticks = [500.0], ticklabels = ["a", "b"]), "got 2 tick labels for 1 tick values")
@@ -886,15 +890,19 @@ end
         secondary_xaxis!(notitle, l -> c / l, ν -> c / ν)
         @test pad_of(notitle) < pad_of(small)
         # A title the user placed is left alone; side = :bottom never moves it.
+        # (Wave 5, Z28: a constructor `title` has the title! placement,
+        # `yref = "container"`.)
         placed = plot_scatter(λ, y; title = "placed")
         relayout!(placed; title_y = 0.95)
         secondary_xaxis!(placed, l -> c / l, ν -> c / ν)
-        @test _ax_get(placed.layout.fields[:title], :yref) === nothing
+        @test _ax_get(placed.layout.fields[:title], :yref) == "container"
         @test _ax_get(placed.layout.fields[:title], :y) == 0.95
+        @test _ax_get(_ax_get(placed.layout.fields[:title], :pad), :b) === nothing
         bottom = plot_scatter(λ, y; title = "b")
         relayout!(bottom; xaxis_side = "top")
         secondary_xaxis!(bottom, l -> c / l, ν -> c / ν; side = :bottom)
-        @test _ax_get(bottom.layout.fields[:title], :yref) === nothing
+        @test _ax_get(bottom.layout.fields[:title], :yref) == "container"
+        @test _ax_get(_ax_get(bottom.layout.fields[:title], :pad), :b) === nothing
         # A bare-string title keeps its text.
         bare = plot_scatter(λ, y)
         bare.layout.fields[:title] = "bare"

@@ -783,6 +783,9 @@ const _SUBPLOT_MATCH_SHARED_KEYS = (
 	:categoryorder,
 	:categoryarray,
 	:minor,
+	# One-sided limits (D11: `autorange` with `minallowed`/`maxallowed`) bound
+	# the group's shared autorange only when the members carry them.
+	:autorangeoptions,
 )
 const _SUBPLOT_MATCH_RANGE_KEYS = (:range, :autorange)
 const _SUBPLOT_MATCH_TRACKED_KEYS = (
@@ -7940,14 +7943,17 @@ end
 MATLAB-like alias for [`plot_scatter!`](@ref): appends line/marker traces to
 a `Plot`, a [`SyncPlot`](@ref) or a `SubplotFigure` (active cell, or
 `row`/`col`) and accepts the same keywords. Returns `nothing` for a
-`Plot`/`SyncPlot` and the figure for a `SubplotFigure`.
+`Plot`/`SyncPlot` and the figure for a `SubplotFigure`. Its errors name
+`plot!`.
 """
 function plot!(
 	sf::SubplotFigure,
 	args...;
 	kwargs...,
 )
-	return plot_scatter!(sf, args...; kwargs...)
+	return Base.ScopedValues.with(_SCAT_ALIAS_WHO => "plot!") do
+		plot_scatter!(sf, args...; delegate_who = "plot!", kwargs...)
+	end
 end
 
 function plot!(
@@ -7955,8 +7961,15 @@ function plot!(
 	args...;
 	kwargs...,
 )
-	return plot_scatter!(fig, args...; kwargs...)
+	return Base.ScopedValues.with(_SCAT_ALIAS_WHO => "plot!") do
+		plot_scatter!(fig, args...; kwargs...)
+	end
 end
+
+# The public name a Plot/SyncPlot `plot_scatter!` call reports in its errors:
+# "plot_scatter!", or the alias (`plot!`) it was called through.
+const _SCAT_ALIAS_WHO = Base.ScopedValues.ScopedValue{Union{Nothing, String}}(nothing)
+_scat_mutator_who() = something(_SCAT_ALIAS_WHO[], "plot_scatter!")
 
 #region 1D Plot
 
@@ -8497,24 +8510,28 @@ function _stats_series_lists(
 	return value_list, position_list, values_nested
 end
 
-# Per-series colours: one string or symbol for every series, or a vector with
-# one entry per series (short vectors leave the remaining series on the colour
-# cycle, long vectors are truncated, like the other per-series keywords).
+# Per-series colours: one colour for every series, or a vector with one entry
+# per series (short vectors leave the remaining series on the colour cycle,
+# long vectors are truncated, like the other per-series keywords). Each colour
+# goes through `_scat_color` (grey levels, Colorants; unknown colours throw).
 function _stats_colors(color, count::Int, who::AbstractString)
 	if color isa AbstractVector
-		entries = String[]
-		for entry in color
-			(entry isa AbstractString || entry isa Symbol) || throw(ArgumentError(
-				"$(who): `color` entries must be strings or symbols; got $(repr(entry)).",
-			))
-			push!(entries, String(entry))
-		end
+		entries = String[_scat_color(entry, who, "color") for entry in color]
 		return _series_kwarg_vector(entries, count, "", String)
 	end
-	(color isa AbstractString || color isa Symbol) || throw(ArgumentError(
-		"$(who): `color` must be a string, a symbol or a vector of them; got $(repr(color)).",
-	))
-	return fill(String(color), count)
+	return fill(_scat_color(color, who, "color"), count)
+end
+
+# Fill the active PlotStyle's per-trace defaults into the `count` traces a
+# statistics call just appended (the last `count` of `fig`): error-bar
+# thickness of bars and histograms (`errorbar_width`), the colorbar fonts and
+# outline of a 2-D histogram. Box and violin traces take none (the call keeps
+# the contract that every constructor and mutator styles what it adds).
+function _stats_apply_style!(fig, count::Int)
+	count > 0 || return nothing
+	total = length(_plot_data(fig))
+	_apply_style_trace_defaults!(fig, (total - count + 1):total)
+	return nothing
 end
 
 _stats_names(legend, count::Int) =
@@ -8603,9 +8620,9 @@ end
 # of non-empty colours, one per bar (plotly `marker.color` array).
 function _stats_bar_colors(color, bar_counts::Vector{Int}, nested::Bool, who::AbstractString)
 	values = _stats_bar_values(
-		color, bar_counts, nested, "", who, "color", "a colour string or symbol";
-		isscalar = entry -> entry isa AbstractString || entry isa Symbol,
-		convert = entry -> String(entry),
+		color, bar_counts, nested, "", who, "color", "a colour (string, Symbol or Colorant)";
+		isscalar = entry -> entry isa AbstractString || entry isa Symbol || entry isa Colors.Colorant,
+		convert = entry -> _scat_color(entry, who, "color"),
 	)
 	return Any[
 		entry isa AbstractVector ? String[
@@ -9449,6 +9466,32 @@ function _scat_string(value, who::AbstractString, name::AbstractString)
 	return String(value)
 end
 
+# The colour keywords of the scatter and statistics constructors below accept
+# a Colors.jl `Colorant` in their signatures, which are evaluated before
+# sci/color.jl (included at the end of this file) imports Colors.
+import Colors
+
+# One colour keyword value of the scatter, statistics and lines.jl families
+# (G16, Z63): `""` (unset) stays `""`; `"none"` is kept where `allow_none`
+# (a hollow marker face); every other value goes through `_color_option`, so a
+# matplotlib grey level becomes "#RRGGBB" ("0.35" -> "#595959"), a Colors.jl
+# `Colorant` becomes "#RRGGBB" or "rgba(r,g,b,a)", any other valid CSS colour
+# string or Symbol is kept as given, and an unknown colour is an ArgumentError
+# naming `who` and the keyword. Returns a `String`.
+function _scat_color(value, who::AbstractString, name::AbstractString; allow_none::Bool = false)
+	if value isa AbstractString || value isa Symbol
+		text = String(value)
+		isempty(text) && return ""
+		(allow_none && text == "none") && return text
+	elseif !(value isa Colors.Colorant)
+		throw(ArgumentError(
+			"$(who): `$(name)` must be a colour (string, Symbol or Colors.jl Colorant); " *
+			"got $(repr(value)).",
+		))
+	end
+	return String(_color_option(value; who = who, name = name))
+end
+
 function _scat_choice(value, choices, who::AbstractString, name::AbstractString)
 	text = _scat_string(value, who, name)
 	(isempty(text) || text in choices) || throw(ArgumentError(
@@ -9526,6 +9569,7 @@ function _scat_series_styles(
 	fill = "",
 	fills = _SCAT_FILLS,
 	fillcolor = "",
+	simplify = nothing,
 )
 	modes = _scat_per_series(mode, n, "lines", value -> _scat_mode(value, who))
 	dashes = _scat_per_series(dash, n, "", value -> _scat_dash(value, who))
@@ -9533,7 +9577,7 @@ function _scat_series_styles(
 		color,
 		n,
 		"",
-		value -> _cmn_check_color(value, "color", who),
+		value -> _scat_color(value, who, "color"),
 	)
 	names = _scat_per_series(
 		legend,
@@ -9557,13 +9601,13 @@ function _scat_series_styles(
 		marker_color,
 		n,
 		"",
-		value -> _cmn_check_color(value, "marker_color", who),
+		value -> _scat_color(value, who, "marker_color"; allow_none = true),
 	)
 	edges = _scat_per_series(
 		marker_line_color,
 		n,
 		"",
-		value -> _cmn_check_color(value, "marker_line_color", who),
+		value -> _scat_color(value, who, "marker_line_color"),
 	)
 	edge_widths = _scat_per_series(
 		marker_line_width,
@@ -9605,7 +9649,13 @@ function _scat_series_styles(
 		fillcolor,
 		n,
 		"",
-		value -> _cmn_check_color(value, "fillcolor", who),
+		value -> _scat_color(value, who, "fillcolor"),
+	)
+	simplifies = _scat_per_series(
+		simplify,
+		n,
+		nothing,
+		value -> _scat_optional_bool(value, who, "simplify"),
 	)
 
 	styles = Vector{Any}(undef, n)
@@ -9626,6 +9676,7 @@ function _scat_series_styles(
 			line_shape = shapes[index],
 			fill = fill_modes[index],
 			fillcolor = fill_colors[index],
+			simplify = simplifies[index],
 		)
 	end
 	return styles
@@ -9754,6 +9805,7 @@ function _scat_trace(
 	isempty(style.dash) || (line[:dash] = style.dash)
 	style.linewidth > 0 && (line[:width] = style.linewidth)
 	isempty(style.line_shape) || (line[:shape] = style.line_shape)
+	style.simplify === nothing || (line[:simplify] = style.simplify)
 	isempty(line) || (fields[:line] = attr(line))
 	marker = _marker_attr(;
 		color_series = series_color,
@@ -9780,6 +9832,30 @@ function _scat_trace(
 	cliponaxis === nothing || (fields[:cliponaxis] = cliponaxis)
 	isempty(yref) || (fields[:yaxis] = String(yref))
 	return GenericTrace(String(trace_type), fields)
+end
+
+# plotly.js simplifies scatter lines unless `line.simplify = false`: a vertex
+# within about 0.75 px of the line through its neighbours is dropped. On a
+# dense smooth curve exported at high resolution the peaks then show as
+# visible corners (render probe: a 4000-point curve at 3.5 in x 600 dpi kept
+# 153 of its 4000 vertices, faceted at every extremum). Static exports
+# therefore draw every vertex: each lowered `scatter` trace of `data` (the
+# `JSON.lower` output `savefig` sends to the renderer, never the caller's
+# figure) that draws a line (`mode` unset or containing "lines") and leaves
+# `line.simplify` unset gets `false`; an explicit value (the `simplify`
+# keyword, a raw attribute) is kept. Interactive output (windows, HTML) keeps
+# plotly's simplification.
+function _scat_export_line_simplify!(data::AbstractVector)
+	for trace in data
+		trace isa AbstractDict || continue
+		string(_lowered_get(trace, :type, "scatter")) == "scatter" || continue
+		mode = _lowered_get(trace, :mode)
+		(mode === nothing || occursin("lines", string(mode))) || continue
+		line = _lowered_get(trace, :line)
+		(line isa AbstractDict && _lowered_get(line, :simplify) !== nothing) && continue
+		_lowered_set!(_lowered_child!(trace, :line), :simplify, false)
+	end
+	return data
 end
 
 # plotly.js layout `font.color` default (`Color.defaultLine`, plotly.js 2.35.2
@@ -9964,8 +10040,11 @@ end
 
 # Coordinates of `values` on an axis of type `axis_type` (log10 on a log axis);
 # `nothing` when a value is neither numeric nor a gap (the extent is unknown).
+# A `Vector{Float64}` on a linear axis is already in axis units and is returned
+# as it is (callers only read it), so a million-point trace is not copied.
 function _scat_legend_coords(values, log_axis::Bool)
 	values isa AbstractVector || return nothing
+	(values isa Vector{Float64} && !log_axis) && return values
 	out = Vector{Float64}(undef, length(values))
 	for (index, value) in enumerate(values)
 		if value === nothing || value === missing
@@ -10027,7 +10106,13 @@ const _SCAT_LEGEND_AUTORANGE_PAD = 0.05
 # plotly's autorange does when `padded` (plotly pads every scatter y axis, and
 # the x axis of traces with markers, text or y error bars). With `tight_zero`,
 # an extreme at exactly 0 is not padded.
-function _scat_legend_window(layout, key::Symbol, values; padded::Bool, tight_zero::Bool = false)
+function _scat_legend_window(
+	layout,
+	key::Symbol,
+	values;
+	padded::Bool,
+	tight_zero::Bool = false,
+)::Union{Nothing, Tuple{Float64, Float64}}
 	axis = get(layout.fields, key, nothing)
 	range = _cmn_mapping_get(axis, :range)
 	autorange = _cmn_mapping_get(axis, :autorange)
@@ -10036,38 +10121,52 @@ function _scat_legend_window(layout, key::Symbol, values; padded::Bool, tight_ze
 	if explicit && all(is_bound, range) && range[1] != range[2]
 		return Float64(range[1]), Float64(range[2])
 	end
-	finite = Iterators.filter(isfinite, values)
-	isempty(finite) && return nothing
-	lo, hi = extrema(finite)
+	# One typed pass over the finite values (`values` may chain several
+	# coordinate vectors of a million points each).
+	lo, hi = Inf, -Inf
+	for value in values
+		v = Float64(value)::Float64
+		isfinite(v) || continue
+		v < lo && (lo = v)
+		v > hi && (hi = v)
+	end
+	lo > hi && return nothing
 	lo == hi && ((lo, hi) = (lo - 0.5, hi + 0.5))
 	pad_lo = padded && !(tight_zero && lo == 0) ? _SCAT_LEGEND_AUTORANGE_PAD : 0.0
 	pad_hi = padded && !(tight_zero && hi == 0) ? _SCAT_LEGEND_AUTORANGE_PAD : 0.0
 	# The data spans the axis length minus both pads.
 	scale = (hi - lo) / (1 - pad_lo - pad_hi)
 	lo, hi = lo - pad_lo * scale, hi + pad_hi * scale
-	# A one-sided limit (lead decision D11: `range = [lo, nothing]` or
-	# `[nothing, hi]` next to a partial `autorange`): the fixed bound, and the
-	# padded data extent on the autoscaled side. A data extent that does not
-	# reach past the fixed bound leaves the data-only window.
+	# A one-sided limit (lead decision D11) fixes one end; the other end is the
+	# padded data extent. `_write_axis_range!` stores it as
+	# `autorangeoptions.minallowed`/`maxallowed` (range units) beside an
+	# automatic range; plotly's own partial range (`range = [lo, nothing]` or
+	# `[nothing, hi]` beside a partial `autorange`, set through `relayout!`) is
+	# read too. A data extent that does not reach past the fixed bound leaves
+	# the data-only window.
+	fixed_min, fixed_max = layout isa Layout ? _stored_axis_limits(layout, key) : (nothing, nothing)
 	if explicit && count(is_bound, range) == 1 && any(isnothing, range)
-		if is_bound(range[1]) && hi > range[1]
-			return Float64(range[1]), hi
-		elseif is_bound(range[2]) && lo < range[2]
-			return lo, Float64(range[2])
-		end
+		is_bound(range[1]) && (fixed_min = range[1])
+		is_bound(range[2]) && (fixed_max = range[2])
 	end
-	return autorange == "reversed" ? (hi, lo) : (lo, hi)
+	(fixed_min !== nothing && hi > fixed_min) && (lo = Float64(fixed_min)::Float64)
+	(fixed_max !== nothing && lo < fixed_max) && (hi = Float64(fixed_max)::Float64)
+	reversed = autorange isa Union{AbstractString, Symbol} && String(autorange) in _REVERSED_AUTORANGES
+	return reversed ? (hi, lo) : (lo, hi)
 end
 
 # Vertices of the line plotly.js draws from (u1, v1) to (u2, v2) for the
 # scatter `line.shape` `shape` (plotly.js 2.35 `line_points`: "hv" goes
 # across then up, "vh" up then across, "hvh"/"vhv" turn at the midpoint;
-# "linear" and "spline" are scored as the straight segment).
-function _scat_legend_step_path(shape::AbstractString, u1, v1, u2, v2)
+# "linear" and "spline" are scored as the straight segment). Always four
+# vertices (shorter paths repeat their end point; a zero-length piece at a
+# vertex hits a box only where the piece before it does), so the scoring loop
+# over a long trace stays type-stable and allocation-free.
+function _scat_legend_step_path(shape::AbstractString, u1::Float64, v1::Float64, u2::Float64, v2::Float64)
 	if shape == "hv"
-		return ((u1, v1), (u2, v1), (u2, v2))
+		return ((u1, v1), (u2, v1), (u2, v2), (u2, v2))
 	elseif shape == "vh"
-		return ((u1, v1), (u1, v2), (u2, v2))
+		return ((u1, v1), (u1, v2), (u2, v2), (u2, v2))
 	elseif shape == "hvh"
 		um = (u1 + u2) / 2
 		return ((u1, v1), (um, v1), (um, v2), (u2, v2))
@@ -10075,7 +10174,7 @@ function _scat_legend_step_path(shape::AbstractString, u1, v1, u2, v2)
 		vm = (v1 + v2) / 2
 		return ((u1, v1), (u1, vm), (u2, vm), (u2, v2))
 	end
-	return ((u1, v1), (u2, v2))
+	return ((u1, v1), (u2, v2), (u2, v2), (u2, v2))
 end
 
 function _scat_legend_path_hits_box(path, u0, u1, v0, v1)
@@ -10130,7 +10229,8 @@ function _scat_best_legend_position(
 		if _trace_will_showlegend(trace)
 			entries += 1
 			name = get(fields, :name, "")
-			widest = max(widest, length(string(name)))
+			# `::Int`: the legend box size (and so the scoring loop) stays typed.
+			widest = max(widest, length(string(name))::Int)
 		end
 		visible = get(fields, :visible, true)
 		(visible === false || visible == "legendonly") && continue
@@ -10148,7 +10248,10 @@ function _scat_best_legend_position(
 		(xs === nothing || ys === nothing) && return nothing
 		n = min(length(xs), length(ys))
 		n == 0 && continue
-		xs, ys = xs[1:n], ys[1:n]
+		# Trimmed only when the lengths differ (the coordinates may be the
+		# trace's own vectors; they are only read).
+		n == length(xs) || (xs = xs[1:n])
+		n == length(ys) || (ys = ys[1:n])
 		mode = string(get(fields, :mode, "lines+markers"))
 		shape = _cmn_mapping_get(get(fields, :line, nothing), :shape)
 		shape = shape isa AbstractString ? String(shape) : "linear"
@@ -10173,7 +10276,8 @@ function _scat_best_legend_position(
 				append!(extra_y, ys, ys)
 			end
 		end
-		push!(series, (ykey, vcat(xs, extra_x), vcat(ys, extra_y), :points, shape))
+		isempty(extra_x) ? push!(series, (ykey, xs, ys, :points, shape)) :
+			push!(series, (ykey, vcat(xs, extra_x), vcat(ys, extra_y), :points, shape))
 		occursin("lines", mode) && push!(series, (ykey, xs, ys, :segments, shape))
 		fill == "tozeroy" && !ylog && push!(series, (ykey, xs, ys, :drops, shape))
 		fill == "toself" && push!(series, (ykey, xs, ys, :polygon, shape))
@@ -10185,7 +10289,9 @@ function _scat_best_legend_position(
 		layout, xkey, Iterators.flatten(s[2] for s in series); padded = xpadded,
 	)
 	xwindow === nothing && return nothing
-	ywindows = Dict{Symbol, Any}()
+	# Concretely typed, so the scoring loop below is type-stable (with `Any`
+	# values it boxed every coordinate: ~950 MiB for a 1e6-point trace).
+	ywindows = Dict{Symbol, Union{Nothing, Tuple{Float64, Float64}}}()
 	for key in unique(s[1] for s in series)
 		# A filled area reaches down to 0, which the autorange includes unpadded.
 		filled = any(s -> s[1] === key && s[4] === :drops, series)
@@ -10458,6 +10564,7 @@ function _scatter_impl!(
 	line_shape = "",
 	fill = "",
 	fillcolor = "",
+	simplify = nothing,
 	text = nothing,
 	textposition::AbstractString = "",
 	textsize::Real = 0,
@@ -10498,6 +10605,7 @@ function _scatter_impl!(
 		line_shape = line_shape,
 		fill = fill,
 		fillcolor = fillcolor,
+		simplify = simplify,
 	)
 	texts = _scat_series_text(text, nested, lengths, who)
 	position = _scat_choice(textposition, _SCAT_TEXT_POSITIONS, who, "textposition")
@@ -10940,6 +11048,7 @@ function _stats_bar!(
 
 	ykey, yref = _stats_target_y!(fig, secondary_y, who)
 	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
+	_stats_apply_style!(fig, count)
 	_apply_explicit_layout_mode!(fig, :barmode, barmode)
 	# Figure-wide plotly settings: written only when given.
 	bargap === nothing || relayout!(fig; bargap = bargap)
@@ -11051,6 +11160,7 @@ function _stats_histogram!(
 
 	ykey, yref = _stats_target_y!(fig, secondary_y, who)
 	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
+	_stats_apply_style!(fig, length(traces))
 	if !isempty(barmode)
 		_apply_explicit_layout_mode!(fig, :barmode, barmode)
 	elseif root_overlay
@@ -11147,6 +11257,7 @@ function _stats_distribution!(
 
 	ykey, yref = _stats_target_y!(fig, secondary_y, who)
 	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
+	_stats_apply_style!(fig, count)
 	group && _apply_nested_layout_mode!(fig, values, mode_key, "group")
 	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
 	return nothing
@@ -11185,13 +11296,24 @@ at their default take the active [`PlotStyle`](@ref)'s per-trace defaults
 - `dash = ""`: `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`,
   `"longdashdot"` or a dash-length list such as `"5px,10px"` (`""`: the
   style's dash cycle, else solid).
-- `color = ""`: line (and default marker) colour, a CSS colour string or
-  `Symbol`; `""` uses the template colorway.
+- `color = ""`: line (and default marker) colour: a CSS colour string
+  (`"red"`, `"#1f77b4"`, `"rgba(0,0,0,0.5)"`), a `Symbol`, a matplotlib grey
+  level (`"0.35"` draws `#595959`) or a Colors.jl `Colorant`; `""` uses the
+  template colorway. The other colour keywords (`marker_color`,
+  `marker_line_color`, `fillcolor`) take the same values; an unknown colour is
+  an `ArgumentError`.
 - `legend = ""`: legend name (`AbstractString`, math such as `L"\\alpha"` is
   typeset).
 - `linewidth = 0`: line width in px (`0`: the style's width, else plotly's).
 - `line_shape = ""`: `"linear"`, `"spline"`, or the step shapes `"hv"`
   (step after the point), `"vh"`, `"hvh"`, `"vhv"`.
+- `simplify = nothing`: plotly's line simplification (`line.simplify`), which
+  drops vertices that lie within about a pixel of the line through their
+  neighbours. `nothing`: simplified on screen, every vertex drawn by
+  `savefig` (PNG, SVG, PDF, EPS, JPEG, TIFF), so dense smooth curves keep
+  their shape in high-resolution exports; `true`/`false` force it on/off
+  everywhere (`true` can turn the peaks of a dense curve into visible
+  corners at 600 dpi).
 - `marker_size = 0`: marker diameter in px (`Real`; `0`: the style's size,
   else plotly's).
 - `marker_symbol = ""`: a Plotly symbol (`"circle"`, `"square-open"`, ...) or a
@@ -11233,7 +11355,9 @@ at their default take the active [`PlotStyle`](@ref)'s per-trace defaults
 #### Figure keywords
 
 - `title = ""`, `xlabel = ""`, `ylabel = ""`: text (`AbstractString`, math is
-  typeset).
+  typeset). The title is placed as [`title!`](@ref) places it (centred above
+  the plot area, 10 px below the top edge, the plot area moving down to fit
+  it); a mutator's `title` changes only the text of a title already placed.
 - `xscale = ""`, `yscale = ""`: axis type, `"linear"`, `"log"`, `"date"`,
   `"category"`; log axes label ticks as powers of ten.
 - $(_SCAT_RANGE_DOC)
@@ -11273,7 +11397,7 @@ function plot_scatter(
 	height::Real = 0,
 	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	title::AbstractString = "",
 	fontsize::Real = 0,
@@ -11282,15 +11406,16 @@ function plot_scatter(
 	yscale::AbstractString = "",
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	marker_line_width::Union{Real, AbstractVector} = 0,
 	linewidth::Union{Real, AbstractVector} = 0,
 	opacity::Union{Real, AbstractVector} = 1,
 	markevery = nothing,
 	line_shape::Union{AbstractString, AbstractVector} = "",
+	simplify::Union{Nothing, Bool, AbstractVector} = nothing,
 	fill::Union{AbstractString, AbstractVector} = "",
-	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	text = nothing,
 	textposition::AbstractString = "",
 	textsize::Real = 0,
@@ -11312,6 +11437,7 @@ function plot_scatter(
 		fig,
 		x,
 		y;
+		simplify = simplify,
 		who = "plot_scatter",
 		constructor = true,
 		xlabel = xlabel,
@@ -11616,7 +11742,8 @@ head. Stems never show hover labels or legend entries.
 Per series (a value for every series, or a vector with one entry per series):
 
 - `color = ""`: head and stem colour (`""`: heads use the colorway, stems are
-  black).
+  black); any colour [`plot_scatter`](@ref) takes (grey levels such as
+  `"0.35"`, Colors.jl `Colorant`s).
 - `legend = ""`: legend name (an unnamed series has no legend entry);
   `showlegend = nothing`: force the legend entry on (`true`) or off (`false`).
 - `marker_size = 0` (px), `marker_symbol = ""` (Plotly name or matplotlib code
@@ -11653,7 +11780,7 @@ function plot_stem(
 	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	title::AbstractString = "",
 	fontsize::Real = 0,
@@ -11664,7 +11791,7 @@ function plot_stem(
 	baseline::Real = 0,
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	linewidth::Union{Real, AbstractVector} = 0,
 	xticks = nothing,
 	xticklabels = nothing,
@@ -11748,8 +11875,10 @@ Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
   keywords (`yticks`, `yticklabels`, `:decades`) apply as on any log axis.
 
 #### Keyword Arguments
-- `color::Union{AbstractString,Symbol,AbstractVector} = ""`: bar colour (`""`
-  uses the colour cycle). Several series: a vector with one colour per series,
+- `color::Union{AbstractString,Symbol,Colorant,AbstractVector} = ""`: bar
+  colour (`""` uses the colour cycle): a CSS colour string or `Symbol`, a
+  matplotlib grey level (`"0.35"` draws `#595959`) or a Colors.jl `Colorant`;
+  an unknown colour is an `ArgumentError`. Several series: a vector with one colour per series,
   where an entry may itself be a vector with one colour per bar of that
   series. A single series: a vector with one colour per bar colours each bar
   (as matplotlib's `bar(color = [...])`), a one-element vector is the series
@@ -11838,7 +11967,7 @@ function plot_bar(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	orientation::AbstractString = "",
@@ -11892,7 +12021,7 @@ function plot_bar(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	orientation::AbstractString = "",
@@ -11978,7 +12107,7 @@ Histogram of the samples `x`. Returns a `PlotlyBase.Plot`, or a
 - `opacity::Union{Nothing,Real} = nothing`: trace opacity in [0, 1].
 - `hatch::Union{AbstractString,AbstractVector{<:AbstractString}} = ""`:
   matplotlib hatch per series (see [`plot_bar`](@ref)).
-- `color::Union{AbstractString,Symbol,AbstractVector} = ""`, `legend = ""`,
+- `color::Union{AbstractString,Symbol,Colorant,AbstractVector} = ""`, `legend = ""`,
   `showlegend = nothing`: per-series colour, name and legend visibility as in
   [`plot_bar`](@ref).
 - `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
@@ -12013,7 +12142,7 @@ function plot_histogram(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	nbinsx::Integer = 0,
@@ -12077,7 +12206,7 @@ Box plot. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
   points in [0, 1].
 - `pointpos::Union{Nothing,Real} = nothing`: offset of the points relative to
   the box in [-2, 2] (0 = centred on the box).
-- `color::Union{AbstractString,Symbol,AbstractVector} = ""`, `legend = ""`,
+- `color::Union{AbstractString,Symbol,Colorant,AbstractVector} = ""`, `legend = ""`,
   `showlegend = nothing`: per-series colour, name and legend visibility as in
   [`plot_bar`](@ref).
 - `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
@@ -12111,7 +12240,7 @@ function plot_box(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	points::Union{Bool, AbstractString} = "outliers",
@@ -12158,7 +12287,7 @@ function plot_box(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	points::Union{Bool, AbstractString} = "outliers",
@@ -12212,7 +12341,7 @@ overwritten.
 - `jitter::Union{Nothing,Real} = nothing` in [0, 1] and
   `pointpos::Union{Nothing,Real} = nothing` in [-2, 2]: spread and offset of
   the drawn points.
-- `color::Union{AbstractString,Symbol,AbstractVector} = ""`, `legend = ""`,
+- `color::Union{AbstractString,Symbol,Colorant,AbstractVector} = ""`, `legend = ""`,
   `showlegend = nothing`: per-series colour, name and legend visibility as in
   [`plot_bar`](@ref).
 - `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
@@ -12246,7 +12375,7 @@ function plot_violin(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	points::Union{Bool, AbstractString} = "outliers",
@@ -12294,7 +12423,7 @@ function plot_violin(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	points::Union{Bool, AbstractString} = "outliers",
@@ -12611,22 +12740,22 @@ function plot_scatterpolar(
 	height::Real = 0,
 	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	title::AbstractString = "",
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = true,
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	marker_line_width::Union{Real, AbstractVector} = 0,
 	linewidth::Union{Real, AbstractVector} = 0,
 	opacity::Union{Real, AbstractVector} = 1,
 	markevery = nothing,
 	line_shape::Union{AbstractString, AbstractVector} = "",
 	fill::Union{AbstractString, AbstractVector} = "",
-	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
 	direction::AbstractString = "",
 	rotation::Union{Nothing, Real} = nothing,
@@ -15774,7 +15903,7 @@ function plot_scatter!(
 	height::Real = 0,
 	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	title::AbstractString = "",
 	fontsize::Real = 0,
@@ -15783,15 +15912,16 @@ function plot_scatter!(
 	yscale::AbstractString = "",
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	marker_line_width::Union{Real, AbstractVector} = 0,
 	linewidth::Union{Real, AbstractVector} = 0,
 	opacity::Union{Real, AbstractVector} = 1,
 	markevery = nothing,
 	line_shape::Union{AbstractString, AbstractVector} = "",
+	simplify::Union{Nothing, Bool, AbstractVector} = nothing,
 	fill::Union{AbstractString, AbstractVector} = "",
-	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	text = nothing,
 	textposition::AbstractString = "",
 	textsize::Real = 0,
@@ -15808,12 +15938,13 @@ function plot_scatter!(
 	equalar::Bool = false,
 	kwargs...,
 )
-	who = "plot_scatter!"
+	who = _scat_mutator_who()
 	secondary_y = _scat_mutator_options(who, kwargs)
 	_scatter_impl!(
 		fig,
 		x,
 		y;
+		simplify = simplify,
 		who = who,
 		constructor = false,
 		secondary_y = secondary_y,
@@ -15863,7 +15994,7 @@ function plot_scatter!(
 end
 
 plot_scatter!(fig, y::AbstractArray; kwargs...) =
-	plot_scatter!(fig, _auto_xvalues(y; who = "plot_scatter!"), y; kwargs...)
+	plot_scatter!(fig, _auto_xvalues(y; who = _scat_mutator_who()), y; kwargs...)
 
 """
 	plot_stem!(fig, x, y; kwargs...) -> nothing (SubplotFigure: the figure)
@@ -15895,7 +16026,7 @@ function plot_stem!(
 	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	title::AbstractString = "",
 	fontsize::Real = 0,
@@ -15906,7 +16037,7 @@ function plot_stem!(
 	baseline::Real = 0,
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	linewidth::Union{Real, AbstractVector} = 0,
 	xticks = nothing,
 	xticklabels = nothing,
@@ -16018,7 +16149,7 @@ function plot_bar!(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	orientation::AbstractString = "",
@@ -16074,7 +16205,7 @@ function plot_bar!(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	orientation::AbstractString = "",
@@ -16164,7 +16295,7 @@ function plot_histogram!(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	nbinsx::Integer = 0,
@@ -16246,7 +16377,7 @@ function plot_box!(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	points::Union{Bool, AbstractString} = "outliers",
@@ -16295,7 +16426,7 @@ function plot_box!(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	points::Union{Bool, AbstractString} = "outliers",
@@ -16375,7 +16506,7 @@ function plot_violin!(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	points::Union{Bool, AbstractString} = "outliers",
@@ -16425,7 +16556,7 @@ function plot_violin!(
 	yticks = nothing,
 	yticklabels = nothing,
 	ytickformat::AbstractString = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector{Bool}} = nothing,
 	points::Union{Bool, AbstractString} = "outliers",
@@ -16486,22 +16617,22 @@ function plot_scatterpolar!(
 	height::Real = 0,
 	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	title::AbstractString = "",
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	marker_line_width::Union{Real, AbstractVector} = 0,
 	linewidth::Union{Real, AbstractVector} = 0,
 	opacity::Union{Real, AbstractVector} = 1,
 	markevery = nothing,
 	line_shape::Union{AbstractString, AbstractVector} = "",
 	fill::Union{AbstractString, AbstractVector} = "",
-	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
 	direction::AbstractString = "",
 	rotation::Union{Nothing, Real} = nothing,
@@ -19092,7 +19223,7 @@ plot_area!(fig, t, rand(11); stack = true, legend = "c", hatch = "//")
 function plot_area(
 	x::AbstractArray,
 	y::AbstractArray;
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	mode::Union{Nothing, AbstractString} = nothing,
 	stack::Bool = false,
@@ -19173,7 +19304,7 @@ function plot_area!(
 	fig,
 	x::AbstractArray,
 	y::AbstractArray;
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	mode::Union{Nothing, AbstractString} = nothing,
 	stack::Bool = false,
@@ -20116,6 +20247,7 @@ function _stats_histogram2d!(
 
 	ykey, yref = _stats_target_y!(fig, secondary_y, who)
 	push!(_plot_data(fig), only(_stats_bind_y!(GenericTrace[trace], yref)))
+	_stats_apply_style!(fig, 1)
 	isempty(layout_fields) || relayout!(fig; layout_fields...)
 	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
 	return nothing

@@ -1794,12 +1794,17 @@ function _axes_title_clearance(layout::Layout, depth::Float64)
 	yanchor = _cmn_mapping_get(title, :yanchor)
 	ours = yref == "paper" && y isa Real && y == 1 && yanchor == "bottom"
 	untouched = yref === nothing && y === nothing && yanchor === nothing
-	(ours || untouched) || return nothing
+	# The `title!` (and constructor) placement at the top of the container:
+	# plotly.js reserves `pad.b` below such a title when it grows the top
+	# margin, so the axis depth goes into `pad.b` and the placement is kept.
+	container = yref == "container" && y isa Real && y == 1 && yanchor == "top"
+	(ours || untouched || container) || return nothing
 	pad_b = ceil(depth + _AXES_FIGURE_TITLE_GAP)
-	if ours
+	if ours || container
 		existing = _cmn_mapping_get(_cmn_mapping_get(title, :pad), :b)
 		existing isa Real && !(existing isa Bool) && (pad_b = max(pad_b, Float64(existing)))
 	end
+	container && return Dict{Symbol, Any}(:pad => attr(b = pad_b))
 	fields[:yref] = "paper"
 	fields[:y] = 1
 	fields[:yanchor] = "bottom"
@@ -1837,7 +1842,9 @@ function _axes_secondary_xaxis!(
 	log_axis = axis_type == "log"
 	primary_side = _cmn_mapping_get(get(layout.fields, t.xkey, nothing), :side)
 	primary_side isa AbstractString || (primary_side = "bottom")
-	primary_side == side_name && throw(ArgumentError(
+	# W5: on a bottom primary axis, `side = :bottom` is a second label row.
+	stacked = primary_side == side_name
+	(stacked && side_name != "bottom") && throw(ArgumentError(
 		"$(who): the primary x axis is already on the $(side_name); put the " *
 		"secondary axis on the other side.",
 	))
@@ -1912,11 +1919,19 @@ function _axes_secondary_xaxis!(
 	text = ticklabels === nothing ?
 		String[_axes_format_number(v) for v in tick_values] :
 		_cmn_tick_labels(ticklabels, length(tick_values), who)
+	if stacked
+		# A second label row starts one text line per primary label line lower.
+		primary_text = _cmn_mapping_get(get(layout.fields, t.xkey, nothing), :ticktext)
+		lines = primary_text isa AbstractVector ? maximum(
+			(label isa AbstractString ? 1 + count(r"<br\s*/?>", label) : 1 for label in primary_text);
+			init = 1) : 1
+		text = String["<br>"^lines * label for label in text]
+	end
 	title_text = _label(title)
 
 	# The axis: reuse the one a previous call created for this cell axis
 	# (found through its named dummy trace), else the next free index.
-	name = "plotlysupply:secondary_xaxis:" * t.xref
+	name = "plotlysupply:secondary_xaxis:" * t.xref * (stacked ? ":row" : "")
 	data = _plot_data(_cmn_relayout_target(fig))
 	existing_ref = nothing
 	for trace in data
@@ -1960,6 +1975,22 @@ function _axes_secondary_xaxis!(
 	)
 	axis_type == "-" || (fields[:type] = axis_type)
 	_cmn_copy_axis_style!(fields, get(layout.fields, t.xkey, nothing))
+	if stacked
+		# The primary's tick direction and length (so the rows start alike),
+		# with invisible marks and no axis line.
+		primary_ticks = _cmn_mapping_get(get(layout.fields, t.xkey, nothing), :ticks)
+		primary_ticks isa AbstractString ? (fields[:ticks] = primary_ticks) : delete!(fields, :ticks)
+		fields[:tickcolor] = "rgba(0,0,0,0)"
+		fields[:showline] = false
+		# plotly.js reserves a title line below an axis whose title text is ""
+		# (render probe: a blank band under the row), so no title leaves the
+		# text unset.
+		if isempty(title_text)
+			kept = _symbol_dict(fields[:title])
+			delete!(kept, :text)
+			isempty(kept) ? delete!(fields, :title) : (fields[:title] = attr(; kept...))
+		end
+	end
 	title_clearance = (side_name == "top" && !in_inset && _axes_is_top_cell(fig, t)) ?
 		_axes_title_clearance(layout, _axes_top_axis_depth(layout, fields)) :
 		nothing
@@ -1980,6 +2011,9 @@ function _axes_secondary_xaxis!(
 			members = _axes_match_members(fig, root, who),
 		)
 	end
+	# A row replaced without a title drops the previous row's title text.
+	(stacked && isempty(title_text) && existing_ref !== nothing) &&
+		_cmn_delete_layout_fields!(fig, key, (:text,); nested = :title)
 	_cmn_merge_layout_key!(fig, key, fields; nested = (:title,))
 	title_clearance === nothing ||
 		_cmn_merge_layout_key!(fig, :title, title_clearance; nested = (:pad,))
@@ -2036,7 +2070,9 @@ Set the final range with [`xrange!`](@ref) before calling this.
 - `ticklabels = nothing`: one label per tick (through the mathtext layer);
   requires `ticks`. Default: the values with six significant digits.
 - `title::AbstractString = ""`: axis title.
-- `side = :top`: `:top` or `:bottom`; must differ from the primary side.
+- `side = :top`: `:top` or `:bottom`; must differ from the primary side,
+  except `:bottom` on a bottom primary axis, which adds a second label row
+  (below).
 - `row`, `col`: SubplotFigure cell (both or neither; default the active cell,
   which the call makes active); `inset = k` targets inset `k`.
 
@@ -2047,8 +2083,9 @@ template; later changes to the primary are not followed), has no
 grid lines, and (except in an inset) pushes the
 figure margin to fit its labels. Calling it again for the same axis replaces
 the secondary axis (idempotent). The axis needs a hidden dummy trace (named
-`"plotlysupply:secondary_xaxis:<x ref>"`, `visible = false`), because
-plotly.js only draws axes that a trace uses.
+`"plotlysupply:secondary_xaxis:<x ref>"`, `":row"` appended for a second
+label row, `visible = false`), because plotly.js only draws axes that a trace
+uses.
 
 Figure title: plotly.js sizes the top margin for the larger of the figure
 title and the top axis, not their sum, so a default-placed title would
@@ -2056,9 +2093,23 @@ overlap a top secondary axis in the top row. The title is therefore placed
 on the plot area (`title.yref = "paper"`, `y = 1`, `yanchor = "bottom"`,
 `automargin = true`) and lifted by `title.pad.b`, the axis's estimated
 height (from the font sizes at call time) plus 6 px. This also holds for a
-title set later. A title the user placed (`y`, `yref` or `yanchor` set) is
-left alone. Subplot titles of the same cell, and cells above an interior
+title set later. A title at the top of the figure (`title!`, or a
+constructor's `title`) keeps its place and gets the same room as
+`title.pad.b`. Any other title the user placed (`y`, `yref` or `yanchor` set)
+is left alone. Subplot titles of the same cell, and cells above an interior
 cell, are not moved: leave room with `vertical_spacing`.
+
+Second label row: `side = :bottom` on a bottom primary axis draws no axis
+line and no tick marks; its labels sit one text line below the primary tick
+labels, which suits group captions under grouped ticks (`f = finv =
+identity`, `ticks` at the group centres). Its `title` is drawn below that
+row, so give the axis title there and leave the primary's empty:
+
+```julia
+xticks!(fig, 1:7, ["−40", "−20", "+20", "+40", "−0.1", "+0.1", "+0.2"])
+secondary_xaxis!(fig, identity, identity; side = :bottom, ticks = [2.5, 6],
+	ticklabels = ["wall shift (nm)", "detuning (%)"], title = "parameter")
+```
 
 Returns `nothing` (`sf` for a SubplotFigure).
 

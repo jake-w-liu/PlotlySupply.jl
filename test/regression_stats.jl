@@ -1361,3 +1361,109 @@ end
 	)
 	@test _st_layout(twin.plot)[:barmode] == "stack"
 end
+
+# ── wave 5 (oned) ────────────────────────────────────────────────────────────
+
+_st_limits(fig, key) = PlotlySupply._stored_axis_limits(PlotlySupply._plot_obj(fig).layout, key)
+
+@testset "stats: one-sided limits on twin, log and shared axes; exports keep them (Z51, Z52, Z38)" begin
+	b = plot_bar(["a", "b", "c"], [5.0, 6, 7]; yrange = (4, nothing))
+	@test _st_limits(b, :yaxis) == (4, nothing)
+	@test _st_axis(b, :yaxis)[:autorange] === true
+	plot_bar!(b, ["a", "b", "c"], [50.0, 60, 70]; secondary_y = true, yrange = (nothing, 100))
+	@test _st_limits(b, :yaxis2) == (nothing, 100)
+	@test _st_limits(b, :yaxis) == (4, nothing)
+	@test _st_limits(plot_bar([5.0, 6, 7], ["a", "b", "c"]; orientation = "h", xrange = (nothing, 10)), :xaxis) == (nothing, 10)
+	@test _st_limits(plot_histogram(collect(range(-3, 3; length = 200)); xrange = (nothing, 1)), :xaxis) == (nothing, 1)
+	@test _st_limits(plot_box([1.0, 2, 3, 4, 8]; yrange = (0, nothing)), :yaxis) == (0, nothing)
+	@test _st_limits(plot_violin([1.0, 2, 3, 4, 8]; yrange = (-5, nothing)), :yaxis) == (-5, nothing)
+	@test _st_limits(plot_histogram2d(collect(0.1:0.1:5), collect(0.1:0.1:5); xrange = (-2, nothing)), :xaxis) == (-2, nothing)
+	# A log value axis stores log10 units.
+	@test _st_limits(plot_bar([1.0, 10, 100]; yscale = "log", yrange = (0.1, nothing)), :yaxis) == (-1, nothing)
+	# A shared axis group gets the bound on every member.
+	sf = subplots(1, 2; sync = false, shared_yaxes = true)
+	plot_bar!(sf, [1.0, 2, 3]; row = 1, col = 1)
+	plot_histogram!(sf, [1.0, 2, 2, 3]; row = 1, col = 2, yrange = (nothing, 10))
+	@test _st_limits(sf.plot, :yaxis) == (nothing, 10)
+	@test _st_limits(sf.plot, :yaxis2) == (nothing, 10)
+	# Z38: the export copy savefig renders keeps the encoding.
+	prepared = PlotlySupply._prepare_renderer_export(b, (;))
+	layout = PlotlySupply.PlotlyBase.JSON.parse(prepared.layout_js)
+	@test layout["yaxis"]["autorangeoptions"]["minallowed"] == 4
+	@test layout["yaxis2"]["autorangeoptions"]["maxallowed"] == 100
+	# Bad bounds name the function; a mutator leaves the figure unchanged.
+	err = _st_error(() -> plot_bar(["a"], [1.0]; yrange = ("a", "b")))
+	@test err isa ArgumentError && startswith(err.msg, "plot_bar:")
+	target = plot_histogram([1.0, 2, 3])
+	before = _st_snapshot(target)
+	err = _st_error(() -> plot_histogram!(target, [1.0, 2]; xrange = ("a", nothing)))
+	@test err isa ArgumentError && startswith(err.msg, "plot_histogram!:")
+	@test _st_snapshot(target) == before
+end
+
+@testset "stats: constructors and mutators apply the style's trace defaults (Z62)" begin
+	errorbar_width = 0.75 * 96 / 72      # :ieee `errorbar_width` (0.75 pt in px)
+	thickness(trace, key = :error_y) = _st_get(trace, key)[:thickness]
+	with_style(:ieee) do
+		b = plot_bar(["a", "b"], [1.0, 2]; error_y = [0.1, 0.2])
+		@test thickness(_st_trace(b)) ≈ errorbar_width
+		plot_bar!(b, ["a", "b"], [2.0, 3]; error_y = [0.1, 0.2])
+		@test thickness(_st_trace(b, 2)) ≈ errorbar_width
+		h = plot_bar([1.0, 2], ["a", "b"]; orientation = "h", error_x = [0.1, 0.2])
+		@test thickness(_st_trace(h), :error_x) ≈ errorbar_width
+		# SyncPlot and SubplotFigure mutators style the traces they add.
+		sp, _ = _st_probe_syncplot(plot_bar(["a"], [1.0]))
+		plot_bar!(sp, ["a"], [2.0]; error_y = [0.1])
+		@test thickness(_st_fields(sp.plot.data[2])) ≈ errorbar_width
+		sf = subplots(1, 2; sync = false)
+		plot_bar!(sf, ["a"], [1.0]; error_y = [0.1], row = 1, col = 2)
+		@test thickness(_st_fields(sf.plot.data[end])) ≈ errorbar_width
+		# A 2-D histogram's colorbar takes the style's fonts and outline, also
+		# when added by a mutator.
+		ref = PlotlySupply._style_colorbar_trace_defaults(PlotlySupply._active_style())
+		for fig in (plot_histogram2d(randn(40), randn(40)),
+				(f = plot_scatter(1:3, 1:3); plot_histogram2d!(f, randn(40), randn(40)); f))
+			colorbar = _st_get(fig.data[end], :colorbar)
+			@test _st_get(colorbar, :tickfont)[:size] == ref[:tickfont][:size]
+			@test haskey(_st_fields(colorbar), :outlinewidth)
+		end
+	end
+	# The default style has no trace defaults: nothing is added.
+	@test !haskey(_st_get(_st_trace(plot_bar(["a"], [1.0]; error_y = [0.1])), :error_y), :thickness)
+end
+
+@testset "stats: colour keywords take grey levels and Colorants, reject unknown names (Z63, Z10)" begin
+	Colors = PlotlySupply.Colors
+	for (value, expected) in (("0.35", "#595959"), (Colors.RGB(0, 0.5, 0), "#008000"),
+			(Colors.RGBA(1, 0, 0, 0.5), "rgba(255,0,0,0.5)"), (:navy, "navy"), ("rgb(1,2,3)", "rgb(1,2,3)"))
+		@test _st_get(_st_trace(plot_bar(["a", "b"], [1.0, 2]; color = value)), :marker)[:color] == expected
+		@test _st_get(_st_trace(plot_histogram([1.0, 2, 2]; color = value)), :marker)[:color] == expected
+		box = _st_trace(plot_box([1.0, 2, 3, 4]; color = value))
+		@test _st_get(box, :marker)[:color] == expected && _st_get(box, :line)[:color] == expected
+		@test _st_get(_st_trace(plot_violin([1.0, 2, 3, 4]; color = value)), :line)[:color] == expected
+		f = plot_bar(["a"], [1.0])
+		plot_bar!(f, ["a"], [2.0]; color = value)
+		@test _st_get(_st_trace(f, 2), :marker)[:color] == expected
+	end
+	# Per-bar colours (G68) and per-series vectors convert entry by entry.
+	@test _st_get(_st_trace(plot_bar(["a", "b"], [1.0, 2]; color = ["0.2", Colors.RGB(0, 0, 1)])), :marker)[:color] ==
+		["#333333", "#0000FF"]
+	two = plot_histogram([[1.0, 2], [2.0, 3]]; color = ["0.2", :red])
+	@test [_st_get(_st_trace(two, k), :marker)[:color] for k in 1:2] == ["#333333", "red"]
+	for (who, call) in (
+		("plot_bar", () -> plot_bar(["a"], [1.0]; color = "nope")),
+		("plot_bar", () -> plot_bar(["a", "b"], [1.0, 2]; color = ["red", "nope"])),
+		("plot_histogram", () -> plot_histogram([1.0, 2]; color = "nope")),
+		("plot_box", () -> plot_box([1.0, 2]; color = "nope")),
+		("plot_violin", () -> plot_violin([1.0, 2]; color = "nope")),
+	)
+		err = _st_error(call)
+		@test err isa ArgumentError && startswith(err.msg, who * ": `color")
+		@test err isa ArgumentError && occursin("invalid colour", err.msg)
+	end
+	target = plot_bar(["a"], [1.0])
+	before = _st_snapshot(target)
+	err = _st_error(() -> plot_bar!(target, ["a"], [2.0]; color = "nope"))
+	@test err isa ArgumentError && startswith(err.msg, "plot_bar!: `color")
+	@test _st_snapshot(target) == before
+end
