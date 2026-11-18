@@ -803,36 +803,47 @@ end
 		horizontal = plot_surface(xs, ys, Z)
 		horizontal.data[1].fields[:colorbar] = attr(orientation = "h")
 		@test PS._s3_colorbar_right_margin(horizontal, 700.0, 50.0, 50.0) == 50.0
+		# The viewport is the plot area the finalizer's margins leave (W6), with
+		# the colorbar's room on the right.
 		width, height = Base.ScopedValues.with(PS._S3_EXPORT_SIZE => (700.0, 500.0)) do
 			PS._s3_viewport(f, PS._s3_layout_target(f, :scene))
 		end
-		@test width ≈ 700 - 50 - r
-		@test height == 500 - 60 - 50
-		# Outside an export the layout margins are used.
-		@test PS._s3_viewport(f, PS._s3_layout_target(f, :scene))[1] == 600
+		m = PS._fin_margins(f.layout, PS._fin_collect_axes(f), 700.0, 500.0, Dict{Symbol, Any}(), ())
+		@test width ≈ 700 - m.l - PS._s3_colorbar_right_margin(f, 700.0, m.l, m.r)
+		@test height ≈ 500 - m.t - m.b
+		@test PS._s3_colorbar_right_margin(f, 700.0, m.l, m.r) > m.r
+		# Outside an export the figure's own size is used: here none is set, so
+		# the active style's default size (700 x 500 under :default, Z69).
+		@test PS._style_default_figure_size() == (700, 500)
+		@test PS._s3_viewport(f, PS._s3_layout_target(f, :scene)) == (width, height)
 	end
 
 	@testset "G72/G82/V3 export refit of scene cameras and cell ticks" begin
 		xs, ys, Z = _v4_surface_data()
 		f = plot_surface(xs, ys, Z; xlabel = "Material scale α", ylabel = "Time step Δt", zlabel = "Frequency ratio R")
 		before = PlotlyBase.JSON.json(f)
-		eye0 = _v4_xyz(_v4_camera(f)[:eye])
+		camera0 = _v4_camera(f)
+		offset0 = _v4_xyz(camera0[:eye]) .- (haskey(camera0, :center) ? _v4_xyz(camera0[:center]) : zeros(3))
+		# The figure is framed for its own size when it is built (W6): an export
+		# at that size has nothing to refit.
+		@test PS._s3_refit_scenes!(_v4_copy(f), f, (700, 500)) === false
+		@test 0.97 < _v4_label_extent(f, :scene, (700, 500)) <= 1
 		target = _v4_copy(f)
-		@test PS._s3_refit_scenes!(target, f, (700, 500)) === true
+		@test PS._s3_refit_scenes!(target, f, (900, 350)) === true
 		@test PlotlyBase.JSON.json(f) == before
 		camera = _v4_camera(target)
 		eye = _v4_xyz(camera[:eye])
 		center = _v4_xyz(camera[:center])
 		offset = eye .- center
 		# The direction is kept; the drawing, labels included, uses the viewport.
-		@test offset ./ sqrt(sum(abs2, offset)) ≈ eye0 ./ sqrt(sum(abs2, eye0)) atol = 1e-9
-		@test 0.97 < _v4_label_extent(target, :scene, (700, 500)) <= 1
-		@test _v4_label_extent(target, :scene, (700, 500), 0.97) > 1
-		# Without `pan` the camera centre stays at the origin.
+		@test offset ./ sqrt(sum(abs2, offset)) ≈ offset0 ./ sqrt(sum(abs2, offset0)) atol = 1e-9
+		@test 0.97 < _v4_label_extent(target, :scene, (900, 350)) <= 1
+		@test _v4_label_extent(target, :scene, (900, 350), 0.97) > 1
+		# Without `pan` the camera centre returns to the origin.
 		fixed = _v4_copy(f)
-		PS._s3_refit_scenes!(fixed, f, (700, 500); pan = false)
+		PS._s3_refit_scenes!(fixed, f, (900, 350); pan = false)
 		@test !haskey(_v4_camera(fixed), :center)
-		@test _v4_label_extent(fixed, :scene, (700, 500)) <= 1
+		@test _v4_label_extent(fixed, :scene, (900, 350)) <= 1
 		# A camera the user placed is left alone.
 		user = plot_surface(xs, ys, Z)
 		view!(user; elev = 30, azim = 40, distance = 3)
@@ -857,5 +868,287 @@ end
 			"_s3_refit_scenes!: `size` must be (width, height) in px; got (0, 500)."
 		@test _v4_message(() -> PS._s3_refit_scenes!(f, f, (700, 500))) ==
 			"_s3_refit_scenes!: `target` must have its own layout (it is written in place)."
+	end
+end
+
+# Wave-5 3-D items (v5 "threed"); each testset names its item id.
+_v5_scene(p::Plot, key::Symbol = :scene) = _v4_fields(p.layout.fields[key])
+_v5_axis(p::Plot, key::Symbol, axis::Symbol) = _v4_fields(_v5_scene(p, key)[axis])
+_v5_center(camera) = haskey(camera, :center) ? _v4_xyz(camera[:center]) : zeros(3)
+_v5_offset(p::Plot, key::Symbol = :scene) = (c = _v4_camera(p, key); _v4_xyz(c[:eye]) .- _v5_center(c))
+_v5_distance(p::Plot, key::Symbol = :scene) = sqrt(sum(abs2, _v5_offset(p, key)))
+_v5_width(p::Plot, key::Symbol) = (d = _v4_fields(_v5_scene(p, key)[:domain]); d[:x][2] - d[:x][1])
+_v5_tickfont(p::Plot, key::Symbol, axis::Symbol) = _v4_fields(_v5_axis(p, key, axis)[:tickfont])[:size]
+_v5_scene_sf(rows, cols) = subplots(rows, cols; sync = false, specs = fill(Spec(kind = "scene"), rows, cols))
+function _v5_with_style(f, style)
+	set_default_style!(style)
+	try
+		return f()
+	finally
+		set_default_style!()
+	end
+end
+
+@testset "regression: 3-D wave 5 (v5 threed)" begin
+	PS = PlotlySupply
+	xs, ys, Z = _v4_surface_data()
+
+	@testset "W6 identical cells give identical scenes (topo_torus layout)" begin
+		# Three equal scene cells sharing one colour axis whose colorbar the
+		# finalizer places, above a full-width 2-D row.
+		sf = subplots(2, 3; sync = false, height_ratios = [2, 1],
+			specs = [Spec(kind = "scene") Spec(kind = "scene") Spec(kind = "scene"); Spec(colspan = 3) missing missing])
+		for c in 1:3
+			plot_surface!(sf, xs, ys, Z .* c; row = 1, col = c, shared_coloraxis = true, crange = (0, 3))
+			view!(sf; row = 1, col = c, elev = 33, azim = -61)
+		end
+		colorbar!(sf; coloraxis = :shared, len = 0.3, y = 0.78)
+		plot_heatmap!(sf, 1:4, 1:3, rand(3, 4); row = 2, col = 1, showscale = false)
+		p = sf.plot
+		keys3 = (:scene, :scene2, :scene3)
+		widths = [_v5_width(p, k) for k in keys3]
+		@test maximum(widths) - minimum(widths) < 1e-9
+		distances = [_v5_distance(p, k) for k in keys3]
+		@test maximum(distances) / minimum(distances) - 1 < 1e-6
+		@test all(k -> _v5_offset(p, k) ./ _v5_distance(p, k) ≈ _v5_offset(p, :scene) ./ _v5_distance(p, :scene), keys3)
+		for axis in (:xaxis, :yaxis, :zaxis)
+			@test length(unique(get(_v5_axis(p, k, axis), :nticks, nothing) for k in keys3)) == 1
+			@test length(unique(_v5_tickfont(p, k, axis) for k in keys3)) == 1
+		end
+	end
+
+	@testset "W6/Z45 framed live, at the layout size and at another size" begin
+		f = plot_surface(xs, ys, Z; xlabel = "x", ylabel = "y", zlabel = "height")
+		# A constructor returns the figure framed (labels included) for its size.
+		@test PS._s3_finalize_scenes!(f) === false
+		@test 0.97 < _v4_label_extent(f, :scene, (700, 500)) <= 1
+		@test _v4_label_extent(f, :scene, (700, 500), 0.97) > 1
+		# savefig at the layout size renders the figure itself; at another size
+		# a copy framed for that size.
+		@test PS._export_source(f, PS._normalize_export_options(f, (width = 700, height = 500))) === f
+		other = PS._export_source(f, PS._normalize_export_options(f, (width = 900, height = 350)))
+		@test other !== f
+		@test 0.97 < _v4_label_extent(other, :scene, (900, 350)) <= 1
+		@test _v4_label_extent(other, :scene, (900, 350), 0.97) > 1
+		# Mutations keep it framed: data, axis titles (Z45), ranges, the size.
+		plot_scatter3d!(f, [0.0, 4.0], [0.0, 1.0], [0.0, 2.0])
+		@test PS._s3_finalize_scenes!(f) === false
+		@test 0.97 < _v4_label_extent(f, :scene, (700, 500)) <= 1
+		d0 = _v5_distance(f)
+		zlabel!(f, "A very long z axis title that needs room")
+		xlabel!(f, "A long x axis title")
+		@test _v5_distance(f) != d0
+		@test PS._s3_finalize_scenes!(f) === false
+		@test 0.97 < _v4_label_extent(f, :scene, (700, 500)) <= 1
+		zrange!(f, (0, 3))
+		@test PS._s3_finalize_scenes!(f) === false
+		@test 0.97 < _v4_label_extent(f, :scene, (700, 500)) <= 1
+		figsize!(f, 900, 350)
+		@test PS._s3_finalize_scenes!(f) === false
+		@test 0.97 < _v4_label_extent(f, :scene, (900, 350)) <= 1
+		@test PS._export_source(f, PS._normalize_export_options(f, NamedTuple())) === f
+		# The same in a scene cell of a SubplotFigure.
+		sf = _v5_scene_sf(1, 2)
+		plot_surface!(sf, xs, ys, Z; row = 1, col = 2)
+		d0 = _v5_distance(sf.plot, :scene2)
+		xlabel!(sf, "A very long x axis title"; row = 1, col = 2)
+		@test _v5_distance(sf.plot, :scene2) > d0
+		@test PS._s3_finalize_scenes!(sf.plot) === false
+		@test 0.97 < _v4_label_extent(sf.plot, :scene2, (700, 500)) <= 1
+		ylabel!(sf, ""; row = 1, col = 2)
+		zrange!(sf, (0, nothing); row = 1, col = 2)
+		@test PS._s3_finalize_scenes!(sf.plot) === false
+		@test 0.97 < _v4_label_extent(sf.plot, :scene2, (700, 500)) <= 1
+		@test _v4_message(() -> PS._s3_finalize_scenes!(_v4_copy(f), (0, 500))) ==
+			"_s3_finalize_scenes!: `size` must be (width, height) in px; got (0, 500)."
+		@test _v4_message(() -> PS._s3_finalize_scenes!(_v4_copy(f), (700, NaN))) ==
+			"_s3_finalize_scenes!: `size` must be (width, height) in px; got (700, NaN)."
+		# Scenes PlotlySupply did not frame (no mark) are left alone.
+		raw = Plot(PlotlyBase.GenericTrace("surface"; z = Z))
+		@test PS._s3_finalize_scenes!(raw, (700, 500)) === false
+		@test !haskey(raw.layout.fields, :scene)
+	end
+
+	@testset "W6 a user camera is kept; zoom scales the fitted distance" begin
+		g = plot_surface(xs, ys, Z)
+		relayout!(g; scene_camera_center = attr(x = 0.1, y = 0.0, z = 0.0))
+		eye = _v4_xyz(_v4_camera(g)[:eye])
+		plot_scatter3d!(g, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0])
+		@test _v5_center(_v4_camera(g)) == [0.1, 0.0, 0.0]
+		@test _v4_xyz(_v4_camera(g)[:eye]) == eye
+		h = plot_surface(xs, ys, Z)
+		relayout!(h; scene_camera_eye = attr(x = 0.5, y = -2.0, z = 1.0))
+		plot_scatter3d!(h, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0])
+		@test _v4_xyz(_v4_camera(h)[:eye]) == [0.5, -2.0, 1.0]
+		@test PS._s3_finalize_scenes!(h, (900, 350)) === false
+		k = plot_surface(xs, ys, Z)
+		view!(k; elev = 30, azim = -60)
+		auto = _v5_distance(k)
+		view!(k; elev = 30, azim = -60, zoom = 1.5)
+		@test _v5_distance(k) ≈ auto / 1.5 rtol = 1e-6
+		# The zoom survives an export at another size.
+		at = PS._export_source(k, PS._normalize_export_options(k, (width = 900, height = 350)))
+		@test _v4_label_extent(at, :scene, (900, 350)) ≈ 1.5 rtol = 0.05
+	end
+
+	@testset "W6 scene tick and title fonts follow the style" begin
+		_v5_with_style(PlotStyle(; tick_fontsize = 9, label_fontsize = 11)) do
+			sf = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec()])
+			plot_surface!(sf, xs, ys, Z; row = 1, col = 1, xlabel = "x")
+			plot_scatter!(sf, 1:3, 1:3; row = 1, col = 2)
+			p = sf.plot
+			# gl3d draws scene tick text tickfont.size^2/12 px large: 9 px wants
+			# sqrt(12 * 9); axis titles are drawn at their size.
+			for axis in (:xaxis, :yaxis, :zaxis)
+				@test _v5_tickfont(p, :scene, axis) ≈ sqrt(12 * 9)
+			end
+			@test _v4_fields(_v4_fields(_v5_axis(p, :scene, :xaxis)[:title])[:font])[:size] == 11
+			two_d = [k for k in keys(p.layout.fields) if occursin(r"^xaxis\d*$", String(k))]
+			@test !isempty(two_d)
+			@test all(k -> _v4_fields(_v4_fields(p.layout.fields[k])[:tickfont])[:size] == 9, two_d)
+			# Repeated finalizing does not compound; a size the user writes is
+			# compensated in turn.
+			@test PS._s3_finalize_scenes!(p) === false
+			relayout!(p; scene_xaxis_tickfont_size = 20)
+			plot_surface!(sf, xs, ys, Z; row = 1, col = 1)
+			@test _v5_tickfont(p, :scene, :xaxis) ≈ sqrt(12 * 20)
+			@test _v5_tickfont(p, :scene, :yaxis) ≈ sqrt(12 * 9)
+		end
+		# Without a style the scene ticks are drawn at the figure font size.
+		f = plot_surface(xs, ys, Z)
+		@test _v5_tickfont(f, :scene, :zaxis) ≈ 12
+		relayout!(f; font = attr(size = 16))
+		view!(f; elev = 20, azim = 30)
+		@test _v5_tickfont(f, :scene, :zaxis) ≈ sqrt(12 * 16)
+	end
+
+	@testset "W6 perf guard: framing reads each trace's data once per axis" begin
+		big = _v5_scene_sf(1, 3)
+		Zb = [sin(i / 9) * cos(j / 7) for i in 1:250, j in 1:250]
+		for c in 1:3
+			plot_surface!(big, Zb; row = 1, col = c, xlabel = "x", zlabel = "z")
+		end
+		PS._s3_finalize_scenes!(_v4_copy(big.plot), (900, 350))   # compile
+		framed = _v4_copy(big.plot)
+		elapsed = @elapsed PS._s3_finalize_scenes!(framed, (800, 450))
+		@test elapsed < 1.0
+		@test PS._s3_finalize_scenes!(framed, (800, 450)) === false
+	end
+
+	@testset "Z69 the framing size falls back to the style's default size" begin
+		_v5_with_style(PlotStyle(; width = 350, aspect = 0.8)) do
+			@test PS._style_default_figure_size() == (350, 280)
+			g = plot_surface(xs, ys, Z)
+			delete!(g.layout.fields, :width)
+			delete!(g.layout.fields, :height)
+			m = PS._fin_margins(g.layout, PS._fin_collect_axes(g), 350.0, 280.0, Dict{Symbol, Any}(), ())
+			w, h = PS._s3_viewport(g, PS._s3_layout_target(g, :scene))
+			@test w ≈ 350 - m.l - PS._s3_colorbar_right_margin(g, 350.0, m.l, m.r)
+			@test h ≈ 280 - m.t - m.b
+		end
+	end
+
+	@testset "Z55 one-sided ranges on the 3-D constructor and mutator keywords" begin
+		lo, hi = extrema(Z)
+		top = hi + (hi - lo) / 32   # the open end: data end widened by 1/32 (zrange!)
+		a = plot_surface(xs, ys, Z; zrange = (0, nothing))
+		b = plot_surface(xs, ys, Z)
+		zrange!(b, (0, nothing))
+		@test _v5_axis(a, :scene, :zaxis)[:range] ≈ [0, top]
+		@test _v5_axis(a, :scene, :zaxis)[:range] == _v5_axis(b, :scene, :zaxis)[:range]
+		@test _v5_scene(a)[:aspectmode] == "manual"   # the range is pinned (Y26)
+		s = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.5, 3.0]; xrange = (nothing, 5))
+		@test _v5_axis(s, :scene, :xaxis)[:range] ≈ [-2 / 32, 5]
+		# A mutator resolves against all the scene's data.
+		plot_scatter3d!(s, [0.0, 4.0], [0.0, 1.0], [0.0, 1.0]; zrange = (-1, nothing))
+		@test _v5_axis(s, :scene, :zaxis)[:range] ≈ [-1, 3 + 3 / 32]
+		scene!(s; yrange = (nothing, 2))
+		@test _v5_axis(s, :scene, :yaxis)[:range] ≈ [-1 / 32, 2]
+		# SubplotFigure cells: the open end comes from the cell's data.
+		sf = _v5_scene_sf(1, 2)
+		plot_scatter3d!(sf, [0.0, 1.0], [0.0, 1.0], [0.0, 8.0]; row = 1, col = 2)
+		plot_surface!(sf, xs, ys, Z; row = 1, col = 2, zrange = (-1, nothing))
+		@test _v5_axis(sf.plot, :scene2, :zaxis)[:range] ≈ [-1, 8 + 8 / 32]
+		# A reversed axis keeps its direction.
+		r = plot_scatter3d([0.0, 2.0], [0.0, 1.0], [0.0, 4.0])
+		relayout!(r; scene_zaxis_autorange = "reversed")
+		scene!(r; zrange = (1, nothing))
+		@test _v5_axis(r, :scene, :zaxis)[:range] ≈ [4 + 4 / 32, 1]
+		# On a log axis the fixed bound is a data value, as with xrange!.
+		l = plot_scatter3d([1.0, 100.0], [0.0, 1.0], [0.0, 1.0])
+		relayout!(l; scene_xaxis_type = "log")
+		l2 = plot_scatter3d([1.0, 100.0], [0.0, 1.0], [0.0, 1.0])
+		relayout!(l2; scene_xaxis_type = "log")
+		scene!(l; xrange = (10, nothing))
+		xrange!(l2, (10, nothing))
+		@test _v5_axis(l, :scene, :xaxis)[:range] ≈ _v5_axis(l2, :scene, :xaxis)[:range]
+		@test _v5_axis(l, :scene, :xaxis)[:range][1] ≈ 1
+		@test startswith(_v4_message(() -> scene!(l; xrange = (-1, nothing))),
+			"scene!: `xrange` bounds on a logarithmic scene axis")
+		# Errors name the call and leave the figure unchanged.
+		before = PlotlyBase.JSON.json(s)
+		@test startswith(_v4_message(() -> plot_scatter3d!(s, [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]; xrange = (100, nothing))),
+			"plot_scatter3d!: `range` = (100, nothing) leaves no room for the data on the x axis")
+		@test PlotlyBase.JSON.json(s) == before
+		@test startswith(_v4_message(() -> plot_surface(xs, ys, Z; zrange = (missing, 1))),
+			"plot_surface: `zrange`: an open bound of a one-sided limit is written `nothing`")
+		@test occursin("has none yet", _v4_message(() -> scene!(_v5_scene_sf(1, 2); row = 1, col = 1, zrange = (0, nothing))))
+		# (nothing, nothing) is the automatic range.
+		@test !haskey(_v5_axis(plot_surface(xs, ys, Z; zrange = (nothing, nothing)), :scene, :zaxis), :range)
+	end
+
+	@testset "Z61 3-D traces and colour axes take the style's colorbar defaults" begin
+		g = [0.0, 1.0]
+		V = [x + y + z for x in g, y in g, z in g]
+		_v5_with_style(PlotStyle(; tick_fontsize = 9, label_fontsize = 11, axis_linewidth = 1.5)) do
+			styled(bar) = (b = _v4_fields(bar); _v4_fields(b[:tickfont])[:size] == 9 &&
+				_v4_fields(_v4_fields(b[:title])[:font])[:size] == 11 && b[:outlinewidth] == 1.5)
+			f = plot_surface(xs, ys, Z; colorbar_title = "c")
+			plot_surface!(f, xs, ys, Z .+ 1; colorbar_title = "d")
+			plot_isosurface!(f, g, g, g, V)
+			plot_volume!(f, g, g, g, V)
+			plot_mesh3d!(f, [0.0, 1, 0], [0.0, 0, 1], [0.0, 0, 0]; intensity = [0.0, 1, 2])
+			plot_quiver3d!(f, g, g, g, g, g, g)
+			plot_streamtube!(f, g, g, g, V, V, V)
+			@test length(f.data) == 7
+			@test all(t -> styled(t.fields[:colorbar]), f.data)
+			@test _v4_fields(_v4_fields(f.data[2].fields[:colorbar])[:title])[:text] == "d"
+			# SubplotFigure cells, and a colour axis a mutator creates.
+			sf = _v5_scene_sf(1, 2)
+			plot_surface!(sf, xs, ys, Z; row = 1, col = 1)
+			@test styled(sf.plot.data[1].fields[:colorbar])
+			plot_surface!(sf, xs, ys, Z; row = 1, col = 2, shared_coloraxis = true)
+			plot_surface!(sf, xs, ys, Z; row = 1, col = 1, shared_coloraxis = true)
+			@test styled(_v4_fields(sf.plot.layout.fields[:coloraxis])[:colorbar])
+		end
+	end
+
+	@testset "Z63 3-D colour keywords are checked as colours" begin
+		x = [0.0, 1.0]
+		# A matplotlib grey level is drawn as its hex colour.
+		@test _v4_line(plot_scatter3d(x, x, x; color = "0.35").data[1])[:color] == "#595959"
+		@test _v4_line(plot_scatter3d(x, x, x; color = :red).data[1])[:color] == "red"
+		@test _v4_line(plot_scatter3d(x, x, x; color = PS.Colors.RGB(1, 0, 0)).data[1])[:color] == "#FF0000"
+		# Wrong types are ArgumentErrors naming the call and the keyword.
+		@test _v4_message(() -> plot_scatter3d(x, x, x; color = 3.5)) ==
+			"plot_scatter3d: `color` must be a colour string, Symbol or Colors.jl Colorant (or a vector of them, one per series); got Float64."
+		@test _v4_message(() -> plot_scatter3d([x, x], [x, x], [x, x]; marker_color = ["red", 2])) ==
+			"plot_scatter3d: `marker_color[2]` must be a colour string, Symbol or Colors.jl Colorant (or a vector of them, one per series); got Int64."
+		@test _v4_message(() -> plot_quiver3d(x, x, x, x, x, x; color = 3.5)) ==
+			"plot_quiver3d: `color` must be a colour string, Symbol or Colors.jl Colorant; got Float64."
+		# Colours are checked also where they are not drawn.
+		@test startswith(_v4_message(() -> plot_surface(xs, ys, Z; edgecolor = "notacolor")),
+			"plot_surface: `edgecolor`: invalid colour \"notacolor\"")
+		@test startswith(_v4_message(() -> plot_mesh3d([0.0, 1, 0], [0.0, 0, 1], [0.0, 0, 0]; edgecolor = "nope")),
+			"plot_mesh3d: `edgecolor`: invalid colour \"nope\"")
+		f = plot_scatter3d(x, x, x)
+		before = PlotlyBase.JSON.json(f)
+		for key in (:bgcolor, :bordercolor, :arrowcolor)
+			@test startswith(_v4_message(() -> annotate!(f, 0.5, 0.5, 0.5, "t"; (key => "notacolor",)...)),
+				"annotate!: `$(key)`: invalid colour \"notacolor\"")
+		end
+		@test PlotlyBase.JSON.json(f) == before
+		annotate!(f, 0.5, 0.5, 0.5, "t"; bgcolor = "0.9")
+		@test _v4_fields(only(_v5_scene(f)[:annotations]))[:bgcolor] == "#E6E6E6"
 	end
 end

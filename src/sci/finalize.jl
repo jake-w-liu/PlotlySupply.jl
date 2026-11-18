@@ -3192,6 +3192,14 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 		entry === nothing && continue
 		key = _room_bar_key(item)
 		plan.bar_items[key] = entry
+		# Our bar goes beyond the union of its areas: an area of the axis that
+		# is not at the union's edge (it was, before more areas joined the
+		# axis) needs no room for it, so its shrink on that side was ours.
+		if _fin_bar_owned(item.bar)
+			for k in entry.areas
+				k in entry.edge_areas || push!(plan.vacated, (k, entry.side))
+			end
+		end
 		for k in entry.edge_areas
 			reserve = occursin(_FIN_MARGIN_FIRST_SUBPLOT, String(k))
 			_request_room!(plan, k, entry.side, entry.px + (reserve ? _FIN_AUTOMARGIN_EXTRA : 0.0); owner = :colorbar,
@@ -3583,6 +3591,9 @@ Normalise the figure after a PlotlySupply constructor or mutator changed it
   The right margin grows to fit a math colorbar title drawn beside its bar.
   The fit and the room solve run again after a pass that wrote (at most
   `_FIN_FIT_ROUNDS`), so a second call writes nothing.
+- M5: the 3-D scenes PlotlySupply manages are framed for the final domains
+  and margins, at `size` when given (`_s3_finalize_scenes!`: camera
+  distance, tick counts and tick font sizes).
 
 Explicit user settings (ranges, `autorangeoptions`, domains outside the cell,
 placed colorbars) are never changed. `live` holds the traces of the live
@@ -3614,6 +3625,9 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 		_fin_fit!(ctx, accs) || break
 		wrote = true
 	end
+	# M5: 3-D scenes are framed for the final domains and margins, at the
+	# export size when there is one (scene3d.jl; layout writes only).
+	_s3_finalize_scenes!(p, ctx.size) && (wrote = true)
 	return wrote
 end
 
