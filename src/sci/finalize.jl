@@ -3619,7 +3619,7 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	_fin_sticky_updates!(updates, p, accs)
 	# Log-axis tick labels and long axis titles at this figure size
 	# (W7/Z70/W5, src/sci/axes.jl).
-	_axes_finalize_updates!(updates, p, _fin_figure_size(ctx, p.layout))
+	_axes_finalize_updates!(updates, p, _fin_figure_size(ctx, p.layout), accs)
 	wrote = _fin_relayout!(ctx, updates)
 	# The fit and the room solve read what they write (a bar's length changes
 	# its tick-label estimate, fitted domains the margins): a pass that wrote

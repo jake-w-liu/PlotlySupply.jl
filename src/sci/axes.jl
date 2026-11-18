@@ -1346,7 +1346,7 @@ end
 # the estimated plot area (px, `_fin_margins`): its size `Wp` x `Hp` and its
 # left and bottom margins `ml`, `mb`.
 struct _AxesFitPlan
-	accs::AbstractDict{Symbol}   # Dict{Symbol, _FinAxisAcc}; finalize.jl is included after this file
+	accs   # the `_FinAxes` of `_fin_collect_axes` (untyped: finalize.jl is included after this file)
 	W::Float64
 	H::Float64
 	Wp::Float64
@@ -1355,8 +1355,7 @@ struct _AxesFitPlan
 	mb::Float64
 end
 
-function _axes_fit_plan(p::Plot, size)
-	accs = _fin_collect_axes(p)
+function _axes_fit_plan(p::Plot, size, accs = _fin_collect_axes(p))
 	W, H = Float64(size[1]), Float64(size[2])
 	margins = _fin_margins(p.layout, accs, W, H, Dict{Symbol, Any}(), ())
 	return _AxesFitPlan(
@@ -1380,20 +1379,22 @@ function _axes_plan_length(layout::Layout, plan::_AxesFitPlan, key::Symbol)
 end
 
 """
-	_axes_finalize_updates!(updates, p::Plot, size) -> updates
+	_axes_finalize_updates!(updates, p::Plot, size, accs = nothing) -> updates
 
 The axis fits `_finalize_figure!` runs for a figure of `size = (width,
 height)` px, after every mutation and on the export copy: log-axis tick
 labels (`_axes_log_tick_updates!`, W7/Z70) and axis titles that would run
 off the figure (`_axes_title_wrap_updates!`, W5). Figures without a log axis
 or a long plain axis title return at once, without reading the trace data.
+`accs` is the run's `_fin_collect_axes(p)` when the caller already has it, so
+the extents are not collected a second time.
 """
-function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size)
+function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size, accs = nothing)
 	layout = p.layout
 	log_axes = _axes_has_log_axis(layout)
 	wrap = _axes_title_wrap_candidates(layout)
 	(log_axes || !isempty(wrap)) || return updates
-	plan = _axes_fit_plan(p, size)
+	plan = accs === nothing ? _axes_fit_plan(p, size) : _axes_fit_plan(p, size, accs)
 	log_axes && _axes_log_tick_updates!(updates, p, plan)
 	isempty(wrap) || _axes_title_wrap_updates!(updates, p, plan, wrap)
 	return updates
