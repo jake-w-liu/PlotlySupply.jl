@@ -2111,8 +2111,11 @@ const _ROOM_LABEL_PAD = 4.0
 # colorbar rise above the bar's `y` (measured: 4 px at 12 px).
 const _FIN_HBAR_TITLE_RISE = 0.35
 # A plot area gives up at most this share of its grid cell's width (left +
-# right) or height (top + bottom); a decoration needing more overlaps.
-const _ROOM_MAX_SHARE = 0.5
+# right) or height (top + bottom); a decoration needing more overlaps. Two
+# thirds: a 2 x 2 grid with two-line panel titles, panel labels, x and y
+# titles, a cell legend, a colorbar and a figure legend at the IEEE
+# single-column size (336 x 252 px) needs 62 % between its rows.
+const _ROOM_MAX_SHARE = 2 / 3
 # Height of a MathJax colorbar title drawn above or below a horizontal bar,
 # in font sizes (`$|E|^2$` and `$\frac{a}{b}$` render about 1.6 em tall).
 const _FIN_MATH_TITLE_H = 1.8
@@ -2346,11 +2349,25 @@ function _room_region_area(key::AbstractString)
 	return occursin(_FIN_DOMAIN_SUBPLOT, key) ? Symbol(key) : nothing
 end
 
+# A y axis title is drawn beyond the push `_fin_title_push` estimates for it
+# (plotly lets it reach into the automargin extra): its box ends
+# 14.5 + 1.35 f px past the tick labels for a title font of f px (probe p29,
+# plotly.js 2.35.2: f = 10, 14, 20, 28 gave 28.0, 33.4, 41.5, 52.3 px).
+# A side facing another cell, or a decoration beyond the title, needs that.
+function _room_y_title_overhang(layout::Layout, ykey::Symbol)
+	axis = get(layout.fields, ykey, nothing)
+	(_cmn_mapping_get(axis, :visible) === false || isempty(_fin_title_text(axis))) && return 0.0
+	font = _fin_font_size(layout)
+	size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
+	return max(0.0, 14.5 + 1.35 * size - _fin_title_push(axis, font))
+end
+
 # Px the axes of a Cartesian area draw on each side.
 function _room_own_extents(plan::_RoomPlan, xkey::Symbol, ykey::Symbol, cur)
 	layout = plan.layout
 	own = Dict{Symbol, Float64}(side => 0.0 for side in _ROOM_SIDES)
 	own[:left] = _fin_left_decoration(layout, plan.accs, ykey, cur[2], plan.Hp)
+	own[:left] > 0 && (own[:left] += _room_y_title_overhang(layout, ykey))
 	xaxis = get(layout.fields, xkey, nothing)
 	if something(_fin_string(_cmn_mapping_get(xaxis, :side)), "bottom") == "top"
 		own[:top] = _fin_x_labels_px(layout, xkey)
@@ -2359,7 +2376,8 @@ function _room_own_extents(plan::_RoomPlan, xkey::Symbol, ykey::Symbol, cur)
 	end
 	yaxis = get(layout.fields, ykey, nothing)
 	something(_fin_string(_cmn_mapping_get(yaxis, :side)), "left") == "right" &&
-		(own[:right] = _fin_y_labels_px(layout, plan.accs, ykey, cur[2], plan.Hp))
+		(own[:right] = _fin_y_labels_px(layout, plan.accs, ykey, cur[2], plan.Hp) +
+			_room_y_title_overhang(layout, ykey))
 	xref, yref = _fin_axis_ref(xkey), _fin_axis_ref(ykey)
 	# Overlaying axes: a twin y axis on the right, a secondary x axis on top.
 	for (key, axis) in layout.fields
@@ -2369,7 +2387,8 @@ function _room_own_extents(plan::_RoomPlan, xkey::Symbol, ykey::Symbol, cur)
 		letter = String(key)[1]
 		if letter == 'y' && over == yref &&
 				something(_fin_string(_cmn_mapping_get(axis, :side)), "left") == "right"
-			own[:right] = max(own[:right], _fin_y_labels_px(layout, plan.accs, key, cur[2], plan.Hp))
+			own[:right] = max(own[:right], _fin_y_labels_px(layout, plan.accs, key, cur[2], plan.Hp) +
+				_room_y_title_overhang(layout, key))
 		elseif letter == 'x' && over == xref &&
 				something(_fin_string(_cmn_mapping_get(axis, :side)), "bottom") == "top"
 			own[:top] = max(own[:top], _fin_x_labels_px(layout, key))
@@ -2665,9 +2684,11 @@ end
 _room_flexible(a::_RoomArea) = (a.managed || a.aspect) && !a.frozen && a.ref !== nothing
 
 # Room per side of every grid area and the final domains. A side with
-# requests takes `need - allowance`: the allowance is the gap to the
-# neighbouring cells minus what they need on the facing side (at least half
-# the gap when they take room for requests of their own there). Areas with
+# requests, or with axis labels facing another cell, takes
+# `need - allowance`: the allowance is the gap to the
+# neighbouring cells minus what they need on the facing side; when they
+# take room there too (that would leave less than half the gap), the two
+# split what they need beyond the gap in proportion to their spans. Areas with
 # the same grid edge get the same room (rows keep a common top and bottom,
 # columns a common left and right); an area gives up at most
 # `_ROOM_MAX_SHARE` of its grid cell. The right side of an equal-aspect cell
@@ -2753,7 +2774,11 @@ function _room_solve!(plan::_RoomPlan)
 			a.writable[side] = abs(cur_edge - ref_edge) <= 1e-9 || _room_evidence(plan, a, side) ||
 				_room_label_evidence(plan, a, side)
 			sign = side === :left || side === :bottom ? 1.0 : -1.0
-			edges[side] = a.writable[side] ? ref_edge + sign * a.room[side] / _room_px(plan, side) : cur_edge
+			want = ref_edge + sign * a.room[side] / _room_px(plan, side)
+			# A side without requests shrunk earlier (by us or the user) is
+			# only shrunk further, when its axis labels need more room.
+			grow = !haskey(by_side, (key, side)) && sign * (want - cur_edge) > 1e-9
+			edges[side] = a.writable[side] || grow ? want : cur_edge
 		end
 		# A domain the user set never inverts.
 		(edges[:left] < edges[:right] && edges[:bottom] < edges[:top]) || continue

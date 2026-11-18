@@ -2468,6 +2468,9 @@ function set_legend!(
 		any(_legend_hides_unnamed, p.data) ||
 		(options.dedupe && !isempty(_legend_dedupe_groups(p))) ||
 		options.ncols > 0 || _legend_column_layout(p, "legend") !== nothing
+	# An explicit position is the user's, not the best-position rule's (the
+	# transaction may run on a copy of `p`, so this happens here).
+	options.position === nothing || _scat_legend_forget!(p)
 	return _transactional_high_level_plot_mutation!(
 		needs_trace_edits ? _set_legend_traces_impl! : _set_legend_impl!,
 		fig;
@@ -2851,7 +2854,9 @@ in [`set_legend!`](@ref); the 1.x names `legend_inset`, `legend_bgcolor`,
 
 `ncols` gives each cell's legend that many columns (fewer, with a warning,
 where they do not fit the cell). Returns `fig`. Invalid values throw an
-`ArgumentError` before anything is changed; `show` is not accepted.
+`ArgumentError` before anything is changed; `show` is not accepted, nor are
+`row`/`col` (this sets up the legend of every cell; use
+`set_legend!(sf; row, col, …)` for one cell's legend).
 
 # Example
 ```julia
@@ -2884,9 +2889,12 @@ function subplot_legends!(
 	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_borderwidth::Union{Nothing, Real} = nothing,
+	row = nothing,
+	col = nothing,
 	show = nothing,
 )
 	_text_reject_show(show, "subplot_legends!")
+	_legend_reject_cell_keywords(row, col, "subplot_legends!")
 	aliases = _legend_subplot_aliases(
 		"subplot_legends!";
 		inset, bgcolor, bordercolor, borderwidth,
@@ -2909,6 +2917,15 @@ function subplot_legends!(
 		fig;
 		options = options,
 	)
+end
+
+# `row`/`col` given to a call that sets up the legends of every cell.
+function _legend_reject_cell_keywords(row, col, who::AbstractString)
+	(row === nothing && col === nothing) && return nothing
+	throw(ArgumentError(
+		"$(who): `row`/`col` are not supported; $(who) sets up the legend of every cell. " *
+		"Use `set_legend!(sf; row, col, …)` for the legend of one cell.",
+	))
 end
 
 function _subplot_figure_legends_impl!(sf::SubplotFigure; options)
@@ -2941,9 +2958,12 @@ function subplot_legends!(
 	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_borderwidth::Union{Nothing, Real} = nothing,
+	row = nothing,
+	col = nothing,
 	show = nothing,
 )
 	_text_reject_show(show, "subplot_legends!")
+	_legend_reject_cell_keywords(row, col, "subplot_legends!")
 	aliases = _legend_subplot_aliases(
 		"subplot_legends!";
 		inset, bgcolor, bordercolor, borderwidth,
@@ -10447,9 +10467,36 @@ end
 # rough per-entry estimate above). `obstacles` are rectangles
 # `(u0, u1, v0, v1)` (fractions of the plot area, e.g. insets) a legend box
 # must not cover: each scores like a filled area, by the share of the box it
-# covers. Used for a Plot (all traces, main axes) and for a SubplotFigure cell
-# legend (the cell's traces, `_legend_best_cell_position`).
+# covers. The shapes and annotations drawn on the plot area score too
+# (`_scat_legend_reference_scores!`). Used for a Plot (all traces, main axes)
+# and for a SubplotFigure cell legend (the cell's traces,
+# `_legend_best_cell_position`).
 function _scat_best_legend_position(
+	p::Plot,
+	indices,
+	xkey::Symbol,
+	xref::AbstractString,
+	width_px::Float64,
+	height_px::Float64,
+	box = nothing;
+	obstacles = (),
+)
+	scores = _scat_legend_scores(p, indices, xkey, xref, width_px, height_px, box; obstacles = obstacles)
+	scores === nothing && return nothing
+	# `argmin` returns the first minimum: ties keep the candidate order, and a
+	# position covering nothing (score 0) wins over every covering one.
+	return _SCAT_LEGEND_POSITIONS[argmin(scores)]
+end
+
+# One scored series: y axis key, coordinates (log10 on a log axis) and how
+# they are drawn (`:points` where they lie, `:segments` joining consecutive
+# points with the trace's line shape, `:drops` joining each point to y = 0,
+# `:polygon` the closed area of a `fill = "toself"` trace).
+const _ScatLegendSeries = Tuple{Symbol, Vector{Float64}, Vector{Float64}, Symbol, String}
+
+# Score of every candidate of `_SCAT_LEGEND_POSITIONS` (what its box covers),
+# or `nothing` when the estimate does not apply (see above).
+function _scat_legend_scores(
 	p::Plot,
 	indices,
 	xkey::Symbol,
@@ -10462,13 +10509,9 @@ function _scat_best_legend_position(
 	layout = p.layout
 	entries = 0
 	widest = 0
-	# (y axis key, x coordinates, y coordinates, kind, line shape): `:points`
-	# are scored where they lie, `:segments` join consecutive points with the
-	# trace's line shape, `:drops` join each point to y = 0 (the area of a
-	# `fill = "tozeroy"` trace), `:polygon` is the closed area of a
-	# `fill = "toself"` trace (`_scat_legend_fill_scores!`).
-	series = Tuple{Symbol, Vector{Float64}, Vector{Float64}, Symbol, String}[]
+	series = _ScatLegendSeries[]
 	xpadded = false
+	xlog = _axis_type(layout, xkey) == "log"
 	for trace_index in indices
 		trace = p.data[trace_index]
 		trace isa GenericTrace || return nothing
@@ -10490,7 +10533,7 @@ function _scat_best_legend_position(
 		fill in ("", "none", "tozeroy", "toself") || return nothing
 		ykey = _axis_layout_key(string(get(fields, :yaxis, "y")), :y)
 		ylog = _axis_type(layout, ykey) == "log"
-		xs = _scat_legend_coords(get(fields, :x, nothing), _axis_type(layout, xkey) == "log")
+		xs = _scat_legend_coords(get(fields, :x, nothing), xlog)
 		ys = _scat_legend_coords(get(fields, :y, nothing), ylog)
 		(xs === nothing || ys === nothing) && return nothing
 		n = min(length(xs), length(ys))
@@ -10532,8 +10575,11 @@ function _scat_best_legend_position(
 	(box === nothing ? entries == 0 || isempty(series) : isempty(series) && isempty(obstacles)) &&
 		return nothing
 
+	# Shapes drawn on these axes widen the autorange like data (plotly.js
+	# `shapes/calc_autorange`): their extents join the windows.
+	shape_x, shape_y = _scat_legend_shape_extents(layout, xref, xlog)
 	xwindow = isempty(series) ? (0.0, 1.0) : _scat_legend_window(
-		layout, xkey, Iterators.flatten(s[2] for s in series); padded = xpadded,
+		layout, xkey, Iterators.flatten((Iterators.flatten(s[2] for s in series), shape_x)); padded = xpadded,
 	)
 	xwindow === nothing && return nothing
 	# Concretely typed, so the scoring loop below is type-stable (with `Any`
@@ -10542,13 +10588,18 @@ function _scat_best_legend_position(
 	for key in unique(s[1] for s in series)
 		# A filled area reaches down to 0, which the autorange includes unpadded.
 		filled = any(s -> s[1] === key && s[4] === :drops, series)
-		ywindows[key] = _scat_legend_window(
+		window = _scat_legend_window(
 			layout,
 			key,
-			Iterators.flatten((Iterators.flatten(s[3] for s in series if s[1] === key), filled ? (0.0,) : ()));
+			Iterators.flatten((
+				Iterators.flatten(s[3] for s in series if s[1] === key),
+				get(shape_y, key, Float64[]),
+				filled ? (0.0,) : (),
+			));
 			padded = true,
 			tight_zero = filled,
 		)
+		ywindows[key] = window === nothing ? nothing : (Float64(window[1]), Float64(window[2]))
 	end
 
 	box_w, box_h = if box === nothing
@@ -10559,62 +10610,284 @@ function _scat_best_legend_position(
 	else
 		(min(0.95, box[1] / width_px), min(0.95, box[2] / height_px))
 	end
-	# The box of each candidate, from the anchor point and anchors the legend
-	# would get there.
-	boxes = map(_SCAT_LEGEND_POSITIONS) do position
-		x, y, xanchor, yanchor =
-			_legend_anchor((0.0, 1.0), (0.0, 1.0), _DEFAULT_LEGEND_INSET[], position)
-		u0 = xanchor == "left" ? x : xanchor == "right" ? x - box_w : x - box_w / 2
-		v0 = yanchor == "bottom" ? y : yanchor == "top" ? y - box_h : y - box_h / 2
-		return (u0, u0 + box_w, v0, v0 + box_h)
-	end
+	boxes = map(b -> map(Float64, b), _legend_candidate_boxes(Float64(box_w), Float64(box_h)))
 	scores = zeros(Int, length(boxes))
-	xlo, xhi = xwindow
+	xw = (Float64(xwindow[1]), Float64(xwindow[2]))
 	for (ykey, xs, ys, kind, shape) in series
 		ywindow = ywindows[ykey]
 		ywindow === nothing && continue
-		ylo, yhi = ywindow
-		v_zero = (0.0 - ylo) / (yhi - ylo)
-		count = length(xs)
-		stride = max(1, cld(count, _SCAT_LEGEND_MAX_POINTS))
-		if kind === :polygon
-			us = [(xs[index] - xlo) / (xhi - xlo) for index in 1:stride:count]
-			vs = [(ys[index] - ylo) / (yhi - ylo) for index in 1:stride:count]
-			_scat_legend_fill_scores!(scores, us, vs, boxes)
-			continue
-		end
-		previous = nothing
-		for index in 1:stride:count
-			u = (xs[index] - xlo) / (xhi - xlo)
-			v = (ys[index] - ylo) / (yhi - ylo)
-			if !(isfinite(u) && isfinite(v))
-				previous = nothing
-				continue
-			end
-			path = kind === :segments && previous !== nothing ?
-				_scat_legend_step_path(shape, previous[1], previous[2], u, v) : nothing
-			for (corner, (u0, u1, v0, v1)) in enumerate(boxes)
-				hit = if kind === :segments
-					path !== nothing && _scat_legend_path_hits_box(path, u0, u1, v0, v1)
-				elseif kind === :drops
-					_scat_segment_hits_box(u, v, u, v_zero, u0, u1, v0, v1)
-				else
-					u0 <= u <= u1 && v0 <= v <= v1
-				end
-				hit && (scores[corner] += 1)
-			end
-			previous = (u, v)
-		end
+		_scat_legend_score_series!(scores, boxes, xs, ys, kind, shape, xw, ywindow)
 	end
 	samples = _SCAT_LEGEND_FILL_SAMPLES^2
 	for (a0, a1, b0, b1) in obstacles
-		for (corner, (u0, u1, v0, v1)) in enumerate(boxes)
-			overlap = max(0.0, min(u1, a1) - max(u0, a0)) * max(0.0, min(v1, b1) - max(v0, b0))
-			overlap > 0 && (scores[corner] += ceil(Int, samples * overlap / ((u1 - u0) * (v1 - v0))))
+		_scat_legend_score_rect!(scores, boxes, Float64(a0), Float64(a1), Float64(b0), Float64(b1), samples)
+	end
+	_scat_legend_reference_scores!(scores, boxes, layout, xkey, xref, xw, ywindows, width_px, height_px)
+	return scores
+end
+
+# Add to `scores` what each candidate box covers of one series (coordinates
+# mapped to the plot area by the windows `xw`, `yw`; at most
+# `_SCAT_LEGEND_MAX_POINTS` points, sampled with a stride). A function
+# barrier: every argument has a concrete type, so the loop over the points
+# allocates nothing.
+function _scat_legend_score_series!(
+	scores::Vector{Int},
+	boxes::NTuple{N, NTuple{4, Float64}},
+	xs::Vector{Float64},
+	ys::Vector{Float64},
+	kind::Symbol,
+	shape::String,
+	xw::Tuple{Float64, Float64},
+	yw::Tuple{Float64, Float64},
+) where {N}
+	xlo, xhi = xw
+	ylo, yhi = yw
+	v_zero = (0.0 - ylo) / (yhi - ylo)
+	count = length(xs)
+	stride = max(1, cld(count, _SCAT_LEGEND_MAX_POINTS))
+	if kind === :polygon
+		us = [(xs[index] - xlo) / (xhi - xlo) for index in 1:stride:count]
+		vs = [(ys[index] - ylo) / (yhi - ylo) for index in 1:stride:count]
+		_scat_legend_fill_scores!(scores, us, vs, boxes)
+		return scores
+	end
+	has_previous = false
+	pu = 0.0
+	pv = 0.0
+	for index in 1:stride:count
+		u = (xs[index] - xlo) / (xhi - xlo)
+		v = (ys[index] - ylo) / (yhi - ylo)
+		if !(isfinite(u) && isfinite(v))
+			has_previous = false
+			continue
+		end
+		for corner in 1:N
+			u0, u1, v0, v1 = boxes[corner]
+			hit = if kind === :segments
+				has_previous && _scat_legend_shape_hits_box(shape, pu, pv, u, v, u0, u1, v0, v1)
+			elseif kind === :drops
+				_scat_segment_hits_box(u, v, u, v_zero, u0, u1, v0, v1)
+			else
+				u0 <= u <= u1 && v0 <= v <= v1
+			end
+			hit && (scores[corner] += 1)
+		end
+		has_previous = true
+		pu = u
+		pv = v
+	end
+	return scores
+end
+
+# Whether the line plotly.js draws from (u1, v1) to (u2, v2) for the scatter
+# `line.shape` `shape` meets the box [u0, ub] x [v0, vb] (plotly.js 2.35
+# `line_points`: "hv" goes across then up, "vh" up then across, "hvh"/"vhv"
+# turn at the midpoint; "linear" and "spline" are scored as the straight
+# segment).
+function _scat_legend_shape_hits_box(shape::String, u1::Float64, v1::Float64, u2::Float64, v2::Float64,
+	u0::Float64, ub::Float64, v0::Float64, vb::Float64)
+	if shape == "hv"
+		return _scat_segment_hits_box(u1, v1, u2, v1, u0, ub, v0, vb) ||
+			_scat_segment_hits_box(u2, v1, u2, v2, u0, ub, v0, vb)
+	elseif shape == "vh"
+		return _scat_segment_hits_box(u1, v1, u1, v2, u0, ub, v0, vb) ||
+			_scat_segment_hits_box(u1, v2, u2, v2, u0, ub, v0, vb)
+	elseif shape == "hvh"
+		um = (u1 + u2) / 2
+		return _scat_segment_hits_box(u1, v1, um, v1, u0, ub, v0, vb) ||
+			_scat_segment_hits_box(um, v1, um, v2, u0, ub, v0, vb) ||
+			_scat_segment_hits_box(um, v2, u2, v2, u0, ub, v0, vb)
+	elseif shape == "vhv"
+		vm = (v1 + v2) / 2
+		return _scat_segment_hits_box(u1, v1, u1, vm, u0, ub, v0, vb) ||
+			_scat_segment_hits_box(u1, vm, u2, vm, u0, ub, v0, vb) ||
+			_scat_segment_hits_box(u2, vm, u2, v2, u0, ub, v0, vb)
+	end
+	return _scat_segment_hits_box(u1, v1, u2, v2, u0, ub, v0, vb)
+end
+
+# Add to `scores` the share of each candidate box the rectangle
+# [a0, a1] x [b0, b1] covers, counted as `samples` sample points of the box.
+function _scat_legend_score_rect!(scores::Vector{Int}, boxes, a0::Float64, a1::Float64, b0::Float64, b1::Float64, samples::Int)
+	for (corner, (u0, u1, v0, v1)) in enumerate(boxes)
+		overlap = max(0.0, min(u1, a1) - max(u0, a0)) * max(0.0, min(v1, b1) - max(v0, b0))
+		overlap > 0 && (scores[corner] += ceil(Int, samples * overlap / ((u1 - u0) * (v1 - v0))))
+	end
+	return scores
+end
+
+# Points the outline of an ellipse (`type = "circle"` shape) is sampled with.
+const _SCAT_LEGEND_ELLIPSE_POINTS = 48
+
+# A finite number, or `nothing` (dates, categories, missing values).
+_scat_legend_number(value) =
+	value isa Real && !(value isa Bool) && isfinite(value) ? Float64(value) : nothing
+
+# Layout key of the data axis `ref` of `letter` ("y2" -> :yaxis2), or
+# `nothing` for a domain or paper reference.
+function _scat_legend_data_axis(ref::AbstractString, letter::Symbol)
+	occursin(letter === :x ? r"^x[0-9]*$" : r"^y[0-9]*$", ref) || return nothing
+	return _axis_layout_key(ref, letter)
+end
+
+# Data coordinate of a shape position `value` on axis `key`: shape positions
+# are data values, log10 on a log axis (plotly.js `shapePositionToRange`).
+function _scat_legend_shape_coord(layout::Layout, key::Symbol, value::Float64)
+	_axis_type(layout, key) == "log" || return value
+	return value > 0 ? log10(value) : NaN
+end
+
+# The x values on axis `xref` and the y values per y axis key of the line,
+# rectangle and ellipse shapes drawn in data coordinates, for the autorange
+# windows.
+function _scat_legend_shape_extents(layout::Layout, xref::AbstractString, xlog::Bool)
+	xs = Float64[]
+	ys = Dict{Symbol, Vector{Float64}}()
+	shapes = get(layout.fields, :shapes, nothing)
+	shapes isa AbstractVector || return xs, ys
+	xkey = _axis_layout_key(xref, :x)
+	for item in shapes
+		_cmn_mapping_get(item, :visible) === false && continue
+		string(something(_cmn_mapping_get(item, :type), "")) in ("line", "rect", "circle") || continue
+		if string(something(_cmn_mapping_get(item, :xref), "x")) == xref
+			for k in (:x0, :x1)
+				value = _scat_legend_number(_cmn_mapping_get(item, k))
+				value === nothing && continue
+				coord = _scat_legend_shape_coord(layout, xkey, value)
+				isfinite(coord) && push!(xs, coord)
+			end
+		end
+		ykey = _scat_legend_data_axis(string(something(_cmn_mapping_get(item, :yref), "y")), :y)
+		ykey === nothing && continue
+		for k in (:y0, :y1)
+			value = _scat_legend_number(_cmn_mapping_get(item, k))
+			value === nothing && continue
+			coord = _scat_legend_shape_coord(layout, ykey, value)
+			isfinite(coord) && push!(get!(Vector{Float64}, ys, ykey), coord)
 		end
 	end
-	# `argmin` returns the first minimum: ties keep the candidate order.
-	return _SCAT_LEGEND_POSITIONS[argmin(scores)]
+	return xs, ys
+end
+
+# Plot-area fraction of a position `value` given against reference `ref` on
+# the plot area whose axes are `axis_keys` (the first is the main one):
+# a data axis among them (`windows`; `range`: the value is in range units, as
+# annotation positions are, else a data value as shape positions are),
+# `"<axis> domain"` (a fraction of the plot area) or `"paper"` (mapped through
+# the main axis' domain). `nothing` when the reference is not this plot area.
+function _scat_legend_fraction(layout::Layout, ref::AbstractString, letter::Symbol, axis_keys, windows,
+	value::Float64, range::Bool)
+	if ref == "paper"
+		domain = something(_layout_axis_domain(layout, first(axis_keys)), (0.0, 1.0))
+		span = domain[2] - domain[1]
+		span > 0 || return nothing
+		return (value - domain[1]) / span
+	end
+	m = match(letter === :x ? r"^(x[0-9]*)( domain)?$" : r"^(y[0-9]*)( domain)?$", ref)
+	m === nothing && return nothing
+	key = _axis_layout_key(String(m.captures[1]), letter)
+	key in axis_keys || return nothing
+	m.captures[2] === nothing || return value
+	window = get(windows, key, nothing)
+	window === nothing && return nothing
+	lo, hi = window
+	coord = range ? value : _scat_legend_shape_coord(layout, key, value)
+	return (coord - lo) / (hi - lo)
+end
+
+# The shapes and annotations drawn on the plot area of x axis `xkey` and the
+# y axes of `ywindows` (data, domain or paper references) score like data: a
+# line, or the outline of a rectangle or an ellipse, by the candidate boxes
+# each of its pieces crosses; a filled shape like a filled area; an
+# annotation's text box (`_text_extent`) like an obstacle and its arrow like a
+# line. Paths and pixel-sized shapes are not scored.
+function _scat_legend_reference_scores!(scores::Vector{Int}, boxes, layout::Layout, xkey::Symbol,
+	xref::AbstractString, xw::Tuple{Float64, Float64}, ywindows, width_px::Float64, height_px::Float64)
+	ykeys = isempty(ywindows) ? [:yaxis] : sort!(collect(keys(ywindows)))
+	xwindows = Dict{Symbol, Union{Nothing, Tuple{Float64, Float64}}}(xkey => xw)
+	unit = (0.0, 1.0)
+	shapes = get(layout.fields, :shapes, nothing)
+	if shapes isa AbstractVector
+		for item in shapes
+			_cmn_mapping_get(item, :visible) === false && continue
+			type = string(something(_cmn_mapping_get(item, :type), ""))
+			type in ("line", "rect", "circle") || continue
+			(_cmn_mapping_get(item, :xsizemode) == "pixel" || _cmn_mapping_get(item, :ysizemode) == "pixel") && continue
+			ends = map(k -> _scat_legend_number(_cmn_mapping_get(item, k)), (:x0, :x1, :y0, :y1))
+			any(isnothing, ends) && continue
+			x_ref = string(something(_cmn_mapping_get(item, :xref), "x"))
+			y_ref = string(something(_cmn_mapping_get(item, :yref), "y"))
+			a0 = _scat_legend_fraction(layout, x_ref, :x, (xkey,), xwindows, ends[1], false)
+			a1 = _scat_legend_fraction(layout, x_ref, :x, (xkey,), xwindows, ends[2], false)
+			b0 = _scat_legend_fraction(layout, y_ref, :y, ykeys, ywindows, ends[3], false)
+			b1 = _scat_legend_fraction(layout, y_ref, :y, ykeys, ywindows, ends[4], false)
+			any(isnothing, (a0, a1, b0, b1)) && continue
+			all(isfinite, (a0, a1, b0, b1)) || continue
+			us, vs = if type == "line"
+				[a0, a1], [b0, b1]
+			elseif type == "rect"
+				[a0, a1, a1, a0, a0], [b0, b0, b1, b1, b0]
+			else
+				cu, cv, ru, rv = (a0 + a1) / 2, (b0 + b1) / 2, abs(a1 - a0) / 2, abs(b1 - b0) / 2
+				angles = range(0.0, 2pi; length = _SCAT_LEGEND_ELLIPSE_POINTS + 1)
+				[cu + ru * cos(t) for t in angles], [cv + rv * sin(t) for t in angles]
+			end
+			_scat_legend_score_series!(scores, boxes, us, vs, :segments, "linear", unit, unit)
+			type == "line" && continue
+			fill = _cmn_mapping_get(item, :fillcolor)
+			(fill isa AbstractString && !_scat_legend_transparent(fill)) &&
+				_scat_legend_fill_scores!(scores, us, vs, boxes)
+		end
+	end
+	annotations = get(layout.fields, :annotations, nothing)
+	annotations isa AbstractVector || return scores
+	samples = _SCAT_LEGEND_FILL_SAMPLES^2
+	base_size = _fin_mapping_font_size(layout.fields, :font, 12.0)
+	for item in annotations
+		_cmn_mapping_get(item, :visible) === false && continue
+		text = _cmn_mapping_get(item, :text)
+		(text isa AbstractString && !isempty(strip(text))) || continue
+		x = _scat_legend_number(_cmn_mapping_get(item, :x))
+		y = _scat_legend_number(_cmn_mapping_get(item, :y))
+		(x === nothing || y === nothing) && continue
+		u = _scat_legend_fraction(layout, string(something(_cmn_mapping_get(item, :xref), "x")), :x, (xkey,), xwindows, x, true)
+		v = _scat_legend_fraction(layout, string(something(_cmn_mapping_get(item, :yref), "y")), :y, ykeys, ywindows, y, true)
+		(u === nothing || v === nothing || !isfinite(u) || !isfinite(v)) && continue
+		w, h = _text_extent(text, _fin_mapping_font_size(item, :font, base_size))
+		tw = (w + _TEXT_ANNOTATION_FRAME) / width_px
+		th = (h + _TEXT_ANNOTATION_FRAME) / height_px
+		# The text box centre: moved by `xshift`/`yshift` (px, up) and, when
+		# the arrow is drawn (plotly's default), to its tail `ax`/`ay` (px,
+		# down; plotly's defaults -10 and -30).
+		cu = u + something(_scat_legend_number(_cmn_mapping_get(item, :xshift)), 0.0) / width_px
+		cv = v + something(_scat_legend_number(_cmn_mapping_get(item, :yshift)), 0.0) / height_px
+		if _cmn_mapping_get(item, :showarrow) !== false
+			cu += something(_scat_legend_number(_cmn_mapping_get(item, :ax)), -10.0) / width_px
+			cv -= something(_scat_legend_number(_cmn_mapping_get(item, :ay)), -30.0) / height_px
+			_scat_legend_score_series!(scores, boxes, [u, cu], [v, cv], :segments, "linear", unit, unit)
+		end
+		# "auto" anchors centre the box (on the arrow's tail with an arrow).
+		xanchor = string(something(_cmn_mapping_get(item, :xanchor), "auto"))
+		yanchor = string(something(_cmn_mapping_get(item, :yanchor), "auto"))
+		left = xanchor == "left" ? cu : xanchor == "right" ? cu - tw : cu - tw / 2
+		bottom = yanchor == "bottom" ? cv : yanchor == "top" ? cv - th : cv - th / 2
+		_scat_legend_score_rect!(scores, boxes, left, left + tw, bottom, bottom + th, samples)
+	end
+	return scores
+end
+
+# Whether a CSS colour draws nothing: plotly's default shape fill
+# "rgba(0,0,0,0)", "transparent", "none" or another zero alpha.
+function _scat_legend_transparent(color::AbstractString)
+	c = lowercase(strip(color))
+	(isempty(c) || c in ("transparent", "none")) && return true
+	m = match(r"^(rgba|hsla)\((.*)\)$", c)
+	m === nothing && return false
+	parts = split(m.captures[2], ',')
+	length(parts) == 4 || return false
+	alpha = tryparse(Float64, strip(parts[4]))
+	return alpha !== nothing && alpha == 0
 end
 
 # Samples per box side for `_scat_legend_fill_scores!` (5 x 5 = 25 points: a
@@ -10707,6 +10980,10 @@ function _scat_legend_state(fig)
 		position -> _scat_legend_at(p, _scat_position_placement(position)),
 		_SCAT_LEGEND_POSITIONS,
 	) || return :fixed
+	# Still where the last call of this family put it: the rule placed it,
+	# without scoring the figure again (one scoring per call).
+	placed = get(_SCAT_LEGEND_AUTO, p, nothing)
+	placed !== nothing && _scat_legend_at(p, _scat_position_placement(placed)) && return :auto
 	position = something(_scat_best_legend_position(p), :topright)
 	return _scat_legend_at(p, _scat_position_placement(position)) ? :auto : :fixed
 end
@@ -10722,12 +10999,22 @@ function _scat_place_legend!(fig, before::Symbol)
 	p = _plot_obj(fig)
 	# A legend created by this call sits at the package default corner.
 	before === :none && !_scat_legend_at(p, _scat_position_placement(:topright)) && return nothing
-	placement = _scat_position_placement(something(_scat_best_legend_position(p), :topright))
+	position = something(_scat_best_legend_position(p), :topright)
+	_SCAT_LEGEND_AUTO[p] = position
+	placement = _scat_position_placement(position)
 	_scat_legend_at(p, placement) && return nothing
 	_legend_write_block!(p, :legend; placement = placement, replace_placement = true)
 	_legend_stack!(p)
 	return nothing
 end
+
+# The position `_scat_place_legend!` last gave the legend of each Plot (weak
+# keys, so an entry goes with its Plot; WeakKeyDict locks its own access).
+# `_scat_legend_state` reads it to know a legend the rule placed without
+# scoring the figure as it stood before the call; an explicit placement
+# (`set_legend!`) drops the entry.
+const _SCAT_LEGEND_AUTO = WeakKeyDict{Plot, Symbol}()
+_scat_legend_forget!(p::Plot) = (delete!(_SCAT_LEGEND_AUTO, p); nothing)
 
 # Number of traces that precede the next trace appended to `fig`: its own
 # traces plus, while a SubplotFigure call builds its traces in a scratch

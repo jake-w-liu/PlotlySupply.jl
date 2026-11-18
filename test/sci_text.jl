@@ -424,7 +424,13 @@ using Test, PlotlySupply
 		@test set_legend!(sf; row = 1, col = 2, position = (1.03, 1.0)) === sf
 		d = lg(sf, Symbol(id12))
 		t12 = cell(sf, 1, 2)
-		@test d[:x] ≈ t12.xdomain[1] + 1.03 * (t12.xdomain[2] - t12.xdomain[1])
+		# D12: just outside the right edge, it is placed at the right-hand slot
+		# of its cell by the room providers (in the requested direction, not
+		# farther out than asked)
+		plan = PS._room_plan(sf)
+		slot = PS._room_slot(plan, PS._LT_OWNER, "legend:" * id12)
+		@test d[:x] ≈ PS._lt_outside(plan, slot.edge, slot.offset, :right)
+		@test t12.xdomain[2] < d[:x] <= t12.xdomain[1] + 1.03 * (t12.xdomain[2] - t12.xdomain[1])
 		@test d[:xanchor] == "left" && d[:y] ≈ t12.ydomain[2]
 		# A3/G57 per-cell ncols: content-sized columns (one entry → one column)
 		id21 = PS._legend_cell_legend_id(pl(sf), cell(sf, 2, 1))
@@ -591,7 +597,15 @@ using Test, PlotlySupply
 		# the corner (outside the axes), the title keeps the corner.
 		title!(sf, L"Mesh, $h = 0.1$"; row = 1, col = 1, align = :left)
 		t11 = cell(sf, 1, 1)
-		@test label(1, 1)[:x] == t11.xdomain[1] && label(1, 1)[:y] == t11.ydomain[2]
+		# D12: beside the corner it sits over the y tick labels, so the title
+		# line rises clear of the top one
+		plan = PS._room_plan(sf)
+		line = PS._room_slot(plan, PS._LT_OWNER, "line:xaxis")
+		entry = only(e for e in only(d for d in PS._lt_decorations(plan) if d.key == "line:xaxis").data
+			if e[1] == "plotlysupply:panel_label:1:1")
+		@test line.offset + entry[3] >= PS._LT_TICK_REACH * 12 + 1 - 1e-9
+		@test label(1, 1)[:x] == t11.xdomain[1] &&
+			  label(1, 1)[:y] ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP + entry[3], :top)
 		@test label(1, 1)[:xanchor] == "right" && label(1, 1)[:xshift] == -PS._TEXT_PANEL_GAP
 		@test label(1, 1)[:yanchor] == "bottom" && label(1, 1)[:yshift] == PS._TEXT_PANEL_GAP
 		@test ptitle(1, 1)[:x] == t11.xdomain[1] && ptitle(1, 1)[:xanchor] == "left"
@@ -690,5 +704,106 @@ using Test, PlotlySupply
 		inside = Dict{Symbol, Any}(:x => xd[2][2], :xanchor => "right", :y => 0.97, :yanchor => "top")
 		@test PS._legend_available_width(p, inside, span; legend_id = "legend2") ≈ span * area
 		@test PS._legend_available_width(p, above("right", xd[2][2]), span) ≈ span * area
+	end
+
+	@testset "D12: baseline depth of a title (_text_baseline_depth)" begin
+		frame = PS._TEXT_ANNOTATION_FRAME
+		s = PS._TEXT_SCRIPT_SCALE
+		saved = PS._MATHTEXT_SETTINGS[]
+		try
+			set_default_mathtext!(true; inherit_text_font = false)
+			# plain text: half the frame plus the font descent
+			@test PS._text_baseline_depth("Plain title", 12) ≈ frame / 2 + 0.2 * 12
+			@test PS._text_baseline_depth("Plain title", 16) ≈ frame / 2 + 0.2 * 16
+			@test PS._text_baseline_depth("Plain title", 0) ≈ frame / 2 + 0.2 * 12      # unusable size: 12 px
+			# MathJax: the depth of the expression
+			@test PS._text_baseline_depth("\$x\$", 12) ≈ 0.25
+			@test PS._text_baseline_depth("\$y\$", 12) ≈ 0.25 + 0.2 * 12
+			@test PS._text_baseline_depth("\$\\mathrm{f}\$", 12) ≈ 0.25                # upright: no tail
+			@test PS._text_baseline_depth("\$f\$", 12) ≈ 0.25 + 0.2 * 12
+			@test PS._text_baseline_depth("\$(a)\$", 12) ≈ 0.25 + 0.25 * 12
+			@test PS._text_baseline_depth("\$x_i\$", 12) ≈ 0.25 + 0.15 * 12
+			@test PS._text_baseline_depth("\$x_i^2\$", 12) ≈ 0.25 + 0.25 * 12
+			@test PS._text_baseline_depth("\$x_y\$", 12) ≈ 0.25 + (0.15 + s * 0.2) * 12
+			@test PS._text_baseline_depth("\$\\frac{a}{b}\$", 12) ≈ 0.25 + 0.47 * 12
+			@test PS._text_baseline_depth("\$\\sum_k x_k\$", 13) ≈ 0.25 + 0.36 * 13
+			@test PS._text_baseline_depth("\$\\alpha\$ and \$\\beta\$", 12) ≈ 0.25   # the first segment
+			# not estimated
+			@test PS._text_baseline_depth("\$\\begin{array}{c}a\\\\b\\end{array}\$", 12) === nothing
+			@test PS._text_baseline_depth("x<sub>2</sub>", 12) === nothing
+			@test PS._text_baseline_depth("  ", 12) === nothing
+			# inherit_text_font: text runs are drawn in the label's font
+			set_default_mathtext!(true; inherit_text_font = true)
+			@test PS._text_baseline_depth("\$\\text{(a) }x\$", 12) ≈ PS._TEXT_INHERITED_TEXT_DEPTH_PX
+			@test PS._text_baseline_depth("\$\\frac{a}{b}\\text{ x}\$", 12) ≈ 0.25 + 0.47 * 12
+			@test PS._text_baseline_depth("\$x\$", 12) ≈ 0.25                          # no text run
+		finally
+			PS._MATHTEXT_SETTINGS[] = saved
+		end
+	end
+
+	@testset "D12: the titles of a row share one baseline (W2 chama_a6, audit_d)" begin
+		saved = PS._MATHTEXT_SETTINGS[]
+		try
+			set_default_mathtext!(true; inherit_text_font = false)
+			sf = subplots(1, 3; sync = false)
+			for c in 1:3
+				plot_scatter!(sf, 1:3, (1:3) .* c; row = 1, col = c)
+			end
+			title!(sf, "(a) plain"; row = 1, col = 1)
+			title!(sf, "\$\\frac{a}{b}\$"; row = 1, col = 2)
+			title!(sf, "\$x\$"; row = 1, col = 3)
+			plan = PS._room_plan(sf)
+			lines = Dict(d.area => d for d in PS._lt_decorations(plan) if d.role === :line)
+			raise(key) = only(lines[key].data)[3]
+			depth(text) = PS._text_baseline_depth(text, 12)
+			deepest = depth("\$\\frac{a}{b}\$")
+			@test raise(:xaxis2) == 0.0
+			@test raise(:xaxis) ≈ deepest - depth("(a) plain")
+			@test raise(:xaxis3) ≈ deepest - depth("\$x\$")
+			# each line requests its own room plus its raise
+			@test lines[:xaxis3].px ≈ maximum(PS._lt_annotation_px(plan, a, 1.0)
+				for a in pl(sf).layout.fields[:annotations] if get(sd(a), :name, "") == "plotlysupply:title:1:3") + raise(:xaxis3)
+			# placed: the raise goes into `y`, so the plain title sits higher
+			y(name) = only(named(sf, name))[:y]
+			@test y("plotlysupply:title:1:1") > y("plotlysupply:title:1:2")
+			@test y("plotlysupply:title:1:3") > y("plotlysupply:title:1:1")
+		finally
+			PS._MATHTEXT_SETTINGS[] = saved
+		end
+	end
+
+	@testset "Z60: subplot_titles are panel titles (named, styled, stacked)" begin
+		sf = subplots(1, 2; sync = false, subplot_titles = ["(a) left", "(b) right"])
+		for c in 1:2
+			plot_scatter!(sf, 1:3, 1:3; row = 1, col = c)
+		end
+		for c in 1:2
+			a = only(named(sf, "plotlysupply:title:1:$(c)"))
+			@test a[:yanchor] == "bottom" && a[:yshift] == PS._TEXT_PANEL_GAP
+		end
+		set_fonts!(sf; title = 17)
+		@test all(c -> sd(only(named(sf, "plotlysupply:title:1:$(c)"))[:font])[:size] == 17, 1:2)
+		# title! on the cell replaces it instead of adding a second title
+		title!(sf, "(a) replaced"; row = 1, col = 1)
+		@test only(named(sf, "plotlysupply:title:1:1"))[:text] == "(a) replaced"
+		@test length(annotations(sf)) == 2
+	end
+
+	@testset "Z17/Z18/Z21: cell keywords on whole-figure verbs are ArgumentErrors" begin
+		sf = subplots(2, 2; sync = false)
+		plot_scatter!(sf, 1:3, 1:3; legend = "a", row = 1, col = 1)
+		before = layout_json(sf)
+		@test throws_arg(() -> panel_labels!(sf; row = 2, col = 2), "panel_labels!: ")
+		@test throws_arg(() -> panel_labels!(sf; row = 1), "panel_labels!: ")
+		@test throws_arg(() -> subplot_legends!(sf; row = 2, col = 2), "subplot_legends!: ")
+		@test throws_arg(() -> tight_layout!(sf; row = 2, col = 2), "tight_layout!: ")
+		@test throws_arg(() -> tight_layout!(sf; show = true), "tight_layout!: ")
+		@test throws_arg(() -> tight_layout!(sf; pad = "4"), "tight_layout!: ")
+		fig = plot_scatter(1:3, 1:3)
+		@test throws_arg(() -> tight_layout!(fig; show = true), "tight_layout!: ")
+		@test throws_arg(() -> tight_layout!(fig; row = 1), "tight_layout!: ")
+		@test throws_arg(() -> tight_layout!(fig; pad = -1), "tight_layout!: ")
+		@test layout_json(sf) == before
 	end
 end

@@ -13,7 +13,16 @@
 # - right / left: a cell legend outside the axes (20), after the colorbars;
 # - above the whole grid: an `:outside_top` figure legend (20), then the
 #   figure title (90, only for the margin: plotly draws it at the top of the
-#   figure); right of the grid: an `:outside_right` figure legend (20).
+#   figure); right of the grid: an `:outside_right` figure legend (20);
+# - below everything: the band of the captions at the bottom of the figure
+#   (`annotate!(…; coords = :figure)` text reaching below the plot area, 40),
+#   with an `:outside_bottom` figure legend (20) stacked on top of them.
+# Annotations placed in figure fractions (`coords = :figure`) are re-placed
+# for the final margins (their `xshift`/`yshift`), so they stay at their
+# fraction of the figure whatever the margins become.
+# A title line or cell legend above the axes that reaches past the plot
+# area's x span (a label beside its title, a wide legend over a narrow cell)
+# rises clear of the top y tick label there (`_lt_tick_clearance`).
 # A figure with a single plot area places its legend like a cell legend of
 # that area. Inside panel labels and inside legends take no room; they follow
 # the corners of their plot area when its domain changes (an equal-aspect
@@ -42,6 +51,7 @@
 const _LT_OWNER = :legend_titles
 const _LT_ORDER_LEGEND = 20
 const _LT_ORDER_LINE = 30
+const _LT_ORDER_CAPTION = 40
 const _LT_ORDER_TITLE = 90
 # Paper tolerance for "at the domain edge" (positions written from domains).
 const _LT_EDGE_TOL = 1e-6
@@ -55,6 +65,10 @@ const _LT_BOX_TOL = 3e-3
 # the plot height a placement was converted with moves with the margins).
 const _LT_ANCHOR_TOL = 2.0
 const _LT_ANCHOR_SHARE = 0.5
+# How far (tick font sizes) the box of a y tick label at the top of the
+# range reaches above the plot area (probe p31, plotly.js 2.35.2: 0.65 f for
+# Verdana 12 px, 0.53-0.56 f for Times and Arial at 8-20 px).
+const _LT_TICK_REACH = 0.65
 const _LT_TITLE_NAME = r"^plotlysupply:title:(\d+):(\d+)$"
 const _LT_LABEL_NAME = r"^plotlysupply:panel_label:(\d+):(\d+)$"
 
@@ -308,7 +322,8 @@ function _lt_decorations(plan)
 
 	# Panel titles and labels.
 	items = get(layout.fields, :annotations, nothing)
-	lines = Dict{Symbol, Vector{Tuple{String, Bool, Float64}}}()   # area => (name, left, px)
+	# area => (name, left, px, baseline depth or `nothing`)
+	lines = Dict{Symbol, Vector{Tuple{String, Bool, Float64, Union{Nothing, Float64}}}}()
 	if items isa AbstractVector
 		for item in items
 			name = _cmn_item_name(item)
@@ -326,7 +341,10 @@ function _lt_decorations(plan)
 			role === nothing && continue
 			px = _lt_annotation_px(plan, item, role.role === :below ? -1.0 : 1.0)
 			if role.role === :line
-				push!(get!(Vector{Tuple{String, Bool, Float64}}, lines, key), (String(name), role.left, px))
+				text = _cmn_mapping_get(item, :text)
+				depth = text isa AbstractString ? _text_baseline_depth(text, _lt_font(plan, item)) : nothing
+				push!(get!(Vector{Tuple{String, Bool, Float64, Union{Nothing, Float64}}}, lines, key),
+					(String(name), role.left, px, depth))
 			elseif role.role === :below
 				y = Float64(_cmn_mapping_get(item, :y))
 				expected = _lt_expected_offset(plan, out, key, :bottom, _LT_ORDER_LINE)
@@ -339,21 +357,118 @@ function _lt_decorations(plan)
 			end
 		end
 	end
+	# One baseline for the title lines of the areas sharing a top edge (a row
+	# of the grid): each title or label is raised by its baseline depth's
+	# shortfall to the deepest one there (`_text_baseline_depth`; plotly.js
+	# aligns the bottoms of the boxes). Its room grows by as much.
+	deepest = Dict{Float64, Float64}()
+	for (key, list) in lines, entry in list
+		entry[4] === nothing && continue
+		edge = round(plan.areas[key].current[2][2]; digits = 6)
+		deepest[edge] = max(get(deepest, edge, 0.0), entry[4])
+	end
+	# (name, left, raise px) per area
+	raised = Dict{Symbol, Vector{Tuple{String, Bool, Float64}}}()
 	for (key, list) in lines
-		px = maximum(entry[3] for entry in list)
+		edge = round(plan.areas[key].current[2][2]; digits = 6)
+		raised[key] = [(name, left, depth === nothing ? 0.0 : deepest[edge] - depth) for (name, left, _, depth) in list]
+	end
+	# A title or label reaching past the cell's x span (a label beside its
+	# title) sits over the tick labels of the y axis there: the row's lines
+	# rise clear of the top tick label (all of them, to keep the baseline).
+	lift = Dict{Float64, Float64}()
+	for (key, entries) in raised
+		edge = round(plan.areas[key].current[2][2]; digits = 6)
+		expected = _lt_expected_offset(plan, out, key, :top, _LT_ORDER_LINE)
+		lift[edge] = max(get(lift, edge, 0.0), _lt_line_lift(plan, items, key, entries, expected))
+	end
+	for (key, list) in lines
+		edge = round(plan.areas[key].current[2][2]; digits = 6)
+		entries = [(name, left, raise + lift[edge]) for (name, left, raise) in raised[key]]
+		px = maximum(entry[3] + raise for (entry, (_, _, raise)) in zip(list, entries))
 		px > 0 || continue
 		expected = _lt_expected_offset(plan, out, key, :top, _LT_ORDER_LINE)
 		top = plan.areas[key].current[2][2]
-		anchored = any(list) do (name, _, _)
+		anchored = any(entries) do (name, _, raise)
 			item = _lt_find_annotation(items, name)
-			item !== nothing && _lt_anchored_at(plan, Float64(_cmn_mapping_get(item, :y)), top, expected - _ROOM_GAP, 1.0)
+			item !== nothing && _lt_anchored_at(plan, Float64(_cmn_mapping_get(item, :y)), top, expected - _ROOM_GAP + raise, 1.0)
 		end
 		push!(out, _LtDecor("line:" * String(key), key, :top, px, _LT_ORDER_LINE, anchored, false,
-			:line, String(key), list))
+			:line, String(key), entries))
 	end
 
+	# The captions at the bottom of the figure, under everything else.
+	_lt_caption_decorations!(out, plan)
 	# The figure title above everything placed at the top of the figure.
 	_lt_title_decoration!(out, plan)
+	return out
+end
+
+# (bottom, top) px from the bottom of the figure of an annotation placed in
+# figure fractions (`spec` from `_figure_annotation_spec`, with a `fy`): the
+# height `annotate!` reserves for it (`_figure_annotation_text_height`).
+function _lt_caption_span(plan, item, spec)
+	height = _figure_annotation_text_height(_cmn_mapping_get(item, :text), _figure_annotation_fontsize(item, plan.layout))
+	anchor = something(_fin_string(_cmn_mapping_get(item, :yanchor)), "auto")
+	anchor == "auto" && (anchor = _annotation_auto_yanchor(spec.fy))
+	below = anchor == "top" ? height : anchor == "middle" ? height / 2 : 0.0
+	bottom = spec.fy * plan.H + spec.dy - below
+	return (bottom, bottom + height)
+end
+
+# The id of an `:outside_bottom` figure legend: centred, at the bottom edge
+# of the figure container (`_legend_placement` with `figure = true`), else
+# `nothing`.
+function _lt_bottom_figure_legend(plan)
+	ids = ["legend"]
+	any(_trace_is_figure_legend_entry, plan.p.data) && push!(ids, _FIGURE_LEGEND_ID)
+	for id in ids
+		d = _lt_legend_box(plan, id)
+		(d === nothing || isempty(d)) && continue
+		_fin_string(get(d, :xref, "paper")) == "paper" || continue
+		something(_fin_string(get(d, :yref, nothing)), "paper") == "container" || continue
+		something(_fin_string(get(d, :yanchor, nothing)), "auto") == "bottom" || continue
+		something(_fin_string(get(d, :xanchor, nothing)), "auto") == "center" || continue
+		x, y = _lt_real(get(d, :x, nothing)), _lt_real(get(d, :y, nothing))
+		(x === nothing || y === nothing) && continue
+		(abs(x - 0.5) <= _LT_EDGE_TOL && 0 <= y < 0.5) || continue
+		return id
+	end
+	return nothing
+end
+
+# The band of the captions at the bottom of the figure: the annotations
+# placed in figure fractions without an arrow whose box reaches below the
+# plot area (the captions `annotate!` reserves the bottom margin for). The
+# band (their top plus `_FIGURE_ANNOTATION_GAP`, at most half the figure)
+# is requested at the bottom of the figure, beyond the x axes and what is
+# stacked under them, so the margin holds the captions whatever else
+# changes it (`tight_layout!`, a new legend). An `:outside_bottom` figure
+# legend (container-referenced) is stacked on the band instead of on the
+# bottom edge of the figure, where the captions are.
+function _lt_caption_decorations!(out, plan)
+	items = get(plan.layout.fields, :annotations, nothing)
+	items isa AbstractVector || return out
+	top = -Inf
+	for item in items
+		spec = _figure_annotation_spec(item)
+		(spec === nothing || spec.fy === nothing) && continue
+		_cmn_mapping_get(item, :showarrow) === false || continue
+		_cmn_mapping_get(item, :visible) === false && continue
+		bottom, item_top = _lt_caption_span(plan, item, spec)
+		bottom < plan.margins.b || continue
+		top = max(top, item_top)
+	end
+	isfinite(top) || return out
+	band = min(max(top, 0.0) + _FIGURE_ANNOTATION_GAP, plan.H / 2)
+	legend = _lt_bottom_figure_legend(plan)
+	if legend !== nothing && get(plan.layout.fields, :showlegend, nothing) !== false
+		px = _lt_legend_depth(plan, legend, :bottom)
+		px > 0 && push!(out, _LtDecor("figure_legend:" * legend, :figure, :bottom, px, _LT_ORDER_LEGEND, false, false,
+			:bottom_figure_legend, legend, band))
+	end
+	push!(out, _LtDecor("figure_captions", :figure, :bottom, band, _LT_ORDER_CAPTION, false, false,
+		:figure_captions, "", band))
 	return out
 end
 
@@ -399,9 +514,13 @@ function _lt_legend_decorations!(out, plan, cells, single::Bool, boxes)
 		px > 0 || continue
 		edge = _room_edge(plan.areas[area].current, role.side)
 		expected = _lt_expected_offset(plan, out, area, role.side, _LT_ORDER_LEGEND)
+		# Above the axes and wider than the plot area, it rises clear of the
+		# top tick labels it reaches over.
+		lift = role.side === :top ? max(0.0, _lt_legend_tick_clearance(plan, plan.areas[area], id, d) - expected) : 0.0
+		px += lift
 		coordinate = role.side in (:top, :bottom) ? Float64(d[:y]) : Float64(d[:x])
 		outward = role.side in (:top, :right) ? 1.0 : -1.0
-		anchored = !role.legacy && _lt_anchored_legend(plan, coordinate, edge, expected, outward, role.side)
+		anchored = !role.legacy && _lt_anchored_legend(plan, coordinate, edge, expected + lift, outward, role.side)
 		# Attached to the edge (its outward coordinate is the slot's): placed
 		# by `set_legend!` at an `:outside_*` position or at the edge itself
 		# (a tuple position on the edge, matplotlib's `bbox_to_anchor`), or
@@ -410,7 +529,7 @@ function _lt_legend_decorations!(out, plan, cells, single::Bool, boxes)
 		attached = role.legacy || role.canonical || anchored ||
 			abs(coordinate - _room_edge(role.box, role.side)) <= role.tol
 		push!(out, _LtDecor("legend:" * id, area, role.side, px, _LT_ORDER_LEGEND, anchored, false,
-			:cell_legend, id, merge(role, (attached = attached,))))
+			:cell_legend, id, merge(role, (attached = attached, lift = lift))))
 	end
 	single && return out
 	# Figure legends of a grid: "legend" without cell legends, and the
@@ -533,13 +652,25 @@ function _lt_update_annotation!(plan, name::AbstractString, updates::AbstractDic
 	existing isa AbstractVector || return nothing
 	index = findfirst(item -> _cmn_item_name(item) == name, existing)
 	index === nothing && return nothing
+	return _lt_update_annotation_at!(plan, index, updates)
+end
+
+# `_lt_update_annotation!` for the annotation at `index`.
+function _lt_update_annotation_at!(plan, index::Integer, updates::AbstractDict{Symbol})
+	existing = plan.annotations === nothing ? get(plan.layout.fields, :annotations, nothing) : plan.annotations
 	entry = _symbol_dict(existing[index])
 	changed = false
 	for (key, value) in updates
 		current = get(entry, key, nothing)
 		if value isa Real
 			have = _lt_real(current)
-			have === nothing && key === :xshift && value == 0 && continue
+			if key === :xshift && value == 0
+				# No shift is written as none (as `title!`/`panel_labels!` do).
+				current === nothing && continue
+				delete!(entry, :xshift)
+				changed = true
+				continue
+			end
 			(have !== nothing && isapprox(have, value; atol = 1e-9)) && continue
 		else
 			isequal(current, value) && continue
@@ -565,7 +696,8 @@ end
 # cell's x span; beside the corner, outside the span and clear of the panel
 # title (`_text_panel_label_xplacement`), when the title is aligned to that
 # corner or, at the final size, would reach the label (a centred title in
-# a narrow cell) and the figure has room beside the corner for it.
+# a narrow cell) and the figure has room beside the corner for it. Beside a
+# centred title wider than the span, the label clears the title's end.
 function _lt_label_xplacement(plan, label, title, left::Bool, span)
 	corner = (left ? "left" : "right", 0.0)
 	title === nothing && return corner
@@ -582,26 +714,109 @@ function _lt_label_xplacement(plan, label, title, left::Bool, span)
 		xanchor == "right" ? (anchor - tw, anchor) : (anchor - tw / 2, anchor + tw / 2)
 	reach = left ? t_lo < lo + lw + _TEXT_PANEL_GAP : t_hi > hi - lw - _TEXT_PANEL_GAP
 	reach || return corner
+	over = left ? max(lo - t_lo, 0.0) : max(t_hi - hi, 0.0)
 	room = left ? plan.margins.l + lo : plan.margins.r + (Wp - hi)
-	return room >= lw + _TEXT_PANEL_GAP ? beside : corner
+	room >= lw + _TEXT_PANEL_GAP + over || return corner
+	return (beside[1], left ? beside[2] - over : beside[2] + over)
+end
+
+# Px a decoration spanning `lo`..`hi` (px from the left of the plot width
+# `plan.Wp`) right above area `a` keeps between its bottom and the plot
+# area's top, so that it clears the top tick label of a y axis on a side it
+# reaches past (at the current domain); 0 when it stays over the plot area
+# or that side has no tick labels.
+function _lt_tick_clearance(plan, a, lo::Float64, hi::Float64)
+	span = (a.current[1][1] * plan.Wp, a.current[1][2] * plan.Wp)
+	need = 0.0
+	for (side, past) in ((:left, lo < span[1] - 0.5), (:right, hi > span[2] + 0.5))
+		(past && a.own[side] > 0) || continue
+		font = _lt_y_tick_font(plan, a, side)
+		font > 0 && (need = max(need, _LT_TICK_REACH * font + 1))
+	end
+	return need
+end
+
+# `_lt_tick_clearance` of the legend `id` (layout entry `d`) above area `a`,
+# from its estimated width and `x`/`xanchor` (`"auto"`: plotly.js anchors
+# left up to x = 1/3, right from 2/3, centred between).
+function _lt_legend_tick_clearance(plan, a, id::String, d::AbstractDict)
+	size = _legend_box_size(plan.p, id)
+	x = _lt_real(get(d, :x, nothing))
+	(size === nothing || x === nothing) && return 0.0
+	w = Float64(size[1])
+	px = get(d, :xref, "paper") == "container" ? x * plan.W - plan.margins.l : x * plan.Wp
+	xanchor = string(get(d, :xanchor, "auto"))
+	xanchor == "auto" && (xanchor = x <= 1 / 3 ? "left" : x >= 2 / 3 ? "right" : "center")
+	lo = xanchor == "left" ? px : xanchor == "right" ? px - w : px - w / 2
+	return _lt_tick_clearance(plan, a, lo, lo + w)
+end
+
+# Px the title line of area `key` rises (added to the `raise` of every
+# entry) so that a title or label reaching past the plot area's x span (a
+# label beside its title, a centred title wider than the cell) clears the
+# top tick label there (`_lt_tick_clearance`). `entries` are
+# (name, left, raise) and `expected` is the line's slot offset.
+function _lt_line_lift(plan, items, key::Symbol, entries, expected::Float64)
+	a = plan.areas[key]
+	span = a.current[1]
+	lo, hi = span[1] * plan.Wp, span[2] * plan.Wp
+	t = findfirst(entry -> match(_LT_TITLE_NAME, entry[1]) !== nothing, entries)
+	title = t === nothing ? nothing : _lt_find_annotation(items, entries[t][1])
+	lift = 0.0
+	for (name, left, raise) in entries
+		item = _lt_find_annotation(items, name)
+		item === nothing && continue
+		w = _lt_annotation_width(plan, item)
+		if item === title
+			xanchor = something(_fin_string(_cmn_mapping_get(item, :xanchor)), "auto")
+			x = _lt_anchor_x(xanchor, (lo, hi)) + something(_lt_real(_cmn_mapping_get(item, :xshift, 0)), 0.0)
+		else
+			xanchor, xshift = _lt_label_xplacement(plan, item, title, left, span)
+			x = (left ? lo : hi) + xshift
+		end
+		extent = xanchor == "left" ? (x, x + w) : xanchor == "right" ? (x - w, x) : (x - w / 2, x + w / 2)
+		lift = max(lift, _lt_tick_clearance(plan, a, extent[1], extent[2]) - (expected + raise))
+	end
+	return lift
+end
+
+# Largest tick font (px) of the y axes of area `a` showing tick labels on
+# `side` (its own and those overlaying it); 0 when none do.
+function _lt_y_tick_font(plan, a, side::Symbol)
+	a.ykey === nothing && return 0.0
+	yref = _fin_axis_ref(a.ykey)
+	size = 0.0
+	for (key, axis) in plan.layout.fields
+		(_fin_is_axis_key(key) && String(key)[1] == 'y') || continue
+		(key === a.ykey || _fin_string(_cmn_mapping_get(axis, :overlaying)) == yref) || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		_cmn_mapping_get(axis, :showticklabels) === false && continue
+		something(_fin_string(_cmn_mapping_get(axis, :side)), "left") == String(side) || continue
+		size = max(size, _fin_mapping_font_size(axis, :tickfont, plan.font))
+	end
+	return size
 end
 
 function _room_place!(plan, ::Val{:legend_titles})
 	items = get(plan.layout.fields, :annotations, nothing)
 	single = plan.layout.subplots.rows * plan.layout.subplots.cols == 1
-	for d in _lt_decorations(plan)
+	decorations = _lt_decorations(plan)
+	any(d -> d.role in (:inside_legend, :cell_legend, :figure_legend), decorations) &&
+		_lt_hold_pushed_margins!(plan)
+	for d in decorations
 		if d.role === :line
 			slot = _room_slot(plan, _LT_OWNER, d.key)
 			slot === nothing && continue
 			fx, fy = slot.domain_x, slot.domain_y
 			# Annotations keep their own `yshift` (the `_TEXT_PANEL_GAP` gap and
-			# any user offset): the slot offset beyond that gap goes into `y`.
-			y = _lt_outside(plan, slot.edge, slot.offset - _ROOM_GAP, :top)
+			# any user offset): the slot offset beyond that gap, and the raise
+			# that puts them on the row's baseline, go into `y`.
 			title_name = findfirst(entry -> match(_LT_TITLE_NAME, entry[1]) !== nothing, d.data)
 			title = title_name === nothing ? nothing : _lt_find_annotation(items, d.data[title_name][1])
-			for (name, left, _) in d.data
+			for (name, left, raise) in d.data
 				item = _lt_find_annotation(items, name)
 				item === nothing && continue
+				y = _lt_outside(plan, slot.edge, slot.offset - _ROOM_GAP + raise, :top)
 				if item === title
 					x = _lt_anchor_x(something(_fin_string(_cmn_mapping_get(item, :xanchor)), "auto"), fx)
 					_lt_update_annotation!(plan, name, Dict{Symbol, Any}(:x => round(x; digits = 9), :y => y))
@@ -634,6 +849,12 @@ function _room_place!(plan, ::Val{:legend_titles})
 			_room_relayout!(plan, Symbol(d.id, :_y), round(want[:y]; digits = 6))
 		elseif d.role === :figure_title
 			_lt_pin_title!(plan)
+		elseif d.role === :bottom_figure_legend
+			# Container-referenced: its bottom on the caption band, whatever
+			# the margins (plotly.js 2.35.2 reserves the legend's height plus
+			# `y` x the figure height under the x axes' automargin push; the
+			# margin raised for the band holds that).
+			_room_relayout!(plan, Symbol(d.id, :_y), round(d.data / plan.H; digits = 6))
 		elseif d.role === :figure_legend
 			slot = _room_slot(plan, _LT_OWNER, d.key)
 			slot === nothing && continue
@@ -646,6 +867,73 @@ function _room_place!(plan, ::Val{:legend_titles})
 				_room_relayout!(plan, Symbol(d.id, :_x), _lt_outside(plan, 1.0, slot.offset, :right))
 			end
 		end
+	end
+	_lt_place_figure_annotations!(plan)
+	return nothing
+end
+
+# Every annotation placed in figure fractions (`coords = :figure`, named
+# `plotlysupply:figure:…`) re-placed for the margins plotly will draw with:
+# the paper `x`/`y` stay, the shifts become `f * (l + r) - l + dx` and
+# `f * (t + b) - b + dy` (`_figure_annotations_place!`'s rule) with the plan's
+# margins raised by the margin updates of this pass. A figure whose margins
+# change later is re-placed by the next pass.
+function _lt_place_figure_annotations!(plan)
+	existing = plan.annotations === nothing ? get(plan.layout.fields, :annotations, nothing) : plan.annotations
+	existing isa AbstractVector || return nothing
+	any(item -> _figure_annotation_spec(item) !== nothing, existing) || return nothing
+	_room_margin_updates!(plan)
+	final(letter) = begin
+		queued = get(plan.updates, Symbol(:margin_, letter), nothing)
+		have = Float64(getfield(plan.margins, letter))
+		_fin_isfinite_real(queued) ? max(have, Float64(queued)) : have
+	end
+	l, r, t, b = final(:l), final(:r), final(:t), final(:b)
+	for index in eachindex(existing)
+		spec = _figure_annotation_spec(existing[index])
+		spec === nothing && continue
+		updates = Dict{Symbol, Any}()
+		spec.fx === nothing || (updates[:xshift] = round(spec.fx * (l + r) - l + spec.dx; digits = 2))
+		spec.fy === nothing || (updates[:yshift] = round(spec.fy * (t + b) - b + spec.dy; digits = 2))
+		_lt_update_annotation_at!(plan, index, updates)
+	end
+	return nothing
+end
+
+# A legend that does not push the margin (inside a plot area, or at its slot
+# here) is drawn by plotly.js 2.35.2 at the plot area the figure had before
+# another component (a colorbar) pushed the margin: measured, a top-right
+# legend 40 px into the colorbar of a 700 x 500 px heatmap whose colorbar
+# pushed the right margin from 50 to 102 px. With a legend placed here, the
+# margin at each paper edge is raised to what plotly would push it to there
+# (the reach past the plot area plus `_FIN_AUTOMARGIN_EXTRA`), so plotly
+# finds nothing left to push and draws the legend where it belongs. It only
+# raises margins.
+function _lt_hold_pushed_margins!(plan)
+	base = _fin_margins_base(plan.layout)
+	need = Dict{Symbol, Float64}()
+	for request in plan.requests
+		request.margin_pushed || continue
+		for slot in _room_slots(plan, request.owner, request.key)
+			(slot.area === request.area && slot.side === request.side) || continue
+			if slot.area !== :figure
+				_room_neighbour(plan, plan.areas[slot.area], slot.side) === nothing || continue
+			end
+			paper = slot.side in (:right, :top) ? 1.0 : 0.0
+			inside = abs(slot.edge - paper) * _room_px(plan, slot.side)
+			reach = slot.offset + slot.px - inside
+			reach > 0 || continue
+			need[slot.side] = max(get(need, slot.side, 0.0), reach + _FIN_AUTOMARGIN_EXTRA)
+		end
+	end
+	for (side, px) in need
+		letter = Symbol(String(side)[1])
+		key = Symbol(:margin_, letter)
+		current = _cmn_mapping_get(get(plan.layout.fields, :margin, nothing), letter)
+		have = _fin_isfinite_real(current) ? Float64(current) : getfield(base, letter)
+		queued = get(plan.updates, key, nothing)
+		_fin_isfinite_real(queued) && (have = max(have, Float64(queued)))
+		px > have + 0.5 && _room_relayout!(plan, key, ceil(px))
 	end
 	return nothing
 end
@@ -675,7 +963,7 @@ function _lt_place_cell_legend!(plan, d::_LtDecor, slot)
 	role = d.data
 	vertical = role.side in (:top, :bottom)
 	outward_key, along_key = vertical ? (:y, :x) : (:x, :y)
-	target = _lt_outside(plan, slot.edge, slot.offset, role.side)
+	target = _lt_outside(plan, slot.edge, slot.offset + role.lift, role.side)
 	if role.legacy
 		_room_relayout!(plan, Symbol(d.id, :_yref), "paper")
 		_room_relayout!(plan, Symbol(d.id, :_yanchor), "bottom")
