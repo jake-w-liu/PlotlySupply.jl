@@ -116,7 +116,9 @@ savefig(fig_conv, "convergence.pdf")
 ![Convergence plot at IEEE double-column width](assets/papers_convergence.png)
 
 The legend is placed where it covers the least data; ranges are data values on
-the log axes; `xticks = :decades` labels powers of ten only.
+the log axes; `xticks = :decades` labels powers of ten only (a log axis with no
+tick setting keeps plotly's labels, "2" and "5" between the decades, except
+where they would collide at the figure's size).
 
 ## 5. Example: field maps with shared colorbars
 
@@ -166,9 +168,10 @@ savefig(fig_fields, "fields.pdf")
 
 For vectors drawn as glyphs instead of streamlines use
 [`plot_quiver`](@ref) (arrows or triangles, see [2-D fields](fields.md)). An
-overlay never widens the field's axes: its anchor points count, not the length
-of its arrows, so arrows that leave the frame are clipped at it; use
-`pivot = :tip` or an explicit `xrange`/`yrange` to show them whole.
+overlay whose anchor points lie inside the field does not widen its axes: the
+anchor points count, not the length of the arrows, so arrows that leave the
+frame are clipped at it; use `pivot = :tip` or an explicit `xrange`/`yrange` to
+show them whole.
 
 ## 6. Example: a row of 3-D surfaces with one colorbar
 
