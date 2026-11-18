@@ -1601,7 +1601,23 @@ function _legend_has_box_above_plot(p::Plot)
 		trace isa GenericTrace && _trace_will_showlegend(trace) || continue
 		push!(ids, _legend_trace_legend_id(trace))
 	end
-	return any(id -> _legend_box_above_plot(get(p.layout.fields, Symbol(id), nothing)), ids)
+	return any(ids) do id
+		block = get(p.layout.fields, Symbol(id), nothing)
+		_legend_box_above_plot(block) && !_legend_box_stacked(p, id, _symbol_dict(block))
+	end
+end
+
+# Whether legend box `id` (above the plot area) is one the D12 room
+# providers stack under the figure title, which then needs no clearance: the
+# legend of a single figure anchored above its axes, a cell legend (per-cell
+# legends), or a centred `:outside_top` figure legend of a grid
+# (src/sci/room_providers.jl).
+function _legend_box_stacked(p::Plot, id::AbstractString, box::AbstractDict)
+	p.layout.subplots.rows * p.layout.subplots.cols == 1 &&
+		return _lt_real(get(box, :x, nothing)) !== nothing && -_LT_EDGE_TOL <= box[:x] <= 1 + _LT_EDGE_TOL
+	any(t -> t isa GenericTrace && haskey(t.fields, :legend) && !_trace_is_figure_legend_entry(t) &&
+		_legend_trace_legend_id(t) == id, p.data) && return true
+	return _lt_figure_legend_side(box) === :top
 end
 
 _legend_real(x) = (x isa Real && !(x isa Bool) && isfinite(x)) ? Float64(x) : nothing
@@ -1702,10 +1718,11 @@ function _legend_title_clearance!(p::Plot)
 	return nothing
 end
 
-# Layout pass after every legend placement: the decorations above the axes
-# are stacked (D12: panel titles/labels above cell legends, figure legends
-# above both), or, with nothing stacked, the figure title clears a legend
-# above the plot area (`_text_restack!(p; clearance = true)`).
+# Layout pass after every legend placement: the figure title clears a legend
+# above the plot area that the D12 room providers do not stack
+# (`_text_restack!(p; clearance = true)`); the stacking itself (panel
+# titles/labels above cell legends, figure legends above both, the figure
+# title on top) is done by those providers when `_finalize_figure!` runs.
 function _legend_stack!(p::Plot)
 	_text_restack!(p; clearance = true)
 	return nothing
@@ -23438,6 +23455,7 @@ include("sci/mesh2d.jl")
 include("sci/fields.jl")
 include("sci/scene3d.jl")
 include("sci/finalize.jl")
+include("sci/room_providers.jl")
 
 """
 	plot_choropleth(locations, z; locationmode=nothing, geojson=nothing,

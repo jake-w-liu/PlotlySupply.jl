@@ -2695,9 +2695,9 @@ end
 # Text sizes (plain lines at 1.3 em, MathJax rows, glyph widths) come from
 # `_text_extent` (src/sci/text.jl); plotly.js draws annotation text inside
 # `borderpad`+`borderwidth` (defaults 1, 1) on each side.
-# Figure size assumed when the layout has none: the package's savefig default.
-const _TIGHT_DEFAULT_WIDTH = 700.0
-const _TIGHT_DEFAULT_HEIGHT = 500.0
+# Figure size assumed when the layout has none: the size `savefig` exports it
+# at, the active style's figure size (`_style_default_figure_size`: the
+# style's width and aspect, else 700 x 500 px).
 # plotly.js 2.35 layout defaults: font.size 12, title.font.size =
 # round(1.4 * font.size), title.subtitle.font.size = round(0.7 * title size).
 const _TIGHT_DEFAULT_FONT_SIZE = 12.0
@@ -2798,8 +2798,16 @@ function _tight_anchor(anchor, position::Float64, has_arrow::Bool, letter::Symbo
 	return letter === :x ? "center" : "middle"
 end
 
+# Panel titles and panel labels (`title!(…; row, col)`, `subplot_titles`,
+# `panel_labels!`): the D12 room providers place them and raise the margin
+# they need (src/sci/room_providers.jl) whenever `_finalize_figure!` runs, so
+# their current position (possibly the one of another figure size) is not
+# measured here.
+const _TIGHT_PROVIDER_PLACED = r"^plotlysupply:(title|panel_label):[0-9]+:[0-9]+$"
+
 # Pixels by which paper-referenced annotations overhang each side of the plot
-# area. Plotly annotations never push margins themselves.
+# area (those the room providers place excluded). Plotly annotations never
+# push margins themselves.
 function _tight_annotation_overhang(layout::Layout, lookup, width::Float64, height::Float64, root_size::Float64)
 	overhang = Dict(:l => 0.0, :r => 0.0, :t => 0.0, :b => 0.0)
 	annotations = lookup(:annotations)
@@ -2807,6 +2815,8 @@ function _tight_annotation_overhang(layout::Layout, lookup, width::Float64, heig
 	for annotation in annotations
 		d = _symbol_dict(annotation)
 		get(d, :visible, true) === false && continue
+		name = get(d, :name, nothing)
+		name isa AbstractString && occursin(_TIGHT_PROVIDER_PLACED, name) && continue
 		text = get(d, :text, "")
 		text isa AbstractString && !isempty(text) || continue
 		px = _tight_paper_coordinate(layout, get(d, :xref, nothing), get(d, :x, nothing), :x)
@@ -2867,8 +2877,9 @@ function _fit_margin_updates(
 )
 	fields = p.layout.fields
 	lookup(key) = haskey(pending, key) ? pending[key] : get(fields, key, nothing)
-	width = _tight_real(lookup(:width), _TIGHT_DEFAULT_WIDTH)
-	height = _tight_real(lookup(:height), _TIGHT_DEFAULT_HEIGHT)
+	default_width, default_height = _style_default_figure_size()
+	width = _tight_real(lookup(:width), Float64(default_width))
+	height = _tight_real(lookup(:height), Float64(default_height))
 	root_size = _tight_root_font_size(lookup)
 	overhang = _tight_annotation_overhang(p.layout, lookup, width, height, root_size)
 
@@ -2914,13 +2925,28 @@ function _tight_layout_impl!(fig; pad::Real = 4)
 	fields = p.layout.fields
 	fields[:margin] = new_margin
 	new_title === nothing || (fields[:title] = new_title)
-	# Decorations stacked above the axes and a figure legend moved to the top
-	# of the figure (`_text_restack!`) need more top margin than the
-	# annotations alone; the pass only raises it.
-	_text_restack!(p)
+	# Panel titles and labels, legends outside the plot areas and the figure
+	# title above them get their room back from the D12 room providers
+	# (`_finalize_figure!`), which raise the margins from these minimums.
 	_refresh!(fig)
 	return nothing
 end
+
+# Keywords `tight_layout!` does not take, rejected before anything changes:
+# it lays out the whole figure (no `row`/`col`) and modifies an existing one
+# (no `show`).
+function _tight_reject_keywords(kwargs)
+	isempty(kwargs) && return nothing
+	haskey(kwargs, :show) && _text_reject_show(kwargs[:show], "tight_layout!")
+	names = join(("`$(k)`" for k in keys(kwargs)), ", ")
+	throw(ArgumentError(
+		"tight_layout!: unsupported keyword(s) $(names); it takes only `pad` and lays out the " *
+		"whole figure (margins of every cell).",
+	))
+end
+
+_tight_pad_value(pad) = pad isa Real ? pad :
+	throw(ArgumentError("tight_layout!: `pad` must be a real number of px >= 0; got $(repr(pad))."))
 
 """
 	tight_layout!(fig; pad=4)
@@ -2936,9 +2962,9 @@ clipped:
 - a figure title gets `title.automargin=true`, so the top margin grows to fit
   it, and (unless it has its own `title.pad.t`) `title.pad.t = pad`, so it
   keeps `pad` px from the top edge;
-- paper-referenced annotations above, below or beside the plot area (subplot
-  titles, panel labels) are measured and the margin on that side is enlarged
-  by their estimated extent (plain text 1.3 em per `<br>` line with
+- paper-referenced annotations above, below or beside the plot area are
+  measured and the margin on that side is enlarged by their estimated extent
+  (plain text 1.3 em per `<br>` line with
   per-glyph widths; TeX labels such as those [`mathtext`](@ref) writes are
   measured as typeset: one row per row of a multi-line `array`, commands,
   braces and `\\text{…}` wrappers stripped, scripts at 70 %, fractions and
@@ -2948,16 +2974,21 @@ clipped:
   annotations sit above the plot area, the estimated title height is added to
   the top margin as well, so the title stays above them. Each enlargement is
   capped at 45 % of the figure width or height.
-- what is stacked above the axes (a legend placed above a cell, panel titles
-  and labels above it, an `:outside_top` figure legend moved under the figure
-  title; see [`set_legend!`](@ref)) keeps its room: the top margin is raised
-  to hold the stack.
+- panel titles and panel labels ([`title!`](@ref) with `row`/`col`,
+  `subplot_titles`, [`panel_labels!`](@ref)), legends placed outside a plot
+  area and the figure title above them keep their room: they are stacked and
+  the margins raised to hold them whenever the figure changes (with or
+  without `tight_layout!`; see [`set_legend!`](@ref)), so they are not
+  measured here.
 
 The figure size used for the measurement is `layout.width`/`layout.height`
-(see [`figsize!`](@ref)), else 700 × 500 px. A title with `yref="paper"` is
-placed by plotly directly above the plot area and is not moved. Bare-string
-titles are converted to `attr(text=…, automargin=true, pad=attr(t=pad))`.
-Returns `nothing` for a `Plot`/`SyncPlot` and `sf` for a `SubplotFigure`.
+(see [`figsize!`](@ref)), else the active style's figure size (700 × 500 px
+without one). A title with `yref="paper"` is placed by plotly directly above
+the plot area and is not moved. Bare-string titles are converted to
+`attr(text=…, automargin=true, pad=attr(t=pad))`. Any other keyword (`row`,
+`col`, `show`, …) or a `pad` that is not a real number >= 0 throws an
+`ArgumentError` before anything changes. Returns `nothing` for a
+`Plot`/`SyncPlot` and `sf` for a `SubplotFigure`.
 
 # Example
 ```julia
@@ -2966,8 +2997,9 @@ tight_layout!(fig)            # 4 px margins plus the room the labels need
 tight_layout!(fig; pad = 0)
 ```
 """
-function tight_layout!(fig; pad::Real = 4)
-	return _tight_layout_impl!(fig; pad = pad)
+function tight_layout!(fig; pad = 4, kwargs...)
+	_tight_reject_keywords(kwargs)
+	return _tight_layout_impl!(fig; pad = _tight_pad_value(pad))
 end
 
 function _tight_layout_subplot_impl!(sf::SubplotFigure; pad::Real = 4)
@@ -2975,7 +3007,10 @@ function _tight_layout_subplot_impl!(sf::SubplotFigure; pad::Real = 4)
 	return sf
 end
 
-function tight_layout!(sf::SubplotFigure; pad::Real = 4)
+function tight_layout!(sf::SubplotFigure; pad = 4, kwargs...)
+	_tight_reject_keywords(kwargs)
+	pad = _tight_pad_value(pad)
+	_style_nonnegative(pad, "tight_layout!", "pad")
 	return _transactional_subplot_mutation!(
 		_tight_layout_subplot_impl!,
 		sf,

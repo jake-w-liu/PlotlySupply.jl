@@ -797,11 +797,11 @@ function _legend_columns_width(widths::Vector{Float64}, columns::Vector{Int}, fr
 end
 
 # Width (px) of the plot area plotly.js will lay the figure out in, from
-# `layout.width` (else 700 px, the export default) and the left/right margins
+# `layout.width` (else the export default, `_style_default_figure_size`) and the left/right margins
 # (layout, template, plotly default 80 px). Automatic margins only shrink it,
 # which the column fit absorbs through the generous label estimates.
 function _legend_plot_area_width(p::Plot)
-	width = _tight_real(get(p.layout.fields, :width, nothing), _TIGHT_DEFAULT_WIDTH)
+	width = _tight_real(get(p.layout.fields, :width, nothing), Float64(_style_default_figure_size()[1]))
 	return max(width - _legend_margin_lr(p, :l) - _legend_margin_lr(p, :r), 1.0)
 end
 
@@ -827,7 +827,7 @@ function _legend_available_width(p::Plot, box::AbstractDict, span::Float64; lege
 	x = _legend_real(get(box, :x, nothing))
 	area = _legend_plot_area_width(p)
 	if get(box, :xref, "paper") == "paper" && x !== nothing && (x < 0 || x > 1)
-		return _tight_real(get(p.layout.fields, :width, nothing), _TIGHT_DEFAULT_WIDTH) / 2
+		return _tight_real(get(p.layout.fields, :width, nothing), Float64(_style_default_figure_size()[1])) / 2
 	end
 	cell = area * clamp(span, 0.0, 1.0)
 	(legend_id === nothing || span >= 1 || x === nothing) && return cell
@@ -1556,9 +1556,9 @@ function _text_panel_title!(fig, target, text, align::Symbol, fontsize::Float64,
 	_text_drop_centred_cell_title!(fig, xdom, ydom)
 	_upsert_named!(fig, :annotations, name, [attr(annotation)]; who = "title!")
 	_text_refit_panel_label!(fig, target)
-	# D12: above a top axis / a cell legend above the axes; a figure legend
-	# above the plot area moves above the new title.
-	_text_restack!(fig)
+	# D12: the room providers (room_providers.jl) stack it above a top axis
+	# and a cell legend above the axes, and a figure legend above it, when
+	# `_finalize_figure!` runs after this mutation.
 	return nothing
 end
 
@@ -1624,52 +1624,15 @@ end
 # Above a cell's axes sit, bottom to top: a top x axis (tick labels and title,
 # own or `secondary_xaxis!`), a legend placed above the axes, then the panel
 # title with the outside top panel label on its line. Above the top row come
-# the figure legends and, at the top of the figure, the figure title.
-# `_text_restack!` enforces that order after every change of one of them
-# (`title!`, `panel_labels!`, every legend placement). Panel titles, labels
-# and cell legends are only RAISED when they would overlap what is below
-# them, so a figure that fits keeps its layout and a decoration the user moved
-# higher stays there; the top margin is only raised. A decoration is not
-# lowered again when what was below it goes away (call `title!` /
-# `panel_labels!` again for that). Room between rows is not made here: a
-# raised panel title of a lower row can reach the x axis of the row above
-# (the layout engine reserves that room, D12). Pixel offsets of legends are
-# converted with the figure height (`layout.height`, else the 500 px export
-# default).
+# the figure legends and, at the top of the figure, the figure title. The room
+# providers of src/sci/room_providers.jl (`_room_requests!` /
+# `_room_place!(plan, ::Val{:legend_titles})`) enforce that order and give
+# every one of them its own room; `_finalize_figure!` runs them after every
+# mutation and on the `savefig` export copy at the export size.
 
-# plotly.js layout default margin.b (px).
-const _TEXT_DEFAULT_MARGIN_B = 80.0
 # plotly.js annotation box around the text: borderpad 1 + borderwidth 1 on
 # each side (attribute defaults).
 const _TEXT_ANNOTATION_FRAME = 4.0
-# The plot-area height used to convert px to paper never goes below this
-# fraction of the figure height (tiny figures would otherwise send a legend
-# far above the plot).
-const _TEXT_MIN_PLOT_FRACTION = 0.25
-# Offsets within this many px of their target are left alone (paper `y` is
-# rounded to 4 digits; a second pass must not move things by fractions of a px).
-const _TEXT_STACK_TOL = 0.5
-
-function _text_margin(p::Plot, key::Symbol, default::Float64)
-	margin = _symbol_dict(get(p.layout.fields, :margin, nothing))
-	return something(
-		_legend_real(get(margin, key, nothing)),
-		_legend_real(_legend_template_layout_value(p, (:margin, key))),
-		default,
-	)
-end
-
-_text_figure_height(p::Plot) = _tight_real(get(p.layout.fields, :height, nothing), _TIGHT_DEFAULT_HEIGHT)
-
-# Plot-area height (px) the stacking pass converts paper offsets with: the
-# figure height minus the top margin (which holds the title band and the
-# stacks once `_text_restack!` has raised it), the bottom margin and the
-# container legends at the bottom (at least a quarter of the figure height).
-function _text_plot_height(p::Plot)
-	H = _text_figure_height(p)
-	hp = H - _legend_top_margin(p) - _text_margin(p, :b, _TEXT_DEFAULT_MARGIN_B) - _text_bottom_reserved(p)
-	return max(hp, _TEXT_MIN_PLOT_FRACTION * H)
-end
 
 # Estimated height (px) of legend box `legend_id` as plotly.js 2.35.2 lays it
 # out (legend/draw.js computeLegendDimensions): entry rows of max(text height,
@@ -1718,73 +1681,6 @@ function _legend_box_height(
 	return body + 2 * (frame + _LEGEND_ITEM_GAP)
 end
 
-# A legend box drawn above paper height `edge`: paper-referenced, anchored at
-# its bottom edge at or above it.
-function _text_box_above(box::AbstractDict, edge::Float64)
-	get(box, :visible, true) === false && return false
-	get(box, :yref, "paper") == "paper" || return false
-	get(box, :yanchor, nothing) == "bottom" || return false
-	y = _legend_real(get(box, :y, nothing))
-	return y !== nothing && y >= edge - 1e-9
-end
-
-# Top x axes (`side="top"`, own or `overlaying` another axis): the x domain,
-# the top of the y domain they are drawn at, and their depth (px, tick labels
-# + title, `_axes_top_axis_depth`).
-function _text_top_axes(p::Plot)
-	out = Tuple{Tuple{Float64, Float64}, Float64, Float64}[]
-	layout = p.layout
-	for (key, value) in layout.fields
-		occursin(r"^xaxis([2-9]|[1-9][0-9]+)?$", String(key)) || continue
-		axis = _symbol_dict(value)
-		get(axis, :side, "bottom") == "top" || continue
-		get(axis, :visible, true) === false && continue
-		ref = _legend_base_axis_ref(layout, replace(String(key), "axis" => ""), :x)
-		# plotly.js domain default [0, 1] (a plain Plot sets none).
-		xdom = something(_layout_axis_domain(layout, _axis_layout_key(ref, :x)), (0.0, 1.0))
-		anchor = get(axis, :anchor, get(_symbol_dict(get(layout.fields, _axis_layout_key(ref, :x), nothing)), :anchor, "y"))
-		(anchor isa AbstractString && startswith(anchor, "y")) || continue
-		ydom = something(_layout_axis_domain(layout, _axis_layout_key(anchor, :y)), (0.0, 1.0))
-		push!(out, (xdom, ydom[2], _axes_top_axis_depth(layout, axis)))
-	end
-	return out
-end
-
-_text_in_span(x::Real, span) = span[1] - 1e-9 <= x <= span[2] + 1e-9
-
-# Cell legends of `p` (per-subplot legends: the ids traces carry explicitly)
-# with their paper domains; none in figure-legend mode or on a plain Plot.
-function _text_cell_legends(p::Plot)
-	out = Tuple{String, Tuple{Float64, Float64}, Tuple{Float64, Float64}}[]
-	any(t -> t isa GenericTrace && haskey(t.fields, :legend) && !_trace_is_figure_legend_entry(t), p.data) || return out
-	order, ids, domains, _ = _legend_subplot_assignment(p)
-	for key in order
-		xdom, ydom = domains[key]
-		push!(out, (_legend_id(ids[key]), xdom, ydom))
-	end
-	return out
-end
-
-# Figure legends: `legend1000` (legend_entry! proxies) and, without cell
-# legends, `legend`.
-function _text_figure_legend_ids(p::Plot, cell_legends)
-	ids = String[]
-	isempty(cell_legends) && push!(ids, "legend")
-	any(t -> t isa GenericTrace && _trace_is_figure_legend_entry(t), p.data) && push!(ids, _FIGURE_LEGEND_ID)
-	return ids
-end
-
-const _TEXT_STACK_NAME = r"^plotlysupply:(title|panel_label):([0-9]+):([0-9]+)$"
-
-# Text height (px) of annotation `item` at its font size (else the layout's).
-function _text_annotation_height(p::Plot, item::AbstractDict)
-	text = get(item, :text, "")
-	text isa AbstractString || return 0.0
-	size = _legend_real(get(_symbol_dict(get(item, :font, nothing)), :size, nothing))
-	size === nothing && (size = _legend_real(get(_symbol_dict(get(p.layout.fields, :font, nothing)), :size, nothing)))
-	return _text_extent(text, something(size, Float64(_PLOTLY_DEFAULT_FONT_SIZE)))[2]
-end
-
 # The figure title of `p` as a Dict when it has text, else `nothing`.
 function _text_title_dict(p::Plot)
 	title = get(p.layout.fields, :title, nothing)
@@ -1805,255 +1701,26 @@ function _text_title_band(p::Plot)
 		_text_extent(d[:text], _legend_title_font_size(p, d))[2] + _TEXT_PANEL_GAP
 end
 
-# px a figure title placed on the plot area (`yref="paper"`, `y=1`,
-# `yanchor="bottom"`, lifted by `pad.b`, as `secondary_xaxis!` places it)
-# reaches above it; 0 for any other title.
-function _text_paper_title_reach(p::Plot)
-	d = _text_title_dict(p)
-	d === nothing && return 0.0
-	get(d, :yref, "container") == "paper" || return 0.0
-	get(d, :yanchor, "auto") == "bottom" || return 0.0
-	y = _legend_real(get(d, :y, nothing))
-	(y !== nothing && isapprox(y, 1; atol = 1e-9)) || return 0.0
-	pad = _symbol_dict(get(d, :pad, nothing))
-	return something(_legend_real(get(pad, :b, nothing)), 0.0) +
-		_text_extent(d[:text], _legend_title_font_size(p, d))[2]
-end
-
-# px container-referenced legends reserve at the bottom of the figure
-# (`:outside_bottom` figure legends).
-function _text_bottom_reserved(p::Plot)
-	total = 0.0
-	for (key, value) in p.layout.fields
-		name = String(key)
-		(name == "legend" || occursin(_LEGEND_ID_PATTERN, name)) || continue
-		box = _symbol_dict(value)
-		get(box, :yref, "paper") == "container" || continue
-		y = _legend_real(get(box, :y, nothing))
-		(y !== nothing && y < 0.5) || continue
-		total = max(total, _legend_box_height(p, name))
-	end
-	return total
-end
-
-# A centred figure legend above the plot area (`:outside_top`), or one this
-# pass already moved to the top of the figure (container-referenced, anchored
-# at its top edge in the upper half). Other placements are the user's.
-function _text_top_figure_legend(box::AbstractDict)
-	get(box, :visible, true) === false && return false
-	get(box, :xref, "paper") == "paper" || return false
-	x = _legend_real(get(box, :x, nothing))
-	(x !== nothing && isapprox(x, 0.5; atol = 1e-9) && get(box, :xanchor, nothing) == "center") || return false
-	_text_box_above(box, 1.0) && return true
-	y = _legend_real(get(box, :y, nothing))
-	return get(box, :yref, "paper") == "container" && get(box, :yanchor, nothing) == "top" &&
-		y !== nothing && y > 0.5
-end
-
 """
-	_text_restack!(fig) -> Bool
+	_text_restack!(fig; clearance = false) -> Bool
 
-Enforce the stacking order above the axes (see the note above) on a `Plot`,
-`SyncPlot`'s plot, staged figure or `SubplotFigure`. Layout only:
-
-- panel title and outside top panel label annotations
-  (`"plotlysupply:title:r:c"`, `"plotlysupply:panel_label:r:c"`,
-  `yanchor="bottom"`) are raised (`yshift`) above a top x axis and a cell
-  legend drawn above the same axes; a cell legend above its axes is raised
-  (`y`) above a top x axis;
-- when something is stacked above the top row, a centred figure legend above
-  the plot area (`:outside_top`) moves to the top of the figure, under the
-  figure title: container-referenced, `yanchor="top"`, at `1 - band / H`
-  (`band` = the title's `pad.t` + text + 4 px; `H` = `layout.height`, else
-  the 500 px export default). plotly.js places a legend above the plot area
-  by pushing the top margin to the larger of its pushers, which let it
-  overlap the panel titles (G38) and, once moved higher, the figure title;
-  a container legend instead reserves its own band;
-- `layout.margin.t` is raised (never lowered) to hold the title band, the
-  top legends, `_LEGEND_TITLE_GAP` and the stacks.
-
-Nothing is lowered and a decoration the user placed elsewhere is left alone,
-so the pass is idempotent. Returns whether anything changed.
-
-With `clearance = true` (every legend placement, `_legend_stack!`), a figure
-with nothing stacked above the top row gets `_legend_title_clearance!`
-instead (the figure title keeps clear of a legend pushed above the plot
-area); when something is stacked, the margin computed here already holds the
-title, so a `title.pad.b` that clearance wrote is removed.
+The layout pass every legend placement runs (`_legend_stack!`) on a `Plot`,
+`SyncPlot`'s plot, staged figure or `SubplotFigure`. The stacking above the
+axes (panel titles and labels above cell legends and top x axes, figure
+legends above the top row, the figure title on top, the room and margins they
+need) is done by the D12 room providers when `_finalize_figure!` runs after
+the mutation; with `clearance = true` this pass keeps the figure title clear
+of a legend above the plot area that those providers do not place (one the
+user put there, `_legend_title_clearance!`). Returns whether anything changed.
 """
 function _text_restack!(fig; clearance::Bool = false)
+	clearance || return false
 	p = _cmn_plot(fig)
-	changed, managed = _text_restack_pass!(p)
-	clearance && !managed && _legend_title_clearance!(p)
-	return changed
+	before = get(p.layout.fields, :title, nothing)
+	_legend_title_clearance!(p)
+	return get(p.layout.fields, :title, nothing) !== before
 end
 
-# The pass of `_text_restack!`: (whether anything changed, whether something
-# is stacked above the top row so that the top margin is computed here).
-function _text_restack_pass!(p::Plot)
-	items = get(p.layout.fields, :annotations, nothing)
-	stack_items = Dict{Tuple{Int, Int}, Vector{Int}}()
-	if items isa AbstractVector
-		for (index, item) in enumerate(items)
-			name = _cmn_item_name(item)
-			name isa AbstractString || continue
-			m = match(_TEXT_STACK_NAME, name)
-			m === nothing && continue
-			_cmn_mapping_get(item, :yanchor) == "bottom" || continue
-			_cmn_mapping_get(item, :yref) == "paper" || continue
-			push!(get!(stack_items, (parse(Int, m[2]), parse(Int, m[3])), Int[]), index)
-		end
-	end
-	cell_legends = _text_cell_legends(p)
-	figure_ids = filter(_text_figure_legend_ids(p, cell_legends)) do id
-		_text_top_figure_legend(_symbol_dict(get(p.layout.fields, Symbol(id), nothing)))
-	end
-	cells_above = filter(cell_legends) do (id, _, ydom)
-		_text_box_above(_symbol_dict(get(p.layout.fields, Symbol(id), nothing)), ydom[2])
-	end
-	top_axes = _text_top_axes(p)
-	(isempty(stack_items) && isempty(figure_ids) && isempty(cells_above) && isempty(top_axes)) && return (false, false)
-
-	changed = false
-	axis_depth(x, edge) = maximum(
-		(depth for (xdom, top, depth) in top_axes if isapprox(top, edge; atol = 1e-6) && _text_in_span(x, xdom));
-		init = 0.0,
-	)
-	hp = _text_plot_height(p)
-	reach = 0.0   # px the stacks reach above paper y = 1
-
-	# Cell legends above their axes: px offset above the axes (at least the
-	# depth of a top x axis + gap; placed after the margin is known) and top.
-	legend_tops = Tuple{Tuple{Float64, Float64}, Float64, Float64}[]  # (xdom, edge, px above edge)
-	legend_raises = Tuple{Symbol, Float64, Float64}[]  # (key, edge, px offset)
-	for (id, xdom, ydom) in cells_above
-		key = Symbol(id)
-		box = _symbol_dict(p.layout.fields[key])
-		height = _legend_box_height(p, id)
-		height > 0 || continue
-		edge = ydom[2]
-		x = something(_legend_real(get(box, :x, nothing)), (xdom[1] + xdom[2]) / 2)
-		depth = axis_depth(clamp(x, xdom[1], xdom[2]), edge)
-		offset = (box[:y] - edge) * hp
-		if depth > 0
-			# the final paper `y` is set once the margin is known
-			push!(legend_raises, (key, edge, depth + _TEXT_PANEL_GAP))
-			offset = max(offset, depth + _TEXT_PANEL_GAP)
-		end
-		push!(legend_tops, (xdom, edge, offset + height))
-		reach = max(reach, (edge - 1) * hp + offset + height)
-	end
-
-	# Panel titles and outside top panel labels: above the axis and legends.
-	if !isempty(stack_items)
-		updated = Any[item for item in items]
-		raised = false
-		for cell in sort!(collect(keys(stack_items)))
-			indices = stack_items[cell]
-			entries = [_symbol_dict(updated[index]) for index in indices]
-			floor = 0.0
-			for entry in entries
-				edge = _legend_real(get(entry, :y, nothing))
-				x = _legend_real(get(entry, :x, nothing))
-				(edge === nothing || x === nothing) && continue
-				below = axis_depth(x, edge)
-				for (xdom, ledge, top) in legend_tops
-					(isapprox(ledge, edge; atol = 1e-9) && _text_in_span(x, xdom)) && (below = max(below, top))
-				end
-				floor = max(floor, below)
-			end
-			shift_floor = floor + _TEXT_PANEL_GAP
-			for (index, entry) in zip(indices, entries)
-				edge = _legend_real(get(entry, :y, nothing))
-				edge === nothing && continue
-				shift = something(_legend_real(get(entry, :yshift, nothing)), 0.0)
-				if floor > 0 && shift < shift_floor - _TEXT_STACK_TOL
-					shift = shift_floor
-					entry[:yshift] = _text_number(shift)
-					updated[index] = attr(; entry...)
-					raised = true
-				end
-				reach = max(reach, (edge - 1) * hp + shift + _text_annotation_height(p, entry) + _TEXT_ANNOTATION_FRAME)
-			end
-		end
-		if raised
-			p.layout.fields[:annotations] = updated
-			changed = true
-		end
-	end
-	for (_, top, depth) in top_axes
-		reach = max(reach, (top - 1) * hp + depth)
-	end
-	reach = max(reach, _text_paper_title_reach(p))
-	if reach <= 0
-		changed |= _text_raise_cell_legends!(p, legend_raises)
-		return (changed, false)
-	end
-	# A `title.pad.b` from `_legend_title_clearance` (it would reserve a band
-	# as tall as the old top margin above everything placed here) goes.
-	title = _text_title_dict(p)
-	if title !== nothing && get(title, :automargin, nothing) === true
-		pad = _symbol_dict(get(title, :pad, nothing))
-		pad_b = _legend_real(get(pad, :b, nothing))
-		if pad_b !== nothing && pad_b == _legend_title_clearance_pad(p, title)
-			delete!(pad, :b)
-			title[:pad] = attr(; pad...)
-			p.layout.fields[:title] = attr(; title...)
-			changed = true
-		end
-	end
-
-	# Figure legends at the top of the figure, under the title band.
-	H = _text_figure_height(p)
-	band = _text_title_band(p)
-	offset = band > 0 ? band : Float64(_TEXT_PANEL_GAP)
-	stacked = false
-	for id in figure_ids
-		key = Symbol(id)
-		box = _symbol_dict(p.layout.fields[key])
-		height = _legend_box_height(p, id)
-		height > 0 || continue
-		placed = copy(box)
-		placed[:yref] = "container"
-		placed[:y] = round(1 - offset / H; digits = 4)
-		placed[:yanchor] = "top"
-		if placed != box
-			p.layout.fields[key] = attr(; placed...)
-			changed = true
-		end
-		offset += height + _TEXT_PANEL_GAP
-		stacked = true
-	end
-	# Without a title the stacks keep `_TEXT_PANEL_GAP` from the figure edge.
-	needed = ceil(stacked ? offset - _TEXT_PANEL_GAP + _LEGEND_TITLE_GAP + reach : max(band, _TEXT_PANEL_GAP) + reach)
-	if needed > _legend_top_margin(p) + _TEXT_STACK_TOL
-		margin = _symbol_dict(get(p.layout.fields, :margin, nothing))
-		margin[:t] = needed
-		p.layout.fields[:margin] = attr(; margin...)
-		changed = true
-	end
-	changed |= _text_raise_cell_legends!(p, legend_raises)
-	return (changed, true)
-end
-
-# Raise cell legends above their axes to at least `offset` px above paper
-# `edge` (`raises` from `_text_restack_pass!`), converted with the plot-area height
-# of the final margins (`_text_plot_height`, also used to read the offsets
-# back, so a second pass changes nothing).
-function _text_raise_cell_legends!(p::Plot, raises)
-	isempty(raises) && return false
-	hp = _text_plot_height(p)
-	changed = false
-	for (key, edge, offset) in raises
-		box = _symbol_dict(p.layout.fields[key])
-		(box[:y] - edge) * hp < offset - _TEXT_STACK_TOL || continue
-		y = round(edge + offset / hp; digits = 4)
-		box[:y] = y
-		p.layout.fields[key] = attr(; box...)
-		changed = true
-	end
-	return changed
-end
 
 function _text_title_args(align, fontsize, offset)
 	return (
@@ -2343,7 +2010,7 @@ function _text_write_panel_labels!(fig, targets, texts, format, position, outsid
 	for (name, annotation) in items
 		_upsert_named!(fig, :annotations, name, [annotation]; who = "panel_labels!")
 	end
-	_text_restack!(fig)   # D12 stacking, as for panel titles
+	# D12 stacking and room, as for panel titles (room_providers.jl).
 	return nothing
 end
 
