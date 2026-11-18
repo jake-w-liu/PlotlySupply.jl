@@ -1459,3 +1459,47 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 		end
 	end
 end
+
+# Z1: a small mutation costs O(keys written), not O(layout + template + traces).
+@testset "mutation cost: relayout!/update_* share the template and skip the traces (Z1)" begin
+	PB = PlotlySupply.PlotlyBase
+	alloc(f) = (f(); f(); @allocated f())
+
+	p = plot_scatter(1:10, rand(10); xlabel = "x")
+	template = p.layout[:template]
+	@test relayout!(p; title = "t") === p
+	@test p.layout[:template] === template                  # untouched, same object
+	@test p.layout[:title] == "t" || p.layout[:title][:text] == "t"
+	one_trace = alloc(() -> relayout!(p; title = "t2"))
+	@test one_trace < 120_000        # measured 59.7 kB (289 kB before the template was shared)
+
+	big = plot_scatter(1:10, [rand(10) for _ in 1:200]; xlabel = "x")
+	@test alloc(() -> relayout!(big; title = "t2")) < 1.3 * one_trace
+	update_one = alloc(() -> update_xaxes!(p; showgrid = false))
+	update_many = alloc(() -> update_xaxes!(big; showgrid = false))
+	@test update_one < 150_000
+	@test update_many < 1.5 * update_one                    # independent of the trace count
+	@test big.layout.xaxis[:showgrid] == false
+	@test all(t -> t isa PB.GenericTrace, big.data) && length(big.data) == 200
+
+	# A relayout that names the template still writes it, and only the staged copy
+	# is written before the commit: a failed call leaves the model unchanged.
+	shared = plot_scatter(1:3, [1.0, 2.0, 3.0])
+	other = plot_scatter(1:3, [1.0, 2.0, 3.0])
+	tpl = shared.layout[:template]
+	other.layout[:template] = tpl                            # two figures share one template
+	before = deepcopy(tpl)
+	relayout!(shared; template = "plotly_dark")
+	@test shared.layout[:template] !== tpl
+	@test other.layout[:template] === tpl && other.layout[:template] == before
+	@test_throws Exception relayout!(other; title_font_size = 12, template = 1 + "x")
+	@test other.layout[:template] === tpl && other.layout[:template] == before
+
+	# An object shared between a trace and the layout is still one object after a
+	# layout-only update (the commit writes it in place).
+	marker = attr(color = "red")
+	aliased = Plot([scatter(x = 1:3, y = 1:3, marker = marker)], Layout())
+	update_xaxes!(aliased; title_text = "x")
+	@test aliased.data[1][:marker] === marker
+	@test aliased.layout.xaxis[:title][:text] == "x"
+end

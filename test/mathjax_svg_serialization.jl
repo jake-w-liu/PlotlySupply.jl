@@ -14,7 +14,15 @@ function serialization_main()
         folder=joinpath(out,name);mkpath(folder)
         before=savefig(p;format="json");write(joinpath(folder,"model.json"),before)
         file=joinpath(folder,"figure.svg");savefig(p,file;width=504,height=288)
-        d=svg_roundtrip_metrics(read(file,String),joinpath(folder,"svg_roundtrip.json"))
+        plot=p isa PS.SubplotFigure ? p.fig : p
+        # The figure is drawn again in the export window (2.0 clears it after an
+        # export) and the SVG file is compared with that drawing.
+        drawn(plot,504,288) do ec,win
+            check_drawn(ec,win,p,name,folder,file,before;gradient=gradient)
+        end
+    end
+    function check_drawn(ec,win,p,name,folder,file,before;gradient=false)
+        d=svg_roundtrip_metrics(ec,win,read(file,String),joinpath(folder,"svg_roundtrip.json"))
         gradient && d["gradient_nodes"]<1 && error("gradient/pattern control did not exercise a URL")
         if gradient
             negative=joinpath(out,"negative_controls");mkpath(negative)
@@ -24,17 +32,16 @@ function serialization_main()
             js="""(function(){const d=new DOMParser().parseFromString($(PS._json_js(svg)), 'image/svg+xml');
               const n=d.querySelector($(PS._json_js(selector)));if(!n)throw new Error('missing mutation target');
               n.setAttribute($(PS._json_js(attribute)),$(PS._json_js(value)));return new XMLSerializer().serializeToString(d);})()"""
-            s=PS._EXPORT_STATE
-            bad=Base.invokelatest(()->s.backend.run(s.window,js))
+            bad=Base.invokelatest(()->ec.run(win,js))
             write(joinpath(negative,name*"_corrupted.svg"),bad)
-            source=Base.invokelatest(()->s.backend.run(s.window,"document.querySelector('.js-plotly-plot').outerHTML"))
+            source=Base.invokelatest(()->ec.run(win,"document.querySelector('.js-plotly-plot').outerHTML"))
             rejected=try
-                svg_roundtrip_metrics(bad,joinpath(negative,name*"_rejected.json"));false
+                svg_roundtrip_metrics(ec,win,bad,joinpath(negative,name*"_rejected.json"));false
             catch err
                 err isa ErrorException && occursin("gradient or pattern identity changed",sprint(showerror,err))
             end
             rejected || error("corrupted gradient/pattern was not rejected for the intended reason")
-            source==Base.invokelatest(()->s.backend.run(s.window,"document.querySelector('.js-plotly-plot').outerHTML")) ||
+            source==Base.invokelatest(()->ec.run(win,"document.querySelector('.js-plotly-plot').outerHTML")) ||
                 error("negative SVG control changed the live plot")
         end
         before==savefig(p;format="json") || error("SVG export changed model JSON")

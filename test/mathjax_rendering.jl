@@ -1,6 +1,8 @@
 # Standalone Electron integration: julia --project=. test/mathjax_rendering.jl OUT MODE
 # Modes run in separate processes so order tests start with an empty renderer cache.
-# Live mode initializes MathJax explicitly; desktop loading is not assumed.
+# 2.0 clears the export window after every export, so the figure is drawn in the
+# export window again (the PDF draw step) and measured there, in the same state
+# the exported file was made from. The desktop window loads MathJax itself.
 using PlotlySupply
 const PS=PlotlySupply
 const JSON=PS.PlotlyBase.JSON
@@ -62,18 +64,20 @@ function checked_metrics(ec,window,path,font,mode,columns)
     end
     return d
 end
-function export_metrics(path,font,mode,columns)
-    s=PS._EXPORT_STATE
-    lock(s.lock) do
-        checked_metrics(s.backend,s.window,path,font,mode,columns)
+# Draw `plot` in the export window exactly as the PDF/EPS export does (same
+# prepared copy, same `Plotly.newPlot` step) and call `f(ec, window)` while the
+# drawn figure is in the page.
+function drawn(f,plot,width,height)
+    prepared=PS._prepare_export(plot,("pdf",),(width=width,height=height)).renderer
+    PS._with_export_window(PS._EXPORT_STATE) do ec,app,win,divid
+        drawing=Base.invokelatest(()->ec.run(win,PS._pdf_render_script(divid,prepared)))
+        drawing=="ok" || error("the export window did not draw the figure: "*repr(drawing))
+        f(ec,win)
     end
 end
-function svg_roundtrip_metrics(svg,path)
-    s=PS._EXPORT_STATE
+function svg_roundtrip_metrics(ec,win,svg,path)
     js=replace(SVG_ROUNDTRIP,"__PS_SVG_TEXT__"=>PS._json_js(svg);count=1)
-    raw=lock(s.lock) do
-        Base.invokelatest(()->s.backend.run(s.window,js))
-    end
+    raw=Base.invokelatest(()->ec.run(win,js))
     raw isa AbstractString || error("SVG roundtrip was not serialized")
     d=JSON.parse(raw);write(path,raw*"\n")
     haskey(d,"diagnostic_error") && error(d["diagnostic_error"]*"\n"*d["stack"])
@@ -106,36 +110,25 @@ function html_metrics(file,path,font,mode,columns)
         end
     end
 end
-function prime_live_mathjax(ec,sp,out)
-    initial=Base.invokelatest(()->ec.run(sp.window,"""JSON.stringify({mathjax_type:typeof MathJax,
-      scripts:Array.from(document.scripts).map(s=>s.src).filter(Boolean),
-      math_groups:document.querySelectorAll('g[data-math="Y"]').length})"""))
-    write(joinpath(out,"live_setup_initial.json"),initial*"\n")
-    JSON.parse(initial)["mathjax_type"]=="undefined" || error("live fixture expected the unprimed desktop route")
-    load="""(async function(){
-      const config=document.createElement('script');config.type='text/x-mathjax-config';
-      config.textContent='MathJax.Hub.Config({SVG:{font:"Latin-Modern"}});';document.head.appendChild(config);
-      return await new Promise(function(resolve,reject){
-       const timer=setTimeout(()=>reject(new Error('fixture MathJax load timed out')),30000);
-       const script=document.createElement('script');script.src=$(PS._json_js(PS._MATHJAX_CDN_URL));
-       script.onerror=()=>{clearTimeout(timer);reject(new Error('fixture MathJax script failed'));};
-       script.onload=()=>{
-        if(typeof MathJax==='undefined'||!MathJax.Hub){clearTimeout(timer);reject(new Error('MathJax Hub absent'));return;}
-        MathJax.Hub.Queue(function(){clearTimeout(timer);resolve(JSON.stringify({version:MathJax.version,ready:true}));});
-       };
-       document.head.appendChild(script);
-      });
-    })()"""
-    loaded=Base.invokelatest(()->ec.run(sp.window,load))
-    write(joinpath(out,"live_setup_ready.json"),loaded*"\n")
-    ready=JSON.parse(loaded)
-    ready["version"]=="2.7.9" && ready["ready"]===true || error("fixture MathJax did not initialize")
-    before=savefig(sp.plot;format="json");model=JSON.parse(String(copy(before)))
-    redraw="""(async function(){const gd=document.querySelector('.js-plotly-plot');
-      await Plotly.newPlot(gd,$(PS._json_js(model["data"])), $(PS._json_js(model["layout"])), $(PS._json_js(model["config"])));
-      return 'ok';})()"""
-    Base.invokelatest(()->ec.run(sp.window,redraw))=="ok" || error("fixture reinitialization failed")
-    before==savefig(sp.plot;format="json") || error("live fixture initialization changed model JSON")
+# The desktop window loads MathJax by itself (2.0): wait for it, check its
+# version and that reading the model JSON does not change it.
+function check_live_mathjax(ec,sp,out)
+    deadline=time()+30
+    local state
+    while true
+        raw=Base.invokelatest(()->ec.run(sp.window,"""JSON.stringify({mathjax_type:typeof MathJax,
+          version:typeof MathJax==='undefined'?null:MathJax.version,
+          scripts:Array.from(document.scripts).map(s=>s.src).filter(Boolean),
+          math_groups:document.querySelectorAll('g[data-math="Y"]').length})"""))
+        state=JSON.parse(raw)
+        state["mathjax_type"]=="object" && state["math_groups"]>0 && break
+        time()<deadline || error("the desktop window did not load MathJax: "*raw)
+        sleep(.1)
+    end
+    write(joinpath(out,"live_setup_ready.json"),raw*"\n")
+    state["version"]=="2.7.9" || error("unexpected desktop MathJax version")
+    before=savefig(sp.plot;format="json")
+    before==savefig(sp.plot;format="json") || error("reading the model JSON changed it")
 end
 
 function definitions(mode)
@@ -155,14 +148,14 @@ end
 function main()
 length(ARGS)==2 || error("usage: mathjax_rendering.jl FRESH_OUT matrix|order12|order18|custom|live")
 out=abspath(ARGS[1]);mode=ARGS[2];ispath(out) && error("output directory must be fresh");mkpath(out)
-PS._EXPORT_STATE.window===nothing && PS._PLOTLYJS_COMPAT_ASSET_STATE.asset===nothing || error("renderer was primed")
+PS._EXPORT_STATE.window===nothing || error("renderer was primed")
 if mode=="live"
     sf=figure(12,:math,1,DEFAULT_FAMILY)
     sp=to_syncplot(sf.fig;show=false,width=504,height=288)
     ec=PS._electroncall();success=false
     try
         original_data=JSON.json(sp.plot.data)
-        prime_live_mathjax(ec,sp,out)
+        check_live_mathjax(ec,sp,out)
         for (i,(font,family)) in enumerate(((12,DEFAULT_FAMILY),(18,DEFAULT_FAMILY),(12,DEFAULT_FAMILY),(18,"Times New Roman"),(18,"Arial")))
             relayout!(sp;font=attr(size=font,family=family))
             checked_metrics(ec,sp.window,joinpath(out,"live$(i)"),font,:math,1)
@@ -178,7 +171,7 @@ if mode=="live"
             end
         end
     end
-    write(joinpath(out,"complete.json"),JSON.json((mode=mode,live_states=5,closed=true,data_unchanged=true,explicit_fixture_mathjax=true,automatic_desktop_mathjax_loading=false))*"\n")
+    write(joinpath(out,"complete.json"),JSON.json((mode=mode,live_states=5,closed=true,data_unchanged=true,explicit_fixture_mathjax=false,automatic_desktop_mathjax_loading=true))*"\n")
 else
     records=Any[]
     for c in definitions(mode)
@@ -186,14 +179,16 @@ else
         sf=figure(c.font,c.mode,c.columns,c.family);stem=joinpath(folder,"legend")
         savefig(sf,stem*".json");before=read(stem*".json")
         savefig(sf,stem*".pdf";width=504c.columns,height=288)
-        pdf=export_metrics(joinpath(folder,"after_pdf"),c.font,c.mode,c.columns)
         savefig(sf,stem*".svg";width=504c.columns,height=288)
-        svg=export_metrics(joinpath(folder,"after_svg"),c.font,c.mode,c.columns)
-        svg_roundtrip_metrics(read(stem*".svg",String),joinpath(folder,"svg_roundtrip.json"))
+        svgtext=read(stem*".svg",String)
+        drawn(sf.fig,504c.columns,288) do ec,win
+            checked_metrics(ec,win,joinpath(folder,"after_export"),c.font,c.mode,c.columns)
+            svg_roundtrip_metrics(ec,win,svgtext,joinpath(folder,"svg_roundtrip.json"))
+        end
         savefig(sf,stem*".html")
         html=html_metrics(stem*".html",joinpath(folder,"after_html"),c.font,c.mode,c.columns)
         before==savefig(sf.fig;format="json") || error("exports changed model JSON")
-        push!(records,merge(c,(mode=string(c.mode),json_unchanged=true,pdf_passed=true,svg_dom_passed=true,html_passed=true)))
+        push!(records,merge(c,(mode=string(c.mode),json_unchanged=true,drawn_passed=true,svg_dom_passed=true,html_passed=true)))
         write(joinpath(out,"cases.json"),JSON.json(records)*"\n")
         println("passed ",mode,"/",c.id);flush(stdout)
     end

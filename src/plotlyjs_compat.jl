@@ -2124,10 +2124,10 @@ Latin-Modern, `\\mathcal` draws Latin Modern's script letters, and
 upright-regular (the font has no bold glyphs for them; `font = "TeX"` has).
 
 # Errors
-`ArgumentError` for unknown keywords, invalid values, a missing or unwritable
-destination directory, or EPS (or `fonts = :outline` pdf) without
-Ghostscript, before anything is drawn or any file is touched;
-`ErrorException` for an unsupported format or a renderer failure.
+`ArgumentError` for unknown keywords, invalid values, an unsupported format, a
+missing or unwritable destination directory, or EPS (or `fonts = :outline`
+pdf) without Ghostscript, before anything is drawn or any file is touched;
+`ErrorException` for a renderer failure.
 
 ```julia
 fig = plot_scatter(1:10, rand(10); xlabel = "x", ylabel = "y")
