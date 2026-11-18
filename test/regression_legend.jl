@@ -809,7 +809,12 @@ using Test, PlotlySupply
 					export_boxes(fig; width = round(Int, w), height = round(Int, h))
 				end
 				@test length(b["ann"]) == 1
-				@test layout_defects(b) == String[]
+				defects = layout_defects(b)
+				# an inside label sits over its plot area by design; it must not
+				# be clipped (an outside one touches nothing at all)
+				outside ? (@test defects == String[]) : (@test !any(d -> occursin("clipped", d), defects))
+				label = b["ann"][1]
+				@test label[1] >= -0.5 && label[2] >= -0.5 && label[3] <= b["W"] + 0.5 && label[4] <= b["H"] + 0.5
 			end
 		end
 	end
