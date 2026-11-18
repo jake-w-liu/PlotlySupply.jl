@@ -1436,12 +1436,9 @@ _parity_method_rejects(err, keyword) =
 
 # Mutators that report an unknown keyword as a MethodError on an internal staging
 # type (`plot_pie!(::PlotlySupply._HighLevelStagedPlotMutation, ...)`) instead of
-# an ArgumentError naming the function (cross-requested in wave 4, G36).
-const _PARITY_UNKNOWN_KEYWORD_METHODERROR = (
-    :plot_candlestick!, :plot_funnel!, :plot_funnelarea!, :plot_indicator!, :plot_ohlc!,
-    :plot_parcoords!, :plot_pie!, :plot_sankey!, :plot_sunburst!, :plot_ternary!,
-    :plot_treemap!, :plot_waterfall!,
-)
+# an ArgumentError naming the function (cross-requested in wave 4, G36). Empty
+# since wave 5 (Z88): the twelve extended-chart mutators reject it themselves.
+const _PARITY_UNKNOWN_KEYWORD_METHODERROR = ()
 
 # Source file of a mutator's SubplotFigure method(s).
 _parity_cell_source(mut) = minimum(

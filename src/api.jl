@@ -7840,8 +7840,10 @@ function plot_indicator!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_indicator!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	trace = _indicator_trace(
 		who,
@@ -17184,6 +17186,19 @@ function _extended_mutator_guard(who::AbstractString, show, row, col)
 	return nothing
 end
 
+# Keywords a Plot/SyncPlot mutator does not declare arrive through its
+# `kwargs...`: each one is an ArgumentError naming the public function (Julia
+# would otherwise report a MethodError on the internal staging type the
+# transactional wrapper passes in, Z88).
+function _extended_reject_unknown(who::AbstractString, kwargs)
+	isempty(kwargs) && return nothing
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) " *
+		"$(join(("`$(key)`" for key in keys(kwargs)), ", ")); see the docstring " *
+		"for the accepted keywords.",
+	))
+end
+
 # The Cartesian mutators take `secondary_y` for SubplotFigure cells (the
 # SubplotFigure method routes it to the cell's secondary y axis).
 function _extended_secondary_y_guard(who::AbstractString, secondary_y::Bool)
@@ -17434,10 +17449,39 @@ _extended_cartesian_labels(who::AbstractString; title, xlabel, ylabel) = (
 	ylabel = _extended_label(ylabel, who, "ylabel"),
 )
 
+# Tick values of the Cartesian extended charts: `Date`/`DateTime` values (the
+# periods of a candlestick/OHLC chart) become the ISO strings plotly.js reads
+# on a date axis; numbers, strings, tick presets (D9) and `nothing` pass
+# unchanged to the shared tick helpers.
+function _extended_tick_values(values)
+	(values isa AbstractVector || values isa Tuple) || return values
+	any(v -> v isa Dates.Date || v isa Dates.DateTime, values) || return values
+	return Any[(v isa Dates.Date || v isa Dates.DateTime) ? string(v) : v for v in values]
+end
+
+# The six tick keywords (G30, Z31) of the Cartesian extended charts (funnel,
+# waterfall, candlestick, OHLC), as `_apply_cartesian_plot_options!` takes
+# them; `_EXTENDED_NO_TICKS` leaves every tick setting alone.
+_extended_ticks(; xticks, xticklabels, xtickformat::AbstractString, yticks, yticklabels,
+	ytickformat::AbstractString) = (
+	xticks = _extended_tick_values(xticks),
+	xticklabels = xticklabels,
+	xtickformat = xtickformat,
+	yticks = _extended_tick_values(yticks),
+	yticklabels = yticklabels,
+	ytickformat = ytickformat,
+)
+
+const _EXTENDED_NO_TICKS = (
+	xticks = nothing, xticklabels = nothing, xtickformat = "",
+	yticks = nothing, yticklabels = nothing, ytickformat = "",
+)
+
 # Constructor of a Cartesian chart: one trace, spine-styled axes, then the
 # common options through the D7 primitives (validated before any write).
 # `reveal_x_axis` shows an x axis plotly hides by default (the value axis of
-# a horizontal funnel) when the caller gave it a title.
+# a horizontal funnel) when the caller gave it a title. `ticks` holds the
+# tick keywords (`_extended_ticks`).
 function _extended_cartesian_plot(
 	who::AbstractString,
 	trace;
@@ -17453,6 +17497,7 @@ function _extended_cartesian_plot(
 	grid,
 	show::Bool,
 	reveal_x_axis::Bool = false,
+	ticks = _EXTENDED_NO_TICKS,
 )
 	fig = Plot(trace, _extended_cartesian_layout())
 	_apply_cartesian_plot_options!(
@@ -17468,6 +17513,12 @@ function _extended_cartesian_plot(
 		grid = grid,
 		fontsize = fontsize,
 		title = labels.title,
+		xticks = ticks.xticks,
+		xticklabels = ticks.xticklabels,
+		xtickformat = ticks.xtickformat,
+		yticks = ticks.yticks,
+		yticklabels = ticks.yticklabels,
+		ytickformat = ticks.ytickformat,
 		who = who,
 	)
 	reveal_x_axis && relayout!(fig, xaxis_visible = true)
@@ -17476,7 +17527,9 @@ end
 
 # Mutator of a Cartesian chart: every option is validated before the trace
 # is appended; `grid = nothing` leaves the grid as it is, any other value is
-# applied (so `grid = true` re-enables a hidden grid).
+# applied (so `grid = true` re-enables a hidden grid). `ticks` holds the tick
+# keywords (`_extended_ticks`), checked against the axis types this call ends
+# up with before the trace is appended.
 function _extended_cartesian_append!(
 	fig,
 	who::AbstractString,
@@ -17491,6 +17544,7 @@ function _extended_cartesian_append!(
 	fontsize,
 	grid,
 	reveal_x_axis::Bool = false,
+	ticks = _EXTENDED_NO_TICKS,
 )
 	_validate_cartesian_options(
 		fig,
@@ -17504,6 +17558,8 @@ function _extended_cartesian_append!(
 		fontsize = fontsize,
 		grid = grid,
 	)
+	_validate_tick_option(fig, :xaxis, ticks.xticks, ticks.xticklabels, xscale, who, "x")
+	_validate_tick_option(fig, :yaxis, ticks.yticks, ticks.yticklabels, yscale, who, "y")
 	push!(_plot_data(fig), trace)
 	_apply_axis_grid!(fig, grid, who)
 	reveal_x_axis && relayout!(fig, xaxis_visible = true)
@@ -17520,6 +17576,12 @@ function _extended_cartesian_append!(
 		grid = nothing,
 		fontsize = fontsize,
 		title = labels.title,
+		xticks = ticks.xticks,
+		xticklabels = ticks.xticklabels,
+		xtickformat = ticks.xtickformat,
+		yticks = ticks.yticks,
+		yticklabels = ticks.yticklabels,
+		ytickformat = ticks.ytickformat,
 		refresh = true,
 		apply_template = false,
 		who = who,
@@ -17724,8 +17786,10 @@ function plot_pie!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_pie!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	return _extended_slice_append!(
 		fig,
@@ -18057,8 +18121,10 @@ function plot_sunburst!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_sunburst!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	return _extended_hierarchy_append!(
 		fig,
@@ -18181,8 +18247,10 @@ function plot_treemap!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_treemap!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	return _extended_hierarchy_append!(
 		fig,
@@ -18251,7 +18319,8 @@ end
 """
 	plot_funnel(x, y; color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
 		yrange=[0, 0], title="", width=0, height=0, fontsize=0, grid=true,
-		show=false)
+		xticks=nothing, xticklabels=nothing, xtickformat="", yticks=nothing,
+		yticklabels=nothing, ytickformat="", show=false)
 
 Funnel chart: one horizontal bar per stage, centred on zero, with width
 `x[i]`, labelled by `y[i]` on the y axis (top to bottom in the given order).
@@ -18273,10 +18342,20 @@ Funnel chart: one horizontal bar per stage, centred on zero, with width
 - `fontsize::Real = 0`: global font size in px (`0` = template default).
 - `grid::Union{Bool,Symbol} = true`: `true` keeps the template grid; `false`
   or `:none` hides it, `:x`/`:y`/`:both` choose the axes with grid lines.
+- `xticks = nothing`, `yticks = nothing`: tick positions in data units
+  (numbers, or strings on a category axis such as the stage axis; `Date`s on a
+  date axis), or the presets `:auto` / `:decades` (log axes only), as for
+  [`xticks!`](@ref); `nothing` keeps plotly's automatic ticks.
+- `xticklabels = nothing`, `yticklabels = nothing`: one label (mathtext) per
+  tick value; needs `xticks`/`yticks`.
+- `xtickformat::AbstractString = ""`, `ytickformat::AbstractString = ""`: d3
+  tick format such as `".2f"` or `"~s"` (`""` = plotly's default).
 - `show::Bool = false`: open an Electron window and return a `SyncPlot`.
 
 The value axis cannot be logarithmic (the bars are centred on zero).
-Mismatched lengths and non-numeric or non-finite values throw an `ArgumentError`.
+Mismatched lengths and non-numeric or non-finite values throw an `ArgumentError`,
+as do tick labels without tick values or of another length, and a tick preset
+that does not apply to the axis.
 
 # Returns
 A `Plot`, or a `SyncPlot` when `show = true`.
@@ -18301,6 +18380,12 @@ function plot_funnel(
 	height::Real = 0,
 	fontsize::Real = 0,
 	grid::Union{Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	show::Bool = false,
 )
 	who = "plot_funnel"
@@ -18319,13 +18404,15 @@ function plot_funnel(
 		grid = grid,
 		show = show,
 		reveal_x_axis = !isempty(labels.xlabel),
+		ticks = _extended_ticks(; xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat),
 	)
 end
 
 """
 	plot_funnel!(fig, x, y; color="", legend="", xlabel="", ylabel="",
 		xrange=[0, 0], yrange=[0, 0], title="", width=0, height=0, fontsize=0,
-		grid=nothing)
+		grid=nothing, xticks=nothing, xticklabels=nothing, xtickformat="",
+		yticks=nothing, yticklabels=nothing, ytickformat="")
 	plot_funnel!(sf::SubplotFigure, x, y; row=nothing, col=nothing, secondary_y=false,
 		inset=nothing, kwargs...)
 
@@ -18368,12 +18455,20 @@ function plot_funnel!(
 	height::Real = 0,
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	secondary_y::Bool = false,
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_funnel!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	_extended_secondary_y_guard(who, secondary_y)
 	trace = _extended_funnel_trace(who, x, y; color = color, legend = legend)
@@ -18391,6 +18486,7 @@ function plot_funnel!(
 		fontsize = fontsize,
 		grid = grid,
 		reveal_x_axis = !isempty(labels.xlabel),
+		ticks = _extended_ticks(; xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat),
 	)
 end
 
@@ -18504,8 +18600,10 @@ function plot_funnelarea!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_funnelarea!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	return _extended_slice_append!(
 		fig,
@@ -18590,7 +18688,8 @@ end
 """
 	plot_waterfall(x, y; measure=nothing, legend="", xlabel="", ylabel="",
 		xrange=[0, 0], yrange=[0, 0], title="", width=0, height=0, fontsize=0,
-		grid=true, show=false)
+		grid=true, xticks=nothing, xticklabels=nothing, xtickformat="",
+		yticks=nothing, yticklabels=nothing, ytickformat="", show=false)
 
 Waterfall chart: a running total built from the increments `y`, one bar per
 category `x`.
@@ -18606,10 +18705,13 @@ category `x`.
   as Strings or Symbols; `nothing` means all relative.
 - `legend::AbstractString = ""`: legend name of the trace (mathtext).
 - `xlabel`, `ylabel`, `xrange`, `yrange`, `title`, `width`, `height`,
-  `fontsize`, `grid`, `show`: as for [`plot_funnel`](@ref).
+  `fontsize`, `grid`, `show`, and the tick keywords `xticks`, `xticklabels`,
+  `xtickformat`, `yticks`, `yticklabels`, `ytickformat`: as for
+  [`plot_funnel`](@ref).
 
 The y axis cannot be logarithmic (the bars start at zero). Mismatched lengths,
-unknown measures and non-finite increments throw an `ArgumentError`.
+unknown measures, non-finite increments and invalid tick keywords throw an
+`ArgumentError`.
 
 # Returns
 A `Plot`, or a `SyncPlot` when `show = true`.
@@ -18634,6 +18736,12 @@ function plot_waterfall(
 	height::Real = 0,
 	fontsize::Real = 0,
 	grid::Union{Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	show::Bool = false,
 )
 	who = "plot_waterfall"
@@ -18651,13 +18759,15 @@ function plot_waterfall(
 		fontsize = fontsize,
 		grid = grid,
 		show = show,
+		ticks = _extended_ticks(; xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat),
 	)
 end
 
 """
 	plot_waterfall!(fig, x, y; measure=nothing, legend="", xlabel="", ylabel="",
 		xrange=[0, 0], yrange=[0, 0], title="", width=0, height=0, fontsize=0,
-		grid=nothing)
+		grid=nothing, xticks=nothing, xticklabels=nothing, xtickformat="",
+		yticks=nothing, yticklabels=nothing, ytickformat="")
 	plot_waterfall!(sf::SubplotFigure, x, y; row=nothing, col=nothing, secondary_y=false,
 		inset=nothing, kwargs...)
 
@@ -18692,12 +18802,20 @@ function plot_waterfall!(
 	height::Real = 0,
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	secondary_y::Bool = false,
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_waterfall!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	_extended_secondary_y_guard(who, secondary_y)
 	trace = _waterfall_trace(who, x, y; measure = measure, legend = legend)
@@ -18714,6 +18832,7 @@ function plot_waterfall!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		ticks = _extended_ticks(; xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat),
 	)
 end
 
@@ -19301,6 +19420,7 @@ function _extended_ohlc_plot(
 	fontsize,
 	grid,
 	show::Bool,
+	ticks,
 )
 	trace = _ohlc_trace(
 		constructor,
@@ -19331,6 +19451,7 @@ function _extended_ohlc_plot(
 		fontsize = fontsize,
 		grid = grid,
 		show = show,
+		ticks = ticks,
 	)
 end
 
@@ -19361,7 +19482,10 @@ function _extended_ohlc_append!(
 	row,
 	col,
 	show,
+	ticks,
+	extra,
 )
+	_extended_reject_unknown(who, extra)
 	_extended_mutator_guard(who, show, row, col)
 	_extended_secondary_y_guard(who, secondary_y)
 	trace = _ohlc_trace(
@@ -19392,6 +19516,7 @@ function _extended_ohlc_append!(
 		height = height,
 		fontsize = fontsize,
 		grid = grid,
+		ticks = ticks,
 	)
 	return nothing
 end
@@ -19400,7 +19525,9 @@ end
 	plot_candlestick(x, open, high, low, close; increasing_color="",
 		decreasing_color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
 		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
-		fontsize=0, grid=true, show=false)
+		fontsize=0, grid=true, xticks=nothing, xticklabels=nothing,
+		xtickformat="", yticks=nothing, yticklabels=nothing, ytickformat="",
+		show=false)
 
 Candlestick chart: for each period `x[i]` a box from `open[i]` to `close[i]`
 with whiskers to `high[i]` and `low[i]`, coloured by direction. Plotly adds a
@@ -19429,10 +19556,18 @@ range slider under the x axis.
 - `fontsize::Real = 0`: global font size in px (`0` = template default).
 - `grid::Union{Bool,Symbol} = true`: `true` keeps the template grid; `false`
   or `:none` hides it, `:x`/`:y`/`:both` choose the axes with grid lines.
+- `xticks = nothing`, `yticks = nothing`: tick positions in data units
+  (numbers; `Date`/`DateTime` values or date strings on a date axis), or the
+  presets `:auto` / `:decades` (log axes only), as for [`xticks!`](@ref);
+  `nothing` keeps plotly's automatic ticks.
+- `xticklabels = nothing`, `yticklabels = nothing`: one label (mathtext) per
+  tick value; needs `xticks`/`yticks`.
+- `xtickformat::AbstractString = ""`, `ytickformat::AbstractString = ""`: d3
+  tick format (`".2f"`, `"\$.0f"`, or a date format such as `"%b %d"`).
 - `show::Bool = false`: open an Electron window and return a `SyncPlot`.
 
-Arrays whose length differs from `length(x)` and non-finite or non-numeric
-prices throw an `ArgumentError`.
+Arrays whose length differs from `length(x)`, non-finite or non-numeric
+prices and invalid tick keywords throw an `ArgumentError`.
 
 # Returns
 A `Plot`, or a `SyncPlot` when `show = true`.
@@ -19463,6 +19598,12 @@ function plot_candlestick(
 	height::Real = 0,
 	fontsize::Real = 0,
 	grid::Union{Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	show::Bool = false,
 )
 	return _extended_ohlc_plot(
@@ -19488,6 +19629,7 @@ function plot_candlestick(
 		fontsize = fontsize,
 		grid = grid,
 		show = show,
+		ticks = _extended_ticks(; xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat),
 	)
 end
 
@@ -19495,7 +19637,8 @@ end
 	plot_candlestick!(fig, x, open, high, low, close; increasing_color="",
 		decreasing_color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
 		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
-		fontsize=0, grid=nothing)
+		fontsize=0, grid=nothing, xticks=nothing, xticklabels=nothing,
+		xtickformat="", yticks=nothing, yticklabels=nothing, ytickformat="")
 	plot_candlestick!(sf::SubplotFigure, x, open, high, low, close;
 		row=nothing, col=nothing, secondary_y=false, inset=nothing, kwargs...)
 
@@ -19544,10 +19687,17 @@ function plot_candlestick!(
 	height::Real = 0,
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	secondary_y::Bool = false,
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	return _extended_ohlc_append!(
 		fig,
@@ -19576,6 +19726,8 @@ function plot_candlestick!(
 		row = row,
 		col = col,
 		show = show,
+		ticks = _extended_ticks(; xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat),
+		extra = kwargs,
 	)
 end
 
@@ -19615,7 +19767,9 @@ end
 	plot_ohlc(x, open, high, low, close; increasing_color="",
 		decreasing_color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
 		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
-		fontsize=0, grid=true, show=false)
+		fontsize=0, grid=true, xticks=nothing, xticklabels=nothing,
+		xtickformat="", yticks=nothing, yticklabels=nothing, ytickformat="",
+		show=false)
 
 OHLC bar chart: for each period `x[i]` a vertical bar from `low[i]` to
 `high[i]` with ticks at `open[i]` (left) and `close[i]` (right), coloured by
@@ -19650,6 +19804,12 @@ function plot_ohlc(
 	height::Real = 0,
 	fontsize::Real = 0,
 	grid::Union{Bool, Symbol} = true,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	show::Bool = false,
 )
 	return _extended_ohlc_plot(
@@ -19675,6 +19835,7 @@ function plot_ohlc(
 		fontsize = fontsize,
 		grid = grid,
 		show = show,
+		ticks = _extended_ticks(; xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat),
 	)
 end
 
@@ -19682,7 +19843,8 @@ end
 	plot_ohlc!(fig, x, open, high, low, close; increasing_color="",
 		decreasing_color="", legend="", xlabel="", ylabel="", xrange=[0, 0],
 		yrange=[0, 0], xscale="", yscale="", title="", width=0, height=0,
-		fontsize=0, grid=nothing)
+		fontsize=0, grid=nothing, xticks=nothing, xticklabels=nothing,
+		xtickformat="", yticks=nothing, yticklabels=nothing, ytickformat="")
 	plot_ohlc!(sf::SubplotFigure, x, open, high, low, close;
 		row=nothing, col=nothing, secondary_y=false, inset=nothing, kwargs...)
 
@@ -19722,10 +19884,17 @@ function plot_ohlc!(
 	height::Real = 0,
 	fontsize::Real = 0,
 	grid::Union{Nothing, Bool, Symbol} = nothing,
+	xticks = nothing,
+	xticklabels = nothing,
+	xtickformat::AbstractString = "",
+	yticks = nothing,
+	yticklabels = nothing,
+	ytickformat::AbstractString = "",
 	secondary_y::Bool = false,
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	return _extended_ohlc_append!(
 		fig,
@@ -19754,6 +19923,8 @@ function plot_ohlc!(
 		row = row,
 		col = col,
 		show = show,
+		ticks = _extended_ticks(; xticks, xticklabels, xtickformat, yticks, yticklabels, ytickformat),
+		extra = kwargs,
 	)
 end
 
@@ -20407,7 +20578,8 @@ function _annotation_axis_exists(layout::Layout, key::Symbol)
 end
 
 # Reference and position of one annotation coordinate. An explicit `xref` /
-# `yref` wins over `coords`.
+# `yref` wins over `coords`. `name` is the keyword the value came from (for
+# the error messages): "x"/"y", or e.g. "xytext" for the text position.
 function _annotation_coordinate(
 	layout::Layout,
 	target,
@@ -20415,10 +20587,10 @@ function _annotation_coordinate(
 	value,
 	coords::Symbol,
 	ref_override,
-	who::AbstractString,
+	who::AbstractString;
+	name::AbstractString = String(letter),
 )
-	name = String(letter)
-	ref_name = name * "ref"
+	ref_name = String(letter) * "ref"
 	if ref_override !== nothing
 		ref_override isa AbstractString || throw(ArgumentError(
 			"$(who): `$(ref_name)` must be a string; got $(repr(ref_override)).",
@@ -20426,8 +20598,8 @@ function _annotation_coordinate(
 		ref = String(ref_override)
 		pattern = letter === :x ? _ANNOTATION_X_REF : _ANNOTATION_Y_REF
 		occursin(pattern, ref) || throw(ArgumentError(
-			"$(who): `$(ref_name)` must be \"paper\", \"$(name)\", \"$(name)2\", … or " *
-			"\"$(name) domain\", \"$(name)2 domain\", …; got $(repr(ref)).",
+			"$(who): `$(ref_name)` must be \"paper\", \"$(letter)\", \"$(letter)2\", … or " *
+			"\"$(letter) domain\", \"$(letter)2 domain\", …; got $(repr(ref)).",
 		))
 		ref == "paper" && return ref, _annotation_fraction(value, who, name, "a figure fraction")
 		axis_ref = replace(ref, " domain" => "")
@@ -20500,6 +20672,346 @@ end
 
 const _ANNOTATION_ALIGN = Dict("left" => :l, "center" => :c, "right" => :r)
 
+# `anchor` names (after `_annotation_anchor` normalises them) => plotly
+# (xanchor, yanchor): the point of the text box that sits at (x, y).
+const _ANNOTATION_ANCHORS = Dict(
+	"center" => ("center", "middle"),
+	"left" => ("left", "middle"),
+	"right" => ("right", "middle"),
+	"top" => ("center", "top"),
+	"bottom" => ("center", "bottom"),
+	"topleft" => ("left", "top"),
+	"topright" => ("right", "top"),
+	"bottomleft" => ("left", "bottom"),
+	"bottomright" => ("right", "bottom"),
+	"topcenter" => ("center", "top"),
+	"bottomcenter" => ("center", "bottom"),
+	"centerleft" => ("left", "middle"),
+	"centerright" => ("right", "middle"),
+)
+
+# (xanchor, yanchor) of an `anchor` value: a Symbol or string such as
+# `:topleft`, `"top left"`, `"upper left"` (matplotlib's names), `:center`.
+function _annotation_anchor(anchor, who::AbstractString)
+	(anchor isa Symbol || anchor isa AbstractString) || throw(ArgumentError(
+		"$(who): `anchor` must be a Symbol or string such as :center, :left, :topright or " *
+		"\"upper left\"; got $(repr(anchor)).",
+	))
+	key = replace(lowercase(String(anchor)), "upper" => "top", "lower" => "bottom", "centre" => "center",
+		"middle" => "center")
+	key = filter(isletter, key)
+	pair = get(_ANNOTATION_ANCHORS, key, nothing)
+	pair === nothing && throw(ArgumentError(
+		"$(who): `anchor` must be :center, :left, :right, :top, :bottom, :topleft, :topright, " *
+		":bottomleft or :bottomright (or matplotlib's \"upper left\", \"center right\", …); " *
+		"got $(repr(anchor)).",
+	))
+	return pair
+end
+
+# px per unit of `units` (:px or :pt) for offsets, font size, padding and edge width.
+function _annotation_units(units, who::AbstractString)
+	name = units isa Symbol ? units : units isa AbstractString ? Symbol(lowercase(units)) : nothing
+	name === :px && return 1.0
+	name === :pt && return _PT_PX
+	throw(ArgumentError("$(who): `units` must be :px or :pt; got $(repr(units))."))
+end
+
+function _annotation_coords(value, who::AbstractString, name::AbstractString)
+	system = (value isa Symbol || value isa AbstractString) ? Symbol(value) : nothing
+	system in _ANNOTATION_COORDS || throw(ArgumentError(
+		"$(who): `$(name)` must be :data, :axes, :paper or :figure; got $(repr(value)).",
+	))
+	return system
+end
+
+# A colour keyword of an annotation through `_color_option` (Z63: grey
+# levels such as "0.35" become "#595959", Colorants hex/rgba). `nothing`
+# and `""` mean unset (""); a number is not a colour here.
+function _annotation_colour(who::AbstractString, name::AbstractString, value)
+	value === nothing && return ""
+	(value isa AbstractString || value isa Symbol || value isa Colors.Colorant) || throw(ArgumentError(
+		"$(who): `$(name)` must be a colour (string, Symbol or Colorant); got $(repr(value)).",
+	))
+	return String(_color_option(value; who = who, name = name))
+end
+
+# Every attribute whose name ends in "color" of an annotation attribute dict
+# (and of its nested `font`/`hoverlabel` dicts) through `_annotation_colour`.
+function _annotation_colour_fields!(fields::Dict{Symbol, Any}, who::AbstractString, prefix::AbstractString)
+	for (key, value) in fields
+		name = prefix * String(key)
+		if value isa Union{PlotlyBase.PlotlyAttribute, AbstractDict}
+			nested = _symbol_dict(value)
+			_annotation_colour_fields!(nested, who, name * "_")
+			fields[key] = nested
+		elseif endswith(String(key), "color") && value !== nothing
+			fields[key] = _annotation_colour(who, name, value)
+		end
+	end
+	return fields
+end
+
+# ── Text fitted to a box (`fit`, `wrap`) ──
+#
+# An annotation with `fit = (w, h)` is named "<prefix><w>:<h>:<fmax>": the
+# box size in the units of its `xref`/`yref` (data units, axis-domain or
+# paper fractions) and the largest font size in px (0: the figure font). Its
+# font size is the largest, at most fmax, at which the text with its padding
+# and border (rotated by `textangle`) fits the box. It is computed when the
+# annotation is added and again by `_finalize_figure!` (room owner
+# `:annotate`), with the final plot-area size, domains and export size.
+const _ANNOTATION_FIT_PREFIX = "plotlysupply:fit:"
+# plotly.js `font.size` has `min: 1`; a box too small for any text gets that.
+const _ANNOTATION_FIT_MIN_FONT = 1.0
+
+function _annotation_fit_spec(item)
+	name = _cmn_mapping_get(item, :name)
+	(name isa AbstractString && startswith(name, _ANNOTATION_FIT_PREFIX)) || return nothing
+	parts = split(name[(ncodeunits(_ANNOTATION_FIT_PREFIX) + 1):end], ':')
+	length(parts) == 3 || return nothing
+	values = [tryparse(Float64, part) for part in parts]
+	any(isnothing, values) && return nothing
+	w, h, fmax = values
+	(isfinite(w) && w > 0 && isfinite(h) && h > 0 && isfinite(fmax) && fmax >= 0) || return nothing
+	return (w = w, h = h, fmax = fmax)
+end
+
+# Domain of axis `key` (`letter` :x or :y): a domain queued in `updates` (the
+# finalizer's pending writes), else the layout's; an overlaying axis
+# (secondary axis) has the domain of the axis it overlays.
+function _annotation_fit_domain(layout::Layout, updates, key::Symbol, letter::Symbol)
+	visited = Set{Symbol}()
+	while !(key in visited)
+		push!(visited, key)
+		queued = updates === nothing ? nothing : get(updates, Symbol(key, :_domain), nothing)
+		if queued isa AbstractVector && length(queued) == 2 && all(_fin_isfinite_real, queued)
+			return (Float64(queued[1]), Float64(queued[2]))
+		end
+		domain = _layout_axis_domain(layout, key)
+		domain === nothing || return domain
+		over = _cmn_mapping_get(get(layout.fields, key, nothing), :overlaying)
+		(over isa AbstractString && occursin(letter === :x ? _ANNOTATION_AX_REF : _ANNOTATION_AY_REF, over) &&
+			over != "pixel" && !endswith(over, " domain")) || break
+		key = _axis_layout_key(over, letter)
+	end
+	return (0.0, 1.0)
+end
+
+# px per unit of annotation reference `ref` along `letter` for a plot region
+# of `Wp` x `Hp` px; `nothing` when unknown (an axis without a known range,
+# or not linear).
+function _annotation_ref_px(layout::Layout, accs, updates, ref::AbstractString, letter::Symbol, Wp::Real, Hp::Real)
+	side = Float64(letter === :x ? Wp : Hp)
+	ref == "paper" && return side
+	axis_ref = replace(ref, " domain" => "")
+	key = _axis_layout_key(axis_ref, letter)
+	lo, hi = _annotation_fit_domain(layout, updates, key, letter)
+	span_px = (hi - lo) * side
+	endswith(ref, " domain") && return span_px
+	_axis_type(layout, key) in ("linear", "-") || return nothing
+	shown = _fin_shown_range(layout, key, accs)
+	shown === nothing && return nothing
+	span = Float64(shown[2] - shown[1])
+	(isfinite(span) && span > 0) || return nothing
+	return span_px / span
+end
+
+# Axes linked by `scaleanchor` draw one unit with px in the ratio
+# `scaleratio`; plotly.js keeps the smaller scale (it shrinks the domain or
+# widens the range of the other axis).
+function _annotation_scale_link(layout::Layout, xref::AbstractString, yref::AbstractString, px, py)
+	(px === nothing || py === nothing) && return px, py
+	any(ref -> ref == "paper" || endswith(ref, " domain"), (xref, yref)) && return px, py
+	xaxis = get(layout.fields, _axis_layout_key(xref, :x), nothing)
+	yaxis = get(layout.fields, _axis_layout_key(yref, :y), nothing)
+	ratio(axis) = (r = _cmn_mapping_get(axis, :scaleratio);
+		r isa Real && !(r isa Bool) && isfinite(r) && r > 0 ? Float64(r) : 1.0)
+	if _cmn_mapping_get(xaxis, :scaleanchor) == yref
+		r = ratio(xaxis)
+		s = min(px, r * py)
+		return s, s / r
+	elseif _cmn_mapping_get(yaxis, :scaleanchor) == xref
+		r = ratio(yaxis)
+		s = min(py, r * px)
+		return s / r, s
+	end
+	return px, py
+end
+
+# Largest font size (px, at most `cap`) at which `text` (as plotly draws it,
+# `_text_extent`) with `pad` + `border` px on each side, rotated by `angle`
+# degrees, fits a `box_w` x `box_h` px box. `rounded`: rounded down to 0.1 px
+# and at least `_ANNOTATION_FIT_MIN_FONT`.
+function _annotation_fit_font(text, box_w::Real, box_h::Real, pad::Real, border::Real, angle::Real, cap::Real;
+		rounded::Bool = true)
+	a, b = _text_extent(text isa AbstractString ? text : string(text), 1.0)
+	c, s = abs(cosd(angle)), abs(sind(angle))
+	frame = 2 * (pad + border) * (c + s)
+	font = Float64(cap)
+	kw, kh = c * a + s * b, s * a + c * b
+	kw > 0 && (font = min(font, (box_w - frame) / kw))
+	kh > 0 && (font = min(font, (box_h - frame) / kh))
+	rounded || return font
+	font >= cap && return Float64(cap)
+	return max(floor(font * 10) / 10, _ANNOTATION_FIT_MIN_FONT)
+end
+
+_annotation_number(value, default::Float64) =
+	value isa Real && !(value isa Bool) && isfinite(value) ? Float64(value) : default
+
+# Box size (px) of a fitted annotation (`item`: its attributes, `spec` from
+# `_annotation_fit_spec`), or `nothing` when a scale is unknown.
+function _annotation_fit_box(layout::Layout, accs, updates, item, spec, Wp::Real, Hp::Real)
+	xref = _cmn_mapping_get(item, :xref)
+	yref = _cmn_mapping_get(item, :yref)
+	(xref isa AbstractString && yref isa AbstractString) || return nothing
+	px = _annotation_ref_px(layout, accs, updates, xref, :x, Wp, Hp)
+	py = _annotation_ref_px(layout, accs, updates, yref, :y, Wp, Hp)
+	px, py = _annotation_scale_link(layout, xref, yref, px, py)
+	(px === nothing || py === nothing) && return nothing
+	return spec.w * px, spec.h * py
+end
+
+# Font size (px) of a fitted annotation, or `nothing` when it cannot be
+# computed; `base_font` is the figure font size (the cap when fmax is 0).
+function _annotation_fit_size(layout::Layout, accs, updates, item, spec, Wp::Real, Hp::Real, base_font::Real)
+	box = _annotation_fit_box(layout, accs, updates, item, spec, Wp, Hp)
+	box === nothing && return nothing
+	pad = _annotation_number(_cmn_mapping_get(item, :borderpad), 1.0)
+	border = _annotation_number(_cmn_mapping_get(item, :borderwidth), 1.0)
+	angle = _annotation_number(_cmn_mapping_get(item, :textangle), 0.0)
+	cap = spec.fmax > 0 ? spec.fmax : Float64(base_font)
+	return _annotation_fit_font(_cmn_mapping_get(item, :text), box[1], box[2], pad, border, angle, cap)
+end
+
+# Plot-region size (px) of a figure laid out for its layout size (or the
+# style's default size), as the margins estimate it.
+function _annotation_plot_px(p::Plot, accs)
+	W, H = _figure_annotation_size(p.layout)
+	margins = _fin_margins(p.layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
+	return max(W - margins.l - margins.r, 1.0), max(H - margins.t - margins.b, 1.0)
+end
+
+# Words of `text` for `wrap = true`: one vector per hard line (`\n`, `<br>`),
+# words split at spaces outside `$…$` math.
+function _annotation_words(text::AbstractString)
+	paragraphs = Vector{Vector{String}}()
+	for line in split(text, r"\n|<br\s*/?>"i)
+		words = String[]
+		buffer = IOBuffer()
+		math = false
+		escaped = false
+		for c in line
+			if c == ' ' && !math
+				word = String(take!(buffer))
+				isempty(word) || push!(words, word)
+			else
+				print(buffer, c)
+				c == '$' && !escaped && (math = !math)
+			end
+			escaped = c == '\\' && !escaped
+		end
+		word = String(take!(buffer))
+		isempty(word) || push!(words, word)
+		push!(paragraphs, words)
+	end
+	return paragraphs
+end
+
+# `paragraphs` broken greedily into lines at most `limit` em wide (a word
+# wider than `limit` gets a line of its own); `widths`: the words' widths,
+# `space`: the width of a space (em).
+function _annotation_greedy_wrap(paragraphs, widths, space::Float64, limit::Float64)
+	lines = String[]
+	for (words, word_widths) in zip(paragraphs, widths)
+		if isempty(words)
+			push!(lines, "")
+			continue
+		end
+		line, line_width = words[1], word_widths[1]
+		for k in 2:length(words)
+			if line_width + space + word_widths[k] <= limit
+				line *= " " * words[k]
+				line_width += space + word_widths[k]
+			else
+				push!(lines, line)
+				line, line_width = words[k], word_widths[k]
+			end
+		end
+		push!(lines, line)
+	end
+	return join(lines, "\n")
+end
+
+# `text` with line breaks inserted so that it fits a `box_w` x `box_h` px box
+# at the largest font size (see `_annotation_fit_font`); among layouts
+# reaching the same size the one with the fewest lines. For each line count
+# the candidate is the narrowest greedy layout with that many lines: greedy
+# breaking at the smallest width limit that gives it, and the limits worth
+# trying are the widths of runs of consecutive words.
+function _annotation_wrap(text::AbstractString, who::AbstractString, align::Symbol, box_w::Real, box_h::Real,
+		pad::Real, border::Real, angle::Real, cap::Real)
+	paragraphs = _annotation_words(text)
+	widths = [[_text_extent(word, 1.0)[1] for word in words] for words in paragraphs]
+	all(isempty, widths) && return text
+	space = _text_extent("a a", 1.0)[1] - _text_extent("aa", 1.0)[1]
+	limits = Float64[]
+	for word_widths in widths, i in eachindex(word_widths)
+		run = 0.0
+		for j in i:lastindex(word_widths)
+			run += word_widths[j] + (j > i ? space : 0.0)
+			push!(limits, run)
+		end
+	end
+	best_text, best_font = text, -Inf
+	counts = Set{Int}()
+	for limit in sort!(unique!(limits))
+		# The relative tolerance keeps a run whose width equals the limit up to
+		# float rounding of the sums on one line.
+		candidate = _annotation_greedy_wrap(paragraphs, widths, space, limit * (1 + 1e-9))
+		lines = count(==('\n'), candidate) + 1
+		lines in counts && continue
+		push!(counts, lines)
+		label = _extended_label(candidate, who, "text"; align = align)
+		font = _annotation_fit_font(label, box_w, box_h, pad, border, angle, cap; rounded = false)
+		# Limits ascend, so line counts descend: `>=` prefers fewer lines at
+		# the same size.
+		font >= best_font && ((best_text, best_font) = (candidate, font))
+	end
+	return best_text
+end
+
+"""
+	_room_place!(plan, ::Val{:annotate})
+
+Room owner `:annotate` (D12 provider): re-fits the font size of every
+`annotate!(...; fit = (w, h))` annotation to its box with the final domains,
+plot-area size and (on the `savefig` copy) export size of this finalize
+pass. Edits only those items of `_room_annotations!(plan)`; a figure without
+fitted annotations is left untouched (its annotation list is not copied).
+"""
+function _room_place!(plan, ::Val{:annotate})
+	existing = get(plan.layout.fields, :annotations, nothing)
+	existing isa AbstractVector || return nothing
+	any(item -> _annotation_fit_spec(item) !== nothing, existing) || return nothing
+	annotations = _room_annotations!(plan)
+	for (index, item) in pairs(annotations)
+		spec = _annotation_fit_spec(item)
+		spec === nothing && continue
+		size = _annotation_fit_size(plan.layout, plan.accs, plan.updates, item, spec, plan.Wp, plan.Hp, plan.font)
+		size === nothing && continue
+		current = _cmn_mapping_get(_cmn_mapping_get(item, :font), :size)
+		(current isa Real && !(current isa Bool) && abs(current - size) < 0.05) && continue
+		fields = _symbol_dict(item)
+		font = _symbol_dict(get(fields, :font, nothing))
+		font[:size] = size
+		fields[:font] = attr(; font...)
+		annotations[index] = attr(; fields...)
+	end
+	return nothing
+end
+
 # ── Whole-figure annotations (`coords = :figure`) ──
 #
 # plotly.js annotations reference only the paper (the plot area inside the
@@ -20557,25 +21069,52 @@ function _figure_annotation_fontsize(item, layout::Layout)
 	return 12.0
 end
 
-# Figure size (px) used for the bottom-margin reservation: the layout size,
-# else plotly's default 700 x 500 (`savefig`'s default size as well).
+# Figure size (px) used for the bottom-margin reservation and the text fit:
+# the layout size, else the active style's default figure size (700 x 500
+# under `:default`, `savefig`'s default size as well).
 function _figure_annotation_size(layout::Layout)
+	default_w, default_h = _style_default_figure_size()
 	side(key, default) = (v = get(layout.fields, key, nothing);
 		v isa Real && !(v isa Bool) && isfinite(v) && v > 0 ? Float64(v) : default)
-	return side(:width, _DEFAULT_EXPORT_WIDTH_PX), side(:height, _DEFAULT_EXPORT_HEIGHT_PX)
+	return side(:width, default_w), side(:height, default_h)
 end
 
-# Re-place every whole-figure annotation of `annotations` (the figure's
-# annotation list, items replaced, never mutated) for the current margins of
-# `p`, raising the bottom margin when a caption reaches below the plot area.
-# Returns the new `margin.b` (px) to write, or `nothing`.
-function _figure_annotations_place!(p::Plot, annotations::Vector{Any})
+"""
+	_figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = nothing,
+		accs = nothing) -> Union{Nothing, Float64}
+
+Re-place every whole-figure annotation (`annotate!(...; coords = :figure)`,
+named `$(_FIGURE_ANNOTATION_PREFIX)…`) of `annotations` for the current
+margins of `p`, and raise the bottom margin when such a caption reaches below
+the plot area. Returns the `margin.b` (px) to write, or `nothing` when the
+margin is large enough.
+
+This is the hook `_finalize_figure!` calls (decision D12, Z47) so that the
+annotations follow later margin changes (`figsize!`, `tight_layout!`,
+legends, colorbars) and the export size:
+- `annotations` is the figure's annotation list; matching items are replaced
+  in it (the items themselves and `p` are never mutated), all others are
+  left as they are;
+- `size = (W, H)`: the figure size in px to place for (the export size on the
+  `savefig` copy); default: the layout size, else the style's default size;
+- `accs`: the axis extents of `p` (`_fin_collect_axes(p)`), when the caller
+  has them, so they are not collected again.
+It is pure in `p` and idempotent: calling it again after the returned margin
+and the replaced annotations are written changes nothing.
+"""
+function _figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = nothing, accs = nothing)
 	specs = [(index, spec) for (index, item) in pairs(annotations)
 		for spec in (_figure_annotation_spec(item),) if spec !== nothing]
 	isempty(specs) && return nothing
 	layout = p.layout
-	W, H = _figure_annotation_size(layout)
-	accs = _fin_collect_axes(p)
+	W, H = if size === nothing
+		_figure_annotation_size(layout)
+	else
+		(length(size) == 2 && all(v -> v isa Real && !(v isa Bool) && isfinite(v) && v > 0, size)) ||
+			throw(ArgumentError("_figure_annotations_place!: `size` must be (width, height) in px; got $(repr(size))."))
+		(Float64(size[1]), Float64(size[2]))
+	end
+	accs === nothing && (accs = _fin_collect_axes(p))
 	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
 	# Room the bottom x-axis tick labels and title take (their automargin push
 	# plus plotly's extra), measured with a zero base margin.
@@ -20624,23 +21163,37 @@ function _extended_annotate!(
 	y,
 	text::AbstractString;
 	coords::Union{Symbol, AbstractString} = :data,
+	xcoords = nothing,
+	ycoords = nothing,
 	offset = (0, 0),
+	units::Union{Symbol, AbstractString} = :px,
 	fontsize::Real = 0,
 	font_size = nothing,
-	color::Union{AbstractString, Symbol} = "",
-	showarrow::Bool = true,
+	color = "",
+	showarrow::Union{Nothing, Bool} = nothing,
+	xytext = nothing,
+	head::Union{Symbol, AbstractString} = :end,
+	anchor = nothing,
+	rotation::Real = 0,
+	background = nothing,
+	background_opacity = nothing,
+	pad = nothing,
+	edgecolor = nothing,
+	edgewidth = nothing,
+	fit = nothing,
+	wrap::Bool = false,
 	xref = nothing,
 	yref = nothing,
 	kwargs...,
 )
 	who = "annotate!"
 	layout = _plot_layout(fig)
-	coordinate_system = Symbol(coords)
-	coordinate_system in _ANNOTATION_COORDS || throw(ArgumentError(
-		"$(who): `coords` must be :data, :axes, :paper or :figure; got $(repr(coords)).",
-	))
+	coordinate_system = _annotation_coords(coords, who, "coords")
+	x_system = xcoords === nothing ? coordinate_system : _annotation_coords(xcoords, who, "xcoords")
+	y_system = ycoords === nothing ? coordinate_system : _annotation_coords(ycoords, who, "ycoords")
+	scale = _annotation_units(units, who)
 	_require_size_option(fontsize, who, "fontsize")
-	font_px = fontsize
+	font_px = fontsize * scale
 	if font_size !== nothing
 		Base.depwarn(
 			"`annotate!(...; font_size = n)` is deprecated; use `fontsize = n`.",
@@ -20651,22 +21204,28 @@ function _extended_annotate!(
 			"$(who): `font_size` (deprecated) and `fontsize` disagree " *
 			"($(repr(font_size)) vs $(repr(fontsize))); pass only `fontsize`.",
 		))
-		font_px = font_size
+		font_px = font_size * scale
 	end
-	text_color = _extended_colour(who, "color", color)
+	text_color = _annotation_colour(who, "color", color)
 	(offset isa Tuple || offset isa AbstractVector) && length(offset) == 2 || throw(ArgumentError(
-		"$(who): `offset` must be a 2-element tuple or vector (dx, dy) in px; got $(repr(offset)).",
+		"$(who): `offset` must be a 2-element tuple or vector (dx, dy) in `units`; got $(repr(offset)).",
 	))
-	dx = _annotation_fraction(offset[begin], who, "offset", "px")
-	dy = _annotation_fraction(offset[end], who, "offset", "px")
+	dx = _annotation_fraction(offset[begin], who, "offset", "px or pt") * scale
+	dy = _annotation_fraction(offset[end], who, "offset", "px or pt") * scale
+	draw_arrow = showarrow === nothing ? fit === nothing : showarrow
+	head_name = Symbol(head)
+	head_name in (:end, :none) || throw(ArgumentError(
+		"$(who): `head` must be :end (an arrowhead at (x, y)) or :none (a plain leader line); got $(repr(head)).",
+	))
+	angle = _annotation_fraction(rotation, who, "rotation", "degrees, counter-clockwise")
 
 	entry = Dict{Symbol, Any}()
 	font = Dict{Symbol, Any}()
 	for (key, value) in kwargs
-		head = Symbol(first(split(String(key), '_')))
-		head in _ANNOTATION_ATTRIBUTE_NAMES || throw(ArgumentError(
+		stem = Symbol(first(split(String(key), '_')))
+		stem in _ANNOTATION_ATTRIBUTE_NAMES || throw(ArgumentError(
 			"$(who): unknown keyword `$(key)`; plotly annotations have no " *
-			"attribute $(repr(String(head))).",
+			"attribute $(repr(String(stem))).",
 		))
 		key in (:x, :y, :text) && throw(ArgumentError(
 			"$(who): `$(key)` is a positional argument; do not pass it as a keyword.",
@@ -20676,7 +21235,7 @@ function _extended_annotate!(
 				"$(who): `font` must be an `attr(...)`, a Dict or a NamedTuple; got $(typeof(value)).",
 			))
 			merge!(font, _symbol_dict(value))
-		elseif head === :font
+		elseif stem === :font
 			attribute = String(key)[(ncodeunits("font_") + 1):end]
 			isempty(attribute) && throw(ArgumentError("$(who): unknown keyword `$(key)`."))
 			font[Symbol(attribute)] = value
@@ -20684,19 +21243,70 @@ function _extended_annotate!(
 			entry[key] = value
 		end
 	end
+	# Z63: every colour goes through `_color_option`.
+	_annotation_colour_fields!(entry, who, "")
+	_annotation_colour_fields!(font, who, "font_")
+	for (given, name, attribute) in (
+		(anchor !== nothing, "anchor", :xanchor), (anchor !== nothing, "anchor", :yanchor),
+		(angle != 0, "rotation", :textangle), (background !== nothing, "background", :bgcolor),
+		(edgecolor !== nothing, "edgecolor", :bordercolor), (edgewidth !== nothing, "edgewidth", :borderwidth),
+		(pad !== nothing, "pad", :borderpad), (head_name !== :end, "head", :arrowhead),
+	)
+		given && haskey(entry, attribute) && throw(ArgumentError(
+			"$(who): `$(name)` and `$(attribute)` set the same thing; pass only one of them.",
+		))
+	end
+	if anchor !== nothing
+		xanchor, yanchor = _annotation_anchor(anchor, who)
+		entry[:xanchor] = xanchor
+		entry[:yanchor] = yanchor
+		# Lines of multi-line text line up on the anchored side.
+		haskey(entry, :align) || (entry[:align] = xanchor)
+	end
+	haskey(entry, :align) && entry[:align] isa Symbol && (entry[:align] = String(entry[:align]))
 	align = get(entry, :align, "center")
 	(align isa AbstractString && haskey(_ANNOTATION_ALIGN, align)) || throw(ArgumentError(
-		"$(who): `align` must be \"left\", \"center\" or \"right\"; got $(repr(align)).",
+		"$(who): `align` must be \"left\", \"center\" or \"right\" (or a Symbol); got $(repr(align)).",
 	))
-	label = _extended_label(text, who, "text"; align = _ANNOTATION_ALIGN[align])
+	angle != 0 && (entry[:textangle] = -Float64(angle))
+	if background !== nothing
+		box_fill = _annotation_colour(who, "background", background)
+		if background_opacity !== nothing && !isempty(box_fill)
+			opacity = _checked_unit_fraction(background_opacity, who, "background_opacity")
+			r, g, b, a = _parse_color(box_fill, who)
+			box_fill = _rgba_string((r, g, b, a * opacity))
+		end
+		isempty(box_fill) || (entry[:bgcolor] = box_fill)
+	end
+	background_opacity !== nothing && background === nothing && throw(ArgumentError(
+		"$(who): `background_opacity` needs `background` (the box colour).",
+	))
+	if edgecolor !== nothing
+		edge = _annotation_colour(who, "edgecolor", edgecolor)
+		isempty(edge) || (entry[:bordercolor] = edge)
+	end
+	for (value, name, attribute) in ((edgewidth, "edgewidth", :borderwidth), (pad, "pad", :borderpad))
+		value === nothing && continue
+		(value isa Real && !(value isa Bool) && isfinite(value) && value >= 0) || throw(ArgumentError(
+			"$(who): `$(name)` must be a non-negative finite number (in `units`); got $(repr(value)).",
+		))
+		entry[attribute] = Float64(value * scale)
+	end
+	# A box drawn through `background`/`edgecolor` gets matplotlib's bbox
+	# padding, 0.3 em of the text size, unless `pad` sets it.
+	if (haskey(entry, :bgcolor) && background !== nothing || haskey(entry, :bordercolor) && edgecolor !== nothing) &&
+			!haskey(entry, :borderpad)
+		pad_font = font_px > 0 ? font_px : _annotation_number(get(font, :size, nothing), _fin_font_size(layout))
+		entry[:borderpad] = round(0.3 * pad_font; digits = 1)
+	end
 
-	x_ref, x_position = _annotation_coordinate(layout, target, :x, x, coordinate_system, xref, who)
-	y_ref, y_position = _annotation_coordinate(layout, target, :y, y, coordinate_system, yref, who)
+	x_ref, x_position = _annotation_coordinate(layout, target, :x, x, x_system, xref, who)
+	y_ref, y_position = _annotation_coordinate(layout, target, :y, y, y_system, yref, who)
 	_annotation_tail!(entry, layout, :x, who)
 	_annotation_tail!(entry, layout, :y, who)
 	# Coordinates in whole-figure fractions (an explicit `xref`/`yref` wins).
-	figure_x = coordinate_system === :figure && xref === nothing
-	figure_y = coordinate_system === :figure && yref === nothing
+	figure_x = x_system === :figure && xref === nothing
+	figure_y = y_system === :figure && yref === nothing
 	if figure_x || figure_y
 		haskey(entry, :name) && throw(ArgumentError(
 			"$(who): `name` cannot be set with `coords = :figure` (it marks the " *
@@ -20713,20 +21323,53 @@ function _extended_annotate!(
 	# figure ("paper") fractions, where plotly's automatic anchor would follow
 	# the position in the figure. Anchor by the position in the cell instead,
 	# as plotly does for the "x domain" references of a Cartesian cell.
-	if coordinate_system === :axes && target.kind !== :xy && !showarrow
-		xref === nothing && !haskey(entry, :xanchor) && (entry[:xanchor] = _annotation_auto_xanchor(x))
-		yref === nothing && !haskey(entry, :yanchor) && (entry[:yanchor] = _annotation_auto_yanchor(y))
+	if target.kind !== :xy && !draw_arrow
+		x_system === :axes && xref === nothing && !haskey(entry, :xanchor) && (entry[:xanchor] = _annotation_auto_xanchor(x))
+		y_system === :axes && yref === nothing && !haskey(entry, :yanchor) && (entry[:yanchor] = _annotation_auto_yanchor(y))
+	end
+	if xytext !== nothing
+		draw_arrow || throw(ArgumentError(
+			"$(who): `xytext` places the text away from (x, y) with an arrow to it; it cannot be " *
+			"combined with `showarrow = false` (use `offset` to move text without an arrow).",
+		))
+		((xytext isa Tuple || xytext isa AbstractVector) && length(xytext) == 2) || throw(ArgumentError(
+			"$(who): `xytext` must be a 2-element tuple or vector (x, y) of the text position, " *
+			"in the coordinates of (x, y); got $(repr(xytext)).",
+		))
+		(dx != 0 || dy != 0) && throw(ArgumentError(
+			"$(who): `xytext` and `offset` both place the text; pass only one of them.",
+		))
+		for key in (:ax, :ay, :axref, :ayref)
+			haskey(entry, key) && throw(ArgumentError(
+				"$(who): `xytext` and `$(key)` both place the arrow tail; pass only one of them.",
+			))
+		end
+		tail_x_ref, tail_x = _annotation_coordinate(layout, target, :x, xytext[begin], x_system, xref, who; name = "xytext")
+		tail_y_ref, tail_y = _annotation_coordinate(layout, target, :y, xytext[end], y_system, yref, who; name = "xytext")
+		(tail_x_ref == "paper" || tail_y_ref == "paper") && throw(ArgumentError(
+			"$(who): `xytext` needs (x, y) on axes (`coords = :data`, or `:axes` on a Cartesian " *
+			"cell): plotly places arrow tails in axis units or px only. For paper or figure " *
+			"positions use `offset` (the text shift in `units`).",
+		))
+		entry[:axref] = tail_x_ref
+		entry[:ayref] = tail_y_ref
+		entry[:ax] = tail_x
+		entry[:ay] = tail_y
+	end
+	if head_name === :none
+		draw_arrow || throw(ArgumentError("$(who): `head = :none` needs an arrow (`showarrow = true`)."))
+		entry[:arrowhead] = 0
 	end
 	if dx != 0 || dy != 0
-		shift_keys = showarrow ? (:ax, :ay, :axref, :ayref) : (:xshift, :yshift)
+		shift_keys = draw_arrow ? (:ax, :ay, :axref, :ayref) : (:xshift, :yshift)
 		for key in shift_keys
 			haskey(entry, key) && throw(ArgumentError(
 				"$(who): `offset` and `$(key)` both move the " *
-				(showarrow ? "text away from the arrow head" : "annotation") *
+				(draw_arrow ? "text away from the arrow head" : "annotation") *
 				"; pass only one of them.",
 			))
 		end
-		if showarrow
+		if draw_arrow
 			# The arrow head stays at (x, y); the text moves by the offset
 			# (plotly's `ay` grows downwards, `offset` upwards).
 			entry[:ax] = dx
@@ -20736,22 +21379,89 @@ function _extended_annotate!(
 			entry[:yshift] = dy
 		end
 	end
+
+	# `fit`: the box (w, h) in the units of the coordinates, placed around
+	# (x, y) like the text (by its anchor); the font shrinks to fit it.
+	fit_box = nothing
+	if fit !== nothing
+		((fit isa Tuple || fit isa AbstractVector) && length(fit) == 2) || throw(ArgumentError(
+			"$(who): `fit` must be a 2-element tuple or vector (width, height) of the box, in " *
+			"the units of the coordinates; got $(repr(fit)).",
+		))
+		w = Float64(_annotation_fraction(fit[begin], who, "fit", "the box width"))
+		h = Float64(_annotation_fraction(fit[end], who, "fit", "the box height"))
+		(w > 0 && h > 0) || throw(ArgumentError(
+			"$(who): `fit` = $(repr(fit)): the box width and height must be positive.",
+		))
+		draw_arrow && throw(ArgumentError(
+			"$(who): `fit` sizes text in a box and cannot draw an arrow; drop `showarrow = true`.",
+		))
+		haskey(entry, :name) && throw(ArgumentError(
+			"$(who): `name` cannot be set with `fit` (it marks the annotation as fitted to its box).",
+		))
+		(figure_x || figure_y) && throw(ArgumentError(
+			"$(who): `fit` takes box sizes in data units or axes/paper fractions; it cannot be " *
+			"combined with `coords = :figure`.",
+		))
+		for (letter, ref, position) in ((:x, x_ref, x_position), (:y, y_ref, y_position))
+			(ref == "paper" || endswith(ref, " domain")) && continue
+			type_name = _axis_type(layout, _axis_layout_key(ref, letter))
+			(position isa Real && type_name in ("linear", "-")) || throw(ArgumentError(
+				"$(who): `fit` needs a linear $(letter) axis (box sizes in data units); axis " *
+				"$(repr(ref)) is $(type_name == "-" ? "a category or date axis" : repr(type_name)). " *
+				"Use `coords = :axes` for a box in fractions of the axes.",
+			))
+		end
+		# Fractions of a pie, polar, ternary, 3-D or map cell are figure
+		# fractions scaled to the cell.
+		target.kind !== :xy && x_system === :axes && xref === nothing && (w *= target.xdomain[2] - target.xdomain[1])
+		target.kind !== :xy && y_system === :axes && yref === nothing && (h *= target.ydomain[2] - target.ydomain[1])
+		fmax = font_px > 0 ? Float64(font_px) : _annotation_number(get(font, :size, nothing), 0.0)
+		fit_box = (w = w, h = h, fmax = fmax)
+		entry[:name] = _ANNOTATION_FIT_PREFIX * "$(w):$(h):$(fmax)"
+	end
+	wrap && fit_box === nothing && throw(ArgumentError(
+		"$(who): `wrap = true` breaks the text into lines that fit the `fit` box; pass `fit = (w, h)`.",
+	))
+
 	font_px > 0 && (font[:size] = font_px)
 	if !isempty(text_color)
 		font[:color] = text_color
-		showarrow && !haskey(entry, :arrowcolor) && (entry[:arrowcolor] = text_color)
+		draw_arrow && !haskey(entry, :arrowcolor) && (entry[:arrowcolor] = text_color)
 	end
-	isempty(font) || (entry[:font] = attr(; font...))
 	entry[:x] = x_position
 	entry[:y] = y_position
 	entry[:xref] = x_ref
 	entry[:yref] = y_ref
-	entry[:text] = label
-	entry[:showarrow] = showarrow
+	entry[:showarrow] = draw_arrow
+	label_text = text
+	if fit_box !== nothing
+		p = _plot_obj(fig)
+		accs = _fin_collect_axes(p)
+		Wp, Hp = _annotation_plot_px(p, accs)
+		base_font = _fin_font_size(layout)
+		cap = fit_box.fmax > 0 ? fit_box.fmax : base_font
+		if wrap
+			pad_px = _annotation_number(get(entry, :borderpad, nothing), 1.0)
+			border_px = _annotation_number(get(entry, :borderwidth, nothing), 1.0)
+			box = _annotation_fit_box(layout, accs, nothing, entry, fit_box, Wp, Hp)
+			# Without a known scale only the box shape (w : h) counts.
+			box === nothing && ((box, pad_px, border_px) = ((fit_box.w, fit_box.h), 0.0, 0.0))
+			label_text = _annotation_wrap(text, who, _ANNOTATION_ALIGN[align], box[1], box[2], pad_px, border_px,
+				-angle, cap)
+		end
+		entry[:text] = _extended_label(label_text, who, "text"; align = _ANNOTATION_ALIGN[align])
+		fitted = _annotation_fit_size(layout, accs, nothing, entry, fit_box, Wp, Hp, base_font)
+		fitted === nothing || (font[:size] = fitted)
+	else
+		entry[:text] = _extended_label(label_text, who, "text"; align = _ANNOTATION_ALIGN[align])
+	end
+	isempty(font) || (entry[:font] = attr(; font...))
 	if figure_x || figure_y
 		# Without an arrow the offset is a shift, which the placement adds to
-		# the figure shift; with an arrow it moved the text (`ax`/`ay`).
-		shift_x, shift_y = showarrow ? (0.0, 0.0) : (Float64(dx), Float64(dy))
+		# the figure shift; with an arrow it moved the text (`ax`/`ay`). A
+		# coordinate in another system is written as "-".
+		shift_x, shift_y = draw_arrow ? (0.0, 0.0) : (Float64(dx), Float64(dy))
 		entry[:name] = _FIGURE_ANNOTATION_PREFIX *
 			"$(figure_x ? Float64(x_position) : "-"):$(figure_y ? Float64(y_position) : "-"):$(shift_x):$(shift_y)"
 	end
@@ -20769,8 +21479,11 @@ function _extended_annotate!(
 end
 
 """
-	annotate!(fig, x, y, text; coords=:data, offset=(0, 0), fontsize=0,
-		color="", showarrow=true, xref=nothing, yref=nothing, kwargs...)
+	annotate!(fig, x, y, text; coords=:data, xcoords=nothing, ycoords=nothing,
+		offset=(0, 0), units=:px, fontsize=0, color="", anchor=nothing,
+		rotation=0, background=nothing, background_opacity=nothing, pad=nothing,
+		edgecolor=nothing, edgewidth=nothing, showarrow=nothing, xytext=nothing,
+		head=:end, fit=nothing, wrap=false, xref=nothing, yref=nothing, kwargs...)
 	annotate!(sf::SubplotFigure, x, y, text; row=nothing, col=nothing,
 		secondary_y=false, inset=nothing, kwargs...)
 
@@ -20784,14 +21497,16 @@ at that position.
   typeset, `\\n` breaks lines; `LaTeXString`s are accepted).
 
 # Keywords
+Position:
 - `coords::Symbol = :data`:
   - `:data`: data coordinates of the figure's (or cell's) x/y axes. On a
     logarithmic axis give the data value (`x = 1000`), not its exponent.
   - `:axes`: fractions of the axes area, `(0, 0)` bottom left, `(1, 1)` top
     right (of the cell's domain for pie, polar, ternary, 3-D and map cells).
-    Without an arrow the text is anchored by its position in the cell (left
-    of 1/3 of the width left-aligned, right of 2/3 right-aligned, else
-    centred; likewise bottom/middle/top), on every kind of cell.
+    Without an arrow and `anchor`, the text is anchored by its position in
+    the cell (left of 1/3 of the width left-aligned, right of 2/3
+    right-aligned, else centred; likewise bottom/middle/top), on every kind
+    of cell.
   - `:paper`: plotly "paper" coordinates, fractions of the plot area inside
     the figure margins (of the whole subplot grid on a `SubplotFigure`);
     values below 0 or above 1 reach into the margins.
@@ -20807,22 +21522,78 @@ at that position.
     changed later (a legend moved below the plot, `tight_layout!`) are not
     followed until the next `annotate!`. `name` and `xshift`/`yshift`
     cannot be combined with it (use `offset`).
-- `offset = (0, 0)`: `(dx, dy)` in px, `dy` upwards. With an arrow the text
-  moves by the offset and the arrow head stays at `(x, y)`; without an arrow the
-  whole annotation is shifted.
-- `fontsize::Real = 0`: text size in px (`0` = figure font).
-- `font_size`: deprecated alias of `fontsize`.
-- `color::Union{AbstractString,Symbol} = ""`: text colour, also used for the
-  arrow unless `arrowcolor` is given (`""` = plotly default).
-- `showarrow::Bool = true`: draw an arrow from the text to `(x, y)`.
+- `xcoords`, `ycoords = nothing`: the coordinate system of `x` or of `y`
+  alone (same values as `coords`, which they default to), as matplotlib's
+  `xycoords = (…, …)`: `annotate!(fig, 3.5, 1.02, "peak"; ycoords = :axes)`
+  puts the text at data x = 3.5 just above the axes.
+- `anchor = nothing`: the point of the text box that sits at `(x, y)` (moved
+  by `offset`): `:center`, `:left`, `:right`, `:top`, `:bottom`, `:topleft`,
+  `:topright`, `:bottomleft`, `:bottomright` (strings and matplotlib's
+  `"upper left"`, `"center right"`, … also work). `anchor = :left` puts the
+  text to the right of the point. It also left/right-aligns the lines of
+  multi-line text unless `align` is given. `nothing` keeps plotly's choice
+  (centred; see `:axes`). Cannot be combined with `xanchor`/`yanchor`.
+- `offset = (0, 0)`: `(dx, dy)` in `units`, `dy` upwards. With an arrow the
+  text moves by the offset and the arrow head stays at `(x, y)`; without an
+  arrow the whole annotation is shifted.
+- `units::Symbol = :px`: unit of `offset`, `fontsize`, `pad` and
+  `edgewidth`: `:px` (CSS px) or `:pt` (1 pt = 4/3 px), e.g. `offset = (3, 0),
+  units = :pt` for a gap of 3 pt whatever the figure size.
 - `xref`, `yref::Union{Nothing,AbstractString} = nothing`: explicit plotly
   references (`"paper"`, `"x2"`, `"y3 domain"`, …) that override `coords` for
   that coordinate; an axis reference takes data units (log-converted like
   `:data`).
+
+Text and box:
+- `fontsize::Real = 0`: text size in `units` (`0` = figure font).
+- `font_size`: deprecated alias of `fontsize`.
+- `color = ""`: text colour (string, Symbol, grey level such as `"0.35"`, or a
+  Colors.jl colour; `""` = plotly default), also used for the arrow unless
+  `arrowcolor` is given.
+- `rotation::Real = 0`: text angle in degrees, counter-clockwise (matplotlib's
+  `rotation`; plotly's `textangle` is clockwise). Cannot be combined with
+  `textangle`.
+- `background = nothing`: colour of a box drawn behind the text (`bgcolor`),
+  hiding the lines and shapes under it; `background_opacity::Real` in
+  `[0, 1]` makes it translucent (multiplied into the colour's alpha).
+- `edgecolor = nothing`, `edgewidth = nothing`: frame colour and width (in
+  `units`; plotly's default 1 px) of that box.
+- `pad = nothing`: space between the text and the box edge, in `units`;
+  default 0.3 × the font size when `background` or `edgecolor` draws a box
+  (matplotlib's bbox padding), else plotly's 1 px.
+- `fit = nothing`: `(w, h)`, a box in the units of the coordinates (data units
+  of linear axes, or axes/paper fractions) placed around `(x, y)` like the
+  text (by `anchor`: centred by default). The text is drawn at the largest
+  size, at most `fontsize` (or the figure font), at which it fits the box
+  with its padding and frame, rotation included; for text centred in a
+  rectangle `x0 … x1`, `y0 … y1` use `annotate!(fig, (x0 + x1) / 2,
+  (y0 + y1) / 2, text; fit = (x1 - x0, y1 - y0))`. The size is computed
+  again whenever the figure is finalized (figure size, margins, ranges,
+  `savefig` size). `fit` draws no arrow; it cannot be combined with
+  `coords = :figure`, `name`, or category, date and logarithmic axes.
+- `wrap::Bool = false`: with `fit`, break the text into lines (at spaces
+  outside `\$…\$`; `\\n` and `<br>` stay line breaks) so that it fits at the
+  largest size. The breaks are chosen for the figure size when `annotate!` is
+  called; the size follows later changes.
+
+Arrow:
+- `showarrow = nothing`: draw an arrow from the text to `(x, y)`; `nothing`
+  means `true`, except with `fit` (`false`).
+- `xytext = nothing`: `(xt, yt)`, the text position in the coordinates of
+  `(x, y)` (axes units: `:data`, or `:axes` on a Cartesian cell), with the
+  arrow (leader line with `head = :none`) from the text to `(x, y)`, as
+  matplotlib's `annotate(text, xy, xytext)`. Cannot be combined with
+  `offset`, `ax`/`ay`/`axref`/`ayref` or `showarrow = false`.
+- `head::Symbol = :end`: `:end` draws an arrowhead at `(x, y)`, `:none` a
+  plain leader line (`arrowhead = 0`). Cannot be combined with `arrowhead`.
+
+Other:
 - `kwargs...`: further plotly annotation attributes, e.g. `arrowhead = 2`,
-  `bgcolor = "white"`, `font = attr(family = "Courier")`, `align = "left"`,
-  `ax`/`ay` (with `axref`/`ayref` set to an axis, in data units). Unknown names
-  throw an `ArgumentError`.
+  `bgcolor = "white"`, `font = attr(family = "Courier")`, `align = "left"`
+  (or `:left`), `ax`/`ay` (with `axref`/`ayref` set to an axis, in data
+  units). Colour attributes (`arrowcolor`, `bgcolor`, `bordercolor`,
+  `font_color`, …) take the same values as `color`. Unknown names throw an
+  `ArgumentError`, as do conflicting keywords (each conflict above).
 
 On a `SubplotFigure` the annotation is placed in cell `row`, `col` (both or
 neither; default: the active cell), against the cell's secondary y axis with
@@ -20838,8 +21609,15 @@ cell becomes the active cell. On a single figure, `row`/`col`/`inset` throw an
 fig = plot_scatter(1:100, (1:100) .^ 2; yscale = "log")
 annotate!(fig, 50, 2500, "knee"; offset = (30, 30), color = "firebrick")
 annotate!(fig, 0.02, 0.95, "(a)"; coords = :axes, showarrow = false, fontsize = 16)
+annotate!(fig, 20, 400, "leader"; xytext = (5, 3000), head = :none)
+annotate!(fig, 80, 6400, "label"; showarrow = false, anchor = :topleft, offset = (3, -3),
+	units = :pt, background = "white", background_opacity = 0.8)
 annotate!(fig, 0.5, 0.01, "Source: simulation"; coords = :figure, showarrow = false,
-	yanchor = "bottom")
+	anchor = :bottom)
+
+block = plot_scatter([0, 4], [0, 1]; mode = "markers")
+rectangle!(block, 0, 0, 4, 1)
+annotate!(block, 2, 0.5, "a long label wrapped to fit the box"; fit = (4, 1), wrap = true)
 ```
 """
 function annotate!(
@@ -20851,8 +21629,8 @@ function annotate!(
 	offset = (0, 0),
 	fontsize::Real = 0,
 	font_size = nothing,
-	color::Union{AbstractString, Symbol} = "",
-	showarrow::Bool = true,
+	color = "",
+	showarrow::Union{Nothing, Bool} = nothing,
 	xref = nothing,
 	yref = nothing,
 	row = nothing,
@@ -21085,8 +21863,10 @@ function plot_sankey!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_sankey!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	trace = _sankey_trace(who, source, target, value; label = label, node_color = node_color, link_color = link_color)
 	title_text = _extended_label(title, who, "title")
@@ -21306,8 +22086,10 @@ function plot_parcoords!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_parcoords!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	trace = _parcoords_trace(who, dimensions; line_color = line_color, colorscale = colorscale)
 	title_text = _extended_label(title, who, "title")
@@ -21559,8 +22341,10 @@ function plot_ternary!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	who = "plot_ternary!"
+	_extended_reject_unknown(who, kwargs)
 	_extended_mutator_guard(who, show, row, col)
 	trace = _ternary_trace(who, a, b, c; mode = mode, color = color, legend = legend, marker_size = marker_size)
 	corner = _ternary_axis_labels(who; alabel = alabel, blabel = blabel, clabel = clabel)
@@ -22681,6 +23465,62 @@ function _apply_geo_figure_options!(
 		apply_template = apply_template,
 		who = options.who,
 	)
+	_geo_legend_clear_of_colorbar!(fig)
+	return nothing
+end
+
+const _GEO_SINGLE_TRACE_TYPES = ("scattergeo", "choropleth", "scattermapbox", "choroplethmapbox", "densitymapbox",
+	"scattermap", "choroplethmap", "densitymap")
+
+# Whether `p` draws a vertical colorbar (plotly puts it right of the plot
+# area): a trace whose own bar shows, or a shown coloraxis bar.
+function _geo_right_colorbar(p::Plot)
+	for (index, trace) in enumerate(p.data)
+		slot = _cbar_slot(trace, index)
+		slot === nothing && continue
+		bar = if slot.coloraxis === nothing
+			slot.shows || continue
+			_cbar_slot_bar(trace, slot)
+		else
+			axis = get(p.layout.fields, Symbol(slot.coloraxis), nothing)
+			_cmn_mapping_get(axis, :showscale) === false && continue
+			_cmn_mapping_get(axis, :colorbar)
+		end
+		_cmn_mapping_get(bar, :orientation) == "h" && continue
+		return true
+	end
+	return false
+end
+
+# Z49: the default legend of a figure is drawn inside the plot area at the
+# corner `set_default_legend_position!` names (top right by default), placed
+# by its right edge. On a single geo/map figure that corner is next to the
+# colorbar, and a legend name with typeset math is widened by MathJax after
+# plotly placed the box, so the box grows over the bar. On such a figure with
+# a vertical colorbar the default legend moves to the mirrored left corner,
+# anchored by its left edge, so it never reaches the bar. Only the default
+# placement moves (a legend placed elsewhere, or a figure without a bar, is
+# left as it is); a later `set_legend!` places it anywhere.
+function _geo_legend_clear_of_colorbar!(fig)
+	p = _plot_obj(fig)
+	legend = get(p.layout.fields, :legend, nothing)
+	legend === nothing && return nothing
+	p.layout.subplots.rows * p.layout.subplots.cols == 1 || return nothing
+	(!isempty(p.data) && all(trace -> trace isa GenericTrace &&
+		string(get(trace.fields, :type, "")) in _GEO_SINGLE_TRACE_TYPES, p.data)) || return nothing
+	position = _DEFAULT_LEGEND_POSITION[]
+	name = String(position)
+	(occursin("right", name) && !startswith(name, "outside")) || return nothing
+	inset = _DEFAULT_LEGEND_INSET[]
+	default = _legend_placement(position, (0.0, 1.0), (0.0, 1.0), inset; figure = true)
+	current = _symbol_dict(legend)
+	all(key -> isequal(get(current, key, nothing), default[key]), (:x, :y, :xanchor, :yanchor)) || return nothing
+	haskey(current, :xref) && return nothing
+	_geo_right_colorbar(p) || return nothing
+	mirrored = _legend_placement(Symbol(replace(name, "right" => "left")), (0.0, 1.0), (0.0, 1.0), inset; figure = true)
+	current[:x] = mirrored[:x]
+	current[:xanchor] = mirrored[:xanchor]
+	relayout!(fig; legend = attr(; current...))
 	return nothing
 end
 

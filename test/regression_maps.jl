@@ -735,3 +735,49 @@ _reg_plain(value) =
 		end
 	end
 end
+
+@testset "regression: a single geo/map figure keeps its legend off the colorbar (Z49)" begin
+	legend(fig) = _reg_fields(_reg_layout(fig)[:legend])
+	at(fig) = (legend(fig)[:x], legend(fig)[:xanchor], legend(fig)[:y], legend(fig)[:yanchor])
+	# The default legend sits at the top right, placed by its right edge; a
+	# legend name with typeset math is widened after placement and grew over
+	# the colorbar plotly draws right of the map. With a vertical bar the
+	# default legend now takes the mirrored top-left corner.
+	geo = plot_choropleth(["France", "Germany"], [1.0, 2.0]; colorscale = "Blues",
+		legend = "Regions \$\\alpha\$", scope = "europe")
+	@test at(geo) == (0.02, "left", 0.97, "top")
+	plot_scattergeo!(geo, [2.35], [48.86]; legend = "cities \$x_1\$")
+	@test at(geo) == (0.02, "left", 0.97, "top")
+	map = plot_choroplethmap(_REG_MAP_SQUARE, ["A"], [1.0]; legend = "areas", style = "white-bg")
+	@test at(map) == (0.02, "left", 0.97, "top")
+	density = plot_densitymap([2.0, 2.5], [2.0, 2.5], [1.0, 2.0]; legend = "density", style = "white-bg")
+	@test at(density) == (0.02, "left", 0.97, "top")
+
+	# No colorbar: the default corner stays.
+	points = plot_scattergeo([2.35, 13.4], [48.86, 52.52]; legend = "cities")
+	@test at(points) == (0.98, "right", 0.97, "top")
+	# Numeric marker colours draw no bar unless `marker_showscale = true`.
+	coloured = plot_scattermap([2.0, 3.0], [48.0, 49.0]; color = [1.0, 2.0], colorscale = "Viridis", legend = "pts")
+	@test at(coloured) == (0.98, "right", 0.97, "top")
+	plot_scattermap!(coloured, [4.0], [50.0]; color = [3.0], colorscale = "Viridis", legend = "bar",
+		trace = attr(marker_showscale = true))
+	@test at(coloured) == (0.02, "left", 0.97, "top")
+	# A horizontal bar below the map does not move the legend.
+	flat = plot_choropleth(["France"], [1.0]; legend = "r", trace = attr(colorbar_orientation = "h"))
+	@test at(flat) == (0.98, "right", 0.97, "top")
+	# A legend placed by the user is left where it is.
+	placed = plot_scattergeo([2.35], [48.86]; legend = "p")
+	set_legend!(placed; position = :bottomright)
+	before = at(placed)
+	plot_choropleth!(placed, ["France"], [1.0]; legend = "r")
+	@test at(placed) == before
+	# A Cartesian figure with a colorbar and the default legend is not a map:
+	# left as it is.
+	heat = plot_heatmap([1 2; 3 4])
+	plot_scatter!(heat, [0, 1], [0, 1]; legend = "line")
+	set_legend!(heat; position = :topright)
+	before = at(heat)
+	@test before == (0.98, "right", 0.97, "top")
+	PlotlySupply._geo_legend_clear_of_colorbar!(heat)
+	@test at(heat) == before
+end
