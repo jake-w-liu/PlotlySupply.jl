@@ -24,14 +24,24 @@ const _TEST_FILES_RUN_FIRST = (
     "modern_maps.jl",
 )
 
+# Scripts that must start with a renderer nobody has used yet, so they cannot
+# be included into the suite's process: each runs in a fresh Julia process,
+# started by mathjax_standalone.jl (`julia --project=. test/<file>.jl ARGS`
+# runs one by hand; the usage line is at the top of each).
+const _TEST_FILES_STANDALONE = (
+    "mathjax_rendering.jl",
+    "mathjax_svg_serialization.jl",
+)
+
 # Every test file in `testdir`, in the order runtests.jl runs them: the files of
-# `_TEST_FILES_RUN_FIRST`, then every other `*.jl` file except the runner and
-# this file in name order, so a new test file runs without being registered.
-# A listed file that no longer exists is skipped here, so the rest of the suite
-# still runs, and reported by hygiene.jl.
+# `_TEST_FILES_RUN_FIRST`, then every other `*.jl` file except the runner, this
+# file and the standalone scripts in name order, so a new test file runs
+# without being registered. A listed file that no longer exists is skipped
+# here, so the rest of the suite still runs, and reported by hygiene.jl.
 function _test_files_in_run_order(testdir::AbstractString)
+    skipped = ("runtests.jl", "testutils.jl", _TEST_FILES_STANDALONE...)
     available = sort!(filter(
-        name -> endswith(name, ".jl") && !(name in ("runtests.jl", "testutils.jl")) &&
+        name -> endswith(name, ".jl") && !(name in skipped) &&
             isfile(joinpath(testdir, name)),
         readdir(testdir),
     ))

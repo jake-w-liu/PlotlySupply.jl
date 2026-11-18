@@ -665,9 +665,11 @@ end
 """
 	_savefig_html(io::IO, p::Plot; background = nothing)
 
-Write `p` as a standalone HTML page that loads plotly.js $(_PLOTLYJS_VERSION) and
-MathJax 2.7.9 from their CDNs. Non-finite numbers become `null` and every
-embedded JSON blob is escaped so user text cannot end the inline script.
+Write `p` as a standalone HTML page. The page embeds the bundled plotly.js
+$(_PLOTLYJS_VERSION) that desktop plots and image exports render with (so it
+draws exactly like them and needs no network for plotly.js) and loads MathJax
+2.7.9 from its CDN when it is opened. Non-finite numbers become `null` and
+every embedded JSON blob is escaped so user text cannot end the inline script.
 """
 function _savefig_html(io::IO, p::Plot; background::Union{Nothing,String} = nothing)
 	lowered = PlotlyBase.JSON.lower(p)
@@ -694,6 +696,9 @@ function _savefig_html(io::IO, p::Plot; background::Union{Nothing,String} = noth
 	div_width = _html_css_length(_lowered_get(layout, :width), "100%")
 	div_height = _html_css_length(_lowered_get(layout, :height), "100%")
 	divid = string(p.divid)
+	# The same patched Plotly.js that desktop plots and image exports use, so
+	# the saved page draws mathematical legends and text exactly like them.
+	plotlyjs_script = _compatible_plotlyjs_inline_script()
 
 	print(
 		io,
@@ -705,7 +710,7 @@ function _savefig_html(io::IO, p::Plot; background::Union{Nothing,String} = noth
   <style>html, body { margin: 0; padding: 0; height: 100%; }</style>
   <script type="text/javascript">window.PlotlyConfig = {MathJaxConfig: 'local'};</script>
 $(_mathjax_head_html())
-  <script src="$(_PLOTLY_CDN_URL)" charset="utf-8"></script>
+$(plotlyjs_script)
 </head>
 <body>
   <div id="$(_html_attribute(divid))" class="plotly-graph-div" style="height:$(div_height); width:$(div_width);"></div>
@@ -2013,7 +2018,9 @@ for a stream or bytes it defaults to `"png"`. png/jpeg/tiff/svg/pdf are drawn
 by plotly.js in a hidden Electron window (no Kaleido or Python needed); eps is
 converted from a PDF print by Ghostscript (`gs` must be on `PATH`); html and
 json are written in-process. JSON and HTML write non-finite numbers (`NaN`,
-`±Inf`) as `null`, which plotly.js draws as a gap.
+`±Inf`) as `null`, which plotly.js draws as a gap. An html file embeds the
+bundled plotly.js renderer (about 4.5 MB) and loads MathJax from its CDN when
+mathematical text is present.
 
 What each file contains:
 - png: 8-bit RGBA of exactly `round(width * scale)` x `round(height * scale)`

@@ -276,6 +276,7 @@ function plot end
 
 include("api.jl")
 include("electron_backend.jl")
+include("plotlyjs_compat_asset.jl")
 include("plotlyjs_compat.jl")
 
 function __init__()

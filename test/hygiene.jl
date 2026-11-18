@@ -182,7 +182,9 @@ end
             for ex in ast.args
                 Meta.isexpr(ex, :using) && _hygiene_imported_roots!(roots, ex)
             end
-            (:Test in roots && :PlotlySupply in roots) || push!(missing_using, name)
+            # (a standalone script is a program of its own, not a Test file)
+            (name in _TEST_FILES_STANDALONE || (:Test in roots && :PlotlySupply in roots)) ||
+                push!(missing_using, name)
 
             name == "testutils.jl" && continue
             used = intersect(
@@ -203,8 +205,14 @@ end
         # The run order lists every test file once: the fixed first files, then
         # the rest in name order; files that are not `.jl` sources are left out.
         order = _test_files_in_run_order(testdir)
-        @test sort(order) == filter(name -> !(name in ("runtests.jl", "testutils.jl")), files)
+        @test sort(order) == filter(
+            name -> !(name in ("runtests.jl", "testutils.jl", _TEST_FILES_STANDALONE...)), files)
         @test allunique(order)
+        # the standalone scripts exist and the suite starts each in its own process
+        @test isempty(filter(!in(files), collect(_TEST_FILES_STANDALONE)))
+        standalone_runner = read(joinpath(testdir, "mathjax_standalone.jl"), String)
+        @test all(name -> occursin("\"" * name * "\"", standalone_runner), _TEST_FILES_STANDALONE)
+        @test "mathjax_standalone.jl" in order
         # every file listed to run first exists (a renamed or removed one would be skipped)
         @test isempty(filter(!in(files), collect(_TEST_FILES_RUN_FIRST)))
         @test order[1:length(_TEST_FILES_RUN_FIRST)] == collect(_TEST_FILES_RUN_FIRST)

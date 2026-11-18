@@ -357,7 +357,7 @@ function _syncplot_html(
 	title::AbstractString = _SYNCPLOT_DEFAULT_TITLE,
 	mathjax::NamedTuple{(:font, :inherit_text_font)} = _mathjax_page_config(),
 )
-	plotlyjs_uri = _plotlyjs_asset_uri()
+	plotlyjs_uri = _plotlyjs_render_asset_uri()
 	divid_js = _json_js(divid)
 	autoplay_js = autoplay ? "true" : "false"
 	timeout_ms = timeout_s * 1_000
@@ -10806,7 +10806,7 @@ function _export_window_html(
 	font::AbstractString = _mathjax_svg_font(),
 	inherit_text_font::Bool = _MATHTEXT_SETTINGS[].inherit_text_font,
 )
-	plotlyjs_uri = _plotlyjs_asset_uri()
+	plotlyjs_uri = _plotlyjs_render_asset_uri()
 	match(r"^[A-Za-z0-9_-]+$", divid) === nothing && throw(ArgumentError(
 		"export window div id must contain only letters, digits, '_' and '-'; got $(repr(divid))",
 	))

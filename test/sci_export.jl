@@ -370,8 +370,18 @@ end
 		scatter(x = [1.0, NaN, 3.0], y = [1.0, Inf, -Inf], name = hostile),
 		Layout(title = hostile, width = 400, height = 300),
 	)
-	html = String(savefig(p; format = "html"))
-	@test occursin("<!DOCTYPE html>", html)
+	page = String(savefig(p; format = "html"))
+	@test occursin("<!DOCTYPE html>", page)
+	# The page embeds plotly.js (the patched renderer of desktop plots and
+	# image exports, with its license notice) instead of loading it from the
+	# CDN. Everything else on the page is checked without that library text,
+	# which legitimately contains "NaN", "Infinity" and "plotlyServerURL".
+	library = PlotlySupply._compatible_plotlyjs_inline_script()
+	@test count(library, page) == 1
+	@test !occursin(PlotlySupply._PLOTLY_CDN_URL, page)
+	@test occursin(PlotlySupply._PLOTLYJS_MATH_FONT_REPLACEMENT, library)
+	@test occursin(read(joinpath(dirname(PlotlySupply._plotlyjs_asset_path()), "LICENSE"), String), library)
+	html = replace(page, library => "<script>/* plotly.js */</script>"; count = 1)
 	@test !occursin("__pwned = 1</script>", html)
 	@test !occursin("<!--<script>", html)
 	@test !occursin("NaN", html)
@@ -380,7 +390,6 @@ end
 	# config, MathJax, plotly.js, newPlot), each closed once.
 	@test length(collect(eachmatch(r"<script\b", html))) == 5
 	@test length(collect(eachmatch(r"</script>", html))) == 5
-	@test occursin(PlotlySupply._PLOTLY_CDN_URL, html)
 	@test occursin("mathjax/2.7.9/MathJax.js", html)
 	@test occursin("SVG: {font: \"Latin-Modern\"}", html)
 	@test occursin("width:400.0px", html) && occursin("height:300.0px", html)
