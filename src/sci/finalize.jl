@@ -2097,7 +2097,7 @@ end
 # Both fall back to doing nothing, so an owner without a provider is a no-op.
 # ---------------------------------------------------------------------------
 
-const _ROOM_OWNERS = (:colorbar, :legend_titles, :grid_titles)
+const _ROOM_OWNERS = (:colorbar, :legend_titles, :grid_titles, :annotate)
 const _ROOM_SIDES = (:top, :bottom, :left, :right)
 const _ROOM_OPPOSITE = Dict(:top => :bottom, :bottom => :top, :left => :right, :right => :left)
 # Gap (px) between the axis labels and the first decoration on a side, and

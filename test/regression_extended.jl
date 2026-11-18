@@ -376,7 +376,9 @@ end
 			fig = Plot()
 			@test _rx_atomic(fig, () -> mutator(fig, args...; show = true), "$(nameof(mutator)): mutators do not take `show`")
 			@test _rx_atomic(fig, () -> mutator(fig, args...; row = 1, col = 1), "$(nameof(mutator)): `row`/`col`")
-			@test_throws MethodError mutator(fig, args...; no_such_option = 1)
+			# Z88: an unknown keyword is an ArgumentError naming the mutator.
+			@test _rx_atomic(fig, () -> mutator(fig, args...; no_such_option = 1),
+				"$(nameof(mutator)): unsupported keyword argument(s) `no_such_option`")
 		end
 	end
 
@@ -692,7 +694,8 @@ end
 			@test _rx_atomic(target, () -> mut(target, data...; show = true), "$(who)!: mutators do not take `show`")
 			@test _rx_atomic(target, () -> mut(target, data...; title = "\$x"), "$(who)!: `title`")
 			empty === nothing || @test _rx_atomic(target, () -> mut(target, empty...), "$(who)!: `")
-			@test_throws MethodError mut(target, data...; no_such_option = 1)
+			@test _rx_atomic(target, () -> mut(target, data...; no_such_option = 1),
+				"$(who)!: unsupported keyword argument(s) `no_such_option`")
 
 			# A SubplotFigure cell of the right kind; the trace is routed there.
 			sf = subplots(1, 2; sync = false, specs = [Spec(kind = kind) Spec(kind = kind)])
@@ -704,7 +707,8 @@ end
 			@test _rx_cell_ref(last(sf.fig.data), kind) == expected
 			@test _rx_atomic(sf.fig, () -> mut(sf, data...; show = true), "$(who)!: mutators do not take `show`")
 			empty === nothing || @test _rx_atomic(sf.fig, () -> mut(sf, empty...; row = 1, col = 1), "$(who)!: `")
-			@test_throws MethodError mut(sf, data...; no_such_option = 1)
+			@test _rx_atomic(sf.fig, () -> mut(sf, data...; no_such_option = 1),
+				"$(who)!: unsupported keyword argument(s) `no_such_option`")
 			wrong = subplots(1, 1; sync = false, specs = reshape([Spec(kind = kind == "xy" ? "domain" : "xy")], 1, 1))
 			@test _rx_atomic(wrong.fig, () -> mut(wrong, data...), "$(who)!: trace type")
 		end
@@ -797,5 +801,358 @@ end
 			@test _rx_atomic(host_linear.fig, call, needle)
 		end
 		@test plot_waterfall!(host_linear, ["a"], [1]) === host_linear
+	end
+end
+
+# Wave 5: tick keywords of the Cartesian extended charts, unknown keywords,
+# annotate!'s per-coordinate systems, colours and text boxes, and the
+# figure-annotation placement hook.
+_rx_ann(fig) = [PlotlySupply._symbol_dict(a) for a in _rx_layout(fig)[:annotations]]
+_rx_last(fig) = last(_rx_ann(fig))
+_rx_font(a) = PlotlySupply._symbol_dict(a[:font])
+
+@testset "regression: extended charts and annotate!, wave 5" begin
+	@testset "tick keywords on funnel, waterfall, candlestick and ohlc (Z31 item 2)" begin
+		f = plot_funnel([3.0, 2.0, 1.0], ["a", "b", "c"]; xticks = [0, 1, 2], xticklabels = ["0", "one", "two"],
+			xtickformat = ".1f")
+		x = _rx_get(_rx_layout(f), :xaxis)
+		@test (x[:tickmode], x[:tickvals], x[:ticktext], x[:tickformat]) == ("array", [0, 1, 2], ["0", "one", "two"], ".1f")
+		# The mutator writes them, on the category stage axis too, and checks
+		# them before the trace is added.
+		@test plot_funnel!(f, [1.0], ["d"]; yticks = ["a", "d"], ytickformat = "") === nothing
+		@test _rx_get(_rx_layout(f), :yaxis, :tickvals) == ["a", "d"]
+		@test length(f.data) == 2
+		@test _rx_atomic(f, () -> plot_funnel!(f, [1.0], ["e"]; xticklabels = ["x"]),
+			"plot_funnel!: `xticklabels` needs `xticks`")
+
+		w = plot_waterfall(["a", "b"], [1.0, 2.0]; yticks = [0, 1.5, 3], ytickformat = ".1f")
+		@test _rx_get(_rx_layout(w), :yaxis, :tickvals) == [0, 1.5, 3]
+		@test _rx_get(_rx_layout(w), :yaxis, :tickformat) == ".1f"
+		plot_waterfall!(w, ["a", "b"], [1.0, 2.0]; yticks = [0, 2, 4], yticklabels = ["0", "\$2\$", "4"])
+		@test _rx_get(_rx_layout(w), :yaxis, :ticktext) == ["0", "\$2\$", "4"]
+
+		day(d) = PlotlySupply.Dates.Date(2024, 1, d)
+		c = plot_candlestick([day(1), day(2)], [1, 2], [2, 3], [0.5, 1.5], [1.8, 2.2]; xticks = [day(1), day(2)],
+			xtickformat = "%b %d")
+		@test _rx_get(_rx_layout(c), :xaxis, :tickvals) == ["2024-01-01", "2024-01-02"]
+		@test _rx_get(_rx_layout(c), :xaxis, :tickformat) == "%b %d"
+		@test _rx_atomic(c, () -> plot_candlestick!(c, [day(3)], [1], [2], [0.5], [1.8]; yticks = [1, 2], yticklabels = ["a"]),
+			"plot_candlestick!: got 1 tick labels for 2 tick values")
+
+		o = plot_ohlc(1:3, [1, 2, 3], [2, 3, 4], [0.5, 1.5, 2.5], [1.8, 2.2, 3.3]; yscale = "log", yticks = :decades)
+		@test (_rx_get(_rx_layout(o), :yaxis, :tickmode), _rx_get(_rx_layout(o), :yaxis, :dtick)) == ("linear", 1)
+		@test _rx_throws(() -> plot_ohlc(1:3, [1, 2, 3], [2, 3, 4], [0.5, 1.5, 2.5], [1.8, 2.2, 3.3]; yticks = :decades),
+			"plot_ohlc: the `:decades` tick preset")
+		plot_ohlc!(o, 4:4, [3], [4], [2.5], [3.5]; xticks = [1, 4], xticklabels = ["start", "end"])
+		@test _rx_get(_rx_layout(o), :xaxis, :ticktext) == ["start", "end"]
+
+		# SubplotFigure: the ticks go to the cell's axes.
+		sf = subplots(1, 2; sync = false)
+		plot_waterfall!(sf, ["a"], [1]; row = 1, col = 2, yticks = [0, 1], yticklabels = ["zero", "one"])
+		cell = PlotlySupply._cell_target(sf; row = 1, col = 2)
+		@test _rx_get(_rx_layout(sf.fig), cell.ykey, :ticktext) == ["zero", "one"]
+		@test !_rx_has(_rx_get(_rx_layout(sf.fig), :yaxis), :ticktext)
+		@test _rx_atomic(sf.fig, () -> plot_candlestick!(sf, 1:2, [1, 2], [2, 3], [0.5, 1.5], [1.8, 2.2]; row = 1, col = 1,
+			yticklabels = ["x"]), "plot_candlestick!: `yticklabels` needs `yticks`")
+	end
+
+	@testset "unknown keywords name the mutator, Plot and SubplotFigure (Z88)" begin
+		fig = plot_candlestick(1:2, [1, 2], [2, 3], [0.5, 1.5], [1.8, 2.2])
+		@test _rx_atomic(fig, () -> plot_ohlc!(fig, 1:1, [1], [2], [0.5], [1.5]; colour = "red", widht = 2),
+			"plot_ohlc!: unsupported keyword argument(s) `colour`, `widht`")
+		sf = subplots(1, 1; sync = false, specs = reshape([Spec(kind = "domain")], 1, 1))
+		@test _rx_atomic(sf.fig, () -> plot_pie!(sf, [1.0, 2.0]; labelz = ["a", "b"]),
+			"plot_pie!: unsupported keyword argument(s) `labelz`")
+	end
+
+	@testset "per-coordinate systems: xcoords, ycoords (Z57)" begin
+		fig = plot_scatter(1:10, 1:10)
+		annotate!(fig, 3.5, 1.02, "peak"; ycoords = :axes, showarrow = false)
+		a = _rx_last(fig)
+		@test (a[:xref], a[:x], a[:yref], a[:y]) == ("x", 3.5, "y domain", 1.02)
+		annotate!(fig, 0.02, 5, "edge"; xcoords = :paper, showarrow = false)
+		a = _rx_last(fig)
+		@test (a[:xref], a[:x], a[:yref], a[:y]) == ("paper", 0.02, "y", 5)
+		# A figure fraction for x only: x is re-placed for the margins, y stays data.
+		annotate!(fig, 0.5, 5, "middle of the figure"; xcoords = :figure, showarrow = false)
+		a = _rx_last(fig)
+		@test (a[:xref], a[:yref], a[:y]) == ("paper", "y", 5)
+		@test a[:name] == "plotlysupply:figure:0.5:-:0.0:0.0"
+		@test _rx_has(a, :xshift) && !_rx_has(a, :yshift)
+		# coords sets the default of both.
+		annotate!(fig, 0.5, 7, "axes x"; coords = :axes, ycoords = :data, showarrow = false)
+		a = _rx_last(fig)
+		@test (a[:xref], a[:yref], a[:y]) == ("x domain", "y", 7)
+		# A data coordinate on a logarithmic axis is converted per coordinate.
+		logfig = plot_scatter(1:3, [1, 10, 100]; yscale = "log")
+		annotate!(logfig, 0.5, 100, "log y"; xcoords = :axes)
+		a = _rx_last(logfig)
+		@test (a[:xref], a[:x], a[:yref], a[:y]) == ("x domain", 0.5, "y", 2.0)
+		n = length(_rx_ann(fig))
+		@test _rx_atomic(fig, () -> annotate!(fig, 1, 1, "x"; xcoords = :pixels), "annotate!: `xcoords` must be :data, :axes, :paper or :figure")
+		@test _rx_atomic(fig, () -> annotate!(fig, 1, 1.5, "x"; ycoords = :figure), "annotate!: `y` = 1.5 is outside the figure")
+		@test length(_rx_ann(fig)) == n
+		# A pie cell: an x in cell fractions is anchored by its place in the cell.
+		pies = subplots(1, 2; sync = false, specs = [Spec(kind = "domain") Spec(kind = "domain")])
+		plot_pie!(pies, [1, 2]; row = 1, col = 2)
+		annotate!(pies, 1.0, 0.5, "right"; row = 1, col = 2, xcoords = :axes, ycoords = :paper, showarrow = false)
+		a = _rx_last(pies.fig)
+		@test a[:xanchor] == "right" && !_rx_has(a, :yanchor)
+	end
+
+	@testset "colours go through _color_option (Z63)" begin
+		fig = plot_scatter(1:3, 1:3)
+		annotate!(fig, 1, 1, "c"; color = "0.35", arrowcolor = :red, bgcolor = PlotlySupply.Colors.RGB(0, 0, 1))
+		a = _rx_last(fig)
+		@test (_rx_font(a)[:color], a[:arrowcolor], a[:bgcolor]) == ("#595959", "red", "#0000FF")
+		annotate!(fig, 1, 1, "f"; showarrow = false, font = attr(color = "0.5"), bordercolor = "0",
+			hoverlabel = attr(bgcolor = "1"))
+		a = _rx_last(fig)
+		@test _rx_font(a)[:color] == "#808080"
+		@test a[:bordercolor] == "#000000"
+		@test PlotlySupply._symbol_dict(a[:hoverlabel])[:bgcolor] == "#FFFFFF"
+		annotate!(fig, 1, 1, "g"; color = :teal, edgecolor = "0.2", background = PlotlySupply.Colors.RGBA(1, 0, 0, 0.5))
+		a = _rx_last(fig)
+		@test (_rx_font(a)[:color], a[:bordercolor], a[:bgcolor]) == ("teal", "#333333", "rgba(255,0,0,0.5)")
+		n = length(_rx_ann(fig))
+		for (call, needle) in (
+			(() -> annotate!(fig, 1, 1, "x"; color = 0.5), "annotate!: `color` must be a colour"),
+			(() -> annotate!(fig, 1, 1, "x"; arrowcolor = "not-a-colour"), "annotate!: `arrowcolor`: invalid colour"),
+			(() -> annotate!(fig, 1, 1, "x"; font_color = "1.5"), "annotate!: `font_color`"),
+			(() -> annotate!(fig, 1, 1, "x"; background = "nope"), "annotate!: `background`"),
+		)
+			@test _rx_atomic(fig, call, needle)
+		end
+		@test length(_rx_ann(fig)) == n
+	end
+
+	@testset "anchor, units, background box, rotation, leader arrows (W8)" begin
+		fig = plot_scatter([0.0, 10.0], [0.0, 5.0]; mode = "markers")
+		annotate!(fig, 2, 2, "a<br>b"; showarrow = false, anchor = :topleft, offset = (3, -3), units = :pt)
+		a = _rx_last(fig)
+		@test (a[:xanchor], a[:yanchor], a[:align]) == ("left", "top", "left")
+		@test (a[:xshift], a[:yshift]) == (4.0, -4.0)
+		annotate!(fig, 2, 2, "b"; showarrow = false, anchor = "upper right", align = :center, fontsize = 9, units = :pt)
+		a = _rx_last(fig)
+		@test (a[:xanchor], a[:yanchor], a[:align], _rx_font(a)[:size]) == ("right", "top", "center", 12.0)
+		for (name, expected) in ((:bottom, ("center", "bottom")), ("center left", ("left", "middle")),
+				(:lower_right, ("right", "bottom")), ("centre", ("center", "middle")))
+			annotate!(fig, 1, 1, "c"; showarrow = false, anchor = name)
+			@test (_rx_last(fig)[:xanchor], _rx_last(fig)[:yanchor]) == expected
+		end
+		# A box: background (translucent), edge, matplotlib's 0.3 em padding.
+		annotate!(fig, 5, 2.5, "box"; showarrow = false, background = "white", background_opacity = 0.5, edgecolor = "black",
+			edgewidth = 1.5)
+		a = _rx_last(fig)
+		@test (a[:bgcolor], a[:bordercolor], a[:borderwidth], a[:borderpad]) == ("rgba(255,255,255,0.5)", "black", 1.5, 3.6)
+		annotate!(fig, 5, 2.5, "pad"; showarrow = false, background = "white", pad = 3, units = :pt, fontsize = 10)
+		a = _rx_last(fig)
+		@test (a[:bgcolor], a[:borderpad]) == ("white", 4.0)
+		# A raw bgcolor keeps plotly's padding (1.x output unchanged).
+		annotate!(fig, 5, 2.5, "raw"; showarrow = false, bgcolor = "white")
+		@test !_rx_has(_rx_last(fig), :borderpad)
+		# rotation is counter-clockwise; plotly's textangle clockwise.
+		annotate!(fig, 1, 4, "r"; showarrow = false, rotation = 30)
+		@test _rx_last(fig)[:textangle] == -30.0
+		annotate!(fig, 1, 4, "r0"; showarrow = false, rotation = 0)
+		@test !_rx_has(_rx_last(fig), :textangle)
+		# Leader line / arrow from the text at xytext to (x, y).
+		annotate!(fig, 7, 1, "leader"; xytext = (6, 2), head = :none)
+		a = _rx_last(fig)
+		@test (a[:axref], a[:ax], a[:ayref], a[:ay], a[:arrowhead], a[:showarrow]) == ("x", 6, "y", 2, 0, true)
+		annotate!(fig, 0.5, 0.5, "axes"; coords = :axes, xytext = (0.2, 0.8))
+		a = _rx_last(fig)
+		@test (a[:axref], a[:ax], a[:ayref], a[:ay]) == ("x domain", 0.2, "y domain", 0.8)
+		@test !_rx_has(a, :arrowhead)
+		logfig = plot_scatter(1:3, [1, 10, 100]; yscale = "log")
+		annotate!(logfig, 2, 10, "log tail"; xytext = (1, 1000))
+		@test (_rx_last(logfig)[:ay], _rx_last(logfig)[:y]) == (3.0, 1.0)
+
+		n = length(_rx_ann(fig))
+		for (call, needle) in (
+			(() -> annotate!(fig, 1, 1, "x"; anchor = :middleish), "annotate!: `anchor` must be :center"),
+			(() -> annotate!(fig, 1, 1, "x"; anchor = 3), "annotate!: `anchor` must be a Symbol or string"),
+			(() -> annotate!(fig, 1, 1, "x"; anchor = :left, xanchor = "left"), "`anchor` and `xanchor` set the same thing"),
+			(() -> annotate!(fig, 1, 1, "x"; rotation = 10, textangle = 3), "`rotation` and `textangle`"),
+			(() -> annotate!(fig, 1, 1, "x"; background = "white", bgcolor = "red"), "`background` and `bgcolor`"),
+			(() -> annotate!(fig, 1, 1, "x"; edgecolor = "red", bordercolor = "red"), "`edgecolor` and `bordercolor`"),
+			(() -> annotate!(fig, 1, 1, "x"; edgewidth = 1, borderwidth = 1), "`edgewidth` and `borderwidth`"),
+			(() -> annotate!(fig, 1, 1, "x"; pad = 1, borderpad = 1), "`pad` and `borderpad`"),
+			(() -> annotate!(fig, 1, 1, "x"; head = :none, arrowhead = 2), "`head` and `arrowhead`"),
+			(() -> annotate!(fig, 1, 1, "x"; head = :both), "annotate!: `head` must be :end"),
+			(() -> annotate!(fig, 1, 1, "x"; head = :none, showarrow = false), "`head = :none` needs an arrow"),
+			(() -> annotate!(fig, 1, 1, "x"; units = :cm), "annotate!: `units` must be :px or :pt"),
+			(() -> annotate!(fig, 1, 1, "x"; background_opacity = 0.3), "`background_opacity` needs `background`"),
+			(() -> annotate!(fig, 1, 1, "x"; background = "white", background_opacity = 2), "`background_opacity` must be a number in [0, 1]"),
+			(() -> annotate!(fig, 1, 1, "x"; pad = -1), "annotate!: `pad` must be a non-negative"),
+			(() -> annotate!(fig, 1, 1, "x"; rotation = NaN), "annotate!: `rotation` must be a finite number"),
+			(() -> annotate!(fig, 1, 1, "x"; xytext = (1, 2), showarrow = false), "`xytext` places the text away"),
+			(() -> annotate!(fig, 1, 1, "x"; xytext = (1, 2), offset = (3, 3)), "`xytext` and `offset`"),
+			(() -> annotate!(fig, 1, 1, "x"; xytext = (1, 2), ax = 3), "`xytext` and `ax`"),
+			(() -> annotate!(fig, 1, 1, "x"; xytext = (1, 2, 3)), "`xytext` must be a 2-element"),
+			(() -> annotate!(fig, 0.1, 0.1, "x"; coords = :paper, xytext = (0.2, 0.2)), "`xytext` needs (x, y) on axes"),
+			(() -> annotate!(fig, 1, 1, "x"; xytext = (Inf, 2)), "annotate!: `xytext` must be finite"),
+		)
+			@test _rx_atomic(fig, call, needle)
+		end
+		@test length(_rx_ann(fig)) == n
+	end
+
+	@testset "text fitted to a box: fit, wrap, refit by the finalizer (W8)" begin
+		fig = plot_scatter([0.0, 10.0], [0.0, 5.0]; mode = "markers")
+		xrange!(fig, (0, 10)); yrange!(fig, (0, 5))
+		annotate!(fig, 5, 4, "box"; fit = (2, 0.5), fontsize = 30)
+		a = _rx_last(fig)
+		@test a[:showarrow] == false
+		@test a[:name] == "plotlysupply:fit:2.0:0.5:30.0"
+		# The font size is the largest that fits the box (and at most 30 px).
+		Wp, Hp = PlotlySupply._annotation_plot_px(fig, PlotlySupply._fin_collect_axes(fig))
+		box_w, box_h = 2 / 10 * Wp, 0.5 / 5 * Hp
+		size = _rx_font(a)[:size]
+		tw, th = PlotlySupply._text_extent(a[:text], size)
+		@test size < 30
+		@test tw + 4 <= box_w && th + 4 <= box_h      # padding 1 px + border 1 px on each side
+		tw2, th2 = PlotlySupply._text_extent(a[:text], size + 0.2)
+		@test tw2 + 4 > box_w || th2 + 4 > box_h       # 0.2 px more does not fit
+		# Text that fits keeps its size: never grown past fontsize / the figure font.
+		annotate!(fig, 5, 1, "x"; fit = (4, 2))
+		@test _rx_font(_rx_last(fig))[:size] == 12.0
+		# wrap: the line breaks giving the largest size, fewest lines on a tie.
+		annotate!(fig, 5, 2.5, "the quick brown fox jumps over the lazy dog"; fit = (4, 1), wrap = true)
+		a = _rx_last(fig)
+		@test a[:text] == "the quick brown fox<br>jumps over the lazy dog"
+		@test _rx_font(a)[:size] == 12.0
+		annotate!(fig, 5, 2.5, "a b"; fit = (4, 1), wrap = true)
+		@test _rx_last(fig)[:text] == "a b"
+		# A rotated label in a tall box.
+		annotate!(fig, 9, 2.5, "rotated label in a tall box"; fit = (1, 4), rotation = 90)
+		a = _rx_last(fig)
+		tw, th = PlotlySupply._text_extent(a[:text], _rx_font(a)[:size])
+		@test th + 4 <= 1 / 10 * Wp && tw + 4 <= 4 / 5 * Hp
+		@test _rx_font(a)[:size] > 6
+		# The finalizer refits for the export size (smaller in a smaller
+		# figure), and a second pass changes nothing.
+		fitted(f) = [_rx_font(x)[:size] for x in _rx_ann(f) if startswith(string(get(x, :name, "")), "plotlysupply:fit:")]
+		small = PlotlySupply._finalize_export_copy(fig, (width = 350, height = 250))
+		@test all(fitted(small) .<= fitted(fig))
+		@test fitted(small)[1] < fitted(fig)[1]
+		@test PlotlySupply._finalize_figure!(fig) == false
+		# A figure-size change refits the live figure as well.
+		before = fitted(fig)
+		relayout!(fig; width = 1400, height = 1000)
+		PlotlySupply._finalize_figure!(fig)
+		@test fitted(fig)[1] > before[1]
+		@test PlotlySupply._finalize_figure!(fig) == false
+		# wrap: the breaks are chosen again for the export size (a narrow,
+		# tall export takes more lines at a larger size than the live breaks
+		# would get), and kept when the text was replaced after annotate!.
+		pangram = "the quick brown fox: jumps over the lazy dog"
+		function wrapped_figure()
+			f = plot_scatter([0.0, 10.0], [0.0, 5.0]; mode = "markers", width = 700, height = 500)
+			xrange!(f, (0, 10)); yrange!(f, (0, 5))
+			annotate!(f, 5, 2.5, pangram; fit = (4, 1), wrap = true)
+			return f
+		end
+		function set_last!(f, key, value)
+			items = collect(Any, f.layout.fields[:annotations])
+			fields = PlotlySupply._symbol_dict(items[end])
+			fields[key] = value
+			items[end] = attr(; fields...)
+			relayout!(f; annotations = items)
+		end
+		narrow_export(f) = _rx_last(PlotlySupply._finalize_export_copy(f, (width = 300, height = 900)))
+		tall = wrapped_figure()
+		live = _rx_last(tall)
+		@test live[:name] == "plotlysupply:fit:4.0:1.0:0.0:wrap:c:$(pangram)"
+		@test PlotlySupply._annotation_fit_spec(live).wrap == (align = :c, source = pangram)
+		narrow = narrow_export(tall)
+		lines(a) = count("<br>", a[:text]) + 1
+		@test lines(narrow) > lines(live)
+		@test narrow[:text] in [PlotlySupply._label(c) for c in PlotlySupply._annotation_wrap_candidates(pangram)]
+		@test PlotlySupply._finalize_figure!(tall) == false
+		# The same annotation without the wrap spec keeps the live breaks at a
+		# smaller size in that export.
+		kept = wrapped_figure()
+		set_last!(kept, :name, "plotlysupply:fit:4.0:1.0:0.0")
+		kept_export = narrow_export(kept)
+		@test kept_export[:text] == live[:text]
+		@test _rx_font(narrow)[:size] > _rx_font(kept_export)[:size]
+		# A text replaced after annotate! is kept (and only resized).
+		set_last!(tall, :text, "edited text")
+		@test narrow_export(tall)[:text] == "edited text"
+		# Malformed fit names are not fitted annotations.
+		for name in ("plotlysupply:fit:1:1", "plotlysupply:fit:1:1:0:wrap", "plotlysupply:fit:1:1:0:wrap:x:text",
+				"plotlysupply:fit:1:1:0:nowrap:c:text")
+			@test PlotlySupply._annotation_fit_spec(attr(name = name)) === nothing
+		end
+		# Fractions of the axes; a pie cell scales the box to the cell.
+		annotate!(fig, 0.5, 0.5, "axes box"; coords = :axes, fit = (0.2, 0.1))
+		@test _rx_last(fig)[:name] == "plotlysupply:fit:0.2:0.1:0.0"
+		pies = subplots(1, 2; sync = false, specs = [Spec(kind = "domain") Spec(kind = "domain")])
+		plot_pie!(pies, [1, 2]; row = 1, col = 2)
+		annotate!(pies, 0.5, 0.5, "pie"; row = 1, col = 2, coords = :axes, fit = (0.5, 0.2))
+		cell = PlotlySupply._cell_target(pies; row = 1, col = 2)
+		@test _rx_last(pies.fig)[:name] ==
+			"plotlysupply:fit:$(0.5 * (cell.xdomain[2] - cell.xdomain[1])):$(0.2 * (cell.ydomain[2] - cell.ydomain[1])):0.0"
+		# A figure without fitted annotations is not touched by the provider.
+		plain = plot_scatter(1:3, 1:3)
+		annotate!(plain, 1, 1, "plain")
+		@test PlotlySupply._finalize_figure!(plain) == false
+
+		cats = plot_scatter(["a", "b"], [1, 2])
+		logfig = plot_scatter(1:3, [1, 10, 100]; yscale = "log")
+		n = length(_rx_ann(fig))
+		for (target, call, needle) in (
+			(fig, () -> annotate!(fig, 1, 1, "x"; fit = (1, 1), showarrow = true), "`fit` sizes text in a box and cannot draw an arrow"),
+			(fig, () -> annotate!(fig, 1, 1, "x"; fit = (0, 1)), "the box width and height must be positive"),
+			(fig, () -> annotate!(fig, 1, 1, "x"; fit = (1, 2, 3)), "`fit` must be a 2-element"),
+			(fig, () -> annotate!(fig, 1, 1, "x"; fit = (1, 1), name = "mine"), "`name` cannot be set with `fit`"),
+			(fig, () -> annotate!(fig, 0.5, 0.5, "x"; coords = :figure, fit = (0.1, 0.1)), "cannot be combined with `coords = :figure`"),
+			(fig, () -> annotate!(fig, 1, 1, "x"; wrap = true), "`wrap = true` breaks the text into lines"),
+			(cats, () -> annotate!(cats, "a", 1, "x"; fit = (1, 1)), "`fit` needs a linear x axis"),
+			(logfig, () -> annotate!(logfig, 2, 10, "x"; fit = (1, 1)), "`fit` needs a linear y axis"),
+		)
+			@test _rx_atomic(target, call, needle)
+		end
+		@test length(_rx_ann(fig)) == n
+	end
+
+	@testset "_figure_annotations_place! is pure and idempotent, with a size (Z47)" begin
+		json = PlotlySupply.PlotlyBase.JSON.json
+		fig = plot_scatter(1:3, 1:3; width = 600, height = 400)
+		relayout!(fig; margin = attr(l = 60, r = 40, t = 50, b = 70))
+		annotate!(fig, 0.25, 0.75, "inside"; coords = :figure, showarrow = false)
+		annotate!(fig, 1, 1, "data")
+		# The margins change after the annotation was placed.
+		relayout!(fig; margin = attr(l = 100, r = 40, t = 50, b = 70))
+		before = json(fig)
+		items = collect(Any, _rx_layout(fig)[:annotations])
+		originals = copy(items)
+		@test PlotlySupply._figure_annotations_place!(fig, items) === nothing
+		@test json(fig) == before                                  # the figure is not written
+		@test items[2] === originals[2]                            # other annotations untouched
+		@test items[1] !== originals[1]                            # replaced, not mutated
+		@test PlotlySupply._symbol_dict(originals[1])[:xshift] ≈ 0.25 * (60 + 40) - 60
+		@test PlotlySupply._symbol_dict(items[1])[:xshift] ≈ 0.25 * (100 + 40) - 100
+		relayout!(fig; annotations = items)
+		again = collect(Any, _rx_layout(fig)[:annotations])
+		@test PlotlySupply._figure_annotations_place!(fig, again) === nothing
+		@test all(i -> isequal(PlotlySupply._symbol_dict(again[i]), PlotlySupply._symbol_dict(items[i])), eachindex(items))
+
+		# A tall caption: the bottom margin it needs is capped at half the
+		# figure height of `size` (the export size on a savefig copy).
+		caption = plot_scatter(1:3, 1:3; width = 600, height = 400)
+		annotate!(caption, 0.5, 0.0, join(fill("caption line", 6), "<br>"); coords = :figure, showarrow = false)
+		items = collect(Any, _rx_layout(caption)[:annotations])
+		b_now = _rx_get(_rx_layout(caption), :margin, :b)
+		@test PlotlySupply._figure_annotations_place!(caption, copy(items)) === nothing   # placed already
+		relayout!(caption; margin_b = 20)
+		@test PlotlySupply._figure_annotations_place!(caption, copy(items); size = (600, 160)) == 80.0   # H / 2 of `size`
+		@test PlotlySupply._figure_annotations_place!(caption, copy(items); size = (600, 400)) == b_now
+		@test PlotlySupply._figure_annotations_place!(caption, copy(items)) == b_now     # the layout size
+		@test _rx_throws(() -> PlotlySupply._figure_annotations_place!(caption, items; size = (0, 10)),
+			"_figure_annotations_place!: `size` must be (width, height) in px")
+		@test _rx_throws(() -> PlotlySupply._figure_annotations_place!(caption, items; size = (600,)),
+			"_figure_annotations_place!: `size`")
 	end
 end
