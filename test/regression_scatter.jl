@@ -786,15 +786,18 @@ _rsc_traces(fig) = [
 	# two-sided whatever the Cartesian one-sided limits (D11) accept.
 	@test occursin("must differ", _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; trange = (10, 10))).msg)
 	@test occursin("must be numbers", _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; rrange = ("a", "b"))).msg)
+	# (`rrange` takes one-sided limits since wave 5b: D11; only a `missing`
+	# bound is an error there.)
 	for partial in ((nothing, 2), [1, nothing], (0, missing))
 		for keyword in (:rrange, :trange)
+			keyword === :rrange && partial !== (0, missing) && continue
 			err = _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; keyword => partial))
 			@test err isa ArgumentError && startswith(err.msg, "plot_scatterpolar:") &&
 				occursin("`$(keyword)` must give both bounds", err.msg)
 		end
 		target = plot_scatterpolar([0, 90], [1, 2])
 		snapshot = _rsc_snapshot(target)
-		err = _rsc_error(() -> plot_scatterpolar!(target, [0, 90], [2, 1]; rrange = partial))
+		err = _rsc_error(() -> plot_scatterpolar!(target, [0, 90], [2, 1]; trange = partial))
 		@test err isa ArgumentError && startswith(err.msg, "plot_scatterpolar!:")
 		@test _rsc_unchanged(target, snapshot)
 	end
@@ -1814,4 +1817,51 @@ Base.getindex(v::_RscCountingVector, i::Int) = (v.reads[] += 1; v.data[i])
 	@test counted.reads[] == 0
 	plot_scatter(x, counted; legend = "data")
 	@test counted.reads[] <= n
+end
+
+@testset "scatter family: polar radial one-sided limits and bound types (Z51, D11)" begin
+	rget(fig, key) = _rsc_get(_rsc_fields(_rsc_fields(fig.layout.fields[:polar])[:radialaxis]), key)
+	opts(fig) = (o = rget(fig, :autorangeoptions); o === nothing ? Dict{Symbol, Any}() : _rsc_fields(o))
+	f = plot_scatterpolar([0, 90, 180], [1.0, 2, 3]; rrange = (0, nothing))
+	@test rget(f, :autorange) === true
+	@test opts(f)[:minallowed] == 0
+	@test !haskey(opts(f), :maxallowed)
+	f = plot_scatterpolar([0, 90, 180], [1.0, 2, 3]; rrange = (nothing, 5))
+	@test opts(f)[:maxallowed] == 5
+	# The export copy keeps the encoding (Z38).
+	_, layout = _rsc_export(f)
+	@test layout["polar"]["radialaxis"]["autorangeoptions"]["maxallowed"] == 5
+	@test layout["polar"]["radialaxis"]["autorange"] === true
+	# A mutator replaces it, and a full range replaces a limit.
+	plot_scatterpolar!(f, [0, 90], [1.0, 2]; rrange = (1, 4))
+	@test rget(f, :range) == [1, 4]
+	@test isempty(opts(f))
+	plot_scatterpolar!(f, [0, 90], [1.0, 2]; rrange = (nothing, 3))
+	@test opts(f)[:maxallowed] == 3
+	# A fixed lower end with the upper one open.
+	g = plot_scatterpolar([0, 90], [1.0, 100]; rrange = (1, nothing))
+	@test rget(g, :autorange) === true
+	@test opts(g)[:minallowed] == 1
+	# Errors: both ends open, a non-number, trange stays two-sided.
+	err = _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; rrange = (nothing, nothing), trange = (0, nothing)))
+	@test err isa ArgumentError && startswith(err.msg, "plot_scatterpolar:")
+	err = _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; rrange = ("a", nothing)))
+	@test err isa ArgumentError && startswith(err.msg, "plot_scatterpolar:")
+	err = _rsc_error(() -> plot_scatterpolar([0, 90], [1, 2]; rrange = (true, nothing)))
+	@test err isa ArgumentError && startswith(err.msg, "plot_scatterpolar:")
+	# Linear and autotyped axes reject non-numeric, non-date bounds.
+	for bounds in (("a", "b"), ("a", nothing), (nothing, "b"))
+		err = _rsc_error(() -> plot_scatter(1:3, [1.0, 2, 3]; yrange = bounds))
+		@test err isa ArgumentError && startswith(err.msg, "plot_scatter:")
+		err = _rsc_error(() -> plot_bar(["a"], [1.0]; yrange = bounds))
+		@test err isa ArgumentError && startswith(err.msg, "plot_bar:")
+	end
+end
+
+@testset "scatter family: one-sided limit on an equal-aspect axis pins the open end (Z51, D11)" begin
+	f = plot_scatter(1:5, [1.0, 2, 3, 4, 5]; equalar = true, yrange = (0, nothing))
+	range = _rsc_axis(f, :yaxis)[:range]
+	@test range[1] == 0 && range[2] >= 5
+	z = plot_complex([1 + 1im, 2 + 0.5im]; yrange = (0, nothing))
+	@test _rsc_axis(z, :yaxis)[:range][1] == 0
 end
