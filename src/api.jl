@@ -10383,6 +10383,18 @@ end
 # The few px of marker radius plotly adds as well are ignored.
 const _SCAT_LEGEND_AUTORANGE_PAD = 0.05
 
+# The finite extent of `values`, widening `(lo, hi)`. A function barrier: with
+# a concrete vector type the loop allocates nothing.
+function _scat_legend_extent(values, lo::Float64, hi::Float64)
+	for value in values
+		v = Float64(value)::Float64
+		isfinite(v) || continue
+		v < lo && (lo = v)
+		v > hi && (hi = v)
+	end
+	return lo, hi
+end
+
 # The data window `(lo, hi)` of axis `key` in its stored units: the explicit
 # range, else the extent of `values` (the coordinates drawn on it) widened as
 # plotly's autorange does when `padded` (plotly pads every scatter y axis, and
@@ -10403,14 +10415,12 @@ function _scat_legend_window(
 	if explicit && all(is_bound, range) && range[1] != range[2]
 		return Float64(range[1]), Float64(range[2])
 	end
-	# One typed pass over the finite values (`values` may chain several
-	# coordinate vectors of a million points each).
+	# One typed pass over the finite values. `values` is one coordinate vector
+	# or a collection of them (a million points each: nothing is chained or
+	# copied; each part is scanned by a function barrier).
 	lo, hi = Inf, -Inf
-	for value in values
-		v = Float64(value)::Float64
-		isfinite(v) || continue
-		v < lo && (lo = v)
-		v > hi && (hi = v)
+	for part in (values isa AbstractVector{<:Real} ? (values,) : values)
+		lo, hi = _scat_legend_extent(part, lo, hi)
 	end
 	lo > hi && return nothing
 	lo == hi && ((lo, hi) = (lo - 0.5, hi + 0.5))
@@ -10443,7 +10453,13 @@ end
 # another trace) or non-numeric coordinates.
 function _scat_best_legend_position(p::Plot)
 	width_px, height_px = _scat_legend_figure_px(p.layout)
-	return _scat_best_legend_position(p, eachindex(p.data), :xaxis, "x", width_px, height_px)
+	# The legend box as its font and entries make it (the rough per-entry
+	# estimate assumes a 12 px font: far too small for a long label or large
+	# fonts, and too large for a journal style's 8 pt text).
+	size = _legend_box_size(p, "legend")
+	box = size === nothing ? nothing :
+		(size[1] + _LEGEND_CELL_SLACK_PX[1], size[2] + _LEGEND_CELL_SLACK_PX[2])
+	return _scat_best_legend_position(p, eachindex(p.data), :xaxis, "x", width_px, height_px, box)
 end
 
 # The scoring of `_scat_best_legend_position` for the traces `indices` of `p`
@@ -10469,9 +10485,30 @@ function _scat_best_legend_position(
 	scores = _scat_legend_scores(p, indices, xkey, xref, width_px, height_px, box; obstacles = obstacles)
 	scores === nothing && return nothing
 	# `argmin` returns the first minimum: ties keep the candidate order, and a
-	# position covering nothing (score 0) wins over every covering one.
-	return _SCAT_LEGEND_POSITIONS[argmin(scores)]
+	# position covering nothing (score 0) wins over every covering one. When
+	# every candidate covers something the default legend is not drawn over
+	# data: it goes outside the plot area (`_scat_outside_legend_position`;
+	# the room providers reserve its room).
+	# The centre is never chosen automatically: a legend in the middle of a
+	# plot hides whatever the estimate does not model (thin glyphs, a trace
+	# of another x axis) and reads as a mistake.
+	scores[end] = typemax(Int)
+	best = argmin(scores)
+	scores[best] > 0 && return _scat_outside_legend_position(width_px)
+	return _SCAT_LEGEND_POSITIONS[best]
 end
+
+# Plot areas (or cells) narrower than this many px (a journal column is about
+# 250 px wide) put a default legend that fits nowhere inside below the axes;
+# wider ones put it beside them.
+const _SCAT_LEGEND_BELOW_PX = 360.0
+# The outside positions the best-position rule can choose.
+const _SCAT_LEGEND_OUTSIDE_POSITIONS = (:outside_right, :outside_bottom)
+
+# Where the default legend goes when no inside position is free of data, for
+# a plot area `width_px` wide: right of it, or below it at column width.
+_scat_outside_legend_position(width_px::Real) =
+	width_px < _SCAT_LEGEND_BELOW_PX ? :outside_bottom : :outside_right
 
 # One scored series: y axis key, coordinates (log10 on a log axis) and how
 # they are drawn (`:points` where they lie, `:segments` joining consecutive
@@ -10564,7 +10601,7 @@ function _scat_legend_scores(
 	# `shapes/calc_autorange`): their extents join the windows.
 	shape_x, shape_y = _scat_legend_shape_extents(layout, xref, xlog)
 	xwindow = isempty(series) ? (0.0, 1.0) : _scat_legend_window(
-		layout, xkey, Iterators.flatten((Iterators.flatten(s[2] for s in series), shape_x)); padded = xpadded,
+		layout, xkey, push!(Vector{Float64}[s[2] for s in series], shape_x); padded = xpadded,
 	)
 	xwindow === nothing && return nothing
 	# Concretely typed, so the scoring loop below is type-stable (with `Any`
@@ -10576,11 +10613,11 @@ function _scat_legend_scores(
 		window = _scat_legend_window(
 			layout,
 			key,
-			Iterators.flatten((
-				Iterators.flatten(s[3] for s in series if s[1] === key),
+			push!(
+				Vector{Float64}[s[3] for s in series if s[1] === key],
 				get(shape_y, key, Float64[]),
-				filled ? (0.0,) : (),
-			));
+				filled ? [0.0] : Float64[],
+			);
 			padded = true,
 			tight_zero = filled,
 		)
@@ -10963,7 +11000,7 @@ function _scat_legend_state(fig)
 	p = _plot_obj(fig)
 	any(
 		position -> _scat_legend_at(p, _scat_position_placement(position)),
-		_SCAT_LEGEND_POSITIONS,
+		(_SCAT_LEGEND_POSITIONS..., _SCAT_LEGEND_OUTSIDE_POSITIONS...),
 	) || return :fixed
 	# Still where the last call of this family put it: the rule placed it,
 	# without scoring the figure again (one scoring per call).
@@ -13832,6 +13869,11 @@ function _field2d_apply_options!(
 	partial_ranges::Bool = true,
 	ykey::Symbol = :yaxis,
 )
+	# The legend rule of the scatter family (`_scat_place_legend!`) also places
+	# the legend of the field glyph traces (quiver and streamlines are scatter
+	# traces): a legend this call creates, or one at its automatic position,
+	# avoids the data (the first line of this function sees the new traces).
+	legend_state = constructor ? :none : _scat_legend_state(fig)
 	_apply_figure_title!(fig, title)
 	_apply_axis_title!(fig, :x, xlabel)
 	_apply_axis_title_to_key!(fig, ykey, ylabel)
@@ -13860,6 +13902,7 @@ function _field2d_apply_options!(
 	_apply_figure_size!(fig, who; width = width, height = height)
 	(constructor && grid === true) || _apply_axis_grid!(fig, grid, who)
 	constructor ? _apply_default_template!(fig; fresh = true) : _apply_default_legend!(fig)
+	_scat_place_legend!(fig, legend_state)
 	_apply_figure_fontsize!(fig, who, fontsize)
 	return nothing
 end
