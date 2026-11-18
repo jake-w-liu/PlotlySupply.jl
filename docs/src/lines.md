@@ -125,7 +125,9 @@ fig = plot_complex(z; unit_circle = true, mode = "markers", legend = "8th roots"
 
 [`plot_scatterpolar`](@ref) takes angles in degrees unless
 `thetaunit = "radians"`. `trange` draws a sector, `rrange` sets the radial
-range, and `direction`/`rotation` orient the angle. The radial tick labels sit
+range (a one-sided limit `(nothing, b)` or `(a, nothing)` fixes one end and lets
+the other autorange; `trange` is always two-sided), and `direction`/`rotation`
+orient the angle. The radial tick labels sit
 on the 22.5° spoke of a full circle (`rlabel_angle` moves them), and a radial
 axis without tick settings gets at most 6 ticks. The Cartesian axis keywords
 do not apply to a polar plot.

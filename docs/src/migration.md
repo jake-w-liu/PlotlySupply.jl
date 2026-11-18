@@ -327,8 +327,6 @@ fig3 = plot_scatter(1:3, real.([1im, 2, 3]))
 - Field traces carry `meta = "plotlysupply:field"`.
 - `linewidth = 0` in `plot_streamlines`, `plot_triplot` and
   `plot_tricontour` means the style's width.
-- `plot_pcolormesh` and `plot_pcolormesh!` default to `equalar = false`
-  (matplotlib's auto aspect). Pass `equalar = true` for a physical-space mesh.
 - `plot_image(...; interpolation = :bilinear)` writes a PNG `source` with
   smoothing instead of `z`/`colormodel`; hover shows the RGBA pixel and
   non-finite pixels are transparent.

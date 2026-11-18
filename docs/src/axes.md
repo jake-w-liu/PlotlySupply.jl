@@ -71,10 +71,16 @@ g = plot_scatter(10 .^ (0:0.1:3), 10 .^ (0:0.1:3); xscale = "log", yscale = "log
 
 An axis spanning less than two decades gets only one or two labels with
 `:decades`; keep the automatic ticks (or pass values) there. A log axis with no
-tick setting of yours keeps plotly's labels, except where they would collide at
-the size the figure is drawn (a panel at journal column width): there every
-render, `savefig` included, labels decades only until the labels fit. On an axis of
-more than eight decades, every k-th decade is labelled.
+tick setting of yours follows the style the figure was built under
+(`PlotStyle.log_ticks`): under `:default` it keeps plotly's labels, except where
+they would collide at the size the figure is drawn (a panel at journal column
+width), where every render, `savefig` included, labels decades only until the
+labels fit; under `:publication` and the journal presets an axis that spans two
+decades or more labels decades only without any call. The figure remembers the
+rule of the style it was built under (`layout.meta.plotlysupply.log_ticks`), so
+it keeps its tick labels when it is changed or exported outside the
+`with_style` block. On an axis of more than eight decades, every k-th decade is
+labelled.
 
 For explicit log ticks, [`log_ticks`](@ref) lists `subs` mantissas per decade,
 and `xticks!(fig; subs = (1, 2, 5))` uses them over the axis range:
@@ -84,6 +90,12 @@ log_ticks(1e-3, 1; subs = (1, 2, 5))     # [0.001, 0.002, 0.005, 0.01, ..., 1.0]
 f = plot_scatter([1e-3, 1e3], [1e-2, 1e4]; xscale = "log", yscale = "log")
 yticks!(f; subs = (1, 2, 5), minor = true)
 ```
+
+## Long axis titles
+
+An axis title that would run off the figure is broken between words when the
+figure is finalized; the margin and the title standoff grow to hold the lines.
+`xlabel!(fig, text; wrap = false)` (and `ylabel!`) keep the title on one line.
 
 ## Tick values, labels and format
 

@@ -79,8 +79,14 @@ format. Check a file with `pdffonts figure.pdf`.
 - `deterministic = true` (default): repeated exports of the same figure are
   byte-identical (no creation dates, fixed element ids).
 - `timeout = 300`: seconds allowed for each renderer step.
-- An unwritable destination directory raises an `ArgumentError` before
-  anything is drawn.
+- An unwritable destination directory, an unsupported `format` and an invalid
+  `PLOTLYSUPPLY_MATHJAX_SVG_FONT` raise an `ArgumentError` before anything is
+  drawn.
+- Static exports (PDF, SVG, EPS, PNG, JPEG, TIFF) draw every vertex of a line
+  (`line.simplify = false`), so the peaks of a dense curve do not show as
+  corners at high resolution; windows and HTML files keep plotly.js' line
+  simplification. `plot_scatter(...; simplify = true)` (or `false`) sets it
+  for a trace explicitly, in every output.
 
 Several files from one render, and export to a stream:
 
@@ -94,6 +100,14 @@ end
 A file is written to a temporary file in the same directory and then renamed
 over the destination, so an interrupted export never leaves a half-written
 file.
+
+## HTML and JSON documents
+
+An HTML or JSON file is a document, not a picture: it keeps the figure's
+`div` id, so exporting the same figure twice gives the same bytes. The cameras
+of 3-D scenes keep the box centre as their centre: an image export may shift
+the camera centre to fit the scene into its frame, but a document is rotated by
+hand, and it pivots about the centre.
 
 ## Fields at their final size
 

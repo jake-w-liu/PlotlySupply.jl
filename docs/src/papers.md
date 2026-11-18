@@ -99,13 +99,13 @@ w = journal_width(:ieee; columns = 2, units = :px)
 fig_conv = with_style(:ieee) do
     sf = subplots(1, 2; sync = false, width = w, height = 0.38w)
     plot_scatter!(sf, h, errs; row = 1, col = 1, xscale = "log", yscale = "log",
-        xticks = :decades, yticks = :decades, mode = "lines+markers",
+        mode = "lines+markers",
         legend = ["\$p=1\$", "\$p=2\$", "\$p=3\$"],
         xlabel = "mesh size \$h\$", ylabel = "error \$\\|e\\|\$")
     slope_guide!(sf, 2; row = 1, col = 1, x = (h[end], h[2]),
         through = (h[4], 0.25 * errs[2][4]), label = "\$O(h^2)\$")
     plot_scatter!(sf, 1 ./ h, runtime; row = 1, col = 2, xscale = "log", yscale = "log",
-        xticks = :decades, yticks = :decades, mode = "lines+markers",
+        mode = "lines+markers",
         legend = "assembly", xlabel = "unknowns \$N\$ (relative)", ylabel = "time (s)")
     panel_labels!(sf; labels = :abc, format = "({})")
     sf
@@ -116,9 +116,11 @@ savefig(fig_conv, "convergence.pdf")
 ![Convergence plot at IEEE double-column width](assets/papers_convergence.png)
 
 The legend is placed where it covers the least data; ranges are data values on
-the log axes; `xticks = :decades` labels powers of ten only (a log axis with no
-tick setting keeps plotly's labels, "2" and "5" between the decades, except
-where they would collide at the figure's size).
+the log axes. Under a paper style a log axis that spans two decades or more
+labels powers of ten only by itself (`PlotStyle.log_ticks = :decades`, set by
+`:publication` and every journal preset), so `xticks = :decades` is not needed;
+under `:default`, plotly's labels, "2" and "5" between the decades, stay unless
+they would collide at the figure's size.
 
 ## 5. Example: field maps with shared colorbars
 
@@ -302,7 +304,7 @@ pixels at `dpi = 600`).
 A colorbar, an outside legend, a panel title, a panel label and a secondary
 axis each take room from the cell they belong to, or from the figure margin,
 never from a neighbouring panel: the cell's plot area shrinks on that side
-(cells that share the grid edge shrink alike, by at most half the cell). A
+(cells that share the grid edge shrink alike, by at most two thirds of the cell). A
 figure that already fits is not changed; explicit domains, legend positions
 and colorbar `x`/`y` that you set are kept; repeating a call gives the same
 figure. See [Subplots](subplots.md) for the details and the exceptions.

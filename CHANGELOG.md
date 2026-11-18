@@ -42,6 +42,17 @@ Axes and ranges
 - `grid = nothing` (the mutator default) keeps the grid.
 - `tick0` is no longer written.
 - Logarithmic axes label ticks as powers of ten.
+- Under `:publication` and the journal presets a logarithmic axis that spans
+  two decades or more labels decades only without any tick call
+  (`PlotStyle.log_ticks = :decades`; a figure remembers the rule of the style
+  it was built under). `PlotStyle(...)` constructors given positional arguments
+  take `log_ticks` as a trailing argument (default `:auto`).
+- A full range with bounds that are neither numbers nor dates on an
+  automatically typed axis (`yrange = ("a", "b")`) raises an `ArgumentError`.
+- Axis titles that would run off the figure are wrapped between words by the
+  layout engine only, with `<br />` breaks (`xlabel!(...; wrap = false)` keeps
+  one line); `secondary_xaxis!` no longer writes `title.pad.b` onto a placed
+  figure title, the top margin is raised when the figure is finalized.
 - Changing an axis scale converts an explicit range.
 - `grid!(which = :major | :minor)` changes only that grid (1.x: each call
   defined the whole grid).
@@ -102,6 +113,15 @@ Subplots
   `SubplotFigure`.
 - Arguments are validated.
 - `to_image` on a `sync = false` grid raises an `ArgumentError`.
+- `panel_labels!(sf; row, col)` and `subplot_legends!(sf; row, col)` raise an
+  `ArgumentError` (they were a `MethodError`); the `update_*!` functions on a
+  `Plot` or `SyncPlot` raise an `ArgumentError` for `row`, `col`, `secondary_y`,
+  `inset` and `show` (they wrote them into the layout).
+- A plot area may give up two thirds of its cell for decorations (was one
+  half), so crowded grids shrink more instead of overlapping; titles and
+  legends are placed after the room is solved, so an outside-right legend of a
+  single plot sits at `x` about 1.007, not 1.02. A figure title that already
+  carries `pad.t` keeps it.
 
 Plot functions
 
@@ -120,7 +140,6 @@ Plot functions
   `plot_image!` apply equal aspect by default.
 - `plot_bar` with one series: `color`, `hatch` and `barwidth` vectors with one
   entry per bar set each bar (1.x used the first entry only).
-- `plot_pcolormesh` defaults to `equalar = false`.
 - `plot_image(interpolation = :bilinear)` writes a PNG source; contours with
   non-uniform levels are one trace per level.
 - `plot_quiver`/`plot_streamlines` overlays do not widen a field's tight axes;
@@ -175,6 +194,19 @@ Export, windows and templates
 - `redraw!` rebuilds the page from the Julia figure.
 - At exit, Julia waits for the Electron processes it started.
 - Dark templates use light axis lines and ticks.
+- `savefig` with an unsupported format, or with an invalid
+  `PLOTLYSUPPLY_MATHJAX_SVG_FONT`, raises an `ArgumentError` (1.x:
+  `ErrorException`). HTML export keeps the figure's `div` id, so the bytes are
+  deterministic.
+- Static exports (PDF, SVG, EPS, PNG, JPEG, TIFF) draw every vertex of a line
+  (`line.simplify = false`); windows and HTML keep plotly.js' simplification,
+  and `simplify = true`/`false` on a scatter constructor sets it for a trace.
+- Under a style with a line width, box and violin traces get that line width
+  where unset (plotly's default was 2 px); polar and ternary figures keep a
+  margin of at least one tick-label height; the constructor colour of
+  `plot_band` follows the style's colour cycle (was `#636EFA`); equal-aspect
+  single figures keep a width you set exactly (journal columns are no longer
+  rounded to whole pixels).
 - `set_template!` replaces colours derived from the previous template.
 - `get_default_template` may return a `Template`.
 - `PLOTLYSUPPLY_MATHJAX_SVG_FONT` accepts only the MathJax 2.7 SVG fonts.
@@ -199,6 +231,8 @@ Plot keywords
 - Fields: `levels`, `cmid`, `colornorm = :log`, `text`, `origin`, `tight`.
   Fields fit their axes exactly and keep the colorbar as tall as the field
   under `equalar = true`.
+  `plot_pcolormesh` keeps matplotlib's automatic aspect (`equalar = false`);
+  pass `equalar = true` for a mesh that draws physical space.
 - 3-D: `view`, `edges`, `lighting`, `style = :arrow` for `plot_quiver3d`;
   `plot_scatter3d` `marker_line_color`, `marker_line_width`, `markevery`,
   hollow markers and the matplotlib marker codes.
@@ -211,6 +245,8 @@ Plot keywords
 - Maps: `trace = attr(...)`; `colorscale` on scatter maps; `legend` on
   choropleth and density maps.
 - Polar plots: `rlabel_angle`.
+- `plot_scatterpolar(rrange = (nothing, b))` and `(a, nothing)` are one-sided
+  radial limits; `trange` stays two-sided.
 
 Axes and ticks
 

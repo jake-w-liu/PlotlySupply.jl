@@ -116,6 +116,13 @@ In a scene cell smaller than the plot area, axes with automatic ticks get
 about one tick per 40 px (2 to 9), raised until two ticks are labelled when
 they fit; `scene!(; nticks)` or tick values you set are kept.
 
+Titles and tick labels of a 3-D scene are placed by WebGL at fixed pixel
+offsets from the box, so a small cell gets a small box (never less than 40 % of
+the cell) and the framing keeps every label inside the cell. Known limitations:
+in a cell of about 300 x 250 px, three long axis titles can still overlap each
+other and the tick labels (shorten them or leave the title out), and two tick
+labels at a corner of the box can touch.
+
 ## Axis titles and ranges
 
 [`zlabel!`](@ref) and [`zrange!`](@ref) complete [`xlabel!`](@ref) and
