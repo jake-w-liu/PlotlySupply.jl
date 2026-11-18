@@ -43,18 +43,20 @@ reported with the median/maximum so the noise is visible. Allocated bytes are
 deterministic and are what `test/regression_perf.jl` pins: wall-clock bounds
 would fail on a busy machine.
 
-## Recorded results (wave 6, 2026-11-18)
+## Recorded results (wave 6, 2026-11-19)
 
 Apple M5 (10 cores, 32 GB), macOS, Julia 1.13.1, 1 thread, the 2.0 tree of
-this repository (commit `26c6473`; `benchmark/RESULTS.md` holds the full
-output) against release 1.9.4 (an export of its tag, same `Manifest.toml`).
-The machine was shared and overloaded: the load average was 126 / 111 / 89
-when the run started and about 100 during it (three full test suites were
-running next to it), so every absolute time is inflated about 2-4x against an
-idle machine (the earlier wave-4 record, load 26-49, has 1.84 s for `using` and
-0.55 s for the first `plot_scatter`). Baseline and current were measured
-interleaved, run by run, so both saw the same load: read the ratios, not the
-seconds.
+this repository against release 1.9.4 (an export of its tag, same
+`Manifest.toml`); `benchmark/RESULTS.md` holds the complete output. Two runs,
+because the machine was shared:
+
+- the full run (everything, with Electron; commit `26c6473`) started at load
+  average 126 / 111 / 89 and stayed near 100 (three full test suites ran next
+  to it), so its absolute times are inflated 2-4x; the PNG/PDF rows below come
+  from it. Baseline and current were interleaved run by run, so read the ratios;
+- a repeat of the load and time-to-first-figure part (`--no-scaling
+  --no-electron --repeats 4`) at load 9, which is the record to compare with
+  earlier ones.
 
 ### Time to first figure: the precompile workload
 
@@ -63,31 +65,33 @@ built: the 1-D families with their mutators and figure options, fields,
 meshes, vector fields, 3-D, a `SubplotFigure` with cell mutators, the
 publication style, and the in-process side of every export (no Electron, no
 network, no files). Baseline: release 1.9.4, which has no workload. Minimum of
-3 fresh processes (median in brackets):
+4 fresh processes at load 9 (median in brackets); wave-4 record in the last
+column (load 26-49, baseline there: this tree without the workload):
 
-| measurement | 1.9.4 (s) | 2.0 (s) | speed-up |
-|---|---:|---:|---:|
-| `using PlotlySupply` | 2.97 (3.09) | 5.13 (5.36) | 0.6x (+2.2 s at this load) |
-| first `plot_scatter` | 57.8 (66.4) | 1.33 (1.50) | 43x |
-| first `plot_heatmap` | 62.7 (78.1) | 1.44 (1.48) | 44x |
-| first `subplots` + `plot_scatter!` + `plot_heatmap!` | 85.6 (92.4) | 3.12 (3.23) | 27x |
-| first `savefig` html | 9.69 (10.5) | 0.58 (0.59) | 17x |
-| first `savefig` png | 19.9 (21.3) | 11.7 (12.9) | 1.7x |
-| first `savefig` pdf (fresh process) | 29.8 (29.9) | 14.5 (17.8) | 2.1x |
-| whole process: start, load, first scatter | 63.0 (70.7) | 7.89 (8.10) | 8.0x |
+| measurement | 1.9.4 (s) | 2.0 (s) | speed-up | wave-4 2.0 (s) |
+|---|---:|---:|---:|---:|
+| `using PlotlySupply` | 0.89 (0.94) | 1.49 (1.52) | 0.6x (+0.6 s) | 1.84 |
+| first `plot_scatter` | 14.4 (16.0) | 0.30 (0.31) | 47x | 0.55 |
+| first `plot_heatmap` | 14.7 (14.8) | 0.34 (0.36) | 43x | 0.46 |
+| first `subplots` + `plot_scatter!` + `plot_heatmap!` | 19.6 (19.9) | 0.66 (0.67) | 30x | 1.03 |
+| first `savefig` html | 2.51 (2.55) | 0.146 (0.153) | 17x | 0.005 |
+| whole process: start, load, first scatter | 15.4 (17.2) | 1.67 (1.80) | 9.2x | 2.90 |
+| first `savefig` png (load 100) | 19.9 (21.3) | 11.7 (12.9) | 1.7x | 7.09 |
+| first `savefig` pdf, fresh process (load 100) | 29.8 (29.9) | 14.5 (17.8) | 2.1x | 7.05 |
 
-Second calls in the same process: scatter 0.071 s (1.9.4: 0.130 s), heatmap
-0.229 s (0.236 s), png 0.063 s (0.078 s), pdf 0.201 s (0.174 s). The model
-side of a png/pdf export, which 1.9.4 has no entry point for, takes 0.15 s the
-first time. Against the wave-4 record (normalised by the 1.9.4 `using` time of
-each run, because the load differs), the first `plot_scatter` is unchanged
-(0.45 of it now, 0.44 then); the first `plot_heatmap` (0.48 now, 0.37 then) and
-the first `subplots` call (1.05 now, 0.82 then) come out about 30 % slower.
-Three runs on a machine at load 100 cannot settle whether that is a
-regression or noise (the spread of the three runs is 0.1-0.5 s): the TTFX part
-(`--no-scaling --no-electron`) should be repeated on a quiet machine.
+The first figure of every family is faster than in the wave-4 record (the
+machine is also quieter), `using` 0.6 s longer than 1.9.4 for the larger
+image. Not better: the first html export takes 0.15 s and every html export
+about 45 ms (wave 4: 5 ms and 2 ms), probably because html files now embed the
+compatibility-patched plotly.js of release 1.9.4 (a few MB written per file;
+not profiled; 1.9.4 itself takes 49 ms per call).
 
-The first PNG, split into stages: model side 0.34 s, loading ElectronCall
+Second calls in the same process (load 9): scatter 0.017 s (1.9.4: 0.035 s),
+heatmap 0.058 s (0.058 s), subplots 0.108 s (0.107 s); at load 100 png
+0.063 s (0.078 s) and pdf 0.201 s (0.174 s). The model side of a png/pdf
+export, which 1.9.4 has no entry point for, takes 0.04 s the first time.
+
+The first PNG, split into stages (load 100): model side 0.34 s, loading ElectronCall
 0.05 s, first export window 12.3 s (5.3 s of Electron application start-up
 and page load, 7.0 s of Julia compilation of ElectronCall's window code at this
 load), render 0.9 s. A second export window on the running application takes
