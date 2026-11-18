@@ -202,10 +202,20 @@ function _apply_figure_fontsize!(fig, who::AbstractString, fontsize)
 	return nothing
 end
 
-# Figure title; an empty title leaves the layout untouched.
+# Figure title; an empty title leaves the layout untouched. A title without a
+# placement yet gets the one `title!` gives (Z28: centred over the plot area,
+# `_TEXT_TITLE_TOP_PAD` px below the top edge of the figure, `automargin`);
+# a placed title (`title!`, `secondary_xaxis!`, `relayout!`) keeps it and only
+# its text changes.
 function _apply_figure_title!(fig, title::AbstractString)
 	isempty(title) && return nothing
-	relayout!(fig, title_text = _label(title))
+	current = get(_cmn_layout(fig).fields, :title, nothing)
+	placed = any(key -> _cmn_mapping_get(current, key) !== nothing, (:x, :xanchor, :xref, :y, :yanchor, :yref))
+	placed && (relayout!(fig, title_text = _label(title)); return nothing)
+	relayout!(fig; title_text = _label(title), title_x = 0.5, title_xanchor = "center",
+		title_xref = "paper", title_yref = "container", title_y = 1, title_yanchor = "top",
+		title_automargin = true, title_pad_t = _TEXT_TITLE_TOP_PAD, title_pad_l = 0, title_pad_r = 0)
+	_legend_stack!(_cmn_plot(fig))
 	return nothing
 end
 

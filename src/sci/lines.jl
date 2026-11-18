@@ -334,7 +334,7 @@ function _band_impl!(
 )
 	n, xs, lowers, uppers, wheres = _band_series(x, lower, upper, where, who)
 	fill_opacity = _scat_unit_interval(opacity, who, "opacity")
-	edge = _cmn_check_color(edgecolor, "edgecolor", who)
+	edge = _scat_color(edgecolor, who, "edgecolor")
 	edge_width = _scat_nonnegative(linewidth, who, "linewidth")
 	_lines_validate_figure(fig, who, secondary_y, figure)
 	xtype, ytype = _lines_axis_types(fig, secondary_y, figure)
@@ -417,8 +417,10 @@ surround. Error bands: `plot_band(x, y .- e, y .+ e)`.
 - `where = nothing`: a `Bool` vector, one entry per `x`: the band is drawn
   only over runs of consecutive `true` points (one polygon ring per run, as in
   matplotlib without `interpolate`).
-- `color = ""`: band colour (`""`: the next colorway colour); a vector gives
-  one colour per band. `opacity = 0.25`: fill opacity in [0, 1].
+- `color = ""`: band colour (`""`: the next colorway colour), any colour
+  [`plot_scatter`](@ref) takes (grey levels such as `"0.35"`, Colors.jl
+  `Colorant`s); a vector gives one colour per band. `opacity = 0.25`: fill
+  opacity in [0, 1].
 - `edgecolor = ""`, `linewidth = 0`: outline colour (default: the band colour)
   and width in px (`0`: no outline).
 - `hatch = ""`: hatch pattern over the fill (`"/"`, `"\\\\"`, `"x"`, `"-"`,
@@ -449,9 +451,9 @@ function plot_band(
 	x,
 	lower,
 	upper;
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	opacity::Real = 0.25,
-	edgecolor::Union{AbstractString, Symbol} = "",
+	edgecolor::Union{AbstractString, Symbol, Colors.Colorant} = "",
 	linewidth::Real = 0,
 	hatch::AbstractString = "",
 	where::Union{Nothing, AbstractVector} = nothing,
@@ -509,9 +511,9 @@ function plot_band!(
 	x,
 	lower,
 	upper;
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	opacity::Real = 0.25,
-	edgecolor::Union{AbstractString, Symbol} = "",
+	edgecolor::Union{AbstractString, Symbol, Colors.Colorant} = "",
 	linewidth::Real = 0,
 	hatch::AbstractString = "",
 	where::Union{Nothing, AbstractVector} = nothing,
@@ -625,7 +627,8 @@ function _segments_impl!(
 end
 
 const _SEGMENTS_STYLE_DOC = """
-- `color = ""`: line colour (`""`: the next colorway colour); `linewidth = 0`
+- `color = ""`: line colour (`""`: the next colorway colour; grey levels such
+  as `"0.35"` and Colors.jl `Colorant`s are accepted); `linewidth = 0`
   (px, `0`: the active [`PlotStyle`](@ref)'s line width, else plotly's);
   `dash = ""` (`"dash"`, `"dot"`, ..., as for [`plot_scatter`](@ref); `""`:
   the style's dash cycle, else solid); `opacity = 1`. The style's marker
@@ -670,7 +673,7 @@ function plot_segments(
 	y0,
 	x1,
 	y1;
-	color::Union{AbstractString, Symbol} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant} = "",
 	linewidth::Real = 0,
 	dash::AbstractString = "",
 	opacity::Real = 1,
@@ -719,7 +722,7 @@ function plot_segments!(
 	y0,
 	x1,
 	y1;
-	color::Union{AbstractString, Symbol} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant} = "",
 	linewidth::Real = 0,
 	dash::AbstractString = "",
 	opacity::Real = 1,
@@ -780,7 +783,7 @@ function plot_vlines(
 	x,
 	ymin,
 	ymax;
-	color::Union{AbstractString, Symbol} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant} = "",
 	linewidth::Real = 0,
 	dash::AbstractString = "",
 	opacity::Real = 1,
@@ -829,7 +832,7 @@ function plot_vlines!(
 	x,
 	ymin,
 	ymax;
-	color::Union{AbstractString, Symbol} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant} = "",
 	linewidth::Real = 0,
 	dash::AbstractString = "",
 	opacity::Real = 1,
@@ -889,7 +892,7 @@ function plot_hlines(
 	y,
 	xmin,
 	xmax;
-	color::Union{AbstractString, Symbol} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant} = "",
 	linewidth::Real = 0,
 	dash::AbstractString = "",
 	opacity::Real = 1,
@@ -938,7 +941,7 @@ function plot_hlines!(
 	y,
 	xmin,
 	xmax;
-	color::Union{AbstractString, Symbol} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant} = "",
 	linewidth::Real = 0,
 	dash::AbstractString = "",
 	opacity::Real = 1,
@@ -1096,7 +1099,7 @@ function plot_ecdf(
 	x;
 	complementary::Bool = false,
 	stat::Symbol = :proportion,
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	dash::Union{AbstractString, AbstractVector} = "",
 	linewidth::Union{Real, AbstractVector} = 0,
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -1143,7 +1146,7 @@ function plot_ecdf!(
 	x;
 	complementary::Bool = false,
 	stat::Symbol = :proportion,
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	dash::Union{AbstractString, AbstractVector} = "",
 	linewidth::Union{Real, AbstractVector} = 0,
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -1384,7 +1387,7 @@ function plot_kde(
 	npoints::Integer = 512,
 	cut::Real = 3,
 	fill::Bool = false,
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	dash::Union{AbstractString, AbstractVector} = "",
 	linewidth::Union{Real, AbstractVector} = 0,
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -1433,7 +1436,7 @@ function plot_kde!(
 	npoints::Integer = 512,
 	cut::Real = 3,
 	fill::Bool = false,
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	dash::Union{AbstractString, AbstractVector} = "",
 	linewidth::Union{Real, AbstractVector} = 0,
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -1548,7 +1551,7 @@ of vectors (one series each).
 #### Keywords
 
 - `mode = nothing`, `dash`, `color`, `legend`, `linewidth`, `line_shape`,
-  `marker_size`, `marker_symbol`, `marker_color`, `marker_line_color`,
+  `simplify`, `marker_size`, `marker_symbol`, `marker_color`, `marker_line_color`,
   `marker_line_width`, `opacity`, `showlegend`, `fill`, `fillcolor`,
   `markevery`, `text`, `textposition`, `textsize`, `clip`: as for
   [`plot_scatter`](@ref) (per-series keywords take a scalar or one entry per
@@ -1576,19 +1579,20 @@ function plot_complex(
 	unit_circle::Bool = false,
 	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	marker_line_width::Union{Real, AbstractVector} = 0,
 	linewidth::Union{Real, AbstractVector} = 0,
 	opacity::Union{Real, AbstractVector} = 1,
 	markevery = nothing,
 	line_shape::Union{AbstractString, AbstractVector} = "",
+	simplify::Union{Nothing, Bool, AbstractVector} = nothing,
 	fill::Union{AbstractString, AbstractVector} = "",
-	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	text = nothing,
 	textposition::AbstractString = "",
 	textsize::Real = 0,
@@ -1616,7 +1620,7 @@ function plot_complex(
 	_complex_impl!(fig, z; who = "plot_complex", constructor = true, unit_circle,
 		mode, dash, color, legend, marker_size, marker_symbol, marker_color,
 		marker_line_color, marker_line_width, linewidth, opacity, markevery,
-		line_shape, fill, fillcolor, text, textposition, textsize, showlegend, clip,
+		line_shape, simplify, fill, fillcolor, text, textposition, textsize, showlegend, clip,
 		xlabel, ylabel, xrange, yrange, xticks, xticklabels, yticks, yticklabels,
 		xtickformat, ytickformat, equalar, grid, title, width, height, fontsize)
 	return _scat_maybe_show(fig, show, width, height, title)
@@ -1638,19 +1642,20 @@ function plot_complex!(
 	unit_circle::Bool = false,
 	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
-	color::Union{AbstractString, Symbol, AbstractVector} = "",
+	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	marker_size::Union{Real, AbstractVector} = 0,
 	marker_symbol::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_color::Union{AbstractString, Symbol, AbstractVector} = "",
-	marker_line_color::Union{AbstractString, Symbol, AbstractVector} = "",
+	marker_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
+	marker_line_color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	marker_line_width::Union{Real, AbstractVector} = 0,
 	linewidth::Union{Real, AbstractVector} = 0,
 	opacity::Union{Real, AbstractVector} = 1,
 	markevery = nothing,
 	line_shape::Union{AbstractString, AbstractVector} = "",
+	simplify::Union{Nothing, Bool, AbstractVector} = nothing,
 	fill::Union{AbstractString, AbstractVector} = "",
-	fillcolor::Union{AbstractString, Symbol, AbstractVector} = "",
+	fillcolor::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	text = nothing,
 	textposition::AbstractString = "",
 	textsize::Real = 0,
@@ -1679,7 +1684,7 @@ function plot_complex!(
 	_complex_impl!(fig, z; who, constructor = false, secondary_y, unit_circle,
 		mode, dash, color, legend, marker_size, marker_symbol, marker_color,
 		marker_line_color, marker_line_width, linewidth, opacity, markevery,
-		line_shape, fill, fillcolor, text, textposition, textsize, showlegend, clip,
+		line_shape, simplify, fill, fillcolor, text, textposition, textsize, showlegend, clip,
 		xlabel, ylabel, xrange, yrange, xticks, xticklabels, yticks, yticklabels,
 		xtickformat, ytickformat, equalar, grid, title, width, height, fontsize)
 	_refresh!(fig)

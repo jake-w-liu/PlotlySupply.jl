@@ -586,6 +586,7 @@ function _prepare_renderer_export(
 	resolved.background === nothing ||
 		_apply_export_background!(layout, data, resolved.background)
 	resolved.deterministic && _assign_export_uids!(data)
+	_scat_export_line_simplify!(data)
 	return _PreparedRendererExport(
 		_json_js(data),
 		_json_js(layout),
