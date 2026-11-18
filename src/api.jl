@@ -2942,8 +2942,13 @@ function subplot_legends!(
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_borderwidth::Union{Nothing, Real} = nothing,
 	show = nothing,
+	row = nothing,
+	col = nothing,
 )
 	_text_reject_show(show, "subplot_legends!")
+	(row === nothing && col === nothing) || throw(ArgumentError(
+		"subplot_legends!: sets the legends of every cell; `row`/`col` are not accepted - give a cell its legend with `legend =` on the plot call.",
+	))
 	aliases = _legend_subplot_aliases(
 		"subplot_legends!";
 		inset, bgcolor, bordercolor, borderwidth,

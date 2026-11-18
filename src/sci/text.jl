@@ -2100,8 +2100,13 @@ function panel_labels!(
 	fontsize::Real = 0,
 	cells = :all,
 	show = nothing,
+	row = nothing,
+	col = nothing,
 )
 	_text_reject_show(show, "panel_labels!")
+	(row === nothing && col === nothing) || throw(ArgumentError(
+		"panel_labels!: labels the whole figure; `row`/`col` are not accepted - select cells with `cells = [(row, col), ...]`.",
+	))
 	_text_panel_label_args(labels, format, position, fontsize, "panel_labels!")
 	return _transactional_subplot_mutation!(
 		_text_panel_labels_sf_impl!,

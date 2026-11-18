@@ -3388,21 +3388,20 @@ end
 
 # ---------------------------------------------------------------------------
 # Grid titles (Z20): `subplots(...; x_title, y_title)` draws them as paper
-# annotations named `plotlysupply:grid_title:x` (below the bottom row) and
-# `plotlysupply:grid_title:y` (left of the left column, rotated -90 deg).
-# Each takes a `:figure` request on its side, nearest the axes: it is placed
-# past the outermost axis labels on that paper edge, and the margin grows to
-# hold it (annotations do not push plotly's automargin).
+# annotations named `plotlysupply:x_title` (below the bottom row) and
+# `plotlysupply:y_title` (left of the left column, rotated -90 deg); the
+# names are the SubplotFigure contract (Z60, `subplots`). Each takes a
+# `:figure` request on its side, nearest the axes: it is placed past the
+# outermost axis labels on that paper edge, and the margin grows to hold it
+# (annotations do not push plotly's automargin).
 # ---------------------------------------------------------------------------
-
-const _FIN_GRID_TITLE_PREFIX = "plotlysupply:grid_title:"
 
 # "x" / "y" for a grid title annotation, else `nothing`.
 function _fin_grid_title_letter(item)
 	name = _cmn_mapping_get(item, :name)
-	(name isa AbstractString && startswith(name, _FIN_GRID_TITLE_PREFIX)) || return nothing
-	letter = name[(ncodeunits(_FIN_GRID_TITLE_PREFIX) + 1):end]
-	return letter in ("x", "y") ? letter : nothing
+	name == "plotlysupply:x_title" && return "x"
+	name == "plotlysupply:y_title" && return "y"
+	return nothing
 end
 
 function _room_requests!(plan, ::Val{:grid_titles})

@@ -1707,11 +1707,6 @@ end
 		# Process-wide setters take no figure.
 		process_wide = Set(["register_style!", "set_default_legend_position!", "set_default_mathtext!",
 			"set_default_style!", "set_default_template!"])
-		# Known defects in other tracks' code (cross-requested Z17, Z18, Z19,
-		# Z21, Z22): these raise a MethodError for `row`/`col` instead of an
-		# ArgumentError naming the function. `@test_broken` turns into an error
-		# once they are fixed; then move the name out of this set.
-		cross_requested = Set(["panel_labels!", "subplot_legends!", "tight_layout!"])
 		image = attr(source="data:image/png;base64,iVBORw0KGgo=", x=0, y=1, sizex=0.2, sizey=0.2)
 		geojson = Dict("type" => "FeatureCollection", "features" => [Dict("type" => "Feature", "id" => "A",
 			"properties" => Dict(), "geometry" => Dict("type" => "Polygon",
@@ -1877,31 +1872,27 @@ end
 				before11 = _rsp_cell_state(sf, 1, 1)
 				before22 = _rsp_cell_state(sf, 2, 2)
 				err = attempt(() -> call(sf, (row=2, col=2)))
-				if name in cross_requested
-					@test_broken err === nothing || (err isa ArgumentError && startswith(err.msg, name * ":"))
-				else
-					if err === nothing
-						@test _rsp_cell_state(sf, 1, 1) == before11
-						if name == "subplot!"
-							# subplot! only selects the cell.
-							@test (sf.current_row, sf.current_col) == (2, 2)
-						else
-							@test _rsp_cell_state(sf, 2, 2) != before22
-						end
+				if err === nothing
+					@test _rsp_cell_state(sf, 1, 1) == before11
+					if name == "subplot!"
+						# subplot! only selects the cell.
+						@test (sf.current_row, sf.current_col) == (2, 2)
 					else
-						@test err isa ArgumentError
-						@test err isa ArgumentError && startswith(err.msg, name * ":")
+						@test _rsp_cell_state(sf, 2, 2) != before22
 					end
-					# Y20: a cell outside the grid is an ArgumentError naming the
-					# function, raised before anything changes.
-					fresh = _rsp_complete_figure(kind)
-					setup(fresh)
-					snapshot = JSON.json(fresh.plot)
-					bad = attempt(() -> call(fresh, (row=99, col=2)))
-					@test bad isa ArgumentError
-					@test bad isa ArgumentError && startswith(bad.msg, name * ":")
-					@test JSON.json(fresh.plot) == snapshot
+				else
+					@test err isa ArgumentError
+					@test err isa ArgumentError && startswith(err.msg, name * ":")
 				end
+				# Y20: a cell outside the grid is an ArgumentError naming the
+				# function, raised before anything changes.
+				fresh = _rsp_complete_figure(kind)
+				setup(fresh)
+				snapshot = JSON.json(fresh.plot)
+				bad = attempt(() -> call(fresh, (row=99, col=2)))
+				@test bad isa ArgumentError
+				@test bad isa ArgumentError && startswith(bad.msg, name * ":")
+				@test JSON.json(fresh.plot) == snapshot
 			end
 		end
 	end
