@@ -1282,9 +1282,10 @@ end
 		end
 		@test _v5b_line(boxed.data[1])[:width] == 3
 		# Stems take the template's ink: 1.x "black" on light templates.
-		@test _v5b_line(_RS._plot_obj(plot_stem(1:3, [1.0, 2, 3])).data[2])[:color] == "black"
+		# (The stems trace comes first, below the heads: oned-stem-no-frame.)
+		@test _v5b_line(_RS._plot_obj(plot_stem(1:3, [1.0, 2, 3])).data[1])[:color] == "black"
 		dark = with_style(() -> plot_stem(1:3, [1.0, 2, 3]), PlotStyle(; template = :plotly_dark))
-		@test _v5b_line(_RS._plot_obj(dark).data[2])[:color] == _RS_DARK_INK
+		@test _v5b_line(_RS._plot_obj(dark).data[1])[:color] == _RS_DARK_INK
 		# Polar labels live in the margin: a small style margin grows to hold them
 		# and, at the top, the figure title (probe: label clipped, title over "90").
 		for name in (:publication, :ieee)

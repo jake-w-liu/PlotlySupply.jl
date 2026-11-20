@@ -36,7 +36,8 @@
 #   `fontsize` (`_apply_figure_fontsize!`, which merges `font.size` and keeps the
 #   style's family/colour), so the caller's base size wins over the style's.
 #   Per-role sizes written by the style (title, axis titles, ticks, legend)
-#   stay; `set_fonts!` changes those.
+#   are scaled by the same factor and the figure records the scaled style
+#   (style-08); `set_fonts!` sets them one by one.
 # - The template re-writes the 1.x frame keys of every x/y axis (zeroline,
 #   showline, mirror, ticks, automargin, linecolor, linewidth, tickcolor); an
 #   option that must override one of them (e.g. tick direction) is applied
@@ -682,35 +683,41 @@ function _style_check_figure_size(width::Float64, aspect::Float64, who::Abstract
 	return nothing
 end
 
+# The keywords are untyped: `_style_validate_field` checks every value and
+# throws the ArgumentError naming the field (style-10).
 function PlotStyle(
 	;
 	template = nothing,
-	font_family::AbstractString = "",
-	fontsize::Real = 0,
-	title_fontsize::Real = 0,
-	label_fontsize::Real = 0,
-	tick_fontsize::Real = 0,
-	legend_fontsize::Real = 0,
+	font_family = "",
+	fontsize = 0,
+	title_fontsize = 0,
+	label_fontsize = 0,
+	tick_fontsize = 0,
+	legend_fontsize = 0,
 	font_color = "",
 	colorway = nothing,
-	linewidth::Real = 0,
-	marker_size::Real = 0,
-	ticks::Union{AbstractString, Symbol} = "outside",
-	spines::Union{AbstractString, Symbol} = :box,
-	grid::Bool = true,
-	legend_frame::Bool = true,
+	linewidth = 0,
+	marker_size = 0,
+	ticks = "outside",
+	spines = :box,
+	grid = true,
+	legend_frame = true,
 	margin = nothing,
-	mathsize::AbstractString = "",
-	cycle::Union{AbstractString, Symbol} = :none,
-	width::Real = 0,
-	aspect::Real = 0,
-	axis_linewidth::Real = 0,
-	tick_length::Real = 0,
-	mirror_ticks::Bool = false,
-	errorbar_width::Real = 0,
-	reference_linewidth::Real = 0,
-	log_ticks::Union{AbstractString, Symbol} = :auto,
+	mathsize = "",
+	cycle = :none,
+	width = 0,
+	aspect = 0,
+	axis_linewidth = 0,
+	tick_length = 0,
+	mirror_ticks = false,
+	errorbar_width = 0,
+	reference_linewidth = 0,
+	log_ticks = :auto,
+	kwargs...,
 )
+	isempty(kwargs) || throw(ArgumentError(
+		"PlotStyle: unknown keyword(s) $(join(("`$(k)`" for k in keys(kwargs)), ", ")); fields are $(join(fieldnames(PlotStyle), ", ")).",
+	))
 	return PlotStyle(
 		template,
 		font_family,
@@ -1140,16 +1147,30 @@ const _ACTIVE_STYLE = Ref{PlotStyle}(_default_plot_style())
 The style constructors consult (see the internal-API comment at the top of
 src/sci/style.jl). Returned by reference: internal callers must not mutate it.
 """
-_active_style() = (scoped = _STYLE_SCOPE[]; scoped === nothing ? _ACTIVE_STYLE[] : scoped)
+function _active_style()
+	scoped = _STYLE_SCOPE[]
+	scoped === nothing || return scoped
+	block = _STYLE_BLOCK[]
+	return block === nothing ? _ACTIVE_STYLE[] : block
+end
 
 # The style a figure carries (see `_figure_style`) while one of its mutators,
 # `_finalize_figure!` or an export runs: `_with_figure_style` installs it here,
 # `_active_style()` returns it in place of the global active style.
 const _STYLE_SCOPE = Base.ScopedValues.ScopedValue{Union{Nothing, PlotStyle}}(nothing)
 
+# style-01: the style of the innermost `with_style` block of the running task
+# (dynamic scope: tasks started inside the block inherit it). A block used to
+# swap the global `_ACTIVE_STYLE` and put the previous value back, so
+# overlapping blocks of two tasks undid each other and left the global style
+# changed after both had ended.
+const _STYLE_BLOCK = Base.ScopedValues.ScopedValue{Union{Nothing, PlotStyle}}(nothing)
+
 function _style_lookup(style::PlotStyle, ::AbstractString)
 	return style
 end
+
+_style_lookup(name::AbstractString, who::AbstractString) = _style_lookup(Symbol(name), who)
 
 function _style_lookup(name::Symbol, who::AbstractString)
 	return lock(_STYLE_LOCK) do
@@ -1189,11 +1210,11 @@ style.fontsize      # 0.0 under the built-in :default style
 get_default_style() = copy(_active_style())
 
 """
-	set_default_style!(style::Union{PlotStyle,Symbol}; kwargs...)::PlotStyle
+	set_default_style!(style::Union{PlotStyle,Symbol,AbstractString}; kwargs...)::PlotStyle
 	set_default_style!(; kwargs...)::PlotStyle
 
 Make `style` the active style used by every subsequently created figure.
-`style` is a [`PlotStyle`](@ref) or the name of a registered style (`:default`,
+`style` is a [`PlotStyle`](@ref) or the name (a Symbol or String) of a registered style (`:default`,
 `:publication`, a journal preset `:ieee`, `:aps`, `:nature`, `:elsevier`,
 `:springer`, `:aip`, or a name given to [`register_style!`](@ref)). Keyword arguments
 override individual `PlotStyle` fields on top of `style`; with no positional
@@ -1210,7 +1231,7 @@ set_default_style!(; tick_fontsize = 11)   # tweak one field
 set_default_style!(:default)                # back to the 1.x defaults
 ```
 """
-function set_default_style!(style::Union{PlotStyle, Symbol}; kwargs...)
+function set_default_style!(style::Union{PlotStyle, Symbol, AbstractString}; kwargs...)
 	new_style = _style_with_overrides(
 		_style_lookup(style, "set_default_style!"),
 		kwargs,
@@ -1222,17 +1243,22 @@ function set_default_style!(style::Union{PlotStyle, Symbol}; kwargs...)
 	return copy(new_style)
 end
 
-set_default_style!(; kwargs...) = set_default_style!(_active_style(); kwargs...)
+# The base is the global default, not a `with_style` block's style (which
+# only lasts for its block).
+set_default_style!(; kwargs...) = set_default_style!(lock(() -> _ACTIVE_STYLE[], _STYLE_LOCK); kwargs...)
 
 """
-	with_style(f, style::Union{PlotStyle,Symbol}; kwargs...)
+	with_style(f, style::Union{PlotStyle,Symbol,AbstractString}; kwargs...)
 	with_style(f; kwargs...)
 
 Run `f()` with `style` (plus keyword field overrides, validated first) as the
-active style and restore the previous style afterwards, also when `f` throws.
-Returns the value of `f()`. The active style is a global setting, not a
-task-local one: figures created concurrently by other tasks while `f` runs also
-see `style`.
+active style; the previous style is active again afterwards, also when `f`
+throws. Returns the value of `f()`. The block's style is scoped to the
+running task (a `Base.ScopedValues` scope): tasks started inside `f` see it,
+other tasks keep their own active style, and overlapping blocks of several
+tasks (`asyncmap`, `Threads.@spawn`) never change each other's style or the
+global default ([`set_default_style!`](@ref)). `set_default_style!` inside the
+block changes that global default, which shows once the block has ended.
 
 A figure carries the style it was built under (every style but the 1.x
 `:default` look is recorded, without the template, in
@@ -1250,32 +1276,22 @@ fig = with_style(:publication; fontsize = 12) do
 end
 ```
 """
-function with_style(f, style::Union{PlotStyle, Symbol}; kwargs...)
+function with_style(f, style::Union{PlotStyle, Symbol, AbstractString}; kwargs...)
 	new_style = _style_with_overrides(
 		_style_lookup(style, "with_style"),
 		kwargs,
 		"with_style",
 	)
-	previous = lock(_STYLE_LOCK) do
-		old = _ACTIVE_STYLE[]
-		_ACTIVE_STYLE[] = new_style
-		old
-	end
-	try
-		return f()
-	finally
-		lock(_STYLE_LOCK) do
-			_ACTIVE_STYLE[] = previous
-		end
-	end
+	return Base.ScopedValues.with(f, _STYLE_BLOCK => new_style)
 end
 
 with_style(f; kwargs...) = with_style(f, _active_style(); kwargs...)
 
 """
-	register_style!(name::Symbol, style::PlotStyle)::Symbol
+	register_style!(name::Union{Symbol,AbstractString}, style::PlotStyle)::Symbol
 
-Register a copy of `style` under `name` so it can be selected with
+Register a copy of `style` under `name` (a String is taken as the Symbol of
+the same name) so it can be selected with
 `set_default_style!(name)` or `with_style(f, name)`. Re-registering a user name
 replaces it; the built-in names (`:default`, `:publication` and the journal
 presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`) cannot
@@ -1287,6 +1303,8 @@ register_style!(:talk, PlotStyle(; fontsize = 18, tick_fontsize = 16, linewidth 
 set_default_style!(:talk)
 ```
 """
+register_style!(name::AbstractString, style::PlotStyle) = register_style!(Symbol(name), style)
+
 function register_style!(name::Symbol, style::PlotStyle)
 	name in _BUILTIN_STYLE_NAMES &&
 		throw(ArgumentError(
@@ -2986,10 +3004,34 @@ end
 
 function _set_fonts_apply!(p::Plot, roles::_FontRoles, cell)
 	layout_updates, trace_updates = _font_role_updates(p, roles, cell, "set_fonts!")
+	cell === nothing && _set_fonts_record!(layout_updates, p, roles)
 	for (key, value) in layout_updates
 		p.layout.fields[key] = value
 	end
 	_commit_trace_updates!(p, trace_updates)
+	return nothing
+end
+
+# A figure-wide `set_fonts!` on a figure that carries a style also makes the
+# sizes it sets the sizes of that recorded style, so what reads the style
+# later (the log-axis label size, style-02; a legend or colorbar a later call
+# adds) follows the call instead of undoing it.
+function _set_fonts_record!(layout_updates::AbstractDict, p::Plot, roles::_FontRoles)
+	style = _figure_recorded_style(p)
+	style === nothing && return nothing
+	updated = copy(style)
+	changed = false
+	for (name, value) in (
+		(:fontsize, roles.size), (:title_fontsize, roles.title), (:label_fontsize, roles.label),
+		(:tick_fontsize, roles.tick), (:legend_fontsize, roles.legend),
+	)
+		value > 0 || continue
+		setproperty!(updated, name, value)
+		changed = true
+	end
+	changed || return nothing
+	meta = _style_meta_with_record(get(layout_updates, :meta, get(p.layout.fields, :meta, nothing)), updated)
+	meta === nothing || (layout_updates[:meta] = meta)
 	return nothing
 end
 
@@ -3120,7 +3162,9 @@ function set_fonts!(
 	units::Symbol = :px,
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
 )
+	_figsize_reject_keywords("set_fonts!", kwargs)
 	return _transactional_high_level_plot_mutation!(
 		_set_fonts_impl!,
 		fig;
@@ -3143,7 +3187,9 @@ function set_fonts!(
 	units::Symbol = :px,
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
 )
+	_figsize_reject_keywords("set_fonts!", kwargs)
 	return _transactional_subplot_mutation!(
 		_set_fonts_subplot_impl!,
 		sf,
@@ -3702,8 +3748,9 @@ journal_width(:ieee)                              # 3.5
 journal_width(:nature; columns = 2, units = :mm)  # 183.0
 ```
 """
-function journal_width(journal::Union{Symbol, AbstractString}; columns = 1, units = :in)
+function journal_width(journal::Union{Symbol, AbstractString}; columns = 1, units = :in, kwargs...)
 	who = "journal_width"
+	_figsize_reject_keywords(who, kwargs)
 	spec = _journal_spec(journal, who)
 	scale = _figsize_scale(units, who)
 	return _journal_width_px(spec, columns, who) / scale

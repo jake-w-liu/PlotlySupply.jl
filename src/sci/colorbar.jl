@@ -1201,6 +1201,13 @@ function _colorbar_edit_coloraxis!(
 	key = Symbol(id)
 	axis = _symbol_dict(get(p.layout.fields, key, nothing))
 	bar = _symbol_dict(get(axis, :colorbar, nothing))
+	# fields-01: data-unit ticks on a log colour scale (color.jl).
+	log = any(p.data) do trace
+		slot = _cbar_slot(trace, 0)
+		slot !== nothing && slot.coloraxis == id &&
+			_colour_log_carrier(_cbar_slot_values(trace, slot), get(trace.fields, :customdata, nothing))
+	end
+	opts = _colour_log_bar_options(opts, log, who)
 	_cbar_apply_options!(bar, opts, _cbar_option_placement(opts, xdomain, ydomain, pad); keep = region === nothing)
 	_cbar_apply_title!(
 		p,
@@ -1225,10 +1232,16 @@ function _colorbar_edit_slots!(p::Plot, slots::Vector{_CbarSlot}, opts, who::Abs
 		trace = p.data[slot.index]
 		region = _cbar_trace_region(p, trace)
 		bar = _symbol_dict(_cbar_slot_bar(trace, slot))
+		# fields-01: data-unit ticks on a log colour scale (color.jl).
+		slot_opts = _colour_log_bar_options(
+			opts,
+			_colour_log_carrier(_cbar_slot_values(trace, slot), get(trace.fields, :customdata, nothing)),
+			who,
+		)
 		_cbar_apply_options!(
 			bar,
-			opts,
-			_cbar_option_placement(opts, region.xdomain, region.ydomain, _CBAR_CELL_PAD),
+			slot_opts,
+			_cbar_option_placement(slot_opts, region.xdomain, region.ydomain, _CBAR_CELL_PAD),
 		)
 		_cbar_apply_title!(
 			p,
@@ -1369,7 +1382,10 @@ Edit the colorbars that already exist in a figure.
 - `thickness::Real=0`: bar thickness in px (`0`: unchanged).
 - `x`, `y`: explicit bar position (paper fractions) overriding `side`'s.
 - `ticks`: tick values in colour units; `ticklabels` (requires `ticks`, same
-  length) their labels, rendered through mathtext.
+  length) their labels, rendered through mathtext. On a logarithmic colour
+  scale (`colornorm = :log`) the ticks are data values, as the constructors'
+  `colorbar_ticks`: positive, placed at their log10 and labelled `10^k` (or
+  by `ticklabels`).
 - `tickformat::AbstractString=""`: d3 format such as `".2f"`;
   `exponentformat::AbstractString=""`: `"none"`, `"e"`, `"E"`, `"power"`,
   `"SI"` or `"B"`; `outlinewidth`: outline width in px (`nothing`: unchanged).

@@ -1236,8 +1236,9 @@ _axes_is_whole_number(value, low::Real) =
 # `_apply_ticks!` states `tickmode = "linear"`, so a user's preset never
 # matches), and a minor placement `tickmode = "linear"`, `tick0 = 0`,
 # `dtick = "D1"` or 1.
-function _axes_is_fitted_decades(axis)
-	_cmn_mapping_get(axis, :tickmode) === nothing || return false
+function _axes_is_fitted_decades(axis; linear_mode::Bool = false)
+	mode = _cmn_mapping_get(axis, :tickmode)
+	(mode === nothing || (linear_mode && mode == "linear")) || return false
 	_axes_real_value_or(_cmn_mapping_get(axis, :tick0), NaN) == 0 || return false
 	_axes_is_whole_number(_cmn_mapping_get(axis, :dtick), 1) || return false
 	for key in (:tickvals, :ticktext, :nticks, :tickformat, :ticklabelstep)
@@ -1467,6 +1468,7 @@ axis nor such labels return at once, without reading the trace data. `accs` is t
 collected a second time.
 """
 function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size, accs = nothing)
+	_axes_log_leftover_updates!(updates, p.layout)
 	has_log = _axes_has_log_axis(p.layout)
 	has_labels = _axes_has_outside_bar_text(p)
 	(has_log || has_labels) || return updates
@@ -1717,19 +1719,28 @@ function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_Axe
 		root === nothing && continue
 		push!(get!(Vector{Symbol}, groups, root), key)
 	end
+	# style-02: the tick size of the figure's style (0: no compensation).
+	style = _figure_recorded_style(layout)
+	tick = style === nothing ? 0.0 : style.tick_fontsize
 	for (root, members) in groups
 		(root in members || !haskey(fields, root)) || push!(members, root)
 		states = Dict(m => _axes_log_tick_state(get(fields, m, nothing)) for m in members)
 		writable = Symbol[m for m in members if states[m] !== :user]
-		isempty(writable) && continue
 		view = _axes_log_view(layout, root, members, plan.accs)
+		# plotly's own dtick choice per axis (an Int: decade labels only).
+		choices = Dict{Symbol, Any}()
 		want = false
 		step = 1
 		if view !== nothing
 			a, b = view
 			letter = String(root)[1]
 			reversed = _axis_is_reversed(p, root)
-			want = mode === :decades && _axes_decade_tick_count(a, b) >= _AXES_STYLE_DECADES_MIN_TICKS
+			for m in members
+				full = _axes_plan_length(layout, plan, m)
+				full > 1 && (choices[m] = _axes_plotly_log_dtick(b - a, full, letter))
+			end
+			want = !isempty(writable) && mode === :decades &&
+				_axes_decade_tick_count(a, b) >= _AXES_STYLE_DECADES_MIN_TICKS
 			for m in writable
 				axis = get(fields, m, nothing)
 				_cmn_mapping_get(axis, :showticklabels) === false && continue
@@ -1737,16 +1748,24 @@ function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_Axe
 				full = _axes_plan_length(layout, plan, m)
 				len = _AXES_TICK_LENGTH_SAFETY * full
 				len > 1 || continue
+				exponentformat = _axes_exponentformat(layout, m)
+				power = exponentformat == "power"
+				# The labels are measured at the size they are drawn at once
+				# this pass is written (the compensated font of a style's axis,
+				# whatever the axis holds now), so the result does not depend on
+				# an earlier pass.
+				own = _axes_log_font_is_style(axis, tick)
 				f = _axes_tick_font(layout, m)
-				exponentformat = _cmn_mapping_get(axis, :exponentformat)
 				if !want
-					choice = _axes_plotly_log_dtick(b - a, full, letter)
+					choice = choices[m]
+					f_auto = own ? (choice isa Int && power ? tick / _AXES_LOG_DECADE_FONT : tick) : f
 					want = _axes_tick_labels_overlap(
-						_axes_log_tick_labels(choice, a, b, len, letter, f, exponentformat, reversed),
+						_axes_log_tick_labels(choice, a, b, len, letter, f_auto, exponentformat, reversed),
 						letter == 'x' ? _AXES_TICK_COLLISION_CLEARANCE_X : _AXES_TICK_COLLISION_CLEARANCE_Y,
 					)
 				end
-				step = max(step, _axes_decade_step(a, b, len, letter, f, exponentformat, reversed))
+				f_decades = own && power ? tick / _AXES_LOG_DECADE_FONT : f
+				step = max(step, _axes_decade_step(a, b, len, letter, f_decades, exponentformat, reversed))
 			end
 		end
 		for m in writable
@@ -1761,8 +1780,96 @@ function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_Axe
 				end
 			end
 		end
+		tick > 0 || continue
+		for m in members
+			axis = get(fields, m, nothing)
+			_axes_log_font_is_style(axis, tick) || continue
+			# The dtick the axis is drawn with after this pass.
+			dtick = if m in writable
+				want ? step : get(choices, m, nothing)
+			else
+				_cmn_mapping_get(axis, :tickmode) == "array" ? nothing :
+					something(_cmn_mapping_get(axis, :dtick), get(choices, m, nothing))
+			end
+			decade_labels = (dtick isa Real && !(dtick isa Bool)) &&
+				_axes_exponentformat(layout, m) == "power" &&
+				isempty(something(_cmn_mapping_get(axis, :tickformat), ""))
+			target = decade_labels ? tick / _AXES_LOG_DECADE_FONT : tick
+			current = _cmn_mapping_get(_cmn_mapping_get(axis, :tickfont), :size)
+			isapprox(current, target; rtol = 1e-9) || (updates[Symbol(m, :_tickfont_size)] = target)
+		end
 	end
 	return updates
+end
+
+# Exponent format of axis `key`: its own, else its template's (the package
+# templates state "power", D21), else `nothing` (plotly's "B").
+function _axes_exponentformat(layout::Layout, key::Symbol)
+	value = _cmn_mapping_get(get(layout.fields, key, nothing), :exponentformat)
+	value === nothing &&
+		(value = _cmn_mapping_get(_axes_template_entry(layout, Symbol(String(key)[1], "axis")), :exponentformat))
+	return value === nothing ? nothing : String(value)
+end
+
+# style-02. plotly.js formatLog draws the decade labels of a power-format log
+# axis with a numeric dtick at 1.25 x the tick font ("D1"/"D2" axes: the
+# decades at 1.25 x, the digits at 0.75 x). Under a figure style with a tick
+# size (`:publication`, the journal presets, a `fontsize`-scaled one) the
+# finalizer gives such an axis `tickfont.size = tick / 1.25`, so its labels
+# come out at the style's size, and the style's size back once it shows other
+# labels (a "D1"/"D2" axis keeps plotly's mixed sizes: no single font size
+# serves both). Only an axis whose tick font is the style's size or its
+# compensated size is the finalizer's; any other size is the user's
+# (`set_fonts!` on a cell, `relayout!`) and stays.
+function _axes_log_font_is_style(axis, tick::Float64)
+	tick > 0 || return false
+	current = _cmn_mapping_get(_cmn_mapping_get(axis, :tickfont), :size)
+	(current isa Real && !(current isa Bool)) || return false
+	return isapprox(current, tick; rtol = 1e-9) ||
+		isapprox(current, tick / _AXES_LOG_DECADE_FONT; rtol = 1e-9)
+end
+
+# axes-ticks-03. Tick state written for a log axis on an axis that is no
+# longer log (a scale switch): the finalizer's fitted decades, the
+# `xticks!(:decades)` preset (the same signature with `tickmode =
+# "linear"`) and the compensated tick font (style-02) would draw a label at
+# every unit of the linear axis (1001 labels for 0..1000) and labels at
+# 0.8 x. They are removed, so the axis shows plotly's automatic ticks at the
+# style's size.
+function _axes_log_leftover_updates!(updates::Dict{Symbol, Any}, layout::Layout)
+	fields = layout.fields
+	style = nothing
+	for (key, axis) in fields
+		_fin_is_axis_key(key) || continue
+		_fin_axis_type(layout, key) == "log" && continue
+		minor = _cmn_mapping_get(axis, :minor)
+		_cmn_mapping_get(minor, :tickmode) == "linear" || _cmn_mapping_get(axis, :tickfont) !== nothing || continue
+		if _axes_is_decades_signature(axis)
+			_cmn_mapping_get(axis, :tickmode) === nothing || (updates[Symbol(key, :_tickmode)] = nothing)
+			for name in (:tick0, :dtick, :minor_tickmode, :minor_tick0, :minor_dtick, :minor_ticks, :minor_ticklen)
+				updates[Symbol(key, :_, name)] = nothing
+			end
+		end
+		style === nothing && (style = something(_figure_recorded_style(layout), false))
+		style === false && continue
+		tick = style.tick_fontsize
+		current = _cmn_mapping_get(_cmn_mapping_get(axis, :tickfont), :size)
+		(tick > 0 && current isa Real && isapprox(current, tick / _AXES_LOG_DECADE_FONT; rtol = 1e-9)) &&
+			(updates[Symbol(key, :_tickfont_size)] = tick)
+	end
+	return updates
+end
+
+# The decade signature (`_axes_is_fitted_decades`) with or without the
+# `tickmode = "linear"` of the `:decades` preset.
+# The preset variant also needs a mark of the log axis it was written for (a
+# minor "D1" step or the preset's own power format), so linear ticks a user
+# states with the same numbers are never taken for it.
+function _axes_is_decades_signature(axis)
+	_cmn_mapping_get(axis, :tickmode) === nothing && return _axes_is_fitted_decades(axis)
+	_axes_is_fitted_decades(axis; linear_mode = true) || return false
+	return _cmn_mapping_get(_cmn_mapping_get(axis, :minor), :dtick) == "D1" ||
+		_cmn_mapping_get(axis, :exponentformat) == "power"
 end
 
 # Visible range (log10) of the log axis group `root` with `members`: the

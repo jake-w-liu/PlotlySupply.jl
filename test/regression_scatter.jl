@@ -40,14 +40,16 @@ end
 	y = randn(1000)
 	f = plot_stem(y)
 	@test length(f.data) == 2
-	head, stem = f.data
+	# oned-stem-no-frame: the stems come first (drawn below the heads) instead
+	# of a negative zorder, which made plotly 2.35 draw no axis lines.
+	stem, head = f.data
 	@test head.fields[:mode] == "markers"
 	@test head.fields[:y] === y
 	@test stem.fields[:mode] == "lines"
 	@test head.fields[:legendgroup] == stem.fields[:legendgroup]
 	@test stem.fields[:showlegend] === false
 	@test stem.fields[:hoverinfo] == "skip"
-	@test stem.fields[:zorder] == -1
+	@test !haskey(stem.fields, :zorder) && !haskey(head.fields, :zorder)
 	# Gap-separated segments baseline -> y (PlotlySupply's `_GAP` is `nothing`).
 	@test length(stem.fields[:x]) == 3 * length(y)
 	@test stem.fields[:x][1:3] == [0, 0, nothing]
@@ -59,15 +61,16 @@ end
 
 	g = plot_stem([randn(5), randn(5)]; legend = ["a", "b"])
 	@test length(g.data) == 4
-	@test [t.fields[:mode] for t in g.data] == ["markers", "markers", "lines", "lines"]
+	@test [t.fields[:mode] for t in g.data] == ["lines", "lines", "markers", "markers"]
 	@test g.data[1].fields[:legendgroup] == g.data[3].fields[:legendgroup]
 	@test g.data[2].fields[:legendgroup] == g.data[4].fields[:legendgroup]
 	@test g.data[1].fields[:legendgroup] != g.data[2].fields[:legendgroup]
-	@test [t.fields[:name] for t in g.data[1:2]] == ["a", "b"]
+	@test [t.fields[:name] for t in g.data[3:4]] == ["a", "b"]
 
 	# Appended series get legend groups that never collide with existing ones.
 	plot_stem!(g, 0:4, randn(5); legend = "c")
 	groups = [g.data[k].fields[:legendgroup] for k in (1, 2, 5)]
+	@test g.data[5].fields[:mode] == "lines" && g.data[6].fields[:mode] == "markers"
 	@test allunique(groups)
 	@test g.data[5].fields[:legendgroup] == g.data[6].fields[:legendgroup]
 
@@ -79,7 +82,7 @@ end
 @testset "scatter family: plot_stem baseline, colours and marker keywords (C30)" begin
 	f = plot_stem(1:3, [1.0, -2.0, 3.0]; baseline = -0.5, color = "crimson",
 		marker_symbol = "s", marker_size = 9.5, linewidth = 2, legend = "s")
-	head, stem = f.data
+	stem, head = f.data
 	@test stem.fields[:y][1:3] == [-0.5, 1.0, nothing]
 	@test stem.fields[:y][4:6] == [-0.5, -2.0, nothing]
 	@test _rsc_get(stem.fields[:line], :color) == "crimson"
@@ -90,10 +93,10 @@ end
 
 	# White heads keep the colorway colour as their edge; stems stay black.
 	w = plot_stem(1:3, [1.0, 2.0, 3.0]; marker_color = "white", legend = "w")
-	marker = _rsc_fields(w.data[1].fields[:marker])
+	marker = _rsc_fields(w.data[2].fields[:marker])
 	@test marker[:color] == "white"
 	@test _rsc_get(marker[:line], :color) == PlotlySupply._default_trace_color(w, 1)
-	@test _rsc_get(w.data[2].fields[:line], :color) == "black"
+	@test _rsc_get(w.data[1].fields[:line], :color) == "black"
 
 	@test_throws ArgumentError plot_stem(1:3, [1.0, 2, 3]; baseline = Inf)
 	@test_throws ArgumentError plot_stem(1:3, [1.0, 2, 3]; baseline = true)

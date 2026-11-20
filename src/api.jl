@@ -9146,6 +9146,27 @@ function _stats_bar_widths(barwidth, bar_counts::Vector{Int}, nested::Bool, who:
 	]
 end
 
+# oned-bar-date-width: plotly.js measures a bar width on a date axis in
+# milliseconds, so `barwidth = 0.8` drew 0 px bars. On a date position axis
+# (typed "date", or autotyped with date positions) the width is in days, the
+# date unit of matplotlib's `bar(width = ...)`, converted to milliseconds.
+const _MS_PER_DAY = 86_400_000   # inherent: 24 * 60 * 60 * 1000
+
+function _stats_date_positions(fig, key::Symbol, positions)
+	axis_type = _axis_type(fig, key)
+	axis_type == "date" && return true
+	axis_type == "-" || return false
+	for v in positions
+		v === nothing && continue
+		return v isa Union{Dates.Date, Dates.DateTime} ||
+			(v isa AbstractString && occursin(_PLOTLY_DATE_PATTERN, v))
+	end
+	return false
+end
+
+_stats_days_to_ms(width) = width === nothing ? nothing :
+	width isa AbstractVector ? Any[w * _MS_PER_DAY for w in width] : width * _MS_PER_DAY
+
 # Bar hatches (`_hatch_pattern`): per series a pattern, `nothing`, or, for
 # per-bar hatches, one pattern whose `shape`, `size` and `solidity` are arrays
 # ("" shape: no hatch on that bar).
@@ -11829,10 +11850,13 @@ function _stats_bar!(
 	widths = _stats_bar_widths(o.barwidth, bar_counts, nested, who)
 	bargap = _stats_number(o.bargap, who, "bargap", 0, 1)
 	bargroupgap = _stats_number(o.bargroupgap, who, "bargroupgap", 0, 1)
+	position_key = horizontal ? _scat_twin_key(fig, secondary_y) : :xaxis
 	traces = Vector{GenericTrace}(undef, count)
 	for index in 1:count
 		series = value_list[index]
 		series_positions = position_list[index]
+		_stats_date_positions(fig, position_key, series_positions) &&
+			(widths[index] = _stats_days_to_ms(widths[index]))
 		points = length(series)
 		trace_x, trace_y = horizontal ? (series, series_positions) : (series_positions, series)
 		traces[index] = _bar_trace(;
@@ -12191,7 +12215,10 @@ at their default take the active [`PlotStyle`](@ref)'s per-trace defaults
 - `grid = true`: `true` keeps the template grid, `false` hides it, `:x`,
   `:y`, `:both` or `:none` choose the axes with grid lines.
 - `width = 0`, `height = 0`: figure size in px (`0`: automatic);
-  `fontsize = 0`: global font size in px.
+  `fontsize = 0`: global font size in px. Under a style with per-role sizes
+  (`:publication`, the journal presets) every role (title, axis titles, tick
+  labels, legend) is scaled by `fontsize` / the style's base size, so the
+  style's proportions stay; the same holds for every constructor's `fontsize`.
 - `show = false`: `true` opens the figure in a window and returns the
   `SyncPlot`.
 
@@ -12749,8 +12776,10 @@ Bar chart. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
 - `barwidth = nothing`: bar width in data units of the position axis (1 =
   the spacing of categories), as matplotlib's `width`: a number for every
   bar, or vectors following the `color` rule (one per series, or one per bar).
-  A width does not move the bar centre; under the default grouped `barmode`
-  the series still take their own slots. `nothing`: plotly's automatic width.
+  On a date position axis the width is in days (matplotlib's date unit),
+  written in plotly's milliseconds. A width does not move the bar centre;
+  under the default grouped `barmode` the series still take their own slots.
+  `nothing`: plotly's automatic width.
 - `bargap = nothing`, `bargroupgap = nothing`: figure-wide plotly gaps in
   [0, 1], the fraction of the position spacing between neighbouring bar
   groups and between the bars of one group (`nothing` leaves them unchanged:
@@ -15037,6 +15066,24 @@ function _contour_uniform_levels(values::Vector{Float64})
 	)
 end
 
+# fields-04: the colorscale of a native filled contour at uniform levels
+# whose band fills are the band colours of `stops` (a stepped BoundaryNorm
+# scale, 2k stops: band `i` spans stops 2i-1 and 2i). plotly.js colours each
+# band at its centre over a scale that spans one half step beyond the first
+# and last levels, so band `i` of `k` is sampled at t = i / (k + 1) and the
+# bands below and above the levels at t = 0 and 1: those take the end band
+# colours (out-of-range data clamped, as `plot_heatmap(levels)` draws it).
+function _contour_uniform_fill_scale(stops)
+	k = length(stops) ÷ 2
+	scale = Vector{Vector{Any}}()
+	push!(scale, Any[0.0, stops[1][2]])
+	for i in 1:k
+		push!(scale, Any[i / (k + 1), stops[2i - 1][2]])
+	end
+	push!(scale, Any[1.0, stops[2k - 1][2]])
+	return scale
+end
+
 # Contour-level specification of plot_contour(!) (spec F26). `kind` is
 # `:auto` (plotly chooses), `:count` (`ncontours`), `:uniform`
 # (start/end/size), `:per_level` (one trace per level: a single level, or
@@ -15272,7 +15319,12 @@ function _contour_add!(
 	# map (every level in the same colour). Their colours are sampled here, and
 	# a carrier trace draws the colorbar, as for bands.
 	line_levels = spec.kind === :per_level && spec.coloring == "lines"
-	carried = bands || line_levels
+	# fields-04: filled contours at uniform levels stay one native trace (one
+	# copy of the field), but take the band colours and the stepped colorbar
+	# of the levels' BoundaryNorm, as non-uniform levels and
+	# `plot_heatmap(levels)` do (`_contour_uniform_fill_scale`).
+	uniform_fill = spec.kind === :uniform && spec.coloring in ("", "fill")
+	carried = bands || line_levels || uniform_fill
 	color = _field2d_color(
 		Z,
 		who;
@@ -15293,9 +15345,9 @@ function _contour_add!(
 	user_ticklabels = colorbar_ticklabels === nothing ? nothing :
 		_field2d_labels(colorbar_ticklabels, who, "colorbar_ticklabels")
 	band_norm = nothing
-	if bands
-		# Filled bands between non-uniform levels: the band colours and the
-		# stepped colorbar come from the BoundaryNorm of the levels.
+	if bands || uniform_fill
+		# Filled bands between the levels: the band colours and the stepped
+		# colorbar come from the BoundaryNorm of the levels.
 		band_norm = _apply_color_norm(
 			nothing;
 			crange = user_crange,
@@ -15324,7 +15376,7 @@ function _contour_add!(
 		)
 		level_colours = line_norm.colours
 		carrier_norm = line_norm
-	elseif bands && colorbar_ticks === nothing
+	elseif (bands || uniform_fill) && colorbar_ticks === nothing
 		# matplotlib labels a contour colorbar with FixedLocator(levels,
 		# nbins = 10): at most about ten of the boundaries.
 		keep = _contour_tick_subset(band_norm.tickvals)
@@ -15367,6 +15419,10 @@ function _contour_add!(
 		contours[:end] = spec.values[end]
 		contours[:size] = spec.values[2] - spec.values[1]
 	end
+	if uniform_fill
+		base[:colorscale] = _contour_uniform_fill_scale(band_norm.stops)
+		base[:showscale] = false
+	end
 	if spec.kind in (:auto, :count, :uniform)
 		isempty(line) || (base[:line] = attr(; line...))
 		isempty(contours) || (base[:contours] = attr(; contours...))
@@ -15404,14 +15460,23 @@ function _contour_add!(
 		end
 	else
 		k = length(spec.values) - 1
+		# Values outside the levels take the end bands' colours (fields-04), as
+		# with uniform levels and `plot_heatmap(levels)`: the first and last
+		# bands reach down and up to the data extremes.
+		extent = _cbar_real_extrema(color.values)
 		for band in 1:k
 			fill_colour = band_norm.stops[2 * band - 1][2]
+			lower, upper = spec.values[band], spec.values[band + 1]
+			if extent !== nothing
+				band == 1 && (lower = min(lower, extent[1]))
+				band == k && (upper = max(upper, extent[2]))
+			end
 			# plotly shades the region a constraint EXCLUDES, so "][" (keep
 			# values outside the band) fills the band itself.
 			band_contours = Dict{Symbol, Any}(
 				:type => "constraint",
 				:operation => "][",
-				:value => Any[spec.values[band], spec.values[band + 1]],
+				:value => Any[lower, upper],
 			)
 			# Constraint contours draw their lines and labels in the fill colour
 			# by default (labels invisible on their own band); use the colour of
@@ -15647,9 +15712,12 @@ Levels and lines (spec F26):
   them); a uniformly spaced vector gives exactly those levels
   (`contours.start/end/size`); a single level or non-uniform levels draw one
   line trace per level; non-uniform levels with filled colouring draw one
-  filled band per interval (values outside `[levels[1], levels[end]]` stay
-  empty) and a stepped colorbar. Levels are data values, also with
-  `colornorm = :log`.
+  filled band per interval. Filled levels, uniform or not, give k + 1
+  boundaries k bands in the colours of `plot_heatmap(levels)` (band centres
+  of the colormap, matplotlib BoundaryNorm), values outside
+  `[levels[1], levels[end]]` in the end bands' colours, and a stepped
+  colorbar of exactly those k bands with ticks at the levels. Levels are data
+  values, also with `colornorm = :log`.
 - `ncontours::Integer = 0`: number of automatic levels (not with `levels`).
 - `coloring = ""`: `"fill"` (plotly default), `"lines"` (lines coloured by the
   colorscale), `"heatmap"`, or `"none"` (single-colour lines without colorbar
@@ -20155,6 +20223,27 @@ end
 # `stack = true` puts every series of the call in the stack group "one", which
 # also stacks them on earlier `stack = true` areas of the same axes; otherwise
 # each series is filled to zero.
+# oned-area-gap-filled: plotly.js joins the segments of a filled trace into
+# one fill path, so an area filled across a gap (NaN/missing/nothing in `y`),
+# and a stacked one took the gap as zero, both drawing area where there is no
+# data. A gap is an error instead (before any change); the scan stops at the
+# first gap and allocates nothing.
+_area_is_gap(v) = v === missing || v === nothing || (v isa AbstractFloat && isnan(v))
+
+function _area_check_gaps(ys, who::AbstractString)
+	for (k, y) in enumerate(ys)
+		i = findfirst(_area_is_gap, y)
+		i === nothing && continue
+		throw(ArgumentError(
+			"$(who): `y`$(length(ys) > 1 ? " of series $(k)" : "") has a gap " *
+			"(`$(repr(y[i]))` at position $(i)); a filled area cannot show a gap " *
+			"(plotly.js would fill across it, or take it as 0 when stacked): draw " *
+			"each gap-free part with its own call.",
+		))
+	end
+	return nothing
+end
+
 function _area_impl!(
 	fig,
 	x,
@@ -20189,6 +20278,7 @@ function _area_impl!(
 )
 	xs, ys, _ = _scat_series(x, y, who)
 	n = length(ys)
+	_area_check_gaps(ys, who)
 	trace_mode = _scat_mode(something(mode, "lines"), who)
 	xrange = _scat_range_arg(xrange)
 	yrange = _scat_range_arg(yrange)
@@ -20293,7 +20383,13 @@ one-argument form uses `x = 0:length(y)-1` (per series).
 
 - `x`, `y`: vectors of equal length, or a vector of vectors in `y` (one area
   per series) with `x` shared or nested like `y`. Matrices and complex values
-  throw an `ArgumentError`.
+  throw an `ArgumentError`. A `y` value that is `NaN`, `missing` or
+  `nothing` (a gap) is an `ArgumentError` as well: plotly.js would fill
+  across the gap (or, stacked, take it as zero), showing area where there is
+  no data; draw each gap-free part with its own call. With `stack = true`,
+  series on different x grids (nested `x`) are interpolated at the x values
+  only the other series have (plotly `stackgaps = "interpolate"`), never taken
+  as zero there.
 
 #### Keywords
 

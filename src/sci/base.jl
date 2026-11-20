@@ -195,10 +195,47 @@ function _apply_figure_size!(fig, who::AbstractString; width = 0, height = 0)
 	return nothing
 end
 
-# Global font size in pixels; 0 keeps the template default.
+# Global font size in pixels; 0 keeps the template default. Under a style that
+# sets per-role sizes (`:publication`, the journal presets) `font.size` alone
+# changes no visible text, so the keyword scales every role size of the
+# figure's style by `fontsize / base` (base: the style's `fontsize`, else
+# plotly's 12 px), keeping the style's proportions, writes them to the text
+# that exists, and records the scaled style on the figure, so a legend or
+# colorbar a later call adds gets the same sizes (style-08). Without role sizes
+# (`:default`, 1.x) only `font.size` changes. Repeating the same size is a
+# no-op (the recorded base is then `fontsize`).
+const _FONTSIZE_ROLE_FIELDS = (:title_fontsize, :label_fontsize, :tick_fontsize, :legend_fontsize)
+
 function _apply_figure_fontsize!(fig, who::AbstractString, fontsize)
 	_require_size_option(fontsize, who, "fontsize")
-	fontsize > 0 && relayout!(fig, font_size = fontsize)
+	fontsize > 0 || return nothing
+	p = _cmn_plot(fig)
+	style = _figure_recorded_style(p)
+	if style !== nothing && any(name -> getfield(style, name) > 0, _FONTSIZE_ROLE_FIELDS)
+		ratio = fontsize / (style.fontsize > 0 ? style.fontsize : _TIGHT_DEFAULT_FONT_SIZE)
+		scaled = copy(style)
+		for name in _FONTSIZE_ROLE_FIELDS
+			size = getfield(style, name)
+			size > 0 && setproperty!(scaled, name, size * ratio)
+		end
+		scaled.fontsize = fontsize
+		roles = _FontRoles(
+			"", 0.0, "",
+			scaled.title_fontsize, scaled.label_fontsize, scaled.tick_fontsize, scaled.legend_fontsize,
+			0.0, 0.0,
+		)
+		layout_updates, trace_updates = _font_role_updates(p, roles, nothing, who)
+		meta = _style_meta_with_record(
+			get(layout_updates, :meta, get(p.layout.fields, :meta, nothing)),
+			scaled,
+		)
+		meta === nothing || (layout_updates[:meta] = meta)
+		for (key, value) in layout_updates
+			p.layout.fields[key] = value
+		end
+		_commit_trace_updates!(p, trace_updates)
+	end
+	relayout!(fig, font_size = fontsize)
 	return nothing
 end
 

@@ -718,7 +718,30 @@ function _stream_arrow_index(line::Vector{NTuple{2, Float64}})
 	return m
 end
 
+# Finite colour values of the traces bound to colour axis `id` of `fig` that
+# has no limits yet (`z` of heatmaps and contours; a log-norm carrier stores
+# log10 of its data there, given back as data under `colornorm = :log`);
+# empty when the axis has limits (`_mesh2d_colour` takes those) or no trace.
+function _stream_coloraxis_values(fig, id::String, colornorm)
+	_mesh2d_coloraxis_limits(fig, id) === nothing || return Float64[]
+	log = colornorm === :log || colornorm == "log"
+	values = Float64[]
+	for trace in _plot_data(fig)
+		get(trace.fields, :coloraxis, nothing) == id || continue
+		z = get(trace.fields, :z, nothing)
+		z isa AbstractArray || continue
+		for v in z
+			(v isa Real && !(v isa Bool) && isfinite(v)) || continue
+			push!(values, log ? exp10(Float64(v)) : Float64(v))
+		end
+	end
+	return values
+end
+
+# The traces of one streamlines call and the colour map of `colorby =
+# :speed` (`nothing` without it): `(traces, cm)`.
 function _streamlines_traces(
+	fig,
 	x,
 	y,
 	U,
@@ -735,8 +758,16 @@ function _streamlines_traces(
 	color,
 	colorby,
 	colorscale,
+	crange = [0, 0],
+	cmid = nothing,
+	colornorm = :linear,
+	levels = nothing,
+	showscale = nothing,
 	colorbar_title::AbstractString,
 	colorbar_title_side::Symbol,
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
 	linewidth,
 	legend::AbstractString,
 )
@@ -765,10 +796,25 @@ function _streamlines_traces(
 	by_speed && !isempty(colour) && throw(ArgumentError(
 		"$(who): `color` sets one colour and conflicts with colorby = :speed.",
 	))
-	!by_speed && !_is_unset_colorscale(colorscale) && throw(ArgumentError(
-		"$(who): `colorscale` applies to colorby = :speed; got colorby = :none.",
-	))
-	stops = by_speed ? _concrete_norm_stops(colorscale, nothing, who) : nothing
+	if !by_speed
+		# fields-05: the colour keywords colour by speed; without it they
+		# would be silently ignored.
+		given = String[]
+		_is_unset_colorscale(colorscale) || push!(given, "`colorscale`")
+		_is_auto_range(crange) || push!(given, "`crange`")
+		(colornorm === :linear || colornorm == "linear") || push!(given, "`colornorm`")
+		for (name, value) in (
+			(:cmid, cmid), (:levels, levels), (:showscale, showscale),
+			(:colorbar_ticks, colorbar_ticks), (:colorbar_ticklabels, colorbar_ticklabels),
+			(:coloraxis, coloraxis),
+		)
+			value === nothing || push!(given, "`$(name)`")
+		end
+		isempty(given) || throw(ArgumentError(
+			"$(who): $(join(given, ", ")) $(length(given) == 1 ? "applies" : "apply") " *
+			"to colorby = :speed; got colorby = :none.",
+		))
+	end
 
 	xs = _stream_axis(x, who, "x", xlog)
 	ys = _stream_axis(y, who, "y", ylog)
@@ -851,39 +897,64 @@ function _streamlines_traces(
 			push!(py, _GAP)
 			push!(sizes, 0.0)
 		end
-		return _field2d_mark_anchors!(GenericTrace[line_trace(px, py, sizes, colour, true)], anchors...)
+		return _field2d_mark_anchors!(GenericTrace[line_trace(px, py, sizes, colour, true)], anchors...), nothing
 	end
 
-	# colorby = :speed: every segment takes the colour bin of its mean speed;
-	# runs of equal bins become polylines of that bin's trace.
+	# colorby = :speed: every segment takes the colour bin of its mean speed
+	# under the colour norm of the keywords (`crange`, `cmid`, `colornorm`,
+	# `levels`, `coloraxis`: the mesh family's, as plot_quiver's `colorby`,
+	# fields-05); runs of equal bins become polylines of that bin's trace.
 	speeds = [
 		[something(_stream_velocity(grid, point...), (0.0, 0.0, NaN))[3] for point in line]
 		for line in lines
 	]
-	finite_speeds = [s for line_speeds in speeds for s in line_speeds if isfinite(s)]
-	if isempty(finite_speeds)
+	segment_speed(ls, k) = isfinite(ls[k]) && isfinite(ls[k + 1]) ? (ls[k] + ls[k + 1]) / 2 :
+		isfinite(ls[k]) ? ls[k] : ls[k + 1]
+	segment_speeds = Float64[segment_speed(ls, k) for ls in speeds for k in 1:(length(ls) - 1)]
+	# The segment colours are fixed here: joining a colour axis without limits
+	# (a heatmap of the speed with plotly's automatic range), the limits must
+	# also cover the values the axis already shows, or the bar would take the
+	# streamlines' range and clip the field.
+	shared = coloraxis !== nothing && _is_auto_range(crange) && levels === nothing ?
+		_stream_coloraxis_values(fig, _normalize_coloraxis(coloraxis, who), colornorm) : Float64[]
+	cm = _mesh2d_colour(
+		fig,
+		_Mesh2dTarget(),
+		isempty(shared) ? segment_speeds : vcat(segment_speeds, shared);
+		colorscale = colorscale,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		showscale = showscale,
+		colorbar_title = colorbar_title,
+		colorbar_title_side = colorbar_title_side,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
+		who = who,
+	)
+	segment_bin, colours = _mesh2d_bins(cm, _STREAMLINE_COLOR_BINS)
+	if isempty(colours)
+		# No finite speed to colour by: one empty trace, no colorbar.
 		return _field2d_mark_anchors!(
 			GenericTrace[line_trace(Union{Nothing, Float64}[], Union{Nothing, Float64}[], Float64[], "", true)],
 			anchors...,
-		)
+		), cm
 	end
-	low, high = extrema(finite_speeds)
-	# A uniform speed has no range to map: give it the low end of the scale.
-	high > low || (high = low == 0 ? 1.0 : low + abs(low))
-	nbins = _STREAMLINE_COLOR_BINS
-	bin(s) = isfinite(s) ? clamp(floor(Int, (s - low) / (high - low) * nbins) + 1, 1, nbins) : 1
+	nbins = length(colours)
 	bin_x = [Union{Nothing, Float64}[] for _ in 1:nbins]
 	bin_y = [Union{Nothing, Float64}[] for _ in 1:nbins]
 	bin_sizes = [Float64[] for _ in 1:nbins]
-	for (line, line_speeds) in zip(lines, speeds)
+	offset = 0
+	for line in lines
 		m = length(line)
 		arrow = _stream_arrow_index(line)
-		segment_bins = [
-			bin(isfinite(line_speeds[k]) && isfinite(line_speeds[k + 1]) ?
-				(line_speeds[k] + line_speeds[k + 1]) / 2 :
-				isfinite(line_speeds[k]) ? line_speeds[k] : line_speeds[k + 1])
-			for k in 1:(m - 1)
-		]
+		# A segment without a colour value (no finite speed, or a speed the
+		# norm cannot show, e.g. 0 under `:log`) takes the lowest bin, so the
+		# line stays whole.
+		segment_bins = [max(segment_bin[offset + k], 1) for k in 1:(m - 1)]
+		offset += m - 1
 		first_segment = 1
 		while first_segment <= m - 1
 			b = segment_bins[first_segment]
@@ -906,22 +977,16 @@ function _streamlines_traces(
 	traces = GenericTrace[]
 	for b in 1:nbins
 		isempty(bin_x[b]) && continue
-		bin_colour = _sample_colorscale(stops, (b - 0.5) / nbins)
-		push!(traces, line_trace(bin_x[b], bin_y[b], bin_sizes[b], bin_colour, isempty(traces)))
+		push!(traces, line_trace(bin_x[b], bin_y[b], bin_sizes[b], colours[b], isempty(traces)))
 	end
-	_field2d_mark_anchors!(traces, anchors...)
-	colorbar = _field2d_colorbar(colorbar_title, colorbar_title_side, who)
-	push!(
+	isempty(traces) && push!(
 		traces,
-		_colorbar_carrier_trace(;
-			stops = stops,
-			cmin = low,
-			cmax = high,
-			colorbar = colorbar,
-			who = who,
-		),
+		line_trace(Union{Nothing, Float64}[], Union{Nothing, Float64}[], Float64[], "", true),
 	)
-	return traces
+	_field2d_mark_anchors!(traces, anchors...)
+	carrier = _mesh2d_carrier(cm, who)
+	carrier === nothing || push!(traces, carrier)
+	return traces, cm
 end
 
 function _streamlines_add!(
@@ -941,8 +1006,16 @@ function _streamlines_add!(
 	color,
 	colorby,
 	colorscale,
+	crange = [0, 0],
+	cmid = nothing,
+	colornorm = :linear,
+	levels = nothing,
+	showscale = nothing,
 	colorbar_title::AbstractString,
 	colorbar_title_side,
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
 	linewidth,
 	legend::AbstractString,
 	xlabel::AbstractString,
@@ -995,7 +1068,8 @@ function _streamlines_add!(
 		ykey = twin_key,
 	)
 	title_side = _field2d_title_side(colorbar_title_side, who)
-	traces = _streamlines_traces(
+	traces, cm = _streamlines_traces(
+		fig,
 		x,
 		y,
 		U,
@@ -1012,8 +1086,16 @@ function _streamlines_add!(
 		color = color,
 		colorby = colorby,
 		colorscale = colorscale,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		showscale = showscale,
 		colorbar_title = colorbar_title,
 		colorbar_title_side = title_side,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
 		linewidth = linewidth,
 		legend = legend,
 	)
@@ -1021,6 +1103,7 @@ function _streamlines_add!(
 	_stats_bind_y!(traces, yref)
 	first_new = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
+	cm === nothing || _mesh2d_write_coloraxis!(fig, _Mesh2dTarget(), cm, showscale !== nothing)
 	_field2d_apply_options!(
 		fig,
 		who;
@@ -1098,10 +1181,18 @@ arrowheads whole. Each line trace stores the grid extent in
 - `colorby = :none`: `:speed` colours each segment by the local speed
   `hypot(U, V)` (in $(_STREAMLINE_COLOR_BINS) colour bins, one trace each) and
   adds a colorbar.
-- `colorscale = ""`: colorscale for `colorby = :speed` (template default when
-  unset); `colorbar_title = ""` (mathtext; a `\$...\$` title is drawn as a
-  typeset annotation beside the bar), `colorbar_title_side = :top`
-  (`:top`, `:right` or `:bottom`, also as a String).
+- Colour by speed (`colorby = :speed`; passing one of these without it throws
+  an `ArgumentError`), as for [`plot_quiver`](@ref)'s `colorby` and the mesh
+  family: `colorscale = ""` (template default when unset), `crange = [0, 0]`
+  (colour limits; automatic: the speed range, or the limits of an existing
+  `coloraxis`), `cmid = nothing`, `colornorm = :linear` (`:log`: LogNorm),
+  `levels = nothing` (discrete bands), `showscale = nothing`,
+  `colorbar_ticks`/`colorbar_ticklabels` (data values), `coloraxis = nothing`
+  (a shared colour axis id such as `:shared`, which [`shared_colorbar!`](@ref)
+  and other fields can join); `colorbar_title = ""` (mathtext; a `\$...\$`
+  title is drawn as a typeset annotation beside the bar),
+  `colorbar_title_side = :top` (`:top`, `:right` or `:bottom`, also as a
+  String).
 - `linewidth::Real = 0`: line width in px; `0` takes the active style's line
   width ([`with_style`](@ref)) and else 1 px. `legend = ""` (legend name;
   unnamed streamlines have no legend entry).
@@ -1139,8 +1230,16 @@ function plot_streamlines(
 	color = "",
 	colorby::Union{Symbol, AbstractString} = :none,
 	colorscale = "",
+	crange = [0, 0],
+	cmid = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	levels = nothing,
+	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
 	colorbar_title_side::Union{Symbol, AbstractString} = :top,
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
 	linewidth::Real = 0,
 	legend::AbstractString = "",
 	xlabel::AbstractString = "",
@@ -1181,8 +1280,16 @@ function plot_streamlines(
 		color = color,
 		colorby = colorby,
 		colorscale = colorscale,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		showscale = showscale,
 		colorbar_title = colorbar_title,
 		colorbar_title_side = colorbar_title_side,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
 		linewidth = linewidth,
 		legend = legend,
 		xlabel = xlabel,
@@ -1253,8 +1360,16 @@ function plot_streamlines!(
 	color = "",
 	colorby::Union{Symbol, AbstractString} = :none,
 	colorscale = "",
+	crange = [0, 0],
+	cmid = nothing,
+	colornorm::Union{Symbol, AbstractString} = :linear,
+	levels = nothing,
+	showscale::Union{Nothing, Bool} = nothing,
 	colorbar_title::AbstractString = "",
 	colorbar_title_side::Union{Symbol, AbstractString} = :top,
+	colorbar_ticks = nothing,
+	colorbar_ticklabels = nothing,
+	coloraxis = nothing,
 	linewidth::Real = 0,
 	legend::AbstractString = "",
 	xlabel::AbstractString = "",
@@ -1295,8 +1410,16 @@ function plot_streamlines!(
 		color = color,
 		colorby = colorby,
 		colorscale = colorscale,
+		crange = crange,
+		cmid = cmid,
+		colornorm = colornorm,
+		levels = levels,
+		showscale = showscale,
 		colorbar_title = colorbar_title,
 		colorbar_title_side = colorbar_title_side,
+		colorbar_ticks = colorbar_ticks,
+		colorbar_ticklabels = colorbar_ticklabels,
+		coloraxis = coloraxis,
 		linewidth = linewidth,
 		legend = legend,
 		xlabel = xlabel,

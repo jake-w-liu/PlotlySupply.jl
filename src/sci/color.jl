@@ -1011,6 +1011,49 @@ function _format_colorbar_number(v::Float64)
 		mtext == "-1" ? "-10<sup>$(exponent)</sup>" : "$(mtext)×10<sup>$(exponent)</sup>"
 end
 
+# fields-01: whether a colour carrier was built with `colornorm = :log`:
+# `_apply_color_norm` maps the data to log10 colour values and keeps the data
+# for the hover in `customdata`, so its first finite colour values are the
+# log10 of their data (a carrier with other customdata, e.g. the counts of a
+# linear 2-D histogram on log axes, fails the test). `values` are the colour
+# values (`_cbar_slot_values`), `data` the trace's `customdata`; both are
+# iterated in storage order (matrices or vectors of rows, as built).
+const _COLOUR_LOG_CARRIER_SAMPLES = 8   # agreeing values that make the case
+
+_colour_flat(a) = eltype(a) <: AbstractArray ? Iterators.flatten(a) : a
+
+function _colour_log_carrier(values, data)
+	(values isa AbstractArray && data isa AbstractArray) || return false
+	# A heatmap keeps `z` as the lazy transpose of its `customdata` (plotly's
+	# row-major z): compare entry by entry in the same orientation.
+	(values isa AbstractMatrix && data isa AbstractMatrix && size(values) != size(data) &&
+		size(values) == reverse(size(data))) && (data = PermutedDimsArray(data, (2, 1)))
+	checked = 0
+	for (v, d) in zip(_colour_flat(values), _colour_flat(data))
+		(v isa Real && d isa Real && !(v isa Bool) && !(d isa Bool) &&
+			isfinite(v) && isfinite(d) && d > 0) || continue
+		isapprox(Float64(v), log10(Float64(d)); atol = 1e-9) || return false
+		(checked += 1) >= _COLOUR_LOG_CARRIER_SAMPLES && break
+	end
+	return checked > 0
+end
+
+# The colorbar options of `colorbar!` for a carrier of a logarithmic colour
+# scale (`log`): its `ticks` are data values, as the constructors'
+# `colorbar_ticks`, placed at their log10 and labelled like the constructor's
+# decade ticks unless `ticklabels` are given. Other options pass unchanged.
+function _colour_log_bar_options(opts, log::Bool, who::AbstractString)
+	(log && opts.ticks !== nothing) || return opts
+	ticks = opts.ticks
+	all(t -> t > 0, ticks) || throw(ArgumentError(
+		"$(who): `ticks` on a logarithmic colour scale (`colornorm = :log`) are " *
+		"data values and must be positive; got $(repr(ticks)).",
+	))
+	labels = opts.ticklabels === nothing ?
+		String[_log_tick_label(Float64(t)) for t in ticks] : opts.ticklabels
+	return merge(opts, (ticks = Float64[log10(Float64(t)) for t in ticks], ticklabels = labels))
+end
+
 # Label of a tick at data value `v` on a log colorbar: exact decades are
 # "10<sup>k</sup>" (HTML, no MathJax needed); other values use the compact form.
 function _log_tick_label(v::Float64)

@@ -248,10 +248,20 @@ end
 		@test _bs_get(d, :xaxis, :range) == ["2020-01-01", "2021-06-30"]
 		_BS._apply_axis_range!(d, :x, (1.5e12, 1.6e12), "t")
 		@test _bs_get(d, :xaxis, :range) == [1.5e12, 1.6e12]
-		# An autotyped axis may become a date axis: strings pass unchanged.
-		a = plot_scatter([1.0, 2.0], [1.0, 2.0])
+		# An autotyped axis without data may become a date axis: strings pass
+		# unchanged. Numbers on it make plotly.js type it linear, where date
+		# bounds would draw garbage (axes-ticks-02).
+		a = Plot(Layout())
 		_BS._apply_axis_range!(a, :x, ("2020-01-01", "2020-02-01"), "t")
 		@test _bs_get(a, :xaxis, :range) == ["2020-01-01", "2020-02-01"]
+		num = plot_scatter([1.0, 2.0], [1.0, 2.0])
+		@test _bs_throws(
+			() -> _BS._apply_axis_range!(num, :x, ("2020-01-01", "2020-02-01"), "t"),
+			"t: `xrange` bounds on a linear axis must be numbers",
+		)
+		dated = plot_scatter(["2020-01-01", "2020-03-01"], [1.0, 2.0])
+		_BS._apply_axis_range!(dated, :x, ("2020-01-01", "2020-02-01"), "t")
+		@test _bs_get(dated, :xaxis, :range) == ["2020-01-01", "2020-02-01"]
 
 		c = plot_bar(["a", "b", "c"], [1.0, 2.0, 3.0])
 		relayout!(c; xaxis_type = "category")
