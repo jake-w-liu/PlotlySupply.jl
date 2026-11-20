@@ -1191,6 +1191,33 @@ import Dates
 		@test append_bytes(grid(200, true)) <= 1.5 * append_bytes(grid(200, false))
 	end
 
+	@testset "v7 Q27: a cell legend without entries is neither scored nor recorded; its first entry is placed by the rule" begin
+		# Before: every append to a grid of unnamed traces scored the cell's
+		# hidden legend and recorded it as the rule's (an append to a 6 x 6
+		# grid cost 3.4 MB against 1.9 MB, and `layout.meta` kept the record).
+		sf = subplots(2, 2; sync = false)
+		for r in 1:2, c in 1:2
+			plot_scatter!(sf, 1:10, 1:10; row = r, col = c, xlabel = "x", ylabel = "y")
+		end
+		@test isempty(something(PS._legend_cell_auto_ids(pl(sf)), Set{String}()))
+		@test !haskey(pl(sf).layout.fields, :meta) ||
+			PS._style_meta_get(PS._style_meta_get(pl(sf).layout.fields[:meta], PS._STYLE_META_KEY), :legend_rule) === nothing
+		# The first named trace of a cell: its rising line covers the top
+		# right, so the rule takes the box the unnamed traces left at the
+		# default corner and records it.
+		plot_scatter!(sf, 1:10, 1:10; row = 1, col = 1, legend = "rising")
+		@test placed_at(sf, :legend, :topleft)
+		@test "legend" in PS._legend_cell_auto_ids(pl(sf))
+		@test PS._finalize_figure!(sf) === false
+		# A box the user placed while it had no entries stays where it is.
+		su = subplots(1, 2; sync = false)
+		plot_scatter!(su, 1:10, 1:10; row = 1, col = 1)
+		set_legend!(su; row = 1, col = 1, position = :bottomright)
+		plot_scatter!(su, 1:10, 1:10; row = 1, col = 1, legend = "rising")
+		@test placed_at(su, :legend, :bottomright)
+		@test PS._finalize_figure!(su) === false
+	end
+
 	@testset "v7 vm-12: a cell legend that fits neither inside nor beside its cell goes below it as a column" begin
 		# Twin-y cells of an :ieee 1 x 2 grid: before, the legends stayed
 		# inside a plot area narrower than them (x = 0.21 right-anchored,

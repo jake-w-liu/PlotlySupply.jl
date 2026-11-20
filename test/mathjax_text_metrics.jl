@@ -215,6 +215,42 @@ $(PS._EXPORT_RESET_DIV_JS)
 		@test gaps["exact"]["top"] < 3
 	end
 
+	# tm-cbar-math-title-clip: a math colorbar title (an annotation beside,
+	# above or below the bar) of two lines or with a fraction ran past the
+	# figure edge, and under :ieee (4 px margins) a title above the bar was
+	# drawn outside the figure.
+	cbar_title_js = raw"""
+  const fig = div.querySelector('svg.main-svg').getBoundingClientRect();
+  const out = [];
+  div.querySelectorAll('g.annotation').forEach(function (a) {
+    let u = null;
+    a.querySelectorAll('g.annotation-text-g text, g.annotation-text-g [class*="math-group"]').forEach(function (e) {
+      const r = e.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return;
+      u = u ? [Math.min(u[0], r.left), Math.min(u[1], r.top), Math.max(u[2], r.right), Math.max(u[3], r.bottom)] :
+        [r.left, r.top, r.right, r.bottom];
+    });
+    if (u) out.push([u[0] - fig.left, u[1] - fig.top, fig.right - u[2], fig.bottom - u[3]]);
+  });
+  return out;
+"""
+	cbar_titles = ("frac" => "\$\\frac{|E|}{E_0}\$", "2-line" => "normalised\nfield \$|E|\$",
+		"math" => "\$|E|^2\$ (V\$^2\$/m\$^2\$)")
+	@testset "tm-cbar-math-title-clip: math colorbar title inside the figure ($(style), $(tag), $(side))" for
+			style in (:default, :ieee), (tag, title) in cbar_titles, side in (:right, :top, :bottom)
+		xs = collect(range(0, 1; length = 12))
+		ys = collect(range(0, 1; length = 10))
+		Z = [sin(3a) * cos(2b) for a in xs, b in ys]
+		fig = with_style(style) do
+			plot_heatmap(xs, ys, Z; xlabel = "x", ylabel = "y", colorbar_title = title, colorbar_title_side = side)
+		end
+		@test PS._finalize_figure!(fig) === false
+		gaps = drawn_json(fig, cbar_title_js)
+		@test length(gaps) == 1
+		# left, top, right and bottom distance of the glyphs from the figure edge
+		@test all(gap -> minimum(gap) >= 0, gaps)
+	end
+
 	# docs-06: a math column title sat on the top frame line of its column
 	# (no gap; a MathJax box ends at the formula's baseline).
 	@testset "math column titles clear the frame" begin

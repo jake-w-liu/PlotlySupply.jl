@@ -2073,6 +2073,10 @@ function _apply_subplot_legends!(
 	# from one whose id was handed to another cell.
 	kept = Set{String}()
 	moved = Set{String}()
+	# Cells whose legend draws an entry, and drew one before this append
+	# (plotly.js draws no box without one: the rule leaves such a box alone).
+	shown = Set{String}()
+	shown_before = Set{String}()
 	has_figure_entries = false
 	for (index, trace) in enumerate(p.data)
 		trace isa GenericTrace || continue
@@ -2096,6 +2100,13 @@ function _apply_subplot_legends!(
 		if !haskey(trace.fields, :showlegend)
 			trace.fields[:showlegend] =
 				_trace_will_showlegend(trace)
+		end
+		if !_trace_is_figure_legend_entry(trace) && get(trace.fields, :showlegend, true) !== false
+			key = trace_keys[index]
+			if key !== nothing
+				push!(shown, key)
+				auto_from > 0 && index < auto_from && push!(shown_before, key)
+			end
 		end
 	end
 
@@ -2128,7 +2139,9 @@ function _apply_subplot_legends!(
 			xanchor = xanchor,
 			yanchor = yanchor,
 		)
-		auto = key in appended && legend_position === :topright && isempty(xanchor) &&
+		# A box without entries is not scored (Q27: every append to a grid of
+		# unnamed traces scored its cell) nor recorded as the rule's.
+		auto = key in appended && key in shown && legend_position === :topright && isempty(xanchor) &&
 			isempty(yanchor) && !replace_placement && _DEFAULT_LEGEND_POSITION[] === :topright
 		if auto && !(created || reassigned)
 			current = _symbol_dict(p.layout.fields[legend_key])
@@ -2136,23 +2149,29 @@ function _apply_subplot_legends!(
 			# another position of the rule since, `_lt_follow_rule!`), else at
 			# the position the rule gave the cell before this append.
 			recorded = legend_id in something(_legend_cell_auto_ids(p), ())
-			positions = recorded ? (_SCAT_LEGEND_POSITIONS..., _SCAT_LEGEND_OUTSIDE_POSITIONS...) :
-				(something(_legend_best_cell_position(p, legend_id, xdom, ydom; before = auto_from), :topright),)
-			# An outside position is matched by anchors, side and (for the
-			# position the rule gave the cell before this append) orientation:
-			# the layout engine sets its coordinates in the room it reserved,
-			# and the rule turns a row below the cell into a column as entries
-			# are added (`_legend_rule_placement`).
-			auto = any(positions) do position
-				expected = _legend_rule_placement(p, legend_id, position, xdom, ydom, legend_inset; before = auto_from)
-				position in _SCAT_LEGEND_OUTSIDE_POSITIONS || return _legend_placement_matches(current, expected, _LEGEND_PLACEMENT_KEYS)
-				_legend_placement_matches(current, expected,
-					recorded ? (:xanchor, :yanchor, :xref, :yref) : (:xanchor, :yanchor, :xref, :yref, :orientation)) || return false
-				x = get(current, :x, nothing)
-				y = get(current, :y, nothing)
-				(x isa Real && y isa Real) || return true
-				return position === :outside_right ? x >= xdom[2] - _LEGEND_PLACEMENT_TOL :
-					y <= ydom[1] + _LEGEND_PLACEMENT_TOL
+			if !recorded && !(key in shown_before)
+				# Its first entries: the rule takes the box while it is where
+				# this function put it when it had none (the default corner).
+				auto = _legend_placement_matches(current, placement, _LEGEND_PLACEMENT_KEYS)
+			else
+				positions = recorded ? (_SCAT_LEGEND_POSITIONS..., _SCAT_LEGEND_OUTSIDE_POSITIONS...) :
+					(something(_legend_best_cell_position(p, legend_id, xdom, ydom; before = auto_from), :topright),)
+				# An outside position is matched by anchors, side and (for the
+				# position the rule gave the cell before this append) orientation:
+				# the layout engine sets its coordinates in the room it reserved,
+				# and the rule turns a row below the cell into a column as entries
+				# are added (`_legend_rule_placement`).
+				auto = any(positions) do position
+					expected = _legend_rule_placement(p, legend_id, position, xdom, ydom, legend_inset; before = auto_from)
+					position in _SCAT_LEGEND_OUTSIDE_POSITIONS || return _legend_placement_matches(current, expected, _LEGEND_PLACEMENT_KEYS)
+					_legend_placement_matches(current, expected,
+						recorded ? (:xanchor, :yanchor, :xref, :yref) : (:xanchor, :yanchor, :xref, :yref, :orientation)) || return false
+					x = get(current, :x, nothing)
+					y = get(current, :y, nothing)
+					(x isa Real && y isa Real) || return true
+					return position === :outside_right ? x >= xdom[2] - _LEGEND_PLACEMENT_TOL :
+						y <= ydom[1] + _LEGEND_PLACEMENT_TOL
+				end
 			end
 			# Moved by the user since: the rule no longer owns it.
 			auto || _legend_cell_auto!(p, legend_id, false)
