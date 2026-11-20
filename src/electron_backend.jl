@@ -6337,7 +6337,7 @@ function _layout_delta_has_renderer_side_effects(
 				occursin(_PLOTLY_COLORAXIS_BOUND_PATH, path) ||
 				occursin(_PLOTLY_COLORAXIS_SCALE_PATH, path) ||
 				occursin(_PLOTLY_ASPECTRATIO_PATH, path) ||
-				leaf in ("autorange", "tickmode", "cauto", "autocolorscale")) && return true
+				leaf in ("autorange", "cauto", "autocolorscale")) && return true
 			continue
 		end
 		parent = _plotly_path_parent(path)
@@ -6466,7 +6466,7 @@ function _trace_delta_has_renderer_side_effects(
 				path == "zmin" || path == "zmax" ||
 				path in _PLOTLY_CONTOUR_PATHS ||
 				occursin(_PLOTLY_TRACE_TICK_PATH, path) ||
-				leaf in ("autocontour", "zauto", "cauto", "autocolorscale", "tickmode")) && return true
+				leaf in ("autocontour", "zauto", "cauto", "autocolorscale")) && return true
 			continue
 		end
 		parent = _plotly_path_parent(path)

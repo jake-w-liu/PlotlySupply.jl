@@ -376,7 +376,8 @@ end
 	hostile = "</script><script>window.__pwned = 1</script><!--<script>"
 	p = Plot(
 		scatter(x = [1.0, NaN, 3.0], y = [1.0, Inf, -Inf], name = hostile),
-		Layout(title = hostile, width = 400, height = 300),
+		# A `$...$` pair: MathJax is loaded only for figures with math (w7).
+		Layout(title = hostile, xaxis_title = "\$x\$", width = 400, height = 300),
 	)
 	page = String(savefig(p; format = "html"))
 	@test occursin("<!DOCTYPE html>", page)
