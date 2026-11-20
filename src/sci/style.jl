@@ -3337,6 +3337,8 @@ function _figsize_write!(fig, w::Float64, h::Float64)
 	# Whole sizes are written as Int (JSON `336`, as 1.x wrote them).
 	fields[:width] = _style_number(w)
 	fields[:height] = _style_number(h)
+	# The size is the user's: the finalizer never resizes it (figsize-01).
+	_fin_mark_user_size!(_plot_layout(fig))
 	_refresh!(fig)
 	return nothing
 end
@@ -3433,11 +3435,16 @@ savefig(fig, "fig.pdf")                        # exported at that size
 ```
 """
 function figsize!(fig, width::Real, height::Real; kwargs...)
-	return _figsize_impl!(fig, width, height; kwargs...)
+	_figsize_impl!(fig, width, height; kwargs...)
+	# The room and the colorbar ticks for the new size (style-06).
+	_finalize_figure!(fig)
+	return nothing
 end
 
 function figsize!(fig, journal::Union{Symbol, AbstractString}; kwargs...)
-	return _figsize_journal_impl!(fig, journal; kwargs...)
+	_figsize_journal_impl!(fig, journal; kwargs...)
+	_finalize_figure!(fig)
+	return nothing
 end
 
 function _figsize_subplot_impl!(sf::SubplotFigure, width::Real, height::Real; kwargs...)

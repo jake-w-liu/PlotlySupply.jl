@@ -836,8 +836,42 @@ end
 
 function _fin_relayout!(ctx::_FinContext, updates::Dict{Symbol, Any})
 	isempty(updates) && return false
-	relayout!(ctx.target; updates...)
+	relayout!(ctx.target, _fin_property_paths(updates))
 	return true
+end
+
+# perf-01: the `relayout!` keys of `updates` (`legend2_x`) as one Dict of
+# plotly property paths (`legend2.x`, which `relayout!` sets nested, a
+# `nothing` removing the key). Splatting the Dict as keywords made a new
+# NamedTuple type per key set, and `relayout!` was compiled again for each
+# (0.3 s per new cell of a grid). A path below a container the same update
+# replaces is written into that container, so the order of the Dict does not
+# matter.
+function _fin_property_paths(updates::Dict{Symbol, Any})
+	paths = Dict{Symbol, Any}()
+	for (key, value) in updates
+		paths[Symbol(replace(String(key), '_' => '.'))] = value
+	end
+	for key in collect(keys(paths))
+		parts = split(String(key), '.')
+		for n in 1:(length(parts) - 1)
+			parent = Symbol(join(parts[1:n], '.'))
+			container = get(paths, parent, nothing)
+			container isa AbstractDict || continue
+			inner = paths[parent] = copy(container)
+			for part in parts[(n + 1):(end - 1)]
+				child = get(inner, Symbol(part), nothing)
+				child = child isa AbstractDict ? copy(child) : Dict{Symbol, Any}()
+				inner[Symbol(part)] = child
+				inner = child
+			end
+			value = paths[key]
+			value === nothing ? delete!(inner, Symbol(parts[end])) : (inner[Symbol(parts[end])] = value)
+			delete!(paths, key)
+			break
+		end
+	end
+	return paths
 end
 
 # ---------------------------------------------------------------------------
@@ -1250,6 +1284,68 @@ function _fin_insets(p::Plot, sf)
 	return found
 end
 
+# inset-01/02, axes-ticks-06: an inset keeps its place in its host's plot box
+# when the host gives up room or is fitted for equal aspect. `layout.meta`
+# records per inset (x axis key) `[fx0, fx1, fy0, fy1, x0, x1, y0, y1]`: its
+# fractions of the host's plot box and the paper domains last written. An
+# inset still at those domains moves with the box; one seen for the first
+# time, or moved since by the user, takes its fractions from where it is now,
+# of the host's domain (the rectangle `inset!` measured it against). An inset
+# fitted for its own equal aspect is left to its fit. Queues the domain
+# writes in `updates`; returns whether the record changed.
+const _FIN_INSET_KEY = Symbol("plotlysupply:inset")
+
+function _fin_place_insets!(ctx::_FinContext, plan, fits, updates::Dict{Symbol, Any})
+	isempty(ctx.insets) && return false
+	layout = ctx.p.layout
+	raw = _fin_meta_get(layout, _FIN_INSET_KEY)
+	record = Dict{String, Vector{Float64}}()
+	if raw isa AbstractDict
+		for (k, v) in raw
+			(v isa AbstractVector && length(v) == 8 && all(_fin_isfinite_real, v)) || continue
+			record[String(k)] = Float64.(v)
+		end
+	end
+	fitted = Set{Symbol}(xkey for (xkey, _) in keys(fits))
+	new = Dict{String, Vector{Float64}}()
+	for inset in ctx.insets
+		inset.xkey in fitted && continue
+		host = _fin_inset_host_region(ctx.p, inset)
+		host === nothing && continue
+		a = get(plan.areas, _fin_axis_key(host.key), nothing)
+		a === nothing && continue
+		xd = _layout_axis_domain(layout, inset.xkey)
+		yd = _layout_axis_domain(layout, inset.ykey)
+		(xd === nothing || yd === nothing) && continue
+		now = Float64[xd[1], xd[2], yd[1], yd[2]]
+		rec = get(record, String(inset.xkey), nothing)
+		frac = if rec !== nothing && all(isapprox.(rec[5:8], now; atol = 1e-9))
+			rec[1:4]
+		else
+			(hx, hy) = a.current
+			(hx[2] > hx[1] && hy[2] > hy[1]) || continue
+			Float64[(now[1] - hx[1]) / (hx[2] - hx[1]), (now[2] - hx[1]) / (hx[2] - hx[1]),
+				(now[3] - hy[1]) / (hy[2] - hy[1]), (now[4] - hy[1]) / (hy[2] - hy[1])]
+		end
+		(bx, by) = a.final
+		target = Float64[clamp(bx[1] + frac[1] * (bx[2] - bx[1]), 0.0, 1.0),
+			clamp(bx[1] + frac[2] * (bx[2] - bx[1]), 0.0, 1.0),
+			clamp(by[1] + frac[3] * (by[2] - by[1]), 0.0, 1.0),
+			clamp(by[1] + frac[4] * (by[2] - by[1]), 0.0, 1.0)]
+		(target[1] < target[2] && target[3] < target[4]) || continue
+		for (key, dom) in ((inset.xkey, (target[1], target[2])), (inset.ykey, (target[3], target[4])))
+			_fin_layout_value_changed(_layout_axis_domain(layout, key), dom) &&
+				(updates[Symbol(key, :_domain)] = [dom[1], dom[2]])
+		end
+		new[String(inset.xkey)] = vcat(frac, target)
+	end
+	same = length(new) == length(record) &&
+		all(k -> haskey(record, k) && all(isapprox.(record[k], new[k]; atol = 1e-12)), keys(new))
+	same && return false
+	value = isempty(new) ? nothing : Dict{Any, Any}(Symbol(k) => v for (k, v) in new)
+	return _fin_meta_set!(layout, _FIN_INSET_KEY, value)
+end
+
 # The host cell of an inset (`_cbar_trace_region`-like), `nothing` when its
 # grid cell cannot be resolved.
 function _fin_inset_host_region(p::Plot, inset)
@@ -1492,20 +1588,103 @@ function _fin_layout_size(layout::Layout)
 	)
 end
 
-# Whether M3a may size the figure (Z67): it has no size, or exactly the size
-# a sized (journal) style writes into every new figure (`_apply_style_layout!`,
-# within half a px); that size is the style's default, not a choice for this
-# figure, and M3a only removes the blank rows (or columns) around the fitted
-# cell, so the column width a journal style sets is kept for a wide field.
-function _fin_size_is_free(layout::Layout)
+# Who chose the figure size, recorded in `layout.meta` under `_FIN_SIZE_KEY`:
+# `"user"` (written by `figsize!`), or `[W0, H0, w, h, wfree, hfree]` when
+# M3a/L11 sized the figure to `w` x `h` from the base size `W0` x `H0` with
+# the free directions `wfree`/`hfree` (1/0).
+const _FIN_SIZE_KEY = Symbol("plotlysupply:size")
+
+# `figsize!`: the size is the user's; M3a/L11 never change it.
+_fin_mark_user_size!(layout::Layout) = (_fin_meta_set!(layout, _FIN_SIZE_KEY, "user"); nothing)
+
+# Whether M3a/L11 may size the figure (Z67, figsize-01) and from what:
+# `(W0, H0, wfree, hfree)` or `nothing`. Free: a figure without a size (its
+# width only under a style without a journal width), a figure at exactly the
+# size a sized (journal) style writes into every new figure
+# (`_apply_style_layout!`, within half a px: the style's default, not a choice
+# for this figure; its height only, so a journal width is never changed), and
+# a figure still at the size M3a/L11 gave it (from the base size it recorded,
+# so a field that changes is sized again from that base). A size `figsize!`
+# set, or any other, is the user's.
+function _fin_size_choice(layout::Layout)
+	rec = _fin_meta_get(layout, _FIN_SIZE_KEY)
+	rec == "user" && return nothing
 	w = get(layout.fields, :width, nothing)
 	h = get(layout.fields, :height, nothing)
-	w === nothing && h === nothing && return true
-	(_fin_isfinite_real(w) && _fin_isfinite_real(h)) || return false
+	if rec isa AbstractVector && length(rec) == 6 && all(_fin_isfinite_real, rec) &&
+			_fin_isfinite_real(w) && _fin_isfinite_real(h) && abs(w - rec[3]) <= 0.5 && abs(h - rec[4]) <= 0.5
+		return (Float64(rec[1]), Float64(rec[2]), rec[5] != 0, rec[6] != 0)
+	end
 	carried = something(_figure_recorded_style(layout), _STYLE_SCOPE[], Some(nothing))
-	(carried !== nothing && carried.width > 0) || return false
+	sized = carried !== nothing && carried.width > 0
+	if w === nothing && h === nothing
+		W0, H0 = _fin_layout_size(layout)
+		return (W0, H0, !sized, true)
+	end
+	(sized && _fin_isfinite_real(w) && _fin_isfinite_real(h)) || return nothing
 	W0, H0 = _style_default_figure_size(carried)
-	return abs(w - W0) <= 0.5 && abs(h - H0) <= 0.5
+	(abs(w - W0) <= 0.5 && abs(h - H0) <= 0.5) || return nothing
+	return (Float64(w), Float64(h), false, true)
+end
+
+# The size (px) M3a/L11 give a figure of base size `W0` x `H0` from the fits
+# at that size: a single figure drops the blank rows above and below its plot
+# box (wide field) or the blank columns beside it (tall field); a grid drops
+# the blank every equal-aspect cell of a row (column) leaves
+# (`plan.memo[:band_slack]`), unless built with `compress = false`. Only a
+# free direction changes. The bounds are for the 700 x 500 default; a smaller
+# (journal) size scales them.
+function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, wfree::Bool, hfree::Bool)
+	layout = ctx.p.layout
+	lowH = min(H0, _FIN_MIN_FIGURE_HEIGHT * min(1.0, H0 / _DEFAULT_EXPORT_HEIGHT_PX))
+	lowW = min(W0, _FIN_MIN_FIGURE_WIDTH * min(1.0, W0 / _DEFAULT_EXPORT_WIDTH_PX))
+	newW, newH = W0, H0
+	if layout.subplots.rows * layout.subplots.cols == 1
+		(ctx.sf === nothing && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) || return (W0, H0)
+		fit = fits[(:xaxis, :yaxis)]
+		if fit.slack_px > 1
+			hfree && (newH = clamp(round(H0 - fit.slack_px), lowH, H0))
+		elseif fit.free_px > 1
+			wfree && (newW = clamp(round(W0 - fit.free_px), lowW, W0))
+		end
+	else
+		_fin_compress_grid(layout) || return (W0, H0)
+		slack = get(plan.memo, :band_slack, nothing)
+		slack === nothing && return (W0, H0)
+		hfree && slack.y !== nothing && sum(slack.y) > 1 && (newH = clamp(round(H0 - sum(slack.y)), lowH, H0))
+		wfree && slack.x !== nothing && sum(slack.x) > 1 && (newW = clamp(round(W0 - sum(slack.x)), lowW, W0))
+	end
+	# Only a side that was fitted is rounded to whole px: the other keeps its
+	# size exactly (a journal column, 89 mm = 336.378 px, stays 89 mm).
+	newW = newW == W0 ? W0 : Float64(round(Int, newW))
+	newH = newH == H0 ? H0 : Float64(round(Int, newH))
+	return newW, newH
+end
+
+# L11: px of blank each column (`axis = 1`) or row (`axis = 2`) band of the
+# grid leaves in every cell it holds: the least the fitted equal-aspect
+# cells there leave beside (above and below) their plot boxes; 0 for a band
+# holding another cell or a cell spanning several bands. `nothing` without
+# bands.
+function _fin_band_slack(plan, fits, axis::Int)
+	bands = _room_bands(plan, axis)
+	bands === nothing && return nothing
+	lo, hi = bands
+	n = length(lo)
+	slack = fill(Inf, n)
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.grid && a.ref !== nothing) || continue
+		i = searchsortedfirst(lo, round(a.ref[axis][1]; digits = 9))
+		j = searchsortedfirst(hi, round(a.ref[axis][2]; digits = 9))
+		(i <= n && j <= n) || return nothing
+		fit = a.aspect && a.ykey !== nothing ? get(fits, (a.key, a.ykey), nothing) : nothing
+		s = fit === nothing || i != j ? 0.0 : Float64(axis == 1 ? fit.free_px : fit.slack_px)
+		for k in i:j
+			slack[k] = min(slack[k], s)
+		end
+	end
+	return [isfinite(s) ? max(s, 0.0) : 0.0 for s in slack]
 end
 
 # Single figures without a size (decision D10 M3a): the default width, the
@@ -1522,14 +1701,14 @@ const _FIN_MIN_FIGURE_WIDTH = 300.0
 # equals the plot height exactly even when the margin estimate is a few px off.
 _fin_bias(w::Float64) = 0.025 * w + 4.0
 
-# The fitted domains and bar placements of every equal-aspect cell. A cell
-# is fitted inside its reference area less the room (px per side, `reduce`)
-# its other decorations take there (`_room_fit_reduction`); `push` (px per
+# The fitted domains and bar placements of every equal-aspect cell. A grid
+# cell is fitted, centred, inside the slot the room solve gave its column and
+# row (`slots`, paper; D17), any other cell inside its reference area; `push` (px per
 # paper edge) grows the margin estimates for the decorations beyond the
 # paper (`_room_edge_needs`). The plot box and its colorbars of a single
 # figure are centred in the figure, its y tick labels included.
 function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W::Float64, H::Float64;
-		reduce = Dict{Symbol, Dict{Symbol, Float64}}(), push = nothing)
+		slots = Dict{Symbol, _RoomBox}(), push = nothing)
 	results = Dict{Tuple{Symbol, Symbol}, Any}()
 	grid_layout = ctx.grid
 	cells = _fin_aspect_cells(layout, accs)
@@ -1586,11 +1765,16 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 			pad_px = _FIN_CBAR_PAD * Wp
 			widths = [_fin_bar_width(layout, item, Hp) for item in hug]
 			bars_px = isempty(hug) ? 0.0 : pad_px + sum(widths) + _FIN_CBAR_GAP * (length(hug) - 1)
-			allow = _fin_right_allowance(layout, accs, ref, grid_layout, Wp, Hp; area_cache = area_cache)
-			room = max(0.0, bars_px - allow)
-			red = get(reduce, xkey, nothing)
-			fref = red === nothing ? ref : ((ref[1][1] + red[:left] / Wp, ref[1][2]),
-				(ref[2][1] + red[:bottom] / Hp, ref[2][2] - red[:top] / Hp))
+			slot = get(slots, xkey, nothing)
+			# A grid cell's bars sit in the room the solve took for them beyond
+			# its slot (D17), except at the paper edge, where they take what
+			# the margin cannot hold.
+			room = if slot === nothing || ref[1][2] >= 1 - 1e-6
+				max(0.0, bars_px - _fin_right_allowance(layout, accs, ref, grid_layout, Wp, Hp; area_cache = area_cache))
+			else
+				0.0
+			end
+			fref = something(slot, ref)
 			rw = (fref[1][2] - fref[1][1]) * Wp
 			rh = (fref[2][2] - fref[2][1]) * Hp
 			Wa = rw - room
@@ -1605,7 +1789,10 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 			bias = _fin_bias(w)
 			free = max(0.0, rw - (w + bias + room))
 			x0 = fref[1][1] * Wp + free / 2
-			if layout.subplots.rows * layout.subplots.cols == 1 && ref == ((0.0, 1.0), (0.0, 1.0))
+			if slot !== nothing
+				# D17: the plot box centred in its solved slot.
+				x0 = fref[1][1] * Wp + clamp((rw - room - w) / 2 - bias, 0.0, free)
+			elseif layout.subplots.rows * layout.subplots.cols == 1 && ref == ((0.0, 1.0), (0.0, 1.0))
 				# Single figure: centre the visible group (y tick labels and
 				# title, plot box, colorbars) in the figure [-l, Wp + r].
 				labels = _fin_left_decoration(layout, accs, ykey, ((rh - h) / 2 / Hp, (rh + h) / 2 / Hp), Hp)
@@ -1666,31 +1853,31 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 	W, H = _fin_figure_size(ctx, layout)
 	wrote |= _fin_wrap_axis_titles!(ctx, accs, W, H)
 	plan, fits = _fin_plan_and_fit(ctx, accs, bars, W, H)
-	# M3a: a single figure without a size is sized to its equal-aspect cell.
-	if ctx.size === nothing && ctx.sf === nothing && layout.subplots.rows * layout.subplots.cols == 1 &&
-			_fin_size_is_free(layout) && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1
-		fit = fits[(:xaxis, :yaxis)]
-		# Wide field: keep the width and drop the blank rows above and below
-		# the plot box; tall field: keep the height and drop the blank columns.
-		# The bounds are for the 700 x 500 default; a smaller (journal) size
-		# scales them.
-		newW, newH = W, H
-		if fit.slack_px > 1
-			low = min(H, _FIN_MIN_FIGURE_HEIGHT * min(1.0, H / _DEFAULT_EXPORT_HEIGHT_PX))
-			newH = clamp(round(H - fit.slack_px), low, H)
-		elseif fit.free_px > 1
-			low = min(W, _FIN_MIN_FIGURE_WIDTH * min(1.0, W / _DEFAULT_EXPORT_WIDTH_PX))
-			newW = clamp(round(W - fit.free_px), low, W)
+	# M3a / L11: a figure whose size is free (`_fin_size_choice`) is sized to
+	# its equal-aspect cells, always from its base size, so the size follows
+	# the fields and a second pass finds it unchanged.
+	choice = ctx.size === nothing && !isempty(fits) ? _fin_size_choice(layout) : nothing
+	if choice !== nothing
+		W0, H0, wfree, hfree = choice
+		at_base = W0 == W && H0 == H
+		at_base || ((plan, fits) = _fin_plan_and_fit(ctx, accs, bars, W0, H0))
+		newW, newH = _fin_free_size(ctx, plan, fits, W0, H0, wfree, hfree)
+		recorded = _fin_meta_get(layout, _FIN_SIZE_KEY) isa AbstractVector
+		if newW != W || newH != H
+			size_updates = Dict{Symbol, Any}(:width => _style_number(newW), :height => _style_number(newH))
+			wrote |= _fin_relayout!(ctx, size_updates)
+			W, H = newW, newH
+			wrote |= _fin_wrap_axis_titles!(ctx, accs, W, H)
+			plan, fits = _fin_plan_and_fit(ctx, accs, bars, W, H)
+		elseif !at_base
+			plan, fits = _fin_plan_and_fit(ctx, accs, bars, W, H)
 		end
-		# Only the side that was fitted is rounded to whole px: the other keeps
-		# its size exactly (a journal column, 89 mm = 336.378 px, stays 89 mm).
-		newW = newW == W ? W : Float64(round(Int, newW))
-		newH = newH == H ? H : Float64(round(Int, newH))
-		size_updates = Dict{Symbol, Any}(:width => _style_number(newW), :height => _style_number(newH))
-		wrote |= _fin_relayout!(ctx, size_updates)
-		W, H = newW, newH
-		wrote |= _fin_wrap_axis_titles!(ctx, accs, W, H)
-		plan, fits = _fin_plan_and_fit(ctx, accs, bars, W, H)
+		# A figure left at its base size without a record keeps no size of ours.
+		if recorded || newW != W0 || newH != H0
+			record = Any[W0, H0, newW, newH, wfree ? 1 : 0, hfree ? 1 : 0]
+			isequal(_fin_meta_get(layout, _FIN_SIZE_KEY), record) ||
+				(wrote |= _fin_meta_set!(layout, _FIN_SIZE_KEY, record))
+		end
 	end
 	layout_updates = plan.updates
 	# M3b: fitted domains and hugging bars.
@@ -1713,6 +1900,7 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 	# places its decorations in it.
 	isempty(fits) || _room_assign_slots!(plan)
 	_room_write_domains!(plan)
+	wrote |= _fin_place_insets!(ctx, plan, fits, layout_updates)
 	for owner in _ROOM_OWNERS
 		_room_place!(plan, Val(owner))
 	end
@@ -1757,9 +1945,7 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 	end
 	_room_margin_updates!(plan)
 	if annotations !== nothing
-		existing = get(layout.fields, :annotations, nothing)
-		(existing isa AbstractVector && length(existing) == length(annotations) &&
-			all(i -> isequal(_symbol_dict(existing[i]), _symbol_dict(annotations[i])), eachindex(annotations))) ||
+		_fin_same_annotations(get(layout.fields, :annotations, nothing), annotations) ||
 			(layout_updates[:annotations] = annotations)
 	end
 	wrote |= _fin_relayout!(ctx, layout_updates)
@@ -1772,16 +1958,73 @@ end
 # W5: axis titles longer than the figure
 # ---------------------------------------------------------------------------
 
-# Line break `_fin_wrap_axis_titles!` writes. A user's line breaks are a bare
-# `<br>` (`_label` turns "\n" into it); ours is a zero-width space (U+200B)
-# before one, which draws the same and tells the two apart: every pass first
-# joins the lines at this break again, then wraps for the current size.
+# Line break `_fin_wrap_axis_titles!` writes: a bare `<br>`, as a user's line
+# break (`_label` turns "\n" into one). Which breaks are ours is recorded in
+# `layout.meta` (`_FIN_WRAP_RECORD_KEY`: axis key => [title as written,
+# title as wrapped]); every pass starts from the title as written while the
+# axis still shows our wrap, and a title the user changed is theirs (L7; the
+# text carries no marker, so no U+200B reaches a PDF's text layer).
 # It must be a bare `<br>`: plotly.js 2.35 counts a title's extra lines with
 # `/<br(\s+.*)?>/g`, whose greedy `.*` makes `<br />` ... `<br />` ONE match, so
 # a title of three or more lines written with `<br />` was placed one line
 # (two for four lines) too close to its tick labels and drew over them
 # (optical_infra, V1: gap 0 px instead of the 11 px of `title.standoff`).
-const _FIN_WRAP_BREAK = "\u200b<br>"
+const _FIN_WRAP_BREAK = "<br>"
+const _FIN_WRAP_RECORD_KEY = Symbol("plotlysupply:wrap")
+
+# The wrap record of `layout`: axis key => (title as written, as wrapped).
+function _fin_wrap_record(layout::Layout)
+	meta = get(layout.fields, :meta, nothing)
+	raw = meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute ?
+		_cmn_mapping_get(meta, _FIN_WRAP_RECORD_KEY) : nothing
+	out = Dict{String, Tuple{String, String}}()
+	raw isa AbstractDict || return out
+	for (k, v) in raw
+		(v isa AbstractVector && length(v) == 2 && all(x -> x isa AbstractString, v)) || continue
+		out[String(k)] = (String(v[1]), String(v[2]))
+	end
+	return out
+end
+
+# Writes the wrap record. Returns whether it changed.
+function _fin_wrap_record_write!(layout::Layout, old::Dict{String, Tuple{String, String}},
+		new::Dict{String, Tuple{String, String}})
+	new == old && return false
+	value = isempty(new) ? nothing : Dict{Any, Any}(Symbol(k) => Any[v[1], v[2]] for (k, v) in new)
+	return _fin_meta_set!(layout, _FIN_WRAP_RECORD_KEY, value)
+end
+
+# Bookkeeping of the finalizer in `layout.meta` (plotly.js ignores it, so it
+# needs no redraw): `value` under our `key`, or the key removed for
+# `nothing`; the user's own entries are never touched, and a `meta` that is
+# not a mapping is the user's and gets nothing. Returns whether it wrote.
+function _fin_meta_set!(layout::Layout, key::Symbol, value)
+	meta = get(layout.fields, :meta, nothing)
+	holder = meta isa PlotlyBase.PlotlyAttribute ? meta.fields : meta
+	(holder === nothing || holder isa AbstractDict) || return false
+	if value === nothing
+		holder === nothing && return false
+		found = false
+		for k in collect(keys(holder))
+			string(k) == String(key) && (delete!(holder, k); found = true)
+		end
+		isempty(holder) && delete!(layout.fields, :meta)
+		return found
+	end
+	holder === nothing && (holder = Dict{Any, Any}(); layout.fields[:meta] = holder)
+	# A meta read from JSON has String keys.
+	holder[keytype(holder) <: AbstractString ? String(key) : key] = value
+	return true
+end
+
+_fin_meta_get(layout::Layout, key::Symbol) = (meta = get(layout.fields, :meta, nothing);
+	meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute ? _cmn_mapping_get(meta, key) : nothing)
+
+# L11: whether the grid compresses rows and columns of equal-aspect cells
+# that leave blank space (`subplots(...; compress = false)` records false).
+const _FIN_COMPRESS_KEY = Symbol("plotlysupply:compress")
+_fin_set_compress!(layout::Layout, flag::Bool) = (_fin_meta_set!(layout, _FIN_COMPRESS_KEY, flag ? nothing : false); nothing)
+_fin_compress_grid(layout::Layout) = _fin_meta_get(layout, _FIN_COMPRESS_KEY) !== false
 # Px a wrapped title keeps from the figure edges, and the mean glyph width
 # (font sizes) the wrap assumes: a little above DejaVu Sans' (render probe
 # W5: 26 characters of the optical_infra y title at 13 px drew 155 px long,
@@ -1841,12 +2084,21 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 	Wp, Hp = max(W - m.l - m.r, 1.0), max(H - m.t - m.b, 1.0)
 	updates = Dict{Symbol, Any}()
 	wrapped_keys = Symbol[]
+	record = _fin_wrap_record(layout)
+	new_record = Dict{String, Tuple{String, String}}()
 	for (key, axis) in layout.fields
 		(key isa Symbol && _fin_is_axis_key(key)) || continue
-		_cmn_mapping_get(axis, :visible) === false && continue
+		rec = get(record, String(key), nothing)
+		if _cmn_mapping_get(axis, :visible) === false
+			# Kept while hidden: the axis may be shown again.
+			rec === nothing || (new_record[String(key)] = rec)
+			continue
+		end
 		text = _fin_title_text(axis)
 		(isempty(text) || occursin('$', text) || occursin(_FIN_WRAP_MARKUP, text)) && continue
-		plain = replace(text, _FIN_WRAP_BREAK => " ")
+		# The title as written while the axis shows our wrap; a title the user
+		# changed since is theirs, line breaks included.
+		plain = rec !== nothing && text == rec[2] ? rec[1] : text
 		size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
 		vertical = String(key)[1] == 'y'
 		d = vertical ? _cmn_y_axis_domain(layout, key) : _fin_domain(layout, key)
@@ -1859,7 +2111,7 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 		# from the text-extent estimate (widest face measured, share 0.98).
 		wrapped = _text_extent(plain, size)[1] * _FIN_WRAP_WIDTH_SHARE <= room ? plain :
 			_fin_wrap_title(plain, max_chars)
-		wrapped == plain || push!(wrapped_keys, key)
+		wrapped == plain || (push!(wrapped_keys, key); new_record[String(key)] = (plain, wrapped))
 		wrapped == text && continue
 		title = _cmn_mapping_get(axis, :title)
 		if title isa AbstractString
@@ -1879,6 +2131,7 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 		end
 	end
 	wrote = _fin_relayout!(ctx, updates)
+	wrote |= _fin_wrap_record_write!(layout, record, new_record)
 	# Export copies only (`size` given): a margin grown on the figure itself
 	# would outlive the wrap (a later font or size change joins the lines
 	# again; composite_2x2 kept a 155 px left margin).
@@ -2076,12 +2329,42 @@ function _fin_place_figure_annotations!(ctx::_FinContext, accs, W::Float64, H::F
 	new_b = _figure_annotations_place!(ctx.p, annotations; size = (W, H), accs = accs, legends = legends)
 	updates = Dict{Symbol, Any}()
 	for (key, y) in legends
-		isequal(_cmn_mapping_get(get(layout.fields, key, nothing), :y), y) || (updates[Symbol(key, "_y")] = y)
+		# The room engine writes a legend `y` to 6 digits, this placement to
+		# 5: within 1e-5 (a hundredth of a px) the two agree (tm-caption).
+		current = _cmn_mapping_get(get(layout.fields, key, nothing), :y)
+		(_fin_isfinite_real(current) && abs(Float64(current) - y) <= 1e-5) || (updates[Symbol(key, "_y")] = y)
 	end
-	all(i -> isequal(_symbol_dict(existing[i]), _symbol_dict(annotations[i])), eachindex(annotations)) ||
-		(updates[:annotations] = annotations)
-	new_b === nothing || (updates[:margin_b] = new_b)
+	_fin_same_annotations(existing, annotations) || (updates[:annotations] = annotations)
+	new_b === nothing || !_fin_layout_value_changed(_cmn_mapping_get(get(layout.fields, :margin, nothing), :b), new_b) ||
+		(updates[:margin_b] = new_b)
 	return _fin_relayout!(ctx, updates)
+end
+
+# Whether two annotation lists draw the same (tm-caption, docs-07): equal
+# entries, a shift of 0 the same as none (the room providers drop a zero
+# `xshift` that `_figure_annotations_place!` writes), shifts within half a px
+# (the room providers place a figure annotation for the margins they queue,
+# `_figure_annotations_place!` for the margins written: 0.08 px apart) and
+# other numbers within 1e-6 (rounding of the same placement).
+function _fin_same_annotations(a, b)
+	(a isa AbstractVector && b isa AbstractVector && length(a) == length(b)) || return false
+	for i in eachindex(a, b)
+		x, y = _symbol_dict(a[i]), _symbol_dict(b[i])
+		for key in union(keys(x), keys(y))
+			u = get(x, key, nothing)
+			v = get(y, key, nothing)
+			if key in (:xshift, :yshift)
+				u === nothing && (u = 0)
+				v === nothing && (v = 0)
+			end
+			if u isa Real && v isa Real && !(u isa Bool) && !(v isa Bool)
+				isapprox(Float64(u), Float64(v); atol = key in (:xshift, :yshift) ? 0.5 : 1e-6) || return false
+			else
+				isequal(u, v) || return false
+			end
+		end
+	end
+	return true
 end
 
 # The room plan and the equal-aspect fits of a figure W x H px. Equal-aspect
@@ -2097,14 +2380,27 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 	plan = _room_build(ctx, accs, bars, W, H, aspect)
 	fits = Dict{Tuple{Symbol, Symbol}, Any}()
 	isempty(aspect) && return plan, fits
-	fits = _fin_fit_cells(ctx, layout, accs, bars[1], W, H; reduce = _room_fit_reduction(plan),
-		push = _room_edge_needs(plan))
+	fit(plan) = _fin_fit_cells(ctx, layout, accs, bars[1], W, H;
+		slots = get(() -> Dict{Symbol, _RoomBox}(), plan.memo, :aspect_slots), push = _room_edge_needs(plan))
+	fits = fit(plan)
 	unfitted = [xkey for (xkey, ykey) in aspect if !haskey(fits, (xkey, ykey))]
 	if !isempty(unfitted)
 		for xkey in unfitted
 			delete!(aspect, xkey)
 		end
 		plan = _room_build(ctx, accs, bars, W, H, aspect)
+		# The fits of the other cells, in the slots of this plan.
+		isempty(aspect) || (fits = fit(plan))
+	end
+	# L11: the rows and columns whose equal-aspect cells all leave blank
+	# space are drawn closer together, the grid centred in what they free.
+	if !isempty(fits) && layout.subplots.rows * layout.subplots.cols > 1 && _fin_compress_grid(layout)
+		slack = (x = _fin_band_slack(plan, fits, 1), y = _fin_band_slack(plan, fits, 2))
+		if any(s -> s !== nothing && any(>(0.5), s), slack)
+			plan = _room_build(ctx, accs, bars, W, H, aspect; compress = slack)
+			fits = fit(plan)
+		end
+		plan.memo[:band_slack] = slack
 	end
 	return plan, fits
 end
@@ -2659,7 +2955,11 @@ function _room_set_refs!(plan::_RoomPlan)
 			d = _layout_subplot_domain(grid, a.key)
 			a.ref = d === nothing ? nothing : _room_box(d[1], d[2])
 		end
-		a.managed = a.ref !== nothing && !(a.key in plan.ctx.inset_hosts) && !a.aspect && _room_inside(a.current, a.ref)
+		# An inset host gives up room like any cell: its insets follow its
+		# plot box (`_fin_place_insets!`). A domain the solve wrote (D17 moves
+		# the inner columns of a grid, also past their grid rectangle) stays
+		# ours while it equals its record.
+		a.managed = a.ref !== nothing && !a.aspect && (_room_inside(a.current, a.ref) || _room_recorded(plan, a))
 	end
 	return plan
 end
@@ -2807,7 +3107,9 @@ end
 _room_box_vector(box::_RoomBox) = Float64[box[1][1], box[1][2], box[2][1], box[2][2]]
 
 function _room_recorded(plan::_RoomPlan, a::_RoomArea)
-	rec = get(_room_record(plan.layout), String(a.key), nothing)
+	# One parse of the record per plan (the solve asks for every area).
+	record = get!(() -> _room_record(plan.layout), plan.memo, :room_record)
+	rec = get(record, String(a.key), nothing)
 	rec === nothing && return false
 	return all(isapprox.(rec, _room_box_vector(a.current); atol = 1e-9))
 end
@@ -2849,19 +3151,6 @@ function _room_record_write!(plan::_RoomPlan)
 	return true
 end
 
-# Px from the grid edge of `a` on `side` to the neighbours `keys`, an
-# equal-aspect neighbour counted from where its fit drew it (`current`; a fit
-# that leaves slack ends short of its grid edge).
-function _room_fitted_gap(plan::_RoomPlan, a::_RoomArea, side::Symbol, keys)
-	edge = _room_edge(a.ref, side)
-	opposite = _ROOM_OPPOSITE[side]
-	gap = minimum(keys) do k
-		b = plan.areas[k]
-		abs(edge - _room_edge(b.aspect ? b.current : b.ref, opposite))
-	end
-	return gap * _room_px(plan, side)
-end
-
 # Whether the axis labels of a grid cell reach into the gap the neighbour
 # needs (Z71): a figure without requests is solved only then.
 function _room_labels_overflow(plan::_RoomPlan)
@@ -2871,13 +3160,10 @@ function _room_labels_overflow(plan::_RoomPlan)
 		_room_flexible(a) || continue
 		for side in _ROOM_SIDES
 			a.own[side] > 0 || continue
-			a.aspect && continue
 			nb = _room_neighbour(plan, a, side)
 			nb === nothing && continue
 			facing = maximum(need[(k, _ROOM_OPPOSITE[side])] for k in nb.keys)
-			gap = any(k -> plan.areas[k].aspect, nb.keys) ? _room_fitted_gap(plan, a, side, nb.keys) :
-				nb.gap * _room_px(plan, side)
-			need[(key, side)] > gap - facing - _ROOM_GAP && return true
+			need[(key, side)] > nb.gap * _room_px(plan, side) - facing - _ROOM_GAP && return true
 		end
 	end
 	return false
@@ -2920,9 +3206,14 @@ _room_flexible(a::_RoomArea) = (a.managed || a.aspect) && !a.frozen && a.ref !==
 # take room there too (that would leave less than half the gap), the two
 # split what they need beyond the gap in proportion to their spans. Areas with
 # the same grid edge get the same room (rows keep a common top and bottom,
-# columns a common left and right); an area gives up at most
-# `_ROOM_MAX_SHARE` of its grid cell. The right side of an equal-aspect cell
-# is the fit's.
+# columns a common left and right). In a grid whose rectangles form column
+# and row bands (D17, `_room_bands`), the room of every band edge is taken
+# from all bands alike, in proportion to their spans: the plot areas stay
+# equal and aligned, spanning cells span the solved bands, and the grid gives
+# up at most `_ROOM_MAX_SHARE` of its spans. Otherwise an area gives up its
+# own room, at most `_ROOM_MAX_SHARE` of its grid cell. An equal-aspect cell
+# gets its solved slot (`plan.memo[:aspect_slots]`), which the fit centres
+# its plot box in; a domain the user set keeps that side.
 function _room_solve!(plan::_RoomPlan)
 	by_side = _room_by_side(plan)
 	need = _room_needs(plan, by_side)
@@ -2934,7 +3225,6 @@ function _room_solve!(plan::_RoomPlan)
 			# A side with requests, or with axis labels that may not fit in
 			# the gap to the neighbour (Z71: a y title between two cells).
 			(haskey(by_side, (key, side)) || a.own[side] > 0) || continue
-			a.aspect && side === :right && continue
 			nb = _room_neighbour(plan, a, side)
 			nb === nothing && continue
 			opposite = _ROOM_OPPOSITE[side]
@@ -2951,19 +3241,16 @@ function _room_solve!(plan::_RoomPlan)
 				# Labels only. A neighbour taking room for requests on the
 				# facing side already leaves these labels their px (its
 				# allowance subtracts them); two label sides split the gap.
-				# Never on an equal-aspect cell: room there rescales its fit
-				# (audit_d, chama_a5: one panel of a row drawn smaller).
-				a.aspect && continue
-				# An equal-aspect neighbour does not move for these labels,
-				# and the gap counts from where its fit drew it.
-				fitted = any(k -> plan.areas[k].aspect, nb.keys)
-				label_gap = fitted ? _room_fitted_gap(plan, a, side, nb.keys) : gap
-				allowance = if !fitted && movers && all(k -> haskey(by_side, (k, opposite)), nb.keys)
-					label_gap - _ROOM_GAP
-				elseif !fitted && movers
-					max(label_gap - facing - _ROOM_GAP, (label_gap - _ROOM_GAP) / 2)
+				# An equal-aspect cell counts from its grid slot like any
+				# other (D17): the room rescales every column alike, and the
+				# fit centres its box in the solved slot, so the solve does
+				# not depend on where the fit drew it.
+				allowance = if movers && all(k -> haskey(by_side, (k, opposite)), nb.keys)
+					gap - _ROOM_GAP
+				elseif movers
+					max(gap - facing - _ROOM_GAP, (gap - _ROOM_GAP) / 2)
 				else
-					max(label_gap - facing - _ROOM_GAP, 0.0)
+					max(gap - facing - _ROOM_GAP, 0.0)
 				end
 				# Room only when the unpadded estimate overflows: labels a
 				# pixel or two inside the pad leave their cell alone.
@@ -2976,6 +3263,16 @@ function _room_solve!(plan::_RoomPlan)
 		end
 	end
 	_room_equalize_coloraxis!(plan, group)
+	# D17: the room is taken per column gap and row gap of the grid, and the
+	# plot spans of all columns (rows) give it up in proportion to their grid
+	# spans, so the cells of a regular grid stay equal and aligned.
+	compress = get(plan.memo, :compress, nothing)
+	xbands = _room_band_solve(plan, _room_bands(plan, 1), group, :left, :right, plan.Wp,
+		compress === nothing ? nothing : compress.x)
+	ybands = _room_band_solve(plan, _room_bands(plan, 2), group, :bottom, :top, plan.Hp,
+		compress === nothing ? nothing : compress.y)
+	slots = Dict{Symbol, _RoomBox}()
+	plan.memo[:aspect_slots] = slots
 	for key in plan.area_order
 		a = plan.areas[key]
 		for side in _ROOM_SIDES
@@ -2985,7 +3282,6 @@ function _room_solve!(plan::_RoomPlan)
 		a.aspect || (a.final = a.current)
 		_room_flexible(a) || continue
 		for side in _ROOM_SIDES
-			a.aspect && side === :right && continue
 			a.room[side] = get(group, (side, round(_room_edge(a.ref, side); digits = 9)), 0.0)
 		end
 		for (s1, s2, span) in ((:left, :right, (a.ref[1][2] - a.ref[1][1]) * plan.Wp),
@@ -2997,6 +3293,18 @@ function _room_solve!(plan::_RoomPlan)
 				a.room[s2] *= limit / total
 			end
 		end
+		solved = Dict{Symbol, Float64}()
+		for side in _ROOM_SIDES
+			bands = side === :left || side === :right ? xbands : ybands
+			edge = bands === nothing ? nothing : _room_band_edge(bands, a.ref, side)
+			sign = side === :left || side === :bottom ? 1.0 : -1.0
+			solved[side] = edge === nothing ? _room_edge(a.ref, side) + sign * a.room[side] / _room_px(plan, side) : edge
+		end
+		if a.aspect
+			# The slot the fit centres the plot box (and its bars) in.
+			slots[key] = ((solved[:left], solved[:right]), (solved[:bottom], solved[:top]))
+			continue
+		end
 		a.managed || continue
 		edges = Dict{Symbol, Float64}()
 		for side in _ROOM_SIDES
@@ -3004,14 +3312,100 @@ function _room_solve!(plan::_RoomPlan)
 			cur_edge = _room_edge(a.current, side)
 			a.writable[side] = abs(cur_edge - ref_edge) <= 1e-9 || _room_evidence(plan, a, side) ||
 				_room_label_evidence(plan, a, side) || _room_recorded(plan, a)
-			sign = side === :left || side === :bottom ? 1.0 : -1.0
-			edges[side] = a.writable[side] ? ref_edge + sign * a.room[side] / _room_px(plan, side) : cur_edge
+			edges[side] = a.writable[side] ? solved[side] : cur_edge
 		end
 		# A domain the user set never inverts.
 		(edges[:left] < edges[:right] && edges[:bottom] < edges[:top]) || continue
 		a.final = ((edges[:left], edges[:right]), (edges[:bottom], edges[:top]))
 	end
 	return plan
+end
+
+# D17: the column (`axis = 1`) or row (`axis = 2`) bands of the subplot grid:
+# the distinct low and high edges of the grid rectangles (paper, rounded to
+# 1e-9 like the room groups), interleaved `lo[1] < hi[1] <= lo[2] < hi[2] ...`.
+# A spanning cell starts at one band and ends at another. `nothing` when the
+# rectangles do not form bands (a spec with paddings) or the figure is no
+# grid: each area then gives up its own room. O(cells log cells).
+function _room_bands(plan::_RoomPlan, axis::Int)
+	lo = Float64[]
+	hi = Float64[]
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.grid && a.ref !== nothing) || continue
+		push!(lo, round(a.ref[axis][1]; digits = 9))
+		push!(hi, round(a.ref[axis][2]; digits = 9))
+	end
+	isempty(lo) && return nothing
+	lo = unique!(sort!(lo))
+	hi = unique!(sort!(hi))
+	length(lo) == length(hi) || return nothing
+	for i in eachindex(lo)
+		lo[i] < hi[i] || return nothing
+		i < length(lo) && hi[i] > lo[i + 1] && return nothing
+	end
+	return (lo, hi)
+end
+
+# The band edges after the solve: `(lo, hi, new_lo, new_hi)` with each band
+# edge moved in by the room its group needs (`group[(side, edge)]`, px) and
+# the band spans scaled alike for the total (column widths and row heights
+# keep their ratios); the gaps between bands keep their grid width plus the
+# room taken there. The total is capped at `_ROOM_MAX_SHARE` of the spans.
+# `compress` (L11, px per band or `nothing`): blank space every cell of a
+# band leaves, removed from that band's span; the bands are then centred in
+# what that frees.
+function _room_band_solve(plan::_RoomPlan, bands, group, lo_side::Symbol, hi_side::Symbol, px::Float64,
+		compress = nothing)
+	bands === nothing && return nothing
+	lo, hi = bands
+	n = length(lo)
+	take_lo = [get(group, (lo_side, lo[i]), 0.0) / px for i in 1:n]
+	take_hi = [get(group, (hi_side, hi[i]), 0.0) / px for i in 1:n]
+	total = sum(hi[i] - lo[i] for i in 1:n)
+	taken = sum(take_lo) + sum(take_hi)
+	limit = _ROOM_MAX_SHARE * total
+	if taken > limit
+		take_lo .*= limit / taken
+		take_hi .*= limit / taken
+		taken = limit
+	end
+	scale = (total - taken) / total
+	spans = [(hi[i] - lo[i]) * scale for i in 1:n]
+	freed = 0.0
+	if compress !== nothing && length(compress) == n
+		for i in 1:n
+			cut = clamp(compress[i] / px, 0.0, max(spans[i] - 1 / px, 0.0))
+			spans[i] -= cut
+			freed += cut
+		end
+	end
+	new_lo = similar(lo)
+	new_hi = similar(hi)
+	x = lo[1] + freed / 2
+	for i in 1:n
+		x += take_lo[i]
+		new_lo[i] = x
+		x += spans[i]
+		new_hi[i] = x
+		x += take_hi[i]
+		i < n && (x += lo[i + 1] - hi[i])
+	end
+	# No rounding drift at the far edge.
+	freed == 0 && (new_hi[n] = hi[n] - take_hi[n])
+	return (lo, hi, new_lo, new_hi)
+end
+
+# The solved paper edge on `side` of a grid rectangle `ref`, or `nothing`
+# when its edge is not a band edge.
+function _room_band_edge(bands, ref::_RoomBox, side::Symbol)
+	lo, hi, new_lo, new_hi = bands
+	if side === :left || side === :bottom
+		i = searchsortedfirst(lo, round(_room_edge(ref, side); digits = 9))
+		return i <= length(lo) && lo[i] == round(_room_edge(ref, side); digits = 9) ? new_lo[i] : nothing
+	end
+	i = searchsortedfirst(hi, round(_room_edge(ref, side); digits = 9))
+	return i <= length(hi) && hi[i] == round(_room_edge(ref, side); digits = 9) ? new_hi[i] : nothing
 end
 
 # Q18: a colour axis shared by several plot areas has its bar beyond the
@@ -3034,7 +3428,7 @@ function _room_equalize_coloraxis!(plan::_RoomPlan, group::Dict{Tuple{Symbol, Fl
 		for k in entry.areas
 			k in entry.edge_areas && continue
 			a = plan.areas[k]
-			(_room_flexible(a) && !(a.aspect && side === :right)) || continue
+			_room_flexible(a) || continue
 			group[edge_key(k)] = max(get(group, edge_key(k), 0.0), room)
 		end
 	end
@@ -3128,23 +3522,27 @@ end
 # again with the margins grown by what the paper edges need, so px offsets
 # convert to paper fractions with the plot size plotly will use. A figure
 # without requests is not solved (nothing changes).
-function _room_build(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspect::Dict{Symbol, Symbol})
+function _room_build(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspect::Dict{Symbol, Symbol};
+		compress = nothing)
 	layout = ctx.p.layout
 	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
 	skip = Set{Int}()
 	for (xkey, ykey) in aspect, item in _fin_hug_items(ctx, layout, bars[1], xkey, ykey)
 		push!(skip, item.index)
 	end
+	# The equal-aspect cells of a grid are fitted in their solved slots.
+	grid_aspect = !isempty(aspect) && layout.subplots.rows * layout.subplots.cols > 1
 	plan = nothing
 	for pass in 1:2
 		plan = _room_new_plan(ctx, accs, bars, W, H, margins, aspect, skip)
+		compress === nothing || (plan.memo[:compress] = compress)
 		_room_collect_areas!(plan)
 		_room_vacated!(plan)
 		for owner in _ROOM_OWNERS
 			_room_requests!(plan, Val(owner))
 		end
 		_room_set_refs!(plan)
-		(isempty(plan.requests) && isempty(plan.vacated) && !_room_labels_overflow(plan) &&
+		(!grid_aspect && isempty(plan.requests) && isempty(plan.vacated) && !_room_labels_overflow(plan) &&
 			!any(a -> a.managed && _room_recorded(plan, a), values(plan.areas))) && return plan
 		for _ in 1:4
 			_room_solve!(plan)
@@ -3175,18 +3573,6 @@ function _room_plan(fig; size = nothing)
 	return plan
 end
 
-# Room (px) the decorations of each equal-aspect cell take on its top,
-# bottom and left, which `_fin_fit_cells` fits the cell inside.
-function _room_fit_reduction(plan::_RoomPlan)
-	out = Dict{Symbol, Dict{Symbol, Float64}}()
-	for key in plan.area_order
-		a = plan.areas[key]
-		a.aspect || continue
-		any(side -> a.room[side] > 0, _ROOM_SIDES) || continue
-		out[key] = copy(a.room)
-	end
-	return out
-end
 
 # Queue the domain writes of the managed areas whose final domains differ.
 function _room_write_domains!(plan::_RoomPlan)
@@ -3521,6 +3907,13 @@ function _room_coloraxis_entry(plan::_RoomPlan, item::_FinBar)
 	extent = side === :right ? ydomain[2] - ydomain[1] : xdomain[2] - xdomain[1]
 	extent > 0 || return nothing
 	ratio = clamp(_cbar_real(item.bar, :len, extent) / extent, 0.05, 1.0)
+	# The bar is laid along the plot boxes (an equal-aspect cell's box is
+	# narrower than its domain): the share of them it was given is recorded,
+	# so it is not taken of the domains again (sharedcb-02: the bar shrank
+	# by the box/domain ratio every pass).
+	rec = get(_room_cbar_record(plan), item.coloraxis, nothing)
+	len_now = _cbar_real(item.bar, :len, nothing)
+	(rec !== nothing && len_now !== nothing && isapprox(len_now, rec[2]; atol = 1e-9)) && (ratio = rec[1])
 	pad = length(regions) == 1 ? _CBAR_CELL_PAD : _CBAR_SHARED_PAD
 	anchored = _room_bar_anchored(plan, item, side, edge, own, pad)
 	if side === :right
@@ -3644,18 +4037,53 @@ function _room_freeze!(plan::_RoomPlan)
 end
 
 function _room_place!(plan::_RoomPlan, ::Val{:colorbar})
+	record = _room_cbar_record(plan)
+	new_record = Dict{String, Vector{Float64}}()
 	for (key, entry) in plan.bar_items
 		item = entry.item
 		_fin_item_writable(plan.ctx, item) || continue
 		placement = _room_colorbar_placement(plan, key, entry)
-		placement === nothing && continue
+		if placement === nothing
+			item.coloraxis === nothing || !haskey(record, item.coloraxis) ||
+				(new_record[item.coloraxis] = record[item.coloraxis])
+			continue
+		end
+		if item.coloraxis !== nothing && hasproperty(entry, :ratio) && haskey(placement, :len)
+			new_record[item.coloraxis] = Float64[entry.ratio, Float64(placement[:len])]
+		end
 		_room_same_place(item.bar, placement) && !_room_needs_mark(plan, key, item, placement) && continue
 		plan.wrote |= _fin_place_bar!(plan.ctx, plan.updates, item, placement)
 		push!(plan.moved, (item, placement))
 		mark = entry.side === :right ? :xref : :yref
 		item.coloraxis === nothing && get(placement, mark, nothing) === nothing && push!(plan.ctx.released, item.index)
 	end
+	same = length(new_record) == length(record) &&
+		all(k -> haskey(record, k) && all(isapprox.(record[k], new_record[k]; atol = 1e-9)), keys(new_record))
+	if !same
+		_fin_meta_set!(plan.layout, _ROOM_CBAR_KEY,
+			isempty(new_record) ? nothing : Dict{Any, Any}(Symbol(k) => v for (k, v) in new_record))
+		plan.wrote = true
+	end
 	return nothing
+end
+
+# Share of the plot boxes along it each coloraxis bar of ours was given, and
+# the `len` written for it: `layout.meta` `_ROOM_CBAR_KEY`, coloraxis id =>
+# `[ratio, len]` (read once per plan).
+const _ROOM_CBAR_KEY = Symbol("plotlysupply:cbar")
+
+function _room_cbar_record(plan::_RoomPlan)
+	return get!(plan.memo, :cbar_record) do
+		raw = _fin_meta_get(plan.layout, _ROOM_CBAR_KEY)
+		out = Dict{String, Vector{Float64}}()
+		if raw isa AbstractDict
+			for (k, v) in raw
+				(v isa AbstractVector && length(v) == 2 && all(_fin_isfinite_real, v)) || continue
+				out[String(k)] = Float64.(v)
+			end
+		end
+		out
+	end
 end
 
 # A bar already where it goes, next to a side of a grid cell that is shrunk
@@ -3888,9 +4316,10 @@ Normalise the figure after a PlotlySupply constructor or mutator changed it
   The fit and the room solve run again after a pass that wrote (at most
   `_FIN_FIT_ROUNDS`), so a second call writes nothing.
 - Titles: a plain axis title longer than the figure is broken between words
-  with `_FIN_WRAP_BREAK` (a zero-width space before a bare `<br>`; plotly.js
-  counts the extra lines of a title with a regex that sees a run of
-  `<br />` as one tag) and rejoined when it fits again. On a polar or ternary
+  with `_FIN_WRAP_BREAK` (a bare `<br>`; plotly.js counts the extra lines of
+  a title with a regex that sees a run of `<br />` as one tag) and rejoined
+  when it fits again; `layout.meta` records the title as written and as
+  wrapped per axis, and a title the user changed since is theirs. On a polar or ternary
   figure an explicit margin smaller than one line of tick text (and, at the
   top, the title block) is grown to it.
 - M5: the 3-D scenes PlotlySupply manages are framed for the final domains
@@ -3933,7 +4362,9 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	# The axis fits (decade ticks, wrapped titles) read the domains the fit
 	# and the room solve move, so a pass that wrote also re-runs them; a
 	# second `_finalize_figure!` then writes nothing (subplots-verbs, W5B).
+	rounds = 0
 	for _ in 1:_FIN_FIT_ROUNDS
+		rounds += 1
 		fitted = _fin_fit!(ctx, accs)
 		refit = false
 		if fitted
@@ -3943,6 +4374,7 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 		(fitted || refit) || break
 		wrote = true
 	end
+	_FIN_LAST_ROUNDS[] = rounds
 	# M5: 3-D scenes are framed for the final domains and margins, at the
 	# export size when there is one (scene3d.jl; layout writes only).
 	_s3_finalize_scenes!(p, ctx.size) && (wrote = true)
@@ -3987,11 +4419,9 @@ function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height
 end
 
 # Passes of `_fin_fit!` per finalize run; a figure converges in two or three.
-# An equal-aspect field with a colorbar and a legend beside it (the default
-# legend of a field that fills its corners goes outside, `_scat_place_legend!`)
-# approaches its fixed point in about ten (measured on the quiver of the
-# regression_legend test: 4 rounds left a second call writing, 12 settle).
-const _FIN_FIT_ROUNDS = 12
+const _FIN_FIT_ROUNDS = 4
+# Passes the last finalize run took (introspection for tests).
+const _FIN_LAST_ROUNDS = Ref(0)
 
 # The `_FinContext` of a finalize run (see `_fin_run!`).
 function _fin_context(fig, live, size, clone_readonly::Bool)
@@ -4042,9 +4472,26 @@ Whether a mutation of `fig` may need `_finalize_figure!` to write traces that
 already exist: the colorbars of an equal-aspect cell move whenever its fit
 changes, which the append-only fast path cannot stage (it then leaves the
 cell as it was until the next fully staged mutation or export). Figures with
-an equal-aspect cell should take the full staging path.
+an equal-aspect cell (an axis with `scaleanchor`, or an image trace, which
+plotly.js anchors to its x axis) or a trace drawing its own colorbar (moved
+when the plot areas around it give up room) take the full staging path; the
+check reads no trace data.
 """
 function _fin_needs_full_staging(fig)
 	p = fig isa SubplotFigure ? _plot_obj(getfield(fig, :fig)) : _plot_obj(fig)
-	return !isempty(_fin_aspect_cells(p.layout, _fin_collect_axes(p)))
+	for (key, axis) in p.layout.fields
+		(key isa Symbol && _fin_is_axis_key(key)) || continue
+		_fin_axis_key(_fin_field(axis, :scaleanchor)) === nothing || return true
+	end
+	for (index, trace) in enumerate(p.data)
+		trace isa GenericTrace || continue
+		kind = get(trace.fields, :type, nothing)
+		(kind == "image" || kind === :image) && return true
+		# A trace drawing its own colorbar: the bar moves when the plot
+		# areas around it give up room (fields-07: a legend placed beside a
+		# bar the append-only path could not move drifted on the next run).
+		slot = _cbar_slot(trace, index)
+		slot !== nothing && slot.shows && return true
+	end
+	return false
 end

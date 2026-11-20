@@ -190,7 +190,10 @@ function _transactional_high_level_plot_mutation!(
 		!(
 			mutator === plot_surface! &&
 			get(kwargs, :shared_coloraxis, false) === true
-		)
+		) &&
+		# An equal-aspect cell moves the colorbars of existing traces when
+		# its fit changes, which the append-only path cannot stage.
+		!_fin_needs_full_staging(fig)
 
 	if !fast_path_allowed
 		if fig isa SyncPlot
@@ -3426,6 +3429,10 @@ with `plot_*!` get a colorbar next to their own cell (see
   the default style are the 1.x `"rgba(255,255,255,0.72)"`,
   `"rgba(0,0,0,0.15)"` and `1` (darker on dark templates, transparent and 0
   for frameless styles).
+- `compress::Bool=true`: a row (column) whose equal-aspect cells all leave
+  blank space is drawn closer together: the figure height (width) shrinks
+  when it is not set by you or a journal width, otherwise the grid is centred.
+  `false` keeps every cell in its grid slot.
 - `subplot_kwargs...`: forwarded to `PlotlyBase.Subplots`: `specs`,
   `shared_xaxes`, `shared_yaxes`, `start_cell` (`"top-left"` or
   `"bottom-left"`), `subplot_titles` (a matrix, or a vector read in
@@ -3503,6 +3510,7 @@ function subplots(
 	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_borderwidth::Union{Nothing, Real} = nothing,
+	compress::Bool = true,
 	subplot_kwargs...,
 )
 	# Validate every option before a figure or window exists.
@@ -3590,6 +3598,7 @@ function subplots(
 	inset_records = _subplots_register_insets!(p, inset_fractions)
 	_apply_figure_title!(p, title)
 	_apply_figure_size!(p, "subplots"; width = width, height = height)
+	compress || _fin_set_compress!(p.layout, false)
 	# Shared axes: keep every `matches` group autoranging (see finalize.jl).
 	_finalize_figure!(p)
 	fig = sync ?

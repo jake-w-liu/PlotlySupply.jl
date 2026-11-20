@@ -976,20 +976,7 @@ function _colorbar_options(
 	thickness_value = _optional_size(thickness, who, "thickness")
 	x_value = _optional_position(x, who, "x")
 	y_value = _optional_position(y, who, "y")
-	tick_values = ticks === nothing ? nothing : _checked_real_vector(ticks, who, "ticks")
-	tick_labels = nothing
-	if ticklabels !== nothing
-		tick_values === nothing && throw(ArgumentError(
-			"$(who): `ticklabels` need `ticks` of the same length.",
-		))
-		(ticklabels isa AbstractVector || ticklabels isa Tuple) || throw(ArgumentError(
-			"$(who): `ticklabels` must be a vector; got $(typeof(ticklabels)).",
-		))
-		length(ticklabels) == length(tick_values) || throw(ArgumentError(
-			"$(who): $(length(ticklabels)) `ticklabels` for $(length(tick_values)) `ticks`.",
-		))
-		tick_labels = String[_label(string(label)) for label in ticklabels]
-	end
+	tick_values, tick_labels = _cbar_tick_options(ticks, ticklabels, who)
 	(isempty(exponentformat) || exponentformat in _CBAR_EXPONENT_FORMATS) ||
 		throw(ArgumentError(
 			"$(who): `exponentformat` must be one of " *
@@ -1053,18 +1040,7 @@ function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDi
 		bar[:thickness] = opts.thickness
 		bar[:thicknessmode] = "pixels"
 	end
-	if opts.ticks !== nothing
-		# An `nticks` `_finalize_figure!` wrote for automatic ticks
-		# (`_fin_bar_tick_state`) goes with them.
-		_fin_bar_tick_state(bar)[2] && delete!(bar, :nticks)
-		bar[:tickmode] = "array"
-		bar[:tickvals] = opts.ticks
-		if opts.ticklabels === nothing
-			delete!(bar, :ticktext)
-		else
-			bar[:ticktext] = opts.ticklabels
-		end
-	end
+	_cbar_apply_ticks!(bar, opts.ticks, opts.ticklabels)
 	if opts.offset === :none
 		# Only an offset written here (`showexponent = "last"`) is removed.
 		if _cbar_string(bar, :showexponent, "") == "last"
@@ -1476,6 +1452,42 @@ end
 
 # ── shared_colorbar! ────────────────────────────────────────────────────────
 
+# `ticks` (colour units) and `ticklabels` (same length, as `_label` text) of
+# a bar, checked: `(values, labels)`, each `nothing` when not given.
+function _cbar_tick_options(ticks, ticklabels, who::AbstractString)
+	tick_values = ticks === nothing ? nothing : _checked_real_vector(ticks, who, "ticks")
+	tick_labels = nothing
+	if ticklabels !== nothing
+		tick_values === nothing && throw(ArgumentError(
+			"$(who): `ticklabels` need `ticks` of the same length.",
+		))
+		(ticklabels isa AbstractVector || ticklabels isa Tuple) || throw(ArgumentError(
+			"$(who): `ticklabels` must be a vector; got $(typeof(ticklabels)).",
+		))
+		length(ticklabels) == length(tick_values) || throw(ArgumentError(
+			"$(who): $(length(ticklabels)) `ticklabels` for $(length(tick_values)) `ticks`.",
+		))
+		tick_labels = String[_label(string(label)) for label in ticklabels]
+	end
+	return tick_values, tick_labels
+end
+
+# `bar` with the explicit `ticks`/`ticklabels` of `opts` (no change without
+# `ticks`): an `nticks` `_finalize_figure!` wrote for automatic ticks
+# (`_fin_bar_tick_state`) goes with them.
+function _cbar_apply_ticks!(bar::Dict{Symbol, Any}, ticks, ticklabels)
+	ticks === nothing && return bar
+	_fin_bar_tick_state(bar)[2] && delete!(bar, :nticks)
+	bar[:tickmode] = "array"
+	bar[:tickvals] = ticks
+	if ticklabels === nothing
+		delete!(bar, :ticktext)
+	else
+		bar[:ticktext] = ticklabels
+	end
+	return bar
+end
+
 function _shared_colorbar_options(
 	who::AbstractString;
 	colorscale,
@@ -1486,6 +1498,8 @@ function _shared_colorbar_options(
 	side::Symbol,
 	coloraxis,
 	title_side::Symbol,
+	ticks = nothing,
+	ticklabels = nothing,
 )
 	side in _CBAR_SIDES || throw(ArgumentError(
 		"$(who): `side` must be :right or :bottom; got $(repr(side)).",
@@ -1524,10 +1538,13 @@ function _shared_colorbar_options(
 		))
 		mid = Float64(cmid)
 	end
+	tick_values, tick_labels = _cbar_tick_options(ticks, ticklabels, who)
 	return (
 		scale = scale,
 		limits = limits,
 		cmid = mid,
+		ticks = tick_values,
+		ticklabels = tick_labels,
 		title = isempty(title) ? nothing : _label(title),
 		title_side = title_side,
 		len = Float64(len),
@@ -1901,6 +1918,7 @@ function _shared_colorbar_fill_bar!(p::Plot, bar::Dict{Symbol,Any}, placement, c
 	end
 	merge!(bar, placement)
 	haskey(bar, :thickness) || (bar[:thickness] = _CBAR_CELL_THICKNESS)
+	_cbar_apply_ticks!(bar, opts.ticks, opts.ticklabels)
 	title, title_side = opts.title, opts.title_side
 	if title === nothing && carried.title !== nothing &&
 			_cbar_title_text(bar) === nothing &&
@@ -2117,7 +2135,8 @@ end
 
 """
 	shared_colorbar!(fig; colorscale="", crange=[0, 0], cmid=nothing, title="",
-		title_side=:top, len=0.75, side=:right, coloraxis="coloraxis")
+		title_side=:top, len=0.75, side=:right, coloraxis="coloraxis",
+		ticks=nothing, ticklabels=nothing)
 	shared_colorbar!(sf::SubplotFigure; cells=:all, ...)
 
 Give several panels one colour scale and one colorbar. Every colour-mapped
@@ -2179,6 +2198,9 @@ with different limits or scales throw an `ArgumentError`.
   (see [`colorbar!`](@ref)).
 - `coloraxis="coloraxis"`: the shared axis id (`:shared` means
   `"coloraxis"`; `"coloraxis2"`, … are allowed).
+- `ticks=nothing`, `ticklabels=nothing`: tick values in colour units and
+  their labels (requires `ticks`, same length), as in [`colorbar!`](@ref);
+  they replace the ticks carried over from the removed bars.
 
 No coloured trace in the selection is an `ArgumentError`. The call is
 validated first and applied in one transaction. Returns `nothing` for a
@@ -2206,6 +2228,8 @@ function shared_colorbar!(
 	len::Real = 0.75,
 	side::Symbol = :right,
 	coloraxis::Union{AbstractString,Symbol} = "coloraxis",
+	ticks = nothing,
+	ticklabels = nothing,
 	kwargs...,
 )
 	_cbar_reject_keywords("shared_colorbar!", kwargs,
@@ -2214,7 +2238,7 @@ function shared_colorbar!(
 	return _cbar_with_extrema_memo(() -> _transactional_high_level_plot_mutation!(
 		_shared_colorbar_impl!,
 		fig;
-		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis,
+		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis, ticks, ticklabels,
 	))
 end
 
@@ -2229,6 +2253,8 @@ function shared_colorbar!(
 	len::Real = 0.75,
 	side::Symbol = :right,
 	coloraxis::Union{AbstractString,Symbol} = "coloraxis",
+	ticks = nothing,
+	ticklabels = nothing,
 	kwargs...,
 )
 	_cbar_reject_keywords("shared_colorbar!", kwargs,
@@ -2238,6 +2264,6 @@ function shared_colorbar!(
 		_shared_colorbar_subplot_impl!,
 		sf,
 		();
-		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis,
+		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis, ticks, ticklabels,
 	))
 end
