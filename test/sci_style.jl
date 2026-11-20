@@ -1066,6 +1066,27 @@ end
 		PS.PlotlyBase.deletetraces!(sf.plot, 1)
 		PS._finalize_figure!(sf)
 		@test [sig(t) for t in sf.plot.data] == before[2:end]          # no restyle on delete
+		# The colours are written under :default too; a twin axis continues
+		# its cell's cycle, an inset starts its own, and under a figure legend
+		# a series drawn in several cells keeps one style.
+		for st in (:default, :ieee)
+			ex = with_style(st) do
+				f = subplots(1, 2; sync = false, specs = Union{Missing, PS.Spec}[PS.Spec(secondary_y = true) PS.Spec()])
+				for c in 1:2, (k, name) in enumerate(("a", "b"))
+					plot_scatter!(f, 1:3, (1:3) .* k; row = 1, col = c, legend = name)
+				end
+				plot_scatter!(f, 1:3, [3, 2, 1]; row = 1, col = 1, secondary_y = true, legend = "twin")
+				k = inset!(f, (0.5, 0.5, 0.4, 0.4); row = 1, col = 2)
+				plot_scatter!(f, 1:3, [1, 3, 2]; row = 1, col = 2, inset = k, legend = "in1")
+				plot_scatter!(f, 1:3, [2, 3, 1]; row = 1, col = 2, inset = k, legend = "in2")
+				set_legend!(f; legend_target = :figure)
+				f
+			end
+			s = [(g(get(t.fields, :line, nothing), :color), g(get(t.fields, :line, nothing), :dash)) for t in ex.plot.data]
+			@test [get(t.fields, :name, nothing) for t in ex.plot.data] == ["a", "b", "a", "b", "twin", "in1", "in2"]
+			@test s[1] == s[3] == s[6] && s[2] == s[4] == s[7] && s[1] != s[2]
+			@test s[5] == (st === :default ? (PS._default_trace_color(ex, 3), nothing) : ("#009E73", "dot"))
+		end
 		# A plain Plot (no cells) keeps the figure-wide cycle: its second trace
 		# takes the second dash (and colour, through the colorway).
 		p = PS.Plot([PS.scatter(x = 1:3, y = 1:3)], PS.Layout())

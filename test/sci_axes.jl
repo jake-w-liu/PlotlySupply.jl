@@ -2123,16 +2123,25 @@ end
                 for v in (2e-4, 5e3, 1e9)]
             si = plot_scatter([2e-4, 4e-4], [5e3, 1e4])
             yticks!(si; exponentformat = "SI")
-            (svgs, String(savefig(si; format = "svg", width = 600, height = 400)))
+            # A polar radial axis and a colour bar with the same values.
+            others = [String(savefig(make(v); format = "svg", width = 500, height = 400)) for v in (2e-4, 5e3, 1e9),
+                make in (v -> plot_scatterpolar([0, 90, 180], [v, 2v, 3v]), v -> plot_heatmap([v 2v; 3v 4v]))]
+            (svgs, String(savefig(si; format = "svg", width = 600, height = 400)), others)
         catch err
             @test export_failed(err)
             nothing
         end
         if result !== nothing
-            svgs, sisvg = result
+            svgs, sisvg, others = result
             for svg in svgs, cls in ("xtick", "ytick")
                 ls = labels(svg, cls)
                 @test !isempty(ls) && !any(l -> occursin(r"[A-Za-zµ]", l), ls)
+            end
+            # Radial ticks are "xtick" in the polar frame, colour bar ticks "ycb<id>tick".
+            for svg in others
+                ls = [replace(m.captures[1], r"<[^>]+>" => "") for m in
+                    eachmatch(r"<g class=\"(?:xtick|ycb[a-z0-9]*tick)\"[^>]*><text[^>]*>(.*?)</text>", svg)]
+                @test any(l -> occursin("×10", l), ls) && !any(l -> occursin(r"[A-Za-zµ]", l), ls)
             end
             @test any(l -> occursin(r"[kµ]", l), labels(sisvg, "ytick"))
         end
