@@ -955,6 +955,22 @@ _text_plain_em(s::AbstractString) =
 const _TEXT_PLAIN_LINE_EM = 1.3
 const _TEXT_MATH_ROW_EM = 1.3
 const _TEXT_MATH_TALL_ROW_EM = 1.9
+# Rows taller than that (tm-extent-under, drawn at 12 px under :default and
+# :ieee): a display-style big operator with limits (\int_0^1 2.58 em,
+# \sum_{i=1}^{n} 2.67 em, \prod_{k=1}^{N} 2.87 em, \oint_C 2.37 em), a
+# display integral without limits (2.32 em), and a brace with its label
+# (\underbrace{abcdefgh}_{n} 2.15 em; the brace deepens with its width),
+# a display-style fraction ($$\frac{a}{b}$$ 1.94 em).
+const _TEXT_DISPLAY_LIMITS_ROW_EM = 2.9
+const _TEXT_DISPLAY_FRACTION_ROW_EM = 2.0
+const _TEXT_DISPLAY_INTEGRAL_ROW_EM = 2.35
+const _TEXT_BRACE_LABEL_ROW_EM = 2.2
+# A brace is at least 1.03 em wide (\underbrace{x}_{n} drew 12.4 px at
+# 12 px) and reaches past its content (\underbrace{abc}_{n} drew 18.7 px
+# around an estimated 17.4 px: 0.11 em, rounded up so the estimate errs
+# large).
+const _TEXT_BRACE_MIN_EM = 1.05
+const _TEXT_BRACE_EXTRA_EM = 0.15
 # Script size relative to its base: plotly.js <sub>/<sup> (70 %).
 const _TEXT_SCRIPT_SCALE = 0.7
 # plotly.js line break (svg_text_utils BR_TAG_ALL, applied to `<…>` tokens).
@@ -1065,8 +1081,13 @@ mutable struct _TextTeX
 	text::Union{Nothing, _TextFamilyMetrics}
 	k::Float64
 	level::Int
+	# The tallest row height (em) a token of the current row asked for beyond
+	# the tall/plain rows (_TEXT_DISPLAY_LIMITS_ROW_EM and the like); 0 if none.
+	height::Float64
 end
 
+_TextTeX(chars::Vector{Char}, pos::Int, math::_TextMathMetrics, text::Union{Nothing, _TextFamilyMetrics}, k::Float64, level::Int) =
+	_TextTeX(chars, pos, math, text, k, level, 0.0)
 _TextTeX(chars::Vector{Char}, pos::Int) = _TextTeX(chars, pos, _TEXT_MATH_LATIN_MODERN, nothing, 1.0, 1)
 
 _text_tex_peek(t::_TextTeX) = t.pos <= length(t.chars) ? t.chars[t.pos] : nothing
@@ -1258,8 +1279,9 @@ function _text_tex_token!(t::_TextTeX, mode::Symbol)
 			t.pos += 1
 			label, _ = _text_tex_argument!(t, mode; level = _text_tex_script_level(t.level))
 			w = max(w, label)
+			t.height = max(t.height, _TEXT_BRACE_LABEL_ROW_EM)
 		end
-		return (w, true)
+		return (max(w, s * _TEXT_BRACE_MIN_EM) + s * _TEXT_BRACE_EXTRA_EM, true)
 	elseif haskey(_TEXT_TEX_FRACTIONS, name)
 		kind = _TEXT_TEX_FRACTIONS[name]
 		name == "genfrac" && foreach(_ -> _text_tex_skip_group!(t), 1:4)
@@ -1267,6 +1289,8 @@ function _text_tex_token!(t::_TextTeX, mode::Symbol)
 		w1, _ = _text_tex_argument!(t, mode; level = level)
 		w2, _ = _text_tex_argument!(t, mode; level = level)
 		extra = startswith(name, "binom") || endswith(name, "binom") ? 2 * _TEXT_DELIMITER_EM : 0.0
+		# A display-style fraction (its parts in text style) is taller than a tall row.
+		level == 1 && (t.height = max(t.height, s * _TEXT_DISPLAY_FRACTION_ROW_EM))
 		return (max(w1, w2) + s * (_TEXT_FRACTION_EXTRA_EM + extra), true)
 	elseif name in _TEXT_TEX_STACKED
 		w1, _ = _text_tex_argument!(t, mode; level = _text_tex_script_level(t.level))
@@ -1322,6 +1346,23 @@ function _text_tex_token!(t::_TextTeX, mode::Symbol)
 	w = get(t.math.commands, name, nothing)
 	if w !== nothing
 		big = name in _TEXT_TEX_BIG_OPERATORS
+		if big && t.level == 0
+			# Display style: limits above and below (scripts, past any
+			# \limits), integrals drawn large.
+			save = t.pos
+			while true
+				_text_tex_skip_spaces!(t)
+				_text_tex_peek(t) == '\\' || break
+				command = t.pos
+				_text_tex_command!(t) in ("limits", "nolimits", "displaylimits") && continue
+				t.pos = command
+				break
+			end
+			limits = _text_tex_peek(t) in ('_', '^')
+			t.pos = save
+			row = limits ? _TEXT_DISPLAY_LIMITS_ROW_EM : endswith(name, "int") ? _TEXT_DISPLAY_INTEGRAL_ROW_EM : 0.0
+			t.height = max(t.height, row)
+		end
 		return (s * w * (big && t.level == 0 ? _TEXT_DISPLAY_OPERATOR : 1.0), big)
 	end
 	occursin("arrow", lowercase(name)) &&
@@ -1420,16 +1461,20 @@ function _text_tex_environment!(t::_TextTeX, mode::Symbol)
 	s = _text_tex_scale(t)
 	name in ("pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix") && (width += s * 2 * _TEXT_DELIMITER_EM)
 	name in ("cases", "rcases") && (width += s * _TEXT_CASES_BRACE_EM)
-	return (width, length(rows) > 1 || any(last, rows))
+	return (width, length(rows) > 1 || any(row -> row[2], rows))
 end
 
 # Rows of an environment body up to `\end{…}` (consumed): each row is the sum
-# of its `&`-separated cells, `gap` em between cells. Returns [(width, tall), …].
+# of its `&`-separated cells, `gap` em between cells. Returns
+# [(width, tall, height), …] with each row's own `t.height`; `t.height` keeps
+# the tallest of what it held and the rows.
 function _text_tex_rows!(t::_TextTeX, mode::Symbol, gap::Float64 = _TEXT_ARRAY_COLUMN_GAP_EM)
-	rows = Tuple{Float64, Bool}[]
+	rows = Tuple{Float64, Bool, Float64}[]
 	row_width = 0.0
 	row_tall = false
 	cells = 0
+	outer = t.height
+	t.height = 0.0
 	while true
 		w, tall = _text_tex_sequence!(t, mode; cells = true)
 		row_width += w + (cells > 0 ? _text_tex_scale(t) * gap : 0.0)
@@ -1440,7 +1485,9 @@ function _text_tex_rows!(t::_TextTeX, mode::Symbol, gap::Float64 = _TEXT_ARRAY_C
 			t.pos += 1
 			continue
 		end
-		push!(rows, (row_width, row_tall))
+		push!(rows, (row_width, row_tall, t.height))
+		outer = max(outer, t.height)
+		t.height = 0.0
 		row_width, row_tall, cells = 0.0, false, 0
 		c === nothing && break
 		save = t.pos
@@ -1453,11 +1500,13 @@ function _text_tex_rows!(t::_TextTeX, mode::Symbol, gap::Float64 = _TEXT_ARRAY_C
 		end
 		t.pos = save + 1  # not a row end: skip the backslash and go on
 	end
+	t.height = outer
 	return rows
 end
 
-# Rows (width, size scale, tall) of one math expression (math em at the base
-# size). A top-level environment (as `mathtext` writes multi-line labels)
+# Rows (width, size scale, tall, height) of one math expression (math em at
+# the base size; height is a row height in em beyond the tall/plain rows, 0 if
+# none). A top-level environment (as `mathtext` writes multi-line labels)
 # gives one row per environment row.
 function _text_tex_box(math::AbstractString, metrics::_TextMathMetrics,
 	text::Union{Nothing, _TextFamilyMetrics}, k::Float64, display::Bool)
@@ -1482,10 +1531,11 @@ function _text_tex_box(math::AbstractString, metrics::_TextMathMetrics,
 			name_env == "array" && _text_tex_skip_group!(t)
 			rows = _text_tex_rows!(t, :math)
 			# Anything after the environment (rare) extends the last row.
+			t.height = 0.0
 			rest, rest_tall = _text_tex_sequence!(t, :math)
-			isempty(rows) && push!(rows, (0.0, false))
-			rows[end] = (rows[end][1] + rest, rows[end][2] || rest_tall)
-			return [(scale * w, scale, tall) for (w, tall) in rows]
+			isempty(rows) && push!(rows, (0.0, false, 0.0))
+			rows[end] = (rows[end][1] + rest, rows[end][2] || rest_tall, max(rows[end][3], t.height))
+			return [(scale * w, scale, tall, height) for (w, tall, height) in rows]
 		end
 		t.pos = save
 		break
@@ -1493,8 +1543,9 @@ function _text_tex_box(math::AbstractString, metrics::_TextMathMetrics,
 	# The sequence applies the leading switches itself.
 	t.pos = 1
 	t.level = display ? 0 : 1
+	t.height = 0.0
 	w, tall = _text_tex_sequence!(t, :math)
-	return [(w, scale, tall)]
+	return [(w, scale, tall, t.height)]
 end
 
 # Split `s` at unescaped `$` signs into (is_math, segment, display) triples;
@@ -1604,10 +1655,11 @@ function _text_extent_in(segments, fs::Float64, m::_TextFamilyMetrics, math::_Te
 	for (is_math, segment, display) in segments
 		if is_math
 			rows = _text_tex_box(segment, math, inherit ? m : nothing, k, display)
-			for (index, (w, scale, tall)) in enumerate(rows)
+			for (index, (w, scale, tall, height)) in enumerate(rows)
 				index > 1 && push!(lines, (0.0, 0.0))
 				lw, lh = lines[end]
-				lines[end] = (lw + w * k * fs, max(lh, scale * (tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM)))
+				row = max(tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM, height)
+				lines[end] = (lw + w * k * fs, max(lh, scale * row))
 			end
 		else
 			parts = split(segment, _TEXT_BR_TAG)

@@ -183,6 +183,48 @@ $(PS._EXPORT_RESET_DIV_JS)
 		@test maximum(ratios) <= 1.08
 	end
 
+	# tm-extent-under: display math, display big operators and braces were
+	# estimated smaller than drawn ($$\int_0^1 f\,dx$$ 0.74 x the drawn
+	# height, \prod with limits 0.66 x, \underbrace{x}_{n} 0.58 x the width).
+	math_box_js = raw"""
+  const out = [];
+  div.querySelectorAll('g.annotation').forEach(function (a) {
+    let u = null;
+    a.querySelectorAll('g.annotation-text-g text, g.annotation-text-g [class*="math-group"]').forEach(function (e) {
+      const r = e.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return;
+      u = u ? [Math.min(u[0], r.left), Math.min(u[1], r.top), Math.max(u[2], r.right), Math.max(u[3], r.bottom)] :
+        [r.left, r.top, r.right, r.bottom];
+    });
+    out.push({index: +a.getAttribute('data-index'), size: u ? [u[2] - u[0], u[3] - u[1]] : null});
+  });
+  return out;
+"""
+	extent_strings = ["\$\$\\int_0^1 f\\,dx\$\$", "\$\$\\int f\\,dx\$\$", "\$\$\\sum_{i=1}^{n} a_i\$\$",
+		"\$\$\\prod_{k=1}^{N} x_k\$\$", "\$\$\\oint_C E\\cdot dl\$\$", "\$\$\\frac{a}{b}\$\$",
+		"\$\\displaystyle\\sum\\limits_{i=1}^{n} a_i\$", "\$\\underbrace{abc}_{n}\$", "\$\\underbrace{x}_{n}\$",
+		"\$\\underbrace{abcdefgh}_{n}\$", "\$\\overbrace{abc}^{n}\$", "\$\\underbrace{a}_{\\text{long label}}\$"]
+	@testset "tm-extent-under: display operators and braces are not under-estimated ($(style))" for style in (:default, :ieee)
+		fig = with_style(style) do
+			f = plot_scatter([0.0, 1.0], [0.0, 1.0]; width = 700, height = 60 * length(extent_strings) + 80)
+			for (k, s) in enumerate(extent_strings)
+				annotate!(f, 0.02, 1 - (k - 0.5) / length(extent_strings), s; coords = :paper, showarrow = false,
+					anchor = :left, fontsize = 12)
+			end
+			f
+		end
+		stored = [PS._symbol_dict(a)[:text] for a in PS._plot_obj(fig).layout.fields[:annotations]]
+		drawn = drawn_json(fig, math_box_js)
+		@test length(drawn) == length(extent_strings)
+		for d in drawn
+			text = stored[d["index"] + 1]
+			w, h = d["size"]
+			ew, eh = with_style(() -> PS._text_extent(text, 12), style)
+			@test (text, ew / w >= 1.0) == (text, true)
+			@test (text, eh / h >= 1.0) == (text, true)
+		end
+	end
+
 	# v7: text anchored at an edge of the axes keeps clear of the frame and of
 	# the tick marks pointing inwards along it (gallery device_geometry (b)).
 	# Before: 2.5 px from the frame under :ieee, inside its 4.7 px ticks.
@@ -249,6 +291,34 @@ $(PS._EXPORT_RESET_DIV_JS)
 		@test length(gaps) == 1
 		# left, top, right and bottom distance of the glyphs from the figure edge
 		@test all(gap -> minimum(gap) >= 0, gaps)
+	end
+
+	# tm-twoline-math-axis-title: a math axis title of several rows got the
+	# room of one line and grew half its extra rows into the tick labels
+	# (gap -1.7 px under :ieee, 3.5 px under :default for two rows; plain
+	# titles keep 10-16 px).
+	axis_gap_js = raw"""
+  const box = el => el.getBoundingClientRect();
+  const fig = box(div.querySelector('svg.main-svg'));
+  const title = L => { const g = div.querySelector('g.g-' + L + 'title'); const m = g.querySelector('g[class*="math-group"]'); return box(m || g.querySelector('text')); };
+  const labels = L => Array.from(div.querySelectorAll('g.' + L + 'axislayer-above g.' + L + 'tick text')).map(box);
+  const xt = title('x'), yt = title('y');
+  return {x: xt.top - Math.max.apply(null, labels('x').map(b => b.bottom)),
+    y: Math.min.apply(null, labels('y').map(b => b.left)) - yt.right,
+    inside: xt.bottom <= fig.bottom + 0.5 && yt.left >= fig.left - 0.5};
+"""
+	@testset "tm-twoline-math-axis-title: math axis titles of several rows keep their gap ($(style), $(rows) rows)" for
+			style in (:default, :ieee), rows in (1, 2, 3)
+		xl = join(["time \$t\$", "(s)", "last"][1:rows], "\n")
+		yl = join(["field \$E_z\$", "(V/m)", "last"][1:rows], "\n")
+		fig = with_style(style) do
+			plot_scatter(collect(range(0, 1; length = 20)), collect(range(-100, 100; length = 20)); xlabel = xl, ylabel = yl)
+		end
+		@test PS._finalize_figure!(fig) === false
+		gaps = drawn_json(fig, axis_gap_js)
+		@test gaps["x"] >= 8
+		@test gaps["y"] >= 8
+		@test gaps["inside"]
 	end
 
 	# docs-06: a math column title sat on the top frame line of its column

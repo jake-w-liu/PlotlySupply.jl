@@ -46,6 +46,15 @@ using Test, PlotlySupply
         @test count(PlotlySupply._PLOTLYJS_LEGEND_TITLE_MATH_SEAM, source) == 1
         @test count(PlotlySupply._PLOTLYJS_LEGEND_TITLE_MATH_REPLACEMENT, patched) == 1
         @test !occursin(PlotlySupply._PLOTLYJS_LEGEND_TITLE_MATH_SEAM, patched)
+        # tm-twoline-math-axis-title: the rows of a math axis title count as lines
+        for (seam, replacement) in (
+            PlotlySupply._PLOTLYJS_AXIS_TITLE_ROOM_SEAM => PlotlySupply._PLOTLYJS_AXIS_TITLE_ROOM_REPLACEMENT,
+            PlotlySupply._PLOTLYJS_AXIS_TITLE_SHIFT_SEAM => PlotlySupply._PLOTLYJS_AXIS_TITLE_SHIFT_REPLACEMENT,
+        )
+            @test count(seam, source) == 1
+            @test count(replacement, patched) == 1
+            @test !occursin(seam, patched)
+        end
         @test PlotlySupply._plotlyjs_file_digest(raw) == raw_digest
     end
 

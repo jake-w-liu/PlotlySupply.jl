@@ -26,6 +26,25 @@ const _PLOTLYJS_LEGEND_TITLE_MATH_SEAM =
 	raw"""var a=t.select("g[class*=math-group]"),o=a.node(),s=P(r);"""
 const _PLOTLYJS_LEGEND_TITLE_MATH_REPLACEMENT =
 	raw"""var a=t.select(n===b?"g[class*=titletext-math-group]":"g[class*=math-group]"),o=a.node(),s=P(r);"""
+# plotly.js counts the lines of an axis title by its `<br>` tags only: in
+# the automargin room (axes.js approxTitleDepth) and in the title's distance
+# from the axis (drawTitle). A math title of several rows (`mathtext` writes
+# them as one MathJax array, rows split by `\\`) got the room of one line,
+# and its svg, which convertToTspans centres on the title's anchor, grew
+# half its extra rows towards the tick labels (tm-twoline-math-axis-title,
+# measured: the plot area kept its size for 2 and 3 rows and the x title
+# drew 1.7 px into the tick labels under :ieee). Each extra row of a
+# `$...$` title gets 1.6 em of room, and the title's anchor moves away from
+# the axis by half of it: the svg of 2 and 3 rows measured 1.50 and 1.55 em
+# per extra row under :ieee (Times), 1.86 and 1.64 em under :default.
+const _PLOTLYJS_AXIS_TITLE_ROOM_SEAM =
+	raw"""function St(t){var e=t.title.font.size,r=(t.title.text.match(c.BR_TAG_ALL)||[]).length;return t.title.hasOwnProperty("standoff")?e*(q+r*H):r?e*(r+1)*H:e}"""
+const _PLOTLYJS_AXIS_TITLE_ROOM_REPLACEMENT =
+	raw"""function St(t){var e=t.title.font.size,r=(t.title.text.match(c.BR_TAG_ALL)||[]).length,_m=/^\$[\s\S]*\$$/.test(t.title.text)?(t.title.text.match(/\\\\/g)||[]).length:0;return _m*1.6*e+(t.title.hasOwnProperty("standoff")?e*(q+r*H):r?e*(r+1)*H:e)}"""
+const _PLOTLYJS_AXIS_TITLE_SHIFT_SEAM =
+	raw"""}var p,d,m,g,y=Z.getPxPosition(t,e);"""
+const _PLOTLYJS_AXIS_TITLE_SHIFT_REPLACEMENT =
+	raw"""}/^\$[\s\S]*\$$/.test(e.title.text)&&(r+=(e.title.text.match(/\\\\/g)||[]).length*.8*o);var p,d,m,g,y=Z.getPxPosition(t,e);"""
 # Keep XMLSerializer's attribute quotes and retire the old quote placeholders.
 const _PLOTLYJS_SVG_QUOTE_TRANSFORMS = (
 	raw"""var e=this.style.fontFamily;e&&-1!==e.indexOf('"')&&t.style("font-family",e.replace(l,c));var r=this.style.fontWeight;""" =>
@@ -50,6 +69,8 @@ const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_MATH_FONT_SEAM => _PLOTLYJS_MATH_FONT_REPLACEMENT,
 	_PLOTLYJS_MATH_SIZE_SEAM => _PLOTLYJS_MATH_SIZE_REPLACEMENT,
 	_PLOTLYJS_LEGEND_TITLE_MATH_SEAM => _PLOTLYJS_LEGEND_TITLE_MATH_REPLACEMENT,
+	_PLOTLYJS_AXIS_TITLE_ROOM_SEAM => _PLOTLYJS_AXIS_TITLE_ROOM_REPLACEMENT,
+	_PLOTLYJS_AXIS_TITLE_SHIFT_SEAM => _PLOTLYJS_AXIS_TITLE_SHIFT_REPLACEMENT,
 	_PLOTLYJS_GL3D_PAD_SEAM => _PLOTLYJS_GL3D_PAD_REPLACEMENT,
 	_PLOTLYJS_SVG_QUOTE_TRANSFORMS...,
 )
