@@ -818,19 +818,11 @@ end
 		@test status == 0
 		@test sort(filter(endswith(".png"), readdir(out))) == [f[1:end-3] * ".png" for f in _gallery_scripts()]
 		# Settled figures: after the last PlotlySupply call of a script, finalizing the figure (outside
-		# the `with_style` block it was built in) writes nothing.
-		# Two figures (equal-aspect cells with hidden axes) are not yet fixed points of the
-		# finalizer: the first call after the script writes again (chama_a5_deformed_meshes never
-		# settles, device_geometry needs one more round). They are listed as broken so the layout
-		# engine's fix shows up as an unexpected pass; every other gallery figure must be settled.
-		known_unsettled = Set(["chama_a5_deformed_meshes.png", "device_geometry.png"])
-		@test known_unsettled <= Set(first.(runner.DRY_FIGURES))
+		# the `with_style` block it was built in) writes nothing, and takes one pass.
 		for (name, fig) in runner.DRY_FIGURES
-			wrote = PlotlySupply._finalize_figure!(fig)
-			if name in known_unsettled
-				@test_broken !wrote
-			else
-				@test !wrote
+			@testset "$(name) is settled" begin
+				@test !PlotlySupply._finalize_figure!(fig)
+				@test PlotlySupply._FIN_LAST_ROUNDS[] == 1
 			end
 		end
 		# One script is rendered for real: a PNG of twice the figure's pixels (3.5 in at 96 dpi, 2x).

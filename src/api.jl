@@ -19872,6 +19872,8 @@ function plot_indicator(
 		fontsize = fontsize,
 		apply_template = true,
 	)
+	# The margins its decorations need (finalize.jl, vm-17/vm-18/style-07): settled when built.
+	_finalize_figure!(fig)
 	return _extended_maybe_show(fig, show, width, height, title)
 end
 
@@ -22994,6 +22996,8 @@ function plot_parcoords(
 		apply_template = true,
 	)
 	isempty(title_text) || _parcoords_title_margin!(fig, fontsize)
+	# The margins its decorations need (finalize.jl, vm-17/vm-18/style-07): settled when built.
+	_finalize_figure!(fig)
 	return _extended_maybe_show(fig, show, width, height, title)
 end
 
@@ -23240,6 +23244,8 @@ function plot_ternary(
 		fontsize = fontsize,
 		apply_template = true,
 	)
+	# The margins its decorations need (finalize.jl, vm-17/vm-18/style-07): settled when built.
+	_finalize_figure!(fig)
 	return _extended_maybe_show(fig, show, width, height, title)
 end
 

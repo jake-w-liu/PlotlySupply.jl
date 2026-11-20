@@ -425,7 +425,10 @@ end
 	end
 	@test _SFN._finalize_figure!(sf) === false
 	@test _SFN._fin_needs_full_staging(sf)
-	@test !_SFN._fin_needs_full_staging(plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y)))
+	# A trace with its own bar takes the full path too (fields-07: the bar
+	# moves when the plot areas give up room); a plain figure does not.
+	@test _SFN._fin_needs_full_staging(plot_heatmap(_SFN_X, _SFN_Y, _sfn_z(_SFN_X, _SFN_Y)))
+	@test !_SFN._fin_needs_full_staging(plot_scatter(1:3, [1.0, 2.0, 3.0]))
 end
 
 # An equal-aspect heatmap figure that was never finalized (constructors
@@ -510,8 +513,9 @@ end
 	plan = _SFN._room_plan(sf)
 	last_slot = _SFN._room_slot(plan, :colorbar, "bar:2")
 	neighbour = plan.areas[:xaxis2]
+	# D17: the neighbour moves too; the bars end before its labels.
 	@test last_slot.offset + last_slot.px <=
-		(neighbour.ref[1][1] - last_slot.edge) * plan.Wp - neighbour.own[:left] + 1e-6
+		(neighbour.final[1][1] - last_slot.edge) * plan.Wp - neighbour.own[:left] + 1e-6
 	@test _SFN._finalize_figure!(sf) === false
 	# The last column keeps them side by side (the margin grows for them).
 	last = subplots(1, 2; sync = false)
@@ -546,9 +550,12 @@ end
 	cell = _SFN._layout_axis_domain(grid, :xaxis)
 	xd = _SFN._layout_axis_domain(layout, :xaxis)
 	@test xd[1] == cell[1] && xd[2] < cell[2]
-	# The cell below stays aligned; the other columns keep their cells.
+	# The cell below stays aligned; D17: every column gives up the same, so
+	# the columns stay equal (the next one starts after the bar's room).
 	@test collect(_SFN._layout_axis_domain(layout, :xaxis4)) ≈ collect(xd)
-	@test collect(_SFN._layout_axis_domain(layout, :xaxis2)) ≈ collect(_SFN._layout_axis_domain(grid, :xaxis2))
+	x2 = _SFN._layout_axis_domain(layout, :xaxis2)
+	@test x2[2] - x2[1] ≈ xd[2] - xd[1]
+	@test collect(_SFN._layout_axis_domain(layout, :xaxis5)) ≈ collect(x2)
 	bar = _sfn_bar(sf.plot.data[1])
 	@test bar[:x] ≈ xd[2] + _SFN._CBAR_CELL_PAD
 	@test bar[:xref] == "paper"
@@ -586,14 +593,23 @@ end
 	copy = deepcopy(sf.plot)
 	_SFN._finalize_figure!(copy; size = (500, 400))
 	@test collect(_SFN._layout_axis_domain(copy.layout, :xaxis)) == [0.0, 0.2]
-	# A cell hosting an inset is not narrowed (the inset would stick out).
+	# A cell hosting an inset gives up the room of the inset's bar itself
+	# (inset-02), and the inset follows its host's plot area.
 	si = subplots(1, 2; sync = false)
 	plot_scatter!(si, _SFN_X, sin.(_SFN_X); row = 1, col = 1)
 	plot_scatter!(si, _SFN_X, cos.(_SFN_X); row = 1, col = 2)
 	k = inset!(si, (0.55, 0.55, 0.4, 0.4); row = 1, col = 1)
 	plot_heatmap!(si, _SFN_X, _SFN_Y, 1e4 .* z; inset = k)
 	grid = _SFN._plotlysupply_subplot_layout(si.plot.layout.subplots)
-	@test _SFN._layout_axis_domain(si.plot.layout, :xaxis)[2] ≈ _SFN._layout_axis_domain(grid, :xaxis)[2]
+	host = _SFN._layout_axis_domain(si.plot.layout, :xaxis)
+	@test host[2] < _SFN._layout_axis_domain(grid, :xaxis)[2]
+	t = _SFN._cell_target(si; inset = k, who = "test")
+	ix = _SFN._layout_axis_domain(si.plot.layout, t.xkey)
+	w = host[2] - host[1]
+	@test ix[1] ≈ host[1] + 0.55w atol = 1e-6
+	@test ix[2] ≈ host[1] + 0.95w atol = 1e-6
+	@test _sfn_bar(si.plot.data[end])[:x] >= ix[2]
+	@test _sfn_bar(si.plot.data[end])[:x] < _SFN._layout_axis_domain(si.plot.layout, :xaxis2)[1]
 	@test _SFN._finalize_figure!(si) === false
 	# The panel title follows the cell; when the cell's bar goes (here to a
 	# shared colour axis) the cell widens again.
@@ -658,7 +674,10 @@ end
 	yd = _SFN._layout_axis_domain(layout, :yaxis)
 	@test yd[1] > _SFN._layout_axis_domain(grid, :yaxis)[1]
 	@test collect(_SFN._layout_axis_domain(layout, :yaxis2)) ≈ collect(yd)
-	@test collect(_SFN._layout_axis_domain(layout, :yaxis3)) ≈ collect(_SFN._layout_axis_domain(grid, :yaxis3))
+	# D17: both rows give up the same; they stay equal and aligned.
+	y3 = _SFN._layout_axis_domain(layout, :yaxis3)
+	@test y3[2] - y3[1] ≈ yd[2] - yd[1]
+	@test collect(_SFN._layout_axis_domain(layout, :yaxis4)) ≈ collect(y3)
 	plan = _SFN._room_plan(sf)
 	slot = _SFN._room_slot(plan, :colorbar, "bar:1")
 	bar = _sfn_bar(sf.plot.data[1])
@@ -720,7 +739,13 @@ end
 	ref = plan.areas[:xaxis].ref
 	gap = (plan.areas[:xaxis2].ref[1][1] - ref[1][2]) * plan.Wp
 	facing = _SFN._room_label_px(plan.areas[:xaxis2].own[:left])
-	@test slot.edge ≈ ref[1][2] - (_SFN._ROOM_GAP + 80 - (gap - facing - _SFN._ROOM_GAP)) / plan.Wp
+	# D17: the room taken in the gap is shared by the columns (their spans
+	# shrink alike), so the left cell's right edge moves by its share.
+	take = (_SFN._ROOM_GAP + 80 - (gap - facing - _SFN._ROOM_GAP)) / plan.Wp
+	spans = [ref[1][2] - ref[1][1], plan.areas[:xaxis2].ref[1][2] - plan.areas[:xaxis2].ref[1][1]]
+	@test slot.edge ≈ ref[1][1] + spans[1] * (sum(spans) - take) / sum(spans)
+	r2 = plan.areas[:xaxis2].final[1]
+	@test r2[2] - r2[1] ≈ slot.edge - ref[1][1]
 	@test slot.offset == _SFN._ROOM_GAP && slot.px == 80 && !slot.release
 	@test _SFN._room_domain(plan, :xaxis)[1][2] == slot.edge
 	# Text size helpers.
@@ -980,26 +1005,28 @@ end
 		# of the same size does not, whatever style is active.
 		carried = plot_scatter(1:3, 1:3).layout
 		carried.fields[:width] = W; carried.fields[:height] = H
-		@test _SFN._fin_size_is_free(carried)
-		@test !_SFN._fin_size_is_free(Layout(width = W, height = H))
+		# L11: the journal width stays; only the height is free.
+		@test _SFN._fin_size_choice(carried) == (Float64(W), Float64(H), false, true)
+		@test _SFN._fin_size_choice(Layout(width = W, height = H)) === nothing
 		carried.fields[:width] = W + 10
-		@test !_SFN._fin_size_is_free(carried)
+		@test _SFN._fin_size_choice(carried) === nothing
 		# Wide field: the width is kept, blank rows go; the lower bound
 		# scales with the journal size (100 px at 500 px tall).
 		f = plot_heatmap(x, y, z; equalar = true)
 		@test f.layout.fields[:width] == round(Int, W)
 		@test 100 <= f.layout.fields[:height] < H
 		@test f.layout.fields[:height] >= round(_SFN._FIN_MIN_FIGURE_HEIGHT * H / _SFN._DEFAULT_EXPORT_HEIGHT_PX)
-		# Tall field: the height is kept.
+		# Tall field: the journal width is never changed (L11), and the
+		# height has no blank to drop.
 		t = plot_heatmap(y, x, permutedims(z); equalar = true)
-		@test t.layout.fields[:height] == round(Int, H) && t.layout.fields[:width] < W
+		@test t.layout.fields[:height] == round(Int, H) && t.layout.fields[:width] == round(Int, W)
 		# A size the user gave stays.
 		u = plot_heatmap(x, y, z)
 		figsize!(u, 400, 300)
 		plot_heatmap!(u, x, y, z; equalar = true)
 		@test u.layout.fields[:width] == 400 && u.layout.fields[:height] == 300
 	end
-	@test _SFN._fin_size_is_free(Layout())
+	@test _SFN._fin_size_choice(Layout()) == (700.0, 500.0, true, true)
 	d = plot_heatmap(x, y, z; equalar = true)
 	@test d.layout.fields[:width] == 700 && d.layout.fields[:height] < 500
 end
@@ -1208,7 +1235,9 @@ end
 		d1 = _SFN._layout_axis_domain(layout, :xaxis)
 		d2 = _SFN._layout_axis_domain(layout, :xaxis2)
 		@test d2[1] > _SFN._layout_axis_domain(grid, :xaxis2)[1]
-		@test d1 == _SFN._layout_axis_domain(grid, :xaxis)
+		# D17: both cells give up the room; they stay equal.
+		@test d1[1] == _SFN._layout_axis_domain(grid, :xaxis)[1]
+		@test d1[2] - d1[1] ≈ d2[2] - d2[1]
 		plan = _SFN._room_plan(sf)
 		a = plan.areas[:xaxis2]
 		@test (d2[1] - d1[2]) * plan.Wp >= _SFN._room_label_px(a.own[:left]) + _SFN._ROOM_GAP - 1e-6
@@ -1286,15 +1315,18 @@ end
 	# Wrapped at the large font (the bottom row is 156 px tall; the finalizer's
 	# wrap, `_FIN_WRAP_BREAK`, is the only one) ...
 	@test occursin(_SFN._FIN_WRAP_BREAK, _sfn_fields(_sfn_axis(sf, :yaxis4)[:title])[:text])
-	# ... with no grown margin; the right-hand cells give up the room the
-	# wrapped title needs in the 20 % gap (Z71), the left ones keep their domains.
+	# ... with no grown margin; the room the wrapped title needs in the 20 %
+	# gap (Z71) is given up by both columns alike (D17): the left ones keep
+	# their left edge, the right ones start later, all four stay equal.
 	@test _sfn_fields(layout.fields[:margin])[:l] == 50
 	for k in (:xaxis, :xaxis3)
-		@test collect(_SFN._layout_axis_domain(layout, k)) ≈ collect(_SFN._layout_axis_domain(grid, k))
+		@test _SFN._layout_axis_domain(layout, k)[1] ≈ _SFN._layout_axis_domain(grid, k)[1]
 	end
 	for k in (:xaxis2, :xaxis4)
 		@test _SFN._layout_axis_domain(layout, k)[1] > _SFN._layout_axis_domain(grid, k)[1]
 	end
+	spans = [(d = _SFN._layout_axis_domain(layout, k); d[2] - d[1]) for k in (:xaxis, :xaxis2, :xaxis3, :xaxis4)]
+	@test maximum(spans) - minimum(spans) <= 1e-9
 	@test _SFN._finalize_figure!(sf) === false
 	# Smaller fonts: one line again and the cells get the room back (the
 	# record of what the room solve wrote, `layout.meta`, says the narrowing
@@ -1343,7 +1375,9 @@ end
 	heights = [(d = _SFN._layout_axis_domain(layout, k); d[2] - d[1]) for k in (:yaxis, :yaxis2, :yaxis3)]
 	@test maximum(widths) - minimum(widths) <= 1e-6
 	@test maximum(heights) - minimum(heights) <= 1e-6
-	@test all(a -> a.room[:left] == 0, values(plan.areas))
+	# D17: the gaps the labels widen are alike too.
+	d = [_SFN._layout_axis_domain(layout, k) for k in (:xaxis, :xaxis2, :xaxis3)]
+	@test d[2][1] - d[1][2] ≈ d[3][1] - d[2][2]
 	@test _SFN._finalize_figure!(sf) === false
 end
 
@@ -1545,11 +1579,13 @@ end
 	w1, w2 = d1[1][2] - d1[1][1], d2[1][2] - d2[1][1]
 	@test w1 ≈ w2 atol = 1e-9
 	grid = _SFN._plotlysupply_subplot_layout(layout.subplots)
-	# Narrower than the grid cell (the bar sits in the gap before cell 3), at the cell's left edge.
+	# Narrower than the grid cell (the bar sits in the gap before cell 3), the
+	# first at the cell's left edge; D17: the columns give up the room alike,
+	# so the second starts later than its grid cell.
 	gw = _SFN._layout_subplot_domain(grid, :scene)
 	@test w1 < gw[1][2] - gw[1][1] - 1e-3
 	@test d1[1][1] ≈ gw[1][1] atol = 1e-9
-	@test d2[1][1] ≈ _SFN._layout_subplot_domain(grid, :scene2)[1][1] atol = 1e-9
+	@test d2[1][1] >= _SFN._layout_subplot_domain(grid, :scene2)[1][1] - 1e-9
 	# the bar is right of the second scene, left of the third cell
 	bar = _sfn_fields(_sfn_fields(layout.fields[:coloraxis])[:colorbar])
 	@test d2[1][2] < bar[:x] < _SFN._layout_axis_domain(layout, :xaxis)[1]
@@ -1699,6 +1735,560 @@ end
 				@test a["right"] <= info["W"] - 0.5
 				@test a["left"] >= 0
 			end
+		end
+	end
+end
+
+# ---------------------------------------------------------------------------
+# Wave 7 (layout-engine): D17 band solve, L11 compression, L7 wrap record
+# ---------------------------------------------------------------------------
+
+# Px plot box (x0, x1, y0, y1) of each SubplotFigure cell in `cells`.
+function _sfn_grid_boxes(sf, info, cells)
+	out = Dict{Tuple{Int, Int}, NTuple{4, Float64}}()
+	for (r, c) in cells
+		t = _SFN._cell_target(sf; row = r, col = c, who = "test")
+		out[(r, c)] = Float64.(_sfn_box(info, t.xkey, t.ykey))
+	end
+	return out
+end
+
+# D17: the cells of each column share their left and right px edges, those
+# of each row their top and bottom ones, and the column widths (row heights)
+# divided by their ratios agree, all within `tol` px. `spans` lists a
+# spanning cell with the columns it covers.
+function _sfn_check_grid(sf, info, rows, cols; wr = ones(length(cols)), spans = (), tol = 0.5)
+	cells = unique(vcat(rows..., cols..., [s[1] for s in spans]))
+	b = _sfn_grid_boxes(sf, info, cells)
+	for col in cols, cell in col[2:end]
+		@test abs(b[cell][1] - b[col[1]][1]) <= tol
+		@test abs(b[cell][2] - b[col[1]][2]) <= tol
+	end
+	for row in rows, cell in row[2:end]
+		@test abs(b[cell][3] - b[row[1]][3]) <= tol
+		@test abs(b[cell][4] - b[row[1]][4]) <= tol
+	end
+	w = [(b[col[1]][2] - b[col[1]][1]) / wr[i] for (i, col) in enumerate(cols)]
+	h = [b[row[1]][4] - b[row[1]][3] for row in rows]
+	@test maximum(w) - minimum(w) <= tol
+	@test maximum(h) - minimum(h) <= tol
+	@test all(>(5), w) && all(>(5), h)
+	for (cell, (c1, c2)) in spans
+		@test abs(b[cell][1] - b[cols[c1][1]][1]) <= tol
+		@test abs(b[cell][2] - b[cols[c2][1]][2]) <= tol
+	end
+	return b
+end
+
+@testset "D17: the plot areas of a regular grid stay equal and aligned (renderer)" begin
+	x = collect(range(0, 1; length = 30))
+	Z = [sin(0.4i) * cos(0.3j) for i in 1:10, j in 1:10]
+	g(r, c) = [(i, j) for i in 1:r, j in 1:c]
+	rows_of(r, c) = [[(i, j) for j in 1:c] for i in 1:r]
+	cols_of(r, c) = [[(i, j) for i in 1:r] for j in 1:c]
+	configs = [
+		("1x2 long y titles", () -> begin
+			sf = subplots(1, 2; sync = false)
+			plot_scatter!(sf, x, x .^ 2; row = 1, col = 1, xlabel = "Hole contrast",
+				ylabel = "Normalised transmitted power through the split infrared channel")
+			plot_scatter!(sf, x, sqrt.(x); row = 1, col = 2, xlabel = "Hole contrast", ylabel = "power")
+			sf
+		end, rows_of(1, 2), cols_of(1, 2), ones(2), ()),
+		("2x2 legend on top of (1,1)", () -> begin
+			sf = subplots(2, 2; sync = false)
+			for r in 1:2, c in 1:2
+				plot_scatter!(sf, x, x .^ (r + c); row = r, col = c, xlabel = "x", ylabel = "y$r$c", legend = "s$r$c")
+			end
+			set_legend!(sf; row = 1, col = 1, position = :outside_top)
+			sf
+		end, rows_of(2, 2), cols_of(2, 2), ones(2), ()),
+		("2x3 with colorbar cells", () -> begin
+			sf = subplots(2, 3; sync = false)
+			for r in 1:2, c in 1:3
+				if (r + c) % 2 == 0
+					plot_heatmap!(sf, Z; row = r, col = c, xlabel = "x", ylabel = "y")
+				else
+					plot_scatter!(sf, x, x; row = r, col = c, xlabel = "x", ylabel = "y")
+				end
+			end
+			sf
+		end, rows_of(2, 3), cols_of(2, 3), ones(3), ()),
+		("3x1 with a panel title", () -> begin
+			sf = subplots(3, 1; sync = false)
+			for r in 1:3
+				plot_scatter!(sf, x, x; row = r, col = 1, xlabel = "time (s)", ylabel = "y$r")
+			end
+			title!(sf, "(a)"; row = 2, col = 1)
+			sf
+		end, rows_of(3, 1), cols_of(3, 1), ones(1), ()),
+		("spanning top row", () -> begin
+			sf = subplots(2, 2; sync = false, specs = [Spec(colspan = 2) missing; Spec() Spec()])
+			plot_scatter!(sf, x, x; row = 1, col = 1, ylabel = "span")
+			plot_heatmap!(sf, Z; row = 2, col = 1, ylabel = "left")
+			plot_scatter!(sf, x, x; row = 2, col = 2, ylabel = "right")
+			sf
+		end, [[(1, 1)], [(2, 1), (2, 2)]], [[(2, 1)], [(2, 2)]], ones(2), (((1, 1), (1, 2)),)),
+		("width_ratios 2:1", () -> begin
+			sf = subplots(1, 2; sync = false, width_ratios = [2, 1])
+			plot_heatmap!(sf, Z; row = 1, col = 1, ylabel = "a")
+			plot_scatter!(sf, x, x; row = 1, col = 2, ylabel = "b")
+			sf
+		end, rows_of(1, 2), cols_of(1, 2), [2.0, 1.0], ()),
+		("legend below (1,2)", () -> begin
+			sf = subplots(2, 2; sync = false)
+			for r in 1:2, c in 1:2
+				plot_scatter!(sf, x, x .* c; row = r, col = c, legend = "a$r$c")
+				plot_scatter!(sf, x, x .* r; row = r, col = c, legend = "b$r$c")
+			end
+			set_legend!(sf; row = 1, col = 2, position = :outside_bottom)
+			sf
+		end, rows_of(2, 2), cols_of(2, 2), ones(2), ()),
+		("shared axes and a bar", () -> begin
+			sf = subplots(2, 2; sync = false, shared_xaxes = true, shared_yaxes = true)
+			for r in 1:2, c in 1:2
+				plot_scatter!(sf, x, x .* c; row = r, col = c, xlabel = r == 2 ? "x" : "", ylabel = c == 1 ? "y" : "")
+			end
+			plot_heatmap!(sf, Z; row = 1, col = 2)
+			sf
+		end, rows_of(2, 2), cols_of(2, 2), ones(2), ()),
+	]
+	for (name, build, rows, cols, wr, spans) in configs
+		for size in (:default, :ieee1, :ieee2)
+			sf = size === :default ? build() : with_style(build, :ieee)
+			size === :ieee2 && figsize!(sf, :ieee; columns = 2)
+			@test _SFN._finalize_figure!(sf) === false
+			W = round(Int, get(sf.plot.layout.fields, :width, 700))
+			H = round(Int, get(sf.plot.layout.fields, :height, 500))
+			info = _sfn_render(sf; width = W, height = H)
+			info === nothing && break
+			@testset "$name at $size ($W x $H)" begin
+				_sfn_check_grid(sf, info, rows, cols; wr = wr, spans = spans)
+			end
+		end
+	end
+end
+
+@testset "L11: a grid of equal-aspect cells drops its blank band; compress = false keeps it" begin
+	Z = [sin(0.4i) * cos(0.3j) for i in 1:12, j in 1:12]
+	function pair(; kw...)
+		sf = subplots(1, 2; sync = false, kw...)
+		for c in 1:2
+			plot_heatmap!(sf, Z; row = 1, col = c, equalar = true, xlabel = "x", ylabel = "y")
+		end
+		sf
+	end
+	sf = pair()
+	l = sf.plot.layout
+	# No size given: the free height loses the blank rows the square cells
+	# leave in a 700 x 500 page; the width stays.
+	@test l.fields[:width] == 700
+	@test l.fields[:height] < 480
+	@test _SFN._finalize_figure!(sf) === false
+	# compress = false: the page and the centred cells stay.
+	kept = pair(; compress = false)
+	@test get(kept.plot.layout.fields, :height, 500) == 500
+	@test _SFN._fin_compress_grid(kept.plot.layout) === false
+	@test _SFN._finalize_figure!(kept) === false
+	# A user size is never changed.
+	u = pair()
+	figsize!(u, 640, 480)
+	@test u.plot.layout.fields[:width] == 640 && u.plot.layout.fields[:height] == 480
+	@test _SFN._finalize_figure!(u) === false
+	# A journal width is kept; the height adapts.
+	with_style(:ieee) do
+		j = pair()
+		W, H = _SFN._style_default_figure_size()
+		@test j.plot.layout.fields[:width] == round(Int, W)
+		@test j.plot.layout.fields[:height] < H
+		@test _SFN._finalize_figure!(j) === false
+	end
+	# Rendered: the square boxes fill the compressed row and the shared bar
+	# serves exactly their block: `len = 1` spans it, the default 0.75 of it,
+	# centred on it (its title drawn inside that length).
+	for len in (1.0, 0.75)
+		s = pair()
+		shared_colorbar!(s; title = "u", len = len)
+		@test _SFN._finalize_figure!(s) === false
+		W = round(Int, s.plot.layout.fields[:width]); H = round(Int, s.plot.layout.fields[:height])
+		info = _sfn_render(s; width = W, height = H, bars = 1)
+		info === nothing && break
+		b = _sfn_grid_boxes(s, info, [(1, 1), (1, 2)])
+		for cell in values(b)
+			@test abs((cell[2] - cell[1]) - (cell[4] - cell[3])) <= 1
+		end
+		bar = only(info["colorbars"])
+		box = b[(1, 1)]
+		@test abs((bar["top"] + bar["bottom"]) / 2 - (box[3] + box[4]) / 2) <= 2
+		@test abs((bar["bottom"] - bar["top"]) - len * (box[4] - box[3])) <= 3
+	end
+end
+
+@testset "L7: the wrap is recorded in layout.meta; the title carries no marker" begin
+	long = "Normalised transmitted power through the split infrared channel"
+	sf = subplots(1, 2; sync = false)
+	plot_scatter!(sf, 1:10, collect(1.0:10.0); row = 1, col = 1, xlabel = "Hole contrast")
+	plot_scatter!(sf, 1:10, collect(1.0:10.0); row = 1, col = 2)
+	ylabel!(sf, long; row = 1, col = 1)
+	figsize!(sf, 336, 200)
+	text = _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text]
+	@test count("<br>", text) >= 2                       # three lines or more
+	@test !occursin('​', text) && !occursin("<br />", text)
+	@test replace(text, "<br>" => " ") == long
+	@test _SFN._fin_wrap_record(sf.plot.layout)["yaxis"] == (long, text)
+	@test _SFN._finalize_figure!(sf) === false
+	# Re-joined on a larger figure; the record goes with the wrap.
+	figsize!(sf, 1400, 900)
+	@test _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text] == long
+	@test !haskey(_SFN._fin_wrap_record(sf.plot.layout), "yaxis")
+	@test _SFN._finalize_figure!(sf) === false
+	# Wrapped again, then changed by the user: theirs, the record dropped.
+	figsize!(sf, 336, 200)
+	@test haskey(_SFN._fin_wrap_record(sf.plot.layout), "yaxis")
+	ylabel!(sf, "first<br>second"; row = 1, col = 1)
+	@test _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text] == "first<br>second"
+	@test !haskey(_SFN._fin_wrap_record(sf.plot.layout), "yaxis")
+	@test _SFN._finalize_figure!(sf) === false
+	# A user break inside a long title survives the wrap and the re-join.
+	ylabel!(sf, "first<br>" * long; row = 1, col = 1)
+	@test startswith(_sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text], "first<br>")
+	figsize!(sf, 1400, 900)
+	@test _sfn_fields(_sfn_axis(sf, :yaxis)[:title])[:text] == "first<br>" * long
+	# A record read back from JSON (String keys) is understood.
+	figsize!(sf, 336, 200)
+	q = Layout()
+	q.fields[:meta] = JSON.parse(JSON.json(sf.plot.layout.fields[:meta]))
+	@test _SFN._fin_wrap_record(q)["yaxis"][1] == "first<br>" * long
+end
+
+@testset "L7: a wrapped title keeps its gap and leaves no U+200B in the exports" begin
+	long = "Normalised transmitted power through the split infrared channel"
+	f = with_style(:ieee) do
+		g = plot_scatter(collect(0:0.1:1), collect(0:0.1:1); xlabel = "Hole contrast", ylabel = long)
+		figsize!(g, 168, 168)
+		g
+	end
+	@test count("<br>", _sfn_fields(f.layout.fields[:yaxis][:title])[:text]) >= 2
+	dir = mktempdir()
+	svg = joinpath(dir, "w.svg"); pdf = joinpath(dir, "w.pdf")
+	savefig(f, svg); savefig(f, pdf)
+	@test !occursin('​', read(svg, String))
+	tool = Sys.which("pdftotext")
+	if tool !== nothing
+		@test !occursin('​', read(`$tool $pdf -`, String))
+	end
+	@test _SFN._finalize_figure!(f) === false
+end
+
+@testset "settled after mutators of equal-aspect and overlay figures (fields-06, fields-07, docs-08)" begin
+	_SFN._finalize_figure!(plot_scatter(1:2, 1:2))
+	@test _SFN._FIN_FIT_ROUNDS == 4
+	Z = [sin(0.4i) * cos(0.3j) for i in 1:9, j in 1:13]
+	cases = [
+		"xlabel!" => f -> xlabel!(f, "x (mm)"),
+		"xrange!" => f -> xrange!(f, (2, 8)),
+		"scatter with a legend" => f -> plot_scatter!(f, [2.0, 4.0], [3.0, 5.0]; legend = "probes"),
+		"figsize!" => f -> figsize!(f, :ieee),
+	]
+	for (name, mutate!) in cases
+		f = plot_heatmap(Z; equalar = true)
+		mutate!(f)
+		@test _SFN._finalize_figure!(f) === false
+	end
+	# axis_equal! fits its cell for the new aspect at once.
+	f = plot_heatmap(Z)
+	axis_equal!(f)
+	@test _SFN._finalize_figure!(f) === false
+	# An overlay with a legend beside a heatmap's bar under a journal style.
+	g = range(-2, 2; length = 9)
+	X = [a for a in g, b in g]; Y = [b for a in g, b in g]
+	for style in (:ieee, :nature)
+		with_style(style) do
+			h = plot_heatmap(collect(g), collect(g), X .^ 2 .+ Y .^ 2)
+			plot_quiver!(h, X, Y, -Y, X; legend = "F")
+			@test _SFN._finalize_figure!(h) === false
+		end
+	end
+	# figsize! leaves the colorbar ticks it implies written (style-06).
+	h = plot_heatmap(1:20, 1:15, [sin(0.3i) + cos(0.2j) for i in 1:20, j in 1:15]; colorbar_title = "u")
+	figsize!(h, 336, 227)
+	@test _SFN._finalize_figure!(h) === false
+	# The worst case of the fit loop needs no more than the cap.
+	q = plot_quiver(X, Y, -Y, X; sizeref = 1.0, legend = "F", colorby = :magnitude, style = :triangle)
+	@test _SFN._FIN_LAST_ROUNDS[] <= _SFN._FIN_FIT_ROUNDS
+	@test _SFN._finalize_figure!(q) === false
+	@test _SFN._FIN_LAST_ROUNDS[] == 1
+end
+
+@testset "a figure caption and a figure annotation settle (tm-caption, docs-07)" begin
+	x = collect(range(0, 1; length = 20))
+	for style in (:default, :ieee)
+		with_style(style) do
+			f = plot_scatter(x, [x, x .^ 2]; legend = ["a", "b"], xlabel = "x")
+			set_legend!(f; position = :outside_bottom)
+			annotate!(f, 0.5, 0.01, "Source: simulation"; coords = :figure, showarrow = false, anchor = :bottom)
+			@test _SFN._finalize_figure!(f) === false
+		end
+	end
+	sf = subplots(1, 2; sync = false)
+	for c in 1:2
+		plot_scatter!(sf, 1:5, [0.3, 0.1, 0.8, 0.5, 0.9]; legend = "data", color = "black", row = 1, col = c)
+	end
+	legend_entry!(sf, "model"; color = "crimson", dash = "dash")
+	set_legend!(sf; position = :outside_bottom, ncols = 2, frame = false)
+	title!(sf, "(a) Mesh"; row = 1, col = 1, align = :left, bold = true)
+	title!(sf, "Study")
+	annotate!(sf, 0.99, 0.01, "draft"; coords = :figure, showarrow = false)
+	@test _SFN._finalize_figure!(sf) === false
+	# Annotation lists that differ by a zero shift or by rounding draw the same.
+	a = [attr(text = "c", x = 0.5, y = 0.01, yshift = -92.38)]
+	@test _SFN._fin_same_annotations(a, [attr(text = "c", x = 0.5, y = 0.01, yshift = -92.3, xshift = 0)])
+	@test !_SFN._fin_same_annotations(a, [attr(text = "c", x = 0.5, y = 0.01, yshift = -90.0)])
+	@test !_SFN._fin_same_annotations(a, [attr(text = "d", x = 0.5, y = 0.01, yshift = -92.38)])
+end
+
+@testset "a bar over equal-aspect cells keeps its length (sharedcb-02)" begin
+	Z = [sin(0.4i) * cos(0.3j) for i in 1:12, j in 1:10]
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, Z; row = 1, col = 1, equalar = true)
+	plot_heatmap!(sf, Z; row = 1, col = 2, equalar = true)
+	shared_colorbar!(sf; side = :bottom, title = "u")
+	len = sf.plot.layout[:coloraxis][:colorbar][:len]
+	for _ in 1:4
+		@test _SFN._finalize_figure!(sf) === false
+	end
+	@test sf.plot.layout[:coloraxis][:colorbar][:len] == len
+end
+
+@testset "insets follow a host fitted for equal aspect (inset-01, axes-ticks-06)" begin
+	θ = range(0, 2π; length = 200)
+	Z = [sin(0.4i) * cos(0.3j) for i in 1:9, j in 1:13]
+	# Hosts the fit sizes: a circle with fixed ranges, an equal-aspect field.
+	build(order, host) = begin
+		sf = subplots(1, 1; sync = false)
+		figsize!(sf, 700, 400)
+		if host === :circle
+			plot_scatter!(sf, cos.(θ), sin.(θ); xrange = (-1.2, 1.2), yrange = (-1.2, 1.2))
+			order === :before && axis_equal!(sf)
+		else
+			plot_heatmap!(sf, Z; equalar = order === :before)
+		end
+		inset!(sf, (0.6, 0.6, 0.35, 0.35))
+		plot_scatter!(sf, 1:3, 1:3; inset = 1)
+		order === :after && axis_equal!(sf)
+		sf
+	end
+	for order in (:before, :after), kind in (:circle, :field)
+		sf = build(order, kind)
+		@test _SFN._finalize_figure!(sf) === false
+		info = _sfn_render(sf; width = 700, height = 400)
+		info === nothing && break
+		hb = _sfn_box(info, :xaxis, :yaxis)
+		t = _SFN._cell_target(sf; inset = 1, who = "test")
+		box = _sfn_box(info, t.xkey, t.ykey)
+		w = hb[2] - hb[1]; h = hb[4] - hb[3]
+		# The host is drawn square-unit (fitted), not stretched over the cell.
+		@test w < 700 - 100
+		# (0.6, 0.6, 0.35, 0.35) of the drawn plot box (y from the bottom).
+		@test abs(box[1] - (hb[1] + 0.6w)) <= 2
+		@test abs(box[2] - (hb[1] + 0.95w)) <= 2
+		@test abs(box[4] - (hb[4] - 0.6h)) <= 2
+		@test abs(box[3] - (hb[4] - 0.95h)) <= 2
+	end
+end
+
+@testset "a top math colorbar title gets room under the journal styles (threed-f02, vm-02)" begin
+	xs = collect(range(-2, 2; length = 41)); ys = collect(range(-1, 1; length = 21))
+	Z = [exp(-x^2 - 4y^2) for x in xs, y in ys]
+	for style in (:ieee, :nature)
+		with_style(style) do
+			f = plot_heatmap(xs, ys, Z; colorbar_title = raw"$|E|$ (V/m)")
+			@test _SFN._finalize_figure!(f) === false
+			font = _SFN._fin_font_size(f.layout)
+			# The margin holds the title above the bar's top end.
+			@test _sfn_fields(f.layout.fields[:margin])[:t] >= _SFN._FIN_MATH_TITLE_H * font
+			sf = subplots(1, 2; sync = false)
+			plot_heatmap!(sf, xs, ys, Z; row = 1, col = 1, colorbar_title = raw"$|E_x|$")
+			plot_heatmap!(sf, xs, ys, Z; row = 1, col = 2, colorbar_title = raw"$|E_y|$")
+			title!(sf, "Field components")
+			@test _SFN._finalize_figure!(sf) === false
+			plan = _SFN._room_plan(sf)
+			@test count(r -> r.side === :top && endswith(r.key, ":title"), plan.requests) == 2
+		end
+	end
+end
+
+@testset "relayout! takes the finalizer's updates as one Dict of paths (perf-01)" begin
+	paths = _SFN._fin_property_paths(Dict{Symbol, Any}(:legend2_x => 1.0, :xaxis3_domain => [0.1, 0.2],
+		:margin => Dict{Symbol, Any}(:l => 4), :margin_b => 30))
+	@test paths[Symbol("legend2.x")] == 1.0
+	@test paths[Symbol("xaxis3.domain")] == [0.1, 0.2]
+	# A child of a container written whole goes into the container.
+	@test paths[:margin] == Dict{Symbol, Any}(:l => 4, :b => 30)
+	@test !haskey(paths, Symbol("margin.b"))
+	p = plot_scatter(1:3, 1:3)
+	relayout!(p, paths)
+	@test p.layout[:legend2][:x] == 1.0 && p.layout[:margin][:b] == 30
+	# A new grid shape compiles no relayout! method for its key set.
+	sf = subplots(1, 3; sync = false)
+	for c in 1:3
+		plot_scatter!(sf, 1:3, 1:3; row = 1, col = c, legend = "s$c")
+	end
+	sf = subplots(2, 3; sync = false)
+	t = @elapsed for r in 1:2, c in 1:3
+		plot_scatter!(sf, 1:3, 1:3; row = r, col = c, legend = "s$r$c")
+	end
+	@test t < 1.5
+end
+
+_sfn_margin(fig, side) = _SFN._cmn_mapping_get(get(_sfn_plot(fig).layout.fields, :margin, nothing), side)
+
+@testset "margins the room engine raised are given back (cbar-01, margin-01)" begin
+	Z = [1.0 2 3; 4 5 6]
+	for st in (:default, :ieee)
+		with_style(st) do
+			# The right margin of a grid without a bar.
+			plain = subplots(1, 1; sync = false)
+			plot_scatter!(plain, 1:3, 1:3)
+			r0 = _sfn_margin(plain, :r)
+			# A cell bar at the paper edge raises it; moved below, it is given back.
+			sf = subplots(1, 1; sync = false)
+			plot_heatmap!(sf, Z)
+			@test _sfn_margin(sf, :r) > r0
+			colorbar!(sf; side = :bottom)
+			@test _sfn_margin(sf, :r) == r0
+			@test _sfn_margin(sf, :b) > _sfn_margin(plain, :b)
+			@test _SFN._finalize_figure!(sf) === false
+			# An outside legend raises it; moved inside, it is given back.
+			lg = subplots(1, 2; sync = false)
+			plot_scatter!(lg, 1:5, [1.0, 3, 2, 5, 4]; row = 1, col = 1, legend = "data")
+			plot_scatter!(lg, 1:5, [2.0, 1, 4, 3, 5]; row = 1, col = 2, legend = "model")
+			m0 = _sfn_margin(lg, :r)
+			set_legend!(lg; position = :outside_right)
+			@test _sfn_margin(lg, :r) > m0
+			set_legend!(lg; position = :topleft)
+			@test _sfn_margin(lg, :r) == m0
+			@test _SFN._finalize_figure!(lg) === false
+			@test _SFN._fin_meta_get(lg.plot.layout, _SFN._ROOM_MARGIN_KEY) === nothing
+		end
+	end
+	# A margin the user set is theirs: kept when the bar leaves, never lowered.
+	sf = subplots(1, 1; sync = false)
+	plot_heatmap!(sf, Z)
+	relayout!(sf.plot; margin_r = 120)
+	colorbar!(sf; side = :bottom)
+	@test _sfn_margin(sf, :r) == 120
+	@test _SFN._finalize_figure!(sf) === false
+	# The record survives a JSON round trip (String keys).
+	sf = subplots(1, 1; sync = false)
+	plot_heatmap!(sf, Z)
+	rec = _SFN._room_margin_record(sf.plot.layout)
+	@test haskey(rec, :r) && rec[:r][2] == _sfn_margin(sf, :r)
+	meta = _SFN._symbol_dict(sf.plot.layout.fields[:meta])
+	json = Dict{Any, Any}(String(_SFN._ROOM_MARGIN_KEY) => Dict{Any, Any}("r" => Any[rec[:r][1], rec[:r][2]]))
+	q = Layout(); q.fields[:meta] = json
+	@test _SFN._room_margin_record(q) == rec
+end
+
+@testset "decorations plotly does not push margins for get theirs (style-07, vm-19, vm-17, vm-18)" begin
+	for st in (:publication, :ieee, :nature)
+		with_style(st) do
+			# Ternary: the default corner titles "Component A/B/C" are drawn.
+			fig = plot_ternary([0.2, 0.3], [0.3, 0.3], [0.5, 0.4])
+			m = fig.layout.fields[:margin]
+			font = _SFN._fin_font_size(fig.layout)
+			tick = _SFN._tight_root_font_size(k -> get(fig.layout.fields, k, nothing))
+			for axis in (:aaxis, :baxis, :caxis)
+				tick = max(tick, _SFN._fin_mapping_font_size(_SFN._cmn_mapping_get(fig.layout.fields[:ternary], axis), :tickfont, 0.0))
+			end
+			title = _SFN._fin_mapping_font_size(_SFN._cmn_mapping_get(_SFN._cmn_mapping_get(fig.layout.fields[:ternary], :baxis), :title), :font, font)
+			corner = ceil(_SFN._FIN_LINE_EM * title + 4)
+			@test m[:b] >= ceil(1.2 * tick + 8) + corner
+			@test m[:t] >= ceil(1.2 * tick + 8) + corner
+			@test m[:r] >= ceil(_SFN._text_extent("Component C", title)[1] / 2 + 4)
+			@test _SFN._finalize_figure!(fig) === false
+			# An empty title draws nothing and takes no room (margins here
+			# only grow: start from 1 px).
+			bare = plot_ternary([0.2, 0.3], [0.3, 0.3], [0.5, 0.4])
+			relayout!(bare; ternary_aaxis_title_text = "", ternary_baxis_title_text = "", ternary_caxis_title_text = "",
+				margin_b = 1, margin_t = 1)
+			_SFN._finalize_figure!(bare)
+			@test bare.layout.fields[:margin][:b] == ceil(1.2 * tick + 8)
+			@test _SFN._finalize_figure!(bare) === false
+			# Parcoords: dimension titles above, range labels below, the first
+			# axis' tick labels left of it.
+			pc = plot_parcoords(["mass (kg)" => [1.2, 3.4, 2.2], "speed" => [10.0, 30.0, 20.0]])
+			mp = pc.layout.fields[:margin]
+			@test mp[:t] >= _SFN._FIN_PARCOORDS_TITLE_OFFSET + 4
+			@test mp[:b] >= _SFN._FIN_PARCOORDS_EXTENT_OFFSET + 4
+			@test mp[:l] >= ceil(_SFN._text_extent("mass (kg)", _SFN._fin_font_size(pc.layout))[1] / 2)
+			@test _SFN._finalize_figure!(pc) === false
+			# Angular gauge: room for the end labels, alike on both sides.
+			g = plot_indicator(72; reference = 65, gauge_range = (0, 100), number_suffix = "%", title = "Availability")
+			mg = g.layout.fields[:margin]
+			@test mg[:l] == mg[:r] >= 12 + _SFN._text_extent("100", _SFN._fin_font_size(g.layout))[1]
+			@test _SFN._finalize_figure!(g) === false
+		end
+	end
+end
+
+@testset "a free height fits an equal-aspect field to its journal column (vm-08)" begin
+	r = range(1, 2; length = 13); th = range(0, pi; length = 41)
+	X = [ri * cos(t) for ri in r, t in th]; Y = [ri * sin(t) for ri in r, t in th]
+	C = [sin(3t) / ri for ri in r[1:end-1], t in th[1:end-1]]
+	for st in (:ieee, :nature)
+		fig = with_style(st) do
+			plot_pcolormesh(X, Y, C; colorscale = "RdBu_r", cmid = 0, colorbar_title = "f", equalar = true, xlabel = "x", ylabel = "y")
+		end
+		W = fig.layout.fields[:width]; H = fig.layout.fields[:height]
+		# The journal width is kept exactly; the height follows the field.
+		@test W == journal_width(st; columns = 1, units = :px)
+		@test _SFN._finalize_figure!(fig) === false
+		info = _sfn_render(fig; width = round(Int, W), height = round(Int, H), bars = 1)
+		info === nothing && break
+		box = _sfn_box(info, :xaxis, :yaxis)
+		w = box[2] - box[1]; h = box[4] - box[3]
+		@test abs(w - 2h) <= 1.5
+		# The box takes the width labels and bar leave (the old fit left a
+		# 96 px box on a 336 px page), and the page holds it with its labels.
+		@test w >= 0.55 * W
+		bar = only(info["colorbars"])
+		@test bar["labels_right"] <= W
+		@test bar["y1"] - bar["y0"] <= h + 2
+	end
+end
+
+@testset "a bar's room holds its title and every stacked bar (cbar-03, cbar-04)" begin
+	# cbar-03: a top title wider than the bar and its labels.
+	Z = [sin(0.5i) * cos(0.4j) for i in 1:20, j in 1:15]
+	sf = subplots(1, 2; sync = false, width = 700, height = 300)
+	plot_heatmap!(sf, Z; row = 1, col = 1, colorbar_title = "intensity (a.u.)")
+	plot_scatter!(sf, 1:5, [1000.0, 2500, 3000, 2800, 3100]; row = 1, col = 2, ylabel = "counts", yrange = (0, 4000))
+	plan = _SFN._room_plan(sf)
+	bar = _sfn_bar(sf.plot.data[1])
+	font = _SFN._fin_font_size(sf.plot.layout)
+	title_right = bar[:x] * plan.Wp + _SFN._text_extent("intensity (a.u.)", font)[1]
+	x2 = _SFN._layout_axis_domain(sf.plot.layout, :xaxis2)
+	@test title_right <= x2[1] * plan.Wp - _SFN._room_label_px(plan.areas[:xaxis2].own[:left])
+	@test _SFN._finalize_figure!(sf) === false
+	# cbar-04: three bars of one cell stay out of the next one.
+	Zc = [sin(0.5i) * cos(0.4j) for i in 1:12, j in 1:10]
+	for st in (:aps, :ieee)
+		with_style(st) do
+			sf = subplots(1, 2; sync = false)
+			plot_heatmap!(sf, Zc; row = 1, col = 1, colorbar_title = "u")
+			plot_contour!(sf, Zc .^ 2; row = 1, col = 1, colorbar_title = "v")
+			plot_contour!(sf, Zc .* 3; row = 1, col = 1, colorbar_title = "w")
+			plot_scatter!(sf, 1:5, [1.0, 3, 2, 5, 4]; row = 1, col = 2)
+			@test _SFN._finalize_figure!(sf) === false
+			W = round(Int, sf.plot.layout.fields[:width]); H = round(Int, sf.plot.layout.fields[:height])
+			info = _sfn_render(sf; width = W, height = H, bars = 3)
+			info === nothing && return
+			box2 = _sfn_box(info, :xaxis2, :yaxis2)
+			@test length(info["colorbars"]) == 3
+			# The last bar's tick labels end before cell 2's y tick labels.
+			plan = _SFN._room_plan(sf)
+			@test maximum(b["labels_right"] for b in info["colorbars"]) <=
+				box2[1] - _SFN._room_label_px(plan.areas[:xaxis2].own[:left]) + 1
 		end
 	end
 end

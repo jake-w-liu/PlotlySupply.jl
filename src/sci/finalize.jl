@@ -1087,18 +1087,24 @@ _fin_domain(layout::Layout, key::Symbol) =
 
 # Estimated px margins of a figure W x H: the layout margins grown by the
 # automargin pushes of the tick labels and titles of the axes on the left and
-# bottom edges of the paper, and by colorbars reaching past its right edge
-# (`bars`: (x, xanchor, width_px) in paper fractions/px). `domains` overrides
-# axis domains (fitted values not written yet).
+# bottom, and by colorbars reaching past its right edge (`bars`: (x,
+# xanchor, width_px) in paper fractions/px). `domains` overrides axis
+# domains (fitted values not written yet). An axis drawn at paper fraction
+# `f` from the edge pushes only what its labels reach past the paper, as
+# plotly.js 2.35.2 solves it (plots.js `doAutoMargin`: `f * (L - other - m)
+# + m >= px`): a centred equal-aspect box under a 4 px journal margin whose
+# x labels do not fit below it grows the margin (vm-08).
 function _fin_margins(layout::Layout, accs, W::Float64, H::Float64, domains, bars)
 	base = _fin_margins_base(layout)
 	font = _fin_font_size(layout)
 	fields = layout.fields
-	push_l = 0.0
-	push_b = 0.0
+	pushes_l = Tuple{Float64, Float64}[]
+	pushes_b = Tuple{Float64, Float64}[]
 	Hp = max(H - base.t - base.b, 1.0)
 	Wp = max(W - base.l - base.r, 1.0)
 	domain_of(key) = haskey(domains, key) ? domains[key] : _fin_domain(layout, key)
+	# Axes far from the edge (an upper grid row) cannot reach past it.
+	push_into(list, f, push) = (f < 0.5 && push > 0 && push!(list, (Float64(f), Float64(push))); nothing)
 	for (key, axis) in fields
 		_fin_is_axis_key(key) || continue
 		_cmn_mapping_get(axis, :visible) === false && continue
@@ -1115,21 +1121,33 @@ function _fin_margins(layout::Layout, accs, W::Float64, H::Float64, domains, bar
 		dom = domain_of(key)
 		if letter == 'y'
 			something(_fin_string(_cmn_mapping_get(axis, :side)), "left") == "left" || continue
-			domain_of(anchor)[1] <= 0.005 || continue
 			chars = _fin_tick_chars(axis, lo, hi, (dom[2] - dom[1]) * Hp, islog, true)
 			push = chars * 0.6 * tickfont + _fin_tick_len(axis) + 2 + _fin_title_push(axis, font)
-			push_l = max(push_l, push)
+			push_into(pushes_l, domain_of(anchor)[1], push)
 		else
 			something(_fin_string(_cmn_mapping_get(axis, :side)), "bottom") == "bottom" || continue
-			domain_of(anchor)[1] <= 0.005 || continue
 			showlabels = _cmn_mapping_get(axis, :showticklabels) !== false
 			push = (showlabels ? 1.4 * tickfont + 1 : 0.0) + _fin_tick_len(axis) + _fin_title_push(axis, font)
-			push_b = max(push_b, push)
+			push_into(pushes_b, domain_of(anchor)[1], push)
 		end
 	end
 	grow(m, push) = push <= 0 ? m : (m > 0 ? max(m, push + _FIN_AUTOMARGIN_EXTRA) : max(m, push))
-	l = grow(base.l, push_l)
-	b = grow(base.b, push_b)
+	# `f` (paper fraction of the axis line from the edge), `L` the figure
+	# extent, `other` the opposite margin.
+	function reach(m, pushes, L, other)
+		out = m
+		for (f, push) in pushes
+			if f <= 0.005
+				out = max(out, grow(m, push))
+			else
+				need = push + (m > 0 ? _FIN_AUTOMARGIN_EXTRA : 0.0)
+				f * (L - other - m) + m >= need || (out = max(out, (need - f * (L - other)) / (1 - f)))
+			end
+		end
+		return out
+	end
+	l = reach(base.l, pushes_l, W, base.r)
+	b = reach(base.b, pushes_b, H, base.t)
 	t = base.t
 	r = base.r
 	for _ in 1:4
@@ -1205,12 +1223,28 @@ function _fin_bar_width(layout::Layout, item::_FinBar, Hp::Float64; len_px = not
 	text = title isa AbstractString ? title : _cmn_mapping_get(title, :text)
 	if side == "right" && text isa AbstractString && !isempty(text)
 		width += 1.4 * _fin_mapping_font_size(title, :font, font) + 4
+	elseif text isa AbstractString && !isempty(text)
+		# A title above or below the bar (plotly's default side is the top)
+		# starts at the bar's left edge and may be wider than bar and labels
+		# (cbar-03: it ran over the next cell's tick labels).
+		width = max(width, xpad + _text_extent(text, _fin_mapping_font_size(title, :font, font))[1] + 2)
 	else
-		# A math title drawn beside the bar as an annotation.
 		key = item.coloraxis !== nothing ? item.coloraxis : item.own === nothing ? nothing : item.own.key
-		annotation = key === nothing ? nothing : _fin_right_title_annotation(layout, key)
-		annotation === nothing ||
-			(width += _FIN_MATH_TITLE_EM * _fin_mapping_font_size(annotation, :font, font) + 4)
+		if key !== nothing
+			# A math title drawn beside the bar as an annotation.
+			annotation = _fin_right_title_annotation(layout, key)
+			annotation === nothing ||
+				(width += _FIN_MATH_TITLE_EM * _fin_mapping_font_size(annotation, :font, font) + 4)
+			# One drawn above or below it, from the bar's left edge.
+			for end_side in (":top", ":bottom")
+				above = _fin_right_title_annotation(layout, key; side = end_side)
+				above === nothing && continue
+				math = _cmn_mapping_get(above, :text)
+				math isa AbstractString || continue
+				size = _fin_mapping_font_size(above, :font, font)
+				width = max(width, xpad + _fin_text_chars(math) * 0.6 * size + 2)
+			end
+		end
 	end
 	return width
 end
@@ -1226,10 +1260,10 @@ const _FIN_MATH_TITLE_EM = 1.6
 
 # The right-side math title annotation of the bar keyed `key` (coloraxis id
 # or plot-area key, see `_cbar_title_owner`), or `nothing`.
-function _fin_right_title_annotation(layout::Layout, key::AbstractString)
+function _fin_right_title_annotation(layout::Layout, key::AbstractString; side::AbstractString = ":right")
 	annotations = get(layout.fields, :annotations, nothing)
 	annotations isa AbstractVector || return nothing
-	name = _cbar_title_owner(key) * ":right"
+	name = _cbar_title_owner(key) * side
 	for item in annotations
 		_cmn_item_name(item) == name && return item
 	end
@@ -1634,7 +1668,11 @@ end
 # (`plan.memo[:band_slack]`), unless built with `compress = false`. Only a
 # free direction changes. The bounds are for the 700 x 500 default; a smaller
 # (journal) size scales them.
-function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, wfree::Bool, hfree::Bool)
+# Refits `_fin_free_size` makes at a single figure's new size (vm-08); one
+# or two suffice (the second only corrects rounding).
+const _FIN_FREE_SIZE_STEPS = 3
+
+function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, wfree::Bool, hfree::Bool, accs, bars)
 	layout = ctx.p.layout
 	lowH = min(H0, _FIN_MIN_FIGURE_HEIGHT * min(1.0, H0 / _DEFAULT_EXPORT_HEIGHT_PX))
 	lowW = min(W0, _FIN_MIN_FIGURE_WIDTH * min(1.0, W0 / _DEFAULT_EXPORT_WIDTH_PX))
@@ -1646,6 +1684,30 @@ function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, 
 			hfree && (newH = clamp(round(H0 - fit.slack_px), lowH, H0))
 		elseif fit.free_px > 1
 			wfree && (newW = clamp(round(W0 - fit.free_px), lowW, W0))
+		end
+		# vm-08: the margins at the new size are not those at the base: tick
+		# labels and titles push a margin only where the box reaches the paper
+		# edge, as it does once the blank is dropped (a 4 px journal margin
+		# grew by the x labels: an :ieee 2:1 field got a 101 px page and a
+		# 96 px box). The box is refitted at the new size, and the size
+		# corrected by what it still leaves blank or lacks, until it holds.
+		for _ in 1:_FIN_FREE_SIZE_STEPS
+			(newW == W0 && newH == H0) && break
+			_, again = _fin_plan_and_fit(ctx, accs, bars, newW, newH)
+			g = get(again, (:xaxis, :yaxis), nothing)
+			g === nothing && break
+			stepW = stepH = 0.0
+			if newH != H0
+				# Height chosen: drop what is left above and below, or add
+				# what the box needs to fill its width.
+				stepH = g.slack_px > 1 ? -g.slack_px : g.free_px > 1 ? g.free_px / (1.025 * g.ratio) : 0.0
+			else
+				stepW = g.free_px > 1 ? -g.free_px : g.slack_px > 1 ? 1.025 * g.slack_px * g.ratio : 0.0
+			end
+			(abs(stepW) < 1 && abs(stepH) < 1) && break
+			# Only the chosen side moves (a journal column stays exact).
+			stepH == 0 || (newH = clamp(round(newH + stepH), lowH, H0))
+			stepW == 0 || (newW = clamp(round(newW + stepW), lowW, W0))
 		end
 	else
 		_fin_compress_grid(layout) || return (W0, H0)
@@ -1715,11 +1777,18 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 	isempty(cells) && return results
 	domains = Dict{Symbol, NTuple{2, Float64}}()
 	placed = Dict{Tuple{Symbol, Symbol}, Any}()
+	# Fitted domains a former run wrote outside their grid cells (`_fin_fit!`).
+	fit_record = _room_record(layout)
 	# Nothing is written during the fit, so the plot areas of a positions
 	# layout hold for all cells and both passes.
 	area_cache = IdDict{Any, Any}()
-	# Two passes: the margins depend on where the fitted cells and bars end up.
-	for pass in 1:2
+	# The margins depend on where the fitted cells and bars end up, and an
+	# axis near the paper edge pushes by how far it is from it
+	# (`_fin_margins`): passes until no domain moves by `_FIN_FIT_SETTLE_PX`,
+	# so the fit does not depend on the domains it starts from (vm-08: a
+	# free height chosen from a half-converged fit moved 1 px per finalize).
+	previous = Dict{Symbol, NTuple{2, Float64}}()
+	for pass in 1:_FIN_FIT_PASSES
 		bar_boxes = Any[]
 		moved = Set{Int}(item.index for (_, fit) in placed for item in fit.hug)
 		for (key, items) in bars_by_area
@@ -1758,14 +1827,20 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 			(isfinite(ratio) && ratio > 0) || continue
 			ref = _fin_reference(ctx, layout, xkey, ykey, grid_layout)
 			ref === nothing && continue
-			(_fin_within(_fin_domain(layout, xkey), ref[1]) && _fin_within(_fin_domain(layout, ykey), ref[2])) ||
-				continue
+			slot = get(slots, xkey, nothing)
+			# A domain inside its grid cell, or inside the slot the band solve
+			# gave the cell (D17 moves a cell past its grid rectangle), is
+			# ours to fit; any other is the user's.
+			dx, dy = _fin_domain(layout, xkey), _fin_domain(layout, ykey)
+			rec = get(fit_record, String(xkey), nothing)
+			((_fin_within(dx, ref[1]) && _fin_within(dy, ref[2])) ||
+				(slot !== nothing && _fin_within(dx, slot[1]) && _fin_within(dy, slot[2])) ||
+				(rec !== nothing && all(isapprox.(rec, [dx[1], dx[2], dy[1], dy[2]]; atol = 1e-9)))) || continue
 			# The trace bars of this cell (by area key = x ref) that are ours to move.
 			hug = _fin_hug_items(ctx, layout, bars_by_area, xkey, ykey)
 			pad_px = _FIN_CBAR_PAD * Wp
 			widths = [_fin_bar_width(layout, item, Hp) for item in hug]
 			bars_px = isempty(hug) ? 0.0 : pad_px + sum(widths) + _FIN_CBAR_GAP * (length(hug) - 1)
-			slot = get(slots, xkey, nothing)
 			# A grid cell's bars sit in the room the solve took for them beyond
 			# its slot (D17), except at the paper edge, where they take what
 			# the margin cannot hold.
@@ -1802,29 +1877,52 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 			y0 = fref[2][1] * Hp + (rh - h) / 2
 			xd = (x0 / Wp, (x0 + w + bias) / Wp)
 			yd = (y0 / Hp, (y0 + h) / Hp)
+			# The domains drawn now when they are within `_FIN_SNAP_PX` of the
+			# fit (the fit and the room solve read each other and approach
+			# their fixed point geometrically; block_diagram moved 0.008 px
+			# after the cap of rounds).
+			cx = _fin_range_pair(_layout_axis_domain(layout, xkey))
+			cy = _fin_range_pair(_layout_axis_domain(layout, ykey))
+			if cx !== nothing && cy !== nothing && _fin_snap_close(xd, cx, Wp) && _fin_snap_close(yd, cy, Hp)
+				x0 += (cx[1] - xd[1]) * Wp
+				xd, yd = (Float64(cx[1]), Float64(cx[2])), (Float64(cy[1]), Float64(cy[2]))
+			end
 			domains[xkey] = xd
 			domains[ykey] = yd
 			boxes = Tuple{Float64, Float64}[]
 			placements = Dict{Symbol, Any}[]
 			x = xd[2] + _FIN_CBAR_PAD
 			for (item, width) in zip(hug, widths)
+				floor = _room_min_bar_len(_fin_font_size(layout), item.bar, Hp)
+				# Never longer than the fitted box, also when the box is as
+				# tall as its cell (cbar-05: a user `len` of 0.5 on a cell of
+				# 0.27 ran off the page and over the next row).
+				len = min(_room_bar_len(item.bar, _room_span(_fin_domain(layout, ykey)), yd[2] - yd[1];
+					floor = floor, cell = _room_span(ref[2])), max(yd[2] - yd[1], floor))
 				push!(placements, Dict{Symbol, Any}(
 					:x => x, :xanchor => "left", :xref => "paper",
 					:y => (yd[1] + yd[2]) / 2, :yanchor => "middle",
-					:len => _room_bar_len(item.bar, _room_span(_fin_domain(layout, ykey)), yd[2] - yd[1];
-						floor = _room_min_bar_len(_fin_font_size(layout), item.bar, Hp), cell = _room_span(ref[2])),
-					:lenmode => "fraction", :ypad => 0,
+					:len => len, :lenmode => "fraction", :ypad => 0,
 				))
 				push!(boxes, (x, width))
 				x += (width + _FIN_CBAR_GAP) / Wp
 			end
-			placed[(xkey, ykey)] = (xdomain = xd, ydomain = yd, box = ((x0 + bias) / Wp, xd[2]), hug = hug,
-				placements = placements, bar_boxes = boxes, free_px = free, slack_px = rh - h)
+			placed[(xkey, ykey)] = (xdomain = xd, ydomain = yd, ref = ref, box = ((x0 + bias) / Wp, xd[2]), hug = hug,
+				placements = placements, bar_boxes = boxes, free_px = free, slack_px = rh - h, ratio = ratio)
 		end
-		pass == 2 && (results = placed)
+		results = placed
+		pass >= 2 && !isempty(previous) && keys(previous) == keys(domains) &&
+			all(k -> all(abs.(domains[k] .- previous[k]) .* (String(k)[1] == 'x' ? Wp : Hp) .<= _FIN_FIT_SETTLE_PX), keys(domains)) &&
+			break
+		previous = copy(domains)
 	end
 	return results
 end
+
+# Fit passes at most, and the px below which a domain counts as unchanged
+# between passes (`_fin_fit_cells`); two or three passes in practice.
+const _FIN_FIT_PASSES = 6
+const _FIN_FIT_SETTLE_PX = 1e-3
 
 # ---------------------------------------------------------------------------
 # Driver
@@ -1861,7 +1959,7 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 		W0, H0, wfree, hfree = choice
 		at_base = W0 == W && H0 == H
 		at_base || ((plan, fits) = _fin_plan_and_fit(ctx, accs, bars, W0, H0))
-		newW, newH = _fin_free_size(ctx, plan, fits, W0, H0, wfree, hfree)
+		newW, newH = _fin_free_size(ctx, plan, fits, W0, H0, wfree, hfree, accs, bars)
 		recorded = _fin_meta_get(layout, _FIN_SIZE_KEY) isa AbstractVector
 		if newW != W || newH != H
 			size_updates = Dict{Symbol, Any}(:width => _style_number(newW), :height => _style_number(newH))
@@ -1880,12 +1978,21 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 		end
 	end
 	layout_updates = plan.updates
-	# M3b: fitted domains and hugging bars.
+	# M3b: fitted domains and hugging bars. A fitted domain outside its grid
+	# cell (D17 bands, L11 compression) is recorded with the room record, so
+	# the next run still knows it for ours (`_fin_fit_cells`).
+	record = _room_record(layout)
+	fit_record = copy(record)
 	for ((xkey, ykey), fit) in fits
 		all(item -> _fin_item_writable(ctx, item), fit.hug) || continue
 		for (key, dom) in ((xkey, fit.xdomain), (ykey, fit.ydomain))
 			current = _layout_axis_domain(layout, key)
 			_fin_layout_value_changed(current, dom) && (layout_updates[Symbol(key, :_domain)] = [dom[1], dom[2]])
+		end
+		if _fin_within(fit.xdomain, fit.ref[1]) && _fin_within(fit.ydomain, fit.ref[2])
+			delete!(fit_record, String(xkey))
+		else
+			fit_record[String(xkey)] = Float64[fit.xdomain[1], fit.xdomain[2], fit.ydomain[1], fit.ydomain[2]]
 		end
 		_fin_layout_value_changed(_cmn_mapping_get(get(layout.fields, xkey, nothing), :constraintoward), "right") &&
 			(layout_updates[Symbol(xkey, :_constraintoward)] = "right")
@@ -1895,6 +2002,17 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 		end
 		area = get(plan.areas, xkey, nothing)
 		area === nothing || (area.final = (fit.box, fit.ydomain))
+	end
+	# Entries of cells no longer fitted go (a cell the user resized, a fit
+	# given up); those of the room solve's areas are its own.
+	for name in collect(keys(fit_record))
+		key = Symbol(name)
+		haskey(plan.areas, key) && !plan.areas[key].aspect && continue
+		any(k -> k[1] === key, keys(fits)) || delete!(fit_record, name)
+	end
+	if fit_record != record
+		value = isempty(fit_record) ? nothing : Dict{Any, Any}(Symbol(k) => v for (k, v) in fit_record)
+		wrote |= _fin_meta_set!(layout, _ROOM_RECORD_KEY, value)
 	end
 	# D12: plot areas give up the room their decorations need; every owner
 	# places its decorations in it.
@@ -1940,10 +2058,12 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 	needed = _fin_title_margin(layout, annotations === nothing ? get(layout.fields, :annotations, nothing) : annotations,
 		W, plan.margins)
 	if needed !== nothing
+		_room_note_margin!(plan, :r, needed)
 		current = _cmn_mapping_get(get(layout.fields, :margin, nothing), :r)
 		(_fin_isfinite_real(current) && current >= needed) || (layout_updates[:margin_r] = needed)
 	end
 	_room_margin_updates!(plan)
+	wrote |= _room_settle_margins!(plan)
 	if annotations !== nothing
 		_fin_same_annotations(get(layout.fields, :annotations, nothing), annotations) ||
 			(layout_updates[:annotations] = annotations)
@@ -2346,6 +2466,15 @@ end
 # (the room providers place a figure annotation for the margins they queue,
 # `_figure_annotations_place!` for the margins written: 0.08 px apart) and
 # other numbers within 1e-6 (rounding of the same placement).
+# Paper positions closer than this draw alike: 0.02 px on a 1000 px figure
+# (`_FIN_SNAP_PX`; the room engine and the annotation placement round a
+# position the fit approaches geometrically differently in the 6th digit).
+const _FIN_SNAP_PAPER = 2e-5
+
+# Whether coordinate `key` (:x or :y) of both annotations is paper-referenced.
+_fin_paper_ref(x::AbstractDict, y::AbstractDict, key::Symbol) =
+	(ref = key === :x ? :xref : :yref; get(x, ref, nothing) == "paper" && get(y, ref, nothing) == "paper")
+
 function _fin_same_annotations(a, b)
 	(a isa AbstractVector && b isa AbstractVector && length(a) == length(b)) || return false
 	for i in eachindex(a, b)
@@ -2358,7 +2487,9 @@ function _fin_same_annotations(a, b)
 				v === nothing && (v = 0)
 			end
 			if u isa Real && v isa Real && !(u isa Bool) && !(v isa Bool)
-				isapprox(Float64(u), Float64(v); atol = key in (:xshift, :yshift) ? 0.5 : 1e-6) || return false
+				atol = key in (:xshift, :yshift) ? 0.5 :
+					key in (:x, :y) && _fin_paper_ref(x, y, key) ? _FIN_SNAP_PAPER : 1e-6
+				isapprox(Float64(u), Float64(v); atol = atol) || return false
 			else
 				isequal(u, v) || return false
 			end
@@ -2703,7 +2834,11 @@ Queue a layout write (`relayout!` key such as `:legend2_y`) for the one
 relayout of this pass; a value equal to the current one is dropped.
 """
 function _room_relayout!(plan, key::Symbol, value)
-	_fin_layout_value_changed(_room_current(plan.layout, key), value) || return nothing
+	current = _room_current(plan.layout, key)
+	# A legend moved by less than `_FIN_SNAP_PAPER` stays.
+	occursin(r"^legend\d*_[xy]$", String(key)) && _fin_isfinite_real(current) && _fin_isfinite_real(value) &&
+		abs(Float64(current) - Float64(value)) <= _FIN_SNAP_PAPER && return nothing
+	_fin_layout_value_changed(current, value) || return nothing
 	plan.updates[key] = value
 	return nothing
 end
@@ -3316,10 +3451,24 @@ function _room_solve!(plan::_RoomPlan)
 		end
 		# A domain the user set never inverts.
 		(edges[:left] < edges[:right] && edges[:bottom] < edges[:top]) || continue
-		a.final = ((edges[:left], edges[:right]), (edges[:bottom], edges[:top]))
+		final = ((edges[:left], edges[:right]), (edges[:bottom], edges[:top]))
+		# Within `_FIN_SNAP_PX` of what is drawn: kept (see `_fin_snap_close`).
+		(_fin_snap_close(final[1], a.current[1], plan.Wp) && _fin_snap_close(final[2], a.current[2], plan.Hp)) &&
+			(final = a.current)
+		a.final = final
 	end
 	return plan
 end
+
+# Px below which a domain the fit or the room solve computes is taken as the
+# one drawn: far below what a renderer resolves, and above the residue the
+# coupled fit and solve leave after `_FIN_FIT_ROUNDS` passes.
+const _FIN_SNAP_PX = 0.02
+
+# Whether paper spans `a` and `b` differ by at most `_FIN_SNAP_PX` px at
+# either end over a plot region of `px` px.
+_fin_snap_close(a, b, px::Float64) =
+	abs(a[1] - b[1]) * px <= _FIN_SNAP_PX && abs(a[2] - b[2]) * px <= _FIN_SNAP_PX
 
 # D17: the column (`axis = 1`) or row (`axis = 2`) bands of the subplot grid:
 # the distinct low and high edges of the grid rectangles (paper, rounded to
@@ -3621,6 +3770,7 @@ function _room_margin_updates!(plan::_RoomPlan)
 	for (side, px) in need
 		letter = Symbol(String(side)[1])
 		key = Symbol(:margin_, letter)
+		_room_note_margin!(plan, letter, px)
 		current = _cmn_mapping_get(get(plan.layout.fields, :margin, nothing), letter)
 		have = _fin_isfinite_real(current) ? Float64(current) : getfield(base, letter)
 		queued = get(plan.updates, key, nothing)
@@ -3628,6 +3778,70 @@ function _room_margin_updates!(plan::_RoomPlan)
 		px > have + 0.5 && (plan.updates[key] = ceil(px))
 	end
 	return plan
+end
+
+# Margins the room engine raised are given back when what needed them goes
+# (cbar-01: a grid cell's bar moved from the right to the bottom; margin-01:
+# an outside legend moved inside), as a `Plot`'s automargin gives them back.
+# `layout.meta` records them (`_ROOM_MARGIN_KEY`: side letter => [base,
+# value]: the pass raised `margin.<letter>` from `base`, the user's or the
+# style's, to `value`). While the margin still holds `value`, a pass that
+# needs less lowers it, never below `base`; a margin someone else changed
+# is theirs, and its entry goes.
+const _ROOM_MARGIN_KEY = Symbol("plotlysupply:margin")
+
+function _room_margin_record(layout::Layout)
+	raw = _fin_meta_get(layout, _ROOM_MARGIN_KEY)
+	out = Dict{Symbol, NTuple{2, Float64}}()
+	raw isa AbstractDict || return out
+	for (k, v) in raw
+		letter = Symbol(k)
+		letter in (:l, :r, :t, :b) || continue
+		(v isa AbstractVector && length(v) == 2 && all(_fin_isfinite_real, v)) || continue
+		out[letter] = (Float64(v[1]), Float64(v[2]))
+	end
+	return out
+end
+
+# Note the px a decoration of this pass needs on a margin side (whether or
+# not the margin already holds it): `_room_settle_margins!` keeps that much.
+function _room_note_margin!(plan, letter::Symbol, px::Real)
+	need = get!(() -> Dict{Symbol, Float64}(), plan.memo, :margin_need)
+	need[letter] = max(get(need, letter, 0.0), Float64(px))
+	return nothing
+end
+
+# After every owner raised what it needs: record the raises queued in
+# `plan.updates`, and lower the recorded margins nothing needs any more.
+# Returns whether the record changed.
+function _room_settle_margins!(plan::_RoomPlan)
+	layout = plan.layout
+	record = _room_margin_record(layout)
+	need = get(plan.memo, :margin_need, Dict{Symbol, Float64}())
+	margin = get(layout.fields, :margin, nothing)
+	new = Dict{Symbol, NTuple{2, Float64}}()
+	for letter in (:l, :r, :t, :b)
+		key = Symbol(:margin_, letter)
+		current = _cmn_mapping_get(margin, letter)
+		have = _fin_isfinite_real(current) ? Float64(current) : getfield(_fin_margins_base(layout), letter)
+		rec = get(record, letter, nothing)
+		owned = rec !== nothing && abs(have - rec[2]) <= 0.5
+		queued = get(plan.updates, key, nothing)
+		if _fin_isfinite_real(queued) && Float64(queued) > have + 0.5
+			new[letter] = (owned ? rec[1] : have, Float64(queued))
+		elseif owned
+			want = max(rec[1], ceil(get(need, letter, 0.0)))
+			if want < have - 0.5
+				plan.updates[key] = _style_number(want)
+				want > rec[1] + 0.5 && (new[letter] = (rec[1], want))
+			else
+				new[letter] = rec
+			end
+		end
+	end
+	new == record && return false
+	value = isempty(new) ? nothing : Dict{Any, Any}(letter => Float64[v[1], v[2]] for (letter, v) in new)
+	return _fin_meta_set!(layout, _ROOM_MARGIN_KEY, value)
 end
 
 # ---------------------------------------------------------------------------
@@ -3856,6 +4070,7 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 				reserve && (px += _FIN_AUTOMARGIN_EXTRA)
 				_request_room!(plan, area_key, side, px; owner = :colorbar, key = key, order = 10,
 					anchored = anchored, margin_pushed = !reserve)
+				side === :right && _room_request_vbar_title!(plan, item, (area_key,), key)
 			end
 		end
 	end
@@ -3878,6 +4093,36 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 			_request_room!(plan, k, entry.side, entry.px + (reserve ? _FIN_AUTOMARGIN_EXTRA : 0.0); owner = :colorbar,
 				key = key, order = 10, anchored = entry.anchored, margin_pushed = !reserve)
 		end
+		if entry.side === :right
+			top = maximum(plan.areas[k].current[2][2] for k in entry.areas)
+			_room_request_vbar_title!(plan, item,
+				[k for k in entry.areas if abs(plan.areas[k].current[2][2] - top) <= 1e-9], key)
+		end
+	end
+	return nothing
+end
+
+# Px a vertical bar's math title drawn above it (`_cbar_title_annotation`,
+# side :top) reaches above the bar's top end: the gap clearing the end tick
+# label plus the MathJax height. 0 without such a title.
+function _fin_vbar_title_above(plan, item::_FinBar)
+	found = _fin_bar_title_annotation(plan.p, item)
+	(found === nothing || found.side !== :top) && return 0.0
+	tick = _fin_mapping_font_size(item.bar, :tickfont, plan.font)
+	clear = 2 + max(0.0, 0.5 * _CBAR_LINE_EM * tick - _cbar_real(item.bar, :ypad, 10.0))
+	return clear + _FIN_MATH_TITLE_H * plan.font
+end
+
+# Room above the top areas `areas` of a vertical bar for its math title
+# (threed-f02, vm-02: nothing was reserved and the title was cut by the page
+# top under the journal styles, or drawn over the figure title). The bar runs
+# along the areas, so its top end is at their top edge; stacked outermost
+# (the title sits right of the plot box, beside a cell title, not above it).
+function _room_request_vbar_title!(plan::_RoomPlan, item::_FinBar, areas, key::AbstractString)
+	px = _fin_vbar_title_above(plan, item)
+	px > 0 || return nothing
+	for k in areas
+		_request_room!(plan, k, :top, px; owner = :colorbar, key = key * ":title", order = 90)
 	end
 	return nothing
 end
@@ -4352,6 +4597,7 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
 	accs = _fin_collect_axes(p)
 	_fin_sticky_updates!(updates, p, accs)
 	_fin_domain_margin_updates!(updates, p, _fin_figure_size(ctx, p.layout)[2])
+	_fin_trace_margin_updates!(updates, p, _fin_figure_size(ctx, p.layout)[2])
 	# Log-axis tick labels and long axis titles at this figure size
 	# (W7/Z70/W5, src/sci/axes.jl).
 	_axes_finalize_updates!(updates, p, _fin_figure_size(ctx, p.layout), accs)
@@ -4407,12 +4653,102 @@ function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height
 	end
 	label_room = ceil(1.2 * tick + 8)
 	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
+	# Ternary corner titles sit beyond the tick labels (style-07, vm-19): the
+	# a title above the top corner, the b and c titles below the bottom-left
+	# and bottom-right corners, centred on them. Without a title text
+	# plotly.js 2.35.2 draws "Component A/B/C" (ternary/layout_defaults.js).
+	corner = Dict(:l => 0.0, :r => 0.0, :b => 0.0, :t => 0.0)
+	for (key, axis) in fields
+		occursin(r"^ternary\d*$", String(key)) || continue
+		for (name, below, beside) in ((:aaxis, :t, nothing), (:baxis, :b, :l), (:caxis, :b, :r))
+			title = _cmn_mapping_get(_cmn_mapping_get(axis, name), :title)
+			text = title isa AbstractString ? title : _cmn_mapping_get(title, :text)
+			text === nothing && (text = "Component " * uppercase(String(name)[1:1]))
+			(text isa AbstractString && !isempty(text)) || continue
+			size = _fin_mapping_font_size(title, :font, root)
+			corner[below] = max(corner[below], ceil(_FIN_LINE_EM * size + 4))
+			beside === nothing || (corner[beside] = max(corner[beside], ceil(_text_extent(text, size)[1] / 2 + 4)))
+		end
+	end
 	cap = _TIGHT_MAX_MARGIN_FRACTION * height
-	for (side, room) in ((:l, label_room), (:r, label_room), (:b, label_room),
-			(:t, label_room + (title_room > 0 ? title_room + 4 : 0)))
+	for (side, room) in ((:l, max(label_room, corner[:l])), (:r, max(label_room, corner[:r])),
+			(:b, label_room + corner[:b]),
+			(:t, label_room + corner[:t] + (title_room > 0 ? title_room + 4 : 0)))
 		have = _cmn_mapping_get(margin, side)
 		_fin_isfinite_real(have) || continue
 		want = min(room, cap)
+		want > have + 1e-9 && (updates[Symbol(:margin_, side)] = _style_number(want))
+	end
+	return updates
+end
+
+# Px plotly.js 2.35.2 draws parcoords decorations beyond the axes
+# (traces/parcoords/constants.js): the dimension titles' baseline above the
+# top end, the range labels beyond either end.
+const _FIN_PARCOORDS_TITLE_OFFSET = 28.0
+const _FIN_PARCOORDS_EXTENT_OFFSET = 10.0
+
+# vm-17, vm-18: plotly.js does not grow the margin for the decorations of a
+# parcoords trace (dimension titles above the axes and centred on the outer
+# ones, range labels beyond the axis ends, the first axis' tick labels left
+# of it) or of an angular indicator gauge (the end tick labels beyond the
+# arc), so a journal style's few-px margin drew them off the page. Every side
+# of an explicit margin smaller than they need is grown (only grown, as for
+# polar and ternary subplots above).
+function _fin_trace_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height::Float64)
+	margin = get(p.layout.fields, :margin, nothing)
+	margin === nothing && return updates
+	need = Dict(:l => 0.0, :r => 0.0, :t => 0.0, :b => 0.0)
+	root = _fin_font_size(p.layout)
+	label(v) = _format_colorbar_number(Float64(v))
+	width(text, size) = text isa AbstractString && !isempty(text) ? _text_extent(text, size)[1] : 0.0
+	for trace in p.data
+		trace isa GenericTrace || continue
+		fields = trace.fields
+		kind = string(get(fields, :type, ""))
+		if kind == "parcoords"
+			dims = get(fields, :dimensions, nothing)
+			(dims isa AbstractVector && !isempty(dims)) || continue
+			labelsize = _fin_mapping_font_size(fields, :labelfont, root)
+			ticksize = _fin_mapping_font_size(fields, :tickfont, root)
+			rangesize = _fin_mapping_font_size(fields, :rangefont, ticksize)
+			need[:t] = max(need[:t], ceil(_FIN_PARCOORDS_TITLE_OFFSET + labelsize + 4))
+			need[:b] = max(need[:b], ceil(_FIN_PARCOORDS_EXTENT_OFFSET + _FIN_LINE_EM * rangesize + 4))
+			first_title = _cmn_mapping_get(first(dims), :label)
+			last_title = _cmn_mapping_get(last(dims), :label)
+			# The first axis' tick labels: as wide as its widest end or middle value.
+			values = _cmn_mapping_get(first(dims), :values)
+			extent = _cmn_mapping_get(first(dims), :range)
+			lohi = extent isa AbstractVector && length(extent) == 2 && all(_fin_isfinite_real, extent) ?
+				(Float64(extent[1]), Float64(extent[2])) :
+				values isa AbstractVector ? _cbar_extrema(values) : nothing
+			ticks = lohi === nothing ? 0.0 :
+				maximum(width(label(v), ticksize) for v in (lohi[1], lohi[2], (lohi[1] + lohi[2]) / 2))
+			need[:l] = max(need[:l], ceil(max(width(first_title, labelsize) / 2, ticks + 6) + 4))
+			need[:r] = max(need[:r], ceil(width(last_title, labelsize) / 2 + 4))
+		elseif kind == "indicator"
+			mode = string(get(fields, :mode, ""))
+			occursin("gauge", mode) || continue
+			gauge = get(fields, :gauge, nothing)
+			string(something(_cmn_mapping_get(gauge, :shape), "angular")) == "angular" || continue
+			axis = _cmn_mapping_get(gauge, :axis)
+			extent = _cmn_mapping_get(axis, :range)
+			(extent isa AbstractVector && length(extent) == 2 && all(_fin_isfinite_real, extent)) || continue
+			ticksize = _fin_mapping_font_size(axis, :tickfont, root)
+			# Both sides alike: the gauge stays centred on the page.
+			ends = ceil(max(width(label(extent[1]), ticksize), width(label(extent[2]), ticksize)) + 12)
+			need[:l] = max(need[:l], ends)
+			need[:r] = max(need[:r], ends)
+		end
+	end
+	cap = _TIGHT_MAX_MARGIN_FRACTION * height
+	for side in (:l, :r, :t, :b)
+		need[side] > 0 || continue
+		have = _cmn_mapping_get(margin, side)
+		_fin_isfinite_real(have) || continue
+		queued = get(updates, Symbol(:margin_, side), nothing)
+		_fin_isfinite_real(queued) && (have = max(Float64(have), Float64(queued)))
+		want = min(need[side], cap)
 		want > have + 1e-9 && (updates[Symbol(:margin_, side)] = _style_number(want))
 	end
 	return updates
