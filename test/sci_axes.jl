@@ -2184,9 +2184,10 @@ return JSON.stringify(out);}finally{c.remove();}})
         end
         result = try
             out = Tuple{Symbol, String, Float64, Float64}[]
-            for st in (:ieee, :nature, :publication), scale in ("linear", "log")
-                f = with_style(() -> plot_scatter(1:10, 10.0 .^ range(-2, 4; length = 10); yscale = scale,
-                    xlabel = "x", ylabel = "y"), st)
+            # Every sized preset (and :publication), x and y, linear and log.
+            for st in (:ieee, :aps, :nature, :elsevier, :springer, :aip, :publication), scale in ("linear", "log")
+                f = with_style(() -> plot_scatter(10.0 .^ range(-1, 3; length = 10), 10.0 .^ range(-2, 4; length = 10);
+                    xscale = scale, yscale = scale, xlabel = "x", ylabel = "y"), st)
                 svg = String(savefig(f; format = "svg"))
                 raw = _AX._with_export_window(_AX._EXPORT_STATE) do ec, app, win, divid
                     Base.invokelatest(() -> ec.run(win, geom_js * "(" * _AX._json_js(svg) * ")"))
@@ -2200,6 +2201,7 @@ return JSON.stringify(out);}finally{c.remove();}})
             nothing
         end
         if result !== nothing
+            @test length(result) == 14
             for (st, scale, gx, gy) in result
                 @test 2 <= gx < Inf && 2 <= gy < Inf
             end
