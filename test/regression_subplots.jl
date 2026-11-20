@@ -1883,19 +1883,22 @@ end
 				before22 = _rsp_cell_state(sf, 2, 2)
 				err = attempt(() -> call(sf, (row=2, col=2)))
 				if err === nothing
-					if name in ("ylabel!", "update_yaxes!")
-						# D17: the room a y title takes in the gap before column 2
-						# is taken from every column alike, so cell (1, 1) keeps
-						# the width of cell (2, 2) (its legend follows its right
-						# edge); nothing else of it changes.
+					if name in ("ylabel!", "update_yaxes!", "plot_matrix!", "plot_tripcolor!")
+						# D17: the room a y title takes in the gap before column 2,
+						# and the room the colorbar of an equal-aspect cell (matrix,
+						# mesh) needs beyond the right margin, is taken from every
+						# column alike, so cell (1, 1) keeps the width of the plain
+						# cell of column 2 (its legend follows its right edge);
+						# nothing else of it changes.
 						undomain(state) = merge(state, (
 							objects = [replace(o, r"\"domain\":\[[^\]]*\],?" => "") for o in state.objects],
 							legends = [replace(o, r"\"x\":[-+0-9.eE]+,?" => "") for o in state.legends]))
 						@test undomain(_rsp_cell_state(sf, 1, 1)) == undomain(before11)
 						xkey(r, c) = PlotlySupply._cell_target(sf; row = r, col = c, who = "test").xkey
 						w11 = PlotlySupply._layout_axis_domain(sf.plot.layout, xkey(1, 1))
-						w22 = PlotlySupply._layout_axis_domain(sf.plot.layout, xkey(2, 2))
-						@test w11[2] - w11[1] ≈ w22[2] - w22[1] atol = 1e-9
+						plain = name in ("ylabel!", "update_yaxes!") ? (2, 2) : (1, 2)
+						w2 = PlotlySupply._layout_axis_domain(sf.plot.layout, xkey(plain...))
+						@test w11[2] - w11[1] ≈ w2[2] - w2[1] atol = 1e-9
 					else
 						@test _rsp_cell_state(sf, 1, 1) == before11
 					end
