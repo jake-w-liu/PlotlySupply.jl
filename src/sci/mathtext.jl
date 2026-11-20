@@ -122,8 +122,35 @@ function _mathtext_snippet(s::AbstractString)
 end
 
 function _mathtext_error(message::AbstractString, label::AbstractString)
-	throw(ArgumentError("mathtext: $(message) in label $(_mathtext_snippet(label))."))
+	throw(ArgumentError("$(_mathtext_who()): $(message) in label $(_mathtext_snippet(label))."))
 end
+
+# The package's source directory: frames of PlotlySupply's own functions.
+const _MATHTEXT_SRC_DIR = dirname(@__DIR__)
+
+# Name of the exported PlotlySupply function the user called, so a label
+# error names it (`xlabel!: unbalanced \$ …`, `plot_scatter: …`; the D6
+# error-prefix rule; tm-error-prefix): the outermost frame on the stack of an
+# exported function defined in the package's sources (a keyword method's
+# body `#plot_scatter#12` counts as `plot_scatter`). "mathtext" when there is
+# none. Only called while throwing.
+function _mathtext_who()
+	who = "mathtext"
+	for frame in stacktrace()
+		file = string(frame.file)
+		startswith(file, _MATHTEXT_SRC_DIR) || continue
+		m = match(r"^#*([^#]+)", string(frame.func))
+		m === nothing && continue
+		name = Symbol(m.captures[1])
+		(isdefined(@__MODULE__, name) && Base.isexported(@__MODULE__, name)) || continue
+		who = String(name)              # frames run innermost first: the last match is outermost
+	end
+	return who
+end
+
+# `ArgumentError` for a label that is not valid UTF-8, named as above.
+_mathtext_invalid_utf8(s::AbstractString) =
+	ArgumentError("$(_mathtext_who()): label is not valid UTF-8: $(repr(s)).")
 
 function _normalize_mathtext_size(size::AbstractString, who::AbstractString)
 	name = strip(String(size))
@@ -384,7 +411,7 @@ end
 # resolved only for labels that contain math, so plain labels never depend on
 # (or fail because of) the active style's `mathsize`.
 function _mathtext(s::String, column::Char, size::Union{Nothing,String})::String
-	isvalid(s) || throw(ArgumentError("mathtext: label is not valid UTF-8: $(repr(s))."))
+	isvalid(s) || throw(_mathtext_invalid_utf8(s))
 	chars = collect(s)
 	segments = _mathtext_segments(chars, s)
 	if all(segment -> segment[1] === :text, segments)
@@ -934,7 +961,7 @@ end
 function _label_plain(s::AbstractString)::String
 	str = String(s)
 	_MATHTEXT_SETTINGS[].enabled || return _mathtext_newlines_to_br(str)
-	isvalid(str) || throw(ArgumentError("mathtext: label is not valid UTF-8: $(repr(str))."))
+	isvalid(str) || throw(_mathtext_invalid_utf8(str))
 	segments = _mathtext_segments(collect(str), str)
 	out = IOBuffer()
 	for (kind, content) in segments
@@ -1066,27 +1093,105 @@ function _tex_plain_char(c::Char)
 	return string(c)
 end
 
+# Spacing in math mode (tm-tex-plain-spaces): TeX ignores the spaces typed
+# between atoms and spaces them by their class. Plain text keeps one typed
+# space next to an operator, relation, punctuation or named function
+# (`a + b`, `x \leq y`, `\log x`) and drops it between two ordinary atoms
+# (`\Delta T` is "ΔT", `k_0 a` is "k<sub>0</sub>a"); an explicit spacing
+# command (`\,`, `\quad`) is the space itself.
+const _TEX_PLAIN_OPERATOR_CHARS = Set("+-*=<>,;:")
+const _TEX_PLAIN_OPERATOR_NAMES = Set([
+	"pm", "mp", "times", "cdot", "div", "ast", "star", "bullet", "oplus", "otimes", "odot",
+	"setminus", "cup", "cap", "wedge", "land", "vee", "lor", "approx", "sim", "simeq", "cong",
+	"equiv", "neq", "ne", "leq", "le", "geq", "ge", "ll", "gg", "lt", "gt", "propto", "perp",
+	"parallel", "mid", "in", "notin", "ni", "subset", "subseteq", "supset", "supseteq", "to",
+	"rightarrow", "leftarrow", "gets", "leftrightarrow", "Rightarrow", "Leftarrow",
+	"Leftrightarrow", "mapsto", "uparrow", "downarrow", "colon", "not", "sum", "prod", "int",
+	"iint", "iiint", "oint",
+])
+const _TEX_PLAIN_SPACE_NAMES = Set(["quad", "qquad"])
+const _TEX_PLAIN_WHITESPACE = (' ', '\t', '\r', '\n')
+
+# Spacing class of the atom at the cursor: `:op` (operator, relation,
+# punctuation, named function), `:space` (a spacing command), `:none`
+# (nothing follows in this group), else `:ord`.
+function _tex_plain_peek_class(cur::_TexPlainCursor)
+	_tex_plain_done(cur) && return :none
+	c = cur.chars[cur.pos]
+	c == '}' && return :none
+	c in _TEX_PLAIN_OPERATOR_CHARS && return :op
+	c == '\\' || return :ord
+	n = length(cur.chars)
+	cur.pos == n && return :ord
+	next = cur.chars[cur.pos + 1]
+	if !_mathtext_isletter(next)
+		next == '\\' && return :none                      # a line break
+		return next in keys(_TEX_PLAIN_CONTROL_SYMBOLS) && next != '|' ? :space : :ord
+	end
+	stop = cur.pos + 1
+	while stop < n && _mathtext_isletter(cur.chars[stop + 1])
+		stop += 1
+	end
+	name = String(cur.chars[(cur.pos + 1):stop])
+	(name in _TEX_PLAIN_OPERATOR_NAMES || name in _TEX_PLAIN_FUNCTION_NAMES) && return :op
+	name in _TEX_PLAIN_SPACE_NAMES && return :space
+	name in _TEX_PLAIN_IGNORED && return :ignored
+	return :ord
+end
+
+# The TeX source spaces at the cursor (skipped) after an atom of class `prev`:
+# one space is printed only between an operator and another atom (`a + b`,
+# `\sin \theta`), none between ordinary atoms (`\Delta T` is "ΔT").
+function _tex_plain_whitespace!(out::IO, cur::_TexPlainCursor, prev::Symbol)
+	while !_tex_plain_done(cur) && cur.chars[cur.pos] in _TEX_PLAIN_WHITESPACE
+		cur.pos += 1
+	end
+	next = _tex_plain_peek_class(cur)
+	next === :ignored && return nothing                 # `\bf z`: decided before `z`
+	keep = (prev === :op || next === :op) && !(prev in (:none, :space)) && !(next in (:none, :space))
+	keep && print(out, ' ')
+	return nothing
+end
+
 # Convert until the end of input, or (in_group) until the closing `}`.
 function _tex_plain_until!(cur::_TexPlainCursor, in_group::Bool)
 	out = IOBuffer()
+	# Class of the last atom printed (`_tex_plain_peek_class`).
+	prev = :none
 	while !_tex_plain_done(cur)
 		c = cur.chars[cur.pos]
+		if c in _TEX_PLAIN_WHITESPACE
+			_tex_plain_whitespace!(out, cur, prev)
+			continue
+		end
+		class = _tex_plain_peek_class(cur)
 		if c == '}'
 			cur.pos += 1
 			in_group && return String(take!(out))
 			print(out, '}')   # a stray `}` is shown rather than dropped
+			prev = :ord
 		elseif c == '{'
 			cur.pos += 1
-			print(out, _tex_plain_until!(cur, true))
+			group = _tex_plain_until!(cur, true)
+			print(out, group)
+			isempty(group) || (prev = :ord)
 		elseif c == '^' || c == '_'
 			cur.pos += 1
 			tag = c == '^' ? "sup" : "sub"
 			print(out, "<", tag, ">", _tex_plain_arg!(cur), "</", tag, ">")
+			prev = :ord
 		elseif c == '\\'
-			print(out, _tex_plain_control!(cur))
+			text = _tex_plain_control!(cur)
+			print(out, text)
+			if class === :none
+				prev = :none                                # after a line break
+			elseif class !== :ignored && !isempty(text)
+				prev = class
+			end
 		else
 			cur.pos += 1
 			print(out, _tex_plain_char(c))
+			prev = class
 		end
 	end
 	return String(take!(out))

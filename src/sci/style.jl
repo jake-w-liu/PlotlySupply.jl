@@ -2661,6 +2661,11 @@ function _font_role_updates(
 		end
 		for key in sort!(collect(legend_keys))
 			update!(key, (:font,), legend_font)
+			# A legend title takes the legend's size (style-04: plotly.js would
+			# keep the size `set_legend!` gave it, or draw it 1.2 times larger).
+			title = _cmn_mapping_get(current(key), :title)
+			text = _cmn_mapping_get(title, :text)
+			(text isa AbstractString && !isempty(text)) && update!(key, (:title, :font), legend_font)
 		end
 	end
 

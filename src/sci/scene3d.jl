@@ -74,7 +74,7 @@ function _label3d(s::AbstractString)::String
 	str = String(s)
 	isempty(str) && return str
 	_MATHTEXT_SETTINGS[].enabled || return _mathtext_newlines_to_br(str)
-	isvalid(str) || throw(ArgumentError("mathtext: label is not valid UTF-8: $(repr(str))."))
+	isvalid(str) || throw(_mathtext_invalid_utf8(str))
 	segments = _mathtext_segments(collect(str), str)
 	out = IOBuffer()
 	for (kind, content) in segments
@@ -90,24 +90,43 @@ end
 
 function _label3d_until!(cur::_TexPlainCursor, in_group::Bool)
 	out = IOBuffer()
+	# v7 tm-tex-plain-spaces: TeX source spaces as `_tex_plain_until!` keeps
+	# them (`\Delta T` is "ΔT"); `prev` is the class of the last atom printed.
+	prev = :none
 	while !_tex_plain_done(cur)
 		c = cur.chars[cur.pos]
+		if c in _TEX_PLAIN_WHITESPACE
+			_tex_plain_whitespace!(out, cur, prev)
+			continue
+		end
+		class = _tex_plain_peek_class(cur)
 		if c == '}'
 			cur.pos += 1
 			in_group && return String(take!(out))
 			print(out, '}')
+			prev = :ord
 		elseif c == '{'
 			cur.pos += 1
-			print(out, _label3d_until!(cur, true))
+			group = _label3d_until!(cur, true)
+			print(out, group)
+			isempty(group) || (prev = :ord)
 		elseif c == '^' || c == '_'
 			cur.pos += 1
 			tag = c == '^' ? "sup" : "sub"
 			print(out, "<", tag, ">", _label3d_arg!(cur), "</", tag, ">")
+			prev = :ord
 		elseif c == '\\'
-			print(out, _label3d_control!(cur))
+			text = _label3d_control!(cur)
+			print(out, text)
+			if class === :none
+				prev = :none
+			elseif class !== :ignored && !isempty(text)
+				prev = class
+			end
 		else
 			cur.pos += 1
 			print(out, _tex_plain_char(c))
+			prev = class
 		end
 	end
 	return String(take!(out))
@@ -900,11 +919,13 @@ function _s3_color_spec(
 	res.cmax === nothing || (fields[:cmax] = res.cmax)
 	res.cmid === nothing || (fields[:cmid] = res.cmid)
 	showscale === nothing || (fields[:showscale] = showscale)
-	# User tick labels may contain TeX (the colorbar is SVG, so MathJax works);
-	# generated log/levels labels are already plotly HTML.
+	# User tick labels may contain TeX; generated log/levels labels are
+	# already plotly HTML.
 	ticktext = res.ticktext
 	if colorbar_ticklabels !== nothing && ticktext !== nothing
-		ticktext = String[_label(label) for label in ticktext]
+		# math as Unicode with <sup>/<sub>: plotly.js 2.35.2 never finishes
+		# MathJax colorbar tick labels
+		ticktext = String[_label_plain(label) for label in ticktext]
 	end
 	colorbar = _colorbar_attr(ticks = res.tickvals, ticklabels = ticktext, who = who)
 	if title !== nothing

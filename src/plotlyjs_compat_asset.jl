@@ -16,6 +16,16 @@ const _PLOTLYJS_MATH_SIZE_SEAM =
 	raw"""var r=parseInt(t.node().style.fontSize,10),o={fontSize:r}"""
 const _PLOTLYJS_MATH_SIZE_REPLACEMENT =
 	raw"""var r=parseFloat(t.node().style.fontSize),o={fontSize:r}"""
+# legend.js computeTextDimensions measures and places the legend title's
+# MathJax group with `scrollbox.select("g[class*=math-group]")`, which finds
+# the group of the first math ENTRY when one comes earlier in the scroll box
+# (tm-legend-math-title-clip, measured: the title group kept no transform and
+# drew 8.3 px above the legend box, and the title height was the entry's).
+# The title reads its own group (class "<legend id>titletext-math-group").
+const _PLOTLYJS_LEGEND_TITLE_MATH_SEAM =
+	raw"""var a=t.select("g[class*=math-group]"),o=a.node(),s=P(r);"""
+const _PLOTLYJS_LEGEND_TITLE_MATH_REPLACEMENT =
+	raw"""var a=t.select(n===b?"g[class*=titletext-math-group]":"g[class*=math-group]"),o=a.node(),s=P(r);"""
 # Keep XMLSerializer's attribute quotes and retire the old quote placeholders.
 const _PLOTLYJS_SVG_QUOTE_TRANSFORMS = (
 	raw"""var e=this.style.fontFamily;e&&-1!==e.indexOf('"')&&t.style("font-family",e.replace(l,c));var r=this.style.fontWeight;""" =>
@@ -39,6 +49,7 @@ const _PLOTLYJS_GL3D_PAD_REPLACEMENT =
 const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_MATH_FONT_SEAM => _PLOTLYJS_MATH_FONT_REPLACEMENT,
 	_PLOTLYJS_MATH_SIZE_SEAM => _PLOTLYJS_MATH_SIZE_REPLACEMENT,
+	_PLOTLYJS_LEGEND_TITLE_MATH_SEAM => _PLOTLYJS_LEGEND_TITLE_MATH_REPLACEMENT,
 	_PLOTLYJS_GL3D_PAD_SEAM => _PLOTLYJS_GL3D_PAD_REPLACEMENT,
 	_PLOTLYJS_SVG_QUOTE_TRANSFORMS...,
 )

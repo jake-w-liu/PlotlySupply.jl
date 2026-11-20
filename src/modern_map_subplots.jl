@@ -673,6 +673,9 @@ function _apply_subplot_title_annotations!(
 					sp,
 					col,
 				);
+				# the panel titles' gap: a math title's box ends at its
+				# baseline, so without it the formula sat on the frame (docs-06)
+				offset = _TEXT_PANEL_GAP,
 				name = row === nothing ? nothing : "plotlysupply:title!:$(row):$(col):column",
 			)
 		end
@@ -690,6 +693,7 @@ function _apply_subplot_title_annotations!(
 					row,
 				);
 				edge = :right,
+				offset = _TEXT_PANEL_GAP,
 				name = col === nothing ? nothing : "plotlysupply:title!:$(row):$(col):row",
 			)
 		end

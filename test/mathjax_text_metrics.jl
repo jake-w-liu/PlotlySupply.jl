@@ -182,4 +182,217 @@ $(PS._EXPORT_RESET_DIV_JS)
 		@test minimum(ratios) >= 1.0
 		@test maximum(ratios) <= 1.08
 	end
+
+	# v7: text anchored at an edge of the axes keeps clear of the frame and of
+	# the tick marks pointing inwards along it (gallery device_geometry (b)).
+	# Before: 2.5 px from the frame under :ieee, inside its 4.7 px ticks.
+	edge_js = raw"""
+  const fr = div.querySelector('.draglayer .xy rect.nsewdrag').getBoundingClientRect();
+  const notes = {};
+  div.querySelectorAll('g.annotation').forEach(function (a) {
+    const t = a.querySelector('text'); const r = t.getBoundingClientRect();
+    notes[t.textContent] = {right: fr.right - r.right, left: r.left - fr.left, bottom: fr.bottom - r.bottom, top: r.top - fr.top};
+  });
+  return notes;
+"""
+	@testset "annotate! at an axes edge clears the frame and its inward ticks ($(style))" for style in (:ieee, :nature, :default)
+		fig = with_style(style) do
+			f = plot_scatter([0.0, 1.0], [0.0, 1.0])
+			annotate!(f, 1, 0.5, "right note"; coords = :axes, anchor = :right, showarrow = false)
+			annotate!(f, 0, 0, "corner"; coords = :axes, anchor = :bottomleft, showarrow = false)
+			annotate!(f, 1, 1, "exact"; coords = :axes, anchor = :topright, showarrow = false, offset = (0, 0))
+			f
+		end
+		y = PS._symbol_dict(PS._plot_obj(fig).layout.fields[:yaxis])
+		x = PS._symbol_dict(PS._plot_obj(fig).layout.fields[:xaxis])
+		inward(a) = get(a, :ticks, "") == "inside" ? Float64(get(a, :ticklen, 5)) : 0.0
+		gaps = drawn_json(fig, edge_js)
+		@test gaps["right note"]["right"] >= inward(y) + 1.5
+		@test gaps["corner"]["left"] >= inward(y) + 1.5
+		@test gaps["corner"]["bottom"] >= inward(x) + 1.5
+		# an explicit offset = (0, 0) puts the text at the edge
+		@test gaps["exact"]["right"] < gaps["right note"]["right"]
+		@test gaps["exact"]["top"] < 3
+	end
+
+	# docs-06: a math column title sat on the top frame line of its column
+	# (no gap; a MathJax box ends at the formula's baseline).
+	@testset "math column titles clear the frame" begin
+		sf = subplots(2, 2; sync = false, shared_xaxes = true, shared_yaxes = true,
+			column_titles = ["\$\\alpha = 1\$", "\$\\alpha = 2\$"], row_titles = ["\$r_1\$", "\$r_2\$"])
+		for r in 1:2, c in 1:2
+			plot_scatter!(sf, 1:5, collect(1.0:5.0) .* r; row = r, col = c)
+		end
+		js = raw"""
+  const frames = Array.from(div.querySelectorAll('.draglayer .nsewdrag')).map(r => r.getBoundingClientRect());
+  const top = Math.min.apply(null, frames.map(r => r.top));
+  const right = Math.max.apply(null, frames.map(r => r.right));
+  const out = [];
+  div.querySelectorAll('g.annotation').forEach(function (a) {
+    const g = a.querySelector('g[class$="-math-group"]'); if (!g) return;
+    const r = g.getBoundingClientRect();
+    out.push({label: g.getAttribute('data-unformatted'), above: top - r.bottom, beside: r.left - right});
+  });
+  return out;
+"""
+		drawn = drawn_json(sf, js)
+		cols = filter(d -> occursin("alpha", d["label"]), drawn)
+		rows = filter(d -> occursin("r_", d["label"]), drawn)
+		@test length(cols) == 2 && length(rows) == 2
+		@test all(d -> d["above"] >= 2, cols)
+		@test all(d -> d["beside"] >= 2, rows)
+	end
+
+	# vm-01: an :outside_top legend with MathJax entries that plotly.js wraps
+	# into two rows. The room above the axes was one row, plotly.js pushed the
+	# top margin while drawing, and the SVG export drew the curves and frame
+	# 19 px off the tick labels (sin(0) at y = 115.5, tick "0" at 134.5).
+	@testset "vm-01: data drawn at its ticks under a wrapped outside_top math legend ($(style))" for style in (:ieee, :nature)
+		xs = collect(range(0, 10; length = 100))
+		fig = with_style(style) do
+			f = plot_scatter(xs, [sin.(xs), cos.(xs), sin.(xs) .* cos.(xs), 0.3 .* xs .- 1.5];
+				legend = ["\$\\sin x\$", "\$\\cos x\$", "product", "linear trend"], xlabel = "x", ylabel = "y")
+			set_legend!(f; position = :outside_top)
+			f
+		end
+		path = joinpath(mktempdir(), "vm01.svg")
+		savefig(fig, path)
+		svg = read(path, String)
+		tick = match(r"class=\"ytick\"><text[^>]*transform=\"translate\(0,([0-9.]+)\)\"[^>]*>0</text>", svg)
+		group = match(r"<g class=\"xy\" transform=\"translate\(([0-9.]+),([0-9.]+)\)\"", svg)
+		line = match(r"<path class=\"js-line\" d=\"M([0-9.]+),([0-9.]+)", svg)
+		@test tick !== nothing && group !== nothing && line !== nothing
+		if tick !== nothing && group !== nothing && line !== nothing
+			# the first point of sin x (data y = 0) on the tick "0"
+			@test abs(parse(Float64, group[2]) + parse(Float64, line[2]) - parse(Float64, tick[1])) <= 0.5
+		end
+		# the legend lies inside the figure
+		legend = match(r"<g class=\"legend\"[^>]*transform=\"translate\(([-0-9.]+),([-0-9.]+)\)\"", svg)
+		@test legend !== nothing && parse(Float64, legend[2]) >= 0
+	end
+
+	# tm-cbar-math-ticklabels-hang: math colorbar tick labels made every export
+	# wait for its timeout and fail (plotly.js never finished drawing them);
+	# they are drawn as Unicode with <sup>/<sub>.
+	@testset "math colorbar tick labels export" begin
+		fig = plot_heatmap([1.0 2.0; 3.0 4.0]; colorbar_ticks = [1, 2.5, 4],
+			colorbar_ticklabels = ["\$10^{-3}\$", "b", "\$\\alpha\$"])
+		colorbar!(fig; ticks = [1, 2.5, 4], ticklabels = ["\$a\$", "b", "c"])
+		path = joinpath(mktempdir(), "cbar.svg")
+		@test savefig(fig, path; timeout = 60) == path
+		svg = read(path, String)
+		@test occursin(">a</text>", svg) && occursin(">c</text>", svg)
+	end
+
+	# tm-title-top-clip: the first line of a title of several lines, and a
+	# MathJax title, started above the top of the figure (-7 px for
+	# "Two-line\nfigure title", -17 px under :ieee, -5 px for a fraction).
+	@testset "tm-title-top-clip: titles start inside the figure ($(style))" for style in (:default, :ieee)
+		for text in ("Two-line\nfigure title", "Three\nline\ntitle", "Response \$\\frac{\\partial u}{\\partial t}\$",
+				"Two-line\nfigure title \$\\alpha\$")
+			fig = with_style(style) do
+				f = plot_scatter(collect(0.0:0.5:2.0), collect(0.0:0.5:2.0); xlabel = "x", ylabel = "y")
+				title!(f, text)
+				f
+			end
+			r = drawn_json(fig, raw"""
+  const g = div.querySelector('.g-gtitle').getBoundingClientRect(), top = div.getBoundingClientRect().top;
+  return {top: g.top - top, bottom: g.bottom - top, t: div._fullLayout._size.t, margin: div._fullLayout.margin.t};
+""")
+			@test r["top"] >= 0
+			@test r["bottom"] <= r["t"]                 # above the plot area
+			@test abs(r["t"] - r["margin"]) <= 0.5      # plotly.js did not push the margin
+		end
+	end
+
+	# tm-math-script-minsize: below about 11 px MathJax stopped shrinking
+	# sub/superscripts (its scriptminsize, 8 px): `$x^{2}$` drawn at 4 px was
+	# 1.63 times as wide per px of font as at 12 px. The width per px of font
+	# is the same at every size.
+	@testset "tm-math-script-minsize: math scales with its font size" begin
+		fig = plot_scatter([0.0, 1.0], [0.0, 1.0])
+		for (k, size) in enumerate((4, 7, 12))
+			annotate!(fig, 0.5, 0.3k, "\$x^{2}\$"; fontsize = size, showarrow = false)
+		end
+		widths = drawn_json(fig, raw"""
+  return Array.from(div.querySelectorAll('g.annotation g[class$="-math-group"] svg')).map(s => s.getBoundingClientRect().width);
+""")
+		@test length(widths) == 3
+		if length(widths) == 3
+			per_px = widths ./ [4, 7, 12]
+			@test maximum(per_px) / minimum(per_px) < 1.05
+		end
+	end
+
+	# vm-06: the default legend of a polar figure with no free corner goes
+	# beside the disk; it sat on the "1/4 π" angular tick label.
+	@testset "vm-06: polar legend clear of the angular tick labels ($(style))" for style in (:ieee, :nature)
+		th = collect(range(0, 2pi; length = 361))
+		fig = with_style(style) do
+			plot_scatterpolar([th, th], [1 .+ cos.(th), 0.5 .+ 0.5 .* abs.(sin.(2 .* th))];
+				thetaunit = "radians", legend = ["cardioid", "rose"])
+		end
+		boxes = drawn_json(fig, raw"""
+  const top = div.getBoundingClientRect();
+  const box = el => { const r = el.getBoundingClientRect(); return [r.left - top.left, r.top - top.top, r.right - top.left, r.bottom - top.top]; };
+  return {legend: box(div.querySelector('g.legend > rect.bg')),
+    labels: Array.from(div.querySelectorAll('g.angularaxistick text')).map(box)};
+""")
+		overlap(a, b) = a[1] < b[3] && b[1] < a[3] && a[2] < b[4] && b[2] < a[4]
+		@test length(boxes["labels"]) == 8
+		@test !any(label -> overlap(boxes["legend"], label), boxes["labels"])
+	end
+
+	# tm-legend-math-title-clip: with a math entry, plotly.js measured and
+	# placed the entry's MathJax group for the math legend title (the title
+	# kept no transform: 8.3 px above the legend box, cut by it).
+	@testset "tm-legend-math-title-clip: a math legend title inside its box ($(style), $(tag))" for style in (:default, :ieee),
+			(tag, title) in (("math", "\$\\epsilon_r\$ values"), ("frac", "\$\\frac{a}{b}\$ ratio"))
+		xs = collect(range(0, 1; length = 30))
+		fig = with_style(style) do
+			f = plot_scatter(xs, [xs, xs .^ 2, xs .^ 3]; legend = ["linear", "quadratic \$x^2\$", "cubic"], xlabel = "x", ylabel = "y")
+			set_legend!(f; position = :topright, title = title)
+			f
+		end
+		r = drawn_json(fig, raw"""
+  const lg = div.querySelector('g.legend'), top = div.getBoundingClientRect().top;
+  const box = el => { const b = el.getBoundingClientRect(); return [b.top - top, b.bottom - top]; };
+  const title = lg.querySelector('g[class*=titletext-math-group]');
+  const entries = Array.from(lg.querySelectorAll('g.traces')).map(box);
+  return {bg: box(lg.querySelector('rect.bg')), title: title ? box(title) : null,
+    first: Math.min(...entries.map(e => e[0]))};
+""")
+		@test r["title"] !== nothing
+		@test r["title"][1] >= r["bg"][1] - 0.5                 # inside the box
+		@test r["title"][2] <= r["first"] + 0.5                 # above the first entry
+	end
+
+	# topo_response, optical_bars: the cell title and label (a) of a cell
+	# without a legend above it were drawn a legend's height lower than (b),
+	# above the outside_top legend of its neighbour.
+	@testset "panel labels and cell titles of a row on one baseline ($(style))" for style in (:default, :ieee)
+		xs = collect(range(0, 1; length = 30))
+		sf = with_style(style) do
+			sf = subplots(1, 2; sync = false)
+			plot_scatter!(sf, xs, xs .^ 2; row = 1, col = 1, xlabel = "x", ylabel = "y")
+			plot_scatter!(sf, xs, [xs, 1 .- xs]; row = 1, col = 2, legend = ["radiated", "TM\$_0\$ reflected"],
+				xlabel = "x", ylabel = "y")
+			title!(sf, "reduced model"; row = 1, col = 1)
+			set_legend!(sf; row = 1, col = 2, position = :outside_top, ncols = 1)
+			panel_labels!(sf; labels = :abc, format = "({})", bold = true)
+			sf
+		end
+		r = drawn_json(sf, raw"""
+  const top = div.getBoundingClientRect().top, anns = div._fullLayout.annotations, out = {};
+  div.querySelectorAll('g.annotation').forEach((g, i) => { const b = g.querySelector('.annotation-text-g').getBoundingClientRect(); out[anns[i].name] = [b.top - top, b.bottom - top]; });
+  const lg = div.querySelector('g.legend2 > rect.bg') || div.querySelector('g.legend > rect.bg');
+  return {anns: out, legend: lg.getBoundingClientRect().top - top};
+""")
+		a = r["anns"]["plotlysupply:panel_label:1:1"]
+		b = r["anns"]["plotlysupply:panel_label:1:2"]
+		t = r["anns"]["plotlysupply:title:1:1"]
+		@test abs(a[2] - b[2]) <= 0.5 && abs(t[2] - b[2]) <= 0.5
+		@test b[2] <= r["legend"]                                   # the line stays above the legend
+		@test min(a[1], b[1], t[1]) >= -1                           # and on the page
+	end
 end

@@ -988,7 +988,10 @@ function _colorbar_options(
 		length(ticklabels) == length(tick_values) || throw(ArgumentError(
 			"$(who): $(length(ticklabels)) `ticklabels` for $(length(tick_values)) `ticks`.",
 		))
-		tick_labels = String[_label(string(label)) for label in ticklabels]
+		# tm-cbar-math-ticklabels-hang: plotly.js 2.35.2 never finishes
+		# MathJax colorbar tick labels (every export waited for its timeout),
+		# so their math is drawn as Unicode with <sup>/<sub> (`_label_plain`).
+		tick_labels = String[_label_plain(string(label)) for label in ticklabels]
 	end
 	(isempty(exponentformat) || exponentformat in _CBAR_EXPONENT_FORMATS) ||
 		throw(ArgumentError(

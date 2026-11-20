@@ -338,7 +338,8 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		@test _m2_get(marker, :showscale) === false
 		bar = _m2_get(marker, :colorbar)
 		@test _m2_get(bar, :tickvals) == [0.0, 0.5, 1.0]
-		@test _m2_get(bar, :ticktext) == [_M2._label("lo"), _M2._label("\$\\mu\$"), _M2._label("hi")]
+		# v7 tm-cbar-math-ticklabels-hang: colorbar tick-label math as Unicode
+		@test _m2_get(bar, :ticktext) == ["lo", "μ", "hi"]
 		@test _m2_throws(() -> plot_polygons(_M2_QX, _M2_QY, _M2_QUADS, [0.0, 1.0]; colorbar_ticklabels = ["a"]), "need `ticks`")
 		@test _m2_throws(() -> plot_polygons(_M2_QX, _M2_QY, _M2_QUADS, [0.0, 1.0]; showscale = 1), "`showscale` must be true, false or nothing")
 		@test _m2_throws(() -> plot_polygons(_M2_QX, _M2_QY, _M2_QUADS, [0.0, 1.0]; colorbar_title = 1), "`colorbar_title` must be a string")

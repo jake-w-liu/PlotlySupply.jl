@@ -77,6 +77,29 @@ end
 		catch e
 			e
 		end))
+		# v7 tm-error-prefix: a label error names the function the user called.
+		caught(f) = try
+			f()
+			nothing
+		catch e
+			e
+		end
+		xs = collect(1.0:3.0)
+		for (name, call) in (
+			"xlabel!" => () -> xlabel!(plot_scatter(xs, xs), "bad \$x"),
+			"plot_scatter" => () -> plot_scatter(xs, xs; xlabel = "bad \$x"),
+			"plot_scatter" => () -> plot_scatter(xs, xs; legend = "bad \$x"),
+			"plot_heatmap" => () -> plot_heatmap([1.0 2.0; 3.0 4.0]; colorbar_title = "bad \$x"),
+			"xticks!" => () -> xticks!(plot_scatter(xs, xs), [1, 2], ["a", "bad \$x"]),
+			"plot_scatter" => () -> plot_scatter(xs, xs; xlabel = String([0xff, 0x61])),
+		)
+			err = caught(call)
+			@test err isa ArgumentError
+			@test startswith(err.msg, name * ": ")
+		end
+		# named once by the functions that wrap the message themselves
+		err = caught(() -> title!(plot_scatter(xs, xs), "bad \$x"))
+		@test startswith(err.msg, "title!: invalid label") && count("title!", err.msg) == 1
 	end
 
 	@testset "whole-math labels are unchanged" begin
@@ -299,20 +322,20 @@ end
 	end
 
 	@testset "default settings" begin
-		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = false)
+		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = nothing)
 		_with_mathtext_settings(true; size = "large") do
-			@test get_default_mathtext() == (enabled = true, size = "\\large", font = "", inherit_text_font = false)
+			@test get_default_mathtext() == (enabled = true, size = "\\large", font = "", inherit_text_font = nothing)
 			@test PlotlySupply._label("Time \$t\$") == "\$\\large{\\text{Time }t}\$"
 			@test mathtext("\$x\$") == "\$\\large{x}\$"
 			@test mathtext("\$x\$"; size = "") == "\$x\$"
 			@test PlotlySupply._label("plain") == "plain"
 		end
-		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = false)
+		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = nothing)
 		# X57: the helper restores font and inherit_text_font too.
 		try
 			set_default_mathtext!(true; size = "small", font = "Latin-Modern", inherit_text_font = true)
 			_with_mathtext_settings(false; size = "huge") do
-				@test get_default_mathtext() == (enabled = false, size = "\\huge", font = "", inherit_text_font = false)
+				@test get_default_mathtext() == (enabled = false, size = "\\huge", font = "", inherit_text_font = nothing)
 			end
 			@test get_default_mathtext() ==
 				  (enabled = true, size = "\\small", font = "Latin-Modern", inherit_text_font = true)
@@ -321,11 +344,11 @@ end
 		end
 		# Validation happens before the settings change.
 		@test_throws ArgumentError set_default_mathtext!(true; size = "\\footnotesize")
-		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = false)
+		@test get_default_mathtext() == (enabled = true, size = "", font = "", inherit_text_font = nothing)
 		# Return value and replacement semantics.
 		try
-			@test set_default_mathtext!(false; size = "\\small") == (enabled = false, size = "\\small", font = "", inherit_text_font = false)
-			@test set_default_mathtext!() == (enabled = true, size = "", font = "", inherit_text_font = false)
+			@test set_default_mathtext!(false; size = "\\small") == (enabled = false, size = "\\small", font = "", inherit_text_font = nothing)
+			@test set_default_mathtext!() == (enabled = true, size = "", font = "", inherit_text_font = nothing)
 		finally
 			set_default_mathtext!()
 		end
@@ -356,8 +379,21 @@ end
 			"ℝ<sup>n</sup> (1/2) x|<sub>0</sub><sup>1</sup>"
 		@test P("\$\\sin\\theta\$ \$\\sin(x)\$ \$\\log x\$") == "sin θ sin(x) log x"
 		@test P("\$\\unicode{36}\\unicode{x3B1}\$ \$\\foo{x}\$ \$\\bar\$") == "\$α \\foo{x} "
-		@test P("\$\\not= \\color{red}{x} \\textcolor{blue}{y} \\bf z\$") == "=\u0338 x y  z"
+		# v7 tm-tex-plain-spaces: TeX drops the spaces typed between ordinary atoms.
+		@test P("\$\\not= \\color{red}{x} \\textcolor{blue}{y} \\bf z\$") == "=\u0338 xyz"
+		@test P("\$\\Delta T\$ (K)") == "\u0394T (K)"
+		@test P("\$k_0 a\$") == "k<sub>0</sub>a"
+		@test P("\$\\frac{\\partial u}{\\partial t}\$") == "(\u2202u)/(\u2202t)"
+		@test P("\$\\nabla \\cdot \\mathbf{E}\$") == "\u2207 \u22c5 E"
+		@test P("\$\\alpha \\beta\$ \$\\sin \\theta\$ \$a + b\$ \$x = -1\$") == "\u03b1\u03b2 sin \u03b8 a + b x = \u22121"
+		@test P("\$ a \$ \$\\log  x\$ \$x \\, y\$") == "a log x x y"
 		@test P("\$x'\$ \$a \\leq b\$ \$\\{1,2\\}\$ \$a~b\$ \$x}\$") == "x′ a ≤ b {1,2} a\u00a0b x}"
+		# the same in 3-D (WebGL) text: scene axis titles, zlabel!
+		L3 = PlotlySupply._label3d
+		@test L3("\$\\Delta T\$ (K)") == "\u0394T (K)"
+		@test L3("\$k_0 a\$") == "k<sub>0</sub>a"
+		@test L3("\$\\alpha \\beta\$ \$\\sin \\theta\$ \$a + b\$") == "\u03b1\u03b2 sin \u03b8 a + b"
+		@test L3("\$\\nabla \\cdot \\mathbf{E}\$") == "\u2207 \u22c5 <b>E</b>"
 		@test P("two\n\$x\$ lines\r\n") == "two<br>x lines<br>"
 		@test P("\$a\\\\b\$") == "a<br>b"
 		@test P("\$\\begin{array}{c}a\\\\b\\end{array}\$") == "a<br>b"
@@ -506,4 +542,44 @@ end
 			inherit_text_font = previous.inherit_text_font,
 		)
 	end
+end
+
+# v7 tm-cbar-math-ticklabels-hang: plotly.js 2.35.2 never finishes MathJax
+# colorbar tick labels (every export of such a figure waited for its timeout
+# and failed), so every colorbar tick-label path writes them as Unicode with
+# <sup>/<sub>, as the decade labels of a log norm are.
+@testset "sci mathtext: colorbar tick labels are drawn as Unicode" begin
+	sd(x) = PlotlySupply._symbol_dict(x)
+	function ticktext(fig)
+		for trace in PlotlySupply._plot_obj(fig).data
+			for holder in (trace.fields, sd(get(trace.fields, :marker, nothing)))
+				bar = get(holder, :colorbar, nothing)
+				bar === nothing || return get(sd(bar), :ticktext, nothing)
+			end
+		end
+		return nothing
+	end
+	labels = ["\$10^{-3}\$", "b", "\$\\alpha\$"]
+	want = ["10<sup>\u2212" * "3</sup>", "b", "\u03b1"]
+	U = [1.0 2.0; 3.0 4.0]
+	@test ticktext(plot_heatmap(U; colorbar_ticks = [1, 2.5, 4], colorbar_ticklabels = labels)) == want
+	@test ticktext(plot_contour(U; colorbar_ticks = [1, 2.5, 4], colorbar_ticklabels = labels)) == want
+	fig = plot_heatmap(U)
+	colorbar!(fig; ticks = [1, 2.5, 4], ticklabels = labels)
+	@test ticktext(fig) == want
+	@test ticktext(plot_histogram2d([0.1, 0.5, 0.9, 0.3], [0.2, 0.4, 0.6, 0.8];
+		colorbar_ticks = [0, 1, 2], colorbar_ticklabels = labels)) == want
+	@test ticktext(plot_surface([1.0, 2.0], [1.0, 2.0], U; colorbar_ticks = [1, 2.5, 4], colorbar_ticklabels = labels)) == want
+end
+
+# v7 tm-amp-estimate: a `&` in the text part of a math label is text, not an
+# array cell separator: the extent estimate measured up to it (0.2-0.37 of
+# the drawn width, so `annotate!(fit)` overflowed its box).
+@testset "sci mathtext: a & in text is measured" begin
+	E(s) = PlotlySupply._text_extent(mathtext(s), 12.0)[1]
+	@test E("Mie & Rayleigh, \$\\lambda = 2\\pi a\$") >= 0.9 * E("Mie and Rayleigh, \$\\lambda = 2\\pi a\$")
+	@test E("\$E_x\$ & \$E_y\$ (V/m)") >= 0.85 * E("\$E_x\$ and \$E_y\$ (V/m)")
+	@test E("R&D \$\\alpha\$") >= 0.8 * E("RnD \$\\alpha\$")
+	# an array cell still ends at `&`: two cells are not one long row
+	@test E("\$\\begin{array}{cc}aaaa & bbbb\\end{array}\$") < 1.5 * E("\$aaaa bbbb\$")
 end

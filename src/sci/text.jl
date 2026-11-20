@@ -63,7 +63,16 @@ function _text_checked_label(s::AbstractString, who::AbstractString; align::Symb
 		return _label(s; align = align)
 	catch err
 		err isa ArgumentError || rethrow()
-		throw(ArgumentError("$(who): invalid label $(repr(String(s))): $(err.msg)"))
+		# The mathtext message already names a caller (`_mathtext_who`): the
+		# label's function is named once.
+		msg = err.msg
+		m = match(r"^([A-Za-z_][A-Za-z0-9_!]*): ", msg)
+		if m !== nothing
+			name = Symbol(m.captures[1])
+			(name === :mathtext || (isdefined(@__MODULE__, name) && Base.isexported(@__MODULE__, name))) &&
+				(msg = msg[(lastindex(m.match) + 1):end])
+		end
+		throw(ArgumentError("$(who): invalid label $(repr(String(s))): $(msg)"))
 	end
 end
 
@@ -2442,7 +2451,12 @@ function _legend_relayout_columns!(p::Plot, legend_id::AbstractString, opts; spa
 		fill, n = layout
 		count = fill == 'r' ? length(p.data) : n
 		_legend_apply_columns!(p, legend_id, count; fill = fill, span = span, who = "")
-	elseif cell && _legend_box_orientation(p, legend_id) == "h"
+	elseif cell && _legend_box_orientation(p, legend_id) == "h" &&
+			!(opts.orientation === nothing && legend_id in something(_legend_cell_auto_ids(p), ()))
+		# A row the best-position rule laid out (`:outside_bottom`, which it
+		# picks only when the row fits the cell) is not wrapped into column
+		# groups: they would stay when the rule moves the legend back inside
+		# as a column (grouped spacing between its entries).
 		_legend_apply_columns!(p, legend_id, length(p.data); fill = 'r', span = span, who = "")
 	end
 	return nothing
@@ -2533,7 +2547,19 @@ const _LEGEND_POLAR_RADIAL_LABEL_PX = 10.0
 # the box to its own width); the height from `_legend_box_height`. `nothing`
 # when the legend lists nothing or is hidden. `before > 0` counts only the
 # entries of traces before index `before` (the legend before an append).
-function _legend_box_size(p::Plot, legend_id::AbstractString; before::Integer = 0)
+# `orientation` ("v"/"h") sizes the box as it would be drawn with that
+# orientation instead of its own. `wrap` (px): the width at which plotly.js
+# wraps a horizontal legend (its `_maxWidth`, the paper's plot width for a
+# legend anchored inside the paper); default `_legend_plot_area_width`, the
+# layout margins' estimate (the room plan passes its own, with the axes'
+# automargins: `_lt_box_size`).
+function _legend_box_size(
+	p::Plot,
+	legend_id::AbstractString;
+	before::Integer = 0,
+	orientation::Union{Nothing, AbstractString} = nothing,
+	wrap::Union{Nothing, Real} = nothing,
+)
 	box = _symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing))
 	get(box, :visible, true) === false && return nothing
 	indices = _legend_entry_indices(p, legend_id)
@@ -2546,7 +2572,7 @@ function _legend_box_size(p::Plot, legend_id::AbstractString; before::Integer = 
 	title_px = title_text isa AbstractString && !isempty(strip(title_text)) ?
 		_text_extent(title_text, _legend_title_size(p, box); family = _legend_entry_font_family(p, box))[1] +
 		2 * _LEGEND_ITEM_GAP : 0.0
-	orientation = get(box, :orientation, "v")
+	orientation === nothing && (orientation = something(get(box, :orientation, nothing), "v"))
 	title_left = title_px > 0 &&
 		occursin("left", string(get(title, :side, orientation == "h" ? "left" : "top")))
 	width = if _legend_column_layout(p, legend_id) !== nothing
@@ -2556,12 +2582,38 @@ function _legend_box_size(p::Plot, legend_id::AbstractString; before::Integer = 
 		end
 		_legend_columns_width(widths, columns, frame, 0.0)
 	elseif orientation == "h"
-		sum(widths) + _LEGEND_ITEM_GAP * length(widths) + 2 * frame
+		per_row, _ = _legend_wrap(widths, frame, something(wrap, _legend_plot_area_width(p)))
+		per_row >= length(widths) ? sum(widths) + _LEGEND_ITEM_GAP * length(widths) + 2 * frame :
+			per_row * (maximum(widths) + _LEGEND_ITEM_GAP) + 2 * frame
 	else
 		maximum(widths) + _LEGEND_ITEM_GAP + 2 * frame
 	end
 	width = title_left ? width + title_px : max(width, title_px + 2 * frame)
-	return (width, _legend_box_height(p, legend_id, indices))
+	return (width, _legend_box_height(p, legend_id, indices; orientation = orientation, wrap = wrap))
+end
+
+# Entries per row and rows of a horizontal legend with entry widths `widths`
+# (px) and border `frame` wrapped at `max_width` px, as plotly.js 2.35.2 lays
+# it out (legend/draw.js computeLegendDimensions, no `entrywidth`): one row
+# of their own widths when they fit, else every entry takes the widest one's
+# width plus the item gap, a new row starting at the entry that would reach
+# `max_width`.
+function _legend_wrap(widths::AbstractVector{<:Real}, frame::Real, max_width::Real)
+	n = length(widths)
+	n == 0 && return (0, 0)
+	gap = _LEGEND_ITEM_GAP
+	sum(widths) + 2 * frame + (n - 1) * gap < max_width && return (n, 1)
+	step = maximum(widths) + gap
+	per_row = 0
+	x = 0.0
+	while per_row < n
+		# plotly: a new row when `step + frame + x - gap >= _maxWidth` (the
+		# first entry of a row always stays).
+		per_row > 0 && step + frame + x - gap >= max_width && break
+		x += step
+		per_row += 1
+	end
+	return (per_row, cld(n, per_row))
 end
 
 # Slack (px) added to the estimated (width, height) of a cell legend before
@@ -2594,13 +2646,20 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 	w = width_px * (xdom[2] - xdom[1])
 	h = height_px * (ydom[2] - ydom[1])
 	(w > 0 && h > 0) || return nothing
-	legend_size = _legend_box_size(p, legend_id; before = before)
+	# Scored as the vertical box an inside position draws, whatever the
+	# orientation an outside position gave it (`:outside_bottom` is one row):
+	# a row would make an inside corner look free for a box drawn taller there.
+	# A column legend (`ncols`) keeps its own layout.
+	orientation = _legend_column_layout(p, legend_id) === nothing ? "v" : nothing
+	legend_size = _legend_box_size(p, legend_id; before = before, orientation = orientation)
 	legend_size === nothing && return nothing
 	legend_size = (legend_size[1] + _LEGEND_CELL_SLACK_PX[1], legend_size[2] + _LEGEND_CELL_SLACK_PX[2])
 	first_trace = p.data[indices[1]]
 	if string(get(first_trace.fields, :type, "scatter")) in ("scatterpolar", "scatterpolargl")
 		subplot = Symbol(string(get(first_trace.fields, :subplot, "polar")))
-		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size)
+		# vm-06: beside the cell when no corner is clear of the data and the
+		# angular tick labels
+		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size; outside = :outside_right)
 	end
 	# Cartesian cell: the host's traces are scored as data; the traces of an
 	# inset the cell hosts (listed in the host's legend, `_legend_inset_host`)
@@ -2630,14 +2689,34 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 		)
 		rect in obstacles || push!(obstacles, rect)
 	end
-	# With every position covering data the legend goes below its cell, when
-	# its entries side by side fit the cell's width (a wider one would run
-	# over its neighbours: it keeps the position covering the least).
-	outside = _legend_row_width(p, legend_id, before) <= w ? :outside_bottom : nothing
+	# With every inside position covering data (or a box larger than the plot
+	# area) the legend goes outside its cell, where the room provider
+	# reserves its room (taken from the cell): below it as one row when its
+	# entries side by side fit the plot area's width; else right of it as a
+	# column when that column leaves the plot area at least half its width;
+	# else below it as a column (`_legend_rule_placement`; plotly.js wraps a
+	# horizontal legend at the width of the whole grid, so a wider row would
+	# run under its neighbours).
+	outside = _legend_row_width(p, legend_id, before) <= w ||
+		legend_size[1] + _ROOM_GAP > w / 2 ? :outside_bottom : :outside_right
+	(legend_size[1] > w || legend_size[2] > h) && return outside
 	return _scat_best_legend_position(
 		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size;
 		obstacles = obstacles, outside = outside,
 	)
+end
+
+# Placement of cell legend `legend_id` at `position` of the best-position
+# rule for the plot area `xdom` x `ydom` (paper): `_legend_placement`, with a
+# column below the cell (orientation "v") when the legend's one row is wider
+# than the plot area (`_legend_best_cell_position`). `before` as there.
+function _legend_rule_placement(p::Plot, legend_id::AbstractString, position::Symbol, xdom, ydom, inset;
+		before::Integer = 0)
+	placement = _legend_placement(position, xdom, ydom, inset; figure = false)
+	position === :outside_bottom || return placement
+	width_px = _scat_legend_figure_px(p.layout)[1] * (xdom[2] - xdom[1])
+	_legend_row_width(p, legend_id, before) <= width_px || (placement[:orientation] = "v")
+	return placement
 end
 
 # Width (px) of legend `legend_id` laid out as one row (the `:outside_bottom`
@@ -2668,10 +2747,13 @@ end
 # Polar cell of `w` x `h` px (subplot layout key `subplot`): the circle is
 # centred in the cell with radius min(w, h) / 2 (plotly.js polar, full
 # sector); `r` maps linearly from the radial range (explicit, else from
-# min(0, r) to max(r)), `theta` in degrees from `angularaxis.rotation` in its
-# `direction`. `nothing` for sectors, holes, non-linear or categorical axes,
-# other trace types, or non-numeric coordinates.
-function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float64, h::Float64, legend_size)
+# min(0, r) to max(r)), `theta` (in its trace's `thetaunit`) from
+# `angularaxis.rotation` in its `direction`. `nothing` for sectors, holes,
+# non-linear or categorical axes, other trace types, or non-numeric
+# coordinates. With `outside`, that position when every corner covers data or
+# a tick label.
+function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float64, h::Float64, legend_size;
+	outside::Union{Nothing, Symbol} = nothing)
 	polar = _symbol_dict(get(p.layout.fields, subplot, nothing))
 	radial = _symbol_dict(get(polar, :radialaxis, nothing))
 	angular = _symbol_dict(get(polar, :angularaxis, nothing))
@@ -2681,7 +2763,8 @@ function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float
 			abs(sector[2] - sector[1]) >= 360) || return nothing
 	end
 	something(_legend_real(get(polar, :hole, nothing)), 0.0) == 0 || return nothing
-	get(angular, :thetaunit, "degrees") == "degrees" || return nothing
+	# `angularaxis.thetaunit` only formats the tick labels (vm-06: "1/4 π"
+	# under "radians"); their positions stay in degrees.
 	get(angular, :type, "-") in ("-", "linear") || return nothing
 	get(radial, :type, "-") in ("-", "linear") || return nothing
 	rotation = something(_legend_real(get(angular, :rotation, nothing)), 0.0)
@@ -2700,6 +2783,12 @@ function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float
 		r = _scat_legend_coords(get(fields, :r, nothing), false)
 		theta = _scat_legend_coords(get(fields, :theta, nothing), false)
 		(r === nothing || theta === nothing) && return nothing
+		# the trace's `thetaunit` is the unit of its theta values (plotly.js:
+		# degrees, radians or gradians)
+		unit = string(get(fields, :thetaunit, "degrees"))
+		degrees_per_unit = unit == "degrees" ? 1.0 : unit == "radians" ? 180 / pi :
+			unit == "gradians" ? 0.9 : return nothing
+		degrees_per_unit == 1 || (theta = theta .* degrees_per_unit)
 		n = min(length(r), length(theta))
 		n == 0 && continue
 		mode = string(get(fields, :mode, "lines"))
@@ -2790,7 +2879,11 @@ function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float
 			(data[k], labels[k], depth[k])
 	end
 	# `argmin` returns the first minimum: ties keep the candidate order.
-	return _SCAT_LEGEND_POSITIONS[argmin(ranks)]
+	best = argmin(ranks)
+	# vm-06: no corner clear of the data and the tick labels; `outside` given,
+	# the legend goes there instead of over them.
+	outside !== nothing && (data[best] > 0 || labels[best] > 0) && return outside
+	return _SCAT_LEGEND_POSITIONS[best]
 end
 
 # Angles (degrees) of the angular tick labels of polar `angularaxis` settings
@@ -2889,6 +2982,10 @@ function _text_figure_title!(fig, text, align::Symbol, fontsize::Float64, bold::
 		updates[:title_pad_r] = _text_number(align === :right ? -dx : 0.0)
 		fontsize > 0 && (updates[:title_font_size] = _text_number(fontsize))
 	end
+	# The pad the room providers wrote for the last title (`_lt_title_pin`)
+	# is not this one's: its record goes.
+	meta = _text_meta_without_title_shift(_cmn_plot(fig).layout)
+	meta === nothing || (updates[:meta] = meta)
 	relayout!(fig; updates...)
 	# A legend already drawn above the axes stays clear of the new title, and
 	# a figure legend there is re-stacked for the new title band.
@@ -3032,10 +3129,13 @@ const _TEXT_ANNOTATION_FRAME = 4.0
 # 16) + 3 px - one per entry for a vertical legend, the longest column for a
 # column legend, rows of the plot-area width for a plain horizontal legend -,
 # a title on top, and the frame + itemGap padding. 0 when it lists nothing.
+# `orientation` and `wrap` as for `_legend_box_size`.
 function _legend_box_height(
 	p::Plot,
 	legend_id::AbstractString,
-	indices::Vector{Int} = _legend_entry_indices(p, legend_id),
+	indices::Vector{Int} = _legend_entry_indices(p, legend_id);
+	orientation::Union{Nothing, AbstractString} = nothing,
+	wrap::Union{Nothing, Real} = nothing,
 )
 	box = _symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing))
 	get(box, :visible, true) === false && return 0.0
@@ -3045,7 +3145,7 @@ function _legend_box_height(
 		name = get(p.data[index].fields, :name, "")
 		max(_text_extent(name isa AbstractString ? name : string(name), fontsize)[2], 16.0) + 3
 	end
-	orientation = get(box, :orientation, "v")
+	orientation === nothing && (orientation = something(get(box, :orientation, nothing), "v"))
 	order = get(box, :traceorder, "")
 	body = if orientation != "h"
 		sum(heights)
@@ -3059,7 +3159,8 @@ function _legend_box_height(
 		maximum(values(columns))
 	else
 		widths = _legend_entry_widths(p, box, indices)
-		rows = ceil(Int, (sum(widths) + _LEGEND_ITEM_GAP * length(widths)) / _legend_plot_area_width(p))
+		frame_px = something(_legend_real(get(box, :borderwidth, nothing)), 0.0)
+		_, rows = _legend_wrap(widths, frame_px, something(wrap, _legend_plot_area_width(p)))
 		max(rows, 1) * maximum(heights)
 	end
 	frame = something(_legend_real(get(box, :borderwidth, nothing)), 0.0)
@@ -3067,14 +3168,28 @@ function _legend_box_height(
 	title_text = get(title, :text, "")
 	if title_text isa AbstractString && !isempty(strip(title_text))
 		side = string(get(title, :side, orientation == "h" ? "left" : "top"))
-		title_size = something(_legend_real(get(_symbol_dict(get(title, :font, nothing)), :size, nothing)), fontsize)
-		h = _text_extent(title_text, title_size)[2]
+		# plotly.js draws a title without a size of its own 1.2 times the
+		# entries' size (`_legend_title_size`).
+		h = _text_extent(title_text, _legend_title_size(p, box))[2]
 		body = occursin("top", side) ? body + h : max(body, h)
 	end
 	return body + 2 * (frame + _LEGEND_ITEM_GAP)
 end
 
 # The figure title of `p` as a Dict when it has text, else `nothing`.
+# A copy of `layout.meta` without the `plotlysupply.titleshift` record of the
+# room providers (`_lt_title_pin`); `nothing` when it has none.
+function _text_meta_without_title_shift(layout)
+	meta = get(layout.fields, :meta, nothing)
+	own = _style_meta_get(meta, _STYLE_META_KEY)
+	_style_meta_get(own, _LT_TITLE_SHIFT_META_KEY) === nothing && return nothing
+	fields = _symbol_dict(meta)
+	own = _symbol_dict(own)
+	delete!(own, _LT_TITLE_SHIFT_META_KEY)
+	isempty(own) ? delete!(fields, _STYLE_META_KEY) : (fields[_STYLE_META_KEY] = own)
+	return fields
+end
+
 function _text_title_dict(p::Plot)
 	title = get(p.layout.fields, :title, nothing)
 	d = title isa AbstractString ? Dict{Symbol, Any}(:text => String(title)) : _symbol_dict(title)
@@ -3403,9 +3518,27 @@ function _text_write_panel_labels!(fig, targets, texts, format, position, outsid
 			),
 		))
 	end
-	for (name, annotation) in items
-		_upsert_named!(fig, :annotations, name, [annotation]; who = "panel_labels!")
+	isempty(items) && return nothing
+	# One write for all labels (perf-04: an `_upsert_named!` per label
+	# relayouted the whole annotation list once per cell, quadratic in the
+	# cells). The result is the one of those upserts in turn: the other
+	# annotations in their order, then the labels in cell order.
+	existing = get(_cmn_layout(fig).fields, :annotations, nothing)
+	(existing === nothing || existing isa AbstractVector) || throw(ArgumentError(
+		"panel_labels!: layout.annotations must be a vector; got $(typeof(existing)).",
+	))
+	names = Set{String}(name for (name, _) in items)
+	kept = Any[]
+	if existing !== nothing
+		for item in existing
+			item_name = _cmn_item_name(item)
+			# `_cmn_name_matches`: the name itself or one of its ":k" parts.
+			item_name isa AbstractString && (item_name in names ||
+				any(name -> _cmn_name_matches(item_name, name), names)) && continue
+			push!(kept, item)
+		end
 	end
+	relayout!(_cmn_relayout_target(fig); annotations = vcat(kept, Any[annotation for (_, annotation) in items]))
 	# D12 stacking and room, as for panel titles (room_providers.jl).
 	return nothing
 end

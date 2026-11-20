@@ -531,6 +531,10 @@ using Test, PlotlySupply
 		sh = subplots(1, 3; sync = false)
 		plot_scatter!(sh, x, [x, 2x]; legend = ["two frequencies", "three frequencies"], row = 1, col = 1)
 		plot_scatter!(sh, x, x; legend = "z", row = 1, col = 2)
+		# v7 L10: two long labels fit no corner of a third of the figure, so the
+		# rule put this legend right of its cell (narrowing it); pinned inside,
+		# the rows below are computed for the cell's full width.
+		set_legend!(sh; row = 1, col = 1, position = :topright)
 		@test_logs set_legend!(sh; row = 1, col = 1, orientation = :h)
 		id = PS._legend_cell_legend_id(pl(sh), cell(sh, 1, 1))
 		infos = [PS._legend_column_info(group(sh, k)) for k in 1:2]
@@ -805,5 +809,183 @@ using Test, PlotlySupply
 		@test throws_arg(() -> tight_layout!(fig; row = 1), "tight_layout!: ")
 		@test throws_arg(() -> tight_layout!(fig; pad = -1), "tight_layout!: ")
 		@test layout_json(sf) == before
+	end
+
+	@testset "v7: annotate! at an axes edge keeps a pad from the frame and its inward ticks" begin
+		shift(f) = (a = last(annotations(f)); (get(a, :xshift, 0.0), get(a, :yshift, 0.0)))
+		note!(f, x, y; kw...) = annotate!(f, x, y, "note"; coords = :axes, showarrow = false, kw...)
+		# :ieee draws ticks inside on all four sides (mirrored): tick length
+		# 3.5 pt, frame 1 px: 3.5 pt + 1.75 pt + 0.5 px.
+		ieee = with_style(() -> plot_scatter([0.0, 1.0], [0.0, 1.0]), :ieee)
+		len = Float64(sd(pl(ieee).layout.fields[:yaxis])[:ticklen])
+		@test len ≈ 3.5 * PS._PT_PX
+		pad = len + len / 2 + 0.5
+		note!(ieee, 1, 0.5; anchor = :right)
+		@test all(shift(ieee) .≈ (-pad, 0.0))
+		note!(ieee, 0, 0; anchor = :bottomleft)
+		@test all(shift(ieee) .≈ (pad, pad))
+		note!(ieee, 1, 1)                                       # plotly's automatic anchor: top right
+		@test all(shift(ieee) .≈ (-pad, -pad))
+		# no pad: anchored away from the edge, centred on it, inside the
+		# axes, with an arrow, an explicit offset, a raw shift, data coordinates
+		for kw in ((anchor = :left,), (anchor = :center,))
+			note!(ieee, 1, 0.5; kw...)
+			@test shift(ieee) == (0.0, 0.0)
+		end
+		note!(ieee, 0.98, 0.5; anchor = :right)
+		@test shift(ieee) == (0.0, 0.0)
+		annotate!(ieee, 1, 0.5, "arrow"; coords = :axes)
+		@test shift(ieee) == (0.0, 0.0)
+		note!(ieee, 1, 0.5; anchor = :right, offset = (0, 0))
+		@test shift(ieee) == (0.0, 0.0)
+		note!(ieee, 1, 0.5; anchor = :right, offset = (-2, 1), units = :pt)
+		@test all(shift(ieee) .≈ (-2 * PS._PT_PX, PS._PT_PX))
+		note!(ieee, 1, 0.5; anchor = :right, yshift = 4)
+		@test shift(ieee) == (0.0, 4)
+		annotate!(ieee, 1.0, 0.5, "data"; showarrow = false, anchor = :right)
+		@test shift(ieee) == (0.0, 0.0)
+		# :default: outside ticks of plotly's 5 px, a 1 px frame
+		plain = plot_scatter([0.0, 1.0], [0.0, 1.0])
+		note!(plain, 1, 0.5; anchor = :right)
+		@test all(shift(plain) .≈ (-3.0, 0.0))
+		# a cell of a grid and its twin y axis with inside ticks on the right
+		sf = subplots(1, 2; sync = false, specs = [Spec() Spec(secondary_y = true)])
+		plot_scatter!(sf, [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2)
+		plot_scatter!(sf, [0.0, 1.0], [1.0, 0.0]; row = 1, col = 2, secondary_y = true)
+		twin = only(k for (k, v) in pl(sf).layout.fields if occursin(r"^yaxis\d+$", String(k)) &&
+			get(sd(v), :overlaying, nothing) == "y2")
+		relayout!(sf; Symbol(twin, "_ticks") => "inside", Symbol(twin, "_ticklen") => 8)
+		note!(sf, 1, 0.5; row = 1, col = 2, anchor = :right)
+		@test all(shift(sf) .≈ (-(8 + 2.5 + 0.5), 0.0))
+		note!(sf, 0, 0.5; row = 1, col = 2, anchor = :left)
+		@test all(shift(sf) .≈ (3.0, 0.0))                       # the left edge has no inside ticks
+	end
+
+	@testset "v7 docs-06: column and row titles keep the panel titles' gap from the frame" begin
+		sf = subplots(2, 2; sync = false, subplot_titles = ["a" "b"; "c" "d"],
+			column_titles = ["\$\\alpha = 1\$", "C2"], row_titles = ["R1", "\$r_2\$"])
+		byname = Dict(a[:name] => a for a in annotations(sf) if haskey(a, :name))
+		gap = PS._TEXT_PANEL_GAP
+		@test byname["plotlysupply:title:1:1"][:yshift] == gap
+		for c in 1:2
+			@test byname["plotlysupply:title!:1:$(c):column"][:yshift] == gap
+		end
+		for r in 1:2
+			@test byname["plotlysupply:title!:$(r):2:row"][:xshift] == gap
+		end
+	end
+
+	@testset "v7 perf-04: panel_labels! writes every label in one relayout" begin
+		# (not `grid`: that name is the outer testset's local helper)
+		function square_grid(n)
+			g = subplots(n, n; sync = false)
+			for r in 1:n, c in 1:n
+				plot_scatter!(g, [1.0, 2.0], [1.0, 2.0]; row = r, col = c)
+			end
+			return g
+		end
+		small, large = square_grid(4), square_grid(8)
+		panel_labels!(small)
+		panel_labels!(large)
+		# Measured before: 7.7 MB (4 x 4) and 86 MB (8 x 8), 11x for 4x the
+		# cells (one relayout of the whole annotation list per label).
+		@test @allocated(panel_labels!(large)) < 6 * @allocated(panel_labels!(small))
+		# the same annotations as one upsert per label: the others first, in
+		# their order, then the labels in cell order; a second call replaces
+		sf = subplots(1, 3; sync = false)
+		for c in 1:3
+			plot_scatter!(sf, [1.0, 2.0], [1.0, 2.0]; row = 1, col = c)
+		end
+		annotate!(sf, 1.5, 1.5, "note"; row = 1, col = 2)
+		panel_labels!(sf)
+		panel_labels!(sf; format = "{})")
+		names = [get(a, :name, "") for a in annotations(sf)]
+		labels = filter(n -> startswith(n, "plotlysupply:panel_label:"), names)
+		@test labels == ["plotlysupply:panel_label:1:$(c)" for c in 1:3]
+		@test findfirst(==(labels[1]), names) > something(findfirst(n -> !startswith(n, "plotlysupply:panel_label:"), names), 0)
+		@test [a[:text] for a in annotations(sf) if startswith(get(a, :name, ""), "plotlysupply:panel_label:")] ==
+			[PS._text_label("$(l))", :left, false, "panel_labels!") for l in ("a", "b", "c")]
+	end
+
+	@testset "v7 tm-title-top-clip: a title of several lines starts where a one-line title does" begin
+		for style in (:default, :ieee)
+			fig = with_style(style) do
+				f = plot_scatter(x, x; xlabel = "x", ylabel = "y")
+				title!(f, "Two-line\nfigure title")
+				f
+			end
+			PS._finalize_figure!(fig)
+			@test PS._finalize_figure!(fig) === false
+			t = sd(pl(fig).layout.fields[:title])
+			size = PS._legend_title_font_size(pl(fig), t)
+			# plotly.js puts the first line's baseline on the anchor (a one-line
+			# title's 0.7 em lower): the pad holds that shift
+			@test abs(sd(t[:pad])[:t] - (PS._TEXT_TITLE_TOP_PAD + 0.7 * size)) <= 1e-3
+			# the margin holds the drawn band, so plotly.js does not push it
+			# (a push moved every line up by a further 1.65 em)
+			@test sd(pl(fig).layout.fields[:margin])[:t] >= sd(t[:pad])[:t] + PS._text_extent(t[:text], size)[2]
+			# one line again: the pad title! gives
+			title!(fig, "One line")
+			PS._finalize_figure!(fig)
+			@test sd(sd(pl(fig).layout.fields[:title])[:pad])[:t] == PS._TEXT_TITLE_TOP_PAD
+			@test PS._finalize_figure!(fig) === false
+		end
+	end
+
+	@testset "v7: titles and labels of a row share a baseline above a cell legend (topo_response, optical_bars)" begin
+		# (a) and the cell title of (1, 1) were drawn a legend's height lower
+		# than (b), which sits above the outside_top legend of (1, 2).
+		xs = collect(range(0, 1; length = 30))
+		label(c) = "plotlysupply:panel_label:1:$(c)"
+		for style in (:default, :ieee), legend_cell in (2, 1)
+			sf = with_style(style) do
+				sf = subplots(1, 2; sync = false)
+				plot_scatter!(sf, xs, xs .^ 2; row = 1, col = 1, legend = "square", xlabel = "x", ylabel = "y")
+				plot_scatter!(sf, xs, [xs, 1 .- xs]; row = 1, col = 2, legend = ["radiated", "TM\$_0\$ reflected"],
+					xlabel = "x", ylabel = "y")
+				title!(sf, "reduced model"; row = 1, col = 1)
+				set_legend!(sf; row = 1, col = legend_cell, position = :outside_top, ncols = 2)
+				panel_labels!(sf; labels = :abc, format = "({})", bold = true)
+				sf
+			end
+			PS._finalize_figure!(sf)
+			@test PS._finalize_figure!(sf) === false
+			a, b = only(named(sf, label(1))), only(named(sf, label(2)))
+			@test a[:yref] == b[:yref] == "paper" && a[:yanchor] == b[:yanchor] == "bottom"
+			@test abs(a[:y] - b[:y]) <= 1e-6
+			@test get(a, :yshift, 0) == get(b, :yshift, 0)
+			# above the legend of its own cell, and nothing changed beyond the
+			# raise of the other cell's line
+			plan = PS._room_plan(sf)
+			lines = Dict(d.area => d for d in PS._lt_decorations(plan) if d.role === :line)
+			other = legend_cell == 2 ? :xaxis : :xaxis2
+			own = legend_cell == 2 ? :xaxis2 : :xaxis
+			rise = PS._lt_expected_offset(plan, PS._lt_decorations(plan), own, :top, PS._LT_ORDER_LINE) -
+				PS._lt_expected_offset(plan, PS._lt_decorations(plan), other, :top, PS._LT_ORDER_LINE)
+			@test rise > 10                                  # the legend's band
+			@test all(entry -> entry[3] >= rise - 1e-9, lines[other].data)
+		end
+	end
+
+	@testset "v7 vm-03: panel label (a) beside a math cell title stays on the page" begin
+		# :ieee 2 x 2 grid, math cell titles, a math legend in (1, 1), a
+		# heatmap in (2, 1): label (a) was pushed 16.15 px left of the
+		# plot area with a 4 px margin (only "a)" drawn).
+		xs = range(0, 1; length = 40)
+		hx = range(0, 4; length = 81); hy = range(0, 2; length = 41)
+		U = [abs(sin(2a) * cos(3b)) for a in hx, b in hy]
+		sf = with_style(:ieee) do
+			sf = subplots(2, 2; sync = false, subplot_titles = ["Mesh \$h = 0.1\$", "Mesh \$h = 0.05\$", "Error map", "Convergence"])
+			plot_scatter!(sf, xs, sin.(4xs); row = 1, col = 1, legend = "\$u_h\$")
+			plot_scatter!(sf, xs, sin.(4xs); row = 1, col = 2)
+			plot_heatmap!(sf, hx, hy, U; row = 2, col = 1)
+			plot_scatter!(sf, xs, xs .^ 2; row = 2, col = 2)
+			panel_labels!(sf)
+			sf
+		end
+		byname = Dict(a[:name] => a for a in annotations(sf) if haskey(a, :name))
+		a, c = byname["plotlysupply:panel_label:1:1"], byname["plotlysupply:panel_label:2:1"]
+		@test get(a, :xshift, 0) == get(c, :xshift, 0)
+		@test PS._finalize_figure!(sf) === false
 	end
 end
