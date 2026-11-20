@@ -3708,7 +3708,7 @@ view `elev = 30, azim = -60` puts the camera on the +x, -y, +z side. At
 `(90, -90)` you look straight down with +x to the right and +y up; at `(0, 0)`
 you look along -x with +y to the right and +z up. Near-vertical views
 (`|elev| ≥ 89.9`) use the horizontal up vector `∓(cosd(azim), sind(azim), 0)`,
-which gives exactly that top view. `fig` is a `Plot` or `SyncPlot` with a 3-D
+which gives exactly that top view. The axis the camera looks along (within 0.8 degrees: z in a top view, x at `(0, 0)`) is seen end-on, its two ends on one point, so its tick labels are hidden (`showticklabels = false`, unless you set that attribute) and shown again by a later view that is not end-on along it. `fig` is a `Plot` or `SyncPlot` with a 3-D
 scene, or a `SubplotFigure`. Every 3-D constructor and mutator also accepts
 `view = (elev, azim)`.
 
