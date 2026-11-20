@@ -819,13 +819,11 @@ end
 		@test sort(filter(endswith(".png"), readdir(out))) == [f[1:end-3] * ".png" for f in _gallery_scripts()]
 		# Settled figures: after the last PlotlySupply call of a script, finalizing the figure (outside
 		# the `with_style` block it was built in) writes nothing.
-		# Five figures (all with equal-aspect cells, shared colorbars or hidden axes) are not yet
-		# fixed points of the finalizer: the first call after the script writes again
-		# (chama_a5_deformed_meshes never settles, device_geometry needs three rounds). They are
-		# listed as broken so the layout engine's fix shows up as an unexpected pass; every
-		# other gallery figure must be settled.
-		known_unsettled = Set(["block_diagram.png", "chama_a5_deformed_meshes.png", "device_geometry.png",
-			"field_maps.png", "optical_pixelmap.png"])
+		# Two figures (equal-aspect cells with hidden axes) are not yet fixed points of the
+		# finalizer: the first call after the script writes again (chama_a5_deformed_meshes never
+		# settles, device_geometry needs one more round). They are listed as broken so the layout
+		# engine's fix shows up as an unexpected pass; every other gallery figure must be settled.
+		known_unsettled = Set(["chama_a5_deformed_meshes.png", "device_geometry.png"])
 		@test known_unsettled <= Set(first.(runner.DRY_FIGURES))
 		for (name, fig) in runner.DRY_FIGURES
 			wrote = PlotlySupply._finalize_figure!(fig)
