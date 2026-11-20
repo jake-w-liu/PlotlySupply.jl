@@ -2615,3 +2615,120 @@ end
 	@test m.data[1] === t1
 	@test _SFN._finalize_figure!(m) === false
 end
+
+@testset "_fin_least_size finds the least fitting size whatever it starts from" begin
+	# Sizes 237 and up fit; each probe answers with an estimate of the boundary.
+	calls = Ref(0)
+	probe(boundary, estimate) = s -> (calls[] += 1; (s >= boundary, estimate(s)))
+	for guesses in ((400.0, 300.0), (237.0,), (236.0,), (201.0,), (499.0,), (NaN,), ())
+		for estimate in (s -> 237.0, s -> s, s -> 1000.0, s -> -5.0)
+			calls[] = 0
+			@test _SFN._fin_least_size(probe(237, estimate), 200.0, 500.0, guesses) == 237.0
+			@test calls[] <= 20
+		end
+	end
+	# None fits below the base: the base, unrounded (a journal height).
+	@test _SFN._fin_least_size(s -> (false, s + 1), 200.0, 252.3, (220.0,)) == 252.3
+	# Everything fits: the lower bound, rounded up.
+	@test _SFN._fin_least_size(s -> (true, s - 1), 200.4, 500.0, (300.0,)) == 201.0
+	# An empty range and a probe that cannot fit: the base.
+	@test _SFN._fin_least_size(s -> (true, s), 500.0, 500.0, (300.0,)) == 500.0
+	@test _SFN._fin_least_size(s -> nothing, 200.0, 500.0, (300.0,)) == 500.0
+end
+
+@testset "single and grid equal-aspect fields settle (free size, fit cycles, slow margins, edge bars)" begin
+	settled(fig) = _SFN._finalize_figure!(fig) === false && _SFN._finalize_figure!(fig) === false
+	field(ex, ey, nx, ny) = (x = range(-ex, ex; length = nx); y = range(-ey, ey; length = ny);
+		(x, y, [exp(-(a^2 + b^2)) for a in x, b in y]))
+	# A free height corrected by the blank the fit leaves alternated between
+	# 386 and 393 px: the size is now the least that fits.
+	x, y, U = field(2.0, 1.0, 41, 21)
+	p = plot_heatmap(x, y, U; equalar = true, colorbar_title = "|E| (V/m)", xlabel = "x (mm)", ylabel = "y (mm)")
+	@test settled(p)
+	H = p.layout.fields[:height]
+	@test H < 500
+	ctx = _SFN._fin_context(p, nothing, nothing, false)
+	accs = _SFN._fin_collect_axes(p)
+	bars = _SFN._fin_collect_bars(p, ctx.insets)
+	fit_at(h) = _SFN._fin_plan_and_fit(ctx, accs, bars, 700.0, Float64(h))[2][(:xaxis, :yaxis)]
+	_SFN._with_figure_style(p) do
+		_SFN._cbar_with_extrema_memo() do
+			@test fit_at(H).free_px <= 1
+			@test fit_at(H - 1).free_px > 1
+		end
+	end
+	# The fit's passes cycled with period 5 (y tick labels widening past a
+	# box height): the pass with the smallest boxes is the fit.
+	with_style(:aps) do
+		x, y, U = field(1.5, 1.5, 30, 30)
+		q = plot_heatmap(x, y, U; equalar = true, colorbar_title = "\$|E|\$ (V/m)", xlabel = "x (mm)",
+			ylabel = "y (mm)", title = "field")
+		@test settled(q)
+	end
+	# The y labels' margin estimate crept 2.4 px per pass toward the 10 px
+	# margin: the constructor's run ended a round short.
+	with_style(:publication) do
+		x, y, U = field(0.55, 2.0, 11, 40)
+		r = plot_heatmap(x, y, U; equalar = true, xlabel = "x (mm)", ylabel = "y (mm)")
+		@test settled(r)
+	end
+	# The bars of the right column of an :ieee grid were taken from its slot
+	# alone: a 17 px box, given up, laid out by the fit and the solve on
+	# alternate rounds. The band edge now gives that room up for every column.
+	# The 2 x 2 grids: L11 cut the :ieee one to 114 px, where no cell fitted,
+	# and moved the :nature one 252 -> 246 -> 135 -> 110 px and back. The
+	# :aps pair with bar titles: the bar of the right cell, drawn beyond the
+	# paper while the cell was given up, kept the fit's margin too wide for it.
+	cases = Any[(style, rows, cols, (; xlabel = "x (mm)", ylabel = "y (mm)"))
+		for style in (:ieee, :nature) for (rows, cols) in ((1, 2), (2, 2))]
+	push!(cases, (:aps, 1, 2, (; colorbar_title = "|E| (V/m)")))
+	for (style, rows, cols, deco) in cases
+		with_style(style) do
+			x, y, U = field(2.0, 1.0, 21, 15)
+			sf = subplots(rows, cols; sync = false)
+			for i in 1:rows, j in 1:cols
+				plot_heatmap!(sf, x, y, U; row = i, col = j, equalar = true, deco...)
+			end
+			@test settled(sf)
+			widths = [(d = _SFN._layout_axis_domain(sf.plot.layout, Symbol(k)); d[2] - d[1])
+				for k in (cols == 2 && rows == 1 ? ("xaxis", "xaxis2") : ("xaxis", "xaxis2", "xaxis3", "xaxis4"))]
+			@test maximum(widths) - minimum(widths) <= 1e-6
+			# Every cell is fitted (its domain is the fit's, in the room record
+			# or inside its grid cell, and its bar hugs it).
+			fits = _SFN._with_figure_style(sf) do
+				_SFN._cbar_with_extrema_memo() do
+					ctx = _SFN._fin_context(sf, nothing, nothing, false)
+					accs = _SFN._fin_collect_axes(sf.plot)
+					bars = _SFN._fin_collect_bars(sf.plot, ctx.insets)
+					W, H = _SFN._fin_figure_size(ctx, sf.plot.layout)
+					_SFN._fin_plan_and_fit(ctx, accs, bars, W, H)[2]
+				end
+			end
+			@test length(fits) == rows * cols
+		end
+	end
+end
+
+@testset "a compressed grid size that stops holding is given up (L11)" begin
+	# A record of a compressed size whose cells do not fit there (the state
+	# the :ieee 2 x 2 grid was left in): the figure goes back to its base
+	# size, records that, and settles there.
+	with_style(:ieee) do
+		x = range(-2.0, 2.0; length = 21); y = range(-1.0, 1.0; length = 15)
+		U = [exp(-(a^2 + b^2)) for a in x, b in y]
+		sf = subplots(2, 2; sync = false)
+		for i in 1:2, j in 1:2
+			plot_heatmap!(sf, x, y, U; row = i, col = j, equalar = true, xlabel = "x (mm)", ylabel = "y (mm)")
+		end
+		layout = sf.plot.layout
+		W0, H0 = Float64(layout.fields[:width]), Float64(layout.fields[:height])
+		rec = _SFN._fin_meta_get(layout, _SFN._FIN_SIZE_KEY)
+		base = rec isa AbstractVector ? Float64(rec[2]) : H0
+		layout.fields[:height] = 114
+		_SFN._fin_meta_set!(layout, _SFN._FIN_SIZE_KEY, Any[W0, base, W0, 114.0, 0, 1])
+		@test _SFN._finalize_figure!(sf) === true
+		@test layout.fields[:height] == base
+		@test _SFN._fin_size_abandoned(layout)
+		@test _SFN._finalize_figure!(sf) === false
+	end
+end

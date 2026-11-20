@@ -1647,8 +1647,15 @@ end
 # Who chose the figure size, recorded in `layout.meta` under `_FIN_SIZE_KEY`:
 # `"user"` (written by `figsize!`), or `[W0, H0, w, h, wfree, hfree]` when
 # M3a/L11 sized the figure to `w` x `h` from the base size `W0` x `H0` with
-# the free directions `wfree`/`hfree` (1/0).
+# the free directions `wfree`/`hfree` (1/0), and a seventh entry 1 when L11
+# gave up compressing the grid (`_fin_free_size`).
 const _FIN_SIZE_KEY = Symbol("plotlysupply:size")
+
+# Whether the size record of the figure says L11 gave up compressing it.
+function _fin_size_abandoned(layout::Layout)
+	rec = _fin_meta_get(layout, _FIN_SIZE_KEY)
+	return rec isa AbstractVector && length(rec) == 7 && _fin_isfinite_real(rec[7]) && rec[7] != 0
+end
 
 # `figsize!`: the size is the user's; M3a/L11 never change it.
 _fin_mark_user_size!(layout::Layout) = (_fin_meta_set!(layout, _FIN_SIZE_KEY, "user"); nothing)
@@ -1667,7 +1674,7 @@ function _fin_size_choice(layout::Layout)
 	rec == "user" && return nothing
 	w = get(layout.fields, :width, nothing)
 	h = get(layout.fields, :height, nothing)
-	if rec isa AbstractVector && length(rec) == 6 && all(_fin_isfinite_real, rec) &&
+	if rec isa AbstractVector && length(rec) in (6, 7) && all(_fin_isfinite_real, rec) &&
 			_fin_isfinite_real(w) && _fin_isfinite_real(h) && abs(w - rec[3]) <= 0.5 && abs(h - rec[4]) <= 0.5
 		return (Float64(rec[1]), Float64(rec[2]), rec[5] != 0, rec[6] != 0)
 	end
@@ -1684,65 +1691,141 @@ function _fin_size_choice(layout::Layout)
 end
 
 # The size (px) M3a/L11 give a figure of base size `W0` x `H0` from the fits
-# at that size: a single figure drops the blank rows above and below its plot
-# box (wide field) or the blank columns beside it (tall field); a grid drops
-# the blank every equal-aspect cell of a row (column) leaves
-# (`plan.memo[:band_slack]`), unless built with `compress = false`. Only a
-# free direction changes. The bounds are for the 700 x 500 default; a smaller
-# (journal) size scales them.
-# Refits `_fin_free_size` makes at a single figure's new size (vm-08); one
-# or two suffice (the second only corrects rounding).
-const _FIN_FREE_SIZE_STEPS = 3
-
-function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, wfree::Bool, hfree::Bool, accs, bars)
+# at that size, and whether L11 gives up compressing it: a single figure
+# drops the blank rows above and below its plot box (wide field) or the
+# blank columns beside it (tall field); a grid drops the blank every
+# equal-aspect cell of a row (column) leaves (`plan.memo[:band_slack]`),
+# unless built with `compress = false` or the compression was given up
+# (`abandoned`). Only a free direction changes. The bounds are for the
+# 700 x 500 default; a smaller (journal) size scales them. `now` is the size
+# the figure has and the fits there: `(W, H, fits)`.
+function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, wfree::Bool, hfree::Bool, accs, bars;
+		now = nothing, abandoned::Bool = false)
 	layout = ctx.p.layout
 	lowH = min(H0, _FIN_MIN_FIGURE_HEIGHT * min(1.0, H0 / _DEFAULT_EXPORT_HEIGHT_PX))
 	lowW = min(W0, _FIN_MIN_FIGURE_WIDTH * min(1.0, W0 / _DEFAULT_EXPORT_WIDTH_PX))
 	newW, newH = W0, H0
 	if layout.subplots.rows * layout.subplots.cols == 1
-		(ctx.sf === nothing && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) || return (W0, H0)
+		(ctx.sf === nothing && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) || return (W0, H0, false)
 		fit = fits[(:xaxis, :yaxis)]
-		if fit.slack_px > 1
-			hfree && (newH = clamp(round(H0 - fit.slack_px), lowH, H0))
-		elseif fit.free_px > 1
-			wfree && (newW = clamp(round(W0 - fit.free_px), lowW, W0))
-		end
-		# vm-08: the margins at the new size are not those at the base: tick
+		# vm-08: the margins at a new size are not those at the base: tick
 		# labels and titles push a margin only where the box reaches the paper
 		# edge, as it does once the blank is dropped (a 4 px journal margin
 		# grew by the x labels: an :ieee 2:1 field got a 101 px page and a
-		# 96 px box). The box is refitted at the new size, and the size
-		# corrected by what it still leaves blank or lacks, until it holds.
-		for _ in 1:_FIN_FREE_SIZE_STEPS
-			(newW == W0 && newH == H0) && break
-			_, again = _fin_plan_and_fit(ctx, accs, bars, newW, newH)
-			g = get(again, (:xaxis, :yaxis), nothing)
-			g === nothing && break
-			stepW = stepH = 0.0
-			if newH != H0
-				# Height chosen: drop what is left above and below, or add
-				# what the box needs to fill its width.
-				stepH = g.slack_px > 1 ? -g.slack_px : g.free_px > 1 ? g.free_px / (1.025 * g.ratio) : 0.0
-			else
-				stepW = g.free_px > 1 ? -g.free_px : g.slack_px > 1 ? 1.025 * g.slack_px * g.ratio : 0.0
-			end
-			(abs(stepW) < 1 && abs(stepH) < 1) && break
-			# Only the chosen side moves (a journal column stays exact).
-			stepH == 0 || (newH = clamp(round(newH + stepH), lowH, H0))
-			stepW == 0 || (newW = clamp(round(newW + stepW), lowW, W0))
+		# 96 px box). So the blank a fit leaves is not the px to drop (an
+		# equal-aspect heatmap under :default left 2 px more blank per px of
+		# height), and correcting the size by it alternated between two sizes
+		# on every finalize. The size is the least whole px at which the box
+		# fills its cell in the free direction, found by a search that keeps
+		# a size known to fit and one known not to: one value, whatever the
+		# state the fits read.
+		# The size the figure has is tried first: once settled, the search
+		# confirms it with one more fit (a px less does not fit).
+		current = _fin_figure_size(ctx, layout)
+		fitted(W, H) = get(_fin_plan_and_fit(ctx, accs, bars, W, H)[2], (:xaxis, :yaxis), nothing)
+		if fit.slack_px > 1
+			# A wide field: drop the rows above and below the box down to the
+			# least height at which it still fills its width.
+			hfree && (newH = _fin_least_size(lowH, H0, (current[2], H0 - fit.slack_px)) do h
+				g = fitted(W0, h)
+				g === nothing ? nothing :
+					g.free_px <= 1 ? (true, h - max(1.0, floor(g.slack_px / 2))) :
+					(false, h + ceil(g.free_px / (1.025 * g.ratio)))
+			end)
+		elseif fit.free_px > 1
+			# A tall field: drop the columns beside it down to the least width
+			# at which it still fills its height.
+			wfree && (newW = _fin_least_size(lowW, W0, (current[1], W0 - fit.free_px)) do w
+				g = fitted(w, H0)
+				g === nothing ? nothing :
+					g.slack_px <= 1 ? (true, w - max(1.0, floor(g.free_px / 2))) :
+					(false, w + ceil(1.025 * g.slack_px * g.ratio))
+			end)
 		end
 	else
-		_fin_compress_grid(layout) || return (W0, H0)
+		(_fin_compress_grid(layout) && !abandoned) || return (W0, H0, false)
+		compressed = now !== nothing && (now[1] != W0 || now[2] != H0)
 		slack = get(plan.memo, :band_slack, nothing)
-		slack === nothing && return (W0, H0)
-		hfree && slack.y !== nothing && sum(slack.y) > 1 && (newH = clamp(round(H0 - sum(slack.y)), lowH, H0))
-		wfree && slack.x !== nothing && sum(slack.x) > 1 && (newW = clamp(round(W0 - sum(slack.x)), lowW, W0))
+		# A grid the plan at the base size does not compress (its compressed
+		# bands lost a cell, `_fin_plan_and_fit`) is drawn at the base size,
+		# and one at a compressed size gives the compression up (below).
+		slack === nothing && return (W0, H0, compressed)
+		dropH = hfree && slack.y !== nothing && sum(slack.y) > 1 ? H0 - clamp(round(H0 - sum(slack.y)), lowH, H0) : 0.0
+		dropW = wfree && slack.x !== nothing && sum(slack.x) > 1 ? W0 - clamp(round(W0 - sum(slack.x)), lowW, W0) : 0.0
+		D = max(dropH, dropW)
+		D > 0 || return (W0, H0, false)
+		# A size holds when every cell fitted at the base is fitted there
+		# with a box as large (within 1 px: only blank was dropped).
+		holds(g) = all(fits) do (cell, f)
+			h = get(g, cell, nothing)
+			h !== nothing && h.free_px <= f.free_px + 1 && h.slack_px <= f.slack_px + 1
+		end
+		# The fits at another size read the domains, bars and wrapped titles
+		# drawn now, and a grid's change with the size: the gaps between rows
+		# are paper fractions, so the room their labels take grows as the
+		# figure shrinks, a short row wraps its y title, and the bands give
+		# up at most `_ROOM_MAX_SHARE`. So a size found from one state need
+		# not hold in the state it leads to (a :nature 2 x 2 grid of labelled
+		# fields with bars went 252 -> 246 -> 135 -> 110 px, where no cell
+		# fitted, and back on successive passes; an :ieee one was cut to
+		# 114 px with 8 px rows and stayed there unfitted). A compressed size
+		# the figure has is therefore kept while it holds (its own fits, no
+		# probe); one that no longer holds is given up for the base size,
+		# and the figure is not compressed again (`abandoned`, recorded with
+		# the size) until its base size or its size record changes.
+		if compressed
+			holds(now[3]) && return (now[1], now[2], false)
+			return (W0, H0, true)
+		end
+		# From the base: the size keeps `u` px of the larger drop (`u = 0`:
+		# all of it, `u = D`: the base), the least `u` that holds found by
+		# `_fin_least_size`, the full drop (which holds unless the room grows
+		# as above) tried first.
+		at(u) = (W0 - round(dropW * (D - u) / D), H0 - round(dropH * (D - u) / D))
+		probe(u) = (ok = holds(_fin_plan_and_fit(ctx, accs, bars, at(u)...)[2]);
+			# Holding: one px less is the next trial; else the bracket is halved.
+			(ok, ok ? u - 1 : NaN))
+		newW, newH = at(_fin_least_size(probe, 0.0, D, (0.0,)))
 	end
 	# Only a side that was fitted is rounded to whole px: the other keeps its
 	# size exactly (a journal column, 89 mm = 336.378 px, stays 89 mm).
 	newW = newW == W0 ? W0 : Float64(round(Int, newW))
 	newH = newH == H0 ? H0 : Float64(round(Int, newH))
-	return newW, newH
+	return newW, newH, false
+end
+
+# The least whole size in [lo, hi) at which `probe` holds, or `hi` when none
+# does (`hi` itself holds). Sizes below that boundary do not hold and those
+# above it do. `probe(s)` answers `(holds, next)`, `next` its estimate of the
+# boundary, or `nothing` (no fit at `s`), which ends the search at the least
+# size known to hold. The search keeps the greatest size known not to hold
+# and the least known to hold, and tries `guesses` (the first strictly
+# between them) and then each estimate; it halves the bracket instead when
+# an estimate falls outside it or the last trial did not halve it. Every
+# trial narrows the bracket, so the search ends.
+function _fin_least_size(probe, lo::Float64, hi::Float64, guesses)
+	bad = ceil(lo) - 1.0
+	ok = ceil(hi)
+	trial = NaN
+	for g in guesses
+		s = round(g)
+		if isfinite(s) && bad < s < ok
+			trial = s
+			break
+		end
+	end
+	halve = false
+	while ok - bad > 1
+		width = ok - bad
+		(halve || !(bad < trial < ok)) && (trial = floor((bad + ok) / 2))
+		answer = probe(trial)
+		answer === nothing && break
+		holds, estimate = answer
+		holds ? (ok = trial) : (bad = trial)
+		halve = ok - bad > width / 2
+		trial = round(estimate)
+	end
+	return ok == ceil(hi) ? hi : ok
 end
 
 # L11: px of blank each column (`axis = 1`) or row (`axis = 2`) band of the
@@ -1763,7 +1846,13 @@ function _fin_band_slack(plan, fits, axis::Int)
 		j = searchsortedfirst(hi, round(a.ref[axis][2]; digits = 9))
 		(i <= n && j <= n) || return nothing
 		fit = a.aspect && a.ykey !== nothing ? get(fits, (a.key, a.ykey), nothing) : nothing
-		s = fit === nothing || i != j ? 0.0 : Float64(axis == 1 ? fit.free_px : fit.slack_px)
+		# A band cut to a box smaller than the least slot the fit fits a cell
+		# in (`_FIN_FIT_MIN_PX`) would make the compressed plan give that
+		# cell up (fields 13 px tall in the rows of a :nature 2 x 2 grid with
+		# bars): it keeps a px more than that.
+		s = fit === nothing || i != j ? 0.0 : axis == 1 ?
+			Float64(fit.free_px - max(0.0, _FIN_FIT_MIN_PX + 1 - fit.width_px)) :
+			Float64(fit.slack_px - max(0.0, _FIN_FIT_MIN_PX + 1 - fit.height_px))
 		for k in i:j
 			slack[k] = min(slack[k], s)
 		end
@@ -1810,13 +1899,22 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 	# so the fit does not depend on the domains it starts from (vm-08: a
 	# free height chosen from a half-converged fit moved 1 px per finalize).
 	previous = Dict{Symbol, NTuple{2, Float64}}()
+	started = Dict{Symbol, NTuple{2, Float64}}()
+	history = NamedTuple{(:domains, :placed, :boxes_px)}[]
+	# D17: the bars of a grid cell fitted in its solved slot sit in the room
+	# the solve took beside it, inside the paper, so where they are drawn now
+	# pushes no margin of this fit (a cell given up before has its bar beyond
+	# the paper edge, and counting it there kept the margin, and so the cell,
+	# too small to fit: an :aps 1 x 2 grid with bar titles never settled).
+	slotted = Set{Int}(item.index for (xkey, ykey, _) in cells if haskey(slots, xkey)
+		for item in _fin_hug_items(ctx, layout, bars_by_area, xkey, ykey))
 	for pass in 1:_FIN_FIT_PASSES
 		bar_boxes = Any[]
 		moved = Set{Int}(item.index for (_, fit) in placed for item in fit.hug)
 		for (key, items) in bars_by_area
 			for item in items
 				_fin_bar_vertical(item.bar) || continue
-				item.slot !== nothing && item.index in moved && continue
+				item.slot !== nothing && (item.index in moved || item.index in slotted) && continue
 				x = _cbar_real(item.bar, :x, 1.02)
 				push!(bar_boxes, (x = x, xanchor = _cbar_string(item.bar, :xanchor, "left"),
 					width = _fin_bar_width(layout, item, H)))
@@ -1864,10 +1962,12 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 			widths = [_fin_bar_width(layout, item, Hp) for item in hug]
 			bars_px = isempty(hug) ? 0.0 : pad_px + sum(widths) + _FIN_CBAR_GAP * (length(hug) - 1)
 			# A grid cell's bars sit in the room the solve took for them beyond
-			# its slot (D17), except at the paper edge, where they take what
-			# the margin cannot hold.
+			# its slot (D17); at the paper edge they take what the margin cannot
+			# hold, less what the solve left beyond the slot there
+			# (`_room_solve!`).
 			room = if slot === nothing || ref[1][2] >= 1 - 1e-6
-				max(0.0, bars_px - _fin_right_allowance(layout, accs, ref, grid_layout, Wp, Hp; area_cache = area_cache))
+				edge = max(0.0, bars_px - _fin_right_allowance(layout, accs, ref, grid_layout, Wp, Hp; area_cache = area_cache))
+				slot === nothing ? edge : max(0.0, edge - max(0.0, ref[1][2] - slot[1][2]) * Wp)
 			else
 				0.0
 			end
@@ -1875,7 +1975,7 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 			rw = (fref[1][2] - fref[1][1]) * Wp
 			rh = (fref[2][2] - fref[2][1]) * Hp
 			Wa = rw - room
-			(Wa > 20 && rh > 20) || continue
+			(Wa > _FIN_FIT_MIN_PX && rh > _FIN_FIT_MIN_PX) || continue
 			if Wa - _fin_bias(rh * ratio) >= rh * ratio
 				h = rh
 				w = rh * ratio
@@ -1930,21 +2030,59 @@ function _fin_fit_cells(ctx::_FinContext, layout::Layout, accs, bars_by_area, W:
 				x += (width + _FIN_CBAR_GAP) / Wp
 			end
 			placed[(xkey, ykey)] = (xdomain = xd, ydomain = yd, ref = ref, box = ((x0 + bias) / Wp, xd[2]), hug = hug,
-				placements = placements, bar_boxes = boxes, free_px = free, slack_px = rh - h, ratio = ratio)
+				placements = placements, bar_boxes = boxes, free_px = free, slack_px = rh - h, ratio = ratio,
+				width_px = w + bias, height_px = h)
 		end
 		results = placed
-		pass >= 2 && !isempty(previous) && keys(previous) == keys(domains) &&
-			all(k -> all(abs.(domains[k] .- previous[k]) .* (String(k)[1] == 'x' ? Wp : Hp) .<= _FIN_FIT_SETTLE_PX), keys(domains)) &&
+		pass >= 2 && !isempty(previous) && _fin_same_domains(domains, previous, Wp, Hp) && break
+		# The passes can cycle instead of settling: a y axis whose tick
+		# labels widen past a box height (more ticks) narrows the box below
+		# it, where they are narrow again (an :aps 30 x 30 heatmap with a
+		# title, a math bar title and axis labels repeated every 5 passes and
+		# never settled). Once the domains repeat (those the fit started from
+		# included), the pass of the cycle with the smallest plot boxes is
+		# the fit: its margins hold the widest labels, and it is the same
+		# pass whichever domains the fit started from.
+		if pass == 1
+			for k in keys(domains)
+				started[k] = something(_fin_range_pair(_layout_axis_domain(layout, k)), (0.0, 1.0))
+			end
+		end
+		boxes_px = sum(f -> (f.box[2] - f.box[1]) * Wp * (f.ydomain[2] - f.ydomain[1]) * Hp, values(placed); init = 0.0)
+		push!(history, (domains = copy(domains), placed = copy(placed), boxes_px = boxes_px))
+		repeat_of = findfirst(h -> _fin_same_domains(domains, h.domains, Wp, Hp), @view history[1:(end - 1)])
+		repeat_of === nothing && pass >= 2 && _fin_same_domains(domains, started, Wp, Hp) && (repeat_of = 0)
+		if repeat_of !== nothing
+			cycle = history[(repeat_of + 1):end]
+			rank(h) = (h.boxes_px, [v for k in sort!(collect(keys(h.domains))) for v in h.domains[k]])
+			results = cycle[argmin(map(rank, cycle))].placed
 			break
+		end
 		previous = copy(domains)
 	end
 	return results
 end
 
+# Whether the axis domains `a` and `b` (same axes) are within
+# `_FIN_FIT_SETTLE_PX` of each other in a plot region `Wp` x `Hp` px.
+_fin_same_domains(a, b, Wp::Float64, Hp::Float64) = keys(a) == keys(b) &&
+	all(k -> all(abs.(a[k] .- b[k]) .* (String(k)[1] == 'x' ? Wp : Hp) .<= _FIN_FIT_SETTLE_PX), keys(a))
+
 # Fit passes at most, and the px below which a domain counts as unchanged
-# between passes (`_fin_fit_cells`); two or three passes in practice.
-const _FIN_FIT_PASSES = 6
+# between passes (`_fin_fit_cells`); two or three passes in practice. A box
+# away from the paper edge can need many more: plotly pushes the margin of
+# its y labels only when they do not fit beside it, and the estimate of that
+# margin follows the fitted domain a few px per pass (a 300 px :publication
+# 11 x 40 field came down from 53 px to the 10 px margin by 2.4 px per pass,
+# 24 passes, and with 6 passes per round took 6 finalize rounds, past the
+# cap). A pass costs no plan: a sweep of 175 single equal-aspect figures (5
+# styles) allocated 1.0 GiB with 32 passes against 1.09 GiB with 6, which
+# needed more rounds, and one of 72 grids 2.3-2.5 GiB with either.
+const _FIN_FIT_PASSES = 32
 const _FIN_FIT_SETTLE_PX = 1e-3
+# Px a cell's slot (less its bars' room) must exceed in both directions to
+# be fitted (`_fin_fit_cells`); a smaller cell is left to the room solve.
+const _FIN_FIT_MIN_PX = 20.0
 
 # ---------------------------------------------------------------------------
 # Driver
@@ -1999,12 +2137,19 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 	# M3a / L11: a figure whose size is free (`_fin_size_choice`) is sized to
 	# its equal-aspect cells, always from its base size, so the size follows
 	# the fields and a second pass finds it unchanged.
-	choice = ctx.size === nothing && !isempty(fits) ? _fin_size_choice(layout) : nothing
+	# A figure at a size of ours whose cells no longer fit there is sized
+	# again from its base too.
+	choice = ctx.size === nothing && (!isempty(fits) || _fin_meta_get(layout, _FIN_SIZE_KEY) isa AbstractVector) ?
+		_fin_size_choice(layout) : nothing
 	if choice !== nothing
 		W0, H0, wfree, hfree = choice
 		at_base = W0 == W && H0 == H
+		now = (W, H, fits)
 		at_base || ((plan, fits) = _fin_plan_and_fit(ctx, accs, bars, W0, H0))
-		newW, newH = _fin_free_size(ctx, plan, fits, W0, H0, wfree, hfree, accs, bars)
+		abandoned = _fin_size_abandoned(layout)
+		newW, newH, abandon = _fin_free_size(ctx, plan, fits, W0, H0, wfree, hfree, accs, bars;
+			now = now, abandoned = abandoned)
+		abandoned |= abandon
 		recorded = _fin_meta_get(layout, _FIN_SIZE_KEY) isa AbstractVector
 		# A chosen size within 1 px of the one the figure has is kept: the fit
 		# at the base size reads the current domains, so a size that rounds
@@ -2026,6 +2171,7 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 		# A figure left at its base size without a record keeps no size of ours.
 		if recorded || newW != W0 || newH != H0
 			record = Any[W0, H0, newW, newH, wfree ? 1 : 0, hfree ? 1 : 0]
+			abandoned && push!(record, 1)
 			isequal(_fin_meta_get(layout, _FIN_SIZE_KEY), record) ||
 				(wrote |= _fin_meta_set!(layout, _FIN_SIZE_KEY, record))
 		end
@@ -2193,30 +2339,47 @@ end
 # Bookkeeping of the finalizer in `layout.meta` (plotly.js ignores it, so it
 # needs no redraw): `value` under our `key`, or the key removed for
 # `nothing`; the user's own entries are never touched, and a `meta` that is
-# not a mapping is the user's and gets nothing. The mapping is never changed
-# in place: the layout gets an updated copy (the append-only fast path shares
-# `meta` with the live figure, and it may be the user's own object). Returns
-# whether it wrote.
+# not a mapping is the user's and gets nothing. Written in place: a staged
+# call commits `meta` back into the live figure's own object, which the
+# user's other references (aliases into the layout) keep pointing at
+# (layout_merge_preservation); the append-only fast path, whose staged
+# layout shares `meta` with the live figure, gives the run its own copy
+# first (`_fin_own_meta!`). Returns whether it wrote.
 function _fin_meta_set!(layout::Layout, key::Symbol, value)
 	meta = get(layout.fields, :meta, nothing)
 	holder = meta isa PlotlyBase.PlotlyAttribute ? meta.fields : meta
 	(holder === nothing || holder isa AbstractDict) || return false
 	if value === nothing
 		holder === nothing && return false
-		names = [k for k in keys(holder) if string(k) == String(key)]
-		isempty(names) && return false
-		updated = copy(holder)
-		for k in names
-			delete!(updated, k)
+		found = false
+		for k in collect(keys(holder))
+			string(k) == String(key) && (delete!(holder, k); found = true)
 		end
-		isempty(updated) ? delete!(layout.fields, :meta) : (layout.fields[:meta] = updated)
-		return true
+		isempty(holder) && delete!(layout.fields, :meta)
+		return found
 	end
-	updated = holder === nothing ? Dict{Any, Any}() : copy(holder)
+	holder === nothing && (holder = Dict{Any, Any}(); layout.fields[:meta] = holder)
 	# A meta read from JSON has String keys.
-	updated[keytype(updated) <: AbstractString ? String(key) : key] = value
-	layout.fields[:meta] = updated
+	holder[keytype(holder) <: AbstractString ? String(key) : key] = value
 	return true
+end
+
+# The append-only fast path stages a call on a layout that shares `meta`
+# with the live figure (`_is_high_level_readonly_layout_payload`): the run
+# gets a copy of the mapping, its own records (`plotlysupply:` keys, which
+# some writers change in place, `_s3_write_pads!`) copied too, so nothing it
+# writes reaches the live figure before the call commits. The user's
+# entries stay the same objects.
+function _fin_own_meta!(layout::Layout)
+	meta = get(layout.fields, :meta, nothing)
+	holder = meta isa PlotlyBase.PlotlyAttribute ? meta.fields : meta
+	holder isa AbstractDict || return nothing
+	owned = copy(holder)
+	for (k, v) in owned
+		startswith(string(k), "plotlysupply:") && (owned[k] = deepcopy(v))
+	end
+	layout.fields[:meta] = meta isa PlotlyBase.PlotlyAttribute ? typeof(meta)(owned) : owned
+	return nothing
 end
 
 _fin_meta_get(layout::Layout, key::Symbol) = (meta = get(layout.fields, :meta, nothing);
@@ -2635,12 +2798,23 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 	if !isempty(fits) && layout.subplots.rows * layout.subplots.cols > 1 && _fin_compress_grid(layout)
 		slack = (x = _fin_band_slack(plan, fits, 1), y = _fin_band_slack(plan, fits, 2))
 		if any(s -> s !== nothing && any(>(0.5), s), slack)
-			plan = _room_build(ctx, accs, bars, W, H, aspect; compress = slack, fits = fits,
+			cplan = _room_build(ctx, accs, bars, W, H, aspect; compress = slack, fits = fits,
 				domains = _fin_plan_domains(plan, fits))
-			fits = fit(plan)
-			plan, fits = _fin_plan_settle(ctx, accs, bars, W, H, aspect, plan, fits, fit, slack)
+			cfits = fit(cplan)
+			cplan, cfits = _fin_plan_settle(ctx, accs, bars, W, H, aspect, cplan, cfits, fit, slack)
+			# The compressed bands hold every cell, or the grid is not
+			# compressed (nor the figure, `_fin_free_size`): a cell the
+			# compressed plan gives up is neither fitted nor a managed area,
+			# so nothing would write it (an :ieee 1 x 2 grid of labelled
+			# fields kept one cell fitted and one at its grid cell, and the
+			# bar of that one past the paper edge). The fit's margins read
+			# the domains drawn now, and those of a cell drawn at its whole
+			# grid cell push a margin the compressed rows have no room for.
+			if all(cell -> haskey(cfits, cell), keys(fits))
+				plan, fits = cplan, cfits
+				plan.memo[:band_slack] = slack
+			end
 		end
-		plan.memo[:band_slack] = slack
 	end
 	return plan, fits
 end
@@ -3547,7 +3721,23 @@ function _room_solve!(plan::_RoomPlan)
 			# the gap to the neighbour (Z71: a y title between two cells).
 			(haskey(by_side, (key, side)) || a.own[side] > 0) || continue
 			nb = _room_neighbour(plan, a, side)
-			nb === nothing && continue
+			if nb === nothing
+				# D17: the bars of an equal-aspect grid cell at the right paper
+				# edge sit beside its box, and what the margin cannot hold is
+				# taken at the band edge, so every column gives it up alike
+				# (`_fin_fit_cells` takes from the slot only what is left);
+				# else the fit took it from the last column alone (an :ieee
+				# 1 x 2 grid of labelled fields: a 17 px box, given up, and
+				# laid out on alternate rounds by the fit and the solve).
+				if side === :right && a.aspect && a.grid && a.own[:right] > 0
+					room = a.own[:right] - _fin_right_allowance(plan.layout, plan.accs, a.ref, plan.ctx.grid, plan.Wp, plan.Hp)
+					if room > 0
+						g = (side, round(_room_edge(a.ref, side); digits = 9))
+						group[g] = max(get(group, g, 0.0), room)
+					end
+				end
+				continue
+			end
 			opposite = _ROOM_OPPOSITE[side]
 			gap = nb.gap * _room_px(plan, side)
 			facing = maximum(need[(k, opposite)] for k in nb.keys)
@@ -4850,6 +5040,8 @@ end
 function _fin_run_scoped!(fig, live, size, clone_readonly::Bool, strict::Bool = false)
 	ctx = _fin_context(fig, live, size, clone_readonly; strict = strict)
 	p = ctx.p
+	# `strict` is the append-only fast path (`_transactional_high_level_plot_mutation!`).
+	strict && _fin_own_meta!(p.layout)
 	updates = _fin_match_group_updates(p.layout, p.data)
 	# One collection for the run (Z81): no write of the run changes an extent
 	# (see `_FinAxes`).
