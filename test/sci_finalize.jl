@@ -2522,3 +2522,69 @@ end
 	end
 	@test minimum(@allocated(xlabel!(big, "b")) for _ in 1:5) < 3.6e5
 end
+
+@testset "audit probes settle and keep their size (settle-04, figsize-01, vm-07)" begin
+	# settle-04: one equal-aspect heatmap in the left cell of a 1x2 grid
+	# alternated between two layouts on every finalize.
+	U = [-1.529 -0.73 -0.465; -0.089 -0.818 -1.248; -0.051 -0.721 1.022; -1.343 -1.166 -1.08]
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, U; row = 1, col = 1, equalar = true)
+	@test _SFN._finalize_figure!(sf) === false
+	plot_scatter!(sf, 1:5, [1.0, 4, 2, 5, 3]; row = 1, col = 2, legend = "data")
+	@test _SFN._finalize_figure!(sf) === false
+	# figsize-01: an explicit journal size is the figure's, under that
+	# journal's style too (it was narrowed to 264 px for a quiver).
+	x = 0:0.5:3; y = 0:0.5:3
+	Uq = [cos(b) for a in x, b in y]; Vq = [sin(a) for a in x, b in y]
+	for style in (:default, :ieee)
+		with_style(style) do
+			for make in (() -> plot_quiver(x, y, Uq, Vq), () -> plot_heatmap(x, y, Uq; equalar = true))
+				p = make()
+				figsize!(p, :ieee; columns = 1)
+				@test (p.layout.fields[:width], p.layout.fields[:height]) == (336, 252)
+				@test _SFN._finalize_figure!(p) === false
+				figsize!(p, 3.5, 2.5; units = :in)
+				@test (p.layout.fields[:width], p.layout.fields[:height]) == (336, 240)
+			end
+		end
+	end
+	# vm-07: overlays drawn on fields leave them settled.
+	gx = range(-2, 2; length = 41)
+	P = [exp(-(a^2 + b^2)) for a in gx, b in gx]
+	q = range(-1.8, 1.8; length = 10)
+	qx = vec([a for a in q, b in q]); qy = vec([b for a in q, b in q])
+	fig = plot_heatmap(gx, gx, P; equalar = true)
+	plot_quiver!(fig, qx, qy, -qy, qx; sizeref = 0.35, legend = "v")
+	@test _SFN._finalize_figure!(fig) === false
+	px = [0.0, 1, 0, 1, 0.5]; py = [0.0, 0, 1, 1, 0.5]; tri = [1 2 5; 2 4 5; 4 3 5; 3 1 5]
+	fig3 = with_style(:ieee) do
+		f = plot_tripcolor(px, py, tri, px .+ py; equalar = true, colorbar_title = "u")
+		plot_triplot!(f, px, py, tri; color = "white")
+		f
+	end
+	@test _SFN._finalize_figure!(fig3) === false
+end
+
+@testset "long y tick labels of a lower grid row stay on the page (optical_pixelmap (b))" begin
+	# The gallery script had shortened them to "0-24" / "24-48".
+	z = [sign(sin(0.9i + 1.3j) + 1e-9) for i in 1:40, j in 1:9]
+	xs = collect(range(0, 24; length = 41))
+	for style in (:default, :ieee)
+		sf = with_style(style) do
+			s = subplots(2, 1; sync = false)
+			plot_scatter!(s, [0.0, 1.0], [0.0, 1.0]; row = 1, col = 1)
+			plot_heatmap!(s, xs, collect(range(1.15, 2.05; length = 10)), z; row = 2, col = 1, showscale = false)
+			plot_heatmap!(s, xs, collect(range(0.0, 0.9; length = 10)), z; row = 2, col = 1, showscale = false)
+			yticks!(s, [1.6, 0.45], ["0–24 µm", "24–48 µm"]; row = 2, col = 1)
+			panel_labels!(s)
+			s
+		end
+		@test _SFN._finalize_figure!(sf) === false
+		fields = sf.plot.layout.fields
+		info = _sfn_render(sf; width = round(Int, get(fields, :width, 700)), height = round(Int, get(fields, :height, 500)))
+		info === nothing && break
+		t = _SFN._cell_target(sf; row = 2, col = 1, who = "test")
+		left = info["axes"][String(t.ykey)]["labels_left"]
+		@test left >= 0
+	end
+end
