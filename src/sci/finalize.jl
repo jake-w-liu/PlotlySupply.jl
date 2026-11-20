@@ -1944,6 +1944,29 @@ end
 # single equal-aspect figure, and the decorations placed in their room.
 # Returns whether anything was written.
 function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
+	wrote = false
+	for pass in 1:_FIN_MARGIN_PASSES
+		w, again = _fin_fit_pass!(ctx, accs, pass < _FIN_MARGIN_PASSES)
+		wrote |= w
+		again || break
+	end
+	return wrote
+end
+
+# Margin raises solved with the room in one `_fin_fit!` (B1/B2): a decoration
+# at the paper edge that plotly does not push the margin for (a panel label
+# above the top cell) raises `layout.margin`, which shrinks the plot area,
+# which moves an equal-aspect box centred in its slot and so what the
+# decoration needs (device_geometry: 4 -> 21 -> 23 -> 24 px, one finalize
+# round each, with the domains following at a third of the step: more than
+# `_FIN_FIT_ROUNDS` rounds). A pass that raises a margin writes all it
+# solved (domains, records and margins stay consistent) and runs again at the
+# new margins, at most this many passes per `_fin_fit!`.
+const _FIN_MARGIN_PASSES = 4
+
+# One fit and room pass (see `_fin_fit!`). Returns `(wrote, again)`: `again`
+# when `restart` and the pass raised a margin.
+function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 	p = ctx.p
 	layout = p.layout
 	bars = _fin_collect_bars(p, ctx.insets)
@@ -1961,6 +1984,14 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 		at_base || ((plan, fits) = _fin_plan_and_fit(ctx, accs, bars, W0, H0))
 		newW, newH = _fin_free_size(ctx, plan, fits, W0, H0, wfree, hfree, accs, bars)
 		recorded = _fin_meta_get(layout, _FIN_SIZE_KEY) isa AbstractVector
+		# A chosen size within 1 px of the one the figure has is kept: the fit
+		# at the base size reads the current domains, so a size that rounds
+		# near a half px would alternate (an L11 pair with a shared bar went
+		# 356 <-> 357 px on every finalize).
+		if recorded
+			(newW != W0 && abs(newW - W) <= 1) && (newW = W)
+			(newH != H0 && abs(newH - H) <= 1) && (newH = H)
+		end
 		if newW != W || newH != H
 			size_updates = Dict{Symbol, Any}(:width => _style_number(newW), :height => _style_number(newH))
 			wrote |= _fin_relayout!(ctx, size_updates)
@@ -2062,7 +2093,24 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 		current = _cmn_mapping_get(get(layout.fields, :margin, nothing), :r)
 		(_fin_isfinite_real(current) && current >= needed) || (layout_updates[:margin_r] = needed)
 	end
+	# The last x tick label at the right paper edge: a margin need like the
+	# decorations' (kept when a raise is given back).
+	over = _fin_tick_overhang_px(p, accs, plan.Wp, W)
+	if over > 0
+		_room_note_margin!(plan, :r, over)
+		current = _cmn_mapping_get(get(layout.fields, :margin, nothing), :r)
+		queued = get(layout_updates, :margin_r, nothing)
+		have = max(Float64(current), _fin_isfinite_real(queued) ? Float64(queued) : 0.0)
+		over > have + 0.5 && (layout_updates[:margin_r] = _style_number(ceil(over)))
+	end
 	_room_margin_updates!(plan)
+	# A raised margin shrinks the plot area this pass solved for.
+	margin = get(layout.fields, :margin, nothing)
+	raised = any(letter -> begin
+		value = get(layout_updates, Symbol(:margin_, letter), nothing)
+		have = _cmn_mapping_get(margin, letter)
+		_fin_isfinite_real(value) && (!_fin_isfinite_real(have) || value > have)
+	end, (:l, :r, :t, :b))
 	wrote |= _room_settle_margins!(plan)
 	if annotations !== nothing
 		_fin_same_annotations(get(layout.fields, :annotations, nothing), annotations) ||
@@ -2071,7 +2119,7 @@ function _fin_fit!(ctx::_FinContext, accs = _fin_collect_axes(ctx.p))
 	wrote |= _fin_relayout!(ctx, layout_updates)
 	wrote |= _fin_thin_bar_ticks!(ctx, plan.Wp, plan.Hp)
 	wrote |= _fin_place_figure_annotations!(ctx, accs, W, H)
-	return wrote
+	return wrote, restart && raised
 end
 
 # ---------------------------------------------------------------------------
@@ -2511,8 +2559,8 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 	plan = _room_build(ctx, accs, bars, W, H, aspect)
 	fits = Dict{Tuple{Symbol, Symbol}, Any}()
 	isempty(aspect) && return plan, fits
-	fit(plan) = _fin_fit_cells(ctx, layout, accs, bars[1], W, H;
-		slots = get(() -> Dict{Symbol, _RoomBox}(), plan.memo, :aspect_slots), push = _room_edge_needs(plan))
+	fit(plan) = _fin_fit_converged(plan, push -> _fin_fit_cells(ctx, layout, accs, bars[1], W, H;
+		slots = get(() -> Dict{Symbol, _RoomBox}(), plan.memo, :aspect_slots), push = push))
 	fits = fit(plan)
 	unfitted = [xkey for (xkey, ykey) in aspect if !haskey(fits, (xkey, ykey))]
 	if !isempty(unfitted)
@@ -2523,17 +2571,103 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 		# The fits of the other cells, in the slots of this plan.
 		isempty(aspect) || (fits = fit(plan))
 	end
+	plan, fits = _fin_plan_settle(ctx, accs, bars, W, H, aspect, plan, fits, fit, nothing)
 	# L11: the rows and columns whose equal-aspect cells all leave blank
 	# space are drawn closer together, the grid centred in what they free.
 	if !isempty(fits) && layout.subplots.rows * layout.subplots.cols > 1 && _fin_compress_grid(layout)
 		slack = (x = _fin_band_slack(plan, fits, 1), y = _fin_band_slack(plan, fits, 2))
 		if any(s -> s !== nothing && any(>(0.5), s), slack)
-			plan = _room_build(ctx, accs, bars, W, H, aspect; compress = slack)
+			plan = _room_build(ctx, accs, bars, W, H, aspect; compress = slack, fits = fits,
+				domains = _fin_plan_domains(plan, fits))
 			fits = fit(plan)
+			plan, fits = _fin_plan_settle(ctx, accs, bars, W, H, aspect, plan, fits, fit, slack)
 		end
 		plan.memo[:band_slack] = slack
 	end
 	return plan, fits
+end
+
+# B1/B2: the plan converts the room it solves from px to paper with the
+# plot region of its margins, and those depend on where the plot areas end
+# up (plotly's automargin pushes by how far an axis is from the paper edge).
+# A plan whose margins are estimated from the drawn domains while it moves
+# them makes the domains follow a fraction of the way per finalize round
+# (optical_pixelmap: an equal-aspect row over a plain one drifted for more
+# than `_FIN_FIT_ROUNDS` rounds). The plan is built again with the margins of
+# the domains it solved (and the fit fitted) until those domains move by at
+# most `_FIN_FIT_SETTLE_PX` (at most `_FIN_PLAN_PASSES` builds; a settled
+# figure, whose drawn domains are the solved ones, needs none).
+const _FIN_PLAN_PASSES = 8
+
+function _fin_plan_settle(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspect, plan, fits, fit, compress)
+	layout = ctx.p.layout
+	used = nothing
+	for _ in 1:_FIN_PLAN_PASSES
+		domains = _fin_plan_domains(plan, fits)
+		moved = any(domains) do (key, d)
+			u = used === nothing ? _fin_domain(layout, key) : get(used, key, nothing)
+			u === nothing && return true
+			px = String(key)[1] == 'x' ? plan.Wp : plan.Hp
+			return abs(u[1] - d[1]) * px > _FIN_FIT_SETTLE_PX || abs(u[2] - d[2]) * px > _FIN_FIT_SETTLE_PX
+		end
+		moved || break
+		plan = _room_build(ctx, accs, bars, W, H, aspect; compress = compress, fits = fits, domains = domains)
+		fits = isempty(aspect) ? fits : fit(plan)
+		used = domains
+	end
+	return plan, fits
+end
+
+# The x and y axis domains `plan` solved (fitted ones from `fits`) for
+# `_fin_margins`.
+function _fin_plan_domains(plan, fits)
+	out = Dict{Symbol, NTuple{2, Float64}}()
+	for key in plan.area_order
+		a = plan.areas[key]
+		a.kind === :xy || continue
+		out[a.key] = a.final[1]
+		out[a.ykey] = a.final[2]
+	end
+	for ((xkey, ykey), fit) in fits
+		out[xkey] = fit.xdomain
+		out[ykey] = fit.ydomain
+	end
+	return out
+end
+
+# The fitted areas of `plan` take their fitted boxes as `final` (what
+# `_fin_fit!` gives them).
+function _fin_fits_to_areas!(plan, fits)
+	for ((xkey, _), fit) in fits
+		area = get(plan.areas, xkey, nothing)
+		area === nothing || (area.final = (fit.box, fit.ydomain))
+	end
+	return plan
+end
+
+# B1/B2: what the paper edges need beyond the plot region
+# (`_room_edge_needs`) depends on where the fitted plot boxes sit (a panel
+# label above a box at the top edge needs the margin the box leaves free),
+# and the fit depends on that need (it shrinks the plot region). Solved
+# here, per plan, until the need moves by at most `_FIN_FIT_SETTLE_PX`
+# (device_geometry, optical_pixelmap: the domains followed the margin a
+# third to two thirds of the way per finalize round, more rounds than
+# `_FIN_FIT_ROUNDS`). The fitted areas keep their fitted boxes as `final`
+# (what `_fin_fit!` gives them). `fit_with(push)` fits every cell.
+const _FIN_PUSH_PASSES = 32
+
+function _fin_fit_converged(plan, fit_with)
+	push = _room_edge_needs(plan)
+	fits = fit_with(push)
+	_fin_fits_to_areas!(plan, fits)
+	for _ in 1:_FIN_PUSH_PASSES
+		next = _room_edge_needs(plan)
+		all(side -> abs(next[side] - push[side]) <= _FIN_FIT_SETTLE_PX, _ROOM_SIDES) && break
+		push = next
+		fits = fit_with(push)
+		_fin_fits_to_areas!(plan, fits)
+	end
+	return fits
 end
 
 # Coloraxis id => indices of the traces this mutation bound to it that
@@ -3429,9 +3563,11 @@ function _room_solve!(plan::_RoomPlan)
 			end
 		end
 		solved = Dict{Symbol, Float64}()
+		scene = occursin(r"^scene\d*$", String(key))
 		for side in _ROOM_SIDES
 			bands = side === :left || side === :right ? xbands : ybands
-			edge = bands === nothing ? nothing : _room_band_edge(bands, a.ref, side)
+			edge = bands === nothing ? nothing : _room_band_edge(bands, a.ref, side;
+				outer = scene && !_room_scene_owns(plan, by_side, key, side))
 			sign = side === :left || side === :bottom ? 1.0 : -1.0
 			solved[side] = edge === nothing ? _room_edge(a.ref, side) + sign * a.room[side] / _room_px(plan, side) : edge
 		end
@@ -3531,30 +3667,52 @@ function _room_band_solve(plan::_RoomPlan, bands, group, lo_side::Symbol, hi_sid
 	end
 	new_lo = similar(lo)
 	new_hi = similar(hi)
+	out_lo = similar(lo)
+	out_hi = similar(hi)
 	x = lo[1] + freed / 2
 	for i in 1:n
+		out_lo[i] = x
 		x += take_lo[i]
 		new_lo[i] = x
 		x += spans[i]
 		new_hi[i] = x
 		x += take_hi[i]
+		out_hi[i] = x
 		i < n && (x += lo[i + 1] - hi[i])
 	end
 	# No rounding drift at the far edge.
-	freed == 0 && (new_hi[n] = hi[n] - take_hi[n])
-	return (lo, hi, new_lo, new_hi)
+	if freed == 0
+		new_hi[n] = hi[n] - take_hi[n]
+		out_hi[n] = hi[n]
+	end
+	# `out_lo`/`out_hi`: the band's slot, the room taken at its edges included.
+	return (lo, hi, new_lo, new_hi, out_lo, out_hi)
 end
 
 # The solved paper edge on `side` of a grid rectangle `ref`, or `nothing`
-# when its edge is not a band edge.
-function _room_band_edge(bands, ref::_RoomBox, side::Symbol)
-	lo, hi, new_lo, new_hi = bands
+# when its edge is not a band edge; with `outer`, the edge of the band's slot
+# (the room taken there included).
+function _room_band_edge(bands, ref::_RoomBox, side::Symbol; outer::Bool = false)
+	lo, hi, new_lo, new_hi, out_lo, out_hi = bands
 	if side === :left || side === :bottom
 		i = searchsortedfirst(lo, round(_room_edge(ref, side); digits = 9))
-		return i <= length(lo) && lo[i] == round(_room_edge(ref, side); digits = 9) ? new_lo[i] : nothing
+		return i <= length(lo) && lo[i] == round(_room_edge(ref, side); digits = 9) ? (outer ? out_lo : new_lo)[i] : nothing
 	end
 	i = searchsortedfirst(hi, round(_room_edge(ref, side); digits = 9))
-	return i <= length(hi) && hi[i] == round(_room_edge(ref, side); digits = 9) ? new_hi[i] : nothing
+	return i <= length(hi) && hi[i] == round(_room_edge(ref, side); digits = 9) ? (outer ? out_hi : new_hi)[i] : nothing
+end
+
+# L2: a 3-D scene draws its axes, ticks and titles inside its domain, so it
+# takes the whole slot of its row and column; only on a side where it asks
+# for room itself (its bar, a panel title, the bar of a colour axis it
+# shares) does it end at the band edge like the plot areas there.
+function _room_scene_owns(plan::_RoomPlan, by_side, key::Symbol, side::Symbol)
+	haskey(by_side, (key, side)) && return true
+	for entry in values(plan.bar_items)
+		(hasproperty(entry, :edge_areas) && entry.item.coloraxis !== nothing && !entry.keep_default) || continue
+		entry.side === side && key in entry.areas && return true
+	end
+	return false
 end
 
 # Q18: a colour axis shared by several plot areas has its bar beyond the
@@ -3672,9 +3830,10 @@ end
 # convert to paper fractions with the plot size plotly will use. A figure
 # without requests is not solved (nothing changes).
 function _room_build(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspect::Dict{Symbol, Symbol};
-		compress = nothing)
+		compress = nothing, fits = nothing, domains = nothing)
 	layout = ctx.p.layout
-	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
+	margins = _fin_margins(layout, accs, W, H,
+		domains === nothing ? Dict{Symbol, NTuple{2, Float64}}() : domains, Any[])
 	skip = Set{Int}()
 	for (xkey, ykey) in aspect, item in _fin_hug_items(ctx, layout, bars[1], xkey, ykey)
 		push!(skip, item.index)
@@ -3690,6 +3849,7 @@ function _room_build(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspec
 		for owner in _ROOM_OWNERS
 			_room_requests!(plan, Val(owner))
 		end
+		_room_share_vbar_titles!(plan)
 		_room_set_refs!(plan)
 		(!grid_aspect && isempty(plan.requests) && isempty(plan.vacated) && !_room_labels_overflow(plan) &&
 			!any(a -> a.managed && _room_recorded(plan, a), values(plan.areas))) && return plan
@@ -3699,6 +3859,7 @@ function _room_build(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspec
 			_room_freeze!(plan) || break
 		end
 		pass == 2 && break
+		fits === nothing || _fin_fits_to_areas!(plan, fits)
 		grown = _room_grow_margins(margins, _room_edge_needs(plan))
 		grown == margins && break
 		margins = grown
@@ -4070,7 +4231,10 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 				reserve && (px += _FIN_AUTOMARGIN_EXTRA)
 				_request_room!(plan, area_key, side, px; owner = :colorbar, key = key, order = 10,
 					anchored = anchored, margin_pushed = !reserve)
-				side === :right && _room_request_vbar_title!(plan, item, (area_key,), key)
+				if side === :right
+					len = max(_room_bar_len(item.bar, span, span), _room_min_bar_len(plan.font, item.bar, span * plan.Hp))
+					_room_request_vbar_title!(plan, item, (area_key,), key, (span - len) / 2 * plan.Hp)
+				end
 			end
 		end
 	end
@@ -4095,8 +4259,11 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 		end
 		if entry.side === :right
 			top = maximum(plan.areas[k].current[2][2] for k in entry.areas)
+			extent = top - minimum(plan.areas[k].current[2][1] for k in entry.areas)
+			len = max(entry.ratio * extent, _room_min_bar_len(plan.font, item.bar, extent * plan.Hp))
 			_room_request_vbar_title!(plan, item,
-				[k for k in entry.areas if abs(plan.areas[k].current[2][2] - top) <= 1e-9], key)
+				[k for k in entry.areas if abs(plan.areas[k].current[2][2] - top) <= 1e-9], key,
+				(extent - len) / 2 * plan.Hp)
 		end
 	end
 	return nothing
@@ -4115,16 +4282,53 @@ end
 
 # Room above the top areas `areas` of a vertical bar for its math title
 # (threed-f02, vm-02: nothing was reserved and the title was cut by the page
-# top under the journal styles, or drawn over the figure title). The bar runs
-# along the areas, so its top end is at their top edge; stacked outermost
-# (the title sits right of the plot box, beside a cell title, not above it).
-function _room_request_vbar_title!(plan::_RoomPlan, item::_FinBar, areas, key::AbstractString)
-	px = _fin_vbar_title_above(plan, item)
+# top under the journal styles, or drawn over the figure title). The bar is
+# centred along the areas: its top end is `below` px under their top edge (a
+# bar shorter than the areas, `len = 0.7`), and only what the title reaches
+# above that edge is requested, in whole px (an exact fixed point: the gap
+# shrinks with the room it leaves). Stacked outermost, but the title sits
+# right of the plot box, beside a cell title, not above it: the room the
+# area's other top requests take counts towards it (`_room_share_vbar_titles!`).
+function _room_request_vbar_title!(plan::_RoomPlan, item::_FinBar, areas, key::AbstractString, below::Float64)
+	px = ceil(_fin_vbar_title_above(plan, item) - max(below, 0.0) - 1e-6)
 	px > 0 || return nothing
 	for k in areas
-		_request_room!(plan, k, :top, px; owner = :colorbar, key = key * ":title", order = 90)
+		_request_room!(plan, k, :top, px; owner = :colorbar, key = key * _ROOM_VBAR_TITLE, order = 90)
 	end
 	return nothing
+end
+
+# Key suffix of the request of `_room_request_vbar_title!`.
+const _ROOM_VBAR_TITLE = ":title"
+
+# The top room of an area is the sum of its stacked requests; a bar's math
+# title (`_room_request_vbar_title!`) is drawn beside the area's other top
+# decorations (cell title, panel label, top axis labels), so it takes only
+# what it needs beyond them (mdd_slices: three scenes with two-line cell titles
+# were lowered by the full title height of a bar 0.7 of their height).
+# Requests reduced to nothing are dropped. O(requests).
+function _room_share_vbar_titles!(plan::_RoomPlan)
+	any(r -> r.side === :top && r.owner === :colorbar && endswith(r.key, _ROOM_VBAR_TITLE), plan.requests) ||
+		return plan
+	others = Dict{Symbol, Float64}()
+	for r in plan.requests
+		r.side === :top || continue
+		(r.owner === :colorbar && endswith(r.key, _ROOM_VBAR_TITLE)) && continue
+		others[r.area] = get(others, r.area, 0.0) + _ROOM_GAP + r.px
+	end
+	kept = _RoomRequest[]
+	for r in plan.requests
+		if r.side === :top && r.owner === :colorbar && endswith(r.key, _ROOM_VBAR_TITLE)
+			a = plan.areas[r.area]
+			px = r.px - get(others, r.area, 0.0) - _room_label_px(a.own[:top])
+			px > 0 || continue
+			r = _RoomRequest(r.area, r.side, px, r.owner, r.key, r.order, r.anchored, r.margin_pushed)
+		end
+		push!(kept, r)
+	end
+	empty!(plan.requests)
+	append!(plan.requests, kept)
+	return plan
 end
 
 # A coloraxis bar (`shared_colorbar!`, a shared axis placed per cell) that is
@@ -4752,6 +4956,87 @@ function _fin_trace_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height:
 		want > have + 1e-9 && (updates[Symbol(:margin_, side)] = _style_number(want))
 	end
 	return updates
+end
+
+# The tick label plotly.js 2.35.2 centres on the last tick of an x axis that
+# reaches the right paper edge sticks out past the plot area by half its
+# width less the tick's distance from the axis end; automargin pushes only
+# the axis side (bottom or top), so under a tight margin (`tight_layout!`,
+# `savefig(...; tight = true)`: 4 px) that half was cut. The right margin
+# grows to hold it, by no more; it only grows. Only ranges known before
+# rendering count (fixed ranges and the sticky edges of fields), as for the
+# equal-aspect fit; ticks follow plotly's auto step (`_fin_nice_step`), a
+# numeric `dtick`/`tick0`, or explicit `tickvals`. Returns the px the right
+# margin needs for it (0 when none), at most `_TIGHT_MAX_MARGIN_FRACTION`
+# of the width `W`; `Wp` is the plot width. A right margin left to plotly
+# (unset) is not raised.
+function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64)
+	layout = p.layout
+	_fin_isfinite_real(_cmn_mapping_get(get(layout.fields, :margin, nothing), :r)) || return 0.0
+	Wp = max(Wp, 1.0)
+	font = _fin_font_size(layout)
+	need = 0.0
+	for (key, axis) in layout.fields
+		(_fin_is_axis_key(key) && String(key)[1] == 'x') || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		_cmn_mapping_get(axis, :showticklabels) === false && continue
+		position = _fin_string(_cmn_mapping_get(axis, :ticklabelposition))
+		(position === nothing || !occursin("inside", position)) || continue
+		_fin_axis_type(layout, key) in ("linear", "-") || continue
+		dom = _fin_domain(layout, key)
+		dom[2] >= 1 - 1e-3 || continue
+		root = something(_fin_match_root(layout.fields, key), key)
+		raxis = get(layout.fields, root, nothing)
+		auto = _fin_field(raxis, :autorange)
+		pair = _fin_range_pair(_fin_field(raxis, :range))
+		known = (pair !== nothing && (auto === false || auto === nothing)) || _fin_sticky_clip(raxis) !== nothing
+		known || continue
+		shown = _fin_shown_range(layout, key, accs)
+		shown === nothing && continue
+		lo, hi = Float64(shown[1]), Float64(shown[2])
+		hi > lo || continue
+		reversed = auto == "reversed" || (pair !== nothing && pair[1] > pair[2])
+		right = reversed ? lo : hi
+		len = (dom[2] - dom[1]) * Wp
+		tickfont = _fin_mapping_font_size(axis, :tickfont, font)
+		# The tick nearest the right end and its label (characters), counted
+		# as `_fin_tick_chars` counts them.
+		values = _cmn_mapping_get(axis, :tickvals)
+		texts = _cmn_mapping_get(axis, :ticktext)
+		extra = 0
+		for affix in (:tickprefix, :ticksuffix)
+			a = _cmn_mapping_get(axis, affix)
+			a isa AbstractString && (extra += _fin_text_chars(a))
+		end
+		tick, chars = 0.0, 0
+		if (values isa AbstractVector || values isa Tuple) && !isempty(values)
+			best = nothing
+			decimals = 0
+			for (i, v) in enumerate(values)
+				_fin_isfinite_real(v) || continue
+				decimals = max(decimals, v == round(v) ? 0 : clamp(ceil(Int, -log10(abs(v - round(v)) + eps())), 0, 6))
+				lo - 1e-9 * (hi - lo) <= v <= hi + 1e-9 * (hi - lo) || continue
+				(best === nothing || abs(right - v) < abs(right - best[2])) && (best = (i, Float64(v)))
+			end
+			best === nothing && continue
+			tick = best[2]
+			text = (texts isa AbstractVector || texts isa Tuple) && best[1] <= length(texts) ? string(texts[best[1]]) : nothing
+			chars = text === nothing ? _fin_number_chars(tick, decimals) + extra : _fin_text_chars(text)
+		else
+			dtick = _cmn_mapping_get(axis, :dtick)
+			step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) : _fin_nice_step(hi - lo, max(len, 1.0), false)
+			t0 = _cmn_mapping_get(axis, :tick0)
+			t0 = _fin_isfinite_real(t0) ? Float64(t0) : 0.0
+			k = reversed ? ceil((lo - t0) / step - 1e-9) : floor((hi - t0) / step + 1e-9)
+			tick = t0 + k * step
+			decimals = max(0, -floor(Int, log10(step) + 1e-9))
+			chars = _fin_number_chars(tick, decimals) + extra
+		end
+		distance = abs(right - tick) / (hi - lo) * len
+		over = chars * 0.6 * tickfont / 2 - distance
+		over > 0 && (need = max(need, over + 1))
+	end
+	return min(need, _TIGHT_MAX_MARGIN_FRACTION * W)
 end
 
 # Passes of `_fin_fit!` per finalize run; a figure converges in two or three.

@@ -2153,9 +2153,15 @@ _sfn_margin(fig, side) = _SFN._cmn_mapping_get(get(_sfn_plot(fig).layout.fields,
 			# A cell bar at the paper edge raises it; moved below, it is given back.
 			sf = subplots(1, 1; sync = false)
 			plot_heatmap!(sf, Z)
-			@test _sfn_margin(sf, :r) > r0
+			raised = _sfn_margin(sf, :r)
+			@test raised > r0
 			colorbar!(sf; side = :bottom)
-			@test _sfn_margin(sf, :r) == r0
+			# Given back down to what the last x tick label at the right
+			# paper edge needs (the heatmap's x range is known: its cell
+			# edges), at once: a later finalize does not raise it again.
+			plan = _SFN._room_plan(sf)
+			tick = _SFN._fin_tick_overhang_px(sf.plot, _SFN._fin_collect_axes(sf.plot), plan.Wp, plan.W)
+			@test _sfn_margin(sf, :r) == max(r0, ceil(tick)) < raised
 			@test _sfn_margin(sf, :b) > _sfn_margin(plain, :b)
 			@test _SFN._finalize_figure!(sf) === false
 			# An outside legend raises it; moved inside, it is given back.
@@ -2289,6 +2295,116 @@ end
 			plan = _SFN._room_plan(sf)
 			@test maximum(b["labels_right"] for b in info["colorbars"]) <=
 				box2[1] - _SFN._room_label_px(plan.areas[:xaxis2].own[:left]) + 1
+		end
+	end
+end
+
+@testset "the last x tick label of a tight export is never cut; the tight margin stays otherwise" begin
+	cases = (
+		((0, 10), :default, true), ((0, 1000), :default, true), ((0, 9.3), :default, false),
+		((0, 10), :ieee, true),
+	)
+	for (xr, st, at_end) in cases
+		fig = with_style(st) do
+			plot_scatter(collect(range(xr[1], xr[2]; length = 11)), collect(1.0:11.0); xrange = xr, xlabel = "x", ylabel = "y")
+		end
+		tight_layout!(fig)
+		@test _SFN._finalize_figure!(fig) === false
+		r = _sfn_margin(fig, :r)
+		at_end ? (@test r > 4) : (@test r == 4)
+		W = round(Int, something(get(fig.layout.fields, :width, nothing), 700))
+		H = round(Int, something(get(fig.layout.fields, :height, nothing), 500))
+		info = _sfn_render(fig; width = W, height = H)
+		info === nothing && break
+		@test info["axes"]["xaxis"]["labels_right"] <= W
+	end
+	# Explicit tick text at the right end: its own width counts.
+	fig = plot_scatter(collect(0.0:10.0), collect(1.0:11.0); xrange = (0, 10))
+	xticks!(fig, [0, 5, 10], ["0", "5", "10 units"])
+	tight_layout!(fig)
+	@test _SFN._finalize_figure!(fig) === false
+	@test _sfn_margin(fig, :r) > 9
+	info = _sfn_render(fig; width = 700, height = 500)
+	info === nothing || @test info["axes"]["xaxis"]["labels_right"] <= 700
+	# A tick label that ends inside the plot area leaves the margin alone.
+	fig = plot_heatmap(collect(0.0:0.5:10.0), collect(0.0:0.5:4.0), [sin(a) * cos(b) for a in 0:0.5:10, b in 0:0.5:4])
+	tight_layout!(fig)
+	@test _sfn_margin(fig, :r) == 4
+end
+
+@testset "a 3-D scene cell takes the whole slot of its row and column (L2)" begin
+	xs = collect(range(-2, 2; length = 21)); ys = collect(range(-1, 1; length = 11))
+	Z = [exp(-x^2 - 4y^2) for x in xs, y in ys]
+	sf = subplots(2, 2; sync = false, specs = [Spec() Spec(kind = "scene"); Spec() Spec()])
+	plot_scatter!(sf, xs, sin.(xs); row = 1, col = 1, xlabel = "x", ylabel = "amplitude (a.u.)")
+	plot_surface!(sf, xs, ys, Z; row = 1, col = 2, showscale = false)
+	plot_scatter!(sf, xs, cos.(xs); row = 2, col = 1, xlabel = "x", ylabel = "y")
+	plot_scatter!(sf, xs, 1000 .* cos.(xs); row = 2, col = 2, xlabel = "x", ylabel = "counts")
+	layout = sf.plot.layout
+	plan = _SFN._room_plan(sf)
+	scene = _SFN._layout_subplot_domain(layout, :scene)
+	x1 = _SFN._layout_axis_domain(layout, :xaxis)
+	x4 = _SFN._layout_axis_domain(layout, :xaxis3)
+	# The plot area below gives up room on its left for its tick labels and
+	# title; the scene, which draws its labels inside its domain, does not:
+	# it starts where that room starts, the grid gap after column 1.
+	@test x4[1] > scene[1][1] + 1 / plan.Wp
+	@test scene[1][1] - x1[2] ≈ 0.1 atol = 1e-6
+	@test scene[1][2] ≈ x4[2]
+	# Its top is its row's top; it is as tall as its row's slot.
+	@test scene[2][2] ≈ _SFN._layout_axis_domain(layout, :yaxis)[2]
+	@test scene[2][1] <= _SFN._layout_axis_domain(layout, :yaxis)[1] + 1e-9
+	@test _SFN._finalize_figure!(sf) === false
+	# Scenes that gave up room for their own bars get their whole slots back
+	# when one shared bar replaces them (mdd_slices), after every call settled.
+	sf = subplots(1, 3; sync = false, specs = fill(Spec(kind = "scene"), 1, 3), horizontal_spacing = 0.02)
+	figsize!(sf, 11.2, 3.4; units = :in)
+	g = collect(range(0, 1; length = 6))
+	for c in 1:3
+		plot_surface!(sf, g, g, [sin(3a) * cos(2b) * c for a in g, b in g]; row = 1, col = c)
+		title!(sf, "panel $c\nsecond line"; row = 1, col = c)
+		@test _SFN._finalize_figure!(sf) === false
+	end
+	narrowed = _SFN._layout_subplot_domain(sf.plot.layout, :scene)[1]
+	@test narrowed[2] < 0.32 - 1e-3
+	shared_colorbar!(sf; title = "u", len = 0.7)
+	for (key, slot) in ((:scene, (0.0, 0.32)), (:scene2, (0.34, 0.66)), (:scene3, (0.68, 1.0)))
+		@test collect(_SFN._layout_subplot_domain(sf.plot.layout, key)[1]) ≈ collect(slot) atol = 1e-9
+	end
+	@test _SFN._finalize_figure!(sf) === false
+end
+
+@testset "panel labels above equal-aspect rows settle within the round cap (B1, B2)" begin
+	# device_geometry: a label above the top cell needs a margin plotly does
+	# not push; the margin shrinks the plot region, which moves the fitted
+	# box, which changes what the label needs. Solved together in one round:
+	# the call takes at most two rounds and leaves nothing for a next one.
+	for st in (:default, :ieee)
+		with_style(st) do
+			sf = subplots(2, 1; sync = false, height_ratios = [1.1, 0.9])
+			figsize!(sf, :ieee; columns = 2, aspect = 0.62)
+			plot_scatter!(sf, Float64[], Float64[]; row = 1, col = 1, xrange = (-0.6, 5.3), yrange = (-0.3, 1.12),
+				equalar = true)
+			plot_scatter!(sf, [0.5, 1.5, 2.5], [0.25, 0.75, 0.5]; row = 2, col = 1, xrange = (0, 4), yrange = (0, 1),
+				equalar = true, legend = "rects")
+			xlabel!(sf, "x (um)"; row = 2, col = 1)
+			ylabel!(sf, "y (um)"; row = 2, col = 1)
+			panel_labels!(sf)
+			@test _SFN._FIN_LAST_ROUNDS[] <= 2
+			@test _SFN._finalize_figure!(sf) === false
+			@test _SFN._FIN_LAST_ROUNDS[] == 1
+			# The label sits on the top cell, its line inside the top margin.
+			layout = sf.plot.layout
+			top = _SFN._layout_axis_domain(layout, :yaxis)[2]
+			labels = [_SFN._symbol_dict(a) for a in get(layout.fields, :annotations, Any[])
+				if get(_SFN._symbol_dict(a), :name, "") == "plotlysupply:panel_label:1:1"]
+			@test length(labels) == 1
+			label = labels[1]
+			@test label[:yref] == "paper" && label[:yanchor] == "bottom"
+			@test label[:y] ≈ top atol = 1e-6
+			t = _sfn_margin(sf, :t)
+			Hp = layout.fields[:height] - t - _sfn_margin(sf, :b)
+			@test (label[:y] - 1) * Hp + get(label, :yshift, 0) + 1.3 * _SFN._fin_font_size(layout) <= t
 		end
 	end
 end

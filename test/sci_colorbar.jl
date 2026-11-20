@@ -1026,7 +1026,8 @@ end
 		W = 700.0
 		Wp = W - _scb_fields(layout.fields[:margin])[:l] - margin_r
 		title = titles[1]
-		@test title[:xref] == "paper" && title[:x] >= bar[:x]
+		# (1e-6 paper: under a thousandth of a px, the residue of the fit.)
+		@test title[:xref] == "paper" && title[:x] >= bar[:x] - 1e-6
 		@test (title[:x] - 1) * Wp + get(title, :xshift, 0) + 1.6 * 12 <= margin_r
 		@test _SCB._finalize_figure!(sf) === false
 	end
