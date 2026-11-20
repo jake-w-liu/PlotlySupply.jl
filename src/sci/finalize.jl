@@ -1647,15 +1647,28 @@ end
 # Who chose the figure size, recorded in `layout.meta` under `_FIN_SIZE_KEY`:
 # `"user"` (written by `figsize!`), or `[W0, H0, w, h, wfree, hfree]` when
 # M3a/L11 sized the figure to `w` x `h` from the base size `W0` x `H0` with
-# the free directions `wfree`/`hfree` (1/0), and a seventh entry 1 when L11
-# gave up compressing the grid (`_fin_free_size`).
+# the free directions `wfree`/`hfree` (1/0), and a seventh entry when L11
+# searched a grid's size again (`1 + n` after `n` searches) or gave up
+# compressing it (1) (`_fin_free_size`).
 const _FIN_SIZE_KEY = Symbol("plotlysupply:size")
 
-# Whether the size record of the figure says L11 gave up compressing it.
-function _fin_size_abandoned(layout::Layout)
+# Searches of a grid's size from its base after its compressed size stopped
+# holding, before L11 gives the compression up (`_fin_free_size`). One: a
+# second one costs the finalize rounds the margins then need to settle
+# (`_FIN_FIT_ROUNDS`).
+const _FIN_SIZE_SEARCHES = 1
+
+# The L11 state of the size record: 0, 1 (given up) or `1 + n` (searched
+# again `n` times).
+function _fin_size_flag(layout::Layout)
 	rec = _fin_meta_get(layout, _FIN_SIZE_KEY)
-	return rec isa AbstractVector && length(rec) == 7 && _fin_isfinite_real(rec[7]) && rec[7] != 0
+	(rec isa AbstractVector && length(rec) == 7 && _fin_isfinite_real(rec[7])) || return 0
+	flag = rec[7]
+	return isinteger(flag) && 1 <= flag <= 1 + _FIN_SIZE_SEARCHES ? Int(flag) : 0
 end
+
+# Whether the size record of the figure says L11 gave up compressing it.
+_fin_size_abandoned(layout::Layout) = _fin_size_flag(layout) == 1
 
 # `figsize!`: the size is the user's; M3a/L11 never change it.
 _fin_mark_user_size!(layout::Layout) = (_fin_meta_set!(layout, _FIN_SIZE_KEY, "user"); nothing)
@@ -1691,22 +1704,22 @@ function _fin_size_choice(layout::Layout)
 end
 
 # The size (px) M3a/L11 give a figure of base size `W0` x `H0` from the fits
-# at that size, and whether L11 gives up compressing it: a single figure
-# drops the blank rows above and below its plot box (wide field) or the
-# blank columns beside it (tall field); a grid drops the blank every
+# at that size, and the L11 state of the record (`_fin_size_flag`): a single
+# figure drops the blank rows above and below its plot box (wide field) or
+# the blank columns beside it (tall field); a grid drops the blank every
 # equal-aspect cell of a row (column) leaves (`plan.memo[:band_slack]`),
 # unless built with `compress = false` or the compression was given up
-# (`abandoned`). Only a free direction changes. The bounds are for the
+# (`flag == 1`). Only a free direction changes. The bounds are for the
 # 700 x 500 default; a smaller (journal) size scales them. `now` is the size
 # the figure has and the fits there: `(W, H, fits)`.
 function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, wfree::Bool, hfree::Bool, accs, bars;
-		now = nothing, abandoned::Bool = false)
+		now = nothing, flag::Int = 0)
 	layout = ctx.p.layout
 	lowH = min(H0, _FIN_MIN_FIGURE_HEIGHT * min(1.0, H0 / _DEFAULT_EXPORT_HEIGHT_PX))
 	lowW = min(W0, _FIN_MIN_FIGURE_WIDTH * min(1.0, W0 / _DEFAULT_EXPORT_WIDTH_PX))
 	newW, newH = W0, H0
 	if layout.subplots.rows * layout.subplots.cols == 1
-		(ctx.sf === nothing && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) || return (W0, H0, false)
+		(ctx.sf === nothing && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) || return (W0, H0, flag)
 		fit = fits[(:xaxis, :yaxis)]
 		# vm-08: the margins at a new size are not those at the base: tick
 		# labels and titles push a margin only where the box reaches the paper
@@ -1743,22 +1756,23 @@ function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, 
 			end)
 		end
 	else
-		(_fin_compress_grid(layout) && !abandoned) || return (W0, H0, false)
+		(_fin_compress_grid(layout) && flag != 1) || return (W0, H0, flag)
 		compressed = now !== nothing && (now[1] != W0 || now[2] != H0)
 		slack = get(plan.memo, :band_slack, nothing)
-		# A grid the plan at the base size does not compress (its compressed
-		# bands lost a cell, `_fin_plan_and_fit`) is drawn at the base size,
-		# and one at a compressed size gives the compression up (below).
-		slack === nothing && return (W0, H0, compressed)
-		dropH = hfree && slack.y !== nothing && sum(slack.y) > 1 ? H0 - clamp(round(H0 - sum(slack.y)), lowH, H0) : 0.0
-		dropW = wfree && slack.x !== nothing && sum(slack.x) > 1 ? W0 - clamp(round(W0 - sum(slack.x)), lowW, W0) : 0.0
-		D = max(dropH, dropW)
-		D > 0 || return (W0, H0, false)
 		# A size holds when every cell fitted at the base is fitted there
-		# with a box as large (within 1 px: only blank was dropped).
-		holds(g) = all(fits) do (cell, f)
+		# with a plot box as large (within `tol` px): only blank was dropped.
+		# The box, not the blank the fit reports: the compressed bands leave a
+		# cell no blank at any size (a 1 x 2 pair given a bottom bar kept the
+		# size its right bars had led to, its boxes 181 px wide for 270 at the
+		# base). The search takes the least size within 1 px; a size the
+		# figure has is kept within 2, as the fits read the state they start
+		# from and the size found lands tenths of a px either side of the
+		# bound in the state it leads to (an :aps pair with a bottom bar,
+		# searched to 154.8 px with 118.9 px boxes for 119.7 at the base, had
+		# 118.5 px boxes at 155 px and was given up).
+		holds(g, tol) = all(fits) do (cell, f)
 			h = get(g, cell, nothing)
-			h !== nothing && h.free_px <= f.free_px + 1 && h.slack_px <= f.slack_px + 1
+			h !== nothing && h.width_px >= f.width_px - tol && h.height_px >= f.height_px - tol
 		end
 		# The fits at another size read the domains, bars and wrapped titles
 		# drawn now, and a grid's change with the size: the gaps between rows
@@ -1766,23 +1780,33 @@ function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, 
 		# figure shrinks, a short row wraps its y title, and the bands give
 		# up at most `_ROOM_MAX_SHARE`. So a size found from one state need
 		# not hold in the state it leads to (a :nature 2 x 2 grid of labelled
-		# fields with bars went 252 -> 246 -> 135 -> 110 px, where no cell
-		# fitted, and back on successive passes; an :ieee one was cut to
-		# 114 px with 8 px rows and stayed there unfitted). A compressed size
-		# the figure has is therefore kept while it holds (its own fits, no
-		# probe); one that no longer holds is given up for the base size,
-		# and the figure is not compressed again (`abandoned`, recorded with
-		# the size) until its base size or its size record changes.
+		# fields with bars went 252 -> 246 -> 135 -> 110 px and back on
+		# successive passes). A compressed size the figure has is therefore
+		# kept while it holds (its own fits, no probe). One that no longer
+		# holds (a later call changed the cells, or the grid at the base no
+		# longer compresses) is searched again from the base, at most
+		# `_FIN_SIZE_SEARCHES` times in a row (`flag` 1 + n); when the size
+		# found then stops holding too, the compression is given up for the
+		# base size (`flag` 1), and the figure is not compressed again until
+		# its base size or its size record changes.
 		if compressed
-			holds(now[3]) && return (now[1], now[2], false)
-			return (W0, H0, true)
+			slack !== nothing && holds(now[3], 2.0) && return (now[1], now[2], 0)
+			flag == 1 + _FIN_SIZE_SEARCHES && return (W0, H0, 1)
+			flag = flag == 0 ? 2 : flag + 1
 		end
+		# A grid the plan at the base size does not compress (its compressed
+		# bands lost a cell, `_fin_plan_and_fit`) is drawn at the base size.
+		slack === nothing && return (W0, H0, flag)
+		dropH = hfree && slack.y !== nothing && sum(slack.y) > 1 ? H0 - clamp(round(H0 - sum(slack.y)), lowH, H0) : 0.0
+		dropW = wfree && slack.x !== nothing && sum(slack.x) > 1 ? W0 - clamp(round(W0 - sum(slack.x)), lowW, W0) : 0.0
+		D = max(dropH, dropW)
+		D > 0 || return (W0, H0, flag)
 		# From the base: the size keeps `u` px of the larger drop (`u = 0`:
 		# all of it, `u = D`: the base), the least `u` that holds found by
 		# `_fin_least_size`, the full drop (which holds unless the room grows
 		# as above) tried first.
 		at(u) = (W0 - round(dropW * (D - u) / D), H0 - round(dropH * (D - u) / D))
-		probe(u) = (ok = holds(_fin_plan_and_fit(ctx, accs, bars, at(u)...)[2]);
+		probe(u) = (ok = holds(_fin_plan_and_fit(ctx, accs, bars, at(u)...)[2], 1.0);
 			# Holding: one px less is the next trial; else the bracket is halved.
 			(ok, ok ? u - 1 : NaN))
 		newW, newH = at(_fin_least_size(probe, 0.0, D, (0.0,)))
@@ -1791,7 +1815,7 @@ function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, 
 	# size exactly (a journal column, 89 mm = 336.378 px, stays 89 mm).
 	newW = newW == W0 ? W0 : Float64(round(Int, newW))
 	newH = newH == H0 ? H0 : Float64(round(Int, newH))
-	return newW, newH, false
+	return newW, newH, flag
 end
 
 # The least whole size in [lo, hi) at which `probe` holds, or `hi` when none
@@ -2146,10 +2170,8 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 		at_base = W0 == W && H0 == H
 		now = (W, H, fits)
 		at_base || ((plan, fits) = _fin_plan_and_fit(ctx, accs, bars, W0, H0))
-		abandoned = _fin_size_abandoned(layout)
-		newW, newH, abandon = _fin_free_size(ctx, plan, fits, W0, H0, wfree, hfree, accs, bars;
-			now = now, abandoned = abandoned)
-		abandoned |= abandon
+		newW, newH, flag = _fin_free_size(ctx, plan, fits, W0, H0, wfree, hfree, accs, bars;
+			now = now, flag = _fin_size_flag(layout))
 		recorded = _fin_meta_get(layout, _FIN_SIZE_KEY) isa AbstractVector
 		# A chosen size within 1 px of the one the figure has is kept: the fit
 		# at the base size reads the current domains, so a size that rounds
@@ -2171,7 +2193,7 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 		# A figure left at its base size without a record keeps no size of ours.
 		if recorded || newW != W0 || newH != H0
 			record = Any[W0, H0, newW, newH, wfree ? 1 : 0, hfree ? 1 : 0]
-			abandoned && push!(record, 1)
+			flag == 0 || push!(record, flag)
 			isequal(_fin_meta_get(layout, _FIN_SIZE_KEY), record) ||
 				(wrote |= _fin_meta_set!(layout, _FIN_SIZE_KEY, record))
 		end
@@ -2269,7 +2291,7 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 	end
 	# The last x tick label at the right paper edge: a margin need like the
 	# decorations' (kept when a raise is given back).
-	over = _fin_tick_overhang_px(p, accs, plan.Wp, W)
+	over = _fin_tick_overhang_px(p, accs, plan.Wp, W; pending = layout_updates)
 	if over > 0
 		_room_note_margin!(plan, :r, over)
 		current = _cmn_mapping_get(get(layout.fields, :margin, nothing), :r)
@@ -5206,8 +5228,9 @@ function _fin_trace_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height:
 end
 
 # The tick label plotly.js 2.35.2 centres on the last tick of an x axis that
-# reaches the right paper edge sticks out past the plot area by half its
-# width less the tick's distance from the axis end; automargin pushes only
+# ends at (or near) the right paper edge sticks out past the plot area by half
+# its width less the tick's distance from the axis end and the axis end's
+# distance from the paper edge; automargin pushes only
 # the axis side (bottom or top), so under a tight margin (`tight_layout!`,
 # `savefig(...; tight = true)`: 4 px) that half was cut. The right margin
 # grows to hold it, by no more; it only grows. Only ranges known before
@@ -5216,8 +5239,12 @@ end
 # numeric `dtick`/`tick0`, or explicit `tickvals`. Returns the px the right
 # margin needs for it (0 when none), at most `_TIGHT_MAX_MARGIN_FRACTION`
 # of the width `W`; `Wp` is the plot width. A right margin left to plotly
-# (unset) is not raised.
-function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64)
+# (unset) is not raised. `pending` holds the updates the calling pass is
+# about to write: an x domain there is the one measured (read from the layout
+# instead, a margin sized for the domain of the pass before gave a 1 px step
+# a round, a :nature pair with a panel title going 6 -> 5 -> 4 px past
+# `_FIN_FIT_ROUNDS`).
+function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64; pending::AbstractDict = Dict{Symbol, Any}())
 	layout = p.layout
 	_fin_isfinite_real(_cmn_mapping_get(get(layout.fields, :margin, nothing), :r)) || return 0.0
 	Wp = max(Wp, 1.0)
@@ -5230,8 +5257,17 @@ function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64)
 		position = _fin_string(_cmn_mapping_get(axis, :ticklabelposition))
 		(position === nothing || !occursin("inside", position)) || continue
 		_fin_axis_type(layout, key) in ("linear", "-") || continue
-		dom = _fin_domain(layout, key)
-		dom[2] >= 1 - 1e-3 || continue
+		queued = get(pending, Symbol(key, :_domain), nothing)
+		dom = queued isa AbstractVector && length(queued) == 2 && all(_fin_isfinite_real, queued) ?
+			(Float64(queued[1]), Float64(queued[2])) : _fin_domain(layout, key)
+		# The axis end's px from the paper edge, which the label overhangs
+		# less: an equal-aspect box the fit drew a px short of the edge needs
+		# the margin too (counting only boxes at the edge alternated an :ieee
+		# pair between a 4 px margin, at which its boxes reach the edge, and
+		# an 8 px one, at which they stop 0.9 px short). Past the margin cap
+		# no label reaches the paper edge.
+		gap = max(0.0, (1 - dom[2]) * Wp)
+		gap < _TIGHT_MAX_MARGIN_FRACTION * W || continue
 		root = something(_fin_match_root(layout.fields, key), key)
 		raxis = get(layout.fields, root, nothing)
 		auto = _fin_field(raxis, :autorange)
@@ -5280,7 +5316,7 @@ function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64)
 			chars = _fin_number_chars(tick, decimals) + extra
 		end
 		distance = abs(right - tick) / (hi - lo) * len
-		over = chars * 0.6 * tickfont / 2 - distance
+		over = chars * 0.6 * tickfont / 2 - distance - gap
 		over > 0 && (need = max(need, over + 1))
 	end
 	return min(need, _TIGHT_MAX_MARGIN_FRACTION * W)

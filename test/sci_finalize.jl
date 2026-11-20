@@ -2330,6 +2330,31 @@ end
 	fig = plot_heatmap(collect(0.0:0.5:10.0), collect(0.0:0.5:4.0), [sin(a) * cos(b) for a in 0:0.5:10, b in 0:0.5:4])
 	tight_layout!(fig)
 	@test _sfn_margin(fig, :r) == 4
+	# An equal-aspect box that ends near the paper edge, not at it: the label
+	# overhangs less by the gap, measured on the domain the pass writes, and
+	# the margin settles within the call (an :ieee pair alternated between 4
+	# and 8 px; a :nature pair given a panel title stepped 6 -> 5 -> 4 px a
+	# round, past the round cap).
+	x = range(-1.0, 1.0; length = 21)
+	y = range(-1.0, 1.0; length = 15)
+	U = [exp(-(a^2 + b^2)) for a in x, b in y]
+	for (st, titled) in ((:ieee, false), (:nature, false), (:nature, true))
+		sf = with_style(st) do
+			s = subplots(1, 2; sync = false)
+			for j in 1:2
+				plot_heatmap!(s, x, y, U; row = 1, col = j, equalar = true, showscale = false)
+			end
+			titled && title!(s, "(a)"; row = 1, col = 1)
+			s
+		end
+		@test _SFN._finalize_figure!(sf) === false
+		layout = sf.plot.layout
+		W = round(Int, something(get(layout.fields, :width, nothing), 700))
+		H = round(Int, something(get(layout.fields, :height, nothing), 500))
+		info = _sfn_render(sf; width = W, height = H)
+		info === nothing && continue
+		@test info["axes"]["xaxis2"]["labels_right"] <= W
+	end
 end
 
 @testset "a 3-D scene cell takes the whole slot of its row and column (L2)" begin
@@ -2709,10 +2734,21 @@ end
 	end
 end
 
-@testset "a compressed grid size that stops holding is given up (L11)" begin
+@testset "a compressed grid size that stops holding is searched again, then given up (L11)" begin
 	# A record of a compressed size whose cells do not fit there (the state
-	# the :ieee 2 x 2 grid was left in): the figure goes back to its base
-	# size, records that, and settles there.
+	# the :ieee 2 x 2 grid was left in): the size is searched again from the
+	# base. The fits read the state they start from (titles wrapped for the
+	# 114 px rows), so where that leads is not the size the figure was built
+	# with; it settles at a size whose cells are all fitted with the plot
+	# boxes of the base size.
+	fits_at(fig, W, H) = _SFN._with_figure_style(fig) do
+		_SFN._cbar_with_extrema_memo() do
+			ctx = _SFN._fin_context(fig, nothing, nothing, false)
+			accs = _SFN._fin_collect_axes(ctx.p)
+			bars = _SFN._fin_collect_bars(ctx.p, ctx.insets)
+			_SFN._fin_plan_and_fit(ctx, accs, bars, Float64(W), Float64(H))[2]
+		end
+	end
 	with_style(:ieee) do
 		x = range(-2.0, 2.0; length = 21); y = range(-1.0, 1.0; length = 15)
 		U = [exp(-(a^2 + b^2)) for a in x, b in y]
@@ -2727,8 +2763,63 @@ end
 		layout.fields[:height] = 114
 		_SFN._fin_meta_set!(layout, _SFN._FIN_SIZE_KEY, Any[W0, base, W0, 114.0, 0, 1])
 		@test _SFN._finalize_figure!(sf) === true
+		@test _SFN._finalize_figure!(sf) === false
+		H = layout.fields[:height]
+		@test 114 < H <= base
+		at_base = fits_at(sf, W0, base)
+		now = fits_at(sf, W0, H)
+		@test length(at_base) == length(now) == 4
+		# Within the 2 px a size the figure has is kept by (`_fin_free_size`).
+		@test all(((cell, f),) -> now[cell].width_px >= f.width_px - 2 && now[cell].height_px >= f.height_px - 2, at_base)
+		# A size that was searched again as often as allowed and stops holding
+		# as well: the compression is given up for the base size, recorded,
+		# and settled.
+		layout.fields[:height] = 114
+		_SFN._fin_meta_set!(layout, _SFN._FIN_SIZE_KEY, Any[W0, base, W0, 114.0, 0, 1, 1 + _SFN._FIN_SIZE_SEARCHES])
+		@test _SFN._finalize_figure!(sf) === true
 		@test layout.fields[:height] == base
 		@test _SFN._fin_size_abandoned(layout)
 		@test _SFN._finalize_figure!(sf) === false
 	end
+end
+
+@testset "L11 drops only blank: a compressed grid keeps the plot boxes of its base size" begin
+	# A 1 x 2 pair compressed with its two right bars, then given one bottom
+	# bar: it kept the size the right bars had led to (700 x 303), its boxes
+	# 181 px wide where the base size gives 270. Built with the bottom bar
+	# from the start it took another size (326 px), with 209 px boxes.
+	Z = [sin(0.4i) * cos(0.3j) for i in 1:12, j in 1:10]
+	fits_at(fig, W, H) = _SFN._with_figure_style(fig) do
+		_SFN._cbar_with_extrema_memo() do
+			ctx = _SFN._fin_context(fig, nothing, nothing, false)
+			accs = _SFN._fin_collect_axes(ctx.p)
+			bars = _SFN._fin_collect_bars(ctx.p, ctx.insets)
+			_SFN._fin_plan_and_fit(ctx, accs, bars, Float64(W), Float64(H))[2]
+		end
+	end
+	sizes = Tuple{Int, Int}[]
+	for showscale in (true, false)
+		sf = subplots(1, 2; sync = false)
+		plot_heatmap!(sf, Z; row = 1, col = 1, equalar = true, showscale = showscale)
+		plot_heatmap!(sf, Z; row = 1, col = 2, equalar = true, showscale = showscale)
+		shared_colorbar!(sf; side = :bottom, title = "u")
+		@test _SFN._finalize_figure!(sf) === false
+		layout = sf.plot.layout
+		W, H = layout.fields[:width], layout.fields[:height]
+		push!(sizes, (W, H))
+		@test H < 500
+		base = fits_at(sf, 700, 500)
+		now = fits_at(sf, W, H)
+		@test length(base) == length(now) == 2
+		for (cell, f) in base
+			@test now[cell].width_px >= f.width_px - 2
+			@test now[cell].height_px >= f.height_px - 2
+		end
+		# One px less does not keep them.
+		less = fits_at(sf, W, H - 1)
+		@test any(((cell, f),) -> !haskey(less, cell) || less[cell].width_px < f.width_px - 1 ||
+			less[cell].height_px < f.height_px - 1, base)
+	end
+	# The same figure gets the same size whichever way it was built.
+	@test abs(sizes[1][2] - sizes[2][2]) <= 1
 end
