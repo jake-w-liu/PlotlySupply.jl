@@ -883,9 +883,11 @@ end
 			PlotlySupply._subplot_delegate_mutator!(sf, mutator, [1, 2], [3, 4]; row=1, col=1)
 		end
 		dashes = [_rsp_fields(t[:line])[:dash] for t in sf.plot.data]
-		@test dashes[1] != dashes[2]
-		@test dashes[2] != dashes[3]
-		@test length(unique(dashes)) == 3
+		# D20 (replaces X9): the cycle runs per cell, as each matplotlib Axes
+		# has its own; the second call on cell (1, 1) continues that cell's.
+		@test dashes[1] == dashes[2]
+		@test dashes[3] != dashes[1]
+		@test length(unique(dashes)) == 2
 	end
 
 	@testset "numbered colour axes reach the figure (X51)" begin
@@ -915,7 +917,7 @@ end
 	end
 
 	@testset "real families: style cycles, colour axes and log ranges per cell (Y19, Y21, Y29, Y30, Y32, Y36)" begin
-		# Y32: the dash/marker cycle runs across geo, ternary and xy cells.
+		# Y32, D20: each geo, ternary and xy cell starts its own dash/marker cycle.
 		mixed = subplots(1, 3; sync=false, specs=[Spec(kind="geo") Spec(kind="ternary") Spec()])
 		with_style(; cycle=:dash_marker) do
 			plot_scattergeo!(mixed, [0.0, 1.0], [0.0, 1.0]; row=1, col=1, mode="lines")
@@ -923,10 +925,10 @@ end
 			plot_scatter!(mixed, [1.0, 2.0], [1.0, 2.0]; row=1, col=3)
 		end
 		@test [t[:type] for t in mixed.plot.data] == ["scattergeo", "scatterternary", "scatter"]
-		@test [_rsp_fields(t[:line])[:dash] for t in mixed.plot.data] == ["solid", "dash", "dot"]
-		@test [_rsp_fields(t[:marker])[:symbol] for t in mixed.plot.data] == ["circle", "square", "diamond"]
-		# Y21/Y29: a field family in another cell does not restart the cycle,
-		# exactly as on one figure.
+		@test [_rsp_fields(t[:line])[:dash] for t in mixed.plot.data] == ["solid", "solid", "solid"]
+		@test [_rsp_fields(t[:marker])[:symbol] for t in mixed.plot.data] == ["circle", "circle", "circle"]
+		# Y21/Y29: a field family takes no cycle position, in a cell exactly as
+		# on one figure (D20: cell (1, 2)'s first line trace starts its cycle).
 		cells = subplots(1, 2; sync=false)
 		single = plot_scatter([1.0, 2.0], [1.0, 2.0])
 		with_style(; cycle=:dash) do
@@ -938,8 +940,8 @@ end
 			plot_scatter!(single, [1.0, 2.0], [2.0, 2.0])
 		end
 		line_dash(t) = haskey(t.fields, :line) ? get(_rsp_fields(t[:line]), :dash, nothing) : nothing
-		@test [line_dash(t) for t in cells.plot.data] == ["solid", nothing, "dash"]
-		@test [line_dash(t) for t in cells.plot.data] == [line_dash(t) for t in single.data]
+		@test [line_dash(t) for t in cells.plot.data] == ["solid", nothing, "solid"]
+		@test [line_dash(t) for t in single.data] == ["solid", nothing, "dash"]
 		# Y19/Y30: a numbered colour axis from a real family reaches the
 		# figure, its bar placed next to the cell.
 		colour = subplots(1, 2; sync=false)
