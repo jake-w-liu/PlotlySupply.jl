@@ -34,12 +34,33 @@ const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_SVG_QUOTE_TRANSFORMS...,
 )
 
-struct _PlotlyJSCompatAsset
+# `stamp` is the (size, mtime) of the four files the asset depends on (source,
+# source LICENSE, patched copy, copied LICENSE) as of the last full integrity
+# check; `script` memoises the inline `<script>` text of the HTML export for
+# that stamp. A call whose files still carry the stamp skips the read, hash and
+# regex work (about 90 ms for the 4.4 MB text); a changed stamp falls back to
+# the full digest check.
+mutable struct _PlotlyJSCompatAsset
 	source::String
 	directory::String
 	path::String
 	digest::String
+	stamp::Vector{Tuple{Int64,Float64}}
+	script::Union{Nothing,String}
 end
+_PlotlyJSCompatAsset(source, directory, path, digest) =
+	_PlotlyJSCompatAsset(source, directory, path, digest, Tuple{Int64,Float64}[], nothing)
+
+function _plotlyjs_stamp(paths)
+	stamp = Tuple{Int64,Float64}[]
+	for path in paths
+		st = stat(path)
+		push!(stamp, (Int64(st.size), Float64(st.mtime)))
+	end
+	return stamp
+end
+_plotlyjs_asset_files(asset::_PlotlyJSCompatAsset) =
+	(asset.source, joinpath(dirname(asset.source), "LICENSE"), asset.path, joinpath(asset.directory, "LICENSE"))
 
 mutable struct _PlotlyJSCompatAssetState
 	lock::ReentrantLock
@@ -110,6 +131,12 @@ function _plotlyjs_render_asset_path(;
 	remove_directory = _remove_plotlyjs_compat_directory,
 )
 	lock(state.lock) do
+		if state.asset !== nothing
+			asset = state.asset
+			asset.source == abspath(source_path) || error("Plotly.js compatibility source changed")
+			isempty(asset.stamp) || _plotlyjs_stamp(_plotlyjs_asset_files(asset)) == asset.stamp &&
+				return asset.path
+		end
 		source = read(source_path, String)
 		_plotlyjs_text_digest(source) == _PLOTLYJS_MATH_FONT_SOURCE_SHA256 ||
 			error("Unexpected Plotly.js source for math-font compatibility")
@@ -125,6 +152,8 @@ function _plotlyjs_render_asset_path(;
 			isfile(joinpath(asset.directory, "LICENSE")) &&
 				_plotlyjs_file_digest(joinpath(asset.directory, "LICENSE")) == _PLOTLYJS_LICENSE_SHA256 ||
 				error("The owned Plotly.js compatibility license changed or is missing")
+			asset.stamp = _plotlyjs_stamp(_plotlyjs_asset_files(asset))
+			asset.script = nothing
 			return asset.path
 		end
 		patched = _patch_plotlyjs_math_fonts(source)
@@ -142,7 +171,9 @@ function _plotlyjs_render_asset_path(;
 			path = joinpath(directory, "plotly.min.js")
 			Base.Filesystem.rename(staged, path)
 			Base.Filesystem.rename(staged_license, joinpath(directory, "LICENSE"))
-			state.asset = _PlotlyJSCompatAsset(abspath(source_path), directory, path, digest)
+			asset = _PlotlyJSCompatAsset(abspath(source_path), directory, path, digest)
+			asset.stamp = _plotlyjs_stamp(_plotlyjs_asset_files(asset))
+			state.asset = asset
 			delete!(state.unpublished, directory)
 			return path
 		catch
@@ -170,9 +201,20 @@ end
 # The inline `<script>` of the compatibility-patched Plotly.js that desktop
 # plots and image exports render with (HTML export embeds it instead of
 # loading Plotly.js from the CDN, so a saved file draws exactly like them).
-function _compatible_plotlyjs_inline_script()
-	path = _plotlyjs_render_asset_path()
-	return _plotlyjs_inline_script(read(path, String), read(joinpath(dirname(path), "LICENSE"), String))
+# The text is memoised on the asset (one 4.4 MB string per session) and rebuilt
+# when the integrity check saw a changed stamp.
+function _compatible_plotlyjs_inline_script(; state::_PlotlyJSCompatAssetState = _PLOTLYJS_COMPAT_ASSET_STATE)
+	path = _plotlyjs_render_asset_path(; state)
+	lock(state.lock) do
+		asset = state.asset
+		asset === nothing && error("The Plotly.js compatibility asset is not available")
+		script = asset.script
+		if script === nothing || asset.path != path
+			script = _plotlyjs_inline_script(read(path, String), read(joinpath(dirname(path), "LICENSE"), String))
+			asset.script = script
+		end
+		return script
+	end
 end
 
 function _inline_plotlyjs_source(html::AbstractString, source::AbstractString, license::AbstractString)

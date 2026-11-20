@@ -9,7 +9,8 @@
 # - no Electron: no `show = true`, no `to_syncplot`, `subplots(...; sync =
 #   false)` only, and only the in-process side of an export (the export copy,
 #   the finalizer and the JSON the renderer would receive; html and json
-#   written to an `IOBuffer`). Nothing touches the network or the file system.
+#   written to an `IOBuffer`; no html export, which needs the plotly.js
+#   artifact). Nothing touches the network or the file system.
 #   ElectronCall is not loaded either: it stays loaded on first desktop or
 #   export use (see electron_backend.jl), so its window code compiles then.
 # - no warnings, and no lasting change of package state: styles go through
@@ -89,7 +90,10 @@ function _precompile_workload()
 	# The in-process side of every export (no Electron).
 	_prepare_export(fig, ("png", "pdf", "svg"), NamedTuple())
 	_prepare_export(getfield(sf, :fig), ("png", "pdf"), NamedTuple())
-	savefig(IOBuffer(), fig; format = "html")
+	# No html export here: it resolves the lazy plotly.js artifact (a download
+	# on a machine that does not have it, which fails package-image generation
+	# offline) and creates the patched asset directory, whose "registered for
+	# removal at exit" flag would be saved into the image.
 	savefig(IOBuffer(), hm; format = "json")
 	# A png/pdf/svg file export would start Electron, so its Julia side is
 	# compiled from directives instead (compiled, not run): this takes about

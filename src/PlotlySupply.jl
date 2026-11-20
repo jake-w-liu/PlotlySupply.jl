@@ -35,8 +35,9 @@ include("modern_map_subplots.jl")
 # PlotlyBase exports `json`, but recent JSON.jl releases no longer export that
 # function for `using JSON` to import. Restore the documented binding while
 # retaining forward compatibility with a PlotlyBase release that defines it.
-if !isdefined(@__MODULE__, :json)
-	const json = PlotlyBase.JSON.json
+const _JSON_IS_OWN = !isdefined(@__MODULE__, :json)
+if _JSON_IS_OWN
+	json(args...; kwargs...) = PlotlyBase.JSON.json(args...; kwargs...)
 end
 
 struct _SyncPlotCreationSpec
@@ -288,6 +289,15 @@ function __init__()
 	# PlotlyBase owns the generic HTML/VS Code display paths. Keep its default
 	# renderer aligned with the project-owned desktop/export artifact.
 	PlotlyBase.set_plotly_version(_PLOTLYJS_VERSION)
+	# Whatever a package-image build left in the asset state does not belong
+	# to this process: the atexit cleanup must be registered by this session.
+	let state = _PLOTLYJS_COMPAT_ASSET_STATE
+		lock(state.lock) do
+			state.asset = nothing
+			empty!(state.unpublished)
+			state.atexit_registered = false
+		end
+	end
 	pushdisplay(ElectronDisplay())
 end
 

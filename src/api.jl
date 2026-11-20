@@ -3111,7 +3111,7 @@ function _subplots_checked_ratios(ratios, count::Int, name::AbstractString)
 	))
 	length(ratios) == count || throw(ArgumentError(
 		"subplots: `$(name)` needs one entry per " *
-		(name == "height_ratios" ? "row" : "column") *
+		(name in ("height_ratios", "row_heights") ? "row" : "column") *
 		" ($(count)); got $(length(ratios)).",
 	))
 	out = Vector{Float64}(undef, count)
@@ -3209,6 +3209,27 @@ function _subplots_grid_kwargs(
 		))
 		grid[name] = _subplots_title_label(title, String(name))
 	end
+	# `row_heights` / `column_widths` given directly reach PlotlyBase's
+	# `sum(...)` and `Vector{Float64}` conversion: they must be one positive
+	# number per row / column.
+	for (name, count) in ((:row_heights, rows), (:column_widths, cols))
+		haskey(grid, name) && grid[name] === missing && delete!(grid, name)
+		haskey(grid, name) || continue
+		grid[name] = _subplots_checked_ratios(grid[name], count, String(name))
+	end
+	for name in (:shared_xaxes, :shared_yaxes)
+		haskey(grid, name) || continue
+		mode = grid[name]
+		(mode === missing || mode isa Bool || (mode isa AbstractString &&
+			String(mode) in ("rows", "columns", "all"))) || throw(ArgumentError(
+			"subplots: `$(name)` must be true, false, \"rows\", \"columns\" or \"all\"; " *
+			"got $(repr(mode)).",
+		))
+		mode isa AbstractString && (grid[name] = String(mode))
+	end
+	if haskey(grid, :specs)
+		grid[:specs] = _subplots_checked_specs(grid[:specs], rows, cols)
+	end
 	if height_ratios !== nothing
 		haskey(grid, :row_heights) && throw(ArgumentError(
 			"subplots: pass either `height_ratios` (top-to-bottom) or " *
@@ -3235,6 +3256,79 @@ function _subplots_grid_kwargs(
 			_subplots_checked_ratios(width_ratios, cols, "width_ratios")
 	end
 	return grid
+end
+
+# `specs` of `subplots`: a (rows, cols) matrix of `Spec` (a cell that is
+# `missing` or `nothing` is empty); a vector is accepted for a one-column or
+# one-row grid. A span must stay inside the grid and cover only empty cells
+# (PlotlyBase reaches an error without cell names, or draws overlapping axes).
+function _subplots_checked_specs(specs, rows::Int, cols::Int)
+	specs === missing && return specs
+	specs isa AbstractMatrix || (specs isa AbstractVector && (rows == 1 || cols == 1)) ||
+		throw(ArgumentError(
+			"subplots: `specs` must be a $(rows) × $(cols) matrix of `Spec(...)` " *
+			"(`missing` for an empty cell); got $(typeof(specs))" *
+			(specs isa AbstractVector ? " for a grid with several rows and columns." : "."),
+		))
+	if specs isa AbstractVector
+		length(specs) == rows * cols || throw(ArgumentError(
+			"subplots: `specs` needs one entry per cell ($(rows * cols)) of the " *
+			"$(rows) × $(cols) grid; got $(length(specs)).",
+		))
+		specs = reshape(collect(specs), rows, cols)
+	end
+	size(specs) == (rows, cols) || throw(ArgumentError(
+		"subplots: `specs` must have size (rows, cols) = ($(rows), $(cols)); got $(size(specs)).",
+	))
+	checked = Matrix{Union{Missing,Spec}}(undef, rows, cols)
+	for r in 1:rows, c in 1:cols
+		spec = specs[r, c]
+		if spec === nothing || spec === missing
+			checked[r, c] = missing
+			continue
+		end
+		spec isa Spec || throw(ArgumentError(
+			"subplots: `specs[$(r), $(c)]` must be a `Spec(...)`, `missing` or " *
+			"`nothing`; got $(repr(spec)).",
+		))
+		kind = spec.kind
+		known = kind in PlotlyBase._subplot_types || _is_modern_map_spec_kind(kind) ||
+			Symbol(kind) in PlotlyBase._TRACE_TYPES
+		known && try
+			_subplot_effective_single_kind(kind)
+			true
+		catch
+			false
+		end || throw(ArgumentError(
+			"subplots: `specs[$(r), $(c)]` has an unknown subplot kind $(repr(kind)); " *
+			"use \"xy\", \"scene\", \"polar\", \"ternary\", \"geo\", \"domain\", \"mapbox\" or " *
+			"a map kind.",
+		))
+		(spec.rowspan >= 1 && spec.colspan >= 1) || throw(ArgumentError(
+			"subplots: `specs[$(r), $(c)]` needs rowspan >= 1 and colspan >= 1; got " *
+			"rowspan = $(spec.rowspan), colspan = $(spec.colspan).",
+		))
+		(r + spec.rowspan - 1 <= rows && c + spec.colspan - 1 <= cols) || throw(ArgumentError(
+			"subplots: `specs[$(r), $(c)]` spans rows $(r):$(r + spec.rowspan - 1) and " *
+			"columns $(c):$(c + spec.colspan - 1), beyond the $(rows) × $(cols) grid.",
+		))
+		all(isfinite, (spec.l, spec.r, spec.b, spec.t)) || throw(ArgumentError(
+			"subplots: the paddings l, r, b, t of `specs[$(r), $(c)]` must be finite.",
+		))
+		checked[r, c] = spec
+	end
+	for r in 1:rows, c in 1:cols
+		spec = checked[r, c]
+		spec === missing && continue
+		for rr in r:(r + spec.rowspan - 1), cc in c:(c + spec.colspan - 1)
+			(rr, cc) == (r, c) && continue
+			checked[rr, cc] === missing || throw(ArgumentError(
+				"subplots: `specs[$(r), $(c)]` spans cell ($(rr), $(cc)), which has its " *
+				"own spec; use `missing` for the cells a span covers.",
+			))
+		end
+	end
+	return checked
 end
 
 # ── `subplots(...; insets = [Inset(...), ...])` ──────────────────────────────
@@ -3570,7 +3664,7 @@ function subplots(
 		# PlotlyBase checks start_cell, shared-axis modes and title counts
 		# with @assert; report them as argument errors.
 		err isa AssertionError || rethrow()
-		throw(ArgumentError("subplots: invalid grid option: $(err.msg)"))
+		throw(ArgumentError("subplots: invalid grid option ($(err.msg))"))
 	end
 	# The cell sizes PlotlyBase derived from the spacing (the horizontal room
 	# also shrinks for secondary y axes and row titles) must stay positive.
@@ -12002,7 +12096,7 @@ function plot_scatter(
 	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
+	mode::Union{Nothing, AbstractString, Symbol, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
 	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -12038,7 +12132,13 @@ function plot_scatter(
 	ytickformat::AbstractString = "",
 	equalar::Bool = false,
 	show::Bool = false,
+	kwargs...,
 )
+	isempty(kwargs) || throw(ArgumentError(
+		"plot_scatter: unsupported keyword argument(s) " *
+		"$(join(("`$(key)`" for key in keys(kwargs)), ", ")); see the docstring for the accepted keywords.",
+	))
+	mode isa Symbol && (mode = String(mode))
 	fig = Plot(GenericTrace[], _default_cartesian_layout())
 	_scatter_impl!(
 		fig,
@@ -13543,6 +13643,26 @@ function _field2d_check_coordinates(
 				"must be positive numbers; entry $(i) is $(repr(value)).",
 			))
 		end
+	end
+	_field2d_check_monotonic(v, who, name)
+	return nothing
+end
+
+# A heatmap/contour grid is laid out cell by cell along each coordinate, so
+# an unsorted or repeated coordinate draws the cells at the wrong positions
+# (plotly.js would not complain): numeric and date coordinates must be
+# strictly monotonic (decreasing is fine). Categories are not ordered.
+function _field2d_check_monotonic(v, who::AbstractString, name::AbstractString)
+	T = eltype(v)
+	((T <: Real && !(T <: Bool)) || T <: Dates.TimeType) || return nothing
+	length(v) >= 2 || return nothing
+	increasing = v[2] > v[1]
+	for i in 1:(length(v) - 1)
+		(increasing ? v[i + 1] > v[i] : v[i + 1] < v[i]) || throw(ArgumentError(
+			"$(who): `$(name)` must be strictly monotonic (all increasing or all " *
+			"decreasing, without repeated values); entries $(i) and $(i + 1) are " *
+			"$(repr(v[i])) and $(repr(v[i + 1])).",
+		))
 	end
 	return nothing
 end
@@ -16590,7 +16710,7 @@ function plot_scatter!(
 	yrange::Union{Nothing, AbstractVector, Tuple} = [0, 0],
 	width::Real = 0,
 	height::Real = 0,
-	mode::Union{Nothing, AbstractString, AbstractVector} = nothing,
+	mode::Union{Nothing, AbstractString, Symbol, AbstractVector} = nothing,
 	dash::Union{AbstractString, AbstractVector} = "",
 	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
@@ -16629,6 +16749,7 @@ function plot_scatter!(
 )
 	who = _scat_mutator_who()
 	secondary_y = _scat_mutator_options(who, kwargs)
+	mode isa Symbol && (mode = String(mode))
 	_scatter_impl!(
 		fig,
 		x,
@@ -19892,7 +20013,7 @@ function _area_impl!(
 	color = "",
 	legend = "",
 	mode::Union{Nothing, AbstractString} = nothing,
-	stack::Bool = false,
+	stack = false,
 	hatch::AbstractString = "",
 	showlegend = nothing,
 	xlabel::AbstractString = "",
@@ -19914,6 +20035,9 @@ function _area_impl!(
 	ytickformat::AbstractString = "",
 	equalar::Bool = false,
 )
+	stack isa Bool || throw(ArgumentError(
+		"$(who): `stack` must be true or false; got $(repr(stack)).",
+	))
 	xs, ys, _ = _scat_series(x, y, who)
 	n = length(ys)
 	trace_mode = _scat_mode(something(mode, "lines"), who)
@@ -20058,7 +20182,7 @@ function plot_area(
 	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	mode::Union{Nothing, AbstractString} = nothing,
-	stack::Bool = false,
+	stack = false,
 	hatch::AbstractString = "",
 	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
 	xlabel::AbstractString = "",
@@ -20139,7 +20263,7 @@ function plot_area!(
 	color::Union{AbstractString, Symbol, Colors.Colorant, AbstractVector} = "",
 	legend::Union{AbstractString, AbstractVector} = "",
 	mode::Union{Nothing, AbstractString} = nothing,
-	stack::Bool = false,
+	stack = false,
 	hatch::AbstractString = "",
 	showlegend::Union{Nothing, Bool, AbstractVector} = nothing,
 	xlabel::AbstractString = "",
