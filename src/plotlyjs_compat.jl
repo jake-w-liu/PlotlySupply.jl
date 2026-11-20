@@ -758,7 +758,9 @@ end
 Write `p` as a standalone HTML page. The page embeds the bundled plotly.js
 $(_PLOTLYJS_VERSION) that desktop plots and image exports render with (so it
 draws exactly like them and needs no network for plotly.js) and loads MathJax
-2.7.9 from its CDN when it is opened. Non-finite numbers become `null` and
+2.7.9 from its CDN when it is opened. Geo maps also need network: plotly.js
+fetches their topology (topojson) from `cdn.plot.ly`, and tile maps their
+tiles, so offline such a map draws no coastlines. Non-finite numbers become `null` and
 every embedded JSON blob is escaped so user text cannot end the inline script.
 """
 function _savefig_html(io::IO, p::Plot; background::Union{Nothing,String} = nothing)
@@ -2168,8 +2170,9 @@ What each file contains:
 - `format::Union{Nothing,AbstractString} = nothing`: output format, overriding
   the extension. Not allowed with a vector of file names.
 - `width`, `height::Real`: figure size in `units`. Default: the figure's
-  `layout.width`/`layout.height` when set, else the active style's default
-  figure size (journal styles set one), else 700 x 500 px. The size must be
+  `layout.width`/`layout.height` when set, else the default size of the style
+  the figure carries (journal styles set one), else, for a figure that carries
+  no style, the active style's default size, else 700 x 500 px. The size must be
   at least 10 px (plotly.js's layout minimum).
 - `units::Symbol = :px`: unit of `width`/`height`: `:px` (CSS pixel, 1/96 in),
   `:in`, `:cm`, `:mm` or `:pt` (1/72 in). The pdf/eps page is exact in points
@@ -2191,7 +2194,11 @@ What each file contains:
   can embed other fonts (CFF/OpenType-PS such as STIX or Latin Modern) only
   as Type 3 fonts, which many journal checks reject, so then the whole page's
   text is converted to outlines with Ghostscript (without Ghostscript the Type
-  3 fonts are kept and a warning names them). `:embed` keeps Chromium's fonts
+  3 fonts are kept and a warning names them). Any Type 3 font on the page
+  triggers this, not only the figure's own: one label with a glyph that the
+  figure's font lacks (a dingbat such as ✓, some arrows, emoji) falls back to
+  a system font that Chromium embeds as Type 3, and the whole page is then
+  outlined without a warning. `:embed` keeps Chromium's fonts
   as they are; `:outline` always draws text as outlines (needs Ghostscript).
   eps: text is always outlines (no font in the file) unless `:embed`, which
   lets Ghostscript embed Type 3/Type 42 fonts. Outlined text prints the same

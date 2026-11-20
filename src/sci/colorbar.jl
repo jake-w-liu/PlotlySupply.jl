@@ -1407,7 +1407,7 @@ one transaction (a live window redraws once). Returns `nothing` for a
 sf = subplots(1, 2; sync=false)
 plot_heatmap!(sf, rand(10, 10); row=1, col=1)
 plot_heatmap!(sf, rand(10, 10); row=1, col=2)
-colorbar!(sf; row=1, col=2, title="\$|E|^2\$", title_side=:right)
+colorbar!(sf; row=1, col=2, title="\\\$|E|^2\\\$", title_side=:right)
 colorbar!(sf; row=1, col=1, side=:bottom, ticks=[0, 0.5, 1])
 ```
 """

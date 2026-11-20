@@ -506,6 +506,7 @@ nothing` (the default here) keeps the current grid.
 #### Example
 
 ```julia
+x = 0:0.1:5; y = sin.(x); σ = 0.1 .+ 0.05 .* x
 fig = plot_scatter(x, y; legend = "mean")
 plot_band!(fig, x, y .- σ, y .+ σ; legend = "±σ")
 ```

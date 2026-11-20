@@ -46,6 +46,18 @@ fig = with_style(:publication; fontsize = 12) do
 end
 ```
 
+A figure carries the style it was built under: a figure made under a style
+other than `:default` records the fields in which that style differs from
+`PlotStyle()` in `layout.meta.plotlysupply.style` (the template is not part of
+it; the record survives `JSON`). Mutators, the layout engine and `savefig` read
+that record, not the active style, so `with_style(:aps) do xlabel!(fig, "x")
+end` does not restyle a figure that was built under `:ieee`; a figure
+without a record (built under `:default`) that a mutator changes inside
+`with_style(:x)` adopts `:x` from then on. A figure without a size exports
+at the size of its carried style. A public mutator that bypasses the
+PlotlySupply wrappers (a direct PlotlyBase verb such as `relayout!` on a
+plain `Plot`) runs under the active style and does not adopt.
+
 [`register_style!`](@ref) stores a style under a name, and
 [`get_default_style`](@ref) returns a copy of the active one.
 

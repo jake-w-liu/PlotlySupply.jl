@@ -125,6 +125,22 @@ yticks!(fig; format = ".1f", minor = true, direction = "inside")
 The same tick settings are constructor keywords: `xticks`, `xticklabels`,
 `xtickformat` (and the `y` forms).
 
+<!-- D21 -->
+Large and small tick values are written in the power format, never with SI
+prefixes: "2x10^-4", not "200µ", and "5x10^3", not "5k". Every template that
+PlotlySupply writes (`:default` included) sets `exponentformat = "power"` on
+Cartesian axes, colorbars, polar radial axes, ternary axes and 3-D scene axes
+(log axes already did). For SI prefixes ask for them where you want them:
+`update_xaxes!(fig; exponentformat = "SI")` (or `"B"`, plotly's default),
+`yticks!`, and `colorbar!(fig; exponentformat = "SI")`; the other plotly values
+(`"none"`, `"e"`, `"E"`) stay available too.
+
+```julia
+fig = plot_scatter(1:5, 2e-4 .* (1:5))
+update_yaxes!(fig; exponentformat = "SI")          # "200µ", "400µ", ... on purpose
+```
+<!-- /D21 -->
+
 ## Date axes
 
 Dates and times (`Date`, `DateTime`) on x make a date axis. Ranges on a date

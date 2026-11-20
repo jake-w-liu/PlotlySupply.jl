@@ -56,6 +56,22 @@ Run the whole suite with `julia --project -e 'using Pkg; Pkg.test()'` (or `julia
 Every file in `test/` also runs on its own, e.g. `julia --project=. test/regression_scatter.jl`: it starts with `using Test` and `using PlotlySupply`, and a file that uses the shared fixtures in `test/testutils.jl` loads them with `isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")`.
 `test/runtests.jl` runs every `test/*.jl` file, so a new test file needs no registration: the files listed in `_TEST_FILES_RUN_FIRST` (`test/testutils.jl`) run first, then all others in name order. Packages a test file loads with `using` must be listed in `Project.toml` (`[deps]`, or `[extras]` plus `[targets]`), because `Pkg.test()` cannot load anything else. Assert the exception type a call throws (`@test_throws ArgumentError ...`), not `Exception`. `test/hygiene.jl` checks these rules.
 
+### Package defaults are guarded per test file
+
+The package has global defaults: the active style (`set_default_style!`), the default template, the default legend position and the mathtext settings (`set_default_mathtext!`). A test file that changes one of them and does not put it back changes what every later file of the full run measures, so the suite guards them: `test/runtests.jl` snapshots the four defaults (`_global_defaults_snapshot()` in `test/testutils.jl`) around every file and fails the file that leaves one changed, and a file run on its own is checked when its process ends (`julia --project=. test/<file>.jl` exits with status 1 and prints which defaults leaked). Change a default only inside `with_style(...) do ... end`, or restore it in a `try ... finally`:
+
+```julia
+old = get_default_legend_position()
+try
+    set_default_legend_position!(:bottom)
+    # ... assertions ...
+finally
+    set_default_legend_position!(old)
+end
+```
+
+A style you register by name with `register_style!` is not a default and need not be removed. `test/hygiene.jl` tests the guard itself.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.

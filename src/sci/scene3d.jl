@@ -5335,8 +5335,10 @@ const _S3_QUIVER3D_KEYWORDS_DOC = raw"""
 - `style = :cone`: `:cone` draws plotly cones; `:arrow` draws arrows (a line
   shaft and a cone head) from each point to point + vector, in data units.
 - `sizemode = "scaled"` (cones): how `sizeref` sizes the cones. "scaled":
-  relative to the spacing of the points, independent of the magnitude of the
-  field; "absolute": `sizeref` is in units of the largest vector norm; "raw":
+  the largest cone is sized relative to the spacing of the points, so a
+  uniform rescaling of the field (a change of units) does not change the
+  picture; each cone is still proportional to the length of its own vector;
+  "absolute": `sizeref` is in units of the largest vector norm; "raw":
   each cone is `sizeref` times its vector's length in data units.
 - `sizeref = 1` (cones): positive size factor (see `sizemode`).
 - `anchor = "cm"` (cones): the part of each cone placed at its point: "cm"

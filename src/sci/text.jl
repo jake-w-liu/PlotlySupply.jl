@@ -2000,7 +2000,7 @@ sf = subplots(1, 2; sync = false)
 plot_scatter!(sf, 1:3, [1, 4, 9]; row = 1, col = 1)
 plot_scatter!(sf, 1:3, [9, 4, 1]; row = 1, col = 2)
 title!(sf, "Convergence study"; align = :left, bold = true)
-title!(sf, "(a) Mesh, \$h = 0.1\$"; row = 1, col = 1, align = :left)
+title!(sf, "(a) Mesh, \\\$h = 0.1\\\$"; row = 1, col = 1, align = :left)
 title!(sf, "(b) Error"; row = 1, col = 2, align = :left)
 ```
 """
