@@ -1,4 +1,5 @@
 using Test, PlotlySupply
+import Dates
 
 # Regression tests for the legend audit findings (numbers are the audit ids)
 # and the 2.0 legend behaviour changes C11 (outside legends re-anchored) and
@@ -553,9 +554,15 @@ using Test, PlotlySupply
 		plot_band!(sb, 1:3, 0, [1, 2, 3]; row = 1, col = 2, legend = "b")
 		@test placed_at(sb, :legend, :topleft)
 
-		# Traces the estimate does not model keep the default corner.
+		# Bars are scored (v7 vm-05): the tallest bar, at the right, leaves the
+		# top left free.
 		sk = subplots(1, 2; sync = false)
 		plot_bar!(sk, ["a", "b", "c"], [1, 2, 3]; row = 1, col = 1, legend = "bars")
+		@test placed_at(sk, :legend, :topleft)
+		# Traces the estimate does not model (a histogram plotly.js bins) keep
+		# the default corner.
+		sk = subplots(1, 2; sync = false)
+		plot_histogram!(sk, [0.1, 0.5, 0.5, 0.9, 0.9, 0.9]; row = 1, col = 1, legend = "samples")
 		@test placed_at(sk, :legend, :topright)
 		# The rule is off while the default position is not :topright.
 		set_default_legend_position!(:topleft)
@@ -1281,6 +1288,84 @@ using Test, PlotlySupply
 		fig = build()
 		set_legend!(fig; position = :topright)
 		vline!(fig, 185; legend = "event")
+		@test PS._scat_legend_is(pl(fig), :topright)
+	end
+
+	@testset "v7 vm-05/style-03: bars, boxes, violins, dates and categories are scored" begin
+		# Unit pieces: plotly.js date and category coordinates.
+		@test PS._scat_legend_date_ms("2024-01-01") == 1_704_067_200_000
+		@test PS._scat_legend_date_ms(Dates.Date(2024, 1, 1)) == 1_704_067_200_000
+		@test PS._scat_legend_date_ms("2024-01-01 12:30:15.5") == 1_704_067_200_000 + 1000 * (12 * 3600 + 30 * 60 + 15.5)
+		@test PS._scat_legend_date_ms("2024-13-01") === nothing && PS._scat_legend_date_ms("dose 1") === nothing
+		@test PS._scat_legend_autotype([1.0, 2.0]) === :linear
+		@test PS._scat_legend_autotype(["1", "2.5"]) === :linear                # numeric strings are numbers
+		@test PS._scat_legend_autotype(["control", "dose 1"]) === :category
+		@test PS._scat_legend_autotype([Dates.Date(2024, 1, 1), Dates.Date(2024, 2, 1)]) === :date
+		@test PS._scat_legend_autotype(Any["2024-01-01", "2024-01-02"]) === :date
+		@test PS._scat_legend_category_name(2.0) == "2" && PS._scat_legend_category_name("a") == "a"
+		lay(; fields...) = PB.Layout(; fields...)
+		@test PS._scat_legend_categories(lay(), :xaxis, (["b", "a"], ["c", "a"])) == Dict("b" => 0, "a" => 1, "c" => 2)
+		@test PS._scat_legend_categories(lay(xaxis = PB.attr(categoryorder = "category ascending")), :xaxis, (["b", "a"],)) ==
+			Dict("a" => 0, "b" => 1)
+		@test PS._scat_legend_categories(lay(xaxis = PB.attr(categoryorder = "array", categoryarray = ["z", "b"])), :xaxis,
+			(["b", "a"],)) == Dict("z" => 0, "b" => 1, "a" => 2)
+		@test PS._scat_legend_categories(lay(xaxis = PB.attr(categoryorder = "total ascending")), :xaxis, (["b"],)) === nothing
+
+		# Figures of the findings: before, every one kept the top-right corner,
+		# over the bars, the violin "c", the date curve's end and "dose 3".
+		days = collect(Dates.Date(2024, 1, 1):Dates.Day(1):Dates.Date(2024, 6, 30))
+		walk = collect(range(0, 18; length = length(days))) .+ sin.(1:length(days))
+		build = Dict(
+			"grouped bars" => () -> plot_bar(["Si", "Ge", "GaAs", "InP"],
+				[[3.1, 4.0, 2.2, 5.1], [2.5, 3.6, 3.1, 4.4], [1.9, 2.8, 2.7, 3.9]]; legend = ["300 K", "200 K", "77 K"]),
+			"style-03 bars" => () -> plot_bar(["A", "B", "C"], [[1.0, 2.0, 3.0], [1.5, 2.5, 3.5], [2.0, 3.0, 4.0]];
+				legend = ["method 1", "method 2", "method 3"]),
+			"stacked bars" => () -> plot_bar(["A", "B", "C", "D"], [[1.0, 2.0, 3.0, 4.0], [1.0, 1.0, 1.0, 1.0]];
+				legend = ["base", "extra"], barmode = "stack"),
+			"violins" => () -> plot_violin([[-3.0, -1.0, 0.0, 1.0, 3.3], [0.0, 0.5, 1.0, 1.5, 2.0], [-5.0, -1.0, 1.0, 2.5, 6.3]];
+				legend = ["a", "b", "c"], points = false),
+			"boxes" => () -> plot_box([[-2.0, 0.0, 0.5, 2.5], [-1.0, 1.0, 1.5, 3.5], [0.5, 2.5, 3.5, 5.5]]; legend = ["a", "b", "c"]),
+			"date axis" => () -> plot_scatter(days, walk; legend = "station A"),
+			"category axis" => () -> plot_scatter(["control", "dose 1", "dose 2", "dose 3"], [1.0, 1.6, 2.3, 3.0];
+				mode = "markers", legend = "wild type"),
+		)
+		for (name, builder) in build, style in (:default, :ieee, :aip)
+			fig = with_style(builder, style)
+			p = pl(fig)
+			# the first candidate, top right, covers data; an inside answer is
+			# a free one (the rule goes outside when none is)
+			pos = PS._scat_best_legend_position(p)
+			@test pos !== nothing && pos !== :topright
+			@test pos in PS._SCAT_LEGEND_POSITIONS || pos in PS._SCAT_LEGEND_OUTSIDE_POSITIONS
+			@test PS._scat_legend_is(p, pos)
+			@test PS._finalize_figure!(fig) === false
+		end
+		# The rectangles: a bar of the stack starts where the one below ends,
+		# grouped bars share their slot, horizontal bars swap the axes.
+		scored(fig) = begin
+			p = pl(fig)
+			series = PS._ScatLegendSeries[]
+			ok, xpadded, xzero = PS._scat_legend_block_series!(series, Float64[], Dict{Symbol, Bool}(), Set{Symbol}(), p,
+				[(t.fields, String(t.fields[:type]), :yaxis) for t in p.data], :xaxis,
+				(key, letter) -> PS._scat_legend_axis(p, eachindex(p.data), key, letter))
+			ok, series, xzero
+		end
+		ok, series, _ = scored(plot_bar(["A", "B"], [[1.0, 2.0], [3.0, 4.0]]; barmode = "stack"))
+		@test ok && length(series) == 2
+		@test series[2][3] == [1.0, 4.0, 2.0, 6.0]                    # from the first series' tops
+		@test series[1][2] ≈ [-0.4, 0.4, 0.6, 1.4]                    # bargap 0.2 of a 1-wide slot
+		ok, series, _ = scored(plot_bar(["A", "B"], [[1.0, 2.0], [3.0, 4.0]]))      # group
+		@test ok && series[1][2] ≈ [-0.4, 0.0, 0.6, 1.0] && series[2][2] ≈ [0.0, 0.4, 1.0, 1.4]
+		ok, series, xzero = scored(plot_bar([2.0, 5.0], ["a", "b"]; orientation = "h"))
+		@test ok && xzero && series[1][2] == [0.0, 2.0, 0.0, 5.0] && series[1][3] ≈ [-0.4, 0.4, 0.6, 1.4]
+		# not read: the legend keeps the corner the user or the default gave it
+		@test PS._scat_legend_axis(pl(plot_scatter(1:3, 1:3)), 1:1, :xaxis, :x).kind === :linear
+		h = plot_histogram(randn(200); legend = "samples")                      # binned by plotly.js
+		@test PS._scat_best_legend_position(pl(h)) === nothing
+		# a legend the user placed stays
+		fig = plot_bar(["A", "B"], [1.0, 2.0]; legend = "v")
+		set_legend!(fig; position = :topright)
+		plot_bar!(fig, ["A", "B"], [3.0, 4.0]; legend = "w")
 		@test PS._scat_legend_is(pl(fig), :topright)
 	end
 

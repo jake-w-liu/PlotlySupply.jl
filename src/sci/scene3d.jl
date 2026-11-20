@@ -71,7 +71,7 @@ per macro name. With mathtext disabled (`set_default_mathtext!(false)`) the
 text is used literally.
 """
 function _label3d(s::AbstractString)::String
-	str = String(s)
+	str = String(s)::String    # typed, as in `_label_plain` (no dynamic `isvalid`)
 	isempty(str) && return str
 	_MATHTEXT_SETTINGS[].enabled || return _mathtext_newlines_to_br(str)
 	isvalid(str) || throw(_mathtext_invalid_utf8(str))

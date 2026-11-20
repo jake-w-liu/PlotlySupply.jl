@@ -10404,14 +10404,19 @@ end
 # first position of `_SCAT_LEGEND_POSITIONS` (matplotlib's candidate order:
 # the four corners, then the middle of the right, left, bottom and top edges,
 # then the centre) whose estimated box covers the fewest data points (markers,
-# error-bar ends), line segments and filled areas of the traces on the main x
-# axis (primary or secondary y). Each call of this family re-evaluates a
+# error-bar ends), line segments, filled areas, bars, boxes and violins of
+# the traces on the main x axis (primary or secondary y; category and date
+# axes as plotly.js maps them, vm-05). Each call of this family (the scatter
+# and line constructors, `plot_bar`, `plot_histogram`, `plot_box`,
+# `plot_violin` and their mutators) re-evaluates a
 # legend it created, or one that still sits where the rule puts it for the
 # figure as it stood before the call (so the rule placed it); a legend
 # anywhere else was placed by the user (`set_legend!`, `relayout!`) and is
-# never moved. A trace the estimate does not model (another type or x axis, a
-# stacked fill or a fill to another trace) or non-numeric coordinates
-# (categories, dates) make the data extent unknown: the legend then goes to,
+# never moved. A trace the estimate does not model (another type such as a
+# histogram binned by plotly.js, another x axis, a stacked fill or a fill to
+# another trace, a box or violin over log positions or a violin over log
+# values, a multicategory axis) makes the data extent
+# unknown: the legend then goes to,
 # or stays at, the default top-right corner. SubplotFigure cell legends follow
 # the same rule per cell (`_legend_best_cell_position`). Known limit: a legend
 # the user puts exactly where the rule would put it is indistinguishable from
@@ -10691,6 +10696,405 @@ _scat_outside_legend_position(width_px::Real) =
 # `:polygon` the closed area of a `fill = "toself"` trace).
 const _ScatLegendSeries = Tuple{Symbol, Vector{Float64}, Vector{Float64}, Symbol, String}
 
+# ── vm-05: categories, dates, bars, boxes and violins ───────────────────────
+# Coordinates on an axis that is not numeric are mapped as plotly.js 2.35.2
+# maps them: a category axis puts its categories at 0, 1, 2, … (in the order
+# of `categoryorder`: first appearance in the traces, `categoryarray` first,
+# or sorted), a date axis at milliseconds since 1970-01-01 (UTC). An axis
+# whose type or order this estimate does not read (multicategory, the
+# `total`/`mean` orders) leaves the data extent unknown.
+struct _ScatLegendAxis
+	kind::Symbol                        # :linear, :log, :date or :category
+	categories::Dict{String, Int}       # category => position (`:category`)
+end
+_ScatLegendAxis(kind::Symbol) = _ScatLegendAxis(kind, Dict{String, Int}())
+
+# Dates plotly.js reads from a string: "yyyy", "yyyy-mm", "yyyy-mm-dd" and a
+# time "HH", "HH:MM" or "HH:MM:SS(.s)" after a space or "T".
+const _SCAT_LEGEND_DATE =
+	r"^\s*(\d{4})(?:-(\d{1,2})(?:-(\d{1,2})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2})(\.\d+)?)?)?)?)?)?\s*$"
+
+# Milliseconds since 1970-01-01 (UTC) of a date value (a `Date`, a `DateTime`
+# or a date string plotly.js reads), else `nothing`.
+function _scat_legend_date_ms(value)::Union{Nothing, Float64}
+	value isa Dates.DateTime && return 1000 * Dates.datetime2unix(value)
+	value isa Dates.Date && return 1000 * Dates.datetime2unix(Dates.DateTime(value))
+	value isa AbstractString || return nothing
+	m = match(_SCAT_LEGEND_DATE, value)
+	m === nothing && return nothing
+	part(index, default) = m.captures[index] === nothing ? default : parse(Int, m.captures[index])
+	moment = try
+		Dates.DateTime(part(1, 1970), part(2, 1), part(3, 1), part(4, 0), part(5, 0), part(6, 0))
+	catch err
+		err isa ArgumentError || rethrow()
+		return nothing                                   # no such date (month 13, …)
+	end
+	fraction = m.captures[7] === nothing ? 0.0 : parse(Float64, m.captures[7])
+	return 1000 * (Dates.datetime2unix(moment) + fraction)
+end
+
+# A category's name as plotly.js keys it (JavaScript's `String(v)`: 1.0 is "1").
+function _scat_legend_category_name(value)::String
+	value isa AbstractString && return String(value)
+	if value isa AbstractFloat && isfinite(value) && isinteger(value) && abs(value) < 1e15
+		return string(Int64(value))
+	end
+	return string(value)
+end
+
+# plotly.js `autoType` (axes/axis_autotype.js) of the values of the first
+# trace on an axis: dates when more than twice as many as numbers, else
+# categories when the other values are more than twice as many as numbers,
+# else linear. Numeric strings count as numbers.
+function _scat_legend_autotype(values)::Symbol
+	values isa AbstractVector{<:Real} && !(eltype(values) <: Bool) && return :linear
+	numbers = dates = others = 0
+	for value in values
+		(value === nothing || value === missing) && continue
+		if value isa Real && !(value isa Bool)
+			numbers += 1
+		elseif value isa Dates.TimeType
+			dates += 1
+			others += 1
+		elseif value isa AbstractString
+			if tryparse(Float64, strip(value)) !== nothing
+				numbers += 1
+			else
+				_scat_legend_date_ms(value) === nothing || (dates += 1)
+				others += 1
+			end
+		else
+			others += 1
+		end
+	end
+	dates > 2 * numbers && return :date
+	others > 2 * numbers && return :category
+	return :linear
+end
+
+# The category positions of axis `key` from the values drawn on it
+# (`vectors`, in trace order), or `nothing` for an order this estimate does
+# not read.
+function _scat_legend_categories(layout, key::Symbol, vectors)::Union{Nothing, Dict{String, Int}}
+	axis = get(layout.fields, key, nothing)
+	order = _cmn_mapping_get(axis, :categoryorder)
+	order = order isa Union{AbstractString, Symbol} ? String(order) : "trace"
+	names = String[]
+	positions = Dict{String, Int}()
+	function add(value)
+		(value === nothing || value === missing) && return nothing
+		value isa AbstractFloat && isnan(value) && return nothing
+		name = _scat_legend_category_name(value)
+		haskey(positions, name) && return nothing
+		positions[name] = length(names)
+		push!(names, name)
+		return nothing
+	end
+	if order == "array"
+		array = _cmn_mapping_get(axis, :categoryarray)
+		array isa AbstractVector && foreach(add, array)
+	elseif !(order in ("trace", "category ascending", "category descending"))
+		return nothing
+	end
+	for values in vectors, value in values
+		add(value)
+	end
+	if order in ("category ascending", "category descending")
+		sort!(names; rev = order == "category descending")
+		empty!(positions)
+		for (index, name) in enumerate(names)
+			positions[name] = index - 1
+		end
+	end
+	return positions
+end
+
+# Whether trace `fields` of `type` is drawn horizontally (bars growing along
+# x; boxes and violins over samples on x). plotly.js: a box or violin with
+# `x` and no `y` is horizontal.
+function _scat_legend_horizontal(fields, type::AbstractString)
+	orientation = get(fields, :orientation, nothing)
+	if orientation isa Union{AbstractString, Symbol} && !isempty(String(orientation))
+		return String(orientation) == "h"
+	end
+	return type in ("box", "violin") && get(fields, :x, nothing) !== nothing && get(fields, :y, nothing) === nothing
+end
+
+# The values trace `fields` of `type` puts on its `letter` axis: its
+# coordinates, or for a box or violin without positions its `x0`/`y0`, else
+# its name (plotly.js places it there on a category axis); `nothing` when
+# none.
+function _scat_legend_axis_values(fields, type::AbstractString, letter::Symbol)
+	values = get(fields, letter, nothing)
+	values isa AbstractVector && return values
+	if type in ("box", "violin") && (letter === :y) == _scat_legend_horizontal(fields, type)
+		start = get(fields, Symbol(letter, 0), nothing)
+		start === nothing || return Any[start]
+		name = get(fields, :name, nothing)
+		name isa AbstractString && !isempty(name) && return Any[name]
+	end
+	return nothing
+end
+
+# The coordinate kind of axis `key` (`letter` :x or :y) for the traces
+# `indices` of `p` drawn on it, or `nothing` when unknown.
+function _scat_legend_axis(p::Plot, indices, key::Symbol, letter::Symbol)
+	layout = p.layout
+	declared = _axis_type(layout, key)
+	declared == "log" && return _ScatLegendAxis(:log)
+	declared == "linear" && return _ScatLegendAxis(:linear)
+	declared == "date" && return _ScatLegendAxis(:date)
+	declared in ("-", "category") || return nothing
+	vectors = Any[]
+	for index in indices
+		trace = p.data[index]
+		trace isa GenericTrace || continue
+		fields = trace.fields
+		ref = string(get(fields, letter === :x ? :xaxis : :yaxis, letter === :x ? "x" : "y"))
+		_axis_layout_key(ref, letter) == key || continue
+		values = _scat_legend_axis_values(fields, string(get(fields, :type, "scatter")), letter)
+		values === nothing || push!(vectors, values)
+	end
+	kind = declared == "category" ? :category :
+		isempty(vectors) ? :linear : _scat_legend_autotype(first(vectors))
+	kind === :category || return _ScatLegendAxis(kind)
+	categories = _scat_legend_categories(layout, key, vectors)
+	return categories === nothing ? nothing : _ScatLegendAxis(:category, categories)
+end
+
+# Coordinates of `values` on `axis` (log10 on a log axis, ms on a date axis,
+# positions on a category axis; NaN for a gap), or `nothing` when a value is
+# not one the axis reads.
+function _scat_legend_axis_coords(values, axis::_ScatLegendAxis)
+	axis.kind === :linear && return _scat_legend_coords(values, false)
+	axis.kind === :log && return _scat_legend_coords(values, true)
+	values isa AbstractVector || return nothing
+	out = Vector{Float64}(undef, length(values))
+	for (index, value) in enumerate(values)
+		if value === nothing || value === missing || (value isa AbstractFloat && isnan(value))
+			out[index] = NaN
+		elseif axis.kind === :date
+			ms = value isa Real && !(value isa Bool) ? Float64(value) : _scat_legend_date_ms(value)
+			ms === nothing && return nothing
+			out[index] = ms
+		else
+			position = get(axis.categories, _scat_legend_category_name(value), nothing)
+			position === nothing && return nothing
+			out[index] = position
+		end
+	end
+	return out
+end
+
+# The value `field` of a trace gives point `index` (a number, or one per
+# point), else `default`.
+function _scat_legend_per_point(field, index::Int, default::Float64)
+	field isa AbstractVector || return something(_scat_legend_number(field), default)
+	index <= length(field) || return default
+	return something(_scat_legend_number(field[index]), default)
+end
+
+# Least distance between the distinct finite `positions` (plotly.js `dPos`,
+# 1 for a single position).
+function _scat_legend_slot(positions)
+	sorted = sort!(unique!(filter(isfinite, collect(Float64, positions))))
+	slot = Inf
+	for index in 2:length(sorted)
+		slot = min(slot, sorted[index] - sorted[index - 1])
+	end
+	return isfinite(slot) && slot > 0 ? slot : 1.0
+end
+
+# Default bar, box and violin gaps of plotly.js 2.35.2 (`bargap` 0.2,
+# `boxgap` and `violingap` 0.3) and their modes (`barmode` "group", the
+# others "overlay").
+const _SCAT_LEGEND_BLOCK_LAYOUT = Dict(
+	"bar" => (:bargap, 0.2, :barmode, "group"),
+	"box" => (:boxgap, 0.3, :boxmode, "overlay"),
+	"violin" => (:violingap, 0.3, :violinmode, "overlay"),
+)
+
+# plotly.js violin bandwidth (violin/calc.js): the trace's `bandwidth` (at
+# least a 1e-4 share of the range), else Silverman's rule (at least a 1e-2
+# share of the range).
+function _scat_legend_violin_bandwidth(fields, values::Vector{Float64})
+	lo, hi = extrema(values)
+	span = hi - lo
+	given = _scat_legend_number(get(fields, :bandwidth, nothing))
+	span > 0 || return something(given, 0.0)
+	given === nothing || return max(given, span / 1e4)
+	n = length(values)
+	mean = sum(values) / n
+	std = n > 1 ? sqrt(sum(v -> (v - mean)^2, values) / (n - 1)) : 0.0
+	sorted = sort(values)
+	quantile(q) = begin
+		position = 1 + (n - 1) * q
+		lower = floor(Int, position)
+		upper = min(lower + 1, n)
+		sorted[lower] + (position - lower) * (sorted[upper] - sorted[lower])
+	end
+	iqr = quantile(0.75) - quantile(0.25)
+	return max(1.059 * min(std, iqr / 1.349) * n^(-0.2), span / 100)
+end
+
+# The rectangles the bar, box and violin traces `blocks` (`(fields, type,
+# ykey)` in trace order, all on x axis `xkey`) draw, pushed to `series` as one
+# `:rects` series per trace (corner pairs: x a0 a1, y b0 b1, in axis
+# coordinates; `reaches` gets 0 for each). `pads` collects which y axes
+# plotly.js pads and `zero_keys` the y axes bars start from. Returns `(ok,
+# xpadded, xzero)` (the x axis padded, bars starting from x = 0); `ok` is
+# false when a trace is not read (an unknown position or axis, a box or
+# violin on a log axis).
+function _scat_legend_block_series!(series::Vector{_ScatLegendSeries}, reaches::Vector{Float64},
+	pads::Dict{Symbol, Bool}, zero_keys::Set{Symbol}, p::Plot, blocks, xkey::Symbol, axis_of)
+	layout = p.layout
+	xpadded = false
+	xzero = false
+	# Positions of every block per (type, position axis): the slot width.
+	slots = Dict{Tuple{String, Symbol}, Vector{Float64}}()
+	# Groups per (type, position axis): offsetgroup (or trace) => index.
+	groups = Dict{Tuple{String, Symbol}, Dict{Any, Int}}()
+	parsed = Vector{Any}(undef, length(blocks))
+	for (number, (fields, type, ykey)) in enumerate(blocks)
+		horizontal = _scat_legend_horizontal(fields, type)
+		pos_key, pos_letter = horizontal ? (ykey, :y) : (xkey, :x)
+		val_key, val_letter = horizontal ? (xkey, :x) : (ykey, :y)
+		pos_axis, val_axis = axis_of(pos_key, pos_letter), axis_of(val_key, val_letter)
+		(pos_axis === nothing || val_axis === nothing) && return false, xpadded, xzero
+		val_axis.kind in (:linear, :log) || return false, xpadded, xzero
+		# Bars on a log position axis (the bins of a log-axis histogram) are
+		# placed in data units and their edges mapped; boxes and violins
+		# there are not read.
+		pos_log = pos_axis.kind === :log
+		pos_log && type != "bar" && return false, xpadded, xzero
+		values = _scat_legend_coords(get(fields, val_letter, nothing), false)   # data units
+		values === nothing && return false, xpadded, xzero
+		raw_positions = _scat_legend_axis_values(fields, type, pos_letter)
+		positions = if raw_positions === nothing
+			type == "bar" && pos_axis.kind === :linear || return false, xpadded, xzero
+			Float64.(0:(length(values) - 1))                     # plotly.js x0 = 0, dx = 1
+		else
+			pos_log ? _scat_legend_coords(raw_positions, false) : _scat_legend_axis_coords(raw_positions, pos_axis)
+		end
+		positions === nothing && return false, xpadded, xzero
+		type == "violin" && val_axis.kind === :log && return false, xpadded, xzero
+		family = (type, pos_key)
+		append!(get!(Vector{Float64}, slots, family), positions)
+		members = get!(Dict{Any, Int}, groups, family)
+		group = something(get(fields, :offsetgroup, nothing), number)
+		haskey(members, group) || (members[group] = length(members))
+		parsed[number] = (horizontal, pos_key, val_key, val_axis.kind === :log, pos_log, values, positions, members[group])
+	end
+	# Running sums of stacked bars per (position axis, value axis, position):
+	# above and below the base for "relative", one signed sum for "stack".
+	stacked = Dict{Tuple{Symbol, Symbol, Float64}, Tuple{Float64, Float64}}()
+	for (number, (fields, type, ykey)) in enumerate(blocks)
+		horizontal, pos_key, val_key, log_values, pos_log, values, positions, group = parsed[number]
+		gap_key, gap_default, mode_key, mode_default = _SCAT_LEGEND_BLOCK_LAYOUT[type]
+		gap = something(_scat_legend_number(get(layout.fields, gap_key, nothing)), gap_default)
+		mode = get(layout.fields, mode_key, nothing)
+		mode = mode isa Union{AbstractString, Symbol} && !isempty(String(mode)) ? String(mode) : mode_default
+		family = (type, pos_key)
+		full = _scat_legend_slot(slots[family]) * (1 - clamp(gap, 0.0, 1.0))
+		count = length(groups[family])
+		span(position, width) = mode == "group" ?
+			(position - full / 2 + group * full / count, position - full / 2 + (group + 1) * full / count) :
+			(position - width / 2, position + width / 2)
+		to_axis(v) = log_values ? (v > 0 ? log10(v) : (v == 0 ? -Inf : NaN)) : v
+		to_position(v) = pos_log ? (v > 0 ? log10(v) : NaN) : v
+		offsets = type == "bar" ? get(fields, :offset, nothing) : nothing
+		us, vs = Float64[], Float64[]
+		push_rect!(a, b) = begin
+			push!(us, a[1], a[2])
+			push!(vs, b[1], b[2])
+		end
+		if type == "bar"
+			n = min(length(values), length(positions))
+			error = _scat_legend_errors(get(fields, horizontal ? :error_x : :error_y, nothing), n)
+			for index in 1:n
+				position, value = positions[index], values[index]
+				(isfinite(position) && isfinite(value)) || continue
+				base = _scat_legend_per_point(get(fields, :base, nothing), index, 0.0)
+				if mode in ("stack", "relative")
+					above, below = get(stacked, (pos_key, val_key, position), (0.0, 0.0))
+					if mode == "stack"
+						base = above
+						stacked[(pos_key, val_key, position)] = (above + value, below)
+					elseif value >= 0
+						base = above
+						stacked[(pos_key, val_key, position)] = (above + value, below)
+					else
+						base = below
+						stacked[(pos_key, val_key, position)] = (above, below + value)
+					end
+				end
+				top = base + value
+				lo, hi = minmax(base, top)
+				if error !== nothing
+					minus, plus = error[1][index], error[2][index]
+					value >= 0 ? (hi = max(hi, top + plus); lo = min(lo, top - minus)) :
+						(lo = min(lo, top - plus); hi = max(hi, top + minus))
+				end
+				width = _scat_legend_per_point(get(fields, :width, nothing), index, full)
+				# An explicit `offset` puts the bar at [position + offset,
+				# position + offset + width] in every bar mode (plotly.js).
+				a = offsets === nothing ? span(position, width) :
+					(position + _scat_legend_per_point(offsets, index, -width / 2),
+						position + _scat_legend_per_point(offsets, index, -width / 2) + width)
+				a = (to_position(a[1]), to_position(a[2]))
+				b = (to_axis(lo), to_axis(hi))
+				(any(isnan, a) || any(isnan, b)) && continue
+				horizontal ? push_rect!(b, a) : push_rect!(a, b)
+			end
+			horizontal ? (xpadded = true; xzero = true) : (pads[val_key] = true; push!(zero_keys, val_key))
+		else
+			# Samples per position; plotly.js draws one box or violin each.
+			samples = Dict{Float64, Vector{Float64}}()
+			single = length(positions) == 1
+			for index in eachindex(values)
+				position = single ? positions[1] : (index <= length(positions) ? positions[index] : NaN)
+				value = to_axis(values[index])
+				(isfinite(position) && isfinite(value)) && push!(get!(Vector{Float64}, samples, position), value)
+			end
+			points = get(fields, type == "box" ? :boxpoints : :points, "outliers")
+			all_points = points isa AbstractString && points in ("all", "suspectedoutliers")
+			pointpos = something(_scat_legend_number(get(fields, :pointpos, nothing)), all_points ? -1.5 : 0.0)
+			jitter = something(_scat_legend_number(get(fields, :jitter, nothing)), all_points ? 0.3 : 0.0)
+			for (position, drawn) in samples
+				lo, hi = extrema(drawn)
+				if type == "violin"
+					spanmode = string(get(fields, :spanmode, "soft"))
+					bandwidth = _scat_legend_violin_bandwidth(fields, drawn)
+					if spanmode == "manual"
+						given = get(fields, :span, nothing)
+						ends = given isa AbstractVector && length(given) == 2 ? map(_scat_legend_number, given) : (nothing, nothing)
+						lo = something(ends[1], lo - 2 * bandwidth)
+						hi = something(ends[2], hi + 2 * bandwidth)
+					elseif spanmode != "hard"
+						lo, hi = lo - 2 * bandwidth, hi + 2 * bandwidth
+					end
+				end
+				a0, a1 = span(position, full)
+				# The sample points of "all": beside the box, `pointpos` half
+				# widths from its centre, spread `jitter` half widths.
+				if all_points
+					half = (a1 - a0) / 2
+					centre = (a0 + a1) / 2 + pointpos * half
+					a0, a1 = min(a0, centre - jitter * half), max(a1, centre + jitter * half)
+				end
+				horizontal ? push_rect!((lo, hi), (a0, a1)) : push_rect!((a0, a1), (lo, hi))
+			end
+			horizontal ? (xpadded = true) : (pads[val_key] = true)
+		end
+		# The position axis is not padded (plotly.js pads only the values).
+		horizontal ? get!(pads, ykey, false) : nothing
+		isempty(us) && continue
+		push!(series, (ykey, us, vs, :rects, "linear"))
+		push!(reaches, 0.0)
+	end
+	return true, xpadded, xzero
+end
+
 # Score of every candidate of `_SCAT_LEGEND_POSITIONS` (what its box covers),
 # or `nothing` when the estimate does not apply (see above).
 function _scat_legend_scores(
@@ -10710,6 +11114,14 @@ function _scat_legend_scores(
 	reaches = Float64[]
 	xpadded = false
 	xlog = _axis_type(layout, xkey) == "log"
+	# vm-05: categories and dates are mapped as plotly.js maps them; bars,
+	# boxes and violins score as the rectangles they fill
+	# (`_scat_legend_block_series!`, after every trace is known).
+	axis_maps = Dict{Symbol, Union{Nothing, _ScatLegendAxis}}()
+	axis_of(key::Symbol, letter::Symbol) = get!(() -> _scat_legend_axis(p, indices, key, letter), axis_maps, key)
+	blocks = Tuple{Any, String, Symbol}[]
+	ypads = Dict{Symbol, Bool}()       # y axis => plotly.js pads its autorange
+	yzeros = Set{Symbol}()             # y axes bars start from
 	for trace_index in indices
 		trace = p.data[trace_index]
 		trace isa GenericTrace || return nothing
@@ -10722,8 +11134,13 @@ function _scat_legend_scores(
 		end
 		visible = get(fields, :visible, true)
 		(visible === false || visible == "legendonly") && continue
-		string(get(fields, :type, "scatter")) in ("scatter", "scattergl") || return nothing
+		type = string(get(fields, :type, "scatter"))
 		string(get(fields, :xaxis, "x")) == xref || return nothing
+		if type in ("bar", "box", "violin")
+			push!(blocks, (fields, type, _axis_layout_key(string(get(fields, :yaxis, "y")), :y)))
+			continue
+		end
+		type in ("scatter", "scattergl") || return nothing
 		# Stacked fills and fills to another trace or to x = 0 cover areas
 		# these scores do not model.
 		haskey(fields, :stackgroup) && return nothing
@@ -10731,9 +11148,12 @@ function _scat_legend_scores(
 		fill in ("", "none", "tozeroy", "toself") || return nothing
 		ykey = _axis_layout_key(string(get(fields, :yaxis, "y")), :y)
 		ylog = _axis_type(layout, ykey) == "log"
-		xs = _scat_legend_coords(get(fields, :x, nothing), xlog)
-		ys = _scat_legend_coords(get(fields, :y, nothing), ylog)
+		xaxis, yaxis = axis_of(xkey, :x), axis_of(ykey, :y)
+		(xaxis === nothing || yaxis === nothing) && return nothing
+		xs = _scat_legend_axis_coords(get(fields, :x, nothing), xaxis)
+		ys = _scat_legend_axis_coords(get(fields, :y, nothing), yaxis)
 		(xs === nothing || ys === nothing) && return nothing
+		ypads[ykey] = true
 		n = min(length(xs), length(ys))
 		n == 0 && continue
 		# Trimmed only when the lengths differ (the coordinates may be the
@@ -10775,6 +11195,12 @@ function _scat_legend_scores(
 			push!(reaches, r)
 		end
 	end
+	xzero = false
+	if !isempty(blocks)
+		ok, block_padded, xzero = _scat_legend_block_series!(series, reaches, ypads, yzeros, p, blocks, xkey, axis_of)
+		ok || return nothing
+		xpadded |= block_padded
+	end
 	(box === nothing ? entries == 0 || isempty(series) : isempty(series) && isempty(obstacles)) &&
 		return nothing
 
@@ -10782,7 +11208,7 @@ function _scat_legend_scores(
 	# `shapes/calc_autorange`): their extents join the windows.
 	shape_x, shape_y = _scat_legend_shape_extents(layout, xref, xlog)
 	xwindow = isempty(series) ? (0.0, 1.0) : _scat_legend_window(
-		layout, xkey, push!(Vector{Float64}[s[2] for s in series], shape_x); padded = xpadded,
+		layout, xkey, push!(Vector{Float64}[s[2] for s in series], shape_x); padded = xpadded, tight_zero = xzero,
 	)
 	xwindow === nothing && return nothing
 	# Concretely typed, so the scoring loop below is type-stable (with `Any`
@@ -10799,8 +11225,8 @@ function _scat_legend_scores(
 				get(shape_y, key, Float64[]),
 				filled ? [0.0] : Float64[],
 			);
-			padded = true,
-			tight_zero = filled,
+			padded = get(ypads, key, true),
+			tight_zero = filled || key in yzeros,
 		)
 		ywindows[key] = window === nothing ? nothing : (Float64(window[1]), Float64(window[2]))
 	end
@@ -10857,6 +11283,18 @@ function _scat_legend_score_series!(
 		us = [(xs[index] - xlo) / (xhi - xlo) for index in 1:stride:count]
 		vs = [(ys[index] - ylo) / (yhi - ylo) for index in 1:stride:count]
 		_scat_legend_fill_scores!(scores, us, vs, boxes)
+		return scores
+	end
+	if kind === :rects
+		# Corner pairs of filled rectangles (bars, boxes, violins); an end at
+		# -Inf (a bar from 0 on a log axis) reaches the bottom of the window.
+		samples = _SCAT_LEGEND_FILL_SAMPLES^2
+		for index in 1:2:(count - 1)
+			u0, u1 = (xs[index] - xlo) / (xhi - xlo), (xs[index + 1] - xlo) / (xhi - xlo)
+			v0, v1 = (ys[index] - ylo) / (yhi - ylo), (ys[index + 1] - ylo) / (yhi - ylo)
+			(isnan(u0) || isnan(u1) || isnan(v0) || isnan(v1)) && continue
+			_scat_legend_score_rect!(scores, boxes, min(u0, u1), max(u0, u1), min(v0, v1), max(v0, v1), samples)
+		end
 		return scores
 	end
 	has_previous = false
@@ -11980,6 +12418,9 @@ function _stats_bar!(
 		)
 	end
 	_stats_validate_options(fig, who, options; ykey = _scat_twin_key(fig, secondary_y))
+	# vm-05/style-03: the default legend follows the data, as in the scatter
+	# family (`_scat_place_legend!`; read before the figure changes).
+	legend_state = mutator ? _scat_legend_state(fig) : :none
 
 	ykey, yref = _stats_target_y!(fig, secondary_y, who)
 	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
@@ -11989,6 +12430,7 @@ function _stats_bar!(
 	bargap === nothing || relayout!(fig; bargap = bargap)
 	bargroupgap === nothing || relayout!(fig; bargroupgap = bargroupgap)
 	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
+	_scat_place_legend!(fig, legend_state)
 	return nothing
 end
 
@@ -12092,6 +12534,9 @@ function _stats_histogram!(
 		end
 	end
 	_stats_validate_options(fig, who, options; ykey = check_ykey)
+	# vm-05/style-03: the default legend follows the data, as in the scatter
+	# family (`_scat_place_legend!`; read before the figure changes).
+	legend_state = mutator ? _scat_legend_state(fig) : :none
 
 	ykey, yref = _stats_target_y!(fig, secondary_y, who)
 	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
@@ -12102,6 +12547,7 @@ function _stats_histogram!(
 		_apply_nested_layout_mode!(fig, x, :barmode, "overlay")
 	end
 	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
+	_scat_place_legend!(fig, legend_state)
 	return nothing
 end
 
@@ -12189,12 +12635,16 @@ function _stats_distribution!(
 		_stats_positions_collide(fig, names, String(kind), horizontal)
 	)
 	_stats_validate_options(fig, who, options; ykey = _scat_twin_key(fig, secondary_y))
+	# vm-05/style-03: the default legend follows the data, as in the scatter
+	# family (`_scat_place_legend!`; read before the figure changes).
+	legend_state = mutator ? _scat_legend_state(fig) : :none
 
 	ykey, yref = _stats_target_y!(fig, secondary_y, who)
 	append!(_plot_data(fig), _stats_bind_y!(traces, yref))
 	_stats_apply_style!(fig, count)
 	group && _apply_nested_layout_mode!(fig, values, mode_key, "group")
 	_stats_apply_options!(fig, who, options; mutator = mutator, ykey = ykey)
+	_scat_place_legend!(fig, legend_state)
 	return nothing
 end
 

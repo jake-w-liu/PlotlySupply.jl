@@ -959,7 +959,11 @@ end
 # rules and errors match `mathtext`; when mathtext is disabled only newlines
 # change, as in `_label`.
 function _label_plain(s::AbstractString)::String
-	str = String(s)
+	# Typed: compiled for `::AbstractString` (colorbar and cell labels),
+	# `String(s)` infers as Any and `isvalid(str)` became a dynamic
+	# `isvalid(::Any)` that loading the export backend (URIs' `isvalid(::URI)`)
+	# invalidated with every caller above it.
+	str = String(s)::String
 	_MATHTEXT_SETTINGS[].enabled || return _mathtext_newlines_to_br(str)
 	isvalid(str) || throw(_mathtext_invalid_utf8(str))
 	segments = _mathtext_segments(collect(str), str)

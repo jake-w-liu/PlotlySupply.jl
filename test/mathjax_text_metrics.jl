@@ -367,6 +367,33 @@ $(PS._EXPORT_RESET_DIV_JS)
 		@test r["title"][2] <= r["first"] + 0.5                 # above the first entry
 	end
 
+	# vm-05/style-03: the default legend of bars, boxes and violins kept the
+	# top-right corner, over the tallest bars and the violin "c".
+	@testset "vm-05: default legend clear of bars, boxes and violins ($(style))" for style in (:default, :ieee)
+		figures = (
+			() -> plot_bar(["Si", "Ge", "GaAs", "InP"], [[3.1, 4.0, 2.2, 5.1], [2.5, 3.6, 3.1, 4.4], [1.9, 2.8, 2.7, 3.9]];
+				legend = ["300 K", "200 K", "77 K"]),
+			() -> plot_bar(["A", "B", "C", "D"], [[1.0, 2.0, 3.0, 4.0], [1.0, 1.0, 1.0, 1.0]]; legend = ["base", "extra"], barmode = "stack"),
+			() -> plot_bar([3.0, 5.0, 8.0, 9.5], ["a", "b", "c", "d"]; orientation = "h", legend = "value"),
+			() -> plot_violin([[-3.0, -1.0, 0.0, 1.0, 3.3], [0.0, 0.5, 1.0, 1.5, 2.0], [-5.0, -1.0, 1.0, 2.5, 6.3]];
+				legend = ["a", "b", "c"], points = false),
+			() -> plot_box([[-2.0, 0.0, 0.5, 2.5], [-1.0, 1.0, 1.5, 3.5], [0.5, 2.5, 3.5, 5.5]]; legend = ["a", "b", "c"]),
+		)
+		for build in figures
+			fig = with_style(build, style)
+			PS._finalize_figure!(fig)
+			r = drawn_json(fig, raw"""
+  const top = div.getBoundingClientRect();
+  const box = el => { const b = el.getBoundingClientRect(); return [b.left - top.left, b.top - top.top, b.right - top.left, b.bottom - top.top]; };
+  return {legend: box(div.querySelector('g.legend > rect.bg')),
+    marks: Array.from(div.querySelectorAll('g.barlayer g.point path, g.boxlayer path.box, g.violinlayer path.violin, g.boxlayer path.point')).map(box)};
+""")
+			overlap(a, b) = min(a[3], b[3]) - max(a[1], b[1]) > 0.5 && min(a[4], b[4]) - max(a[2], b[2]) > 0.5
+			@test !isempty(r["marks"])
+			@test !any(mark -> overlap(r["legend"], mark), r["marks"])
+		end
+	end
+
 	# topo_response, optical_bars: the cell title and label (a) of a cell
 	# without a legend above it were drawn a legend's height lower than (b),
 	# above the outside_top legend of its neighbour.
