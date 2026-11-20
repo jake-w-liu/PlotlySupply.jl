@@ -1241,7 +1241,9 @@ axis is touched.
   ("none", "e", "E", "power", "SI", "B"). A d3 `tickformat` takes precedence
   over `exponentformat` in plotly.js, so an `exponentformat` given without
   `format` removes an automatic "~g".
-- `minor=true`: minor ticks (`ticks` = `direction` or "outside", length 0.6
+- `minor=true`: minor ticks (`ticks` = `direction`, else the direction of
+  the axis's major ticks, else "outside"; a new `direction` also turns
+  minor ticks already drawn, L8), length 0.6
   times the major length, 3 px by default); on a log axis with array major
   ticks also explicit minor tick values (mantissas 1..9 per decade).
   `minor=false` removes minor ticks.
@@ -1346,9 +1348,15 @@ function _apply_ticks!(
 	clear_minor_array = false
 	# Minor tick placement removed by `:auto` (and replaced by `:decades`).
 	clear_minor_placement = preset !== nothing
+	# Minor ticks point the way the major ones do (L8): a minor tick on the
+	# other side of the axis line runs into the tick labels, which plotly.js
+	# places from the major ticks only. Without major tick marks they go
+	# outside.
+	major_direction = direction != "" ? direction : _axes_tick_direction(layout, key)
+	minor_direction = major_direction in ("inside", "outside") ? major_direction : "outside"
 	if preset === :decades && minor !== false && direction != "none"
 		minor_fields = Dict{Symbol, Any}(
-			:ticks => direction == "" ? "outside" : direction,
+			:ticks => minor_direction,
 			:ticklen => _cmn_minor_ticklen(axis_entry, ticklen),
 			:tickmode => "linear",
 			:tick0 => 0,
@@ -1358,7 +1366,7 @@ function _apply_ticks!(
 		clear_minor_array = true
 	elseif minor === true
 		minor_fields = Dict{Symbol, Any}(
-			:ticks => direction == "" ? "outside" : direction,
+			:ticks => minor_direction,
 			:ticklen => _cmn_minor_ticklen(axis_entry, ticklen),
 		)
 		majors = preset !== nothing ? nothing :
@@ -1383,6 +1391,14 @@ function _apply_ticks!(
 		minor_fields = Dict{Symbol, Any}(
 			:ticklen => _cmn_minor_ticklen(axis_entry, ticklen),
 		)
+	end
+	# A new major direction turns minor ticks that are drawn with it.
+	if direction in ("inside", "outside") && minor !== false && preset !== :auto
+		current_minor = _cmn_mapping_get(_cmn_mapping_get(axis_entry, :minor), :ticks)
+		if current_minor in ("inside", "outside")
+			minor_fields === nothing && (minor_fields = Dict{Symbol, Any}())
+			haskey(minor_fields, :ticks) || (minor_fields[:ticks] = direction)
+		end
 	end
 
 	# --- write ---
@@ -1578,7 +1594,9 @@ figure's own template (`_figure_axis_defaults(fig; axis = :y)`: black on light
 templates, the template's light text colour on dark ones such as
 `plotly_dark`). The primary y axis's `title.font`, `tickfont`, `linecolor`,
 `linewidth`, `tickcolor`, `ticklen` and `tickwidth`, when set, are then copied
-over those, so both y axes read alike. Idempotent. A SubplotFigure cell gets
+over those, so both y axes read alike, and the twin's ticks point the way the
+primary's do. The primary stops mirroring its ticks onto the twin's spine
+(`_axes_twin_mirror_updates`). Idempotent. A SubplotFigure cell gets
 its secondary y axis from `subplots(...; specs=...)` instead, so it is an
 `ArgumentError` here, as is a figure without Cartesian axes.
 """
@@ -1625,9 +1643,14 @@ function _ensure_twin_y!(fig; who::AbstractString = "_ensure_twin_y!")
 	))
 	# Fonts and spine styling set on the primary y axis before the twin exists
 	# (set_fonts!, styles, dark templates) carry over, so both y axes read
-	# alike. Copied, never aliased.
+	# alike. Copied, never aliased. The twin's ticks point the way the
+	# primary's do (axes-ticks-05: under :ieee the twin had no tick marks).
 	_cmn_copy_axis_style!(fields, get(p.layout.fields, :yaxis, nothing))
+	direction = _axes_tick_direction(p.layout, :yaxis)
+	isempty(direction) || (fields[:ticks] = direction)
 	_cmn_merge_layout_key!(fig, key, fields; nested = (:title,))
+	# The primary stops mirroring its ticks onto the twin's spine.
+	_axes_apply_twin_mirrors!(fig)
 	return key
 end
 

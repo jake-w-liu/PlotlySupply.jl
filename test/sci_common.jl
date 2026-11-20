@@ -106,7 +106,7 @@ end
         # on a headless figure and set_template! had already mutated it.
         plot_scatter!(sf, 1:3, [1, 2, 3])
         set_template!(sf, "ggplot2")
-        @test sf.plot.layout.fields[:template] == _CMN_PB.templates[:ggplot2]
+        @test sf.plot.layout.fields[:template] == PlotlySupply._resolve_template(:ggplot2)
         annotate!(sf, 2, 2, "hi")
         @test count(a -> _cmn_get(a, :text) == "hi", sf.plot.layout.fields[:annotations]) == 1
 

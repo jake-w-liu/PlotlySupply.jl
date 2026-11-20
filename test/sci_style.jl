@@ -229,7 +229,7 @@ using PlotlySupply
 
 			@test PS._style_template(default) === PS._resolve_template(PS._DEFAULT_TEMPLATE[])
 			set_default_template!(:plotly_dark)
-			@test PS._style_template(default) === PB.templates[:plotly_dark]
+			@test PS._style_template(default) === PS._resolve_template(:plotly_dark)
 			@test PS._style_axis_defaults(default)[:linecolor] == "#f2f5fa"
 			set_default_template!(original_template)
 

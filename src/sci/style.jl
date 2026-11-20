@@ -405,6 +405,14 @@ const _STYLE_INK_CYCLES = (:bw, :bw_dash_marker)
 # Height / width of a sized style that sets no `aspect`: matplotlib's default
 # `figure.figsize` of 6.4 x 4.8 in.
 const _STYLE_DEFAULT_ASPECT = 0.75
+# L8: extra px (plotly `ticklabelstandoff`, an integer) between the tick
+# labels and the ticks / axis line under a style that sizes its tick labels
+# (see `_style_axis_defaults`): 2 px keeps every rendered label box at least
+# 2 px clear of the ticks and the spine under every preset (the closest, a
+# power-format x label under :nature, otherwise comes within 1.1 px), and
+# brings the label gap of the inside-tick presets to about matplotlib's
+# 3.5 pt `xtick.major.pad`.
+const _STYLE_TICKLABEL_STANDOFF = 2
 # plotly.js rejects layout.width/height below 10 px; the upper bound only
 # keeps `round(Int, ·)` in range (no canvas comes near 2^31 px).
 const _STYLE_MIN_FIGURE_PX = 10.0
@@ -454,7 +462,7 @@ temporarily with [`with_style`](@ref); styles are registered by name with
   colorway (`COLOR_CYCLES[:okabe_ito]`, high-contrast colours first), a closed
   box, a frameless legend, `\\large` math and a 10 px margin that grows
   automatically to fit labels and the title, and decade-only tick labels on
-  logarithmic axes spanning two decades or more (`log_ticks = :decades`). It
+  logarithmic axes showing two decade ticks or more (`log_ticks = :decades`). It
   sets no figure size and no per-trace defaults.
 - Journal presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`
   — sized for the journal's single column (`width`, `aspect = 0.75`), in the
@@ -535,7 +543,7 @@ Every field is validated by the constructor and on assignment
 - `log_ticks=:auto`: tick labels of a logarithmic axis that has no tick
   setting of its own. `:auto` keeps plotly's adaptive labels; `:decades` labels
   decades only (every k-th decade on a long axis, unlabelled minor ticks
-  between) once the axis shows two decades or more, so that the minor labels
+  between) once the axis shows two decade ticks (10ⁿ) or more, so that the minor labels
   `2`, `5` of a narrow column-width panel never collide. `:publication` and
   every journal preset use `:decades`; `:default` keeps `:auto`. An axis
   that has `tickvals`, `dtick`, `tickmode` or `ticktext` set by the user is
@@ -1342,11 +1350,21 @@ _figure_axis_defaults(fig; axis::Symbol = :x, style::PlotStyle = _figure_style(f
 function _template_spec_is_builtin(spec)
 	spec === nothing && return _template_spec_is_builtin(_DEFAULT_TEMPLATE[])
 	if spec isa PlotlyBase.Template
-		# A built-in Template object can only come from `PlotlyBase.templates[name]`,
-		# which caches it in the (lazily filled) `templates.templates` dict; looking
-		# there avoids loading every built-in template from disk.
+		# A built-in Template object comes from `PlotlyBase.templates[name]`,
+		# which caches it in the (lazily filled) `templates.templates` dict;
+		# looking there avoids loading every built-in template from disk. A
+		# figure holds its power-format copy (`_power_template`, D21), or a
+		# deep copy of either (staged mutations, `deepcopy(fig)`): identity
+		# first, then content.
 		loaded = PlotlyBase.templates.templates
-		return any(name -> get(loaded, name, missing) === spec, _STYLE_BUILTIN_TEMPLATES)
+		sources = PlotlyBase.Template[]
+		for name in _STYLE_BUILTIN_TEMPLATES
+			source = get(loaded, name, missing)
+			source isa PlotlyBase.Template || continue
+			(spec === source || spec === _power_template(source)) && return true
+			push!(sources, source)
+		end
+		return any(source -> spec == _power_template(source) || spec == source, sources)
 	end
 	parts = Symbol.(strip.(split(String(spec), '+')))
 	return all(in(_STYLE_BUILTIN_TEMPLATES), parts)
@@ -1380,6 +1398,15 @@ function _style_axis_defaults(
 	end
 	style.tick_length > 0 && (defaults[:ticklen] = _style_number(style.tick_length))
 	style.grid || (defaults[:showgrid] = false)
+	# L8: plotly.js puts a tick label 0.2 tick-font sizes plus half the line
+	# width beyond the tick end (outside ticks) or the axis line (inside
+	# ticks). At the explicit tick sizes of :publication and the journal
+	# presets (9-12 px) that is under 2 px, and the raised exponent of a
+	# power-format log label ("10⁻³", drawn at 1.25 x) comes within 1 px of
+	# the ticks of an x axis (rendered: :nature 1.1 px, :default 0.6 px).
+	# Styles that size their tick labels push them `_STYLE_TICKLABEL_STANDOFF`
+	# px further out; :default keeps plotly's placement.
+	style.tick_fontsize > 0 && (defaults[:ticklabelstandoff] = _STYLE_TICKLABEL_STANDOFF)
 	if !_style_template_is_builtin(style)
 		template_axis = _symbol_dict(get(
 			_template_layout_fields(template),
@@ -2268,8 +2295,8 @@ end
 	_style_log_ticks(style::PlotStyle = _active_style()) -> Symbol
 
 The style's rule for logarithmic axes without a user tick setting (lead
-decision D15, rule 2): `:decades` (decade labels only on an axis spanning two
-decades or more; `:publication` and the journal presets) or `:auto` (plotly's
+decision D15, rule 2): `:decades` (decade labels only on an axis showing two
+decade ticks or more; `:publication` and the journal presets) or `:auto` (plotly's
 adaptive labels). Reads `PlotStyle.log_ticks`. Internal; `_axes_log_tick_updates!` (src/sci/axes.jl) applies it.
 """
 _style_log_ticks(style::PlotStyle = _active_style()) = style.log_ticks

@@ -832,8 +832,8 @@ end
         cat = plot_scatter([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
         relayout!(cat; xaxis_type = "category", yaxis_type = "linear")
         before = _ax_json(cat.layout)
-        @test _ax_throws(() -> xrange!(cat, ("a", "c")), "xrange!: a category axis needs numeric range bounds")
-        @test _ax_throws(() -> yrange!(cat, ("a", "c")), "yrange!: a linear axis needs numeric range bounds")
+        @test _ax_throws(() -> xrange!(cat, ("a", "c")), "xrange!: `range` bounds on a category axis must be numbers")
+        @test _ax_throws(() -> yrange!(cat, ("a", "c")), "yrange!: `range` bounds on a linear axis must be numbers")
         @test _ax_json(cat.layout) == before
         xrange!(cat, (-0.5, 2.5))
         @test _ax_field(cat, :xaxis, :range) == [-0.5, 2.5]
@@ -1332,13 +1332,13 @@ end
         # Repeating replaces the line instead of adding one.
         spines!(fig; left = false)
         @test length(sh(fig)) == 1
-        # Open frame with mirrored ticks: plotly.js cannot mirror the ticks
-        # without the line, so both own lines become shapes, `mirror = "ticks"`.
+        # Open frame (L12): mirrored ticks need the opposite line, so
+        # `ticks = :mirror` leaves no ticks floating on the open sides; the
+        # own lines stay native, no shapes.
         spines!(fig; style = :open, ticks = :mirror)
-        @test _ax_field(fig, :xaxis, :showline) === false && _ax_field(fig, :xaxis, :mirror) == "ticks"
-        @test _ax_field(fig, :yaxis, :showline) === false && _ax_field(fig, :yaxis, :mirror) == "ticks"
-        edges = sort([(_ax_get(x, :x0), _ax_get(x, :y0), _ax_get(x, :x1), _ax_get(x, :y1)) for x in sh(fig)])
-        @test edges == [(0, 0, 0, 1), (0, 0, 1, 0)]
+        @test _ax_field(fig, :xaxis, :showline) === true && _ax_field(fig, :xaxis, :mirror) === false
+        @test _ax_field(fig, :yaxis, :showline) === true && _ax_field(fig, :yaxis, :mirror) === false
+        @test isempty(sh(fig))
         # Top and right only.
         spines!(fig; style = :none, top = true, right = true, ticks = :primary)
         edges = sort([(_ax_get(x, :x0), _ax_get(x, :y0), _ax_get(x, :x1), _ax_get(x, :y1)) for x in sh(fig)])
@@ -1369,8 +1369,10 @@ end
         # Cells: lines named per cell; other cells untouched.
         sf = _ax_grid(1, 2)
         spines!(sf; style = :open, top = true, ticks = :mirror, row = 1, col = 2)
-        names = [_ax_get(x, :name) for x in sh(sf)]
-        @test names == ["plotlysupply:spine:x2y2:1"]
+        # Bottom and top drawn: x2 mirrors its ticks onto the top line; the
+        # right side is open, so y2 mirrors nothing (L12).
+        @test isempty(sh(sf))
+        @test _ax_field(sf, :xaxis2, :mirror) == "ticks" && _ax_field(sf, :yaxis2, :mirror) === false
         @test _ax_field(sf, :xaxis, :mirror) === true
         # Errors before any change.
         before = _ax_json(fig.layout)
@@ -1794,13 +1796,18 @@ end
         relayout!(P(tf); xaxis_tickformat = "")
         @test isempty(upd(tf, (150, 120)))
 
-        # W7: under a paper style (mode :decades) an axis of two decades or
-        # more shows decade labels at any size; fewer decades keep plotly's.
+        # W7: under a paper style (mode :decades) an axis that shows two
+        # decade ticks or more shows decade labels at any size; one decade
+        # tick keeps plotly's labels.
         three = plot_scatter([1.0, 1000.0], [1.0, 2.0]; xscale = "log")
         @test isempty(upd(three, (700, 500)))
         d = upd(three, (700, 500); mode = :decades)
         @test d[:xaxis_dtick] == 1 && d[:xaxis_minor_dtick] == "D1"
-        few = plot_scatter([1.0, 30.0], [1.0, 2.0]; xscale = "log")
+        # 1..30 shows the decade ticks 1 and 10 (less than one decade and a
+        # half, but two decade ticks); 2..30 shows 10 only.
+        two_ticks = plot_scatter([1.0, 30.0], [1.0, 2.0]; xscale = "log")
+        @test upd(two_ticks, (700, 500); mode = :decades)[:xaxis_dtick] == 1
+        few = plot_scatter([2.0, 30.0], [1.0, 2.0]; xscale = "log")
         @test isempty(upd(few, (700, 500); mode = :decades))
         @test _AX._style_log_ticks() in (:auto, :decades)
         @test hasfield(PlotStyle, :log_ticks) || _AX._style_log_ticks(PlotStyle()) === :auto

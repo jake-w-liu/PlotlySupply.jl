@@ -306,11 +306,19 @@ end
 # scene, polar and ternary axes and on colour bars (colour axes and the
 # colorbars of trace types that draw one), wherever the source template
 # chooses no exponent format. `yticks!(fig; exponentformat = "SI")` and
-# `relayout!` still set another one per axis. One derived copy per source
-# template object (by identity; a derived template maps to itself), shared by
-# every figure that uses it, as the source templates are; a source template
-# changed in place after its first use keeps its earlier derived copy.
+# `relayout!` still set another one per axis. A template that chooses an
+# exponent format everywhere (a derived one among them) is used as it is. The
+# derived copy of a template registered in `PlotlyBase.templates` is made once
+# (by identity) and shared by every figure that uses it, as the registered
+# templates are; any other template (a user's `Template`, a "+" compound,
+# which PlotlyBase builds anew per lookup) is remembered among the last
+# `_POWER_TEMPLATES_RECENT_MAX` only, so the cache cannot grow without bound.
+# A source template changed in place after its first use keeps its earlier
+# derived copy.
 const _POWER_TEMPLATES = IdDict{PlotlyBase.Template, PlotlyBase.Template}()
+const _POWER_TEMPLATES_RECENT = Pair{PlotlyBase.Template, PlotlyBase.Template}[]
+# A handful of user templates in use at once (a style's and a figure's).
+const _POWER_TEMPLATES_RECENT_MAX = 16
 const _POWER_TEMPLATES_LOCK = ReentrantLock()
 
 const _POWER_LAYOUT_PATHS = (
@@ -340,13 +348,53 @@ const _POWER_TRACE_COLORBARS = (
 
 function _power_template(source::PlotlyBase.Template)
 	return lock(_POWER_TEMPLATES_LOCK) do
-		get(_POWER_TEMPLATES, source, nothing) isa PlotlyBase.Template &&
-			return _POWER_TEMPLATES[source]
+		cached = get(_POWER_TEMPLATES, source, nothing)
+		cached isa PlotlyBase.Template && return cached
+		for (from, to) in _POWER_TEMPLATES_RECENT
+			(from === source || to === source) && return to
+		end
+		_power_template_complete(source) && return source
 		derived = _derive_power_template(source)
-		_POWER_TEMPLATES[source] = derived
-		_POWER_TEMPLATES[derived] = derived
+		if any(t -> t === source, values(PlotlyBase.templates.templates))
+			_POWER_TEMPLATES[source] = derived
+			_POWER_TEMPLATES[derived] = derived
+		else
+			length(_POWER_TEMPLATES_RECENT) >= _POWER_TEMPLATES_RECENT_MAX &&
+				popfirst!(_POWER_TEMPLATES_RECENT)
+			push!(_POWER_TEMPLATES_RECENT, source => derived)
+		end
 		return derived
 	end
+end
+
+# The container at `path` of a template layout or trace-default dictionary
+# (`nothing` when absent or not a container).
+function _power_container(fields, path::Tuple)
+	current = fields
+	for name in path
+		current isa PlotlyBase.PlotlyAttribute && (current = current.fields)
+		current isa AbstractDict || return nothing
+		current = get(current, name, nothing)
+	end
+	current isa PlotlyBase.PlotlyAttribute && (current = current.fields)
+	return current isa AbstractDict ? current : nothing
+end
+
+# Whether every container `_derive_power_template` fills already states an
+# exponent format.
+function _power_template_complete(template::PlotlyBase.Template)
+	stated(container) = container !== nothing &&
+		!_style_value_unset(get(container, :exponentformat, nothing))
+	all(path -> stated(_power_container(template.layout.fields, path)), _POWER_LAYOUT_PATHS) ||
+		return false
+	for (type, paths) in _POWER_TRACE_COLORBARS
+		entries = get(template.data, type, nothing)
+		(entries === nothing || isempty(entries)) && return false
+		for entry in entries, path in paths
+			stated(_power_container(entry, path)) || return false
+		end
+	end
+	return true
 end
 
 # `fields` (a template layout or trace-default dictionary) with
@@ -376,10 +424,15 @@ function _derive_power_template(source::PlotlyBase.Template)
 		_power_set!(derived.layout.fields, path)
 	end
 	for (type, paths) in _POWER_TRACE_COLORBARS
-		entries = get!(() -> PlotlyBase._ATTR[attr()], derived.data, type)
-		isempty(entries) && push!(entries, attr())
+		entries = get!(() -> PlotlyBase.PlotlyAttribute{Dict{Symbol, Any}}[], derived.data, type)
+		if isempty(entries)
+			# A user's template may hold plain Dicts.
+			push!(entries, PlotlyBase.PlotlyAttribute{Dict{Symbol, Any}} <: eltype(entries) ?
+				attr() : Dict{Symbol, Any}())
+		end
 		for entry in entries, path in paths
-			_power_set!(entry.fields, path)
+			fields = entry isa PlotlyBase.PlotlyAttribute ? entry.fields : entry
+			fields isa AbstractDict && _power_set!(fields, path)
 		end
 	end
 	return derived
@@ -619,6 +672,10 @@ function _apply_default_cartesian_axes!(
 	target = fresh ? _plot_layout(fig) : fig
 	x_defaults === nothing || update_xaxes!(target; x_defaults...)
 	y_defaults === nothing || update_yaxes!(target; y_defaults...)
+	# The style's mirrored ticks stop at the spine of a twin or secondary axis
+	# (`Spec(secondary_y = true)`, axes-ticks-05): each spine shows the ticks of
+	# its own scale only.
+	append!(grid_updates, pairs(_axes_twin_mirror_updates(_plot_layout(fig))))
 	isempty(grid_updates) || (fresh ? PlotlyBase.relayout!(target; grid_updates...) : relayout!(fig; grid_updates...))
 	return nothing
 end
@@ -9448,6 +9505,7 @@ function _stats_bind_y!(traces, yref::AbstractString)
 end
 
 function _stats_maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString)
+	_settle_log_ticks!(fig)
 	show || return fig
 	return _maybe_show(
 		fig,
@@ -9570,9 +9628,6 @@ const _SCAT_TEXT_POSITIONS = (
 # Stem lines keep the 1.x look (thin, in the template's ink: black on light
 # templates) unless a colour, a line width or an active PlotStyle says otherwise.
 const _STEM_DEFAULT_LINEWIDTH = 0.5
-# plotly.js `zorder` of stems traces: below the default layer 0 of every other
-# trace on the same axes.
-const _STEM_ZORDER = -1
 
 # Docstring fragments shared by the scatter, statistics and lines.jl families
 # (interpolated into their docstrings; the list items continue with a 2-space
@@ -11518,6 +11573,14 @@ end
 # normalization, and under `cumulative` the density norms act as their
 # non-density equivalents. With `grouped`, the series sit side by side inside
 # each bin, each taking an equal share of the bin's width in decades.
+#
+# The same counting serves explicit `bins` on a linear axis (`log_axis =
+# false`; automatic bins there stay plotly's own histogram): plotly.js's bins
+# are half-open, so a sample equal to `stop` fell out of the last bin
+# (oned-hist-stop-dropped: [0, .5, 1, 1, 1.5, 2, 2.5, 3, 3, 3] in (0, 3, 1)
+# counted [2, 3, 2]). Here, as in numpy/matplotlib, the last bin is closed
+# when `stop` is a bin edge: [2, 3, 5]. Each series drops its empty leading
+# and trailing bins, as plotly's histogram does.
 function _stats_log_histogram_traces(
 	sample_list,
 	who::AbstractString;
@@ -11532,6 +11595,7 @@ function _stats_log_histogram_traces(
 	showlegends,
 	opacity,
 	patterns,
+	log_axis::Bool = true,
 )
 	series_count = length(sample_list)
 	positions = Vector{Vector{Float64}}(undef, series_count)
@@ -11541,21 +11605,27 @@ function _stats_log_histogram_traces(
 		total_length += length(samples)
 		positions[index] = bins === nothing ? Float64[log10(value) for value in numeric if value > 0] : numeric
 	end
+	closed_end = false
 	if bins === nothing
+		log_axis || throw(ArgumentError("$(who): automatic bins on a linear axis are plotly's own."))
 		pooled = reduce(vcat, positions; init = Float64[])
 		isempty(pooled) && throw(ArgumentError(
 			"$(who): a histogram on a log axis needs at least one positive finite sample.",
 		))
-		start, stop, width = _stats_autobins(pooled, nbins; total = total_length)
+		# plotly's 1-D rule (oned-hist-logbins), over log10 of the data.
+		start, stop, width = _stats_autobins(pooled, nbins; total = total_length, is2d = false)
 		bin_count = round(Int, (stop - start) / width)
 		edges = exp10.([start + k * width for k in 0:bin_count])
 	else
 		start, stop, width = bins
-		start > 0 || throw(ArgumentError(
+		(log_axis && !(start > 0)) && throw(ArgumentError(
 			"$(who): on a log axis `bins` (data units) must start above 0; got start = $(start).",
 		))
-		# plotly keeps every bin whose left edge lies below `stop`.
-		bin_count = max(1, ceil(Int, (stop - start) / width - 1e-9))
+		# plotly keeps every bin whose left edge lies below `stop`; when `stop`
+		# is itself a bin edge, the last bin includes it.
+		exact = (stop - start) / width
+		bin_count = max(1, ceil(Int, exact - 1e-9))
+		closed_end = abs(exact - round(exact)) <= 1e-9 * max(1.0, abs(exact))
 		edges = [start + k * width for k in 0:bin_count]
 	end
 	bin_widths = diff(edges)
@@ -11566,15 +11636,16 @@ function _stats_log_histogram_traces(
 	end
 	horizontal = orientation == "h"
 	value_letter = horizontal ? "x" : "y"
-	hovertemplate = "[%{customdata[0]:.4g}, %{customdata[1]:.4g}): " *
+	# The closing bracket per bin: "]" for a closed last bin.
+	hovertemplate = "[%{customdata[0]:.4g}, %{customdata[1]:.4g}%{customdata[2]}: " *
 		"$(cumulative ? "cumulative " : "")$(_STATS_HISTNORM_LABELS[histnorm]) %{$(value_letter)}"
-	customdata = [Any[edges[k], edges[k + 1]] for k in 1:bin_count]
+	customdata = [Any[edges[k], edges[k + 1], (closed_end && k == bin_count) ? "]" : ")"] for k in 1:bin_count]
 	traces = Vector{GenericTrace}(undef, series_count)
 	for index in 1:series_count
 		counts = zeros(Float64, bin_count)
 		binned = 0
 		for position in positions[index]
-			bin = _stats_bin_index(position, start, width, bin_count)
+			bin = _stats_bin_index(position, start, width, bin_count; closed_end = closed_end)
 			bin == 0 && continue
 			counts[bin] += 1
 			binned += 1
@@ -11591,23 +11662,28 @@ function _stats_log_histogram_traces(
 		end
 		cumulative && cumsum!(counts, counts)
 		if grouped
-			low = log10.(edges[1:(end - 1)])
-			share = (log10.(edges[2:end]) .- low) ./ series_count
-			left = exp10.(low .+ (index - 1) .* share)
-			right = exp10.(low .+ index .* share)
+			# Equal shares of each bin: in decades on a log axis.
+			scale, unscale = log_axis ? (log10, exp10) : (identity, identity)
+			low = scale.(edges[1:(end - 1)])
+			share = (scale.(edges[2:end]) .- low) ./ series_count
+			left = unscale.(low .+ (index - 1) .* share)
+			right = unscale.(low .+ index .* share)
 		else
 			left = edges[1:(end - 1)]
 			right = edges[2:end]
 		end
+		# Empty leading and trailing bins are not drawn (plotly histogram).
+		first_bin = findfirst(!iszero, counts)
+		kept = first_bin === nothing ? (1:0) : (first_bin:findlast(!iszero, counts))
 		kw = Dict{Symbol, Any}(
 			:name => String(names[index]),
 			:offset => 0,
-			:width => right .- left,
-			:customdata => customdata,
+			:width => (right .- left)[kept],
+			:customdata => customdata[kept],
 			:hovertemplate => hovertemplate,
 		)
-		kw[horizontal ? :y : :x] = left
-		kw[horizontal ? :x : :y] = counts
+		kw[horizontal ? :y : :x] = left[kept]
+		kw[horizontal ? :x : :y] = counts[kept]
 		horizontal && (kw[:orientation] = "h")
 		marker = Dict{Symbol, Any}()
 		isempty(colors[index]) || (marker[:color] = String(colors[index]))
@@ -11692,6 +11768,7 @@ function _violin_trace(;
 	meanline::Bool = false,
 	jitter::Union{Nothing, Real} = nothing,
 	pointpos::Union{Nothing, Real} = nothing,
+	spanmode::AbstractString = "",
 )
 	kw = _stats_distribution_fields(;
 		x = x,
@@ -11705,6 +11782,7 @@ function _violin_trace(;
 	)
 	kw[:points] = _normalize_points(points)
 	kw[:side] = String(side)
+	isempty(spanmode) || (kw[:spanmode] = String(spanmode))
 	box && (kw[:box] = attr(visible = true))
 	meanline && (kw[:meanline] = attr(visible = true))
 	return violin(; kw...)
@@ -11849,7 +11927,9 @@ function _stats_histogram!(
 		horizontal ? options.yscale : options.xscale,
 		horizontal ? check_ykey : :xaxis,
 	)
-	if log_axis
+	# Explicit bins are counted in Julia on any axis (closed last bin,
+	# oned-hist-stop-dropped); automatic ones too on a log axis.
+	if log_axis || bins !== nothing
 		traces = _stats_log_histogram_traces(
 			sample_list,
 			who;
@@ -11864,6 +11944,7 @@ function _stats_histogram!(
 			showlegends = showlegends,
 			opacity = trace_opacity,
 			patterns = patterns,
+			log_axis = log_axis,
 		)
 	else
 		traces = Vector{GenericTrace}(undef, count)
@@ -11941,6 +12022,17 @@ function _stats_distribution!(
 	colors = _stats_colors(o.color, count, who)
 	names = _stats_names(o.legend, count)
 	showlegends = _stats_showlegends(o.showlegend, count)
+	# oned-violin-log: plotly.js computes a violin's density in linear units
+	# and, by default, over the data range widened by two bandwidths, which
+	# reaches values <= 0 on a log value axis: the bodies ran thousands of px
+	# off the plot and the autorange missed the data. On a log value axis the
+	# density spans the data range only (`spanmode = "hard"`, as matplotlib's
+	# `violinplot` evaluates its KDE between the extremes).
+	log_values = kind === :violin && _stats_log_axis(
+		fig,
+		horizontal ? options.xscale : options.yscale,
+		horizontal ? :xaxis : _scat_twin_key(fig, secondary_y),
+	)
 	traces = Vector{GenericTrace}(undef, count)
 	for index in 1:count
 		series = value_list[index]
@@ -11974,6 +12066,7 @@ function _stats_distribution!(
 				meanline = o.meanline,
 				jitter = jitter,
 				pointpos = pointpos,
+				spanmode = log_values ? "hard" : "",
 			)
 		end
 	end
@@ -12409,9 +12502,6 @@ function _stem_impl!(
 			:legendgroup => groups[index],
 			:showlegend => false,
 			:hoverinfo => "skip",
-			# Drawn below the heads (and the other traces of the axes), as in
-			# matplotlib, so a stem never crosses a hollow or white-faced head.
-			:zorder => _STEM_ZORDER,
 		)
 		isempty(yref) || (stem[:yaxis] = yref)
 		stems[index] = GenericTrace("scatter", stem)
@@ -12451,7 +12541,38 @@ function _stem_impl!(
 		apply_template = constructor,
 		who = who,
 	)
+	_stem_order_below_heads!(fig, n, n_existing)
 	_scat_place_legend!(fig, legend_state)
+	return nothing
+end
+
+# oned-stem-no-frame: plotly.js 2.35 draws empty axis lines (no spines, no
+# frame) on a subplot as soon as one of its traces has a non-zero `zorder`, so
+# the stems are drawn below the heads by trace order instead, as in
+# matplotlib (a stem never crosses a hollow or white-faced head): the `n`
+# stems traces of the call (appended after its `n` heads) move in front of
+# them. A trace's position picks its colorway colour, so every head without a
+# colour first gets, explicitly, the one plotly gave it in the heads-first
+# order (`_scat_default_color` at position `n_existing + i`, the position the
+# style cycle also used); colours after the call are unchanged.
+function _stem_order_below_heads!(fig, n::Int, n_existing::Int)
+	data = _plot_data(fig)
+	first_head = length(data) - 2n + 1
+	for i in 1:n
+		head = data[first_head + i - 1]
+		marker = get(head.fields, :marker, nothing)
+		_cmn_mapping_get(marker, :color) === nothing || continue
+		color = _scat_default_color(fig, n_existing + i)
+		if marker isa PlotlyBase.PlotlyAttribute
+			marker.fields[:color] = color
+		elseif marker isa AbstractDict
+			marker[:color] = color
+		else
+			head.fields[:marker] = attr(color = color)
+		end
+	end
+	block = data[first_head:end]
+	data[first_head:end] = vcat(block[(n + 1):(2n)], block[1:n])
 	return nothing
 end
 
@@ -12465,10 +12586,12 @@ vertical line (matplotlib `stem`). The one-argument form uses
 
 Each series is drawn by two traces: a marker ("head") trace carrying the legend
 entry, and one stems trace whose segments are separated by gaps. The two share
-a legend group, so clicking the legend entry toggles the whole series. All head
-traces of a call come first, then all stems traces; the stems are drawn below
-every other trace of the axes (plotly.js `zorder = -1`), so they never cross a
-head. Stems never show hover labels or legend entries.
+a legend group, so clicking the legend entry toggles the whole series. All
+stems traces of a call come first, then all head traces, so the stems are
+drawn below the heads and never cross one (plotly.js `zorder` is not used: it
+removes the axis lines of the subplot); a head without a `color` gets its
+colorway colour written explicitly. Stems never show hover labels or legend
+entries.
 
 #### Data
 
@@ -12821,12 +12944,17 @@ Histogram of the samples `x`. Returns a `PlotlyBase.Plot`, or a
   logarithmic): plotly.js cannot bin there (it draws nothing), so the samples
   are counted in Julia (numeric data only) and drawn as `bar` traces spanning
   the bins. Automatic bins have equal width in decades (chosen like plotly's
-  automatic bins, over log10 of the data, shared by the series of one call);
-  explicit `bins` are in data units and must start above 0. Non-positive
-  samples, which a log axis cannot show, are dropped. `histnorm` and
-  `cumulative` behave as in plotly (densities divide by each bin's width in
-  data units); in group mode the series of one call share each bin side by
-  side.
+  automatic 1-D bins, over log10 of the data, shared by the series of one
+  call); explicit `bins` are in data units and must start above 0.
+  Non-positive samples, which a log axis cannot show, are dropped. `histnorm`
+  and `cumulative` behave as in plotly (densities divide by each bin's width
+  in data units); in group mode the series of one call share each bin side by
+  side. Empty bins at either end of a series are not drawn, as in plotly.
+- Explicit `bins = (start, stop, width)` are counted the same way (`bar`
+  traces) on a linear axis too, so that the last bin includes `stop` when
+  `stop` is a bin edge, as numpy/matplotlib do (plotly's own bins are
+  half-open and would drop samples equal to `stop`); samples outside the bins
+  are not counted, and `histnorm` normalizes over the counted samples.
 
 #### Keyword Arguments
 - `nbinsx::Integer = 0`: approximate number of bins (`0` = automatic). It is
@@ -13086,7 +13214,11 @@ overwritten.
 - `xlabel`, `ylabel`, `title`, `xrange`, `yrange`, `xscale`, `yscale`,
   `xticks`, `xticklabels`, `xtickformat`, `yticks`, `yticklabels`,
   `ytickformat`, `width`, `height`, `fontsize`, `grid = true`, `show = false`:
-  as in [`plot_bar`](@ref).
+  as in [`plot_bar`](@ref). On a logarithmic value axis (`yscale = "log"`,
+  `xscale = "log"` with `orientation = "h"`, or such a target axis) the
+  density, which plotly.js computes in linear units, spans the data range
+  only (`spanmode = "hard"`, as matplotlib's `violinplot`), so the bodies
+  stay on the positive axis.
 
 #### Example
 ```julia
@@ -18092,8 +18224,25 @@ end
 # the `Plot`. `to_syncplot` validates the window options and maps the
 # constructor sentinels `0` (width/height) and `""` (title) to its defaults
 # (960 × 720 px, "PlotlySupply"). The window title is the plain `title` text.
-_maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString) =
-	show ? to_syncplot(fig; width = width, height = height, title = title) : fig
+# The figure is handed out settled: the log-axis tick labels of its style
+# (`_settle_log_ticks!`) are written first.
+function _maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString)
+	_settle_log_ticks!(fig)
+	return show ? to_syncplot(fig; width = width, height = height, title = title) : fig
+end
+
+# tm-log-unsettled: under the paper styles a log axis gets decade labels
+# (`_axes_log_tick_updates!`), and bar value labels drawn outside their bars
+# get room on their value axis (`_axes_bar_label_updates!`); `_finalize_figure!`
+# writes both after every mutation, but constructors do not finalize: the
+# first finalize (a display, an export) then changed the figure. A
+# constructor writes them itself (`_axes_apply_fits!`), at the figure's size
+# and under the style it carries, as the finalizer does. Figures without a
+# log axis or bar text cost one scan of the layout keys and the trace types.
+function _settle_log_ticks!(fig)
+	_with_figure_style(() -> _axes_apply_fits!(fig), fig)
+	return nothing
+end
 
 # Lightweight layout options for non-Cartesian charts (pie, sankey, sunburst, …)
 # that have no x/y axes to style, written through the D7 figure-option
@@ -20982,15 +21131,18 @@ _stats_js_floor_log10(value::Float64) = floor(log(value) / log(10.0))
 
 # Automatic bins `(start, stop, width)` of one axis, reproducing plotly.js 2.35
 # `Axes.autoBin` for numeric data on a linear (or log, which plotly bins
-# linearly) axis in the 2-D histogram variant, so a histogram2d binned in
-# Julia (colornorm = :log) gets the bins plotly would pick for the same data.
-# `samples` are the finite values; `total` is the length of the original data
-# including missing/non-finite entries, which plotly keeps in the sample count
-# of its 2σ/n^(1/4) estimate. `nbins > 0` is the requested (approximate) bin
-# count, as plotly's `nbinsx`. Verified
-# against the bins plotly.js computes (gd._fullData xbins/ybins) for normal,
-# uniform, integer, constant, single-sample, scaled and clustered data.
-function _stats_autobins(samples::Vector{Float64}, nbins::Int; total::Int = length(samples))
+# linearly) axis, so a histogram2d binned in Julia (colornorm = :log) gets the
+# bins plotly would pick for the same data, and a 1-D histogram on a log axis
+# (`is2d = false`) the bins plotly's 1-D histogram picks over log10 of the
+# data. `samples` are the finite values; `total` is the length of the
+# original data including missing/non-finite entries, which plotly keeps in
+# the sample count of its 2σ/n^p estimate (p = 1/4 for 2-D histograms, 0.4
+# for 1-D ones: plotly.js 2.35 `Axes.autoBin`, `Math.pow(t.length, n ? .25 :
+# .4)`). `nbins > 0` is the requested (approximate) bin count, as plotly's
+# `nbinsx`. Verified against the bins plotly.js computes (gd._fullData
+# xbins/ybins) for normal, uniform, integer, constant, single-sample, scaled
+# and clustered data.
+function _stats_autobins(samples::Vector{Float64}, nbins::Int; total::Int = length(samples), is2d::Bool = true)
 	count = length(samples)
 	count > 0 || throw(ArgumentError("_stats_autobins: needs at least one finite sample."))
 	total >= count || throw(ArgumentError("_stats_autobins: `total` must be at least the sample count."))
@@ -20999,7 +21151,7 @@ function _stats_autobins(samples::Vector{Float64}, nbins::Int; total::Int = leng
 		(upper - lower) / nbins
 	else
 		# Smallest gap between distinct values, rounded down to 0.9, 1.9, 4.9
-		# or 9.9 times its decade, against 2σ/n^(1/4) (2-D variant).
+		# or 9.9 times its decade, against 2σ/n^(1/4) (2-D) or 2σ/n^0.4 (1-D).
 		sorted = sort(samples)
 		min_gap = upper - lower
 		min_gap == 0 && (min_gap = 1.0)
@@ -21017,7 +21169,7 @@ function _stats_autobins(samples::Vector{Float64}, nbins::Int; total::Int = leng
 		rounded = decade * (ratio >= 9.9 ? 9.9 : ratio >= 4.9 ? 4.9 : ratio >= 1.9 ? 1.9 : 0.9)
 		mean_value = sum(samples) / count
 		deviation = sqrt(sum(value -> (value - mean_value)^2, samples) / count)
-		max(rounded, 2 * deviation / total^0.25)
+		max(rounded, 2 * deviation / total^(is2d ? 0.25 : 0.4))
 	end
 	(isfinite(size_estimate) && size_estimate > 0) || (size_estimate = 1.0)
 	# Axes.autoTicks on a linear axis: the next "nice" width 2, 5 or 10 times
@@ -21055,10 +21207,13 @@ function _stats_autobins(samples::Vector{Float64}, nbins::Int; total::Int = leng
 end
 
 # Bin index (1-based) of `value` for bins starting at `start` of `width`, or 0
-# outside; plotly's `Lib.findBin` uses the same 1e-9 tolerance.
-function _stats_bin_index(value::Float64, start::Float64, width::Float64, nbins::Int)
+# outside; plotly's `Lib.findBin` uses the same 1e-9 tolerance. With
+# `closed_end`, the last bin also holds its right edge (numpy's histogram).
+function _stats_bin_index(value::Float64, start::Float64, width::Float64, nbins::Int; closed_end::Bool = false)
 	index = floor(Int, (value - start) / width + 1e-9) + 1
-	return 1 <= index <= nbins ? index : 0
+	1 <= index <= nbins && return index
+	(closed_end && index == nbins + 1 && value <= start + nbins * width + 1e-9 * width) && return nbins
+	return 0
 end
 
 const _STATS_HISTNORM_LABELS = Dict(

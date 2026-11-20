@@ -965,8 +965,9 @@ const _AXES_TICKS_DOC_KEYWORDS = """
   ticks are `log_ticks` over the explicit range, else the data extent.
   Mutually exclusive with `values`.
 - `minor::Union{Nothing,Bool} = nothing`: `true` draws minor ticks (0.6 of
-  the major length; on a log axis with explicit major ticks at mantissas 1..9
-  of every decade); `false` removes them; `nothing` leaves them.
+  the major length, on the side of the major ticks; on a log axis with
+  explicit major ticks at mantissas 1..9 of every decade); `false` removes
+  them; `nothing` leaves them. A new `direction` turns the minor ticks too.
 - `angle::Union{Nothing,Real} = nothing`: tick-label angle in degrees.
 - `direction = ""`: `"inside"`, `"outside"`, `"none"` (no tick marks, minor
   ticks included; matplotlib `tick_params(length = 0)`), or the Symbols; `""`
@@ -1158,8 +1159,8 @@ end
 # tick setting decade labels every k decades and unlabelled minor ticks at
 # the other digits when
 # - the active style says so (`_style_log_ticks() == :decades`, D15 rule 2:
-#   `:publication` and the journal presets) and the axis shows two decades or
-#   more (W7), or
+#   `:publication` and the journal presets) and the axis shows two decade ticks
+#   (10ⁿ) or more (W7), or
 # - plotly's automatic labels would overlap at the axis's estimated length
 #   (Z70; matplotlib labels no minor ticks on an axis spanning more than one
 #   decade either);
@@ -1202,8 +1203,14 @@ const _AXES_TICK_LENGTH_SAFETY = 0.95
 const _AXES_TICK_BELOW = 0.35
 const _AXES_TICK_DIGIT_ABOVE = 0.37
 const _AXES_TICK_SUP_ABOVE = 0.57
-# Decades a `:decades` axis must show under the paper styles (D15 rule 2).
-const _AXES_STYLE_DECADES_MIN_SPAN = 2.0
+# Decade ticks (10ⁿ) a log axis must show for decade-only labels under the
+# paper styles (D15 rule 2, refined in wave 7: 5e1..2e3 shows 10² and 10³
+# and is labelled with them alone, not plotly's "2", "5" digits between).
+const _AXES_STYLE_DECADES_MIN_TICKS = 2
+# Number of decade ticks (integer log10 values) on a log axis showing
+# [a, b] (log10), ends included up to 1e-9 decades.
+_axes_decade_tick_count(a::Float64, b::Float64) =
+	max(0, floor(Int, b + 1e-9) - ceil(Int, a - 1e-9) + 1)
 # Padding plotly.js gives an autoranged scatter axis, as a share of the data
 # span on each side: 5 % of the axis length per side, the data filling 90 %.
 const _AXES_AUTORANGE_PAD = 0.05 / 0.9
@@ -1453,16 +1460,231 @@ end
 
 The axis fits `_finalize_figure!` runs for a figure of `size = (width,
 height)` px, after every mutation and on the export copy: log-axis tick
-labels (`_axes_log_tick_updates!`, W7/Z70). Figures without a log axis return
-at once, without reading the trace data. `accs` is the run's
+labels (`_axes_log_tick_updates!`, W7/Z70) and the room of bar labels drawn
+outside their bars (`_axes_bar_label_updates!`). Figures with neither a log
+axis nor such labels return at once, without reading the trace data. `accs` is the run's
 `_fin_collect_axes(p)` when the caller already has it, so the extents are not
 collected a second time.
 """
 function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size, accs = nothing)
-	_axes_has_log_axis(p.layout) || return updates
+	has_log = _axes_has_log_axis(p.layout)
+	has_labels = _axes_has_outside_bar_text(p)
+	(has_log || has_labels) || return updates
 	plan = accs === nothing ? _axes_fit_plan(p, size) : _axes_fit_plan(p, size, accs)
-	_axes_log_tick_updates!(updates, p, plan)
+	has_log && _axes_log_tick_updates!(updates, p, plan)
+	has_labels && _axes_bar_label_updates!(updates, p, plan)
 	return updates
+end
+
+# ---------------------------------------------------------------------------
+# Room for bar value labels drawn outside the bars
+# (oned-bar-text-clipped, vm-10)
+# ---------------------------------------------------------------------------
+#
+# plotly.js leaves the text of a bar with `textposition = "outside"` out of
+# the autorange, and clips it at the plot area (`cliponaxis`): the label of
+# the tallest bar was cut at the top, and under the boxed journal styles it
+# was struck through by the top spine and its mirrored ticks. The finalizer
+# gives every automatically ranged value axis with such labels the room of
+# one label beyond its extreme bars (`autorangeoptions.include`), at the
+# figure's size, as the log-tick fit does.
+
+# plotly.js 2.35 bar text offset from the bar end (bar/plot.js TEXTPAD).
+const _AXES_BAR_TEXT_PAD = 3.0
+# Clear space (px) between a label and the edge of the plot area.
+const _AXES_BAR_LABEL_CLEARANCE = 3.0
+# Largest share of the axis length the labels may claim (a figure too small
+# for that keeps plotly's range).
+const _AXES_BAR_LABEL_MAX_SHARE = 0.4
+
+_axes_is_bar_trace(trace) = trace isa GenericTrace && get(trace.fields, :type, nothing) == "bar"
+
+# Whether `trace` (a bar trace) draws text outside its bars: a `text` or
+# `texttemplate` with `textposition = "outside"` (or a vector holding it).
+function _axes_bar_outside_text(trace)
+	_cmn_mapping_get(trace.fields, :visible) === false && return false
+	position = get(trace.fields, :textposition, nothing)
+	outside = position == "outside" ||
+		(position isa AbstractVector && any(==("outside"), position))
+	outside || return false
+	text = get(trace.fields, :text, nothing)
+	template = get(trace.fields, :texttemplate, nothing)
+	has(value) = value !== nothing && !(value isa AbstractString && isempty(value)) &&
+		!(value isa AbstractVector && isempty(value))
+	return has(text) || has(template)
+end
+
+_axes_has_outside_bar_text(p::Plot) =
+	any(trace -> _axes_is_bar_trace(trace) && _axes_bar_outside_text(trace), p.data)
+
+# Ends of the bars of `trace` along its value axis (`base` added), finite
+# numbers only.
+function _axes_bar_ends(trace, horizontal::Bool)
+	values = get(trace.fields, horizontal ? :x : :y, nothing)
+	values isa AbstractVector || return Float64[]
+	base = get(trace.fields, :base, nothing)
+	ends = Float64[]
+	for (i, v) in enumerate(values)
+		(v isa Real && !(v isa Bool) && isfinite(v)) || continue
+		b = base isa AbstractVector ? (i <= length(base) ? base[i] : 0) : base
+		b = (b isa Real && !(b isa Bool) && isfinite(b)) ? Float64(b) : 0.0
+		push!(ends, Float64(v) + b)
+	end
+	return ends
+end
+
+# Lowest and highest stack ends of the bars on value axis `key` (orientation
+# `horizontal`) in plotly's "stack" (running sums in trace order) or
+# "relative" (positive and negative values stacked apart) bar mode.
+function _axes_stacked_bar_extent(p::Plot, key::Symbol, horizontal::Bool, relative::Bool)
+	up = Dict{Any, Float64}()
+	down = Dict{Any, Float64}()
+	lo = hi = 0.0
+	for trace in p.data
+		_axes_is_bar_trace(trace) || continue
+		(get(trace.fields, :orientation, nothing) == "h") == horizontal || continue
+		_cmn_mapping_get(trace.fields, :visible) === false && continue
+		ref = get(trace.fields, horizontal ? :xaxis : :yaxis, horizontal ? "x" : "y")
+		ref isa Symbol && (ref = String(ref))
+		(ref isa AbstractString && _axis_layout_key(ref, horizontal ? :x : :y) === key) || continue
+		values = get(trace.fields, horizontal ? :x : :y, nothing)
+		values isa AbstractVector || continue
+		positions = get(trace.fields, horizontal ? :y : :x, nothing)
+		for (i, v) in enumerate(values)
+			(v isa Real && !(v isa Bool) && isfinite(v)) || continue
+			at = positions isa AbstractVector && i <= length(positions) ? positions[i] : i - 1
+			if relative && v < 0
+				down[at] = get(down, at, 0.0) + v
+				lo = min(lo, down[at])
+			else
+				up[at] = get(up, at, 0.0) + v
+				lo, hi = min(lo, up[at]), max(hi, up[at])
+			end
+		end
+	end
+	return lo, hi
+end
+
+# The px a label of `trace` needs beyond its bar along the value axis: one
+# text line on a vertical bar, the widest label on a horizontal one, plus
+# plotly's text pad and a clearance.
+function _axes_bar_label_room(trace, horizontal::Bool, root_font::Float64)
+	font = _cmn_mapping_get(trace.fields, :outsidetextfont)
+	size = _cmn_mapping_get(font, :size)
+	size isa Real || (size = _cmn_mapping_get(_cmn_mapping_get(trace.fields, :textfont), :size))
+	s = (size isa Real && !(size isa Bool) && size > 0) ? Float64(size) : root_font
+	extent = if horizontal
+		text = get(trace.fields, :text, nothing)
+		labels = text isa AbstractVector ? text : (text === nothing ? () : (text,))
+		widest = 0.0
+		for label in labels
+			widest = max(widest, _text_extent(string(label), s)[1])
+		end
+		# A texttemplate's text is not known here: a short number.
+		widest > 0 ? widest : _text_extent("0000", s)[1]
+	else
+		_AXES_LINE_HEIGHT_EM * s
+	end
+	return extent + _AXES_BAR_TEXT_PAD + _AXES_BAR_LABEL_CLEARANCE
+end
+
+function _axes_bar_label_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_AxesFitPlan)
+	layout = p.layout
+	fields = layout.fields
+	root_font = Float64(_tight_root_font_size(k -> get(fields, k, nothing)))
+	# value axis key => (lowest end, highest end, lowest positive end, room px)
+	needs = Dict{Symbol, NTuple{4, Float64}}()
+	for trace in p.data
+		(_axes_is_bar_trace(trace) && _axes_bar_outside_text(trace)) || continue
+		horizontal = get(trace.fields, :orientation, nothing) == "h"
+		ref = get(trace.fields, horizontal ? :xaxis : :yaxis, horizontal ? "x" : "y")
+		ref isa Symbol && (ref = String(ref))
+		ref isa AbstractString || continue
+		key = _axis_layout_key(ref, horizontal ? :x : :y)
+		ends = _axes_bar_ends(trace, horizontal)
+		isempty(ends) && continue
+		room = _axes_bar_label_room(trace, horizontal, root_font)
+		lo, hi = extrema(ends)
+		pos = minimum(e -> e > 0 ? e : Inf, ends)
+		# Stacked bars end at their stack's sum.
+		barmode = _cmn_mapping_get(fields, :barmode)
+		if barmode == "stack" || barmode == "relative"
+			slo, shi = _axes_stacked_bar_extent(p, key, horizontal, barmode == "relative")
+			lo, hi = min(lo, slo), max(hi, shi)
+		end
+		if haskey(needs, key)
+			a, b, c, r = needs[key]
+			needs[key] = (min(a, lo), max(b, hi), min(c, pos), max(r, room))
+		else
+			needs[key] = (lo, hi, pos, room)
+		end
+	end
+	for (key, (lo, hi, pos, room)) in needs
+		axis = get(fields, key, nothing)
+		# Only an automatic range of an axis that is its own root.
+		_cmn_mapping_get(axis, :matches) === nothing || continue
+		auto = _fin_field(axis, :autorange)
+		explicit = _fin_range_pair(_fin_field(axis, :range)) !== nothing && (auto === false || auto === nothing)
+		explicit && continue
+		options = _cmn_mapping_get(axis, :autorangeoptions)
+		options isa PlotlyBase.PlotlyAttribute && (options = options.fields)
+		# Only autorange options this fit wrote are replaced: an `include`
+		# alone, every value beyond the bars and 0 (a field's tight range, or
+		# options of the user's, are kept).
+		current = nothing
+		if options !== nothing
+			options isa AbstractDict && length(options) == 1 || continue
+			current = _cmn_mapping_get(options, :include)
+			(current isa AbstractVector && !isempty(current) &&
+				all(v -> v isa Real && !(v isa Bool) && (v > max(hi, 0.0) || v < min(lo, 0.0)), current)) || continue
+		end
+		wanted = _axes_bar_label_include(layout, plan, key, lo, hi, pos, room)
+		if wanted === nothing
+			# The labels no longer fit (or need no room): plotly's range.
+			current === nothing || (updates[Symbol(key, :_autorangeoptions)] = nothing)
+			continue
+		end
+		same = current isa AbstractVector && length(current) == length(wanted) &&
+			all(i -> isapprox(Float64(current[i]), wanted[i]; rtol = 1e-6), eachindex(wanted))
+		same || (updates[Symbol(key, :_autorangeoptions_include)] = wanted)
+	end
+	return updates
+end
+
+# The `autorangeoptions.include` values that leave `room` px between the
+# extreme bar ends (`lo`, `hi`) and the edge of the plot area on axis `key`:
+# the bar end `e` and the axis end `t` satisfy (t - e) = share * (t - b) with
+# `share = room / length` and `b` the other end of the range. Linear bars
+# grow from 0; on a log axis plotly ranges the bars from their lowest
+# positive end `pos` less its autorange pad (`_FIN_AUTORANGE_PAD` of the axis
+# length). `nothing` when the axis is not numeric, the labels would claim
+# more than `_AXES_BAR_LABEL_MAX_SHARE` of it, or there are no bars to make
+# room for.
+function _axes_bar_label_include(layout::Layout, plan::_AxesFitPlan, key::Symbol, lo::Float64, hi::Float64, pos::Float64, room::Float64)
+	axis_type = _fin_axis_type(layout, key)
+	axis_type in ("linear", "-", "log") || return nothing
+	len = _axes_plan_length(layout, plan, key)
+	len > 1 || return nothing
+	share = room / len
+	share < _AXES_BAR_LABEL_MAX_SHARE || return nothing
+	wanted = Float64[]
+	if axis_type == "log"
+		(hi > 0 && isfinite(pos) && hi > pos) || return nothing
+		share + _FIN_AUTORANGE_PAD < 1 || return nothing
+		span = (log10(hi) - log10(pos)) / (1 - share - _FIN_AUTORANGE_PAD)
+		push!(wanted, exp10(log10(hi) + share * span))
+	else
+		# Bars above and below 0 both need the room: (t - b) = (top - bottom)
+		# / (1 - 2 share).
+		bottom, top = min(0.0, lo), max(0.0, hi)
+		up, down = hi > 0, lo < 0
+		sides = up + down
+		(top - bottom > 0 && sides * share < 1) || return nothing
+		span = (top - bottom) / (1 - sides * share)
+		up && push!(wanted, top + share * span)
+		down && push!(wanted, bottom - share * span)
+	end
+	return isempty(wanted) ? nothing : wanted
 end
 
 """
@@ -1471,8 +1693,8 @@ end
 Add to `updates` (`relayout!` keys, `nothing` removes) the tick settings the
 log axes of `p` need for a figure of `size = (width, height)` px (or an
 `_AxesFitPlan`; see the comment above): decade labels on a log axis without
-a tick setting when `mode == :decades` and the axis shows two decades or
-more, or when plotly's automatic labels would overlap; a re-fitted decade
+a tick setting when `mode == :decades` and the axis shows two decade ticks
+or more, or when plotly's automatic labels would overlap; a re-fitted decade
 step on an axis that has them; plotly's automatic labels back when neither
 holds any more. A `matches` group is decided once (any member whose labels
 would overlap) and written on every member without a tick setting of the
@@ -1507,7 +1729,7 @@ function _axes_log_tick_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_Axe
 			a, b = view
 			letter = String(root)[1]
 			reversed = _axis_is_reversed(p, root)
-			want = mode === :decades && b - a >= _AXES_STYLE_DECADES_MIN_SPAN - 1e-9
+			want = mode === :decades && _axes_decade_tick_count(a, b) >= _AXES_STYLE_DECADES_MIN_TICKS
 			for m in writable
 				axis = get(fields, m, nothing)
 				_cmn_mapping_get(axis, :showticklabels) === false && continue
@@ -1624,6 +1846,25 @@ function _axes_apply_style_log_ticks!(fig; size = nothing, mode::Union{Nothing, 
 		size = (_axes_real_value_or(w, dw), _axes_real_value_or(h, dh))
 	end
 	updates = _axes_log_tick_updates!(Dict{Symbol, Any}(), p, size; mode = mode)
+	isempty(updates) && return false
+	relayout!(_cmn_relayout_target(fig); updates...)
+	return true
+end
+
+"""
+	_axes_apply_fits!(fig) -> Bool
+
+Write the axis fits of `_axes_finalize_updates!` (decade labels on log axes,
+room for bar labels drawn outside their bars) into `fig` at its layout size
+(default: `_figure_default_size`), the size `_finalize_figure!` fits a figure
+without an export size for; returns whether anything was written. Used by
+the constructors, which do not finalize, so that their figures are handed
+out settled. The caller runs it under the style the figure carries.
+"""
+function _axes_apply_fits!(fig)
+	p = _cmn_plot(fig)
+	(_axes_has_log_axis(p.layout) || _axes_has_outside_bar_text(p)) || return false
+	updates = _axes_finalize_updates!(Dict{Symbol, Any}(), p, _fin_layout_size(p.layout))
 	isempty(updates) && return false
 	relayout!(_cmn_relayout_target(fig); updates...)
 	return true
@@ -1872,6 +2113,77 @@ end
 
 # Whether a plotly `mirror` value mirrors the ticks.
 _axes_mirrors_ticks(mirror) = mirror isa AbstractString && mirror in ("ticks", "allticks")
+# The `mirror` value that keeps the mirrored line of `mirror` but no ticks.
+_axes_unmirrored_ticks(mirror) = mirror == "allticks" ? "all" : true
+
+# The side ("bottom"/"top" for x, "left"/"right" for y) axis `entry` is drawn on.
+function _axes_axis_side(entry, letter::Char)
+	side = _cmn_mapping_get(entry, :side)
+	side isa Symbol && (side = String(side))
+	letter == 'x' && return side == "top" ? "top" : "bottom"
+	return side == "right" ? "right" : "left"
+end
+
+# Whether axis `key` (an `xaxis*`/`yaxis*` key) shares the plot area with an
+# axis on its opposite side: one that overlays it, or that it overlays (a twin
+# or secondary axis: `plot_scatter!(...; secondary_y = true)`,
+# `Spec(secondary_y = true)`, `secondary_xaxis!`). That side shows the other
+# axis's ticks, so `key` must not mirror its own there (axes-ticks-05).
+function _axes_has_opposite_twin(layout::Layout, key::Symbol)
+	name = String(key)
+	letter = name[1]
+	m = match(r"^[xy]axis(\d*)$", name)
+	m === nothing && return false
+	ref = string(letter, m.captures[1] == "1" ? "" : m.captures[1])
+	fields = layout.fields
+	entry = get(fields, key, nothing)
+	own_side = _axes_axis_side(entry, letter)
+	host = _cmn_mapping_get(entry, :overlaying)
+	if host isa AbstractString && _cmn_axis_ref_index(host, letter) !== nothing
+		host_key = _axis_layout_key(host, Symbol(letter))
+		_axes_axis_side(get(fields, host_key, nothing), letter) != own_side && return true
+	end
+	for (other, other_entry) in fields
+		other === key && continue
+		occursin(Regex("^$(letter)axis\\d*\$"), String(other)) || continue
+		_cmn_mapping_get(other_entry, :overlaying) == ref || continue
+		_axes_axis_side(other_entry, letter) != own_side && return true
+	end
+	return false
+end
+
+"""
+	_axes_twin_mirror_updates(layout::Layout) -> Dict{Symbol,Any}
+
+`relayout!` updates (`<axis>_mirror`) that stop every Cartesian axis sharing
+its plot area with an axis on the opposite side (`_axes_has_opposite_twin`)
+from mirroring its ticks there: `mirror = "ticks"` becomes `true` (the line
+stays, the ticks go), `"allticks"` becomes `"all"`. Each spine then carries
+the ticks of its own scale only, as matplotlib's `twinx`/`secondary_xaxis`
+(axes-ticks-05: under a journal style with mirrored ticks the twin's spine
+also carried the primary's ticks at the primary's positions). Empty when
+nothing mirrors onto a twin. Internal.
+"""
+function _axes_twin_mirror_updates(layout::Layout)
+	updates = Dict{Symbol, Any}()
+	for (key, entry) in layout.fields
+		occursin(r"^[xy]axis\d*$", String(key)) || continue
+		mirror = _cmn_mapping_get(entry, :mirror)
+		_axes_mirrors_ticks(mirror) || continue
+		_axes_has_opposite_twin(layout, key) || continue
+		updates[Symbol(key, :_mirror)] = _axes_unmirrored_ticks(mirror)
+	end
+	return updates
+end
+
+# Apply `_axes_twin_mirror_updates` to `fig` (a figure or staged target).
+function _axes_apply_twin_mirrors!(fig)
+	for (name, value) in _axes_twin_mirror_updates(_cmn_layout(fig))
+		key = Symbol(String(name)[1:(end - length("_mirror"))])
+		_cmn_merge_layout_key!(fig, key, Dict{Symbol, Any}(:mirror => value))
+	end
+	return nothing
+end
 
 # plotly.js draws an axis line on the axis's own side (`showline`) and, with
 # `mirror`, on the opposite side as well; it cannot draw the opposite line
@@ -2007,6 +2319,10 @@ function _axes_spines!(
 		end
 	end
 	ink = nothing
+	# The figure's style mirrors its ticks (`PlotStyle(mirror_ticks = true)`
+	# with tick marks, the :ieee/:aps/:aip look): what a closed frame gets back.
+	style = _figure_style(fig)
+	style_mirror = style.mirror_ticks && !isempty(style.ticks)
 	for (t, bounded) in zip(targets, target_intervals)
 		shapes = Any[]
 		for (key, letter) in ((t.xkey, 'x'), (t.ykey, 'y'))
@@ -2017,8 +2333,22 @@ function _axes_spines!(
 			own_index, other_index = letter == 'x' ?
 				(side == "top" ? (2, 1) : (1, 2)) :
 				(side == "right" ? (4, 3) : (3, 4))
-			mirror_ticks = ticks_name === :mirror ||
-				(ticks_name === nothing && _axes_mirrors_ticks(_cmn_mapping_get(entry, :mirror)))
+			# L12: a side without a line has no ticks, and a side that carries a
+			# twin or secondary axis shows that axis's ticks only
+			# (axes-ticks-05). `mirror = false` is what a frame without its
+			# opposite line leaves (`:open`, `:none`, a side switched off), so a
+			# closed frame (`ticks = nothing`) takes the style's mirrored ticks
+			# back; `mirror = true` (a closed frame without mirrored ticks,
+			# `ticks = :primary`) is the user's choice and is kept.
+			current_mirror = _cmn_mapping_get(entry, :mirror)
+			wanted = ticks_name === :mirror || (
+				ticks_name === nothing && (
+					_axes_mirrors_ticks(current_mirror) ||
+					(current_mirror === false && style_mirror)
+				)
+			)
+			mirror_ticks = wanted && sides[other_index] &&
+				!_axes_has_opposite_twin(_cmn_layout(fig), key)
 			# A bounded side is a shape over its interval; plotly.js's axis
 			# line always spans the whole plot area (Z37).
 			fields, drawn = _axes_spine_axis_fields(
@@ -2110,7 +2440,12 @@ SubplotFigure cell or inset (matplotlib `ax.spines[...]`, including
   frame sides (plotly `mirror = "ticks"`); `:primary` keeps them on the
   bottom and left sides only; `:none` removes the tick marks (major and
   minor; `xticks!(fig; direction = :outside)` brings the major ticks back,
-  `minor = true` the minor ones); `nothing` keeps the current choice.
+  `minor = true` the minor ones); `nothing` keeps the current choice, and a
+  frame closed again after `:open`/`:none` gets the mirrored ticks of the
+  figure's style back (`:ieee`, `:aps`, `:aip`). Mirrored ticks (major and
+  minor) are drawn only on a side that has its line and carries no twin or
+  secondary axis (whose own ticks are there): a side without a line has no
+  ticks.
 - `color = ""`: line colour (CSS/hex string, Symbol or Colors.jl colour);
   `""` keeps it.
 - `linewidth::Real = 0`: line width in px; 0 keeps it.
@@ -2388,9 +2723,10 @@ end
 
 # 1-2-5 ticks `k * m * 10^e` covering [lo, hi]: the step `m * 10^e`
 # (m in 1, 2, 5) whose tick count is closest to the target, the larger step
-# on a tie. Values are computed from integers so they are correctly rounded
-# (0.3, not 0.30000000000000004).
-function _axes_linear_ticks(lo::Float64, hi::Float64, who::AbstractString)
+# on a tie, among the steps whose labels `fits` (all when none does: the
+# step with the fewest ticks, at least two). Values are computed from
+# integers so they are correctly rounded (0.3, not 0.30000000000000004).
+function _axes_linear_ticks(lo::Float64, hi::Float64, who::AbstractString; fits = _ -> true)
 	span = hi - lo
 	raw = span / _AXES_SECONDARY_TICK_TARGET
 	e0 = floor(Int, log10(raw))
@@ -2400,26 +2736,30 @@ function _axes_linear_ticks(lo::Float64, hi::Float64, who::AbstractString)
 		"magnitude to place automatic ticks; pass `ticks`.",
 	))
 	slack = 1e-9 * span
-	best = nothing
-	best_score = typemax(Int)
-	for e in (e0, e0 + 1), m in (1, 2, 5)
+	# (score, -step order, values): the steps up to 10^(e0 + 2) >= 10 x span /
+	# target reach down to two ticks.
+	candidates = Tuple{Int, Int, Vector{Float64}}[]
+	order = 0
+	for e in e0:(e0 + 2), m in (1, 2, 5)
+		order += 1
 		step = m * exp10(e)
 		kmin = ceil(Int, (lo - slack) / step)
 		kmax = floor(Int, (hi + slack) / step)
 		count = kmax - kmin + 1
 		count >= 2 || continue
-		score = abs(count - _AXES_SECONDARY_TICK_TARGET)
-		if score <= best_score
-			best = (m, e, kmin, kmax)
-			best_score = score
-		end
+		values = Float64[_cmn_log_tick_value(Float64(k * m), 10.0, e) for k in kmin:kmax]
+		push!(candidates, (abs(count - _AXES_SECONDARY_TICK_TARGET), -order, values))
 	end
 	# The step 10^e0 <= span / target always yields at least `target` ticks.
-	m, e, kmin, kmax = something(best)
-	return Float64[_cmn_log_tick_value(Float64(k * m), 10.0, e) for k in kmin:kmax]
+	sort!(candidates; by = c -> (c[1], c[2]))
+	for (_, _, values) in candidates
+		fits(values) && return values
+	end
+	return candidates[argmin([length(c[3]) for c in candidates])][3]
 end
 
-function _axes_secondary_auto_ticks(lo::Float64, hi::Float64, log_axis::Bool, who::AbstractString)
+function _axes_secondary_auto_ticks(lo::Float64, hi::Float64, log_axis::Bool, who::AbstractString;
+	fits = _ -> true)
 	if log_axis && lo > 0
 		decades = log10(hi / lo)
 		if decades >= 1
@@ -2429,10 +2769,64 @@ function _axes_secondary_auto_ticks(lo::Float64, hi::Float64, log_axis::Bool, wh
 				stride = ceil(Int, length(values) / _AXES_SECONDARY_TICK_TARGET)
 				values = values[1:stride:end]
 			end
+			if length(values) >= 2 && !fits(values)
+				# Labels that collide: powers of ten only, then every n-th.
+				decade_values = log_ticks(lo, hi; subs = (1,))
+				stride = 1
+				values = decade_values
+				while length(values) > 2 && !fits(values)
+					stride += 1
+					values = decade_values[1:stride:end]
+				end
+			end
 			length(values) >= 2 && return values
 		end
 	end
-	return _axes_linear_ticks(lo, hi, who)
+	return _axes_linear_ticks(lo, hi, who; fits = fits)
+end
+
+# Clear space between neighbouring secondary tick labels, in tick-font sizes.
+const _AXES_SECONDARY_LABEL_GAP_EM = 0.5
+
+# vm-11: a predicate on secondary tick values (in secondary units) that holds
+# when their labels (`_axes_format_number` at the primary axis's tick font)
+# keep `_AXES_SECONDARY_LABEL_GAP_EM` between them along the cell's x axis,
+# whose length is estimated for the figure's size as the log-tick fit does
+# (`_axes_fit_plan`). A narrow cell (a column of a 1 x 2 grid under a journal
+# style) then gets fewer ticks instead of colliding labels, which plotly.js
+# would tilt by 90 degrees.
+function _axes_secondary_label_fit(fig, t, finv, lower::Float64, upper::Float64, log_axis::Bool)
+	p = _cmn_plot(fig)
+	layout = p.layout
+	w = get(layout.fields, :width, nothing)
+	h = get(layout.fields, :height, nothing)
+	dw, dh = _figure_default_size(p)
+	plan = _axes_fit_plan(p, (_axes_real_value_or(w, dw), _axes_real_value_or(h, dh)))
+	len = _AXES_TICK_LENGTH_SAFETY * _axes_plan_length(layout, plan, t.xkey)
+	f = _axes_tick_font(layout, t.xkey)
+	gap = _AXES_SECONDARY_LABEL_GAP_EM * f
+	at(x) = log_axis ? (log10(x) - log10(lower)) / (log10(upper) - log10(lower)) :
+		(x - lower) / (upper - lower)
+	return function (values)
+		labels = Tuple{Float64, Float64}[]
+		for v in values
+			# A value `finv` cannot place is reported by the caller, which maps
+			# the chosen ticks with the checks of `secondary_xaxis!`.
+			x = try
+				finv(v)
+			catch err
+				err isa InterruptException && rethrow()
+				return true
+			end
+			(x isa Real && isfinite(x) && (!log_axis || x > 0)) || return true
+			push!(labels, (at(Float64(x)) * len, _text_extent(_axes_format_number(v), f)[1]))
+		end
+		sort!(labels; by = first)
+		for i in 2:length(labels)
+			labels[i][1] - labels[i - 1][1] < (labels[i][2] + labels[i - 1][2]) / 2 + gap && return false
+		end
+		return true
+	end
 end
 
 # Compact tick text: integers without ".0", six significant digits, plain
@@ -2665,7 +3059,13 @@ function _axes_secondary_xaxis!(
 			"$(who): `ticklabels` need explicit `ticks`.",
 		))
 		lo2, hi2 = extrema(mapped)
-		_axes_secondary_auto_ticks(lo2, hi2, log_axis, who)
+		_axes_secondary_auto_ticks(
+			lo2,
+			hi2,
+			log_axis,
+			who;
+			fits = _axes_secondary_label_fit(fig, t, finv, lower, upper, log_axis),
+		)
 	else
 		(ticks isa AbstractVector || ticks isa Tuple) || throw(ArgumentError(
 			"$(who): `ticks` must be a vector or tuple of numbers; got " *
@@ -2730,7 +3130,11 @@ function _axes_secondary_xaxis!(
 		:zeroline => false,
 		:showline => true,
 		:mirror => false,
-		:ticks => "outside",
+		# The tick direction of the primary axis (the style's: "inside" under
+		# :ieee, axes-ticks-05), "outside" when it has no tick marks.
+		:ticks => let direction = _axes_tick_direction(layout, t.xkey)
+			isempty(direction) ? "outside" : direction
+		end,
 		:automargin => !in_inset,
 		# Y9: the ink of the figure's template (white lines on plotly_dark);
 		# the primary axis's own line style is copied over it below.
@@ -2804,6 +3208,9 @@ function _axes_secondary_xaxis!(
 			),
 		)
 	end
+	# The primary stops mirroring its ticks onto the new axis's side
+	# (axes-ticks-05): that spine shows the secondary scale only.
+	_axes_apply_twin_mirrors!(fig)
 	# The stack above the axes changed (D12, Z15): panel titles, legends above
 	# the cell and the figure title band move above the new top axis, and the
 	# top margin grows to hold them.

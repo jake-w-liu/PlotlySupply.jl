@@ -58,7 +58,7 @@ end
 		@testset "#119 #131 #216 #266 #283 spines and legend follow the template" begin
 			fig = plot_scatter(1:4, [[1, 2, 3, 4], [4, 3, 2, 1]]; legend = ["a", "b"])
 			@test set_template!(fig, "plotly_dark") === nothing
-			@test fig.layout.fields[:template] == _RS_PB.templates[:plotly_dark]
+			@test fig.layout.fields[:template] == _RS._resolve_template(:plotly_dark)
 			for key in (:xaxis, :yaxis)
 				axis = _rs_get(fig, key)
 				@test axis[:linecolor] == _RS_DARK_INK
@@ -139,7 +139,7 @@ end
 		@testset "set_template! on a SyncPlot" begin
 			sp, scripts = _rs_syncplot(plot_scatter(1:3, 1:3; legend = "s"))
 			@test set_template!(sp, :plotly_dark) === nothing
-			@test sp.plot.layout.fields[:template] == _RS_PB.templates[:plotly_dark]
+			@test sp.plot.layout.fields[:template] == _RS._resolve_template(:plotly_dark)
 			@test _rs_get(sp, :xaxis)[:linecolor] == _RS_DARK_INK
 			@test _rs_get(sp, :legend)[:bgcolor] == _RS_DARK_LEGEND.bgcolor
 			@test !isempty(scripts)
@@ -157,7 +157,7 @@ end
 			s5 = subplots(1, 1; sync = false)
 			plot!(s5, 1:3, [1, 2, 3])
 			@test set_template!(s5, "ggplot2") === s5
-			@test s5.plot.layout.fields[:template] == _RS_PB.templates[:ggplot2]
+			@test s5.plot.layout.fields[:template] == _RS._resolve_template(:ggplot2)
 			@test annotate!(s5, 2, 2, "hi") === s5
 			@test length(s5.plot.layout.fields[:annotations]) == 1
 			s53 = subplots(1, 2; sync = false)
@@ -171,7 +171,7 @@ end
 			s116 = subplots(2, 1; sync = false, show = false)
 			plot_scatter!(s116, [1.0, 2.0], [3.0, 4.0])
 			@test set_template!(s116, "plotly_dark") === s116
-			@test s116.layout.fields[:template] == _RS_PB.templates[:plotly_dark]
+			@test s116.layout.fields[:template] == _RS._resolve_template(:plotly_dark)
 			s284 = subplots(1, 2; sync = false)
 			plot!(s284, 1:3, [1, 2, 3])
 			@test hasproperty(s284, :plot)
@@ -181,7 +181,7 @@ end
 			sf = subplots(1, 2; sync = false)
 			plot_scatter!(sf, 1:5, [1.0, 2, 3, 2, 1]; row = 1, col = 2, legend = "a")
 			@test set_template!(sf, "plotly_dark") === sf
-			@test sf.plot.layout.fields[:template] == _RS_PB.templates[:plotly_dark]
+			@test sf.plot.layout.fields[:template] == _RS._resolve_template(:plotly_dark)
 			@test sf.plot.layout.fields[:template].layout.fields[:paper_bgcolor] == "rgb(17,17,17)"
 			for key in (:xaxis, :yaxis, :xaxis2, :yaxis2)
 				@test _rs_get(sf, key)[:linecolor] == _RS_DARK_INK
@@ -208,7 +208,7 @@ end
 
 			# Default argument and back to light.
 			@test set_template!(sf) === sf
-			@test sf.plot.layout.fields[:template] == _RS_PB.templates[:plotly_white]
+			@test sf.plot.layout.fields[:template] == _RS._resolve_template(:plotly_white)
 			@test _rs_get(sf, :xaxis2)[:linecolor] == "#000000"
 			@test (sf.legend_bgcolor, sf.legend_bordercolor) == Tuple(_RS_LIGHT_LEGEND)
 
@@ -224,7 +224,7 @@ end
 			sf_sync = SubplotFigure(sp, 1, 2, 1, 1, true, :topright, (0.02, 0.03),
 				_RS_LIGHT_LEGEND.bgcolor, _RS_LIGHT_LEGEND.bordercolor, 1.0)
 			@test set_template!(sf_sync, :plotly_dark) === sf_sync
-			@test sp.plot.layout.fields[:template] == _RS_PB.templates[:plotly_dark]
+			@test sp.plot.layout.fields[:template] == _RS._resolve_template(:plotly_dark)
 			@test _rs_get(sp, :xaxis2)[:linecolor] == _RS_DARK_INK
 			@test sf_sync.legend_bgcolor == _RS_DARK_LEGEND.bgcolor
 			@test !isempty(scripts)
@@ -243,7 +243,7 @@ end
 			@test_throws ArgumentError _RS._normalize_template(1)
 			fig = plot_scatter(1:3, 1:3)
 			@test_logs set_template!(fig, " ggplot2 ")
-			@test fig.layout.fields[:template] == _RS_PB.templates[:ggplot2]
+			@test fig.layout.fields[:template] == _RS._resolve_template(:ggplot2)
 			_rs_with_defaults() do
 				@test (@test_logs set_default_template!(" seaborn ")) === :seaborn
 				@test get_default_template() === :seaborn
@@ -255,7 +255,7 @@ end
 				f = plot_scatter(1:3, [1, 2, 3])
 				set_template!(f, "seaborn")
 				set_template!(f)
-				@test f.layout.fields[:template] == _RS_PB.templates[:plotly_dark]
+				@test f.layout.fields[:template] == _RS._resolve_template(:plotly_dark)
 				@test _rs_get(f, :xaxis)[:linecolor] == _RS_DARK_INK
 			end
 			doc = string(@doc set_template!)
@@ -270,7 +270,7 @@ end
 				@test set_default_template!(custom) === custom
 				@test get_default_template() === custom
 				fig = plot_scatter(1:3, 1:3; legend = "c")
-				@test fig.layout.fields[:template] == custom
+				@test fig.layout.fields[:template] == _RS._resolve_template(custom)
 				# A dark custom template gets a light frame and a dark legend box.
 				@test _rs_get(fig, :xaxis)[:linecolor] == "#eeeeee"
 				@test _rs_get(fig, :legend)[:bgcolor] == "rgba(5,5,40,0.72)"
@@ -323,7 +323,7 @@ end
 			for key in (:font, :colorway)
 				@test !haskey(fig.layout.fields, key)
 			end
-			@test fig.layout.fields[:template] == _RS_PB.templates[:plotly_white]
+			@test fig.layout.fields[:template] == _RS._resolve_template(:plotly_white)
 			for key in (:xaxis, :yaxis), (k, v) in legacy_axis
 				@test _rs_get(fig, key)[k] == v
 			end
@@ -404,7 +404,7 @@ end
 			# A style template, spines, ticks and grid.
 			with_style(; template = :plotly_dark, spines = :open, ticks = :inside, grid = false) do
 				fig = plot_scatter(1:3, 1:3; legend = "d")
-				@test fig.layout.fields[:template] == _RS_PB.templates[:plotly_dark]
+				@test fig.layout.fields[:template] == _RS._resolve_template(:plotly_dark)
 				xaxis = _rs_get(fig, :xaxis)
 				@test xaxis[:linecolor] == _RS_DARK_INK
 				@test xaxis[:mirror] === false
@@ -412,7 +412,7 @@ end
 				@test xaxis[:showgrid] === false
 				@test _rs_get(fig, :legend)[:bgcolor] == _RS_DARK_LEGEND.bgcolor
 			end
-			@test plot_scatter(1:3, 1:3).layout.fields[:template] == _RS_PB.templates[:plotly_white]
+			@test plot_scatter(1:3, 1:3).layout.fields[:template] == _RS._resolve_template(:plotly_white)
 
 			# A custom style template that sets ticks/mirror wins over the style.
 			ticks_template = _RS_PB.Template(layout = _RS_PB.Layout(xaxis = attr(ticks = "inside", mirror = "allticks")))
@@ -688,7 +688,7 @@ end
 			@test _rs_get(fig, :title)[:automargin] === true
 			@test (fig.layout.fields[:width], fig.layout.fields[:height]) == (400.0, 300)
 			@test _rs_get(fig, :font)[:size] == 12.5
-			@test fig.layout.fields[:template] == _RS_PB.templates[:plotly_white]
+			@test fig.layout.fields[:template] == _RS._resolve_template(:plotly_white)
 			@test _rs_get(fig, :legend)[:bgcolor] == _RS_LIGHT_LEGEND.bgcolor
 
 			fresh = Plot(GenericTrace[pie(values = [1, 2])], Layout())
@@ -739,7 +739,7 @@ end
 			@test _rs_json(fig) == before
 			@test get_default_template() === :plotly_white
 			@test_logs (:warn, r"^set_template!: unrecognized template \"nope\"") set_template!(fig, "nope")
-			@test fig.layout.fields[:template] == _RS_PB.templates[:plotly_white]
+			@test fig.layout.fields[:template] == _RS._resolve_template(:plotly_white)
 			_rs_with_defaults() do
 				@test (@test_logs (:warn, r"^set_default_template!: unrecognized") set_default_template!(:nope)) === :plotly_white
 			end
@@ -796,12 +796,12 @@ end
 			# back to the style's template.
 			named = Plot(GenericTrace[], Layout())
 			named.layout.fields[:template] = " plotly_dark "
-			@test _RS._figure_style_template(named) === _RS_PB.templates[:plotly_dark]
+			@test _RS._figure_style_template(named) === _RS._resolve_template(:plotly_dark)
 			delete!(named.layout.fields, :template)
 			@test _RS._figure_template(named) === nothing
-			@test _RS._figure_style_template(named) === _RS_PB.templates[:plotly_white]
+			@test _RS._figure_style_template(named) === _RS._resolve_template(:plotly_white)
 			with_style(; template = :ggplot2) do
-				@test _RS._figure_style_template(named) === _RS_PB.templates[:ggplot2]
+				@test _RS._figure_style_template(named) === _RS._resolve_template(:ggplot2)
 			end
 			# Legend font for legends created after construction.
 			@test _RS._style_legend_font() == Dict{Symbol, Any}()
