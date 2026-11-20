@@ -1559,3 +1559,183 @@ const _V6_TOPO_EXPORT = (width = 6.6, height = 2.0, units = :in, dpi = 200, tigh
 		@test t < 2.0
 	end
 end
+
+# ── Wave 7 (release fix round, "threed") ─────────────────────────────────────
+# threed-f01/vm-09 (framing settles), f04, f05, f07, f08, lw02 and the framing
+# memo. Each fails on 45446e8.
+@testset "wave 7 threed" begin
+	PS = PlotlySupply
+	mesh() = plot_mesh3d([0.0, 1, 0, 0], [0.0, 0, 1, 0], [0.0, 0, 0, 1];
+		i = [0, 0, 0, 1], j = [1, 2, 3, 2], k = [2, 3, 1, 3], intensity = [1.0, 2, 3, 4])
+	grid_fig(style, rows, cols) = with_style(style) do
+		sf = subplots(rows, cols; sync = false, specs = fill(Spec(kind = "scene"), rows, cols))
+		xs = collect(range(-2, 2; length = 31)); ys = collect(range(-1, 1; length = 21))
+		Z = [exp(-x^2 - 4y^2) for x in xs, y in ys]
+		for r in 1:rows, c in 1:cols
+			plot_surface!(sf, xs, ys, Z; row = r, col = c)
+		end
+		sf
+	end
+
+	@testset "f01/vm-09: the framing settles under journal styles" begin
+		for style in (:default, :ieee, :nature)
+			fig = with_style(mesh, style)
+			@test [PS._finalize_figure!(fig) for _ in 1:3] == [false, false, false]
+			before = _r3_json(fig)
+			PS._finalize_figure!(fig)
+			@test _r3_json(fig) == before
+			# What is drawn is clear: no two labels of the scene overlap.
+			@test PS._s3_drawn_score(fig, :scene)[1] == 0
+		end
+		for (style, rows, cols) in ((:ieee, 1, 2), (:ieee, 2, 2), (:nature, 1, 3))
+			sf = grid_fig(style, rows, cols)
+			fig = sf.plot
+			@test [PS._finalize_figure!(fig) for _ in 1:3] == [false, false, false]
+			a = _r3_json(fig)
+			PS._finalize_figure!(fig)
+			@test _r3_json(fig) == a
+		end
+	end
+
+	@testset "f01: the same input gives the same framing, at any export size" begin
+		for size in ((500.0, 400.0), (700.0, 500.0), (333.0, 251.0))
+			first_copy = deepcopy(with_style(mesh, :ieee))
+			second_copy = deepcopy(with_style(mesh, :ieee))
+			PS._s3_finalize_scenes!(first_copy, size)
+			PS._s3_finalize_scenes!(second_copy, size)
+			@test _r3_json(first_copy) == _r3_json(second_copy)
+			@test !PS._s3_finalize_scenes!(first_copy, size)
+		end
+	end
+
+	@testset "framing memo: a settled scene is not framed again" begin
+		fig = with_style(mesh, :ieee)
+		PS._finalize_figure!(fig)
+		hit = minimum(@allocated(PS._s3_finalize_scenes!(fig)) for _ in 1:3)
+		empty!(PS._S3_FIT_MEMO)
+		PS._s3_finalize_scenes!(fig)   # warm and refill
+		empty!(PS._S3_FIT_MEMO)
+		miss = @allocated PS._s3_finalize_scenes!(fig)
+		@test hit < miss / 4
+		@test !PS._s3_finalize_scenes!(fig)
+		# A change of what the framing reads is noticed.
+		eye_before = PS._cmn_mapping_get(fig.layout[:scene][:camera], :eye)
+		relayout!(fig, width = 420, height = 300)
+		PS._finalize_figure!(fig)
+		@test PS._cmn_mapping_get(fig.layout[:scene][:camera], :eye) != eye_before
+		xlabel_before = PS._s3_drawn_score(fig, :scene)
+		@test !PS._finalize_figure!(fig)
+		# Another size on a copy re-frames it.
+		copy_plot = deepcopy(fig)
+		@test PS._s3_finalize_scenes!(copy_plot, (900.0, 600.0))
+	end
+
+	@testset "f05: matrix-shaped coordinates raise ArgumentError, not MethodError" begin
+		m = reshape([1.0, 2, 3], 3, 1)
+		for bad in (m, [1.0 2 3]', transpose([1.0 2 3]), [1.0 4; 2 5; 3 6], [1.0 2 3; 4 5 6]')
+			err = try plot_scatter3d(bad, bad, bad); nothing catch e; e end
+			@test err isa ArgumentError
+			@test startswith(err.msg, "plot_scatter3d: ")
+		end
+		fig = plot_scatter3d([1.0, 2], [1.0, 2], [1.0, 2])
+		n = length(fig.data)
+		err = try plot_scatter3d!(fig, m, m, m); nothing catch e; e end
+		@test err isa ArgumentError && startswith(err.msg, "plot_scatter3d!: ")
+		@test length(fig.data) == n
+	end
+
+	@testset "f07: 3-D legend names go through mathtext" begin
+		x = [0.0, 1, 2]; y = [0.0, 1, 0]; z = [0.0, 0, 1]
+		name(f) = f.data[1].fields[:name]
+		cut = "cut \$y=0\$"
+		expected = PS._label(cut)
+		@test occursin("\\text{cut", expected)
+		@test name(plot_scatter3d(x, y, z; legend = cut)) == expected
+		@test name(plot_segments3d([0.0], [0.0], [0.0], [1.0], [1.0], [1.0]; legend = cut)) == expected
+		X = [0.0 1; 0 1]; Y = [0.0 0; 1 1]; Z = [0.0 1; 1 0]
+		@test name(plot_wireframe(X, Y, Z; legend = cut)) == expected
+		@test name(plot_quiver3d(x, y, z, x, y, z; style = :arrow, legend = cut)) == expected
+		@test name(plot_mesh3d(x, y, z; i = [0], j = [1], k = [2], legend = cut)) == expected
+		@test plot_scatter3d(x, y, z; legend = "line 1\nline 2").data[1].fields[:name] == PS._label("line 1\nline 2")
+		fig = plot_scatter3d(x, y, z)
+		n = length(fig.data)
+		for f in (() -> plot_scatter3d(x, y, z; legend = "cost \$5"),
+			() -> plot_scatter3d!(fig, x, y, z; legend = "cost \$5"),
+			() -> plot_wireframe(X, Y, Z; legend = "cost \$5"),
+			() -> plot_mesh3d(x, y, z; i = [0], j = [1], k = [2], legend = "cost \$5"))
+			err = try f(); nothing catch e; e end
+			@test err isa ArgumentError
+		end
+		@test length(fig.data) == n
+		# 2-D and 3-D agree.
+		@test name(plot_scatter3d(x, y, z; legend = cut)) == plot_scatter(x, y; legend = cut).data[1].fields[:name]
+	end
+
+	@testset "f04: a 3-D call on a Cartesian plot raises before the figure changes" begin
+		X = [0.0 1; 0 1]; Y = [0.0 0; 1 1]; Z = [0.0 1; 1 0]
+		x = [0.0, 1, 2]; y = [0.0, 1, 0]; z = [0.0, 0, 1]
+		calls = (
+			f -> plot_surface!(f, X, Y, Z),
+			f -> plot_scatter3d!(f, x, y, z),
+			f -> plot_mesh3d!(f, x, y, z; i = [0], j = [1], k = [2]),
+			f -> plot_quiver3d!(f, x, y, z, x, y, z),
+			f -> plot_wireframe!(f, X, Y, Z),
+			f -> plot_segments3d!(f, [0.0], [0.0], [0.0], [1.0], [1.0], [1.0]),
+			f -> plot_polygons3d!(f, [0.0, 1, 0], [0.0, 0, 1], [0.0, 0, 0], [[1, 2, 3]]),
+		)
+		for call in calls
+			fig = plot_scatter([1, 2, 3], [1, 4, 9])
+			before = _r3_json(fig)
+			err = try call(fig); nothing catch e; e end
+			@test err isa ArgumentError
+			@test occursin("not a 3-D scene", err.msg)
+			@test _r3_json(fig) == before
+		end
+		# A scene figure still takes more 3-D traces.
+		fig = plot_scatter3d(x, y, z)
+		@test plot_surface!(fig, X, Y, Z) === nothing
+		@test length(fig.data) == 2
+	end
+
+	@testset "f08: an end-on axis hides its tick labels, a later view shows them" begin
+		fig = plot_scatter3d([0.0, 1, 0.5], [0.0, 1, 0.5], [0.0, 1, 0.5])
+		axis(f, a) = _r3_fields(_r3_scene(f)[a])
+		view!(fig; elev = 90, azim = -90, projection = "orthographic")
+		@test get(axis(fig, :zaxis), :showticklabels, nothing) == false
+		@test get(axis(fig, :xaxis), :showticklabels, nothing) === nothing
+		@test get(axis(fig, :yaxis), :showticklabels, nothing) === nothing
+		view!(fig; elev = 30, azim = -60)
+		@test get(axis(fig, :zaxis), :showticklabels, nothing) === nothing
+		# elev = 0, azim = 0 looks along x
+		view!(fig; elev = 0, azim = 0)
+		@test get(axis(fig, :xaxis), :showticklabels, nothing) == false
+		@test get(axis(fig, :zaxis), :showticklabels, nothing) === nothing
+		# The user's own choice wins both ways.
+		g = plot_scatter3d([0.0, 1], [0.0, 1], [0.0, 1])
+		scene!(g; zticks = [0, 1])
+		relayout!(g, scene_zaxis_showticklabels = true)
+		view!(g; elev = 90, azim = -90)
+		@test axis(g, :zaxis)[:showticklabels] == true
+		@test !PS._finalize_figure!(fig)
+	end
+
+	@testset "lw02: label pads are written copy-on-write" begin
+		x = collect(range(0.0, 2pi; length = 12))
+		U = [sin(a) * cos(b) for a in x, b in x]
+		fig = plot_surface(x, x, U)
+		old_meta = fig.layout.fields[:meta]
+		old_pads = deepcopy(PS._s3_pads_record(fig.layout))
+		for pads in ((8.0, 16.0), (9.5, 17.0))
+			PS._s3_write_pads!(fig.layout, :scene, pads)
+			@test PS._s3_scene_pads(fig, :scene) == pads
+		end
+		# the meta object that existed before is untouched
+		@test PS._s3_pads_record(Layout(; meta = old_meta)) == old_pads
+		stage = deepcopy(fig.layout)
+		shared = stage.fields[:meta]
+		PS._s3_write_pads!(stage, :scene, (7.0, 15.0))
+		@test PS._s3_scene_pads(PlotlyBase.Plot(GenericTrace[], stage), :scene) == (7.0, 15.0)
+		@test stage.fields[:meta] !== shared
+		@test shared[Symbol("plotlysupply:gl3d")][:scene] == [9.5, 17.0]
+	end
+end
