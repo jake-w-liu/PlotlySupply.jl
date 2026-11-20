@@ -183,8 +183,9 @@ $(PS._EXPORT_RESET_DIV_JS)
 		@test maximum(ratios) <= 1.08
 	end
 
-	# tm-extent-under: display math, display big operators and braces were
-	# estimated smaller than drawn ($$\int_0^1 f\,dx$$ 0.74 x the drawn
+	# tm-extent-under: CJK text, the Verdana fallback's minus and long arrows
+	# (fixed with D19), and display math, display big operators and braces
+	# were estimated smaller than drawn ($$\int_0^1 f\,dx$$ 0.74 x the drawn
 	# height, \prod with limits 0.66 x, \underbrace{x}_{n} 0.58 x the width).
 	math_box_js = raw"""
   const out = [];
@@ -200,11 +201,11 @@ $(PS._EXPORT_RESET_DIV_JS)
   });
   return out;
 """
-	extent_strings = ["\$\$\\int_0^1 f\\,dx\$\$", "\$\$\\int f\\,dx\$\$", "\$\$\\sum_{i=1}^{n} a_i\$\$",
+	extent_strings = ["电场强度分布 (V/m)", "−1.5×10³", "\$a \\Longrightarrow b\$", "\$\$\\int_0^1 f\\,dx\$\$","\$\$\\int f\\,dx\$\$", "\$\$\\sum_{i=1}^{n} a_i\$\$",
 		"\$\$\\prod_{k=1}^{N} x_k\$\$", "\$\$\\oint_C E\\cdot dl\$\$", "\$\$\\frac{a}{b}\$\$",
 		"\$\\displaystyle\\sum\\limits_{i=1}^{n} a_i\$", "\$\\underbrace{abc}_{n}\$", "\$\\underbrace{x}_{n}\$",
 		"\$\\underbrace{abcdefgh}_{n}\$", "\$\\overbrace{abc}^{n}\$", "\$\\underbrace{a}_{\\text{long label}}\$"]
-	@testset "tm-extent-under: display operators and braces are not under-estimated ($(style))" for style in (:default, :ieee)
+	@testset "tm-extent-under: CJK, arrows, display operators and braces are not under-estimated ($(style))" for style in (:default, :ieee)
 		fig = with_style(style) do
 			f = plot_scatter([0.0, 1.0], [0.0, 1.0]; width = 700, height = 60 * length(extent_strings) + 80)
 			for (k, s) in enumerate(extent_strings)
