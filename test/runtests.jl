@@ -3190,7 +3190,16 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             end
         end
         @test sf.layout.fields[:scene][:camera][:projection][:type] == "orthographic"
-        @test sf.layout.fields[:scene][:domain] == scene_domain
+        # D17: the colorbars drawn in the gaps between columns (histogram2d,
+        # choropleth) take room every column gives up alike: the scene keeps
+        # its row and the right edge of its slot, lines up with the map below
+        # it and is as wide as the xy column.
+        scene = sf.layout.fields[:scene][:domain]
+        @test scene[:y] == scene_domain[:y]
+        @test scene[:x][2] == scene_domain[:x][2]
+        @test collect(scene[:x]) ≈ collect(sf.layout.fields[:mapbox][:domain][:x])
+        xy = PlotlySupply._layout_axis_domain(sf.plot.layout, :xaxis)
+        @test scene[:x][2] - scene[:x][1] ≈ xy[2] - xy[1]
     end
 
     @testset "CRC: subplot routing rejects incompatible traces atomically" begin

@@ -178,7 +178,10 @@ function _transactional_high_level_plot_mutation!(
 		staged_target[] = staged
 		_with_figure_style(staged; adopt = true) do
 			result[] = mutator(staged, args...; kwargs...)
-			_finalize_figure!(staged; live = _plot_data(fig))
+			# A write the existing traces need (a colorbar of a cell that
+			# gives up room) raises `_FinNeedsFullStaging`: the call is then
+			# staged in full (`_prepare_high_level_plot_mutation_transaction`).
+			_finalize_figure!(staged; live = _plot_data(fig), strict = true)
 		end
 		return nothing
 	end
@@ -190,10 +193,7 @@ function _transactional_high_level_plot_mutation!(
 		!(
 			mutator === plot_surface! &&
 			get(kwargs, :shared_coloraxis, false) === true
-		) &&
-		# An equal-aspect cell moves the colorbars of existing traces when
-		# its fit changes, which the append-only path cannot stage.
-		!_fin_needs_full_staging(fig)
+		)
 
 	if !fast_path_allowed
 		if fig isa SyncPlot

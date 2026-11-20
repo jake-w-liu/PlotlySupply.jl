@@ -802,6 +802,26 @@ struct _FinContext
 	# Trace bars this run placed without our mark (`release`): their mark
 	# was dropped here, not by the mutation (`_room_vacated!`).
 	released::Set{Int}
+	# A write to a `readonly` trace this run needs raises
+	# `_FinNeedsFullStaging` instead of being skipped (`_fin_live_skip!`).
+	strict::Bool
+end
+
+# Raised by a strict run (`_finalize_figure!(...; strict = true)`) on the
+# append-only fast path when the figure needs a write to a trace it shares
+# with the live figure (a colorbar to move, its ticks to thin): the caller
+# stages the call in full instead, so the figure is settled after it.
+struct _FinNeedsFullStaging <: Exception end
+
+Base.showerror(io::IO, ::_FinNeedsFullStaging) = print(io,
+	"_finalize_figure!: the figure needs a write to a trace shared with the live figure; stage the call in full.")
+
+# A write to a trace shared with the live figure that this run cannot make:
+# a strict run raises `_FinNeedsFullStaging`, any other leaves the trace (and
+# the cell whose decoration it is) as it is.
+function _fin_live_skip!(ctx)
+	ctx.strict && throw(_FinNeedsFullStaging())
+	return nothing
 end
 
 # The layout of the bare subplot grid (`_plotlysupply_subplot_layout`): the
@@ -818,6 +838,8 @@ function _fin_restyle!(ctx::_FinContext, index::Int, updates::Dict{Symbol, Any})
 	isempty(updates) && return nothing
 	trace = ctx.p.data[index]
 	if ctx.readonly !== nothing && trace in ctx.readonly
+		# A strict run restages the call in full (`_fin_live_skip!`).
+		ctx.clone_readonly || _fin_live_skip!(ctx)
 		ctx.clone_readonly || throw(ArgumentError(
 			"_finalize_figure!: trace $(index) is shared with the live figure and cannot be written here.",
 		))
@@ -2015,7 +2037,13 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 	record = _room_record(layout)
 	fit_record = copy(record)
 	for ((xkey, ykey), fit) in fits
-		all(item -> _fin_item_writable(ctx, item), fit.hug) || continue
+		if !all(item -> _fin_item_writable(ctx, item), fit.hug)
+			moved = any(((key, dom),) -> _fin_layout_value_changed(_layout_axis_domain(layout, key), dom),
+				((xkey, fit.xdomain), (ykey, fit.ydomain))) ||
+				any(((item, placement),) -> !_room_same_place(item.bar, placement), zip(fit.hug, fit.placements))
+			moved && _fin_live_skip!(ctx)
+			continue
+		end
 		for (key, dom) in ((xkey, fit.xdomain), (ykey, fit.ydomain))
 			current = _layout_axis_domain(layout, key)
 			_fin_layout_value_changed(current, dom) && (layout_updates[Symbol(key, :_domain)] = [dom[1], dom[2]])
@@ -2165,23 +2193,29 @@ end
 # Bookkeeping of the finalizer in `layout.meta` (plotly.js ignores it, so it
 # needs no redraw): `value` under our `key`, or the key removed for
 # `nothing`; the user's own entries are never touched, and a `meta` that is
-# not a mapping is the user's and gets nothing. Returns whether it wrote.
+# not a mapping is the user's and gets nothing. The mapping is never changed
+# in place: the layout gets an updated copy (the append-only fast path shares
+# `meta` with the live figure, and it may be the user's own object). Returns
+# whether it wrote.
 function _fin_meta_set!(layout::Layout, key::Symbol, value)
 	meta = get(layout.fields, :meta, nothing)
 	holder = meta isa PlotlyBase.PlotlyAttribute ? meta.fields : meta
 	(holder === nothing || holder isa AbstractDict) || return false
 	if value === nothing
 		holder === nothing && return false
-		found = false
-		for k in collect(keys(holder))
-			string(k) == String(key) && (delete!(holder, k); found = true)
+		names = [k for k in keys(holder) if string(k) == String(key)]
+		isempty(names) && return false
+		updated = copy(holder)
+		for k in names
+			delete!(updated, k)
 		end
-		isempty(holder) && delete!(layout.fields, :meta)
-		return found
+		isempty(updated) ? delete!(layout.fields, :meta) : (layout.fields[:meta] = updated)
+		return true
 	end
-	holder === nothing && (holder = Dict{Any, Any}(); layout.fields[:meta] = holder)
+	updated = holder === nothing ? Dict{Any, Any}() : copy(holder)
 	# A meta read from JSON has String keys.
-	holder[keytype(holder) <: AbstractString ? String(key) : key] = value
+	updated[keytype(updated) <: AbstractString ? String(key) : key] = value
+	layout.fields[:meta] = updated
 	return true
 end
 
@@ -2475,7 +2509,6 @@ function _fin_thin_bar_ticks!(ctx::_FinContext, Wp::Float64, Hp::Float64)
 	updates = Dict{Symbol, Any}()
 	wrote = false
 	for key in order, item in by_area[key]
-		_fin_item_writable(ctx, item) || continue
 		automatic, ours = _fin_bar_tick_state(item.bar)
 		automatic || continue
 		n = _fin_bar_nticks(ctx.p.layout, item, Wp, Hp)
@@ -2497,6 +2530,10 @@ function _fin_thin_bar_ticks!(ctx::_FinContext, Wp::Float64, Hp::Float64)
 			wrote_values && (change[:tickvals] = nothing)
 			change
 		else
+			continue
+		end
+		if !_fin_item_writable(ctx, item)
+			_room_same_place(item.bar, change) || _fin_live_skip!(ctx)
 			continue
 		end
 		wrote |= _fin_place_bar!(ctx, updates, item, change)
@@ -3430,15 +3467,9 @@ function _room_record_write!(plan::_RoomPlan)
 		end
 	end
 	new == record && return false
-	if isempty(new)
-		holder === nothing && return false
-		delete!(holder, _ROOM_RECORD_KEY)
-		isempty(holder) && delete!(layout.fields, :meta)
-	else
-		holder === nothing && (holder = Dict{Any, Any}(); layout.fields[:meta] = holder)
-		holder[_ROOM_RECORD_KEY] = Dict{Any, Any}(Symbol(name) => box for (name, box) in new)
-	end
-	return true
+	# Written as an updated copy, never in place (`_fin_meta_set!`).
+	return _fin_meta_set!(layout, _ROOM_RECORD_KEY,
+		isempty(new) ? nothing : Dict{Any, Any}(Symbol(name) => box for (name, box) in new))
 end
 
 # Whether the axis labels of a grid cell reach into the gap the neighbour
@@ -4495,6 +4526,7 @@ function _room_freeze!(plan::_RoomPlan)
 		_fin_item_writable(plan.ctx, entry.item) && continue
 		placement = _room_colorbar_placement(plan, key, entry)
 		(placement === nothing || _room_same_place(entry.item.bar, placement)) && continue
+		_fin_live_skip!(plan.ctx)
 		for slot in _room_slots(plan, :colorbar, key)
 			slot.area === :figure && continue
 			a = plan.areas[slot.area]
@@ -4742,7 +4774,7 @@ function _fin_title_margin(layout::Layout, annotations, W::Float64, margins)
 end
 
 """
-	_finalize_figure!(fig; live = nothing, size = nothing) -> Bool
+	_finalize_figure!(fig; live = nothing, size = nothing, strict = false) -> Bool
 
 Normalise the figure after a PlotlySupply constructor or mutator changed it
 (decision D10); returns whether anything was written.
@@ -4799,22 +4831,24 @@ Normalise the figure after a PlotlySupply constructor or mutator changed it
 Explicit user settings (ranges, `autorangeoptions`, domains outside the cell,
 placed colorbars) are never changed. `live` holds the traces of the live
 figure: those are not written (the append-only fast path shares them), and a
-cell whose colorbar would need such a write is left as it is. `size` is the
-export size (px) to fit for.
+cell whose colorbar would need such a write is left as it is; with
+`strict = true` such a write raises `_FinNeedsFullStaging` instead (the
+caller then stages the call in full). `size` is the export size (px) to fit
+for.
 """
-function _finalize_figure!(fig; live = nothing, size = nothing)
-	return _fin_run!(fig, live, size, false)
+function _finalize_figure!(fig; live = nothing, size = nothing, strict::Bool = false)
+	return _fin_run!(fig, live, size, false; strict = strict)
 end
 
 # Colour ranges are scanned once per run (Z83, `_cbar_with_extrema_memo`).
 # The run reads the style the figure carries (K1): its sizes, margins and
 # decade-tick rule never depend on the style active when it runs.
-_fin_run!(fig, live, size, clone_readonly::Bool) = _with_figure_style(fig) do
-	_cbar_with_extrema_memo(() -> _fin_run_scoped!(fig, live, size, clone_readonly))
+_fin_run!(fig, live, size, clone_readonly::Bool; strict::Bool = false) = _with_figure_style(fig) do
+	_cbar_with_extrema_memo(() -> _fin_run_scoped!(fig, live, size, clone_readonly, strict))
 end
 
-function _fin_run_scoped!(fig, live, size, clone_readonly::Bool)
-	ctx = _fin_context(fig, live, size, clone_readonly)
+function _fin_run_scoped!(fig, live, size, clone_readonly::Bool, strict::Bool = false)
+	ctx = _fin_context(fig, live, size, clone_readonly; strict = strict)
 	p = ctx.p
 	updates = _fin_match_group_updates(p.layout, p.data)
 	# One collection for the run (Z81): no write of the run changes an extent
@@ -5066,7 +5100,7 @@ const _FIN_FIT_ROUNDS = 4
 const _FIN_LAST_ROUNDS = Ref(0)
 
 # The `_FinContext` of a finalize run (see `_fin_run!`).
-function _fin_context(fig, live, size, clone_readonly::Bool)
+function _fin_context(fig, live, size, clone_readonly::Bool; strict::Bool = false)
 	p = fig isa SubplotFigure ? _plot_obj(getfield(fig, :fig)) : _plot_obj(fig)
 	target = fig isa SubplotFigure ? getfield(fig, :fig) : fig
 	readonly = live === nothing ? nothing : Base.IdSet{Any}(live)
@@ -5086,7 +5120,8 @@ function _fin_context(fig, live, size, clone_readonly::Bool)
 		host === nothing || push!(hosts, _fin_axis_key(host.key))
 	end
 	return _FinContext(target, p, sf, readonly, clone_readonly, checked_size,
-		live === nothing ? nothing : collect(Any, live), insets, hosts, Ref{Any}(nothing), Set{Int}())
+		live === nothing ? nothing : collect(Any, live), insets, hosts, Ref{Any}(nothing), Set{Int}(),
+		strict && readonly !== nothing && !clone_readonly)
 end
 
 """
@@ -5116,8 +5151,10 @@ changes, which the append-only fast path cannot stage (it then leaves the
 cell as it was until the next fully staged mutation or export). Figures with
 an equal-aspect cell (an axis with `scaleanchor`, or an image trace, which
 plotly.js anchors to its x axis) or a trace drawing its own colorbar (moved
-when the plot areas around it give up room) take the full staging path; the
-check reads no trace data.
+when the plot areas around it give up room) may need the full staging path
+(the SubplotFigure delegates check the same, `_subplot_delegate_needs_full_staging`;
+a Plot mutation tries the fast path and restages in full on
+`_FinNeedsFullStaging`); the check reads no trace data.
 """
 function _fin_needs_full_staging(fig)
 	p = fig isa SubplotFigure ? _plot_obj(getfield(fig, :fig)) : _plot_obj(fig)

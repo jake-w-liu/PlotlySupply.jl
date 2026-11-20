@@ -2588,3 +2588,30 @@ end
 		@test left >= 0
 	end
 end
+
+@testset "an append that must move an existing bar is staged in full (fields-07)" begin
+	# A second choropleth sets the first bar aside: a write to a trace the
+	# append-only path shares with the live figure.
+	g = plot_choropleth(["USA"], [1.0]); set_template!(g, "plotly_dark")
+	first_bar = get(g.data[1].fields, :colorbar, nothing)
+	plot_choropleth!(g, ["CAN"], [2.0])
+	@test g.layout.fields[:template] === PlotlyBase.templates[:plotly_dark]
+	@test _SFN._finalize_figure!(g) === false
+	@test get(g.data[1].fields, :colorbar, nothing) != first_bar
+	# The strict run of the fast path raises where it cannot write; the
+	# lenient one leaves the shared trace as it is.
+	h = plot_choropleth(["USA"], [1.0])
+	second = plot_choropleth(["CAN"], [2.0]).data[1]
+	staged() = Plot(GenericTrace[h.data[1], second], deepcopy(h.layout))
+	@test_throws _SFN._FinNeedsFullStaging _SFN._finalize_figure!(staged(); live = h.data, strict = true)
+	before = deepcopy(h.data[1].fields)
+	_SFN._finalize_figure!(staged(); live = h.data)
+	@test isequal(h.data[1].fields, before)
+	# An append that moves no bar keeps the fast path: the existing trace
+	# objects are the live ones.
+	m = plot_heatmap(rand(4, 3))
+	t1 = m.data[1]
+	plot_scatter!(m, [1.0, 2.0], [1.0, 2.0])
+	@test m.data[1] === t1
+	@test _SFN._finalize_figure!(m) === false
+end
