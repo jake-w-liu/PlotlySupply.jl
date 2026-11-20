@@ -8,6 +8,14 @@ const _PLOTLYJS_MATH_FONT_SEAM =
 	raw""".attr({"pointer-events":"none","data-unformatted":S,"data-math":"Y"});l.node()"""
 const _PLOTLYJS_MATH_FONT_REPLACEMENT =
 	raw""".attr({"pointer-events":"none","data-unformatted":S,"data-math":"Y"}).style({"font-family":t.node().style.fontFamily,"font-size":r+"px"});l.node()"""
+# plotly.js reads a label's font size with parseInt before typesetting it, so
+# a fractional size (8 pt = 10.667 px, every journal preset) typeset the math
+# at 10 px while the plain labels beside it stay at 10.667 px (L9). The size
+# is read whole.
+const _PLOTLYJS_MATH_SIZE_SEAM =
+	raw"""var r=parseInt(t.node().style.fontSize,10),o={fontSize:r}"""
+const _PLOTLYJS_MATH_SIZE_REPLACEMENT =
+	raw"""var r=parseFloat(t.node().style.fontSize),o={fontSize:r}"""
 # Keep XMLSerializer's attribute quotes and retire the old quote placeholders.
 const _PLOTLYJS_SVG_QUOTE_TRANSFORMS = (
 	raw"""var e=this.style.fontFamily;e&&-1!==e.indexOf('"')&&t.style("font-family",e.replace(l,c));var r=this.style.fontWeight;""" =>
@@ -30,6 +38,7 @@ const _PLOTLYJS_GL3D_PAD_REPLACEMENT =
 	raw"""o.prototype.merge=function(t,e){var _g=t.meta&&t.meta["plotlysupply:gl3d"],_h=_g&&e._scene&&_g[e._scene.id];for(var r=this,o=0;o<3;++o){var s=e[a[o]];_h&&_h.length>=2&&isFinite(_h[0])&&isFinite(_h[1])&&_h[0]>=0&&_h[1]>=0&&(r.tickPad[o]=+_h[0],r.labelPad[o]=+_h[1]);s.visible?("""
 const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_MATH_FONT_SEAM => _PLOTLYJS_MATH_FONT_REPLACEMENT,
+	_PLOTLYJS_MATH_SIZE_SEAM => _PLOTLYJS_MATH_SIZE_REPLACEMENT,
 	_PLOTLYJS_GL3D_PAD_SEAM => _PLOTLYJS_GL3D_PAD_REPLACEMENT,
 	_PLOTLYJS_SVG_QUOTE_TRANSFORMS...,
 )

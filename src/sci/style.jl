@@ -148,8 +148,8 @@
 #       the cycle of `fig` (for builders that work on a temporary figure).
 #
 #   _style_mathsize(style = _active_style())::String
-#       "" or a MathJax 2 size switch for the mathtext pipeline (`:publication`
-#       gives "\\large"). `_label` and `mathtext` (src/sci/mathtext.jl,
+#       "" or a MathJax 2 size switch for the mathtext pipeline (the built-in
+#       styles give ""). `_label` and `mathtext` (src/sci/mathtext.jl,
 #       `_mathtext_default_size`) fall back to it when the
 #       `set_default_mathtext!` size is "", so every math label of a figure
 #       built under the style gets the same size.
@@ -452,7 +452,8 @@ temporarily with [`with_style`](@ref); styles are registered by name with
   faces, so PDF exports embed TrueType rather than Type 3 fonts), the
   Okabe–Ito colour-blind-safe
   colorway (`COLOR_CYCLES[:okabe_ito]`, high-contrast colours first), a closed
-  box, a frameless legend, `\\large` math and a 10 px margin that grows
+  box, a frameless legend, math labels whose text parts are drawn in the
+  text font (`set_default_mathtext!`'s `inherit_text_font`) and a 10 px margin that grows
   automatically to fit labels and the title, and decade-only tick labels on
   logarithmic axes spanning two decades or more (`log_ticks = :decades`). It
   sets no figure size and no per-trace defaults.
@@ -972,7 +973,6 @@ _publication_plot_style() = PlotStyle(
 	spines = :box,
 	legend_frame = false,
 	margin = 10,
-	mathsize = "\\large",
 	log_ticks = :decades,
 )
 
@@ -1104,7 +1104,6 @@ function _journal_plot_style(spec::_JournalSpec)
 		grid = false,
 		legend_frame = false,
 		margin = 4,
-		mathsize = "\\large",
 		cycle = :dash_symbol,
 		width = _journal_width_px(spec, 1.0, "PlotStyle"),
 		aspect = _STYLE_DEFAULT_ASPECT,

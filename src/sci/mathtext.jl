@@ -30,11 +30,13 @@ struct _MathtextSettings
 	# MathJax SVG font ("" defers to PLOTLYSUPPLY_MATHJAX_SVG_FONT, then
 	# "Latin-Modern"); read by the export window and live SyncPlot pages.
 	font::String
-	# Typeset `\text{…}` in the label's own font instead of the MathJax font.
-	inherit_text_font::Bool
+	# Typeset `\text{…}` in the label's own font instead of the MathJax font:
+	# `nothing` follows the figure's style (inherit when it sets a text font
+	# family), `true`/`false` force it for every figure.
+	inherit_text_font::Union{Nothing, Bool}
 end
 
-const _MATHTEXT_SETTINGS = Ref(_MathtextSettings(true, "", "", false))
+const _MATHTEXT_SETTINGS = Ref(_MathtextSettings(true, "", "", nothing))
 
 # The fonts of MathJax 2.7's SVG output (jax/output/SVG/fonts/<name>). Each was
 # verified to load from the pinned MathJax 2.7.9 CDN by exporting a math label
@@ -136,7 +138,7 @@ end
 
 # The size switch applied when a label writer or `mathtext` is not given one:
 # the `set_default_mathtext!` size, or else the active PlotStyle's `mathsize`
-# (`_style_mathsize`, src/sci/style.jl; `\large` under `:publication`). Every
+# (`_style_mathsize`, src/sci/style.jl). Every
 # PlotStyle field write is validated (constructor and `setproperty!`) against
 # `_STYLE_MATHSIZES`, which is built from `_MATHTEXT_SIZES`, so the style's
 # value is always "" or a `\name` switch MathJax 2 knows (X55).
@@ -168,11 +170,12 @@ Return the package-wide label settings as a `NamedTuple`
 - `font::String`: the MathJax SVG font, or `""`, which defers to the
   `PLOTLYSUPPLY_MATHJAX_SVG_FONT` environment variable and then to
   `"Latin-Modern"`.
-- `inherit_text_font::Bool`: the text parts of math labels are drawn in the
-  label's own font.
+- `inherit_text_font::Union{Nothing,Bool}`: whether the text parts of math
+  labels are drawn in the label's own font; `nothing` follows each figure's
+  style (see [`set_default_mathtext!`](@ref)).
 
 The package default is
-`(enabled = true, size = "", font = "", inherit_text_font = false)`.
+`(enabled = true, size = "", font = "", inherit_text_font = nothing)`.
 """
 function get_default_mathtext()
 	settings = _MATHTEXT_SETTINGS[]
@@ -186,7 +189,8 @@ end
 
 """
 	set_default_mathtext!(enabled::Bool = true; size::AbstractString = "",
-	                      font::AbstractString = "", inherit_text_font::Bool = false)
+	                      font::AbstractString = "",
+	                      inherit_text_font::Union{Nothing,Bool} = nothing)
 
 Configure how PlotlySupply writes and typesets every user-visible label
 (titles, axis titles, legend names, colorbar titles, tick labels, annotations).
@@ -203,11 +207,12 @@ Configure how PlotlySupply writes and typesets every user-visible label
   contains math: one of `\\tiny`, `\\Tiny`, `\\scriptsize`, `\\small`,
   `\\normalsize`, `\\large`, `\\Large`, `\\LARGE`, `\\huge`, `\\Huge` (the
   leading backslash is optional). `""` uses the active [`PlotStyle`](@ref)'s
-  `mathsize` (`"\\\\large"` under `:publication`, none under `:default`); pass
-  `"\\\\normalsize"` to switch sizing off under such a style. MathJax math
-  renders at roughly 0.8× the height of plain text of the same font size, so
-  `"\\\\large"` (1.2×) matches them closely. Plain labels are not affected. Other
-  values throw an `ArgumentError` (`\\footnotesize` does not exist in MathJax 2).
+  `mathsize` (none under the built-in styles: MathJax matches the x-height of
+  math to the label's font, and with `inherit_text_font` the text parts are
+  drawn at the label's size); pass `"\\\\normalsize"` to switch a style's
+  sizing off. The switch scales the whole label, its text parts included.
+  Plain labels are not affected. Other values throw an `ArgumentError`
+  (`\\footnotesize` does not exist in MathJax 2).
   The size is written into the label strings when a figure is built, so it
   applies to figures created afterwards.
 - `font::AbstractString = ""`: the MathJax SVG font used to typeset math, one of
@@ -215,12 +220,22 @@ Configure how PlotlySupply writes and typesets every user-visible label
   `"Gyre-Termes"`, `"Latin-Modern"` (case-insensitive). `""` falls back to the
   `PLOTLYSUPPLY_MATHJAX_SVG_FONT` environment variable (same names) and then to
   `"Latin-Modern"`. Other names throw an `ArgumentError`.
-- `inherit_text_font::Bool = false`: when `true`, the text parts of a math label
-  (the `\\text{…}` segments [`mathtext`](@ref) produces, `\\textbf{…}`, `\\mbox{…}`)
-  are drawn in the font family, weight and style of the label itself (e.g. the
-  figure's sans-serif font) instead of the MathJax font; math symbols keep the
-  MathJax font, and MathJax scales them to the x-height of the label's font.
-  When `false`, the whole label is typeset in the MathJax font.
+- `inherit_text_font::Union{Nothing,Bool} = nothing`: when `true`, the text
+  parts of a math label (the `\\text{…}` segments [`mathtext`](@ref) produces,
+  `\\textbf{…}`, `\\mbox{…}`) are drawn in the font family, weight, style and
+  size of the label itself (e.g. the figure's Times or Arial) instead of the
+  MathJax font, so "Time \\\$t\\\$ (s)" has the face and size of a plain label;
+  math symbols keep the MathJax font (italic letters from the math font), and
+  MathJax scales them to the x-height of the label's font. When `false`, the
+  whole label is typeset in the MathJax font (with the default Latin-Modern
+  font: Computer Modern throughout the label). `nothing` (the default) decides
+  per figure: text parts follow the label's font when the figure's
+  [`PlotStyle`](@ref) sets a `font_family` (every journal preset and
+  `:publication`), and the MathJax font under `:default`. For Computer Modern
+  in every label under a preset, call
+  `set_default_mathtext!(; inherit_text_font = false)` (and give the style a
+  Computer Modern `font_family`, e.g. `"CMU Serif"`, if installed, for the
+  plain labels).
 
 `font` and `inherit_text_font` take effect at render time: every following
 `savefig` (all formats, including HTML) uses them, and an open `SyncPlot`
@@ -246,7 +261,7 @@ function set_default_mathtext!(
 	enabled::Bool = true;
 	size::AbstractString = "",
 	font::AbstractString = "",
-	inherit_text_font::Bool = false,
+	inherit_text_font::Union{Nothing, Bool} = nothing,
 )
 	normalized = _normalize_mathtext_size(size, "set_default_mathtext!")
 	font_name = if isempty(strip(font))
