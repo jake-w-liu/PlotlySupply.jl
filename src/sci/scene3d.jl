@@ -2027,7 +2027,14 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 		own && continue
 		offset .+= (label.label_pad * unit) .* minor
 		at = (low .+ high) ./ 2 .+ offset
-		along = label.title_along ? screen_direction(at, a) : (1.0, 0.0)
+		# gl-axes turns a title of more than four characters along the
+		# projected edge of its axis (measured on renders: the title of a z
+		# axis leans like the edge, not like the axis direction at the
+		# title's own position, which can differ by 10 degrees).
+		edge_x, edge_y = geoms[a][2][1] - geoms[a][1][1], geoms[a][2][2] - geoms[a][1][2]
+		edge_len = hypot(edge_x, edge_y)
+		along = !label.title_along ? (1.0, 0.0) : edge_len > 1e-9 ? (edge_x / edge_len, edge_y / edge_len) :
+			screen_direction(at, a)
 		thick = label.title_size * (1 + _S3_LINE_EM * (label.title_lines - 1))
 		push!(quads, _s3_text_quad(project(at), along, 0.5 * label.title_chars * _S3_CHAR_EM * label.title_size, 0.5 * thick))
 		push!(tags, (a, :title))
