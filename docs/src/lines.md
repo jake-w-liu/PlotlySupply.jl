@@ -24,7 +24,10 @@ entry per series: `mode`, `dash`, `color`, `legend`, `linewidth`,
 - `dash` takes `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`,
   `"longdashdot"` or a dash-length list such as `"5px,3px"`.
 - `marker_symbol` takes plotly names or matplotlib codes (`"o"`, `"s"`, `"D"`,
-  `"^"`, ...).
+  `"^"`, ...). Where the two collide, the matplotlib code wins: `"x"` and
+  `"+"` draw thin strokes (plotly symbols `"x-thin"` and `"cross-thin"`, 1.5 px
+  wide) and `"X"` and `"P"` draw the filled glyphs; in 1.x `"x"` was plotly's
+  filled X (see [Migration](migration.md)).
 - `marker_color = "white"` or `"none"` draws open markers; the outline takes
   the line colour, and `marker_line_width` sets its width.
 - `markevery = k` puts markers on every `k`-th point only; with `text`, every
@@ -57,8 +60,15 @@ While the package default position is `:topright`
 ([`get_default_legend_position`](@ref)), a new figure from `plot_scatter`,
 `plot_stem`, `plot_area` and the line family (`plot_band`, `plot_segments`,
 `plot_vlines`, `plot_hlines`, `plot_ecdf`, `plot_kde`, `plot_complex`) puts its
-legend at the matplotlib "best" candidate that covers the least data. A legend
-you place with [`set_legend!`](@ref) is never moved:
+legend at the first free one of `:topright`, `:topleft`, `:bottomleft`,
+`:bottomright`, `:right`, `:left`, `:bottom`, `:top` (matplotlib's "best"); the
+centre is never chosen automatically. When none of them is free the legend goes
+outside: to the right of the plot (`:outside_right`) when the plot area is at
+least 360 px wide, below it (`:outside_bottom`) otherwise, and the layout
+engine reserves the room at the next finalize (display, `savefig`, any
+mutator). A legend you place with [`set_legend!`](@ref) or a `position`
+keyword is never moved. Quiver and streamline figures follow the same rule;
+polar cells never go outside automatically:
 
 ```julia
 fig = plot_scatter(1:10, (1:10) .^ 2; legend = "squares")

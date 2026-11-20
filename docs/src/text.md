@@ -27,7 +27,8 @@ Rules:
 - 3-D scene axis titles and tick labels cannot be typeset (WebGL): their
   `$...$` is converted to Unicode and HTML.
 - Math is typeset by MathJax 2.7.9 from a CDN, so math labels need network
-  access in windows and exports.
+  access in windows and exports (geo maps need network for their topology,
+  see [Export](export.md)).
 
 ```julia
 mathtext("cost \\\$5 per unit")      # literal dollar sign
@@ -103,8 +104,9 @@ labels and title; the figure legend placed below the plot (`:outside_bottom`)
 moves up above the caption. Figure annotations are placed again at every
 finalize and on the copy `savefig` exports. `name`, `xshift` and `yshift` cannot be combined with
 `:figure` (use `offset`), and values outside `[0, 1]` raise an
-`ArgumentError`. Margins that change after the last `annotate!` (a legend
-moved below the plot, `tight_layout!`) are not followed until the next call.
+`ArgumentError`. A caption follows margins that change later (a legend moved
+below the plot, `figsize!`, `tight_layout!`, a longer x title): it is placed
+again at every finalize.
 Caption heights are estimates (1.4 em per line, 2.2 em for math with
 fractions or sub/superscripts).
 

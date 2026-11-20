@@ -26,9 +26,9 @@ Pkg.add("PlotlySupply")
 ```
 
 The package precompiles a workload of the common calls, so the first figure
-of a session takes about half a second instead of half a minute. The price is
+of a session takes about a third of a second instead of 15 seconds. The price is
 a longer one-time precompilation after each install or update (minutes) and a
-larger package image (about 70 MB). To skip the workload, see
+larger package image (about 90 MB). To skip the workload, see
 [Performance](https://jake-w-liu.github.io/PlotlySupply.jl/dev/performance/).
 
 ## Quick tour
@@ -144,9 +144,8 @@ plot_heatmap!(sf, rand(30, 30))      # each colorbar sits next to its own cell
 - **Decorations get their own room.** A colorbar, an outside legend, a panel
   title or label takes room from its own cell or from the figure margin, never
   from a neighbouring panel; a figure that already fits, and any position you
-  set yourself, is left alone. Choose the figure size first (journal
-  `figsize!`, or `width`/`height`): the layout is fitted for the size the figure
-  has when you call, and again at the export size.
+  set yourself, is left alone. `figsize!` after the content is fine: the room
+  is solved again for the new size, and once more at the export size.
 - **Mutators end in `!`** and take a `Plot`, a `SyncPlot` (the window updates)
   or a `SubplotFigure`. On a `SubplotFigure` they draw into the active cell, or
   into `row`/`col`; Cartesian mutators also take `secondary_y = true` and
@@ -230,8 +229,9 @@ constructor except `show`. A keyword a function does not take raises an error.
 `png`, `jpeg`, `tiff` (`.tif`), `html` or `json`, chosen by the extension:
 
 - `width`, `height` with `units = :px` (default), `:in`, `:cm`, `:mm` or `:pt`;
-  without them the figure's own size, else the active style's default size
-  (a journal preset sets one), else 700 x 500 px. PDF and EPS pages have
+  without them the figure's own size, else the size of the style it carries
+  (a journal preset sets one), else, for a figure without a recorded style,
+  the active style's default size, else 700 x 500 px. PDF and EPS pages have
   exactly that size in points; PNG, JPEG and TIFF get `round(width * scale)`
   pixels.
 - `dpi` for PNG, JPEG and TIFF (stored in the file); TIFF is lossless LZW with

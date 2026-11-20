@@ -68,8 +68,11 @@ fig2 = plot_polygons3d(vx, vy, vz, faces, [0.5, 1.5]; colorbar_title = "value")
 
 ## Vector fields and volumes
 
-[`plot_quiver3d`](@ref) draws cones (`style = :cone`, the default; their size
-does not depend on the field's magnitude, see `sizemode`) or arrows
+[`plot_quiver3d`](@ref) draws cones (`style = :cone`, the default; with
+`sizemode = "scaled"` the largest cone is sized relative to the point spacing,
+so rescaling the whole field, for example a change of units, does not change
+the picture; each cone is still proportional to the length of its own vector)
+or arrows
 (`style = :arrow`). [`plot_isosurface`](@ref), [`plot_volume`](@ref) and
 [`plot_streamtube`](@ref) take scattered grid points as flat vectors.
 
@@ -105,16 +108,26 @@ Without `view!` a perspective scene keeps plotly's default viewing direction
 at a distance that fits the box, its tick labels and its axis titles into the
 cell, and the 3-D functions keep that distance up to date as data is added or
 the figure is resized; `savefig` frames the scene again for the export size.
-Because the labels must fit, a flat scene can fill less of its cell than you
-want, and scenes with different data get different distances. A positive
-`distance` (plotly's normalised units, about 2.2 for the default view) fixes
-it, so that scenes in different cells are drawn at the same size:
-`view!(sf; row = 1, col = c, elev = 25, azim = -55, distance = 4)`. `zoom`
-divides the distance of the automatic framing.
+The framing reduces the offsets of tick labels and axis titles from the box
+(compact pads, through the patched plotly.js that windows, exports and HTML
+files use; a plain PlotlyBase display ignores the pads in
+`layout.meta["plotlysupply:gl3d"]` and draws plotly's own, so labels there can
+be clipped), so a scene fills its cell, and scenes in cells of the same size
+with the same box proportions get the same distance. When the three axis
+titles of a scene cannot be kept apart they are drawn as annotations named
+`plotlysupply:scene3d:<scene>:title:<x|y|z>`, rotated along the projected
+axis, wrapped or set smaller; at a corner shared by two axes one end tick of
+the axis with more ticks is dropped (tick values you set are never touched).
+A positive `distance` you pass to `view!` (plotly's normalised units, about
+2.2 for the default view) is a deliberate camera: it is kept as given, and
+plotly's own pads and axis titles come back with it. `zoom` divides the
+distance of the automatic framing.
 
 In a scene cell smaller than the plot area, axes with automatic ticks get
 about one tick per 40 px (2 to 9), raised until two ticks are labelled when
-they fit; `scene!(; nticks)` or tick values you set are kept.
+they fit; axes under four ticks long (a single-column figure) get explicit
+counts, because WebGL tick counts follow the export scale; `scene!(; nticks)`
+or tick values you set are kept.
 
 Titles and tick labels of a 3-D scene are placed by WebGL at fixed pixel
 offsets from the box, so a small cell gets a small box (never less than 40 % of

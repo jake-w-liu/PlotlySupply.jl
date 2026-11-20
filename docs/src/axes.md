@@ -12,6 +12,13 @@ Ranges are data values on every axis type, including logarithmic axes (pass
 ranging (a reversed axis stays reversed). Equal bounds and non-positive bounds
 on a log axis raise an `ArgumentError`.
 
+On an image or an `origin = :upper` heatmap the y axis is reversed (row 1 at
+the top). The keyword `yrange = (0, 3)` of [`plot_image`](@ref) and
+[`plot_heatmap`](@ref) keeps that orientation (it becomes `[3, 0]`), but
+`yrange!(fig, (0, 3))` writes the direction you give and so turns the picture
+upside down, as matplotlib's `set_ylim(0, 3)` does on an `imshow` axis. To
+zoom a reversed axis, pass the bounds reversed: `yrange!(fig, (3, 0))`.
+
 ```julia
 using PlotlySupply
 
@@ -102,7 +109,9 @@ figure is finalized; the margin and the title standoff grow to hold the lines.
 [`xticks!`](@ref) and [`yticks!`](@ref) take tick values in data units and an
 optional label per value. Labels go through mathtext, so TeX works. Without
 labels, ticks on a linear axis are printed with the d3 format `"~g"` (0.0025,
-16). `format` sets another d3 format, `angle` rotates the labels, `minor`
+16). `format` sets another d3 format, `angle` rotates the labels clockwise
+(plotly's `tickangle`; matplotlib's `rotation = 45` is counter-clockwise, so
+it corresponds to `angle = -45`), `minor`
 turns minor ticks on or off, and `direction`, `tickwidth` and `ticklen` style
 the marks.
 
@@ -158,7 +167,7 @@ spines!(fig; left = (1, 100), bottom = (1, 10)) # range frame: lines only over t
 grid!(fig; axis = :y, which = :minor, alpha = 0.05)
 fig2 = plot_scatter(1:10, 1e5 .* (1:10))
 xticks!(fig2; direction = :none)               # no tick marks on x
-yticks!(fig2; offset = :auto)                  # scientific offset text "×10⁵" above the axis
+yticks!(fig2; offset = :auto)                  # scientific offset text "×10⁶" above the axis (the order of the largest tick)
 ```
 
 Tick marks cannot cross the axis line: `direction = :both` and `:inout` raise an

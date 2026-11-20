@@ -178,8 +178,9 @@ show them whole.
 ## 6. Example: a row of 3-D surfaces with one colorbar
 
 Three scenes at the Nature double column width; the surfaces share one colour
-scale (`shared_coloraxis = true`) and one colorbar. Give every scene the same
-camera: with the same `distance` the scenes are drawn at the same size.
+scale (`shared_coloraxis = true`) and one colorbar. Scenes of equal cells and
+equal box proportions are framed alike by the automatic camera, so nothing
+has to be set for them to be drawn at the same size.
 
 ```julia
 xs = range(-2, 2; length = 61)
@@ -190,8 +191,8 @@ fig_surf = with_style(:nature) do
         specs = fill(Spec(kind = "scene"), 1, 3))
     for (c, a) in enumerate((1.0, 2.0, 4.0))
         plot_surface!(sf, xs, xs, surf(a); row = 1, col = c, shared_coloraxis = true,
-            xlabel = "\$x\$", ylabel = "\$y\$", colorscale = "viridis", aspectmode = "cube")
-        view!(sf; row = 1, col = c, elev = 25, azim = -55, distance = 4.0)
+            xlabel = "\$x\$", ylabel = "\$y\$", zlabel = "\$u\$", colorscale = "viridis", aspectmode = "cube")
+        view!(sf; row = 1, col = c, elev = 25, azim = -55)
     end
     colorbar!(sf; coloraxis = :shared, title = "\$u\$", title_side = :right)
     panel_labels!(sf; labels = :abc, format = "{}", bold = true)
@@ -203,9 +204,11 @@ savefig(fig_surf, "surfaces.pdf")
 ![Three surfaces with one colorbar at Nature double-column width](assets/papers_surfaces.png)
 
 Scene axis titles and tick labels are drawn by WebGL and cannot typeset TeX:
-`$x$` becomes the plain letter. Without `view!` the camera distance is chosen
-to keep the labels inside the cell, which can draw a scene smaller than its
-cell; a fixed `distance` gives the same framing in every cell.
+`$x$` becomes the plain letter. The automatic camera distance keeps the box,
+its tick labels and its axis titles inside the cell and fills it; the three
+scenes get the same distance. A `distance` you give with `view!` is kept as
+given and also restores plotly's own label offsets and axis titles: use it
+only for a deliberate common camera.
 
 ## 7. Example: a schematic with annotations
 

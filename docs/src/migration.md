@@ -172,13 +172,19 @@ An empty `title`, `xlabel` or `ylabel` is no longer written at all.
 - [`subplot_legends!`](@ref) keywords lost their `legend_` prefix (`inset`,
   `bgcolor`, `bordercolor`, `borderwidth`); the old names still work with a
   deprecation warning.
-- The default legend of line plots goes to the corner that covers the least
-  data while the package default position is `:topright`; a legend you
-  place is never moved.
+- The default legend of line plots goes to the first free corner or edge
+  while the package default position is `:topright`, and outside the plot
+  (right, or below a narrow plot) when none is free; a legend you place is
+  never moved.
 - The default legend box follows the template (a dark box on dark
   templates).
 - Cell legends of a `SubplotFigure` at the default `:topright` also move to
-  the least-covered position when traces are appended to the cell, and `plot_band`
+  the first free position when traces are appended to the cell; when none is
+  free the legend goes below the cell (when its entries fit in one row of the
+  cell width) instead of staying in the corner, so a figure that 1.x drew with
+  the legend inside at the top right can differ. To restore the 1.x placement:
+  `set_legend!(sf; position = :topright)` or
+  `subplot_legends!(sf; position = :topright)`. `plot_band`
   and `fill = "toself"` traces count as data. A legend placed with
   `set_legend!`/`relayout!` stays put, and any other default position turns the
   rule off.
@@ -206,6 +212,11 @@ set_legend!(sf; position = :outside_bottom, dedupe = false)
 
 - `subplots(...; sync = false)` writes no figure title; 1.x wrote
   "PlotlySupply". The window title is the separate `window_title` keyword.
+- `subplots` writes no figure size by default (`width = 0`, `height = 0`:
+  automatic); 1.x wrote `layout.width = 960` and `layout.height = 720`. The
+  size then comes from the style the figure carries (a journal preset's
+  column width) or from the window and the export (700 x 500 px). Pass
+  `width`/`height` for the 1.x size.
 - `update_xaxes!`, `update_yaxes!`, `update_scenes!`, `update_polars!`,
   `update_ternaries!`, `update_annotations!`, `update_shapes!` and
   `update_images!` with `row`/`col` change only that cell; 1.x changed every
@@ -268,6 +279,11 @@ update_xaxes!(sf; row = 1, col = 2, title_text = "x (right cell only)")
 - [`plot_stem`](@ref) draws two traces per series (markers, then stems),
   not one trace per point.
 - `tick0` is no longer written on axes.
+- `marker_symbol = "x"` (and `"+"`) are matplotlib codes now and draw thin
+  strokes (`"x-thin"`, `"cross-thin"`, 1.5 px wide); in 1.x `"x"` was plotly's
+  filled X. A marker that must look as in 1.x: `marker_symbol = "X"` (filled
+  X) or `"P"`/`"cross"` (filled plus). A trace built straight from PlotlyBase
+  keeps plotly's names.
 - Mismatched `x`/`y` lengths, matrices and complex data raise an
   `ArgumentError` (complex data points to [`plot_complex`](@ref)); stats
   functions given a matrix suggest `eachcol`.
@@ -364,8 +380,10 @@ fig2 = plot_heatmap(xs, ys, permutedims(Z))
 
 ## 3-D
 
-- `plot_quiver3d` cones use `sizemode = "scaled"`: their size follows the
-  point spacing, not the field's magnitude. Vectors with non-finite values
+- `plot_quiver3d` cones use `sizemode = "scaled"`: the largest cone is sized
+  relative to the point spacing, so a uniform rescaling of the field (units)
+  does not change the picture; each cone is still proportional to its
+  vector's length. Vectors with non-finite values
   are skipped with a warning.
 - Inputs are validated before the figure changes (`ArgumentError` for bad
   ranges, opacity, sizes, colours, colormap names, shapes, complex data).
@@ -460,8 +478,9 @@ fig3 = plot_scattergeo([2.35], [48.86]; trace = attr(hovertemplate = "%{lat}"))
 - `redraw!` rebuilds the page from the Julia figure.
 - At Julia exit, the Electron processes PlotlySupply started are closed and
   waited for (scripts take 1 to 4 s longer to exit).
-- A figure without a size exports at the active style's default size (a
-  journal preset sets one) instead of always 700 x 500 px.
+- A figure without a size exports at the size of the style it carries (a
+  journal preset sets one; a figure without a recorded style uses the active
+  style's size) instead of always 700 x 500 px.
 - PDF with `fonts = :auto` (the default): when Chromium embedded Type 3 fonts
   (STIX, Latin Modern) and Ghostscript is on `PATH`, all text of the page is
   converted to outlines and can no longer be selected. TrueType figures

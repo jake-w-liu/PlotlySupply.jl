@@ -174,9 +174,8 @@ figure margin, never from a neighbouring cell. The rules:
   fitted plot box, not on the cell.
 - Sizes are estimated from the figure size in pixels (`layout.width`, else
   700), the font sizes and the text lengths, generously, and the layout is
-  fitted again on the copy that `savefig` exports at its real size. Set the
-  size first (`figsize!`, or `width`/`height`): a layout fitted at a
-  smaller size keeps the room it asked for.
+  fitted again on the copy that `savefig` exports at its real size. `figsize!` after
+  the content is fine: the room is solved again for the new size.
 - Known limits: a bottom bar released because its cell's domain is yours is not
   re-placed later; after you relayout a y domain a bar keeps its old `len`
   until the next `colorbar!` call; equal-aspect cells in one row can end up
@@ -209,8 +208,12 @@ cell legend moves to the position that covers the least data (matplotlib's
 the line and marker families, band and fill traces, secondary y axes, polar
 cells and insets. A legend placed with `set_legend!` or `relayout!` stays
 put; setting another default position turns the rule off. When no position is
-free, the one that covers least is taken (a legend wider than its cell can
-cross data). Cells with other trace types, category or date coordinates keep
+free, the legend goes below the cell when its entries fit in one row of the
+cell's width (the layout engine reserves the room); a legend wider than that
+keeps the position that covers least and can cross data: give it `ncols`, a
+`position`, or `legend_target = :figure`. To get the 1.x look back, place the
+legend yourself: `set_legend!(sf; position = :topright)` or
+`subplot_legends!(sf; position = :topright)`. Cells with other trace types, category or date coordinates keep
 the top right.
 
 `set_legend!(...; ncols = k)` lays the entries out in `k` columns (as

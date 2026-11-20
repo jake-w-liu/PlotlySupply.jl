@@ -50,7 +50,10 @@ Axes and ranges
 - A full range with bounds that are neither numbers nor dates on an
   automatically typed axis (`yrange = ("a", "b")`) raises an `ArgumentError`.
 - Axis titles that would run off the figure are wrapped between words by the
-  layout engine only, with `<br />` breaks (`xlabel!(...; wrap = false)` keeps
+  layout engine only; each break it writes is a zero-width space (U+200B)
+  before a bare `<br>` (plotly.js counts the extra lines of a title with a
+  greedy `<br...>` pattern, which makes a run of `<br />` one tag; your own
+  `<br>` stay as you wrote them) (`xlabel!(...; wrap = false)` keeps
   one line); `secondary_xaxis!` no longer writes `title.pad.b` onto a placed
   figure title, the top margin is raised when the figure is finalized.
 - Changing an axis scale converts an explicit range.
@@ -79,12 +82,14 @@ Legends
 - `set_legend!` merges duplicate entries (`dedupe = true`).
 - `subplot_legends!` keywords lost their `legend_` prefix (old names are
   deprecated).
-- The default legend of line plots moves to the corner with the least data
-  (the matplotlib "best" placement).
+- The default legend of line plots moves to the first free corner or edge
+  (the matplotlib "best" placement; never the centre automatically) and goes
+  outside the plot (right, or below a narrow plot) when none is free.
 - Legend boxes follow the template.
 - Cell legends of a `SubplotFigure` at the default `:topright` move to the
-  least-covered position when traces are appended; a legend placed by you
-  stays.
+  first free position when traces are appended, below the cell when none is
+  free and its entries fit in one row (`set_legend!(sf; position = :topright)`
+  restores the 1.x corner); a legend placed by you stays.
 - `set_legend!(ncols = k)` lays columns out as legend groups; a click toggles
   one entry.
 - `legend_entry!` validates colours and writes hex CSS.
@@ -93,6 +98,9 @@ Subplots
 
 - `subplots(...; sync = false)` writes no figure title. The window title is
   the `window_title` keyword.
+- `subplots` writes no figure size by default (`width = 0`, `height = 0`:
+  automatic); 1.x wrote 960 x 720 px into the layout. Pass `width`/`height`
+  for that size.
 - `update_xaxes!` and the other `update_*!` functions with `row`/`col` change
   only that cell.
 - Colorbars sit next to their cell.
@@ -179,7 +187,8 @@ Export, windows and templates
 - `savefig` uses the figure's `layout.width`/`layout.height` when no size is
   given (1.x: always 700 x 500 px).
 - Exports are deterministic by default.
-- A figure without a size exports at the active style's default size.
+- A figure without a size exports at the size of the style it carries (a figure
+  without a recorded style: the active style's size), else 700 x 500 px.
 - PDF with `fonts = :auto`: text of a page with Type 3 fonts is outlined by
   Ghostscript (TrueType figures are unchanged). EPS text is outlined and its
   bounding box is the page; translucent EPS colours are blended.
@@ -315,9 +324,10 @@ Styles and export
   - physical `units`, `dpi`, `background`, `tight`, `deterministic` and
     `timeout`;
   - several files from one render.
-- A precompile workload: the first figure of a session takes about half a
-  second instead of half a minute; the one-time precompilation takes minutes
-  longer and the package image grows by about 50 MB. Opt out with the
+- A precompile workload: the first figure of a session takes about a third
+  of a second instead of 15 seconds (low machine load, `benchmark/RESULTS.md`);
+  the one-time precompilation takes minutes longer and the package image grows
+  by about 80 MB (5.9 MB to 87.6 MB). Opt out with the
   `precompile_workload` preference. A benchmark suite lives in `benchmark/`.
 
 ### Fixed
