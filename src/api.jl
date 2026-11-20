@@ -9870,9 +9870,11 @@ end
 # typed vectors are scanned without allocating.
 # A time of day or a duration is no plotly.js coordinate: the axis would show
 # the values as equally spaced categories (axes-ticks-08).
-function _scat_time_error(who::AbstractString, name::Symbol, T)
+# `nameof` keeps the message the same whether or not `Dates` is imported where
+# it is shown (`Time`, not `Dates.Time`).
+function _scat_time_error(who::AbstractString, name::Symbol, T::DataType)
 	throw(ArgumentError(
-		"$(who): `$(name)` holds $(T) values, which plotly.js draws as equally " *
+		"$(who): `$(name)` holds $(nameof(T)) values, which plotly.js draws as equally " *
 		"spaced categories; pass `DateTime` values for a date axis (e.g. " *
 		"`DateTime(2024, 1, 1) + t`) or numbers (e.g. seconds).",
 	))

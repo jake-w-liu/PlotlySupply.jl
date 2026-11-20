@@ -737,8 +737,9 @@ _t3_centred(fig, key::Symbol = :scene) = maximum(abs, _t3_drawing(fig, key).mid)
 		@test _t3_fields(sf.plot.data[end].fields[:line])[:color] ==
 			  PlotlySupply._blend_over("#0000ff", 0.5, "#ff0000"; who = "test")
 		plot_scatter3d!(sf, 1:2, 1:2, 1:2; row = 1, col = 2, opacity = 0.5)
+		# The second trace of cell (1,2): the colour cycle restarts in every cell (D20).
 		@test _t3_fields(sf.plot.data[end].fields[:line])[:color] ==
-			  PlotlySupply._blend_over(PlotlySupply._default_trace_color(sf.plot, 4), 0.5, "#ff0000"; who = "test")
+			  PlotlySupply._blend_over(PlotlySupply._default_trace_color(sf.plot, 2), 0.5, "#ff0000"; who = "test")
 		# Scene keywords go to the target cell's scene only (the first scene's
 		# camera is re-framed for the plot area the new colorbar leaves).
 		# (the tick counts of the axes follow the framing, so they are framing too)

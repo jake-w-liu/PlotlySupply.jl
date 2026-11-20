@@ -834,7 +834,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test haskey(sf.plot.layout.fields, :legend3)
         @test haskey(sf.plot.layout.fields, :legend4)
         @test sf.plot.data[1].fields[:showlegend] == true
-        @test sf.plot.data[2].fields[:showlegend] == true
+        @test sf.plot.data[3].fields[:showlegend] == true   # stem heads; the stems (2) come first
         @test sf.plot.layout.fields[:showlegend] == true
 
         @test sf.plot.layout.fields[:legend2][:x] > sf.plot.layout.fields[:legend][:x]
@@ -2454,8 +2454,8 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         y_st = rand(5)
         PlotlySupply.plot_stem!(sf, y_st)
         @test length(sf.plot.data) == 3
-        @test [t[:mode] for t in sf.plot.data[2:3]] == ["markers", "lines"]
-        @test sf.plot.data[2][:x] == 0:4 && sf.plot.data[2][:y] == y_st
+        @test [t[:mode] for t in sf.plot.data[2:3]] == ["lines", "markers"]   # stems below the heads
+        @test sf.plot.data[3][:x] == 0:4 && sf.plot.data[3][:y] == y_st
         @test all(t -> axes_of(t) == ("x2", "y2"), sf.plot.data[2:3])
 
         # bar!(sf, y) - y-only
@@ -2633,12 +2633,13 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
     @testset "CRC: stem honors color (marker + stem lines)" begin
         f = plot_stem([0, 1, 2], [3.0, 4.0, 5.0]; color="red")
-        @test f.data[1].fields[:marker][:color] == "red"        # head marker colored
-        @test !haskey(f.data[1].fields, :line)                  # no unused line on markers trace
-        @test f.data[2].fields[:line][:color] == "red"          # stem line colored
+        heads, stems = _stem_parts(f)
+        @test only(heads).fields[:marker][:color] == "red"      # head marker colored
+        @test !haskey(only(heads).fields, :line)                # no unused line on markers trace
+        @test only(stems).fields[:line][:color] == "red"        # stem line colored
         # default (no color) keeps black stems
         g = plot_stem([0, 1], [1.0, 2.0])
-        @test g.data[2].fields[:line][:color] == "black"
+        @test only(last(_stem_parts(g))).fields[:line][:color] == "black"
     end
 
     @testset "CRC: scatterpolar has no default sector (full circle)" begin

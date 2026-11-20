@@ -2111,6 +2111,13 @@ end
         tpl = _AX._plot_obj(plot_scatter(1:2, 1:2)).layout.fields[:template].layout.fields
         @test g(tpl[:xaxis], :exponentformat) == "power" && g(tpl[:polar], :radialaxis, :exponentformat) == "power"
         @test g(tpl[:ternary], :aaxis, :exponentformat) == "power" && g(tpl[:scene], :zaxis, :exponentformat) == "power"
+        # The layout engine sizes the power labels ("−0.5×10⁴", not "−5k"):
+        # sign, mantissa, "×10" and a 70 % exponent.
+        @test _AX._fin_power_chars(-5000.0, 1e4, 3.0) == 8
+        @test _AX._fin_power_chars(1e4, 1e4, 3.0) == 5 && _AX._fin_power_chars(0.0, 1e4, 3.0) == 1
+        @test _AX._fin_power_chars(1.5e-4, 2e-4, 3.0) == 8 && _AX._fin_power_chars(2000.0, 4000.0, 3.0) === nothing
+        unset, si = Dict{Symbol, Any}(), Dict{Symbol, Any}(:exponentformat => "SI")
+        @test _AX._fin_tick_chars(unset, -1e4, 1e4, 300.0, false, true) == 8 > _AX._fin_tick_chars(si, -1e4, 1e4, 300.0, false, true)
         result = try
             svgs = [String(savefig(plot_scatter([v, 2v, 3v], [v, 2v, 3v]); format = "svg", width = 600, height = 400))
                 for v in (2e-4, 5e3, 1e9)]
@@ -2224,7 +2231,8 @@ end
     xticks!(e, [0, 1e6, 2e6, 3e6])
     @test g(L(e)[:xaxis], :tickformat) === nothing
     # axes-ticks-08: Dates.Time is refused with a remedy.
-    @test occursin("holds Dates.Time values", msg(() -> plot_scatter([_AX.Dates.Time(1), _AX.Dates.Time(2)], [1.0, 2.0])))
+    @test occursin("`x` holds Time values", msg(() -> plot_scatter([_AX.Dates.Time(1), _AX.Dates.Time(2)], [1.0, 2.0])))
+    @test occursin("`y` holds Second values", msg(() -> plot_scatter([1.0, 2.0], Any[1.0, _AX.Dates.Second(2)])))
     # axes-ticks-13: unknown keywords are ArgumentErrors naming public API.
     pf = plot_scatter(1:3, 1:3)
     for (name, call) in (("xticks!", () -> xticks!(pf; formatt = "x")), ("xrange!", () -> xrange!(pf, (0, 1); foo = 1)),
