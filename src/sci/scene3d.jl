@@ -1576,48 +1576,48 @@ function _s3_write_pads!(layout::Layout, key::Symbol, pads::NTuple{2, Float64})
 	return true
 end
 
-# The tick labels between the two outermost ones of scene axis `d` (`fields`
-# its layout entry) as fractions of the box edge (`tick_lo`/`tick_hi` are the
-# outermost): the user's tick values, or on a linear axis the multiples of
-# the step of `nticks`/`dtick`, else (plotly.js picks the count from the
-# axis length) of every count it may pick (a title must clear all of them);
-# none on a log, date or category axis. A label in the middle of an axis lies
-# where the axis title is drawn, so a title clears these as it clears the end
-# labels.
+# The tick label between the two outermost ones of scene axis `d` (`fields`
+# its layout entry) that lies nearest the middle of the box edge, as a
+# fraction of the edge (`NaN` when there is none): the user's tick values, or
+# on a linear axis the multiples of the step of `nticks`/`dtick`, else
+# (plotly.js picks the count from the axis length) of every count it may
+# pick; none on a log, date or category axis. An axis title is drawn at the
+# middle of its edge, where this label lies: the title clears it as it clears
+# the end labels. (One label stands for the row: every inner label hangs at
+# the same distance from the edge, and the one at the middle is the one the
+# title can meet.)
 function _s3_tick_inner(p::Plot, scenekey::Symbol, d::Int, fields, tick_lo::Float64, tick_hi::Float64)
 	axis_type = _cmn_mapping_get(fields, :type)
 	range = _s3_axis_range(p, scenekey, d, fields)
-	(range === nothing || range[1] == range[2]) && return Float64[]
+	(range === nothing || range[1] == range[2]) && return NaN
 	span = range[2] - range[1]
 	reversed = range[1] > range[2]
-	fractions = Float64[]
+	best = NaN
 	function add(f)
 		(isfinite(f) && -1e-9 <= f <= 1 + 1e-9) || return
 		g = clamp(f, 0.0, 1.0)
 		for h in (reversed ? (g, 1 - g) : (g,))
-			(h > tick_lo + 1e-6 && h < tick_hi - 1e-6) && push!(fractions, h)
+			(h > tick_lo + 1e-6 && h < tick_hi - 1e-6) || continue
+			(isnan(best) || abs(h - 0.5) < abs(best - 0.5)) && (best = h)
 		end
 	end
 	values = _cmn_mapping_get(fields, :tickvals)
 	if (values isa AbstractVector || values isa Tuple) && !isempty(values)
-		axis_type == "log" && return Float64[]
+		axis_type == "log" && return NaN
 		for value in values
 			_s3_is_real(value) && add((Float64(value) - range[1]) / span)
 		end
 	elseif axis_type in (nothing, "-", "linear")
 		lo, hi = minmax(range[1], range[2])
-		dtick = _cmn_mapping_get(fields, :dtick)
-		steps = if _s3_is_real(dtick) && isfinite(dtick) && dtick > 0
-			Float64[dtick]
-		else
-			nticks = _cmn_mapping_get(fields, :nticks)
-			counts = (_s3_is_real(nticks) && isinteger(nticks) && nticks >= 1) ? (Int(nticks):Int(nticks)) :
-				(_S3_MIN_PLOTLY_TICKS:_S3_MAX_AUTO_TICKS)
-			unique!(map(count -> _s3_plotly_tick_step(abs(span), count), counts))
-		end
 		tick0 = _cmn_mapping_get(fields, :tick0)
 		origin = (_s3_is_real(tick0) && isfinite(tick0)) ? Float64(tick0) : 0.0
-		for step in steps
+		dtick = _cmn_mapping_get(fields, :dtick)
+		nticks = _cmn_mapping_get(fields, :nticks)
+		first_count, last_count = (_s3_is_real(nticks) && isinteger(nticks) && nticks >= 1) ? (Int(nticks), Int(nticks)) :
+			(_S3_MIN_PLOTLY_TICKS, _S3_MAX_AUTO_TICKS)
+		given = _s3_is_real(dtick) && isfinite(dtick) && dtick > 0
+		for count in (given ? (first_count:first_count) : (first_count:last_count))
+			step = given ? Float64(dtick) : _s3_plotly_tick_step(abs(span), count)
 			first_index = ceil(Int, (lo - origin) / step - 1e-9)
 			last_index = floor(Int, (hi - origin) / step + 1e-9)
 			# A pathological step (a tiny dtick) would list thousands of ticks.
@@ -1626,10 +1626,8 @@ function _s3_tick_inner(p::Plot, scenekey::Symbol, d::Int, fields, tick_lo::Floa
 				add((origin + k * step - range[1]) / span)
 			end
 		end
-	else
-		return Float64[]
 	end
-	return sort!(unique!(round.(fractions; digits = 9)))
+	return best
 end
 
 # The labels gl-axes draws for one scene axis. `ticklen` is the tick length
@@ -1645,7 +1643,7 @@ struct _S3AxisLabels
 	tick_chars::Int
 	tick_lo::Float64
 	tick_hi::Float64
-	tick_inner::Vector{Float64}
+	tick_inner::Float64
 	title_size::Float64
 	title_chars::Int
 	title_lines::Int
@@ -1832,7 +1830,7 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol; pads = _s3_scene_pads(p, sce
 			tick_chars,
 			tick_lo,
 			tick_hi,
-			(!shown || tick_chars == 0 || (tick_override !== nothing && haskey(tick_override, d))) ? Float64[] :
+			(!shown || tick_chars == 0 || (tick_override !== nothing && haskey(tick_override, d))) ? NaN :
 				_s3_tick_inner(p, scenekey, d, fields, tick_lo, tick_hi),
 			title_size,
 			visible ? maximum(_s3_visible_chars, lines) : 0,
@@ -1964,7 +1962,7 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 	ratio = width / height
 	# The shader divides by max(w, 1e-4) (w: depth in front of the eye).
 	function project(point, min_depth::Float64 = 1e-9)
-		q = point .- eye
+		q = (point[1] - eye[1], point[2] - eye[2], point[3] - eye[3])
 		depth = max(-_s3_dot(q, v), min_depth)
 		return (_s3_dot(q, r) / (depth * tan_half * ratio) * width / 2, _s3_dot(q, u) / (depth * tan_half) * height / 2)
 	end
@@ -1978,9 +1976,9 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 	# viewport height (gl-axes: pixelRatio · w / drawingBufferHeight).
 	unit = max(_s3_dot(eye, v), 1e-9) / height
 	function screen_direction(at, axis::Int)
-		step = zeros(3)
-		step[axis] = (spans === nothing || !(spans[axis] > 0)) ? box[axis] * 1e-3 : box[axis] / spans[axis]
-		a, b = project(at, 1e-4), project(at .+ step, 1e-4)
+		delta = (spans === nothing || !(spans[axis] > 0)) ? box[axis] * 1e-3 : box[axis] / spans[axis]
+		moved = (at[1] + (axis == 1 ? delta : 0.0), at[2] + (axis == 2 ? delta : 0.0), at[3] + (axis == 3 ? delta : 0.0))
+		a, b = project(at, 1e-4), project(moved, 1e-4)
 		len = hypot(b[1] - a[1], b[2] - a[2])
 		return len > 0 ? ((b[1] - a[1]) / len, (b[2] - a[2]) / len) : (1.0, 0.0)
 	end
@@ -2007,10 +2005,7 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 		if label.ticks_shown
 			offset .+= (label.tick_pad * unit) .* minor
 			pushed = findall(!iszero, minor)
-			for (end_tag, fraction) in Iterators.flatten((
-				((:tick_lo, label.tick_lo), (:tick_hi, label.tick_hi)),
-				((:tick_mid, f) for f in label.tick_inner),
-			))
+			function place_tick(end_tag::Symbol, fraction::Float64)
 				at = copy(edge)
 				at[a] = (fraction - 0.5) * box[a]
 				at .+= offset
@@ -2022,6 +2017,9 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 					push!(tags, (a, end_tag))
 				end
 			end
+			place_tick(:tick_lo, label.tick_lo)
+			place_tick(:tick_hi, label.tick_hi)
+			isnan(label.tick_inner) || place_tick(:tick_mid, label.tick_inner)
 		end
 		label.title_chars > 0 || continue
 		own && continue

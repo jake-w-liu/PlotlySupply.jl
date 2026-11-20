@@ -134,7 +134,8 @@ end
     )
     for (name, mutate!, expected_delta) in explicit_mutators
         @testset "$name explicit coordinates" begin
-            fig = plot_scatter(1:3, 1:3)
+            # A 3-D mutator needs a scene (it refuses a Cartesian figure).
+            fig = startswith(name, "scatter3d") ? plot_scatter3d(1:3, 1:3, 1:3) : plot_scatter(1:3, 1:3)
             initial_count = length(fig.data)
             @test mutate!(fig) === nothing
             @test length(fig.data) == initial_count + expected_delta
