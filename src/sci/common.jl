@@ -353,8 +353,9 @@ function _cell_target(
 			twin = _cmn_twin_y_key(layout)
 			twin === nothing && throw(ArgumentError(
 				"$(who): this figure has no secondary y-axis (a y axis " *
-				"overlaying \"y\"); `secondary_y=true` mutators create it " *
-				"with `_ensure_twin_y!`.",
+				"overlaying \"y\"); create it by drawing on it, e.g. " *
+				"`plot_scatter!(fig, x, y; secondary_y = true)` " *
+				"(a SubplotFigure cell: also `Spec(secondary_y = true)`).",
 			))
 			ykey = twin
 		end
@@ -963,6 +964,16 @@ const _CMN_MINOR_TICKLEN = 3
 const _CMN_MINOR_TICKLEN_RATIO = 0.6
 # The d3 format written by default for numeric array ticks on linear axes.
 const _CMN_AUTO_TICKFORMAT = "~g"
+# "~g" (d3, six significant digits) prints computer e-notation ("1e+6",
+# "2.5e-7") for |v| >= 1e6 or < 1e-6, and long decimals ("0.00002") below
+# 1e-3. Tick values outside [1e-3, 1e5) (zero aside) get no tickformat, so
+# plotly.js labels them in the axis's exponent format: "power" in every
+# PlotlySupply template (D21), so "2×10⁶" (tm-tickformat-g, axes-ticks-07).
+const _CMN_AUTO_TICKFORMAT_RANGE = (1e-3, 1e5)
+_cmn_plain_tick_values(values) = all(
+	v -> v == 0 || _CMN_AUTO_TICKFORMAT_RANGE[1] <= abs(v) < _CMN_AUTO_TICKFORMAT_RANGE[2],
+	values,
+)
 
 # Tick values in the form plotly.js reads: numbers (`Float64`), or strings on
 # category/date axes. `Date`/`DateTime` values (Z42) become plotly date
@@ -1143,7 +1154,9 @@ function _cmn_decade_count(fig, key::Symbol, who::AbstractString)
 	limits === nothing && return 1.0
 	lower, upper = minmax(limits...)
 	(lower > 0 && upper > 0) || return 1.0
-	return log10(upper / lower)
+	# A difference of logarithms, not log10(upper / lower): the ratio of two
+	# finite values overflows to Inf past about 1e308 (data at 1e±160).
+	return log10(upper) - log10(lower)
 end
 
 """
@@ -1213,7 +1226,10 @@ axis is touched.
   A preset cannot be combined with `labels` or `subs`.
 - `labels`: one label per value, each passed through `_label`. Without labels,
   numeric array ticks on a linear axis default to `tickformat="~g"` unless
-  `format`, `exponentformat` or an existing `tickformat` says otherwise. On a
+  `format`, `exponentformat` or an existing `tickformat` says otherwise, or a
+  value lies outside 1e-3 <= |v| < 1e5 (zero aside; "~g" would print
+  e-notation or long decimals): then no tickformat is written (an earlier
+  automatic one is removed) and plotly.js uses the exponent format. On a
   log axis "~g" is never written (it prints 1e+06, ADDENDUM B1): the axis
   keeps its exponent format, and gets `exponentformat="power"` when it has
   none (C17), and an earlier automatic "~g" is removed. Stale `ticktext` from
@@ -1381,7 +1397,8 @@ function _apply_ticks!(
 		(
 			exponentformat != "" ||
 			preset !== nothing ||
-			(log_axis && numeric_array && ticktext === nothing)
+			(log_axis && numeric_array && ticktext === nothing) ||
+			(numeric_array && ticktext === nothing && !_cmn_plain_tick_values(tickvals))
 		)
 	fields = Dict{Symbol, Any}()
 	if preset === :decades
@@ -1406,7 +1423,7 @@ function _apply_ticks!(
 				existing_exponent = _cmn_mapping_get(axis_entry, :exponentformat)
 				(existing_exponent isa AbstractString && !isempty(existing_exponent)) ||
 					(fields[:exponentformat] = "power")
-			else
+			elseif _cmn_plain_tick_values(tickvals)
 				fields[:tickformat] = _CMN_AUTO_TICKFORMAT
 			end
 		end

@@ -731,7 +731,16 @@ function _require_range_bound_types(checked, axis_type::AbstractString, who::Abs
 		# An autotyped or date axis takes numbers and date values; anything
 		# else (("a", "b")) is an error here, not a silently broken axis.
 		for b in checked
-			(b === nothing || b isa Real) || _date_bound_ms(b, who, name)
+			(b === nothing || b isa Real) && continue
+			# Not a date on an axis that is not (yet) a date axis: a category
+			# name, not a bad date (category ranges are 0-based positions).
+			axis_type == "-" && !(b isa Union{Dates.Date, Dates.DateTime}) &&
+				!(b isa AbstractString && occursin(_PLOTLY_DATE_PATTERN, b)) &&
+				throw(ArgumentError(
+					"$(who): `$(name)` bounds must be numbers (data values; 0-based " *
+					"positions on a category axis) or dates; got $(repr(Tuple(checked))).",
+				))
+			_date_bound_ms(b, who, name)
 		end
 		return nothing
 	end
@@ -825,7 +834,14 @@ function _apply_axis_range_to_key!(
 	checked === nothing && return nothing
 	root = _axes_match_root(fig, key, who)
 	axis_type = _axis_type(_plot_layout(fig), root)
-	_require_range_bound_types(checked, axis_type, who, name)
+	# On an autotyped axis the data decide what plotly.js makes of it (a date
+	# on a numeric axis is as wrong as a name on a category axis).
+	_require_range_bound_types(
+		checked,
+		_axes_bound_axis_type(fig, _axes_match_members(fig, root, who), axis_type),
+		who,
+		name,
+	)
 	_write_axis_group_range!(fig, root, _axis_range_store_value(checked, axis_type, who, name), who, name)
 	return nothing
 end
@@ -956,6 +972,17 @@ function _require_axis_range_for_key(
 				(final_type == "log" ? " (log-axis bounds must be positive numbers)" : "") *
 				"; pass a new `$(name)` in the same call, or clear the range first " *
 				"with `$(letter)range!(fig, nothing)`.",
+			))
+			# The view `_finalize_figure!` keeps on a field (heatmap, contour,
+			# streamlines) is the clip on the axis; a field reaching <= 0 has no
+			# log view (the stored-range check above, for an autoranged axis).
+			clip = final_type == "log" && _axis_type(layout, key) != "log" ?
+				_fin_sticky_clip(get(layout.fields, key, nothing)) : nothing
+			(clip !== nothing && clip[1] <= 0) && throw(ArgumentError(
+				"$(who): the $(letter) axis shows a field over $(repr(clip)), which " *
+				"reaches values <= 0 and cannot be shown on a \"log\" axis; pass a " *
+				"positive `$(name)` in the same call, or draw the field on positive " *
+				"coordinates.",
 			))
 			limit_action, _ = _axis_limits_for_scale(layout, key, final_type)
 			limit_action === :drop && throw(ArgumentError(

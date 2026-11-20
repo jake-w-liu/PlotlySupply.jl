@@ -46,6 +46,38 @@ function _axes_reject_show(show, who::AbstractString)
 	return nothing
 end
 
+# A keyword the helper does not take is an ArgumentError naming the public
+# function and what it takes (invariant 4), not a MethodError naming the
+# private implementation. `names`: the accepted keywords besides `show`.
+function _axes_reject_unknown(kwargs, names, who::AbstractString)
+	unknown = Symbol[k for k in keys(kwargs) if !(k in names)]
+	isempty(unknown) && return nothing
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) " *
+		"$(join(("`$(k)`" for k in unknown), ", ")); it takes " *
+		"$(join(("`$(k)`" for k in names), ", ")).",
+	))
+end
+
+const _AXES_TICKS_KEYWORDS = (
+	:format, :exponentformat, :subs, :minor, :angle, :direction, :tickwidth,
+	:ticklen, :offset, :row, :col, :inset,
+)
+const _AXES_YTICKS_KEYWORDS = (_AXES_TICKS_KEYWORDS..., :secondary_y)
+const _AXES_EQUAL_KEYWORDS = (:ratio, :row, :col, :inset)
+const _AXES_OFF_KEYWORDS = (:row, :col, :inset)
+const _AXES_SPINES_KEYWORDS = (
+	:style, :color, :linewidth, :ticks, :bottom, :top, :left, :right, :row,
+	:col, :inset, :cells,
+)
+const _AXES_GRID_KEYWORDS = (
+	:axis, :which, :color, :width, :dash, :alpha, :row, :col, :inset, :cells,
+)
+const _AXES_SECONDARY_X_KEYWORDS = (:ticks, :ticklabels, :title, :side, :row, :col, :inset)
+const _AXES_INSET_KEYWORDS = (
+	:row, :col, :coords, :sharex, :sharey, :background, :ticklabel_halo, :fontsize,
+)
+
 # A SubplotFigure helper makes its target cell the active cell, as
 # `xlabel!(sf; row, col)` always did. An inset selects its host cell.
 _axes_select!(fig, t::_CellTarget) = nothing
@@ -430,6 +462,15 @@ function _axes_range!(
 			"3-D scene cell.",
 		))
 		key = _axes_match_root(fig, letter == 'x' ? t.xkey : t.ykey, who)
+		# The bounds the axis can show (D3, axes-ticks-02): numbers on a
+		# numeric axis, 0-based positions on a category axis, dates on a date
+		# axis; on an autotyped axis what its data make of it.
+		checked === nothing || _require_range_bound_types(
+			checked,
+			_axes_bound_axis_type(fig, _axes_match_members(fig, key, who), _axis_type(layout, key)),
+			who,
+			"range",
+		)
 		value = _axes_axis_range_value(
 			checked,
 			_axis_type(layout, key),
@@ -516,8 +557,10 @@ function zlabel!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "zlabel!")
+	_axes_reject_unknown(kwargs, (:row, :col), "zlabel!")
 	_axes_label!(fig, 'z', label; row = row, col = col, who = "zlabel!")
 	return nothing
 end
@@ -528,8 +571,10 @@ function zlabel!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "zlabel!")
+	_axes_reject_unknown(kwargs, (:row, :col), "zlabel!")
 	_transactional_subplot_mutation!(
 		_axes_label!,
 		sf,
@@ -580,8 +625,9 @@ zrange!(fig, (0, 2))
 zrange!(fig, (0, nothing))   # bottom at 0, top from the data
 ```
 """
-function zrange!(fig, range; row = nothing, col = nothing, show = nothing)
+function zrange!(fig, range; row = nothing, col = nothing, show = nothing, kwargs...)
 	_axes_reject_show(show, "zrange!")
+	_axes_reject_unknown(kwargs, (:row, :col), "zrange!")
 	_axes_range!(fig, 'z', range; row = row, col = col, who = "zrange!")
 	return nothing
 end
@@ -592,8 +638,10 @@ function zrange!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "zrange!")
+	_axes_reject_unknown(kwargs, (:row, :col), "zrange!")
 	_transactional_subplot_mutation!(
 		_axes_range!,
 		sf,
@@ -671,6 +719,22 @@ _axes_has_nonnumeric_data(fig, key::Symbol) = _axes_axis_values_any(
 # there: plotly.js then types an untyped ("-") axis as a date axis.
 _axes_has_date_data(fig, key::Symbol) =
 	_axes_axis_values_any(v -> v isa Union{Dates.Date, Dates.DateTime}, fig, key)
+
+# The axis type whose range bounds an axis of group `members` takes: its
+# declared `axis_type`, or for an autotyped ("-") axis the type plotly.js
+# derives from the data: "linear" when a trace places numbers there, "date"
+# for dates (`Date`/`DateTime` or date strings), "category" for other text;
+# "-" while the group has no data (numbers and dates are then accepted).
+function _axes_bound_axis_type(fig, members, axis_type::AbstractString)
+	axis_type == "-" || return axis_type
+	is_number(v) = v isa Real && !(v isa Bool)
+	is_date(v) = v isa Union{Dates.Date, Dates.DateTime} ||
+		(v isa AbstractString && occursin(_PLOTLY_DATE_PATTERN, v))
+	any(m -> _axes_axis_values_any(is_number, fig, m), members) && return "linear"
+	any(m -> _axes_axis_values_any(is_date, fig, m), members) && return "date"
+	any(m -> _axes_has_nonnumeric_data(fig, m), members) && return "category"
+	return "-"
+end
 
 # What `offset` asks of axis `key` (before any write): `(values, labels, k,
 # clear)`. A factor 10^k comes with the scaled tick values and labels; without
@@ -970,8 +1034,10 @@ Only that axis changes (other cells keep their ticks).
 - `labels`: one label per value; each goes through the mathtext layer, so a
   TeX label such as `L"\\pi/2"` (LaTeXStrings) typesets. Without labels,
   numeric ticks on a linear axis are printed with the d3 format `"~g"`
-  (0.0025, 16) unless a format is set; a logarithmic axis keeps Plotly's
-  power exponent format (1×10⁻⁶ … 1000 …).
+  (0.0025, 16) unless a format is set; values outside 10⁻³ ≤ |v| < 10⁵
+  (zero aside) are labelled in the axis's power exponent format instead
+  (2×10⁶, 2.5×10⁻⁷; never computer e-notation); a logarithmic axis keeps
+  Plotly's power exponent format (1×10⁻⁶ … 1000 …).
 
 $(_AXES_TICKS_DOC_KEYWORDS)
 Errors (`ArgumentError`, before anything changes): mismatched label count,
@@ -994,6 +1060,7 @@ xticks!(f, :auto)        # Plotly's automatic ticks again
 """
 function xticks!(fig, values = nothing, labels = nothing; show = nothing, kwargs...)
 	_axes_reject_show(show, "xticks!")
+	_axes_reject_unknown(kwargs, _AXES_TICKS_KEYWORDS, "xticks!")
 	_axes_xticks!(fig, values, labels; kwargs...)
 	return nothing
 end
@@ -1006,6 +1073,7 @@ function xticks!(
 	kwargs...,
 )
 	_axes_reject_show(show, "xticks!")
+	_axes_reject_unknown(kwargs, _AXES_TICKS_KEYWORDS, "xticks!")
 	_transactional_subplot_mutation!(
 		_axes_xticks!,
 		sf,
@@ -1043,6 +1111,7 @@ yticks!(small; offset = :auto)   # labels 0..1 and "×10⁻⁵" above the axis
 """
 function yticks!(fig, values = nothing, labels = nothing; show = nothing, kwargs...)
 	_axes_reject_show(show, "yticks!")
+	_axes_reject_unknown(kwargs, _AXES_YTICKS_KEYWORDS, "yticks!")
 	_axes_yticks!(fig, values, labels; kwargs...)
 	return nothing
 end
@@ -1055,6 +1124,7 @@ function yticks!(
 	kwargs...,
 )
 	_axes_reject_show(show, "yticks!")
+	_axes_reject_unknown(kwargs, _AXES_YTICKS_KEYWORDS, "yticks!")
 	_transactional_subplot_mutation!(
 		_axes_yticks!,
 		sf,
@@ -1680,12 +1750,14 @@ axis_equal!(fig)
 """
 function axis_equal!(fig; show = nothing, kwargs...)
 	_axes_reject_show(show, "axis_equal!")
+	_axes_reject_unknown(kwargs, _AXES_EQUAL_KEYWORDS, "axis_equal!")
 	_axes_equal!(fig; kwargs...)
 	return nothing
 end
 
 function axis_equal!(sf::SubplotFigure; show = nothing, kwargs...)
 	_axes_reject_show(show, "axis_equal!")
+	_axes_reject_unknown(kwargs, _AXES_EQUAL_KEYWORDS, "axis_equal!")
 	_transactional_subplot_mutation!(
 		_axes_equal!,
 		sf,
@@ -1764,12 +1836,14 @@ axis_off!(fig)
 """
 function axis_off!(fig; show = nothing, kwargs...)
 	_axes_reject_show(show, "axis_off!")
+	_axes_reject_unknown(kwargs, _AXES_OFF_KEYWORDS, "axis_off!")
 	_axes_off!(fig; kwargs...)
 	return nothing
 end
 
 function axis_off!(sf::SubplotFigure; show = nothing, kwargs...)
 	_axes_reject_show(show, "axis_off!")
+	_axes_reject_unknown(kwargs, _AXES_OFF_KEYWORDS, "axis_off!")
 	_transactional_subplot_mutation!(
 		_axes_off!,
 		sf,
@@ -2063,12 +2137,14 @@ spines!(fig; style = :open, bottom = (1, 10), left = (0, 1))   # range frame
 """
 function spines!(fig; show = nothing, kwargs...)
 	_axes_reject_show(show, "spines!")
+	_axes_reject_unknown(kwargs, _AXES_SPINES_KEYWORDS, "spines!")
 	_axes_spines!(fig; kwargs...)
 	return nothing
 end
 
 function spines!(sf::SubplotFigure; show = nothing, kwargs...)
 	_axes_reject_show(show, "spines!")
+	_axes_reject_unknown(kwargs, _AXES_SPINES_KEYWORDS, "spines!")
 	_transactional_subplot_mutation!(
 		_axes_spines!,
 		sf,
@@ -2248,12 +2324,14 @@ grid!(fig; axis = :y, which = :minor, alpha = 0.05)   # fainter minor lines
 """
 function grid!(fig; show = nothing, kwargs...)
 	_axes_reject_show(show, "grid!")
+	_axes_reject_unknown(kwargs, _AXES_GRID_KEYWORDS, "grid!")
 	_axes_grid!(fig; kwargs...)
 	return nothing
 end
 
 function grid!(sf::SubplotFigure; show = nothing, kwargs...)
 	_axes_reject_show(show, "grid!")
+	_axes_reject_unknown(kwargs, _AXES_GRID_KEYWORDS, "grid!")
 	_transactional_subplot_mutation!(
 		_axes_grid!,
 		sf,
@@ -2520,6 +2598,13 @@ function _axes_secondary_xaxis!(
 		"$(who): needs a numeric (linear or log) x axis; $(repr(root)) has " *
 		"type $(repr(axis_type)).",
 	))
+	# An untyped axis is typed by plotly.js from its data: dates or text make it
+	# a date or category axis, which has no numeric transform `f` could map.
+	axis_type == "-" && any(m -> _axes_has_nonnumeric_data(fig, m), _axes_match_members(fig, root, who)) &&
+		throw(ArgumentError(
+			"$(who): needs a numeric (linear or log) x axis; $(repr(root)) " *
+			"shows text or date data (plotly.js makes it a category or date axis).",
+		))
 	log_axis = axis_type == "log"
 	primary_side = _cmn_mapping_get(get(layout.fields, t.xkey, nothing), :side)
 	primary_side isa AbstractString || (primary_side = "bottom")
@@ -2812,12 +2897,14 @@ secondary_xaxis!(fig, l -> c / l, ν -> c / ν; title = "frequency (THz)")
 """
 function secondary_xaxis!(fig, f, finv; show = nothing, kwargs...)
 	_axes_reject_show(show, "secondary_xaxis!")
+	_axes_reject_unknown(kwargs, _AXES_SECONDARY_X_KEYWORDS, "secondary_xaxis!")
 	_axes_secondary_xaxis!(fig, f, finv; kwargs...)
 	return nothing
 end
 
 function secondary_xaxis!(sf::SubplotFigure, f, finv; show = nothing, kwargs...)
 	_axes_reject_show(show, "secondary_xaxis!")
+	_axes_reject_unknown(kwargs, _AXES_SECONDARY_X_KEYWORDS, "secondary_xaxis!")
 	_transactional_subplot_mutation!(
 		_axes_secondary_xaxis!,
 		sf,
@@ -2975,6 +3062,13 @@ function _axes_inset!(
 	end
 	xfields = merge(frame, Dict{Symbol, Any}(:domain => collect(xdomain), :anchor => yref))
 	yfields = merge(frame, Dict{Symbol, Any}(:domain => collect(ydomain), :anchor => xref))
+	# The inset shows a grid where its host does (vm-15): a grid-free style
+	# writes `showgrid = false` on the host axes, which plotly.js would
+	# otherwise not apply to the new axes (matplotlib insets follow rcParams).
+	for (host_key, fields) in ((host.xkey, xfields), (host.ykey, yfields))
+		host_grid = _cmn_mapping_get(get(layout.fields, host_key, nothing), :showgrid)
+		host_grid isa Bool && (fields[:showgrid] = host_grid)
+	end
 	root_autorange = Dict{Symbol, Bool}()
 	for (share, host_key, fields) in ((sharex, host.xkey, xfields), (sharey, host.ykey, yfields))
 		share || continue
@@ -3196,6 +3290,7 @@ xrange!(sf, (2, 3); inset = k)
 """
 function inset!(sf::SubplotFigure, bounds; show = nothing, kwargs...)
 	_axes_reject_show(show, "inset!")
+	_axes_reject_unknown(kwargs, _AXES_INSET_KEYWORDS, "inset!")
 	return _transactional_subplot_mutation!(
 		_axes_inset!,
 		sf,

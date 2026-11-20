@@ -617,7 +617,9 @@ function _fin_axis_mode(axis, clip, islog::Bool, implicit_reversed::Bool)
 	auto === true && return (:auto, false)
 	_fin_string(auto) == "reversed" && return (:auto, true)
 	auto === nothing && range === nothing && return (:auto, implicit_reversed)
-	if auto === false && clip !== nothing
+	# A clip left from before the axis became logarithmic can reach <= 0: no
+	# log view, so not a pin of ours (the sticky pass then removes it).
+	if auto === false && clip !== nothing && !(islog && clip[1] <= 0)
 		pair = _fin_range_pair(range)
 		if pair !== nothing
 			lo, hi = islog ? (log10(clip[1]), log10(clip[2])) : clip
@@ -1032,7 +1034,9 @@ function _fin_shown_range(layout::Layout, key::Symbol, accs)
 		return minmax(pair[1], pair[2])
 	end
 	clip = _fin_sticky_clip(axis)
-	if clip !== nothing
+	# A clip that reaches <= 0 on a log axis is stale (written while the axis
+	# was linear; `_fin_sticky_updates!` removes it): the data decide.
+	if clip !== nothing && !(islog && clip[1] <= 0)
 		return islog ? (log10(clip[1]), log10(clip[2])) : clip
 	end
 	acc = get(accs, key, nothing)

@@ -288,14 +288,101 @@ function _normalize_template(template; who::AbstractString = "template")
 	return :plotly_white
 end
 
-# The `PlotlyBase.Template` object for a template specification: a Template is
-# returned as is, a name goes through `_normalize_template` (same `who`).
-_resolve_template(template::PlotlyBase.Template; who::AbstractString = "template") = template
+# The `PlotlyBase.Template` object a figure gets for a template specification
+# (a Template, or a name that goes through `_normalize_template`, same `who`):
+# its PlotlySupply version (`_power_template`).
+_resolve_template(template::PlotlyBase.Template; who::AbstractString = "template") =
+	_power_template(template)
 function _resolve_template(template; who::AbstractString = "template")
 	name = _normalize_template(template; who = who)
-	name in keys(PlotlyBase.templates) &&
-		return PlotlyBase.templates[name]
-	return PlotlyBase.templates[String(name)]
+	source = name in keys(PlotlyBase.templates) ?
+		PlotlyBase.templates[name] : PlotlyBase.templates[String(name)]
+	return _power_template(source)
+end
+
+# D21: scientific figures never label ticks with SI prefixes ("200µ", "5k",
+# "1G", plotly's default `exponentformat = "B"`). Every template a PlotlySupply
+# figure gets sets `exponentformat = "power"` (2×10⁻⁴) on the Cartesian, 3-D
+# scene, polar and ternary axes and on colour bars (colour axes and the
+# colorbars of trace types that draw one), wherever the source template
+# chooses no exponent format. `yticks!(fig; exponentformat = "SI")` and
+# `relayout!` still set another one per axis. One derived copy per source
+# template object (by identity; a derived template maps to itself), shared by
+# every figure that uses it, as the source templates are; a source template
+# changed in place after its first use keeps its earlier derived copy.
+const _POWER_TEMPLATES = IdDict{PlotlyBase.Template, PlotlyBase.Template}()
+const _POWER_TEMPLATES_LOCK = ReentrantLock()
+
+const _POWER_LAYOUT_PATHS = (
+	(:xaxis,), (:yaxis,),
+	(:scene, :xaxis), (:scene, :yaxis), (:scene, :zaxis),
+	(:polar, :radialaxis), (:polar, :angularaxis),
+	(:ternary, :aaxis), (:ternary, :baxis), (:ternary, :caxis),
+	(:coloraxis, :colorbar),
+)
+# Trace types and the paths of the colorbar(s) they can draw (plotly.js 2.35
+# schema).
+const _POWER_TRACE_COLORBARS = (
+	(:heatmap, ((:colorbar,),)), (:contour, ((:colorbar,),)),
+	(:histogram2d, ((:colorbar,),)), (:histogram2dcontour, ((:colorbar,),)),
+	(:contourcarpet, ((:colorbar,),)), (:surface, ((:colorbar,),)),
+	(:mesh3d, ((:colorbar,),)), (:cone, ((:colorbar,),)),
+	(:streamtube, ((:colorbar,),)), (:isosurface, ((:colorbar,),)),
+	(:volume, ((:colorbar,),)), (:choropleth, ((:colorbar,),)),
+	(:scatter, ((:marker, :colorbar),)), (:scattergl, ((:marker, :colorbar),)),
+	(:scatter3d, ((:marker, :colorbar), (:line, :colorbar))),
+	(:scatterpolar, ((:marker, :colorbar),)), (:scatterpolargl, ((:marker, :colorbar),)),
+	(:scatterternary, ((:marker, :colorbar),)), (:scattergeo, ((:marker, :colorbar),)),
+	(:scattercarpet, ((:marker, :colorbar),)), (:scattersmith, ((:marker, :colorbar),)),
+	(:bar, ((:marker, :colorbar),)), (:barpolar, ((:marker, :colorbar),)),
+	(:histogram, ((:marker, :colorbar),)),
+)
+
+function _power_template(source::PlotlyBase.Template)
+	return lock(_POWER_TEMPLATES_LOCK) do
+		get(_POWER_TEMPLATES, source, nothing) isa PlotlyBase.Template &&
+			return _POWER_TEMPLATES[source]
+		derived = _derive_power_template(source)
+		_POWER_TEMPLATES[source] = derived
+		_POWER_TEMPLATES[derived] = derived
+		return derived
+	end
+end
+
+# `fields` (a template layout or trace-default dictionary) with
+# `exponentformat = "power"` at the end of `path`, unless set there already.
+function _power_set!(fields::AbstractDict, path::Tuple)
+	head = first(path)
+	current = get(fields, head, nothing)
+	inner = current isa PlotlyBase.PlotlyAttribute ? current.fields :
+		current isa AbstractDict ? current : nothing
+	if inner === nothing
+		current === nothing || return nothing   # a scalar there: not ours to change
+		inner = Dict{Symbol, Any}()
+		fields[head] = attr(; inner...)
+		inner = fields[head].fields
+	end
+	if length(path) == 1
+		_style_value_unset(get(inner, :exponentformat, nothing)) && (inner[:exponentformat] = "power")
+	else
+		_power_set!(inner, Base.tail(path))
+	end
+	return nothing
+end
+
+function _derive_power_template(source::PlotlyBase.Template)
+	derived = deepcopy(source)
+	for path in _POWER_LAYOUT_PATHS
+		_power_set!(derived.layout.fields, path)
+	end
+	for (type, paths) in _POWER_TRACE_COLORBARS
+		entries = get!(() -> PlotlyBase._ATTR[attr()], derived.data, type)
+		isempty(entries) && push!(entries, attr())
+		for entry in entries, path in paths
+			_power_set!(entry.fields, path)
+		end
+	end
+	return derived
 end
 
 function _normalize_legend_position(position)
@@ -6620,11 +6707,14 @@ function _subplot_delegate_mutator_impl!(
 	# mutator converts ranges, validates ticks and builds log-aware traces
 	# exactly as on a single figure with those axes.
 	seeded, seeded_roots = _subplot_seed_scratch_axes!(tmp, p, axis_keys)
+	# D20: the style cycle (colour, dash, marker) continues the target cell's
+	# traces, not the figure's (`_STYLE_CELL`).
+	cell_scope = _style_delegate_cell(p, r, c, inset_target, secondary_y, who)
 	# Colorbar titles that plotly cannot typeset are converted after the
 	# traces reach their cell and the colorbars are placed (see
 	# `_place_cell_colorbars!`), not on the scratch figure. The style's
-	# dash/marker cycle continues from the traces already in the figure.
-	Base.ScopedValues.with(_CBAR_DEFER_MATH_TITLES => true) do
+	# dash/marker cycle continues from the traces already in the cell.
+	Base.ScopedValues.with(_CBAR_DEFER_MATH_TITLES => true, _STYLE_CELL => cell_scope) do
 		_with_style_trace_offset(p) do
 			mutator(_StagedPlotMutation(tmp), args...; kwargs...)
 		end
@@ -6664,6 +6754,9 @@ function _subplot_delegate_mutator_impl!(
 
 	start_index = length(p.data) + 1
 	append!(p.data, routed)
+	# D20: the cell's colour cycle, written on the traces (plotly.js's
+	# colorway runs over the whole figure).
+	_style_write_cell_colors!(p, start_index, cell_scope)
 	_apply_source_layout_to_added_traces!(p, tmp, start_index)
 	if !isempty(routed) && axis_keys !== nothing
 		for (scratch_key, cell_key) in zip((:xaxis, :yaxis), axis_keys)
@@ -7176,8 +7269,10 @@ function xlabel!(
 	inset = nothing,
 	wrap::Bool = true,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "xlabel!")
+	_axes_reject_unknown(kwargs, (:row, :col, :inset, :wrap), "xlabel!")
 	_axes_label!(
 		fig,
 		'x',
@@ -7199,8 +7294,10 @@ function xlabel!(
 	inset = nothing,
 	wrap::Bool = true,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "xlabel!")
+	_axes_reject_unknown(kwargs, (:row, :col, :inset, :wrap), "xlabel!")
 	return _transactional_subplot_mutation!(
 		_subplot_xlabel_impl!,
 		sf,
@@ -7271,8 +7368,10 @@ function ylabel!(
 	secondary_y::Bool = false,
 	wrap::Bool = true,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "ylabel!")
+	_axes_reject_unknown(kwargs, (:row, :col, :inset, :secondary_y, :wrap), "ylabel!")
 	_axes_label!(
 		fig,
 		'y',
@@ -7296,8 +7395,10 @@ function ylabel!(
 	secondary_y::Bool = false,
 	wrap::Bool = true,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "ylabel!")
+	_axes_reject_unknown(kwargs, (:row, :col, :inset, :secondary_y, :wrap), "ylabel!")
 	return _transactional_subplot_mutation!(
 		_subplot_ylabel_impl!,
 		sf,
@@ -7396,8 +7497,10 @@ function xrange!(
 	col = nothing,
 	inset = nothing,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "xrange!")
+	_axes_reject_unknown(kwargs, (:row, :col, :inset), "xrange!")
 	_axes_range!(
 		fig,
 		'x',
@@ -7417,8 +7520,10 @@ function xrange!(
 	col = nothing,
 	inset = nothing,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "xrange!")
+	_axes_reject_unknown(kwargs, (:row, :col, :inset), "xrange!")
 	return _transactional_subplot_mutation!(
 		_subplot_xrange_impl!,
 		sf,
@@ -7484,8 +7589,10 @@ function yrange!(
 	inset = nothing,
 	secondary_y::Bool = false,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "yrange!")
+	_axes_reject_unknown(kwargs, (:row, :col, :inset, :secondary_y), "yrange!")
 	_axes_range!(
 		fig,
 		'y',
@@ -7507,8 +7614,10 @@ function yrange!(
 	inset = nothing,
 	secondary_y::Bool = false,
 	show = nothing,
+	kwargs...,
 )
 	_axes_reject_show(show, "yrange!")
+	_axes_reject_unknown(kwargs, (:row, :col, :inset, :secondary_y), "yrange!")
 	return _transactional_subplot_mutation!(
 		_subplot_yrange_impl!,
 		sf,
@@ -9683,9 +9792,20 @@ end
 # Element check of one coordinate vector: complex numbers and arrays cannot be
 # drawn as coordinates. A concrete element type is checked in O(1); abstractly
 # typed vectors are scanned without allocating.
+# A time of day or a duration is no plotly.js coordinate: the axis would show
+# the values as equally spaced categories (axes-ticks-08).
+function _scat_time_error(who::AbstractString, name::Symbol, T)
+	throw(ArgumentError(
+		"$(who): `$(name)` holds $(T) values, which plotly.js draws as equally " *
+		"spaced categories; pass `DateTime` values for a date axis (e.g. " *
+		"`DateTime(2024, 1, 1) + t`) or numbers (e.g. seconds).",
+	))
+end
+
 function _scat_check_values(v::AbstractVector, who::AbstractString, name::Symbol)
 	T = eltype(v)
 	if isconcretetype(T)
+		T <: Union{Dates.Time, Dates.Period} && _scat_time_error(who, name, T)
 		T <: Complex && _scat_complex_error(who, name)
 		T <: AbstractArray && throw(ArgumentError(
 			"$(who): `$(name)` holds $(T) elements; pass a vector of values, or " *
@@ -9694,6 +9814,7 @@ function _scat_check_values(v::AbstractVector, who::AbstractString, name::Symbol
 		return nothing
 	end
 	for value in v
+		value isa Union{Dates.Time, Dates.Period} && _scat_time_error(who, name, typeof(value))
 		value isa Complex && _scat_complex_error(who, name)
 		value isa AbstractArray && throw(ArgumentError(
 			"$(who): `$(name)` holds a $(typeof(value)) element; pass a vector of " *
@@ -10269,13 +10390,16 @@ function _scat_subplot_delegate!(sf::SubplotFigure, mutator, args...; kwargs...)
 			group = get(trace.fields, :legendgroup, nothing)
 			group isa AbstractString && push!(groups, String(group))
 		end
+		# D20: default colours continue the target cell's colour cycle (the
+		# delegate sets `_STYLE_CELL` before this runs).
+		scope = _STYLE_CELL[]
 		context = (
 			figure = sf,
-			offset = length(plot.data),
+			offset = scope === nothing ? length(plot.data) : scope.traces,
 			legend_groups = groups,
 			polar = _scat_cell_polar_layout(sf, plot, row, col),
 		)
-		# The style's dash/marker cycle continues the real figure's line-style
+		# The style's dash/marker cycle continues the target cell's line-style
 		# traces instead of restarting at the scratch figure's first trace.
 		return Base.ScopedValues.with(_SCAT_SUBPLOT_CONTEXT => context) do
 			_with_style_trace_offset(plot) do
@@ -19961,6 +20085,10 @@ function _area_impl!(
 		isempty(style.color) || (fields[:line] = attr(color = style.color))
 		if stack
 			fields[:stackgroup] = "one"
+			# A series without a value at an x of another series (nested x)
+			# is interpolated there, not taken as zero (plotly's default
+			# "infer zero" turns a constant series into a sawtooth).
+			fields[:stackgaps] = "interpolate"
 		else
 			fields[:fill] = "tozeroy"
 		end

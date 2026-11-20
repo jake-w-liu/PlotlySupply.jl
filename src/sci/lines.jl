@@ -124,14 +124,17 @@ _lines_new_figure() = Plot(GenericTrace[], _default_cartesian_layout())
 _lines_show(fig, show::Bool, figure) =
 	_scat_maybe_show(fig, show, figure.width, figure.height, figure.title)
 
+# The position suffix of an error message; built only when a check fails (a
+# string per value would cost ~200 B per point on million-point calls, perf-02).
+_lines_at(position) = position === nothing ? "" : " at position $(position)"
+
 function _lines_check_value(value, who::AbstractString, name::Symbol, axis_type::AbstractString, position)
-	at = position === nothing ? "" : " at position $(position)"
 	(value isa Real && !(value isa Bool) && isfinite(value)) || throw(ArgumentError(
-		"$(who): `$(name)` must hold finite real numbers; got $(repr(value))$(at).",
+		"$(who): `$(name)` must hold finite real numbers; got $(repr(value))$(_lines_at(position)).",
 	))
 	axis_type == "log" && value <= 0 && throw(ArgumentError(
 		"$(who): `$(name)` values must be positive on a logarithmic axis; got " *
-		"$(value)$(at).",
+		"$(value)$(_lines_at(position)).",
 	))
 	return nothing
 end

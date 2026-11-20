@@ -537,6 +537,17 @@ function _stream_integrate!(
 		else
 			ni = gi + h / 6 * sign * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
 			nj = gj + h / 6 * sign * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2])
+			if !(0.0 <= ni <= nx1 && 0.0 <= nj <= ny1)
+				# Every stage lay inside the grid but the combined step leaves
+				# it (a curved path along an edge): end on the boundary with an
+				# Euler step, as at a stage outside the grid (matplotlib's
+				# streamplot does the same).
+				t = _stream_edge_step(gi, gj, d1i, d1j, h, nx1, ny1)
+				t > 0 || break
+				ni = clamp(gi + t * d1i, 0.0, Float64(nx1))
+				nj = clamp(gj + t * d1j, 0.0, Float64(ny1))
+				final = true
+			end
 		end
 		step = hypot((ni - gi) / nx1, (nj - gj) / ny1)
 		(final || step >= min_step) || break

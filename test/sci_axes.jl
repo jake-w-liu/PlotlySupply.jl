@@ -448,7 +448,8 @@ end
         @test _ax_throws(() -> xticks!(fig; tickwidth = -1), "xticks!: `tickwidth` must be a finite number >= 0")
         @test _ax_throws(() -> xticks!(fig; direction = :both), "`direction` must be")
         @test _ax_json(fig.layout) == before
-        @test_throws MethodError xticks!(fig; secondary_y = true)
+        # axes-ticks-13: an unknown keyword names the public function.
+        @test _ax_throws(() -> xticks!(fig; secondary_y = true), "xticks!: unsupported keyword argument(s) `secondary_y`")
 
         # Base-2 log ticks keep the exponent format (no SI suffixes).
         l2 = plot_scatter([4, 8, 16, 24, 32], [1.0, 2, 3, 4, 5]; xscale = "log")
@@ -511,7 +512,7 @@ end
         scene = plot_scatter3d([1.0, 2.0], [1.0, 2.0], [1.0, 2.0])
         @test _ax_throws(() -> xticks!(scene, [1, 2]), "xticks!: tick control applies to Cartesian (xy) cells")
         @test _ax_throws(() -> yticks!(fig, [1]; show = true), "yticks!: figure helpers have no `show` keyword")
-        @test_throws MethodError xticks!(fig, [1e-3]; bogus = 1)
+        @test _ax_throws(() -> xticks!(fig, [1e-3]; bogus = 1), "xticks!: unsupported keyword argument(s) `bogus`")
     end
 
     @testset "axis_equal! (F9)" begin

@@ -1504,7 +1504,9 @@ const _STYLE_TRACE_OFFSET = Base.ScopedValues.ScopedValue(0)
 
 Run `f()` with the style cycle offset by the number of line-style traces
 already in `fig` (a `Plot`, `SyncPlot`, `SubplotFigure` or staged target), and
-return its value. Internal; for code that builds traces on a temporary figure
+return its value. Inside a SubplotFigure call (`_STYLE_CELL` set by the
+delegate, D20) the offset is the number of line-style traces in the target
+cell instead. Internal; for code that builds traces on a temporary figure
 and then appends them to `fig` (the `plot_*!(sf::SubplotFigure, …)` delegate
 builds into an empty `Plot`): calls to [`_apply_style_trace_defaults!`](@ref)
 inside `f` then continue the dash/marker cycle of `fig` instead of restarting
@@ -1517,8 +1519,173 @@ end
 ```
 """
 function _with_style_trace_offset(f, fig)
-	offset = count(_style_is_line_trace, _plot_obj(fig).data)
+	# D20: inside a SubplotFigure call the cycle continues the target cell's
+	# traces only (`_STYLE_CELL`, set by the delegate around the call; `fig`
+	# may then be the figure or its staged copy).
+	scope = _STYLE_CELL[]
+	offset = scope === nothing ? count(_style_is_line_trace, _plot_obj(fig).data) : scope.lines
 	return Base.ScopedValues.with(f, _STYLE_TRACE_OFFSET => offset)
+end
+
+# D20: the style cycle (colour, dash, marker) runs per subplot cell, as each
+# matplotlib Axes has its own property cycle. While a SubplotFigure call
+# builds its traces on the delegate's scratch figure this holds the target
+# cell (`_style_delegate_cell`): `plot` (the figure's model), `key`
+# (`_style_cell_key`), and the number of line-style traces (`lines`) and of
+# all traces (`traces`) the cell already has; the call's dash/marker positions
+# continue from `lines`, its colour positions from `traces` (plotly.js gives
+# every trace a colorway position, as on a plain figure).
+const _STYLE_CELL = Base.ScopedValues.ScopedValue{Any}(nothing)
+
+# Axis reference `ref` ("y3") of letter `letter` resolved through
+# `overlaying`: a twin y axis or a secondary x axis belongs to the cell of the
+# axis it overlays. plotly.js allows one level of `overlaying`.
+function _style_overlay_root(layout::Layout, ref, letter::Char)
+	ref isa Symbol && (ref = String(ref))
+	ref isa AbstractString || return string(ref)
+	key = Symbol(letter == 'x' ? "xaxis" : "yaxis", ref[2:end])
+	over = _cmn_mapping_get(get(layout.fields, key, nothing), :overlaying)
+	over isa Symbol && (over = String(over))
+	return over isa AbstractString && length(over) >= 1 && over[1] == letter ? String(over) : String(ref)
+end
+
+# The subplot cell of a trace of subplot kind `kind` routed by `fields` (its
+# `xaxis`/`yaxis`, `scene`, `subplot`, `geo` or `domain`): ("xy", x, y) with
+# both references resolved through `overlaying` (an inset has axes of its
+# own, so its own cell), (kind, subplot id) for 3-D scenes, polar, ternary,
+# smith, geo and map subplots, ("domain", domain) for pie-like traces.
+function _style_cell_key(layout::Layout, kind::AbstractString, fields)
+	if kind == "xy"
+		return (
+			"xy",
+			_style_overlay_root(layout, get(fields, :xaxis, "x"), 'x'),
+			_style_overlay_root(layout, get(fields, :yaxis, "y"), 'y'),
+		)
+	elseif kind == "domain"
+		return ("domain", PlotlyBase.JSON.json(get(fields, :domain, nothing)))
+	end
+	name = kind == "scene" ? :scene : kind == "geo" ? :geo : :subplot
+	value = get(fields, name, kind)
+	return (String(kind), value isa Union{AbstractString, Symbol} ? String(value) : string(value))
+end
+
+# Cell of `trace` in a figure with layout `layout`; `nothing` for a trace type
+# plotly.js does not know (it belongs to no cell).
+function _style_trace_cell_key(layout::Layout, trace::GenericTrace)
+	value = get(trace.fields, :type, "scatter")
+	value isa Union{AbstractString, Symbol} || return nothing
+	type = Symbol(value)
+	# PlotlyBase's classifier raises a KeyError for a name it does not know.
+	(type in PlotlyBase._TRACE_TYPES || type in _MODERN_MAP_TRACE_TYPES) || return nothing
+	kind = _plotlysupply_subplot_kind_from_trace_type(type)
+	kind isa AbstractString || return nothing
+	return _style_cell_key(layout, kind, trace.fields)
+end
+
+# `_STYLE_CELL` value for a SubplotFigure call on cell (`row`, `col`) of `p`
+# (its secondary y axis with `secondary_y`), or on inset `inset_target`.
+function _style_delegate_cell(p::Plot, row::Int, col::Int, inset_target, secondary_y::Bool, who::AbstractString)
+	key = if inset_target === nothing
+		ref = _subplot_target_ref(p, row, col; secondary_y = secondary_y, who = who)
+		_style_cell_key(p.layout, String(ref.subplot_kind), ref.trace_kwargs.fields)
+	else
+		_style_cell_key(p.layout, "xy", Dict{Symbol, Any}(:xaxis => inset_target.xref, :yaxis => inset_target.yref))
+	end
+	counts = _style_cell_counts(p, key)
+	return (plot = p, key = key, lines = counts.lines, traces = counts.traces)
+end
+
+# Number of line-style traces (`lines`) and of all traces (`traces`) of `p`
+# in the cell `key` (`_style_cell_key`).
+function _style_cell_counts(p::Plot, key)
+	lines = 0
+	traces = 0
+	for trace in p.data
+		trace isa GenericTrace || continue
+		_style_trace_cell_key(p.layout, trace) == key || continue
+		traces += 1
+		_style_is_line_trace(trace) && (lines += 1)
+	end
+	return (lines = lines, traces = traces)
+end
+
+# Trace types whose colour plotly.js takes from the figure-wide colorway, and
+# the attribute that carries it: the scatter family (`line.color`, or
+# `marker.color` without lines), bars (`marker.color`), box/violin
+# (`line.color`; fill and points derive from it) and uniform mesh3d (`color`).
+const _STYLE_CELL_COLOR_SCATTER_TYPES = union(_STYLE_LINE_TRACE_TYPES, Set(["scattermapbox", "scattermap"]))
+const _STYLE_CELL_COLOR_BAR_TYPES = Set(["bar", "histogram", "barpolar", "funnel"])
+const _STYLE_CELL_COLOR_BOX_TYPES = Set(["box", "violin"])
+
+# The updates that give `trace` the colour `color` where plotly.js would take
+# a colorway colour (D20), mirroring plotly.js 2.35 defaults: a scatter line
+# takes the scalar `marker.color` when one is set, markers and error bars take
+# the line colour, a fill the line or marker colour at opacity 0.5; a box or
+# violin line takes `marker.color`. Values the trace sets are kept.
+function _style_cell_color_updates(trace::GenericTrace, color::String)
+	fields = trace.fields
+	type = _style_trace_type(trace)
+	where = "D20 cell colour"
+	updates = Dict{Symbol, Any}()
+	line = _style_container_dict(get(fields, :line, nothing), "line", where)
+	marker = _style_container_dict(get(fields, :marker, nothing), "marker", where)
+	line_color = get(line, :color, nothing)
+	marker_color = get(marker, :color, nothing)
+	scalar_marker = !_style_value_unset(marker_color) && !(marker_color isa AbstractArray)
+	if type in _STYLE_CELL_COLOR_SCATTER_TYPES
+		mode = get(fields, :mode, nothing)
+		flags = mode isa Union{AbstractString, Symbol} ? split(String(mode), '+') : nothing
+		# plotly's default mode always draws lines.
+		has_lines = flags === nothing || "lines" in flags
+		has_markers = flags !== nothing && "markers" in flags
+		if has_lines && _style_value_unset(line_color) && !scalar_marker
+			updates[:line] = _style_update_path(get(fields, :line, nothing), (), Dict{Symbol, Any}(:color => color), "line", where)
+		elseif !has_lines && has_markers && _style_value_unset(marker_color)
+			updates[:marker] = _style_update_path(get(fields, :marker, nothing), (), Dict{Symbol, Any}(:color => color), "marker", where)
+		end
+		fill = get(fields, :fill, nothing)
+		if !has_lines && fill isa Union{AbstractString, Symbol} && String(fill) != "none" &&
+		   _style_value_unset(get(fields, :fillcolor, nothing)) && !scalar_marker
+			updates[:fillcolor] = _rgba(color, 0.5; who = where)
+		end
+	elseif type in _STYLE_CELL_COLOR_BAR_TYPES
+		_style_value_unset(marker_color) && (updates[:marker] =
+			_style_update_path(get(fields, :marker, nothing), (), Dict{Symbol, Any}(:color => color), "marker", where))
+	elseif type in _STYLE_CELL_COLOR_BOX_TYPES
+		_style_value_unset(line_color) && _style_value_unset(marker_color) && (updates[:line] =
+			_style_update_path(get(fields, :line, nothing), (), Dict{Symbol, Any}(:color => color), "line", where))
+	elseif type == "mesh3d"
+		all(name -> _style_value_unset(get(fields, name, nothing)), (:color, :intensity, :vertexcolor, :facecolor)) &&
+			(updates[:color] = color)
+	end
+	return updates
+end
+
+"""
+	_style_write_cell_colors!(p, first_new, scope)
+
+D20: give the traces `p.data[first_new:end]`, which a SubplotFigure call just
+added to the cell `scope` describes (`_style_delegate_cell`), the colour of
+their position in that cell's colour cycle, written on the trace wherever
+plotly.js would otherwise take a colour from the figure-wide colorway: the
+n-th trace of a cell gets colorway entry `scope.traces + n` of the figure's
+colorway (layout, then template; `_default_trace_color`). Explicit colours
+are kept (the trace still takes its position). Internal; the SubplotFigure
+delegate calls it after routing the traces. Returns `nothing`.
+"""
+function _style_write_cell_colors!(p::Plot, first_new::Integer, scope)
+	scope === nothing && return nothing
+	pending = Tuple{Int, Dict{Symbol, Any}}[]
+	for index in first_new:length(p.data)
+		trace = p.data[index]
+		trace isa GenericTrace || continue
+		updates = _style_cell_color_updates(trace, _default_trace_color(p, scope.traces + index - first_new + 1))
+		isempty(updates) || push!(pending, (index, updates))
+	end
+	for (index, updates) in pending
+		merge!(p.data[index].fields, updates)
+	end
+	return nothing
 end
 
 function _style_trace_type(trace::GenericTrace)
@@ -1614,9 +1781,11 @@ a per-point vector — is the caller's and is kept. Filled where unset:
 The cycle position of a trace is its rank among the figure's line-style traces
 (1 for the first), so the cycle continues across `plot_*!` appends and skips
 non-line traces; inside [`_with_style_trace_offset`](@ref) the line-style
-traces of the outer figure are counted too. Colour is never set here: the
+traces of the outer figure are counted too, or, during a SubplotFigure call
+(D20), those of the target cell only. Colour is never set here: the
 `:bw` cycle's single ink colour is the figure colorway (written by
-`_apply_default_template!`).
+`_apply_default_template!`); the per-cell colours of a SubplotFigure are
+written by `_style_write_cell_colors!`.
 
 # Guarantees
 - Idempotent: a second call with the same arguments changes nothing (every
