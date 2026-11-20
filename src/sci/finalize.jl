@@ -2408,7 +2408,31 @@ function _fin_bar_nticks(layout::Layout, item::_FinBar, Wp::Float64, Hp::Float64
 	default = clamp(axis_px / (vertical ? 40.0 : 80.0), 4.0, 9.0) + 1
 	# Two ticks at least: a bar shows where its colour range starts and how it grows.
 	wanted = max(2, floor(Int, axis_px / spacing))
-	return wanted < default ? wanted : nothing
+	wanted < default || return nothing
+	# plotly rounds the step up (`_fin_auto_tick_step`), so more ticks may
+	# still be `spacing` apart (chama_a5: a 84 px bar over 0.17 holds the
+	# 0.05 steps plotly's own count gives; 3 ticks would round to 0.1 and
+	# label only two): the largest count whose labels keep apart and number
+	# two at least (fewer get values of their own, `_fin_bar_two_ticks`),
+	# none when plotly's own count does.
+	lo, hi = item.range === nothing ? (NaN, NaN) : item.range
+	fits(n) = _fin_auto_tick_step(lo, hi, n) / (hi - lo) * axis_px >= spacing && _fin_auto_tick_count(lo, hi, n) >= 2
+	(isfinite(lo) && isfinite(hi) && hi > lo) || return wanted
+	fits(floor(Int, default)) && return nothing
+	for n in (floor(Int, default) - 1):-1:(wanted + 1)
+		fits(n) && return n
+	end
+	return wanted
+end
+
+# The tick step plotly.js 2.35.2 (axes.js autoTicks, linear axis) takes for
+# a range [lo, hi] (finite, lo < hi) asked for `n` ticks: the rough step
+# (hi - lo) / n rounded UP to 2, 5 or 10 x 10^k.
+function _fin_auto_tick_step(lo::Float64, hi::Float64, n::Int)
+	rough = (hi - lo) / n
+	base = exp10(floor(log10(rough)))
+	x = rough / base
+	return (x <= 2 + 1e-9 ? 2.0 : x <= 5 + 1e-9 ? 5.0 : 10.0) * base
 end
 
 # How many labels plotly.js 2.35.2 (axes.js autoTicks, linear axis) draws on
@@ -2419,10 +2443,7 @@ end
 function _fin_auto_tick_count(lo::Float64, hi::Float64, n::Int)
 	# An empty or unknown range has nothing to count (and nothing to fix).
 	(isfinite(lo) && isfinite(hi) && hi > lo && n >= 1) || return typemax(Int)
-	rough = (hi - lo) / n
-	base = exp10(floor(log10(rough)))
-	x = rough / base
-	step = (x <= 2 + 1e-9 ? 2.0 : x <= 5 + 1e-9 ? 5.0 : 10.0) * base
+	step = _fin_auto_tick_step(lo, hi, n)
 	return floor(Int, hi / step + 1e-9) - ceil(Int, lo / step - 1e-9) + 1
 end
 

@@ -1004,7 +1004,15 @@ end
 			(0.0, 1.0), nothing, false)
 		@test _SCB._fin_bar_nticks(Layout(), item, 600.0, 400.0) === nothing
 		item.bar[:len] = 0.25
-		@test _SCB._fin_bar_nticks(Layout(), item, 600.0, 400.0) == 3   # (100 - 20) px / 24 px
+		# (100 - 20) px / 24 px = 3 labels at least 24 px apart; plotly rounds
+		# the step of 4 (0.25) up to 0.5 as well: 40 px apart, so 4. Its own
+		# 5 would step 0.2, 16 px apart.
+		@test _SCB._fin_bar_nticks(Layout(), item, 600.0, 400.0) == 4
+		# A range whose rounded-up default step keeps the labels apart is
+		# left to plotly (chama_a5: 0.17 over an 84 px bar steps 0.05, 24.8 px).
+		short = _SCB._FinBar(1, nothing, nothing, Dict{Symbol, Any}(:len => 0.75, :lenmode => "fraction", :ypad => 0,
+			:tickfont => Dict{Any, Any}(:size => 32 / 3)), (-0.16929663085937496, 0.0), nothing, false)
+		@test _SCB._fin_bar_nticks(Layout(), short, 600.0, 111.88666666666666) === nothing
 	end
 
 	@testset "shared bar of equal-aspect cells: right of the cells, title inside the figure (Z98)" begin
@@ -1039,8 +1047,10 @@ end
 	# `shared_colorbar!` copies the settings of the first cell bar to the shared
 	# bar: that `nticks` is the finalizer's, not the user's, and must not come
 	# along (it stayed at 4 on a bar three rows tall: field_maps, index_maps).
+	# (300 px tall: rows short enough that plotly's own step, 0.5 over the
+	# range -1..1, would set the cell bars' labels closer than 2 em.)
 	make() = begin
-		sf = subplots(3, 1; sync = false, shared_xaxes = true, vertical_spacing = 0.05)
+		sf = subplots(3, 1; sync = false, shared_xaxes = true, vertical_spacing = 0.05, height = 300)
 		for row in 1:3
 			plot_heatmap!(sf, 0:5, 0:2, [sin(i + j + row) for i in 0:5, j in 0:2]; row = row, col = 1,
 				crange = (-1, 1))
