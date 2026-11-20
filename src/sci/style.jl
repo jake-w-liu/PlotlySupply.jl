@@ -1683,14 +1683,17 @@ function _style_cell_color_updates(trace::GenericTrace, color::String)
 		# plotly's default mode always draws lines.
 		has_lines = flags === nothing || "lines" in flags
 		has_markers = flags !== nothing && "markers" in flags
+		# Markers and a fill take `line.color` even without lines (plotly.js
+		# 2.35 scatter marker and fill defaults), so a trace that sets it
+		# (`color = "black"` with `mode = "markers"`) is left alone.
 		if has_lines && _style_value_unset(line_color) && !scalar_marker
 			updates[:line] = _style_update_path(get(fields, :line, nothing), (), Dict{Symbol, Any}(:color => color), "line", where)
-		elseif !has_lines && has_markers && _style_value_unset(marker_color)
+		elseif !has_lines && has_markers && _style_value_unset(marker_color) && _style_value_unset(line_color)
 			updates[:marker] = _style_update_path(get(fields, :marker, nothing), (), Dict{Symbol, Any}(:color => color), "marker", where)
 		end
 		fill = get(fields, :fill, nothing)
 		if !has_lines && fill isa Union{AbstractString, Symbol} && String(fill) != "none" &&
-		   _style_value_unset(get(fields, :fillcolor, nothing)) && !scalar_marker
+		   _style_value_unset(get(fields, :fillcolor, nothing)) && !scalar_marker && _style_value_unset(line_color)
 			updates[:fillcolor] = _rgba(color, 0.5; who = where)
 		end
 	elseif type in _STYLE_CELL_COLOR_BAR_TYPES

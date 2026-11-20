@@ -848,6 +848,25 @@ end
 # unbounded tick vector.
 const _CMN_MAX_LOG_DECADES = 2000
 
+# Labels of the `subs` ticks of a base-10 log axis in one format, the power
+# format of the package's decade labels (plotly's "1", "10", "10ⁿ"): a tick
+# m·10ⁿ reads "m×10ⁿ", written out as a number for n = 0 and 1 ("2", "50")
+# as plotly writes 1 and 10.
+function _cmn_subs_ticktext(tickvals::AbstractVector{<:Real})
+	return map(tickvals) do v
+		n = floor(Int, log10(v) + 1e-9)
+		m = v / exp10(n)
+		# Mantissas are the `subs` entries, at most a few digits.
+		mant = isapprox(m, round(m); atol = 1e-9) ? string(round(Int, m)) : string(round(m; sigdigits = 6))
+		if n in (0, 1)
+			return _axes_format_number(Float64(v))
+		elseif isapprox(m, 1; atol = 1e-9)
+			return "10<sup>" * (n < 0 ? "−" : "") * string(abs(n)) * "</sup>"
+		end
+		return mant * "×10<sup>" * (n < 0 ? "−" : "") * string(abs(n)) * "</sup>"
+	end
+end
+
 function _cmn_normalized_subs(subs, base::Float64, who::AbstractString)
 	values = if subs isa Real
 		(subs,)
@@ -1338,6 +1357,10 @@ function _apply_ticks!(
 			"$(who): tick `labels` need tick `values` (or `subs`).",
 		))
 		ticktext = _cmn_tick_labels(labels, length(tickvals), who)
+	elseif subs !== nothing && isempty(format) && isempty(exponentformat)
+		# docs-10: plotly formats each array tick on its own (0.01 ... 5000,
+		# then "1×10⁴"); one format for the whole axis instead.
+		ticktext = _cmn_subs_ticktext(tickvals)
 	end
 
 	decade_step = preset === :decades ?

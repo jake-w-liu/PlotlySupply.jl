@@ -677,7 +677,7 @@ _axes_offset_owner(key::Symbol) = "$(_AXES_OFFSET_NAME):$(_cmn_axis_ref(key))"
 function _axes_has_offset(fig, key::Symbol)
 	existing = get(_cmn_layout(fig).fields, :annotations, nothing)
 	existing isa AbstractVector || return false
-	owner = _axes_offset_owner(key)
+	owner = _axes_offset_owner(_axes_offset_label_axis(fig, key))
 	return any(item -> _cmn_name_matches(_cmn_item_name(item), owner), existing)
 end
 
@@ -835,9 +835,38 @@ end
 # The "×10^k" annotation at the end of axis `key` of cell `t`: an x axis at
 # its right end below (above, for a top axis) the tick labels, a y axis above
 # its top end (right-aligned with a left axis's tick labels).
+# axes-ticks-01: the axis of `key`'s shared (`matches`) group that shows the
+# tick labels the factor applies to: `key` itself when it shows labels, else
+# the first member that does (subplots with shared axes show the labels on
+# one cell only), else `key`.
+function _axes_offset_label_axis(fig, key::Symbol)
+	fields = _cmn_layout(fig).fields
+	shows(k) = (entry = get(fields, k, nothing);
+		_cmn_mapping_get(entry, :showticklabels) !== false && _cmn_mapping_get(entry, :visible) !== false)
+	shows(key) && return key
+	root = _fin_match_root(fields, key)
+	root === nothing && return key
+	letter = String(key)[1]
+	members = sort!(
+		Symbol[k for k in keys(fields) if _fin_is_axis_key(k) && String(k)[1] == letter && _fin_match_root(fields, k) === root];
+		by = k -> (length(String(k)), String(k)),
+	)
+	for k in members
+		shows(k) && return k
+	end
+	return key
+end
+
+# The factor annotation of axis `key` (the labelled axis of its group): in
+# the domain of `key` and of the axis it is anchored to.
 function _axes_offset_annotation(fig, t::_CellTarget, key::Symbol, letter::Char, k::Int)
 	layout = _cmn_layout(fig)
 	entry = get(layout.fields, key, nothing)
+	anchor = _cmn_mapping_get(entry, :anchor)
+	own_ref = _cmn_axis_ref(key)
+	other_ref = anchor isa AbstractString && occursin(r"^[xy]\d*$", anchor) ? String(anchor) :
+		(letter == 'x' ? t.yref : t.xref)
+	xref, yref = letter == 'x' ? (own_ref, other_ref) : (other_ref, own_ref)
 	root_size = _tight_root_font_size(name -> get(layout.fields, name, nothing))
 	tickfont = _cmn_mapping_get(entry, :tickfont)
 	size = _axes_size(_cmn_mapping_get(tickfont, :size), root_size)
@@ -851,8 +880,8 @@ function _axes_offset_annotation(fig, t::_CellTarget, key::Symbol, letter::Char,
 	fields = Dict{Symbol, Any}(
 		:text => _label("\$\\times 10^{$(k)}\$"),
 		:showarrow => false,
-		:xref => "$(t.xref) domain",
-		:yref => "$(t.yref) domain",
+		:xref => "$(xref) domain",
+		:yref => "$(yref) domain",
 		:font => attr(; font...),
 	)
 	if letter == 'x'
@@ -931,16 +960,17 @@ function _axes_ticks!(
 		who = who,
 	)
 	clear && _cmn_delete_layout_fields!(fig, key, (:tickmode, :tickvals, :ticktext))
+	label_key = _axes_offset_label_axis(fig, key)
 	if exponent !== nothing
 		_upsert_named!(
 			fig,
 			:annotations,
-			_axes_offset_owner(key),
-			[_axes_offset_annotation(fig, t, key, letter, exponent)];
+			_axes_offset_owner(label_key),
+			[_axes_offset_annotation(fig, t, label_key, letter, exponent)];
 			who = who,
 		)
 	elseif drop_factor
-		_upsert_named!(fig, :annotations, _axes_offset_owner(key), Any[]; who = who)
+		_upsert_named!(fig, :annotations, _axes_offset_owner(label_key), Any[]; who = who)
 	end
 	_axes_select!(fig, t)
 	_axes_finish!(fig)
@@ -2055,7 +2085,33 @@ function _axes_equal!(
 		_s3_finish_scene!(fig, t, state)
 		_s3_finish_ticks!(fig, t, state)
 	else
+		# axes-ticks-04: plotly.js 2.35 ignores `scaleanchor` on an axis that
+		# has `matches` (a shared y of a subplot row), which left the cell
+		# unconstrained. The constraint then goes on the cell's x axis
+		# instead (one x unit = 1/ratio y units: the same aspect); with both
+		# axes shared there is no free axis to constrain.
+		swap = false
+		if t.kind === :xy
+			fields = _cmn_layout(fig).fields
+			matched(key) = _cmn_mapping_get(get(fields, key, nothing), :matches) !== nothing
+			if matched(t.ykey)
+				matched(t.xkey) && throw(ArgumentError(
+					"$(who): both axes of this cell are shared with other cells " *
+					"(`matches`), and plotly.js cannot lock the aspect of a shared " *
+					"axis; share at most one of them.",
+				))
+				swap = true
+			end
+		end
 		_apply_equal_aspect!(fig, t; ratio = ratio, who = who)
+		if swap
+			_cmn_delete_layout_fields!(fig, t.ykey, (:scaleanchor, :scaleratio))
+			_cmn_merge_layout_key!(
+				fig,
+				t.xkey,
+				Dict{Symbol, Any}(:scaleanchor => t.yref, :scaleratio => 1 / Float64(ratio), :constrain => "domain"),
+			)
+		end
 		# plotly.js ignores one-sided limits (D11) on aspect-linked axes.
 		if t.kind === :xy
 			roots = (_axes_match_root(fig, t.xkey, who), _axes_match_root(fig, t.ykey, who))
@@ -2079,7 +2135,11 @@ Lock the data aspect ratio of a figure, SubplotFigure cell or inset
 (matplotlib `set_aspect`). One y data unit spans `ratio` times the pixels of
 one x data unit: the cell's y axis gets `scaleanchor = <cell x>`,
 `scaleratio = ratio`, and both axes get `constrain = "domain"`, so explicit
-ranges are honoured and the plot area shrinks instead. A 3-D scene cell gets
+ranges are honoured and the plot area shrinks instead. When the cell's y axis
+is shared with other cells (`subplots(...; shared_yaxes = true)`), which
+plotly.js cannot constrain, its x axis gets `scaleanchor = <cell y>`,
+`scaleratio = 1/ratio` (the same aspect); a cell whose x and y axes are both
+shared throws an `ArgumentError`. A 3-D scene cell gets
 `aspectmode = "data"` (only `ratio = 1`).
 
 # Keywords

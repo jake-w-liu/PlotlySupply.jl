@@ -274,14 +274,14 @@ end
 				# A dark custom template gets a light frame and a dark legend box.
 				@test _rs_get(fig, :xaxis)[:linecolor] == "#eeeeee"
 				@test _rs_get(fig, :legend)[:bgcolor] == "rgba(5,5,40,0.72)"
-				@test _RS._style_template(PlotStyle()) === custom
+				@test _RS._style_template(PlotStyle()) === _RS._resolve_template(custom)
 				# set_template! with no template applies the Template default.
 				other = plot_scatter(1:3, 1:3)
 				set_template!(other, :ggplot2)
 				set_template!(other)
-				@test other.layout.fields[:template] == custom
+				@test other.layout.fields[:template] == _RS._resolve_template(custom)
 				heat = plot_heatmap([1 2; 3 4])
-				@test heat.layout.fields[:template] == custom
+				@test heat.layout.fields[:template] == _RS._resolve_template(custom)
 				# Invalid values leave the default unchanged.
 				@test_throws ArgumentError set_default_template!(3)
 				@test get_default_template() === custom
