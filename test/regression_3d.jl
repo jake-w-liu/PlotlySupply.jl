@@ -1409,7 +1409,8 @@ const _V6_TOPO_EXPORT = (width = 6.6, height = 2.0, units = :in, dpi = 200, tigh
 		sf = _v6_topo_cell()
 		d = _v6_drawing(sf; _V6_TOPO_EXPORT...)[:scene]
 		@test d.own
-		@test d.mark.titles == ("Material scale α", "Time step Δ t/T<sub>h</sub>", "Frequency ratio R")
+		# TeX drops the source space of `\Delta t` (v7 tm-tex-plain-spaces).
+		@test d.mark.titles == ("Material scale α", "Time step Δt/T<sub>h</sub>", "Frequency ratio R")
 		@test length(d.placed) == 3
 		# the live figure (framed for the layout size) carries the same
 		figsize!(sf, 6.6, 2.0; units = :in)

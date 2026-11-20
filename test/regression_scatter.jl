@@ -1064,11 +1064,12 @@ end
 	relayout!(user; legend_x = 0.5)
 	plot_scatter!(user, 1:10, collect(1:10); legend = "third")
 	@test placement(user)[1] == 0.5
-	# Unknown extents (categories, bars) keep the default corner.
-	@test placement(plot_scatter(["a", "b"], [1, 2]; legend = "cat")) == TR
+	# Categories and bars are scored too (v7 vm-05/style-03): rising data
+	# takes the top right and leaves the top left free.
+	@test placement(plot_scatter(["a", "b"], [1, 2]; legend = "cat")) == TL
 	mixed = plot_bar(1:10, (1:10) .^ 2; legend = "bars")
 	plot_scatter!(mixed, 1:10, (1:10) .^ 2; legend = "line")
-	@test placement(mixed) == TR
+	@test placement(mixed) == TL
 	# Off while another default position is set.
 	try
 		set_default_legend_position!(:bottomleft)

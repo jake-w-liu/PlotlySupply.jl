@@ -1090,7 +1090,10 @@ end
                 ])
             end
             if tkw !== nothing
-                push!(cases, ("title!", f -> title!(f, L"Run $\alpha$"; tkw...), Set([tkey]), f -> true))
+                # A math figure title also records its pin shift in
+                # `layout.meta` (v7 tm-title-top-clip, `_lt_pin_title!`).
+                push!(cases, ("title!", f -> title!(f, L"Run $\alpha$"; tkw...),
+                    tkey === :title ? Set([:title, :meta]) : Set([tkey]), f -> true))
                 push!(cases, ("panel_labels!", f -> panel_labels!(f; pkw...), Set([:annotations]), f -> true))
             end
             for (helper, call, expected, check) in cases

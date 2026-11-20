@@ -641,8 +641,13 @@ using PlotlySupply
 			relayout!(tex_title, annotations = [PB.attr(text = "above", x = 0.5, y = 1, xref = "paper", yref = "paper", yanchor = "bottom", showarrow = false)])
 			tight_layout!(tex_title)
 			title_size = round(1.4 * 12)
+			# The margin holds the title above the annotation line, and the band
+			# the room providers give a pinned math title (v7 tm-title-top-clip:
+			# its pad.t includes the shift that keeps its first row inside).
+			band = PS._room_slot(PS._room_plan(tex_title), PS._LT_OWNER, "figure_title")
+			@test band.px >= 2 * 1.3 * title_size
 			@test sd(tex_title.layout.fields[:margin])[:t] ==
-				  4 + ceil(12 * 1.3 + 4) + ceil(2 * 1.3 * title_size + 4)
+				  max(4 + ceil(12 * 1.3 + 4) + ceil(2 * 1.3 * title_size + 4), ceil(band.offset + band.px + PS._ROOM_GAP))
 
 			sp, scripts = fake_syncplot(plot_scatter(1:3, [1, 2, 3]; title = "T"))
 			@test tight_layout!(sp) === nothing
