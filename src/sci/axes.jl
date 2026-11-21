@@ -488,15 +488,16 @@ function _axes_range!(
 		)
 		axis_type isa Symbol && (axis_type = String(axis_type))
 		axis_type isa AbstractString || (axis_type = "-")
-		# The bounds the scene axis can show (errors-inputs-12): numbers on a
-		# numeric axis, dates on a date axis, as on Cartesian axes.
-		_s3_require_range_types(checked, layout, t.scenekey, letter - 'w', who, "range", _cmn_plot(fig).data)
 		value = _axes_axis_range_value(
 			checked,
 			axis_type,
 			who,
 			r -> Float64[_axes_log10_bound(b, who) for b in r],
 		)
+		# The bounds an autotyped scene axis can show (errors-inputs-12):
+		# numbers on one its data make numeric, dates on a date axis, as on
+		# Cartesian axes.
+		_s3_require_range_types(checked, layout, t.scenekey, letter - 'w', who, "range", _cmn_plot(fig).data)
 		_is_one_sided_range(value) &&
 			(value = _axes_scene_limit_range(fig, t.scenekey, letter, value, who))
 		state = _s3_scene_state(fig, t)
