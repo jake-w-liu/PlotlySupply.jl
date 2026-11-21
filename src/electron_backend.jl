@@ -853,6 +853,13 @@ function _create_syncplot_window(
 		sp = SyncPlot(p, electron_app, window, divid, resources)
 		finalizer(_finalize_syncplot!, sp)
 		_watch_syncplot_window!(sp, ec; retain = options.show)
+		# A 3-D figure without a size of its own is framed for the size this
+		# window draws it at (threed-live-07, `_s3_frame_for_window!`).
+		_s3_frame_for_window!(sp, () -> Base.invokelatest(() -> ec.run(
+			window,
+			"(() => { const d = document.getElementById($(_json_js(divid))); " *
+			"return d && d._fullLayout ? [d._fullLayout.width, d._fullLayout.height] : null; })()",
+		)))
 		return sp
 	catch
 		if sp !== nothing

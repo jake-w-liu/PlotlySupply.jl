@@ -1,4 +1,4 @@
-using Test, PlotlySupply
+using Test, PlotlySupply, Dates
 
 # Regression tests for the audit findings fixed in the 3-D track (v2
 # "threed"). Each testset names its finding id and fails on the 1.x code.
@@ -1739,5 +1739,317 @@ end
 		@test PS._s3_scene_pads(PlotlyBase.Plot(GenericTrace[], stage), :scene) == (7.0, 15.0)
 		@test stage.fields[:meta] !== shared
 		@test shared[Symbol("plotlysupply:gl3d")][:scene] == [9.5, 17.0]
+	end
+end
+
+@testset "v8 r1 threed" begin
+	PS = PlotlySupply
+	settled(fig) = (j = _r3_json(fig); !PS._finalize_figure!(fig) && _r3_json(fig) == j)
+	arg_error(f, prefix) = (e = try f(); nothing catch err; err end; e isa ArgumentError && startswith(e.msg, prefix))
+
+	@testset "apib-09: plot_wireframe of an empty grid draws nothing instead of a BoundsError" begin
+		for (x, y, Z) in ((Float64[], Float64[], zeros(0, 0)), ([0.0], Float64[], zeros(1, 0)), (Float64[], [0.0, 1], zeros(0, 2)))
+			fig = plot_wireframe(x, y, Z)
+			t = fig.data[1].fields
+			@test isempty(t[:x]) && isempty(t[:y]) && isempty(t[:z])
+			@test settled(fig)
+			g = plot_wireframe([0.0, 1], [0.0, 1], [0.0 1; 1 0])
+			@test plot_wireframe!(g, x, y, Z) === nothing
+			@test length(g.data) == 2 && isempty(g.data[2].fields[:x])
+		end
+		# A non-empty grid is unchanged: every stride-th line plus the last.
+		@test PS._s3_stride_lines(5, 2) == [1, 3, 5]
+		@test PS._s3_stride_lines(0, 3) == Int[]
+		@test PS._s3_stride_lines(4, 0) == Int[]
+	end
+
+	@testset "errors-inputs-11: a non-array surfacecolor is an ArgumentError" begin
+		Z = [1.0 2; 3 4]
+		for bad in (:abc, missing, sin, "abc", 1.5)
+			@test arg_error(() -> plot_surface(Z; surfacecolor = bad), "plot_surface: ")
+			fig = plot_surface(Z)
+			before = _r3_json(fig)
+			@test arg_error(() -> plot_surface!(fig, Z; surfacecolor = bad), "plot_surface!: ")
+			@test _r3_json(fig) == before
+		end
+		# An empty array still means "no colour array".
+		@test !haskey(plot_surface(Z; surfacecolor = Float64[]).data[1].fields, :surfacecolor)
+		@test plot_surface(Z; surfacecolor = [1.0 0; 0 1]).data[1].fields[:surfacecolor] == [1.0 0; 0 1]
+	end
+
+	@testset "errors-inputs-12: scene range bounds must suit the scene axis" begin
+		Z = [1.0 2; 3 4]
+		bad_bounds = (("a", "b"), (1 + 2im, 2), (Dates.Date(2020), Dates.Date(2021)), (Dates.Day(1), Dates.Day(2)),
+			('a', 'b'), (Dates.Time(1), Dates.Time(2)))
+		for r in bad_bounds
+			@test arg_error(() -> plot_surface(Z; zrange = r), "plot_surface: ")
+			@test arg_error(() -> plot_surface([1.0, 2], [1.0, 2], Z; xrange = r), "plot_surface: ")
+			fig = plot_surface(Z)
+			before = _r3_json(fig)
+			@test arg_error(() -> zrange!(fig, r), "zrange!: ")
+			@test arg_error(() -> plot_surface!(fig, Z; yrange = r), "plot_surface!: ")
+			@test arg_error(() -> scene!(fig; zrange = r), "scene!: ")
+			@test _r3_json(fig) == before
+			s = plot_scatter3d([1.0, 2], [1.0, 2], [1.0, 2])
+			@test arg_error(() -> xrange!(s, r), "xrange!: ")
+		end
+		# Numbers stay valid; a scene axis of dates takes dates.
+		@test _r3_scene(plot_surface(Z; zrange = (0, 5)))[:zaxis][:range] == [0, 5]
+		d = plot_scatter3d([Dates.Date(2020, 1, k) for k in 1:3], [1.0, 2, 3], [1.0, 2, 3])
+		xrange!(d, (Dates.Date(2020, 1, 1), Dates.Date(2020, 1, 5)))
+		@test _r3_scene(d)[:xaxis][:range] == [Dates.Date(2020, 1, 1), Dates.Date(2020, 1, 5)]
+		@test arg_error(() -> xrange!(d, ("a", "b")), "xrange!: ")
+		# On a subplot cell too.
+		sf = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec(kind = "scene")])
+		plot_surface!(sf, Z; row = 1, col = 2)
+		@test arg_error(() -> zrange!(sf, ("a", "b"); row = 1, col = 2), "zrange!: ")
+	end
+
+	@testset "threed-live-09: view! with the default zoom undoes an earlier orthographic zoom" begin
+		aspect(f) = (s = _r3_scene(f); a = get(s, :aspectratio, nothing);
+			(get(s, :aspectmode, nothing), a === nothing ? nothing : round.((a[:x], a[:y], a[:z]); digits = 9)))
+		xs = range(-2, 2; length = 21); ys = range(-1, 1; length = 11)
+		G = [exp(-x^2 - 4y^2) for x in xs, y in ys]
+		fresh = plot_surface(xs, ys, G)
+		view!(fresh; elev = 90, azim = -90, projection = "orthographic")
+		fig = plot_surface(xs, ys, G)
+		view!(fig; elev = 90, azim = -90, projection = "orthographic", zoom = 2)
+		zoomed = aspect(fig)
+		@test zoomed[1] == "manual" && maximum(zoomed[2]) ≈ 2
+		view!(fig; elev = 90, azim = -90, projection = "orthographic", zoom = 2)
+		@test aspect(fig) == zoomed                 # repeats do not compound
+		view!(fig; elev = 90, azim = -90, projection = "orthographic")
+		@test aspect(fig) == aspect(fresh)          # zoom 1: as on a fresh figure
+		@test _r3_json(fig)["layout"]["scene"]["camera"] == _r3_json(fresh)["layout"]["scene"]["camera"]
+		view!(fig; elev = 90, azim = -90, projection = "orthographic", zoom = 3)
+		view!(fig; elev = 30, azim = -60, projection = "perspective")
+		p2 = plot_surface(xs, ys, G)
+		view!(p2; elev = 30, azim = -60, projection = "perspective")
+		@test aspect(fig) == aspect(p2)
+		@test settled(fig)
+		# A user's manual aspect from before the zoom comes back; one set after it is kept.
+		u = plot_surface(xs, ys, G)
+		scene!(u; aspectratio = (1, 1, 0.5))
+		view!(u; projection = "orthographic", zoom = 2)
+		view!(u; projection = "orthographic")
+		@test aspect(u) == ("manual", (1.0, 1.0, 0.5))
+		view!(u; projection = "orthographic", zoom = 2)
+		scene!(u; aspectratio = (3, 1, 1))
+		view!(u; projection = "orthographic")
+		@test aspect(u) == ("manual", (3.0, 1.0, 1.0))
+	end
+
+	@testset "apib-06: 3-D constructors with a TeX colorbar title on the right return settled figures" begin
+		Z = [1.0 2 3; 4 5 6]
+		figs = (
+			plot_surface(Z; colorbar_title = "\$T\$", colorbar_title_side = :right),
+			plot_volume(collect(0.0:1), collect(0.0:1), collect(0.0:1), reshape(collect(1.0:8), 2, 2, 2);
+				colorbar_title = "\$T\$", colorbar_title_side = :right),
+			plot_quiver3d([0.0], [0.0], [0.0], [1.0], [1.0], [1.0]; colorbar_title = "\$T\$", colorbar_title_side = :right),
+			plot_polygons3d([0.0, 1, 0], [0.0, 0, 1], [0.0, 0, 0], [1 2 3], [1.0]; colorbar_title = "\$T\$", colorbar_title_side = :right),
+			with_style(() -> plot_surface(Z; colorbar_title = "\$\\theta\$ (K)", colorbar_title_side = :right), :ieee),
+		)
+		for fig in figs
+			@test settled(fig)
+		end
+		# The room was made at construction: the right margin is the grown one.
+		@test _r3_fields(figs[1].layout.fields[:margin])[:r] > 50
+	end
+
+	@testset "O11: an array changed in place re-frames at the next call" begin
+		# A scatter3d has no colour range that would change the plot area.
+		t = collect(range(0, 4π; length = 200))
+		zs = sin.(t)
+		fig = plot_scatter3d(cos.(t), t, zs)
+		zs .*= 20
+		@test PS._finalize_figure!(fig)              # the framing noticed the new extent
+		@test _r3_json(fig)["layout"]["scene"] == _r3_json(plot_scatter3d(cos.(t), t, copy(zs)))["layout"]["scene"]
+		@test settled(fig)
+		# Corner-trimmed tick values follow the data (threed-live-01's case).
+		W = [exp(-x^2 - 4y^2) for x in range(-2, 2; length = 41), y in range(-1, 1; length = 21)]
+		g = with_style(() -> plot_surface(W), :ieee)
+		W .+= 5
+		PS._finalize_figure!(g)
+		mine = _r3_json(g)["layout"]["scene"]
+		fresh = _r3_json(with_style(() -> plot_surface(copy(W)), :ieee))["layout"]["scene"]
+		for axis in ("xaxis", "yaxis", "zaxis")
+			@test mine[axis] == fresh[axis]       # ticks and trimmed tick values follow the data
+		end
+		# The camera agrees to rounding (a refit from the previous camera, not a fresh fit).
+		@test isapprox([mine["camera"]["eye"][k] for k in ("x", "y", "z")], [fresh["camera"]["eye"][k] for k in ("x", "y", "z")]; rtol = 1e-12)
+		# The memo stays cheap: a settled scene is not framed again.
+		hit = minimum(@allocated(PS._s3_finalize_scenes!(fig)) for _ in 1:3)
+		empty!(PS._S3_FIT_MEMO)
+		PS._s3_finalize_scenes!(fig)
+		empty!(PS._S3_FIT_MEMO)
+		miss = @allocated PS._s3_finalize_scenes!(fig)
+		@test hit < miss / 4
+	end
+
+	@testset "mr-03/perf-quiver3d: quiver3d validation and later mutations do not allocate per arrow" begin
+		amin(f) = (f(); minimum(_ -> @allocated(f()), 1:3))
+		per_arrow = Float64[]
+		mutation = Float64[]
+		fields = Int[]
+		for n in (1_000, 20_000)
+			x, y, z, u, v, w = (rand(n) for _ in 1:6)
+			field = amin(() -> PS._s3_vector_field("plot_quiver3d", "x" => x, "y" => y, "z" => z, "u" => u, "v" => v, "w" => w))
+			push!(fields, field)
+			push!(per_arrow, amin(() -> plot_quiver3d(x, y, z, u, v, w)) / n)
+			fig = plot_quiver3d(x, y, z, u, v, w)
+			push!(mutation, amin(() -> title!(fig, "t")))
+		end
+		# A bit mask of the finite arrows (under 1 B per arrow) and a fixed
+		# part, not about 1.6 KB per arrow.
+		@test fields[1] < 8_000
+		@test fields[2] - fields[1] < 19_000
+		@test per_arrow[2] < 250                       # 1730 B per arrow before
+		@test mutation[2] < 1.5 * mutation[1] + 200_000  # title! does not grow with the arrows
+		# Non-finite vectors are still skipped with one warning, in order.
+		out = @test_logs (:warn, r"skipped 1 vector") PS._s3_vector_field("t", "x" => [0.0, 1, 2], "u" => [1.0, NaN, 1])
+		@test out == ([0.0, 2], [1.0, 1])
+		@test arg_error(() -> PS._s3_vector_field("t", "x" => Any[0.0, "a"], "u" => [1.0, 2]), "t: `x[2]`")
+		# The cone colour range is the range of the vector norms.
+		c = plot_quiver3d([0.0, 1], [0.0, 1], [0.0, 1], [3.0, 0], [4.0, 0], [0.0, 1])
+		@test PS._cbar_slot_range(c.data[1], PS._cbar_slot(c.data[1], 1)) == (1.0, 5.0)
+		@test collect(PS._CbarConeNorms(Any[3, nothing], [4.0, 1], [0.0, 1])) |> v -> v[1] == 5.0 && isnan(v[2])
+	end
+
+	@testset "threed-live-04: no two tick labels on each other at a corner for user cameras" begin
+		mesh() = plot_mesh3d([0.0, 1, 0, 0], [0.0, 0, 1, 0], [0.0, 0, 0, 1]; i = [0, 0, 0, 1], j = [1, 2, 3, 2], k = [2, 3, 1, 3],
+			intensity = [1.0, 2, 3, 4], intensitymode = "cell", edges = true, colorbar_title = "face")
+		with_style(:ieee) do
+			for e in -60:30:60, a in 0:30:330
+				fig = mesh()
+				figsize!(fig, :ieee; columns = 1)
+				view!(fig; elev = e, azim = a)
+				@test PS._s3_drawn_score(fig, :scene)[1] == 0
+				@test !PS._finalize_figure!(fig)
+			end
+		end
+		@test PS._s3_finer_ticks((-0.03, 1.03), 1.0) == ([0.0, 0.5, 1.0], 0.5)
+	end
+
+	@testset "O9: scatter3d figures and grids settle in one finalize under every style" begin
+		pts = collect(range(-1, 1; length = 40))
+		for style in (:default, :ieee, :nature), (rows, cols) in ((1, 1), (1, 2), (2, 2))
+			sf = with_style(style) do
+				sf = subplots(rows, cols; sync = false, specs = fill(Spec(kind = "scene"), rows, cols))
+				for r in 1:rows, c in 1:cols
+					plot_scatter3d!(sf, pts, sin.(3 .* pts), cos.(2 .* pts); row = r, col = c, mode = "lines+markers")
+				end
+				sf
+			end
+			@test settled(sf.plot)
+			small = with_style(style) do
+				f = plot_scatter3d(pts, sin.(3 .* pts), cos.(2 .* pts))
+				figsize!(f, 240, 200; units = :px)
+				f
+			end
+			@test settled(small)
+			@test settled(with_style(() -> plot_scatter3d(pts, sin.(3 .* pts), cos.(2 .* pts)), style))
+		end
+	end
+
+	# The box of scene `key` as drawn by the export renderer: the bounding box
+	# (figure px) of the strongly coloured pixels (the viridis surface; labels
+	# and box lines are grey) inside the scene's cell.
+	function drawn_surface_box(fig, key::Symbol = :scene)
+		p = fig isa SubplotFigure ? fig.plot : fig
+		prepared = PS._prepare_export(p, ("png",), NamedTuple()).renderer
+		w = prepared.options.width
+		h = prepared.options.height
+		area = PS._s3_plot_area(p)
+		t = PS._s3_layout_target(p, key)
+		pw, ph = w - area.l - area.r, h - area.t - area.b
+		cell = (area.l + pw * t.xdomain[1], area.l + pw * t.xdomain[2], area.t + ph * (1 - t.ydomain[2]), area.t + ph * (1 - t.ydomain[1]))
+		body = """
+$(PS._EXPORT_RESET_DIV_JS)
+    const layout = Object.assign({}, $(prepared.layout_js), {width: $(PS._json_js(w)), height: $(PS._json_js(h))});
+    await Plotly.newPlot(div, $(prepared.data_js), layout, Object.assign({}, $(prepared.config_js)));
+    const url = await Plotly.toImage(div, {format: 'png', width: $(PS._json_js(w)), height: $(PS._json_js(h)), scale: 1});
+    const img = new Image(); img.src = url; await img.decode();
+    const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
+    const cx = cv.getContext('2d'); cx.drawImage(img, 0, 0);
+    const px = cx.getImageData(0, 0, cv.width, cv.height).data;
+    const c = $(PS._json_js(collect(cell)));
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let y = Math.max(0, Math.floor(c[2])); y < Math.min(cv.height, Math.ceil(c[3])); y++) {
+      for (let x = Math.max(0, Math.floor(c[0])); x < Math.min(cv.width, Math.ceil(c[1])); x++) {
+        const i = 4 * (y * cv.width + x); const r = px[i], g = px[i + 1], b = px[i + 2];
+        if (Math.max(r, g, b) - Math.min(r, g, b) > 60) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      }
+    }
+    return JSON.stringify([x0, x1, y0, y1]);
+"""
+		raw = PS._with_export_window(PS._EXPORT_STATE) do ec, app, win, divid
+			Base.invokelatest(() -> ec.run(win, PS._guarded_export_script(divid, 60.0, body)))
+		end
+		return PlotlyBase.JSON.parse(raw), cell
+	end
+
+	@testset "vm-mixed3d: a scene next to a heatmap fills its cell under the sized styles" begin
+		xs = range(-2, 2; length = 31)
+		Z = [exp(-(x^2 + y^2)) for x in xs, y in xs]
+		for style in (:default, :ieee, :aps), eq in (true, false)
+			sf = with_style(style) do
+				sf = subplots(1, 2; sync = false, specs = [Spec() Spec(kind = "scene")])
+				plot_heatmap!(sf, xs, xs, Z; row = 1, col = 1, colorscale = "viridis", colorbar_title = "\$u\$", equalar = eq,
+					xlabel = "\$x\$ (m)", ylabel = "\$y\$ (m)")
+				plot_surface!(sf, xs, xs, Z; row = 1, col = 2, colorscale = "viridis", showscale = false,
+					xlabel = "\$x\$ (m)", ylabel = "\$y\$ (m)", zlabel = "\$u\$")
+				panel_labels!(sf; labels = :abc, format = "({})")
+				sf
+			end
+			@test settled(sf.plot)
+			# The model: no label on another and nothing outside the cell.
+			@test PS._s3_drawn_score(sf.plot, :scene) == (0, 0.0)
+			# Rendered: the surface spans at least 45 % of the cell's width
+			# (0.31 under :ieee before, its titles outside the cell; 0.48 to
+			# 0.53 now, 0.49 under :aps and 0.69 under :default, where the
+			# tick labels and titles take a smaller share of the cell).
+			box, cell = drawn_surface_box(sf)
+			@test (box[2] - box[1]) / (cell[2] - cell[1]) >= 0.45
+		end
+	end
+
+	@testset "threed-live-07: a window frames an unsized 3-D figure for the size it draws it at" begin
+		xs = range(-2, 2; length = 41); ys = range(-1, 1; length = 21)
+		G = [exp(-x^2 - 4y^2) for x in xs, y in ys]
+		fig = plot_surface(xs, ys, G; xlabel = "frequency f (GHz)", ylabel = "wavenumber k (1/m)", zlabel = "amplitude |E| (V/m)")
+		@test PS._s3_window_size(fig.layout) === nothing
+		sp = to_syncplot(fig; width = 420, height = 320, show = false)
+		try
+			drawn = Base.invokelatest(() -> PS._syncplot_backend(sp).run(sp.window,
+				"(() => { const d = document.getElementById($(PS._json_js(sp.divid))); return [d._fullLayout.width, d._fullLayout.height]; })()"))
+			@test PS._s3_window_size(sp.plot.layout) == (Float64(drawn[1]), Float64(drawn[2]))
+			@test PS._s3_plot_area(sp.plot).width == drawn[1]
+			# Framed for that size: the same framing as an export at that size,
+			# and the window shows it (its camera is the figure's).
+			copy_plot = deepcopy(sp.plot)
+			@test !PS._s3_finalize_scenes!(copy_plot, (Float64(drawn[1]), Float64(drawn[2])))
+			eye = Base.invokelatest(() -> PS._syncplot_backend(sp).run(sp.window,
+				"(() => { const d = document.getElementById($(PS._json_js(sp.divid))); return d.layout.scene.camera.eye; })()"))
+			mine = _r3_scene(sp.plot)[:camera][:eye]
+			@test isapprox([eye["x"], eye["y"], eye["z"]], [mine[:x], mine[:y], mine[:z]]; rtol = 1e-9)
+			@test PS._s3_drawn_score(sp.plot, :scene) == (0, 0.0)
+			@test settled(sp.plot)
+			# A later call keeps the window's framing (settled for that size).
+			title!(sp, "run")
+			@test PS._s3_window_size(sp.plot.layout) == (Float64(drawn[1]), Float64(drawn[2]))
+			@test settled(sp.plot)
+		finally
+			close(sp)
+		end
+		# A figure with a size of its own is not touched.
+		sized = plot_surface(xs, ys, G)
+		figsize!(sized, 500, 400)
+		j = _r3_json(sized)
+		sp2 = to_syncplot(sized; width = 420, height = 320, show = false)
+		try
+			@test _r3_json(sp2.plot) == j
+		finally
+			close(sp2)
+		end
 	end
 end
