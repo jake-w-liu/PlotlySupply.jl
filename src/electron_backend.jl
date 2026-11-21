@@ -156,16 +156,9 @@ _is_sandboxed_env() = any(
 	_SANDBOX_ENV_VARS,
 )
 
-function _default_electron_app(ec)
-	app = if _is_sandboxed_env() && isdefined(ec, :development_config)
-		security = Base.invokelatest(() -> ec.development_config())
-		Base.invokelatest(() -> ec.default_application(security))
-	else
-		Base.invokelatest(() -> ec.default_application())
-	end
-	_record_owned_electron_app!(app)
-	return app
-end
+# `_default_electron_app`, the bounded start of an Electron application and the
+# request/reply pairing on its connection (`_ec_run`, `_ec_native`) are in
+# electron_channel.jl.
 
 # ── Exit-time shutdown of PlotlySupply's Electron applications (X53) ──
 #
@@ -582,10 +575,8 @@ function _ensure_renderer_mathjax_current!(sp::SyncPlot, committed_model::Plot)
 			joinpath(tempdir, _SYNCPLOT_MODEL_FILENAME),
 			committed_model,
 		)
-		Base.invokelatest(() -> ec.load(window, _file_uri(index_file)))
-		result = Base.invokelatest(
-			() -> ec.run(window, _syncplot_readiness_script()),
-		)
+		_ec_native(() -> Base.invokelatest(() -> ec.load(window, _file_uri(index_file))), ec, _ec_window_app(window))
+		result = _ec_run(ec, window, _syncplot_readiness_script())
 		_require_plotlyjs_success(result, "MathJax page reload")
 	catch reload_error
 		_set_renderer_desynchronized!(sp, true)
@@ -828,17 +819,15 @@ function _create_syncplot_window(
 		_write_syncplot_model(model_file, p)
 		file_uri = _file_uri(tmpfile)
 
-		window = Base.invokelatest(() -> ec.Window(
+		window = _ec_native(() -> Base.invokelatest(() -> ec.Window(
 			electron_app,
 			file_uri;
 			width = options.width,
 			height = options.height,
 			title = options.title,
 			show = options.show,
-		))
-		render_result = Base.invokelatest(
-			() -> ec.run(window, readiness_js),
-		)
+		)), ec, electron_app)
+		render_result = _ec_run(ec, window, readiness_js)
 		_require_plotlyjs_success(render_result, "initial render")
 		creation_spec = _SyncPlotCreationSpec(
 			options.width,
@@ -868,7 +857,7 @@ function _create_syncplot_window(
 			# This exact window was created in the transaction above, so it is
 			# safe to close here even if setup failed before SyncPlot existed.
 			try
-				Base.invokelatest(() -> ec.close(window))
+				_ec_native(() -> Base.invokelatest(() -> ec.close(window)), ec, _ec_window_app(window))
 			catch cleanup_error
 				@warn "Failed to close a partially constructed Electron window." exception = (
 					cleanup_error,
@@ -1339,7 +1328,7 @@ function _run_plotlyjs_script!(
 	operation::AbstractString,
 )
 	ec = _syncplot_backend(sp)
-	result = Base.invokelatest(() -> ec.run(sp.window, js))
+	result = _ec_run(ec, sp.window, js)
 	_require_plotlyjs_success(result, operation)
 	return nothing
 end
@@ -1368,7 +1357,7 @@ function _plotlyjs_command!(sp::SyncPlot, command::Symbol)
 	_require_open_syncplot_window(sp)
 	js = _plotlyjs_command_script(sp, command)
 	ec = _syncplot_backend(sp)
-	result = Base.invokelatest(() -> ec.run(sp.window, js))
+	result = _ec_run(ec, sp.window, js)
 	_require_plotlyjs_success(result, string(command))
 	return nothing
 end
@@ -10671,7 +10660,7 @@ function Base.close(sp::SyncPlot)
 			if _syncplot_raw_window_state(sp) !== :closed
 				ec = _syncplot_backend(sp)
 				window = getfield(sp, :window)
-				Base.invokelatest(() -> ec.close(window))
+				_ec_native(() -> Base.invokelatest(() -> ec.close(window)), ec, _ec_window_app(window))
 			end
 		catch
 			if render_lock_held
@@ -11098,6 +11087,23 @@ function _export_window_html(
   <style>
     @page { margin: 0; }
     html, body, #$divid { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
+    @media print {
+      /* printToPDF scales the page content down to fit the widest box in the
+         page. MathJax leaves a hidden measuring div (about 300 px wide) in the
+         body, which shrank every narrower PDF/EPS page drawn after it. Every
+         body child but the figure takes no room in print; it is clipped, not
+         removed (the figure's math refers to glyph definitions inside it). */
+      body > :not(#$divid) {
+        position: absolute !important; left: 0 !important; top: 0 !important;
+        width: 0 !important; height: 0 !important;
+        max-width: 0 !important; max-height: 0 !important;
+        overflow: hidden !important;
+      }
+      /* plotly.js draws axis lines, ticks and grid lines with
+         shape-rendering: crispEdges, which Chromium prints as 0.12 pt
+         translucent hairlines; in print they keep their stroke width. */
+      #$divid .crisp { shape-rendering: geometricPrecision !important; }
+    }
   </style>
 </head>
 <body>
@@ -11118,7 +11124,7 @@ function _wait_for_plotly(ec, win; timeout_s::Real = 10.0)
 	start_ns = time_ns()
 	while (time_ns() - start_ns) / 1.0e9 < timeout
 		try
-			result = Base.invokelatest(() -> ec.run(win, "typeof Plotly !== 'undefined' ? 'ready' : 'waiting'"))
+			result = _ec_run(ec, win, "typeof Plotly !== 'undefined' ? 'ready' : 'waiting'")
 			result == "ready" && return true
 		catch err
 			err isa InterruptException && rethrow()
@@ -11166,7 +11172,7 @@ function _close_export_window(ec, win)
 		# Unknown backend state is not proof that the window is closed. Attempt
 		# the close using the exact backend that created this exact window.
 	end
-	should_close && Base.invokelatest(() -> ec.close(win))
+	should_close && _ec_native(() -> Base.invokelatest(() -> ec.close(win)), ec, _ec_window_app(win))
 	return nothing
 end
 
@@ -11251,8 +11257,16 @@ function _retire_export_window_locked!(
 	return nothing
 end
 
+# Bound (seconds) on waiting for a running export at exit: an export holds the
+# lock for at most its renderer timeouts, but exit must never hang on it.
+const _EXPORT_EXIT_LOCK_TIMEOUT_S = Ref(30.0)
+
 function _cleanup_export_state_at_exit!(state::_ExportState)
-	lock(state.lock)
+	if timedwait(() -> trylock(state.lock), _EXPORT_EXIT_LOCK_TIMEOUT_S[]; pollint = 0.05) !== :ok
+		@warn "PlotlySupply: an export was still running at exit; its window and temporary " *
+			"files are left to the Electron shutdown."
+		return nothing
+	end
 	try
 		_retire_export_window_locked!(state; throw_errors = false)
 		_retry_pending_export_windows_locked!(state; throw_errors = false)
@@ -11311,12 +11325,25 @@ function _ensure_export_window_locked!(
 	state::_ExportState,
 	ec;
 	timeout_s::Real,
+	start_timeout_s::Real = _DEFAULT_EXPORT_TIMEOUT_S,
 )
 	_register_export_atexit_locked!(state)
 
 	# The MathJax configuration is baked into the window page, so a changed
 	# `set_default_mathtext!(; font, inherit_text_font)` or
 	# PLOTLYSUPPLY_MATHJAX_SVG_FONT requires a fresh window.
+	if _ec_poisoned(state.app)
+		# The application was given up (electron_channel.jl) and is being shut
+		# down with its windows: forget them, they cannot be closed by request.
+		state.window = nothing
+		state.backend = nothing
+		state.ready = false
+		state.mathjax_font = nothing
+		state.mathjax_inherit_text_font = nothing
+		state.tempdir = nothing
+		empty!(state.pending_windows)
+		state.app = nothing
+	end
 	mathjax = _mathjax_page_config()
 	font = mathjax.font
 	if _export_window_is_alive_locked(state) &&
@@ -11331,7 +11358,7 @@ function _ensure_export_window_locked!(
 
 	app = state.app
 	if state.app_backend !== ec || !_export_app_is_alive(app)
-		app = _default_electron_app(ec)
+		app = _default_electron_app(ec; timeout_s = start_timeout_s, who = "savefig")
 		state.app_backend = ec
 		state.app = app
 	end
@@ -11348,14 +11375,14 @@ function _ensure_export_window_locked!(
 			inherit_text_font = mathjax.inherit_text_font,
 		))
 		file_uri = _file_uri(tmpfile)
-		win = Base.invokelatest(() -> ec.Window(
+		win = _ec_native(() -> Base.invokelatest(() -> ec.Window(
 			app,
 			file_uri;
 			width = 960,
 			height = 720,
 			title = "PlotlySupply Export",
 			show = false,
-		))
+		)), ec, app; who = "savefig")
 		push!(state.pending_windows, (ec, win))
 		_wait_for_plotly(ec, win; timeout_s = timeout_s)
 
@@ -11420,6 +11447,7 @@ function _with_export_window(
 	state::_ExportState = _EXPORT_STATE;
 	ec = nothing,
 	timeout_s::Real = 10.0,
+	start_timeout_s::Real = _DEFAULT_EXPORT_TIMEOUT_S,
 )
 	backend = ec === nothing ? _electroncall() : ec
 	lock(state.lock)
@@ -11428,6 +11456,7 @@ function _with_export_window(
 			state,
 			backend;
 			timeout_s = timeout_s,
+			start_timeout_s = start_timeout_s,
 		)
 		return f(args...)
 	finally

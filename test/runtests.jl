@@ -4,7 +4,18 @@ using Base64
 
 isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
-@testset "PlotlySupply.jl" begin
+# The whole run is one test set, "PlotlySupply.jl", but it is opened here and
+# closed at the end of this file instead of wrapping the file in one
+# `@testset ... begin ... end` block. Every testset below is therefore its own
+# top-level statement, lowered and compiled on its own as the run reaches it:
+# one block holding the whole file was a single thunk whose compilation alone
+# took longer than the CI job (its cost grows faster than its length), and
+# nothing was printed before the whole suite had finished. Every result is
+# still recorded in the root set, and the root set's `finish` at the end
+# prints the summary and fails the run like a single `@testset` does.
+const _RUNTESTS_ROOT = Test.DefaultTestSet("PlotlySupply.jl")
+Test.push_testset(_RUNTESTS_ROOT)
+_runtests_t0 = time()
     @testset "plot_scatter" begin
         x = 1:10
         y = rand(10)
@@ -2996,7 +3007,13 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     @testset "CRC: json is a working reexport" begin
         @test isdefined(PlotlySupply, :json)
         p = plot_scatter(1:2, [3.0, NaN])
-        @test json(p; allownan=true) == PlotlyBase.JSON.json(p; allownan=true)
+        # 2.0 (compat-02): `json` of a figure writes non-finite numbers as
+        # `null` (a gap for plotly.js), like savefig(...; format = "json"); the
+        # other keywords are JSON.jl's.
+        @test json(p) == PlotlyBase.JSON.json(p; allownan=true, nan="null", inf="null", ninf="null")
+        @test occursin("[3.0,null]", json(p))
+        @test json(p; allownan=true) == json(p)
+        @test json(p; nan="NaN") == PlotlyBase.JSON.json(p; allownan=true)
         io = IOBuffer()
         @test json(io, Dict("answer" => 42)) === nothing
         @test String(take!(io)) == "{\"answer\":42}"
@@ -5551,9 +5568,16 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
     # Every other test/*.jl file: the ones in `_TEST_FILES_RUN_FIRST`
     # (testutils.jl) first, then all the rest, including the sci_* and
     # regression_* suites, in name order. A new file needs no registration.
+    println("runtests: inline testsets done after ", round(time() - _runtests_t0; digits = 1), " s")
+    flush(stdout)
+    # Each file runs inside its own test set, so an error a file raises outside
+    # its testsets is recorded against that file and the run goes on.
     for test_file in _test_files_in_run_order(@__DIR__)
         defaults_before = _global_defaults_snapshot()
-        include(test_file)
+        file_t0 = time()
+        @testset "$(basename(test_file))" begin
+            include(test_file)
+        end
         # A file that changes a package-wide default must put it back: what it
         # leaves would change every later file of this run.
         leaked = _global_defaults_diff(defaults_before, _global_defaults_snapshot())
@@ -5561,5 +5585,10 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             @test leaked == Symbol[]
         end
         isempty(leaked) || _global_defaults_restore!(defaults_before)
+        println("runtests: ", basename(test_file), " done in ", round(time() - file_t0; digits = 1),
+            " s (", round(time() - _runtests_t0; digits = 1), " s total)")
+        flush(stdout)
     end
-end
+
+Test.pop_testset()
+Test.finish(_RUNTESTS_ROOT)

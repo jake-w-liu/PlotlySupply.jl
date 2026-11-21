@@ -101,16 +101,54 @@ end
 """
 	make_subplots(; kwargs...)
 
-PlotlyJS-style subplot constructor. Forwards `kwargs` to `PlotlyBase.Subplots`
-(e.g. `rows`, `cols`, `shared_xaxes`, `specs`, `column_widths`) and returns a
-`Plot` with the package default template and Cartesian axis styling applied.
-For the MATLAB-like helper that returns a mutable canvas, see [`subplots`](@ref).
+PlotlyJS-style subplot constructor. `rows::Integer = 1` and `cols::Integer = 1`
+give the grid; the other keywords are forwarded to `PlotlyBase.Subplots` and
+validated as in [`subplots`](@ref): `specs`, `shared_xaxes`, `shared_yaxes`,
+`start_cell`, `subplot_titles`, `column_titles`, `row_titles`, `x_title`,
+`y_title`, `insets`, `horizontal_spacing`, `vertical_spacing`, `column_widths`
+and `row_heights` (PlotlyBase order). Returns a `Plot` with the package default
+template and Cartesian axis styling applied; shared axes keep autoranging like
+those of `subplots`. An unknown keyword or an invalid value is an
+`ArgumentError("make_subplots: ...")`. For the MATLAB-like helper that returns
+a mutable canvas, see [`subplots`](@ref).
+
+```julia
+fig = make_subplots(rows = 1, cols = 2, shared_yaxes = true)
+add_trace!(fig, scatter(x = 1:3, y = [1, 3, 2]); row = 1, col = 1)
+add_trace!(fig, scatter(x = 1:3, y = [2, 1, 3]); row = 1, col = 2)
+```
 """
-function make_subplots(; kwargs...)
-	fig = plot(_plotlysupply_subplot_layout(Subplots(; kwargs...)))
+function make_subplots(; rows = 1, cols = 1, kwargs...)
+	for (name, value) in ((:rows, rows), (:cols, cols))
+		(value isa Integer && !(value isa Bool) && value >= 1) || throw(ArgumentError(
+			"make_subplots: `$(name)` must be a positive integer; got $(repr(value)).",
+		))
+	end
+	_subplots_check_grid_keywords(kwargs, "make_subplots")
+	rows_i, cols_i = Int(rows), Int(cols)
+	grid_kwargs = _subplots_grid_kwargs(rows_i, cols_i, nothing, nothing, kwargs; who = "make_subplots")
+	_subplots_checked_insets(get(grid_kwargs, :insets, missing), rows_i, cols_i; who = "make_subplots")
+	grid = try
+		Subplots(; rows = rows_i, cols = cols_i, grid_kwargs...)
+	catch err
+		err isa AssertionError || rethrow()
+		throw(ArgumentError("make_subplots: invalid grid option ($(err.msg))"))
+	end
+	for (name, sizes) in (
+		("horizontal_spacing", getfield(grid, :_widths)),
+		("vertical_spacing", getfield(grid, :_heights)),
+	)
+		all(size -> size > 0, sizes) || throw(ArgumentError(
+			"make_subplots: `$(name)` leaves no room for the cells; use a smaller value.",
+		))
+	end
+	fig = plot(_plotlysupply_subplot_layout(grid))
 	p = _plot_obj(fig)
 	# Also applies the default Cartesian axis styling (see api.jl).
 	_apply_default_template!(p)
+	# Shared axes: every `matches` group autoranges (see finalize.jl), so the
+	# figure is returned settled.
+	_finalize_figure!(p)
 	_refresh!(fig)
 	return fig
 end
@@ -121,13 +159,22 @@ end
 Build broadcasted coordinate grids from 1-D `arrays`, NumPy `mgrid`-style. For
 inputs of lengths `(n₁, n₂, …)` returns a vector of arrays each of shape
 `(n₁, n₂, …)`, where the `i`-th output varies along its `i`-th dimension. The
-element type of each input is preserved.
+element type of each input is preserved. Every argument must be an
+`AbstractVector` (a vector or range); anything else, or no argument at all, is
+an `ArgumentError`.
 
 ```julia
 X, Y = mgrid(1:3, 1:2)   # X[i,j] = i, Y[i,j] = j
 ```
 """
 function mgrid(arrays...)
+	isempty(arrays) && throw(ArgumentError("mgrid: give at least one 1-D array of coordinates."))
+	for (k, a) in enumerate(arrays)
+		a isa AbstractVector || throw(ArgumentError(
+			"mgrid: argument $(k) must be a 1-D array (a vector or range) of coordinates; got " *
+			(a isa AbstractArray ? "a $(ndims(a))-dimensional $(typeof(a))." : "a $(typeof(a))."),
+		))
+	end
 	lengths = collect(length.(arrays))
 	ones_vec = ones(Int, length(arrays))
 	grids = map(eachindex(arrays)) do i
@@ -195,7 +242,10 @@ const _JSON_NONFINITE_AS_NULL = (allownan = true, nan = "null", inf = "null", ni
 # as `null` (plotly.js draws them as gaps) like `savefig(...; format = "json")`
 # does, where PlotlyBase's own serialiser raises on NaN/Inf. `kwargs` are
 # JSON.jl's; the non-finite keywords may be overridden. A grid figure
-# serialises its plotly figure, not its fields.
+# serialises its plotly figure, not its fields. The positional indent of the
+# documented `json(fig, 2)` form is JSON.jl's `pretty` keyword (its own
+# two-argument method is `json(filename, obj)`, which would bypass the
+# figure methods).
 if _JSON_IS_OWN
 	json(p::Plot; kwargs...) = PlotlyBase.JSON.json(p; _JSON_NONFINITE_AS_NULL..., kwargs...)
 	json(io::IO, p::Plot; kwargs...) = PlotlyBase.JSON.json(io, p; _JSON_NONFINITE_AS_NULL..., kwargs...)
@@ -203,6 +253,15 @@ if _JSON_IS_OWN
 	json(io::IO, sp::SyncPlot; kwargs...) = json(io, sp.plot; kwargs...)
 	json(sf::SubplotFigure; kwargs...) = json(getfield(sf, :fig); kwargs...)
 	json(io::IO, sf::SubplotFigure; kwargs...) = json(io, getfield(sf, :fig); kwargs...)
+	function json(fig::Union{Plot, SyncPlot, SubplotFigure}, indent::Integer; kwargs...)
+		(indent isa Bool || indent < 0) && throw(ArgumentError(
+			"json: the indent must be a non-negative integer; got $(repr(indent)).",
+		))
+		haskey(kwargs, :pretty) && throw(ArgumentError(
+			"json: pass the indent positionally or as `pretty`, not both.",
+		))
+		return json(fig; pretty = Int(indent), kwargs...)
+	end
 end
 
 # Plots built by PlotlySupply (and `Plot(...)` of generic traces) serialise
@@ -1035,7 +1094,7 @@ function _fetch_renderer_result(ec, win, total, fmt::String)
 	io = IOBuffer()
 	for _ in 1:max_slices
 		reply = _check_renderer_result(
-			Base.invokelatest(() -> ec.run(win, _FETCH_RESULT_SLICE_JS)),
+			_ec_run(ec, win, _FETCH_RESULT_SLICE_JS),
 			"fetching the rendered $(fmt) image",
 		)
 		(reply isa AbstractVector && length(reply) == 2 && reply[1] isa AbstractString &&
@@ -1153,7 +1212,7 @@ $(_RENDERER_RESULT_HANDOFF_JS)
 """
 	end
 	js = _guarded_export_script(divid, options.timeout, body)
-	result = Base.invokelatest(() -> ec.run(win, js))
+	result = _ec_run(ec, win, js)
 	reply = _check_renderer_result(result, "rendering the $(fmt) image")
 	data_url = reply isa AbstractDict && haskey(reply, "resultLength") ?
 		_fetch_renderer_result(ec, win, reply["resultLength"], fmt) : reply
@@ -1223,8 +1282,9 @@ function _finalize_image(data_url::String, fmt::String, options::_ExportOptions)
 	elseif fmt == "jpeg"
 		dpi === nothing || (bytes = _jpeg_set_density(bytes, dpi))
 	elseif fmt == "svg"
-		svg = String(bytes)
-		options.deterministic && (svg = _svg_canonical_root(_svg_stable_ids(svg)))
+		svg = _svg_merge_mathjax_glyphs(String(bytes))
+		options.deterministic &&
+			(svg = _svg_canonical_elements(_svg_canonical_root(_svg_stable_ids(svg))))
 		if options.units !== :px
 			scale = _format_scale(options, fmt)
 			svg = _svg_set_physical_size(svg, options.width * scale, options.height * scale, options.units)
@@ -1256,7 +1316,7 @@ function _wait_for_pdf_job(ec, app, job_id::String; timeout_s::Real)
 """
 	start_ns = time_ns()
 	while (time_ns() - start_ns) / 1.0e9 < timeout
-		status = Base.invokelatest(() -> ec.run(app, status_js))
+		status = _ec_run(ec, app, status_js)
 		status === nothing &&
 			error("printToPDF job '$job_id' disappeared before completion")
 		if _pdf_status_field(status, :done) === true
@@ -1284,9 +1344,54 @@ function _delete_pdf_job(ec, app, job_id::String)
   return jobs ? jobs.delete($job_id_js) : false;
 })()
 """
-	Base.invokelatest(() -> ec.run(app, js))
+	_ec_run(ec, app, js)
 	return nothing
 end
+
+# plotly.js draws an unsmoothed heatmap (zsmooth = false) and an image trace
+# as one small bitmap, one pixel per cell, styled `image-rendering:
+# pixelated`. printToPDF embeds that bitmap without `/Interpolate false`, so
+# macOS Quartz (Preview) smooths the cells into a blur that the PNG and SVG do
+# not show. Each such bitmap is enlarged here by whole factors, nearest
+# neighbour, to at least 4 pixels per CSS pixel of the page (384 ppi), so
+# every viewer shows flat cells whatever its interpolation. Bitmaps that are
+# already that fine, and enlargements past 16 Mpx, are left alone. `scale` is
+# the page scale of the PDF script.
+const _SHARPEN_PIXELATED_IMAGES_JS = """
+    {
+      const XLINK = 'http://www.w3.org/1999/xlink';
+      const MAX_PIXELS = 16e6;
+      const images = Array.prototype.slice.call(div.querySelectorAll('image'));
+      for (const im of images) {
+        if (!/pixelated|crisp-edges|optimizeSpeed/.test(im.getAttribute('style') || '')) continue;
+        const href = im.getAttributeNS(XLINK, 'href') || im.getAttribute('href');
+        if (!href || href.indexOf('data:') !== 0) continue;
+        const drawnW = parseFloat(im.getAttribute('width')) * scale;
+        const drawnH = parseFloat(im.getAttribute('height')) * scale;
+        if (!(drawnW > 0) || !(drawnH > 0)) continue;
+        const bitmap = new Image();
+        await new Promise(function(resolve, reject) {
+          bitmap.onload = resolve;
+          bitmap.onerror = function() { reject(new Error('a heatmap bitmap could not be decoded')); };
+          bitmap.src = href;
+        });
+        const w = bitmap.naturalWidth, h = bitmap.naturalHeight;
+        if (!(w > 0) || !(h > 0)) continue;
+        let kx = Math.ceil(4 * drawnW / w), ky = Math.ceil(4 * drawnH / h);
+        while (kx * ky > 1 && w * kx * h * ky > MAX_PIXELS) {
+          if (kx >= ky) kx -= 1; else ky -= 1;
+        }
+        if (kx <= 1 && ky <= 1) continue;
+        const canvas = document.createElement('canvas');
+        canvas.width = w * kx;
+        canvas.height = h * ky;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        im.setAttributeNS(XLINK, 'xlink:href', canvas.toDataURL('image/png'));
+      }
+    }
+"""
 
 # Chromium printToPDF encodes SVG linearGradient fills as PDF shading
 # patterns, which some viewers render as a flat end color. Expand every
@@ -1601,6 +1706,7 @@ $(_EXPORT_RESET_DIV_JS)
     // dpi journals ask for), whatever `scale` is.
     if (config.plotGlPixelRatio == null) config.plotGlPixelRatio = 4;
     await Plotly.newPlot(div, $(prepared.data_js), layout, config);
+$(_SHARPEN_PIXELATED_IMAGES_JS)
 $(_FLATTEN_COLORBAR_GRADIENTS_JS)
 $(flatten_translucency ? _FLATTEN_TRANSLUCENCY_JS : "")
     if (scale !== 1) {
@@ -1648,7 +1754,7 @@ function _capture_pdf_file(
 )
 	options = prepared.options
 	script = _pdf_render_script(divid, prepared; flatten_translucency = flatten_translucency)
-	result = Base.invokelatest(() -> ec.run(win, script))
+	result = _ec_run(ec, win, script)
 	result = _check_renderer_result(result, "drawing the PDF page")
 	result == "ok" ||
 		error("savefig: unexpected result from the PDF render step: $(repr(result))")
@@ -1716,7 +1822,7 @@ function _capture_pdf_file(
 """
 
 	try
-		result = Base.invokelatest(() -> ec.run(app, js_pdf))
+		result = _ec_run(ec, app, js_pdf)
 		result == "started" ||
 			error("printToPDF job '$job_id' failed to start (result: $result)")
 		_wait_for_pdf_job(ec, app, job_id; timeout_s = timeout_s)
@@ -1947,6 +2053,7 @@ function _export_outputs(
 		state;
 		ec = ec,
 		timeout_s = window_timeout_s,
+		start_timeout_s = options.timeout,
 	) do backend, app, win, divid
 		try
 			_capture_renderer_outputs(
@@ -1961,9 +2068,17 @@ function _export_outputs(
 				pdf_timeout,
 			)
 		catch err
-			# The page may still be drawing the abandoned figure.
-			err isa _ExportTimeoutError &&
+			if err isa _ExportTimeoutError
+				# The page may still be drawing the abandoned figure.
 				_retire_export_window_locked!(state; throw_errors = false)
+				# A renderer timeout is a renderer failure like the others
+				# (documented as ErrorException), not an internal type.
+				throw(ErrorException(err.message))
+			end
+			# A request abandoned by an interrupt leaves the page drawing its
+			# figure: the next export uses a fresh window, retired once the
+			# connection has caught up (electron_channel.jl).
+			_ec_owed(app) > 0 && (state.ready = false)
 			rethrow()
 		end
 	end
@@ -2498,7 +2613,7 @@ function PlotlyBase.to_image(sp::SyncPlot; kwargs...)
 	# from the committed model). The model itself is not changed.
 	_syncplot_refresh_page!(sp)
 	ec = _syncplot_backend(sp)
-	result = Base.invokelatest(() -> ec.run(getfield(sp, :window), js))
+	result = _ec_run(ec, getfield(sp, :window), js)
 	result isa AbstractString || error(
 		"Plotly.toImage returned a non-string result of type $(typeof(result))",
 	)
@@ -2511,7 +2626,7 @@ function PlotlyBase.download_image(sp::SyncPlot; kwargs...)
 	# As in `to_image`: capture an up-to-date page, never a stale one.
 	_syncplot_refresh_page!(sp)
 	ec = _syncplot_backend(sp)
-	Base.invokelatest(() -> ec.run(getfield(sp, :window), js))
+	_ec_run(ec, getfield(sp, :window), js)
 	return nothing
 end
 

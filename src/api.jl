@@ -3297,21 +3297,56 @@ function subplot_legends!(
 	)
 end
 
-function _check_subplot_dims(rows::Int, cols::Int)
-	rows > 0 || throw(ArgumentError("`rows` must be positive."))
-	cols > 0 || throw(ArgumentError("`cols` must be positive."))
-	return nothing
+# The `PlotlyBase.Subplots` keywords `subplots` and `make_subplots` forward
+# (the grid shape is positional in `subplots`); anything else is a typo, not a
+# keyword PlotlyBase would ignore.
+const _SUBPLOTS_GRID_KEYWORDS = (
+	:specs, :shared_xaxes, :shared_yaxes, :start_cell, :subplot_titles,
+	:column_titles, :row_titles, :x_title, :y_title, :insets,
+	:horizontal_spacing, :vertical_spacing, :column_widths, :row_heights,
+)
+# matplotlib names users reach for, with the keyword that does the same here.
+const _SUBPLOTS_KEYWORD_HINTS = Dict(
+	:sharex => :shared_xaxes, :sharey => :shared_yaxes,
+	:hspace => :vertical_spacing, :wspace => :horizontal_spacing,
+)
+
+# `who` takes no (more) keywords: anything in `kwargs` is a typo or a keyword
+# of another function, reported as an ArgumentError naming `who` instead of
+# the MethodError Julia raises for an unknown keyword.
+function _reject_keywords(who::AbstractString, kwargs; accepted = ())
+	isempty(kwargs) && return nothing
+	names = join(("`$(key)`" for key in keys(kwargs)), ", ")
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) $(names)" *
+		(isempty(accepted) ? "; it takes no keyword arguments." :
+			"; it takes $(join(("`$(key)`" for key in accepted), ", "))."),
+	))
 end
 
-function _check_subplot_cell(sf::SubplotFigure, row::Int, col::Int)
-	(1 <= row <= sf.rows) || throw(ArgumentError("`row` must be in 1:$(sf.rows), got $(row)."))
-	(1 <= col <= sf.cols) || throw(ArgumentError("`col` must be in 1:$(sf.cols), got $(col)."))
+function _subplots_check_grid_keywords(kwargs, who::AbstractString; extra = ())
+	unknown = Symbol[key for key in keys(kwargs) if !(key in _SUBPLOTS_GRID_KEYWORDS) && !(key in extra)]
+	isempty(unknown) && return nothing
+	hints = String[
+		"`$(key)` is `$(_SUBPLOTS_KEYWORD_HINTS[key])` here" for key in unknown
+		if haskey(_SUBPLOTS_KEYWORD_HINTS, key)
+	]
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) $(join(("`$(key)`" for key in unknown), ", "))" *
+		(isempty(hints) ? "" : " ($(join(hints, "; ")))") *
+		"; see the docstring for the accepted keywords.",
+	))
+end
+
+function _check_subplot_dims(rows::Int, cols::Int)
+	rows > 0 || throw(ArgumentError("subplots: `rows` must be positive; got $(rows)."))
+	cols > 0 || throw(ArgumentError("subplots: `cols` must be positive; got $(cols)."))
 	return nothing
 end
 
 function _subplot_cell(sf::SubplotFigure, index::Int)
 	maxidx = sf.rows * sf.cols
-	(1 <= index <= maxidx) || throw(ArgumentError("`index` must be in 1:$(maxidx), got $(index)."))
+	(1 <= index <= maxidx) || throw(ArgumentError("subplot!: `index` must be in 1:$(maxidx); got $(index)."))
 	row = fld(index - 1, sf.cols) + 1
 	col = mod(index - 1, sf.cols) + 1
 	return row, col
@@ -3350,24 +3385,24 @@ const _SUBPLOTS_START_CELLS = ("top-left", "bottom-left")
 # the text around `$…$` math and turns newlines into line breaks. A label the
 # layer rejects (an odd number of `$`, an HTML tag next to math, ...) is an
 # ArgumentError naming the keyword.
-function _subplots_title_label(text::AbstractString, name::AbstractString)
+function _subplots_title_label(text::AbstractString, name::AbstractString; who::AbstractString = "subplots")
 	return try
 		_label(text)
 	catch err
 		err isa ArgumentError || rethrow()
-		throw(ArgumentError("subplots: `$(name)` entry $(repr(text)): $(err.msg)"))
+		throw(ArgumentError("$(who): `$(name)` entry $(repr(text)): $(err.msg)"))
 	end
 end
 
 # Validated relative sizes for `height_ratios` / `width_ratios`: `count`
 # positive finite reals, returned as Float64 in the caller's order.
-function _subplots_checked_ratios(ratios, count::Int, name::AbstractString)
+function _subplots_checked_ratios(ratios, count::Int, name::AbstractString; who::AbstractString = "subplots")
 	(ratios isa AbstractVector || ratios isa Tuple) || throw(ArgumentError(
-		"subplots: `$(name)` must be a vector of positive numbers; got " *
+		"$(who): `$(name)` must be a vector of positive numbers; got " *
 		"$(typeof(ratios)).",
 	))
 	length(ratios) == count || throw(ArgumentError(
-		"subplots: `$(name)` needs one entry per " *
+		"$(who): `$(name)` needs one entry per " *
 		(name in ("height_ratios", "row_heights") ? "row" : "column") *
 		" ($(count)); got $(length(ratios)).",
 	))
@@ -3375,7 +3410,7 @@ function _subplots_checked_ratios(ratios, count::Int, name::AbstractString)
 	for (k, value) in enumerate(ratios)
 		(value isa Real && !(value isa Bool) && isfinite(value) && value > 0) ||
 			throw(ArgumentError(
-				"subplots: `$(name)` entries must be positive finite numbers; " *
+				"$(who): `$(name)` entries must be positive finite numbers; " *
 				"entry $(k) is $(repr(value)).",
 			))
 		out[k] = Float64(value)
@@ -3396,13 +3431,14 @@ function _subplots_grid_kwargs(
 	cols::Int,
 	height_ratios,
 	width_ratios,
-	subplot_kwargs,
+	subplot_kwargs;
+	who::AbstractString = "subplots",
 )
 	grid = Dict{Symbol,Any}(pairs(subplot_kwargs))
 	start_cell = get(grid, :start_cell, "top-left")
 	(start_cell isa AbstractString && start_cell in _SUBPLOTS_START_CELLS) ||
 		throw(ArgumentError(
-			"subplots: `start_cell` must be \"top-left\" or \"bottom-left\"; " *
+			"$(who): `start_cell` must be \"top-left\" or \"bottom-left\"; " *
 			"got $(repr(start_cell)).",
 		))
 	grid[:start_cell] = String(start_cell)
@@ -3413,7 +3449,7 @@ function _subplots_grid_kwargs(
 		spacing = grid[name]
 		(spacing isa Real && !(spacing isa Bool) && isfinite(spacing) &&
 			0 <= spacing <= 1 && spacing * (count - 1) < 1) || throw(ArgumentError(
-			"subplots: `$(name)` must be a finite number in [0, 1] whose " *
+			"$(who): `$(name)` must be a finite number in [0, 1] whose " *
 			"$(count - 1) gap(s) leave room for the cells (spacing × $(count - 1) < 1); " *
 			"got $(repr(spacing)).",
 		))
@@ -3433,11 +3469,11 @@ function _subplots_grid_kwargs(
 		(titles isa AbstractVecOrMat &&
 			all(t -> t isa AbstractString || t === missing, titles)) ||
 			throw(ArgumentError(
-				"subplots: `subplot_titles` must be a vector or matrix of strings " *
+				"$(who): `subplot_titles` must be a vector or matrix of strings " *
 				"(`missing` skips a cell); got $(repr(titles)).",
 			))
 		as_matrix = titles isa AbstractVector ? reshape(collect(titles), 1, :) : collect(titles)
-		labelled = map(t -> t === missing ? missing : _subplots_title_label(t, "subplot_titles"), as_matrix)
+		labelled = map(t -> t === missing ? missing : _subplots_title_label(t, "subplot_titles"; who = who), as_matrix)
 		grid[:subplot_titles] = any(ismissing, as_matrix) ?
 			Matrix{Union{Missing, String}}(labelled) :
 			Matrix{String}(labelled)
@@ -3448,23 +3484,23 @@ function _subplots_grid_kwargs(
 		titles = grid[name]
 		(titles isa AbstractVector && all(t -> t isa AbstractString, titles)) ||
 			throw(ArgumentError(
-				"subplots: `$(name)` must be a vector of strings, one per $(unit) " *
+				"$(who): `$(name)` must be a vector of strings, one per $(unit) " *
 				"(\"\" for none); got $(repr(titles)).",
 			))
 		length(titles) == count || throw(ArgumentError(
-			"subplots: `$(name)` needs one entry per $(unit) ($(count)); got " *
+			"$(who): `$(name)` needs one entry per $(unit) ($(count)); got " *
 			"$(length(titles)).",
 		))
-		grid[name] = String[_subplots_title_label(t, String(name)) for t in titles]
+		grid[name] = String[_subplots_title_label(t, String(name); who = who) for t in titles]
 	end
 	for name in (:x_title, :y_title)
 		haskey(grid, name) && grid[name] === missing && delete!(grid, name)
 		haskey(grid, name) || continue
 		title = grid[name]
 		title isa AbstractString || throw(ArgumentError(
-			"subplots: `$(name)` must be a string; got $(repr(title)).",
+			"$(who): `$(name)` must be a string; got $(repr(title)).",
 		))
-		grid[name] = _subplots_title_label(title, String(name))
+		grid[name] = _subplots_title_label(title, String(name); who = who)
 	end
 	# `row_heights` / `column_widths` given directly reach PlotlyBase's
 	# `sum(...)` and `Vector{Float64}` conversion: they must be one positive
@@ -3472,32 +3508,32 @@ function _subplots_grid_kwargs(
 	for (name, count) in ((:row_heights, rows), (:column_widths, cols))
 		haskey(grid, name) && grid[name] === missing && delete!(grid, name)
 		haskey(grid, name) || continue
-		grid[name] = _subplots_checked_ratios(grid[name], count, String(name))
+		grid[name] = _subplots_checked_ratios(grid[name], count, String(name); who = who)
 	end
 	for name in (:shared_xaxes, :shared_yaxes)
 		haskey(grid, name) || continue
 		mode = grid[name]
 		(mode === missing || mode isa Bool || (mode isa AbstractString &&
 			String(mode) in ("rows", "columns", "all"))) || throw(ArgumentError(
-			"subplots: `$(name)` must be true, false, \"rows\", \"columns\" or \"all\"; " *
+			"$(who): `$(name)` must be true, false, \"rows\", \"columns\" or \"all\"; " *
 			"got $(repr(mode)).",
 		))
 		mode isa AbstractString && (grid[name] = String(mode))
 	end
 	if haskey(grid, :specs)
-		grid[:specs] = _subplots_checked_specs(grid[:specs], rows, cols)
+		grid[:specs] = _subplots_checked_specs(grid[:specs], rows, cols; who = who)
 	end
 	if height_ratios !== nothing
 		haskey(grid, :row_heights) && throw(ArgumentError(
-			"subplots: pass either `height_ratios` (top-to-bottom) or " *
+			"$(who): pass either `height_ratios` (top-to-bottom) or " *
 			"`row_heights` (PlotlyBase order), not both.",
 		))
-		ratios = _subplots_checked_ratios(height_ratios, rows, "height_ratios")
+		ratios = _subplots_checked_ratios(height_ratios, rows, "height_ratios"; who = who)
 		if start_cell == "top-left"
 			grid[:row_heights] = reverse(ratios)
 		else
 			all(==(first(ratios)), ratios) || throw(ArgumentError(
-				"subplots: unequal `height_ratios` are not supported with " *
+				"$(who): unequal `height_ratios` are not supported with " *
 				"start_cell = \"bottom-left\": PlotlyBase computes " *
 				"overlapping row domains for that combination. Use the " *
 				"default start_cell = \"top-left\" (row 1 at the top).",
@@ -3507,10 +3543,10 @@ function _subplots_grid_kwargs(
 	end
 	if width_ratios !== nothing
 		haskey(grid, :column_widths) && throw(ArgumentError(
-			"subplots: pass either `width_ratios` or `column_widths`, not both.",
+			"$(who): pass either `width_ratios` or `column_widths`, not both.",
 		))
 		grid[:column_widths] =
-			_subplots_checked_ratios(width_ratios, cols, "width_ratios")
+			_subplots_checked_ratios(width_ratios, cols, "width_ratios"; who = who)
 	end
 	return grid
 end
@@ -3519,23 +3555,23 @@ end
 # `missing` or `nothing` is empty); a vector is accepted for a one-column or
 # one-row grid. A span must stay inside the grid and cover only empty cells
 # (PlotlyBase reaches an error without cell names, or draws overlapping axes).
-function _subplots_checked_specs(specs, rows::Int, cols::Int)
+function _subplots_checked_specs(specs, rows::Int, cols::Int; who::AbstractString = "subplots")
 	specs === missing && return specs
 	specs isa AbstractMatrix || (specs isa AbstractVector && (rows == 1 || cols == 1)) ||
 		throw(ArgumentError(
-			"subplots: `specs` must be a $(rows) × $(cols) matrix of `Spec(...)` " *
+			"$(who): `specs` must be a $(rows) × $(cols) matrix of `Spec(...)` " *
 			"(`missing` for an empty cell); got $(typeof(specs))" *
 			(specs isa AbstractVector ? " for a grid with several rows and columns." : "."),
 		))
 	if specs isa AbstractVector
 		length(specs) == rows * cols || throw(ArgumentError(
-			"subplots: `specs` needs one entry per cell ($(rows * cols)) of the " *
+			"$(who): `specs` needs one entry per cell ($(rows * cols)) of the " *
 			"$(rows) × $(cols) grid; got $(length(specs)).",
 		))
 		specs = reshape(collect(specs), rows, cols)
 	end
 	size(specs) == (rows, cols) || throw(ArgumentError(
-		"subplots: `specs` must have size (rows, cols) = ($(rows), $(cols)); got $(size(specs)).",
+		"$(who): `specs` must have size (rows, cols) = ($(rows), $(cols)); got $(size(specs)).",
 	))
 	checked = Matrix{Union{Missing,Spec}}(undef, rows, cols)
 	for r in 1:rows, c in 1:cols
@@ -3545,7 +3581,7 @@ function _subplots_checked_specs(specs, rows::Int, cols::Int)
 			continue
 		end
 		spec isa Spec || throw(ArgumentError(
-			"subplots: `specs[$(r), $(c)]` must be a `Spec(...)`, `missing` or " *
+			"$(who): `specs[$(r), $(c)]` must be a `Spec(...)`, `missing` or " *
 			"`nothing`; got $(repr(spec)).",
 		))
 		kind = spec.kind
@@ -3557,32 +3593,42 @@ function _subplots_checked_specs(specs, rows::Int, cols::Int)
 		catch
 			false
 		end || throw(ArgumentError(
-			"subplots: `specs[$(r), $(c)]` has an unknown subplot kind $(repr(kind)); " *
+			"$(who): `specs[$(r), $(c)]` has an unknown subplot kind $(repr(kind)); " *
 			"use \"xy\", \"scene\", \"polar\", \"ternary\", \"geo\", \"domain\", \"mapbox\" or " *
 			"a map kind.",
 		))
 		(spec.rowspan >= 1 && spec.colspan >= 1) || throw(ArgumentError(
-			"subplots: `specs[$(r), $(c)]` needs rowspan >= 1 and colspan >= 1; got " *
+			"$(who): `specs[$(r), $(c)]` needs rowspan >= 1 and colspan >= 1; got " *
 			"rowspan = $(spec.rowspan), colspan = $(spec.colspan).",
 		))
 		(r + spec.rowspan - 1 <= rows && c + spec.colspan - 1 <= cols) || throw(ArgumentError(
-			"subplots: `specs[$(r), $(c)]` spans rows $(r):$(r + spec.rowspan - 1) and " *
+			"$(who): `specs[$(r), $(c)]` spans rows $(r):$(r + spec.rowspan - 1) and " *
 			"columns $(c):$(c + spec.colspan - 1), beyond the $(rows) × $(cols) grid.",
 		))
 		all(isfinite, (spec.l, spec.r, spec.b, spec.t)) || throw(ArgumentError(
-			"subplots: the paddings l, r, b, t of `specs[$(r), $(c)]` must be finite.",
+			"$(who): the paddings l, r, b, t of `specs[$(r), $(c)]` must be finite.",
 		))
 		checked[r, c] = spec
 	end
+	# The cell whose spec covers each grid cell: two spans that cross over the
+	# same empty cell would draw overlapping axes there.
+	owner = fill((0, 0), rows, cols)
 	for r in 1:rows, c in 1:cols
 		spec = checked[r, c]
 		spec === missing && continue
 		for rr in r:(r + spec.rowspan - 1), cc in c:(c + spec.colspan - 1)
-			(rr, cc) == (r, c) && continue
-			checked[rr, cc] === missing || throw(ArgumentError(
-				"subplots: `specs[$(r), $(c)]` spans cell ($(rr), $(cc)), which has its " *
-				"own spec; use `missing` for the cells a span covers.",
+			if (rr, cc) != (r, c)
+				checked[rr, cc] === missing || throw(ArgumentError(
+					"$(who): `specs[$(r), $(c)]` spans cell ($(rr), $(cc)), which has its " *
+					"own spec; use `missing` for the cells a span covers.",
+				))
+			end
+			other = owner[rr, cc]
+			other == (0, 0) || throw(ArgumentError(
+				"$(who): the spans of `specs[$(other[1]), $(other[2])]` and " *
+				"`specs[$(r), $(c)]` both cover cell ($(rr), $(cc)); spans must not overlap.",
 			))
+			owner[rr, cc] = (r, c)
 		end
 	end
 	return checked
@@ -3604,16 +3650,16 @@ const _SubplotsCheckedInset = NamedTuple{
 }
 
 # A size fraction of an `Inset` (`l`, `b`, or `w`/`h`, which may be "to_end").
-function _subplots_inset_fraction(value, k::Int, name::AbstractString; size::Bool)
+function _subplots_inset_fraction(value, k::Int, name::AbstractString; size::Bool, who::AbstractString = "subplots")
 	if size && value isa AbstractString
 		value == "to_end" || throw(ArgumentError(
-			"subplots: `insets[$(k)].$(name)` must be a number or \"to_end\"; got $(repr(value)).",
+			"$(who): `insets[$(k)].$(name)` must be a number or \"to_end\"; got $(repr(value)).",
 		))
 		return nothing
 	end
 	(value isa Real && !(value isa Bool) && isfinite(value) &&
 		(size ? 0 < value <= 1 : 0 <= value < 1)) || throw(ArgumentError(
-		"subplots: `insets[$(k)].$(name)` must be a finite number in " *
+		"$(who): `insets[$(k)].$(name)` must be a finite number in " *
 		(size ? "(0, 1]" : "[0, 1)") * " (a fraction of the host cell); got $(repr(value)).",
 	))
 	return Float64(value)
@@ -3624,34 +3670,34 @@ end
 # span cells and their fractions must keep them inside the host cell; they are
 # returned (with their position `index` in `insets`) as fractions of the host
 # cell, in order. Insets of other kinds are not returned.
-function _subplots_checked_insets(insets, rows::Int, cols::Int)
+function _subplots_checked_insets(insets, rows::Int, cols::Int; who::AbstractString = "subplots")
 	checked = _SubplotsCheckedInset[]
 	insets === missing && return checked
 	(insets isa AbstractVector && all(inset -> inset isa PlotlyBase.Inset, insets)) ||
 		throw(ArgumentError(
-			"subplots: `insets` must be a vector of `Inset(...)` specifications; got " *
+			"$(who): `insets` must be a vector of `Inset(...)` specifications; got " *
 			"$(repr(insets)). (`inset!(sf, bounds)` adds an inset to an existing figure.)",
 		))
 	for (k, inset) in enumerate(insets)
 		r, c = inset.cell
 		(1 <= r <= rows && 1 <= c <= cols) || throw(ArgumentError(
-			"subplots: `insets[$(k)].cell` = $(inset.cell) is outside the " *
+			"$(who): `insets[$(k)].cell` = $(inset.cell) is outside the " *
 			"$(rows) × $(cols) grid.",
 		))
 		inset.kind == "xy" || continue
 		(inset.colspan == 1 && inset.rowspan == 1) || throw(ArgumentError(
-			"subplots: `insets[$(k)]` sets colspan/rowspan, which PlotlyBase ignores; " *
+			"$(who): `insets[$(k)]` sets colspan/rowspan, which PlotlyBase ignores; " *
 			"an inset lies inside one cell (size it with `w`/`h`).",
 		))
-		l = _subplots_inset_fraction(inset.l, k, "l"; size = false)
-		b = _subplots_inset_fraction(inset.b, k, "b"; size = false)
-		w = _subplots_inset_fraction(inset.w, k, "w"; size = true)
-		h = _subplots_inset_fraction(inset.h, k, "h"; size = true)
+		l = _subplots_inset_fraction(inset.l, k, "l"; size = false, who = who)
+		b = _subplots_inset_fraction(inset.b, k, "b"; size = false, who = who)
+		w = _subplots_inset_fraction(inset.w, k, "w"; size = true, who = who)
+		h = _subplots_inset_fraction(inset.h, k, "h"; size = true, who = who)
 		x1 = w === nothing ? 1.0 : l + w
 		y1 = h === nothing ? 1.0 : b + h
 		# Tolerance for fractions such as 0.7 + 0.3, which exceed 1 by one ulp.
 		(x1 <= 1 + 1e-12 && y1 <= 1 + 1e-12) || throw(ArgumentError(
-			"subplots: `insets[$(k)]` reaches outside its cell (l + w = $(x1), " *
+			"$(who): `insets[$(k)]` reaches outside its cell (l + w = $(x1), " *
 			"b + h = $(y1)); both must be at most 1.",
 		))
 		push!(checked, (
@@ -3847,22 +3893,22 @@ plot_scatter!(sf, 0:0.1:10, cos.(0:0.1:10); row=2, col=1)
 function subplots(
 	rows::Integer,
 	cols::Integer;
-	sync::Bool = true,
-	width::Real = 0,
-	height::Real = 0,
-	title::AbstractString = "",
-	window_title::AbstractString = "",
-	show::Bool = true,
+	sync = true,
+	width = 0,
+	height = 0,
+	title = "",
+	window_title = "",
+	show = true,
 	app = nothing,
 	height_ratios = nothing,
 	width_ratios = nothing,
-	per_subplot_legends::Bool = true,
-	legend_position::Union{Symbol, AbstractString} = get_default_legend_position(),
-	legend_inset::Union{Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = _DEFAULT_LEGEND_INSET[],
-	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
-	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
-	legend_borderwidth::Union{Nothing, Real} = nothing,
-	compress::Bool = true,
+	per_subplot_legends = true,
+	legend_position = get_default_legend_position(),
+	legend_inset = _DEFAULT_LEGEND_INSET[],
+	legend_bgcolor = nothing,
+	legend_bordercolor = nothing,
+	legend_borderwidth = nothing,
+	compress = true,
 	subplot_kwargs...,
 )
 	# Validate every option before a figure or window exists.
@@ -3875,6 +3921,33 @@ function subplots(
 			"positionally as `subplots(rows, cols)`.",
 		))
 	end
+	_subplots_check_grid_keywords(subplot_kwargs, "subplots")
+	for (name, value) in (
+		(:sync, sync), (:show, show), (:per_subplot_legends, per_subplot_legends),
+		(:compress, compress),
+	)
+		value isa Bool || throw(ArgumentError(
+			"subplots: `$(name)` must be true or false; got $(repr(value)).",
+		))
+	end
+	for (name, value) in ((:title, title), (:window_title, window_title))
+		value isa AbstractString || throw(ArgumentError(
+			"subplots: `$(name)` must be a string; got $(repr(value)).",
+		))
+	end
+	(legend_position isa Symbol || legend_position isa AbstractString) || throw(ArgumentError(
+		"subplots: `legend_position` must be a Symbol or a string such as :topright; " *
+		"got $(repr(legend_position)).",
+	))
+	for (name, value) in ((:legend_bgcolor, legend_bgcolor), (:legend_bordercolor, legend_bordercolor))
+		(value === nothing || value isa AbstractString || value isa Symbol) || throw(ArgumentError(
+			"subplots: `$(name)` must be a colour name or string, or nothing; got $(repr(value)).",
+		))
+	end
+	(legend_borderwidth === nothing || legend_borderwidth isa Real) || throw(ArgumentError(
+		"subplots: `legend_borderwidth` must be a finite number ≥ 0; got " *
+		"$(repr(legend_borderwidth)).",
+	))
 	rows_i = Int(rows)
 	cols_i = Int(cols)
 	_check_subplot_dims(rows_i, cols_i)
@@ -3892,7 +3965,8 @@ function subplots(
 		show = show,
 	)
 	normalized_legend_position = _normalize_legend_position(legend_position)
-	(length(legend_inset) == 2 && all(v -> !(v isa Bool) && isfinite(v), legend_inset)) ||
+	((legend_inset isa Tuple || legend_inset isa AbstractVector) && length(legend_inset) == 2 &&
+		all(v -> v isa Real && !(v isa Bool) && isfinite(v), legend_inset)) ||
 		throw(ArgumentError(
 			"subplots: `legend_inset` must be two finite numbers (x, y); got " *
 			"$(repr(legend_inset)).",
@@ -3998,7 +4072,8 @@ Out-of-range or `Bool` indices throw an `ArgumentError` and leave the active
 cell unchanged. Empty cells (`specs` entries of `missing`) may be selected,
 but plotting into them throws.
 """
-function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
+function subplot!(sf::SubplotFigure, row::Integer, col::Integer; kwargs...)
+	_reject_keywords("subplot!", kwargs)
 	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = "subplot!")
 	lock(getfield(sf, :_lock)) do
 		sf.current_row = r
@@ -4007,7 +4082,8 @@ function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
 	return sf
 end
 
-function subplot!(sf::SubplotFigure, index::Integer)
+function subplot!(sf::SubplotFigure, index::Integer; kwargs...)
+	_reject_keywords("subplot!", kwargs)
 	index isa Bool && throw(ArgumentError(
 		"subplot!: `index` must be an integer, not Bool.",
 	))

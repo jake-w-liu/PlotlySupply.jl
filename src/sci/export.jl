@@ -1084,6 +1084,82 @@ function _svg_canonical_root(svg::String)::String
 	return tag * svg[(ncodeunits(root.match) + 1):end]
 end
 
+# One attribute `name="value"` of a serialised SVG start tag (XMLSerializer
+# escapes `"` inside values, so a value never holds one).
+const _SVG_ATTRIBUTE = r"\s+([A-Za-z_:][-A-Za-z0-9_:.]*)=\"([^\"]*)\""
+const _SVG_START_TAG = r"<([A-Za-z][-A-Za-z0-9_:.]*)((?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*=\"[^\"]*\")+)(\s*/?>)"
+
+"""
+	_svg_canonical_elements(svg::String) -> String
+
+Write the attributes of every element below the root `<svg>` in name order.
+plotly.js sets some attributes in a different order on a figure's first draw
+than on later ones (the legend's `rect.bg`: `style` before or after
+`width`/`height`), so two exports of the same figure differed in bytes. The
+root element keeps the order `_svg_canonical_root` gives it.
+"""
+function _svg_canonical_elements(svg::String)::String
+	root = match(r"<svg\b[^>]*>", svg)
+	root === nothing && return svg
+	head_end = root.offset + ncodeunits(root.match) - 1
+	body = SubString(svg, head_end + 1)
+	sorted = replace(body, _SVG_START_TAG => function (tag)
+		m = match(_SVG_START_TAG, tag)
+		attributes = [(m2.captures[1], m2.captures[2]) for m2 in eachmatch(_SVG_ATTRIBUTE, m.captures[2])]
+		issorted(attributes; by = first) && return tag
+		sort!(attributes; by = first)
+		return string("<", m.captures[1], join((" $(n)=\"$(v)\"" for (n, v) in attributes)), m.captures[3])
+	end)
+	return svg[1:head_end] * sorted
+end
+
+const _MATHJAX_GLYPH_DEFS = r"<defs id=\"MathJax_SVG_glyphs\">(.*?)</defs>"s
+const _MATHJAX_GLYPH_PATH = r"<path\b[^>]*?\bid=\"([^\"]+)\"[^>]*?/>"
+
+"""
+	_svg_merge_mathjax_glyphs(svg::String) -> String
+
+plotly.js copies MathJax's whole session glyph cache into every math label of
+an exported SVG: `<defs id="MathJax_SVG_glyphs">` and each glyph id appear once
+per label (duplicate ids, invalid XML), and glyphs of figures exported earlier
+in the session are carried along (the file depends on the session). Keep one
+glyph definitions block, at the first one's place, holding each glyph the file
+refers to (`href="#id"`) once, in id order. An SVG without MathJax glyphs is
+returned unchanged; a referenced glyph no block defines is left as it is.
+"""
+function _svg_merge_mathjax_glyphs(svg::String)::String
+	blocks = collect(eachmatch(_MATHJAX_GLYPH_DEFS, svg))
+	isempty(blocks) && return svg
+	glyphs = Dict{String,String}()
+	for block in blocks, m in eachmatch(_MATHJAX_GLYPH_PATH, block.captures[1])
+		get!(glyphs, String(m.captures[1]), String(m.match))
+	end
+	# References from outside the glyph blocks (a glyph path does not refer
+	# to other glyphs).
+	out = IOBuffer()
+	cursor = 1
+	for block in blocks
+		write(out, SubString(svg, cursor, prevind(svg, block.offset)))
+		cursor = block.offset + ncodeunits(block.match)
+	end
+	write(out, SubString(svg, cursor))
+	rest = String(take!(out))
+	used = Set{String}()
+	for m in eachmatch(r"href=\"#([^\"]+)\"", rest)
+		haskey(glyphs, m.captures[1]) && push!(used, String(m.captures[1]))
+	end
+	merged = "<defs id=\"MathJax_SVG_glyphs\">" * join(glyphs[id] for id in sort!(collect(used))) * "</defs>"
+	result = IOBuffer()
+	cursor = 1
+	for (k, block) in enumerate(blocks)
+		write(result, SubString(svg, cursor, prevind(svg, block.offset)))
+		k == 1 && write(result, merged)
+		cursor = block.offset + ncodeunits(block.match)
+	end
+	write(result, SubString(svg, cursor))
+	return String(take!(result))
+end
+
 # A length for an SVG attribute: plain decimal, at most 6 decimals (1e-6 of a
 # unit; floating-point noise such as 8.299999999999999 cm prints as 8.3).
 # Export sizes are at least 1 px (0.0104 in) and finite, so Julia's shortest

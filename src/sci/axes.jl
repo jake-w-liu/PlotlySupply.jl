@@ -3883,7 +3883,7 @@ end
 
 function inset!(fig, bounds; kwargs...)
 	throw(ArgumentError(
-		"inset! needs a SubplotFigure; use subplots(1,1; sync=false)",
+		"inset!: only a SubplotFigure has insets; got a $(nameof(typeof(fig))). Make one with subplots(1, 1; sync = false).",
 	))
 end
 
