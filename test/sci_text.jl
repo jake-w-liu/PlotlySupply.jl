@@ -989,11 +989,13 @@ using Test, PlotlySupply
 		end
 		byname = Dict(a[:name] => a for a in annotations(sf) if haskey(a, :name))
 		a, c = byname["plotlysupply:panel_label:1:1"], byname["plotlysupply:panel_label:2:1"]
-		# (a) sits at its corner like (c), or beside it clear of the centred
-		# title when the margin and the tick-label room hold it (the drawn
-		# box is checked in regression_legend.jl, "r1 vm-03")
-		@test (get(a, :xanchor, "left"), get(a, :xshift, 0)) in (("left", 0), ("right", -PS._TEXT_PANEL_GAP))
-		@test (get(c, :xanchor, "left"), get(c, :xshift, 0)) == ("left", 0)
+		# (a) sits at its corner, or beside it when the cell title is drawn
+		# at that corner (`_text_panel_label_xplacement`: "(a) Title" on one
+		# line); the drawn boxes are checked in regression_legend.jl, "r1 vm-03"
+		for (label, row) in ((a, 1), (c, 2))
+			want = PS._text_panel_label_xplacement(true, PS._text_panel_title_side(sf, row, 1))
+			@test (get(label, :xanchor, "left"), get(label, :xshift, 0)) == want
+		end
 		@test PS._finalize_figure!(sf) === false
 	end
 

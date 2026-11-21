@@ -2239,6 +2239,30 @@ function _legend_plot_area_width(p::Plot)
 	return max(width - _legend_margin_lr(p, :l) - _legend_margin_lr(p, :r), 1.0)
 end
 
+# The plot-area width (px) once the finalize that ends this call has settled
+# the figure, for the column count of an explicit `set_legend!` call
+# (`_legend_relayout_columns!`). A left or right margin may still hold room
+# the room engine raised for a decoration the call just moved (`_ROOM_MARGIN_KEY`:
+# an outside legend placed above the grid with `ncols = 2` was given one
+# column, 327 of the 590 px the plot area has once the margin is given back,
+# chama_a2), so then the figure is settled on a copy at its own size
+# (`_finalize_export_copy`; `p` is not changed) and its margins are read.
+# Without such a margin it is the plot area of now, and no copy is made.
+function _legend_settled_area_width(p::Plot)
+	record = _room_margin_record(p.layout)
+	margin = get(p.layout.fields, :margin, nothing)
+	held = any((:l, :r)) do letter
+		rec = get(record, letter, nothing)
+		current = _cmn_mapping_get(margin, letter)
+		rec !== nothing && _fin_isfinite_real(current) && abs(Float64(current) - rec[2]) <= 0.5
+	end
+	held || return _legend_plot_area_width(p)
+	width, height = _figure_default_size(p)
+	size = (width = _tight_real(get(p.layout.fields, :width, nothing), Float64(width)),
+		height = _tight_real(get(p.layout.fields, :height, nothing), Float64(height)))
+	return _legend_plot_area_width(_finalize_export_copy(p, size))
+end
+
 # Left or right figure margin (px): the layout's, the template's, else
 # plotly.js' default.
 function _legend_margin_lr(p::Plot, key::Symbol)
@@ -2257,9 +2281,10 @@ end
 # reach from its anchor to the nearest plot area of the same row, or into the
 # figure margin beside the grid (`_legend_band_interval`), as matplotlib's
 # legends above the axes do.
-function _legend_available_width(p::Plot, box::AbstractDict, span::Float64; legend_id = nothing)
+function _legend_available_width(p::Plot, box::AbstractDict, span::Float64; legend_id = nothing,
+		area::Union{Nothing, Float64} = nothing)
 	x = _legend_real(get(box, :x, nothing))
-	area = _legend_plot_area_width(p)
+	area = something(area, _legend_plot_area_width(p))
 	if get(box, :xref, "paper") == "paper" && x !== nothing && (x < 0 || x > 1)
 		return _tight_real(get(p.layout.fields, :width, nothing), Float64(_figure_default_size(p)[1])) / 2
 	end
@@ -2397,6 +2422,7 @@ function _legend_apply_columns!(
 	fill::Char = 'c',
 	span::Real = 1.0,
 	who::AbstractString = "set_legend!",
+	area::Union{Nothing, Float64} = nothing,
 )
 	legend_id = String(legend_id)
 	_legend_clear_column_groups!(p, legend_id)
@@ -2416,7 +2442,7 @@ function _legend_apply_columns!(
 	# side containing "left" ("left" and "top left": `computeLegendDimensions`).
 	title_left = has_title && occursin("left", string(get(title, :side, "top")))
 	title_width = title_left ? _text_extent(title_text, _legend_entry_font_size(p, box))[1] + 2 * _LEGEND_ITEM_GAP : 0.0
-	available = _legend_available_width(p, box, Float64(span); legend_id = legend_id)
+	available = _legend_available_width(p, box, Float64(span); legend_id = legend_id, area = area)
 	wanted = min(Int(ncols), length(indices))
 	used = wanted
 	columns = _legend_column_assignment(length(indices), used, fill)
@@ -2491,7 +2517,8 @@ area. `span` is the legend's share of the plot-area width.
 function _legend_relayout_columns!(p::Plot, legend_id::AbstractString, opts; span::Real = 1.0, cell::Bool = false)
 	who = isempty(opts.who) ? "set_legend!" : opts.who
 	if opts.ncols > 1 || (opts.ncols == 1 && opts.orientation == "h")
-		_legend_apply_columns!(p, legend_id, opts.ncols; fill = 'c', span = span, who = who)
+		_legend_apply_columns!(p, legend_id, opts.ncols; fill = 'c', span = span, who = who,
+			area = _legend_settled_area_width(p))
 		return nothing
 	end
 	if opts.ncols == 1 || opts.orientation == "v"
@@ -2502,14 +2529,16 @@ function _legend_relayout_columns!(p::Plot, legend_id::AbstractString, opts; spa
 	if layout !== nothing
 		fill, n = layout
 		count = fill == 'r' ? length(p.data) : n
-		_legend_apply_columns!(p, legend_id, count; fill = fill, span = span, who = "")
+		_legend_apply_columns!(p, legend_id, count; fill = fill, span = span, who = "",
+			area = _legend_settled_area_width(p))
 	elseif cell && _legend_box_orientation(p, legend_id) == "h" &&
 			!(opts.orientation === nothing && legend_id in something(_legend_cell_auto_ids(p), ()))
 		# A row the best-position rule laid out (`:outside_bottom`, which it
 		# picks only when the row fits the cell) is not wrapped into column
 		# groups: they would stay when the rule moves the legend back inside
 		# as a column (grouped spacing between its entries).
-		_legend_apply_columns!(p, legend_id, length(p.data); fill = 'r', span = span, who = "")
+		_legend_apply_columns!(p, legend_id, length(p.data); fill = 'r', span = span, who = "",
+			area = _legend_settled_area_width(p))
 	end
 	return nothing
 end

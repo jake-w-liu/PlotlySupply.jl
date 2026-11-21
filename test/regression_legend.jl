@@ -1792,4 +1792,37 @@ import Dates
 		@test PS._scat_outside_legend_fit(560.0, 700.0, (800.0, 60.0)) === nothing
 		@test PS._scat_outside_legend_fit(560.0, 700.0, nothing) === :outside_right
 	end
+
+	@testset "r1: ncols counts the plot area a moved outside legend gives back" begin
+		# An outside legend raised the right margin; the call that places it
+		# above the grid with two columns sizes them on the plot area the
+		# figure has once the margin is given back (it got one column, at
+		# 327 of 590 px, in the chama_a2 recreation).
+		names = ["macroelement, unit square", "mixed enhanced strain, unit square",
+			"macroelement, Cook's membrane", "mixed enhanced strain, Cook's membrane"]
+		for first in (nothing, :outside_right)
+			sf = subplots(1, 2; sync = false, per_subplot_legends = false)
+			figsize!(sf, 7.2, 4.0; units = :in)
+			for c in 1:2
+				plot_scatter!(sf, [1.0, 2, 3], [1.0, 4, 9] .* c; row = 1, col = c)
+			end
+			for name in names
+				legend_entry!(sf, name; color = "red", legend_target = :figure)
+			end
+			first === nothing || set_legend!(sf; position = first, legend_target = :figure)
+			@test PS._finalize_figure!(sf) === false
+			m = sd(pl(sf).layout.fields[:margin])
+			@test m[:r] > 150                                               # the legend's room
+			@test_logs min_level = Base.CoreLogging.Warn set_legend!(sf; position = (0.5, 1.09),
+				xanchor = "center", yanchor = "bottom", ncols = 2, frame = false, legend_target = :figure)
+			groups = [t.fields[:legendgroup] for t in pl(sf).data if haskey(t.fields, :legendgroup)]
+			@test sort(unique(groups)) == ["plotlysupply:col:legend:c:1/2", "plotlysupply:col:legend:c:2/2"]
+			@test PS._finalize_figure!(sf) === false
+			@test sd(pl(sf).layout.fields[:margin])[:r] < 60                # given back
+			# drawn: two rows of two entries, inside the figure
+			b = export_boxes(sf)
+			box = only(b["legends"])
+			@test box[4] - box[2] < 3 * 18 && box[1] >= 0 && box[3] <= b["W"]
+		end
+	end
 end
