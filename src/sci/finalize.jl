@@ -4655,14 +4655,21 @@ end
 # its plot area).
 function _room_bar_len(bar::AbstractDict, current::Float64, final::Float64; floor::Float64 = 0.0,
 		cell::Float64 = current, wrote::Union{Nothing, Float64} = nothing)
-	len = _cbar_real(bar, :len, nothing)
-	ours = len === nothing || !(len > 0) || _cbar_string(bar, :lenmode, "fraction") != "fraction" ||
-		isapprox(len, current; atol = 1e-9) || isapprox(len, max(current, floor); atol = 1e-9) ||
-		(wrote !== nothing && isapprox(len, wrote; atol = 1e-9))
-	ours && return max(final, floor)
-	len = Float64(len)
+	_room_bar_len_ours(bar, current; floor = floor, wrote = wrote) && return max(final, floor)
+	len = Float64(_cbar_real(bar, :len, nothing))
 	final < cell - 1e-9 && (len = min(len, final))
 	return max(len, floor)
+end
+
+# Whether the `len` of trace bar `bar` is ours (`_room_bar_len`): unset, not
+# a fraction, the area's `current` extent, the `floor`, or what a former pass
+# wrote (`wrote`); any other `len` is the user's.
+function _room_bar_len_ours(bar::AbstractDict, current::Float64; floor::Float64 = 0.0,
+		wrote::Union{Nothing, Float64} = nothing)
+	len = _cbar_real(bar, :len, nothing)
+	return len === nothing || !(len > 0) || _cbar_string(bar, :lenmode, "fraction") != "fraction" ||
+		isapprox(len, current; atol = 1e-9) || isapprox(len, max(current, floor); atol = 1e-9) ||
+		(wrote !== nothing && isapprox(len, wrote; atol = 1e-9))
 end
 
 # Tick label lines a vertical bar's body keeps at least. plotly.js 2.35.2
@@ -4803,7 +4810,8 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 			reserve = occursin(_FIN_MARGIN_FIRST_SUBPLOT, String(area_key))
 			for item in group
 				key = _room_bar_key(item)
-				plan.bar_items[key] = (item = item, side = side, keep_default = keep_default)
+				plan.bar_items[key] = (item = item, side = side, keep_default = keep_default,
+					flat = a.kind === :xy)
 				px = side === :right ?
 					_fin_bar_width(layout, item, plan.Hp; len_px = _room_bar_len(item.bar, span, span) * plan.Hp) +
 					max(0.0, lead - _ROOM_GAP) :
@@ -4990,8 +4998,10 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 	# layout-fuzz-05: a lone bar left at plotly's default position (x 1.02,
 	# len 1) is drawn without plotly's 10 px `ypad`, which made it 20 px
 	# shorter than the plot area. `ypad` alone keeps it unplaced
-	# (`_fin_bar_unplaced`), so it stays at the default on later runs.
+	# (`_fin_bar_unplaced`), so it stays at the default on later runs. The
+	# bar of a 3-D scene (no plot area to match) is left untouched.
 	if entry.keep_default
+		(hasproperty(entry, :flat) && !entry.flat) && return nothing
 		ypad = _cbar_real(entry.item.bar, :ypad, nothing)
 		return ypad !== nothing && ypad == 0 ? nothing : Dict{Symbol, Any}(:ypad => 0)
 	end
@@ -5034,16 +5044,22 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 			placement[:y] = (yd[1] + yd[2]) / 2
 			placement[:yanchor] = "middle"
 			area = plan.areas[slot.area]
+			floor = _room_min_bar_len(plan.font, item.bar, plan.Hp)
+			wrote = _room_cbar_wrote(plan, key)
+			_room_bar_len_ours(item.bar, _room_span(area.current[2]); floor = floor, wrote = wrote) ||
+				push!(_room_user_len_bars(plan), key)
 			placement[:len] = _room_bar_len(item.bar, _room_span(area.current[2]), _room_span(yd);
-				floor = _room_min_bar_len(plan.font, item.bar, plan.Hp),
-				cell = area.ref === nothing ? _room_span(area.current[2]) : _room_span(area.ref[2]),
-				wrote = _room_cbar_wrote(plan, key))
+				floor = floor, cell = area.ref === nothing ? _room_span(area.current[2]) : _room_span(area.ref[2]),
+				wrote = wrote)
 		end
 		return placement
 	end
 	xd = slot.domain_x
-	len = _room_bar_len(item.bar, _room_span(plan.areas[slot.area].current[1]), _room_span(xd);
-		floor = _room_min_hbar_len(plan.font, item.bar, plan.Wp), wrote = _room_cbar_wrote(plan, key))
+	current = _room_span(plan.areas[slot.area].current[1])
+	floor = _room_min_hbar_len(plan.font, item.bar, plan.Wp)
+	wrote = _room_cbar_wrote(plan, key)
+	_room_bar_len_ours(item.bar, current; floor = floor, wrote = wrote) || push!(_room_user_len_bars(plan), key)
+	len = _room_bar_len(item.bar, current, _room_span(xd); floor = floor, wrote = wrote)
 	return _room_hbar_placement(plan, item, slot.edge, slot.offset, (xd[1] + xd[2]) / 2, len, slot.release)
 end
 
@@ -5120,7 +5136,13 @@ function _room_place!(plan::_RoomPlan, ::Val{:colorbar})
 		if item.coloraxis !== nothing && hasproperty(entry, :ratio) && haskey(placement, :len)
 			new_record[item.coloraxis] = Float64[entry.ratio, Float64(placement[:len])]
 		elseif item.coloraxis === nothing && haskey(placement, :len)
-			new_record[key] = Float64[1.0, Float64(placement[:len])]
+			# A `len` the user gave (`colorbar!(...; len)`) is not ours:
+			# recorded, the next pass would take it for ours and drop it.
+			if key in _room_user_len_bars(plan)
+				delete!(new_record, key)
+			else
+				new_record[key] = Float64[1.0, Float64(placement[:len])]
+			end
 		end
 		_room_same_place(item.bar, placement) && !_room_needs_mark(plan, key, item, placement) && continue
 		plan.wrote |= _fin_place_bar!(plan.ctx, plan.updates, item, placement)
@@ -5143,6 +5165,10 @@ end
 # `[ratio, len]`; a trace bar of ours placed by the plan, by its
 # `_room_bar_key` => `[1, len]` (read once per plan).
 const _ROOM_CBAR_KEY = Symbol("plotlysupply:cbar")
+
+# The keys of the trace bars whose `len` this plan found to be the user's
+# (`_room_bar_len_ours`).
+_room_user_len_bars(plan::_RoomPlan) = get!(() -> Set{String}(), plan.memo, :user_len_bars)::Set{String}
 
 # The `len` a former pass wrote on the trace bar keyed `key`, or `nothing`.
 function _room_cbar_wrote(plan::_RoomPlan, key::AbstractString)
