@@ -136,7 +136,7 @@ using PlotlySupply
 			@test pub.colorway == OKABE_ITO
 			@test pub.spines === :box
 			@test !pub.legend_frame
-			@test pub.mathsize == "\\large"
+			@test pub.mathsize == ""          # L9: math is drawn at the label size
 			@test pub.margin == Dict(:l => 10.0, :r => 10.0, :t => 10.0, :b => 10.0)
 
 			returned = set_default_style!(:publication)
@@ -144,7 +144,7 @@ using PlotlySupply
 			returned.fontsize = 30
 			@test get_default_style().fontsize == pub.fontsize
 			@test PS._active_style() == pub
-			@test PS._style_mathsize() == "\\large"
+			@test PS._style_mathsize() == ""
 
 			got = get_default_style()
 			got.fontsize = 31
@@ -641,8 +641,13 @@ using PlotlySupply
 			relayout!(tex_title, annotations = [PB.attr(text = "above", x = 0.5, y = 1, xref = "paper", yref = "paper", yanchor = "bottom", showarrow = false)])
 			tight_layout!(tex_title)
 			title_size = round(1.4 * 12)
+			# The margin holds the title above the annotation line, and the band
+			# the room providers give a pinned math title (v7 tm-title-top-clip:
+			# its pad.t includes the shift that keeps its first row inside).
+			band = PS._room_slot(PS._room_plan(tex_title), PS._LT_OWNER, "figure_title")
+			@test band.px >= 2 * 1.3 * title_size
 			@test sd(tex_title.layout.fields[:margin])[:t] ==
-				  4 + ceil(12 * 1.3 + 4) + ceil(2 * 1.3 * title_size + 4)
+				  max(4 + ceil(12 * 1.3 + 4) + ceil(2 * 1.3 * title_size + 4), ceil(band.offset + band.px + PS._ROOM_GAP))
 
 			sp, scripts = fake_syncplot(plot_scatter(1:3, [1, 2, 3]; title = "T"))
 			@test tight_layout!(sp) === nothing
@@ -660,8 +665,9 @@ using PlotlySupply
 			ieee_width = with_style(() -> PS._style_default_figure_size()[1], :ieee)
 			@test ieee_width < 700
 			ieee_font = PS._tight_root_font_size(k -> get(ieee.layout.fields, k, nothing))
-			@test sd(ieee.layout.fields[:margin])[:l] ==
-				  4 + ceil(0.05 * ieee_width + PS._text_extent("left label", ieee_font)[1] + 4)
+			# The label is measured in the :ieee font (Times New Roman, D19).
+			label_width = with_style(() -> PS._text_extent("left label", ieee_font)[1], :ieee)
+			@test sd(ieee.layout.fields[:margin])[:l] == 4 + ceil(0.05 * ieee_width + label_width + 4)
 
 			# Z48: a caption placed in figure fractions keeps the room under the
 			# x axis that `annotate!` reserved: the room providers hold it.
@@ -809,7 +815,7 @@ using PlotlySupply
 				@test st.tick_length ≈ 3.5 * 4 / 3 && st.marker_size ≈ 6
 				@test st.colorway == PS.COLOR_CYCLES[:okabe_ito] && st.cycle === :dash_symbol
 				@test st.template === :plotly_white && st.font_color == "#000000" && !st.grid && !st.legend_frame
-				@test st.mathsize == "\\large"
+				@test st.mathsize == ""
 				for (columns, px_width) in widths
 					@test journal_width(name; columns = columns, units = :px) ≈ px_width
 					@test journal_width(String(name); columns = columns, units = :mm) ≈ px_width / mm

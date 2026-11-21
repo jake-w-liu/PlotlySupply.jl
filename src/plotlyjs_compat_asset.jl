@@ -8,6 +8,43 @@ const _PLOTLYJS_MATH_FONT_SEAM =
 	raw""".attr({"pointer-events":"none","data-unformatted":S,"data-math":"Y"});l.node()"""
 const _PLOTLYJS_MATH_FONT_REPLACEMENT =
 	raw""".attr({"pointer-events":"none","data-unformatted":S,"data-math":"Y"}).style({"font-family":t.node().style.fontFamily,"font-size":r+"px"});l.node()"""
+# plotly.js reads a label's font size with parseInt before typesetting it, so
+# a fractional size (8 pt = 10.667 px, every journal preset) typeset the math
+# at 10 px while the plain labels beside it stay at 10.667 px (L9). The size
+# is read whole.
+const _PLOTLYJS_MATH_SIZE_SEAM =
+	raw"""var r=parseInt(t.node().style.fontSize,10),o={fontSize:r}"""
+const _PLOTLYJS_MATH_SIZE_REPLACEMENT =
+	raw"""var r=parseFloat(t.node().style.fontSize),o={fontSize:r}"""
+# legend.js computeTextDimensions measures and places the legend title's
+# MathJax group with `scrollbox.select("g[class*=math-group]")`, which finds
+# the group of the first math ENTRY when one comes earlier in the scroll box
+# (tm-legend-math-title-clip, measured: the title group kept no transform and
+# drew 8.3 px above the legend box, and the title height was the entry's).
+# The title reads its own group (class "<legend id>titletext-math-group").
+const _PLOTLYJS_LEGEND_TITLE_MATH_SEAM =
+	raw"""var a=t.select("g[class*=math-group]"),o=a.node(),s=P(r);"""
+const _PLOTLYJS_LEGEND_TITLE_MATH_REPLACEMENT =
+	raw"""var a=t.select(n===b?"g[class*=titletext-math-group]":"g[class*=math-group]"),o=a.node(),s=P(r);"""
+# plotly.js counts the lines of an axis title by its `<br>` tags only: in
+# the automargin room (axes.js approxTitleDepth) and in the title's distance
+# from the axis (drawTitle). A math title of several rows (`mathtext` writes
+# them as one MathJax array, rows split by `\\`) got the room of one line,
+# and its svg, which convertToTspans centres on the title's anchor, grew
+# half its extra rows towards the tick labels (tm-twoline-math-axis-title,
+# measured: the plot area kept its size for 2 and 3 rows and the x title
+# drew 1.7 px into the tick labels under :ieee). Each extra row of a
+# `$...$` title gets 1.6 em of room, and the title's anchor moves away from
+# the axis by half of it: the svg of 2 and 3 rows measured 1.50 and 1.55 em
+# per extra row under :ieee (Times), 1.86 and 1.64 em under :default.
+const _PLOTLYJS_AXIS_TITLE_ROOM_SEAM =
+	raw"""function St(t){var e=t.title.font.size,r=(t.title.text.match(c.BR_TAG_ALL)||[]).length;return t.title.hasOwnProperty("standoff")?e*(q+r*H):r?e*(r+1)*H:e}"""
+const _PLOTLYJS_AXIS_TITLE_ROOM_REPLACEMENT =
+	raw"""function St(t){var e=t.title.font.size,r=(t.title.text.match(c.BR_TAG_ALL)||[]).length,_m=/^\$[\s\S]*\$$/.test(t.title.text)?(t.title.text.match(/\\\\/g)||[]).length:0;return _m*1.6*e+(t.title.hasOwnProperty("standoff")?e*(q+r*H):r?e*(r+1)*H:e)}"""
+const _PLOTLYJS_AXIS_TITLE_SHIFT_SEAM =
+	raw"""}var p,d,m,g,y=Z.getPxPosition(t,e);"""
+const _PLOTLYJS_AXIS_TITLE_SHIFT_REPLACEMENT =
+	raw"""}/^\$[\s\S]*\$$/.test(e.title.text)&&(r+=(e.title.text.match(/\\\\/g)||[]).length*.8*o);var p,d,m,g,y=Z.getPxPosition(t,e);"""
 # Keep XMLSerializer's attribute quotes and retire the old quote placeholders.
 const _PLOTLYJS_SVG_QUOTE_TRANSFORMS = (
 	raw"""var e=this.style.fontFamily;e&&-1!==e.indexOf('"')&&t.style("font-family",e.replace(l,c));var r=this.style.fontWeight;""" =>
@@ -30,6 +67,10 @@ const _PLOTLYJS_GL3D_PAD_REPLACEMENT =
 	raw"""o.prototype.merge=function(t,e){var _g=t.meta&&t.meta["plotlysupply:gl3d"],_h=_g&&e._scene&&_g[e._scene.id];for(var r=this,o=0;o<3;++o){var s=e[a[o]];_h&&_h.length>=2&&isFinite(_h[0])&&isFinite(_h[1])&&_h[0]>=0&&_h[1]>=0&&(r.tickPad[o]=+_h[0],r.labelPad[o]=+_h[1]);s.visible?("""
 const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_MATH_FONT_SEAM => _PLOTLYJS_MATH_FONT_REPLACEMENT,
+	_PLOTLYJS_MATH_SIZE_SEAM => _PLOTLYJS_MATH_SIZE_REPLACEMENT,
+	_PLOTLYJS_LEGEND_TITLE_MATH_SEAM => _PLOTLYJS_LEGEND_TITLE_MATH_REPLACEMENT,
+	_PLOTLYJS_AXIS_TITLE_ROOM_SEAM => _PLOTLYJS_AXIS_TITLE_ROOM_REPLACEMENT,
+	_PLOTLYJS_AXIS_TITLE_SHIFT_SEAM => _PLOTLYJS_AXIS_TITLE_SHIFT_REPLACEMENT,
 	_PLOTLYJS_GL3D_PAD_SEAM => _PLOTLYJS_GL3D_PAD_REPLACEMENT,
 	_PLOTLYJS_SVG_QUOTE_TRANSFORMS...,
 )

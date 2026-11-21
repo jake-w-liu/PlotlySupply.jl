@@ -530,7 +530,13 @@ function _ref_refresh_legends!(fig)
 			)
 		end
 	else
+		# vm-14: the best-position rule as for a trace of the scatter family
+		# (the line or shape is scored as data): a legend it placed, or the
+		# one this entry creates, moves off the new line; one the user
+		# placed stays.
+		state = _scat_legend_state(fig)
 		_apply_default_legend!(fig)
+		_scat_place_legend!(fig, state)
 	end
 	return nothing
 end

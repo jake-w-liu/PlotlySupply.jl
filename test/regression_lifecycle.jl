@@ -656,7 +656,7 @@ end
 	@testset "set_default_mathtext!: font, inherit_text_font, style size" begin
 		_rl_with_mathtext() do
 			@test get_default_mathtext() ==
-				(enabled = true, size = "", font = "", inherit_text_font = false)
+				(enabled = true, size = "", font = "", inherit_text_font = nothing)
 			# Font names are matched case-insensitively and stored canonically.
 			@test set_default_mathtext!(; font = " stix-web ", inherit_text_font = true) ==
 				(enabled = true, size = "", font = "STIX-Web", inherit_text_font = true)
@@ -673,7 +673,7 @@ end
 			@test get_default_mathtext().font == "STIX-Web"
 			# Every keyword is replaced on each call.
 			@test set_default_mathtext!(false) ==
-				(enabled = false, size = "", font = "", inherit_text_font = false)
+				(enabled = false, size = "", font = "", inherit_text_font = nothing)
 			set_default_mathtext!()
 
 			# font = "" falls back to the environment variable, then Latin-Modern.
@@ -707,7 +707,7 @@ end
 			inherit = PlotlySupply._mathjax_config_script("Asana-Math"; inherit_text_font = true)
 			@test occursin("SVG: {font: \"Asana-Math\"}", inherit)
 			@test occursin("var INHERIT = true;", inherit)
-			@test occursin("mtextFontInherit: true", inherit)
+			@test occursin("output.config.mtextFontInherit = current", inherit)   # set per label at typeset time (L9)
 			# The defaults follow the settings, for every page kind.
 			set_default_mathtext!(; font = "gyre-termes", inherit_text_font = true)
 			for page in (
@@ -721,7 +721,7 @@ end
 			end
 			set_default_mathtext!()
 			@test occursin(
-				"var INHERIT = false;",
+				"var INHERIT = null;",   # default: follow the figure style (L9)
 				PlotlySupply._syncplot_html("rl-div"; autoplay = false, timeout_s = 1.0),
 			)
 		end
@@ -729,7 +729,7 @@ end
 		# The size default consults the active PlotStyle when its own is "".
 		_rl_with_mathtext() do
 			@test PlotlySupply._label("Time \$t\$") == "\$\\text{Time }t\$"
-			with_style(:publication) do
+			with_style(:publication; mathsize = "\\large") do   # presets set no math size (L9)
 				@test PlotlySupply._label("Time \$t\$") == "\$\\large{\\text{Time }t}\$"
 				@test mathtext("\$x\$") == "\$\\large{x}\$"
 				@test mathtext("\$x\$"; size = "") == "\$x\$"
@@ -777,7 +777,7 @@ end
 				model_file = joinpath(resources.tempdir, PlotlySupply._SYNCPLOT_MODEL_FILENAME)
 				live_title() = sp.plot.layout[:title]
 				@test PlotlySupply._syncplot_page_mathjax(sp) ==
-					(font = "Latin-Modern", inherit_text_font = false)
+					(font = "Latin-Modern", inherit_text_font = nothing)
 				@test occursin("SVG: {font: \"Latin-Modern\"}", read(index, String))
 
 				# An unchanged configuration never reloads.
@@ -823,7 +823,7 @@ end
 				@test live_title() == "d"
 				@test !resources.renderer_desynchronized
 				@test PlotlySupply._syncplot_page_mathjax(sp) ==
-					(font = "STIX-Web", inherit_text_font = false)
+					(font = "STIX-Web", inherit_text_font = nothing)
 
 				# An interrupt propagates as itself.
 				set_default_mathtext!(; font = "Neo-Euler")
@@ -1257,7 +1257,7 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 				@test !inherited(termes)
 				@test PlotlySupply._EXPORT_STATE.window !== window
 				@test PlotlySupply._EXPORT_STATE.mathjax_font == "Gyre-Termes"
-				@test !PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font
+				@test PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font === nothing
 				window = PlotlySupply._EXPORT_STATE.window
 
 				set_default_mathtext!(; font = "Gyre-Termes", inherit_text_font = true)
@@ -1265,7 +1265,7 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 				@test all(startswith("GYRETERMES"), _rl_glyph_sets(inherit_svg))
 				@test inherited(inherit_svg)
 				@test PlotlySupply._EXPORT_STATE.window !== window
-				@test PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font
+				@test PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font === true
 				# PDF export of an inherited label works (a `"` in a font list
 				# used to break plotly's SVG serialization).
 				pdf = savefig(fig(); format = "pdf", width = 600, height = 400)
@@ -1281,7 +1281,7 @@ Array.from(document.querySelectorAll('g[class\$="-math-group"]'))
 			@test "LATINMODERNMAIN" in restored
 			@test all(startswith("LATINMODERN"), restored)
 			@test PlotlySupply._EXPORT_STATE.mathjax_font == "Latin-Modern"
-			@test !PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font
+			@test PlotlySupply._EXPORT_STATE.mathjax_inherit_text_font === nothing
 		end
 
 		@testset "shape, image, JSON and devtools entry points" begin

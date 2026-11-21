@@ -533,7 +533,7 @@ end
 # `_mathjax_page_config()` is reloaded before its next renderer update
 # (`_ensure_renderer_mathjax_current!`). SyncPlots that were not built by
 # `_create_syncplot_window` have no entry and are never reloaded.
-const _MathJaxPageConfig = NamedTuple{(:font, :inherit_text_font),Tuple{String,Bool}}
+const _MathJaxPageConfig = NamedTuple{(:font, :inherit_text_font),Tuple{String,Union{Nothing,Bool}}}
 const _SYNCPLOT_MATHJAX_PAGES = WeakKeyDict{_SyncPlotResources,_MathJaxPageConfig}()
 
 function _record_syncplot_mathjax!(resources::_SyncPlotResources, config)
@@ -10802,7 +10802,7 @@ mutable struct _ExportState
 	# MathJax configuration baked into the live export window. A window is
 	# reused only while `_mathjax_page_config()` still returns these values.
 	mathjax_font::Union{Nothing,String}
-	mathjax_inherit_text_font::Bool
+	mathjax_inherit_text_font::Union{Nothing,Bool}
 end
 
 function _ExportState(; divid::String = "plotlysupply-export")
@@ -10822,7 +10822,7 @@ function _ExportState(; divid::String = "plotlysupply-export")
 		Set{String}(),
 		Set{String}(),
 		nothing,
-		false,
+		nothing,
 	)
 end
 
@@ -10868,8 +10868,9 @@ function _validated_mathjax_font(font::AbstractString)
 end
 
 # Page-level MathJax 2.7 extensions, installed by every page PlotlySupply builds
-# (`__INHERIT__` is replaced by `true`/`false`, `__FONT__` by the JSON string of
-# the canonical SVG font name).
+# (`__INHERIT__` is replaced by `null`, `true` or `false`, the
+# `set_default_mathtext!(; inherit_text_font)` setting, and `__FONT__` by the
+# JSON string of the canonical SVG font name).
 #
 # 1. Explicit text metrics. MathJax draws characters it has no glyph for (CJK,
 #    and with `mtextFontInherit` every `\text{…}` run) as SVG <text> that
@@ -10881,11 +10882,17 @@ end
 #    inheriting, family/weight/style) as attributes. Double quotes in font
 #    lists become single quotes: plotly's SVG serializer decodes entities and
 #    would otherwise break the attribute (export failed with "[object Event]").
-# 2. Label font (inherit only). plotly.js gives its temporary <div> only the
-#    label's font size, so the label's family/weight/style are looked up from
-#    the hidden source <text> plotly is typesetting (same TeX after plotly's own
-#    `<`/`>` rewrite; a label without a math group yet is preferred) and set on
-#    the <div> before MathJax measures it.
+# 2. Label font. The label plotly.js is typesetting is looked up (the hidden
+#    source <text>, same TeX after plotly's own `<`/`>` rewrite; a label
+#    without a math group yet is preferred). Its text runs are drawn in its
+#    own font (MathJax `mtextFontInherit`) when the setting says so or, with
+#    the setting `null`, when the figure's style sets a text font family
+#    (`layout.meta.plotlysupply.style.font_family`: every journal preset and
+#    `:publication`), so a label's text parts have the face and size of its
+#    plain text (L9). plotly.js gives its temporary <div> only the label's
+#    font size, so when inheriting the label's family/weight/style are set on
+#    the <div> before MathJax measures it: MathJax then matches the math's
+#    x-height to that font.
 # 3. Calligraphic letters in Latin-Modern. MathJax 2.7.9's Latin-Modern font
 #    data has no calligraphic font: its `-tex-caligraphic` variant (`\mathcal`,
 #    `\cal`) lists the roman Main font, so `\mathcal{E}` came out as an upright
@@ -10897,10 +10904,15 @@ end
 #    letter-like-symbol remaps). The patch runs when the font data has loaded,
 #    before anything is typeset. Other fonts have a calligraphic font
 #    (TeX: MathJax_Caligraphic) and are left alone.
+# 4. Script sizes. MathJax 2 never draws a script below `scriptminsize`
+#    (8 px): at journal sizes (8 pt labels, 7.5 px subscripts) the scripts
+#    came out as large as their base. The minimum is lifted, so scripts are
+#    0.71 (and 0.5) of their base at every size, as in TeX.
 const _MATHJAX_PAGE_EXTENSIONS_JS = raw"""
 (function () {
   var INHERIT = __INHERIT__;
   var FONT = __FONT__;
+  var current = INHERIT === true;
   if (FONT === "Latin-Modern") {
     var patchCaligraphic = function () {
       var data = MathJax.OutputJax.SVG.FONTDATA;
@@ -10920,42 +10932,53 @@ const _MATHJAX_PAGE_EXTENSIONS_JS = raw"""
       }
     });
   }
-  if (INHERIT) {
-    MathJax.Hub.Config({SVG: {mtextFontInherit: true}});
-    var MATH = /([^$]*)([$]+[^$]*[$]+)([^$]*)/;
-    var LT = /(<|&lt;|&#60;)/g, GT = /(>|&gt;|&#62;)/g;
-    var sourceLabel = function (div) {
-      var tex = div.textContent, fallback = null;
-      var nodes = document.querySelectorAll('text[data-math="N"]');
-      for (var i = 0; i < nodes.length; i++) {
-        var node = nodes[i];
-        if (node.style.display !== "none") continue;
-        var m = (node.getAttribute("data-unformatted") || "").match(MATH);
-        if (!m || m[2].replace(LT, "\\lt ").replace(GT, "\\gt ") !== tex) continue;
-        var group = (node.getAttribute("class") || "text").split(" ")[0] + "-math-group";
-        var typeset = false;
-        for (var c = node.parentNode ? node.parentNode.firstChild : null; c; c = c.nextSibling) {
-          if (c.classList && c.classList.contains(group)) { typeset = true; break; }
-        }
-        if (!typeset) return node;
-        if (fallback === null) fallback = node;
+  var MATH = /([^$]*)([$]+[^$]*[$]+)([^$]*)/;
+  var LT = /(<|&lt;|&#60;)/g, GT = /(>|&gt;|&#62;)/g;
+  var sourceLabel = function (div) {
+    var tex = div.textContent, fallback = null;
+    var nodes = document.querySelectorAll('text[data-math="N"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (node.style.display !== "none") continue;
+      var m = (node.getAttribute("data-unformatted") || "").match(MATH);
+      if (!m || m[2].replace(LT, "\\lt ").replace(GT, "\\gt ") !== tex) continue;
+      var group = (node.getAttribute("class") || "text").split(" ")[0] + "-math-group";
+      var typeset = false;
+      for (var c = node.parentNode ? node.parentNode.firstChild : null; c; c = c.nextSibling) {
+        if (c.classList && c.classList.contains(group)) { typeset = true; break; }
       }
-      return fallback;
-    };
-    var typesetLabel = MathJax.Hub.Typeset;
-    MathJax.Hub.Typeset = function (element) {
-      if (element && element.nodeType === 1 && /^math-output-/.test(element.id || "")) {
-        var label = sourceLabel(element);
-        if (label !== null) {
-          element.style.fontFamily = label.style.fontFamily;
-          element.style.fontWeight = label.style.fontWeight;
-          element.style.fontStyle = label.style.fontStyle;
-        }
+      if (!typeset) return node;
+      if (fallback === null) fallback = node;
+    }
+    return fallback;
+  };
+  var styleFamily = function (label) {
+    var gd = label && label.closest ? label.closest(".js-plotly-plot") : null;
+    var meta = gd && gd.layout && gd.layout.meta;
+    var own = meta && meta.plotlysupply;
+    var style = own && own.style;
+    var family = style && style.font_family;
+    return typeof family === "string" && family.replace(/\s+/g, "") !== "";
+  };
+  var typesetLabel = MathJax.Hub.Typeset;
+  MathJax.Hub.Typeset = function (element) {
+    if (element && element.nodeType === 1 && /^math-output-/.test(element.id || "")) {
+      var label = sourceLabel(element);
+      current = INHERIT !== null ? INHERIT : (label !== null && styleFamily(label));
+      var output = MathJax.OutputJax.SVG;
+      if (output && output.config) output.config.mtextFontInherit = current;
+      if (current && label !== null) {
+        element.style.fontFamily = label.style.fontFamily;
+        element.style.fontWeight = label.style.fontWeight;
+        element.style.fontStyle = label.style.fontStyle;
       }
-      return typesetLabel.apply(this, arguments);
-    };
-  }
+    }
+    return typesetLabel.apply(this, arguments);
+  };
   MathJax.Hub.Register.StartupHook("SVG Jax Ready", function () {
+    var MML = MathJax.ElementJax.mml;
+    MML.math.prototype.defaults.scriptminsize = "0px";
+    MML.mstyle.prototype.defaults.scriptminsize = "0px";
     var SVG = MathJax.OutputJax.SVG, TEXT = SVG.BBOX.TEXT, init = TEXT.prototype.Init;
     TEXT.Augment({
       Init: function (scale, text, def) {
@@ -10964,7 +10987,7 @@ const _MATHJAX_PAGE_EXTENSIONS_JS = raw"""
         if (host && host.isConnected) {
           var cs = window.getComputedStyle(host);
           if (!def["font-size"] && cs.fontSize) def["font-size"] = cs.fontSize;
-          if (INHERIT) {
+          if (current) {
             if (!def["font-family"] && cs.fontFamily) def["font-family"] = cs.fontFamily.replace(/"/g, "'");
             if (!def["font-weight"] && cs.fontWeight) def["font-weight"] = cs.fontWeight;
             if (!def["font-style"] && cs.fontStyle) def["font-style"] = cs.fontStyle;
@@ -10979,12 +11002,12 @@ const _MATHJAX_PAGE_EXTENSIONS_JS = raw"""
 
 function _mathjax_config_script(
 	font::AbstractString = _mathjax_svg_font();
-	inherit_text_font::Bool = _MATHTEXT_SETTINGS[].inherit_text_font,
+	inherit_text_font::Union{Nothing,Bool} = _MATHTEXT_SETTINGS[].inherit_text_font,
 )
 	name = _validated_mathjax_font(font)
 	extensions = replace(
 		_MATHJAX_PAGE_EXTENSIONS_JS,
-		"__INHERIT__" => inherit_text_font ? "true" : "false",
+		"__INHERIT__" => inherit_text_font === nothing ? "null" : inherit_text_font ? "true" : "false",
 		"__FONT__" => _json_js(name),
 	)
 	return "  <script type=\"text/x-mathjax-config\">\n" *
@@ -10999,7 +11022,7 @@ end
 # live SyncPlot page and the standalone HTML export.
 function _mathjax_head_html(
 	font::AbstractString = _mathjax_svg_font();
-	inherit_text_font::Bool = _MATHTEXT_SETTINGS[].inherit_text_font,
+	inherit_text_font::Union{Nothing,Bool} = _MATHTEXT_SETTINGS[].inherit_text_font,
 )
 	return _mathjax_config_script(font; inherit_text_font = inherit_text_font) *
 		"\n  <script src=\"$(_MATHJAX_CDN_URL)\"></script>"
@@ -11008,7 +11031,7 @@ end
 function _export_window_html(
 	divid::String;
 	font::AbstractString = _mathjax_svg_font(),
-	inherit_text_font::Bool = _MATHTEXT_SETTINGS[].inherit_text_font,
+	inherit_text_font::Union{Nothing,Bool} = _MATHTEXT_SETTINGS[].inherit_text_font,
 )
 	plotlyjs_uri = _plotlyjs_render_asset_uri()
 	match(r"^[A-Za-z0-9_-]+$", divid) === nothing && throw(ArgumentError(
@@ -11164,7 +11187,7 @@ function _retire_export_window_locked!(
 	state.tempdir = nothing
 	state.ready = false
 	state.mathjax_font = nothing
-	state.mathjax_inherit_text_font = false
+	state.mathjax_inherit_text_font = nothing
 	if tempdir !== nothing
 		_remove_export_tempdir_locked!(
 			state,

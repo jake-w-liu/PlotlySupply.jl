@@ -30,11 +30,13 @@ struct _MathtextSettings
 	# MathJax SVG font ("" defers to PLOTLYSUPPLY_MATHJAX_SVG_FONT, then
 	# "Latin-Modern"); read by the export window and live SyncPlot pages.
 	font::String
-	# Typeset `\text{…}` in the label's own font instead of the MathJax font.
-	inherit_text_font::Bool
+	# Typeset `\text{…}` in the label's own font instead of the MathJax font:
+	# `nothing` follows the figure's style (inherit when it sets a text font
+	# family), `true`/`false` force it for every figure.
+	inherit_text_font::Union{Nothing, Bool}
 end
 
-const _MATHTEXT_SETTINGS = Ref(_MathtextSettings(true, "", "", false))
+const _MATHTEXT_SETTINGS = Ref(_MathtextSettings(true, "", "", nothing))
 
 # The fonts of MathJax 2.7's SVG output (jax/output/SVG/fonts/<name>). Each was
 # verified to load from the pinned MathJax 2.7.9 CDN by exporting a math label
@@ -120,8 +122,35 @@ function _mathtext_snippet(s::AbstractString)
 end
 
 function _mathtext_error(message::AbstractString, label::AbstractString)
-	throw(ArgumentError("mathtext: $(message) in label $(_mathtext_snippet(label))."))
+	throw(ArgumentError("$(_mathtext_who()): $(message) in label $(_mathtext_snippet(label))."))
 end
+
+# The package's source directory: frames of PlotlySupply's own functions.
+const _MATHTEXT_SRC_DIR = dirname(@__DIR__)
+
+# Name of the exported PlotlySupply function the user called, so a label
+# error names it (`xlabel!: unbalanced \$ …`, `plot_scatter: …`; the D6
+# error-prefix rule; tm-error-prefix): the outermost frame on the stack of an
+# exported function defined in the package's sources (a keyword method's
+# body `#plot_scatter#12` counts as `plot_scatter`). "mathtext" when there is
+# none. Only called while throwing.
+function _mathtext_who()
+	who = "mathtext"
+	for frame in stacktrace()
+		file = string(frame.file)
+		startswith(file, _MATHTEXT_SRC_DIR) || continue
+		m = match(r"^#*([^#]+)", string(frame.func))
+		m === nothing && continue
+		name = Symbol(m.captures[1])
+		(isdefined(@__MODULE__, name) && Base.isexported(@__MODULE__, name)) || continue
+		who = String(name)              # frames run innermost first: the last match is outermost
+	end
+	return who
+end
+
+# `ArgumentError` for a label that is not valid UTF-8, named as above.
+_mathtext_invalid_utf8(s::AbstractString) =
+	ArgumentError("$(_mathtext_who()): label is not valid UTF-8: $(repr(s)).")
 
 function _normalize_mathtext_size(size::AbstractString, who::AbstractString)
 	name = strip(String(size))
@@ -136,7 +165,7 @@ end
 
 # The size switch applied when a label writer or `mathtext` is not given one:
 # the `set_default_mathtext!` size, or else the active PlotStyle's `mathsize`
-# (`_style_mathsize`, src/sci/style.jl; `\large` under `:publication`). Every
+# (`_style_mathsize`, src/sci/style.jl). Every
 # PlotStyle field write is validated (constructor and `setproperty!`) against
 # `_STYLE_MATHSIZES`, which is built from `_MATHTEXT_SIZES`, so the style's
 # value is always "" or a `\name` switch MathJax 2 knows (X55).
@@ -168,11 +197,12 @@ Return the package-wide label settings as a `NamedTuple`
 - `font::String`: the MathJax SVG font, or `""`, which defers to the
   `PLOTLYSUPPLY_MATHJAX_SVG_FONT` environment variable and then to
   `"Latin-Modern"`.
-- `inherit_text_font::Bool`: the text parts of math labels are drawn in the
-  label's own font.
+- `inherit_text_font::Union{Nothing,Bool}`: whether the text parts of math
+  labels are drawn in the label's own font; `nothing` follows each figure's
+  style (see [`set_default_mathtext!`](@ref)).
 
 The package default is
-`(enabled = true, size = "", font = "", inherit_text_font = false)`.
+`(enabled = true, size = "", font = "", inherit_text_font = nothing)`.
 """
 function get_default_mathtext()
 	settings = _MATHTEXT_SETTINGS[]
@@ -186,7 +216,8 @@ end
 
 """
 	set_default_mathtext!(enabled::Bool = true; size::AbstractString = "",
-	                      font::AbstractString = "", inherit_text_font::Bool = false)
+	                      font::AbstractString = "",
+	                      inherit_text_font::Union{Nothing,Bool} = nothing)
 
 Configure how PlotlySupply writes and typesets every user-visible label
 (titles, axis titles, legend names, colorbar titles, tick labels, annotations).
@@ -203,11 +234,12 @@ Configure how PlotlySupply writes and typesets every user-visible label
   contains math: one of `\\tiny`, `\\Tiny`, `\\scriptsize`, `\\small`,
   `\\normalsize`, `\\large`, `\\Large`, `\\LARGE`, `\\huge`, `\\Huge` (the
   leading backslash is optional). `""` uses the active [`PlotStyle`](@ref)'s
-  `mathsize` (`"\\\\large"` under `:publication`, none under `:default`); pass
-  `"\\\\normalsize"` to switch sizing off under such a style. MathJax math
-  renders at roughly 0.8× the height of plain text of the same font size, so
-  `"\\\\large"` (1.2×) matches them closely. Plain labels are not affected. Other
-  values throw an `ArgumentError` (`\\footnotesize` does not exist in MathJax 2).
+  `mathsize` (none under the built-in styles: MathJax matches the x-height of
+  math to the label's font, and with `inherit_text_font` the text parts are
+  drawn at the label's size); pass `"\\\\normalsize"` to switch a style's
+  sizing off. The switch scales the whole label, its text parts included.
+  Plain labels are not affected. Other values throw an `ArgumentError`
+  (`\\footnotesize` does not exist in MathJax 2).
   The size is written into the label strings when a figure is built, so it
   applies to figures created afterwards.
 - `font::AbstractString = ""`: the MathJax SVG font used to typeset math, one of
@@ -215,12 +247,22 @@ Configure how PlotlySupply writes and typesets every user-visible label
   `"Gyre-Termes"`, `"Latin-Modern"` (case-insensitive). `""` falls back to the
   `PLOTLYSUPPLY_MATHJAX_SVG_FONT` environment variable (same names) and then to
   `"Latin-Modern"`. Other names throw an `ArgumentError`.
-- `inherit_text_font::Bool = false`: when `true`, the text parts of a math label
-  (the `\\text{…}` segments [`mathtext`](@ref) produces, `\\textbf{…}`, `\\mbox{…}`)
-  are drawn in the font family, weight and style of the label itself (e.g. the
-  figure's sans-serif font) instead of the MathJax font; math symbols keep the
-  MathJax font, and MathJax scales them to the x-height of the label's font.
-  When `false`, the whole label is typeset in the MathJax font.
+- `inherit_text_font::Union{Nothing,Bool} = nothing`: when `true`, the text
+  parts of a math label (the `\\text{…}` segments [`mathtext`](@ref) produces,
+  `\\textbf{…}`, `\\mbox{…}`) are drawn in the font family, weight, style and
+  size of the label itself (e.g. the figure's Times or Arial) instead of the
+  MathJax font, so "Time \\\$t\\\$ (s)" has the face and size of a plain label;
+  math symbols keep the MathJax font (italic letters from the math font), and
+  MathJax scales them to the x-height of the label's font. When `false`, the
+  whole label is typeset in the MathJax font (with the default Latin-Modern
+  font: Computer Modern throughout the label). `nothing` (the default) decides
+  per figure: text parts follow the label's font when the figure's
+  [`PlotStyle`](@ref) sets a `font_family` (every journal preset and
+  `:publication`), and the MathJax font under `:default`. For Computer Modern
+  in every label under a preset, call
+  `set_default_mathtext!(; inherit_text_font = false)` (and give the style a
+  Computer Modern `font_family`, e.g. `"CMU Serif"`, if installed, for the
+  plain labels).
 
 `font` and `inherit_text_font` take effect at render time: every following
 `savefig` (all formats, including HTML) uses them, and an open `SyncPlot`
@@ -246,7 +288,7 @@ function set_default_mathtext!(
 	enabled::Bool = true;
 	size::AbstractString = "",
 	font::AbstractString = "",
-	inherit_text_font::Bool = false,
+	inherit_text_font::Union{Nothing, Bool} = nothing,
 )
 	normalized = _normalize_mathtext_size(size, "set_default_mathtext!")
 	font_name = if isempty(strip(font))
@@ -369,7 +411,7 @@ end
 # resolved only for labels that contain math, so plain labels never depend on
 # (or fail because of) the active style's `mathsize`.
 function _mathtext(s::String, column::Char, size::Union{Nothing,String})::String
-	isvalid(s) || throw(ArgumentError("mathtext: label is not valid UTF-8: $(repr(s))."))
+	isvalid(s) || throw(_mathtext_invalid_utf8(s))
 	chars = collect(s)
 	segments = _mathtext_segments(chars, s)
 	if all(segment -> segment[1] === :text, segments)
@@ -917,9 +959,13 @@ end
 # rules and errors match `mathtext`; when mathtext is disabled only newlines
 # change, as in `_label`.
 function _label_plain(s::AbstractString)::String
-	str = String(s)
+	# Typed: compiled for `::AbstractString` (colorbar and cell labels),
+	# `String(s)` infers as Any and `isvalid(str)` became a dynamic
+	# `isvalid(::Any)` that loading the export backend (URIs' `isvalid(::URI)`)
+	# invalidated with every caller above it.
+	str = String(s)::String
 	_MATHTEXT_SETTINGS[].enabled || return _mathtext_newlines_to_br(str)
-	isvalid(str) || throw(ArgumentError("mathtext: label is not valid UTF-8: $(repr(str))."))
+	isvalid(str) || throw(_mathtext_invalid_utf8(str))
 	segments = _mathtext_segments(collect(str), str)
 	out = IOBuffer()
 	for (kind, content) in segments
@@ -1051,27 +1097,105 @@ function _tex_plain_char(c::Char)
 	return string(c)
 end
 
+# Spacing in math mode (tm-tex-plain-spaces): TeX ignores the spaces typed
+# between atoms and spaces them by their class. Plain text keeps one typed
+# space next to an operator, relation, punctuation or named function
+# (`a + b`, `x \leq y`, `\log x`) and drops it between two ordinary atoms
+# (`\Delta T` is "ΔT", `k_0 a` is "k<sub>0</sub>a"); an explicit spacing
+# command (`\,`, `\quad`) is the space itself.
+const _TEX_PLAIN_OPERATOR_CHARS = Set("+-*=<>,;:")
+const _TEX_PLAIN_OPERATOR_NAMES = Set([
+	"pm", "mp", "times", "cdot", "div", "ast", "star", "bullet", "oplus", "otimes", "odot",
+	"setminus", "cup", "cap", "wedge", "land", "vee", "lor", "approx", "sim", "simeq", "cong",
+	"equiv", "neq", "ne", "leq", "le", "geq", "ge", "ll", "gg", "lt", "gt", "propto", "perp",
+	"parallel", "mid", "in", "notin", "ni", "subset", "subseteq", "supset", "supseteq", "to",
+	"rightarrow", "leftarrow", "gets", "leftrightarrow", "Rightarrow", "Leftarrow",
+	"Leftrightarrow", "mapsto", "uparrow", "downarrow", "colon", "not", "sum", "prod", "int",
+	"iint", "iiint", "oint",
+])
+const _TEX_PLAIN_SPACE_NAMES = Set(["quad", "qquad"])
+const _TEX_PLAIN_WHITESPACE = (' ', '\t', '\r', '\n')
+
+# Spacing class of the atom at the cursor: `:op` (operator, relation,
+# punctuation, named function), `:space` (a spacing command), `:none`
+# (nothing follows in this group), else `:ord`.
+function _tex_plain_peek_class(cur::_TexPlainCursor)
+	_tex_plain_done(cur) && return :none
+	c = cur.chars[cur.pos]
+	c == '}' && return :none
+	c in _TEX_PLAIN_OPERATOR_CHARS && return :op
+	c == '\\' || return :ord
+	n = length(cur.chars)
+	cur.pos == n && return :ord
+	next = cur.chars[cur.pos + 1]
+	if !_mathtext_isletter(next)
+		next == '\\' && return :none                      # a line break
+		return next in keys(_TEX_PLAIN_CONTROL_SYMBOLS) && next != '|' ? :space : :ord
+	end
+	stop = cur.pos + 1
+	while stop < n && _mathtext_isletter(cur.chars[stop + 1])
+		stop += 1
+	end
+	name = String(cur.chars[(cur.pos + 1):stop])
+	(name in _TEX_PLAIN_OPERATOR_NAMES || name in _TEX_PLAIN_FUNCTION_NAMES) && return :op
+	name in _TEX_PLAIN_SPACE_NAMES && return :space
+	name in _TEX_PLAIN_IGNORED && return :ignored
+	return :ord
+end
+
+# The TeX source spaces at the cursor (skipped) after an atom of class `prev`:
+# one space is printed only between an operator and another atom (`a + b`,
+# `\sin \theta`), none between ordinary atoms (`\Delta T` is "ΔT").
+function _tex_plain_whitespace!(out::IO, cur::_TexPlainCursor, prev::Symbol)
+	while !_tex_plain_done(cur) && cur.chars[cur.pos] in _TEX_PLAIN_WHITESPACE
+		cur.pos += 1
+	end
+	next = _tex_plain_peek_class(cur)
+	next === :ignored && return nothing                 # `\bf z`: decided before `z`
+	keep = (prev === :op || next === :op) && !(prev in (:none, :space)) && !(next in (:none, :space))
+	keep && print(out, ' ')
+	return nothing
+end
+
 # Convert until the end of input, or (in_group) until the closing `}`.
 function _tex_plain_until!(cur::_TexPlainCursor, in_group::Bool)
 	out = IOBuffer()
+	# Class of the last atom printed (`_tex_plain_peek_class`).
+	prev = :none
 	while !_tex_plain_done(cur)
 		c = cur.chars[cur.pos]
+		if c in _TEX_PLAIN_WHITESPACE
+			_tex_plain_whitespace!(out, cur, prev)
+			continue
+		end
+		class = _tex_plain_peek_class(cur)
 		if c == '}'
 			cur.pos += 1
 			in_group && return String(take!(out))
 			print(out, '}')   # a stray `}` is shown rather than dropped
+			prev = :ord
 		elseif c == '{'
 			cur.pos += 1
-			print(out, _tex_plain_until!(cur, true))
+			group = _tex_plain_until!(cur, true)
+			print(out, group)
+			isempty(group) || (prev = :ord)
 		elseif c == '^' || c == '_'
 			cur.pos += 1
 			tag = c == '^' ? "sup" : "sub"
 			print(out, "<", tag, ">", _tex_plain_arg!(cur), "</", tag, ">")
+			prev = :ord
 		elseif c == '\\'
-			print(out, _tex_plain_control!(cur))
+			text = _tex_plain_control!(cur)
+			print(out, text)
+			if class === :none
+				prev = :none                                # after a line break
+			elseif class !== :ignored && !isempty(text)
+				prev = class
+			end
 		else
 			cur.pos += 1
 			print(out, _tex_plain_char(c))
+			prev = class
 		end
 	end
 	return String(take!(out))

@@ -694,7 +694,9 @@ function _mesh2d_colour(
 		band_edges = norm_kind === :log ? log10.(boundaries) : boundaries
 	end
 	ticktext = if colorbar_ticklabels !== nothing
-		String[_label(string(label)) for label in colorbar_ticklabels]
+		# math as Unicode with <sup>/<sub>: plotly.js 2.35.2 never finishes
+		# MathJax colorbar tick labels
+		String[_label_plain(string(label)) for label in colorbar_ticklabels]
 	else
 		norm.ticktext
 	end

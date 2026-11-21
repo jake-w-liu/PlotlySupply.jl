@@ -63,7 +63,16 @@ function _text_checked_label(s::AbstractString, who::AbstractString; align::Symb
 		return _label(s; align = align)
 	catch err
 		err isa ArgumentError || rethrow()
-		throw(ArgumentError("$(who): invalid label $(repr(String(s))): $(err.msg)"))
+		# The mathtext message already names a caller (`_mathtext_who`): the
+		# label's function is named once.
+		msg = err.msg
+		m = match(r"^([A-Za-z_][A-Za-z0-9_!]*): ", msg)
+		if m !== nothing
+			name = Symbol(m.captures[1])
+			(name === :mathtext || (isdefined(@__MODULE__, name) && Base.isexported(@__MODULE__, name))) &&
+				(msg = msg[(lastindex(m.match) + 1):end])
+		end
+		throw(ArgumentError("$(who): invalid label $(repr(String(s))): $(msg)"))
 	end
 end
 
@@ -71,85 +80,832 @@ end
 # Text extent estimates (tight_layout!, legend columns, decoration stacking)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Text is measured without the renderer, so these are estimates that err on
-# the large side. The glyph classes follow Verdana, the widest face in
-# plotly's default font stack ("Open Sans", verdana, arial, sans-serif), and
-# MathJax 2's TeX fonts; the calibration renders (plotly.js 2.35.2, 12 and
-# 20 px annotations) are listed with the tests in test/sci_style.jl.
-#
-# Glyph advance classes in em (narrow: i, l, t, punctuation, space; wide: M,
-# W, m, w, @, %; capitals; everything else).
-const _TEXT_EM_NARROW = 0.36
-const _TEXT_EM_WIDE = 0.9
-const _TEXT_EM_CAPITAL = 0.7
-const _TEXT_EM_NORMAL = 0.62
-# plotly.js turns raw newlines into spaces (svg_text_utils), so they are
-# measured as one.
-const _TEXT_NARROW_CHARS = Set("iljtfrI.,:;!|'` ()[]\n\r\t")
-const _TEXT_WIDE_CHARS = Set("MWmw@%")
-# plotly.js line break (svg_text_utils BR_TAG_ALL, applied to `<…>` tokens).
-const _TEXT_BR_TAG = r"<br(\s+[^<>]*)?>"i
-# plotly.js lays plain text out at 1.3 em per line (svg_text_utils
-# LINE_SPACING). A MathJax row with scripts or parentheses is ~1.2 em tall
-# (array rows are spaced 1.2 em apart), one with a fraction, root or stacked
-# operator up to ~1.9 em.
-const _TEXT_PLAIN_LINE_EM = 1.3
-const _TEXT_MATH_ROW_EM = 1.3
-const _TEXT_MATH_TALL_ROW_EM = 1.9
-# Width (em) of a TeX relation or binary-operator glyph (0.78 em) with the
-# thick/medium space MathJax puts on each side, of a Greek letter or other
-# symbol command, and of a command the estimator does not know.
-const _TEXT_EM_MATH_OPERATOR = 1.25
-const _TEXT_EM_SYMBOL = 0.62
-const _TEXT_EM_UNKNOWN = 0.7
-# Script (sub/superscript) size relative to its base.
-const _TEXT_SCRIPT_SCALE = 0.7
-# MathJax 2 size switches (relative to \normalsize).
-const _TEXT_TEX_SIZES = Dict(
-	"tiny" => 0.5, "scriptsize" => 0.7, "footnotesize" => 0.8, "small" => 0.9,
-	"normalsize" => 1.0, "large" => 1.2, "Large" => 1.44, "LARGE" => 1.73,
-	"huge" => 2.07, "Huge" => 2.49,
-)
-# Commands whose single argument is typeset as it is (its width counts).
-const _TEXT_TEX_WRAPPERS = Set([
-	"text", "textbf", "textit", "textrm", "textsf", "texttt", "textup", "emph",
-	"mbox", "hbox", "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mathcal",
-	"mathbb", "mathfrak", "mathscr", "boldsymbol", "bm", "operatorname", "mathnormal",
-	"hat", "bar", "vec", "tilde", "dot", "ddot", "check", "breve", "acute", "grave",
-	"widehat", "widetilde", "overline", "underline", "mathring", "pmb", "displaystyle",
-	"textstyle", "underbrace", "overbrace",
-])
-const _TEXT_TEX_TEXT_MODE = Set([
-	"text", "textbf", "textit", "textrm", "textsf", "texttt", "textup", "emph", "mbox", "hbox",
-])
-# Two-argument constructs drawn one above the other (width = the wider part).
-const _TEXT_TEX_STACKED = Set(["frac", "dfrac", "tfrac", "cfrac", "binom", "dbinom", "tbinom", "overset", "underset", "stackrel"])
-const _TEXT_TEX_BIG_OPERATORS = Set(["sum", "prod", "int", "iint", "iiint", "oint", "coprod", "bigcup", "bigcap", "bigoplus", "bigotimes"])
-const _TEXT_TEX_OPERATORS = Set([
-	"cdot", "times", "pm", "mp", "div", "leq", "geq", "le", "ge", "neq", "ne", "approx",
-	"sim", "simeq", "equiv", "propto", "to", "rightarrow", "leftarrow", "Rightarrow",
-	"Leftarrow", "leftrightarrow", "Leftrightarrow", "mapsto", "in", "notin", "subset",
-	"supset", "subseteq", "supseteq", "cup", "cap", "wedge", "vee", "otimes", "oplus",
-	"ll", "gg", "perp", "parallel", "mid", "circ", "ast", "star", "bullet", "longrightarrow",
-])
-# Explicit spaces (em).
-const _TEXT_TEX_SPACES = Dict(
-	"quad" => 1.0, "qquad" => 2.0, "enspace" => 0.5, "thinspace" => 0.17,
-	"," => 0.17, ":" => 0.22, ";" => 0.28, "!" => -0.17, " " => 0.33,
-)
+# Text is measured without the renderer, from advance widths measured in it
+# (D19). In the export window (Electron's Chromium, plotly.js 2.35.2, MathJax
+# 2.7.9) every character of `_TEXT_ADVANCE_CHARS` was measured, for each
+# family below, with canvas `measureText` at 100 px, regular and bold (the
+# shaping SVG <text> gets), with the family's CSS x-height (the `ex` MathJax
+# sizes math by); and for the Latin-Modern and STIX-Web MathJax fonts, the
+# width (math em) of the SVG box MathJax draws for each math token, with the
+# spacing TeX puts around it between two ordinary letters; and the pair
+# adjustment (kerning, ligatures) of every pair of printable ASCII characters
+# and typographic quotes and dashes, width("ab") - width("a") - width("b").
+# Values are rounded up to 1/1000 em, so a run's estimate is never below the
+# drawn width. test/mathjax_text_metrics.jl draws random strings under every
+# preset and checks the estimates against the renderer.
 
-function _text_char_em(c::Char)
-	c in _TEXT_NARROW_CHARS && return _TEXT_EM_NARROW
-	c in _TEXT_WIDE_CHARS && return _TEXT_EM_WIDE
-	isuppercase(c) && return _TEXT_EM_CAPITAL
-	return _TEXT_EM_NORMAL
+# Metrics of one font family: its CSS x-height (em), the advance (em) of each
+# character of `_TEXT_ADVANCE_CHARS`, regular and bold, how far its ink
+# reaches left of its origin and right of its advance (em, `ink_left`/
+# `ink_right`, nonnegative): plotly.js sizes text by its bounding box, which
+# Chromium takes over the ink as well as the advances (a leading "j" of Times
+# reaches 0.08 em to the left), and the pair adjustments (`kern`, em; "Y,"
+# is -0.129 em in Times New Roman). `fallback` is the widest letter, used for
+# a character the table does not list.
+struct _TextFamilyMetrics
+	name::String
+	ex::Float64
+	regular::Vector{Float64}
+	bold::Vector{Float64}
+	ink_left::Vector{Float64}
+	ink_right::Vector{Float64}
+	ink_left_bold::Vector{Float64}
+	ink_right_bold::Vector{Float64}
+	kern::Dict{Tuple{Char, Char}, Float64}
+	kern_bold::Dict{Tuple{Char, Char}, Float64}
+	fallback::Float64
+	fallback_bold::Float64
 end
 
-# Width (em) of plain text after HTML markup is removed: tags are dropped,
-# entities count as one glyph, and <sub>/<sup> content is set at script size.
-function _text_plain_em(s::AbstractString)
-	width = 0.0
+# Characters the family tables list: printable ASCII, then CJK and Hangul
+# samples, typographic symbols, Greek letters and arrows.
+const _TEXT_ADVANCE_CHARS = " !\"#\$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~日本語한국°±×÷µ·–—‘’“”…€£¥§©®™ÅαβγδεθλμπσφωΩΔ√∞≤≥≈≠→←↔"
+const _TEXT_ADVANCE_INDEX = Dict{Char, Int}(c => k for (k, c) in enumerate(_TEXT_ADVANCE_CHARS))
+
+# `ink_regular`/`ink_bold`: the characters whose ink overhangs, with the
+# overhangs (1/1000 em) on the left and on the right.
+# `kern_regular`/`kern_bold`: the pairs (two characters each, concatenated)
+# and their adjustments (1/1000 em).
+function _text_family_metrics(name::String, ex::Float64, regular::Vector{Int16}, bold::Vector{Int16},
+	ink_regular::Tuple{String, Vector{Int16}, Vector{Int16}}, ink_bold::Tuple{String, Vector{Int16}, Vector{Int16}},
+	kern_regular::Tuple{String, Vector{Int16}}, kern_bold::Tuple{String, Vector{Int16}})
+	n = length(_TEXT_ADVANCE_CHARS)
+	(length(regular) == n && length(bold) == n) ||
+		error("text metrics of $(name): $(length(regular))/$(length(bold)) advances for $(n) characters")
+	function overhangs(spec)
+		chars, left, right = spec
+		(length(chars) == length(left) == length(right)) ||
+			error("text metrics of $(name): $(length(left))/$(length(right)) overhangs for $(length(chars)) characters")
+		l = zeros(n)
+		r = zeros(n)
+		for (c, a, b) in zip(chars, left, right)
+			k = _TEXT_ADVANCE_INDEX[c]
+			l[k] = a / 1000
+			r[k] = b / 1000
+		end
+		return l, r
+	end
+	il, ir = overhangs(ink_regular)
+	bl, br = overhangs(ink_bold)
+	function pairs(spec)
+		chars, values = collect(spec[1]), spec[2]
+		length(chars) == 2 * length(values) ||
+			error("text metrics of $(name): $(length(values)) pair adjustments for $(length(chars)) characters")
+		return Dict((chars[2k - 1], chars[2k]) => values[k] / 1000 for k in eachindex(values))
+	end
+	r = regular ./ 1000
+	b = bold ./ 1000
+	letters = [k for (k, c) in enumerate(_TEXT_ADVANCE_CHARS) if 'A' <= c <= 'Z' || 'a' <= c <= 'z']
+	return _TextFamilyMetrics(name, ex, r, b, il, ir, bl, br, pairs(kern_regular), pairs(kern_bold),
+		maximum(r[letters]), maximum(b[letters]))
+end
+
+# The elementwise maximum of `families`: the metrics assumed for a family
+# that was not measured (a pair one family does not adjust counts 0 there).
+function _text_family_max(name::String, families)
+	elementwise(field) = reduce((a, b) -> max.(a, b), (getfield(f, field) for f in families))
+	function pairs(field)
+		out = Dict{Tuple{Char, Char}, Float64}()
+		for pair in union((keys(getfield(f, field)) for f in families)...)
+			value = maximum(f -> get(getfield(f, field), pair, 0.0), families)
+			value == 0 || (out[pair] = value)
+		end
+		return out
+	end
+	return _TextFamilyMetrics(
+		name, maximum(f.ex for f in families), elementwise(:regular), elementwise(:bold),
+		elementwise(:ink_left), elementwise(:ink_right), elementwise(:ink_left_bold), elementwise(:ink_right_bold),
+		pairs(:kern), pairs(:kern_bold),
+		maximum(f.fallback for f in families), maximum(f.fallback_bold for f in families),
+	)
+end
+
+# Metrics of one MathJax SVG font, in math em: math-mode letters and digits
+# (`italic`), text-mode characters (`roman`, `\text{…}` without
+# `inherit_text_font`, and `\mathrm`), math-mode punctuation and operators
+# with their spacing between two letters (`ops`), named commands (`commands`,
+# symbols with their spacing), the text-mode space and the radical sign.
+struct _TextMathMetrics
+	name::String
+	italic::Dict{Char, Float64}
+	roman::Dict{Char, Float64}
+	ops::Dict{Char, Float64}
+	commands::Dict{String, Float64}
+	space::Float64
+	radical::Float64
+end
+
+function _text_math_metrics(name::String; italic, roman, ops, commands, space::Integer, radical::Integer)
+	table(chars, values) = (length(chars) == length(values) ||
+		error("math metrics of $(name): $(length(values)) values for $(length(chars)) entries");
+		Dict(zip(chars, values ./ 1000)))
+	return _TextMathMetrics(
+		name, table(collect(italic[1]), italic[2]), table(collect(roman[1]), roman[2]),
+		table(collect(ops[1]), ops[2]), table(String.(commands[1]), commands[2]),
+		space / 1000, radical / 1000,
+	)
+end
+
+function _text_math_max(name::String, a::_TextMathMetrics, b::_TextMathMetrics)
+	merged(x, y) = mergewith(max, x, y)
+	return _TextMathMetrics(
+		name, merged(a.italic, b.italic), merged(a.roman, b.roman), merged(a.ops, b.ops),
+		merged(a.commands, b.commands), max(a.space, b.space), max(a.radical, b.radical),
+	)
+end
+
+const _TEXT_FAMILY_TIMES_NEW_ROMAN = _text_family_metrics("Times New Roman", 0.4473,
+	Int16[
+		250, 334, 409, 500, 500, 834, 778, 181, 334, 334, 500, 564, 250, 334, 250, 278, 500, 500, 500,
+		500, 500, 500, 500, 500, 500, 500, 278, 278, 564, 564, 564, 444, 921, 723, 667, 667, 723, 611,
+		557, 723, 723, 334, 390, 723, 611, 890, 723, 723, 557, 723, 667, 557, 611, 723, 723, 944, 723,
+		723, 611, 334, 278, 334, 470, 500, 334, 444, 500, 444, 500, 444, 334, 500, 500, 278, 278, 500,
+		278, 778, 500, 500, 500, 500, 334, 390, 278, 500, 500, 723, 500, 500, 444, 480, 201, 480, 542,
+		1000, 1000, 1000, 1000, 1000, 400, 549, 564, 549, 577, 334, 500, 1000, 334, 334, 444, 444, 1000,
+		500, 500, 500, 500, 760, 760, 980, 723, 524, 509, 442, 472, 420, 480, 485, 537, 505, 540, 578,
+		659, 744, 644, 549, 713, 549, 549, 549, 549, 1000, 1000, 1000,
+	],
+	Int16[
+		250, 334, 556, 500, 500, 1000, 834, 278, 334, 334, 500, 570, 250, 334, 250, 278, 500, 500, 500,
+		500, 500, 500, 500, 500, 500, 500, 334, 334, 570, 570, 570, 500, 931, 723, 667, 723, 723, 667,
+		611, 778, 778, 390, 500, 778, 667, 944, 723, 778, 611, 778, 723, 557, 667, 723, 723, 1000, 723,
+		723, 667, 334, 278, 334, 582, 500, 334, 500, 557, 444, 557, 444, 334, 500, 557, 278, 334, 557,
+		278, 834, 557, 500, 557, 557, 444, 390, 334, 557, 500, 723, 500, 500, 444, 395, 221, 395, 521,
+		1000, 1000, 1000, 1000, 1000, 400, 549, 570, 549, 577, 334, 500, 1000, 334, 334, 500, 500, 1000,
+		500, 500, 500, 500, 748, 748, 1000, 723, 559, 527, 468, 520, 428, 522, 492, 567, 548, 544, 625,
+		731, 801, 627, 549, 713, 549, 549, 549, 549, 1000, 1000, 1000,
+	],
+	("/KNR\\_bdfjkprt–—€λ", Int16[0, 0, 14, 0, 0, 9, 3, 0, 0, 77, 0, 4, 0, 0, 9, 10, 12, 0], Int16[3, 9, 0, 9, 2, 9, 0, 3, 102, 0, 6, 0, 7, 2, 9, 9, 0, 5]),
+	("/KR\\_fjk~–—€™λ", Int16[0, 0, 0, 0, 10, 0, 28, 0, 0, 9, 10, 12, 2, 0], Int16[3, 12, 9, 3, 10, 75, 0, 10, 18, 8, 10, 0, 6, 12]),
+	(
+		"11ATAVAWAYAvAwAyA’F,F.FALTLVLWLYLyL’P,P.PARTRVRWRYRyT,T-T.T:" *
+		"T;TATOTaTcTeTiToTrTsTuTwTyV,V-V.V:V;VAVaVeViVoVrVuVyW,W-W.W:" *
+		"W;WAWaWeWiWoWrWuWyY,Y-Y.Y:Y;YAYaYeYiYoYpYqYuYvfff’r,r-r.rgr’" *
+		"v,v.w,w.y,y.‘‘’s’t’’",
+		Int16[
+			-37, -110, -128, -80, -91, -74, -91, -91, -110, -80, -80, -74, -91, -91, -74, -100, -55, -91,
+			-110, -110, -91, -60, -80, -55, -55, -40, -74, -91, -74, -49, -55, -80, -18, -69, -69, -69, -35,
+			-69, -35, -69, -35, -69, -69, -128, -91, -128, -74, -74, -128, -110, -110, -60, -128, -60, -60,
+			-110, -91, -55, -91, -37, -37, -110, -80, -80, -40, -80, -40, -40, -60, -128, -110, -128, -91,
+			-91, -110, -100, -100, -55, -100, -91, -110, -110, -100, -18, 56, -40, -20, -55, -18, 38, -64,
+			-64, -64, -64, -64, -64, -74, -55, -18, -74,
+		],
+	),
+	(
+		"11ATAVAWAYAvAwAyA’F,F.FALTLVLWLYLyL’P,P.PARTRVRWRYRyT,T-T.T:" *
+		"T;TATOTaTcTeTiToTrTsTuTwTyV,V-V.V:V;VAVOVaVeViVoVrVuVyW,W-W." *
+		"W:W;WAWaWeWiWoWrWuWyY,Y-Y.Y:Y;YAYaYeYiYoYpYqYuYvf’r,r-r.rcre" *
+		"rorqr’v,v.w,w.y,y.‘‘’s’’",
+		Int16[
+			-55, -74, -128, -110, -91, -74, -74, -74, -74, -91, -91, -74, -91, -91, -91, -91, -55, -91, -91,
+			-91, -74, -35, -35, -35, -35, -35, -74, -91, -74, -74, -74, -74, -18, -91, -91, -91, -18, -91,
+			-74, -91, -91, -74, -74, -128, -74, -128, -91, -91, -128, -20, -91, -91, -37, -91, -74, -91, -91,
+			-91, -37, -91, -55, -55, -110, -55, -55, -18, -55, -18, -18, -37, -91, -91, -91, -91, -91, -91,
+			-110, -110, -37, -110, -91, -110, -91, -110, 56, -91, -37, -91, -18, -18, -18, -18, 19, -55, -55,
+			-55, -55, -55, -55, -74, -37, -74,
+		],
+	),
+)
+const _TEXT_FAMILY_TIMES = _text_family_metrics("Times", 0.4487,
+	Int16[
+		250, 334, 409, 500, 500, 834, 778, 181, 334, 334, 500, 564, 250, 334, 250, 278, 500, 500, 500,
+		500, 500, 500, 500, 500, 500, 500, 278, 278, 564, 564, 564, 444, 921, 723, 667, 667, 723, 611,
+		557, 723, 723, 334, 390, 723, 611, 890, 723, 723, 557, 723, 667, 557, 611, 723, 723, 944, 723,
+		723, 611, 334, 278, 334, 470, 500, 334, 444, 500, 444, 500, 444, 334, 500, 500, 278, 278, 500,
+		278, 778, 500, 500, 500, 500, 334, 390, 278, 500, 500, 723, 500, 500, 444, 480, 201, 480, 542,
+		1000, 1000, 1000, 1000, 1000, 400, 549, 564, 549, 577, 250, 500, 1000, 334, 334, 444, 444, 1000,
+		745, 500, 500, 500, 760, 760, 980, 723, 611, 557, 500, 557, 444, 557, 500, 557, 549, 557, 667,
+		723, 769, 723, 549, 713, 549, 549, 549, 549, 1000, 1000, 1000,
+	],
+	Int16[
+		250, 334, 556, 500, 500, 1000, 834, 278, 334, 334, 500, 570, 250, 334, 250, 278, 500, 500, 500,
+		500, 500, 500, 500, 500, 500, 500, 334, 334, 570, 570, 570, 500, 931, 723, 667, 723, 723, 667,
+		611, 778, 778, 390, 500, 778, 667, 944, 723, 778, 611, 778, 723, 557, 667, 723, 723, 1000, 723,
+		723, 667, 334, 278, 334, 582, 500, 334, 500, 557, 444, 557, 444, 334, 500, 557, 278, 334, 557,
+		278, 834, 557, 500, 557, 557, 444, 390, 334, 557, 500, 723, 500, 500, 444, 395, 221, 395, 521,
+		1000, 1000, 1000, 1000, 1000, 400, 549, 570, 549, 577, 250, 500, 1000, 334, 334, 500, 500, 1000,
+		745, 500, 500, 500, 748, 748, 1000, 723, 611, 557, 557, 557, 444, 557, 500, 611, 549, 557, 667,
+		723, 769, 778, 549, 713, 549, 549, 549, 549, 1000, 1000, 1000,
+	],
+	("\\`fjrtµ–¥μπ√", Int16[32, 10, 0, 58, 0, 0, 77, 3, 0, 0, 0, 11], Int16[31, 0, 50, 0, 4, 1, 0, 0, 4, 32, 27, 100]),
+	("#,/\\`fj~µ–¥πΩ√", Int16[4, 0, 15, 48, 21, 0, 59, 0, 65, 10, 0, 0, 0, 11], Int16[1, 14, 14, 46, 0, 56, 0, 50, 0, 5, 227, 28, 7, 93]),
+	(
+		"11ATAVAWAYAvAwAyA’F,F.FALTLVLWLYLyL’P,P.PARTRVRWRYRyT,T-T.T:" *
+		"T;TATOTaTcTeTiToTrTsTuTwTyV,V-V.V:V;VAVaVeViVoVrVuVyW,W-W.W:" *
+		"W;WAWaWeWiWoWrWuWyY,Y-Y.Y:Y;YAYaYeYiYoYpYqYuYvfffiflf’r,r-r." *
+		"rgr’v,v.w,w.y,y.‘‘’s’t’’",
+		Int16[
+			-36, -110, -128, -79, -91, -73, -91, -91, -110, -79, -79, -73, -91, -91, -73, -99, -54, -91,
+			-110, -110, -91, -59, -79, -54, -54, -39, -73, -91, -73, -49, -54, -79, -17, -69, -69, -69, -34,
+			-69, -34, -69, -34, -69, -69, -128, -91, -128, -73, -73, -128, -110, -110, -59, -128, -59, -59,
+			-110, -91, -54, -91, -36, -36, -110, -79, -79, -39, -79, -39, -39, -59, -128, -110, -128, -91,
+			-91, -110, -99, -99, -54, -99, -91, -110, -110, -99, -17, -54, -54, 56, -39, -19, -54, -17, 38,
+			-64, -64, -64, -64, -64, -64, -73, -54, -17, -73,
+		],
+	),
+	(
+		"11ATAVAWAYAvAwAyA’F,F.FALTLVLWLYLyL’P,P.PARTRVRWRYRyT,T-T.T:" *
+		"T;TATOTaTcTeTiToTrTsTuTwTyV,V-V.V:V;VAVOVaVeViVoVrVuVyW,W-W." *
+		"W:W;WAWaWeWiWoWrWuWyY,Y-Y.Y:Y;YAYaYeYiYoYpYqYuYvfiflf’r,r-r." *
+		"rcrerorqr’v,v.w,w.y,y.‘‘’s’’",
+		Int16[
+			-54, -73, -128, -110, -91, -73, -73, -73, -73, -91, -91, -73, -91, -91, -91, -91, -54, -91, -91,
+			-91, -73, -34, -34, -34, -34, -34, -73, -91, -73, -73, -73, -73, -17, -91, -91, -91, -17, -91,
+			-73, -91, -91, -73, -73, -128, -73, -128, -91, -91, -128, -19, -91, -91, -36, -91, -73, -91, -91,
+			-91, -36, -91, -54, -54, -110, -54, -54, -17, -54, -17, -17, -36, -91, -91, -91, -91, -91, -91,
+			-110, -110, -36, -110, -91, -110, -91, -110, -54, -54, 56, -91, -36, -91, -17, -17, -17, -17, 19,
+			-54, -54, -54, -54, -54, -54, -73, -36, -73,
+		],
+	),
+)
+const _TEXT_FAMILY_ARIAL = _text_family_metrics("Arial", 0.5185,
+	Int16[
+		278, 278, 355, 557, 557, 890, 667, 191, 334, 334, 390, 584, 278, 334, 278, 278, 557, 557, 557,
+		557, 557, 557, 557, 557, 557, 557, 278, 278, 584, 584, 584, 557, 1016, 667, 667, 723, 723, 667,
+		611, 778, 723, 278, 500, 667, 557, 834, 723, 778, 667, 778, 723, 667, 611, 723, 667, 944, 667,
+		667, 611, 278, 278, 278, 470, 557, 334, 557, 557, 500, 557, 557, 278, 557, 557, 223, 223, 500,
+		223, 834, 557, 557, 557, 557, 334, 500, 278, 557, 500, 723, 500, 500, 500, 334, 260, 334, 584,
+		1000, 1000, 1000, 865, 865, 400, 549, 584, 549, 577, 334, 557, 1000, 223, 223, 334, 334, 1000,
+		557, 557, 557, 557, 737, 737, 1000, 667, 579, 576, 500, 557, 446, 557, 500, 577, 690, 618, 649,
+		781, 748, 668, 549, 713, 549, 549, 549, 549, 1000, 1000, 1000,
+	],
+	Int16[
+		278, 334, 475, 557, 557, 890, 723, 238, 334, 334, 390, 584, 278, 334, 278, 278, 557, 557, 557,
+		557, 557, 557, 557, 557, 557, 557, 334, 334, 584, 584, 584, 611, 976, 723, 723, 723, 723, 667,
+		611, 778, 723, 278, 557, 723, 611, 834, 723, 778, 667, 778, 723, 667, 611, 723, 667, 944, 667,
+		667, 611, 334, 278, 334, 584, 557, 334, 557, 611, 557, 611, 557, 334, 611, 611, 278, 278, 557,
+		278, 890, 611, 611, 611, 611, 390, 557, 334, 611, 557, 778, 557, 557, 500, 390, 280, 390, 584,
+		1000, 1000, 1000, 865, 865, 400, 549, 584, 549, 577, 334, 557, 1000, 278, 278, 500, 500, 1000,
+		557, 557, 557, 557, 737, 737, 1000, 723, 615, 611, 557, 607, 475, 541, 557, 612, 766, 685, 716,
+		845, 802, 719, 549, 713, 549, 549, 549, 549, 1000, 1000, 1000,
+	],
+	("A_fjr–€¥©®ÅΔ", Int16[2, 16, 0, 46, 0, 2, 14, 2, 0, 0, 2, 1], Int16[2, 12, 35, 0, 14, 0, 0, 0, 2, 2, 2, 1]),
+	("/VY\\_fjr–€©®", Int16[2, 1, 2, 2, 10, 0, 46, 0, 2, 16, 5, 5], Int16[1, 0, 1, 1, 5, 30, 0, 13, 0, 0, 7, 7]),
+	(
+		"11ATAVAWAYAvAwAyA’F,F.FALTLVLWLYLyL’P,P.PARTRVRWRYT,T-T.T:T;" *
+		"TATOTaTcTeTiToTrTsTuTwTyV,V-V.V:V;VAVaVeViVoVrVuVyW,W-W.W:W;" *
+		"WAWaWeWoWrWuWyY,Y-Y.Y:Y;YAYaYeYiYoYpYqYuYvfff’r,r.r’v,v.w,w." *
+		"y,y.‘‘’s’’",
+		Int16[
+			-74, -74, -74, -37, -74, -18, -18, -18, -74, -110, -110, -55, -74, -74, -74, -74, -37, -55, -128,
+			-128, -74, -18, -18, -18, -18, -110, -55, -110, -110, -110, -74, -18, -110, -110, -110, -37,
+			-110, -37, -110, -37, -55, -55, -91, -55, -91, -37, -37, -74, -74, -55, -18, -55, -37, -37, -37,
+			-55, -18, -55, -18, -18, -37, -37, -18, -18, -18, -18, -8, -128, -91, -128, -55, -64, -74, -74,
+			-91, -37, -91, -74, -91, -55, -55, -18, 19, -55, -55, 38, -74, -74, -55, -55, -74, -74, -18, -18,
+			-18,
+		],
+	),
+	(
+		"11ATAVAWAYAvAwAyA’F,F.FALTLVLWLYLyL’P,P.PARVRWRYT,T-T.T:T;TA" *
+		"TOTaTcTeTiToTrTsTuTwTyV,V-V.V:V;VAVaVeViVoVrVuVyW,W-W.W:W;WA" *
+		"WaWeWiWoWrWuWyY,Y-Y.Y:Y;YAYaYeYiYoYpYqYuYvf’r,r.r’v,v.w,w.y," *
+		"y.‘‘’s’’",
+		Int16[
+			-55, -74, -74, -55, -91, -37, -18, -37, -55, -110, -110, -55, -74, -74, -55, -91, -37, -55, -128,
+			-128, -74, -18, -18, -37, -110, -55, -110, -110, -110, -74, -18, -74, -74, -74, -18, -74, -55,
+			-74, -74, -74, -74, -91, -55, -91, -55, -55, -74, -55, -55, -18, -74, -55, -37, -37, -55, -20,
+			-55, -18, -18, -55, -37, -18, -8, -18, -18, -18, -18, -110, -55, -110, -74, -74, -91, -55, -55,
+			-37, -74, -55, -74, -55, -55, 19, -55, -55, 38, -74, -74, -37, -37, -74, -74, -37, -37, -37,
+		],
+	),
+)
+const _TEXT_FAMILY_HELVETICA = _text_family_metrics("Helvetica", 0.5230,
+	Int16[
+		278, 278, 355, 557, 557, 890, 667, 191, 334, 334, 390, 584, 278, 334, 278, 278, 557, 557, 557,
+		557, 557, 557, 557, 557, 557, 557, 278, 278, 584, 584, 584, 557, 1016, 667, 667, 723, 723, 667,
+		611, 778, 723, 278, 500, 667, 557, 834, 723, 778, 667, 778, 723, 667, 611, 723, 667, 944, 667,
+		667, 611, 278, 278, 278, 470, 557, 334, 557, 557, 500, 557, 557, 278, 557, 557, 223, 223, 500,
+		223, 834, 557, 557, 557, 557, 334, 500, 278, 557, 500, 723, 500, 500, 500, 334, 260, 334, 584,
+		1000, 1000, 1000, 865, 865, 400, 549, 584, 549, 577, 278, 557, 1000, 223, 223, 334, 334, 1000,
+		745, 557, 557, 557, 737, 737, 1000, 667, 611, 611, 557, 611, 557, 612, 557, 611, 549, 611, 723,
+		758, 778, 723, 549, 713, 549, 549, 549, 549, 1000, 1000, 916,
+	],
+	Int16[
+		278, 334, 475, 557, 557, 890, 723, 238, 334, 334, 390, 584, 278, 334, 278, 278, 557, 557, 557,
+		557, 557, 557, 557, 557, 557, 557, 334, 334, 584, 584, 584, 611, 976, 723, 723, 723, 723, 667,
+		611, 778, 723, 278, 557, 723, 611, 834, 723, 778, 667, 778, 723, 667, 611, 723, 667, 944, 667,
+		667, 611, 334, 278, 334, 584, 557, 334, 557, 611, 557, 611, 557, 334, 611, 611, 278, 278, 557,
+		278, 890, 611, 611, 611, 611, 390, 557, 334, 611, 557, 778, 557, 557, 500, 390, 280, 390, 584,
+		1000, 1000, 1000, 865, 865, 400, 549, 584, 549, 577, 278, 557, 1000, 278, 278, 500, 500, 1000,
+		745, 557, 557, 557, 737, 737, 1000, 723, 612, 605, 557, 611, 557, 610, 557, 610, 549, 612, 723,
+		723, 778, 723, 549, 713, 549, 549, 549, 549, 1000, 1000, 975,
+	],
+	("/<>\\^j{}~±÷µ–¥π√≤≥", Int16[0, 0, 0, 34, 0, 19, 21, 0, 0, 0, 0, 38, 3, 16, 0, 9, 0, 0], Int16[24, 1, 1, 44, 9, 0, 0, 21, 6, 6, 6, 0, 2, 4, 46, 101, 5, 6]),
+	("/<>\\`~±÷µ–¥π√≤≥", Int16[55, 0, 0, 55, 25, 0, 0, 0, 26, 3, 11, 0, 21, 0, 0], Int16[63, 3, 3, 63, 0, 12, 16, 16, 17, 2, 11, 42, 85, 15, 16]),
+	(
+		"11ATAVAWAYAvAwAyA’F,F.FALTLVLWLYLyL’P,P.PARTRVRWRYT,T-T.T:T;" *
+		"TATOTaTcTeTiToTrTsTuTwTyV,V-V.V:V;VAVaVeViVoVrVuVyW,W-W.W:W;" *
+		"WAWaWeWoWrWuWyY,Y-Y.Y:Y;YAYaYeYiYoYpYqYuYvfff’r,r.r’v,v.w,w." *
+		"y,y.‘‘’s’’",
+		Int16[
+			-73, -73, -73, -36, -73, -17, -17, -17, -73, -110, -110, -54, -73, -73, -73, -73, -36, -54, -128,
+			-128, -73, -17, -17, -17, -17, -110, -54, -110, -110, -110, -73, -17, -110, -110, -110, -36,
+			-110, -36, -110, -36, -54, -54, -91, -54, -91, -36, -36, -73, -73, -54, -17, -54, -36, -36, -36,
+			-54, -17, -54, -17, -17, -36, -36, -17, -17, -17, -17, -8, -128, -91, -128, -54, -64, -73, -73,
+			-91, -36, -91, -73, -91, -54, -54, -17, 19, -54, -54, 38, -73, -73, -54, -54, -73, -73, -17, -17,
+			-17,
+		],
+	),
+	(
+		"11ATAVAWAYAvAwAyA’F,F.FALTLVLWLYLyL’P,P.PARVRWRYT,T-T.T:T;TA" *
+		"TOTaTcTeTiToTrTsTuTwTyV,V-V.V:V;VAVaVeViVoVrVuVyW,W-W.W:W;WA" *
+		"WaWeWiWoWrWuWyY,Y-Y.Y:Y;YAYaYeYiYoYpYqYuYvf’r,r.r’v,v.w,w.y," *
+		"y.‘‘’s’’",
+		Int16[
+			-54, -73, -73, -54, -91, -36, -17, -36, -54, -110, -110, -54, -73, -73, -54, -91, -36, -54, -128,
+			-128, -73, -17, -17, -36, -110, -54, -110, -110, -110, -73, -17, -73, -73, -73, -17, -73, -54,
+			-73, -73, -73, -73, -91, -54, -91, -54, -54, -73, -54, -54, -17, -73, -54, -36, -36, -54, -19,
+			-54, -17, -17, -54, -36, -17, -8, -17, -17, -17, -17, -110, -54, -110, -73, -73, -91, -54, -54,
+			-36, -73, -54, -73, -54, -54, 19, -54, -54, 38, -73, -73, -36, -36, -73, -73, -36, -36, -36,
+		],
+	),
+)
+const _TEXT_FAMILY_VERDANA = _text_family_metrics("Verdana", 0.5453,
+	Int16[
+		352, 394, 459, 819, 636, 1077, 727, 269, 455, 455, 636, 819, 364, 455, 364, 455, 636, 636, 636,
+		636, 636, 636, 636, 636, 636, 636, 455, 455, 819, 819, 819, 546, 1000, 684, 686, 699, 771, 633,
+		575, 776, 752, 421, 455, 693, 557, 843, 749, 788, 604, 788, 696, 684, 617, 732, 684, 989, 686,
+		616, 686, 455, 455, 455, 819, 636, 636, 601, 624, 521, 624, 596, 352, 624, 633, 275, 345, 592,
+		275, 973, 633, 607, 624, 624, 427, 521, 395, 633, 592, 819, 592, 592, 526, 635, 455, 635, 819,
+		1000, 1000, 1000, 865, 865, 542, 819, 819, 819, 642, 364, 636, 1000, 269, 269, 459, 459, 819, 636,
+		636, 636, 636, 1000, 1000, 977, 684, 624, 621, 592, 608, 513, 625, 592, 640, 638, 631, 791, 814,
+		819, 704, 819, 1000, 819, 819, 819, 819, 1000, 1000, 916,
+	],
+	Int16[
+		342, 403, 588, 868, 711, 1272, 863, 333, 544, 544, 711, 868, 362, 480, 362, 690, 711, 711, 711,
+		711, 711, 711, 711, 711, 711, 711, 403, 403, 868, 868, 868, 617, 964, 777, 762, 724, 831, 684,
+		651, 812, 838, 546, 556, 771, 638, 948, 847, 851, 733, 851, 783, 711, 682, 813, 764, 1129, 764,
+		737, 692, 544, 690, 544, 868, 711, 711, 668, 700, 589, 700, 665, 423, 700, 713, 342, 403, 671,
+		342, 1059, 713, 687, 700, 700, 498, 594, 456, 713, 650, 980, 669, 651, 597, 711, 544, 711, 868,
+		1000, 1000, 1000, 865, 865, 588, 868, 868, 868, 722, 362, 711, 1000, 333, 333, 588, 588, 1049,
+		711, 711, 711, 711, 964, 964, 964, 777, 700, 717, 651, 687, 585, 701, 651, 722, 720, 726, 915,
+		895, 844, 806, 868, 1059, 868, 868, 868, 868, 1000, 1000, 975,
+	],
+	("&/LR\\_fjr‘’“”σ√", Int16[0, 15, 0, 0, 0, 2, 0, 31, 0, 10, 0, 10, 0, 0, 0], Int16[33, 0, 1, 4, 15, 2, 33, 0, 4, 0, 10, 0, 10, 2, 30]),
+	("&KR_fj√", Int16[0, 0, 0, 8, 0, 29, 0], Int16[18, 1, 11, 8, 17, 0, 60]),
+	(
+		"!’!”'A,’,”-A-I-J-S-T-V-W-X-Y-Z-a-v-w-x-y-z.,.-.’.”.–.—:—A-AS" *
+		"ATAUAVAWAYAtAuAvAwAyA‘A’A“A”A–A—B,B-B.BTB–B—B…C-C–C—D,D.DTDW" *
+		"DXDYDZD…F,F.F:F;F?FAFTFaFeFoF…I-I–I—J,J.JAJ…K-KOKaKeKoKuKvKw" *
+		"KyK–K—L'L-LCLGLJLOLTLVLWLYLvLyL’L”L–L—O,O.OTOXOYOZO…P,P.PAPY" *
+		"PaPePoP…Q,Q.Q…R-RTRYRaReRoRuRyR’R”R–R—S,S.SASSSvSwSyS…T,T-T." *
+		"T:T;T?TATCTGTOTSTTTaTcTeTgToTrTsTuTvTwTyTzT–T—T…U,U.UAU…V,V-" *
+		"V.V:V;VAVaVeVoVuVyV–V—V…W,W-W.W:W;WAWaWeWoWrWuWyW–W—W…X-XCXG" *
+		"XOXaXeXoXuXyX–X—Y,Y-Y.Y:Y;YAYOYaYdYeYgYmYnYoYpYqYrYsYuYvY–Y—" *
+		"Y…Z-ZCZGZOZZZaZeZoZwZyZ–Z—avawayb,b.byb…c-cTc–c—eTf\"f'f)f*f," *
+		"f-f.f?f\\f]fyf}f’f”f–f—f…hvhwhyk-kekok–k—mvmwmynvnwnyo,o.ovox" *
+		"oyo…p,p.pyp…r,r-r.rar’r”r–r—r…t-tyt’t”t–t—v,v-v.vavevov–v—v…" *
+		"w,w-w.waw–w—w…x-xcxdxexgxox–x—y,y-y.yaycydyeygyoyqy–y—y…z-zc" *
+		"zdzezgzozqz–z—‘A’,’.’A’T’V’W’Y’s’t’…“A”,”.”A”T”V”W”Y”s”t”…–A" *
+		"–I–J–S–T–V–W–X–Y–Z–a–v–w–x–y–z—A—I—J—S—T—V—W—X—Y—Z—a—v—w—x—y" *
+		"—z…’…”",
+		Int16[
+			-48, -48, -48, -102, -102, -24, -14, -48, -9, -73, -24, -24, -39, -68, -14, -9, -19, -9, -24,
+			-19, -19, -63, -78, -102, -102, -58, -58, -68, -24, -4, -58, -4, -29, -24, -39, -9, -4, -24, -14,
+			-24, -24, -58, -24, -58, -24, -24, -9, 5, -9, -29, 5, 5, -9, -24, -24, -24, -24, -24, -24, -9,
+			-4, -9, -9, -24, -146, -146, -29, -29, 30, -48, 15, -48, -24, -24, -146, -14, -14, -14, -9, -9,
+			-4, -9, -53, -9, -29, -34, -34, -24, -39, -34, -39, -53, -53, -58, -78, -9, -9, 49, -9, -83, -53,
+			-48, -78, -53, -53, -78, -78, -78, -78, -14, -14, -24, -4, -9, -9, -14, -146, -146, -24, 10, -24,
+			-24, -24, -146, -14, -14, -14, -48, -29, -9, -19, -24, -24, -9, -26, -34, -34, -48, -48, -9, -9,
+			-9, -10, -14, -9, -14, -9, -141, -73, -141, -97, -97, 30, -58, -19, -19, -24, -5, -34, -117,
+			-107, -107, -102, -107, -97, -87, -97, -97, -97, -97, -83, -73, -73, -141, -9, -9, -4, -9, -141,
+			-24, -141, -39, -39, -29, -48, -48, -48, -29, -31, -24, -24, -141, -141, -24, -107, -39, -39,
+			-24, -48, -48, -48, -29, -29, -31, -24, -24, -107, -39, -4, -4, -4, -24, -29, -29, -14, -39, -39,
+			-39, -141, -68, -141, -97, -97, -39, -9, -68, -58, -63, -63, -48, -48, -63, -48, -63, -48, -53,
+			-53, -48, -68, -68, -141, -29, -9, -9, -9, -4, -24, -29, -29, -19, -31, -24, -24, -7, -4, -7,
+			-14, -9, -2, -9, -9, -29, -9, -9, -68, 30, 30, 49, 25, -63, -24, -58, 54, 49, 49, -4, 49, 25, 25,
+			-24, -24, -58, -9, -4, -9, -48, -9, -9, -48, -48, -9, -4, -9, -9, -4, -9, -14, -9, -7, -9, -7,
+			-9, -14, -9, -2, -9, -141, -9, -141, -17, 15, 15, -9, -9, -141, -19, -4, 10, 10, -19, -19, -87,
+			-19, -87, -19, -8, -8, -19, -19, -87, -34, -9, -34, -9, -9, -9, -34, -24, -9, -4, -11, -4, -11,
+			-24, -24, -92, -19, -92, -19, -8, -4, -8, -4, -8, -4, -19, -19, -87, -9, -4, -4, -5, -4, -5, -4,
+			-9, -9, -48, -102, -102, -48, 54, 49, 30, 54, -34, 20, -102, -48, -102, -102, -48, 54, 49, 30,
+			54, -34, 20, -102, -24, -14, -48, -9, -73, -24, -24, -39, -68, -4, -9, -19, -9, -24, -19, -19,
+			-24, -14, -48, -9, -73, -24, -24, -39, -68, -4, -9, -19, -9, -24, -19, -19, -102, -102,
+		],
+	),
+	(
+		"",
+		Int16[
+		],
+	),
+)
+const _TEXT_FAMILY_DEJAVU_SANS = _text_family_metrics("DejaVu Sans", 0.5468,
+	Int16[
+		318, 401, 460, 838, 637, 951, 780, 275, 391, 391, 500, 838, 318, 361, 318, 337, 637, 637, 637,
+		637, 637, 637, 637, 637, 637, 637, 337, 337, 838, 838, 838, 531, 1000, 685, 687, 699, 771, 632,
+		576, 775, 752, 295, 295, 656, 558, 863, 749, 788, 604, 788, 695, 635, 611, 732, 685, 989, 686,
+		611, 686, 391, 337, 391, 838, 500, 500, 613, 635, 550, 635, 616, 353, 635, 634, 278, 278, 580,
+		278, 975, 634, 612, 635, 635, 412, 521, 393, 634, 592, 818, 592, 592, 525, 637, 337, 637, 838,
+		1000, 1000, 1000, 865, 865, 500, 838, 838, 838, 637, 318, 500, 1000, 318, 318, 519, 519, 1000,
+		637, 637, 637, 500, 1000, 1000, 1000, 685, 660, 639, 592, 612, 541, 612, 592, 637, 603, 634, 660,
+		838, 765, 685, 638, 834, 838, 838, 838, 838, 838, 838, 838,
+	],
+	Int16[
+		349, 457, 521, 838, 696, 1002, 873, 307, 458, 458, 523, 838, 380, 416, 380, 366, 696, 696, 696,
+		696, 696, 696, 696, 696, 696, 696, 400, 400, 838, 838, 838, 581, 1000, 774, 763, 734, 831, 684,
+		684, 821, 837, 373, 373, 775, 638, 996, 837, 851, 733, 851, 771, 721, 683, 813, 774, 1104, 771,
+		725, 726, 458, 366, 458, 838, 500, 500, 675, 716, 593, 716, 679, 436, 716, 712, 343, 343, 666,
+		343, 1042, 712, 688, 716, 716, 494, 596, 479, 712, 652, 924, 646, 652, 583, 712, 366, 712, 838,
+		1000, 1000, 1000, 865, 865, 500, 838, 838, 838, 736, 380, 500, 1000, 380, 380, 658, 658, 1000,
+		696, 696, 696, 500, 1000, 1000, 1000, 774, 688, 716, 682, 688, 557, 688, 633, 736, 792, 779, 783,
+		870, 851, 774, 667, 834, 838, 838, 838, 838, 838, 838, 838,
+	],
+	("JKTY_fj", Int16[52, 0, 3, 2, 10, 0, 19], Int16[0, 21, 3, 2, 10, 20, 0]),
+	("JKYfjk€√", Int16[57, 0, 10, 0, 34, 0, 20, 0], Int16[0, 31, 10, 9, 0, 20, 0, 2]),
+	(
+		"-A-B-G-J-O-Q-T-V-W-X-Y-o-v-yA-A.A:AAACAGAOAQATAVAWAYAcAdAeAf" *
+		"AoAqAtAvAwAyA“A”BCBGBOBSBVBWBYB“B”CYC”DADVDYD“D”F.F:FAFSFTFa" *
+		"FeFiFoFrFuFyF“GTGYG“G”H.H“H”J-JAJ“J”K-KAKCKOKTKUKWKYKaKeKoKu" *
+		"KyK“K”L-LALOLTLULVLWLYLeLoLuLyL“L”O-O.O:OAOVOXOYO“O”P-P.PAPY" *
+		"PaPePiPnPoPrPsPuP“P”Q-Q“Q”R-R.R:RARCRTRVRWRYRaReRoRuRyR“R”SA" *
+		"T-T.T:TATCTTTaTcTeTiToTrTsTuTwTyT”UZV-V.V:VAVOVaVeViVoVuVyW-" *
+		"W.W:WAWaWeWiWoWrWuWyW“X-XCXOXTXeX“X”Y-Y.Y:YAYCYOYaYeYiYoYuY“" *
+		"Y”Z-Z“Z”exf-f.f:ffftfwfyf“kakekokukyn“n”o-o.oxo“o”r-r.r:rcrd" *
+		"rergrhrmrnrorqrrrxr”v-v.v:v”w.w:xcxexoy-y.y:“A“B“C“D“F“G“H“J" *
+		"“K“L“O“P“Q“R“X“Z“f“n“o“r“v“w“y",
+		Int16[
+			-21, -35, 37, 56, 28, 37, -91, -58, -40, -49, -118, 19, -26, -17, -21, -17, -17, 28, -17, -17,
+			-17, -17, -77, -63, -54, -77, -17, -17, -17, -35, -17, -17, -17, -58, -40, -67, -128, -123, -17,
+			-17, -17, -17, -30, -35, -54, -54, -54, -17, 19, -17, -17, -54, -21, -26, -160, -77, -91, -17,
+			-17, -91, -54, -72, -35, -72, -54, -91, -21, -35, -49, -21, -21, -17, -35, -30, -35, -17, -35,
+			-30, -104, -17, -54, -54, -77, -26, -35, -35, -17, -49, -49, -49, -72, -30, -30, -17, 23, -35,
+			-137, -49, -109, -91, -132, -17, -17, -17, -91, -202, -262, 28, -40, -17, -17, -17, -63, -54,
+			-21, -17, -21, -155, -63, -21, -44, -35, -21, -17, -35, -17, -17, -17, 19, 19, 28, -21, -17, -40,
+			-35, -30, -40, -49, -72, -54, -40, -63, -21, -44, -44, -44, -54, -72, -63, 19, -91, -118, -109,
+			-77, -58, -17, -165, -169, -169, -30, -169, -146, -165, -151, -165, -155, -21, -17, -58, -128,
+			-81, -63, -17, -77, -77, -21, -77, -67, -26, -40, -114, -58, -54, -63, -58, -21, -58, -44, -35,
+			-17, -17, -49, -72, -63, -17, -44, -77, -40, -118, -202, -132, -77, -54, -54, -137, -132, -35,
+			-132, -114, -54, -17, -17, -17, -17, -17, -54, -72, -35, -15, -17, -17, -17, 32, -17, -35, -35,
+			-30, -35, -72, -54, 19, -17, -30, -72, -35, -63, -91, -17, -21, -17, -21, -17, -17, -17, -17,
+			-21, -17, -17, -26, 42, -26, -77, -54, -17, -91, -54, -17, -30, -30, -17, -142, -72, -128, -30,
+			-35, -30, -30, -35, -30, -30, -30, -30, -35, -30, -35, -30, -58, -17, -35, -54, -72, -54, -35,
+			-35, -35,
+		],
+	),
+	(
+		"-T-V-W-X-YA,A.A:A;ATAUAVAWAYAvAyA’A”BVBWBYC-CSC’C”D-DYF,F-F." *
+		"F:F;FAFaFeFoFrFuFyF’GTGYK-KCKOKUKeKoKuKyLOLTLULVLWLYLyL’L”O," *
+		"O-O.OAOVOXOYP,P-P.PAPaPsPyP’P”Q-R,R.RTRYRySST,T-T.T:T;TATTTa" *
+		"TcTeToTrTsTuTwTyUAV,V-V.V:V;VAVOVaVeViVoVuW,W-W.W:W;WAWaWeWo" *
+		"WrX-XCXOXeY,Y-Y.Y:Y;YAYCYOYaYeYoYuZ-ayf,f-f.fffiflf’f”kekor," *
+		"r.r’r”v,v.w,w.y,y.‘A‘J‘V‘Y“A“J“Y",
+		Int16[
+			-146, -72, -44, -81, -146, 19, 19, 19, 19, -77, -30, -67, -44, -95, -35, -35, -91, -91, -40, -54,
+			-54, 23, 19, 37, 37, 19, -72, -160, -30, -146, -54, -54, -114, -58, -40, -40, -63, -49, -54, 19,
+			-17, -21, -86, -44, -44, -17, -17, -17, -17, -63, -35, -165, -35, -137, -77, -155, -67, -229,
+			-239, -21, 19, -21, -26, -26, -35, -35, -183, -17, -183, -91, -26, -17, 19, 28, 19, 19, 19, 19,
+			-44, -54, -44, -44, -142, -146, -151, -54, -54, -77, 23, -128, -132, -132, -132, -109, -132,
+			-109, -109, -118, -30, -128, -72, -128, -44, -44, -67, -17, -54, -54, -17, -54, -35, -81, -44,
+			-81, -30, -30, -44, -35, -35, -35, -17, -81, -35, -35, -26, -165, -146, -165, -86, -86, -95, -35,
+			-35, -91, -91, -91, -72, -17, -30, -54, -17, -54, -60, -36, -36, 69, 42, -26, -26, -146, -142,
+			42, 19, -81, -81, -63, -63, -77, -91, -114, -44, 19, 37, -128, -44, 19,
+		],
+	),
+)
+const _TEXT_FAMILY_COURIER_NEW = _text_family_metrics("Courier New", 0.4228,
+	Int16[
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		1000, 1000, 1000, 865, 865, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+	],
+	Int16[
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		1000, 1000, 1000, 865, 865, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+		601, 601, 601, 601, 601, 601, 601, 601, 601, 601, 601,
+	],
+	("—", Int16[8], Int16[7]),
+	("<>AJKMNRVW_bdmpqvw—©®™Å≤≥", Int16[13, 0, 23, 0, 0, 19, 8, 0, 23, 11, 40, 11, 0, 17, 9, 0, 0, 2, 30, 3, 3, 42, 23, 13, 0], Int16[0, 14, 23, 14, 5, 24, 0, 21, 23, 12, 44, 0, 14, 26, 0, 17, 4, 2, 30, 3, 3, 2, 23, 0, 14]),
+	(
+		"",
+		Int16[
+		],
+	),
+	(
+		"",
+		Int16[
+		],
+	),
+)
+const _TEXT_FAMILY_MONOSPACE = _text_family_metrics("monospace", 0.5468,
+	Int16[
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		1000, 1000, 1000, 865, 865, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+	],
+	Int16[
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		1000, 1000, 1000, 865, 865, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+		603, 603, 603, 603, 603, 603, 603, 603, 603, 603, 603,
+	],
+	("#", Int16[0], Int16[5]),
+	("&", Int16[0], Int16[1]),
+	(
+		"",
+		Int16[
+		],
+	),
+	(
+		"",
+		Int16[
+		],
+	),
+)
+const _TEXT_MATH_LATIN_MODERN = _text_math_metrics("Latin-Modern";
+	italic = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", Int16[
+		530, 430, 434, 521, 467, 553, 478, 577, 346, 414, 522, 299, 879, 601, 486, 507, 453, 452, 470,
+		362, 573, 486, 717, 573, 491, 468, 751, 760, 761, 829, 764, 749, 787, 882, 498, 634, 890, 682,
+		1045, 882, 764, 755, 792, 760, 646, 705, 761, 770, 1049, 852, 763, 724, 501, 501, 501, 501, 501,
+		501, 501, 501, 501, 501,
+	]),
+	roman = ("!\"\$'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]`abcdefghijklmnopqrstuvwxyz{|}", Int16[
+		279, 375, 501, 279, 390, 390, 501, 779, 279, 334, 279, 501, 501, 501, 501, 501, 501, 501, 501,
+		501, 501, 501, 279, 279, 779, 779, 779, 473, 779, 751, 709, 723, 765, 682, 654, 786, 751, 362,
+		515, 779, 626, 918, 751, 779, 682, 779, 737, 557, 723, 751, 751, 1029, 751, 751, 612, 279, 279,
+		501, 501, 557, 445, 557, 445, 312, 501, 557, 279, 311, 529, 279, 834, 557, 501, 557, 529, 393,
+		395, 390, 557, 529, 723, 529, 529, 445, 501, 279, 501,
+	]),
+	ops = ("+-=<>*/,.;:!?'()[]|", Int16[1223, 1223, 1334, 1334, 1334, 945, 501, 446, 446, 446, 834, 278, 473, 388, 390, 390, 278, 278, 278]),
+	commands = (
+		split("""
+		alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa lambda mu nu xi pi
+		varpi rho varrho sigma varsigma tau upsilon phi varphi chi psi omega Gamma Delta Theta Lambda Xi
+		Pi Sigma Upsilon Phi Psi Omega infty partial nabla hbar ell imath jmath aleph emptyset varnothing
+		Re Im wp prime angle triangle cdot times pm mp div ast star circ bullet otimes oplus odot wedge
+		vee cup cap setminus leq geq le ge neq ne approx sim simeq equiv propto ll gg perp parallel mid in
+		notin ni subset supset subseteq supseteq cong doteq models to rightarrow leftarrow Rightarrow
+		Leftarrow leftrightarrow Leftrightarrow longrightarrow Longrightarrow longleftarrow Longleftarrow
+		longleftrightarrow Longleftrightarrow mapsto longmapsto uparrow downarrow Uparrow Downarrow
+		nearrow searrow hookrightarrow ldots cdots dots vdots ddots langle rangle lfloor rfloor lceil
+		rceil vert Vert backslash sum prod int iint oint coprod bigcup bigcap bigoplus bigotimes sin cos
+		tan cot sec csc arcsin arccos arctan sinh cosh tanh log ln lg exp max min sup inf lim det arg dim
+		ker deg gcd Pr quad qquad enspace thinspace checkmark dagger ddagger S
+		"""),
+		Int16[
+			641, 575, 544, 453, 407, 467, 475, 498, 470, 592, 355, 577, 584, 604, 525, 447, 571, 829, 518,
+			518, 572, 410, 512, 541, 597, 655, 627, 652, 623, 626, 834, 779, 695, 668, 751, 723, 779, 723,
+			779, 723, 1001, 587, 834, 577, 418, 279, 347, 612, 501, 501, 829, 555, 637, 408, 779, 969, 723,
+			1223, 1223, 1223, 1223, 945, 945, 857, 945, 1223, 1223, 1223, 1112, 1112, 1112, 1112, 1013, 1334,
+			1334, 1334, 1334, 1334, 1334, 1329, 1329, 1334, 1334, 1334, 1556, 1556, 1334, 1056, 834, 1223,
+			1223, 1223, 1334, 1334, 1334, 1334, 1334, 1334, 1168, 1556, 1556, 1556, 1556, 1556, 1556, 1556,
+			2019, 2013, 2019, 2013, 1998, 2090, 1533, 1999, 1056, 1056, 1167, 1167, 1556, 1556, 1553, 1171,
+			1110, 1171, 219, 947, 390, 390, 445, 445, 445, 445, 279, 399, 569, 1390, 1278, 999, 1369, 999,
+			1278, 1167, 1167, 1445, 1445, 1563, 1673, 1780, 1668, 1617, 1617, 2900, 3010, 3117, 2119, 2229,
+			2336, 1613, 1168, 1112, 1863, 2196, 2002, 1841, 1475, 1724, 1724, 1727, 2002, 1699, 1835, 1835,
+			1407, 1001, 2000, 500, 167, 834, 889, 889, 445,
+		],
+	),
+	space = 332,
+	radical = 834,
+)
+const _TEXT_MATH_STIX = _text_math_metrics("STIX-Web";
+	italic = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", Int16[
+		503, 471, 416, 533, 446, 616, 493, 514, 312, 391, 543, 319, 711, 498, 459, 493, 464, 409, 441,
+		314, 475, 507, 776, 551, 497, 500, 718, 697, 712, 791, 735, 724, 735, 924, 531, 621, 803, 709,
+		1056, 902, 733, 705, 782, 741, 681, 671, 776, 761, 1102, 811, 696, 803, 501, 501, 501, 501, 501,
+		501, 501, 501, 501, 501,
+	]),
+	roman = ("!\"\$'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]`abcdefghijklmnopqrstuvwxyz{|}", Int16[
+		334, 409, 501, 181, 334, 334, 501, 686, 251, 334, 251, 281, 501, 501, 501, 501, 501, 501, 501,
+		501, 501, 501, 279, 279, 686, 686, 686, 445, 922, 723, 668, 668, 723, 612, 557, 723, 723, 334,
+		375, 723, 612, 890, 723, 723, 558, 723, 668, 557, 612, 723, 723, 945, 723, 723, 613, 334, 334,
+		334, 445, 501, 445, 501, 445, 339, 501, 501, 279, 286, 501, 279, 779, 501, 501, 501, 501, 334,
+		390, 279, 501, 501, 723, 501, 501, 445, 481, 321, 481,
+	]),
+	ops = ("+-=<>*/,.;:!?'()[]|", Int16[1131, 1131, 1242, 1242, 1242, 968, 279, 418, 418, 446, 834, 334, 445, 341, 334, 334, 334, 334, 321]),
+	commands = (
+		split("""
+		alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa lambda mu nu xi pi
+		varpi rho varrho sigma varsigma tau upsilon phi varphi chi psi omega Gamma Delta Theta Lambda Xi
+		Pi Sigma Upsilon Phi Psi Omega infty partial nabla hbar ell imath jmath aleph emptyset varnothing
+		Re Im wp prime angle triangle cdot times pm mp div ast star circ bullet otimes oplus odot wedge
+		vee cup cap setminus leq geq le ge neq ne approx sim simeq equiv propto ll gg perp parallel mid in
+		notin ni subset supset subseteq supseteq cong doteq models to rightarrow leftarrow Rightarrow
+		Leftarrow leftrightarrow Leftrightarrow longrightarrow Longrightarrow longleftarrow Longleftarrow
+		longleftrightarrow Longleftrightarrow mapsto longmapsto uparrow downarrow Uparrow Downarrow
+		nearrow searrow hookrightarrow ldots cdots dots vdots ddots langle rangle lfloor rfloor lceil
+		rceil vert Vert backslash sum prod int iint oint coprod bigcup bigcap bigoplus bigotimes sin cos
+		tan cot sec csc arcsin arccos arctan sinh cosh tanh log ln lg exp max min sup inf lim det arg dim
+		ker deg gcd Pr quad qquad enspace thinspace checkmark dagger ddagger S
+		"""),
+		Int16[
+			530, 519, 459, 464, 431, 485, 481, 461, 485, 555, 268, 550, 542, 580, 463, 444, 569, 867, 503,
+			510, 548, 465, 473, 461, 646, 667, 646, 712, 682, 588, 723, 723, 703, 644, 723, 625, 723, 764,
+			747, 745, 927, 472, 732, 580, 580, 279, 403, 683, 763, 524, 875, 763, 827, 341, 686, 1146, 731,
+			1085, 1131, 1131, 1010, 968, 1145, 796, 796, 1287, 1287, 1207, 1065, 1065, 1065, 1065, 968, 1242,
+			1242, 1242, 1242, 1242, 1242, 1242, 1242, 1242, 1242, 1242, 1490, 1490, 1242, 1079, 822, 1242,
+			1242, 1242, 1242, 1242, 1242, 1242, 1242, 1242, 1242, 1482, 1482, 1482, 1482, 1482, 1482, 1482,
+			2130, 2130, 2130, 2130, 2130, 2130, 1482, 2130, 1068, 1068, 1242, 1242, 1482, 1482, 1482, 1334,
+			1260, 1334, 512, 1260, 401, 401, 470, 470, 470, 470, 321, 524, 524, 1248, 1334, 973, 1215, 973,
+			1334, 1258, 1258, 1460, 1460, 1502, 1668, 1557, 1557, 1612, 1612, 2725, 2890, 2779, 2003, 2168,
+			2058, 1613, 1113, 1113, 1779, 2057, 1891, 1724, 1446, 1669, 1557, 1612, 1891, 1612, 1779, 1779,
+			1225, 1001, 2000, 500, 167, 865, 945, 945, 501,
+		],
+	),
+	space = 250,
+	radical = 929,
+)
+const _TEXT_MATH_DEFAULT = _text_math_max("default", _TEXT_MATH_LATIN_MODERN, _TEXT_MATH_STIX)
+
+# Family names (lower case) with a table. Liberation, Tinos/Arimo/Cousine
+# and the URW Nimbus faces are the metric-compatible substitutes Linux
+# systems draw for Times New Roman, Arial, Courier New, Times and Helvetica
+# (their published design goal; not measured here).
+const _TEXT_FAMILIES = Dict{String, _TextFamilyMetrics}(
+	"times new roman" => _TEXT_FAMILY_TIMES_NEW_ROMAN,
+	"liberation serif" => _TEXT_FAMILY_TIMES_NEW_ROMAN,
+	"tinos" => _TEXT_FAMILY_TIMES_NEW_ROMAN,
+	"times" => _TEXT_FAMILY_TIMES,
+	"nimbus roman" => _TEXT_FAMILY_TIMES,
+	"nimbus roman no9 l" => _TEXT_FAMILY_TIMES,
+	"arial" => _TEXT_FAMILY_ARIAL,
+	"liberation sans" => _TEXT_FAMILY_ARIAL,
+	"arimo" => _TEXT_FAMILY_ARIAL,
+	"helvetica" => _TEXT_FAMILY_HELVETICA,
+	"nimbus sans" => _TEXT_FAMILY_HELVETICA,
+	"nimbus sans l" => _TEXT_FAMILY_HELVETICA,
+	"verdana" => _TEXT_FAMILY_VERDANA,
+	"dejavu sans" => _TEXT_FAMILY_DEJAVU_SANS,
+	"bitstream vera sans" => _TEXT_FAMILY_DEJAVU_SANS,
+	"courier new" => _TEXT_FAMILY_COURIER_NEW,
+	"courier" => _TEXT_FAMILY_COURIER_NEW,
+	"liberation mono" => _TEXT_FAMILY_COURIER_NEW,
+	"cousine" => _TEXT_FAMILY_COURIER_NEW,
+)
+# A family that was not measured (plotly's default "Open Sans" among them:
+# it is not installed where the tables were made) gets the elementwise
+# maximum of the proportional families. A face wider than all of them can
+# still exceed it.
+const _TEXT_FAMILY_DEFAULT = _text_family_max("default", (
+	_TEXT_FAMILY_TIMES_NEW_ROMAN, _TEXT_FAMILY_TIMES, _TEXT_FAMILY_ARIAL,
+	_TEXT_FAMILY_HELVETICA, _TEXT_FAMILY_VERDANA, _TEXT_FAMILY_DEJAVU_SANS,
+))
+# Generic families, as the renderer resolved them (serif: Times, sans-serif:
+# Helvetica). They count only when no named family precedes them.
+const _TEXT_GENERIC_FAMILIES = Dict{String, _TextFamilyMetrics}(
+	"serif" => _TEXT_FAMILY_TIMES,
+	"sans-serif" => _TEXT_FAMILY_HELVETICA,
+	"monospace" => _TEXT_FAMILY_MONOSPACE,
+)
+# plotly.js's default font stack (layout.font.family).
+const _TEXT_PLOTLY_DEFAULT_FAMILY = "\"Open Sans\", verdana, arial, sans-serif"
+
+# The families a CSS family list may be drawn in: every named family it lists
+# (the browser takes the first one installed, which is unknown here), the
+# conservative default for a name without a table, the generic family when
+# nothing else is listed. Cached per list.
+const _TEXT_FAMILY_CACHE = Dict{String, Vector{_TextFamilyMetrics}}()
+const _TEXT_FAMILY_CACHE_LOCK = ReentrantLock()
+const _TEXT_FAMILY_CACHE_MAX = 256
+
+function _text_family_candidates(family::AbstractString)
+	key = String(family)
+	lock(_TEXT_FAMILY_CACHE_LOCK) do
+		cached = get(_TEXT_FAMILY_CACHE, key, nothing)
+		cached === nothing || return cached
+		list = isempty(strip(key)) ? _TEXT_PLOTLY_DEFAULT_FAMILY : key
+		out = _TextFamilyMetrics[]
+		generic = nothing
+		for part in split(list, ',')
+			name = lowercase(strip(strip(part), ['"', '\'', ' ', '\t']))
+			isempty(name) && continue
+			metrics = get(_TEXT_FAMILIES, name, nothing)
+			if metrics === nothing && haskey(_TEXT_GENERIC_FAMILIES, name)
+				generic === nothing && (generic = _TEXT_GENERIC_FAMILIES[name])
+				continue
+			end
+			metrics === nothing && (metrics = _TEXT_FAMILY_DEFAULT)
+			any(m -> m === metrics, out) || push!(out, metrics)
+		end
+		isempty(out) && push!(out, something(generic, _TEXT_FAMILY_DEFAULT))
+		length(_TEXT_FAMILY_CACHE) >= _TEXT_FAMILY_CACHE_MAX && empty!(_TEXT_FAMILY_CACHE)
+		_TEXT_FAMILY_CACHE[key] = out
+		return out
+	end
+end
+
+# The text family of the style in scope (`_with_figure_style` puts a figure's
+# own style in scope for its mutators, the finalizer and exports).
+_text_scope_family() = _active_style().font_family
+
+# Advance and ink overhangs (left, right; em) of `c` in family `m`. A
+# character the table does not list: nothing for a zero-width one, 1 em for a
+# wide (CJK) one (every family's fallback measured 1 em or less), the base
+# letter's for an accented letter, else the widest letter.
+function _text_family_glyph(m::_TextFamilyMetrics, c::Char, bold::Bool)
+	k = get(_TEXT_ADVANCE_INDEX, c, 0)
+	# plotly.js draws raw newlines and tabs as spaces (svg_text_utils).
+	k == 0 && c in ('\n', '\r', '\t') && (k = 1)
+	if k == 0 && isvalid(c)
+		w = textwidth(c)
+		w == 0 && return (0.0, 0.0, 0.0)
+		w >= 2 && return (1.0, 0.0, 0.0)
+		base = first(Base.Unicode.normalize(string(c), :NFD))
+		base == c || (k = get(_TEXT_ADVANCE_INDEX, base, 0))
+	end
+	k == 0 && return (bold ? m.fallback_bold : m.fallback, 0.0, 0.0)
+	return bold ? (m.bold[k], m.ink_left_bold[k], m.ink_right_bold[k]) :
+		(m.regular[k], m.ink_left[k], m.ink_right[k])
+end
+
+_text_family_advance(m::_TextFamilyMetrics, c::Char, bold::Bool) = _text_family_glyph(m, c, bold)[1]
+
+# Width (em) of a run of characters as Chromium boxes it: from the leftmost
+# ink or origin to the rightmost ink or advance end, the pair adjustments
+# applied between neighbours of one weight and size (one shaping run; across
+# a `<b>`/`<sub>` boundary only an adjustment that widens is counted).
+# `glyphs` counts the characters drawn.
+mutable struct _TextRunBox
+	x::Float64
+	lo::Float64
+	hi::Float64
+	prev::Char
+	prev_bold::Bool
+	prev_scale::Float64
+	glyphs::Int
+end
+_TextRunBox() = _TextRunBox(0.0, 0.0, 0.0, '\0', false, 1.0, 0)
+
+function _text_run_add!(box::_TextRunBox, m::_TextFamilyMetrics, c::Char, bold::Bool, scale::Float64)
+	if box.prev != '\0'
+		pair = (box.prev, c)
+		if box.prev_bold == bold && box.prev_scale == scale
+			box.x += scale * get(bold ? m.kern_bold : m.kern, pair, 0.0)
+		else
+			widen = max(get(m.kern, pair, 0.0), get(m.kern_bold, pair, 0.0))
+			widen > 0 && (box.x += max(scale, box.prev_scale) * widen)
+		end
+	end
+	advance, left, right = _text_family_glyph(m, c, bold)
+	box.lo = min(box.lo, box.x - scale * left)
+	box.x += scale * advance
+	box.hi = max(box.hi, box.x + scale * right, box.x)
+	box.prev, box.prev_bold, box.prev_scale = c, bold, scale
+	box.glyphs += 1
+	return box
+end
+
+_text_run_width(box::_TextRunBox) = box.hi - box.lo
+
+# A markup tag ends the shaping run (plotly.js draws each styled part as its
+# own <tspan>): the next character is not adjusted against the previous one
+# (beyond an adjustment that widens).
+_text_run_break!(box::_TextRunBox) = (box.prev_scale = -1.0; box)
+
+# Drawn text runs measured up to 0.003 px wider than their advances, pair
+# adjustments and ink (D19 probe: "u{2" at 10.67 px Times New Roman, 15.789
+# drawn vs 15.787 px): glyph positions are rounded to Chromium's layout unit,
+# 1/64 px, allowed once per glyph.
+const _TEXT_GLYPH_ROUNDING_PX = 1 / 64
+
+# Character a named or numeric HTML entity (`amp`, `#38`, `#x26`) stands for,
+# or `nothing`.
+const _TEXT_ENTITIES = Dict(
+	"amp" => '&', "lt" => '<', "gt" => '>', "quot" => '"', "apos" => '\'', "nbsp" => ' ',
+	"deg" => '°', "plusmn" => '±', "times" => '×', "divide" => '÷', "micro" => 'µ',
+	"middot" => '·', "ndash" => '–', "mdash" => '—', "hellip" => '…', "copy" => '©',
+	"reg" => '®', "trade" => '™', "euro" => '€', "pound" => '£', "yen" => '¥', "sect" => '§',
+)
+
+function _text_entity_char(name::AbstractString)
+	c = get(_TEXT_ENTITIES, name, nothing)
+	c === nothing || return c
+	m = match(r"^#(?:[xX]([0-9A-Fa-f]{1,6})|([0-9]{1,7}))$", name)
+	m === nothing && return nothing
+	code = m.captures[1] !== nothing ? parse(Int, m.captures[1]; base = 16) : parse(Int, m.captures[2])
+	return (0 <= code <= 0x10ffff && !(0xd800 <= code <= 0xdfff)) ? Char(code) : nothing
+end
+
+# Width (em) of plain text in family `m` after HTML markup is removed: tags
+# are dropped (`<b>`/`<strong>` set bold, `<sub>`/`<sup>` the script size),
+# an entity counts as its character.
+_text_plain_em(s::AbstractString, m::_TextFamilyMetrics, bold::Bool = false) =
+	_text_run_width(_text_plain_run(s, m, bold))
+
+# The run box (`_TextRunBox`) of plain text `s` in family `m`.
+function _text_plain_run(s::AbstractString, m::_TextFamilyMetrics, bold::Bool = false)
+	box = _TextRunBox()
 	scale = 1.0
+	weight = bold
 	chars = collect(s)
 	i = 1
 	n = length(chars)
@@ -158,36 +914,191 @@ function _text_plain_em(s::AbstractString)
 		if c == '<'
 			close = findnext(==('>'), chars, i)
 			if close !== nothing
-				tag = lowercase(String(chars[(i + 1):(close - 1)]))
-				if startswith(tag, "sub") || startswith(tag, "sup")
-					scale = _TEXT_SCRIPT_SCALE
-				elseif startswith(tag, "/sub") || startswith(tag, "/sup")
-					scale = 1.0
+				tag = lowercase(strip(String(chars[(i + 1):(close - 1)])))
+				name = something(match(r"^/?\s*([a-z0-9]*)", tag), (; captures = [""])).captures[1]
+				closing = startswith(tag, "/")
+				if name in ("sub", "sup")
+					scale = closing ? 1.0 : _TEXT_SCRIPT_SCALE
+				elseif name in ("b", "strong")
+					weight = closing ? bold : true
 				end
+				_text_run_break!(box)
 				i = close + 1
 				continue
 			end
 		elseif c == '&'
 			semi = findnext(==(';'), chars, i)
-			if semi !== nothing && semi - i <= 8
-				width += scale * _TEXT_EM_NORMAL
-				i = semi + 1
-				continue
+			if semi !== nothing && semi - i <= 9
+				e = _text_entity_char(String(chars[(i + 1):(semi - 1)]))
+				if e !== nothing
+					_text_run_add!(box, m, e, weight, scale)
+					i = semi + 1
+					continue
+				end
 			end
 		end
-		width += scale * _text_char_em(c)
+		_text_run_add!(box, m, c, weight, scale)
 		i += 1
 	end
-	return width
+	return box
 end
 
-# TeX fragment parser state: `chars` and the read position.
+# The same in the scoped style's family (the widest of the families it may be
+# drawn in).
+_text_plain_em(s::AbstractString) =
+	maximum(m -> _text_plain_em(s, m), _text_family_candidates(_text_scope_family()))
+
+# plotly.js lays plain text out at 1.3 em per line (svg_text_utils
+# LINE_SPACING). A MathJax row with scripts or parentheses is ~1.2 em tall
+# (array rows are spaced 1.2 em apart), one with a fraction, root or stacked
+# operator up to ~1.9 em.
+const _TEXT_PLAIN_LINE_EM = 1.3
+const _TEXT_MATH_ROW_EM = 1.3
+const _TEXT_MATH_TALL_ROW_EM = 1.9
+# Rows taller than that (tm-extent-under, drawn at 12 px under :default and
+# :ieee): a display-style big operator with limits (\int_0^1 2.58 em,
+# \sum_{i=1}^{n} 2.67 em, \prod_{k=1}^{N} 2.87 em, \oint_C 2.37 em), a
+# display integral without limits (2.32 em), and a brace with its label
+# (\underbrace{abcdefgh}_{n} 2.15 em; the brace deepens with its width),
+# a display-style fraction ($$\frac{a}{b}$$ 1.94 em).
+const _TEXT_DISPLAY_LIMITS_ROW_EM = 2.9
+const _TEXT_DISPLAY_FRACTION_ROW_EM = 2.0
+const _TEXT_DISPLAY_INTEGRAL_ROW_EM = 2.35
+const _TEXT_BRACE_LABEL_ROW_EM = 2.2
+# A brace is at least 1.03 em wide (\underbrace{x}_{n} drew 12.4 px at
+# 12 px) and reaches past its content (\underbrace{abc}_{n} drew 18.7 px
+# around an estimated 17.4 px: 0.11 em, rounded up so the estimate errs
+# large).
+const _TEXT_BRACE_MIN_EM = 1.05
+const _TEXT_BRACE_EXTRA_EM = 0.15
+# Script size relative to its base: plotly.js <sub>/<sup> (70 %).
+const _TEXT_SCRIPT_SCALE = 0.7
+# plotly.js line break (svg_text_utils BR_TAG_ALL, applied to `<…>` tokens).
+const _TEXT_BR_TAG = r"<br(\s+[^<>]*)?>"i
+
+# ── MathJax ──────────────────────────────────────────────────────────────────
+# MathJax 2 sizes math so that its x-height (TeX x_height, 0.430554 em) is the
+# ex of the <div> plotly.js typesets in: the label's family under
+# `inherit_text_font` (the page sets it, `_MATHJAX_PAGE_EXTENSIONS_JS`), else
+# the page's default font (Chromium: Times, `_TEXT_FAMILY_TIMES`).
+const _TEXT_MATH_X_HEIGHT = 0.430554
+# Style levels: display, text, script, scriptscript (MathJax 2
+# scriptsizemultiplier 0.71, scriptminsize lifted by the page).
+const _TEXT_LEVEL_SCALE = (1.0, 1.0, 0.7071, 0.5)
+# Space after a script (scriptspace 0.05 em) and the italic correction
+# MathJax adds before it (measured: x^2, x_2, x_{aa}^{aa}).
+const _TEXT_SCRIPT_EXTRA_EM = 0.1
+# A fraction or binomial: the null delimiters and the rule overhang
+# (measured: \frac{a}{a} 0.734 em at text size, 0.889 em in display).
+const _TEXT_FRACTION_EXTRA_EM = 0.36
+# A \left/\right or \big delimiter (measured 0.39 to 0.42 em around rows of
+# one line).
+const _TEXT_DELIMITER_EM = 0.45
+const _TEXT_BIG_DELIMITER_EM = 0.6
+const _TEXT_NULL_DELIMITER_EM = 0.12
+# \mathbf over \mathrm (measured 5.594 / 5.004).
+const _TEXT_MATH_BOLD = 1.12
+# A large operator in display style over text style (\sum 1.444 / 1.056).
+const _TEXT_DISPLAY_OPERATOR = 1.4
+# A character the math font has no glyph for (CJK, most symbols): MathJax
+# draws it as text at the label's size (CJK measured 1.1 em of the label).
+const _TEXT_MATH_FOREIGN_EM = 1.1
+# A math-mode character or command without a measured width; arrows named by
+# a command the table does not list (`\Longleftrightarrow`-like when "long").
+const _TEXT_MATH_UNKNOWN_EM = 1.0
+const _TEXT_MATH_ARROW_EM = 1.56
+const _TEXT_MATH_LONG_ARROW_EM = 2.13
+# A literal that MathJax prints from its text font (`\%`, `\#`, `\&`, `\_`):
+# the widest of them, 0.834 em.
+const _TEXT_MATH_ESCAPED_EM = 0.834
+# Spacing on both sides of a binary/relation command, an operator name
+# (`\sin`) beside a letter, the gap between array columns.
+const _TEXT_MATH_OPERATOR_SPACE_EM = 0.333
+const _TEXT_ARRAY_COLUMN_GAP_EM = 1.0
+# The brace of `cases`, two delimiters of a matrix environment.
+const _TEXT_CASES_BRACE_EM = 0.9
+
+# MathJax 2 size switches (relative to \normalsize; MathJax 2 has no
+# \footnotesize, kept at LaTeX's 0.8 for labels written by hand).
+const _TEXT_TEX_SIZES = Dict(
+	"tiny" => 0.5, "Tiny" => 0.6, "scriptsize" => 0.7, "footnotesize" => 0.8, "small" => 0.85,
+	"normalsize" => 1.0, "large" => 1.2, "Large" => 1.44, "LARGE" => 1.73,
+	"huge" => 2.07, "Huge" => 2.49,
+)
+# Style switches: the level the rest of the group is set at.
+const _TEXT_TEX_STYLES = Dict("displaystyle" => 0, "textstyle" => 1, "scriptstyle" => 2, "scriptscriptstyle" => 3)
+# Commands whose single argument is set in text mode (literal characters).
+const _TEXT_TEX_TEXT_MODE = Set([
+	"text", "textbf", "textit", "textrm", "textsf", "texttt", "textup", "textnormal", "emph", "mbox", "hbox",
+])
+const _TEXT_TEX_TEXT_BOLD = Set(["textbf"])
+# Commands whose argument is set in a math alphabet.
+const _TEXT_TEX_ALPHABETS = Dict(
+	"mathrm" => :mathrm, "mathsf" => :mathrm, "mathtt" => :mathrm, "mathup" => :mathrm,
+	"operatorname" => :mathrm, "mathbf" => :mathbf, "boldsymbol" => :mathbf, "bm" => :mathbf,
+	"pmb" => :mathbf, "mathcal" => :mathbf, "mathscr" => :mathbf, "mathfrak" => :mathbf,
+	"mathbb" => :mathbf, "mathit" => :math, "mathnormal" => :math,
+)
+# Commands whose argument keeps its width (accents, over/underlines, class
+# changes, colour boxes).
+const _TEXT_TEX_WRAPPERS = Set([
+	"hat", "bar", "vec", "tilde", "dot", "ddot", "dddot", "check", "breve", "acute", "grave",
+	"widehat", "widetilde", "overline", "underline", "mathring", "overrightarrow",
+	"overleftarrow", "mathord", "mathopen", "mathclose", "mathpunct", "mathinner", "boxed",
+	"phantom", "hphantom", "smash", "cancel", "bcancel", "xcancel",
+])
+# Two-argument constructs drawn one above the other.
+const _TEXT_TEX_FRACTIONS = Dict(
+	"frac" => :auto, "cfrac" => :auto, "binom" => :auto, "genfrac" => :auto,
+	"dfrac" => :display, "dbinom" => :display, "tfrac" => :text, "tbinom" => :text,
+)
+const _TEXT_TEX_STACKED = Set(["overset", "underset", "stackrel"])
+const _TEXT_TEX_BIG_OPERATORS = Set([
+	"sum", "prod", "int", "iint", "iiint", "oint", "coprod", "bigcup", "bigcap", "bigoplus",
+	"bigotimes", "bigodot", "biguplus", "bigvee", "bigwedge", "bigsqcup",
+])
+const _TEXT_TEX_DELIMITER_SIZES = Set([
+	"big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr", "biggl", "biggr", "Biggl", "Biggr",
+	"bigm", "Bigm", "biggm", "Biggm",
+])
+# Explicit spaces (em).
+const _TEXT_TEX_SPACES = Dict(
+	"quad" => 1.0, "qquad" => 2.0, "enspace" => 0.5, "thinspace" => 0.17, "enskip" => 0.5,
+	"," => 0.17, ":" => 0.22, ">" => 0.22, ";" => 0.28, "!" => -0.17, " " => 0.333,
+	"negthinspace" => -0.17, "medspace" => 0.22, "thickspace" => 0.28,
+)
+# Commands drawn as nothing.
+const _TEXT_TEX_INVISIBLE = Set(["limits", "nolimits", "displaylimits", "label", "nonumber", "notag", "hline", "vphantom", "strut", "relax"])
+
+# TeX parser state: the characters and read position, the math font, the
+# label's text family when text runs are drawn in it (`inherit_text_font`),
+# the math em per px of font size `k`, and the style level (0 display,
+# 1 text, 2 script, 3 scriptscript).
 mutable struct _TextTeX
 	chars::Vector{Char}
 	pos::Int
+	math::_TextMathMetrics
+	text::Union{Nothing, _TextFamilyMetrics}
+	k::Float64
+	level::Int
+	# The tallest row height (em) a token of the current row asked for beyond
+	# the tall/plain rows (_TEXT_DISPLAY_LIMITS_ROW_EM and the like); 0 if none.
+	height::Float64
 end
 
+_TextTeX(chars::Vector{Char}, pos::Int, math::_TextMathMetrics, text::Union{Nothing, _TextFamilyMetrics}, k::Float64, level::Int) =
+	_TextTeX(chars, pos, math, text, k, level, 0.0)
+_TextTeX(chars::Vector{Char}, pos::Int) = _TextTeX(chars, pos, _TEXT_MATH_LATIN_MODERN, nothing, 1.0, 1)
+
 _text_tex_peek(t::_TextTeX) = t.pos <= length(t.chars) ? t.chars[t.pos] : nothing
+_text_tex_scale(t::_TextTeX) = _TEXT_LEVEL_SCALE[t.level + 1]
+
+function _text_tex_skip_spaces!(t::_TextTeX)
+	while (c = _text_tex_peek(t)) !== nothing && isspace(c)
+		t.pos += 1
+	end
+	return nothing
+end
 
 # Read a command name after a backslash (letters, or one non-letter).
 function _text_tex_command!(t::_TextTeX)
@@ -204,156 +1115,369 @@ function _text_tex_command!(t::_TextTeX)
 	return String(t.chars[start:(t.pos - 1)])
 end
 
-# Skip spaces; read one argument: a `{…}` group, a command, or one character.
-# Returns (width_em, tall).
-function _text_tex_argument!(t::_TextTeX, text_mode::Bool)
-	while (c = _text_tex_peek(t)) !== nothing && c == ' '
-		t.pos += 1
-	end
-	c = _text_tex_peek(t)
-	c === nothing && return (0.0, false)
-	if c == '{'
-		t.pos += 1
-		return _text_tex_sequence!(t, text_mode; stop = '}')
-	elseif c == '\\'
-		return _text_tex_token!(t, text_mode)
-	end
-	t.pos += 1
-	return (text_mode ? _text_char_em(c) : _text_tex_math_char_em(c), false)
-end
-
-# A `{…}` group read and thrown away (colour names, array column specs).
+# A `{…}` group read and thrown away (colour names, column specs); returns
+# its content.
 function _text_tex_skip_group!(t::_TextTeX)
-	while (c = _text_tex_peek(t)) !== nothing && c == ' '
-		t.pos += 1
-	end
-	_text_tex_peek(t) == '{' || return nothing
+	_text_tex_skip_spaces!(t)
+	_text_tex_peek(t) == '{' || return ""
+	start = t.pos + 1
 	depth = 0
 	while (c = _text_tex_peek(t)) !== nothing
 		t.pos += 1
-		c == '{' && (depth += 1)
-		c == '}' && (depth -= 1; depth == 0 && return nothing)
+		if c == '\\'
+			t.pos += 1
+		elseif c == '{'
+			depth += 1
+		elseif c == '}'
+			depth -= 1
+			depth == 0 && return String(t.chars[start:(t.pos - 2)])
+		end
 	end
-	return nothing
+	return String(t.chars[start:end])
 end
 
-function _text_tex_math_char_em(c::Char)
-	isspace(c) && return 0.0  # TeX ignores spaces in math mode
-	c in "=+<>" && return _TEXT_EM_MATH_OPERATOR
-	c == '-' && return _TEXT_EM_MATH_OPERATOR
-	return _text_char_em(c)
+# Width (math em, at the base size) of one text-mode character.
+function _text_tex_text_char(t::_TextTeX, c::Char, bold::Bool)
+	if t.text !== nothing
+		# Drawn in the label's family at the label's size: em of the label.
+		return _text_family_advance(t.text, c, bold) / t.k
+	end
+	c == ' ' && return t.math.space
+	w = get(t.math.roman, c, nothing)
+	w !== nothing && return bold ? _TEXT_MATH_BOLD * w : w
+	c in "#%&_^~\\" && return _TEXT_MATH_ESCAPED_EM
+	return _text_tex_foreign_char(t, c)
 end
+
+function _text_tex_foreign_char(t::_TextTeX, c::Char)
+	textwidth(c) == 0 && !isspace(c) && return 0.0
+	return _TEXT_MATH_FOREIGN_EM / t.k
+end
+
+# Width of one math-mode character in alphabet `mode`.
+function _text_tex_math_char(t::_TextTeX, c::Char, mode::Symbol)
+	isspace(c) && return 0.0  # TeX ignores spaces in math mode
+	m = t.math
+	if mode !== :math && (isletter(c) || isdigit(c))
+		w = get(m.roman, c, nothing)
+		w !== nothing && return mode === :mathbf ? _TEXT_MATH_BOLD * w : w
+	end
+	w = get(m.italic, c, nothing)
+	w === nothing || return w
+	w = get(m.ops, c, nothing)
+	w === nothing || return w
+	w = get(m.roman, c, nothing)
+	w === nothing || return w
+	c in "#%&_^~\\" && return _TEXT_MATH_ESCAPED_EM
+	return _text_tex_foreign_char(t, c)
+end
+
+# The argument of a text-mode command: MathJax prints it literally (`\$`,
+# `\{`, `\}` and `\\` stand for the character; inner braces are printed).
+function _text_tex_text_argument!(t::_TextTeX, bold::Bool)
+	s = _text_tex_scale(t)
+	_text_tex_skip_spaces!(t)
+	c = _text_tex_peek(t)
+	c === nothing && return 0.0
+	if c != '{'
+		t.pos += 1
+		return s * _text_tex_text_char(t, c, bold)
+	end
+	t.pos += 1
+	depth = 1
+	run = Char[]
+	while (c = _text_tex_peek(t)) !== nothing
+		t.pos += 1
+		if c == '}'
+			depth -= 1
+			depth == 0 && break
+		elseif c == '{'
+			depth += 1
+		elseif c == '\\' && (n = _text_tex_peek(t)) !== nothing && n in "\${}\\"
+			t.pos += 1
+			c = n
+		end
+		push!(run, c)
+	end
+	if t.text !== nothing
+		# One <text> in the label's family: MathJax sizes it by its bounding box.
+		box = _TextRunBox()
+		foreach(c -> _text_run_add!(box, t.text, c, bold, 1.0), run)
+		return s * _text_run_width(box) / t.k
+	end
+	return s * sum((_text_tex_text_char(t, c, bold) for c in run); init = 0.0)
+end
+
+# One argument at `level`: a `{…}` group, a command, or one character.
+# Returns (width, tall).
+function _text_tex_argument!(t::_TextTeX, mode::Symbol; level::Int = t.level)
+	outer = t.level
+	t.level = level
+	try
+		_text_tex_skip_spaces!(t)
+		c = _text_tex_peek(t)
+		c === nothing && return (0.0, false)
+		if c == '{'
+			t.pos += 1
+			return _text_tex_sequence!(t, mode; stop = '}')
+		end
+		return _text_tex_token!(t, mode)
+	finally
+		t.level = outer
+	end
+end
+
+_text_tex_script_level(level::Int) = level <= 1 ? 2 : 3
+_text_tex_fraction_level(level::Int, kind::Symbol) =
+	kind === :display ? 1 : kind === :text ? 2 : level == 0 ? 1 : level == 1 ? 2 : 3
 
 # One token at the current position (a command with its arguments, a group, a
-# script, a character). Returns (width_em, tall).
-function _text_tex_token!(t::_TextTeX, text_mode::Bool)
+# script with no base, a character). Returns (width, tall).
+function _text_tex_token!(t::_TextTeX, mode::Symbol)
+	s = _text_tex_scale(t)
 	c = _text_tex_peek(t)
 	c === nothing && return (0.0, false)
 	if c == '{'
 		t.pos += 1
-		return _text_tex_sequence!(t, text_mode; stop = '}')
+		return _text_tex_sequence!(t, mode; stop = '}')
+	elseif c == '}'
+		# A closing brace with no group open here (literal braces are \{ \}).
+		t.pos += 1
+		return (0.0, false)
 	elseif c == '^' || c == '_'
 		t.pos += 1
-		w, tall = _text_tex_argument!(t, text_mode)
-		return (_TEXT_SCRIPT_SCALE * w, tall)
+		w, tall = _text_tex_argument!(t, mode; level = _text_tex_script_level(t.level))
+		return (w + s * _TEXT_SCRIPT_EXTRA_EM, tall)
+	elseif c == '&'
+		# A raw `&` outside an array: MathJax reports "Misplaced &".
+		t.pos += 1
+		return (s * _TEXT_MATH_ESCAPED_EM, false)
 	elseif c != '\\'
 		t.pos += 1
-		return (text_mode ? _text_char_em(c) : _text_tex_math_char_em(c), false)
+		return (s * _text_tex_math_char(t, c, mode), false)
 	end
 	name = _text_tex_command!(t)
 	isempty(name) && return (0.0, false)
-	haskey(_TEXT_TEX_SPACES, name) && return (_TEXT_TEX_SPACES[name], false)
-	name in ("{", "}", "\$", "%", "#", "&", "_") && return (_TEXT_EM_NORMAL, false)
-	name in _TEXT_TEX_WRAPPERS && return _text_tex_argument!(t, name in _TEXT_TEX_TEXT_MODE)
-	if name in _TEXT_TEX_STACKED
-		w1, _ = _text_tex_argument!(t, text_mode)
-		w2, _ = _text_tex_argument!(t, text_mode)
-		return (max(w1, w2) + 0.2, true)
+	haskey(_TEXT_TEX_SPACES, name) && return (s * _TEXT_TEX_SPACES[name], false)
+	name in ("{", "}") && return (s * 0.5, false)
+	name == "\$" && return (s * 0.5, false)
+	name in ("%", "#", "&", "_") && return (s * _TEXT_MATH_ESCAPED_EM, false)
+	name == "|" && return (s * get(t.math.commands, "Vert", 0.4), false)
+	name in ("\\", "cr", "newline") && return (0.0, false)
+	name in _TEXT_TEX_INVISIBLE && (name == "vphantom" && _text_tex_skip_group!(t); return (0.0, false))
+	name in _TEXT_TEX_TEXT_MODE && return (_text_tex_text_argument!(t, name in _TEXT_TEX_TEXT_BOLD), false)
+	if haskey(_TEXT_TEX_ALPHABETS, name)
+		w, tall = _text_tex_argument!(t, _TEXT_TEX_ALPHABETS[name])
+		name == "operatorname" && (w += s * _TEXT_MATH_OPERATOR_SPACE_EM)
+		return (w, tall)
+	end
+	name in _TEXT_TEX_WRAPPERS && return _text_tex_argument!(t, mode)
+	if name in ("underbrace", "overbrace")
+		w, _ = _text_tex_argument!(t, mode)
+		_text_tex_skip_spaces!(t)
+		if _text_tex_peek(t) in ('_', '^')
+			t.pos += 1
+			label, _ = _text_tex_argument!(t, mode; level = _text_tex_script_level(t.level))
+			w = max(w, label)
+			t.height = max(t.height, _TEXT_BRACE_LABEL_ROW_EM)
+		end
+		return (max(w, s * _TEXT_BRACE_MIN_EM) + s * _TEXT_BRACE_EXTRA_EM, true)
+	elseif haskey(_TEXT_TEX_FRACTIONS, name)
+		kind = _TEXT_TEX_FRACTIONS[name]
+		name == "genfrac" && foreach(_ -> _text_tex_skip_group!(t), 1:4)
+		level = _text_tex_fraction_level(t.level, kind)
+		w1, _ = _text_tex_argument!(t, mode; level = level)
+		w2, _ = _text_tex_argument!(t, mode; level = level)
+		extra = startswith(name, "binom") || endswith(name, "binom") ? 2 * _TEXT_DELIMITER_EM : 0.0
+		# A display-style fraction (its parts in text style) is taller than a tall row.
+		level == 1 && (t.height = max(t.height, s * _TEXT_DISPLAY_FRACTION_ROW_EM))
+		return (max(w1, w2) + s * (_TEXT_FRACTION_EXTRA_EM + extra), true)
+	elseif name in _TEXT_TEX_STACKED
+		w1, _ = _text_tex_argument!(t, mode; level = _text_tex_script_level(t.level))
+		w2, _ = _text_tex_argument!(t, mode)
+		return (max(w1, w2) + s * _TEXT_MATH_OPERATOR_SPACE_EM, true)
 	elseif name == "sqrt"
+		index = 0.0
+		_text_tex_skip_spaces!(t)
 		if _text_tex_peek(t) == '['
 			close = findnext(==(']'), t.chars, t.pos)
-			close === nothing || (t.pos = close + 1)
+			if close !== nothing
+				inner = _TextTeX(t.chars[(t.pos + 1):(close - 1)], 1, t.math, t.text, t.k, 3)
+				index, _ = _text_tex_sequence!(inner, mode)
+				t.pos = close + 1
+			end
 		end
-		w, _ = _text_tex_argument!(t, text_mode)
-		return (w + 0.9, true)
-	elseif name in ("left", "right", "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr")
-		# The delimiter that follows is one glyph.
-		w, _ = _text_tex_argument!(t, text_mode)
-		return (max(w, 0.4), name in ("Big", "bigg", "Bigg", "Bigl", "Bigr"))
-	elseif name in ("color", "label", "hspace", "vspace", "phantom", "hphantom", "vphantom")
+		w, _ = _text_tex_argument!(t, mode)
+		return (w + index + s * t.math.radical, true)
+	elseif name in ("left", "right", "middle")
+		_text_tex_skip_spaces!(t)
+		if _text_tex_peek(t) == '.'
+			t.pos += 1
+			return (s * _TEXT_NULL_DELIMITER_EM, false)
+		end
+		w, _ = _text_tex_argument!(t, mode)
+		return (max(w, s * _TEXT_DELIMITER_EM), false)
+	elseif name in _TEXT_TEX_DELIMITER_SIZES
+		w, _ = _text_tex_argument!(t, mode)
+		return (max(w, s * _TEXT_BIG_DELIMITER_EM), name[1] == 'B' || startswith(name, "bigg"))
+	elseif name in ("color", "hspace", "kern", "mkern", "hskip", "mskip")
+		spec = _text_tex_skip_group!(t)
+		name == "color" && return (0.0, false)
+		return (s * _text_tex_length_em(spec), false)
+	elseif name in ("textcolor", "colorbox")
 		_text_tex_skip_group!(t)
-		return (0.0, false)
-	elseif name == "textcolor"
-		_text_tex_skip_group!(t)
-		return _text_tex_argument!(t, text_mode)
+		return _text_tex_argument!(t, mode)
 	elseif name == "unicode"
-		_text_tex_skip_group!(t)
-		return (_TEXT_EM_NORMAL, false)
+		code = tryparse(Int, strip(_text_tex_skip_group!(t)))
+		return (s * (code == 36 ? 0.5 : _TEXT_MATH_FOREIGN_EM / t.k), false)
+	elseif name in ("mathbin", "mathrel", "mathop")
+		w, tall = _text_tex_argument!(t, mode)
+		return (w + s * 2 * _TEXT_MATH_OPERATOR_SPACE_EM, tall)
+	elseif name == "not"
+		return _text_tex_token!(t, mode)
 	elseif name == "begin"
-		_text_tex_skip_group!(t)
-		# Optional column spec of an array: `{c|c}`.
-		_text_tex_peek(t) == '{' && _text_tex_skip_group!(t)
-		rows = _text_tex_rows!(t, text_mode)
-		width = isempty(rows) ? 0.0 : maximum(first, rows)
-		return (width, length(rows) > 1 || any(last, rows))
+		return _text_tex_environment!(t, mode)
 	elseif name == "end"
 		_text_tex_skip_group!(t)
 		return (0.0, false)
-	elseif haskey(_TEXT_TEX_SIZES, name)
-		return (0.0, false)  # handled by the enclosing sequence
-	elseif name in _TEXT_TEX_BIG_OPERATORS
-		return (1.0, true)
-	elseif name in _TEXT_TEX_OPERATORS
-		return (_TEXT_EM_MATH_OPERATOR, false)
-	elseif length(name) == 1
-		return (_TEXT_EM_NORMAL, false)
-	elseif all(isletter, name) && length(name) <= 7 && !isuppercase(name[1])
-		# Greek letters and named symbols (\alpha, \infty, \partial, …).
-		return (_TEXT_EM_SYMBOL, false)
+	elseif haskey(_TEXT_TEX_SIZES, name) || haskey(_TEXT_TEX_STYLES, name)
+		return (0.0, false)  # switches: handled by the enclosing sequence
 	end
-	return (_TEXT_EM_UNKNOWN, false)
+	w = get(t.math.commands, name, nothing)
+	if w !== nothing
+		big = name in _TEXT_TEX_BIG_OPERATORS
+		if big && t.level == 0
+			# Display style: limits above and below (scripts, past any
+			# \limits), integrals drawn large.
+			save = t.pos
+			while true
+				_text_tex_skip_spaces!(t)
+				_text_tex_peek(t) == '\\' || break
+				command = t.pos
+				_text_tex_command!(t) in ("limits", "nolimits", "displaylimits") && continue
+				t.pos = command
+				break
+			end
+			limits = _text_tex_peek(t) in ('_', '^')
+			t.pos = save
+			row = limits ? _TEXT_DISPLAY_LIMITS_ROW_EM : endswith(name, "int") ? _TEXT_DISPLAY_INTEGRAL_ROW_EM : 0.0
+			t.height = max(t.height, row)
+		end
+		return (s * w * (big && t.level == 0 ? _TEXT_DISPLAY_OPERATOR : 1.0), big)
+	end
+	occursin("arrow", lowercase(name)) &&
+		return (s * (startswith(lowercase(name), "long") ? _TEXT_MATH_LONG_ARROW_EM : _TEXT_MATH_ARROW_EM), false)
+	return (s * _TEXT_MATH_UNKNOWN_EM, false)
 end
 
-# A token sequence up to `stop` (consumed) or the end. A size switch scales
-# the rest of the sequence. Returns (width_em, tall).
-function _text_tex_sequence!(t::_TextTeX, text_mode::Bool; stop = nothing)
+# Length (em) of a TeX dimension (`1em`, `0.5ex`, `3pt`, `2mu`); an unknown
+# one counts as 1 em.
+function _text_tex_length_em(spec::AbstractString)
+	m = match(r"^\s*(-?[0-9]*\.?[0-9]+)\s*(em|ex|pt|mu|px)?\s*$", spec)
+	m === nothing && return 1.0
+	value = parse(Float64, m.captures[1])
+	unit = something(m.captures[2], "em")
+	unit == "ex" && return value * _TEXT_MATH_X_HEIGHT
+	unit == "pt" && return value / 10
+	unit == "mu" && return value / 18
+	unit == "px" && return value / 12
+	return value
+end
+
+# A token sequence up to `stop` (consumed) or the end; with `cells`, up to an
+# unconsumed `&`, `\\` or `\end` (an array cell). Size and style switches
+# apply to the rest of the sequence; a token's scripts follow it (both share
+# one column). Returns (width, tall).
+function _text_tex_sequence!(t::_TextTeX, mode::Symbol; stop = nothing, cells::Bool = false)
 	width = 0.0
 	tall = false
 	scale = 1.0
-	while (c = _text_tex_peek(t)) !== nothing
-		if stop !== nothing && c == stop
-			t.pos += 1
-			break
-		end
-		if c == '\\'
-			save = t.pos
-			name = _text_tex_command!(t)
-			if haskey(_TEXT_TEX_SIZES, name)
-				scale = _TEXT_TEX_SIZES[name]
-				continue
+	outer = t.level
+	try
+		while (c = _text_tex_peek(t)) !== nothing
+			if stop !== nothing && c == stop
+				t.pos += 1
+				break
 			end
-			(name == "\\" || name == "end") && (t.pos = save; break)
-			t.pos = save
-		elseif c == '&'
-			break
+			cells && c == '&' && break
+			if c == '\\'
+				save = t.pos
+				name = _text_tex_command!(t)
+				if haskey(_TEXT_TEX_SIZES, name)
+					scale = _TEXT_TEX_SIZES[name]
+					continue
+				elseif haskey(_TEXT_TEX_STYLES, name)
+					t.level = _TEXT_TEX_STYLES[name]
+					continue
+				elseif cells && name in ("\\", "cr", "end")
+					t.pos = save
+					break
+				end
+				t.pos = save
+			end
+			w, h = _text_tex_token!(t, mode)
+			# Scripts of this token: a superscript and a subscript share a column.
+			sup = -1.0
+			sub = -1.0
+			while true
+				_text_tex_skip_spaces!(t)
+				n = _text_tex_peek(t)
+				if n == '^' && sup < 0
+					t.pos += 1
+					sup, sh = _text_tex_argument!(t, mode; level = _text_tex_script_level(t.level))
+					h |= sh
+				elseif n == '_' && sub < 0
+					t.pos += 1
+					sub, sh = _text_tex_argument!(t, mode; level = _text_tex_script_level(t.level))
+					h |= sh
+				elseif n == '\'' && sup < 0
+					# A prime is a superscript.
+					t.pos += 1
+					sup = _TEXT_LEVEL_SCALE[_text_tex_script_level(t.level) + 1] * get(t.math.commands, "prime", 0.41)
+				else
+					break
+				end
+			end
+			(sup >= 0 || sub >= 0) && (w += max(sup, sub) + _text_tex_scale(t) * _TEXT_SCRIPT_EXTRA_EM)
+			width += scale * w
+			tall |= h
 		end
-		w, h = _text_tex_token!(t, text_mode)
-		width += scale * w
-		tall |= h
+	finally
+		t.level = outer
 	end
 	return (width, tall)
 end
 
-# Rows of an environment body up to `\end{…}`: each row is the sum of its
-# `&`-separated cells (1 em gap between cells). Returns [(width_em, tall), …].
-function _text_tex_rows!(t::_TextTeX, text_mode::Bool)
-	rows = Tuple{Float64, Bool}[]
+# An environment after `\begin`: its rows, each the sum of its `&`-separated
+# cells and the column gaps, plus a matrix's delimiters or the brace of
+# `cases`. Returns (width, tall).
+function _text_tex_environment!(t::_TextTeX, mode::Symbol)
+	name = strip(_text_tex_skip_group!(t))
+	name == "array" && _text_tex_skip_group!(t)   # column spec
+	gap = name in ("aligned", "align", "align*", "alignedat", "eqnarray", "split", "gathered") ? 0.0 :
+		_TEXT_ARRAY_COLUMN_GAP_EM
+	rows = _text_tex_rows!(t, mode, gap)
+	width = isempty(rows) ? 0.0 : maximum(first, rows)
+	s = _text_tex_scale(t)
+	name in ("pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix") && (width += s * 2 * _TEXT_DELIMITER_EM)
+	name in ("cases", "rcases") && (width += s * _TEXT_CASES_BRACE_EM)
+	return (width, length(rows) > 1 || any(row -> row[2], rows))
+end
+
+# Rows of an environment body up to `\end{…}` (consumed): each row is the sum
+# of its `&`-separated cells, `gap` em between cells. Returns
+# [(width, tall, height), …] with each row's own `t.height`; `t.height` keeps
+# the tallest of what it held and the rows.
+function _text_tex_rows!(t::_TextTeX, mode::Symbol, gap::Float64 = _TEXT_ARRAY_COLUMN_GAP_EM)
+	rows = Tuple{Float64, Bool, Float64}[]
 	row_width = 0.0
 	row_tall = false
 	cells = 0
+	outer = t.height
+	t.height = 0.0
 	while true
-		w, tall = _text_tex_sequence!(t, text_mode)
-		row_width += w + (cells > 0 ? 1.0 : 0.0)
+		w, tall = _text_tex_sequence!(t, mode; cells = true)
+		row_width += w + (cells > 0 ? _text_tex_scale(t) * gap : 0.0)
 		row_tall |= tall
 		cells += 1
 		c = _text_tex_peek(t)
@@ -361,12 +1485,14 @@ function _text_tex_rows!(t::_TextTeX, text_mode::Bool)
 			t.pos += 1
 			continue
 		end
-		push!(rows, (row_width, row_tall))
+		push!(rows, (row_width, row_tall, t.height))
+		outer = max(outer, t.height)
+		t.height = 0.0
 		row_width, row_tall, cells = 0.0, false, 0
 		c === nothing && break
 		save = t.pos
 		name = _text_tex_command!(t)
-		if name == "\\"
+		if name in ("\\", "cr")
 			continue
 		elseif name == "end"
 			_text_tex_skip_group!(t)
@@ -374,17 +1500,21 @@ function _text_tex_rows!(t::_TextTeX, text_mode::Bool)
 		end
 		t.pos = save + 1  # not a row end: skip the backslash and go on
 	end
+	t.height = outer
 	return rows
 end
 
-# Rows (width_em, height_em) of one `$…$` expression. A top-level array (as
-# `mathtext` writes multi-line labels) gives one row per array row.
-function _text_tex_box(math::AbstractString)
-	t = _TextTeX(collect(math), 1)
+# Rows (width, size scale, tall, height) of one math expression (math em at
+# the base size; height is a row height in em beyond the tall/plain rows, 0 if
+# none). A top-level environment (as `mathtext` writes multi-line labels)
+# gives one row per environment row.
+function _text_tex_box(math::AbstractString, metrics::_TextMathMetrics,
+	text::Union{Nothing, _TextFamilyMetrics}, k::Float64, display::Bool)
+	t = _TextTeX(collect(math), 1, metrics, text, k, display ? 0 : 1)
 	scale = 1.0
-	# Leading size switches and braces around the whole expression.
+	# Leading size and style switches and braces around the whole expression.
 	while true
-		while (c = _text_tex_peek(t)) !== nothing && (c == ' ' || c == '{')
+		while (c = _text_tex_peek(t)) !== nothing && (isspace(c) || c == '{')
 			t.pos += 1
 		end
 		_text_tex_peek(t) == '\\' || break
@@ -393,83 +1523,158 @@ function _text_tex_box(math::AbstractString)
 		if haskey(_TEXT_TEX_SIZES, name)
 			scale = _TEXT_TEX_SIZES[name]
 			continue
+		elseif haskey(_TEXT_TEX_STYLES, name)
+			t.level = _TEXT_TEX_STYLES[name]
+			continue
 		elseif name == "begin"
-			_text_tex_skip_group!(t)
-			_text_tex_peek(t) == '{' && _text_tex_skip_group!(t)
-			rows = _text_tex_rows!(t, false)
+			name_env = strip(_text_tex_skip_group!(t))
+			name_env == "array" && _text_tex_skip_group!(t)
+			rows = _text_tex_rows!(t, :math)
 			# Anything after the environment (rare) extends the last row.
-			rest, rest_tall = _text_tex_sequence!(t, false)
-			isempty(rows) && push!(rows, (0.0, false))
-			rows[end] = (rows[end][1] + rest, rows[end][2] || rest_tall)
-			return [(scale * w, scale * (tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM)) for (w, tall) in rows]
+			t.height = 0.0
+			rest, rest_tall = _text_tex_sequence!(t, :math)
+			isempty(rows) && push!(rows, (0.0, false, 0.0))
+			rows[end] = (rows[end][1] + rest, rows[end][2] || rest_tall, max(rows[end][3], t.height))
+			return [(scale * w, scale, tall, height) for (w, tall, height) in rows]
 		end
 		t.pos = save
 		break
 	end
+	# The sequence applies the leading switches itself.
 	t.pos = 1
-	w, tall = _text_tex_sequence!(t, false)
-	return [(scale * w, scale * (tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM))]
+	t.level = display ? 0 : 1
+	t.height = 0.0
+	w, tall = _text_tex_sequence!(t, :math)
+	return [(w, scale, tall, t.height)]
 end
 
-# Split `s` at unescaped `$` signs into (is_math, segment) pairs.
+# Split `s` at unescaped `$` signs into (is_math, segment, display) triples;
+# `$$…$$` is display math.
 function _text_math_segments(s::AbstractString)
-	segments = Tuple{Bool, String}[]
+	segments = Tuple{Bool, String, Bool}[]
 	buf = IOBuffer()
 	math = false
+	display = false
 	escaped = false
-	for c in s
+	chars = collect(s)
+	k = 1
+	while k <= length(chars)
+		c = chars[k]
 		if c == '$' && !escaped
-			push!(segments, (math, String(take!(buf))))
-			math = !math
-		else
-			print(buf, c)
+			double = k < length(chars) && chars[k + 1] == '$'
+			push!(segments, (math, String(take!(buf)), display))
+			if math
+				math = false
+				display && double && (k += 1)
+				display = false
+			else
+				math = true
+				display = double
+				double && (k += 1)
+			end
+			escaped = false
+			k += 1
+			continue
 		end
+		print(buf, c)
 		escaped = c == '\\' && !escaped
+		k += 1
 	end
-	push!(segments, (math, String(take!(buf))))
-	return [(m, seg) for (m, seg) in segments if !isempty(seg)]
+	push!(segments, (math, String(take!(buf)), display))
+	return [x for x in segments if !isempty(x[2])]
+end
+
+# Mathjax font metrics of the SVG font in effect (`set_default_mathtext!(;
+# font)`); a font that was not measured gets the larger of the two.
+function _text_math_font_metrics()
+	name = try
+		_mathjax_svg_font()
+	catch err
+		err isa ArgumentError || rethrow()
+		""
+	end
+	name == "Latin-Modern" && return _TEXT_MATH_LATIN_MODERN
+	name == "STIX-Web" && return _TEXT_MATH_STIX
+	return _TEXT_MATH_DEFAULT
 end
 
 """
-	_text_extent(text, fontsize) -> (width_px, height_px)
+	_text_inherits_text_font() -> Bool
+
+Whether MathJax draws the text runs of a math label (`\\text{…}`) in the
+label's own font: `set_default_mathtext!(; inherit_text_font)` when set, else
+whether the style in scope sets a text font family (every journal preset and
+`:publication` do; `:default` does not). The page decides the same per figure
+from the style it records (`_MATHJAX_PAGE_EXTENSIONS_JS`).
+"""
+function _text_inherits_text_font()
+	forced = _MATHTEXT_SETTINGS[].inherit_text_font
+	forced === nothing || return forced
+	return !isempty(strip(_active_style().font_family))
+end
+
+"""
+	_text_extent(text, fontsize; family = nothing, bold = false) -> (width_px, height_px)
 
 Estimated size of `text` as plotly.js draws it in an annotation, title or
 legend entry at `fontsize` px, without any frame or padding: plain text with
-HTML markup (`<br>`/newline line breaks, tags stripped, `<sub>`/`<sup>` at
-script size) at 1.3 em per line, and MathJax (`\$…\$`, as [`mathtext`](@ref)
-writes it) with TeX commands, braces and size switches interpreted: a
-top-level `array` gives one row per `\\\\`, `\\frac`/`\\sqrt` rows are taller.
-Estimates err on the large side (see the calibration note above). Never
-throws: unknown commands count as one glyph.
+HTML markup (`<br>`/newline line breaks, tags stripped, `<b>` bold,
+`<sub>`/`<sup>` at script size) at 1.3 em per line, and MathJax (`\$…\$`, as
+[`mathtext`](@ref) writes it) with TeX commands, braces, scripts, fractions
+and size switches interpreted: a top-level environment gives one row per
+`\\\\`. Widths come from advances measured in the renderer for the font family
+`family` (a CSS list; default: the scoped style's, `_text_scope_family`) and
+the MathJax font in effect; with several possible families, the widest. Never
+throws: an unknown character or command counts as a wide glyph.
 """
-function _text_extent(text::AbstractString, fontsize::Real)
+function _text_extent(text::AbstractString, fontsize::Real; family::Union{Nothing, AbstractString} = nothing, bold::Bool = false)
 	fs = (fontsize isa Real && isfinite(fontsize) && fontsize > 0) ? Float64(fontsize) : 12.0
 	s = String(text)
 	isempty(strip(s)) && return (0.0, 0.0)
+	candidates = _text_family_candidates(family === nothing ? _text_scope_family() : family)
 	segments = _text_math_segments(s)
+	inherit = any(first, segments) && _text_inherits_text_font()
+	math = any(first, segments) ? _text_math_font_metrics() : _TEXT_MATH_LATIN_MODERN
+	width = 0.0
+	height = 0.0
+	for m in candidates
+		w, h = _text_extent_in(segments, fs, m, math, inherit, bold)
+		width = max(width, w)
+		height = max(height, h)
+	end
+	return (width, height)
+end
+
+function _text_extent_in(segments, fs::Float64, m::_TextFamilyMetrics, math::_TextMathMetrics, inherit::Bool, bold::Bool)
+	# Math em per px of font size: MathJax matches its x-height to the ex of
+	# the label's family (inherit) or of the page's default font.
+	k = (inherit ? m.ex : _TEXT_FAMILY_TIMES.ex) / _TEXT_MATH_X_HEIGHT
 	# Lines: plain text breaks at <br>/newline; a math segment contributes
 	# its rows (the first continues the current line, further rows add lines).
-	lines = Tuple{Float64, Float64}[(0.0, _TEXT_PLAIN_LINE_EM)]  # (width_em, height_em)
-	for (math, segment) in segments
-		if math
-			rows = _text_tex_box(segment)
-			for (k, (w, h)) in enumerate(rows)
-				k > 1 && push!(lines, (0.0, 0.0))
+	lines = Tuple{Float64, Float64}[(0.0, _TEXT_PLAIN_LINE_EM)]  # (width_px, height_em)
+	for (is_math, segment, display) in segments
+		if is_math
+			rows = _text_tex_box(segment, math, inherit ? m : nothing, k, display)
+			for (index, (w, scale, tall, height)) in enumerate(rows)
+				index > 1 && push!(lines, (0.0, 0.0))
 				lw, lh = lines[end]
-				lines[end] = (lw + w, max(lh, h))
+				row = max(tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM, height)
+				lines[end] = (lw + w * k * fs, max(lh, scale * row))
 			end
 		else
 			parts = split(segment, _TEXT_BR_TAG)
-			for (k, part) in enumerate(parts)
-				k > 1 && push!(lines, (0.0, _TEXT_PLAIN_LINE_EM))
+			for (index, part) in enumerate(parts)
+				index > 1 && push!(lines, (0.0, _TEXT_PLAIN_LINE_EM))
 				lw, lh = lines[end]
-				lines[end] = (lw + _text_plain_em(part), max(lh, _TEXT_PLAIN_LINE_EM))
+				run = _text_plain_run(part, m, bold)
+				lines[end] = (
+					lw + _text_run_width(run) * fs + run.glyphs * _TEXT_GLYPH_ROUNDING_PX,
+					max(lh, _TEXT_PLAIN_LINE_EM),
+				)
 			end
 		end
 	end
-	width = maximum(first, lines)
-	height = sum(last, lines)
-	return (width * fs, height * fs)
+	return (maximum(first, lines), sum(last, lines) * fs)
 end
 
 # ── Baseline depth ──────────────────────────────────────────────────────────
@@ -502,6 +1707,17 @@ const _TEXT_DEPTH_UPRIGHT = Set([
 	"text", "textbf", "textrm", "textsf", "texttt", "textup", "mbox", "hbox", "mathrm", "mathbf",
 	"mathsf", "mathtt", "operatorname", "boldsymbol", "bm", "pmb",
 ])
+# Commands whose argument sets the depth as it is, and constructs drawn one
+# above the other (a fraction's depth, or the base's under \overset).
+const _TEXT_DEPTH_WRAPPERS = Set([
+	"text", "textbf", "textit", "textrm", "textsf", "texttt", "textup", "emph",
+	"mbox", "hbox", "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mathcal",
+	"mathbb", "mathfrak", "mathscr", "boldsymbol", "bm", "operatorname", "mathnormal",
+	"hat", "bar", "vec", "tilde", "dot", "ddot", "check", "breve", "acute", "grave",
+	"widehat", "widetilde", "overline", "underline", "mathring", "pmb", "displaystyle",
+	"textstyle", "underbrace", "overbrace",
+])
+const _TEXT_DEPTH_STACKED = Set(["frac", "dfrac", "tfrac", "cfrac", "binom", "dbinom", "tbinom", "overset", "underset", "stackrel"])
 const _TEXT_DEPTH_SWITCHES = Dict("rm" => true, "bf" => true, "sf" => true, "tt" => true, "it" => false)
 # Box bottom to baseline, px, beyond the depth: half of `_TEXT_ANNOTATION_FRAME`
 # plus the font descent (0.2 em) for plain text, 0.25 px for MathJax.
@@ -562,8 +1778,8 @@ function _text_tex_depth_command!(scan::_TextDepthScan, upright::Bool)
 	name in _TEXT_DEPTH_DELIMITER_COMMANDS && return _TEXT_DEPTH_DELIMITER_EM
 	name in _TEXT_DEPTH_UPRIGHT && return _text_tex_depth_argument!(scan, true)
 	name in ("textit", "mathit", "emph") && return _text_tex_depth_argument!(scan, false)
-	name in _TEXT_TEX_WRAPPERS && return _text_tex_depth_argument!(scan, upright)
-	if name in _TEXT_TEX_STACKED
+	name in _TEXT_DEPTH_WRAPPERS && return _text_tex_depth_argument!(scan, upright)
+	if name in _TEXT_DEPTH_STACKED
 		_text_tex_depth_argument!(scan, upright)
 		base = _text_tex_depth_argument!(scan, upright)
 		return name in ("overset", "stackrel") ? base : _TEXT_DEPTH_FRACTION_EM
@@ -659,7 +1875,7 @@ function _text_baseline_depth(text::AbstractString, fontsize::Real)
 	end
 	math = segments[index][2]
 	(occursin("\\begin", math) || occursin("\\\\", math)) && return nothing
-	scan = _TextDepthScan(_TextTeX(collect(math), 1), _MATHTEXT_SETTINGS[].inherit_text_font, false)
+	scan = _TextDepthScan(_TextTeX(collect(math), 1), _text_inherits_text_font(), false)
 	depth = _TEXT_MATH_BASELINE_PX + fs * _text_tex_depth_sequence!(scan, false)
 	return scan.text ? max(depth, _TEXT_INHERITED_TEXT_DEPTH_PX) : depth
 end
@@ -942,12 +2158,38 @@ function _legend_entry_font_size(p::Plot, box::AbstractDict)
 	return Float64(_PLOTLY_DEFAULT_FONT_SIZE)
 end
 
+# Font family (CSS list) of the entries of legend box `box`: the box's font,
+# the template's legend font, the layout font, the template font, else the
+# scoped style's family.
+function _legend_entry_font_family(p::Plot, box::AbstractDict)
+	for value in (
+		get(_symbol_dict(get(box, :font, nothing)), :family, nothing),
+		_legend_template_layout_value(p, (:legend, :font, :family)),
+		get(_symbol_dict(get(p.layout.fields, :font, nothing)), :family, nothing),
+		_legend_template_layout_value(p, (:font, :family)),
+	)
+		value isa AbstractString && !isempty(strip(value)) && return String(value)
+	end
+	return _text_scope_family()
+end
+
+# Font size (px) of the title of legend box `box`: its own, else plotly.js's
+# default, the entry font enlarged by 1.2 and rounded (legend/defaults.js
+# `Lib.bigFont`).
+function _legend_title_size(p::Plot, box::AbstractDict)
+	title = _symbol_dict(get(box, :title, nothing))
+	own = _legend_real(get(_symbol_dict(get(title, :font, nothing)), :size, nothing))
+	(own === nothing || own <= 0) || return own
+	return Float64(round(1.2 * _legend_entry_font_size(p, box)))
+end
+
 # Estimated px width of each entry of `indices` as plotly.js lays it out
 # (legend/draw.js `getLegendItemWidth`): textGap (indentation + itemwidth + 2
 # itemGap) plus the trace's own `legendwidth`, else the box's `entrywidth` in
 # pixels, else the label.
 function _legend_entry_widths(p::Plot, box::AbstractDict, indices::Vector{Int})
 	fontsize = _legend_entry_font_size(p, box)
+	family = _legend_entry_font_family(p, box)
 	itemwidth = something(_legend_real(get(box, :itemwidth, nothing)), Float64(_LEGEND_DEFAULT_ITEMWIDTH))
 	indentation = something(_legend_real(get(box, :indentation, nothing)), 0.0)
 	textgap = indentation + itemwidth + 2 * _LEGEND_ITEM_GAP
@@ -959,7 +2201,7 @@ function _legend_entry_widths(p::Plot, box::AbstractDict, indices::Vector{Int})
 		(own !== nothing && own > 0) && return textgap + own
 		(entrywidth !== nothing && entrywidth > 0) && return textgap + entrywidth
 		name = get(fields, :name, "")
-		return textgap + _text_extent(name isa AbstractString ? name : string(name), fontsize)[1]
+		return textgap + _text_extent(name isa AbstractString ? name : string(name), fontsize; family = family)[1]
 	end
 end
 
@@ -1261,7 +2503,12 @@ function _legend_relayout_columns!(p::Plot, legend_id::AbstractString, opts; spa
 		fill, n = layout
 		count = fill == 'r' ? length(p.data) : n
 		_legend_apply_columns!(p, legend_id, count; fill = fill, span = span, who = "")
-	elseif cell && _legend_box_orientation(p, legend_id) == "h"
+	elseif cell && _legend_box_orientation(p, legend_id) == "h" &&
+			!(opts.orientation === nothing && legend_id in something(_legend_cell_auto_ids(p), ()))
+		# A row the best-position rule laid out (`:outside_bottom`, which it
+		# picks only when the row fits the cell) is not wrapped into column
+		# groups: they would stay when the rule moves the legend back inside
+		# as a column (grouped spacing between its entries).
 		_legend_apply_columns!(p, legend_id, length(p.data); fill = 'r', span = span, who = "")
 	end
 	return nothing
@@ -1352,7 +2599,19 @@ const _LEGEND_POLAR_RADIAL_LABEL_PX = 10.0
 # the box to its own width); the height from `_legend_box_height`. `nothing`
 # when the legend lists nothing or is hidden. `before > 0` counts only the
 # entries of traces before index `before` (the legend before an append).
-function _legend_box_size(p::Plot, legend_id::AbstractString; before::Integer = 0)
+# `orientation` ("v"/"h") sizes the box as it would be drawn with that
+# orientation instead of its own. `wrap` (px): the width at which plotly.js
+# wraps a horizontal legend (its `_maxWidth`, the paper's plot width for a
+# legend anchored inside the paper); default `_legend_plot_area_width`, the
+# layout margins' estimate (the room plan passes its own, with the axes'
+# automargins: `_lt_box_size`).
+function _legend_box_size(
+	p::Plot,
+	legend_id::AbstractString;
+	before::Integer = 0,
+	orientation::Union{Nothing, AbstractString} = nothing,
+	wrap::Union{Nothing, Real} = nothing,
+)
 	box = _symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing))
 	get(box, :visible, true) === false && return nothing
 	indices = _legend_entry_indices(p, legend_id)
@@ -1363,8 +2622,9 @@ function _legend_box_size(p::Plot, legend_id::AbstractString; before::Integer = 
 	title = _symbol_dict(get(box, :title, nothing))
 	title_text = get(title, :text, "")
 	title_px = title_text isa AbstractString && !isempty(strip(title_text)) ?
-		_text_extent(title_text, _legend_entry_font_size(p, box))[1] + 2 * _LEGEND_ITEM_GAP : 0.0
-	orientation = get(box, :orientation, "v")
+		_text_extent(title_text, _legend_title_size(p, box); family = _legend_entry_font_family(p, box))[1] +
+		2 * _LEGEND_ITEM_GAP : 0.0
+	orientation === nothing && (orientation = something(get(box, :orientation, nothing), "v"))
 	title_left = title_px > 0 &&
 		occursin("left", string(get(title, :side, orientation == "h" ? "left" : "top")))
 	width = if _legend_column_layout(p, legend_id) !== nothing
@@ -1374,12 +2634,38 @@ function _legend_box_size(p::Plot, legend_id::AbstractString; before::Integer = 
 		end
 		_legend_columns_width(widths, columns, frame, 0.0)
 	elseif orientation == "h"
-		sum(widths) + _LEGEND_ITEM_GAP * length(widths) + 2 * frame
+		per_row, _ = _legend_wrap(widths, frame, something(wrap, _legend_plot_area_width(p)))
+		per_row >= length(widths) ? sum(widths) + _LEGEND_ITEM_GAP * length(widths) + 2 * frame :
+			per_row * (maximum(widths) + _LEGEND_ITEM_GAP) + 2 * frame
 	else
 		maximum(widths) + _LEGEND_ITEM_GAP + 2 * frame
 	end
 	width = title_left ? width + title_px : max(width, title_px + 2 * frame)
-	return (width, _legend_box_height(p, legend_id, indices))
+	return (width, _legend_box_height(p, legend_id, indices; orientation = orientation, wrap = wrap))
+end
+
+# Entries per row and rows of a horizontal legend with entry widths `widths`
+# (px) and border `frame` wrapped at `max_width` px, as plotly.js 2.35.2 lays
+# it out (legend/draw.js computeLegendDimensions, no `entrywidth`): one row
+# of their own widths when they fit, else every entry takes the widest one's
+# width plus the item gap, a new row starting at the entry that would reach
+# `max_width`.
+function _legend_wrap(widths::AbstractVector{<:Real}, frame::Real, max_width::Real)
+	n = length(widths)
+	n == 0 && return (0, 0)
+	gap = _LEGEND_ITEM_GAP
+	sum(widths) + 2 * frame + (n - 1) * gap < max_width && return (n, 1)
+	step = maximum(widths) + gap
+	per_row = 0
+	x = 0.0
+	while per_row < n
+		# plotly: a new row when `step + frame + x - gap >= _maxWidth` (the
+		# first entry of a row always stays).
+		per_row > 0 && step + frame + x - gap >= max_width && break
+		x += step
+		per_row += 1
+	end
+	return (per_row, cld(n, per_row))
 end
 
 # Slack (px) added to the estimated (width, height) of a cell legend before
@@ -1412,13 +2698,20 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 	w = width_px * (xdom[2] - xdom[1])
 	h = height_px * (ydom[2] - ydom[1])
 	(w > 0 && h > 0) || return nothing
-	legend_size = _legend_box_size(p, legend_id; before = before)
+	# Scored as the vertical box an inside position draws, whatever the
+	# orientation an outside position gave it (`:outside_bottom` is one row):
+	# a row would make an inside corner look free for a box drawn taller there.
+	# A column legend (`ncols`) keeps its own layout.
+	orientation = _legend_column_layout(p, legend_id) === nothing ? "v" : nothing
+	legend_size = _legend_box_size(p, legend_id; before = before, orientation = orientation)
 	legend_size === nothing && return nothing
 	legend_size = (legend_size[1] + _LEGEND_CELL_SLACK_PX[1], legend_size[2] + _LEGEND_CELL_SLACK_PX[2])
 	first_trace = p.data[indices[1]]
 	if string(get(first_trace.fields, :type, "scatter")) in ("scatterpolar", "scatterpolargl")
 		subplot = Symbol(string(get(first_trace.fields, :subplot, "polar")))
-		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size)
+		# vm-06: beside the cell when no corner is clear of the data and the
+		# angular tick labels
+		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size; outside = :outside_right)
 	end
 	# Cartesian cell: the host's traces are scored as data; the traces of an
 	# inset the cell hosts (listed in the host's legend, `_legend_inset_host`)
@@ -1448,14 +2741,34 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 		)
 		rect in obstacles || push!(obstacles, rect)
 	end
-	# With every position covering data the legend goes below its cell, when
-	# its entries side by side fit the cell's width (a wider one would run
-	# over its neighbours: it keeps the position covering the least).
-	outside = _legend_row_width(p, legend_id, before) <= w ? :outside_bottom : nothing
+	# With every inside position covering data (or a box larger than the plot
+	# area) the legend goes outside its cell, where the room provider
+	# reserves its room (taken from the cell): below it as one row when its
+	# entries side by side fit the plot area's width; else right of it as a
+	# column when that column leaves the plot area at least half its width;
+	# else below it as a column (`_legend_rule_placement`; plotly.js wraps a
+	# horizontal legend at the width of the whole grid, so a wider row would
+	# run under its neighbours).
+	outside = _legend_row_width(p, legend_id, before) <= w ||
+		legend_size[1] + _ROOM_GAP > w / 2 ? :outside_bottom : :outside_right
+	(legend_size[1] > w || legend_size[2] > h) && return outside
 	return _scat_best_legend_position(
 		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size;
 		obstacles = obstacles, outside = outside,
 	)
+end
+
+# Placement of cell legend `legend_id` at `position` of the best-position
+# rule for the plot area `xdom` x `ydom` (paper): `_legend_placement`, with a
+# column below the cell (orientation "v") when the legend's one row is wider
+# than the plot area (`_legend_best_cell_position`). `before` as there.
+function _legend_rule_placement(p::Plot, legend_id::AbstractString, position::Symbol, xdom, ydom, inset;
+		before::Integer = 0)
+	placement = _legend_placement(position, xdom, ydom, inset; figure = false)
+	position === :outside_bottom || return placement
+	width_px = _scat_legend_figure_px(p.layout)[1] * (xdom[2] - xdom[1])
+	_legend_row_width(p, legend_id, before) <= width_px || (placement[:orientation] = "v")
+	return placement
 end
 
 # Width (px) of legend `legend_id` laid out as one row (the `:outside_bottom`
@@ -1486,10 +2799,13 @@ end
 # Polar cell of `w` x `h` px (subplot layout key `subplot`): the circle is
 # centred in the cell with radius min(w, h) / 2 (plotly.js polar, full
 # sector); `r` maps linearly from the radial range (explicit, else from
-# min(0, r) to max(r)), `theta` in degrees from `angularaxis.rotation` in its
-# `direction`. `nothing` for sectors, holes, non-linear or categorical axes,
-# other trace types, or non-numeric coordinates.
-function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float64, h::Float64, legend_size)
+# min(0, r) to max(r)), `theta` (in its trace's `thetaunit`) from
+# `angularaxis.rotation` in its `direction`. `nothing` for sectors, holes,
+# non-linear or categorical axes, other trace types, or non-numeric
+# coordinates. With `outside`, that position when every corner covers data or
+# a tick label.
+function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float64, h::Float64, legend_size;
+	outside::Union{Nothing, Symbol} = nothing)
 	polar = _symbol_dict(get(p.layout.fields, subplot, nothing))
 	radial = _symbol_dict(get(polar, :radialaxis, nothing))
 	angular = _symbol_dict(get(polar, :angularaxis, nothing))
@@ -1499,7 +2815,8 @@ function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float
 			abs(sector[2] - sector[1]) >= 360) || return nothing
 	end
 	something(_legend_real(get(polar, :hole, nothing)), 0.0) == 0 || return nothing
-	get(angular, :thetaunit, "degrees") == "degrees" || return nothing
+	# `angularaxis.thetaunit` only formats the tick labels (vm-06: "1/4 π"
+	# under "radians"); their positions stay in degrees.
 	get(angular, :type, "-") in ("-", "linear") || return nothing
 	get(radial, :type, "-") in ("-", "linear") || return nothing
 	rotation = something(_legend_real(get(angular, :rotation, nothing)), 0.0)
@@ -1518,6 +2835,12 @@ function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float
 		r = _scat_legend_coords(get(fields, :r, nothing), false)
 		theta = _scat_legend_coords(get(fields, :theta, nothing), false)
 		(r === nothing || theta === nothing) && return nothing
+		# the trace's `thetaunit` is the unit of its theta values (plotly.js:
+		# degrees, radians or gradians)
+		unit = string(get(fields, :thetaunit, "degrees"))
+		degrees_per_unit = unit == "degrees" ? 1.0 : unit == "radians" ? 180 / pi :
+			unit == "gradians" ? 0.9 : return nothing
+		degrees_per_unit == 1 || (theta = theta .* degrees_per_unit)
 		n = min(length(r), length(theta))
 		n == 0 && continue
 		mode = string(get(fields, :mode, "lines"))
@@ -1608,7 +2931,11 @@ function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float
 			(data[k], labels[k], depth[k])
 	end
 	# `argmin` returns the first minimum: ties keep the candidate order.
-	return _SCAT_LEGEND_POSITIONS[argmin(ranks)]
+	best = argmin(ranks)
+	# vm-06: no corner clear of the data and the tick labels; `outside` given,
+	# the legend goes there instead of over them.
+	outside !== nothing && (data[best] > 0 || labels[best] > 0) && return outside
+	return _SCAT_LEGEND_POSITIONS[best]
 end
 
 # Angles (degrees) of the angular tick labels of polar `angularaxis` settings
@@ -1707,6 +3034,10 @@ function _text_figure_title!(fig, text, align::Symbol, fontsize::Float64, bold::
 		updates[:title_pad_r] = _text_number(align === :right ? -dx : 0.0)
 		fontsize > 0 && (updates[:title_font_size] = _text_number(fontsize))
 	end
+	# The pad the room providers wrote for the last title (`_lt_title_pin`)
+	# is not this one's: its record goes.
+	meta = _text_meta_without_title_shift(_cmn_plot(fig).layout)
+	meta === nothing || (updates[:meta] = meta)
 	relayout!(fig; updates...)
 	# A legend already drawn above the axes stays clear of the new title, and
 	# a figure legend there is re-stacked for the new title band.
@@ -1850,10 +3181,13 @@ const _TEXT_ANNOTATION_FRAME = 4.0
 # 16) + 3 px - one per entry for a vertical legend, the longest column for a
 # column legend, rows of the plot-area width for a plain horizontal legend -,
 # a title on top, and the frame + itemGap padding. 0 when it lists nothing.
+# `orientation` and `wrap` as for `_legend_box_size`.
 function _legend_box_height(
 	p::Plot,
 	legend_id::AbstractString,
-	indices::Vector{Int} = _legend_entry_indices(p, legend_id),
+	indices::Vector{Int} = _legend_entry_indices(p, legend_id);
+	orientation::Union{Nothing, AbstractString} = nothing,
+	wrap::Union{Nothing, Real} = nothing,
 )
 	box = _symbol_dict(get(p.layout.fields, Symbol(legend_id), nothing))
 	get(box, :visible, true) === false && return 0.0
@@ -1863,7 +3197,7 @@ function _legend_box_height(
 		name = get(p.data[index].fields, :name, "")
 		max(_text_extent(name isa AbstractString ? name : string(name), fontsize)[2], 16.0) + 3
 	end
-	orientation = get(box, :orientation, "v")
+	orientation === nothing && (orientation = something(get(box, :orientation, nothing), "v"))
 	order = get(box, :traceorder, "")
 	body = if orientation != "h"
 		sum(heights)
@@ -1877,7 +3211,8 @@ function _legend_box_height(
 		maximum(values(columns))
 	else
 		widths = _legend_entry_widths(p, box, indices)
-		rows = ceil(Int, (sum(widths) + _LEGEND_ITEM_GAP * length(widths)) / _legend_plot_area_width(p))
+		frame_px = something(_legend_real(get(box, :borderwidth, nothing)), 0.0)
+		_, rows = _legend_wrap(widths, frame_px, something(wrap, _legend_plot_area_width(p)))
 		max(rows, 1) * maximum(heights)
 	end
 	frame = something(_legend_real(get(box, :borderwidth, nothing)), 0.0)
@@ -1885,14 +3220,28 @@ function _legend_box_height(
 	title_text = get(title, :text, "")
 	if title_text isa AbstractString && !isempty(strip(title_text))
 		side = string(get(title, :side, orientation == "h" ? "left" : "top"))
-		title_size = something(_legend_real(get(_symbol_dict(get(title, :font, nothing)), :size, nothing)), fontsize)
-		h = _text_extent(title_text, title_size)[2]
+		# plotly.js draws a title without a size of its own 1.2 times the
+		# entries' size (`_legend_title_size`).
+		h = _text_extent(title_text, _legend_title_size(p, box))[2]
 		body = occursin("top", side) ? body + h : max(body, h)
 	end
 	return body + 2 * (frame + _LEGEND_ITEM_GAP)
 end
 
 # The figure title of `p` as a Dict when it has text, else `nothing`.
+# A copy of `layout.meta` without the `plotlysupply.titleshift` record of the
+# room providers (`_lt_title_pin`); `nothing` when it has none.
+function _text_meta_without_title_shift(layout)
+	meta = get(layout.fields, :meta, nothing)
+	own = _style_meta_get(meta, _STYLE_META_KEY)
+	_style_meta_get(own, _LT_TITLE_SHIFT_META_KEY) === nothing && return nothing
+	fields = _symbol_dict(meta)
+	own = _symbol_dict(own)
+	delete!(own, _LT_TITLE_SHIFT_META_KEY)
+	isempty(own) ? delete!(fields, _STYLE_META_KEY) : (fields[_STYLE_META_KEY] = own)
+	return fields
+end
+
 function _text_title_dict(p::Plot)
 	title = get(p.layout.fields, :title, nothing)
 	d = title isa AbstractString ? Dict{Symbol, Any}(:text => String(title)) : _symbol_dict(title)
@@ -2221,9 +3570,27 @@ function _text_write_panel_labels!(fig, targets, texts, format, position, outsid
 			),
 		))
 	end
-	for (name, annotation) in items
-		_upsert_named!(fig, :annotations, name, [annotation]; who = "panel_labels!")
+	isempty(items) && return nothing
+	# One write for all labels (perf-04: an `_upsert_named!` per label
+	# relayouted the whole annotation list once per cell, quadratic in the
+	# cells). The result is the one of those upserts in turn: the other
+	# annotations in their order, then the labels in cell order.
+	existing = get(_cmn_layout(fig).fields, :annotations, nothing)
+	(existing === nothing || existing isa AbstractVector) || throw(ArgumentError(
+		"panel_labels!: layout.annotations must be a vector; got $(typeof(existing)).",
+	))
+	names = Set{String}(name for (name, _) in items)
+	kept = Any[]
+	if existing !== nothing
+		for item in existing
+			item_name = _cmn_item_name(item)
+			# `_cmn_name_matches`: the name itself or one of its ":k" parts.
+			item_name isa AbstractString && (item_name in names ||
+				any(name -> _cmn_name_matches(item_name, name), names)) && continue
+			push!(kept, item)
+		end
 	end
+	relayout!(_cmn_relayout_target(fig); annotations = vcat(kept, Any[annotation for (_, annotation) in items]))
 	# D12 stacking and room, as for panel titles (room_providers.jl).
 	return nothing
 end

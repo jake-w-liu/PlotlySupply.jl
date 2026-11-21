@@ -1255,11 +1255,10 @@ function _fin_bar_width(layout::Layout, item::_FinBar, Hp::Float64; len_px = not
 		if key !== nothing
 			# A math title drawn beside the bar as an annotation.
 			annotation = _fin_right_title_annotation(layout, key)
-			annotation === nothing ||
-				(width += _FIN_MATH_TITLE_EM * _fin_mapping_font_size(annotation, :font, font) + 4)
+			annotation === nothing || (width += _fin_math_title_depth(annotation, font) + 4)
 			# One drawn above or below it, from the bar's left edge.
-			for end_side in (":top", ":bottom")
-				above = _fin_right_title_annotation(layout, key; side = end_side)
+			for end_side in (:top, :bottom)
+				above = _fin_title_annotation(layout, key, end_side)
 				above === nothing && continue
 				math = _cmn_mapping_get(above, :text)
 				math isa AbstractString || continue
@@ -1280,17 +1279,37 @@ const _FIN_BAR_OFFSET_CHARS = 4
 # 13.5, 16, 18 and 19 px wide.
 const _FIN_MATH_TITLE_EM = 1.6
 
-# The right-side math title annotation of the bar keyed `key` (coloraxis id
+# Px a math colorbar title annotation takes across its lines (the width of a
+# -90 deg title, the height of an upright one), from the anchor side of its
+# box to the far side of the glyphs: its lines and MathJax rows measured by
+# `_text_extent` (a fraction or a second line, tm-cbar-math-title-clip: a
+# 1.6 em guess cut them at the figure edge) times `_FIN_MATH_TITLE_BOX`,
+# never less than the `_FIN_MATH_TITLE_EM` measured for one row.
+function _fin_math_title_depth(annotation, font::Float64)
+	size = _fin_mapping_font_size(annotation, :font, font)
+	text = _cmn_mapping_get(annotation, :text)
+	depth = text isa AbstractString ? _FIN_MATH_TITLE_BOX * _text_extent(text, size)[2] : 0.0
+	return max(depth, _FIN_MATH_TITLE_EM * size)
+end
+
+# plotly.js 2.35.2 centres the glyphs of a math annotation in the box of its
+# MathJax svg plus the frame: rendered -90 deg colorbar titles (one row, a
+# fraction, two lines; 12 px :default and :ieee) reached 1.09-1.19 x their
+# `_text_extent` past the annotation's anchor.
+const _FIN_MATH_TITLE_BOX = 1.2
+
+# The math title annotation on `side` of the bar keyed `key` (coloraxis id
 # or plot-area key, see `_cbar_title_owner`), or `nothing`.
-function _fin_right_title_annotation(layout::Layout, key::AbstractString; side::AbstractString = ":right")
+function _fin_title_annotation(layout::Layout, key::AbstractString, side::Symbol)
 	annotations = get(layout.fields, :annotations, nothing)
 	annotations isa AbstractVector || return nothing
-	name = _cbar_title_owner(key) * side
+	name = _cbar_title_owner(key) * ":" * String(side)
 	for item in annotations
 		_cmn_item_name(item) == name && return item
 	end
 	return nothing
 end
+_fin_right_title_annotation(layout::Layout, key::AbstractString) = _fin_title_annotation(layout, key, :right)
 
 # The insets of a figure as `(row, col, xkey, ykey, xref, yref, xdomain,
 # ydomain)`: the SubplotFigure's records, or, for its plot alone (an export
@@ -4321,6 +4340,22 @@ function _fin_hbar_above(plan, item::_FinBar)
 	return _FIN_MATH_TITLE_H * plan.font + 4
 end
 
+# Px a vertical bar's math title (`title_side = :top`/`:bottom`: an annotation
+# `yshift` px beyond the end of the bar, which spans its plot area) reaches
+# past the `side` edge of the area beyond the axis' own labels there (`own`
+# px; the title is beside them), 0 without one. tm-cbar-math-title-clip: no
+# room was kept, and under a 4 px :ieee margin the title was drawn outside the
+# figure.
+function _room_vbar_title_px(plan, item::_FinBar, side::Symbol, own::Float64)
+	key = item.coloraxis !== nothing ? item.coloraxis : item.own === nothing ? nothing : item.own.key
+	key === nothing && return 0.0
+	annotation = _fin_title_annotation(plan.layout, key, side)
+	annotation === nothing && return 0.0
+	shift = _cmn_mapping_get(annotation, :yshift, 0)
+	shift = _fin_isfinite_real(shift) ? abs(Float64(shift)) : 0.0
+	return max(0.0, shift + _fin_math_title_depth(annotation, plan.font) - _room_label_px(own))
+end
+
 # Depth (px) of a horizontal colorbar: bar, outside ticks, one line of tick
 # labels below it, and a title above or below it (plain, or a math title
 # drawn as an annotation).
@@ -4498,6 +4533,7 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 				if side === :right
 					len = max(_room_bar_len(item.bar, span, span), _room_min_bar_len(plan.font, item.bar, span * plan.Hp))
 					_room_request_vbar_title!(plan, item, (area_key,), key, (span - len) / 2 * plan.Hp)
+					_room_request_vbar_title_below!(plan, item, (area_key,), key, (span - len) / 2 * plan.Hp)
 				end
 			end
 		end
@@ -4523,10 +4559,14 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 		end
 		if entry.side === :right
 			top = maximum(plan.areas[k].current[2][2] for k in entry.areas)
-			extent = top - minimum(plan.areas[k].current[2][1] for k in entry.areas)
+			bottom = minimum(plan.areas[k].current[2][1] for k in entry.areas)
+			extent = top - bottom
 			len = max(entry.ratio * extent, _room_min_bar_len(plan.font, item.bar, extent * plan.Hp))
 			_room_request_vbar_title!(plan, item,
 				[k for k in entry.areas if abs(plan.areas[k].current[2][2] - top) <= 1e-9], key,
+				(extent - len) / 2 * plan.Hp)
+			_room_request_vbar_title_below!(plan, item,
+				[k for k in entry.areas if abs(plan.areas[k].current[2][1] - bottom) <= 1e-9], key,
 				(extent - len) / 2 * plan.Hp)
 		end
 	end
@@ -4542,6 +4582,18 @@ function _fin_vbar_title_above(plan, item::_FinBar)
 	tick = _fin_mapping_font_size(item.bar, :tickfont, plan.font)
 	clear = 2 + max(0.0, 0.5 * _CBAR_LINE_EM * tick - _cbar_real(item.bar, :ypad, 10.0))
 	return clear + _FIN_MATH_TITLE_H * plan.font
+end
+
+# The same below the bar (`title_side = :bottom`), on the bottom areas `areas`
+# (tm-cbar-math-title-clip): what the title reaches below their bottom edge
+# beyond the axis' own labels there (`_room_vbar_title_px`), less the `below`
+# px the centred bar ends above that edge, in whole px.
+function _room_request_vbar_title_below!(plan::_RoomPlan, item::_FinBar, areas, key::AbstractString, below::Float64)
+	for k in areas
+		px = ceil(_room_vbar_title_px(plan, item, :bottom, plan.areas[k].own[:bottom]) - max(below, 0.0) - 1e-6)
+		px > 0 && _request_room!(plan, k, :bottom, px; owner = :colorbar, key = key * _ROOM_VBAR_TITLE, order = 90)
+	end
+	return nothing
 end
 
 # Room above the top areas `areas` of a vertical bar for its math title
@@ -4964,7 +5016,7 @@ end
 
 # Right margin (px) that fits every right-side math colorbar title, or
 # `nothing` when there is none. The title is a -90 deg annotation `xshift` px
-# right of its paper `x`, `_FIN_MATH_TITLE_EM` font sizes wide.
+# right of its paper `x`, `_fin_math_title_depth` px wide.
 function _fin_title_margin(layout::Layout, annotations, W::Float64, margins)
 	(annotations isa AbstractVector && !isempty(annotations)) || return nothing
 	font = _fin_font_size(layout)
@@ -4977,8 +5029,7 @@ function _fin_title_margin(layout::Layout, annotations, W::Float64, margins)
 		x = _cmn_mapping_get(item, :x)
 		shift = _cmn_mapping_get(item, :xshift, 0)
 		(_fin_isfinite_real(x) && _fin_isfinite_real(shift)) || continue
-		size = _fin_mapping_font_size(item, :font, font)
-		edge = (Float64(x) - 1) * Wp + Float64(shift) + _FIN_MATH_TITLE_EM * size + 4
+		edge = (Float64(x) - 1) * Wp + Float64(shift) + _fin_math_title_depth(item, font) + 4
 		needed = max(something(needed, 0.0), ceil(edge))
 	end
 	(needed === nothing || needed <= 0) && return nothing

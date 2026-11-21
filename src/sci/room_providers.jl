@@ -396,12 +396,30 @@ function _lt_decorations(plan)
 		expected = _lt_expected_offset(plan, out, key, :top, _LT_ORDER_LINE)
 		lift[edge] = max(get(lift, edge, 0.0), _lt_line_lift(plan, items, key, entries, expected))
 	end
+	# The lines of a row share one height too (topo_response, optical_bars:
+	# a cell with a legend above its plot area had its title and label
+	# higher than its neighbour's): each line rises to the highest offset of
+	# its row and its room grows by as much (within the row's room, unless
+	# the raised line is the taller one).
+	placed = Dict{Symbol, Tuple{Vector{Tuple{String, Bool, Float64}}, Float64, Float64}}()
+	highest = Dict{Float64, Float64}()   # top edge => highest line offset there
 	for (key, list) in lines
 		edge = round(plan.areas[key].current[2][2]; digits = 6)
 		entries = [(name, left, raise + lift[edge]) for (name, left, raise) in raised[key]]
 		px = maximum(entry[3] + raise for (entry, (_, _, raise)) in zip(list, entries))
 		px > 0 || continue
 		expected = _lt_expected_offset(plan, out, key, :top, _LT_ORDER_LINE)
+		placed[key] = (entries, px, expected)
+		highest[edge] = max(get(highest, edge, -Inf), expected)
+	end
+	for key in keys(lines)
+		haskey(placed, key) || continue
+		entries, px, expected = placed[key]
+		rise = highest[round(plan.areas[key].current[2][2]; digits = 6)] - expected
+		if rise > 1e-9
+			entries = [(name, left, raise + rise) for (name, left, raise) in entries]
+			px += rise
+		end
 		top = plan.areas[key].current[2][2]
 		anchored = any(entries) do (name, _, raise)
 			item = _lt_find_annotation(items, name)
@@ -515,9 +533,12 @@ function _lt_legend_assignment(plan)
 	return (order, ids)
 end
 
-# `_legend_box_size` of legend `id` of the plan's figure, once per plan.
+# `_legend_box_size` of legend `id` of the plan's figure, once per plan; a
+# horizontal legend wraps at the plan's plot width, which counts the axes'
+# automargins (vm-01: estimated at the layout margins, a two-row legend was
+# given one row of room and plotly.js pushed the margin while drawing).
 _lt_box_size(plan, id::AbstractString) =
-	get!(() -> _legend_box_size(plan.p, id), _lt_plan_memo(plan), (:box_size, String(id)))
+	get!(() -> _legend_box_size(plan.p, id; wrap = plan.Wp), _lt_plan_memo(plan), (:box_size, String(id)))
 
 # Cell legends (per-subplot legends; a single figure's legend counts as the
 # legend of its plot area) and the figure legends of a grid.
@@ -618,8 +639,8 @@ end
 # The band (px) a container-referenced figure title takes at the top of the
 # figure (`_text_title_band` plus a `pad.b` of its own); the margin must hold
 # it on top of what is stacked above the top row, which plotly does not add
-# up for annotations. Requested only when something of ours sits at the top
-# edge of the figure.
+# up for annotations. Requested when something of ours sits at the top edge
+# of the figure, and for a pinned title of several lines or with math.
 function _lt_title_decoration!(out, plan)
 	p = plan.p
 	d = _text_title_dict(p)
@@ -640,14 +661,30 @@ function _lt_title_decoration!(out, plan)
 	# So does the math title of a colorbar (threed-f02; requested earlier).
 	at_top = at_top || any(r -> r.side === :top && r.area !== :figure &&
 		plan.areas[r.area].current[2][2] >= highest - _LT_EDGE_TOL, plan.requests)
-	at_top || return out
+	# A pinned title of several lines or with math is always given its band
+	# (tm-title-top-clip): plotly.js must not push the margin for it, the
+	# first line is placed for that (`_lt_title_pin`).
+	pin = _lt_title_pin(plan, d)
+	at_top || (pin !== nothing && (pin.shift > 0 || pin.recorded)) || return out
 	pad = _symbol_dict(get(d, :pad, nothing))
 	pad_b = something(_legend_real(get(pad, :b, nothing)), 0.0)
-	# A title at plotly's automatic height is pinned with the default pad.t
-	# (`_lt_pin_title!`).
-	y = get(d, :y, "auto")
-	pin = (y === nothing || y == "auto") && !haskey(pad, :t) ? Float64(_TEXT_TITLE_TOP_PAD) : 0.0
-	band = _text_title_band(p) + pad_b + pin
+	band = if pin === nothing
+		_text_title_band(p) + pad_b
+	else
+		# The text starts about where a one-line title's does (`pin.pad` less
+		# the shift); plotly.js measures the band from `pin.pad`, so the
+		# margin (the band, `_ROOM_GAP` and, for a positive margin,
+		# `_FIN_AUTOMARGIN_EXTRA`, `_room_grow_margins`) must hold the shift
+		# too, or plotly.js pushes it while drawing. A MathJax title keeps
+		# the whole shift: plotly.js measures its svg box, taller than the
+		# estimate (measured: 33.5 px against 27.7 px for a two-line math
+		# title under :ieee, which the gap and extra alone did not cover).
+		math = occursin(r"\$[^$]*\$", string(get(d, :text, "")))
+		slack = math ? 0.0 :
+			_ROOM_GAP + (_fin_isfinite_real(plan.margins.t) && plan.margins.t > 0 ? _FIN_AUTOMARGIN_EXTRA : 0.0)
+		pin.pad - pin.shift + _text_extent(d[:text], _legend_title_font_size(p, d))[2] + _TEXT_PANEL_GAP + pad_b +
+			max(pin.shift - slack, 0.0)
+	end
 	band > 0 || return out
 	push!(out, _LtDecor("figure_title", :figure, :top, band, _LT_ORDER_TITLE, false, false, :figure_title, "title", nothing))
 	return out
@@ -883,8 +920,10 @@ function _room_place!(plan, ::Val{:legend_titles})
 		elseif d.role === :cell_legend
 			slot = _room_slot(plan, _LT_OWNER, d.key)
 			slot === nothing && continue
+			_lt_follow_rule!(plan, d) && continue
 			_lt_place_cell_legend!(plan, d, slot)
 		elseif d.role === :inside_legend
+			_lt_follow_rule!(plan, d) && continue
 			a = plan.areas[d.area]
 			box = _lt_final_box(a)
 			want = _legend_placement(d.data, box[1], box[2], _lt_legend_inset(plan); figure = false)
@@ -988,15 +1027,158 @@ end
 # top row: it is pinned to the top of the figure as `title!` places it
 # (`y = 1`, `yanchor = "top"`, `pad.t = _TEXT_TITLE_TOP_PAD` unless it has a
 # `pad.t`), so the band `_lt_title_decoration!` requests is where it is drawn.
+# The `pad.t` of a pinned title includes `_lt_title_shift`.
 function _lt_pin_title!(plan)
 	d = _text_title_dict(plan.p)
 	d === nothing && return nothing
-	y = get(d, :y, "auto")
-	(y === nothing || y == "auto") || return nothing
+	pin = _lt_title_pin(plan, d)
+	pin === nothing && return nothing
 	_room_relayout!(plan, :title_y, 1)
 	_room_relayout!(plan, :title_yanchor, "top")
-	haskey(_symbol_dict(get(d, :pad, nothing)), :t) || _room_relayout!(plan, :title_pad_t, _TEXT_TITLE_TOP_PAD)
+	_room_relayout!(plan, :title_pad_t, pin.pad)
+	if pin.shift > 0 || pin.recorded
+		meta = _lt_meta_with_title_shift(plan.layout, [pin.pad, pin.shift])
+		meta === nothing || _room_relayout!(plan, :meta, meta)
+	end
 	return nothing
+end
+
+# A copy of `layout.meta` with `plotlysupply.titleshift = value`; `nothing`
+# when the meta is not a mapping the record can live in.
+function _lt_meta_with_title_shift(layout, value)
+	meta = get(layout.fields, :meta, nothing)
+	(meta === nothing || meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute) || return nothing
+	fields = _symbol_dict(meta)
+	own = _symbol_dict(_style_meta_get(fields, _STYLE_META_KEY))
+	own[_LT_TITLE_SHIFT_META_KEY] = value
+	fields[_STYLE_META_KEY] = own
+	return fields
+end
+
+# tm-title-top-clip: plotly.js 2.35.2 draws a container-anchored title with
+# `yanchor = "top"` and its `pad.t` below the top of the figure, but the
+# first line of a title of several lines (`<br>`) with its baseline on that
+# anchor (a one-line title sits 0.7 em, plotly's CAP_SHIFT, lower), and a
+# MathJax title centred about 1/4 em above it; when its `automargin` pushes
+# the top margin it moves every line of a multi-line title up by a further
+# (1.3 n + 0.35) em (n line breaks). Measured: the first line of
+# "Two-line\nfigure title" 7 px above the figure (17 px font), 17 px under
+# :ieee; a fraction 5 px above it. A pinned title of several lines or with
+# math therefore gets its band from the room providers (the margin holds it,
+# plotly.js does not push) and `pad.t` grows by this shift (px), which puts
+# its top where a one-line plain title's is (about 0.3 em above the pad);
+# the text height estimate errs large, so a MathJax title lands lower.
+function _lt_title_shift(p::Plot, d)
+	text = string(get(d, :text, ""))
+	size = _legend_title_font_size(p, d)
+	occursin(r"\$[^$]*\$", text) && return max(_text_extent(text, size)[2] / 2 - 0.05 * size, 0.0)
+	occursin(r"<br\s*/?>"i, text) && return 0.7 * size
+	return 0.0
+end
+
+# Key (in `layout.meta.plotlysupply`; one word: it is a `relayout!` path
+# part) of the `[pad.t, shift]` the last pin wrote.
+const _LT_TITLE_SHIFT_META_KEY = :titleshift
+
+# The pin of figure title `d`: `pad` (px, its `pad.t`: the user's pad, else
+# `_TEXT_TITLE_TOP_PAD`, plus `shift`, `_lt_title_shift`) and whether a shift
+# was recorded; `nothing` for a title the user placed (another `y` than "auto"
+# or 1, another anchor or reference). The user's pad is the `pad.t` less the
+# recorded shift while `pad.t` is still the value the pin wrote.
+function _lt_title_pin(plan, d)
+	y = get(d, :y, "auto")
+	auto = y === nothing || y == "auto"
+	if !auto
+		(_legend_real(y) == 1 && get(d, :yanchor, nothing) == "top" &&
+			get(d, :yref, "container") == "container") || return nothing
+	end
+	pad = _legend_real(get(_symbol_dict(get(d, :pad, nothing)), :t, nothing))
+	base = something(pad, Float64(_TEXT_TITLE_TOP_PAD))
+	own = _style_meta_get(get(plan.layout.fields, :meta, nothing), _STYLE_META_KEY)
+	record = _style_meta_get(own, _LT_TITLE_SHIFT_META_KEY)
+	recorded = record isa AbstractVector && length(record) == 2 && all(v -> v isa Real, record)
+	recorded && pad !== nothing && abs(pad - record[1]) <= 1e-6 && (base = pad - Float64(record[2]))
+	shift = round(_lt_title_shift(plan.p, d); digits = 3)
+	return (pad = round(base + shift; digits = 3), shift = shift, recorded = recorded)
+end
+
+# A cell legend of a grid that the best-position rule placed (and the user
+# did not place since, `_legend_cell_auto_ids`) and that sits at a position of
+# the rule follows its cell's data: when a call changed the data without an
+# append (`xrange!`, a style, the figure size) and the rule now gives another
+# position, the legend is written there (anchors, orientation and its corner
+# of the plot box) and `true` is returned; the next pass of the fit gives it
+# its room. `false`: placed as it is.
+#
+# The rule scores the plot area the solve gives the cell without the
+# legend's own room (a legend outside took that room from its cell; scored on
+# the narrower area every inside position would stay covered once the data
+# made room): the same area whether the legend is inside or outside (a
+# neighbour's room on the same edge stays), so the answer does not flip
+# between passes and a second finalize writes nothing.
+function _lt_follow_rule!(plan, d::_LtDecor)
+	plan.layout.subplots.rows * plan.layout.subplots.cols == 1 && return false
+	auto = _legend_cell_auto_ids(plan.p)
+	(auto === nothing || !(d.id in auto)) && return false
+	current = if d.role === :inside_legend
+		d.data
+	else
+		role = d.data
+		(role.legacy || !role.canonical) && return false
+		role.side === :bottom ? :outside_bottom : role.side === :right ? :outside_right : return false
+	end
+	box = _lt_final_box(plan.areas[d.area])
+	xdom, ydom = d.role === :cell_legend ? _lt_box_without_room(plan, d) : box
+	best = _legend_best_cell_position(plan.p, d.id, xdom, ydom)
+	best === nothing && return false
+	# Placed on the final box; a column below the cell when the row is wider
+	# than the plot area the rule scored.
+	want = _legend_placement(best, box[1], box[2], _lt_legend_inset(plan); figure = false)
+	best === :outside_bottom &&
+		(want[:orientation] = get(_legend_rule_placement(plan.p, d.id, best, xdom, ydom, (0.0, 0.0)), :orientation, "h"))
+	if best === current
+		# Below the cell already: only its orientation may follow.
+		best === :outside_bottom || return false
+		now = something(_room_current(plan.layout, Symbol(d.id, :_orientation)), "v")
+		now == want[:orientation] && return false
+		_room_relayout!(plan, Symbol(d.id, :_orientation), want[:orientation])
+		return true
+	end
+	_room_relayout!(plan, Symbol(d.id, :_x), round(Float64(want[:x]); digits = 6))
+	_room_relayout!(plan, Symbol(d.id, :_y), round(Float64(want[:y]); digits = 6))
+	_room_relayout!(plan, Symbol(d.id, :_xanchor), want[:xanchor])
+	_room_relayout!(plan, Symbol(d.id, :_yanchor), want[:yanchor])
+	# An inside box is vertical (the rule scores it so): "v" is written over
+	# an outside row's "h" (`_legend_placement_matches` takes it as left out).
+	orientation = get(want, :orientation, nothing)
+	if orientation !== nothing
+		_room_relayout!(plan, Symbol(d.id, :_orientation), orientation)
+	elseif _room_current(plan.layout, Symbol(d.id, :_orientation)) == "h"
+		_room_relayout!(plan, Symbol(d.id, :_orientation), "v")
+	end
+	return true
+end
+
+# The final box of the plot area of decoration `d` as the solve gives it
+# without the room `d` requested (the requests of everything else kept). The
+# solve is run again on the plan with `d`'s request left out; the plan's
+# requests and every area's room, writable sides and final box are restored.
+function _lt_box_without_room(plan, d::_LtDecor)
+	requests = plan.requests
+	saved = Dict(key => (copy(a.room), copy(a.writable), a.final) for (key, a) in plan.areas)
+	plan.requests = filter(r -> !(r.owner === _LT_OWNER && r.key == d.key), requests)
+	try
+		_room_solve!(plan)
+		return _lt_final_box(plan.areas[d.area])
+	finally
+		plan.requests = requests
+		for (key, (room, writable, final)) in saved
+			a = plan.areas[key]
+			a.room = room
+			a.writable = writable
+			a.final = final
+		end
+	end
 end
 
 # A cell legend (or the legend of a single figure) outside one edge of its

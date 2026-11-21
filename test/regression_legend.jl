@@ -1,4 +1,5 @@
 using Test, PlotlySupply
+import Dates
 
 # Regression tests for the legend audit findings (numbers are the audit ids)
 # and the 2.0 legend behaviour changes C11 (outside legends re-anchored) and
@@ -295,11 +296,13 @@ using Test, PlotlySupply
 		@test lg(sf, :legend2)[:y] ≈ PS._lt_outside(plan, leg.edge, leg.offset, :top)
 		title_y = ann(sf, "plotlysupply:title:1:2")[:y]
 		@test title_y ≈ PS._lt_outside(plan, line.edge, line.offset - PS._ROOM_GAP, :top)
-		# the label rides on the title's line; the other cell is unchanged
+		# the label rides on the title's line; the label of the other cell
+		# (no legend above it) keeps its slot and rises onto the same line
+		# (topo_response, optical_bars)
 		@test ann(sf, "plotlysupply:panel_label:1:2")[:y] == title_y
 		other = slot_of(plan, "line:xaxis")
 		@test other.offset == PS._ROOM_GAP
-		@test ann(sf, "plotlysupply:panel_label:1:1")[:y] ≈ PS._lt_outside(plan, other.edge, 0.0, :top)
+		@test ann(sf, "plotlysupply:panel_label:1:1")[:y] ≈ title_y
 		@test !PS._text_restack!(sf)                                             # idempotent
 		# a higher user offset is kept
 		title!(sf, "(b) Ellipse"; row = 1, col = 2, align = :left, offset = (0, 80))
@@ -551,9 +554,15 @@ using Test, PlotlySupply
 		plot_band!(sb, 1:3, 0, [1, 2, 3]; row = 1, col = 2, legend = "b")
 		@test placed_at(sb, :legend, :topleft)
 
-		# Traces the estimate does not model keep the default corner.
+		# Bars are scored (v7 vm-05): the tallest bar, at the right, leaves the
+		# top left free.
 		sk = subplots(1, 2; sync = false)
 		plot_bar!(sk, ["a", "b", "c"], [1, 2, 3]; row = 1, col = 1, legend = "bars")
+		@test placed_at(sk, :legend, :topleft)
+		# Traces the estimate does not model (a histogram plotly.js bins) keep
+		# the default corner.
+		sk = subplots(1, 2; sync = false)
+		plot_histogram!(sk, [0.1, 0.5, 0.5, 0.9, 0.9, 0.9]; row = 1, col = 1, legend = "samples")
 		@test placed_at(sk, :legend, :topright)
 		# The rule is off while the default position is not :topright.
 		set_default_legend_position!(:topleft)
@@ -582,12 +591,14 @@ using Test, PlotlySupply
 		plot_scatterpolar!(sq, 0:30:330, fill(1.0, 12); row = 1, col = 2, legend = "pattern", mode = "markers")
 		@test placed_at(sq, :legend, :topright)
 		# No free position (the legend is wider than the room beside the disk):
-		# the position covering the fewest points, then the fewest tick labels.
+		# v7 vm-06, beside the cell (it was the corner covering the fewest
+		# points, then the fewest tick labels: on a tick label).
 		sr = subplots(2, 2; sync = false, specs = [Spec() Spec(kind = "polar"); Spec(secondary_y = true) Spec()])
 		plot_scatter!(sr, 1:5, [1, 4, 9, 16, 25]; row = 1, col = 1, legend = "(1,1)", mode = "lines+markers")
 		plot_scatterpolar!(sr, 0:30:330, fill(1.0, 12); row = 1, col = 2, legend = "polar", mode = "markers")
 		@test placed_at(sr, :legend, :topleft)
-		@test placed_at(sr, :legend2, :topright)
+		polar_x = sd(sd(pl(sr).layout.fields[:polar])[:domain])[:x]
+		@test lg(sr, :legend2)[:xanchor] == "left" && lg(sr, :legend2)[:x] >= polar_x[2]
 		# Holes are not modelled: the default corner.
 		sh = subplots(1, 1; sync = false, specs = fill(Spec(kind = "polar"), 1, 1))
 		relayout!(sh, width = 500, height = 500, polar = attr(hole = 0.3))
@@ -662,13 +673,13 @@ using Test, PlotlySupply
 		# again does not score the 2e5 points.
 		h = plot_scatter(xs, sin.(xs); legend = "a")
 		plot_scatter!(h, xs, cos.(xs); legend = "b")
-		@test get(PS._SCAT_LEGEND_AUTO, pl(h), nothing) === :topright
+		@test get(PS._SCAT_LEGEND_AUTO, PS._scat_legend_memo_key(pl(h)), nothing) === :topright
 		PS._scat_legend_state(h)
 		@test PS._scat_legend_state(h) === :auto
 		@test @allocated(PS._scat_legend_state(h)) < 100_000
 		# an explicit position is the user's: forgotten, and kept on appends
 		set_legend!(h; position = :topleft)
-		@test !haskey(PS._SCAT_LEGEND_AUTO, pl(h))
+		@test !haskey(PS._SCAT_LEGEND_AUTO, PS._scat_legend_memo_key(pl(h)))
 		@test PS._scat_legend_state(h) === :fixed
 		plot_scatter!(h, xs, 2 .* cos.(xs); legend = "c")
 		@test lg(h)[:xanchor] == "left"
@@ -978,12 +989,125 @@ using Test, PlotlySupply
 		@test PS._finalize_figure!(sf) === false
 		bottom = PS._layout_axis_domain(pl(sf).layout, :yaxis)[1]
 		@test lg(sf, :legend)[:y] < bottom
-		# a legend wider than its cell keeps an inside position (the least covered one)
-		narrow = subplots(1, 4; sync = false)
-		for c in 1:4
-			frame_cell!(narrow, c; names = ("a rather long label", "another long one", "a third long label", "and a fourth long label"))
+		# v7 L10: a legend whose row is wider than its cell goes right of the cell
+		# as a column, with its room taken from the cell, when the column takes
+		# at most half the cell's width (vm-12: else below it as a column)
+		function long_cells(width)
+			g = subplots(1, 3; sync = false, width = width)
+			for c in 1:3
+				frame_cell!(g, c; names = ("a rather long label", "another long one", "a third long label"))
+			end
+			return g
 		end
-		@test all(c -> !haskey(lg(narrow, Symbol(c == 1 ? "legend" : "legend$c")), :orientation), 1:4)
+		ids, xkeys = (:legend, :legend2, :legend3), (:xaxis, :xaxis2, :xaxis3)
+		wide = long_cells(1500)          # cells of about 370 px, a 160 px column
+		for id in ids
+			box = lg(wide, id)
+			@test box[:xanchor] == "left" && box[:yanchor] == "top" && get(box, :orientation, "v") == "v"
+		end
+		PS._finalize_figure!(wide)
+		@test PS._finalize_figure!(wide) === false
+		for (id, xkey) in zip(ids, xkeys)
+			@test lg(wide, id)[:x] >= PS._layout_axis_domain(pl(wide).layout, xkey)[2]   # beside its cell
+		end
+		narrow = long_cells(700)         # cells of about 175 px
+		for (id, xkey) in zip(ids, xkeys)
+			box = lg(narrow, id)
+			xdom = PS._layout_axis_domain(pl(narrow).layout, xkey)
+			@test box[:xanchor] == "center" && box[:yanchor] == "top" && box[:orientation] == "v"
+			@test abs(box[:x] - (xdom[1] + xdom[2]) / 2) <= 1e-6                     # below its cell
+		end
+		PS._finalize_figure!(narrow)
+		@test PS._finalize_figure!(narrow) === false
+		bottom = PS._layout_axis_domain(pl(narrow).layout, :yaxis)[1]
+		@test all(id -> lg(narrow, id)[:y] < bottom, ids)
+	end
+
+	@testset "v7: a cell legend placed by the rule keeps following the data after a finalize pass" begin
+		# The room providers store an inside legend's position rounded to 6
+		# decimals; the rule must still recognise it as its own (chama_a6 (b)).
+		xs = 10.0 .^ (0:6)
+		sf = subplots(1, 2; sync = false, width_ratios = [1, 1.3], width = 690, height = 270)
+		plot_scatter!(sf, [0.0, 1.0], [0.0, 1.0]; row = 1, col = 1)
+		plot_scatter!(sf, xs, [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.0]; row = 1, col = 2, legend = "a", xscale = "log")
+		plot_scatter!(sf, xs, [0.9, 0.7, 0.5, 0.3, 0.15, 0.05, 0.0]; row = 1, col = 2, legend = "b")
+		box = lg(sf, :legend2)
+		@test (box[:xanchor], box[:yanchor]) == ("right", "top")              # the free top-right corner
+		@test box[:x] == round(box[:x]; digits = 6)                          # as the providers stored it
+		before = (box[:x], box[:y])
+		# the third curve crosses the top-right corner: the legend moves (with
+		# an exact comparison it stayed there, taken for a user placement)
+		plot_scatter!(sf, xs, [0.0, 0.05, 0.2, 0.4, 0.6, 0.8, 1.0]; row = 1, col = 2, legend = "c")
+		p = pl(sf)
+		order, ids, domains, _ = PS._legend_subplot_assignment(p)
+		xdom, ydom = domains[order[end]]
+		best = PS._legend_best_cell_position(p, "legend2", xdom, ydom)
+		@test best !== :topright
+		want = PS._legend_placement(best, xdom, ydom, sf.legend_inset; figure = false)
+		@test PS._legend_placement_matches(lg(sf, :legend2), want, (:xanchor, :yanchor))
+		@test (lg(sf, :legend2)[:x], lg(sf, :legend2)[:y]) != before
+		# the matcher: numbers within 1e-6, everything else equal
+		@test PS._legend_placement_matches(Dict(:x => 0.989826), Dict(:x => 0.9898260869565217), (:x,))
+		@test !PS._legend_placement_matches(Dict(:x => 0.9898), Dict(:x => 0.9898260869565217), (:x,))
+		@test !PS._legend_placement_matches(Dict(:xanchor => "left"), Dict(:xanchor => "right"), (:xanchor,))
+	end
+
+	@testset "v7: a cell legend placed by the rule follows a range change; one the user placed stays" begin
+		# gallery optical_reach (b): the legend was placed for the autorange
+		# and stayed there, on the curves, after `xrange!` squeezed them left.
+		anchors(sf, id) = (b = lg(sf, id); (b[:xanchor], b[:yanchor], get(b, :orientation, "v")))
+		function build()
+			sf = subplots(1, 2; sync = false, width = 700, height = 300)
+			for (k, c) in enumerate((0.07, 0.10, 0.17))   # the last one reaches the top right
+				r = collect(range(0.0, 0.2; length = 21))
+				plot_scatter!(sf, r, clamp.(1 .- (r .- c) ./ 0.03, 0, 1); row = 1, col = 1, legend = "n$k")
+			end
+			plot_scatter!(sf, [0.0, 1.0], [0.0, 1.0]; row = 1, col = 2, legend = "other")
+			return sf
+		end
+		# where the rule puts legend "legend" of the first cell now (its locals
+		# are named apart from this testset's: a closure assigns those)
+		function rule(fig)
+			plot = pl(fig)
+			cells, _, cell_domains, _ = PS._legend_subplot_assignment(plot)
+			cx, cy = cell_domains[cells[1]]
+			position = PS._legend_best_cell_position(plot, "legend", cx, cy)
+			return position, PS._legend_placement(position, cx, cy, fig.legend_inset; figure = false)
+		end
+		sf = build()
+		@test "legend" in PS._legend_cell_auto_ids(pl(sf))
+		before = anchors(sf, :legend)
+		@test before[1:2] != ("right", "top")                          # the autorange is full
+		xrange!(sf, (0, 0.6); row = 1, col = 1)                  # the right of the cell is now free
+		best, want = rule(sf)
+		@test best in (:topright, :right, :bottomright)
+		@test PS._legend_placement_matches(lg(sf, :legend), want, (:xanchor, :yanchor, :orientation))
+		@test PS._finalize_figure!(sf) === false                       # settled
+		# the curves fill the cell again: back where the rule puts it
+		xrange!(sf, (0.05, 0.16); row = 1, col = 1)
+		best2, want2 = rule(sf)
+		@test best2 != best
+		@test PS._legend_placement_matches(lg(sf, :legend), want2, (:xanchor, :yanchor, :orientation))
+		@test PS._finalize_figure!(sf) === false
+		# a position the user gave is kept whatever the range
+		sf = build()
+		set_legend!(sf; row = 1, col = 1, position = :bottomleft)
+		@test !("legend" in something(PS._legend_cell_auto_ids(pl(sf)), Set{String}()))
+		xrange!(sf, (0, 0.6); row = 1, col = 1)
+		@test anchors(sf, :legend)[1:2] == ("left", "bottom")
+		# options without a placement (a title) keep the rule
+		sf = build()
+		set_legend!(sf; row = 1, col = 1, title = "family")
+		@test "legend" in PS._legend_cell_auto_ids(pl(sf))
+	end
+
+	@testset "v7: a marker's radius counts when scoring the legend corners" begin
+		# A marker whose centre lies just outside the top-right box still covers it.
+		fields = Dict{Symbol, Any}(:mode => "markers", :marker => Dict(:size => 10, :line => Dict(:width => 1)))
+		@test PS._scat_legend_reach(fields, "markers") == 6.0
+		@test PS._scat_legend_reach(Dict{Symbol, Any}(), "lines") == 1.0
+		@test PS._scat_legend_reach(Dict{Symbol, Any}(:line => Dict(:width => 4)), "lines+markers") == 3.0
+		@test PS._scat_legend_reach(Dict{Symbol, Any}(:marker => Dict(:size => [4, 12, missing])), "markers") == 6.0
 	end
 
 	@testset "v6: nothing to place returns at once; legend assignment and box sizes are computed once per plan" begin
@@ -1005,5 +1129,298 @@ using Test, PlotlySupply
 		@test order == ["xy:x|y", "xy:x2|y2", "xy:x3|y3", "xy:x4|y4", "xy:x5|y5", "xy:x6|y6", "xy:x7|y7", "xy:x8|y8", "xy:x9|y9"]
 		@test [ids[k] for k in order] == collect(1:9)
 		@test length(PS._legend_inset_cells(pl(sf))) == 9
+	end
+
+	@testset "v7 style-04: a legend title is drawn at the legend's size in a styled figure" begin
+		xs = collect(1.0:5.0)
+		size_of(f) = sd(sd(lg(f)[:font]))[:size]
+		title_size(f) = sd(sd(sd(lg(f)[:title])[:font]))[:size]
+		f = with_style(:nature) do
+			g = plot_scatter(xs, [xs, 2 .* xs]; legend = ["alpha", "beta"])
+			set_legend!(g; title = "Mode")
+			g
+		end
+		@test title_size(f) == size_of(f)
+		@test PS._legend_title_size(pl(f), lg(f)) == size_of(f)
+		set_fonts!(f; legend = 6, units = :pt)
+		@test size_of(f) ≈ 8 && title_size(f) ≈ 8
+		# a size the user gives the title is kept
+		relayout!(f; legend_title_font_size = 11)
+		set_legend!(f; title = "Mode 2")
+		@test title_size(f) == 11
+		# :default keeps plotly.js's larger title
+		d = plot_scatter(xs, [xs, 2 .* xs]; legend = ["alpha", "beta"])
+		set_legend!(d; title = "Mode")
+		@test !haskey(sd(sd(lg(d)[:title])), :font)
+	end
+
+	@testset "v7 perf-07: an append remembers where it put the legend of the user's figure" begin
+		# Keyed by the Plot, the memo was written for the staged copy each
+		# call works on: the user's Plot kept the constructor's :topright, and
+		# every later call scored the whole figure again (146 KB here).
+		x = collect(range(0.0, 10.0; length = 100))
+		fig = plot_scatter(x, sin.(x); legend = "s0")
+		for k in 1:50
+			plot_scatter!(fig, x, sin.(x) .+ k; legend = "s$k")
+		end
+		placed = get(PS._SCAT_LEGEND_AUTO, PS._scat_legend_memo_key(pl(fig)), nothing)
+		@test placed !== nothing && placed !== :topright
+		@test PS._scat_legend_is(pl(fig), placed)
+		@test PS._scat_legend_state(fig) === :auto
+		@test @allocated(PS._scat_legend_state(fig)) < 20_000
+		@test PS._scat_legend_memo_key(PS.Plot()) === nothing
+	end
+
+	@testset "v7 F1: the cell legend assignment allocates nothing per trace" begin
+		# Measured before the fix: 84 KB per call at 200 traces (a boxed key
+		# and an untyped tuple per trace), run several times per append; an
+		# append with per-subplot legends cost 2.02x one with a figure legend.
+		xs = collect(1.0:5.0)
+		function grid(n, per)
+			f = subplots(1, 2; sync = false, per_subplot_legends = per)
+			for k in 1:n
+				plot_scatter!(f, xs, xs .+ k; row = 1, col = 1)
+			end
+			plot_scatter!(f, xs, xs; row = 1, col = 1)
+			return f
+		end
+		assign_bytes(f) = (PS._legend_subplot_assignment(pl(f)); @allocated PS._legend_subplot_assignment(pl(f)))
+		small, large = assign_bytes(grid(50, true)), assign_bytes(grid(800, true))
+		@test large < small + 16 * 750          # the per-trace key vector only (8 bytes a trace)
+		append_bytes(f) = minimum(k -> @allocated(plot_scatter!(f, xs, xs .+ k; row = 1, col = 1)), 1:5)
+		@test append_bytes(grid(200, true)) <= 1.5 * append_bytes(grid(200, false))
+	end
+
+	@testset "v7 Q27: a cell legend without entries is neither scored nor recorded; its first entry is placed by the rule" begin
+		# Before: every append to a grid of unnamed traces scored the cell's
+		# hidden legend and recorded it as the rule's (an append to a 6 x 6
+		# grid cost 3.4 MB against 1.9 MB, and `layout.meta` kept the record).
+		sf = subplots(2, 2; sync = false)
+		for r in 1:2, c in 1:2
+			plot_scatter!(sf, 1:10, 1:10; row = r, col = c, xlabel = "x", ylabel = "y")
+		end
+		@test isempty(something(PS._legend_cell_auto_ids(pl(sf)), Set{String}()))
+		@test !haskey(pl(sf).layout.fields, :meta) ||
+			PS._style_meta_get(PS._style_meta_get(pl(sf).layout.fields[:meta], PS._STYLE_META_KEY), :legend_rule) === nothing
+		# The first named trace of a cell: its rising line covers the top
+		# right, so the rule takes the box the unnamed traces left at the
+		# default corner and records it.
+		plot_scatter!(sf, 1:10, 1:10; row = 1, col = 1, legend = "rising")
+		@test placed_at(sf, :legend, :topleft)
+		@test "legend" in PS._legend_cell_auto_ids(pl(sf))
+		@test PS._finalize_figure!(sf) === false
+		# A box the user placed while it had no entries stays where it is.
+		su = subplots(1, 2; sync = false)
+		plot_scatter!(su, 1:10, 1:10; row = 1, col = 1)
+		set_legend!(su; row = 1, col = 1, position = :bottomright)
+		plot_scatter!(su, 1:10, 1:10; row = 1, col = 1, legend = "rising")
+		@test placed_at(su, :legend, :bottomright)
+		@test PS._finalize_figure!(su) === false
+	end
+
+	@testset "v7 vm-12: a cell legend that fits neither inside nor beside its cell goes below it as a column" begin
+		# Twin-y cells of an :ieee 1 x 2 grid: before, the legends stayed
+		# inside a plot area narrower than them (x = 0.21 right-anchored,
+		# their samples over the left spine and tick labels); a column right
+		# of the cell took the room the room engine caps.
+		t = collect(0:0.1:10)
+		sf = with_style(:ieee) do
+			sf = subplots(1, 2; sync = false, specs = fill(Spec(secondary_y = true), 1, 2))
+			for c in 1:2
+				plot_scatter!(sf, t, sin.(c .* t); row = 1, col = c, legend = "voltage")
+				plot_scatter!(sf, t, 1000 .* cos.(t); row = 1, col = c, secondary_y = true, legend = "current")
+				ylabel!(sf, "voltage (V)"; row = 1, col = c)
+				ylabel!(sf, "current (mA)"; row = 1, col = c, secondary_y = true)
+			end
+			sf
+		end
+		for (id, xkey) in ((:legend, :xaxis), (:legend2, :xaxis2))
+			d = lg(sf, id)
+			xdom = PS._layout_axis_domain(pl(sf).layout, xkey)
+			anchor = String(sd(pl(sf).layout.fields[xkey])[:anchor])    # the primary y of the cell
+			ydom = PS._layout_axis_domain(pl(sf).layout, Symbol("yaxis", anchor[2:end]))
+			@test d[:yanchor] == "top" && d[:y] < ydom[1]                    # below the cell
+			@test d[:xanchor] == "center" && xdom[1] < d[:x] < xdom[2]       # under its own plot area
+			@test get(d, :orientation, "v") == "v"                           # a column: no row run under the neighbour
+		end
+		@test PS._finalize_figure!(sf) === false
+	end
+
+	@testset "v7: a path shape (ellipse!, polygon!) counts when scoring the legend corners" begin
+		# gallery mdd_shell_field (b): the cell legend sat on a dotted ellipse!,
+		# a path shape the rule did not read
+		@test PS._scat_legend_path_pieces("M0,0 L1,0 L1,1 Z M2,2 H3 V4") ==
+			[([0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0], true), ([2.0, 3.0, 3.0], [2.0, 2.0, 4.0], false)]
+		@test PS._scat_legend_path_pieces("M0,0 C1,1 2,2 3,-1.5e-1") == [([0.0, 3.0], [0.0, -0.15], false)]
+		@test PS._scat_legend_path_pieces("m0,0 l1,1") === nothing          # relative: not read
+		@test PS._scat_legend_path_pieces("M0,0 L1") === nothing
+		@test PS._scat_legend_path_pieces(nothing) === nothing
+		xs = collect(range(0, 1; length = 20))
+		fig = plot_scatter(xs, 0.2 .* xs; legend = "low", yrange = [0, 1])   # the top right is free
+		@test PS._scat_best_legend_position(pl(fig)) === :topright
+		ellipse!(fig, 0.85, 0.85, 0.12, 0.12)
+		@test PS._scat_best_legend_position(pl(fig)) !== :topright
+	end
+
+	@testset "v7 vm-06: a polar legend with no free corner goes beside the disk" begin
+		th = collect(range(0, 2pi; length = 361))
+		build() = plot_scatterpolar([th, th], [1 .+ cos.(th), 0.5 .+ 0.5 .* abs.(sin.(2 .* th))];
+			thetaunit = "radians", legend = ["cardioid", "rose"])
+		# theta in radians is scored (it was not: the legend kept the top right
+		# corner, on the "1/4 π" tick label, under :ieee and :nature)
+		p = pl(build())
+		@test PS._legend_best_polar_position(p, eachindex(p.data), :polar, 300.0, 200.0, (110.0, 50.0)) !== nothing
+		# the roomy default figure: its free top right corner
+		box = lg(build())
+		@test (box[:xanchor], box[:yanchor]) == ("right", "top") && box[:x] < 1
+		for style in (:ieee, :nature)
+			fig = with_style(build, style)
+			box = lg(fig)
+			@test box[:xanchor] == "left" && box[:x] > 1                  # beside the disk
+			PS._finalize_figure!(fig)
+			@test PS._finalize_figure!(fig) === false
+		end
+		# the same data in a polar cell of a journal grid
+		sf = with_style(:ieee) do
+			g = subplots(1, 2; sync = false, specs = [Spec() Spec(kind = "polar")])
+			plot_scatter!(g, collect(0:0.1:1), collect(0:0.1:1); row = 1, col = 1, legend = "line")
+			plot_scatterpolar!(g, [th, th], [1 .+ cos.(th), 0.5 .+ 0.5 .* abs.(sin.(2 .* th))];
+				thetaunit = "radians", legend = ["cardioid", "pattern"], row = 1, col = 2)
+			g
+		end
+		polar_x = sd(sd(pl(sf).layout.fields[:polar])[:domain])[:x]
+		@test lg(sf, :legend2)[:xanchor] == "left" && lg(sf, :legend2)[:x] >= polar_x[2]
+		@test PS._finalize_figure!(sf) === false
+	end
+
+	@testset "v7 vm-14: a reference line with a legend entry moves the rule's legend off it" begin
+		t = collect(0.0:1:200)
+		y = -10 .+ 2 .* sin.(t ./ 15)                      # the lower part of the y range
+		build() = plot_scatter(t, y; legend = "signal", xlabel = "sample", ylabel = "level", yrange = (-14, 2))
+		# the same line as a trace: the rule's answer
+		ref = build()
+		plot_scatter!(ref, [185.0, 185.0], [-14.0, 2.0]; legend = "event")
+		@test !PS._scat_legend_is(pl(ref), :topright)
+		for style in (:default, :ieee)
+			fig = with_style(style) do
+				f = build()
+				vline!(f, 185; dash = "dot", legend = "event")
+				f
+			end
+			# before: still top right, on the line (x = 0.98)
+			@test !PS._scat_legend_is(pl(fig), :topright)
+			@test PS._scat_legend_is(pl(fig), something(PS._scat_best_legend_position(pl(fig)), :topright))
+		end
+		# a legend the user placed stays where it is
+		fig = build()
+		set_legend!(fig; position = :topright)
+		vline!(fig, 185; legend = "event")
+		@test PS._scat_legend_is(pl(fig), :topright)
+	end
+
+	@testset "v7 vm-05/style-03: bars, boxes, violins, dates and categories are scored" begin
+		# Unit pieces: plotly.js date and category coordinates.
+		@test PS._scat_legend_date_ms("2024-01-01") == 1_704_067_200_000
+		@test PS._scat_legend_date_ms(Dates.Date(2024, 1, 1)) == 1_704_067_200_000
+		@test PS._scat_legend_date_ms("2024-01-01 12:30:15.5") == 1_704_067_200_000 + 1000 * (12 * 3600 + 30 * 60 + 15.5)
+		@test PS._scat_legend_date_ms("2024-13-01") === nothing && PS._scat_legend_date_ms("dose 1") === nothing
+		@test PS._scat_legend_autotype([1.0, 2.0]) === :linear
+		@test PS._scat_legend_autotype(["1", "2.5"]) === :linear                # numeric strings are numbers
+		@test PS._scat_legend_autotype(["control", "dose 1"]) === :category
+		@test PS._scat_legend_autotype([Dates.Date(2024, 1, 1), Dates.Date(2024, 2, 1)]) === :date
+		@test PS._scat_legend_autotype(Any["2024-01-01", "2024-01-02"]) === :date
+		@test PS._scat_legend_category_name(2.0) == "2" && PS._scat_legend_category_name("a") == "a"
+		lay(; fields...) = PB.Layout(; fields...)
+		@test PS._scat_legend_categories(lay(), :xaxis, (["b", "a"], ["c", "a"])) == Dict("b" => 0, "a" => 1, "c" => 2)
+		@test PS._scat_legend_categories(lay(xaxis = PB.attr(categoryorder = "category ascending")), :xaxis, (["b", "a"],)) ==
+			Dict("a" => 0, "b" => 1)
+		@test PS._scat_legend_categories(lay(xaxis = PB.attr(categoryorder = "array", categoryarray = ["z", "b"])), :xaxis,
+			(["b", "a"],)) == Dict("z" => 0, "b" => 1, "a" => 2)
+		@test PS._scat_legend_categories(lay(xaxis = PB.attr(categoryorder = "total ascending")), :xaxis, (["b"],)) === nothing
+
+		# Figures of the findings: before, every one kept the top-right corner,
+		# over the bars, the violin "c", the date curve's end and "dose 3".
+		days = collect(Dates.Date(2024, 1, 1):Dates.Day(1):Dates.Date(2024, 6, 30))
+		walk = collect(range(0, 18; length = length(days))) .+ sin.(1:length(days))
+		build = Dict(
+			"grouped bars" => () -> plot_bar(["Si", "Ge", "GaAs", "InP"],
+				[[3.1, 4.0, 2.2, 5.1], [2.5, 3.6, 3.1, 4.4], [1.9, 2.8, 2.7, 3.9]]; legend = ["300 K", "200 K", "77 K"]),
+			"style-03 bars" => () -> plot_bar(["A", "B", "C"], [[1.0, 2.0, 3.0], [1.5, 2.5, 3.5], [2.0, 3.0, 4.0]];
+				legend = ["method 1", "method 2", "method 3"]),
+			"stacked bars" => () -> plot_bar(["A", "B", "C", "D"], [[1.0, 2.0, 3.0, 4.0], [1.0, 1.0, 1.0, 1.0]];
+				legend = ["base", "extra"], barmode = "stack"),
+			"violins" => () -> plot_violin([[-3.0, -1.0, 0.0, 1.0, 3.3], [0.0, 0.5, 1.0, 1.5, 2.0], [-5.0, -1.0, 1.0, 2.5, 6.3]];
+				legend = ["a", "b", "c"], points = false),
+			"boxes" => () -> plot_box([[-2.0, 0.0, 0.5, 2.5], [-1.0, 1.0, 1.5, 3.5], [0.5, 2.5, 3.5, 5.5]]; legend = ["a", "b", "c"]),
+			"date axis" => () -> plot_scatter(days, walk; legend = "station A"),
+			"category axis" => () -> plot_scatter(["control", "dose 1", "dose 2", "dose 3"], [1.0, 1.6, 2.3, 3.0];
+				mode = "markers", legend = "wild type"),
+		)
+		for (name, builder) in build, style in (:default, :ieee, :aip)
+			fig = with_style(builder, style)
+			p = pl(fig)
+			# the first candidate, top right, covers data; an inside answer is
+			# a free one (the rule goes outside when none is)
+			pos = PS._scat_best_legend_position(p)
+			@test pos !== nothing && pos !== :topright
+			@test pos in PS._SCAT_LEGEND_POSITIONS || pos in PS._SCAT_LEGEND_OUTSIDE_POSITIONS
+			@test PS._scat_legend_is(p, pos)
+			@test PS._finalize_figure!(fig) === false
+		end
+		# The rectangles: a bar of the stack starts where the one below ends,
+		# grouped bars share their slot, horizontal bars swap the axes.
+		scored(fig) = begin
+			p = pl(fig)
+			series = PS._ScatLegendSeries[]
+			ok, xpadded, xzero = PS._scat_legend_block_series!(series, Float64[], Dict{Symbol, Bool}(), Set{Symbol}(), p,
+				[(t.fields, String(t.fields[:type]), :yaxis) for t in p.data], :xaxis,
+				(key, letter) -> PS._scat_legend_axis(p, eachindex(p.data), key, letter))
+			ok, series, xzero
+		end
+		ok, series, _ = scored(plot_bar(["A", "B"], [[1.0, 2.0], [3.0, 4.0]]; barmode = "stack"))
+		@test ok && length(series) == 2
+		@test series[2][3] == [1.0, 4.0, 2.0, 6.0]                    # from the first series' tops
+		@test series[1][2] ≈ [-0.4, 0.4, 0.6, 1.4]                    # bargap 0.2 of a 1-wide slot
+		ok, series, _ = scored(plot_bar(["A", "B"], [[1.0, 2.0], [3.0, 4.0]]))      # group
+		@test ok && series[1][2] ≈ [-0.4, 0.0, 0.6, 1.0] && series[2][2] ≈ [0.0, 0.4, 1.0, 1.4]
+		ok, series, xzero = scored(plot_bar([2.0, 5.0], ["a", "b"]; orientation = "h"))
+		@test ok && xzero && series[1][2] == [0.0, 2.0, 0.0, 5.0] && series[1][3] ≈ [-0.4, 0.4, 0.6, 1.4]
+		# not read: the legend keeps the corner the user or the default gave it
+		@test PS._scat_legend_axis(pl(plot_scatter(1:3, 1:3)), 1:1, :xaxis, :x).kind === :linear
+		h = plot_histogram(randn(200); legend = "samples")                      # binned by plotly.js
+		@test PS._scat_best_legend_position(pl(h)) === nothing
+		# a legend the user placed stays
+		fig = plot_bar(["A", "B"], [1.0, 2.0]; legend = "v")
+		set_legend!(fig; position = :topright)
+		plot_bar!(fig, ["A", "B"], [3.0, 4.0]; legend = "w")
+		@test PS._scat_legend_is(pl(fig), :topright)
+	end
+
+	@testset "v7 vm-01: a horizontal legend is given the rows plotly.js wraps it into" begin
+		# The room above the axes was estimated for one row at the layout
+		# margins' plot width (328 px) while plotly.js wraps at the plot width
+		# after the axes' automargins (286 px): two rows (48 px), so plotly.js
+		# pushed the top margin while drawing and, with MathJax entries, drew
+		# the curves 19 px off their ticks in the export.
+		xs = collect(range(0, 10; length = 100))
+		fig = with_style(:ieee) do
+			f = plot_scatter(xs, [sin.(xs), cos.(xs), sin.(xs) .* cos.(xs), 0.3 .* xs .- 1.5];
+				legend = ["\$\\sin x\$", "\$\\cos x\$", "product", "linear trend"], xlabel = "x", ylabel = "y")
+			set_legend!(f; position = :outside_top)
+			f
+		end
+		p = pl(fig)
+		plan = PS._room_plan(p)
+		@test PS._lt_box_size(plan, "legend")[2] >= 48 - 1                 # two rows
+		@test PS._legend_box_size(p, "legend"; wrap = 1000.0)[2] < 40         # one row when it fits
+		# the room above the plot holds the legend: top margin >= its height
+		# and its offset above the axes
+		@test sd(p.layout.fields[:margin])[:t] >= 48
+		# plotly.js' horizontal wrap (entries per row, rows): one row of own
+		# widths when it fits, else the widest entry + gap per entry
+		@test PS._legend_wrap([50.0, 60.0], 0.0, 200.0) == (2, 1)
+		@test PS._legend_wrap([50.0, 60.0, 70.0, 80.0], 0.0, 200.0) == (2, 2)   # wrapped: widest + gap per entry
+		@test PS._legend_wrap([50.0, 60.0, 70.0, 80.0], 0.0, 60.0) == (1, 4)
+		@test PS._legend_wrap(Float64[], 0.0, 60.0) == (0, 0)
 	end
 end
