@@ -726,7 +726,7 @@ end
 # big-endian host. The export window is the only consumer: html and json files
 # keep plain JSON arrays.
 const _EXPORT_TYPED_ARRAY_MIN = Ref(50_000)
-const _EXPORT_TYPED_ARRAY_KEYS = (:x, :y, :z, :r, :theta, :lat, :lon)
+const _EXPORT_TYPED_ARRAY_KEYS = (:x, :y, :z, :r, :theta, :lat, :lon, :customdata)
 
 struct _TypedArrayPayload
 	dtype::String

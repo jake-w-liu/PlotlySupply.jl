@@ -1756,7 +1756,11 @@ function _cmn_check_color(value, name::AbstractString, who::AbstractString)
 	(value isa AbstractString || value isa Symbol) || throw(ArgumentError(
 		"$(who): `$(name)` must be a colour string or symbol; got $(repr(value)).",
 	))
-	return _cmn_color_string(value)
+	text = _cmn_color_string(value)
+	# "" (unset) and "none" (no fill) are sentinels; anything else must be a
+	# colour (apia-07: "nocolor" was written into the figure).
+	(isempty(text) || lowercase(text) == "none") || _color_option_scalar(text, who, name)
+	return text
 end
 
 """

@@ -1,6 +1,7 @@
 using Test, PlotlySupply
 using PlotlySupply: PlotlyBase
 using Base64
+isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
 # v8 fix round r1 (api-export): the Electron connection after interrupts and
 # failed starts, export documents and pages, user-error contracts of the grid
@@ -600,7 +601,6 @@ end
 end
 
 @testset "r1 tests-ci-07: registries a test file extends are restored after it" begin
-	isdefined(@__MODULE__, :_global_registries_snapshot) || include(joinpath(@__DIR__, "testutils.jl"))
 	snapshot = _global_registries_snapshot()
 	cmap = PlotlySupply.COLORMAPS["viridis"]
 	try
@@ -615,4 +615,149 @@ end
 	@test !haskey(PlotlySupply.COLORMAPS, "r1_ice")
 	@test PlotlySupply.COLORMAPS["viridis"] == snapshot.colormaps["viridis"]
 	@test !haskey(PlotlySupply._STYLE_REGISTRY, :r1_registry_style)
+end
+
+@testset "r1 apib-05: sunburst/treemap hierarchies plotly cannot draw are ArgumentErrors" begin
+	for (ctor, mut, who) in ((plot_sunburst, plot_sunburst!, "plot_sunburst"), (plot_treemap, plot_treemap!, "plot_treemap"))
+		@test _r1_argerr(() -> ctor(["r", "a", "b"], ["", "q", "r"]),
+			"$(who): `parents[2]` is \"q\", which is not one of the labels")
+		@test _r1_argerr(() -> ctor(["r", "a"], ["", "r"]; values = [1, 5], branchvalues = "total"),
+			"$(who): with `branchvalues = \"total\"` the value of \"r\" (1) must be at least the sum of its children (5.0)")
+		# With ids, a parent names an id, not a label.
+		@test _r1_argerr(() -> ctor(["r", "a"], ["", "r"]; ids = ["x", "y"]),
+			"$(who): `parents[2]` is \"r\", which is not one of the ids")
+		@test ctor(["r", "a"], ["", "x"]; ids = ["x", "y"]) isa Plot
+		# Valid trees: equal totals, remainder values above their parents, ids.
+		@test ctor(["r", "a", "b"], ["", "r", "r"]; values = [2, 1, 1], branchvalues = "total") isa Plot
+		@test ctor(["r", "a"], ["", "r"]; values = [1, 5]) isa Plot
+		@test ctor(["r", "a", "a"], ["", "r1", "r1"]; ids = ["r1", "a1", "a2"]) isa Plot
+		@test ctor(["r", "a"], ["", 1]; ids = [1.0, 2.0]) isa Plot   # plotly reads both as "1"
+		fig = ctor(["r", "a"], ["", "r"])
+		before = json(fig)
+		@test _r1_argerr(() -> mut(fig, ["s", "c"], ["", "nope"]), "$(who)!: `parents[2]`")
+		@test json(fig) == before
+	end
+end
+
+@testset "r1 apia-07: colour strings that are no colour are ArgumentErrors" begin
+	sf = subplots(1, 1; sync = false)
+	plot_scatter!(sf, 1:5, [1.0, 3, 2, 4, 3])
+	before = json(sf.plot)
+	@test _r1_argerr(() -> inset!(sf, (0.5, 0.5, 0.4, 0.4); background = "nocolor"), "inset!: `background`")
+	@test json(sf.plot) == before
+	inset!(sf, (0.5, 0.5, 0.4, 0.4); background = "white")
+	pie = plot_pie([1])
+	snapshot = json(pie)
+	@test _r1_argerr(() -> plot_pie!(pie, [2]; colors = ["nocolor"]), "plot_pie!: `colors[1]`")
+	@test json(pie) == snapshot
+	funnel = plot_funnelarea([1])
+	@test _r1_argerr(() -> plot_funnelarea!(funnel, [2]; colors = ["nocolor"]), "plot_funnelarea!: `colors[1]`")
+	pc = plot_parcoords(["a" => [1, 2]])
+	@test _r1_argerr(() -> plot_parcoords!(pc, ["a" => [1, 2]]; line_color = "nocolor"), "plot_parcoords!: `line_color`")
+	# Valid spellings still pass and are written unchanged.
+	@test plot_pie([1, 2]; colors = ["red", "#00ff00"]).data[1][:marker][:colors] == ["red", "#00ff00"]
+	@test plot_parcoords(["a" => [1, 2]]; line_color = "teal").data[1][:line][:color] == "teal"
+	legend_entry!(plot_scatter(1:2, 1:2), "open"; mode = "markers", marker_color = "none")
+end
+
+@testset "r1 numerics-06: a histogram bin count beyond what a figure shows is an ArgumentError" begin
+	t = @elapsed err = _r1_err(() -> plot_histogram([0.5]; bins = (0, 1, 1e-12)))
+	@test err isa ArgumentError && startswith(err.msg, "plot_histogram: `bins` (0, 1, 1.0e-12) declares 1.0e12 bins; at most 100000")
+	@test t < 5
+	@test plot_histogram([0.5]; bins = (0, 1, 1e-5)) isa Plot   # 100 000 bins: the bound itself
+	@test _r1_argerr(() -> plot_histogram([0.5]; bins = (0, 1, 9.9e-6)), "plot_histogram: `bins`")
+end
+
+@testset "r1 errors-inputs-13: geo/map scatter modes, geo scope and projection, bar base" begin
+	lon, lat = [0.0, 10.0], [0.0, 10.0]
+	@test _r1_argerr(() -> plot_scattergeo(lon, lat; mode = "zzqq"), "plot_scattergeo: `mode` must combine")
+	@test _r1_argerr(() -> plot_scattermap(lon, lat; mode = "zzqq"), "plot_scattermap: `mode` must combine")
+	@test _r1_argerr(() -> plot_scattermapbox(lon, lat; mode = "zzqq"), "plot_scattermapbox: `mode` must combine")
+	@test _r1_argerr(() -> plot_scattergeo(lon, lat; projection = "zzqq"), "plot_scattergeo: `projection` must be one of")
+	@test _r1_argerr(() -> plot_scattergeo(lon, lat; scope = "zzqq"), "plot_scattergeo: `scope` must be one of")
+	@test _r1_argerr(() -> plot_choropleth(["USA"], [1.0]; scope = "mars"), "plot_choropleth: `scope`")
+	g = plot_scattergeo(lon, lat; mode = "lines+markers", projection = "natural earth", scope = "europe")
+	snapshot = json(g)
+	@test _r1_argerr(() -> plot_scattergeo!(g, lon, lat; projection = "zzqq"), "plot_scattergeo!: `projection`")
+	@test json(g) == snapshot
+	@test g.data[1][:mode] == "lines+markers"
+	@test g.layout[:geo][:projection][:type] == "natural earth"
+	@test _r1_argerr(() -> plot_bar(["a", "b"], [1, 2]; base = "zzqq"), "plot_bar: `base` entries must be finite numbers")
+	@test _r1_argerr(() -> plot_bar(["a", "b"], [1, 2]; base = "NaN"), "plot_bar: `base`")
+	@test plot_bar(["a", "b"], [1, 2]; base = "2020-01-02").data[1][:base] == "2020-01-02"
+	@test plot_bar(["a", "b"], [1, 2]; base = ["1.5", "2020-01-02 03:04"]).data[1][:base] == ["1.5", "2020-01-02 03:04"]
+end
+
+@testset "r1 seams-08: heatmap/contour coordinates follow the scatter rules" begin
+	Z = [1.0 2 3; 4 5 6; 7 8 9; 10 11 12]
+	Time = _R1.Dates.Time; Second = _R1.Dates.Second; Minute = _R1.Dates.Minute
+	@test _r1_argerr(() -> plot_heatmap([Time(1), Time(2), Time(4), Time(8)], 1:3, Z), "plot_heatmap: `x` holds Time values")
+	@test _r1_argerr(() -> plot_heatmap(Second.([1, 2, 4, 8]), 1:3, Z), "plot_heatmap: `x` holds Second values")
+	@test _r1_argerr(() -> plot_contour(1:4, Minute.([1, 5, 10]), Z), "plot_contour: `y` holds Minute values")
+	@test _r1_argerr(() -> plot_heatmap(Any[3.0, 1, 2, 4], 1:3, Z), "plot_heatmap: `x` must be strictly monotonic")
+	@test _r1_argerr(() -> plot_heatmap(["a", "a", "b", "c"], 1:3, Z), "plot_heatmap: `x` repeats the category \"a\"")
+	@test plot_heatmap(Any[1, 2.5, 3, 4], 1:3, Z) isa Plot
+	@test plot_heatmap(["a", "b", "c", "d"], 1:3, Z) isa Plot
+	@test plot_heatmap(_R1.Dates.Date(2020, 1, 1) .+ _R1.Dates.Day.(0:3), 1:3, Z) isa Plot
+end
+
+@testset "r1 mr-04/mr-07: field exports send customdata as typed arrays; pcolormesh keeps C" begin
+	U = [1.0 + i + j for i in 1:300, j in 1:300]   # 90 000 values, above the typed-array minimum
+	hm = plot_heatmap(U; colornorm = :log)
+	@test hm.data[1][:customdata] isa AbstractMatrix
+	prepared = _R1._prepare_renderer_export(hm, NamedTuple())
+	@test occursin("\"customdata\":{\"bdata\":", prepared.data_js) || occursin("\"customdata\":{\"dtype\":\"f8\"", prepared.data_js)
+	@test sizeof(prepared.data_js) < 3 * 8 * length(U)   # two typed arrays (z, customdata), not JSON text
+	# pcolormesh on a rectilinear grid: one heatmap trace that references C.
+	edges = collect(0.0:300.0)
+	C = [sin(i / 7) * cos(j / 5) for i in 1:300, j in 1:300]
+	C[3, 4] = NaN
+	fig = plot_pcolormesh(edges, edges, C)
+	# One copy of C (the validated cell values) plus a size-independent
+	# overhead, not the Union{Nothing, Float64} rows on top of it (measured
+	# 9.3 MB here; the rows alone were another 9 MB).
+	big_edges = collect(0.0:1000.0)
+	B = [sin(i / 7) * cos(j / 5) for i in 1:1000, j in 1:1000]
+	alloc = @allocated plot_pcolormesh(big_edges, big_edges, B)
+	@test alloc < 1.5 * sizeof(B)
+	z = fig.data[1][:z]
+	@test z isa AbstractMatrix{Float64} && isequal(z, C)
+	@test C[3, 4] !== nothing && isnan(C[3, 4])   # the user's matrix is not written
+	rows = PlotlyBase.JSON.parse(json(fig))["data"][1]["z"]
+	@test rows[4][3] === nothing && rows[5][2] == C[2, 5]   # row j of plotly's z is C[:, j]
+	L = abs.(C) .+ 0.1
+	log_fig = plot_pcolormesh(edges, edges, L; colornorm = :log, hover = true)
+	@test log_fig.data[1][:customdata] isa AbstractMatrix{Float64}
+	@test isequal(log_fig.data[1][:customdata], L)
+end
+
+@testset "r1 sm-09: a live equal-aspect field shows the model's domains after a mutation" begin
+	JSON = PlotlyBase.JSON
+	state_js = """
+	(function() {
+	  const div = document.querySelector('.js-plotly-plot');
+	  const F = div._fullLayout;
+	  return JSON.stringify({x: F.xaxis.domain, y: F.yaxis.domain, w: F._size.w, h: F._size.h});
+	})();
+	"""
+	state(sp) = JSON.parse(String(Base.invokelatest(() -> _R1._syncplot_backend(sp).run(sp.window, state_js))))
+	same(a, b) = all(k -> isapprox(Float64.(a[k]), Float64.(b[k]); atol = 1e-9), ("x", "y", "w", "h"))
+	Z = [sin(i / 3) * cos(j / 4) for i in 1:15, j in 1:12]
+	for (style, change!) in ((:ieee, sp -> figsize!(sp, :ieee; columns = 2)), (:ieee, sp -> figsize!(sp, 500, 500)),
+			(:default, sp -> figsize!(sp, 900, 400)))
+		sp = to_syncplot(with_style(() -> plot_heatmap(1:15, 1:12, Z; equalar = true, colorbar_title = "u"), style); show = false)
+		try
+			change!(sp)
+			fresh = to_syncplot(deepcopy(sp.plot); show = false)
+			try
+				live, ref = state(sp), state(fresh)
+				@test same(live, ref)
+				same(live, ref) || @info "sm-09 window differs from a fresh render" style live ref
+			finally
+				close(fresh)
+			end
+		finally
+			close(sp)
+		end
+	end
 end

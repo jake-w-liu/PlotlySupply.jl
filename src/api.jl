@@ -9606,8 +9606,21 @@ function _stats_bar_text(
 	return Any[_stats_bar_text_entry(entry, who) for entry in part]
 end
 
+# A date string plotly.js reads on a date axis ("2020", "2020-01-02",
+# "2020-01-02 03:04:05.6", "T" or a space between date and time).
+const _STATS_DATE_STRING = r"^\s*-?\d{1,4}(-\d{1,2}(-\d{1,2}([ T]\d{1,2}(:\d{1,2}(:\d{1,2}(\.\d+)?)?)?)?)?)?\s*$"
+
 function _stats_bar_base_entry(entry, who::AbstractString)
-	entry isa AbstractString && return String(entry)
+	if entry isa AbstractString
+		# Anything else is drawn as no base at all (errors-inputs-13).
+		number = tryparse(Float64, entry)
+		(number !== nothing ? isfinite(number) : occursin(_STATS_DATE_STRING, entry)) ||
+			throw(ArgumentError(
+				"$(who): `base` entries must be finite numbers (or date strings such as " *
+				"\"2020-01-02\"); got $(repr(entry)).",
+			))
+		return String(entry)
+	end
 	(entry isa Real && !(entry isa Bool) && isfinite(entry)) && return entry
 	throw(ArgumentError(
 		"$(who): `base` entries must be finite numbers (or date strings); got $(repr(entry)).",
@@ -9647,8 +9660,20 @@ function _stats_bins(bins, who::AbstractString)
 	values[3] > 0 || throw(ArgumentError(
 		"$(who): `bins` width must be positive; got $(repr(bins)).",
 	))
+	# The work (here for log axes, in plotly.js otherwise) grows with the
+	# declared bin count, not the data: a width typo (1e-12) would hang
+	# (numerics-06). The bound is far beyond what a figure can show.
+	count = (values[2] - values[1]) / values[3]
+	count <= _STATS_MAX_BINS || throw(ArgumentError(
+		"$(who): `bins` $(repr(bins)) declares $(round(count; sigdigits = 3)) bins; at most " *
+		"$(_STATS_MAX_BINS) are supported (a figure cannot show more). Use a larger width.",
+	))
 	return (values[1], values[2], values[3])
 end
+
+# 100 000 bins: 25 per pixel of a 4K display's 3840 px width; the measured
+# cost is about 330 bytes per declared bin (33 MB at the bound).
+const _STATS_MAX_BINS = 100_000
 
 function _stats_bins_attr(bins)
 	return attr(Dict{Symbol, Any}(
@@ -14824,6 +14849,9 @@ function _field2d_check_coordinates(
 				"$(who): `$(name)` is on a logarithmic axis, so its coordinates " *
 				"must be positive; entry $(i) is $(value).",
 			))
+		elseif value isa Union{Dates.Time, Dates.Period}
+			# As for the 1-D families (seams-08).
+			_scat_time_error(who, Symbol(name), typeof(value))
 		elseif _field2d_bad_coordinate(value)
 			throw(ArgumentError(
 				"$(who): `$(name)` coordinates must be finite real numbers, " *
@@ -14845,9 +14873,28 @@ end
 # (plotly.js would not complain): numeric and date coordinates must be
 # strictly monotonic (decreasing is fine). Categories are not ordered.
 function _field2d_check_monotonic(v, who::AbstractString, name::AbstractString)
-	T = eltype(v)
-	((T <: Real && !(T <: Bool)) || T <: Dates.TimeType) || return nothing
 	length(v) >= 2 || return nothing
+	T = eltype(v)
+	real(x) = x isa Real && !(x isa Bool)
+	# An abstract eltype (`Vector{Any}`) is checked by its values (seams-08).
+	ordered = (T <: Real && !(T <: Bool)) || T <: Dates.TimeType ||
+		(!isconcretetype(T) && (all(real, v) || all(x -> x isa Dates.TimeType, v)))
+	if !ordered
+		# A repeated category puts two rows or columns of cells on one place.
+		if all(x -> x isa Union{AbstractString, Symbol}, v) && !allunique(string.(v))
+			seen = Set{String}()
+			repeated = ""
+			for x in string.(v)
+				x in seen && (repeated = x; break)
+				push!(seen, x)
+			end
+			throw(ArgumentError(
+				"$(who): `$(name)` repeats the category $(repr(repeated)); plotly would " *
+				"draw both rows or columns of cells at one place.",
+			))
+		end
+		return nothing
+	end
 	increasing = v[2] > v[1]
 	for i in 1:(length(v) - 1)
 		(increasing ? v[i + 1] > v[i] : v[i + 1] < v[i]) || throw(ArgumentError(
@@ -19581,6 +19628,9 @@ function _extended_colour(who::AbstractString, name::AbstractString, value)
 	_extended_is_colour(value) || throw(ArgumentError(
 		"$(who): `$(name)` must be a colour string or Symbol; got $(repr(value)).",
 	))
+	# A string that is no colour ("nocolor") is an error, not a figure
+	# plotly draws in its default colour (apia-07).
+	isempty(String(value)) || _color_option_scalar(value, who, name)
 	return String(value)
 end
 
@@ -19603,6 +19653,8 @@ function _extended_colour_vector(
 				"$(who): `$(name)[$(position)]` must be a colour string or Symbol" *
 				(numbers ? " or a finite number" : "") * "; got $(repr(value)).",
 			))
+		_extended_is_colour(value) && !isempty(String(value)) &&
+			_color_option_scalar(value, who, "$(name)[$(position)]")
 	end
 	any(value -> value isa Symbol, colors) || return colors
 	return Any[value isa Symbol ? String(value) : value for value in colors]
@@ -20101,6 +20153,7 @@ function _hierarchy_trace(
 		"$(who): `branchvalues` must be \"remainder\", \"total\" or \"\" (plotly " *
 		"default, \"remainder\"); got $(repr(branchvalues)).",
 	))
+	_hierarchy_check_tree(who, labels, parents, ids, values, branch)
 	scale = _resolve_colorscale(colorscale; who = who).scale
 	display_labels = _extended_plain_labels(labels, who, "labels")
 
@@ -20122,6 +20175,42 @@ function _hierarchy_trace(
 	end
 	isempty(marker) || (kw[:marker] = attr(; marker...))
 	return constructor(; kw...)
+end
+
+# A tree plotly.js can draw (apib-05; it draws an empty figure otherwise):
+# every parent other than "" (a root) names a sector, by id when `ids` are
+# given and by label otherwise (plotly compares them as strings), and with
+# `branchvalues = "total"` no parent's value is below the sum of its
+# children's (plotly.js's own test, relative tolerance 1e-9).
+function _hierarchy_check_tree(who, labels, parents, ids, values, branch)
+	# As JavaScript's String(): 2.0 and 2 are both "2".
+	key(x) = x isa Real && !(x isa Bool) && isfinite(x) && isinteger(x) && abs(x) < 2.0^53 ?
+		string(Int64(x)) : string(x)
+	names = key.(ids === nothing ? labels : ids)
+	position = Dict(name => i for (i, name) in enumerate(names))
+	is_root(parent) = parent === nothing || parent === missing ||
+		(parent isa AbstractString && isempty(parent))
+	for (i, parent) in enumerate(parents)
+		is_root(parent) || haskey(position, key(parent)) || throw(ArgumentError(
+			"$(who): `parents[$(i)]` is $(repr(parent)), which is not one of the " *
+			"$(ids === nothing ? "labels" : "ids"); a root sector has the parent \"\".",
+		))
+	end
+	(branch == "total" && values !== nothing) || return nothing
+	number(v) = v isa AbstractString ? parse(Float64, v) : Float64(v)
+	children = zeros(Float64, length(names))
+	for (i, parent) in enumerate(parents)
+		is_root(parent) || (children[position[key(parent)]] += number(values[i]))
+	end
+	for (i, total) in enumerate(children)
+		total > 0 && number(values[i]) < total * (1 - 1e-9) && throw(ArgumentError(
+			"$(who): with `branchvalues = \"total\"` the value of $(repr(names[i])) " *
+			"($(values[i])) must be at least the sum of its children ($(total)); " *
+			"plotly would draw nothing. Use `branchvalues = \"remainder\"` to add " *
+			"the children to their parent.",
+		))
+	end
+	return nothing
 end
 
 function _extended_hierarchy_plot(
@@ -25846,6 +25935,29 @@ _map_numeric_color(color) =
 	color isa AbstractVector && !isempty(color) &&
 	all(value -> value isa Real && !(value isa Bool), color)
 
+# The `layout.geo.scope` and `layout.geo.projection.type` values of plotly's
+# schema (PlotlyBase's bundled one); cached on first use.
+const _GEO_ENUMERATIONS = Ref{Any}(nothing)
+
+function _geo_check_layout_options(who::AbstractString, scope::AbstractString, projection::AbstractString)
+	(isempty(scope) && isempty(projection)) && return nothing
+	if _GEO_ENUMERATIONS[] === nothing
+		geo = PlotlyBase.get_plotschema().layout[:layoutAttributes][:geo]
+		_GEO_ENUMERATIONS[] = (
+			scope = String[string(v) for v in geo[:scope][:values]],
+			projection = String[string(v) for v in geo[:projection][:type][:values]],
+		)
+	end
+	known = _GEO_ENUMERATIONS[]
+	for (name, value, values) in (("scope", scope, known.scope), ("projection", projection, known.projection))
+		# An unknown value is drawn as plotly's default map (errors-inputs-13).
+		isempty(value) || value in values || throw(ArgumentError(
+			"$(who): `$(name)` must be one of $(join(repr.(values), ", ")); got $(repr(value)).",
+		))
+	end
+	return nothing
+end
+
 function _geo_layout(
 	scope::AbstractString,
 	projection::AbstractString,
@@ -26037,7 +26149,8 @@ function _geo_scatter_trace(
 	)
 	_map_set!(built, lon, :lon)
 	_map_set!(built, lat, :lat)
-	_map_set!(built, String(mode), :mode)
+	# The flags plotly.js knows, as for plot_ternary (errors-inputs-13).
+	_map_set!(built, _extended_scatter_mode(who, mode), :mode)
 	if color isa Union{AbstractString, Symbol}
 		text = String(color)
 		isempty(text) || _map_set!(built, text, :marker, :color)
@@ -26579,6 +26692,7 @@ function plot_choropleth(
 )
 	who = "plot_choropleth"
 	_map_reject_keywords(who, kwargs; mutator = false)
+	_geo_check_layout_options(who, scope, projection)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -26653,6 +26767,7 @@ function plot_choropleth!(
 )
 	who = "plot_choropleth!"
 	_map_reject_keywords(who, kwargs; mutator = true)
+	_geo_check_layout_options(who, scope, projection)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -26750,6 +26865,7 @@ function plot_scattergeo(
 )
 	who = "plot_scattergeo"
 	_map_reject_keywords(who, kwargs; mutator = false)
+	_geo_check_layout_options(who, scope, projection)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -26828,6 +26944,7 @@ function plot_scattergeo!(
 )
 	who = "plot_scattergeo!"
 	_map_reject_keywords(who, kwargs; mutator = true)
+	_geo_check_layout_options(who, scope, projection)
 	options = _geo_figure_options(
 		who;
 		title = title,

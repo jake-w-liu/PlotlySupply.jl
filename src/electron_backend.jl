@@ -1255,6 +1255,22 @@ function _require_plotlyjs_success(result, operation::AbstractString)
 	))
 end
 
+# Plotly.react keeps the private `_inputDomain` an equal-aspect axis
+# (`constrain = "domain"`) got at the previous draw, and constrains that old
+# domain instead of the one the new layout gives (sm-09: after figsize! the
+# window kept x domain [0, 0.749] where the model and a fresh window have
+# [0.061, 0.880]). The layout a react sends is the whole model, so its domains
+# are the input: the stale ones are dropped first. (Plotly.relayout/update keep
+# them: their input is the window's own layout, which plotly.js has rewritten
+# with the constrained domain.)
+const _PLOTLYJS_REACT_FRESH_DOMAINS_JS = raw"""
+  if (div._fullLayout) {
+    for (const key of Object.keys(div._fullLayout)) {
+      const axis = div._fullLayout[key];
+      if (/^[xy]axis\d*$/.test(key) && axis) delete axis._inputDomain;
+    }
+  }"""
+
 function _plotlyjs_refresh_script(
 	sp::SyncPlot,
 	data,
@@ -1275,6 +1291,7 @@ function _plotlyjs_refresh_script(
   if (typeof Plotly === "undefined") return "plotly-not-loaded";
   const div = document.getElementById($divid_js);
   if (!div) return "plot-div-not-found";
+$(_PLOTLYJS_REACT_FRESH_DOMAINS_JS)
   await Plotly.react(div, $data_js, $layout_js, $config_js);
   return "ok";
 })();
@@ -1316,6 +1333,7 @@ function _plotlyjs_refresh_payload_script(
   if (typeof Plotly === "undefined") return "plotly-not-loaded";
   const div = document.getElementById($divid_js);
   if (!div) return "plot-div-not-found";
+$(_PLOTLYJS_REACT_FRESH_DOMAINS_JS)
   await Plotly.react(div, $(payload.data), $(payload.layout), $(payload.config));
   return "ok";
 })();
