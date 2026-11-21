@@ -20191,35 +20191,143 @@ function _hierarchy_trace(
 	return constructor(; kw...)
 end
 
-# A tree plotly.js can draw (apib-05; it draws an empty figure otherwise):
-# every parent other than "" (a root) names a sector, by id when `ids` are
-# given and by label otherwise (plotly compares them as strings), and with
-# `branchvalues = "total"` no parent's value is below the sum of its
-# children's (plotly.js's own test, relative tolerance 1e-9).
-function _hierarchy_check_tree(who, labels, parents, ids, values, branch)
-	# As JavaScript's String(): 2.0 and 2 are both "2".
-	key(x) = x isa Real && !(x isa Bool) && isfinite(x) && isinteger(x) && abs(x) < 2.0^53 ?
-		string(Int64(x)) : string(x)
-	names = key.(ids === nothing ? labels : ids)
-	position = Dict(name => i for (i, name) in enumerate(names))
-	is_root(parent) = parent === nothing || parent === missing ||
-		(parent isa AbstractString && isempty(parent))
-	for (i, parent) in enumerate(parents)
-		is_root(parent) || haskey(position, key(parent)) || throw(ArgumentError(
-			"$(who): `parents[$(i)]` is $(repr(parent)), which is not one of the " *
-			"$(ids === nothing ? "labels" : "ids"); a root sector has the parent \"\".",
+# A tree plotly.js can draw (apib-05; it draws an empty figure otherwise, render
+# probe apib05b over plotly.js 2.35.2 sunburst/treemap `calc`). plotly.js names
+# a sector by its id (or label) as a JavaScript string, so 2 and 2.0 and "2"
+# are one name; a parent that is `nothing`, "" or `false` makes the sector a
+# root, and a sector without a name is left out. With a root, every other
+# parent must name a sector; without one, the parents that name no sector
+# must all be one name, which plotly then adds as the root. No sector may be
+# its own ancestor, and with `branchvalues = "total"` no parent's value may be
+# below the sum of its children's (plotly's relative tolerance 1e-6).
+_hierarchy_js_key(x) = x isa Real && !(x isa Bool) && isfinite(x) && isinteger(x) && abs(x) < 2.0^53 ?
+	string(Int64(x)) : string(x)
+_hierarchy_is_blank(x) = x === nothing || x === missing || x === false || (x isa AbstractString && isempty(x))
+
+# Position (1-based, in order) of the sector a parent names, 0 for none. An
+# integer range is searched arithmetically, so a lazy range is not
+# materialized (lazy_payloads.jl).
+struct _HierarchyRangeIndex{R <: AbstractRange}
+	names::R
+end
+function (index::_HierarchyRangeIndex)(parent)
+	value = if parent isa Real && !(parent isa Bool)
+		(isfinite(parent) && isinteger(parent) && abs(parent) < 2.0^53) || return 0
+		Int64(parent)
+	elseif parent isa AbstractString
+		parsed = tryparse(Int64, parent)
+		(parsed === nothing || string(parsed) != parent) && return 0
+		parsed
+	else
+		return 0
+	end
+	names = index.names
+	value in names || return 0
+	return Int(div(value - first(names), step(names))) + 1
+end
+
+struct _HierarchyDictIndex
+	positions::Dict{String, Int}
+end
+(index::_HierarchyDictIndex)(parent) = get(index.positions, _hierarchy_js_key(parent), 0)
+
+_hierarchy_index(who, what, names::AbstractRange{<:Integer}) =
+	eltype(names) === Bool ? _hierarchy_dict_index(who, what, names) : _HierarchyRangeIndex(names)
+_hierarchy_index(who, what, names) = _hierarchy_dict_index(who, what, names)
+
+function _hierarchy_dict_index(who, what, names)
+	positions = Dict{String, Int}()
+	for (position, name) in enumerate(names)
+		_hierarchy_is_blank(name) && continue
+		key = _hierarchy_js_key(name)
+		previous = get(positions, key, 0)
+		previous == 0 || throw(ArgumentError(
+			"$(who): `$(what)` contains $(repr(names[firstindex(names) + previous - 1])) and $(repr(name)), " *
+			"which plotly reads as the same name $(repr(key)); the sectors would be merged.",
 		))
+		positions[key] = position
+	end
+	return _HierarchyDictIndex(positions)
+end
+
+function _hierarchy_check_tree(who, labels, parents, ids, values, branch)
+	names = ids === nothing ? labels : ids
+	what = ids === nothing ? "labels" : "ids"
+	locate = _hierarchy_index(who, what, names)
+	n = length(names)
+	name_at(i) = names[firstindex(names) + i - 1]
+	parent_at(i) = parents[firstindex(parents) + i - 1]
+	present(i) = !_hierarchy_is_blank(name_at(i))
+	parent_index(i) = (p = parent_at(i); _hierarchy_is_blank(p) ? 0 : locate(p))
+	has_root = false
+	first_missing = 0      # first sector whose parent names no sector
+	second_missing = 0     # first one whose missing parent is another name
+	for i in 1:n
+		present(i) || continue
+		p = parent_at(i)
+		if _hierarchy_is_blank(p)
+			has_root = true
+		elseif locate(p) == 0
+			if first_missing == 0
+				first_missing = i
+			elseif second_missing == 0 && _hierarchy_js_key(p) != _hierarchy_js_key(parent_at(first_missing))
+				second_missing = i
+			end
+		end
+	end
+	if has_root && first_missing != 0
+		throw(ArgumentError(
+			"$(who): `parents[$(first_missing)]` is $(repr(parent_at(first_missing))), which is not " *
+			"one of the $(what); a root sector has the parent \"\" (plotly would draw nothing).",
+		))
+	elseif !has_root && second_missing != 0
+		throw(ArgumentError(
+			"$(who): `parents` names $(repr(parent_at(first_missing))) and " *
+			"$(repr(parent_at(second_missing))), which are not among the $(what); plotly adds " *
+			"one missing parent as the root and draws nothing with two. Give the root " *
+			"sectors the parent \"\".",
+		))
+	elseif !has_root && first_missing == 0
+		throw(ArgumentError(
+			"$(who): no sector is a root: every parent is one of the $(what), so the " *
+			"sectors form a cycle (plotly would draw nothing). Give the root sector the " *
+			"parent \"\".",
+		))
+	end
+	# No sector is its own ancestor: walk each chain of parents once (state 1:
+	# on the current walk, 2: reaches a root).
+	state = zeros(UInt8, n)
+	for start in 1:n
+		(present(start) && state[start] == 0x00) || continue
+		i = start
+		while i != 0 && state[i] == 0x00
+			state[i] = 0x01
+			i = parent_index(i)
+		end
+		i != 0 && state[i] == 0x01 && throw(ArgumentError(
+			"$(who): the sector $(repr(name_at(i))) is its own ancestor (`parents` makes " *
+			"a cycle); plotly would draw nothing.",
+		))
+		i = start
+		while i != 0 && state[i] == 0x01
+			state[i] = 0x02
+			i = parent_index(i)
+		end
 	end
 	(branch == "total" && values !== nothing) || return nothing
 	number(v) = v isa AbstractString ? parse(Float64, v) : Float64(v)
-	children = zeros(Float64, length(names))
-	for (i, parent) in enumerate(parents)
-		is_root(parent) || (children[position[key(parent)]] += number(values[i]))
+	value_at(i) = values[firstindex(values) + i - 1]
+	children = zeros(Float64, n)
+	for i in 1:n
+		present(i) || continue
+		j = parent_index(i)
+		j == 0 || (children[j] += number(value_at(i)))
 	end
 	for (i, total) in enumerate(children)
-		total > 0 && number(values[i]) < total * (1 - 1e-9) && throw(ArgumentError(
-			"$(who): with `branchvalues = \"total\"` the value of $(repr(names[i])) " *
-			"($(values[i])) must be at least the sum of its children ($(total)); " *
+		# plotly.js compares with its ALMOST_EQUAL = 0.999999.
+		total > 0 && number(value_at(i)) < total * 0.999999 && throw(ArgumentError(
+			"$(who): with `branchvalues = \"total\"` the value of $(repr(name_at(i))) " *
+			"($(value_at(i))) must be at least the sum of its children ($(total)); " *
 			"plotly would draw nothing. Use `branchvalues = \"remainder\"` to add " *
 			"the children to their parent.",
 		))

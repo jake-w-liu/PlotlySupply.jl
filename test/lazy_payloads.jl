@@ -702,6 +702,7 @@ end
 
     @testset "million-element constructors stay allocation bounded" begin
         payload = 1:1_000_000
+        parents = 0:(length(payload) - 1)
         field = reshape(payload, length(payload), 1)
         measure = fill("relative", length(payload))
         dimensions = ["a" => payload, "b" => payload]
@@ -716,15 +717,18 @@ end
             () -> plot_heatmap(field),
             () -> plot_contour(field),
             () -> plot_surface(field),
+            # A chain (sector i's parent is i - 1, and 0, which names no
+            # sector, becomes plotly's root): a tree plotly draws, checked
+            # without materializing either range (apib-05).
             () -> plot_sunburst(
                 payload,
-                payload;
+                parents;
                 values=payload,
                 colors=payload,
             ),
             () -> plot_sunburst(
                 payload,
-                payload;
+                parents;
                 values=payload,
                 colorscale="Viridis",
             ),

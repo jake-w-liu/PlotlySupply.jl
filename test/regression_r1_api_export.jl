@@ -632,6 +632,20 @@ end
 		@test ctor(["r", "a"], ["", "r"]; values = [1, 5]) isa Plot
 		@test ctor(["r", "a", "a"], ["", "r1", "r1"]; ids = ["r1", "a1", "a2"]) isa Plot
 		@test ctor(["r", "a"], ["", 1]; ids = [1.0, 2.0]) isa Plot   # plotly reads both as "1"
+		# plotly's own rule (render probe apib05b): without a "" root, the one
+		# parent that names no sector becomes the root; two such parents, a
+		# cycle, or no root at all draw nothing.
+		@test ctor(["a", "b"], ["q", "q"]) isa Plot
+		@test ctor(1:5, 0:4) isa Plot
+		@test ctor(["a", "b", "c"], ["", "", "a"]) isa Plot
+		@test _r1_argerr(() -> ctor(["a", "b"], ["q", "r"]),
+			"$(who): `parents` names \"q\" and \"r\", which are not among the labels")
+		@test _r1_argerr(() -> ctor(["r", "a", "b"], ["", "b", "a"]),
+			"$(who): the sector \"a\" is its own ancestor")
+		@test _r1_argerr(() -> ctor(["a", "b"], ["", "b"]), "$(who): the sector \"b\" is its own ancestor")
+		@test _r1_argerr(() -> ctor(1:3, 1:3), "$(who): no sector is a root")
+		@test _r1_argerr(() -> ctor(Any[2, "2"], ["", ""]),
+			"$(who): `labels` contains 2 and \"2\", which plotly reads as the same name")
 		fig = ctor(["r", "a"], ["", "r"])
 		before = json(fig)
 		@test _r1_argerr(() -> mut(fig, ["s", "c"], ["", "nope"]), "$(who)!: `parents[2]`")
