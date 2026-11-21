@@ -132,8 +132,9 @@ fig = plot_polygons(px, py, [1.0, 2.0]; colorscale = "viridis",
 ## Vector fields
 
 [`plot_quiver`](@ref) draws one glyph per vector `(u, v)` at `(x, y)`; equal
-axis scales are on by default (`equalar = true`). `sizeref` is the length of
-the longest glyph in data units (decades on a log axis). Two kinds, chosen by
+axis scales are on by default (`equalar = true`). `sizeref` is the length budget
+of the glyphs in data units (decades on a log axis): the longest glyph is
+`2/3 * sizeref` long. Two kinds, chosen by
 `style`:
 
 - `style = :arrow` (default): a line arrow whose length is proportional to
@@ -146,8 +147,8 @@ the longest glyph in data units (decades on a log axis). Two kinds, chosen by
 
 Further keywords: `pivot = :tail | :middle | :tip` (the part of the glyph at
 `(x, y)`; default `:tail` for arrows, `:middle` for triangles);
-`scale = :magnitude` (default) or `:uniform` (every non-zero vector at the
-full `sizeref`: a direction field); `colorby = :magnitude`, or an array of
+`scale = :magnitude` (default) or `:uniform` (every non-zero vector as long as
+the longest glyph, `2/3 * sizeref`: a direction field); `colorby = :magnitude`, or an array of
 values with the shape of `u`, colours the glyphs through the colour keywords
 (`colorscale`, `crange`, `cmid`, `colornorm`, `levels`, `colorbar_title`,
 `colorbar_title_side`, `coloraxis`, `showscale`) and draws a colorbar; `color`

@@ -134,8 +134,12 @@ garbage-collected.
 
 LaTeX labels such as `"\$x^2\$"` are typeset with MathJax in the window, as
 in [`savefig`](@ref); MathJax is loaded from a CDN, so without network access
-such labels are shown as plain text. See also [`msgchannel`](@ref) and
-[`toggle_devtools`](@ref).
+such labels are shown as plain text. A closed window ends editing: every
+mutator on a `SyncPlot` whose window is closed throws an
+`InvalidStateException("SyncPlot window is not open")` and leaves the figure
+unchanged ([`savefig`](@ref) still works); build without a window (the plain
+`Plot` in `sp.plot`, or `sync = false`) to keep editing. See also
+[`msgchannel`](@ref) and [`toggle_devtools`](@ref).
 """
 mutable struct SyncPlot
 	plot::Plot
@@ -284,6 +288,7 @@ include("api.jl")
 include("electron_backend.jl")
 include("plotlyjs_compat_asset.jl")
 include("plotlyjs_compat.jl")
+include("compat_docs.jl")
 
 function __init__()
 	# PlotlyBase owns the generic HTML/VS Code display paths. Keep its default

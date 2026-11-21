@@ -12,6 +12,38 @@ page "Migrating from 1.x".
 
 It includes the fixes of 1.9.4 (listed at the end).
 
+### What is new in 2.0
+
+- **Journal presets and physical sizes.** `with_style(:ieee)` (also `:aps`,
+  `:nature`, `:elsevier`, `:springer`, `:aip`) sets the journal's fonts in
+  points, line widths, ticks, a colour-blind- and greyscale-safe cycle and the
+  column width; `figsize!(fig, :nature; columns = 2)` and `journal_width` give
+  exact sizes. A figure carries its style.
+- **A layout engine.** Colorbars, outside legends, titles, panel labels and
+  wrapped axis titles get their own room and never overlap a neighbour; legends
+  go to a free corner or outside the plot; fields fit their axes without a
+  white border; `figsize!` at any time re-solves the layout.
+- **Fields and overlays.** Heatmaps, images, contours, `pcolormesh`, triangle
+  meshes and polygons with shared colorbars, quiver and streamlines on a field,
+  equal-aspect panels, annotated heatmaps and deformed meshes.
+- **Annotations and schematics.** `annotate!` in data, axes, paper and figure
+  coordinates, shapes and arrows, `slope_guide!`, reference lines and bands.
+- **3-D that fits its cell.** Scenes are framed to fill their cell, with
+  compact tick and axis-title offsets, equal across a row of scenes.
+- **Export for publishers.** PDF and EPS at exact page sizes with embedded
+  TrueType fonts, SVG, PNG, JPEG and TIFF with the resolution recorded,
+  deterministic files, several files from one render, HTML and JSON.
+- **Statistics and more chart types.** Violin, box, ECDF, KDE, bands, stems,
+  grouped and stacked bars, maps, polar and ternary plots.
+- **A gallery** of 44 scripts that each produce one figure from synthetic
+  data (see [Gallery](https://jake-w-liu.github.io/PlotlySupply.jl/dev/gallery/)).
+- **Fast.** The first figure of a session takes about a third of a second
+  instead of 15 seconds, and constructors keep your arrays instead of copying
+  them.
+- **Migration.** Colour scales follow matplotlib's orientation, ranges on log
+  axes are data values, and a few defaults changed; "Migrating from 1.x" lists
+  each change with before and after code.
+
 ### Breaking changes
 
 Colours
@@ -50,7 +82,10 @@ Axes and ranges
 - A full range with bounds that are neither numbers nor dates on an
   automatically typed axis (`yrange = ("a", "b")`) raises an `ArgumentError`.
 - Axis titles that would run off the figure are wrapped between words by the
-  layout engine only, with `<br />` breaks (`xlabel!(...; wrap = false)` keeps
+  layout engine only; each break it writes is a zero-width space (U+200B)
+  before a bare `<br>` (plotly.js counts the extra lines of a title with a
+  greedy `<br...>` pattern, which makes a run of `<br />` one tag; your own
+  `<br>` stay as you wrote them) (`xlabel!(...; wrap = false)` keeps
   one line); `secondary_xaxis!` no longer writes `title.pad.b` onto a placed
   figure title, the top margin is raised when the figure is finalized.
 - Changing an axis scale converts an explicit range.
@@ -79,12 +114,14 @@ Legends
 - `set_legend!` merges duplicate entries (`dedupe = true`).
 - `subplot_legends!` keywords lost their `legend_` prefix (old names are
   deprecated).
-- The default legend of line plots moves to the corner with the least data
-  (the matplotlib "best" placement).
+- The default legend of line plots moves to the first free corner or edge
+  (the matplotlib "best" placement; never the centre automatically) and goes
+  outside the plot (right, or below a narrow plot) when none is free.
 - Legend boxes follow the template.
 - Cell legends of a `SubplotFigure` at the default `:topright` move to the
-  least-covered position when traces are appended; a legend placed by you
-  stays.
+  first free position when traces are appended, below the cell when none is
+  free and its entries fit in one row (`set_legend!(sf; position = :topright)`
+  restores the 1.x corner); a legend placed by you stays.
 - `set_legend!(ncols = k)` lays columns out as legend groups; a click toggles
   one entry.
 - `legend_entry!` validates colours and writes hex CSS.
@@ -93,6 +130,9 @@ Subplots
 
 - `subplots(...; sync = false)` writes no figure title. The window title is
   the `window_title` keyword.
+- `subplots` writes no figure size by default (`width = 0`, `height = 0`:
+  automatic); 1.x wrote 960 x 720 px into the layout. Pass `width`/`height`
+  for that size.
 - `update_xaxes!` and the other `update_*!` functions with `row`/`col` change
   only that cell.
 - Colorbars sit next to their cell.
@@ -147,9 +187,21 @@ Plot functions
 - `view!(fig)` and `scene!(fig)` return `nothing` on a `Plot` or `SyncPlot`.
 - 3-D colours with an alpha channel are drawn opaque, blended over the
   background; `plot_scatter3d(marker_color = ...)` adds a 1.5 px outline.
-- `plot_quiver3d` cones use `sizemode = "scaled"`.
+- `plot_quiver3d` cones use `sizemode = "scaled"`: the largest cone is sized
+  relative to the point spacing (a uniform rescaling of the field does not
+  change the picture); each cone is still proportional to its vector's length.
 - `plot_surface(...; color = "gray")` draws one colour.
-- 3-D scenes get an explicit camera at a fitted distance.
+- 3-D scenes get an explicit camera at a fitted distance, and tick labels and
+  axis titles sit closer to the box (compact pads written to
+  `layout.meta["plotlysupply:gl3d"]`, read by the patched plotly.js of the
+  windows, exports and HTML files; a plain PlotlyBase display draws plotly's own
+  pads and can clip labels). When the three axis titles cannot be kept apart
+  they are drawn as annotations named
+  `plotlysupply:scene3d:<scene>:title:<x|y|z>` (the scene's own title then
+  holds a blank), one end tick at a corner shared by two axes is dropped, and
+  scenes whose axes are under four ticks long (small figures) get explicit
+  tick counts. A camera or `distance` you set keeps plotly's own pads and
+  titles.
 - Scenes with explicit ranges use `aspectmode = "manual"`.
 - `plot_scatter3d` and nested `mode = ""` series draw lines.
 - `plot_indicator` shows only the number unless `reference` or
@@ -174,12 +226,64 @@ Validation and errors
 - `annotate!(coords = :figure)` now means fractions of the whole figure in
   `[0, 1]`; plotly's paper coordinates are `coords = :paper`.
 
+Styles and layout
+
+- A figure carries the style it was built under (`layout.meta.plotlysupply.style`,
+  the fields that differ from `PlotStyle()`); mutators, the layout engine and
+  `savefig` read it, not the active style. A `with_style(:x)` around a mutator
+  no longer restyles an existing styled figure; a figure built under `:default`
+  that a mutator changes inside `with_style(:x)` adopts `:x` from then on.
+  A size-less figure is laid out at its carried style's size, else 700 x 500 px.
+- The default legend of a `Plot` goes outside the plot when no inside position
+  is free, and quiver and streamline figures follow the same rule.
+- A colorbar shows at least two tick labels, and `len` is never longer than the
+  fitted plot box of an equal-aspect cell. Cells that share a coloraxis give up
+  the same room. `figsize!` after the content re-solves the room (the old
+  advice to size the figure first is gone).
+- Layout-only `update_*` verbs on a `SyncPlot` (`update_xaxes!`, `update_yaxes!`,
+  `update_polars!`, `update_geos!`, `update_mapboxes!`, `update_scenes!`,
+  `update_ternaries!`, `update_annotations!`, `update_shapes!`, `update_images!`,
+  `add_hline!`, `add_vline!`, `add_hrect!`, `add_vrect!`, `add_shape!`,
+  `add_layout_image!`, `add_recession_bands!`) send `Plotly.relayout` with the
+  changed leaves instead of `Plotly.react` of the whole figure; the model result
+  is identical.
+- <!-- D17 -->Regular grids keep equal, aligned panels: in a grid of equal cells
+  every panel has the same plot-area width and height, and the room a decoration
+  needs is taken per column and row gap (the largest need along it) instead of
+  from the neighbouring cell only; `column_widths`/`row_heights` ratios,
+  narrowed domains, equal-aspect boxes, spanning cells and insets are exempt.
+  Figures whose right panel used to give up room alone now have equal
+  panels.<!-- /D17 -->
+- <!-- L11 -->Rows and columns of fixed-aspect cells are compressed (no bands of
+  white between and around equal-aspect maps; the page shrinks to the content
+  when its size is free); `subplots(...; compress = false)` keeps the
+  slots.<!-- /L11 -->
+- <!-- D20 -->The style cycle restarts in every subplot cell (colour, dash and
+  marker; the colour is written on the trace). 1.x grids that relied on
+  figure-wide colours (cell 2 continuing the colours of cell 1) change; give
+  `color` explicitly to keep them.<!-- /D20 -->
+- <!-- D21 -->Tick labels never use SI prefixes: every template sets
+  `exponentformat = "power"` on Cartesian, colorbar, polar, ternary and scene
+  axes ("2x10^-4", not "200µ"; "5x10^3", not "5k"). Ask for the old labels with
+  `exponentformat = "SI"` (or `"B"`).<!-- /D21 -->
+- <!-- D19 -->Text extents follow the font family of the style (advance tables
+  for Times, Arial/Helvetica, Verdana, DejaVu Sans, Computer Modern and STIX):
+  under Times titles are no longer wrapped, and room is no longer reserved, for
+  width the text does not need.<!-- /D19 -->
+- <!-- L9 -->Under a style with a text face (the presets, `:publication`) the
+  text of a mixed math string is drawn in the figure's font at the plain-text
+  size (`inherit_text_font` is on by default).<!-- /L9 -->
+
 Export, windows and templates
 
 - `savefig` uses the figure's `layout.width`/`layout.height` when no size is
   given (1.x: always 700 x 500 px).
+- <!-- D18 -->PNG, JPEG and WebP under a style with a physical size (the journal
+  presets) default to 300 dpi like TIFF when neither `dpi` nor `scale` is
+  given (`:default` and `:publication`: scale 1).<!-- /D18 -->
 - Exports are deterministic by default.
-- A figure without a size exports at the active style's default size.
+- A figure without a size exports at the size of the style it carries (a figure
+  without a recorded style: the active style's size), else 700 x 500 px.
 - PDF with `fonts = :auto`: text of a page with Type 3 fonts is outlined by
   Ghostscript (TrueType figures are unchanged). EPS text is outlined and its
   bounding box is the page; translucent EPS colours are blended.
@@ -187,7 +291,14 @@ Export, windows and templates
   `96 * scale` dpi; SVG with physical units carries them (`88mm`).
 - `.tif`/`.tiff` are a format; an unwritable destination raises an
   `ArgumentError` before rendering.
-- HTML export embeds plotly.js (about 4.5 MB per file).
+- HTML export embeds plotly.js (about 4.5 MB per file). HTML and JSON
+  documents have un-panned 3-D cameras (they orbit the middle of the scene).
+- In EPS export a translucent area fill trace is drawn below the other traces
+  of its layer (it used to hide them).
+- `savefig` sends dense numeric arrays of 50 000 elements or more (`x`, `y`,
+  `z`, `r`, `theta`, `lat`, `lon`) to the export window as plotly.js typed
+  arrays; the picture is byte-identical and a 2000 x 2000 heatmap exports
+  about twice as fast.
 - `figsize!` stores exact, unrounded sizes; its errors are `ArgumentError`.
 - The `:publication` font family is "Times New Roman, Times, Liberation Serif,
   serif" (PDF embeds TrueType).
@@ -315,9 +426,10 @@ Styles and export
   - physical `units`, `dpi`, `background`, `tight`, `deterministic` and
     `timeout`;
   - several files from one render.
-- A precompile workload: the first figure of a session takes about half a
-  second instead of half a minute; the one-time precompilation takes minutes
-  longer and the package image grows by about 50 MB. Opt out with the
+- A precompile workload: the first figure of a session takes about a third
+  of a second instead of 15 seconds (low machine load, `benchmark/RESULTS.md`);
+  the one-time precompilation takes minutes longer and the package image grows
+  by about 80 MB (5.9 MB to 87.6 MB). Opt out with the
   `precompile_workload` preference. A benchmark suite lives in `benchmark/`.
 
 ### Fixed

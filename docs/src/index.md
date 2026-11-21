@@ -20,9 +20,9 @@ Pkg.add("PlotlySupply")
 ```
 
 The package precompiles a workload of the common calls, so the first figure
-of a session takes about half a second instead of half a minute. The price is
+of a session takes about a third of a second instead of 15 seconds. The price is
 a longer one-time precompilation after each install or update (minutes) and a
-larger package image (about 70 MB). To skip the workload, see
+larger package image (about 90 MB). To skip the workload, see
 [Performance](performance.md).
 
 ## Quick tour
@@ -138,9 +138,8 @@ plot_heatmap!(sf, rand(30, 30))      # each colorbar sits next to its own cell
 - **Decorations get their own room.** A colorbar, an outside legend, a panel
   title or label takes room from its own cell or from the figure margin, never
   from a neighbouring panel; a figure that already fits, and any position you
-  set yourself, is left alone. Choose the figure size first (journal
-  `figsize!`, or `width`/`height`): the layout is fitted for the size the figure
-  has when you call, and again at the export size.
+  set yourself, is left alone. `figsize!` after the content is fine: the room
+  is solved again for the new size, and once more at the export size.
 - **Mutators end in `!`** and take a `Plot`, a `SyncPlot` (the window updates)
   or a `SubplotFigure`. On a `SubplotFigure` they draw into the active cell, or
   into `row`/`col`; Cartesian mutators also take `secondary_y = true` and

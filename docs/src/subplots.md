@@ -142,7 +142,14 @@ colorbar!(sf2; row = 1, col = 2, title = "level", side = :bottom)
   bar moves it back to the right, so pass `side = :bottom` again.
 - A vertical bar is never drawn shorter than three lines of tick labels plus a
   title above or below it (at most the plot height); a shorter `len` is
-  raised to that.
+  raised to that. A `len` longer than the fitted plot box of an equal-aspect
+  cell is cut to the box: the bar is never longer than the field it serves.
+- A bar always shows at least two tick labels: when plotly's step rounding
+  would label the range once, two `tickvals` are written (marked by the
+  `nticks` next to them). Ticks you give through `colorbar!(...; ticks)`,
+  `restyle!` or `shared_colorbar!` replace them.
+- Cells that share a coloraxis, whose bar sits between grid cells, give up the
+  same room.
 - A math (`$...$`) title is an annotation next to the bar; it follows later
   `colorbar!` moves, but not `relayout!` edits of the bar.
 - In `shared_colorbar!`, an explicit `crange` is the colour limit of every
@@ -174,9 +181,8 @@ figure margin, never from a neighbouring cell. The rules:
   fitted plot box, not on the cell.
 - Sizes are estimated from the figure size in pixels (`layout.width`, else
   700), the font sizes and the text lengths, generously, and the layout is
-  fitted again on the copy that `savefig` exports at its real size. Set the
-  size first (`figsize!`, or `width`/`height`): a layout fitted at a
-  smaller size keeps the room it asked for.
+  fitted again on the copy that `savefig` exports at its real size. `figsize!` after
+  the content is fine: the room is solved again for the new size.
 - Known limits: a bottom bar released because its cell's domain is yours is not
   re-placed later; after you relayout a y domain a bar keeps its old `len`
   until the next `colorbar!` call; equal-aspect cells in one row can end up
@@ -184,6 +190,79 @@ figure margin, never from a neighbouring cell. The rules:
 - Overlays on a field (quiver, streamlines, scatter) widen the field's tight
   axes only where their anchor points lie outside the field, by 2.5 % of the
   span; arrow parts beyond the frame are clipped.
+- On polar and ternary figures with an explicit small margin, `title!` and font
+  changes grow the margin, never shrink it.
+
+<!-- D17 -->
+### Equal, aligned panels
+
+In a regular grid, whose cells have equal spans and no differing
+`column_widths`/`row_heights`, every panel ends with the same plot-area width
+and height, panels of one column share their x domain, and panels of one row
+share their y domain (the rule of matplotlib's constrained layout). The room
+that a decoration needs (axis title, tick labels, colorbar, cell legend, panel
+label, cell title) is taken per column gap and per row gap, the largest need
+of the cells along that gap, and the remaining length is divided equally. So a
+long y title on the right panel moves that gap, not just the right panel:
+
+```julia
+using PlotlySupply
+fig = with_style(:ieee) do
+    sf = subplots(1, 2; sync = false)
+    plot_scatter!(sf, 1:5, rand(5); row = 1, col = 1, ylabel = "power")
+    plot_scatter!(sf, 1:5, rand(5); row = 1, col = 2,
+        ylabel = "normalised transmitted power (a.u.)")
+    sf
+end
+```
+
+Unequal `column_widths`/`row_heights` keep their ratios (the shares are
+scaled, not equalised). Exempt are a domain you narrowed yourself, the fitted
+box of an equal-aspect cell (it stays centred in its equalised cell), spanning
+cells (they span the equalised columns) and insets. Decorations at the margin
+(a shared colorbar at the right, a figure legend, outer titles) take their room
+from the figure margin, never from the last column only.
+<!-- /D17 -->
+
+<!-- L11 -->
+### Fixed-aspect cells: compressed grids
+
+When the cells of a row (or column) are all fitted smaller than their slots in
+the same direction (equal-aspect maps, images), the slack is removed, as in
+matplotlib's `layout = "compressed"`: the rows move together to the gap their
+decorations need, and when the size of the figure along that direction is free
+(not given by you: the style's default, or `figsize!(fig, :journal; columns)`
+without a height or aspect) the page shrinks to the content; when it is fixed
+the block of cells is centred. A shared colorbar spans exactly the block of
+plot boxes it serves. `subplots(...; compress = false)` keeps the slots.
+<!-- /L11 -->
+
+<!-- D20 -->
+### The style cycle restarts in every cell
+
+As in matplotlib, every cell has its own cycle: the n-th trace that a
+PlotlySupply constructor adds to a cell takes the n-th entry of the style's
+cycle (colour, dash, marker), independent of the other cells, and the colour
+is written explicitly on the trace (plotly's colorway is figure-wide). Traces
+on a secondary axis of the cell continue the cell's cycle; an inset has its
+own; explicit `color`, `dash` or `marker_symbol` keywords win for that
+property, and the call still consumes one cycle position. A plain `Plot` is
+one cell and is unchanged.
+
+```julia
+using PlotlySupply
+fig = with_style(:ieee) do
+    sf = subplots(1, 2; sync = false)
+    for c in 1:2, k in 1:3                       # the same three series in both cells
+        plot_scatter!(sf, 1:5, rand(5) .+ k; row = 1, col = c, legend = "series $k")
+    end
+    sf
+end
+# 2.0 with D20: series 1, 2, 3 have the same colour and dash in both cells.
+# Before: cell 2 continued the cycle of cell 1 (series 1 of cell 2 was the
+# fourth entry, "dot" and "diamond"), so a shared legend was wrong for it.
+```
+<!-- /D20 -->
 
 ## Legends
 
@@ -209,8 +288,12 @@ cell legend moves to the position that covers the least data (matplotlib's
 the line and marker families, band and fill traces, secondary y axes, polar
 cells and insets. A legend placed with `set_legend!` or `relayout!` stays
 put; setting another default position turns the rule off. When no position is
-free, the one that covers least is taken (a legend wider than its cell can
-cross data). Cells with other trace types, category or date coordinates keep
+free, the legend goes below the cell when its entries fit in one row of the
+cell's width (the layout engine reserves the room); a legend wider than that
+keeps the position that covers least and can cross data: give it `ncols`, a
+`position`, or `legend_target = :figure`. To get the 1.x look back, place the
+legend yourself: `set_legend!(sf; position = :topright)` or
+`subplot_legends!(sf; position = :topright)`. Cells with other trace types, category or date coordinates keep
 the top right.
 
 `set_legend!(...; ncols = k)` lays the entries out in `k` columns (as

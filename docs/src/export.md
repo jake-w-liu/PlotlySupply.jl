@@ -39,13 +39,22 @@ savefig(fig, "figure.eps")
 
 `width` and `height` are in `units`: `:px` (default, 1/96 in), `:in`, `:cm`,
 `:mm` or `:pt` (1/72 in). Without them the figure's `layout.width`/`height`
-is used, else the active style's default size (a journal preset sets one),
-else 700 x 500 px. PDF and EPS pages have exactly that size in points. For
+is used, else the size of the style the figure carries (a journal preset sets
+one), else, for a figure that carries no style, the active style's default
+size, else 700 x 500 px. PDF and EPS pages have exactly that size in points. For
 PNG, JPEG and TIFF, `dpi` sets the resolution (it is an alternative to
 `scale`; PNG and JPEG with a physical size and no `dpi` record 96 x `scale`
 dpi, a pixel-size export records none):
 `width = 3.5, units = :in, dpi = 300` gives a 1050 px wide image that prints
 3.5 in wide.
+
+<!-- D18 -->
+Under a style that carries a physical size (the journal presets, and any
+style registered with a width in inches or millimetres) PNG, JPEG and WebP
+default to 300 dpi like TIFF when neither `dpi` nor `scale` is given: a 3.5 in
+`:ieee` figure is 1050 px wide, not 336. `:default` and `:publication` figures
+keep `scale = 1`, and `dpi` and `scale` always win.
+<!-- /D18 -->
 
 ```julia
 savefig(fig, "column.pdf"; width = 3.5, height = 2.5, units = :in)
@@ -66,7 +75,12 @@ embed CFF/OpenType-PS fonts (STIX, Latin Modern) only as Type 3 fonts, which
 many journal checks reject. When that happens and Ghostscript is on `PATH`,
 `:auto` converts all text of that page to outlines (it prints the same but
 cannot be selected or searched); without Ghostscript the Type 3 fonts are kept
-and a warning names them. `fonts = :embed` keeps Chromium's fonts as they are;
+and a warning names them. The trigger is any Type 3 font on the page, not only
+the figure's own: one label with a glyph that the figure's font lacks (a
+dingbat such as ✓ or ✗, some arrows, emoji) falls back to a system font that
+Chromium embeds as Type 3, and `:auto` then outlines the whole page without a
+warning. Use symbols the figure's font covers (math symbols go through
+MathJax) or `fonts = :embed`. `fonts = :embed` keeps Chromium's fonts as they are;
 `fonts = :outline` always draws outlines (needs Ghostscript). EPS text is
 always outlines unless `fonts = :embed`. Math is drawn as glyph paths in every
 format. Check a file with `pdffonts figure.pdf`.
@@ -128,4 +142,9 @@ plotly.js is patched when it is loaded (windows, image export and the HTML
 file all use the patched copy): math text groups get an explicit font family
 and size, so legend entries with math keep their size and SVG output keeps
 its quotes. An HTML file embeds that copy, so it needs no network for
-plotly.js itself.
+plotly.js itself. Maps are the other network use: `plot_scattergeo` and
+`plot_choropleth` fetch their topology (topojson) from `cdn.plot.ly`, and the
+tile maps (`plot_scattermap`, `plot_choroplethmap`) fetch their tiles, when the
+figure is shown or exported; offline, an HTML map draws no coastlines (a
+`scattergeo` shows nothing at all). Draw such figures on a machine with
+network access.

@@ -178,8 +178,9 @@ show them whole.
 ## 6. Example: a row of 3-D surfaces with one colorbar
 
 Three scenes at the Nature double column width; the surfaces share one colour
-scale (`shared_coloraxis = true`) and one colorbar. Give every scene the same
-camera: with the same `distance` the scenes are drawn at the same size.
+scale (`shared_coloraxis = true`) and one colorbar. Scenes of equal cells and
+equal box proportions are framed alike by the automatic camera, so nothing
+has to be set for them to be drawn at the same size.
 
 ```julia
 xs = range(-2, 2; length = 61)
@@ -190,8 +191,8 @@ fig_surf = with_style(:nature) do
         specs = fill(Spec(kind = "scene"), 1, 3))
     for (c, a) in enumerate((1.0, 2.0, 4.0))
         plot_surface!(sf, xs, xs, surf(a); row = 1, col = c, shared_coloraxis = true,
-            xlabel = "\$x\$", ylabel = "\$y\$", colorscale = "viridis", aspectmode = "cube")
-        view!(sf; row = 1, col = c, elev = 25, azim = -55, distance = 4.0)
+            xlabel = "\$x\$", ylabel = "\$y\$", zlabel = "\$u\$", colorscale = "viridis", aspectmode = "cube")
+        view!(sf; row = 1, col = c, elev = 25, azim = -55)
     end
     colorbar!(sf; coloraxis = :shared, title = "\$u\$", title_side = :right)
     panel_labels!(sf; labels = :abc, format = "{}", bold = true)
@@ -203,9 +204,11 @@ savefig(fig_surf, "surfaces.pdf")
 ![Three surfaces with one colorbar at Nature double-column width](assets/papers_surfaces.png)
 
 Scene axis titles and tick labels are drawn by WebGL and cannot typeset TeX:
-`$x$` becomes the plain letter. Without `view!` the camera distance is chosen
-to keep the labels inside the cell, which can draw a scene smaller than its
-cell; a fixed `distance` gives the same framing in every cell.
+`$x$` becomes the plain letter. The automatic camera distance keeps the box,
+its tick labels and its axis titles inside the cell and fills it; the three
+scenes get the same distance. A `distance` you give with `view!` is kept as
+given and also restores plotly's own label offsets and axis titles: use it
+only for a deliberate common camera.
 
 ## 7. Example: a schematic with annotations
 
@@ -252,10 +255,10 @@ savefig(fig_conv, "fig1.eps")                          # vector, text as outline
 
 | Format | What you get |
 |---|---|
-| PDF | Vector, page of exactly the figure's size in points (7.16 in is 515.52 pt). Text stays text in subset-embedded TrueType (CID) fonts when the figure's fonts are TrueType (Times New Roman, Arial, Liberation, DejaVu, ...). STIX or Latin Modern text would be Type 3, which many journal checks reject: with `fonts = :auto` (default) all text of such a page is then converted to outlines through Ghostscript (not selectable), or kept with a warning when `gs` is missing. `fonts = :embed` keeps Chromium's fonts, `fonts = :outline` always outlines. Math is drawn as glyph paths. |
+| PDF | Vector, page of exactly the figure's size in points (7.16 in is 515.52 pt). Text stays text in subset-embedded TrueType (CID) fonts when the figure's fonts are TrueType (Times New Roman, Arial, Liberation, DejaVu, ...). STIX or Latin Modern text would be Type 3, which many journal checks reject: with `fonts = :auto` (default) all text of such a page is then converted to outlines through Ghostscript (not selectable), or kept with a warning when `gs` is missing; a single label with a glyph that falls back to a system font (a dingbat such as ✓, some arrows, emoji) has the same effect, so keep to symbols of the figure's font. `fonts = :embed` keeps Chromium's fonts, `fonts = :outline` always outlines. Math is drawn as glyph paths. |
 | EPS | Vector through Ghostscript, `%%BoundingBox` is the page. Text is outlined (no fonts in the file) unless `fonts = :embed`. EPS has no transparency: translucent colours are blended over their background; a translucent mark over another mark covers it, so use PDF for overlapping translucent layers. |
 | TIFF (`.tif`, `.tiff`) | Baseline TIFF 6.0, lossless LZW, 8-bit RGB (RGBA with unassociated alpha for a translucent background), resolution tags set. 300 dpi unless `dpi` or `scale` says otherwise. |
-| PNG, JPEG | Exactly `round(width * scale)` pixels; `dpi` records the resolution (`dpi = 300` on a 3.5 in figure gives 1050 px). With physical sizes and no `dpi`, 96 x `scale` dpi is recorded. JPEG is lossy (quality 0.92). |
+| PNG, JPEG | Exactly `round(width * scale)` pixels; `dpi` records the resolution (`dpi = 300` on a 3.5 in figure gives 1050 px). With physical sizes and no `dpi`, 96 x `scale` dpi is recorded. <!-- D18 -->Under a journal preset (a style with a physical size) and with neither `dpi` nor `scale`, the default is 300 dpi, as for TIFF.<!-- /D18 --> JPEG is lossy (quality 0.92). |
 | SVG | With physical units the root `width`/`height` carry the unit (`88mm`); text is `<text>` in the figure's font (not embedded); math is glyph paths. |
 
 Exports are deterministic (`deterministic = true`): repeated exports are

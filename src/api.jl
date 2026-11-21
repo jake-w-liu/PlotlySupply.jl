@@ -2704,9 +2704,11 @@ current position.
 - Stored settings (`sf.legend_position`, `sf.legend_inset`, colours) are updated
   and used for cells that get traces later.
 
-Returns `fig` (the `SubplotFigure` for one). Invalid values throw an
-`ArgumentError` before anything is changed; `show` is not accepted (this
-modifies an existing figure).
+Returns `fig` (the `SubplotFigure` for one). Invalid values of the other
+keywords, and a `position` of the wrong type, throw an `ArgumentError` before
+anything is changed; an unknown position *name* is the exception: it warns and
+falls back to `:topright` (see Placement), so the figure is changed. `show` is
+not accepted (this modifies an existing figure).
 
 # Example
 ```julia
@@ -3159,7 +3161,8 @@ in [`set_legend!`](@ref); the 1.x names `legend_inset`, `legend_bgcolor`,
 
 `ncols` gives each cell's legend that many columns (fewer, with a warning,
 where they do not fit the cell). Returns `fig`. Invalid values throw an
-`ArgumentError` before anything is changed; `show` is not accepted, nor are
+`ArgumentError` before anything is changed, except that an unknown position
+name warns and falls back to `:topright`; `show` is not accepted, nor are
 `row`/`col` (this sets up the legend of every cell; use
 `set_legend!(sf; row, col, …)` for one cell's legend).
 
@@ -3741,6 +3744,10 @@ with `plot_*!` get a colorbar next to their own cell (see
 # Keywords
 - `sync::Bool=true`: `true` shows the figure in a live Electron window (the
   figure is a `SyncPlot`); `false` builds a plain `Plot` without a window.
+  Once the window of a `sync = true` grid is closed, every mutator on it
+  throws `InvalidStateException("SyncPlot window is not open")` (the figure
+  stays as it was and `savefig` works); to keep editing, build with
+  `sync = false`.
 - `title::AbstractString=""`: figure title, stored as `layout.title.text`
   in both modes (LaTeX/mathtext is rendered, see [`mathtext`](@ref)); `""`
   writes no title. (1.x wrote `"PlotlySupply"` here for `sync=false`.)
@@ -7833,6 +7840,13 @@ units on logarithmic axes (`yrange!(fig, (1, 1e5))`, not exponents),
 `autorange = false`, shared axes, scene cells. One-sided limits: `(lo,
 nothing)` fixes the bottom end (`ylim(bottom = 0)`), `(nothing, hi)` the top
 end, the other end follows the data (see [`xrange!`](@ref)).
+
+On an image or an `origin = :upper` heatmap the y axis is reversed. The
+`yrange = (0, 3)` keyword of [`plot_image`](@ref) / [`plot_heatmap`](@ref)
+keeps that orientation (it is stored as `[3, 0]`), but `yrange!(fig, (0, 3))`
+writes the direction it is given and turns the picture upside down (as
+matplotlib's `set_ylim(0, 3)` does on an `imshow` axis). To zoom a reversed
+axis, give the bounds reversed: `yrange!(fig, (3, 0))`.
 
 # Keywords
 - `row`, `col`, `inset`: as for [`xrange!`](@ref).
@@ -13136,7 +13150,7 @@ the function.
 x = range(0, 2π; length = 50)
 fig = plot_scatter(x, [sin.(x), cos.(x)]; legend = ["sin", "cos"],
 	mode = ["lines", "lines+markers"], marker_symbol = "o", marker_color = "white",
-	markevery = [nothing, 5], xlabel = "\$t\$", ylabel = "signal")
+	markevery = [nothing, 5], xlabel = "\\\$t\\\$", ylabel = "signal")
 ```
 """
 function plot_scatter(
@@ -13565,7 +13579,7 @@ Shared:
 ```julia
 n = 0:20
 fig = plot_stem(n, exp.(-n ./ 6) .* cos.(n); legend = "h[n]", baseline = 0,
-	marker_color = "white", xlabel = "\$n\$")
+	marker_color = "white", xlabel = "\\\$n\\\$")
 ```
 """
 function plot_stem(
@@ -13996,6 +14010,16 @@ Box plot. Returns a `PlotlyBase.Plot`, or a [`SyncPlot`](@ref) window when
   `ArgumentError` (pass `collect(eachcol(A))` for one series per column), and
   each series needs one group per sample.
 - An existing `boxmode` on the figure is never overwritten.
+
+#### Statistic
+The quartiles are plotly.js's `quartilemethod = "linear"` (a Hazen-type
+interpolation), not the type-7 rule of numpy and matplotlib: for
+`[1, 2, 3, 4, 10]` the box runs from 1.75 to 5.5 (matplotlib: 2 to 4). The
+whiskers end at the most extreme sample that lies within 1.5 times the
+interquartile range of the box; samples beyond them are outliers, so the same
+data can have different outliers than in matplotlib's `boxplot`. There is no
+`quartilemethod` keyword; set `"exclusive"` or `"inclusive"` on the trace
+with `update_traces!`.
 
 #### Keyword Arguments
 - `points::Union{Bool,AbstractString} = "outliers"`: sample points drawn next
@@ -27081,6 +27105,10 @@ Returns `nothing` (`sf` for a `SubplotFigure`).
 
 # Example
 ```julia
+square = Dict("type" => "FeatureCollection", "features" => [Dict(
+	"type" => "Feature", "id" => "A", "properties" => Dict(),
+	"geometry" => Dict("type" => "Polygon",
+		"coordinates" => [[[0, 0], [0, 5], [5, 5], [5, 0], [0, 0]]]))])
 fig = plot_scattermapbox([2.5], [2.5]; zoom=3)
 plot_choroplethmapbox!(fig, square, ["A"], [1.0]; marker_opacity=0.5)
 ```

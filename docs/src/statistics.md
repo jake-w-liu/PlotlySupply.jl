@@ -4,8 +4,10 @@
 
 [`plot_bar`](@ref) takes positions and values, or values only (positions
 `0:n-1`). A vector of vectors draws grouped series; `barmode = "stack"`
-stacks them. `orientation = "h"` draws horizontal bars. Error bars, value
-labels and hatching are keywords.
+stacks them. `orientation = "h"` draws horizontal bars and swaps the roles
+(plotly's convention, passed through): the values come first and the
+categories second, `plot_bar(values, categories; orientation = "h")`.
+Error bars, value labels and hatching are keywords.
 
 ```julia
 using PlotlySupply
@@ -83,6 +85,16 @@ fig = plot_histogram2d(x, y; nbinsx = 40, nbinsy = 40, colorscale = "viridis",
 series; each named series sits on its name. The two-argument form follows
 plotly: `x` gives the group of every sample. `points` shows the samples
 (`"all"`, `"outliers"`, `false`).
+
+The box statistic is plotly.js's `quartilemethod = "linear"` (a Hazen-type
+interpolation of the quartiles), not the type-7 rule of numpy and
+matplotlib: for `[1, 2, 3, 4, 10]` the box runs from 1.75 to 5.5, where
+matplotlib draws 2 to 4. Whiskers end at the most extreme sample within
+1.5 times the interquartile range of the box; samples beyond them are
+outliers. The classification of the same data as outliers can therefore
+differ from matplotlib's `boxplot`. `plot_box` has no `quartilemethod`
+keyword; pass `quartilemethod = "exclusive"` or `"inclusive"` through
+`update_traces!` to change it.
 
 ```julia
 data = [randn(100), randn(100) .+ 1, 2 .* randn(100)]

@@ -27,7 +27,8 @@ Rules:
 - 3-D scene axis titles and tick labels cannot be typeset (WebGL): their
   `$...$` is converted to Unicode and HTML.
 - Math is typeset by MathJax 2.7.9 from a CDN, so math labels need network
-  access in windows and exports.
+  access in windows and exports (geo maps need network for their topology,
+  see [Export](export.md)).
 
 ```julia
 mathtext("cost \\\$5 per unit")      # literal dollar sign
@@ -47,6 +48,16 @@ replaces all settings; `set_default_mathtext!()` restores the defaults.
 MathJax math renders at about 0.8 of the height of plain text of the same
 font size, so `"\\large"` matches the two closely; the `:publication` style
 uses it.
+
+<!-- L9 -->
+Under a style whose font is a serif or sans text face (the journal presets,
+`:publication`) `inherit_text_font` is on by default: the text part of a
+mixed string such as `"elements per side \$n\$"` is drawn in the figure's
+text font at the same size as a plain string at that site (legend entries,
+titles, axis titles, tick labels, colorbar titles, panel labels, annotations),
+and the math italics come from the math font. You no longer have to call
+`set_default_mathtext!(true; inherit_text_font = true)` yourself.
+<!-- /L9 -->
 
 ```julia
 set_default_mathtext!(true; size = "\\large", font = "TeX", inherit_text_font = true)
@@ -68,6 +79,17 @@ fig = plot_scatter(1:10, (1:10) .^ 2; xlabel = "n", ylabel = "\$n^2\$", title = 
 set_fonts!(fig; family = "Arial", title = 18, label = 14, tick = 11, legend = 11)
 set_fonts!(fig; tick = 7.5, units = :pt)   # 10 px tick labels
 ```
+
+<!-- D19 -->
+The layout engine sizes titles, legends, tick labels and colorbars from the
+width of their text, and it takes the family of the figure's style for that:
+there are advance tables for the families the presets use (Times New Roman,
+Arial and Helvetica, Verdana, DejaVu Sans, Computer Modern and STIX for math)
+and a conservative default for any other family. Under Times a title is
+therefore no longer wrapped, and no room reserved, for width it does not need
+(the estimate was 25 to 30 % too wide for Times before). The estimate is never
+more than 8 % above the drawn width and is not smaller than it.
+<!-- /D19 -->
 
 ## Titles
 
@@ -103,8 +125,9 @@ labels and title; the figure legend placed below the plot (`:outside_bottom`)
 moves up above the caption. Figure annotations are placed again at every
 finalize and on the copy `savefig` exports. `name`, `xshift` and `yshift` cannot be combined with
 `:figure` (use `offset`), and values outside `[0, 1]` raise an
-`ArgumentError`. Margins that change after the last `annotate!` (a legend
-moved below the plot, `tight_layout!`) are not followed until the next call.
+`ArgumentError`. A caption follows margins that change later (a legend moved
+below the plot, `figsize!`, `tight_layout!`, a longer x title): it is placed
+again at every finalize.
 Caption heights are estimates (1.4 em per line, 2.2 em for math with
 fractions or sub/superscripts).
 

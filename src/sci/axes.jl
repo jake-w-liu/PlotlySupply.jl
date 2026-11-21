@@ -998,7 +998,10 @@ const _AXES_TICKS_DOC_KEYWORDS = """
   the major length, on the side of the major ticks; on a log axis with
   explicit major ticks at mantissas 1..9 of every decade); `false` removes
   them; `nothing` leaves them. A new `direction` turns the minor ticks too.
-- `angle::Union{Nothing,Real} = nothing`: tick-label angle in degrees.
+- `angle::Union{Nothing,Real} = nothing`: tick-label angle in degrees,
+  positive CLOCKWISE (plotly's `tickangle`: `angle = 45` makes the labels
+  run down to the right). matplotlib's `rotation = 45` is counter-clockwise,
+  so it corresponds to `angle = -45`.
 - `direction = ""`: `"inside"`, `"outside"`, `"none"` (no tick marks, minor
   ticks included; matplotlib `tick_params(length = 0)`), or the Symbols; `""`
   keeps it. plotly.js has no ticks crossing the axis line (matplotlib
@@ -3457,6 +3460,7 @@ identity`, `ticks` at the group centres). Its `title` is drawn below that
 row, so give the axis title there and leave the primary's empty:
 
 ```julia
+fig = plot_scatter(1:7, rand(7))
 xticks!(fig, 1:7, ["−40", "−20", "+20", "+40", "−0.1", "+0.1", "+0.2"])
 secondary_xaxis!(fig, identity, identity; side = :bottom, ticks = [2.5, 6],
 	ticklabels = ["wall shift (nm)", "detuning (%)"], title = "parameter")

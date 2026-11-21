@@ -172,13 +172,19 @@ An empty `title`, `xlabel` or `ylabel` is no longer written at all.
 - [`subplot_legends!`](@ref) keywords lost their `legend_` prefix (`inset`,
   `bgcolor`, `bordercolor`, `borderwidth`); the old names still work with a
   deprecation warning.
-- The default legend of line plots goes to the corner that covers the least
-  data while the package default position is `:topright`; a legend you
-  place is never moved.
+- The default legend of line plots goes to the first free corner or edge
+  while the package default position is `:topright`, and outside the plot
+  (right, or below a narrow plot) when none is free; a legend you place is
+  never moved.
 - The default legend box follows the template (a dark box on dark
   templates).
 - Cell legends of a `SubplotFigure` at the default `:topright` also move to
-  the least-covered position when traces are appended to the cell, and `plot_band`
+  the first free position when traces are appended to the cell; when none is
+  free the legend goes below the cell (when its entries fit in one row of the
+  cell width) instead of staying in the corner, so a figure that 1.x drew with
+  the legend inside at the top right can differ. To restore the 1.x placement:
+  `set_legend!(sf; position = :topright)` or
+  `subplot_legends!(sf; position = :topright)`. `plot_band`
   and `fill = "toself"` traces count as data. A legend placed with
   `set_legend!`/`relayout!` stays put, and any other default position turns the
   rule off.
@@ -204,8 +210,44 @@ set_legend!(sf; position = :outside_bottom, dedupe = false)
 
 ## Subplots
 
+<!-- D17 -->
+- Regular grids keep equal, aligned panels: every cell of a grid with equal
+  spans ends with the same plot-area width and height, and the room a
+  decoration needs (a long y title, a colorbar, a cell legend) is taken per
+  column or row gap, not from one cell alone. 1.x figures whose right panel was
+  narrower because of its y title now have equal panels. Unequal
+  `column_widths`/`row_heights`, domains you set, equal-aspect boxes, spanning
+  cells and insets keep their old behaviour.
+<!-- /D17 -->
+<!-- L11 -->
+- Rows and columns of fixed-aspect cells are compressed, so equal-aspect maps no
+  longer leave bands of white between and around them; the page shrinks to the
+  content when its size is free. `subplots(...; compress = false)` keeps the
+  slots.
+<!-- /L11 -->
+<!-- D20 -->
+- The style cycle (colour, dash, marker) restarts in every cell. Before, a
+  `SubplotFigure` ran one cycle over the whole figure (cell 2 started where cell
+  1 stopped) and the colours came from plotly's figure-wide colorway:
+
+  ```julia
+  sf = subplots(1, 2; sync = false)
+  for c in 1:2, k in 1:3
+      plot_scatter!(sf, 1:5, rand(5) .+ k; row = 1, col = c, legend = "series $k")
+  end
+  # before: series 1 of cell 2 had the colour and dash of series 4
+  # now:    series 1, 2, 3 look alike in both cells
+  ```
+
+  Pass `color`, `dash` or `marker_symbol` to keep a particular look.
+<!-- /D20 -->
 - `subplots(...; sync = false)` writes no figure title; 1.x wrote
   "PlotlySupply". The window title is the separate `window_title` keyword.
+- `subplots` writes no figure size by default (`width = 0`, `height = 0`:
+  automatic); 1.x wrote `layout.width = 960` and `layout.height = 720`. The
+  size then comes from the style the figure carries (a journal preset's
+  column width) or from the window and the export (700 x 500 px). Pass
+  `width`/`height` for the 1.x size.
 - `update_xaxes!`, `update_yaxes!`, `update_scenes!`, `update_polars!`,
   `update_ternaries!`, `update_annotations!`, `update_shapes!` and
   `update_images!` with `row`/`col` change only that cell; 1.x changed every
@@ -268,6 +310,11 @@ update_xaxes!(sf; row = 1, col = 2, title_text = "x (right cell only)")
 - [`plot_stem`](@ref) draws two traces per series (markers, then stems),
   not one trace per point.
 - `tick0` is no longer written on axes.
+- `marker_symbol = "x"` (and `"+"`) are matplotlib codes now and draw thin
+  strokes (`"x-thin"`, `"cross-thin"`, 1.5 px wide); in 1.x `"x"` was plotly's
+  filled X. A marker that must look as in 1.x: `marker_symbol = "X"` (filled
+  X) or `"P"`/`"cross"` (filled plus). A trace built straight from PlotlyBase
+  keeps plotly's names.
 - Mismatched `x`/`y` lengths, matrices and complex data raise an
   `ArgumentError` (complex data points to [`plot_complex`](@ref)); stats
   functions given a matrix suggest `eachcol`.
@@ -364,8 +411,10 @@ fig2 = plot_heatmap(xs, ys, permutedims(Z))
 
 ## 3-D
 
-- `plot_quiver3d` cones use `sizemode = "scaled"`: their size follows the
-  point spacing, not the field's magnitude. Vectors with non-finite values
+- `plot_quiver3d` cones use `sizemode = "scaled"`: the largest cone is sized
+  relative to the point spacing, so a uniform rescaling of the field (units)
+  does not change the picture; each cone is still proportional to its
+  vector's length. Vectors with non-finite values
   are skipped with a warning.
 - Inputs are validated before the figure changes (`ArgumentError` for bad
   ranges, opacity, sizes, colours, colormap names, shapes, complex data).
@@ -456,12 +505,23 @@ fig3 = plot_scattergeo([2.35], [48.86]; trace = attr(hovertemplate = "%{lat}"))
 
 - `savefig` without `width`/`height` uses the figure's `layout.width` and
   `layout.height`; 1.x always used 700 x 500 px.
+<!-- D18 -->
+- Under a style with a physical size (the journal presets) PNG, JPEG and WebP
+  default to 300 dpi like TIFF when neither `dpi` nor `scale` is given (1.x:
+  96 dpi). `:default` and `:publication` keep `scale = 1`; `dpi` and `scale`
+  always win.
+<!-- /D18 -->
+- Layout-only `update_*` verbs on a `SyncPlot` send `Plotly.relayout` with the
+  changed leaves instead of `Plotly.react` of the whole figure (same result);
+  in EPS export a translucent area fill is drawn below the other traces of its
+  layer; HTML and JSON documents have un-panned 3-D cameras.
 - Exports are deterministic by default (`deterministic = true`).
 - `redraw!` rebuilds the page from the Julia figure.
 - At Julia exit, the Electron processes PlotlySupply started are closed and
   waited for (scripts take 1 to 4 s longer to exit).
-- A figure without a size exports at the active style's default size (a
-  journal preset sets one) instead of always 700 x 500 px.
+- A figure without a size exports at the size of the style it carries (a
+  journal preset sets one; a figure without a recorded style uses the active
+  style's size) instead of always 700 x 500 px.
 - PDF with `fonts = :auto` (the default): when Chromium embedded Type 3 fonts
   (STIX, Latin Modern) and Ghostscript is on `PATH`, all text of the page is
   converted to outlines and can no longer be selected. TrueType figures
@@ -488,6 +548,28 @@ savefig(fig, "default.png"; width = 700, height = 500)
 
 ## Templates, styles and math settings
 
+<!-- D21 -->
+- Tick labels never use SI prefixes: "2x10^-4" (not "200µ") and "5x10^3" (not
+  "5k"), because every template sets `exponentformat = "power"`. For the 1.x
+  labels: `update_yaxes!(fig; exponentformat = "SI")` (or `"B"`), or the same
+  keyword in `xticks!`/`yticks!`/`colorbar!`.
+<!-- /D21 -->
+<!-- D19 -->
+- Layout estimates of text width follow the font family of the style, so Times
+  titles and legends are no longer wrapped or given room for width they do not
+  need.
+<!-- /D19 -->
+<!-- L9 -->
+- Under the presets and `:publication` the text of mixed math labels is drawn
+  in the figure's font at the plain-text size (`inherit_text_font` is on by
+  default); `set_default_mathtext!(true; inherit_text_font = false)` restores
+  the earlier look.
+<!-- /L9 -->
+- A figure carries the style it was built under in
+  `layout.meta.plotlysupply.style`; mutators, the layout engine and `savefig`
+  read it, not the active style. `with_style(:x) do xlabel!(fig, "t") end` no
+  longer restyles a figure built under another style (a figure built under
+  `:default` adopts `:x` from then on).
 - On dark templates the axis lines, ticks and the default legend box use the
   template's colours instead of black and white.
 - `set_template!` also replaces the colours that were derived from the

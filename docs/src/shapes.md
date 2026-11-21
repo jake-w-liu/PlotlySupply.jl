@@ -55,7 +55,7 @@ fig = plot_scatter(Float64[], Float64[]; xrange = [0, 10], yrange = [0, 4],
     equalar = true)
 rectangle!(fig, 1, 1, 4, 3; rounded = 0.3, fillcolor = "#eeeeee", label = "Laser")
 rectangle!(fig, 6, 1, 9, 3; label = "Detector")
-arrow!(fig, 4, 2, 6, 2; text = "beam")
+arrow!(fig, 4, 2, 6, 2; text = "beam", offset = (0, 10))
 circle!(fig, 5, 3.5, 0.3; fillcolor = :gold)
 arc!(fig, 5, 2, 0.8, 30, 150; arrow = :end)
 axis_off!(fig)

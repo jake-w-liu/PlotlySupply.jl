@@ -45,6 +45,15 @@ closed, even when no variable refers to it any more. A hidden window
 collected. At Julia exit the Electron processes PlotlySupply started are
 closed.
 
+A closed window ends editing of its figure: every mutator on the `SyncPlot`
+(`xlabel!`, `plot_scatter!`, `relayout!`, ...), and on a `subplots(...)` grid
+made with the default `sync = true`, throws `InvalidStateException("SyncPlot
+window is not open")`, and the figure stays as it was. [`savefig`](@ref) still
+works. To keep building a figure after its window may be gone, build it
+without a window (`subplots(...; sync = false)`, or a `Plot` from the
+constructors; `sp.plot` is the plain `Plot` of a `SyncPlot`, `sf.fig` that of
+a grid) and open it with [`to_syncplot`](@ref) when you want to look at it.
+
 ```julia
 # fragment: opens a hidden window
 sp = to_syncplot(plot_scatter(1:3, [1, 4, 9]); show = false)
@@ -65,4 +74,5 @@ false` is passed to `to_syncplot` or `plot(...; sync = true)`.
 
 Building and exporting figures needs no window: `subplots(...; sync = false)`
 builds a grid without one, and [`savefig`](@ref) renders in a hidden window
-of its own. Math in windows and exports is typeset by MathJax from a CDN.
+of its own. Math in windows and exports is typeset by MathJax from a CDN, and
+geo maps load their topology from `cdn.plot.ly`.
