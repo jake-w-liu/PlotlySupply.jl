@@ -60,8 +60,12 @@ const _LT_ORDER_LINE = 30
 const _LT_ORDER_BELOW_LABEL = 5
 const _LT_ORDER_CAPTION = 40
 const _LT_ORDER_TITLE = 90
-# Paper tolerance for "at the domain edge" (positions written from domains).
-const _LT_EDGE_TOL = 1e-6
+# Paper tolerance for "at the domain edge" (positions written from domains):
+# the rounding to 6 decimals, and the room engine's snap, which keeps a
+# legend or annotation where it is when its new paper position is within
+# `_FIN_SNAP_PAPER` (seams-01: a cell legend left 1.3e-5 off its corner was
+# no longer recognised and never moved again). `_LEGEND_PLACEMENT_TOL`.
+const _LT_EDGE_TOL = _LEGEND_PLACEMENT_TOL
 # Paper tolerance against the plot box of an equal-aspect cell, which is
 # estimated from its domain (the fit pads the domain by `_fin_bias`), and
 # against a legend's estimated position along an edge.

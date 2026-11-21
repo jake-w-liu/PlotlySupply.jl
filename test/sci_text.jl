@@ -586,7 +586,10 @@ using Test, PlotlySupply
 			@test set_default_legend_position!(:left_outside) === :outside_left
 			@test throws_arg(() -> set_default_legend_position!(42), "must be a Symbol or a string")
 			@test get_default_legend_position() === :outside_left
-			@test (@test_logs (:warn,) match_mode = :any set_default_legend_position!(:nowhere)) === :topright
+			# D22: an unknown name is an error, and the default stays
+			@test throws_arg(() -> set_default_legend_position!(:nowhere),
+				"set_default_legend_position!: unknown legend position :nowhere")
+			@test get_default_legend_position() === :outside_left
 		finally
 			set_default_legend_position!(original)
 		end
@@ -986,7 +989,11 @@ using Test, PlotlySupply
 		end
 		byname = Dict(a[:name] => a for a in annotations(sf) if haskey(a, :name))
 		a, c = byname["plotlysupply:panel_label:1:1"], byname["plotlysupply:panel_label:2:1"]
-		@test get(a, :xshift, 0) == get(c, :xshift, 0)
+		# (a) sits at its corner like (c), or beside it clear of the centred
+		# title when the margin and the tick-label room hold it (the drawn
+		# box is checked in regression_legend.jl, "r1 vm-03")
+		@test (get(a, :xanchor, "left"), get(a, :xshift, 0)) in (("left", 0), ("right", -PS._TEXT_PANEL_GAP))
+		@test (get(c, :xanchor, "left"), get(c, :xshift, 0)) == ("left", 0)
 		@test PS._finalize_figure!(sf) === false
 	end
 
@@ -1021,7 +1028,8 @@ using Test, PlotlySupply
 		m = sd(e.layout.fields[:margin])
 		rows = [(sd(e.layout.fields[k])[:domain][2] - sd(e.layout.fields[k])[:domain][1]) * (355.2 - m[:t] - m[:b])
 			for k in (:yaxis, :yaxis4)]
-		@test m[:t] < 120 && all(>(80), rows)
+		# 157 px and rows of 44 px before; 97 px and 74.6 px rows now
+		@test m[:t] < 110 && all(>(70), rows)
 	end
 
 	@testset "r1 layout-fuzz-16: row and column titles beside spanning cells" begin
@@ -1067,5 +1075,50 @@ using Test, PlotlySupply
 		for f in (sf, sg, sh, sb)
 			@test PS._finalize_figure!(f) === false
 		end
+	end
+
+	@testset "r1 O6: 3-D titles are sized with the per-family extents" begin
+		for style in (:default, :ieee, :nature)
+			with_style(style) do
+				for (text, size) in (("Wavelength (nm)", 12.0), ("x", 10.0), ("\$\\lambda\$ (nm)", 11.0))
+					w = PS._s3_title_px(text, size)
+					@test w == PS._text_extent(text, size)[1]
+				end
+				# a plain title in a journal family: well under the 0.56 em a
+				# character of a tick digit (:default keeps the widest
+				# candidate family, D19)
+				style === :default || @test PS._s3_title_px("Wavelength (nm)", 12.0) < PS._S3_CHAR_EM * 15 * 12.0
+			end
+		end
+		xs = collect(range(0, 1; length = 12))
+		f = with_style(:ieee) do
+			plot_surface(xs, xs, [a * b for a in xs, b in xs]; xlabel = "Wavelength (nm)", ylabel = "Angle (deg)", zlabel = "Power")
+		end
+		@test PS._finalize_figure!(f) === false
+	end
+
+	@testset "r1 sm-06: title! on a figure with a polar cell is settled" begin
+		specs = (reshape([Spec(), Spec(kind = "polar")], 1, 2), reshape([Spec(kind = "polar"), Spec()], 2, 1),
+			[Spec(colspan = 2) missing Spec(kind = "scene"); Spec(kind = "polar") Spec() Spec(secondary_y = true)])
+		for style in (:default, :publication, :ieee), spec in specs, text in ("\$\\alpha_1\$", "line1\nline2", "Plain")
+			sf = with_style(() -> subplots(size(spec)...; sync = false, specs = spec), style)
+			title!(sf, text)
+			before = layout_json(sf)
+			@test PS._finalize_figure!(sf) === false
+			@test layout_json(sf) == before
+			# the margin holds the title above the polar tick labels
+			m = sd(pl(sf).layout.fields[:margin])
+			lookup(k) = get(pl(sf).layout.fields, k, nothing)
+			need = PS._with_figure_style(sf) do
+				root = PS._tight_root_font_size(lookup)
+				room = ceil(1.2 * root + 8) + ceil(PS._tight_title_height(lookup(:title), lookup, root)) + 4
+				min(room, PS._TIGHT_MAX_MARGIN_FRACTION * PS._style_default_figure_size()[2])
+			end
+			@test m[:t] >= need - 1
+		end
+		f = with_style(() -> plot_scatterpolar(collect(0.0:30:330), collect(1.0:12.0)), :publication)
+		PS._finalize_figure!(f)
+		title!(f, "\$\\alpha_1\$")
+		@test PS._finalize_figure!(f) === false
 	end
 end

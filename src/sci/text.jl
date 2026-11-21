@@ -2753,13 +2753,37 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 	# else below it as a column (`_legend_rule_placement`; plotly.js wraps a
 	# horizontal legend at the width of the whole grid, so a wider row would
 	# run under its neighbours).
+	# The column is weighed against the cell's grid band, not its plot area:
+	# the room a column beside the cell (or beside an equal panel of the
+	# grid, D17) takes narrows the plot area, and measured on that the rule
+	# moved the same legend below (Z72: a 160 px column beside cells of
+	# 366 px, which narrowed every cell to 331 px, so the third cell's
+	# legend went below its cell while the others stayed beside theirs).
+	band = max(w, width_px * _legend_cell_band_span(p.layout, xdom))
 	outside = _legend_row_width(p, legend_id, before) <= w ||
-		legend_size[1] + _ROOM_GAP > w / 2 ? :outside_bottom : :outside_right
+		legend_size[1] + _ROOM_GAP > band / 2 ? :outside_bottom : :outside_right
 	(legend_size[1] > w || legend_size[2] > h) && return outside
 	return _scat_best_legend_position(
 		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size;
 		obstacles = obstacles, outside = outside, inset = inset,
 	)
+end
+
+# Width (paper) of the grid columns PlotlyBase laid out under the x domain
+# `xdom` of a cell (`_subplot_grid_band`: before the finalizer gave any room
+# away), from the first to the last column it overlaps; 0 for a figure
+# without a grid.
+function _legend_cell_band_span(layout::Layout, xdom)
+	sp = layout.subplots
+	(sp.cols >= 1 && length(sp._widths) == sp.cols) || return 0.0
+	lo, hi = Inf, -Inf
+	for col in 1:sp.cols
+		a, b = _subplot_grid_band(sp, :x, col)
+		min(b, xdom[2]) - max(a, xdom[1]) > 1e-9 || continue
+		lo = min(lo, a)
+		hi = max(hi, b)
+	end
+	return hi > lo ? hi - lo : 0.0
 end
 
 # Placement of cell legend `legend_id` at `position` of the best-position

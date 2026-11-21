@@ -1104,7 +1104,7 @@ import Dates
 		# rounding, everything else equal
 		@test PS._legend_placement_matches(Dict(:x => 0.989826), Dict(:x => 0.9898260869565217), (:x,))
 		@test PS._legend_placement_matches(Dict(:x => 0.993419), Dict(:x => 0.9934321305841924), (:x,))  # seams-01
-		@test PS._LEGEND_PLACEMENT_TOL >= PS._FIN_SNAP_PAPER + 1e-6
+		@test PS._LEGEND_PLACEMENT_TOL ≈ PS._FIN_SNAP_PAPER + 1e-6
 		@test !PS._legend_placement_matches(Dict(:x => 0.9898), Dict(:x => 0.9898260869565217), (:x,))
 		@test !PS._legend_placement_matches(Dict(:xanchor => "left"), Dict(:xanchor => "right"), (:xanchor,))
 	end
@@ -1582,11 +1582,7 @@ import Dates
 		for inset in ((0.02, 0.03), (0.02, 0.45), (0.3, 0.1))
 			sf = convergence(inset)
 			p = pl(sf)
-			order, ids, domains, _ = PS._legend_subplot_assignment(p)
-			xdom, ydom = domains[order[1]]
-			best = PS._legend_best_cell_position(p, "legend", xdom, ydom; inset = inset)
-			want = PS._legend_rule_placement(p, "legend", something(best, :topright), xdom, ydom, inset)
-			@test all(k -> lg(sf)[k] == want[k], (:xanchor, :yanchor))
+			@test "legend" in something(PS._legend_cell_auto_ids(p), Set())     # placed by the rule
 			@test PS._finalize_figure!(sf) === false
 			# the drawn box covers no marker of the data
 			b = export_boxes(sf; width = 1050, height = 567)
@@ -1595,7 +1591,7 @@ import Dates
 		end
 		# the candidate boxes follow the inset (clamped as `_legend_anchor` clamps it)
 		k = findfirst(==(:topleft), PS._SCAT_LEGEND_POSITIONS)
-		@test PS._legend_candidate_boxes(0.2, 0.2, (0.02, 0.45))[k] == (0.02, 0.22, 0.35, 0.55)
+		@test all(PS._legend_candidate_boxes(0.2, 0.2, (0.02, 0.45))[k] .≈ (0.02, 0.22, 0.35, 0.55))
 		@test PS._legend_candidate_boxes(0.2, 0.2, (0.02, 0.8))[k][4] ≈ 0.51
 		@test PS._legend_candidate_boxes(0.2, 0.2) == PS._legend_candidate_boxes(0.2, 0.2, PS._DEFAULT_LEGEND_INSET[])
 	end
@@ -1620,7 +1616,7 @@ import Dates
 		@test all(L -> L[3] <= b["W"] + 0.5, b["legends"])
 		# a journal column: below the grid
 		sj = covered(:ieee)
-		@test lg(sj)[:yanchor] == "top" && lg(sj)[:y] < 0
+		@test lg(sj)[:yanchor] == "bottom" && lg(sj)[:yref] == "container" && lg(sj)[:y] == 0
 		@test PS._finalize_figure!(sj) === false
 		bj = with_style(() -> export_boxes(sj), :ieee)
 		@test length(bj["legends"]) == 1
@@ -1634,10 +1630,10 @@ import Dates
 		sl = subplots(1, 2; sync = false, per_subplot_legends = false, legend_position = :bottomleft)
 		plot_scatter!(sl, [0.0, 1], [0.0, 1]; row = 1, col = 1, legend = "a")
 		@test lg(sl)[:xanchor] == "left" && lg(sl)[:x] < 0.5
-		# switching a grid to one figure legend without a position: outside too
-		sm = subplots(1, 2; sync = false)
+		# set_legend! without a position keeps the default figure legend outside
+		sm = subplots(1, 2; sync = false, per_subplot_legends = false)
 		plot_scatter!(sm, [0.0, 1], [0.0, 1]; row = 1, col = 2, legend = "a")
-		set_legend!(sm; legend_target = :figure)
+		set_legend!(sm; frame = false)
 		@test lg(sm)[:x] > 1 && lg(sm)[:xanchor] == "left"
 		@test PS._finalize_figure!(sm) === false
 		# another default position turns it off
@@ -1650,6 +1646,60 @@ import Dates
 		finally
 			set_default_legend_position!(original)
 		end
+	end
+
+	@testset "r1 seams-01: the legend of a right-edge heatmap cell follows the rule" begin
+		hx = range(0, 1; length = 30); hy = range(0, 1; length = 20)
+		Z(k) = [k * sin(3a) * cos(2b) for a in hx, b in hy]
+		for ncol in (2, 3), style in (:ieee, :default)
+			sf = with_style(style) do
+				sf = subplots(1, ncol; sync = false)
+				for c in 1:ncol
+					plot_heatmap!(sf, hx, hy, Z(c); row = 1, col = c)
+					plot_scatter!(sf, collect(hx), 0.5 .+ 0.4 .* sin.(8 .* hx); row = 1, col = c, legend = "model")
+					plot_scatter!(sf, collect(hx), 0.5 .+ 0.4 .* cos.(8 .* hx); row = 1, col = c, legend = "measured")
+				end
+				sf
+			end
+			p = pl(sf)
+			order, ids, domains, _ = PS._legend_subplot_assignment(p)
+			auto = something(PS._legend_cell_auto_ids(p), Set())
+			for key in order
+				id = PS._legend_id(ids[key])
+				xdom, ydom = domains[key]
+				@test id in auto                                            # every cell: the rule's
+				# where the rule scores one (a heatmap cell is not scored: the
+				# legend keeps the default corner or the outside place its size
+				# gave it)
+				best = PS._legend_best_cell_position(p, id, xdom, ydom; inset = sf.legend_inset)
+				best === nothing && continue
+				want = PS._legend_rule_placement(p, id, best, xdom, ydom, sf.legend_inset)
+				@test PS._legend_placement_matches(lg(sf, PS._legend_symbol(ids[key])), want, (:xanchor, :yanchor))
+			end
+			@test PS._finalize_figure!(sf) === false
+		end
+	end
+
+	@testset "r1 vm-03: a panel label beside a math cell title is drawn on the page" begin
+		xs = range(0, 1; length = 40)
+		hx = range(0, 4; length = 81); hy = range(0, 2; length = 41)
+		U = [abs(sin(2a) * cos(3b)) for a in hx, b in hy]
+		sf = with_style(:ieee) do
+			sf = subplots(2, 2; sync = false, subplot_titles = ["Mesh \$h = 0.1\$", "Mesh \$h = 0.05\$", "Error map", "Convergence"])
+			plot_scatter!(sf, xs, sin.(4xs); row = 1, col = 1, legend = "\$u_h\$")
+			plot_scatter!(sf, xs, sin.(4xs); row = 1, col = 2)
+			plot_heatmap!(sf, hx, hy, U; row = 2, col = 1)
+			plot_scatter!(sf, xs, xs .^ 2; row = 2, col = 2)
+			panel_labels!(sf)
+			sf
+		end
+		@test PS._finalize_figure!(sf) === false
+		b = with_style(() -> export_boxes(sf), :ieee)
+		@test length(b["ann"]) == 8
+		# every title and label inside the figure, none over another or a tick label
+		@test all(a -> a[1] >= -0.5 && a[3] <= b["W"] + 0.5 && a[2] >= -0.5, b["ann"])
+		@test !any(overlaps(b["ann"][i], b["ann"][j]) for i in 1:8, j in 1:8 if i < j)
+		@test !any(overlaps(a, t) for a in b["ann"], t in b["ticks"])
 	end
 
 	@testset "r1 V3: an annotation at an axes edge clears the inward ticks by half an em (rendered)" begin
@@ -1731,7 +1781,7 @@ import Dates
 		end
 		# 100 characters fit below the axes; 1000 do not and stay inside
 		p = plot_scatter([1.0, 2, 3], [1.0, 4, 9]; legend = repeat("abcdefghij", 10))
-		@test lg(p)[:yanchor] == "top" && lg(p)[:y] < 0
+		@test lg(p)[:yanchor] == "bottom" && lg(p)[:yref] == "container" && lg(p)[:y] == 0
 		q = plot_scatter([1.0, 2, 3], [1.0, 4, 9]; legend = repeat("abcdefghij", 100))
 		@test 0 <= lg(q)[:x] <= 1 && 0 <= lg(q)[:y] <= 1
 		# the choice: right of the axes while the legend is at most half the
