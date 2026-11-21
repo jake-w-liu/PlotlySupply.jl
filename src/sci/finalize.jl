@@ -2440,8 +2440,19 @@ function _fin_cap_margin_sum!(layout::Layout, updates::AbstractDict{Symbol}, W::
 		qa = haskey(updates, ka) ? va : 0.0
 		qb = haskey(updates, kb) ? vb : 0.0
 		share = min(excess / (qa + qb), 1.0)
-		qa > 0 && (updates[ka] = _style_number(floor(va - qa * share)))
-		qb > 0 && (updates[kb] = _style_number(floor(vb - qb * share)))
+		for (key, letter, v, q) in ((ka, a, va, qa), (kb, b, vb, qb))
+			q > 0 || continue
+			capped = floor(v - q * share)
+			# Capped back to the margin the figure has: nothing to write (a
+			# rewrite of the same value on every pass left a small figure
+			# with a bottom colorbar never settled).
+			current = _cmn_mapping_get(margin, letter)
+			if _fin_isfinite_real(current) && abs(Float64(current) - capped) < 0.5
+				delete!(updates, key)
+			else
+				updates[key] = _style_number(capped)
+			end
+		end
 	end
 	return updates
 end

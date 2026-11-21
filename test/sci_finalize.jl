@@ -3363,3 +3363,18 @@ end
 		@test _SFN._finalize_export_copy(p, opts(p)) === p
 	end
 end
+
+@testset "a margin capped back to its value is not rewritten (small figure, bottom bar)" begin
+	# :ieee 336 x 158 px: the bottom bar of a fitted field asks for more
+	# bottom margin than the plot can give; capped back to the margin the
+	# figure has, nothing is written and the figure settles.
+	Z = [sin(a) * cos(b) for a in range(0, 3; length = 40), b in range(0, 2; length = 30)]
+	f = with_style(:ieee) do
+		f = plot_heatmap(collect(range(0, 6; length = 40)), collect(range(0, 1; length = 30)), Z; equalar = true)
+		colorbar!(f; side = :bottom, title = "intensity")
+		f
+	end
+	@test _sfn_settled(f)
+	W, H = _sfn_size(f)
+	@test _sfn_margin(f, :t) + _sfn_margin(f, :b) <= H - 64
+end
