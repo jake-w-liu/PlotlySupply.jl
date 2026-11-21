@@ -2148,11 +2148,15 @@ _sfn_margin(fig, side) = _SFN._cmn_mapping_get(get(_sfn_plot(fig).layout.fields,
 		with_style(st) do
 			# The right margin of a grid without a bar.
 			plain = subplots(1, 1; sync = false)
-			plot_scatter!(plain, 1:3, 1:3)
+			plot_scatter!(plain, 1:3, 1:3; legend = "data")
 			r0 = _sfn_margin(plain, :r)
-			# A cell bar at the paper edge raises it; moved below, it is given back.
+			# A cell bar at the paper edge raises it (held for the inside
+			# legend, `_lt_hold_pushed_margins!`; a bar alone is left to
+			# plotly's automargin since its empty legend no longer counts,
+			# layout-fuzz-01); moved below, it is given back.
 			sf = subplots(1, 1; sync = false)
 			plot_heatmap!(sf, Z)
+			plot_scatter!(sf, [0.0, 1.0, 2.0], [0.0, 1.0, 1.0]; legend = "data")
 			raised = _sfn_margin(sf, :r)
 			@test raised > r0
 			colorbar!(sf; side = :bottom)
@@ -2187,6 +2191,7 @@ _sfn_margin(fig, side) = _SFN._cmn_mapping_get(get(_sfn_plot(fig).layout.fields,
 	# The record survives a JSON round trip (String keys).
 	sf = subplots(1, 1; sync = false)
 	plot_heatmap!(sf, Z)
+	plot_scatter!(sf, [0.0, 1.0, 2.0], [0.0, 1.0, 1.0]; legend = "data")
 	rec = _SFN._room_margin_record(sf.plot.layout)
 	@test haskey(rec, :r) && rec[:r][2] == _sfn_margin(sf, :r)
 	meta = _SFN._symbol_dict(sf.plot.layout.fields[:meta])
@@ -3330,4 +3335,31 @@ const _SFN_ANNOTATIONS_JS = raw"""
 		plot_scatter(collect(1.0:10), collect(1.0:10); xlabel = "x", ylabel = "y")
 	end
 	@test _sfn_margin(fig, :t) == 4
+end
+
+@testset "savefig draws a settled grid as it is (export copy, Q27 hold)" begin
+	# A grid holds the margins its bars push whatever its legends list: the
+	# export copy (a Plot) finds the grid settled as the SubplotFigure did,
+	# so `savefig` draws the figure itself, not a re-fitted copy.
+	opts(p) = _SFN._normalize_export_options(p, pairs((; scale = 2)))
+	hg = subplots(2, 2; sync = false)
+	for r in 1:2, c in 1:2
+		plot_heatmap!(hg, [1.0 2.0; 3.0 4.0]; row = r, col = c)
+	end
+	fm = with_style(:aps) do
+		sf = subplots(3, 1; sync = false, shared_xaxes = true, width = 325, height = 330)
+		for r in 1:3
+			plot_pcolormesh!(sf, collect(range(0, 6; length = 31)), collect(range(0, 1.8; length = 11)), rand(31, 11);
+				row = r, col = 1, crange = (0, 1), equalar = true)
+			ylabel!(sf, "\$y\$ (\$\\mu\$m)"; row = r, col = 1)
+		end
+		xlabel!(sf, "\$x\$ (\$\\mu\$m)"; row = 3, col = 1)
+		shared_colorbar!(sf; title = "normalized \$|E_z|^2\$", title_side = :right)
+		sf
+	end
+	for fig in (hg, fm)
+		@test _sfn_settled(fig)
+		p = _sfn_plot(fig)
+		@test _SFN._finalize_export_copy(p, opts(p)) === p
+	end
 end

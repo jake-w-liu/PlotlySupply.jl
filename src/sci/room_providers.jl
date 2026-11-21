@@ -911,8 +911,10 @@ function _room_place!(plan, ::Val{:legend_titles})
 	# A grid holds them always: its cells' legends come and go with their
 	# entries, and a hold that followed them gave a grid of fields without
 	# entries its margins on some passes only (layout-fuzz-01), and a 6 x 6
-	# grid of heatmaps a quarter more allocations per finalize (Q27).
-	(plan.ctx.sf !== nothing || any(d -> d.role in (:inside_legend, :cell_legend, :figure_legend), decorations)) &&
+	# grid of heatmaps a quarter more allocations per finalize (Q27). Read
+	# from the layout's grid, not the SubplotFigure: the export copy of a
+	# grid (a Plot) must find it settled as the figure did.
+	(!single || any(d -> d.role in (:inside_legend, :cell_legend, :figure_legend), decorations)) &&
 		_lt_hold_pushed_margins!(plan)
 	for d in decorations
 		if d.role === :line
