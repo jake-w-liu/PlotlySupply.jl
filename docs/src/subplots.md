@@ -193,7 +193,6 @@ figure margin, never from a neighbouring cell. The rules:
 - On polar and ternary figures with an explicit small margin, `title!` and font
   changes grow the margin, never shrink it.
 
-<!-- D17 -->
 ### Equal, aligned panels
 
 In a regular grid, whose cells have equal spans and no differing
@@ -222,9 +221,7 @@ box of an equal-aspect cell (it stays centred in its equalised cell), spanning
 cells (they span the equalised columns) and insets. Decorations at the margin
 (a shared colorbar at the right, a figure legend, outer titles) take their room
 from the figure margin, never from the last column only.
-<!-- /D17 -->
 
-<!-- L11 -->
 ### Fixed-aspect cells: compressed grids
 
 When the cells of a row (or column) are all fitted smaller than their slots in
@@ -235,9 +232,7 @@ decorations need, and when the size of the figure along that direction is free
 without a height or aspect) the page shrinks to the content; when it is fixed
 the block of cells is centred. A shared colorbar spans exactly the block of
 plot boxes it serves. `subplots(...; compress = false)` keeps the slots.
-<!-- /L11 -->
 
-<!-- D20 -->
 ### The style cycle restarts in every cell
 
 As in matplotlib, every cell has its own cycle: the n-th trace that a
@@ -258,11 +253,10 @@ fig = with_style(:ieee) do
     end
     sf
 end
-# 2.0 with D20: series 1, 2, 3 have the same colour and dash in both cells.
-# Before: cell 2 continued the cycle of cell 1 (series 1 of cell 2 was the
-# fourth entry, "dot" and "diamond"), so a shared legend was wrong for it.
+# Series 1, 2, 3 have the same colour and dash in both cells. In 1.x cell 2
+# continued the cycle of cell 1 (series 1 of cell 2 was the fourth entry,
+# "dot" and "diamond"), so a shared legend was wrong for it.
 ```
-<!-- /D20 -->
 
 ## Legends
 
@@ -285,16 +279,19 @@ set_legend!(sf; position = :outside_bottom, ncols = 2)    # one legend, two entr
 Where the default legend goes: while the default position is `:topright`, a
 cell legend moves to the position that covers the least data (matplotlib's
 `loc = "best"`) each time traces are appended to the cell. This applies to
-the line and marker families, band and fill traces, secondary y axes, polar
-cells and insets. A legend placed with `set_legend!` or `relayout!` stays
+the line and marker families, band and fill traces, bars, boxes and violins,
+secondary y axes, polar cells and insets. A legend placed with `set_legend!` or `relayout!` stays
 put; setting another default position turns the rule off. When no position is
 free, the legend goes below the cell when its entries fit in one row of the
 cell's width (the layout engine reserves the room); a legend wider than that
 keeps the position that covers least and can cross data: give it `ncols`, a
 `position`, or `legend_target = :figure`. To get the 1.x look back, place the
 legend yourself: `set_legend!(sf; position = :topright)` or
-`subplot_legends!(sf; position = :topright)`. Cells with other trace types, category or date coordinates keep
-the top right.
+`subplot_legends!(sf; position = :topright)`. Bars, boxes and violins, and
+category or date coordinates, are scored like the other data. Cells with
+histograms or other trace types (heatmaps, contours, stacked areas, fills to
+another trace), and polar cells with sectors, a hole or fills to another
+trace, keep the top right.
 
 `set_legend!(...; ncols = k)` lays the entries out in `k` columns (as
 legend groups named `plotlysupply:col:...`, so clicking an entry toggles that

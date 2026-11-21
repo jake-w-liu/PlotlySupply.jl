@@ -23,9 +23,17 @@ The trace stores the resolved colour stops instead of the name.
 | `"RdBu"` | blue to red | dark red to dark blue | `"RdBu_r"` |
 
 `"Reds"`, `"Hot"`, `"Jet"`, `"Rainbow"`, `"Viridis"` and `"Cividis"` keep their
-direction (the colours of the ColorBrewer scales are matplotlib's, so the end
-colours differ slightly from plotly.js's: `"Blues_r"` ends at `#F7FBFF`, not
-at plotly.js's grey). `"Bluered"`, `"Picnic"`, `"Portland"`, `"Electric"`,
+direction, but their colours are matplotlib's too. For the ColorBrewer scales
+the end colours differ slightly from plotly.js's (`"Blues_r"` ends at
+`#F7FBFF`, not at plotly.js's grey). `"Hot"`, `"Jet"` and `"Rainbow"` are
+matplotlib's `hot`, `jet` and `rainbow` and look visibly different from
+plotly.js's scales of those names: plotly.js's `"Hot"` has four stops (black,
+red at 0.3, yellow at 0.6, white), matplotlib's starts at `#0B0000` and is
+red-orange (`#FF5A00`) in the middle; plotly.js's `"Jet"` starts at
+`rgb(0,0,131)`, matplotlib's at `#000080`; plotly.js's `"Rainbow"` runs from
+purple `rgb(150,0,90)` through blue to red, matplotlib's from violet `#8000FF`
+through green-cyan to red. To keep the 1.x picture, pass plotly.js's stops
+(below). `"Bluered"`, `"Picnic"`, `"Portland"`, `"Electric"`,
 `"Blackbody"` and `"Earth"` are still plotly.js's own. The rule applies to
 every function with a `colorscale`: 2-D, 3-D, statistical, hierarchy and map
 functions, `shared_colorbar!` and `colorbar!`.
@@ -45,6 +53,15 @@ fig.data[1][:colorscale][1]                    # [0.0, "#053061"], not "RdBu"
 fig2 = plot_heatmap(U; colorscale = "Greys_r") # black at the low end, as in 1.x
 # exactly plotly.js's stops, if the 1.x colours matter:
 fig3 = plot_heatmap(U; colorscale = [(0, "rgb(0,0,0)"), (1, "rgb(255,255,255)")])
+# plotly.js 2.35's "Hot", "Jet" and "Rainbow" (the 1.x pictures):
+hot_1x = [(0, "rgb(0,0,0)"), (0.3, "rgb(230,0,0)"), (0.6, "rgb(255,210,0)"),
+    (1, "rgb(255,255,255)")]
+jet_1x = [(0, "rgb(0,0,131)"), (0.125, "rgb(0,60,170)"), (0.375, "rgb(5,255,255)"),
+    (0.625, "rgb(255,255,0)"), (0.875, "rgb(250,0,0)"), (1, "rgb(128,0,0)")]
+rainbow_1x = [(0, "rgb(150,0,90)"), (0.125, "rgb(0,0,200)"), (0.25, "rgb(0,25,255)"),
+    (0.375, "rgb(0,152,255)"), (0.5, "rgb(44,255,150)"), (0.625, "rgb(151,255,0)"),
+    (0.75, "rgb(255,234,0)"), (0.875, "rgb(255,111,0)"), (1, "rgb(255,0,0)")]
+fig4 = plot_heatmap(U; colorscale = hot_1x)
 ```
 
 To find the places to change in a code base, search for `colorscale` and for
@@ -158,6 +175,19 @@ fig.layout[:title_text]          # "Run 3"
 
 An empty `title`, `xlabel` or `ylabel` is no longer written at all.
 
+The figure title is centred over the plot area (`title.x = 0.5`,
+`xref = "paper"`), with its top at the top of the figure (`yref =
+"container"`) and the margin grown to hold it; 1.x left it to plotly.js,
+which centres it on the whole figure. A figure with a wide left margin (a long
+y label) therefore shows its title further right than in 1.x. To get the 1.x
+position back, or any other, set the title attributes; later calls keep them:
+
+```julia
+fig = plot_scatter(1:3, [1, 2, 3]; title = "Run 3", ylabel = "a long y label")
+relayout!(fig; title_x = 0.5, title_xref = "container")   # centred on the figure, as in 1.x
+title!(fig, "Run 3"; align = :left)                       # flush with the plot area's left edge
+```
+
 ## Legends
 
 - A trace without a name (`legend` not given, or blank) is hidden from the
@@ -172,10 +202,12 @@ An empty `title`, `xlabel` or `ylabel` is no longer written at all.
 - [`subplot_legends!`](@ref) keywords lost their `legend_` prefix (`inset`,
   `bgcolor`, `bordercolor`, `borderwidth`); the old names still work with a
   deprecation warning.
-- The default legend of line plots goes to the first free corner or edge
-  while the package default position is `:topright`, and outside the plot
-  (right, or below a narrow plot) when none is free; a legend you place is
-  never moved.
+- The default legend of line, marker, area, bar, box and violin figures (on
+  numeric, category or date axes) goes to the first free corner or edge while
+  the package default position is `:topright`, and outside the plot (right,
+  or below a narrow plot) when none is free; a legend you place is never
+  moved. In 1.x it stayed at the top right; histograms and the other trace
+  types still keep it there. Polar figures follow the rule too.
 - The default legend box follows the template (a dark box on dark
   templates).
 - Cell legends of a `SubplotFigure` at the default `:topright` also move to
@@ -210,7 +242,6 @@ set_legend!(sf; position = :outside_bottom, dedupe = false)
 
 ## Subplots
 
-<!-- D17 -->
 - Regular grids keep equal, aligned panels: every cell of a grid with equal
   spans ends with the same plot-area width and height, and the room a
   decoration needs (a long y title, a colorbar, a cell legend) is taken per
@@ -218,14 +249,10 @@ set_legend!(sf; position = :outside_bottom, dedupe = false)
   narrower because of its y title now have equal panels. Unequal
   `column_widths`/`row_heights`, domains you set, equal-aspect boxes, spanning
   cells and insets keep their old behaviour.
-<!-- /D17 -->
-<!-- L11 -->
 - Rows and columns of fixed-aspect cells are compressed, so equal-aspect maps no
   longer leave bands of white between and around them; the page shrinks to the
   content when its size is free. `subplots(...; compress = false)` keeps the
   slots.
-<!-- /L11 -->
-<!-- D20 -->
 - The style cycle (colour, dash, marker) restarts in every cell. Before, a
   `SubplotFigure` ran one cycle over the whole figure (cell 2 started where cell
   1 stopped) and the colours came from plotly's figure-wide colorway:
@@ -240,7 +267,6 @@ set_legend!(sf; position = :outside_bottom, dedupe = false)
   ```
 
   Pass `color`, `dash` or `marker_symbol` to keep a particular look.
-<!-- /D20 -->
 - `subplots(...; sync = false)` writes no figure title; 1.x wrote
   "PlotlySupply". The window title is the separate `window_title` keyword.
 - `subplots` writes no figure size by default (`width = 0`, `height = 0`:
@@ -307,8 +333,9 @@ update_xaxes!(sf; row = 1, col = 2, title_text = "x (right cell only)")
 
 ## Lines and statistics
 
-- [`plot_stem`](@ref) draws two traces per series (markers, then stems),
-  not one trace per point.
+- [`plot_stem`](@ref) draws two traces per series, not one trace per point:
+  the stems traces of a call come first in `fig.data` (so they draw below
+  the markers), then the marker traces, which carry the legend entries.
 - `tick0` is no longer written on axes.
 - `marker_symbol = "x"` (and `"+"`) are matplotlib codes now and draw thin
   strokes (`"x-thin"`, `"cross-thin"`, 1.5 px wide); in 1.x `"x"` was plotly's
@@ -505,12 +532,10 @@ fig3 = plot_scattergeo([2.35], [48.86]; trace = attr(hovertemplate = "%{lat}"))
 
 - `savefig` without `width`/`height` uses the figure's `layout.width` and
   `layout.height`; 1.x always used 700 x 500 px.
-<!-- D18 -->
-- Under a style with a physical size (the journal presets) PNG, JPEG and WebP
+- Under a style with a physical size (the journal presets) PNG and JPEG
   default to 300 dpi like TIFF when neither `dpi` nor `scale` is given (1.x:
   96 dpi). `:default` and `:publication` keep `scale = 1`; `dpi` and `scale`
   always win.
-<!-- /D18 -->
 - Layout-only `update_*` verbs on a `SyncPlot` send `Plotly.relayout` with the
   changed leaves instead of `Plotly.react` of the whole figure (same result);
   in EPS export a translucent area fill is drawn below the other traces of its
@@ -548,23 +573,17 @@ savefig(fig, "default.png"; width = 700, height = 500)
 
 ## Templates, styles and math settings
 
-<!-- D21 -->
 - Tick labels never use SI prefixes: "2x10^-4" (not "200µ") and "5x10^3" (not
   "5k"), because every template sets `exponentformat = "power"`. For the 1.x
   labels: `update_yaxes!(fig; exponentformat = "SI")` (or `"B"`), or the same
   keyword in `xticks!`/`yticks!`/`colorbar!`.
-<!-- /D21 -->
-<!-- D19 -->
 - Layout estimates of text width follow the font family of the style, so Times
   titles and legends are no longer wrapped or given room for width they do not
   need.
-<!-- /D19 -->
-<!-- L9 -->
 - Under the presets and `:publication` the text of mixed math labels is drawn
   in the figure's font at the plain-text size (`inherit_text_font` is on by
   default); `set_default_mathtext!(true; inherit_text_font = false)` restores
   the earlier look.
-<!-- /L9 -->
 - A figure carries the style it was built under in
   `layout.meta.plotlysupply.style`; mutators, the layout engine and `savefig`
   read it, not the active style. `with_style(:x) do xlabel!(fig, "t") end` no
@@ -610,10 +629,13 @@ savefig(fig, "default.png"; width = 700, height = 500)
 ## Errors
 
 Invalid input raises an `ArgumentError` whose message starts with the public
-function name (`"plot_scatter!: ..."`). Unknown keywords and `show` on
-mutators raise an `ArgumentError` instead of a `MethodError` in the mutators,
-3-D, mesh and map functions; the 2-D constructors still raise a
-`MethodError` for an unknown keyword.
+function name (`"plot_scatter!: ..."`).
+<!-- PENDING errors-inputs-05 apib-02 -->
+An unknown keyword, and `show` passed to a mutator, raise an `ArgumentError`
+naming the keyword in every PlotlySupply function (constructors, mutators,
+3-D, mesh and map functions) instead of a `MethodError`; a keyword value of
+the wrong type is an `ArgumentError` too.
+<!-- /PENDING -->
 
 ```julia
 fig = plot_scatter(1:3, [1, 2, 3])

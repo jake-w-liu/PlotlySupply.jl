@@ -10814,6 +10814,14 @@ end
 Return the `ElectronCall` message channel attached to `sp`'s window, for
 sending custom messages between Julia and the Electron renderer. The channel
 is closed when the window closes.
+
+# Example
+```julia
+# fragment: opens a window
+sp = plot_scatter(1:3, [1, 4, 9]; show = true)
+ch = msgchannel(sp)                        # an ElectronCall message channel
+close(sp)
+```
 """
 function msgchannel(sp::SyncPlot)
 	ec = _syncplot_backend(sp)
@@ -10826,6 +10834,14 @@ end
 
 Toggle the Chromium developer-tools panel of `sp`'s Electron window. Throws an
 `InvalidStateException` when the window is not open.
+
+# Example
+```julia
+# fragment: opens a window
+sp = plot_scatter(1:3, [1, 4, 9]; show = true)
+toggle_devtools(sp)                        # open the developer tools
+toggle_devtools(sp)                        # and close them again
+```
 """
 function toggle_devtools(sp::SyncPlot)
 	_require_open_syncplot_window(sp)

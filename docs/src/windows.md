@@ -76,3 +76,50 @@ Building and exporting figures needs no window: `subplots(...; sync = false)`
 builds a grid without one, and [`savefig`](@ref) renders in a hidden window
 of its own. Math in windows and exports is typeset by MathJax from a CDN, and
 geo maps load their topology from `cdn.plot.ly`.
+
+The hidden window is still an Electron process. On macOS and Windows that
+needs nothing extra; on Linux without a display server run Julia inside a
+virtual X server, for example
+`xvfb-run -a -s "-screen 0 1920x1080x24" julia script.jl`. `using PlotlySupply`
+alone starts no Electron process and loads no export code.
+
+## Downloads and working offline
+
+The Electron binary is installed with the package (Electron\_jll). The
+plotly.js bundle (plotly.js-dist-min 2.35.2, from the npm registry, checked
+against its SHA-256) is a lazy artifact: it is downloaded the first time a
+window is opened or a figure is exported, not at install. To prepare a machine
+that will work offline, fetch it once while online:
+
+```julia
+# fragment: downloads the plotly.js artifact
+using Pkg, PlotlySupply
+Pkg.Artifacts.ensure_artifact_installed("plotlyjs",
+    joinpath(pkgdir(PlotlySupply), "Artifacts.toml"))
+```
+
+Offline, windows and PDF, SVG, PNG, JPEG, TIFF and EPS exports work once the
+artifact is present; math labels and geo maps still need their CDNs (MathJax,
+`cdn.plot.ly`).
+
+## The Electron sandbox
+
+Electron windows normally run with Chromium's sandbox. Some CI runners and
+containers cannot start a sandboxed renderer, so PlotlySupply starts its
+Electron application without the sandbox (ElectronCall's
+`development_config()`: context isolation on, Node integration off, web
+security on, sandbox off) when one of these environment variables is `1`,
+`true`, `yes` or `on` (any case) at the time the first window or export
+starts the application:
+
+`GITHUB_ACTIONS`, `CI`, `CODEX_SANDBOX`, `CODEX_AUTOMATION`,
+`CLAUDE_CODE_SANDBOX`, `AGENT_SANDBOX`, `SANDBOX` and
+`PLOTLYSUPPLY_DISABLE_ELECTRON_SANDBOX`.
+
+The pages PlotlySupply renders are its own (the figure's JSON and the bundled
+plotly.js; MathJax and map topology from their CDNs), so the risk is small,
+but the renderer then has the rights of the Julia process. Do not set these
+variables to show figures built from untrusted input (for example a figure
+JSON or HTML labels from a web form) on a machine you care about. An
+application you pass yourself (`app = ...` to `to_syncplot` or `subplots`)
+is used with the settings you gave it.

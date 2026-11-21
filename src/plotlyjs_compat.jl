@@ -105,6 +105,13 @@ PlotlyJS-style subplot constructor. Forwards `kwargs` to `PlotlyBase.Subplots`
 (e.g. `rows`, `cols`, `shared_xaxes`, `specs`, `column_widths`) and returns a
 `Plot` with the package default template and Cartesian axis styling applied.
 For the MATLAB-like helper that returns a mutable canvas, see [`subplots`](@ref).
+
+# Example
+```julia
+fig = make_subplots(rows = 1, cols = 2)
+add_trace!(fig, scatter(x = 1:3, y = [1, 4, 9]); row = 1, col = 1)
+add_trace!(fig, bar(x = ["a", "b"], y = [2, 3]); row = 1, col = 2)
+```
 """
 function make_subplots(; kwargs...)
 	fig = plot(_plotlysupply_subplot_layout(Subplots(; kwargs...)))
@@ -2269,17 +2276,24 @@ What each file contains:
 - `units::Symbol = :px`: unit of `width`/`height`: `:px` (CSS pixel, 1/96 in),
   `:in`, `:cm`, `:mm` or `:pt` (1/72 in). The pdf/eps page is exact in points
   for any size; a raster gets the nearest whole number of pixels.
-- `scale::Real = 1`: uniform magnification. png/jpeg/tiff get `scale` times
+- `scale::Real`: uniform magnification. png/jpeg/tiff get `scale` times
   more pixels; svg/pdf/eps get a `scale` times larger page with the same
-  layout (text, markers and lines grow with it).
+  layout (text, markers and lines grow with it). Default: 1, except for
+  rasters drawn at 300 dpi by default (see `dpi`).
 - `dpi::Real`: raster resolution in dots per inch, an alternative to `scale`
   (passing both is an error). png/jpeg/tiff are drawn at `scale = dpi/96` and
   record the resolution (PNG `pHYs` chunk, JPEG JFIF density, TIFF
   resolution tags), so `width = 3.5, units = :in, dpi = 300` gives a
-  1050-px-wide image that prints 3.5 in wide. Without `dpi`, png/jpeg record
-  `96 * scale` dpi when `units` is physical (none for `:px`, as in 1.x), and
-  tiff always records its resolution. Vector formats keep their physical size
-  and ignore `dpi`.
+  1050-px-wide image that prints 3.5 in wide. With neither `dpi` nor
+  `scale`, tiff is drawn at 300 dpi, and so are png and jpeg when the style
+  the figure carries (the active style for a figure that carries none) has a
+  physical width: every journal preset (`:ieee`, `:aps`, ...) and any style
+  registered with a width. A 3.5 in `:ieee` figure is then 1050 px wide and
+  records 300 dpi; under `:default` and `:publication` png/jpeg keep scale 1.
+  Otherwise png/jpeg record `96 * scale` dpi when `units` is physical (none
+  for `:px`, as in 1.x), and tiff always records its resolution. `dpi` and
+  `scale` always win. Vector formats keep their physical size and ignore
+  `dpi`.
 - `fonts::Symbol = :auto`: text in pdf and eps. pdf: `:auto` keeps text as
   text in subset-embedded TrueType (CID) fonts when the figure's fonts are
   TrueType (Arial, Times New Roman, Verdana, Liberation, DejaVu, …); Chromium
@@ -3358,6 +3372,13 @@ meshgrid
 Serialize to JSON — re-exported from `JSON.jl` via PlotlyBase; e.g.
 `json(p, 2)` or `json(p; pretty = true)` pretty-prints a figure's JSON
 specification (`pretty` and the other keywords are those of `JSON.json`).
+
+# Example
+```julia
+fig = plot_scatter(1:3, [1.0, NaN, 3.0])
+s = json(fig)                              # NaN is written as null
+occursin("null", s)                        # true
+```
 """
 json
 

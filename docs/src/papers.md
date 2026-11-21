@@ -103,7 +103,7 @@ fig_conv = with_style(:ieee) do
         legend = ["\$p=1\$", "\$p=2\$", "\$p=3\$"],
         xlabel = "mesh size \$h\$", ylabel = "error \$\\|e\\|\$")
     slope_guide!(sf, 2; row = 1, col = 1, x = (h[end], h[2]),
-        through = (h[4], 0.25 * errs[2][4]), label = "\$O(h^2)\$")
+        through = (h[4], 0.1 * errs[2][4]), label = "\$O(h^2)\$")
     plot_scatter!(sf, 1 ./ h, runtime; row = 1, col = 2, xscale = "log", yscale = "log",
         mode = "lines+markers",
         legend = "assembly", xlabel = "unknowns \$N\$ (relative)", ylabel = "time (s)")
@@ -258,16 +258,17 @@ savefig(fig_conv, "fig1.eps")                          # vector, text as outline
 | PDF | Vector, page of exactly the figure's size in points (7.16 in is 515.52 pt). Text stays text in subset-embedded TrueType (CID) fonts when the figure's fonts are TrueType (Times New Roman, Arial, Liberation, DejaVu, ...). STIX or Latin Modern text would be Type 3, which many journal checks reject: with `fonts = :auto` (default) all text of such a page is then converted to outlines through Ghostscript (not selectable), or kept with a warning when `gs` is missing; a single label with a glyph that falls back to a system font (a dingbat such as ✓, some arrows, emoji) has the same effect, so keep to symbols of the figure's font. `fonts = :embed` keeps Chromium's fonts, `fonts = :outline` always outlines. Math is drawn as glyph paths. |
 | EPS | Vector through Ghostscript, `%%BoundingBox` is the page. Text is outlined (no fonts in the file) unless `fonts = :embed`. EPS has no transparency: translucent colours are blended over their background; a translucent mark over another mark covers it, so use PDF for overlapping translucent layers. |
 | TIFF (`.tif`, `.tiff`) | Baseline TIFF 6.0, lossless LZW, 8-bit RGB (RGBA with unassociated alpha for a translucent background), resolution tags set. 300 dpi unless `dpi` or `scale` says otherwise. |
-| PNG, JPEG | Exactly `round(width * scale)` pixels; `dpi` records the resolution (`dpi = 300` on a 3.5 in figure gives 1050 px). With physical sizes and no `dpi`, 96 x `scale` dpi is recorded. <!-- D18 -->Under a journal preset (a style with a physical size) and with neither `dpi` nor `scale`, the default is 300 dpi, as for TIFF.<!-- /D18 --> JPEG is lossy (quality 0.92). |
+| PNG, JPEG | Exactly `round(width * scale)` pixels; `dpi` records the resolution (`dpi = 300` on a 3.5 in figure gives 1050 px). With physical sizes and no `dpi`, 96 x `scale` dpi is recorded. Under a journal preset (a style with a physical size) and with neither `dpi` nor `scale`, the default is 300 dpi, as for TIFF. JPEG is lossy (quality 0.92). |
 | SVG | With physical units the root `width`/`height` carry the unit (`88mm`); text is `<text>` in the figure's font (not embedded); math is glyph paths. |
 
 Exports are deterministic (`deterministic = true`): repeated exports are
 byte-identical. The figure you pass is never modified. See [Export](export.md)
 for every keyword.
 
-I checked the IEEE example above with `pdfinfo` (page 252 x 189 pt), `pdffonts`
-(one embedded CID TrueType font, no Type 3) and the TIFF header (2100 x 1575
-pixels at `dpi = 600`).
+The files of the convergence example (`fig_conv`, 7.16 in wide) check out
+with the usual tools: `pdfinfo fig1.pdf` gives a page of 515.52 x 195.9 pt,
+`pdffonts fig1.pdf` lists only embedded CID TrueType subsets of Times New
+Roman (no Type 3), and `fig1.tif` is 4296 x 1632 pixels at 600 dpi.
 
 ## 9. Fonts, math and sizes in points
 

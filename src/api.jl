@@ -484,6 +484,14 @@ names such as `Symbol("plotly_white+xgridoff")` are possible) or the
 
 The active [`PlotStyle`](@ref) follows this default unless the style names a
 template of its own (the built-in `:default` style does not).
+
+# Example
+```julia
+get_default_template()                     # :plotly_white
+set_default_template!("simple_white")
+get_default_template()                     # :simple_white
+set_default_template!()                    # back to the package default
+```
 """
 get_default_template() = _DEFAULT_TEMPLATE[]
 
@@ -495,6 +503,14 @@ Return the package-wide default legend position (a `Symbol` such as
 where [`set_legend!`](@ref) puts a legend that has none yet, and the default of
 `subplots(...; legend_position)`. Change it with
 [`set_default_legend_position!`](@ref).
+
+# Example
+```julia
+get_default_legend_position()              # :topright
+set_default_legend_position!(:bottomleft)
+fig = plot_scatter(1:3, [1, 2, 3]; legend = "data")    # legend at the bottom left
+set_default_legend_position!()             # back to :topright
+```
 """
 get_default_legend_position() = _DEFAULT_LEGEND_POSITION[]
 
@@ -3759,8 +3775,11 @@ with `plot_*!` get a colorbar next to their own cell (see
   the window size. `0` leaves the layout size automatic (the figure fills the
   window, which defaults to 960 × 720; `savefig` then uses its own default
   size). Negative or non-finite values throw an `ArgumentError`.
-- `show::Bool=true`, `app=nothing`: window visibility and ElectronCall
-  application (`sync=true` only; validated in both modes).
+- `show::Bool=true`: window visibility (`sync=true` only; it must be a
+  `Bool` in both modes).
+- `app=nothing`: the ElectronCall application that opens the window
+  (`sync=true` only; `nothing` uses PlotlySupply's shared application). It is
+  passed to ElectronCall unchecked and ignored with `sync=false`.
 - `height_ratios=nothing`: relative row heights listed TOP-TO-BOTTOM as drawn
   (`[3, 1]` makes row 1 three times as tall as row 2); a vector or tuple with
   one positive finite number per row. Cannot be combined with `row_heights`;
@@ -3832,8 +3851,8 @@ with `plot_*!` get a colorbar next to their own cell (see
   cell. Insets of other kinds (maps, scenes, ...) are passed to PlotlyBase
   unchanged and get no `inset` id.
 
-Every option is validated before the figure (or window) is created; invalid
-values throw an `ArgumentError`. Figure-level settings are not changed by the
+Every option except `app` is validated before the figure (or window) is
+created; invalid values throw an `ArgumentError`. Figure-level settings are not changed by the
 per-cell `plot_*!` mutators: set them here or with `relayout!(sf; ...)`.
 
 # Example
@@ -3997,6 +4016,15 @@ figure data and never refreshes the window.
 Out-of-range or `Bool` indices throw an `ArgumentError` and leave the active
 cell unchanged. Empty cells (`specs` entries of `missing`) may be selected,
 but plotting into them throws.
+
+# Example
+```julia
+sf = subplots(2, 3; sync = false)
+subplot!(sf, 2, 1)                         # cell (2, 1)
+plot_scatter!(sf, 1:3, [1, 4, 9])
+subplot!(sf, 6)                            # index 6 = cell (2, 3)
+plot_bar!(sf, [3.0, 1.0, 2.0])
+```
 """
 function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
 	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = "subplot!")
@@ -8660,6 +8688,12 @@ a `Plot`, a [`SyncPlot`](@ref) or a `SubplotFigure` (active cell, or
 `row`/`col`) and accepts the same keywords. Returns `nothing` for a
 `Plot`/`SyncPlot` and the figure for a `SubplotFigure`. Its errors name
 `plot!`.
+
+# Example
+```julia
+fig = plot(1:10, rand(10); legend = "a")
+plot!(fig, 1:10, rand(10); legend = "b", dash = "dash")
+```
 """
 function plot!(
 	sf::SubplotFigure,
@@ -13303,9 +13337,10 @@ function _stem_segments(x::AbstractVector, y::AbstractVector, baseline::Real)
 	return sx, sy
 end
 
-# Shared body of plot_stem / plot_stem!: one marker ("head") trace per series,
-# followed by one stems trace per series. Each series' two traces share a
-# unique legend group; the stems never get a legend entry or hover label.
+# Shared body of plot_stem / plot_stem!: one marker ("head") trace and one
+# stems trace per series; the stems traces of a call are placed in front of its
+# heads, so they draw below them. Each series' two traces share a unique legend
+# group; the stems never get a legend entry or hover label.
 function _stem_impl!(
 	fig,
 	x,
@@ -14019,7 +14054,7 @@ whiskers end at the most extreme sample that lies within 1.5 times the
 interquartile range of the box; samples beyond them are outliers, so the same
 data can have different outliers than in matplotlib's `boxplot`. There is no
 `quartilemethod` keyword; set `"exclusive"` or `"inclusive"` on the trace
-with `update_traces!`.
+with `restyle!(fig, 1; quartilemethod = "exclusive")`.
 
 #### Keyword Arguments
 - `points::Union{Bool,AbstractString} = "outliers"`: sample points drawn next
@@ -21473,6 +21508,13 @@ Append filled-area trace(s) to an existing `Plot`, [`SyncPlot`](@ref) or
 [`inset!`](@ref)). `grid = nothing` keeps the current grid. With
 `stack = true` the new series stack on the earlier `stack = true` areas of the
 same axes.
+
+# Example
+```julia
+x = 0:10
+fig = plot_area(x, rand(11); stack = true, legend = "a")
+plot_area!(fig, x, rand(11); stack = true, legend = "b")
+```
 """
 function plot_area!(
 	fig,

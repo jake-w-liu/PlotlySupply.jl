@@ -93,8 +93,8 @@ matplotlib draws 2 to 4. Whiskers end at the most extreme sample within
 1.5 times the interquartile range of the box; samples beyond them are
 outliers. The classification of the same data as outliers can therefore
 differ from matplotlib's `boxplot`. `plot_box` has no `quartilemethod`
-keyword; pass `quartilemethod = "exclusive"` or `"inclusive"` through
-`update_traces!` to change it.
+keyword; set it on the trace afterwards with
+`restyle!(fig, 1; quartilemethod = "exclusive")` (or `"inclusive"`).
 
 ```julia
 data = [randn(100), randn(100) .+ 1, 2 .* randn(100)]

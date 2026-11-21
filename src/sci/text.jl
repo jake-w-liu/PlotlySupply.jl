@@ -2572,10 +2572,11 @@ end
 # least is used (ties keep the candidate order, top right first): a legend
 # wider than the room beside a polar disk covers a tick label, and a large
 # legend in a small Cartesian cell can still cross data (place it with
-# `set_legend!(sf; row, col, position)`, e.g. `:outside_right`, then). Cells
-# the estimate does not model (other trace types, categorical or date
-# coordinates, polar sectors, holes or fills to another trace) keep the top
-# right corner.
+# `set_legend!(sf; row, col, position)`, e.g. `:outside_right`, then). Bar,
+# box and violin traces and categorical or date coordinates are scored like
+# the other data; cells with any other trace type (histograms, heatmaps, ...),
+# stacked or fill-to-another-trace areas, and polar cells the estimate does
+# not model (sectors, holes, fills to another trace) keep the top right.
 
 # Angular tick labels of a polar cell (measured on plotly.js 2.35.2 renders,
 # 12 px font): one every 45 degrees (whatever the size) unless `dtick` or

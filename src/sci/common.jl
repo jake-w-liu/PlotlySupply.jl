@@ -936,9 +936,13 @@ either order): every `s * base^k` with `s` in `subs` that falls inside
   `(1, 2, 5)` gives 1-2-5 ticks, `1:9` every integer multiple.
 - `base::Real = 10`: logarithm base, finite and `> 1`.
 
-Integer mantissas of an integral base are correctly rounded, so
+Integer mantissas of an integral base are correctly rounded while
+`base^|k|` is exact in `Float64` (base 10: exponents `|k| <= 22`), so
 `log_ticks(1e-3, 1; subs=(1, 2, 5))` is exactly
-`[0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]`.
+`[0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]`. Beyond that a
+tick can differ from the decimal literal by one ulp (`3.0000000000000005e25`
+for `3e25`), and ticks below about `1e-308` (subnormal numbers) are not
+returned.
 Throws `ArgumentError` for non-positive or non-finite bounds, an invalid
 `base` or `subs`, or a span of more than 2000 powers of `base`.
 

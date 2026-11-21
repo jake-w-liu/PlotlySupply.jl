@@ -560,8 +560,11 @@ Numeric fields use `0` as "unset"; negative and non-finite values throw an
 # How a style meets the constructor keywords
 The active style is applied when a figure is created; existing figures are not
 restyled. A constructor's explicit keywords then win: `fontsize` sets the base
-size (`layout.font.size`, keeping the style's family and colour) while the
-style's per-role sizes stay (change those with [`set_fonts!`](@ref)); a
+size (`layout.font.size`, keeping the style's family and colour), and when the
+style sets per-role sizes (the journal presets, `:publication`) each of them
+(title, axis titles, tick labels, legend) is scaled by `fontsize` / the
+style's base size, so the style's proportions stay (set single roles with
+[`set_fonts!`](@ref)); a
 `grid` keyword other than the constructor default `true` (`false`, `:x`,
 `:y`, `:both`, `:none`) wins over the style's `grid`; `title`/`xlabel`/`ylabel`
 get the style's role sizes. Spine,

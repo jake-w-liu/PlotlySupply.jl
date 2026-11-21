@@ -23,7 +23,12 @@ for (verb, extra) in (
 	(:extendtraces!, "Appends points to existing traces."),
 	(:prependtraces!, "Prepends points to existing traces."),
 )
-	@eval @doc $(string("`", verb, "(fig, ...)`: the PlotlyBase verb (see its own help above).\n\n", _COMPAT_VERB_NOTE, "\n", extra, "\n")) PlotlyBase.$verb
+	# Attached to the `SyncPlot`/`SubplotFigure` signature, not to the bare
+	# binding: PlotlyBase documents some of these verbs (`restyle!`, `update!`)
+	# with a signature-free docstring, and a second one of ours would be the same
+	# (binding, signature) pair, which Documenter's strict build rejects as a
+	# duplicate on the compatibility page.
+	@eval @doc $(string("`", verb, "(fig, ...)`: the PlotlyBase verb (see its own help above).\n\n", _COMPAT_VERB_NOTE, "\n", extra, "\n")) PlotlyBase.$verb(::Union{SyncPlot, SubplotFigure}, args...)
 end
 
 @doc """
@@ -33,3 +38,33 @@ traces are added to the Julia figure and the open window in one transaction
 [`SubplotFigure`](@ref) the traces go to the figure as given (use `row`/`col`
 mutators such as [`plot_scatter!`](@ref) to draw into a cell).
 """ PlotlyBase.addtraces!
+
+@doc """
+	update_yaxes!(sf::SubplotFigure, with=attr(); row=nothing, col=nothing, secondary_y=false, inset=nothing, kwargs...)
+
+Update y axes of a [`SubplotFigure`](@ref); the keywords are Plotly y-axis
+attributes (`type = "log"`, `title_text = "t"`, …).
+
+- Without `row`/`col`: every y axis of the figure is updated; the active cell
+  is unchanged.
+- With `row` and `col` (pass both): only that cell's y axis is updated
+  (`secondary_y = true`: its secondary y axis), and the cell becomes the active
+  cell. A cell without a y axis (scene, polar, ...) is an `ArgumentError` and
+  nothing changes; a `domain` value is ignored with a warning (the grid owns
+  the domains).
+- `inset = k`: only the y axis of inset `k` of `sf.insets` ([`inset!`](@ref),
+  `subplots(...; insets)`) is updated, and its host cell becomes the active
+  cell; `row`/`col` may be omitted (when given they must name the host cell).
+  An unknown id, or `secondary_y = true` with an inset, is an `ArgumentError`.
+
+Returns `sf`. [`update_xaxes!`](@ref) is the x-axis counterpart.
+
+# Example
+```julia
+sf = subplots(1, 2; sync=false)
+plot_scatter!(sf, 1:3, [1.0, 10, 100]; row=1, col=2)
+update_yaxes!(sf; row=1, col=2, type="log")       # only cell (1, 2)
+k = inset!(sf, (0.6, 0.6, 0.35, 0.35); row=1, col=2)
+update_yaxes!(sf; inset=k, showgrid=false)        # only the inset's y axis
+```
+""" PlotlyBase.update_yaxes!(::SubplotFigure)

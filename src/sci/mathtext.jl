@@ -203,6 +203,14 @@ Return the package-wide label settings as a `NamedTuple`
 
 The package default is
 `(enabled = true, size = "", font = "", inherit_text_font = nothing)`.
+
+# Example
+```julia
+get_default_mathtext().enabled             # true
+set_default_mathtext!(true; font = "TeX")
+get_default_mathtext().font                # "TeX"
+set_default_mathtext!()                    # back to the package defaults
+```
 """
 function get_default_mathtext()
 	settings = _MATHTEXT_SETTINGS[]

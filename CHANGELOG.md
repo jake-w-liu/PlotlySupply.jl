@@ -247,40 +247,40 @@ Styles and layout
   `add_layout_image!`, `add_recession_bands!`) send `Plotly.relayout` with the
   changed leaves instead of `Plotly.react` of the whole figure; the model result
   is identical.
-- <!-- D17 -->Regular grids keep equal, aligned panels: in a grid of equal cells
+- Regular grids keep equal, aligned panels: in a grid of equal cells
   every panel has the same plot-area width and height, and the room a decoration
   needs is taken per column and row gap (the largest need along it) instead of
   from the neighbouring cell only; `column_widths`/`row_heights` ratios,
   narrowed domains, equal-aspect boxes, spanning cells and insets are exempt.
   Figures whose right panel used to give up room alone now have equal
-  panels.<!-- /D17 -->
-- <!-- L11 -->Rows and columns of fixed-aspect cells are compressed (no bands of
+  panels.
+- Rows and columns of fixed-aspect cells are compressed (no bands of
   white between and around equal-aspect maps; the page shrinks to the content
   when its size is free); `subplots(...; compress = false)` keeps the
-  slots.<!-- /L11 -->
-- <!-- D20 -->The style cycle restarts in every subplot cell (colour, dash and
+  slots.
+- The style cycle restarts in every subplot cell (colour, dash and
   marker; the colour is written on the trace). 1.x grids that relied on
   figure-wide colours (cell 2 continuing the colours of cell 1) change; give
-  `color` explicitly to keep them.<!-- /D20 -->
-- <!-- D21 -->Tick labels never use SI prefixes: every template sets
+  `color` explicitly to keep them.
+- Tick labels never use SI prefixes: every template sets
   `exponentformat = "power"` on Cartesian, colorbar, polar, ternary and scene
   axes ("2x10^-4", not "200µ"; "5x10^3", not "5k"). Ask for the old labels with
-  `exponentformat = "SI"` (or `"B"`).<!-- /D21 -->
-- <!-- D19 -->Text extents follow the font family of the style (advance tables
+  `exponentformat = "SI"` (or `"B"`).
+- Text extents follow the font family of the style (advance tables
   for Times, Arial/Helvetica, Verdana, DejaVu Sans, Computer Modern and STIX):
   under Times titles are no longer wrapped, and room is no longer reserved, for
-  width the text does not need.<!-- /D19 -->
-- <!-- L9 -->Under a style with a text face (the presets, `:publication`) the
+  width the text does not need.
+- Under a style with a text face (the presets, `:publication`) the
   text of a mixed math string is drawn in the figure's font at the plain-text
-  size (`inherit_text_font` is on by default).<!-- /L9 -->
+  size (`inherit_text_font` is on by default).
 
 Export, windows and templates
 
 - `savefig` uses the figure's `layout.width`/`layout.height` when no size is
   given (1.x: always 700 x 500 px).
-- <!-- D18 -->PNG, JPEG and WebP under a style with a physical size (the journal
-  presets) default to 300 dpi like TIFF when neither `dpi` nor `scale` is
-  given (`:default` and `:publication`: scale 1).<!-- /D18 -->
+- PNG and JPEG under a style with a physical size (the journal presets) default
+  to 300 dpi like TIFF when neither `dpi` nor `scale` is given (`:default` and
+  `:publication`: scale 1).
 - Exports are deterministic by default.
 - A figure without a size exports at the size of the style it carries (a figure
   without a recorded style: the active style's size), else 700 x 500 px.
@@ -429,7 +429,7 @@ Styles and export
 - A precompile workload: the first figure of a session takes about a third
   of a second instead of 15 seconds (low machine load, `benchmark/RESULTS.md`);
   the one-time precompilation takes minutes longer and the package image grows
-  by about 80 MB (5.9 MB to 87.6 MB). Opt out with the
+  by about 105 MB (about 5 MB to about 110 MB). Opt out with the
   `precompile_workload` preference. A benchmark suite lives in `benchmark/`.
 
 ### Fixed

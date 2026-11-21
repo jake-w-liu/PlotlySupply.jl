@@ -7,8 +7,6 @@
 #   "stack"` for the budget and `:outside_top` for the legend; fonts and spines come from the preset.
 using PlotlySupply
 
-set_default_mathtext!(true; inherit_text_font = true)    # text parts of math labels stay in the sans font
-
 outdir = isempty(ARGS) ? (@__DIR__) : first(ARGS)
 blue, orange, grey, dark = "#0072B2", "#E69F00", "#999999", "#202020"
 
@@ -50,4 +48,3 @@ fig = with_style(:nature) do
 	sf
 end
 savefig(fig, joinpath(outdir, "optical_bars.png"); scale = 2)
-set_default_mathtext!()

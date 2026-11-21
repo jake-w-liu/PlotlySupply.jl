@@ -7,8 +7,6 @@
 #   luminance), `colorbar!(ticks = ...)`, and the categories are the x ticks themselves.
 using PlotlySupply
 
-set_default_mathtext!(true; inherit_text_font = true)    # text parts of math labels stay in the sans font
-
 outdir = isempty(ARGS) ? (@__DIR__) : first(ARGS)
 blue, purple = "#0072B2", "#CC79A7"
 
@@ -49,4 +47,3 @@ fig = with_style(:elsevier) do
 	sf
 end
 savefig(fig, joinpath(outdir, "topo_annotated_heatmap.png"); scale = 2)
-set_default_mathtext!()

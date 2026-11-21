@@ -48,13 +48,13 @@ dpi, a pixel-size export records none):
 `width = 3.5, units = :in, dpi = 300` gives a 1050 px wide image that prints
 3.5 in wide.
 
-<!-- D18 -->
 Under a style that carries a physical size (the journal presets, and any
-style registered with a width in inches or millimetres) PNG, JPEG and WebP
-default to 300 dpi like TIFF when neither `dpi` nor `scale` is given: a 3.5 in
-`:ieee` figure is 1050 px wide, not 336. `:default` and `:publication` figures
-keep `scale = 1`, and `dpi` and `scale` always win.
-<!-- /D18 -->
+style registered with a width in inches or millimetres) PNG and JPEG default to
+300 dpi like TIFF when neither `dpi` nor `scale` is given: a 3.5 in `:ieee`
+figure is 1050 px wide, not 336, and records 300 dpi. The style that decides
+is the one the figure carries (the active style for a figure that carries
+none). `:default` and `:publication` figures keep `scale = 1`, and `dpi` and
+`scale` always win.
 
 ```julia
 savefig(fig, "column.pdf"; width = 3.5, height = 2.5, units = :in)
