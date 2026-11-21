@@ -74,12 +74,9 @@ function _sfn_render(fig; width::Int = 700, height::Int = 500, bars::Int = 0)
 	q = Plot(deepcopy(p.data), deepcopy(p.layout))
 	relayout!(q; width = width, height = height)
 	_SFN._finalize_figure!(q)
-	sp = try
-		to_syncplot(q; show = false)
-	catch err
-		@warn "sci_finalize: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
-		return nothing
-	end
+	# ElectronCall is a hard dependency: a renderer that cannot draw the figure
+	# is a test error, never a skipped check (tests-ci-05).
+	sp = to_syncplot(q; show = false)
 	try
 		backend = _SFN._syncplot_backend(sp)
 		script = replace(_SFN_RENDER_JS, "__DIV__" => _SFN._json_js(sp.divid), "__BARS__" => string(bars))
@@ -2620,7 +2617,9 @@ end
 	g = plot_choropleth(["USA"], [1.0]); set_template!(g, "plotly_dark")
 	first_bar = get(g.data[1].fields, :colorbar, nothing)
 	plot_choropleth!(g, ["CAN"], [2.0])
-	@test g.layout.fields[:template] === PlotlyBase.templates[:plotly_dark]
+	# The append keeps the figure's template object: the shared derived copy
+	# of plotly_dark (D21, `_resolve_template`), not a copy of it.
+	@test g.layout.fields[:template] === _SFN._resolve_template("plotly_dark")
 	@test _SFN._finalize_figure!(g) === false
 	@test get(g.data[1].fields, :colorbar, nothing) != first_bar
 	# The strict run of the fast path raises where it cannot write; the

@@ -100,6 +100,45 @@ function _global_defaults_restore!(snapshot)
     return nothing
 end
 
+# The user-extensible registries: `COLORMAPS`, `COLOR_CYCLES` and the styles
+# `register_style!` adds. A file may extend them (the docs examples register
+# `COLORMAPS["ice"]`, `:talk` and `:paper`), but what it adds must not reach
+# later files, whose registry checks would otherwise depend on the run order.
+# runtests.jl therefore restores them after every file.
+_global_registries_snapshot() = (
+    # The registered objects themselves (restored as they were, so identity
+    # checks against them still hold) and value copies (to see in-place edits).
+    refs = (copy(PlotlySupply.COLORMAPS), copy(PlotlySupply.COLOR_CYCLES), copy(PlotlySupply._STYLE_REGISTRY)),
+    colormaps = Dict(k => copy(v) for (k, v) in PlotlySupply.COLORMAPS),
+    color_cycles = Dict(k => copy(v) for (k, v) in PlotlySupply.COLOR_CYCLES),
+    styles = Dict(k => deepcopy(v) for (k, v) in PlotlySupply._STYLE_REGISTRY),
+)
+
+# Names of the registries that differ between two snapshots.
+function _global_registries_diff(before, after)
+    changed = Symbol[]
+    isequal(before.colormaps, after.colormaps) || push!(changed, :colormaps)
+    isequal(before.color_cycles, after.color_cycles) || push!(changed, :color_cycles)
+    (keys(before.styles) == keys(after.styles) &&
+     all(k -> _same_value(before.styles[k], after.styles[k]), keys(before.styles))) ||
+        push!(changed, :styles)
+    return changed
+end
+
+function _global_registries_restore!(snapshot)
+    registries = (PlotlySupply.COLORMAPS, PlotlySupply.COLOR_CYCLES, PlotlySupply._STYLE_REGISTRY)
+    values = (snapshot.colormaps, snapshot.color_cycles, snapshot.styles)
+    for (registry, refs, saved) in zip(registries, snapshot.refs, values)
+        empty!(registry)
+        for (k, v) in refs
+            registry[k] = v
+            # An entry changed in place gets its saved value back.
+            _same_value(v, saved[k]) || (registry[k] = deepcopy(saved[k]))
+        end
+    end
+    return nothing
+end
+
 # Run on its own (`julia --project=. test/<file>.jl`) a file that includes this
 # one is checked when the process ends: the defaults it started with must be
 # the defaults it leaves. (Under runtests.jl every file is checked as it ends.)

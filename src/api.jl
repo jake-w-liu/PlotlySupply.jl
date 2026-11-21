@@ -155,12 +155,56 @@ for updater in (
 	end
 end
 
+# Keyword names the methods of `mutator` for these positional argument types
+# accept (`nothing`: some method takes `kwargs...`, or none applies, and the
+# call itself reports any problem). Cached per mutator and argument types.
+const _MUTATOR_KEYWORDS = Dict{Tuple{Any,Any},Union{Nothing,Vector{Symbol}}}()
+const _MUTATOR_KEYWORDS_LOCK = ReentrantLock()
+
+function _mutator_keywords(mutator, argtypes::Type{<:Tuple})
+	return lock(_MUTATOR_KEYWORDS_LOCK) do
+		get!(_MUTATOR_KEYWORDS, (mutator, argtypes)) do
+			found = methods(mutator, argtypes)
+			isempty(found) && return nothing
+			accepted = Symbol[]
+			for m in found
+				declared = Base.kwarg_decl(m)
+				any(k -> endswith(String(k), "..."), declared) && return nothing
+				append!(accepted, declared)
+			end
+			return unique!(accepted)
+		end
+	end
+end
+
+# The public name of a mutator: `_set_legend_impl!` is `set_legend!`.
+function _public_mutator_name(mutator)
+	name = String(nameof(mutator))
+	m = match(r"^_(.+)_impl!$", name)
+	return m === nothing ? name : m.captures[1] * "!"
+end
+
+# An unknown keyword is an ArgumentError naming the public function (invariant
+# 4), not a MethodError naming the internal staging type, and is raised before
+# anything is staged.
+function _check_mutator_keywords(mutator, args, kwargs)
+	isempty(kwargs) && return nothing
+	argtypes = Tuple{_HighLevelStagedPlotMutation, map(Core.Typeof, args)...}
+	accepted = _mutator_keywords(mutator, argtypes)
+	accepted === nothing && return nothing
+	unknown = [key for key in keys(kwargs) if !(key in accepted)]
+	isempty(unknown) && return nothing
+	_reject_keywords(_public_mutator_name(mutator), NamedTuple{Tuple(unknown)}(Tuple(kwargs[k] for k in unknown));
+		accepted = accepted)
+end
+
 function _transactional_high_level_plot_mutation!(
 	mutator::Function,
 	fig::Union{Plot,SyncPlot},
 	args...;
 	kwargs...,
 )
+	_check_mutator_keywords(mutator, args, kwargs)
 	result = Ref{Any}(nothing)
 	staged_target = Ref{Any}(nothing)
 	# A mutation runs with the style the figure carries (K1), not the active one.
@@ -174,6 +218,12 @@ function _transactional_high_level_plot_mutation!(
 		return nothing
 	end
 	fast_mutation = function (candidate)
+		# The fast path stages the call on a layout that shares `meta` with
+		# the live figure: the run owns it before the mutator runs, so a
+		# record a mutator writes in place (figsize!'s size mark, the 3-D
+		# label pads of its own finalize pass) never reaches the live figure
+		# unless the call commits (threed-live-06).
+		candidate.layout isa Layout && _fin_own_meta!(candidate.layout)
 		staged = _HighLevelStagedPlotMutation(candidate)
 		staged_target[] = staged
 		_with_figure_style(staged; adopt = true) do
@@ -531,7 +581,8 @@ set_default_template!(PlotlyBase.Template(layout = attr(font = attr(family = "Ar
 set_default_template!()                    # back to "plotly_white"
 ```
 """
-function set_default_template!(template = "plotly_white")
+function set_default_template!(template = "plotly_white"; kwargs...)
+	_reject_keywords("set_default_template!", kwargs)
 	_DEFAULT_TEMPLATE[] = template isa PlotlyBase.Template ?
 		template :
 		_normalize_template(template; who = "set_default_template!")
@@ -564,7 +615,12 @@ fig = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]]; legend = ["a", "b"])  # legend b
 set_default_legend_position!()                                         # back to :topright
 ```
 """
-function set_default_legend_position!(position = :topright)
+function set_default_legend_position!(position = :topright; kwargs...)
+	_reject_keywords("set_default_legend_position!", kwargs)
+	(position isa Symbol || position isa AbstractString) || throw(ArgumentError(
+		"set_default_legend_position!: the position must be a Symbol or a string such as " *
+		":topright; got $(repr(position)).",
+	))
 	_DEFAULT_LEGEND_POSITION[] = _normalize_legend_position(position)
 	return _DEFAULT_LEGEND_POSITION[]
 end
@@ -2745,7 +2801,9 @@ function set_legend!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("set_legend!", kwargs; accepted = nothing)
 	_text_reject_show(show, "set_legend!")
 	(row === nothing && col === nothing) || throw(ArgumentError(
 		"set_legend!: `row`/`col` select a SubplotFigure cell; a Plot/SyncPlot " *
@@ -3060,7 +3118,9 @@ function set_legend!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("set_legend!", kwargs; accepted = nothing)
 	_text_reject_show(show, "set_legend!")
 	options = _legend_options(
 		"set_legend!";
@@ -3200,7 +3260,9 @@ function subplot_legends!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("subplot_legends!", kwargs; accepted = nothing)
 	_text_reject_show(show, "subplot_legends!")
 	_legend_reject_cell_keywords(row, col, "subplot_legends!")
 	aliases = _legend_subplot_aliases(
@@ -3269,7 +3331,9 @@ function subplot_legends!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("subplot_legends!", kwargs; accepted = nothing)
 	_text_reject_show(show, "subplot_legends!")
 	_legend_reject_cell_keywords(row, col, "subplot_legends!")
 	aliases = _legend_subplot_aliases(
@@ -3319,7 +3383,8 @@ function _reject_keywords(who::AbstractString, kwargs; accepted = ())
 	names = join(("`$(key)`" for key in keys(kwargs)), ", ")
 	throw(ArgumentError(
 		"$(who): unsupported keyword argument(s) $(names)" *
-		(isempty(accepted) ? "; it takes no keyword arguments." :
+		(accepted === nothing ? "; see the docstring of `$(who)` for the accepted keywords." :
+		 isempty(accepted) ? "; it takes no keyword arguments." :
 			"; it takes $(join(("`$(key)`" for key in accepted), ", "))."),
 	))
 end
@@ -5937,19 +6002,6 @@ function _preserve_layout_mapping_root(
 		nested_has_alias
 end
 
-function _preserve_subplot_axis_root(
-	sf::SubplotFigure,
-	key::Symbol,
-	nested_keys::Tuple{Vararg{Symbol}} =
-		(:title,),
-)
-	return _preserve_layout_mapping_root(
-		_plot_obj(sf.fig),
-		key,
-		nested_keys,
-	)
-end
-
 function _layout_merge_key_reaches_mutation(
 	value,
 	mutated::IdDict{Any,Nothing},
@@ -7260,39 +7312,6 @@ function _subplot_delegate_mutator!(
 	finally
 		unlock(metadata_lock)
 	end
-end
-
-# Layout keys of a cell's x and y axes, read from the grid routing table (no
-# probe trace is added to the figure).
-function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_y::Bool = false)
-	p = _plot_obj(sf.fig)
-	grid_ref = p.layout.subplots.grid_ref
-	(checkbounds(Bool, grid_ref, row, col) &&
-		isassigned(grid_ref, row, col) &&
-		!isempty(grid_ref[row, col])) || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) is empty (its `specs` entry is " *
-		"`missing`, or a spanning cell covers it) and has no axes.",
-	))
-	refs = grid_ref[row, col]
-	kind = String(first(refs).subplot_kind)
-	kind == "xy" || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) is a '$(kind)' cell and does " *
-		"not accept Cartesian x/y axes.",
-	))
-	if secondary_y && length(refs) < 2
-		throw(ArgumentError(
-			"Selected subplot cell ($(row), $(col)) has no secondary y-axis; " *
-			"create the grid with `specs` containing `Spec(secondary_y=true)` " *
-			"for that cell.",
-		))
-	end
-	trace_refs = refs[secondary_y ? 2 : 1].trace_kwargs.fields
-	(haskey(trace_refs, :xaxis) && haskey(trace_refs, :yaxis)) || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) has no x/y axis pair.",
-	))
-	xkey = _axis_layout_key(String(trace_refs[:xaxis]), :x)
-	ykey = _axis_layout_key(String(trace_refs[:yaxis]), :y)
-	return xkey, ykey
 end
 
 # The layout key of the single `kind` object (:geo, :mapbox, :map, ...) of
@@ -8789,13 +8808,6 @@ function _series_kwarg_vector(
 	return out
 end
 
-function _string_kwarg_vector(
-	value::Union{AbstractString, AbstractVector{<:AbstractString}},
-	n::Int,
-)
-	return _series_kwarg_vector(value, n, "", String)
-end
-
 function _first_or_empty(
 	value::Union{AbstractString, AbstractVector{<:AbstractString}},
 )
@@ -8968,23 +8980,6 @@ function _error_bar_entries(
 		))
 	end
 	return entries
-end
-
-# Attach data error bars to one or more traces. `error_x`/`error_y` take the
-# forms listed at `_error_bar_entries`; `nothing` leaves that axis untouched.
-function _set_error_bars!(trace, error_x, error_y)
-	(error_x === nothing && error_y === nothing) && return nothing
-	traces = trace isa AbstractVector ? trace : (trace,)
-	n = length(traces)
-	x_entries = _error_bar_entries(error_x, n, "error_x")
-	y_entries = _error_bar_entries(error_y, n, "error_y")
-	for (index, t) in enumerate(traces)
-		x_entries[index] === nothing ||
-			(t.error_x = _error_bar_attr(x_entries[index]))
-		y_entries[index] === nothing ||
-			(t.error_y = _error_bar_attr(y_entries[index]))
-	end
-	return nothing
 end
 
 # Default x coordinates `0:length(y)-1` of a y-only call (one range per
@@ -15149,13 +15144,6 @@ end
 _field2d_apply_origin!(fig, origin::AbstractString; key::Symbol = :yaxis) =
 	isempty(origin) ? nothing :
 	_field2d_axis_direction!(fig, key, origin == "upper")
-
-# A `Date`/`DateTime` coordinate as the ISO string plotly.js reads on a date
-# axis (Y25): "2020-01-02", "2020-01-02T03:04:05.678". Anything else is
-# returned unchanged. (`Dates` is imported in src/sci/reference.jl; this body
-# resolves it at call time.)
-_field2d_date_value(v) =
-	(v isa Dates.Date || v isa Dates.DateTime) ? string(v) : v
 
 # Check the tick keywords before the first write, against the axis types the
 # call ends up with (`_validate_tick_option`; D9 presets pass). `ykey` is the

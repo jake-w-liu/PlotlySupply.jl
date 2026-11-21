@@ -1572,28 +1572,25 @@ function _s3_write_pads!(layout::Layout, key::Symbol, pads::NTuple{2, Float64})
 	(holder === nothing || holder isa AbstractDict) || return false
 	record = _s3_pads_record(layout)
 	current = record === nothing ? nothing : _cmn_mapping_get(record, key)
-	# `meta` is copied on write (a new mapping replaces it in the layout, the
-	# old one is never changed): a transactional mutator and the live-window
-	# delta share the layout's `meta` between the staged and the committed
-	# figure, so an in-place write would escape both the rollback and the delta.
-	rebuilt(h) = meta isa PlotlyBase.PlotlyAttribute ? PlotlyBase.PlotlyAttribute(h) : h
+	# The record is copied on write (a new mapping replaces it in `meta`, the
+	# old one is never changed); `meta` itself is written in place, like every
+	# finalizer record (`_fin_meta_set!`): a staged call commits it back into
+	# the live figure's own `meta`, which the user's references into the layout
+	# keep pointing at (layout_merge_preservation), and the append-only fast
+	# path gives the run its own `meta` first (`_fin_own_meta!`).
 	if pads == _S3_GL_DEFAULT_PADS
 		current === nothing && return false
-		fresh = copy(holder)
 		fresh_record = copy(record)
 		_cmn_mapping_delete!(fresh_record, (key,))
-		isempty(fresh_record) ? delete!(fresh, _S3_PADS_KEY) : (fresh[_S3_PADS_KEY] = fresh_record)
-		isempty(fresh) ? delete!(layout.fields, :meta) : (layout.fields[:meta] = rebuilt(fresh))
+		_fin_meta_set!(layout, _S3_PADS_KEY, isempty(fresh_record) ? nothing : fresh_record)
 		return true
 	end
 	same = (current isa AbstractVector || current isa Tuple) && length(current) == 2 &&
 		all(i -> _s3_is_real(current[i]) && current[i] == pads[i], 1:2)
 	same && return false
-	fresh = holder === nothing ? Dict{Any, Any}() : copy(holder)
 	fresh_record = record === nothing ? Dict{Any, Any}() : copy(record)
 	fresh_record[key] = Float64[pads[1], pads[2]]
-	fresh[_S3_PADS_KEY] = fresh_record
-	layout.fields[:meta] = rebuilt(fresh)
+	_fin_meta_set!(layout, _S3_PADS_KEY, fresh_record)
 	return true
 end
 

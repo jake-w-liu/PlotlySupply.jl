@@ -189,14 +189,11 @@ using Test, PlotlySupply
 
     @testset "portable HTML source guard and shared rendering routes" begin
         tag = "<script src=\"$(PlotlySupply._PLOTLY_CDN_URL)\"></script>"
-        @test_throws ErrorException PlotlySupply._inline_plotlyjs_source("none", patched, license)
-        @test_throws ErrorException PlotlySupply._inline_plotlyjs_source(tag*tag, patched, license)
         for token in ("</script", "</SCRIPT>", "</ScRiPt >")
-            @test_throws ErrorException PlotlySupply._inline_plotlyjs_source(tag, "prefix"*token, license)
+            @test_throws ErrorException PlotlySupply._plotlyjs_inline_script("prefix"*token, license)
         end
-        @test_throws ErrorException PlotlySupply._inline_plotlyjs_source(tag, patched, "*/")
-        html = PlotlySupply._inline_plotlyjs_source(tag, patched, license)
-        @test !occursin(tag, html)
+        @test_throws ErrorException PlotlySupply._plotlyjs_inline_script(patched, "*/")
+        html = PlotlySupply._plotlyjs_inline_script(patched, license)
         @test occursin(patched, html)
         @test occursin(license, html)
         @test count(replacement, html) == 1

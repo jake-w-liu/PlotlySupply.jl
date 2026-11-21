@@ -4364,7 +4364,7 @@ _runtests_t0 = time()
         before = snapshot_atomic(p)
         update_dict = Dict{Symbol,Any}(:name => ["changed"])
         update_before = deepcopy(update_dict)
-        @test_throws BoundsError restyle!(p, [1, 4], update_dict)
+        @test_throws ArgumentError restyle!(p, [1, 4], update_dict)
         @test snapshot_atomic(p) == before
         @test update_dict == update_before
 
@@ -4379,7 +4379,7 @@ _runtests_t0 = time()
         layout_ref = p.layout
         update_dict = Dict{Symbol,Any}(:name => ["changed"])
         update_before = deepcopy(update_dict)
-        @test_throws BoundsError update!(
+        @test_throws ArgumentError update!(
             p,
             [1, 4],
             update_dict;
@@ -4427,7 +4427,7 @@ _runtests_t0 = time()
         p = make_atomic_plot()
         before = snapshot_atomic(p)
         data_ref = p.data
-        @test_throws BoundsError movetraces!(p, [1, 9], [3, 1])
+        @test_throws ArgumentError movetraces!(p, [1, 9], [3, 1])
         @test snapshot_atomic(p) == before
         @test p.data === data_ref
         @test_throws DimensionMismatch movetraces!(p, [1, 2], [3])
@@ -4442,7 +4442,7 @@ _runtests_t0 = time()
         @test [trace[:name] for trace in p.data] == ["one", "three", "two"]
         @test p.data === data_ref
         before = snapshot_atomic(p)
-        @test_throws BoundsError movetraces!(p, 9)
+        @test_throws ArgumentError movetraces!(p, 9)
         @test snapshot_atomic(p) == before
 
         p = make_atomic_plot()
@@ -4455,20 +4455,20 @@ _runtests_t0 = time()
         p = make_atomic_plot()
         sp = SyncPlot(p, nothing, nothing, "atomic-test")
         before = snapshot_atomic(p)
-        @test_throws BoundsError restyle!(
+        @test_throws ArgumentError restyle!(
             sp,
             [1, 4],
             Dict(:name => ["x", "y"]),
         )
         @test snapshot_atomic(p) == before
-        @test_throws BoundsError update!(
+        @test_throws ArgumentError update!(
             sp,
             [1, 4],
             Dict(:name => ["x", "y"]);
             layout=Layout(title="new"),
         )
         @test snapshot_atomic(p) == before
-        @test_throws BoundsError movetraces!(sp, [1, 9], [3, 1])
+        @test_throws ArgumentError movetraces!(sp, [1, 9], [3, 1])
         @test snapshot_atomic(p) == before
     end
 
@@ -5282,7 +5282,7 @@ _runtests_t0 = time()
             @test !ispath(purge_tempdir)
 
             window_count = length(ec.windows)
-            @test_throws BoundsError restyle(
+            @test_throws ArgumentError restyle(
                 source,
                 [99],
                 Dict(:name => ["invalid"]),
@@ -5574,6 +5574,7 @@ _runtests_t0 = time()
     # its testsets is recorded against that file and the run goes on.
     for test_file in _test_files_in_run_order(@__DIR__)
         defaults_before = _global_defaults_snapshot()
+        registries_before = _global_registries_snapshot()
         file_t0 = time()
         @testset "$(basename(test_file))" begin
             include(test_file)
@@ -5585,6 +5586,9 @@ _runtests_t0 = time()
             @test leaked == Symbol[]
         end
         isempty(leaked) || _global_defaults_restore!(defaults_before)
+        # What a file added to the registries does not reach the next file.
+        isempty(_global_registries_diff(registries_before, _global_registries_snapshot())) ||
+            _global_registries_restore!(registries_before)
         println("runtests: ", basename(test_file), " done in ", round(time() - file_t0; digits = 1),
             " s (", round(time() - _runtests_t0; digits = 1), " s total)")
         flush(stdout)

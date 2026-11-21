@@ -1259,10 +1259,17 @@ function _run_ghostscript(
 		pipeline(ignorestatus(cmd); stdin = devnull, stdout = stdout_buffer, stderr = stderr_buffer);
 		wait = false,
 	)
-	status = timedwait(() -> process_exited(process), timeout; pollint = 0.02)
+	# The Ghostscript child started just above (its Process handle, not a
+	# matched or pre-existing process) is stopped on a timeout and on any
+	# exception while it runs (Ctrl-C), so it never outlives the export.
+	status = try
+		timedwait(() -> process_exited(process), timeout; pollint = 0.02)
+	catch
+		process_exited(process) || kill(process)
+		wait(process)
+		rethrow()
+	end
 	if status !== :ok
-		# This is the Ghostscript child started just above (its Process handle),
-		# not a matched or pre-existing process.
 		kill(process)
 		wait(process)
 		error("savefig($(label)): Ghostscript did not finish within $(timeout) s.")

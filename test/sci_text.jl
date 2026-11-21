@@ -394,7 +394,7 @@ using Test, PlotlySupply
 		@test throws_arg(() -> set_legend!(fig; row = 1, col = 1), "omit them")
 		@test throws_arg(() -> set_legend!(fig; show = true), "set_legend!: `show` is not supported")
 		@test layout_json(fig) == before
-		@test_throws MethodError set_legend!(fig; not_a_keyword = 1)   # D5: unknown keywords still raise
+		@test_throws ArgumentError set_legend!(fig; not_a_keyword = 1)   # D5/invariant 4: unknown keywords raise
 
 		# dedupe: same name and style → one entry, one legend group; dedupe=false keeps both
 		dd = plot_scatter(x, [x, 2x]; legend = ["same", "same"], color = ["black", "black"])
@@ -570,11 +570,16 @@ using Test, PlotlySupply
 		fig = plot_scatter(x, x; legend = "a")
 		sf = grid(1, 2)
 		for target in (fig, sf)
-			@test_throws MethodError title!(target, "t"; not_a_keyword = 1)
-			@test_throws MethodError panel_labels!(target; not_a_keyword = 1)
-			@test_throws MethodError legend_entry!(target, "t"; not_a_keyword = 1)
-			@test_throws MethodError set_legend!(target; not_a_keyword = 1)
-			@test_throws MethodError subplot_legends!(target; not_a_keyword = 1)
+			# Invariant 4: an ArgumentError naming the function and the keyword.
+			for (who, call) in (("title!", () -> title!(target, "t"; not_a_keyword = 1)),
+					("panel_labels!", () -> panel_labels!(target; not_a_keyword = 1)),
+					("legend_entry!", () -> legend_entry!(target, "t"; not_a_keyword = 1)),
+					("set_legend!", () -> set_legend!(target; not_a_keyword = 1)),
+					("subplot_legends!", () -> subplot_legends!(target; not_a_keyword = 1)))
+				err = try call(); nothing catch e; e end
+				@test err isa ArgumentError
+				@test err isa ArgumentError && startswith(err.msg, "$(who): unsupported keyword argument(s) `not_a_keyword`")
+			end
 		end
 	end
 

@@ -1473,9 +1473,16 @@ end
 # for an index outside the figure, as the tests of the compatibility verbs
 # pin); repeated indices are an ArgumentError naming the verb. Both are raised
 # before anything changes.
+# A trace index out of range is a user error (invariant 4): an ArgumentError
+# naming the function, raised before the figure changes.
+_trace_index_error(who, ind, upto::Int) = ArgumentError(
+	"$(who): trace index $(ind) is out of range " *
+	(upto == 0 ? "(the figure has no traces)." : "1:$(upto)."),
+)
+
 function _check_trace_indices(who::AbstractString, p::Plot, inds; unique::Bool = false, upto::Int = length(p.data))
 	for ind in inds
-		(1 <= ind <= upto) || throw(BoundsError(p.data, ind))
+		(1 <= ind <= upto) || throw(_trace_index_error(who, ind, upto))
 	end
 	unique && !allunique(inds) && throw(ArgumentError(
 		"$(who): trace indices must be distinct; got $(collect(inds)).",
@@ -4034,7 +4041,7 @@ function _stage_restyle(
 	verb::Symbol = :restyle!,
 )
 	for ind in inds
-		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
+		checkbounds(Bool, p.data, ind) || throw(_trace_index_error(verb, ind, length(p.data)))
 	end
 
 	# A repeated trace object is staged only once, retaining PlotlyBase's
@@ -5543,42 +5550,43 @@ function _validate_trace_splice_args(
 	p::Plot,
 	update::AbstractDict,
 	indices::AbstractVector{Int},
-	maxpoints,
+	maxpoints;
+	who::AbstractString = "extendtraces!/prependtraces!",
 )
-	allunique(indices) || throw(ArgumentError("`indices` must not contain duplicates."))
+	allunique(indices) || throw(ArgumentError("$(who): `indices` must not contain duplicates."))
 	for p_ix in indices
-		checkbounds(Bool, p.data, p_ix) || throw(BoundsError(p.data, p_ix))
+		checkbounds(Bool, p.data, p_ix) || throw(_trace_index_error(who, p_ix, length(p.data)))
 	end
 
 	maxpoints_is_dict = maxpoints isa AbstractDict
 	for (key, inserts) in update
 		inserts isa AbstractVector ||
-			throw(ArgumentError("update attribute $(repr(key)) must be a vector of per-trace vectors."))
+			throw(ArgumentError("$(who): update attribute $(repr(key)) must be a vector of per-trace vectors."))
 		length(inserts) == length(indices) || throw(ArgumentError(
-			"update attribute $(repr(key)) must contain one vector per trace index; " *
+			"$(who): update attribute $(repr(key)) must contain one vector per trace index; " *
 			"got $(length(inserts)) updates for $(length(indices)) indices.",
 		))
 
 		if maxpoints_is_dict
 			haskey(maxpoints, key) || throw(ArgumentError(
-				"`maxpoints` must contain an entry for update attribute $(repr(key)).",
+				"$(who): `maxpoints` must contain an entry for update attribute $(repr(key)).",
 			))
 			limits = maxpoints[key]
 			limits isa AbstractVector || throw(ArgumentError(
-				"`maxpoints[$(repr(key))]` must be a vector with one limit per trace index.",
+				"$(who): `maxpoints[$(repr(key))]` must be a vector with one limit per trace index.",
 			))
 			length(limits) == length(indices) || throw(ArgumentError(
-				"`maxpoints[$(repr(key))]` must contain one limit per trace index; " *
+				"$(who): `maxpoints[$(repr(key))]` must contain one limit per trace index; " *
 				"got $(length(limits)) limits for $(length(indices)) indices.",
 			))
 		end
 
 		for (ix, p_ix) in enumerate(indices)
 			inserts[ix] isa AbstractVector || throw(ArgumentError(
-				"extendtraces!/prependtraces!: update attribute $(repr(key)) at position $ix must be an `AbstractVector`.",
+				"$(who): update attribute $(repr(key)) at position $ix must be an `AbstractVector`.",
 			))
 			p.data[p_ix][key] isa AbstractVector || throw(ArgumentError(
-				"extendtraces!/prependtraces!: cannot extend or prepend missing/non-vector trace attribute $(repr(key)) " *
+				"$(who): cannot extend or prepend missing/non-vector trace attribute $(repr(key)) " *
 				"on trace index $p_ix.",
 			))
 		end
@@ -5650,7 +5658,7 @@ function _do_trace_splice!(
 	maxpoints;
 	prepend::Bool,
 )
-	_validate_trace_splice_args(p, update, indices, maxpoints)
+	_validate_trace_splice_args(p, update, indices, maxpoints; who = prepend ? "prependtraces!" : "extendtraces!")
 	(isempty(indices) || isempty(update)) && return p
 
 	# The overwhelmingly common one-trace/one-attribute case is already
@@ -8964,7 +8972,7 @@ function _prepare_trace_splice_fast_transaction(
 			return nothing
 		String(trace_type) in _PLOTLY_SPLICE_TRACE_TYPES || return nothing
 	end
-	_validate_trace_splice_args(p, update, indices, maxpoints)
+	_validate_trace_splice_args(p, update, indices, maxpoints; who = prepend ? "prependtraces!" : "extendtraces!")
 
 	# Plotly.extendTraces changes only gd.data[i], so a trace object listed at
 	# two positions (which the model extends at both) needs the general path.

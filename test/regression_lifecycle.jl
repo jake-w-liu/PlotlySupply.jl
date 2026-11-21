@@ -714,11 +714,16 @@ end
 				PlotlySupply._mathjax_head_html(),
 				PlotlySupply._export_window_html("rl-export"),
 				PlotlySupply._syncplot_html("rl-div"; autoplay = false, timeout_s = 1.0),
-				String(savefig(Plot(scatter(y = [1, 2])); format = "html")),
+				# An HTML export loads MathJax only when the figure has math (a
+				# figure without it draws offline, O18).
+				String(savefig(Plot(scatter(y = [1, 2]), Layout(title = "\$x^2\$")); format = "html")),
 			)
 				@test occursin("SVG: {font: \"Gyre-Termes\"}", page)
 				@test occursin("var INHERIT = true;", page)
 			end
+			nomath = String(savefig(Plot(scatter(y = [1, 2])); format = "html"))
+			@test !occursin("SVG: {font:", nomath)
+			@test !occursin("var INHERIT", nomath)
 			set_default_mathtext!()
 			@test occursin(
 				"var INHERIT = null;",   # default: follow the figure style (L9)

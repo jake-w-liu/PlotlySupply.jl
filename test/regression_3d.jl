@@ -1726,18 +1726,33 @@ end
 		U = [sin(a) * cos(b) for a in x, b in x]
 		fig = plot_surface(x, x, U)
 		old_meta = fig.layout.fields[:meta]
-		old_pads = deepcopy(PS._s3_pads_record(fig.layout))
+		old_record = PS._s3_pads_record(fig.layout)
+		old_pads = deepcopy(old_record)
 		for pads in ((8.0, 16.0), (9.5, 17.0))
 			PS._s3_write_pads!(fig.layout, :scene, pads)
 			@test PS._s3_scene_pads(fig, :scene) == pads
 		end
-		# the meta object that existed before is untouched
-		@test PS._s3_pads_record(Layout(; meta = old_meta)) == old_pads
+		# The record is copied on write: the record object that existed before
+		# is untouched. `meta` itself is written in place like every finalizer
+		# record (`_fin_meta_set!`), so references to it stay valid
+		# (layout_merge_preservation); a staged run owns its `meta` first.
+		@test old_record == old_pads
+		@test PS._s3_pads_record(fig.layout) !== old_record
+		@test fig.layout.fields[:meta] === old_meta
 		stage = deepcopy(fig.layout)
-		shared = stage.fields[:meta]
+		shared_record = PS._s3_pads_record(stage)
 		PS._s3_write_pads!(stage, :scene, (7.0, 15.0))
 		@test PS._s3_scene_pads(PlotlyBase.Plot(GenericTrace[], stage), :scene) == (7.0, 15.0)
-		@test stage.fields[:meta] !== shared
-		@test shared[Symbol("plotlysupply:gl3d")][:scene] == [9.5, 17.0]
+		@test shared_record[:scene] == [9.5, 17.0]
+		@test PS._s3_scene_pads(fig, :scene) == (9.5, 17.0)
+		# The append-only fast path: a staged run gets its own `meta` (and
+		# records), so the pads it writes never reach the live figure early.
+		live_meta = fig.layout.fields[:meta]
+		staged = deepcopy(fig.layout)
+		staged.fields[:meta] = live_meta   # shared, as the fast path stages it
+		PS._fin_own_meta!(staged)
+		PS._s3_write_pads!(staged, :scene, (6.0, 14.0))
+		@test PS._s3_scene_pads(fig, :scene) == (9.5, 17.0)
+		@test fig.layout.fields[:meta] === live_meta
 	end
 end

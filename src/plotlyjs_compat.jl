@@ -281,6 +281,31 @@ Base.print(io::IO, p::_GenericTracePlot) = (PlotlyBase.JSON.json(io, p; _JSON_NO
 Base.show(io::IO, ::MIME"application/vnd.plotly.v1+json", p::_GenericTracePlot) =
 	(PlotlyBase.JSON.json(io, p; _JSON_NONFINITE_AS_NULL...); nothing)
 
+# The lowered (plain Dict/Array) form of a figure part, with every non-finite
+# number replaced by `nothing` (JSON `null`, which plotly.js draws as a gap).
+_nonfinite_as_nothing(x::AbstractFloat) = isfinite(x) ? x : nothing
+_nonfinite_as_nothing(x::AbstractDict) = Dict{Any,Any}(k => _nonfinite_as_nothing(v) for (k, v) in pairs(x))
+_nonfinite_as_nothing(x::AbstractArray{<:Union{Integer,AbstractString,Nothing,Missing}}) = x
+_nonfinite_as_nothing(x::Union{AbstractArray,Tuple}) = map(_nonfinite_as_nothing, x)
+_nonfinite_as_nothing(x) = x
+
+_symbol_fields(d::AbstractDict) = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(d))
+
+# The text/html MIME type (notebooks, Documenter pages, VS Code) goes through
+# PlotlyBase's `to_html`, whose serialiser raises on NaN/Inf: it renders a
+# copy built from the figure's lowered form with non-finite numbers as `null`,
+# the same document `json(fig)` describes. The figure itself is not changed.
+function Base.show(io::IO, mime::MIME"text/html", p::_GenericTracePlot; kwargs...)
+	lowered = PlotlyBase.JSON.lower(p)
+	data = [GenericTrace(_symbol_fields(_nonfinite_as_nothing(t))) for t in lowered[:data]]
+	layout = Layout()
+	# Set directly: the constructor would merge the layout defaults again.
+	layout.fields = _symbol_fields(_nonfinite_as_nothing(lowered[:layout]))
+	frames = [PlotlyFrame{Dict{Symbol,Any}}(_symbol_fields(_nonfinite_as_nothing(f))) for f in lowered[:frames]]
+	q = Plot(data, layout, isempty(frames) ? PlotlyFrame[] : frames, p.divid, p.config)
+	return PlotlyBase.to_html(io, q; kwargs...)
+end
+
 struct _ExportOptions
 	width::Float64          # layout width in CSS px
 	height::Float64         # layout height in CSS px
@@ -785,13 +810,28 @@ function _prepare_renderer_export(
 	)
 end
 
+# The options of an html/json document: the size keywords are validated but
+# ignored (documented), so the document is fitted at the figure's own size,
+# the size savefig uses when it gets no size keyword.
+function _document_export_options(p::Plot, options::_ExportOptions)
+	default_width, default_height = _export_default_size(p)
+	width = _layout_export_px(p, :width, default_width)
+	height = _layout_export_px(p, :height, default_height)
+	width == options.width && height == options.height && return options
+	return _ExportOptions(
+		width, height, options.scale, options.dpi, options.deterministic,
+		options.background, options.tight, options.timeout, options.units,
+		options.scale_given, options.fonts, options.sized,
+	)
+end
+
 function _prepare_document_export(
 	p::Plot,
 	kwargs;
 	options::Union{Nothing,_ExportOptions} = nothing,
 	source::Union{Nothing,Plot} = nothing,
 )
-	resolved = options === nothing ? _normalize_export_options(p, kwargs) : options
+	resolved = _document_export_options(p, options === nothing ? _normalize_export_options(p, kwargs) : options)
 	figure = source === nothing ? _export_source(p, resolved; pan = false) : source
 	# The export copy is a new Plot with a new random div id; the page keeps the
 	# figure's own id so two exports of one figure are the same bytes.
@@ -808,11 +848,14 @@ function _prepare_export(p::Plot, formats, kwargs)
 	"pdf" in formats && options.fonts === :outline && _ghostscript_command(; purpose = :outline)
 	wants_renderer = any(in(_RENDERER_FORMATS), formats)
 	wants_document = any(in(("html", "json")), formats)
-	source = _export_source(p, options; pan = wants_renderer)
-	# A document keeps its scene centres; with scenes it needs its own copy.
-	document_source = (wants_renderer && wants_document &&
-		any(key -> key isa Symbol && occursin(_S3_SCENE_KEY, String(key)), keys(p.layout.fields))) ?
-		_export_source(p, options; pan = false) : source
+	source = wants_renderer ? _export_source(p, options; pan = true) : nothing
+	# A document is fitted at the figure's own size and keeps its scene
+	# centres, so it shares the renderer copy only when both agree.
+	document_options = _document_export_options(p, options)
+	document_source = !wants_document ? nothing :
+		(wants_renderer && document_options === options &&
+		 !any(key -> key isa Symbol && occursin(_S3_SCENE_KEY, String(key)), keys(p.layout.fields))) ?
+		source : _export_source(p, document_options; pan = false)
 	renderer = wants_renderer ?
 		_prepare_renderer_export(p, kwargs; options = options, source = source) : nothing
 	document = wants_document ?
@@ -2517,11 +2560,51 @@ PlotlyBase._is3d(sp::SyncPlot) = PlotlyBase._is3d(sp.plot)
 
 Base.size(sp::SyncPlot) = size(sp.plot)
 
+# The subplot kind a trace type is drawn in ("xy", "polar", "scene", "geo",
+# "domain", ...), from plotly's schema; `nothing` for a type it does not know.
+function _add_trace_subplot_kind(trace::GenericTrace)
+	type = get(trace.fields, :type, "scatter")
+	(type isa AbstractString || type isa Symbol) || return nothing
+	return try
+		kind = PlotlyBase.get_subplotkind_from_trace_type(Symbol(type))
+		kind isa AbstractString ? String(kind) : nothing
+	catch err
+		err isa KeyError || rethrow()
+		nothing
+	end
+end
+
+# add_trace!(p, trace; row, col) into a cell of another kind (a Cartesian
+# trace into a polar cell) is drawn outside the cell by plotly.js: an
+# ArgumentError before the figure changes (invariant 4). A plain figure (one
+# Cartesian cell, no grid made by make_subplots) takes any trace, as plotly
+# places it itself.
+function _check_add_trace_cell(p::Plot, trace::GenericTrace, row, col)
+	subplots = p.layout.subplots
+	grid = subplots === nothing ? nothing : subplots.grid_ref
+	(grid isa AbstractMatrix && !isempty(grid)) || return nothing
+	plain = size(grid) == (1, 1) && isassigned(grid, 1, 1) && !isempty(grid[1, 1]) &&
+		grid[1, 1][1].subplot_kind == "xy"
+	plain && return nothing
+	(row isa Integer && col isa Integer) || return nothing
+	checkbounds(Bool, grid, row, col) && isassigned(grid, row, col) && !isempty(grid[row, col]) ||
+		return nothing   # PlotlyBase reports a cell outside the grid
+	cell = grid[row, col][1].subplot_kind
+	kind = _add_trace_subplot_kind(trace)
+	(kind === nothing || kind == cell) && return nothing
+	throw(ArgumentError(
+		"add_trace!: a $(get(trace.fields, :type, "scatter")) trace is drawn in a $(repr(kind)) " *
+		"subplot, but cell ($(row), $(col)) is $(repr(cell)); create the grid with a matching " *
+		"`specs` entry (e.g. `Spec(kind = $(repr(kind)))`) or add the trace to a $(repr(kind)) cell.",
+	))
+end
+
 function _invoke_plot_add_trace!(
 	p::Plot,
 	trace::GenericTrace;
 	kw...,
 )
+	_check_add_trace_cell(p, trace, get(kw, :row, 1), get(kw, :col, 1))
 	try
 		return invoke(
 			PlotlyBase.add_trace!,

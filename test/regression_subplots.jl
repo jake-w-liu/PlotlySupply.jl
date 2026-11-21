@@ -81,20 +81,13 @@ const _RSP_AXES_JS = raw"""
 })()
 """
 
-const _RSP_RENDERER_OK = Ref(true)
-
 function _rsp_render_axes(fig)
-	_RSP_RENDERER_OK[] || return nothing
 	p = fig isa SubplotFigure ? fig.plot : fig
 	q = Plot(deepcopy(p.data), deepcopy(p.layout))
 	relayout!(q; width = 700, height = 500)
-	sp = try
-		to_syncplot(q; show = false)
-	catch err
-		_RSP_RENDERER_OK[] = false
-		@warn "regression_subplots: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
-		return nothing
-	end
+	# ElectronCall is a hard dependency: a renderer failure is a test error,
+	# never a skipped check (tests-ci-05).
+	sp = to_syncplot(q; show = false)
 	try
 		backend = PlotlySupply._syncplot_backend(sp)
 		script = replace(_RSP_AXES_JS, "__DIV__" => PlotlySupply._json_js(sp.divid))
@@ -664,8 +657,9 @@ end
 		@test err isa ArgumentError
 		@test startswith(err.msg, "xlabel!:")
 		@test occursin("this cell is :polar", err.msg)
+		# A cell without a secondary y-axis, through the public verb.
 		secondary_err = try
-			PlotlySupply._subplot_xy_axis_keys(sf, 1, 2; secondary_y=true)
+			plot_scatter!(sf, [1.0, 2.0], [1.0, 2.0]; row=1, col=2, secondary_y=true)
 			nothing
 		catch caught
 			caught

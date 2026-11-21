@@ -197,7 +197,7 @@ end
 	err = _w7_msg(() -> deletetraces!(p, 1, 1))
 	@test err isa ArgumentError && startswith(err.msg, "deletetraces!:")
 	@test length(p.data) == 1
-	@test_throws BoundsError deletetraces!(p, 5)
-	@test_throws BoundsError restyle!(p, 5; line_width = 2)
+	@test_throws ArgumentError deletetraces!(p, 5)
+	@test_throws ArgumentError restyle!(p, 5; line_width = 2)
 	@test length(p.data) == 1
 end

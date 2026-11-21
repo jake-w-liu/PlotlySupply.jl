@@ -365,3 +365,254 @@ end
 		@test count(>(32), d) <= 0.002 * length(d)
 	end
 end
+
+@testset "r1 export-01: html and json ignore the size keywords" begin
+	x = range(-2, 2; length = 41); y = range(-1, 1; length = 21)
+	field = plot_heatmap(x, y, [sin(a) * cos(b) for a in x, b in y]; equalar = true, colorbar_title = "f")
+	surf = plot_surface(x, y, [a * b for a in x, b in y])
+	for fig in (field, surf), fmt in ("json", "html")
+		plain = savefig(fig; format = fmt)
+		@test savefig(fig; format = fmt, width = 300, height = 600) == plain
+		@test savefig(fig; format = fmt, width = 3.5, height = 2.5, units = :in, dpi = 600, tight = false) == plain
+	end
+	# Several files in one call: the document is the figure at its own size,
+	# the PDF has the requested page.
+	dir = mktempdir()
+	try
+		savefig(field, [joinpath(dir, "f.pdf"), joinpath(dir, "f.json")]; width = 3.5, height = 2.5, units = :in)
+		@test read(joinpath(dir, "f.json")) == savefig(field; format = "json")
+		box = match(r"/MediaBox\s*\[\s*([-0-9.]+)\s+([-0-9.]+)\s+([-0-9.]+)\s+([-0-9.]+)", String(read(joinpath(dir, "f.pdf"))))
+		@test box !== nothing && isapprox(parse(Float64, box[3]) - parse(Float64, box[1]), 252; atol = 0.01)
+	finally
+		rm(dir; recursive = true, force = true)
+	end
+	# The figure itself is not changed by any of it.
+	@test !_R1._finalize_figure!(field)
+end
+
+if Sys.isunix()
+	@testset "r1 mr-02: an interrupted EPS export stops its Ghostscript child" begin
+		savefig(plot_scatter([1.0, 2.0], [1.0, 2.0]); format = "png")
+		dir = mktempdir()
+		record = joinpath(dir, "record.txt")
+		fake = joinpath(dir, "gs")
+		write(fake, """
+		#!/bin/sh
+		echo "\$\$" > "$(record)"
+		exec sleep 30
+		""")
+		chmod(fake, 0o755)
+		old_path = ENV["PATH"]
+		ENV["PATH"] = dir * ":" * old_path
+		try
+			task = @async savefig(plot_scatter(1:10, 1:10); format = "eps")
+			@test timedwait(() -> isfile(record) && !isempty(read(record, String)), 120.0) === :ok
+			pid = parse(Int, strip(read(record, String)))
+			alive() = success(pipeline(`kill -0 $pid`; stdout = devnull, stderr = devnull))
+			@test alive()
+			schedule(task, InterruptException(); error = true)
+			err = _r1_err(() -> fetch(task))
+			@test err isa TaskFailedException && err.task.exception isa InterruptException
+			# The child was stopped and reaped before savefig returned.
+			@test !alive()
+		finally
+			ENV["PATH"] = old_path
+			rm(dir; recursive = true, force = true)
+		end
+	end
+end
+
+@testset "r1 platform-deps-04: a render asset removed by a temp cleaner is rebuilt" begin
+	parent = mktempdir()
+	try
+		state = _R1._PlotlyJSCompatAssetState()
+		path = _R1._plotlyjs_render_asset_path(; state, cache_parent = parent)
+		@test isfile(path)
+		rm(dirname(path); recursive = true)          # what a temp cleaner does
+		rebuilt = _R1._plotlyjs_render_asset_path(; state, cache_parent = parent)
+		@test isfile(rebuilt) && rebuilt != path
+		@test _R1._plotlyjs_file_digest(rebuilt) == state.asset.digest
+		@test isfile(joinpath(dirname(rebuilt), "LICENSE"))
+		# A changed (not missing) asset still fails closed.
+		write(rebuilt, "changed")
+		@test_throws ErrorException _R1._plotlyjs_render_asset_path(; state, cache_parent = parent)
+		_R1._cleanup_plotlyjs_compat_asset!(state)
+	finally
+		rm(parent; recursive = true, force = true)
+	end
+	# The session's own asset: removed, then a new export window and an HTML
+	# page still work.
+	global_path = _R1._plotlyjs_render_asset_path()
+	rm(dirname(global_path); recursive = true)
+	html = String(savefig(plot_scatter(1:3, 1:3); format = "html"))
+	@test occursin("Plotly", html)
+	lock(() -> _R1._retire_export_window_locked!(_R1._EXPORT_STATE; throw_errors = true), _R1._EXPORT_STATE.lock)
+	svg = String(savefig(plot_scatter(1:3, [3, 1, 2]; title = "AFTERCLEAN"); format = "svg"))
+	@test occursin("AFTERCLEAN", svg)
+	@test isfile(_R1._plotlyjs_render_asset_path())
+end
+
+@testset "r1 errors-inputs-09: a bad trace index is an ArgumentError naming the verb" begin
+	fig = plot_scatter(1:3, [1.0, 2.0, 3.0])
+	before = json(fig)
+	@test _r1_argerr(() -> restyle!(fig, 0; opacity = 0.5), "restyle!: trace index 0 is out of range 1:1")
+	@test _r1_argerr(() -> restyle!(fig, 5; opacity = 0.5), "restyle!: trace index 5 is out of range 1:1")
+	@test _r1_argerr(() -> update!(fig, 0; opacity = 0.5), "update!: trace index 0")
+	@test _r1_argerr(() -> deletetraces!(fig, 5), "deletetraces!: trace index 5")
+	@test _r1_argerr(() -> movetraces!(fig, 0, 1), "movetraces!: trace index 0")
+	@test _r1_argerr(() -> addtraces!(fig, 0, scatter(y = [1])), "addtraces!: trace index 0 is out of range 1:2")
+	@test _r1_argerr(() -> extendtraces!(fig, Dict(:y => [[1.0]]), [5]), "extendtraces!: trace index 5")
+	@test _r1_argerr(() -> prependtraces!(fig, Dict(:y => [[1.0]]), [5]), "prependtraces!: trace index 5")
+	@test json(fig) == before
+end
+
+@testset "r1 tests-ci-08/errors-inputs-08: splice and default-setter messages name the function" begin
+	fig = plot_scatter(1:3, [1.0, 2.0, 3.0])
+	@test _r1_argerr(() -> extendtraces!(fig, Dict(:y => [[5.0], [6.0]]), [1, 1]), "extendtraces!: `indices` must not contain duplicates")
+	@test _r1_argerr(() -> extendtraces!(fig, Dict(:y => [[5.0], [6.0]]), [1]), "extendtraces!: update attribute :y must contain one vector per trace index")
+	@test _r1_argerr(() -> prependtraces!(fig, Dict(:a => 1), [1]), "prependtraces!: update attribute :a must be a vector")
+	@test _r1_argerr(() -> extendtraces!(fig, Dict(:y => [[5.0]]), [1], Dict(:x => [1])), "extendtraces!: `maxpoints` must contain an entry")
+	old = get_default_legend_position()
+	try
+		@test _r1_argerr(() -> set_default_legend_position!(3), "set_default_legend_position!: the position must be a Symbol")
+		@test _r1_argerr(() -> set_default_legend_position!(nothing), "set_default_legend_position!:")
+		@test get_default_legend_position() == old
+	finally
+		set_default_legend_position!(old)
+	end
+end
+
+@testset "r1 apib-02/sm-14: unknown keywords of the text and legend verbs and the setters" begin
+	fig = plot_scatter(1:3, [1.0, 2.0, 3.0]; legend = "a")
+	sf = subplots(1, 2; sync = false)
+	before = json(fig)
+	@test _r1_argerr(() -> title!(fig, "T"; fontsiz = 9), "title!: unsupported keyword argument(s) `fontsiz`")
+	@test _r1_argerr(() -> title!(sf, "T"; row = 1, col = 1, inset = 1), "title!: unsupported keyword argument(s) `inset`")
+	@test _r1_argerr(() -> set_legend!(fig; positon = :top), "set_legend!: unsupported keyword argument(s) `positon`")
+	@test _r1_argerr(() -> set_legend!(sf; positon = :top), "set_legend!: unsupported keyword")
+	@test _r1_argerr(() -> subplot_legends!(sf; positon = :top), "subplot_legends!: unsupported keyword")
+	@test _r1_argerr(() -> panel_labels!(sf; styel = :paren), "panel_labels!: unsupported keyword")
+	@test _r1_argerr(() -> legend_entry!(fig, "x"; colr = "red"), "legend_entry!: unsupported keyword argument(s) `colr`")
+	@test _r1_argerr(() -> set_default_mathtext!(; bogus = 1), "set_default_mathtext!: unsupported keyword")
+	@test _r1_argerr(() -> set_default_template!(:plotly_white; bogus = 1), "set_default_template!: unsupported keyword")
+	@test _r1_argerr(() -> register_style!(:r1_never_registered, PlotStyle(); bogus = 1), "register_style!: unsupported keyword")
+	@test json(fig) == before
+	# The messages never name an internal type.
+	err = _r1_err(() -> title!(fig, "T"; fontsiz = 9))
+	@test !occursin("Staged", sprint(showerror, err))
+	# Valid keywords still work.
+	title!(fig, "T"; fontsize = 12)
+	@test fig.layout[:title][:text] == "T"
+end
+
+@testset "r1 apib-02: legend_entry! on a SubplotFigure rejects an unknown keyword" begin
+	sf = subplots(1, 2; sync = false)
+	before = json(sf.plot)
+	@test _r1_argerr(() -> legend_entry!(sf, "x"; colr = "red"), "legend_entry!: unsupported keyword argument(s) `colr`")
+	@test json(sf.plot) == before
+	legend_entry!(sf, "x"; color = "red", row = 1, col = 2)
+	@test sf.plot.data[end][:name] == "x"
+end
+
+@testset "r1 O16: text/html display of a figure with NaN, add_trace! into a cell of another kind" begin
+	JSON = PlotlyBase.JSON
+	p = plot_scatter(1:3, [1.0, NaN, Inf]; title = "gap")
+	before = json(p)
+	html = sprint(show, MIME"text/html"(), p)
+	m = match(r"Plotly\.newPlot\(\s*'[^']+',\s*(\[.*?\]),\n", html)
+	@test m !== nothing
+	data = JSON.parse(m.captures[1])
+	# The page holds the figure JSON `json(fig)` describes: non-finite as null.
+	@test data[1]["y"] == [1.0, nothing, nothing]
+	@test data == JSON.parse(before)["data"]
+	@test occursin(string(p.divid), html)
+	@test json(p) == before
+	h = sprint(show, MIME"text/html"(), plot_heatmap([1.0 NaN; 2.0 3.0]))
+	z = JSON.parse(match(r"Plotly\.newPlot\(\s*'[^']+',\s*(\[.*?\]),\n", h).captures[1])[1]["z"]
+	@test any(row -> any(isnothing, row), z)
+
+	fig = make_subplots(rows = 1, cols = 2, specs = [Spec(kind = "polar") Spec(kind = "xy")])
+	snapshot = json(fig)
+	err = _r1_err(() -> add_trace!(fig, scatter(x = 1:3, y = [1, 3, 2]); row = 1, col = 1))
+	@test err isa ArgumentError
+	@test startswith(err.msg, "add_trace!: a scatter trace is drawn in a \"xy\" subplot, but cell (1, 1) is \"polar\"")
+	@test json(fig) == snapshot
+	add_trace!(fig, scatterpolar(r = [1, 2, 3], theta = [0, 90, 180]); row = 1, col = 1)
+	add_trace!(fig, scatter(x = 1:3, y = [1, 3, 2]); row = 1, col = 2)
+	@test [t[:type] for t in fig.data] == ["scatterpolar", "scatter"]
+	@test get(fig.data[1].fields, :subplot, "polar") == "polar"
+	# A plain figure takes any trace, as plotly places it itself.
+	q = Plot(scatter(y = [1, 2]))
+	add_trace!(q, scatterpolar(r = [1, 2], theta = [0, 90]))
+	@test length(q.data) == 2
+end
+
+@testset "r1 threed-live-06: a failed live figsize! of a 3-D figure leaves the model unchanged" begin
+	JSON = PlotlyBase.JSON
+	run_js(sp, code) = Base.invokelatest(() -> _R1._syncplot_backend(sp).run(sp.window, code))
+	sabotage = """(() => { window.__r1_saved = {relayout: Plotly.relayout, restyle: Plotly.restyle, react: Plotly.react, addTraces: Plotly.addTraces, update: Plotly.update};
+	  for (const k of Object.keys(window.__r1_saved)) Plotly[k] = function() { return Promise.reject(new Error('injected ' + k)); }; return 'ok'; })()"""
+	restore = """(() => { for (const k of Object.keys(window.__r1_saved)) Plotly[k] = window.__r1_saved[k]; return 'ok'; })()"""
+	xs = range(-2, 2; length = 21); ys = range(-1, 1; length = 11)
+	G = [exp(-x^2 - 4y^2) for x in xs, y in ys]
+	sp = to_syncplot(plot_surface(xs, ys, G; xlabel = "x", ylabel = "y", zlabel = "z"); show = false)
+	try
+		before = JSON.parse(json(sp.plot))
+		meta_before = deepcopy(sp.plot.layout.fields[:meta])
+		run_js(sp, sabotage)
+		failed = _r1_err(() -> figsize!(sp, 400, 300))
+		run_js(sp, restore)
+		@test failed !== nothing
+		@test JSON.parse(json(sp.plot)) == before
+		@test isequal(sp.plot.layout.fields[:meta], meta_before)
+		@test !haskey(sp.plot.layout.fields[:meta], Symbol("plotlysupply:size"))
+		# The same call with a working renderer commits the size, its mark
+		# and the 3-D label pads, and the window gets the same record.
+		figsize!(sp, 400, 300)
+		meta = sp.plot.layout.fields[:meta]
+		@test sp.plot.layout[:width] == 400
+		@test meta[Symbol("plotlysupply:size")] == "user"
+		window = JSON.parse(String(run_js(sp, "JSON.stringify(document.getElementById($(repr(string(sp.divid)))).layout.meta)")))
+		@test window["plotlysupply:size"] == "user"
+		@test window["plotlysupply:gl3d"]["scene"] == meta[Symbol("plotlysupply:gl3d")][:scene]
+	finally
+		close(sp)
+	end
+end
+
+@testset "r1 S-api-export-2: 3-D label pads keep the user's aliases into layout.meta" begin
+	sf = subplots(1, 1; sync = false, show = false, per_subplot_legends = false,
+		specs = fill(Spec(kind = "scene"), 1, 1))
+	fields(x) = x isa AbstractDict ? x : x.fields
+	scene = sf.layout.fields[:scene]
+	font = attr(color = "red")
+	title = attr(); fields(title)[:text] = "old"; fields(title)[:font] = font
+	xaxis = attr(); fields(xaxis)[:title] = title; fields(scene)[:xaxis] = xaxis
+	sf.layout.fields[:meta] = Dict{Symbol, Any}(:font => font, :xaxis => xaxis)
+	plot_surface!(sf, [1.0 2.0; 3.0 4.0]; xlabel = "surface-x", shared_coloraxis = true)
+	holder = sf.layout.fields[:meta]
+	committed = fields(fields(fields(sf.layout.fields[:scene])[:xaxis])[:title])
+	@test haskey(holder, Symbol("plotlysupply:gl3d"))
+	@test committed[:text] == "surface-x"
+	@test committed[:font] === holder[:font]
+	@test committed[:font] === font
+	@test fields(sf.layout.fields[:scene])[:xaxis] === holder[:xaxis]
+end
+
+@testset "r1 tests-ci-07: registries a test file extends are restored after it" begin
+	isdefined(@__MODULE__, :_global_registries_snapshot) || include(joinpath(@__DIR__, "testutils.jl"))
+	snapshot = _global_registries_snapshot()
+	cmap = PlotlySupply.COLORMAPS["viridis"]
+	try
+		PlotlySupply.COLORMAPS["r1_ice"] = ["#000000", "#ffffff"]
+		push!(PlotlySupply.COLORMAPS["viridis"], "#000000")   # changed in place
+		register_style!(:r1_registry_style, PlotStyle())
+		@test Set(_global_registries_diff(snapshot, _global_registries_snapshot())) == Set([:colormaps, :styles])
+	finally
+		_global_registries_restore!(snapshot)
+	end
+	@test _global_registries_diff(snapshot, _global_registries_snapshot()) == Symbol[]
+	@test !haskey(PlotlySupply.COLORMAPS, "r1_ice")
+	@test PlotlySupply.COLORMAPS["viridis"] == snapshot.colormaps["viridis"]
+	@test !haskey(PlotlySupply._STYLE_REGISTRY, :r1_registry_style)
+end

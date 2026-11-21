@@ -1304,7 +1304,8 @@ set_default_style!(:talk)
 """
 register_style!(name::AbstractString, style::PlotStyle) = register_style!(Symbol(name), style)
 
-function register_style!(name::Symbol, style::PlotStyle)
+function register_style!(name::Symbol, style::PlotStyle; kwargs...)
+	_reject_keywords("register_style!", kwargs)
 	name in _BUILTIN_STYLE_NAMES &&
 		throw(ArgumentError(
 			"register_style!: $(repr(name)) is a built-in style and cannot be redefined; register the style under another name.",
@@ -3238,8 +3239,6 @@ function _tight_title_text(title)
 	end
 	return ""
 end
-
-_tight_lines(text::AbstractString) = split(String(text), r"<br\s*/?>"i)
 
 function _tight_root_font_size(lookup)
 	template = lookup(:template)

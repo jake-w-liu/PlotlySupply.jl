@@ -270,6 +270,22 @@ end
         @test _global_defaults_diff(before, _global_defaults_snapshot()) == Symbol[]
         @test get_default_legend_position() == :topright
 
+        # The registries a file extends are restored after it (tests-ci-07).
+        @test occursin("_global_registries_restore!", read(joinpath(testdir, "runtests.jl"), String))
+        registries = _global_registries_snapshot()
+        try
+            PlotlySupply.COLORMAPS["hygiene_ice"] = ["#000000", "#ffffff"]
+            PlotlySupply.COLOR_CYCLES[:hygiene_cycle] = ["#000000"]
+            register_style!(:hygiene_style, PlotStyle())
+            @test Set(_global_registries_diff(registries, _global_registries_snapshot())) ==
+                Set([:colormaps, :color_cycles, :styles])
+        finally
+            _global_registries_restore!(registries)
+        end
+        @test _global_registries_diff(registries, _global_registries_snapshot()) == Symbol[]
+        @test !haskey(PlotlySupply.COLORMAPS, "hygiene_ice")
+        @test !haskey(PlotlySupply._STYLE_REGISTRY, :hygiene_style)
+
         # A file run on its own is checked when its process ends.
         mktempdir() do dir
             utils = joinpath(testdir, "testutils.jl")

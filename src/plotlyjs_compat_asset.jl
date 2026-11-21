@@ -185,11 +185,19 @@ function _plotlyjs_render_asset_path(;
 		license = read(license_path, String)
 		_plotlyjs_text_digest(license) == _PLOTLYJS_LICENSE_SHA256 ||
 			error("Unexpected Plotly.js license for math-font compatibility")
+		if state.asset !== nothing && !isfile(state.asset.path)
+			# The asset is a cache derived from the read-only artifact: when a
+			# temp cleaner (macOS, systemd-tmpfiles, an HPC scratch purge) has
+			# removed it, it is rebuilt below instead of failing every later
+			# window and export of the session.
+			remove_directory(state.asset.directory)
+			state.asset = nothing
+		end
 		if state.asset !== nothing
 			asset = state.asset
 			asset.source == abspath(source_path) || error("Plotly.js compatibility source changed")
-			isfile(asset.path) && _plotlyjs_file_digest(asset.path) == asset.digest ||
-				error("The owned Plotly.js compatibility asset changed or is missing")
+			_plotlyjs_file_digest(asset.path) == asset.digest ||
+				error("The owned Plotly.js compatibility asset changed")
 			isfile(joinpath(asset.directory, "LICENSE")) &&
 				_plotlyjs_file_digest(joinpath(asset.directory, "LICENSE")) == _PLOTLYJS_LICENSE_SHA256 ||
 				error("The owned Plotly.js compatibility license changed or is missing")
@@ -256,19 +264,4 @@ function _compatible_plotlyjs_inline_script(; state::_PlotlyJSCompatAssetState =
 		end
 		return script
 	end
-end
-
-function _inline_plotlyjs_source(html::AbstractString, source::AbstractString, license::AbstractString)
-	tag = "<script src=\"$(_PLOTLY_CDN_URL)\"></script>"
-	count(tag, html) == 1 || error("Expected exactly one Plotly.js CDN script in HTML export")
-	script = _plotlyjs_inline_script(source, license)
-	return replace(html, tag => script; count = 1)
-end
-
-function _inline_compatible_plotlyjs(html::AbstractString)
-	tag = "<script src=\"$(_PLOTLY_CDN_URL)\"></script>"
-	count(tag, html) == 1 || error("Expected exactly one Plotly.js CDN script in HTML export")
-	path = _plotlyjs_render_asset_path()
-	return _inline_plotlyjs_source(html, read(path, String),
-		read(joinpath(dirname(path), "LICENSE"), String))
 end

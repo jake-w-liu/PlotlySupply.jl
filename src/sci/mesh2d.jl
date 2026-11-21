@@ -1023,9 +1023,6 @@ end
 # SubplotFigure path
 # ---------------------------------------------------------------------------
 
-_mesh2d_trace_ref(trace, key::Symbol, default::String) =
-	trace isa GenericTrace ? String(get(trace.fields, key, default)) : default
-
 # Copy the figure's colour axes into the delegate's scratch figure, so a call
 # bound to a colour axis that already has limits reuses them (a shared norm,
 # `_mesh2d_coloraxis_limits`). The delegate itself seeds the cell's axis type,
