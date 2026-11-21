@@ -27,23 +27,9 @@ for (verb, extra) in (
 end
 
 @doc """
-`react!(fig, ...)`: the PlotlyBase verb. On a [`SyncPlot`](@ref) the window is
-redrawn from the Julia figure; on a [`SubplotFigure`](@ref) the cell keywords
-`row`, `col`, `secondary_y`, `inset` and `show` are rejected with an
-`ArgumentError`.
-""" PlotlyBase.react!
-
-@doc """
 `addtraces!(fig, traces...)`: the PlotlyBase verb. On a [`SyncPlot`](@ref) the
 traces are added to the Julia figure and the open window in one transaction
 (an `InvalidStateException` once the window is closed); on a
 [`SubplotFigure`](@ref) the traces go to the figure as given (use `row`/`col`
 mutators such as [`plot_scatter!`](@ref) to draw into a cell).
 """ PlotlyBase.addtraces!
-
-@doc """
-`update_yaxes!(sf::SubplotFigure, ...; row, col, secondary_y, inset)`: see
-[`update_xaxes!`](@ref), which documents both. `inset = k` updates only the y
-axis of inset `k` of `sf.insets` ([`inset!`](@ref)); `secondary_y = true` the
-secondary y axis of the cell; `inset` and `secondary_y` cannot be combined.
-""" PlotlyBase.update_yaxes!

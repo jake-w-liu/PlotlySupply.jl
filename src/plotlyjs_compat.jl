@@ -3064,7 +3064,9 @@ purge!
 	react!(p::SyncPlot, p2::Plot)
 
 Replace the `data` and `layout` of `p` in place (plotly.js `Plotly.react`
-semantics). On a [`SyncPlot`](@ref) the open window is updated.
+semantics). On a [`SyncPlot`](@ref) the open window is redrawn from the Julia
+figure. On a [`SubplotFigure`](@ref) the cell keywords `row`, `col`,
+`secondary_y`, `inset` and `show` are rejected with an `ArgumentError`.
 """
 react!
 
