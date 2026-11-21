@@ -102,8 +102,8 @@ fig_conv = with_style(:ieee) do
         mode = "lines+markers",
         legend = ["\$p=1\$", "\$p=2\$", "\$p=3\$"],
         xlabel = "mesh size \$h\$", ylabel = "error \$\\|e\\|\$")
-    slope_guide!(sf, 2; row = 1, col = 1, x = (h[end], h[2]),
-        through = (h[4], 0.1 * errs[2][4]), label = "\$O(h^2)\$")
+    slope_guide!(sf, 2; row = 1, col = 1, x = (h[end], h[4]),
+        through = (h[4], 3 * errs[2][4]), label = "\$O(h^2)\$")
     plot_scatter!(sf, 1 ./ h, runtime; row = 1, col = 2, xscale = "log", yscale = "log",
         mode = "lines+markers",
         legend = "assembly", xlabel = "unknowns \$N\$ (relative)", ylabel = "time (s)")
@@ -207,8 +207,9 @@ Scene axis titles and tick labels are drawn by WebGL and cannot typeset TeX:
 `$x$` becomes the plain letter. The automatic camera distance keeps the box,
 its tick labels and its axis titles inside the cell and fills it; the three
 scenes get the same distance. A `distance` you give with `view!` is kept as
-given and also restores plotly's own label offsets and axis titles: use it
-only for a deliberate common camera.
+given and moves only the camera (the label offsets of the automatic framing
+are not fitted again): use it only for a deliberate common camera, and check
+the labels.
 
 ## 7. Example: a schematic with annotations
 

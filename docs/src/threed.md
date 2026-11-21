@@ -119,9 +119,13 @@ titles of a scene cannot be kept apart they are drawn as annotations named
 axis, wrapped or set smaller; at a corner shared by two axes one end tick of
 the axis with more ticks is dropped (tick values you set are never touched).
 A positive `distance` you pass to `view!` (plotly's normalised units, about
-2.2 for the default view) is a deliberate camera: it is kept as given, and
-plotly's own pads and axis titles come back with it. `zoom` divides the
-distance of the automatic framing.
+2.2 for the default view) is a deliberate camera: it is kept as given and
+moves only the camera; the label offsets the automatic framing wrote stay as
+they were (they are not fitted again for the new distance, so check that the
+labels still fit). A camera set before the scene was ever framed (for
+example a `Layout(scene = attr(camera = ...))` passed to `plot`) and an
+orthographic scene keep plotly's own offsets. `zoom` divides the distance of
+the automatic framing.
 
 In a scene cell smaller than the plot area, axes with automatic ticks get
 about one tick per 40 px (2 to 9), raised until two ticks are labelled when

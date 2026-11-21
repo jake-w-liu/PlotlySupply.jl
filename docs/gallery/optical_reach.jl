@@ -21,7 +21,7 @@ xx = [0.0, 0.5]
 fig = with_style(:ieee) do
 	sf = subplots(2, 2; sync = false, width_ratios = [1.3, 1], shared_xaxes = "columns",
 		specs = [Spec() Spec(rowspan = 2); Spec() missing])
-	figsize!(sf, :ieee; columns = 2, aspect = 0.55)
+	figsize!(sf, :ieee; columns = 2, aspect = 0.7)        # room for the legends above (a) and (b)
 	for (row, (family, ns)) in enumerate(families)
 		ramp = colormap_colors(["#93AECB", navy], length(ns))           # light-to-dark ramp per layout
 		for (j, n) in enumerate(ns)

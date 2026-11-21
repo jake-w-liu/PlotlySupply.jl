@@ -200,8 +200,8 @@ Plot functions
   `plotlysupply:scene3d:<scene>:title:<x|y|z>` (the scene's own title then
   holds a blank), one end tick at a corner shared by two axes is dropped, and
   scenes whose axes are under four ticks long (small figures) get explicit
-  tick counts. A camera or `distance` you set keeps plotly's own pads and
-  titles.
+  tick counts. A camera set before the first framing keeps plotly's own pads;
+  a `distance` given to `view!` later moves only the camera.
 - Scenes with explicit ranges use `aspectmode = "manual"`.
 - `plot_scatter3d` and nested `mode = ""` series draw lines.
 - `plot_indicator` shows only the number unless `reference` or
