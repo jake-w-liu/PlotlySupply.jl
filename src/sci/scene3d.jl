@@ -699,7 +699,10 @@ function _s3_mutator_state(fig, who::AbstractString)
 	_S3_CELL_CONTEXT[] === nothing || return nothing
 	isempty(_plot_data(fig)) && return _S3_NEW_SCENE
 	target = _cell_target(fig; who = who)
-	(target.kind === :scene && target.scenekey === :scene) || return nothing
+	target.kind === :scene || throw(ArgumentError(
+		"$(who): the target is a :$(target.kind) figure, not a 3-D scene (a plot with Cartesian traces cannot take a scene).",
+	))
+	target.scenekey === :scene || return nothing
 	return _s3_scene_state(fig, target)
 end
 
@@ -1569,25 +1572,83 @@ function _s3_write_pads!(layout::Layout, key::Symbol, pads::NTuple{2, Float64})
 	(holder === nothing || holder isa AbstractDict) || return false
 	record = _s3_pads_record(layout)
 	current = record === nothing ? nothing : _cmn_mapping_get(record, key)
+	# `meta` is copied on write (a new mapping replaces it in the layout, the
+	# old one is never changed): a transactional mutator and the live-window
+	# delta share the layout's `meta` between the staged and the committed
+	# figure, so an in-place write would escape both the rollback and the delta.
+	rebuilt(h) = meta isa PlotlyBase.PlotlyAttribute ? PlotlyBase.PlotlyAttribute(h) : h
 	if pads == _S3_GL_DEFAULT_PADS
 		current === nothing && return false
-		_cmn_mapping_delete!(record, (key,))
-		if isempty(record)
-			delete!(holder, _S3_PADS_KEY)
-			isempty(holder) && delete!(layout.fields, :meta)
-		end
+		fresh = copy(holder)
+		fresh_record = copy(record)
+		_cmn_mapping_delete!(fresh_record, (key,))
+		isempty(fresh_record) ? delete!(fresh, _S3_PADS_KEY) : (fresh[_S3_PADS_KEY] = fresh_record)
+		isempty(fresh) ? delete!(layout.fields, :meta) : (layout.fields[:meta] = rebuilt(fresh))
 		return true
 	end
 	same = (current isa AbstractVector || current isa Tuple) && length(current) == 2 &&
 		all(i -> _s3_is_real(current[i]) && current[i] == pads[i], 1:2)
 	same && return false
-	if holder === nothing
-		holder = Dict{Any, Any}()
-		layout.fields[:meta] = holder
-	end
-	record === nothing && (record = Dict{Any, Any}(); holder[_S3_PADS_KEY] = record)
-	record[key] = Float64[pads[1], pads[2]]
+	fresh = holder === nothing ? Dict{Any, Any}() : copy(holder)
+	fresh_record = record === nothing ? Dict{Any, Any}() : copy(record)
+	fresh_record[key] = Float64[pads[1], pads[2]]
+	fresh[_S3_PADS_KEY] = fresh_record
+	layout.fields[:meta] = rebuilt(fresh)
 	return true
+end
+
+# The tick label between the two outermost ones of scene axis `d` (`fields`
+# its layout entry) that lies nearest the middle of the box edge, as a
+# fraction of the edge (`NaN` when there is none): the user's tick values, or
+# on a linear axis the multiples of the step of `nticks`/`dtick`, else
+# (plotly.js picks the count from the axis length) of every count it may
+# pick; none on a log, date or category axis. An axis title is drawn at the
+# middle of its edge, where this label lies: the title clears it as it clears
+# the end labels. (One label stands for the row: every inner label hangs at
+# the same distance from the edge, and the one at the middle is the one the
+# title can meet.)
+function _s3_tick_inner(p::Plot, scenekey::Symbol, d::Int, fields, tick_lo::Float64, tick_hi::Float64)
+	axis_type = _cmn_mapping_get(fields, :type)
+	range = _s3_axis_range(p, scenekey, d, fields)
+	(range === nothing || range[1] == range[2]) && return NaN
+	span = range[2] - range[1]
+	reversed = range[1] > range[2]
+	best = NaN
+	function add(f)
+		(isfinite(f) && -1e-9 <= f <= 1 + 1e-9) || return
+		g = clamp(f, 0.0, 1.0)
+		for h in (reversed ? (g, 1 - g) : (g,))
+			(h > tick_lo + 1e-6 && h < tick_hi - 1e-6) || continue
+			(isnan(best) || abs(h - 0.5) < abs(best - 0.5)) && (best = h)
+		end
+	end
+	values = _cmn_mapping_get(fields, :tickvals)
+	if (values isa AbstractVector || values isa Tuple) && !isempty(values)
+		axis_type == "log" && return NaN
+		for value in values
+			_s3_is_real(value) && add((Float64(value) - range[1]) / span)
+		end
+	elseif axis_type in (nothing, "-", "linear")
+		lo, hi = minmax(range[1], range[2])
+		tick0 = _cmn_mapping_get(fields, :tick0)
+		origin = (_s3_is_real(tick0) && isfinite(tick0)) ? Float64(tick0) : 0.0
+		dtick = _cmn_mapping_get(fields, :dtick)
+		nticks = _cmn_mapping_get(fields, :nticks)
+		first_count, last_count = (_s3_is_real(nticks) && isinteger(nticks) && nticks >= 1) ? (Int(nticks), Int(nticks)) :
+			(_S3_MIN_PLOTLY_TICKS, _S3_MAX_AUTO_TICKS)
+		given = _s3_is_real(dtick) && isfinite(dtick) && dtick > 0
+		for count in (given ? (first_count:first_count) : (first_count:last_count))
+			step = given ? Float64(dtick) : _s3_plotly_tick_step(abs(span), count)
+			first_index = ceil(Int, (lo - origin) / step - 1e-9)
+			last_index = floor(Int, (hi - origin) / step + 1e-9)
+			# A pathological step (a tiny dtick) would list thousands of ticks.
+			last_index - first_index <= 64 || continue
+			for k in first_index:last_index
+				add((origin + k * step - range[1]) / span)
+			end
+		end
+	end
+	return best
 end
 
 # The labels gl-axes draws for one scene axis. `ticklen` is the tick length
@@ -1603,6 +1664,7 @@ struct _S3AxisLabels
 	tick_chars::Int
 	tick_lo::Float64
 	tick_hi::Float64
+	tick_inner::Float64
 	title_size::Float64
 	title_chars::Int
 	title_lines::Int
@@ -1789,6 +1851,8 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol; pads = _s3_scene_pads(p, sce
 			tick_chars,
 			tick_lo,
 			tick_hi,
+			(!shown || tick_chars == 0 || (tick_override !== nothing && haskey(tick_override, d))) ? NaN :
+				_s3_tick_inner(p, scenekey, d, fields, tick_lo, tick_hi),
 			title_size,
 			visible ? maximum(_s3_visible_chars, lines) : 0,
 			length(lines),
@@ -1919,7 +1983,7 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 	ratio = width / height
 	# The shader divides by max(w, 1e-4) (w: depth in front of the eye).
 	function project(point, min_depth::Float64 = 1e-9)
-		q = point .- eye
+		q = (point[1] - eye[1], point[2] - eye[2], point[3] - eye[3])
 		depth = max(-_s3_dot(q, v), min_depth)
 		return (_s3_dot(q, r) / (depth * tan_half * ratio) * width / 2, _s3_dot(q, u) / (depth * tan_half) * height / 2)
 	end
@@ -1933,9 +1997,9 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 	# viewport height (gl-axes: pixelRatio · w / drawingBufferHeight).
 	unit = max(_s3_dot(eye, v), 1e-9) / height
 	function screen_direction(at, axis::Int)
-		step = zeros(3)
-		step[axis] = (spans === nothing || !(spans[axis] > 0)) ? box[axis] * 1e-3 : box[axis] / spans[axis]
-		a, b = project(at, 1e-4), project(at .+ step, 1e-4)
+		delta = (spans === nothing || !(spans[axis] > 0)) ? box[axis] * 1e-3 : box[axis] / spans[axis]
+		moved = (at[1] + (axis == 1 ? delta : 0.0), at[2] + (axis == 2 ? delta : 0.0), at[3] + (axis == 3 ? delta : 0.0))
+		a, b = project(at, 1e-4), project(moved, 1e-4)
 		len = hypot(b[1] - a[1], b[2] - a[2])
 		return len > 0 ? ((b[1] - a[1]) / len, (b[2] - a[2]) / len) : (1.0, 0.0)
 	end
@@ -1962,7 +2026,7 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 		if label.ticks_shown
 			offset .+= (label.tick_pad * unit) .* minor
 			pushed = findall(!iszero, minor)
-			for (end_tag, fraction) in ((:tick_lo, label.tick_lo), (:tick_hi, label.tick_hi))
+			function place_tick(end_tag::Symbol, fraction::Float64)
 				at = copy(edge)
 				at[a] = (fraction - 0.5) * box[a]
 				at .+= offset
@@ -1974,12 +2038,22 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 					push!(tags, (a, end_tag))
 				end
 			end
+			place_tick(:tick_lo, label.tick_lo)
+			place_tick(:tick_hi, label.tick_hi)
+			isnan(label.tick_inner) || place_tick(:tick_mid, label.tick_inner)
 		end
 		label.title_chars > 0 || continue
 		own && continue
 		offset .+= (label.label_pad * unit) .* minor
 		at = (low .+ high) ./ 2 .+ offset
-		along = label.title_along ? screen_direction(at, a) : (1.0, 0.0)
+		# gl-axes turns a title of more than four characters along the
+		# projected edge of its axis (measured on renders: the title of a z
+		# axis leans like the edge, not like the axis direction at the
+		# title's own position, which can differ by 10 degrees).
+		edge_x, edge_y = geoms[a][2][1] - geoms[a][1][1], geoms[a][2][2] - geoms[a][1][2]
+		edge_len = hypot(edge_x, edge_y)
+		along = !label.title_along ? (1.0, 0.0) : edge_len > 1e-9 ? (edge_x / edge_len, edge_y / edge_len) :
+			screen_direction(at, a)
 		thick = label.title_size * (1 + _S3_LINE_EM * (label.title_lines - 1))
 		push!(quads, _s3_text_quad(project(at), along, 0.5 * label.title_chars * _S3_CHAR_EM * label.title_size, 0.5 * thick))
 		push!(tags, (a, :title))
@@ -2363,12 +2437,13 @@ struct _S3Mark
 	font_written::NTuple{3, Float64}
 	titles::NTuple{3, String}
 	tickvals::NTuple{3, Tuple{Vararg{Float64}}}
+	endon::NTuple{3, Int}
 end
 
 Base.:(==)(a::_S3Mark, b::_S3Mark) = all(name -> getfield(a, name) == getfield(b, name), fieldnames(_S3Mark))
 
 const _S3_ORIGIN = (0.0, 0.0, 0.0)
-const _S3_NEW_MARK = _S3Mark(true, 1.0, true, nothing, _S3_ORIGIN, (0, 0, 0), _S3_ORIGIN, _S3_ORIGIN, ("", "", ""), ((), (), ()))
+const _S3_NEW_MARK = _S3Mark(true, 1.0, true, nothing, _S3_ORIGIN, (0, 0, 0), _S3_ORIGIN, _S3_ORIGIN, ("", "", ""), ((), (), ()), (0, 0, 0))
 
 # The mark of a scene layout entry, or `nothing`. Malformed entries (edited by
 # hand) read as their defaults.
@@ -2398,6 +2473,9 @@ function _s3_mark(scene)
 		something(triple(:fontwritten), _S3_ORIGIN),
 		_s3_mark_titles(field(:titles)),
 		_s3_mark_tickvals(field(:tickvals)),
+		let flags = triple(:endon)
+			flags === nothing ? (0, 0, 0) : map(f -> f == 1 ? 1 : 0, flags)
+		end,
 	)
 end
 
@@ -2431,6 +2509,7 @@ function _s3_write_mark!(layout::Layout, key::Symbol, mark::_S3Mark)
 		fontwritten = collect(mark.font_written),
 		titles = collect(mark.titles),
 		tickvals = [collect(t) for t in mark.tickvals],
+		endon = collect(mark.endon),
 	)
 	_merge_scene_layout_attr!(layout, key, attr(; _S3_MARK_KEY => value))
 	return true
@@ -3056,7 +3135,7 @@ function _s3_layout_target(p::Plot, key::Symbol)
 end
 
 const _S3_SCENE_KEY = r"^scene([2-9]|[1-9][0-9]+)?$"
-const _S3_REFIT_ROUNDS = 4
+const _S3_REFIT_ROUNDS = 6
 
 # ── Tick fonts ────────────────────────────────────────────────────────────────
 #
@@ -3124,17 +3203,276 @@ function _s3_frame_scene!(p::Plot, key::Symbol, pan::Bool)
 			(wrote |= _s3_apply_titles!(p, target, _s3_axis_labels(p, key), nothing))
 	end
 	any(state.auto_ticks) || state.auto_camera || return wrote
-	# The framing places the tick labels of the current counts, and the counts
-	# follow the framing: repeat until neither changes (two rounds in
-	# practice; the bound stops an alternation).
+	# A scene already framed to its fixed point, with nothing it depends on
+	# changed since, is not framed again (`_s3_fit_fingerprint`).
+	fingerprint = _s3_fit_fingerprint(p, key, pan)
+	_s3_fit_known(p.layout, key, fingerprint) && return wrote
+	wrote |= _s3_refit_rounds!(p, key, target, state, pan)
+	_s3_fit_remember!(p.layout, key, _s3_fit_fingerprint(p, key, pan))
+	return wrote
+end
+
+# ── Memo of settled framings ─────────────────────────────────────────────────
+#
+# `_s3_refit_rounds!` ends in a fixed point (or in the canonical state of a
+# cycle, which the next call chooses again), so framing a scene whose inputs
+# did not change since the last time writes nothing, but finding that out
+# costs a full pass of camera searches. `_S3_FIT_MEMO` remembers, per layout
+# and scene, a fingerprint of everything the framing reads and of what it
+# wrote (`_s3_fit_fingerprint`); a call that finds the same fingerprint skips
+# the pass. The memo lives outside the layout (so remembering writes nothing
+# and a copy of the figure starts without it) and holds its layouts weakly.
+# Not noticed: a user array changed in place (the data are fingerprinted by
+# identity and size, as they are never copied); any other change of the
+# figure re-frames.
+const _S3_FIT_MEMO = WeakKeyDict{Any, Dict{Symbol, UInt}}()
+const _S3_FIT_MEMO_LOCK = ReentrantLock()
+
+function _s3_fit_known(layout, key::Symbol, fingerprint::UInt)
+	return lock(_S3_FIT_MEMO_LOCK) do
+		known = get(_S3_FIT_MEMO, layout, nothing)
+		known !== nothing && get(known, key, nothing) == fingerprint
+	end
+end
+
+function _s3_fit_remember!(layout, key::Symbol, fingerprint::UInt)
+	lock(_S3_FIT_MEMO_LOCK) do
+		get!(() -> Dict{Symbol, UInt}(), _S3_FIT_MEMO, layout)[key] = fingerprint
+	end
+	return nothing
+end
+
+# Hash of a layout or trace value that does not depend on the order of a
+# dictionary and takes an array of more than 64 elements by identity and size.
+function _s3_fp(x)::UInt
+	if x isa AbstractDict
+		h = UInt(length(x))
+		for (k, v) in x
+			h += hash(k, _s3_fp(v))
+		end
+		return h
+	elseif x isa PlotlyBase.AbstractPlotlyAttribute
+		return _s3_fp(x.fields)
+	elseif x isa AbstractArray
+		length(x) <= 64 || return hash((objectid(x), size(x)))
+		h = hash(size(x))
+		for v in x
+			h = hash(_s3_fp(v), h)
+		end
+		return h
+	elseif x isa Tuple
+		h = hash(length(x))
+		for v in x
+			h = hash(_s3_fp(v), h)
+		end
+		return h
+	elseif x isa Union{AbstractString, Number, Symbol, Nothing, Missing}
+		return hash(x)
+	end
+	return hash(objectid(x))
+end
+
+# The fingerprint of what framing scene `key` of `p` reads and wrote: the
+# layout without the scene entries, the titles PlotlySupply draws and the
+# label pads (other scenes do not change this one's framing, and the
+# framing's own writes elsewhere are not inputs), the scene's own entry, the
+# traces, the template (by identity), the figure and plot area size, the
+# export size and `pan`.
+function _s3_fit_fingerprint(p::Plot, key::Symbol, pan::Bool)::UInt
+	h = hash((pan, _S3_EXPORT_SIZE[], key))
+	h = hash(_figure_default_size(p), h)
+	area = _s3_plot_area(p)
+	h = hash((area.width, area.height, area.l, area.r, area.t, area.b), h)
+	prefix = "plotlysupply:scene3d:"
+	layout_hash = UInt(0)
+	for (name, value) in p.layout.fields
+		if name isa Symbol && occursin(_S3_SCENE_KEY, String(name))
+			name === key && (layout_hash += hash(name, _s3_fp(value)))
+			continue
+		elseif name === :annotations && value isa AbstractVector
+			mine(item) = (n = _cmn_mapping_get(item, :name); n isa AbstractString && startswith(n, prefix))
+			layout_hash += hash(name, _s3_fp(filter(!mine, value)))
+		elseif name === :meta && (value isa AbstractDict || value isa PlotlyBase.AbstractPlotlyAttribute)
+			holder = value isa AbstractDict ? value : value.fields
+			layout_hash += hash(name, _s3_fp(Dict(k => v for (k, v) in holder if k !== _S3_PADS_KEY)))
+		elseif name === :template
+			layout_hash += hash(name, hash(objectid(value)))
+		else
+			layout_hash += hash(name, _s3_fp(value))
+		end
+	end
+	h = hash(layout_hash, h)
+	data_hash = UInt(0)
+	for (index, trace) in enumerate(p.data)
+		data_hash += hash(index, trace isa GenericTrace ? _s3_fp(trace.fields) : hash(objectid(trace)))
+	end
+	return hash(data_hash, h)
+end
+
+# ── Settling the framing ─────────────────────────────────────────────────────
+#
+# The framing places the tick labels of the current counts, and the counts
+# follow the framing (a tick count is floor(length / 40 px) of the axis the
+# camera projects, and the trim of a corner tick moves the camera that
+# decided it), so the rounds can chase their own tail: two framings that each
+# produce the other, one with a trimmed tick and a closer camera, one without
+# and a farther one. A bounded loop then ended in whichever state the round
+# bound fell on, and the next call started from it and ended in the other
+# (an unsettled figure whose drawn ticks were not the ones its camera was
+# fitted for). `_s3_refit_rounds!` repeats the rounds until a round writes
+# nothing (the fixed point), or, when a state comes round again, settles on
+# the best state of that cycle by what is drawn (`_s3_drawn_score`; ties by
+# the state's own values, so the choice does not depend on where the cycle
+# was entered). The state is restored from the snapshot taken when it
+# occurred, so a figure that is already in the chosen state is not written
+# and the next call chooses it again.
+
+# The scene-related layout state the rounds write: the scene entry (camera,
+# tick counts and values, tick fonts, mark, titles), the annotations (titles
+# PlotlySupply draws) and `meta` (label pads; copied on write, so the old
+# value stays valid).
+struct _S3Snapshot
+	scene::Any
+	annotations::Any
+	meta::Any
+end
+
+_s3_snapshot(p::Plot, key::Symbol) = _S3Snapshot(
+	deepcopy(get(p.layout.fields, key, nothing)),
+	get(p.layout.fields, :annotations, nothing),
+	get(p.layout.fields, :meta, nothing),
+)
+
+function _s3_restore!(p::Plot, key::Symbol, snapshot::_S3Snapshot)
+	fields = p.layout.fields
+	fields[key] = deepcopy(snapshot.scene)
+	snapshot.annotations === nothing ? delete!(fields, :annotations) : (fields[:annotations] = snapshot.annotations)
+	snapshot.meta === nothing ? delete!(fields, :meta) : (fields[:meta] = snapshot.meta)
+	return nothing
+end
+
+# The numbers and texts of a snapshot that identify a framing, as a flat
+# vector: camera, tick counts and values, label pads, titles drawn by
+# PlotlySupply.
+function _s3_state_values(p::Plot, key::Symbol)
+	scene = get(p.layout.fields, key, nothing)
+	camera = _cmn_mapping_get(scene, :camera)
+	values = Any[]
+	for name in (:eye, :center)
+		append!(values, _s3_vector3(_cmn_mapping_get(camera, name), NaN))
+	end
+	for axis in (:xaxis, :yaxis, :zaxis)
+		fields = _cmn_mapping_get(scene, axis)
+		nticks = _cmn_mapping_get(fields, :nticks)
+		push!(values, _s3_is_real(nticks) ? Float64(nticks) : -1.0)
+		ticks = _cmn_mapping_get(fields, :tickvals)
+		push!(values, ticks isa AbstractVector ? Float64[v for v in ticks if _s3_is_real(v)] : nothing)
+		title = _cmn_mapping_get(fields, :title)
+		push!(values, title isa AbstractString ? title : _cmn_mapping_get(title, :text))
+	end
+	append!(values, collect(_s3_scene_pads(p, key)))
+	prefix = string("plotlysupply:scene3d:", key, ":")
+	for item in get(p.layout.fields, :annotations, ())
+		name = _cmn_mapping_get(item, :name)
+		(name isa AbstractString && startswith(name, prefix)) || continue
+		push!(values, name, _cmn_mapping_get(item, :text), _cmn_mapping_get(item, :x), _cmn_mapping_get(item, :y))
+	end
+	return values
+end
+
+function _s3_same_values(a, b)
+	length(a) == length(b) || return false
+	for (x, y) in zip(a, b)
+		if x isa Real && y isa Real
+			(isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1e-7, atol = 1e-9) || return false
+		elseif x isa AbstractVector && y isa AbstractVector
+			length(x) == length(y) && all(i -> isapprox(x[i], y[i]; rtol = 1e-7, atol = 1e-9), eachindex(x)) || return false
+		else
+			isequal(x, y) || return false
+		end
+	end
+	return true
+end
+
+# `(collisions, overflow)` of the scene drawn as the layout says (camera, tick
+# counts and values, label pads, titles): the number of pairs of label
+# rectangles of different axes (or of a title and any label) that overlap,
+# and the px by which the drawing leaves the viewport (rounded to 0.5 px).
+# `(0, 0.0)` for a scene this module cannot model (orthographic, no data).
+function _s3_drawn_score(p::Plot, key::Symbol)
+	scene = get(p.layout.fields, key, nothing)
+	camera = _cmn_mapping_get(scene, :camera)
+	_cmn_mapping_get(_cmn_mapping_get(camera, :projection), :type) == "orthographic" && return (0, 0.0)
+	box = _s3_drawn_box(p, key)
+	box === nothing && return (0, 0.0)
+	eye_value = _cmn_mapping_get(camera, :eye)
+	eye_value === nothing && return (0, 0.0)
+	center = _s3_vector3(_cmn_mapping_get(camera, :center))
+	offset = _s3_vector3(eye_value, NaN) .- center
+	distance = _s3_norm(offset)
+	(isfinite(distance) && distance > 0) || return (0, 0.0)
+	frame = _s3_camera_frame(offset ./ distance, _s3_camera_up(camera))
+	frame === nothing && return (0, 0.0)
+	target = _s3_layout_target(p, key)
+	width, height = _s3_viewport(p, target)
+	labels = _s3_axis_labels(p, key)
+	corners, quads, tags, _ = _s3_label_layout_tagged(box, Tuple(center), frame, distance, width, height, labels,
+		_s3_scene_spans(p, key))
+	collisions = 0
+	for i in eachindex(quads), j in (i + 1):length(quads)
+		(tags[i][1] == tags[j][1] && tags[i][2] != :title && tags[j][2] != :title) && continue
+		_s3_quads_intersect(quads[i], quads[j]; tolerance = _S3_LABEL_TOUCH_PX) && (collisions += 1)
+	end
+	over = 0.0
+	m = _S3_LABEL_MARGIN_PX
+	for point in Iterators.flatten((corners, Iterators.flatten(quads)))
+		over += max(0.0, abs(point[1]) - (width / 2 - m)) + max(0.0, abs(point[2]) - (height / 2 - m))
+	end
+	return (collisions, round(2 * over) / 2)
+end
+
+# Run the rounds of camera, tick counts and corner trim on scene `key` until
+# they settle (see above); returns whether the layout changed.
+function _s3_refit_rounds!(p::Plot, key::Symbol, target::_CellTarget, state::_S3SceneState, pan::Bool)
+	initial = _s3_snapshot(p, key)
+	snapshots = _S3Snapshot[initial]
+	values = Any[_s3_state_values(p, key)]
 	for _ in 1:_S3_REFIT_ROUNDS
 		changed = state.auto_camera && _s3_frame_camera!(p, target; fit_labels = true, pan = pan)
 		changed |= any(state.auto_ticks) && _s3_finish_ticks!(p, target, state)
 		changed |= state.auto_camera && _s3_trim_corner_ticks!(p, target)
-		changed || break
-		wrote = true
+		# A round that writes nothing: the fixed point.
+		changed || return length(snapshots) > 1
+		current = _s3_state_values(p, key)
+		first_seen = findfirst(v -> _s3_same_values(v, current), values)
+		if first_seen === nothing
+			push!(snapshots, _s3_snapshot(p, key))
+			push!(values, current)
+			continue
+		end
+		# A state came round again: the states from `first_seen` on are the
+		# cycle. Settle on the best by what is drawn.
+		best = nothing
+		for index in first_seen:length(snapshots)
+			_s3_restore!(p, key, snapshots[index])
+			collisions, overflow = _s3_drawn_score(p, key)
+			rank = (collisions, overflow, string(values[index]))
+			(best === nothing || rank < best[1]) && (best = (rank, index))
+		end
+		chosen = best[2]
+		_s3_restore!(p, key, snapshots[chosen])
+		return chosen != 1
 	end
-	return wrote
+	# No fixed point and no cycle within the bound: the best state seen.
+	best = nothing
+	for index in eachindex(snapshots)
+		_s3_restore!(p, key, snapshots[index])
+		collisions, overflow = _s3_drawn_score(p, key)
+		rank = (collisions, overflow, string(values[index]))
+		(best === nothing || rank < best[1]) && (best = (rank, index))
+	end
+	_s3_restore!(p, key, snapshots[best[2]])
+	return best[2] != 1
 end
 
 """
@@ -3328,8 +3666,36 @@ function _s3_apply_view!(fig, target::_CellTarget, params::_S3ViewParams)
 		pan = owned_center,
 		eye = automatic ? written : nothing,
 		center = Tuple(c),
+		endon = _s3_hide_end_on_ticks!(p, key, direction),
 	))
 	return nothing
+end
+
+# The axis the camera looks along (the direction from the scene centre to the
+# eye within 0.8 degrees of an axis: the z axis of a top view, the x axis of
+# `elev = 0, azim = 0`) is seen end-on: its two ends project to one point, so
+# its tick labels (and its title) are drawn on top of each other there. Its
+# tick labels are hidden (`showticklabels = false`, unless the user set that
+# attribute), and shown again by a later view that is not end-on along it;
+# the mark records which axes were hidden here. Returns the new `endon`
+# record `(x, y, z)` of the mark (1: hidden by PlotlySupply).
+function _s3_hide_end_on_ticks!(p::Plot, key::Symbol, direction)
+	mark = something(_s3_mark(get(p.layout.fields, key, nothing)), _S3_NEW_MARK)
+	flags = collect(mark.endon)
+	for (d, axis) in enumerate((:xaxis, :yaxis, :zaxis))
+		fields = _cmn_mapping_get(get(p.layout.fields, key, nothing), axis)
+		shown = _cmn_mapping_get(fields, :showticklabels)
+		if abs(direction[d]) >= 0.9999
+			if shown === nothing
+				_merge_scene_layout_attr!(p.layout, key, attr(; axis => attr(showticklabels = false)))
+				flags[d] = 1
+			end
+		elseif flags[d] == 1
+			shown === false && _cmn_mapping_delete!(fields, (:showticklabels,))
+			flags[d] = 0
+		end
+	end
+	return Tuple(flags)
 end
 
 function _s3_number_field_signed(mapping, key::Symbol)
@@ -3361,7 +3727,7 @@ view `elev = 30, azim = -60` puts the camera on the +x, -y, +z side. At
 `(90, -90)` you look straight down with +x to the right and +y up; at `(0, 0)`
 you look along -x with +y to the right and +z up. Near-vertical views
 (`|elev| ≥ 89.9`) use the horizontal up vector `∓(cosd(azim), sind(azim), 0)`,
-which gives exactly that top view. `fig` is a `Plot` or `SyncPlot` with a 3-D
+which gives exactly that top view. The axis the camera looks along (within 0.8 degrees: z in a top view, x at `(0, 0)`) is seen end-on, its two ends on one point, so its tick labels are hidden (`showticklabels = false`, unless you set that attribute) and shown again by a later view that is not end-on along it. `fig` is a `Plot` or `SyncPlot` with a 3-D
 scene, or a `SubplotFigure`. Every 3-D constructor and mutator also accepts
 `view = (elev, azim)`.
 
@@ -4647,7 +5013,7 @@ function _s3_scatter3d_trace(
 		:z => _s3_plottable(z),
 		:mode => trace_mode,
 		:line => attr(; line...),
-		:name => String(legend),
+		:name => _label(legend),
 	)
 	marker = _s3_marker_attr(; series = line_color, face, edge, edge_width,
 		size = size_value > 0 ? marker_size : 0, symbol, point)
@@ -4743,6 +5109,10 @@ function _s3_scatter3d_traces(
 	who::AbstractString,
 )
 	for (name, values) in (("x", x), ("y", y), ("z", z))
+		ndims(values) == 1 || throw(ArgumentError(
+			"$(who): `$(name)` must be a vector (one series) or a vector of vectors (several series); " *
+			"got a $(ndims(values))-dimensional $(typeof(values)).",
+		))
 		eltype(values) <: Complex && _s3_check_numeric_array(values, who, name)
 	end
 	mode === nothing && (mode = "")
@@ -4856,9 +5226,9 @@ function _s3_scatter3d_traces(
 end
 
 function plot_scatter3d(
-	x::AbstractVector,
-	y::AbstractVector,
-	z::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray,
+	z::AbstractArray;
 	mode::Union{Nothing, AbstractString, AbstractVector{<:AbstractString}} = nothing,
 	color = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
@@ -4905,9 +5275,9 @@ end
 
 function plot_scatter3d!(
 	fig,
-	x::AbstractVector,
-	y::AbstractVector,
-	z::AbstractVector;
+	x::AbstractArray,
+	y::AbstractArray,
+	z::AbstractArray;
 	mode::Union{Nothing, AbstractString, AbstractVector{<:AbstractString}} = nothing,
 	color = "",
 	legend::Union{AbstractString, AbstractVector{<:AbstractString}} = "",
@@ -5124,7 +5494,7 @@ function _s3_quiver3d_traces(
 		"$(who): `style` must be :cone or :arrow; got $(repr(style)).",
 	))
 	uniform = _s3_uniform_color(color, who)
-	name = String(legend)
+	name = _label(legend)
 	if !isempty(uniform) && !_is_unset_colorscale(colorscale)
 		# 1.x accepted `color` together with `colorscale` and drew the uniform
 		# colour, so that combination keeps working; the name is still checked.
@@ -5459,7 +5829,7 @@ function _s3_segment_trace(x, y, z, edges; line, legend::AbstractString = "", ho
 		:x => sx, :y => sy, :z => sz,
 		:mode => "lines",
 		:line => line,
-		:name => String(legend),
+		:name => _label(legend),
 		:showlegend => !isempty(legend),
 	)
 	hover || (fields[:hoverinfo] = "skip")
@@ -5647,7 +6017,7 @@ function _s3_mesh3d_traces(
 	shading = flatshading === nothing ? (flat ? true : nothing) : flatshading
 	shading === nothing || (fields[:flatshading] = shading)
 	alpha < 1 && (fields[:opacity] = alpha)
-	name = String(legend)
+	name = _label(legend)
 	isempty(name) || (fields[:name] = name; fields[:showlegend] = true)
 	traces = GenericTrace[GenericTrace("mesh3d"; fields...)]
 	# Validated also when `edges = false`.
@@ -6457,7 +6827,7 @@ function _s3_polygons3d_traces(
 	light === nothing || (fields[:lighting] = light)
 	flat && (fields[:flatshading] = true)
 	alpha < 1 && (fields[:opacity] = alpha)
-	name = String(legend)
+	name = _label(legend)
 	isempty(name) || (fields[:name] = name; fields[:showlegend] = true)
 	traces = GenericTrace[GenericTrace("mesh3d"; fields...)]
 	if !isempty(line_color) && line_width > 0
@@ -6712,7 +7082,7 @@ function _s3_wireframe_trace(fig, X, Y, Z; rstride, cstride, color, linewidth, d
 		t += 1
 		sx[t] = sy[t] = sz[t] = _GAP
 	end
-	name = String(legend)
+	name = _label(legend)
 	return GenericTrace(
 		"scatter3d";
 		x = sx, y = sy, z = sz,
