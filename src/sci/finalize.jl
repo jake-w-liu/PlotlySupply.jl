@@ -617,7 +617,9 @@ function _fin_axis_mode(axis, clip, islog::Bool, implicit_reversed::Bool)
 	auto === true && return (:auto, false)
 	_fin_string(auto) == "reversed" && return (:auto, true)
 	auto === nothing && range === nothing && return (:auto, implicit_reversed)
-	if auto === false && clip !== nothing
+	# A clip left from before the axis became logarithmic can reach <= 0: no
+	# log view, so not a pin of ours (the sticky pass then removes it).
+	if auto === false && clip !== nothing && !(islog && clip[1] <= 0)
 		pair = _fin_range_pair(range)
 		if pair !== nothing
 			lo, hi = islog ? (log10(clip[1]), log10(clip[2])) : clip
@@ -960,6 +962,23 @@ function _fin_number_chars(v::Float64, decimals::Int)
 	return sign + whole + (decimals > 0 ? decimals + 1 : 0)
 end
 
+# Characters of plotly's power-format label of `v` on a linear axis whose
+# largest |value| shown is `top` ("−0.25×10⁴": plotly.js 2.35 axes.js
+# autoTickRound factors 10^e out of every label once |e| > minexponent; the
+# mantissa drops trailing zeros, the exponent is drawn at 70 % size), or
+# `nothing` when plotly writes the plain number. D21 makes "power" the default
+# of every PlotlySupply template.
+function _fin_power_chars(v::Float64, top::Float64, minexponent::Float64)
+	(isfinite(top) && top > 0) || return nothing
+	e = floor(Int, log10(top) + 0.01)
+	abs(e) > minexponent || return nothing
+	v == 0 && return 1
+	x = abs(v) / exp10(e)
+	d = something(findfirst(k -> isapprox(round(x; digits = k), x; rtol = 1e-9), 0:6), 7) - 1
+	return (v < 0) + ndigits(floor(Int, x)) + (d > 0 ? d + 1 : 0) + 3 +
+		ceil(Int, 0.7 * (ndigits(abs(e)) + (e < 0)))
+end
+
 # Rough plotly tick step: about one tick per 40 px on a vertical axis and per
 # 80 px on a horizontal one (4 to 10 ticks), rounded up to 1, 2 or 5 x 10^k.
 function _fin_nice_step(span::Float64, len_px::Float64, vertical::Bool)
@@ -1007,12 +1026,23 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 		affix = _cmn_mapping_get(mapping, key)
 		affix isa AbstractString && (extra += _fin_text_chars(affix))
 	end
+	# Linear labels: "power" factors out an exponent; unset (the template's
+	# choice, "power" in PlotlySupply's) counts the wider of power and "B".
+	format = _fin_string(_cmn_mapping_get(mapping, :exponentformat))
+	minexponent = _cmn_mapping_get(mapping, :minexponent)
+	minexponent = _fin_isfinite_real(minexponent) ? Float64(minexponent) : 3.0
+	label_chars(v, decimals, top) = begin
+		plain = _fin_number_chars(v, decimals)
+		power = format in (nothing, "power") ? _fin_power_chars(v, top, minexponent) : nothing
+		power === nothing ? plain : format === nothing ? max(power, plain) : power
+	end
 	values = _cmn_mapping_get(mapping, :tickvals)
 	if (values isa AbstractVector || values isa Tuple) && !isempty(values)
 		reals = [Float64(v) for v in values if _fin_isfinite_real(v)]
 		isempty(reals) && return 4 + extra
 		decimals = maximum(v -> v == round(v) ? 0 : clamp(ceil(Int, -log10(abs(v - round(v)) + eps())), 0, 6), reals)
-		return maximum(v -> _fin_number_chars(v, decimals), reals) + extra
+		top = maximum(abs, reals)
+		return maximum(v -> label_chars(v, decimals, top), reals) + extra
 	end
 	(isfinite(lo) && isfinite(hi) && hi > lo) || return 4 + extra
 	if islog
@@ -1024,10 +1054,7 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 		plain = (tickformat isa AbstractString && !isempty(tickformat)) ||
 			(dtick isa AbstractString && startswith(dtick, "L"))
 		plain && return maximum(e -> _fin_number_chars(exp10(e), max(0, -e)), decades) + extra
-		format = something(_fin_string(_cmn_mapping_get(mapping, :exponentformat)), "B")
-		minexponent = _cmn_mapping_get(mapping, :minexponent)
-		minexponent = _fin_isfinite_real(minexponent) ? Float64(minexponent) : 3.0
-		return maximum(e -> _fin_log_label_chars(e, format, minexponent), decades) + extra
+		return maximum(e -> _fin_log_label_chars(e, something(format, "B"), minexponent), decades) + extra
 	end
 	dtick = _cmn_mapping_get(mapping, :dtick)
 	step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) :
@@ -1037,8 +1064,9 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 	first = ceil(lo / step - 1e-9)
 	count = 0
 	k = first
+	top = max(abs(lo), abs(hi))
 	while k * step <= hi + 1e-9 * step && count < 60
-		chars = max(chars, _fin_number_chars(k * step, decimals))
+		chars = max(chars, label_chars(k * step, decimals, top))
 		k += 1
 		count += 1
 	end
@@ -1088,7 +1116,9 @@ function _fin_shown_range(layout::Layout, key::Symbol, accs)
 		return minmax(pair[1], pair[2])
 	end
 	clip = _fin_sticky_clip(axis)
-	if clip !== nothing
+	# A clip that reaches <= 0 on a log axis is stale (written while the axis
+	# was linear; `_fin_sticky_updates!` removes it): the data decide.
+	if clip !== nothing && !(islog && clip[1] <= 0)
 		return islog ? (log10(clip[1]), log10(clip[2])) : clip
 	end
 	acc = get(accs, key, nothing)

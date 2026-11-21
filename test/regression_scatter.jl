@@ -40,14 +40,16 @@ end
 	y = randn(1000)
 	f = plot_stem(y)
 	@test length(f.data) == 2
-	head, stem = f.data
+	# oned-stem-no-frame: the stems come first (drawn below the heads) instead
+	# of a negative zorder, which made plotly 2.35 draw no axis lines.
+	stem, head = f.data
 	@test head.fields[:mode] == "markers"
 	@test head.fields[:y] === y
 	@test stem.fields[:mode] == "lines"
 	@test head.fields[:legendgroup] == stem.fields[:legendgroup]
 	@test stem.fields[:showlegend] === false
 	@test stem.fields[:hoverinfo] == "skip"
-	@test stem.fields[:zorder] == -1
+	@test !haskey(stem.fields, :zorder) && !haskey(head.fields, :zorder)
 	# Gap-separated segments baseline -> y (PlotlySupply's `_GAP` is `nothing`).
 	@test length(stem.fields[:x]) == 3 * length(y)
 	@test stem.fields[:x][1:3] == [0, 0, nothing]
@@ -59,15 +61,16 @@ end
 
 	g = plot_stem([randn(5), randn(5)]; legend = ["a", "b"])
 	@test length(g.data) == 4
-	@test [t.fields[:mode] for t in g.data] == ["markers", "markers", "lines", "lines"]
+	@test [t.fields[:mode] for t in g.data] == ["lines", "lines", "markers", "markers"]
 	@test g.data[1].fields[:legendgroup] == g.data[3].fields[:legendgroup]
 	@test g.data[2].fields[:legendgroup] == g.data[4].fields[:legendgroup]
 	@test g.data[1].fields[:legendgroup] != g.data[2].fields[:legendgroup]
-	@test [t.fields[:name] for t in g.data[1:2]] == ["a", "b"]
+	@test [t.fields[:name] for t in g.data[3:4]] == ["a", "b"]
 
 	# Appended series get legend groups that never collide with existing ones.
 	plot_stem!(g, 0:4, randn(5); legend = "c")
 	groups = [g.data[k].fields[:legendgroup] for k in (1, 2, 5)]
+	@test g.data[5].fields[:mode] == "lines" && g.data[6].fields[:mode] == "markers"
 	@test allunique(groups)
 	@test g.data[5].fields[:legendgroup] == g.data[6].fields[:legendgroup]
 
@@ -79,7 +82,7 @@ end
 @testset "scatter family: plot_stem baseline, colours and marker keywords (C30)" begin
 	f = plot_stem(1:3, [1.0, -2.0, 3.0]; baseline = -0.5, color = "crimson",
 		marker_symbol = "s", marker_size = 9.5, linewidth = 2, legend = "s")
-	head, stem = f.data
+	stem, head = f.data
 	@test stem.fields[:y][1:3] == [-0.5, 1.0, nothing]
 	@test stem.fields[:y][4:6] == [-0.5, -2.0, nothing]
 	@test _rsc_get(stem.fields[:line], :color) == "crimson"
@@ -90,10 +93,10 @@ end
 
 	# White heads keep the colorway colour as their edge; stems stay black.
 	w = plot_stem(1:3, [1.0, 2.0, 3.0]; marker_color = "white", legend = "w")
-	marker = _rsc_fields(w.data[1].fields[:marker])
+	marker = _rsc_fields(w.data[2].fields[:marker])
 	@test marker[:color] == "white"
 	@test _rsc_get(marker[:line], :color) == PlotlySupply._default_trace_color(w, 1)
-	@test _rsc_get(w.data[2].fields[:line], :color) == "black"
+	@test _rsc_get(w.data[1].fields[:line], :color) == "black"
 
 	@test_throws ArgumentError plot_stem(1:3, [1.0, 2, 3]; baseline = Inf)
 	@test_throws ArgumentError plot_stem(1:3, [1.0, 2, 3]; baseline = true)
@@ -105,11 +108,12 @@ end
 	f = plot_stem([3.0, 1.0, 2.0])
 	@test f.data[1].fields[:showlegend] === false
 	@test !any(PlotlySupply._trace_will_showlegend, f.data)
+	# The legend entry is the heads' (stems first, oned-stem-no-frame).
 	q = plot_stem([3.0, 1.0, 2.0]; legend = "s")
-	@test !haskey(q.data[1].fields, :showlegend)
-	@test PlotlySupply._trace_will_showlegend(q.data[1])
+	@test !haskey(q.data[2].fields, :showlegend)
+	@test PlotlySupply._trace_will_showlegend(q.data[2])
 	h = plot_stem([3.0, 1.0, 2.0]; showlegend = true)
-	@test h.data[1].fields[:showlegend] === true
+	@test h.data[2].fields[:showlegend] === true
 	r = plot_scatter(1:4, rand(4); legend = "named")
 	plot_stem!(r, 1:4, rand(4))
 	@test r.data[2].fields[:showlegend] === false
@@ -659,8 +663,10 @@ end
 	plot_scatter!(sf2, 1:3, [1, 2, 3]; row = 1, col = 1)
 	plot_stem!(sf2, 1:3, [1, 2, 3]; row = 1, col = 1)
 	plot_scatter!(sf2, 1:3, [1, 2, 3]; row = 1, col = 2, marker_color = "white", mode = "markers")
+	# D20: the cycle restarts in every cell, so the first trace of cell (1, 2)
+	# takes the first colour.
 	@test _rsc_get(_rsc_fields(sf2.plot.data[4].fields[:marker])[:line], :color) ==
-		PlotlySupply._default_trace_color(sf2, 4)
+		PlotlySupply._default_trace_color(sf2, 1)
 	plot_stem!(sf2, 1:3, [1, 2, 3]; row = 1, col = 2)
 	@test sf2.plot.data[5].fields[:legendgroup] != sf2.plot.data[2].fields[:legendgroup]
 	@test sf2.plot.data[5].fields[:legendgroup] == sf2.plot.data[6].fields[:legendgroup]
@@ -872,7 +878,7 @@ end
 		@test !haskey(_rsc_marker(t), :symbol)
 	end
 	# Stems: the heads take the marker cycle, the stem lines the width only.
-	heads, stems = d[7], d[8]
+	stems, heads = d[7], d[8]          # stems first (oned-stem-no-frame)
 	@test heads.fields[:mode] == "markers"
 	@test _rsc_get(_rsc_marker(heads), :symbol) == symbols[mod1(7, length(symbols))]
 	@test _rsc_get(_rsc_line(stems), :width) == 2
@@ -881,17 +887,17 @@ end
 	@test _rsc_get(_rsc_line(d[9]), :width) == 2
 	@test !haskey(_rsc_line(d[9]), :dash) && !haskey(_rsc_marker(d[9]), :symbol)
 	# Without a style width the stems keep their thin default.
-	@test _rsc_get(_rsc_line(plot_stem(1:3, [1.0, 2, 3]).data[2]), :width) == PlotlySupply._STEM_DEFAULT_LINEWIDTH
+	@test _rsc_get(_rsc_line(plot_stem(1:3, [1.0, 2, 3]).data[1]), :width) == PlotlySupply._STEM_DEFAULT_LINEWIDTH
 
-	# The cycle runs over the whole SubplotFigure, cell after cell.
+	# The cycle restarts in every cell of a SubplotFigure (D20).
 	sf = with_style(; style_kw...) do
 		s = subplots(1, 2; sync = false)
 		plot_scatter!(s, 1:3, [[1, 2, 3], [3, 2, 1]]; row = 1, col = 1)
 		plot_scatter!(s, 1:3, [[1, 2, 3], [3, 2, 1]]; row = 1, col = 2)
 		s
 	end
-	@test [_rsc_get(_rsc_line(t), :dash) for t in sf.plot.data] == collect(dashes[1:4])
-	@test [_rsc_get(_rsc_marker(t), :symbol) for t in sf.plot.data] == collect(symbols[1:4])
+	@test [_rsc_get(_rsc_line(t), :dash) for t in sf.plot.data] == collect(dashes[[1, 2, 1, 2]])
+	@test [_rsc_get(_rsc_marker(t), :symbol) for t in sf.plot.data] == collect(symbols[[1, 2, 1, 2]])
 	# SyncPlot mutators style the appended traces only.
 	sp = _rsc_syncplot(plot_scatter(1:3, [1, 2, 3]))
 	with_style(; style_kw...) do
@@ -1870,4 +1876,101 @@ end
 	@test range[1] == 0 && range[2] >= 5
 	z = plot_complex([1 + 1im, 2 + 0.5im]; yrange = (0, nothing))
 	@test _rsc_axis(z, :yaxis)[:range][1] == 0
+end
+
+@testset "v7 axes-style: 1-D audit fixes (histogram bins, violin log, stems, bar labels, date widths, area gaps)" begin
+	PS = PlotlySupply
+	g(x, ks...) = (for k in ks; x = PS._cmn_mapping_get(x, k); end; x)
+	L(f) = PS._cmn_layout(f).fields
+	argmsg(f) = try
+		f(); "no error"
+	catch err
+		err isa ArgumentError ? err.msg : string(typeof(err))
+	end
+	data = [1.0, 2, 2, 3, 3, 3, 4, 4, 4, 4]
+
+	@testset "oned-hist-stop-dropped / oned-hist-logbins" begin
+		# The last explicit bin is closed: the four samples at `stop` count.
+		h = plot_histogram(data; bins = (1, 4, 1))
+		@test h.data[1].fields[:x] == [1.0, 2.0, 3.0] && h.data[1].fields[:y] == [1.0, 2.0, 7.0]
+		hp = plot_histogram(data; bins = (1, 4, 1), histnorm = "probability")
+		@test hp.data[1].fields[:y] ≈ [0.1, 0.2, 0.7]
+		# Log auto bins: plotly's 1-D rule over log10 (one decade wide here),
+		# no empty end bins.
+		hl = plot_histogram([1.0, 10, 10, 100, 100, 100, 1000]; xscale = "log")
+		@test hl.data[1].fields[:y] == [1.0, 2.0, 3.0, 1.0]
+		edges = [c[1] for c in hl.data[1].fields[:customdata]]
+		@test log10.(edges) ≈ [-0.5, 0.5, 1.5, 2.5]
+	end
+
+	@testset "oned-violin-log: the kernel stays inside the data" begin
+		v = plot_violin([1.0, 10, 100, 1000, 50]; yscale = "log")
+		@test v.data[1].fields[:spanmode] == "hard"
+		@test !haskey(plot_violin([1.0, 10, 100]).data[1].fields, :spanmode)
+	end
+
+	@testset "oned-stem-no-frame: stems keep the axis frame (rendered)" begin
+		s = plot_stem(1:3, [1.0, 2, 3])
+		@test all(t -> !haskey(t.fields, :zorder), s.data)
+		svg = try
+			String(savefig(s; format = "svg", width = 500, height = 400))
+		catch err
+			m = sprint(showerror, err)
+			@test occursin("Electron", m) || occursin("Plotly.js", m)
+			nothing
+		end
+		if svg !== nothing
+			lines = [m.captures[1] for m in eachmatch(r"class=\"[xy]lines-above crisp\" d=\"([^\"]*)\"", svg)]
+			@test length(lines) == 2 && all(d -> d != "M0,0" && length(d) > 10, lines)
+		end
+	end
+
+	@testset "oned-bar-text-clipped / vm-10: room for outside bar labels" begin
+		for st in (:default, :ieee)
+			b = with_style(st) do
+				plot_bar(["a", "b", "c"], [3, 2, 5]; text = ["3", "2", "5"], textposition = "outside")
+			end
+			inc = g(L(b)[:yaxis], :autorangeoptions, :include)
+			@test length(inc) == 1 && 5.2 < inc[1] < 5.8
+			@test !PS._finalize_figure!(b)
+		end
+		bl = plot_bar(["a", "b"], [10, 1000]; text = ["10", "1000"], textposition = "outside", yscale = "log")
+		@test 1000 < g(L(bl)[:yaxis], :autorangeoptions, :include)[1] < 3000
+		# An explicit range is the user's: no include.
+		br = plot_bar(["a", "b"], [1, 2]; text = ["1", "2"], textposition = "outside", yrange = [0, 10])
+		@test g(L(br)[:yaxis], :autorangeoptions) === nothing
+		# Rendered: the tallest label lies inside the plot area.
+		b = with_style(() -> plot_bar(["a", "b", "c"], [3, 2, 5]; text = ["3", "2", "5"], textposition = "outside"), :ieee)
+		svg = try
+			String(savefig(b; format = "svg"))
+		catch err
+			m = sprint(showerror, err)
+			@test occursin("Electron", m) || occursin("Plotly.js", m)
+			nothing
+		end
+		if svg !== nothing
+			# plotly drops (`cliponaxis`) or clips a label outside the plot area;
+			# all three value labels are drawn.
+			@test count(m -> m.captures[1] in ("3", "2", "5"), eachmatch(r"<text class=\"bartext[^\"]*\"[^>]*>([^<]*)</text>", svg)) == 3
+		end
+	end
+
+	@testset "oned-bar-date-width: barwidth in days on a date axis" begin
+		days = PS.Dates.Date(2024, 1, 1) .+ PS.Dates.Day.(0:9)
+		@test plot_bar(days, 1:10; barwidth = 0.8).data[1].fields[:width] == 0.8 * 86_400_000
+		@test plot_bar(PS.Dates.DateTime.(days), 1:10; barwidth = 0.5).data[1].fields[:width] == 0.5 * 86_400_000
+		@test plot_bar(1:10, days; barwidth = 0.8, orientation = "h").data[1].fields[:width] == 0.8 * 86_400_000
+		@test plot_bar(1:10, 1:10; barwidth = 0.8).data[1].fields[:width] == 0.8
+	end
+
+	@testset "oned-area-gap-filled: a gap is an error, not a filled plateau" begin
+		@test argmsg(() -> plot_area(1:5, [1.0, 2, NaN, 2, 1])) == "plot_area: `y` has a gap (`NaN` at position 3); " *
+			"a filled area cannot show a gap (plotly.js would fill across it, or take it as 0 when stacked): " *
+			"draw each gap-free part with its own call."
+		@test occursin("of series 2", argmsg(() -> plot_area(1:3, [[1.0, 2, 3], [1.0, missing, 3]]; stack = true)))
+		f = plot_area(1:3, [1.0, 2, 3])
+		before = length(f.data)
+		@test occursin("has a gap", argmsg(() -> plot_area!(f, 1:3, [1.0, NaN, 3])))
+		@test length(f.data) == before
+	end
 end

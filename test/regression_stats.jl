@@ -544,9 +544,10 @@ end
 		color = ["red", "blue"],
 	)
 	t1, t2 = _st_trace(fig, 1), _st_trace(fig, 2)
-	@test _st_fields(t1[:xbins]) == Dict(:start => -4.0, Symbol("end") => 5.0, :size => 0.5)
-	@test _st_fields(t1[:cumulative])[:enabled] === true
-	@test t1[:histnorm] == "probability"
+	# Explicit bins are counted in Julia (closed last bin, oned-hist-stop-dropped).
+	@test t1[:type] == "bar" && all(t1[:width] .== 0.5) && all(isinteger, 2 .* (t1[:x] .+ 4))
+	@test issorted(t1[:y]) && last(t1[:y]) ≈ 1                  # cumulative probability
+	@test occursin("cumulative probability", t1[:hovertemplate])
 	@test !haskey(_st_get(t1, :marker), :pattern)
 	@test _st_get(t2, :marker, :pattern)[:shape] == "/"
 
@@ -555,7 +556,7 @@ end
 	@test horizontal[:orientation] == "h"
 	@test horizontal[:nbinsy] == 10 && !haskey(horizontal, :nbinsx)
 	horizontal_bins = _st_trace(plot_histogram(samples; orientation = "h", bins = (0, 1, 0.1)))
-	@test _st_fields(horizontal_bins[:ybins])[:size] == 0.1
+	@test horizontal_bins[:orientation] == "h" && all(horizontal_bins[:width] .≈ 0.1)
 
 	@test_throws ArgumentError plot_histogram(samples; bins = (0, 1, 0.1), nbinsx = 5)
 	@test_throws ArgumentError plot_histogram(samples; bins = (1, 0, 0.1))
@@ -776,7 +777,7 @@ end
 	@test all(isapprox.(steps, steps[1]; atol = 1e-9))          # equal width in decades
 	@test sum(trace[:y]) == 2000
 	@test first(left) <= minimum(data) && last(right) >= maximum(data)
-	@test trace[:customdata][1] ≈ [left[1], right[1]]
+	@test trace[:customdata][1][1:2] ≈ [left[1], right[1]] && trace[:customdata][1][3] == ")"
 	@test _st_axis(fig, :xaxis)[:type] == "log"
 	# nbinsx works as for plotly's automatic bins, over log10 of the data.
 	l_start, l_stop, l_width = PlotlySupply._stats_autobins(log10.(data), 5; total = length(data))
@@ -807,15 +808,23 @@ end
 	# group mode splits each bin into equal shares in decades.
 	a, b = data, 3 .* exp.(randn(500))
 	overlay = plot_histogram([a, b]; xscale = "log", legend = ["a", "b"])
-	@test _st_trace(overlay, 1)[:x] == _st_trace(overlay, 2)[:x]
+	# Each series drops its own empty end bins (as plotly's histogram does):
+	# together they still lie on one grid of equal steps in decades.
+	grid = sort(union(_st_trace(overlay, 1)[:x], _st_trace(overlay, 2)[:x]))
+	@test all(isapprox.(diff(log10.(grid)), log10(grid[2] / grid[1]); atol = 1e-9))
 	@test _st_trace(overlay, 1)[:opacity] == 0.6
 	@test _st_layout(overlay)[:barmode] == "overlay"
 	grouped = plot_histogram([a, b]; xscale = "log", barmode = "group")
 	first_series, second_series = _st_trace(grouped, 1), _st_trace(grouped, 2)
-	@test first_series[:x] .+ first_series[:width] ≈ second_series[:x]
-	@test log10.(first_series[:x] .+ first_series[:width]) .- log10.(first_series[:x]) ≈
-		log10.(second_series[:x] .+ second_series[:width]) .- log10.(second_series[:x])
-	@test first_series[:customdata] == second_series[:customdata]   # hover shows the whole bin
+	# The bins both series keep, matched by their left edge.
+	slot = Dict(c[1] => k for (k, c) in enumerate(first_series[:customdata]))
+	i2 = [k for (k, c) in enumerate(second_series[:customdata]) if haskey(slot, c[1])]
+	i1 = [slot[second_series[:customdata][k][1]] for k in i2]
+	@test length(i1) > 10
+	@test first_series[:x][i1] .+ first_series[:width][i1] ≈ second_series[:x][i2]
+	@test log10.(first_series[:x][i1] .+ first_series[:width][i1]) .- log10.(first_series[:x][i1]) ≈
+		log10.(second_series[:x][i2] .+ second_series[:width][i2]) .- log10.(second_series[:x][i2])
+	@test first_series[:customdata][i1] == second_series[:customdata][i2]   # hover shows the whole bin
 
 	# Horizontal histograms bin along a log y axis; a log COUNT axis keeps
 	# plotly's own histogram.

@@ -7073,7 +7073,11 @@ function _s3_subplot!(
 			options[key] = stored
 		end
 	end
-	context = _S3CellContext(current, target.scenekey, length(current.data))
+	# D20: default colours continue the scene cell's colour cycle.
+	context = _S3CellContext(current, target.scenekey, _style_cell_counts(
+		current,
+		_style_cell_key(layout, "scene", Dict{Symbol, Any}(:scene => String(target.scenekey))),
+	).traces)
 	# A plain colorbar title for a colour axis whose earlier math title is an
 	# annotation: the staging figure cannot see that annotation, so it is
 	# removed here.

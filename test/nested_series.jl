@@ -104,7 +104,8 @@ end
         @testset "$name y-only constructor" begin
             fig = make_figure()
             @test length(fig.data) == expected
-            @test collect(fig.data[1].fields[:y]) == [1, 2, 3]
+            # The stems of both series are drawn first; the heads carry the values.
+            @test collect(fig.data[name == "stem" ? 3 : 1].fields[:y]) == [1, 2, 3]
         end
     end
 
@@ -156,7 +157,8 @@ end
             @test mutate!(fig) === nothing
             @test length(fig.data) == initial_count + expected_delta
             if has_generated_x
-                @test collect(fig.data[initial_count + 1].fields[:x]) == [0, 1, 2]
+                # The stems of both series are drawn first; the heads carry the values.
+                @test collect(fig.data[initial_count + (name == "stem!" ? 3 : 1)].fields[:x]) == [0, 1, 2]
             else
                 @test collect(fig.data[initial_count + 1].fields[:y]) == [1, 2, 3]
             end

@@ -450,14 +450,15 @@ _r3_resolved(name) = PlotlySupply._resolve_colorscale(name; who = "test").scale
 		@test !haskey(_r3_fields(d.data[1].fields[:line]), :width)
 		@test _r3_fields(d.data[2].fields[:line])[:width] == 1
 		@test _r3_fields(d.data[3].fields[:line])[:width] == 1
-		# The cycle continues across SubplotFigure cells.
+		# The cycle restarts in every SubplotFigure cell (D20).
 		sf = with_style(:default; cycle = :dash_marker) do
 			s = _r3_sf()
+			plot_scatter3d!(s, 1:3, 1:3, 1:3; row = 1, col = 1)
 			plot_scatter3d!(s, 1:3, 1:3, 1:3; row = 1, col = 1)
 			plot_scatter3d!(s, 1:3, 1:3, 1:3; row = 1, col = 2)
 			s
 		end
-		@test [_r3_fields(t.fields[:line])[:dash] for t in sf.plot.data] == ["solid", "dash"]
+		@test [_r3_fields(t.fields[:line])[:dash] for t in sf.plot.data] == ["solid", "dash", "solid"]
 	end
 
 	@testset "Bool coordinates are sent as numbers (3-D)" begin

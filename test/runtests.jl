@@ -373,14 +373,14 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
             :gridon,
         )
             set_template!(fig, string(name))
-            expected = PlotlyBase.templates[name]
+            expected = PlotlySupply._resolve_template(name)
             @test fig.layout.fields[:template] isa PlotlyBase.Template
             @test fig.layout.fields[:template] === expected
             @test serialized(fig.layout)["template"] == serialized(expected)
         end
         @test_logs (:warn,) set_template!(fig, "none")
         @test fig.layout.fields[:template] ===
-            PlotlyBase.templates[:plotly_white]
+            PlotlySupply._resolve_template(:plotly_white)
 
         custom_name = :plotlysupply_test_custom
         custom = PlotlyBase.Template(
@@ -393,7 +393,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         PlotlyBase.templates[custom_name] = custom
         try
             compound_name = Symbol("plotly_white+xgridoff")
-            compound = PlotlyBase.templates[String(compound_name)]
+            compound = PlotlySupply._resolve_template(String(compound_name))
             set_template!(fig, " plotly_white + xgridoff ")
             @test fig.layout.fields[:template] isa PlotlyBase.Template
             @test fig.layout.fields[:template] == compound
@@ -407,24 +407,24 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
                 serialized(compound)
 
             set_template!(fig, custom)
-            @test fig.layout.fields[:template] === custom
-            @test serialized(fig.layout)["template"] == serialized(custom)
+            @test fig.layout.fields[:template] === PlotlySupply._resolve_template(custom)
+            @test serialized(fig.layout)["template"] == serialized(PlotlySupply._resolve_template(custom))
 
             set_template!(fig, custom_name)
-            @test fig.layout.fields[:template] === custom
+            @test fig.layout.fields[:template] === PlotlySupply._resolve_template(custom)
             @test set_default_template!(custom_name) === custom_name
             @test get_default_template() === custom_name
             fig2 = plot_scatter(x, y)
             @test fig2.layout.fields[:template] isa PlotlyBase.Template
-            @test fig2.layout.fields[:template] == custom
-            @test serialized(fig2.layout)["template"] == serialized(custom)
+            @test fig2.layout.fields[:template] == PlotlySupply._resolve_template(custom)
+            @test serialized(fig2.layout)["template"] == serialized(PlotlySupply._resolve_template(custom))
 
             # 2.0 (spec C38): a Template object is accepted as the default.
             @test set_default_template!(custom) === custom
             @test get_default_template() === custom
             fig3 = plot_scatter(x, y)
-            @test fig3.layout.fields[:template] == custom
-            @test serialized(fig3.layout)["template"] == serialized(custom)
+            @test fig3.layout.fields[:template] == PlotlySupply._resolve_template(custom)
+            @test serialized(fig3.layout)["template"] == serialized(PlotlySupply._resolve_template(custom))
         finally
             set_default_template!(previous_default)
             if had_previous_custom
@@ -807,7 +807,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test sf.legend_position == get_default_legend_position()
         @test sf.plot.layout.fields[:template] isa PlotlyBase.Template
         @test sf.plot.layout.fields[:template] ==
-            PlotlyBase.templates[get_default_template()]
+            PlotlySupply._resolve_template(get_default_template())
 
         PlotlySupply.plot!(sf, 1:5, rand(5); legend="A")
         PlotlySupply.subplot!(sf, 1, 2)
@@ -834,7 +834,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test haskey(sf.plot.layout.fields, :legend3)
         @test haskey(sf.plot.layout.fields, :legend4)
         @test sf.plot.data[1].fields[:showlegend] == true
-        @test sf.plot.data[2].fields[:showlegend] == true
+        @test sf.plot.data[3].fields[:showlegend] == true   # stem heads; the stems (2) come first
         @test sf.plot.layout.fields[:showlegend] == true
 
         @test sf.plot.layout.fields[:legend2][:x] > sf.plot.layout.fields[:legend][:x]
@@ -861,7 +861,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test length(sf_raw.plot.data) == 2
         @test sf_raw.plot.layout.fields[:template] isa PlotlyBase.Template
         @test sf_raw.plot.layout.fields[:template] ==
-            PlotlyBase.templates[get_default_template()]
+            PlotlySupply._resolve_template(get_default_template())
         @test sf_raw.plot.layout.fields[:showlegend] == true
     end
 
@@ -2454,8 +2454,8 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         y_st = rand(5)
         PlotlySupply.plot_stem!(sf, y_st)
         @test length(sf.plot.data) == 3
-        @test [t[:mode] for t in sf.plot.data[2:3]] == ["markers", "lines"]
-        @test sf.plot.data[2][:x] == 0:4 && sf.plot.data[2][:y] == y_st
+        @test [t[:mode] for t in sf.plot.data[2:3]] == ["lines", "markers"]   # stems below the heads
+        @test sf.plot.data[3][:x] == 0:4 && sf.plot.data[3][:y] == y_st
         @test all(t -> axes_of(t) == ("x2", "y2"), sf.plot.data[2:3])
 
         # bar!(sf, y) - y-only
@@ -2633,12 +2633,13 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
     @testset "CRC: stem honors color (marker + stem lines)" begin
         f = plot_stem([0, 1, 2], [3.0, 4.0, 5.0]; color="red")
-        @test f.data[1].fields[:marker][:color] == "red"        # head marker colored
-        @test !haskey(f.data[1].fields, :line)                  # no unused line on markers trace
-        @test f.data[2].fields[:line][:color] == "red"          # stem line colored
+        heads, stems = _stem_parts(f)
+        @test only(heads).fields[:marker][:color] == "red"      # head marker colored
+        @test !haskey(only(heads).fields, :line)                # no unused line on markers trace
+        @test only(stems).fields[:line][:color] == "red"        # stem line colored
         # default (no color) keeps black stems
         g = plot_stem([0, 1], [1.0, 2.0])
-        @test g.data[2].fields[:line][:color] == "black"
+        @test only(last(_stem_parts(g))).fields[:line][:color] == "black"
     end
 
     @testset "CRC: scatterpolar has no default sector (full circle)" begin
@@ -2818,13 +2819,13 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         f = plot_scatter(1:5, rand(5)); set_template!(f, "plotly_dark")
         f_template = f.layout.fields[:template]
         plot_scatter!(f, 1:5, rand(5))
-        @test f_template === PlotlyBase.templates[:plotly_dark]
+        @test f_template === PlotlySupply._resolve_template(:plotly_dark)
         @test f.layout.fields[:template] === f_template
         g = plot_bar(1:3, rand(3)); set_template!(g, "seaborn"); plot_bar!(g, 1:3, rand(3))
-        @test g.layout.fields[:template] === PlotlyBase.templates[:seaborn]
+        @test g.layout.fields[:template] === PlotlySupply._resolve_template(:seaborn)
         h = plot_heatmap(rand(3, 3)); set_template!(h, "plotly_dark"); plot_heatmap!(h, rand(3, 3))
         @test h.layout.fields[:template] ===
-            PlotlyBase.templates[:plotly_dark]
+            PlotlySupply._resolve_template(:plotly_dark)
     end
 
     @testset "CRC: _apply_showlegend! tolerates over-long vector" begin
@@ -4305,7 +4306,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         )
             g = mk(); set_template!(g, "plotly_dark"); add!(g)
             @test g.layout.fields[:template] ===
-                PlotlyBase.templates[:plotly_dark]
+                PlotlySupply._resolve_template(:plotly_dark)
             @test length(g.data) == 2
         end
     end

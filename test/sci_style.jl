@@ -229,7 +229,7 @@ using PlotlySupply
 
 			@test PS._style_template(default) === PS._resolve_template(PS._DEFAULT_TEMPLATE[])
 			set_default_template!(:plotly_dark)
-			@test PS._style_template(default) === PB.templates[:plotly_dark]
+			@test PS._style_template(default) === PS._resolve_template(:plotly_dark)
 			@test PS._style_axis_defaults(default)[:linecolor] == "#f2f5fa"
 			set_default_template!(original_template)
 
@@ -743,9 +743,9 @@ using PlotlySupply
 				@test err isa ArgumentError
 				@test occursin("PlotStyle: `$(name)`", sprint(showerror, err))
 			end
-			# Wrong types are rejected by the keyword signature.
-			@test_throws TypeError PlotStyle(; mirror_ticks = 1)
-			@test_throws TypeError PlotStyle(; reference_linewidth = "1")
+			# Wrong types are user errors (style-10: ArgumentError, not TypeError).
+			@test_throws ArgumentError PlotStyle(; mirror_ticks = 1)
+			@test_throws ArgumentError PlotStyle(; reference_linewidth = "1")
 			s_bad = PlotStyle()
 			@test_throws ArgumentError (s_bad.mirror_ticks = 1)
 			@test_throws ArgumentError (s_bad.errorbar_width = true)
@@ -980,5 +980,143 @@ using PlotlySupply
 	finally
 		set_default_style!(:default)
 		set_default_template!(original_template)
+	end
+end
+
+@testset "v7 axes-style: style scope, fontsize, API errors, cycles (style-01/08/10, tm-log-unsettled, D20)" begin
+	PS = PlotlySupply
+	g(x, ks...) = (for k in ks; x = PS._cmn_mapping_get(x, k); end; x)
+	L(f) = PS._cmn_layout(f).fields
+	argmsg(f) = try
+		f(); "no error"
+	catch err
+		err isa ArgumentError ? err.msg : string(typeof(err))
+	end
+	set_default_style!(:default)
+
+	@testset "style-01: with_style is scoped to its task" begin
+		widths = asyncmap(1:4) do i
+			with_style(:nature) do
+				sleep(0.02 * (5 - i))
+				get(L(plot_scatter(1:3, 1:3)), :width, nothing)
+			end
+		end
+		nature_width = L(with_style(() -> plot_scatter(1:3, 1:3), :nature))[:width]
+		@test all(==(nature_width), widths)
+		@test PS._active_style().width == 0
+		t1 = @async with_style(() -> (sleep(0.15); plot_scatter(1:3, 1:3)), :ieee)
+		t2 = @async with_style(() -> (sleep(0.02); f = plot_scatter(1:3, 1:3); sleep(0.2); f), :ieee)
+		@test get(L(fetch(t1)), :width, nothing) == get(L(fetch(t2)), :width, nothing) !== nothing
+		@test PS._active_style().width == 0
+		# Tasks started inside a block see its style.
+		@test with_style(() -> fetch(Threads.@spawn get(L(plot_scatter(1:3, 1:3)), :width, nothing)), :ieee) !== nothing
+		# set_default_style! inside a block sets the default seen after it.
+		with_style(:aps) do
+			set_default_style!(:ieee)
+			@test PS._active_style().width == PS._STYLE_REGISTRY[:aps].width
+		end
+		@test PS._active_style().width == PS._STYLE_REGISTRY[:ieee].width
+		set_default_style!(:default)
+	end
+
+	@testset "style-08: a constructor's fontsize scales the style's text roles" begin
+		f = with_style(:publication) do
+			plot_scatter(1:3, 1:3; fontsize = 20, title = "T", xlabel = "x", ylabel = "y", legend = "a")
+		end
+		ratio = 20 / 14                        # :publication base 14 px
+		@test g(L(f)[:title], :font, :size) ≈ 16 * ratio
+		@test g(L(f)[:xaxis], :title, :font, :size) ≈ 14 * ratio
+		@test g(L(f)[:xaxis], :tickfont, :size) ≈ 12 * ratio
+		@test g(L(f)[:legend], :font, :size) ≈ 12 * ratio
+		@test PS._figure_recorded_style(f).tick_fontsize ≈ 12 * ratio
+		@test !PS._finalize_figure!(f)
+		j = with_style(() -> plot_scatter(1:3, 1:3; fontsize = 20, xlabel = "x"), :nature)
+		@test g(L(j)[:xaxis], :tickfont, :size) ≈ 20 && g(L(j)[:xaxis], :title, :font, :size) ≈ 20
+		d = plot_scatter(1:3, 1:3; fontsize = 20)
+		@test g(L(d)[:font], :size) == 20 && g(L(d)[:xaxis], :tickfont, :size) === nothing
+	end
+
+	@testset "style-10: style API errors and String names" begin
+		f = plot_scatter(1:3, 1:3)
+		@test argmsg(() -> set_fonts!(f; ticks = 9)) == "set_fonts!: unsupported keyword argument(s) `ticks`."
+		@test argmsg(() -> journal_width(:ieee; column = 2)) == "journal_width: unsupported keyword argument(s) `column`."
+		@test startswith(argmsg(() -> PlotStyle(; font_size = 9)), "PlotStyle: unknown keyword(s) `font_size`")
+		@test argmsg(() -> PlotStyle(; font_family = :Arial)) == "PlotStyle: `font_family` must be a string; got :Arial."
+		@test argmsg(() -> PlotStyle(; fontsize = "9")) == "PlotStyle: `fontsize` must be a real number; got \"9\"."
+		@test startswith(argmsg(() -> with_style(() -> 1, "nope")), "with_style: unknown style :nope")
+		@test with_style(() -> PS._active_style().width, "ieee") == PS._STYLE_REGISTRY[:ieee].width
+		@test set_default_style!("ieee").width == PS._STYLE_REGISTRY[:ieee].width
+		set_default_style!(:default)
+		@test register_style!("v7_string_name", PlotStyle()) === :v7_string_name
+	end
+
+	@testset "tm-log-unsettled: log constructors are settled under every style" begin
+		for st in (:publication, :ieee, :aps, :nature, :elsevier, :springer, :aip)
+			f = with_style(() -> plot_scatter(1:3, [1, 10, 1000]; yscale = "log"), st)
+			@test !PS._finalize_figure!(f)
+		end
+	end
+
+	@testset "D20: the style cycle restarts in every cell" begin
+		sig(t) = (get(t.fields, :xaxis, "x"), g(get(t.fields, :line, nothing), :color), g(get(t.fields, :line, nothing), :dash))
+		sf = with_style(:ieee) do
+			sf = subplots(1, 2; sync = false)
+			for c in 1:2, k in 1:2
+				plot_scatter!(sf, 1:3, (1:3) .* k; row = 1, col = c)
+			end
+			sf
+		end
+		@test [sig(t) for t in sf.plot.data] == [("x", "#0072B2", "solid"), ("x", "#D55E00", "dash"),
+			("x2", "#0072B2", "solid"), ("x2", "#D55E00", "dash")]
+		before = [sig(t) for t in sf.plot.data]
+		PS.PlotlyBase.deletetraces!(sf.plot, 1)
+		PS._finalize_figure!(sf)
+		@test [sig(t) for t in sf.plot.data] == before[2:end]          # no restyle on delete
+		# The colours are written under :default too; a twin axis continues
+		# its cell's cycle, an inset starts its own, and under a figure legend
+		# a series drawn in several cells keeps one style.
+		for st in (:default, :ieee)
+			ex = with_style(st) do
+				f = subplots(1, 2; sync = false, specs = Union{Missing, PS.Spec}[PS.Spec(secondary_y = true) PS.Spec()])
+				for c in 1:2, (k, name) in enumerate(("a", "b"))
+					plot_scatter!(f, 1:3, (1:3) .* k; row = 1, col = c, legend = name)
+				end
+				plot_scatter!(f, 1:3, [3, 2, 1]; row = 1, col = 1, secondary_y = true, legend = "twin")
+				k = inset!(f, (0.5, 0.5, 0.4, 0.4); row = 1, col = 2)
+				plot_scatter!(f, 1:3, [1, 3, 2]; row = 1, col = 2, inset = k, legend = "in1")
+				plot_scatter!(f, 1:3, [2, 3, 1]; row = 1, col = 2, inset = k, legend = "in2")
+				set_legend!(f; legend_target = :figure)
+				f
+			end
+			s = [(g(get(t.fields, :line, nothing), :color), g(get(t.fields, :line, nothing), :dash)) for t in ex.plot.data]
+			@test [get(t.fields, :name, nothing) for t in ex.plot.data] == ["a", "b", "a", "b", "twin", "in1", "in2"]
+			@test s[1] == s[3] == s[6] && s[2] == s[4] == s[7] && s[1] != s[2]
+			@test s[5] == (st === :default ? (PS._default_trace_color(ex, 3), nothing) : ("#009E73", "dot"))
+		end
+		# A plain Plot (no cells) keeps the figure-wide cycle: its second trace
+		# takes the second dash (and colour, through the colorway).
+		p = PS.Plot([PS.scatter(x = 1:3, y = 1:3)], PS.Layout())
+		with_style(() -> plot_scatter!(p, 1:3, 2:4), :ieee)
+		@test sig(p.data[2]) == ("x", nothing, "dash")    # colour: the colorway's second
+		# Markers take an explicit `color` (line.color) in plotly.js even without
+		# lines: the cell colour must not be written over it.
+		mk = subplots(1, 1; sync = false)
+		plot_scatter!(mk, 1:3, 1:3)
+		plot_scatter!(mk, [2], [2]; mode = "markers", color = "black", marker_size = 9)
+		@test g(get(mk.plot.data[2].fields, :line, nothing), :color) == "black"
+		@test g(get(mk.plot.data[2].fields, :marker, nothing), :color) === nothing
+		plot_scatter!(mk, [1], [3]; mode = "markers")           # no colour: the cell's third
+		@test g(mk.plot.data[3].fields[:marker], :color) == PS._default_trace_color(mk, 3)
+		svg = try
+			String(savefig(mk; format = "svg", width = 400, height = 300))
+		catch err
+			m = sprint(showerror, err)
+			@test occursin("Electron", m) || occursin("Plotly.js", m)
+			nothing
+		end
+		if svg !== nothing
+			fills = [m.captures[1] for m in eachmatch(r"<path class=\"point\"[^>]*?fill: (rgb\([^)]*\))", svg)]
+			@test fills == ["rgb(0, 0, 0)", "rgb(0, 204, 150)"]
+		end
 	end
 end

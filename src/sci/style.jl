@@ -36,7 +36,8 @@
 #   `fontsize` (`_apply_figure_fontsize!`, which merges `font.size` and keeps the
 #   style's family/colour), so the caller's base size wins over the style's.
 #   Per-role sizes written by the style (title, axis titles, ticks, legend)
-#   stay; `set_fonts!` changes those.
+#   are scaled by the same factor and the figure records the scaled style
+#   (style-08); `set_fonts!` sets them one by one.
 # - The template re-writes the 1.x frame keys of every x/y axis (zeroline,
 #   showline, mirror, ticks, automargin, linecolor, linewidth, tickcolor); an
 #   option that must override one of them (e.g. tick direction) is applied
@@ -405,6 +406,14 @@ const _STYLE_INK_CYCLES = (:bw, :bw_dash_marker)
 # Height / width of a sized style that sets no `aspect`: matplotlib's default
 # `figure.figsize` of 6.4 x 4.8 in.
 const _STYLE_DEFAULT_ASPECT = 0.75
+# L8: extra px (plotly `ticklabelstandoff`, an integer) between the tick
+# labels and the ticks / axis line under a style that sizes its tick labels
+# (see `_style_axis_defaults`): 2 px keeps every rendered label box at least
+# 2 px clear of the ticks and the spine under every preset (the closest, a
+# power-format x label under :nature, otherwise comes within 1.1 px), and
+# brings the label gap of the inside-tick presets to about matplotlib's
+# 3.5 pt `xtick.major.pad`.
+const _STYLE_TICKLABEL_STANDOFF = 2
 # plotly.js rejects layout.width/height below 10 px; the upper bound only
 # keeps `round(Int, ·)` in range (no canvas comes near 2^31 px).
 const _STYLE_MIN_FIGURE_PX = 10.0
@@ -455,7 +464,7 @@ temporarily with [`with_style`](@ref); styles are registered by name with
   box, a frameless legend, math labels whose text parts are drawn in the
   text font (`set_default_mathtext!`'s `inherit_text_font`) and a 10 px margin that grows
   automatically to fit labels and the title, and decade-only tick labels on
-  logarithmic axes spanning two decades or more (`log_ticks = :decades`). It
+  logarithmic axes showing two decade ticks or more (`log_ticks = :decades`). It
   sets no figure size and no per-trace defaults.
 - Journal presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`
   — sized for the journal's single column (`width`, `aspect = 0.75`), in the
@@ -536,7 +545,7 @@ Every field is validated by the constructor and on assignment
 - `log_ticks=:auto`: tick labels of a logarithmic axis that has no tick
   setting of its own. `:auto` keeps plotly's adaptive labels; `:decades` labels
   decades only (every k-th decade on a long axis, unlabelled minor ticks
-  between) once the axis shows two decades or more, so that the minor labels
+  between) once the axis shows two decade ticks (10ⁿ) or more, so that the minor labels
   `2`, `5` of a narrow column-width panel never collide. `:publication` and
   every journal preset use `:decades`; `:default` keeps `:auto`. An axis
   that has `tickvals`, `dtick`, `tickmode` or `ticktext` set by the user is
@@ -675,35 +684,41 @@ function _style_check_figure_size(width::Float64, aspect::Float64, who::Abstract
 	return nothing
 end
 
+# The keywords are untyped: `_style_validate_field` checks every value and
+# throws the ArgumentError naming the field (style-10).
 function PlotStyle(
 	;
 	template = nothing,
-	font_family::AbstractString = "",
-	fontsize::Real = 0,
-	title_fontsize::Real = 0,
-	label_fontsize::Real = 0,
-	tick_fontsize::Real = 0,
-	legend_fontsize::Real = 0,
+	font_family = "",
+	fontsize = 0,
+	title_fontsize = 0,
+	label_fontsize = 0,
+	tick_fontsize = 0,
+	legend_fontsize = 0,
 	font_color = "",
 	colorway = nothing,
-	linewidth::Real = 0,
-	marker_size::Real = 0,
-	ticks::Union{AbstractString, Symbol} = "outside",
-	spines::Union{AbstractString, Symbol} = :box,
-	grid::Bool = true,
-	legend_frame::Bool = true,
+	linewidth = 0,
+	marker_size = 0,
+	ticks = "outside",
+	spines = :box,
+	grid = true,
+	legend_frame = true,
 	margin = nothing,
-	mathsize::AbstractString = "",
-	cycle::Union{AbstractString, Symbol} = :none,
-	width::Real = 0,
-	aspect::Real = 0,
-	axis_linewidth::Real = 0,
-	tick_length::Real = 0,
-	mirror_ticks::Bool = false,
-	errorbar_width::Real = 0,
-	reference_linewidth::Real = 0,
-	log_ticks::Union{AbstractString, Symbol} = :auto,
+	mathsize = "",
+	cycle = :none,
+	width = 0,
+	aspect = 0,
+	axis_linewidth = 0,
+	tick_length = 0,
+	mirror_ticks = false,
+	errorbar_width = 0,
+	reference_linewidth = 0,
+	log_ticks = :auto,
+	kwargs...,
 )
+	isempty(kwargs) || throw(ArgumentError(
+		"PlotStyle: unknown keyword(s) $(join(("`$(k)`" for k in keys(kwargs)), ", ")); fields are $(join(fieldnames(PlotStyle), ", ")).",
+	))
 	return PlotStyle(
 		template,
 		font_family,
@@ -1131,16 +1146,30 @@ const _ACTIVE_STYLE = Ref{PlotStyle}(_default_plot_style())
 The style constructors consult (see the internal-API comment at the top of
 src/sci/style.jl). Returned by reference: internal callers must not mutate it.
 """
-_active_style() = (scoped = _STYLE_SCOPE[]; scoped === nothing ? _ACTIVE_STYLE[] : scoped)
+function _active_style()
+	scoped = _STYLE_SCOPE[]
+	scoped === nothing || return scoped
+	block = _STYLE_BLOCK[]
+	return block === nothing ? _ACTIVE_STYLE[] : block
+end
 
 # The style a figure carries (see `_figure_style`) while one of its mutators,
 # `_finalize_figure!` or an export runs: `_with_figure_style` installs it here,
 # `_active_style()` returns it in place of the global active style.
 const _STYLE_SCOPE = Base.ScopedValues.ScopedValue{Union{Nothing, PlotStyle}}(nothing)
 
+# style-01: the style of the innermost `with_style` block of the running task
+# (dynamic scope: tasks started inside the block inherit it). A block used to
+# swap the global `_ACTIVE_STYLE` and put the previous value back, so
+# overlapping blocks of two tasks undid each other and left the global style
+# changed after both had ended.
+const _STYLE_BLOCK = Base.ScopedValues.ScopedValue{Union{Nothing, PlotStyle}}(nothing)
+
 function _style_lookup(style::PlotStyle, ::AbstractString)
 	return style
 end
+
+_style_lookup(name::AbstractString, who::AbstractString) = _style_lookup(Symbol(name), who)
 
 function _style_lookup(name::Symbol, who::AbstractString)
 	return lock(_STYLE_LOCK) do
@@ -1180,11 +1209,11 @@ style.fontsize      # 0.0 under the built-in :default style
 get_default_style() = copy(_active_style())
 
 """
-	set_default_style!(style::Union{PlotStyle,Symbol}; kwargs...)::PlotStyle
+	set_default_style!(style::Union{PlotStyle,Symbol,AbstractString}; kwargs...)::PlotStyle
 	set_default_style!(; kwargs...)::PlotStyle
 
 Make `style` the active style used by every subsequently created figure.
-`style` is a [`PlotStyle`](@ref) or the name of a registered style (`:default`,
+`style` is a [`PlotStyle`](@ref) or the name (a Symbol or String) of a registered style (`:default`,
 `:publication`, a journal preset `:ieee`, `:aps`, `:nature`, `:elsevier`,
 `:springer`, `:aip`, or a name given to [`register_style!`](@ref)). Keyword arguments
 override individual `PlotStyle` fields on top of `style`; with no positional
@@ -1201,7 +1230,7 @@ set_default_style!(; tick_fontsize = 11)   # tweak one field
 set_default_style!(:default)                # back to the 1.x defaults
 ```
 """
-function set_default_style!(style::Union{PlotStyle, Symbol}; kwargs...)
+function set_default_style!(style::Union{PlotStyle, Symbol, AbstractString}; kwargs...)
 	new_style = _style_with_overrides(
 		_style_lookup(style, "set_default_style!"),
 		kwargs,
@@ -1213,17 +1242,22 @@ function set_default_style!(style::Union{PlotStyle, Symbol}; kwargs...)
 	return copy(new_style)
 end
 
-set_default_style!(; kwargs...) = set_default_style!(_active_style(); kwargs...)
+# The base is the global default, not a `with_style` block's style (which
+# only lasts for its block).
+set_default_style!(; kwargs...) = set_default_style!(lock(() -> _ACTIVE_STYLE[], _STYLE_LOCK); kwargs...)
 
 """
-	with_style(f, style::Union{PlotStyle,Symbol}; kwargs...)
+	with_style(f, style::Union{PlotStyle,Symbol,AbstractString}; kwargs...)
 	with_style(f; kwargs...)
 
 Run `f()` with `style` (plus keyword field overrides, validated first) as the
-active style and restore the previous style afterwards, also when `f` throws.
-Returns the value of `f()`. The active style is a global setting, not a
-task-local one: figures created concurrently by other tasks while `f` runs also
-see `style`.
+active style; the previous style is active again afterwards, also when `f`
+throws. Returns the value of `f()`. The block's style is scoped to the
+running task (a `Base.ScopedValues` scope): tasks started inside `f` see it,
+other tasks keep their own active style, and overlapping blocks of several
+tasks (`asyncmap`, `Threads.@spawn`) never change each other's style or the
+global default ([`set_default_style!`](@ref)). `set_default_style!` inside the
+block changes that global default, which shows once the block has ended.
 
 A figure carries the style it was built under (every style but the 1.x
 `:default` look is recorded, without the template, in
@@ -1241,32 +1275,22 @@ fig = with_style(:publication; fontsize = 12) do
 end
 ```
 """
-function with_style(f, style::Union{PlotStyle, Symbol}; kwargs...)
+function with_style(f, style::Union{PlotStyle, Symbol, AbstractString}; kwargs...)
 	new_style = _style_with_overrides(
 		_style_lookup(style, "with_style"),
 		kwargs,
 		"with_style",
 	)
-	previous = lock(_STYLE_LOCK) do
-		old = _ACTIVE_STYLE[]
-		_ACTIVE_STYLE[] = new_style
-		old
-	end
-	try
-		return f()
-	finally
-		lock(_STYLE_LOCK) do
-			_ACTIVE_STYLE[] = previous
-		end
-	end
+	return Base.ScopedValues.with(f, _STYLE_BLOCK => new_style)
 end
 
 with_style(f; kwargs...) = with_style(f, _active_style(); kwargs...)
 
 """
-	register_style!(name::Symbol, style::PlotStyle)::Symbol
+	register_style!(name::Union{Symbol,AbstractString}, style::PlotStyle)::Symbol
 
-Register a copy of `style` under `name` so it can be selected with
+Register a copy of `style` under `name` (a String is taken as the Symbol of
+the same name) so it can be selected with
 `set_default_style!(name)` or `with_style(f, name)`. Re-registering a user name
 replaces it; the built-in names (`:default`, `:publication` and the journal
 presets `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip`) cannot
@@ -1278,6 +1302,8 @@ register_style!(:talk, PlotStyle(; fontsize = 18, tick_fontsize = 16, linewidth 
 set_default_style!(:talk)
 ```
 """
+register_style!(name::AbstractString, style::PlotStyle) = register_style!(Symbol(name), style)
+
 function register_style!(name::Symbol, style::PlotStyle)
 	name in _BUILTIN_STYLE_NAMES &&
 		throw(ArgumentError(
@@ -1341,11 +1367,21 @@ _figure_axis_defaults(fig; axis::Symbol = :x, style::PlotStyle = _figure_style(f
 function _template_spec_is_builtin(spec)
 	spec === nothing && return _template_spec_is_builtin(_DEFAULT_TEMPLATE[])
 	if spec isa PlotlyBase.Template
-		# A built-in Template object can only come from `PlotlyBase.templates[name]`,
-		# which caches it in the (lazily filled) `templates.templates` dict; looking
-		# there avoids loading every built-in template from disk.
+		# A built-in Template object comes from `PlotlyBase.templates[name]`,
+		# which caches it in the (lazily filled) `templates.templates` dict;
+		# looking there avoids loading every built-in template from disk. A
+		# figure holds its power-format copy (`_power_template`, D21), or a
+		# deep copy of either (staged mutations, `deepcopy(fig)`): identity
+		# first, then content.
 		loaded = PlotlyBase.templates.templates
-		return any(name -> get(loaded, name, missing) === spec, _STYLE_BUILTIN_TEMPLATES)
+		sources = PlotlyBase.Template[]
+		for name in _STYLE_BUILTIN_TEMPLATES
+			source = get(loaded, name, missing)
+			source isa PlotlyBase.Template || continue
+			(spec === source || spec === _power_template(source)) && return true
+			push!(sources, source)
+		end
+		return any(source -> spec == _power_template(source) || spec == source, sources)
 	end
 	parts = Symbol.(strip.(split(String(spec), '+')))
 	return all(in(_STYLE_BUILTIN_TEMPLATES), parts)
@@ -1379,6 +1415,15 @@ function _style_axis_defaults(
 	end
 	style.tick_length > 0 && (defaults[:ticklen] = _style_number(style.tick_length))
 	style.grid || (defaults[:showgrid] = false)
+	# L8: plotly.js puts a tick label 0.2 tick-font sizes plus half the line
+	# width beyond the tick end (outside ticks) or the axis line (inside
+	# ticks). At the explicit tick sizes of :publication and the journal
+	# presets (9-12 px) that is under 2 px, and the raised exponent of a
+	# power-format log label ("10⁻³", drawn at 1.25 x) comes within 1 px of
+	# the ticks of an x axis (rendered: :nature 1.1 px, :default 0.6 px).
+	# Styles that size their tick labels push them `_STYLE_TICKLABEL_STANDOFF`
+	# px further out; :default keeps plotly's placement.
+	style.tick_fontsize > 0 && (defaults[:ticklabelstandoff] = _STYLE_TICKLABEL_STANDOFF)
 	if !_style_template_is_builtin(style)
 		template_axis = _symbol_dict(get(
 			_template_layout_fields(template),
@@ -1503,7 +1548,9 @@ const _STYLE_TRACE_OFFSET = Base.ScopedValues.ScopedValue(0)
 
 Run `f()` with the style cycle offset by the number of line-style traces
 already in `fig` (a `Plot`, `SyncPlot`, `SubplotFigure` or staged target), and
-return its value. Internal; for code that builds traces on a temporary figure
+return its value. Inside a SubplotFigure call (`_STYLE_CELL` set by the
+delegate, D20) the offset is the number of line-style traces in the target
+cell instead. Internal; for code that builds traces on a temporary figure
 and then appends them to `fig` (the `plot_*!(sf::SubplotFigure, …)` delegate
 builds into an empty `Plot`): calls to [`_apply_style_trace_defaults!`](@ref)
 inside `f` then continue the dash/marker cycle of `fig` instead of restarting
@@ -1516,8 +1563,176 @@ end
 ```
 """
 function _with_style_trace_offset(f, fig)
-	offset = count(_style_is_line_trace, _plot_obj(fig).data)
+	# D20: inside a SubplotFigure call the cycle continues the target cell's
+	# traces only (`_STYLE_CELL`, set by the delegate around the call; `fig`
+	# may then be the figure or its staged copy).
+	scope = _STYLE_CELL[]
+	offset = scope === nothing ? count(_style_is_line_trace, _plot_obj(fig).data) : scope.lines
 	return Base.ScopedValues.with(f, _STYLE_TRACE_OFFSET => offset)
+end
+
+# D20: the style cycle (colour, dash, marker) runs per subplot cell, as each
+# matplotlib Axes has its own property cycle. While a SubplotFigure call
+# builds its traces on the delegate's scratch figure this holds the target
+# cell (`_style_delegate_cell`): `plot` (the figure's model), `key`
+# (`_style_cell_key`), and the number of line-style traces (`lines`) and of
+# all traces (`traces`) the cell already has; the call's dash/marker positions
+# continue from `lines`, its colour positions from `traces` (plotly.js gives
+# every trace a colorway position, as on a plain figure).
+const _STYLE_CELL = Base.ScopedValues.ScopedValue{Any}(nothing)
+
+# Axis reference `ref` ("y3") of letter `letter` resolved through
+# `overlaying`: a twin y axis or a secondary x axis belongs to the cell of the
+# axis it overlays. plotly.js allows one level of `overlaying`.
+function _style_overlay_root(layout::Layout, ref, letter::Char)
+	ref isa Symbol && (ref = String(ref))
+	ref isa AbstractString || return string(ref)
+	key = Symbol(letter == 'x' ? "xaxis" : "yaxis", ref[2:end])
+	over = _cmn_mapping_get(get(layout.fields, key, nothing), :overlaying)
+	over isa Symbol && (over = String(over))
+	return over isa AbstractString && length(over) >= 1 && over[1] == letter ? String(over) : String(ref)
+end
+
+# The subplot cell of a trace of subplot kind `kind` routed by `fields` (its
+# `xaxis`/`yaxis`, `scene`, `subplot`, `geo` or `domain`): ("xy", x, y) with
+# both references resolved through `overlaying` (an inset has axes of its
+# own, so its own cell), (kind, subplot id) for 3-D scenes, polar, ternary,
+# smith, geo and map subplots, ("domain", domain) for pie-like traces.
+function _style_cell_key(layout::Layout, kind::AbstractString, fields)
+	if kind == "xy"
+		return (
+			"xy",
+			_style_overlay_root(layout, get(fields, :xaxis, "x"), 'x'),
+			_style_overlay_root(layout, get(fields, :yaxis, "y"), 'y'),
+		)
+	elseif kind == "domain"
+		return ("domain", PlotlyBase.JSON.json(get(fields, :domain, nothing)))
+	end
+	name = kind == "scene" ? :scene : kind == "geo" ? :geo : :subplot
+	value = get(fields, name, kind)
+	return (String(kind), value isa Union{AbstractString, Symbol} ? String(value) : string(value))
+end
+
+# Cell of `trace` in a figure with layout `layout`; `nothing` for a trace type
+# plotly.js does not know (it belongs to no cell).
+function _style_trace_cell_key(layout::Layout, trace::GenericTrace)
+	value = get(trace.fields, :type, "scatter")
+	value isa Union{AbstractString, Symbol} || return nothing
+	type = Symbol(value)
+	# PlotlyBase's classifier raises a KeyError for a name it does not know.
+	(type in PlotlyBase._TRACE_TYPES || type in _MODERN_MAP_TRACE_TYPES) || return nothing
+	kind = _plotlysupply_subplot_kind_from_trace_type(type)
+	kind isa AbstractString || return nothing
+	return _style_cell_key(layout, kind, trace.fields)
+end
+
+# `_STYLE_CELL` value for a SubplotFigure call on cell (`row`, `col`) of `p`
+# (its secondary y axis with `secondary_y`), or on inset `inset_target`.
+function _style_delegate_cell(p::Plot, row::Int, col::Int, inset_target, secondary_y::Bool, who::AbstractString)
+	key = if inset_target === nothing
+		ref = _subplot_target_ref(p, row, col; secondary_y = secondary_y, who = who)
+		_style_cell_key(p.layout, String(ref.subplot_kind), ref.trace_kwargs.fields)
+	else
+		_style_cell_key(p.layout, "xy", Dict{Symbol, Any}(:xaxis => inset_target.xref, :yaxis => inset_target.yref))
+	end
+	counts = _style_cell_counts(p, key)
+	return (plot = p, key = key, lines = counts.lines, traces = counts.traces)
+end
+
+# Number of line-style traces (`lines`) and of all traces (`traces`) of `p`
+# in the cell `key` (`_style_cell_key`).
+function _style_cell_counts(p::Plot, key)
+	lines = 0
+	traces = 0
+	for trace in p.data
+		trace isa GenericTrace || continue
+		_style_trace_cell_key(p.layout, trace) == key || continue
+		traces += 1
+		_style_is_line_trace(trace) && (lines += 1)
+	end
+	return (lines = lines, traces = traces)
+end
+
+# Trace types whose colour plotly.js takes from the figure-wide colorway, and
+# the attribute that carries it: the scatter family (`line.color`, or
+# `marker.color` without lines), bars (`marker.color`), box/violin
+# (`line.color`; fill and points derive from it) and uniform mesh3d (`color`).
+const _STYLE_CELL_COLOR_SCATTER_TYPES = union(_STYLE_LINE_TRACE_TYPES, Set(["scattermapbox", "scattermap"]))
+const _STYLE_CELL_COLOR_BAR_TYPES = Set(["bar", "histogram", "barpolar", "funnel"])
+const _STYLE_CELL_COLOR_BOX_TYPES = Set(["box", "violin"])
+
+# The updates that give `trace` the colour `color` where plotly.js would take
+# a colorway colour (D20), mirroring plotly.js 2.35 defaults: a scatter line
+# takes the scalar `marker.color` when one is set, markers and error bars take
+# the line colour, a fill the line or marker colour at opacity 0.5; a box or
+# violin line takes `marker.color`. Values the trace sets are kept.
+function _style_cell_color_updates(trace::GenericTrace, color::String)
+	fields = trace.fields
+	type = _style_trace_type(trace)
+	where = "D20 cell colour"
+	updates = Dict{Symbol, Any}()
+	line = _style_container_dict(get(fields, :line, nothing), "line", where)
+	marker = _style_container_dict(get(fields, :marker, nothing), "marker", where)
+	line_color = get(line, :color, nothing)
+	marker_color = get(marker, :color, nothing)
+	scalar_marker = !_style_value_unset(marker_color) && !(marker_color isa AbstractArray)
+	if type in _STYLE_CELL_COLOR_SCATTER_TYPES
+		mode = get(fields, :mode, nothing)
+		flags = mode isa Union{AbstractString, Symbol} ? split(String(mode), '+') : nothing
+		# plotly's default mode always draws lines.
+		has_lines = flags === nothing || "lines" in flags
+		has_markers = flags !== nothing && "markers" in flags
+		# Markers and a fill take `line.color` even without lines (plotly.js
+		# 2.35 scatter marker and fill defaults), so a trace that sets it
+		# (`color = "black"` with `mode = "markers"`) is left alone.
+		if has_lines && _style_value_unset(line_color) && !scalar_marker
+			updates[:line] = _style_update_path(get(fields, :line, nothing), (), Dict{Symbol, Any}(:color => color), "line", where)
+		elseif !has_lines && has_markers && _style_value_unset(marker_color) && _style_value_unset(line_color)
+			updates[:marker] = _style_update_path(get(fields, :marker, nothing), (), Dict{Symbol, Any}(:color => color), "marker", where)
+		end
+		fill = get(fields, :fill, nothing)
+		if !has_lines && fill isa Union{AbstractString, Symbol} && String(fill) != "none" &&
+		   _style_value_unset(get(fields, :fillcolor, nothing)) && !scalar_marker && _style_value_unset(line_color)
+			updates[:fillcolor] = _rgba(color, 0.5; who = where)
+		end
+	elseif type in _STYLE_CELL_COLOR_BAR_TYPES
+		_style_value_unset(marker_color) && (updates[:marker] =
+			_style_update_path(get(fields, :marker, nothing), (), Dict{Symbol, Any}(:color => color), "marker", where))
+	elseif type in _STYLE_CELL_COLOR_BOX_TYPES
+		_style_value_unset(line_color) && _style_value_unset(marker_color) && (updates[:line] =
+			_style_update_path(get(fields, :line, nothing), (), Dict{Symbol, Any}(:color => color), "line", where))
+	elseif type == "mesh3d"
+		all(name -> _style_value_unset(get(fields, name, nothing)), (:color, :intensity, :vertexcolor, :facecolor)) &&
+			(updates[:color] = color)
+	end
+	return updates
+end
+
+"""
+	_style_write_cell_colors!(p, first_new, scope)
+
+D20: give the traces `p.data[first_new:end]`, which a SubplotFigure call just
+added to the cell `scope` describes (`_style_delegate_cell`), the colour of
+their position in that cell's colour cycle, written on the trace wherever
+plotly.js would otherwise take a colour from the figure-wide colorway: the
+n-th trace of a cell gets colorway entry `scope.traces + n` of the figure's
+colorway (layout, then template; `_default_trace_color`). Explicit colours
+are kept (the trace still takes its position). Internal; the SubplotFigure
+delegate calls it after routing the traces. Returns `nothing`.
+"""
+function _style_write_cell_colors!(p::Plot, first_new::Integer, scope)
+	scope === nothing && return nothing
+	pending = Tuple{Int, Dict{Symbol, Any}}[]
+	for index in first_new:length(p.data)
+		trace = p.data[index]
+		trace isa GenericTrace || continue
+		updates = _style_cell_color_updates(trace, _default_trace_color(p, scope.traces + index - first_new + 1))
+		isempty(updates) || push!(pending, (index, updates))
+	end
+	for (index, updates) in pending
+		merge!(p.data[index].fields, updates)
+	end
+	return nothing
 end
 
 function _style_trace_type(trace::GenericTrace)
@@ -1613,9 +1828,11 @@ a per-point vector — is the caller's and is kept. Filled where unset:
 The cycle position of a trace is its rank among the figure's line-style traces
 (1 for the first), so the cycle continues across `plot_*!` appends and skips
 non-line traces; inside [`_with_style_trace_offset`](@ref) the line-style
-traces of the outer figure are counted too. Colour is never set here: the
+traces of the outer figure are counted too, or, during a SubplotFigure call
+(D20), those of the target cell only. Colour is never set here: the
 `:bw` cycle's single ink colour is the figure colorway (written by
-`_apply_default_template!`).
+`_apply_default_template!`); the per-cell colours of a SubplotFigure are
+written by `_style_write_cell_colors!`.
 
 # Guarantees
 - Idempotent: a second call with the same arguments changes nothing (every
@@ -2098,8 +2315,8 @@ end
 	_style_log_ticks(style::PlotStyle = _active_style()) -> Symbol
 
 The style's rule for logarithmic axes without a user tick setting (lead
-decision D15, rule 2): `:decades` (decade labels only on an axis spanning two
-decades or more; `:publication` and the journal presets) or `:auto` (plotly's
+decision D15, rule 2): `:decades` (decade labels only on an axis showing two
+decade ticks or more; `:publication` and the journal presets) or `:auto` (plotly's
 adaptive labels). Reads `PlotStyle.log_ticks`. Internal; `_axes_log_tick_updates!` (src/sci/axes.jl) applies it.
 """
 _style_log_ticks(style::PlotStyle = _active_style()) = style.log_ticks
@@ -2794,10 +3011,34 @@ end
 
 function _set_fonts_apply!(p::Plot, roles::_FontRoles, cell)
 	layout_updates, trace_updates = _font_role_updates(p, roles, cell, "set_fonts!")
+	cell === nothing && _set_fonts_record!(layout_updates, p, roles)
 	for (key, value) in layout_updates
 		p.layout.fields[key] = value
 	end
 	_commit_trace_updates!(p, trace_updates)
+	return nothing
+end
+
+# A figure-wide `set_fonts!` on a figure that carries a style also makes the
+# sizes it sets the sizes of that recorded style, so what reads the style
+# later (the log-axis label size, style-02; a legend or colorbar a later call
+# adds) follows the call instead of undoing it.
+function _set_fonts_record!(layout_updates::AbstractDict, p::Plot, roles::_FontRoles)
+	style = _figure_recorded_style(p)
+	style === nothing && return nothing
+	updated = copy(style)
+	changed = false
+	for (name, value) in (
+		(:fontsize, roles.size), (:title_fontsize, roles.title), (:label_fontsize, roles.label),
+		(:tick_fontsize, roles.tick), (:legend_fontsize, roles.legend),
+	)
+		value > 0 || continue
+		setproperty!(updated, name, value)
+		changed = true
+	end
+	changed || return nothing
+	meta = _style_meta_with_record(get(layout_updates, :meta, get(p.layout.fields, :meta, nothing)), updated)
+	meta === nothing || (layout_updates[:meta] = meta)
 	return nothing
 end
 
@@ -2928,7 +3169,9 @@ function set_fonts!(
 	units::Symbol = :px,
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
 )
+	_figsize_reject_keywords("set_fonts!", kwargs)
 	return _transactional_high_level_plot_mutation!(
 		_set_fonts_impl!,
 		fig;
@@ -2951,7 +3194,9 @@ function set_fonts!(
 	units::Symbol = :px,
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
+	kwargs...,
 )
+	_figsize_reject_keywords("set_fonts!", kwargs)
 	return _transactional_subplot_mutation!(
 		_set_fonts_subplot_impl!,
 		sf,
@@ -3517,8 +3762,9 @@ journal_width(:ieee)                              # 3.5
 journal_width(:nature; columns = 2, units = :mm)  # 183.0
 ```
 """
-function journal_width(journal::Union{Symbol, AbstractString}; columns = 1, units = :in)
+function journal_width(journal::Union{Symbol, AbstractString}; columns = 1, units = :in, kwargs...)
 	who = "journal_width"
+	_figsize_reject_keywords(who, kwargs)
 	spec = _journal_spec(journal, who)
 	scale = _figsize_scale(units, who)
 	return _journal_width_px(spec, columns, who) / scale

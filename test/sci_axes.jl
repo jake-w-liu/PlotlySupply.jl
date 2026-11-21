@@ -448,7 +448,8 @@ end
         @test _ax_throws(() -> xticks!(fig; tickwidth = -1), "xticks!: `tickwidth` must be a finite number >= 0")
         @test _ax_throws(() -> xticks!(fig; direction = :both), "`direction` must be")
         @test _ax_json(fig.layout) == before
-        @test_throws MethodError xticks!(fig; secondary_y = true)
+        # axes-ticks-13: an unknown keyword names the public function.
+        @test _ax_throws(() -> xticks!(fig; secondary_y = true), "xticks!: unsupported keyword argument(s) `secondary_y`")
 
         # Base-2 log ticks keep the exponent format (no SI suffixes).
         l2 = plot_scatter([4, 8, 16, 24, 32], [1.0, 2, 3, 4, 5]; xscale = "log")
@@ -511,7 +512,7 @@ end
         scene = plot_scatter3d([1.0, 2.0], [1.0, 2.0], [1.0, 2.0])
         @test _ax_throws(() -> xticks!(scene, [1, 2]), "xticks!: tick control applies to Cartesian (xy) cells")
         @test _ax_throws(() -> yticks!(fig, [1]; show = true), "yticks!: figure helpers have no `show` keyword")
-        @test_throws MethodError xticks!(fig, [1e-3]; bogus = 1)
+        @test _ax_throws(() -> xticks!(fig, [1e-3]; bogus = 1), "xticks!: unsupported keyword argument(s) `bogus`")
     end
 
     @testset "axis_equal! (F9)" begin
@@ -834,8 +835,8 @@ end
         cat = plot_scatter([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
         relayout!(cat; xaxis_type = "category", yaxis_type = "linear")
         before = _ax_json(cat.layout)
-        @test _ax_throws(() -> xrange!(cat, ("a", "c")), "xrange!: a category axis needs numeric range bounds")
-        @test _ax_throws(() -> yrange!(cat, ("a", "c")), "yrange!: a linear axis needs numeric range bounds")
+        @test _ax_throws(() -> xrange!(cat, ("a", "c")), "xrange!: `range` bounds on a category axis must be numbers")
+        @test _ax_throws(() -> yrange!(cat, ("a", "c")), "yrange!: `range` bounds on a linear axis must be numbers")
         @test _ax_json(cat.layout) == before
         xrange!(cat, (-0.5, 2.5))
         @test _ax_field(cat, :xaxis, :range) == [-0.5, 2.5]
@@ -1337,13 +1338,13 @@ end
         # Repeating replaces the line instead of adding one.
         spines!(fig; left = false)
         @test length(sh(fig)) == 1
-        # Open frame with mirrored ticks: plotly.js cannot mirror the ticks
-        # without the line, so both own lines become shapes, `mirror = "ticks"`.
+        # Open frame (L12): mirrored ticks need the opposite line, so
+        # `ticks = :mirror` leaves no ticks floating on the open sides; the
+        # own lines stay native, no shapes.
         spines!(fig; style = :open, ticks = :mirror)
-        @test _ax_field(fig, :xaxis, :showline) === false && _ax_field(fig, :xaxis, :mirror) == "ticks"
-        @test _ax_field(fig, :yaxis, :showline) === false && _ax_field(fig, :yaxis, :mirror) == "ticks"
-        edges = sort([(_ax_get(x, :x0), _ax_get(x, :y0), _ax_get(x, :x1), _ax_get(x, :y1)) for x in sh(fig)])
-        @test edges == [(0, 0, 0, 1), (0, 0, 1, 0)]
+        @test _ax_field(fig, :xaxis, :showline) === true && _ax_field(fig, :xaxis, :mirror) === false
+        @test _ax_field(fig, :yaxis, :showline) === true && _ax_field(fig, :yaxis, :mirror) === false
+        @test isempty(sh(fig))
         # Top and right only.
         spines!(fig; style = :none, top = true, right = true, ticks = :primary)
         edges = sort([(_ax_get(x, :x0), _ax_get(x, :y0), _ax_get(x, :x1), _ax_get(x, :y1)) for x in sh(fig)])
@@ -1374,8 +1375,10 @@ end
         # Cells: lines named per cell; other cells untouched.
         sf = _ax_grid(1, 2)
         spines!(sf; style = :open, top = true, ticks = :mirror, row = 1, col = 2)
-        names = [_ax_get(x, :name) for x in sh(sf)]
-        @test names == ["plotlysupply:spine:x2y2:1"]
+        # Bottom and top drawn: x2 mirrors its ticks onto the top line; the
+        # right side is open, so y2 mirrors nothing (L12).
+        @test isempty(sh(sf))
+        @test _ax_field(sf, :xaxis2, :mirror) == "ticks" && _ax_field(sf, :yaxis2, :mirror) === false
         @test _ax_field(sf, :xaxis, :mirror) === true
         # Errors before any change.
         before = _ax_json(fig.layout)
@@ -1799,13 +1802,18 @@ end
         relayout!(P(tf); xaxis_tickformat = "")
         @test isempty(upd(tf, (150, 120)))
 
-        # W7: under a paper style (mode :decades) an axis of two decades or
-        # more shows decade labels at any size; fewer decades keep plotly's.
+        # W7: under a paper style (mode :decades) an axis that shows two
+        # decade ticks or more shows decade labels at any size; one decade
+        # tick keeps plotly's labels.
         three = plot_scatter([1.0, 1000.0], [1.0, 2.0]; xscale = "log")
         @test isempty(upd(three, (700, 500)))
         d = upd(three, (700, 500); mode = :decades)
         @test d[:xaxis_dtick] == 1 && d[:xaxis_minor_dtick] == "D1"
-        few = plot_scatter([1.0, 30.0], [1.0, 2.0]; xscale = "log")
+        # 1..30 shows the decade ticks 1 and 10 (less than one decade and a
+        # half, but two decade ticks); 2..30 shows 10 only.
+        two_ticks = plot_scatter([1.0, 30.0], [1.0, 2.0]; xscale = "log")
+        @test upd(two_ticks, (700, 500); mode = :decades)[:xaxis_dtick] == 1
+        few = plot_scatter([2.0, 30.0], [1.0, 2.0]; xscale = "log")
         @test isempty(upd(few, (700, 500); mode = :decades))
         @test _AX._style_log_ticks() in (:auto, :decades)
         @test hasfield(PlotStyle, :log_ticks) || _AX._style_log_ticks(PlotStyle()) === :auto
@@ -1980,4 +1988,313 @@ end
         flog = plot_scatter([1.0, 10, 100], [1.0, 2, 3]; xscale = "log")
         @test _ax_throws(() -> xticks!(flog, [_AX.Dates.Date(2020, 1, 1)]), "xticks!: a logarithmic axis needs numeric tick values; got dates.")
     end
+end
+
+@testset "v7 axes-style: log labels, scale switches, shared axes (style-02, axes-ticks-01/03/04/12, docs-10, D21, L8, L12)" begin
+    g(x, ks...) = (for k in ks; x = _AX._cmn_mapping_get(x, k); end; x)
+    L(f) = _AX._cmn_layout(f).fields
+    ieee_tick = _AX._STYLE_REGISTRY[:ieee].tick_fontsize
+    export_failed(err) = (m = sprint(showerror, err); occursin("Electron", m) || occursin("Plotly.js", m))
+
+    @testset "style-02: decade labels at the style's tick size" begin
+        # plotly draws power-format decade labels at 1.25 x the tick font: a
+        # styled log axis gets the compensated font, linear axes keep theirs.
+        f = with_style(() -> plot_scatter(1:10, 10.0 .^ range(-2, 4; length = 10); yscale = "log"), :ieee)
+        @test g(L(f)[:yaxis], :tickfont, :size) ≈ ieee_tick / 1.25
+        @test g(L(f)[:xaxis], :tickfont, :size) ≈ ieee_tick
+        @test !_AX._finalize_figure!(f)
+        d = plot_scatter(1:10, 10.0 .^ range(-2, 4; length = 10); yscale = "log")
+        @test g(L(d)[:yaxis], :tickfont, :size) === nothing        # :default keeps plotly's look
+        # A figure-wide set_fonts! is the new intended size.
+        s = with_style(() -> plot_scatter(1:10, 10.0 .^ range(-2, 4; length = 10); yscale = "log"), :aip)
+        set_fonts!(s; tick = 8, units = :pt)
+        @test g(L(s)[:yaxis], :tickfont, :size) ≈ 8 * 96 / 72 / 1.25
+        @test !_AX._finalize_figure!(s)
+        sizes(svg, letter) = [parse(Float64, m.captures[1]) for m in
+            eachmatch(Regex("<g class=\"$(letter)tick\"><text[^>]*?font-size: ([0-9.]+)px"), svg)]
+        result = try
+            (String(savefig(f; format = "svg")), String(savefig(s; format = "svg")))
+        catch err
+            @test export_failed(err)
+            nothing
+        end
+        if result !== nothing
+            fsvg, ssvg = result
+            @test !isempty(sizes(fsvg, "y")) && all(v -> isapprox(v, ieee_tick; atol = 0.01), sizes(fsvg, "y"))
+            @test all(v -> isapprox(v, 8 * 96 / 72; atol = 0.01), vcat(sizes(ssvg, "y"), sizes(ssvg, "x")))
+        end
+    end
+
+    @testset "axes-ticks-03: log tick state goes with the log scale" begin
+        f = with_style(() -> plot_scatter(1:10, 10.0 .^ (0:9); yscale = "log"), :ieee)
+        _AX._finalize_figure!(f)
+        @test g(L(f)[:yaxis], :dtick) == 2 && g(L(f)[:yaxis], :minor, :tickmode) == "linear"
+        plot_scatter!(f, 1:10, 1:10; yscale = "linear")
+        @test g(L(f)[:yaxis], :dtick) === nothing && g(L(f)[:yaxis], :tick0) === nothing
+        @test g(L(f)[:yaxis], :minor, :dtick) === nothing && g(L(f)[:yaxis], :minor, :tickmode) === nothing
+        @test g(L(f)[:yaxis], :tickfont, :size) ≈ ieee_tick
+        @test !_AX._finalize_figure!(f)
+        p = plot_scatter(1:10, 10.0 .^ (0:9); yscale = "log")
+        yticks!(p, :decades)
+        plot_scatter!(p, 1:10, 100:100:1000; yscale = "linear")
+        @test g(L(p)[:yaxis], :tickmode) === nothing && g(L(p)[:yaxis], :dtick) === nothing
+        # Linear ticks stated by the user with the same numbers are kept.
+        u = plot_scatter(0:10, 0:10)
+        relayout!(u; yaxis_tickmode = "linear", yaxis_tick0 = 0, yaxis_dtick = 1,
+            yaxis_minor = attr(tickmode = "linear", tick0 = 0, dtick = 1))
+        _AX._finalize_figure!(u)
+        @test g(L(u)[:yaxis], :dtick) == 1 && g(L(u)[:yaxis], :minor, :dtick) == 1
+    end
+
+    @testset "axes-ticks-01: the offset factor sits at the labelled axis of a shared group" begin
+        anns(sf) = [(g(a, :name), g(a, :xref), g(a, :yref)) for a in L(sf)[:annotations]]
+        sf = subplots(1, 2; shared_yaxes = true, sync = false)
+        plot_scatter!(sf, 1:3, [1e5, 1e6, 2e6]; row = 1, col = 1)
+        plot_scatter!(sf, 1:3, [1e5, 1e6, 2e6]; row = 1, col = 2)
+        yticks!(sf; offset = :auto, row = 1, col = 2)
+        @test anns(sf) == [("plotlysupply:offset:y", "x domain", "y domain")]
+        yticks!(sf; offset = :auto, row = 1, col = 1)            # same factor, not a second one
+        @test length(anns(sf)) == 1
+        sc = subplots(2, 1; shared_xaxes = true, sync = false)
+        plot_scatter!(sc, [1e5, 1e6], 1:2; row = 1, col = 1)
+        plot_scatter!(sc, [1e5, 1e6], 1:2; row = 2, col = 1)
+        xticks!(sc; offset = :auto, row = 1, col = 1)
+        labelled = first(k for k in (:xaxis, :xaxis2) if g(L(sc)[k], :showticklabels) !== false)
+        ref = labelled === :xaxis ? "x" : "x2"
+        @test anns(sc) == [("plotlysupply:offset:$(ref)", "$(ref) domain", "$(g(L(sc)[labelled], :anchor)) domain")]
+    end
+
+    @testset "axes-ticks-04: axis_equal! on a cell with a shared y axis" begin
+        sf = subplots(1, 2; shared_yaxes = true, sync = false)
+        th = range(0, 2pi; length = 50)
+        plot_scatter!(sf, cos.(th), sin.(th); row = 1, col = 1)
+        plot_scatter!(sf, 2 .* cos.(th), sin.(th); row = 1, col = 2)
+        axis_equal!(sf; row = 1, col = 2, ratio = 2)
+        # plotly.js ignores scaleanchor on an axis with `matches`: the cell's x
+        # axis carries the constraint (rendered at ratio 1: 67.5 px per unit on
+        # both x2 and y2, probe scratch v7/axes-style/p/a1.jl).
+        @test g(L(sf)[:xaxis2], :scaleanchor) == "y2" && g(L(sf)[:xaxis2], :scaleratio) ≈ 0.5
+        @test g(L(sf)[:yaxis2], :scaleanchor) === nothing
+        both = subplots(2, 2; shared_xaxes = true, shared_yaxes = true, sync = false)
+        plot_scatter!(both, 1:3, 1:3; row = 1, col = 2)
+        before = _AX.PlotlyBase.JSON.json(both.plot)
+        @test _ax_throws(() -> axis_equal!(both; row = 1, col = 2), "both axes of this cell are shared")
+        @test _AX.PlotlyBase.JSON.json(both.plot) == before
+    end
+
+    @testset "axes-ticks-12 / docs-10: decades past 1e±154, one label format for subs" begin
+        for (lim, step) in ((1e-160, 40), (1e-300, 75))
+            f = plot_scatter([1, 2], [lim, 1 / lim]; yscale = "log")
+            yticks!(f, :decades)
+            @test g(L(f)[:yaxis], :dtick) == step
+        end
+        f = plot_scatter(10.0 .^ (-3:3), 10.0 .^ (-2:4); xscale = "log", yscale = "log")
+        yticks!(f; subs = (1, 2, 5), minor = true)
+        @test g(L(f)[:yaxis], :ticktext) == ["10<sup>−2</sup>", "2×10<sup>−2</sup>", "5×10<sup>−2</sup>",
+            "10<sup>−1</sup>", "2×10<sup>−1</sup>", "5×10<sup>−1</sup>", "1", "2", "5", "10", "20", "50",
+            "10<sup>2</sup>", "2×10<sup>2</sup>", "5×10<sup>2</sup>", "10<sup>3</sup>", "2×10<sup>3</sup>",
+            "5×10<sup>3</sup>", "10<sup>4</sup>"]
+        h = plot_scatter(10.0 .^ (-3:3), 10.0 .^ (-2:4); yscale = "log")
+        yticks!(h; subs = (1, 2, 5), format = "~g")             # a format of the user's wins
+        @test g(L(h)[:yaxis], :ticktext) === nothing
+    end
+
+    @testset "L12 / axes-ticks-05: open frames and twin axes never float mirrored ticks" begin
+        f = with_style(() -> plot_scatter(1:3, 1:3), :ieee)
+        spines!(f; style = :open)
+        @test g(L(f)[:xaxis], :mirror) === false && g(L(f)[:xaxis], :showline) === true
+        spines!(f; style = :box)
+        @test g(L(f)[:xaxis], :mirror) == "ticks" && g(L(f)[:yaxis], :mirror) == "ticks"
+        t = with_style(:ieee) do
+            t = plot_scatter(1:3, 1:3)
+            plot_scatter!(t, 1:3, [30, 10, 20]; secondary_y = true)
+            t
+        end
+        _AX._finalize_figure!(t)
+        @test g(L(t)[:yaxis], :mirror) === true        # the line, not the primary's ticks
+        @test g(L(t)[:yaxis2], :ticks) == "inside"
+    end
+
+    @testset "D21: power exponents everywhere, SI on request (rendered)" begin
+        labels(svg, cls) = [replace(m.captures[1], r"<[^>]+>" => "") for m in
+            eachmatch(Regex("<g class=\"$(cls)\"><text[^>]*>(.*?)</text>"), svg)]
+        tpl = _AX._plot_obj(plot_scatter(1:2, 1:2)).layout.fields[:template].layout.fields
+        @test g(tpl[:xaxis], :exponentformat) == "power" && g(tpl[:polar], :radialaxis, :exponentformat) == "power"
+        @test g(tpl[:ternary], :aaxis, :exponentformat) == "power" && g(tpl[:scene], :zaxis, :exponentformat) == "power"
+        # The layout engine sizes the power labels ("−0.5×10⁴", not "−5k"):
+        # sign, mantissa, "×10" and a 70 % exponent.
+        @test _AX._fin_power_chars(-5000.0, 1e4, 3.0) == 8
+        @test _AX._fin_power_chars(1e4, 1e4, 3.0) == 5 && _AX._fin_power_chars(0.0, 1e4, 3.0) == 1
+        @test _AX._fin_power_chars(1.5e-4, 2e-4, 3.0) == 8 && _AX._fin_power_chars(2000.0, 4000.0, 3.0) === nothing
+        unset, si = Dict{Symbol, Any}(), Dict{Symbol, Any}(:exponentformat => "SI")
+        @test _AX._fin_tick_chars(unset, -1e4, 1e4, 300.0, false, true) == 8 > _AX._fin_tick_chars(si, -1e4, 1e4, 300.0, false, true)
+        result = try
+            svgs = [String(savefig(plot_scatter([v, 2v, 3v], [v, 2v, 3v]); format = "svg", width = 600, height = 400))
+                for v in (2e-4, 5e3, 1e9)]
+            si = plot_scatter([2e-4, 4e-4], [5e3, 1e4])
+            yticks!(si; exponentformat = "SI")
+            # A polar radial axis and a colour bar with the same values.
+            others = [String(savefig(make(v); format = "svg", width = 500, height = 400)) for v in (2e-4, 5e3, 1e9),
+                make in (v -> plot_scatterpolar([0, 90, 180], [v, 2v, 3v]), v -> plot_heatmap([v 2v; 3v 4v]))]
+            (svgs, String(savefig(si; format = "svg", width = 600, height = 400)), others)
+        catch err
+            @test export_failed(err)
+            nothing
+        end
+        if result !== nothing
+            svgs, sisvg, others = result
+            for svg in svgs, cls in ("xtick", "ytick")
+                ls = labels(svg, cls)
+                @test !isempty(ls) && !any(l -> occursin(r"[A-Za-zµ]", l), ls)
+            end
+            # Radial ticks are "xtick" in the polar frame, colour bar ticks "ycb<id>tick".
+            for svg in others
+                ls = [replace(m.captures[1], r"<[^>]+>" => "") for m in
+                    eachmatch(r"<g class=\"(?:xtick|ycb[a-z0-9]*tick)\"[^>]*><text[^>]*>(.*?)</text>", svg)]
+                @test any(l -> occursin("×10", l), ls) && !any(l -> occursin(r"[A-Za-zµ]", l), ls)
+            end
+            @test any(l -> occursin(r"[kµ]", l), labels(sisvg, "ytick"))
+        end
+    end
+
+    @testset "L8: tick labels clear the ticks and the spine (rendered)" begin
+        geom_js = raw"""
+(function(svgText){
+var c=document.createElement('div');c.style.position='absolute';c.style.left='0px';c.style.top='0px';
+c.innerHTML=svgText;document.body.appendChild(c);
+try{var R=c.querySelector('svg').getBoundingClientRect();
+var b=function(e){var r=e.getBoundingClientRect();if(r.width===0&&r.height===0)return null;return [r.left-R.left,r.top-R.top,r.right-R.left,r.bottom-R.top];};
+var out={};
+c.querySelectorAll('g.xaxislayer-above, g.yaxislayer-above').forEach(function(layer){
+ var l=layer.getAttribute('class').charAt(0); var a=out[l]=out[l]||{labels:[],marks:[]};
+ layer.querySelectorAll('g.'+l+'tick text').forEach(function(t){var x=b(t);if(x)a.labels.push(x);});
+ layer.querySelectorAll('path').forEach(function(p){var x=b(p);if(x)a.marks.push(x);});});
+c.querySelectorAll('g.overlines-above > path, g.overaxes-above path').forEach(function(p){
+ var m=/^([xy])lines-above/.exec(p.getAttribute('class')||'');if(!m)return;var x=b(p);if(!x)return;
+ var a=out[m[1]]=out[m[1]]||{labels:[],marks:[]};a.marks.push(x);});
+return JSON.stringify(out);}finally{c.remove();}})
+"""
+        # Gap (px) between each label box and the nearest tick mark or spine on
+        # its label side (left of a y label's box, above an x label's).
+        function gap(geo, letter)
+            a = geo[letter]
+            worst = Inf
+            for lb in a["labels"], m in a["marks"]
+                if letter == "y"
+                    (m[4] < lb[2] || m[2] > lb[4]) && continue
+                    m[1] >= lb[3] - 0.5 || continue
+                    worst = min(worst, m[1] - lb[3])
+                else
+                    (m[3] < lb[1] || m[1] > lb[3]) && continue
+                    m[4] <= lb[2] + 0.5 || continue
+                    worst = min(worst, lb[2] - m[4])
+                end
+            end
+            return worst
+        end
+        result = try
+            out = Tuple{Symbol, String, Float64, Float64}[]
+            # Every sized preset (and :publication), x and y, linear and log.
+            for st in (:ieee, :aps, :nature, :elsevier, :springer, :aip, :publication), scale in ("linear", "log")
+                f = with_style(() -> plot_scatter(10.0 .^ range(-1, 3; length = 10), 10.0 .^ range(-2, 4; length = 10);
+                    xscale = scale, yscale = scale, xlabel = "x", ylabel = "y"), st)
+                svg = String(savefig(f; format = "svg"))
+                raw = _AX._with_export_window(_AX._EXPORT_STATE) do ec, app, win, divid
+                    Base.invokelatest(() -> ec.run(win, geom_js * "(" * _AX._json_js(svg) * ")"))
+                end
+                geo = _AX.PlotlyBase.JSON.parse(String(raw))
+                push!(out, (st, scale, gap(geo, "x"), gap(geo, "y")))
+            end
+            out
+        catch err
+            @test export_failed(err)
+            nothing
+        end
+        if result !== nothing
+            @test length(result) == 14
+            for (st, scale, gx, gy) in result
+                @test 2 <= gx < Inf && 2 <= gy < Inf
+            end
+        end
+    end
+end
+
+@testset "v7 axes-style: quick audit fixes (log-01, stream-01, oned-cat-range-strings, axes-ticks-07/08/13/14, vm-11, vm-15, perf-02, oned-area-stack-nested-x)" begin
+    g(x, ks...) = (for k in ks; x = _AX._cmn_mapping_get(x, k); end; x)
+    L(f) = _AX._cmn_layout(f).fields
+    msg(f) = try
+        f(); "no error"
+    catch err
+        err isa ArgumentError ? err.msg : string(typeof(err))
+    end
+    x = 0:3; y = 0:4
+    U = [-(yj - 2.0) for xi in x, yj in y]; V = [xi - 1.5 for xi in x, yj in y]
+    # log-01: an ArgumentError naming the field, not a DomainError.
+    @test startswith(msg(() -> (p = plot_streamlines(x, y, U, V); plot_scatter!(p, 1:5, [15, 11, 4, 15, 18]; yscale = "log"))),
+        "plot_scatter!: the y axis shows a field over")
+    # stream-01: RK4 trial points outside the grid end the line at the edge
+    # (this field threw BoundsError [31, 5] on 45446e8).
+    Ub = [0.088 0.015 0.108 0.43 1.54; 0.184 -1.136 -0.421 2.44 1.147; 1.688 -0.863 -2.556 -0.463 -0.15; -0.112 0.561 -0.801 0.186 1.562]
+    Vb = [-0.302 -0.375 -0.327 -0.558 0.164; -1.119 0.273 -1.09 0.21 -0.473; 0.357 -1.35 -1.28 1.186 -1.938; 1.016 -0.769 0.76 -0.263 -0.312]
+    @test !isempty(plot_streamlines(0:3, 0:4, Ub, Vb).data)
+    @test all(1:60) do s
+        U = [sin(1e3 * s + 7.3 * i + 3.1 * j) for i in 1:4, j in 1:5]
+        V = [cos(2e3 * s + 5.7 * i - 1.9 * j) for i in 1:4, j in 1:5]
+        plot_streamlines(0:3, 0:4, U, V) isa Plot
+    end
+    # oned-cat-range-strings / axes-ticks-02
+    @test msg(() -> plot_scatter(["a", "b", "c"], 1:3; xrange = ("a", "c"))) ==
+        "plot_scatter: `xrange` bounds must be numbers (data values; 0-based positions on a category axis) or dates; got (\"a\", \"c\")."
+    @test msg(() -> xrange!(plot_scatter(["a", "b", "c"], 1:3), ("a", "c"))) ==
+        "xrange!: `range` bounds on a category axis must be numbers (0-based category positions); got (\"a\", \"c\")."
+    # axes-ticks-07 / tm-tickformat-g: explicit values keep plotly's power format.
+    e = plot_scatter([0, 1e6, 2e6, 3e6], 1:4)
+    xticks!(e, [0, 1e6, 2e6, 3e6])
+    @test g(L(e)[:xaxis], :tickformat) === nothing
+    # axes-ticks-08: Dates.Time is refused with a remedy.
+    @test occursin("`x` holds Time values", msg(() -> plot_scatter([_AX.Dates.Time(1), _AX.Dates.Time(2)], [1.0, 2.0])))
+    @test occursin("`y` holds Second values", msg(() -> plot_scatter([1.0, 2.0], Any[1.0, _AX.Dates.Second(2)])))
+    # axes-ticks-13: unknown keywords are ArgumentErrors naming public API.
+    pf = plot_scatter(1:3, 1:3)
+    for (name, call) in (("xticks!", () -> xticks!(pf; formatt = "x")), ("xrange!", () -> xrange!(pf, (0, 1); foo = 1)),
+            ("spines!", () -> spines!(pf; colr = "red")), ("grid!", () -> grid!(pf; foo = 1)),
+            ("axis_equal!", () -> axis_equal!(pf; rato = 2)), ("secondary_xaxis!", () -> secondary_xaxis!(pf, identity, identity; foo = 1)))
+        @test startswith(msg(call), "$(name): unsupported keyword argument(s)")
+    end
+    @test !occursin("_ensure_twin", msg(() -> yticks!(pf; secondary_y = true)))
+    # axes-ticks-14
+    d = plot_scatter([_AX.Dates.Date(2024, 1, 1), _AX.Dates.Date(2024, 6, 1)], [1, 2])
+    xrange!(d, (_AX.Dates.Date(2024, 1, 1), _AX.Dates.Date(2024, 6, 1)))
+    @test occursin("needs a numeric (linear or log) x axis", msg(() -> secondary_xaxis!(d, identity, identity)))
+    # vm-11: fewer secondary ticks in a narrow cell.
+    sn = with_style(:nature) do
+        sn = subplots(1, 2; sync = false)
+        plot_scatter!(sn, collect(400.0:10:700), sin.(1:31); row = 1, col = 1)
+        secondary_xaxis!(sn, l -> 299792.458 / l, n -> 299792.458 / n; row = 1, col = 1)
+        sn
+    end
+    sec = first(k for k in keys(L(sn)) if occursin(r"^xaxis\d+$", String(k)) && g(L(sn)[k], :overlaying) !== nothing)
+    s1 = plot_scatter(collect(400.0:10:700), sin.(1:31))
+    secondary_xaxis!(s1, l -> 299792.458 / l, n -> 299792.458 / n)
+    @test length(g(L(sn)[sec], :tickvals)) < length(g(L(s1)[:xaxis2], :tickvals))
+    # vm-15: insets follow the style's grid.
+    sf = with_style(:ieee) do
+        sf = subplots(1, 1; sync = false)
+        plot_scatter!(sf, 1:10, 1:10)
+        k = inset!(sf, (0.6, 0.6, 0.3, 0.3))
+        plot_scatter!(sf, 1:3, 1:3; inset = k)
+        sf
+    end
+    @test all(k -> g(L(sf)[k], :showgrid) === false, (:xaxis2, :yaxis2))
+    # oned-area-stack-nested-x: a series is interpolated at another's x, not
+    # taken as zero.
+    nest = plot_area([[0.0, 1, 2, 3, 4], [0.0, 2, 4]], [[1.0, 1, 1, 1, 1], [1.0, 1, 1]]; stack = true)
+    @test all(t -> t.fields[:stackgaps] == "interpolate", nest.data)
+    # perf-02: no per-value message string (was 510-940 B per value; the copies
+    # of the values themselves cost 8 B per array).
+    n = 10^5
+    px = collect(range(0, 1; length = n)); lo = sin.(px); hi = lo .+ 1
+    plot_band(px, lo, hi); plot_segments(px, lo, px, hi)
+    @test (@allocated plot_band(px, lo, hi)) / n < 150
+    @test (@allocated plot_segments(px, lo, px, hi)) / n < 150
 end

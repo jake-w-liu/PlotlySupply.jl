@@ -1082,11 +1082,11 @@ function _mesh2d_subplot!(
 			"mesh plots draw on Cartesian x/y axes.",
 		))
 		live = _cmn_plot(sf)
-		in_cell = count(
-			trace -> _mesh2d_trace_ref(trace, :xaxis, "x") == cell.xref &&
-				_mesh2d_trace_ref(trace, :yaxis, "y") == cell.yref,
-			live.data,
-		)
+		# D20: the cell's colour cycle (a twin y axis continues it).
+		in_cell = _style_cell_counts(
+			live,
+			_style_cell_key(live.layout, "xy", Dict{Symbol, Any}(:xaxis => cell.xref, :yaxis => cell.yref)),
+		).traces
 		overlay_y = _cmn_mapping_get(get(live.layout.fields, cell.ykey, nothing), :overlaying) !== nothing
 		target = _Mesh2dTarget(cell.xref, in_cell + 1, live.layout, nothing, overlay_y)
 		mutator = function (staged, margs...; mkwargs...)

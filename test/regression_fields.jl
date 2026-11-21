@@ -541,8 +541,10 @@ end
 			@test occursin("$(who): `$(key)` bounds must be finite", msg(build, key, (Inf, nothing)))
 			# The fixed end of a one-sided limit on an autotyped axis is a number
 			# or a date (plotly.js reads date limits in milliseconds).
-			@test occursin("$(who): `$(key)`: [1, 2] is not a date", msg(build, key, (nothing, [1, 2])))
-			@test occursin("$(who): `$(key)`: \"a\" is not a date", msg(build, key, ("a", nothing)))
+			@test occursin("$(who): `$(key)` bounds must be numbers (data values; 0-based positions on a " *
+				"category axis) or dates; got (nothing, [1, 2]).", msg(build, key, (nothing, [1, 2])))
+			@test occursin("$(who): `$(key)` bounds must be numbers (data values; 0-based positions on a " *
+				"category axis) or dates; got (\"a\", nothing).", msg(build, key, ("a", nothing)))
 		end
 		@test collect(_rf_axis(plot_image(zeros(UInt8, 2, 2, 3); origin = :lower, yrange = (1, 3)), :yaxis)[:range]) == [1, 3]
 		# Pinned on an image: the fixed bound and the image's pixel edge. With
@@ -1587,5 +1589,74 @@ end
 		@test _rf_axis(h, :xaxis)[:tickvals] == ["2024-01-02T06:00:00"]
 		@test occursin("needs numeric tick values; got dates",
 			_rfv3_msg(() -> plot_heatmap(U5; xscale = "log", xticks = [D.Date(2024, 1, 1)])))
+	end
+end
+
+@testset "v7 axes-style: field colour fixes (fields-01, fields-04, fields-05)" begin
+	PS = PlotlySupply
+	g(x, ks...) = (for k in ks; x = PS._cmn_mapping_get(x, k); end; x)
+	argmsg(f) = try
+		f(); "no error"
+	catch err
+		err isa ArgumentError ? err.msg : string(typeof(err))
+	end
+
+	@testset "fields-01: colorbar!(ticks) on a log colour scale takes data values" begin
+		x = collect(1.0:20.0); y = collect(1.0:10.0)
+		D = [10.0^(3 * (a - 1) / 19) for a in x, b in y]
+		made = plot_heatmap(x, y, D; colornorm = :log, colorbar_ticks = [1, 10, 100])
+		f = plot_heatmap(x, y, D; colornorm = :log)
+		colorbar!(f; ticks = [1, 10, 100])
+		bar = f.data[1].fields[:colorbar]
+		@test bar[:tickvals] == [0.0, 1.0, 2.0] == made.data[1].fields[:colorbar][:tickvals]
+		@test bar[:ticktext] == ["10<sup>0</sup>", "10<sup>1</sup>", "10<sup>2</sup>"]
+		colorbar!(f; ticks = [1, 100], ticklabels = ["low", "high"])
+		@test f.data[1].fields[:colorbar][:ticktext] == ["low", "high"]
+		@test occursin("must be positive", argmsg(() -> colorbar!(f; ticks = [0, 10])))
+		lin = plot_heatmap(x, y, D)
+		colorbar!(lin; ticks = [1, 10, 100])
+		@test lin.data[1].fields[:colorbar][:tickvals] == [1.0, 10.0, 100.0]
+	end
+
+	@testset "fields-04: evenly spaced contour levels colour like uneven ones and heatmap(levels)" begin
+		x = collect(range(0, 10; length = 101)); y = collect(range(0, 1; length = 11))
+		U = [a for a in x, b in y]
+		f = plot_contour(x, y, U; levels = [0, 2.5, 5, 7.5, 10], colorscale = "viridis")
+		t = f.data[1]
+		@test get(t.fields, :showscale, nothing) === false
+		# plotly samples band i of k at t = i/(k+1) of the trace's scale.
+		stops = PS._concrete_norm_stops(t.fields[:colorscale], nothing, "test")
+		@test PS._sample_colorscale(stops, [1, 2, 3, 4] ./ 5) == ["#472D7B", "#2C728E", "#27AD81", "#AADC32"]
+		# The bar is the carrier's: the levels as ticks, no extra end bands.
+		@test g(f.data[end].fields[:marker], :colorbar, :tickvals) == [0.0, 2.5, 5.0, 7.5, 10.0]
+	end
+
+	@testset "fields-05: streamlines colour keywords" begin
+		sx = range(-2, 2; length = 21); sy = range(-1, 1; length = 11)
+		U = [-b for a in sx, b in sy]; V = [a for a in sx, b in sy]
+		S = hypot.(U, V)
+		# Joining a heatmap's colour axis: one bar over the field's full range.
+		fig = plot_heatmap(sx, sy, S; colorscale = "viridis", coloraxis = :shared)
+		plot_streamlines!(fig, sx, sy, U, V; colorby = :speed, colorscale = "viridis", coloraxis = :shared)
+		axis = PS._cmn_layout(fig).fields[:coloraxis]
+		@test g(axis, :cmin) ≈ 0 && g(axis, :cmax) ≈ maximum(S)
+		@test !PS._finalize_figure!(fig)
+		# Panels with a common crange share one bar.
+		sf = subplots(1, 2; sync = false)
+		plot_streamlines!(sf, sx, sy, U, V; row = 1, col = 1, colorby = :speed, crange = (0, 4.5))
+		plot_streamlines!(sf, sx, sy, 2 .* U, 2 .* V; row = 1, col = 2, colorby = :speed, crange = (0, 4.5))
+		@test shared_colorbar!(sf) === sf
+		# Log norm, levels and showscale.
+		lg = plot_streamlines(sx, sy, U, V; colorby = :speed, colornorm = :log, colorbar_ticks = [0.1, 1])
+		@test g(lg.data[end].fields[:marker], :colorbar, :ticktext) == ["10<sup>-1</sup>", "10<sup>0</sup>"]
+		lv = plot_streamlines(sx, sy, U, V; colorby = :speed, levels = [0, 0.5, 1, 1.5, 2.5])
+		@test length(unique(g(t.fields[:line], :color) for t in lv.data if haskey(t.fields, :line))) <= 4
+		ns = plot_streamlines(sx, sy, U, V; colorby = :speed, showscale = false)
+		@test all(t -> g(get(t.fields, :marker, nothing), :showscale) !== true, ns.data)
+		for (kw, name) in (((; crange = (0, 1)), "crange"), ((; colornorm = :log), "colornorm"),
+				((; coloraxis = :a), "coloraxis"), ((; levels = [0, 1]), "levels"), ((; showscale = true), "showscale"))
+			@test argmsg(() -> plot_streamlines(sx, sy, U, V; kw...)) ==
+				"plot_streamlines: `$(name)` applies to colorby = :speed; got colorby = :none."
+		end
 	end
 end

@@ -300,12 +300,13 @@ end
     appended = target.data[(initial_count + 1):end]
     @test _stem_color_signature(appended) ==
           _stem_color_signature(expected_first_color.data)
-    @test appended[1].fields[:name] ==
-          expected_first_color.data[1].fields[:name]
-    @test appended[1].fields[:name] == "first"
-    @test appended[1].fields[:showlegend] ===
-          expected_first_color.data[1].fields[:showlegend]
-    @test appended[1].fields[:showlegend] === false
+    # The stems trace comes first, below its head (oned-stem-no-frame).
+    @test appended[2].fields[:name] ==
+          expected_first_color.data[2].fields[:name]
+    @test appended[2].fields[:name] == "first"
+    @test appended[2].fields[:showlegend] ===
+          expected_first_color.data[2].fields[:showlegend]
+    @test appended[2].fields[:showlegend] === false
 end
 
 @testset "per-series styling ignores surplus vector entries" begin
@@ -387,7 +388,7 @@ end
     @test _stem_color_signature(appended_stem) ==
           _stem_color_signature(expected_stem.data)
     @test getfield.(
-        _series_style_signature.(appended_stem[1:2]),
+        _series_style_signature.(appended_stem[3:4]),
         :legend,
     ) == ["first", "second"]
 end
