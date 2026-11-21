@@ -1625,11 +1625,13 @@ end
 		title!(f, "T")
 		@test _sfn_fields(f.layout.fields[:margin])[:t] >= m1[:t]
 	end
-	# Larger tick fonts after construction grow every side.
+	# Larger tick fonts after construction grow every side (the angular
+	# labels' own font: the style sets it, so a larger figure font alone
+	# leaves them as they are).
 	with_style(:ieee) do
 		g = plot_scatterpolar(th, r)
 		m0 = _sfn_fields(g.layout.fields[:margin])
-		relayout!(g; font_size = 30)
+		relayout!(g; polar_angularaxis_tickfont_size = 30)
 		_SFN._finalize_figure!(g)
 		m1 = _sfn_fields(g.layout.fields[:margin])
 		@test all(m1[s] > m0[s] for s in (:l, :r, :b, :t))
@@ -2207,9 +2209,12 @@ end
 			fig = plot_ternary([0.2, 0.3], [0.3, 0.3], [0.5, 0.4])
 			m = fig.layout.fields[:margin]
 			font = _SFN._fin_font_size(fig.layout)
-			tick = _SFN._tight_root_font_size(k -> get(fig.layout.fields, k, nothing))
+			# The corner labels are drawn at each axis's own tick font (the
+			# style's), else at the figure's.
+			root = _SFN._tight_root_font_size(k -> get(fig.layout.fields, k, nothing))
+			tick = 0.0
 			for axis in (:aaxis, :baxis, :caxis)
-				tick = max(tick, _SFN._fin_mapping_font_size(_SFN._cmn_mapping_get(fig.layout.fields[:ternary], axis), :tickfont, 0.0))
+				tick = max(tick, _SFN._fin_mapping_font_size(_SFN._cmn_mapping_get(fig.layout.fields[:ternary], axis), :tickfont, root))
 			end
 			title = _SFN._fin_mapping_font_size(_SFN._cmn_mapping_get(_SFN._cmn_mapping_get(fig.layout.fields[:ternary], :baxis), :title), :font, font)
 			corner = ceil(_SFN._FIN_LINE_EM * title + 4)
@@ -3377,4 +3382,26 @@ end
 	@test _sfn_settled(f)
 	W, H = _sfn_size(f)
 	@test _sfn_margin(f, :t) + _sfn_margin(f, :b) <= H - 64
+end
+
+@testset "a polar figure under a paper style is settled with its style margin (angular tick font)" begin
+	# :publication draws the angular labels at its 12 px tick font under a
+	# 14 px figure font: the margin holds one 12 px line plus plotly's offset,
+	# as the style gave it, and a finalize does not grow it to the 14 px room.
+	for name in (:publication, :ieee)
+		stp = _SFN._STYLE_REGISTRY[name]
+		room = ceil(1.2 * stp.tick_fontsize + 8)
+		fig = with_style(() -> plot_scatterpolar(0:30:330, 1:12), name)
+		@test with_style(() -> _sfn_settled(fig), name)
+		@test all(side -> _sfn_margin(fig, side) == room, (:l, :r, :t, :b))
+	end
+end
+
+@testset "a math x title under a generous margin writes nothing (plotly's push holds it)" begin
+	# :default: 50 px of bottom margin hold the plain title (48.1 px); plotly
+	# pushes it to 60 px, past the deepest MathJax title measured (54.4 px).
+	p = plot_scatter([1.0, 2.0, 3.0], [1.0, 4.0, 9.0])
+	xlabel!(p, raw"$t$ (s)")
+	@test _sfn_margin(p, :b) == 50
+	@test _SFN._fin_meta_get(p.layout, _SFN._ROOM_MARGIN_KEY) === nothing
 end

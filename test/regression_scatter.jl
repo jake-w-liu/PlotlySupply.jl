@@ -1823,12 +1823,15 @@ Base.getindex(v::_RscCountingVector, i::Int) = (v.reads[] += 1; v.data[i])
 	p = PlotlySupply._plot_obj(f)
 	PlotlySupply._scat_best_legend_position(p)
 	@test (@allocated PlotlySupply._scat_best_legend_position(p)) < 16 * 2^20
-	# One pass over a non-Float64 vector (the conversion), none without a legend.
+	# A constructor hands out a settled figure (invariant 1): its finalize
+	# reads the axis extent once (one non-allocating `extrema` pass, which the
+	# margins need); the best-legend estimate makes one more. No other pass.
 	counted = _RscCountingVector(copy(y), Ref(0))
 	plot_scatter(x, counted)
-	@test counted.reads[] == 0
-	plot_scatter(x, counted; legend = "data")
 	@test counted.reads[] <= n
+	counted.reads[] = 0
+	plot_scatter(x, counted; legend = "data")
+	@test counted.reads[] <= 2n
 end
 
 @testset "scatter family: polar radial one-sided limits and bound types (Z51, D11)" begin

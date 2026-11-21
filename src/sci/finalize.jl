@@ -2376,7 +2376,14 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 	# A math x title at the bottom paper edge (vm-xtitleclip).
 	# A bottom margin left to plotly (unset, 80 px) is not raised.
 	current_b = _cmn_mapping_get(get(layout.fields, :margin, nothing), :b)
-	math_b = _fin_isfinite_real(current_b) ? _fin_math_xtitle_px(layout; pending = layout_updates) : 0.0
+	math_b = 0.0
+	if _fin_isfinite_real(current_b)
+		# The margin before the room engine raised it (its record), as the
+		# user or style set it.
+		rec = get(_room_margin_record(layout), :b, nothing)
+		base_b = rec !== nothing && abs(Float64(current_b) - rec[2]) <= 0.5 ? rec[1] : Float64(current_b)
+		math_b = _fin_math_xtitle_px(layout; pending = layout_updates, base = base_b)
+	end
 	if math_b > 0
 		_room_note_margin!(plan, :b, math_b)
 		queued = get(layout_updates, :margin_b, nothing)
@@ -3625,7 +3632,8 @@ function _room_add_domain_area!(plan::_RoomPlan, key::Symbol, grid::Bool)
 		(domain = ((0.0, 1.0), (0.0, 1.0)))
 	domain === nothing && return nothing
 	area = _room_new_area(key, nothing, :domain, grid, _room_box(domain[1], domain[2]))
-	occursin(r"^polar\d*$", String(key)) && _room_polar_own!(plan, area)
+	# Outside a grid the style margin holds them (`_style_domain_subplot_margin`).
+	grid && occursin(r"^polar\d*$", String(key)) && _room_polar_own!(plan, area)
 	plan.areas[key] = area
 	push!(plan.area_order, key)
 	return nothing
@@ -5609,12 +5617,15 @@ function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height
 	margin === nothing && return updates
 	lookup(key) = get(fields, key, nothing)
 	root = _tight_root_font_size(lookup)
-	tick = root
+	# The labels drawn outside: an axis's own tick font, else the figure's
+	# (a style's 12 px angular labels under a 14 px root font need the room
+	# of 12 px, as `_style_domain_subplot_margin` gives it).
+	tick = 0.0
 	for (key, axis) in fields
 		occursin(r"^(polar|ternary)\d*$", String(key)) || continue
-		for name in (:angularaxis, :aaxis, :baxis, :caxis)
-			size = _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, 0.0)
-			size > tick && (tick = size)
+		names = occursin(r"^polar", String(key)) ? (:angularaxis,) : (:aaxis, :baxis, :caxis)
+		for name in names
+			tick = max(tick, _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, root))
 		end
 	end
 	label_room = ceil(1.2 * tick + 8)
@@ -5736,8 +5747,13 @@ const _FIN_MATH_XTITLE_PAD = 1.0
 # the bottom paper edge (0 when none): their tick labels, ticks and title
 # (`_fin_x_labels_px`) and the MathJax depth beyond what plotly pushes.
 # `pending` holds the updates of the calling pass (a y domain there is the
-# one drawn).
-function _fin_math_xtitle_px(layout::Layout; pending::AbstractDict = Dict{Symbol, Any}())
+# one drawn). Only a title whose plain room exceeds the bottom margin `base`
+# (as the user or style set it) counts: plotly then sets the page edge by
+# its push, which the MathJax glyphs pass. A margin that already holds the
+# plain room is pushed further by plotly than the glyphs reach (:default,
+# 50 px for 48.1 px of plain room: drawn 60 px, the deepest of the titles
+# above 54.4 px), so nothing is written there.
+function _fin_math_xtitle_px(layout::Layout; pending::AbstractDict = Dict{Symbol, Any}(), base::Real = 0.0)
 	need = 0.0
 	font = _fin_font_size(layout)
 	for (key, axis) in layout.fields
@@ -5752,8 +5768,10 @@ function _fin_math_xtitle_px(layout::Layout; pending::AbstractDict = Dict{Symbol
 		edge = queued isa AbstractVector && length(queued) == 2 ? Float64(queued[1]) :
 			_cmn_y_axis_domain(layout, anchor)[1]
 		edge <= 1e-9 || continue
+		plain = _fin_x_labels_px(layout, key)
+		plain > base || continue
 		size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
-		need = max(need, _fin_x_labels_px(layout, key) + _FIN_MATH_XTITLE_EM * size + _FIN_MATH_XTITLE_PAD)
+		need = max(need, plain + _FIN_MATH_XTITLE_EM * size + _FIN_MATH_XTITLE_PAD)
 	end
 	return need
 end
