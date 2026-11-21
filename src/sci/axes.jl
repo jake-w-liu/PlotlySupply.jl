@@ -1681,6 +1681,9 @@ axis_equal!(fig)
 function axis_equal!(fig; show = nothing, kwargs...)
 	_axes_reject_show(show, "axis_equal!")
 	_axes_equal!(fig; kwargs...)
+	# The cell is fitted for its new aspect now, so the figure is settled
+	# (fields-06).
+	_finalize_figure!(fig)
 	return nothing
 end
 

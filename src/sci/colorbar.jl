@@ -976,20 +976,7 @@ function _colorbar_options(
 	thickness_value = _optional_size(thickness, who, "thickness")
 	x_value = _optional_position(x, who, "x")
 	y_value = _optional_position(y, who, "y")
-	tick_values = ticks === nothing ? nothing : _checked_real_vector(ticks, who, "ticks")
-	tick_labels = nothing
-	if ticklabels !== nothing
-		tick_values === nothing && throw(ArgumentError(
-			"$(who): `ticklabels` need `ticks` of the same length.",
-		))
-		(ticklabels isa AbstractVector || ticklabels isa Tuple) || throw(ArgumentError(
-			"$(who): `ticklabels` must be a vector; got $(typeof(ticklabels)).",
-		))
-		length(ticklabels) == length(tick_values) || throw(ArgumentError(
-			"$(who): $(length(ticklabels)) `ticklabels` for $(length(tick_values)) `ticks`.",
-		))
-		tick_labels = String[_label(string(label)) for label in ticklabels]
-	end
+	tick_values, tick_labels = _cbar_tick_options(ticks, ticklabels, who)
 	(isempty(exponentformat) || exponentformat in _CBAR_EXPONENT_FORMATS) ||
 		throw(ArgumentError(
 			"$(who): `exponentformat` must be one of " *
@@ -1053,18 +1040,7 @@ function _cbar_apply_options!(bar::Dict{Symbol,Any}, opts, placement::AbstractDi
 		bar[:thickness] = opts.thickness
 		bar[:thicknessmode] = "pixels"
 	end
-	if opts.ticks !== nothing
-		# An `nticks` `_finalize_figure!` wrote for automatic ticks
-		# (`_fin_bar_tick_state`) goes with them.
-		_fin_bar_tick_state(bar)[2] && delete!(bar, :nticks)
-		bar[:tickmode] = "array"
-		bar[:tickvals] = opts.ticks
-		if opts.ticklabels === nothing
-			delete!(bar, :ticktext)
-		else
-			bar[:ticktext] = opts.ticklabels
-		end
-	end
+	_cbar_apply_ticks!(bar, opts.ticks, opts.ticklabels)
 	if opts.offset === :none
 		# Only an offset written here (`showexponent = "last"`) is removed.
 		if _cbar_string(bar, :showexponent, "") == "last"
@@ -1476,6 +1452,42 @@ end
 
 # ── shared_colorbar! ────────────────────────────────────────────────────────
 
+# `ticks` (colour units) and `ticklabels` (same length, as `_label` text) of
+# a bar, checked: `(values, labels)`, each `nothing` when not given.
+function _cbar_tick_options(ticks, ticklabels, who::AbstractString)
+	tick_values = ticks === nothing ? nothing : _checked_real_vector(ticks, who, "ticks")
+	tick_labels = nothing
+	if ticklabels !== nothing
+		tick_values === nothing && throw(ArgumentError(
+			"$(who): `ticklabels` need `ticks` of the same length.",
+		))
+		(ticklabels isa AbstractVector || ticklabels isa Tuple) || throw(ArgumentError(
+			"$(who): `ticklabels` must be a vector; got $(typeof(ticklabels)).",
+		))
+		length(ticklabels) == length(tick_values) || throw(ArgumentError(
+			"$(who): $(length(ticklabels)) `ticklabels` for $(length(tick_values)) `ticks`.",
+		))
+		tick_labels = String[_label(string(label)) for label in ticklabels]
+	end
+	return tick_values, tick_labels
+end
+
+# `bar` with the explicit `ticks`/`ticklabels` of `opts` (no change without
+# `ticks`): an `nticks` `_finalize_figure!` wrote for automatic ticks
+# (`_fin_bar_tick_state`) goes with them.
+function _cbar_apply_ticks!(bar::Dict{Symbol, Any}, ticks, ticklabels)
+	ticks === nothing && return bar
+	_fin_bar_tick_state(bar)[2] && delete!(bar, :nticks)
+	bar[:tickmode] = "array"
+	bar[:tickvals] = ticks
+	if ticklabels === nothing
+		delete!(bar, :ticktext)
+	else
+		bar[:ticktext] = ticklabels
+	end
+	return bar
+end
+
 function _shared_colorbar_options(
 	who::AbstractString;
 	colorscale,
@@ -1486,6 +1498,8 @@ function _shared_colorbar_options(
 	side::Symbol,
 	coloraxis,
 	title_side::Symbol,
+	ticks = nothing,
+	ticklabels = nothing,
 )
 	side in _CBAR_SIDES || throw(ArgumentError(
 		"$(who): `side` must be :right or :bottom; got $(repr(side)).",
@@ -1524,10 +1538,13 @@ function _shared_colorbar_options(
 		))
 		mid = Float64(cmid)
 	end
+	tick_values, tick_labels = _cbar_tick_options(ticks, ticklabels, who)
 	return (
 		scale = scale,
 		limits = limits,
 		cmid = mid,
+		ticks = tick_values,
+		ticklabels = tick_labels,
 		title = isempty(title) ? nothing : _label(title),
 		title_side = title_side,
 		len = Float64(len),
@@ -1729,6 +1746,116 @@ function _shared_colorbar_carried(p::Plot, slots::Vector{_CbarSlot})
 	return (settings = settings, title = title)
 end
 
+# The colour norm trace `trace` (slot `slot`) was drawn with (fields-03):
+# `(:levels, boundaries)` for the stepped scale `levels` writes (one colour
+# per band, two stops at each inner boundary, the bar ticked at the
+# boundaries), `(:log, nothing)` for a bar labelled as `colornorm = :log`
+# labels it (`_log_tick_label` at log10 positions), else `(:linear, nothing)`.
+# A trace already bound to a coloraxis is drawn with the axis' scale and bar.
+function _cbar_slot_norm(p::Plot, trace::GenericTrace, slot::_CbarSlot)
+	if slot.coloraxis !== nothing
+		holder = get(p.layout.fields, Symbol(slot.coloraxis), nothing)
+		bar = _cmn_mapping_get(holder, :colorbar)
+	else
+		holder = slot.container === :root ? trace.fields : get(trace.fields, slot.container, nothing)
+		bar = _cbar_slot_bar(trace, slot)
+	end
+	ticks = _cmn_mapping_get(bar, :tickvals)
+	labels = _cmn_mapping_get(bar, :ticktext)
+	numeric(v) = v isa AbstractVector && !isempty(v) && all(x -> x isa Real && !(x isa Bool) && isfinite(x), v)
+	if numeric(ticks) && labels isa AbstractVector && length(labels) == length(ticks) &&
+			all(i -> labels[i] isa AbstractString && labels[i] == _log_tick_label(10.0^Float64(ticks[i])),
+				eachindex(ticks))
+		return (:log, nothing)
+	end
+	scale = _cmn_mapping_get(holder, :colorscale)
+	if scale isa AbstractVector && length(scale) >= 4 && numeric(ticks) && length(ticks) >= 2
+		positions = Float64[]
+		for stop in scale
+			(stop isa AbstractVector || stop isa Tuple) && length(stop) == 2 && stop[1] isa Real ||
+				return (:linear, nothing)
+			push!(positions, Float64(stop[1]))
+		end
+		stepped = any(i -> positions[i] == positions[i + 1], 1:(length(positions) - 1))
+		edges = unique(positions)
+		lo, hi = Float64(first(ticks)), Float64(last(ticks))
+		if stepped && hi > lo && length(edges) == length(ticks) &&
+				all(i -> isapprox(edges[i], (Float64(ticks[i]) - lo) / (hi - lo); atol = 1e-9), eachindex(edges))
+			return (:levels, Float64.(ticks))
+		end
+	end
+	return (:linear, nothing)
+end
+
+# The fixed limits of colorbar carrier traces must cover the colour data of
+# every other member: the shared axis takes the carriers' limits, so data
+# beyond them would be drawn in the end colours without notice (fields-08).
+# A member's own `zmin`/`zmax` (`cmin`/`cmax`) count as its data range; the
+# limits of a coloraxis it is bound to do not (the carrier may have written
+# them). Throws before anything changes.
+function _shared_colorbar_check_cover(p::Plot, slots::Vector{_CbarSlot}, limits, who::AbstractString)
+	span = limits[2] - limits[1]
+	tol = 1e-9 * max(abs(span), 1.0)
+	carrier = 0
+	for slot in slots
+		_cbar_is_carrier(p.data[slot.index]) && (carrier = slot.index; break)
+	end
+	for slot in slots
+		trace = p.data[slot.index]
+		(trace isa GenericTrace && !_cbar_is_carrier(trace)) || continue
+		source = slot.container === :root ? trace.fields : _symbol_dict(get(trace.fields, slot.container, nothing))
+		part = nothing
+		for (lo_key, hi_key) in ((:zmin, :zmax), (:cmin, :cmax))
+			lo = _cbar_real(source, lo_key, nothing)
+			hi = _cbar_real(source, hi_key, nothing)
+			(lo !== nothing && hi !== nothing && lo < hi) && (part = (lo, hi); break)
+		end
+		if part === nothing
+			values = _cbar_slot_values(trace, slot)
+			values === nothing && continue
+			part = _cbar_extrema(values)
+			part === nothing && continue
+		end
+		(part[1] >= limits[1] - tol && part[2] <= limits[2] + tol) && continue
+		throw(ArgumentError(
+			"$(who): trace $(slot.index) has colour values $(part[1])..$(part[2]), outside the " *
+			"limits $(limits[1])..$(limits[2]) the colorbar carrier trace $(carrier) was drawn with; " *
+			"its colours are fixed when the figure is built. Rebuild that plot with a `crange` " *
+			"covering every panel, e.g. crange = ($(min(part[1], limits[1])), $(max(part[2], limits[2]))).",
+		))
+	end
+	return nothing
+end
+
+# Members of one shared colour axis must be drawn with one colour norm: the
+# axis maps every member through one continuous range, so a `levels` panel
+# next to a continuous one, or a log panel next to a linear one, would be
+# recoloured wrongly (fields-03). Throws before anything changes.
+function _shared_colorbar_check_norms(p::Plot, slots::Vector{_CbarSlot}, who::AbstractString)
+	first_norm = nothing
+	first_index = 0
+	for slot in slots
+		trace = p.data[slot.index]
+		trace isa GenericTrace || continue
+		# Contours colour by their own levels and get the shared limits.
+		_cbar_is_banded_contour(trace, slot) && continue
+		norm = _cbar_slot_norm(p, trace, slot)
+		if first_norm === nothing
+			first_norm, first_index = norm, slot.index
+			continue
+		end
+		norm == first_norm && continue
+		describe(n) = n[1] === :levels ? "levels $(n[2])" : n[1] === :log ? "colornorm = :log" :
+			"a continuous linear scale"
+		throw(ArgumentError(
+			"$(who): trace $(first_index) is drawn with $(describe(first_norm)) and trace " *
+			"$(slot.index) with $(describe(norm)); one colour axis maps every member through one " *
+			"norm. Build the panels with the same `levels`/`colornorm`, or give them separate colorbars.",
+		))
+	end
+	return nothing
+end
+
 function _shared_colorbar_apply!(
 	p::Plot,
 	slots::Vector{_CbarSlot},
@@ -1737,6 +1864,7 @@ function _shared_colorbar_apply!(
 	who::AbstractString,
 )
 	id = opts.coloraxis
+	_shared_colorbar_check_norms(p, slots, who)
 	carriers = _shared_colorbar_carrier_spec(p, slots, who)
 	carried = _shared_colorbar_carried(p, slots)
 	# Colour limits: explicit, centred automatic (cmid), the limits colorbar
@@ -1761,6 +1889,7 @@ function _shared_colorbar_apply!(
 			))
 		end
 		limits = carriers.limits
+		_shared_colorbar_check_cover(p, slots, limits, who)
 	end
 	if carriers.scale !== nothing && opts.scale !== nothing
 		requested = _cbar_scale_stops(opts.scale.scale, opts.scale.reversescale)
@@ -1901,6 +2030,7 @@ function _shared_colorbar_fill_bar!(p::Plot, bar::Dict{Symbol,Any}, placement, c
 	end
 	merge!(bar, placement)
 	haskey(bar, :thickness) || (bar[:thickness] = _CBAR_CELL_THICKNESS)
+	_cbar_apply_ticks!(bar, opts.ticks, opts.ticklabels)
 	title, title_side = opts.title, opts.title_side
 	if title === nothing && carried.title !== nothing &&
 			_cbar_title_text(bar) === nothing &&
@@ -2117,7 +2247,8 @@ end
 
 """
 	shared_colorbar!(fig; colorscale="", crange=[0, 0], cmid=nothing, title="",
-		title_side=:top, len=0.75, side=:right, coloraxis="coloraxis")
+		title_side=:top, len=0.75, side=:right, coloraxis="coloraxis",
+		ticks=nothing, ticklabels=nothing)
 	shared_colorbar!(sf::SubplotFigure; cells=:all, ...)
 
 Give several panels one colour scale and one colorbar. Every colour-mapped
@@ -2179,6 +2310,9 @@ with different limits or scales throw an `ArgumentError`.
   (see [`colorbar!`](@ref)).
 - `coloraxis="coloraxis"`: the shared axis id (`:shared` means
   `"coloraxis"`; `"coloraxis2"`, … are allowed).
+- `ticks=nothing`, `ticklabels=nothing`: tick values in colour units and
+  their labels (requires `ticks`, same length), as in [`colorbar!`](@ref);
+  they replace the ticks carried over from the removed bars.
 
 No coloured trace in the selection is an `ArgumentError`. The call is
 validated first and applied in one transaction. Returns `nothing` for a
@@ -2206,6 +2340,8 @@ function shared_colorbar!(
 	len::Real = 0.75,
 	side::Symbol = :right,
 	coloraxis::Union{AbstractString,Symbol} = "coloraxis",
+	ticks = nothing,
+	ticklabels = nothing,
 	kwargs...,
 )
 	_cbar_reject_keywords("shared_colorbar!", kwargs,
@@ -2214,7 +2350,7 @@ function shared_colorbar!(
 	return _cbar_with_extrema_memo(() -> _transactional_high_level_plot_mutation!(
 		_shared_colorbar_impl!,
 		fig;
-		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis,
+		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis, ticks, ticklabels,
 	))
 end
 
@@ -2229,6 +2365,8 @@ function shared_colorbar!(
 	len::Real = 0.75,
 	side::Symbol = :right,
 	coloraxis::Union{AbstractString,Symbol} = "coloraxis",
+	ticks = nothing,
+	ticklabels = nothing,
 	kwargs...,
 )
 	_cbar_reject_keywords("shared_colorbar!", kwargs,
@@ -2238,6 +2376,6 @@ function shared_colorbar!(
 		_shared_colorbar_subplot_impl!,
 		sf,
 		();
-		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis,
+		cells, colorscale, crange, cmid, title, title_side, len, side, coloraxis, ticks, ticklabels,
 	))
 end

@@ -178,7 +178,10 @@ function _transactional_high_level_plot_mutation!(
 		staged_target[] = staged
 		_with_figure_style(staged; adopt = true) do
 			result[] = mutator(staged, args...; kwargs...)
-			_finalize_figure!(staged; live = _plot_data(fig))
+			# A write the existing traces need (a colorbar of a cell that
+			# gives up room) raises `_FinNeedsFullStaging`: the call is then
+			# staged in full (`_prepare_high_level_plot_mutation_transaction`).
+			_finalize_figure!(staged; live = _plot_data(fig), strict = true)
 		end
 		return nothing
 	end
@@ -3426,6 +3429,10 @@ with `plot_*!` get a colorbar next to their own cell (see
   the default style are the 1.x `"rgba(255,255,255,0.72)"`,
   `"rgba(0,0,0,0.15)"` and `1` (darker on dark templates, transparent and 0
   for frameless styles).
+- `compress::Bool=true`: a row (column) whose equal-aspect cells all leave
+  blank space is drawn closer together: the figure height (width) shrinks
+  when it is not set by you or a journal width, otherwise the grid is centred.
+  `false` keeps every cell in its grid slot.
 - `subplot_kwargs...`: forwarded to `PlotlyBase.Subplots`: `specs`,
   `shared_xaxes`, `shared_yaxes`, `start_cell` (`"top-left"` or
   `"bottom-left"`), `subplot_titles` (a matrix, or a vector read in
@@ -3503,6 +3510,7 @@ function subplots(
 	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	legend_borderwidth::Union{Nothing, Real} = nothing,
+	compress::Bool = true,
 	subplot_kwargs...,
 )
 	# Validate every option before a figure or window exists.
@@ -3590,6 +3598,7 @@ function subplots(
 	inset_records = _subplots_register_insets!(p, inset_fractions)
 	_apply_figure_title!(p, title)
 	_apply_figure_size!(p, "subplots"; width = width, height = height)
+	compress || _fin_set_compress!(p.layout, false)
 	# Shared axes: keep every `matches` group autoranging (see finalize.jl).
 	_finalize_figure!(p)
 	fig = sync ?
@@ -19863,6 +19872,8 @@ function plot_indicator(
 		fontsize = fontsize,
 		apply_template = true,
 	)
+	# The margins its decorations need (finalize.jl, vm-17/vm-18/style-07): settled when built.
+	_finalize_figure!(fig)
 	return _extended_maybe_show(fig, show, width, height, title)
 end
 
@@ -22985,6 +22996,8 @@ function plot_parcoords(
 		apply_template = true,
 	)
 	isempty(title_text) || _parcoords_title_margin!(fig, fontsize)
+	# The margins its decorations need (finalize.jl, vm-17/vm-18/style-07): settled when built.
+	_finalize_figure!(fig)
 	return _extended_maybe_show(fig, show, width, height, title)
 end
 
@@ -23231,6 +23244,8 @@ function plot_ternary(
 		fontsize = fontsize,
 		apply_template = true,
 	)
+	# The margins its decorations need (finalize.jl, vm-17/vm-18/style-07): settled when built.
+	_finalize_figure!(fig)
 	return _extended_maybe_show(fig, show, width, height, title)
 end
 

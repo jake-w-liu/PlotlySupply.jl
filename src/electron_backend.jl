@@ -8534,13 +8534,30 @@ function _prepare_high_level_plot_mutation_transaction(
 			full_mutation,
 			commit_callback,
 		)
-	return _finish_high_level_plot_fast_transaction(
-		sp,
-		p,
-		context,
-		fast_mutation,
-		commit_callback,
-	)
+	return try
+		_finish_high_level_plot_fast_transaction(
+			sp,
+			p,
+			context,
+			fast_mutation,
+			commit_callback,
+		)
+	catch err
+		# The finalizer needs a write to a trace the fast path shares with
+		# the live figure (a colorbar to move): nothing of `p` was changed
+		# yet, so the call is staged in full instead: any trace and the
+		# layout may change; the template stays shared, as on the fast path
+		# (`_is_high_level_readonly_layout_payload`), and frames and config
+		# are not written (the fast path checks that too).
+		err isa _FinNeedsFullStaging || rethrow()
+		_prepare_full_model_mutation_transaction(
+			sp,
+			p,
+			full_mutation,
+			commit_callback,
+			(trace_indices = eachindex(p.data), layout = true, template_untouched = true),
+		)
+	end
 end
 
 function _prepare_structural_data_mutation_transaction(

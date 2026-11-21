@@ -1004,7 +1004,15 @@ end
 			(0.0, 1.0), nothing, false)
 		@test _SCB._fin_bar_nticks(Layout(), item, 600.0, 400.0) === nothing
 		item.bar[:len] = 0.25
-		@test _SCB._fin_bar_nticks(Layout(), item, 600.0, 400.0) == 3   # (100 - 20) px / 24 px
+		# (100 - 20) px / 24 px = 3 labels at least 24 px apart; plotly rounds
+		# the step of 4 (0.25) up to 0.5 as well: 40 px apart, so 4. Its own
+		# 5 would step 0.2, 16 px apart.
+		@test _SCB._fin_bar_nticks(Layout(), item, 600.0, 400.0) == 4
+		# A range whose rounded-up default step keeps the labels apart is
+		# left to plotly (chama_a5: 0.17 over an 84 px bar steps 0.05, 24.8 px).
+		short = _SCB._FinBar(1, nothing, nothing, Dict{Symbol, Any}(:len => 0.75, :lenmode => "fraction", :ypad => 0,
+			:tickfont => Dict{Any, Any}(:size => 32 / 3)), (-0.16929663085937496, 0.0), nothing, false)
+		@test _SCB._fin_bar_nticks(Layout(), short, 600.0, 111.88666666666666) === nothing
 	end
 
 	@testset "shared bar of equal-aspect cells: right of the cells, title inside the figure (Z98)" begin
@@ -1026,7 +1034,8 @@ end
 		W = 700.0
 		Wp = W - _scb_fields(layout.fields[:margin])[:l] - margin_r
 		title = titles[1]
-		@test title[:xref] == "paper" && title[:x] >= bar[:x]
+		# (1e-6 paper: under a thousandth of a px, the residue of the fit.)
+		@test title[:xref] == "paper" && title[:x] >= bar[:x] - 1e-6
 		@test (title[:x] - 1) * Wp + get(title, :xshift, 0) + 1.6 * 12 <= margin_r
 		@test _SCB._finalize_figure!(sf) === false
 	end
@@ -1038,8 +1047,10 @@ end
 	# `shared_colorbar!` copies the settings of the first cell bar to the shared
 	# bar: that `nticks` is the finalizer's, not the user's, and must not come
 	# along (it stayed at 4 on a bar three rows tall: field_maps, index_maps).
+	# (300 px tall: rows short enough that plotly's own step, 0.5 over the
+	# range -1..1, would set the cell bars' labels closer than 2 em.)
 	make() = begin
-		sf = subplots(3, 1; sync = false, shared_xaxes = true, vertical_spacing = 0.05)
+		sf = subplots(3, 1; sync = false, shared_xaxes = true, vertical_spacing = 0.05, height = 300)
 		for row in 1:3
 			plot_heatmap!(sf, 0:5, 0:2, [sin(i + j + row) for i in 0:5, j in 0:2]; row = row, col = 1,
 				crange = (-1, 1))
@@ -1232,4 +1243,103 @@ end
 	@test _SCB._room_bar_len(Dict{Symbol, Any}(:len => 0.3, :lenmode => "fraction"), 1.0, 0.5) == 0.3
 	@test _SCB._room_bar_len(Dict{Symbol, Any}(:len => 0.82, :lenmode => "fraction"), 0.4, 0.4) == 0.82
 	@test _SCB._room_bar_len(Dict{Symbol, Any}(:len => 1.0, :lenmode => "fraction"), 1.0, 0.5) == 0.5
+end
+
+@testset "shared_colorbar!(...; ticks, ticklabels)" begin
+	z = [1.0 2.0; 3.0 4.0]
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, z; row = 1, col = 1)
+	plot_heatmap!(sf, 2 .* z; row = 1, col = 2)
+	ticks = [2.0, 4.0, 6.0]
+	shared_colorbar!(sf; ticks = ticks, ticklabels = ["low", "mid", "high"])
+	bar = _scb_axis_bar(sf)
+	@test bar[:tickmode] == "array"
+	@test collect(bar[:tickvals]) == ticks
+	@test collect(bar[:ticktext]) == ["low", "mid", "high"]
+	@test ticks == [2.0, 4.0, 6.0]                  # the caller's vector is not changed
+	@test !haskey(bar, :nticks)
+	@test _SCB._finalize_figure!(sf) === false
+	# Without labels the values are drawn as numbers.
+	shared_colorbar!(sf; ticks = [1, 8])
+	bar = _scb_axis_bar(sf)
+	@test collect(bar[:tickvals]) == [1, 8] && !haskey(bar, :ticktext)
+	# Errors come before any change.
+	before = deepcopy(sf.plot.layout.fields)
+	@test_throws ArgumentError shared_colorbar!(sf; ticklabels = ["a"])
+	@test_throws ArgumentError shared_colorbar!(sf; ticks = [1.0, 2.0], ticklabels = ["a"])
+	@test_throws ArgumentError shared_colorbar!(sf; ticks = [1.0, NaN])
+	@test sf.plot.layout.fields == before
+	# The plain-Plot method takes them too.
+	p = plot_heatmap(z)
+	plot_heatmap!(p, 2 .* z)
+	shared_colorbar!(p; ticks = [2, 5], ticklabels = ["2", "5"])
+	@test collect(_scb_axis_bar(p)[:ticktext]) == ["2", "5"]
+end
+
+@testset "shared_colorbar! refuses members it would recolour (fields-03, fields-08)" begin
+	x = collect(range(0, 4; length = 21)); y = collect(range(0, 2; length = 11))
+	U = [2.5 * a for a in x, b in y]                       # 0 .. 10
+	snapshot(p) = (_SCB_PB.JSON.json(p.layout), [_SCB_PB.JSON.json(t) for t in p.data])
+	# fields-03: a `levels` panel next to a continuous one, a log panel next
+	# to a linear one: one colour axis cannot draw both; nothing changes.
+	for (a, b) in (((levels = [0, 1, 2, 5, 10],), NamedTuple()), ((colornorm = :log,), NamedTuple()))
+		sf = subplots(1, 2; sync = false)
+		plot_heatmap!(sf, x, y, U .+ 1; row = 1, col = 1, a...)
+		plot_heatmap!(sf, x, y, 2 .* U .+ 1; row = 1, col = 2, b...)
+		before = snapshot(sf.plot)
+		err = try
+			shared_colorbar!(sf); nothing
+		catch e
+			e
+		end
+		@test err isa ArgumentError
+		@test startswith(sprint(showerror, err), "ArgumentError: shared_colorbar!")
+		@test snapshot(sf.plot) == before
+	end
+	# The same norm on both panels is accepted.
+	sf = subplots(1, 2; sync = false)
+	for c in 1:2
+		plot_heatmap!(sf, x, y, c .* U .+ 1; row = 1, col = c, colornorm = :log)
+	end
+	shared_colorbar!(sf)
+	@test haskey(sf.plot.layout.fields, :coloraxis)
+	# fields-08: a curvilinear mesh (drawn as polygons with its colours fixed)
+	# carries 0 .. 5; a heatmap of 0 .. 10 next to it would be clamped.
+	r = range(1, 2; length = 5); th = range(0, pi; length = 9)
+	X = [ri * cos(t) for ri in r, t in th]; Y = [ri * sin(t) for ri in r, t in th]
+	C = [5.0 * (i - 1) / 3 for i in 1:4, j in 1:8]
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2)
+	before = snapshot(sf.plot)
+	err = try
+		shared_colorbar!(sf); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && occursin("crange", sprint(showerror, err))
+	@test snapshot(sf.plot) == before
+	# A mesh drawn with a range covering both is accepted.
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2, crange = (0, 10))
+	shared_colorbar!(sf)
+	@test haskey(sf.plot.layout.fields, :coloraxis)
+end
+
+@testset "a cell bar's length never exceeds its fitted box (cbar-05)" begin
+	for kw in ((len = 0.5,), (len = 0.5, title_side = :right), NamedTuple())
+		sf = subplots(3, 1; sync = false, width = 700, height = 600)
+		plot_pcolormesh!(sf, 0:3, 0:2, [0.281 0.077; 1.23 -1.193; -1.107 -0.45]; row = 1, col = 1, equalar = true)
+		for r in 2:3
+			plot_scatter!(sf, 1:5, [1.0, 3, 2, 5, 4]; row = r, col = 1)
+		end
+		colorbar!(sf; row = 1, col = 1, kw...)
+		bar = _SCB._symbol_dict(sf.plot.data[1].fields[:colorbar])
+		yd = _SCB._layout_axis_domain(sf.plot.layout, :yaxis)
+		@test bar[:len] <= yd[2] - yd[1] + 1e-9
+		@test bar[:y] + bar[:len] / 2 <= 1 + 1e-9
+		@test bar[:y] - bar[:len] / 2 >= _SCB._layout_axis_domain(sf.plot.layout, :yaxis2)[2]
+		@test _SCB._finalize_figure!(sf) === false
+	end
 end

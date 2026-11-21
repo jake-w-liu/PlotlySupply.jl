@@ -637,6 +637,9 @@ function _lt_title_decoration!(out, plan)
 	# tick labels and title are drawn up to the margin edge.
 	at_top = at_top || any(a -> a.own[:top] > 0 && a.current[2][2] >= highest - _LT_EDGE_TOL,
 		values(plan.areas))
+	# So does the math title of a colorbar (threed-f02; requested earlier).
+	at_top = at_top || any(r -> r.side === :top && r.area !== :figure &&
+		plan.areas[r.area].current[2][2] >= highest - _LT_EDGE_TOL, plan.requests)
 	at_top || return out
 	pad = _symbol_dict(get(d, :pad, nothing))
 	pad_b = something(_legend_real(get(pad, :b, nothing)), 0.0)
@@ -969,6 +972,8 @@ function _lt_hold_pushed_margins!(plan)
 	for (side, px) in need
 		letter = Symbol(String(side)[1])
 		key = Symbol(:margin_, letter)
+		# Kept by `_room_settle_margins!` (margin-01).
+		_room_note_margin!(plan, letter, px)
 		current = _cmn_mapping_get(get(plan.layout.fields, :margin, nothing), letter)
 		have = _fin_isfinite_real(current) ? Float64(current) : getfield(base, letter)
 		queued = get(plan.updates, key, nothing)

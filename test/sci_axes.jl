@@ -782,7 +782,10 @@ end
         @test _AX._axis_data_extent(sf, rec.xkey) == (1.5, 2.0)
 
         # Every helper accepts inset = k and touches only the inset axes.
-        others = Dict(kk => _ax_json(v) for (kk, v) in sf.plot.layout.fields if !(kk in (:xaxis5, :yaxis5)))
+        # `layout.meta` is the finalizer's bookkeeping: its record of where the
+        # inset sits in its host (inset-01) goes once `axis_equal!` hands the
+        # inset to its own equal-aspect fit.
+        others = Dict(kk => _ax_json(v) for (kk, v) in sf.plot.layout.fields if !(kk in (:xaxis5, :yaxis5, :meta)))
         xlabel!(sf, "zoom x"; inset = k)
         ylabel!(sf, "zoom y"; inset = k)
         xrange!(sf, (1.5, 2.0); inset = k)
@@ -1908,7 +1911,11 @@ end
         xlabel!(u, long * "<br>and more")
         _AX._finalize_figure!(u)
         @test occursin("<br>and more", text(u, :xaxis))
-        @test replace(text(u, :xaxis), _AX_BREAK => " ") == long * "<br>and more"
+        # L7: our breaks are bare `<br>`s like the user's; the wrap record in
+        # `layout.meta` keeps the title as written and as wrapped.
+        rec = _AX._fin_wrap_record(P(u).layout)["xaxis"]
+        @test rec == (long * "<br>and more", text(u, :xaxis))
+        @test count("<br>", text(u, :xaxis)) > 1
         @test _AX._axes_keep_on_one_line("a <span style=\"x y\">b c</span>") == "a\u00a0<span style=\"x y\">b\u00a0c</span>"
         @test _AX._axes_keep_on_one_line("\$a b\$") == "\$a b\$"
         # A bare-string title is rewritten as a title mapping.
