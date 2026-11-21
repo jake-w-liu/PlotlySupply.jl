@@ -761,3 +761,188 @@ end
 		end
 	end
 end
+
+# O18: the wave-7 export and window changes, rendered and measured. With
+# R1_RENDER_DIR set, the renders are also written there to be looked at.
+_r1_u32(b, i) = (UInt32(b[i]) << 24) | (UInt32(b[i + 1]) << 16) | (UInt32(b[i + 2]) << 8) | UInt32(b[i + 3])
+function _r1_png_chunk(png::Vector{UInt8}, kind::String)
+	i = 9
+	while i + 7 <= length(png)
+		len = Int(_r1_u32(png, i))
+		String(png[(i + 4):(i + 7)]) == kind && return png[(i + 8):(i + 7 + len)]
+		i += 12 + len
+	end
+	return nothing
+end
+_r1_keep(name, bytes) = (dir = get(ENV, "R1_RENDER_DIR", ""); isempty(dir) || write(joinpath(dir, name), bytes); nothing)
+
+@testset "r1 O18: sized-style rasters, 3-D scene resolution, EPS translucency" begin
+	# A sized journal style exports PNG at 300 dpi: pixel size and pHYs.
+	fig = with_style(:ieee) do
+		plot_scatter(1:10, sin.(1:10); xlabel = "x", ylabel = "y", legend = "sin")
+	end
+	o = _R1._normalize_export_options(fig, (;))
+	png = savefig(fig; format = "png")
+	_r1_keep("o18_ieee.png", png)
+	@test (Int(_r1_u32(png, 17)), Int(_r1_u32(png, 21))) == (round(Int, o.width * 300 / 96), round(Int, o.height * 300 / 96))
+	phys = _r1_png_chunk(png, "pHYs")
+	@test phys !== nothing && Int(_r1_u32(phys, 1)) == Int(_r1_u32(phys, 5)) == round(Int, 300 / 0.0254) && phys[9] == 0x01
+	# A 3-D scene is embedded in SVG and PDF at 384 ppi or more.
+	x = collect(range(-2, 2; length = 30))
+	surf = plot_surface(x, x, [exp(-a^2 - b^2) for a in x, b in x]; xlabel = "x", ylabel = "y", zlabel = "z")
+	svg = String(savefig(surf; format = "svg"))
+	_r1_keep("o18_surface.svg", codeunits(svg))
+	m = match(r"<image[^>]*\bwidth=\"([0-9.]+)\"[^>]*href=\"data:image/png;base64,([^\"]+)\""s, svg)
+	m === nothing && (m = match(r"<image[^>]*href=\"data:image/png;base64,([^\"]+)\"[^>]*\bwidth=\"([0-9.]+)\""s, svg))
+	@test m !== nothing
+	if m !== nothing
+		drawn, data = occursin(r"^[0-9.]+$", m.captures[1]) ? (m.captures[1], m.captures[2]) : (m.captures[2], m.captures[1])
+		raster = base64decode(data)
+		ppi = Int(_r1_u32(raster, 17)) / (parse(Float64, drawn) / 96)
+		@test ppi >= 384 * 0.99
+		pdf = savefig(surf; format = "pdf")
+		_r1_keep("o18_surface.pdf", pdf)
+		widths = [parse(Int, w.captures[1]) for w in eachmatch(r"/Width\s+(\d+)", String(copy(pdf)))]
+		@test !isempty(widths) && maximum(widths) / (parse(Float64, drawn) / 96) >= 384 * 0.99
+	end
+	# EPS has no transparency: a translucent paper and scene background are
+	# flattened over white once (rgba(255,0,0,0.5) -> (255,128,128)).
+	if _R1._ghostscript_available()
+		relayout!(surf; paper_bgcolor = "rgba(255,0,0,0.5)", scene_bgcolor = "rgba(0,0,255,0.25)")
+		mktempdir() do dir
+			eps = joinpath(dir, "o18.eps"); out = joinpath(dir, "o18.png")
+			savefig(surf, eps)
+			run(pipeline(`$(_R1._ghostscript_command()) -q -dSAFER -dBATCH -dNOPAUSE -dEPSCrop -sDEVICE=png16m -r96 -sOutputFile=$out $eps`; stdout = devnull))
+			raster = read(out)
+			_r1_keep("o18_translucent_eps.png", raster)
+			w, h, channels, pixels = _R1._png_decode(raster)
+			corner = Int.(pixels[1:3])
+			@test all(abs.(corner .- [255, 128, 128]) .<= 3)
+			centre = Int.(pixels[(((h ÷ 2) * w + 3) * channels + 1):(((h ÷ 2) * w + 3) * channels + 3)])
+			@test all(abs.(centre .- [255, 128, 128]) .<= 3)   # the left edge, outside the scene
+			# Inside the scene, above the box: the scene background blended
+			# once over the flattened paper, 0.25 (0,0,255) + 0.75 (255,128,128).
+			sx, sy = round(Int, 0.1 * w), round(Int, 0.16 * h)
+			scene = Int.(pixels[((sy * w + sx) * channels + 1):((sy * w + sx) * channels + 3)])
+			@test all(abs.(scene .- [191, 96, 160]) .<= 3)
+		end
+	end
+end
+
+@testset "r1 O18: windows settle raw figures and drop removed ranges and contours (lw03, lw05)" begin
+	JSON = PlotlyBase.JSON
+	run_js(sp, code) = JSON.parse(String(Base.invokelatest(() -> _R1._syncplot_backend(sp).run(sp.window, code))))
+	axes_js = """(function(){ const F = document.querySelector('.js-plotly-plot')._fullLayout;
+	  return JSON.stringify({xr: F.xaxis.range, xa: F.xaxis.autorange, yr: F.yaxis.range, ya: F.yaxis.autorange}); })();"""
+	contours_js = """(function(){ const d = document.querySelector('.js-plotly-plot')._fullData[0];
+	  return JSON.stringify({auto: d.autocontour, start: d.contours.start, end: d.contours.end, size: d.contours.size}); })();"""
+	function fresh_state(sp, js)
+		fresh = to_syncplot(deepcopy(sp.plot); show = false)
+		try
+			return run_js(fresh, js)
+		finally
+			close(fresh)
+		end
+	end
+	# A raw make_subplots figure is settled (by the verbs themselves since
+	# apia-04, and again when its window is made): the window draws the whole
+	# shared range, and the model has nothing left to settle.
+	p = make_subplots(rows = 1, cols = 2, shared_yaxes = true)
+	add_trace!(p, scatter(x = 1:3, y = [0.0, 1.0, 2.0]); row = 1, col = 1)
+	add_trace!(p, scatter(x = 1:3, y = [0.0, 100.0, 200.0]); row = 1, col = 2)
+	sp = to_syncplot(p; show = false)
+	try
+		@test _R1._finalize_figure!(p) === false
+		state = run_js(sp, axes_js)
+		@test state["yr"][1] <= 0 && state["yr"][2] >= 200
+	finally
+		close(sp)
+	end
+	# lw03: a removed range autoranges the window as a fresh render of the model.
+	sp = to_syncplot(plot_scatter(1:3, [1.0, 3.0, 2.0]); show = false)
+	try
+		relayout!(sp; xaxis_range = [0, 1])
+		@test run_js(sp, axes_js)["xr"] == [0, 1]
+		relayout!(sp; xaxis_range = nothing)
+		live = run_js(sp, axes_js)
+		@test live["xa"] === true && live["xr"][1] <= 1 && live["xr"][2] >= 3
+		@test live == fresh_state(sp, axes_js)
+	finally
+		close(sp)
+	end
+	# lw05: removed contour levels give the automatic levels back.
+	U = [sin(a) * cos(b) for a in range(0, 3; length = 20), b in range(0, 3; length = 20)]
+	sp = to_syncplot(plot_contour(U); show = false)
+	try
+		auto = run_js(sp, contours_js)
+		restyle!(sp, 1; contours_start = 0.1, contours_end = 0.5, contours_size = 0.1)
+		@test run_js(sp, contours_js)["size"] ≈ 0.1
+		restyle!(sp, 1; contours_start = nothing, contours_end = nothing, contours_size = nothing)
+		live = run_js(sp, contours_js)
+		@test live == fresh_state(sp, contours_js)
+		@test live == auto
+	finally
+		close(sp)
+	end
+end
+
+# O12: a cell mutation stages on a copy of the layout and the containers it
+# touches, never of the trace data: its cost follows the layout (cells,
+# decorations), not the data. Measured on a 6x6 grid (Julia 1.13): 2.9 MB for
+# 100 or 100 000 points per trace (57.6 MB of data).
+@testset "r1 O12: a cell mutation does not copy trace data" begin
+	function cells(n, npts)
+		sf = subplots(n, n; sync = false)
+		x = collect(range(0, 1; length = npts))
+		for r in 1:n, c in 1:n
+			plot_scatter!(sf, x, sin.(x .* (r + c)); row = r, col = c)
+		end
+		xlabel!(sf, "warm"; row = 1, col = 1); hline!(sf, 0.5; row = 1, col = 1)
+		plot_scatter!(sf, [0.0, 1.0], [0.0, 1.0]; row = 1, col = 1)
+		return sf
+	end
+	cost(sf) = (
+		@allocated(xlabel!(sf, "x"; row = 1, col = 1)),
+		@allocated(hline!(sf, 0.25; row = 1, col = 1)),
+		@allocated(plot_scatter!(sf, [0.0, 1.0], [1.0, 0.0]; row = 1, col = 1)),
+	)
+	small, large = cells(6, 100), cells(6, 100_000)
+	data = sum(sizeof(tr.fields[:x]) + sizeof(tr.fields[:y]) for tr in large.plot.data if haskey(tr.fields, :y))
+	@test data > 50_000_000
+	cs, cl = cost(small), cost(large)
+	for (s, l) in zip(cs, cl)
+		@test l < s + 1_000_000          # independent of the data
+		@test l < 8_000_000              # bounded: 3 MB measured, layout-sized
+	end
+end
+
+# O13: the transaction machinery is compiled once, not once per mutator,
+# argument types and keywords (`_ErasedMutation`). Measured in a fresh
+# process, nine first calls with keyword sets the workload does not use:
+# 12.1 s of compilation before, 4.7 s after.
+@testset "r1 O13: transaction wrappers are not specialized per call" begin
+	machinery = (
+		_R1._transactional_high_level_model_mutation!,
+		_R1._prepare_high_level_plot_mutation_transaction,
+		_R1._finish_high_level_plot_fast_transaction,
+		_R1._prepare_full_model_mutation_transaction,
+		_R1._transactional_full_plot_mutation!,
+		_R1._try_local_plot_mutation!,
+	)
+	count_specializations() = sum(length(collect(Base.specializations(m))) for f in machinery for m in methods(f))
+	x = collect(range(0, 1; length = 5)); y = x .^ 2
+	fig = plot_scatter(x, y)
+	sf = subplots(1, 2; sync = false)
+	# Each path once.
+	plot_scatter!(fig, x, y; legend = "w"); hline!(fig, 0.5; dash = "dot")
+	plot_scatter!(sf, x, y; row = 1, col = 1); xlabel!(sf, "x"; row = 1, col = 1)
+	plot_surface!(subplots(1, 1; sync = false, specs = [Spec(kind = "scene")]), x, x, x * x'; row = 1, col = 1)
+	before = count_specializations()
+	# Calls whose mutator, arguments or keywords are new to this process.
+	plot_scatter!(fig, x, y; opacity = 0.5, legend = "o")
+	hline!(fig, 0.25; linewidth = 3, color = "red")
+	vline!(fig, 0.5; color = "blue", dash = "dash")
+	plot_scatter!(sf, x, y; row = 1, col = 2, marker_size = 4, mode = "markers")
+	ylabel!(sf, "y"; row = 1, col = 2, wrap = false)
+	@test count_specializations() == before
+end

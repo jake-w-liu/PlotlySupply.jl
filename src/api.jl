@@ -198,6 +198,20 @@ function _check_mutator_keywords(mutator, args, kwargs)
 		accepted = accepted)
 end
 
+# A mutation closure behind one concrete type (O13). The closures of the
+# transaction entry points capture the mutator, its arguments and keywords, so
+# each (mutator, argument types, keywords) has a closure type of its own; the
+# transaction machinery they are passed to (staging, rebasing, committing,
+# the renderer delta) was compiled again for every one of them, 1-2 s at the
+# first call of each new keyword set. Behind `_ErasedMutation` it is compiled
+# once; only the small closure body is specialized, and the call through the
+# field is one dynamic dispatch per mutation.
+struct _ErasedMutation <: Function
+	f::Any
+end
+(m::_ErasedMutation)(args...) = m.f(args...)
+_erased_mutation(f) = f isa _ErasedMutation ? f : _ErasedMutation(f)
+
 function _transactional_high_level_plot_mutation!(
 	mutator::Function,
 	fig::Union{Plot,SyncPlot},
@@ -208,7 +222,7 @@ function _transactional_high_level_plot_mutation!(
 	result = Ref{Any}(nothing)
 	staged_target = Ref{Any}(nothing)
 	# A mutation runs with the style the figure carries (K1), not the active one.
-	full_mutation = function (candidate)
+	full_mutation = _ErasedMutation(function (candidate)
 		staged = _StagedPlotMutation(candidate)
 		staged_target[] = staged
 		_with_figure_style(staged; adopt = true) do
@@ -216,8 +230,8 @@ function _transactional_high_level_plot_mutation!(
 			_finalize_figure!(staged; live = _plot_data(fig))
 		end
 		return nothing
-	end
-	fast_mutation = function (candidate)
+	end)
+	fast_mutation = _ErasedMutation(function (candidate)
 		# The fast path stages the call on a layout that shares `meta` with
 		# the live figure: the run owns it before the mutator runs, so a
 		# record a mutator writes in place (figsize!'s size mark, the 3-D
@@ -234,7 +248,7 @@ function _transactional_high_level_plot_mutation!(
 			_finalize_figure!(staged; live = _plot_data(fig), strict = true)
 		end
 		return nothing
-	end
+	end)
 	fast_path_allowed =
 		(
 			mutator === _set_legend_impl! ||
@@ -929,7 +943,7 @@ function _transactional_subplot_mutation!(
 		staged_ref =
 			Ref{Union{Nothing,SubplotFigure}}(nothing)
 		result = Ref{Any}(nothing)
-		mutation = function (candidate)
+		mutation = _ErasedMutation(function (candidate)
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
 			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
@@ -940,7 +954,7 @@ function _transactional_subplot_mutation!(
 				_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
 			end
 			return nothing
-		end
+		end)
 		commit_callback = _ -> _commit_subplot_metadata!(
 			sf,
 			something(staged_ref[]),
@@ -7249,7 +7263,7 @@ function _subplot_delegate_mutator!(
 		staged_ref =
 			Ref{Union{Nothing,SubplotFigure}}(nothing)
 		result = Ref{Any}(nothing)
-		mutation = function (candidate)
+		mutation = _ErasedMutation(function (candidate)
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
 			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
@@ -7264,7 +7278,7 @@ function _subplot_delegate_mutator!(
 				_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
 			end
 			return nothing
-		end
+		end)
 		commit_callback = _ -> _commit_subplot_metadata!(
 			sf,
 			something(staged_ref[]),

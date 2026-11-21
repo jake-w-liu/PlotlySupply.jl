@@ -3326,25 +3326,26 @@ end
 
 # The scene-related layout state the rounds write: the scene entry (camera,
 # tick counts and values, tick fonts, mark, titles), the annotations (titles
-# PlotlySupply draws) and `meta` (label pads; copied on write, so the old
-# value stays valid).
+# PlotlySupply draws) and the label-pads record in `meta` (the record is
+# copied on write, so the old one stays valid; `meta` itself is written in
+# place, `_s3_write_pads!`, so the snapshot keeps the record, not `meta`).
 struct _S3Snapshot
 	scene::Any
 	annotations::Any
-	meta::Any
+	pads::Any
 end
 
-_s3_snapshot(p::Plot, key::Symbol) = _S3Snapshot(
-	deepcopy(get(p.layout.fields, key, nothing)),
-	get(p.layout.fields, :annotations, nothing),
-	get(p.layout.fields, :meta, nothing),
-)
+function _s3_snapshot(p::Plot, key::Symbol)
+	meta = get(p.layout.fields, :meta, nothing)
+	pads = meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute ? _cmn_mapping_get(meta, _S3_PADS_KEY) : nothing
+	return _S3Snapshot(deepcopy(get(p.layout.fields, key, nothing)), get(p.layout.fields, :annotations, nothing), pads)
+end
 
 function _s3_restore!(p::Plot, key::Symbol, snapshot::_S3Snapshot)
 	fields = p.layout.fields
 	fields[key] = deepcopy(snapshot.scene)
 	snapshot.annotations === nothing ? delete!(fields, :annotations) : (fields[:annotations] = snapshot.annotations)
-	snapshot.meta === nothing ? delete!(fields, :meta) : (fields[:meta] = snapshot.meta)
+	_fin_meta_set!(p.layout, _S3_PADS_KEY, snapshot.pads)
 	return nothing
 end
 

@@ -8697,11 +8697,13 @@ function _mutate_and_refresh_syncplot!(
 	mutation_scope = nothing,
 	preserve_layout_vector::Union{Nothing,Symbol} = nothing,
 )
+	# One compiled transaction for every mutation closure (`_ErasedMutation`).
+	erased = _erased_mutation(mutation)
 	prepare = (target, current) ->
 		_prepare_full_model_mutation_transaction(
 			target,
 			current,
-			mutation,
+			erased,
 			commit_callback,
 			mutation_scope,
 			preserve_layout_vector,
@@ -8792,9 +8794,11 @@ function _transactional_full_plot_mutation!(
 	mutation_scope = nothing,
 	preserve_layout_vector::Union{Nothing,Symbol} = nothing,
 )
-	# The mutation runs with the style the figure carries (K1).
+	# The mutation runs with the style the figure carries (K1). One compiled
+	# transaction for every mutation closure (`_ErasedMutation`).
+	erased = _erased_mutation(mutation)
 	scoped_mutation = candidate -> _with_figure_style(candidate) do
-		mutation(candidate)
+		erased(candidate)
 	end
 	prepare = (target, current) ->
 		_prepare_full_model_mutation_transaction(
