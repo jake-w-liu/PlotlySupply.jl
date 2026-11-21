@@ -51,6 +51,13 @@
 const _LT_OWNER = :legend_titles
 const _LT_ORDER_LEGEND = 20
 const _LT_ORDER_LINE = 30
+# A panel label below its axes (`panel_labels!(; position = :bottomleft)`)
+# sits right under them, nearer than a colorbar (10) or a legend below the
+# cell: it labels the plot area, and a bar shared by a row of cells reserves
+# room only under the cells of its colour axis, so a label placed beyond it
+# was far from its cell, and the label of a cell without the bar was drawn
+# over the bar (layout-fuzz-15).
+const _LT_ORDER_BELOW_LABEL = 5
 const _LT_ORDER_CAPTION = 40
 const _LT_ORDER_TITLE = 90
 # Paper tolerance for "at the domain edge" (positions written from domains).
@@ -361,9 +368,9 @@ function _lt_decorations(plan)
 					(String(name), role.left, px, depth))
 			elseif role.role === :below
 				y = Float64(_cmn_mapping_get(item, :y))
-				expected = _lt_expected_offset(plan, out, key, :bottom, _LT_ORDER_LINE)
+				expected = _lt_expected_offset(plan, out, key, :bottom, _LT_ORDER_BELOW_LABEL)
 				anchored = _lt_anchored_at(plan, y, plan.areas[key].current[2][1], expected - _ROOM_GAP, -1.0)
-				push!(out, _LtDecor("label:" * name, key, :bottom, px, _LT_ORDER_LINE, anchored, false,
+				push!(out, _LtDecor("label:" * name, key, :bottom, px, _LT_ORDER_BELOW_LABEL, anchored, false,
 					:below_label, String(name), role.left))
 			else
 				push!(out, _LtDecor("label:" * name, key, :none, 0.0, 0, false, false,
@@ -1129,7 +1136,7 @@ function _lt_follow_rule!(plan, d::_LtDecor)
 	end
 	box = _lt_final_box(plan.areas[d.area])
 	xdom, ydom = d.role === :cell_legend ? _lt_box_without_room(plan, d) : box
-	best = _legend_best_cell_position(plan.p, d.id, xdom, ydom)
+	best = _legend_best_cell_position(plan.p, d.id, xdom, ydom; inset = _lt_legend_inset(plan))
 	best === nothing && return false
 	# Placed on the final box; a column below the cell when the row is wider
 	# than the plot area the rule scored.

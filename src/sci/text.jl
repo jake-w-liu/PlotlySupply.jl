@@ -1905,7 +1905,7 @@ end
 function _legend_position_option(position, who::AbstractString)
 	position === nothing && return nothing
 	(position isa Symbol || position isa AbstractString) &&
-		return _normalize_legend_position(position)
+		return _normalize_legend_position(position, who)
 	(position isa Tuple || position isa AbstractVector) || throw(ArgumentError(
 		"$(who): `position` must be a Symbol, a string or an (x, y) tuple of " *
 		"axes fractions; got $(repr(position)).",
@@ -2676,15 +2676,18 @@ end
 const _LEGEND_CELL_SLACK_PX = (4.0, 2.0)
 
 """
-	_legend_best_cell_position(p, legend_id, xdom, ydom; before = 0) -> Union{Symbol, Nothing}
+	_legend_best_cell_position(p, legend_id, xdom, ydom; before = 0, inset = _DEFAULT_LEGEND_INSET[]) -> Union{Symbol, Nothing}
 
 The position of `_SCAT_LEGEND_POSITIONS` (relative to the cell's axes) where
 cell legend `legend_id` of the cell with paper domains `xdom` x `ydom` covers
 the least data (see the note above), or `nothing` when the estimate does not
 apply. `before > 0` scores only the traces before index `before` (the cell as
 it was before an append), to tell an automatic placement from the user's.
+`inset` is the legend inset the box is drawn at (the SubplotFigure's
+`legend_inset`): every candidate is scored where `_legend_placement` puts it.
 """
-function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, ydom; before::Integer = 0)
+function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, ydom; before::Integer = 0,
+		inset::Tuple{Float64, Float64} = _DEFAULT_LEGEND_INSET[])
 	indices = Int[]
 	for (index, trace) in enumerate(p.data)
 		before > 0 && index >= before && break
@@ -2711,7 +2714,8 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 		subplot = Symbol(string(get(first_trace.fields, :subplot, "polar")))
 		# vm-06: beside the cell when no corner is clear of the data and the
 		# angular tick labels
-		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size; outside = :outside_right)
+		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size; outside = :outside_right,
+			inset = inset)
 	end
 	# Cartesian cell: the host's traces are scored as data; the traces of an
 	# inset the cell hosts (listed in the host's legend, `_legend_inset_host`)
@@ -2754,7 +2758,7 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 	(legend_size[1] > w || legend_size[2] > h) && return outside
 	return _scat_best_legend_position(
 		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size;
-		obstacles = obstacles, outside = outside,
+		obstacles = obstacles, outside = outside, inset = inset,
 	)
 end
 
@@ -2786,10 +2790,13 @@ function _legend_row_width(p::Plot, legend_id::AbstractString, before::Integer =
 end
 
 # Box (fractions of the cell) of each candidate position for a legend of
-# `box_w` x `box_h` (fractions), as `_scat_best_legend_position` builds them.
-function _legend_candidate_boxes(box_w::Float64, box_h::Float64)
+# `box_w` x `box_h` (fractions) drawn at legend inset `inset` (fractions of
+# the cell, as `_legend_placement` takes it), as `_scat_best_legend_position`
+# builds them.
+function _legend_candidate_boxes(box_w::Float64, box_h::Float64,
+		inset::Tuple{Float64, Float64} = _DEFAULT_LEGEND_INSET[])
 	return map(_SCAT_LEGEND_POSITIONS) do position
-		x, y, xanchor, yanchor = _legend_anchor((0.0, 1.0), (0.0, 1.0), _DEFAULT_LEGEND_INSET[], position)
+		x, y, xanchor, yanchor = _legend_anchor((0.0, 1.0), (0.0, 1.0), inset, position)
 		u0 = xanchor == "left" ? x : xanchor == "right" ? x - box_w : x - box_w / 2
 		v0 = yanchor == "bottom" ? y : yanchor == "top" ? y - box_h : y - box_h / 2
 		(u0, u0 + box_w, v0, v0 + box_h)
@@ -2805,7 +2812,7 @@ end
 # coordinates. With `outside`, that position when every corner covers data or
 # a tick label.
 function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float64, h::Float64, legend_size;
-	outside::Union{Nothing, Symbol} = nothing)
+	outside::Union{Nothing, Symbol} = nothing, inset::Tuple{Float64, Float64} = _DEFAULT_LEGEND_INSET[])
 	polar = _symbol_dict(get(p.layout.fields, subplot, nothing))
 	radial = _symbol_dict(get(polar, :radialaxis, nothing))
 	angular = _symbol_dict(get(polar, :angularaxis, nothing))
@@ -2862,7 +2869,7 @@ function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float
 	position(rho, angle) = (0.5 + rho * cosd(angle) / w, 0.5 + rho * sind(angle) / h)
 	box_w = min(0.95, legend_size[1] / w)
 	box_h = min(0.95, legend_size[2] / h)
-	boxes = _legend_candidate_boxes(box_w, box_h)
+	boxes = _legend_candidate_boxes(box_w, box_h, inset)
 	data = zeros(Int, length(boxes))
 	for (rs, thetas, lines, filled, marker) in series
 		stride = max(1, cld(length(rs), _SCAT_LEGEND_MAX_POINTS))
@@ -3032,6 +3039,12 @@ function _text_figure_title!(fig, text, align::Symbol, fontsize::Float64, bold::
 		# right-anchored one left by pad.r; a centred title ignores both.
 		updates[:title_pad_l] = _text_number(align === :left ? dx : 0.0)
 		updates[:title_pad_r] = _text_number(align === :right ? -dx : 0.0)
+		# The whole pad is this placement's: a `pad.b` left by another
+		# placement (`secondary_xaxis!` lifts a paper-anchored title by it)
+		# would lift the container-anchored title by that much again
+		# (layout-fuzz-03). plotly.js' default `pad.b` is 0.
+		_cmn_mapping_get(_cmn_mapping_get(get(_cmn_plot(fig).layout.fields, :title, nothing), :pad), :b) === nothing ||
+			(updates[:title_pad_b] = 0)
 		fontsize > 0 && (updates[:title_font_size] = _text_number(fontsize))
 	end
 	# The pad the room providers wrote for the last title (`_lt_title_pin`)

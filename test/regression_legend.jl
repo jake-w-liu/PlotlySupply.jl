@@ -261,9 +261,57 @@ import Dates
 	end
 
 	@testset "_normalize_legend_position rejects non-names" begin
-		@test throws_arg(() -> PS._normalize_legend_position(1.5), "must be a Symbol or a string")
-		@test PS._normalize_legend_position(" Top-Left ") === :topleft
-		@test (@test_logs (:warn,) match_mode = :any PS._normalize_legend_position("sideways")) === :topright
+		@test throws_arg(() -> PS._normalize_legend_position(1.5, "set_legend!"), "set_legend!: legend position must be a Symbol or a string")
+		@test PS._normalize_legend_position(" Top-Left ", "set_legend!") === :topleft
+		@test throws_arg(() -> PS._normalize_legend_position("sideways", "set_legend!"), "set_legend!: unknown legend position \"sideways\"")
+	end
+
+	@testset "r1 D22: an unknown legend position name is an ArgumentError before anything changes" begin
+		snap(f) = PB.JSON.json(pl(f))
+		# every valid name is listed in the message
+		names_listed(msg) = all(n -> occursin(repr(n), msg), PS._VALID_LEGEND_POSITIONS)
+		message(f) = try
+			f()
+			""
+		catch err
+			err isa ArgumentError ? err.msg : "not an ArgumentError: $(typeof(err))"
+		end
+		fig = plot_scatter(x, [x, 2x]; legend = ["a", "b"])
+		before = snap(fig)
+		m = message(() -> set_legend!(fig; position = :sideways))
+		@test startswith(m, "set_legend!: unknown legend position :sideways") && names_listed(m)
+		@test snap(fig) == before
+		m = message(() -> set_legend!(fig; position = "upper middle", ncols = 2, title = "t"))
+		@test startswith(m, "set_legend!: unknown legend position \"upper middle\"")
+		@test snap(fig) == before
+		@test !PS._finalize_figure!(fig)
+		sf = subplots(1, 2; sync = false)
+		plot_scatter!(sf, x, x; legend = "a", row = 1, col = 1)
+		plot_scatter!(sf, x, 2x; legend = "b", row = 1, col = 2)
+		before = snap(sf)
+		settings = (sf.legend_position, sf.legend_inset, sf.per_subplot_legends)
+		for call in (() -> set_legend!(sf; position = :nowhere),
+			() -> set_legend!(sf; row = 1, col = 2, position = :nowhere),
+			() -> set_legend!(sf; legend_target = :figure, position = :nowhere),
+			() -> subplot_legends!(sf; position = :nowhere))
+			m = message(call)
+			@test occursin(r"^(set_legend!|subplot_legends!): unknown legend position :nowhere", m) && names_listed(m)
+			@test snap(sf) == before
+			@test (sf.legend_position, sf.legend_inset, sf.per_subplot_legends) == settings
+		end
+		@test startswith(message(() -> subplot_legends!(sf; position = :nowhere)), "subplot_legends!: ")
+		m = message(() -> subplots(1, 2; sync = false, legend_position = :nowhere))
+		@test startswith(m, "subplots: unknown legend position :nowhere") && names_listed(m)
+		original = get_default_legend_position()
+		m = message(() -> set_default_legend_position!("sideways"))
+		@test startswith(m, "set_default_legend_position!: unknown legend position") && names_listed(m)
+		@test get_default_legend_position() === original
+		@test startswith(message(() -> set_default_legend_position!(3)), "set_default_legend_position!: legend position must be")
+		# aliases still work, and nothing warns
+		g = plot_scatter(x, [x, 2x]; legend = ["a", "b"])
+		@test_logs set_legend!(g; position = "Upper-Left")
+		@test lg(g)[:xanchor] == "left" && lg(g)[:yanchor] == "top"
+		@test !PS._finalize_figure!(g)
 	end
 
 	ann(f, name) = only(filter(a -> get(a, :name, "") == name, [sd(a) for a in pl(f).layout.fields[:annotations]]))
@@ -1033,7 +1081,13 @@ import Dates
 		plot_scatter!(sf, xs, [0.9, 0.7, 0.5, 0.3, 0.15, 0.05, 0.0]; row = 1, col = 2, legend = "b")
 		box = lg(sf, :legend2)
 		@test (box[:xanchor], box[:yanchor]) == ("right", "top")              # the free top-right corner
-		@test box[:x] == round(box[:x]; digits = 6)                          # as the providers stored it
+		# where the rule puts it for the final domains, within the room
+		# engine's snap (it keeps a legend that would move less than
+		# `_FIN_SNAP_PAPER`, so the x the rule wrote may stay unrounded)
+		order2, _, domains2, _ = PS._legend_subplot_assignment(pl(sf))
+		xdom2, ydom2 = domains2[order2[end]]
+		@test PS._legend_placement_matches(box,
+			PS._legend_placement(:topright, xdom2, ydom2, sf.legend_inset; figure = false), PS._LEGEND_PLACEMENT_KEYS)
 		before = (box[:x], box[:y])
 		# the third curve crosses the top-right corner: the legend moves (with
 		# an exact comparison it stayed there, taken for a user placement)
@@ -1046,8 +1100,11 @@ import Dates
 		want = PS._legend_placement(best, xdom, ydom, sf.legend_inset; figure = false)
 		@test PS._legend_placement_matches(lg(sf, :legend2), want, (:xanchor, :yanchor))
 		@test (lg(sf, :legend2)[:x], lg(sf, :legend2)[:y]) != before
-		# the matcher: numbers within 1e-6, everything else equal
+		# the matcher: numbers within the room engine's snap plus the
+		# rounding, everything else equal
 		@test PS._legend_placement_matches(Dict(:x => 0.989826), Dict(:x => 0.9898260869565217), (:x,))
+		@test PS._legend_placement_matches(Dict(:x => 0.993419), Dict(:x => 0.9934321305841924), (:x,))  # seams-01
+		@test PS._LEGEND_PLACEMENT_TOL >= PS._FIN_SNAP_PAPER + 1e-6
 		@test !PS._legend_placement_matches(Dict(:x => 0.9898), Dict(:x => 0.9898260869565217), (:x,))
 		@test !PS._legend_placement_matches(Dict(:xanchor => "left"), Dict(:xanchor => "right"), (:xanchor,))
 	end
@@ -1422,5 +1479,267 @@ import Dates
 		@test PS._legend_wrap([50.0, 60.0, 70.0, 80.0], 0.0, 200.0) == (2, 2)   # wrapped: widest + gap per entry
 		@test PS._legend_wrap([50.0, 60.0, 70.0, 80.0], 0.0, 60.0) == (1, 4)
 		@test PS._legend_wrap(Float64[], 0.0, 60.0) == (0, 0)
+	end
+
+	@testset "r1 vm-stackleg: numeric strings are scored as the numbers plotly.js draws" begin
+		years = ["2019", "2020", "2021", "2022", "2023"]
+		stacks = [[12.0, 15, 18, 22, 25], [5.0, 6, 8, 9, 12], [3.0, 3, 4, 6, 7], [1.0, 2, 2, 3, 4]]
+		names = ["solar", "wind", "hydro", "geothermal"]
+		for style in (:default, :ieee), mode in ("stack", "group")
+			f, g = with_style(style) do
+				plot_bar(years, stacks; barmode = mode, legend = names, ylabel = "GW"),
+				plot_bar([2019, 2020, 2021, 2022, 2023], stacks; barmode = mode, legend = names, ylabel = "GW")
+			end
+			# the position of the same data given as numbers, not the covered top right
+			best = with_style(() -> PS._scat_best_legend_position(pl(f)), style)
+			@test best !== nothing && best === with_style(() -> PS._scat_best_legend_position(pl(g)), style)
+			@test (lg(f)[:x], lg(f)[:y], lg(f)[:xanchor]) == (lg(g)[:x], lg(g)[:y], lg(g)[:xanchor])
+			@test lg(f)[:xanchor] != "right"
+			@test PS._finalize_figure!(f) === false
+		end
+		xs = collect(0.0:0.25:4.0)
+		f = plot_scatter(string.(xs), [xs, fill(4.0, length(xs))]; legend = ["rising", "flat"], mode = "markers")
+		g = plot_scatter(xs, [xs, fill(4.0, length(xs))]; legend = ["rising", "flat"], mode = "markers")
+		@test PS._scat_best_legend_position(pl(g)) !== nothing
+		@test PS._scat_best_legend_position(pl(f)) === PS._scat_best_legend_position(pl(g))
+		# plotly.js `cleanNumber`: thousands separators and currency signs go,
+		# text and non-finite values are no number (a gap)
+		@test PS._scat_legend_numeric_string(" \$1,200 ") == 1200.0
+		@test PS._scat_legend_numeric_string("2e3") == 2000.0
+		@test PS._scat_legend_numeric_string("Inf") === nothing
+		@test PS._scat_legend_numeric_string("n/a") === nothing
+		@test PS._scat_legend_numeric_string("  ") === nothing
+		@test isequal(PS._scat_legend_axis_coords(Any["1", "n/a", 3, missing], PS._ScatLegendAxis(:linear)), [1.0, NaN, 3.0, NaN])
+		@test PS._scat_legend_axis_coords(["10", "100"], PS._ScatLegendAxis(:log)) == [1.0, 2.0]
+		# strings only where the axis is known to be numeric
+		@test PS._scat_legend_coords(["1", "2"], false) === nothing
+		@test PS._scat_legend_coords(["1", "2"], false; strings = true) == [1.0, 2.0]
+		# a Vector{Float64} is not copied
+		v = rand(10)
+		@test PS._scat_legend_coords(v, false; strings = true) === v
+	end
+
+	@testset "r1 numerics-09: the violin bandwidth replica is plotly.js'" begin
+		function rendered_bandwidths(fig)
+			sp = to_syncplot(PB.Plot(deepcopy(pl(fig).data), deepcopy(pl(fig).layout)); show = false)
+			try
+				backend = PS._syncplot_backend(sp)
+				divid = PS._json_js(sp.divid)
+				script = "(() => { const gd = document.getElementById($divid); " *
+					"if (!gd || !gd.calcdata) return null; " *
+					"return JSON.stringify(gd.calcdata.map(c => c[0].bandwidth)); })()"
+				for _ in 1:1200
+					raw = Base.invokelatest(() -> backend.run(sp.window, script))
+					(raw === nothing || raw == "null") || return Float64.(PB.JSON.parse(String(raw)))
+					sleep(0.05)
+				end
+				error("the violins did not render")
+			finally
+				close(sp)
+			end
+		end
+		# a fixed pseudo-random stream (splitmix64): the same draws everywhere
+		state = Ref(UInt64(0x5eed))
+		draw() = begin
+			state[] += 0x9e3779b97f4a7c15
+			z = state[]
+			z = (z ⊻ (z >> 30)) * 0xbf58476d1ce4e5b9
+			z = (z ⊻ (z >> 27)) * 0x94d049bb133111eb
+			z ⊻= z >> 31
+			Float64(z >> 11) / Float64(UInt64(1) << 53)
+		end
+		# skewed samples (where the IQR, not the deviation, decides), odd and even n
+		samples = [[draw()^3 * 10 for _ in 1:n] for n in (15, 40, 200, 7, 9, 8)]
+		methods = ("linear", "exclusive", "inclusive", "linear", "exclusive", "inclusive")
+		fig = PB.Plot([PB.violin(y = s, name = "v$(i)", quartilemethod = m)
+			for (i, (s, m)) in enumerate(zip(samples, methods))])
+		drawn = rendered_bandwidths(fig)
+		@test length(drawn) == length(samples)
+		for (i, trace) in enumerate(fig.data)
+			replica = PS._scat_legend_violin_bandwidth(trace.fields, Float64.(samples[i]))
+			@test isapprox(replica, drawn[i]; rtol = 1e-9)
+		end
+		# a one-value sample and an explicit bandwidth as plotly.js takes them
+		@test PS._scat_legend_violin_bandwidth(Dict{Symbol, Any}(), [2.0, 2.0]) == 0.0
+		@test PS._scat_legend_violin_bandwidth(Dict{Symbol, Any}(:bandwidth => 1e-9), [0.0, 1.0]) == 1e-4
+	end
+
+	@testset "r1 dependents-02: a cell legend is scored at the inset it is drawn at" begin
+		h = [16.25, 10.833, 7.222, 5.417, 3.611, 2.708, 1.806]
+		err = [5.44e-4 9.78e-4 2.45e-3 8.96e-3; 2.40e-4 4.32e-4 1.08e-3 3.92e-3; 1.05e-4 1.89e-4 4.72e-4 1.71e-3;
+			5.79e-5 1.04e-4 2.60e-4 9.41e-4; 2.42e-5 4.35e-5 1.08e-4 3.93e-4; 1.24e-5 2.23e-5 5.55e-5 2.01e-4;
+			3.96e-6 7.11e-6 1.77e-5 6.42e-5]
+		lx = log10.(h)
+		function convergence(inset)
+			sf = subplots(1, 1; sync = false, legend_position = :topright, legend_inset = inset)
+			for j in 1:4
+				plot_scatter!(sf, lx, log10.(err[:, j]); mode = "lines+markers", legend = "series $j")
+			end
+			xrange!(sf, [0.2, 1.4])
+			yrange!(sf, [-6.2, -1.8])
+			return sf
+		end
+		for inset in ((0.02, 0.03), (0.02, 0.45), (0.3, 0.1))
+			sf = convergence(inset)
+			p = pl(sf)
+			order, ids, domains, _ = PS._legend_subplot_assignment(p)
+			xdom, ydom = domains[order[1]]
+			best = PS._legend_best_cell_position(p, "legend", xdom, ydom; inset = inset)
+			want = PS._legend_rule_placement(p, "legend", something(best, :topright), xdom, ydom, inset)
+			@test all(k -> lg(sf)[k] == want[k], (:xanchor, :yanchor))
+			@test PS._finalize_figure!(sf) === false
+			# the drawn box covers no marker of the data
+			b = export_boxes(sf; width = 1050, height = 567)
+			@test length(b["legends"]) == 1
+			@test !any(pt -> overlaps(b["legends"][1], pt), b["points"])
+		end
+		# the candidate boxes follow the inset (clamped as `_legend_anchor` clamps it)
+		k = findfirst(==(:topleft), PS._SCAT_LEGEND_POSITIONS)
+		@test PS._legend_candidate_boxes(0.2, 0.2, (0.02, 0.45))[k] == (0.02, 0.22, 0.35, 0.55)
+		@test PS._legend_candidate_boxes(0.2, 0.2, (0.02, 0.8))[k][4] ≈ 0.51
+		@test PS._legend_candidate_boxes(0.2, 0.2) == PS._legend_candidate_boxes(0.2, 0.2, PS._DEFAULT_LEGEND_INSET[])
+	end
+
+	@testset "r1 dependents-01: the default figure legend of a grid goes outside the cells" begin
+		function covered(style)
+			with_style(style) do
+				sf = subplots(1, 2; sync = false, per_subplot_legends = false)
+				plot_scatter!(sf, [0.0, 1, 2, 3], [0.0, 0.5, 1.0, 0.2]; row = 1, col = 1, legend = "left data")
+				xs = collect(range(0, 1; length = 200))
+				plot_scatter!(sf, xs, xs; row = 1, col = 2, legend = "right diagonal")
+				plot_scatter!(sf, xs, 0.9 .+ 0.05 .* sin.(20 .* xs); row = 1, col = 2, mode = "markers", legend = "right band")
+				sf
+			end
+		end
+		sf = covered(:default)
+		@test lg(sf)[:xanchor] == "left" && lg(sf)[:x] > 1                # right of the grid
+		@test PS._finalize_figure!(sf) === false
+		b = export_boxes(sf; width = 700, height = 350)
+		@test length(b["legends"]) == 1
+		@test !any(plot -> overlaps(b["legends"][1], plot), b["plots"])
+		@test all(L -> L[3] <= b["W"] + 0.5, b["legends"])
+		# a journal column: below the grid
+		sj = covered(:ieee)
+		@test lg(sj)[:yanchor] == "top" && lg(sj)[:y] < 0
+		@test PS._finalize_figure!(sj) === false
+		bj = with_style(() -> export_boxes(sj), :ieee)
+		@test length(bj["legends"]) == 1
+		@test !any(plot -> overlaps(bj["legends"][1], plot), bj["plots"])
+		@test all(L -> L[4] <= bj["H"] + 0.5, bj["legends"])
+		# a position the user gives is kept, inside the grid included
+		sk = subplots(1, 2; sync = false, per_subplot_legends = false)
+		plot_scatter!(sk, [0.0, 1], [0.0, 1]; row = 1, col = 2, legend = "a")
+		set_legend!(sk; position = :topright)
+		@test lg(sk)[:x] < 1 && lg(sk)[:xanchor] == "right"
+		sl = subplots(1, 2; sync = false, per_subplot_legends = false, legend_position = :bottomleft)
+		plot_scatter!(sl, [0.0, 1], [0.0, 1]; row = 1, col = 1, legend = "a")
+		@test lg(sl)[:xanchor] == "left" && lg(sl)[:x] < 0.5
+		# switching a grid to one figure legend without a position: outside too
+		sm = subplots(1, 2; sync = false)
+		plot_scatter!(sm, [0.0, 1], [0.0, 1]; row = 1, col = 2, legend = "a")
+		set_legend!(sm; legend_target = :figure)
+		@test lg(sm)[:x] > 1 && lg(sm)[:xanchor] == "left"
+		@test PS._finalize_figure!(sm) === false
+		# another default position turns it off
+		original = get_default_legend_position()
+		try
+			set_default_legend_position!(:bottomright)
+			sn = subplots(1, 2; sync = false, per_subplot_legends = false, legend_position = :topright)
+			plot_scatter!(sn, [0.0, 1], [0.0, 1]; row = 1, col = 2, legend = "a")
+			@test lg(sn)[:x] < 1
+		finally
+			set_default_legend_position!(original)
+		end
+	end
+
+	@testset "r1 V3: an annotation at an axes edge clears the inward ticks by half an em (rendered)" begin
+		for style in (:ieee, :aps, :aip)
+			f = with_style(() -> plot_scatter([0.0, 1.0], [0.0, 1.0]; xlabel = "x", ylabel = "y"), style)
+			annotate!(f, 1, 0.5, "right note"; coords = :axes, showarrow = false, anchor = :right)
+			annotate!(f, 0, 0.5, "left note"; coords = :axes, showarrow = false, anchor = :left)
+			annotate!(f, 0.5, 1, "top note"; coords = :axes, showarrow = false, anchor = :top)
+			annotate!(f, 0.5, 0, "bottom note"; coords = :axes, showarrow = false, anchor = :bottom)
+			@test PS._finalize_figure!(f) === false
+			L = pl(f).layout.fields
+			len = Float64(sd(L[:yaxis])[:ticklen])
+			@test len == Float64(sd(L[:xaxis])[:ticklen]) && len > 0
+			@test sd(L[:yaxis])[:ticks] == "inside" && sd(L[:yaxis])[:mirror] in ("ticks", "all", "allticks")
+			em = Float64(sd(L[:font])[:size])
+			b = with_style(() -> export_boxes(f), style)
+			@test length(b["plots"]) == 1 && length(b["ann"]) == 4
+			frame = b["plots"][1]
+			right, left, top, bottom = b["ann"]
+			# the glyph boxes keep the tick plus half an em from the frame (1 px
+			# for the frame line and the renderer's rounding)
+			need = len + em / 2 - 1
+			@test frame[3] - right[3] >= need
+			@test left[1] - frame[1] >= need
+			@test top[2] - frame[2] >= need
+			@test frame[4] - bottom[4] >= need
+			# and stay in the plot area
+			@test all(a -> a[1] >= frame[1] && a[3] <= frame[3] && a[2] >= frame[2] && a[4] <= frame[4], b["ann"])
+		end
+	end
+
+	@testset "r1 layout-fuzz-15: outside bottom panel labels sit by their cells, clear of a shared bottom bar" begin
+		hx = collect(range(0.0, 3.0; length = 30)); hy = collect(range(0.0, 2.0; length = 20))
+		Z = [sin(2a) * cos(3b) for a in hx, b in hy]
+		lx = collect(range(0.0, 1.0; length = 30))
+		for style in (:default, :ieee), line_cell in (false, true)
+			sf = with_style(style) do
+				sf = subplots(2, 2; sync = false)
+				for r in 1:2, c in 1:2
+					if line_cell && (r, c) == (2, 2)
+						plot_scatter!(sf, lx, lx; row = r, col = c, xlabel = "x")
+					else
+						plot_heatmap!(sf, hx, hy, Z; row = r, col = c, xlabel = "x")
+					end
+				end
+				shared_colorbar!(sf; side = :bottom)
+				panel_labels!(sf; outside = true, position = :bottomleft)
+				sf
+			end
+			@test PS._finalize_figure!(sf) === false
+			b = with_style(() -> export_boxes(sf), style)
+			@test length(b["ann"]) == 4 && length(b["colorbars"]) == 1 && length(b["plots"]) == 4
+			bar = b["colorbars"][1]
+			lower = sort(b["ann"]; by = a -> a[2])[3:4]          # (c) and (d)
+			plot_bottom = maximum(p[4] for p in b["plots"])
+			xtitles = filter(t -> t[2] > plot_bottom - 1, b["xtitle"])
+			for label in lower
+				@test !overlaps(label, bar)
+				@test label[4] <= bar[2] + 0.5                     # between its axes and the bar
+				@test label[2] >= plot_bottom                      # below its plot area
+				@test !any(t -> overlaps(label, t), xtitles)
+				@test label[4] <= b["H"] + 0.5
+			end
+			# both labels of the row on one line
+			@test abs(lower[1][2] - lower[2][2]) <= 1
+		end
+	end
+
+	@testset "r1 errors-inputs-03: a default legend wider than the room beside the axes keeps a plot area" begin
+		for n in (60, 100, 200, 1000)
+			name = repeat("abcdefghij", n ÷ 10)
+			p = plot_scatter([1.0, 2, 3], [1.0, 4, 9]; legend = name)
+			@test PS._finalize_figure!(p) === false
+			e = PS._finalize_export_copy(p, (width = 700, height = 500))
+			m = sd(e.layout.fields[:margin])
+			@test 700 - m[:l] - m[:r] >= 300                                 # 1 px at 100 chars before
+			@test 500 - m[:t] - m[:b] >= 150
+			@test PS._finalize_figure!(p) === false
+		end
+		# 100 characters fit below the axes; 1000 do not and stay inside
+		p = plot_scatter([1.0, 2, 3], [1.0, 4, 9]; legend = repeat("abcdefghij", 10))
+		@test lg(p)[:yanchor] == "top" && lg(p)[:y] < 0
+		q = plot_scatter([1.0, 2, 3], [1.0, 4, 9]; legend = repeat("abcdefghij", 100))
+		@test 0 <= lg(q)[:x] <= 1 && 0 <= lg(q)[:y] <= 1
+		# the choice: right of the axes while the legend is at most half the
+		# figure wide, below them while its widest entry fits, else inside
+		@test PS._scat_outside_legend_fit(560.0, 700.0, (80.0, 60.0)) === :outside_right
+		@test PS._scat_outside_legend_fit(560.0, 700.0, (400.0, 60.0)) === :outside_bottom
+		@test PS._scat_outside_legend_fit(250.0, 336.0, (300.0, 60.0)) === :outside_bottom
+		@test PS._scat_outside_legend_fit(560.0, 700.0, (800.0, 60.0)) === nothing
+		@test PS._scat_outside_legend_fit(560.0, 700.0, nothing) === :outside_right
 	end
 end
