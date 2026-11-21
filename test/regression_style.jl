@@ -1469,3 +1469,30 @@ end
 		@test colour(PlotlySupply.PlotlyBase.Plot(ieee.data[2:2], ieee.layout)) == "#D55E00"
 	end
 end
+
+@testset "v8 axes-style: O8 presets, D21 map colour bars (seams-06)" begin
+	PSX = PlotlySupply
+	# IEEE Author Center, File Formatting: "Type should appear approximately
+	# 9-10 point when viewed at full size."
+	@test PSX._STYLE_REGISTRY[:ieee].tick_fontsize ≈ 9 * 4 / 3
+	@test PSX._journal_spec(:ieee, "test").fontsize_pt == 9.0
+	widths = Dict(s.name => [(c[1], c[2], c[3]) for c in s.columns] for s in PSX._JOURNALS)
+	@test widths[:ieee] == [(1.0, 3.5, :in), (2.0, 7.16, :in)]
+	@test widths[:aps] == [(1.0, 8.6, :cm), (2.0, 17.2, :cm)]
+	@test widths[:nature] == [(1.0, 89.0, :mm), (2.0, 183.0, :mm)]
+	@test widths[:elsevier] == [(1.0, 90.0, :mm), (1.5, 140.0, :mm), (2.0, 190.0, :mm)]
+	@test widths[:springer] == [(1.0, 84.0, :mm), (1.5, 129.0, :mm), (2.0, 174.0, :mm)]
+	@test widths[:aip] == [(1.0, 3.37, :in), (2.0, 6.69, :in)]
+	# seams-06: every trace type that draws a colour bar gets the power format.
+	tpl = plot_scatter(1:2, 1:2).layout.template.data
+	g(x, ks...) = (for k in ks; x = PSX._cmn_mapping_get(x, k); end; x)
+	for (type, path) in ((:densitymap, (:colorbar,)), (:densitymapbox, (:colorbar,)), (:choroplethmap, (:colorbar,)),
+		(:choroplethmapbox, (:colorbar,)), (:scattermap, (:marker, :colorbar)), (:scattermapbox, (:marker, :colorbar)),
+		(:splom, (:marker, :colorbar)), (:sunburst, (:marker, :colorbar)), (:treemap, (:marker, :colorbar)),
+		(:icicle, (:marker, :colorbar)), (:parcoords, (:line, :colorbar)), (:parcats, (:line, :colorbar)))
+		entries = get(tpl, type, nothing)
+		entry = entries === nothing ? nothing : first(entries)
+		entry isa PSX.PlotlyBase.PlotlyAttribute && (entry = entry.fields)
+		@test entry !== nothing && g(entry, path..., :exponentformat) == "power"
+	end
+end

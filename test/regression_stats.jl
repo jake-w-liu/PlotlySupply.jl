@@ -1476,3 +1476,16 @@ end
 	@test err isa ArgumentError && startswith(err.msg, "plot_bar!: `color")
 	@test _st_snapshot(target) == before
 end
+
+@testset "v8 axes-style: errors-inputs-10 plot_kde beyond the float range" begin
+	err = try
+		plot_kde([1e308, -1e308, 0]); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && startswith(err.msg, "plot_kde: the curve of `x` would span")
+	fig = plot_scatter(1:3, 1:3)
+	before = length(fig.data)
+	@test_throws ArgumentError plot_kde!(fig, [1e308, -1e308, 0])
+	@test length(fig.data) == before
+end

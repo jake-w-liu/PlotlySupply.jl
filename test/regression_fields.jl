@@ -1057,7 +1057,7 @@ end
 			PlotlySupply._sample_colorscale("Plasma", log10.(lv) ./ 3)
 		kb = _rfv3_d(_rfv3_d(only(_rf_traces(k, "scatter")).fields[:marker])[:colorbar])
 		@test kb[:tickvals] ≈ log10.(lv)
-		@test kb[:ticktext] == ["10<sup>0</sup>", "3", "30", "10<sup>3</sup>"]
+		@test kb[:ticktext] == ["1", "3", "30", "10<sup>3</sup>"]
 		# Many levels: at most 10 colorbar ticks, all of them levels; explicit
 		# `colorbar_ticks` win.
 		many = cumsum(1.0:25.0) ./ 10 .+ 10
@@ -1609,7 +1609,7 @@ end
 		colorbar!(f; ticks = [1, 10, 100])
 		bar = f.data[1].fields[:colorbar]
 		@test bar[:tickvals] == [0.0, 1.0, 2.0] == made.data[1].fields[:colorbar][:tickvals]
-		@test bar[:ticktext] == ["10<sup>0</sup>", "10<sup>1</sup>", "10<sup>2</sup>"]
+		@test bar[:ticktext] == ["1", "10", "10<sup>2</sup>"]
 		colorbar!(f; ticks = [1, 100], ticklabels = ["low", "high"])
 		@test f.data[1].fields[:colorbar][:ticktext] == ["low", "high"]
 		@test occursin("must be positive", argmsg(() -> colorbar!(f; ticks = [0, 10])))
@@ -1648,7 +1648,7 @@ end
 		@test shared_colorbar!(sf) === sf
 		# Log norm, levels and showscale.
 		lg = plot_streamlines(sx, sy, U, V; colorby = :speed, colornorm = :log, colorbar_ticks = [0.1, 1])
-		@test g(lg.data[end].fields[:marker], :colorbar, :ticktext) == ["10<sup>-1</sup>", "10<sup>0</sup>"]
+		@test g(lg.data[end].fields[:marker], :colorbar, :ticktext) == ["10<sup>−1</sup>", "1"]
 		lv = plot_streamlines(sx, sy, U, V; colorby = :speed, levels = [0, 0.5, 1, 1.5, 2.5])
 		@test length(unique(g(t.fields[:line], :color) for t in lv.data if haskey(t.fields, :line))) <= 4
 		ns = plot_streamlines(sx, sy, U, V; colorby = :speed, showscale = false)
@@ -1657,6 +1657,55 @@ end
 				((; coloraxis = :a), "coloraxis"), ((; levels = [0, 1]), "levels"), ((; showscale = true), "showscale"))
 			@test argmsg(() -> plot_streamlines(sx, sy, U, V; kw...)) ==
 				"plot_streamlines: `$(name)` applies to colorby = :speed; got colorby = :none."
+		end
+	end
+end
+
+@testset "v8 axes-style: contour level colours and streamlines (numerics-02, numerics-04, numerics-05)" begin
+	Z = [Float64(a + b) for a in 0:9, b in 0:9]
+	colours(f) = [(l = get(t.fields, :line, nothing); l === nothing ? nothing : get(l isa AbstractDict ? l : l.fields, :color, nothing))
+		for t in f.data if get(t.fields, :type, "") == "contour"]
+	# numerics-02: evenly spaced levels with a colour norm take their colours
+	# on the norm, as uneven ones do.
+	f = plot_contour(Z; coloring = "lines", levels = [2, 4, 6, 8], crange = (0, 20))
+	@test length(f.data) == 5 && colours(f) == ["#40039D", "#6901A6", "#8F10A1", "#B02A90"]
+	f = plot_contour(Z; coloring = "lines", levels = [2, 4, 6, 8], cmid = 7)
+	@test colours(f) == ["#0D0887", "#6901A6", "#B02A90", "#E06561"]
+	@test length(plot_contour(Z; coloring = "lines", levels = [2, 4, 6, 8]).data) == 1
+	function polylines(fig)
+		lines = Vector{Vector{NTuple{2, Float64}}}()
+		for t in fig.data
+			get(t.fields, :mode, "") in ("lines", "lines+markers") || continue
+			cur = NTuple{2, Float64}[]
+			for (a, b) in zip(t.fields[:x], t.fields[:y])
+				if a === nothing
+					isempty(cur) || push!(lines, cur); cur = NTuple{2, Float64}[]
+				else
+					push!(cur, (a, b))
+				end
+			end
+			isempty(cur) || push!(lines, cur)
+		end
+		return lines
+	end
+	# numerics-04: on a log axis the field is integrated in decades: a
+	# constant (1, 1) field gives y = log10(x) + c.
+	x = exp10.(range(0, 2; length = 21)); y = collect(range(0, 1; length = 21))
+	fig = plot_streamlines(x, y, ones(21, 21), ones(21, 21); xscale = "log", seeds = [(1.0, 0.0), (10.0, 0.0)], direction = :forward)
+	ls = polylines(fig)
+	@test length(ls) == 2
+	for l in ls
+		@test maximum(p -> abs((p[2] - log10(p[1])) - (l[1][2] - log10(l[1][1]))), l) < 1e-9
+	end
+	# numerics-05: a rigid rotation on non-uniform grids draws circles.
+	for g in ([tanh(2s) / tanh(2) for s in range(-1, 1; length = 21)],
+		vcat(collect(-1:0.2:-0.2), collect(-0.175:0.025:0.175), collect(0.2:0.2:1)))
+		U = [-b for a in g, b in g]; V = [a for a in g, b in g]
+		for r in (0.3, 0.6, 0.9)
+			l = only(polylines(plot_streamlines(g, g, U, V; seeds = [(r, 0.0)], direction = :forward, maxlength = pi * r)))
+			# Measured 3.4e-6 r at most, as on a uniform grid (the integrator's
+			# step error); the per-cell index velocity drifted 3 % (0.3 -> 0.3094).
+			@test maximum(p -> abs(hypot(p...) - r), l) < 1e-4 * r
 		end
 	end
 end

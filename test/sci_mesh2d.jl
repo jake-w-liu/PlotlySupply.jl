@@ -296,7 +296,7 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		@test (_m2_get(marker, :cmin), _m2_get(marker, :cmax)) == (0.0, 2.0)
 		bar = _m2_get(marker, :colorbar)
 		@test _m2_get(bar, :tickvals) == [0.0, 1.0, 2.0]
-		@test _m2_get(bar, :ticktext) == ["10<sup>0</sup>", "10<sup>1</sup>", "10<sup>2</sup>"]
+		@test _m2_get(bar, :ticktext) == ["1", "10", "10<sup>2</sup>"]
 		@test _m2_ring_color(fig, [1.0, 2.0, 2.0, 1.0], [0.0, 0.0, 1.0, 1.0]) == _M2._sample_colorscale(stops, 0.75)
 		fig = plot_polygons(vcat(x, x), vcat(zeros(4), ones(4)), cells, [-1.0, 10.0, 100.0]; colornorm = :log)
 		@test _m2_nrings(fig) == 2                                   # <= 0 is not drawn
@@ -1252,4 +1252,68 @@ end
 		@test z == [[1.0, 3.0], [nothing, 4.0]]
 		@test _m2_throws(() -> plot_pcolormesh(0:2, 0:2, Any[1.0 "a"; 3.0 4.0]), "plot_pcolormesh: colour values must be real numbers or missing; entry 3 is \"a\"")
 	end
+end
+
+@testset "v8 axes-style: mesh2d labels, indices, kernel cost (numerics-08, errors-inputs-10, perf-tricontour, perf-tripcolor)" begin
+	PSX = PlotlySupply
+	# numerics-08: tricontour labels of small, large and offset values.
+	xs = [0.0, 1, 0, 1, 0.5]; ys = [0.0, 0, 1, 1, 0.5]; tri = [1 2 5; 2 4 5; 4 3 5; 3 1 5]
+	for (v, want) in (
+		(1e-6 .* (2 .* xs .+ 3 .* ys), ["10<sup>−6</sup>", "2×10<sup>−6</sup>", "3×10<sup>−6</sup>", "4×10<sup>−6</sup>"]),
+		(1e15 .* (xs .+ ys), ["5×10<sup>14</sup>", "10<sup>15</sup>", "1.5×10<sup>15</sup>"]),
+		(1e6 .+ (xs .+ ys) ./ 2, ["1.0000002×10<sup>6</sup>", "1.0000004×10<sup>6</sup>", "1.0000006×10<sup>6</sup>", "1.0000008×10<sup>6</sup>"]),
+	)
+		f = plot_tricontour(xs, ys, tri, v; showlabels = true, levels = 4)
+		lab = [t for t in f.data if get(t.fields, :mode, "") == "text"]
+		@test !isempty(lab) && lab[end].fields[:text] == want
+	end
+	# errors-inputs-10: an integral float index beyond Int is outside the nodes.
+	for (who, call) in (
+		("plot_tripcolor", () -> plot_tripcolor([0.0, 1, 0], [0.0, 0, 1], [1 2 1e308], [1.0, 2, 3])),
+		("plot_triplot", () -> plot_triplot([0.0, 1, 0], [0.0, 0, 1], [1 2 1e308])),
+		("plot_tricontour", () -> plot_tricontour([0.0, 1, 0, 1], [0.0, 0, 1, 1], [1 2 1e308; 2 3 4], [1.0, 2, 3, 4])),
+	)
+		err = try
+			call(); nothing
+		catch e
+			e
+		end
+		@test err isa ArgumentError && startswith(err.msg, "$(who): `triangles` cell 1 refers to node 1.0e308")
+	end
+	# perf-tricontour / perf-tripcolor: bytes per output point / per cell.
+	function tri_grid(m)
+		px = Float64[]; py = Float64[]
+		for j in 0:m, i in 0:m
+			push!(px, i + 0.1 * sin(j)); push!(py, j + 0.1 * cos(i))
+		end
+		id(i, j) = j * (m + 1) + i + 1
+		T = Matrix{Int}(undef, 2m^2, 3)
+		k = 0
+		for j in 0:(m - 1), i in 0:(m - 1)
+			T[k += 1, :] = [id(i, j), id(i + 1, j), id(i + 1, j + 1)]
+			T[k += 1, :] = [id(i, j), id(i + 1, j + 1), id(i, j + 1)]
+		end
+		return px, py, T
+	end
+	px, py, T = tri_grid(80)
+	v = sin.(px) .* cos.(py)
+	t = PSX._mesh2d_triangulation(px, py, T, nothing, "test")
+	levels = PSX._mesh2d_contour_levels(10, v, "test")
+	PSX._mesh2d_contour_lines(t, v, levels[1])
+	bytes = 0; points = 0
+	for l in levels
+		bytes += @allocated(PSX._mesh2d_contour_lines(t, v, l))
+		points += sum(length(first(line)) for line in PSX._mesh2d_contour_lines(t, v, l); init = 0)
+	end
+	# Measured 239 B per line point; the eager `get!(.., Int[])` defaults cost
+	# about 400.
+	@test bytes / points < 300
+	# Flat shading with one value per triangle costs what one value per node
+	# does (measured 807 vs 810 B per triangle on this mesh); boxing the cell
+	# values into Any[] cost 883 (ratio 1.094).
+	cellv = sin.(1:size(T, 1)) .+ 0.0
+	plot_tripcolor(px, py, T, cellv); plot_tripcolor(px, py, T, v)
+	per_cell = @allocated plot_tripcolor(px, py, T, cellv)
+	per_node = @allocated plot_tripcolor(px, py, T, v)
+	@test per_cell / per_node < 1.04
 end

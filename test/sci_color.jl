@@ -434,7 +434,7 @@ using Test, PlotlySupply
 		@test lognorm.customdata === raw
 		@test lognorm.cmin === nothing && lognorm.cmax === nothing
 		@test lognorm.tickvals == [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0]
-		@test "10<sup>-3</sup>" in lognorm.ticktext && lognorm.ticktext[end] == "10<sup>2</sup>"
+		@test "10<sup>−3</sup>" in lognorm.ticktext && lognorm.ticktext[end] == "10<sup>2</sup>"
 		@test P._apply_color_norm(raw; colornorm = "LOG").tickvals == lognorm.tickvals
 
 		clipped = P._apply_color_norm(raw; colornorm = :log, crange = [1e-2, 1e2])
@@ -451,7 +451,7 @@ using Test, PlotlySupply
 
 		narrow = P._apply_color_norm([2.0, 8.0]; colornorm = :log)
 		@test narrow.tickvals ≈ [log10(2), log10(5)]
-		@test narrow.ticktext == ["2×10<sup>0</sup>", "5×10<sup>0</sup>"]
+		@test narrow.ticktext == ["2", "5"]
 		@test length(P._apply_color_norm([3.1, 3.3]; colornorm = :log).tickvals) == 2
 		wide = P._apply_color_norm([1e-30, 1e30]; colornorm = :log)
 		@test 2 <= length(wide.tickvals) <= 9
@@ -484,7 +484,7 @@ using Test, PlotlySupply
 		@test first.(logged.stops) ≈ [0, 1 / 3, 1 / 3, 2 / 3, 2 / 3, 1]
 		@test logged.cmin == 0.0 && logged.cmax ≈ 3.0
 		@test logged.tickvals ≈ [0, 1, 2, 3]
-		@test logged.ticktext == ["10<sup>0</sup>", "10<sup>1</sup>", "10<sup>2</sup>", "10<sup>3</sup>"]
+		@test logged.ticktext == ["1", "10", "10<sup>2</sup>", "10<sup>3</sup>"]
 		@test logged.values ≈ [log10(5) log10(50)]
 		@test P._apply_color_norm(z; levels = [0, 1]).stops == [Any[0.0, P._sample_colorscale(P._template_colorscale(), 0.5)],
 			Any[1.0, P._sample_colorscale(P._template_colorscale(), 0.5)]]
@@ -504,7 +504,7 @@ using Test, PlotlySupply
 		@test linear.tickvals == [0.0, 500.0, 1000.0] && linear.ticktext == ["lo", "\$m\$", "hi"]
 		@test P._apply_color_norm(z; ticks = 1:3).ticktext === nothing
 		logticks = P._apply_color_norm(z; colornorm = :log, ticks = [1, 100])
-		@test logticks.tickvals == [0.0, 2.0] && logticks.ticktext == ["10<sup>0</sup>", "10<sup>2</sup>"]
+		@test logticks.tickvals == [0.0, 2.0] && logticks.ticktext == ["1", "10<sup>2</sup>"]
 		labelled = P._apply_color_norm(z; colornorm = :log, ticks = [1, 100], ticklabels = ["one", "hundred"])
 		@test labelled.ticktext == ["one", "hundred"]
 		@test P._apply_color_norm(z; colornorm = :log, ticks = [3]).ticktext == ["3"]
@@ -706,4 +706,43 @@ using Test, PlotlySupply
 			@test occursin("ElectronCall", sprint(showerror, err)) || occursin("Plotly.js", sprint(showerror, err))
 		end
 	end
+end
+
+@testset "v8 axes-style: log colour bars (apia-06, numerics-11) and colormap_colors bound" begin
+	PSX = PlotlySupply
+	cbar(f) = (c = f.data[1].fields[:colorbar]; c isa AbstractDict ? c : c.fields)
+	# apia-06: colorbar!(ticks) on a log colour scale takes data values for
+	# every field shape (a square field used to be read as decades).
+	for (m, n) in ((20, 10), (6, 5), (6, 6), (10, 10), (1, 1))
+		V = [10.0^(3 * (a - 1) / max(m - 1, 1)) * (1 + 0.1b) for a in 1:m, b in 1:n]
+		for make in (plot_heatmap, plot_contour)
+			(make === plot_contour && min(m, n) < 2) && continue
+			f = make(V; colornorm = :log)
+			colorbar!(f; ticks = [1, 10, 100])
+			@test cbar(f)[:tickvals] == [0.0, 1.0, 2.0]
+			@test cbar(f)[:ticktext] == ["1", "10", "10<sup>2</sup>"]
+		end
+	end
+	f = plot_heatmap([1.0 10; 100 1000]; colornorm = :log)
+	err = try
+		colorbar!(f; ticks = [-1, 10]); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && startswith(err.msg, "colorbar!: ")
+	# numerics-11: decades 1 and 10 written plainly, U+2212 minus.
+	@test PSX._format_colorbar_number(-2.5e-7) == "−2.5×10<sup>−7</sup>"
+	@test PSX._format_colorbar_number(-0.05) == "−0.05"
+	@test PSX._format_colorbar_number(3e8) == "3×10<sup>8</sup>"
+	@test PSX._log_colorbar_ticks(log10(0.02), log10(0.08))[2] == ["2×10<sup>−2</sup>", "5×10<sup>−2</sup>"]
+	# errors-inputs-10: a count no colour table holds is an ArgumentError.
+	for n in (2^24 + 1, typemax(Int), typemax(Int128))
+		err = try
+			colormap_colors("viridis", n); nothing
+		catch e
+			e
+		end
+		@test err isa ArgumentError && startswith(err.msg, "colormap_colors: `n` must be at most")
+	end
+	@test length(colormap_colors("viridis", 3)) == 3
 end

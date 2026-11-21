@@ -1974,3 +1974,15 @@ end
 		@test length(f.data) == before
 	end
 end
+
+@testset "v8 axes-style: numerics-01 error bar values are checked" begin
+	for kw in ((error_y = [0.1, -0.2, 0.1],), (error_y = ([0.1, 0.1, 0.1], [0.3, -0.3, 0.3]),), (error_y = ["a", "b", "c"],))
+		err = try
+			plot_scatter(1:3, [1.0, 2, 3]; kw...); nothing
+		catch e
+			e
+		end
+		@test err isa ArgumentError && startswith(err.msg, "plot_scatter: `error_y` entries must be non-negative numbers")
+	end
+	@test plot_scatter(1:3, [1.0, 2, 3]; error_y = [0.1, missing, 0.2]) isa PlotlySupply.Plot
+end

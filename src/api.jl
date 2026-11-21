@@ -16714,11 +16714,8 @@ Levels and lines (spec F26):
   thin level boundaries (bands: none).
 - `dash = ""` (`"dash"`, `"dot"`, `"dashdot"`, ... or `"5px,3px"`).
 - `showlabels::Bool = false`, `labelformat = ""` (d3 format, e.g. `".2f"`).
-  Known limitation (fields-09): next to a NaN/`missing` gap plotly.js clips
-  the contour group, labels included, to the region with data, so a label it
-  places at the edge of a gap can come out cut ("0.(" for "0.6"); the lines
-  are right. Label such a figure with [`annotate!`](@ref) at points away from
-  the gap instead.
+  Next to a NaN/`missing` gap the lines and fills are clipped to the region
+  with data; the labels are drawn whole.
 
 Colour: `colorscale`, `crange` (alias `zrange`), `cmid`, `colornorm`,
 `showscale`, `colorbar_title`, `colorbar_title_side = :top`,

@@ -128,6 +128,19 @@ const _PLOTLYJS_TITLE_SCOOT_SEAM =
 	raw"""T=b.maxShift||u*(w[b.side]-f[b.side]),k=0;if(T<0)k=T;else{var A=b.offsetLeft||0,M=b.offsetTop||0;f.left-=A,f.right-=A,f.top-=M,f.bottom-=M,b.selection.each((function(){var t=c.bBox(this);s.bBoxIntersect(f,t,h)&&(k=Math.max(k,u*(t[b.side]-f[o])+h))})),k=Math.min(T,k),y._titleScoot=Math.abs(k)}if(k>0||T<0){"""
 const _PLOTLYJS_TITLE_SCOOT_REPLACEMENT =
 	raw"""T,k=0;if(i(b.gap)){var _r=a.node().getBoundingClientRect(),_p=g._paper.node().getBoundingClientRect(),_q=_p.width>0?g.width/_p.width:1,_f={left:(_r.left-_p.left)*_q,right:(_r.right-_p.left)*_q,top:(_r.top-_p.top)*_q,bottom:(_r.bottom-_p.top)*_q},_k=-1/0;T=b.maxShift||u*(w[b.side]-_f[b.side]),b.selection.each((function(){var t=this.getBoundingClientRect();t.width>0&&t.height>0&&(_k=Math.max(_k,u*(t[b.side]-_r[o])))})),k=isFinite(_k)?Math.min(T,_k*_q+b.gap):0,y._titleScoot=Math.max(k,0)}else if((T=b.maxShift||u*(w[b.side]-f[b.side]))<0)k=T;else{var A=b.offsetLeft||0,M=b.offsetTop||0;f.left-=A,f.right-=A,f.top-=M,f.bottom-=M,b.selection.each((function(){var t=c.bBox(this);s.bBoxIntersect(f,t,h)&&(k=Math.max(k,u*(t[b.side]-f[o])+h))})),k=Math.min(T,k),y._titleScoot=Math.abs(k)}if(0!==k){"""
+# D23 (contour labels next to a gap): a contour trace with NaN/missing cells
+# and `connectgaps = false` is clipped to the region with data (contour/plot.js
+# clipGaps). plotly.js set that clip on the whole trace group, labels
+# included, so a label placed on a line that ends at a gap came out cut
+# ("0.(" for "0.6"). The clip now goes on every child of the group except
+# `g.contourlabels`: lines, fills and background stay inside the data. A
+# label whose anchor (the point on its line it is centred at) lies in the
+# clipped region labels a line that is not drawn there and is removed; every
+# other label is drawn whole.
+const _PLOTLYJS_CONTOUR_GAP_CLIP_SEAM =
+	raw"""else c=null;a.setClipUrl(t,c,r)}(s,r,t,y,I)}"""
+const _PLOTLYJS_CONTOUR_GAP_CLIP_REPLACEMENT =
+	raw"""else c=null;if(a.setClipUrl(t,null,r),a.setClipUrl(t.selectAll((function(){return Array.prototype.filter.call(this.childNodes,(function(e){return!(e.classList&&e.classList.contains("contourlabels"))}))})),c,r),c){var _cp=u.select("path").node();_cp&&"function"==typeof _cp.isPointInFill&&_cp.ownerSVGElement&&t.selectAll("g.contourlabels text").each((function(){var e=_cp.ownerSVGElement.createSVGPoint();e.x=+this.getAttribute("x"),e.y=+this.getAttribute("y"),isFinite(e.x)&&isFinite(e.y)&&!_cp.isPointInFill(e)&&this.parentNode.removeChild(this)}))}}(s,r,t,y,I)}"""
 const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_MATH_FONT_SEAM => _PLOTLYJS_MATH_FONT_REPLACEMENT,
 	_PLOTLYJS_MATH_SIZE_SEAM => _PLOTLYJS_MATH_SIZE_REPLACEMENT,
@@ -141,6 +154,7 @@ const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_SHAPE_PAD_SEAM => _PLOTLYJS_SHAPE_PAD_REPLACEMENT,
 	_PLOTLYJS_TITLE_GAP_SEAM => _PLOTLYJS_TITLE_GAP_REPLACEMENT,
 	_PLOTLYJS_TITLE_SCOOT_SEAM => _PLOTLYJS_TITLE_SCOOT_REPLACEMENT,
+	_PLOTLYJS_CONTOUR_GAP_CLIP_SEAM => _PLOTLYJS_CONTOUR_GAP_CLIP_REPLACEMENT,
 	_PLOTLYJS_SVG_QUOTE_TRANSFORMS...,
 )
 
