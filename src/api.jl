@@ -19256,23 +19256,24 @@ end
 # the `Plot`. `to_syncplot` validates the window options and maps the
 # constructor sentinels `0` (width/height) and `""` (title) to its defaults
 # (960 × 720 px, "PlotlySupply"). The window title is the plain `title` text.
-# The figure is handed out settled: the log-axis tick labels of its style
-# (`_settle_log_ticks!`) are written first.
+# The figure is handed out settled (`_settle_log_ticks!`: the finalizer has
+# run on it).
 function _maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString)
 	_settle_log_ticks!(fig)
 	return show ? to_syncplot(fig; width = width, height = height, title = title) : fig
 end
 
-# tm-log-unsettled: under the paper styles a log axis gets decade labels
-# (`_axes_log_tick_updates!`), and bar value labels drawn outside their bars
-# get room on their value axis (`_axes_bar_label_updates!`); `_finalize_figure!`
-# writes both after every mutation, but constructors do not finalize: the
-# first finalize (a display, an export) then changed the figure. A
-# constructor writes them itself (`_axes_apply_fits!`), at the figure's size
-# and under the style it carries, as the finalizer does. Figures without a
-# log axis or bar text cost one scan of the layout keys and the trace types.
+# Invariant 1 (settled figures; tm-log-unsettled, apib-10, errors-inputs-01,
+# seams-02, apia-03, apia-10): a constructor hands out the figure the first
+# display or export would draw. `_finalize_figure!` writes everything a
+# mutator's finalize writes: decade labels of a log axis and room for bar
+# value labels (`_axes_finalize_updates!`), long axis titles wrapped, the
+# room of a math or multi-line figure title (`titleshift`), outside legends,
+# colorbars and map colour bars, the sticky field ranges and the 3-D framing,
+# at the figure's size and under the style it carries (K1). Its cost is one
+# scan of the trace extents (no copy of the data) plus the decorations.
 function _settle_log_ticks!(fig)
-	_with_figure_style(() -> _axes_apply_fits!(fig), fig)
+	_finalize_figure!(fig)
 	return nothing
 end
 
@@ -19572,9 +19573,10 @@ function _extended_apply_figure_options!(
 end
 
 # Open a window for a freshly built figure when `show = true` (960×720 and
-# the title "PlotlySupply" when width/height/title are unset).
+# the title "PlotlySupply" when width/height/title are unset). The figure is
+# handed out settled (`_settle_log_ticks!`; apib-10: a math title's room).
 _extended_maybe_show(fig, show::Bool, width::Real, height::Real, title::AbstractString) =
-	show ?
+	(_settle_log_ticks!(fig); show) ?
 	to_syncplot(
 		fig;
 		width = width > 0 ? width : 960,
@@ -21190,11 +21192,12 @@ end
 # also stacks them on earlier `stack = true` areas of the same axes; otherwise
 # each series is filled to zero.
 # oned-area-gap-filled: plotly.js joins the segments of a filled trace into
-# one fill path, so an area filled across a gap (NaN/missing/nothing in `y`),
+# one fill path, so an area filled across a gap (NaN/missing/nothing in `y`;
+# ±Inf too, which the JSON writes as the same `null`, apia-01),
 # and a stacked one took the gap as zero, both drawing area where there is no
 # data. A gap is an error instead (before any change); the scan stops at the
 # first gap and allocates nothing.
-_area_is_gap(v) = v === missing || v === nothing || (v isa AbstractFloat && isnan(v))
+_area_is_gap(v) = v === missing || v === nothing || (v isa AbstractFloat && !isfinite(v))
 
 function _area_check_gaps(ys, who::AbstractString)
 	for (k, y) in enumerate(ys)
@@ -21352,8 +21355,9 @@ one-argument form uses `x = 0:length(y)-1` (per series).
 
 - `x`, `y`: vectors of equal length, or a vector of vectors in `y` (one area
   per series) with `x` shared or nested like `y`. Matrices and complex values
-  throw an `ArgumentError`. A `y` value that is `NaN`, `missing` or
-  `nothing` (a gap) is an `ArgumentError` as well: plotly.js would fill
+  throw an `ArgumentError`. A `y` value that is `NaN`, `±Inf` (written to the
+  JSON as `null`), `missing` or `nothing` (a gap) is an `ArgumentError` as
+  well: plotly.js would fill
   across the gap (or, stacked, take it as zero), showing area where there is
   no data; draw each gap-free part with its own call. With `stack = true`,
   series on different x grids (nested `x`) are interpolated at the x values
@@ -23392,7 +23396,7 @@ end
 
 """
 	_figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = nothing,
-		accs = nothing) -> Union{Nothing, Float64}
+		accs = nothing, legends = nothing, margins = nothing) -> Union{Nothing, Float64}
 
 Re-place every whole-figure annotation (`annotate!(...; coords = :figure)`,
 named `$(_FIGURE_ANNOTATION_PREFIX)…`) of `annotations` for the current
@@ -23413,12 +23417,17 @@ legends, colorbars) and the export size:
 - `size = (W, H)`: the figure size in px to place for (the export size on the
   `savefig` copy); default: the layout size, else the style's default size;
 - `accs`: the axis extents of `p` (`_fin_collect_axes(p)`), when the caller
-  has them, so they are not collected again.
+  has them, so they are not collected again;
+- `margins`: the margins `(l, r, t, b)` (px) plotly draws the figure with,
+  when the caller knows them (`_finalize_figure!` passes those of its room
+  plan, which count the margins colorbars and legends push, so this
+  placement and the room engine's agree, sm-04); default: estimated from the
+  layout (`_fin_margins`).
 It is pure in `p` and idempotent: calling it again after the returned margin
 and the replaced annotations are written changes nothing.
 """
 function _figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = nothing, accs = nothing,
-	legends::Union{Nothing, AbstractDict} = nothing)
+	legends::Union{Nothing, AbstractDict} = nothing, margins = nothing)
 	specs = [(index, spec) for (index, item) in pairs(annotations)
 		for spec in (_figure_annotation_spec(item),) if spec !== nothing]
 	isempty(specs) && return nothing
@@ -23431,7 +23440,7 @@ function _figure_annotations_place!(p::Plot, annotations::Vector{Any}; size = no
 		(Float64(size[1]), Float64(size[2]))
 	end
 	accs === nothing && (accs = _fin_collect_axes(p))
-	margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[])
+	margins === nothing && (margins = _fin_margins(layout, accs, W, H, Dict{Symbol, NTuple{2, Float64}}(), Any[]))
 	# Room the bottom x-axis tick labels and title take (their automargin push
 	# plus plotly's extra), measured with a zero base margin.
 	probe = Layout(copy(layout.fields))

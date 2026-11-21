@@ -1339,7 +1339,10 @@ Edit the colorbars that already exist in a figure.
   as an annotation next to the bar (named
   `"plotlysupply:colorbar_title:<area>:<side>"`); its distance for `:right`
   is estimated from the tick-label width. The annotation follows later
-  `colorbar!` moves but not `relayout!`/`restyle!` edits of the bar.
+  `colorbar!` moves but not `relayout!`/`restyle!` edits of the bar. When
+  the bar is gone (its trace deleted, `react!` with other data,
+  `remove_inset!`, or a plain title set on the bar), the next PlotlySupply
+  call or export removes the annotation.
 - `side::Symbol=:right`: `:right` gives a vertical bar right of the plot
   area (past a right-side y axis' labels) and as tall as it; `:bottom` a
   horizontal bar below the cell's x tick labels and x title, centred on the

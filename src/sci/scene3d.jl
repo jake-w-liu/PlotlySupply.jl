@@ -708,8 +708,11 @@ end
 
 # `show = true` opens an Electron window sized like the figure; 960×720 and
 # the "PlotlySupply" window title are the defaults every other constructor
-# uses (`_maybe_show` in api.jl).
+# uses (`_maybe_show` in api.jl). The figure is handed out settled, as
+# every constructor's (`_settle_log_ticks!`: the finalizer, its 3-D framing
+# included, has run on it; apib-10, errors-inputs-01).
 function _s3_show(fig, show::Bool, opts::_S3Options)
+	_settle_log_ticks!(fig)
 	show || return fig
 	return to_syncplot(
 		fig;

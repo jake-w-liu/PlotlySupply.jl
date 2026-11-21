@@ -848,12 +848,15 @@ function _fin_restyle!(ctx::_FinContext, index::Int, updates::Dict{Symbol, Any})
 		ctx.p.data[index] = _clone_trace_for_mutation(trace, IdDict{Any, Any}())
 	end
 	target = ctx.target
-	# Keyword updates: `colorbar_x` addresses the nested path (a Dict update
-	# would store the literal key `colorbar_x`).
+	# perf-01 (restyle half): one Dict of plotly property paths
+	# (`colorbar_x` -> `colorbar.x`, set nested; a raw `colorbar_x` key
+	# would be stored literally), as `_fin_relayout!` does. Splatting the
+	# updates as keywords compiled `restyle!` again for every new key set.
+	paths = _fin_property_paths(updates)
 	if target isa SyncPlot
-		restyle!(target, index; updates...)
+		restyle!(target, index, paths)
 	else
-		restyle!(_plot_obj(target), index; updates...)
+		restyle!(_plot_obj(target), index, paths)
 	end
 	return nothing
 end
@@ -2363,7 +2366,7 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 	end
 	wrote |= _fin_relayout!(ctx, layout_updates)
 	wrote |= _fin_thin_bar_ticks!(ctx, plan.Wp, plan.Hp)
-	wrote |= _fin_place_figure_annotations!(ctx, accs, W, H)
+	wrote |= _fin_place_figure_annotations!(ctx, accs, W, H; margins = _fin_drawn_margins(plan))
 	return wrote, restart && raised
 end
 
@@ -2779,14 +2782,29 @@ end
 # Z47: whole-figure annotations (`annotate!(...; coords = :figure)`) are
 # shifted by the margins (`_figure_annotations_place!`): re-place them for
 # the margins this pass leaves, at the size the figure is finalized for.
-function _fin_place_figure_annotations!(ctx::_FinContext, accs, W::Float64, H::Float64)
+# The margins (px) plotly draws a figure with after a pass of `plan` wrote:
+# the plan's (the layout's grown by what its decorations push, which plotly's
+# automargin adds) and never less than a margin written in the pass. The
+# room engine places the figure annotations for the same margins
+# (`_lt_place_figure_annotations!`); estimated without the pushes, the two
+# placements disagreed by half a colorbar's push on every pass (sm-04).
+function _fin_drawn_margins(plan)
+	margin = get(plan.layout.fields, :margin, nothing)
+	at(letter) = (have = _cmn_mapping_get(margin, letter);
+		_fin_isfinite_real(have) ? max(Float64(getfield(plan.margins, letter)), Float64(have)) :
+			Float64(getfield(plan.margins, letter)))
+	return (l = at(:l), r = at(:r), t = at(:t), b = at(:b))
+end
+
+function _fin_place_figure_annotations!(ctx::_FinContext, accs, W::Float64, H::Float64; margins = nothing)
 	layout = ctx.p.layout
 	existing = get(layout.fields, :annotations, nothing)
 	existing isa AbstractVector || return false
 	any(item -> _figure_annotation_spec(item) !== nothing, existing) || return false
 	annotations = collect(Any, existing)
 	legends = Dict{Symbol, Float64}()
-	new_b = _figure_annotations_place!(ctx.p, annotations; size = (W, H), accs = accs, legends = legends)
+	new_b = _figure_annotations_place!(ctx.p, annotations; size = (W, H), accs = accs, legends = legends,
+		margins = margins)
 	updates = Dict{Symbol, Any}()
 	for (key, y) in legends
 		# The room engine writes a legend `y` to 6 digits, this placement to
@@ -4318,6 +4336,55 @@ function _room_settle_margins!(plan::_RoomPlan)
 	return _fin_meta_set!(layout, _ROOM_MARGIN_KEY, value)
 end
 
+"""
+	_room_plot_px_without(plan, owner::Symbol, keys) -> (w, h)
+
+The plot px (figure less margins) of `plan` once every margin the room
+engine raised holds only what the decorations other than those of `owner`
+keyed `keys` (one key, or a collection of them) need there (each side at least its recorded base, the user's or the
+style's; a margin nobody raised stays as it is). A decision about where
+the decoration goes that is made on the current plot px depends on where
+it is now: a cell legend beside the right column raises the right margin
+and so narrows the cell it is scored on (docs-truth-16: right of the cell
+at 600 px, below it at 547, and back, on every pass).
+"""
+function _room_plot_px_without(plan::_RoomPlan, owner::Symbol, keys)
+	drop = keys isa AbstractString ? (String(keys),) : keys
+	layout = plan.layout
+	record = _room_margin_record(layout)
+	margin = get(layout.fields, :margin, nothing)
+	base = _fin_margins_base(layout)
+	need = Dict{Symbol, Float64}()
+	for request in plan.requests
+		(request.owner === owner && request.key in drop) && continue
+		for slot in _room_slots(plan, request.owner, request.key)
+			(slot.area === request.area && slot.side === request.side) || continue
+			if slot.area !== :figure
+				_room_neighbour(plan, plan.areas[slot.area], slot.side) === nothing || continue
+			end
+			paper = slot.side in (:right, :top) ? 1.0 : 0.0
+			inside = abs(slot.edge - paper) * _room_px(plan, slot.side)
+			# As `_lt_hold_pushed_margins!` (automargin) and
+			# `_room_margin_updates!` (margins the engine raises) count it.
+			reach = request.margin_pushed ? slot.offset + slot.px - inside + _FIN_AUTOMARGIN_EXTRA :
+				slot.offset + slot.px + _ROOM_GAP - inside
+			letter = Symbol(String(slot.side)[1])
+			need[letter] = max(get(need, letter, 0.0), reach)
+		end
+	end
+	side_px(letter) = begin
+		current = _cmn_mapping_get(margin, letter)
+		have = _fin_isfinite_real(current) ? Float64(current) : getfield(base, letter)
+		queued = get(plan.updates, Symbol(:margin_, letter), nothing)
+		rec = get(record, letter, nothing)
+		owned = rec !== nothing && abs(have - rec[2]) <= 0.5
+		raised = _fin_isfinite_real(queued) && Float64(queued) > have + 0.5
+		(owned || raised) || return have
+		return max(owned ? rec[1] : have, ceil(get(need, letter, 0.0)))
+	end
+	return (max(plan.W - side_px(:l) - side_px(:r), 1.0), max(plan.H - side_px(:t) - side_px(:b), 1.0))
+end
+
 # ---------------------------------------------------------------------------
 # Colorbars as a room owner
 # ---------------------------------------------------------------------------
@@ -4736,7 +4803,14 @@ end
 # The placement of colorbar `key` after the solve, `nothing` to leave it
 # (no slot, a frozen area, plotly's default kept).
 function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
-	entry.keep_default && return nothing
+	# layout-fuzz-05: a lone bar left at plotly's default position (x 1.02,
+	# len 1) is drawn without plotly's 10 px `ypad`, which made it 20 px
+	# shorter than the plot area. `ypad` alone keeps it unplaced
+	# (`_fin_bar_unplaced`), so it stays at the default on later runs.
+	if entry.keep_default
+		ypad = _cbar_real(entry.item.bar, :ypad, nothing)
+		return ypad !== nothing && ypad == 0 ? nothing : Dict{Symbol, Any}(:ypad => 0)
+	end
 	slots = _room_slots(plan, :colorbar, key)
 	isempty(slots) && return nothing
 	any(slot -> slot.area !== :figure && plan.areas[slot.area].frozen, slots) && return nothing
@@ -4993,6 +5067,56 @@ function _fin_title_annotations(p::Plot, moved, base = nothing)
 	return changed ? result : base
 end
 
+# sm-01, sm-13: a math colorbar title is an annotation named after the
+# plot area (or coloraxis) of its bar (`_cbar_title_owner`). It belongs to a
+# bar that shows and has no title of its own (the conversion removed it); once
+# no such bar is left (the trace was deleted, `react!` replaced the data,
+# `remove_inset!` took the inset, a new bar there carries a plain title) the
+# annotation is dropped, so no title floats where no bar is drawn. Returns
+# the annotations to write, or `nothing` when every title still has its bar.
+# Costs one scan of the annotations, and of the traces only when a title
+# annotation exists.
+function _fin_orphan_cbar_titles(p::Plot)
+	existing = get(p.layout.fields, :annotations, nothing)
+	existing isa AbstractVector || return nothing
+	prefix = _CBAR_TITLE_ANNOTATION_PREFIX
+	any(item -> (name = _cmn_item_name(item); name isa AbstractString && startswith(name, prefix)), existing) ||
+		return nothing
+	# Areas and coloraxes whose bar shows without a title of its own.
+	alive = Set{String}()
+	used_axes = Set{String}()
+	for (index, trace) in enumerate(p.data)
+		slot = _cbar_slot(trace, index)
+		slot === nothing && continue
+		if slot.coloraxis !== nothing
+			push!(used_axes, slot.coloraxis)
+			continue
+		end
+		slot.shows || continue
+		text = _cbar_title_text(_symbol_dict(_cbar_slot_bar(trace, slot)))
+		(text === nothing || isempty(text)) || continue
+		push!(alive, _cbar_trace_region(p, trace).key)
+	end
+	for id in used_axes
+		axis = get(p.layout.fields, Symbol(id), nothing)
+		_cmn_mapping_get(axis, :showscale) === false && continue
+		text = _cbar_title_text(_symbol_dict(_cmn_mapping_get(axis, :colorbar)))
+		(text === nothing || isempty(text)) && push!(alive, id)
+	end
+	kept = Any[]
+	for item in existing
+		name = _cmn_item_name(item)
+		if name isa AbstractString && startswith(name, prefix)
+			rest = String(name)[(ncodeunits(prefix) + 1):end]
+			cut = findlast(':', rest)
+			area = cut === nothing ? rest : rest[1:prevind(rest, cut)]
+			area in alive || continue
+		end
+		push!(kept, item)
+	end
+	return length(kept) == length(existing) ? nothing : kept
+end
+
 const _FIN_PANEL_TITLE_NAME = r"^plotlysupply:title!?:(\d+):(\d+)(:.*)?$"
 
 # `annotations` (the layout's when `nothing`) with every panel title
@@ -5146,6 +5270,8 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool, strict::Bool = 
 	# `strict` is the append-only fast path (`_transactional_high_level_plot_mutation!`).
 	strict && _fin_own_meta!(p.layout)
 	updates = _fin_match_group_updates(p.layout, p.data)
+	orphans = _fin_orphan_cbar_titles(p)
+	orphans === nothing || (updates[:annotations] = orphans)
 	# One collection for the run (Z81): no write of the run changes an extent
 	# (see `_FinAxes`).
 	accs = _fin_collect_axes(p)

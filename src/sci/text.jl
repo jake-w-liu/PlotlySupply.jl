@@ -2675,16 +2675,28 @@ end
 # reaches a few px beyond its centre.
 const _LEGEND_CELL_SLACK_PX = (4.0, 2.0)
 
+# Share of the cell width by which the side of an outside cell legend (right
+# of the cell or below it) must be the wrong one before the rule moves it to
+# the other: the choice is a soft one (a column leaving the plot area half
+# its width), and moving the legend moves the cell it is scored on.
+const _LEGEND_SIDE_HYSTERESIS = 0.05
+
 """
-	_legend_best_cell_position(p, legend_id, xdom, ydom; before = 0) -> Union{Symbol, Nothing}
+	_legend_best_cell_position(p, legend_id, xdom, ydom; before = 0, plot_px = nothing) -> Union{Symbol, Nothing}
 
 The position of `_SCAT_LEGEND_POSITIONS` (relative to the cell's axes) where
 cell legend `legend_id` of the cell with paper domains `xdom` x `ydom` covers
 the least data (see the note above), or `nothing` when the estimate does not
 apply. `before > 0` scores only the traces before index `before` (the cell as
 it was before an append), to tell an automatic placement from the user's.
+`plot_px` (width, height) is the plot px the domains are fractions of; by
+default the layout's size less its margins (`_scat_legend_figure_px`).
+`current` is the outside position (`:outside_right`, `:outside_bottom`) the
+legend has now, if any: it keeps it while the choice between the two is
+within `_LEGEND_SIDE_HYSTERESIS` of the cell width (see the note below).
 """
-function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, ydom; before::Integer = 0)
+function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, ydom; before::Integer = 0,
+		plot_px = nothing, current::Union{Nothing, Symbol} = nothing)
 	indices = Int[]
 	for (index, trace) in enumerate(p.data)
 		before > 0 && index >= before && break
@@ -2694,7 +2706,7 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 		push!(indices, index)
 	end
 	isempty(indices) && return nothing
-	width_px, height_px = _scat_legend_figure_px(p.layout)
+	width_px, height_px = something(plot_px, _scat_legend_figure_px(p.layout))
 	w = width_px * (xdom[2] - xdom[1])
 	h = height_px * (ydom[2] - ydom[1])
 	(w > 0 && h > 0) || return nothing
@@ -2748,9 +2760,16 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 	# column when that column leaves the plot area at least half its width;
 	# else below it as a column (`_legend_rule_placement`; plotly.js wraps a
 	# horizontal legend at the width of the whole grid, so a wider row would
-	# run under its neighbours).
-	outside = _legend_row_width(p, legend_id, before) <= w ||
-		legend_size[1] + _ROOM_GAP > w / 2 ? :outside_bottom : :outside_right
+	# run under its neighbours). A legend outside already keeps its side while
+	# the choice is within `_LEGEND_SIDE_HYSTERESIS` of the width: its own
+	# room moves the cell (an equal-aspect neighbour fitted to the height the
+	# bottom margin leaves), and chama_a6 went right, below and right again
+	# on every pass, the column 1.2 px over half the cell width on the right
+	# and 6.5 px under it below.
+	slack = current === :outside_bottom ? _LEGEND_SIDE_HYSTERESIS * w :
+		current === :outside_right ? -_LEGEND_SIDE_HYSTERESIS * w : 0.0
+	outside = _legend_row_width(p, legend_id, before) <= w + slack ||
+		legend_size[1] + _ROOM_GAP > w / 2 - slack ? :outside_bottom : :outside_right
 	(legend_size[1] > w || legend_size[2] > h) && return outside
 	return _scat_best_legend_position(
 		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size;
@@ -2761,12 +2780,13 @@ end
 # Placement of cell legend `legend_id` at `position` of the best-position
 # rule for the plot area `xdom` x `ydom` (paper): `_legend_placement`, with a
 # column below the cell (orientation "v") when the legend's one row is wider
-# than the plot area (`_legend_best_cell_position`). `before` as there.
+# than the plot area (`_legend_best_cell_position`). `before` and `plot_px`
+# as there.
 function _legend_rule_placement(p::Plot, legend_id::AbstractString, position::Symbol, xdom, ydom, inset;
-		before::Integer = 0)
+		before::Integer = 0, plot_px = nothing)
 	placement = _legend_placement(position, xdom, ydom, inset; figure = false)
 	position === :outside_bottom || return placement
-	width_px = _scat_legend_figure_px(p.layout)[1] * (xdom[2] - xdom[1])
+	width_px = something(plot_px, _scat_legend_figure_px(p.layout))[1] * (xdom[2] - xdom[1])
 	_legend_row_width(p, legend_id, before) <= width_px || (placement[:orientation] = "v")
 	return placement
 end

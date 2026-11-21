@@ -2620,7 +2620,10 @@ end
 	g = plot_choropleth(["USA"], [1.0]); set_template!(g, "plotly_dark")
 	first_bar = get(g.data[1].fields, :colorbar, nothing)
 	plot_choropleth!(g, ["CAN"], [2.0])
-	@test g.layout.fields[:template] === PlotlyBase.templates[:plotly_dark]
+	# D21: the figure holds the power-format copy of the named template
+	# (made once per registered template and shared, so `===` holds).
+	@test g.layout.fields[:template] === _SFN._power_template(PlotlyBase.templates[:plotly_dark])
+	@test g.layout.fields[:template] !== PlotlyBase.templates[:plotly_dark]
 	@test _SFN._finalize_figure!(g) === false
 	@test get(g.data[1].fields, :colorbar, nothing) != first_bar
 	# The strict run of the fast path raises where it cannot write; the
