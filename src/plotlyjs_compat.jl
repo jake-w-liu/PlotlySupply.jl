@@ -191,6 +191,37 @@ const _TRANSPARENT_BACKGROUND = "rgba(0,0,0,0)"
 # exactly like a non-finite number, so non-finite values are written as null.
 const _JSON_NONFINITE_AS_NULL = (allownan = true, nan = "null", inf = "null", ninf = "null")
 
+# `json` of a figure: the plotly figure JSON, with non-finite numbers written
+# as `null` (plotly.js draws them as gaps) like `savefig(...; format = "json")`
+# does, where PlotlyBase's own serialiser raises on NaN/Inf. `kwargs` are
+# JSON.jl's; the non-finite keywords may be overridden. A grid figure
+# serialises its plotly figure, not its fields.
+if _JSON_IS_OWN
+	json(p::Plot; kwargs...) = PlotlyBase.JSON.json(p; _JSON_NONFINITE_AS_NULL..., kwargs...)
+	json(io::IO, p::Plot; kwargs...) = PlotlyBase.JSON.json(io, p; _JSON_NONFINITE_AS_NULL..., kwargs...)
+	json(sp::SyncPlot; kwargs...) = json(sp.plot; kwargs...)
+	json(io::IO, sp::SyncPlot; kwargs...) = json(io, sp.plot; kwargs...)
+	json(sf::SubplotFigure; kwargs...) = json(getfield(sf, :fig); kwargs...)
+	json(io::IO, sf::SubplotFigure; kwargs...) = json(io, getfield(sf, :fig); kwargs...)
+end
+
+# Plots built by PlotlySupply (and `Plot(...)` of generic traces) serialise
+# non-finite numbers as `null` in every JSON route: `savejson`, `print` and
+# `string` of a figure, and the plotly JSON MIME type. These methods are
+# narrower than PlotlyBase's (a `Plot` of any trace vector), so they extend
+# rather than replace them.
+const _GenericTracePlot = Plot{<:AbstractVector{<:GenericTrace}}
+function PlotlyBase.savejson(p::_GenericTracePlot, filename::AbstractString)
+	lowercase(splitext(filename)[2]) == ".json" || throw(ArgumentError(
+		"savejson: the file name must end in .json; use savefig for other formats.",
+	))
+	savefig(filename, p; format = "json")
+	return p
+end
+Base.print(io::IO, p::_GenericTracePlot) = (PlotlyBase.JSON.json(io, p; _JSON_NONFINITE_AS_NULL...); nothing)
+Base.show(io::IO, ::MIME"application/vnd.plotly.v1+json", p::_GenericTracePlot) =
+	(PlotlyBase.JSON.json(io, p; _JSON_NONFINITE_AS_NULL...); nothing)
+
 struct _ExportOptions
 	width::Float64          # layout width in CSS px
 	height::Float64         # layout height in CSS px
@@ -203,7 +234,10 @@ struct _ExportOptions
 	units::Symbol           # unit the caller gave sizes in (:px, :in, :cm, :mm, :pt)
 	scale_given::Bool       # `scale` was passed explicitly
 	fonts::Symbol           # :auto, :embed or :outline (pdf/eps text)
+	sized::Bool             # the figure's style carries a physical size (D18)
 end
+_ExportOptions(width, height, scale, dpi, deterministic, background, tight, timeout, units, scale_given, fonts) =
+	_ExportOptions(width, height, scale, dpi, deterministic, background, tight, timeout, units, scale_given, fonts, false)
 
 struct _PreparedRendererExport
 	data_js::String
@@ -248,7 +282,7 @@ end
 
 function _filename_export_format(
 	filename::AbstractString,
-	format::Union{Nothing,AbstractString},
+	format::Union{Nothing,AbstractString,Symbol},
 )
 	ext = lowercase(splitext(filename)[2])
 	inferred = isempty(ext) ? "png" : String(lstrip(ext, '.'))
@@ -397,6 +431,7 @@ function _normalize_export_options(p::Plot, kwargs)
 	# Every magnification a format of this call can use: `scale` for all
 	# formats (and the 300-dpi TIFF default when neither is given), or dpi / 96
 	# for raster and 1 for vector output.
+	sized = _export_style_is_sized(p)
 	scales = if dpi !== nothing
 		(dpi / _CSS_PX_PER_INCH, 1.0)
 	elseif scale_value === nothing
@@ -433,15 +468,34 @@ function _normalize_export_options(p::Plot, kwargs)
 		units,
 		scale_value !== nothing,
 		_normalize_export_fonts(get(kwargs, :fonts, nothing)),
+		sized,
 	)
 end
 
+# Whether the style the figure carries (the active style when it carries none)
+# sets a physical figure width: every journal preset and any style registered
+# with a width. Raster exports of such a figure default to 300 dpi (D18).
+_export_style_is_sized(p::Plot) = _with_figure_style(p) do
+	isdefined(@__MODULE__, :_active_style) || return false
+	Base.invokelatest(_active_style).width > 0
+end
+
+# The resolution a raster export of `fmt` uses when the caller gave neither
+# `dpi` nor `scale`: 300 dpi for TIFF always and for PNG/JPEG under a sized
+# style; `nothing` otherwise (scale 1, 96 dpi).
+function _default_raster_dpi(options::_ExportOptions, fmt::AbstractString)
+	(options.dpi === nothing && !options.scale_given) || return nothing
+	(fmt == "tiff" || (options.sized && fmt in _RASTER_FORMATS)) && return _DEFAULT_TIFF_DPI
+	return nothing
+end
+
 # Magnification used for `fmt`: `dpi` sets the raster resolution (scale =
-# dpi / 96) and leaves vector output at its physical size; a TIFF without
-# `dpi` or `scale` is drawn at 300 dpi.
+# dpi / 96) and leaves vector output at its physical size; a TIFF, and a PNG
+# or JPEG of a sized journal style, without `dpi` or `scale` is drawn at 300 dpi.
 function _format_scale(options::_ExportOptions, fmt::AbstractString)
 	if options.dpi === nothing
-		fmt == "tiff" && !options.scale_given && return _DEFAULT_TIFF_DPI / _CSS_PX_PER_INCH
+		default = _default_raster_dpi(options, fmt)
+		default === nothing || return default / _CSS_PX_PER_INCH
 		return options.scale
 	end
 	return fmt in _RASTER_FORMATS ? options.dpi / _CSS_PX_PER_INCH : 1.0
@@ -454,7 +508,7 @@ end
 function _format_dpi(options::_ExportOptions, fmt::AbstractString)
 	fmt in _RASTER_FORMATS || return nothing
 	options.dpi === nothing || return options.dpi
-	(fmt == "tiff" || options.units !== :px) || return nothing
+	(fmt == "tiff" || options.units !== :px || _default_raster_dpi(options, fmt) !== nothing) || return nothing
 	return _CSS_PX_PER_INCH * _format_scale(options, fmt)
 end
 
@@ -691,8 +745,8 @@ end
 # no destination is touched.
 function _prepare_export(p::Plot, formats, kwargs)
 	options = _normalize_export_options(p, kwargs)
-	("eps" in formats || ("pdf" in formats && options.fonts === :outline)) &&
-		_ghostscript_command()
+	"eps" in formats && _ghostscript_command()
+	"pdf" in formats && options.fonts === :outline && _ghostscript_command(; purpose = :outline)
 	wants_renderer = any(in(_RENDERER_FORMATS), formats)
 	wants_document = any(in(("html", "json")), formats)
 	source = _export_source(p, options; pan = wants_renderer)
@@ -758,9 +812,12 @@ end
 Write `p` as a standalone HTML page. The page embeds the bundled plotly.js
 $(_PLOTLYJS_VERSION) that desktop plots and image exports render with (so it
 draws exactly like them and needs no network for plotly.js) and loads MathJax
-2.7.9 from its CDN when it is opened. Non-finite numbers become `null` and
+2.7.9 from its CDN when it is opened, only when the figure has math (a `\$...\$`
+pair in some text). Non-finite numbers become `null` and
 every embedded JSON blob is escaped so user text cannot end the inline script.
 """
+const _HTML_MATH_PATTERN = r"\$[^$]*\$"
+
 function _savefig_html(io::IO, p::Plot; background::Union{Nothing,String} = nothing)
 	lowered = PlotlyBase.JSON.lower(p)
 	data = lowered[:data]
@@ -780,8 +837,17 @@ function _savefig_html(io::IO, p::Plot; background::Union{Nothing,String} = noth
 		end
 	end
 
+	data_json = _json_html(data)
+	layout_json = _json_html(layout)
+	config_json = _json_html(config)
+	frames_json = isempty(frames) ? "" : _json_html(frames)
+	# MathJax (a blocking script from its CDN) only when some text may hold
+	# math, i.e. a `$...$` pair (plotly.js's own test): a figure without it
+	# draws without network access.
+	mathjax_head = any(text -> occursin(_HTML_MATH_PATTERN, text),
+		(data_json, layout_json, config_json, frames_json)) ? _mathjax_head_html() : ""
 	then_frames = isempty(frames) ? "" :
-		".then(function () { return Plotly.addFrames(gd, $(_json_html(frames))); })" *
+		".then(function () { return Plotly.addFrames(gd, $(frames_json)); })" *
 		".then(function () { return Plotly.animate(gd, null); })"
 	div_width = _html_css_length(_lowered_get(layout, :width), "100%")
 	div_height = _html_css_length(_lowered_get(layout, :height), "100%")
@@ -799,7 +865,7 @@ function _savefig_html(io::IO, p::Plot; background::Union{Nothing,String} = noth
   <meta charset="utf-8" />
   <style>html, body { margin: 0; padding: 0; height: 100%; }</style>
   <script type="text/javascript">window.PlotlyConfig = {MathJaxConfig: 'local'};</script>
-$(_mathjax_head_html())
+$(mathjax_head)
 $(plotlyjs_script)
 </head>
 <body>
@@ -809,7 +875,7 @@ window.PLOTLYENV = window.PLOTLYENV || {};
 $(base_url_line)(function () {
   var gd = document.getElementById($(_json_html(divid)));
   if (!gd) { return; }
-  Plotly.newPlot(gd, $(_json_html(data)), $(_json_html(layout)), $(_json_html(config)))$(then_frames);
+  Plotly.newPlot(gd, $(data_json), $(layout_json), $(config_json))$(then_frames);
 })();
   </script>
 </body>
@@ -880,8 +946,17 @@ end
 
 # Each export starts from a purged div and `Plotly.newPlot`, so no state
 # (axis constraints, colorbar groups, transforms, animations) of an earlier,
-# unrelated export can leak into this one.
+# unrelated export can leak into this one. `Plotly.toImage` appends a
+# temporary div (position:absolute; left:-5000px) to the page and removes it
+# only when it succeeds: after a failed png/svg render the orphan would make
+# every later printed PDF/EPS page longer (an extra blank page), so the
+# leftovers are removed here.
 const _EXPORT_RESET_DIV_JS = """
+    Array.prototype.slice.call(document.body.children).forEach(function(el) {
+      if (el === div || el.contains(div) || !el.style || el.style.left !== '-5000px') return;
+      try { Plotly.purge(el); } catch (e) {}
+      el.remove();
+    });
     div.style.transform = '';
     div.style.transformOrigin = '';
     div.style.width = '';
@@ -1008,9 +1083,11 @@ $(_EXPORT_RESET_DIV_JS)
     const config = Object.assign({}, $(prepared.config_js));
     // WebGL canvases (3-D scenes, maps) are embedded as bitmaps; give them
     // proportionally more pixels at a raster scale above 1 (plotly.js accepts
-    // plotGlPixelRatio in [1, 4] and defaults to 2).
-    if ($(_json_js(raster)) && scale > 1 && config.plotGlPixelRatio == null) {
-      config.plotGlPixelRatio = Math.min(4, 2 * scale);
+    // plotGlPixelRatio in [1, 4] and defaults to 2). An SVG keeps its scene as
+    // a bitmap whatever `scale` is, so it gets the largest ratio (384 ppi).
+    if (config.plotGlPixelRatio == null) {
+      if ($(_json_js(raster))) { if (scale > 1) config.plotGlPixelRatio = Math.min(4, 2 * scale); }
+      else config.plotGlPixelRatio = 4;
     }
     const figure = {data: $(prepared.data_js), layout: layout, config: config};
 """
@@ -1361,23 +1438,37 @@ const _FLATTEN_TRANSLUCENCY_JS = """
         var bg = parse(full[key].bgcolor || 'rgba(0,0,0,0)');
         if (bg && bg[3] < 1) sceneUpdate[key + '.bgcolor'] = css(over(bg, bg[3], paper));
       });
+      // The paper background is a CSS colour of the page, which the element
+      // rewrite below never reaches: Ghostscript would paint its alpha at full
+      // strength. A translucent (not fully transparent) paper gets the opaque
+      // colour it shows over white.
+      if (paperColour[3] > 0 && paperColour[3] < 1) sceneUpdate['paper_bgcolor'] = css(paper);
       if (Object.keys(sceneUpdate).length > 0) await Plotly.relayout(div, sceneUpdate);
       var areas = [];
+      var areaBelow = new Map();
+      function areaAt(el, count) {
+        var b = el.getBoundingClientRect();
+        var x = b.left + b.width / 2, y = b.top + b.height / 2;
+        for (var i = count - 1; i >= 0; i--) {
+          var r = areas[i].box;
+          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return areas[i].colour;
+        }
+        return paper;
+      }
       div.querySelectorAll('.bglayer rect.bg').forEach(function(rect) {
         var style = getComputedStyle(rect);
         var colour = parse(style.fill);
         if (!colour) return;
         var alpha = colour[3] * parseFloat(style.fillOpacity || '1');
-        areas.push({box: rect.getBoundingClientRect(), colour: over(colour, alpha, paper)});
+        // A plot background is blended once, over what lies below it (the
+        // paper, or the plot area of the host cell for an inset).
+        var below = areaAt(rect, areas.length);
+        areaBelow.set(rect, below);
+        areas.push({box: rect.getBoundingClientRect(), colour: over(colour, alpha, below)});
       });
       function backgroundAt(el) {
-        var b = el.getBoundingClientRect();
-        var x = b.left + b.width / 2, y = b.top + b.height / 2;
-        for (var i = areas.length - 1; i >= 0; i--) {
-          var r = areas[i].box;
-          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return areas[i].colour;
-        }
-        return paper;
+        if (areaBelow.has(el)) return areaBelow.get(el);
+        return areaAt(el, areas.length);
       }
       var memo = new Map();
       var translucentNodes = [];
@@ -1502,10 +1593,10 @@ $(_EXPORT_RESET_DIV_JS)
     const config = Object.assign({}, $(prepared.config_js));
     // WebGL canvases (3-D scenes, maps) are bitmaps that the transform below
     // enlarges, so draw them with proportionally more pixels; plotly.js
-    // accepts plotGlPixelRatio in [1, 4] and defaults to 2.
-    if (scale > 1 && config.plotGlPixelRatio == null) {
-      config.plotGlPixelRatio = Math.min(4, 2 * scale);
-    }
+    // accepts plotGlPixelRatio in [1, 4] and defaults to 2. A PDF scene is
+    // embedded at the largest ratio (384 ppi at the page size, above the 300
+    // dpi journals ask for), whatever `scale` is.
+    if (config.plotGlPixelRatio == null) config.plotGlPixelRatio = 4;
     await Plotly.newPlot(div, $(prepared.data_js), layout, config);
 $(_FLATTEN_COLORBAR_GRADIENTS_JS)
 $(flatten_translucency ? _FLATTEN_TRANSLUCENCY_JS : "")
@@ -1942,7 +2033,7 @@ function _resolve_savefig_target(filename::AbstractString)
 		target = isabspath(link) ? link : normpath(joinpath(dirname(target), link))
 	end
 	isdir(target) &&
-		throw(ArgumentError("savefig destination is a directory: $filename"))
+		throw(ArgumentError("savefig: destination is a directory: $filename"))
 	ispath(target) && !isfile(target) && throw(ArgumentError(
 		"savefig: destination exists and is not a regular file: $(repr(filename))",
 	))
@@ -2057,7 +2148,7 @@ _export_plot(sp::SyncPlot) = sp.plot
 function _savefig_filename(
 	filename::AbstractString,
 	p::Union{Plot,SyncPlot},
-	format::Union{Nothing,AbstractString},
+	format::Union{Nothing,AbstractString,Symbol},
 	kwargs;
 	state::_ExportState = _EXPORT_STATE,
 	ec = nothing,
@@ -2165,7 +2256,7 @@ What each file contains:
   instead of letting it show through; export pdf to keep true transparency.
 
 # Keyword arguments
-- `format::Union{Nothing,AbstractString} = nothing`: output format, overriding
+- `format::Union{Nothing,AbstractString,Symbol} = nothing`: output format, overriding
   the extension. Not allowed with a vector of file names.
 - `width`, `height::Real`: figure size in `units`. Default: the figure's
   `layout.width`/`layout.height` when set, else the active style's default
@@ -2253,10 +2344,10 @@ bytes = savefig(fig; format = "svg")
 function savefig(
 	io::IO,
 	p::Plot;
-	format::Union{Nothing,AbstractString} = nothing,
+	format::Union{Nothing,AbstractString,Symbol} = nothing,
 	kwargs...,
 )
-	fmt = _validate_export_format(format === nothing ? "png" : format)
+	fmt = _validate_export_format(format === nothing ? "png" : String(format))
 	prepared = _prepare_savefig(p, fmt, kwargs)
 	return _savefig_prepared(io, p, fmt, prepared)
 end
@@ -2272,7 +2363,7 @@ end
 function savefig(
 	filename::AbstractString,
 	p::Union{Plot,SyncPlot};
-	format::Union{Nothing,AbstractString} = nothing,
+	format::Union{Nothing,AbstractString,Symbol} = nothing,
 	kwargs...,
 )
 	return _savefig_filename(filename, p, format, kwargs)
@@ -2308,13 +2399,20 @@ function _invoke_plot_add_trace!(
 	trace::GenericTrace;
 	kw...,
 )
-	return invoke(
-		PlotlyBase.add_trace!,
-		Tuple{Plot,GenericTrace},
-		p,
-		trace;
-		kw...,
-	)
+	try
+		return invoke(
+			PlotlyBase.add_trace!,
+			Tuple{Plot,GenericTrace},
+			p,
+			trace;
+			kw...,
+		)
+	catch err
+		# PlotlyBase reports a cell outside the grid as a plain ErrorException.
+		err isa ErrorException && occursin("too large for layout", err.msg) &&
+			throw(ArgumentError("add_trace!: $(err.msg); `row` and `col` must address a cell of the figure's grid."))
+		rethrow()
+	end
 end
 
 function PlotlyBase.add_trace!(

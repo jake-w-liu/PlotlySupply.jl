@@ -840,6 +840,9 @@ hline!(fig, 2; color = :gray, label = "floor", labelpos = :end)
 hline!(fig, y::Union{_RefPosition, AbstractVector}; kwargs...) = _ref_hline!(fig, y; kwargs...)
 hline!(sf::SubplotFigure, y::Union{_RefPosition, AbstractVector}; kwargs...) =
 	_ref_subplot_call!(_ref_hline!, sf, y; kwargs...)
+# A position of another type is an ArgumentError naming the function.
+hline!(fig, y; kwargs...) = throw(ArgumentError(
+	"hline!: `y` must be a real number, a Date/DateTime or a vector of them; got $(repr(y))."))
 
 """
 	vline!(fig, x; color=nothing, dash="", linewidth=nothing, opacity=1, layer="above",
@@ -868,6 +871,8 @@ vline!(sf, [0.5, 1.5]; row = 1, col = 2, dash = :dot, legend = "events")
 vline!(fig, x::Union{_RefPosition, AbstractVector}; kwargs...) = _ref_vline!(fig, x; kwargs...)
 vline!(sf::SubplotFigure, x::Union{_RefPosition, AbstractVector}; kwargs...) =
 	_ref_subplot_call!(_ref_vline!, sf, x; kwargs...)
+vline!(fig, x; kwargs...) = throw(ArgumentError(
+	"vline!: `x` must be a real number, a Date/DateTime or a vector of them; got $(repr(x))."))
 
 # ---------------------------------------------------------------------------
 # F16b: hspan! / vspan!

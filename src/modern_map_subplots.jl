@@ -639,7 +639,7 @@ function _apply_subplot_title_annotations!(
 				push!(cells, (row, col))
 			end
 			length(titles) <= length(domains) || throw(ArgumentError(
-				"Subplots: `subplot_titles` has $(length(titles)) entries but " *
+				"subplots: `subplot_titles` has $(length(titles)) entries but " *
 				"the grid has only $(length(domains)) occupied cell(s); " *
 				"titles for insets are not supported.",
 			))
@@ -654,7 +654,7 @@ function _apply_subplot_title_annotations!(
 			end
 		else
 			throw(ArgumentError(
-				"Subplots: `subplot_titles` must be a ($(sp.rows), $(sp.cols)) " *
+				"subplots: `subplot_titles` must be a ($(sp.rows), $(sp.cols)) " *
 				"matrix (one title per cell) or a 1×N row listing the " *
 				"occupied cells in row-major order; got size " *
 				"$(size(titles)).",
@@ -815,7 +815,7 @@ function _plotlysupply_subplot_layout(sp::Subplots)
 	# PlotlyBase does not check the shape, so a smaller matrix would raise a
 	# raw BoundsError and a larger one would silently drop the extra cells.
 	size(sp.specs) == (sp.rows, sp.cols) || throw(ArgumentError(
-		"Subplots: `specs` must have size (rows, cols) = " *
+		"subplots: `specs` must have size (rows, cols) = " *
 		"($(sp.rows), $(sp.cols)); got $(size(sp.specs)).",
 	))
 	has_modern_map = _contains_modern_map(sp)

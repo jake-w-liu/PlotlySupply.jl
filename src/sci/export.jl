@@ -1138,19 +1138,23 @@ const _GHOSTSCRIPT_CANDIDATES = Sys.iswindows() ? ("gswin64c", "gswin32c", "gs")
 """
 	_ghostscript_command() -> String
 
-Path of the Ghostscript executable used for EPS export. Throws
+Path of the Ghostscript executable used for EPS export and for outlined PDF
+text (`purpose = :outline` words the error for that case). Throws
 `ArgumentError` with install guidance when Ghostscript is not on `PATH`.
 """
-function _ghostscript_command()
+function _ghostscript_command(; purpose::Symbol = :eps)
 	for name in _GHOSTSCRIPT_CANDIDATES
 		path = Sys.which(name)
 		path === nothing || return path
 	end
+	what, instead = purpose === :outline ?
+		("`fonts = :outline` PDF export", "pass `fonts = :embed` (or `:auto`) to keep the text as fonts") :
+		("EPS export", "export \"pdf\" or \"svg\" instead")
 	throw(ArgumentError(
-		"savefig: EPS export needs Ghostscript (`gs`), which was not found on PATH. " *
+		"savefig: $what needs Ghostscript (`gs`), which was not found on PATH. " *
 		"Install it (macOS: `brew install ghostscript`; Debian/Ubuntu: " *
 		"`apt install ghostscript`; Windows: https://ghostscript.com/releases/) " *
-		"or export \"pdf\" or \"svg\" instead.",
+		"or $instead.",
 	))
 end
 

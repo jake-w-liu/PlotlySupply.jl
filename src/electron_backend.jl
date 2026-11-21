@@ -901,6 +901,23 @@ function to_syncplot(
 	autoplay::Bool = true,
 	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
 )
+	_syncplot_window_options(
+		"to_syncplot";
+		app = app,
+		width = width,
+		height = height,
+		title = title,
+		show = show,
+		autoplay = autoplay,
+		timeout_s = timeout_s,
+	)
+	# A figure built with the raw PlotlyBase verbs (`make_subplots`,
+	# `add_trace!`, `relayout!`) is settled before it is drawn, as a figure
+	# of every PlotlySupply constructor is (and as `savefig` settles its
+	# copy): plotly.js would otherwise fit shared-axis groups to a fixed
+	# sibling's range and cut the data (D10-M1). A settled figure is not
+	# written to.
+	_finalize_figure!(fig)
 	return _create_syncplot_window(
 		fig;
 		app = app,
@@ -1463,18 +1480,34 @@ function _do_react!(p::Plot, data::AbstractVector{<:AbstractTrace}, layout)
 	return p
 end
 
+# Trace indices of the raw verbs follow PlotlyBase's contract (a BoundsError
+# for an index outside the figure, as the tests of the compatibility verbs
+# pin); repeated indices are an ArgumentError naming the verb. Both are raised
+# before anything changes.
+function _check_trace_indices(who::AbstractString, p::Plot, inds; unique::Bool = false, upto::Int = length(p.data))
+	for ind in inds
+		(1 <= ind <= upto) || throw(BoundsError(p.data, ind))
+	end
+	unique && !allunique(inds) && throw(ArgumentError(
+		"$(who): trace indices must be distinct; got $(collect(inds)).",
+	))
+	return nothing
+end
+
 function _do_addtraces!(p::Plot, traces::AbstractTrace...)
 	push!(p.data, traces...)
 	return p
 end
 
 function _do_addtraces!(p::Plot, i::Int, traces::AbstractTrace...)
+	_check_trace_indices("addtraces!", p, (i,); upto = length(p.data) + 1)
 	p.data = vcat(p.data[1:i-1], traces..., p.data[i:end])
 	return p
 end
 
 function _do_deletetraces!(p::Plot, inds::Int...)
-	deleteat!(p.data, inds)
+	_check_trace_indices("deletetraces!", p, inds; unique = true)
+	deleteat!(p.data, sort!(collect(inds)))
 	return p
 end
 
@@ -5410,6 +5443,7 @@ function _do_restyle!(
 	update::AbstractDict = Dict();
 	kwargs...,
 )
+	_check_trace_indices("restyle!", p, (ind,))
 	memo = IdDict{Any,Any}()
 	setter_origins = IdDict{Any,Nothing}()
 	staged = _stage_restyle(
@@ -5449,6 +5483,7 @@ function _do_restyle!(
 	update::AbstractDict = Dict();
 	kwargs...,
 )
+	_check_trace_indices("restyle!", p, inds)
 	memo = IdDict{Any,Any}()
 	setter_origins = IdDict{Any,Nothing}()
 	staged = _stage_restyle(
@@ -5487,6 +5522,7 @@ function _do_restyle!(p::Plot, update::AbstractDict = Dict(); kwargs...)
 end
 
 function _do_movetraces!(p::Plot, to_end::Int...)
+	_check_trace_indices("movetraces!", p, to_end; unique = true)
 	staged = copy(p.data)
 	inds = collect(to_end)
 	moved = staged[inds]
@@ -5501,14 +5537,10 @@ function _do_movetraces!(
 	dest::AbstractVector{Int},
 )
 	length(src) == length(dest) || throw(DimensionMismatch(
-		"`src` and `dest` must contain the same number of indices.",
+		"movetraces!: `src` and `dest` must contain the same number of indices.",
 	))
-	for ind in src
-		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
-	end
-	for ind in dest
-		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
-	end
+	_check_trace_indices("movetraces!", p, src; unique = true)
+	_check_trace_indices("movetraces!", p, dest; unique = true)
 
 	staged = copy(p.data)
 	for (from, to) in zip(src, dest)
@@ -5554,10 +5586,10 @@ function _validate_trace_splice_args(
 
 		for (ix, p_ix) in enumerate(indices)
 			inserts[ix] isa AbstractVector || throw(ArgumentError(
-				"update attribute $(repr(key)) at position $ix must be an `AbstractVector`.",
+				"extendtraces!/prependtraces!: update attribute $(repr(key)) at position $ix must be an `AbstractVector`.",
 			))
 			p.data[p_ix][key] isa AbstractVector || throw(ArgumentError(
-				"cannot extend or prepend missing/non-vector trace attribute $(repr(key)) " *
+				"extendtraces!/prependtraces!: cannot extend or prepend missing/non-vector trace attribute $(repr(key)) " *
 				"on trace index $p_ix.",
 			))
 		end
@@ -6294,8 +6326,20 @@ function _layout_delta_has_renderer_side_effects(
 		occursin(_PLOTLY_AXIS_NAME_LEAF, leaf) &&
 			_layout_has_annotations_or_images(fields) &&
 			return true
-		# impliedEdits apply only for a non-null value.
-		value === nothing && continue
+		# impliedEdits apply only for a non-null value, but removing the
+		# attribute does not undo the edit an earlier call implied (a range
+		# leaves autorange = false, a dtick leaves tickmode = "linear", ...):
+		# the window would keep it while the model does not. Such a removal is
+		# sent as the whole staged model.
+		if value === nothing
+			(occursin(_PLOTLY_AXIS_RANGE_PATH, path) ||
+				occursin(_PLOTLY_LAYOUT_TICK_PATH, path) ||
+				occursin(_PLOTLY_COLORAXIS_BOUND_PATH, path) ||
+				occursin(_PLOTLY_COLORAXIS_SCALE_PATH, path) ||
+				occursin(_PLOTLY_ASPECTRATIO_PATH, path) ||
+				leaf in ("autorange", "cauto", "autocolorscale")) && return true
+			continue
+		end
 		parent = _plotly_path_parent(path)
 		aspect = match(_PLOTLY_ASPECTRATIO_PATH, path)
 		consistent = if occursin(_PLOTLY_AXIS_RANGE_PATH, path)
@@ -6414,8 +6458,17 @@ function _trace_delta_has_renderer_side_effects(
 		root in _PLOTLY_CLEAR_AXIS_TYPE_ROOTS &&
 			_layout_has_explicit_axis_type(layout_fields) &&
 			return true
-		# impliedEdits apply only for a non-null value.
-		value === nothing && continue
+		# Removing an attribute does not undo the edit an earlier call implied
+		# (autocontour/zauto/cauto/autocolorscale/tickmode): send the model.
+		if value === nothing
+			(occursin(_PLOTLY_TRACE_BOUND_PATH, path) ||
+				occursin(_PLOTLY_TRACE_SCALE_PATH, path) ||
+				path == "zmin" || path == "zmax" ||
+				path in _PLOTLY_CONTOUR_PATHS ||
+				occursin(_PLOTLY_TRACE_TICK_PATH, path) ||
+				leaf in ("autocontour", "zauto", "cauto", "autocolorscale")) && return true
+			continue
+		end
 		parent = _plotly_path_parent(path)
 		consistent = if occursin(_PLOTLY_TRACE_BOUND_PATH, path)
 			_implied_edit_consistent(

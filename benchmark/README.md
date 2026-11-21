@@ -82,9 +82,12 @@ column (load 26-49, baseline there: this tree without the workload):
 The first figure of every family is faster than in the wave-4 record (the
 machine is also quieter), `using` 0.6 s longer than 1.9.4 for the larger
 image. Not better: the first html export takes 0.15 s and every html export
-about 45 ms (wave 4: 5 ms and 2 ms), probably because html files now embed the
-compatibility-patched plotly.js of release 1.9.4 (a few MB written per file;
-not profiled; 1.9.4 itself takes 49 ms per call).
+about 45 ms (wave 4: 5 ms and 2 ms). Wave 7 profiled it: writing the 4.4 MB html
+costs 0.2 ms; the time was the per-call integrity check of the compatibility-
+patched plotly.js (read and SHA-256 of the source, the patched copy and both
+licences, about 90 ms under load). The check now runs once per session per
+asset (and again when a file's size or mtime changes), and the inline script is
+memoised; test/regression_perf.jl guards the cost.
 
 Second calls in the same process (load 9): scatter 0.017 s (1.9.4: 0.035 s),
 heatmap 0.058 s (0.058 s), subplots 0.108 s (0.107 s); at load 100 png
@@ -140,7 +143,11 @@ built in a scratch copy, minimum of 2 fresh processes):
   load ElectronCall, against the documented lazy loading in
   `src/electron_backend.jl`. That trade-off belongs to the Electron backend.
 
-The only package state the workload leaves in the image is the cache of
+The workload runs no html export (it would resolve the lazy plotly.js
+artifact, which fails an offline package-image build, and would save the
+patched-asset state, including its "removal at exit is registered" flag, into the
+image; `__init__` also resets that state). The only package state the workload
+leaves in the image is the cache of
 Plotly's marker symbol names (`_CMN_MARKER_SYMBOLS`, read from PlotlyBase's
 bundled schema, so it is rebuilt whenever PlotlyBase changes). With and
 without the workload, every other module-level container has the same length
