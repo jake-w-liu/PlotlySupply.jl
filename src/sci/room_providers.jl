@@ -227,10 +227,28 @@ end
 # of a lone heatmap's cell, taken for an inside legend, held the margins its
 # colorbar pushed on one pass and not on the next, layout-fuzz-01).
 function _lt_legend_box(plan, id::String)
+	id in _lt_listed_legends(plan) || return nothing
 	d = _symbol_dict(get(plan.layout.fields, Symbol(id), nothing))
 	get(d, :visible, true) === false && return nothing
-	_lt_box_size(plan, id) === nothing && return nothing
 	return d
+end
+
+# The ids of the legends some trace of the plan's figure is listed in (as
+# `_legend_entry_indices` counts entries), from one scan of the traces per
+# plan: asked per legend, the emptiness check cost a 6 x 6 grid of heatmaps
+# a fifth more per finalize (Q27).
+function _lt_listed_legends(plan)
+	memo = _lt_plan_memo(plan)
+	ids = get(memo, :listed_legends, nothing)
+	ids === nothing || return ids::Set{String}
+	ids = Set{String}()
+	for trace in plan.p.data
+		trace isa GenericTrace || continue
+		_trace_will_showlegend(trace) || continue
+		push!(ids, _legend_trace_legend_id(trace))
+	end
+	memo[:listed_legends] = ids
+	return ids
 end
 
 # The inset legends of this figure are placed with (`_legend_placement`).
@@ -890,7 +908,11 @@ function _room_place!(plan, ::Val{:legend_titles})
 	items = get(plan.layout.fields, :annotations, nothing)
 	single = plan.layout.subplots.rows * plan.layout.subplots.cols == 1
 	decorations = _lt_decorations(plan)
-	any(d -> d.role in (:inside_legend, :cell_legend, :figure_legend), decorations) &&
+	# A grid holds them always: its cells' legends come and go with their
+	# entries, and a hold that followed them gave a grid of fields without
+	# entries its margins on some passes only (layout-fuzz-01), and a 6 x 6
+	# grid of heatmaps a quarter more allocations per finalize (Q27).
+	(plan.ctx.sf !== nothing || any(d -> d.role in (:inside_legend, :cell_legend, :figure_legend), decorations)) &&
 		_lt_hold_pushed_margins!(plan)
 	for d in decorations
 		if d.role === :line

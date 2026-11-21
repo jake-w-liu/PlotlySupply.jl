@@ -1346,7 +1346,8 @@ Edit the colorbars that already exist in a figure.
 - `side::Symbol=:right`: `:right` gives a vertical bar right of the plot
   area (past a right-side y axis' labels) and as tall as it; `:bottom` a
   horizontal bar below the cell's x tick labels and x title, centred on the
-  cell and as wide as it. Every figure update reserves room for the bar,
+  cell and as wide as it (as the plot box drawn for an equal-aspect field,
+  `equalar = true`). Every figure update reserves room for the bar,
   its tick labels and its title (decision D12): when the gap to the
   neighbouring cell is too small the cell's domain shrinks on that side
   (cells sharing that grid edge shrink alike, at most half the cell), at the
@@ -1355,7 +1356,8 @@ Edit the colorbars that already exist in a figure.
   it is on later calls without `x` or `y` (pass `side` again to keep a
   bottom bar at the bottom: the default is `:right`); a vertical bar is
   never drawn shorter than three lines of tick labels plus a title above or
-  below it (at most the plot height).
+  below it (at most the plot height), and a horizontal bar never shorter
+  than the same tick-label length plus a title on its left or right.
 - `len::Real=0`: bar length as a paper fraction, centred on the cell (`0`:
   the cell's extent, following it when its domain changes).
 - `thickness::Real=0`: bar thickness in px (`0`: unchanged).

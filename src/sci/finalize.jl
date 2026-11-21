@@ -1771,7 +1771,11 @@ function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, 
 	lowW = min(W0, _FIN_MIN_FIGURE_WIDTH * min(1.0, W0 / _DEFAULT_EXPORT_WIDTH_PX))
 	newW, newH = W0, H0
 	if layout.subplots.rows * layout.subplots.cols == 1
-		(ctx.sf === nothing && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) || return (W0, H0, flag)
+		# A 1 x 1 grid like a `Plot` (seams-15: its field kept the whole page
+		# height that the same field as a `Plot` or in a 1 x 2 grid dropped),
+		# unless built with `compress = false`.
+		((ctx.sf === nothing || _fin_compress_grid(layout)) && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) ||
+			return (W0, H0, flag)
 		fit = fits[(:xaxis, :yaxis)]
 		# vm-08: the margins at a new size are not those at the base: tick
 		# labels and titles push a margin only where the box reaches the paper
@@ -2351,6 +2355,34 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 		have = max(Float64(current), _fin_isfinite_real(queued) ? Float64(queued) : 0.0)
 		over > have + 0.5 && (layout_updates[:margin_r] = _style_number(ceil(over)))
 	end
+	# A horizontal bar under a fitted field spans the fitted box, which the fit
+	# computed for the plot height of the plan's margins; plotly draws the
+	# height of its own pushes, a few px off (layout-fuzz-04: a bottom bar
+	# 13.5 px short of a wide field whose plot came out 3.6 px taller). The
+	# vertical margins are written as the plan estimated them, so plotly
+	# (which takes the larger of a margin and its push) draws that height.
+	if !isempty(fits) && any(r -> r.owner === :colorbar && r.side === :bottom &&
+			any(k -> k[1] === r.area, keys(fits)), plan.requests)
+		for letter in (:t, :b)
+			est = Float64(getfield(plan.margins, letter))
+			current = _cmn_mapping_get(get(layout.fields, :margin, nothing), letter)
+			_fin_isfinite_real(current) || continue
+			_room_note_margin!(plan, letter, est)
+			queued = get(layout_updates, Symbol(:margin_, letter), nothing)
+			have = max(Float64(current), _fin_isfinite_real(queued) ? Float64(queued) : 0.0)
+			est > have + 0.5 && (layout_updates[Symbol(:margin_, letter)] = _style_number(ceil(est)))
+		end
+	end
+	# A math x title at the bottom paper edge (vm-xtitleclip).
+	# A bottom margin left to plotly (unset, 80 px) is not raised.
+	current_b = _cmn_mapping_get(get(layout.fields, :margin, nothing), :b)
+	math_b = _fin_isfinite_real(current_b) ? _fin_math_xtitle_px(layout; pending = layout_updates) : 0.0
+	if math_b > 0
+		_room_note_margin!(plan, :b, math_b)
+		queued = get(layout_updates, :margin_b, nothing)
+		have = max(Float64(current_b), _fin_isfinite_real(queued) ? Float64(queued) : 0.0)
+		math_b > have + 0.5 && (layout_updates[:margin_b] = _style_number(ceil(math_b)))
+	end
 	_room_margin_updates!(plan)
 	# A raised margin shrinks the plot area this pass solved for.
 	margin = get(layout.fields, :margin, nothing)
@@ -2552,9 +2584,46 @@ function _fin_wrap_title(text::AbstractString, max_chars::Int)
 	return String(take!(out))
 end
 
+# The paper bounds (`lo`, `hi`, `nothing` for the figure edge) along its axis
+# within which the title of axis `key` stays clear of the titles of the
+# neighbouring cells: the middle of the gap to the nearest base axis of the
+# same letter on each side whose plot area overlaps this one across the axis
+# (the cells of its row for an x axis, of its column for a y axis).
+function _fin_wrap_cell_bounds(layout::Layout, key::Symbol, vertical::Bool)
+	_fin_is_base_axis(layout, key) || return (nothing, nothing)
+	letter = String(key)[1]
+	across(k) = begin
+		anchor = _fin_axis_key(_cmn_mapping_get(get(layout.fields, k, nothing), :anchor, vertical ? "x" : "y"))
+		anchor === nothing ? nothing : vertical ? _fin_domain(layout, anchor) : _cmn_y_axis_domain(layout, anchor)
+	end
+	along(k) = vertical ? _cmn_y_axis_domain(layout, k) : _fin_domain(layout, k)
+	own, cross = along(key), across(key)
+	cross === nothing && return (nothing, nothing)
+	lo = hi = nothing
+	for (other, axis) in layout.fields
+		(other isa Symbol && other !== key && _fin_is_axis_key(other) && String(other)[1] == letter &&
+			_fin_is_base_axis(layout, other)) || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		c = across(other)
+		(c === nothing || min(c[2], cross[2]) - max(c[1], cross[1]) <= 1e-9) && continue
+		d = along(other)
+		if d[2] <= own[1] + 1e-9
+			mid = (d[2] + own[1]) / 2
+			lo = lo === nothing ? mid : max(lo, mid)
+		elseif d[1] >= own[2] - 1e-9
+			mid = (own[2] + d[1]) / 2
+			hi = hi === nothing ? mid : min(hi, mid)
+		end
+	end
+	return (lo, hi)
+end
+
 # W5: a plain axis title longer than the figure can show along its axis
 # (centred on the axis, `_FIN_WRAP_PAD` from the figure edges, figure
-# `W` x `H` px) is broken into lines between words; a title that fits again
+# `W` x `H` px, and from the middle of the gap to the next cell of its row or
+# column, `_fin_wrap_cell_bounds`: vm-xtitleoverlap, the titles of a 1 x 3
+# row ran into each other and only the last one was wrapped at the figure
+# edge) is broken into lines between words; a title that fits again
 # (a larger export, a shorter text) is joined again. Math (`$…$`) and styled
 # titles are left as written.
 function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
@@ -2587,12 +2656,21 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 		d = vertical ? _cmn_y_axis_domain(layout, key) : _fin_domain(layout, key)
 		centre = vertical ? m.b + (d[1] + d[2]) / 2 * Hp : m.l + (d[1] + d[2]) / 2 * Wp
 		extent = vertical ? H : W
-		room = 2 * min(centre, extent - centre) - 2 * _FIN_WRAP_PAD
+		width = _text_extent(plain, size)[1] * _FIN_WRAP_WIDTH_SHARE
+		offset, span = vertical ? (m.b, Hp) : (m.l, Wp)
+		# The cell bounds lie beyond the axis' own span: a title within it
+		# (most are) fits them, and they are not scanned for (a scan per
+		# title is quadratic in the cells, Q27).
+		lo, hi = width <= (d[2] - d[1]) * span - 2 * _FIN_WRAP_PAD ? (nothing, nothing) :
+			_fin_wrap_cell_bounds(layout, key, vertical)
+		lo_px = lo === nothing ? 0.0 : offset + lo * span
+		hi_px = hi === nothing ? extent : offset + hi * span
+		room = 2 * min(centre - lo_px, hi_px - centre) - 2 * _FIN_WRAP_PAD
 		max_chars = max(1, floor(Int, room / (_FIN_WRAP_CHAR_EM * size)))
 		# A title that fits is left on one line: the char count above errs on
 		# the large side (0.55 em against 0.46-0.5 drawn), so the width comes
 		# from the text-extent estimate (widest face measured, share 0.98).
-		wrapped = _text_extent(plain, size)[1] * _FIN_WRAP_WIDTH_SHARE <= room ? plain :
+		wrapped = width <= room ? plain :
 			_fin_wrap_title(plain, max_chars)
 		wrapped == plain || (push!(wrapped_keys, key); new_record[String(key)] = (plain, wrapped))
 		wrapped == text && continue
@@ -3163,7 +3241,7 @@ end
 # Both fall back to doing nothing, so an owner without a provider is a no-op.
 # ---------------------------------------------------------------------------
 
-const _ROOM_OWNERS = (:colorbar, :legend_titles, :grid_titles, :annotate)
+const _ROOM_OWNERS = (:colorbar, :legend_titles, :grid_titles, :annotate, :offset)
 const _ROOM_SIDES = (:top, :bottom, :left, :right)
 const _ROOM_OPPOSITE = Dict(:top => :bottom, :bottom => :top, :left => :right, :right => :left)
 # Gap (px) between the axis labels and the first decoration on a side, and
@@ -3535,9 +3613,30 @@ function _room_add_domain_area!(plan::_RoomPlan, key::Symbol, grid::Bool)
 	domain === nothing && !grid && plan.layout.subplots.rows * plan.layout.subplots.cols == 1 &&
 		(domain = ((0.0, 1.0), (0.0, 1.0)))
 	domain === nothing && return nothing
-	plan.areas[key] = _room_new_area(key, nothing, :domain, grid, _room_box(domain[1], domain[2]))
+	area = _room_new_area(key, nothing, :domain, grid, _room_box(domain[1], domain[2]))
+	occursin(r"^polar\d*$", String(key)) && _room_polar_own!(plan, area)
+	plan.areas[key] = area
 	push!(plan.area_order, key)
 	return nothing
+end
+
+# The angular tick labels plotly.js 2.35.2 draws outside a polar subplot's
+# circle, which fills its domain: they need the gap to a neighbouring cell
+# like a Cartesian cell's axis labels (layout-fuzz-06: the "0°" of one polar
+# cell and the "180°" of the next one drew over each other). The widest
+# default label ("180°") beside the circle, one line above and below it,
+# each with the label pad; none when the angular axis or its labels are
+# hidden.
+function _room_polar_own!(plan::_RoomPlan, area)
+	polar = get(plan.layout.fields, area.key, nothing)
+	axis = _cmn_mapping_get(polar, :angularaxis)
+	(_cmn_mapping_get(axis, :visible) === false || _cmn_mapping_get(axis, :showticklabels) === false) && return area
+	tick = _fin_mapping_font_size(axis, :tickfont, plan.font)
+	beside = _text_extent("180°", tick)[1] + _ROOM_LABEL_PAD
+	above = _CBAR_LINE_EM * tick + _ROOM_LABEL_PAD
+	area.own[:left] = area.own[:right] = beside
+	area.own[:top] = area.own[:bottom] = above
+	return area
 end
 
 # The plot areas: the subplot grid's cells, then any other plot area
@@ -4548,12 +4647,18 @@ end
 # but never longer than an area that is drawn smaller than before (an
 # equal-aspect cell fitted inside its grid cell, V3: the bar ran past the plot
 # box and into the cell title); otherwise the bar follows the area. Never
-# shorter than `floor` (`_room_min_bar_len`), which counts as ours too.
+# shorter than `floor` (`_room_min_bar_len`), which counts as ours too, as
+# does the `len` a former pass wrote (`wrote`, `_room_cbar_wrote`): a bar of a
+# fitted cell is as long as its box, not its domain, and the extent or floor
+# it was written for changes with the size (layout-fuzz-09: a cell bar kept
+# the length of the cell before `figsize!` and a figure title, 49 px past
+# its plot area).
 function _room_bar_len(bar::AbstractDict, current::Float64, final::Float64; floor::Float64 = 0.0,
-		cell::Float64 = current)
+		cell::Float64 = current, wrote::Union{Nothing, Float64} = nothing)
 	len = _cbar_real(bar, :len, nothing)
 	ours = len === nothing || !(len > 0) || _cbar_string(bar, :lenmode, "fraction") != "fraction" ||
-		isapprox(len, current; atol = 1e-9) || isapprox(len, max(current, floor); atol = 1e-9)
+		isapprox(len, current; atol = 1e-9) || isapprox(len, max(current, floor); atol = 1e-9) ||
+		(wrote !== nothing && isapprox(len, wrote; atol = 1e-9))
 	ours && return max(final, floor)
 	len = Float64(len)
 	final < cell - 1e-9 && (len = min(len, final))
@@ -4670,6 +4775,14 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 		a = get(plan.areas, area_key, nothing)
 		a === nothing && continue
 		items = by_area[region_key]
+		# The math title above a bar the equal-aspect fit hugs to its field
+		# (`skip_bars`): the fit places the bar, its title needs room above
+		# the area like any other (vm-cbtitle: under a 4 px :ieee top margin
+		# the title of a fitted heatmap was drawn above the page).
+		for item in items
+			(item.coloraxis === nothing && item.index in plan.skip_bars && _fin_bar_vertical(item.bar)) || continue
+			_room_request_vbar_title!(plan, item, (area_key,), _room_bar_key(item), 0.0)
+		end
 		for side in (:right, :bottom)
 			group = _FinBar[item for item in items if item.coloraxis === nothing &&
 				!(item.index in plan.skip_bars) && _fin_bar_vertical(item.bar) == (side === :right) &&
@@ -4923,13 +5036,14 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 			area = plan.areas[slot.area]
 			placement[:len] = _room_bar_len(item.bar, _room_span(area.current[2]), _room_span(yd);
 				floor = _room_min_bar_len(plan.font, item.bar, plan.Hp),
-				cell = area.ref === nothing ? _room_span(area.current[2]) : _room_span(area.ref[2]))
+				cell = area.ref === nothing ? _room_span(area.current[2]) : _room_span(area.ref[2]),
+				wrote = _room_cbar_wrote(plan, key))
 		end
 		return placement
 	end
 	xd = slot.domain_x
 	len = _room_bar_len(item.bar, _room_span(plan.areas[slot.area].current[1]), _room_span(xd);
-		floor = _room_min_hbar_len(plan.font, item.bar, plan.Wp))
+		floor = _room_min_hbar_len(plan.font, item.bar, plan.Wp), wrote = _room_cbar_wrote(plan, key))
 	return _room_hbar_placement(plan, item, slot.edge, slot.offset, (xd[1] + xd[2]) / 2, len, slot.release)
 end
 
@@ -4981,17 +5095,32 @@ end
 function _room_place!(plan::_RoomPlan, ::Val{:colorbar})
 	record = _room_cbar_record(plan)
 	new_record = Dict{String, Vector{Float64}}()
+	# The len written on a trace bar no pass of this plan places (a bar the
+	# plan leaves to the fit, or not writable now) is kept while the trace
+	# still carries a bar: entries come and go only with their bars, not with
+	# the passes that visit them (a heatmap and a contour sharing a plot area
+	# dropped and re-added the heatmap's on alternate finalizes).
+	for (id, value) in record
+		startswith(id, "bar:") || continue
+		index = tryparse(Int, SubString(id, 5))
+		(index !== nothing && 1 <= index <= length(plan.p.data)) || continue
+		trace = plan.p.data[index]
+		(trace isa GenericTrace && _cbar_slot(trace, index) !== nothing) || continue
+		new_record[id] = value
+	end
 	for (key, entry) in plan.bar_items
 		item = entry.item
 		_fin_item_writable(plan.ctx, item) || continue
 		placement = _room_colorbar_placement(plan, key, entry)
 		if placement === nothing
-			item.coloraxis === nothing || !haskey(record, item.coloraxis) ||
-				(new_record[item.coloraxis] = record[item.coloraxis])
+			id = item.coloraxis === nothing ? key : item.coloraxis
+			haskey(record, id) && (new_record[id] = record[id])
 			continue
 		end
 		if item.coloraxis !== nothing && hasproperty(entry, :ratio) && haskey(placement, :len)
 			new_record[item.coloraxis] = Float64[entry.ratio, Float64(placement[:len])]
+		elseif item.coloraxis === nothing && haskey(placement, :len)
+			new_record[key] = Float64[1.0, Float64(placement[:len])]
 		end
 		_room_same_place(item.bar, placement) && !_room_needs_mark(plan, key, item, placement) && continue
 		plan.wrote |= _fin_place_bar!(plan.ctx, plan.updates, item, placement)
@@ -5011,8 +5140,15 @@ end
 
 # Share of the plot boxes along it each coloraxis bar of ours was given, and
 # the `len` written for it: `layout.meta` `_ROOM_CBAR_KEY`, coloraxis id =>
-# `[ratio, len]` (read once per plan).
+# `[ratio, len]`; a trace bar of ours placed by the plan, by its
+# `_room_bar_key` => `[1, len]` (read once per plan).
 const _ROOM_CBAR_KEY = Symbol("plotlysupply:cbar")
+
+# The `len` a former pass wrote on the trace bar keyed `key`, or `nothing`.
+function _room_cbar_wrote(plan::_RoomPlan, key::AbstractString)
+	rec = get(_room_cbar_record(plan), key, nothing)
+	return rec === nothing ? nothing : rec[2]
+end
 
 function _room_cbar_record(plan::_RoomPlan)
 	return get!(plan.memo, :cbar_record) do
@@ -5062,6 +5198,42 @@ function _fin_grid_title_letter(item)
 	name = _cmn_mapping_get(item, :name)
 	name isa AbstractString || return nothing
 	return get(_FIN_GRID_TITLE_NAMES, String(name), nothing)
+end
+
+# O2: the "×10^k" label of a y axis with a scientific offset (`yticks!(...;
+# offset)`, annotation `plotlysupply:offset:<y ref>`) sits above the top end
+# of the axis, `yshift` px up from its domain (axes.jl places it there, and
+# it follows the domain); annotations push no margin, so under the 4 px top
+# margin of a sized style it was drawn above the page (top at -12.5 px). It
+# takes a request on the top of its plot area like any decoration (stacked
+# outermost); the provider places nothing.
+function _room_requests!(plan, ::Val{:offset})
+	annotations = get(plan.layout.fields, :annotations, nothing)
+	annotations isa AbstractVector || return nothing
+	prefix = _AXES_OFFSET_NAME * ":"
+	for item in annotations
+		name = _cmn_mapping_get(item, :name)
+		(name isa AbstractString && startswith(name, prefix)) || continue
+		_cmn_mapping_get(item, :visible) === false && continue
+		yref = _fin_string(_cmn_mapping_get(item, :yref))
+		(yref !== nothing && occursin(r"^y\d* domain$", yref)) || continue
+		_fin_string(_cmn_mapping_get(item, :yanchor)) == "bottom" || continue
+		ykey = _fin_axis_key(first(split(yref)))
+		ykey === nothing && continue
+		area = nothing
+		for key in plan.area_order
+			a = plan.areas[key]
+			(a.kind === :xy && a.ykey === ykey) || continue
+			area = key
+			break
+		end
+		area === nothing && continue
+		shift = _cmn_mapping_get(item, :yshift, 0)
+		shift = _fin_isfinite_real(shift) ? max(Float64(shift), 0.0) : 0.0
+		_request_room!(plan, area, :top, shift + _fin_math_title_depth(item, plan.font); owner = :offset,
+			key = String(name), order = 90)
+	end
+	return nothing
 end
 
 function _room_requests!(plan, ::Val{:grid_titles})
@@ -5509,6 +5681,44 @@ function _fin_trace_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height:
 		want > have + 1e-9 && (updates[Symbol(:margin_, side)] = _style_number(want))
 	end
 	return updates
+end
+
+# plotly.js 2.35.2 pushes the bottom margin for an x title by its tick depth,
+# standoff and one title font size (axes.js, the same for any title), but a
+# MathJax title is drawn lower: its glyph box reached 0.44-0.77 title font
+# sizes past `_fin_x_labels_px` where a plain title stayed within it
+# (vm-xtitleclip: `$x$ ($\mu$m)`, `$\ell = L/\sqrt{T}$`, `$\frac{a}{b}$` and
+# "frequency $f$ (Hz)" under :default, :ieee, :aps and :nature, measured on
+# 4x PNGs), so under a tight bottom margin (4 px) the descenders were cut at
+# the page edge. `_FIN_MATH_XTITLE_EM` title font sizes plus
+# `_FIN_MATH_XTITLE_PAD` px cover the largest measured.
+const _FIN_MATH_XTITLE_EM = 0.8
+const _FIN_MATH_XTITLE_PAD = 1.0
+
+# The px the bottom margin needs for the math titles of the x axes drawn at
+# the bottom paper edge (0 when none): their tick labels, ticks and title
+# (`_fin_x_labels_px`) and the MathJax depth beyond what plotly pushes.
+# `pending` holds the updates of the calling pass (a y domain there is the
+# one drawn).
+function _fin_math_xtitle_px(layout::Layout; pending::AbstractDict = Dict{Symbol, Any}())
+	need = 0.0
+	font = _fin_font_size(layout)
+	for (key, axis) in layout.fields
+		(key isa Symbol && _fin_is_axis_key(key) && String(key)[1] == 'x') || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		text = _fin_title_text(axis)
+		occursin('$', text) || continue
+		something(_fin_string(_cmn_mapping_get(axis, :side)), "bottom") == "bottom" || continue
+		anchor = _fin_axis_key(_cmn_mapping_get(axis, :anchor, "y"))
+		anchor === nothing && continue
+		queued = get(pending, Symbol(anchor, :_domain), nothing)
+		edge = queued isa AbstractVector && length(queued) == 2 ? Float64(queued[1]) :
+			_cmn_y_axis_domain(layout, anchor)[1]
+		edge <= 1e-9 || continue
+		size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
+		need = max(need, _fin_x_labels_px(layout, key) + _FIN_MATH_XTITLE_EM * size + _FIN_MATH_XTITLE_PAD)
+	end
+	return need
 end
 
 # The tick label plotly.js 2.35.2 centres on the last tick of an x axis that
