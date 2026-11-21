@@ -52,6 +52,12 @@ plot_contour!(fig, xs, ys, U; levels = [0.0], coloring = "none",
 `origin = :upper` puts the first row of `y` at the top (image convention);
 `text`/`texttemplate` write values into the cells.
 
+<!-- PENDING D23 -->
+Contour labels (`showlabels = true`) are drawn whole, on a drawn part of their
+line, also next to `NaN` or `missing` gaps of the field (plotly.js alone clips
+the labels there together with the lines).
+<!-- /PENDING -->
+
 ## Tight axes and equal aspect
 
 Axes that carry a field fit the field exactly: the view is the field's extent
@@ -63,6 +69,13 @@ or `tight = false`, wins. `xrange!(fig, nothing)` returns to the fitted view.
 an explicit size, the figure height follows the field's aspect ratio, so no
 blank space is left around the field and the colorbar is as tall as the
 field.
+
+<!-- PENDING O1 -->
+On an autoranged equal-aspect plot without a field (`plot_complex`,
+`plot_scatter(...; equalar = true)`) the layout engine fits the plot box the
+same way: the default legend and `annotate!(...; coords = :axes)` refer to
+the box that is drawn, not to the whole plot area.
+<!-- /PENDING -->
 
 ```julia
 fig = plot_heatmap(xs, ys, U; equalar = true, colorscale = "viridis")
@@ -84,6 +97,15 @@ or a matrix of Colors.jl colours, with row 1 at the top and square pixels.
 Channel values follow plotly's convention, 0 to 255 (multiply data in
 `[0, 1]` by 255); the alpha channel of a floating-point RGBA array is in
 `[0, 1]`. `extent = (x0, x1, y0, y1)` places the image in data coordinates.
+
+plotly.js paints an image (`interpolation = :nearest`, the default) into a
+canvas the size of the plot area in CSS pixels, so an image with more pixels
+than the plot area is resampled in windows and in every export: a 600 x 600
+image in a 400 x 400 px figure is embedded as a 289 x 289 bitmap in SVG and
+PDF, and fine patterns alias. Small images upscaled stay crisp. For a large
+image keep every pixel with `plot_heatmap` (the matrix of one channel, or a
+grey level; exported at full resolution) or with `interpolation = :bilinear`
+(sent as a PNG at full resolution, smoothed when scaled).
 
 ```julia
 img = zeros(40, 60, 3)

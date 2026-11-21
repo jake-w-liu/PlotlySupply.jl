@@ -30,6 +30,9 @@ of a session takes about a third of a second instead of 15 seconds. The price is
 a longer one-time precompilation after each install or update (minutes) and a
 larger package image (about 110 MB). To skip the workload, see
 [Performance](https://jake-w-liu.github.io/PlotlySupply.jl/dev/performance/).
+The plotly.js bundle (about 4.6 MB) is downloaded once, the first time a
+window is opened or a figure is exported; to prepare an offline machine, see
+[Live windows](https://jake-w-liu.github.io/PlotlySupply.jl/dev/windows/).
 
 ## Quick tour
 
@@ -235,7 +238,10 @@ constructor except `show`. A keyword a function does not take raises an error.
   exactly that size in points; PNG, JPEG and TIFF get `round(width * scale)`
   pixels.
 - `dpi` for PNG, JPEG and TIFF (stored in the file); TIFF is lossless LZW with
-  its resolution tags, 300 dpi unless told otherwise.
+  its resolution tags, 300 dpi unless told otherwise. Under a journal preset
+  (a style with a physical size) PNG and JPEG default to 300 dpi too: a
+  3.5 in `:ieee` figure is 1050 px wide. `:default` and `:publication`
+  figures keep `scale = 1`.
 - `fonts = :auto` (PDF): text stays text in embedded TrueType fonts. Chromium can
   embed STIX or Latin Modern only as Type 3; `:auto` then outlines the page's
   text with Ghostscript. `:embed` and `:outline` force either. EPS text is

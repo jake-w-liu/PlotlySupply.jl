@@ -11,6 +11,11 @@ Coordinates are data values, also on log axes. They return `nothing`, or the
 (matplotlib `axhline`/`axvline`); [`hspan!`](@ref) and [`vspan!`](@ref) shade
 bands (`axhspan`/`axvspan`). `label` writes text at the line, `legend` gives
 it a legend entry.
+<!-- PENDING V4 -->
+On an autoranged axis the range includes the line with the data's padding,
+so a line at the data's edge is not drawn on the frame; a range you set is
+never changed.
+<!-- /PENDING -->
 
 ```julia
 using PlotlySupply

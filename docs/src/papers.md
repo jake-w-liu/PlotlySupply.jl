@@ -274,6 +274,13 @@ Roman (no Type 3), and `fig1.tif` is 4296 x 1632 pixels at 600 dpi.
 
 - The presets already set the sizes. To change them, use
   `set_fonts!(fig; label = 9, tick = 8, legend = 8, units = :pt)`.
+<!-- PENDING D24 -->
+- Under the presets (every style with a width) the gap between the tick
+  labels and the axis title is half an em of the title font on every axis
+  (`PlotStyle.title_gap = 0.5`, in em), for plain, math, wrapped and
+  multi-line titles; `title_gap = nothing` keeps plotly's placement, as
+  `:default` and `:publication` do, and a `title_standoff` you set wins.
+<!-- /PENDING -->
 - Text and math share a label: `"time \$t\$ (s)"`. MathJax typesets the math in
   Latin Modern by default; `set_default_mathtext!(; font = "STIX-Web")` and the
   other MathJax fonts are listed under [`savefig`](@ref).

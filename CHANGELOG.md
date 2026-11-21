@@ -318,6 +318,15 @@ Export, windows and templates
   `plot_band` follows the style's colour cycle (was `#636EFA`); equal-aspect
   single figures keep a width you set exactly (journal columns are no longer
   rounded to whole pixels).
+<!-- PENDING D22 -->
+- An unknown legend position name raises an `ArgumentError` listing the valid
+  names in every function that takes one (1.x warned and used `:topright`).
+<!-- /PENDING -->
+<!-- PENDING D24 -->
+- Under the journal presets the axis titles sit half an em of the title font
+  from the tick labels (`PlotStyle.title_gap`; plotly's placement was 1.3 to
+  1.5 em); `:default` and `:publication` keep plotly's placement.
+<!-- /PENDING -->
 - `set_template!` replaces colours derived from the previous template.
 - `get_default_template` may return a `Template`.
 - `PLOTLYSUPPLY_MATHJAX_SVG_FONT` accepts only the MathJax 2.7 SVG fonts.
@@ -511,6 +520,18 @@ Layout
   neighbouring panels, and fields fit their axes without a white border.
 - The axis title of a shared-axis grid keeps its text when fonts are
   restyled.
+<!-- PENDING D23 -->
+- Contour labels next to `NaN` or `missing` gaps are drawn whole instead of
+  being clipped with the lines.
+<!-- /PENDING -->
+<!-- PENDING V4 -->
+- A reference line at the edge of the data of an autoranged axis is drawn
+  inside the range instead of on the frame.
+<!-- /PENDING -->
+<!-- PENDING O1 -->
+- On an autoranged equal-aspect plot (`plot_complex`, `equalar = true`) the
+  default legend and `annotate!(...; coords = :axes)` use the drawn plot box.
+<!-- /PENDING -->
 
 ### Removed
 

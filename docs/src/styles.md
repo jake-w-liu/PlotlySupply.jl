@@ -29,6 +29,12 @@ Built-in styles:
   and sources is in [Figures for papers](papers.md); `journal_width` returns
   any width and `figsize!(fig, :ieee; columns = 2)` sizes a figure.
 
+<!-- PENDING D24 -->
+Under the journal presets the axis titles sit half an em of the title font
+from the tick labels (`title_gap = 0.5`; `nothing`, as under `:default` and
+`:publication`, keeps plotly's placement).
+<!-- /PENDING -->
+
 ```julia
 using PlotlySupply
 
@@ -134,6 +140,11 @@ tight_layout!(fig)
 [`set_default_legend_position!`](@ref) sets where new figures put their
 legend (`:topright`, `:bottomleft`, ..., or outside: `:outside_right`,
 `:outside_bottom`, ...); [`get_default_legend_position`](@ref) returns it.
+<!-- PENDING D22 -->
+An unknown position name raises an `ArgumentError` that lists the valid names,
+here and in every function that takes a legend position (`set_legend!`,
+`subplot_legends!`, ...), before the figure changes.
+<!-- /PENDING -->
 
 ```julia
 set_default_legend_position!(:outside_bottom)

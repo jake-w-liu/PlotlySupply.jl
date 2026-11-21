@@ -24,6 +24,9 @@ of a session takes about a third of a second instead of 15 seconds. The price is
 a longer one-time precompilation after each install or update (minutes) and a
 larger package image (about 110 MB). To skip the workload, see
 [Performance](performance.md).
+The plotly.js bundle (about 4.6 MB) is downloaded once, the first time a
+window is opened or a figure is exported; to prepare an offline machine, see
+[Live windows](windows.md).
 
 ## Quick tour
 

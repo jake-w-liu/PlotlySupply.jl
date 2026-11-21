@@ -226,6 +226,10 @@ title!(fig, "Run 3"; align = :left)                       # flush with the plot 
   below its axes may reach over the gap to the next cell.
 - `legend_entry!` validates colours (`ArgumentError`) and writes hex CSS
   (`"red"` becomes `"#FF0000"`).
+<!-- PENDING D22 -->
+- An unknown legend position name (`position = :nowhere`) raises an
+  `ArgumentError` listing the valid names; 1.x warned and used `:topright`.
+<!-- /PENDING -->
 
 ```julia
 # fragment: 1.x code
@@ -277,7 +281,13 @@ set_legend!(sf; position = :outside_bottom, dedupe = false)
 - `update_xaxes!`, `update_yaxes!`, `update_scenes!`, `update_polars!`,
   `update_ternaries!`, `update_annotations!`, `update_shapes!` and
   `update_images!` with `row`/`col` change only that cell; 1.x changed every
-  cell and stored `row`/`col` as attributes.
+  cell and stored `row`/`col` as attributes. On a `Plot` or `SyncPlot` these
+  verbs raise an `ArgumentError` for `row`, `col`, `secondary_y`, `inset` or
+  `show` (1.x wrote them into the layout as attributes).
+- A `Spec` with `colspan`/`rowspan` over a cell that has its own spec raises an
+  `ArgumentError`; give the covered cells `missing` (or `nothing`).
+- `subplot_legends!(sf; row, col)` raises an `ArgumentError` (a
+  `MethodError` in 1.x).
 - Colorbars of traces drawn into cells sit next to their cell.
 - Only an explicit `barmode` is copied to the whole figure.
 - Arguments are validated (`ArgumentError` for spacing outside `[0, 1]`,
@@ -349,8 +359,15 @@ update_xaxes!(sf; row = 1, col = 2, title_text = "x (right cell only)")
 - `plot_area(...; stack = true)` stacks a single series too.
 - `plot_bar(y; orientation = "h")` puts the positions `0:n-1` on the y axis.
 - The series of one `plot_histogram` call share their bins and are overlaid
-  at opacity 0.6. On a log binning axis histograms are counted in Julia and
-  drawn as `bar` traces (plotly.js drew nothing there).
+  at opacity 0.6. Histograms with explicit `bins`, and any histogram on a log
+  binning axis, are counted in Julia and drawn as `bar` traces with a closed
+  last bin (plotly.js drew nothing on a log axis); their traces have no
+  `xbins`, `cumulative` or `histnorm` fields.
+- `plot_area` with a `NaN` or `missing` gap raises an `ArgumentError` (1.x drew
+  a filled plateau over the gap).
+- `Dates.Time` and `Period` coordinates raise an `ArgumentError` (plotly.js
+  draws them as equally spaced categories); pass numbers, `Date` or
+  `DateTime`.
 - Box and violin series of one call are grouped only when their positions
   collide.
 - Error-bar magnitudes must be non-negative.
@@ -392,6 +409,9 @@ fig3 = plot_scatter(1:3, real.([1im, 2, 3]))
   suggests `permutedims(U)`; 1.x drew it silently.
 - `Bool` matrices are drawn as 0/1; complex matrices raise an
   `ArgumentError`.
+- A heatmap or contour `x` or `y` that is not strictly monotonic (out of
+  order, or with a repeated value) raises an `ArgumentError`; decreasing
+  coordinates are fine.
 - `plot_quiver` separates arrows with `nothing` (JSON `null`) instead of
   `NaN`, sets equal aspect through `yaxis.scaleanchor`, hides an unnamed
   quiver from the legend, and `plot_quiver!` applies equal aspect by default.
@@ -448,6 +468,16 @@ fig2 = plot_heatmap(xs, ys, permutedims(Z))
 - `plot_surface(...; color = "gray")` draws one colour without a colorbar.
 - Perspective scenes get an explicit camera at a distance that fits the box
   (`view!(...; distance = :auto)` computes it); 1.x left the camera unset.
+- Framed scenes draw their tick labels and axis titles closer to the box:
+  `layout.meta` gains the key `"plotlysupply:gl3d"` with the label offsets
+  (read by PlotlySupply's patched plotly.js; a plain PlotlyBase display
+  ignores it), and the layout can hold annotations named
+  `plotlysupply:scene3d:*` that draw crowded axis titles.
+- `plot_scatter3d!` and the other 3-D `!` functions on a `Plot` that holds
+  only Cartesian traces raise an `ArgumentError` instead of drawing a scene
+  over the xy axes.
+- 3-D legend names go through mathtext like 2-D ones (`"\$\\alpha\$ run"` is
+  rewritten, an unbalanced `\$` raises an `ArgumentError`).
 - A scene with an explicit range uses `aspectmode = "manual"` with the span
   ratios.
 - `annotate!(fig, x, y, z, text)` takes data values on log scene axes.
@@ -559,11 +589,14 @@ fig3 = plot_scattergeo([2.35], [48.86]; trace = attr(hovertemplate = "%{lat}"))
   96 x `scale` dpi; pixel-unit exports record none, as in 1.x.
 - SVG exported with physical units has `width`/`height` with a unit suffix
   (`88mm`); the `viewBox` is unchanged.
-- `.tif` and `.tiff` are a format now (they raised an `ErrorException`).
+- `.tif` and `.tiff` are a format now (they raised an `ErrorException`). An
+  unsupported format (`.bmp`, `.webp`, ...) raises an `ArgumentError` that
+  lists the supported ones (an `ErrorException` in 1.x).
 - An unwritable destination directory raises an `ArgumentError` before
   rendering.
 - HTML export embeds plotly.js (about 4.5 MB per file) instead of loading it
-  from a CDN; MathJax still comes from its CDN.
+  from a CDN; MathJax still comes from its CDN, and only a figure with math
+  (a `\$...\$` pair) gets the MathJax tag (1.x wrote it into every file).
 
 ```julia
 fig = plot_scatter(1:3, [1, 2, 3]; width = 400, height = 300)
@@ -584,6 +617,10 @@ savefig(fig, "default.png"; width = 700, height = 500)
   in the figure's font at the plain-text size (`inherit_text_font` is on by
   default); `set_default_mathtext!(true; inherit_text_font = false)` restores
   the earlier look.
+- Math in colorbar tick labels is converted to Unicode text (`"\$\\mu\$"`
+  becomes `"μ"` in `ticktext`).
+- Axis titles longer than their axis are wrapped at spaces (with `<br>`)
+  when the figure is finalized.
 - A figure carries the style it was built under in
   `layout.meta.plotlysupply.style`; mutators, the layout engine and `savefig`
   read it, not the active style. `with_style(:x) do xlabel!(fig, "t") end` no

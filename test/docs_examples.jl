@@ -914,3 +914,102 @@ end
 		@test plot_scatter(1:5, 1:5; simplify = true).data[1][:line][:simplify] === true
 	end
 end
+
+# --- round v8: docstring examples, the gallery page and the archetype links ----------------
+
+# The ```julia blocks of every docstring PlotlySupply attaches to `name` (all methods).
+function _docs_docstring_blocks(name::Symbol)
+	binding = Base.Docs.Binding(PlotlySupply, name)
+	multi = get(Base.Docs.meta(PlotlySupply), binding, nothing)
+	multi === nothing && return String[]
+	blocks = String[]
+	for doc in values(multi.docs)
+		text = join(string.(doc.text))
+		for m in eachmatch(r"(?ms)^\s*```(?:julia|jldoctest)[^\n]*\n(.*?)^\s*```", text)
+			push!(blocks, String(m.captures[1]))
+		end
+	end
+	return blocks
+end
+
+# A block that would open a window must be marked `# fragment` (the suite never shows windows).
+const _DOCS_WINDOW_CODE = r"show\s*=\s*true|display\(|sync\s*=\s*true|to_syncplot|(?<![A-Za-z_])subplots\((?![^)]*sync\s*=\s*false)"
+
+@testset "every exported function has a docstring example, and the examples run" begin
+	blocks_run = 0
+	mktempdir() do dir
+		cd(dir) do
+			for name in _docs_own_names()
+				value = getfield(PlotlySupply, name)
+				blocks = _docs_docstring_blocks(name)
+				if value isa Function
+					isempty(blocks) && @error "`$(name)` has no example in its docstring"
+					@test !isempty(blocks)
+				end
+				for (k, code) in enumerate(blocks)
+					occursin(r"^\s*#\s*fragment\b", code) && continue
+					@testset "$(name) example $(k)" begin
+						window = occursin(_DOCS_WINDOW_CODE, code)
+						window && @error "`$(name)` example $(k) opens a window; mark it `# fragment: opens a window`"
+						@test !window
+						if !window
+							mod = _docs_new_module()
+							_docs_reset_defaults()
+							try
+								@test (Base.include_string(mod, code, "docstring of $(name)"); true)
+							finally
+								_docs_reset_defaults()
+							end
+							blocks_run += 1
+						end
+					end
+				end
+			end
+		end
+	end
+	@test blocks_run >= 150
+end
+
+@testset "gallery page entries come from the script headers" begin
+	page = _docs_read("docs/src/gallery.md")
+	for f in _gallery_scripts()
+		name = f[1:end-3]
+		src = _docs_read(joinpath("docs", "gallery", f))
+		description = strip(split(src, '\n')[1][3:end])
+		i = findfirst("### `$(name)`", page)
+		@test i !== nothing
+		i === nothing && continue
+		rest = page[last(i)+1:end]
+		stop = findfirst(r"\n##", rest)
+		entry = stop === nothing ? rest : rest[1:first(stop)-1]
+		@testset "$name" begin
+			@test occursin(description, entry)
+			@test occursin("(https://github.com/jake-w-liu/PlotlySupply.jl/blob/main/docs/gallery/$(name).jl)", entry)
+			@test occursin("(assets/gallery/$(name).png)", entry)
+			@test occursin(r"\*\*Replaces \(matplotlib\):\*\* \S", entry)
+			@test occursin(r"\*\*PlotlySupply:\*\* \S", entry)
+			# Markdown markup in the matplotlib calls is escaped (`set\_xscale`, not italics).
+			replaces = match(r"\*\*Replaces \(matplotlib\):\*\* ([^\n]*)", entry).captures[1]
+			@test !occursin(r"(?<!\\)[_*$]", replaces)
+		end
+	end
+end
+
+@testset "the matplotlib archetypes link to gallery figures" begin
+	text = _docs_read("docs/src/matplotlib.md")
+	section = text[first(findfirst("## Figure archetypes from real projects", text)):end]
+	page = _docs_read("docs/src/gallery.md")
+	scripts = Set(f[1:end-3] for f in _gallery_scripts())
+	rows = filter(l -> startswith(l, "| ") && !startswith(l, "| matplotlib"), split(section, '\n'))
+	@test length(rows) >= 40
+	linked = 0
+	for row in rows
+		links = [m.captures[1] for m in eachmatch(r"\]\(gallery\.md#([A-Za-z0-9_]+)\)", row)]
+		isempty(links) || (linked += 1)
+		for name in links
+			@test name in scripts
+			@test occursin("### `$(name)`", page)
+		end
+	end
+	@test linked == length(rows)
+end

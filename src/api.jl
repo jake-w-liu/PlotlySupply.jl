@@ -8691,7 +8691,7 @@ a `Plot`, a [`SyncPlot`](@ref) or a `SubplotFigure` (active cell, or
 
 # Example
 ```julia
-fig = plot(1:10, rand(10); legend = "a")
+fig = plot_scatter(1:10, rand(10); legend = "a")
 plot!(fig, 1:10, rand(10); legend = "b", dash = "dash")
 ```
 """
@@ -25326,7 +25326,10 @@ alpha channel is kept. A 2-D matrix of numbers is not an image (use
   PNG (trace `source`, `zsmooth = "fast"`; channel values are converted from
   `colormodel` and clamped to its range, a pixel with a non-finite channel is
   transparent, and the hover shows the RGBA bytes). The smoothing needs
-  linear axes; on a log axis plotly draws the pixels flat.
+  linear axes; on a log axis plotly draws the pixels flat. A `:nearest`
+  image is painted at the plot area's size in CSS pixels, so one with more
+  pixels than the plot area is resampled (and fine patterns alias) in windows
+  and exports; `:bilinear` or [`plot_heatmap`](@ref) keep every pixel.
 - `xlabel = ""`, `ylabel = ""`, `title = ""`, `xrange = [0, 0]`,
   `yrange = [0, 0]` (data units; `[0, 0]`/`nothing` automatic; a one-sided
   `(start, nothing)`/`(nothing, stop)` fixes the start (left/bottom end) or

@@ -231,6 +231,7 @@ The window lives until it is closed by the user or with `close(sp)`; see
 
 # Example
 ```julia
+# fragment: opens a window
 sp = to_syncplot(plot_scatter(1:3, [1, 4, 9]); title = "Squares")
 relayout!(sp; title = "Squares, updated")
 close(sp)
@@ -278,6 +279,10 @@ PlotlyBase's defaults.
 # Example
 ```julia
 fig = plot([scatter(y = [1, 3, 2]), bar(y = [2, 1, 3])]; layout = Layout(title = "Mixed"))
+```
+
+```julia
+# fragment: opens a window
 sp = plot(scatter(y = [1, 2]); sync = true, title = "Window")
 close(sp)
 ```
