@@ -243,7 +243,9 @@ end
 	index = if v isa Integer && !(v isa Bool)
 		v
 	elseif _mesh2d_is_real(v) && isfinite(v) && isinteger(v)
-		Int(v)
+		# errors-inputs-10: compared before the conversion, so 1e308 is an
+		# index outside the nodes, not an InexactError.
+		(1 <= v <= nnodes) ? Int(v) : v
 	else
 		throw(ArgumentError(
 			"$(who): `$(name)` must hold integer node indices; cell $(cell) has $(repr(v)).",
@@ -2214,7 +2216,9 @@ function _mesh2d_tripcolor_impl!(
 				for i in 1:tri.ntri if _mesh2d_tri_drawn(tri, i)
 			]
 		else
-			Any[values[i] for i in 1:tri.ntri if _mesh2d_tri_drawn(tri, i)]
+			# perf-tripcolor: a typed vector (NaN for a missing value, as the
+			# per-node branch), so the checks downstream allocate nothing.
+			Float64[_mesh2d_tvalue(values[i], who, i) for i in 1:tri.ntri if _mesh2d_tri_drawn(tri, i)]
 		end
 		indices, offsets = _mesh2d_tri_cells(tri)
 		rings = _mesh2d_rings_from_nodes(tri.x, tri.y, indices, offsets)
@@ -2564,13 +2568,11 @@ function _mesh2d_nice_levels(lo::Float64, hi::Float64, n::Int)
 	return unique!(Float64[lo + (hi - lo) * k / (n + 1) for k in 1:n])
 end
 
-# Label text of a contour level: up to 6 significant digits, no trailing ".0".
-function _mesh2d_level_text(v::Float64)
-	r = round(v; sigdigits = 6)
-	r == 0 && return "0"
-	isinteger(r) && abs(r) < 1e15 && return string(Int(r))
-	return string(r)
-end
+# Label texts of contour levels (numerics-08): plotly's power format (D21) as
+# the tick labels of the figure ("2×10⁻⁶", never "2.0e-6"; plotly's minus
+# sign), at least 6 significant digits and as many more as distinct levels
+# need to keep distinct labels (`_axes_distinct_power_ticktext`).
+_mesh2d_level_texts(levels::AbstractVector{Float64}) = _axes_distinct_power_ticktext(levels)
 
 # Contour levels: an integer n gives at most n "nice" levels strictly inside
 # the finite data range (none for a constant field); a vector is used as given
@@ -2598,15 +2600,27 @@ end
 function _mesh2d_contour_lines(t::_Mesh2dTri, v::Vector{Float64}, level::Float64)
 	nnodes = length(t.x)
 	edge_key(a, b) = a < b ? (a - 1) * nnodes + (b - 1) : (b - 1) * nnodes + (a - 1)
-	seg_keys = Tuple{Int, Int}[]
-	points = Dict{Int, Tuple{Float64, Float64}}()
+	# perf-tricontour: crossing points get dense ids (one Dict entry per
+	# crossed edge, coordinates in flat vectors) and the segment incidence is
+	# a CSR array, so the join allocates on the order of its output.
+	point_id = Dict{Int, Int}()
+	px = Float64[]
+	py = Float64[]
+	pkey = Int[]
+	seg_a = Int[]
+	seg_b = Int[]
 	function crossing!(a, b)
 		key = edge_key(a, b)
-		if !haskey(points, key)
+		id = get(point_id, key, 0)
+		if id == 0
 			s = (level - v[a]) / (v[b] - v[a])
-			points[key] = (t.x[a] + s * (t.x[b] - t.x[a]), t.y[a] + s * (t.y[b] - t.y[a]))
+			push!(px, t.x[a] + s * (t.x[b] - t.x[a]))
+			push!(py, t.y[a] + s * (t.y[b] - t.y[a]))
+			push!(pkey, key)
+			id = length(px)
+			point_id[key] = id
 		end
-		return key
+		return id
 	end
 	for tri in 1:t.ntri
 		_mesh2d_tri_drawn(t, tri) || continue
@@ -2621,54 +2635,72 @@ function _mesh2d_contour_lines(t::_Mesh2dTri, v::Vector{Float64}, level::Float64
 		p = n[lone]
 		q = n[mod1(lone + 1, 3)]
 		r = n[mod1(lone + 2, 3)]
-		push!(seg_keys, (crossing!(p, q), crossing!(p, r)))
+		push!(seg_a, crossing!(p, q))
+		push!(seg_b, crossing!(p, r))
 	end
-	isempty(seg_keys) && return Tuple{Vector{Float64}, Vector{Float64}}[]
+	nseg = length(seg_a)
+	nseg == 0 && return Tuple{Vector{Float64}, Vector{Float64}}[]
 	# Join segments: each crossing point belongs to at most two segments in a
-	# manifold mesh; walk the chains.
-	incident = Dict{Int, Vector{Int}}()
-	for (s, (k1, k2)) in enumerate(seg_keys)
-		push!(get!(incident, k1, Int[]), s)
-		push!(get!(incident, k2, Int[]), s)
+	# manifold mesh (more where a user mesh shares an edge between more than
+	# two triangles); walk the chains. `incident[offset[k]:(offset[k + 1] - 1)]`
+	# are the segments of point k in segment order.
+	npoints = length(px)
+	offset = zeros(Int, npoints + 1)
+	for s in 1:nseg
+		offset[seg_a[s] + 1] += 1
+		offset[seg_b[s] + 1] += 1
 	end
-	used = falses(length(seg_keys))
+	offset[1] = 1
+	for k in 2:(npoints + 1)
+		offset[k] += offset[k - 1]
+	end
+	fill_at = offset[1:npoints]
+	incident = Vector{Int}(undef, 2nseg)
+	for s in 1:nseg
+		incident[fill_at[seg_a[s]]] = s
+		fill_at[seg_a[s]] += 1
+		incident[fill_at[seg_b[s]]] = s
+		fill_at[seg_b[s]] += 1
+	end
+	used = falses(nseg)
 	lines = Tuple{Vector{Float64}, Vector{Float64}}[]
-	other(s, key) = seg_keys[s][1] == key ? seg_keys[s][2] : seg_keys[s][1]
-	function next_segment(key, from)
-		for s in incident[key]
+	other(s, k) = seg_a[s] == k ? seg_b[s] : seg_a[s]
+	function next_segment(k, from)
+		for j in offset[k]:(offset[k + 1] - 1)
+			s = incident[j]
 			(s != from && !used[s]) && return s
 		end
 		return 0
 	end
-	# Start open chains at ends (points with one incident segment) first, then
-	# closed loops anywhere.
-	starts = Int[]
-	for (key, segs) in incident
-		length(segs) == 1 && push!(starts, key)
-	end
-	sort!(starts)
-	function walk!(start_key)
-		chain = Int[start_key]
-		key = start_key
+	unused_at(k) = any(j -> !used[incident[j]], offset[k]:(offset[k + 1] - 1))
+	# Start open chains at ends (points with one incident segment, in the
+	# order of their mesh edges) first, then closed loops anywhere.
+	starts = Int[k for k in 1:npoints if offset[k + 1] - offset[k] == 1]
+	sort!(starts; by = k -> pkey[k])
+	chain = Int[]
+	function walk!(start)
+		empty!(chain)
+		push!(chain, start)
+		k = start
 		from = 0
 		while true
-			s = next_segment(key, from)
+			s = next_segment(k, from)
 			s == 0 && break
 			used[s] = true
-			key = other(s, key)
-			push!(chain, key)
+			k = other(s, k)
+			push!(chain, k)
 			from = s
 		end
 		length(chain) >= 2 || return nothing
-		push!(lines, ([points[k][1] for k in chain], [points[k][2] for k in chain]))
+		push!(lines, (px[chain], py[chain]))
 		return nothing
 	end
-	for key in starts
-		any(s -> !used[s], incident[key]) && walk!(key)
+	for k in starts
+		unused_at(k) && walk!(k)
 	end
-	for s in eachindex(seg_keys)
+	for s in 1:nseg
 		used[s] && continue
-		walk!(seg_keys[s][1])
+		walk!(seg_a[s])
 	end
 	return lines
 end
@@ -2775,6 +2807,7 @@ function _mesh2d_tricontour_impl!(
 	label_y = Float64[]
 	label_text = String[]
 	label_colour = String[]
+	level_texts = _mesh2d_level_texts(level_values)
 	for (k, level) in enumerate(level_values)
 		lines = _mesh2d_contour_lines(tri, v, level)
 		isempty(lines) && continue
@@ -2803,7 +2836,7 @@ function _mesh2d_tricontour_impl!(
 				end
 			end
 		end
-		text = _mesh2d_level_text(level)
+		text = level_texts[k]
 		line = Dict{Symbol, Any}(:color => level_colours[k], :width => line_width)
 		isempty(line_dash) || (line[:dash] = line_dash)
 		fields = Dict{Symbol, Any}(

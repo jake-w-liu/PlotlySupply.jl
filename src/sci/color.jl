@@ -782,8 +782,8 @@ family of lines (matplotlib's `cmap(np.linspace(lo, hi, n))`).
 
 # Arguments
 - `name_or_scale`: any value accepted by [`colormap`](@ref).
-- `n::Integer`: number of colours, at least 1. `n == 1` returns the colour at the
-  midpoint of `range`.
+- `n::Integer`: number of colours, at least 1 and at most 2^24 (the distinct
+  24-bit colours). `n == 1` returns the colour at the midpoint of `range`.
 
 # Keywords
 - `reverse::Bool = false`: sample the reversed map.
@@ -799,6 +799,9 @@ colors = colormap_colors("viridis", 4; range = (0.1, 0.9))
 plot_scatter(1:10, [rand(10) for _ in 1:4]; color = colors)
 ```
 """
+# More samples than 24-bit sRGB has distinct colours cannot be told apart.
+const _COLORMAP_MAX_SAMPLES = 2^24
+
 function colormap_colors(
 	name_or_scale,
 	n::Integer;
@@ -806,6 +809,11 @@ function colormap_colors(
 	range = (0.0, 1.0),
 )
 	n >= 1 || throw(ArgumentError("colormap_colors: `n` must be at least 1; got $(n)."))
+	# errors-inputs-10: a count beyond Int (typemax(Int128)) or one no memory
+	# holds is an ArgumentError, not an InexactError or an exhausted machine.
+	n <= _COLORMAP_MAX_SAMPLES || throw(ArgumentError(
+		"colormap_colors: `n` must be at most $(_COLORMAP_MAX_SAMPLES) (the distinct 24-bit colours); got $(n).",
+	))
 	lo, hi = _checked_sample_range(range, "colormap_colors")
 	parsed = _parsed_colorscale(_colorscale_stops(name_or_scale; who = "colormap_colors"))
 	count = Int(n)
@@ -993,22 +1001,38 @@ function _checked_real_vector(v, who::AbstractString, name::AbstractString)
 	return out
 end
 
-# Compact plain-text number for colorbar labels: "0.05", "250", "2×10<sup>-7</sup>".
+# Compact plain-text number for colorbar labels: "0.05", "250", "−3",
+# "2×10<sup>−7</sup>". Negative numbers and exponents carry plotly's minus
+# sign (U+2212), as the tick labels plotly draws next to them (numerics-11).
 function _format_colorbar_number(v::Float64)
 	v == 0 && return "0"
+	isfinite(v) || return v > 0 ? "∞" : v < 0 ? "−∞" : "NaN"
 	r = round(v; sigdigits = 4)
-	if 1e-4 <= abs(r) < 1e6
-		return isinteger(r) ? string(Int(r)) : string(r)
+	sign = r < 0 ? "−" : ""
+	a = abs(r)
+	if 1e-4 <= a < 1e6
+		return sign * (isinteger(a) ? string(Int(a)) : string(a))
 	end
-	exponent = floor(Int, log10(abs(r)))
-	mantissa = round(r / 10.0^exponent; sigdigits = 4)
-	if abs(mantissa) >= 10
+	exponent = floor(Int, log10(a))
+	mantissa = round(a / exp10(exponent); sigdigits = 4)
+	if mantissa >= 10
 		mantissa /= 10
 		exponent += 1
 	end
 	mtext = isinteger(mantissa) ? string(Int(mantissa)) : string(mantissa)
-	return mtext == "1" ? "10<sup>$(exponent)</sup>" :
-		mtext == "-1" ? "-10<sup>$(exponent)</sup>" : "$(mtext)×10<sup>$(exponent)</sup>"
+	return sign * _colour_power_text(mtext, exponent)
+end
+
+# "m×10ⁿ" in plotly's power format with its minus sign (U+2212): a mantissa
+# of "1" is left out ("10ⁿ"), and n = 0 and 1 are written as numbers ("1",
+# "10", "2", "50"), as plotly labels the decades of a log axis.
+function _colour_power_text(mtext::AbstractString, n::Int)
+	if n in (0, 1)
+		value = parse(Float64, mtext) * (n == 1 ? 10 : 1)
+		return isinteger(value) ? string(Int(value)) : string(round(value; sigdigits = 6))
+	end
+	power = "10<sup>" * (n < 0 ? "−" : "") * string(abs(n)) * "</sup>"
+	return mtext == "1" ? power : mtext * "×" * power
 end
 
 # fields-01: whether a colour carrier was built with `colornorm = :log`:
@@ -1024,10 +1048,20 @@ _colour_flat(a) = eltype(a) <: AbstractArray ? Iterators.flatten(a) : a
 
 function _colour_log_carrier(values, data)
 	(values isa AbstractArray && data isa AbstractArray) || return false
-	# A heatmap keeps `z` as the lazy transpose of its `customdata` (plotly's
-	# row-major z): compare entry by entry in the same orientation.
-	(values isa AbstractMatrix && data isa AbstractMatrix && size(values) != size(data) &&
-		size(values) == reverse(size(data))) && (data = PermutedDimsArray(data, (2, 1)))
+	_colour_log_pairs(values, data) && return true
+	# A heatmap or contour keeps `z` as the lazy transpose of its `customdata`
+	# (plotly's row-major z): compare entry by entry in the same orientation.
+	# The shapes cannot tell the orientation of a square field (apia-06), so
+	# the transposed comparison is tried whenever the shapes allow it.
+	(values isa AbstractMatrix && data isa AbstractMatrix &&
+		size(values) == reverse(size(data))) || return false
+	return _colour_log_pairs(values, PermutedDimsArray(data, (2, 1)))
+end
+
+# Whether the first finite positive entries of `data` (up to
+# `_COLOUR_LOG_CARRIER_SAMPLES`, at least one) have their log10 at the same
+# storage position in `values`.
+function _colour_log_pairs(values, data)
 	checked = 0
 	for (v, d) in zip(_colour_flat(values), _colour_flat(data))
 		(v isa Real && d isa Real && !(v isa Bool) && !(d isa Bool) &&
@@ -1055,11 +1089,13 @@ function _colour_log_bar_options(opts, log::Bool, who::AbstractString)
 end
 
 # Label of a tick at data value `v` on a log colorbar: exact decades are
-# "10<sup>k</sup>" (HTML, no MathJax needed); other values use the compact form.
+# written as plotly writes the decades of a log axis ("1", "10",
+# "10<sup>k</sup>" with U+2212; HTML, no MathJax needed); other values use the
+# compact form.
 function _log_tick_label(v::Float64)
 	exponent = log10(v)
 	k = round(Int, exponent)
-	isapprox(exponent, k; atol = 1e-9) && return "10<sup>$(k)</sup>"
+	isapprox(exponent, k; atol = 1e-9) && return _colour_power_text("1", k)
 	return _format_colorbar_number(v)
 end
 
@@ -1075,7 +1111,7 @@ function _log_colorbar_ticks(lo::Float64, hi::Float64)
 		stride = max(1, cld(ndecades - 1, _MAX_LOG_DECADE_TICKS - 1))
 		decades = [k for k in first_decade:last_decade if mod(k, stride) == 0]
 		length(decades) >= 2 || (decades = collect(first_decade:stride:last_decade))
-		return Float64.(decades), ["10<sup>$(k)</sup>" for k in decades]
+		return Float64.(decades), [_colour_power_text("1", k) for k in decades]
 	end
 	# Less than two decades: add 1-2-5 (then 1…9) sub-decade ticks.
 	for mantissas in ((1, 2, 5), (1, 2, 3, 4, 5, 6, 7, 8, 9))
@@ -1085,7 +1121,7 @@ function _log_colorbar_ticks(lo::Float64, hi::Float64)
 			position = log10(m) + exponent
 			if lo - _LOG_TICK_TOLERANCE <= position <= hi + _LOG_TICK_TOLERANCE
 				push!(positions, position)
-				push!(labels, m == 1 ? "10<sup>$(exponent)</sup>" : "$(m)×10<sup>$(exponent)</sup>")
+				push!(labels, _colour_power_text(string(m), exponent))
 			end
 		end
 		length(positions) >= 2 && return positions, labels

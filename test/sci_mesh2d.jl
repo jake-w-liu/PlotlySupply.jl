@@ -1199,6 +1199,17 @@ end
 	end
 end
 
+# What allocating one m x n Float64 matrix costs `@allocated` in this process
+# now (tests-ci-04: it is not sizeof(matrix) once the process has churned).
+const _M2_ALLOC_KEEP = Ref{Any}(nothing)
+@noinline _m2_new_matrix(m::Int, n::Int) = Matrix{Float64}(undef, m, n)
+function _m2_alloc_cost(m::Int, n::Int)
+	_M2_ALLOC_KEEP[] = _m2_new_matrix(m, n)        # compiled before it is counted
+	cost = @allocated(_M2_ALLOC_KEEP[] = _m2_new_matrix(m, n))
+	_M2_ALLOC_KEEP[] = nothing
+	return cost
+end
+
 @testset "sci mesh2d: wave 5 (fields)" begin
 	@testset "Z84 rectilinear plot_pcolormesh validates the cell values in place" begin
 		C = rand(1000, 1000)
@@ -1214,14 +1225,21 @@ end
 		end
 		# One Float64 matrix per cell value (8 MB here), read straight from `C`:
 		# no Matrix{Any} copy and no boxing per entry (either costs 8 MB or
-		# more). 1 MiB covers the array headers and what the allocator adds in
-		# a long test process (the count is 16.04 MB alone and was 16.40 MB in
-		# the full suite; 64 KiB failed there).
+		# more). tests-ci-04: what `@allocated` reports for one large array
+		# depends on the state of the process (a plain 8 MB
+		# `Matrix{Float64}(undef, 1000, 1000)` counted 8.0 MB in a fresh
+		# process and 10.0-10.1 MB once it had allocated and freed 2 GB, as in
+		# the full suite), so the bound is what allocating the output arrays
+		# themselves costs, measured next to the call, plus 1 MiB of headers
+		# and bookkeeping. A second copy of either matrix still exceeds it.
 		slack = 2^20
-		@test @allocated(_M2._mesh2d_cell_values(C, 1001, 1001, "t")) <= sizeof(C) + slack
-		@test @allocated(_M2._mesh2d_cell_values(Cm, 1001, 1001, "t")) <= sizeof(C) + slack
+		cell_cost = _m2_alloc_cost(1000, 1000)
+		@test @allocated(_M2._mesh2d_cell_values(C, 1001, 1001, "t")) <= cell_cost + slack
+		cell_cost = _m2_alloc_cost(1000, 1000)
+		@test @allocated(_M2._mesh2d_cell_values(Cm, 1001, 1001, "t")) <= cell_cost + slack
 		# Node values: the node matrix and the cell means.
-		@test @allocated(_M2._mesh2d_cell_values(Cn, 1001, 1001, "t")) <= sizeof(Cn) + sizeof(C) + slack
+		node_cost = _m2_alloc_cost(1001, 1001) + _m2_alloc_cost(1000, 1000)
+		@test @allocated(_M2._mesh2d_cell_values(Cn, 1001, 1001, "t")) <= node_cost + slack
 		v = _M2._mesh2d_cell_values(Cm, 1001, 1001, "t")
 		@test v isa Matrix{Float64} && isnan(v[3, 7]) && v[1, 1] == C[1, 1]
 		# The whole call: the validated values (8 MB, also the colour values

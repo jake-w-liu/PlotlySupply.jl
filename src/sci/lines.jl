@@ -1317,6 +1317,16 @@ function _kde_impl!(
 		end
 	end
 
+	# errors-inputs-10: data near floatmax (+-1e308) give an infinite spread or
+	# evaluation range; an ArgumentError naming the call, before any write.
+	for (series, (sample, h)) in enumerate(zip(samples, bandwidths))
+		(isfinite(h) && isfinite(first(sample) - cut * h) && isfinite(last(sample) + cut * h)) ||
+			throw(ArgumentError(
+				"$(who): the curve of `x`$(n > 1 ? " (series $(series))" : "") would span " *
+				"$(first(sample) - cut * h) to $(last(sample) + cut * h) (bandwidth $(h)), beyond " *
+				"the floating-point range; rescale the data.",
+			))
+	end
 	curves = map(zip(samples, bandwidths)) do (sample, h)
 		grid = collect(range(first(sample) - cut * h, last(sample) + cut * h; length = Int(npoints)))
 		return grid, _kde_density(sample, h, grid)

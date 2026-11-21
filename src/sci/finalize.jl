@@ -1044,7 +1044,8 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 		top = maximum(abs, reals)
 		return maximum(v -> label_chars(v, decimals, top), reals) + extra
 	end
-	(isfinite(lo) && isfinite(hi) && hi > lo) || return 4 + extra
+	# errors-inputs-10: limits whose span overflows (+-1e308) estimate no labels.
+	(isfinite(lo) && isfinite(hi) && hi > lo && isfinite(hi - lo)) || return 4 + extra
 	if islog
 		tickformat = _cmn_mapping_get(mapping, :tickformat)
 		decades = floor(Int, lo):ceil(Int, hi)
@@ -1059,6 +1060,7 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 	dtick = _cmn_mapping_get(mapping, :dtick)
 	step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) :
 		_fin_nice_step(hi - lo, max(len_px, 1.0), vertical)
+	(isfinite(step) && step > 0) || return 4 + extra
 	decimals = max(0, -floor(Int, log10(step) + 1e-9))
 	chars = 1
 	first = ceil(lo / step - 1e-9)
@@ -1085,8 +1087,19 @@ function _fin_title_push(mapping, font::Float64)
 	size = _fin_mapping_font_size(_cmn_mapping_get(mapping, :title), :font, round(1.2 * font))
 	# Every further line of a multi-line title adds one line height.
 	lines = 1 + count(_FIN_LINE_BREAK, text)
-	return _FIN_TITLE_BASE + _FIN_TITLE_PER_PX * size + (lines - 1) * _FIN_LINE_EM * size
+	return _fin_title_base(mapping) + _FIN_TITLE_PER_PX * size + (lines - 1) * _FIN_LINE_EM * size
 end
+
+# D24: the measured base holds plotly_white's 15 px `title.standoff`; an
+# axis's own standoff (the title gap of a sized style, or the user's) moves
+# the title, and plotly's automargin push, by the difference (plotly.js
+# axes.js: the push is `_depth + St(ax) + title.standoff`).
+function _fin_title_base(mapping)
+	standoff = _cmn_mapping_get(_cmn_mapping_get(mapping, :title), :standoff)
+	return _fin_isfinite_real(standoff) && standoff >= 0 ?
+		_FIN_TITLE_BASE + (Float64(standoff) - _FIN_TEMPLATE_TITLE_STANDOFF) : _FIN_TITLE_BASE
+end
+const _FIN_TEMPLATE_TITLE_STANDOFF = 15.0
 
 # Line breaks plotly.js draws (svg_text_utils: `<br>`, `<br/>`, `<br />`) and
 # the distance of the lines, in font sizes (svg_text_utils LINE_SPACING).
@@ -2562,7 +2575,9 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 		standoff = _cmn_mapping_get(title, :standoff)
 		if wrapped != plain
 			standoff === nothing && (updates[Symbol(key, :_title_standoff)] = _FIN_WRAP_STANDOFF)
-		elseif _fin_isfinite_real(standoff) && standoff == _FIN_WRAP_STANDOFF
+		elseif _fin_isfinite_real(standoff) && standoff == _FIN_WRAP_STANDOFF &&
+				get(_axes_title_gap_record(layout), String(key), (NaN, NaN))[1] != standoff
+			# D24: a standoff of the title gap (src/sci/axes.jl) is not ours.
 			updates[Symbol(key, :_title_standoff)] = nothing
 		end
 	end
@@ -5197,14 +5212,21 @@ function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height
 	margin === nothing && return updates
 	lookup(key) = get(fields, key, nothing)
 	root = _tight_root_font_size(lookup)
-	tick = root
+	# sm-02: the labels outside the disc/triangle are drawn at their axis's
+	# own tick font (the style writes it, `_font_role_updates`), else at
+	# the root font: the largest of those, as `_style_domain_subplot_margin`
+	# sizes the style margin (a :publication tick font of 12 under a root
+	# font of 14 is drawn at 12).
+	tick = 0.0
 	for (key, axis) in fields
-		occursin(r"^(polar|ternary)\d*$", String(key)) || continue
-		for name in (:angularaxis, :aaxis, :baxis, :caxis)
-			size = _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, 0.0)
-			size > tick && (tick = size)
+		name = String(key)
+		names = occursin(r"^polar\d*$", name) ? (:angularaxis,) :
+			occursin(r"^ternary\d*$", name) ? (:aaxis, :baxis, :caxis) : ()
+		for sub in names
+			tick = max(tick, _fin_mapping_font_size(_cmn_mapping_get(axis, sub), :tickfont, root))
 		end
 	end
+	tick > 0 || (tick = root)
 	label_room = ceil(1.2 * tick + 8)
 	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
 	# Ternary corner titles sit beyond the tick labels (style-07, vm-19): the
@@ -5358,7 +5380,8 @@ function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64; pending::
 		shown = _fin_shown_range(layout, key, accs)
 		shown === nothing && continue
 		lo, hi = Float64(shown[1]), Float64(shown[2])
-		hi > lo || continue
+		# errors-inputs-10: a span that overflows (+-1e308) has no estimate.
+		(hi > lo && isfinite(hi - lo)) || continue
 		reversed = auto == "reversed" || (pair !== nothing && pair[1] > pair[2])
 		right = reversed ? lo : hi
 		len = (dom[2] - dom[1]) * Wp
@@ -5389,6 +5412,7 @@ function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64; pending::
 		else
 			dtick = _cmn_mapping_get(axis, :dtick)
 			step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) : _fin_nice_step(hi - lo, max(len, 1.0), false)
+			(isfinite(step) && step > 0) || continue
 			t0 = _cmn_mapping_get(axis, :tick0)
 			t0 = _fin_isfinite_real(t0) ? Float64(t0) : 0.0
 			k = reversed ? ceil((lo - t0) / step - 1e-9) : floor((hi - t0) / step + 1e-9)

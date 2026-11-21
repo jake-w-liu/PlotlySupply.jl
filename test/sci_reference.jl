@@ -250,7 +250,7 @@ end
 		# An odd `$` in a label fails in the text pipeline before any write.
 		@test_throws ArgumentError hline!(fig, 1; label = "cost \$5")
 		@test_throws ArgumentError hline!(fig, 1; legend = "cost \$5")
-		@test_throws MethodError hline!(fig, "1")
+		@test _rft_throws(() -> hline!(fig, "1"), "hline!: `y` must be a real number")
 		@test _rft_json(fig) == snapshot
 
 		# A non-vector layout.shapes is rejected before anything is written.

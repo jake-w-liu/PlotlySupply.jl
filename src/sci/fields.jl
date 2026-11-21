@@ -404,12 +404,60 @@ const _STREAMLINE_MIN_LENGTH = 0.1
 const _STREAMLINE_SPEED_FLOOR = 1e-12
 const _STREAMLINE_COLOR_BINS = 32
 
+# numerics-04, numerics-05: the field is integrated in AXIS units (decades on
+# a log axis, as plot_quiver draws its vectors, D13), scaled per axis so that
+# one unit is one mean grid cell ("index" coordinates ξ = (X - X₁) * s, with
+# s = (n - 1) / (Xₙ - X₁)). The direction (u s_x, v s_y) is then continuous
+# across cells of different sizes (a non-uniform grid), and the bilinear
+# field is evaluated in the cell that contains the point. On a grid uniform
+# in axis units ξ is the grid index, so cells are found without a search.
 struct _StreamGrid
-	x::Vector{Float64}
+	x::Vector{Float64}          # node coordinates in data units
 	y::Vector{Float64}
+	X::Vector{Float64}          # node coordinates in axis units
+	Y::Vector{Float64}
+	xlog::Bool
+	ylog::Bool
+	uniform_x::Bool             # nodes evenly spaced in axis units
+	uniform_y::Bool
+	sx::Float64                 # index units per axis unit
+	sy::Float64
 	U::Matrix{Float64}
 	V::Matrix{Float64}
 	speed_floor::Float64
+end
+
+# Evenly spaced within 1e-9 of the span (grids made by `range`, also through
+# exp10 for a log axis, are; the residue is far below a drawn pixel).
+function _stream_uniform(X::Vector{Float64})
+	n = length(X)
+	h = (X[n] - X[1]) / (n - 1)
+	tol = 1e-9 * (X[n] - X[1])
+	return all(i -> abs(X[i] - (X[1] + (i - 1) * h)) <= tol, 1:n)
+end
+
+function _stream_grid(xs::Vector{Float64}, ys::Vector{Float64}, xlog::Bool, ylog::Bool,
+	U::Matrix{Float64}, V::Matrix{Float64}, speed_floor::Float64)
+	X = xlog ? log10.(xs) : xs
+	Y = ylog ? log10.(ys) : ys
+	return _StreamGrid(
+		xs, ys, X, Y, xlog, ylog, _stream_uniform(X), _stream_uniform(Y),
+		(length(X) - 1) / (X[end] - X[1]), (length(Y) - 1) / (Y[end] - Y[1]),
+		U, V, speed_floor,
+	)
+end
+
+# The 0-based cell `i0` that contains index coordinate `g` of an axis
+# (nodes `A` in axis units) and the fraction `f` of the way across it.
+function _stream_cell(A::Vector{Float64}, uniform::Bool, s::Float64, g::Float64)
+	n1 = length(A) - 1
+	if uniform
+		i0 = min(floor(Int, g), n1 - 1)
+		return i0, g - i0
+	end
+	a = A[1] + g / s
+	i = clamp(searchsortedlast(A, a), 1, n1)
+	return i - 1, (a - A[i]) / (A[i + 1] - A[i])
 end
 
 mutable struct _StreamMask
@@ -436,17 +484,15 @@ function _stream_axis(v, who::AbstractString, name::AbstractString, log_axis::Bo
 	return out
 end
 
-# Bilinear field value at the 0-based fractional grid index (gi, gj).
+# Bilinear field value at index coordinates (gi, gj) (see `_StreamGrid`).
 # Returns (unit direction in index space..., data speed) or `nothing` outside
 # the grid, at a gap (NaN/missing) or at a stagnation point.
 function _stream_velocity(g::_StreamGrid, gi::Float64, gj::Float64)
 	nx1 = length(g.x) - 1
 	ny1 = length(g.y) - 1
 	(0.0 <= gi <= nx1 && 0.0 <= gj <= ny1) || return nothing
-	i0 = min(floor(Int, gi), nx1 - 1)
-	j0 = min(floor(Int, gj), ny1 - 1)
-	fx = gi - i0
-	fy = gj - j0
+	i0, fx = _stream_cell(g.X, g.uniform_x, g.sx, gi)
+	j0, fy = _stream_cell(g.Y, g.uniform_y, g.sy, gj)
 	w00 = (1 - fx) * (1 - fy)
 	w10 = fx * (1 - fy)
 	w01 = (1 - fx) * fy
@@ -456,8 +502,10 @@ function _stream_velocity(g::_StreamGrid, gi::Float64, gj::Float64)
 			w01 * g.U[i0 + 1, j0 + 2] + w11 * g.U[i0 + 2, j0 + 2]
 		v = w00 * g.V[i0 + 1, j0 + 1] + w10 * g.V[i0 + 2, j0 + 1] +
 			w01 * g.V[i0 + 1, j0 + 2] + w11 * g.V[i0 + 2, j0 + 2]
-		cell_x = g.x[i0 + 2] - g.x[i0 + 1]
-		cell_y = g.y[j0 + 2] - g.y[j0 + 1]
+		# Axis units per index unit: the cell's own width on an evenly
+		# spaced axis (the grid index), the mean cell otherwise.
+		cell_x = g.uniform_x ? g.X[i0 + 2] - g.X[i0 + 1] : 1 / g.sx
+		cell_y = g.uniform_y ? g.Y[j0 + 2] - g.Y[j0 + 1] : 1 / g.sy
 	end
 	(isfinite(u) && isfinite(v)) || return nothing
 	speed = hypot(u, v)
@@ -633,14 +681,23 @@ function _stream_spiral(n::Int)
 	return order
 end
 
-function _stream_to_index(coords::Vector{Float64}, value::Float64)
-	i0 = clamp(searchsortedlast(coords, value), 1, length(coords) - 1)
-	return (i0 - 1) + (value - coords[i0]) / (coords[i0 + 1] - coords[i0])
+# Index coordinate of data value `value` on an axis (nodes `A` in axis
+# units) and back (see `_StreamGrid`).
+function _stream_to_index(A::Vector{Float64}, uniform::Bool, s::Float64, log_axis::Bool, value::Float64)
+	a = log_axis ? log10(value) : value
+	uniform || return (a - A[1]) * s
+	i0 = clamp(searchsortedlast(A, a), 1, length(A) - 1)
+	return (i0 - 1) + (a - A[i0]) / (A[i0 + 1] - A[i0])
 end
 
-function _stream_to_data(coords::Vector{Float64}, g::Float64)
-	i0 = min(floor(Int, g), length(coords) - 2)
-	return coords[i0 + 1] + (g - i0) * (coords[i0 + 2] - coords[i0 + 1])
+function _stream_to_data(A::Vector{Float64}, uniform::Bool, s::Float64, log_axis::Bool, g::Float64)
+	a = if uniform
+		i0 = min(floor(Int, g), length(A) - 2)
+		A[i0 + 1] + (g - i0) * (A[i0 + 2] - A[i0 + 1])
+	else
+		A[1] + g / s
+	end
+	return log_axis ? exp10(a) : a
 end
 
 function _stream_seeds(seeds, g::_StreamGrid, who::AbstractString)
@@ -673,7 +730,10 @@ function _stream_seeds(seeds, g::_StreamGrid, who::AbstractString)
 			"$(who): seed ($(xs), $(ys)) lies outside the grid " *
 			"[$(g.x[1]), $(g.x[end])] × [$(g.y[1]), $(g.y[end])].",
 		))
-		push!(out, (_stream_to_index(g.x, Float64(xs)), _stream_to_index(g.y, Float64(ys))))
+		push!(out, (
+			_stream_to_index(g.X, g.uniform_x, g.sx, g.xlog, Float64(xs)),
+			_stream_to_index(g.Y, g.uniform_y, g.sy, g.ylog, Float64(ys)),
+		))
 	end
 	return out
 end
@@ -832,7 +892,7 @@ function _streamlines_traces(
 		speed = hypot(Ugrid[k], Vgrid[k])
 		isfinite(speed) && (largest = max(largest, speed))
 	end
-	grid = _StreamGrid(xs, ys, Ugrid, Vgrid, _STREAMLINE_SPEED_FLOOR * largest)
+	grid = _stream_grid(xs, ys, xlog, ylog, Ugrid, Vgrid, _STREAMLINE_SPEED_FLOOR * largest)
 	lines = largest > 0 ?
 		_stream_lines(grid, Float64(density), seeds, direction_value, Float64(maxlength), who) :
 		Vector{Vector{NTuple{2, Float64}}}()
@@ -876,8 +936,8 @@ function _streamlines_traces(
 		end
 		return scatter(; fields...)
 	end
-	data_x(point) = _stream_to_data(grid.x, point[1])
-	data_y(point) = _stream_to_data(grid.y, point[2])
+	data_x(point) = _stream_to_data(grid.X, grid.uniform_x, grid.sx, grid.xlog, point[1])
+	data_y(point) = _stream_to_data(grid.Y, grid.uniform_y, grid.sy, grid.ylog, point[2])
 	# D16: the anchor extent of the streamlines is the field grid they are
 	# integrated on (every line and seed lies inside it).
 	anchors = (xs[1], xs[end], ys[1], ys[end])

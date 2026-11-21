@@ -445,7 +445,7 @@ const _STYLE_MARKER_CYCLE = (
 		colorway=nothing, linewidth=0, marker_size=0, ticks="outside", spines=:box,
 		grid=true, legend_frame=true, margin=nothing, mathsize="", cycle=:none,
 		width=0, aspect=0, axis_linewidth=0, tick_length=0, mirror_ticks=false,
-		errorbar_width=0, reference_linewidth=0, log_ticks=:auto)
+		errorbar_width=0, reference_linewidth=0, log_ticks=:auto, title_gap=:auto)
 
 A named bundle of figure defaults (the PlotlySupply analogue of matplotlib
 `rcParams`). The active style is chosen with [`set_default_style!`](@ref) or
@@ -550,6 +550,15 @@ Every field is validated by the constructor and on assignment
   every journal preset use `:decades`; `:default` keeps `:auto`. An axis
   that has `tickvals`, `dtick`, `tickmode` or `ticktext` set by the user is
   never changed.
+- `title_gap=:auto`: clear gap, in em of the axis-title font, between the
+  box of the tick labels of a Cartesian axis and the box of its title, on
+  every side and for plain, MathJax, wrapped and multi-line titles alike
+  (written as the axis's `title.standoff`, with a record in `layout.meta`
+  that the bundled plotly.js places the drawn title by). `:auto` is `0.5`
+  for a sized style (`width > 0`: every journal preset; matplotlib's
+  `labelpad` is 4 pt) and plotly's own placement otherwise (`:default`,
+  `:publication`); `nothing` always keeps plotly's placement. A
+  `title_standoff`/`title.standoff` the user sets wins.
 
 Numeric fields use `0` as "unset"; negative and non-finite values throw an
 `ArgumentError`. Sizes and widths are CSS px (1 pt = 4/3 px, 1 in = 96 px).
@@ -605,6 +614,7 @@ mutable struct PlotStyle
 	errorbar_width::Float64
 	reference_linewidth::Float64
 	log_ticks::Symbol
+	title_gap::Union{Nothing, Symbol, Float64}
 
 	function PlotStyle(
 		template,
@@ -632,7 +642,8 @@ mutable struct PlotStyle
 		mirror_ticks = false,
 		errorbar_width = 0,
 		reference_linewidth = 0,
-		log_ticks = :auto;
+		log_ticks = :auto,
+		title_gap = :auto;
 		who::AbstractString = "PlotStyle",
 	)
 		v(name, value) = _style_validate_field(name, value, who)
@@ -663,6 +674,7 @@ mutable struct PlotStyle
 			v(:errorbar_width, errorbar_width),
 			v(:reference_linewidth, reference_linewidth),
 			v(:log_ticks, log_ticks),
+			v(:title_gap, title_gap),
 		)
 		_style_check_figure_size(style.width, style.aspect, who)
 		return style
@@ -714,6 +726,7 @@ function PlotStyle(
 	errorbar_width = 0,
 	reference_linewidth = 0,
 	log_ticks = :auto,
+	title_gap = :auto,
 	kwargs...,
 )
 	isempty(kwargs) || throw(ArgumentError(
@@ -746,6 +759,7 @@ function PlotStyle(
 		errorbar_width,
 		reference_linewidth,
 		log_ticks,
+		title_gap,
 	)
 end
 
@@ -905,6 +919,14 @@ function _style_validate_field(name::Symbol, value, who::AbstractString)
 		return _style_symbol_choice(value, _STYLE_CYCLES, who, "cycle")
 	elseif name === :log_ticks
 		return _style_symbol_choice(value, _STYLE_LOG_TICKS, who, "log_ticks")
+	elseif name === :title_gap
+		value === nothing && return nothing
+		(value === :auto || value == "auto") && return :auto
+		(value isa Real && !(value isa Bool) && isfinite(value) && value >= 0) ||
+			throw(ArgumentError(
+				"$(who): `title_gap` must be :auto, nothing or a finite number of em >= 0; got $(repr(value)).",
+			))
+		return Float64(value)
 	end
 	throw(ArgumentError(
 		"$(who): unknown PlotStyle field `$(name)`; fields are $(join(fieldnames(PlotStyle), ", ")).",
@@ -2322,6 +2344,22 @@ adaptive labels). Reads `PlotStyle.log_ticks`. Internal; `_axes_log_tick_updates
 _style_log_ticks(style::PlotStyle = _active_style()) = style.log_ticks
 
 """
+	_style_title_gap(style::PlotStyle = _active_style()) -> Union{Nothing, Float64}
+
+The axis-title gap (em of the title font) of `style` (D24): `title_gap`, with
+`:auto` resolved to `0.5` for a sized style (`width > 0`, the journal presets)
+and to `nothing` (plotly's placement) otherwise. Internal;
+`_axes_title_gap_updates!` (src/sci/axes.jl) applies it.
+"""
+function _style_title_gap(style::PlotStyle = _active_style())
+	gap = style.title_gap
+	gap === :auto && return style.width > 0 ? _STYLE_SIZED_TITLE_GAP_EM : nothing
+	return gap
+end
+# matplotlib's `axes.labelpad` is 4 pt, half of an 8 pt label.
+const _STYLE_SIZED_TITLE_GAP_EM = 0.5
+
+"""
 	_style_log_ticks(layout::Layout) -> Symbol
 
 The log-axis tick rule of a figure: the one of the style it was built under
@@ -2426,11 +2464,12 @@ end
 """
 	_with_figure_style(f, fig; adopt = false)
 
-Run `f()` with `_active_style()` returning the style `fig` carries (the active
-style when it carries none), so every function below that reads the active
-style (trace defaults, legend and axis frames, the finalizer's sizes, the
-export size) sees the figure's own. Internal; the entry of mutators,
-`_finalize_figure!` and `savefig`.
+Run `f()` with `_active_style()` returning the style `fig` carries (the default
+look, `PlotStyle()`, when it carries none), so every function below that reads
+the active style (trace defaults, legend and axis frames, the finalizer's
+sizes, the export size) sees the figure's own whatever style is active around
+the call (sm-11). Internal; the entry of mutators, `_finalize_figure!` and
+`savefig`.
 
 `adopt = true` (the mutators): a figure that carries no style takes the active
 one first when that is not the default look (`_style_record`), so what the
@@ -2441,8 +2480,18 @@ ended. A mutation never changes the figure's style otherwise.
 function _with_figure_style(f, fig; adopt::Bool = false)
 	adopt && _style_adopt!(fig)
 	recorded = _figure_recorded_style(fig)
-	scoped = _STYLE_SCOPE[]
-	(recorded === nothing ? scoped === nothing : recorded === scoped) && return f()
+	if recorded === nothing
+		# A mutator found the active style to be the default look (else the
+		# figure has just adopted it): it runs under the active style.
+		adopt && return _STYLE_SCOPE[] === nothing ? f() : Base.ScopedValues.with(f, _STYLE_SCOPE => nothing)
+		# sm-11: a figure that carries no style carries the default look
+		# (`_style_record` writes nothing for it), so the finalizer, the raw
+		# verbs and an export read `PlotStyle()`, not a style active around
+		# them (`with_style(:ieee)` would re-place its legends and export it at
+		# 3.5 in).
+		recorded = _STYLE_BASELINE
+	end
+	recorded === _STYLE_SCOPE[] && return f()
 	return Base.ScopedValues.with(f, _STYLE_SCOPE => recorded)
 end
 

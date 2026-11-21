@@ -347,6 +347,14 @@ const _POWER_TRACE_COLORBARS = (
 	(:scattercarpet, ((:marker, :colorbar),)), (:scattersmith, ((:marker, :colorbar),)),
 	(:bar, ((:marker, :colorbar),)), (:barpolar, ((:marker, :colorbar),)),
 	(:histogram, ((:marker, :colorbar),)),
+	# seams-06: the map traces, parcoords/parcats and the hierarchy traces draw
+	# colorbars too.
+	(:densitymap, ((:colorbar,),)), (:densitymapbox, ((:colorbar,),)),
+	(:choroplethmap, ((:colorbar,),)), (:choroplethmapbox, ((:colorbar,),)),
+	(:scattermap, ((:marker, :colorbar),)), (:scattermapbox, ((:marker, :colorbar),)),
+	(:parcoords, ((:line, :colorbar),)), (:parcats, ((:line, :colorbar),)),
+	(:splom, ((:marker, :colorbar),)), (:sunburst, ((:marker, :colorbar),)),
+	(:treemap, ((:marker, :colorbar),)), (:icicle, ((:marker, :colorbar),)),
 )
 
 function _power_template(source::PlotlyBase.Template)
@@ -10513,6 +10521,9 @@ function _scat_series_errors(err, lengths::Vector{Int}, who::AbstractString, nam
 				"$(who): `$(name)` for series $(index) has $(length(values)) values " *
 				"but the series has $(lengths[index]) points.",
 			))
+			# numerics-01: magnitudes, as plot_bar checks them (a negative
+			# value draws the bar on the wrong side, a string draws nothing).
+			_stats_check_error_values(values, who, name)
 		end
 	end
 	return entries
@@ -16252,6 +16263,15 @@ function _contour_add!(
 		linecolor_set = !isempty(line_color),
 		log_levels = log_norm,
 	)
+	# numerics-02: plotly.js colours the lines of a native contour trace over
+	# contours.start..end, whatever zmin/zmax say, so an explicit colour range
+	# or midpoint on evenly spaced line levels would leave the lines and the
+	# colorbar disagreeing. Such levels take the per-level path, whose colours
+	# come from crange/cmid (as non-uniform levels).
+	if spec.kind === :uniform && spec.coloring == "lines" &&
+		(cmid !== nothing || !_is_auto_range(crange) || !_is_auto_range(zrange))
+		spec = merge(spec, (kind = :per_level,))
+	end
 	single_colour = spec.coloring == "none"
 	single_colour && showscale === true && throw(ArgumentError(
 		"$(who): `showscale = true` needs colour-mapped contours; coloring = " *

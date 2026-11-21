@@ -65,6 +65,69 @@ const _PLOTLYJS_GL3D_PAD_SEAM =
 	raw"""o.prototype.merge=function(t,e){for(var r=this,o=0;o<3;++o){var s=e[a[o]];s.visible?("""
 const _PLOTLYJS_GL3D_PAD_REPLACEMENT =
 	raw"""o.prototype.merge=function(t,e){var _g=t.meta&&t.meta["plotlysupply:gl3d"],_h=_g&&e._scene&&_g[e._scene.id];for(var r=this,o=0;o<3;++o){var s=e[a[o]];_h&&_h.length>=2&&isFinite(_h[0])&&isFinite(_h[1])&&_h[0]>=0&&_h[1]>=0&&(r.tickPad[o]=+_h[0],r.labelPad[o]=+_h[1]);s.visible?("""
+# Power-format tick labels (D21, vm-powerfmt). plotly.js takes the common
+# exponent of a linear axis from the larger END of its range (axes.js
+# autoTickRound), so ticks 2000 ... 8000 on a range that ends at 1.04e4 read
+# "0.2×10^4" ... "0.8×10^4", and a tick below the largest tick's decade
+# (5000 next to 15000) reads "0.5×10^4". A journal figure never prints a
+# mantissa below 1. (a) The exponent of a linear axis (colorbars included)
+# is taken from its largest tick inside the range (the range end when no
+# tick lies inside), so 2000 ... 8000 print plainly, as matplotlib does.
+# (b) Under exponentformat = "power" every tick label that carries an
+# exponent is written with its own decade, so its mantissa is in [1, 10):
+# "5×10^3", "1×10^4", "1.5×10^4". Hover labels and the other formats keep
+# plotly's text.
+const _PLOTLYJS_POWER_EXPONENT_SEAM =
+	raw"""var l=Math.max(Math.abs(s[0]),Math.abs(s[1])),c=Math.floor(Math.log(l)/Math.LN10+.01),u=void 0===t.minexponent?3:t.minexponent;"""
+const _PLOTLYJS_POWER_EXPONENT_REPLACEMENT =
+	raw"""var l=Math.max(Math.abs(s[0]),Math.abs(s[1]));if("linear"===t.type&&i(e)&&e>0&&isFinite(s[0])&&isFinite(s[1])){var _p0=i(t.tick0)?+t.tick0:0,_pa=_p0+Math.ceil((Math.min(s[0],s[1])-_p0)/e-1e-9)*e,_pb=_p0+Math.floor((Math.max(s[0],s[1])-_p0)/e+1e-9)*e,_pm=Math.max(Math.abs(_pa),Math.abs(_pb));_pa<=_pb&&_pm>0&&isFinite(_pm)&&(l=_pm)}var c=Math.floor(Math.log(l)/Math.LN10+.01),u=void 0===t.minexponent?3:t.minexponent;"""
+const _PLOTLYJS_POWER_MANTISSA_SEAM =
+	raw"""if(t+=d,c&&(t*=Math.pow(10,-c),o+=c),0===o)"""
+const _PLOTLYJS_POWER_MANTISSA_REPLACEMENT =
+	raw"""if(t+=d,c&&"power"===l&&!n&&t>0&&isFinite(t)&&(c=Math.min(c,Math.floor(Math.log(t)/Math.LN10+1e-9))),c&&(t*=Math.pow(10,-c),o+=c),0===o)"""
+# apia-11: text and hover templates ("%{z:.2f}" in plot_matrix cells) format
+# numbers through the figure's d3 locale, whose minus sign is the ASCII
+# hyphen in plotly.js' d3-format 1.4, while plotly's own tick and colorbar
+# labels print U+2212. The locale's minus is U+2212 unless the locale gives
+# one, so every number of a figure is written with the same glyph.
+const _PLOTLYJS_LOCALE_MINUS_SEAM =
+	raw"""s._d3locale=function(t,e){return t.decimal=e.charAt(0),t.thousands=e.charAt(1),{numberFormat:"""
+const _PLOTLYJS_LOCALE_MINUS_REPLACEMENT =
+	raw"""s._d3locale=function(t,e){return t.decimal=e.charAt(0),t.thousands=e.charAt(1),void 0===t.minus&&(t.minus="−"),{numberFormat:"""
+# V4 (lead visual review): plotly.js counts a layout shape in the autorange of
+# a data axis without padding (shapes/calc_autorange.js), so a reference line
+# (hline!/vline!, any line spanning its cell: drawn from 0 to 1 of the other
+# axis's domain or the paper) below the data lands on the frame, where it
+# cannot be seen (gallery log_bars (b): the 0.8 floor on the bottom spine).
+# Such a line is padded like data, as matplotlib's axhline/axvline, which
+# join the data limits before the margins are added; a range the user fixes
+# is never changed.
+const _PLOTLYJS_SHAPE_PAD_SEAM =
+	raw"""function s(t){return c(t.line.width,t.xsizemode,t.x0,t.x1,t.path,!1)}function l(t){return c(t.line.width,t.ysizemode,t.y0,t.y1,t.path,!0)}"""
+const _PLOTLYJS_SHAPE_PAD_REPLACEMENT =
+	raw"""function s(t){var _s=c(t.line.width,t.xsizemode,t.x0,t.x1,t.path,!1);return"line"===t.type&&"scaled"===t.xsizemode&&t.x0===t.x1&&/(domain|paper)$/.test(String(t.yref))&&(_s.padded=!0),_s}function l(t){var _s=c(t.line.width,t.ysizemode,t.y0,t.y1,t.path,!0);return"line"===t.type&&"scaled"===t.ysizemode&&t.y0===t.y1&&/(domain|paper)$/.test(String(t.xref))&&(_s.padded=!0),_s}"""
+# D24 (axis-title gap, src/sci/axes.jl `_axes_title_gap_updates!`): an axis
+# whose `title.standoff` is the one recorded in
+# `layout.meta["plotlysupply:titlegap"]` (axis name => [standoff, gap px])
+# asks for its title box to sit exactly `gap` px beyond the union of its tick
+# label boxes. plotly.js places a title by formula (baseline or centre line
+# `standoff` px past the labels' depth), so the box gap depends on the font,
+# the side and, for MathJax, on the expression; it then only pushes a title
+# out of the labels it overlaps (`titles.draw` avoid, scootTitle). The first
+# seam hands the recorded gap to the title's avoid options; the second
+# measures, once the title is drawn, the rendered boxes of the title and of
+# every tick label (getBoundingClientRect, scaled to layout px: Drawing.bBox
+# measures a detached clone, which misses a MathJax title's glyph sizes by up
+# to 3 px) and moves the title to the gap, nearer or further, never beyond
+# the paper (its `maxShift`). Every other title is placed as before.
+const _PLOTLYJS_TITLE_GAP_SEAM =
+	raw"""e.title.hasOwnProperty("standoff")&&(g.pad=0)}return e._titleStandoff=r,u.draw"""
+const _PLOTLYJS_TITLE_GAP_REPLACEMENT =
+	raw"""e.title.hasOwnProperty("standoff")&&(g.pad=0);var _G=n.meta&&n.meta["plotlysupply:titlegap"],_g=_G&&_G[e._name];Array.isArray(_g)&&_g[0]===e.title.standoff&&"number"==typeof _g[1]&&isFinite(_g[1])&&(g.gap=_g[1])}return e._titleStandoff=r,u.draw"""
+const _PLOTLYJS_TITLE_SCOOT_SEAM =
+	raw"""T=b.maxShift||u*(w[b.side]-f[b.side]),k=0;if(T<0)k=T;else{var A=b.offsetLeft||0,M=b.offsetTop||0;f.left-=A,f.right-=A,f.top-=M,f.bottom-=M,b.selection.each((function(){var t=c.bBox(this);s.bBoxIntersect(f,t,h)&&(k=Math.max(k,u*(t[b.side]-f[o])+h))})),k=Math.min(T,k),y._titleScoot=Math.abs(k)}if(k>0||T<0){"""
+const _PLOTLYJS_TITLE_SCOOT_REPLACEMENT =
+	raw"""T,k=0;if(i(b.gap)){var _r=a.node().getBoundingClientRect(),_p=g._paper.node().getBoundingClientRect(),_q=_p.width>0?g.width/_p.width:1,_f={left:(_r.left-_p.left)*_q,right:(_r.right-_p.left)*_q,top:(_r.top-_p.top)*_q,bottom:(_r.bottom-_p.top)*_q},_k=-1/0;T=b.maxShift||u*(w[b.side]-_f[b.side]),b.selection.each((function(){var t=this.getBoundingClientRect();t.width>0&&t.height>0&&(_k=Math.max(_k,u*(t[b.side]-_r[o])))})),k=isFinite(_k)?Math.min(T,_k*_q+b.gap):0,y._titleScoot=Math.max(k,0)}else if((T=b.maxShift||u*(w[b.side]-f[b.side]))<0)k=T;else{var A=b.offsetLeft||0,M=b.offsetTop||0;f.left-=A,f.right-=A,f.top-=M,f.bottom-=M,b.selection.each((function(){var t=c.bBox(this);s.bBoxIntersect(f,t,h)&&(k=Math.max(k,u*(t[b.side]-f[o])+h))})),k=Math.min(T,k),y._titleScoot=Math.abs(k)}if(0!==k){"""
 const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_MATH_FONT_SEAM => _PLOTLYJS_MATH_FONT_REPLACEMENT,
 	_PLOTLYJS_MATH_SIZE_SEAM => _PLOTLYJS_MATH_SIZE_REPLACEMENT,
@@ -72,6 +135,12 @@ const _PLOTLYJS_COMPAT_TRANSFORMS = (
 	_PLOTLYJS_AXIS_TITLE_ROOM_SEAM => _PLOTLYJS_AXIS_TITLE_ROOM_REPLACEMENT,
 	_PLOTLYJS_AXIS_TITLE_SHIFT_SEAM => _PLOTLYJS_AXIS_TITLE_SHIFT_REPLACEMENT,
 	_PLOTLYJS_GL3D_PAD_SEAM => _PLOTLYJS_GL3D_PAD_REPLACEMENT,
+	_PLOTLYJS_POWER_EXPONENT_SEAM => _PLOTLYJS_POWER_EXPONENT_REPLACEMENT,
+	_PLOTLYJS_POWER_MANTISSA_SEAM => _PLOTLYJS_POWER_MANTISSA_REPLACEMENT,
+	_PLOTLYJS_LOCALE_MINUS_SEAM => _PLOTLYJS_LOCALE_MINUS_REPLACEMENT,
+	_PLOTLYJS_SHAPE_PAD_SEAM => _PLOTLYJS_SHAPE_PAD_REPLACEMENT,
+	_PLOTLYJS_TITLE_GAP_SEAM => _PLOTLYJS_TITLE_GAP_REPLACEMENT,
+	_PLOTLYJS_TITLE_SCOOT_SEAM => _PLOTLYJS_TITLE_SCOOT_REPLACEMENT,
 	_PLOTLYJS_SVG_QUOTE_TRANSFORMS...,
 )
 

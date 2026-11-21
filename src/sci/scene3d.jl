@@ -2787,6 +2787,9 @@ function _s3_nice_ticks(range, count::Int)
 	lo, hi = Float64(range[1]), Float64(range[2])
 	(isfinite(lo) && isfinite(hi) && hi > lo) || return (Float64[], 0.0)
 	step = _s3_plotly_tick_step(hi - lo, max(count, 1))
+	# errors-inputs-10: a span that overflows or is subnormal (zrange =
+	# (0, 5e-324)) has no step plotly could draw ticks at.
+	(isfinite(step) && step > 0 && isfinite(lo / step) && isfinite(hi / step)) || return (Float64[], 0.0)
 	first_index = ceil(Int, lo / step - 1e-9)
 	last_index = floor(Int, hi / step + 1e-9)
 	return [round(k * step; sigdigits = 12) for k in first_index:last_index], step

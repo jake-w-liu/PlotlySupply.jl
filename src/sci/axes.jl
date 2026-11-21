@@ -681,8 +681,10 @@ function _axes_has_offset(fig, key::Symbol)
 	return any(item -> _cmn_name_matches(_cmn_item_name(item), owner), existing)
 end
 
-# Tick label for `v / 10^k`: six significant digits, plotly's minus sign.
-_axes_offset_label(v::Float64) = replace(_axes_format_number(v), "-" => "\u2212")
+# Tick label for `v / 10^k`: six (`sigdigits`) significant digits, plotly's
+# minus sign.
+_axes_offset_label(v::Float64; sigdigits::Int = 6) =
+	replace(_axes_format_number(v; sigdigits = sigdigits), "-" => "\u2212")
 
 # Whether a trace on Cartesian axis `key` places a coordinate `v` with
 # `pred(v)` there (its `x`/`y` values; implied coordinates are numbers).
@@ -808,14 +810,18 @@ function _axes_offset_plan(fig, key::Symbol, values, labels, offset, subs, forma
 				"place ticks there.",
 			))
 			inner = _axes_linear_ticks(lo, hi, who)
-			step = length(inner) >= 2 ? inner[2] - inner[1] : hi - lo
+			# numerics-10: the ticks are multiples of the 1-2-5 step m·10^e of
+			# `inner`, built from integers (`_cmn_log_tick_value`, correctly
+			# rounded), never from a difference of two large tick values.
+			m, e = _axes_nice_step(inner[2] - inner[1])
+			step = m * exp10(e)
 			span = hi - lo
 			# Ticks over one more span on each side: the autorange padding and
 			# moderate later changes stay labelled (plotly.js draws only the
 			# ticks inside the range).
 			kmin, kmax = floor(Int, (lo - span) / step), ceil(Int, (hi + span) / step)
 			visible = inner
-			Float64[round(k * step; sigdigits = 12) for k in kmin:kmax]
+			Float64[_cmn_log_tick_value(Float64(k * m), 10.0, e) for k in kmin:kmax]
 		end
 	end
 	k = if offset === :auto
@@ -829,7 +835,31 @@ function _axes_offset_plan(fig, key::Symbol, values, labels, offset, subs, forma
 		return (values, labels, nothing, values === nothing && _axes_has_offset(fig, key))
 	end
 	factor = exp10(k)
-	return (ticks, String[_axes_offset_label(v / factor) for v in ticks], k, false)
+	return (ticks, _axes_offset_labels(ticks, factor), k, false)
+end
+
+# The 1-2-5 step (m, e), m·10^e with m in (1, 2, 5), nearest to `d` (a
+# difference of two neighbouring `_axes_linear_ticks` values, which carries
+# their rounding error).
+function _axes_nice_step(d::Float64)
+	e = floor(Int, log10(d) + 1e-9)
+	m = round(Int, d / exp10(e))
+	m >= 10 && return (1, e + 1)
+	return (m < 2 ? 1 : m < 4 ? 2 : 5, e)
+end
+
+# numerics-10: labels `v / factor` of the ticks `ticks` with plotly's minus
+# sign: six significant digits, or as many more (up to 17) as distinct tick
+# values need to keep distinct labels (data with a large constant part:
+# 1000000.2 and 1000000.4 under ×10^6 read "1.0000002" and "1.0000004").
+function _axes_offset_labels(ticks::AbstractVector{Float64}, factor::Float64)
+	scaled = Float64[v / factor for v in ticks]
+	distinct = length(unique(ticks))
+	for digits in 6:17
+		labels = String[_axes_offset_label(v; sigdigits = digits) for v in scaled]
+		length(unique(labels)) >= distinct && return labels
+	end
+	return String[_axes_offset_label(v; sigdigits = 17) for v in scaled]
 end
 
 # The "×10^k" annotation at the end of axis `key` of cell `t`: an x axis at
@@ -1502,12 +1532,156 @@ collected a second time.
 """
 function _axes_finalize_updates!(updates::Dict{Symbol, Any}, p::Plot, size, accs = nothing)
 	_axes_log_leftover_updates!(updates, p.layout)
+	_axes_title_gap_updates!(updates, p.layout)
 	has_log = _axes_has_log_axis(p.layout)
 	has_labels = _axes_has_outside_bar_text(p)
 	(has_log || has_labels) || return updates
 	plan = accs === nothing ? _axes_fit_plan(p, size) : _axes_fit_plan(p, size, accs)
 	has_log && _axes_log_tick_updates!(updates, p, plan)
 	has_labels && _axes_bar_label_updates!(updates, p, plan)
+	return updates
+end
+
+# ---------------------------------------------------------------------------
+# D24: the axis-title gap of the sized styles
+# ---------------------------------------------------------------------------
+#
+# plotly.js puts an axis title `title.standoff` px (plotly_white: 15) beyond
+# the tick labels' depth, measured to the title's baseline (bottom, right) or
+# its centre line (left, top), so the clear gap between the boxes was about
+# 1.4 em of a journal style's 8 pt title, and it depends on the family, the
+# side and, for MathJax, on the height of the expression. Under a style with
+# a `title_gap` (`_style_title_gap`: 0.5 em for the sized styles) every
+# Cartesian axis with a title gets
+#
+# - `title.standoff`: plotly's automargin, and the room estimates that follow
+#   it (`_fin_title_push`), reserve `_depth + standoff + 0.7 f` (plus 1.3 f
+#   per extra line) for the title, so the standoff is what makes that hold
+#   the title as drawn at the gap (`_AXES_TITLE_GAP_RESERVE_EM`, more for
+#   MathJax); a title that does not fit its margin is stopped at the paper
+#   edge, nearer than the gap;
+# - a record `layout.meta["plotlysupply:titlegap"]` (axis key => [standoff,
+#   gap px]). plotly.js (src/plotlyjs_compat_asset.jl, the D24 title seams)
+#   then moves a recorded title, once it is drawn, so that its box sits
+#   exactly that many px beyond the union of the tick-label boxes: plain,
+#   MathJax, wrapped and multi-line titles alike, on every side, whatever
+#   the tick angle or axis type.
+#
+# A standoff that differs from the recorded one is the user's (it wins: the
+# record is dropped and plotly places the title as usual); ours is removed
+# again when the style has no gap or the title goes.
+
+const _AXES_TITLE_GAP_META_KEY = Symbol("plotlysupply:titlegap")
+# A plain title box is 1.125 em (Times, Arial, Helvetica) to 1.214 em (Open
+# Sans) high (render probe j4); plotly reserves standoff + 0.7 em of it, so
+# the standoff is the gap plus 0.55 em (with standoff 20 px, plotly itself
+# drew the box 0.07-0.34 em nearer than the standoff, probe j3: the seam
+# moves it in to the gap).
+const _AXES_TITLE_GAP_RESERVE_EM = 0.55
+# Room (em) a MathJax title gets beyond its estimated height (see
+# `_axes_title_gap_updates!`): the largest excess drawn over a plain line.
+const _AXES_TITLE_GAP_MATH_EM = 0.45
+
+# Whether `key` names a Cartesian axis of a layout (xaxis, yaxis5, ...).
+_axes_is_cartesian_key(key) = key isa Symbol && occursin(r"^[xy]axis([1-9][0-9]*)?$", String(key))
+
+# The title gap record of `layout`: axis key (String) => (standoff, gap px).
+function _axes_title_gap_record(layout::Layout)
+	raw = _fin_meta_get(layout, _AXES_TITLE_GAP_META_KEY)
+	out = Dict{String, Tuple{Float64, Float64}}()
+	raw isa PlotlyBase.PlotlyAttribute && (raw = raw.fields)
+	raw isa AbstractDict || return out
+	for (k, v) in raw
+		(v isa AbstractVector && length(v) == 2 && all(_fin_isfinite_real, v)) || continue
+		out[String(k)] = (Float64(v[1]), Float64(v[2]))
+	end
+	return out
+end
+
+# Whether `layout` may need title gaps written or removed: its style has a
+# gap, or it carries a record (so ours can be removed). Cheap: the style is
+# in scope, the record one lookup.
+_axes_wants_title_gaps(layout::Layout) =
+	_style_title_gap(_active_style()) !== nothing ||
+	_fin_meta_get(layout, _AXES_TITLE_GAP_META_KEY) !== nothing
+
+# The size (px) plotly.js draws the title of axis `key` at: its own
+# `title.font.size`, the template's for the axis letter, else round(1.2 x)
+# the layout font size (plotly's `bigFont`).
+function _axes_title_font_size(layout::Layout, key::Symbol, axis)
+	own = _cmn_mapping_get(_cmn_mapping_get(_cmn_mapping_get(axis, :title), :font), :size)
+	_fin_isfinite_real(own) && own > 0 && return Float64(own)
+	template_axis = _axes_template_entry(layout, String(key)[1] == 'x' ? :xaxis : :yaxis)
+	inherited = _cmn_mapping_get(_cmn_mapping_get(_cmn_mapping_get(template_axis, :title), :font), :size)
+	_fin_isfinite_real(inherited) && inherited > 0 && return Float64(inherited)
+	return Float64(round(_AXES_TITLE_FONT_FACTOR * _fin_font_size(layout)))
+end
+
+"""
+	_axes_title_gap_updates!(updates, layout::Layout) -> updates
+
+D24 (see the comment above): add to `updates` (`relayout!` keys, `nothing`
+removes) the `title.standoff` of every titled Cartesian axis of `layout` under
+the scoped style's `title_gap`, and write the matching record into
+`layout.meta` in place. A standoff the user set is kept; ours is removed when
+the style has no gap or the axis no title. A hidden axis keeps what it has.
+"""
+function _axes_title_gap_updates!(updates::Dict{Symbol, Any}, layout::Layout)
+	gap_em = _style_title_gap(_active_style())
+	record = _axes_title_gap_record(layout)
+	gap_em === nothing && isempty(record) && return updates
+	fresh = Dict{String, Tuple{Float64, Float64}}()
+	wraps = nothing
+	for (key, axis) in layout.fields
+		_axes_is_cartesian_key(key) || continue
+		name = String(key)
+		rec = get(record, name, nothing)
+		standoff = _cmn_mapping_get(_cmn_mapping_get(axis, :title), :standoff)
+		ours = rec !== nothing && _fin_isfinite_real(standoff) && Float64(standoff) == rec[1]
+		if _cmn_mapping_get(axis, :visible) === false
+			ours && (fresh[name] = rec)
+			continue
+		end
+		if gap_em === nothing || isempty(_fin_title_text(axis))
+			ours && (updates[Symbol(key, :_title_standoff)] = nothing)
+			continue
+		end
+		# A standoff of the user's wins (ours, if any, was replaced); the one
+		# the title wrap writes with its line breaks (`_FIN_WRAP_STANDOFF`) is
+		# not the user's.
+		wrap_standoff = _fin_isfinite_real(standoff) && standoff == _FIN_WRAP_STANDOFF &&
+			haskey(wraps === nothing ? (wraps = _fin_wrap_record(layout)) : wraps, name)
+		(standoff === nothing || ours || wrap_standoff) || continue
+		size = _axes_title_font_size(layout, key, axis)
+		# A MathJax title taller than its plain line (a fraction, a root, a
+		# script) is drawn by the seam at the same gap, but plotly reserves
+		# margin by the standoff: the standoff takes the excess of its
+		# estimated height, so the margin holds the title (the seam then moves
+		# it in to the gap) instead of the paper edge capping the move.
+		# The estimate runs short for scripts and delimiters (drawn 1.2-1.53 em
+		# against 1.125 em for a plain line, render probe j4), so a MathJax
+		# title also gets `_AXES_TITLE_GAP_MATH_EM`.
+		text = _fin_title_text(axis)
+		extra = occursin('$', text) ?
+			max(0.0, _text_extent(text, size)[2] - _AXES_LINE_HEIGHT_EM * size * (1 + count(_FIN_LINE_BREAK, text))) +
+			_AXES_TITLE_GAP_MATH_EM * size : 0.0
+		# Rounded to 0.01 px so the value survives a JSON round trip as it is.
+		want = round((gap_em + _AXES_TITLE_GAP_RESERVE_EM) * size + extra; digits = 2)
+		gap = round(gap_em * size; digits = 2)
+		if !(ours && rec[1] == want)
+			title = _cmn_mapping_get(axis, :title)
+			# A title given as a bare string becomes {text, standoff}.
+			title isa AbstractString ?
+				(updates[Symbol(key, :_title)] = Dict{Symbol, Any}(:text => String(title), :standoff => want)) :
+				(updates[Symbol(key, :_title_standoff)] = want)
+		end
+		fresh[name] = (want, gap)
+	end
+	if fresh != record
+		value = isempty(fresh) ? nothing :
+			Dict{Any, Any}(Symbol(k) => Any[v[1], v[2]] for (k, v) in fresh)
+		_fin_meta_set!(layout, _AXES_TITLE_GAP_META_KEY, value)
+	end
 	return updates
 end
 
@@ -1623,12 +1797,63 @@ function _axes_bar_label_room(trace, horizontal::Bool, root_font::Float64)
 	return extent + _AXES_BAR_TEXT_PAD + _AXES_BAR_LABEL_CLEARANCE
 end
 
+# vm-hbartext: inside ticks of the counter axis reach into the plot area at
+# the ends of the value axis: its mirrored ticks at the far frame (the
+# journal presets mirror inside ticks), its own ticks at the near one, where
+# the labels of negative bars go. Their length is room the labels also need
+# (an outside label of the longest horizontal bar was struck through by the
+# mirrored y ticks under :ieee and :aps).
+function _axes_bar_counter_ticks(fields, trace, horizontal::Bool, negative::Bool)
+	ref = get(trace.fields, horizontal ? :yaxis : :xaxis, horizontal ? "y" : "x")
+	ref isa Symbol && (ref = String(ref))
+	ref isa AbstractString || return 0.0
+	axis = get(fields, _axis_layout_key(ref, horizontal ? :y : :x), nothing)
+	_fin_string(_cmn_mapping_get(axis, :ticks)) == "inside" || return 0.0
+	mirror = _cmn_mapping_get(axis, :mirror)
+	mirrored = mirror == "ticks" || mirror == "allticks"
+	(mirrored || negative) || return 0.0
+	len = _cmn_mapping_get(axis, :ticklen)
+	return _fin_isfinite_real(len) && len >= 0 ? Float64(len) : _AXES_PLOTLY_TICKLEN
+end
+
+# vm-hbartext: the category names of horizontal bars are the y tick labels,
+# which the plan's margin counts as numbers (`_fin_y_labels_px`: 0.6 em per
+# character of a numeric tick): "EfficientNet-B4" took 80 px against 40
+# estimated, the x axis was 40 px shorter than planned and the room for the
+# value labels came out that much short. The px by which the names (measured
+# with the family's glyph widths, `_text_extent`) exceed the estimate, for a
+# y axis on the left at the paper edge.
+function _axes_bar_category_excess(layout::Layout, plan::_AxesFitPlan, trace)
+	names = get(trace.fields, :y, nothing)
+	(names isa AbstractVector && !isempty(names) && any(v -> v isa AbstractString, names)) || return 0.0
+	ref = get(trace.fields, :yaxis, "y")
+	ref isa Symbol && (ref = String(ref))
+	ref isa AbstractString || return 0.0
+	ykey = _axis_layout_key(ref, :y)
+	axis = get(layout.fields, ykey, nothing)
+	_cmn_mapping_get(axis, :visible) === false && return 0.0
+	_cmn_mapping_get(axis, :showticklabels) === false && return 0.0
+	_fin_string(_cmn_mapping_get(axis, :side)) == "right" && return 0.0
+	font = _fin_font_size(layout)
+	tickfont = _fin_mapping_font_size(axis, :tickfont, font)
+	widest = 0.0
+	for name in names
+		name isa AbstractString && (widest = max(widest, _text_extent(name, tickfont)[1]))
+	end
+	dy = _cmn_y_axis_domain(layout, ykey)
+	estimated = _fin_y_labels_px(layout, plan.accs, ykey, dy, plan.Hp) - _fin_title_push(axis, font) -
+		_fin_tick_len(axis) - 2
+	return max(0.0, widest - estimated)
+end
+
 function _axes_bar_label_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_AxesFitPlan)
 	layout = p.layout
 	fields = layout.fields
 	root_font = Float64(_tight_root_font_size(k -> get(fields, k, nothing)))
 	# value axis key => (lowest end, highest end, lowest positive end, room px)
 	needs = Dict{Symbol, NTuple{4, Float64}}()
+	# value axis key => px the plot area is shorter than the plan says
+	short = Dict{Symbol, Float64}()
 	for trace in p.data
 		(_axes_is_bar_trace(trace) && _axes_bar_outside_text(trace)) || continue
 		horizontal = get(trace.fields, :orientation, nothing) == "h"
@@ -1638,8 +1863,9 @@ function _axes_bar_label_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_Ax
 		key = _axis_layout_key(ref, horizontal ? :x : :y)
 		ends = _axes_bar_ends(trace, horizontal)
 		isempty(ends) && continue
-		room = _axes_bar_label_room(trace, horizontal, root_font)
 		lo, hi = extrema(ends)
+		room = _axes_bar_label_room(trace, horizontal, root_font) +
+			_axes_bar_counter_ticks(fields, trace, horizontal, lo < 0)
 		pos = minimum(e -> e > 0 ? e : Inf, ends)
 		# Stacked bars end at their stack's sum.
 		barmode = _cmn_mapping_get(fields, :barmode)
@@ -1647,6 +1873,7 @@ function _axes_bar_label_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_Ax
 			slo, shi = _axes_stacked_bar_extent(p, key, horizontal, barmode == "relative")
 			lo, hi = min(lo, slo), max(hi, shi)
 		end
+		horizontal && (short[key] = max(get(short, key, 0.0), _axes_bar_category_excess(layout, plan, trace)))
 		if haskey(needs, key)
 			a, b, c, r = needs[key]
 			needs[key] = (min(a, lo), max(b, hi), min(c, pos), max(r, room))
@@ -1673,7 +1900,7 @@ function _axes_bar_label_updates!(updates::Dict{Symbol, Any}, p::Plot, plan::_Ax
 			(current isa AbstractVector && !isempty(current) &&
 				all(v -> v isa Real && !(v isa Bool) && (v > max(hi, 0.0) || v < min(lo, 0.0)), current)) || continue
 		end
-		wanted = _axes_bar_label_include(layout, plan, key, lo, hi, pos, room)
+		wanted = _axes_bar_label_include(layout, plan, key, lo, hi, pos, room; short = get(short, key, 0.0))
 		if wanted === nothing
 			# The labels no longer fit (or need no room): plotly's range.
 			current === nothing || (updates[Symbol(key, :_autorangeoptions)] = nothing)
@@ -1695,10 +1922,11 @@ end
 # length). `nothing` when the axis is not numeric, the labels would claim
 # more than `_AXES_BAR_LABEL_MAX_SHARE` of it, or there are no bars to make
 # room for.
-function _axes_bar_label_include(layout::Layout, plan::_AxesFitPlan, key::Symbol, lo::Float64, hi::Float64, pos::Float64, room::Float64)
+function _axes_bar_label_include(layout::Layout, plan::_AxesFitPlan, key::Symbol, lo::Float64, hi::Float64, pos::Float64, room::Float64;
+		short::Float64 = 0.0)
 	axis_type = _fin_axis_type(layout, key)
 	axis_type in ("linear", "-", "log") || return nothing
-	len = _axes_plan_length(layout, plan, key)
+	len = _axes_plan_length(layout, plan, key) - short
 	len > 1 || return nothing
 	share = room / len
 	share < _AXES_BAR_LABEL_MAX_SHARE || return nothing
@@ -2003,7 +2231,8 @@ out settled. The caller runs it under the style the figure carries.
 """
 function _axes_apply_fits!(fig)
 	p = _cmn_plot(fig)
-	(_axes_has_log_axis(p.layout) || _axes_has_outside_bar_text(p)) || return false
+	(_axes_has_log_axis(p.layout) || _axes_has_outside_bar_text(p) || _axes_wants_title_gaps(p.layout)) ||
+		return false
 	updates = _axes_finalize_updates!(Dict{Symbol, Any}(), p, _fin_layout_size(p.layout))
 	isempty(updates) && return false
 	relayout!(_cmn_relayout_target(fig); updates...)
@@ -2441,6 +2670,74 @@ function _axes_spine_interval(fig, key::Symbol, interval, name::AbstractString, 
 	return out
 end
 
+# perf-spines: the axis writes of a styling call over many cells, collected
+# as `relayout!` property paths (`xaxis3.showline`, `xaxis3.minor.ticks`: a
+# nested `minor` mapping is merged one level deeper, siblings kept, as
+# `_cmn_merge_layout_key!(...; nested = (:minor,))` merges it) and written
+# in one call. A key queued twice flushes first, so a target that reads an
+# axis an earlier target wrote sees the write, as one merge per key did.
+struct _AxesLayoutBatch
+	paths::Dict{Symbol, Any}
+	keys::Set{Symbol}
+end
+_AxesLayoutBatch() = _AxesLayoutBatch(Dict{Symbol, Any}(), Set{Symbol}())
+
+function _axes_queue_layout_fields!(batch::_AxesLayoutBatch, fig, key::Symbol, fields::AbstractDict{Symbol})
+	isempty(fields) && return nothing
+	key in batch.keys && _axes_flush_layout_fields!(batch, fig)
+	# A container that is not a mapping (a user's scalar) is replaced as the
+	# merge replaced it.
+	entry = get(_cmn_layout(fig).fields, key, nothing)
+	if !(entry === nothing || entry isa AbstractDict || entry isa PlotlyBase.PlotlyAttribute)
+		_axes_flush_layout_fields!(batch, fig)
+		_cmn_merge_layout_key!(fig, key, fields; nested = (:minor,))
+		return nothing
+	end
+	push!(batch.keys, key)
+	for (name, value) in fields
+		inner = value isa PlotlyBase.PlotlyAttribute ? value.fields : value
+		current = _cmn_mapping_get(entry, name)
+		if name === :minor && inner isa AbstractDict &&
+				(current === nothing || current isa AbstractDict || current isa PlotlyBase.PlotlyAttribute)
+			for (k, v) in inner
+				batch.paths[Symbol(key, '.', name, '.', k)] = v
+			end
+		else
+			batch.paths[Symbol(key, '.', name)] = value
+		end
+	end
+	return nothing
+end
+
+function _axes_flush_layout_fields!(batch::_AxesLayoutBatch, fig)
+	isempty(batch.paths) && return nothing
+	relayout!(_cmn_relayout_target(fig), copy(batch.paths))
+	empty!(batch.paths)
+	empty!(batch.keys)
+	return nothing
+end
+
+# The shapes of `owners` replaced by `items` (each named into its owner's
+# namespace) in one `layout.shapes` write; the other shapes keep their order.
+function _axes_replace_named_shapes!(fig, owners::Vector{String}, items::Vector{Any}, who::AbstractString)
+	isempty(owners) && return nothing
+	length(owners) == 1 && return _upsert_named!(fig, :shapes, only(owners), items; who = who)
+	existing = get(_cmn_layout(fig).fields, :shapes, nothing)
+	(existing === nothing || existing isa AbstractVector) || throw(ArgumentError(
+		"$(who): layout.shapes must be a vector; got $(typeof(existing)).",
+	))
+	kept = Any[]
+	if existing !== nothing
+		for item in existing
+			name = _cmn_item_name(item)
+			any(owner -> _cmn_name_matches(name, owner), owners) && continue
+			push!(kept, item)
+		end
+	end
+	relayout!(_cmn_relayout_target(fig); shapes = vcat(kept, items))
+	return nothing
+end
+
 function _axes_spines!(
 	fig;
 	style::Union{Symbol, AbstractString} = :box,
@@ -2496,6 +2793,12 @@ function _axes_spines!(
 	# with tick marks, the :ieee/:aps/:aip look): what a closed frame gets back.
 	style = _figure_style(fig)
 	style_mirror = style.mirror_ticks && !isempty(style.ticks)
+	# perf-spines: the axis fields of every target go out in one `relayout!`
+	# and the lines of every cell in one `layout.shapes` write (a merge and a
+	# shapes write per cell made `cells = :all` quadratic in the cells).
+	batch = _AxesLayoutBatch()
+	shape_owners = String[]
+	shape_items = Any[]
 	for (t, bounded) in zip(targets, target_intervals)
 		shapes = Any[]
 		for (key, letter) in ((t.xkey, 'x'), (t.ykey, 'y'))
@@ -2536,7 +2839,7 @@ function _axes_spines!(
 				fields[:ticks] = ""
 				_cmn_mapping_get(entry, :minor) === nothing || (fields[:minor] = attr(ticks = ""))
 			end
-			_cmn_merge_layout_key!(fig, key, fields; nested = (:minor,))
+			_axes_queue_layout_fields!(batch, fig, key, fields)
 			any(drawn) || continue
 			shape_color = something(line_color, _cmn_mapping_get(entry, :linecolor), Some(nothing))
 			if shape_color === nothing
@@ -2574,9 +2877,13 @@ function _axes_spines!(
 		existing = get(_cmn_layout(fig).fields, :shapes, nothing)
 		had_lines = existing isa AbstractVector &&
 			any(item -> _cmn_name_matches(_cmn_item_name(item), owner), existing)
-		(isempty(named) && !had_lines) ||
-			_upsert_named!(fig, :shapes, owner, named; who = who)
+		if !(isempty(named) && !had_lines)
+			push!(shape_owners, owner)
+			append!(shape_items, named)
+		end
 	end
+	_axes_flush_layout_fields!(batch, fig)
+	_axes_replace_named_shapes!(fig, shape_owners, shape_items, who)
 	select && _axes_select!(fig, only(targets))
 	_axes_finish!(fig)
 	return nothing
@@ -2743,6 +3050,8 @@ function _axes_grid!(
 	# major grid, whose colour, width and dash plotly.js's minor grid follows
 	# (the minor colour as a lighter blend).
 	style_key = which_name === :minor ? :minor : :major
+	# perf-spines: one `relayout!` for every target (see `_AxesLayoutBatch`).
+	batch = _AxesLayoutBatch()
 	for t in targets
 		for (key, on) in (
 			(t.xkey, axis_name in (:both, :x)),
@@ -2780,9 +3089,10 @@ function _axes_grid!(
 			elseif minor_on && minor_entry !== nothing
 				fields[:minor] = attr(showgrid = false)
 			end
-			isempty(fields) || _cmn_merge_layout_key!(fig, key, fields; nested = (:minor,))
+			isempty(fields) || _axes_queue_layout_fields!(batch, fig, key, fields)
 		end
 	end
+	_axes_flush_layout_fields!(batch, fig)
 	select && _axes_select!(fig, only(targets))
 	_axes_finish!(fig)
 	return nothing
@@ -2905,8 +3215,8 @@ function _axes_linear_ticks(lo::Float64, hi::Float64, who::AbstractString; fits 
 	e0 = floor(Int, log10(raw))
 	# The smallest candidate step is 10^e0; k = value / step must fit an Int.
 	max(abs(lo), abs(hi)) / exp10(e0) < 1e15 || throw(ArgumentError(
-		"$(who): the secondary range [$(lo), $(hi)] is too narrow for its " *
-		"magnitude to place automatic ticks; pass `ticks`.",
+		"$(who): the range [$(lo), $(hi)] is too narrow for its magnitude to " *
+		"place automatic ticks; pass explicit tick values.",
 	))
 	slack = 1e-9 * span
 	# (score, -step order, values): the steps up to 10^(e0 + 2) >= 10 x span /
@@ -2982,7 +3292,8 @@ function _axes_secondary_label_fit(fig, t, finv, lower::Float64, upper::Float64,
 		(x - lower) / (upper - lower)
 	return function (values)
 		labels = Tuple{Float64, Float64}[]
-		for v in values
+		texts = _axes_power_ticktext(values, log_axis)
+		for (v, text) in zip(values, texts)
 			# A value `finv` cannot place is reported by the caller, which maps
 			# the chosen ticks with the checks of `secondary_xaxis!`.
 			x = try
@@ -2992,7 +3303,7 @@ function _axes_secondary_label_fit(fig, t, finv, lower::Float64, upper::Float64,
 				return true
 			end
 			(x isa Real && isfinite(x) && (!log_axis || x > 0)) || return true
-			push!(labels, (at(Float64(x)) * len, _text_extent(_axes_format_number(v), f)[1]))
+			push!(labels, (at(Float64(x)) * len, _text_extent(text, f)[1]))
 		end
 		sort!(labels; by = first)
 		for i in 2:length(labels)
@@ -3002,17 +3313,65 @@ function _axes_secondary_label_fit(fig, t, finv, lower::Float64, upper::Float64,
 	end
 end
 
+# numerics-03: automatic secondary tick labels in plotly's power format (D21),
+# as the primary axes beside them. Linear: a set of ticks whose largest
+# magnitude has a decade beyond plotly's `minexponent` (3) is written
+# "m×10ⁿ", each label with its own decade so the mantissa is in [1, 10)
+# (the package's patched power format, src/plotlyjs_compat_asset.jl); other
+# sets print as plain numbers. On a logarithmic primary axis the labels read
+# as plotly's log axes: "1", "10", "10ⁿ" and "m×10ⁿ". Negative numbers and
+# exponents carry plotly's minus sign (U+2212).
+const _AXES_POWER_MINEXPONENT = 3   # plotly.js' `minexponent` default
+function _axes_power_ticktext(values, log_axis::Bool; sigdigits::Int = 6)
+	big = 0.0
+	for v in values
+		a = abs(Float64(v))
+		isfinite(a) && (big = max(big, a))
+	end
+	exponent_needed = log_axis ||
+		(big > 0 && abs(floor(Int, log10(big) + 0.01)) > _AXES_POWER_MINEXPONENT)
+	return String[_axes_power_number(Float64(v), exponent_needed; sigdigits = sigdigits) for v in values]
+end
+
+# `_axes_power_ticktext` of linear `values` with six significant digits, or
+# as many more (up to 17) as distinct values need to keep distinct labels
+# (numerics-08: levels 1000000.2 and 1000000.4 read "1.0000002×10⁶" and
+# "1.0000004×10⁶", not both "1000000").
+function _axes_distinct_power_ticktext(values::AbstractVector{Float64})
+	distinct = length(unique(values))
+	labels = String[]
+	for digits in 6:17
+		labels = _axes_power_ticktext(values, false; sigdigits = digits)
+		length(unique(labels)) >= distinct && return labels
+	end
+	return labels
+end
+
+function _axes_power_number(v::Float64, exponent_needed::Bool; sigdigits::Int = 6)
+	v == 0 && return "0"
+	a = abs(v)
+	(exponent_needed || !(1e-4 <= a < 1e15)) || return _axes_offset_label(v; sigdigits = sigdigits)
+	n = floor(Int, log10(a) + 1e-9)
+	m = round(a / exp10(n); sigdigits = sigdigits)
+	if m >= 10
+		m /= 10
+		n += 1
+	end
+	mtext = isinteger(m) ? string(Int(m)) : string(m)
+	return (v < 0 ? "−" : "") * _colour_power_text(mtext, n)
+end
+
 # Compact tick text: integers without ".0", six significant digits, plain
 # decimals in [1e-4, 1e15) and "me±k" outside.
-function _axes_format_number(v::Float64)
+function _axes_format_number(v::Float64; sigdigits::Int = 6)
 	v == 0 && return "0"
-	r = round(v; sigdigits = 6)
+	r = round(v; sigdigits = sigdigits)
 	a = abs(r)
 	if 1e-4 <= a < 1e15
 		return isinteger(r) ? string(Int64(r)) : string(r)
 	end
 	e = floor(Int, log10(a))
-	mantissa = round(r / exp10(e); sigdigits = 6)
+	mantissa = round(r / exp10(e); sigdigits = sigdigits)
 	if abs(mantissa) >= 10
 		mantissa /= 10
 		e += 1
@@ -3256,7 +3615,7 @@ function _axes_secondary_xaxis!(
 		push!(positions, x)
 	end
 	text = ticklabels === nothing ?
-		String[_axes_format_number(v) for v in tick_values] :
+		_axes_power_ticktext(tick_values, log_axis) :
 		_cmn_tick_labels(ticklabels, length(tick_values), who)
 	if stacked
 		# A second label row starts one text line per primary label line lower.
