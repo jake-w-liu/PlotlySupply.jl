@@ -53,8 +53,13 @@ const _LT_ORDER_LEGEND = 20
 const _LT_ORDER_LINE = 30
 const _LT_ORDER_CAPTION = 40
 const _LT_ORDER_TITLE = 90
-# Paper tolerance for "at the domain edge" (positions written from domains).
-const _LT_EDGE_TOL = 1e-6
+# Paper tolerance for "at the domain edge" (positions written from domains):
+# the snap within which a legend is left where it is (`_room_relayout!`,
+# `_FIN_SNAP_PAPER`) plus the rounding of a written position. At 1e-6, an
+# inside legend left 1.2e-5 from the corner of a cell its colorbar margin
+# had narrowed was taken for the user's on the next pass, which then gave
+# the margin back, and the figure went between the two (layout-fuzz-01).
+const _LT_EDGE_TOL = _FIN_SNAP_PAPER + 1e-6
 # Paper tolerance against the plot box of an equal-aspect cell, which is
 # estimated from its domain (the fit pads the domain by `_fin_bias`), and
 # against a legend's estimated position along an edge.

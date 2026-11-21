@@ -2359,6 +2359,7 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 		have = _cmn_mapping_get(margin, letter)
 		_fin_isfinite_real(value) && (!_fin_isfinite_real(have) || value > have)
 	end, (:l, :r, :t, :b))
+	_fin_cap_margin_sum!(layout, layout_updates, W, H)
 	wrote |= _room_settle_margins!(plan)
 	if annotations !== nothing
 		_fin_same_annotations(get(layout.fields, :annotations, nothing), annotations) ||
@@ -2368,6 +2369,49 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 	wrote |= _fin_thin_bar_ticks!(ctx, plan.Wp, plan.Hp)
 	wrote |= _fin_place_figure_annotations!(ctx, accs, W, H; margins = _fin_drawn_margins(plan))
 	return wrote, restart && raised
+end
+
+# The plot size (px) explicit margins leave at least: plotly.js 2.35.2's own
+# automargin keeps `layout.minreducedwidth`/`minreducedheight` (default
+# 64 px) for the plot, but takes an explicit margin as given, and margins
+# summing past the figure made it throw "Something went wrong with axis
+# scaling" in the export (layout-fuzz-08: :nature 336 x 252 px, a long left
+# title above and a wrapped long x title with a three-entry legend below,
+# top 67 + bottom 193 px). At most half the figure on a smaller one.
+const _FIN_MIN_PLOT_PX = 64.0
+
+# Lowers the margins on opposite sides, one of which `updates` queues, that
+# leave the plot less than `_FIN_MIN_PLOT_PX` of the figure's `W` x `H` px:
+# the queued ones, in proportion, to whole px (a side left to plotly, unset,
+# counts with plotly's default). What they were raised for no longer fits beside
+# the plot: it is drawn over it rather than the export failing.
+function _fin_cap_margin_sum!(layout::Layout, updates::AbstractDict{Symbol}, W::Float64, H::Float64)
+	margin = get(layout.fields, :margin, nothing)
+	base = _fin_margins_base(layout)
+	for (a, b, extent, floor_key) in ((:l, :r, W, :minreducedwidth), (:t, :b, H, :minreducedheight))
+		ka, kb = Symbol(:margin_, a), Symbol(:margin_, b)
+		# Only a pair this pass raises: margins as they are are someone's.
+		(haskey(updates, ka) || haskey(updates, kb)) || continue
+		value(key, letter) = begin
+			queued = get(updates, key, nothing)
+			_fin_isfinite_real(queued) && return Float64(queued)
+			current = _cmn_mapping_get(margin, letter)
+			return _fin_isfinite_real(current) ? Float64(current) : getfield(base, letter)
+		end
+		va, vb = value(ka, a), value(kb, b)
+		least = get(layout.fields, floor_key, nothing)
+		least = _fin_isfinite_real(least) && least > 0 ? Float64(least) : _FIN_MIN_PLOT_PX
+		limit = extent - min(least, extent / 2)
+		excess = va + vb - limit
+		excess > 0 || continue
+		# Taken from the sides this pass raises, in proportion to them.
+		qa = haskey(updates, ka) ? va : 0.0
+		qb = haskey(updates, kb) ? vb : 0.0
+		share = min(excess / (qa + qb), 1.0)
+		qa > 0 && (updates[ka] = _style_number(floor(va - qa * share)))
+		qb > 0 && (updates[kb] = _style_number(floor(vb - qb * share)))
+	end
+	return updates
 end
 
 # ---------------------------------------------------------------------------
@@ -2864,6 +2908,12 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 	layout = ctx.p.layout
 	aspect = Dict{Symbol, Symbol}()
 	for (xkey, ykey, _) in _fin_aspect_cells(layout, accs)
+		# Base pairs only, as `_fin_fit_cells` fits them: a secondary y axis
+		# anchored to the same x (`plot_matrix!(...; secondary_y = true)`)
+		# took the base pair's entry, the plan then did not leave the base
+		# cell's bar to the fit, and the fit and the room solve each placed
+		# it, on every pass (errors-inputs-02).
+		(_fin_is_base_axis(layout, xkey) && _fin_is_base_axis(layout, ykey)) || continue
 		aspect[xkey] = ykey
 	end
 	plan = _room_build(ctx, accs, bars, W, H, aspect)
@@ -3928,9 +3978,13 @@ function _room_solve!(plan::_RoomPlan)
 end
 
 # Px below which a domain the fit or the room solve computes is taken as the
-# one drawn: far below what a renderer resolves, and above the residue the
-# coupled fit and solve leave after `_FIN_FIT_ROUNDS` passes.
-const _FIN_SNAP_PX = 0.02
+# one drawn: far below what a renderer resolves (0.3 device px at scale 3),
+# and above the residue the coupled fit and solve leave after
+# `_FIN_FIT_ROUNDS` passes. That residue grows with the figure: 0.008 px for
+# block_diagram, 0.074 px for an equal-aspect field between two line cells
+# of a 2400 px figure (layout-fuzz-10, seed 1218) after a margin of 67 px
+# was given back.
+const _FIN_SNAP_PX = 0.1
 
 # Whether paper spans `a` and `b` differ by at most `_FIN_SNAP_PX` px at
 # either end over a plot region of `px` px.
@@ -4529,6 +4583,23 @@ function _room_min_bar_len(font::Float64, bar::AbstractDict, extent_px::Float64)
 	return min(need / max(extent_px, 1.0), 1.0)
 end
 
+# Shortest length (paper, of `extent_px` px) a horizontal bar is drawn with:
+# a title beside it (`title_side = :right`/`:left`) takes its width from the
+# bar's length, and plotly.js 2.35.2 fails on the bar left without length
+# (layout-fuzz-14: "intensity (a.u.)" beside a 0.14 bar under a cell of a
+# 1 x 5 grid, 700 px wide). Room for the title and the body of
+# `_room_min_bar_len` is kept.
+function _room_min_hbar_len(font::Float64, bar::AbstractDict, extent_px::Float64)
+	need = _ROOM_MIN_BAR_LINES * _CBAR_LINE_EM * _fin_mapping_font_size(bar, :tickfont, font) + 2
+	text = _cbar_title_text(bar)
+	if text !== nothing && !isempty(text)
+		title = get(bar, :title, nothing)
+		side = something(_fin_string(_cmn_mapping_get(title, :side)), "top")
+		side in ("right", "left") && (need += _text_extent(text, _fin_mapping_font_size(title, :font, font))[1] + 4)
+	end
+	return min(need / max(extent_px, 1.0), 1.0)
+end
+
 _room_span(d) = Float64(d[2] - d[1])
 
 # A coloraxis bar where `shared_colorbar!`/`_place_cell_colorbars!` put it
@@ -4830,8 +4901,8 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 				:ypad => 0)
 		end
 		low = argmin(slot -> slot.edge - slot.offset / plan.Hp, slots)
-		return _room_hbar_placement(plan, item, low.edge, low.offset, (x0 + x1) / 2, entry.ratio * (x1 - x0),
-			release)
+		return _room_hbar_placement(plan, item, low.edge, low.offset, (x0 + x1) / 2,
+			max(entry.ratio * (x1 - x0), _room_min_hbar_len(plan.font, item.bar, plan.Wp)), release)
 	end
 	slot = first(slots)
 	if slot.side === :right
@@ -4857,7 +4928,8 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 		return placement
 	end
 	xd = slot.domain_x
-	len = _room_bar_len(item.bar, _room_span(plan.areas[slot.area].current[1]), _room_span(xd))
+	len = _room_bar_len(item.bar, _room_span(plan.areas[slot.area].current[1]), _room_span(xd);
+		floor = _room_min_hbar_len(plan.font, item.bar, plan.Wp))
 	return _room_hbar_placement(plan, item, slot.edge, slot.offset, (xd[1] + xd[2]) / 2, len, slot.release)
 end
 
@@ -5295,6 +5367,11 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool, strict::Bool = 
 		refit = false
 		if fitted
 			again = _axes_finalize_updates!(Dict{Symbol, Any}(), p, _fin_figure_size(ctx, p.layout), accs)
+			# The room above a polar/ternary subplot counts the title block,
+			# whose `pad.t` the fit may just have raised (a math or two-line
+			# title; errors-inputs-01: `plot_scatterpolar(...; title = "\$t\$")`
+			# gained 10 px of top margin on the first finalize after it).
+			_fin_domain_margin_updates!(again, p, _fin_figure_size(ctx, p.layout)[2])
 			refit = !isempty(again) && _fin_relayout!(ctx, again)
 		end
 		(fitted || refit) || break
