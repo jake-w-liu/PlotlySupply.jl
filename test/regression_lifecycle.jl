@@ -577,7 +577,9 @@ end
 		bogus = SyncPlot(Plot(scatter(y=[1])), nothing, nothing, "rl-bogus")
 		@test to_syncplot(bogus) === bogus
 		@test to_syncplot(bogus; width=10, title="ignored") === bogus
-		@test_throws MethodError to_syncplot(bogus; widht=10)
+		# An unknown keyword is an ArgumentError naming the function
+		# (invariant 4), not a MethodError.
+		@test_throws ArgumentError("to_syncplot: unsupported keyword argument(s) `widht`; it takes `app`, `width`, `height`, `title`, `show`, `autoplay`, `timeout_s`.") to_syncplot(bogus; widht=10)
 
 		for doc in (string(@doc plot), string(@doc to_syncplot))
 			@test !occursin("Pkg.add", doc)

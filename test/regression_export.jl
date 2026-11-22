@@ -207,8 +207,14 @@ end
 	@test clear[26] == 0x06   # IHDR colour type 6: RGBA
 	# plotly.js paints the SVG paper rect as `fill` + `fill-opacity`; the
 	# transparent export also clears the plot-area rect.
-	paper_rect(svg) = match(r"<rect x=\"0\" y=\"0\" [^>]*style=\"([^\"]*)\"", svg).captures[1]
-	plot_rect(svg) = match(r"<rect class=\"bg\" [^>]*style=\"([^\"]*)\"", svg).captures[1]
+	# A deterministic SVG writes every element's attributes in name order
+	# (platform-deps-02), so the rects are found by their attributes, not by
+	# where plotly.js put them: the paper rect is the first classless rect at
+	# (0, 0), the plot-area rect the first of class "bg".
+	rect_attributes(svg) = [Dict(a.captures[1] => a.captures[2] for a in eachmatch(r"\s([A-Za-z_:][-A-Za-z0-9_:.]*)=\"([^\"]*)\"", m.match))
+		for m in eachmatch(r"<rect\b[^>]*>", svg)]
+	paper_rect(svg) = first(r for r in rect_attributes(svg) if !haskey(r, "class") && get(r, "x", "") == "0" && get(r, "y", "") == "0")["style"]
+	plot_rect(svg) = first(r for r in rect_attributes(svg) if get(r, "class", "") == "bg")["style"]
 	clear_svg = String(savefig(p; format = "svg", background = :transparent))
 	@test occursin("fill-opacity: 0;", paper_rect(clear_svg))
 	@test occursin("fill-opacity: 0;", plot_rect(clear_svg))

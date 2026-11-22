@@ -270,7 +270,8 @@ end
 # narrower than PlotlyBase's (a `Plot` of any trace vector), so they extend
 # rather than replace them.
 const _GenericTracePlot = Plot{<:AbstractVector{<:GenericTrace}}
-function PlotlyBase.savejson(p::_GenericTracePlot, filename::AbstractString)
+function PlotlyBase.savejson(p::_GenericTracePlot, filename::AbstractString; kwargs...)
+	_compat_reject_keywords("savejson", kwargs)
 	lowercase(splitext(filename)[2]) == ".json" || throw(ArgumentError(
 		"savejson: the file name must end in .json; use savefig for other formats.",
 	))
@@ -2548,7 +2549,8 @@ Write the JSON figure specification of `sp`'s plot to `filename` (which must
 end in `.json`), atomically and with non-finite numbers written as `null`.
 Returns `sp.plot`.
 """
-function PlotlyBase.savejson(sp::SyncPlot, filename::AbstractString)
+function PlotlyBase.savejson(sp::SyncPlot, filename::AbstractString; kwargs...)
+	_compat_reject_keywords("savejson", kwargs)
 	lowercase(splitext(filename)[2]) == ".json" || throw(ArgumentError(
 		"savejson: the file name must end in .json; use savefig for other formats.",
 	))
@@ -2604,6 +2606,7 @@ function _invoke_plot_add_trace!(
 	trace::GenericTrace;
 	kw...,
 )
+	_compat_reject_keywords("add_trace!", kw, (:row, :col, :secondary_y))
 	_check_add_trace_cell(p, trace, get(kw, :row, 1), get(kw, :col, 1))
 	try
 		return invoke(
@@ -2643,13 +2646,15 @@ function PlotlyBase.add_trace!(sp::SyncPlot, trace::GenericTrace; kw...)
 	end
 end
 
-function PlotlyBase.redraw!(sp::SyncPlot)
+function PlotlyBase.redraw!(sp::SyncPlot; kwargs...)
+	_compat_reject_keywords("redraw!", kwargs)
 	# Rebuild the window from the committed model (`_prepare_redraw_transaction`).
 	_syncplot_transaction!(sp, _prepare_redraw_transaction)
 	return sp
 end
 
-function PlotlyBase.purge!(sp::SyncPlot)
+function PlotlyBase.purge!(sp::SyncPlot; kwargs...)
+	_compat_reject_keywords("purge!", kwargs)
 	prepare = (target, current) ->
 		_prepare_purge_transaction(target, current)
 	_syncplot_transaction!(sp, prepare)

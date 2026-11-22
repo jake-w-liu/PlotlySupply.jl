@@ -880,6 +880,18 @@ function _create_syncplot_window(
 	end
 end
 
+# An unknown keyword of a compat verb or `to_syncplot` is an
+# ArgumentError("<verb>: ...") raised before anything changes (invariant 4),
+# not a MethodError naming a method table.
+function _compat_reject_keywords(who::AbstractString, kwargs, accepted = ())
+	unknown = Tuple(key for key in keys(kwargs) if !(key in accepted))
+	isempty(unknown) && return nothing
+	return _reject_keywords(who, NamedTuple{unknown}(Tuple(kwargs[key] for key in unknown));
+		accepted = accepted)
+end
+
+const _TO_SYNCPLOT_KEYWORDS = (:app, :width, :height, :title, :show, :autoplay, :timeout_s)
+
 function to_syncplot(
 	fig::Plot;
 	app = nothing,
@@ -889,7 +901,9 @@ function to_syncplot(
 	show::Bool = true,
 	autoplay::Bool = true,
 	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
+	kwargs...,
 )
+	_compat_reject_keywords("to_syncplot", kwargs, _TO_SYNCPLOT_KEYWORDS)
 	_syncplot_window_options(
 		"to_syncplot";
 		app = app,
@@ -930,7 +944,9 @@ function to_syncplot(
 	show::Bool = true,
 	autoplay::Bool = true,
 	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
+	kwargs...,
 )
+	_compat_reject_keywords("to_syncplot", kwargs, _TO_SYNCPLOT_KEYWORDS)
 	_syncplot_window_options(
 		"to_syncplot";
 		app = app,
@@ -7493,7 +7509,8 @@ end
 # Renderer-backed model mutations stage and encode their complete candidate,
 # render it, and only then publish non-allocating pointer swaps to Julia.
 
-function PlotlyBase.react!(sp::SyncPlot, data::AbstractVector{<:AbstractTrace}, layout::AbstractLayout)
+function PlotlyBase.react!(sp::SyncPlot, data::AbstractVector{<:AbstractTrace}, layout::AbstractLayout; kwargs...)
+	_compat_reject_keywords("react!", kwargs)
 	prepare = function (target, current)
 		staged_data, staged_layout =
 			_prepare_react_values(current, data, layout)
@@ -7513,7 +7530,8 @@ function PlotlyBase.react!(sp::SyncPlot, data::AbstractVector{<:AbstractTrace}, 
 	return _syncplot_transaction!(sp, prepare)
 end
 
-function PlotlyBase.react!(sp::SyncPlot, p::Plot)
+function PlotlyBase.react!(sp::SyncPlot, p::Plot; kwargs...)
+	_compat_reject_keywords("react!", kwargs)
 	prepare = function (target, current)
 		script = _plotlyjs_refresh_script(
 			target,
@@ -8907,31 +8925,36 @@ const _APPEND_TRACE_MUTATION_SCOPE = (
 	template_untouched = true,
 )
 
-function PlotlyBase.addtraces!(sp::SyncPlot, traces::AbstractTrace...)
+function PlotlyBase.addtraces!(sp::SyncPlot, traces::AbstractTrace...; kwargs...)
+	_compat_reject_keywords("addtraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_addtraces!(current, traces...)
 	end
 end
 
-function PlotlyBase.addtraces!(sp::SyncPlot, i::Int, traces::AbstractTrace...)
+function PlotlyBase.addtraces!(sp::SyncPlot, i::Int, traces::AbstractTrace...; kwargs...)
+	_compat_reject_keywords("addtraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_addtraces!(current, i, traces...)
 	end
 end
 
-function PlotlyBase.deletetraces!(sp::SyncPlot, inds::Int...)
+function PlotlyBase.deletetraces!(sp::SyncPlot, inds::Int...; kwargs...)
+	_compat_reject_keywords("deletetraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_deletetraces!(current, inds...)
 	end
 end
 
-function PlotlyBase.movetraces!(sp::SyncPlot, to_end::Int...)
+function PlotlyBase.movetraces!(sp::SyncPlot, to_end::Int...; kwargs...)
+	_compat_reject_keywords("movetraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_movetraces!(current, to_end...)
 	end
 end
 
-function PlotlyBase.movetraces!(sp::SyncPlot, src::AbstractVector{Int}, dest::AbstractVector{Int})
+function PlotlyBase.movetraces!(sp::SyncPlot, src::AbstractVector{Int}, dest::AbstractVector{Int}; kwargs...)
+	_compat_reject_keywords("movetraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_movetraces!(current, src, dest)
 	end
@@ -9185,7 +9208,8 @@ function _plot_trace_splice!(
 	)
 end
 
-function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1; kwargs...)
+	_compat_reject_keywords("extendtraces!", kwargs)
 	return _syncplot_trace_splice!(
 		sp,
 		update,
@@ -9228,12 +9252,15 @@ function PlotlyBase.extendtraces!(
 	sp::SyncPlot,
 	update::AbstractDict,
 	index::Int,
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("extendtraces!", kwargs)
 	return PlotlyBase.extendtraces!(sp, update, [index], maxpoints)
 end
 
-function PlotlyBase.prependtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+function PlotlyBase.prependtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1; kwargs...)
+	_compat_reject_keywords("prependtraces!", kwargs)
 	return _syncplot_trace_splice!(
 		sp,
 		update,
@@ -9276,8 +9303,10 @@ function PlotlyBase.prependtraces!(
 	sp::SyncPlot,
 	update::AbstractDict,
 	index::Int,
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("prependtraces!", kwargs)
 	return PlotlyBase.prependtraces!(sp, update, [index], maxpoints)
 end
 
@@ -10063,14 +10092,16 @@ function _prepare_redraw_transaction(target::SyncPlot, current::Plot)
 	return (script = script, operation = "redraw", commit = () -> current)
 end
 
-function PlotlyBase.redraw!(p::_RefreshablePlot)
+function PlotlyBase.redraw!(p::_RefreshablePlot; kwargs...)
+	_compat_reject_keywords("redraw!", kwargs)
 	# A Plot shown in a SyncPlot window redraws through the same renderer
 	# transaction as redraw!(::SyncPlot). An undisplayed Plot has no renderer,
 	# so the local path is a no-op (PlotlyBase's redraw! semantics).
 	return _transactional_plot_mutation!(p, _prepare_redraw_transaction, () -> p)
 end
 
-function PlotlyBase.purge!(p::_RefreshablePlot)
+function PlotlyBase.purge!(p::_RefreshablePlot; kwargs...)
+	_compat_reject_keywords("purge!", kwargs)
 	prepare = (target, current) ->
 		_prepare_purge_transaction(target, current)
 	local_mutation = () -> _do_purge!(p)
@@ -10084,8 +10115,10 @@ end
 function PlotlyBase.react!(
 	p::_RefreshablePlot,
 	data::AbstractVector{<:AbstractTrace},
-	layout::Layout,
+	layout::Layout;
+	kwargs...,
 )
+	_compat_reject_keywords("react!", kwargs)
 	prepare = function (target, current)
 		staged_data, staged_layout =
 			_prepare_react_values(current, data, layout)
@@ -10174,7 +10207,8 @@ function PlotlyBase.restyle!(
 	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
-function PlotlyBase.addtraces!(p::_RefreshablePlot, traces::AbstractTrace...)
+function PlotlyBase.addtraces!(p::_RefreshablePlot, traces::AbstractTrace...; kwargs...)
+	_compat_reject_keywords("addtraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_addtraces!(current, traces...)
 	end
@@ -10183,20 +10217,24 @@ end
 function PlotlyBase.addtraces!(
 	p::_RefreshablePlot,
 	i::Int,
-	traces::AbstractTrace...,
+	traces::AbstractTrace...;
+	kwargs...,
 )
+	_compat_reject_keywords("addtraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_addtraces!(current, i, traces...)
 	end
 end
 
-function PlotlyBase.deletetraces!(p::_RefreshablePlot, inds::Int...)
+function PlotlyBase.deletetraces!(p::_RefreshablePlot, inds::Int...; kwargs...)
+	_compat_reject_keywords("deletetraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_deletetraces!(current, inds...)
 	end
 end
 
-function PlotlyBase.movetraces!(p::_RefreshablePlot, to_end::Int...)
+function PlotlyBase.movetraces!(p::_RefreshablePlot, to_end::Int...; kwargs...)
+	_compat_reject_keywords("movetraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_movetraces!(current, to_end...)
 	end
@@ -10205,8 +10243,10 @@ end
 function PlotlyBase.movetraces!(
 	p::_RefreshablePlot,
 	src::AbstractVector{Int},
-	dest::AbstractVector{Int},
+	dest::AbstractVector{Int};
+	kwargs...,
 )
+	_compat_reject_keywords("movetraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_movetraces!(current, src, dest)
 	end
@@ -10216,8 +10256,10 @@ function PlotlyBase.extendtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
 	indices::AbstractVector{Int} = [1],
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("extendtraces!", kwargs)
 	return _plot_trace_splice!(
 		p,
 		update,
@@ -10263,8 +10305,10 @@ function PlotlyBase.extendtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
 	index::Int,
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("extendtraces!", kwargs)
 	return PlotlyBase.extendtraces!(p, update, [index], maxpoints)
 end
 
@@ -10272,8 +10316,10 @@ function PlotlyBase.prependtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
 	indices::AbstractVector{Int} = [1],
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("prependtraces!", kwargs)
 	return _plot_trace_splice!(
 		p,
 		update,
@@ -10317,8 +10363,10 @@ function PlotlyBase.prependtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
 	index::Int,
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("prependtraces!", kwargs)
 	return PlotlyBase.prependtraces!(p, update, [index], maxpoints)
 end
 

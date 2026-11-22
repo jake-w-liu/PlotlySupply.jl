@@ -804,7 +804,9 @@ function colormap_colors(
 	n::Integer;
 	reverse::Bool = false,
 	range = (0.0, 1.0),
+	kwargs...,
 )
+	_reject_keywords("colormap_colors", kwargs; accepted = (:reverse, :range))
 	n >= 1 || throw(ArgumentError("colormap_colors: `n` must be at least 1; got $(n)."))
 	lo, hi = _checked_sample_range(range, "colormap_colors")
 	parsed = _parsed_colorscale(_colorscale_stops(name_or_scale; who = "colormap_colors"))
@@ -837,7 +839,8 @@ lighten("#000000", 0.5)              # "#808080"
 fill = lighten("#1f77b4", 0.7)       # pale fill for a band behind a line
 ```
 """
-function lighten(color, frac::Real)
+function lighten(color, frac::Real; kwargs...)
+	_reject_keywords("lighten", kwargs)
 	f = _checked_unit_fraction(frac, "lighten", "frac")
 	r, g, b, a = _parse_color(color, "lighten")
 	return _rgba_string((r + (1 - r) * f, g + (1 - g) * f, b + (1 - b) * f, a))
@@ -864,7 +867,8 @@ plot_heatmap(rand(20, 20); colorscale = cs)
 discrete_colormap(colormap_colors("viridis", 5))   # five-band viridis
 ```
 """
-function discrete_colormap(colors::AbstractVector)
+function discrete_colormap(colors::AbstractVector; kwargs...)
+	_reject_keywords("discrete_colormap", kwargs)
 	k = length(colors)
 	k == 0 && throw(ArgumentError("discrete_colormap: at least one colour is required."))
 	hexes = [_color_hex(c; who = "discrete_colormap") for c in colors]

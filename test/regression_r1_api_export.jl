@@ -530,6 +530,57 @@ end
 	@test sf.plot.data[end][:name] == "x"
 end
 
+@testset "r1 errors-inputs-05: unknown keywords of the compat verbs, savejson and to_syncplot" begin
+	p = plot_scatter(1:3, [1.0, 2.0, 3.0])
+	addtraces!(p, PlotlyBase.scatter(x = [1, 2], y = [2.0, 1.0]))
+	before = json(p)
+	tr = PlotlyBase.scatter(x = [1], y = [1.0])
+	upd = Dict(:y => [[4.0]])
+	path = joinpath(mktempdir(), "r1.json")
+	# A SyncPlot without a window: the keyword check comes before any use of it.
+	sp = SyncPlot(deepcopy(p), nothing, nothing, "r1-no-window")
+	for target in (p, sp)
+		@test _r1_argerr(() -> purge!(target; bogus = 1), "purge!: unsupported keyword argument(s) `bogus`; it takes no keyword arguments.")
+		@test _r1_argerr(() -> redraw!(target; bogus = 1), "redraw!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> react!(target, copy(p.data), p.layout; bogus = 1), "react!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> addtraces!(target, tr; bogus = 1), "addtraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> addtraces!(target, 1, tr; bogus = 1), "addtraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> deletetraces!(target, 1; bogus = 1), "deletetraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> movetraces!(target, 1; bogus = 1), "movetraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> movetraces!(target, [1], [2]; bogus = 1), "movetraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> extendtraces!(target, upd, [1]; bogus = 1), "extendtraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> extendtraces!(target, upd, 1; bogus = 1), "extendtraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> prependtraces!(target, upd, [1]; bogus = 1), "prependtraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> prependtraces!(target, upd, 1; bogus = 1), "prependtraces!: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> savejson(target, path; bogus = 1), "savejson: unsupported keyword argument(s) `bogus`")
+		@test _r1_argerr(() -> add_trace!(target, tr; colum = 1), "add_trace!: unsupported keyword argument(s) `colum`; it takes `row`, `col`, `secondary_y`.")
+		@test _r1_argerr(() -> to_syncplot(target; widht = 10), "to_syncplot: unsupported keyword argument(s) `widht`; it takes `app`, `width`")
+	end
+	@test json(p) == before
+	@test json(sp.plot) == before
+	@test !isfile(path)
+	# Valid calls still work.
+	@test add_trace!(p, tr; row = 1, col = 1) === p
+	@test length(p.data) == 3
+	@test extendtraces!(p, upd, [3]) === p
+	@test p.data[3][:y] == [1.0, 4.0]
+	@test movetraces!(p, 1) === p
+	@test deletetraces!(p, 3) === p
+	@test length(p.data) == 2
+	@test savejson(p, path) === p
+	@test isfile(path)
+	# The text and colour utilities.
+	@test _r1_argerr(() -> mathtext("a"; bogus = 1), "mathtext: unsupported keyword argument(s) `bogus`; it takes `align`, `size`.")
+	@test _r1_argerr(() -> colormap_colors("viridis", 3; bogus = 1), "colormap_colors: unsupported keyword argument(s) `bogus`; it takes `reverse`, `range`.")
+	@test _r1_argerr(() -> discrete_colormap(["#000000", "#ffffff"]; bogus = 1), "discrete_colormap: unsupported keyword argument(s) `bogus`; it takes no keyword arguments.")
+	@test _r1_argerr(() -> lighten("#000000", 0.5; bogus = 1), "lighten: unsupported keyword argument(s) `bogus`; it takes no keyword arguments.")
+	@test _r1_argerr(() -> log_ticks(1, 100; bogus = 1), "log_ticks: unsupported keyword argument(s) `bogus`; it takes `subs`, `base`.")
+	@test lighten("#000000", 0.5) == "#808080"
+	@test log_ticks(4, 32; base = 2) == [4.0, 8.0, 16.0, 32.0]
+	@test length(colormap_colors("viridis", 3; reverse = true)) == 3
+	@test mathtext("a"; align = :l) isa String
+end
+
 @testset "r1 O16: text/html display of a figure with NaN, add_trace! into a cell of another kind" begin
 	JSON = PlotlyBase.JSON
 	p = plot_scatter(1:3, [1.0, NaN, Inf]; title = "gap")

@@ -395,7 +395,9 @@ function mathtext(
 	s::AbstractString;
 	align::Symbol = :c,
 	size::Union{Nothing,AbstractString} = nothing,
+	kwargs...,
 )::String
+	_reject_keywords("mathtext", kwargs; accepted = (:align, :size))
 	column = _mathtext_align_column(align, "mathtext")
 	normalized_size = size === nothing ? nothing :
 		_normalize_mathtext_size(size, "mathtext")
