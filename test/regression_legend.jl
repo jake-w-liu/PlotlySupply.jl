@@ -1900,9 +1900,37 @@ import Dates
 		@test PS._finalize_figure!(sb) === false
 		# the line breaking: balanced lines, the user's breaks kept, a word
 		# wider than the room on a line of its own
-		wrapped = PS._lt_wrap_title_text("aa bb cc dd", 10.0, PS._text_extent("aa bb", 10.0)[1] + 0.1, false)
+		wrapped = PS._lt_wrap_title_text("aa bb cc dd", 10.0, PS._text_drawn_extent("aa bb", 10.0)[1] + 0.1, false)
 		@test wrapped == "aa bb<br>cc dd"
-		@test PS._lt_wrap_title_text("a<br>bb cc", 10.0, PS._text_extent("bb", 10.0)[1] + 0.1, false) == "a<br>bb<br>cc"
+		@test PS._lt_wrap_title_text("a<br>bb cc", 10.0, PS._text_drawn_extent("bb", 10.0)[1] + 0.1, false) == "a<br>bb<br>cc"
 		@test PS._lt_wrap_title_text("averyveryverylongword", 10.0, 5.0, false) == "averyveryverylongword"
+		# A title that fits as drawn stays whole. The recreation
+		# recreate_markevery_limits: "(c)  Radiation trace loses amplitude"
+		# in "STIX Two Text, STIXGeneral, serif" (no table: the widest
+		# measured family, 243 px, for room) drawn 197 px wide in 241 px of
+		# room at its tight 6.5 in export, was broken in two (measured at the
+		# widest family and in the style's family, not the figure's).
+		st = subplots(1, 2; sync = false, horizontal_spacing = 0.16)
+		for c in 1:2
+			plot_scatter!(st, xs, xs .^ c; row = 1, col = c, xlabel = "x", ylabel = "y")
+		end
+		title!(st, "(b)  Bulk remains bounded"; row = 1, col = 1, align = :left)
+		title!(st, "(c)  Radiation trace loses amplitude"; row = 1, col = 2, align = :left)
+		set_fonts!(st; family = "STIX Two Text, STIXGeneral, serif", size = 9, title = 10, label = 9.2, tick = 8, units = :pt)
+		b = export_boxes(st; width = 6.5, height = 2.9, units = :in, tight = true)
+		@test length(b["ann"]) == 2
+		# one line each (10 pt: 17.3 px a line, 16 px drawn), inside the figure
+		@test all(a -> a[4] - a[2] < 1.5 * 13.34, b["ann"])
+		@test all(a -> a[1] >= -0.5 && a[3] <= b["W"] + 0.5, b["ann"])
+		@test isempty(PS._lt_wrap_record(pl(st).layout))
+		# the estimate: the first listed family with a table, else the
+		# generic family of the list, else the widest
+		@test PS._text_drawn_family("STIX Two Text, STIXGeneral, serif") === PS._TEXT_FAMILY_TIMES
+		@test PS._text_drawn_family("\"Open Sans\", verdana, arial, sans-serif") === PS._TEXT_FAMILY_VERDANA
+		@test PS._text_drawn_family("") === PS._TEXT_FAMILY_VERDANA
+		@test PS._text_drawn_family("Arial, Helvetica") === PS._TEXT_FAMILY_ARIAL
+		@test PS._text_drawn_family("Unknown Face") === PS._TEXT_FAMILY_DEFAULT
+		@test PS._text_drawn_family("Unknown Face, sans-serif") === PS._TEXT_FAMILY_HELVETICA
+		@test PS._text_drawn_extent("Radiation", 12.0; family = "Times")[1] == PS._text_extent("Radiation", 12.0; family = "Times")[1]
 	end
 end

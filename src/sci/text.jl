@@ -1631,10 +1631,42 @@ the MathJax font in effect; with several possible families, the widest. Never
 throws: an unknown character or command counts as a wide glyph.
 """
 function _text_extent(text::AbstractString, fontsize::Real; family::Union{Nothing, AbstractString} = nothing, bold::Bool = false)
+	return _text_extent_over(_text_family_candidates(family === nothing ? _text_scope_family() : family), text, fontsize, bold)
+end
+
+# The family a CSS family list is drawn in as far as the tables tell, for a
+# decision that changes the text itself (`_lt_wrap_panel_titles!` breaking a
+# title into lines), where the conservative estimate of `_text_extent` (the
+# widest family the list may be drawn in; the maximum of all measured
+# families for a family without a table) would change text that fits: the
+# first listed family with a table; else the generic family the list names
+# (a list of unmeasured serif faces is estimated as Times: a title in
+# "STIX Two Text, STIXGeneral, serif" measured 197 px drawn, 190 px as Times
+# and 243 px as the maximum); else the maximum (nothing is known). plotly.js's default list gives
+# Verdana ("Open Sans" has no table).
+function _text_drawn_family(family::AbstractString)
+	list = isempty(strip(family)) ? _TEXT_PLOTLY_DEFAULT_FAMILY : family
+	generic = nothing
+	for part in split(list, ',')
+		name = lowercase(strip(strip(part), ['"', '\'', ' ', '\t']))
+		metrics = get(_TEXT_FAMILIES, name, nothing)
+		metrics === nothing || return metrics
+		generic === nothing && (generic = get(_TEXT_GENERIC_FAMILIES, name, nothing))
+	end
+	return something(generic, _TEXT_FAMILY_DEFAULT)
+end
+
+# `_text_extent` in the family `_text_drawn_family` takes `family` (default:
+# the style's in scope) to be drawn in.
+_text_drawn_extent(text::AbstractString, fontsize::Real; family::Union{Nothing, AbstractString} = nothing, bold::Bool = false) =
+	_text_extent_over((_text_drawn_family(family === nothing ? _text_scope_family() : family),), text, fontsize, bold)
+
+# Extent of `text` at `fontsize` px: the widest and tallest over the families
+# `candidates`.
+function _text_extent_over(candidates, text::AbstractString, fontsize::Real, bold::Bool)
 	fs = (fontsize isa Real && isfinite(fontsize) && fontsize > 0) ? Float64(fontsize) : 12.0
 	s = String(text)
 	isempty(strip(s)) && return (0.0, 0.0)
-	candidates = _text_family_candidates(family === nothing ? _text_scope_family() : family)
 	segments = _text_math_segments(s)
 	inherit = any(first, segments) && _text_inherits_text_font()
 	math = any(first, segments) ? _text_math_font_metrics() : _TEXT_MATH_LATIN_MODERN

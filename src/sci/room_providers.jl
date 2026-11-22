@@ -911,15 +911,16 @@ end
 
 # `text` (no math, markup as `_LT_WRAP_MARKUP` allows) with every line (the
 # user's breaks kept as written) broken between words into lines whose
-# width at `font` px (`bold`: as bold, the wider) is at most `width` px; a
-# longer word keeps a line of its own. The lines are balanced: as few as
+# width at `font` px in `family` (`_text_drawn_extent`; `bold`: as bold, the
+# wider) is at most `width` px; a longer word keeps a line of its own. The lines are balanced: as few as
 # filling them greedily gives, each as short as that count allows (the
 # narrowest fill width with that count, to `_LT_WRAP_BALANCE_PX`), so a
 # title does not end in one short word ("A rather long panel" / "title for
 # a cell", not "A rather long panel title for a" / "cell").
 const _LT_WRAP_BALANCE_PX = 0.5
-function _lt_wrap_title_text(text::AbstractString, font::Float64, width::Float64, bold::Bool)
-	measure(line) = _text_extent(line, font; bold = bold)[1]
+function _lt_wrap_title_text(text::AbstractString, font::Float64, width::Float64, bold::Bool;
+	family::Union{Nothing, AbstractString} = nothing)
+	measure(line) = _text_drawn_extent(line, font; family = family, bold = bold)[1]
 	out = IOBuffer()
 	start = 1
 	wrap(line) = begin
@@ -947,8 +948,20 @@ function _lt_wrap_title_text(text::AbstractString, font::Float64, width::Float64
 	return String(take!(out))
 end
 
+# The CSS family list annotation `item` is drawn in: its own, else the
+# figure's (`layout.font.family`), else the style's in scope.
+function _lt_item_family(plan, item)
+	for font in (_cmn_mapping_get(item, :font), get(plan.layout.fields, :font, nothing))
+		family = font === nothing ? nothing : _cmn_mapping_get(font, :family)
+		(family isa AbstractString && !isempty(strip(family))) && return String(family)
+	end
+	return _text_scope_family()
+end
+
 # Breaks every panel title of the plan wider than its room
-# (`_lt_title_room`) into lines, or joins one we broke that fits again, in
+# (`_lt_title_room`; the title measured in the family it is drawn in as far
+# as the tables tell, `_text_drawn_extent`: a conservative width would break
+# titles that fit) into lines, or joins one we broke that fits again, in
 # the plan's annotations (measured by the requests and placed by the place
 # phase of this plan). Once per plan; returns the wrap record as read and as
 # it is now (written to `layout.meta` by the place phase).
@@ -997,8 +1010,9 @@ function _lt_wrap_panel_titles!(plan)
 			room = _lt_title_room(plan, xanchor, xshift, plan.areas[key].current[1],
 				_lt_title_band(plan, key, cells), get(labels, key, ()))
 			bold = occursin(r"<b>"i, plain)
-			if _text_extent(plain, font; bold = bold)[1] + _TEXT_ANNOTATION_FRAME > room + 1e-9
-				wrapped = _lt_wrap_title_text(plain, font, room - _TEXT_ANNOTATION_FRAME, bold)
+			family = _lt_item_family(plan, item)
+			if _text_drawn_extent(plain, font; family = family, bold = bold)[1] + _TEXT_ANNOTATION_FRAME > room + 1e-9
+				wrapped = _lt_wrap_title_text(plain, font, room - _TEXT_ANNOTATION_FRAME, bold; family = family)
 			end
 		end
 		wrapped == plain || (result[2][name] = (plain, wrapped))
