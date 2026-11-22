@@ -1680,6 +1680,11 @@ struct _S3AxisLabels
 	label_pad::Float64
 	title_text::String
 	title_own::Bool
+	# Title width (px) per px of font size, of the title and of its two-line
+	# form (`_s3_wrap_title`; NaN without one): `_s3_title_px` once per
+	# label, not per camera the framing search tries (O6).
+	title_em::Float64
+	title_wrap_em::Float64
 end
 
 # Characters a label shows: HTML tags (<b>, <sub>, ...) count as nothing, an
@@ -1868,8 +1873,17 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol; pads = _s3_scene_pads(p, sce
 			pads[2],
 			text,
 			own_title,
+			_s3_title_px(text, 1.0),
+			_s3_wrap_title_em(text),
 		)
 	end
+end
+
+# `title_wrap_em` of `_S3AxisLabels`: the width per px of font size of the
+# two-line form of `text`, NaN when it has none.
+function _s3_wrap_title_em(text::AbstractString)
+	wrapped = _s3_wrap_title(text)
+	return wrapped === nothing ? NaN : _s3_title_px(wrapped[1], 1.0)
 end
 
 # Box corner `index` (0–7; bit d - 1 set: the high end of axis d) of a box
@@ -2062,7 +2076,7 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 		along = !label.title_along ? (1.0, 0.0) : edge_len > 1e-9 ? (edge_x / edge_len, edge_y / edge_len) :
 			screen_direction(at, a)
 		thick = label.title_size * (1 + _S3_LINE_EM * (label.title_lines - 1))
-		push!(quads, _s3_text_quad(project(at), along, 0.5 * _s3_title_px(label.title_text, label.title_size), 0.5 * thick))
+		push!(quads, _s3_text_quad(project(at), along, 0.5 * label.title_em * label.title_size, 0.5 * thick))
 		push!(tags, (a, :title))
 	end
 	placed = _S3Title[]
@@ -2147,12 +2161,13 @@ function _s3_place_titles(labels, geoms, ticks, centroid, scale::Float64, wrap::
 		(label.visible && label.title_chars > 0 && geoms[a] !== nothing) || continue
 		lo, hi = geoms[a]
 		text, chars, lines = label.title_text, label.title_chars, label.title_lines
+		em = label.title_em
 		if wrap && lines == 1
 			wrapped = _s3_wrap_title(text)
-			wrapped === nothing || ((text, chars) = wrapped; lines = 2)
+			wrapped === nothing || ((text, chars) = wrapped; lines = 2; em = label.title_wrap_em)
 		end
 		size = label.title_size * scale
-		half_len = 0.5 * _s3_title_px(text, size)
+		half_len = 0.5 * em * size
 		half_thick = 0.5 * size * (1 + _S3_LINE_EM * (lines - 1))
 		dx, dy = hi[1] - lo[1], hi[2] - lo[2]
 		edge = hypot(dx, dy)

@@ -1085,7 +1085,15 @@ using Test, PlotlySupply
 				for (text, size) in (("Wavelength (nm)", 12.0), ("x", 10.0), ("\$\\lambda\$ (nm)", 11.0))
 					w = PS._s3_title_px(text, size)
 					@test w == PS._text_extent(text, size)[1]
+					# linear in the size: the labels keep the width per px
+					@test w ≈ size * PS._s3_title_px(text, 1.0) rtol = 1e-12
 				end
+				# the cached widths of a scene's axis labels, wrapped form included
+				q = plot_surface([0.0 1; 1 0]; xlabel = "Wavelength of the probe (nm)", ylabel = "y")
+				labels = PS._s3_axis_labels(q, :scene)
+				@test labels[1].title_em ≈ PS._s3_title_px("Wavelength of the probe (nm)", 1.0)
+				@test labels[1].title_wrap_em ≈ PS._s3_title_px(PS._s3_wrap_title("Wavelength of the probe (nm)")[1], 1.0)
+				@test labels[2].title_em ≈ PS._s3_title_px("y", 1.0) && isnan(labels[2].title_wrap_em)
 				# a plain title in a journal family: well under the 0.56 em a
 				# character of a tick digit (:default keeps the widest
 				# candidate family, D19)

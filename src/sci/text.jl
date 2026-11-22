@@ -3388,6 +3388,13 @@ title of one panel.
   at most two thirds of its height; a figure too small for that still
   overlaps, so make it taller or widen `vertical_spacing`). The top margin grows for titles of
   the first row. `offset` moves it farther out and its room grows with it.
+  A panel title wider than its line (from half way to the neighbouring
+  cell on each side, or the figure edge, and clear of the outside panel
+  labels at the cell's top corners) is broken between words into balanced
+  lines when the figure is finalized, at the size it is drawn or exported
+  at (a larger export joins the lines again); `subplot_titles` too. Math
+  titles (`\$…\$`) and titles with markup other than `<b>`, `<i>` and line
+  breaks are left as written.
 
 `text` goes through mathtext (`"(a) Mesh study, \$\\lambda=10^8\$"` keeps its
 text); `""` removes the title.

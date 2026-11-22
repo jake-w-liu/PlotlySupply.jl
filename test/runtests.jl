@@ -2846,7 +2846,8 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
     @testset "CRC: normalize warns on invalid template / legend position" begin
         @test (@test_logs (:warn,) PlotlySupply._normalize_template("does_not_exist")) == :plotly_white
-        @test (@test_logs (:warn,) PlotlySupply._normalize_legend_position("nowhere")) == :topright
+        # D22: an unknown legend position name is an error, not a warning
+        @test_throws ArgumentError PlotlySupply._normalize_legend_position("nowhere", "set_legend!")
     end
 
     @testset "CRC: _json_js escapes all close-tag sequences" begin

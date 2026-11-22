@@ -1825,4 +1825,84 @@ import Dates
 			@test box[4] - box[2] < 3 * 18 && box[1] >= 0 && box[3] <= b["W"]
 		end
 	end
+
+	@testset "r1 layout-fuzz-07: a panel title wider than its line is broken into lines (rendered)" begin
+		xs = collect(range(0.0, 1.0; length = 40))
+		long = "A rather long panel title for a cell"
+		title_of(sf, r, c) = only(a for a in sd.(pl(sf).layout.fields[:annotations]) if get(a, :name, "") == "plotlysupply:title:$(r):$(c)")
+		function grid(style, align)
+			with_style(style) do
+				sf = subplots(2, 2; sync = false)
+				for r in 1:2, c in 1:2
+					plot_scatter!(sf, xs, xs .^ (r + c); row = r, col = c, xlabel = "x", ylabel = "y")
+				end
+				title!(sf, long; row = 1, col = 1, align = align)
+				title!(sf, "Second panel, also long-ish title"; row = 1, col = 2, align = align)
+				panel_labels!(sf)
+				style === :default && figsize!(sf, :ieee; columns = 1, aspect = 0.8)
+				sf
+			end
+		end
+		for style in (:default, :ieee), align in (:right, :center, :left)
+			sf = grid(style, align)
+			@test PS._finalize_figure!(sf) === false
+			b = with_style(() -> export_boxes(sf), style)
+			@test length(b["ann"]) == 6
+			# every title and label inside the figure, none over another, a
+			# tick label or a plot area
+			@test all(a -> a[1] >= -0.5 && a[3] <= b["W"] + 0.5 && a[2] >= -0.5, b["ann"])
+			@test !any(overlaps(b["ann"][i], b["ann"][j]) for i in 1:6, j in 1:6 if i < j)
+			@test !any(overlaps(a, t) for a in b["ann"], t in b["ticks"])
+			@test !any(overlaps(a, q) for a in b["ann"], q in b["plots"])
+			# as written where it fits (centred under :ieee, "(a)" beside it),
+			# else broken between words, the record holding it as written
+			t = title_of(sf, 1, 1)
+			record = PS._lt_wrap_record(pl(sf).layout)
+			if t[:text] == long
+				@test !haskey(record, "plotlysupply:title:1:1")
+			else
+				@test replace(t[:text], "<br>" => " ") == long
+				@test record["plotlysupply:title:1:1"] == (long, t[:text])
+			end
+		end
+		# the probe's figure: 1-column :ieee size at the default style, the
+		# title over (a) and (b) and off the figure before
+		sf = grid(:default, :right)
+		lines = split(title_of(sf, 1, 1)[:text], "<br>")
+		# balanced lines: none a lone short word
+		@test length(lines) >= 2 && all(l -> length(split(l)) >= 2, lines)
+		# a larger export joins the lines again; the figure keeps its wrap
+		before = PB.JSON.json(pl(sf))
+		e = PS._finalize_export_copy(pl(sf), (width = 1400, height = 1000))
+		@test only(a for a in sd.(e.layout.fields[:annotations]) if get(a, :name, "") == "plotlysupply:title:1:1")[:text] == long
+		@test PS._lt_wrap_record(e.layout) |> isempty
+		@test PB.JSON.json(pl(sf)) == before
+		# a title the user changes is theirs: written as given, wrapped anew
+		title!(sf, "Short"; row = 1, col = 1)
+		@test title_of(sf, 1, 1)[:text] == "Short"
+		@test !haskey(PS._lt_wrap_record(pl(sf).layout), "plotlysupply:title:1:1")
+		@test PS._finalize_figure!(sf) === false
+		# bold titles keep their weight on every line; math titles stay whole
+		sb = with_style(:ieee) do
+			sb = subplots(1, 2; sync = false)
+			for c in 1:2
+				plot_scatter!(sb, xs, xs .^ c; row = 1, col = c)
+			end
+			title!(sb, "Electric field magnitude near the tip"; row = 1, col = 1, bold = true)
+			title!(sb, "\$E_z\$ along the axis of the probe tip, normalised"; row = 1, col = 2)
+			sb
+		end
+		t1, t2 = title_of(sb, 1, 1), title_of(sb, 1, 2)
+		@test startswith(t1[:text], "<b>") && endswith(t1[:text], "</b>") && occursin("<br>", t1[:text])
+		@test !occursin("<br>", t2[:text])
+		svg = with_style(() -> String(savefig(sb; format = "svg")), :ieee)
+		@test count("font-weight:bold", svg) == length(split(t1[:text], "<br>"))
+		@test PS._finalize_figure!(sb) === false
+		# the line breaking: balanced lines, the user's breaks kept, a word
+		# wider than the room on a line of its own
+		wrapped = PS._lt_wrap_title_text("aa bb cc dd", 10.0, PS._text_extent("aa bb", 10.0)[1] + 0.1, false)
+		@test wrapped == "aa bb<br>cc dd"
+		@test PS._lt_wrap_title_text("a<br>bb cc", 10.0, PS._text_extent("bb", 10.0)[1] + 0.1, false) == "a<br>bb<br>cc"
+		@test PS._lt_wrap_title_text("averyveryverylongword", 10.0, 5.0, false) == "averyveryverylongword"
+	end
 end
