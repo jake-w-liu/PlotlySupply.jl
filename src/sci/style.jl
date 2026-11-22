@@ -3642,7 +3642,12 @@ end
 function _figsize_journal_impl!(fig, journal; columns = 1, aspect = nothing, height = nothing, units = :in, kwargs...)
 	_figsize_reject_keywords("figsize!", kwargs)
 	w, h = _figsize_journal_px(journal, columns, aspect, height, units, "figsize!")
-	return _figsize_write!(fig, w, h)
+	_figsize_write!(fig, w, h)
+	# Without a height or aspect the height is the style's proportion, free
+	# for L11 (a grid of equal-aspect cells drops its blank); the width is
+	# the journal's.
+	(aspect === nothing && height === nothing) && _fin_mark_free_height!(_plot_layout(fig), w, h)
+	return nothing
 end
 
 """

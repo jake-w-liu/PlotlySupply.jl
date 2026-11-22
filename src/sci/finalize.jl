@@ -1204,6 +1204,16 @@ function _fin_margins(layout::Layout, accs, W::Float64, H::Float64, domains, bar
 	l = reach(base.l, pushes_l, W, base.r)
 	b = reach(base.b, pushes_b, H, base.t)
 	t = base.t
+	# plotly pushes the top and bottom margins by what y tick labels reach
+	# past their axis ends, measured from the plot area's edge whatever the
+	# axis domain, plus its pad of min(12, the margins) (render probe
+	# s2/pushtest.jl: 7.8 px past at margins t = 4, 10, 20 and l = 40, r = 10,
+	# b = 30 gave t = 12, 18, 20). Unmodelled, a grid of equal-aspect cells
+	# under a 4 px journal margin was drawn 12 px shorter than fitted (V2).
+	over_t, over_b = _fin_y_end_overhang(layout, accs, Hp, domain_of)
+	pad = min(12.0, base.l, base.r, base.t, base.b)
+	over_t > 0 && (t = max(t, over_t + pad))
+	over_b > 0 && (b = max(b, over_b + pad))
 	r = base.r
 	for _ in 1:4
 		Wp = max(W - l - r, 1.0)
@@ -1724,6 +1734,13 @@ _fin_size_abandoned(layout::Layout) = _fin_size_flag(layout) == 1
 
 # `figsize!`: the size is the user's; M3a/L11 never change it.
 _fin_mark_user_size!(layout::Layout) = (_fin_meta_set!(layout, _FIN_SIZE_KEY, "user"); nothing)
+
+# `figsize!(fig, journal; columns)` without a height or aspect: the width is
+# the journal's and the height `w` x `h` the style's proportion, free for
+# L11 as a sized style's own size is (docs/src/subplots.md, L11; V2): a
+# grid of equal-aspect cells drops its blank rows, a field fills the width.
+_fin_mark_free_height!(layout::Layout, w::Real, h::Real) =
+	(_fin_meta_set!(layout, _FIN_SIZE_KEY, Any[Float64(w), Float64(h), Float64(w), Float64(h), 0, 1]); nothing)
 
 # Whether M3a/L11 may size the figure (Z67, figsize-01) and from what:
 # `(W0, H0, wfree, hfree)` or `nothing`. Free: a figure without a size (its
@@ -3046,6 +3063,25 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 			# the domains drawn now, and those of a cell drawn at its whole
 			# grid cell push a margin the compressed rows have no room for.
 			if all(cell -> haskey(cfits, cell), keys(fits))
+				# A block of equal-aspect cells whose gaps closed
+				# (`_room_collapse`): the compressed plan's own margins and
+				# closed gaps can leave its cells blank again (device_geometry,
+				# :ieee 2 x 1 at a fixed size: 12 and 16 px per row after one
+				# pass); that blank is removed too, a few passes at most.
+				if _room_collapse(cplan)
+					for _ in 1:_FIN_COLLAPSE_PASSES
+						more = (x = _fin_band_slack(cplan, cfits, 1), y = _fin_band_slack(cplan, cfits, 2))
+						any(s -> s !== nothing && any(>(0.5), s), more) || break
+						add(a, b) = a === nothing || b === nothing || length(a) != length(b) ? a : a .+ b
+						grown = (x = add(slack.x, more.x), y = add(slack.y, more.y))
+						nplan = _room_build(ctx, accs, bars, W, H, aspect; compress = grown, fits = cfits,
+							domains = _fin_plan_domains(cplan, cfits))
+						nfits = fit(nplan)
+						nplan, nfits = _fin_plan_settle(ctx, accs, bars, W, H, aspect, nplan, nfits, fit, grown)
+						all(cell -> haskey(nfits, cell), keys(fits)) || break
+						cplan, cfits, slack = nplan, nfits, grown
+					end
+				end
 				plan, fits = cplan, cfits
 				plan.memo[:band_slack] = slack
 			end
@@ -3065,6 +3101,10 @@ end
 # most `_FIN_FIT_SETTLE_PX` (at most `_FIN_PLAN_PASSES` builds; a settled
 # figure, whose drawn domains are the solved ones, needs none).
 const _FIN_PLAN_PASSES = 8
+
+# Passes that remove the blank a compressed block of equal-aspect cells
+# still leaves (`_fin_plan_and_fit`).
+const _FIN_COLLAPSE_PASSES = 3
 
 function _fin_plan_settle(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspect, plan, fits, fit, compress)
 	layout = ctx.p.layout
@@ -4035,10 +4075,19 @@ function _room_solve!(plan::_RoomPlan)
 	# plot spans of all columns (rows) give it up in proportion to their grid
 	# spans, so the cells of a regular grid stay equal and aligned.
 	compress = get(plan.memo, :compress, nothing)
-	xbands = _room_band_solve(plan, _room_bands(plan, 1), group, :left, :right, plan.Wp,
-		compress === nothing ? nothing : compress.x)
-	ybands = _room_band_solve(plan, _room_bands(plan, 2), group, :bottom, :top, plan.Hp,
-		compress === nothing ? nothing : compress.y)
+	# L11 (V2): in a grid of equal-aspect cells only, the gaps between the
+	# bands close to what their decorations need.
+	collapse = _room_collapse(plan)
+	xb = _room_bands(plan, 1)
+	yb = _room_bands(plan, 2)
+	xbands = _room_band_solve(plan, xb, group, :left, :right, plan.Wp,
+		compress === nothing ? nothing : compress.x;
+		gapneed = collapse ? _room_gap_needs(plan, need, xb, :left, :right, 1) : nothing,
+		outer = collapse ? _room_outer_needs(plan, need, xb, :left, :right, 1) : (0.0, 0.0))
+	ybands = _room_band_solve(plan, yb, group, :bottom, :top, plan.Hp,
+		compress === nothing ? nothing : compress.y;
+		gapneed = collapse ? _room_gap_needs(plan, need, yb, :bottom, :top, 2) : nothing,
+		outer = collapse ? _room_outer_needs(plan, need, yb, :bottom, :top, 2) : (0.0, 0.0))
 	slots = Dict{Symbol, _RoomBox}()
 	plan.memo[:aspect_slots] = slots
 	for key in plan.area_order
@@ -4135,6 +4184,68 @@ function _room_bands(plan::_RoomPlan, axis::Int)
 	return (lo, hi)
 end
 
+# L11 (V2, device_geometry): whether the gaps between the bands of the grid
+# close to what their decorations need. Only a grid all of whose cells are
+# equal-aspect cells the fit sizes (a block of fixed-aspect boxes, as in
+# matplotlib's `layout = "compressed"`), unless built with
+# `compress = false`: the grid gap of a free cell is the user's spacing.
+function _room_collapse(plan::_RoomPlan)
+	_fin_compress_grid(plan.layout) || return false
+	found = false
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.grid && a.ref !== nothing) || continue
+		a.aspect || return false
+		found = true
+	end
+	return found
+end
+
+# Px the decorations across each gap between bands i and i + 1 of
+# `bands` need (`need`, `_room_needs`: labels and requests of each side),
+# plus `_ROOM_GAP` between them; `nothing` without bands.
+function _room_gap_needs(plan::_RoomPlan, need, bands, lo_side::Symbol, hi_side::Symbol, axis::Int)
+	bands === nothing && return nothing
+	lo, hi = bands
+	n = length(lo)
+	toward_next = zeros(n)
+	toward_previous = zeros(n)
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.grid && a.ref !== nothing) || continue
+		e = round(a.ref[axis][2]; digits = 9)
+		i = searchsortedfirst(hi, e)
+		i <= n && hi[i] == e && (toward_next[i] = max(toward_next[i], need[(key, hi_side)]))
+		e = round(a.ref[axis][1]; digits = 9)
+		j = searchsortedfirst(lo, e)
+		j <= n && lo[j] == e && (toward_previous[j] = max(toward_previous[j], need[(key, lo_side)]))
+	end
+	return [toward_next[i] + toward_previous[i + 1] + _ROOM_GAP for i in 1:(n - 1)]
+end
+
+# Px the decorations of the outermost bands take inside the plot region at
+# its two ends (`(lo end, hi end)`): what their sides need (`need`,
+# `_room_needs`: labels and requests) less what the margin estimate holds
+# beyond the base margin (plotly's automargin push, the room engine's edge
+# needs). A compressed block is centred with them (`_room_band_solve`), so
+# the blank left beyond the decorations is the same at both ends.
+function _room_outer_needs(plan::_RoomPlan, need, bands, lo_side::Symbol, hi_side::Symbol, axis::Int)
+	bands === nothing && return (0.0, 0.0)
+	lo, hi = bands
+	inside_lo = 0.0
+	inside_hi = 0.0
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.grid && a.ref !== nothing) || continue
+		round(a.ref[axis][1]; digits = 9) == lo[1] && (inside_lo = max(inside_lo, need[(key, lo_side)]))
+		round(a.ref[axis][2]; digits = 9) == hi[end] && (inside_hi = max(inside_hi, need[(key, hi_side)]))
+	end
+	base = _fin_margins_base(plan.layout)
+	margin(side) = side === :left ? plan.margins.l - base.l : side === :right ? plan.margins.r - base.r :
+		side === :bottom ? plan.margins.b - base.b : plan.margins.t - base.t
+	return (max(0.0, inside_lo - max(0.0, margin(lo_side))), max(0.0, inside_hi - max(0.0, margin(hi_side))))
+end
+
 # The band edges after the solve: `(lo, hi, new_lo, new_hi)` with each band
 # edge moved in by the room its group needs (`group[(side, edge)]`, px) and
 # the band spans scaled alike for the total (column widths and row heights
@@ -4142,9 +4253,14 @@ end
 # room taken there. The total is capped at `_ROOM_MAX_SHARE` of the spans.
 # `compress` (L11, px per band or `nothing`): blank space every cell of a
 # band leaves, removed from that band's span; the bands are then centred in
-# what that frees.
+# what that frees. `gapneed` (L11, px per gap between bands i and i + 1, or
+# `nothing`): what the decorations facing each other across that gap need
+# (`_room_gap_needs`); a gap wider than that closes to it and the bands
+# take what it frees, in proportion to their spans (a grid of equal-aspect
+# cells only, `_room_collapse`: the fit then grows the boxes or leaves the
+# blank that `compress` removes).
 function _room_band_solve(plan::_RoomPlan, bands, group, lo_side::Symbol, hi_side::Symbol, px::Float64,
-		compress = nothing)
+		compress = nothing; gapneed = nothing, outer::Tuple{Float64, Float64} = (0.0, 0.0))
 	bands === nothing && return nothing
 	lo, hi = bands
 	n = length(lo)
@@ -4160,6 +4276,24 @@ function _room_band_solve(plan::_RoomPlan, bands, group, lo_side::Symbol, hi_sid
 	end
 	scale = (total - taken) / total
 	spans = [(hi[i] - lo[i]) * scale for i in 1:n]
+	# Paper distance between the plot spans of bands i and i + 1, where a
+	# gap closed (`nothing`: the grid gap plus the room taken on each side).
+	inner = Union{Nothing, Float64}[nothing for _ in 1:(n - 1)]
+	if gapneed !== nothing && length(gapneed) == n - 1
+		closed = 0.0
+		for i in 1:(n - 1)
+			have = take_hi[i] + (lo[i + 1] - hi[i]) + take_lo[i + 1]
+			want = gapneed[i] / px
+			if have > want
+				closed += have - want
+				inner[i] = want
+			end
+		end
+		if closed > 0
+			grow = (sum(spans) + closed) / sum(spans)
+			spans .*= grow
+		end
+	end
 	freed = 0.0
 	if compress !== nothing && length(compress) == n
 		for i in 1:n
@@ -4172,13 +4306,29 @@ function _room_band_solve(plan::_RoomPlan, bands, group, lo_side::Symbol, hi_sid
 	new_hi = similar(hi)
 	out_lo = similar(lo)
 	out_hi = similar(hi)
-	x = lo[1] + freed / 2
+	# Centred in what the compression frees; a block whose gaps closed is
+	# centred with the decorations its outer bands take inside the plot
+	# region (`outer`, px), within what is freed.
+	x = lo[1] + clamp(freed / 2 + (outer[1] - outer[2]) / (2 * px), 0.0, freed)
 	for i in 1:n
-		out_lo[i] = x
-		x += take_lo[i]
+		if i == 1 || inner[i - 1] === nothing
+			out_lo[i] = x
+			x += take_lo[i]
+		end
 		new_lo[i] = x
 		x += spans[i]
 		new_hi[i] = x
+		if i < n && inner[i] !== nothing
+			# A closed gap: each slot keeps the room taken on its side within
+			# the distance to the next band.
+			d = inner[i]
+			share = take_hi[i] + take_lo[i + 1] > 0 ? take_hi[i] / (take_hi[i] + take_lo[i + 1]) : 0.5
+			mine = min(take_hi[i], d * share)
+			out_hi[i] = x + mine
+			x += d
+			out_lo[i + 1] = x - min(take_lo[i + 1], d - mine)
+			continue
+		end
 		x += take_hi[i]
 		out_hi[i] = x
 		i < n && (x += lo[i + 1] - hi[i])
@@ -5870,6 +6020,74 @@ function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64; pending::
 	end
 	return min(need, _TIGHT_MAX_MARGIN_FRACTION * W)
 end
+
+# Px the tick labels of the y axes reach past the top and bottom ends of
+# their axes (`(top, bottom)`), as plotly's automargin measures them: half a
+# label height (`_FIN_YLABEL_HALF` x the tick font) less the label's
+# distance from the end. Only linear axes with a range known before
+# rendering (a fixed range or a field's sticky edges, as
+# `_fin_tick_overhang_px`) and ticks from plotly's auto step, a numeric
+# `dtick`/`tick0` or `tickvals`; an autoranged axis is padded past its last
+# label. `domain_of(key)` is the axis domain, `Hp` the plot height.
+function _fin_y_end_overhang(layout::Layout, accs, Hp::Float64, domain_of)
+	font = _fin_font_size(layout)
+	top = 0.0
+	bottom = 0.0
+	for (key, axis) in layout.fields
+		(_fin_is_axis_key(key) && String(key)[1] == 'y') || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		_fin_automargin(axis) || continue
+		_cmn_mapping_get(axis, :showticklabels) === false && continue
+		position = _fin_string(_cmn_mapping_get(axis, :ticklabelposition))
+		(position === nothing || !occursin("inside", position)) || continue
+		_fin_axis_type(layout, key) in ("linear", "-") || continue
+		root = something(_fin_match_root(layout.fields, key), key)
+		raxis = get(layout.fields, root, nothing)
+		auto = _fin_field(raxis, :autorange)
+		pair = _fin_range_pair(_fin_field(raxis, :range))
+		((pair !== nothing && (auto === false || auto === nothing)) || _fin_sticky_clip(raxis) !== nothing) || continue
+		shown = _fin_shown_range(layout, key, accs)
+		shown === nothing && continue
+		lo, hi = Float64(shown[1]), Float64(shown[2])
+		hi > lo || continue
+		reversed = auto == "reversed" || (pair !== nothing && pair[1] > pair[2])
+		dom = domain_of(key)
+		len = max((dom[2] - dom[1]) * Hp, 1.0)
+		half = _FIN_YLABEL_HALF * _fin_mapping_font_size(axis, :tickfont, font)
+		# The ticks nearest the low and high ends of the range.
+		near_lo, near_hi = NaN, NaN
+		values = _cmn_mapping_get(axis, :tickvals)
+		if (values isa AbstractVector || values isa Tuple) && !isempty(values)
+			for v in values
+				_fin_isfinite_real(v) || continue
+				lo - 1e-9 * (hi - lo) <= v <= hi + 1e-9 * (hi - lo) || continue
+				(isnan(near_lo) || v < near_lo) && (near_lo = Float64(v))
+				(isnan(near_hi) || v > near_hi) && (near_hi = Float64(v))
+			end
+			isnan(near_lo) && continue
+		else
+			dtick = _cmn_mapping_get(axis, :dtick)
+			step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) : _fin_nice_step(hi - lo, len, true)
+			t0 = _cmn_mapping_get(axis, :tick0)
+			t0 = _fin_isfinite_real(t0) ? Float64(t0) : 0.0
+			near_lo = t0 + ceil((lo - t0) / step - 1e-9) * step
+			near_hi = t0 + floor((hi - t0) / step + 1e-9) * step
+		end
+		near_lo <= near_hi || continue
+		px(v) = (v - lo) / (hi - lo) * len
+		# Distance of the label nearest the top (bottom) of the axis from it.
+		d_top = reversed ? px(near_lo) : len - px(near_hi)
+		d_bottom = reversed ? len - px(near_hi) : px(near_lo)
+		top = max(top, half - d_top)
+		bottom = max(bottom, half - d_bottom)
+	end
+	return (max(top, 0.0), max(bottom, 0.0))
+end
+
+# Half a y tick label's height per px of tick font, as plotly's automargin
+# measures it past the axis end (render probes: 7.8 px at 12 px Open Sans,
+# 5.8 above and 6.2 below at 10.7 px Times; the larger ratio, 0.65).
+const _FIN_YLABEL_HALF = 0.65
 
 # Passes of `_fin_fit!` per finalize run; a figure converges in two or three.
 const _FIN_FIT_ROUNDS = 4
