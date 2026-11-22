@@ -1967,6 +1967,100 @@ import Dates
 			@test !any(overlaps(a, t) for a in b["ann"], t in b["ticks"])
 			@test all(a -> a[1] >= -0.5 && a[3] <= b["W"] + 0.5, b["ann"])
 		end
+		# A title centred over an equal-aspect cell is measured where it is
+		# drawn, on the fitted plot box, and may touch its neighbour's box
+		# (each holds plotly's frame). The figure of recreate_topo_response,
+		# where "(b) Material shapes the orbit" was taken 21 px left of where
+		# it is drawn, 2 px short of the 4 px gap to the long title of the
+		# 3-D cell (a), and broken.
+		previous = get_default_mathtext()
+		set_default_mathtext!(true; inherit_text_font = true)
+		b = try
+			sr = with_style(style) do
+				sr = subplots(1, 2; sync = false, specs = [Spec(kind = "scene") Spec()], width_ratios = [1.25, 1],
+					horizontal_spacing = 0.1)
+
+				# ---- (a) response surface ---------------------------------------------------------------------
+				Rfun(a, t) = (1 - 0.55 * (a - 1)) * (1 + 1.6 * t^2 * a) + 0.12 * (a - 0.8)^2   # analytic model
+				α = range(0.8, 1.4; length = 31)
+				τ = range(0, 0.125; length = 31)
+				R = [Rfun(a, t) for a in α, t in τ]
+				plot_surface!(sr, collect(α), collect(τ), R; row = 1, col = 1, color = "#55A7CA", opacity = 0.66,
+					edges = true, edgecolor = "#D6E6EC", edgewidth = 1)
+				# curves on the surface
+				tline = collect(τ)
+				plot_scatter3d!(sr, collect(α), zeros(length(α)), Rfun.(α, 0.0); row = 1, col = 1,
+					color = "#333333", linewidth = 4, showlegend = false)
+				plot_scatter3d!(sr, fill(1.0, length(τ)), tline, Rfun.(1.0, tline); row = 1, col = 1,
+					color = "#333333", linewidth = 3, dash = "dash", showlegend = false)
+				plot_scatter3d!(sr, fill(1.21, length(τ)), tline, Rfun.(1.21, tline); row = 1, col = 1,
+					color = "#7B2F9A", linewidth = 4, showlegend = false)
+				ag = range(0.88, 0.97; length = 6); tg = range(0.02, 0.11; length = 6)
+				plot_scatter3d!(sr, collect(ag), collect(tg), Rfun.(ag, tg); row = 1, col = 1,
+					mode = "lines+markers", marker_symbol = "diamond", marker_size = 5, color = "#00875A",
+					linewidth = 4, showlegend = false)
+				# full-system samples: white circles (plot_scatter3d has no marker edge colour, so the dark
+				# outline of matplotlib's facecolor="white", edgecolor="#333333" is drawn as a slightly larger dark
+				# marker underneath)
+				as = [0.8, 0.85, 0.95, 1.0, 1.1, 1.21, 1.3, 1.4]; ts = [0.0, 0.03, 0.06, 0.09, 0.12]
+				sa = [a for a in as for t in ts][1:3:end]; st = [t for a in as for t in ts][1:3:end]
+				plot_scatter3d!(sr, sa, st, Rfun.(sa, st); row = 1, col = 1, mode = "markers",
+					marker_size = 4, color = "#333333", showlegend = false)
+				plot_scatter3d!(sr, sa, st, Rfun.(sa, st); row = 1, col = 1, mode = "markers",
+					marker_size = 3, color = "white", showlegend = false)
+				scene!(sr; row = 1, col = 1, aspectratio = (1.30, 1.0, 0.85), showbackground = false,
+					xticks = [0.8, 1.0, 1.2, 1.4], yticks = [0, 0.0625, 0.125], yticklabels = ["0", "1/16", "1/8"],
+					zticks = [0.8, 1.0, 1.1], xlabel = "Material scale \$\\alpha\$",
+					ylabel = "Time step \$\\Delta t/T_h\$", zlabel = "Frequency ratio \$R\$")
+				# zoom < 1 backs the camera off: the automatic distance frames the box itself tightly and the
+				# WebGL axis titles outside it are clipped at the cell edge (see the notes)
+				view!(sr; row = 1, col = 1, elev = 24, azim = -61)
+				title!(sr, "(a) Material and time step set the frequency"; row = 1, col = 1, align = :left,
+					bold = true)
+				annotate!(sr, 0.0, 1.0, "Analytic surface; circles: full system"; row = 1, col = 1,
+					coords = :axes, showarrow = false, xanchor = "left", yanchor = "top")
+				annotate!(sr, 0.0, 0.92, "Green: \$R=1\$ from opposing errors"; row = 1, col = 1,
+					coords = :axes, showarrow = false, xanchor = "left", yanchor = "top", color = "#00875A")
+
+				# ---- (b) orbit ellipse --------------------------------------------------------------------------
+				θ = range(0, 2π; length = 241)
+				hline!(sr, 0; row = 1, col = 2, color = "#bbbbbb", linewidth = 0.7)
+				vline!(sr, 0; row = 1, col = 2, color = "#bbbbbb", linewidth = 0.7)
+				plot_scatter!(sr, cos.(θ), sin.(θ); row = 1, col = 2, color = "#333333", linewidth = 1.6,
+					legend = "\$\\alpha=1\$")
+				plot_scatter!(sr, cos.(θ) ./ sqrt(1.21), sin.(θ); row = 1, col = 2, color = "#7B2F9A",
+					linewidth = 2.4, legend = "\$\\alpha=1.21\$")
+				plot_scatter!(sr, [0, 1 / sqrt(1.21)], [1, 0]; row = 1, col = 2, mode = "markers",
+					marker_size = 8, color = "#7B2F9A", showlegend = false)
+				annotate!(sr, 0, 0.5, "\$\\alpha a^2+s^2=1\$"; row = 1, col = 2, showarrow = false)
+				annotate!(sr, 0, 0.15, "Own energy: constant"; row = 1, col = 2, showarrow = false)
+				annotate!(sr, 0, -0.45, "Original energy:\n21% variation"; row = 1, col = 2, showarrow = false,
+					color = "#7B2F9A")
+				xrange!(sr, (-1.2, 1.2); row = 1, col = 2); yrange!(sr, (-1.15, 1.15); row = 1, col = 2)
+				xticks!(sr, [-1, 0, 1]; row = 1, col = 2); yticks!(sr, [-1, 0, 1]; row = 1, col = 2)
+				axis_equal!(sr; row = 1, col = 2)                         # set_aspect("equal")
+				xlabel!(sr, "Electric amplitude \$a\$"; row = 1, col = 2)
+				ylabel!(sr, "Magnetic amplitude \$s\$"; row = 1, col = 2)
+				# the panel title and a legend above the axes share the same spot (no automatic stacking):
+				# lift the title by about one legend row
+				title!(sr, "(b) Material shapes the orbit"; row = 1, col = 2, bold = true, offset = (0, 24))
+				# legend(loc="upper center", bbox_to_anchor=(.5, 1.16), ncol=2): a horizontal legend above
+				set_legend!(sr; row = 1, col = 2, position = (0.5, 1.0), xanchor = "center", yanchor = "bottom",
+					orientation = :h)
+				sr
+			end
+			with_style(() -> export_boxes(sr; width = 6.6, height = 3.1, units = :in, tight = true), style)
+		finally
+			set_default_mathtext!(previous.enabled; size = previous.size, font = previous.font,
+				inherit_text_font = previous.inherit_text_font)
+		end
+		# the panel titles: (b) lifted to the top, (a) the widest annotation
+		tb = argmin(a -> a[2], b["ann"])
+		ta = argmax(a -> a[3] - a[1], b["ann"])
+		@test ta !== tb
+		@test all(a -> a[4] - a[2] < 1.5 * 13.34, (ta, tb))
+		@test !overlaps(ta, tb) && ta[3] <= tb[1]
+		@test all(a -> a[1] >= -0.5 && a[3] <= b["W"] + 0.5, (ta, tb))
 		# the estimate: the first listed family with a table, else the
 		# generic family of the list, else the widest
 		@test PS._text_drawn_family("STIX Two Text, STIXGeneral, serif") === PS._TEXT_FAMILY_TIMES

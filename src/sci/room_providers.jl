@@ -963,6 +963,10 @@ function _lt_wrap_title_text(text::AbstractString, font::Float64, width::Float64
 	return String(take!(out))
 end
 
+# The x span (paper) a panel title of area `a` is placed on: its plot box
+# (an equal-aspect cell's as fitted, `_lt_fitted_box`).
+_lt_title_span(plan, a) = a.aspect ? _lt_fitted_box(plan, a)[1] : a.current[1]
+
 # The CSS family list annotation `item` is drawn in: its own, else the
 # figure's (`layout.font.family`), else the style's in scope.
 function _lt_item_family(plan, item)
@@ -1027,7 +1031,7 @@ function _lt_wrap_panel_titles!(plan)
 		xanchor = something(_fin_string(_cmn_mapping_get(item, :xanchor)), "auto")
 		xshift = something(_lt_real(_cmn_mapping_get(item, :xshift, 0)), 0.0)
 		bold = occursin(r"<b>"i, plain)
-		(lo, hi) = plan.areas[key].current[1]
+		(lo, hi) = _lt_title_span(plan, plan.areas[key])
 		anchor = _lt_anchor_x(xanchor, (lo * plan.Wp, hi * plan.Wp)) + xshift
 		w = _text_drawn_extent(plain, font; family = family, bold = bold)[1] + _TEXT_ANNOTATION_FRAME
 		box = xanchor == "left" ? (anchor, anchor + w) : xanchor == "right" ? (anchor - w, anchor) : (anchor - w / 2, anchor + w / 2)
@@ -1038,7 +1042,7 @@ function _lt_wrap_panel_titles!(plan)
 		wrapped = t.plain
 		if t.breakable
 			band = _lt_title_wrap_band(plan, t.key, cells, boxes, labels)
-			room = _lt_title_room(plan, t.xanchor, t.xshift, plan.areas[t.key].current[1], band, get(labels, t.key, ());
+			room = _lt_title_room(plan, t.xanchor, t.xshift, _lt_title_span(plan, plan.areas[t.key]), band, get(labels, t.key, ());
 				label_band = _lt_title_band(plan, t.key, cells))
 			if t.w > room + 1e-9
 				wrapped = _lt_wrap_title_text(t.plain, t.font, room - _TEXT_ANNOTATION_FRAME, t.bold; family = t.family)
@@ -1055,8 +1059,10 @@ end
 # on the title line whose own title and outside top label stay in their half
 # of the gap between the two cells: up to that title's box as written
 # (`boxes`: area => (left, right) px, `_lt_wrap_panel_titles!`), that label
-# (`labels`, as `_lt_wrap_panel_titles!`; taken beside its corner) and the
-# neighbour's plot span, less `_TEXT_PANEL_GAP`. A title as wide as its cell
+# (`labels`, as `_lt_wrap_panel_titles!`; taken beside its corner, as
+# `_lt_label_xplacement` places it) and the neighbour's plot span less
+# `_TEXT_PANEL_GAP` (the boxes may touch: each holds plotly's frame around
+# its text, `_TEXT_ANNOTATION_FRAME`). A title as wide as its cell
 # reaching into an empty gap stays whole (recreate_topo_phase; the room the
 # solve gives the title line keeps it clear of the neighbour's top y tick
 # label); a neighbour reaching past half way is broken to its half itself,
@@ -1071,23 +1077,25 @@ function _lt_title_wrap_band(plan, key::Symbol, cells, boxes, labels)
 		(olo, ohi), _ = plan.areas[other].current
 		rows[other] == row || continue
 		box = get(boxes, other, nothing)
+		ospan = _lt_title_span(plan, plan.areas[other])
 		if olo >= hi - _LT_EDGE_TOL
-			# on the right: its leftmost drawn edge, at most its plot span
+			# on the right: up to its leftmost drawn box, at most its plot
+			# span less the gap
 			half = (olo + hi) / 2 * plan.Wp
-			edge = olo * plan.Wp
-			box === nothing || (edge = min(edge, box[1]))
+			limit = ospan[1] * plan.Wp - _TEXT_PANEL_GAP
+			box === nothing || (limit = min(limit, box[1]))
 			for (l, lw) in get(labels, other, ())
-				l && (edge = min(edge, olo * plan.Wp - lw - _TEXT_PANEL_GAP))
+				l && (limit = min(limit, ospan[1] * plan.Wp - _TEXT_PANEL_GAP - lw))
 			end
-			edge > half && right == half && (right = max(half, edge - _TEXT_PANEL_GAP))
+			limit > half && right == half && (right = limit)
 		elseif ohi <= lo + _LT_EDGE_TOL
 			half = (ohi + lo) / 2 * plan.Wp
-			edge = ohi * plan.Wp
-			box === nothing || (edge = max(edge, box[2]))
+			limit = ospan[2] * plan.Wp + _TEXT_PANEL_GAP
+			box === nothing || (limit = max(limit, box[2]))
 			for (l, lw) in get(labels, other, ())
-				l || (edge = max(edge, ohi * plan.Wp + lw + _TEXT_PANEL_GAP))
+				l || (limit = max(limit, ospan[2] * plan.Wp + _TEXT_PANEL_GAP + lw))
 			end
-			edge < half && left == half && (left = min(half, edge + _TEXT_PANEL_GAP))
+			limit < half && left == half && (left = limit)
 		end
 	end
 	return (left, right)
