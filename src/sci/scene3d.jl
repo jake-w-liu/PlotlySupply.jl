@@ -5117,8 +5117,8 @@ function _s3_scatter3d_traces(
 	color = _s3_color_text(color, who, "color")
 	marker_color = _s3_color_text(marker_color, who, "marker_color")
 	marker_line_color = _s3_color_text(marker_line_color, who, "marker_line_color")
-	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x)
-	_, y_nested = _nested_coordinate_mode(z, y, :z, :y)
+	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x; who = who)
+	_, y_nested = _nested_coordinate_mode(z, y, :z, :y; who = who)
 	start = _s3_next_index(fig)
 	if !z_nested
 		single_mode = _first_or_empty(mode)

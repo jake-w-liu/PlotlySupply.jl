@@ -27717,6 +27717,23 @@ function _is_transactional_high_level_plot_mutator(mutator::Function)
 	return false
 end
 
+# Values that are never a figure. A mutator called with one of them where the
+# figure goes (`xlabel!(nothing, "x")`, `hline!(1, 0.5)`, a Layout or a trace)
+# raises ArgumentError("<function>: ...") naming the function (invariant 4)
+# before anything is read, instead of reaching `_plot_obj` from whichever
+# helper touches the figure first. No mutator method takes one of these types
+# first (each has the figure, a SubplotFigure or a staged mutation there).
+const _NOT_A_FIGURE = Union{
+	Nothing, Missing, Number, AbstractString, Symbol, AbstractChar,
+	AbstractArray, AbstractDict, Tuple, NamedTuple, Module, Function, Type,
+	Layout, AbstractTrace,
+}
+
+_not_a_figure_error(who::AbstractString, value) = ArgumentError(
+	"$(who): the first argument must be the figure (a Plot, SyncPlot or " *
+	"SubplotFigure); got a value of type $(typeof(value)).",
+)
+
 function _install_transactional_high_level_plot_wrappers!()
 	for function_name in _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS
 		mutator = getfield(@__MODULE__, function_name)
@@ -27749,6 +27766,13 @@ function _install_transactional_high_level_plot_wrappers!()
 						kwargs...,
 					)
 				end
+				function $(function_name)(
+					fig::_NOT_A_FIGURE,
+					$(typed_arguments...);
+					kwargs...,
+				)
+					throw(_not_a_figure_error($(string(function_name)), fig))
+				end
 			end
 			Core.eval(@__MODULE__, definition)
 		end
@@ -27757,3 +27781,16 @@ function _install_transactional_high_level_plot_wrappers!()
 end
 
 _install_transactional_high_level_plot_wrappers!()
+
+# The figure verbs whose methods are all typed (no generic method for the
+# wrappers above): the same ArgumentError for a value that is never a figure.
+for name in (:colorbar!, :set_fonts!, :set_legend!, :shared_colorbar!)
+	@eval $(name)(fig::_NOT_A_FIGURE, args...; kwargs...) =
+		throw(_not_a_figure_error($(string(name)), fig))
+end
+for name in (:subplot!, :subplot_legends!)
+	@eval $(name)(sf::_NOT_A_FIGURE, args...; kwargs...) = throw(ArgumentError(
+		$(string(name)) * ": the first argument must be a SubplotFigure (made by " *
+		"`subplots`); got a value of type $(typeof(sf)).",
+	))
+end

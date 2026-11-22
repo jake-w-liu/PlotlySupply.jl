@@ -498,6 +498,37 @@ end
 	end
 end
 
+@testset "r1 errors-inputs-08: a value that is no figure, scatter3d series, kde range" begin
+	x = [1.0, 2.0, 3.0]
+	notfig = "the first argument must be the figure (a Plot, SyncPlot or SubplotFigure); got a value of type"
+	for (who, call) in (
+		("xlabel!", v -> xlabel!(v, "x")),
+		("title!", v -> title!(v, "T")),
+		("plot_scatter!", v -> plot_scatter!(v, x, x)),
+		("plot_heatmap!", v -> plot_heatmap!(v, [1.0 2.0; 3.0 4.0])),
+		("annotate!", v -> annotate!(v, 1, 1, "a")),
+		("hline!", v -> hline!(v, 0.5)),
+		("figsize!", v -> figsize!(v, :ieee)),
+		("plot_surface!", v -> plot_surface!(v, x, x, x * x')),
+		("colorbar!", v -> colorbar!(v)),
+		("set_fonts!", v -> set_fonts!(v; size = 10)),
+		("set_legend!", v -> set_legend!(v; position = :top)),
+		("shared_colorbar!", v -> shared_colorbar!(v)),
+	), value in (nothing, 1, "fig", PlotlyBase.Layout(), PlotlyBase.scatter(y = [1]), Dict(:a => 1), [1, 2])
+		@test _r1_argerr(() -> call(value), "$(who): $(notfig) $(typeof(value)).")
+	end
+	@test _r1_argerr(() -> subplot!(nothing, 1, 1), "subplot!: the first argument must be a SubplotFigure")
+	@test _r1_argerr(() -> subplot_legends!(1), "subplot_legends!: the first argument must be a SubplotFigure")
+	# The figure forms still work.
+	fig = plot_scatter(x, x)
+	@test xlabel!(fig, "x") === nothing
+	@test fig.layout[:xaxis][:title][:text] == "x"
+	@test _r1_argerr(() -> plot_scatter3d([x, x], [x, x], x), "plot_scatter3d: `x` contains multiple series but `z` contains one series.")
+	@test _r1_argerr(() -> plot_scatter3d(x, [x, x], x), "plot_scatter3d: `y` contains multiple series but `z` contains one series.")
+	@test _r1_argerr(() -> plot_kde([1e308, -1e308, 0.0]), "plot_kde: the curve of `x` would span")
+	@test plot_kde([1.0, 2.0, 2.5]) isa PlotlyBase.Plot
+end
+
 @testset "r1 apib-02/sm-14: unknown keywords of the text and legend verbs and the setters" begin
 	fig = plot_scatter(1:3, [1.0, 2.0, 3.0]; legend = "a")
 	sf = subplots(1, 2; sync = false)

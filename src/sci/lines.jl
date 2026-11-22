@@ -1317,6 +1317,17 @@ function _kde_impl!(
 		end
 	end
 
+	# Data spanning most of the Float64 range (or a bandwidth that overflows)
+	# puts the evaluation grid's ends outside it: an ArgumentError naming the
+	# function, not Base's `range` error.
+	for (series, (sample, h)) in enumerate(zip(samples, bandwidths))
+		lower, upper = first(sample) - cut * h, last(sample) + cut * h
+		isfinite(lower) && isfinite(upper) || throw(ArgumentError(
+			"$(who): the curve of `x`$(n > 1 ? " (series $(series))" : "") would span [$(lower), $(upper)] " *
+			"(the data range plus `cut` = $(cut) bandwidths of $(h)), which is not finite in Float64; " *
+			"rescale the data or pass a finite `bandwidth`.",
+		))
+	end
 	curves = map(zip(samples, bandwidths)) do (sample, h)
 		grid = collect(range(first(sample) - cut * h, last(sample) + cut * h; length = Int(npoints)))
 		return grid, _kde_density(sample, h, grid)
