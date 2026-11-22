@@ -850,18 +850,32 @@ end
 # pass: wrapped titles) once it has its own, else the layout's.
 _lt_items(plan) = plan.annotations === nothing ? get(plan.layout.fields, :annotations, nothing) : plan.annotations
 
+# The grid row of each cell of `cells` (`_lt_cell_areas`; a cell spanning
+# rows: its top row): the cells of a row share a title line, an
+# equal-aspect cell fitted lower than its row too (its title is drawn lower,
+# reaching the line of its neighbours' titles).
+function _lt_cell_rows(cells)
+	rows = Dict{Symbol, Int}()
+	for ((r, _), key) in cells
+		rows[key] = min(get(rows, key, r), r)
+	end
+	return rows
+end
+
 # Px span (from the left of the plot width `plan.Wp`) the title line of area
-# `key` may use: from half way to the nearest grid cell on its left whose
-# plot area has the same top edge (a neighbour on the same title line; the
-# figure's left edge when there is none) to half way to the nearest one on
-# its right (the figure's right edge). `cells` as `_lt_cell_areas`.
+# `key` may use: from half way to the nearest grid cell on its left on the
+# same title line (`_lt_cell_rows`; the figure's left edge when there is
+# none) to half way to the nearest one on its right (the figure's right
+# edge). `cells` as `_lt_cell_areas`.
 function _lt_title_band(plan, key::Symbol, cells = _lt_cell_areas(plan))
-	(lo, hi), (_, top) = plan.areas[key].current
+	(lo, hi), _ = plan.areas[key].current
+	rows = _lt_cell_rows(cells)
+	row = get(rows, key, 0)
 	left, right = -Float64(plan.margins.l), plan.Wp + Float64(plan.margins.r)
 	for other in values(cells)
 		other === key && continue
-		(olo, ohi), (_, otop) = plan.areas[other].current
-		abs(otop - top) <= _LT_EDGE_TOL || continue
+		(olo, ohi), _ = plan.areas[other].current
+		rows[other] == row || continue
 		ohi <= lo + _LT_EDGE_TOL && (left = max(left, (ohi + lo) / 2 * plan.Wp))
 		olo >= hi - _LT_EDGE_TOL && (right = min(right, (olo + hi) / 2 * plan.Wp))
 	end
@@ -870,19 +884,20 @@ end
 
 # Width (px) of the widest box a panel title anchored at `xanchor` (+
 # `xshift` px) on the span `span` (paper) may have on its line: within
-# `band` (`_lt_title_band`), and clear of the outside top labels at the
+# `band` (`_lt_title_wrap_band`), and clear of the outside top labels at the
 # corners (`labels`: (left, width px) each) wherever they go
-# (`_lt_label_xplacement`): beside the corner when the band has room for
-# them there, else at the corner. A title aligned to a corner pushes the
-# label of that corner beside it, so that side does not limit it.
-function _lt_title_room(plan, xanchor::AbstractString, xshift::Float64, span, band, labels)
+# (`_lt_label_xplacement`, within `label_band`, `_lt_title_band`): beside the
+# corner when that band has room for them there, else at the corner. A
+# title aligned to a corner pushes the label of that corner beside it, so
+# that side does not limit it.
+function _lt_title_room(plan, xanchor::AbstractString, xshift::Float64, span, band, labels; label_band = band)
 	lo, hi = span[1] * plan.Wp, span[2] * plan.Wp
 	low, high = band
 	for (left, lw) in labels
 		if left && xanchor != "left"
-			low = lo - band[1] >= lw + _TEXT_PANEL_GAP ? band[1] + lw + _TEXT_PANEL_GAP : lo + lw + _TEXT_PANEL_GAP
+			low = lo - label_band[1] >= lw + _TEXT_PANEL_GAP ? label_band[1] + lw + _TEXT_PANEL_GAP : lo + lw + _TEXT_PANEL_GAP
 		elseif !left && xanchor != "right"
-			high = band[2] - hi >= lw + _TEXT_PANEL_GAP ? band[2] - lw - _TEXT_PANEL_GAP : hi - lw - _TEXT_PANEL_GAP
+			high = label_band[2] - hi >= lw + _TEXT_PANEL_GAP ? label_band[2] - lw - _TEXT_PANEL_GAP : hi - lw - _TEXT_PANEL_GAP
 		end
 	end
 	anchor = _lt_anchor_x(xanchor, (lo, hi)) + xshift
@@ -995,30 +1010,87 @@ function _lt_wrap_panel_titles!(plan)
 			push!(get!(Vector{Tuple{Bool, Float64}}, labels, key), (role.left, _lt_annotation_width(plan, item)))
 		end
 	end
+	# The titles as written (`plain`; `text`: as the annotation shows it),
+	# measured in the family they are drawn in: `box` (left, right) px and
+	# width `w` of the box as written; `breakable`: plain text on the title
+	# line, ours to break.
+	written = NamedTuple[]
 	for (name, item, key) in titles
 		text = _cmn_mapping_get(item, :text)
 		text isa AbstractString || continue
 		rec = get(record, name, nothing)
-		ours = rec !== nothing && text == rec[2]
-		plain = ours ? rec[1] : String(text)
-		wrapped = plain
+		plain = rec !== nothing && text == rec[2] ? rec[1] : String(text)
 		role = _lt_annotation_role(item, :title, _lt_ref_boxes(plan, plan.areas[key], single))
-		if role !== nothing && !occursin('$', plain) && !occursin(_LT_WRAP_MARKUP, plain)
-			font = _lt_font(plan, item)
-			xanchor = something(_fin_string(_cmn_mapping_get(item, :xanchor)), "auto")
-			xshift = something(_lt_real(_cmn_mapping_get(item, :xshift, 0)), 0.0)
-			room = _lt_title_room(plan, xanchor, xshift, plan.areas[key].current[1],
-				_lt_title_band(plan, key, cells), get(labels, key, ()))
-			bold = occursin(r"<b>"i, plain)
-			family = _lt_item_family(plan, item)
-			if _text_drawn_extent(plain, font; family = family, bold = bold)[1] + _TEXT_ANNOTATION_FRAME > room + 1e-9
-				wrapped = _lt_wrap_title_text(plain, font, room - _TEXT_ANNOTATION_FRAME, bold; family = family)
+		breakable = role !== nothing && !occursin('$', plain) && !occursin(_LT_WRAP_MARKUP, plain)
+		font = _lt_font(plan, item)
+		family = _lt_item_family(plan, item)
+		xanchor = something(_fin_string(_cmn_mapping_get(item, :xanchor)), "auto")
+		xshift = something(_lt_real(_cmn_mapping_get(item, :xshift, 0)), 0.0)
+		bold = occursin(r"<b>"i, plain)
+		(lo, hi) = plan.areas[key].current[1]
+		anchor = _lt_anchor_x(xanchor, (lo * plan.Wp, hi * plan.Wp)) + xshift
+		w = _text_drawn_extent(plain, font; family = family, bold = bold)[1] + _TEXT_ANNOTATION_FRAME
+		box = xanchor == "left" ? (anchor, anchor + w) : xanchor == "right" ? (anchor - w, anchor) : (anchor - w / 2, anchor + w / 2)
+		push!(written, (; name, item, key, text, plain, breakable, font, family, xanchor, xshift, bold, box, w))
+	end
+	boxes = Dict(t.key => t.box for t in written)
+	for t in written
+		wrapped = t.plain
+		if t.breakable
+			band = _lt_title_wrap_band(plan, t.key, cells, boxes, labels)
+			room = _lt_title_room(plan, t.xanchor, t.xshift, plan.areas[t.key].current[1], band, get(labels, t.key, ());
+				label_band = _lt_title_band(plan, t.key, cells))
+			if t.w > room + 1e-9
+				wrapped = _lt_wrap_title_text(t.plain, t.font, room - _TEXT_ANNOTATION_FRAME, t.bold; family = t.family)
 			end
 		end
-		wrapped == plain || (result[2][name] = (plain, wrapped))
-		wrapped == text || _lt_update_annotation!(plan, name, Dict{Symbol, Any}(:text => wrapped))
+		wrapped == t.plain || (result[2][t.name] = (t.plain, wrapped))
+		wrapped == t.text || _lt_update_annotation!(plan, t.name, Dict{Symbol, Any}(:text => wrapped))
 	end
 	return result
+end
+
+# The px span (as `_lt_title_band`) a panel title of area `key` may be
+# broken to fit: `_lt_title_band`, widened on a side with a neighbouring cell
+# on the title line whose own title and outside top label stay in their half
+# of the gap between the two cells: up to that title's box as written
+# (`boxes`: area => (left, right) px, `_lt_wrap_panel_titles!`), that label
+# (`labels`, as `_lt_wrap_panel_titles!`; taken beside its corner) and the
+# neighbour's plot span, less `_TEXT_PANEL_GAP`. A title as wide as its cell
+# reaching into an empty gap stays whole (recreate_topo_phase; the room the
+# solve gives the title line keeps it clear of the neighbour's top y tick
+# label); a neighbour reaching past half way is broken to its half itself,
+# which bounds it.
+function _lt_title_wrap_band(plan, key::Symbol, cells, boxes, labels)
+	left, right = _lt_title_band(plan, key, cells)
+	(lo, hi), _ = plan.areas[key].current
+	rows = _lt_cell_rows(cells)
+	row = get(rows, key, 0)
+	for other in values(cells)
+		other === key && continue
+		(olo, ohi), _ = plan.areas[other].current
+		rows[other] == row || continue
+		box = get(boxes, other, nothing)
+		if olo >= hi - _LT_EDGE_TOL
+			# on the right: its leftmost drawn edge, at most its plot span
+			half = (olo + hi) / 2 * plan.Wp
+			edge = olo * plan.Wp
+			box === nothing || (edge = min(edge, box[1]))
+			for (l, lw) in get(labels, other, ())
+				l && (edge = min(edge, olo * plan.Wp - lw - _TEXT_PANEL_GAP))
+			end
+			edge > half && right == half && (right = max(half, edge - _TEXT_PANEL_GAP))
+		elseif ohi <= lo + _LT_EDGE_TOL
+			half = (ohi + lo) / 2 * plan.Wp
+			edge = ohi * plan.Wp
+			box === nothing || (edge = max(edge, box[2]))
+			for (l, lw) in get(labels, other, ())
+				l || (edge = max(edge, ohi * plan.Wp + lw + _TEXT_PANEL_GAP))
+			end
+			edge < half && left == half && (left = min(half, edge + _TEXT_PANEL_GAP))
+		end
+	end
+	return (left, right)
 end
 
 # Writes the wrap record of `_lt_wrap_panel_titles!` to `layout.meta` when it

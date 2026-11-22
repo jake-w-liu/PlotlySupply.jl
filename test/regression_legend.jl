@@ -1923,6 +1923,50 @@ import Dates
 		@test all(a -> a[4] - a[2] < 1.5 * 13.34, b["ann"])
 		@test all(a -> a[1] >= -0.5 && a[3] <= b["W"] + 0.5, b["ann"])
 		@test isempty(PS._lt_wrap_record(pl(st).layout))
+		# A title running into an empty gap beside its cell stays whole while
+		# the neighbour's title keeps its half (recreate_topo_phase: "(a)
+		# Equal energy, different phase" over an equal-aspect cell, left
+		# aligned, was broken at half way to the next cell though the gap
+		# up to "(b) ..." was free).
+		style = PlotStyle(; font_family = "DejaVu Sans, Arial, sans-serif", fontsize = 10 * 96 / 72, spines = :open)
+		function phase_grid(title_a, title_b, align_b, ytop, ticks)
+			with_style(style) do
+				sp = subplots(1, 2; sync = false, horizontal_spacing = 0.16)
+				circle!(sp, 0, 0, 1; row = 1, col = 1)
+				xrange!(sp, (-1.25, 1.42); row = 1, col = 1)
+				yrange!(sp, (-1.17, 1.12); row = 1, col = 1)
+				axis_equal!(sp; row = 1, col = 1)
+				xlabel!(sp, "Electric amplitude"; row = 1, col = 1)
+				ylabel!(sp, "Magnetic amplitude"; row = 1, col = 1)
+				plot_scatter!(sp, 0:8, 0.25 .* (0:8); row = 1, col = 2, xlabel = "Elapsed periods", ylabel = "Phase lag (rad)")
+				# ytop = 2: a tick label at the top of the range, reaching above
+				# the plot area
+				yrange!(sp, (0, ytop); row = 1, col = 2)
+				ticks === nothing || yticks!(sp, ticks; row = 1, col = 2)
+				title!(sp, title_a; row = 1, col = 1, align = :left, bold = true)
+				title!(sp, title_b; row = 1, col = 2, align = align_b, bold = true)
+				sp
+			end
+		end
+		# A neighbour title reaching past half way (right aligned, wider
+		# than its cell) keeps the half as before: both are broken. The same
+		# title over the column of the neighbour's y tick labels, one at the
+		# top of its range ("1.5", "2"), stays clear of them.
+		short_a = "(a) Equal energy, different phase"
+		for (title_a, title_b, align_b, ytop, ticks, whole) in (
+			(short_a, "(b) Phase lag accumulates", :left, 2.6, [0, 1, 2], true),
+			(short_a, "A much longer neighbour title (b) that runs far into the gap", :right, 2.6, [0, 1, 2], false),
+			(short_a, "(b) Phase lag", :left, 2, nothing, true))
+			sp = phase_grid(title_a, title_b, align_b, ytop, ticks)
+			b = with_style(() -> export_boxes(sp; width = 6.6, height = 2.7, units = :in, tight = true), style)
+			@test length(b["ann"]) == 2
+			ta, tb = sort(b["ann"]; by = first)
+			# (a) one line where the gap is free, else broken to its half
+			@test (ta[4] - ta[2] < 1.5 * 13.34) == whole
+			@test !overlaps(ta, tb) && ta[3] <= tb[1]
+			@test !any(overlaps(a, t) for a in b["ann"], t in b["ticks"])
+			@test all(a -> a[1] >= -0.5 && a[3] <= b["W"] + 0.5, b["ann"])
+		end
 		# the estimate: the first listed family with a table, else the
 		# generic family of the list, else the widest
 		@test PS._text_drawn_family("STIX Two Text, STIXGeneral, serif") === PS._TEXT_FAMILY_TIMES
