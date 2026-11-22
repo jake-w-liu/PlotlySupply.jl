@@ -1551,6 +1551,9 @@ end
 # Split `s` at unescaped `$` signs into (is_math, segment, display) triples;
 # `$$…$$` is display math.
 function _text_math_segments(s::AbstractString)
+	# No `$`: one text segment (what the scan below gives, without its
+	# per-character buffer; most labels).
+	occursin('$', s) || return isempty(s) ? Tuple{Bool, String, Bool}[] : Tuple{Bool, String, Bool}[(false, String(s), false)]
 	segments = Tuple{Bool, String, Bool}[]
 	buf = IOBuffer()
 	math = false
@@ -1651,30 +1654,36 @@ function _text_extent_in(segments, fs::Float64, m::_TextFamilyMetrics, math::_Te
 	k = (inherit ? m.ex : _TEXT_FAMILY_TIMES.ex) / _TEXT_MATH_X_HEIGHT
 	# Lines: plain text breaks at <br>/newline; a math segment contributes
 	# its rows (the first continues the current line, further rows add lines).
-	lines = Tuple{Float64, Float64}[(0.0, _TEXT_PLAIN_LINE_EM)]  # (width_px, height_em)
+	# The current line is (lw px, lh em); the finished ones are kept as their
+	# widest width and summed height (em), in line order.
+	lw::Float64, lh::Float64 = 0.0, _TEXT_PLAIN_LINE_EM
+	widest::Float64, height_em::Float64 = -Inf, 0.0
 	for (is_math, segment, display) in segments
 		if is_math
 			rows = _text_tex_box(segment, math, inherit ? m : nothing, k, display)
 			for (index, (w, scale, tall, height)) in enumerate(rows)
-				index > 1 && push!(lines, (0.0, 0.0))
-				lw, lh = lines[end]
+				if index > 1
+					widest, height_em = max(widest, lw), height_em + lh
+					lw, lh = 0.0, 0.0
+				end
 				row = max(tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM, height)
-				lines[end] = (lw + w * k * fs, max(lh, scale * row))
+				lw, lh = lw + w * k * fs, max(lh, scale * row)
 			end
 		else
-			parts = split(segment, _TEXT_BR_TAG)
+			# (no `<`: no line break, and no regex split)
+			parts = occursin('<', segment) ? split(segment, _TEXT_BR_TAG) : (segment,)
 			for (index, part) in enumerate(parts)
-				index > 1 && push!(lines, (0.0, _TEXT_PLAIN_LINE_EM))
-				lw, lh = lines[end]
+				if index > 1
+					widest, height_em = max(widest, lw), height_em + lh
+					lw, lh = 0.0, _TEXT_PLAIN_LINE_EM
+				end
 				run = _text_plain_run(part, m, bold)
-				lines[end] = (
-					lw + _text_run_width(run) * fs + run.glyphs * _TEXT_GLYPH_ROUNDING_PX,
-					max(lh, _TEXT_PLAIN_LINE_EM),
-				)
+				lw = lw + _text_run_width(run) * fs + run.glyphs * _TEXT_GLYPH_ROUNDING_PX
+				lh = max(lh, _TEXT_PLAIN_LINE_EM)
 			end
 		end
 	end
-	return (maximum(first, lines), sum(last, lines) * fs)
+	return (max(widest, lw), (height_em + lh) * fs)
 end
 
 # ── Baseline depth ──────────────────────────────────────────────────────────

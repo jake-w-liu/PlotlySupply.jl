@@ -989,13 +989,13 @@ using Test, PlotlySupply
 		end
 		byname = Dict(a[:name] => a for a in annotations(sf) if haskey(a, :name))
 		a, c = byname["plotlysupply:panel_label:1:1"], byname["plotlysupply:panel_label:2:1"]
-		# (a) sits at its corner, or beside it when the cell title is drawn
-		# at that corner (`_text_panel_label_xplacement`: "(a) Title" on one
-		# line); the drawn boxes are checked in regression_legend.jl, "r1 vm-03"
-		for (label, row) in ((a, 1), (c, 2))
-			want = PS._text_panel_label_xplacement(true, PS._text_panel_title_side(sf, row, 1))
-			@test (get(label, :xanchor, "left"), get(label, :xshift, 0)) == want
-		end
+		# The centred math title of the narrow (1, 1) reaches the corner of
+		# (a), which goes beside the corner, outside the axes ("(a) Title" on
+		# one line, `_lt_label_xplacement`); "Error map" leaves (c) at its
+		# corner. The drawn boxes (on the page, nothing overlapping) are
+		# checked in regression_legend.jl, "r1 vm-03".
+		@test a[:xanchor] == "right" && a[:xshift] <= -PS._TEXT_PANEL_GAP
+		@test get(c, :xanchor, "left") == "left" && get(c, :xshift, 0) == 0
 		@test PS._finalize_figure!(sf) === false
 	end
 
@@ -1085,15 +1085,22 @@ using Test, PlotlySupply
 				for (text, size) in (("Wavelength (nm)", 12.0), ("x", 10.0), ("\$\\lambda\$ (nm)", 11.0))
 					w = PS._s3_title_px(text, size)
 					@test w == PS._text_extent(text, size)[1]
-					# linear in the size: the labels keep the width per px
-					@test w ≈ size * PS._s3_title_px(text, 1.0) rtol = 1e-12
+					# affine in the size (the per-glyph rounding does not
+					# scale): the labels keep two numbers for every size
+					@test PS._s3_title_width(PS._s3_title_affine(text), size) ≈ w rtol = 1e-12
 				end
-				# the cached widths of a scene's axis labels, wrapped form included
-				q = plot_surface([0.0 1; 1 0]; xlabel = "Wavelength of the probe (nm)", ylabel = "y")
+				# the cached widths of a scene's axis labels, wrapped form
+				# included, at the sizes the framing search tries
+				long = "Wavelength of the probe (nm)"
+				q = plot_surface([0.0 1; 1 0]; xlabel = long, ylabel = "y")
 				labels = PS._s3_axis_labels(q, :scene)
-				@test labels[1].title_em ≈ PS._s3_title_px("Wavelength of the probe (nm)", 1.0)
-				@test labels[1].title_wrap_em ≈ PS._s3_title_px(PS._s3_wrap_title("Wavelength of the probe (nm)")[1], 1.0)
-				@test labels[2].title_em ≈ PS._s3_title_px("y", 1.0) && isnan(labels[2].title_wrap_em)
+				for size in (6.0, 9.5, 10.666666666666666, 14.0, 23.0)
+					@test PS._s3_title_width(labels[1].title_width, size) ≈ PS._s3_title_px(long, size) rtol = 1e-12
+					@test PS._s3_title_width(labels[1].title_wrap_width, size) ≈
+						PS._s3_title_px(PS._s3_wrap_title(long)[1], size) rtol = 1e-12
+					@test PS._s3_title_width(labels[2].title_width, size) ≈ PS._s3_title_px("y", size) rtol = 1e-12
+				end
+				@test all(isnan, labels[2].title_wrap_width)
 				# a plain title in a journal family: well under the 0.56 em a
 				# character of a tick digit (:default keeps the widest
 				# candidate family, D19)
