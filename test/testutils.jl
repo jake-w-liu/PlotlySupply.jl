@@ -9,9 +9,11 @@ using PlotlySupply
 
 const _PLOTLYSUPPLY_TESTUTILS = true
 
-# Test files that runtests.jl runs first, in this order (the static suite checks
-# first, then the pre-2.0 suites in the order they were added).
+# Test files that runtests.jl runs first, in this order (the core testsets that
+# runtests.jl once held inline, the static suite checks, then the pre-2.0
+# suites in the order they were added).
 const _TEST_FILES_RUN_FIRST = (
+    "core_suite.jl",
     "hygiene.jl",
     "nested_series.jl",
     "three_d_styling.jl",

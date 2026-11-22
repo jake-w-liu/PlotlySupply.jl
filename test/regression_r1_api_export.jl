@@ -45,17 +45,32 @@ function _r1_subprocess(code::AbstractString; limit_s::Real = 240, threads::Int 
 	return (finished = finished, output = text, seconds = seconds, exitcode = proc.exitcode)
 end
 
-@testset "r1 tests-ci-06: runtests.jl is many small top-level statements" begin
-	path = joinpath(@__DIR__, "runtests.jl")
+@testset "r1 tests-ci-06: the suite is many small top-level statements" begin
+	# runtests.jl was one 5550-line @testset compiled as one thunk (52+
+	# minutes of codegen before its first statement). Its testsets are now
+	# core_suite.jl, ~150 statements (the largest, about 970 lines, lowers in
+	# about 3 s), and runtests.jl `include`s every file inside the root set.
+	path = joinpath(@__DIR__, "core_suite.jl")
 	ex = Meta.parseall(read(path, String); filename = path)
 	lines = [a.line for a in ex.args if a isa LineNumberNode]
 	nlines = countlines(path)
 	spans = diff(vcat(lines, nlines + 1))
-	# The file was one 5550-line @testset compiled as one thunk (52+ minutes
-	# of codegen before its first statement). It is now ~150 statements; the
-	# largest (about 970 lines) lowers in about 3 s.
 	@test length(lines) > 50
 	@test maximum(spans) < 1500
+	runner = read(joinpath(@__DIR__, "runtests.jl"), String)
+	@test countlines(joinpath(@__DIR__, "runtests.jl")) < 100
+	# Test's internal testset stack (`push_testset`) is gone in Julia 1.13:
+	# the runner uses only `@testset` and `include`, whose statements are
+	# recorded in the enclosing set on every supported version.
+	@test !occursin("push_testset", runner) && !occursin("pop_testset", runner)
+	mktempdir() do dir
+		inner = joinpath(dir, "inner.jl")
+		write(inner, "using Test\n@testset \"inner a\" begin @test true end\n@testset \"inner b\" begin @test 1 + 1 == 2 end\n")
+		outer = @testset "outer" begin
+			include(inner)
+		end
+		@test [r.description for r in outer.results] == ["inner a", "inner b"]
+	end
 end
 
 @testset "r1 mr-01: an interrupted renderer request cannot answer a later one" begin
