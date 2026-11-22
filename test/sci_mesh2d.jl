@@ -937,7 +937,9 @@ end
 		# Edges, carriers and hover markers are overlays: no meta.
 		f = plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS, [0.2, 0.9]; edgecolor = "black", edgewidth = 1, hover = true)
 		@test count(==(tight), _m2v3_meta(f)) == length(_m2_fills(f))
-		@test all(t -> !haskey(t.fields, :meta), _m2_carriers(f))
+		# (A carrier's meta holds only its colour-bin record, O3: not a field mark.)
+		@test all(t -> PlotlySupply._fin_field_kind(t) === nothing &&
+			keys(t.fields[:meta]) == Set([Symbol("plotlysupply:cbins")]), _m2_carriers(f))
 		@test _m2v3_meta(plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI)) == Any[nothing]
 		@test _m2v3_meta(plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5])) == Any[nothing]
 		for (who, call) in (

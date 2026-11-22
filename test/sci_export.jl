@@ -647,13 +647,22 @@ end
 		# layout size exports at the active style's default size (D14).
 		unsized = _sci_plot()
 		@test !haskey(unsized.layout.fields, :width)
+		# A figure exports at the size of the style it carries (styles.md):
+		# one built under :ieee at the :ieee size wherever it is exported, one
+		# built under :default (no record) at the 1.x default also inside
+		# `with_style(:ieee)` (sm-11: it exported at 3.5 in there).
+		styled = PlotlySupply.with_style(_sci_plot, :ieee)
+		@test !haskey(styled.layout.fields, :width)
 		PlotlySupply.with_style(:ieee) do
 			expected = PlotlySupply._style_default_figure_size()
 			@test expected != (700.0, 500.0)
 			@test PlotlySupply._export_default_size() == expected
-			@test (_sci_options(unsized).width, _sci_options(unsized).height) == expected
-			@test _sci_options(unsized; width = 300).width == 300.0
+			@test (_sci_options(styled).width, _sci_options(styled).height) == expected
+			@test _sci_options(styled; width = 300).width == 300.0
+			@test (_sci_options(unsized).width, _sci_options(unsized).height) == (700.0, 500.0)
 		end
+		expected = PlotlySupply.with_style(PlotlySupply._style_default_figure_size, :ieee)
+		@test (_sci_options(styled).width, _sci_options(styled).height) == expected
 	end
 	mktempdir() do dir
 		withenv("PATH" => dir) do

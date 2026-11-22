@@ -2329,8 +2329,8 @@ c.querySelectorAll('g.contourlabels').forEach(function(g){var clips=[];for(var n
 return JSON.stringify(out);}finally{c.remove();}})
 """
 
-function _v8ax_geometry(fig)
-	svg = String(savefig(fig; format = "svg"))
+function _v8ax_geometry(fig; kwargs...)
+	svg = String(savefig(fig; format = "svg", kwargs...))
 	raw = PlotlySupply._with_export_window(PlotlySupply._EXPORT_STATE) do ec, app, win, divid
 		Base.invokelatest(() -> ec.run(win, _V8AX_GEOM_JS * "(" * PlotlySupply._json_js(svg) * ")"))
 	end
@@ -2686,5 +2686,32 @@ end
 		wrote = _AX._finalize_figure!(fig)
 		@test (st, name, wrote) == (st, name, false)
 		@test _AX.json(fig) == before
+	end
+end
+
+@testset "v8 axes-style: a wrapped y title in a cell keeps the tight pad (D24, rendered)" begin
+	# optical_infra: the wrap gives the title 10 px standoff, which the title
+	# push now counts (D24); the margin the wrap writes must still hold the
+	# title's whole box (the overhang past its push), 4 px from the edge.
+	dejavu = PlotStyle(; font_family = "DejaVu Sans, Arial, sans-serif", fontsize = 8 * 96 / 72,
+		spines = :open, grid = false, legend_frame = false)
+	for st in (:default, :publication, dejavu)
+		sf = with_style(st) do
+			g = subplots(1, 2; sync = false, horizontal_spacing = 0.14)
+			x = range(0, 1; length = 50)
+			plot_scatter!(g, x, x .^ 2; row = 1, col = 1)
+			plot_scatter!(g, x, sqrt.(x); row = 1, col = 2)
+			xlabel!(g, "x"; row = 1, col = 1)
+			ylabel!(g, "a fairly long y-axis label that matplotlib would split"; row = 1, col = 1)
+			figsize!(g, 153, 60; units = :mm)
+			g
+		end
+		name = st isa Symbol ? st : :dejavu
+		geo = first(_v8ax_geometry(sf; tight = true))
+		title = geo["axes"]["y"]["title"]
+		@test count("<br>", PlotlySupply._fin_title_text(sf.plot.layout.fields[:yaxis])) >= 1   # wrapped
+		# its box starts at the 4 px pad (rounded up margins: within 6 px of it)
+		@test (name, title[1] >= 4 - 0.5) == (name, true)
+		@test (name, title[1] <= 4 + 6) == (name, true)
 	end
 end

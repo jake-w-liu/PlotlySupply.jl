@@ -2612,8 +2612,12 @@ function _fin_wrap_margins!(ctx::_FinContext, accs, keys::Vector{Symbol}, Hp::Fl
 		# pushes the margin.
 		edge = vertical ? _fin_domain(layout, anchor)[1] : _cmn_y_axis_domain(layout, anchor)[1]
 		edge <= 1e-9 || continue
-		px = vertical ? _fin_y_labels_px(layout, accs, key, _cmn_y_axis_domain(layout, key), Hp) :
-			_fin_x_labels_px(layout, key)
+		# A y title's box reaches past its push by `_room_y_title_overhang`
+		# (D24: before the push counted the wrap's 10 px standoff, the 5 px it
+		# overstated stood in for that; optical_infra drew its title box 1 px
+		# beyond the figure edge without it).
+		px = vertical ? _fin_y_labels_px(layout, accs, key, _cmn_y_axis_domain(layout, key), Hp) +
+			_room_y_title_overhang(layout, key) : _fin_x_labels_px(layout, key)
 		letter = vertical ? :l : :b
 		need[letter] = max(get(need, letter, 0.0), px + _FIN_WRAP_PAD)
 	end
@@ -3380,8 +3384,19 @@ function _room_y_title_overhang(layout::Layout, ykey::Symbol)
 	axis = get(layout.fields, ykey, nothing)
 	(_cmn_mapping_get(axis, :visible) === false || isempty(_fin_title_text(axis))) && return 0.0
 	font = _fin_font_size(layout)
+	# D24: a title at its recorded title gap is moved to `gap` px beyond the
+	# drawn tick labels (the title-gap seam of the plotly.js asset); its push
+	# already covers that box (measured 4-5 px to spare under :ieee).
+	standoff = _cmn_mapping_get(_cmn_mapping_get(axis, :title), :standoff)
+	_fin_isfinite_real(standoff) &&
+		get(_axes_title_gap_record(layout), String(ykey), (NaN, NaN))[1] == standoff && return 0.0
 	size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
-	return max(0.0, 14.5 + 1.35 * size - _fin_title_push(axis, font))
+	# The measured box is that of one line at plotly_white's 15 px standoff.
+	# Further lines and another standoff move the box and the push alike
+	# (D24: `_fin_title_push` counts both), so the overhang is the same: a
+	# wrapped title at the wrap's 10 px standoff lost it and drew its box
+	# 1 px beyond the figure edge (optical_infra, tight export).
+	return max(0.0, 14.5 + 1.35 * size - (_FIN_TITLE_BASE + _FIN_TITLE_PER_PX * size))
 end
 
 # Px the axes of a Cartesian area draw on each side.
