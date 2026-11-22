@@ -2715,3 +2715,25 @@ end
 		@test (name, title[1] <= 4 + 6) == (name, true)
 	end
 end
+
+@testset "v8 axes-style: a cell's y title at its title gap stays clear of the cell beside it (D24, rendered)" begin
+	# The room engine gives a title at its title gap no overhang past its
+	# push (the push covers the box the gap seam draws, 2.6-5.7 px to spare
+	# across the sized presets): the right cell's y title must still clear the
+	# left cell's tick labels and frame.
+	for st in (:ieee, :nature, :aps, :elsevier, :springer, :aip)
+		sf = with_style(st) do
+			g = subplots(1, 2; sync = false)
+			plot_scatter!(g, 1:3, 1:3; row = 1, col = 1, xlabel = "x", ylabel = "y")
+			plot_scatter!(g, 1:3, 1:3; row = 1, col = 2, xlabel = "x", ylabel = "signal (a.u.)")
+			g
+		end
+		geo, svg = _v8ax_geometry(sf)
+		title = geo["axes"]["y2"]["title"]
+		left_ink = geo["axes"]["x"]["labels"][3]
+		for f in geo["frames"]["x"]
+			f[1] < title[1] && (left_ink = max(left_ink, f[3]))
+		end
+		@test (st, title[1] - left_ink >= 4) == (st, true)
+	end
+end
