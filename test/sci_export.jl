@@ -651,8 +651,11 @@ end
 		# one built under :ieee at the :ieee size wherever it is exported, one
 		# built under :default (no record) at the 1.x default also inside
 		# `with_style(:ieee)` (sm-11: it exported at 3.5 in there).
+		# (a sized style writes its size into the layout: drop it, the figure
+		# still carries :ieee)
 		styled = PlotlySupply.with_style(_sci_plot, :ieee)
-		@test !haskey(styled.layout.fields, :width)
+		delete!(styled.layout.fields, :width)
+		delete!(styled.layout.fields, :height)
 		PlotlySupply.with_style(:ieee) do
 			expected = PlotlySupply._style_default_figure_size()
 			@test expected != (700.0, 500.0)
