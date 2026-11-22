@@ -2794,7 +2794,7 @@ set_legend!(sf; position = :outside_bottom, ncols = 3)   # one legend, one "meas
 """
 function set_legend!(
 	fig::Union{Plot, SyncPlot};
-	position::Union{Nothing, Symbol, AbstractString, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
+	position = nothing,  # `_legend_options` checks it (a wrong type is an ArgumentError)
 	inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -3111,7 +3111,7 @@ end
 
 function set_legend!(
 	sf::SubplotFigure;
-	position::Union{Nothing, Symbol, AbstractString, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
+	position = nothing,  # `_legend_options` checks it (a wrong type is an ArgumentError)
 	inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -3250,7 +3250,7 @@ subplot_legends!(sf; position = :bottomright)
 """
 function subplot_legends!(
 	fig::Union{Plot, SyncPlot};
-	position::Union{Nothing, Symbol, AbstractString, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
+	position = nothing,  # `_legend_options` checks it (a wrong type is an ArgumentError)
 	inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -3321,7 +3321,7 @@ end
 
 function subplot_legends!(
 	sf::SubplotFigure;
-	position::Union{Nothing, Symbol, AbstractString, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
+	position = nothing,  # `_legend_options` checks it (a wrong type is an ArgumentError)
 	inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,

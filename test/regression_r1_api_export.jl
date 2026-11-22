@@ -569,6 +569,10 @@ end
 	@test _r1_argerr(() -> set_default_mathtext!(; bogus = 1), "set_default_mathtext!: unsupported keyword")
 	@test _r1_argerr(() -> set_default_template!(:plotly_white; bogus = 1), "set_default_template!: unsupported keyword")
 	@test _r1_argerr(() -> register_style!(:r1_never_registered, PlotStyle(); bogus = 1), "register_style!: unsupported keyword")
+	# A `position` of the wrong type (the set_legend! docstring: ArgumentError).
+	@test _r1_argerr(() -> set_legend!(fig; position = 3), "set_legend!: `position` must be a Symbol, a string or an (x, y) tuple")
+	@test _r1_argerr(() -> set_legend!(sf; position = 3), "set_legend!: `position` must be a Symbol")
+	@test _r1_argerr(() -> subplot_legends!(sf; position = 3), "subplot_legends!: `position` must be a Symbol")
 	@test json(fig) == before
 	# The messages never name an internal type.
 	err = _r1_err(() -> title!(fig, "T"; fontsiz = 9))
