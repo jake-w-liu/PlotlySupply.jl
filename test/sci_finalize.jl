@@ -3478,3 +3478,22 @@ const _SFN_BLOCK_JS = raw"""
 		@test abs(info["top"] - (info["H"] - info["bottom"])) <= 6
 	end
 end
+
+
+@testset "cost: an append into a 200-trace cell with per-subplot legends (O5)" begin
+	# One append into a cell holding 200 traces costs about as many bytes
+	# with per-subplot legends as with one figure legend (measured 1.11x at
+	# 200 traces and 1.05-1.07x at 800, on d017760 too: what per-subplot
+	# legends add does not grow with the cell's trace count; the append
+	# itself grows about 1.1 KB per trace in both modes).
+	x = collect(range(0.0, 10.0; length = 100)); y = sin.(x)
+	function append_bytes(per, n)
+		f = subplots(1, 2; sync = false, per_subplot_legends = per)
+		for k in 1:n
+			plot_scatter!(f, x, y .+ k; row = 1, col = 1)
+		end
+		plot_scatter!(f, x, y; row = 1, col = 1)
+		return minimum(k -> @allocated(plot_scatter!(f, x, y .+ k; row = 1, col = 1)), 1:5)
+	end
+	@test append_bytes(true, 200) <= 1.5 * append_bytes(false, 200)
+end
