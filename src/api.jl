@@ -15003,30 +15003,14 @@ function _field2d_color_trace_fields!(fields::AbstractDict, color)
 end
 
 # Write the colour fields of a shared coloraxis into `layout.<coloraxis>`.
-# O3 (fields-08): when carrier builds drew the axis's limits from their own
-# data, a member with automatic limits widens them to its values and a
-# member's `crange` replaces them; the builds are recoloured for the new
-# limits (`_colour_follow_axis!`) instead of the member being clamped to
-# them, or the builds not matching the bar.
 function _field2d_apply_coloraxis!(fig, color)
 	color.coloraxis === nothing && return nothing
-	auto = _colour_auto_axis_carriers(_cmn_plot(fig), color.coloraxis)
 	_cmn_merge_layout_key!(
 		fig,
 		Symbol(color.coloraxis),
 		color.fields;
 		nested = (:colorbar,),
 	)
-	auto === nothing && return nothing
-	fields = color.fields
-	if haskey(fields, :cmin) && haskey(fields, :cmax)
-		_colour_follow_axis!(fig, color.coloraxis, auto, (fields[:cmin], fields[:cmax]); fixed = true)
-	elseif !(haskey(fields, :cmin) || haskey(fields, :cmax) || haskey(fields, :cmid))
-		extent = _finite_extrema(color.values)
-		extent === nothing ||
-			_colour_follow_axis!(fig, color.coloraxis, auto,
-				(min(auto.limits[1], extent[1]), max(auto.limits[2], extent[2])))
-	end
 	return nothing
 end
 
@@ -17465,8 +17449,8 @@ function _quiver_traces(
 	carrier === nothing || push!(traces, carrier)
 	# O3: the bins are recorded so a shared colour axis can recolour them.
 	cm.band_edges === nothing && !isempty(group_bins) &&
-		_colour_mark_bins!(traces[1:length(group_bins)], group_bins, cm.tvals, cm.cmin, cm.cmax,
-			length(colours), colours, carrier; auto = cm.auto)
+		_colour_mark_bins!(traces, 1, group_bins, cm.tvals, cm.cmin, cm.cmax,
+			length(colours), colours, carrier)
 	return traces, cm
 end
 

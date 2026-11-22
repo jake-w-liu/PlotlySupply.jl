@@ -486,8 +486,10 @@ end
 		cb = Base.CoreLogging.with_logger(Base.CoreLogging.NullLogger()) do
 			plot_quiver([0.0, 1.0, 5.0, NaN], [0.0, 2.0, -1.0, 3.0], [1.0, 0.0, 1.0, 1.0], [0.0, 0.0, NaN, 1.0]; colorby = :magnitude)
 		end
-		glyphs = filter(t -> haskey(t.fields, :meta), cb.data)
+		# (The carrier's own meta holds its colour-bin record, O3.)
+		glyphs = filter(t -> !PlotlySupply._cbar_is_carrier(t), cb.data)
 		@test !isempty(glyphs) && length(glyphs) == length(cb.data) - 1
+		@test PlotlySupply._cmn_mapping_get(get(cb.data[end].fields, :meta, nothing), :plotlysupply_anchor_extent) === nothing
 		@test all(t -> t.fields[:meta] == Dict(:plotlysupply_anchor_extent => [0.0, 5.0, -1.0, 2.0]), glyphs)
 		@test PlotlySupply._fin_field_kind(glyphs[1]) === nothing
 	end

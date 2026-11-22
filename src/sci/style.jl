@@ -1075,7 +1075,9 @@ const _JOURNALS = (
 	# Elsevier artwork sizing (www.elsevier.com/about/policies-and-standards/
 	# author/artwork-and-media-instructions/artwork-sizing): single column
 	# 90 mm, 1.5 columns 140 mm, double column 190 mm; text at least 7 pt and
-	# sub/superscripts at least 6 pt; fonts Arial, Courier, Symbol, Times. 9 pt
+	# sub/superscripts at least 6 pt. Fonts (Elsevier artwork overview,
+	# .../artwork-and-media-instructions/artwork-overview): Arial (or
+	# Helvetica), Courier, Symbol, Times (or Times New Roman). 9 pt
 	# is chosen so that plotly's superscripts (70 % of the size: <sup> is
 	# "font-size:70%" in plotly.js) stay >= 6 pt (6.3 pt).
 	_JournalSpec(:elsevier, "Elsevier", [(1.0, 90.0, :mm), (1.5, 140.0, :mm), (2.0, 190.0, :mm)], (0.0, :mm),
@@ -1089,8 +1091,9 @@ const _JOURNALS = (
 	_JournalSpec(:springer, "Springer", [(1.0, 84.0, :mm), (1.5, 129.0, :mm), (2.0, 174.0, :mm)], (234.0, :mm),
 		"Helvetica, Arial, Liberation Sans, sans-serif", 8.0, "outside", false, :box,
 		"Springer instructions for authors: 84 / 129 / 174 mm, <= 234 mm high, Helvetica/Arial 8-12 pt"),
-	# AIP Publishing author instructions (publishing.aip.org/resources/
-	# researchers/author-instructions/): one column 3.37 in (8.5 cm), two
+	# AIP Publishing author instructions (pubs.aip.org/pages/author-instructions,
+	# formerly publishing.aip.org/resources/researchers/author-instructions/;
+	# O8, read 2026-11-22): one column 3.37 in (8.5 cm), two
 	# columns 6.69 in (17 cm), at most 8.25 in deep, lettering at least 8 pt,
 	# lines at least 0.5 pt, figures must read in black and white. Font:
 	# choice (Times).

@@ -544,7 +544,6 @@ struct _Mesh2dColourMap
 	coloraxis::Union{Nothing, String}
 	showscale::Bool
 	colorbar::Any                                # attr(...) or nothing
-	auto::Bool                                   # limits are the data's extent (O3: a shared axis may widen them)
 end
 
 _mesh2d_layout_source(fig, target::_Mesh2dTarget) =
@@ -650,20 +649,17 @@ function _mesh2d_colour(
 		))
 	stops0 = _mesh2d_stops(colorscale, _mesh2d_layout_source(fig, target), who)
 	effective_crange = crange
-	# O3 (fields-08): limits that carrier builds on the axis drew from their
-	# own data are joined with this build's (`_colour_follow_axis!`
-	# recolours those builds when the limits are written); other limits on
-	# the axis (a `crange`) are this build's limits too.
+	# O3 (fields-08): an axis without limits whose members plotly colours
+	# (a heatmap with automatic limits) is ranged by plotly over every member:
+	# this build's automatic limits hold their values too, so the limits it
+	# writes do not clamp them.
 	joined = nothing
 	if axis_id !== nothing && _is_auto_range(crange) && levels === nothing
 		limits = _mesh2d_coloraxis_limits(fig, axis_id)
-		if limits === nothing
-			# Members with automatic limits (a heatmap): their values count.
-			cmid === nothing && (joined = _colour_axis_member_extent(_plot_obj(fig), axis_id))
-		elseif cmid === nothing && _colour_auto_axis_carriers(_plot_obj(fig), axis_id) !== nothing
-			joined = limits
-		else
+		if limits !== nothing
 			effective_crange = norm_kind === :log ? [exp10(limits[1]), exp10(limits[2])] : [limits[1], limits[2]]
+		elseif cmid === nothing
+			joined = _colour_axis_member_extent(_plot_obj(fig), axis_id)
 		end
 	end
 	norm = _apply_color_norm(
@@ -683,7 +679,6 @@ function _mesh2d_colour(
 		_mesh2d_tvalues(norm.values, who)
 	end
 	cmin, cmax = norm.cmin, norm.cmax
-	auto = cmin === nothing && norm.cmid === nothing && levels === nothing
 	if cmin === nothing
 		extent = _finite_extrema(tvals)
 		if extent !== nothing
@@ -736,7 +731,6 @@ function _mesh2d_colour(
 		axis_id,
 		showscale === nothing ? true : showscale,
 		colorbar,
-		auto,
 	)
 end
 
@@ -794,9 +788,6 @@ end
 function _mesh2d_write_coloraxis!(fig, target::_Mesh2dTarget, cm::_Mesh2dColourMap, showscale_given::Bool)
 	fields = _mesh2d_coloraxis_fields(cm, showscale_given)
 	fields === nothing && return nothing
-	# O3: carrier builds whose limits these widen are recoloured first.
-	cm.auto && _colour_follow_axis!(fig, cm.coloraxis, _colour_auto_axis_carriers(_plot_obj(fig), cm.coloraxis),
-		(cm.cmin, cm.cmax); stops = cm.stops)
 	_cmn_merge_layout_key!(fig, Symbol(cm.coloraxis), fields; nested = (:colorbar,))
 	target.coloraxis_write = (cm.coloraxis, fields)
 	return nothing
@@ -1268,12 +1259,12 @@ function _mesh2d_draw_cells!(
 		bins, colours = _mesh2d_bins(cm, bins_count)
 		xs, ys, counts = _mesh2d_group_coords(rings, bins, length(colours))
 		group_bins = Int[]
+		first_group = length(traces) + 1
 		for b in eachindex(colours)
 			counts[b] == 0 && continue
 			push!(traces, _mesh2d_fill_trace(xs[b], ys[b], colours[b], edge, width, alpha, pattern, "", tight))
 			push!(group_bins, b)
 		end
-		groups = traces[1:length(group_bins)]
 		# Cells without a colour (NaN) keep an explicit outline, as in
 		# matplotlib where only their face is masked.
 		if !isempty(edge) && width > 0
@@ -1295,7 +1286,7 @@ function _mesh2d_draw_cells!(
 		carrier === nothing || push!(traces, carrier)
 		# O3: the bins are recorded so a shared colour axis can recolour them.
 		cm.band_edges === nothing &&
-			_colour_mark_bins!(groups, group_bins, cm.tvals, cm.cmin, cm.cmax, length(colours), colours, carrier; auto = cm.auto)
+			_colour_mark_bins!(traces, first_group, group_bins, cm.tvals, cm.cmin, cm.cmax, length(colours), colours, carrier)
 		if hover
 			drawn = findall(!=(0), bins)
 			if !isempty(drawn)

@@ -1050,8 +1050,8 @@ function _streamlines_traces(
 	carrier === nothing || push!(traces, carrier)
 	# O3: the bins are recorded so a shared colour axis can recolour them.
 	cm.band_edges === nothing && !isempty(group_bins) &&
-		_colour_mark_bins!(traces[1:length(group_bins)], group_bins, cm.tvals, cm.cmin, cm.cmax,
-			length(colours), colours, carrier; auto = cm.auto)
+		_colour_mark_bins!(traces, 1, group_bins, cm.tvals, cm.cmin, cm.cmax,
+			length(colours), colours, carrier)
 	return traces, cm
 end
 
