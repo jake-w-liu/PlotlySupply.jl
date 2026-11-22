@@ -498,6 +498,32 @@ end
 	end
 end
 
+@testset "r1 sm-14: add_recession_bands! style keywords style the bands; others are ArgumentErrors" begin
+	dates = [PlotlySupply.Dates.Date(2006, 1, 1), PlotlySupply.Dates.Date(2010, 6, 1)]
+	fig = plot_scatter(dates, [1.0, 2.0])
+	before = json(fig)
+	@test _r1_argerr(() -> add_recession_bands!(fig; colr = "red"), "add_recession_bands!: `colr` is not a shape attribute")
+	@test _r1_argerr(() -> add_recession_bands!(fig; x0 = 1), "add_recession_bands!: `x0` is set by the recession table")
+	@test json(fig) == before
+	# Before: every override (documented: "attributes override the band
+	# style") was a MethodError from PlotlyBase's attr splice.
+	shapes = add_recession_bands!(fig; fillcolor = "red", opacity = 0.2, line_color = "blue")
+	@test length(shapes) == 1     # the 2007-2009 recession
+	band = shapes[1]
+	@test band[:fillcolor] == "red" && band[:opacity] == 0.2 && band[:layer] == "below"
+	@test band[:line][:color] == "blue" && band[:line][:width] == 0
+	# PlotlyBase's recession table: 2008-01 to 2009-07 for this span.
+	@test band[:xref] == "x" && band[:x0] == PlotlySupply.Dates.Date(2008, 1, 1) && band[:x1] == PlotlySupply.Dates.Date(2009, 7, 1)
+	sf = subplots(1, 2; sync = false)
+	plot_scatter!(sf, dates, [1.0, 2.0]; row = 1, col = 2)
+	before = json(sf.plot)
+	@test _r1_argerr(() -> add_recession_bands!(sf; row = 1, col = 2, bogus = 1), "add_recession_bands!: `bogus` is not a shape attribute")
+	@test json(sf.plot) == before
+	@test add_recession_bands!(sf; row = 1, col = 2, fillcolor = "green") === sf
+	@test sf.plot.layout[:shapes][end][:fillcolor] == "green"
+	@test sf.plot.layout[:shapes][end][:xref] == "x2"
+end
+
 @testset "r1 errors-inputs-08: a value that is no figure, scatter3d series, kde range" begin
 	x = [1.0, 2.0, 3.0]
 	notfig = "the first argument must be the figure (a Plot, SyncPlot or SubplotFigure); got a value of type"

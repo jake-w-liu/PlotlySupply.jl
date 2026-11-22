@@ -2903,17 +2903,64 @@ for f in (:add_hrect!, :add_hline!, :add_vrect!, :add_vline!, :add_shape!, :add_
 	end
 end
 
+# The attributes of a layout shape in the bundled plotly.js 2.35.2
+# (`Plotly.PlotSchema.get().layout.layoutAttributes.shapes.items.shape`,
+# without its `editType` bookkeeping entry).
+const _PLOTLY_SHAPE_ATTRIBUTES = (
+	:editable, :fillcolor, :fillrule, :label, :layer, :legend, :legendgroup,
+	:legendgrouptitle, :legendrank, :legendwidth, :line, :name, :opacity, :path,
+	:showlegend, :templateitemname, :type, :visible, :x0, :x0shift, :x1, :x1shift,
+	:xanchor, :xref, :xsizemode, :y0, :y0shift, :y1, :y1shift, :yanchor, :yref,
+	:ysizemode,
+)
+# What the recession table and the target axes decide for every band.
+const _RECESSION_BAND_GEOMETRY = (:type, :path, :x0, :x1, :y0, :y1, :xref, :yref)
+
+# A style override of `add_recession_bands!` names a shape attribute, alone or
+# as the head of a nested name (`line_width`, `label_text`), and leaves the
+# band geometry alone; anything else is an ArgumentError before any change.
+function _check_recession_band_overrides(overrides, who::AbstractString)
+	for key in keys(overrides)
+		head = Symbol(first(split(String(key), '_')))
+		head in _PLOTLY_SHAPE_ATTRIBUTES || throw(ArgumentError(
+			"$(who): `$(key)` is not a shape attribute; the band style takes " *
+			"plotly shape attributes such as `fillcolor`, `opacity`, `layer` or " *
+			"`line_color`.",
+		))
+		head in _RECESSION_BAND_GEOMETRY && throw(ArgumentError(
+			"$(who): `$(key)` is set by the recession table and the target axes; " *
+			"the keywords style the bands.",
+		))
+	end
+	return nothing
+end
+
+# PlotlyBase's recession bands of `p` with the caller's style overrides.
+# PlotlyBase splices the overrides into `attr` as positional pairs, a
+# MethodError for every override, so the bands are built with its defaults
+# (`fillcolor = "#E6E6E6"`, `opacity = 0.4`, `line_width = 0`,
+# `layer = "below"`) and each override is written onto every band here.
+# `nothing` when no trace has date x values.
+function _recession_band_shapes_styled(p::Plot, overrides, who::AbstractString)
+	_check_recession_band_overrides(overrides, who)
+	bands = PlotlyBase._recession_band_shapes(p)
+	bands === nothing && return nothing
+	items = bands isa AbstractVector ? bands : [bands]
+	for item in items, (key, value) in pairs(overrides)
+		item[key] = value
+	end
+	return bands
+end
+
 function PlotlyBase.add_recession_bands!(sp::SyncPlot; kwargs...)
 	_verb_reject_cell_keywords("add_recession_bands!", kwargs)
+	_check_recession_band_overrides(kwargs, "add_recession_bands!")
 	new_shapes = Ref{Any}(nothing)
 	_mutate_and_refresh_syncplot!(
 		sp;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
 	) do current
-		bands = PlotlyBase._recession_band_shapes(
-			current;
-			kwargs...,
-		)
+		bands = _recession_band_shapes_styled(current, kwargs, "add_recession_bands!")
 		bands === nothing && return nothing
 		old_shapes = current.layout[:shapes]
 		new_shapes[] =
@@ -2931,12 +2978,13 @@ function PlotlyBase.add_recession_bands!(
 	kwargs...,
 )
 	_verb_reject_cell_keywords("add_recession_bands!", kwargs)
+	_check_recession_band_overrides(kwargs, "add_recession_bands!")
 	new_shapes = Ref{Any}(nothing)
 	_transactional_full_plot_mutation!(
 		p;
 		mutation_scope = _LAYOUT_ONLY_MUTATION_SCOPE,
 	) do current
-		bands = PlotlyBase._recession_band_shapes(current; kwargs...)
+		bands = _recession_band_shapes_styled(current, kwargs, "add_recession_bands!")
 		bands === nothing && return nothing
 		old_shapes = current.layout[:shapes]
 		new_shapes[] =
@@ -3442,7 +3490,11 @@ add_layout_image!
 	add_recession_bands!(sf::SubplotFigure; row = nothing, col = nothing, secondary_y = false, inset = nothing, kwargs...)
 
 Shade US recession bands (vertical spans) on a time-series `Plot` or
-[`SyncPlot`](@ref); `kwargs` are forwarded to the generated band shapes.
+[`SyncPlot`](@ref); `kwargs` style the bands: plotly shape attributes such as
+`fillcolor`, `opacity`, `layer` or `line_color` (defaults `fillcolor = "#E6E6E6"`,
+`opacity = 0.4`, `line_width = 0`, `layer = "below"`). A name that is no shape
+attribute, or one of the band geometry (`x0`, `x1`, `y0`, `y1`, `xref`, `yref`,
+`type`, `path`), is an `ArgumentError`.
 `show`, `row`, `col`, `secondary_y` and `inset` are `ArgumentError`s on a
 `Plot`/`SyncPlot` (it has no cells to select).
 

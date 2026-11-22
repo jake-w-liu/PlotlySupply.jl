@@ -5034,7 +5034,7 @@ function _verb_recession_shapes(p::Plot, xref::AbstractString, yref::AbstractStr
 		push!(probe.data, GenericTrace(Dict{Symbol, Any}(:type => "scatter", :x => x)))
 	end
 	isempty(probe.data) && return nothing
-	bands = PlotlyBase._recession_band_shapes(probe; kwargs...)
+	bands = _recession_band_shapes_styled(probe, kwargs, "add_recession_bands!")
 	bands === nothing && return nothing
 	items = bands isa AbstractVector ? collect(Any, bands) : Any[bands]
 	isempty(items) && return nothing
