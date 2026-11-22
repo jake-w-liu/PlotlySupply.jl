@@ -1047,14 +1047,15 @@ const _JOURNALS = (
 	# 7.16 inches, 182 millimeters, or 43 picas". IEEE Author Center, "File
 	# Formatting" (.../create-graphics-for-your-article/file-formatting/):
 	# "Type should appear approximately 9-10 point when viewed at full size."
-	# (O8, read 2026-11-21: 9 pt, the smallest size that guide asks for; the
-	# 8 pt of 2.0 betas followed the manuscript template, "Use 8 point
-	# Times New Roman for Figure labels", not the graphics guide.) Times New
-	# Roman is on the guide's recommended font list. Inside, mirrored ticks: choice (the common
-	# IEEE/physics look).
+	# The IEEE journal and conference templates: "Use 8 point Times New Roman
+	# for Figure labels". (O8, read 2026-11-21: the two IEEE sources differ;
+	# the preset keeps the templates' figure-label size, the more specific
+	# instruction, until the lead decides otherwise.) Times New Roman is on
+	# the graphics guide's recommended font list. Inside, mirrored ticks:
+	# choice (the common IEEE/physics look).
 	_JournalSpec(:ieee, "IEEE", [(1.0, 3.5, :in), (2.0, 7.16, :in)], (0.0, :mm),
-		_SERIF_FONTS, 9.0, "inside", true, :box,
-		"IEEE Author Center, Resolution and Size: 3.5 in / 7.16 in; File Formatting: type approximately 9-10 pt"),
+		_SERIF_FONTS, 8.0, "inside", true, :box,
+		"IEEE Author Center, Resolution and Size: 3.5 in / 7.16 in; IEEE template: 8 pt Times New Roman labels"),
 	# APS Physical Review, Information for Authors
 	# (journals.aps.org/prb/info/infoB.html): single column 8.6 cm (3 3/8 in),
 	# lettering at least 2 mm high, lines at least 0.18 mm (0.5 pt); 17.2 cm is
@@ -3795,7 +3796,7 @@ or unit throws an `ArgumentError`.
 
 | journal | columns → width | max. height | text (preset) | source |
 |:--|:--|:--|:--|:--|
-| `:ieee` | 1 → 3.5 in, 2 → 7.16 in | — | Times New Roman 9 pt (approximately 9–10 pt) | IEEE Author Center, "Resolution and Size" and "File Formatting" |
+| `:ieee` | 1 → 3.5 in, 2 → 7.16 in | — | Times New Roman 8 pt | IEEE Author Center, "Resolution and Size"; IEEE template (8 pt Times New Roman labels) |
 | `:aps` | 1 → 8.6 cm, 2 → 17.2 cm | — | Times 9 pt (lettering ≥ 2 mm) | APS Physical Review information for authors; APS Word template (17.2 cm) |
 | `:nature` | 1 → 89 mm, 2 → 183 mm | 170 mm | Arial 7 pt (5–7 pt allowed) | Nature research figure guide |
 | `:elsevier` | 1 → 90 mm, 1.5 → 140 mm, 2 → 190 mm | — | Arial 9 pt (≥ 7 pt, sub/superscripts ≥ 6 pt) | Elsevier artwork sizing |

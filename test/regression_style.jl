@@ -1435,7 +1435,12 @@ end
 		end
 		g = plot_scatter(x, y)
 		xlabel!(g, "x")
-		@test _rs_get(f, :xaxis)[:title] == _rs_get(g, :xaxis)[:title]
+		# D24: the mutator made `f` adopt :ieee, whose title gap gives its
+		# title a standoff (the one it records); the title is otherwise `g`'s.
+		tf, tg = copy(_rs_sd(_rs_get(f, :xaxis)[:title])), _rs_sd(_rs_get(g, :xaxis)[:title])
+		@test _RS._figure_recorded_style(f) !== nothing && _RS._figure_recorded_style(g) === nothing
+		@test pop!(tf, :standoff) == PlotlySupply._axes_title_gap_record(_RS._cmn_plot(f).layout)["xaxis"][1]
+		@test tf == tg
 		@test _RS._figure_default_size() == (700.0, 500.0)
 		@test with_style(() -> _RS._figure_default_size(), :ieee) == (700.0, 500.0)
 		ieee_fig = with_style(() -> plot_scatter(x, y), :ieee)
@@ -1472,10 +1477,10 @@ end
 
 @testset "v8 axes-style: O8 presets, D21 map colour bars (seams-06)" begin
 	PSX = PlotlySupply
-	# IEEE Author Center, File Formatting: "Type should appear approximately
-	# 9-10 point when viewed at full size."
-	@test PSX._STYLE_REGISTRY[:ieee].tick_fontsize ≈ 9 * 4 / 3
-	@test PSX._journal_spec(:ieee, "test").fontsize_pt == 9.0
+	# IEEE templates: "Use 8 point Times New Roman for Figure labels" (the
+	# Author Center graphics guide says 9-10 pt; kept at 8 pt, see style.jl).
+	@test PSX._STYLE_REGISTRY[:ieee].tick_fontsize ≈ 8 * 4 / 3
+	@test PSX._journal_spec(:ieee, "test").fontsize_pt == 8.0
 	widths = Dict(s.name => [(c[1], c[2], c[3]) for c in s.columns] for s in PSX._JOURNALS)
 	@test widths[:ieee] == [(1.0, 3.5, :in), (2.0, 7.16, :in)]
 	@test widths[:aps] == [(1.0, 8.6, :cm), (2.0, 17.2, :cm)]

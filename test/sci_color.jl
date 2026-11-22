@@ -745,4 +745,6 @@ end
 		@test err isa ArgumentError && startswith(err.msg, "colormap_colors: `n` must be at most")
 	end
 	@test length(colormap_colors("viridis", 3)) == 3
+	# The bound's constant sits above the docstring, which stays on the function.
+	@test occursin("colormap_colors(name_or_scale, n::Integer", string(@doc(colormap_colors)))
 end

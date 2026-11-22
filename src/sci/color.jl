@@ -774,6 +774,9 @@ function _checked_sample_range(range, who::AbstractString)
 	return lo, hi
 end
 
+# More samples than 24-bit sRGB has distinct colours cannot be told apart.
+const _COLORMAP_MAX_SAMPLES = 2^24
+
 """
 	colormap_colors(name_or_scale, n::Integer; reverse::Bool = false, range = (0.0, 1.0)) -> Vector{String}
 
@@ -799,9 +802,6 @@ colors = colormap_colors("viridis", 4; range = (0.1, 0.9))
 plot_scatter(1:10, [rand(10) for _ in 1:4]; color = colors)
 ```
 """
-# More samples than 24-bit sRGB has distinct colours cannot be told apart.
-const _COLORMAP_MAX_SAMPLES = 2^24
-
 function colormap_colors(
 	name_or_scale,
 	n::Integer;
