@@ -618,7 +618,8 @@ end
 		@test _rsc_unchanged(p, snapshot)
 		@test mutate!(p, args...; row = nothing, col = nothing) === nothing
 	end
-	@test_throws MethodError plot_scatter(1:3, [1, 2, 3]; colour = "red")
+	# plot_scatter names an unknown keyword in an ArgumentError (the user-error contract).
+	@test_throws ArgumentError plot_scatter(1:3, [1, 2, 3]; colour = "red")
 end
 
 @testset "scatter family: SyncPlot and SubplotFigure mutators" begin
@@ -1165,7 +1166,10 @@ end
 			err = _rsc_error(() -> mut(fig, args...; extra..., bogus_kw = 1))
 			@test err isa ArgumentError && occursin("unsupported keyword argument(s) `bogus_kw`", err.msg)
 			@test _rsc_unchanged(fig, snapshot)
-			@test_throws MethodError ctor(args...; extra..., bogus_kw = 1)
+			# A constructor that checks its keywords names the unknown one in an
+			# ArgumentError (plot_scatter); the others still raise a MethodError.
+			err = _rsc_error(() -> ctor(args...; extra..., bogus_kw = 1))
+			@test err isa MethodError || (err isa ArgumentError && occursin("`bogus_kw`", err.msg))
 			@test mut(fig, args...; extra..., row = nothing, col = nothing) === nothing
 			# (g) a log x axis with a data-unit range: on a Plot, on cell (2, 2)
 			# of a SubplotFigure and on an inset.
