@@ -15003,14 +15003,30 @@ function _field2d_color_trace_fields!(fields::AbstractDict, color)
 end
 
 # Write the colour fields of a shared coloraxis into `layout.<coloraxis>`.
+# O3 (fields-08): when carrier builds drew the axis's limits from their own
+# data, a member with automatic limits widens them to its values and a
+# member's `crange` replaces them; the builds are recoloured for the new
+# limits (`_colour_follow_axis!`) instead of the member being clamped to
+# them, or the builds not matching the bar.
 function _field2d_apply_coloraxis!(fig, color)
 	color.coloraxis === nothing && return nothing
+	auto = _colour_auto_axis_carriers(_cmn_plot(fig), color.coloraxis)
 	_cmn_merge_layout_key!(
 		fig,
 		Symbol(color.coloraxis),
 		color.fields;
 		nested = (:colorbar,),
 	)
+	auto === nothing && return nothing
+	fields = color.fields
+	if haskey(fields, :cmin) && haskey(fields, :cmax)
+		_colour_follow_axis!(fig, color.coloraxis, auto, (fields[:cmin], fields[:cmax]); fixed = true)
+	elseif !(haskey(fields, :cmin) || haskey(fields, :cmax) || haskey(fields, :cmid))
+		extent = _finite_extrema(color.values)
+		extent === nothing ||
+			_colour_follow_axis!(fig, color.coloraxis, auto,
+				(min(auto.limits[1], extent[1]), max(auto.limits[2], extent[2])))
+	end
 	return nothing
 end
 
@@ -17408,9 +17424,11 @@ function _quiver_traces(
 		filled[b] += points
 	end
 	traces = GenericTrace[]
+	group_bins = Int[]
 	for b in eachindex(colours)
 		counts[b] == 0 && continue
 		first_trace = isempty(traces)
+		push!(group_bins, b)
 		push!(
 			traces,
 			_quiver_glyph_trace(
@@ -17445,6 +17463,10 @@ function _quiver_traces(
 	_field2d_mark_anchors!(traces, anchors...)
 	carrier = _mesh2d_carrier(cm, who)
 	carrier === nothing || push!(traces, carrier)
+	# O3: the bins are recorded so a shared colour axis can recolour them.
+	cm.band_edges === nothing && !isempty(group_bins) &&
+		_colour_mark_bins!(traces[1:length(group_bins)], group_bins, cm.tvals, cm.cmin, cm.cmax,
+			length(colours), colours, carrier; auto = cm.auto)
 	return traces, cm
 end
 
@@ -19280,16 +19302,20 @@ function _maybe_show(fig, show::Bool, width::Real, height::Real, title::Abstract
 	return show ? to_syncplot(fig; width = width, height = height, title = title) : fig
 end
 
-# tm-log-unsettled: under the paper styles a log axis gets decade labels
-# (`_axes_log_tick_updates!`), and bar value labels drawn outside their bars
-# get room on their value axis (`_axes_bar_label_updates!`); `_finalize_figure!`
-# writes both after every mutation, but constructors do not finalize: the
-# first finalize (a display, an export) then changed the figure. A
-# constructor writes them itself (`_axes_apply_fits!`), at the figure's size
-# and under the style it carries, as the finalizer does. Figures without a
-# log axis or bar text cost one scan of the layout keys and the trace types.
+# Invariant 1 (tm-log-unsettled, sm-07): a constructor hands out a settled
+# figure, so it ends with the finalizer every mutation ends with: decade
+# labels of log axes, room for outside bar labels, the wrap and standoff of
+# long axis titles, margins and rooms, at the figure's size and under the
+# style it carries. The run reads only the layout, the trace extents and the
+# colour ranges (about 0.5 ms and 40 KB for 1e6 points or a 2000 x 2000
+# field). Inside a SubplotFigure build that finalizes once at its end
+# (`_FIELD2D_DEFER_FINALIZE`) only the axis fits are written, as before.
 function _settle_log_ticks!(fig)
-	_with_figure_style(() -> _axes_apply_fits!(fig), fig)
+	if _FIELD2D_DEFER_FINALIZE[]
+		_with_figure_style(() -> _axes_apply_fits!(fig), fig)
+	else
+		_finalize_figure!(fig)
+	end
 	return nothing
 end
 

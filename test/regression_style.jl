@@ -1290,7 +1290,9 @@ end
 		# and, at the top, the figure title (probe: label clipped, title over "90").
 		for name in (:publication, :ieee)
 			stp = _RS._STYLE_REGISTRY[name]
-			room = ceil(1.2 * stp.tick_fontsize + 8)
+			# sm-02: the room the finalizer keeps (one line of the larger of
+			# the root and tick fonts), so the constructed figure is settled.
+			room = ceil(1.2 * max(stp.tick_fontsize, stp.fontsize) + 8)
 			fig = with_style(() -> plot_scatterpolar(0:30:330, 1:12; title = "Polar title"), name)
 			margin = _rs_get(fig, :margin)
 			@test margin[:l] == room && margin[:r] == room && margin[:b] == room

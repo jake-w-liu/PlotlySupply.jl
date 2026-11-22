@@ -5212,21 +5212,14 @@ function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height
 	margin === nothing && return updates
 	lookup(key) = get(fields, key, nothing)
 	root = _tight_root_font_size(lookup)
-	# sm-02: the labels outside the disc/triangle are drawn at their axis's
-	# own tick font (the style writes it, `_font_role_updates`), else at
-	# the root font: the largest of those, as `_style_domain_subplot_margin`
-	# sizes the style margin (a :publication tick font of 12 under a root
-	# font of 14 is drawn at 12).
-	tick = 0.0
+	tick = root
 	for (key, axis) in fields
-		name = String(key)
-		names = occursin(r"^polar\d*$", name) ? (:angularaxis,) :
-			occursin(r"^ternary\d*$", name) ? (:aaxis, :baxis, :caxis) : ()
-		for sub in names
-			tick = max(tick, _fin_mapping_font_size(_cmn_mapping_get(axis, sub), :tickfont, root))
+		occursin(r"^(polar|ternary)\d*$", String(key)) || continue
+		for name in (:angularaxis, :aaxis, :baxis, :caxis)
+			size = _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, 0.0)
+			size > tick && (tick = size)
 		end
 	end
-	tick > 0 || (tick = root)
 	label_room = ceil(1.2 * tick + 8)
 	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
 	# Ternary corner titles sit beyond the tick labels (style-07, vm-19): the

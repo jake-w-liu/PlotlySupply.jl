@@ -632,7 +632,9 @@ end
 					Layout(),
 				),
 				(;),
-				"different colour limits",
+				# O3: a carrier with no recorded colour bins cannot be
+				# recoloured for the union limits 0 .. 5.
+				"cannot be recoloured",
 			),
 			(
 				() -> Plot(
@@ -1303,14 +1305,25 @@ end
 	end
 	shared_colorbar!(sf)
 	@test haskey(sf.plot.layout.fields, :coloraxis)
-	# fields-08: a curvilinear mesh (drawn as polygons with its colours fixed)
-	# carries 0 .. 5; a heatmap of 0 .. 10 next to it would be clamped.
+	# fields-08 (O3): a curvilinear mesh (drawn as polygons, its colours
+	# sampled for 0 .. 5) next to a heatmap of 0 .. 10 is recoloured for the
+	# shared 0 .. 10; the heatmap is not clamped.
 	r = range(1, 2; length = 5); th = range(0, pi; length = 9)
 	X = [ri * cos(t) for ri in r, t in th]; Y = [ri * sin(t) for ri in r, t in th]
 	C = [5.0 * (i - 1) / 3 for i in 1:4, j in 1:8]
 	sf = subplots(1, 2; sync = false)
 	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
 	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2)
+	shared_colorbar!(sf)
+	axis = _SCB._symbol_dict(sf.plot.layout.fields[:coloraxis])
+	@test (axis[:cmin], axis[:cmax]) == (0.0, 10.0)
+	carrier = only(t for t in sf.plot.data if _SCB._cbar_is_carrier(t))
+	@test _SCB._colour_carrier_limits(carrier) == (0.0, 10.0)
+	# A mesh whose `crange` clamps its own values cannot be redrawn for a
+	# wider range: refused, nothing changes.
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2, crange = (1, 4))
 	before = snapshot(sf.plot)
 	err = try
 		shared_colorbar!(sf); nothing

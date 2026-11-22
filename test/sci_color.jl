@@ -747,4 +747,139 @@ end
 	@test length(colormap_colors("viridis", 3)) == 3
 	# The bound's constant sits above the docstring, which stays on the function.
 	@test occursin("colormap_colors(name_or_scale, n::Integer", string(@doc(colormap_colors)))
+	# Log bars now label the decades 0 and 1 "1" and "10": a user's linear bar so
+	# labelled is not taken for a log one by shared_colorbar!, a log heatmap
+	# within one decade is, and a log panel beside a linear one is still refused.
+	user = PSX.Plot([PSX.heatmap(z = rand(3, 3), colorbar = PSX.attr(tickvals = [0, 1], ticktext = ["1", "10"])),
+		PSX.heatmap(z = 1 .+ rand(3, 3))], PSX.Layout())
+	@test (shared_colorbar!(user); true)
+	slot_norm(fig) = (p = PSX._cmn_plot(fig); t = p.data[1]; PSX._cbar_slot_norm(p, t, PSX._cbar_slot(t, 0)))
+	@test slot_norm(plot_heatmap([1.0 + i + j for i in 0:2, j in 0:2] ./ 1.2; colornorm = :log)) == (:log, nothing)
+	@test slot_norm(plot_heatmap(rand(3, 3))) == (:linear, nothing)
+	mixed = subplots(1, 2; sync = false)
+	plot_heatmap!(mixed, [10.0^(i + j) for i in 0:2, j in 0:2]; colornorm = :log, row = 1, col = 1)
+	plot_heatmap!(mixed, rand(3, 3); row = 1, col = 2)
+	@test_throws ArgumentError shared_colorbar!(mixed)
+end
+
+@testset "v8 axes-style: carrier builds follow a shared colour axis (O3, fields-08)" begin
+	PSX = PlotlySupply
+	x = collect(range(0, 4; length = 21)); y = collect(range(0, 2; length = 11))
+	U = [2.5 * a for a in x, b in y]                       # 0 .. 10
+	r = range(1, 2; length = 5); th = range(0, pi; length = 9)
+	X = [ri * cos(t) for ri in r, t in th]; Y = [ri * sin(t) for ri in r, t in th]
+	C = [5.0 * (i - 1) / 3 for i in 1:4, j in 1:8]       # 0 .. 5 on a curvilinear mesh
+	axis_limits(fig, id = :coloraxis) = (a = get(PSX._cmn_plot(fig).layout.fields, id, nothing);
+		(PSX._cmn_mapping_get(a, :cmin), PSX._cmn_mapping_get(a, :cmax)))
+	carriers(fig) = [t for t in PSX._cmn_plot(fig).data if PSX._cbar_is_carrier(t)]
+	bins(fig) = [t for t in PSX._cmn_plot(fig).data if PSX._colour_meta_get(t, PSX._COLOUR_BIN_META) !== nothing]
+	# Every recorded bin trace is drawn in the colour of its bin's centre
+	# under the limits it now records, which are the shared ones.
+	function follows(fig, limits, scale)
+		stops = PSX._cbar_scale_stops(scale, false)
+		ok = !isempty(bins(fig))
+		for t in bins(fig)
+			rec = PSX._colour_meta_get(t, PSX._COLOUR_BIN_META)
+			want = PSX._sample_colorscale(stops, ((rec[1] + rec[2]) / 2 - limits[1]) / (limits[2] - limits[1]))
+			ok &= (rec[3], rec[4]) == limits && rec[5] == want &&
+				any(c -> c == want, (get(t.fields, :fillcolor, nothing), PSX._cmn_mapping_get(get(t.fields, :line, nothing), :color)))
+		end
+		return ok && all(c -> PSX._colour_carrier_limits(c) == limits, carriers(fig))
+	end
+	scale_of(fig, id = :coloraxis) = PSX._cmn_mapping_get(get(PSX._cmn_plot(fig).layout.fields, id, nothing), :colorscale)
+
+	# shared_colorbar!: a heatmap of 0 .. 10 beside a mesh drawn for 0 .. 5. The
+	# mesh is recoloured for 0 .. 10 instead of the call being refused (or the
+	# heatmap clamped to 0 .. 5); the mesh's cell at 5 is now mid-scale.
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2)
+	before = Set(t.fields[:fillcolor] for t in bins(sf))
+	shared_colorbar!(sf)
+	@test axis_limits(sf) == (0.0, 10.0)
+	@test follows(sf, (0.0, 10.0), scale_of(sf))
+	@test Set(t.fields[:fillcolor] for t in bins(sf)) != before
+	@test !PSX._finalize_figure!(sf)
+	# A mesh drawn with a `crange` that clamps its own values cannot show them
+	# under a wider range: refused before anything changes.
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2, crange = (1, 4))
+	snapshot = PSX.PlotlyBase.JSON.json(sf.plot)
+	err = try
+		shared_colorbar!(sf); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && startswith(err.msg, "shared_colorbar!:") && occursin("crange", err.msg)
+	@test PSX.PlotlyBase.JSON.json(sf.plot) == snapshot
+	# ... while a range that holds every value recolours it (an explicit
+	# shared `crange` included).
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2, crange = (0, 6))
+	shared_colorbar!(sf; crange = (-1, 12))
+	@test axis_limits(sf) == (-1.0, 12.0) && follows(sf, (-1.0, 12.0), scale_of(sf))
+
+	# coloraxis = :shared at build time, in either order: the axis holds both
+	# members and the mesh is drawn (or redrawn) for it.
+	f = plot_heatmap(x, y, U; coloraxis = :shared)
+	plot_pcolormesh!(f, X, Y, C; coloraxis = :shared)
+	@test axis_limits(f) == (0.0, 10.0) && follows(f, (0.0, 10.0), scale_of(f))
+	g = plot_pcolormesh(X, Y, C; coloraxis = :shared)
+	@test axis_limits(g) == (0.0, 5.0)
+	plot_heatmap!(g, x, y, U; coloraxis = :shared)
+	@test axis_limits(g) == (0.0, 10.0) && follows(g, (0.0, 10.0), scale_of(g))
+	@test !PSX._finalize_figure!(f) && !PSX._finalize_figure!(g)
+	# The same colours as a mesh drawn for 0 .. 10 from the start, to the bin
+	# resolution (the recoloured bins are half as wide).
+	direct = plot_pcolormesh(X, Y, C; crange = (0, 10))
+	near(a, b) = (pa = PSX._color_hex(a); pb = PSX._color_hex(b);
+		maximum(abs(parse(Int, pa[i:(i + 1)]; base = 16) - parse(Int, pb[i:(i + 1)]; base = 16)) for i in (2, 4, 6)) <= 3)
+	colour_at(fig, v) = only(t.fields[:fillcolor] for t in bins(fig) if (rec = PSX._colour_meta_get(t, PSX._COLOUR_BIN_META);
+		rec[1] - 1e-9 <= v <= rec[2] + 1e-9 && (v < rec[2] - 1e-9 || v == 5.0)))
+	for v in (0.0, 5 / 3, 10 / 3, 5.0)
+		@test near(colour_at(g, v), colour_at(direct, v))
+	end
+	# A quiver coloured by speed over a speed map: the axis spans the map.
+	sp = [hypot(a - 2, b - 1) for a in x, b in y]
+	q = plot_heatmap(x, y, sp; coloraxis = :shared)
+	plot_quiver!(q, repeat(x[1:4:end], 3), repeat([0.5, 1.0, 1.5], inner = 6), ones(18), fill(0.5, 18);
+		colorby = :magnitude, coloraxis = :shared)
+	@test axis_limits(q)[1] == 0.0 && axis_limits(q)[2] ≈ maximum(sp)
+	@test follows(q, axis_limits(q), scale_of(q))
+	# A `crange` of the user's on the axis is kept: the later heatmap is drawn
+	# with it, as plotly draws every member of an axis with fixed limits.
+	h = plot_pcolormesh(X, Y, C; coloraxis = :shared, crange = (0, 5))
+	plot_heatmap!(h, x, y, U; coloraxis = :shared)
+	@test axis_limits(h) == (0.0, 5.0)
+	@test PSX._colour_meta_get(carriers(h)[1], PSX._COLOUR_AUTO_META) === nothing
+	# A later member's `crange` is the axis's: the mesh is redrawn for it
+	# (values beyond it take the end colours, as plotly draws the heatmap) and
+	# no longer widens with later members.
+	k = plot_pcolormesh(X, Y, C; coloraxis = :shared)
+	plot_heatmap!(k, x, y, U; coloraxis = :shared, crange = (0, 4))
+	@test axis_limits(k) == (0.0, 4.0) && follows(k, (0.0, 4.0), scale_of(k))
+	plot_heatmap!(k, x, y, 3 .* U; coloraxis = :shared)
+	@test axis_limits(k) == (0.0, 4.0)
+	# Only the build of the carrier is recoloured: a mesh with its own bar on
+	# the same axes keeps its colours.
+	m = plot_pcolormesh(X, Y, C)
+	own = Dict(i => t.fields[:fillcolor] for (i, t) in enumerate(m.data) if haskey(t.fields, :fillcolor))
+	plot_pcolormesh!(m, X, Y, C; coloraxis = :shared)
+	plot_heatmap!(m, x, y, U; coloraxis = :shared)
+	@test all(m.data[i].fields[:fillcolor] == c for (i, c) in own)
+	@test any(t -> PSX._colour_meta_get(t, PSX._COLOUR_BIN_META) !== nothing &&
+		PSX._colour_meta_get(t, PSX._COLOUR_BIN_META)[4] == 10.0, m.data)
+	# SubplotFigure cells built on `coloraxis = :shared` (either order):
+	# `shared_colorbar!` joins every member and recolours the mesh.
+	for order in (1, 2)
+		sf = subplots(1, 2; sync = false)
+		steps = [() -> plot_heatmap!(sf, x, y, U; row = 1, col = 1, coloraxis = :shared),
+			() -> plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2, coloraxis = :shared)]
+		order == 1 ? foreach(f -> f(), steps) : foreach(f -> f(), reverse(steps))
+		shared_colorbar!(sf)
+		@test axis_limits(sf) == (0.0, 10.0) && follows(sf, (0.0, 10.0), scale_of(sf))
+		@test !PSX._finalize_figure!(sf)
+	end
 end

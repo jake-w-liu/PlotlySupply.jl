@@ -719,8 +719,15 @@ end
         a2 = _ax_axis(lg, :xaxis2)
         @test a2[:type] == "log"
         @test _ax_field(lg, :xaxis, :range) ≈ [0.0, 3.0]
-        @test a2[:ticktext][1] == "0.001" && a2[:ticktext][end] == "1"
-        @test a2[:tickvals] ≈ 1 ./ parse.(Float64, a2[:ticktext])
+        # numerics-03: the labels read as plotly's log-axis decades ("10⁻³" ... "1").
+        @test a2[:ticktext][1] == "10<sup>−3</sup>" && a2[:ticktext][end] == "1"
+        # Labels are "1", "10<sup>k</sup>" or "m×10<sup>k</sup>" (U+2212 minus).
+        function decade(s)
+            s == "1" && return 1.0
+            m = match(r"^(?:(\d+)×)?10<sup>(.*)</sup>$", s)
+            return (m[1] === nothing ? 1.0 : parse(Float64, m[1])) * exp10(parse(Int, replace(m[2], "−" => "-")))
+        end
+        @test a2[:tickvals] ≈ 1 ./ decade.(a2[:ticktext])
 
         # Unknown range and non-numeric axes are errors.
         empty = Plot(GenericTrace[], Layout(xaxis = attr(type = "linear")))
@@ -2650,5 +2657,34 @@ end
 		# 4x the cells: measured 3.2x (16 -> 64 cells); the per-cell merges of
 		# the old code grew 8x.
 		@test cost(8, f) / cost(4, f) < 4.5
+	end
+end
+
+@testset "v8 axes-style: constructors return settled figures under every style (sm-07)" begin
+	# Invariant 1: after a constructor returns, `_finalize_figure!` writes
+	# nothing. A long axis title wrapped under a sized style was left for the
+	# first later finalize (it wrote `yaxis`/`xaxis` and `meta`).
+	x = collect(range(0.1, 2; length = 25)); y = sin.(3 .* x)
+	Z = [sin(i / 3) * cos(j / 4) for i in 1:15, j in 1:12]
+	LX = "applied magnetic field strength in the sample plane (kA/m)"
+	LY = "normalised transmitted optical power through the device (a.u.)"
+	LT = "Measured and simulated response of the resonator for three different coupling gaps"
+	ctors = [
+		"scatter" => () -> plot_scatter(x, y; xlabel = LX, ylabel = LY, title = LT),
+		"bar" => () -> plot_bar(["a", "b", "c"], [1, 2, 3]; ylabel = LY),
+		"histogram" => () -> plot_histogram(collect(range(-2, 2; length = 200)); xlabel = LX),
+		"stem" => () -> plot_stem(1:10, collect(1.0:10); ylabel = LY),
+		"area" => () -> plot_area(x, y; ylabel = LY),
+		"band" => () -> plot_band(x, y .- 0.1, y .+ 0.1; ylabel = LY),
+		"box" => () -> plot_box([collect(1.0:30), collect(2.0:31)]; ylabel = LY),
+		"heatmap" => () -> plot_heatmap(1:15, 1:12, Z; xlabel = LX, ylabel = LY),
+		"contour" => () -> plot_contour(1:15, 1:12, Z; xlabel = LX),
+	]
+	for st in (:default, :ieee, :nature, :aps), (name, build) in ctors
+		fig = with_style(build, st)
+		before = _AX.json(fig)
+		wrote = _AX._finalize_figure!(fig)
+		@test (st, name, wrote) == (st, name, false)
+		@test _AX.json(fig) == before
 	end
 end

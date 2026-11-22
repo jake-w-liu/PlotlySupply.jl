@@ -1527,3 +1527,312 @@ function _colorbar_carrier_trace(;
 end
 
 #endregion
+
+#region Recolourable colour bins (O3, fields-08)
+
+# Builds whose colours are sampled in Julia (cell meshes, quiver glyphs and
+# streamlines coloured by a value: one trace per colour bin plus a colorbar
+# carrier) cannot follow a colour range that changes after they are drawn.
+# Each bin trace therefore records the bin it was coloured for, and the
+# carrier that it was recorded, so a colour axis shared with other members
+# (`shared_colorbar!`, `coloraxis = :shared`) recolours the build for the
+# shared limits instead of clamping the other members to the build's limits:
+#
+# - bin trace: `meta["plotlysupply:cbin"] = [t_lo, t_hi, cmin, cmax, colour,
+#   clamped_lo, clamped_hi, build]`: the bin's interval and the limits it was
+#   coloured for (colour units: log10 under `colornorm = :log`), the colour
+#   it was drawn in, whether the end bin also holds values beyond the limits
+#   (an explicit `crange` narrower than the data: their true colours under a
+#   wider range are unknown, so such a build is not recoloured past that
+#   limit), and the build's token;
+# - carrier: `meta["plotlysupply:cbins"] = build` (the token, unique in the
+#   process: a counter after the load time), plus
+#   `meta["plotlysupply:cauto"] = true` when its limits are its data's extent
+#   (no `crange`, `cmid` or inherited limits: a later member may widen them).
+# `levels` builds (bands) are never recorded: their colours follow the band
+# edges, not the limits.
+const _COLOUR_BIN_META = Symbol("plotlysupply:cbin")
+const _COLOUR_BINS_META = Symbol("plotlysupply:cbins")
+const _COLOUR_AUTO_META = Symbol("plotlysupply:cauto")
+# The colour fields of a bin trace (fill, line, arrowhead marker).
+const _COLOUR_BIN_PATHS = ((:fillcolor,), (:line, :color), (:marker, :color))
+const _COLOUR_BUILD_COUNTER = Threads.Atomic{Int}(0)
+const _COLOUR_BUILD_EPOCH = Ref{UInt64}(0)
+
+function _colour_build_token()
+	_COLOUR_BUILD_EPOCH[] == 0 && (_COLOUR_BUILD_EPOCH[] = time_ns())
+	return string(_COLOUR_BUILD_EPOCH[]; base = 36) * "-" * string(Threads.atomic_add!(_COLOUR_BUILD_COUNTER, 1) + 1)
+end
+
+# `trace.meta[key]` (Symbol or, after a JSON round trip, String key), or `nothing`.
+function _colour_meta_get(trace::GenericTrace, key::Symbol)
+	meta = get(trace.fields, :meta, nothing)
+	meta isa PlotlyBase.PlotlyAttribute && (meta = meta.fields)
+	meta isa AbstractDict || return nothing
+	value = get(meta, key, nothing)
+	value === nothing && (value = get(meta, String(key), nothing))
+	return value
+end
+
+# Set `trace.meta[key]` in a new Dict (meta dicts may be shared by traces).
+function _colour_meta_put!(trace::GenericTrace, key::Symbol, value)
+	old = get(trace.fields, :meta, nothing)
+	old isa PlotlyBase.PlotlyAttribute && (old = old.fields)
+	meta = Dict{Symbol, Any}()
+	if old isa AbstractDict
+		for (k, v) in old
+			meta[Symbol(k)] = v
+		end
+	end
+	meta[key] = value
+	trace.fields[:meta] = meta
+	return trace
+end
+
+"""
+	_colour_mark_bins!(groups, bins, tvals, cmin, cmax, ncolors, colours, carrier; auto) -> nothing
+
+Record on each bin trace `groups[i]` (coloured `colours[bins[i]]`, one of
+`ncolors` uniform bins over `[cmin, cmax]`) the bin it was coloured for, and
+on `carrier` that its build can be recoloured (see the comment above);
+`tvals` are the build's colour values (NaN = not drawn), which tell whether
+the end bins hold values beyond the limits. `auto`: the limits are the
+data's extent. Nothing is recorded without a carrier. Internal.
+"""
+function _colour_mark_bins!(groups::AbstractVector, bins::AbstractVector{Int}, tvals::AbstractVector{Float64},
+	cmin, cmax, ncolors::Int, colours::AbstractVector, carrier; auto::Bool)
+	(carrier === nothing || cmin === nothing || cmax === nothing) && return nothing
+	lo, hi = Float64(cmin), Float64(cmax)
+	tol = 1e-9 * (hi - lo)
+	below = above = false
+	for v in tvals
+		isnan(v) && continue
+		v < lo - tol && (below = true)
+		v > hi + tol && (above = true)
+	end
+	width = (hi - lo) / ncolors
+	build = _colour_build_token()
+	for (trace, b) in zip(groups, bins)
+		_colour_meta_put!(trace, _COLOUR_BIN_META, Any[
+			lo + (b - 1) * width, lo + b * width, lo, hi, String(colours[b]),
+			below && b == 1, above && b == ncolors, build,
+		])
+	end
+	_colour_meta_put!(carrier, _COLOUR_BINS_META, build)
+	auto && _colour_meta_put!(carrier, _COLOUR_AUTO_META, true)
+	return nothing
+end
+
+# The limits `marker.color = [cmin, cmax]` of a colorbar carrier.
+function _colour_carrier_limits(carrier::GenericTrace)
+	colours = _cmn_mapping_get(get(carrier.fields, :marker, nothing), :color)
+	return (Float64(colours[1]), Float64(colours[2]))
+end
+
+_colour_same_limit(a::Real, b::Real) = isapprox(Float64(a), Float64(b); rtol = 1e-9, atol = 1e-12)
+
+"""
+	_colour_recolour_plan(p::Plot, k::Int, limits, stops) -> Vector{Tuple{Int,String}} or String
+
+How to recolour the build whose colorbar carrier is `p.data[k]` for the
+colour limits `limits` (colour units) of the colour scale `stops`: the new
+colour of each of its bin traces (those recorded with the carrier's build
+token), as `(trace index, colour)`. A String says why the build
+cannot follow (it was not recorded: `levels` bands, a build from an older
+version; or an end bin holds values beyond its limits that the new range
+would show). Reads only. Internal.
+"""
+function _colour_recolour_plan(p::Plot, k::Int, limits::NTuple{2, Float64}, stops)
+	carrier = p.data[k]
+	build = _colour_meta_get(carrier, _COLOUR_BINS_META)
+	build isa AbstractString ||
+		return "its colours were drawn for fixed colour levels or limits"
+	old = _colour_carrier_limits(carrier)
+	tol = 1e-9 * max(old[2] - old[1], abs(limits[2] - limits[1]))
+	span = limits[2] - limits[1]
+	plan = Tuple{Int, String}[]
+	for (i, trace) in enumerate(p.data)
+		trace isa GenericTrace || continue
+		rec = _colour_meta_get(trace, _COLOUR_BIN_META)
+		(rec isa AbstractVector && length(rec) == 8 && rec[8] == build) || continue
+		((rec[6] === true && limits[1] < old[1] - tol) || (rec[7] === true && limits[2] > old[2] + tol)) &&
+			return "it was drawn with a `crange` that clamps some of its values"
+		t = ((Float64(rec[1]) + Float64(rec[2])) / 2 - limits[1]) / span
+		push!(plan, (i, _sample_colorscale(stops, clamp(t, 0.0, 1.0))))
+	end
+	return plan
+end
+
+# O3 (fields-08, `shared_colorbar!`): the recolouring of every carrier build
+# among `indices` whose limits differ from the shared `limits`
+# (`_colour_recolour_plan`), or an ArgumentError naming the build that cannot
+# follow. Reads only.
+function _colour_recolour_plans(p::Plot, indices::Vector{Int}, limits, stops, who::AbstractString)
+	plans = Tuple{Int, Vector{Tuple{Int, String}}}[]
+	for k in indices
+		old = _colour_carrier_limits(p.data[k])
+		(_colour_same_limit(old[1], limits[1]) && _colour_same_limit(old[2], limits[2])) && continue
+		plan = stops === nothing ? "the colour scale it was drawn with is unknown" :
+			_colour_recolour_plan(p, k, (Float64(limits[1]), Float64(limits[2])), stops)
+		plan isa AbstractString && throw(ArgumentError(
+			"$(who): the colorbar carrier trace $(k) was drawn for the colour limits " *
+			"$(old[1])..$(old[2]) and cannot be recoloured for the shared limits " *
+			"$(limits[1])..$(limits[2]): $(plan). Rebuild that plot with " *
+			"`crange = ($(limits[1]), $(limits[2]))`.",
+		))
+		push!(plans, (k, plan))
+	end
+	return plans
+end
+
+# O3 (fields-08, `shared_colorbar!`): the colour extent of the members among
+# `slots` that are not colorbar carriers: a member's own limits (`zmin`/`zmax`,
+# `cmin`/`cmax`), else its values. The limits of a colour axis a member is
+# bound to do not count (a carrier build may have written them); members
+# whose colours plotly computes (histogram counts) are left out. `nothing`
+# when no member has finite values.
+function _colour_members_extent(p::Plot, slots)
+	lo, hi = Inf, -Inf
+	for slot in slots
+		trace = p.data[slot.index]
+		(trace isa GenericTrace && !_cbar_is_carrier(trace)) || continue
+		source = slot.container === :root ? trace.fields : _symbol_dict(get(trace.fields, slot.container, nothing))
+		part = nothing
+		for (lo_key, hi_key) in ((:zmin, :zmax), (:cmin, :cmax))
+			a = _cbar_real(source, lo_key, nothing)
+			b = _cbar_real(source, hi_key, nothing)
+			(a !== nothing && b !== nothing && a < b) && (part = (a, b); break)
+		end
+		if part === nothing
+			values = _cbar_slot_values(trace, slot)
+			values === nothing && continue
+			part = _cbar_extrema(values)
+			part === nothing && continue
+		end
+		lo, hi = min(lo, Float64(part[1])), max(hi, Float64(part[2]))
+	end
+	return lo <= hi ? (lo, hi) : nothing
+end
+
+# Apply a `_colour_recolour_plan` of carrier `k` for `limits`: every recorded
+# colour field of the bin traces takes its new colour (fields the user
+# changed since are left), their records and the carrier's limits follow.
+function _colour_recolour!(p::Plot, k::Int, plan::Vector{Tuple{Int, String}}, limits::NTuple{2, Float64})
+	for (i, colour) in plan
+		trace = p.data[i]
+		rec = copy(_colour_meta_get(trace, _COLOUR_BIN_META))
+		old = rec[5]
+		for path in _COLOUR_BIN_PATHS
+			_colour_replace_field!(trace.fields, path, old, colour)
+		end
+		rec[3], rec[4], rec[5] = limits[1], limits[2], colour
+		_colour_meta_put!(trace, _COLOUR_BIN_META, rec)
+	end
+	carrier = p.data[k]
+	marker = _symbol_dict(get(carrier.fields, :marker, nothing))
+	marker[:color] = Any[limits[1], limits[2]]
+	haskey(marker, :cmin) && (marker[:cmin] = limits[1])
+	haskey(marker, :cmax) && (marker[:cmax] = limits[2])
+	carrier.fields[:marker] = PlotlyBase.attr(; marker...)
+	return nothing
+end
+
+# O3 (fields-08): the colorbar carriers of `p` bound to coloraxis `id` that
+# drew the axis's `cmin`/`cmax`, when every one of them is a recorded build
+# whose limits are its data's extent (`_colour_mark_bins!`): such limits may
+# widen for a new member. `nothing` when the axis has no limits, or they are
+# the user's (a `crange`) or a fixed build's.
+function _colour_auto_axis_carriers(p::Plot, id::AbstractString)
+	axis = get(p.layout.fields, Symbol(id), nothing)
+	lo = _cmn_mapping_get(axis, :cmin)
+	hi = _cmn_mapping_get(axis, :cmax)
+	(lo isa Real && hi isa Real && !(lo isa Bool) && !(hi isa Bool) && isfinite(lo) && isfinite(hi) && lo < hi) ||
+		return nothing
+	carriers = Int[]
+	for (k, trace) in enumerate(p.data)
+		(trace isa GenericTrace && _cbar_is_carrier(trace)) || continue
+		_cmn_mapping_get(get(trace.fields, :marker, nothing), :coloraxis) == id || continue
+		limits = _colour_carrier_limits(trace)
+		(_colour_same_limit(limits[1], lo) && _colour_same_limit(limits[2], hi)) || continue
+		(_colour_meta_get(trace, _COLOUR_BINS_META) isa AbstractString && _colour_meta_get(trace, _COLOUR_AUTO_META) === true) ||
+			return nothing
+		push!(carriers, k)
+	end
+	return isempty(carriers) ? nothing : (limits = (Float64(lo), Float64(hi)), carriers = carriers)
+end
+
+# O3 (fields-08): the colour values (colour units) of the members bound to
+# coloraxis `id` of `p` that draw their own colours (a heatmap, a contour:
+# not carrier builds), so a carrier build joining the axis covers them;
+# `nothing` when none has numbers (plotly computes histogram counts).
+function _colour_axis_member_extent(p::Plot, id::AbstractString)
+	lo, hi = Inf, -Inf
+	for (k, trace) in enumerate(p.data)
+		slot = _cbar_slot(trace, k)
+		(slot === nothing || slot.coloraxis != id || _cbar_is_carrier(trace)) && continue
+		values = _cbar_slot_values(trace, slot)
+		values === nothing && continue
+		part = _cbar_extrema(values)
+		part === nothing && continue
+		lo, hi = min(lo, Float64(part[1])), max(hi, Float64(part[2]))
+	end
+	return lo <= hi ? (lo, hi) : nothing
+end
+
+"""
+	_colour_follow_axis!(fig, id, auto, limits; stops = nothing, fixed = false) -> Bool
+
+O3 (fields-08): coloraxis `id` of `fig`, whose limits `auto.limits` the
+carrier builds `auto.carriers` drew from their own data
+(`_colour_auto_axis_carriers`, read before the axis changed), now takes the
+colour limits `limits` (colour units): the builds are recoloured for them
+(with the colour scale `stops`, else the axis's) and the axis takes them, so
+no member is clamped to another's range. `fixed`: the limits are the user's
+(a member's `crange`); the builds no longer widen with later members.
+Returns whether it changed the figure. Internal.
+"""
+function _colour_follow_axis!(fig, id::AbstractString, auto, limits; stops = nothing, fixed::Bool = false)
+	auto === nothing && return false
+	shared = (Float64(limits[1]), Float64(limits[2]))
+	(isfinite(shared[1]) && isfinite(shared[2]) && shared[1] < shared[2]) || return false
+	p = _cmn_plot(fig)
+	if stops === nothing
+		axis = get(p.layout.fields, Symbol(id), nothing)
+		stops = _cbar_scale_stops(_cmn_mapping_get(axis, :colorscale), _cmn_mapping_get(axis, :reversescale) === true)
+		stops === nothing && return false
+	end
+	same = _colour_same_limit(shared[1], auto.limits[1]) && _colour_same_limit(shared[2], auto.limits[2])
+	plans = Tuple{Int, Vector{Tuple{Int, String}}}[]
+	if !same
+		for k in auto.carriers
+			plan = _colour_recolour_plan(p, k, shared, stops)
+			plan isa AbstractString && return false
+			push!(plans, (k, plan))
+		end
+	end
+	for (k, plan) in plans
+		_colour_recolour!(p, k, plan, shared)
+	end
+	fixed && for k in auto.carriers
+		_colour_meta_put!(p.data[k], _COLOUR_AUTO_META, false)
+	end
+	same || _cmn_merge_layout_key!(fig, Symbol(id), Dict{Symbol, Any}(:cmin => shared[1], :cmax => shared[2]))
+	return !same || fixed
+end
+
+# `fields[path...] = new` where it is `old` (a nested mapping is replaced by
+# a new attr, so one shared with another trace is not changed).
+function _colour_replace_field!(fields::AbstractDict, path::Tuple, old, new::String)
+	if length(path) == 1
+		get(fields, path[1], nothing) == old && (fields[path[1]] = new)
+		return nothing
+	end
+	inner = get(fields, path[1], nothing)
+	_cmn_mapping_get(inner, path[2]) == old || return nothing
+	copied = _symbol_dict(inner)
+	copied[path[2]] = new
+	fields[path[1]] = PlotlyBase.attr(; copied...)
+	return nothing
+end
+
+#endregion

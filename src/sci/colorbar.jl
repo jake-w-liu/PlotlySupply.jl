@@ -1656,29 +1656,24 @@ function _cbar_is_carrier(trace::GenericTrace)
 		all(v -> v isa Real && !(v isa Bool) && isfinite(v), colours)
 end
 
-# (limits, scale) the carriers among `slots` were drawn with: limits from
-# `marker.color`; scale `(scale, reversescale, stops)` from the marker or the
-# coloraxis they are bound to (`nothing` when unset). Carriers that disagree
-# cannot share one bar.
+# (limits, scale, indices) of the carriers among `slots`: the union of the
+# limits they were drawn with (`marker.color`; a build the shared limits
+# differ from is recoloured, `_colour_recolour_plans`), the scale
+# `(scale, reversescale, stops)` from the marker or the coloraxis they are
+# bound to (`nothing` when unset; carriers drawn with different scales cannot
+# share one bar), and their trace indices.
 function _shared_colorbar_carrier_spec(p::Plot, slots::Vector{_CbarSlot}, who::AbstractString)
 	limits = nothing
 	scale = nothing
+	indices = Int[]
 	for slot in slots
 		trace = p.data[slot.index]
 		_cbar_is_carrier(trace) || continue
+		push!(indices, slot.index)
 		colours = _cmn_mapping_get(get(trace.fields, :marker, nothing), :color)
 		carrier_limits = (Float64(colours[1]), Float64(colours[2]))
-		if limits === nothing
-			limits = carrier_limits
-		elseif !(isapprox(limits[1], carrier_limits[1]; rtol = 1e-9, atol = 1e-12) &&
-				isapprox(limits[2], carrier_limits[2]; rtol = 1e-9, atol = 1e-12))
-			throw(ArgumentError(
-				"$(who): the colorbar carrier traces were drawn for different colour " *
-				"limits ($(limits[1])..$(limits[2]) and $(carrier_limits[1])..$(carrier_limits[2])). " *
-				"Their colours are fixed when the figure is built, so they cannot share " *
-				"one bar; rebuild those plots with a common colour range (e.g. `crange`).",
-			))
-		end
+		limits = limits === nothing ? carrier_limits :
+			(min(limits[1], carrier_limits[1]), max(limits[2], carrier_limits[2]))
 		source = slot.coloraxis === nothing ?
 			_cbar_slot_source(trace, slot) :
 			_symbol_dict(get(p.layout.fields, Symbol(slot.coloraxis), nothing))
@@ -1696,7 +1691,7 @@ function _shared_colorbar_carrier_spec(p::Plot, slots::Vector{_CbarSlot}, who::A
 			))
 		end
 	end
-	return (limits = limits, scale = scale)
+	return (limits = limits, scale = scale, indices = indices)
 end
 
 # Non-geometry settings of the bars that `shared_colorbar!` removes, for the
@@ -1782,9 +1777,14 @@ function _cbar_slot_norm(p::Plot, trace::GenericTrace, slot::_CbarSlot)
 	ticks = _cmn_mapping_get(bar, :tickvals)
 	labels = _cmn_mapping_get(bar, :ticktext)
 	numeric(v) = v isa AbstractVector && !isempty(v) && all(x -> x isa Real && !(x isa Bool) && isfinite(x), v)
+	# A log bar labels the decades 0 and 1 "1" and "10", as plotly's log axes
+	# (numerics-11): labels that are all plain numbers ("1", "10" at 0 and 1,
+	# a user's linear bar) mark a log bar only on a trace carrying log10 data.
 	if numeric(ticks) && labels isa AbstractVector && length(labels) == length(ticks) &&
 			all(i -> labels[i] isa AbstractString && labels[i] == _log_tick_label(10.0^Float64(ticks[i])),
-				eachindex(ticks))
+				eachindex(ticks)) &&
+			(any(label -> occursin("<sup>", label), labels) ||
+			 _colour_log_carrier(_cbar_slot_values(trace, slot), get(trace.fields, :customdata, nothing)))
 		return (:log, nothing)
 	end
 	scale = _cmn_mapping_get(holder, :colorscale)
@@ -1804,46 +1804,6 @@ function _cbar_slot_norm(p::Plot, trace::GenericTrace, slot::_CbarSlot)
 		end
 	end
 	return (:linear, nothing)
-end
-
-# The fixed limits of colorbar carrier traces must cover the colour data of
-# every other member: the shared axis takes the carriers' limits, so data
-# beyond them would be drawn in the end colours without notice (fields-08).
-# A member's own `zmin`/`zmax` (`cmin`/`cmax`) count as its data range; the
-# limits of a coloraxis it is bound to do not (the carrier may have written
-# them). Throws before anything changes.
-function _shared_colorbar_check_cover(p::Plot, slots::Vector{_CbarSlot}, limits, who::AbstractString)
-	span = limits[2] - limits[1]
-	tol = 1e-9 * max(abs(span), 1.0)
-	carrier = 0
-	for slot in slots
-		_cbar_is_carrier(p.data[slot.index]) && (carrier = slot.index; break)
-	end
-	for slot in slots
-		trace = p.data[slot.index]
-		(trace isa GenericTrace && !_cbar_is_carrier(trace)) || continue
-		source = slot.container === :root ? trace.fields : _symbol_dict(get(trace.fields, slot.container, nothing))
-		part = nothing
-		for (lo_key, hi_key) in ((:zmin, :zmax), (:cmin, :cmax))
-			lo = _cbar_real(source, lo_key, nothing)
-			hi = _cbar_real(source, hi_key, nothing)
-			(lo !== nothing && hi !== nothing && lo < hi) && (part = (lo, hi); break)
-		end
-		if part === nothing
-			values = _cbar_slot_values(trace, slot)
-			values === nothing && continue
-			part = _cbar_extrema(values)
-			part === nothing && continue
-		end
-		(part[1] >= limits[1] - tol && part[2] <= limits[2] + tol) && continue
-		throw(ArgumentError(
-			"$(who): trace $(slot.index) has colour values $(part[1])..$(part[2]), outside the " *
-			"limits $(limits[1])..$(limits[2]) the colorbar carrier trace $(carrier) was drawn with; " *
-			"its colours are fixed when the figure is built. Rebuild that plot with a `crange` " *
-			"covering every panel, e.g. crange = ($(min(part[1], limits[1])), $(max(part[2], limits[2]))).",
-		))
-	end
-	return nothing
 end
 
 # Members of one shared colour axis must be drawn with one colour norm: the
@@ -1897,18 +1857,14 @@ function _shared_colorbar_apply!(
 			"$(who): `cmid` would rescale the colorbar carrier traces, whose " *
 			"colours are fixed at $(carriers.limits[1])..$(carriers.limits[2]); omit it.",
 		))
-		if limits !== nothing &&
-				!(isapprox(limits[1], carriers.limits[1]; rtol = 1e-9, atol = 1e-12) &&
-				isapprox(limits[2], carriers.limits[2]; rtol = 1e-9, atol = 1e-12))
-			throw(ArgumentError(
-				"$(who): `crange` $(collect(limits)) differs from the colour limits " *
-				"$(collect(carriers.limits)) the colorbar carrier traces were drawn " *
-				"with; their colours cannot be rescaled. Omit `crange` or rebuild " *
-				"those plots with it.",
-			))
+		# O3: the shared limits are the given `crange`, else the extent of
+		# every member (the carriers' limits included); the carrier builds
+		# drawn for other limits are recoloured for them below.
+		if limits === nothing
+			extent = _colour_members_extent(p, slots)
+			limits = extent === nothing ? carriers.limits :
+				(min(extent[1], carriers.limits[1]), max(extent[2], carriers.limits[2]))
 		end
-		limits = carriers.limits
-		_shared_colorbar_check_cover(p, slots, limits, who)
 	end
 	if carriers.scale !== nothing && opts.scale !== nothing
 		requested = _cbar_scale_stops(opts.scale.scale, opts.scale.reversescale)
@@ -1970,6 +1926,17 @@ function _shared_colorbar_apply!(
 				"pass `colorscale`.",
 			))
 			scale = (scale = _two_slope_stops(stops, mid_at), reversescale = false)
+		end
+	end
+
+	# O3 (fields-08): carrier builds drawn for other limits are recoloured
+	# for the shared ones (all checked before the first is changed).
+	if limits !== nothing && !isempty(carriers.indices)
+		shared = (Float64(limits[1]), Float64(limits[2]))
+		plans = _colour_recolour_plans(p, carriers.indices, shared,
+			carriers.scale === nothing ? nothing : carriers.scale.stops, who)
+		for (k, plan) in plans
+			_colour_recolour!(p, k, plan, shared)
 		end
 	end
 

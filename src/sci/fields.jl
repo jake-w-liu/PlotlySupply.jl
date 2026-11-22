@@ -1035,9 +1035,11 @@ function _streamlines_traces(
 		end
 	end
 	traces = GenericTrace[]
+	group_bins = Int[]
 	for b in 1:nbins
 		isempty(bin_x[b]) && continue
 		push!(traces, line_trace(bin_x[b], bin_y[b], bin_sizes[b], colours[b], isempty(traces)))
+		push!(group_bins, b)
 	end
 	isempty(traces) && push!(
 		traces,
@@ -1046,6 +1048,10 @@ function _streamlines_traces(
 	_field2d_mark_anchors!(traces, anchors...)
 	carrier = _mesh2d_carrier(cm, who)
 	carrier === nothing || push!(traces, carrier)
+	# O3: the bins are recorded so a shared colour axis can recolour them.
+	cm.band_edges === nothing && !isempty(group_bins) &&
+		_colour_mark_bins!(traces[1:length(group_bins)], group_bins, cm.tvals, cm.cmin, cm.cmax,
+			length(colours), colours, carrier; auto = cm.auto)
 	return traces, cm
 end
 
