@@ -1204,16 +1204,6 @@ function _fin_margins(layout::Layout, accs, W::Float64, H::Float64, domains, bar
 	l = reach(base.l, pushes_l, W, base.r)
 	b = reach(base.b, pushes_b, H, base.t)
 	t = base.t
-	# plotly pushes the top and bottom margins by what y tick labels reach
-	# past their axis ends, measured from the plot area's edge whatever the
-	# axis domain, plus its pad of min(12, the margins) (render probe
-	# s2/pushtest.jl: 7.8 px past at margins t = 4, 10, 20 and l = 40, r = 10,
-	# b = 30 gave t = 12, 18, 20). Unmodelled, a grid of equal-aspect cells
-	# under a 4 px journal margin was drawn 12 px shorter than fitted (V2).
-	over_t, over_b = _fin_y_end_overhang(layout, accs, Hp, domain_of)
-	pad = min(12.0, base.l, base.r, base.t, base.b)
-	over_t > 0 && (t = max(t, over_t + pad))
-	over_b > 0 && (b = max(b, over_b + pad))
 	r = base.r
 	for _ in 1:4
 		Wp = max(W - l - r, 1.0)
@@ -3063,17 +3053,18 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 			# the domains drawn now, and those of a cell drawn at its whole
 			# grid cell push a margin the compressed rows have no room for.
 			if all(cell -> haskey(cfits, cell), keys(fits))
-				# A block of equal-aspect cells whose gaps closed
+				# A block of equal-aspect cells whose row gaps closed
 				# (`_room_collapse`): the compressed plan's own margins and
 				# closed gaps can leave its cells blank again (device_geometry,
 				# :ieee 2 x 1 at a fixed size: 12 and 16 px per row after one
 				# pass); that blank is removed too, a few passes at most.
 				if _room_collapse(cplan)
 					for _ in 1:_FIN_COLLAPSE_PASSES
-						more = (x = _fin_band_slack(cplan, cfits, 1), y = _fin_band_slack(cplan, cfits, 2))
-						any(s -> s !== nothing && any(>(0.5), s), more) || break
-						add(a, b) = a === nothing || b === nothing || length(a) != length(b) ? a : a .+ b
-						grown = (x = add(slack.x, more.x), y = add(slack.y, more.y))
+						# Rows only, as the gaps close (`_room_solve!`).
+						more = _fin_band_slack(cplan, cfits, 2)
+						(more !== nothing && slack.y !== nothing && length(more) == length(slack.y) &&
+						 any(>(0.5), more)) || break
+						grown = (x = slack.x, y = slack.y .+ more)
 						nplan = _room_build(ctx, accs, bars, W, H, aspect; compress = grown, fits = cfits,
 							domains = _fin_plan_domains(cplan, cfits))
 						nfits = fit(nplan)
@@ -4080,10 +4071,10 @@ function _room_solve!(plan::_RoomPlan)
 	collapse = _room_collapse(plan)
 	xb = _room_bands(plan, 1)
 	yb = _room_bands(plan, 2)
+	# Rows only: closing the gaps between columns moved a 1 x 3 row of
+	# height-limited maps (chama_a5) off centre past its shared bar.
 	xbands = _room_band_solve(plan, xb, group, :left, :right, plan.Wp,
-		compress === nothing ? nothing : compress.x;
-		gapneed = collapse ? _room_gap_needs(plan, need, xb, :left, :right, 1) : nothing,
-		outer = collapse ? _room_outer_needs(plan, need, xb, :left, :right, 1) : (0.0, 0.0))
+		compress === nothing ? nothing : compress.x)
 	ybands = _room_band_solve(plan, yb, group, :bottom, :top, plan.Hp,
 		compress === nothing ? nothing : compress.y;
 		gapneed = collapse ? _room_gap_needs(plan, need, yb, :bottom, :top, 2) : nothing,
@@ -4240,9 +4231,20 @@ function _room_outer_needs(plan::_RoomPlan, need, bands, lo_side::Symbol, hi_sid
 		round(a.ref[axis][1]; digits = 9) == lo[1] && (inside_lo = max(inside_lo, need[(key, lo_side)]))
 		round(a.ref[axis][2]; digits = 9) == hi[end] && (inside_hi = max(inside_hi, need[(key, hi_side)]))
 	end
+	# The base margin is the one before the room engine raised it
+	# (`_ROOM_MARGIN_KEY`): a decoration the raise holds is centred as one
+	# inside the region, so the block stays where it was once the margin is
+	# raised for it (B1/B2: a panel label's 4 -> 10 px raise moved the block,
+	# which then gave the raise back, on every round).
 	base = _fin_margins_base(plan.layout)
-	margin(side) = side === :left ? plan.margins.l - base.l : side === :right ? plan.margins.r - base.r :
-		side === :bottom ? plan.margins.b - base.b : plan.margins.t - base.t
+	record = _room_margin_record(plan.layout)
+	function margin(side)
+		letter = Symbol(String(side)[1])
+		b = getfield(base, letter)
+		rec = get(record, letter, nothing)
+		rec !== nothing && abs(b - rec[2]) <= 0.5 && (b = rec[1])
+		return getfield(plan.margins, letter) - b
+	end
 	return (max(0.0, inside_lo - max(0.0, margin(lo_side))), max(0.0, inside_hi - max(0.0, margin(hi_side))))
 end
 
@@ -6020,74 +6022,6 @@ function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64; pending::
 	end
 	return min(need, _TIGHT_MAX_MARGIN_FRACTION * W)
 end
-
-# Px the tick labels of the y axes reach past the top and bottom ends of
-# their axes (`(top, bottom)`), as plotly's automargin measures them: half a
-# label height (`_FIN_YLABEL_HALF` x the tick font) less the label's
-# distance from the end. Only linear axes with a range known before
-# rendering (a fixed range or a field's sticky edges, as
-# `_fin_tick_overhang_px`) and ticks from plotly's auto step, a numeric
-# `dtick`/`tick0` or `tickvals`; an autoranged axis is padded past its last
-# label. `domain_of(key)` is the axis domain, `Hp` the plot height.
-function _fin_y_end_overhang(layout::Layout, accs, Hp::Float64, domain_of)
-	font = _fin_font_size(layout)
-	top = 0.0
-	bottom = 0.0
-	for (key, axis) in layout.fields
-		(_fin_is_axis_key(key) && String(key)[1] == 'y') || continue
-		_cmn_mapping_get(axis, :visible) === false && continue
-		_fin_automargin(axis) || continue
-		_cmn_mapping_get(axis, :showticklabels) === false && continue
-		position = _fin_string(_cmn_mapping_get(axis, :ticklabelposition))
-		(position === nothing || !occursin("inside", position)) || continue
-		_fin_axis_type(layout, key) in ("linear", "-") || continue
-		root = something(_fin_match_root(layout.fields, key), key)
-		raxis = get(layout.fields, root, nothing)
-		auto = _fin_field(raxis, :autorange)
-		pair = _fin_range_pair(_fin_field(raxis, :range))
-		((pair !== nothing && (auto === false || auto === nothing)) || _fin_sticky_clip(raxis) !== nothing) || continue
-		shown = _fin_shown_range(layout, key, accs)
-		shown === nothing && continue
-		lo, hi = Float64(shown[1]), Float64(shown[2])
-		hi > lo || continue
-		reversed = auto == "reversed" || (pair !== nothing && pair[1] > pair[2])
-		dom = domain_of(key)
-		len = max((dom[2] - dom[1]) * Hp, 1.0)
-		half = _FIN_YLABEL_HALF * _fin_mapping_font_size(axis, :tickfont, font)
-		# The ticks nearest the low and high ends of the range.
-		near_lo, near_hi = NaN, NaN
-		values = _cmn_mapping_get(axis, :tickvals)
-		if (values isa AbstractVector || values isa Tuple) && !isempty(values)
-			for v in values
-				_fin_isfinite_real(v) || continue
-				lo - 1e-9 * (hi - lo) <= v <= hi + 1e-9 * (hi - lo) || continue
-				(isnan(near_lo) || v < near_lo) && (near_lo = Float64(v))
-				(isnan(near_hi) || v > near_hi) && (near_hi = Float64(v))
-			end
-			isnan(near_lo) && continue
-		else
-			dtick = _cmn_mapping_get(axis, :dtick)
-			step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) : _fin_nice_step(hi - lo, len, true)
-			t0 = _cmn_mapping_get(axis, :tick0)
-			t0 = _fin_isfinite_real(t0) ? Float64(t0) : 0.0
-			near_lo = t0 + ceil((lo - t0) / step - 1e-9) * step
-			near_hi = t0 + floor((hi - t0) / step + 1e-9) * step
-		end
-		near_lo <= near_hi || continue
-		px(v) = (v - lo) / (hi - lo) * len
-		# Distance of the label nearest the top (bottom) of the axis from it.
-		d_top = reversed ? px(near_lo) : len - px(near_hi)
-		d_bottom = reversed ? len - px(near_hi) : px(near_lo)
-		top = max(top, half - d_top)
-		bottom = max(bottom, half - d_bottom)
-	end
-	return (max(top, 0.0), max(bottom, 0.0))
-end
-
-# Half a y tick label's height per px of tick font, as plotly's automargin
-# measures it past the axis end (render probes: 7.8 px at 12 px Open Sans,
-# 5.8 above and 6.2 below at 10.7 px Times; the larger ratio, 0.65).
-const _FIN_YLABEL_HALF = 0.65
 
 # Passes of `_fin_fit!` per finalize run; a figure converges in two or three.
 const _FIN_FIT_ROUNDS = 4

@@ -3405,3 +3405,74 @@ end
 	@test _sfn_margin(p, :b) == 50
 	@test _SFN._fin_meta_get(p.layout, _SFN._ROOM_MARGIN_KEY) === nothing
 end
+
+const _SFN_BLOCK_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const fl = gd._fullLayout;
+  const root = gd.getBoundingClientRect();
+  let top = 1e9, bottom = -1e9;
+  for (const t of gd.querySelectorAll('g.xtick text, g.x2tick text, g.ytick text, g.y2tick text, .g-xtitle text, .g-x2title text, .g-ytitle text, .g-y2title text')) {
+    const r = t.getBoundingClientRect();
+    if (r.height <= 0) continue;
+    top = Math.min(top, r.top - root.top);
+    bottom = Math.max(bottom, r.bottom - root.top);
+  }
+  const x1 = [...gd.querySelectorAll('g.xtick text, .g-xtitle text')].map(t => t.getBoundingClientRect().bottom - root.top);
+  const box = a => [a._offset, a._offset + a._length];
+  return JSON.stringify({H: fl.height, top: top, bottom: bottom, x1_bottom: Math.max(...x1),
+    x: box(fl.xaxis), y: box(fl.yaxis), x2: box(fl.xaxis2), y2: box(fl.yaxis2)});
+})()
+"""
+
+@testset "a grid of equal-aspect rows is drawn as one centred block, its gaps closed (V2)" begin
+	xw = collect(range(0, 4; length = 80))
+	function rows(; aspect = nothing)
+		with_style(:ieee) do
+			sf = subplots(2, 1; sync = false)
+			aspect === nothing ? figsize!(sf, :ieee; columns = 2) : figsize!(sf, :ieee; columns = 2, aspect = aspect)
+			for (r, f) in ((1, sin), (2, cos))
+				plot_scatter!(sf, xw, 0.5 .+ 0.4 .* f.(3 .* xw); row = r, col = 1, xrange = (0, 4), yrange = (0, 1),
+					equalar = true, xlabel = "x (μm)", ylabel = "y")
+			end
+			sf
+		end
+	end
+	# A fixed size (an aspect given) with height to spare: the rows close up
+	# to what their labels need and the block is centred with its labels
+	# (d017760: 17 px between the first row's x title and the second row,
+	# 21 px blank above the block and 2 px below).
+	sf = rows(; aspect = 0.62)
+	@test _SFN._fin_meta_get(sf.plot.layout, _SFN._FIN_SIZE_KEY) == "user"
+	@test _sfn_settled(sf)
+	info = _sfn_render_js(sf, _SFN_BLOCK_JS)
+	if info !== nothing
+		H = info["H"]
+		gap = info["y2"][1] - info["x1_bottom"]
+		@test 0 <= gap <= 8
+		@test abs(info["top"] - (H - info["bottom"])) <= 3
+		# Equal aspect boxes of one size. (plotly's push for the y labels at
+		# the axis ends, which the margin estimate does not model, draws
+		# them 584 px wide for the 601 of d017760, whose bottom labels
+		# pushed the margin instead.)
+		ws = [info[xk][2] - info[xk][1] for xk in ("x", "x2")]
+		hs = [info[yk][2] - info[yk][1] for yk in ("y", "y2")]
+		@test all(w -> w >= 575, ws) && abs(ws[1] - ws[2]) <= 1
+		@test all(i -> abs(ws[i] / hs[i] - 4) <= 0.05, 1:2)
+	end
+	# The journal width without a height or aspect: the height is free, so
+	# the page drops the blank rows (d017760: 516 px, the style's own height).
+	sf = rows()
+	rec = _SFN._fin_meta_get(sf.plot.layout, _SFN._FIN_SIZE_KEY)
+	@test rec isa AbstractVector && rec[5] == 0 && rec[6] == 1
+	W, H = _sfn_size(sf)
+	@test W == 687 && H <= 470
+	@test _sfn_settled(sf)
+	info = _sfn_render_js(sf, _SFN_BLOCK_JS)
+	if info !== nothing
+		@test info["x"][2] - info["x"][1] >= 575
+		@test 0 <= info["y2"][1] - info["x1_bottom"] <= 8
+		@test abs(info["top"] - (info["H"] - info["bottom"])) <= 3
+	end
+end
