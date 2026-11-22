@@ -1680,12 +1680,9 @@ struct _S3AxisLabels
 	label_pad::Float64
 	title_text::String
 	title_own::Bool
-	# Width (px) of the title and of its two-line form (`_s3_wrap_title`;
-	# NaN without one) at a font size, as `(a, b)`: `a * size + b`
-	# (`_s3_title_affine`): `_s3_title_px` twice per label, not once per
-	# camera and scale the framing search tries (O6).
-	title_width::NTuple{2, Float64}
-	title_wrap_width::NTuple{2, Float64}
+	# Width (px) of the title at `title_size` (`_s3_title_px`): once per
+	# label, not once per camera the framing search tries (O6).
+	title_px::Float64
 end
 
 # Characters a label shows: HTML tags (<b>, <sub>, ...) count as nothing, an
@@ -1874,27 +1871,9 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol; pads = _s3_scene_pads(p, sce
 			pads[2],
 			text,
 			own_title,
-			_s3_title_affine(text),
-			_s3_wrap_title_affine(text),
+			_s3_title_px(text, title_size),
 		)
 	end
-end
-
-# `_s3_title_px(text, size)` as `(a, b)` with `a * size + b` the same width
-# for every size: `_text_extent` is affine in the font size (advances scale
-# with it; the layout-unit rounding, `_TEXT_GLYPH_ROUNDING_PX` per glyph,
-# does not), so two sizes give it exactly.
-function _s3_title_affine(text::AbstractString)
-	w1, w2 = _s3_title_px(text, 1.0), _s3_title_px(text, 2.0)
-	return (w2 - w1, 2 * w1 - w2)
-end
-_s3_title_width(width::NTuple{2, Float64}, size::Real) = width[1] * size + width[2]
-
-# `title_wrap_width` of `_S3AxisLabels`: `_s3_title_affine` of the two-line
-# form of `text`, `(NaN, NaN)` when it has none.
-function _s3_wrap_title_affine(text::AbstractString)
-	wrapped = _s3_wrap_title(text)
-	return wrapped === nothing ? (NaN, NaN) : _s3_title_affine(wrapped[1])
 end
 
 # Box corner `index` (0–7; bit d - 1 set: the high end of axis d) of a box
@@ -2087,7 +2066,7 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 		along = !label.title_along ? (1.0, 0.0) : edge_len > 1e-9 ? (edge_x / edge_len, edge_y / edge_len) :
 			screen_direction(at, a)
 		thick = label.title_size * (1 + _S3_LINE_EM * (label.title_lines - 1))
-		push!(quads, _s3_text_quad(project(at), along, 0.5 * _s3_title_width(label.title_width, label.title_size), 0.5 * thick))
+		push!(quads, _s3_text_quad(project(at), along, 0.5 * label.title_px, 0.5 * thick))
 		push!(tags, (a, :title))
 	end
 	placed = _S3Title[]
@@ -2172,13 +2151,12 @@ function _s3_place_titles(labels, geoms, ticks, centroid, scale::Float64, wrap::
 		(label.visible && label.title_chars > 0 && geoms[a] !== nothing) || continue
 		lo, hi = geoms[a]
 		text, chars, lines = label.title_text, label.title_chars, label.title_lines
-		width = label.title_width
 		if wrap && lines == 1
 			wrapped = _s3_wrap_title(text)
-			wrapped === nothing || ((text, chars) = wrapped; lines = 2; width = label.title_wrap_width)
+			wrapped === nothing || ((text, chars) = wrapped; lines = 2)
 		end
 		size = label.title_size * scale
-		half_len = 0.5 * _s3_title_width(width, size)
+		half_len = 0.5 * _s3_title_px(text, size)
 		half_thick = 0.5 * size * (1 + _S3_LINE_EM * (lines - 1))
 		dx, dy = hi[1] - lo[1], hi[2] - lo[2]
 		edge = hypot(dx, dy)

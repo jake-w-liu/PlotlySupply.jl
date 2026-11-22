@@ -1085,22 +1085,13 @@ using Test, PlotlySupply
 				for (text, size) in (("Wavelength (nm)", 12.0), ("x", 10.0), ("\$\\lambda\$ (nm)", 11.0))
 					w = PS._s3_title_px(text, size)
 					@test w == PS._text_extent(text, size)[1]
-					# affine in the size (the per-glyph rounding does not
-					# scale): the labels keep two numbers for every size
-					@test PS._s3_title_width(PS._s3_title_affine(text), size) ≈ w rtol = 1e-12
 				end
-				# the cached widths of a scene's axis labels, wrapped form
-				# included, at the sizes the framing search tries
+				# the cached width of a scene's axis label: exact, at its size
 				long = "Wavelength of the probe (nm)"
 				q = plot_surface([0.0 1; 1 0]; xlabel = long, ylabel = "y")
 				labels = PS._s3_axis_labels(q, :scene)
-				for size in (6.0, 9.5, 10.666666666666666, 14.0, 23.0)
-					@test PS._s3_title_width(labels[1].title_width, size) ≈ PS._s3_title_px(long, size) rtol = 1e-12
-					@test PS._s3_title_width(labels[1].title_wrap_width, size) ≈
-						PS._s3_title_px(PS._s3_wrap_title(long)[1], size) rtol = 1e-12
-					@test PS._s3_title_width(labels[2].title_width, size) ≈ PS._s3_title_px("y", size) rtol = 1e-12
-				end
-				@test all(isnan, labels[2].title_wrap_width)
+				@test labels[1].title_px == PS._s3_title_px(long, labels[1].title_size)
+				@test labels[2].title_px == PS._s3_title_px("y", labels[2].title_size)
 				# a plain title in a journal family: well under the 0.56 em a
 				# character of a tick digit (:default keeps the widest
 				# candidate family, D19)
