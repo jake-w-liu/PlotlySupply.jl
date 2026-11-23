@@ -21,6 +21,10 @@ function _m2_throws(f, needle::AbstractString)
 end
 
 _m2_json(x) = _M2_PB.JSON.json(x)
+# A field of a trace as plotly.js receives it: the JSON every writer sends
+# (non-finite numbers as null, a matrix as its columns). The heatmap path keeps
+# the cell matrix itself (mr-07), so its rows are read from the JSON.
+_m2_plotly(h, key::Symbol) = _M2_PB.JSON.parse(_M2_PB.JSON.json(h; allownan = true, nan = "null", inf = "null", ninf = "null"))[String(key)]
 _m2_get(m, key) = _M2._cmn_mapping_get(m, key)
 _m2_type(t) = String(get(t.fields, :type, "scatter"))
 _m2_fills(fig) = [t for t in _M2._plot_data(fig) if get(t.fields, :fill, "") == "toself"]
@@ -583,7 +587,7 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		@test h.fields[:x] == x && h.fields[:y] == y
 		@test h.fields[:transpose] === false
 		@test h.fields[:zsmooth] === false
-		@test h.fields[:z] == [[C[1, j], C[2, j]] for j in 1:3]
+		@test _m2_plotly(h, :z) == [[C[1, j], C[2, j]] for j in 1:3]
 		@test (h.fields[:zmin], h.fields[:zmax]) == (1.0, 6.0)
 		@test h.fields[:colorscale] == _m2_stops("Viridis")
 		@test h.fields[:showscale] === true
@@ -591,15 +595,15 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		# decreasing coordinates are reversed together with C
 		fig = plot_pcolormesh(reverse(x), y, C)
 		@test fig.data[1].fields[:x] == x
-		@test fig.data[1].fields[:z] == [[C[2, j], C[1, j]] for j in 1:3]
+		@test _m2_plotly(fig.data[1], :z) == [[C[2, j], C[1, j]] for j in 1:3]
 		# NaN cell is a gap; log norm stores log10 and hovers the raw value
 		Cn = copy(C)
 		Cn[2, 1] = NaN
 		fig = plot_pcolormesh(x, y, Cn; colornorm = :log, hover = true, colorbar_title = "v")
 		h = fig.data[1]
-		@test h.fields[:z][1][2] === nothing
-		@test h.fields[:z][2][1] ≈ log10(C[1, 2])
-		@test h.fields[:customdata][2][1] == C[1, 2]
+		@test _m2_plotly(h, :z)[1][2] === nothing
+		@test _m2_plotly(h, :z)[2][1] ≈ log10(C[1, 2])
+		@test _m2_plotly(h, :customdata)[2][1] == C[1, 2]
 		@test h.fields[:zmin] == 0.0 && h.fields[:zmax] ≈ log10(6.0)
 		@test _m2_get(_m2_get(h.fields[:colorbar], :title), :text) == "v"
 		# coloraxis on the heatmap path
@@ -669,7 +673,7 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		h = fig.data[1]
 		@test _m2_type(h) == "heatmap"
 		@test h.fields[:transpose] === false
-		xc, yc, z = h.fields[:x], h.fields[:y], h.fields[:z]
+		xc, yc, z = h.fields[:x], h.fields[:y], _m2_plotly(h, :z)
 		@test length(xc) == 64 && length(yc) == 48
 		@test xc[1] ≈ 4 / 64 / 2 && yc[1] ≈ 3 / 48 / 2
 		filled = [(i, j) for j in eachindex(yc), i in eachindex(xc) if z[j][i] !== nothing]
@@ -685,7 +689,7 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		# masked triangle pixels are gaps; the hidden node does not set limits
 		fig = plot_tripcolor(_M2_SQX, _M2_SQY, _M2_SQTRI, [0.0, 1.0, 1.0, 2.0]; shading = :gouraud, mask = [false, true], resolution = 20)
 		h = fig.data[1]
-		xc, yc, z = h.fields[:x], h.fields[:y], h.fields[:z]
+		xc, yc, z = h.fields[:x], h.fields[:y], _m2_plotly(h, :z)
 		for j in eachindex(yc), i in eachindex(xc)
 			# triangle 1 = (0,0), (1,0), (1,1): below the diagonal
 			if yc[j] > xc[i] + 1e-9
@@ -705,8 +709,9 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		@test occursin("%{z", fig.data[1].fields[:hovertemplate])
 		fig = plot_tripcolor(_M2_TX, _M2_TY, _M2_TRI, _M2_TX .+ 1; shading = :gouraud, colornorm = :log, hover = true)
 		h = fig.data[1]
-		k = findfirst(v -> v !== nothing, h.fields[:z][end ÷ 2])
-		@test exp10(h.fields[:z][end ÷ 2][k]) ≈ h.fields[:customdata][end ÷ 2][k]
+		z, raw = _m2_plotly(h, :z), _m2_plotly(h, :customdata)
+		k = findfirst(v -> v !== nothing, z[end ÷ 2])
+		@test exp10(z[end ÷ 2][k]) ≈ raw[end ÷ 2][k]
 		@test _m2_throws(() -> plot_tripcolor(_M2_TX, _M2_TY, _M2_TRI, [1.0, 2.0, 3.0, 4.0]; shading = :gouraud), "must have one entry per node (5)")
 		@test _m2_throws(() -> plot_tripcolor(_M2_TX .+ 1, _M2_TY, _M2_TRI, _M2_TX; shading = :gouraud, xscale = "log"), "use shading = :flat on logarithmic axes")
 		@test _m2_throws(() -> plot_tripcolor(_M2_TX, _M2_TY, _M2_TRI, _M2_TX; shading = :gouraud, resolution = 4096), "`resolution` must be an integer in 2:2048")
@@ -1225,12 +1230,12 @@ end
 		v = _M2._mesh2d_cell_values(Cm, 1001, 1001, "t")
 		@test v isa Matrix{Float64} && isnan(v[3, 7]) && v[1, 1] == C[1, 1]
 		# The whole call: the validated values (8 MB, also the colour values
-		# under a linear norm), the trace's z rows (about 9 MB, kept) and small
+		# under a linear norm, which the trace keeps as its z, mr-07) and small
 		# bookkeeping. The 1.x path held a Matrix{Any} copy and a second pass
 		# (about 168 MB); 4x the input is a guard well below that.
 		@test @allocated(plot_pcolormesh(0:1000, 0:1000, C)) < 4 * sizeof(C)
 		# The values themselves are unchanged by the in-place path.
-		z = plot_pcolormesh(0:2, 0:2, [1.0 NaN; 3.0 4.0]).data[1].fields[:z]
+		z = _m2_plotly(plot_pcolormesh(0:2, 0:2, [1.0 NaN; 3.0 4.0]).data[1], :z)
 		@test z == [[1.0, 3.0], [nothing, 4.0]]
 		@test _m2_throws(() -> plot_pcolormesh(0:2, 0:2, Any[1.0 "a"; 3.0 4.0]), "plot_pcolormesh: colour values must be real numbers or missing; entry 3 is \"a\"")
 	end

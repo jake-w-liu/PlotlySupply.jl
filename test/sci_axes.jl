@@ -826,7 +826,7 @@ end
         sc = subplots(1, 1; sync = false, specs = fill(Spec(kind = "scene"), 1, 1))
         @test _ax_throws(() -> inset!(sc, (0.1, 0.1, 0.2, 0.2)), "inset!: an inset applies to Cartesian (xy) cells")
         @test isempty(sc.insets)
-        @test _ax_throws(() -> inset!(plot_scatter([1.0], [1.0]), (0.1, 0.1, 0.2, 0.2)), "inset! needs a SubplotFigure; use subplots(1,1; sync=false)")
+        @test _ax_throws(() -> inset!(plot_scatter([1.0], [1.0]), (0.1, 0.1, 0.2, 0.2)), "inset!: only a SubplotFigure has insets")
         # Ids follow creation order.
         @test inset!(sf, (0.05, 0.05, 0.3, 0.3); row = 1, col = 2) == 2
     end

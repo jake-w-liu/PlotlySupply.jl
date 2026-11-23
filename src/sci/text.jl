@@ -3409,7 +3409,9 @@ function title!(
 	bold::Bool = false,
 	offset::Union{Tuple, AbstractVector} = (0, 0),
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("title!", kwargs; accepted = (:row, :col, :align, :fontsize, :bold, :offset, :show))
 	_text_reject_show(show, "title!")
 	# Validate before the transaction so a bad keyword never stages anything.
 	_text_title_args(align, fontsize, offset)
@@ -3657,7 +3659,9 @@ function panel_labels!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("panel_labels!", kwargs; accepted = nothing)
 	who = "panel_labels!"
 	_text_reject_show(show, who)
 	_text_reject_panel_cell(row, col)
@@ -3705,7 +3709,9 @@ function panel_labels!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("panel_labels!", kwargs; accepted = nothing)
 	_text_reject_show(show, "panel_labels!")
 	_text_reject_panel_cell(row, col)
 	_text_panel_label_args(labels, format, position, fontsize, "panel_labels!")
@@ -3960,8 +3966,10 @@ function legend_entry!(
 	col::Union{Nothing, Integer} = nothing,
 	legend_target::Symbol = :cell,
 	show = nothing,
+	kwargs...,
 )
 	who = "legend_entry!"
+	_reject_keywords(who, kwargs; accepted = nothing)
 	_text_reject_show(show, who)
 	_text_legend_target(legend_target, who)
 	# Build once outside the transaction so invalid styling throws before

@@ -170,7 +170,7 @@ import Dates
 		@test lg(sf)[:bgcolor] == "black"
 		@test throws_arg(() -> subplot_legends!(sf; bgcolor = "red", legend_bgcolor = "blue"), "deprecated alias")
 		@test throws_arg(() -> subplot_legends!(sf; show = true), "subplot_legends!: `show` is not supported")
-		@test_throws MethodError subplot_legends!(sf; legend_position = :top)
+		@test throws_arg(() -> subplot_legends!(sf; legend_position = :top), "subplot_legends!: unsupported keyword argument(s) `legend_position`")
 		# the Plot method has the same keywords
 		raw = pl(sf)
 		p2 = deepcopy(raw)

@@ -33,13 +33,18 @@ end
 		@test PlotlySupply._format_scale(o2, "png") == 2.0
 		@test PlotlySupply._format_dpi(o2, "png") === nothing
 	end
-	# The figure's carried style decides, not the active one.
+	# A figure that carries a style is exported under it whatever style is
+	# active; one that carries none (made under :default) follows the active
+	# style (`_export_style_is_sized`, docs/src/export.md).
 	ieee = with_style(:ieee) do
 		plot_scatter(1:3, 1:3)
 	end
 	plain = plot_scatter(1:3, 1:3)
 	with_style(:ieee) do
-		@test !PlotlySupply._normalize_export_options(plain, (;)).sized || true
+		@test PlotlySupply._normalize_export_options(plain, (;)).sized
+		@test PlotlySupply._normalize_export_options(ieee, (;)).sized
+	end
+	with_style(:publication) do
 		@test PlotlySupply._normalize_export_options(ieee, (;)).sized
 	end
 	@test PlotlySupply._normalize_export_options(ieee, (;)).sized
@@ -192,7 +197,7 @@ end
 	err = _w7_msg(() -> deletetraces!(p, 1, 1))
 	@test err isa ArgumentError && startswith(err.msg, "deletetraces!:")
 	@test length(p.data) == 1
-	@test_throws BoundsError deletetraces!(p, 5)
-	@test_throws BoundsError restyle!(p, 5; line_width = 2)
+	@test_throws ArgumentError deletetraces!(p, 5)
+	@test_throws ArgumentError restyle!(p, 5; line_width = 2)
 	@test length(p.data) == 1
 end

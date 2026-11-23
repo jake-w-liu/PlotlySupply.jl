@@ -289,7 +289,9 @@ function set_default_mathtext!(
 	size::AbstractString = "",
 	font::AbstractString = "",
 	inherit_text_font::Union{Nothing, Bool} = nothing,
+	kwargs...,
 )
+	_reject_keywords("set_default_mathtext!", kwargs; accepted = (:size, :font, :inherit_text_font))
 	normalized = _normalize_mathtext_size(size, "set_default_mathtext!")
 	font_name = if isempty(strip(font))
 		""
@@ -393,7 +395,9 @@ function mathtext(
 	s::AbstractString;
 	align::Symbol = :c,
 	size::Union{Nothing,AbstractString} = nothing,
+	kwargs...,
 )::String
+	_reject_keywords("mathtext", kwargs; accepted = (:align, :size))
 	column = _mathtext_align_column(align, "mathtext")
 	normalized_size = size === nothing ? nothing :
 		_normalize_mathtext_size(size, "mathtext")

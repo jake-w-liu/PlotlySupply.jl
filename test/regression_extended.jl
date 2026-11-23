@@ -93,7 +93,9 @@ end
 			@test _rx_atomic(target, () -> mutator(target, labels, parents), "Pass unique `ids`")
 
 			ids = ["2023", "2024", "2023/Q1", "2024/Q1"]
-			fig = constructor(labels, ["", "", "2023", "2024"]; ids = ids, values = [0, 0, 1, 2], branchvalues = :total)
+			# "total": a year is at least the sum of its quarters (plotly draws
+			# nothing otherwise, apib-05).
+			fig = constructor(labels, ["", "", "2023", "2024"]; ids = ids, values = [1, 2, 1, 2], branchvalues = :total)
 			trace = _rx_trace(fig)
 			@test trace.fields[:ids] === ids
 			@test trace.fields[:labels] === labels

@@ -949,8 +949,9 @@ xticks!(fig, log_ticks(1e-3, 1; subs = (1, 2, 5)))
 log_ticks(4, 32; base = 2)   # [4.0, 8.0, 16.0, 32.0]
 ```
 """
-function log_ticks(lo::Real, hi::Real; subs = (1,), base::Real = 10)
+function log_ticks(lo::Real, hi::Real; subs = (1,), base::Real = 10, kwargs...)
 	who = "log_ticks"
+	_reject_keywords(who, kwargs; accepted = (:subs, :base))
 	for (name, value) in (("lo", lo), ("hi", hi))
 		(isfinite(value) && value > 0) || throw(ArgumentError(
 			"$(who): `$(name)` must be finite and positive; got $(value).",
@@ -1756,7 +1757,11 @@ function _cmn_check_color(value, name::AbstractString, who::AbstractString)
 	(value isa AbstractString || value isa Symbol) || throw(ArgumentError(
 		"$(who): `$(name)` must be a colour string or symbol; got $(repr(value)).",
 	))
-	return _cmn_color_string(value)
+	text = _cmn_color_string(value)
+	# "" (unset) and "none" (no fill) are sentinels; anything else must be a
+	# colour (apia-07: "nocolor" was written into the figure).
+	(isempty(text) || lowercase(text) == "none") || _color_option_scalar(text, who, name)
+	return text
 end
 
 """

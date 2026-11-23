@@ -814,20 +814,14 @@ function _mesh2d_heatmap_trace(
 	hover::Bool,
 	tight::Bool,
 )
-	nx, ny = size(Z)
-	rows = Vector{Vector{Union{Nothing, Float64}}}(undef, ny)
-	for j in 1:ny
-		row = Vector{Union{Nothing, Float64}}(undef, nx)
-		for i in 1:nx
-			v = Z[i, j]
-			row[i] = isnan(v) ? _GAP : v
-		end
-		rows[j] = row
-	end
+	# `Z` itself, as plot_heatmap keeps its matrix (mr-07): JSON writes a
+	# matrix as its columns, so row j of plotly's z is Z[:, j] (`transpose =
+	# false`), and every writer sends NaN as a gap (null, or NaN in a typed
+	# array), so no Union{Nothing, Float64} copy is needed.
 	fields = Dict{Symbol, Any}(
 		:x => collect(xs),
 		:y => collect(ys),
-		:z => rows,
+		:z => Z,
 		:transpose => false,
 		:zsmooth => false,
 		:name => "",
@@ -849,9 +843,7 @@ function _mesh2d_heatmap_trace(
 	if !hover
 		fields[:hoverinfo] = "skip"
 	elseif cm.log && raw !== nothing
-		fields[:customdata] = [
-			Union{Nothing, Float64}[isnan(raw[i, j]) ? _GAP : raw[i, j] for i in 1:nx] for j in 1:ny
-		]
+		fields[:customdata] = raw
 		fields[:hovertemplate] = _MESH2D_VALUE_HOVER
 	else
 		fields[:hovertemplate] = "(%{x:.4g}, %{y:.4g}): %{z:.4g}<extra></extra>"
@@ -1022,9 +1014,6 @@ end
 # ---------------------------------------------------------------------------
 # SubplotFigure path
 # ---------------------------------------------------------------------------
-
-_mesh2d_trace_ref(trace, key::Symbol, default::String) =
-	trace isa GenericTrace ? String(get(trace.fields, key, default)) : default
 
 # Copy the figure's colour axes into the delegate's scratch figure, so a call
 # bound to a colour axis that already has limits reuses them (a shared norm,
@@ -1827,8 +1816,9 @@ function _mesh2d_pcolormesh_impl!(
 			validated = true,
 		)
 		# Views of the validated values, not copies (Z84): under a linear norm
-		# `cm.tvals` IS `cellvals`; neither is written, the trace builder copies
-		# into its own rows, and the flips below index into new arrays.
+		# `cm.tvals` IS `cellvals`; neither is written, the trace keeps them by
+		# reference as plot_heatmap does (mr-07), and the flips below index
+		# into new arrays.
 		Z = reshape(cm.tvals, m - 1, n - 1)
 		raw = cellvals
 		xe, ye = xv, yv

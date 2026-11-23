@@ -1572,28 +1572,25 @@ function _s3_write_pads!(layout::Layout, key::Symbol, pads::NTuple{2, Float64})
 	(holder === nothing || holder isa AbstractDict) || return false
 	record = _s3_pads_record(layout)
 	current = record === nothing ? nothing : _cmn_mapping_get(record, key)
-	# `meta` is copied on write (a new mapping replaces it in the layout, the
-	# old one is never changed): a transactional mutator and the live-window
-	# delta share the layout's `meta` between the staged and the committed
-	# figure, so an in-place write would escape both the rollback and the delta.
-	rebuilt(h) = meta isa PlotlyBase.PlotlyAttribute ? PlotlyBase.PlotlyAttribute(h) : h
+	# The record is copied on write (a new mapping replaces it in `meta`, the
+	# old one is never changed); `meta` itself is written in place, like every
+	# finalizer record (`_fin_meta_set!`): a staged call commits it back into
+	# the live figure's own `meta`, which the user's references into the layout
+	# keep pointing at (layout_merge_preservation), and the append-only fast
+	# path gives the run its own `meta` first (`_fin_own_meta!`).
 	if pads == _S3_GL_DEFAULT_PADS
 		current === nothing && return false
-		fresh = copy(holder)
 		fresh_record = copy(record)
 		_cmn_mapping_delete!(fresh_record, (key,))
-		isempty(fresh_record) ? delete!(fresh, _S3_PADS_KEY) : (fresh[_S3_PADS_KEY] = fresh_record)
-		isempty(fresh) ? delete!(layout.fields, :meta) : (layout.fields[:meta] = rebuilt(fresh))
+		_fin_meta_set!(layout, _S3_PADS_KEY, isempty(fresh_record) ? nothing : fresh_record)
 		return true
 	end
 	same = (current isa AbstractVector || current isa Tuple) && length(current) == 2 &&
 		all(i -> _s3_is_real(current[i]) && current[i] == pads[i], 1:2)
 	same && return false
-	fresh = holder === nothing ? Dict{Any, Any}() : copy(holder)
 	fresh_record = record === nothing ? Dict{Any, Any}() : copy(record)
 	fresh_record[key] = Float64[pads[1], pads[2]]
-	fresh[_S3_PADS_KEY] = fresh_record
-	layout.fields[:meta] = rebuilt(fresh)
+	_fin_meta_set!(layout, _S3_PADS_KEY, fresh_record)
 	return true
 end
 
@@ -3329,25 +3326,26 @@ end
 
 # The scene-related layout state the rounds write: the scene entry (camera,
 # tick counts and values, tick fonts, mark, titles), the annotations (titles
-# PlotlySupply draws) and `meta` (label pads; copied on write, so the old
-# value stays valid).
+# PlotlySupply draws) and the label-pads record in `meta` (the record is
+# copied on write, so the old one stays valid; `meta` itself is written in
+# place, `_s3_write_pads!`, so the snapshot keeps the record, not `meta`).
 struct _S3Snapshot
 	scene::Any
 	annotations::Any
-	meta::Any
+	pads::Any
 end
 
-_s3_snapshot(p::Plot, key::Symbol) = _S3Snapshot(
-	deepcopy(get(p.layout.fields, key, nothing)),
-	get(p.layout.fields, :annotations, nothing),
-	get(p.layout.fields, :meta, nothing),
-)
+function _s3_snapshot(p::Plot, key::Symbol)
+	meta = get(p.layout.fields, :meta, nothing)
+	pads = meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute ? _cmn_mapping_get(meta, _S3_PADS_KEY) : nothing
+	return _S3Snapshot(deepcopy(get(p.layout.fields, key, nothing)), get(p.layout.fields, :annotations, nothing), pads)
+end
 
 function _s3_restore!(p::Plot, key::Symbol, snapshot::_S3Snapshot)
 	fields = p.layout.fields
 	fields[key] = deepcopy(snapshot.scene)
 	snapshot.annotations === nothing ? delete!(fields, :annotations) : (fields[:annotations] = snapshot.annotations)
-	snapshot.meta === nothing ? delete!(fields, :meta) : (fields[:meta] = snapshot.meta)
+	_fin_meta_set!(p.layout, _S3_PADS_KEY, snapshot.pads)
 	return nothing
 end
 
@@ -5119,8 +5117,8 @@ function _s3_scatter3d_traces(
 	color = _s3_color_text(color, who, "color")
 	marker_color = _s3_color_text(marker_color, who, "marker_color")
 	marker_line_color = _s3_color_text(marker_line_color, who, "marker_line_color")
-	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x)
-	_, y_nested = _nested_coordinate_mode(z, y, :z, :y)
+	z_nested, x_nested = _nested_coordinate_mode(z, x, :z, :x; who = who)
+	_, y_nested = _nested_coordinate_mode(z, y, :z, :y; who = who)
 	start = _s3_next_index(fig)
 	if !z_nested
 		single_mode = _first_or_empty(mode)

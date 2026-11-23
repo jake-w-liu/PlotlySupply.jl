@@ -82,6 +82,18 @@ function _precompile_workload()
 	figsize!(sf, 7.0, 5.0; units = :in)
 	tight_layout!(sf)
 
+	# Field maps side by side with one shared colorbar (a field in a second
+	# cell, `shared_colorbar!`), a journal size, statistics and a categorical
+	# axis: common first calls that compiled for 2-16 s outside the workload.
+	fields = subplots(1, 2; sync = false)
+	plot_heatmap!(fields, x, x, U; row = 1, col = 1, colorbar_title = "u")
+	plot_heatmap!(fields, x, x, U; row = 1, col = 2, colorbar_title = "u")
+	shared_colorbar!(fields; title = "u")
+	figsize!(plot_scatter(x, y), :ieee)
+	plot_box(y)
+	plot_violin(y)
+	plot_bar(["a", "b", "c"], [1.0, 2.0, 3.0])
+
 	# Publication style.
 	with_style(:publication) do
 		plot_scatter(x, y; legend = "a", xlabel = "x", ylabel = "y")

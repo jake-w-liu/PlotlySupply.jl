@@ -1118,12 +1118,8 @@ const _SCB_BARS_JS = raw"""
 """
 
 function _scb_render(p::Plot; bars::Int = 1)
-	sp = try
-		to_syncplot(p; show = false)
-	catch err
-		@warn "sci_colorbar: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
-		return nothing
-	end
+	# A renderer failure is a test error, never a skipped check (tests-ci-05).
+	sp = to_syncplot(p; show = false)
 	try
 		backend = _SCB._syncplot_backend(sp)
 		script = replace(_SCB_BARS_JS, "__DIV__" => _SCB._json_js(sp.divid), "__BARS__" => string(bars))

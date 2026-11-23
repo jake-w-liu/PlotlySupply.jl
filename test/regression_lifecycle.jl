@@ -577,7 +577,9 @@ end
 		bogus = SyncPlot(Plot(scatter(y=[1])), nothing, nothing, "rl-bogus")
 		@test to_syncplot(bogus) === bogus
 		@test to_syncplot(bogus; width=10, title="ignored") === bogus
-		@test_throws MethodError to_syncplot(bogus; widht=10)
+		# An unknown keyword is an ArgumentError naming the function
+		# (invariant 4), not a MethodError.
+		@test_throws ArgumentError("to_syncplot: unsupported keyword argument(s) `widht`; it takes `app`, `width`, `height`, `title`, `show`, `autoplay`, `timeout_s`.") to_syncplot(bogus; widht=10)
 
 		for doc in (string(@doc plot), string(@doc to_syncplot))
 			@test !occursin("Pkg.add", doc)
@@ -714,11 +716,16 @@ end
 				PlotlySupply._mathjax_head_html(),
 				PlotlySupply._export_window_html("rl-export"),
 				PlotlySupply._syncplot_html("rl-div"; autoplay = false, timeout_s = 1.0),
-				String(savefig(Plot(scatter(y = [1, 2])); format = "html")),
+				# An HTML export loads MathJax only when the figure has math (a
+				# figure without it draws offline, O18).
+				String(savefig(Plot(scatter(y = [1, 2]), Layout(title = "\$x^2\$")); format = "html")),
 			)
 				@test occursin("SVG: {font: \"Gyre-Termes\"}", page)
 				@test occursin("var INHERIT = true;", page)
 			end
+			nomath = String(savefig(Plot(scatter(y = [1, 2])); format = "html"))
+			@test !occursin("SVG: {font:", nomath)
+			@test !occursin("var INHERIT", nomath)
 			set_default_mathtext!()
 			@test occursin(
 				"var INHERIT = null;",   # default: follow the figure style (L9)

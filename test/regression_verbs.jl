@@ -166,7 +166,14 @@ end
 		relayout!(sp; yaxis = attr(range = [1, 2]))
 		relayout!(sp; yaxis_range = nothing)
 		@test !haskey(p.layout[:yaxis], :range)
-		@test occursin("\"yaxis.range\":null", last(renderer.scripts))
+		# Removing a range is sent as the whole staged model, since a
+		# relayout to null would leave the `autorange = false` the range
+		# implied in the window (_layout_delta_has_renderer_side_effects):
+		# a react whose y axis no longer has a range.
+		script = last(renderer.scripts)
+		@test occursin("await Plotly.react", script)
+		@test occursin("\"yaxis\":{}", script)
+		@test !occursin("\"range\":[1,2]", script)
 	finally
 		close(sp)
 	end
@@ -529,7 +536,7 @@ end
 	try
 		@test_throws ArgumentError extendtraces!(sp, Dict(:y => [[1.0]]), [1, 1])
 		@test_throws ArgumentError extendtraces!(sp, Dict(:z => [[1.0]]), [1])
-		@test_throws BoundsError extendtraces!(sp, Dict(:y => [[1.0]]), [2])
+		@test_throws ArgumentError extendtraces!(sp, Dict(:y => [[1.0]]), [2])
 		@test isempty(renderer.scripts)
 		@test p.data[1][:y] == [1.0, 2.0]
 	finally

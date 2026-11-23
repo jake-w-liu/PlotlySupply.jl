@@ -876,7 +876,9 @@ end
 		# pcolormesh: C[i, k] colours the cell [x[i], x[i+1]] x [y[k], y[k+1]].
 		C = [i + 10k for i in 1:4, k in 1:2]
 		pm = plot_pcolormesh(x, y, C; equalar = false).data[1]
-		z = pm.fields[:z]
+		# What plotly.js draws is the JSON: row k of `z` is C[:, k] (the trace
+		# keeps C itself, mr-07).
+		z = _RF_JSON.parse(_RF_JSON.json(pm))["z"]
 		@test pm.fields[:x] == x && pm.fields[:y] == y && pm.fields[:transpose] == false
 		@test all(z[k][i] == C[i, k] for i in 1:4, k in 1:2)
 		# quiver: the arrow of u[ix, iy], v[ix, iy] starts at (x[ix], y[iy]).

@@ -156,16 +156,9 @@ _is_sandboxed_env() = any(
 	_SANDBOX_ENV_VARS,
 )
 
-function _default_electron_app(ec)
-	app = if _is_sandboxed_env() && isdefined(ec, :development_config)
-		security = Base.invokelatest(() -> ec.development_config())
-		Base.invokelatest(() -> ec.default_application(security))
-	else
-		Base.invokelatest(() -> ec.default_application())
-	end
-	_record_owned_electron_app!(app)
-	return app
-end
+# `_default_electron_app`, the bounded start of an Electron application and the
+# request/reply pairing on its connection (`_ec_run`, `_ec_native`) are in
+# electron_channel.jl.
 
 # ── Exit-time shutdown of PlotlySupply's Electron applications (X53) ──
 #
@@ -582,10 +575,8 @@ function _ensure_renderer_mathjax_current!(sp::SyncPlot, committed_model::Plot)
 			joinpath(tempdir, _SYNCPLOT_MODEL_FILENAME),
 			committed_model,
 		)
-		Base.invokelatest(() -> ec.load(window, _file_uri(index_file)))
-		result = Base.invokelatest(
-			() -> ec.run(window, _syncplot_readiness_script()),
-		)
+		_ec_native(() -> Base.invokelatest(() -> ec.load(window, _file_uri(index_file))), ec, _ec_window_app(window))
+		result = _ec_run(ec, window, _syncplot_readiness_script())
 		_require_plotlyjs_success(result, "MathJax page reload")
 	catch reload_error
 		_set_renderer_desynchronized!(sp, true)
@@ -828,17 +819,15 @@ function _create_syncplot_window(
 		_write_syncplot_model(model_file, p)
 		file_uri = _file_uri(tmpfile)
 
-		window = Base.invokelatest(() -> ec.Window(
+		window = _ec_native(() -> Base.invokelatest(() -> ec.Window(
 			electron_app,
 			file_uri;
 			width = options.width,
 			height = options.height,
 			title = options.title,
 			show = options.show,
-		))
-		render_result = Base.invokelatest(
-			() -> ec.run(window, readiness_js),
-		)
+		)), ec, electron_app)
+		render_result = _ec_run(ec, window, readiness_js)
 		_require_plotlyjs_success(render_result, "initial render")
 		creation_spec = _SyncPlotCreationSpec(
 			options.width,
@@ -868,7 +857,7 @@ function _create_syncplot_window(
 			# This exact window was created in the transaction above, so it is
 			# safe to close here even if setup failed before SyncPlot existed.
 			try
-				Base.invokelatest(() -> ec.close(window))
+				_ec_native(() -> Base.invokelatest(() -> ec.close(window)), ec, _ec_window_app(window))
 			catch cleanup_error
 				@warn "Failed to close a partially constructed Electron window." exception = (
 					cleanup_error,
@@ -891,6 +880,18 @@ function _create_syncplot_window(
 	end
 end
 
+# An unknown keyword of a compat verb or `to_syncplot` is an
+# ArgumentError("<verb>: ...") raised before anything changes (invariant 4),
+# not a MethodError naming a method table.
+function _compat_reject_keywords(who::AbstractString, kwargs, accepted = ())
+	unknown = Tuple(key for key in keys(kwargs) if !(key in accepted))
+	isempty(unknown) && return nothing
+	return _reject_keywords(who, NamedTuple{unknown}(Tuple(kwargs[key] for key in unknown));
+		accepted = accepted)
+end
+
+const _TO_SYNCPLOT_KEYWORDS = (:app, :width, :height, :title, :show, :autoplay, :timeout_s)
+
 function to_syncplot(
 	fig::Plot;
 	app = nothing,
@@ -900,7 +901,9 @@ function to_syncplot(
 	show::Bool = true,
 	autoplay::Bool = true,
 	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
+	kwargs...,
 )
+	_compat_reject_keywords("to_syncplot", kwargs, _TO_SYNCPLOT_KEYWORDS)
 	_syncplot_window_options(
 		"to_syncplot";
 		app = app,
@@ -941,7 +944,9 @@ function to_syncplot(
 	show::Bool = true,
 	autoplay::Bool = true,
 	timeout_s::Real = _SYNCPLOT_STARTUP_TIMEOUT_SECONDS,
+	kwargs...,
 )
+	_compat_reject_keywords("to_syncplot", kwargs, _TO_SYNCPLOT_KEYWORDS)
 	_syncplot_window_options(
 		"to_syncplot";
 		app = app,
@@ -1266,6 +1271,22 @@ function _require_plotlyjs_success(result, operation::AbstractString)
 	))
 end
 
+# Plotly.react keeps the private `_inputDomain` an equal-aspect axis
+# (`constrain = "domain"`) got at the previous draw, and constrains that old
+# domain instead of the one the new layout gives (sm-09: after figsize! the
+# window kept x domain [0, 0.749] where the model and a fresh window have
+# [0.061, 0.880]). The layout a react sends is the whole model, so its domains
+# are the input: the stale ones are dropped first. (Plotly.relayout/update keep
+# them: their input is the window's own layout, which plotly.js has rewritten
+# with the constrained domain.)
+const _PLOTLYJS_REACT_FRESH_DOMAINS_JS = raw"""
+  if (div._fullLayout) {
+    for (const key of Object.keys(div._fullLayout)) {
+      const axis = div._fullLayout[key];
+      if (/^[xy]axis\d*$/.test(key) && axis) delete axis._inputDomain;
+    }
+  }"""
+
 function _plotlyjs_refresh_script(
 	sp::SyncPlot,
 	data,
@@ -1286,6 +1307,7 @@ function _plotlyjs_refresh_script(
   if (typeof Plotly === "undefined") return "plotly-not-loaded";
   const div = document.getElementById($divid_js);
   if (!div) return "plot-div-not-found";
+$(_PLOTLYJS_REACT_FRESH_DOMAINS_JS)
   await Plotly.react(div, $data_js, $layout_js, $config_js);
   return "ok";
 })();
@@ -1327,6 +1349,7 @@ function _plotlyjs_refresh_payload_script(
   if (typeof Plotly === "undefined") return "plotly-not-loaded";
   const div = document.getElementById($divid_js);
   if (!div) return "plot-div-not-found";
+$(_PLOTLYJS_REACT_FRESH_DOMAINS_JS)
   await Plotly.react(div, $(payload.data), $(payload.layout), $(payload.config));
   return "ok";
 })();
@@ -1339,7 +1362,7 @@ function _run_plotlyjs_script!(
 	operation::AbstractString,
 )
 	ec = _syncplot_backend(sp)
-	result = Base.invokelatest(() -> ec.run(sp.window, js))
+	result = _ec_run(ec, sp.window, js)
 	_require_plotlyjs_success(result, operation)
 	return nothing
 end
@@ -1368,7 +1391,7 @@ function _plotlyjs_command!(sp::SyncPlot, command::Symbol)
 	_require_open_syncplot_window(sp)
 	js = _plotlyjs_command_script(sp, command)
 	ec = _syncplot_backend(sp)
-	result = Base.invokelatest(() -> ec.run(sp.window, js))
+	result = _ec_run(ec, sp.window, js)
 	_require_plotlyjs_success(result, string(command))
 	return nothing
 end
@@ -1484,9 +1507,16 @@ end
 # for an index outside the figure, as the tests of the compatibility verbs
 # pin); repeated indices are an ArgumentError naming the verb. Both are raised
 # before anything changes.
+# A trace index out of range is a user error (invariant 4): an ArgumentError
+# naming the function, raised before the figure changes.
+_trace_index_error(who, ind, upto::Int) = ArgumentError(
+	"$(who): trace index $(ind) is out of range " *
+	(upto == 0 ? "(the figure has no traces)." : "1:$(upto)."),
+)
+
 function _check_trace_indices(who::AbstractString, p::Plot, inds; unique::Bool = false, upto::Int = length(p.data))
 	for ind in inds
-		(1 <= ind <= upto) || throw(BoundsError(p.data, ind))
+		(1 <= ind <= upto) || throw(_trace_index_error(who, ind, upto))
 	end
 	unique && !allunique(inds) && throw(ArgumentError(
 		"$(who): trace indices must be distinct; got $(collect(inds)).",
@@ -4045,7 +4075,7 @@ function _stage_restyle(
 	verb::Symbol = :restyle!,
 )
 	for ind in inds
-		checkbounds(Bool, p.data, ind) || throw(BoundsError(p.data, ind))
+		checkbounds(Bool, p.data, ind) || throw(_trace_index_error(verb, ind, length(p.data)))
 	end
 
 	# A repeated trace object is staged only once, retaining PlotlyBase's
@@ -5554,42 +5584,43 @@ function _validate_trace_splice_args(
 	p::Plot,
 	update::AbstractDict,
 	indices::AbstractVector{Int},
-	maxpoints,
+	maxpoints;
+	who::AbstractString = "extendtraces!/prependtraces!",
 )
-	allunique(indices) || throw(ArgumentError("`indices` must not contain duplicates."))
+	allunique(indices) || throw(ArgumentError("$(who): `indices` must not contain duplicates."))
 	for p_ix in indices
-		checkbounds(Bool, p.data, p_ix) || throw(BoundsError(p.data, p_ix))
+		checkbounds(Bool, p.data, p_ix) || throw(_trace_index_error(who, p_ix, length(p.data)))
 	end
 
 	maxpoints_is_dict = maxpoints isa AbstractDict
 	for (key, inserts) in update
 		inserts isa AbstractVector ||
-			throw(ArgumentError("update attribute $(repr(key)) must be a vector of per-trace vectors."))
+			throw(ArgumentError("$(who): update attribute $(repr(key)) must be a vector of per-trace vectors."))
 		length(inserts) == length(indices) || throw(ArgumentError(
-			"update attribute $(repr(key)) must contain one vector per trace index; " *
+			"$(who): update attribute $(repr(key)) must contain one vector per trace index; " *
 			"got $(length(inserts)) updates for $(length(indices)) indices.",
 		))
 
 		if maxpoints_is_dict
 			haskey(maxpoints, key) || throw(ArgumentError(
-				"`maxpoints` must contain an entry for update attribute $(repr(key)).",
+				"$(who): `maxpoints` must contain an entry for update attribute $(repr(key)).",
 			))
 			limits = maxpoints[key]
 			limits isa AbstractVector || throw(ArgumentError(
-				"`maxpoints[$(repr(key))]` must be a vector with one limit per trace index.",
+				"$(who): `maxpoints[$(repr(key))]` must be a vector with one limit per trace index.",
 			))
 			length(limits) == length(indices) || throw(ArgumentError(
-				"`maxpoints[$(repr(key))]` must contain one limit per trace index; " *
+				"$(who): `maxpoints[$(repr(key))]` must contain one limit per trace index; " *
 				"got $(length(limits)) limits for $(length(indices)) indices.",
 			))
 		end
 
 		for (ix, p_ix) in enumerate(indices)
 			inserts[ix] isa AbstractVector || throw(ArgumentError(
-				"extendtraces!/prependtraces!: update attribute $(repr(key)) at position $ix must be an `AbstractVector`.",
+				"$(who): update attribute $(repr(key)) at position $ix must be an `AbstractVector`.",
 			))
 			p.data[p_ix][key] isa AbstractVector || throw(ArgumentError(
-				"extendtraces!/prependtraces!: cannot extend or prepend missing/non-vector trace attribute $(repr(key)) " *
+				"$(who): cannot extend or prepend missing/non-vector trace attribute $(repr(key)) " *
 				"on trace index $p_ix.",
 			))
 		end
@@ -5661,7 +5692,7 @@ function _do_trace_splice!(
 	maxpoints;
 	prepend::Bool,
 )
-	_validate_trace_splice_args(p, update, indices, maxpoints)
+	_validate_trace_splice_args(p, update, indices, maxpoints; who = prepend ? "prependtraces!" : "extendtraces!")
 	(isempty(indices) || isempty(update)) && return p
 
 	# The overwhelmingly common one-trace/one-attribute case is already
@@ -7478,7 +7509,8 @@ end
 # Renderer-backed model mutations stage and encode their complete candidate,
 # render it, and only then publish non-allocating pointer swaps to Julia.
 
-function PlotlyBase.react!(sp::SyncPlot, data::AbstractVector{<:AbstractTrace}, layout::AbstractLayout)
+function PlotlyBase.react!(sp::SyncPlot, data::AbstractVector{<:AbstractTrace}, layout::AbstractLayout; kwargs...)
+	_compat_reject_keywords("react!", kwargs)
 	prepare = function (target, current)
 		staged_data, staged_layout =
 			_prepare_react_values(current, data, layout)
@@ -7498,7 +7530,8 @@ function PlotlyBase.react!(sp::SyncPlot, data::AbstractVector{<:AbstractTrace}, 
 	return _syncplot_transaction!(sp, prepare)
 end
 
-function PlotlyBase.react!(sp::SyncPlot, p::Plot)
+function PlotlyBase.react!(sp::SyncPlot, p::Plot; kwargs...)
+	_compat_reject_keywords("react!", kwargs)
 	prepare = function (target, current)
 		script = _plotlyjs_refresh_script(
 			target,
@@ -8682,11 +8715,13 @@ function _mutate_and_refresh_syncplot!(
 	mutation_scope = nothing,
 	preserve_layout_vector::Union{Nothing,Symbol} = nothing,
 )
+	# One compiled transaction for every mutation closure (`_ErasedMutation`).
+	erased = _erased_mutation(mutation)
 	prepare = (target, current) ->
 		_prepare_full_model_mutation_transaction(
 			target,
 			current,
-			mutation,
+			erased,
 			commit_callback,
 			mutation_scope,
 			preserve_layout_vector,
@@ -8777,9 +8812,11 @@ function _transactional_full_plot_mutation!(
 	mutation_scope = nothing,
 	preserve_layout_vector::Union{Nothing,Symbol} = nothing,
 )
-	# The mutation runs with the style the figure carries (K1).
+	# The mutation runs with the style the figure carries (K1). One compiled
+	# transaction for every mutation closure (`_ErasedMutation`).
+	erased = _erased_mutation(mutation)
 	scoped_mutation = candidate -> _with_figure_style(candidate) do
-		mutation(candidate)
+		erased(candidate)
 	end
 	prepare = (target, current) ->
 		_prepare_full_model_mutation_transaction(
@@ -8888,31 +8925,36 @@ const _APPEND_TRACE_MUTATION_SCOPE = (
 	template_untouched = true,
 )
 
-function PlotlyBase.addtraces!(sp::SyncPlot, traces::AbstractTrace...)
+function PlotlyBase.addtraces!(sp::SyncPlot, traces::AbstractTrace...; kwargs...)
+	_compat_reject_keywords("addtraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_addtraces!(current, traces...)
 	end
 end
 
-function PlotlyBase.addtraces!(sp::SyncPlot, i::Int, traces::AbstractTrace...)
+function PlotlyBase.addtraces!(sp::SyncPlot, i::Int, traces::AbstractTrace...; kwargs...)
+	_compat_reject_keywords("addtraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_addtraces!(current, i, traces...)
 	end
 end
 
-function PlotlyBase.deletetraces!(sp::SyncPlot, inds::Int...)
+function PlotlyBase.deletetraces!(sp::SyncPlot, inds::Int...; kwargs...)
+	_compat_reject_keywords("deletetraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_deletetraces!(current, inds...)
 	end
 end
 
-function PlotlyBase.movetraces!(sp::SyncPlot, to_end::Int...)
+function PlotlyBase.movetraces!(sp::SyncPlot, to_end::Int...; kwargs...)
+	_compat_reject_keywords("movetraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_movetraces!(current, to_end...)
 	end
 end
 
-function PlotlyBase.movetraces!(sp::SyncPlot, src::AbstractVector{Int}, dest::AbstractVector{Int})
+function PlotlyBase.movetraces!(sp::SyncPlot, src::AbstractVector{Int}, dest::AbstractVector{Int}; kwargs...)
+	_compat_reject_keywords("movetraces!", kwargs)
 	return _mutate_structural_data_and_refresh_syncplot!(sp) do current
 		_do_movetraces!(current, src, dest)
 	end
@@ -8975,7 +9017,7 @@ function _prepare_trace_splice_fast_transaction(
 			return nothing
 		String(trace_type) in _PLOTLY_SPLICE_TRACE_TYPES || return nothing
 	end
-	_validate_trace_splice_args(p, update, indices, maxpoints)
+	_validate_trace_splice_args(p, update, indices, maxpoints; who = prepend ? "prependtraces!" : "extendtraces!")
 
 	# Plotly.extendTraces changes only gd.data[i], so a trace object listed at
 	# two positions (which the model extends at both) needs the general path.
@@ -9166,7 +9208,8 @@ function _plot_trace_splice!(
 	)
 end
 
-function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+function PlotlyBase.extendtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1; kwargs...)
+	_compat_reject_keywords("extendtraces!", kwargs)
 	return _syncplot_trace_splice!(
 		sp,
 		update,
@@ -9209,12 +9252,15 @@ function PlotlyBase.extendtraces!(
 	sp::SyncPlot,
 	update::AbstractDict,
 	index::Int,
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("extendtraces!", kwargs)
 	return PlotlyBase.extendtraces!(sp, update, [index], maxpoints)
 end
 
-function PlotlyBase.prependtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1)
+function PlotlyBase.prependtraces!(sp::SyncPlot, update::AbstractDict, indices::AbstractVector{Int} = [1], maxpoints = -1; kwargs...)
+	_compat_reject_keywords("prependtraces!", kwargs)
 	return _syncplot_trace_splice!(
 		sp,
 		update,
@@ -9257,8 +9303,10 @@ function PlotlyBase.prependtraces!(
 	sp::SyncPlot,
 	update::AbstractDict,
 	index::Int,
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("prependtraces!", kwargs)
 	return PlotlyBase.prependtraces!(sp, update, [index], maxpoints)
 end
 
@@ -10044,14 +10092,16 @@ function _prepare_redraw_transaction(target::SyncPlot, current::Plot)
 	return (script = script, operation = "redraw", commit = () -> current)
 end
 
-function PlotlyBase.redraw!(p::_RefreshablePlot)
+function PlotlyBase.redraw!(p::_RefreshablePlot; kwargs...)
+	_compat_reject_keywords("redraw!", kwargs)
 	# A Plot shown in a SyncPlot window redraws through the same renderer
 	# transaction as redraw!(::SyncPlot). An undisplayed Plot has no renderer,
 	# so the local path is a no-op (PlotlyBase's redraw! semantics).
 	return _transactional_plot_mutation!(p, _prepare_redraw_transaction, () -> p)
 end
 
-function PlotlyBase.purge!(p::_RefreshablePlot)
+function PlotlyBase.purge!(p::_RefreshablePlot; kwargs...)
+	_compat_reject_keywords("purge!", kwargs)
 	prepare = (target, current) ->
 		_prepare_purge_transaction(target, current)
 	local_mutation = () -> _do_purge!(p)
@@ -10065,8 +10115,10 @@ end
 function PlotlyBase.react!(
 	p::_RefreshablePlot,
 	data::AbstractVector{<:AbstractTrace},
-	layout::Layout,
+	layout::Layout;
+	kwargs...,
 )
+	_compat_reject_keywords("react!", kwargs)
 	prepare = function (target, current)
 		staged_data, staged_layout =
 			_prepare_react_values(current, data, layout)
@@ -10155,7 +10207,8 @@ function PlotlyBase.restyle!(
 	return _transactional_plot_mutation!(p, prepare, local_mutation)
 end
 
-function PlotlyBase.addtraces!(p::_RefreshablePlot, traces::AbstractTrace...)
+function PlotlyBase.addtraces!(p::_RefreshablePlot, traces::AbstractTrace...; kwargs...)
+	_compat_reject_keywords("addtraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_addtraces!(current, traces...)
 	end
@@ -10164,20 +10217,24 @@ end
 function PlotlyBase.addtraces!(
 	p::_RefreshablePlot,
 	i::Int,
-	traces::AbstractTrace...,
+	traces::AbstractTrace...;
+	kwargs...,
 )
+	_compat_reject_keywords("addtraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_addtraces!(current, i, traces...)
 	end
 end
 
-function PlotlyBase.deletetraces!(p::_RefreshablePlot, inds::Int...)
+function PlotlyBase.deletetraces!(p::_RefreshablePlot, inds::Int...; kwargs...)
+	_compat_reject_keywords("deletetraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_deletetraces!(current, inds...)
 	end
 end
 
-function PlotlyBase.movetraces!(p::_RefreshablePlot, to_end::Int...)
+function PlotlyBase.movetraces!(p::_RefreshablePlot, to_end::Int...; kwargs...)
+	_compat_reject_keywords("movetraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_movetraces!(current, to_end...)
 	end
@@ -10186,8 +10243,10 @@ end
 function PlotlyBase.movetraces!(
 	p::_RefreshablePlot,
 	src::AbstractVector{Int},
-	dest::AbstractVector{Int},
+	dest::AbstractVector{Int};
+	kwargs...,
 )
+	_compat_reject_keywords("movetraces!", kwargs)
 	return _transactional_structural_plot_mutation!(p) do current
 		_do_movetraces!(current, src, dest)
 	end
@@ -10197,8 +10256,10 @@ function PlotlyBase.extendtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
 	indices::AbstractVector{Int} = [1],
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("extendtraces!", kwargs)
 	return _plot_trace_splice!(
 		p,
 		update,
@@ -10244,8 +10305,10 @@ function PlotlyBase.extendtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
 	index::Int,
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("extendtraces!", kwargs)
 	return PlotlyBase.extendtraces!(p, update, [index], maxpoints)
 end
 
@@ -10253,8 +10316,10 @@ function PlotlyBase.prependtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
 	indices::AbstractVector{Int} = [1],
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("prependtraces!", kwargs)
 	return _plot_trace_splice!(
 		p,
 		update,
@@ -10298,8 +10363,10 @@ function PlotlyBase.prependtraces!(
 	p::_RefreshablePlot,
 	update::AbstractDict,
 	index::Int,
-	maxpoints = -1,
+	maxpoints = -1;
+	kwargs...,
 )
+	_compat_reject_keywords("prependtraces!", kwargs)
 	return PlotlyBase.prependtraces!(p, update, [index], maxpoints)
 end
 
@@ -10671,7 +10738,7 @@ function Base.close(sp::SyncPlot)
 			if _syncplot_raw_window_state(sp) !== :closed
 				ec = _syncplot_backend(sp)
 				window = getfield(sp, :window)
-				Base.invokelatest(() -> ec.close(window))
+				_ec_native(() -> Base.invokelatest(() -> ec.close(window)), ec, _ec_window_app(window))
 			end
 		catch
 			if render_lock_held
@@ -11098,6 +11165,23 @@ function _export_window_html(
   <style>
     @page { margin: 0; }
     html, body, #$divid { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
+    @media print {
+      /* printToPDF scales the page content down to fit the widest box in the
+         page. MathJax leaves a hidden measuring div (about 300 px wide) in the
+         body, which shrank every narrower PDF/EPS page drawn after it. Every
+         body child but the figure takes no room in print; it is clipped, not
+         removed (the figure's math refers to glyph definitions inside it). */
+      body > :not(#$divid) {
+        position: absolute !important; left: 0 !important; top: 0 !important;
+        width: 0 !important; height: 0 !important;
+        max-width: 0 !important; max-height: 0 !important;
+        overflow: hidden !important;
+      }
+      /* plotly.js draws axis lines, ticks and grid lines with
+         shape-rendering: crispEdges, which Chromium prints as 0.12 pt
+         translucent hairlines; in print they keep their stroke width. */
+      #$divid .crisp { shape-rendering: geometricPrecision !important; }
+    }
   </style>
 </head>
 <body>
@@ -11118,7 +11202,7 @@ function _wait_for_plotly(ec, win; timeout_s::Real = 10.0)
 	start_ns = time_ns()
 	while (time_ns() - start_ns) / 1.0e9 < timeout
 		try
-			result = Base.invokelatest(() -> ec.run(win, "typeof Plotly !== 'undefined' ? 'ready' : 'waiting'"))
+			result = _ec_run(ec, win, "typeof Plotly !== 'undefined' ? 'ready' : 'waiting'")
 			result == "ready" && return true
 		catch err
 			err isa InterruptException && rethrow()
@@ -11166,7 +11250,7 @@ function _close_export_window(ec, win)
 		# Unknown backend state is not proof that the window is closed. Attempt
 		# the close using the exact backend that created this exact window.
 	end
-	should_close && Base.invokelatest(() -> ec.close(win))
+	should_close && _ec_native(() -> Base.invokelatest(() -> ec.close(win)), ec, _ec_window_app(win))
 	return nothing
 end
 
@@ -11251,8 +11335,16 @@ function _retire_export_window_locked!(
 	return nothing
 end
 
+# Bound (seconds) on waiting for a running export at exit: an export holds the
+# lock for at most its renderer timeouts, but exit must never hang on it.
+const _EXPORT_EXIT_LOCK_TIMEOUT_S = Ref(30.0)
+
 function _cleanup_export_state_at_exit!(state::_ExportState)
-	lock(state.lock)
+	if timedwait(() -> trylock(state.lock), _EXPORT_EXIT_LOCK_TIMEOUT_S[]; pollint = 0.05) !== :ok
+		@warn "PlotlySupply: an export was still running at exit; its window and temporary " *
+			"files are left to the Electron shutdown."
+		return nothing
+	end
 	try
 		_retire_export_window_locked!(state; throw_errors = false)
 		_retry_pending_export_windows_locked!(state; throw_errors = false)
@@ -11311,12 +11403,25 @@ function _ensure_export_window_locked!(
 	state::_ExportState,
 	ec;
 	timeout_s::Real,
+	start_timeout_s::Real = _DEFAULT_EXPORT_TIMEOUT_S,
 )
 	_register_export_atexit_locked!(state)
 
 	# The MathJax configuration is baked into the window page, so a changed
 	# `set_default_mathtext!(; font, inherit_text_font)` or
 	# PLOTLYSUPPLY_MATHJAX_SVG_FONT requires a fresh window.
+	if _ec_poisoned(state.app)
+		# The application was given up (electron_channel.jl) and is being shut
+		# down with its windows: forget them, they cannot be closed by request.
+		state.window = nothing
+		state.backend = nothing
+		state.ready = false
+		state.mathjax_font = nothing
+		state.mathjax_inherit_text_font = nothing
+		state.tempdir = nothing
+		empty!(state.pending_windows)
+		state.app = nothing
+	end
 	mathjax = _mathjax_page_config()
 	font = mathjax.font
 	if _export_window_is_alive_locked(state) &&
@@ -11331,7 +11436,7 @@ function _ensure_export_window_locked!(
 
 	app = state.app
 	if state.app_backend !== ec || !_export_app_is_alive(app)
-		app = _default_electron_app(ec)
+		app = _default_electron_app(ec; timeout_s = start_timeout_s, who = "savefig")
 		state.app_backend = ec
 		state.app = app
 	end
@@ -11348,14 +11453,14 @@ function _ensure_export_window_locked!(
 			inherit_text_font = mathjax.inherit_text_font,
 		))
 		file_uri = _file_uri(tmpfile)
-		win = Base.invokelatest(() -> ec.Window(
+		win = _ec_native(() -> Base.invokelatest(() -> ec.Window(
 			app,
 			file_uri;
 			width = 960,
 			height = 720,
 			title = "PlotlySupply Export",
 			show = false,
-		))
+		)), ec, app; who = "savefig")
 		push!(state.pending_windows, (ec, win))
 		_wait_for_plotly(ec, win; timeout_s = timeout_s)
 
@@ -11420,6 +11525,7 @@ function _with_export_window(
 	state::_ExportState = _EXPORT_STATE;
 	ec = nothing,
 	timeout_s::Real = 10.0,
+	start_timeout_s::Real = _DEFAULT_EXPORT_TIMEOUT_S,
 )
 	backend = ec === nothing ? _electroncall() : ec
 	lock(state.lock)
@@ -11428,6 +11534,7 @@ function _with_export_window(
 			state,
 			backend;
 			timeout_s = timeout_s,
+			start_timeout_s = start_timeout_s,
 		)
 		return f(args...)
 	finally

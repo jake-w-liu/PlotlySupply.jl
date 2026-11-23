@@ -155,16 +155,74 @@ for updater in (
 	end
 end
 
+# Keyword names the methods of `mutator` for these positional argument types
+# accept (`nothing`: some method takes `kwargs...`, or none applies, and the
+# call itself reports any problem). Cached per mutator and argument types.
+const _MUTATOR_KEYWORDS = Dict{Tuple{Any,Any},Union{Nothing,Vector{Symbol}}}()
+const _MUTATOR_KEYWORDS_LOCK = ReentrantLock()
+
+function _mutator_keywords(mutator, argtypes::Type{<:Tuple})
+	return lock(_MUTATOR_KEYWORDS_LOCK) do
+		get!(_MUTATOR_KEYWORDS, (mutator, argtypes)) do
+			found = methods(mutator, argtypes)
+			isempty(found) && return nothing
+			accepted = Symbol[]
+			for m in found
+				declared = Base.kwarg_decl(m)
+				any(k -> endswith(String(k), "..."), declared) && return nothing
+				append!(accepted, declared)
+			end
+			return unique!(accepted)
+		end
+	end
+end
+
+# The public name of a mutator: `_set_legend_impl!` is `set_legend!`.
+function _public_mutator_name(mutator)
+	name = String(nameof(mutator))
+	m = match(r"^_(.+)_impl!$", name)
+	return m === nothing ? name : m.captures[1] * "!"
+end
+
+# An unknown keyword is an ArgumentError naming the public function (invariant
+# 4), not a MethodError naming the internal staging type, and is raised before
+# anything is staged.
+function _check_mutator_keywords(mutator, args, kwargs)
+	isempty(kwargs) && return nothing
+	argtypes = Tuple{_HighLevelStagedPlotMutation, map(Core.Typeof, args)...}
+	accepted = _mutator_keywords(mutator, argtypes)
+	accepted === nothing && return nothing
+	unknown = [key for key in keys(kwargs) if !(key in accepted)]
+	isempty(unknown) && return nothing
+	_reject_keywords(_public_mutator_name(mutator), NamedTuple{Tuple(unknown)}(Tuple(kwargs[k] for k in unknown));
+		accepted = accepted)
+end
+
+# A mutation closure behind one concrete type (O13). The closures of the
+# transaction entry points capture the mutator, its arguments and keywords, so
+# each (mutator, argument types, keywords) has a closure type of its own; the
+# transaction machinery they are passed to (staging, rebasing, committing,
+# the renderer delta) was compiled again for every one of them, 1-2 s at the
+# first call of each new keyword set. Behind `_ErasedMutation` it is compiled
+# once; only the small closure body is specialized, and the call through the
+# field is one dynamic dispatch per mutation.
+struct _ErasedMutation <: Function
+	f::Any
+end
+(m::_ErasedMutation)(args...) = m.f(args...)
+_erased_mutation(f) = f isa _ErasedMutation ? f : _ErasedMutation(f)
+
 function _transactional_high_level_plot_mutation!(
 	mutator::Function,
 	fig::Union{Plot,SyncPlot},
 	args...;
 	kwargs...,
 )
+	_check_mutator_keywords(mutator, args, kwargs)
 	result = Ref{Any}(nothing)
 	staged_target = Ref{Any}(nothing)
 	# A mutation runs with the style the figure carries (K1), not the active one.
-	full_mutation = function (candidate)
+	full_mutation = _ErasedMutation(function (candidate)
 		staged = _StagedPlotMutation(candidate)
 		staged_target[] = staged
 		_with_figure_style(staged; adopt = true) do
@@ -172,8 +230,14 @@ function _transactional_high_level_plot_mutation!(
 			_finalize_figure!(staged; live = _plot_data(fig))
 		end
 		return nothing
-	end
-	fast_mutation = function (candidate)
+	end)
+	fast_mutation = _ErasedMutation(function (candidate)
+		# The fast path stages the call on a layout that shares `meta` with
+		# the live figure: the run owns it before the mutator runs, so a
+		# record a mutator writes in place (figsize!'s size mark, the 3-D
+		# label pads of its own finalize pass) never reaches the live figure
+		# unless the call commits (threed-live-06).
+		candidate.layout isa Layout && _fin_own_meta!(candidate.layout)
 		staged = _HighLevelStagedPlotMutation(candidate)
 		staged_target[] = staged
 		_with_figure_style(staged; adopt = true) do
@@ -184,7 +248,7 @@ function _transactional_high_level_plot_mutation!(
 			_finalize_figure!(staged; live = _plot_data(fig), strict = true)
 		end
 		return nothing
-	end
+	end)
 	fast_path_allowed =
 		(
 			mutator === _set_legend_impl! ||
@@ -531,7 +595,8 @@ set_default_template!(PlotlyBase.Template(layout = attr(font = attr(family = "Ar
 set_default_template!()                    # back to "plotly_white"
 ```
 """
-function set_default_template!(template = "plotly_white")
+function set_default_template!(template = "plotly_white"; kwargs...)
+	_reject_keywords("set_default_template!", kwargs)
 	_DEFAULT_TEMPLATE[] = template isa PlotlyBase.Template ?
 		template :
 		_normalize_template(template; who = "set_default_template!")
@@ -564,7 +629,12 @@ fig = plot_scatter(1:3, [[1, 2, 3], [3, 2, 1]]; legend = ["a", "b"])  # legend b
 set_default_legend_position!()                                         # back to :topright
 ```
 """
-function set_default_legend_position!(position = :topright)
+function set_default_legend_position!(position = :topright; kwargs...)
+	_reject_keywords("set_default_legend_position!", kwargs)
+	(position isa Symbol || position isa AbstractString) || throw(ArgumentError(
+		"set_default_legend_position!: the position must be a Symbol or a string such as " *
+		":topright; got $(repr(position)).",
+	))
 	_DEFAULT_LEGEND_POSITION[] = _normalize_legend_position(position)
 	return _DEFAULT_LEGEND_POSITION[]
 end
@@ -873,7 +943,7 @@ function _transactional_subplot_mutation!(
 		staged_ref =
 			Ref{Union{Nothing,SubplotFigure}}(nothing)
 		result = Ref{Any}(nothing)
-		mutation = function (candidate)
+		mutation = _ErasedMutation(function (candidate)
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
 			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
@@ -884,7 +954,7 @@ function _transactional_subplot_mutation!(
 				_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
 			end
 			return nothing
-		end
+		end)
 		commit_callback = _ -> _commit_subplot_metadata!(
 			sf,
 			something(staged_ref[]),
@@ -2724,7 +2794,7 @@ set_legend!(sf; position = :outside_bottom, ncols = 3)   # one legend, one "meas
 """
 function set_legend!(
 	fig::Union{Plot, SyncPlot};
-	position::Union{Nothing, Symbol, AbstractString, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
+	position = nothing,  # `_legend_options` checks it (a wrong type is an ArgumentError)
 	inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -2745,7 +2815,9 @@ function set_legend!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("set_legend!", kwargs; accepted = nothing)
 	_text_reject_show(show, "set_legend!")
 	(row === nothing && col === nothing) || throw(ArgumentError(
 		"set_legend!: `row`/`col` select a SubplotFigure cell; a Plot/SyncPlot " *
@@ -3039,7 +3111,7 @@ end
 
 function set_legend!(
 	sf::SubplotFigure;
-	position::Union{Nothing, Symbol, AbstractString, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
+	position = nothing,  # `_legend_options` checks it (a wrong type is an ArgumentError)
 	inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -3060,7 +3132,9 @@ function set_legend!(
 	row::Union{Nothing, Integer} = nothing,
 	col::Union{Nothing, Integer} = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("set_legend!", kwargs; accepted = nothing)
 	_text_reject_show(show, "set_legend!")
 	options = _legend_options(
 		"set_legend!";
@@ -3176,7 +3250,7 @@ subplot_legends!(sf; position = :bottomright)
 """
 function subplot_legends!(
 	fig::Union{Plot, SyncPlot};
-	position::Union{Nothing, Symbol, AbstractString, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
+	position = nothing,  # `_legend_options` checks it (a wrong type is an ArgumentError)
 	inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -3200,7 +3274,9 @@ function subplot_legends!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("subplot_legends!", kwargs; accepted = nothing)
 	_text_reject_show(show, "subplot_legends!")
 	_legend_reject_cell_keywords(row, col, "subplot_legends!")
 	aliases = _legend_subplot_aliases(
@@ -3245,7 +3321,7 @@ end
 
 function subplot_legends!(
 	sf::SubplotFigure;
-	position::Union{Nothing, Symbol, AbstractString, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
+	position = nothing,  # `_legend_options` checks it (a wrong type is an ArgumentError)
 	inset::Union{Nothing, Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = nothing,
 	bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
 	bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
@@ -3269,7 +3345,9 @@ function subplot_legends!(
 	row = nothing,
 	col = nothing,
 	show = nothing,
+	kwargs...,
 )
+	_reject_keywords("subplot_legends!", kwargs; accepted = nothing)
 	_text_reject_show(show, "subplot_legends!")
 	_legend_reject_cell_keywords(row, col, "subplot_legends!")
 	aliases = _legend_subplot_aliases(
@@ -3297,21 +3375,57 @@ function subplot_legends!(
 	)
 end
 
-function _check_subplot_dims(rows::Int, cols::Int)
-	rows > 0 || throw(ArgumentError("`rows` must be positive."))
-	cols > 0 || throw(ArgumentError("`cols` must be positive."))
-	return nothing
+# The `PlotlyBase.Subplots` keywords `subplots` and `make_subplots` forward
+# (the grid shape is positional in `subplots`); anything else is a typo, not a
+# keyword PlotlyBase would ignore.
+const _SUBPLOTS_GRID_KEYWORDS = (
+	:specs, :shared_xaxes, :shared_yaxes, :start_cell, :subplot_titles,
+	:column_titles, :row_titles, :x_title, :y_title, :insets,
+	:horizontal_spacing, :vertical_spacing, :column_widths, :row_heights,
+)
+# matplotlib names users reach for, with the keyword that does the same here.
+const _SUBPLOTS_KEYWORD_HINTS = Dict(
+	:sharex => :shared_xaxes, :sharey => :shared_yaxes,
+	:hspace => :vertical_spacing, :wspace => :horizontal_spacing,
+)
+
+# `who` takes no (more) keywords: anything in `kwargs` is a typo or a keyword
+# of another function, reported as an ArgumentError naming `who` instead of
+# the MethodError Julia raises for an unknown keyword.
+function _reject_keywords(who::AbstractString, kwargs; accepted = ())
+	isempty(kwargs) && return nothing
+	names = join(("`$(key)`" for key in keys(kwargs)), ", ")
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) $(names)" *
+		(accepted === nothing ? "; see the docstring of `$(who)` for the accepted keywords." :
+		 isempty(accepted) ? "; it takes no keyword arguments." :
+			"; it takes $(join(("`$(key)`" for key in accepted), ", "))."),
+	))
 end
 
-function _check_subplot_cell(sf::SubplotFigure, row::Int, col::Int)
-	(1 <= row <= sf.rows) || throw(ArgumentError("`row` must be in 1:$(sf.rows), got $(row)."))
-	(1 <= col <= sf.cols) || throw(ArgumentError("`col` must be in 1:$(sf.cols), got $(col)."))
+function _subplots_check_grid_keywords(kwargs, who::AbstractString; extra = ())
+	unknown = Symbol[key for key in keys(kwargs) if !(key in _SUBPLOTS_GRID_KEYWORDS) && !(key in extra)]
+	isempty(unknown) && return nothing
+	hints = String[
+		"`$(key)` is `$(_SUBPLOTS_KEYWORD_HINTS[key])` here" for key in unknown
+		if haskey(_SUBPLOTS_KEYWORD_HINTS, key)
+	]
+	throw(ArgumentError(
+		"$(who): unsupported keyword argument(s) $(join(("`$(key)`" for key in unknown), ", "))" *
+		(isempty(hints) ? "" : " ($(join(hints, "; ")))") *
+		"; see the docstring for the accepted keywords.",
+	))
+end
+
+function _check_subplot_dims(rows::Int, cols::Int)
+	rows > 0 || throw(ArgumentError("subplots: `rows` must be positive; got $(rows)."))
+	cols > 0 || throw(ArgumentError("subplots: `cols` must be positive; got $(cols)."))
 	return nothing
 end
 
 function _subplot_cell(sf::SubplotFigure, index::Int)
 	maxidx = sf.rows * sf.cols
-	(1 <= index <= maxidx) || throw(ArgumentError("`index` must be in 1:$(maxidx), got $(index)."))
+	(1 <= index <= maxidx) || throw(ArgumentError("subplot!: `index` must be in 1:$(maxidx); got $(index)."))
 	row = fld(index - 1, sf.cols) + 1
 	col = mod(index - 1, sf.cols) + 1
 	return row, col
@@ -3350,24 +3464,24 @@ const _SUBPLOTS_START_CELLS = ("top-left", "bottom-left")
 # the text around `$…$` math and turns newlines into line breaks. A label the
 # layer rejects (an odd number of `$`, an HTML tag next to math, ...) is an
 # ArgumentError naming the keyword.
-function _subplots_title_label(text::AbstractString, name::AbstractString)
+function _subplots_title_label(text::AbstractString, name::AbstractString; who::AbstractString = "subplots")
 	return try
 		_label(text)
 	catch err
 		err isa ArgumentError || rethrow()
-		throw(ArgumentError("subplots: `$(name)` entry $(repr(text)): $(err.msg)"))
+		throw(ArgumentError("$(who): `$(name)` entry $(repr(text)): $(err.msg)"))
 	end
 end
 
 # Validated relative sizes for `height_ratios` / `width_ratios`: `count`
 # positive finite reals, returned as Float64 in the caller's order.
-function _subplots_checked_ratios(ratios, count::Int, name::AbstractString)
+function _subplots_checked_ratios(ratios, count::Int, name::AbstractString; who::AbstractString = "subplots")
 	(ratios isa AbstractVector || ratios isa Tuple) || throw(ArgumentError(
-		"subplots: `$(name)` must be a vector of positive numbers; got " *
+		"$(who): `$(name)` must be a vector of positive numbers; got " *
 		"$(typeof(ratios)).",
 	))
 	length(ratios) == count || throw(ArgumentError(
-		"subplots: `$(name)` needs one entry per " *
+		"$(who): `$(name)` needs one entry per " *
 		(name in ("height_ratios", "row_heights") ? "row" : "column") *
 		" ($(count)); got $(length(ratios)).",
 	))
@@ -3375,7 +3489,7 @@ function _subplots_checked_ratios(ratios, count::Int, name::AbstractString)
 	for (k, value) in enumerate(ratios)
 		(value isa Real && !(value isa Bool) && isfinite(value) && value > 0) ||
 			throw(ArgumentError(
-				"subplots: `$(name)` entries must be positive finite numbers; " *
+				"$(who): `$(name)` entries must be positive finite numbers; " *
 				"entry $(k) is $(repr(value)).",
 			))
 		out[k] = Float64(value)
@@ -3396,13 +3510,14 @@ function _subplots_grid_kwargs(
 	cols::Int,
 	height_ratios,
 	width_ratios,
-	subplot_kwargs,
+	subplot_kwargs;
+	who::AbstractString = "subplots",
 )
 	grid = Dict{Symbol,Any}(pairs(subplot_kwargs))
 	start_cell = get(grid, :start_cell, "top-left")
 	(start_cell isa AbstractString && start_cell in _SUBPLOTS_START_CELLS) ||
 		throw(ArgumentError(
-			"subplots: `start_cell` must be \"top-left\" or \"bottom-left\"; " *
+			"$(who): `start_cell` must be \"top-left\" or \"bottom-left\"; " *
 			"got $(repr(start_cell)).",
 		))
 	grid[:start_cell] = String(start_cell)
@@ -3413,7 +3528,7 @@ function _subplots_grid_kwargs(
 		spacing = grid[name]
 		(spacing isa Real && !(spacing isa Bool) && isfinite(spacing) &&
 			0 <= spacing <= 1 && spacing * (count - 1) < 1) || throw(ArgumentError(
-			"subplots: `$(name)` must be a finite number in [0, 1] whose " *
+			"$(who): `$(name)` must be a finite number in [0, 1] whose " *
 			"$(count - 1) gap(s) leave room for the cells (spacing × $(count - 1) < 1); " *
 			"got $(repr(spacing)).",
 		))
@@ -3433,11 +3548,11 @@ function _subplots_grid_kwargs(
 		(titles isa AbstractVecOrMat &&
 			all(t -> t isa AbstractString || t === missing, titles)) ||
 			throw(ArgumentError(
-				"subplots: `subplot_titles` must be a vector or matrix of strings " *
+				"$(who): `subplot_titles` must be a vector or matrix of strings " *
 				"(`missing` skips a cell); got $(repr(titles)).",
 			))
 		as_matrix = titles isa AbstractVector ? reshape(collect(titles), 1, :) : collect(titles)
-		labelled = map(t -> t === missing ? missing : _subplots_title_label(t, "subplot_titles"), as_matrix)
+		labelled = map(t -> t === missing ? missing : _subplots_title_label(t, "subplot_titles"; who = who), as_matrix)
 		grid[:subplot_titles] = any(ismissing, as_matrix) ?
 			Matrix{Union{Missing, String}}(labelled) :
 			Matrix{String}(labelled)
@@ -3448,23 +3563,23 @@ function _subplots_grid_kwargs(
 		titles = grid[name]
 		(titles isa AbstractVector && all(t -> t isa AbstractString, titles)) ||
 			throw(ArgumentError(
-				"subplots: `$(name)` must be a vector of strings, one per $(unit) " *
+				"$(who): `$(name)` must be a vector of strings, one per $(unit) " *
 				"(\"\" for none); got $(repr(titles)).",
 			))
 		length(titles) == count || throw(ArgumentError(
-			"subplots: `$(name)` needs one entry per $(unit) ($(count)); got " *
+			"$(who): `$(name)` needs one entry per $(unit) ($(count)); got " *
 			"$(length(titles)).",
 		))
-		grid[name] = String[_subplots_title_label(t, String(name)) for t in titles]
+		grid[name] = String[_subplots_title_label(t, String(name); who = who) for t in titles]
 	end
 	for name in (:x_title, :y_title)
 		haskey(grid, name) && grid[name] === missing && delete!(grid, name)
 		haskey(grid, name) || continue
 		title = grid[name]
 		title isa AbstractString || throw(ArgumentError(
-			"subplots: `$(name)` must be a string; got $(repr(title)).",
+			"$(who): `$(name)` must be a string; got $(repr(title)).",
 		))
-		grid[name] = _subplots_title_label(title, String(name))
+		grid[name] = _subplots_title_label(title, String(name); who = who)
 	end
 	# `row_heights` / `column_widths` given directly reach PlotlyBase's
 	# `sum(...)` and `Vector{Float64}` conversion: they must be one positive
@@ -3472,32 +3587,32 @@ function _subplots_grid_kwargs(
 	for (name, count) in ((:row_heights, rows), (:column_widths, cols))
 		haskey(grid, name) && grid[name] === missing && delete!(grid, name)
 		haskey(grid, name) || continue
-		grid[name] = _subplots_checked_ratios(grid[name], count, String(name))
+		grid[name] = _subplots_checked_ratios(grid[name], count, String(name); who = who)
 	end
 	for name in (:shared_xaxes, :shared_yaxes)
 		haskey(grid, name) || continue
 		mode = grid[name]
 		(mode === missing || mode isa Bool || (mode isa AbstractString &&
 			String(mode) in ("rows", "columns", "all"))) || throw(ArgumentError(
-			"subplots: `$(name)` must be true, false, \"rows\", \"columns\" or \"all\"; " *
+			"$(who): `$(name)` must be true, false, \"rows\", \"columns\" or \"all\"; " *
 			"got $(repr(mode)).",
 		))
 		mode isa AbstractString && (grid[name] = String(mode))
 	end
 	if haskey(grid, :specs)
-		grid[:specs] = _subplots_checked_specs(grid[:specs], rows, cols)
+		grid[:specs] = _subplots_checked_specs(grid[:specs], rows, cols; who = who)
 	end
 	if height_ratios !== nothing
 		haskey(grid, :row_heights) && throw(ArgumentError(
-			"subplots: pass either `height_ratios` (top-to-bottom) or " *
+			"$(who): pass either `height_ratios` (top-to-bottom) or " *
 			"`row_heights` (PlotlyBase order), not both.",
 		))
-		ratios = _subplots_checked_ratios(height_ratios, rows, "height_ratios")
+		ratios = _subplots_checked_ratios(height_ratios, rows, "height_ratios"; who = who)
 		if start_cell == "top-left"
 			grid[:row_heights] = reverse(ratios)
 		else
 			all(==(first(ratios)), ratios) || throw(ArgumentError(
-				"subplots: unequal `height_ratios` are not supported with " *
+				"$(who): unequal `height_ratios` are not supported with " *
 				"start_cell = \"bottom-left\": PlotlyBase computes " *
 				"overlapping row domains for that combination. Use the " *
 				"default start_cell = \"top-left\" (row 1 at the top).",
@@ -3507,10 +3622,10 @@ function _subplots_grid_kwargs(
 	end
 	if width_ratios !== nothing
 		haskey(grid, :column_widths) && throw(ArgumentError(
-			"subplots: pass either `width_ratios` or `column_widths`, not both.",
+			"$(who): pass either `width_ratios` or `column_widths`, not both.",
 		))
 		grid[:column_widths] =
-			_subplots_checked_ratios(width_ratios, cols, "width_ratios")
+			_subplots_checked_ratios(width_ratios, cols, "width_ratios"; who = who)
 	end
 	return grid
 end
@@ -3519,23 +3634,23 @@ end
 # `missing` or `nothing` is empty); a vector is accepted for a one-column or
 # one-row grid. A span must stay inside the grid and cover only empty cells
 # (PlotlyBase reaches an error without cell names, or draws overlapping axes).
-function _subplots_checked_specs(specs, rows::Int, cols::Int)
+function _subplots_checked_specs(specs, rows::Int, cols::Int; who::AbstractString = "subplots")
 	specs === missing && return specs
 	specs isa AbstractMatrix || (specs isa AbstractVector && (rows == 1 || cols == 1)) ||
 		throw(ArgumentError(
-			"subplots: `specs` must be a $(rows) × $(cols) matrix of `Spec(...)` " *
+			"$(who): `specs` must be a $(rows) × $(cols) matrix of `Spec(...)` " *
 			"(`missing` for an empty cell); got $(typeof(specs))" *
 			(specs isa AbstractVector ? " for a grid with several rows and columns." : "."),
 		))
 	if specs isa AbstractVector
 		length(specs) == rows * cols || throw(ArgumentError(
-			"subplots: `specs` needs one entry per cell ($(rows * cols)) of the " *
+			"$(who): `specs` needs one entry per cell ($(rows * cols)) of the " *
 			"$(rows) × $(cols) grid; got $(length(specs)).",
 		))
 		specs = reshape(collect(specs), rows, cols)
 	end
 	size(specs) == (rows, cols) || throw(ArgumentError(
-		"subplots: `specs` must have size (rows, cols) = ($(rows), $(cols)); got $(size(specs)).",
+		"$(who): `specs` must have size (rows, cols) = ($(rows), $(cols)); got $(size(specs)).",
 	))
 	checked = Matrix{Union{Missing,Spec}}(undef, rows, cols)
 	for r in 1:rows, c in 1:cols
@@ -3545,7 +3660,7 @@ function _subplots_checked_specs(specs, rows::Int, cols::Int)
 			continue
 		end
 		spec isa Spec || throw(ArgumentError(
-			"subplots: `specs[$(r), $(c)]` must be a `Spec(...)`, `missing` or " *
+			"$(who): `specs[$(r), $(c)]` must be a `Spec(...)`, `missing` or " *
 			"`nothing`; got $(repr(spec)).",
 		))
 		kind = spec.kind
@@ -3557,32 +3672,42 @@ function _subplots_checked_specs(specs, rows::Int, cols::Int)
 		catch
 			false
 		end || throw(ArgumentError(
-			"subplots: `specs[$(r), $(c)]` has an unknown subplot kind $(repr(kind)); " *
+			"$(who): `specs[$(r), $(c)]` has an unknown subplot kind $(repr(kind)); " *
 			"use \"xy\", \"scene\", \"polar\", \"ternary\", \"geo\", \"domain\", \"mapbox\" or " *
 			"a map kind.",
 		))
 		(spec.rowspan >= 1 && spec.colspan >= 1) || throw(ArgumentError(
-			"subplots: `specs[$(r), $(c)]` needs rowspan >= 1 and colspan >= 1; got " *
+			"$(who): `specs[$(r), $(c)]` needs rowspan >= 1 and colspan >= 1; got " *
 			"rowspan = $(spec.rowspan), colspan = $(spec.colspan).",
 		))
 		(r + spec.rowspan - 1 <= rows && c + spec.colspan - 1 <= cols) || throw(ArgumentError(
-			"subplots: `specs[$(r), $(c)]` spans rows $(r):$(r + spec.rowspan - 1) and " *
+			"$(who): `specs[$(r), $(c)]` spans rows $(r):$(r + spec.rowspan - 1) and " *
 			"columns $(c):$(c + spec.colspan - 1), beyond the $(rows) × $(cols) grid.",
 		))
 		all(isfinite, (spec.l, spec.r, spec.b, spec.t)) || throw(ArgumentError(
-			"subplots: the paddings l, r, b, t of `specs[$(r), $(c)]` must be finite.",
+			"$(who): the paddings l, r, b, t of `specs[$(r), $(c)]` must be finite.",
 		))
 		checked[r, c] = spec
 	end
+	# The cell whose spec covers each grid cell: two spans that cross over the
+	# same empty cell would draw overlapping axes there.
+	owner = fill((0, 0), rows, cols)
 	for r in 1:rows, c in 1:cols
 		spec = checked[r, c]
 		spec === missing && continue
 		for rr in r:(r + spec.rowspan - 1), cc in c:(c + spec.colspan - 1)
-			(rr, cc) == (r, c) && continue
-			checked[rr, cc] === missing || throw(ArgumentError(
-				"subplots: `specs[$(r), $(c)]` spans cell ($(rr), $(cc)), which has its " *
-				"own spec; use `missing` for the cells a span covers.",
+			if (rr, cc) != (r, c)
+				checked[rr, cc] === missing || throw(ArgumentError(
+					"$(who): `specs[$(r), $(c)]` spans cell ($(rr), $(cc)), which has its " *
+					"own spec; use `missing` for the cells a span covers.",
+				))
+			end
+			other = owner[rr, cc]
+			other == (0, 0) || throw(ArgumentError(
+				"$(who): the spans of `specs[$(other[1]), $(other[2])]` and " *
+				"`specs[$(r), $(c)]` both cover cell ($(rr), $(cc)); spans must not overlap.",
 			))
+			owner[rr, cc] = (r, c)
 		end
 	end
 	return checked
@@ -3604,16 +3729,16 @@ const _SubplotsCheckedInset = NamedTuple{
 }
 
 # A size fraction of an `Inset` (`l`, `b`, or `w`/`h`, which may be "to_end").
-function _subplots_inset_fraction(value, k::Int, name::AbstractString; size::Bool)
+function _subplots_inset_fraction(value, k::Int, name::AbstractString; size::Bool, who::AbstractString = "subplots")
 	if size && value isa AbstractString
 		value == "to_end" || throw(ArgumentError(
-			"subplots: `insets[$(k)].$(name)` must be a number or \"to_end\"; got $(repr(value)).",
+			"$(who): `insets[$(k)].$(name)` must be a number or \"to_end\"; got $(repr(value)).",
 		))
 		return nothing
 	end
 	(value isa Real && !(value isa Bool) && isfinite(value) &&
 		(size ? 0 < value <= 1 : 0 <= value < 1)) || throw(ArgumentError(
-		"subplots: `insets[$(k)].$(name)` must be a finite number in " *
+		"$(who): `insets[$(k)].$(name)` must be a finite number in " *
 		(size ? "(0, 1]" : "[0, 1)") * " (a fraction of the host cell); got $(repr(value)).",
 	))
 	return Float64(value)
@@ -3624,34 +3749,34 @@ end
 # span cells and their fractions must keep them inside the host cell; they are
 # returned (with their position `index` in `insets`) as fractions of the host
 # cell, in order. Insets of other kinds are not returned.
-function _subplots_checked_insets(insets, rows::Int, cols::Int)
+function _subplots_checked_insets(insets, rows::Int, cols::Int; who::AbstractString = "subplots")
 	checked = _SubplotsCheckedInset[]
 	insets === missing && return checked
 	(insets isa AbstractVector && all(inset -> inset isa PlotlyBase.Inset, insets)) ||
 		throw(ArgumentError(
-			"subplots: `insets` must be a vector of `Inset(...)` specifications; got " *
+			"$(who): `insets` must be a vector of `Inset(...)` specifications; got " *
 			"$(repr(insets)). (`inset!(sf, bounds)` adds an inset to an existing figure.)",
 		))
 	for (k, inset) in enumerate(insets)
 		r, c = inset.cell
 		(1 <= r <= rows && 1 <= c <= cols) || throw(ArgumentError(
-			"subplots: `insets[$(k)].cell` = $(inset.cell) is outside the " *
+			"$(who): `insets[$(k)].cell` = $(inset.cell) is outside the " *
 			"$(rows) × $(cols) grid.",
 		))
 		inset.kind == "xy" || continue
 		(inset.colspan == 1 && inset.rowspan == 1) || throw(ArgumentError(
-			"subplots: `insets[$(k)]` sets colspan/rowspan, which PlotlyBase ignores; " *
+			"$(who): `insets[$(k)]` sets colspan/rowspan, which PlotlyBase ignores; " *
 			"an inset lies inside one cell (size it with `w`/`h`).",
 		))
-		l = _subplots_inset_fraction(inset.l, k, "l"; size = false)
-		b = _subplots_inset_fraction(inset.b, k, "b"; size = false)
-		w = _subplots_inset_fraction(inset.w, k, "w"; size = true)
-		h = _subplots_inset_fraction(inset.h, k, "h"; size = true)
+		l = _subplots_inset_fraction(inset.l, k, "l"; size = false, who = who)
+		b = _subplots_inset_fraction(inset.b, k, "b"; size = false, who = who)
+		w = _subplots_inset_fraction(inset.w, k, "w"; size = true, who = who)
+		h = _subplots_inset_fraction(inset.h, k, "h"; size = true, who = who)
 		x1 = w === nothing ? 1.0 : l + w
 		y1 = h === nothing ? 1.0 : b + h
 		# Tolerance for fractions such as 0.7 + 0.3, which exceed 1 by one ulp.
 		(x1 <= 1 + 1e-12 && y1 <= 1 + 1e-12) || throw(ArgumentError(
-			"subplots: `insets[$(k)]` reaches outside its cell (l + w = $(x1), " *
+			"$(who): `insets[$(k)]` reaches outside its cell (l + w = $(x1), " *
 			"b + h = $(y1)); both must be at most 1.",
 		))
 		push!(checked, (
@@ -3847,22 +3972,22 @@ plot_scatter!(sf, 0:0.1:10, cos.(0:0.1:10); row=2, col=1)
 function subplots(
 	rows::Integer,
 	cols::Integer;
-	sync::Bool = true,
-	width::Real = 0,
-	height::Real = 0,
-	title::AbstractString = "",
-	window_title::AbstractString = "",
-	show::Bool = true,
+	sync = true,
+	width = 0,
+	height = 0,
+	title = "",
+	window_title = "",
+	show = true,
 	app = nothing,
 	height_ratios = nothing,
 	width_ratios = nothing,
-	per_subplot_legends::Bool = true,
-	legend_position::Union{Symbol, AbstractString} = get_default_legend_position(),
-	legend_inset::Union{Tuple{<:Real, <:Real}, AbstractVector{<:Real}} = _DEFAULT_LEGEND_INSET[],
-	legend_bgcolor::Union{Nothing, AbstractString, Symbol} = nothing,
-	legend_bordercolor::Union{Nothing, AbstractString, Symbol} = nothing,
-	legend_borderwidth::Union{Nothing, Real} = nothing,
-	compress::Bool = true,
+	per_subplot_legends = true,
+	legend_position = get_default_legend_position(),
+	legend_inset = _DEFAULT_LEGEND_INSET[],
+	legend_bgcolor = nothing,
+	legend_bordercolor = nothing,
+	legend_borderwidth = nothing,
+	compress = true,
 	subplot_kwargs...,
 )
 	# Validate every option before a figure or window exists.
@@ -3875,6 +4000,33 @@ function subplots(
 			"positionally as `subplots(rows, cols)`.",
 		))
 	end
+	_subplots_check_grid_keywords(subplot_kwargs, "subplots")
+	for (name, value) in (
+		(:sync, sync), (:show, show), (:per_subplot_legends, per_subplot_legends),
+		(:compress, compress),
+	)
+		value isa Bool || throw(ArgumentError(
+			"subplots: `$(name)` must be true or false; got $(repr(value)).",
+		))
+	end
+	for (name, value) in ((:title, title), (:window_title, window_title))
+		value isa AbstractString || throw(ArgumentError(
+			"subplots: `$(name)` must be a string; got $(repr(value)).",
+		))
+	end
+	(legend_position isa Symbol || legend_position isa AbstractString) || throw(ArgumentError(
+		"subplots: `legend_position` must be a Symbol or a string such as :topright; " *
+		"got $(repr(legend_position)).",
+	))
+	for (name, value) in ((:legend_bgcolor, legend_bgcolor), (:legend_bordercolor, legend_bordercolor))
+		(value === nothing || value isa AbstractString || value isa Symbol) || throw(ArgumentError(
+			"subplots: `$(name)` must be a colour name or string, or nothing; got $(repr(value)).",
+		))
+	end
+	(legend_borderwidth === nothing || legend_borderwidth isa Real) || throw(ArgumentError(
+		"subplots: `legend_borderwidth` must be a finite number ≥ 0; got " *
+		"$(repr(legend_borderwidth)).",
+	))
 	rows_i = Int(rows)
 	cols_i = Int(cols)
 	_check_subplot_dims(rows_i, cols_i)
@@ -3892,7 +4044,8 @@ function subplots(
 		show = show,
 	)
 	normalized_legend_position = _normalize_legend_position(legend_position)
-	(length(legend_inset) == 2 && all(v -> !(v isa Bool) && isfinite(v), legend_inset)) ||
+	((legend_inset isa Tuple || legend_inset isa AbstractVector) && length(legend_inset) == 2 &&
+		all(v -> v isa Real && !(v isa Bool) && isfinite(v), legend_inset)) ||
 		throw(ArgumentError(
 			"subplots: `legend_inset` must be two finite numbers (x, y); got " *
 			"$(repr(legend_inset)).",
@@ -3998,7 +4151,8 @@ Out-of-range or `Bool` indices throw an `ArgumentError` and leave the active
 cell unchanged. Empty cells (`specs` entries of `missing`) may be selected,
 but plotting into them throws.
 """
-function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
+function subplot!(sf::SubplotFigure, row::Integer, col::Integer; kwargs...)
+	_reject_keywords("subplot!", kwargs)
 	r, c = _resolve_subplot_cell(sf; row = row, col = col, who = "subplot!")
 	lock(getfield(sf, :_lock)) do
 		sf.current_row = r
@@ -4007,7 +4161,8 @@ function subplot!(sf::SubplotFigure, row::Integer, col::Integer)
 	return sf
 end
 
-function subplot!(sf::SubplotFigure, index::Integer)
+function subplot!(sf::SubplotFigure, index::Integer; kwargs...)
+	_reject_keywords("subplot!", kwargs)
 	index isa Bool && throw(ArgumentError(
 		"subplot!: `index` must be an integer, not Bool.",
 	))
@@ -4879,7 +5034,7 @@ function _verb_recession_shapes(p::Plot, xref::AbstractString, yref::AbstractStr
 		push!(probe.data, GenericTrace(Dict{Symbol, Any}(:type => "scatter", :x => x)))
 	end
 	isempty(probe.data) && return nothing
-	bands = PlotlyBase._recession_band_shapes(probe; kwargs...)
+	bands = _recession_band_shapes_styled(probe, kwargs, "add_recession_bands!")
 	bands === nothing && return nothing
 	items = bands isa AbstractVector ? collect(Any, bands) : Any[bands]
 	isempty(items) && return nothing
@@ -5859,19 +6014,6 @@ function _preserve_layout_mapping_root(
 	return preserve_builtin_root ||
 		root_has_alias ||
 		nested_has_alias
-end
-
-function _preserve_subplot_axis_root(
-	sf::SubplotFigure,
-	key::Symbol,
-	nested_keys::Tuple{Vararg{Symbol}} =
-		(:title,),
-)
-	return _preserve_layout_mapping_root(
-		_plot_obj(sf.fig),
-		key,
-		nested_keys,
-	)
 end
 
 function _layout_merge_key_reaches_mutation(
@@ -7121,7 +7263,7 @@ function _subplot_delegate_mutator!(
 		staged_ref =
 			Ref{Union{Nothing,SubplotFigure}}(nothing)
 		result = Ref{Any}(nothing)
-		mutation = function (candidate)
+		mutation = _ErasedMutation(function (candidate)
 			staged = _staged_subplot_figure(sf, candidate)
 			staged_ref[] = staged
 			match_snapshot = _subplot_match_snapshot(_plot_obj(candidate), _subplot_inset_axis_keys(sf))
@@ -7136,7 +7278,7 @@ function _subplot_delegate_mutator!(
 				_finalize_figure!(staged; live = _plot_data(getfield(sf, :fig)))
 			end
 			return nothing
-		end
+		end)
 		commit_callback = _ -> _commit_subplot_metadata!(
 			sf,
 			something(staged_ref[]),
@@ -7184,39 +7326,6 @@ function _subplot_delegate_mutator!(
 	finally
 		unlock(metadata_lock)
 	end
-end
-
-# Layout keys of a cell's x and y axes, read from the grid routing table (no
-# probe trace is added to the figure).
-function _subplot_xy_axis_keys(sf::SubplotFigure, row::Int, col::Int; secondary_y::Bool = false)
-	p = _plot_obj(sf.fig)
-	grid_ref = p.layout.subplots.grid_ref
-	(checkbounds(Bool, grid_ref, row, col) &&
-		isassigned(grid_ref, row, col) &&
-		!isempty(grid_ref[row, col])) || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) is empty (its `specs` entry is " *
-		"`missing`, or a spanning cell covers it) and has no axes.",
-	))
-	refs = grid_ref[row, col]
-	kind = String(first(refs).subplot_kind)
-	kind == "xy" || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) is a '$(kind)' cell and does " *
-		"not accept Cartesian x/y axes.",
-	))
-	if secondary_y && length(refs) < 2
-		throw(ArgumentError(
-			"Selected subplot cell ($(row), $(col)) has no secondary y-axis; " *
-			"create the grid with `specs` containing `Spec(secondary_y=true)` " *
-			"for that cell.",
-		))
-	end
-	trace_refs = refs[secondary_y ? 2 : 1].trace_kwargs.fields
-	(haskey(trace_refs, :xaxis) && haskey(trace_refs, :yaxis)) || throw(ArgumentError(
-		"Selected subplot cell ($(row), $(col)) has no x/y axis pair.",
-	))
-	xkey = _axis_layout_key(String(trace_refs[:xaxis]), :x)
-	ykey = _axis_layout_key(String(trace_refs[:yaxis]), :y)
-	return xkey, ykey
 end
 
 # The layout key of the single `kind` object (:geo, :mapbox, :map, ...) of
@@ -8713,13 +8822,6 @@ function _series_kwarg_vector(
 	return out
 end
 
-function _string_kwarg_vector(
-	value::Union{AbstractString, AbstractVector{<:AbstractString}},
-	n::Int,
-)
-	return _series_kwarg_vector(value, n, "", String)
-end
-
 function _first_or_empty(
 	value::Union{AbstractString, AbstractVector{<:AbstractString}},
 )
@@ -8892,23 +8994,6 @@ function _error_bar_entries(
 		))
 	end
 	return entries
-end
-
-# Attach data error bars to one or more traces. `error_x`/`error_y` take the
-# forms listed at `_error_bar_entries`; `nothing` leaves that axis untouched.
-function _set_error_bars!(trace, error_x, error_y)
-	(error_x === nothing && error_y === nothing) && return nothing
-	traces = trace isa AbstractVector ? trace : (trace,)
-	n = length(traces)
-	x_entries = _error_bar_entries(error_x, n, "error_x")
-	y_entries = _error_bar_entries(error_y, n, "error_y")
-	for (index, t) in enumerate(traces)
-		x_entries[index] === nothing ||
-			(t.error_x = _error_bar_attr(x_entries[index]))
-		y_entries[index] === nothing ||
-			(t.error_y = _error_bar_attr(y_entries[index]))
-	end
-	return nothing
 end
 
 # Default x coordinates `0:length(y)-1` of a y-only call (one range per
@@ -9535,8 +9620,21 @@ function _stats_bar_text(
 	return Any[_stats_bar_text_entry(entry, who) for entry in part]
 end
 
+# A date string plotly.js reads on a date axis ("2020", "2020-01-02",
+# "2020-01-02 03:04:05.6", "T" or a space between date and time).
+const _STATS_DATE_STRING = r"^\s*-?\d{1,4}(-\d{1,2}(-\d{1,2}([ T]\d{1,2}(:\d{1,2}(:\d{1,2}(\.\d+)?)?)?)?)?)?\s*$"
+
 function _stats_bar_base_entry(entry, who::AbstractString)
-	entry isa AbstractString && return String(entry)
+	if entry isa AbstractString
+		# Anything else is drawn as no base at all (errors-inputs-13).
+		number = tryparse(Float64, entry)
+		(number !== nothing ? isfinite(number) : occursin(_STATS_DATE_STRING, entry)) ||
+			throw(ArgumentError(
+				"$(who): `base` entries must be finite numbers (or date strings such as " *
+				"\"2020-01-02\"); got $(repr(entry)).",
+			))
+		return String(entry)
+	end
 	(entry isa Real && !(entry isa Bool) && isfinite(entry)) && return entry
 	throw(ArgumentError(
 		"$(who): `base` entries must be finite numbers (or date strings); got $(repr(entry)).",
@@ -9576,8 +9674,20 @@ function _stats_bins(bins, who::AbstractString)
 	values[3] > 0 || throw(ArgumentError(
 		"$(who): `bins` width must be positive; got $(repr(bins)).",
 	))
+	# The work (here for log axes, in plotly.js otherwise) grows with the
+	# declared bin count, not the data: a width typo (1e-12) would hang
+	# (numerics-06). The bound is far beyond what a figure can show.
+	count = (values[2] - values[1]) / values[3]
+	count <= _STATS_MAX_BINS || throw(ArgumentError(
+		"$(who): `bins` $(repr(bins)) declares $(round(count; sigdigits = 3)) bins; at most " *
+		"$(_STATS_MAX_BINS) are supported (a figure cannot show more). Use a larger width.",
+	))
 	return (values[1], values[2], values[3])
 end
+
+# 100 000 bins: 25 per pixel of a 4K display's 3840 px width; the measured
+# cost is about 330 bytes per declared bin (33 MB at the bound).
+const _STATS_MAX_BINS = 100_000
 
 function _stats_bins_attr(bins)
 	return attr(Dict{Symbol, Any}(
@@ -14753,6 +14863,9 @@ function _field2d_check_coordinates(
 				"$(who): `$(name)` is on a logarithmic axis, so its coordinates " *
 				"must be positive; entry $(i) is $(value).",
 			))
+		elseif value isa Union{Dates.Time, Dates.Period}
+			# As for the 1-D families (seams-08).
+			_scat_time_error(who, Symbol(name), typeof(value))
 		elseif _field2d_bad_coordinate(value)
 			throw(ArgumentError(
 				"$(who): `$(name)` coordinates must be finite real numbers, " *
@@ -14774,9 +14887,28 @@ end
 # (plotly.js would not complain): numeric and date coordinates must be
 # strictly monotonic (decreasing is fine). Categories are not ordered.
 function _field2d_check_monotonic(v, who::AbstractString, name::AbstractString)
-	T = eltype(v)
-	((T <: Real && !(T <: Bool)) || T <: Dates.TimeType) || return nothing
 	length(v) >= 2 || return nothing
+	T = eltype(v)
+	real(x) = x isa Real && !(x isa Bool)
+	# An abstract eltype (`Vector{Any}`) is checked by its values (seams-08).
+	ordered = (T <: Real && !(T <: Bool)) || T <: Dates.TimeType ||
+		(!isconcretetype(T) && (all(real, v) || all(x -> x isa Dates.TimeType, v)))
+	if !ordered
+		# A repeated category puts two rows or columns of cells on one place.
+		if all(x -> x isa Union{AbstractString, Symbol}, v) && !allunique(string.(v))
+			seen = Set{String}()
+			repeated = ""
+			for x in string.(v)
+				x in seen && (repeated = x; break)
+				push!(seen, x)
+			end
+			throw(ArgumentError(
+				"$(who): `$(name)` repeats the category $(repr(repeated)); plotly would " *
+				"draw both rows or columns of cells at one place.",
+			))
+		end
+		return nothing
+	end
 	increasing = v[2] > v[1]
 	for i in 1:(length(v) - 1)
 		(increasing ? v[i + 1] > v[i] : v[i + 1] < v[i]) || throw(ArgumentError(
@@ -15073,13 +15205,6 @@ end
 _field2d_apply_origin!(fig, origin::AbstractString; key::Symbol = :yaxis) =
 	isempty(origin) ? nothing :
 	_field2d_axis_direction!(fig, key, origin == "upper")
-
-# A `Date`/`DateTime` coordinate as the ISO string plotly.js reads on a date
-# axis (Y25): "2020-01-02", "2020-01-02T03:04:05.678". Anything else is
-# returned unchanged. (`Dates` is imported in src/sci/reference.jl; this body
-# resolves it at call time.)
-_field2d_date_value(v) =
-	(v isa Dates.Date || v isa Dates.DateTime) ? string(v) : v
 
 # Check the tick keywords before the first write, against the axis types the
 # call ends up with (`_validate_tick_option`; D9 presets pass). `ykey` is the
@@ -19517,6 +19642,9 @@ function _extended_colour(who::AbstractString, name::AbstractString, value)
 	_extended_is_colour(value) || throw(ArgumentError(
 		"$(who): `$(name)` must be a colour string or Symbol; got $(repr(value)).",
 	))
+	# A string that is no colour ("nocolor") is an error, not a figure
+	# plotly draws in its default colour (apia-07).
+	isempty(String(value)) || _color_option_scalar(value, who, name)
 	return String(value)
 end
 
@@ -19539,6 +19667,8 @@ function _extended_colour_vector(
 				"$(who): `$(name)[$(position)]` must be a colour string or Symbol" *
 				(numbers ? " or a finite number" : "") * "; got $(repr(value)).",
 			))
+		_extended_is_colour(value) && !isempty(String(value)) &&
+			_color_option_scalar(value, who, "$(name)[$(position)]")
 	end
 	any(value -> value isa Symbol, colors) || return colors
 	return Any[value isa Symbol ? String(value) : value for value in colors]
@@ -20037,6 +20167,7 @@ function _hierarchy_trace(
 		"$(who): `branchvalues` must be \"remainder\", \"total\" or \"\" (plotly " *
 		"default, \"remainder\"); got $(repr(branchvalues)).",
 	))
+	_hierarchy_check_tree(who, labels, parents, ids, values, branch)
 	scale = _resolve_colorscale(colorscale; who = who).scale
 	display_labels = _extended_plain_labels(labels, who, "labels")
 
@@ -20058,6 +20189,150 @@ function _hierarchy_trace(
 	end
 	isempty(marker) || (kw[:marker] = attr(; marker...))
 	return constructor(; kw...)
+end
+
+# A tree plotly.js can draw (apib-05; it draws an empty figure otherwise, render
+# probe apib05b over plotly.js 2.35.2 sunburst/treemap `calc`). plotly.js names
+# a sector by its id (or label) as a JavaScript string, so 2 and 2.0 and "2"
+# are one name; a parent that is `nothing`, "" or `false` makes the sector a
+# root, and a sector without a name is left out. With a root, every other
+# parent must name a sector; without one, the parents that name no sector
+# must all be one name, which plotly then adds as the root. No sector may be
+# its own ancestor, and with `branchvalues = "total"` no parent's value may be
+# below the sum of its children's (plotly's relative tolerance 1e-6).
+_hierarchy_js_key(x) = x isa Real && !(x isa Bool) && isfinite(x) && isinteger(x) && abs(x) < 2.0^53 ?
+	string(Int64(x)) : string(x)
+_hierarchy_is_blank(x) = x === nothing || x === missing || x === false || (x isa AbstractString && isempty(x))
+
+# Position (1-based, in order) of the sector a parent names, 0 for none. An
+# integer range is searched arithmetically, so a lazy range is not
+# materialized (lazy_payloads.jl).
+struct _HierarchyRangeIndex{R <: AbstractRange}
+	names::R
+end
+function (index::_HierarchyRangeIndex)(parent)
+	value = if parent isa Real && !(parent isa Bool)
+		(isfinite(parent) && isinteger(parent) && abs(parent) < 2.0^53) || return 0
+		Int64(parent)
+	elseif parent isa AbstractString
+		parsed = tryparse(Int64, parent)
+		(parsed === nothing || string(parsed) != parent) && return 0
+		parsed
+	else
+		return 0
+	end
+	names = index.names
+	value in names || return 0
+	return Int(div(value - first(names), step(names))) + 1
+end
+
+struct _HierarchyDictIndex
+	positions::Dict{String, Int}
+end
+(index::_HierarchyDictIndex)(parent) = get(index.positions, _hierarchy_js_key(parent), 0)
+
+_hierarchy_index(who, what, names::AbstractRange{<:Integer}) =
+	eltype(names) === Bool ? _hierarchy_dict_index(who, what, names) : _HierarchyRangeIndex(names)
+_hierarchy_index(who, what, names) = _hierarchy_dict_index(who, what, names)
+
+function _hierarchy_dict_index(who, what, names)
+	positions = Dict{String, Int}()
+	for (position, name) in enumerate(names)
+		_hierarchy_is_blank(name) && continue
+		key = _hierarchy_js_key(name)
+		previous = get(positions, key, 0)
+		previous == 0 || throw(ArgumentError(
+			"$(who): `$(what)` contains $(repr(names[firstindex(names) + previous - 1])) and $(repr(name)), " *
+			"which plotly reads as the same name $(repr(key)); the sectors would be merged.",
+		))
+		positions[key] = position
+	end
+	return _HierarchyDictIndex(positions)
+end
+
+function _hierarchy_check_tree(who, labels, parents, ids, values, branch)
+	names = ids === nothing ? labels : ids
+	what = ids === nothing ? "labels" : "ids"
+	locate = _hierarchy_index(who, what, names)
+	n = length(names)
+	name_at(i) = names[firstindex(names) + i - 1]
+	parent_at(i) = parents[firstindex(parents) + i - 1]
+	present(i) = !_hierarchy_is_blank(name_at(i))
+	parent_index(i) = (p = parent_at(i); _hierarchy_is_blank(p) ? 0 : locate(p))
+	has_root = false
+	first_missing = 0      # first sector whose parent names no sector
+	second_missing = 0     # first one whose missing parent is another name
+	for i in 1:n
+		present(i) || continue
+		p = parent_at(i)
+		if _hierarchy_is_blank(p)
+			has_root = true
+		elseif locate(p) == 0
+			if first_missing == 0
+				first_missing = i
+			elseif second_missing == 0 && _hierarchy_js_key(p) != _hierarchy_js_key(parent_at(first_missing))
+				second_missing = i
+			end
+		end
+	end
+	if has_root && first_missing != 0
+		throw(ArgumentError(
+			"$(who): `parents[$(first_missing)]` is $(repr(parent_at(first_missing))), which is not " *
+			"one of the $(what); a root sector has the parent \"\" (plotly would draw nothing).",
+		))
+	elseif !has_root && second_missing != 0
+		throw(ArgumentError(
+			"$(who): `parents` names $(repr(parent_at(first_missing))) and " *
+			"$(repr(parent_at(second_missing))), which are not among the $(what); plotly adds " *
+			"one missing parent as the root and draws nothing with two. Give the root " *
+			"sectors the parent \"\".",
+		))
+	elseif !has_root && first_missing == 0
+		throw(ArgumentError(
+			"$(who): no sector is a root: every parent is one of the $(what), so the " *
+			"sectors form a cycle (plotly would draw nothing). Give the root sector the " *
+			"parent \"\".",
+		))
+	end
+	# No sector is its own ancestor: walk each chain of parents once (state 1:
+	# on the current walk, 2: reaches a root).
+	state = zeros(UInt8, n)
+	for start in 1:n
+		(present(start) && state[start] == 0x00) || continue
+		i = start
+		while i != 0 && state[i] == 0x00
+			state[i] = 0x01
+			i = parent_index(i)
+		end
+		i != 0 && state[i] == 0x01 && throw(ArgumentError(
+			"$(who): the sector $(repr(name_at(i))) is its own ancestor (`parents` makes " *
+			"a cycle); plotly would draw nothing.",
+		))
+		i = start
+		while i != 0 && state[i] == 0x01
+			state[i] = 0x02
+			i = parent_index(i)
+		end
+	end
+	(branch == "total" && values !== nothing) || return nothing
+	number(v) = v isa AbstractString ? parse(Float64, v) : Float64(v)
+	value_at(i) = values[firstindex(values) + i - 1]
+	children = zeros(Float64, n)
+	for i in 1:n
+		present(i) || continue
+		j = parent_index(i)
+		j == 0 || (children[j] += number(value_at(i)))
+	end
+	for (i, total) in enumerate(children)
+		# plotly.js compares with its ALMOST_EQUAL = 0.999999.
+		total > 0 && number(value_at(i)) < total * 0.999999 && throw(ArgumentError(
+			"$(who): with `branchvalues = \"total\"` the value of $(repr(name_at(i))) " *
+			"($(value_at(i))) must be at least the sum of its children ($(total)); " *
+			"plotly would draw nothing. Use `branchvalues = \"remainder\"` to add " *
+			"the children to their parent.",
+		))
+	end
+	return nothing
 end
 
 function _extended_hierarchy_plot(
@@ -25782,6 +26057,29 @@ _map_numeric_color(color) =
 	color isa AbstractVector && !isempty(color) &&
 	all(value -> value isa Real && !(value isa Bool), color)
 
+# The `layout.geo.scope` and `layout.geo.projection.type` values of plotly's
+# schema (PlotlyBase's bundled one); cached on first use.
+const _GEO_ENUMERATIONS = Ref{Any}(nothing)
+
+function _geo_check_layout_options(who::AbstractString, scope::AbstractString, projection::AbstractString)
+	(isempty(scope) && isempty(projection)) && return nothing
+	if _GEO_ENUMERATIONS[] === nothing
+		geo = PlotlyBase.get_plotschema().layout[:layoutAttributes][:geo]
+		_GEO_ENUMERATIONS[] = (
+			scope = String[string(v) for v in geo[:scope][:values]],
+			projection = String[string(v) for v in geo[:projection][:type][:values]],
+		)
+	end
+	known = _GEO_ENUMERATIONS[]
+	for (name, value, values) in (("scope", scope, known.scope), ("projection", projection, known.projection))
+		# An unknown value is drawn as plotly's default map (errors-inputs-13).
+		isempty(value) || value in values || throw(ArgumentError(
+			"$(who): `$(name)` must be one of $(join(repr.(values), ", ")); got $(repr(value)).",
+		))
+	end
+	return nothing
+end
+
 function _geo_layout(
 	scope::AbstractString,
 	projection::AbstractString,
@@ -25973,7 +26271,8 @@ function _geo_scatter_trace(
 	)
 	_map_set!(built, lon, :lon)
 	_map_set!(built, lat, :lat)
-	_map_set!(built, String(mode), :mode)
+	# The flags plotly.js knows, as for plot_ternary (errors-inputs-13).
+	_map_set!(built, _extended_scatter_mode(who, mode), :mode)
 	if color isa Union{AbstractString, Symbol}
 		text = String(color)
 		isempty(text) || _map_set!(built, text, :marker, :color)
@@ -26515,6 +26814,7 @@ function plot_choropleth(
 )
 	who = "plot_choropleth"
 	_map_reject_keywords(who, kwargs; mutator = false)
+	_geo_check_layout_options(who, scope, projection)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -26589,6 +26889,7 @@ function plot_choropleth!(
 )
 	who = "plot_choropleth!"
 	_map_reject_keywords(who, kwargs; mutator = true)
+	_geo_check_layout_options(who, scope, projection)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -26686,6 +26987,7 @@ function plot_scattergeo(
 )
 	who = "plot_scattergeo"
 	_map_reject_keywords(who, kwargs; mutator = false)
+	_geo_check_layout_options(who, scope, projection)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -26764,6 +27066,7 @@ function plot_scattergeo!(
 )
 	who = "plot_scattergeo!"
 	_map_reject_keywords(who, kwargs; mutator = true)
+	_geo_check_layout_options(who, scope, projection)
 	options = _geo_figure_options(
 		who;
 		title = title,
@@ -27414,6 +27717,23 @@ function _is_transactional_high_level_plot_mutator(mutator::Function)
 	return false
 end
 
+# Values that are never a figure. A mutator called with one of them where the
+# figure goes (`xlabel!(nothing, "x")`, `hline!(1, 0.5)`, a Layout or a trace)
+# raises ArgumentError("<function>: ...") naming the function (invariant 4)
+# before anything is read, instead of reaching `_plot_obj` from whichever
+# helper touches the figure first. No mutator method takes one of these types
+# first (each has the figure, a SubplotFigure or a staged mutation there).
+const _NOT_A_FIGURE = Union{
+	Nothing, Missing, Number, AbstractString, Symbol, AbstractChar,
+	AbstractArray, AbstractDict, Tuple, NamedTuple, Module, Function, Type,
+	Layout, AbstractTrace,
+}
+
+_not_a_figure_error(who::AbstractString, value) = ArgumentError(
+	"$(who): the first argument must be the figure (a Plot, SyncPlot or " *
+	"SubplotFigure); got a value of type $(typeof(value)).",
+)
+
 function _install_transactional_high_level_plot_wrappers!()
 	for function_name in _TRANSACTIONAL_HIGH_LEVEL_PLOT_MUTATORS
 		mutator = getfield(@__MODULE__, function_name)
@@ -27446,6 +27766,13 @@ function _install_transactional_high_level_plot_wrappers!()
 						kwargs...,
 					)
 				end
+				function $(function_name)(
+					fig::_NOT_A_FIGURE,
+					$(typed_arguments...);
+					kwargs...,
+				)
+					throw(_not_a_figure_error($(string(function_name)), fig))
+				end
 			end
 			Core.eval(@__MODULE__, definition)
 		end
@@ -27454,3 +27781,16 @@ function _install_transactional_high_level_plot_wrappers!()
 end
 
 _install_transactional_high_level_plot_wrappers!()
+
+# The figure verbs whose methods are all typed (no generic method for the
+# wrappers above): the same ArgumentError for a value that is never a figure.
+for name in (:colorbar!, :set_fonts!, :set_legend!, :shared_colorbar!)
+	@eval $(name)(fig::_NOT_A_FIGURE, args...; kwargs...) =
+		throw(_not_a_figure_error($(string(name)), fig))
+end
+for name in (:subplot!, :subplot_legends!)
+	@eval $(name)(sf::_NOT_A_FIGURE, args...; kwargs...) = throw(ArgumentError(
+		$(string(name)) * ": the first argument must be a SubplotFigure (made by " *
+		"`subplots`); got a value of type $(typeof(sf)).",
+	))
+end

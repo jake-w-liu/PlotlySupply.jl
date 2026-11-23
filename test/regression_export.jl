@@ -2,6 +2,26 @@ using Test, PlotlySupply
 using Base64
 using PlotlySupply: PlotlyBase
 
+# Two exports of a 3-D scene: equal apart from the WebGL bitmap, whose pixels
+# differ by at most a few anti-aliasing levels on a small fraction of pixels.
+function _reg_same_pixels(a::Vector{UInt8}, b::Vector{UInt8})
+	wa, ha, ca, pa = PlotlySupply._png_decode(a)
+	wb, hb, cb, pb = PlotlySupply._png_decode(b)
+	(wa, ha, ca) == (wb, hb, cb) || return false
+	diff = abs.(Int.(pa) .- Int.(pb))
+	return count(>(0), diff) <= 0.01 * length(diff) && maximum(diff; init = 0) <= 96
+end
+function _reg_same_scene_export(a::Vector{UInt8}, b::Vector{UInt8}, fmt::String)
+	a == b && return true
+	fmt == "png" && return _reg_same_pixels(a, b)
+	bitmap = r"data:image/png;base64,([A-Za-z0-9+/=]+)"
+	sa, sb = String(copy(a)), String(copy(b))
+	replace(sa, bitmap => "BITMAP") == replace(sb, bitmap => "BITMAP") || return false
+	ma, mb = collect(eachmatch(bitmap, sa)), collect(eachmatch(bitmap, sb))
+	length(ma) == length(mb) || return false
+	return all(_reg_same_pixels(base64decode(x.captures[1]), base64decode(y.captures[1])) for (x, y) in zip(ma, mb))
+end
+
 # Live-renderer export regressions (hidden Electron export window). Pure byte
 # helpers and HTML/JSON output are covered by test/sci_export.jl.
 
@@ -187,8 +207,14 @@ end
 	@test clear[26] == 0x06   # IHDR colour type 6: RGBA
 	# plotly.js paints the SVG paper rect as `fill` + `fill-opacity`; the
 	# transparent export also clears the plot-area rect.
-	paper_rect(svg) = match(r"<rect x=\"0\" y=\"0\" [^>]*style=\"([^\"]*)\"", svg).captures[1]
-	plot_rect(svg) = match(r"<rect class=\"bg\" [^>]*style=\"([^\"]*)\"", svg).captures[1]
+	# A deterministic SVG writes every element's attributes in name order
+	# (platform-deps-02), so the rects are found by their attributes, not by
+	# where plotly.js put them: the paper rect is the first classless rect at
+	# (0, 0), the plot-area rect the first of class "bg".
+	rect_attributes(svg) = [Dict(a.captures[1] => a.captures[2] for a in eachmatch(r"\s([A-Za-z_:][-A-Za-z0-9_:.]*)=\"([^\"]*)\"", m.match))
+		for m in eachmatch(r"<rect\b[^>]*>", svg)]
+	paper_rect(svg) = first(r for r in rect_attributes(svg) if !haskey(r, "class") && get(r, "x", "") == "0" && get(r, "y", "") == "0")["style"]
+	plot_rect(svg) = first(r for r in rect_attributes(svg) if get(r, "class", "") == "bg")["style"]
 	clear_svg = String(savefig(p; format = "svg", background = :transparent))
 	@test occursin("fill-opacity: 0;", paper_rect(clear_svg))
 	@test occursin("fill-opacity: 0;", plot_rect(clear_svg))
@@ -255,7 +281,7 @@ end
 	catch caught
 		caught
 	end
-	@test err isa PlotlySupply._ExportTimeoutError
+	@test err isa ErrorException  # the documented renderer-failure type (export-06)
 	@test occursin("timeout", sprint(showerror, err))
 	# The busy window was retired; the next export gets a fresh one.
 	@test PlotlySupply._EXPORT_STATE.window === nothing
@@ -634,7 +660,15 @@ end
 			PS._EXPORT_TYPED_ARRAY_MIN[] = typemax(Int)
 			@test !occursin("\"bdata\"", PS._prepare_savefig(fig, fmt, (;)).data_js)
 			plain = savefig(fig; format = fmt, width = 400, height = 300)
-			@test typed == plain
+			if fig === surf
+				# A 3-D scene is a WebGL bitmap, and two GPU draws of the same
+				# scene may differ in a few anti-aliased pixels (O15). What is
+				# promised: the same document around the bitmap, and the same
+				# picture to within a few pixels.
+				@test _reg_same_scene_export(typed, plain, fmt)
+			else
+				@test typed == plain
+			end
 		end
 	finally
 		PS._EXPORT_TYPED_ARRAY_MIN[] = old_min
