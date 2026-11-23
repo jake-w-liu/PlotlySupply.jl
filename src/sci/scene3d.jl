@@ -3653,7 +3653,14 @@ end
 # rectangles of different axes (or of a title and any label) that overlap,
 # and the px by which the drawing leaves the viewport (rounded to 0.5 px).
 # `(0, 0.0)` for a scene this module cannot model (orthographic, no data).
-function _s3_drawn_score(p::Plot, key::Symbol)
+# Measured under the style the figure carries (sm-11): the title widths
+# (`_s3_title_px`) are those of the style's font family, as the framing
+# that `_finalize_figure!` ran under it used; read under the style active
+# around the call they were wider (default family), and an :aps scene
+# framed to fit scored 4.5 px outside its viewport (vm-mixed3d).
+_s3_drawn_score(p::Plot, key::Symbol) = _with_figure_style(() -> _s3_drawn_score_scoped(p, key), p)
+
+function _s3_drawn_score_scoped(p::Plot, key::Symbol)
 	scene = get(p.layout.fields, key, nothing)
 	camera = _cmn_mapping_get(scene, :camera)
 	_cmn_mapping_get(_cmn_mapping_get(camera, :projection), :type) == "orthographic" && return (0, 0.0)
