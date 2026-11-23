@@ -240,6 +240,19 @@ function _lt_legend_box(plan, id::String)
 	return d
 end
 
+# The `:inside_legend` decoration (no room) of grid cell legend `id`, which
+# lists no entry, when its box is visible and sits at an inside position of
+# its cell (`_lt_legend_role`); else nothing (a box the user put outside
+# stays where it is and takes no room while it is empty).
+function _lt_empty_cell_legend!(out, plan, id::String, area::Symbol, boxes)
+	d = _symbol_dict(get(plan.layout.fields, Symbol(id), nothing))
+	(isempty(d) || get(d, :visible, true) === false) && return out
+	role = _lt_legend_role(plan, d, plan.areas[area], boxes(area), false)
+	(role === nothing || role.side !== :none) && return out
+	push!(out, _LtDecor("legend:" * id, area, :none, 0.0, 0, false, false, :inside_legend, id, role.position))
+	return out
+end
+
 # The ids of the legends some trace of the plan's figure is listed in (as
 # `_legend_entry_indices` counts entries), from one scan of the traces per
 # plan: asked per legend, the emptiness check cost a 6 x 6 grid of heatmaps
@@ -596,7 +609,18 @@ function _lt_legend_decorations!(out, plan, cells, single::Bool, boxes)
 	end
 	for (id, area) in cell_ids
 		d = _lt_legend_box(plan, id)
-		d === nothing && continue
+		if d === nothing
+			# A cell legend of a grid that lists no entry yet (a heatmap's
+			# cell) draws nothing and takes no room, but while it sits at a
+			# corner inside its cell it keeps following that corner as the
+			# cell moves (its colorbar's room): its first entries are given to
+			# the best-position rule only while the box is where the default
+			# placement puts it for the cell's domain (`_apply_subplot_legends!`,
+			# seams-01). No room and no other role: a grid holds its pushed
+			# margins whatever its legends list (layout-fuzz-01, Q27).
+			single || _lt_empty_cell_legend!(out, plan, id, area, boxes)
+			continue
+		end
 		role = _lt_legend_role(plan, d, plan.areas[area], boxes(area), single)
 		role === nothing && continue
 		if role.side === :none
