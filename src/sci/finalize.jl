@@ -4255,17 +4255,29 @@ end
 # `_room_needs`: labels and requests) less what the margin estimate holds
 # beyond the base margin (plotly's automargin push, the room engine's edge
 # needs). A compressed block is centred with them (`_room_band_solve`), so
-# the blank left beyond the decorations is the same at both ends.
-function _room_outer_needs(plan::_RoomPlan, need, bands, lo_side::Symbol, hi_side::Symbol, axis::Int)
+# the blank left beyond the decorations is the same at both ends. A side
+# whose outermost decoration is its axis labels (no request beyond them,
+# `by_side`) counts them as drawn, without the `_ROOM_LABEL_PAD` kept
+# between labels and a next decoration: that pad at the labelled end only
+# put the block that much off centre (V2: 4 px once the D24 axis-title
+# model matched the drawn title).
+function _room_outer_needs(plan::_RoomPlan, need, bands, lo_side::Symbol, hi_side::Symbol, axis::Int;
+		by_side = nothing)
 	bands === nothing && return (0.0, 0.0)
 	lo, hi = bands
 	inside_lo = 0.0
 	inside_hi = 0.0
+	function drawn(key, side)
+		px = need[(key, side)]
+		labelled_last = plan.areas[key].own[side] > 0 &&
+			(by_side === nothing || isempty(get(by_side, (key, side), ())))
+		return labelled_last ? px - _ROOM_LABEL_PAD : px
+	end
 	for key in plan.area_order
 		a = plan.areas[key]
 		(a.grid && a.ref !== nothing) || continue
-		round(a.ref[axis][1]; digits = 9) == lo[1] && (inside_lo = max(inside_lo, need[(key, lo_side)]))
-		round(a.ref[axis][2]; digits = 9) == hi[end] && (inside_hi = max(inside_hi, need[(key, hi_side)]))
+		round(a.ref[axis][1]; digits = 9) == lo[1] && (inside_lo = max(inside_lo, drawn(key, lo_side)))
+		round(a.ref[axis][2]; digits = 9) == hi[end] && (inside_hi = max(inside_hi, drawn(key, hi_side)))
 	end
 	# The base margin is the one before the room engine raised it
 	# (`_ROOM_MARGIN_KEY`): a decoration the raise holds is centred as one
@@ -5811,6 +5823,26 @@ end
 # line of tick text plus offset (at the top also the title block) is grown.
 # Margins only grow, and a figure without a margin of its own keeps plotly's
 # generous default.
+# Font size (px) of the labels a polar or ternary subplot draws outside its
+# disc or triangle (angular / a, b, c tick labels): the largest tick font of
+# those axes among the layout keys `keys` (read through `lookup`), an axis
+# without one at the root font `root` (a style's 12 px angular labels under
+# a 14 px root font need the room of 12 px). One rule for the finalizer and
+# the style margin (`_style_domain_subplot_margin`), so a constructed figure
+# is settled (sm-02).
+function _fin_domain_tick_font(lookup, keys, root::Float64)
+	tick = 0.0
+	for key in keys
+		name = String(key)
+		occursin(r"^(polar|ternary)\d*$", name) || continue
+		axis = lookup(key)
+		for sub in (startswith(name, "polar") ? (:angularaxis,) : (:aaxis, :baxis, :caxis))
+			tick = max(tick, _fin_mapping_font_size(_cmn_mapping_get(axis, sub), :tickfont, root))
+		end
+	end
+	return tick
+end
+
 function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height::Float64)
 	fields = p.layout.fields
 	any(key -> occursin(r"^(polar|ternary)\d*$", String(key)), keys(fields)) || return updates
