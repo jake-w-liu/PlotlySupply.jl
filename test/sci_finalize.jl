@@ -1622,11 +1622,13 @@ end
 		title!(f, "T")
 		@test _sfn_fields(f.layout.fields[:margin])[:t] >= m1[:t]
 	end
-	# Larger tick fonts after construction grow every side.
+	# Larger tick fonts after construction grow every side (the angular
+	# labels' own font: the style sets it, so a larger figure font alone
+	# leaves them as they are).
 	with_style(:ieee) do
 		g = plot_scatterpolar(th, r)
 		m0 = _sfn_fields(g.layout.fields[:margin])
-		relayout!(g; font_size = 30)
+		relayout!(g; polar_angularaxis_tickfont_size = 30)
 		_SFN._finalize_figure!(g)
 		m1 = _sfn_fields(g.layout.fields[:margin])
 		@test all(m1[s] > m0[s] for s in (:l, :r, :b, :t))
@@ -2148,11 +2150,15 @@ _sfn_margin(fig, side) = _SFN._cmn_mapping_get(get(_sfn_plot(fig).layout.fields,
 		with_style(st) do
 			# The right margin of a grid without a bar.
 			plain = subplots(1, 1; sync = false)
-			plot_scatter!(plain, 1:3, 1:3)
+			plot_scatter!(plain, 1:3, 1:3; legend = "data")
 			r0 = _sfn_margin(plain, :r)
-			# A cell bar at the paper edge raises it; moved below, it is given back.
+			# A cell bar at the paper edge raises it (held for the inside
+			# legend, `_lt_hold_pushed_margins!`; a bar alone is left to
+			# plotly's automargin since its empty legend no longer counts,
+			# layout-fuzz-01); moved below, it is given back.
 			sf = subplots(1, 1; sync = false)
 			plot_heatmap!(sf, Z)
+			plot_scatter!(sf, [0.0, 1.0, 2.0], [0.0, 1.0, 1.0]; legend = "data")
 			raised = _sfn_margin(sf, :r)
 			@test raised > r0
 			colorbar!(sf; side = :bottom)
@@ -2187,6 +2193,7 @@ _sfn_margin(fig, side) = _SFN._cmn_mapping_get(get(_sfn_plot(fig).layout.fields,
 	# The record survives a JSON round trip (String keys).
 	sf = subplots(1, 1; sync = false)
 	plot_heatmap!(sf, Z)
+	plot_scatter!(sf, [0.0, 1.0, 2.0], [0.0, 1.0, 1.0]; legend = "data")
 	rec = _SFN._room_margin_record(sf.plot.layout)
 	@test haskey(rec, :r) && rec[:r][2] == _sfn_margin(sf, :r)
 	meta = _SFN._symbol_dict(sf.plot.layout.fields[:meta])
@@ -2202,9 +2209,12 @@ end
 			fig = plot_ternary([0.2, 0.3], [0.3, 0.3], [0.5, 0.4])
 			m = fig.layout.fields[:margin]
 			font = _SFN._fin_font_size(fig.layout)
-			tick = _SFN._tight_root_font_size(k -> get(fig.layout.fields, k, nothing))
+			# The corner labels are drawn at each axis's own tick font (the
+			# style's), else at the figure's.
+			root = _SFN._tight_root_font_size(k -> get(fig.layout.fields, k, nothing))
+			tick = 0.0
 			for axis in (:aaxis, :baxis, :caxis)
-				tick = max(tick, _SFN._fin_mapping_font_size(_SFN._cmn_mapping_get(fig.layout.fields[:ternary], axis), :tickfont, 0.0))
+				tick = max(tick, _SFN._fin_mapping_font_size(_SFN._cmn_mapping_get(fig.layout.fields[:ternary], axis), :tickfont, root))
 			end
 			title = _SFN._fin_mapping_font_size(_SFN._cmn_mapping_get(_SFN._cmn_mapping_get(fig.layout.fields[:ternary], :baxis), :title), :font, font)
 			corner = ceil(_SFN._FIN_LINE_EM * title + 4)
@@ -2824,4 +2834,665 @@ end
 	end
 	# The same figure gets the same size whichever way it was built.
 	@test abs(sizes[1][2] - sizes[2][2]) <= 1
+end
+
+# ---------------------------------------------------------------------------
+# v8 r1 (layout-engine): settling, colorbar spans, title room
+# ---------------------------------------------------------------------------
+
+_sfn_settled(fig) = _SFN._finalize_figure!(fig) === false
+_sfn_size(fig) = (l = _sfn_plot(fig).layout.fields; (Int(round(l[:width])), Int(round(l[:height]))))
+
+# The drawn box (px, page coordinates) of the x title of a rendered figure:
+# its MathJax svg when it has one.
+const _SFN_XTITLE_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const t = gd.querySelector('.g-xtitle');
+  if (!t) return null;
+  const math = t.querySelector('.math-group, svg');
+  if (!math) return null;
+  const root = gd.getBoundingClientRect();
+  const r = math.getBoundingClientRect();
+  if (r.height <= 0) return null;
+  return JSON.stringify({height: gd._fullLayout.height, top: r.top - root.top, bottom: r.bottom - root.top});
+})()
+"""
+
+# Runs `js` (with `__DIV__` for the graph div) on the figure drawn in a
+# hidden window until it returns a JSON string; `nothing` when the renderer
+# cannot start (the checks are then skipped). With `width` and `height`, a
+# copy of the figure is drawn at that size, finalized for it.
+function _sfn_render_js(fig, js::AbstractString; width = nothing, height = nothing)
+	p = _sfn_plot(fig)
+	if width !== nothing
+		p = Plot(deepcopy(p.data), deepcopy(p.layout))
+		relayout!(p; width = width, height = height)
+		_SFN._finalize_figure!(p)
+	end
+	sp = try
+		to_syncplot(p; show = false)
+	catch err
+		@warn "sci_finalize: the renderer could not start; renderer checks are skipped" exception = (err, catch_backtrace())
+		return nothing
+	end
+	try
+		backend = _SFN._syncplot_backend(sp)
+		script = replace(js, "__DIV__" => _SFN._json_js(sp.divid))
+		for _ in 1:300
+			raw = Base.invokelatest(() -> backend.run(sp.window, script))
+			(raw === nothing || raw == "null") || return JSON.parse(String(raw))
+			sleep(0.05)
+		end
+		error("sci_finalize: the figure did not render within 15 s")
+	finally
+		close(sp)
+	end
+end
+
+_sfn_render_xtitle(fig) = _sfn_render_js(fig, _SFN_XTITLE_JS)
+
+# The px boxes of the angular tick labels of every polar subplot drawn.
+const _SFN_POLAR_TICKS_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const root = gd.getBoundingClientRect();
+  const out = {};
+  for (const g of gd.querySelectorAll('g.polarlayer > g')) {
+    const id = [...g.classList].find(c => /^polar\d*$/.test(c));
+    if (!id) continue;
+    out[id] = [...g.querySelectorAll('g.angularaxistick text')].map(t => {
+      const r = t.getBoundingClientRect();
+      return [r.left - root.left, r.top - root.top, r.right - root.left, r.bottom - root.top];
+    }).filter(b => b[2] > b[0]);
+  }
+  if (Object.keys(out).length === 0) return null;
+  return JSON.stringify(out);
+})()
+"""
+
+@testset "constructors return settled figures (errors-inputs-01, apib-10, seams-02, vm-settle, apia-03, apia-10)" begin
+	x = collect(range(0.1, 3.0; length = 40))
+	h = [sin(3a) * b for a in 1:30 for b in (0.5, 1.0)]
+	hy = [cos(2a) * b for a in 1:30 for b in (0.5, 1.0)]
+	θ = collect(range(0, 2π; length = 91))
+	xs = range(-2, 2; length = 21); ys = range(-1, 1; length = 11)
+	Z = [exp(-a^2 - 4b^2) for a in xs, b in ys]
+	cases = [
+		"math title" => () -> plot_scatter(x, sin.(x); title = "\$t\$ (s)"),
+		"two-line title" => () -> plot_scatter(x, sin.(x); title = "a<br>b"),
+		"long x title" => () -> plot_scatter(x, sin.(x); xlabel = repeat("a long axis title ", 6)),
+		"histogram2d log" => () -> plot_histogram2d(h, hy; colornorm = :log, colorbar_title = "count"),
+		"histogram2d log axes" => () -> plot_histogram2d(abs.(h) .+ 0.1, abs.(hy) .+ 0.1; colornorm = :log, xscale = "log"),
+		"polar legend" => () -> plot_scatterpolar(θ, [abs.(cos.(2 .* θ)), 0.5 .+ 0.3 .* cos.(θ)];
+			thetaunit = "radians", legend = ["a", "b"], title = "\$r(\\theta)\$<br>two lines"),
+		"surface" => () -> plot_surface(xs, ys, Z; colorbar_title = "\$\\Phi\$ (V)", zlabel = "\$\\Phi\$ (V)"),
+		"box legend" => () -> plot_box(h; legend = "A"),
+		"choropleth" => () -> plot_choropleth(["USA", "CAN"], [1.0, 2.0]),
+	]
+	for st in (:default, :ieee, :aps), (name, build) in cases
+		fig = with_style(build, st)
+		@test _sfn_settled(fig)
+	end
+end
+
+@testset "the math colorbar title of a removed field goes with it (sm-01, sm-13)" begin
+	Z = [sin(i / 3) * cos(j / 4) for i in 1:15, j in 1:12]
+	titles(fig) = [String(a[:name]) for a in get(_sfn_plot(fig).layout.fields, :annotations, Any[])
+		if occursin("colorbar_title", string(get(a, :name, "")))]
+	fig = plot_heatmap(1:15, 1:12, Z; colorbar_title = "\$\\phi\$ (V)")
+	@test length(titles(fig)) == 1
+	deletetraces!(fig, 1)
+	plot_scatter!(fig, 1:15, sin.(1:15); legend = "line")
+	@test isempty(titles(fig))
+	@test _sfn_settled(fig)
+	fig = plot_heatmap(1:15, 1:12, Z; colorbar_title = "\$\\phi\$ (V)")
+	react!(fig, [scatter(x = 1:3, y = [1, 2, 3])], fig.layout)
+	ylabel!(fig, "y")
+	@test isempty(titles(fig))
+	sf = subplots(1, 1; sync = false)
+	plot_scatter!(sf, 1:3, [1.0, 2, 3]; legend = "main")
+	k = inset!(sf, (0.55, 0.55, 0.4, 0.4))
+	plot_heatmap!(sf, 1:15, 1:12, Z; inset = k, colorbar_title = "\$u\$ (V)")
+	@test length(titles(sf)) == 1
+	remove_inset!(sf, k)
+	@test isempty(titles(sf))
+	@test _sfn_settled(sf)
+end
+
+@testset "figure annotations and narrowed cells settle (sm-04, sm-10, layout-fuzz-01, layout-fuzz-10)" begin
+	Z = [sin(i / 3) * cos(j / 4) for i in 1:6, j in 1:5]
+	f = plot_heatmap(collect(1.0:6), collect(1.0:5), Z; xlabel = "x")
+	annotate!(f, 0.5, 0.01, "Source: simulation"; coords = :figure, showarrow = false, anchor = :bottom)
+	@test _sfn_settled(f)
+	f = plot_scatter(1:6, [1.0, 3, 2, 5, 4, 6]; xlabel = "x", title = "\$\\alpha\$ test")
+	annotate!(f, 0.5, 0.01, "note"; coords = :figure, showarrow = false, anchor = :bottom)
+	@test _sfn_settled(f)
+	Z2 = [sin(i / 3) * cos(j / 4) for i in 1:15, j in 1:12]
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, 1:15, 1:12, Z2; row = 1, col = 1)
+	plot_heatmap!(sf, 1:15, 1:12, Z2; row = 1, col = 2)
+	relayout!(sf; xaxis_domain = [0.0, 0.3])
+	xlabel!(sf, "x"; row = 1, col = 2)
+	@test _sfn_settled(sf)
+	xs = collect(range(0.0, 3.0; length = 30)); ys = collect(range(0.0, 2.0; length = 20))
+	Zf = [sin(2a) * cos(3b) for a in xs, b in ys]
+	xl = collect(range(0.0, 1.0; length = 40))
+	for st in (:ieee, :aps, :nature)
+		sf = with_style(st) do
+			sf = subplots(1, 2; sync = false)
+			plot_heatmap!(sf, xs, ys, Zf; row = 1, col = 2)
+			sf
+		end
+		@test _sfn_settled(sf)
+		sf = with_style(st) do
+			sf = subplots(1, 2; sync = false)
+			plot_scatter!(sf, xl, xl .^ 2; row = 1, col = 1, legend = "model", xlabel = "x", ylabel = "y")
+			plot_heatmap!(sf, xs, ys, Zf; row = 1, col = 2, xlabel = "x", ylabel = "y", colorbar_title = "E")
+			sf
+		end
+		@test _sfn_settled(sf)
+	end
+	# figsize! after an equal-aspect field: settled by the call.
+	f = with_style(:ieee) do
+		f = plot_heatmap(xs, ys, Zf; equalar = true)
+		figsize!(f, :ieee; columns = 2)
+		f
+	end
+	@test _sfn_settled(f)
+end
+
+@testset "secondary y over an equal-aspect host settles (errors-inputs-02)" begin
+	Z = [1.0 2 3; 4 5 6; 7 8 9]
+	f = plot_matrix(Z)
+	plot_matrix!(f, Z; secondary_y = true)
+	@test _sfn_settled(f)
+	px, py = [[0.0, 1, 1], [1.0, 2, 2]], [[0.0, 0, 1], [0.0, 0, 1]]
+	f = plot_polygons(px, py, [1.0, 2.0])
+	plot_polygons!(f, px, py, [1.0, 2.0]; secondary_y = true)
+	@test _sfn_settled(f)
+	f = plot_tripcolor([0.0, 1, 0, 1], [0.0, 0, 1, 1], [1 2 3; 2 4 3], [1.0, 2, 3, 4])
+	plot_tripcolor!(f, [0.0, 1, 0, 1], [0.0, 0, 1, 1], [1 2 3; 2 4 3], [1.0, 2, 3, 4]; secondary_y = true)
+	@test _sfn_settled(f)
+end
+
+@testset "rule-placed cell legends do not move each other (docs-truth-16, vm-gridleg, layout-fuzz-11)" begin
+	x = collect(range(0.0, 1.0; length = 30))
+	sf = with_style(:nature) do
+		sf = subplots(1, 3; sync = false)
+		for c in 1:3
+			plot_scatter!(sf, x, x .^ c; row = 1, col = c, legend = ["model $c"], xlabel = "x", ylabel = "y")
+		end
+		figsize!(sf, :nature; columns = 2)
+		sf
+	end
+	@test _sfn_settled(sf)
+	L = sf.plot.layout.fields
+	for (c, id) in enumerate((:legend, :legend2, :legend3))
+		lg = _SFN._symbol_dict(get(L, id, nothing))
+		xd = _SFN._symbol_dict(L[c == 1 ? :xaxis : Symbol(:xaxis, c)])[:domain]
+		haskey(lg, :x) || continue
+		# Beside its own cell (inside or right of it), never over the next one.
+		c < 3 && @test lg[:x] < _SFN._symbol_dict(L[Symbol(:xaxis, c + 1)])[:domain][1]
+		@test lg[:x] >= xd[1] - 1e-9
+	end
+	# layout-fuzz-11: a cell legend left under its cell follows figsize!.
+	xs = collect(range(0.0, 3.0; length = 30)); ys = collect(range(0.0, 2.0; length = 20))
+	Z = [sin(2a) * cos(3b) for a in xs, b in ys]
+	xx = 10 .^ range(-3, 3; length = 30)
+	sf = with_style(:springer) do
+		sf = subplots(3, 2; sync = false, column_titles = ["Column 1", "Column 2"])
+		plot_bar!(sf, ["alpha", "beta", "gamma", "delta"], [3, 1, 2, 4]; row = 1, col = 1, xlabel = "Error",
+			legend = raw"$\alpha = 0.5$")
+		plot_heatmap!(sf, xs, ys, Z; row = 2, col = 1, xlabel = "time (s)", ylabel = "Error", colorbar_title = "intensity (a.u.)")
+		plot_scatter!(sf, xx, xx .^ -2; row = 3, col = 1, xscale = "log", yscale = "log",
+			xlabel = raw"elements per side $n$", legend = raw"$\alpha = 0.5$")
+		figsize!(sf, :springer; columns = 2, aspect = 1.0)
+		sf
+	end
+	@test _sfn_settled(sf)
+	L = sf.plot.layout.fields
+	lg = _SFN._symbol_dict(L[:legend])
+	# The legend of cell (1, 1) stays in row 1: above the top of row 2.
+	row2_top = _SFN._symbol_dict(L[:yaxis3])[:domain][2]
+	@test lg[:y] > row2_top
+end
+
+@testset "margins hold what plotly cannot push (layout-fuzz-08, layout-fuzz-14)" begin
+	# Decorations taller than a :nature figure: savefig neither fails nor
+	# leaves less than plotly's least plot height.
+	f = with_style(:nature) do
+		f = plot_scatter(1:5, [1.0, 2, 3, 2, 1]; legend = "a", ylabel = repeat("long left title ", 3),
+			xlabel = repeat("a wrapped long x title ", 8))
+		plot_scatter!(f, 1:5, [2.0, 1, 2, 3, 2]; legend = "b")
+		plot_scatter!(f, 1:5, [3.0, 2, 1, 1, 2]; legend = "c")
+		set_legend!(f; position = :outside_bottom)
+		f
+	end
+	@test _sfn_settled(f)
+	m = _SFN._symbol_dict(f.layout.fields[:margin])
+	W, H = _sfn_size(f)
+	@test H - m[:t] - m[:b] >= min(64, H / 2) - 1
+	@test !isempty(savefig(f; format = "svg"))
+	# A narrow cell with a bottom bar titled on its right: the bar keeps room
+	# for its title and labels, and the export works.
+	sf = subplots(1, 4; sync = false)
+	plot_heatmap!(sf, 1:10, 1:10, [sin(i) * j for i in 1:10, j in 1:10]; row = 1, col = 1)
+	colorbar!(sf; row = 1, col = 1, side = :bottom, title = "intensity (a.u.)", title_side = :right)
+	figsize!(sf, 336, 200)
+	@test _sfn_settled(sf)
+	bar = _sfn_bar(sf.plot.data[1])
+	W = 336 - sum(_SFN._symbol_dict(sf.plot.layout.fields[:margin])[k] for k in (:l, :r))
+	@test bar[:len] * W >= _SFN._text_extent("intensity (a.u.)", _SFN._fin_font_size(sf.plot.layout))[1]
+	@test !isempty(savefig(sf; format = "svg"))
+end
+
+@testset "the finalizer's restyle! takes one Dict of paths (perf-restyle)" begin
+	p = plot_heatmap([1.0 2; 3 4])
+	ctx = _SFN._fin_context(p, nothing, nothing, false)
+	_SFN._fin_restyle!(ctx, 1, Dict{Symbol, Any}(:colorbar_x => 0.5, :colorbar_len => 0.4))
+	@test _sfn_bar(p.data[1])[:x] == 0.5 && _sfn_bar(p.data[1])[:len] == 0.4
+	@test !haskey(p.data[1].fields, :colorbar_x)
+	# A key set never seen before compiles no restyle! method.
+	updates = Dict{Symbol, Any}(:colorbar_ypad => 0, :colorbar_xanchor => "left", :colorbar_thickness => 11,
+		:colorbar_outlinewidth => 1)
+	Base.cumulative_compile_timing(true)
+	t0 = Base.cumulative_compile_time_ns()[1]
+	_SFN._fin_restyle!(ctx, 1, updates)
+	t1 = Base.cumulative_compile_time_ns()[1]
+	Base.cumulative_compile_timing(false)
+	@test (t1 - t0) / 1e9 < 0.2
+	@test _sfn_bar(p.data[1])[:thickness] == 11
+end
+
+@testset "plot_area rejects Inf as it rejects NaN, before any mutation (apia-01)" begin
+	err = try
+		plot_area([1.0, 2, 3, 4, 5], [1.0, 2, Inf, 2, 1]); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && startswith(err.msg, "plot_area:") && occursin("Inf", err.msg)
+	@test_throws ArgumentError plot_area([1.0, 2, 3], [1.0, -Inf, 1])
+	f = plot_scatter(1:3, [1.0, 2, 3])
+	before = _sfn_snapshot(f)
+	@test_throws ArgumentError plot_area!(f, [1.0, 2, 3], [1.0, Inf, 1])
+	@test _sfn_snapshot(f) == before
+end
+
+@testset "rendered colorbars span their plot areas (layout-fuzz-04, layout-fuzz-05, layout-fuzz-09)" begin
+	xs40 = collect(range(0.0, 4.0; length = 40)); ys10 = collect(range(0.0, 1.0; length = 10))
+	Zw = [sin(2a) * cos(3b) for a in xs40, b in ys10]
+	# A bottom bar under a wide fitted field: as wide as its box.
+	f = plot_heatmap(xs40, ys10, Zw; equalar = true)
+	colorbar!(f; side = :bottom)
+	@test _sfn_settled(f)
+	W, H = _sfn_size(f)
+	info = _sfn_render(f; width = W, height = H, bars = 1)
+	if info !== nothing
+		box = _sfn_box(info, :xaxis, :yaxis)
+		bar = only(info["colorbars"])
+		@test abs(bar["x0"] - box[1]) <= 1.5 && abs(bar["x1"] - box[2]) <= 1.5
+	end
+	# Under a tall fitted field in a grid resized after its content.
+	xs10 = collect(range(0.0, 1.0; length = 10)); ys30 = collect(range(0.0, 3.0; length = 30))
+	Zt = [sin(2a) * cos(3b) for a in xs10, b in ys30]
+	sf = subplots(2, 1; sync = false)
+	plot_heatmap!(sf, xs10, ys30, Zt; row = 1, col = 1, equalar = true)
+	colorbar!(sf; row = 1, col = 1, side = :bottom)
+	plot_scatter!(sf, xs10, xs10; row = 2, col = 1)
+	figsize!(sf, 7.16, 8.0; units = :in)
+	@test _sfn_settled(sf)
+	W, H = _sfn_size(sf)
+	info = _sfn_render(sf; width = W, height = H, bars = 1)
+	if info !== nothing
+		box = _sfn_box(info, :xaxis, :yaxis)
+		bar = only(info["colorbars"])
+		@test abs(bar["x0"] - box[1]) <= 1.5 && abs(bar["x1"] - box[2]) <= 1.5
+	end
+	# A single field at plotly's default bar position: as tall as the plot.
+	f = plot_heatmap([sin(i) * j for i in 1:10, j in 1:8])
+	@test _sfn_settled(f)
+	info = _sfn_render(f; bars = 1)
+	if info !== nothing
+		box = _sfn_box(info, :xaxis, :yaxis)
+		bar = only(info["colorbars"])
+		@test abs(bar["y0"] - box[3]) <= 1.5 && abs(bar["y1"] - box[4]) <= 1.5
+	end
+	# A cell bar written before a figure title, panel labels and figsize!
+	# follows its cell.
+	xs = collect(range(0.0, 3.0; length = 30)); ys = collect(range(0.0, 2.0; length = 20))
+	Z = [sin(2a) * cos(3b) for a in xs, b in ys]
+	xl = collect(range(0.0, 1.0; length = 30))
+	sf = with_style(:aps) do
+		sf = subplots(2, 1; sync = false)
+		plot_heatmap!(sf, xs, ys, Z; row = 1, col = 1, ylabel = "y", colorbar_title = "intensity (a.u.)")
+		plot_scatter!(sf, xl, xl .^ 2; row = 2, col = 1, xlabel = "x", ylabel = "y")
+		title!(sf, "Convergence study"; align = :left)
+		panel_labels!(sf)
+		figsize!(sf, :aps; columns = 2, aspect = 1.0)
+		sf
+	end
+	@test _sfn_settled(sf)
+	W, H = _sfn_size(sf)
+	info = _sfn_render(sf; width = W, height = H, bars = 1)
+	if info !== nothing
+		box = _sfn_box(info, :xaxis, :yaxis)
+		bar = only(info["colorbars"])
+		@test abs(bar["y1"] - box[4]) <= 1.5
+		@test bar["top"] >= box[3] - 1.5
+	end
+end
+
+@testset "math titles stay on the page (vm-xtitleclip, vm-cbtitle)" begin
+	for st in (:ieee, :aps, :nature)
+		fig = with_style(st) do
+			plot_scatter(collect(1:10), collect(1:10) .^ 2; xlabel = "frequency \$f\$ (Hz)", ylabel = "y")
+		end
+		@test _sfn_settled(fig)
+		info = _sfn_render_xtitle(fig)
+		info === nothing || @test info["bottom"] <= info["height"] - 1
+	end
+	# A plain title keeps the style's tight margin.
+	fig = with_style(:ieee) do
+		plot_scatter(collect(1:10), collect(1:10) .^ 2; xlabel = "frequency f (Hz)")
+	end
+	@test _sfn_margin(fig, :b) == 4
+	x = range(-2, 2; length = 81); y = range(-1, 1; length = 41)
+	U = [sin(3a) * cos(4b) for a in x, b in y]
+	for st in (:ieee, :aps)
+		fig = with_style(st) do
+			plot_heatmap(x, y, U; colorbar_title = "\$E_z\$ (V/m)", equalar = true)
+		end
+		@test _sfn_settled(fig)
+		W, H = _sfn_size(fig)
+		info = _sfn_render(fig; width = W, height = H, bars = 1)
+		if info !== nothing
+			ann = only([a for a in info["annotations"] if a["box"][2] !== nothing])
+			@test ann["box"][2] >= 0
+			@test _SFN._finalize_figure!(fig) === false
+		end
+	end
+end
+
+@testset "a 1 x 1 grid drops a wide field's blank as a Plot does (seams-15)" begin
+	xw = range(0, 4; length = 80); yw = range(0, 1; length = 20)
+	W = [sin(2a) * cos(3b) for a in xw, b in yw]
+	for st in (:default, :ieee)
+		fp = with_style(() -> plot_heatmap(xw, yw, W; equalar = true, xlabel = "x", ylabel = "y"), st)
+		sf = with_style(st) do
+			sf = subplots(1, 1; sync = false)
+			plot_heatmap!(sf, xw, yw, W; equalar = true, xlabel = "x", ylabel = "y")
+			sf
+		end
+		@test _sfn_settled(sf)
+		H0 = st === :default ? 500 : 252
+		@test _sfn_size(sf)[2] < 0.6 * H0
+		@test abs(_sfn_size(sf)[2] - _sfn_size(fp)[2]) <= 0.1 * _sfn_size(fp)[2]
+		yd = _SFN._symbol_dict(sf.plot.layout.fields[:yaxis])[:domain]
+		@test yd[2] - yd[1] > 0.95
+	end
+end
+
+@testset "a field alone in the right column of a journal grid settles (sm-05, sm-15)" begin
+	xs = range(-2, 2; length = 21); ys = range(-1, 1; length = 11)
+	Z = [exp(-a^2 - 4b^2) for a in xs, b in ys]
+	for st in (:ieee, :aps)
+		sf = with_style(st) do
+			subplots(2, 2; sync = false, specs = [Spec() Spec(kind = "scene"); Spec(kind = "polar") Spec()])
+		end
+		plot_surface!(sf, collect(xs), collect(ys), Z; row = 1, col = 2)
+		@test _sfn_settled(sf)
+		for (r, c) in ((2, 2), (2, 3))
+			sf = with_style(st) do
+				sf = subplots(r, c; sync = false)
+				plot_heatmap!(sf, xs, ys, Z; row = 1, col = c)
+				sf
+			end
+			@test _sfn_settled(sf)
+			r0 = _sfn_margin(sf, :r)
+			@test _sfn_settled(sf) && _sfn_margin(sf, :r) == r0
+		end
+	end
+end
+
+@testset "titles of a row wrap within their cells (vm-xtitleoverlap)" begin
+	xx = collect(range(0, 1; length = 50))
+	for st in (:aps, :ieee)
+		sf = with_style(st) do
+			sf = subplots(1, 3; sync = false, shared_yaxes = true)
+			for c in 1:3
+				plot_scatter!(sf, xx, sin.(c .* xx); row = 1, col = c)
+				xlabel!(sf, "normalised position xi (a.u.)"; row = 1, col = c)
+			end
+			sf
+		end
+		@test _sfn_settled(sf)
+		L = sf.plot.layout.fields
+		for key in (:xaxis, :xaxis2, :xaxis3)
+			text = _SFN._fin_title_text(L[key])
+			@test occursin("<br>", text)
+			@test replace(text, "<br>" => " ") == "normalised position xi (a.u.)"
+		end
+	end
+	# A title with room in its cell stays on one line.
+	sf = subplots(1, 2; sync = false)
+	plot_scatter!(sf, xx, xx; row = 1, col = 1, xlabel = "x (m)")
+	plot_scatter!(sf, xx, xx; row = 1, col = 2, xlabel = "y (m)")
+	@test _SFN._fin_title_text(sf.plot.layout.fields[:xaxis]) == "x (m)"
+end
+
+@testset "adjacent polar cells keep their angular labels apart (layout-fuzz-06)" begin
+	x = collect(range(0.0, 1.0; length = 40))
+	th = collect(range(0, 360; length = 60))
+	sf = subplots(1, 3; sync = false, specs = [Spec() Spec(kind = "polar") Spec(kind = "polar")])
+	plot_scatter!(sf, x, x .^ 2; row = 1, col = 1, xlabel = "x", ylabel = "y")
+	plot_scatterpolar!(sf, th, 1 .+ 0.5 .* sind.(3 .* th); row = 1, col = 2)
+	plot_scatterpolar!(sf, th, 1 .+ 0.5 .* sind.(3 .* th); row = 1, col = 3)
+	@test _sfn_settled(sf)
+	info = _sfn_render_js(sf, _SFN_POLAR_TICKS_JS; width = 700, height = 500)
+	if info !== nothing
+		@test haskey(info, "polar") && haskey(info, "polar2")
+		a, b = info["polar"], info["polar2"]
+		@test !isempty(a) && !isempty(b)
+		@test maximum(t[3] for t in a) < minimum(t[1] for t in b)
+	end
+end
+
+# The px boxes (left, top, right, bottom) of the annotations drawn, once
+# every one of them is typeset.
+const _SFN_ANNOTATIONS_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const root = gd.getBoundingClientRect();
+  const boxes = [];
+  for (const g of gd.querySelectorAll('g.annotation')) {
+    const r = g.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return null;
+    boxes.push([r.left - root.left, r.top - root.top, r.right - root.left, r.bottom - root.top]);
+  }
+  if (boxes.length === 0) return null;
+  return JSON.stringify({boxes: boxes});
+})()
+"""
+
+@testset "a y axis offset label gets room above its axis (O2)" begin
+	for st in (:ieee, :aps)
+		fig = with_style(st) do
+			f = plot_scatter(collect(1.0:10), collect(1.0:10) .* 3e7; xlabel = "x", ylabel = "y")
+			yticks!(f; offset = :auto)
+			f
+		end
+		@test _sfn_settled(fig)
+		@test _sfn_margin(fig, :t) > 4
+		W, H = _sfn_size(fig)
+		info = _sfn_render_js(fig, _SFN_ANNOTATIONS_JS)
+		if info !== nothing
+			@test length(info["boxes"]) == 1
+			@test info["boxes"][1][2] >= 0
+		end
+	end
+	# Without an offset the style's top margin stays.
+	fig = with_style(:ieee) do
+		plot_scatter(collect(1.0:10), collect(1.0:10); xlabel = "x", ylabel = "y")
+	end
+	@test _sfn_margin(fig, :t) == 4
+end
+
+@testset "savefig draws a settled grid as it is (export copy, Q27 hold)" begin
+	# A grid holds the margins its bars push whatever its legends list: the
+	# export copy (a Plot) finds the grid settled as the SubplotFigure did,
+	# so `savefig` draws the figure itself, not a re-fitted copy.
+	opts(p) = _SFN._normalize_export_options(p, pairs((; scale = 2)))
+	hg = subplots(2, 2; sync = false)
+	for r in 1:2, c in 1:2
+		plot_heatmap!(hg, [1.0 2.0; 3.0 4.0]; row = r, col = c)
+	end
+	fm = with_style(:aps) do
+		sf = subplots(3, 1; sync = false, shared_xaxes = true, width = 325, height = 330)
+		for r in 1:3
+			plot_pcolormesh!(sf, collect(range(0, 6; length = 31)), collect(range(0, 1.8; length = 11)), rand(31, 11);
+				row = r, col = 1, crange = (0, 1), equalar = true)
+			ylabel!(sf, "\$y\$ (\$\\mu\$m)"; row = r, col = 1)
+		end
+		xlabel!(sf, "\$x\$ (\$\\mu\$m)"; row = 3, col = 1)
+		shared_colorbar!(sf; title = "normalized \$|E_z|^2\$", title_side = :right)
+		sf
+	end
+	for fig in (hg, fm)
+		@test _sfn_settled(fig)
+		p = _sfn_plot(fig)
+		@test _SFN._finalize_export_copy(p, opts(p)) === p
+	end
+end
+
+@testset "a margin capped back to its value is not rewritten (small figure, bottom bar)" begin
+	# :ieee 336 x 158 px: the bottom bar of a fitted field asks for more
+	# bottom margin than the plot can give; capped back to the margin the
+	# figure has, nothing is written and the figure settles.
+	Z = [sin(a) * cos(b) for a in range(0, 3; length = 40), b in range(0, 2; length = 30)]
+	f = with_style(:ieee) do
+		f = plot_heatmap(collect(range(0, 6; length = 40)), collect(range(0, 1; length = 30)), Z; equalar = true)
+		colorbar!(f; side = :bottom, title = "intensity")
+		f
+	end
+	@test _sfn_settled(f)
+	W, H = _sfn_size(f)
+	@test _sfn_margin(f, :t) + _sfn_margin(f, :b) <= H - 64
+end
+
+@testset "a polar figure under a paper style is settled with its style margin (angular tick font)" begin
+	# :publication draws the angular labels at its 12 px tick font under a
+	# 14 px figure font: the margin holds one 12 px line plus plotly's offset,
+	# as the style gave it, and a finalize does not grow it to the 14 px room.
+	for name in (:publication, :ieee)
+		stp = _SFN._STYLE_REGISTRY[name]
+		room = ceil(1.2 * stp.tick_fontsize + 8)
+		fig = with_style(() -> plot_scatterpolar(0:30:330, 1:12), name)
+		@test with_style(() -> _sfn_settled(fig), name)
+		@test all(side -> _sfn_margin(fig, side) == room, (:l, :r, :t, :b))
+	end
+end
+
+@testset "a math x title under a generous margin writes nothing (plotly's push holds it)" begin
+	# :default: 50 px of bottom margin hold the plain title (48.1 px); plotly
+	# pushes it to 60 px, past the deepest MathJax title measured (54.4 px).
+	p = plot_scatter([1.0, 2.0, 3.0], [1.0, 4.0, 9.0])
+	xlabel!(p, raw"$t$ (s)")
+	@test _sfn_margin(p, :b) == 50
+	@test _SFN._fin_meta_get(p.layout, _SFN._ROOM_MARGIN_KEY) === nothing
+end
+
+const _SFN_BLOCK_JS = raw"""
+(() => {
+  const gd = document.getElementById(__DIV__);
+  if (!gd || !gd._fullLayout || !gd._fullLayout._size) return null;
+  const fl = gd._fullLayout;
+  const root = gd.getBoundingClientRect();
+  let top = 1e9, bottom = -1e9;
+  for (const t of gd.querySelectorAll('g.xtick text, g.x2tick text, g.ytick text, g.y2tick text, .g-xtitle text, .g-x2title text, .g-ytitle text, .g-y2title text')) {
+    const r = t.getBoundingClientRect();
+    if (r.height <= 0) continue;
+    top = Math.min(top, r.top - root.top);
+    bottom = Math.max(bottom, r.bottom - root.top);
+  }
+  const x1 = [...gd.querySelectorAll('g.xtick text, .g-xtitle text')].map(t => t.getBoundingClientRect().bottom - root.top);
+  const box = a => [a._offset, a._offset + a._length];
+  return JSON.stringify({H: fl.height, top: top, bottom: bottom, x1_bottom: Math.max(...x1),
+    x: box(fl.xaxis), y: box(fl.yaxis), x2: box(fl.xaxis2), y2: box(fl.yaxis2)});
+})()
+"""
+
+@testset "a grid of equal-aspect rows is drawn as one centred block, its gaps closed (V2)" begin
+	xw = collect(range(0, 4; length = 80))
+	function rows(; aspect = nothing)
+		with_style(:ieee) do
+			sf = subplots(2, 1; sync = false)
+			aspect === nothing ? figsize!(sf, :ieee; columns = 2) : figsize!(sf, :ieee; columns = 2, aspect = aspect)
+			for (r, f) in ((1, sin), (2, cos))
+				plot_scatter!(sf, xw, 0.5 .+ 0.4 .* f.(3 .* xw); row = r, col = 1, xrange = (0, 4), yrange = (0, 1),
+					equalar = true, xlabel = "x (μm)", ylabel = "y")
+			end
+			sf
+		end
+	end
+	# A fixed size (an aspect given) with height to spare: the rows close up
+	# to what their labels need and the block is centred with its labels
+	# (d017760: 17 px between the first row's x title and the second row,
+	# 21 px blank above the block and 2 px below).
+	sf = rows(; aspect = 0.62)
+	@test _SFN._fin_meta_get(sf.plot.layout, _SFN._FIN_SIZE_KEY) == "user"
+	@test _sfn_settled(sf)
+	info = _sfn_render_js(sf, _SFN_BLOCK_JS)
+	if info !== nothing
+		H = info["H"]
+		gap = info["y2"][1] - info["x1_bottom"]
+		@test 0 <= gap <= 8
+		# within 6 px: plotly pushes the top and bottom margins by the y labels
+		# at the axis ends, which the plan does not model (d017760: 13 px)
+		@test abs(info["top"] - (H - info["bottom"])) <= 6
+		# Equal aspect boxes of one size. (plotly's push for the y labels at
+		# the axis ends, which the margin estimate does not model, draws
+		# them 584 px wide for the 601 of d017760, whose bottom labels
+		# pushed the margin instead.)
+		ws = [info[xk][2] - info[xk][1] for xk in ("x", "x2")]
+		hs = [info[yk][2] - info[yk][1] for yk in ("y", "y2")]
+		@test all(w -> w >= 575, ws) && abs(ws[1] - ws[2]) <= 1
+		@test all(i -> abs(ws[i] / hs[i] - 4) <= 0.05, 1:2)
+	end
+	# The journal width without a height or aspect: the height is free, so
+	# the page drops the blank rows (d017760: 516 px, the style's own height).
+	sf = rows()
+	rec = _SFN._fin_meta_get(sf.plot.layout, _SFN._FIN_SIZE_KEY)
+	@test rec isa AbstractVector && rec[5] == 0 && rec[6] == 1
+	W, H = _sfn_size(sf)
+	@test W == 687 && H <= 470
+	@test _sfn_settled(sf)
+	info = _sfn_render_js(sf, _SFN_BLOCK_JS)
+	if info !== nothing
+		@test info["x"][2] - info["x"][1] >= 575
+		@test 0 <= info["y2"][1] - info["x1_bottom"] <= 8
+		@test abs(info["top"] - (info["H"] - info["bottom"])) <= 6
+	end
+end
+
+
+@testset "cost: an append into a 200-trace cell with per-subplot legends (O5)" begin
+	# One append into a cell holding 200 traces costs about as many bytes
+	# with per-subplot legends as with one figure legend (measured 1.11x at
+	# 200 traces and 1.05-1.07x at 800, on d017760 too: what per-subplot
+	# legends add does not grow with the cell's trace count; the append
+	# itself grows about 1.1 KB per trace in both modes).
+	x = collect(range(0.0, 10.0; length = 100)); y = sin.(x)
+	function append_bytes(per, n)
+		f = subplots(1, 2; sync = false, per_subplot_legends = per)
+		for k in 1:n
+			plot_scatter!(f, x, y .+ k; row = 1, col = 1)
+		end
+		plot_scatter!(f, x, y; row = 1, col = 1)
+		return minimum(k -> @allocated(plot_scatter!(f, x, y .+ k; row = 1, col = 1)), 1:5)
+	end
+	@test append_bytes(true, 200) <= 1.5 * append_bytes(false, 200)
 end

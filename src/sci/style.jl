@@ -3705,7 +3705,15 @@ end
 function _figsize_journal_impl!(fig, journal; columns = 1, aspect = nothing, height = nothing, units = :in, kwargs...)
 	_figsize_reject_keywords("figsize!", kwargs)
 	w, h = _figsize_journal_px(journal, columns, aspect, height, units, "figsize!")
-	return _figsize_write!(fig, w, h)
+	_figsize_write!(fig, w, h)
+	# A grid without a height or aspect: the height is the style's
+	# proportion, free for L11 (docs/src/subplots.md: its rows of
+	# equal-aspect cells drop their blank); the width is the journal's. A
+	# `Plot` (and a 1 x 1 grid, drawn like one) keeps the size (figsize-01).
+	(aspect === nothing && height === nothing &&
+	 _plot_layout(fig).subplots.rows * _plot_layout(fig).subplots.cols > 1) &&
+		_fin_mark_free_height!(_plot_layout(fig), w, h)
+	return nothing
 end
 
 """

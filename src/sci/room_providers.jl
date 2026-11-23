@@ -53,8 +53,13 @@ const _LT_ORDER_LEGEND = 20
 const _LT_ORDER_LINE = 30
 const _LT_ORDER_CAPTION = 40
 const _LT_ORDER_TITLE = 90
-# Paper tolerance for "at the domain edge" (positions written from domains).
-const _LT_EDGE_TOL = 1e-6
+# Paper tolerance for "at the domain edge" (positions written from domains):
+# the snap within which a legend is left where it is (`_room_relayout!`,
+# `_FIN_SNAP_PAPER`) plus the rounding of a written position. At 1e-6, an
+# inside legend left 1.2e-5 from the corner of a cell its colorbar margin
+# had narrowed was taken for the user's on the next pass, which then gave
+# the margin back, and the figure went between the two (layout-fuzz-01).
+const _LT_EDGE_TOL = _FIN_SNAP_PAPER + 1e-6
 # Paper tolerance against the plot box of an equal-aspect cell, which is
 # estimated from its domain (the fit pads the domain by `_fin_bias`), and
 # against a legend's estimated position along an edge.
@@ -217,11 +222,33 @@ function _lt_has_decorations(layout, p)
 	return _text_title_dict(p) !== nothing
 end
 
-# Legend box `id` of `p` as a Dict, or `nothing` when it draws nothing.
+# Legend box `id` of `p` as a Dict, or `nothing` when it draws nothing:
+# hidden, or listing no entry (plotly.js draws no legend then; the empty box
+# of a lone heatmap's cell, taken for an inside legend, held the margins its
+# colorbar pushed on one pass and not on the next, layout-fuzz-01).
 function _lt_legend_box(plan, id::String)
+	id in _lt_listed_legends(plan) || return nothing
 	d = _symbol_dict(get(plan.layout.fields, Symbol(id), nothing))
 	get(d, :visible, true) === false && return nothing
 	return d
+end
+
+# The ids of the legends some trace of the plan's figure is listed in (as
+# `_legend_entry_indices` counts entries), from one scan of the traces per
+# plan: asked per legend, the emptiness check cost a 6 x 6 grid of heatmaps
+# a fifth more per finalize (Q27).
+function _lt_listed_legends(plan)
+	memo = _lt_plan_memo(plan)
+	ids = get(memo, :listed_legends, nothing)
+	ids === nothing || return ids::Set{String}
+	ids = Set{String}()
+	for trace in plan.p.data
+		trace isa GenericTrace || continue
+		_trace_will_showlegend(trace) || continue
+		push!(ids, _legend_trace_legend_id(trace))
+	end
+	memo[:listed_legends] = ids
+	return ids
 end
 
 # The inset legends of this figure are placed with (`_legend_placement`).
@@ -881,7 +908,13 @@ function _room_place!(plan, ::Val{:legend_titles})
 	items = get(plan.layout.fields, :annotations, nothing)
 	single = plan.layout.subplots.rows * plan.layout.subplots.cols == 1
 	decorations = _lt_decorations(plan)
-	any(d -> d.role in (:inside_legend, :cell_legend, :figure_legend), decorations) &&
+	# A grid holds them always: its cells' legends come and go with their
+	# entries, and a hold that followed them gave a grid of fields without
+	# entries its margins on some passes only (layout-fuzz-01), and a 6 x 6
+	# grid of heatmaps a quarter more allocations per finalize (Q27). Read
+	# from the layout's grid, not the SubplotFigure: the export copy of a
+	# grid (a Plot) must find it settled as the figure did.
+	(!single || any(d -> d.role in (:inside_legend, :cell_legend, :figure_legend), decorations)) &&
 		_lt_hold_pushed_margins!(plan)
 	for d in decorations
 		if d.role === :line
@@ -1128,21 +1161,34 @@ function _lt_follow_rule!(plan, d::_LtDecor)
 		role.side === :bottom ? :outside_bottom : role.side === :right ? :outside_right : return false
 	end
 	box = _lt_final_box(plan.areas[d.area])
-	xdom, ydom = d.role === :cell_legend ? _lt_box_without_room(plan, d) : box
-	best = _legend_best_cell_position(plan.p, d.id, xdom, ydom)
+	# Scored on the plot area and plot px the figure has without the room of
+	# any legend the rule places (each its own and the others'): where one
+	# goes then does not depend on where it or another one is now
+	# (docs-truth-16: the margin a legend raised beside the right column
+	# narrowed the cell it was scored on, and it went below the cell and
+	# back; vm-gridleg: three cell legends moved each other's cells).
+	rule_keys = Set("legend:" * id for id in auto)
+	xdom, ydom = _lt_box_without_room(plan, d; keys = rule_keys)
+	px = _room_plot_px_without(plan, _LT_OWNER, rule_keys)
+	best = _legend_best_cell_position(plan.p, d.id, xdom, ydom; plot_px = px,
+		current = current in _SCAT_LEGEND_OUTSIDE_POSITIONS ? current : nothing)
 	best === nothing && return false
 	# Placed on the final box; a column below the cell when the row is wider
 	# than the plot area the rule scored.
 	want = _legend_placement(best, box[1], box[2], _lt_legend_inset(plan); figure = false)
 	best === :outside_bottom &&
-		(want[:orientation] = get(_legend_rule_placement(plan.p, d.id, best, xdom, ydom, (0.0, 0.0)), :orientation, "h"))
+		(want[:orientation] = get(_legend_rule_placement(plan.p, d.id, best, xdom, ydom, (0.0, 0.0); plot_px = px),
+			:orientation, "h"))
 	if best === current
-		# Below the cell already: only its orientation may follow.
+		# Below the cell already: only its orientation may follow. It is
+		# still placed at its slot by the caller (layout-fuzz-11: placed on
+		# no pass where it turned into a column while its cell narrowed, it
+		# stayed centred under the old domain, which no longer took it for
+		# ours, and `figsize!` left it in the cell below).
 		best === :outside_bottom || return false
 		now = something(_room_current(plan.layout, Symbol(d.id, :_orientation)), "v")
-		now == want[:orientation] && return false
-		_room_relayout!(plan, Symbol(d.id, :_orientation), want[:orientation])
-		return true
+		now == want[:orientation] || _room_relayout!(plan, Symbol(d.id, :_orientation), want[:orientation])
+		return false
 	end
 	_room_relayout!(plan, Symbol(d.id, :_x), round(Float64(want[:x]); digits = 6))
 	_room_relayout!(plan, Symbol(d.id, :_y), round(Float64(want[:y]); digits = 6))
@@ -1160,13 +1206,15 @@ function _lt_follow_rule!(plan, d::_LtDecor)
 end
 
 # The final box of the plot area of decoration `d` as the solve gives it
-# without the room `d` requested (the requests of everything else kept). The
+# without the room `d` requested (the requests of everything else kept), or
+# without the room of every request of this provider keyed in `keys`. The
 # solve is run again on the plan with `d`'s request left out; the plan's
 # requests and every area's room, writable sides and final box are restored.
-function _lt_box_without_room(plan, d::_LtDecor)
+function _lt_box_without_room(plan, d::_LtDecor; keys = nothing)
 	requests = plan.requests
 	saved = Dict(key => (copy(a.room), copy(a.writable), a.final) for (key, a) in plan.areas)
-	plan.requests = filter(r -> !(r.owner === _LT_OWNER && r.key == d.key), requests)
+	drop = keys === nothing ? (d.key,) : keys
+	plan.requests = filter(r -> !(r.owner === _LT_OWNER && r.key in drop), requests)
 	try
 		_room_solve!(plan)
 		return _lt_final_box(plan.areas[d.area])

@@ -848,12 +848,15 @@ function _fin_restyle!(ctx::_FinContext, index::Int, updates::Dict{Symbol, Any})
 		ctx.p.data[index] = _clone_trace_for_mutation(trace, IdDict{Any, Any}())
 	end
 	target = ctx.target
-	# Keyword updates: `colorbar_x` addresses the nested path (a Dict update
-	# would store the literal key `colorbar_x`).
+	# perf-01 (restyle half): one Dict of plotly property paths
+	# (`colorbar_x` -> `colorbar.x`, set nested; a raw `colorbar_x` key
+	# would be stored literally), as `_fin_relayout!` does. Splatting the
+	# updates as keywords compiled `restyle!` again for every new key set.
+	paths = _fin_property_paths(updates)
 	if target isa SyncPlot
-		restyle!(target, index; updates...)
+		restyle!(target, index, paths)
 	else
-		restyle!(_plot_obj(target), index; updates...)
+		restyle!(_plot_obj(target), index, paths)
 	end
 	return nothing
 end
@@ -1735,6 +1738,13 @@ _fin_size_abandoned(layout::Layout) = _fin_size_flag(layout) == 1
 # `figsize!`: the size is the user's; M3a/L11 never change it.
 _fin_mark_user_size!(layout::Layout) = (_fin_meta_set!(layout, _FIN_SIZE_KEY, "user"); nothing)
 
+# `figsize!(fig, journal; columns)` without a height or aspect: the width is
+# the journal's and the height `w` x `h` the style's proportion, free for
+# L11 as a sized style's own size is (docs/src/subplots.md, L11; V2): a
+# grid of equal-aspect cells drops its blank rows, a field fills the width.
+_fin_mark_free_height!(layout::Layout, w::Real, h::Real) =
+	(_fin_meta_set!(layout, _FIN_SIZE_KEY, Any[Float64(w), Float64(h), Float64(w), Float64(h), 0, 1]); nothing)
+
 # Whether M3a/L11 may size the figure (Z67, figsize-01) and from what:
 # `(W0, H0, wfree, hfree)` or `nothing`. Free: a figure without a size (its
 # width only under a style without a journal width), a figure at exactly the
@@ -1781,7 +1791,11 @@ function _fin_free_size(ctx::_FinContext, plan, fits, W0::Float64, H0::Float64, 
 	lowW = min(W0, _FIN_MIN_FIGURE_WIDTH * min(1.0, W0 / _DEFAULT_EXPORT_WIDTH_PX))
 	newW, newH = W0, H0
 	if layout.subplots.rows * layout.subplots.cols == 1
-		(ctx.sf === nothing && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) || return (W0, H0, flag)
+		# A 1 x 1 grid like a `Plot` (seams-15: its field kept the whole page
+		# height that the same field as a `Plot` or in a 1 x 2 grid dropped),
+		# unless built with `compress = false`.
+		((ctx.sf === nothing || _fin_compress_grid(layout)) && haskey(fits, (:xaxis, :yaxis)) && length(fits) == 1) ||
+			return (W0, H0, flag)
 		fit = fits[(:xaxis, :yaxis)]
 		# vm-08: the margins at a new size are not those at the base: tick
 		# labels and titles push a margin only where the box reaches the paper
@@ -2361,6 +2375,41 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 		have = max(Float64(current), _fin_isfinite_real(queued) ? Float64(queued) : 0.0)
 		over > have + 0.5 && (layout_updates[:margin_r] = _style_number(ceil(over)))
 	end
+	# A horizontal bar under a fitted field spans the fitted box, which the fit
+	# computed for the plot height of the plan's margins; plotly draws the
+	# height of its own pushes, a few px off (layout-fuzz-04: a bottom bar
+	# 13.5 px short of a wide field whose plot came out 3.6 px taller). The
+	# vertical margins are written as the plan estimated them, so plotly
+	# (which takes the larger of a margin and its push) draws that height.
+	if !isempty(fits) && any(r -> r.owner === :colorbar && r.side === :bottom &&
+			any(k -> k[1] === r.area, keys(fits)), plan.requests)
+		for letter in (:t, :b)
+			est = Float64(getfield(plan.margins, letter))
+			current = _cmn_mapping_get(get(layout.fields, :margin, nothing), letter)
+			_fin_isfinite_real(current) || continue
+			_room_note_margin!(plan, letter, est)
+			queued = get(layout_updates, Symbol(:margin_, letter), nothing)
+			have = max(Float64(current), _fin_isfinite_real(queued) ? Float64(queued) : 0.0)
+			est > have + 0.5 && (layout_updates[Symbol(:margin_, letter)] = _style_number(ceil(est)))
+		end
+	end
+	# A math x title at the bottom paper edge (vm-xtitleclip).
+	# A bottom margin left to plotly (unset, 80 px) is not raised.
+	current_b = _cmn_mapping_get(get(layout.fields, :margin, nothing), :b)
+	math_b = 0.0
+	if _fin_isfinite_real(current_b)
+		# The margin before the room engine raised it (its record), as the
+		# user or style set it.
+		rec = get(_room_margin_record(layout), :b, nothing)
+		base_b = rec !== nothing && abs(Float64(current_b) - rec[2]) <= 0.5 ? rec[1] : Float64(current_b)
+		math_b = _fin_math_xtitle_px(layout; pending = layout_updates, base = base_b)
+	end
+	if math_b > 0
+		_room_note_margin!(plan, :b, math_b)
+		queued = get(layout_updates, :margin_b, nothing)
+		have = max(Float64(current_b), _fin_isfinite_real(queued) ? Float64(queued) : 0.0)
+		math_b > have + 0.5 && (layout_updates[:margin_b] = _style_number(ceil(math_b)))
+	end
 	_room_margin_updates!(plan)
 	# A raised margin shrinks the plot area this pass solved for.
 	margin = get(layout.fields, :margin, nothing)
@@ -2369,6 +2418,7 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 		have = _cmn_mapping_get(margin, letter)
 		_fin_isfinite_real(value) && (!_fin_isfinite_real(have) || value > have)
 	end, (:l, :r, :t, :b))
+	_fin_cap_margin_sum!(layout, layout_updates, W, H)
 	wrote |= _room_settle_margins!(plan)
 	if annotations !== nothing
 		_fin_same_annotations(get(layout.fields, :annotations, nothing), annotations) ||
@@ -2376,8 +2426,62 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 	end
 	wrote |= _fin_relayout!(ctx, layout_updates)
 	wrote |= _fin_thin_bar_ticks!(ctx, plan.Wp, plan.Hp)
-	wrote |= _fin_place_figure_annotations!(ctx, accs, W, H)
+	wrote |= _fin_place_figure_annotations!(ctx, accs, W, H; margins = _fin_drawn_margins(plan))
 	return wrote, restart && raised
+end
+
+# The plot size (px) explicit margins leave at least: plotly.js 2.35.2's own
+# automargin keeps `layout.minreducedwidth`/`minreducedheight` (default
+# 64 px) for the plot, but takes an explicit margin as given, and margins
+# summing past the figure made it throw "Something went wrong with axis
+# scaling" in the export (layout-fuzz-08: :nature 336 x 252 px, a long left
+# title above and a wrapped long x title with a three-entry legend below,
+# top 67 + bottom 193 px). At most half the figure on a smaller one.
+const _FIN_MIN_PLOT_PX = 64.0
+
+# Lowers the margins on opposite sides, one of which `updates` queues, that
+# leave the plot less than `_FIN_MIN_PLOT_PX` of the figure's `W` x `H` px:
+# the queued ones, in proportion, to whole px (a side left to plotly, unset,
+# counts with plotly's default). What they were raised for no longer fits beside
+# the plot: it is drawn over it rather than the export failing.
+function _fin_cap_margin_sum!(layout::Layout, updates::AbstractDict{Symbol}, W::Float64, H::Float64)
+	margin = get(layout.fields, :margin, nothing)
+	base = _fin_margins_base(layout)
+	for (a, b, extent, floor_key) in ((:l, :r, W, :minreducedwidth), (:t, :b, H, :minreducedheight))
+		ka, kb = Symbol(:margin_, a), Symbol(:margin_, b)
+		# Only a pair this pass raises: margins as they are are someone's.
+		(haskey(updates, ka) || haskey(updates, kb)) || continue
+		value(key, letter) = begin
+			queued = get(updates, key, nothing)
+			_fin_isfinite_real(queued) && return Float64(queued)
+			current = _cmn_mapping_get(margin, letter)
+			return _fin_isfinite_real(current) ? Float64(current) : getfield(base, letter)
+		end
+		va, vb = value(ka, a), value(kb, b)
+		least = get(layout.fields, floor_key, nothing)
+		least = _fin_isfinite_real(least) && least > 0 ? Float64(least) : _FIN_MIN_PLOT_PX
+		limit = extent - min(least, extent / 2)
+		excess = va + vb - limit
+		excess > 0 || continue
+		# Taken from the sides this pass raises, in proportion to them.
+		qa = haskey(updates, ka) ? va : 0.0
+		qb = haskey(updates, kb) ? vb : 0.0
+		share = min(excess / (qa + qb), 1.0)
+		for (key, letter, v, q) in ((ka, a, va, qa), (kb, b, vb, qb))
+			q > 0 || continue
+			capped = floor(v - q * share)
+			# Capped back to the margin the figure has: nothing to write (a
+			# rewrite of the same value on every pass left a small figure
+			# with a bottom colorbar never settled).
+			current = _cmn_mapping_get(margin, letter)
+			if _fin_isfinite_real(current) && abs(Float64(current) - capped) < 0.5
+				delete!(updates, key)
+			else
+				updates[key] = _style_number(capped)
+			end
+		end
+	end
+	return updates
 end
 
 # ---------------------------------------------------------------------------
@@ -2518,9 +2622,46 @@ function _fin_wrap_title(text::AbstractString, max_chars::Int)
 	return String(take!(out))
 end
 
+# The paper bounds (`lo`, `hi`, `nothing` for the figure edge) along its axis
+# within which the title of axis `key` stays clear of the titles of the
+# neighbouring cells: the middle of the gap to the nearest base axis of the
+# same letter on each side whose plot area overlaps this one across the axis
+# (the cells of its row for an x axis, of its column for a y axis).
+function _fin_wrap_cell_bounds(layout::Layout, key::Symbol, vertical::Bool)
+	_fin_is_base_axis(layout, key) || return (nothing, nothing)
+	letter = String(key)[1]
+	across(k) = begin
+		anchor = _fin_axis_key(_cmn_mapping_get(get(layout.fields, k, nothing), :anchor, vertical ? "x" : "y"))
+		anchor === nothing ? nothing : vertical ? _fin_domain(layout, anchor) : _cmn_y_axis_domain(layout, anchor)
+	end
+	along(k) = vertical ? _cmn_y_axis_domain(layout, k) : _fin_domain(layout, k)
+	own, cross = along(key), across(key)
+	cross === nothing && return (nothing, nothing)
+	lo = hi = nothing
+	for (other, axis) in layout.fields
+		(other isa Symbol && other !== key && _fin_is_axis_key(other) && String(other)[1] == letter &&
+			_fin_is_base_axis(layout, other)) || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		c = across(other)
+		(c === nothing || min(c[2], cross[2]) - max(c[1], cross[1]) <= 1e-9) && continue
+		d = along(other)
+		if d[2] <= own[1] + 1e-9
+			mid = (d[2] + own[1]) / 2
+			lo = lo === nothing ? mid : max(lo, mid)
+		elseif d[1] >= own[2] - 1e-9
+			mid = (own[2] + d[1]) / 2
+			hi = hi === nothing ? mid : min(hi, mid)
+		end
+	end
+	return (lo, hi)
+end
+
 # W5: a plain axis title longer than the figure can show along its axis
 # (centred on the axis, `_FIN_WRAP_PAD` from the figure edges, figure
-# `W` x `H` px) is broken into lines between words; a title that fits again
+# `W` x `H` px, and from the middle of the gap to the next cell of its row or
+# column, `_fin_wrap_cell_bounds`: vm-xtitleoverlap, the titles of a 1 x 3
+# row ran into each other and only the last one was wrapped at the figure
+# edge) is broken into lines between words; a title that fits again
 # (a larger export, a shorter text) is joined again. Math (`$…$`) and styled
 # titles are left as written.
 function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
@@ -2553,12 +2694,21 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 		d = vertical ? _cmn_y_axis_domain(layout, key) : _fin_domain(layout, key)
 		centre = vertical ? m.b + (d[1] + d[2]) / 2 * Hp : m.l + (d[1] + d[2]) / 2 * Wp
 		extent = vertical ? H : W
-		room = 2 * min(centre, extent - centre) - 2 * _FIN_WRAP_PAD
+		width = _text_extent(plain, size)[1] * _FIN_WRAP_WIDTH_SHARE
+		offset, span = vertical ? (m.b, Hp) : (m.l, Wp)
+		# The cell bounds lie beyond the axis' own span: a title within it
+		# (most are) fits them, and they are not scanned for (a scan per
+		# title is quadratic in the cells, Q27).
+		lo, hi = width <= (d[2] - d[1]) * span - 2 * _FIN_WRAP_PAD ? (nothing, nothing) :
+			_fin_wrap_cell_bounds(layout, key, vertical)
+		lo_px = lo === nothing ? 0.0 : offset + lo * span
+		hi_px = hi === nothing ? extent : offset + hi * span
+		room = 2 * min(centre - lo_px, hi_px - centre) - 2 * _FIN_WRAP_PAD
 		max_chars = max(1, floor(Int, room / (_FIN_WRAP_CHAR_EM * size)))
 		# A title that fits is left on one line: the char count above errs on
 		# the large side (0.55 em against 0.46-0.5 drawn), so the width comes
 		# from the text-extent estimate (widest face measured, share 0.98).
-		wrapped = _text_extent(plain, size)[1] * _FIN_WRAP_WIDTH_SHARE <= room ? plain :
+		wrapped = width <= room ? plain :
 			_fin_wrap_title(plain, max_chars)
 		wrapped == plain || (push!(wrapped_keys, key); new_record[String(key)] = (plain, wrapped))
 		wrapped == text && continue
@@ -2798,14 +2948,29 @@ end
 # Z47: whole-figure annotations (`annotate!(...; coords = :figure)`) are
 # shifted by the margins (`_figure_annotations_place!`): re-place them for
 # the margins this pass leaves, at the size the figure is finalized for.
-function _fin_place_figure_annotations!(ctx::_FinContext, accs, W::Float64, H::Float64)
+# The margins (px) plotly draws a figure with after a pass of `plan` wrote:
+# the plan's (the layout's grown by what its decorations push, which plotly's
+# automargin adds) and never less than a margin written in the pass. The
+# room engine places the figure annotations for the same margins
+# (`_lt_place_figure_annotations!`); estimated without the pushes, the two
+# placements disagreed by half a colorbar's push on every pass (sm-04).
+function _fin_drawn_margins(plan)
+	margin = get(plan.layout.fields, :margin, nothing)
+	at(letter) = (have = _cmn_mapping_get(margin, letter);
+		_fin_isfinite_real(have) ? max(Float64(getfield(plan.margins, letter)), Float64(have)) :
+			Float64(getfield(plan.margins, letter)))
+	return (l = at(:l), r = at(:r), t = at(:t), b = at(:b))
+end
+
+function _fin_place_figure_annotations!(ctx::_FinContext, accs, W::Float64, H::Float64; margins = nothing)
 	layout = ctx.p.layout
 	existing = get(layout.fields, :annotations, nothing)
 	existing isa AbstractVector || return false
 	any(item -> _figure_annotation_spec(item) !== nothing, existing) || return false
 	annotations = collect(Any, existing)
 	legends = Dict{Symbol, Float64}()
-	new_b = _figure_annotations_place!(ctx.p, annotations; size = (W, H), accs = accs, legends = legends)
+	new_b = _figure_annotations_place!(ctx.p, annotations; size = (W, H), accs = accs, legends = legends,
+		margins = margins)
 	updates = Dict{Symbol, Any}()
 	for (key, y) in legends
 		# The room engine writes a legend `y` to 6 digits, this placement to
@@ -2865,6 +3030,12 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 	layout = ctx.p.layout
 	aspect = Dict{Symbol, Symbol}()
 	for (xkey, ykey, _) in _fin_aspect_cells(layout, accs)
+		# Base pairs only, as `_fin_fit_cells` fits them: a secondary y axis
+		# anchored to the same x (`plot_matrix!(...; secondary_y = true)`)
+		# took the base pair's entry, the plan then did not leave the base
+		# cell's bar to the fit, and the fit and the room solve each placed
+		# it, on every pass (errors-inputs-02).
+		(_fin_is_base_axis(layout, xkey) && _fin_is_base_axis(layout, ykey)) || continue
 		aspect[xkey] = ykey
 	end
 	plan = _room_build(ctx, accs, bars, W, H, aspect)
@@ -2901,6 +3072,26 @@ function _fin_plan_and_fit(ctx::_FinContext, accs, bars, W::Float64, H::Float64)
 			# the domains drawn now, and those of a cell drawn at its whole
 			# grid cell push a margin the compressed rows have no room for.
 			if all(cell -> haskey(cfits, cell), keys(fits))
+				# A block of equal-aspect cells whose row gaps closed
+				# (`_room_collapse`): the compressed plan's own margins and
+				# closed gaps can leave its cells blank again (device_geometry,
+				# :ieee 2 x 1 at a fixed size: 12 and 16 px per row after one
+				# pass); that blank is removed too, a few passes at most.
+				if _room_collapse(cplan)
+					for _ in 1:_FIN_COLLAPSE_PASSES
+						# Rows only, as the gaps close (`_room_solve!`).
+						more = _fin_band_slack(cplan, cfits, 2)
+						(more !== nothing && slack.y !== nothing && length(more) == length(slack.y) &&
+						 any(>(0.5), more)) || break
+						grown = (x = slack.x, y = slack.y .+ more)
+						nplan = _room_build(ctx, accs, bars, W, H, aspect; compress = grown, fits = cfits,
+							domains = _fin_plan_domains(cplan, cfits))
+						nfits = fit(nplan)
+						nplan, nfits = _fin_plan_settle(ctx, accs, bars, W, H, aspect, nplan, nfits, fit, grown)
+						all(cell -> haskey(nfits, cell), keys(fits)) || break
+						cplan, cfits, slack = nplan, nfits, grown
+					end
+				end
 				plan, fits = cplan, cfits
 				plan.memo[:band_slack] = slack
 			end
@@ -2920,6 +3111,10 @@ end
 # most `_FIN_FIT_SETTLE_PX` (at most `_FIN_PLAN_PASSES` builds; a settled
 # figure, whose drawn domains are the solved ones, needs none).
 const _FIN_PLAN_PASSES = 8
+
+# Passes that remove the blank a compressed block of equal-aspect cells
+# still leaves (`_fin_plan_and_fit`).
+const _FIN_COLLAPSE_PASSES = 3
 
 function _fin_plan_settle(ctx::_FinContext, accs, bars, W::Float64, H::Float64, aspect, plan, fits, fit, compress)
 	layout = ctx.p.layout
@@ -3114,7 +3309,7 @@ end
 # Both fall back to doing nothing, so an owner without a provider is a no-op.
 # ---------------------------------------------------------------------------
 
-const _ROOM_OWNERS = (:colorbar, :legend_titles, :grid_titles, :annotate)
+const _ROOM_OWNERS = (:colorbar, :legend_titles, :grid_titles, :annotate, :offset)
 const _ROOM_SIDES = (:top, :bottom, :left, :right)
 const _ROOM_OPPOSITE = Dict(:top => :bottom, :bottom => :top, :left => :right, :right => :left)
 # Gap (px) between the axis labels and the first decoration on a side, and
@@ -3497,9 +3692,31 @@ function _room_add_domain_area!(plan::_RoomPlan, key::Symbol, grid::Bool)
 	domain === nothing && !grid && plan.layout.subplots.rows * plan.layout.subplots.cols == 1 &&
 		(domain = ((0.0, 1.0), (0.0, 1.0)))
 	domain === nothing && return nothing
-	plan.areas[key] = _room_new_area(key, nothing, :domain, grid, _room_box(domain[1], domain[2]))
+	area = _room_new_area(key, nothing, :domain, grid, _room_box(domain[1], domain[2]))
+	# Outside a grid the style margin holds them (`_style_domain_subplot_margin`).
+	grid && occursin(r"^polar\d*$", String(key)) && _room_polar_own!(plan, area)
+	plan.areas[key] = area
 	push!(plan.area_order, key)
 	return nothing
+end
+
+# The angular tick labels plotly.js 2.35.2 draws outside a polar subplot's
+# circle, which fills its domain: they need the gap to a neighbouring cell
+# like a Cartesian cell's axis labels (layout-fuzz-06: the "0°" of one polar
+# cell and the "180°" of the next one drew over each other). The widest
+# default label ("180°") beside the circle, one line above and below it,
+# each with the label pad; none when the angular axis or its labels are
+# hidden.
+function _room_polar_own!(plan::_RoomPlan, area)
+	polar = get(plan.layout.fields, area.key, nothing)
+	axis = _cmn_mapping_get(polar, :angularaxis)
+	(_cmn_mapping_get(axis, :visible) === false || _cmn_mapping_get(axis, :showticklabels) === false) && return area
+	tick = _fin_mapping_font_size(axis, :tickfont, plan.font)
+	beside = _text_extent("180°", tick)[1] + _ROOM_LABEL_PAD
+	above = _CBAR_LINE_EM * tick + _ROOM_LABEL_PAD
+	area.own[:left] = area.own[:right] = beside
+	area.own[:top] = area.own[:bottom] = above
+	return area
 end
 
 # The plot areas: the subplot grid's cells, then any other plot area
@@ -3879,10 +4096,19 @@ function _room_solve!(plan::_RoomPlan)
 	# plot spans of all columns (rows) give it up in proportion to their grid
 	# spans, so the cells of a regular grid stay equal and aligned.
 	compress = get(plan.memo, :compress, nothing)
-	xbands = _room_band_solve(plan, _room_bands(plan, 1), group, :left, :right, plan.Wp,
+	# L11 (V2): in a grid of equal-aspect cells only, the gaps between the
+	# bands close to what their decorations need.
+	collapse = _room_collapse(plan)
+	xb = _room_bands(plan, 1)
+	yb = _room_bands(plan, 2)
+	# Rows only: closing the gaps between columns moved a 1 x 3 row of
+	# height-limited maps (chama_a5) off centre past its shared bar.
+	xbands = _room_band_solve(plan, xb, group, :left, :right, plan.Wp,
 		compress === nothing ? nothing : compress.x)
-	ybands = _room_band_solve(plan, _room_bands(plan, 2), group, :bottom, :top, plan.Hp,
-		compress === nothing ? nothing : compress.y)
+	ybands = _room_band_solve(plan, yb, group, :bottom, :top, plan.Hp,
+		compress === nothing ? nothing : compress.y;
+		gapneed = collapse ? _room_gap_needs(plan, need, yb, :bottom, :top, 2) : nothing,
+		outer = collapse ? _room_outer_needs(plan, need, yb, :bottom, :top, 2) : (0.0, 0.0))
 	slots = Dict{Symbol, _RoomBox}()
 	plan.memo[:aspect_slots] = slots
 	for key in plan.area_order
@@ -3940,9 +4166,13 @@ function _room_solve!(plan::_RoomPlan)
 end
 
 # Px below which a domain the fit or the room solve computes is taken as the
-# one drawn: far below what a renderer resolves, and above the residue the
-# coupled fit and solve leave after `_FIN_FIT_ROUNDS` passes.
-const _FIN_SNAP_PX = 0.02
+# one drawn: far below what a renderer resolves (0.3 device px at scale 3),
+# and above the residue the coupled fit and solve leave after
+# `_FIN_FIT_ROUNDS` passes. That residue grows with the figure: 0.008 px for
+# block_diagram, 0.074 px for an equal-aspect field between two line cells
+# of a 2400 px figure (layout-fuzz-10, seed 1218) after a margin of 67 px
+# was given back.
+const _FIN_SNAP_PX = 0.1
 
 # Whether paper spans `a` and `b` differ by at most `_FIN_SNAP_PX` px at
 # either end over a plot region of `px` px.
@@ -3975,6 +4205,79 @@ function _room_bands(plan::_RoomPlan, axis::Int)
 	return (lo, hi)
 end
 
+# L11 (V2, device_geometry): whether the gaps between the bands of the grid
+# close to what their decorations need. Only a grid all of whose cells are
+# equal-aspect cells the fit sizes (a block of fixed-aspect boxes, as in
+# matplotlib's `layout = "compressed"`), unless built with
+# `compress = false`: the grid gap of a free cell is the user's spacing.
+function _room_collapse(plan::_RoomPlan)
+	_fin_compress_grid(plan.layout) || return false
+	found = false
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.grid && a.ref !== nothing) || continue
+		a.aspect || return false
+		found = true
+	end
+	return found
+end
+
+# Px the decorations across each gap between bands i and i + 1 of
+# `bands` need (`need`, `_room_needs`: labels and requests of each side),
+# plus `_ROOM_GAP` between them; `nothing` without bands.
+function _room_gap_needs(plan::_RoomPlan, need, bands, lo_side::Symbol, hi_side::Symbol, axis::Int)
+	bands === nothing && return nothing
+	lo, hi = bands
+	n = length(lo)
+	toward_next = zeros(n)
+	toward_previous = zeros(n)
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.grid && a.ref !== nothing) || continue
+		e = round(a.ref[axis][2]; digits = 9)
+		i = searchsortedfirst(hi, e)
+		i <= n && hi[i] == e && (toward_next[i] = max(toward_next[i], need[(key, hi_side)]))
+		e = round(a.ref[axis][1]; digits = 9)
+		j = searchsortedfirst(lo, e)
+		j <= n && lo[j] == e && (toward_previous[j] = max(toward_previous[j], need[(key, lo_side)]))
+	end
+	return [toward_next[i] + toward_previous[i + 1] + _ROOM_GAP for i in 1:(n - 1)]
+end
+
+# Px the decorations of the outermost bands take inside the plot region at
+# its two ends (`(lo end, hi end)`): what their sides need (`need`,
+# `_room_needs`: labels and requests) less what the margin estimate holds
+# beyond the base margin (plotly's automargin push, the room engine's edge
+# needs). A compressed block is centred with them (`_room_band_solve`), so
+# the blank left beyond the decorations is the same at both ends.
+function _room_outer_needs(plan::_RoomPlan, need, bands, lo_side::Symbol, hi_side::Symbol, axis::Int)
+	bands === nothing && return (0.0, 0.0)
+	lo, hi = bands
+	inside_lo = 0.0
+	inside_hi = 0.0
+	for key in plan.area_order
+		a = plan.areas[key]
+		(a.grid && a.ref !== nothing) || continue
+		round(a.ref[axis][1]; digits = 9) == lo[1] && (inside_lo = max(inside_lo, need[(key, lo_side)]))
+		round(a.ref[axis][2]; digits = 9) == hi[end] && (inside_hi = max(inside_hi, need[(key, hi_side)]))
+	end
+	# The base margin is the one before the room engine raised it
+	# (`_ROOM_MARGIN_KEY`): a decoration the raise holds is centred as one
+	# inside the region, so the block stays where it was once the margin is
+	# raised for it (B1/B2: a panel label's 4 -> 10 px raise moved the block,
+	# which then gave the raise back, on every round).
+	base = _fin_margins_base(plan.layout)
+	record = _room_margin_record(plan.layout)
+	function margin(side)
+		letter = Symbol(String(side)[1])
+		b = getfield(base, letter)
+		rec = get(record, letter, nothing)
+		rec !== nothing && abs(b - rec[2]) <= 0.5 && (b = rec[1])
+		return getfield(plan.margins, letter) - b
+	end
+	return (max(0.0, inside_lo - max(0.0, margin(lo_side))), max(0.0, inside_hi - max(0.0, margin(hi_side))))
+end
+
 # The band edges after the solve: `(lo, hi, new_lo, new_hi)` with each band
 # edge moved in by the room its group needs (`group[(side, edge)]`, px) and
 # the band spans scaled alike for the total (column widths and row heights
@@ -3982,9 +4285,14 @@ end
 # room taken there. The total is capped at `_ROOM_MAX_SHARE` of the spans.
 # `compress` (L11, px per band or `nothing`): blank space every cell of a
 # band leaves, removed from that band's span; the bands are then centred in
-# what that frees.
+# what that frees. `gapneed` (L11, px per gap between bands i and i + 1, or
+# `nothing`): what the decorations facing each other across that gap need
+# (`_room_gap_needs`); a gap wider than that closes to it and the bands
+# take what it frees, in proportion to their spans (a grid of equal-aspect
+# cells only, `_room_collapse`: the fit then grows the boxes or leaves the
+# blank that `compress` removes).
 function _room_band_solve(plan::_RoomPlan, bands, group, lo_side::Symbol, hi_side::Symbol, px::Float64,
-		compress = nothing)
+		compress = nothing; gapneed = nothing, outer::Tuple{Float64, Float64} = (0.0, 0.0))
 	bands === nothing && return nothing
 	lo, hi = bands
 	n = length(lo)
@@ -4000,6 +4308,24 @@ function _room_band_solve(plan::_RoomPlan, bands, group, lo_side::Symbol, hi_sid
 	end
 	scale = (total - taken) / total
 	spans = [(hi[i] - lo[i]) * scale for i in 1:n]
+	# Paper distance between the plot spans of bands i and i + 1, where a
+	# gap closed (`nothing`: the grid gap plus the room taken on each side).
+	inner = Union{Nothing, Float64}[nothing for _ in 1:(n - 1)]
+	if gapneed !== nothing && length(gapneed) == n - 1
+		closed = 0.0
+		for i in 1:(n - 1)
+			have = take_hi[i] + (lo[i + 1] - hi[i]) + take_lo[i + 1]
+			want = gapneed[i] / px
+			if have > want
+				closed += have - want
+				inner[i] = want
+			end
+		end
+		if closed > 0
+			grow = (sum(spans) + closed) / sum(spans)
+			spans .*= grow
+		end
+	end
 	freed = 0.0
 	if compress !== nothing && length(compress) == n
 		for i in 1:n
@@ -4012,13 +4338,29 @@ function _room_band_solve(plan::_RoomPlan, bands, group, lo_side::Symbol, hi_sid
 	new_hi = similar(hi)
 	out_lo = similar(lo)
 	out_hi = similar(hi)
-	x = lo[1] + freed / 2
+	# Centred in what the compression frees; a block whose gaps closed is
+	# centred with the decorations its outer bands take inside the plot
+	# region (`outer`, px), within what is freed.
+	x = lo[1] + clamp(freed / 2 + (outer[1] - outer[2]) / (2 * px), 0.0, freed)
 	for i in 1:n
-		out_lo[i] = x
-		x += take_lo[i]
+		if i == 1 || inner[i - 1] === nothing
+			out_lo[i] = x
+			x += take_lo[i]
+		end
 		new_lo[i] = x
 		x += spans[i]
 		new_hi[i] = x
+		if i < n && inner[i] !== nothing
+			# A closed gap: each slot keeps the room taken on its side within
+			# the distance to the next band.
+			d = inner[i]
+			share = take_hi[i] + take_lo[i + 1] > 0 ? take_hi[i] / (take_hi[i] + take_lo[i + 1]) : 0.5
+			mine = min(take_hi[i], d * share)
+			out_hi[i] = x + mine
+			x += d
+			out_lo[i + 1] = x - min(take_lo[i + 1], d - mine)
+			continue
+		end
 		x += take_hi[i]
 		out_hi[i] = x
 		i < n && (x += lo[i + 1] - hi[i])
@@ -4348,6 +4690,55 @@ function _room_settle_margins!(plan::_RoomPlan)
 	return _fin_meta_set!(layout, _ROOM_MARGIN_KEY, value)
 end
 
+"""
+	_room_plot_px_without(plan, owner::Symbol, keys) -> (w, h)
+
+The plot px (figure less margins) of `plan` once every margin the room
+engine raised holds only what the decorations other than those of `owner`
+keyed `keys` (one key, or a collection of them) need there (each side at least its recorded base, the user's or the
+style's; a margin nobody raised stays as it is). A decision about where
+the decoration goes that is made on the current plot px depends on where
+it is now: a cell legend beside the right column raises the right margin
+and so narrows the cell it is scored on (docs-truth-16: right of the cell
+at 600 px, below it at 547, and back, on every pass).
+"""
+function _room_plot_px_without(plan::_RoomPlan, owner::Symbol, keys)
+	drop = keys isa AbstractString ? (String(keys),) : keys
+	layout = plan.layout
+	record = _room_margin_record(layout)
+	margin = get(layout.fields, :margin, nothing)
+	base = _fin_margins_base(layout)
+	need = Dict{Symbol, Float64}()
+	for request in plan.requests
+		(request.owner === owner && request.key in drop) && continue
+		for slot in _room_slots(plan, request.owner, request.key)
+			(slot.area === request.area && slot.side === request.side) || continue
+			if slot.area !== :figure
+				_room_neighbour(plan, plan.areas[slot.area], slot.side) === nothing || continue
+			end
+			paper = slot.side in (:right, :top) ? 1.0 : 0.0
+			inside = abs(slot.edge - paper) * _room_px(plan, slot.side)
+			# As `_lt_hold_pushed_margins!` (automargin) and
+			# `_room_margin_updates!` (margins the engine raises) count it.
+			reach = request.margin_pushed ? slot.offset + slot.px - inside + _FIN_AUTOMARGIN_EXTRA :
+				slot.offset + slot.px + _ROOM_GAP - inside
+			letter = Symbol(String(slot.side)[1])
+			need[letter] = max(get(need, letter, 0.0), reach)
+		end
+	end
+	side_px(letter) = begin
+		current = _cmn_mapping_get(margin, letter)
+		have = _fin_isfinite_real(current) ? Float64(current) : getfield(base, letter)
+		queued = get(plan.updates, Symbol(:margin_, letter), nothing)
+		rec = get(record, letter, nothing)
+		owned = rec !== nothing && abs(have - rec[2]) <= 0.5
+		raised = _fin_isfinite_real(queued) && Float64(queued) > have + 0.5
+		(owned || raised) || return have
+		return max(owned ? rec[1] : have, ceil(get(need, letter, 0.0)))
+	end
+	return (max(plan.W - side_px(:l) - side_px(:r), 1.0), max(plan.H - side_px(:t) - side_px(:b), 1.0))
+end
+
 # ---------------------------------------------------------------------------
 # Colorbars as a room owner
 # ---------------------------------------------------------------------------
@@ -4457,16 +4848,29 @@ end
 # but never longer than an area that is drawn smaller than before (an
 # equal-aspect cell fitted inside its grid cell, V3: the bar ran past the plot
 # box and into the cell title); otherwise the bar follows the area. Never
-# shorter than `floor` (`_room_min_bar_len`), which counts as ours too.
+# shorter than `floor` (`_room_min_bar_len`), which counts as ours too, as
+# does the `len` a former pass wrote (`wrote`, `_room_cbar_wrote`): a bar of a
+# fitted cell is as long as its box, not its domain, and the extent or floor
+# it was written for changes with the size (layout-fuzz-09: a cell bar kept
+# the length of the cell before `figsize!` and a figure title, 49 px past
+# its plot area).
 function _room_bar_len(bar::AbstractDict, current::Float64, final::Float64; floor::Float64 = 0.0,
-		cell::Float64 = current)
-	len = _cbar_real(bar, :len, nothing)
-	ours = len === nothing || !(len > 0) || _cbar_string(bar, :lenmode, "fraction") != "fraction" ||
-		isapprox(len, current; atol = 1e-9) || isapprox(len, max(current, floor); atol = 1e-9)
-	ours && return max(final, floor)
-	len = Float64(len)
+		cell::Float64 = current, wrote::Union{Nothing, Float64} = nothing)
+	_room_bar_len_ours(bar, current; floor = floor, wrote = wrote) && return max(final, floor)
+	len = Float64(_cbar_real(bar, :len, nothing))
 	final < cell - 1e-9 && (len = min(len, final))
 	return max(len, floor)
+end
+
+# Whether the `len` of trace bar `bar` is ours (`_room_bar_len`): unset, not
+# a fraction, the area's `current` extent, the `floor`, or what a former pass
+# wrote (`wrote`); any other `len` is the user's.
+function _room_bar_len_ours(bar::AbstractDict, current::Float64; floor::Float64 = 0.0,
+		wrote::Union{Nothing, Float64} = nothing)
+	len = _cbar_real(bar, :len, nothing)
+	return len === nothing || !(len > 0) || _cbar_string(bar, :lenmode, "fraction") != "fraction" ||
+		isapprox(len, current; atol = 1e-9) || isapprox(len, max(current, floor); atol = 1e-9) ||
+		(wrote !== nothing && isapprox(len, wrote; atol = 1e-9))
 end
 
 # Tick label lines a vertical bar's body keeps at least. plotly.js 2.35.2
@@ -4488,6 +4892,23 @@ function _room_min_bar_len(font::Float64, bar::AbstractDict, extent_px::Float64)
 		title = get(bar, :title, nothing)
 		side = something(_fin_string(_cmn_mapping_get(title, :side)), "top")
 		side in ("top", "bottom") && (need += _CBAR_LINE_EM * _fin_mapping_font_size(title, :font, font) + 4)
+	end
+	return min(need / max(extent_px, 1.0), 1.0)
+end
+
+# Shortest length (paper, of `extent_px` px) a horizontal bar is drawn with:
+# a title beside it (`title_side = :right`/`:left`) takes its width from the
+# bar's length, and plotly.js 2.35.2 fails on the bar left without length
+# (layout-fuzz-14: "intensity (a.u.)" beside a 0.14 bar under a cell of a
+# 1 x 5 grid, 700 px wide). Room for the title and the body of
+# `_room_min_bar_len` is kept.
+function _room_min_hbar_len(font::Float64, bar::AbstractDict, extent_px::Float64)
+	need = _ROOM_MIN_BAR_LINES * _CBAR_LINE_EM * _fin_mapping_font_size(bar, :tickfont, font) + 2
+	text = _cbar_title_text(bar)
+	if text !== nothing && !isempty(text)
+		title = get(bar, :title, nothing)
+		side = something(_fin_string(_cmn_mapping_get(title, :side)), "top")
+		side in ("right", "left") && (need += _text_extent(text, _fin_mapping_font_size(title, :font, font))[1] + 4)
 	end
 	return min(need / max(extent_px, 1.0), 1.0)
 end
@@ -4562,6 +4983,14 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 		a = get(plan.areas, area_key, nothing)
 		a === nothing && continue
 		items = by_area[region_key]
+		# The math title above a bar the equal-aspect fit hugs to its field
+		# (`skip_bars`): the fit places the bar, its title needs room above
+		# the area like any other (vm-cbtitle: under a 4 px :ieee top margin
+		# the title of a fitted heatmap was drawn above the page).
+		for item in items
+			(item.coloraxis === nothing && item.index in plan.skip_bars && _fin_bar_vertical(item.bar)) || continue
+			_room_request_vbar_title!(plan, item, (area_key,), _room_bar_key(item), 0.0)
+		end
 		for side in (:right, :bottom)
 			group = _FinBar[item for item in items if item.coloraxis === nothing &&
 				!(item.index in plan.skip_bars) && _fin_bar_vertical(item.bar) == (side === :right) &&
@@ -4582,7 +5011,8 @@ function _room_requests!(plan::_RoomPlan, ::Val{:colorbar})
 			reserve = occursin(_FIN_MARGIN_FIRST_SUBPLOT, String(area_key))
 			for item in group
 				key = _room_bar_key(item)
-				plan.bar_items[key] = (item = item, side = side, keep_default = keep_default)
+				plan.bar_items[key] = (item = item, side = side, keep_default = keep_default,
+					flat = a.kind === :xy)
 				px = side === :right ?
 					_fin_bar_width(layout, item, plan.Hp; len_px = _room_bar_len(item.bar, span, span) * plan.Hp) +
 					max(0.0, lead - _ROOM_GAP) :
@@ -4766,7 +5196,16 @@ end
 # The placement of colorbar `key` after the solve, `nothing` to leave it
 # (no slot, a frozen area, plotly's default kept).
 function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
-	entry.keep_default && return nothing
+	# layout-fuzz-05: a lone bar left at plotly's default position (x 1.02,
+	# len 1) is drawn without plotly's 10 px `ypad`, which made it 20 px
+	# shorter than the plot area. `ypad` alone keeps it unplaced
+	# (`_fin_bar_unplaced`), so it stays at the default on later runs. The
+	# bar of a 3-D scene (no plot area to match) is left untouched.
+	if entry.keep_default
+		(hasproperty(entry, :flat) && !entry.flat) && return nothing
+		ypad = _cbar_real(entry.item.bar, :ypad, nothing)
+		return ypad !== nothing && ypad == 0 ? nothing : Dict{Symbol, Any}(:ypad => 0)
+	end
 	slots = _room_slots(plan, :colorbar, key)
 	isempty(slots) && return nothing
 	any(slot -> slot.area !== :figure && plan.areas[slot.area].frozen, slots) && return nothing
@@ -4786,8 +5225,8 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 				:ypad => 0)
 		end
 		low = argmin(slot -> slot.edge - slot.offset / plan.Hp, slots)
-		return _room_hbar_placement(plan, item, low.edge, low.offset, (x0 + x1) / 2, entry.ratio * (x1 - x0),
-			release)
+		return _room_hbar_placement(plan, item, low.edge, low.offset, (x0 + x1) / 2,
+			max(entry.ratio * (x1 - x0), _room_min_hbar_len(plan.font, item.bar, plan.Wp)), release)
 	end
 	slot = first(slots)
 	if slot.side === :right
@@ -4806,14 +5245,22 @@ function _room_colorbar_placement(plan::_RoomPlan, key::String, entry)
 			placement[:y] = (yd[1] + yd[2]) / 2
 			placement[:yanchor] = "middle"
 			area = plan.areas[slot.area]
+			floor = _room_min_bar_len(plan.font, item.bar, plan.Hp)
+			wrote = _room_cbar_wrote(plan, key)
+			_room_bar_len_ours(item.bar, _room_span(area.current[2]); floor = floor, wrote = wrote) ||
+				push!(_room_user_len_bars(plan), key)
 			placement[:len] = _room_bar_len(item.bar, _room_span(area.current[2]), _room_span(yd);
-				floor = _room_min_bar_len(plan.font, item.bar, plan.Hp),
-				cell = area.ref === nothing ? _room_span(area.current[2]) : _room_span(area.ref[2]))
+				floor = floor, cell = area.ref === nothing ? _room_span(area.current[2]) : _room_span(area.ref[2]),
+				wrote = wrote)
 		end
 		return placement
 	end
 	xd = slot.domain_x
-	len = _room_bar_len(item.bar, _room_span(plan.areas[slot.area].current[1]), _room_span(xd))
+	current = _room_span(plan.areas[slot.area].current[1])
+	floor = _room_min_hbar_len(plan.font, item.bar, plan.Wp)
+	wrote = _room_cbar_wrote(plan, key)
+	_room_bar_len_ours(item.bar, current; floor = floor, wrote = wrote) || push!(_room_user_len_bars(plan), key)
+	len = _room_bar_len(item.bar, current, _room_span(xd); floor = floor, wrote = wrote)
 	return _room_hbar_placement(plan, item, slot.edge, slot.offset, (xd[1] + xd[2]) / 2, len, slot.release)
 end
 
@@ -4865,17 +5312,38 @@ end
 function _room_place!(plan::_RoomPlan, ::Val{:colorbar})
 	record = _room_cbar_record(plan)
 	new_record = Dict{String, Vector{Float64}}()
+	# The len written on a trace bar no pass of this plan places (a bar the
+	# plan leaves to the fit, or not writable now) is kept while the trace
+	# still carries a bar: entries come and go only with their bars, not with
+	# the passes that visit them (a heatmap and a contour sharing a plot area
+	# dropped and re-added the heatmap's on alternate finalizes).
+	for (id, value) in record
+		startswith(id, "bar:") || continue
+		index = tryparse(Int, SubString(id, 5))
+		(index !== nothing && 1 <= index <= length(plan.p.data)) || continue
+		trace = plan.p.data[index]
+		(trace isa GenericTrace && _cbar_slot(trace, index) !== nothing) || continue
+		new_record[id] = value
+	end
 	for (key, entry) in plan.bar_items
 		item = entry.item
 		_fin_item_writable(plan.ctx, item) || continue
 		placement = _room_colorbar_placement(plan, key, entry)
 		if placement === nothing
-			item.coloraxis === nothing || !haskey(record, item.coloraxis) ||
-				(new_record[item.coloraxis] = record[item.coloraxis])
+			id = item.coloraxis === nothing ? key : item.coloraxis
+			haskey(record, id) && (new_record[id] = record[id])
 			continue
 		end
 		if item.coloraxis !== nothing && hasproperty(entry, :ratio) && haskey(placement, :len)
 			new_record[item.coloraxis] = Float64[entry.ratio, Float64(placement[:len])]
+		elseif item.coloraxis === nothing && haskey(placement, :len)
+			# A `len` the user gave (`colorbar!(...; len)`) is not ours:
+			# recorded, the next pass would take it for ours and drop it.
+			if key in _room_user_len_bars(plan)
+				delete!(new_record, key)
+			else
+				new_record[key] = Float64[1.0, Float64(placement[:len])]
+			end
 		end
 		_room_same_place(item.bar, placement) && !_room_needs_mark(plan, key, item, placement) && continue
 		plan.wrote |= _fin_place_bar!(plan.ctx, plan.updates, item, placement)
@@ -4895,8 +5363,19 @@ end
 
 # Share of the plot boxes along it each coloraxis bar of ours was given, and
 # the `len` written for it: `layout.meta` `_ROOM_CBAR_KEY`, coloraxis id =>
-# `[ratio, len]` (read once per plan).
+# `[ratio, len]`; a trace bar of ours placed by the plan, by its
+# `_room_bar_key` => `[1, len]` (read once per plan).
 const _ROOM_CBAR_KEY = Symbol("plotlysupply:cbar")
+
+# The keys of the trace bars whose `len` this plan found to be the user's
+# (`_room_bar_len_ours`).
+_room_user_len_bars(plan::_RoomPlan) = get!(() -> Set{String}(), plan.memo, :user_len_bars)::Set{String}
+
+# The `len` a former pass wrote on the trace bar keyed `key`, or `nothing`.
+function _room_cbar_wrote(plan::_RoomPlan, key::AbstractString)
+	rec = get(_room_cbar_record(plan), key, nothing)
+	return rec === nothing ? nothing : rec[2]
+end
 
 function _room_cbar_record(plan::_RoomPlan)
 	return get!(plan.memo, :cbar_record) do
@@ -4946,6 +5425,42 @@ function _fin_grid_title_letter(item)
 	name = _cmn_mapping_get(item, :name)
 	name isa AbstractString || return nothing
 	return get(_FIN_GRID_TITLE_NAMES, String(name), nothing)
+end
+
+# O2: the "×10^k" label of a y axis with a scientific offset (`yticks!(...;
+# offset)`, annotation `plotlysupply:offset:<y ref>`) sits above the top end
+# of the axis, `yshift` px up from its domain (axes.jl places it there, and
+# it follows the domain); annotations push no margin, so under the 4 px top
+# margin of a sized style it was drawn above the page (top at -12.5 px). It
+# takes a request on the top of its plot area like any decoration (stacked
+# outermost); the provider places nothing.
+function _room_requests!(plan, ::Val{:offset})
+	annotations = get(plan.layout.fields, :annotations, nothing)
+	annotations isa AbstractVector || return nothing
+	prefix = _AXES_OFFSET_NAME * ":"
+	for item in annotations
+		name = _cmn_mapping_get(item, :name)
+		(name isa AbstractString && startswith(name, prefix)) || continue
+		_cmn_mapping_get(item, :visible) === false && continue
+		yref = _fin_string(_cmn_mapping_get(item, :yref))
+		(yref !== nothing && occursin(r"^y\d* domain$", yref)) || continue
+		_fin_string(_cmn_mapping_get(item, :yanchor)) == "bottom" || continue
+		ykey = _fin_axis_key(first(split(yref)))
+		ykey === nothing && continue
+		area = nothing
+		for key in plan.area_order
+			a = plan.areas[key]
+			(a.kind === :xy && a.ykey === ykey) || continue
+			area = key
+			break
+		end
+		area === nothing && continue
+		shift = _cmn_mapping_get(item, :yshift, 0)
+		shift = _fin_isfinite_real(shift) ? max(Float64(shift), 0.0) : 0.0
+		_request_room!(plan, area, :top, shift + _fin_math_title_depth(item, plan.font); owner = :offset,
+			key = String(name), order = 90)
+	end
+	return nothing
 end
 
 function _room_requests!(plan, ::Val{:grid_titles})
@@ -5021,6 +5536,56 @@ function _fin_title_annotations(p::Plot, moved, base = nothing)
 		end
 	end
 	return changed ? result : base
+end
+
+# sm-01, sm-13: a math colorbar title is an annotation named after the
+# plot area (or coloraxis) of its bar (`_cbar_title_owner`). It belongs to a
+# bar that shows and has no title of its own (the conversion removed it); once
+# no such bar is left (the trace was deleted, `react!` replaced the data,
+# `remove_inset!` took the inset, a new bar there carries a plain title) the
+# annotation is dropped, so no title floats where no bar is drawn. Returns
+# the annotations to write, or `nothing` when every title still has its bar.
+# Costs one scan of the annotations, and of the traces only when a title
+# annotation exists.
+function _fin_orphan_cbar_titles(p::Plot)
+	existing = get(p.layout.fields, :annotations, nothing)
+	existing isa AbstractVector || return nothing
+	prefix = _CBAR_TITLE_ANNOTATION_PREFIX
+	any(item -> (name = _cmn_item_name(item); name isa AbstractString && startswith(name, prefix)), existing) ||
+		return nothing
+	# Areas and coloraxes whose bar shows without a title of its own.
+	alive = Set{String}()
+	used_axes = Set{String}()
+	for (index, trace) in enumerate(p.data)
+		slot = _cbar_slot(trace, index)
+		slot === nothing && continue
+		if slot.coloraxis !== nothing
+			push!(used_axes, slot.coloraxis)
+			continue
+		end
+		slot.shows || continue
+		text = _cbar_title_text(_symbol_dict(_cbar_slot_bar(trace, slot)))
+		(text === nothing || isempty(text)) || continue
+		push!(alive, _cbar_trace_region(p, trace).key)
+	end
+	for id in used_axes
+		axis = get(p.layout.fields, Symbol(id), nothing)
+		_cmn_mapping_get(axis, :showscale) === false && continue
+		text = _cbar_title_text(_symbol_dict(_cmn_mapping_get(axis, :colorbar)))
+		(text === nothing || isempty(text)) && push!(alive, id)
+	end
+	kept = Any[]
+	for item in existing
+		name = _cmn_item_name(item)
+		if name isa AbstractString && startswith(name, prefix)
+			rest = String(name)[(ncodeunits(prefix) + 1):end]
+			cut = findlast(':', rest)
+			area = cut === nothing ? rest : rest[1:prevind(rest, cut)]
+			area in alive || continue
+		end
+		push!(kept, item)
+	end
+	return length(kept) == length(existing) ? nothing : kept
 end
 
 const _FIN_PANEL_TITLE_NAME = r"^plotlysupply:title!?:(\d+):(\d+)(:.*)?$"
@@ -5176,6 +5741,8 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool, strict::Bool = 
 	# `strict` is the append-only fast path (`_transactional_high_level_plot_mutation!`).
 	strict && _fin_own_meta!(p.layout)
 	updates = _fin_match_group_updates(p.layout, p.data)
+	orphans = _fin_orphan_cbar_titles(p)
+	orphans === nothing || (updates[:annotations] = orphans)
 	# One collection for the run (Z81): no write of the run changes an extent
 	# (see `_FinAxes`).
 	accs = _fin_collect_axes(p)
@@ -5199,6 +5766,11 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool, strict::Bool = 
 		refit = false
 		if fitted
 			again = _axes_finalize_updates!(Dict{Symbol, Any}(), p, _fin_figure_size(ctx, p.layout), accs)
+			# The room above a polar/ternary subplot counts the title block,
+			# whose `pad.t` the fit may just have raised (a math or two-line
+			# title; errors-inputs-01: `plot_scatterpolar(...; title = "\$t\$")`
+			# gained 10 px of top margin on the first finalize after it).
+			_fin_domain_margin_updates!(again, p, _fin_figure_size(ctx, p.layout)[2])
 			refit = !isempty(again) && _fin_relayout!(ctx, again)
 		end
 		(fitted || refit) || break
@@ -5227,12 +5799,15 @@ function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height
 	margin === nothing && return updates
 	lookup(key) = get(fields, key, nothing)
 	root = _tight_root_font_size(lookup)
-	tick = root
+	# The labels drawn outside: an axis's own tick font, else the figure's
+	# (a style's 12 px angular labels under a 14 px root font need the room
+	# of 12 px, as `_style_domain_subplot_margin` gives it).
+	tick = 0.0
 	for (key, axis) in fields
 		occursin(r"^(polar|ternary)\d*$", String(key)) || continue
-		for name in (:angularaxis, :aaxis, :baxis, :caxis)
-			size = _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, 0.0)
-			size > tick && (tick = size)
+		names = occursin(r"^polar", String(key)) ? (:angularaxis,) : (:aaxis, :baxis, :caxis)
+		for name in names
+			tick = max(tick, _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, root))
 		end
 	end
 	label_room = ceil(1.2 * tick + 8)
@@ -5336,6 +5911,51 @@ function _fin_trace_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height:
 		want > have + 1e-9 && (updates[Symbol(:margin_, side)] = _style_number(want))
 	end
 	return updates
+end
+
+# plotly.js 2.35.2 pushes the bottom margin for an x title by its tick depth,
+# standoff and one title font size (axes.js, the same for any title), but a
+# MathJax title is drawn lower: its glyph box reached 0.44-0.77 title font
+# sizes past `_fin_x_labels_px` where a plain title stayed within it
+# (vm-xtitleclip: `$x$ ($\mu$m)`, `$\ell = L/\sqrt{T}$`, `$\frac{a}{b}$` and
+# "frequency $f$ (Hz)" under :default, :ieee, :aps and :nature, measured on
+# 4x PNGs), so under a tight bottom margin (4 px) the descenders were cut at
+# the page edge. `_FIN_MATH_XTITLE_EM` title font sizes plus
+# `_FIN_MATH_XTITLE_PAD` px cover the largest measured.
+const _FIN_MATH_XTITLE_EM = 0.8
+const _FIN_MATH_XTITLE_PAD = 1.0
+
+# The px the bottom margin needs for the math titles of the x axes drawn at
+# the bottom paper edge (0 when none): their tick labels, ticks and title
+# (`_fin_x_labels_px`) and the MathJax depth beyond what plotly pushes.
+# `pending` holds the updates of the calling pass (a y domain there is the
+# one drawn). Only a title whose plain room exceeds the bottom margin `base`
+# (as the user or style set it) counts: plotly then sets the page edge by
+# its push, which the MathJax glyphs pass. A margin that already holds the
+# plain room is pushed further by plotly than the glyphs reach (:default,
+# 50 px for 48.1 px of plain room: drawn 60 px, the deepest of the titles
+# above 54.4 px), so nothing is written there.
+function _fin_math_xtitle_px(layout::Layout; pending::AbstractDict = Dict{Symbol, Any}(), base::Real = 0.0)
+	need = 0.0
+	font = _fin_font_size(layout)
+	for (key, axis) in layout.fields
+		(key isa Symbol && _fin_is_axis_key(key) && String(key)[1] == 'x') || continue
+		_cmn_mapping_get(axis, :visible) === false && continue
+		text = _fin_title_text(axis)
+		occursin('$', text) || continue
+		something(_fin_string(_cmn_mapping_get(axis, :side)), "bottom") == "bottom" || continue
+		anchor = _fin_axis_key(_cmn_mapping_get(axis, :anchor, "y"))
+		anchor === nothing && continue
+		queued = get(pending, Symbol(anchor, :_domain), nothing)
+		edge = queued isa AbstractVector && length(queued) == 2 ? Float64(queued[1]) :
+			_cmn_y_axis_domain(layout, anchor)[1]
+		edge <= 1e-9 || continue
+		plain = _fin_x_labels_px(layout, key)
+		plain > base || continue
+		size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
+		need = max(need, plain + _FIN_MATH_XTITLE_EM * size + _FIN_MATH_XTITLE_PAD)
+	end
+	return need
 end
 
 # The tick label plotly.js 2.35.2 centres on the last tick of an x axis that
