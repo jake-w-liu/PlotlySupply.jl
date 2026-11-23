@@ -300,6 +300,27 @@ function _cbar_set_slot_bar!(trace::GenericTrace, slot::_CbarSlot, bar::Dict{Sym
 	return nothing
 end
 
+# The vector norms a cone trace is coloured by, computed on access (mr-03:
+# the finalizer reads a cone's colour range on every run, and a materialised
+# vector of norms cost an allocation per cone each time). The k-th norm is
+# that of the k-th (u, v, w) in linear order over the shortest of the three;
+# a triple with a non-real entry (a JSON `null` gap) is NaN, which every
+# consumer skips as it skips non-finite colour values.
+struct _CbarConeNorms{U <: AbstractArray, V <: AbstractArray, W <: AbstractArray} <: AbstractVector{Float64}
+	u::U
+	v::V
+	w::W
+end
+Base.size(norms::_CbarConeNorms) = (min(length(norms.u), length(norms.v), length(norms.w)),)
+function Base.getindex(norms::_CbarConeNorms, k::Int)
+	@boundscheck checkbounds(norms, k)
+	a = norms.u[firstindex(norms.u) + k - 1]
+	b = norms.v[firstindex(norms.v) + k - 1]
+	c = norms.w[firstindex(norms.w) + k - 1]
+	(a isa Real && b isa Real && c isa Real) || return NaN
+	return sqrt(Float64(a)^2 + Float64(b)^2 + Float64(c)^2)
+end
+
 # The colour data plotly maps through the slot's scale, or `nothing` when it
 # is computed by plotly (histogram2d counts, streamtube magnitudes, a
 # densitymap without `z`).
@@ -322,11 +343,7 @@ function _cbar_slot_values(trace::GenericTrace, slot::_CbarSlot)
 			w = get(fields, :w, nothing)
 			(u isa AbstractArray && v isa AbstractArray && w isa AbstractArray) ||
 				return nothing
-			return [
-				sqrt(Float64(a)^2 + Float64(b)^2 + Float64(c)^2)
-				for (a, b, c) in zip(u, v, w)
-				if a isa Real && b isa Real && c isa Real
-			]
+			return _CbarConeNorms(u, v, w)
 		end
 		return get(fields, :z, nothing)
 	end

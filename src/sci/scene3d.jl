@@ -427,6 +427,85 @@ function _s3_stored_range(layout, scenekey::Symbol, axiskey::Symbol, checked, wh
 	return Any[b === nothing ? nothing : log10(b) for b in checked]
 end
 
+# What plotly.js autotypes a coordinate array as, for the range bounds the
+# axis takes: "linear" when it holds a real number, else "date" for dates
+# (Date/DateTime or date strings), else "category" for other values; "-"
+# when it holds nothing (`_axes_bound_axis_type` makes the same choice for
+# Cartesian axes). Arrays typed with a real or date element type are not
+# scanned.
+function _s3_coordinate_kind(values::AbstractArray)
+	isempty(values) && return "-"
+	T = eltype(values)
+	(T <: Real && !(T <: Bool) && T !== Union{}) && return "linear"
+	(T <: Union{Dates.Date, Dates.DateTime} && T !== Union{}) && return "date"
+	dates = false
+	other = false
+	for value in values
+		(value === nothing || value === missing) && continue
+		value isa Real && !(value isa Bool) && return "linear"
+		if value isa Union{Dates.Date, Dates.DateTime} ||
+		   (value isa AbstractString && occursin(_PLOTLY_DATE_PATTERN, value))
+			dates = true
+		else
+			other = true
+		end
+	end
+	return dates ? "date" : other ? "category" : "-"
+end
+
+# The type of axis `d` (1 = x, 2 = y, 3 = z) of scene `scenekey` that decides
+# which range bounds it takes: its layout `type` when set (`layout` may be
+# `nothing` for a new figure), else what its data autotype it as
+# (`_s3_coordinate_kind` over the coordinate `d` of the traces of the scene in
+# each of `trace_lists`: the figure's and those a call is about to add; the x
+# and y of a surface without them are the indices of z, so linear).
+function _s3_range_axis_type(layout, scenekey::Symbol, d::Int, trace_lists...)
+	if layout !== nothing
+		axis = _cmn_mapping_get(get(layout.fields, scenekey, nothing), (:xaxis, :yaxis, :zaxis)[d])
+		declared = _cmn_mapping_get(axis, :type)
+		declared isa Symbol && (declared = String(declared))
+		(declared isa AbstractString && !isempty(declared) && declared != "-") && return String(declared)
+	end
+	coordinate = (:x, :y, :z)[d]
+	id = String(scenekey)
+	dates = false
+	other = false
+	for traces in trace_lists, trace in traces
+		_s3_trace_in_scene(trace, id) || continue
+		values = get(trace.fields, coordinate, nothing)
+		if !(values isa AbstractArray)
+			# A surface without x or y draws over the indices of z.
+			(d <= 2 && string(get(trace.fields, :type, "")) == "surface") && return "linear"
+			continue
+		end
+		kind = _s3_coordinate_kind(values)
+		kind == "linear" && return "linear"
+		kind == "date" && (dates = true)
+		kind == "category" && (other = true)
+	end
+	return dates ? "date" : other ? "category" : "-"
+end
+
+# Range bounds a scene axis can show (errors-inputs-12, the scene side of the
+# 2-D rule `_require_range_bound_types`): numbers on a numeric (linear, log or
+# category) axis, numbers and dates on a date axis or one whose type is not
+# known yet. `checked` is a validated range (`_s3_range`); `nothing` passes.
+function _s3_require_range_types(checked, layout, scenekey::Symbol, d::Int, who::AbstractString,
+		name::AbstractString, trace_lists...)
+	checked === nothing && return nothing
+	_require_range_bound_types(checked, _s3_range_axis_type(layout, scenekey, d, trace_lists...), who, name)
+	return nothing
+end
+
+# The range keywords of a 3-D call (`opts`) checked against the types of the
+# scene axes they apply to, before anything is written.
+function _s3_require_option_range_types(opts, layout, scenekey::Symbol, who::AbstractString, trace_lists...)
+	for (d, range, name) in ((1, opts.xrange, "xrange"), (2, opts.yrange, "yrange"), (3, opts.zrange, "zrange"))
+		_s3_require_range_types(range, layout, scenekey, d, who, name, trace_lists...)
+	end
+	return nothing
+end
+
 # A stored scene range (`_s3_stored_range`) as written on scene `scenekey` of
 # `fig`, whose data it applies to is already in the figure: a full range as
 # it is, a one-sided limit as the full range `_axes_scene_limit_range` makes
@@ -1088,8 +1167,9 @@ const _S3_AREA = Base.ScopedValues.ScopedValue{Any}(nothing)
 const _S3_BOUNDS_CACHE = Base.ScopedValues.ScopedValue{Union{Nothing, Dict{Tuple{UInt, Symbol, Int}, Any}}}(nothing)
 
 # Figure size and margins (px) the scenes of `p` are drawn with: the size of
-# `_S3_EXPORT_SIZE`, else the layout's `width`/`height`, else the active
-# style's default figure size (`_style_default_figure_size`, also savefig's
+# `_S3_EXPORT_SIZE`, else the layout's `width`/`height`, else the size a live
+# window drew the figure at (`_s3_window_size`), else the active style's
+# default figure size (`_style_default_figure_size`, also savefig's
 # default); the layout margins (plotly.js's defaults where unset) grown by
 # plotly.js's auto-margin for the tick labels and titles of Cartesian axes on
 # the paper edges (`_fin_margins`, the estimate `_finalize_figure!` uses) and
@@ -1101,7 +1181,7 @@ function _s3_plot_area(p::Plot)
 	fields = p.layout.fields
 	size = _S3_EXPORT_SIZE[]
 	if size === nothing
-		default_width, default_height = _figure_default_size(p)
+		default_width, default_height = something(_s3_window_size(p.layout), _figure_default_size(p))
 		size = (
 			_s3_number_field(fields, :width, Float64(default_width); positive = true),
 			_s3_number_field(fields, :height, Float64(default_height); positive = true),
@@ -1111,6 +1191,60 @@ function _s3_plot_area(p::Plot)
 	margins = _fin_margins(p.layout, _fin_collect_axes(p), width, height, Dict{Symbol, Any}(), ())
 	right = _s3_colorbar_right_margin(p, width, margins.l, margins.r)
 	return (width = width, height = height, l = margins.l, r = right, t = margins.t, b = margins.b)
+end
+
+# ── The size a live window draws a figure at ──────────────────────────────────
+#
+# A figure without a `width`/`height` of its own is drawn by a live window at
+# the size of the window's page (plotly.js autosize), not at the default
+# figure size the framing assumes otherwise (threed-live-07: tick labels ran
+# into each other in a 420x288 window framed for 700x500). When such a figure
+# with a framed scene is shown, the window measures the size it draws at and
+# `_s3_frame_for_window!` records it in `layout.meta["plotlysupply:window"] =
+# [width, height]` (copied on write) and frames the scenes for it; every later
+# PlotlySupply call frames for the recorded size, so the figure stays settled.
+# A `width`/`height` in the layout, and `savefig`'s export size, take
+# precedence. Resizing the window by hand does not re-frame (call `figsize!`).
+const _S3_WINDOW_KEY = Symbol("plotlysupply:window")
+
+# The recorded window size of a figure (see above), or `nothing`.
+function _s3_window_size(layout)
+	meta = get(layout.fields, :meta, nothing)
+	(meta isa AbstractDict || meta isa PlotlyBase.PlotlyAttribute) || return nothing
+	raw = _cmn_mapping_get(meta, _S3_WINDOW_KEY)
+	((raw isa AbstractVector || raw isa Tuple) && length(raw) == 2 &&
+		all(v -> _s3_is_real(v) && isfinite(v) && v > 0, raw)) || return nothing
+	return (Float64(raw[1]), Float64(raw[2]))
+end
+
+# Frame the scenes of the figure of live window `sp` for the size the window
+# draws it at, `measure()` = (width, height) px (the window's plotly.js
+# `_fullLayout` size), when the figure has no size of its own and a scene
+# PlotlySupply frames: the size is recorded (see above), the figure is
+# finalized for it and the window is updated through `react!`. Returns whether
+# anything changed. A size that cannot be measured leaves the figure as it is.
+function _s3_frame_for_window!(sp, measure)
+	p = sp.plot
+	fields = p.layout.fields
+	(_s3_number_field(fields, :width, 0.0; positive = true) > 0 &&
+		_s3_number_field(fields, :height, 0.0; positive = true) > 0) && return false
+	any(((key, value),) -> key isa Symbol && occursin(_S3_SCENE_KEY, String(key)) && _s3_mark(value) !== nothing, fields) ||
+		return false
+	raw = measure()
+	((raw isa AbstractVector || raw isa Tuple) && length(raw) == 2 &&
+		all(v -> _s3_is_real(v) && isfinite(v) && v > 0, raw)) || return false
+	size = (Float64(raw[1]), Float64(raw[2]))
+	_s3_window_size(p.layout) == size && return false
+	layout = deepcopy(p.layout)
+	meta = get(layout.fields, :meta, nothing)
+	holder = meta isa PlotlyBase.PlotlyAttribute ? meta.fields : meta
+	(holder === nothing || holder isa AbstractDict) || return false
+	fresh = holder === nothing ? Dict{Any, Any}() : copy(holder)
+	fresh[_S3_WINDOW_KEY] = Float64[size[1], size[2]]
+	layout.fields[:meta] = meta isa PlotlyBase.PlotlyAttribute ? PlotlyBase.PlotlyAttribute(fresh) : fresh
+	_finalize_figure!(Plot(p.data, layout); live = p.data)
+	react!(sp, p.data, layout)
+	return true
 end
 
 # Pixel size of the scene's viewport: the plot area (`_s3_plot_area`: figure
@@ -2431,8 +2565,12 @@ _s3_vector3(mapping, default::Float64 = 0.0) = [
 # whether the camera centre is PlotlySupply's to move (`pan`), the eye and
 # centre last written, the tick counts written (0: none) and, per axis, the
 # tick font size asked for and the size written for it
-# (`_s3_compensate_tick_fonts!`). A camera, tick count or tick font that no
-# longer matches its record was set by someone else and is kept. Scenes
+# (`_s3_compensate_tick_fonts!`), and the scene aspect an orthographic
+# `view!` zoom wrote (`zoomed`, `nothing` when none) with the aspect it
+# replaced (`prior`: the `aspectmode` and `aspectratio` as they were, `nothing`
+# where unset), so a later `view!` can undo the zoom. A camera, tick count,
+# tick font or zoomed aspect that no longer matches its record was set by
+# someone else and is kept. Scenes
 # without the mark (figures built without PlotlySupply's 3-D functions) are
 # never re-framed.
 const _S3_MARK_KEY = :plotlysupply
@@ -2449,12 +2587,16 @@ struct _S3Mark
 	titles::NTuple{3, String}
 	tickvals::NTuple{3, Tuple{Vararg{Float64}}}
 	endon::NTuple{3, Int}
+	zoomed::Union{Nothing, NTuple{3, Float64}}
+	prior_mode::Union{Nothing, String}
+	prior_ratio::Union{Nothing, NTuple{3, Float64}}
 end
 
 Base.:(==)(a::_S3Mark, b::_S3Mark) = all(name -> getfield(a, name) == getfield(b, name), fieldnames(_S3Mark))
 
 const _S3_ORIGIN = (0.0, 0.0, 0.0)
-const _S3_NEW_MARK = _S3Mark(true, 1.0, true, nothing, _S3_ORIGIN, (0, 0, 0), _S3_ORIGIN, _S3_ORIGIN, ("", "", ""), ((), (), ()), (0, 0, 0))
+const _S3_NEW_MARK = _S3Mark(true, 1.0, true, nothing, _S3_ORIGIN, (0, 0, 0), _S3_ORIGIN, _S3_ORIGIN, ("", "", ""), ((), (), ()), (0, 0, 0),
+	nothing, nothing, nothing)
 
 # The mark of a scene layout entry, or `nothing`. Malformed entries (edited by
 # hand) read as their defaults.
@@ -2487,6 +2629,11 @@ function _s3_mark(scene)
 		let flags = triple(:endon)
 			flags === nothing ? (0, 0, 0) : map(f -> f == 1 ? 1 : 0, flags)
 		end,
+		triple(:zoomed),
+		let mode = field(:prior)
+			mode isa AbstractString && !isempty(mode) ? String(mode) : nothing
+		end,
+		triple(:priorratio),
 	)
 end
 
@@ -2521,6 +2668,9 @@ function _s3_write_mark!(layout::Layout, key::Symbol, mark::_S3Mark)
 		titles = collect(mark.titles),
 		tickvals = [collect(t) for t in mark.tickvals],
 		endon = collect(mark.endon),
+		zoomed = mark.zoomed === nothing ? Float64[] : collect(mark.zoomed),
+		prior = something(mark.prior_mode, ""),
+		priorratio = mark.prior_ratio === nothing ? Float64[] : collect(mark.prior_ratio),
 	)
 	_merge_scene_layout_attr!(layout, key, attr(; _S3_MARK_KEY => value))
 	return true
@@ -2779,7 +2929,11 @@ end
 # intersect, `_s3_trim_corner_ticks!` writes the tick values of the axis with
 # more ticks, as the multiples of plotly.js's step `_s3_plotly_tick_step`
 # inside its range for the tick count the 40 px rule gives, without that end
-# tick; the written values are recorded in the scene's mark (`tickvals`) and
+# tick. When both axes show only two ticks (a short edge in a small cell),
+# dropping one would leave a single label: the axis with the longer edge on
+# screen takes the next finer plotly.js step instead (`_s3_finer_ticks`) and
+# drops the end tick there, so it keeps two labels or more (threed-live-04).
+# The written values are recorded in the scene's mark (`tickvals`) and
 # are PlotlySupply's as long as they equal the record: the next pass starts
 # from the automatic ticks again, so data or size changes never leave a
 # stale trim, and a tick placement of the user's is never touched.
@@ -2805,6 +2959,21 @@ function _s3_nice_ticks(range, count::Int)
 	last_index = floor(Int, hi / step + 1e-9)
 	return [round(k * step; sigdigits = 12) for k in first_index:last_index], step
 end
+
+# The ticks of the next plotly.js step finer than `step` inside `range` (as
+# `_s3_nice_ticks` gives them for a larger tick count) and that step, when
+# they are three or more; `nothing` otherwise.
+function _s3_finer_ticks(range, step::Float64)
+	for count in 2:_S3_MAX_FINER_TICKS
+		list, finer = _s3_nice_ticks(range, count)
+		finer < step * (1 - 1e-9) || continue
+		return length(list) >= 3 ? (list, finer) : nothing
+	end
+	return nothing
+end
+# Tick counts `_s3_finer_ticks` tries; plotly's step sequence (1, 2, 5 per
+# decade) has a finer step below any step within a factor 2.5 of the count.
+const _S3_MAX_FINER_TICKS = 64
 
 # `(lo, hi, chars)` of the tick labels at `values` (ascending, step `step`) on
 # an axis with `range`: the `_s3_tick_extent` triple.
@@ -2871,8 +3040,20 @@ function _s3_trim_corner_ticks!(p::Plot, target::_CellTarget)
 		end
 		hit === nothing && break
 		choices = [t for t in hit if values[tags[t][1]] !== nothing && length(values[tags[t][1]]) >= 3]
-		isempty(choices) && break
-		pick = argmax(t -> (length(values[tags[t][1]]), tags[t][1]), choices)
+		if isempty(choices)
+			# Two ticks on each axis: refine the longer one, then drop its end.
+			pick = nothing
+			for t in sort([t for t in hit if values[tags[t][1]] !== nothing]; by = t -> (-lengths[tags[t][1]], tags[t][1]))
+				finer = _s3_finer_ticks(ranges[tags[t][1]], steps[tags[t][1]])
+				finer === nothing && continue
+				values[tags[t][1]], steps[tags[t][1]] = finer
+				pick = t
+				break
+			end
+			pick === nothing && break
+		else
+			pick = argmax(t -> (length(values[tags[t][1]]), tags[t][1]), choices)
+		end
 		d = tags[pick][1]
 		tags[pick][2] == :tick_lo ? popfirst!(values[d]) : pop!(values[d])
 		push!(trimmed, d)
@@ -2955,7 +3136,13 @@ end
 # `(distance, camera centre, pads, own)` of `_s3_export_camera` with the best of
 # the pads of `_s3_pad_candidates` (see above); when every one of them leaves
 # titles colliding, the smallest tick pad with the titles drawn by PlotlySupply
-# (`own`, see "Axis titles drawn by PlotlySupply") if that collides less. `up`
+# (`own`, see "Axis titles drawn by PlotlySupply") if that collides less. When
+# the best pads collide nowhere but their drawing does not fit the viewport
+# even with the box at `_S3_FAR_FILL` (a cell of about 110 px under a journal
+# style, whose titles then need larger pads to stay apart: vm-mixed3d drew a
+# 45 px box in a 134 px cell, labels still overflowing), the titles drawn by
+# PlotlySupply are taken when they fit with fewer px overflowing and collide
+# nowhere: they sit close to the tick labels, so the box can be larger. `up`
 # parallel to `direction` has no label model: the constants.
 function _s3_fit_with_pads(fig, target::_CellTarget, box, direction, up; center, pan::Bool, zoom::Float64 = 1.0)
 	frame = _s3_camera_frame(direction, up)
@@ -2975,14 +3162,35 @@ function _s3_fit_with_pads(fig, target::_CellTarget, box, direction, up; center,
 		(best === nothing || collisions < best[1]) && (best = (collisions, distance, c, pads, false))
 		collisions == 0 && break
 	end
-	if best[1] > 0
+	overflow = best[1] > 0 ? 0.0 : _s3_fit_overflow(box, best[3], frame, best[2], width, height,
+		_s3_axis_labels(p, target.scenekey; pads = best[4]), spans)
+	if best[1] > 0 || overflow > _S3_PAN_TOLERANCE_PX
 		own_pads = (candidates[1][1], _S3_GL_LABEL_PAD)
 		distance, c = _s3_export_camera(fig, target, box, direction, up; center, pan, zoom, pads = own_pads, own = true)
 		labels = _s3_axis_labels(p, target.scenekey; pads = own_pads)
 		collisions = _s3_title_collisions(box, c, frame, distance, width, height, labels, spans; own = true)
-		collisions < best[1] && (best = (collisions, distance, c, own_pads, true))
+		better = if best[1] > 0
+			collisions < best[1]
+		else
+			collisions == 0 && _s3_fit_overflow(box, c, frame, distance, width, height, labels, spans; own = true) <
+				overflow - _S3_PAN_TOLERANCE_PX
+		end
+		better && (best = (collisions, distance, c, own_pads, true))
 	end
 	return best[2], best[3], best[4], best[5]
+end
+
+# Px by which the drawing (`_s3_label_layout_tagged`: box corners and label
+# rectangles) at camera centre `c` and `distance` leaves the viewport less
+# `_S3_LABEL_MARGIN_PX` on its worst side; 0 when it fits.
+function _s3_fit_overflow(box, c, frame, distance::Float64, width::Float64, height::Float64, labels, spans; own::Bool = false)
+	corners, quads, _, _ = _s3_label_layout_tagged(box, c, frame, distance, width, height, labels, spans; own = own)
+	over = 0.0
+	m = _S3_LABEL_MARGIN_PX
+	for point in Iterators.flatten((corners, Iterators.flatten(quads)))
+		over = max(over, abs(point[1]) - (width / 2 - m), abs(point[2]) - (height / 2 - m))
+	end
+	return over
 end
 
 # Write the titles of the scene as the fit at (`look_at`, `distance`) decided
@@ -3236,9 +3444,12 @@ end
 # wrote (`_s3_fit_fingerprint`); a call that finds the same fingerprint skips
 # the pass. The memo lives outside the layout (so remembering writes nothing
 # and a copy of the figure starts without it) and holds its layouts weakly.
-# Not noticed: a user array changed in place (the data are fingerprinted by
-# identity and size, as they are never copied); any other change of the
-# figure re-frames.
+# Data arrays are fingerprinted by identity and size (they are never copied)
+# and by what the framing reads of them: the scene's data extent per axis
+# (and, on an axis without numeric data, the longest category label), so a
+# user array changed in place re-frames at the next call too (O11). The
+# extents are the ones the framing pass reads (`_S3_BOUNDS_CACHE`): one scan
+# per axis and run, as the colour ranges of the plot area are.
 const _S3_FIT_MEMO = WeakKeyDict{Any, Dict{Symbol, UInt}}()
 const _S3_FIT_MEMO_LOCK = ReentrantLock()
 
@@ -3287,7 +3498,7 @@ function _s3_fp(x)::UInt
 end
 
 # The fingerprint of what framing scene `key` of `p` reads and wrote: the
-# layout without the scene entries, the titles PlotlySupply draws and the
+# data extents of the scene (see above), the layout without the scene entries, the titles PlotlySupply draws and the
 # label pads (other scenes do not change this one's framing, and the
 # framing's own writes elsewhere are not inputs), the scene's own entry, the
 # traces, the template (by identity), the figure and plot area size, the
@@ -3316,6 +3527,11 @@ function _s3_fit_fingerprint(p::Plot, key::Symbol, pan::Bool)::UInt
 		end
 	end
 	h = hash(layout_hash, h)
+	for d in 1:3
+		bounds = _s3_data_bounds(p, key, d)
+		h = hash(bounds, h)
+		bounds === nothing && (h = hash(_s3_category_chars(p, key, d), h))
+	end
 	data_hash = UInt(0)
 	for (index, trace) in enumerate(p.data)
 		data_hash += hash(index, trace isa GenericTrace ? _s3_fp(trace.fields) : hash(objectid(trace)))
@@ -3498,7 +3714,7 @@ Frame the 3-D scenes PlotlySupply manages (those with a framing mark, see
 is `nothing`, for the layout's size (else the active style's default figure
 size, `_style_default_figure_size`). `_finalize_figure!` runs it after every
 PlotlySupply mutation (`size` = `nothing`) and on the export copy `savefig`
-renders (`size` = the export size), and the 3-D constructors run it on the
+renders (`size` = the export size), and the 3-D constructors finalize the
 figure they return, so the live window, a `savefig` at the layout size and a
 `savefig` at any other size show the same framing for their size.
 
@@ -3640,6 +3856,11 @@ function _s3_apply_view!(fig, target::_CellTarget, params::_S3ViewParams)
 	c = [_s3_number_field_signed(_cmn_mapping_get(camera, :center), axis) for axis in (:x, :y, :z)]
 	owned_center = all(iszero, c) || (old.pan && _s3_same_point(c, old.center))
 	owned_center && (c = zeros(3))
+	# The aspect an earlier orthographic zoom wrote goes back to what it
+	# replaced, so the zoom of this call (1: none) applies to the scene's own
+	# box and the same call gives the same figure whatever came before it
+	# (threed-live-09). An aspect changed since is the user's and is kept.
+	zoomed, prior_mode, prior_ratio = _s3_undo_ortho_zoom!(p, key, old)
 	scene_fields = Dict{Symbol, Any}()
 	if projection == "orthographic"
 		distance = params.distance === :auto ? _S3_ORTHO_DISTANCE : params.distance
@@ -3647,8 +3868,14 @@ function _s3_apply_view!(fig, target::_CellTarget, params::_S3ViewParams)
 			# The orthographic image scales with the scene box (plotly's own
 			# wheel zoom multiplies aspectratio), so zoom scales the aspect
 			# ratios, normalised first so repeated calls do not compound.
+			scene = get(p.layout.fields, key, nothing)
+			prior_mode = let mode = _cmn_mapping_get(scene, :aspectmode)
+				mode isa Union{AbstractString, Symbol} ? String(mode) : nothing
+			end
+			prior_ratio = _cmn_mapping_get(scene, :aspectratio) === nothing ? nothing : Tuple(_s3_manual_ratio(scene))
 			aspect, _ = _s3_effective_aspect(p, key)
 			aspect = aspect ./ maximum(aspect) .* params.zoom
+			zoomed = (aspect[1], aspect[2], aspect[3])
 			scene_fields[:aspectmode] = "manual"
 			scene_fields[:aspectratio] = attr(x = aspect[1], y = aspect[2], z = aspect[3])
 		end
@@ -3682,8 +3909,32 @@ function _s3_apply_view!(fig, target::_CellTarget, params::_S3ViewParams)
 		eye = automatic ? written : nothing,
 		center = Tuple(c),
 		endon = _s3_hide_end_on_ticks!(p, key, direction),
+		zoomed = zoomed,
+		prior_mode = prior_mode,
+		prior_ratio = prior_ratio,
 	))
 	return nothing
+end
+
+# Undo the aspect an orthographic `view!` zoom wrote on scene `key` (recorded
+# in `mark`): when the scene still has exactly that manual aspect, its
+# `aspectmode` and `aspectratio` are restored to what they were before the
+# zoom (unset ones are removed). Returns the `(zoomed, prior_mode,
+# prior_ratio)` record the mark keeps afterwards: none.
+function _s3_undo_ortho_zoom!(p::Plot, key::Symbol, mark::_S3Mark)
+	zoomed = mark.zoomed
+	zoomed === nothing && return (nothing, nothing, nothing)
+	scene = get(p.layout.fields, key, nothing)
+	(_s3_scene_aspectmode(scene) == "manual" &&
+		isapprox(_s3_manual_ratio(scene), collect(zoomed); rtol = 1e-9)) || return (nothing, nothing, nothing)
+	restored = Dict{Symbol, Any}()
+	mark.prior_mode === nothing || (restored[:aspectmode] = mark.prior_mode)
+	ratio = mark.prior_ratio
+	ratio === nothing || (restored[:aspectratio] = attr(x = ratio[1], y = ratio[2], z = ratio[3]))
+	removed = Tuple(name for name in (:aspectmode, :aspectratio) if !haskey(restored, name))
+	isempty(removed) || _cmn_mapping_delete!(scene, removed)
+	isempty(restored) || _merge_scene_layout_attr!(p.layout, key, attr(; restored...))
+	return (nothing, nothing, nothing)
 end
 
 # The axis the camera looks along (the direction from the scene centre to the
@@ -4025,7 +4276,9 @@ function scene!(
 	for (axis, letter, label, range, ticks, ticklabels) in axes
 		fields = Dict{Symbol, Any}()
 		isempty(label) || (fields[:title] = attr(text = _label3d(label)))
-		stored = _s3_stored_range(layout, key, axis, _s3_range(range, who, "$(letter)range"), who, "$(letter)range")
+		checked = _s3_range(range, who, "$(letter)range")
+		_s3_require_range_types(checked, layout, key, Int(letter - 'w'), who, "$(letter)range", _cmn_plot(fig).data)
+		stored = _s3_stored_range(layout, key, axis, checked, who, "$(letter)range")
 		stored = _s3_resolve_range(fig, key, letter, stored, who)
 		stored === nothing || (fields[:range] = stored)
 		tick_fields = _s3_ticks(ticks, ticklabels, who, letter)
@@ -4332,14 +4585,17 @@ function _s3_construct(
 	style::Union{Nothing, _S3StyleRequest} = nothing,
 	markevery = nothing,
 )
+	_s3_require_option_range_types(opts, nothing, :scene, who, traces)
 	fig = Plot(traces, _s3_constructor_layout())
 	foreach(spec -> _s3_write_coloraxis!(fig, spec), specs)
 	_s3_apply_style!(fig, 1, something(style, _S3_NO_LINE_STYLE))
 	_s3_split_markevery!(_plot_data(fig), 1, markevery)
 	_s3_apply_options!(fig, opts, who; constructor = true, state = _S3_NEW_SCENE)
 	_s3_colorbar_titles!(fig, 1, specs)
-	# Constructors do not run `_finalize_figure!`; frame the scene as it would.
-	_s3_finalize_scenes!(fig)
+	# The figure is returned settled (invariant 1): the finalizer frames the
+	# scene (`_s3_finalize_scenes!`) after the room it makes for the whole
+	# figure (apib-06: the margin a TeX colorbar title beside its bar needs).
+	_finalize_figure!(fig)
 	return _s3_show(fig, show, opts)
 end
 
@@ -4353,6 +4609,7 @@ function _s3_append!(
 	markevery = nothing,
 )
 	state = _s3_mutator_state(fig, who)
+	_s3_require_option_range_types(opts, _plot_layout(fig), :scene, who, _plot_data(fig), traces)
 	first_index = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), traces)
 	foreach(spec -> _s3_write_coloraxis!(fig, spec), specs)
@@ -4492,7 +4749,7 @@ function _s3_surface_trace(
 	uniform = ""
 	if color isa AbstractArray && !(color isa AbstractVector{<:AbstractString})
 		if !isempty(color)
-			(surfacecolor === nothing || isempty(surfacecolor)) || throw(ArgumentError(
+			(surfacecolor === nothing || (surfacecolor isa AbstractArray && isempty(surfacecolor))) || throw(ArgumentError(
 				"$(who): pass the colour array as `surfacecolor` or `color`, not both.",
 			))
 			surfacecolor = color
@@ -4500,7 +4757,10 @@ function _s3_surface_trace(
 	else
 		uniform = _s3_uniform_color(color, who)
 	end
-	(surfacecolor !== nothing && isempty(surfacecolor)) && (surfacecolor = nothing)
+	# Only an empty ARRAY means "no colour array"; anything else that is not an
+	# array is rejected by `_s3_array` below (errors-inputs-11: `isempty` of a
+	# Symbol or a function raised a MethodError).
+	(surfacecolor isa AbstractArray && isempty(surfacecolor)) && (surfacecolor = nothing)
 	if surfacecolor !== nothing
 		_s3_array(surfacecolor, who, "surfacecolor")
 		size(surfacecolor) == size(Z) || throw(ArgumentError(
@@ -4719,6 +4979,7 @@ function plot_surface!(
 		edgecolor, edgewidth, colorscale, crange, cmid, colornorm, levels, showscale, colorbar_title,
 		colorbar_title_side, colorbar_ticks, colorbar_ticklabels, coloraxis, shared_coloraxis, who)
 	state = _s3_mutator_state(fig, who)
+	_s3_require_option_range_types(opts, _plot_layout(fig), :scene, who, _plot_data(fig), (trace,))
 	first_index = length(_plot_data(fig)) + 1
 	append!(_plot_data(fig), GenericTrace[trace])
 	_s3_write_coloraxis!(fig, spec)
@@ -5460,18 +5721,42 @@ function _s3_vector_field(who::AbstractString, arrays::Pair...)
 	end
 	_s3_check_lengths(who, arrays...)
 	flat = map(((name, values),) -> _s3_flat(_s3_plottable(values)), arrays)
+	# One pass per array behind a function barrier, so each runs specialised on
+	# its own element type (mr-03: a loop over the heterogeneous tuple boxed
+	# every element, about 1.6 KB per vector); arrays typed with a real element
+	# type are not scanned for the type check.
 	for ((name, _), values) in zip(arrays, flat)
-		for (index, value) in pairs(values)
-			_s3_is_real(value) || throw(ArgumentError(
-				"$(who): `$(name)[$(index)]` must be a real number; got $(repr(value)).",
-			))
-		end
+		_s3_vector_field_reals(values, who, name)
 	end
 	count = length(first(flat))
-	keep = [k for k in 1:count if all(values -> isfinite(values[firstindex(values) + k - 1]), flat)]
-	length(keep) == count && return flat
+	finite = trues(count)
+	for values in flat
+		_s3_vector_field_finite!(finite, values)
+	end
+	all(finite) && return flat
+	keep = findall(finite)
 	@warn "$(who): skipped $(count - length(keep)) vector(s) with non-finite origins or components."
 	return map(values -> values[firstindex(values) .+ keep .- 1], flat)
+end
+
+function _s3_vector_field_reals(values::AbstractVector, who::AbstractString, name::AbstractString)
+	T = eltype(values)
+	(T <: Real && !(T <: Bool) && T !== Union{}) && return nothing
+	for (index, value) in pairs(values)
+		_s3_is_real(value) || throw(ArgumentError(
+			"$(who): `$(name)[$(index)]` must be a real number; got $(repr(value)).",
+		))
+	end
+	return nothing
+end
+
+# Clear `finite[k]` where the k-th value (from the first index) is not finite.
+function _s3_vector_field_finite!(finite::BitVector, values::AbstractVector)
+	offset = firstindex(values) - 1
+	@inbounds for k in eachindex(finite)
+		finite[k] && !isfinite(values[offset + k]) && (finite[k] = false)
+	end
+	return finite
 end
 
 function _s3_quiver3d_traces(
@@ -7042,9 +7327,10 @@ faces = [1 2 3 4; 5 6 7 8; 1 2 6 5; 2 3 7 6; 3 4 8 7; 4 1 5 8]   # the unit cube
 #region Wireframes and 3-D segments
 
 # Line positions along one grid dimension: every `stride`-th index plus the
-# last one (matplotlib `plot_wireframe`); stride 0 draws none.
+# last one (matplotlib `plot_wireframe`); stride 0 or an empty dimension draws
+# none.
 function _s3_stride_lines(count::Int, stride::Int)
-	stride == 0 && return Int[]
+	(stride == 0 || count == 0) && return Int[]
 	lines = collect(1:stride:count)
 	last(lines) == count || push!(lines, count)
 	return lines
@@ -7076,8 +7362,11 @@ function _s3_wireframe_trace(fig, X, Y, Z; rstride, cstride, color, linewidth, d
 	))
 	line = _s3_line_style(color, linewidth, dash, opacity, fig, :scene, who; default_color = "black")
 	m, n = size(Z)
-	rows = _s3_stride_lines(m, Int(rstride))
-	cols = _s3_stride_lines(n, Int(cstride))
+	# An empty grid draws no line (an empty trace, as `plot_surface` of an
+	# empty grid gives an empty surface): a row line runs over the n columns
+	# and a column line over the m rows.
+	rows = n == 0 ? Int[] : _s3_stride_lines(m, Int(rstride))
+	cols = m == 0 ? Int[] : _s3_stride_lines(n, Int(cstride))
 	total = length(rows) * (n + 1) + length(cols) * (m + 1)
 	sx = Vector{Union{Nothing, Float64}}(undef, total)
 	sy = similar(sx)
