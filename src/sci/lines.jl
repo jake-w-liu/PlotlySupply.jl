@@ -723,6 +723,12 @@ Add a segment collection (see [`plot_segments`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
 `plot_segments` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
 (`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
+
+# Example
+```julia
+fig = plot_scatter(0:3, [0, 1, 0, 1]; mode = "markers")
+plot_segments!(fig, [0.0, 2.0], [0.0, 0.0], [1.0, 3.0], [1.0, 1.0]; color = "gray")
+```
 """
 function plot_segments!(
 	fig,
@@ -834,6 +840,13 @@ Add vertical lines (see [`plot_vlines`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
 `plot_vlines` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
 (`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
+
+# Example
+```julia
+x = 1:5
+fig = plot_scatter(x, [2.0, 3, 1, 4, 2]; mode = "markers")
+plot_vlines!(fig, x, 0, [2.0, 3, 1, 4, 2]; color = "black")    # stems to the axis
+```
 """
 function plot_vlines!(
 	fig,
@@ -943,6 +956,12 @@ Add horizontal lines (see [`plot_hlines`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
 `plot_hlines` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
 (`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
+
+# Example
+```julia
+fig = plot_scatter(0:10, rand(11))
+plot_hlines!(fig, [0.25, 0.75], 2, 8; dash = "dot", color = "gray")
+```
 """
 function plot_hlines!(
 	fig,
@@ -1148,6 +1167,12 @@ Add ECDF step line(s) (see [`plot_ecdf`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of
 `plot_ecdf` except `show`, plus `secondary_y = false` and `row`/`col`/`inset`
 (`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
+
+# Example
+```julia
+fig = plot_ecdf(randn(200); legend = "sample A")
+plot_ecdf!(fig, randn(200) .+ 0.5; legend = "sample B")
+```
 """
 function plot_ecdf!(
 	fig,
@@ -1447,6 +1472,12 @@ Add kernel density curve(s) (see [`plot_kde`](@ref)) to an existing `Plot`,
 [`SyncPlot`](@ref) or `SubplotFigure` cell. Takes every keyword of `plot_kde`
 except `show`, plus `secondary_y = false` and `row`/`col`/`inset` (`SubplotFigure`
 only: the cell, or inset `k` of [`inset!`](@ref)); `grid = nothing` keeps the current grid.
+
+# Example
+```julia
+fig = plot_kde(randn(500); legend = "A")
+plot_kde!(fig, randn(500) .* 0.5 .+ 1; legend = "B")
+```
 """
 function plot_kde!(
 	fig,
@@ -1654,6 +1685,12 @@ Add complex-plane series (see [`plot_complex`](@ref)) to an existing `Plot`,
 (`SubplotFigure` only: the cell, or inset `k` of [`inset!`](@ref)). Defaults differ where they would overwrite the
 figure: `xlabel = ""`, `ylabel = ""` and `equalar = false` leave the axes as
 they are, and `grid = nothing` keeps the current grid.
+
+# Example
+```julia
+fig = plot_complex(cis.(range(0, 2π; length = 50)); legend = "unit circle")
+plot_complex!(fig, [0.5 + 0.5im, -0.3 + 0.2im]; mode = "markers", legend = "poles")
+```
 """
 function plot_complex!(
 	fig,

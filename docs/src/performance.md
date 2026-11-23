@@ -52,7 +52,8 @@ The price of the workload:
 - building the package image takes minutes instead of seconds (483 s at the
   load of the full run, 158 s at a load of 23 to 27, against 19 s for 1.9.4),
   once per install or dependency update;
-- the package image grows from 5.9 MB to 87.6 MB;
+- the package image grows from about 5 MB to about 110 MB (107 to 112 MB on
+  Julia 1.12 and 1.13);
 - `using PlotlySupply` takes 0.6 s longer (1.49 s against 0.89 s).
 
 Loading the export backend no longer invalidates compiled PlotlySupply methods

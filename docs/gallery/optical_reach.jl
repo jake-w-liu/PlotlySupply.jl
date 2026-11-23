@@ -6,7 +6,8 @@
 #   sampled per line, ax.annotate(xytext=(-5, 4), textcoords='offset points'), fill_between and a
 #   diagonal reference line, one titled legend per panel.
 # 2.0: `Spec(rowspan = 2)`, `colormap_colors` for the ramp, `annotate!(offset = ...)`, `plot_band!`;
-#   no legend position is pinned, the default avoids the curves, and the legends are titled.
+#   the left panels get a one-row titled legend above them (`position = :outside_top`), the default
+#   legend of the right panel avoids its data.
 using PlotlySupply
 
 outdir = isempty(ARGS) ? (@__DIR__) : first(ARGS)
@@ -20,7 +21,7 @@ xx = [0.0, 0.5]
 fig = with_style(:ieee) do
 	sf = subplots(2, 2; sync = false, width_ratios = [1.3, 1], shared_xaxes = "columns",
 		specs = [Spec() Spec(rowspan = 2); Spec() missing])
-	figsize!(sf, :ieee; columns = 2, aspect = 0.55)
+	figsize!(sf, :ieee; columns = 2, aspect = 0.7)        # room for the legends above (a) and (b)
 	for (row, (family, ns)) in enumerate(families)
 		ramp = colormap_colors(["#93AECB", navy], length(ns))           # light-to-dark ramp per layout
 		for (j, n) in enumerate(ns)
@@ -34,9 +35,8 @@ fig = with_style(:ieee) do
 		ylabel!(sf, "converged fraction"; row = row, col = 1)
 		yrange!(sf, (-0.05, 1.05); row = row, col = 1)
 		yticks!(sf, [0, 0.5, 1]; row = row, col = 1)
-		set_legend!(sf; row = row, col = 1, title = family)
+		set_legend!(sf; row = row, col = 1, position = :outside_top, orientation = :h, title = family)
 	end
-	xrange!(sf, (0, 0.42); row = 2, col = 1)                      # room for the legends right of the curves
 	xlabel!(sf, "prescribed amplitude \$r_0=|r_{21}(k_m)|\$"; row = 2, col = 1)
 	plot_band!(sf, xx, 0.59 .* xx, xx; row = 1, col = 2, color = light, opacity = 0.6,
 		legend = "\$0.59\\,t_{\\mathrm{geom}}/K\$ to \$t_{\\mathrm{geom}}/K\$")

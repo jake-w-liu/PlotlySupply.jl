@@ -15,9 +15,10 @@ Built-in styles:
   colours and margins.
 - `:publication` uses black Times New Roman text (14 px labels, 12 px ticks and
   legend, 16 px title; a TrueType face, so PDF export embeds real fonts), the
-  Okabe-Ito colour-blind-safe palette, a closed frame, a frameless legend,
-  `\large` math and a 10 px margin that grows to fit labels and title. It sets
-  no figure size.
+  Okabe-Ito colour-blind-safe palette, a closed frame, a frameless legend and a
+  10 px margin that grows to fit labels and title. Math is drawn at the size of
+  the surrounding text (no style sets a MathJax size switch). It sets no
+  figure size.
 - `:ieee`, `:aps`, `:nature`, `:elsevier`, `:springer`, `:aip` are the journal
   presets: the journal's font family and size in points, 1 pt data lines,
   0.75 pt axes, ticks, error bars and reference lines, 3.5 pt ticks (inside and
@@ -27,6 +28,12 @@ Built-in styles:
   ratio 0.75 as the default figure size. The table with widths, maximum heights
   and sources is in [Figures for papers](papers.md); `journal_width` returns
   any width and `figsize!(fig, :ieee; columns = 2)` sizes a figure.
+
+<!-- PENDING D24 -->
+Under the journal presets the axis titles sit half an em of the title font
+from the tick labels (`title_gap = 0.5`; `nothing`, as under `:default` and
+`:publication`, keeps plotly's placement).
+<!-- /PENDING -->
 
 ```julia
 using PlotlySupply
@@ -38,7 +45,11 @@ set_default_style!(:default)                # back to the 1.x look
 ```
 
 [`with_style`](@ref) applies a style for one block and restores the previous
-one afterwards, also on error. The active style is global, not per task.
+one afterwards, also on error. The block's style belongs to the task that runs
+it (and to the tasks started inside the block): other tasks keep their own
+active style, and overlapping blocks of two tasks do not change each other.
+[`set_default_style!`](@ref) is the global setting that every task sees
+outside a `with_style` block.
 
 ```julia
 fig = with_style(:publication; fontsize = 12) do
@@ -129,6 +140,11 @@ tight_layout!(fig)
 [`set_default_legend_position!`](@ref) sets where new figures put their
 legend (`:topright`, `:bottomleft`, ..., or outside: `:outside_right`,
 `:outside_bottom`, ...); [`get_default_legend_position`](@ref) returns it.
+<!-- PENDING D22 -->
+An unknown position name raises an `ArgumentError` that lists the valid names,
+here and in every function that takes a legend position (`set_legend!`,
+`subplot_legends!`, ...), before the figure changes.
+<!-- /PENDING -->
 
 ```julia
 set_default_legend_position!(:outside_bottom)

@@ -10,6 +10,12 @@ Construct a `scattermap` trace: points, lines, or text rendered on a
 MapLibre-backed tile map. Keyword arguments or `fields` become trace
 attributes; see the [plotly.js figure
 reference](https://plotly.com/julia/reference/).
+
+# Example
+```julia
+t = scattermap(lon = [2.35, 13.40], lat = [48.86, 52.52], mode = "markers")
+fig = plot(t, Layout(map = attr(style = "open-street-map", zoom = 3)))
+```
 """
 scattermap(; kwargs...) = GenericTrace("scattermap"; kwargs...)
 scattermap(fields::AbstractDict; kwargs...) =
@@ -22,6 +28,16 @@ scattermap(fields::AbstractDict; kwargs...) =
 Construct a `choroplethmap` trace: filled regions rendered on a MapLibre-backed
 tile map. Keyword arguments or `fields` become trace attributes; see the
 [plotly.js figure reference](https://plotly.com/julia/reference/).
+
+# Example
+```julia
+square = Dict("type" => "FeatureCollection", "features" => [Dict(
+	"type" => "Feature", "id" => "A", "properties" => Dict(),
+	"geometry" => Dict("type" => "Polygon",
+		"coordinates" => [[[0, 0], [0, 5], [5, 5], [5, 0], [0, 0]]]))])
+t = choroplethmap(geojson = square, locations = ["A"], z = [1.0])
+fig = plot(t, Layout(map = attr(style = "open-street-map", zoom = 3)))
+```
 """
 choroplethmap(; kwargs...) = GenericTrace("choroplethmap"; kwargs...)
 choroplethmap(fields::AbstractDict; kwargs...) =
@@ -34,6 +50,12 @@ choroplethmap(fields::AbstractDict; kwargs...) =
 Construct a `densitymap` trace: a density heatmap rendered on a MapLibre-backed
 tile map. Keyword arguments or `fields` become trace attributes; see the
 [plotly.js figure reference](https://plotly.com/julia/reference/).
+
+# Example
+```julia
+t = densitymap(lon = [2.35, 2.36, 2.40], lat = [48.86, 48.85, 48.87], z = [1.0, 2.0, 3.0])
+fig = plot(t, Layout(map = attr(style = "open-street-map", zoom = 9)))
+```
 """
 densitymap(; kwargs...) = GenericTrace("densitymap"; kwargs...)
 densitymap(fields::AbstractDict; kwargs...) =
@@ -752,6 +774,10 @@ invalid input. Returns `nothing` (`sf` for a `SubplotFigure`).
 
 # Example
 ```julia
+square = Dict("type" => "FeatureCollection", "features" => [Dict(
+	"type" => "Feature", "id" => "A", "properties" => Dict(),
+	"geometry" => Dict("type" => "Polygon",
+		"coordinates" => [[[0, 0], [0, 5], [5, 5], [5, 0], [0, 0]]]))])
 fig = plot_scattermap([2.5], [2.5]; zoom=3)
 plot_choroplethmap!(fig, square, ["A"], [1.0]; marker_opacity=0.5)
 ```

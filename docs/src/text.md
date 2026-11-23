@@ -45,11 +45,12 @@ math (`size = "\\large"`, ...), the MathJax font (`font = "TeX"`,
 `"STIX-Web"`, `"Latin-Modern"` (default), ...), and whether the text parts of
 a math label use the figure's font (`inherit_text_font = true`). Every call
 replaces all settings; `set_default_mathtext!()` restores the defaults.
-MathJax math renders at about 0.8 of the height of plain text of the same
-font size, so `"\\large"` matches the two closely; the `:publication` style
-uses it.
+No built-in style sets a size switch: with `inherit_text_font` on (below)
+MathJax scales the math to the x-height of the label's font, so math and text
+of one label match. Without it, MathJax math renders at about 0.8 of the
+height of plain text of the same font size, and `size = "\\large"` brings
+the two close.
 
-<!-- L9 -->
 Under a style whose font is a serif or sans text face (the journal presets,
 `:publication`) `inherit_text_font` is on by default: the text part of a
 mixed string such as `"elements per side \$n\$"` is drawn in the figure's
@@ -57,7 +58,6 @@ text font at the same size as a plain string at that site (legend entries,
 titles, axis titles, tick labels, colorbar titles, panel labels, annotations),
 and the math italics come from the math font. You no longer have to call
 `set_default_mathtext!(true; inherit_text_font = true)` yourself.
-<!-- /L9 -->
 
 ```julia
 set_default_mathtext!(true; size = "\\large", font = "TeX", inherit_text_font = true)
@@ -80,7 +80,6 @@ set_fonts!(fig; family = "Arial", title = 18, label = 14, tick = 11, legend = 11
 set_fonts!(fig; tick = 7.5, units = :pt)   # 10 px tick labels
 ```
 
-<!-- D19 -->
 The layout engine sizes titles, legends, tick labels and colorbars from the
 width of their text, and it takes the family of the figure's style for that:
 there are advance tables for the families the presets use (Times New Roman,
@@ -89,7 +88,6 @@ and a conservative default for any other family. Under Times a title is
 therefore no longer wrapped, and no room reserved, for width it does not need
 (the estimate was 25 to 30 % too wide for Times before). The estimate is never
 more than 8 % above the drawn width and is not smaller than it.
-<!-- /D19 -->
 
 ## Titles
 

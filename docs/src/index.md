@@ -22,8 +22,11 @@ Pkg.add("PlotlySupply")
 The package precompiles a workload of the common calls, so the first figure
 of a session takes about a third of a second instead of 15 seconds. The price is
 a longer one-time precompilation after each install or update (minutes) and a
-larger package image (about 90 MB). To skip the workload, see
+larger package image (about 110 MB). To skip the workload, see
 [Performance](performance.md).
+The plotly.js bundle (about 4.6 MB) is downloaded once, the first time a
+window is opened or a figure is exported; to prepare an offline machine, see
+[Live windows](windows.md).
 
 ## Quick tour
 
@@ -201,9 +204,9 @@ Keyword support is grouped by family:
 | `color` | one colour, or one per series | 2-D Cartesian | `plot_histogram2d`, `plot_waterfall`, `plot_candlestick`, `plot_ohlc`, `plot_heatmap`, `plot_contour`, `plot_image`, `plot_matrix`, `plot_pcolormesh`, `plot_tripcolor` |
 | `xlabel`, `ylabel`, `zlabel`, `xrange`, `yrange`, `zrange`, `aspectmode`, `perspective`, `showaxis`, `grid`, `view` | scene axes, ranges, aspect, projection and camera `(elev, azim)` | 3-D | none |
 | `colorscale` | colormap name, colours or `(t, colour)` stops | Colour-mapped | none |
-| `crange` | colour limits `[lo, hi]`; `[0, 0]` is automatic | Colour-mapped | `plot_streamlines` |
-| `cmid` | value at the centre of the colormap (diverging data) | Colour-mapped | `plot_streamlines`, `plot_tricontour` |
-| `colornorm`, `showscale` | `:linear` or `:log` colour mapping; colorbar on or off | Colour-mapped | `plot_matrix`, `plot_streamlines`, `plot_tricontour` |
+| `crange` | colour limits `[lo, hi]`; `[0, 0]` is automatic | Colour-mapped | none |
+| `cmid` | value at the centre of the colormap (diverging data) | Colour-mapped | `plot_tricontour` |
+| `colornorm`, `showscale` | `:linear` or `:log` colour mapping; colorbar on or off | Colour-mapped | `plot_matrix`, `plot_tricontour` |
 | `colorbar_title` | colorbar title (mathtext) | Colour-mapped | `plot_tricontour` |
 | `mode`, `marker_size`, `marker_symbol` | `"lines"`, `"markers"`, `"lines+markers"`; marker size in px; marker symbol | `plot_scatter`, `plot_scatterpolar`, `plot_scatter3d`, `plot_complex` | none |
 | `dash`, `linewidth` | dash pattern (`"dash"`, `"dot"`, `"--"`, ...); line width in px | `plot_scatter`, `plot_scatterpolar`, `plot_scatter3d`, `plot_complex`, `plot_segments`, `plot_segments3d`, `plot_vlines`, `plot_hlines`, `plot_ecdf`, `plot_kde`, `plot_contour`, `plot_triplot`, `plot_tricontour`, `plot_wireframe` | none |

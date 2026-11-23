@@ -1367,7 +1367,8 @@ Edit the colorbars that already exist in a figure.
   `equalar = true`). Every figure update reserves room for the bar,
   its tick labels and its title (decision D12): when the gap to the
   neighbouring cell is too small the cell's domain shrinks on that side
-  (cells sharing that grid edge shrink alike, at most half the cell), at the
+  (cells sharing that grid edge shrink alike, by at most two thirds of
+  the cell), at the
   figure edge the margin grows; a cell whose domain you set yourself keeps
   it. Bars of one cell sit side by side. A bar placed this way stays where
   it is on later calls without `x` or `y` (pass `side` again to keep a

@@ -3782,7 +3782,10 @@ Set the final range with [`xrange!`](@ref) before calling this.
 - `ticks = nothing`: tick values in the secondary units (data values of
   `f`, never log10 exponents, also on a logarithmic primary axis; each is
   placed at the DATA position `finv(tick)`); `nothing` chooses 1-2-5 values
-  inside `f(range)` (powers of ten on a log axis spanning a decade or more).
+  inside `f(range)`. On a log primary axis spanning at least a decade they
+  are 1-2-5 values per decade up to three decades and powers of ten beyond
+  (every n-th power when there are many), falling back to powers of ten
+  when the 1-2-5 labels would collide.
 - `ticklabels = nothing`: one label per tick (through the mathtext layer);
   requires `ticks`. Default: the values with six significant digits.
 - `title::AbstractString = ""`: axis title.

@@ -17,6 +17,8 @@ yup, ylo, hh = 0.75, 0.25, 0.1                           # strip centres and hal
 fig = with_style(:ieee) do
 	sf = subplots(2, 1; sync = false, height_ratios = [1.1, 0.9])
 	figsize!(sf, :ieee; columns = 2, aspect = 0.62)
+	# PENDING V2: once the layout engine centres a grid of fitted rows (V2), use
+	# `figsize!(sf, :ieee; columns = 2)` here; the page then shrinks to the content.
 	A = (row = 1, col = 1)
 	plot_scatter!(sf, Float64[], Float64[]; A..., xrange = (-0.6, L + 1.3), yrange = (-0.3, W + 0.12), equalar = true)
 	for yc in (yup, ylo)                                 # shaded design strips with dashed rectangles
@@ -51,8 +53,8 @@ fig = with_style(:ieee) do
 		w, xo = widths[2(k - 1) + m] * 2, xc + (iseven(k + m) ? 0.05 : -0.05)
 		rectangle!(sf, xo - w / 2, yc - hh, xo + w / 2, yc + hh; B..., fillcolor = teal, edgecolor = teal)
 	end
-	annotate!(sf, 3.95, 0.5, "6 of 12 rectangles occupied<br>largest width 9.6 nm<br>dashed: width limit 80 nm";
-		B..., showarrow = false, anchor = :right, align = "right")
+	annotate!(sf, 1, 0.5, "6 of 12 rectangles occupied<br>largest width 9.6 nm<br>dashed: width limit 80 nm";
+		B..., coords = :axes, showarrow = false, anchor = :right, align = "right")   # padded clear of the frame
 	plot_scatter!(sf, Float64[], Float64[]; B..., xrange = (0, L), yrange = (-0.02, W + 0.02), equalar = true)
 	xlabel!(sf, "\$x\$ (\$\\mu\$m)"; B...)
 	ylabel!(sf, "\$y\$ (\$\\mu\$m)"; B...)

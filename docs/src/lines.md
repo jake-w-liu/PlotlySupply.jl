@@ -57,10 +57,12 @@ plot_scatter!(fig, 1:10, rand(10); legend = "second", color = "crimson")
 ## Where the legend goes
 
 While the package default position is `:topright`
-([`get_default_legend_position`](@ref)), a new figure from `plot_scatter`,
-`plot_stem`, `plot_area` and the line family (`plot_band`, `plot_segments`,
-`plot_vlines`, `plot_hlines`, `plot_ecdf`, `plot_kde`, `plot_complex`) puts its
-legend at the first free one of `:topright`, `:topleft`, `:bottomleft`,
+([`get_default_legend_position`](@ref)), a figure whose traces are lines,
+markers, filled areas (to zero or `toself`), bars, boxes or violins, on
+numeric, category or date axes (`plot_scatter`, `plot_stem`, `plot_area`, the
+line family `plot_band`, `plot_segments`, `plot_vlines`, `plot_hlines`,
+`plot_ecdf`, `plot_kde`, `plot_complex`, and `plot_bar`, `plot_box`,
+`plot_violin`), puts its legend at the first free one of `:topright`, `:topleft`, `:bottomleft`,
 `:bottomright`, `:right`, `:left`, `:bottom`, `:top` (matplotlib's "best"); the
 centre is never chosen automatically. When none of them is free the legend goes
 outside: to the right of the plot (`:outside_right`) when the plot area is at
@@ -68,7 +70,9 @@ least 360 px wide, below it (`:outside_bottom`) otherwise, and the layout
 engine reserves the room at the next finalize (display, `savefig`, any
 mutator). A legend you place with [`set_legend!`](@ref) or a `position`
 keyword is never moved. Quiver and streamline figures follow the same rule;
-polar cells never go outside automatically:
+polar cells never go outside automatically. A figure with any other trace
+(a histogram, a heatmap or contour, stacked areas, a fill to another trace)
+keeps the top right:
 
 ```julia
 fig = plot_scatter(1:10, (1:10) .^ 2; legend = "squares")
@@ -99,8 +103,9 @@ fig = plot_area(1:5, [[1, 2, 3, 2, 1], [1, 1, 2, 2, 3]]; stack = true,
 ## Stems, segments and line collections
 
 [`plot_stem`](@ref) draws a marker at each point and a thin line down to
-`baseline`. Each series is two traces: the markers (with the legend entry) and
-one trace holding all stems.
+`baseline`. Each series is two traces: one trace holding all stems and the
+markers (with the legend entry). The stems traces of a call are added before
+its marker traces, so the markers draw on top.
 
 ```julia
 n = 0:20
