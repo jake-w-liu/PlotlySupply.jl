@@ -40,8 +40,8 @@ savefig(fig, "figure.eps")
 `width` and `height` are in `units`: `:px` (default, 1/96 in), `:in`, `:cm`,
 `:mm` or `:pt` (1/72 in). Without them the figure's `layout.width`/`height`
 is used, else the size of the style the figure carries (a journal preset sets
-one), else, for a figure that carries no style, the active style's default
-size, else 700 x 500 px. PDF and EPS pages have exactly that size in points. For
+one), else 700 x 500 px (a figure that carries no style was made under the
+default look and keeps its size also inside `with_style`). PDF and EPS pages have exactly that size in points. For
 PNG, JPEG and TIFF, `dpi` sets the resolution (it is an alternative to
 `scale`; PNG and JPEG with a physical size and no `dpi` record 96 x `scale`
 dpi, a pixel-size export records none):
@@ -52,8 +52,8 @@ Under a style that carries a physical size (the journal presets, and any
 style registered with a width in inches or millimetres) PNG and JPEG default to
 300 dpi like TIFF when neither `dpi` nor `scale` is given: a 3.5 in `:ieee`
 figure is 1050 px wide, not 336, and records 300 dpi. The style that decides
-is the one the figure carries (the active style for a figure that carries
-none). `:default` and `:publication` figures keep `scale = 1`, and `dpi` and
+is the one the figure carries (a figure that carries no style is exported
+under the default look, also inside `with_style`). `:default` and `:publication` figures keep `scale = 1`, and `dpi` and
 `scale` always win.
 
 ```julia

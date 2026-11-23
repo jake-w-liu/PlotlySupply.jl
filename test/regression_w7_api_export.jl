@@ -34,14 +34,15 @@ end
 		@test PlotlySupply._format_dpi(o2, "png") === nothing
 	end
 	# A figure that carries a style is exported under it whatever style is
-	# active; one that carries none (made under :default) follows the active
-	# style (`_export_style_is_sized`, docs/src/export.md).
+	# active; one that carries none (made under :default) is exported under
+	# the default look also inside `with_style` (sm-11,
+	# `_with_figure_style`; docs/src/export.md).
 	ieee = with_style(:ieee) do
 		plot_scatter(1:3, 1:3)
 	end
 	plain = plot_scatter(1:3, 1:3)
 	with_style(:ieee) do
-		@test PlotlySupply._normalize_export_options(plain, (;)).sized
+		@test !PlotlySupply._normalize_export_options(plain, (;)).sized
 		@test PlotlySupply._normalize_export_options(ieee, (;)).sized
 	end
 	with_style(:publication) do

@@ -466,8 +466,8 @@ end
 # Size of a figure that carries no layout.width/height and gets no size
 # keyword: the active style's default figure size (publication-style's
 # `_style_default_figure_size`, CSS px), else the 1.x default 700 x 500 px.
-# `p` is the figure being exported: the style it carries decides, the active
-# style only when it carries none (K1).
+# `p` is the figure being exported: the style it carries decides (K1); one
+# that carries none is exported under the default look (sm-11).
 _export_default_size(p::Plot) = _with_figure_style(_export_default_size, p)
 function _export_default_size()
 	isdefined(@__MODULE__, :_style_default_figure_size) ||
@@ -557,8 +557,8 @@ function _normalize_export_options(p::Plot, kwargs)
 	)
 end
 
-# Whether the style the figure carries (the active style when it carries none)
-# sets a physical figure width: every journal preset and any style registered
+# Whether the style the figure carries (the default look when it carries none,
+# sm-11) sets a physical figure width: every journal preset and any style registered
 # with a width. Raster exports of such a figure default to 300 dpi (D18).
 _export_style_is_sized(p::Plot) = _with_figure_style(p) do
 	isdefined(@__MODULE__, :_active_style) || return false
@@ -2438,7 +2438,7 @@ What each file contains:
   resolution tags), so `width = 3.5, units = :in, dpi = 300` gives a
   1050-px-wide image that prints 3.5 in wide. With neither `dpi` nor
   `scale`, tiff is drawn at 300 dpi, and so are png and jpeg when the style
-  the figure carries (the active style for a figure that carries none) has a
+  the figure carries (the default look for a figure that carries none) has a
   physical width: every journal preset (`:ieee`, `:aps`, ...) and any style
   registered with a width. A 3.5 in `:ieee` figure is then 1050 px wide and
   records 300 dpi; under `:default` and `:publication` png/jpeg keep scale 1.
