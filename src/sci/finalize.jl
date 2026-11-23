@@ -2313,7 +2313,13 @@ function _fin_fit_pass!(ctx::_FinContext, accs, restart::Bool)
 		haskey(plan.areas, key) && !plan.areas[key].aspect && continue
 		any(k -> k[1] === key, keys(fits)) || delete!(fit_record, name)
 	end
-	if fit_record != record
+	# Compared as `_room_recorded` reads it (to 1e-9): a domain the fit
+	# computes again rounds differently in the last bit (1.0 against
+	# 1.0000000000000002, B1/B2), which is no change and must not cost a
+	# round.
+	same_record = keys(fit_record) == keys(record) &&
+		all(k -> all(isapprox.(fit_record[k], record[k]; atol = 1e-9)), keys(record))
+	if !same_record
 		value = isempty(fit_record) ? nothing : Dict{Any, Any}(Symbol(k) => v for (k, v) in fit_record)
 		wrote |= _fin_meta_set!(layout, _ROOM_RECORD_KEY, value)
 	end
