@@ -1124,7 +1124,12 @@ using Test, PlotlySupply
 			lookup(k) = get(pl(sf).layout.fields, k, nothing)
 			need = PS._with_figure_style(sf) do
 				root = PS._tight_root_font_size(lookup)
-				room = ceil(1.2 * root + 8) + ceil(PS._tight_title_height(lookup(:title), lookup, root)) + 4
+				# one line of the angular tick labels at the font they are
+				# drawn at (layout-engine r1: the polar room follows the
+				# angular tick font, 12 px under :publication's 14 px root)
+				tick = maximum(Float64(get(sd(get(sd(get(sd(v), :angularaxis, nothing)), :tickfont, nothing)), :size, root))
+					for (k, v) in pl(sf).layout.fields if occursin(r"^polar\d*$", String(k)))
+				room = ceil(1.2 * tick + 8) + ceil(PS._tight_title_height(lookup(:title), lookup, root)) + 4
 				min(room, PS._TIGHT_MAX_MARGIN_FRACTION * PS._style_default_figure_size()[2])
 			end
 			@test m[:t] >= need - 1

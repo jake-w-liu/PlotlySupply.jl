@@ -2216,10 +2216,12 @@ function _style_domain_subplot_margin(p::Plot, updates::AbstractDict, style::Plo
 	lookup(key) = haskey(updates, key) ? updates[key] : get(fields, key, nothing)
 	root = _tight_root_font_size(lookup)
 	# sm-02: the size the finalizer sizes this margin by
-	# (`_fin_domain_margin_updates!`): the root font, raised by a larger tick
-	# font (a :publication tick font of 12 under a root font of 14 gives 14),
-	# so the margin it finds is the one written here.
-	tick = style.tick_fontsize > 0 ? max(style.tick_fontsize, root) : root
+	# (`_fin_domain_margin_updates!`, the same rule): the tick font the
+	# angular / a, b, c axes are drawn at (the style's tick font, which
+	# `updates` already writes onto them: :publication draws its angular
+	# labels at 12 px under a 14 px root font), so the margin it finds is
+	# the one written here.
+	tick = _fin_domain_tick_font(lookup, union(keys(fields), keys(updates)), root)
 	# One line of tick text plus plotly's offset between the disc and its labels.
 	label_room = ceil(1.2 * tick + 8)
 	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))

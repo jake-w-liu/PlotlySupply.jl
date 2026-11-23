@@ -4114,7 +4114,7 @@ function _room_solve!(plan::_RoomPlan)
 	ybands = _room_band_solve(plan, yb, group, :bottom, :top, plan.Hp,
 		compress === nothing ? nothing : compress.y;
 		gapneed = collapse ? _room_gap_needs(plan, need, yb, :bottom, :top, 2) : nothing,
-		outer = collapse ? _room_outer_needs(plan, need, yb, :bottom, :top, 2) : (0.0, 0.0))
+		outer = collapse ? _room_outer_needs(plan, need, yb, :bottom, :top, 2; by_side = by_side) : (0.0, 0.0))
 	slots = Dict{Symbol, _RoomBox}()
 	plan.memo[:aspect_slots] = slots
 	for key in plan.area_order
@@ -5850,17 +5850,7 @@ function _fin_domain_margin_updates!(updates::Dict{Symbol, Any}, p::Plot, height
 	margin === nothing && return updates
 	lookup(key) = get(fields, key, nothing)
 	root = _tight_root_font_size(lookup)
-	# The labels drawn outside: an axis's own tick font, else the figure's
-	# (a style's 12 px angular labels under a 14 px root font need the room
-	# of 12 px, as `_style_domain_subplot_margin` gives it).
-	tick = 0.0
-	for (key, axis) in fields
-		occursin(r"^(polar|ternary)\d*$", String(key)) || continue
-		names = occursin(r"^polar", String(key)) ? (:angularaxis,) : (:aaxis, :baxis, :caxis)
-		for name in names
-			tick = max(tick, _fin_mapping_font_size(_cmn_mapping_get(axis, name), :tickfont, root))
-		end
-	end
+	tick = _fin_domain_tick_font(lookup, keys(fields), root)
 	label_room = ceil(1.2 * tick + 8)
 	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
 	# Ternary corner titles sit beyond the tick labels (style-07, vm-19): the
