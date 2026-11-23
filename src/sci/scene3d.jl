@@ -2118,6 +2118,31 @@ function _s3_label_layout(box, center, frame, distance::Float64, width::Float64,
 	return corners, quads
 end
 
+# The perspective projection of `_s3_label_layout_tagged`: a world point to
+# screen px from the viewport centre, for the eye at `eye` looking along `-v`
+# with right `r` and up `u`. The shader divides by max(w, 1e-4) (w: depth in
+# front of the eye): `project(point, 1e-4)`. A callable struct, not a closure
+# with a default argument: that closure was boxed (`Core.Box`), and every
+# projection of the camera fit then allocated (O(rounds x labels) small
+# allocations per 3-D figure).
+struct _S3Projector
+	eye::NTuple{3, Float64}
+	v::NTuple{3, Float64}
+	r::NTuple{3, Float64}
+	u::NTuple{3, Float64}
+	tan_half::Float64
+	ratio::Float64
+	width::Float64
+	height::Float64
+end
+function (pr::_S3Projector)(point, min_depth::Float64 = 1e-9)
+	eye = pr.eye
+	q = (point[1] - eye[1], point[2] - eye[2], point[3] - eye[3])
+	depth = max(-_s3_dot(q, pr.v), min_depth)
+	return (_s3_dot(q, pr.r) / (depth * pr.tan_half * pr.ratio) * pr.width / 2,
+		_s3_dot(q, pr.u) / (depth * pr.tan_half) * pr.height / 2)
+end
+
 # `_s3_label_layout` with, per rectangle, the axis (1-3) and kind (`:tick` or
 # `:title`) it belongs to.
 function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::Float64, height::Float64, labels, spans; own = nothing)
@@ -2126,17 +2151,13 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 	eye = center .+ distance .* v
 	tan_half = tan(_S3_HALF_FOVY)
 	ratio = width / height
-	# The shader divides by max(w, 1e-4) (w: depth in front of the eye).
-	function project(point, min_depth::Float64 = 1e-9)
-		q = (point[1] - eye[1], point[2] - eye[2], point[3] - eye[3])
-		depth = max(-_s3_dot(q, v), min_depth)
-		return (_s3_dot(q, r) / (depth * tan_half * ratio) * width / 2, _s3_dot(q, u) / (depth * tan_half) * height / 2)
-	end
-	corners = [project(_s3_corner(box, i)) for i in 0:7]
+	t3(x) = (Float64(x[1]), Float64(x[2]), Float64(x[3]))
+	project = _S3Projector(t3(eye), t3(v), t3(r), t3(u), tan_half, ratio, width, height)
+	corners = NTuple{2, Float64}[project(_s3_corner(box, i)) for i in 0:7]
 	quads = NTuple{4, NTuple{2, Float64}}[]
 	tags = Tuple{Int, Symbol}[]
 	any(label -> label.visible, labels) || return corners, quads, tags, _S3Title[]
-	geoms = Any[nothing, nothing, nothing]
+	geoms = Union{Nothing, NTuple{2, NTuple{2, Float64}}}[nothing, nothing, nothing]
 	edges, signs = _s3_cube_edges(box, eye, project)
 	# World length of one gl-axes pad unit: depth of the scene origin over the
 	# viewport height (gl-axes: pixelRatio · w / drawingBufferHeight).
@@ -2155,9 +2176,9 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 		minor = zeros(3)
 		for o in 1:3
 			o == a && continue
-			high = (edges[a] >> (o - 1)) & 1 == 1
-			edge[o] = high ? box[o] / 2 : -box[o] / 2
-			minor[o] = high ? (signs[o] > 0 ? 0.0 : 1.0) : (signs[o] > 0 ? -1.0 : 0.0)
+			at_high = (edges[a] >> (o - 1)) & 1 == 1
+			edge[o] = at_high ? box[o] / 2 : -box[o] / 2
+			minor[o] = at_high ? (signs[o] > 0 ? 0.0 : 1.0) : (signs[o] > 0 ? -1.0 : 0.0)
 		end
 		offset = zeros(3)
 		if label.marks
@@ -2172,13 +2193,15 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 			offset .+= (label.tick_pad * unit) .* minor
 			pushed = findall(!iszero, minor)
 			function place_tick(end_tag::Symbol, fraction::Float64)
-				at = copy(edge)
-				at[a] = (fraction - 0.5) * box[a]
-				at .+= offset
-				along = length(pushed) == 1 ? screen_direction(at, pushed[1]) : (1.0, 0.0)
+				# Not `at`/`along`: names of the enclosing function, which a
+				# closure assigning them would box.
+				tick_at = copy(edge)
+				tick_at[a] = (fraction - 0.5) * box[a]
+				tick_at .+= offset
+				tick_along = length(pushed) == 1 ? screen_direction(tick_at, pushed[1]) : (1.0, 0.0)
 				if label.tick_chars > 0
 					push!(quads, _s3_text_quad(
-						project(at), along, 0.5 * label.tick_chars * _S3_CHAR_EM * label.tick_size, 0.5 * label.tick_size,
+						project(tick_at), tick_along, 0.5 * label.tick_chars * _S3_CHAR_EM * label.tick_size, 0.5 * label.tick_size,
 					))
 					push!(tags, (a, end_tag))
 				end
