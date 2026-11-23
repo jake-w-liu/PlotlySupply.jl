@@ -5071,7 +5071,14 @@ function _fin_vbar_title_above(plan, item::_FinBar)
 	(found === nothing || found.side !== :top) && return 0.0
 	tick = _fin_mapping_font_size(item.bar, :tickfont, plan.font)
 	clear = 2 + max(0.0, 0.5 * _CBAR_LINE_EM * tick - _cbar_real(item.bar, :ypad, 10.0))
-	return clear + _FIN_MATH_TITLE_H * plan.font
+	# The title's own rows, as below the bar (`_room_vbar_title_px`): a fixed
+	# 1.8 em left a two-line title 1.1 px past the figure top under :ieee
+	# (S-text-legend-1: 28.7 px drawn, 19.2 px reserved).
+	key = item.coloraxis !== nothing ? item.coloraxis : item.own.key
+	annotation = _fin_title_annotation(plan.layout, key, :top)
+	height = _FIN_MATH_TITLE_H * plan.font
+	annotation === nothing || (height = max(height, _fin_math_title_depth(annotation, plan.font)))
+	return clear + height
 end
 
 # The same below the bar (`title_side = :bottom`), on the bottom areas `areas`
@@ -5773,6 +5780,12 @@ function _fin_run_scoped!(fig, live, size, clone_readonly::Bool, strict::Bool = 
 			_fin_domain_margin_updates!(again, p, _fin_figure_size(ctx, p.layout)[2])
 			refit = !isempty(again) && _fin_relayout!(ctx, again)
 		end
+		# The room solve pins the figure title's pad (`_lt_title_pin`), which
+		# the polar/ternary margin rule reads: grown again here, or the next
+		# run raised margin.t by the pad's change (sm-06: 60 -> 70 px after
+		# `title!` with a math title on a grid with a polar cell).
+		grown = _fin_domain_margin_updates!(Dict{Symbol, Any}(), p, _fin_figure_size(ctx, p.layout)[2])
+		refit = (!isempty(grown) && _fin_relayout!(ctx, grown)) || refit
 		(fitted || refit) || break
 		wrote = true
 	end

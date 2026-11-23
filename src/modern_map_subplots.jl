@@ -567,40 +567,67 @@ function _append_subplot_title_annotation!(
 	return nothing
 end
 
-function _first_occupied_column_domain(
-	layout::Layout,
-	sp::Subplots,
-	col::Int,
-)
-	rows = sp.start_cell == "top-left" ?
-		(1:sp.rows) :
-		(sp.rows:-1:1)
-	for row in rows
-		domain = _subplot_grid_cell_domain(layout, row, col)
-		domain === nothing || return domain
+# The anchor `(row, col)` of the cell of the grid that covers cell `(row,
+# col)`: the cell itself, or one whose `rowspan`/`colspan` reaches over it;
+# `nothing` for a blank cell.
+function _subplot_covering_anchor(layout::Layout, sp::Subplots, row::Int, col::Int)
+	for r in 1:row, c in 1:col
+		spec = sp.specs[r, c]
+		ismissing(spec) && continue
+		(r + spec.rowspan - 1 >= row && c + spec.colspan - 1 >= col) || continue
+		_subplot_grid_cell_domain(layout, r, c) === nothing && continue
+		return (r, c)
 	end
 	return nothing
 end
 
-# Row of the cell `_first_occupied_column_domain` takes (`nothing`: none).
-function _first_occupied_column_row(layout::Layout, sp::Subplots, col::Int)
-	rows = sp.start_cell == "top-left" ? (1:sp.rows) : (sp.rows:-1:1)
-	for row in rows
-		_subplot_grid_cell_domain(layout, row, col) === nothing || return row
+# Paper band of grid row `row` (`letter = :y`) or column `col` (`:x`) as
+# PlotlyBase's `Layout(::Subplots)` lays the grid out (its `grid` of cell
+# origins from `_widths`/`_heights` and the spacings, and the height
+# `_heights[end - row + 1]` it gives a row).
+function _subplot_grid_band(sp::Subplots, letter::Symbol, index::Int)
+	if letter === :x
+		start = sum(sp._widths[1:(index - 1)]; init = 0.0) + (index - 1) * sp.horizontal_spacing
+		return (start, start + sp._widths[index])
 	end
-	return nothing
+	k = sp.start_cell == "top-left" ? sp.rows - index : index - 1     # PlotlyBase's `row_seq` value
+	start = sum(sp._heights[1:k]; init = 0.0) + k * sp.vertical_spacing
+	return (start, start + sp._heights[end - index + 1])
 end
 
-function _rightmost_occupied_row_domain(
-	layout::Layout,
-	sp::Subplots,
-	row::Int,
-)
-	for col in sp.cols:-1:1
-		domain = _subplot_grid_cell_domain(layout, row, col)
-		domain === nothing || return domain
+# The domain a row title (`letter = :y`, beside the rightmost cell covering
+# row `index`) or column title (`:x`, above the first cell covering column
+# `index` from the top) is placed against, and the name it gets
+# (layout-fuzz-16): the covering cell's domain when that cell lies in this
+# row/column only; a cell spanning several rows/columns gives the outer edge
+# and the row's/column's own band, so no title is dropped and each sits by
+# its row/column. `(nothing, nothing)` when no cell covers it.
+function _subplot_row_column_title_target(layout::Layout, sp::Subplots, letter::Symbol, index::Int)
+	anchor = nothing
+	if letter === :y
+		for col in sp.cols:-1:1
+			anchor = _subplot_covering_anchor(layout, sp, index, col)
+			anchor === nothing || break
+		end
+	else
+		for row in (sp.start_cell == "top-left" ? (1:sp.rows) : (sp.rows:-1:1))
+			anchor = _subplot_covering_anchor(layout, sp, row, index)
+			anchor === nothing || break
+		end
 	end
-	return nothing
+	anchor === nothing && return (nothing, nothing)
+	r, c = anchor
+	domain = _subplot_grid_cell_domain(layout, r, c)
+	spec = sp.specs[r, c]
+	suffix = letter === :y ? "row" : "column"
+	if letter === :y && spec.rowspan > 1
+		domain = (x = domain.x, y = _subplot_grid_band(sp, :y, index))
+		r == index || (suffix *= ":$(index)")
+	elseif letter === :x && spec.colspan > 1
+		domain = (x = _subplot_grid_band(sp, :x, index), y = domain.y)
+		c == index || (suffix *= ":$(index)")
+	end
+	return (domain, "plotlysupply:title!:$(r):$(c):$(suffix)")
 end
 
 function _apply_subplot_title_annotations!(
@@ -664,37 +691,29 @@ function _apply_subplot_title_annotations!(
 
 	if !ismissing(sp.column_titles)
 		for col in 1:sp.cols
-			row = _first_occupied_column_row(layout, sp, col)
+			domain, name = _subplot_row_column_title_target(layout, sp, :x, col)
 			_append_subplot_title_annotation!(
 				annotations,
 				sp.column_titles[col],
-				_first_occupied_column_domain(
-					layout,
-					sp,
-					col,
-				);
+				domain;
 				# the panel titles' gap: a math title's box ends at its
 				# baseline, so without it the formula sat on the frame (docs-06)
 				offset = _TEXT_PANEL_GAP,
-				name = row === nothing ? nothing : "plotlysupply:title!:$(row):$(col):column",
+				name = name,
 			)
 		end
 	end
 
 	if !ismissing(sp.row_titles)
 		for row in 1:sp.rows
-			col = findlast(c -> _subplot_grid_cell_domain(layout, row, c) !== nothing, 1:sp.cols)
+			domain, name = _subplot_row_column_title_target(layout, sp, :y, row)
 			_append_subplot_title_annotation!(
 				annotations,
 				sp.row_titles[row],
-				_rightmost_occupied_row_domain(
-					layout,
-					sp,
-					row,
-				);
+				domain;
 				edge = :right,
 				offset = _TEXT_PANEL_GAP,
-				name = col === nothing ? nothing : "plotlysupply:title!:$(row):$(col):row",
+				name = name,
 			)
 		end
 	end

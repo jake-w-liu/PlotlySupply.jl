@@ -2059,7 +2059,7 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
     @testset "Legend position normalization" begin
         # Test _normalize_legend_position for all branches
-        nlp = PlotlySupply._normalize_legend_position
+        nlp = position -> PlotlySupply._normalize_legend_position(position, "set_legend!")
         @test nlp(:top_left) == :topleft
         @test nlp(:upperleft) == :topleft
         @test nlp(:upper_left) == :topleft
@@ -2079,8 +2079,8 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
         @test nlp(:outside_bottom) == :outside_bottom
         @test nlp(:bottom_outside) == :outside_bottom
         @test nlp(:outsidebottom) == :outside_bottom
-        # Invalid position defaults to :topright
-        @test (@test_logs (:warn, r"Unrecognized legend position") nlp(:invalid_position_xyz)) == :topright
+        # D22: an invalid position name is an ArgumentError naming the function
+        @test_throws r"set_legend!: unknown legend position :invalid_position_xyz" nlp(:invalid_position_xyz)
     end
 
     @testset "Default legend never covers markers while a corner is free (seeded property)" begin
@@ -2847,7 +2847,8 @@ isdefined(@__MODULE__, :_PLOTLYSUPPLY_TESTUTILS) || include("testutils.jl")
 
     @testset "CRC: normalize warns on invalid template / legend position" begin
         @test (@test_logs (:warn,) PlotlySupply._normalize_template("does_not_exist")) == :plotly_white
-        @test (@test_logs (:warn,) PlotlySupply._normalize_legend_position("nowhere")) == :topright
+        # D22: an unknown legend position name is an error, not a warning
+        @test_throws ArgumentError PlotlySupply._normalize_legend_position("nowhere", "set_legend!")
     end
 
     @testset "CRC: _json_js escapes all close-tag sequences" begin

@@ -1169,7 +1169,7 @@ function _s3_colorbar_width(bar, range, font::Float64)
 		if side == "right"
 			width += 1.4 * title_size
 		else
-			width = max(width, _s3_visible_chars(text) * _S3_CHAR_EM * title_size + 2 * _cbar_real(fields, :xpad, _CBAR_DEFAULT_XPAD))
+			width = max(width, _s3_title_px(text, title_size) + 2 * _cbar_real(fields, :xpad, _CBAR_DEFAULT_XPAD))
 		end
 	end
 	return width
@@ -1531,6 +1531,13 @@ const _S3_DEFAULT_TICKLEN = 5.0
 # text line spacing in font sizes.
 const _S3_CHAR_EM = 0.56
 const _S3_LINE_EM = 1.25
+
+# Width (px) of a title (axis or colorbar title) drawn at `size` px: the
+# D19 per-family advances of `_text_extent` for the family of the style in
+# scope (O6: 0.56 em per character overestimated plain titles by about 26 %,
+# 0.445 em measured, and framed the scene smaller than it needs). Tick
+# labels (digits, 0.556 em in the fallback faces) keep `_S3_CHAR_EM`.
+_s3_title_px(text::AbstractString, size::Real) = _text_extent(text, size)[1]
 # Free pixels kept between a label and the viewport edge.
 const _S3_LABEL_MARGIN_PX = 2.0
 
@@ -1673,6 +1680,9 @@ struct _S3AxisLabels
 	label_pad::Float64
 	title_text::String
 	title_own::Bool
+	# Width (px) of the title at `title_size` (`_s3_title_px`): once per
+	# label, not once per camera the framing search tries (O6).
+	title_px::Float64
 end
 
 # Characters a label shows: HTML tags (<b>, <sub>, ...) count as nothing, an
@@ -1861,6 +1871,7 @@ function _s3_axis_labels(p::Plot, scenekey::Symbol; pads = _s3_scene_pads(p, sce
 			pads[2],
 			text,
 			own_title,
+			_s3_title_px(text, title_size),
 		)
 	end
 end
@@ -2055,7 +2066,7 @@ function _s3_label_layout_tagged(box, center, frame, distance::Float64, width::F
 		along = !label.title_along ? (1.0, 0.0) : edge_len > 1e-9 ? (edge_x / edge_len, edge_y / edge_len) :
 			screen_direction(at, a)
 		thick = label.title_size * (1 + _S3_LINE_EM * (label.title_lines - 1))
-		push!(quads, _s3_text_quad(project(at), along, 0.5 * label.title_chars * _S3_CHAR_EM * label.title_size, 0.5 * thick))
+		push!(quads, _s3_text_quad(project(at), along, 0.5 * label.title_px, 0.5 * thick))
 		push!(tags, (a, :title))
 	end
 	placed = _S3Title[]
@@ -2145,7 +2156,7 @@ function _s3_place_titles(labels, geoms, ticks, centroid, scale::Float64, wrap::
 			wrapped === nothing || ((text, chars) = wrapped; lines = 2)
 		end
 		size = label.title_size * scale
-		half_len = 0.5 * chars * _S3_CHAR_EM * size
+		half_len = 0.5 * _s3_title_px(text, size)
 		half_thick = 0.5 * size * (1 + _S3_LINE_EM * (lines - 1))
 		dx, dy = hi[1] - lo[1], hi[2] - lo[2]
 		edge = hypot(dx, dy)

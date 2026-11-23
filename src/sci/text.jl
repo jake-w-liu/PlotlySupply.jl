@@ -1551,6 +1551,9 @@ end
 # Split `s` at unescaped `$` signs into (is_math, segment, display) triples;
 # `$$…$$` is display math.
 function _text_math_segments(s::AbstractString)
+	# No `$`: one text segment (what the scan below gives, without its
+	# per-character buffer; most labels).
+	occursin('$', s) || return isempty(s) ? Tuple{Bool, String, Bool}[] : Tuple{Bool, String, Bool}[(false, String(s), false)]
 	segments = Tuple{Bool, String, Bool}[]
 	buf = IOBuffer()
 	math = false
@@ -1628,10 +1631,42 @@ the MathJax font in effect; with several possible families, the widest. Never
 throws: an unknown character or command counts as a wide glyph.
 """
 function _text_extent(text::AbstractString, fontsize::Real; family::Union{Nothing, AbstractString} = nothing, bold::Bool = false)
+	return _text_extent_over(_text_family_candidates(family === nothing ? _text_scope_family() : family), text, fontsize, bold)
+end
+
+# The family a CSS family list is drawn in as far as the tables tell, for a
+# decision that changes the text itself (`_lt_wrap_panel_titles!` breaking a
+# title into lines), where the conservative estimate of `_text_extent` (the
+# widest family the list may be drawn in; the maximum of all measured
+# families for a family without a table) would change text that fits: the
+# first listed family with a table; else the generic family the list names
+# (a list of unmeasured serif faces is estimated as Times: a title in
+# "STIX Two Text, STIXGeneral, serif" measured 197 px drawn, 190 px as Times
+# and 243 px as the maximum); else the maximum (nothing is known). plotly.js's default list gives
+# Verdana ("Open Sans" has no table).
+function _text_drawn_family(family::AbstractString)
+	list = isempty(strip(family)) ? _TEXT_PLOTLY_DEFAULT_FAMILY : family
+	generic = nothing
+	for part in split(list, ',')
+		name = lowercase(strip(strip(part), ['"', '\'', ' ', '\t']))
+		metrics = get(_TEXT_FAMILIES, name, nothing)
+		metrics === nothing || return metrics
+		generic === nothing && (generic = get(_TEXT_GENERIC_FAMILIES, name, nothing))
+	end
+	return something(generic, _TEXT_FAMILY_DEFAULT)
+end
+
+# `_text_extent` in the family `_text_drawn_family` takes `family` (default:
+# the style's in scope) to be drawn in.
+_text_drawn_extent(text::AbstractString, fontsize::Real; family::Union{Nothing, AbstractString} = nothing, bold::Bool = false) =
+	_text_extent_over((_text_drawn_family(family === nothing ? _text_scope_family() : family),), text, fontsize, bold)
+
+# Extent of `text` at `fontsize` px: the widest and tallest over the families
+# `candidates`.
+function _text_extent_over(candidates, text::AbstractString, fontsize::Real, bold::Bool)
 	fs = (fontsize isa Real && isfinite(fontsize) && fontsize > 0) ? Float64(fontsize) : 12.0
 	s = String(text)
 	isempty(strip(s)) && return (0.0, 0.0)
-	candidates = _text_family_candidates(family === nothing ? _text_scope_family() : family)
 	segments = _text_math_segments(s)
 	inherit = any(first, segments) && _text_inherits_text_font()
 	math = any(first, segments) ? _text_math_font_metrics() : _TEXT_MATH_LATIN_MODERN
@@ -1651,30 +1686,36 @@ function _text_extent_in(segments, fs::Float64, m::_TextFamilyMetrics, math::_Te
 	k = (inherit ? m.ex : _TEXT_FAMILY_TIMES.ex) / _TEXT_MATH_X_HEIGHT
 	# Lines: plain text breaks at <br>/newline; a math segment contributes
 	# its rows (the first continues the current line, further rows add lines).
-	lines = Tuple{Float64, Float64}[(0.0, _TEXT_PLAIN_LINE_EM)]  # (width_px, height_em)
+	# The current line is (lw px, lh em); the finished ones are kept as their
+	# widest width and summed height (em), in line order.
+	lw::Float64, lh::Float64 = 0.0, _TEXT_PLAIN_LINE_EM
+	widest::Float64, height_em::Float64 = -Inf, 0.0
 	for (is_math, segment, display) in segments
 		if is_math
 			rows = _text_tex_box(segment, math, inherit ? m : nothing, k, display)
 			for (index, (w, scale, tall, height)) in enumerate(rows)
-				index > 1 && push!(lines, (0.0, 0.0))
-				lw, lh = lines[end]
+				if index > 1
+					widest, height_em = max(widest, lw), height_em + lh
+					lw, lh = 0.0, 0.0
+				end
 				row = max(tall ? _TEXT_MATH_TALL_ROW_EM : _TEXT_MATH_ROW_EM, height)
-				lines[end] = (lw + w * k * fs, max(lh, scale * row))
+				lw, lh = lw + w * k * fs, max(lh, scale * row)
 			end
 		else
-			parts = split(segment, _TEXT_BR_TAG)
+			# (no `<`: no line break, and no regex split)
+			parts = occursin('<', segment) ? split(segment, _TEXT_BR_TAG) : (segment,)
 			for (index, part) in enumerate(parts)
-				index > 1 && push!(lines, (0.0, _TEXT_PLAIN_LINE_EM))
-				lw, lh = lines[end]
+				if index > 1
+					widest, height_em = max(widest, lw), height_em + lh
+					lw, lh = 0.0, _TEXT_PLAIN_LINE_EM
+				end
 				run = _text_plain_run(part, m, bold)
-				lines[end] = (
-					lw + _text_run_width(run) * fs + run.glyphs * _TEXT_GLYPH_ROUNDING_PX,
-					max(lh, _TEXT_PLAIN_LINE_EM),
-				)
+				lw = lw + _text_run_width(run) * fs + run.glyphs * _TEXT_GLYPH_ROUNDING_PX
+				lh = max(lh, _TEXT_PLAIN_LINE_EM)
 			end
 		end
 	end
-	return (maximum(first, lines), sum(last, lines) * fs)
+	return (max(widest, lw), (height_em + lh) * fs)
 end
 
 # ── Baseline depth ──────────────────────────────────────────────────────────
@@ -1905,7 +1946,7 @@ end
 function _legend_position_option(position, who::AbstractString)
 	position === nothing && return nothing
 	(position isa Symbol || position isa AbstractString) &&
-		return _normalize_legend_position(position)
+		return _normalize_legend_position(position, who)
 	(position isa Tuple || position isa AbstractVector) || throw(ArgumentError(
 		"$(who): `position` must be a Symbol, a string or an (x, y) tuple of " *
 		"axes fractions; got $(repr(position)).",
@@ -2239,6 +2280,30 @@ function _legend_plot_area_width(p::Plot)
 	return max(width - _legend_margin_lr(p, :l) - _legend_margin_lr(p, :r), 1.0)
 end
 
+# The plot-area width (px) once the finalize that ends this call has settled
+# the figure, for the column count of an explicit `set_legend!` call
+# (`_legend_relayout_columns!`). A left or right margin may still hold room
+# the room engine raised for a decoration the call just moved (`_ROOM_MARGIN_KEY`:
+# an outside legend placed above the grid with `ncols = 2` was given one
+# column, 327 of the 590 px the plot area has once the margin is given back,
+# chama_a2), so then the figure is settled on a copy at its own size
+# (`_finalize_export_copy`; `p` is not changed) and its margins are read.
+# Without such a margin it is the plot area of now, and no copy is made.
+function _legend_settled_area_width(p::Plot)
+	record = _room_margin_record(p.layout)
+	margin = get(p.layout.fields, :margin, nothing)
+	held = any((:l, :r)) do letter
+		rec = get(record, letter, nothing)
+		current = _cmn_mapping_get(margin, letter)
+		rec !== nothing && _fin_isfinite_real(current) && abs(Float64(current) - rec[2]) <= 0.5
+	end
+	held || return _legend_plot_area_width(p)
+	width, height = _figure_default_size(p)
+	size = (width = _tight_real(get(p.layout.fields, :width, nothing), Float64(width)),
+		height = _tight_real(get(p.layout.fields, :height, nothing), Float64(height)))
+	return _legend_plot_area_width(_finalize_export_copy(p, size))
+end
+
 # Left or right figure margin (px): the layout's, the template's, else
 # plotly.js' default.
 function _legend_margin_lr(p::Plot, key::Symbol)
@@ -2257,9 +2322,10 @@ end
 # reach from its anchor to the nearest plot area of the same row, or into the
 # figure margin beside the grid (`_legend_band_interval`), as matplotlib's
 # legends above the axes do.
-function _legend_available_width(p::Plot, box::AbstractDict, span::Float64; legend_id = nothing)
+function _legend_available_width(p::Plot, box::AbstractDict, span::Float64; legend_id = nothing,
+		area::Union{Nothing, Float64} = nothing)
 	x = _legend_real(get(box, :x, nothing))
-	area = _legend_plot_area_width(p)
+	area = something(area, _legend_plot_area_width(p))
 	if get(box, :xref, "paper") == "paper" && x !== nothing && (x < 0 || x > 1)
 		return _tight_real(get(p.layout.fields, :width, nothing), Float64(_figure_default_size(p)[1])) / 2
 	end
@@ -2397,6 +2463,7 @@ function _legend_apply_columns!(
 	fill::Char = 'c',
 	span::Real = 1.0,
 	who::AbstractString = "set_legend!",
+	area::Union{Nothing, Float64} = nothing,
 )
 	legend_id = String(legend_id)
 	_legend_clear_column_groups!(p, legend_id)
@@ -2416,7 +2483,7 @@ function _legend_apply_columns!(
 	# side containing "left" ("left" and "top left": `computeLegendDimensions`).
 	title_left = has_title && occursin("left", string(get(title, :side, "top")))
 	title_width = title_left ? _text_extent(title_text, _legend_entry_font_size(p, box))[1] + 2 * _LEGEND_ITEM_GAP : 0.0
-	available = _legend_available_width(p, box, Float64(span); legend_id = legend_id)
+	available = _legend_available_width(p, box, Float64(span); legend_id = legend_id, area = area)
 	wanted = min(Int(ncols), length(indices))
 	used = wanted
 	columns = _legend_column_assignment(length(indices), used, fill)
@@ -2491,7 +2558,8 @@ area. `span` is the legend's share of the plot-area width.
 function _legend_relayout_columns!(p::Plot, legend_id::AbstractString, opts; span::Real = 1.0, cell::Bool = false)
 	who = isempty(opts.who) ? "set_legend!" : opts.who
 	if opts.ncols > 1 || (opts.ncols == 1 && opts.orientation == "h")
-		_legend_apply_columns!(p, legend_id, opts.ncols; fill = 'c', span = span, who = who)
+		_legend_apply_columns!(p, legend_id, opts.ncols; fill = 'c', span = span, who = who,
+			area = _legend_settled_area_width(p))
 		return nothing
 	end
 	if opts.ncols == 1 || opts.orientation == "v"
@@ -2502,14 +2570,16 @@ function _legend_relayout_columns!(p::Plot, legend_id::AbstractString, opts; spa
 	if layout !== nothing
 		fill, n = layout
 		count = fill == 'r' ? length(p.data) : n
-		_legend_apply_columns!(p, legend_id, count; fill = fill, span = span, who = "")
+		_legend_apply_columns!(p, legend_id, count; fill = fill, span = span, who = "",
+			area = _legend_settled_area_width(p))
 	elseif cell && _legend_box_orientation(p, legend_id) == "h" &&
 			!(opts.orientation === nothing && legend_id in something(_legend_cell_auto_ids(p), ()))
 		# A row the best-position rule laid out (`:outside_bottom`, which it
 		# picks only when the row fits the cell) is not wrapped into column
 		# groups: they would stay when the rule moves the legend back inside
 		# as a column (grouped spacing between its entries).
-		_legend_apply_columns!(p, legend_id, length(p.data); fill = 'r', span = span, who = "")
+		_legend_apply_columns!(p, legend_id, length(p.data); fill = 'r', span = span, who = "",
+			area = _legend_settled_area_width(p))
 	end
 	return nothing
 end
@@ -2682,7 +2752,7 @@ const _LEGEND_CELL_SLACK_PX = (4.0, 2.0)
 const _LEGEND_SIDE_HYSTERESIS = 0.05
 
 """
-	_legend_best_cell_position(p, legend_id, xdom, ydom; before = 0, plot_px = nothing) -> Union{Symbol, Nothing}
+	_legend_best_cell_position(p, legend_id, xdom, ydom; before = 0, plot_px = nothing, current = nothing, inset = _DEFAULT_LEGEND_INSET[]) -> Union{Symbol, Nothing}
 
 The position of `_SCAT_LEGEND_POSITIONS` (relative to the cell's axes) where
 cell legend `legend_id` of the cell with paper domains `xdom` x `ydom` covers
@@ -2694,9 +2764,12 @@ default the layout's size less its margins (`_scat_legend_figure_px`).
 `current` is the outside position (`:outside_right`, `:outside_bottom`) the
 legend has now, if any: it keeps it while the choice between the two is
 within `_LEGEND_SIDE_HYSTERESIS` of the cell width (see the note below).
+`inset` is the legend inset the box is drawn at (the SubplotFigure's
+`legend_inset`): every candidate is scored where `_legend_placement` puts it.
 """
 function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, ydom; before::Integer = 0,
-		plot_px = nothing, current::Union{Nothing, Symbol} = nothing)
+		plot_px = nothing, current::Union{Nothing, Symbol} = nothing,
+		inset::Tuple{Float64, Float64} = _DEFAULT_LEGEND_INSET[])
 	indices = Int[]
 	for (index, trace) in enumerate(p.data)
 		before > 0 && index >= before && break
@@ -2723,7 +2796,8 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 		subplot = Symbol(string(get(first_trace.fields, :subplot, "polar")))
 		# vm-06: beside the cell when no corner is clear of the data and the
 		# angular tick labels
-		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size; outside = :outside_right)
+		return _legend_best_polar_position(p, indices, subplot, w, h, legend_size; outside = :outside_right,
+			inset = inset)
 	end
 	# Cartesian cell: the host's traces are scored as data; the traces of an
 	# inset the cell hosts (listed in the host's legend, `_legend_inset_host`)
@@ -2760,21 +2834,44 @@ function _legend_best_cell_position(p::Plot, legend_id::AbstractString, xdom, yd
 	# column when that column leaves the plot area at least half its width;
 	# else below it as a column (`_legend_rule_placement`; plotly.js wraps a
 	# horizontal legend at the width of the whole grid, so a wider row would
-	# run under its neighbours). A legend outside already keeps its side while
-	# the choice is within `_LEGEND_SIDE_HYSTERESIS` of the width: its own
-	# room moves the cell (an equal-aspect neighbour fitted to the height the
-	# bottom margin leaves), and chama_a6 went right, below and right again
-	# on every pass, the column 1.2 px over half the cell width on the right
-	# and 6.5 px under it below.
-	slack = current === :outside_bottom ? _LEGEND_SIDE_HYSTERESIS * w :
-		current === :outside_right ? -_LEGEND_SIDE_HYSTERESIS * w : 0.0
-	outside = _legend_row_width(p, legend_id, before) <= w + slack ||
-		legend_size[1] + _ROOM_GAP > w / 2 - slack ? :outside_bottom : :outside_right
+	# run under its neighbours).
+	# The column is weighed against the cell's grid band, not its plot area:
+	# the room a column beside the cell (or beside an equal panel of the
+	# grid, D17) takes narrows the plot area, and measured on that the rule
+	# moved the same legend below (Z72: a 160 px column beside cells of
+	# 366 px, which narrowed every cell to 331 px, so the third cell's
+	# legend went below its cell while the others stayed beside theirs).
+	# A legend outside already keeps its side while the choice is within
+	# `_LEGEND_SIDE_HYSTERESIS` of the width (of the plot area for the row,
+	# of the band for the column): its own room moves the cell (an
+	# equal-aspect neighbour fitted to the height the bottom margin leaves),
+	# and chama_a6 went right, below and right again on every pass.
+	band = max(w, width_px * _legend_cell_band_span(p.layout, xdom))
+	keep = current === :outside_bottom ? 1.0 : current === :outside_right ? -1.0 : 0.0
+	outside = _legend_row_width(p, legend_id, before) <= w + keep * _LEGEND_SIDE_HYSTERESIS * w ||
+		legend_size[1] + _ROOM_GAP > band / 2 - keep * _LEGEND_SIDE_HYSTERESIS * band ? :outside_bottom : :outside_right
 	(legend_size[1] > w || legend_size[2] > h) && return outside
 	return _scat_best_legend_position(
 		p, main, _axis_layout_key(host_x, :x), host_x, w, h, legend_size;
-		obstacles = obstacles, outside = outside,
+		obstacles = obstacles, outside = outside, inset = inset,
 	)
+end
+
+# Width (paper) of the grid columns PlotlyBase laid out under the x domain
+# `xdom` of a cell (`_subplot_grid_band`: before the finalizer gave any room
+# away), from the first to the last column it overlaps; 0 for a figure
+# without a grid.
+function _legend_cell_band_span(layout::Layout, xdom)
+	sp = layout.subplots
+	(sp.cols >= 1 && length(sp._widths) == sp.cols) || return 0.0
+	lo, hi = Inf, -Inf
+	for col in 1:sp.cols
+		a, b = _subplot_grid_band(sp, :x, col)
+		min(b, xdom[2]) - max(a, xdom[1]) > 1e-9 || continue
+		lo = min(lo, a)
+		hi = max(hi, b)
+	end
+	return hi > lo ? hi - lo : 0.0
 end
 
 # Placement of cell legend `legend_id` at `position` of the best-position
@@ -2806,10 +2903,13 @@ function _legend_row_width(p::Plot, legend_id::AbstractString, before::Integer =
 end
 
 # Box (fractions of the cell) of each candidate position for a legend of
-# `box_w` x `box_h` (fractions), as `_scat_best_legend_position` builds them.
-function _legend_candidate_boxes(box_w::Float64, box_h::Float64)
+# `box_w` x `box_h` (fractions) drawn at legend inset `inset` (fractions of
+# the cell, as `_legend_placement` takes it), as `_scat_best_legend_position`
+# builds them.
+function _legend_candidate_boxes(box_w::Float64, box_h::Float64,
+		inset::Tuple{Float64, Float64} = _DEFAULT_LEGEND_INSET[])
 	return map(_SCAT_LEGEND_POSITIONS) do position
-		x, y, xanchor, yanchor = _legend_anchor((0.0, 1.0), (0.0, 1.0), _DEFAULT_LEGEND_INSET[], position)
+		x, y, xanchor, yanchor = _legend_anchor((0.0, 1.0), (0.0, 1.0), inset, position)
 		u0 = xanchor == "left" ? x : xanchor == "right" ? x - box_w : x - box_w / 2
 		v0 = yanchor == "bottom" ? y : yanchor == "top" ? y - box_h : y - box_h / 2
 		(u0, u0 + box_w, v0, v0 + box_h)
@@ -2825,7 +2925,7 @@ end
 # coordinates. With `outside`, that position when every corner covers data or
 # a tick label.
 function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float64, h::Float64, legend_size;
-	outside::Union{Nothing, Symbol} = nothing)
+	outside::Union{Nothing, Symbol} = nothing, inset::Tuple{Float64, Float64} = _DEFAULT_LEGEND_INSET[])
 	polar = _symbol_dict(get(p.layout.fields, subplot, nothing))
 	radial = _symbol_dict(get(polar, :radialaxis, nothing))
 	angular = _symbol_dict(get(polar, :angularaxis, nothing))
@@ -2882,7 +2982,7 @@ function _legend_best_polar_position(p::Plot, indices, subplot::Symbol, w::Float
 	position(rho, angle) = (0.5 + rho * cosd(angle) / w, 0.5 + rho * sind(angle) / h)
 	box_w = min(0.95, legend_size[1] / w)
 	box_h = min(0.95, legend_size[2] / h)
-	boxes = _legend_candidate_boxes(box_w, box_h)
+	boxes = _legend_candidate_boxes(box_w, box_h, inset)
 	data = zeros(Int, length(boxes))
 	for (rs, thetas, lines, filled, marker) in series
 		stride = max(1, cld(length(rs), _SCAT_LEGEND_MAX_POINTS))
@@ -3052,6 +3152,12 @@ function _text_figure_title!(fig, text, align::Symbol, fontsize::Float64, bold::
 		# right-anchored one left by pad.r; a centred title ignores both.
 		updates[:title_pad_l] = _text_number(align === :left ? dx : 0.0)
 		updates[:title_pad_r] = _text_number(align === :right ? -dx : 0.0)
+		# The whole pad is this placement's: a `pad.b` left by another
+		# placement (`secondary_xaxis!` lifts a paper-anchored title by it)
+		# would lift the container-anchored title by that much again
+		# (layout-fuzz-03). plotly.js' default `pad.b` is 0.
+		_cmn_mapping_get(_cmn_mapping_get(get(_cmn_plot(fig).layout.fields, :title, nothing), :pad), :b) === nothing ||
+			(updates[:title_pad_b] = 0)
 		fontsize > 0 && (updates[:title_font_size] = _text_number(fontsize))
 	end
 	# The pad the room providers wrote for the last title (`_lt_title_pin`)
@@ -3342,6 +3448,15 @@ title of one panel.
   at most two thirds of its height; a figure too small for that still
   overlaps, so make it taller or widen `vertical_spacing`). The top margin grows for titles of
   the first row. `offset` moves it farther out and its room grows with it.
+  A panel title wider than its line (half way to the neighbouring cell in
+  its row, farther where the neighbour's title, outside panel label and
+  plot area leave the gap free, up to them; the figure edge where there is
+  no neighbour; clear of the outside panel labels at the cell's top
+  corners), measured in the face it is drawn in, is broken
+  between words into balanced lines when the figure is finalized, at the
+  size it is drawn or exported at (a larger export joins the lines again);
+  `subplot_titles` too. Math titles (`\$…\$`) and titles with markup other
+  than `<b>`, `<i>` and line breaks are left as written.
 
 `text` goes through mathtext (`"(a) Mesh study, \$\\lambda=10^8\$"` keeps its
 text); `""` removes the title.

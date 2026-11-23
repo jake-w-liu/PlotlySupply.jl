@@ -591,7 +591,10 @@ using Test, PlotlySupply
 			@test set_default_legend_position!(:left_outside) === :outside_left
 			@test throws_arg(() -> set_default_legend_position!(42), "must be a Symbol or a string")
 			@test get_default_legend_position() === :outside_left
-			@test (@test_logs (:warn,) match_mode = :any set_default_legend_position!(:nowhere)) === :topright
+			# D22: an unknown name is an error, and the default stays
+			@test throws_arg(() -> set_default_legend_position!(:nowhere),
+				"set_default_legend_position!: unknown legend position :nowhere")
+			@test get_default_legend_position() === :outside_left
 		finally
 			set_default_legend_position!(original)
 		end
@@ -820,11 +823,12 @@ using Test, PlotlySupply
 		shift(f) = (a = last(annotations(f)); (get(a, :xshift, 0.0), get(a, :yshift, 0.0)))
 		note!(f, x, y; kw...) = annotate!(f, x, y, "note"; coords = :axes, showarrow = false, kw...)
 		# :ieee draws ticks inside on all four sides (mirrored): tick length
-		# 3.5 pt, frame 1 px: 3.5 pt + 1.75 pt + 0.5 px.
+		# 3.5 pt, frame 1 px: the tick, half an em of the text (V3), 0.5 px.
 		ieee = with_style(() -> plot_scatter([0.0, 1.0], [0.0, 1.0]), :ieee)
 		len = Float64(sd(pl(ieee).layout.fields[:yaxis])[:ticklen])
 		@test len ≈ 3.5 * PS._PT_PX
-		pad = len + len / 2 + 0.5
+		em = Float64(sd(pl(ieee).layout.fields[:font])[:size])
+		pad = len + em / 2 + 0.5
 		note!(ieee, 1, 0.5; anchor = :right)
 		@test all(shift(ieee) .≈ (-pad, 0.0))
 		note!(ieee, 0, 0; anchor = :bottomleft)
@@ -861,7 +865,7 @@ using Test, PlotlySupply
 			get(sd(v), :overlaying, nothing) == "y2")
 		relayout!(sf; Symbol(twin, "_ticks") => "inside", Symbol(twin, "_ticklen") => 8)
 		note!(sf, 1, 0.5; row = 1, col = 2, anchor = :right)
-		@test all(shift(sf) .≈ (-(8 + 2.5 + 0.5), 0.0))
+		@test all(shift(sf) .≈ (-(8 + PS._fin_font_size(pl(sf).layout) / 2 + 0.5), 0.0))
 		note!(sf, 0, 0.5; row = 1, col = 2, anchor = :left)
 		@test all(shift(sf) .≈ (3.0, 0.0))                       # the left edge has no inside ticks
 	end
@@ -990,7 +994,144 @@ using Test, PlotlySupply
 		end
 		byname = Dict(a[:name] => a for a in annotations(sf) if haskey(a, :name))
 		a, c = byname["plotlysupply:panel_label:1:1"], byname["plotlysupply:panel_label:2:1"]
-		@test get(a, :xshift, 0) == get(c, :xshift, 0)
+		# The centred math title of the narrow (1, 1) reaches the corner of
+		# (a), which goes beside the corner, outside the axes ("(a) Title" on
+		# one line, `_lt_label_xplacement`); "Error map" leaves (c) at its
+		# corner. The drawn boxes (on the page, nothing overlapping) are
+		# checked in regression_legend.jl, "r1 vm-03".
+		@test a[:xanchor] == "right" && a[:xshift] <= -PS._TEXT_PANEL_GAP
+		@test get(c, :xanchor, "left") == "left" && get(c, :xshift, 0) == 0
 		@test PS._finalize_figure!(sf) === false
+	end
+
+	@testset "r1 layout-fuzz-03: title! rewrites the whole pad of the figure title" begin
+		xs = collect(range(0.0, 1.0; length = 40))
+		top(f) = sd(PS._finalize_export_copy(pl(f), (width = 700, height = 500)).layout.fields[:margin])[:t]
+		a = plot_scatter(xs, xs; xlabel = "x")
+		secondary_xaxis!(a, v -> 2v, v -> v / 2; title = "double")
+		@test sd(sd(pl(a).layout.fields[:title])[:pad])[:b] > 0          # secondary_xaxis!'s lift
+		title!(a, "Field map")
+		@test sd(sd(pl(a).layout.fields[:title])[:pad])[:b] == 0
+		b = plot_scatter(xs, xs; xlabel = "x")
+		title!(b, "Field map")
+		secondary_xaxis!(b, v -> 2v, v -> v / 2; title = "double")
+		# the same room whatever the order (157 vs 97 px before)
+		@test top(a) == top(b)
+		@test PS._finalize_figure!(a) === false && PS._finalize_figure!(b) === false
+		# a title without a pad.b gets none
+		c = plot_scatter(xs, xs)
+		title!(c, "T")
+		@test !haskey(sd(sd(pl(c).layout.fields[:title])[:pad]), :b)
+		# the grid of the report: the rows keep their height
+		sf = subplots(2, 3; sync = false)
+		for r in 1:2, cc in 1:3
+			plot_scatter!(sf, xs, xs .^ cc; row = r, col = cc, xlabel = "x", ylabel = "y")
+		end
+		secondary_xaxis!(sf, v -> 2v, v -> v / 2; row = 1, col = 3, title = "double")
+		title!(sf, "Convergence study")
+		figsize!(sf, 7.0, 3.7; units = :in)
+		@test PS._finalize_figure!(sf) === false
+		e = PS._finalize_export_copy(pl(sf), (width = 672, height = 355.2))
+		m = sd(e.layout.fields[:margin])
+		rows = [(sd(e.layout.fields[k])[:domain][2] - sd(e.layout.fields[k])[:domain][1]) * (355.2 - m[:t] - m[:b])
+			for k in (:yaxis, :yaxis4)]
+		# 157 px and rows of 44 px before; 97 px and 74.6 px rows now
+		@test m[:t] < 110 && all(>(70), rows)
+	end
+
+	@testset "r1 layout-fuzz-16: row and column titles beside spanning cells" begin
+		xs = collect(range(0.0, 1.0; length = 30))
+		titled(sf, prefix) = [(a[:text], a) for a in annotations(sf) if startswith(string(get(a, :text, "")), prefix)]
+		band(sf, letter, i) = PS._subplot_grid_band(pl(sf).layout.subplots, letter, i)
+		# 2 x 1, (1, 1) spans both rows: both titles, each at its row's band
+		sf = subplots(2, 1; sync = false, specs = Any[Spec(rowspan = 2); missing], row_titles = ["Row 1", "Row 2"])
+		plot_scatter!(sf, xs, xs; row = 1, col = 1)
+		got = titled(sf, "Row")
+		@test first.(got) == ["Row 1", "Row 2"]
+		for (i, (_, a)) in enumerate(got)
+			@test a[:y] ≈ sum(band(sf, :y, i)) / 2
+			@test a[:x] ≈ PS._layout_axis_domain(pl(sf).layout, :xaxis)[2]
+		end
+		@test [a[:name] for (_, a) in got] == ["plotlysupply:title!:1:1:row", "plotlysupply:title!:1:1:row:2"]
+		# the regular rows of a grid with a span are unchanged: beside their own cell
+		sg = subplots(3, 2; sync = false, specs = Any[Spec() Spec(rowspan = 2); Spec() missing; Spec() Spec()],
+			row_titles = ["R1", "R2", "R3"])
+		got = Dict(t => a for (t, a) in titled(sg, "R"))
+		@test length(got) == 3
+		@test got["R1"][:y] ≈ sum(band(sg, :y, 1)) / 2 && got["R2"][:y] ≈ sum(band(sg, :y, 2)) / 2
+		y3 = PS._layout_axis_domain(pl(sg).layout, :yaxis5)
+		@test got["R3"][:y] ≈ sum(y3) / 2
+		# the band is the cells' own domain in a row without spans
+		@test collect(band(sg, :y, 3)) ≈ collect(y3)
+		@test collect(band(sg, :x, 2)) ≈ collect(PS._layout_axis_domain(pl(sg).layout, :xaxis5))
+		# a column covered by a colspan keeps its title, over its own band
+		sh = subplots(2, 2; sync = false, specs = Any[Spec(colspan = 2) missing; Spec() Spec()], column_titles = ["C1", "C2"])
+		got = Dict(t => a for (t, a) in titled(sh, "C"))
+		@test length(got) == 2
+		for (i, name) in enumerate(("C1", "C2"))
+			@test got[name][:x] ≈ sum(band(sh, :x, i)) / 2
+			@test got[name][:y] ≈ PS._layout_axis_domain(pl(sh).layout, :yaxis)[2]
+		end
+		# bottom-left start: the bands follow PlotlyBase's order
+		sb = subplots(2, 1; sync = false, start_cell = "bottom-left", row_titles = ["B1", "B2"])
+		got = Dict(t => a for (t, a) in titled(sb, "B"))
+		for (i, name) in enumerate(("B1", "B2"))
+			cell = PS._subplot_grid_cell_domain(pl(sb).layout, i, 1)
+			@test got[name][:y] ≈ sum(cell.y) / 2 ≈ sum(band(sb, :y, i)) / 2
+		end
+		for f in (sf, sg, sh, sb)
+			@test PS._finalize_figure!(f) === false
+		end
+	end
+
+	@testset "r1 O6: 3-D titles are sized with the per-family extents" begin
+		for style in (:default, :ieee, :nature)
+			with_style(style) do
+				for (text, size) in (("Wavelength (nm)", 12.0), ("x", 10.0), ("\$\\lambda\$ (nm)", 11.0))
+					w = PS._s3_title_px(text, size)
+					@test w == PS._text_extent(text, size)[1]
+				end
+				# the cached width of a scene's axis label: exact, at its size
+				long = "Wavelength of the probe (nm)"
+				q = plot_surface([0.0 1; 1 0]; xlabel = long, ylabel = "y")
+				labels = PS._s3_axis_labels(q, :scene)
+				@test labels[1].title_px == PS._s3_title_px(long, labels[1].title_size)
+				@test labels[2].title_px == PS._s3_title_px("y", labels[2].title_size)
+				# a plain title in a journal family: well under the 0.56 em a
+				# character of a tick digit (:default keeps the widest
+				# candidate family, D19)
+				style === :default || @test PS._s3_title_px("Wavelength (nm)", 12.0) < PS._S3_CHAR_EM * 15 * 12.0
+			end
+		end
+		xs = collect(range(0, 1; length = 12))
+		f = with_style(:ieee) do
+			plot_surface(xs, xs, [a * b for a in xs, b in xs]; xlabel = "Wavelength (nm)", ylabel = "Angle (deg)", zlabel = "Power")
+		end
+		@test PS._finalize_figure!(f) === false
+	end
+
+	@testset "r1 sm-06: title! on a figure with a polar cell is settled" begin
+		specs = (reshape([Spec(), Spec(kind = "polar")], 1, 2), reshape([Spec(kind = "polar"), Spec()], 2, 1),
+			[Spec(colspan = 2) missing Spec(kind = "scene"); Spec(kind = "polar") Spec() Spec(secondary_y = true)])
+		for style in (:default, :publication, :ieee), spec in specs, text in ("\$\\alpha_1\$", "line1\nline2", "Plain")
+			sf = with_style(() -> subplots(size(spec)...; sync = false, specs = spec), style)
+			title!(sf, text)
+			before = layout_json(sf)
+			@test PS._finalize_figure!(sf) === false
+			@test layout_json(sf) == before
+			# the margin holds the title above the polar tick labels
+			m = sd(pl(sf).layout.fields[:margin])
+			lookup(k) = get(pl(sf).layout.fields, k, nothing)
+			need = PS._with_figure_style(sf) do
+				root = PS._tight_root_font_size(lookup)
+				room = ceil(1.2 * root + 8) + ceil(PS._tight_title_height(lookup(:title), lookup, root)) + 4
+				min(room, PS._TIGHT_MAX_MARGIN_FRACTION * PS._style_default_figure_size()[2])
+			end
+			@test m[:t] >= need - 1
+		end
+		f = with_style(() -> plot_scatterpolar(collect(0.0:30:330), collect(1.0:12.0)), :publication)
+		PS._finalize_figure!(f)
+		title!(f, "\$\\alpha_1\$")
+		@test PS._finalize_figure!(f) === false
 	end
 end

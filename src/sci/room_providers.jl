@@ -51,6 +51,13 @@
 const _LT_OWNER = :legend_titles
 const _LT_ORDER_LEGEND = 20
 const _LT_ORDER_LINE = 30
+# A panel label below its axes (`panel_labels!(; position = :bottomleft)`)
+# sits right under them, nearer than a colorbar (10) or a legend below the
+# cell: it labels the plot area, and a bar shared by a row of cells reserves
+# room only under the cells of its colour axis, so a label placed beyond it
+# was far from its cell, and the label of a cell without the bar was drawn
+# over the bar (layout-fuzz-15).
+const _LT_ORDER_BELOW_LABEL = 5
 const _LT_ORDER_CAPTION = 40
 const _LT_ORDER_TITLE = 90
 # Paper tolerance for "at the domain edge" (positions written from domains):
@@ -361,8 +368,10 @@ function _lt_decorations(plan)
 		_lt_legend_decorations!(out, plan, cells, single, boxes)
 	end
 
-	# Panel titles and labels.
-	items = get(layout.fields, :annotations, nothing)
+	# Panel titles and labels, a title wider than its line broken into lines
+	# first (`_lt_wrap_panel_titles!`, in the plan's annotations).
+	_lt_wrap_panel_titles!(plan)
+	items = _lt_items(plan)
 	# area => (name, left, px, baseline depth or `nothing`)
 	lines = Dict{Symbol, Vector{Tuple{String, Bool, Float64, Union{Nothing, Float64}}}}()
 	if items isa AbstractVector
@@ -388,9 +397,9 @@ function _lt_decorations(plan)
 					(String(name), role.left, px, depth))
 			elseif role.role === :below
 				y = Float64(_cmn_mapping_get(item, :y))
-				expected = _lt_expected_offset(plan, out, key, :bottom, _LT_ORDER_LINE)
+				expected = _lt_expected_offset(plan, out, key, :bottom, _LT_ORDER_BELOW_LABEL)
 				anchored = _lt_anchored_at(plan, y, plan.areas[key].current[2][1], expected - _ROOM_GAP, -1.0)
-				push!(out, _LtDecor("label:" * name, key, :bottom, px, _LT_ORDER_LINE, anchored, false,
+				push!(out, _LtDecor("label:" * name, key, :bottom, px, _LT_ORDER_BELOW_LABEL, anchored, false,
 					:below_label, String(name), role.left))
 			else
 				push!(out, _LtDecor("label:" * name, key, :none, 0.0, 0, false, false,
@@ -803,9 +812,13 @@ end
 # cell's x span; beside the corner, outside the span and clear of the panel
 # title (`_text_panel_label_xplacement`), when the title is aligned to that
 # corner or, at the final size, would reach the label (a centred title in
-# a narrow cell) and the figure has room beside the corner for it. Beside a
-# centred title wider than the span, the label clears the title's end.
-function _lt_label_xplacement(plan, label, title, left::Bool, span)
+# a narrow cell) and the title line has room beside the corner for it: up to
+# `band` (px from the left of the plot width: the figure edges by default,
+# else `_lt_title_band`, half way to the neighbouring cell on that line).
+# Beside a centred title wider than the span, the label clears the title's
+# end.
+function _lt_label_xplacement(plan, label, title, left::Bool, span;
+		band::Tuple{Float64, Float64} = (-Float64(plan.margins.l), plan.Wp + Float64(plan.margins.r)))
 	corner = (left ? "left" : "right", 0.0)
 	title === nothing && return corner
 	beside = (left ? "right" : "left", left ? -Float64(_TEXT_PANEL_GAP) : Float64(_TEXT_PANEL_GAP))
@@ -822,9 +835,302 @@ function _lt_label_xplacement(plan, label, title, left::Bool, span)
 	reach = left ? t_lo < lo + lw + _TEXT_PANEL_GAP : t_hi > hi - lw - _TEXT_PANEL_GAP
 	reach || return corner
 	over = left ? max(lo - t_lo, 0.0) : max(t_hi - hi, 0.0)
-	room = left ? plan.margins.l + lo : plan.margins.r + (Wp - hi)
+	room = left ? lo - band[1] : band[2] - hi
 	room >= lw + _TEXT_PANEL_GAP + over || return corner
 	return (beside[1], left ? beside[2] - over : beside[2] + over)
+end
+
+# ── Panel titles wider than their room (layout-fuzz-07) ─────────────────────
+#
+# A panel title (`title!(…; row, col)`, `subplot_titles`) is drawn on its
+# cell's title line, between the cell's neighbours on that line and the
+# figure edges, clear of the outside panel labels at the cell's top corners.
+# One wider than that is broken between words when the figure is finalized
+# (as an axis title longer than the figure, `_fin_wrap_axis_titles!`); the
+# line's room grows with its lines. Which breaks are ours is recorded in
+# `layout.meta` (`_LT_WRAP_RECORD_KEY`: annotation name => [title as
+# written, title as wrapped]): every plan starts from the title as written
+# while the annotation still shows our wrap, so a title that fits again (a
+# larger export) is joined again, and a title the user changed is theirs.
+# Math titles (`$…$`) and titles with markup other than `<b>`, `<i>` and line
+# breaks are left as written.
+const _LT_WRAP_RECORD_KEY = Symbol("plotlysupply:title_wrap")
+const _LT_WRAP_MARKUP = r"<(?!/?(?:b|i)>|br\s*/?>)"i
+
+# The wrap record of `layout`: annotation name => (as written, as wrapped).
+function _lt_wrap_record(layout::Layout)
+	raw = _fin_meta_get(layout, _LT_WRAP_RECORD_KEY)
+	out = Dict{String, Tuple{String, String}}()
+	(raw isa AbstractDict || raw isa PlotlyBase.PlotlyAttribute) || return out
+	for (k, v) in (raw isa PlotlyBase.PlotlyAttribute ? raw.fields : raw)
+		(v isa AbstractVector && length(v) == 2 && all(x -> x isa AbstractString, v)) || continue
+		out[String(k)] = (String(v[1]), String(v[2]))
+	end
+	return out
+end
+
+# The annotations the providers read: the plan's (with the updates of this
+# pass: wrapped titles) once it has its own, else the layout's.
+_lt_items(plan) = plan.annotations === nothing ? get(plan.layout.fields, :annotations, nothing) : plan.annotations
+
+# The grid row of each cell of `cells` (`_lt_cell_areas`; a cell spanning
+# rows: its top row): the cells of a row share a title line, an
+# equal-aspect cell fitted lower than its row too (its title is drawn lower,
+# reaching the line of its neighbours' titles).
+function _lt_cell_rows(cells)
+	rows = Dict{Symbol, Int}()
+	for ((r, _), key) in cells
+		rows[key] = min(get(rows, key, r), r)
+	end
+	return rows
+end
+
+# Px span (from the left of the plot width `plan.Wp`) the title line of area
+# `key` may use: from half way to the nearest grid cell on its left on the
+# same title line (`_lt_cell_rows`; the figure's left edge when there is
+# none) to half way to the nearest one on its right (the figure's right
+# edge). `cells` as `_lt_cell_areas`.
+function _lt_title_band(plan, key::Symbol, cells = _lt_cell_areas(plan))
+	(lo, hi), _ = plan.areas[key].current
+	rows = _lt_cell_rows(cells)
+	row = get(rows, key, 0)
+	left, right = -Float64(plan.margins.l), plan.Wp + Float64(plan.margins.r)
+	for other in values(cells)
+		other === key && continue
+		(olo, ohi), _ = plan.areas[other].current
+		rows[other] == row || continue
+		ohi <= lo + _LT_EDGE_TOL && (left = max(left, (ohi + lo) / 2 * plan.Wp))
+		olo >= hi - _LT_EDGE_TOL && (right = min(right, (olo + hi) / 2 * plan.Wp))
+	end
+	return (left, right)
+end
+
+# Width (px) of the widest box a panel title anchored at `xanchor` (+
+# `xshift` px) on the span `span` (paper) may have on its line: within
+# `band` (`_lt_title_wrap_band`), and clear of the outside top labels at the
+# corners (`labels`: (left, width px) each) wherever they go
+# (`_lt_label_xplacement`, within `label_band`, `_lt_title_band`): beside the
+# corner when that band has room for them there, else at the corner. A
+# title aligned to a corner pushes the label of that corner beside it, so
+# that side does not limit it.
+function _lt_title_room(plan, xanchor::AbstractString, xshift::Float64, span, band, labels; label_band = band)
+	lo, hi = span[1] * plan.Wp, span[2] * plan.Wp
+	low, high = band
+	for (left, lw) in labels
+		if left && xanchor != "left"
+			low = lo - label_band[1] >= lw + _TEXT_PANEL_GAP ? label_band[1] + lw + _TEXT_PANEL_GAP : lo + lw + _TEXT_PANEL_GAP
+		elseif !left && xanchor != "right"
+			high = label_band[2] - hi >= lw + _TEXT_PANEL_GAP ? label_band[2] - lw - _TEXT_PANEL_GAP : hi - lw - _TEXT_PANEL_GAP
+		end
+	end
+	anchor = _lt_anchor_x(xanchor, (lo, hi)) + xshift
+	xanchor == "left" && return high - anchor
+	xanchor == "right" && return anchor - low
+	return 2 * min(anchor - low, high - anchor)
+end
+
+# `words` filled greedily into lines at most `width` px wide (`measure`); a
+# longer word keeps a line of its own.
+function _lt_fill_lines(words, measure, width::Float64)
+	lines = String[]
+	current = ""
+	for word in words
+		candidate = isempty(current) ? String(word) : current * " " * word
+		if isempty(current) || measure(candidate) <= width
+			current = candidate
+		else
+			push!(lines, current)
+			current = String(word)
+		end
+	end
+	isempty(current) || push!(lines, current)
+	return lines
+end
+
+# `text` (no math, markup as `_LT_WRAP_MARKUP` allows) with every line (the
+# user's breaks kept as written) broken between words into lines whose
+# width at `font` px in `family` (`_text_drawn_extent`; `bold`: as bold, the
+# wider) is at most `width` px; a longer word keeps a line of its own. The lines are balanced: as few as
+# filling them greedily gives, each as short as that count allows (the
+# narrowest fill width with that count, to `_LT_WRAP_BALANCE_PX`), so a
+# title does not end in one short word ("A rather long panel" / "title for
+# a cell", not "A rather long panel title for a" / "cell").
+const _LT_WRAP_BALANCE_PX = 0.5
+function _lt_wrap_title_text(text::AbstractString, font::Float64, width::Float64, bold::Bool;
+	family::Union{Nothing, AbstractString} = nothing)
+	measure(line) = _text_drawn_extent(line, font; family = family, bold = bold)[1]
+	out = IOBuffer()
+	start = 1
+	wrap(line) = begin
+		measure(line) <= width && return String(line)
+		words = split(line, ' '; keepempty = false)
+		lines = _lt_fill_lines(words, measure, width)
+		length(lines) <= 1 && return join(lines, _FIN_WRAP_BREAK)
+		# The widest word fills a line at any width; below it the count
+		# cannot drop. Bisect the narrowest width keeping the greedy count.
+		lo = maximum(measure, words)
+		hi = width
+		count = length(lines)
+		while hi - lo > _LT_WRAP_BALANCE_PX
+			mid = (lo + hi) / 2
+			trial = _lt_fill_lines(words, measure, mid)
+			length(trial) <= count ? (hi = mid; lines = trial) : (lo = mid)
+		end
+		return join(lines, _FIN_WRAP_BREAK)
+	end
+	for m in eachmatch(_FIN_LINE_BREAK, text)
+		print(out, wrap(SubString(text, start, prevind(text, m.offset))), m.match)
+		start = m.offset + ncodeunits(m.match)
+	end
+	print(out, wrap(SubString(text, start)))
+	return String(take!(out))
+end
+
+# The x span (paper) a panel title of area `a` is placed on: its plot box
+# (an equal-aspect cell's as fitted, `_lt_fitted_box`).
+_lt_title_span(plan, a) = a.aspect ? _lt_fitted_box(plan, a)[1] : a.current[1]
+
+# The CSS family list annotation `item` is drawn in: its own, else the
+# figure's (`layout.font.family`), else the style's in scope.
+function _lt_item_family(plan, item)
+	for font in (_cmn_mapping_get(item, :font), get(plan.layout.fields, :font, nothing))
+		family = font === nothing ? nothing : _cmn_mapping_get(font, :family)
+		(family isa AbstractString && !isempty(strip(family))) && return String(family)
+	end
+	return _text_scope_family()
+end
+
+# Breaks every panel title of the plan wider than its room
+# (`_lt_title_room`; the title measured in the family it is drawn in as far
+# as the tables tell, `_text_drawn_extent`: a conservative width would break
+# titles that fit) into lines, or joins one we broke that fits again, in
+# the plan's annotations (measured by the requests and placed by the place
+# phase of this plan). Once per plan; returns the wrap record as read and as
+# it is now (written to `layout.meta` by the place phase).
+function _lt_wrap_panel_titles!(plan)
+	memo = _lt_plan_memo(plan)
+	cached = get(memo, :title_wrap, nothing)
+	cached === nothing || return cached
+	record = _lt_wrap_record(plan.layout)
+	result = (record, Dict{String, Tuple{String, String}}())
+	memo[:title_wrap] = result
+	items = _lt_items(plan)
+	items isa AbstractVector || return result
+	cells = _lt_cell_areas(plan)
+	single = plan.layout.subplots.rows * plan.layout.subplots.cols == 1
+	titles = Tuple{String, Any, Symbol}[]
+	labels = Dict{Symbol, Vector{Tuple{Bool, Float64}}}()
+	for item in items
+		name = _cmn_item_name(item)
+		name isa AbstractString || continue
+		m = match(_LT_TITLE_NAME, name)
+		kind = m === nothing ? :label : :title
+		m === nothing && (m = match(_LT_LABEL_NAME, name))
+		m === nothing && continue
+		key = get(cells, (parse(Int, m.captures[1]), parse(Int, m.captures[2])), nothing)
+		key === nothing && continue
+		if kind === :title
+			push!(titles, (String(name), item, key))
+		else
+			role = _lt_annotation_role(item, :label, _lt_ref_boxes(plan, plan.areas[key], single))
+			(role !== nothing && role.role === :line) || continue
+			push!(get!(Vector{Tuple{Bool, Float64}}, labels, key), (role.left, _lt_annotation_width(plan, item)))
+		end
+	end
+	# The titles as written (`plain`; `text`: as the annotation shows it),
+	# measured in the family they are drawn in: `box` (left, right) px and
+	# width `w` of the box as written; `breakable`: plain text on the title
+	# line, ours to break.
+	written = NamedTuple[]
+	for (name, item, key) in titles
+		text = _cmn_mapping_get(item, :text)
+		text isa AbstractString || continue
+		rec = get(record, name, nothing)
+		plain = rec !== nothing && text == rec[2] ? rec[1] : String(text)
+		role = _lt_annotation_role(item, :title, _lt_ref_boxes(plan, plan.areas[key], single))
+		breakable = role !== nothing && !occursin('$', plain) && !occursin(_LT_WRAP_MARKUP, plain)
+		font = _lt_font(plan, item)
+		family = _lt_item_family(plan, item)
+		xanchor = something(_fin_string(_cmn_mapping_get(item, :xanchor)), "auto")
+		xshift = something(_lt_real(_cmn_mapping_get(item, :xshift, 0)), 0.0)
+		bold = occursin(r"<b>"i, plain)
+		(lo, hi) = _lt_title_span(plan, plan.areas[key])
+		anchor = _lt_anchor_x(xanchor, (lo * plan.Wp, hi * plan.Wp)) + xshift
+		w = _text_drawn_extent(plain, font; family = family, bold = bold)[1] + _TEXT_ANNOTATION_FRAME
+		box = xanchor == "left" ? (anchor, anchor + w) : xanchor == "right" ? (anchor - w, anchor) : (anchor - w / 2, anchor + w / 2)
+		push!(written, (; name, item, key, text, plain, breakable, font, family, xanchor, xshift, bold, box, w))
+	end
+	boxes = Dict(t.key => t.box for t in written)
+	for t in written
+		wrapped = t.plain
+		if t.breakable
+			band = _lt_title_wrap_band(plan, t.key, cells, boxes, labels)
+			room = _lt_title_room(plan, t.xanchor, t.xshift, _lt_title_span(plan, plan.areas[t.key]), band, get(labels, t.key, ());
+				label_band = _lt_title_band(plan, t.key, cells))
+			if t.w > room + 1e-9
+				wrapped = _lt_wrap_title_text(t.plain, t.font, room - _TEXT_ANNOTATION_FRAME, t.bold; family = t.family)
+			end
+		end
+		wrapped == t.plain || (result[2][t.name] = (t.plain, wrapped))
+		wrapped == t.text || _lt_update_annotation!(plan, t.name, Dict{Symbol, Any}(:text => wrapped))
+	end
+	return result
+end
+
+# The px span (as `_lt_title_band`) a panel title of area `key` may be
+# broken to fit: `_lt_title_band`, widened on a side with a neighbouring cell
+# on the title line whose own title and outside top label stay in their half
+# of the gap between the two cells: up to that title's box as written
+# (`boxes`: area => (left, right) px, `_lt_wrap_panel_titles!`), that label
+# (`labels`, as `_lt_wrap_panel_titles!`; taken beside its corner, as
+# `_lt_label_xplacement` places it) and the neighbour's plot span less
+# `_TEXT_PANEL_GAP` (the boxes may touch: each holds plotly's frame around
+# its text, `_TEXT_ANNOTATION_FRAME`). A title as wide as its cell
+# reaching into an empty gap stays whole (recreate_topo_phase; the room the
+# solve gives the title line keeps it clear of the neighbour's top y tick
+# label); a neighbour reaching past half way is broken to its half itself,
+# which bounds it.
+function _lt_title_wrap_band(plan, key::Symbol, cells, boxes, labels)
+	left, right = _lt_title_band(plan, key, cells)
+	(lo, hi), _ = plan.areas[key].current
+	rows = _lt_cell_rows(cells)
+	row = get(rows, key, 0)
+	for other in values(cells)
+		other === key && continue
+		(olo, ohi), _ = plan.areas[other].current
+		rows[other] == row || continue
+		box = get(boxes, other, nothing)
+		ospan = _lt_title_span(plan, plan.areas[other])
+		if olo >= hi - _LT_EDGE_TOL
+			# on the right: up to its leftmost drawn box, at most its plot
+			# span less the gap
+			half = (olo + hi) / 2 * plan.Wp
+			limit = ospan[1] * plan.Wp - _TEXT_PANEL_GAP
+			box === nothing || (limit = min(limit, box[1]))
+			for (l, lw) in get(labels, other, ())
+				l && (limit = min(limit, ospan[1] * plan.Wp - _TEXT_PANEL_GAP - lw))
+			end
+			limit > half && right == half && (right = limit)
+		elseif ohi <= lo + _LT_EDGE_TOL
+			half = (ohi + lo) / 2 * plan.Wp
+			limit = ospan[2] * plan.Wp + _TEXT_PANEL_GAP
+			box === nothing || (limit = max(limit, box[2]))
+			for (l, lw) in get(labels, other, ())
+				l || (limit = max(limit, ospan[2] * plan.Wp + _TEXT_PANEL_GAP + lw))
+			end
+			limit < half && left == half && (left = limit)
+		end
+	end
+	return (left, right)
+end
+
+# Writes the wrap record of `_lt_wrap_panel_titles!` to `layout.meta` when it
+# changed (place phase). Returns whether it wrote.
+function _lt_write_wrap_record!(plan)
+	record, now = _lt_wrap_panel_titles!(plan)
+	now == record && return false
+	value = isempty(now) ? nothing : Dict{Any, Any}(Symbol(k) => Any[v[1], v[2]] for (k, v) in now)
+	return _fin_meta_set!(plan.layout, _LT_WRAP_RECORD_KEY, value)
 end
 
 # Px a decoration spanning `lo`..`hi` (px from the left of the plot width
@@ -878,7 +1184,7 @@ function _lt_line_lift(plan, items, key::Symbol, entries, expected::Float64)
 			xanchor = something(_fin_string(_cmn_mapping_get(item, :xanchor)), "auto")
 			x = _lt_anchor_x(xanchor, (lo, hi)) + something(_lt_real(_cmn_mapping_get(item, :xshift, 0)), 0.0)
 		else
-			xanchor, xshift = _lt_label_xplacement(plan, item, title, left, span)
+			xanchor, xshift = _lt_label_xplacement(plan, item, title, left, span; band = _lt_title_band(plan, key))
 			x = (left ? lo : hi) + xshift
 		end
 		extent = xanchor == "left" ? (x, x + w) : xanchor == "right" ? (x - w, x) : (x - w / 2, x + w / 2)
@@ -905,9 +1211,11 @@ function _lt_y_tick_font(plan, a, side::Symbol)
 end
 
 function _room_place!(plan, ::Val{:legend_titles})
-	items = get(plan.layout.fields, :annotations, nothing)
 	single = plan.layout.subplots.rows * plan.layout.subplots.cols == 1
 	decorations = _lt_decorations(plan)
+	items = _lt_items(plan)
+	_lt_write_wrap_record!(plan) && (plan.wrote = true)
+	cells = _lt_cell_areas(plan)
 	# A grid holds them always: its cells' legends come and go with their
 	# entries, and a hold that followed them gave a grid of fields without
 	# entries its margins on some passes only (layout-fuzz-01), and a 6 x 6
@@ -934,7 +1242,8 @@ function _room_place!(plan, ::Val{:legend_titles})
 					x = _lt_anchor_x(something(_fin_string(_cmn_mapping_get(item, :xanchor)), "auto"), fx)
 					_lt_update_annotation!(plan, name, Dict{Symbol, Any}(:x => round(x; digits = 9), :y => y))
 				else
-					xanchor, xshift = _lt_label_xplacement(plan, item, title, left, fx)
+					xanchor, xshift = _lt_label_xplacement(plan, item, title, left, fx;
+						band = _lt_title_band(plan, d.area, cells))
 					_lt_update_annotation!(plan, name, Dict{Symbol, Any}(:x => round(left ? fx[1] : fx[2]; digits = 9),
 						:y => y, :xanchor => xanchor, :xshift => xshift))
 				end
@@ -1166,12 +1475,14 @@ function _lt_follow_rule!(plan, d::_LtDecor)
 	# goes then does not depend on where it or another one is now
 	# (docs-truth-16: the margin a legend raised beside the right column
 	# narrowed the cell it was scored on, and it went below the cell and
-	# back; vm-gridleg: three cell legends moved each other's cells).
+	# back; vm-gridleg: three cell legends moved each other's cells). Every
+	# candidate is scored at the inset it is drawn at.
 	rule_keys = Set("legend:" * id for id in auto)
 	xdom, ydom = _lt_box_without_room(plan, d; keys = rule_keys)
 	px = _room_plot_px_without(plan, _LT_OWNER, rule_keys)
 	best = _legend_best_cell_position(plan.p, d.id, xdom, ydom; plot_px = px,
-		current = current in _SCAT_LEGEND_OUTSIDE_POSITIONS ? current : nothing)
+		current = current in _SCAT_LEGEND_OUTSIDE_POSITIONS ? current : nothing,
+		inset = _lt_legend_inset(plan))
 	best === nothing && return false
 	# Placed on the final box; a column below the cell when the row is wider
 	# than the plot area the rule scored.

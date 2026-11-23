@@ -513,9 +513,13 @@ function _derive_power_template(source::PlotlyBase.Template)
 	return derived
 end
 
-function _normalize_legend_position(position)
+# The legend position name `position` (a Symbol or a string: case, `-`/space
+# and the aliases below are normalized) as one of `_VALID_LEGEND_POSITIONS`.
+# Anything else is an `ArgumentError` prefixed with `who` (the public
+# function), raised before a caller changes a figure (D22).
+function _normalize_legend_position(position, who::AbstractString)
 	(position isa Symbol || position isa AbstractString) || throw(ArgumentError(
-		"legend position must be a Symbol or a string such as :topright; got $(repr(position)).",
+		"$(who): legend position must be a Symbol or a string such as :topright; got $(repr(position)).",
 	))
 	pos_raw = lowercase(strip(String(position)))
 	pos_raw = replace(pos_raw, "-" => "_", " " => "_")
@@ -539,11 +543,12 @@ function _normalize_legend_position(position)
 	else
 		pos
 	end
-	if pos in _VALID_LEGEND_POSITIONS
-		return pos
-	end
-	@warn "Unrecognized legend position $(repr(position)); falling back to :topright." valid = _VALID_LEGEND_POSITIONS
-	return :topright
+	pos in _VALID_LEGEND_POSITIONS && return pos
+	throw(ArgumentError(
+		"$(who): unknown legend position $(repr(position)); valid positions are " *
+		join(map(repr, _VALID_LEGEND_POSITIONS), ", ") *
+		" (case, hyphens/spaces and aliases such as \"top-left\", :upper_right or :outside are accepted).",
+	))
 end
 
 """
@@ -621,9 +626,9 @@ Set the package-wide default legend position (see
 `:outside_left`, `:outside_top` and `:outside_bottom` (placed as described in
 [`set_legend!`](@ref)). Case, hyphen/space and alias forms (`"top-left"`,
 `"upper right"`, `:outside`, `:left_outside`, …) are normalized; an
-unrecognized name warns and falls back to `:topright`; a value that is neither
-a `Symbol` nor a string throws an `ArgumentError`. Figures that already exist
-are not changed. Returns the normalized position.
+unrecognized name, or a value that is neither a `Symbol` nor a string, throws
+an `ArgumentError` listing the valid names (the default is then unchanged).
+Figures that already exist are not changed. Returns the normalized position.
 
 While the default is `:topright`, the legends of the scatter and line
 families and the cell legends of a [`SubplotFigure`](@ref) go where they cover
@@ -643,7 +648,7 @@ function set_default_legend_position!(position = :topright; kwargs...)
 		"set_default_legend_position!: the position must be a Symbol or a string such as " *
 		":topright; got $(repr(position)).",
 	))
-	_DEFAULT_LEGEND_POSITION[] = _normalize_legend_position(position)
+	_DEFAULT_LEGEND_POSITION[] = _normalize_legend_position(position, "set_default_legend_position!")
 	return _DEFAULT_LEGEND_POSITION[]
 end
 
@@ -1532,8 +1537,14 @@ const _LEGEND_OUTSIDE_POSITIONS = (:outside_right, :outside_left, :outside_top, 
 const _LEGEND_PLACEMENT_KEYS = (:x, :y, :xanchor, :yanchor, :xref, :yref, :orientation)
 const _LEGEND_ID_PATTERN = r"^legend([2-9]|[1-9][0-9]+)$"
 # Paper tolerance when matching a stored legend position: the room providers
-# store the positions they place rounded to 6 decimals (room_providers.jl).
-const _LEGEND_PLACEMENT_TOL = 1e-6
+# store the positions they place rounded to 6 decimals (room_providers.jl),
+# and the room engine leaves a legend where it is when the new position is
+# within `_FIN_SNAP_PAPER` (2e-5, finalize.jl) of it, so a legend the package
+# placed can sit that far from where `_legend_placement` puts it for the
+# final domains (seams-01: 1.3e-5 for the legend of a heatmap cell at the
+# right paper edge, which then never followed the rule). The snap plus the
+# rounding; 2.1e-5 paper is 0.02 px on a 1000 px figure.
+const _LEGEND_PLACEMENT_TOL = 2.1e-5
 
 # Whether the legend box fields `current` hold `expected`'s value of each of
 # `keys` (numbers within `_LEGEND_PLACEMENT_TOL`; an orientation left out is
@@ -2380,7 +2391,8 @@ function _apply_subplot_legends!(
 				auto = _legend_placement_matches(current, placement, _LEGEND_PLACEMENT_KEYS)
 			else
 				positions = recorded ? (_SCAT_LEGEND_POSITIONS..., _SCAT_LEGEND_OUTSIDE_POSITIONS...) :
-					(something(_legend_best_cell_position(p, legend_id, xdom, ydom; before = auto_from), :topright),)
+					(something(_legend_best_cell_position(p, legend_id, xdom, ydom; before = auto_from,
+						inset = legend_inset), :topright),)
 				# An outside position is matched by anchors, side and (for the
 				# position the rule gave the cell before this append) orientation:
 				# the layout engine sets its coordinates in the room it reserved,
@@ -2418,7 +2430,7 @@ function _apply_subplot_legends!(
 		created && _legend_fill_style_font!(p, legend_key, style_font)
 		if auto
 			# Scored once the box carries its frame and font (its size).
-			best = something(_legend_best_cell_position(p, legend_id, xdom, ydom), :topright)
+			best = something(_legend_best_cell_position(p, legend_id, xdom, ydom; inset = legend_inset), :topright)
 			_legend_write_block!(
 				p,
 				legend_key;
@@ -2543,7 +2555,7 @@ function _refresh_subplot_legends!(
 	else
 		_apply_figure_legend!(
 			p;
-			position = sf.legend_position,
+			position = _legend_figure_position(p, sf.legend_position),
 			inset = sf.legend_inset,
 			bgcolor = sf.legend_bgcolor,
 			bordercolor = sf.legend_bordercolor,
@@ -2552,6 +2564,20 @@ function _refresh_subplot_legends!(
 		)
 	end
 	return p
+end
+
+# Where the figure legend of a SubplotFigure (`per_subplot_legends = false`)
+# goes for the stored position `position`: that position, except that the
+# package default `:topright` while the best-position rule is on (the
+# default legend position is `:topright`) puts it outside the grid, right of
+# it, or below a figure whose plot area is narrower than
+# `_SCAT_LEGEND_BELOW_PX` (`_scat_outside_legend_position`), where the room
+# providers reserve its room: a paper position inside the grid is inside a
+# cell, over that cell's data (dependents-01; 1.x left it to plotly.js,
+# which put it outside on the right).
+function _legend_figure_position(p::Plot, position)
+	(position === :topright && _DEFAULT_LEGEND_POSITION[] === :topright) || return position
+	return _scat_outside_legend_position(_scat_legend_figure_px(p.layout)[1])
 end
 
 """
@@ -2576,7 +2602,7 @@ function _apply_default_legend!(
 	p = _plot_obj(fig)
 	legend_position = position === nothing ? _DEFAULT_LEGEND_POSITION[] :
 		position isa Tuple ? (Float64(position[1]), Float64(position[2])) :
-		_normalize_legend_position(position)
+		_normalize_legend_position(position, "_apply_default_legend!")
 	legend_inset = inset === nothing ? _DEFAULT_LEGEND_INSET[] :
 		(Float64(inset[1]), Float64(inset[2]))
 	_legend_hide_unnamed!(p)
@@ -2689,8 +2715,8 @@ current position.
   `:center`, `:left`, `:bottomright`, `:bottom`, `:bottomleft` (inside the
   axes), or `:outside_right`, `:outside_left`, `:outside_top`,
   `:outside_bottom` (outside; hyphen/space/alias forms such as `"top-left"`,
-  `"upper right"`, `:outside` are accepted, an unknown value warns and falls
-  back to `:topright`) — or an `(fx, fy)` tuple (or 2-vector) of axes
+  `"upper right"`, `:outside` are accepted; an unknown name is an
+  `ArgumentError` listing the valid ones) — or an `(fx, fy)` tuple (or 2-vector) of axes
   fractions, which may lie outside `[0, 1]` (`(1.02, 1)` is just right of the
   top-right corner). `nothing` keeps the current placement (a figure without a
   legend box gets `get_default_legend_position()`).
@@ -2782,11 +2808,10 @@ current position.
 - Stored settings (`sf.legend_position`, `sf.legend_inset`, colours) are updated
   and used for cells that get traces later.
 
-Returns `fig` (the `SubplotFigure` for one). Invalid values of the other
-keywords, and a `position` of the wrong type, throw an `ArgumentError` before
-anything is changed; an unknown position *name* is the exception: it warns and
-falls back to `:topright` (see Placement), so the figure is changed. `show` is
-not accepted (this modifies an existing figure).
+Returns `fig` (the `SubplotFigure` for one). Invalid values of any keyword,
+an unknown position name (the message lists the valid ones) and a `position`
+of the wrong type included, throw an `ArgumentError` before anything is
+changed. `show` is not accepted (this modifies an existing figure).
 
 # Example
 ```julia
@@ -2941,7 +2966,9 @@ function _legend_set_figure_mode!(sf::SubplotFigure, p::Plot, opts)
 	was_per = sf.per_subplot_legends
 	sf.per_subplot_legends = false
 	_legend_store_settings!(sf, opts)
-	position = opts.position === nothing ? sf.legend_position : opts.position
+	# A position given by this call is the user's; the stored one may be the
+	# default, which puts the figure legend outside the grid.
+	position = opts.position === nothing ? _legend_figure_position(p, sf.legend_position) : opts.position
 	if was_per
 		# Cell boxes (and a figure-entry box) are no longer referenced.
 		for key in collect(keys(p.layout.fields))
@@ -3242,9 +3269,9 @@ in [`set_legend!`](@ref); the 1.x names `legend_inset`, `legend_bgcolor`,
   once (`position = nothing` means `get_default_legend_position()`).
 
 `ncols` gives each cell's legend that many columns (fewer, with a warning,
-where they do not fit the cell). Returns `fig`. Invalid values throw an
-`ArgumentError` before anything is changed, except that an unknown position
-name warns and falls back to `:topright`; `show` is not accepted, nor are
+where they do not fit the cell). Returns `fig`. Invalid values, an unknown
+position name included, throw an `ArgumentError` before anything is changed;
+`show` is not accepted, nor are
 `row`/`col` (this sets up the legend of every cell; use
 `set_legend!(sf; row, col, …)` for one cell's legend).
 
@@ -3903,7 +3930,10 @@ with `plot_*!` get a colorbar next to their own cell (see
   finite number per column. Cannot be combined with `column_widths`.
 - `per_subplot_legends::Bool=true`: every cell gets its own legend inside the
   cell. `false` keeps one figure legend, placed and styled with the
-  `legend_*` keywords below as soon as a named trace is added.
+  `legend_*` keywords below as soon as a named trace is added; at the default
+  `legend_position = :topright` (while `get_default_legend_position()` is
+  `:topright`) it goes outside the grid, right of it, or below a narrow
+  figure, so it never covers a cell's data.
 - `legend_position::Union{Symbol,AbstractString}`: legend placement inside
   each cell (or the figure), one of the [`set_legend!`](@ref) positions.
 - `legend_inset=(0.02, 0.03)`: legend offset from the cell edges as fractions
@@ -4051,7 +4081,7 @@ function subplots(
 		title = resolved_window_title,
 		show = show,
 	)
-	normalized_legend_position = _normalize_legend_position(legend_position)
+	normalized_legend_position = _normalize_legend_position(legend_position, "subplots")
 	((legend_inset isa Tuple || legend_inset isa AbstractVector) && length(legend_inset) == 2 &&
 		all(v -> v isa Real && !(v isa Bool) && isfinite(v), legend_inset)) ||
 		throw(ArgumentError(
@@ -10908,19 +10938,38 @@ function _scat_layout_px(layout, key::Symbol, default::Float64)
 	return value isa Real && !(value isa Bool) && value > 0 ? Float64(value) : default
 end
 
-# Coordinates of `values` on an axis of type `axis_type` (log10 on a log axis);
-# `nothing` when a value is neither numeric nor a gap (the extent is unknown).
-# A `Vector{Float64}` on a linear axis is already in axis units and is returned
-# as it is (callers only read it), so a million-point trace is not copied.
-function _scat_legend_coords(values, log_axis::Bool)
+# Characters plotly.js `Lib.cleanNumber` strips from a string before reading
+# it as a number: quotes, `%`, `,`, `$`, `#` and blanks at either end, and
+# every comma and space inside ("$1,200" is 1200).
+const _SCAT_LEGEND_NUMBER_JUNK = r"^['\"%,$#\s]+|[, ]|['\"%,$#\s]+$"
+
+# The number plotly.js reads from string `value` on a linear or log axis
+# (`Lib.cleanNumber`: "2019" is 2019), or `nothing` for a string it does not
+# read as a finite number (blank, text, "Infinity").
+function _scat_legend_numeric_string(value::AbstractString)
+	cleaned = replace(value, _SCAT_LEGEND_NUMBER_JUNK => "")
+	isempty(cleaned) && return nothing
+	number = tryparse(Float64, cleaned)
+	return number !== nothing && isfinite(number) ? number : nothing
+end
+
+# Coordinates of `values` on a linear axis (log10 on a log axis); `nothing`
+# when a value is neither numeric nor a gap (the extent is unknown). With
+# `strings = true` (the caller knows the axis is linear or log, not an
+# autotyped category axis) a string is read as plotly.js reads it there
+# (vm-stackleg: years given as "2019" are numbers; a string it cannot read is
+# a gap, NaN, as plotly.js draws nothing there). A `Vector{Float64}` on a
+# linear axis is already in axis units and is returned as it is (callers only
+# read it), so a million-point trace is not copied.
+function _scat_legend_coords(values, log_axis::Bool; strings::Bool = false)
 	values isa AbstractVector || return nothing
 	(values isa Vector{Float64} && !log_axis) && return values
 	out = Vector{Float64}(undef, length(values))
 	for (index, value) in enumerate(values)
 		if value === nothing || value === missing
 			out[index] = NaN
-		elseif value isa Real && !(value isa Bool)
-			v = Float64(value)
+		elseif (value isa Real && !(value isa Bool)) || (strings && value isa AbstractString)
+			v = value isa AbstractString ? something(_scat_legend_numeric_string(value), NaN) : Float64(value)
 			out[index] = log_axis ? (v > 0 ? log10(v) : NaN) : v
 		else
 			return nothing
@@ -11057,7 +11106,9 @@ function _scat_best_legend_position(p::Plot)
 		# meet the angular tick labels plotly.js draws under the disk
 		return _legend_best_polar_position(p, eachindex(p.data), polar, w, h, box; outside = :outside_right)
 	end
-	return _scat_best_legend_position(p, eachindex(p.data), :xaxis, "x", width_px, height_px, box)
+	figure_width = _scat_layout_px(p.layout, :width, Float64(_style_default_figure_size()[1]))
+	return _scat_best_legend_position(p, eachindex(p.data), :xaxis, "x", width_px, height_px, box;
+		outside = _scat_outside_legend_fit(width_px, figure_width, box))
 end
 
 # The plot area (px) of `p`, `width_px` x `height_px` now, once the finalizer
@@ -11106,7 +11157,10 @@ end
 # (`_scat_legend_reference_scores!`). When no position is free of data the
 # result is `outside` (default: `_scat_outside_legend_position(width_px)`;
 # a cell legend: below or right of its cell, `_legend_best_cell_position`;
-# `nothing`: the position covering the least). Used for a Plot (all traces, main axes)
+# `nothing`: the position covering the least). `inset` is the legend inset
+# (fractions of the plot area) the box is drawn at, `_legend_placement`'s
+# (dependents-02: a cell legend drawn at its figure's `legend_inset` must be
+# scored there). Used for a Plot (all traces, main axes)
 # and for a SubplotFigure cell legend (the cell's traces,
 # `_legend_best_cell_position`).
 function _scat_best_legend_position(
@@ -11119,8 +11173,9 @@ function _scat_best_legend_position(
 	box = nothing;
 	obstacles = (),
 	outside::Union{Nothing, Symbol} = _scat_outside_legend_position(width_px),
+	inset::Tuple{Float64, Float64} = _DEFAULT_LEGEND_INSET[],
 )
-	scores = _scat_legend_scores(p, indices, xkey, xref, width_px, height_px, box; obstacles = obstacles)
+	scores = _scat_legend_scores(p, indices, xkey, xref, width_px, height_px, box; obstacles = obstacles, inset = inset)
 	scores === nothing && return nothing
 	# `argmin` returns the first minimum: ties keep the candidate order, and a
 	# position covering nothing (score 0) wins over every covering one. The
@@ -11148,6 +11203,23 @@ const _SCAT_LEGEND_OUTSIDE_POSITIONS = (:outside_right, :outside_bottom)
 # a plot area `width_px` wide: right of it, or below it at column width.
 _scat_outside_legend_position(width_px::Real) =
 	width_px < _SCAT_LEGEND_BELOW_PX ? :outside_bottom : :outside_right
+
+# The same for a legend of `box = (w, h)` px (`nothing`: not measured) in a
+# figure `figure_width_px` wide, so that the room it is given leaves a plot
+# area (errors-inputs-03: a 100-character entry put right of the axes took
+# 692 of 700 px): right of the axes while the legend is at most half the
+# figure wide, else below them while its widest entry fits the figure width
+# (a horizontal legend wraps between entries, never inside one), else
+# `nothing` (the inside position covering the least; the legend is clipped
+# at the figure edge but the plot area keeps its size). The figure width,
+# not the plot area, so the choice does not change when the room the legend
+# got narrows the plot area.
+function _scat_outside_legend_fit(width_px::Real, figure_width_px::Real, box)
+	position = _scat_outside_legend_position(width_px)
+	box === nothing && return position
+	position === :outside_right && box[1] <= figure_width_px / 2 && return position
+	return box[1] <= figure_width_px ? :outside_bottom : nothing
+end
 
 # One scored series: y axis key, coordinates (log10 on a log axis) and how
 # they are drawn (`:points` where they lie, `:segments` joining consecutive
@@ -11216,7 +11288,7 @@ function _scat_legend_autotype(values)::Symbol
 			dates += 1
 			others += 1
 		elseif value isa AbstractString
-			if tryparse(Float64, strip(value)) !== nothing
+			if _scat_legend_numeric_string(value) !== nothing
 				numbers += 1
 			else
 				_scat_legend_date_ms(value) === nothing || (dates += 1)
@@ -11325,8 +11397,8 @@ end
 # positions on a category axis; NaN for a gap), or `nothing` when a value is
 # not one the axis reads.
 function _scat_legend_axis_coords(values, axis::_ScatLegendAxis)
-	axis.kind === :linear && return _scat_legend_coords(values, false)
-	axis.kind === :log && return _scat_legend_coords(values, true)
+	axis.kind === :linear && return _scat_legend_coords(values, false; strings = true)
+	axis.kind === :log && return _scat_legend_coords(values, true; strings = true)
 	values isa AbstractVector || return nothing
 	out = Vector{Float64}(undef, length(values))
 	for (index, value) in enumerate(values)
@@ -11375,7 +11447,12 @@ const _SCAT_LEGEND_BLOCK_LAYOUT = Dict(
 
 # plotly.js violin bandwidth (violin/calc.js): the trace's `bandwidth` (at
 # least a 1e-4 share of the range), else Silverman's rule (at least a 1e-2
-# share of the range).
+# share of the range) with the sample standard deviation and the IQR of the
+# box quartiles plotly.js computes first (box/calc.js: `Lib.interp`, the
+# 0-based position n q - 0.5 clamped to the sample, at q = 1/4 and 3/4; for
+# an odd sample under `quartilemethod` "exclusive"/"inclusive" the medians of
+# the lower and upper halves without/with the median; numerics-09: type-7
+# quartiles gave 0.495 for plotly's 0.539).
 function _scat_legend_violin_bandwidth(fields, values::Vector{Float64})
 	lo, hi = extrema(values)
 	span = hi - lo
@@ -11386,13 +11463,26 @@ function _scat_legend_violin_bandwidth(fields, values::Vector{Float64})
 	mean = sum(values) / n
 	std = n > 1 ? sqrt(sum(v -> (v - mean)^2, values) / (n - 1)) : 0.0
 	sorted = sort(values)
-	quantile(q) = begin
-		position = 1 + (n - 1) * q
+	# plotly.js `Lib.interp(arr, q)` over `sorted[first:last]`
+	interp(first, last, q) = begin
+		m = last - first + 1
+		position = m * q - 0.5                    # 0-based
+		position <= 0 && return sorted[first]
+		position >= m - 1 && return sorted[last]
 		lower = floor(Int, position)
-		upper = min(lower + 1, n)
-		sorted[lower] + (position - lower) * (sorted[upper] - sorted[lower])
+		fraction = position - lower
+		(1 - fraction) * sorted[first + lower] + fraction * sorted[first + lower + 1]
 	end
-	iqr = quantile(0.75) - quantile(0.25)
+	method = get(fields, :quartilemethod, "linear")
+	method = method isa Union{AbstractString, Symbol} ? String(method) : "linear"
+	half = n ÷ 2
+	iqr = if isodd(n) && method == "exclusive"
+		interp(half + 2, n, 0.5) - interp(1, half, 0.5)
+	elseif isodd(n) && method == "inclusive"
+		interp(half + 1, n, 0.5) - interp(1, half + 1, 0.5)
+	else
+		interp(1, n, 0.75) - interp(1, n, 0.25)
+	end
 	return max(1.059 * min(std, iqr / 1.349) * n^(-0.2), span / 100)
 end
 
@@ -11426,14 +11516,14 @@ function _scat_legend_block_series!(series::Vector{_ScatLegendSeries}, reaches::
 		# there are not read.
 		pos_log = pos_axis.kind === :log
 		pos_log && type != "bar" && return false, xpadded, xzero
-		values = _scat_legend_coords(get(fields, val_letter, nothing), false)   # data units
+		values = _scat_legend_coords(get(fields, val_letter, nothing), false; strings = true)   # data units
 		values === nothing && return false, xpadded, xzero
 		raw_positions = _scat_legend_axis_values(fields, type, pos_letter)
 		positions = if raw_positions === nothing
 			type == "bar" && pos_axis.kind === :linear || return false, xpadded, xzero
 			Float64.(0:(length(values) - 1))                     # plotly.js x0 = 0, dx = 1
 		else
-			pos_log ? _scat_legend_coords(raw_positions, false) : _scat_legend_axis_coords(raw_positions, pos_axis)
+			pos_log ? _scat_legend_coords(raw_positions, false; strings = true) : _scat_legend_axis_coords(raw_positions, pos_axis)
 		end
 		positions === nothing && return false, xpadded, xzero
 		type == "violin" && val_axis.kind === :log && return false, xpadded, xzero
@@ -11565,6 +11655,7 @@ function _scat_legend_scores(
 	height_px::Float64,
 	box = nothing;
 	obstacles = (),
+	inset::Tuple{Float64, Float64} = _DEFAULT_LEGEND_INSET[],
 )
 	layout = p.layout
 	entries = 0
@@ -11698,7 +11789,7 @@ function _scat_legend_scores(
 	else
 		(min(0.95, box[1] / width_px), min(0.95, box[2] / height_px))
 	end
-	boxes = map(b -> map(Float64, b), _legend_candidate_boxes(Float64(box_w), Float64(box_h)))
+	boxes = map(b -> map(Float64, b), _legend_candidate_boxes(Float64(box_w), Float64(box_h), inset))
 	scores = zeros(Int, length(boxes))
 	xw = (Float64(xwindow[1]), Float64(xwindow[2]))
 	for (index, (ykey, xs, ys, kind, shape)) in enumerate(series)
@@ -23214,20 +23305,28 @@ end
 # `linewidth` 1 px.
 const _ANNOTATION_PLOTLY_TICKLEN = 5.0
 const _ANNOTATION_PLOTLY_LINEWIDTH = 1.0
+# Clear gap (em of the text) between edge-anchored text and the inner end of
+# the tick marks pointing inwards along that edge (`_annotation_edge_pad`):
+# half an em, the gap the sized styles keep between tick labels and axis
+# titles (D24, `PlotStyle.title_gap`).
+const _ANNOTATION_TICK_GAP_EM = 0.5
 
 # Shift (px, signed: +x right, +y up) that keeps text anchored at an edge of
 # a Cartesian cell's axes clear of the frame and of the tick marks drawn
 # inside it (v7). It applies to `coords = :axes` text without an arrow whose
 # `letter` coordinate `fraction` is exactly 0 or 1 and whose anchor on that
 # letter is the edge's own side, or plotly's automatic anchor (which anchors
-# a position at an edge to that edge). The pad is half the tick length plus
-# half the frame line, plus the tick length where tick marks point inwards
-# along that edge: of the cell's axes running along it (the y axes for the
-# left/right edges, the x axes for the bottom/top edges, twin axes overlaying
-# them included), on their own side or mirrored (`mirror = "ticks"`). The
-# tick length and line width are the axes' own, as the style wrote them,
-# else the template's, else plotly's defaults. 0 otherwise.
-function _annotation_edge_pad(p::Plot, target, letter::Symbol, fraction, anchor)
+# a position at an edge to that edge). The pad is half the frame line plus
+# half the tick length; where tick marks point inwards along that edge (of
+# the cell's axes running along it: the y axes for the left/right edges, the
+# x axes for the bottom/top edges, twin axes overlaying them included, on
+# their own side or mirrored, `mirror = "ticks"`) it is half the frame line
+# plus the longest inward tick plus `_ANNOTATION_TICK_GAP_EM` of the text's
+# font size `fontsize` (px; at least half the tick length), so a mirrored
+# tick never touches the text (V3: "9.6 nm -" under :ieee). The tick length
+# and line width are the axes' own, as the style wrote them, else the
+# template's, else plotly's defaults. 0 otherwise.
+function _annotation_edge_pad(p::Plot, target, letter::Symbol, fraction, anchor; fontsize::Real)
 	target.kind === :xy || return 0.0
 	(fraction isa Real && (fraction == 0 || fraction == 1)) || return 0.0
 	low = fraction == 0
@@ -23270,7 +23369,8 @@ function _annotation_edge_pad(p::Plot, target, letter::Symbol, fraction, anchor)
 	if !haskey(fields, base_key) && template_value(:ticks) == "inside"
 		inward = max(inward, main_len)
 	end
-	pad = inward + main_len / 2 + main_line / 2
+	pad = inward > 0 ? inward + max(main_len / 2, _ANNOTATION_TICK_GAP_EM * Float64(fontsize)) + main_line / 2 :
+		main_len / 2 + main_line / 2
 	return low ? pad : -pad
 end
 
@@ -24014,10 +24114,13 @@ function _extended_annotate!(
 	# frame and its inward ticks (`_annotation_edge_pad`), unless `offset` or a
 	# raw `xshift`/`yshift` places it.
 	if !offset_given && !draw_arrow && fit === nothing && !haskey(entry, :xshift) && !haskey(entry, :yshift)
+		text_px = font_px > 0 ? font_px : _annotation_number(get(font, :size, nothing), _fin_font_size(layout))
 		x_system === :axes && xref === nothing &&
-			(dx = _annotation_edge_pad(_plot_obj(fig), target, :x, x_position, get(entry, :xanchor, nothing)))
+			(dx = _annotation_edge_pad(_plot_obj(fig), target, :x, x_position, get(entry, :xanchor, nothing);
+				fontsize = text_px))
 		y_system === :axes && yref === nothing &&
-			(dy = _annotation_edge_pad(_plot_obj(fig), target, :y, y_position, get(entry, :yanchor, nothing)))
+			(dy = _annotation_edge_pad(_plot_obj(fig), target, :y, y_position, get(entry, :yanchor, nothing);
+				fontsize = text_px))
 	end
 	if dx != 0 || dy != 0
 		shift_keys = draw_arrow ? (:ax, :ay, :axref, :ayref) : (:xshift, :yshift)
@@ -24203,10 +24306,12 @@ Position:
   arrow the whole annotation is shifted. `nothing` is no shift, except for
   text without an arrow at an edge of a Cartesian cell's axes (`coords =
   :axes`, `x` or `y` exactly 0 or 1, anchored to that edge or by plotly's
-  automatic anchor): it keeps a pad from the frame of half the tick length
-  plus half the frame line, and the tick length again where tick marks point
-  inwards along that edge (`ticks = "inside"`, mirrored ticks included). An
-  explicit `offset`, also `(0, 0)`, replaces that pad.
+  automatic anchor): it keeps a pad from the frame of half the frame line
+  plus half the tick length, or, where tick marks point inwards along that
+  edge (`ticks = "inside"`, mirrored ticks included, as under the journal
+  styles), half the frame line plus the tick length plus half an em of the
+  text, so the ticks never touch it. An explicit `offset`, also `(0, 0)`,
+  replaces that pad.
 - `units::Symbol = :px`: unit of `offset`, `fontsize`, `pad` and
   `edgewidth`: `:px` (CSS px) or `:pt` (1 pt = 4/3 px), e.g. `offset = (3, 0),
   units = :pt` for a gap of 3 pt whatever the figure size.
