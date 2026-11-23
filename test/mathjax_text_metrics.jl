@@ -371,7 +371,9 @@ $(PS._EXPORT_RESET_DIV_JS)
 		# (the label's x translate is the tick-label standoff: -2 under the
 		# journal styles' inside ticks; only y is compared)
 		tick = match(r"class=\"ytick\"><text[^>]*transform=\"translate\([-0-9.]+,([0-9.]+)\)\"[^>]*>0</text>", svg)
-		group = match(r"<g class=\"xy\" transform=\"translate\(([0-9.]+),([0-9.]+)\)\"", svg)
+		# (attributes in name order: the export writes deterministic SVG,
+		# so `clip-path` comes before `transform`)
+		group = match(r"<g class=\"xy\"[^>]*? transform=\"translate\(([0-9.]+),([0-9.]+)\)\"", svg)
 		line = match(r"<path class=\"js-line\" d=\"M([0-9.]+),([0-9.]+)", svg)
 		@test tick !== nothing && group !== nothing && line !== nothing
 		if tick !== nothing && group !== nothing && line !== nothing
