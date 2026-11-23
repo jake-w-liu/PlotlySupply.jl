@@ -490,7 +490,7 @@ end
 	@test _r1_argerr(() -> extendtraces!(fig, Dict(:y => [[5.0]]), [1], Dict(:x => [1])), "extendtraces!: `maxpoints` must contain an entry")
 	old = get_default_legend_position()
 	try
-		@test _r1_argerr(() -> set_default_legend_position!(3), "set_default_legend_position!: the position must be a Symbol")
+		@test _r1_argerr(() -> set_default_legend_position!(3), "set_default_legend_position!: legend position must be a Symbol")
 		@test _r1_argerr(() -> set_default_legend_position!(nothing), "set_default_legend_position!:")
 		@test get_default_legend_position() == old
 	finally

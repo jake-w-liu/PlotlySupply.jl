@@ -660,10 +660,8 @@ set_default_legend_position!()                                         # back to
 """
 function set_default_legend_position!(position = :topright; kwargs...)
 	_reject_keywords("set_default_legend_position!", kwargs)
-	(position isa Symbol || position isa AbstractString) || throw(ArgumentError(
-		"set_default_legend_position!: the position must be a Symbol or a string such as " *
-		":topright; got $(repr(position)).",
-	))
+	# `_normalize_legend_position` rejects a non-Symbol/non-string position
+	# with the message every legend verb gives (D22).
 	_DEFAULT_LEGEND_POSITION[] = _normalize_legend_position(position, "set_default_legend_position!")
 	return _DEFAULT_LEGEND_POSITION[]
 end
