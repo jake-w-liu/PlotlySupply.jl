@@ -842,7 +842,7 @@ end
 # Beside a centred title wider than the span, the label clears the title's
 # end.
 function _lt_label_xplacement(plan, label, title, left::Bool, span;
-		band::Tuple{Float64, Float64} = (-Float64(plan.margins.l), plan.Wp + Float64(plan.margins.r)))
+		band::Tuple{Float64, Float64} = _lt_page_band(plan))
 	corner = (left ? "left" : "right", 0.0)
 	title === nothing && return corner
 	beside = (left ? "right" : "left", left ? -Float64(_TEXT_PANEL_GAP) : Float64(_TEXT_PANEL_GAP))
@@ -909,6 +909,25 @@ function _lt_cell_rows(cells)
 	return rows
 end
 
+# Px span (from the left of the plot width `plan.Wp`) of the page as plotly
+# draws it: the figure edges at the left and right margins the plan's
+# margins become. plotly.js 2.35.2 adds `pad = min(12, margin.l, margin.r,
+# margin.t, margin.b)` to what an axis pushes (plots.js `autoMargin`, the
+# layout margin), where the plan's estimate adds `_FIN_AUTOMARGIN_EXTRA`
+# (12): under a journal style's 4 px margins a pushed side is drawn 8 px
+# narrower than the plan holds, and the drawn plot width is that much
+# wider. Measured from the plan's plot left, the drawn edges are then no
+# farther out than these, so a title and label kept within them stay on
+# the page (layout-fuzz-07: "(a)" beside a long :ieee title went 6 px off
+# the left edge once the D24 title gap widened the cells).
+function _lt_page_band(plan)
+	base = _fin_margins_base(plan.layout)
+	pad = min(_FIN_AUTOMARGIN_EXTRA, base.l, base.r, base.t, base.b)
+	drawn(letter) = (m = Float64(getfield(plan.margins, letter)); b = getfield(base, letter);
+		m > b ? max(b, m - (_FIN_AUTOMARGIN_EXTRA - pad)) : m)
+	return (-drawn(:l), plan.Wp + drawn(:r))
+end
+
 # Px span (from the left of the plot width `plan.Wp`) the title line of area
 # `key` may use: from half way to the nearest grid cell on its left on the
 # same title line (`_lt_cell_rows`; the figure's left edge when there is
@@ -918,7 +937,7 @@ function _lt_title_band(plan, key::Symbol, cells = _lt_cell_areas(plan))
 	(lo, hi), _ = plan.areas[key].current
 	rows = _lt_cell_rows(cells)
 	row = get(rows, key, 0)
-	left, right = -Float64(plan.margins.l), plan.Wp + Float64(plan.margins.r)
+	left, right = _lt_page_band(plan)
 	for other in values(cells)
 		other === key && continue
 		(olo, ohi), _ = plan.areas[other].current
