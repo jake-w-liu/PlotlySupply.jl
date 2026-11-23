@@ -433,7 +433,7 @@ using Test, PlotlySupply
 		@test lognorm.customdata === raw
 		@test lognorm.cmin === nothing && lognorm.cmax === nothing
 		@test lognorm.tickvals == [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0]
-		@test "10<sup>-3</sup>" in lognorm.ticktext && lognorm.ticktext[end] == "10<sup>2</sup>"
+		@test "10<sup>−3</sup>" in lognorm.ticktext && lognorm.ticktext[end] == "10<sup>2</sup>"
 		@test P._apply_color_norm(raw; colornorm = "LOG").tickvals == lognorm.tickvals
 
 		clipped = P._apply_color_norm(raw; colornorm = :log, crange = [1e-2, 1e2])
@@ -450,7 +450,7 @@ using Test, PlotlySupply
 
 		narrow = P._apply_color_norm([2.0, 8.0]; colornorm = :log)
 		@test narrow.tickvals ≈ [log10(2), log10(5)]
-		@test narrow.ticktext == ["2×10<sup>0</sup>", "5×10<sup>0</sup>"]
+		@test narrow.ticktext == ["2", "5"]
 		@test length(P._apply_color_norm([3.1, 3.3]; colornorm = :log).tickvals) == 2
 		wide = P._apply_color_norm([1e-30, 1e30]; colornorm = :log)
 		@test 2 <= length(wide.tickvals) <= 9
@@ -483,7 +483,7 @@ using Test, PlotlySupply
 		@test first.(logged.stops) ≈ [0, 1 / 3, 1 / 3, 2 / 3, 2 / 3, 1]
 		@test logged.cmin == 0.0 && logged.cmax ≈ 3.0
 		@test logged.tickvals ≈ [0, 1, 2, 3]
-		@test logged.ticktext == ["10<sup>0</sup>", "10<sup>1</sup>", "10<sup>2</sup>", "10<sup>3</sup>"]
+		@test logged.ticktext == ["1", "10", "10<sup>2</sup>", "10<sup>3</sup>"]
 		@test logged.values ≈ [log10(5) log10(50)]
 		@test P._apply_color_norm(z; levels = [0, 1]).stops == [Any[0.0, P._sample_colorscale(P._template_colorscale(), 0.5)],
 			Any[1.0, P._sample_colorscale(P._template_colorscale(), 0.5)]]
@@ -503,7 +503,7 @@ using Test, PlotlySupply
 		@test linear.tickvals == [0.0, 500.0, 1000.0] && linear.ticktext == ["lo", "\$m\$", "hi"]
 		@test P._apply_color_norm(z; ticks = 1:3).ticktext === nothing
 		logticks = P._apply_color_norm(z; colornorm = :log, ticks = [1, 100])
-		@test logticks.tickvals == [0.0, 2.0] && logticks.ticktext == ["10<sup>0</sup>", "10<sup>2</sup>"]
+		@test logticks.tickvals == [0.0, 2.0] && logticks.ticktext == ["1", "10<sup>2</sup>"]
 		labelled = P._apply_color_norm(z; colornorm = :log, ticks = [1, 100], ticklabels = ["one", "hundred"])
 		@test labelled.ticktext == ["one", "hundred"]
 		@test P._apply_color_norm(z; colornorm = :log, ticks = [3]).ticktext == ["3"]
@@ -704,5 +704,191 @@ using Test, PlotlySupply
 		catch err
 			@test occursin("ElectronCall", sprint(showerror, err)) || occursin("Plotly.js", sprint(showerror, err))
 		end
+	end
+end
+
+@testset "v8 axes-style: log colour bars (apia-06, numerics-11) and colormap_colors bound" begin
+	PSX = PlotlySupply
+	cbar(f) = (c = f.data[1].fields[:colorbar]; c isa AbstractDict ? c : c.fields)
+	# apia-06: colorbar!(ticks) on a log colour scale takes data values for
+	# every field shape (a square field used to be read as decades).
+	for (m, n) in ((20, 10), (6, 5), (6, 6), (10, 10), (1, 1))
+		V = [10.0^(3 * (a - 1) / max(m - 1, 1)) * (1 + 0.1b) for a in 1:m, b in 1:n]
+		for make in (plot_heatmap, plot_contour)
+			(make === plot_contour && min(m, n) < 2) && continue
+			f = make(V; colornorm = :log)
+			colorbar!(f; ticks = [1, 10, 100])
+			@test cbar(f)[:tickvals] == [0.0, 1.0, 2.0]
+			@test cbar(f)[:ticktext] == ["1", "10", "10<sup>2</sup>"]
+		end
+	end
+	f = plot_heatmap([1.0 10; 100 1000]; colornorm = :log)
+	err = try
+		colorbar!(f; ticks = [-1, 10]); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && startswith(err.msg, "colorbar!: ")
+	# numerics-11: decades 1 and 10 written plainly, U+2212 minus.
+	@test PSX._format_colorbar_number(-2.5e-7) == "−2.5×10<sup>−7</sup>"
+	@test PSX._format_colorbar_number(-0.05) == "−0.05"
+	@test PSX._format_colorbar_number(3e8) == "3×10<sup>8</sup>"
+	@test PSX._log_colorbar_ticks(log10(0.02), log10(0.08))[2] == ["2×10<sup>−2</sup>", "5×10<sup>−2</sup>"]
+	# errors-inputs-10: a count no colour table holds is an ArgumentError.
+	for n in (2^24 + 1, typemax(Int), typemax(Int128))
+		err = try
+			colormap_colors("viridis", n); nothing
+		catch e
+			e
+		end
+		@test err isa ArgumentError && startswith(err.msg, "colormap_colors: `n` must be at most")
+	end
+	@test length(colormap_colors("viridis", 3)) == 3
+	# The bound's constant sits above the docstring, which stays on the function.
+	@test occursin("colormap_colors(name_or_scale, n::Integer", string(@doc(colormap_colors)))
+	# Log bars now label the decades 0 and 1 "1" and "10": a user's linear bar so
+	# labelled is not taken for a log one by shared_colorbar!, a log heatmap
+	# within one decade is, and a log panel beside a linear one is still refused.
+	user = PSX.Plot([PSX.heatmap(z = rand(3, 3), colorbar = PSX.attr(tickvals = [0, 1], ticktext = ["1", "10"])),
+		PSX.heatmap(z = 1 .+ rand(3, 3))], PSX.Layout())
+	@test (shared_colorbar!(user); true)
+	slot_norm(fig) = (p = PSX._cmn_plot(fig); t = p.data[1]; PSX._cbar_slot_norm(p, t, PSX._cbar_slot(t, 0)))
+	@test slot_norm(plot_heatmap([1.0 + i + j for i in 0:2, j in 0:2] ./ 1.2; colornorm = :log)) == (:log, nothing)
+	@test slot_norm(plot_heatmap(rand(3, 3))) == (:linear, nothing)
+	mixed = subplots(1, 2; sync = false)
+	plot_heatmap!(mixed, [10.0^(i + j) for i in 0:2, j in 0:2]; colornorm = :log, row = 1, col = 1)
+	plot_heatmap!(mixed, rand(3, 3); row = 1, col = 2)
+	@test_throws ArgumentError shared_colorbar!(mixed)
+end
+
+@testset "v8 axes-style: carrier builds follow a shared colour axis (O3, fields-08)" begin
+	PSX = PlotlySupply
+	x = collect(range(0, 4; length = 21)); y = collect(range(0, 2; length = 11))
+	U = [2.5 * a for a in x, b in y]                       # 0 .. 10
+	r = range(1, 2; length = 5); th = range(0, pi; length = 9)
+	X = [ri * cos(t) for ri in r, t in th]; Y = [ri * sin(t) for ri in r, t in th]
+	C = [5.0 * (i - 1) / 3 for i in 1:4, j in 1:8]       # 0 .. 5 on a curvilinear mesh
+	data(fig) = PSX._cmn_plot(fig).data
+	axis_limits(fig, id = :coloraxis) = (a = get(PSX._cmn_plot(fig).layout.fields, id, nothing);
+		(PSX._cmn_mapping_get(a, :cmin), PSX._cmn_mapping_get(a, :cmax)))
+	carriers(fig) = [k for (k, t) in enumerate(data(fig)) if PSX._cbar_is_carrier(t)]
+	scale_of(fig, id = :coloraxis) = PSX._cmn_mapping_get(get(PSX._cmn_plot(fig).layout.fields, id, nothing), :colorscale)
+	colour_of(t) = something(get(t.fields, :fillcolor, nothing), PSX._cmn_mapping_get(get(t.fields, :line, nothing), :color))
+	# (trace, bin interval) of every recorded bin of the carrier at `k`.
+	function bins(fig, k)
+		record = PSX._colour_meta_get(data(fig)[k], PSX._COLOUR_BINS_META)
+		n = length(record) - 1
+		first = k - record[1] - n
+		return [(data(fig)[first + j - 1], (record[j + 1][1], record[j + 1][2])) for j in 1:n]
+	end
+	# Every bin trace of every carrier is drawn in the colour of its bin's
+	# centre under `limits`, which are the carriers' limits.
+	function follows(fig, limits, scale)
+		stops = PSX._cbar_scale_stops(scale, false)
+		ks = carriers(fig)
+		ok = !isempty(ks)
+		for k in ks
+			ok &= PSX._colour_carrier_limits(data(fig)[k]) == limits
+			for (t, (lo, hi)) in bins(fig, k)
+				ok &= colour_of(t) == PSX._sample_colorscale(stops, ((lo + hi) / 2 - limits[1]) / (limits[2] - limits[1]))
+			end
+		end
+		return ok
+	end
+	# Bin traces keep their own meta (the finalizer's field marker).
+	f = plot_pcolormesh(X, Y, C)
+	@test all(t -> get(t.fields, :meta, nothing) == "plotlysupply:field", first.(bins(f, only(carriers(f)))))
+
+	# shared_colorbar!: a heatmap of 0 .. 10 beside a mesh drawn for 0 .. 5. The
+	# mesh is recoloured for 0 .. 10 instead of the call being refused (or the
+	# heatmap clamped to 0 .. 5).
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2)
+	before = Set(colour_of(t) for (t, _) in bins(sf, only(carriers(sf))))
+	shared_colorbar!(sf)
+	@test axis_limits(sf) == (0.0, 10.0)
+	@test follows(sf, (0.0, 10.0), scale_of(sf))
+	@test Set(colour_of(t) for (t, _) in bins(sf, only(carriers(sf)))) != before
+	@test !PSX._finalize_figure!(sf)
+	# The same colours as a mesh drawn for 0 .. 10 from the start, to the bin
+	# resolution (the recoloured bins are half as wide on the bar).
+	direct = plot_pcolormesh(X, Y, C; crange = (0, 10))
+	hexdiff(a, b) = (pa = PSX._color_hex(a); pb = PSX._color_hex(b);
+		maximum(abs(parse(Int, pa[i:(i + 1)]; base = 16) - parse(Int, pb[i:(i + 1)]; base = 16)) for i in (2, 4, 6)))
+	colour_at(fig, v) = only(colour_of(t) for (t, (lo, hi)) in bins(fig, only(carriers(fig))) if lo - 1e-9 <= v < hi - 1e-9 || (v == 5.0 && hi ≈ 5.0))
+	for v in (0.0, 5 / 3, 10 / 3)
+		@test hexdiff(colour_at(sf, v), colour_at(direct, v)) <= 3
+	end
+	# A mesh drawn with a `crange` that clamps its own values cannot show them
+	# under a wider range: refused before anything changes.
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2, crange = (1, 4))
+	snapshot = PSX.PlotlyBase.JSON.json(sf.plot)
+	err = try
+		shared_colorbar!(sf); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && startswith(err.msg, "shared_colorbar!:") && occursin("crange", err.msg)
+	@test PSX.PlotlyBase.JSON.json(sf.plot) == snapshot
+	# ... while a range that holds every value recolours it (an explicit
+	# shared `crange` included).
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2, crange = (0, 6))
+	shared_colorbar!(sf; crange = (-1, 12))
+	@test axis_limits(sf) == (-1.0, 12.0) && follows(sf, (-1.0, 12.0), scale_of(sf))
+	# A build whose bin traces were removed is refused, naming the carrier.
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, x, y, U; row = 1, col = 1)
+	plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2)
+	deleteat!(sf.plot.data, only(carriers(sf)) - 1)
+	err = try
+		shared_colorbar!(sf); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && occursin("no longer next to it", err.msg)
+	# Quiver glyphs coloured by speed (triangles and line arrows) and
+	# streamlines follow too.
+	sp = [hypot(a - 2, b - 1) for a in x, b in y]
+	for build! in (sf -> plot_quiver!(sf, repeat(x[1:4:end], 3), repeat([0.5, 1.0, 1.5], inner = 6), ones(18),
+				collect(range(0.1, 0.9; length = 18)); colorby = :magnitude, row = 1, col = 2),
+			sf -> plot_quiver!(sf, repeat(x[1:4:end], 3), repeat([0.5, 1.0, 1.5], inner = 6), ones(18),
+				collect(range(0.1, 0.9; length = 18)); colorby = :magnitude, style = :triangle, row = 1, col = 2),
+			sf -> plot_streamlines!(sf, x, y, [1.0 + 0.1a for a in x, b in y], [0.5 for a in x, b in y];
+				colorby = :speed, row = 1, col = 2))
+		sf = subplots(1, 2; sync = false)
+		plot_heatmap!(sf, x, y, sp .* 3; row = 1, col = 1)
+		build!(sf)
+		shared_colorbar!(sf)
+		@test axis_limits(sf)[1] == 0.0 && axis_limits(sf)[2] ≈ 3 * maximum(sp)
+		@test follows(sf, axis_limits(sf), scale_of(sf))
+	end
+
+	# coloraxis = :shared at build time: an axis without limits (a heatmap with
+	# automatic limits) gives the mesh limits that hold the heatmap too; an
+	# axis with limits keeps them (documented: the calls share one norm) until
+	# `shared_colorbar!` joins the members.
+	f = plot_heatmap(x, y, U; coloraxis = :shared)
+	plot_pcolormesh!(f, X, Y, C; coloraxis = :shared)
+	@test axis_limits(f) == (0.0, 10.0) && follows(f, (0.0, 10.0), scale_of(f))
+	g = plot_pcolormesh(X, Y, C; coloraxis = :shared)
+	plot_heatmap!(g, x, y, U; coloraxis = :shared)
+	@test axis_limits(g) == (0.0, 5.0)
+	shared_colorbar!(g)
+	@test axis_limits(g) == (0.0, 10.0) && follows(g, (0.0, 10.0), scale_of(g))
+	@test !PSX._finalize_figure!(f) && !PSX._finalize_figure!(g)
+	# SubplotFigure cells built on `coloraxis = :shared`, either order.
+	for order in (1, 2)
+		sf = subplots(1, 2; sync = false)
+		steps = [() -> plot_heatmap!(sf, x, y, U; row = 1, col = 1, coloraxis = :shared),
+			() -> plot_pcolormesh!(sf, X, Y, C; row = 1, col = 2, coloraxis = :shared)]
+		foreach(step -> step(), order == 1 ? steps : reverse(steps))
+		shared_colorbar!(sf)
+		@test axis_limits(sf) == (0.0, 10.0) && follows(sf, (0.0, 10.0), scale_of(sf))
+		@test !PSX._finalize_figure!(sf)
 	end
 end

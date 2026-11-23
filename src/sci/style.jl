@@ -445,7 +445,7 @@ const _STYLE_MARKER_CYCLE = (
 		colorway=nothing, linewidth=0, marker_size=0, ticks="outside", spines=:box,
 		grid=true, legend_frame=true, margin=nothing, mathsize="", cycle=:none,
 		width=0, aspect=0, axis_linewidth=0, tick_length=0, mirror_ticks=false,
-		errorbar_width=0, reference_linewidth=0, log_ticks=:auto)
+		errorbar_width=0, reference_linewidth=0, log_ticks=:auto, title_gap=:auto)
 
 A named bundle of figure defaults (the PlotlySupply analogue of matplotlib
 `rcParams`). The active style is chosen with [`set_default_style!`](@ref) or
@@ -550,6 +550,15 @@ Every field is validated by the constructor and on assignment
   every journal preset use `:decades`; `:default` keeps `:auto`. An axis
   that has `tickvals`, `dtick`, `tickmode` or `ticktext` set by the user is
   never changed.
+- `title_gap=:auto`: clear gap, in em of the axis-title font, between the
+  box of the tick labels of a Cartesian axis and the box of its title, on
+  every side and for plain, MathJax, wrapped and multi-line titles alike
+  (written as the axis's `title.standoff`, with a record in `layout.meta`
+  that the bundled plotly.js places the drawn title by). `:auto` is `0.5`
+  for a sized style (`width > 0`: every journal preset; matplotlib's
+  `labelpad` is 4 pt) and plotly's own placement otherwise (`:default`,
+  `:publication`); `nothing` always keeps plotly's placement. A
+  `title_standoff`/`title.standoff` the user sets wins.
 
 Numeric fields use `0` as "unset"; negative and non-finite values throw an
 `ArgumentError`. Sizes and widths are CSS px (1 pt = 4/3 px, 1 in = 96 px).
@@ -605,6 +614,7 @@ mutable struct PlotStyle
 	errorbar_width::Float64
 	reference_linewidth::Float64
 	log_ticks::Symbol
+	title_gap::Union{Nothing, Symbol, Float64}
 
 	function PlotStyle(
 		template,
@@ -632,7 +642,8 @@ mutable struct PlotStyle
 		mirror_ticks = false,
 		errorbar_width = 0,
 		reference_linewidth = 0,
-		log_ticks = :auto;
+		log_ticks = :auto,
+		title_gap = :auto;
 		who::AbstractString = "PlotStyle",
 	)
 		v(name, value) = _style_validate_field(name, value, who)
@@ -663,6 +674,7 @@ mutable struct PlotStyle
 			v(:errorbar_width, errorbar_width),
 			v(:reference_linewidth, reference_linewidth),
 			v(:log_ticks, log_ticks),
+			v(:title_gap, title_gap),
 		)
 		_style_check_figure_size(style.width, style.aspect, who)
 		return style
@@ -714,6 +726,7 @@ function PlotStyle(
 	errorbar_width = 0,
 	reference_linewidth = 0,
 	log_ticks = :auto,
+	title_gap = :auto,
 	kwargs...,
 )
 	isempty(kwargs) || throw(ArgumentError(
@@ -746,6 +759,7 @@ function PlotStyle(
 		errorbar_width,
 		reference_linewidth,
 		log_ticks,
+		title_gap,
 	)
 end
 
@@ -905,6 +919,14 @@ function _style_validate_field(name::Symbol, value, who::AbstractString)
 		return _style_symbol_choice(value, _STYLE_CYCLES, who, "cycle")
 	elseif name === :log_ticks
 		return _style_symbol_choice(value, _STYLE_LOG_TICKS, who, "log_ticks")
+	elseif name === :title_gap
+		value === nothing && return nothing
+		(value === :auto || value == "auto") && return :auto
+		(value isa Real && !(value isa Bool) && isfinite(value) && value >= 0) ||
+			throw(ArgumentError(
+				"$(who): `title_gap` must be :auto, nothing or a finite number of em >= 0; got $(repr(value)).",
+			))
+		return Float64(value)
 	end
 	throw(ArgumentError(
 		"$(who): unknown PlotStyle field `$(name)`; fields are $(join(fieldnames(PlotStyle), ", ")).",
@@ -1020,10 +1042,17 @@ end
 const _JOURNALS = (
 	# IEEE Author Center, "Resolution and Size"
 	# (journals.ieeeauthorcenter.ieee.org/create-your-ieee-journal-article/
-	# create-graphics-for-your-article/resolution-and-size/): one column 3.5 in
-	# (88.9 mm, 21 picas), two columns 7.16 in (182 mm, 43 picas). IEEE journal
-	# template: "Use 8 point Times New Roman for Figure labels". Inside,
-	# mirrored ticks: choice (the common IEEE/physics look).
+	# create-graphics-for-your-article/resolution-and-size/): "One column
+	# width: 3.5 inches, 88.9 millimeters, or 21 picas", "Two columns width:
+	# 7.16 inches, 182 millimeters, or 43 picas". IEEE Author Center, "File
+	# Formatting" (.../create-graphics-for-your-article/file-formatting/):
+	# "Type should appear approximately 9-10 point when viewed at full size."
+	# The IEEE journal and conference templates: "Use 8 point Times New Roman
+	# for Figure labels". (O8, read 2026-11-21: the two IEEE sources differ;
+	# the preset keeps the templates' figure-label size, the more specific
+	# instruction, until the lead decides otherwise.) Times New Roman is on
+	# the graphics guide's recommended font list. Inside, mirrored ticks:
+	# choice (the common IEEE/physics look).
 	_JournalSpec(:ieee, "IEEE", [(1.0, 3.5, :in), (2.0, 7.16, :in)], (0.0, :mm),
 		_SERIF_FONTS, 8.0, "inside", true, :box,
 		"IEEE Author Center, Resolution and Size: 3.5 in / 7.16 in; IEEE template: 8 pt Times New Roman labels"),
@@ -1046,7 +1075,9 @@ const _JOURNALS = (
 	# Elsevier artwork sizing (www.elsevier.com/about/policies-and-standards/
 	# author/artwork-and-media-instructions/artwork-sizing): single column
 	# 90 mm, 1.5 columns 140 mm, double column 190 mm; text at least 7 pt and
-	# sub/superscripts at least 6 pt; fonts Arial, Courier, Symbol, Times. 9 pt
+	# sub/superscripts at least 6 pt. Fonts (Elsevier artwork overview,
+	# .../artwork-and-media-instructions/artwork-overview): Arial (or
+	# Helvetica), Courier, Symbol, Times (or Times New Roman). 9 pt
 	# is chosen so that plotly's superscripts (70 % of the size: <sup> is
 	# "font-size:70%" in plotly.js) stay >= 6 pt (6.3 pt).
 	_JournalSpec(:elsevier, "Elsevier", [(1.0, 90.0, :mm), (1.5, 140.0, :mm), (2.0, 190.0, :mm)], (0.0, :mm),
@@ -1060,8 +1091,9 @@ const _JOURNALS = (
 	_JournalSpec(:springer, "Springer", [(1.0, 84.0, :mm), (1.5, 129.0, :mm), (2.0, 174.0, :mm)], (234.0, :mm),
 		"Helvetica, Arial, Liberation Sans, sans-serif", 8.0, "outside", false, :box,
 		"Springer instructions for authors: 84 / 129 / 174 mm, <= 234 mm high, Helvetica/Arial 8-12 pt"),
-	# AIP Publishing author instructions (publishing.aip.org/resources/
-	# researchers/author-instructions/): one column 3.37 in (8.5 cm), two
+	# AIP Publishing author instructions (pubs.aip.org/pages/author-instructions,
+	# formerly publishing.aip.org/resources/researchers/author-instructions/;
+	# O8, read 2026-11-22): one column 3.37 in (8.5 cm), two
 	# columns 6.69 in (17 cm), at most 8.25 in deep, lettering at least 8 pt,
 	# lines at least 0.5 pt, figures must read in black and white. Font:
 	# choice (Times).
@@ -2180,7 +2212,11 @@ function _style_domain_subplot_margin(p::Plot, updates::AbstractDict, style::Plo
 	any(key -> occursin(r"^(polar|ternary)\d*$", String(key)), keys(fields)) || return margin
 	lookup(key) = haskey(updates, key) ? updates[key] : get(fields, key, nothing)
 	root = _tight_root_font_size(lookup)
-	tick = style.tick_fontsize > 0 ? style.tick_fontsize : root
+	# sm-02: the size the finalizer sizes this margin by
+	# (`_fin_domain_margin_updates!`): the root font, raised by a larger tick
+	# font (a :publication tick font of 12 under a root font of 14 gives 14),
+	# so the margin it finds is the one written here.
+	tick = style.tick_fontsize > 0 ? max(style.tick_fontsize, root) : root
 	# One line of tick text plus plotly's offset between the disc and its labels.
 	label_room = ceil(1.2 * tick + 8)
 	title_room = ceil(_tight_title_height(lookup(:title), lookup, root))
@@ -2323,6 +2359,22 @@ adaptive labels). Reads `PlotStyle.log_ticks`. Internal; `_axes_log_tick_updates
 _style_log_ticks(style::PlotStyle = _active_style()) = style.log_ticks
 
 """
+	_style_title_gap(style::PlotStyle = _active_style()) -> Union{Nothing, Float64}
+
+The axis-title gap (em of the title font) of `style` (D24): `title_gap`, with
+`:auto` resolved to `0.5` for a sized style (`width > 0`, the journal presets)
+and to `nothing` (plotly's placement) otherwise. Internal;
+`_axes_title_gap_updates!` (src/sci/axes.jl) applies it.
+"""
+function _style_title_gap(style::PlotStyle = _active_style())
+	gap = style.title_gap
+	gap === :auto && return style.width > 0 ? _STYLE_SIZED_TITLE_GAP_EM : nothing
+	return gap
+end
+# matplotlib's `axes.labelpad` is 4 pt, half of an 8 pt label.
+const _STYLE_SIZED_TITLE_GAP_EM = 0.5
+
+"""
 	_style_log_ticks(layout::Layout) -> Symbol
 
 The log-axis tick rule of a figure: the one of the style it was built under
@@ -2427,11 +2479,12 @@ end
 """
 	_with_figure_style(f, fig; adopt = false)
 
-Run `f()` with `_active_style()` returning the style `fig` carries (the active
-style when it carries none), so every function below that reads the active
-style (trace defaults, legend and axis frames, the finalizer's sizes, the
-export size) sees the figure's own. Internal; the entry of mutators,
-`_finalize_figure!` and `savefig`.
+Run `f()` with `_active_style()` returning the style `fig` carries (the default
+look, `PlotStyle()`, when it carries none), so every function below that reads
+the active style (trace defaults, legend and axis frames, the finalizer's
+sizes, the export size) sees the figure's own whatever style is active around
+the call (sm-11). Internal; the entry of mutators, `_finalize_figure!` and
+`savefig`.
 
 `adopt = true` (the mutators): a figure that carries no style takes the active
 one first when that is not the default look (`_style_record`), so what the
@@ -2442,8 +2495,19 @@ ended. A mutation never changes the figure's style otherwise.
 function _with_figure_style(f, fig; adopt::Bool = false)
 	adopt && _style_adopt!(fig)
 	recorded = _figure_recorded_style(fig)
-	scoped = _STYLE_SCOPE[]
-	(recorded === nothing ? scoped === nothing : recorded === scoped) && return f()
+	if recorded === nothing
+		# A mutator found the active style to be the default look (else the
+		# figure has just adopted it): it runs under that active style, also
+		# when it is the baseline a record-less figure's finalize scoped.
+		adopt && return f()
+		# sm-11: a figure that carries no style carries the default look
+		# (`_style_record` writes nothing for it), so the finalizer, the raw
+		# verbs and an export read `PlotStyle()`, not a style active around
+		# them (`with_style(:ieee)` would re-place its legends and export it at
+		# 3.5 in).
+		recorded = _STYLE_BASELINE
+	end
+	recorded === _STYLE_SCOPE[] && return f()
 	return Base.ScopedValues.with(f, _STYLE_SCOPE => recorded)
 end
 

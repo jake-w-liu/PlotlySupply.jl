@@ -719,8 +719,15 @@ end
         a2 = _ax_axis(lg, :xaxis2)
         @test a2[:type] == "log"
         @test _ax_field(lg, :xaxis, :range) ≈ [0.0, 3.0]
-        @test a2[:ticktext][1] == "0.001" && a2[:ticktext][end] == "1"
-        @test a2[:tickvals] ≈ 1 ./ parse.(Float64, a2[:ticktext])
+        # numerics-03: the labels read as plotly's log-axis decades ("10⁻³" ... "1").
+        @test a2[:ticktext][1] == "10<sup>−3</sup>" && a2[:ticktext][end] == "1"
+        # Labels are "1", "10<sup>k</sup>" or "m×10<sup>k</sup>" (U+2212 minus).
+        function decade(s)
+            s == "1" && return 1.0
+            m = match(r"^(?:(\d+)×)?10<sup>(.*)</sup>$", s)
+            return (m[1] === nothing ? 1.0 : parse(Float64, m[1])) * exp10(parse(Int, replace(m[2], "−" => "-")))
+        end
+        @test a2[:tickvals] ≈ 1 ./ decade.(a2[:ticktext])
 
         # Unknown range and non-numeric axes are errors.
         empty = Plot(GenericTrace[], Layout(xaxis = attr(type = "linear")))
@@ -2297,4 +2304,436 @@ end
     plot_band(px, lo, hi); plot_segments(px, lo, px, hi)
     @test (@allocated plot_band(px, lo, hi)) / n < 150
     @test (@allocated plot_segments(px, lo, px, hi)) / n < 150
+end
+
+# ── v8 axes-style (round 1) ──────────────────────────────────────────────────
+# Rendered geometry is measured in the export window on the exported SVG
+# (element boxes, getBoundingClientRect), as the L8 testset above does.
+const _V8AX_GEOM_JS = raw"""
+(function(svgText){
+var c=document.createElement('div');c.style.position='absolute';c.style.left='0px';c.style.top='0px';
+c.innerHTML=svgText;document.body.appendChild(c);
+try{var R=c.querySelector('svg').getBoundingClientRect();
+var one=function(e){var r=e.getBoundingClientRect();if(r.width<=0&&r.height<=0)return null;return [r.left-R.left,r.top-R.top,r.right-R.left,r.bottom-R.top];};
+var box=function(els){var b=null;for(var i=0;i<els.length;i++){var q=one(els[i]);if(!q||q[2]-q[0]<=0||q[3]-q[1]<=0)continue;
+ b=b===null?q:[Math.min(b[0],q[0]),Math.min(b[1],q[1]),Math.max(b[2],q[2]),Math.max(b[3],q[3])];}return b;};
+var out={axes:{},frames:{x:[],y:[]},shapes:[],bartext:[],contour:[]};
+c.querySelectorAll('g').forEach(function(g){var m=/^g-([xy]\d*)title$/.exec(g.getAttribute('class')||'');if(!m)return;
+ var t=box(g.querySelectorAll('text, svg'));var l=box(c.querySelectorAll('g.'+m[1]+'tick text'));
+ if(t&&l)out.axes[m[1]]={title:t,labels:l};});
+c.querySelectorAll('path').forEach(function(p){var m=/^([xy])lines-above/.exec(p.getAttribute('class')||'');if(!m)return;var q=one(p);if(q)out.frames[m[1]].push(q);});
+c.querySelectorAll('g.shapelayer path').forEach(function(p){var q=one(p);if(q)out.shapes.push(q);});
+c.querySelectorAll('text.bartext').forEach(function(t){var q=one(t);if(q)out.bartext.push(q);});
+c.querySelectorAll('g.contourlabels').forEach(function(g){var clips=[];for(var n=g;n&&n.tagName!=='svg';n=n.parentNode){var a=n.getAttribute&&n.getAttribute('clip-path');if(a)clips.push(a);}
+ out.contour.push({clips:clips,labels:g.querySelectorAll('text').length,linesclip:(g.parentNode.querySelector('g.contourlines')||{getAttribute:function(){return null;}}).getAttribute('clip-path')});});
+return JSON.stringify(out);}finally{c.remove();}})
+"""
+
+function _v8ax_geometry(fig; kwargs...)
+	svg = String(savefig(fig; format = "svg", kwargs...))
+	raw = PlotlySupply._with_export_window(PlotlySupply._EXPORT_STATE) do ec, app, win, divid
+		Base.invokelatest(() -> ec.run(win, _V8AX_GEOM_JS * "(" * PlotlySupply._json_js(svg) * ")"))
+	end
+	return PlotlySupply.PlotlyBase.JSON.parse(String(raw)), svg
+end
+
+_v8ax_export_failed(err) = (m = sprint(showerror, err); occursin("Electron", m) || occursin("Plotly.js", m))
+
+# The clear gap (px) between an axis's title box and its tick-label box.
+function _v8ax_gap(entry, id::AbstractString)
+	t, l = entry["title"], entry["labels"]
+	return id[1] == 'x' ? max(t[2] - l[4], l[2] - t[4]) : max(l[1] - t[3], t[1] - l[3])
+end
+
+@testset "v8 axes-style: D24 axis-title gap (rendered)" begin
+	PSX = PlotlySupply
+	plain = ("polynomial degree", "normalized residual")
+	math = ("\$\\alpha_1\\ (\\mathrm{m})\$", "\$\\sqrt{\\sigma}\\ (\\mathrm{s})\$")
+	cases = Tuple{String, Any, Bool}[]   # (tag, figure, built by PlotlySupply calls only)
+	for st in (:ieee, :aps, :nature, :elsevier, :springer, :aip)
+		push!(cases, ("$st plain", with_style(() -> plot_scatter(1:5, [1, 4, 2, 5, 3]; xlabel = plain[1], ylabel = plain[2]), st), true))
+		push!(cases, ("$st math", with_style(() -> plot_scatter(1:5, [1, 4, 2, 5, 3]; xlabel = math[1], ylabel = math[2]), st), true))
+		flip = with_style(st) do
+			f = plot_scatter(1:5, [1, 4, 2, 5, 3]; xlabel = plain[1], ylabel = math[2])
+			relayout!(f; xaxis_side = "top", yaxis_side = "right")
+			f
+		end
+		push!(cases, ("$st top/right", flip, false))
+	end
+	for st in (:ieee, :nature)
+		push!(cases, ("$st two lines", with_style(() -> plot_scatter(1:5, [1, 4, 2, 5, 3];
+			xlabel = "polynomial<br>degree", ylabel = "normalized<br>residual"), st), true))
+		push!(cases, ("$st log", with_style(() -> plot_scatter([1, 10, 100, 1000], [3, 1, 4, 1];
+			xscale = "log", yscale = "log", xlabel = "frequency (Hz)", ylabel = "power"), st), true))
+		rot = with_style(st) do
+			f = plot_bar(["alpha", "beta", "gamma"], [3, 1, 2]; xlabel = "category", ylabel = "count")
+			relayout!(f; xaxis_tickangle = -45)
+			f
+		end
+		push!(cases, ("$st category, rotated labels", rot, false))
+		cell = with_style(st) do
+			sf = subplots(2, 2)
+			for r in 1:2, c in 1:2
+				plot_scatter!(sf, 1:3, [1, 3, 2]; row = r, col = c)
+			end
+			xlabel!(sf, "time (s)"; row = 2, col = 2)
+			ylabel!(sf, "\$v\$ (m/s)"; row = 2, col = 2)
+			sf
+		end
+		push!(cases, ("$st cell (2,2)", cell, true))
+	end
+	# Every constructor-built case is settled with its gap records.
+	for (tag, f, settled) in cases
+		settled && @test !PSX._finalize_figure!(f)
+	end
+	result = try
+		[(tag, f, _v8ax_geometry(f)[1]) for (tag, f, _) in cases]
+	catch err
+		@test _v8ax_export_failed(err)
+		nothing
+	end
+	if result !== nothing
+		measured = 0
+		for (tag, f, geo) in result
+			layout = PSX._cmn_plot(f).layout
+			record = PSX._axes_title_gap_record(layout)
+			for (id, entry) in geo["axes"]
+				name = (id[1] == 'x' ? "xaxis" : "yaxis") * id[2:end]
+				key = Symbol(name)
+				size = PSX._axes_title_font_size(layout, key, get(layout.fields, key, nothing))
+				# The record asks for 0.5 em, and the drawn gap is that to 1 px.
+				@test haskey(record, name) && isapprox(record[name][2], 0.5 * size; atol = 0.01)
+				gap = _v8ax_gap(entry, id)
+				ok = isapprox(gap, 0.5 * size; atol = 1.0)
+				ok || @info "D24 gap" tag id gap target = 0.5 * size
+				@test ok
+				measured += 1
+			end
+		end
+		# Every case has its x and y title measured (the 2x2 grid: its titled cell).
+		@test measured == 2 * length(result)
+	end
+	# :default and :publication keep plotly's placement: no record, no standoff.
+	for st in (:default, :publication)
+		f = with_style(() -> plot_scatter(1:5, [1, 4, 2, 5, 3]; xlabel = plain[1], ylabel = plain[2]), st)
+		layout = PSX._cmn_plot(f).layout
+		@test isempty(PSX._axes_title_gap_record(layout))
+		@test PSX._cmn_mapping_get(PSX._cmn_mapping_get(layout.fields[:xaxis], :title), :standoff) === nothing
+	end
+	# A user standoff wins: its record goes, the other axis keeps the gap.
+	f = with_style(() -> plot_scatter(1:5, [1, 4, 2, 5, 3]; xlabel = plain[1], ylabel = plain[2]), :ieee)
+	relayout!(f; xaxis_title_standoff = 30)
+	PSX._finalize_figure!(f)
+	record = PSX._axes_title_gap_record(PSX._cmn_plot(f).layout)
+	@test !haskey(record, "xaxis") && haskey(record, "yaxis")
+	@test PSX._cmn_mapping_get(PSX._cmn_mapping_get(PSX._cmn_plot(f).layout.fields[:xaxis], :title), :standoff) == 30
+	@test !PSX._finalize_figure!(f)
+	# PlotStyle(title_gap = ...) sets the gap; `nothing` turns it off.
+	@test PlotStyle(; title_gap = 0.8).title_gap == 0.8
+	@test PSX._style_title_gap(PlotStyle(; width = 300, title_gap = nothing)) === nothing
+	@test PSX._style_title_gap(PlotStyle(; width = 300)) == 0.5 && PSX._style_title_gap(PlotStyle()) === nothing
+	@test_throws ArgumentError PlotStyle(; title_gap = -1)
+end
+
+@testset "v8 axes-style: V4 reference lines inside an autoranged frame (rendered)" begin
+	PSX = PlotlySupply
+	figs = Tuple{String, Any}[]
+	for st in (:default, :ieee)
+		push!(figs, ("$st line", with_style(st) do
+			f = plot_scatter(1:5, [2.0, 3, 2.5, 4, 3.5]); hline!(f, 1.0); vline!(f, 6.0); f
+		end))
+		push!(figs, ("$st bars", with_style(st) do
+			f = plot_bar(["a", "b", "c"], [3.0, 5.0, 4.0]); hline!(f, 0.8; dash = "dot"); f
+		end))
+		push!(figs, ("$st log", with_style(st) do
+			f = plot_scatter(1:5, [20.0, 300, 50, 4000, 800]; yscale = "log"); hline!(f, 5.0); f
+		end))
+		push!(figs, ("$st cell (1,2)", with_style(st) do
+			sf = subplots(1, 2; sync = false)
+			plot_scatter!(sf, 1:3, [1.0, 2, 3]; row = 1, col = 1)
+			plot_scatter!(sf, 1:3, [5.0, 6, 7]; row = 1, col = 2)
+			hline!(sf, 2.0; row = 1, col = 2)
+			sf
+		end))
+	end
+	for (tag, f) in figs
+		@test !PSX._finalize_figure!(f)
+	end
+	result = try
+		[(tag, _v8ax_geometry(f)[1]) for (tag, f) in figs]
+	catch err
+		@test _v8ax_export_failed(err)
+		nothing
+	end
+	if result !== nothing
+		for (tag, geo) in result
+			@test !isempty(geo["shapes"])
+			for s in geo["shapes"]
+				horizontal = s[4] - s[2] < s[3] - s[1]
+				# The frame of the line's subplot: the x spines (top and bottom)
+				# for a horizontal line, the y spines for a vertical one.
+				frames = horizontal ? geo["frames"]["x"] : geo["frames"]["y"]
+				mid = horizontal ? (s[1] + s[3]) / 2 : (s[2] + s[4]) / 2
+				fr = only(filter(b -> horizontal ? b[1] <= mid <= b[3] : b[2] <= mid <= b[4], frames))
+				at = horizontal ? (s[2] + s[4]) / 2 : (s[1] + s[3]) / 2
+				lo, hi = horizontal ? (fr[2], fr[4]) : (fr[1], fr[3])
+				inside = lo + 3 < at < hi - 3
+				inside || @info "V4 line on the frame" tag at lo hi
+				@test inside
+			end
+		end
+	end
+	# A user range is never changed.
+	f = plot_scatter(1:5, [2.0, 3, 2.5, 4, 3.5]; yrange = (1.5, 4.5))
+	hline!(f, 1.0)
+	@test collect(PSX._cmn_mapping_get(PSX._cmn_plot(f).layout.fields[:yaxis], :range)) == [1.5, 4.5]
+end
+
+@testset "v8 axes-style: vm-hbartext value labels clear the mirrored ticks (rendered)" begin
+	PSX = PlotlySupply
+	names = ["ResNet-50", "ViT-B/16", "EfficientNet-B4", "ConvNeXt-T", "MobileNet-V3"]
+	acc = [0.91, 0.87, 0.83, 0.79, 0.72]
+	figs = [(st, with_style(() -> plot_bar(acc, names; orientation = "h", xlabel = "top-1 accuracy",
+		text = string.(acc), textposition = "outside"), st)) for st in (:default, :ieee, :aps)]
+	for (_, f) in figs
+		@test !PSX._finalize_figure!(f)
+	end
+	result = try
+		[(st, f, _v8ax_geometry(f)[1]) for (st, f) in figs]
+	catch err
+		@test _v8ax_export_failed(err)
+		nothing
+	end
+	if result !== nothing
+		for (st, f, geo) in result
+			yaxis = PSX._cmn_plot(f).layout.fields[:yaxis]
+			# Inside ticks mirrored on the right spine reach `ticklen` into the plot.
+			mirrored = PSX._cmn_mapping_get(yaxis, :ticks) == "inside" && PSX._cmn_mapping_get(yaxis, :mirror) in ("ticks", "allticks")
+			ticklen = mirrored ? Float64(PSX._cmn_mapping_get(yaxis, :ticklen)) : 0.0
+			right = maximum(b -> b[3], geo["frames"]["y"])
+			@test length(geo["bartext"]) == 5
+			clear = all(b -> b[3] <= right - ticklen, geo["bartext"])
+			clear || @info "vm-hbartext" st right ticklen ends = [b[3] for b in geo["bartext"]]
+			@test clear
+		end
+	end
+end
+
+@testset "v8 axes-style: D23 contour labels beside a gap are not clipped (rendered)" begin
+	x = range(-2, 2; length = 41); y = range(-2, 2; length = 41)
+	Z = [hypot(a, b) for a in x, b in y]
+	for i in eachindex(x), j in eachindex(y)
+		(abs(x[i]) < 0.6 && y[j] > -0.2) && (Z[i, j] = NaN)
+	end
+	figs = [with_style(() -> plot_contour(x, y, Z; coloring = "lines", showlabels = true, ncontours = 8), st) for st in (:default, :ieee)]
+	result = try
+		[_v8ax_geometry(f)[1] for f in figs]
+	catch err
+		@test _v8ax_export_failed(err)
+		nothing
+	end
+	if result !== nothing
+		for geo in result
+			entry = only(geo["contour"])
+			@test entry["labels"] > 0
+			# The lines keep the gap clip; the labels carry only the plot-area clip.
+			@test entry["linesclip"] !== nothing
+			@test all(c -> endswith(c, "plot)"), entry["clips"])
+		end
+	end
+end
+
+@testset "v8 axes-style: tick labels (vm-powerfmt, apia-11, numerics-10, numerics-03)" begin
+	PSX = PlotlySupply
+	ticks(svg, cls) = [replace(m.captures[1], r"<[^>]+>" => "") for m in
+		eachmatch(Regex("<g class=\"$(cls)\"[^>]*>\\s*<text[^>]*>(.*?)</text>"), svg)]
+	result = try
+		(
+			[String(savefig(with_style(() -> plot_scatter(collect(1:10), 950.0 .* (1:10); ylabel = "load (N)"), st); format = "svg"))
+				for st in (:default, :ieee)],
+			String(savefig(with_style(() -> plot_matrix([1.0 0.8 -0.2; 0.8 1.0 0.1; -0.2 0.1 1.0];
+				xlabels = ["a", "b", "c"], ylabels = ["a", "b", "c"], crange = (-1, 1)), :ieee); format = "svg")),
+		)
+	catch err
+		@test _v8ax_export_failed(err)
+		nothing
+	end
+	if result !== nothing
+		lines, matrix = result
+		for svg in lines
+			ls = ticks(svg, "ytick")
+			# 950..9500: "2000", "4000", ... never "0.2×10⁴".
+			@test !isempty(ls) && !any(l -> occursin(r"^[−-]?0\.\d+×10", l), ls)
+		end
+		# Matrix cell values carry the same minus sign (U+2212) as the colour bar.
+		@test occursin(">−0.20<", matrix) && !occursin(">-0.20<", matrix)
+	end
+	# numerics-10: offset ticks of a narrow range far from zero are distinct.
+	f = plot_scatter(1:9, collect(1e6 .+ (1:9) ./ 10))
+	yticks!(f; offset = :auto)
+	ya = PSX._cmn_plot(f).layout.fields[:yaxis]
+	tv, tt = PSX._cmn_mapping_get(ya, :tickvals), PSX._cmn_mapping_get(ya, :ticktext)
+	inside = [i for i in eachindex(tv) if 1e6 + 0.1 <= tv[i] <= 1e6 + 0.9]
+	@test tt[inside] == ["1.0000002", "1.0000004", "1.0000006", "1.0000008"]
+	err = try
+		yticks!(plot_scatter(1:9, collect(1e15 .+ (1:9))); offset = :auto); nothing
+	catch e
+		e
+	end
+	@test err isa ArgumentError && startswith(err.msg, "yticks!: ") && occursin("too narrow", err.msg)
+	# numerics-03: power tick labels on a secondary x axis.
+	for (fwd, inv, x, want) in (
+		(e -> 1.2398e-6 / e, m -> 1.2398e-6 / m, [1.0, 2.0], ["8×10<sup>−7</sup>", "10<sup>−6</sup>", "1.2×10<sup>−6</sup>"]),
+		(g -> 1e9 * g, h -> h / 1e9, [1.0, 5.0], ["10<sup>9</sup>", "2×10<sup>9</sup>", "3×10<sup>9</sup>", "4×10<sup>9</sup>", "5×10<sup>9</sup>"]),
+	)
+		fig = plot_scatter(x, [1.0, 2.0])
+		secondary_xaxis!(fig, fwd, inv)
+		ax = only(v for (k, v) in PSX._cmn_plot(fig).layout.fields if occursin(r"^xaxis\d+$", String(k)))
+		@test PSX._cmn_mapping_get(ax, :ticktext) == want
+	end
+end
+
+@testset "v8 axes-style: errors-inputs-10 extreme ranges estimate, never InexactError" begin
+	PSX = PlotlySupply
+	X = [1.0, 2, 3]; Z = [1.0 2 3; 4 5 6; 7 8 9]
+	f = plot_scatter(X, X; xrange = (-1e308, 1e308))
+	@test !PSX._finalize_figure!(f)
+	for xs in (X, ["2020-01-01", "2020-01-02", "2020-01-03"], ["a", "b", "c"])
+		g = plot_scatter(xs, X)
+		xrange!(g, (-1e308, 1e308))
+		@test !PSX._finalize_figure!(g)
+	end
+	@test plot_heatmap(X, X, Z; crange = (-1e308, 1e308)) isa PSX.Plot
+	@test plot_heatmap(X, X, [1e308 -1e308 0; 0 1 2; 3 4 5]) isa PSX.Plot
+	sf = subplots(1, 2; sync = false)
+	plot_heatmap!(sf, X, X, Z; row = 1, col = 1); plot_heatmap!(sf, X, X, Z; row = 1, col = 2)
+	shared_colorbar!(sf; crange = (-1e308, 1e308))
+	@test !PSX._finalize_figure!(sf)
+	@test plot_surface(X, X, Z; zrange = (0.0, 5e-324)) isa PSX.Plot
+	@test PSX._s3_nice_ticks((0.0, 5e-324), 5) == (Float64[], 0.0)
+	@test PSX._fin_tick_chars(Dict{Symbol, Any}(), -1e308, 1e308, 300.0, false, true) == 4
+end
+
+@testset "v8 axes-style: state (sm-02, sm-11)" begin
+	PSX = PlotlySupply
+	for st in (:publication, :ieee, :default)
+		@test !PSX._finalize_figure!(with_style(() -> plot_scatterpolar([0, 90, 180], [1.0, 2, 3]), st))
+	end
+	# A figure built under :default carries no style record and is not
+	# re-styled by a finalize or an export inside with_style.
+	sf = subplots(2, 2; sync = false)
+	x = collect(range(0, 1; length = 20))
+	plot_scatter!(sf, x, sin.(2pi .* x); row = 1, col = 1, legend = "a")
+	plot_scatter!(sf, x, x .^ 2; row = 2, col = 1, xlabel = "a long x title that wraps maybe")
+	before = PSX.PlotlyBase.JSON.json(PSX._cmn_plot(sf).layout)
+	copy_ = deepcopy(sf)
+	@test !with_style(() -> PSX._finalize_figure!(copy_), :ieee)
+	@test PSX.PlotlyBase.JSON.json(PSX._cmn_plot(copy_).layout) == before
+	result = try
+		(String(savefig(sf; format = "svg")), with_style(() -> String(savefig(sf; format = "svg")), :ieee))
+	catch err
+		@test _v8ax_export_failed(err)
+		nothing
+	end
+	if result !== nothing
+		size_of(s) = match(r"<svg[^>]*width=\"([0-9.]+)[^\"]*\"[^>]*height=\"([0-9.]+)", s).captures
+		@test size_of(result[1]) == size_of(result[2])
+		@test PSX.PlotlyBase.JSON.json(PSX._cmn_plot(sf).layout) == before
+	end
+end
+
+@testset "v8 axes-style: perf-spines all-cell spines!/grid! are linear in cells" begin
+	function cost(n, f)
+		sf = subplots(n, n; sync = false)
+		for r in 1:n, c in 1:n
+			plot_scatter!(sf, [1.0, 2.0, 3.0], [1.0, 4.0, 9.0]; row = r, col = c)
+		end
+		f(deepcopy(sf))     # compile
+		g = deepcopy(sf)
+		return @allocated f(g)
+	end
+	for f in (sf -> spines!(sf; style = :open, cells = :all), sf -> spines!(sf; bottom = (1, 4), cells = :all),
+		sf -> grid!(sf; axis = :both, cells = :all))
+		# 4x the cells: measured 3.2x (16 -> 64 cells); the per-cell merges of
+		# the old code grew 8x.
+		@test cost(8, f) / cost(4, f) < 4.5
+	end
+end
+
+@testset "v8 axes-style: constructors return settled figures under every style (sm-07)" begin
+	# Invariant 1: after a constructor returns, `_finalize_figure!` writes
+	# nothing. A long axis title wrapped under a sized style was left for the
+	# first later finalize (it wrote `yaxis`/`xaxis` and `meta`).
+	x = collect(range(0.1, 2; length = 25)); y = sin.(3 .* x)
+	Z = [sin(i / 3) * cos(j / 4) for i in 1:15, j in 1:12]
+	LX = "applied magnetic field strength in the sample plane (kA/m)"
+	LY = "normalised transmitted optical power through the device (a.u.)"
+	LT = "Measured and simulated response of the resonator for three different coupling gaps"
+	ctors = [
+		"scatter" => () -> plot_scatter(x, y; xlabel = LX, ylabel = LY, title = LT),
+		"bar" => () -> plot_bar(["a", "b", "c"], [1, 2, 3]; ylabel = LY),
+		"histogram" => () -> plot_histogram(collect(range(-2, 2; length = 200)); xlabel = LX),
+		"stem" => () -> plot_stem(1:10, collect(1.0:10); ylabel = LY),
+		"area" => () -> plot_area(x, y; ylabel = LY),
+		"band" => () -> plot_band(x, y .- 0.1, y .+ 0.1; ylabel = LY),
+		"box" => () -> plot_box([collect(1.0:30), collect(2.0:31)]; ylabel = LY),
+		"heatmap" => () -> plot_heatmap(1:15, 1:12, Z; xlabel = LX, ylabel = LY),
+		"contour" => () -> plot_contour(1:15, 1:12, Z; xlabel = LX),
+	]
+	for st in (:default, :ieee, :nature, :aps), (name, build) in ctors
+		fig = with_style(build, st)
+		before = _AX.json(fig)
+		wrote = _AX._finalize_figure!(fig)
+		@test (st, name, wrote) == (st, name, false)
+		@test _AX.json(fig) == before
+	end
+end
+
+@testset "v8 axes-style: a wrapped y title in a cell keeps the tight pad (D24, rendered)" begin
+	# optical_infra: the wrap gives the title 10 px standoff, which the title
+	# push now counts (D24); the margin the wrap writes must still hold the
+	# title's whole box (the overhang past its push), 4 px from the edge.
+	dejavu = PlotStyle(; font_family = "DejaVu Sans, Arial, sans-serif", fontsize = 8 * 96 / 72,
+		spines = :open, grid = false, legend_frame = false)
+	for st in (:default, :publication, dejavu)
+		sf = with_style(st) do
+			g = subplots(1, 2; sync = false, horizontal_spacing = 0.14)
+			x = range(0, 1; length = 50)
+			plot_scatter!(g, x, x .^ 2; row = 1, col = 1)
+			plot_scatter!(g, x, sqrt.(x); row = 1, col = 2)
+			xlabel!(g, "x"; row = 1, col = 1)
+			ylabel!(g, "a fairly long y-axis label that matplotlib would split"; row = 1, col = 1)
+			figsize!(g, 153, 60; units = :mm)
+			g
+		end
+		name = st isa Symbol ? st : :dejavu
+		geo = first(_v8ax_geometry(sf; tight = true))
+		title = geo["axes"]["y"]["title"]
+		@test count("<br>", PlotlySupply._fin_title_text(sf.plot.layout.fields[:yaxis])) >= 1   # wrapped
+		# its box starts at the 4 px pad (rounded up margins: within 6 px of it)
+		@test (name, title[1] >= 4 - 0.5) == (name, true)
+		@test (name, title[1] <= 4 + 6) == (name, true)
+	end
+end
+
+@testset "v8 axes-style: a cell's y title at its title gap stays clear of the cell beside it (D24, rendered)" begin
+	# The room engine gives a title at its title gap no overhang past its
+	# push (the push covers the box the gap seam draws, 2.6-5.7 px to spare
+	# across the sized presets): the right cell's y title must still clear the
+	# left cell's tick labels and frame.
+	for st in (:ieee, :nature, :aps, :elsevier, :springer, :aip)
+		sf = with_style(st) do
+			g = subplots(1, 2; sync = false)
+			plot_scatter!(g, 1:3, 1:3; row = 1, col = 1, xlabel = "x", ylabel = "y")
+			plot_scatter!(g, 1:3, 1:3; row = 1, col = 2, xlabel = "x", ylabel = "signal (a.u.)")
+			g
+		end
+		geo, svg = _v8ax_geometry(sf)
+		title = geo["axes"]["y2"]["title"]
+		left_ink = geo["axes"]["x"]["labels"][3]
+		for f in geo["frames"]["x"]
+			f[1] < title[1] && (left_ink = max(left_ink, f[3]))
+		end
+		@test (st, title[1] - left_ink >= 4) == (st, true)
+	end
 end

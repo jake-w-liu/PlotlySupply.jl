@@ -1290,7 +1290,9 @@ end
 		# and, at the top, the figure title (probe: label clipped, title over "90").
 		for name in (:publication, :ieee)
 			stp = _RS._STYLE_REGISTRY[name]
-			room = ceil(1.2 * stp.tick_fontsize + 8)
+			# sm-02: the room the finalizer keeps (one line of the larger of
+			# the root and tick fonts), so the constructed figure is settled.
+			room = ceil(1.2 * max(stp.tick_fontsize, stp.fontsize) + 8)
 			fig = with_style(() -> plot_scatterpolar(0:30:330, 1:12; title = "Polar title"), name)
 			margin = _rs_get(fig, :margin)
 			@test margin[:l] == room && margin[:r] == room && margin[:b] == room
@@ -1435,7 +1437,12 @@ end
 		end
 		g = plot_scatter(x, y)
 		xlabel!(g, "x")
-		@test _rs_get(f, :xaxis)[:title] == _rs_get(g, :xaxis)[:title]
+		# D24: the mutator made `f` adopt :ieee, whose title gap gives its
+		# title a standoff (the one it records); the title is otherwise `g`'s.
+		tf, tg = copy(_rs_sd(_rs_get(f, :xaxis)[:title])), _rs_sd(_rs_get(g, :xaxis)[:title])
+		@test _RS._figure_recorded_style(f) !== nothing && _RS._figure_recorded_style(g) === nothing
+		@test pop!(tf, :standoff) == PlotlySupply._axes_title_gap_record(_RS._cmn_plot(f).layout)["xaxis"][1]
+		@test tf == tg
 		@test _RS._figure_default_size() == (700.0, 500.0)
 		@test with_style(() -> _RS._figure_default_size(), :ieee) == (700.0, 500.0)
 		ieee_fig = with_style(() -> plot_scatter(x, y), :ieee)
@@ -1467,5 +1474,32 @@ end
 		# Second quiver in a styled figure takes the second colour; outside the block too.
 		plot_quiver!(ieee, args...)
 		@test colour(PlotlySupply.PlotlyBase.Plot(ieee.data[2:2], ieee.layout)) == "#D55E00"
+	end
+end
+
+@testset "v8 axes-style: O8 presets, D21 map colour bars (seams-06)" begin
+	PSX = PlotlySupply
+	# IEEE templates: "Use 8 point Times New Roman for Figure labels" (the
+	# Author Center graphics guide says 9-10 pt; kept at 8 pt, see style.jl).
+	@test PSX._STYLE_REGISTRY[:ieee].tick_fontsize ≈ 8 * 4 / 3
+	@test PSX._journal_spec(:ieee, "test").fontsize_pt == 8.0
+	widths = Dict(s.name => [(c[1], c[2], c[3]) for c in s.columns] for s in PSX._JOURNALS)
+	@test widths[:ieee] == [(1.0, 3.5, :in), (2.0, 7.16, :in)]
+	@test widths[:aps] == [(1.0, 8.6, :cm), (2.0, 17.2, :cm)]
+	@test widths[:nature] == [(1.0, 89.0, :mm), (2.0, 183.0, :mm)]
+	@test widths[:elsevier] == [(1.0, 90.0, :mm), (1.5, 140.0, :mm), (2.0, 190.0, :mm)]
+	@test widths[:springer] == [(1.0, 84.0, :mm), (1.5, 129.0, :mm), (2.0, 174.0, :mm)]
+	@test widths[:aip] == [(1.0, 3.37, :in), (2.0, 6.69, :in)]
+	# seams-06: every trace type that draws a colour bar gets the power format.
+	tpl = plot_scatter(1:2, 1:2).layout.template.data
+	g(x, ks...) = (for k in ks; x = PSX._cmn_mapping_get(x, k); end; x)
+	for (type, path) in ((:densitymap, (:colorbar,)), (:densitymapbox, (:colorbar,)), (:choroplethmap, (:colorbar,)),
+		(:choroplethmapbox, (:colorbar,)), (:scattermap, (:marker, :colorbar)), (:scattermapbox, (:marker, :colorbar)),
+		(:splom, (:marker, :colorbar)), (:sunburst, (:marker, :colorbar)), (:treemap, (:marker, :colorbar)),
+		(:icicle, (:marker, :colorbar)), (:parcoords, (:line, :colorbar)), (:parcats, (:line, :colorbar)))
+		entries = get(tpl, type, nothing)
+		entry = entries === nothing ? nothing : first(entries)
+		entry isa PSX.PlotlyBase.PlotlyAttribute && (entry = entry.fields)
+		@test entry !== nothing && g(entry, path..., :exponentformat) == "power"
 	end
 end

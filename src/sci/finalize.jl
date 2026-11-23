@@ -1044,7 +1044,8 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 		top = maximum(abs, reals)
 		return maximum(v -> label_chars(v, decimals, top), reals) + extra
 	end
-	(isfinite(lo) && isfinite(hi) && hi > lo) || return 4 + extra
+	# errors-inputs-10: limits whose span overflows (+-1e308) estimate no labels.
+	(isfinite(lo) && isfinite(hi) && hi > lo && isfinite(hi - lo)) || return 4 + extra
 	if islog
 		tickformat = _cmn_mapping_get(mapping, :tickformat)
 		decades = floor(Int, lo):ceil(Int, hi)
@@ -1059,6 +1060,7 @@ function _fin_tick_chars(mapping, lo::Float64, hi::Float64, len_px::Float64, isl
 	dtick = _cmn_mapping_get(mapping, :dtick)
 	step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) :
 		_fin_nice_step(hi - lo, max(len_px, 1.0), vertical)
+	(isfinite(step) && step > 0) || return 4 + extra
 	decimals = max(0, -floor(Int, log10(step) + 1e-9))
 	chars = 1
 	first = ceil(lo / step - 1e-9)
@@ -1085,8 +1087,19 @@ function _fin_title_push(mapping, font::Float64)
 	size = _fin_mapping_font_size(_cmn_mapping_get(mapping, :title), :font, round(1.2 * font))
 	# Every further line of a multi-line title adds one line height.
 	lines = 1 + count(_FIN_LINE_BREAK, text)
-	return _FIN_TITLE_BASE + _FIN_TITLE_PER_PX * size + (lines - 1) * _FIN_LINE_EM * size
+	return _fin_title_base(mapping) + _FIN_TITLE_PER_PX * size + (lines - 1) * _FIN_LINE_EM * size
 end
+
+# D24: the measured base holds plotly_white's 15 px `title.standoff`; an
+# axis's own standoff (the title gap of a sized style, or the user's) moves
+# the title, and plotly's automargin push, by the difference (plotly.js
+# axes.js: the push is `_depth + St(ax) + title.standoff`).
+function _fin_title_base(mapping)
+	standoff = _cmn_mapping_get(_cmn_mapping_get(mapping, :title), :standoff)
+	return _fin_isfinite_real(standoff) && standoff >= 0 ?
+		_FIN_TITLE_BASE + (Float64(standoff) - _FIN_TEMPLATE_TITLE_STANDOFF) : _FIN_TITLE_BASE
+end
+const _FIN_TEMPLATE_TITLE_STANDOFF = 15.0
 
 # Line breaks plotly.js draws (svg_text_utils: `<br>`, `<br/>`, `<br />`) and
 # the distance of the lines, in font sizes (svg_text_utils LINE_SPACING).
@@ -2562,7 +2575,9 @@ function _fin_wrap_axis_titles!(ctx::_FinContext, accs, W::Float64, H::Float64)
 		standoff = _cmn_mapping_get(title, :standoff)
 		if wrapped != plain
 			standoff === nothing && (updates[Symbol(key, :_title_standoff)] = _FIN_WRAP_STANDOFF)
-		elseif _fin_isfinite_real(standoff) && standoff == _FIN_WRAP_STANDOFF
+		elseif _fin_isfinite_real(standoff) && standoff == _FIN_WRAP_STANDOFF &&
+				get(_axes_title_gap_record(layout), String(key), (NaN, NaN))[1] != standoff
+			# D24: a standoff of the title gap (src/sci/axes.jl) is not ours.
 			updates[Symbol(key, :_title_standoff)] = nothing
 		end
 	end
@@ -2597,8 +2612,12 @@ function _fin_wrap_margins!(ctx::_FinContext, accs, keys::Vector{Symbol}, Hp::Fl
 		# pushes the margin.
 		edge = vertical ? _fin_domain(layout, anchor)[1] : _cmn_y_axis_domain(layout, anchor)[1]
 		edge <= 1e-9 || continue
-		px = vertical ? _fin_y_labels_px(layout, accs, key, _cmn_y_axis_domain(layout, key), Hp) :
-			_fin_x_labels_px(layout, key)
+		# A y title's box reaches past its push by `_room_y_title_overhang`
+		# (D24: before the push counted the wrap's 10 px standoff, the 5 px it
+		# overstated stood in for that; optical_infra drew its title box 1 px
+		# beyond the figure edge without it).
+		px = vertical ? _fin_y_labels_px(layout, accs, key, _cmn_y_axis_domain(layout, key), Hp) +
+			_room_y_title_overhang(layout, key) : _fin_x_labels_px(layout, key)
 		letter = vertical ? :l : :b
 		need[letter] = max(get(need, letter, 0.0), px + _FIN_WRAP_PAD)
 	end
@@ -3365,8 +3384,19 @@ function _room_y_title_overhang(layout::Layout, ykey::Symbol)
 	axis = get(layout.fields, ykey, nothing)
 	(_cmn_mapping_get(axis, :visible) === false || isempty(_fin_title_text(axis))) && return 0.0
 	font = _fin_font_size(layout)
+	# D24: a title at its recorded title gap is moved to `gap` px beyond the
+	# drawn tick labels (the title-gap seam of the plotly.js asset); its push
+	# already covers that box (measured 4-5 px to spare under :ieee).
+	standoff = _cmn_mapping_get(_cmn_mapping_get(axis, :title), :standoff)
+	_fin_isfinite_real(standoff) &&
+		get(_axes_title_gap_record(layout), String(ykey), (NaN, NaN))[1] == standoff && return 0.0
 	size = _fin_mapping_font_size(_cmn_mapping_get(axis, :title), :font, round(1.2 * font))
-	return max(0.0, 14.5 + 1.35 * size - _fin_title_push(axis, font))
+	# The measured box is that of one line at plotly_white's 15 px standoff.
+	# Further lines and another standoff move the box and the push alike
+	# (D24: `_fin_title_push` counts both), so the overhang is the same: a
+	# wrapped title at the wrap's 10 px standoff lost it and drew its box
+	# 1 px beyond the figure edge (optical_infra, tight export).
+	return max(0.0, 14.5 + 1.35 * size - (_FIN_TITLE_BASE + _FIN_TITLE_PER_PX * size))
 end
 
 # Px the axes of a Cartesian area draw on each side.
@@ -5358,7 +5388,8 @@ function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64; pending::
 		shown = _fin_shown_range(layout, key, accs)
 		shown === nothing && continue
 		lo, hi = Float64(shown[1]), Float64(shown[2])
-		hi > lo || continue
+		# errors-inputs-10: a span that overflows (+-1e308) has no estimate.
+		(hi > lo && isfinite(hi - lo)) || continue
 		reversed = auto == "reversed" || (pair !== nothing && pair[1] > pair[2])
 		right = reversed ? lo : hi
 		len = (dom[2] - dom[1]) * Wp
@@ -5389,6 +5420,7 @@ function _fin_tick_overhang_px(p::Plot, accs, Wp::Float64, W::Float64; pending::
 		else
 			dtick = _cmn_mapping_get(axis, :dtick)
 			step = _fin_isfinite_real(dtick) && dtick > 0 ? Float64(dtick) : _fin_nice_step(hi - lo, max(len, 1.0), false)
+			(isfinite(step) && step > 0) || continue
 			t0 = _cmn_mapping_get(axis, :tick0)
 			t0 = _fin_isfinite_real(t0) ? Float64(t0) : 0.0
 			k = reversed ? ceil((lo - t0) / step - 1e-9) : floor((hi - t0) / step + 1e-9)

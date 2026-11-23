@@ -1646,7 +1646,10 @@ end
 	end
 	sf = build()
 	narrow = _SFN._layout_axis_domain(sf.plot.layout, :xaxis2)
-	@test narrow[1] > 0.6                    # the y title and labels took room in a 3.5 in figure
+	# the y title and labels widened the default gap (xaxis2 from 0.55) in a
+	# 3.5 in figure (D24: a title at its title gap reaches no further than its
+	# push, so the cell gets 0.587, its title 11 px clear of the left cell)
+	@test narrow[1] > 0.55 + 0.02
 	figsize!(sf, :ieee; columns = 2, aspect = 0.38)
 	sized_first = with_style(:ieee) do
 		g = subplots(1, 2; sync = false)

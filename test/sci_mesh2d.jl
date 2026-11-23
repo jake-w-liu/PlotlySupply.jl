@@ -300,7 +300,7 @@ const _M2_SQTRI = [1 2 4; 1 4 3]
 		@test (_m2_get(marker, :cmin), _m2_get(marker, :cmax)) == (0.0, 2.0)
 		bar = _m2_get(marker, :colorbar)
 		@test _m2_get(bar, :tickvals) == [0.0, 1.0, 2.0]
-		@test _m2_get(bar, :ticktext) == ["10<sup>0</sup>", "10<sup>1</sup>", "10<sup>2</sup>"]
+		@test _m2_get(bar, :ticktext) == ["1", "10", "10<sup>2</sup>"]
 		@test _m2_ring_color(fig, [1.0, 2.0, 2.0, 1.0], [0.0, 0.0, 1.0, 1.0]) == _M2._sample_colorscale(stops, 0.75)
 		fig = plot_polygons(vcat(x, x), vcat(zeros(4), ones(4)), cells, [-1.0, 10.0, 100.0]; colornorm = :log)
 		@test _m2_nrings(fig) == 2                                   # <= 0 is not drawn
@@ -942,7 +942,9 @@ end
 		# Edges, carriers and hover markers are overlays: no meta.
 		f = plot_polygons(_M2V3_QX, _M2V3_QY, _M2V3_QUADS, [0.2, 0.9]; edgecolor = "black", edgewidth = 1, hover = true)
 		@test count(==(tight), _m2v3_meta(f)) == length(_m2_fills(f))
-		@test all(t -> !haskey(t.fields, :meta), _m2_carriers(f))
+		# (A carrier's meta holds only its colour-bin record, O3: not a field mark.)
+		@test all(t -> PlotlySupply._fin_field_kind(t) === nothing &&
+			keys(t.fields[:meta]) == Set([Symbol("plotlysupply:cbins")]), _m2_carriers(f))
 		@test _m2v3_meta(plot_triplot(_M2V3_TX, _M2V3_TY, _M2V3_TRI)) == Any[nothing]
 		@test _m2v3_meta(plot_tricontour(_M2V3_TX, _M2V3_TY, _M2V3_TRI, [1.0, 2, 3]; levels = [1.5])) == Any[nothing]
 		for (who, call) in (
@@ -1204,6 +1206,17 @@ end
 	end
 end
 
+# What allocating one m x n Float64 matrix costs `@allocated` in this process
+# now (tests-ci-04: it is not sizeof(matrix) once the process has churned).
+const _M2_ALLOC_KEEP = Ref{Any}(nothing)
+@noinline _m2_new_matrix(m::Int, n::Int) = Matrix{Float64}(undef, m, n)
+function _m2_alloc_cost(m::Int, n::Int)
+	_M2_ALLOC_KEEP[] = _m2_new_matrix(m, n)        # compiled before it is counted
+	cost = @allocated(_M2_ALLOC_KEEP[] = _m2_new_matrix(m, n))
+	_M2_ALLOC_KEEP[] = nothing
+	return cost
+end
+
 @testset "sci mesh2d: wave 5 (fields)" begin
 	@testset "Z84 rectilinear plot_pcolormesh validates the cell values in place" begin
 		C = rand(1000, 1000)
@@ -1219,14 +1232,21 @@ end
 		end
 		# One Float64 matrix per cell value (8 MB here), read straight from `C`:
 		# no Matrix{Any} copy and no boxing per entry (either costs 8 MB or
-		# more). 1 MiB covers the array headers and what the allocator adds in
-		# a long test process (the count is 16.04 MB alone and was 16.40 MB in
-		# the full suite; 64 KiB failed there).
+		# more). tests-ci-04: what `@allocated` reports for one large array
+		# depends on the state of the process (a plain 8 MB
+		# `Matrix{Float64}(undef, 1000, 1000)` counted 8.0 MB in a fresh
+		# process and 10.0-10.1 MB once it had allocated and freed 2 GB, as in
+		# the full suite), so the bound is what allocating the output arrays
+		# themselves costs, measured next to the call, plus 1 MiB of headers
+		# and bookkeeping. A second copy of either matrix still exceeds it.
 		slack = 2^20
-		@test @allocated(_M2._mesh2d_cell_values(C, 1001, 1001, "t")) <= sizeof(C) + slack
-		@test @allocated(_M2._mesh2d_cell_values(Cm, 1001, 1001, "t")) <= sizeof(C) + slack
+		cell_cost = _m2_alloc_cost(1000, 1000)
+		@test @allocated(_M2._mesh2d_cell_values(C, 1001, 1001, "t")) <= cell_cost + slack
+		cell_cost = _m2_alloc_cost(1000, 1000)
+		@test @allocated(_M2._mesh2d_cell_values(Cm, 1001, 1001, "t")) <= cell_cost + slack
 		# Node values: the node matrix and the cell means.
-		@test @allocated(_M2._mesh2d_cell_values(Cn, 1001, 1001, "t")) <= sizeof(Cn) + sizeof(C) + slack
+		node_cost = _m2_alloc_cost(1001, 1001) + _m2_alloc_cost(1000, 1000)
+		@test @allocated(_M2._mesh2d_cell_values(Cn, 1001, 1001, "t")) <= node_cost + slack
 		v = _M2._mesh2d_cell_values(Cm, 1001, 1001, "t")
 		@test v isa Matrix{Float64} && isnan(v[3, 7]) && v[1, 1] == C[1, 1]
 		# The whole call: the validated values (8 MB, also the colour values
@@ -1239,4 +1259,68 @@ end
 		@test z == [[1.0, 3.0], [nothing, 4.0]]
 		@test _m2_throws(() -> plot_pcolormesh(0:2, 0:2, Any[1.0 "a"; 3.0 4.0]), "plot_pcolormesh: colour values must be real numbers or missing; entry 3 is \"a\"")
 	end
+end
+
+@testset "v8 axes-style: mesh2d labels, indices, kernel cost (numerics-08, errors-inputs-10, perf-tricontour, perf-tripcolor)" begin
+	PSX = PlotlySupply
+	# numerics-08: tricontour labels of small, large and offset values.
+	xs = [0.0, 1, 0, 1, 0.5]; ys = [0.0, 0, 1, 1, 0.5]; tri = [1 2 5; 2 4 5; 4 3 5; 3 1 5]
+	for (v, want) in (
+		(1e-6 .* (2 .* xs .+ 3 .* ys), ["10<sup>−6</sup>", "2×10<sup>−6</sup>", "3×10<sup>−6</sup>", "4×10<sup>−6</sup>"]),
+		(1e15 .* (xs .+ ys), ["5×10<sup>14</sup>", "10<sup>15</sup>", "1.5×10<sup>15</sup>"]),
+		(1e6 .+ (xs .+ ys) ./ 2, ["1.0000002×10<sup>6</sup>", "1.0000004×10<sup>6</sup>", "1.0000006×10<sup>6</sup>", "1.0000008×10<sup>6</sup>"]),
+	)
+		f = plot_tricontour(xs, ys, tri, v; showlabels = true, levels = 4)
+		lab = [t for t in f.data if get(t.fields, :mode, "") == "text"]
+		@test !isempty(lab) && lab[end].fields[:text] == want
+	end
+	# errors-inputs-10: an integral float index beyond Int is outside the nodes.
+	for (who, call) in (
+		("plot_tripcolor", () -> plot_tripcolor([0.0, 1, 0], [0.0, 0, 1], [1 2 1e308], [1.0, 2, 3])),
+		("plot_triplot", () -> plot_triplot([0.0, 1, 0], [0.0, 0, 1], [1 2 1e308])),
+		("plot_tricontour", () -> plot_tricontour([0.0, 1, 0, 1], [0.0, 0, 1, 1], [1 2 1e308; 2 3 4], [1.0, 2, 3, 4])),
+	)
+		err = try
+			call(); nothing
+		catch e
+			e
+		end
+		@test err isa ArgumentError && startswith(err.msg, "$(who): `triangles` cell 1 refers to node 1.0e308")
+	end
+	# perf-tricontour / perf-tripcolor: bytes per output point / per cell.
+	function tri_grid(m)
+		px = Float64[]; py = Float64[]
+		for j in 0:m, i in 0:m
+			push!(px, i + 0.1 * sin(j)); push!(py, j + 0.1 * cos(i))
+		end
+		id(i, j) = j * (m + 1) + i + 1
+		T = Matrix{Int}(undef, 2m^2, 3)
+		k = 0
+		for j in 0:(m - 1), i in 0:(m - 1)
+			T[k += 1, :] = [id(i, j), id(i + 1, j), id(i + 1, j + 1)]
+			T[k += 1, :] = [id(i, j), id(i + 1, j + 1), id(i, j + 1)]
+		end
+		return px, py, T
+	end
+	px, py, T = tri_grid(80)
+	v = sin.(px) .* cos.(py)
+	t = PSX._mesh2d_triangulation(px, py, T, nothing, "test")
+	levels = PSX._mesh2d_contour_levels(10, v, "test")
+	PSX._mesh2d_contour_lines(t, v, levels[1])
+	bytes = 0; points = 0
+	for l in levels
+		bytes += @allocated(PSX._mesh2d_contour_lines(t, v, l))
+		points += sum(length(first(line)) for line in PSX._mesh2d_contour_lines(t, v, l); init = 0)
+	end
+	# Measured 239 B per line point; the eager `get!(.., Int[])` defaults cost
+	# about 400.
+	@test bytes / points < 300
+	# Flat shading with one value per triangle costs what one value per node
+	# does (measured 807 vs 810 B per triangle on this mesh); boxing the cell
+	# values into Any[] cost 883 (ratio 1.094).
+	cellv = sin.(1:size(T, 1)) .+ 0.0
+	plot_tripcolor(px, py, T, cellv); plot_tripcolor(px, py, T, v)
+	per_cell = @allocated plot_tripcolor(px, py, T, cellv)
+	per_node = @allocated plot_tripcolor(px, py, T, v)
+	@test per_cell / per_node < 1.04
 end

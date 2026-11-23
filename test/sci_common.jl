@@ -883,3 +883,15 @@ end
         @test _CMN._cmn_tick_values([1, 2.5], false, "t") == [1.0, 2.5]
     end
 end
+
+@testset "v8 axes-style: apia-08 log_ticks are the correctly rounded literals" begin
+	@test log_ticks(1e-300, 1e300) == [parse(Float64, "1e$(k)") for k in -300:300]
+	@test 1e-29 in log_ticks(1e-300, 1e300)
+	want = sort([parse(Float64, "$(m)e$(k)") for k in -61:-20 for m in (1, 2, 5) if 1e-60 <= parse(Float64, "$(m)e$(k)") <= 1e-20])
+	@test log_ticks(1e-60, 1e-20; subs = (1, 2, 5)) == want
+	want = sort([parse(Float64, "$(m)e$(k)") for k in 20:60 for m in (1, 3) if 1e20 <= parse(Float64, "$(m)e$(k)") <= 1e60])
+	@test log_ticks(1e20, 1e60; subs = (1, 3)) == want
+	@test log_ticks(1e-3, 1; subs = (1, 2, 5)) == [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]
+	@test log_ticks(1, 3.0^40; base = 3) == [Float64(big(3)^k) for k in 0:40]
+	@test log_ticks(2.0^-1070, 2.0^-1060; base = 2) == [2.0^k for k in -1070:-1060]
+end

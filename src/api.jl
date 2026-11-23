@@ -411,6 +411,14 @@ const _POWER_TRACE_COLORBARS = (
 	(:scattercarpet, ((:marker, :colorbar),)), (:scattersmith, ((:marker, :colorbar),)),
 	(:bar, ((:marker, :colorbar),)), (:barpolar, ((:marker, :colorbar),)),
 	(:histogram, ((:marker, :colorbar),)),
+	# seams-06: the map traces, parcoords/parcats and the hierarchy traces draw
+	# colorbars too.
+	(:densitymap, ((:colorbar,),)), (:densitymapbox, ((:colorbar,),)),
+	(:choroplethmap, ((:colorbar,),)), (:choroplethmapbox, ((:colorbar,),)),
+	(:scattermap, ((:marker, :colorbar),)), (:scattermapbox, ((:marker, :colorbar),)),
+	(:parcoords, ((:line, :colorbar),)), (:parcats, ((:line, :colorbar),)),
+	(:splom, ((:marker, :colorbar),)), (:sunburst, ((:marker, :colorbar),)),
+	(:treemap, ((:marker, :colorbar),)), (:icicle, ((:marker, :colorbar),)),
 )
 
 function _power_template(source::PlotlyBase.Template)
@@ -10623,6 +10631,9 @@ function _scat_series_errors(err, lengths::Vector{Int}, who::AbstractString, nam
 				"$(who): `$(name)` for series $(index) has $(length(values)) values " *
 				"but the series has $(lengths[index]) points.",
 			))
+			# numerics-01: magnitudes, as plot_bar checks them (a negative
+			# value draws the bar on the wrong side, a string draws nothing).
+			_stats_check_error_values(values, who, name)
 		end
 	end
 	return entries
@@ -16377,6 +16388,15 @@ function _contour_add!(
 		linecolor_set = !isempty(line_color),
 		log_levels = log_norm,
 	)
+	# numerics-02: plotly.js colours the lines of a native contour trace over
+	# contours.start..end, whatever zmin/zmax say, so an explicit colour range
+	# or midpoint on evenly spaced line levels would leave the lines and the
+	# colorbar disagreeing. Such levels take the per-level path, whose colours
+	# come from crange/cmid (as non-uniform levels).
+	if spec.kind === :uniform && spec.coloring == "lines" &&
+		(cmid !== nothing || !_is_auto_range(crange) || !_is_auto_range(zrange))
+		spec = merge(spec, (kind = :per_level,))
+	end
 	single_colour = spec.coloring == "none"
 	single_colour && showscale === true && throw(ArgumentError(
 		"$(who): `showscale = true` needs colour-mapped contours; coloring = " *
@@ -16819,11 +16839,8 @@ Levels and lines (spec F26):
   thin level boundaries (bands: none).
 - `dash = ""` (`"dash"`, `"dot"`, `"dashdot"`, ... or `"5px,3px"`).
 - `showlabels::Bool = false`, `labelformat = ""` (d3 format, e.g. `".2f"`).
-  Known limitation (fields-09): next to a NaN/`missing` gap plotly.js clips
-  the contour group, labels included, to the region with data, so a label it
-  places at the edge of a gap can come out cut ("0.(" for "0.6"); the lines
-  are right. Label such a figure with [`annotate!`](@ref) at points away from
-  the gap instead.
+  Next to a NaN/`missing` gap the lines and fills are clipped to the region
+  with data; the labels are drawn whole.
 
 Colour: `colorscale`, `crange` (alias `zrange`), `cmid`, `colornorm`,
 `showscale`, `colorbar_title`, `colorbar_title_side = :top`,
@@ -17516,9 +17533,11 @@ function _quiver_traces(
 		filled[b] += points
 	end
 	traces = GenericTrace[]
+	group_bins = Int[]
 	for b in eachindex(colours)
 		counts[b] == 0 && continue
 		first_trace = isempty(traces)
+		push!(group_bins, b)
 		push!(
 			traces,
 			_quiver_glyph_trace(
@@ -17553,6 +17572,10 @@ function _quiver_traces(
 	_field2d_mark_anchors!(traces, anchors...)
 	carrier = _mesh2d_carrier(cm, who)
 	carrier === nothing || push!(traces, carrier)
+	# O3: the bins are recorded so a shared colour axis can recolour them.
+	cm.band_edges === nothing && !isempty(group_bins) &&
+		_colour_mark_bins!(traces, 1, group_bins, cm.tvals, cm.cmin, cm.cmax,
+			length(colours), colours, carrier)
 	return traces, cm
 end
 
@@ -19388,16 +19411,20 @@ function _maybe_show(fig, show::Bool, width::Real, height::Real, title::Abstract
 	return show ? to_syncplot(fig; width = width, height = height, title = title) : fig
 end
 
-# tm-log-unsettled: under the paper styles a log axis gets decade labels
-# (`_axes_log_tick_updates!`), and bar value labels drawn outside their bars
-# get room on their value axis (`_axes_bar_label_updates!`); `_finalize_figure!`
-# writes both after every mutation, but constructors do not finalize: the
-# first finalize (a display, an export) then changed the figure. A
-# constructor writes them itself (`_axes_apply_fits!`), at the figure's size
-# and under the style it carries, as the finalizer does. Figures without a
-# log axis or bar text cost one scan of the layout keys and the trace types.
+# Invariant 1 (tm-log-unsettled, sm-07): a constructor hands out a settled
+# figure, so it ends with the finalizer every mutation ends with: decade
+# labels of log axes, room for outside bar labels, the wrap and standoff of
+# long axis titles, margins and rooms, at the figure's size and under the
+# style it carries. The run reads only the layout, the trace extents and the
+# colour ranges (about 0.5 ms and 40 KB for 1e6 points or a 2000 x 2000
+# field). Inside a SubplotFigure build that finalizes once at its end
+# (`_FIELD2D_DEFER_FINALIZE`) only the axis fits are written, as before.
 function _settle_log_ticks!(fig)
-	_with_figure_style(() -> _axes_apply_fits!(fig), fig)
+	if _FIELD2D_DEFER_FINALIZE[]
+		_with_figure_style(() -> _axes_apply_fits!(fig), fig)
+	else
+		_finalize_figure!(fig)
+	end
 	return nothing
 end
 

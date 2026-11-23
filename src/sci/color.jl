@@ -774,6 +774,9 @@ function _checked_sample_range(range, who::AbstractString)
 	return lo, hi
 end
 
+# More samples than 24-bit sRGB has distinct colours cannot be told apart.
+const _COLORMAP_MAX_SAMPLES = 2^24
+
 """
 	colormap_colors(name_or_scale, n::Integer; reverse::Bool = false, range = (0.0, 1.0)) -> Vector{String}
 
@@ -782,8 +785,8 @@ family of lines (matplotlib's `cmap(np.linspace(lo, hi, n))`).
 
 # Arguments
 - `name_or_scale`: any value accepted by [`colormap`](@ref).
-- `n::Integer`: number of colours, at least 1. `n == 1` returns the colour at the
-  midpoint of `range`.
+- `n::Integer`: number of colours, at least 1 and at most 2^24 (the distinct
+  24-bit colours). `n == 1` returns the colour at the midpoint of `range`.
 
 # Keywords
 - `reverse::Bool = false`: sample the reversed map.
@@ -808,6 +811,11 @@ function colormap_colors(
 )
 	_reject_keywords("colormap_colors", kwargs; accepted = (:reverse, :range))
 	n >= 1 || throw(ArgumentError("colormap_colors: `n` must be at least 1; got $(n)."))
+	# errors-inputs-10: a count beyond Int (typemax(Int128)) or one no memory
+	# holds is an ArgumentError, not an InexactError or an exhausted machine.
+	n <= _COLORMAP_MAX_SAMPLES || throw(ArgumentError(
+		"colormap_colors: `n` must be at most $(_COLORMAP_MAX_SAMPLES) (the distinct 24-bit colours); got $(n).",
+	))
 	lo, hi = _checked_sample_range(range, "colormap_colors")
 	parsed = _parsed_colorscale(_colorscale_stops(name_or_scale; who = "colormap_colors"))
 	count = Int(n)
@@ -997,22 +1005,38 @@ function _checked_real_vector(v, who::AbstractString, name::AbstractString)
 	return out
 end
 
-# Compact plain-text number for colorbar labels: "0.05", "250", "2×10<sup>-7</sup>".
+# Compact plain-text number for colorbar labels: "0.05", "250", "−3",
+# "2×10<sup>−7</sup>". Negative numbers and exponents carry plotly's minus
+# sign (U+2212), as the tick labels plotly draws next to them (numerics-11).
 function _format_colorbar_number(v::Float64)
 	v == 0 && return "0"
+	isfinite(v) || return v > 0 ? "∞" : v < 0 ? "−∞" : "NaN"
 	r = round(v; sigdigits = 4)
-	if 1e-4 <= abs(r) < 1e6
-		return isinteger(r) ? string(Int(r)) : string(r)
+	sign = r < 0 ? "−" : ""
+	a = abs(r)
+	if 1e-4 <= a < 1e6
+		return sign * (isinteger(a) ? string(Int(a)) : string(a))
 	end
-	exponent = floor(Int, log10(abs(r)))
-	mantissa = round(r / 10.0^exponent; sigdigits = 4)
-	if abs(mantissa) >= 10
+	exponent = floor(Int, log10(a))
+	mantissa = round(a / exp10(exponent); sigdigits = 4)
+	if mantissa >= 10
 		mantissa /= 10
 		exponent += 1
 	end
 	mtext = isinteger(mantissa) ? string(Int(mantissa)) : string(mantissa)
-	return mtext == "1" ? "10<sup>$(exponent)</sup>" :
-		mtext == "-1" ? "-10<sup>$(exponent)</sup>" : "$(mtext)×10<sup>$(exponent)</sup>"
+	return sign * _colour_power_text(mtext, exponent)
+end
+
+# "m×10ⁿ" in plotly's power format with its minus sign (U+2212): a mantissa
+# of "1" is left out ("10ⁿ"), and n = 0 and 1 are written as numbers ("1",
+# "10", "2", "50"), as plotly labels the decades of a log axis.
+function _colour_power_text(mtext::AbstractString, n::Int)
+	if n in (0, 1)
+		value = parse(Float64, mtext) * (n == 1 ? 10 : 1)
+		return isinteger(value) ? string(Int(value)) : string(round(value; sigdigits = 6))
+	end
+	power = "10<sup>" * (n < 0 ? "−" : "") * string(abs(n)) * "</sup>"
+	return mtext == "1" ? power : mtext * "×" * power
 end
 
 # fields-01: whether a colour carrier was built with `colornorm = :log`:
@@ -1028,10 +1052,20 @@ _colour_flat(a) = eltype(a) <: AbstractArray ? Iterators.flatten(a) : a
 
 function _colour_log_carrier(values, data)
 	(values isa AbstractArray && data isa AbstractArray) || return false
-	# A heatmap keeps `z` as the lazy transpose of its `customdata` (plotly's
-	# row-major z): compare entry by entry in the same orientation.
-	(values isa AbstractMatrix && data isa AbstractMatrix && size(values) != size(data) &&
-		size(values) == reverse(size(data))) && (data = PermutedDimsArray(data, (2, 1)))
+	_colour_log_pairs(values, data) && return true
+	# A heatmap or contour keeps `z` as the lazy transpose of its `customdata`
+	# (plotly's row-major z): compare entry by entry in the same orientation.
+	# The shapes cannot tell the orientation of a square field (apia-06), so
+	# the transposed comparison is tried whenever the shapes allow it.
+	(values isa AbstractMatrix && data isa AbstractMatrix &&
+		size(values) == reverse(size(data))) || return false
+	return _colour_log_pairs(values, PermutedDimsArray(data, (2, 1)))
+end
+
+# Whether the first finite positive entries of `data` (up to
+# `_COLOUR_LOG_CARRIER_SAMPLES`, at least one) have their log10 at the same
+# storage position in `values`.
+function _colour_log_pairs(values, data)
 	checked = 0
 	for (v, d) in zip(_colour_flat(values), _colour_flat(data))
 		(v isa Real && d isa Real && !(v isa Bool) && !(d isa Bool) &&
@@ -1059,11 +1093,13 @@ function _colour_log_bar_options(opts, log::Bool, who::AbstractString)
 end
 
 # Label of a tick at data value `v` on a log colorbar: exact decades are
-# "10<sup>k</sup>" (HTML, no MathJax needed); other values use the compact form.
+# written as plotly writes the decades of a log axis ("1", "10",
+# "10<sup>k</sup>" with U+2212; HTML, no MathJax needed); other values use the
+# compact form.
 function _log_tick_label(v::Float64)
 	exponent = log10(v)
 	k = round(Int, exponent)
-	isapprox(exponent, k; atol = 1e-9) && return "10<sup>$(k)</sup>"
+	isapprox(exponent, k; atol = 1e-9) && return _colour_power_text("1", k)
 	return _format_colorbar_number(v)
 end
 
@@ -1079,7 +1115,7 @@ function _log_colorbar_ticks(lo::Float64, hi::Float64)
 		stride = max(1, cld(ndecades - 1, _MAX_LOG_DECADE_TICKS - 1))
 		decades = [k for k in first_decade:last_decade if mod(k, stride) == 0]
 		length(decades) >= 2 || (decades = collect(first_decade:stride:last_decade))
-		return Float64.(decades), ["10<sup>$(k)</sup>" for k in decades]
+		return Float64.(decades), [_colour_power_text("1", k) for k in decades]
 	end
 	# Less than two decades: add 1-2-5 (then 1…9) sub-decade ticks.
 	for mantissas in ((1, 2, 5), (1, 2, 3, 4, 5, 6, 7, 8, 9))
@@ -1089,7 +1125,7 @@ function _log_colorbar_ticks(lo::Float64, hi::Float64)
 			position = log10(m) + exponent
 			if lo - _LOG_TICK_TOLERANCE <= position <= hi + _LOG_TICK_TOLERANCE
 				push!(positions, position)
-				push!(labels, m == 1 ? "10<sup>$(exponent)</sup>" : "$(m)×10<sup>$(exponent)</sup>")
+				push!(labels, _colour_power_text(string(m), exponent))
 			end
 		end
 		length(positions) >= 2 && return positions, labels
@@ -1492,6 +1528,256 @@ function _colorbar_carrier_trace(;
 		xaxis = String(xref),
 		yaxis = String(yref),
 	)
+end
+
+#endregion
+
+#region Recolourable colour bins (O3, fields-08)
+
+# Builds whose colours are sampled in Julia (cell meshes, quiver glyphs and
+# streamlines coloured by a value: one trace per colour bin, then the
+# colorbar carrier) cannot follow a colour range that changes after they are
+# drawn. Their carrier therefore records the bins, so `shared_colorbar!`
+# recolours the build for the limits shared with other members instead of
+# clamping them to the build's limits (`coloraxis = :shared` at build time
+# keeps limits the axis already has, as documented: those calls share one
+# norm). The record is `carrier.meta["plotlysupply:cbins"] = [gap, bin...]`
+# (the carrier's own meta; bin traces keep theirs, which mark fields and
+# anchors): the bin traces are the `length(bins)` traces just before the
+# carrier, less `gap` traces between them and it (a mesh's NaN-cell
+# outline); each bin is `[t_lo, t_hi, colour, clamped_lo, clamped_hi]`: its
+# interval in colour units (log10 under `colornorm = :log`), the colour it
+# was drawn in, and whether it also holds values beyond the carrier's limits
+# (an explicit `crange` narrower than the data: their colours under a wider
+# range are unknown, so the build is not recoloured past that limit). The
+# limits are the carrier's `marker.color`. A build whose traces were moved
+# apart (their colours no longer match the record) is not recoloured.
+# `levels` builds (bands) are never recorded: their colours follow the band
+# edges, not the limits.
+const _COLOUR_BINS_META = Symbol("plotlysupply:cbins")
+# The colour fields of a bin trace (fill, line, arrowhead marker).
+const _COLOUR_BIN_PATHS = ((:fillcolor,), (:line, :color), (:marker, :color))
+
+# `trace.meta[key]` (Symbol or, after a JSON round trip, String key), or `nothing`.
+function _colour_meta_get(trace::GenericTrace, key::Symbol)
+	meta = get(trace.fields, :meta, nothing)
+	meta isa PlotlyBase.PlotlyAttribute && (meta = meta.fields)
+	meta isa AbstractDict || return nothing
+	value = get(meta, key, nothing)
+	value === nothing && (value = get(meta, String(key), nothing))
+	return value
+end
+
+# Set `trace.meta[key]` in a new Dict (meta dicts may be shared by traces).
+function _colour_meta_put!(trace::GenericTrace, key::Symbol, value)
+	old = get(trace.fields, :meta, nothing)
+	old isa PlotlyBase.PlotlyAttribute && (old = old.fields)
+	meta = Dict{Symbol, Any}()
+	if old isa AbstractDict
+		for (k, v) in old
+			meta[Symbol(k)] = v
+		end
+	end
+	meta[key] = value
+	trace.fields[:meta] = meta
+	return trace
+end
+
+"""
+	_colour_mark_bins!(traces, first, bins, tvals, cmin, cmax, ncolors, colours, carrier) -> nothing
+
+Record on `carrier` (an element of `traces`, after the bin traces) the bins of
+its build: `traces[first:first+length(bins)-1]` are coloured `colours[bins[i]]`,
+the bins of `ncolors` uniform ones over `[cmin, cmax]` (see the comment
+above); `tvals` are the build's colour values (NaN = not drawn), which tell
+whether the end bins hold values beyond the limits. Nothing is recorded
+without a carrier or a bin. Internal.
+"""
+function _colour_mark_bins!(traces::AbstractVector, first::Int, bins::AbstractVector{Int}, tvals::AbstractVector{Float64},
+	cmin, cmax, ncolors::Int, colours::AbstractVector, carrier)
+	(carrier === nothing || cmin === nothing || cmax === nothing || isempty(bins)) && return nothing
+	at = findlast(t -> t === carrier, traces)
+	at === nothing && return nothing
+	lo, hi = Float64(cmin), Float64(cmax)
+	tol = 1e-9 * (hi - lo)
+	below = above = false
+	for v in tvals
+		isnan(v) && continue
+		v < lo - tol && (below = true)
+		v > hi + tol && (above = true)
+	end
+	width = (hi - lo) / ncolors
+	record = Any[at - (first + length(bins))]
+	for b in bins
+		push!(record, Any[lo + (b - 1) * width, lo + b * width, String(colours[b]), below && b == 1, above && b == ncolors])
+	end
+	_colour_meta_put!(carrier, _COLOUR_BINS_META, record)
+	return nothing
+end
+
+# The limits `marker.color = [cmin, cmax]` of a colorbar carrier.
+function _colour_carrier_limits(carrier::GenericTrace)
+	colours = _cmn_mapping_get(get(carrier.fields, :marker, nothing), :color)
+	return (Float64(colours[1]), Float64(colours[2]))
+end
+
+_colour_same_limit(a::Real, b::Real) = isapprox(Float64(a), Float64(b); rtol = 1e-9, atol = 1e-12)
+
+# Whether a colour field of `trace` (`_COLOUR_BIN_PATHS`) holds `colour`.
+function _colour_trace_has(trace, colour)
+	trace isa GenericTrace || return false
+	for path in _COLOUR_BIN_PATHS
+		value = length(path) == 1 ? get(trace.fields, path[1], nothing) :
+			_cmn_mapping_get(get(trace.fields, path[1], nothing), path[2])
+		value == colour && return true
+	end
+	return false
+end
+
+"""
+	_colour_recolour_plan(p::Plot, k::Int, limits, stops) -> Vector{Tuple{Int,String,String}} or String
+
+How to recolour the build whose colorbar carrier is `p.data[k]` for the
+colour limits `limits` (colour units) of the colour scale `stops`: for each
+of its bin traces, `(trace index, old colour, new colour)`. A String says
+why the build cannot follow (it was not recorded: `levels` bands, a build
+from an older version; its traces were moved apart; or an end bin holds
+values beyond its limits that the new range would show). Reads only.
+Internal.
+"""
+function _colour_recolour_plan(p::Plot, k::Int, limits::NTuple{2, Float64}, stops)
+	carrier = p.data[k]
+	record = _colour_meta_get(carrier, _COLOUR_BINS_META)
+	(record isa AbstractVector && length(record) >= 2 && record[1] isa Integer) ||
+		return "its colours were drawn for fixed colour levels or limits"
+	old = _colour_carrier_limits(carrier)
+	tol = 1e-9 * max(old[2] - old[1], abs(limits[2] - limits[1]))
+	span = limits[2] - limits[1]
+	nbins = length(record) - 1
+	first = k - Int(record[1]) - nbins
+	first >= 1 || return "its colour bin traces are no longer next to it"
+	plan = Tuple{Int, String, String}[]
+	for j in 1:nbins
+		bin = record[j + 1]
+		(bin isa AbstractVector && length(bin) == 5) ||
+			return "its colours were drawn for fixed colour levels or limits"
+		_colour_trace_has(p.data[first + j - 1], bin[3]) ||
+			return "its colour bin traces are no longer next to it"
+		((bin[4] === true && limits[1] < old[1] - tol) || (bin[5] === true && limits[2] > old[2] + tol)) &&
+			return "it was drawn with a `crange` that clamps some of its values"
+		t = ((Float64(bin[1]) + Float64(bin[2])) / 2 - limits[1]) / span
+		push!(plan, (first + j - 1, String(bin[3]), _sample_colorscale(stops, clamp(t, 0.0, 1.0))))
+	end
+	return plan
+end
+
+# O3 (fields-08, `shared_colorbar!`): the recolouring of every carrier build
+# among `indices` whose limits differ from the shared `limits`
+# (`_colour_recolour_plan`), or an ArgumentError naming the build that cannot
+# follow. Reads only.
+function _colour_recolour_plans(p::Plot, indices::Vector{Int}, limits, stops, who::AbstractString)
+	plans = Tuple{Int, Vector{Tuple{Int, String, String}}}[]
+	for k in indices
+		old = _colour_carrier_limits(p.data[k])
+		(_colour_same_limit(old[1], limits[1]) && _colour_same_limit(old[2], limits[2])) && continue
+		plan = stops === nothing ? "the colour scale it was drawn with is unknown" :
+			_colour_recolour_plan(p, k, (Float64(limits[1]), Float64(limits[2])), stops)
+		plan isa AbstractString && throw(ArgumentError(
+			"$(who): the colorbar carrier trace $(k) was drawn for the colour limits " *
+			"$(old[1])..$(old[2]) and cannot be recoloured for the shared limits " *
+			"$(limits[1])..$(limits[2]): $(plan). Rebuild that plot with " *
+			"`crange = ($(limits[1]), $(limits[2]))`.",
+		))
+		push!(plans, (k, plan))
+	end
+	return plans
+end
+
+# O3 (fields-08, `shared_colorbar!`): the colour extent of the members among
+# `slots` that are not colorbar carriers: a member's own limits (`zmin`/`zmax`,
+# `cmin`/`cmax`), else its values. The limits of a colour axis a member is
+# bound to do not count (a carrier build may have written them); members
+# whose colours plotly computes (histogram counts) are left out. `nothing`
+# when no member has finite values.
+function _colour_members_extent(p::Plot, slots)
+	lo, hi = Inf, -Inf
+	for slot in slots
+		trace = p.data[slot.index]
+		(trace isa GenericTrace && !_cbar_is_carrier(trace)) || continue
+		source = slot.container === :root ? trace.fields : _symbol_dict(get(trace.fields, slot.container, nothing))
+		part = nothing
+		for (lo_key, hi_key) in ((:zmin, :zmax), (:cmin, :cmax))
+			a = _cbar_real(source, lo_key, nothing)
+			b = _cbar_real(source, hi_key, nothing)
+			(a !== nothing && b !== nothing && a < b) && (part = (a, b); break)
+		end
+		if part === nothing
+			values = _cbar_slot_values(trace, slot)
+			values === nothing && continue
+			part = _cbar_extrema(values)
+			part === nothing && continue
+		end
+		lo, hi = min(lo, Float64(part[1])), max(hi, Float64(part[2]))
+	end
+	return lo <= hi ? (lo, hi) : nothing
+end
+
+# Apply a `_colour_recolour_plan` of carrier `k` for `limits`: the colour
+# fields of each bin trace that hold its recorded colour take the new one
+# (fields the user changed since are left); the record and the carrier's
+# limits follow.
+function _colour_recolour!(p::Plot, k::Int, plan::Vector{Tuple{Int, String, String}}, limits::NTuple{2, Float64})
+	carrier = p.data[k]
+	record = copy(_colour_meta_get(carrier, _COLOUR_BINS_META))
+	for (j, (i, old, colour)) in enumerate(plan)
+		trace = p.data[i]
+		for path in _COLOUR_BIN_PATHS
+			_colour_replace_field!(trace.fields, path, old, colour)
+		end
+		bin = copy(record[j + 1])
+		bin[3] = colour
+		record[j + 1] = bin
+	end
+	_colour_meta_put!(carrier, _COLOUR_BINS_META, record)
+	marker = _symbol_dict(get(carrier.fields, :marker, nothing))
+	marker[:color] = Any[limits[1], limits[2]]
+	haskey(marker, :cmin) && (marker[:cmin] = limits[1])
+	haskey(marker, :cmax) && (marker[:cmax] = limits[2])
+	carrier.fields[:marker] = PlotlyBase.attr(; marker...)
+	return nothing
+end
+
+# O3 (fields-08): the colour values (colour units) of the members bound to
+# coloraxis `id` of `p` that draw their own colours (a heatmap, a contour:
+# not carrier builds), so a carrier build joining the axis covers them;
+# `nothing` when none has numbers (plotly computes histogram counts).
+function _colour_axis_member_extent(p::Plot, id::AbstractString)
+	lo, hi = Inf, -Inf
+	for (k, trace) in enumerate(p.data)
+		slot = _cbar_slot(trace, k)
+		(slot === nothing || slot.coloraxis != id || _cbar_is_carrier(trace)) && continue
+		values = _cbar_slot_values(trace, slot)
+		values === nothing && continue
+		part = _cbar_extrema(values)
+		part === nothing && continue
+		lo, hi = min(lo, Float64(part[1])), max(hi, Float64(part[2]))
+	end
+	return lo <= hi ? (lo, hi) : nothing
+end
+
+# `fields[path...] = new` where it is `old` (a nested mapping is replaced by
+# a new attr, so one shared with another trace is not changed).
+function _colour_replace_field!(fields::AbstractDict, path::Tuple, old, new::String)
+	if length(path) == 1
+		get(fields, path[1], nothing) == old && (fields[path[1]] = new)
+		return nothing
+	end
+	inner = get(fields, path[1], nothing)
+	_cmn_mapping_get(inner, path[2]) == old || return nothing
+	copied = _symbol_dict(inner)
+	copied[path[2]] = new
+	fields[path[1]] = PlotlyBase.attr(; copied...)
+	return nothing
 end
 
 #endregion

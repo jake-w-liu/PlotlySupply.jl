@@ -1825,12 +1825,16 @@ Base.getindex(v::_RscCountingVector, i::Int) = (v.reads[] += 1; v.data[i])
 	p = PlotlySupply._plot_obj(f)
 	PlotlySupply._scat_best_legend_position(p)
 	@test (@allocated PlotlySupply._scat_best_legend_position(p)) < 16 * 2^20
-	# One pass over a non-Float64 vector (the conversion), none without a legend.
+	# A non-Float64 vector is read once to settle the figure (sm-07: the
+	# constructor finalizes, which takes the data extent: measured 1e6 Float64
+	# points 0.33 ms -> 1.15 ms per call) and once more for the legend
+	# placement (the conversion); never more.
 	counted = _RscCountingVector(copy(y), Ref(0))
 	plot_scatter(x, counted)
-	@test counted.reads[] == 0
-	plot_scatter(x, counted; legend = "data")
 	@test counted.reads[] <= n
+	counted.reads[] = 0
+	plot_scatter(x, counted; legend = "data")
+	@test counted.reads[] <= 2n
 end
 
 @testset "scatter family: polar radial one-sided limits and bound types (Z51, D11)" begin
@@ -1975,4 +1979,16 @@ end
 		@test occursin("has a gap", argmsg(() -> plot_area!(f, 1:3, [1.0, NaN, 3])))
 		@test length(f.data) == before
 	end
+end
+
+@testset "v8 axes-style: numerics-01 error bar values are checked" begin
+	for kw in ((error_y = [0.1, -0.2, 0.1],), (error_y = ([0.1, 0.1, 0.1], [0.3, -0.3, 0.3]),), (error_y = ["a", "b", "c"],))
+		err = try
+			plot_scatter(1:3, [1.0, 2, 3]; kw...); nothing
+		catch e
+			e
+		end
+		@test err isa ArgumentError && startswith(err.msg, "plot_scatter: `error_y` entries must be non-negative numbers")
+	end
+	@test plot_scatter(1:3, [1.0, 2, 3]; error_y = [0.1, missing, 0.2]) isa PlotlySupply.Plot
 end

@@ -317,8 +317,11 @@ $(PS._EXPORT_RESET_DIV_JS)
 		end
 		@test PS._finalize_figure!(fig) === false
 		gaps = drawn_json(fig, axis_gap_js)
-		@test gaps["x"] >= 8
-		@test gaps["y"] >= 8
+		# D24: under a sized style the gap is its `title_gap` (0.5 em of the title font).
+		em_gap = with_style(() -> PS._style_title_gap(PS._active_style()), style)
+		want = em_gap === nothing ? nothing : em_gap * with_style(() -> PS._active_style().label_fontsize, style)
+		@test want === nothing ? gaps["x"] >= 8 : abs(gaps["x"] - want) <= 1
+		@test want === nothing ? gaps["y"] >= 8 : abs(gaps["y"] - want) <= 1
 		@test gaps["inside"]
 	end
 

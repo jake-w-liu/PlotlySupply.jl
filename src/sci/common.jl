@@ -893,11 +893,32 @@ function _cmn_normalized_subs(subs, base::Float64, who::AbstractString)
 	return sort!(unique!(out))
 end
 
-# `mantissa * base^k`, computed so that integer mantissas and integral powers
-# of an integral base are correctly rounded (`5 / 1000 == 0.005`, whereas
-# `5 * 10.0^-3` is one ulp off).
+# `mantissa * base^k`, correctly rounded for an integral `base` (apia-08):
+# while `base^|k|` is exactly representable (10^22 for base 10, every power
+# of 2) one multiplication or division rounds once (`5 / 1000 == 0.005`,
+# whereas `5 * 10.0^-3` is one ulp off); beyond it the product is formed in
+# 256-bit precision and rounded once to Float64 (`1e-298`, `2e-23`, `3e23`
+# equal their literals). A non-integral base keeps the plain formula.
 function _cmn_log_tick_value(mantissa::Float64, base::Float64, k::Int)
+	if isinteger(base) && !_cmn_exact_power(base, abs(k))
+		exact = k >= 0 ? BigFloat(mantissa; precision = 256) * BigFloat(base; precision = 256)^k :
+			BigFloat(mantissa; precision = 256) / BigFloat(base; precision = 256)^(-k)
+		return Float64(exact)
+	end
 	return k >= 0 ? mantissa * base^k : mantissa / base^(-k)
+end
+
+# Whether the integral `base` raised to `n >= 0` is a Float64 without
+# rounding: base = 2^t * o with o odd, and o^n needs at most 53 bits (the
+# power of two only moves the exponent; results beyond the Float64 range are
+# left to the 256-bit path).
+function _cmn_exact_power(base::Float64, n::Int)
+	odd = base
+	while odd > 1 && iseven(odd)
+		odd /= 2
+	end
+	odd == 1 && return n * log2(base) < 1000
+	return n * log2(odd) < 53 && n * log2(base) < 1000
 end
 
 function _cmn_log_ticks(lo::Float64, hi::Float64, subs::Vector{Float64}, base::Float64, who::AbstractString)
@@ -936,9 +957,10 @@ either order): every `s * base^k` with `s` in `subs` that falls inside
   `(1, 2, 5)` gives 1-2-5 ticks, `1:9` every integer multiple.
 - `base::Real = 10`: logarithm base, finite and `> 1`.
 
-Integer mantissas of an integral base are correctly rounded, so
-`log_ticks(1e-3, 1; subs=(1, 2, 5))` is exactly
-`[0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]`.
+For an integral `base` every tick is the correctly rounded Float64 of
+`s * base^k`, at every exponent, so `log_ticks(1e-3, 1; subs=(1, 2, 5))` is
+exactly `[0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]` and
+`1e-29 in log_ticks(1e-300, 1e300)`.
 Throws `ArgumentError` for non-positive or non-finite bounds, an invalid
 `base` or `subs`, or a span of more than 2000 powers of `base`.
 
